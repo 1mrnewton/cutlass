@@ -155,6 +155,7 @@ impl Shell {
     fn swapped(&mut self, playhead: cutlass_model::Micros) {
         self.pause();
         self.lanes_cache.replace(None);
+        self.bars_cache.replace(None);
         self.preview_cache.borrow_mut().clear();
         self.transport.forget_mixer();
         self.transport.forget_files();

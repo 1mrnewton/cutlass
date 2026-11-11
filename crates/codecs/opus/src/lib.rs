@@ -1,6 +1,6 @@
 //! Opus decoder and encoder (RFC 6716, updated by RFC 8251).
 //!
-//! The support record is `STATUS.md` next to this crate. Ogg framing lives
+//! The support record is `README.md` next to this crate. Ogg framing lives
 //! in `cutlass-ogg`, and MP4 framing in `cutlass-isobmff`.
 
 #![forbid(unsafe_code)]

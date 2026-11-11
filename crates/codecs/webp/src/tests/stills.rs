@@ -9,7 +9,7 @@ use super::oracle::{
 
 /// Every still under `WEBP_CORPUS_DIR` decodes to `dwebp`'s exact RGBA.
 ///
-/// The corpus is generated outside the repo (see `STATUS.md`); the test is
+/// The corpus is generated outside the repo (see `README.md`); the test is
 /// ignored unless that variable names it.
 #[test]
 #[ignore = "needs WEBP_CORPUS_DIR"]

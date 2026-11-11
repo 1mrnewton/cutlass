@@ -38,6 +38,7 @@ mod shape_shelf;
 mod snap;
 mod stage;
 mod subtitles;
+mod sync;
 mod template;
 mod text_catalog;
 mod text_effect;
@@ -65,12 +66,13 @@ pub use caption_templates::{
 pub use caption_words::{LINE_BREAK, breaks_before, join_words, retype_word, toggle_line_break};
 pub use catalog::{catalog_entries, catalog_search, is_bundled};
 pub use clip_rules::{can_turn, magnet_request};
-pub use clipboard::{ClipboardMiss, CopiedClip, copy_clips, paste_requests};
+pub use clipboard::{ClipboardMiss, CopiedClip, copy_clips, paste_requests, rehome};
 pub use controls::{MAX_VOLUME, SPEED_MARKS, speed_at, speed_position, volume_at, volume_position};
 pub use effect_shelf::{
-    ADJUSTMENT_CARD, EFFECT_CARD_PREFIX, EFFECT_LENGTH, EffectCard, EffectPlace,
+    ADJUSTMENT_CARD, ClipEffect, EFFECT_CARD_PREFIX, EFFECT_LENGTH, EffectCard, EffectPlace,
     FILTER_CARD_PREFIX, effect_cards, effect_categories, effect_of_card, effect_requests,
-    effect_row_for, effect_target, filter_cards, filter_categories, filter_of_card,
+    effect_row_for, effect_target, effect_title, effects_on, filter_cards, filter_categories,
+    filter_of_card,
 };
 pub use filmstrip::{FilmTile, MAX_TILES, film_tiles};
 pub use fling::{
@@ -87,14 +89,17 @@ pub use inspector::{
     BACKGROUND_ALPHA_START, BACKGROUND_ROUND_START, GLOW_RANGE_START, GLOW_STRENGTH_START,
     LetterCase, OUTLINE_START, Panel, SHADOW_ANGLE, SHADOW_BLUR_START, SHADOW_DISTANCE_START,
     SILENT_DB, TEXT_PRESETS, TextLook, TextPreset, canvas_pixels, gain_of_db, is_caption, panel_of,
-    preset_requests, starting, stored_position, text_look, volume_db,
+    preset_requests, starting, stored_position, text_look, text_look_at, volume_db,
 };
-pub use keys::{ClipKeys, KeyGraph, clip_keys, key_graphs, move_key, value_keys};
+pub use keys::{
+    ClipKeys, KeyGraph, clip_keys, key_graphs, move_key, move_keys, remove_key, remove_keys,
+    value_keys,
+};
 pub use lane::{Lane, lane_category, lanes, lanes_for};
 pub use library::{
     LIBRARY_TOP, LibraryFile, LibraryShelf, LibrarySort, NEW_FOLDER_NAME, add_folder,
-    delete_folder, folder_trail, hide_file, library_files, library_folders, next_folder_name,
-    parent_of, place, rename_folder,
+    delete_folder, folder_trail, hide_file, library_cut, library_files, library_folders,
+    next_folder_name, parent_of, picked_files, place, rename_folder,
 };
 pub use media_place::{MediaPlace, extract_request, media_requests, sound_row};
 pub use pen::{PEN_DRAG_MIN, PenPath, PenPress};
@@ -115,6 +120,7 @@ pub use stage::{
     stage_align, stage_box, stage_gesture, stage_pick,
 };
 pub use subtitles::{SubtitleFormat, SubtitleMiss, subtitle_request};
+pub use sync::{SyncMiss, SyncPlan, sync_plan, sync_requests};
 pub use template::{
     TEMPLATE_CARD_PREFIX, TITLE_TEMPLATES, TemplatePlace, TitleTemplate, Widget, template_requests,
     title_template,
@@ -133,8 +139,11 @@ pub use title::{
 };
 pub use tools::{Bar, Tool, ToolId, clip_bar, tools};
 pub use transition_shelf::{
-    MainCut, TRANSITION_CARD_PREFIX, TransitionMiss, TransitionOffer, fit_transition, main_cut,
-    transition_categories, transition_of_card, transition_offers, transition_request,
+    BarEdge, MainCut, TRANSITION_CARD_PREFIX, TRANSITION_LONGEST, TRANSITION_SHORTEST,
+    TransitionBar, TransitionMiss, TransitionOffer, bar_length, blend_of, drop_cut, fit_transition,
+    main_cut, transition_bars, transition_categories, transition_everywhere,
+    transition_length_request, transition_limits, transition_of_card, transition_offers,
+    transition_request,
 };
 pub use transport::{Marks, SHUTTLE_TOP, Shuttle, shuttle_rate};
 pub use view_zoom::{

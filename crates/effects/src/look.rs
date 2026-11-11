@@ -35,11 +35,13 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use cutlass_model::{Draft, MaterialRef, Segment};
+use cutlass_model::{Draft, MaterialRef, Micros, Segment};
 use serde::Deserialize;
 
 use crate::adjust::{Adjust, AdjustKey};
-use crate::grade::{Colour, Grade, HSL_COLORS, WheelSetting, segment_colour, tidy_points};
+use crate::grade::{
+    Colour, Grade, HSL_COLORS, WheelSetting, segment_colour, segment_colour_at, tidy_points,
+};
 
 /// The `effect_id` prefix of a bundled filter.
 pub const LOOK_PREFIX: &str = "look/";
@@ -567,14 +569,38 @@ fn shrink(scene: &crate::preview::PreviewScene, width: u32, height: u32) -> Vec<
 /// not a bundled filter.
 #[must_use]
 pub fn segment_look(draft: &Draft, segment: &Segment) -> Option<Colour> {
+    look_of(draft, segment, None)
+}
+
+/// [`segment_look`] with the filter's keyed sliders as they are at
+/// timeline `time`.
+#[must_use]
+pub fn segment_look_at(draft: &Draft, segment: &Segment, time: Micros) -> Option<Colour> {
+    look_of(draft, segment, Some(time))
+}
+
+fn look_of(draft: &Draft, segment: &Segment, time: Option<Micros>) -> Option<Colour> {
     let Some(MaterialRef::Effect(effect)) = draft.materials.get(segment.material_id.as_str())
     else {
         return None;
     };
     let look = bundled_look(&effect.effect_id)?;
     #[allow(clippy::cast_possible_truncation)]
-    let strength = effect.value.unwrap_or(1.0) as f32;
-    let mut colour = segment_colour(draft, segment);
+    let stored = effect.value.unwrap_or(1.0) as f32;
+    let strength = time
+        .and_then(|time| {
+            crate::grade::keyed_unit(
+                segment,
+                &draft.keyframe_graph_list,
+                &cutlass_model::FILTER_STRENGTH_KEYS,
+                time,
+            )
+        })
+        .unwrap_or(stored);
+    let mut colour = match time {
+        Some(time) => segment_colour_at(draft, segment, time),
+        None => segment_colour(draft, segment),
+    };
     let mut adjust = look.at(strength);
     for key in AdjustKey::ALL {
         adjust.set(key, adjust.get(key) + colour.adjust.get(key));
@@ -588,7 +614,10 @@ pub fn segment_look(draft: &Draft, segment: &Segment) -> Option<Colour> {
 mod tests {
     use cutlass_model::{Draft, MaterialEffect, MaterialId, Segment, TimeRange};
 
-    use super::{BUNDLED_FILES, FILTER, bundled_look, look_poster, looks, read_look, segment_look};
+    use super::{
+        BUNDLED_FILES, FILTER, bundled_look, look_poster, looks, read_look, segment_look,
+        segment_look_at,
+    };
     use crate::adjust::AdjustKey;
 
     #[test]
@@ -694,5 +723,34 @@ mod tests {
         assert!((colour.adjust.get(AdjustKey::Saturation) - 0.05).abs() < 1e-6);
         let other = Segment::new("o", "missing", TimeRange::new(0, 1));
         assert!(segment_look(&draft, &other).is_none());
+    }
+
+    #[test]
+    fn a_keyed_amount_moves_the_look_along_the_clip() {
+        let mut draft = Draft::empty("D");
+        draft.materials.effects.push(MaterialEffect {
+            kind: FILTER.to_owned(),
+            effect_id: "look/warm".to_owned(),
+            value: Some(0.5),
+            ..MaterialEffect::new(MaterialId::new("f"))
+        });
+        let mut segment = Segment::new("s", "f", TimeRange::new(1_000, 2_000));
+        let temp = |segment: &Segment, time: i64| {
+            segment_look_at(&draft, segment, cutlass_model::Micros(time))
+                .unwrap()
+                .adjust
+                .get(AdjustKey::Temperature)
+        };
+        // With no key the stored Amount holds at every time.
+        assert!((temp(&segment, 1_000) - 0.175).abs() < 1e-6);
+        let amount = cutlass_model::FILTER_STRENGTH_KEYS[0];
+        cutlass_model::put_key(&mut segment, amount, cutlass_model::Micros(0), 0.0);
+        cutlass_model::put_key(&mut segment, amount, cutlass_model::Micros(2_000), 1.0);
+        assert!(temp(&segment, 1_000).abs() < 1e-6);
+        assert!((temp(&segment, 2_000) - 0.175).abs() < 1e-6);
+        assert!((temp(&segment, 3_000) - 0.35).abs() < 1e-6);
+        // The timeless reader keeps the stored Amount.
+        let still = segment_look(&draft, &segment).unwrap();
+        assert!((still.adjust.get(AdjustKey::Temperature) - 0.175).abs() < 1e-6);
     }
 }

@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cutlass_effects::{Lighting, lighting};
+use cutlass_effects::{Lighting, lighting, stretch_axis};
 use cutlass_model::{Draft, MaterialRef, Micros, Segment, SegmentId, TimeRange};
 use cutlass_picture::CpuBytes;
 use cutlass_store::{RelightKey, find_relight};
@@ -56,6 +56,7 @@ impl RelightAsk {
             denoise: 0,
             interpolate: 0,
             motion_blur: None,
+            keyed_blur: Vec::new(),
         }
     }
 }
@@ -98,14 +99,16 @@ pub(crate) fn relight_depth(
     Some((path, held.start))
 }
 
-/// The light over `segment` at `time`, when it has a Relight preset this
-/// build knows and some strength. Moving lights are timed from the clip's
+/// The light over `segment` at `time`, its keyed settings as keyed then,
+/// when it has a Relight preset this build knows and some strength. Moving lights are timed from the clip's
 /// start.
 pub(crate) fn light_at(draft: &Draft, segment: &Segment, time: Micros) -> Option<Lighting> {
     let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str()) else {
         return None;
     };
-    let relight = video.relight()?;
+    // A keyed strength, color or angle lights the clip as keyed at `time`.
+    let relight =
+        cutlass_model::relight_at(&video.relight()?, segment, &draft.keyframe_graph_list, time);
     let seconds = time.0.saturating_sub(segment.target.start.0) as f64 / 1e6;
     lighting(&relight, seconds).filter(|lit| lit.strength > 0.0)
 }
@@ -130,17 +133,7 @@ fn stretched_grey(depth: &CpuBytes, width: u32, height: u32) -> Option<Vec<u8>> 
     if dw == 0 || dh == 0 || w == 0 || h == 0 || src.len() < dw * dh * 4 {
         return None;
     }
-    let axis = |to: usize, from: usize| -> Vec<(usize, usize, f32)> {
-        (0..to)
-            .map(|i| {
-                let at = ((i as f32 + 0.5) * from as f32 / to as f32 - 0.5).max(0.0);
-                let lo = (at as usize).min(from - 1);
-                let hi = (lo + 1).min(from - 1);
-                (lo, hi, at - lo as f32)
-            })
-            .collect()
-    };
-    let (xs, ys) = (axis(w, dw), axis(h, dh));
+    let (xs, ys) = (stretch_axis(w, dw), stretch_axis(h, dh));
     let red = |x: usize, y: usize| f32::from(src[(y * dw + x) * 4]);
     let mut out = Vec::with_capacity(w * h);
     for &(y0, y1, fy) in &ys {

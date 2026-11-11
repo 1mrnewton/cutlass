@@ -34,8 +34,9 @@ pub fn set_magnet(draft: &mut Draft, on: bool) -> Result<(), EditError> {
 }
 
 /// Close gaps on the main lane. The order is the current start, and a tie
-/// keeps the order already in the lane. Followers of a clip that moved
-/// take the same extra shift.
+/// keeps the order already in the lane. Followers of a clip that moved,
+/// and the clips grouped with it on other lanes, take the same extra
+/// shift.
 pub(super) fn pack(draft: &mut Draft, linkage: &LinkageSettings) -> Result<(), EditError> {
     if !draft.config.maintrack_adsorb {
         return Ok(());
@@ -66,6 +67,7 @@ pub(super) fn pack(draft: &mut Draft, linkage: &LinkageSettings) -> Result<(), E
         .iter()
         .map(|segment| (segment.id.clone(), segment.target.start.0))
         .collect();
+    let mut moved = std::collections::BTreeSet::new();
     for (id, start) in shifts {
         let Some((_, old)) = before.iter().find(|(stored, _)| stored == &id) else {
             continue;
@@ -73,7 +75,7 @@ pub(super) fn pack(draft: &mut Draft, linkage: &LinkageSettings) -> Result<(), E
         let delta = start
             .checked_sub(*old)
             .ok_or(EditError::Range(cutlass_model::RangeError::EndOverflow))?;
-        super::linkage::follow_pack_shift(draft, &id, delta, linkage)?;
+        super::linkage::follow_pack_shift(draft, &id, delta, linkage, &mut moved)?;
     }
     Ok(())
 }

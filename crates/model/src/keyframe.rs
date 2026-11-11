@@ -430,6 +430,24 @@ pub const POSE_KEYS: [&str; 5] = [
 /// The opacity property.
 pub const ALPHA_KEY: &str = "KFTypeAlpha";
 
+/// Each part of the pose that keys on its own: the names [`clip_at`] reads
+/// for it, the ones a new key is written under first.
+pub const POSITION_KEYS: [&str; 2] = ["KFTypePositionX", "KFTypePositionY"];
+/// Size: both axes, and the one name that drives both.
+pub const SCALE_KEYS: [&str; 3] = ["KFTypeScaleX", "KFTypeScaleY", "KFTypeScale"];
+/// Turn, under its current and its older name.
+pub const ROTATION_KEYS: [&str; 2] = ["KFTypeRotation", "rotation"];
+/// Opacity, under its current and its older name.
+pub const OPACITY_KEYS: [&str; 2] = [ALPHA_KEY, "alpha"];
+
+/// Whether `segment` has a key on any of `names`.
+#[must_use]
+pub fn has_keys(segment: &Segment, names: &[&str]) -> bool {
+    segment.common_keyframes.iter().any(|group| {
+        names.contains(&group.property_type.as_str()) && !group.keyframe_list.is_empty()
+    })
+}
+
 /// The clip's volume, as a linear gain.
 pub const VOLUME_KEY: &str = "KFTypeVolume";
 
@@ -445,6 +463,18 @@ pub const MASK_KEYS: [&str; 7] = [
     "KFTypeCommonMaskRoundCorner",
 ];
 
+/// Each part of the mask that keys on its own, a share of [`MASK_KEYS`].
+pub const MASK_POSITION_KEYS: [&str; 2] =
+    ["KFTypeCommonMaskPositionX", "KFTypeCommonMaskPositionY"];
+/// The mask's width and height.
+pub const MASK_SIZE_KEYS: [&str; 2] = ["KFTypeCommonMaskSizeWidth", "KFTypeCommonMaskSizeHeight"];
+/// The mask's turn.
+pub const MASK_ROTATION_KEYS: [&str; 1] = ["KFTypeCommonMaskRotation"];
+/// The mask's feather.
+pub const MASK_FEATHER_KEYS: [&str; 1] = ["KFTypeCommonMaskFeather"];
+/// The mask's round corners.
+pub const MASK_ROUND_KEYS: [&str; 1] = ["KFTypeCommonMaskRoundCorner"];
+
 /// Whether `property` is part of the clip's pose: place, size, turn or
 /// opacity, under any name [`clip_at`] reads.
 #[must_use]
@@ -458,14 +488,249 @@ pub fn is_pose_key(property: &str) -> bool {
 /// are not known.
 pub const TEXT_COLOR_KEYS: [&str; 3] = ["KFTypeTextColorR", "KFTypeTextColorG", "KFTypeTextColorB"];
 
-/// Whether a key on `property` is played: the pose, the volume, the mask
-/// or a text's color.
+/// The colour Adjust sliders, from -1 to 1 (0 to 1 for Fade, Sharpen and
+/// Grain), in the order the inspector shows them. These are Cutlass's own
+/// names.
+pub static ADJUST_KEYS: [&str; 17] = [
+    "KFTypeAdjustExposure",
+    "KFTypeAdjustBrightness",
+    "KFTypeAdjustContrast",
+    "KFTypeAdjustSaturation",
+    "KFTypeAdjustBrilliance",
+    "KFTypeAdjustHighlights",
+    "KFTypeAdjustShadows",
+    "KFTypeAdjustWhites",
+    "KFTypeAdjustBlacks",
+    "KFTypeAdjustTemperature",
+    "KFTypeAdjustTint",
+    "KFTypeAdjustHue",
+    "KFTypeAdjustFade",
+    "KFTypeAdjustClarity",
+    "KFTypeAdjustSharpen",
+    "KFTypeAdjustVignette",
+    "KFTypeAdjustGrain",
+];
+
+/// A filter's Amount, from 0 to 1. A Cutlass name.
+pub static FILTER_STRENGTH_KEYS: [&str; 1] = ["KFTypeFilterStrength"];
+/// A LUT's intensity, from 0 to 1. A Cutlass name.
+pub static LUT_STRENGTH_KEYS: [&str; 1] = ["KFTypeLutStrength"];
+/// A chroma key's intensity, from 0 to 1. A Cutlass name.
+pub static CHROMA_STRENGTH_KEYS: [&str; 1] = ["KFTypeChromaIntensity"];
+/// A chroma key's shadow, from 0 to 1. A Cutlass name.
+pub static CHROMA_SHADOW_KEYS: [&str; 1] = ["KFTypeChromaShadow"];
+
+/// A clip's canvas color, under its letterbox: red, green and blue from 0
+/// to 1. Cutlass names.
+pub static CANVAS_COLOR_KEYS: [&str; 3] = [
+    "KFTypeCanvasColorR",
+    "KFTypeCanvasColorG",
+    "KFTypeCanvasColorB",
+];
+
+/// The color `names` (red, green and blue keys from 0 to 1) holds on
+/// `segment` at timeline `time` as `#rrggbb`; `None` unless all three are
+/// keyed and read.
+#[must_use]
+pub fn hex_color_at(
+    segment: &Segment,
+    graphs: &[KeyframeGraph],
+    names: &[&str; 3],
+    time: Micros,
+) -> Option<String> {
+    let offset = time.0.saturating_sub(segment.target.start.0);
+    let mut bytes = [0_u8; 3];
+    for (byte, name) in bytes.iter_mut().zip(names) {
+        let value = sample(&segment.common_keyframes, graphs, &[name], offset)??;
+        if !value.is_finite() {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let channel = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+        *byte = channel;
+    }
+    let [r, g, b] = bytes;
+    Some(format!("#{r:02x}{g:02x}{b:02x}"))
+}
+
+/// Motion blur's Blur, its length from 0 to 1 of a frame's time. A
+/// Cutlass name.
+pub static MOTION_BLUR_LENGTH_KEYS: [&str; 1] = ["KFTypeMotionBlurLength"];
+/// Motion blur's Blend, the share of the sharp frame from 0 to 1. A
+/// Cutlass name.
+pub static MOTION_BLUR_BLEND_KEYS: [&str; 1] = ["KFTypeMotionBlurBlend"];
+
+/// `blur` with its Blur and Blend as `segment` keys them where the clip
+/// shows its file's time `source`, in microseconds, each held to 0 to 1.
+/// A time the clip does not show, or a curved speed, keeps them as stored.
+#[must_use]
+pub fn motion_blur_at(
+    blur: &crate::materials::MotionBlur,
+    segment: &Segment,
+    graphs: &[KeyframeGraph],
+    source: i64,
+) -> crate::materials::MotionBlur {
+    let mut out = blur.clone();
+    let Some(at) = crate::materials::beat_timeline_time(segment, source) else {
+        return out;
+    };
+    let offset = at.0.saturating_sub(segment.target.start.0);
+    let keyed = |names: &[&str]| match sample(&segment.common_keyframes, graphs, names, offset) {
+        Some(Some(value)) if value.is_finite() => Some(value.clamp(0.0, 1.0)),
+        _ => None,
+    };
+    if let Some(length) = keyed(&MOTION_BLUR_LENGTH_KEYS) {
+        out.blur = length;
+    }
+    if let Some(blend) = keyed(&MOTION_BLUR_BLEND_KEYS) {
+        out.blend = blend;
+    }
+    out
+}
+
+/// A clip's Relight strength, from 0 to 1. A Cutlass name.
+pub static RELIGHT_STRENGTH_KEYS: [&str; 1] = ["KFTypeRelightStrength"];
+/// The Custom light's color, red, green and blue from 0 to 1. Cutlass names.
+pub static RELIGHT_COLOR_KEYS: [&str; 3] = [
+    "KFTypeRelightColorR",
+    "KFTypeRelightColorG",
+    "KFTypeRelightColorB",
+];
+/// The Custom light's direction in degrees. A Cutlass name.
+pub static RELIGHT_ANGLE_KEYS: [&str; 1] = ["KFTypeRelightAngle"];
+
+/// `relight` with its strength, color and angle as `segment` keys them at
+/// timeline `time`: the strength held to 0 to 1, the color as `#rrggbb`.
+#[must_use]
+pub fn relight_at(
+    relight: &crate::materials::Relight,
+    segment: &Segment,
+    graphs: &[KeyframeGraph],
+    time: Micros,
+) -> crate::materials::Relight {
+    let mut out = relight.clone();
+    let offset = time.0.saturating_sub(segment.target.start.0);
+    let keyed = |name: &str| match sample(&segment.common_keyframes, graphs, &[name], offset) {
+        Some(Some(value)) if value.is_finite() => Some(value),
+        _ => None,
+    };
+    if let Some(strength) = keyed(RELIGHT_STRENGTH_KEYS[0]) {
+        out.strength = strength.clamp(0.0, 1.0);
+    }
+    if let Some(angle) = keyed(RELIGHT_ANGLE_KEYS[0]) {
+        out.angle = angle;
+    }
+    if let Some(color) = hex_color_at(segment, graphs, &RELIGHT_COLOR_KEYS, time) {
+        out.color = color;
+    }
+    out
+}
+
+/// HSL's sliders, -1 to 1: for each of its eight colours (red, orange,
+/// yellow, green, cyan, blue, purple, magenta) the hue, saturation and
+/// lightness, in that order. Cutlass names.
+pub static HSL_KEYS: [&str; 24] = [
+    "KFTypeHslRedHue",
+    "KFTypeHslRedSaturation",
+    "KFTypeHslRedLightness",
+    "KFTypeHslOrangeHue",
+    "KFTypeHslOrangeSaturation",
+    "KFTypeHslOrangeLightness",
+    "KFTypeHslYellowHue",
+    "KFTypeHslYellowSaturation",
+    "KFTypeHslYellowLightness",
+    "KFTypeHslGreenHue",
+    "KFTypeHslGreenSaturation",
+    "KFTypeHslGreenLightness",
+    "KFTypeHslCyanHue",
+    "KFTypeHslCyanSaturation",
+    "KFTypeHslCyanLightness",
+    "KFTypeHslBlueHue",
+    "KFTypeHslBlueSaturation",
+    "KFTypeHslBlueLightness",
+    "KFTypeHslPurpleHue",
+    "KFTypeHslPurpleSaturation",
+    "KFTypeHslPurpleLightness",
+    "KFTypeHslMagentaHue",
+    "KFTypeHslMagentaSaturation",
+    "KFTypeHslMagentaLightness",
+];
+
+/// The colour wheels' settings, -1 to 1: for lift, gamma and gain the
+/// puck's x and y, then the brightness ring. Cutlass names.
+pub static WHEEL_KEYS: [&str; 9] = [
+    "KFTypeWheelLiftX",
+    "KFTypeWheelLiftY",
+    "KFTypeWheelLiftLuma",
+    "KFTypeWheelGammaX",
+    "KFTypeWheelGammaY",
+    "KFTypeWheelGammaLuma",
+    "KFTypeWheelGainX",
+    "KFTypeWheelGainY",
+    "KFTypeWheelGainLuma",
+];
+
+/// Whether `property` is a keyed share from 0 to 1 of the clip's colour
+/// work: a filter's Amount, a LUT's intensity, a chroma key's intensity or
+/// shadow.
+#[must_use]
+pub fn is_unit_colour_key(property: &str) -> bool {
+    [
+        FILTER_STRENGTH_KEYS[0],
+        LUT_STRENGTH_KEYS[0],
+        CHROMA_STRENGTH_KEYS[0],
+        CHROMA_SHADOW_KEYS[0],
+    ]
+    .contains(&property)
+}
+
+/// What a recipe effect's control keys are named by: this, then the
+/// control's id. A Cutlass name.
+pub const EFFECT_CONTROL_PREFIX: &str = "KFTypeEffectControl_";
+
+/// The keyframe property recipe control `id` keys under.
+#[must_use]
+pub fn effect_control_key(id: &str) -> String {
+    format!("{EFFECT_CONTROL_PREFIX}{id}")
+}
+
+/// The control id `property` keys, when it is a recipe control's key: a
+/// non-empty id of at most 64 lowercase letters, digits and underscores.
+#[must_use]
+pub fn effect_control_id(property: &str) -> Option<&str> {
+    let id = property.strip_prefix(EFFECT_CONTROL_PREFIX)?;
+    let fits = !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+    fits.then_some(id)
+}
+
+/// Whether a key on `property` is played: the pose, the volume, the mask,
+/// a text's color, an Adjust slider, or a filter, LUT or chroma key's
+/// strength, a recipe effect's control, or a text's or shape's style.
 #[must_use]
 pub fn is_keyable(property: &str) -> bool {
     is_pose_key(property)
         || matches!(property, VOLUME_KEY | "volume")
         || MASK_KEYS.contains(&property)
         || TEXT_COLOR_KEYS.contains(&property)
+        || ADJUST_KEYS.contains(&property)
+        || HSL_KEYS.contains(&property)
+        || CANVAS_COLOR_KEYS.contains(&property)
+        || MOTION_BLUR_LENGTH_KEYS.contains(&property)
+        || MOTION_BLUR_BLEND_KEYS.contains(&property)
+        || RELIGHT_STRENGTH_KEYS.contains(&property)
+        || RELIGHT_COLOR_KEYS.contains(&property)
+        || RELIGHT_ANGLE_KEYS.contains(&property)
+        || WHEEL_KEYS.contains(&property)
+        || is_unit_colour_key(property)
+        || effect_control_id(property).is_some()
+        || crate::text_keys::TEXT_STYLE_KEYS.contains(&property)
+        || crate::text_keys::GLOW_STRENGTH_KEYS.contains(&property)
+        || crate::text_keys::GLOW_RANGE_KEYS.contains(&property)
+        || crate::shape_keys::SHAPE_STYLE_KEYS.contains(&property)
 }
 
 /// The keyed letter color of `segment` at timeline `time`, red, green and
@@ -551,6 +816,17 @@ pub fn put_key(segment: &mut Segment, property: &str, offset: Micros, value: f64
 /// from the segment start. A clip whose keys do not read is refused.
 #[must_use]
 pub fn add_keys(segment: &mut Segment, graphs: &[KeyframeGraph], offset: Micros) -> Option<()> {
+    add_keys_where(segment, graphs, offset, |_| true)
+}
+
+/// [`add_keys`] on the pose names `keep` takes only: the rest of the pose
+/// is left as it is, keyed or not.
+pub fn add_keys_where(
+    segment: &mut Segment,
+    graphs: &[KeyframeGraph],
+    offset: Micros,
+    keep: impl Fn(&str) -> bool,
+) -> Option<()> {
     let at = Micros(segment.target.start.0.saturating_add(offset.0));
     let (clip, uniform) = clip_at(segment, graphs, at)?;
     let (scale_x, scale_y) = if uniform.on {
@@ -566,9 +842,13 @@ pub fn add_keys(segment: &mut Segment, graphs: &[KeyframeGraph], offset: Micros)
         scale_y,
     ];
     for (property, value) in POSE_KEYS.iter().zip(values) {
-        put_key(segment, property, offset, value);
+        if keep(property) {
+            put_key(segment, property, offset, value);
+        }
     }
-    put_key(segment, ALPHA_KEY, offset, clip.alpha);
+    if keep(ALPHA_KEY) {
+        put_key(segment, ALPHA_KEY, offset, clip.alpha);
+    }
     Some(())
 }
 
@@ -694,6 +974,150 @@ mod tests {
         assert!(!remove_keys(&mut segment, Micros(500)));
         assert_eq!(segment.common_keyframes.len(), 1);
         assert_eq!(key_offsets(&segment), [Micros(900)]);
+    }
+
+    #[test]
+    fn each_pose_part_is_keyed_apart() {
+        let mut segment = segment();
+        assert!(!has_keys(&segment, &POSITION_KEYS));
+        put_key(&mut segment, "KFTypePositionX", Micros(0), 0.5);
+        assert!(has_keys(&segment, &POSITION_KEYS));
+        assert!(!has_keys(&segment, &SCALE_KEYS));
+        assert!(!has_keys(&segment, &ROTATION_KEYS));
+        assert!(!has_keys(&segment, &OPACITY_KEYS));
+        put_key(&mut segment, "alpha", Micros(0), 0.5);
+        assert!(has_keys(&segment, &OPACITY_KEYS));
+        // An empty group is not a key.
+        remove_keys(&mut segment, Micros(0));
+        segment.common_keyframes.push(CommonKeyframeGroup {
+            property_type: "KFTypeScale".to_owned(),
+            ..CommonKeyframeGroup::default()
+        });
+        assert!(!has_keys(&segment, &SCALE_KEYS));
+        for name in POSITION_KEYS
+            .iter()
+            .chain(&SCALE_KEYS)
+            .chain(&ROTATION_KEYS)
+            .chain(&OPACITY_KEYS)
+        {
+            assert!(is_pose_key(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_mask_parts_are_the_mask_keys_in_order() {
+        let parts: Vec<&str> = MASK_POSITION_KEYS
+            .iter()
+            .chain(&MASK_SIZE_KEYS)
+            .chain(&MASK_ROTATION_KEYS)
+            .chain(&MASK_FEATHER_KEYS)
+            .chain(&MASK_ROUND_KEYS)
+            .copied()
+            .collect();
+        assert_eq!(parts, MASK_KEYS);
+    }
+
+    #[test]
+    fn a_keyed_relight_moves_its_strength_and_color_and_leaves_its_angle() {
+        let relight = crate::materials::Relight {
+            preset: crate::materials::Relight::CUSTOM.to_owned(),
+            strength: 0.5,
+            color: "#ffffff".to_owned(),
+            angle: 135.0,
+        };
+        let mut segment = Segment::new("s", "m", crate::time::TimeRange::new(1_000, 2_000));
+        assert_eq!(relight_at(&relight, &segment, &[], Micros(1_500)), relight);
+        put_key(&mut segment, RELIGHT_STRENGTH_KEYS[0], Micros(0), 0.0);
+        put_key(&mut segment, RELIGHT_STRENGTH_KEYS[0], Micros(2_000), 2.0);
+        for (name, value) in RELIGHT_COLOR_KEYS.iter().zip([1.0, 0.0, 0.5]) {
+            put_key(&mut segment, name, Micros(0), value);
+        }
+        let keyed = relight_at(&relight, &segment, &[], Micros(1_500));
+        assert!((keyed.strength - 0.5).abs() < 1e-9);
+        assert_eq!(keyed.color, "#ff0080");
+        assert_eq!(keyed.angle, 135.0);
+        assert_eq!(
+            relight_at(&relight, &segment, &[], Micros(3_000)).strength,
+            1.0
+        );
+        for name in RELIGHT_STRENGTH_KEYS
+            .iter()
+            .chain(&RELIGHT_COLOR_KEYS)
+            .chain(&RELIGHT_ANGLE_KEYS)
+        {
+            assert!(is_keyable(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_keyed_canvas_color_reads_as_hex_once_all_three_are_keyed() {
+        let mut segment = Segment::new("s", "m", crate::time::TimeRange::new(0, 1_000));
+        let at = |segment: &Segment| hex_color_at(segment, &[], &CANVAS_COLOR_KEYS, Micros(500));
+        assert_eq!(at(&segment), None);
+        put_key(&mut segment, CANVAS_COLOR_KEYS[0], Micros(0), 0.0);
+        put_key(&mut segment, CANVAS_COLOR_KEYS[0], Micros(1_000), 1.0);
+        assert_eq!(at(&segment), None);
+        put_key(&mut segment, CANVAS_COLOR_KEYS[1], Micros(0), 0.0);
+        put_key(&mut segment, CANVAS_COLOR_KEYS[2], Micros(0), 2.0);
+        assert_eq!(at(&segment).as_deref(), Some("#8000ff"));
+        assert!(CANVAS_COLOR_KEYS.iter().all(|name| is_keyable(name)));
+    }
+
+    #[test]
+    fn a_keyed_motion_blur_follows_the_clip_shown_from_its_file() {
+        let blur = crate::materials::MotionBlur {
+            blur: 1.0,
+            blend: 0.0,
+            direction: 0,
+            times: 1,
+        };
+        // The clip shows its file from 5 s, on the timeline from 1 s.
+        let mut segment = Segment::new("s", "m", crate::time::TimeRange::new(1_000_000, 1_000_000));
+        segment.source_range = Some(crate::time::TimeRange::new(5_000_000, 1_000_000));
+        assert_eq!(motion_blur_at(&blur, &segment, &[], 5_500_000), blur);
+        put_key(&mut segment, MOTION_BLUR_LENGTH_KEYS[0], Micros(0), 0.0);
+        put_key(
+            &mut segment,
+            MOTION_BLUR_LENGTH_KEYS[0],
+            Micros(1_000_000),
+            1.0,
+        );
+        put_key(&mut segment, MOTION_BLUR_BLEND_KEYS[0], Micros(0), 3.0);
+        let half = motion_blur_at(&blur, &segment, &[], 5_500_000);
+        assert!((half.blur - 0.5).abs() < 1e-6);
+        assert_eq!(half.blend, 1.0);
+        // A time the clip does not show keeps the stored settings.
+        assert_eq!(motion_blur_at(&blur, &segment, &[], 9_000_000), blur);
+        assert!(is_keyable(MOTION_BLUR_LENGTH_KEYS[0]) && is_keyable(MOTION_BLUR_BLEND_KEYS[0]));
+    }
+
+    #[test]
+    fn every_hsl_and_wheel_key_is_keyable_and_named_once() {
+        let mut seen = std::collections::HashSet::new();
+        for name in HSL_KEYS.iter().chain(&WHEEL_KEYS) {
+            assert!(is_keyable(name), "{name}");
+            assert!(seen.insert(*name), "{name}");
+        }
+        assert!(!is_keyable("KFTypeHslPinkHue"));
+    }
+
+    #[test]
+    fn an_effect_control_key_names_its_control() {
+        let key = effect_control_key("intensity");
+        assert_eq!(key, "KFTypeEffectControl_intensity");
+        assert_eq!(effect_control_id(&key), Some("intensity"));
+        assert!(is_keyable(&key));
+        for bad in [
+            "KFTypeEffectControl_",
+            "KFTypeEffectControl_Big",
+            "KFTypeEffectControl_a-b",
+            "KFTypeEffectControl_../x",
+            "intensity",
+        ] {
+            assert_eq!(effect_control_id(bad), None, "{bad}");
+            assert!(!is_keyable(bad), "{bad}");
+        }
+        assert!(!is_keyable(&effect_control_key(&"a".repeat(65))));
     }
 
     #[test]

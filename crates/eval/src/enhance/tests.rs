@@ -404,27 +404,70 @@ fn blur(blur: f64, direction: i64, times: i64) -> MotionBlur {
 #[test]
 fn each_frame_is_blurred_across_its_shutter_the_way_it_reaches() {
     let copy = [Micros(1_000_000), Micros(1_100_000)];
-    let both = shutter_times(&copy, 10.0, &blur(1.0, MotionBlur::BOTH, 1));
+    let both = shutter_times(&copy, 10.0, &blur(1.0, MotionBlur::BOTH, 1), &[]);
     assert_eq!(
         both[0],
         vec![Micros(950_000), Micros(1_000_000), Micros(1_050_000)]
     );
     assert_eq!(both[1][0], Micros(1_050_000));
-    let forward = shutter_times(&copy, 10.0, &blur(0.5, MotionBlur::FORWARD, 2));
+    let forward = shutter_times(&copy, 10.0, &blur(0.5, MotionBlur::FORWARD, 2), &[]);
     assert_eq!(forward[0].len(), 5);
     assert_eq!(
         (forward[0][0], forward[0][4]),
         (Micros(1_000_000), Micros(1_050_000))
     );
-    let backward = shutter_times(&copy, 10.0, &blur(1.0, MotionBlur::BACKWARD, 6));
+    let backward = shutter_times(&copy, 10.0, &blur(1.0, MotionBlur::BACKWARD, 6), &[]);
     assert_eq!(backward[0].len(), 13);
     assert_eq!(
         (backward[0][0], backward[0][12]),
         (Micros(900_000), Micros(1_000_000))
     );
     // No length is the frame itself, every time.
-    let none = shutter_times(&copy, 10.0, &blur(0.0, MotionBlur::BOTH, 1));
+    let none = shutter_times(&copy, 10.0, &blur(0.0, MotionBlur::BOTH, 1), &[]);
     assert!(none[0].iter().all(|time| *time == Micros(1_000_000)));
+    // A keyed Blur gives each frame its own length.
+    let keyed = shutter_times(
+        &copy,
+        10.0,
+        &blur(1.0, MotionBlur::BOTH, 1),
+        &[(0.0, 0.0), (1.0, 0.0)],
+    );
+    assert!(keyed[0].iter().all(|time| *time == Micros(1_000_000)));
+    assert_eq!(keyed[1], both[1]);
+}
+
+#[test]
+fn a_keyed_blur_plans_each_frame_and_names_another_copy() {
+    let (temp, mut draft) = project(None);
+    let root = Some(temp.0.as_path());
+    let settings = blur(1.0, MotionBlur::BOTH, 1);
+    let ask = |draft: &Draft| copy_ask(draft, root, &"v".into(), 0, 0, 0, Some(&settings)).unwrap();
+    let plain = ask(&draft);
+    assert!(plain.keyed_blur.is_empty());
+    assert_eq!(plain.blend_at(3), 0.0);
+    let segment = &mut draft.tracks[0].segments[0];
+    let length = segment.target.duration.0;
+    cutlass_model::put_key(
+        segment,
+        cutlass_model::MOTION_BLUR_BLEND_KEYS[0],
+        Micros(0),
+        0.0,
+    );
+    cutlass_model::put_key(
+        segment,
+        cutlass_model::MOTION_BLUR_BLEND_KEYS[0],
+        Micros(length),
+        1.0,
+    );
+    let keyed = ask(&draft);
+    assert!(!keyed.keyed_blur.is_empty());
+    assert_ne!(keyed.key(), plain.key());
+    let last = keyed.keyed_blur.len() - 1;
+    assert!(keyed.blend_at(0) < keyed.blend_at(last));
+    // Blur is not keyed, so every frame keeps its stored length.
+    assert!(keyed.keyed_blur.iter().all(|(blur, _)| *blur == 1.0));
+    // The same keys name the same copy.
+    assert_eq!(ask(&draft).key(), keyed.key());
 }
 
 #[test]

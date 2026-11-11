@@ -14,11 +14,11 @@ use cutlass_model::{
 use super::{EditError, ensure_unlocked, locate};
 
 /// The widest or tallest a shape can be, in canvas pixels.
-const MAX_SIZE: f64 = 8_192.0;
+const MAX_SIZE: f64 = cutlass_model::MAX_SHAPE_SIZE;
 /// The widest a stroke can be, in canvas pixels.
-const MAX_STROKE: f64 = 256.0;
+const MAX_STROKE: f64 = cutlass_model::MAX_SHAPE_STROKE;
 /// The farthest a shadow can fall, in canvas pixels.
-const MAX_SHADOW_DISTANCE: f64 = 1_024.0;
+const MAX_SHADOW_DISTANCE: f64 = cutlass_model::MAX_SHAPE_SHADOW_DISTANCE;
 /// Solid, dashed and dotted.
 const STROKE_STYLES: i32 = 3;
 

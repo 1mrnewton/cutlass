@@ -24,6 +24,7 @@ use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::EvalError;
 use crate::canvas::project_canvas;
+use crate::gpu::{GpuLayer, GpuSource, SelectionCut};
 use crate::media::clip_frame;
 
 pub(crate) struct StackLayer<'a> {
@@ -77,29 +78,6 @@ impl PictureSource for Held {
     }
 }
 
-/// The frame has an effect mark or a clip filter, so it composes on the CPU.
-/// A blend mode the app ships runs on the GPU and does not count.
-pub(crate) fn needs_cpu(draft: &Draft, time: Micros, stack: &[StackLayer<'_>]) -> bool {
-    !global_marks(draft, time, stack).is_empty()
-        || stack
-            .iter()
-            .any(|layer| clip_adjust(draft, layer.track_index, layer.segment_index).is_some())
-        || stack
-            .iter()
-            .any(|layer| clip_mask(draft, layer.track_index, layer.segment_index).is_some())
-        || stack
-            .iter()
-            .any(|layer| clip_has_selection(draft, layer.track_index, layer.segment_index))
-        || stack.iter().any(|layer| {
-            match clip_filter(draft, layer.track_index, layer.segment_index) {
-                ClipFilter::None => false,
-                ClipFilter::Blend => segment(draft, layer.track_index, layer.segment_index)
-                    .is_none_or(|segment| cutlass_effects::segment_blend(draft, segment).is_none()),
-                ClipFilter::Unary => true,
-            }
-        })
-}
-
 pub(crate) fn present<D: Device>(
     draft: &Draft,
     store: &dyn PackageStore,
@@ -113,7 +91,7 @@ pub(crate) fn present<D: Device>(
         !matches!(
             clip_filter(draft, layer.track_index, layer.segment_index),
             ClipFilter::None
-        ) || clip_adjust(draft, layer.track_index, layer.segment_index).is_some()
+        ) || clip_adjust(draft, layer.track_index, layer.segment_index, time).is_some()
             || clip_mask(draft, layer.track_index, layer.segment_index).is_some()
             || clip_has_selection(draft, layer.track_index, layer.segment_index)
     });
@@ -204,7 +182,12 @@ fn push_visual<'a, D: Device>(
         batch.push(Slot::Borrowed(layer.source));
         return Ok(());
     };
-    let adjust = clip_adjust(pass.draft, layer.track_index, layer.segment_index);
+    let adjust = clip_adjust(
+        pass.draft,
+        layer.track_index,
+        layer.segment_index,
+        pass.time,
+    );
     let mask = clip_mask(pass.draft, layer.track_index, layer.segment_index);
     // Decoded once for this frame, not once per sample.
     let selection = cutlass_effects::segment_selection(pass.draft, segment);
@@ -328,7 +311,7 @@ fn global_marks<'a>(draft: &'a Draft, time: Micros, stack: &[StackLayer<'_>]) ->
         })
         .filter_map(|(track_index, segment_index, segment, _)| {
             // A bundled filter is a look: adjust sliders, not a package.
-            let adjust = cutlass_effects::segment_look(draft, segment);
+            let adjust = cutlass_effects::segment_look_at(draft, segment, time);
             if adjust.as_ref().is_some_and(Colour::is_identity) {
                 return None;
             }
@@ -378,7 +361,7 @@ fn adjustment_layers<'a>(
                 )
         })
         .filter_map(move |(track_index, segment_index, segment)| {
-            let adjust = cutlass_effects::segment_colour(draft, segment);
+            let adjust = cutlass_effects::segment_colour_at(draft, segment, time);
             (!adjust.is_identity()).then_some(Mark {
                 render_index: segment.render_index,
                 track_index,
@@ -387,6 +370,127 @@ fn adjustment_layers<'a>(
                 adjust: Some(adjust),
             })
         })
+}
+
+/// The looks, adjustment layers and effect packages covering `time`, as
+/// GPU layers over the layers before them, with their place among the
+/// layers. A package the store does not have leaves the picture, as on
+/// the CPU.
+pub(crate) fn colour_marks(
+    draft: &Draft,
+    store: &dyn PackageStore,
+    time: Micros,
+    extent: Extent,
+    stack: &[StackLayer<'_>],
+) -> Vec<((i32, usize, usize), GpuLayer)> {
+    global_marks(draft, time, stack)
+        .into_iter()
+        .filter_map(|mark| {
+            let key = (mark.render_index, mark.track_index, mark.segment_index);
+            let Some(colour) = mark.adjust else {
+                let pass = cutlass_effects::segment_pass(store, draft, mark.segment, time)
+                    .filter(|pass| pass.blend.is_none())?;
+                return Some((key, GpuLayer::package(pass, extent.width, extent.height)));
+            };
+            let mask = effect_mask(draft, mark.segment, time, extent);
+            Some((
+                key,
+                GpuLayer::colour(colour, grain_seed(time), mask, extent.width, extent.height),
+            ))
+        })
+        .collect()
+}
+
+/// A drawn clip's effect package at `time`, run over that clip alone
+/// after its colour work, mask and selection, as the CPU runs it: what it
+/// paints, or for a blend package its fade and the mode it mixes with.
+/// `None` for a clip with no package, a blend mode the app ships, or a
+/// package the store does not have.
+pub(crate) fn clip_package(
+    draft: &Draft,
+    store: &dyn PackageStore,
+    time: Micros,
+    track_index: usize,
+    segment_index: usize,
+) -> Option<cutlass_effects::PackagePass> {
+    let segment = segment(draft, track_index, segment_index)?;
+    let blends = match clip_filter(draft, track_index, segment_index) {
+        ClipFilter::None => return None,
+        ClipFilter::Blend if cutlass_effects::segment_blend(draft, segment).is_some() => {
+            return None;
+        }
+        ClipFilter::Blend => true,
+        ClipFilter::Unary => false,
+    };
+    cutlass_effects::segment_pass(store, draft, segment, time)
+        .filter(|pass| pass.blend.is_some() == blends)
+}
+
+/// A drawn clip's own colour work, mask and selection at `time` as GPU
+/// layers over that clip alone, in the order the CPU runs them: the colour
+/// kept to its colour mask, then the mask, then the selection. A cut whose
+/// clip has no frame on the canvas is left out, as the CPU leaves it.
+pub(crate) fn clip_passes(
+    draft: &Draft,
+    time: Micros,
+    extent: Extent,
+    track_index: usize,
+    segment_index: usize,
+) -> Vec<GpuLayer> {
+    let Some(segment) = segment(draft, track_index, segment_index) else {
+        return Vec::new();
+    };
+    let (width, height) = (extent.width, extent.height);
+    let mut passes = Vec::new();
+    if let Some(colour) = clip_adjust(draft, track_index, segment_index, time) {
+        let mask = effect_mask(draft, segment, time, extent);
+        passes.push(GpuLayer::colour(
+            colour,
+            grain_seed(time),
+            mask,
+            width,
+            height,
+        ));
+    }
+    let frame = clip_frame(draft, segment, time, (width, height)).map(|frame| {
+        #[allow(clippy::cast_possible_truncation)]
+        let frame = frame.0.map(|value| value as f32);
+        frame
+    });
+    let Some(frame) = frame else {
+        return passes;
+    };
+    if let Some(mask) = clip_mask(draft, track_index, segment_index) {
+        let mask = mask.at(segment, &draft.keyframe_graph_list, time);
+        passes.push(GpuLayer::cut(
+            GpuSource::Cut(cutlass_effects::CanvasMask { mask, frame }),
+            width,
+            height,
+        ));
+    }
+    if let Some(selection) = cutlass_effects::segment_selection(draft, segment)
+        && let Some(alpha) = selection.alpha()
+    {
+        passes.push(GpuLayer::cut(
+            GpuSource::Select(SelectionCut {
+                width: selection.width,
+                height: selection.height,
+                alpha,
+                invert: selection.invert,
+                frame,
+            }),
+            width,
+            height,
+        ));
+    }
+    passes
+}
+
+/// The grain's seed at `time`: it moves once a frame at 30 frames a second.
+fn grain_seed(time: Micros) -> u32 {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let seed = (time.0 / 33_333) as u32;
+    seed
 }
 
 /// A recipe effect at one frame: where it sits among the layers, its steps
@@ -416,10 +520,17 @@ pub(crate) fn recipe_marks(
                 None => None,
             };
             let offset = Micros(time.0.saturating_sub(segment.target.start.0));
-            let controls = match draft.materials.get(segment.material_id.as_str()) {
+            let stored = match draft.materials.get(segment.material_id.as_str()) {
                 Some(MaterialRef::VideoEffect(effect)) => cutlass_effects::stored_controls(effect),
                 _ => std::collections::BTreeMap::new(),
             };
+            let controls = cutlass_effects::keyed_controls(
+                recipe,
+                stored,
+                segment,
+                &draft.keyframe_graph_list,
+                time,
+            );
             Some(RecipeMark {
                 key: (segment.render_index, track_index, segment_index),
                 steps: recipe.steps_with(offset, &controls),
@@ -516,10 +627,19 @@ fn clip_filter(draft: &Draft, track_index: usize, segment_index: usize) -> ClipF
     }
 }
 
-/// The colour work on a drawn clip, when any is set.
-fn clip_adjust(draft: &Draft, track_index: usize, segment_index: usize) -> Option<Colour> {
-    let colour =
-        cutlass_effects::segment_colour(draft, segment(draft, track_index, segment_index)?);
+/// The colour work on a drawn clip at `time`, keyed sliders as keyed
+/// there, when any is set.
+fn clip_adjust(
+    draft: &Draft,
+    track_index: usize,
+    segment_index: usize,
+    time: Micros,
+) -> Option<Colour> {
+    let colour = cutlass_effects::segment_colour_at(
+        draft,
+        segment(draft, track_index, segment_index)?,
+        time,
+    );
     (!colour.is_identity()).then_some(colour)
 }
 
@@ -606,14 +726,11 @@ fn adjusted_in(
     CpuBytes::new(width, height, rgba).unwrap_or(after)
 }
 
-/// `input` with `adjust` run over it. The grain moves once a frame at 30
-/// frames a second.
+/// `input` with `adjust` run over it, its grain at `time`.
 fn adjusted(colour: &Colour, input: CpuBytes, time: Micros) -> CpuBytes {
     let (width, height) = (input.width(), input.height());
     let mut rgba = input.rgba().to_vec();
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let seed = (time.0 / 33_333) as u32;
-    colour.apply(&mut rgba, width, height, seed);
+    colour.apply(&mut rgba, width, height, grain_seed(time));
     CpuBytes::new(width, height, rgba).unwrap_or(input)
 }
 
@@ -975,6 +1092,38 @@ mod tests {
             .extra_material_refs
             .push("mul".into());
         assert_eq!(draw(&blended, &store, 0), [78, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_keyed_adjust_slider_changes_the_picture_over_the_clip() {
+        let store = Store::new();
+        let mut draft = red_draft();
+        let segment = &mut draft.tracks[0].segments[0];
+        let brightness = cutlass_effects::AdjustKey::Brightness.keyframe();
+        cutlass_model::put_key(segment, brightness, Micros(0), 0.0);
+        cutlass_model::put_key(segment, brightness, Micros(1_000_000), -1.0);
+        assert_eq!(draw(&draft, &store, 0), RED);
+        let late = draw(&draft, &store, 900_000);
+        let middle = draw(&draft, &store, 500_000);
+        assert!(
+            late[0] < middle[0] && middle[0] < RED[0],
+            "{late:?} {middle:?}"
+        );
+        // The same draft and time give the same frame.
+        assert_eq!(draw(&draft, &store, 500_000), middle);
+    }
+
+    #[test]
+    fn a_keyed_hsl_slider_changes_the_picture_over_the_clip() {
+        let store = Store::new();
+        let mut draft = red_draft();
+        let segment = &mut draft.tracks[0].segments[0];
+        let red_lightness = cutlass_effects::hsl_keys(0, 2)[0];
+        cutlass_model::put_key(segment, red_lightness, Micros(0), 0.0);
+        cutlass_model::put_key(segment, red_lightness, Micros(1_000_000), -1.0);
+        assert_eq!(draw(&draft, &store, 0), RED);
+        let late = draw(&draft, &store, 900_000);
+        assert!(late[0] < RED[0], "{late:?}");
     }
 
     #[test]

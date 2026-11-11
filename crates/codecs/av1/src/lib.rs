@@ -5,7 +5,7 @@
 //! and monochrome, all intra, inter, compound, warped and screen-content
 //! tools, the in-loop filters, super resolution, scaled references and film
 //! grain. The encoder ([`enc`]) codes those bitstreams through the decoder's
-//! own syntax code. `STATUS.md` next to this crate is the support record.
+//! own syntax code. `README.md` next to this crate is the support record.
 
 #![forbid(unsafe_code)]
 // Kernels index fixed-size tables and take many scalar parameters, as the

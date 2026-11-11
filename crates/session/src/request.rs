@@ -141,6 +141,10 @@ pub enum Request {
         segment_id: SegmentId,
         material_id: MaterialId,
     },
+    /// Give a picture whose sound was extracted its own sound back, and
+    /// take the clip that sound went to off the timeline when it is still
+    /// linked to the picture.
+    RecoverAudio { segment_id: SegmentId },
     /// Turn one track-attribute bit on or off. Mute and solo are not gains.
     SetTrackAttribute {
         track_id: TrackId,
@@ -163,6 +167,22 @@ pub enum Request {
         segment_id: SegmentId,
         transition: Box<MaterialTransition>,
     },
+    /// Give the clips one group, so they move together, or take them out
+    /// of their groups with an empty `group_id`.
+    SetGroup {
+        segment_ids: Vec<SegmentId>,
+        group_id: String,
+    },
+    /// Paste what Copy attributes took onto each clip that can take it:
+    /// the placement onto clips that draw, the volume onto clips that
+    /// sound. At least one clip must take something.
+    PasteAttributes {
+        segment_ids: Vec<SegmentId>,
+        attributes: Box<crate::ClipAttributes>,
+    },
+    /// Take the blend off the outgoing segment, and its material off the
+    /// draft. A segment with no blend is refused.
+    RemoveTransition { segment_id: SegmentId },
     /// Split `segment_id` at `at`. The time must sit outside every blend window on the track.
     Split {
         segment_id: SegmentId,
@@ -634,9 +654,14 @@ pub enum Request {
     },
     /// Key the clip's place, size, turn, and opacity as they are at
     /// `offset` from its start. A key there takes those values again.
+    /// Named `properties` (pose names such as `KFTypePositionX` or
+    /// `KFTypeAlpha`) key only those parts and leave the rest of the pose
+    /// alone; none keys the whole pose.
     AddKeyframe {
         segment_id: SegmentId,
         offset: Micros,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        properties: Vec<String>,
     },
     /// Key each named setting at `offset` from the clip's start: the
     /// volume (`KFTypeVolume`) or the mask (`KFTypeCommonMask*`), in the
@@ -659,11 +684,14 @@ pub enum Request {
     },
     /// Ease the span that ends at the key `offset` from the clip's start
     /// along the Graphs panel curve named `graph`, or make it straight with
-    /// `None`.
+    /// `None`. Only the keys on `properties` are eased; none eases every
+    /// pose key, as before.
     SetKeyframeGraph {
         segment_id: SegmentId,
         offset: Micros,
         graph: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        properties: Vec<String>,
     },
     /// Give the clip the in or out animation whose resource id is
     /// `animation`, lasting `duration`, or clear that side with `None`.
@@ -673,8 +701,10 @@ pub enum Request {
         animation: Option<String>,
         duration: Micros,
     },
-    /// Store the picture's place, size, and turn, as the three requests
-    /// above do, and key them at `offset` from the clip's start.
+    /// Change the picture's place, size, and turn at `offset` from the
+    /// clip's start. Each part that changed is keyed there when it already
+    /// has keys and stored, as the three requests above do, when it has
+    /// none. A part that did not change is left alone.
     KeyPose {
         segment_id: SegmentId,
         offset: Micros,
@@ -706,6 +736,16 @@ pub enum Request {
     ReplaceMedia {
         segment_id: SegmentId,
         material_id: MaterialId,
+    },
+    /// Point a material at the file stored at `path`, for media that has
+    /// moved. Every clip of the material plays the new file in place of
+    /// the old, which must reach as far as they do.
+    LinkMedia {
+        material_id: MaterialId,
+        path: String,
+        width: i32,
+        height: i32,
+        duration: Micros,
     },
     /// Add an empty lane. Video and mixed lanes are overlays above the main track.
     /// Audio is inserted under the main track. This does not place a segment.

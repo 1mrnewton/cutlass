@@ -283,6 +283,7 @@ impl Shell {
         if session.revision() != before {
             self.session = Some(session);
             self.lanes_cache.replace(None);
+            self.bars_cache.replace(None);
         }
         if let Some(time) = moves.seek {
             self.seek(Micros(time));

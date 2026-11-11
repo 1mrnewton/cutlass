@@ -28,6 +28,11 @@ pub struct MaterialVideo {
     pub duration: Micros,
     #[serde(default)]
     pub has_audio: bool,
+    /// The clip's own sound was taken off it, as Extract audio does. The
+    /// clip is then silent and shows no wave, whether or not the clip that
+    /// sound went to is still on the timeline.
+    #[serde(default)]
+    pub has_sound_separated: bool,
     #[serde(default = "free_crop")]
     pub crop_ratio: String,
     #[serde(default = "one")]
@@ -442,6 +447,7 @@ impl Default for MaterialVideo {
             height: 0,
             duration: Micros(0),
             has_audio: false,
+            has_sound_separated: false,
             crop_ratio: free_crop(),
             crop_scale: 1.0,
             crop: Crop::default(),

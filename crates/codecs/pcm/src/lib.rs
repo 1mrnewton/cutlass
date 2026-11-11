@@ -1,7 +1,7 @@
 //! Integer and float PCM.
 //!
 //! Packet bytes are the samples a container already framed. This crate does
-//! not parse WAV, AIFF, or CAF. The support record is `STATUS.md`.
+//! not parse WAV, AIFF, or CAF. The support record is `README.md`.
 
 #![forbid(unsafe_code)]
 

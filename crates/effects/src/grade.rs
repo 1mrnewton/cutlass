@@ -14,10 +14,10 @@
 //!   `gain`, each `[x, y, luma]`: where the puck sits in the unit circle and
 //!   how far the ring below it is turned, from -1 to 1.
 
-use cutlass_model::{Draft, MaterialRef, Segment};
+use cutlass_model::{Draft, MaterialRef, Micros, Segment};
 use serde_json::{Value, json};
 
-use crate::adjust::{Adjust, adjust_rgba, segment_adjust};
+use crate::adjust::{Adjust, adjust_rgba, keyed_adjust, segment_adjust};
 use crate::chroma::{Chroma, segment_chroma};
 use crate::lut::{ClipLut, segment_lut};
 
@@ -131,6 +131,79 @@ impl Wheel {
             Self::Gain => 2,
         }
     }
+
+    /// The key names the wheel's puck is keyed under, x then y.
+    #[must_use]
+    pub fn puck_keys(self) -> &'static [&'static str] {
+        let at = self.index() * 3;
+        &cutlass_model::WHEEL_KEYS[at..at + 2]
+    }
+
+    /// The key name the wheel's brightness ring is keyed under.
+    #[must_use]
+    pub fn luma_keys(self) -> &'static [&'static str] {
+        let at = self.index() * 3 + 2;
+        &cutlass_model::WHEEL_KEYS[at..=at]
+    }
+}
+
+/// The key name HSL colour `color` (in [`HSL_COLORS`] order) keys its
+/// `part` under: 0 hue, 1 saturation, 2 lightness. Past the end is the last.
+#[must_use]
+pub fn hsl_keys(color: usize, part: usize) -> &'static [&'static str] {
+    let at = (color.min(7) * 3 + part.min(2)).min(cutlass_model::HSL_KEYS.len() - 1);
+    std::slice::from_ref(&cutlass_model::HSL_KEYS[at])
+}
+
+/// `grade` with each HSL slider and wheel `segment` keys set as keyed at
+/// timeline `time`, each held to -1 to 1 and each puck inside its circle.
+#[must_use]
+pub fn keyed_grade(
+    mut grade: Grade,
+    segment: &Segment,
+    graphs: &[cutlass_model::KeyframeGraph],
+    time: Micros,
+) -> Grade {
+    let keyed_any = segment.common_keyframes.iter().any(|group| {
+        let name = group.property_type.as_str();
+        cutlass_model::HSL_KEYS.contains(&name) || cutlass_model::WHEEL_KEYS.contains(&name)
+    });
+    if !keyed_any {
+        return grade;
+    }
+    let offset = time.0.saturating_sub(segment.target.start.0);
+    #[allow(clippy::cast_possible_truncation)]
+    let keyed = |name: &str| match cutlass_model::sample(
+        &segment.common_keyframes,
+        graphs,
+        &[name],
+        offset,
+    ) {
+        Some(Some(value)) if value.is_finite() => Some(value.clamp(-1.0, 1.0) as f32),
+        _ => None,
+    };
+    for (color, values) in grade.hsl.iter_mut().enumerate() {
+        for (part, value) in values.iter_mut().enumerate() {
+            if let Some(keyed) = keyed(hsl_keys(color, part)[0]) {
+                *value = keyed;
+            }
+        }
+    }
+    for wheel in Wheel::ALL {
+        let setting = &mut grade.wheels[wheel.index()];
+        let puck = wheel.puck_keys();
+        if let Some(x) = keyed(puck[0]) {
+            setting.x = x;
+        }
+        if let Some(y) = keyed(puck[1]) {
+            setting.y = y;
+        }
+        if let Some(luma) = keyed(wheel.luma_keys()[0]) {
+            setting.luma = luma;
+        }
+        *setting = setting.held();
+    }
+    grade
 }
 
 /// A wheel's setting: the puck in the unit circle and the ring.
@@ -167,7 +240,7 @@ impl WheelSetting {
 
     /// The colour offset the wheel adds: the puck's hue with its own grey
     /// taken out, plus the ring as grey.
-    fn offset(&self) -> [f32; 3] {
+    pub(crate) fn offset(&self) -> [f32; 3] {
         let amount = (self.x * self.x + self.y * self.y).sqrt();
         let mut offset = [self.luma; 3];
         if amount > 0.0 {
@@ -322,6 +395,46 @@ pub fn segment_colour(draft: &Draft, segment: &Segment) -> Colour {
     }
 }
 
+/// [`segment_colour`] with its keyed settings as they are at timeline
+/// `time`.
+#[must_use]
+pub fn segment_colour_at(draft: &Draft, segment: &Segment, time: Micros) -> Colour {
+    let mut colour = segment_colour(draft, segment);
+    let graphs = &draft.keyframe_graph_list;
+    colour.adjust = keyed_adjust(colour.adjust, segment, graphs, time);
+    colour.grade = keyed_grade(colour.grade, segment, graphs, time);
+    let keyed = |names: &[&str]| keyed_unit(segment, graphs, names, time);
+    if let Some(lut) = colour.lut.as_mut()
+        && let Some(strength) = keyed(&cutlass_model::LUT_STRENGTH_KEYS)
+    {
+        lut.strength = strength;
+    }
+    if let Some(chroma) = colour.chroma.as_mut() {
+        if let Some(strength) = keyed(&cutlass_model::CHROMA_STRENGTH_KEYS) {
+            chroma.strength = strength;
+        }
+        if let Some(shadow) = keyed(&cutlass_model::CHROMA_SHADOW_KEYS) {
+            chroma.shadow = shadow;
+        }
+    }
+    colour
+}
+
+/// The keyed share from 0 to 1 `names` holds at timeline `time`, when
+/// `segment` keys it and the keys read.
+#[must_use]
+pub fn keyed_unit(
+    segment: &Segment,
+    graphs: &[cutlass_model::KeyframeGraph],
+    names: &[&str],
+    time: Micros,
+) -> Option<f32> {
+    let offset = time.0.saturating_sub(segment.target.start.0);
+    let value = cutlass_model::sample(&segment.common_keyframes, graphs, names, offset)??;
+    #[allow(clippy::cast_possible_truncation)]
+    Some(value.clamp(0.0, 1.0) as f32)
+}
+
 /// The curves, wheels and HSL `segment` lists among its extra materials.
 #[must_use]
 pub fn segment_grade(draft: &Draft, segment: &Segment) -> Grade {
@@ -421,7 +534,7 @@ fn read_wheel(value: Option<&Value>) -> WheelSetting {
 
 /// A curve with no bend: fewer than two points, or every point on the
 /// diagonal from one end to the other.
-fn straight(points: &[(f32, f32)]) -> bool {
+pub(crate) fn straight(points: &[(f32, f32)]) -> bool {
     let (Some(first), Some(last)) = (points.first(), points.last()) else {
         return true;
     };
@@ -695,5 +808,35 @@ mod tests {
         assert_eq!(gamma.luma, -0.5);
         assert!(!grade.is_identity());
         assert_eq!(tidy_points(&[(0.5, 0.5), (0.5004, 0.1)]).len(), 1);
+    }
+
+    #[test]
+    fn a_keyed_hsl_slider_or_wheel_moves_on_its_own() {
+        use cutlass_model::{Micros, put_key};
+        let mut segment = Segment::new("s", "m", TimeRange::new(1_000, 2_000));
+        let grade = Grade::default();
+        assert_eq!(
+            super::keyed_grade(grade.clone(), &segment, &[], Micros(1_000)),
+            grade
+        );
+        let green_saturation = super::hsl_keys(3, 1)[0];
+        put_key(&mut segment, green_saturation, Micros(0), -1.0);
+        put_key(&mut segment, green_saturation, Micros(2_000), 1.0);
+        let gain = Wheel::Gain.luma_keys()[0];
+        put_key(&mut segment, gain, Micros(0), 3.0);
+        let keyed = super::keyed_grade(grade, &segment, &[], Micros(2_000));
+        assert!(keyed.hsl[3][1].abs() < 1e-6);
+        assert_eq!(keyed.hsl[3][0], 0.0);
+        assert_eq!(keyed.hsl[3][2], 0.0);
+        // Held to its range, and the other wheels and the puck untouched.
+        assert_eq!(keyed.wheel(Wheel::Gain).luma, 1.0);
+        assert_eq!(keyed.wheel(Wheel::Gain).x, 0.0);
+        assert!(keyed.wheel(Wheel::Lift).is_zero());
+        let mut names: Vec<&str> = Vec::new();
+        for wheel in Wheel::ALL {
+            names.extend(wheel.puck_keys());
+            names.extend(wheel.luma_keys());
+        }
+        assert_eq!(names, cutlass_model::WHEEL_KEYS);
     }
 }

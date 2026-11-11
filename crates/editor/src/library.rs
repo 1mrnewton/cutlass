@@ -159,6 +159,100 @@ pub fn parent_of<'a>(store: &'a VirtualStore, id: &str) -> &'a str {
         .map_or(LIBRARY_TOP, |link| link.parent_id.as_str())
 }
 
+/// The files in the picked cards and folders, as material ids: a card is
+/// its own file, a folder is every file in it and in the folders inside
+/// it, pictures before sounds and each by name. A file picked twice is
+/// listed once.
+#[must_use]
+pub fn picked_files(draft: &Draft, store: &VirtualStore, picked: &[String]) -> Vec<String> {
+    fn inside(
+        draft: &Draft,
+        store: &VirtualStore,
+        folder: &str,
+        depth: usize,
+        out: &mut Vec<String>,
+    ) {
+        for shelf in [LibraryShelf::Media, LibraryShelf::Audio] {
+            out.extend(
+                library_files(draft, store, shelf, folder, LibrarySort::Name, "")
+                    .into_iter()
+                    .map(|file| file.id),
+            );
+        }
+        // A folder linked into itself must not be walked for ever.
+        if depth >= store.folders.len() {
+            return;
+        }
+        for child in library_folders(store, folder, "") {
+            inside(draft, store, &child.id, depth + 1, out);
+        }
+    }
+    let mut files = Vec::new();
+    for id in picked {
+        if find_folder(store, id).is_some() {
+            inside(draft, store, id, 0, &mut files);
+        } else if crate::material_span(draft, id).is_some() {
+            files.push(id.clone());
+        }
+    }
+    let mut seen = HashSet::new();
+    files.retain(|id| seen.insert(id.clone()));
+    files
+}
+
+/// A cut of the library files `files` alone, for exporting them: the
+/// project with its timeline replaced by the pictures end to end on the
+/// main track and the sounds end to end on a sound track, both from the
+/// start. `None` when none of the files has a length to play.
+#[must_use]
+pub fn library_cut(draft: &Draft, files: &[String]) -> Option<Draft> {
+    use cutlass_model::{Segment, TimeRange, Track, TrackType};
+    let mut pictures = Track::main("library-pictures");
+    let mut sounds = Track::main("library-sounds");
+    sounds.kind = TrackType::Audio;
+    for (index, id) in files.iter().enumerate() {
+        let Some((kind, length)) = crate::material_span(draft, id) else {
+            continue;
+        };
+        if length.0 <= 0 {
+            continue;
+        }
+        let track = if kind == TrackType::Audio {
+            &mut sounds
+        } else {
+            &mut pictures
+        };
+        let start = track.segments.last().map_or(0, |last: &Segment| {
+            last.target.start.0 + last.target.duration.0
+        });
+        let mut segment = Segment::new(
+            format!("library-clip-{index}"),
+            id.as_str(),
+            TimeRange::new(start, length.0),
+        );
+        segment.source_range = Some(TimeRange::new(0, length.0));
+        track.segments.push(segment);
+    }
+    let end = |track: &Track| {
+        track
+            .segments
+            .last()
+            .map_or(0, |last| last.target.start.0 + last.target.duration.0)
+    };
+    let length = end(&pictures).max(end(&sounds));
+    if length <= 0 {
+        return None;
+    }
+    let mut cut = draft.clone();
+    cut.tracks = vec![pictures];
+    if !sounds.segments.is_empty() {
+        cut.tracks.push(sounds);
+    }
+    cut.relationships.clear();
+    cut.duration = Micros(length);
+    Some(cut)
+}
+
 /// "Untitled folder", or the first "Untitled folder N" from 2 not taken.
 #[must_use]
 pub fn next_folder_name(store: &VirtualStore) -> String {
@@ -414,6 +508,93 @@ mod tests {
             "",
         );
         assert_eq!(names(&sounds), ["song.m4a"]);
+    }
+
+    #[test]
+    fn picked_cards_and_folders_become_one_cut_end_to_end() {
+        let mut draft = draft();
+        draft.materials.audios[0].duration = Micros(4_000_000);
+        let mut store = VirtualStore::default();
+        add_folder(&mut store, "f1", LIBRARY_TOP, &["b", "s"], 1);
+        add_folder(&mut store, "f2", "f1", &["c"], 1);
+        let ids = |picked: &[&str]| {
+            let picked: Vec<String> = picked.iter().map(|id| (*id).to_owned()).collect();
+            picked_files(&draft, &store, &picked)
+        };
+        // A card is itself; a folder is all it holds, all the way down;
+        // a file picked twice counts once; an unknown id is nothing.
+        assert_eq!(ids(&["a"]), ["a"]);
+        assert_eq!(ids(&["f1"]), ["b", "s", "c"]);
+        assert_eq!(ids(&["c", "f1", "gone"]), ["c", "b", "s"]);
+        assert!(ids(&[]).is_empty());
+
+        let files = ids(&["a", "f1"]);
+        let cut = library_cut(&draft, &files).unwrap();
+        let spans = |track: &cutlass_model::Track| -> Vec<(String, i64, i64)> {
+            track
+                .segments
+                .iter()
+                .map(|segment| {
+                    (
+                        segment.material_id.as_str().to_owned(),
+                        segment.target.start.0,
+                        segment.target.duration.0,
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(cut.tracks.len(), 2);
+        assert!(cut.tracks[0].is_main());
+        assert_eq!(
+            spans(&cut.tracks[0]),
+            [
+                ("a".to_owned(), 0, 3_000_000),
+                ("b".to_owned(), 3_000_000, 9_000_000),
+                ("c".to_owned(), 12_000_000, 5_000_000),
+            ]
+        );
+        assert_eq!(cut.tracks[1].kind, cutlass_model::TrackType::Audio);
+        assert_eq!(spans(&cut.tracks[1]), [("s".to_owned(), 0, 4_000_000)]);
+        assert_eq!(cut.duration, Micros(17_000_000));
+        // Every clip plays its whole file, and the timeline's own clip is
+        // not in the cut.
+        for segment in cut.tracks.iter().flat_map(|track| &track.segments) {
+            assert_eq!(
+                segment.source_range,
+                Some(TimeRange::new(0, segment.target.duration.0))
+            );
+            assert_ne!(segment.id.as_str(), "clip");
+        }
+        assert_eq!(cut.materials, draft.materials);
+        assert_eq!(cut.canvas_config, draft.canvas_config);
+        // The project itself is as it was.
+        assert_eq!(draft.tracks[0].segments.len(), 1);
+
+        // Pictures alone make no sound track; nothing to play makes no cut.
+        assert_eq!(
+            library_cut(&draft, &["a".to_owned()]).unwrap().tracks.len(),
+            1
+        );
+        draft.materials.audios[0].duration = Micros(0);
+        assert!(library_cut(&draft, &["s".to_owned(), "gone".to_owned()]).is_none());
+        assert!(library_cut(&draft, &[]).is_none());
+    }
+
+    #[test]
+    fn a_folder_linked_into_itself_is_walked_once() {
+        let draft = draft();
+        let mut store = VirtualStore::default();
+        add_folder(&mut store, "f1", LIBRARY_TOP, &["b"], 1);
+        add_folder(&mut store, "f2", "f1", &["c"], 1);
+        // A hostile store: the outer folder is also inside the inner one.
+        store.links.push(BinLink {
+            child_id: "f1".to_owned(),
+            parent_id: "f2".to_owned(),
+            ..BinLink::default()
+        });
+        let files = picked_files(&draft, &store, &["f2".to_owned()]);
+        assert!(files.len() <= 2, "{files:?}");
+        assert!(files.contains(&"c".to_owned()));
     }
 
     #[test]

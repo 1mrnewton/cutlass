@@ -2390,6 +2390,7 @@ dependencies = [
  "cutlass-agent",
  "cutlass-aiff",
  "cutlass-alac",
+ "cutlass-audio",
  "cutlass-av1",
  "cutlass-avi",
  "cutlass-caf",
@@ -3044,6 +3045,7 @@ dependencies = [
  "cutlass-eval",
  "cutlass-font",
  "cutlass-gpu",
+ "cutlass-logger",
  "cutlass-model",
  "cutlass-pcm",
  "cutlass-platform-android",
@@ -3053,6 +3055,7 @@ dependencies = [
  "cutlass-renderer-software",
  "cutlass-riff",
  "cutlass-session",
+ "image",
 ]
 
 [[package]]
@@ -3114,6 +3117,8 @@ dependencies = [
  "cutlass-model",
  "cutlass-picture",
  "cutlass-renderer-software",
+ "cutlass-session",
+ "cutlass-storage",
  "pollster",
  "wgpu",
 ]
@@ -5614,6 +5619,46 @@ checksum = "8ea1f30cedd69f0a2954655f7188c6a834246d2bcf1e315e2ac40c4b24dc9519"
 dependencies = [
  "cfg-if",
  "rayon",
+]
+
+[[package]]
+name = "media-bench"
+version = "0.1.0"
+dependencies = [
+ "cutlass-aac",
+ "cutlass-ac3",
+ "cutlass-adts",
+ "cutlass-aiff",
+ "cutlass-alac",
+ "cutlass-av1",
+ "cutlass-codec",
+ "cutlass-container",
+ "cutlass-decode",
+ "cutlass-encode",
+ "cutlass-engine",
+ "cutlass-flac",
+ "cutlass-flac-container",
+ "cutlass-gif",
+ "cutlass-h264",
+ "cutlass-hevc",
+ "cutlass-isobmff",
+ "cutlass-jpeg",
+ "cutlass-mjpeg",
+ "cutlass-mp3",
+ "cutlass-mp3-container",
+ "cutlass-mpeg2",
+ "cutlass-mpeg4",
+ "cutlass-ogg",
+ "cutlass-opus",
+ "cutlass-pcm",
+ "cutlass-png",
+ "cutlass-prores",
+ "cutlass-riff",
+ "cutlass-still",
+ "cutlass-vorbis",
+ "cutlass-vp8",
+ "cutlass-vp9",
+ "cutlass-webp",
 ]
 
 [[package]]

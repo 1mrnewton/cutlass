@@ -134,6 +134,29 @@ pub enum Layer<'a> {
     },
     /// An effect over everything drawn before it in the same list.
     Effect(&'a [Step], Option<&'a cutlass_effects::CanvasMask>),
+    /// Colour work (a chroma key, grades, adjust sliders, a LUT) over
+    /// everything drawn before it in the same list, shown only inside
+    /// `mask` when it has one. `seed` moves the grain.
+    Colour {
+        colour: &'a cutlass_effects::Colour,
+        seed: u32,
+        mask: Option<&'a cutlass_effects::CanvasMask>,
+    },
+    /// Everything drawn before it in the same list, kept as much as the
+    /// mask keeps: a clip's own mask.
+    Cut(&'a cutlass_effects::CanvasMask),
+    /// Everything drawn before it in the same list, kept only where a
+    /// clip's selection is.
+    Select(crate::Selected<'a>),
+    /// Everything drawn before it in the same list, lit again from a depth
+    /// picture stretched to the canvas. It reads the canvas at the size it
+    /// is drawn, so it belongs on a [`Layer::Nested`] canvas, which is
+    /// drawn whole.
+    Relight(crate::Relit<'a>),
+    /// Everything drawn before it in the same list, painted by an effect
+    /// package's stand-in. A blend package's own pass is only its fade;
+    /// [`Layer::Blend`] mixes.
+    Package(&'a cutlass_effects::PackagePass),
     /// `layers` drawn on a canvas the size of this one, then mixed by
     /// `mode` with everything drawn before it in the same list.
     Blend {

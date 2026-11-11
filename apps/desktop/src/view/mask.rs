@@ -240,8 +240,9 @@ fn glyph(ui: &Ui, rect: Rect, name: &str, ink: egui::Color32) {
     }
 }
 
-/// Mask settings: invert, reset and keyframes on the heading, then
-/// position, rotation, size, feather and round corners. The changed mask.
+/// Mask settings: invert and reset on the heading, then position,
+/// rotation, size, feather and round corners, each with its own keyframe
+/// buttons on a clip mask. The changed mask.
 fn settings(
     shell: &mut Shell,
     ui: &mut Ui,
@@ -255,13 +256,17 @@ fn settings(
         state.open.insert(key.clone());
     }
     let mut changed = None;
-    let keys = (!colour)
-        .then(|| shell.setting_keys(KeyedSetting::Mask))
-        .flatten();
+    // A colour mask is not keyed.
+    let keys_of = |setting| (!colour).then(|| shell.setting_keys(setting)).flatten();
+    let place_keys = keys_of(KeyedSetting::MaskPosition);
+    let turn_keys = keys_of(KeyedSetting::MaskRotation);
+    let size_keys = keys_of(KeyedSetting::MaskSize);
+    let feather_keys = keys_of(KeyedSetting::MaskFeather);
+    let round_keys = keys_of(KeyedSetting::MaskRound);
     let playhead = shell.playhead();
-    let mut step = None;
+    let mut steps = [None; 5];
     let mut open = state.open.contains(&key);
-    keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
+    {
         ui.horizontal(|ui| {
             ui.set_min_height(36.0);
             let name = ui.add(
@@ -300,9 +305,6 @@ fn settings(
                 }
             });
         });
-    });
-    if !colour {
-        setting_step(shell, KeyedSetting::Mask, step);
     }
     if open {
         state.open.insert(key);
@@ -313,13 +315,15 @@ fn settings(
     let percent = |v: f32| (f64::from(v) * 100.0).round();
     body(ui, |ui| {
         let mut next = changed.unwrap_or(mask);
-        let (x, y) = pair_row(
-            ui,
-            state,
-            "Position",
-            ("X", percent(mask.x)),
-            ("Y", percent(mask.y)),
-        );
+        let (x, y) = keyed_row(ui, place_keys.as_ref(), playhead, &mut steps[0], |ui| {
+            pair_row(
+                ui,
+                state,
+                "Position",
+                ("X", percent(mask.x)),
+                ("Y", percent(mask.y)),
+            )
+        });
         #[allow(clippy::cast_possible_truncation)]
         let part = |v: f64| (v / 100.0) as f32;
         if let Some(x) = x {
@@ -328,13 +332,15 @@ fn settings(
         if let Some(y) = y {
             next.y = part(y.clamp(-200.0, 200.0));
         }
-        let (turn, _) = pair_row(
-            ui,
-            state,
-            "Rotation",
-            ("°", f64::from(mask.rotation).round()),
-            ("", f64::NAN),
-        );
+        let (turn, _) = keyed_row(ui, turn_keys.as_ref(), playhead, &mut steps[1], |ui| {
+            pair_row(
+                ui,
+                state,
+                "Rotation",
+                ("°", f64::from(mask.rotation).round()),
+                ("", f64::NAN),
+            )
+        });
         if let Some(turn) = turn {
             #[allow(clippy::cast_possible_truncation)]
             let turn = turn.clamp(-180.0, 180.0) as f32;
@@ -343,25 +349,30 @@ fn settings(
         match mask.shape {
             MaskShape::Linear => {}
             MaskShape::Mirror => {
-                let (band, _) = pair_row(
-                    ui,
-                    state,
-                    "Size",
-                    ("H", percent(mask.height)),
-                    ("", f64::NAN),
-                );
+                let (band, _) = keyed_row(ui, size_keys.as_ref(), playhead, &mut steps[2], |ui| {
+                    pair_row(
+                        ui,
+                        state,
+                        "Size",
+                        ("H", percent(mask.height)),
+                        ("", f64::NAN),
+                    )
+                });
                 if let Some(band) = band {
                     next.height = part(band.clamp(0.0, 400.0));
                 }
             }
             _ => {
-                let (width, height) = pair_row(
-                    ui,
-                    state,
-                    "Size",
-                    ("W", percent(mask.width)),
-                    ("H", percent(mask.height)),
-                );
+                let (width, height) =
+                    keyed_row(ui, size_keys.as_ref(), playhead, &mut steps[2], |ui| {
+                        pair_row(
+                            ui,
+                            state,
+                            "Size",
+                            ("W", percent(mask.width)),
+                            ("H", percent(mask.height)),
+                        )
+                    });
                 if let Some(width) = width {
                     next.width = part(width.clamp(0.0, 400.0));
                 }
@@ -370,27 +381,31 @@ fn settings(
                 }
             }
         }
-        if let Some(value) = slider(
-            ui,
-            state,
-            &format!("{prefix}mask-feather"),
-            "Feather",
-            percent(mask.feather),
-            0.0..=100.0,
-            |v| format!("{v:.0}"),
-        ) {
-            next.feather = part(value);
-        }
-        if mask.shape == MaskShape::Rectangle
-            && let Some(value) = slider(
+        if let Some(value) = keyed_row(ui, feather_keys.as_ref(), playhead, &mut steps[3], |ui| {
+            slider(
                 ui,
                 state,
-                &format!("{prefix}mask-round"),
-                "Round corners",
-                percent(mask.round),
+                &format!("{prefix}mask-feather"),
+                "Feather",
+                percent(mask.feather),
                 0.0..=100.0,
                 |v| format!("{v:.0}"),
             )
+        }) {
+            next.feather = part(value);
+        }
+        if mask.shape == MaskShape::Rectangle
+            && let Some(value) = keyed_row(ui, round_keys.as_ref(), playhead, &mut steps[4], |ui| {
+                slider(
+                    ui,
+                    state,
+                    &format!("{prefix}mask-round"),
+                    "Round corners",
+                    percent(mask.round),
+                    0.0..=100.0,
+                    |v| format!("{v:.0}"),
+                )
+            })
         {
             next.round = part(value);
         }
@@ -398,6 +413,16 @@ fn settings(
             changed = Some(next);
         }
     });
+    let parts = [
+        KeyedSetting::MaskPosition,
+        KeyedSetting::MaskRotation,
+        KeyedSetting::MaskSize,
+        KeyedSetting::MaskFeather,
+        KeyedSetting::MaskRound,
+    ];
+    for (part, step) in parts.into_iter().zip(steps) {
+        setting_step(shell, part, step);
+    }
     super::inspector::divider(ui);
     changed
 }

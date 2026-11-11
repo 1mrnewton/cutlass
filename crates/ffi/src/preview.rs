@@ -10,7 +10,7 @@ use std::path::Path;
 
 use cutlass_eval::{Fonts, ReaderFactory};
 use cutlass_playback::FrameCache;
-use cutlass_render::{Canvas, RenderError, Renderer, frame_layers};
+use cutlass_render::{Canvas, RenderError, Renderer};
 use cutlass_renderer_software::SoftwareDevice;
 use cutlass_session::{Micros, Session};
 
@@ -100,17 +100,15 @@ impl Preview {
         {
             return Ok(picture.clone());
         }
-        // Eval still composes a frame it cannot hand over as layers on this
-        // device; the GPU draws the result as one layer.
+        // Eval's CPU device draws the layers the GPU does not, such as text.
         let mut device = SoftwareDevice::new();
         self.cache.set_patient(true);
-        let composed = self
+        let layers = self
             .cache
             .layers(session, &mut device, time, &self.readers, Some(root), fonts)
             .map_err(|error| FfiError::Frame {
                 reason: error.to_string(),
             })?;
-        let layers = frame_layers(composed).map_err(drawing)?;
         if self.renderer.is_none() {
             self.renderer = Some(Renderer::headless().map_err(drawing)?);
         }

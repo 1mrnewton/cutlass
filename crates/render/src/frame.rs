@@ -1,7 +1,7 @@
 //! Eval's frame layers as render layers, so every shell draws a frame the
 //! same way.
 
-use cutlass_eval::{Composed, FrameLayers, GpuSource, YuvSamples};
+use cutlass_eval::{FrameLayers, GpuSource, YuvSamples};
 
 use crate::{Canvas, Layer, Planes, RenderError, Renderer, Rgba};
 
@@ -26,18 +26,6 @@ impl Renderer {
         frame: &FrameLayers,
     ) -> Result<(), RenderError> {
         self.draw_scaled(canvas, &layers_of(frame)?, (frame.width, frame.height))
-    }
-}
-
-/// `composed` as layers: a frame eval already composed on the CPU becomes
-/// one layer the size of the canvas.
-pub fn frame_layers(composed: Composed) -> Result<FrameLayers, RenderError> {
-    match composed {
-        Composed::Layers(layers) => Ok(layers),
-        Composed::Frame(frame) => {
-            let (width, height) = (frame.extent.width, frame.extent.height);
-            FrameLayers::pixels(frame).ok_or(RenderError::Size { width, height })
-        }
     }
 }
 
@@ -81,6 +69,28 @@ fn layers_of(frame: &FrameLayers) -> Result<Vec<Layer<'_>>, RenderError> {
                 placement: layer.placement,
             },
             GpuSource::Effect(steps, mask) => Layer::Effect(steps, mask.as_ref()),
+            GpuSource::Colour { colour, seed, mask } => Layer::Colour {
+                colour,
+                seed: *seed,
+                mask: mask.as_ref(),
+            },
+            GpuSource::Cut(mask) => Layer::Cut(mask),
+            GpuSource::Select(cut) => Layer::Select(crate::Selected {
+                width: cut.width,
+                height: cut.height,
+                alpha: &cut.alpha,
+                invert: cut.invert,
+                frame: cut.frame,
+            }),
+            GpuSource::Package(pass) => Layer::Package(pass),
+            GpuSource::Relight { depth, lighting } => Layer::Relight(crate::Relit {
+                depth: Rgba {
+                    width: depth.width(),
+                    height: depth.height(),
+                    bytes: depth.rgba(),
+                },
+                lighting,
+            }),
             GpuSource::Vector(scene) => Layer::Vector {
                 scene,
                 placement: layer.placement,
@@ -123,12 +133,10 @@ fn layers_of(frame: &FrameLayers) -> Result<Vec<Layer<'_>>, RenderError> {
 
 #[cfg(test)]
 mod tests {
-    use cutlass_compositor::Frame;
-    use cutlass_eval::{Composed, FrameLayers, GpuLayer, GpuSource};
-    use cutlass_gpu::{Extent, Placement};
+    use cutlass_eval::{FrameLayers, GpuLayer, GpuSource};
+    use cutlass_gpu::Placement;
     use cutlass_picture::CpuBytes;
 
-    use super::frame_layers;
     use crate::{RenderError, Renderer};
 
     fn renderer() -> Option<Renderer> {
@@ -328,43 +336,6 @@ mod tests {
             }
             assert!(inside > 0 && inside < drawn.len() / 4, "{shape:?} splits");
         }
-    }
-
-    #[test]
-    fn a_cpu_frame_becomes_one_layer_that_draws_unchanged() {
-        let composed = Composed::Frame(Frame {
-            extent: Extent {
-                width: 4,
-                height: 2,
-            },
-            rgba: pixels(),
-        });
-        let frame = frame_layers(composed).expect("layers");
-        assert_eq!((frame.width, frame.height, frame.layers.len()), (4, 2, 1));
-        let Some(renderer) = renderer() else {
-            return;
-        };
-        let canvas = renderer.canvas(4, 2).expect("canvas");
-        renderer.draw_frame(&canvas, &frame).expect("draw");
-        assert_eq!(renderer.read(&canvas).expect("read"), pixels());
-    }
-
-    #[test]
-    fn a_cpu_frame_with_the_wrong_byte_count_is_refused() {
-        let composed = Composed::Frame(Frame {
-            extent: Extent {
-                width: 4,
-                height: 2,
-            },
-            rgba: vec![0; 5],
-        });
-        assert!(matches!(
-            frame_layers(composed),
-            Err(RenderError::Size {
-                width: 4,
-                height: 2
-            })
-        ));
     }
 
     #[test]

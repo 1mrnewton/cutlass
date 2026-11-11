@@ -372,3 +372,28 @@ fn a_photo_or_a_wrong_blur_is_not_blurred_and_off_needs_no_copy() {
     assert_eq!(shell.motion_blur(), None);
     let _ = std::fs::remove_dir_all(&temp);
 }
+
+#[test]
+fn a_keyed_blend_keys_without_the_blur_and_shows_at_the_playhead() {
+    let (mut shell, temp) = open("blur-keyed", Some(b"a movie"));
+    blurred(&shell, &temp, &blur(4));
+    shell.select(Some("v".into()));
+    shell.set_motion_blur(Some(blur(4))).unwrap();
+    shell
+        .toggle_setting_key(KeyedSetting::MotionBlurBlend)
+        .unwrap();
+    shell.seek(Micros(1_000_000));
+    let mut more = blur(4);
+    more.blend = 0.5;
+    shell.set_motion_blur(Some(more)).unwrap();
+    let times = |shell: &Shell, setting| shell.setting_keys(setting).unwrap().times;
+    assert_eq!(times(&shell, KeyedSetting::MotionBlurBlend).len(), 2);
+    assert!(times(&shell, KeyedSetting::MotionBlurLength).is_empty());
+    // The stored Blend stays; the playhead shows the keyed one.
+    shell.seek(Micros(500_000));
+    let shown = shell.motion_blur().unwrap();
+    assert!((shown.blend - 0.3).abs() < 1e-6);
+    assert_eq!(shown.blur, 0.8);
+    assert_eq!(shell.stored_motion_blur().unwrap().blend, 0.1);
+    let _ = std::fs::remove_dir_all(&temp);
+}

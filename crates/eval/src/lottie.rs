@@ -134,10 +134,16 @@ pub(crate) fn shape_layers(
             if time.0 < start || time.0 >= end {
                 continue;
             }
-            let Some(MaterialRef::Shape(shape)) = draft.materials.get(segment.material_id.as_str())
+            let Some(MaterialRef::Shape(stored)) =
+                draft.materials.get(segment.material_id.as_str())
             else {
                 continue;
             };
+            // A keyed shape is drawn as it is at `time`; the kept picture
+            // is compared with that, so it is redrawn only when it moves.
+            let keyed =
+                cutlass_model::shape_style_at(stored, segment, &draft.keyframe_graph_list, time);
+            let shape = keyed.as_ref().unwrap_or(stored);
             let Some((clip, uniform)) = cutlass_model::animated_at(draft, segment, time) else {
                 continue;
             };
@@ -301,7 +307,7 @@ mod tests {
 
     use super::raster_size;
     use super::*;
-    use crate::{Composed, Snapshot, frame_in, layers_in};
+    use crate::{Snapshot, frame_in, layers_in};
 
     const SQUARE: &str = include_str!("../../lottie/tests/fixtures/square.json");
 
@@ -454,6 +460,42 @@ mod tests {
     }
 
     #[test]
+    fn a_keyed_shape_setting_draws_as_keyed_at_each_frame() {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 100;
+        draft.canvas_config.height = 100;
+        draft
+            .materials
+            .shapes
+            .push(cutlass_model::MaterialShape::preset(
+                "sq".into(),
+                cutlass_model::ShapeKind::Rectangle,
+                20.0,
+                20.0,
+            ));
+        let mut row = Track::main("stickers");
+        row.kind = TrackType::Sticker;
+        let mut segment = Segment::new("shape", "sq", TimeRange::new(0, 1_000_000));
+        let width = cutlass_model::ShapeStyleKey::Size.names()[0];
+        cutlass_model::put_key(&mut segment, width, Micros(0), 20.0);
+        cutlass_model::put_key(&mut segment, width, Micros(1_000_000), 60.0);
+        row.segments.push(segment);
+        draft.tracks.push(row);
+        let mut kept = HashMap::new();
+        let mut drawn = |time: i64| {
+            let layers = shape_layers(&draft, 100, 100, Micros(time), &mut kept);
+            layers[0].placed.raster().unwrap().clone()
+        };
+        let start = drawn(0);
+        let middle = drawn(500_000);
+        // Wider halfway along, and the height is left as it was.
+        assert!(middle.width() > start.width());
+        assert_eq!(middle.height(), start.height());
+        // The same frame again is the kept picture.
+        assert_eq!(drawn(500_000), middle);
+    }
+
+    #[test]
     fn a_lottie_sticker_plays_from_its_clip_start_and_loops() {
         let folder = folder("plays");
         let path = folder.join("square.json");
@@ -508,7 +550,7 @@ mod tests {
         let media = ReaderFactory::new();
         let mut device = SoftwareDevice::new();
         let mut clips = OpenClips::new();
-        let composed = layers_in(
+        let layers = layers_in(
             &Snapshot::new(&draft),
             Micros(1_000_000),
             &mut device,
@@ -518,9 +560,6 @@ mod tests {
             None,
         )
         .unwrap();
-        let Composed::Layers(layers) = composed else {
-            panic!("composed on the CPU");
-        };
         let vectors: Vec<_> = layers
             .layers
             .iter()

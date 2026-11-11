@@ -25,6 +25,8 @@ mod meta;
 mod relationship;
 mod segment;
 mod serde_util;
+mod shape_keys;
+mod text_keys;
 mod time;
 mod track;
 mod tracking;
@@ -43,10 +45,16 @@ pub use enums::{
 pub use graphs::{GRAPH_PRESETS, GraphPreset};
 pub use id::{DraftId, MaterialId, SegmentId, TrackId};
 pub use keyframe::{
-    ALPHA_KEY, CommonKeyframe, CommonKeyframeGroup, GraphPoint, KeyframeGraph, MASK_KEYS,
-    POSE_KEYS, TEXT_COLOR_KEYS, VOLUME_KEY, add_keys, clip_at, is_keyable, is_pose_key,
-    key_offsets, key_offsets_where, put_key, remove_keys, remove_keys_where, sample, shift_keys,
-    text_color_at,
+    ADJUST_KEYS, ALPHA_KEY, CANVAS_COLOR_KEYS, CHROMA_SHADOW_KEYS, CHROMA_STRENGTH_KEYS,
+    CommonKeyframe, CommonKeyframeGroup, EFFECT_CONTROL_PREFIX, FILTER_STRENGTH_KEYS, GraphPoint,
+    HSL_KEYS, KeyframeGraph, LUT_STRENGTH_KEYS, MASK_FEATHER_KEYS, MASK_KEYS, MASK_POSITION_KEYS,
+    MASK_ROTATION_KEYS, MASK_ROUND_KEYS, MASK_SIZE_KEYS, MOTION_BLUR_BLEND_KEYS,
+    MOTION_BLUR_LENGTH_KEYS, OPACITY_KEYS, POSE_KEYS, POSITION_KEYS, RELIGHT_ANGLE_KEYS,
+    RELIGHT_COLOR_KEYS, RELIGHT_STRENGTH_KEYS, ROTATION_KEYS, SCALE_KEYS, TEXT_COLOR_KEYS,
+    VOLUME_KEY, WHEEL_KEYS, add_keys, add_keys_where, clip_at, effect_control_id,
+    effect_control_key, has_keys, hex_color_at, is_keyable, is_pose_key, is_unit_colour_key,
+    key_offsets, key_offsets_where, motion_blur_at, put_key, relight_at, remove_keys,
+    remove_keys_where, sample, shift_keys, text_color_at,
 };
 pub use linkage::{KindSwitches, LinkageSettings, linkage_from_biz};
 pub use materials::{
@@ -69,6 +77,14 @@ pub use materials::{
 pub use meta::MetaType;
 pub use relationship::{LinkPair, Relationship};
 pub use segment::{APPLY_ONE_CLIP, HdrSettings, ResponsiveLayout, Segment};
+pub use shape_keys::{
+    MAX_SHAPE_SHADOW_DISTANCE, MAX_SHAPE_SIZE, MAX_SHAPE_STROKE, SHAPE_STYLE_KEYS, ShapeStyleKey,
+    shape_style_at,
+};
+pub use text_keys::{
+    GLOW_RANGE_KEYS, GLOW_STRENGTH_KEYS, TEXT_STYLE_KEYS, TextStyleKey, glow_at, glow_keyed,
+    text_style_at,
+};
 pub use time::{FrameError, FrameRate, Micros, RangeError, TimeRange, TimecodeLabel};
 pub use track::Track;
 pub use tracking::{TrackMode, TrackPath, TrackSample, VIDEO_TRACKING};

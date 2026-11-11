@@ -4,11 +4,11 @@
 use cutlass_editor::PenPath;
 use cutlass_model::{
     MaterialId, MaterialRef, MaterialShape, SHAPE_FILL, SHAPE_SHADOW, SHAPE_STROKE_WIDTH,
-    SegmentId, TrackId, TrackType,
+    SegmentId, ShapeStyleKey as Key, TrackId, TrackType,
 };
 use cutlass_session::Request;
 
-use super::{STICKER_LENGTH, Shell, ShellError, placed};
+use super::{KeyedSetting, STICKER_LENGTH, Shell, ShellError, placed};
 
 impl Shell {
     /// The shape being drawn with the pen, while the preview takes presses.
@@ -68,37 +68,81 @@ impl Shell {
         Ok(())
     }
 
-    /// The selected clip's shape, when it is one.
+    /// The selected clip's shape, when it is one, with each setting it
+    /// keys as keyed at the playhead.
     #[must_use]
     pub fn shape(&self) -> Option<MaterialShape> {
         let segment_id = self.selected()?;
         let draft = self.draft()?;
         let (segment, _) = placed(draft, segment_id)?;
         match draft.materials.get(segment.material_id.as_str()) {
-            Some(MaterialRef::Shape(shape)) => Some(shape.clone()),
+            Some(MaterialRef::Shape(shape)) => Some(
+                cutlass_model::shape_style_at(
+                    shape,
+                    segment,
+                    &draft.keyframe_graph_list,
+                    self.playhead,
+                )
+                .unwrap_or_else(|| shape.clone()),
+            ),
             _ => None,
         }
+    }
+
+    /// `request` with a key at the playhead for each keyed setting in
+    /// `parts` (the setting and its new values) whose value changes. A
+    /// keyed setting plays its keys, so the stored value alone would not
+    /// show; a setting with no keys is only stored.
+    fn with_shape_keys(&self, request: Request, parts: &[(Key, Vec<f64>)]) -> Vec<Request> {
+        let now = self.shape();
+        let mut requests = vec![request];
+        requests.extend(
+            parts
+                .iter()
+                .filter(|(key, values)| {
+                    now.as_ref().is_some_and(|now| {
+                        key.get(now)
+                            .iter()
+                            .zip(values)
+                            .any(|(was, value)| (was - value).abs() > 1e-9)
+                    })
+                })
+                .filter_map(|(key, values)| {
+                    self.key_setting_here(KeyedSetting::ShapeStyle(*key), values.clone())
+                }),
+        );
+        requests
     }
 
     /// Make the selected shape `width` by `height` canvas pixels.
     pub fn set_shape_size(&mut self, width: f64, height: f64) -> Result<(), ShellError> {
         let segment_id = self.shape_segment()?;
-        self.apply(Request::SetShapeSize {
+        let size = Request::SetShapeSize {
             segment_id,
             width,
             height,
-        })
+        };
+        // A line keys no height of its own.
+        let height = if self.shape().is_some_and(|shape| shape.is_straight()) {
+            0.0
+        } else {
+            height
+        };
+        let requests = self.with_shape_keys(size, &[(Key::Size, vec![width, height])]);
+        self.apply_requests(&requests)
     }
 
     /// Fill the selected shape with `color` at `opacity`. An empty color
     /// takes the fill off; switched back on it is grey.
     pub fn set_shape_fill(&mut self, color: &str, opacity: f64) -> Result<(), ShellError> {
         let segment_id = self.shape_segment()?;
-        self.apply(Request::SetShapeFill {
+        let fill = Request::SetShapeFill {
             segment_id,
             color: color.to_owned(),
             opacity,
-        })
+        };
+        let requests = self.with_shape_keys(fill, &[(Key::FillOpacity, vec![opacity])]);
+        self.apply_requests(&requests)
     }
 
     /// Switch the fill on, grey and opaque, or off.
@@ -120,13 +164,21 @@ impl Shell {
         style: i32,
     ) -> Result<(), ShellError> {
         let segment_id = self.shape_segment()?;
-        self.apply(Request::SetShapeStroke {
+        let stroke = Request::SetShapeStroke {
             segment_id,
             color: color.to_owned(),
             width,
             opacity,
             style,
-        })
+        };
+        let requests = self.with_shape_keys(
+            stroke,
+            &[
+                (Key::StrokeWidth, vec![width]),
+                (Key::StrokeOpacity, vec![opacity]),
+            ],
+        );
+        self.apply_requests(&requests)
     }
 
     /// Switch the stroke on at its starting weight, or off.
@@ -148,7 +200,11 @@ impl Shell {
     /// Round the selected shape's corners: one radius for all, or one each.
     pub fn set_shape_corners(&mut self, radius: Vec<f64>) -> Result<(), ShellError> {
         let segment_id = self.shape_segment()?;
-        self.apply(Request::SetShapeCorners { segment_id, radius })
+        // The key holds one radius for every corner.
+        let most = radius.iter().copied().fold(0.0_f64, f64::max);
+        let corners = Request::SetShapeCorners { segment_id, radius };
+        let requests = self.with_shape_keys(corners, &[(Key::Corners, vec![most])]);
+        self.apply_requests(&requests)
     }
 
     /// Cast the selected shape's shadow. An opacity of 0 takes it off.
@@ -160,13 +216,22 @@ impl Shell {
         opacity: f64,
     ) -> Result<(), ShellError> {
         let segment_id = self.shape_segment()?;
-        self.apply(Request::SetShapeShadow {
+        let shadow = Request::SetShapeShadow {
             segment_id,
             color: color.to_owned(),
             distance,
             angle,
             opacity,
-        })
+        };
+        let requests = self.with_shape_keys(
+            shadow,
+            &[
+                (Key::ShadowDistance, vec![distance]),
+                (Key::ShadowAngle, vec![angle]),
+                (Key::ShadowOpacity, vec![opacity]),
+            ],
+        );
+        self.apply_requests(&requests)
     }
 
     /// Switch the shadow on where it starts, or off.

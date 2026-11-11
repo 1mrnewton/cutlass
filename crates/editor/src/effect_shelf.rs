@@ -7,7 +7,9 @@
 //! places an effect through here.
 
 use cutlass_effects::{bundled, bundled_recipe};
-use cutlass_model::{Draft, MaterialId, Micros, SegmentId, TrackId, TrackType};
+use cutlass_model::{
+    Draft, MaterialId, MaterialRef, Micros, Segment, SegmentId, TrackId, TrackType,
+};
 use cutlass_session::Request;
 
 use crate::append::free_row;
@@ -169,6 +171,61 @@ pub fn effect_requests(draft: &Draft, effect_id: &str, place: &EffectPlace) -> V
     requests
 }
 
+/// An effect that runs over one clip alone: its own clip on an effect row,
+/// and the name it shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClipEffect {
+    pub segment_id: SegmentId,
+    pub name: String,
+}
+
+/// The name an effect, filter or adjustment clip shows: the one its
+/// material stores, or the material's id when it stores none.
+#[must_use]
+pub fn effect_title(draft: &Draft, segment: &Segment) -> String {
+    let name = match draft.materials.get(segment.material_id.as_str()) {
+        Some(MaterialRef::VideoEffect(effect)) => effect.name.clone(),
+        Some(MaterialRef::Effect(effect)) => effect.name.clone(),
+        Some(MaterialRef::Plugin(effect)) => effect.plugin_id.clone(),
+        Some(MaterialRef::Other(raw)) => raw
+            .fields
+            .get("name")
+            .and_then(|name| name.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        _ => String::new(),
+    };
+    if name.is_empty() {
+        segment.material_id.as_str().to_owned()
+    } else {
+        name
+    }
+}
+
+/// The effects that run over `clip` alone, in the order their rows stand
+/// and then by where they start.
+#[must_use]
+pub fn effects_on(draft: &Draft, clip: &SegmentId) -> Vec<ClipEffect> {
+    draft
+        .tracks
+        .iter()
+        .filter(|track| track.kind == TrackType::Effect)
+        .flat_map(|track| {
+            let mut bound: Vec<&Segment> = track
+                .segments
+                .iter()
+                .filter(|segment| segment.bound_clip().as_ref() == Some(clip))
+                .collect();
+            bound.sort_by_key(|segment| segment.target.start);
+            bound
+        })
+        .map(|segment| ClipEffect {
+            segment_id: segment.id.clone(),
+            name: effect_title(draft, segment),
+        })
+        .collect()
+}
+
 /// The clip is linked as another clip's dependent, so it cannot own one.
 fn follows_another(draft: &Draft, clip: &SegmentId) -> bool {
     draft
@@ -284,5 +341,61 @@ mod tests {
             "that row is now full there"
         );
         assert_eq!(effect_target(draft, &SegmentId::new("shake")), None);
+    }
+
+    #[test]
+    fn a_clip_lists_the_effects_bound_to_it_by_name_and_no_others() {
+        let draft = draft();
+        let clip = SegmentId::new("clip");
+        assert!(effects_on(&draft, &clip).is_empty());
+        let (start, duration) = effect_target(&draft, &clip).unwrap();
+        let cards = effect_cards();
+        let mut session = Session::open(draft);
+        // Two on the clip, each on a row of its own, and one over every
+        // picture, which is not the clip's.
+        for (index, (row, id, on)) in [
+            ("fx1", "first", Some(clip.clone())),
+            ("fx2", "second", Some(clip.clone())),
+            ("fx3", "all", None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let place = EffectPlace {
+                track_id: TrackId::new(row),
+                segment_id: SegmentId::new(id),
+                material_id: MaterialId::new(format!("m-{id}")),
+                start,
+                duration,
+                on,
+            };
+            let draft = session.draft().clone();
+            let revision = session.revision();
+            session
+                .apply(
+                    revision,
+                    &effect_requests(&draft, &cards[index].effect_id, &place),
+                )
+                .unwrap();
+        }
+        let draft = session.draft();
+        let listed = effects_on(draft, &clip);
+        let mut ids: Vec<&str> = listed
+            .iter()
+            .map(|effect| effect.segment_id.as_str())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["first", "second"]);
+        for effect in &listed {
+            let card = cards
+                .iter()
+                .find(|card| card.name == effect.name)
+                .map(|card| card.name.as_str());
+            assert_eq!(card, Some(effect.name.as_str()));
+        }
+        assert!(effects_on(draft, &SegmentId::new("gone")).is_empty());
+        // A clip whose material is missing still has a name to show.
+        let orphan = Segment::new("o", "lost", TimeRange::new(0, 1));
+        assert_eq!(effect_title(draft, &orphan), "lost");
     }
 }

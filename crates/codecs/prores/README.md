@@ -1,101 +1,143 @@
 # cutlass-prores
 
-Native safe Rust Apple ProRes decoder and encoder in `cutlass-prores`, per SMPTE RDD 36:2022. No `unsafe`. No C, no FFmpeg, no VideoToolbox. ffmpeg, ffprobe, VideoToolbox (through ffmpeg) and AVFoundation (through `avconvert`) are oracles in the tests and the bench only, started as separate processes.
+An Apple ProRes decoder and encoder in safe Rust (`#![forbid(unsafe_code)]`), following SMPTE RDD 36. It decodes all six profiles, progressive and interlaced, with alpha, and encodes all six as progressive frames at Apple's published data rates. Slices are decoded and encoded in parallel on `cutlass-pool`.
 
-## What this crate is
+The desktop app registers it for `CodecId::Prores` after the platform codecs. On macOS, with hardware decode or encode switched on in Settings, VideoToolbox is asked first and this crate runs when it declines. With the switch off, and on Windows and Linux, this crate is the ProRes codec. `cutlass-ffi` also registers it after the platform codecs.
 
-`ProresDecoder` takes one ProRes frame and returns its picture at 10 or 12 bits with any alpha plane. `ProresEncoder` takes a planar picture or an RGBA picture and returns one ProRes frame at Apple's target rate for the profile. One packet is one frame; every ProRes frame is a key frame.
+## What it supports
 
-`register_decoders`, `register_video_decoders`, `register_encoders` and `register_video_encoders` register `CodecId::Prores`. The desktop app and `cutlass-ffi` register `register_decoders` and `register_encoders` after the platform codecs; neither registers the video variants yet, so the 4444 alpha path is not reached from the app. Registered after the platform, so on a Mac VideoToolbox is asked first and this crate is the fallback, and elsewhere this crate is the only ProRes codec.
+One packet is one frame, and every frame is a key frame.
 
-## Specification
-
-The bitstream is SMPTE RDD 36:2022: the frame header, the picture header, the slice table, slices of 1, 2, 4 or 8 macroblocks, the entropy codes for DC and AC coefficients, the scans, the quantization matrices, and the alpha run-length codes. The inverse transform is a separable floating-point DCT that passes the RDD 36 Annex A (IEEE 1180) accuracy test. Output samples are rounded and clamped to `4..=2^b - 5`, as ffmpeg's decoder does.
-
-The six profiles, by sample entry:
-
-| Profile | Code | Chroma | Decoded depth | Apple's 1080p29.97 target |
+| Profile | Code | Chroma | Decoded depth | Encoder target at 1920 by 1080, 29.97 fps |
 | --- | --- | --- | --- | --- |
 | ProRes 422 Proxy | `apco` | 4:2:2 | 10 | 45 Mb/s |
 | ProRes 422 LT | `apcs` | 4:2:2 | 10 | 102 Mb/s |
 | ProRes 422 | `apcn` | 4:2:2 | 10 | 147 Mb/s |
 | ProRes 422 HQ | `apch` | 4:2:2 | 10 | 220 Mb/s |
-| ProRes 4444 | `ap4h` | 4:4:4 + alpha | 12 | 330 Mb/s |
-| ProRes 4444 XQ | `ap4x` | 4:4:4 + alpha | 12 | 495 Mb/s |
-
-The targets are the table in Apple's ProRes white paper (April 2022). Other sizes scale Apple's HQ table by pixel count and the profile's ratio to HQ.
-
-## API
-
-`ProresDecoder::open` and `ProresEncoder::open` take a `CodecParams` whose `codec` is `CodecId::Prores`. Any other codec is `Unsupported` (`codec is not ProRes`). `params.extra` is the sample-entry code, the convention this repository's movie demuxer and muxer use for ProRes.
+| ProRes 4444 | `ap4h` | 4:4:4, optional alpha | 12 | 330 Mb/s |
+| ProRes 4444 XQ | `ap4x` | 4:4:4, optional alpha | 12 | 495 Mb/s |
 
 Decoder:
 
-- The code in `extra` sets the output depth: 12 bits for `ap4h` and `ap4x`, 10 for the 4:2:2 codes. Without a code, a 4:4:4 or alpha frame is 12-bit and a 4:2:2 frame is 10-bit. `with_depth(10 | 12)` forces one.
-- `decode(&[u8])` returns `DecodedFrame { header, frame }`. The frame is `Yuv422p10`, `Yuv422p12`, `Yuv444p10` or `Yuv444p12` with 16-bit little-endian samples. `frame.alpha` holds the alpha plane at 16 bits when the frame has one. `frame.primaries`, `transfer` and `matrix` come from the frame header.
-- Interlaced frames are decoded field by field and woven into one picture.
-- `with_threads(n)` gives the decoder its own pool; the default shares the workspace pool. Slices are decoded in bands of 16 rows (32 for interlaced). One worker and many give the same bytes.
-- `ProresDecoder` implements `VideoDecoder`. `ProresPictureDecoder` implements `Decoder` and returns 8-bit 4:2:0 for the app's picture path; it drops alpha.
+- Frame and picture headers, slices of 1, 2, 4 or 8 macroblocks, custom and default quantization matrices, 8-bit and 16-bit alpha, bitstream versions 0 and 1.
+- Interlaced frames, either field first. The two fields are woven into one picture.
+- Output is `Yuv422p10`, `Yuv422p12`, `Yuv444p10` or `Yuv444p12`, 16-bit little-endian samples, limited range, clamped to `4..=2^depth - 5`. Alpha comes back on `VideoFrame::alpha` at its coded 8 or 16 bits. Primaries, transfer and matrix come from the frame header.
+- The depth follows the code in `CodecParams::extra`: 12 for `ap4h` and `ap4x`, 10 for the others. With no code, a 4:4:4 or alpha frame is 12-bit and a 4:2:2 frame is 10-bit. `with_depth` forces 10 or 12.
+- `ProresPictureDecoder`, the one the app uses, converts each frame to 8-bit 4:2:0 and drops alpha. An odd width or height grows by one repeated sample.
 
 Encoder:
 
-- The code in `extra` picks the profile. Empty is `apcn`. Any other code is `Unsupported` (`ProRes profile`).
-- `encode(&VideoFrame)` takes 8-, 10- or 12-bit 4:2:0, 4:2:2 or 4:4:4 and converts it to the profile's chroma: 4:2:0 chroma rows are repeated, 4:4:4 chroma pairs are averaged for a 4:2:2 profile, and narrower chroma is repeated for a 4:4:4 profile. A 4:4:4 profile keeps the frame's alpha; a 4:2:2 profile drops it. The frame's color tags are written; untagged frames use the parameters'.
-- `encode_rgba(width, height, &[u8])` converts RGBA to BT.709 limited range.
-- The rate control searches for the finest frame quantizer whose frame fits the profile's budget, starting from the last frame's index, then moves slices one index finer in a spread order while the budget allows. Alpha is coded losslessly and is outside the budget. `with_budget_scale(0.05..=4.0)` scales the budget. `params.bitrate` is not read.
-- The encoder writes `ctls` as its encoder identifier, version 0 for 4:2:2 and 1 for 4:4:4, Apple's own quantization matrices, 8-macroblock slices, and progressive frames.
-- `ProresEncoder` implements `VideoEncoder` and `Encoder`. `Encoder::push_frame` takes RGBA or 8-bit 4:2:0. Audio is `InvalidApi` and platform frames are `Unsupported`.
+- The code in `extra` picks the profile; empty means `apcn`.
+- `encode` takes 8-, 10- or 12-bit planar 4:2:0, 4:2:2 or 4:4:4. It converts to the profile's chroma: 4:2:0 rows are repeated, 4:4:4 pairs are averaged for a 4:2:2 profile, and narrower chroma is repeated for a 4:4:4 profile. A 4444 profile keeps the frame's alpha and codes it losslessly; a 4:2:2 profile drops it.
+- `encode_rgba` takes 8-bit RGBA and converts it to BT.709 limited range. A 4444 profile keeps the alpha channel.
+- Rate control: one quantization index for the frame, the finest whose slices fit the budget, searched from the last frame's index. Then single slices move one index finer while the budget allows. Alpha is outside the budget. The budget is the profile's target for the frame size divided over 29.97 frames, so a frame costs the same at any frame rate. `with_budget_scale` scales it from 0.05 to 4. `CodecParams::bitrate` is not read.
+- Output has encoder identifier `ctls`, both quantization matrices in every frame, 8-macroblock slices, and the frame's color tags (or the parameters' when the frame names none).
 
-The decoder checks the cancel flag before each band and the encoder between rate-control passes; both return `Cancelled`, and `reset` clears the flag.
+Refused:
 
-## Accuracy
+| Input | Error |
+| --- | --- |
+| Another codec id | `Unsupported` `codec is not ProRes` |
+| Bitstream version above 1 | `Unsupported` `bitstream version` |
+| Encoder `extra` that is not one of the six codes | `Unsupported` `ProRes profile` |
+| A frame over the size limits | `Limit` `frame dimensions` |
+| Cut-off input | `Truncated` |
+| Bad header, slice table, quantization index, coefficient run or alpha data | `Malformed`, with the field named in `what` |
+| An empty packet; a depth other than 10 or 12 | `InvalidApi` |
+| Encoder: other pixel formats, platform frames, audio | `Unsupported` |
+| Encoder: a frame whose size differs from the parameters, or a wrong RGBA length | `InvalidApi` |
 
-Decoder, against ffmpeg 8.1.1's decoder and VideoToolbox's (through `ffmpeg -hwaccel videotoolbox`), on 1080p and 2160p streams from three encoders (ffmpeg's `prores_ks`, ffmpeg's `prores_aw`, and VideoToolbox):
+A raised cancel flag gives `Cancelled` from either side, and `reset` clears it. A refused frame leaves the decoder able to decode the next one.
 
-- Every Y, Cb and Cr sample is within 1 of ffmpeg's. Alpha is identical.
-- Against VideoToolbox, this decoder is off by at most 1 in 0.5–1.5% of samples at 10 bits and 5–7% at 12 bits. ffmpeg's decoder is off by up to 4 in 1.6–3% at 10 bits and by up to 2 in 13–21% at 12 bits. This crate's float transform is closer to Apple's decoder than ffmpeg's integer one.
+## Using it
 
-Encoder, six frames of a 1080p29.97 BT.709 clip, PSNR of Y against the 10-bit source (12-bit for 4444):
+- `ProresDecoder` implements `VideoDecoder`; `decode(&[u8])` returns `DecodedFrame { header, frame }`. `decode_frame` is the same step as a free function with an explicit pool, and `parse_frame_header` reads only the header.
+- `ProresEncoder` implements `VideoEncoder` (planar frames) and `Encoder` (CPU frames in RGBA or 8-bit 4:2:0). `extradata()` is the profile code a movie muxer writes as the sample entry.
+- `with_threads(n)` on either gives it its own pool; the default is the shared pool.
+- `target_mbps` and `target_frame_bits` report the encoder's budget for a profile and size.
+- `register_decoders` and `register_encoders` add the 8-bit picture decoder and the encoder to the app's factories. `register_video_decoders` and `register_video_encoders` add the full-depth ones to the video factories; the app does not call those two.
 
-| Profile | Target | This crate | prores_ks | VideoToolbox |
-| --- | --- | --- | --- | --- |
-| Proxy | 45 | 45.0 Mb/s, 40.74 dB | 46.0 Mb/s, 38.34 dB | 44.2 Mb/s, 40.36 dB |
-| LT | 102 | 102.0 Mb/s, 49.83 dB | 108.0 Mb/s, 44.98 dB | 98.2 Mb/s, 49.49 dB |
-| 422 | 147 | 147.0 Mb/s, 54.22 dB | 153.1 Mb/s, 48.79 dB | 145.9 Mb/s, 54.19 dB |
-| HQ | 220 | 220.0 Mb/s, 59.50 dB | 226.1 Mb/s, 54.35 dB | 218.7 Mb/s, 59.51 dB |
-| 4444 | 330 | 330.0 Mb/s, 62.88 dB | 313.8 Mb/s, 58.85 dB | 333.9 Mb/s, 63.22 dB |
-| 4444 XQ | 495 | 495.0 Mb/s, 68.39 dB | 391.2 Mb/s, 63.40 dB | 530.5 Mb/s, 69.02 dB |
+```rust
+use cutlass_decode::{CodecError, CodecId, CodecParams, PixelFormat};
+use cutlass_prores::{Profile, ProresDecoder, ProresEncoder};
 
-VideoToolbox decodes every stream this encoder writes. Full numbers, chroma and SSIM are in `STATUS.md`.
+/// Decode one frame at full depth and code it again as ProRes 422 HQ.
+fn to_hq(frame: &[u8]) -> Result<Vec<u8>, CodecError> {
+    let mut params = CodecParams::with_format(CodecId::Prores, 0, 0, PixelFormat::None);
+    let mut decoder = ProresDecoder::open(&params)?;
+    let decoded = decoder.decode(frame)?;
 
-## Performance
-
-`cargo bench -p cutlass-prores --bench throughput`, Apple M5 Pro (18 cores), rustc 1.99.1, 30 pictures from 6 real frames, frames per second:
-
-| Size | Profile | Encode, all cores | Encode, one | Decode, all cores | Decode, one |
-| --- | --- | --- | --- | --- | --- |
-| 1080p | HQ | 122.5 | 24.8 | 761.6 | 73.6 |
-| 2160p | Proxy | 55.5 | 12.3 | 465.9 | 51.2 |
-| 2160p | HQ | 42.3 | 6.8 | 226.6 | 18.3 |
-| 2160p | 4444 XQ | 26.1 | 4.0 | 124.6 | 10.2 |
-
-2160p HQ decodes at 7.6 times real time at 29.97 fps on all cores. ffmpeg 8.1.1's decoder ran the same stream at 121.9 fps, startup included. Every row, and the machine load during the run, is in `STATUS.md`.
-
-## Tests
-
-```text
-cargo test -p cutlass-prores
-cargo test -p cutlass-prores --release --test external
-cargo bench -p cutlass-prores --bench throughput
-PRORES_FUZZ_SECONDS=1800 cargo test --release -p cutlass-prores --lib fuzz_campaign -- --ignored
+    params.extra = Profile::Hq.fourcc().to_vec();
+    let mut encoder = ProresEncoder::open(&params)?;
+    encoder.encode(&decoded.frame)
+}
 ```
 
-The external tests and the bench need ffmpeg and ffprobe on `PATH` and the clips in `../local-files` beside the checkout. Without them they print why and pass; `PRORES_REQUIRE_ORACLES=1` turns a missing tool into a failure. The VideoToolbox and AVFoundation checks run only on a Mac.
+`examples/decode_raw.rs` decodes a file of back-to-back frames to raw planes.
 
-## Gaps
+## How it is tested
+
+`cargo test -p cutlass-prores` needs no tool:
+
+- The entropy codes and the quantizer scale against hand-coded values, both scans, and the inverse DCT against the RDD 36 Annex A accuracy procedure.
+- Every profile through this encoder and back through this decoder, with a PSNR floor per profile. Odd sizes down to 1 by 1, exact 16-bit alpha, RGBA colors, and identical bytes from one worker and from many.
+- A hand-built flat frame, every truncation of a valid frame, each bad header field by name, and 4 000 seeded bit-flip mutations that must not panic.
+
+`cargo test -p cutlass-prores --release --test external` compares against other implementations. FFmpeg, ffprobe and `avconvert` are started as separate programs; the crate links none of them.
+
+- Decode: streams made by FFmpeg's `prores_ks` and `prores_aw` encoders and by VideoToolbox, including interlaced, alpha, narrow slices, odd sizes and 2160p. Every Y, Cb and Cr sample must be within 1 of FFmpeg's decoder, with at most 5 % of samples differing at 10 bits and 25 % at 12 bits, and alpha must be identical. On Apple platforms the output must also be no further from VideoToolbox's decoder than FFmpeg's is.
+- Encode: for each profile the rate must be between 0.80 and 1.05 times the target, luma PSNR must be within 0.3 dB of `prores_ks` or better at no more than 1.05 times its rate, and on Apple platforms VideoToolbox must decode the stream.
+- End to end: an FFmpeg movie is demuxed, decoded, encoded and muxed again with `cutlass-isobmff`. ffprobe's stream description and packet times must be identical, and on a Mac with `avconvert` AVFoundation must read all frames and keep the color tags.
+
+These tests need `ffmpeg` and `ffprobe` on `PATH` and named clips in a folder outside the repository. Without them each test prints what is missing and passes; setting `PRORES_REQUIRE_ORACLES` makes that a failure. The CI workflow installs no FFmpeg and has no clips, and the crate holds no stored ProRes frames, so on CI the decoder is only checked against this crate's own encoder and the hand-built frame.
+
+Ignored by default: `fuzz_campaign` in `src/hardening.rs`, a seeded mutation run over four valid frames for `PRORES_FUZZ_SECONDS` seconds (60 when unset). It is not coverage-guided.
+
+`benches/throughput.rs` needs FFmpeg and the same clips, and prints why and exits 0 without them.
+
+Not run: official ProRes conformance streams.
+
+## Speed against FFmpeg
+
+Measured on 11 November 2026 at commit `07266d8f`, on an Apple M5 Pro (18 cores, 48 GB) running macOS 27.0.1, against FFmpeg 8.1.1. Built with `cargo build --release` and rustc 1.99.1.
+
+**Decode, prores.** Input: 300 frames of 1920×1080 at 30 frames a second (191 MB), written by FFmpeg with `-c:v prores_ks -profile:v 2 -pix_fmt yuv422p10le`.
+
+|  | Cutlass | FFmpeg (`prores`) |
+| --- | ---: | ---: |
+| Wall time | 0.95 s | 0.46 s |
+| Speed | 316 frames/s | 652 frames/s |
+| CPU time | 3.91 s | 3.55 s |
+| Peak memory | 17 MB | 164 MB |
+| Threads allowed | 16 | 16 |
+
+Cutlass is **2.1× slower** than FFmpeg here. The two outputs are not bit-identical: 55.69 dB PSNR between them, largest single difference 3. The Rust decoder returns `yuv420p` pictures, so FFmpeg's time includes converting each picture to that layout with libswscale.
+
+The stream is 10-bit 4:2:2. The Rust decoder hands the app 8-bit 4:2:0 and converts to it inside the decoder, so FFmpeg is asked for 8-bit 4:2:0 too, and the two conversions round differently.
+
+How it was measured: both sides get the same input from disk, do all of the work, and throw the result away. Each side is a whole process timed with `/usr/bin/time -l`, start-up included, run five times in turn; the tables show the median run. FFmpeg is given as many threads as the Rust code used. The Rust side is [`tools/media-bench`](../../../tools/media-bench), which registers only the Rust codecs. For decoding and packet reading the FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which calls libavformat and libavcodec directly; for encoding it is the `ffmpeg` command. The pictures come from a 4K street scene scaled to 1920×1080, and the sound from a music recording.
+
+To run it again: `cargo build --release -p media-bench`, then `python3 scripts/bench_media.py --video <clip> --audio <song> --work <folder>`.
+
+## Limits and gaps
+
+Limits, in `src/header.rs`: longest edge 16 384 pixels and at most 67 108 864 pixels in a frame. A larger header is `Limit` before any plane is allocated. Below the limit the planes are allocated in full once the headers and slice tables have been read, up to 2 bytes per sample for each of Y, Cb, Cr and alpha, and that allocation is not fallible. The decoder holds nothing between packets.
+
+A coded slice is at most 65 535 bytes. The encoder coarsens a slice that would be larger.
+
+Gaps:
 
 - The encoder writes progressive frames only. Interlaced frames are decoded, not encoded.
-- The export panel offers Proxy, LT, 422 and HQ. 4444 and 4444 XQ are reachable through the API, not the panel.
-- The app's import path asks this crate for 8-bit 4:2:0 and drops alpha; the full-depth `VideoDecoder` output is not wired into playback.
-- `params.bitrate` is not read; the profile sets the rate.
-- Fuzzing is an in-process, time-budgeted mutation campaign, not cargo-fuzz.
+- The encoder writes 0 (unspecified) for the aspect-ratio and frame-rate codes in the frame header.
+- The app's picture path gets 8-bit 4:2:0 without alpha. The full-depth output with alpha is on the crate API only.
+- The export panel offers Proxy, LT, 422 and HQ. 4444 and 4444 XQ are on the crate API only.
+- The data rate cannot be set in bits per second; only `with_budget_scale` changes it.
+- `encode` does not check the plane sizes of the frame it is given; samples outside a plane read as 0.
+- ProRes RAW is a different codec and is not handled.
+- No coverage-guided fuzzing.
+
+## Specifications
+
+- SMPTE RDD 36:2022, Apple ProRes Bitstream Syntax and Decoding Process.
+- Apple ProRes white paper (April 2022): the target data rates per profile and frame size.
+- ITU-T H.273: the primaries, transfer and matrix code points in the frame header.

@@ -61,6 +61,8 @@ pub fn clip_wave(
         Some(MaterialRef::Audio(_)) => false,
         // A held frame is silent: no wave, no volume line.
         Some(MaterialRef::Video(video)) if video.freeze.is_some() => return None,
+        // So is a picture whose sound was taken off it.
+        Some(MaterialRef::Video(video)) if video.has_sound_separated => return None,
         Some(MaterialRef::Video(video)) if video.kind != MetaType::Photo.as_str() => true,
         _ => return None,
     };
@@ -102,7 +104,8 @@ pub fn clip_wave(
             _ => 0.0,
         };
         let offset = Micros((x / pixel_size) as i64);
-        let gain = cutlass_engine::clip_volume(segment, offset).max(0.0) as f32;
+        let gain = cutlass_engine::clip_volume(segment, &draft.keyframe_graph_list, offset).max(0.0)
+            as f32;
         levels.push((level * gain).min(1.0));
         gains.push(gain);
         x += 1.0;
@@ -137,7 +140,14 @@ mod tests {
             freeze: Some(FreezeInfo::default()),
             ..MaterialVideo::default()
         });
-        for (id, material) in [("playing", "movie"), ("still", "held")] {
+        // A movie whose sound was extracted, on the same file.
+        draft.materials.videos.push(MaterialVideo {
+            id: "quiet".into(),
+            path: "/movie.mp4".to_owned(),
+            has_sound_separated: true,
+            ..MaterialVideo::default()
+        });
+        for (id, material) in [("playing", "movie"), ("still", "held"), ("mute", "quiet")] {
             let mut segment = Segment::new(id, material, TimeRange::new(0, 4_000_000));
             segment.source_range = Some(TimeRange::new(0, 4_000_000));
             draft.tracks[0].segments.push(segment);
@@ -159,5 +169,6 @@ mod tests {
         // Its file is not read yet, so the playing clip holds its band open.
         assert!(wave("playing").is_some());
         assert!(wave("still").is_none());
+        assert!(wave("mute").is_none(), "its sound is no longer on it");
     }
 }

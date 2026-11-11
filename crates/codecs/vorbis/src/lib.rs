@@ -3,7 +3,7 @@
 //! [`VorbisDecoder`] and [`VorbisEncoder`] speak raw Vorbis packets. The
 //! codec configuration is the three header packets joined with Xiph lacing
 //! ([`Headers::join`]). Ogg pages, granule positions, and chaining stay in
-//! `cutlass-ogg`. The support record is `STATUS.md` next to this crate.
+//! `cutlass-ogg`. The support record is `README.md` next to this crate.
 
 #![forbid(unsafe_code)]
 

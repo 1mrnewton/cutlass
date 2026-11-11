@@ -61,6 +61,7 @@ impl ReframeAsk {
             denoise: 0,
             interpolate: 0,
             motion_blur: None,
+            keyed_blur: Vec::new(),
         }
     }
 }

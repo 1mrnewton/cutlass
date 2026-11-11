@@ -117,3 +117,38 @@ fn a_photo_nothing_selected_a_missing_file_or_a_wrong_light_is_refused() {
     assert_eq!(shell.relight(), None);
     let _ = std::fs::remove_dir_all(&temp);
 }
+
+#[test]
+fn a_relight_strength_keys_without_its_color_or_angle() {
+    let (mut shell, temp) = open("keyed", Some(b"a movie"));
+    keep_depth(&shell, &temp);
+    shell.select(Some("v".into()));
+    shell
+        .set_relight(Relight::CUSTOM, 0.2, "#ff8800", 90.0)
+        .unwrap();
+    shell
+        .toggle_setting_key(KeyedSetting::RelightStrength)
+        .unwrap();
+    shell.seek(Micros(1_000_000));
+    shell
+        .set_relight(Relight::CUSTOM, 0.6, "#ff8800", 90.0)
+        .unwrap();
+    // Not keyed: stored all along the clip.
+    shell
+        .set_relight(Relight::CUSTOM, 0.6, "#0088ff", 45.0)
+        .unwrap();
+    let times = |shell: &Shell, setting| shell.setting_keys(setting).unwrap().times;
+    assert_eq!(times(&shell, KeyedSetting::RelightStrength).len(), 2);
+    assert!(times(&shell, KeyedSetting::RelightColor).is_empty());
+    assert!(times(&shell, KeyedSetting::RelightAngle).is_empty());
+    shell.seek(Micros(500_000));
+    let lit = shell.relight().unwrap();
+    assert!((lit.strength - 0.4).abs() < 1e-6);
+    assert_eq!((lit.color.as_str(), lit.angle), ("#0088ff", 45.0));
+    // A keyed color plays as keyed.
+    shell
+        .toggle_setting_key(KeyedSetting::RelightColor)
+        .unwrap();
+    assert_eq!(shell.relight().unwrap().color, "#0088ff");
+    let _ = std::fs::remove_dir_all(&temp);
+}

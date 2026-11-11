@@ -163,9 +163,19 @@ pub struct ViewState {
     preview: Option<egui::TextureHandle>,
     /// The clip menu asked for a file to replace the clip's media with.
     wants_replace: bool,
+    /// The clip menu asked where the clip's missing file is now.
+    wants_link: bool,
     export_open: bool,
     /// The project dialog's unsaved choices while it is open.
     project_dialog: Option<cutlass_editor::ProjectSettings>,
+    /// "Do not ask again" is ticked in the replace-transition question.
+    never_ask_transition: bool,
+    /// The project dialog shows its Performance tab, not Details.
+    project_performance: bool,
+    /// The project dialog's proxy switch, once it has been flipped.
+    project_proxies: Option<bool>,
+    /// The project dialog's proxy resolution, once another is picked.
+    project_proxy_side: Option<u32>,
     /// The third-party notices, read when the Licenses window opens.
     licenses: Option<cutlass_licenses::Notices>,
     settings_open: bool,
@@ -281,8 +291,13 @@ impl Default for ViewState {
             system_menus: false,
             preview: None,
             wants_replace: false,
+            wants_link: false,
             export_open: false,
             project_dialog: None,
+            never_ask_transition: false,
+            project_performance: false,
+            project_proxies: None,
+            project_proxy_side: None,
             licenses: None,
             settings_open: false,
             settings_tab: SettingsTab::General,
@@ -353,13 +368,28 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     if std::mem::take(&mut view.inspector.wants_lut) {
         view.dialogs.lut(parent);
     }
-    if std::mem::take(&mut view.wants_replace) {
-        view.dialogs.replace(parent);
+    // Replace clip and Link to media are asked for from a menu, whose own
+    // window is closing: the dialog waits until that window is gone.
+    if view.wants_replace || view.wants_link {
+        if crate::menu::settled(ui.ctx()) {
+            if std::mem::take(&mut view.wants_replace) {
+                view.dialogs.replace(parent);
+            }
+            if std::mem::take(&mut view.wants_link) {
+                view.dialogs.link(parent);
+            }
+        } else {
+            ui.ctx().request_repaint();
+        }
     }
     style(ui);
     shell.hold_edits(ui.input(|input| input.pointer.any_down()));
     shell.chrome = crate::shell::Chrome::default();
     if shell.poll_job() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(100));
+    }
+    if shell.poll_proxies() {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(100));
     }
@@ -415,6 +445,13 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         paint_library_ghost(shell, ui);
         if view.export_open {
             export_dialog(shell, ui, view, parent);
+        } else if !shell.library_export().is_empty() {
+            // The library's files were for that one dialog; the next
+            // export is of the timeline again.
+            shell.clear_library_export();
+        }
+        if shell.asked_transition().is_some() {
+            transition_prompt(shell, ui, view);
         }
         if view.project_dialog.is_some() {
             project_dialog(shell, ui, view);
@@ -1340,10 +1377,31 @@ fn settings_window(
                             &mut settings.playback.scrub_audio,
                             "Play sound while the playhead is dragged",
                         ));
-                        ui.add(ui::Check::new(
-                            &mut settings.playback.proxies,
-                            "Play proxies of 4K and long clips in the viewer",
-                        ));
+                        // One row: off, or the resolution a new project's
+                        // proxies are drawn at.
+                        choices_row(ui, "Proxies", |ui| {
+                            let playback = &mut settings.playback;
+                            let hint = "A new project makes a smaller copy of each clip larger than this for the viewer. Each project keeps its own choice in its settings.";
+                            if ui
+                                .add(ui::Choice::new(!playback.proxies, "Off"))
+                                .on_hover_text(hint)
+                                .clicked()
+                            {
+                                playback.proxies = false;
+                            }
+                            for value in cutlass_export::PROXY_SIDES {
+                                let chosen = playback.proxies
+                                    && cutlass_export::proxy_side(playback.proxy_side) == value;
+                                if ui
+                                    .add(ui::Choice::new(chosen, format!("{value}p")))
+                                    .on_hover_text(hint)
+                                    .clicked()
+                                {
+                                    playback.proxies = true;
+                                    playback.proxy_side = value;
+                                }
+                            }
+                        });
                         choices_row(ui, "Preview", |ui| {
                             let quality = &mut settings.playback.preview_quality;
                             for (value, name, _) in PREVIEW_QUALITIES {
@@ -2344,8 +2402,15 @@ fn library_menu(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
         view.library_menu = None;
         return;
     }
+    // Make proxy while a picked movie has none, Cancel proxy once each has
+    // one or is getting one, and a greyed row when no movie is picked.
+    let proxy = match menu.target {
+        LibraryTarget::Files => shell.proxy_offer(&view.library_picked),
+        LibraryTarget::Empty | LibraryTarget::Folder(_) => None,
+    };
     let entries = match menu.target {
         LibraryTarget::Empty => crate::menu::LIBRARY_EMPTY,
+        LibraryTarget::Files if proxy == Some(false) => crate::menu::LIBRARY_CARD_PROXIED,
         LibraryTarget::Files => crate::menu::LIBRARY_CARD,
         LibraryTarget::Folder(_) => crate::menu::LIBRARY_FOLDER,
     };
@@ -2359,7 +2424,7 @@ fn library_menu(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
         ui.scope_id().with("library-menu"),
         menu.at,
         entries,
-        &|id| !off.contains(&id),
+        &|id| !off.contains(&id) && (id != "make-proxy" || proxy.is_some()),
     );
     if let Some(item) = shown.picked {
         view.library_menu = None;
@@ -2374,7 +2439,7 @@ fn library_action(
     shell: &mut Shell,
     view: &mut ViewState,
     target: &LibraryTarget,
-    item: crate::menu::Item,
+    item: crate::menu::Item<'_>,
 ) {
     let picked = view.library_picked.clone();
     let result = match (item.id, target) {
@@ -2398,6 +2463,8 @@ fn library_action(
             Some(id) => shell.reveal_library_file(id),
             None => Ok(()),
         },
+        ("make-proxy", LibraryTarget::Files) => shell.make_proxy(&picked),
+        ("cancel-proxy", LibraryTarget::Files) => shell.cancel_proxy(&picked),
         ("delete", LibraryTarget::Files) => {
             let files: Vec<String> = picked
                 .iter()
@@ -2423,6 +2490,16 @@ fn library_action(
         ("rename", LibraryTarget::Folder(id)) => {
             start_folder_name(shell, view, id.clone());
             Ok(())
+        }
+        ("export", LibraryTarget::Files | LibraryTarget::Folder(_)) => {
+            let asked = match target {
+                LibraryTarget::Folder(id) => shell.export_library(std::slice::from_ref(id)),
+                _ => shell.export_library(&picked),
+            };
+            asked.map(|()| {
+                view.export.span = crate::shell::ExportSpan::Library;
+                view.export_open = true;
+            })
         }
         _ => {
             shell.set_notice(format!("{} is not built yet", item.label));
@@ -2511,7 +2588,18 @@ fn card_grid(
         let folder = card.look == CardLook::Folder;
         let pen = card.look == CardLook::Pen;
         let lit = view.library_picked.contains(&card.id) || (pen && shell.pen().is_some());
-        paint_bin_card(ui, rect, card, lit);
+        // A file whose proxy is on the way shows a running clock by its
+        // name, and one that plays its proxy a Proxy badge.
+        let proxy = if bin {
+            shell.proxy_state(&card.id)
+        } else {
+            crate::shell::ProxyState::None
+        };
+        let making = match proxy {
+            crate::shell::ProxyState::Making(done) => Some(done),
+            _ => None,
+        };
+        paint_bin_card(ui, rect, card, lit, proxy);
         if folder && folder_name_field(shell, ui, view, card, rect) {
             continue;
         }
@@ -2571,7 +2659,12 @@ fn card_grid(
                 view.library_menu = Some(LibraryMenu { at, target });
             }
         }
-        response.on_hover_text(&card.name);
+        match making {
+            Some(done) => {
+                response.on_hover_text(format!("{}\n{}", card.name, proxy_progress(done)))
+            }
+            None => response.on_hover_text(&card.name),
+        };
         if folder {
             continue;
         }
@@ -2643,8 +2736,55 @@ fn card_plus(ui: &mut Ui, card: Rect, id: &str) -> bool {
     response.clicked()
 }
 
-/// A card: its picture, then its name under it.
-fn paint_bin_card(ui: &Ui, rect: Rect, card: &BinCard, picked: bool) {
+/// What a card says of the proxy being made for its file, `done` of it
+/// drawn once the drawing has begun.
+fn proxy_progress(done: Option<f32>) -> String {
+    match done {
+        Some(done) => format!("Making a proxy: {:.0}%", done.clamp(0.0, 1.0) * 100.0),
+        None => "Waiting to make a proxy".to_owned(),
+    }
+}
+
+/// The width a card's name gives up to the proxy clock before it.
+const PROXY_CLOCK_ROOM: f32 = 16.0;
+
+/// A small clock with its hands going round, `seconds` into the app's run:
+/// the long hand turns once in two seconds and the short one a twelfth as
+/// fast.
+fn paint_proxy_clock(painter: &egui::Painter, center: Pos2, seconds: f64) {
+    const RADIUS: f32 = 5.5;
+    let stroke = egui::Stroke::new(1.2, tokens::MUTED);
+    painter.circle_stroke(center, RADIUS, stroke);
+    let turn = (seconds / 2.0).fract() as f32 * std::f32::consts::TAU;
+    for (angle, reach) in [(turn, RADIUS - 1.8), (turn / 12.0, RADIUS - 3.0)] {
+        let hand = Vec2::new(angle.sin(), -angle.cos()) * reach;
+        painter.line_segment([center, center + hand], stroke);
+    }
+}
+
+/// The badge before the name of a file that plays its proxy. Returns the
+/// width the name gives up to it.
+fn paint_proxy_badge(painter: &egui::Painter, at: Pos2) -> f32 {
+    let galley = painter.layout_no_wrap(
+        "Proxy".to_owned(),
+        FontId::proportional(11.0),
+        tokens::PANEL,
+    );
+    let chip = Rect::from_min_size(at, galley.size() + Vec2::new(8.0, 2.0));
+    painter.rect_filled(chip, CornerRadius::same(3), tokens::MUTED);
+    painter.galley(chip.min + Vec2::new(4.0, 1.0), galley, tokens::PANEL);
+    chip.width() + 5.0
+}
+
+/// A card: its picture, then its name under it, after a running clock
+/// while a proxy of its file is being made and a badge once it plays one.
+fn paint_bin_card(
+    ui: &Ui,
+    rect: Rect,
+    card: &BinCard,
+    picked: bool,
+    proxy: crate::shell::ProxyState,
+) {
     let picture = Rect::from_min_size(rect.min, Vec2::new(rect.width(), CARD_H));
     let painter = ui.painter().with_clip_rect(rect);
     paint_card_face(&painter, picture, card);
@@ -2657,9 +2797,24 @@ fn paint_bin_card(ui: &Ui, rect: Rect, card: &BinCard, picked: bool) {
         );
     }
     let font = FontId::proportional(12.0);
-    let name = middle_ellipsis(ui.ctx(), &card.name, &font, rect.width() - 4.0);
+    let room = match proxy {
+        crate::shell::ProxyState::None => 0.0,
+        crate::shell::ProxyState::Making(_) => {
+            let seconds = ui.input(|input| input.time);
+            let center = Pos2::new(rect.left() + 8.0, picture.bottom() + 14.0);
+            paint_proxy_clock(&painter, center, seconds);
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(50));
+            PROXY_CLOCK_ROOM
+        }
+        crate::shell::ProxyState::Made => paint_proxy_badge(
+            &painter,
+            Pos2::new(rect.left() + 2.0, picture.bottom() + 6.0),
+        ),
+    };
+    let name = middle_ellipsis(ui.ctx(), &card.name, &font, rect.width() - 4.0 - room);
     painter.text(
-        Pos2::new(rect.left() + 2.0, picture.bottom() + 6.0),
+        Pos2::new(rect.left() + 2.0 + room, picture.bottom() + 6.0),
         Align2::LEFT_TOP,
         name,
         font,
@@ -4493,7 +4648,8 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         .unwrap_or_default();
     ui.ctx()
         .data_mut(|data| data.insert_temp(egui::Id::unique(INSPECTED), inspected));
-    let project = shell.inspection().is_none();
+    let transition = shell.selected_transition();
+    let project = shell.inspection().is_none() && transition.is_none();
     // The project's details keep Modify in a band at the foot.
     let body = if project && shell.draft().is_some() {
         let (body, foot) = rect.split_top_bottom_at_y(rect.bottom() - PROJECT_FOOT);
@@ -4537,7 +4693,10 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         .content_margin(egui::Margin::symmetric(16, 0))
         .show(&mut details, |ui| {
             ui.set_width(content_width);
-            if let Some(inspection) = shell.inspection() {
+            if let Some(bar) = &transition {
+                ui.add_space(6.0);
+                inspector::transition_panel(shell, ui, view, bar);
+            } else if let Some(inspection) = shell.inspection() {
                 ui.add_space(6.0);
                 inspector::clip_panel(shell, ui, view, &inspection, content_width);
             } else {
@@ -5398,6 +5557,17 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         .iter()
         .map(|lane| (lane.main, lane_height(view, lane)))
         .collect();
+    // A clip that just landed by a paste or from the library has its lane
+    // scrolled into view.
+    if let Some(landed) = shell.take_reveal()
+        && let Some(index) = rows
+            .iter()
+            .position(|lane| lane.clips.iter().any(|clip| clip.id == landed))
+    {
+        (view.lanes_up, view.lanes_down) =
+            reveal_row(&kinds, lane_area, index, view.lanes_up, view.lanes_down);
+        ui.ctx().request_repaint();
+    }
     // Main stays put. The lanes above it and the lanes under it each scroll
     // in their own band, and one wheel runs through the two in turn.
     let still = lane_layout(&kinds, lane_area, view.lanes_up, view.lanes_down);
@@ -5660,6 +5830,84 @@ impl LaneLayout {
     }
 }
 
+/// The scroll, as `(up, down)`, that shows row `index` whole in its band,
+/// starting from the scroll the lanes have and moving them no further than
+/// that takes. A row above main is brought down from the top or back out
+/// from under main; a row under main is brought up from the foot, and
+/// unfolded first when the lanes above main had folded it away. A row
+/// taller than its band shows as much as fits.
+fn reveal_row(kinds: &[(bool, f32)], area: Rect, index: usize, up: f32, down: f32) -> (f32, f32) {
+    let main = kinds.iter().position(|(main, _)| *main);
+    let above = main.is_some_and(|main| index < main);
+    let (mut up, mut down) = (up, down);
+    // Each pass settles one thing; a few reach any row.
+    for _ in 0..24 {
+        let laid = lane_layout(kinds, area, up, down);
+        up = up.clamp(0.0, laid.up_max);
+        down = down.clamp(0.0, laid.down_max);
+        let (Some(row), Some(band)) = (laid.rows.get(index), laid.bands.get(index)) else {
+            break;
+        };
+        if laid.peek && main.is_some_and(|main| index > main) {
+            up = 0.0;
+            continue;
+        }
+        // Main's band is only what shows of it, so main is held to the
+        // sheet itself.
+        let band = if main == Some(index) { &area } else { band };
+        // A band too short for the row is given room first. Above main the
+        // stack is let back down, then main is sunk; under main, main is
+        // lifted back, then the stack is carried up.
+        let short = row.height() - band.height();
+        if short > 0.5 {
+            let before = (up, down);
+            if above {
+                if down > 0.0 {
+                    down = (down - short).max(0.0);
+                } else {
+                    up = (up + short).min(laid.up_max);
+                }
+            } else if up > 0.0 {
+                // Main had sunk; lifting it gives the lanes under it room.
+                up = (up - short).max(0.0);
+            } else {
+                down = (down + short).min(laid.down_max);
+            }
+            if (up, down) == before {
+                break;
+            }
+            continue;
+        }
+        let lack = band.top() - row.top();
+        let over = row.bottom() - band.bottom();
+        let step = if lack > 0.5 {
+            lack
+        } else if over > 0.5 {
+            -over
+        } else {
+            break;
+        };
+        // A row above main comes down as `up` grows; every other row
+        // comes down as `down` shrinks.
+        let before = (up, down);
+        if above {
+            let wanted = up + step;
+            up = wanted.clamp(0.0, laid.up_max);
+            // What the lanes above main cannot give, the whole stack does.
+            down = (down - (wanted - up)).clamp(0.0, laid.down_max);
+        } else {
+            let wanted = down - step;
+            down = wanted.clamp(0.0, laid.down_max);
+            // What the stack cannot give, lifting main back does.
+            up = (up - (wanted - down).max(0.0)).max(0.0);
+        }
+        if (up, down) == before {
+            break;
+        }
+    }
+    (up, down)
+}
+
 /// Lay the lanes out for rows given as (main, height).
 ///
 /// While everything fits with a lane of room past the top and the bottom,
@@ -5879,6 +6127,10 @@ fn secondary_click(ui: &Ui) -> Option<Pos2> {
     })
 }
 
+/// What the id of an Edit effects submenu row starts with; the effect's
+/// place in the clip's list follows.
+const EDIT_EFFECT_ROW: &str = "edit-effects:";
+
 fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     let Some(menu) = shell.clip_menu() else {
         return;
@@ -5895,19 +6147,54 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     };
     // Two or more clips picked: the menu of rows that act on all of them.
     let entries = if shell.selection().len() > 1 {
-        crate::menu::MULTI
+        let mix = shell.selection_mix();
+        crate::menu::multi_entries(mix.sound, mix.compound)
     } else {
-        crate::menu::clip_entries(&kind)
+        crate::menu::clip_entries_for(
+            &kind,
+            shell.recover_audio_enabled(),
+            shell.compound_selected(),
+        )
+    };
+    // Edit effects picks the clip's one effect, or opens a row for each
+    // when it has several. The rows are made for this frame.
+    let effects = shell.clip_effects();
+    let effect_ids: Vec<String> = (0..effects.len())
+        .map(|index| format!("{EDIT_EFFECT_ROW}{index}"))
+        .collect();
+    let effect_rows: Vec<crate::menu::Entry<'_>> = effects
+        .iter()
+        .zip(&effect_ids)
+        .map(|(effect, id)| crate::menu::named(id, &effect.name))
+        .collect();
+    let with_effects;
+    let entries: &[crate::menu::Entry<'_>] = if effect_rows.len() > 1 {
+        with_effects = crate::menu::with_children(entries, "edit-effects", &effect_rows);
+        &with_effects
+    } else {
+        entries
     };
     let enabled = |id: &str| match id {
+        "edit-effects" => !effects.is_empty(),
+        "sync" => shell.sync_enabled(),
+        "edit-freeze" => shell.freeze_enabled(),
+        "edit-reverse" => shell.reverse_enabled(),
+        "edit-mirror" => shell.mirror_enabled(),
+        "edit-rotate" => shell.rotate_enabled(),
         "edit-crop" => shell.crop_enabled(),
         "split-scenes" => shell.split_scenes_enabled(),
         "transcript" => shell.transcribe_enabled(),
         "extract-audio" => shell.extract_audio_enabled(),
         "flip" => shell.mirror_enabled(),
         "open-file" => shell.selected_has_file(),
-        "open-compound" | "ungroup" => shell.compound_selected(),
-        id if crate::menu::CLIP_OFF.contains(&id) => false,
+        "open-compound" => shell.compound_selected(),
+        "link-media" => shell.link_media_enabled(),
+        "group" => shell.group_enabled(),
+        "ungroup" => shell.ungroup_enabled(),
+        "copy-attributes" => shell.copy_attributes_enabled(),
+        "paste-attributes" => shell.paste_attributes_enabled(),
+        // Only a video clip plays on a speed curve.
+        "variable-speed" => kind == cutlass_model::TrackType::Video,
         _ => true,
     };
     let shown = crate::menu::show(
@@ -5927,10 +6214,15 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
             "copy" => shell.copy_selected(),
             "cut" => shell.cut_selected(),
             "delete" => shell.remove_selected(),
+            "edit-freeze" => shell.freeze_frame(),
+            "edit-reverse" => shell.toggle_reverse(),
+            "edit-mirror" => shell.toggle_mirror(),
+            "edit-rotate" => shell.turn_clockwise(),
             "edit-crop" => shell.toggle_crop(),
             "split-scenes" => shell.split_scenes(),
             "transcript" => shell.transcribe(),
             "extract-audio" => shell.extract_audio(),
+            "recover-audio" => shell.recover_audio(),
             "flip" => shell.toggle_mirror(),
             "deactivate" => shell.toggle_active(),
             "open-file" => shell.reveal_selected_file(),
@@ -5941,7 +6233,6 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
             "compound" => shell.create_compound(),
             "render-preview" => shell.render_selected(false),
             "render-full" => shell.render_selected(true),
-            "make-proxies" => shell.make_proxies(),
             "arrange-forward" => shell.arrange(cutlass_session::Arrange::Forward),
             "arrange-backward" => shell.arrange(cutlass_session::Arrange::Backward),
             "arrange-front" => shell.arrange(cutlass_session::Arrange::Front),
@@ -5951,7 +6242,29 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                 Ok(())
             }
             "open-compound" => shell.open_compound(),
-            "ungroup" => shell.ungroup_compound(),
+            "sync" => shell.start_sync(),
+            "edit-effects" => match effects.first() {
+                Some(effect) => shell.edit_clip_effect(&effect.segment_id),
+                None => Ok(()),
+            },
+            id if id.starts_with(EDIT_EFFECT_ROW) => {
+                let effect = id[EDIT_EFFECT_ROW.len()..]
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|index| effects.get(index));
+                match effect {
+                    Some(effect) => shell.edit_clip_effect(&effect.segment_id),
+                    None => Ok(()),
+                }
+            }
+            "link-media" => {
+                view.wants_link = true;
+                Ok(())
+            }
+            "group" => shell.group_selected(),
+            "ungroup" => shell.ungroup_selected(),
+            "copy-attributes" => shell.copy_attributes(),
+            "paste-attributes" => shell.paste_attributes(),
             "range-in" => shell.mark_clip_in(),
             "range-out" => shell.mark_clip_out(),
             "beat" => {
@@ -6739,7 +7052,7 @@ fn paint_lane(
     {
         shell.open_gap_menu(&lane.track_id, time, pos.x, pos.y);
     }
-    paint_transitions(shell, ui, lane, row, lanes_left);
+    paint_transitions(shell, ui, lane, row, lanes_left, index);
     for preview in &followers {
         paint_move_follower(shell, ui, lane, preview, row, lanes_left);
     }
@@ -7096,52 +7409,178 @@ fn row_height(size: RowSize) -> f32 {
     clip_height(size) + 2.0 * clip_inset(size)
 }
 
-fn paint_transitions(
+/// The narrowest a transition's bar is drawn, so one on a wide view of
+/// the timeline can still be picked.
+const TRANSITION_MIN_WIDTH: f32 = 22.0;
+
+/// The width of the strip at each side of a transition's bar that drags it
+/// longer or shorter.
+const TRANSITION_EDGE: f32 = 6.0;
+
+/// How far a transition's bar stands above and below the clips it joins.
+const TRANSITION_RISE: f32 = 2.0;
+
+/// The pale fill of a transition's bar: frosted over the clips while it
+/// rests, lighter under the pointer, and clearer once picked, when its
+/// outline carries it.
+const TRANSITION_FILL: Color32 = Color32::from_rgba_premultiplied(92, 92, 92, 92);
+const TRANSITION_FILL_HOVERED: Color32 = Color32::from_rgba_premultiplied(120, 120, 120, 120);
+const TRANSITION_FILL_PICKED: Color32 = Color32::from_rgba_premultiplied(56, 56, 56, 56);
+
+/// The mark in the middle of a transition's bar: two triangles that meet
+/// point to point at `center`, one clip handing over to the next.
+fn paint_transition_mark(painter: &egui::Painter, center: Pos2) {
+    const HALF: f32 = 5.0;
+    const REACH: f32 = 6.0;
+    for side in [-1.0, 1.0] {
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                center + Vec2::new(side * REACH, -HALF),
+                center + Vec2::new(side * REACH, HALF),
+                center,
+            ],
+            Color32::WHITE,
+            egui::Stroke::NONE,
+        ));
+    }
+}
+
+/// The grip inside each end of a picked transition's bar: a short upright
+/// line that says the end can be dragged.
+fn paint_transition_grips(painter: &egui::Painter, rect: Rect) {
+    for x in [rect.left() + 6.0, rect.right() - 6.0] {
+        painter.line_segment(
+            [
+                Pos2::new(x, rect.center().y - 6.0),
+                Pos2::new(x, rect.center().y + 6.0),
+            ],
+            egui::Stroke::new(2.0, Color32::from_white_alpha(230)),
+        );
+    }
+}
+
+/// Where a transition's bar is drawn on its `row`: over the blend's
+/// window, a little taller than the clips, and no narrower than
+/// [`TRANSITION_MIN_WIDTH`] about its middle.
+fn transition_rect(
     shell: &Shell,
-    ui: &Ui,
+    lane: &crate::shell::LaneView,
+    bar: &cutlass_editor::TransitionBar,
+    row: Rect,
+    lanes_left: f32,
+) -> Rect {
+    let span = Micros(bar.end.0.saturating_sub(bar.start.0));
+    let rect = clip_bounds(shell, lane_size(lane), bar.start, span, row, lanes_left);
+    let width = (span.0 as f32 * shell.pixel_size() as f32).max(TRANSITION_MIN_WIDTH);
+    Rect::from_center_size(
+        Pos2::new(
+            rect.left() + span.0 as f32 * shell.pixel_size() as f32 / 2.0,
+            rect.center().y,
+        ),
+        Vec2::new(width, rect.height() + 2.0 * TRANSITION_RISE),
+    )
+}
+
+/// The transitions of `lane`, each a frosted bar over its cut with a mark
+/// in its middle. A click picks one, which then wears a white outline and
+/// a grip inside each end; Delete takes it off, and an end dragged makes
+/// it longer or shorter between its limits.
+fn paint_transitions(
+    shell: &mut Shell,
+    ui: &mut Ui,
     lane: &crate::shell::LaneView,
     row: Rect,
     lanes_left: f32,
+    index: usize,
 ) {
-    let Some(draft) = shell.draft() else {
+    let bars = shell.transitions();
+    if bars.is_empty() {
         return;
-    };
-    let Some(track) = draft.tracks.iter().find(|track| track.id == lane.track_id) else {
-        return;
-    };
-    for segment in &track.segments {
-        let Some(transition) = segment.extra_material_refs.iter().find_map(|id| {
-            draft
-                .materials
-                .transitions
-                .iter()
-                .find(|item| &item.id == id)
-        }) else {
-            continue;
-        };
-        let Some((start, end)) = cutlass_model::blend_window(
-            segment.target.end(),
-            transition.duration,
-            transition.is_overlap,
-        ) else {
-            continue;
-        };
-        let x0 = lane_x(
-            lanes_left,
-            shell.pixel_size(),
-            shell.view_origin().0,
-            start.0,
-        );
-        let x1 = lane_x(lanes_left, shell.pixel_size(), shell.view_origin().0, end.0);
-        if x1 <= x0 {
+    }
+    let picked = shell.selected_transition().map(|bar| bar.segment_id);
+    for bar in bars.iter().filter(|bar| bar.track_id == lane.track_id) {
+        let rect = transition_rect(shell, lane, bar, row, lanes_left);
+        let visible = rect.intersect(row);
+        if visible.width() <= 0.0 || visible.height() <= 0.0 {
             continue;
         }
-        let mark = Rect::from_min_max(
-            Pos2::new(x0, row.bottom() - 6.0),
-            Pos2::new(x1, row.bottom() - 2.0),
+        let selected = picked.as_ref() == Some(&bar.segment_id);
+        let painter = ui.painter().with_clip_rect(row);
+        let radius = CornerRadius::same(CLIP_RADIUS);
+        let hovered = ui.rect_contains_pointer(visible);
+        let fill = match (selected, hovered) {
+            (true, _) => TRANSITION_FILL_PICKED,
+            (false, true) => TRANSITION_FILL_HOVERED,
+            (false, false) => TRANSITION_FILL,
+        };
+        painter.rect_filled(rect, radius, fill);
+        if selected {
+            painter.rect_stroke(
+                rect,
+                radius,
+                egui::Stroke::new(2.0, Color32::WHITE),
+                egui::StrokeKind::Inside,
+            );
+        }
+        // The mark needs its own width, and the grips room beside it.
+        if rect.width() >= 18.0 {
+            paint_transition_mark(&painter, rect.center());
+        }
+        if selected && rect.width() >= 40.0 {
+            paint_transition_grips(&painter, rect);
+        }
+        let id = bar.segment_id.clone();
+        let salt = ("transition", index, id.as_str().to_owned());
+        // The body takes the press whole, so the clips under the bar are
+        // neither picked nor dragged through it.
+        let body = Rect::from_min_max(
+            Pos2::new(visible.left() + TRANSITION_EDGE, visible.top()),
+            Pos2::new(visible.right() - TRANSITION_EDGE, visible.bottom()),
         );
-        ui.painter()
-            .rect_filled(mark.intersect(row), CornerRadius::ZERO, tokens::EXPORT);
+        if body.width() > 0.0 {
+            let response = ui
+                .interact(body, ui.scope_id().with(&salt), Sense::click_and_drag())
+                .on_hover_text(format!(
+                    "{} · {:.1}s",
+                    bar.name,
+                    bar.duration.0 as f64 / 1_000_000.0
+                ));
+            if response.clicked() || response.drag_started() {
+                shell.select_transition(Some(id.clone()));
+            }
+        }
+        for (edge, x) in [
+            (cutlass_editor::BarEdge::Start, visible.left()),
+            (
+                cutlass_editor::BarEdge::End,
+                visible.right() - TRANSITION_EDGE,
+            ),
+        ] {
+            let strip = Rect::from_min_size(
+                Pos2::new(x, visible.top()),
+                Vec2::new(TRANSITION_EDGE, visible.height()),
+            )
+            .expand2(Vec2::new(2.0, 0.0));
+            let response = ui.interact(
+                strip,
+                ui.scope_id()
+                    .with((&salt, edge == cutlass_editor::BarEdge::Start)),
+                Sense::drag(),
+            );
+            if response.hovered() || response.dragged() {
+                ui.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            if response.drag_started() {
+                shell.select_transition(Some(id.clone()));
+            }
+            if response.dragged()
+                && let Some(pos) = pointer_pos(ui, &response)
+                && let Err(error) =
+                    shell.drag_transition_edge(&id, edge, f64::from(pos.x - lanes_left))
+            {
+                shell.notice_error(&error);
+            }
+        }
     }
 }
 
@@ -7817,8 +8256,13 @@ fn paint_clip(
     }
 }
 
+/// How far a key's diamond reaches from its middle, and the picked one's.
+const KEY_REACH: f32 = 5.0;
+const KEY_REACH_PICKED: f32 = 6.5;
+
 /// The selected clip's keys as diamonds along its foot. A click puts the
-/// playhead on the key; a drag moves it, landing on the nearest frame.
+/// playhead on the key and picks it, so Delete takes the key and not the
+/// clip; a drag moves it, landing on the nearest frame.
 fn paint_clip_keys(
     shell: &mut Shell,
     ui: &mut Ui,
@@ -7829,6 +8273,12 @@ fn paint_clip_keys(
     let painter = ui.painter().with_clip_rect(clip_rect.intersect(row));
     let pixel_size = shell.pixel_size() as f32;
     let y = clip_rect.bottom() - 8.0;
+    let picked: Vec<Micros> = shell
+        .selected_clip_keys()
+        .into_iter()
+        .filter(|(id, _)| *id == clip.id)
+        .map(|(_, time)| time)
+        .collect();
     for time in shell.clip_key_times(&clip.id) {
         let x = clip_rect.left() + (time.0 - clip.start.0) as f32 * pixel_size;
         let hit = Rect::from_center_size(Pos2::new(x, y), Vec2::new(12.0, 14.0));
@@ -7857,16 +8307,28 @@ fn paint_clip_keys(
             Color32::WHITE
         };
         let c = Pos2::new(at, y);
+        // The picked key is a size larger, filled, with a white edge.
+        let chosen = picked.contains(&time);
+        let (reach, fill, edge) = if chosen {
+            (KEY_REACH_PICKED, tokens::EXPORT, Color32::WHITE)
+        } else {
+            (KEY_REACH, color, Color32::BLACK)
+        };
         painter.add(egui::Shape::convex_polygon(
             vec![
-                c + Vec2::new(0.0, -5.0),
-                c + Vec2::new(5.0, 0.0),
-                c + Vec2::new(0.0, 5.0),
-                c + Vec2::new(-5.0, 0.0),
+                c + Vec2::new(0.0, -reach),
+                c + Vec2::new(reach, 0.0),
+                c + Vec2::new(0.0, reach),
+                c + Vec2::new(-reach, 0.0),
             ],
-            color,
-            egui::Stroke::new(1.0, Color32::BLACK),
+            fill,
+            egui::Stroke::new(if chosen { 1.5 } else { 1.0 }, edge),
         ));
+        // A drag that starts on a key not yet picked picks it alone; one
+        // that starts on a picked key takes all the picked ones along.
+        if response.drag_started_by(egui::PointerButton::Primary) && !chosen {
+            shell.select_clip_key(&clip.id, time);
+        }
         if response.drag_stopped_by(egui::PointerButton::Primary)
             && let Some(pos) = ui.input(|input| input.pointer.interact_pos())
         {
@@ -7877,9 +8339,19 @@ fn paint_clip_keys(
                 shell.notice_error(&error);
             }
         } else if response.clicked() {
-            shell.seek(time);
+            // With Shift or Command held the key joins or leaves the
+            // picked ones, and the playhead stays.
+            let more = ui.input(|input| input.modifiers.shift || input.modifiers.command);
+            if more {
+                shell.toggle_clip_key(&clip.id, time);
+            } else {
+                shell.seek(time);
+                shell.select_clip_key(&clip.id, time);
+            }
         }
-        response.on_hover_text("Keyframe: click to go to it, drag to move it");
+        response.on_hover_text(
+            "Keyframe: click to pick it and go to it, Shift-click to pick more, drag to move, Delete to remove",
+        );
     }
 }
 
@@ -8475,19 +8947,30 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
     choices_row(ui, "Range", |ui| {
         let picked = !shell.selection().is_empty();
         let marked = shell.marked_span().is_some();
+        let files = shell.library_export().len();
         let offered = |span| match span {
             ExportSpan::Whole => true,
             ExportSpan::Selected => picked,
             ExportSpan::Marked => marked,
+            ExportSpan::Library => files > 0,
         };
         if !offered(export.span) {
             export.span = ExportSpan::Whole;
         }
+        // The library's own row is there only when its menu asked.
+        let library = match files {
+            0 => None,
+            1 => Some((ExportSpan::Library, "Library file")),
+            _ => Some((ExportSpan::Library, "Library files")),
+        };
         for (span, name) in [
             (ExportSpan::Whole, "Whole timeline"),
             (ExportSpan::Marked, "In to out"),
             (ExportSpan::Selected, "Selected clips"),
-        ] {
+        ]
+        .into_iter()
+        .chain(library)
+        {
             let label = ui::Choice::new(export.span == span, name);
             if ui.add_enabled(offered(span), label).clicked() {
                 export.span = span;
@@ -8808,13 +9291,86 @@ fn export_extension(view: &ViewState) -> &'static str {
     }
 }
 
-/// Name, canvas, frame rate and color space, saved together.
+/// The question a transition dropped on a cut that has one asks: replace
+/// it or leave it, with a tick that stops the question from then on.
+fn transition_prompt(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
+    let Some((old, new)) = shell.asked_transition() else {
+        return;
+    };
+    let never = &mut view.never_ask_transition;
+    let ((), end) = widgets::sheet(ui, "Replace transition", 420.0, "Replace", |ui| {
+        ui.label(
+            RichText::new(format!("This cut has {old}. Replace it with {new}?"))
+                .size(tokens::TYPE_SIZE + 1.0)
+                .color(tokens::TEXT),
+        );
+        ui.add_space(12.0);
+        ui.add(ui::Check::new(never, "Do not ask again"));
+    });
+    let answered = match end {
+        widgets::SheetEnd::Open => return,
+        widgets::SheetEnd::Cancel => shell.answer_transition(false, false),
+        widgets::SheetEnd::Confirm => shell.answer_transition(true, view.never_ask_transition),
+    };
+    view.never_ask_transition = false;
+    if let Err(error) = answered {
+        shell.notice_error(&error);
+    }
+}
+
+/// The proxy switch and the resolution proxies are drawn at.
+fn project_performance(
+    ui: &mut Ui,
+    proxies: &mut Option<bool>,
+    side: &mut Option<u32>,
+    now: (bool, u32),
+) {
+    let mut on = proxies.unwrap_or(now.0);
+    widgets::form_row(ui, "Proxy", |ui| {
+        if widgets::switch(ui, &mut on, true).changed() {
+            *proxies = Some(on);
+        }
+    });
+    let current = format!("{}p", side.unwrap_or(now.1));
+    let labels: Vec<String> = cutlass_export::PROXY_SIDES
+        .iter()
+        .map(|side| format!("{side}p"))
+        .collect();
+    let names: Vec<&str> = labels.iter().map(String::as_str).collect();
+    widgets::form_row(ui, "Resolution", |ui| {
+        if let Some(index) = widgets::select(ui, "project-proxy-side", &current, &names) {
+            *side = Some(cutlass_export::PROXY_SIDES[index]);
+        }
+    });
+    widgets::form_hint(
+        ui,
+        "Only clips larger than this get a smaller copy for the viewer. Export reads the original files.",
+    );
+}
+
+/// Name, canvas, frame rate and color space under Details, and proxies
+/// under Performance, saved together.
 fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     let folder = shell.project_folder().map(short_folder);
+    let now = (shell.project_proxies(), shell.project_proxy_side());
+    let performance = &mut view.project_performance;
+    let (proxies, side) = (&mut view.project_proxies, &mut view.project_proxy_side);
     let Some(settings) = view.project_dialog.as_mut() else {
         return;
     };
     let ((), end) = widgets::sheet(ui, "Project settings", 560.0, "Save", |ui| {
+        ui::Segmented::show(ui, |ui| {
+            for (tab, name) in [(false, "Details"), (true, "Performance")] {
+                if ui.add(ui::Choice::new(*performance == tab, name)).clicked() {
+                    *performance = tab;
+                }
+            }
+        });
+        ui.add_space(8.0);
+        if *performance {
+            project_performance(ui, proxies, side, now);
+            return;
+        }
         widgets::form_section(ui, "Details");
         widgets::form_row(ui, "Name", |ui| {
             widgets::text_box(ui, &mut settings.name);
@@ -8910,7 +9466,12 @@ fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     });
     match end {
         widgets::SheetEnd::Open => {}
-        widgets::SheetEnd::Cancel => view.project_dialog = None,
+        widgets::SheetEnd::Cancel => {
+            view.project_dialog = None;
+            view.project_performance = false;
+            view.project_proxies = None;
+            view.project_proxy_side = None;
+        }
         widgets::SheetEnd::Confirm => {
             if let Some(settings) = view.project_dialog.take() {
                 if let Err(error) = shell.save_project_settings(&settings) {
@@ -8918,6 +9479,17 @@ fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                     view.project_dialog = Some(settings);
                 } else {
                     view.name_buffer.clear();
+                    view.project_performance = false;
+                    // The resolution first, so a project just turned on
+                    // draws at the size it was given.
+                    let side = view.project_proxy_side.take();
+                    let on = view.project_proxies.take();
+                    let saved = side
+                        .map_or(Ok(()), |side| shell.set_project_proxy_side(side))
+                        .and_then(|()| on.map_or(Ok(()), |on| shell.set_project_proxies(on)));
+                    if let Err(error) = saved {
+                        shell.notice_error(&error);
+                    }
                 }
             }
         }
@@ -8990,6 +9562,7 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
         }
         Picker::Lut => shell.load_lut(&path),
         Picker::Replace => shell.start_replace(&path),
+        Picker::Link => shell.start_link(&path),
         Picker::SaveLog => Shell::export_log(&path).map(|()| {
             shell.set_notice(format!("Saved the log to {}", path.display()));
         }),
@@ -12149,6 +12722,550 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp);
     }
 
+    /// Every circle `output` paints: its middle and its radius.
+    fn circles(output: &egui::FullOutput) -> Vec<(Pos2, f32)> {
+        fn collect(shape: &egui::Shape, found: &mut Vec<(Pos2, f32)>) {
+            match shape {
+                egui::Shape::Circle(circle) => found.push((circle.center, circle.radius)),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut found);
+        }
+        found
+    }
+
+    #[test]
+    fn a_library_movie_makes_and_cancels_its_proxy_from_its_menu_under_a_clock() {
+        let temp = std::env::temp_dir().join(format!("cutlass-proxy-menu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        let file = temp.join("clip.mp4");
+        std::fs::write(&file, b"held, so never read").unwrap();
+        let mut draft = cutlass_model::Draft::empty("draft");
+        let mut movie = cutlass_model::MaterialVideo::new("movie");
+        movie.kind = "video".to_owned();
+        movie.path = file.to_string_lossy().into_owned();
+        movie.width = 1920;
+        movie.height = 1080;
+        movie.duration = Micros(1_000_000);
+        draft.materials.videos.push(movie);
+        let project = temp.join("project");
+        cutlass_store::Folder::new(draft).save(&project).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.set_proxies_folder(temp.join("proxies"));
+        shell.hold_proxies();
+        shell.open_folder(&project).unwrap();
+        // The project makes none by itself, so the menu is what asks.
+        shell.set_project_proxies(false).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2, button: egui::PointerButton| {
+            let event = |pressed| egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), event(true), event(false)]
+        };
+        let clock = |output: &egui::FullOutput| {
+            circles(output)
+                .iter()
+                .any(|(_, radius)| (radius - 5.5).abs() < 0.01)
+        };
+        let making = |shell: &Shell| {
+            matches!(
+                shell.proxy_state("movie"),
+                crate::shell::ProxyState::Making(_)
+            )
+        };
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let name = text_pos(&output, "clip.mp4").expect("library card");
+        // Nothing is on the way, so there is no clock.
+        assert!(!making(&shell));
+        assert!(!clock(&output));
+        let card = name + Vec2::new(20.0, -30.0);
+
+        // The menu makes one, and the clock runs by the name.
+        frame(
+            &mut shell,
+            &mut view,
+            click(card, egui::PointerButton::Secondary),
+        );
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let text = painted_text(&output);
+        assert!(!text.contains("Cancel proxy"), "{text}");
+        let row = text_pos(&output, "Make proxy").expect("the Make proxy row");
+        frame(
+            &mut shell,
+            &mut view,
+            click(row + Vec2::new(4.0, 6.0), egui::PointerButton::Primary),
+        );
+        assert_eq!(shell.notice(), "Making 1 proxy");
+        assert!(making(&shell));
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(clock(&output), "no clock by the name");
+        let moved = text_pos(&output, "clip.mp4").expect("library card");
+        assert!(moved.x > name.x, "the name makes room for the clock");
+
+        // While it is on the way the menu cancels it, and the clock goes.
+        frame(
+            &mut shell,
+            &mut view,
+            click(card, egui::PointerButton::Secondary),
+        );
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let text = painted_text(&output);
+        assert!(!text.contains("Make proxy"), "{text}");
+        let row = text_pos(&output, "Cancel proxy").expect("the Cancel proxy row");
+        frame(
+            &mut shell,
+            &mut view,
+            click(row + Vec2::new(4.0, 6.0), egui::PointerButton::Primary),
+        );
+        assert_eq!(shell.notice(), "Cancelled 1 proxy");
+        assert!(!making(&shell));
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(!clock(&output));
+        assert_eq!(text_pos(&output, "clip.mp4"), Some(name));
+        assert!(text_pos(&output, "Proxy").is_none());
+
+        // Once its proxy is in the folder, the name wears a Proxy badge
+        // in place of the clock.
+        let made = cutlass_export::proxy_name(&file, shell.project_proxy_side()).unwrap();
+        std::fs::create_dir_all(temp.join("proxies")).unwrap();
+        std::fs::write(temp.join("proxies").join(made), b"a proxy").unwrap();
+        shell.make_proxy(&["movie".to_owned()]).unwrap();
+        assert_eq!(shell.notice(), "The proxy is ready");
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(!clock(&output));
+        let badge = text_pos(&output, "Proxy").expect("a Proxy badge");
+        let moved = text_pos(&output, "clip.mp4").expect("library card");
+        assert!(badge.x < moved.x && moved.x > name.x, "{badge:?} {moved:?}");
+        assert!(
+            (badge.y - moved.y).abs() < 3.0,
+            "the badge is on the name's line"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_project_dialogs_performance_tab_sets_the_proxy_switch_and_resolution() {
+        let (mut shell, temp) = open_span("proxies-switch", 1_000_000);
+        assert!(shell.project_proxies());
+        assert_eq!(shell.project_proxy_side(), 720);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            let event = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            [
+                vec![egui::Event::PointerMoved(pos), event(true)],
+                vec![event(false)],
+            ]
+        };
+        let press = |shell: &mut Shell, view: &mut ViewState, label: &str| {
+            let output = frame(shell, view, Vec::new());
+            let at = last_text_pos(&output, label).unwrap_or_else(|| panic!("no {label}"));
+            for events in click(at) {
+                frame(shell, view, events);
+            }
+        };
+        // The switch's knob is the 9-point circle on the Proxy row.
+        let flip = |shell: &mut Shell, view: &mut ViewState| {
+            let output = frame(shell, view, Vec::new());
+            let label = last_text_pos(&output, "Proxy").expect("the Proxy row");
+            let knob = circles(&output)
+                .into_iter()
+                .find(|(center, radius)| {
+                    (radius - 9.0).abs() < 0.01 && (center.y - label.y).abs() < 14.0
+                })
+                .expect("the Proxy switch")
+                .0;
+            for events in click(knob) {
+                frame(shell, view, events);
+            }
+        };
+        let pick = |shell: &mut Shell, view: &mut ViewState, name: &str| {
+            let output = frame(shell, view, Vec::new());
+            let picker =
+                last_text_pos(&output, "Resolution").expect("Resolution") + Vec2::new(240.0, 0.0);
+            for events in click(picker) {
+                frame(shell, view, events);
+            }
+            press(shell, view, name);
+        };
+
+        // A line only the Details tab has; the window behind the dialog
+        // names the frame rate and the rest too.
+        const DETAILS: &str = "Picture clips stack by the order";
+        // Details is shown first; proxies are under Performance.
+        view.project_dialog = shell.project_settings();
+        let text = painted_text(&frame(&mut shell, &mut view, Vec::new()));
+        assert!(text.contains(DETAILS) && !text.contains("Proxy"), "{text}");
+        press(&mut shell, &mut view, "Performance");
+        let text = painted_text(&frame(&mut shell, &mut view, Vec::new()));
+        assert!(!text.contains(DETAILS), "{text}");
+        assert!(text.contains("720p"), "{text}");
+        assert!(text.contains("Only clips larger than this"), "{text}");
+
+        // Changed and cancelled, the project is as it was.
+        flip(&mut shell, &mut view);
+        pick(&mut shell, &mut view, "540p");
+        assert_eq!(view.project_proxies, Some(false));
+        assert_eq!(view.project_proxy_side, Some(540));
+        press(&mut shell, &mut view, "Cancel");
+        assert!(view.project_dialog.is_none());
+        assert!(shell.project_proxies());
+        assert_eq!(shell.project_proxy_side(), 720);
+        assert!(!shell.unsaved());
+
+        // Changed and saved, both are kept, and that is not an undo step.
+        view.project_dialog = shell.project_settings();
+        let text = painted_text(&frame(&mut shell, &mut view, Vec::new()));
+        assert!(text.contains(DETAILS), "the dialog opens on Details again");
+        press(&mut shell, &mut view, "Performance");
+        flip(&mut shell, &mut view);
+        pick(&mut shell, &mut view, "540p");
+        press(&mut shell, &mut view, "Save");
+        assert!(view.project_dialog.is_none(), "{}", shell.notice());
+        assert!(!shell.project_proxies());
+        assert_eq!(shell.project_proxy_side(), 540);
+        assert!(shell.unsaved());
+        assert!(shell.undo().is_err(), "the choices are not an edit");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn settings_turns_new_projects_proxies_off_or_picks_their_resolution() {
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        let mut view = ViewState::new();
+        view.settings_open = true;
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |shell: &mut Shell, view: &mut ViewState, label: &str| {
+            let output = frame(shell, view, Vec::new());
+            let pos = last_text_pos(&output, label).unwrap_or_else(|| panic!("no {label}"));
+            let event = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            frame(
+                shell,
+                view,
+                vec![egui::Event::PointerMoved(pos), event(true)],
+            );
+            frame(shell, view, vec![event(false)]);
+            frame(shell, view, Vec::new());
+        };
+        let chosen = |shell: &Shell| {
+            let playback = &shell.settings().playback;
+            (playback.proxies, playback.proxy_side)
+        };
+        assert_eq!(chosen(&shell), (true, 720));
+        press(&mut shell, &mut view, "540p");
+        assert_eq!(chosen(&shell), (true, 540));
+        press(&mut shell, &mut view, "Off");
+        assert_eq!(chosen(&shell), (false, 540), "the resolution is kept");
+        press(&mut shell, &mut view, "720p");
+        assert_eq!(chosen(&shell), (true, 720));
+    }
+
+    /// The pale bars `output` paints for transitions: each filled rectangle
+    /// in one of the bar's fills.
+    fn transition_bars_painted(output: &egui::FullOutput) -> Vec<Rect> {
+        fn collect(shape: &egui::Shape, found: &mut Vec<Rect>) {
+            match shape {
+                egui::Shape::Rect(rect)
+                    if [
+                        TRANSITION_FILL,
+                        TRANSITION_FILL_HOVERED,
+                        TRANSITION_FILL_PICKED,
+                    ]
+                    .contains(&rect.fill) =>
+                {
+                    found.push(rect.rect);
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut found);
+        }
+        found
+    }
+
+    #[test]
+    fn a_transition_is_a_bar_over_its_cut_that_is_picked_resized_and_deleted() {
+        let temp =
+            std::env::temp_dir().join(format!("cutlass-transition-bar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        for (id, start) in [("a", 0), ("b", 4_000_000)] {
+            draft.tracks[0].segments.push(cutlass_model::Segment::new(
+                id,
+                "color",
+                cutlass_model::TimeRange::new(start, 4_000_000),
+            ));
+        }
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let button = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        // No transition, no bar.
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(transition_bars_painted(&output).is_empty());
+
+        // One second of Dissolve on the cut at four seconds.
+        let card = crate::shell::transition_offers()[0].card_id();
+        shell.pixel_size_for_test(0.000_05);
+        shell
+            .drop_transition(
+                &card,
+                4_000_000.0 * shell.pixel_size(),
+                tokens::LANE_HEIGHT / 2.0,
+            )
+            .unwrap();
+        shell.select(None);
+        let a = SegmentId::new("a");
+        shell.set_transition_length(&a, Micros(1_000_000)).unwrap();
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let bars = transition_bars_painted(&output);
+        assert_eq!(bars.len(), 1, "{bars:?}");
+        let bar = bars[0];
+        // A second at this zoom is 50 points, half each side of the cut.
+        assert!((bar.width() - 50.0).abs() < 1.0, "{bar:?}");
+        assert!(shell.selected_transition().is_none());
+
+        // A click on the bar picks the transition, not the clip under it.
+        frame(
+            &mut shell,
+            &mut view,
+            vec![
+                egui::Event::PointerMoved(bar.center()),
+                button(bar.center(), true),
+            ],
+        );
+        frame(&mut shell, &mut view, vec![button(bar.center(), false)]);
+        assert_eq!(
+            shell.selected_transition().map(|bar| bar.segment_id),
+            Some(a.clone())
+        );
+        assert!(shell.selection().is_empty());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let text = painted_text(&output);
+        for label in ["Transition", "Dissolve", "Duration", "Apply to all"] {
+            assert!(text.contains(label), "no {label} in the panel: {text}");
+        }
+
+        // Its right edge dragged 25 points out makes it a second longer,
+        // as it grows both ways, in one undo step.
+        let edge = Pos2::new(bar.right() - 2.0, bar.center().y);
+        let out = edge + Vec2::new(25.0, 0.0);
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(edge), button(edge, true)],
+        );
+        for step in 1..=5 {
+            let at = edge + Vec2::new(5.0 * step as f32, 0.0);
+            frame(&mut shell, &mut view, vec![egui::Event::PointerMoved(at)]);
+        }
+        frame(&mut shell, &mut view, vec![button(out, false)]);
+        let length = shell.selected_transition().unwrap().duration.0;
+        assert!((length - 2_000_000).abs() < 100_000, "{length}");
+        shell.undo().unwrap();
+        assert_eq!(shell.selected_transition().unwrap().duration.0, 1_000_000);
+        assert_eq!(
+            shell.draft().unwrap().tracks[0].segments[1].target.start,
+            Micros(4_000_000),
+            "no clip moved"
+        );
+
+        // Delete takes the picked transition off and leaves both clips.
+        frame(
+            &mut shell,
+            &mut view,
+            vec![key(egui::Key::Delete, egui::Modifiers::NONE)],
+        );
+        assert!(shell.transitions().is_empty(), "{}", shell.notice());
+        assert_eq!(shell.draft().unwrap().tracks[0].segments.len(), 2);
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(transition_bars_painted(&output).is_empty());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_transition_dropped_on_another_asks_and_can_stop_asking() {
+        let temp =
+            std::env::temp_dir().join(format!("cutlass-transition-ask-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        for (id, start) in [("a", 0), ("b", 4_000_000)] {
+            draft.tracks[0].segments.push(cutlass_model::Segment::new(
+                id,
+                "color",
+                cutlass_model::TimeRange::new(start, 4_000_000),
+            ));
+        }
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.pixel_size_for_test(0.000_05);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |shell: &mut Shell, view: &mut ViewState, label: &str| {
+            let output = frame(shell, view, Vec::new());
+            let pos = last_text_pos(&output, label).unwrap_or_else(|| panic!("no {label}"));
+            let event = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            frame(
+                shell,
+                view,
+                vec![egui::Event::PointerMoved(pos), event(true)],
+            );
+            frame(shell, view, vec![event(false)]);
+            frame(shell, view, Vec::new());
+        };
+        let offers = crate::shell::transition_offers();
+        let (x, y) = (4_000_000.0 * shell.pixel_size(), tokens::LANE_HEIGHT / 2.0);
+        shell.drop_transition(&offers[0].card_id(), x, y).unwrap();
+        let text = painted_text(&frame(&mut shell, &mut view, Vec::new()));
+        assert!(!text.contains("Replace transition"), "{text}");
+
+        // A second one opens the question; Cancel leaves the first.
+        shell.drop_transition(&offers[1].card_id(), x, y).unwrap();
+        let text = painted_text(&frame(&mut shell, &mut view, Vec::new()));
+        assert!(
+            text.contains("This cut has Dissolve. Replace it with Dip to Black?"),
+            "{text}"
+        );
+        assert!(text.contains("Do not ask again"), "{text}");
+        press(&mut shell, &mut view, "Cancel");
+        assert!(shell.asked_transition().is_none());
+        assert_eq!(shell.transitions()[0].name, "Dissolve");
+
+        // Ticked and replaced, the next one lands without the question.
+        shell.drop_transition(&offers[1].card_id(), x, y).unwrap();
+        press(&mut shell, &mut view, "Do not ask again");
+        assert!(view.never_ask_transition);
+        press(&mut shell, &mut view, "Replace");
+        assert_eq!(shell.transitions()[0].name, "Dip to Black");
+        assert!(shell.settings().confirm.replace_transition_unasked);
+        assert!(
+            !view.never_ask_transition,
+            "the tick is cleared for next time"
+        );
+        shell.drop_transition(&offers[0].card_id(), x, y).unwrap();
+        assert_eq!(shell.transitions()[0].name, "Dissolve");
+        let text = painted_text(&frame(&mut shell, &mut view, Vec::new()));
+        assert!(!text.contains("Replace transition"), "{text}");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
     #[test]
     fn a_new_folder_is_named_opened_and_left_by_the_path_bar() {
         let temp = std::env::temp_dir().join(format!("cutlass-folders-{}", std::process::id()));
@@ -14501,6 +15618,85 @@ mod tests {
             (times[1].0 - 2_000_000).abs() <= 34_000,
             "the key landed at {times:?}"
         );
+        // The key that was clicked and dragged is the picked one: it is
+        // drawn larger, and Delete takes it and leaves the clip.
+        assert_eq!(shell.selected_clip_key(), Some((id.clone(), times[1])));
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert_eq!(diamonds(&output, 10.0).len(), 1);
+        assert_eq!(diamonds(&output, 13.0).len(), 1);
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::Key {
+                key: egui::Key::Delete,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(shell.clip_key_times(&id), [Micros(0)]);
+        assert_eq!(shell.draft().unwrap().tracks[0].segments.len(), 1);
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert_eq!(diamonds(&output, 10.0).len(), 1);
+        assert!(diamonds(&output, 13.0).is_empty());
+
+        // A click picks one key; a Shift-click on another picks both and
+        // leaves the playhead; Delete then takes both and not the clip.
+        shell.undo().unwrap();
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let mut keys = diamonds(&output, 10.0);
+        keys.extend(diamonds(&output, 13.0));
+        keys.sort_by(|a, b| a.x.total_cmp(&b.x));
+        assert_eq!(keys.len(), 2, "{keys:?}");
+        frame(
+            &mut shell,
+            &mut view,
+            vec![
+                egui::Event::PointerMoved(keys[0]),
+                press(keys[0], true),
+                press(keys[0], false),
+            ],
+        );
+        assert_eq!(shell.playhead(), Micros(0));
+        let shift = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::SHIFT,
+        };
+        frame(
+            &mut shell,
+            &mut view,
+            vec![
+                egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+                egui::Event::PointerMoved(keys[1]),
+                shift(keys[1], true),
+                shift(keys[1], false),
+            ],
+        );
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)],
+        );
+        assert_eq!(shell.selected_clip_keys().len(), 2);
+        assert_eq!(shell.playhead(), Micros(0), "the playhead stayed");
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert_eq!(diamonds(&output, 13.0).len(), 2);
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::Key {
+                key: egui::Key::Delete,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(shell.clip_key_times(&id).is_empty());
+        assert_eq!(shell.draft().unwrap().tracks[0].segments.len(), 1);
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -14561,10 +15757,111 @@ mod tests {
         assert_eq!(shell.selection().len(), 2, "both clips stay picked");
         assert!(shell.clip_menu().is_some(), "the menu is open");
         let output = frame(&mut shell, &mut view, Vec::new());
-        assert!(
-            text_pos(&output, "Deactivate clips").is_some(),
-            "the menu for several clips"
+        // The menu for several clips: it has no row for one clip alone.
+        assert!(text_pos(&output, "Deactivate clip").is_some());
+        assert!(text_pos(&output, "Group").is_some());
+        assert!(text_pos(&output, "Split scenes").is_none());
+        assert!(text_pos(&output, "Trim clip").is_none());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn edit_effects_picks_the_clips_effect_or_lists_them_by_name() {
+        let temp = std::env::temp_dir().join(format!("cutlass-fxmenu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "a",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), press(true), press(false)]
+        };
+        let clip = SegmentId::new("a");
+        let cards = cutlass_editor::effect_cards();
+        let at = Pos2::new(300.0, 80.0);
+        let open = |shell: &mut Shell| {
+            shell.select(Some(SegmentId::new("a")));
+            shell.open_clip_menu(at.x, at.y);
+        };
+        frame(&mut shell, &mut view, Vec::new());
+
+        // No effect on the clip: the row is there, greyed, and a click on
+        // it does nothing.
+        open(&mut shell);
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let row = text_pos(&output, "Edit effects").expect("the row");
+        frame(&mut shell, &mut view, click(row + Vec2::new(4.0, 0.0)));
+        frame(&mut shell, &mut view, Vec::new());
+        assert_eq!(shell.selected(), Some(&clip));
+        shell.close_clip_menu();
+
+        // One effect: the row picks it.
+        shell
+            .effect_onto(&cards[0].id, clip.clone(), Micros(0), Micros(2_000_000))
+            .unwrap();
+        open(&mut shell);
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let row = text_pos(&output, "Edit effects").expect("the row");
+        assert!(text_pos(&output, "Later").is_none_or(|badge| (badge.y - row.y).abs() > 6.0));
+        frame(&mut shell, &mut view, click(row + Vec2::new(4.0, 0.0)));
+        frame(&mut shell, &mut view, Vec::new());
+        assert!(shell.clip_menu().is_none(), "the menu closed");
+        assert_eq!(
+            shell.selected_track_kind(),
+            Some(cutlass_model::TrackType::Effect)
         );
+        assert_eq!(shell.effect_name().as_deref(), Some(cards[0].name.as_str()));
+
+        // Two effects: the row opens their names, and a name picks its own.
+        shell
+            .effect_onto(&cards[1].id, clip.clone(), Micros(0), Micros(2_000_000))
+            .unwrap();
+        open(&mut shell);
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let row = text_pos(&output, "Edit effects").expect("the row") + Vec2::new(4.0, 0.0);
+        // The name is not on the menu until the row is under the pointer.
+        let second = cards[1].name.as_str();
+        frame(&mut shell, &mut view, vec![egui::Event::PointerMoved(row)]);
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let name = text_pos(&output, second).expect("the second effect's name");
+        assert!(text_pos(&output, cards[0].name.as_str()).is_some());
+        frame(&mut shell, &mut view, click(name + Vec2::new(4.0, 0.0)));
+        frame(&mut shell, &mut view, Vec::new());
+        assert!(shell.clip_menu().is_none(), "the menu closed");
+        assert_eq!(shell.effect_name().as_deref(), Some(second));
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -15339,6 +16636,57 @@ mod tests {
         for shown in &top.shown()[..10] {
             assert!(shown.bottom() <= sunk.top());
         }
+    }
+
+    #[test]
+    fn a_lane_out_of_view_is_scrolled_in_whole_and_one_in_view_is_left_alone() {
+        let area = Rect::from_min_size(Pos2::new(0.0, 100.0), Vec2::new(800.0, 400.0));
+        let whole = |kinds: &[(bool, f32)], index: usize, up: f32, down: f32| {
+            let laid = lane_layout(kinds, area, up, down);
+            let main = kinds.iter().position(|(main, _)| *main);
+            let folded = laid.peek && main.is_some_and(|main| index > main);
+            let band = if main == Some(index) {
+                area
+            } else {
+                laid.bands[index]
+            };
+            let row = laid.rows[index];
+            !folded && row.top() >= band.top() - 0.5 && row.bottom() <= band.bottom() + 0.5
+        };
+        // Ten lanes above main and eight under it, and a stack with no main.
+        let no_main = vec![(false, 62.0); 14];
+        for kinds in [crowded(8), crowded(1), no_main] {
+            let rest = lane_layout(&kinds, area, 0.0, 0.0);
+            let starts = [
+                (0.0, 0.0),
+                (rest.up_max, 0.0),
+                (0.0, rest.down_max),
+                (rest.up_max / 2.0, rest.down_max / 2.0),
+            ];
+            for index in 0..kinds.len() {
+                for (up, down) in starts {
+                    let (to_up, to_down) = reveal_row(&kinds, area, index, up, down);
+                    assert!(
+                        whole(&kinds, index, to_up, to_down),
+                        "lane {index} of {} from ({up}, {down}) at ({to_up}, {to_down})",
+                        kinds.len()
+                    );
+                    // A lane that showed whole already keeps the scroll it had.
+                    if whole(&kinds, index, up, down) {
+                        assert_eq!((to_up, to_down), (up, down), "lane {index}");
+                    }
+                    // Revealed, asking again moves nothing more.
+                    assert_eq!(
+                        reveal_row(&kinds, area, index, to_up, to_down),
+                        (to_up, to_down)
+                    );
+                }
+            }
+        }
+        // A lane taller than the sheet shows what fits and does not loop.
+        let tall = vec![(false, 900.0), (true, 90.0)];
+        let (up, down) = reveal_row(&tall, area, 0, 0.0, 0.0);
+        assert!(up.is_finite() && down.is_finite());
     }
 
     #[test]

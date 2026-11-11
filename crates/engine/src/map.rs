@@ -188,8 +188,8 @@ pub fn media_path<'a>(draft: &'a Draft, segment: &Segment) -> Option<&'a str> {
 /// Whether the mix should read this segment.
 ///
 /// A graphic is silent, and so is a deactivated clip. A picture whose own
-/// sound has been placed on a linked clip is silent too, so that sound is
-/// not played twice.
+/// sound has been taken off it is silent too: its material says so, or,
+/// in a draft from before that mark, its sound sits on a linked clip.
 #[must_use]
 pub fn contributes_sound(draft: &Draft, segment: &Segment) -> bool {
     if !segment.visible || is_graphic(draft, segment) {
@@ -198,9 +198,15 @@ pub fn contributes_sound(draft: &Draft, segment: &Segment) -> bool {
     !original_sound_is_separate(draft, segment)
 }
 
-fn original_sound_is_separate(draft: &Draft, segment: &Segment) -> bool {
-    if !matches!(material(draft, segment), Some(MaterialRef::Video(_))) {
+/// Whether the picture's own sound has been taken off it: its material
+/// says so, or its sound sits on a clip linked to it.
+#[must_use]
+pub fn original_sound_is_separate(draft: &Draft, segment: &Segment) -> bool {
+    let Some(MaterialRef::Video(video)) = material(draft, segment) else {
         return false;
+    };
+    if video.has_sound_separated {
+        return true;
     }
     draft
         .relationships

@@ -4,7 +4,7 @@
 
 use cutlass_editor::{
     BACKGROUND_ALPHA_START, BACKGROUND_ROUND_START, GLOW_RANGE_START, GLOW_STRENGTH_START,
-    OUTLINE_START, SHADOW_BLUR_START, SHADOW_DISTANCE_START, panel_of, starting, text_look,
+    OUTLINE_START, SHADOW_BLUR_START, SHADOW_DISTANCE_START, panel_of, starting,
 };
 pub use cutlass_editor::{LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
 use cutlass_model::{MaterialEffect, MaterialId, MaterialRef, Micros, SegmentId, WordColumns};
@@ -12,21 +12,109 @@ use cutlass_session::Request;
 
 use super::{Shell, ShellError};
 
-/// A setting keyed apart from the clip's pose.
+/// A setting keyed on its own: a key on one never keys another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyedSetting {
+    Position,
+    Scale,
+    Rotation,
+    Opacity,
+    /// Every mask value at once, as taking the mask off clears them.
     Mask,
+    MaskPosition,
+    MaskSize,
+    MaskRotation,
+    MaskFeather,
+    MaskRound,
     Volume,
     TextColor,
+    /// One colour Adjust slider.
+    Adjust(cutlass_effects::AdjustKey),
+    /// A filter's Amount.
+    FilterStrength,
+    LutStrength,
+    ChromaStrength,
+    ChromaShadow,
+    /// A recipe effect's control, by the key name its bundled recipe gives.
+    EffectControl(&'static str),
+    /// One of a text's style settings.
+    TextStyle(cutlass_model::TextStyleKey),
+    /// One of a shape's own settings.
+    ShapeStyle(cutlass_model::ShapeStyleKey),
+    /// One HSL slider: the colour, 0 red to 7 magenta, and the part, 0
+    /// hue, 1 saturation, 2 lightness.
+    Hsl(u8, u8),
+    /// A colour wheel's puck.
+    WheelPuck(cutlass_effects::Wheel),
+    /// A colour wheel's brightness ring.
+    WheelLuma(cutlass_effects::Wheel),
+    /// A title's glow Intensity.
+    GlowStrength,
+    /// How far a title's glow reaches.
+    GlowRange,
+    /// A clip's Relight strength.
+    RelightStrength,
+    /// The Custom light's color.
+    RelightColor,
+    /// The Custom light's direction.
+    RelightAngle,
+    /// A clip's canvas color, under its letterbox.
+    CanvasColor,
+    /// Motion blur's Blur.
+    MotionBlurLength,
+    /// Motion blur's Blend.
+    MotionBlurBlend,
+}
+
+impl KeyedSetting {
+    /// The mask's parts, each keyed on its own, with where its values sit
+    /// in [`cutlass_model::MASK_KEYS`].
+    pub const MASK_PARTS: [(Self, std::ops::Range<usize>); 5] = [
+        (Self::MaskPosition, 0..2),
+        (Self::MaskSize, 2..4),
+        (Self::MaskRotation, 4..5),
+        (Self::MaskFeather, 5..6),
+        (Self::MaskRound, 6..7),
+    ];
 }
 
 impl KeyedSetting {
     /// The key names the setting is stored under.
     #[must_use]
-    pub fn names(self) -> &'static [&'static str] {
+    pub fn names(&self) -> &[&'static str] {
         match self {
+            Self::Position => &cutlass_model::POSITION_KEYS,
+            Self::Scale => &cutlass_model::SCALE_KEYS,
+            Self::Rotation => &cutlass_model::ROTATION_KEYS,
+            Self::Opacity => &cutlass_model::OPACITY_KEYS,
             Self::Mask => &cutlass_model::MASK_KEYS,
+            Self::MaskPosition => &cutlass_model::MASK_POSITION_KEYS,
+            Self::MaskSize => &cutlass_model::MASK_SIZE_KEYS,
+            Self::MaskRotation => &cutlass_model::MASK_ROTATION_KEYS,
+            Self::MaskFeather => &cutlass_model::MASK_FEATHER_KEYS,
+            Self::MaskRound => &cutlass_model::MASK_ROUND_KEYS,
             Self::Volume => &[cutlass_model::VOLUME_KEY],
+            Self::Adjust(key) => key.keyframes(),
+            Self::FilterStrength => &cutlass_model::FILTER_STRENGTH_KEYS,
+            Self::LutStrength => &cutlass_model::LUT_STRENGTH_KEYS,
+            Self::ChromaStrength => &cutlass_model::CHROMA_STRENGTH_KEYS,
+            Self::ChromaShadow => &cutlass_model::CHROMA_SHADOW_KEYS,
+            Self::EffectControl(name) => std::slice::from_ref(name),
+            Self::TextStyle(key) => key.names(),
+            Self::ShapeStyle(key) => key.names(),
+            Self::Hsl(color, part) => {
+                cutlass_effects::hsl_keys(usize::from(*color), usize::from(*part))
+            }
+            Self::WheelPuck(wheel) => wheel.puck_keys(),
+            Self::WheelLuma(wheel) => wheel.luma_keys(),
+            Self::GlowStrength => &cutlass_model::GLOW_STRENGTH_KEYS,
+            Self::GlowRange => &cutlass_model::GLOW_RANGE_KEYS,
+            Self::RelightStrength => &cutlass_model::RELIGHT_STRENGTH_KEYS,
+            Self::RelightColor => &cutlass_model::RELIGHT_COLOR_KEYS,
+            Self::RelightAngle => &cutlass_model::RELIGHT_ANGLE_KEYS,
+            Self::CanvasColor => &cutlass_model::CANVAS_COLOR_KEYS,
+            Self::MotionBlurLength => &cutlass_model::MOTION_BLUR_LENGTH_KEYS,
+            Self::MotionBlurBlend => &cutlass_model::MOTION_BLUR_BLEND_KEYS,
             Self::TextColor => &cutlass_model::TEXT_COLOR_KEYS,
         }
     }
@@ -50,7 +138,25 @@ impl Shell {
     /// The selected title's outline, shadow, box, and glow.
     #[must_use]
     pub fn text_look(&self) -> Option<TextLook> {
-        text_look(self.draft()?, self.selected_segment()?)
+        cutlass_editor::text_look_at(self.draft()?, self.selected_segment()?, self.playhead)
+    }
+
+    /// The keys for each keyed text style setting in `parts` (the setting
+    /// and its new value) whose value changes, at the playhead.
+    fn style_keys(&self, parts: &[(cutlass_model::TextStyleKey, f64)]) -> Vec<Request> {
+        let (Some(draft), Some(segment)) = (self.draft(), self.selected_segment()) else {
+            return Vec::new();
+        };
+        parts
+            .iter()
+            .filter(|(key, value)| {
+                super::text_style_now(draft, segment, self.playhead, *key)
+                    .is_some_and(|now| (now - value).abs() > 1e-9)
+            })
+            .filter_map(|(key, value)| {
+                self.key_setting_here(KeyedSetting::TextStyle(*key), vec![*value])
+            })
+            .collect()
     }
 
     /// The selected effect, filter, or adjustment's stored name.
@@ -58,23 +164,43 @@ impl Shell {
     pub fn effect_name(&self) -> Option<String> {
         let draft = self.draft()?;
         let segment = self.selected_segment()?;
-        let name = match draft.materials.get(segment.material_id.as_str())? {
-            MaterialRef::VideoEffect(effect) => effect.name.clone(),
-            MaterialRef::Effect(effect) => effect.name.clone(),
-            MaterialRef::Plugin(effect) => effect.plugin_id.clone(),
-            MaterialRef::Other(raw) => raw
-                .fields
-                .get("name")
-                .and_then(|name| name.as_str())
-                .unwrap_or_default()
-                .to_owned(),
-            _ => String::new(),
+        Some(cutlass_editor::effect_title(draft, segment))
+    }
+
+    /// The effects that run over the one selected clip alone, for its
+    /// menu's Edit effects row. Empty with several clips picked.
+    #[must_use]
+    pub fn clip_effects(&self) -> Vec<cutlass_editor::ClipEffect> {
+        let (Some(draft), [clip]) = (self.draft(), self.selection()) else {
+            return Vec::new();
         };
-        Some(if name.is_empty() {
-            segment.material_id.as_str().to_owned()
-        } else {
-            name
-        })
+        cutlass_editor::effects_on(draft, clip)
+    }
+
+    /// Pick the effect `effect` that runs over the selected clip, so the
+    /// inspector shows its settings as it does for any effect clip.
+    pub fn edit_clip_effect(&mut self, effect: &SegmentId) -> Result<(), ShellError> {
+        if !self
+            .clip_effects()
+            .iter()
+            .any(|on| on.segment_id == *effect)
+        {
+            return Err(ShellError::Unavailable(
+                "that effect is not on the selected clip".to_owned(),
+            ));
+        }
+        self.select(Some(effect.clone()));
+        Ok(())
+    }
+
+    /// Whether the selected clip is a bundled filter, whose Amount is
+    /// played and so can be keyed.
+    #[must_use]
+    pub fn is_filter(&self) -> bool {
+        let (Some(draft), Some(segment)) = (self.draft(), self.selected_segment()) else {
+            return false;
+        };
+        cutlass_effects::segment_look(draft, segment).is_some()
     }
 
     /// The selected effect, filter, or adjustment's strength from 0 to 1. A
@@ -83,6 +209,17 @@ impl Shell {
     pub fn effect_strength(&self) -> Option<f64> {
         let draft = self.draft()?;
         let segment = self.selected_segment()?;
+        // A filter's keyed Amount shows where the playhead is.
+        if self.is_filter()
+            && let Some(keyed) = cutlass_effects::keyed_unit(
+                segment,
+                &draft.keyframe_graph_list,
+                &cutlass_model::FILTER_STRENGTH_KEYS,
+                self.playhead,
+            )
+        {
+            return Some(f64::from(keyed));
+        }
         match draft.materials.get(segment.material_id.as_str())? {
             MaterialRef::VideoEffect(effect) => Some(effect.value),
             MaterialRef::Effect(effect) if effect.kind != MaterialEffect::BLOOM => {
@@ -97,6 +234,11 @@ impl Shell {
     pub fn set_effect_strength(&mut self, value: f64) -> Result<(), ShellError> {
         let segment_id = self.selected_or_refuse()?;
         self.refuse_locked(&segment_id)?;
+        if self.is_filter()
+            && let Some(key) = self.key_setting_here(KeyedSetting::FilterStrength, vec![value])
+        {
+            return self.apply(key);
+        }
         let material_id = MaterialId::new(self.fresh("effect"));
         self.apply(Request::SetEffectStrength {
             segment_id,
@@ -117,7 +259,14 @@ impl Shell {
             return None;
         };
         let recipe = cutlass_effects::bundled_recipe(&effect.effect_id)?;
-        let stored = cutlass_effects::stored_controls(effect);
+        // Keyed controls show where the playhead is.
+        let stored = cutlass_effects::keyed_controls(
+            recipe,
+            cutlass_effects::stored_controls(effect),
+            segment,
+            &draft.keyframe_graph_list,
+            self.playhead,
+        );
         Some(
             recipe
                 .controls
@@ -132,11 +281,34 @@ impl Shell {
         )
     }
 
+    /// The keyed setting for the selected recipe effect's control `id`,
+    /// when it can be keyed.
+    #[must_use]
+    pub fn effect_control_setting(&self, id: &str) -> Option<KeyedSetting> {
+        let draft = self.draft()?;
+        let segment = self.selected_segment()?;
+        let MaterialRef::VideoEffect(effect) = draft.materials.get(segment.material_id.as_str())?
+        else {
+            return None;
+        };
+        let recipe = cutlass_effects::bundled_recipe(&effect.effect_id)?;
+        let control = recipe
+            .controls
+            .iter()
+            .find(|control| control.id == id && control.keyable())?;
+        Some(KeyedSetting::EffectControl(control.keyframe.as_str()))
+    }
+
     /// Store `value` for the selected effect's control `control`. A split
     /// clip's halves get their own once one changes. One undo restores it.
     pub fn set_effect_control(&mut self, control: &str, value: f64) -> Result<(), ShellError> {
         let segment_id = self.selected_or_refuse()?;
         self.refuse_locked(&segment_id)?;
+        if let Some(setting) = self.effect_control_setting(control)
+            && let Some(key) = self.key_setting_here(setting, vec![value])
+        {
+            return self.apply(key);
+        }
         let material_id = MaterialId::new(self.fresh("effect"));
         self.apply(Request::SetEffectControl {
             segment_id,
@@ -212,14 +384,164 @@ impl Shell {
                 })
             })
             .unwrap_or(to);
-        let offset = Micros((snapped.0 - start).clamp(0, length));
-        if offset.0 == from.0 - start {
+        let from_offset = Micros(from.0 - start);
+        // Dragging one of several picked keys moves them all by as much,
+        // as far as the first and last of them can go on the clip.
+        let together: Vec<Micros> = self
+            .selected_keys
+            .iter()
+            .filter(|(id, _)| id == segment_id)
+            .map(|(_, offset)| *offset)
+            .collect();
+        if together.len() > 1 && together.contains(&from_offset) {
+            let first = together.iter().map(|offset| offset.0).min().unwrap_or(0);
+            let last = together.iter().map(|offset| offset.0).max().unwrap_or(0);
+            let delta =
+                (snapped.0 - start - from_offset.0).clamp(-first, (length - last).max(-first));
+            if delta == 0 {
+                return Ok(());
+            }
+            let request = cutlass_editor::move_keys(draft, segment_id, &together, delta)
+                .ok_or_else(|| ShellError::Unavailable("a key is already there".to_owned()))?;
+            self.apply(request)?;
+            for (id, offset) in &mut self.selected_keys {
+                if id == segment_id {
+                    offset.0 += delta;
+                }
+            }
             return Ok(());
         }
-        let request =
-            cutlass_editor::move_key(draft, segment_id, Micros(from.0 - start), offset)
-                .ok_or_else(|| ShellError::Unavailable("a key is already there".to_owned()))?;
-        self.apply(request)
+        let offset = Micros((snapped.0 - start).clamp(0, length));
+        if offset == from_offset {
+            return Ok(());
+        }
+        let request = cutlass_editor::move_key(draft, segment_id, from_offset, offset)
+            .ok_or_else(|| ShellError::Unavailable("a key is already there".to_owned()))?;
+        self.apply(request)?;
+        // The key that was dragged stays the picked one.
+        self.selected_keys = vec![(segment_id.clone(), offset)];
+        Ok(())
+    }
+
+    /// The key of clip `segment_id` at timeline time `time`, as the clip
+    /// and the time from its start, when it has one there.
+    fn key_at(&self, segment_id: &SegmentId, time: Micros) -> Option<(SegmentId, Micros)> {
+        if !self.clip_key_times(segment_id).contains(&time) {
+            return None;
+        }
+        let start = self
+            .draft()?
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| segment.id == *segment_id)?
+            .target
+            .start
+            .0;
+        Some((segment_id.clone(), Micros(time.0 - start)))
+    }
+
+    /// Pick the keyframe of clip `segment_id` at timeline time `time`
+    /// alone, so Delete takes it and not the clip. A time with no key
+    /// picks nothing.
+    pub fn select_clip_key(&mut self, segment_id: &SegmentId, time: Micros) {
+        self.selected_keys = self.key_at(segment_id, time).into_iter().collect();
+    }
+
+    /// Add the keyframe of clip `segment_id` at timeline time `time` to
+    /// the picked ones, or take it out when it is one of them: a click
+    /// with Shift or Command held.
+    pub fn toggle_clip_key(&mut self, segment_id: &SegmentId, time: Micros) {
+        let Some(key) = self.key_at(segment_id, time) else {
+            return;
+        };
+        match self.selected_keys.iter().position(|picked| *picked == key) {
+            Some(at) => {
+                self.selected_keys.remove(at);
+            }
+            None => self.selected_keys.push(key),
+        }
+    }
+
+    /// Whether the keyframe of clip `segment_id` at timeline time `time`
+    /// is one of the picked ones.
+    #[must_use]
+    pub fn clip_key_picked(&self, segment_id: &SegmentId, time: Micros) -> bool {
+        self.selected_clip_keys()
+            .iter()
+            .any(|(id, at)| id == segment_id && *at == time)
+    }
+
+    /// The picked keyframes, each as its clip and its timeline time, in
+    /// the order they were picked. One whose clip is no longer selected,
+    /// or that has no key there any more, is left out.
+    #[must_use]
+    pub fn selected_clip_keys(&self) -> Vec<(SegmentId, Micros)> {
+        let Some(draft) = self.draft() else {
+            return Vec::new();
+        };
+        self.selected_keys
+            .iter()
+            .filter(|(segment_id, _)| self.is_selected(segment_id))
+            .filter_map(|(segment_id, offset)| {
+                let segment = draft
+                    .tracks
+                    .iter()
+                    .flat_map(|track| &track.segments)
+                    .find(|segment| segment.id == *segment_id)?;
+                cutlass_model::key_offsets(segment)
+                    .contains(offset)
+                    .then(|| {
+                        (
+                            segment_id.clone(),
+                            Micros(segment.target.start.0.saturating_add(offset.0)),
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    /// The keyframe picked last, as its clip and its timeline time.
+    #[must_use]
+    pub fn selected_clip_key(&self) -> Option<(SegmentId, Micros)> {
+        self.selected_clip_keys().pop()
+    }
+
+    /// Take the picked keyframes off their clips: every key at each of
+    /// those times, whatever it keys. The clips stay. One undo step.
+    pub fn remove_selected_key(&mut self) -> Result<(), ShellError> {
+        let live = self.selected_clip_keys();
+        let nothing = || ShellError::Unavailable("no keyframe is selected".to_owned());
+        if live.is_empty() {
+            return Err(nothing());
+        }
+        // The picked keys by clip, as times from each clip's start.
+        let mut by_clip: Vec<(SegmentId, Vec<Micros>)> = Vec::new();
+        for (segment_id, offset) in &self.selected_keys {
+            if !live.iter().any(|(id, _)| id == segment_id) {
+                continue;
+            }
+            match by_clip.iter_mut().find(|(id, _)| id == segment_id) {
+                Some((_, offsets)) => offsets.push(*offset),
+                None => by_clip.push((segment_id.clone(), vec![*offset])),
+            }
+        }
+        for (segment_id, _) in &by_clip {
+            self.refuse_locked(segment_id)?;
+        }
+        let draft = self.session_draft()?;
+        let requests: Vec<_> = by_clip
+            .iter()
+            .filter_map(|(segment_id, offsets)| {
+                cutlass_editor::remove_keys(draft, segment_id, offsets)
+            })
+            .collect();
+        if requests.is_empty() {
+            return Err(nothing());
+        }
+        self.apply_requests(&requests)?;
+        self.selected_keys.clear();
+        Ok(())
     }
 
     /// The selected picture or title's keyframes, read at the playhead.
@@ -251,6 +573,19 @@ impl Shell {
     /// Remove the selected clip's `setting` key under the playhead, or key
     /// `setting` there as it is now. One undo step.
     pub fn toggle_setting_key(&mut self, setting: KeyedSetting) -> Result<(), ShellError> {
+        self.toggle_setting_key_alone(setting)?;
+        // Motion blur's copy is made from its keys, so new keys make it
+        // again.
+        if matches!(
+            setting,
+            KeyedSetting::MotionBlurLength | KeyedSetting::MotionBlurBlend
+        ) {
+            self.remake_motion_blur();
+        }
+        Ok(())
+    }
+
+    fn toggle_setting_key_alone(&mut self, setting: KeyedSetting) -> Result<(), ShellError> {
         let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
         self.refuse_locked(&segment_id)?;
         let keys = self.setting_keys(setting).ok_or(ShellError::NoProject)?;
@@ -270,8 +605,39 @@ impl Shell {
         }
         let values = self.setting_values(setting).ok_or_else(|| {
             ShellError::Unavailable(match setting {
-                KeyedSetting::Mask => "pick a mask shape first".to_owned(),
+                KeyedSetting::Position
+                | KeyedSetting::Scale
+                | KeyedSetting::Rotation
+                | KeyedSetting::Opacity => "keyframes belong on a picture or title".to_owned(),
+                KeyedSetting::Mask
+                | KeyedSetting::MaskPosition
+                | KeyedSetting::MaskSize
+                | KeyedSetting::MaskRotation
+                | KeyedSetting::MaskFeather
+                | KeyedSetting::MaskRound => "pick a mask shape first".to_owned(),
                 KeyedSetting::Volume => "the clip has no sound to key".to_owned(),
+                KeyedSetting::Adjust(_) => "adjustments belong on a picture".to_owned(),
+                KeyedSetting::FilterStrength => "an Amount key belongs on a filter".to_owned(),
+                KeyedSetting::LutStrength => "pick a LUT first".to_owned(),
+                KeyedSetting::ChromaStrength | KeyedSetting::ChromaShadow => {
+                    "switch Chroma key on first".to_owned()
+                }
+                KeyedSetting::EffectControl(_) => "this setting cannot be keyed".to_owned(),
+                KeyedSetting::TextStyle(_) => "a text style key belongs on text".to_owned(),
+                KeyedSetting::ShapeStyle(_) => "a shape key belongs on a shape".to_owned(),
+                KeyedSetting::GlowStrength | KeyedSetting::GlowRange => {
+                    "switch the glow on first".to_owned()
+                }
+                KeyedSetting::RelightStrength
+                | KeyedSetting::RelightColor
+                | KeyedSetting::RelightAngle => "pick a light first".to_owned(),
+                KeyedSetting::CanvasColor => "switch Canvas on first".to_owned(),
+                KeyedSetting::MotionBlurLength | KeyedSetting::MotionBlurBlend => {
+                    "switch Motion blur on first".to_owned()
+                }
+                KeyedSetting::Hsl(..) | KeyedSetting::WheelPuck(_) | KeyedSetting::WheelLuma(_) => {
+                    "colour keys belong on a picture".to_owned()
+                }
                 KeyedSetting::TextColor => "a color key belongs on text".to_owned(),
             })
         })?;
@@ -302,21 +668,92 @@ impl Shell {
     fn setting_values(&self, setting: KeyedSetting) -> Option<Vec<(String, f64)>> {
         let inspection = self.inspection()?;
         let values: Vec<f64> = match setting {
-            KeyedSetting::Mask => {
-                let mask = inspection.mask?;
-                [
-                    mask.x,
-                    mask.y,
-                    mask.width,
-                    mask.height,
-                    mask.rotation,
-                    mask.feather,
-                    mask.round,
-                ]
-                .map(f64::from)
-                .to_vec()
+            KeyedSetting::Position
+            | KeyedSetting::Scale
+            | KeyedSetting::Rotation
+            | KeyedSetting::Opacity => {
+                // Only a picture or title has a pose to key.
+                self.keys()?;
+                self.pose_values(setting, &inspection)?
+            }
+            KeyedSetting::Mask => mask_values(&inspection.mask?).to_vec(),
+            KeyedSetting::MaskPosition
+            | KeyedSetting::MaskSize
+            | KeyedSetting::MaskRotation
+            | KeyedSetting::MaskFeather
+            | KeyedSetting::MaskRound => {
+                let values = mask_values(&inspection.mask?);
+                let (_, range) = KeyedSetting::MASK_PARTS
+                    .into_iter()
+                    .find(|(part, _)| *part == setting)?;
+                values[range].to_vec()
             }
             KeyedSetting::Volume => vec![inspection.volume],
+            KeyedSetting::Adjust(key) => {
+                self.adjust_segment().ok()?;
+                vec![f64::from(inspection.adjust.get(key))]
+            }
+            KeyedSetting::FilterStrength => {
+                self.is_filter().then_some(())?;
+                vec![self.effect_strength()?]
+            }
+            KeyedSetting::LutStrength => vec![f64::from(inspection.lut?.1)],
+            KeyedSetting::ChromaStrength => vec![f64::from(inspection.chroma?.strength)],
+            KeyedSetting::ChromaShadow => vec![f64::from(inspection.chroma?.shadow)],
+            KeyedSetting::TextStyle(key) => {
+                let segment = self.selected_segment()?;
+                let draft = self.draft()?;
+                let Some(MaterialRef::Text(text)) =
+                    draft.materials.get(segment.material_id.as_str())
+                else {
+                    return None;
+                };
+                let keyed = super::text_style_now(draft, segment, self.playhead, key);
+                vec![keyed.unwrap_or_else(|| key.get(text))]
+            }
+            KeyedSetting::ShapeStyle(key) => key.get(&self.shape()?),
+            KeyedSetting::RelightStrength => vec![self.relight()?.strength],
+            KeyedSetting::RelightColor => {
+                super::relight::relight_rgb(&self.relight()?.color).to_vec()
+            }
+            KeyedSetting::RelightAngle => vec![self.relight()?.angle],
+            KeyedSetting::MotionBlurLength => vec![self.motion_blur()?.blur],
+            KeyedSetting::MotionBlurBlend => vec![self.motion_blur()?.blend],
+            KeyedSetting::CanvasColor => {
+                (!inspection.letterbox.is_empty()).then_some(())?;
+                unit_rgb(&inspection.letterbox).to_vec()
+            }
+            KeyedSetting::GlowStrength | KeyedSetting::GlowRange => {
+                let look = self
+                    .text_look()
+                    .filter(|look| !look.glow_color.is_empty())?;
+                vec![if setting == KeyedSetting::GlowStrength {
+                    look.glow_strength
+                } else {
+                    look.glow_range
+                }]
+            }
+            KeyedSetting::Hsl(color, part) => {
+                self.adjust_segment().ok()?;
+                let values = inspection.grade.hsl.get(usize::from(color))?;
+                vec![f64::from(*values.get(usize::from(part))?)]
+            }
+            KeyedSetting::WheelPuck(wheel) => {
+                self.adjust_segment().ok()?;
+                let setting = inspection.grade.wheel(wheel);
+                vec![f64::from(setting.x), f64::from(setting.y)]
+            }
+            KeyedSetting::WheelLuma(wheel) => {
+                self.adjust_segment().ok()?;
+                vec![f64::from(inspection.grade.wheel(wheel).luma)]
+            }
+            KeyedSetting::EffectControl(name) => {
+                let (_, value) = self
+                    .effect_controls()?
+                    .into_iter()
+                    .find(|(control, _)| control.keyable() && control.keyframe == name)?;
+                vec![f64::from(value)]
+            }
             KeyedSetting::TextColor => {
                 if inspection.text_color.is_empty() && self.text_look().is_none() {
                     return None;
@@ -332,6 +769,31 @@ impl Shell {
                 .zip(values)
                 .collect(),
         )
+    }
+
+    /// The pose part `setting` as the inspector shows it at the playhead,
+    /// one value for each of its key names, in order. Scale keys the name
+    /// that drives both axes only when the clip already keys it, since that
+    /// name wins over the two axes while uniform scale is on.
+    fn pose_values(
+        &self,
+        setting: KeyedSetting,
+        inspection: &super::Inspection,
+    ) -> Option<Vec<f64>> {
+        Some(match setting {
+            KeyedSetting::Position => vec![inspection.transform_x, inspection.transform_y],
+            KeyedSetting::Scale => {
+                let segment = self.selected_segment()?;
+                let mut values = vec![inspection.scale_x, inspection.scale_y];
+                if cutlass_model::has_keys(segment, &cutlass_model::SCALE_KEYS[2..]) {
+                    values.push(inspection.scale_x);
+                }
+                values
+            }
+            KeyedSetting::Rotation => vec![inspection.rotation],
+            KeyedSetting::Opacity => vec![inspection.opacity],
+            _ => return None,
+        })
     }
 
     /// The request that keys `setting` at the playhead as `values`, when
@@ -402,16 +864,40 @@ impl Shell {
         self.apply(request)
     }
 
+    /// Ease the span of `setting`'s keys the playhead is in along the Graphs
+    /// curve `graph`, or make it straight with `None`; every other
+    /// setting's keys keep their easing. One undo step.
+    pub fn ease_setting_keys(
+        &mut self,
+        setting: KeyedSetting,
+        graph: Option<String>,
+    ) -> Result<(), ShellError> {
+        let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
+        self.refuse_locked(&segment_id)?;
+        let request = self
+            .setting_keys(setting)
+            .and_then(|keys| keys.ease_only(&segment_id, graph, setting.names()))
+            .ok_or_else(|| {
+                ShellError::Unavailable(
+                    "move the playhead between two keyframes to ease them".to_owned(),
+                )
+            })?;
+        self.apply(request)
+    }
+
     /// Ring the selected title's letters in `color`, `width` ems wide. An
     /// empty color takes the outline off. One undo restores it.
     pub fn set_text_outline(&mut self, color: &str, width: f64) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
-        self.apply(Request::SetTextOutline {
+        let width = starting(color, width, OUTLINE_START);
+        let mut requests = vec![Request::SetTextOutline {
             segment_id,
             color: color.to_owned(),
-            width: starting(color, width, OUTLINE_START),
-        })
+            width,
+        }];
+        requests.extend(self.style_keys(&[(cutlass_model::TextStyleKey::StrokeWidth, width)]));
+        self.apply_requests(&requests)
     }
 
     /// Cast the selected title's shadow in `color`, `distance` hundredths of
@@ -426,13 +912,22 @@ impl Shell {
     ) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
-        self.apply(Request::SetTextShadow {
+        let distance = starting(color, distance, SHADOW_DISTANCE_START);
+        let blur = starting(color, blur, SHADOW_BLUR_START);
+        let mut requests = vec![Request::SetTextShadow {
             segment_id,
             color: color.to_owned(),
-            distance: starting(color, distance, SHADOW_DISTANCE_START),
+            distance,
             angle,
-            blur: starting(color, blur, SHADOW_BLUR_START),
-        })
+            blur,
+        }];
+        use cutlass_model::TextStyleKey as Key;
+        requests.extend(self.style_keys(&[
+            (Key::ShadowDistance, distance),
+            (Key::ShadowAngle, angle),
+            (Key::ShadowBlur, blur),
+        ]));
+        self.apply_requests(&requests)
     }
 
     /// Fill a box behind the selected title in `color` at `alpha`, its
@@ -446,12 +941,19 @@ impl Shell {
     ) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
-        self.apply(Request::SetTextBackground {
+        let alpha = starting(color, alpha, BACKGROUND_ALPHA_START);
+        let round = starting(color, round, BACKGROUND_ROUND_START);
+        let mut requests = vec![Request::SetTextBackground {
             segment_id,
             color: color.to_owned(),
-            alpha: starting(color, alpha, BACKGROUND_ALPHA_START),
-            round: starting(color, round, BACKGROUND_ROUND_START),
-        })
+            alpha,
+            round,
+        }];
+        use cutlass_model::TextStyleKey as Key;
+        requests.extend(
+            self.style_keys(&[(Key::BackgroundAlpha, alpha), (Key::BackgroundRound, round)]),
+        );
+        self.apply_requests(&requests)
     }
 
     /// Shape the selected title's background as the bubble keyed `bubble`.
@@ -560,13 +1062,36 @@ impl Shell {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
         let glow_id = MaterialId::new(self.fresh("glow"));
-        self.apply(Request::SetTextGlow {
+        let strength = starting(color, strength, GLOW_STRENGTH_START);
+        let range = starting(color, range, GLOW_RANGE_START);
+        let now = self.text_look();
+        let mut requests = vec![Request::SetTextGlow {
             segment_id,
             glow_id,
             color: color.to_owned(),
-            strength: starting(color, strength, GLOW_STRENGTH_START),
-            range: starting(color, range, GLOW_RANGE_START),
-        })
+            strength,
+            range,
+        }];
+        // A keyed Intensity or Range plays its keys, so a change keys it here.
+        for (setting, value, was) in [
+            (
+                KeyedSetting::GlowStrength,
+                strength,
+                now.as_ref().map(|look| look.glow_strength),
+            ),
+            (
+                KeyedSetting::GlowRange,
+                range,
+                now.as_ref().map(|look| look.glow_range),
+            ),
+        ] {
+            if was.is_some_and(|was| (was - value).abs() > 1e-9)
+                && let Some(key) = self.key_setting_here(setting, vec![value])
+            {
+                requests.push(key);
+            }
+        }
+        self.apply_requests(&requests)
     }
 
     /// The selected title's words without any rich styling.
@@ -1027,7 +1552,7 @@ pub(super) fn rgb_hex(rgb: [f64; 3]) -> String {
 
 /// The red, green and blue of `#rrggbb`, each from 0 to 1; white when it
 /// does not read.
-fn unit_rgb(color: &str) -> [f64; 3] {
+pub(super) fn unit_rgb(color: &str) -> [f64; 3] {
     let body = color.trim().trim_start_matches('#');
     let channel = |at: usize| {
         body.get(at..at + 2)
@@ -1035,6 +1560,21 @@ fn unit_rgb(color: &str) -> [f64; 3] {
             .map_or(1.0, |byte| f64::from(byte) / 255.0)
     };
     [channel(0), channel(2), channel(4)]
+}
+
+/// The mask's values in the order of [`cutlass_model::MASK_KEYS`].
+#[must_use]
+pub fn mask_values(mask: &cutlass_effects::Mask) -> [f64; 7] {
+    [
+        mask.x,
+        mask.y,
+        mask.width,
+        mask.height,
+        mask.rotation,
+        mask.feather,
+        mask.round,
+    ]
+    .map(f64::from)
 }
 
 #[cfg(test)]
@@ -1405,6 +1945,233 @@ mod tests {
         desktop.set_mask(None).unwrap();
         assert!(!desktop.setting_keyed(super::KeyedSetting::Mask));
         assert!(desktop.inspection().unwrap().mask.is_none());
+    }
+
+    #[test]
+    fn each_adjust_slider_keys_on_its_own_and_reset_takes_the_keys_off() {
+        use super::KeyedSetting;
+        use cutlass_effects::AdjustKey;
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "main");
+        let exposure = KeyedSetting::Adjust(AdjustKey::Exposure);
+        desktop.seek(cutlass_model::Micros(0));
+        desktop.toggle_setting_key(exposure).unwrap();
+        desktop.seek(cutlass_model::Micros(2_000_000));
+        desktop.set_adjust(AdjustKey::Exposure, 0.5).unwrap();
+        // Contrast is not keyed, so it is stored all along the clip.
+        desktop.set_adjust(AdjustKey::Contrast, 0.25).unwrap();
+        let times = |desktop: &Shell, setting| desktop.setting_keys(setting).unwrap().times;
+        assert_eq!(times(&desktop, exposure).len(), 2);
+        assert!(times(&desktop, KeyedSetting::Adjust(AdjustKey::Contrast)).is_empty());
+        desktop.seek(cutlass_model::Micros(1_000_000));
+        let adjust = desktop.inspection().unwrap().adjust;
+        assert!((adjust.get(AdjustKey::Exposure) - 0.25).abs() < 1e-6);
+        assert!((adjust.get(AdjustKey::Contrast) - 0.25).abs() < 1e-6);
+        // Nothing in the pose was keyed.
+        assert!(desktop.keys().is_none_or(|keys| keys.times.is_empty()));
+
+        desktop.reset_adjust().unwrap();
+        assert!(times(&desktop, exposure).is_empty());
+        assert!(desktop.inspection().unwrap().adjust.is_identity());
+        desktop.undo().unwrap();
+        assert_eq!(times(&desktop, exposure).len(), 2);
+    }
+
+    #[test]
+    fn a_chroma_key_keys_its_intensity_and_shadow_apart() {
+        use super::KeyedSetting;
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "main");
+        desktop.set_chroma("#00ff00", 0.5, 0.0).unwrap();
+        desktop.seek(cutlass_model::Micros(0));
+        desktop
+            .toggle_setting_key(KeyedSetting::ChromaStrength)
+            .unwrap();
+        desktop.seek(cutlass_model::Micros(2_000_000));
+        desktop.set_chroma("#00ff00", 1.0, 0.0).unwrap();
+        // The shadow is not keyed, so it is stored all along the clip.
+        desktop.set_chroma("#00ff00", 1.0, 0.25).unwrap();
+        let times = |desktop: &Shell, setting| desktop.setting_keys(setting).unwrap().times;
+        assert_eq!(times(&desktop, KeyedSetting::ChromaStrength).len(), 2);
+        assert!(times(&desktop, KeyedSetting::ChromaShadow).is_empty());
+        desktop.seek(cutlass_model::Micros(1_000_000));
+        let chroma = desktop.inspection().unwrap().chroma.unwrap();
+        assert!((chroma.strength - 0.75).abs() < 1e-6, "{chroma:?}");
+        assert!((chroma.shadow - 0.25).abs() < 1e-6, "{chroma:?}");
+        // Taking the key off takes its keys too, in one undo step.
+        desktop.set_chroma("", 0.0, 0.0).unwrap();
+        assert!(desktop.inspection().unwrap().chroma.is_none());
+        assert!(times(&desktop, KeyedSetting::ChromaStrength).is_empty());
+        desktop.undo().unwrap();
+        assert_eq!(times(&desktop, KeyedSetting::ChromaStrength).len(), 2);
+        // A clip that is not a bundled filter has no Amount to key.
+        pick(&mut desktop, "fx");
+        assert!(!desktop.is_filter());
+        assert!(
+            desktop
+                .toggle_setting_key(KeyedSetting::FilterStrength)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_recipe_control_keys_on_its_own_and_speed_is_never_keyed() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "fx");
+        assert_eq!(desktop.effect_control_setting("speed"), None);
+        let intensity = desktop.effect_control_setting("intensity").unwrap();
+        desktop.seek(cutlass_model::Micros(1_000_000));
+        desktop.toggle_setting_key(intensity).unwrap();
+        desktop.seek(cutlass_model::Micros(3_000_000));
+        desktop.set_effect_control("intensity", 2.0).unwrap();
+        desktop.set_effect_control("speed", 2.0).unwrap();
+        assert_eq!(desktop.setting_keys(intensity).unwrap().times.len(), 2);
+        desktop.seek(cutlass_model::Micros(2_000_000));
+        let value = |desktop: &Shell, id: &str| {
+            desktop
+                .effect_controls()
+                .unwrap()
+                .into_iter()
+                .find(|(control, _)| control.id == id)
+                .unwrap()
+                .1
+        };
+        assert!((value(&desktop, "intensity") - 1.5).abs() < 1e-6);
+        // Speed was stored, the same all along the effect.
+        assert_eq!(value(&desktop, "speed"), 2.0);
+        let draft = desktop.draft().unwrap();
+        let fx = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| segment.id.as_str() == "fx")
+            .unwrap();
+        let names: Vec<&str> = fx
+            .common_keyframes
+            .iter()
+            .map(|group| group.property_type.as_str())
+            .collect();
+        assert_eq!(names, ["KFTypeEffectControl_intensity"]);
+    }
+
+    #[test]
+    fn a_glow_intensity_keys_without_its_range() {
+        use super::KeyedSetting;
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "words");
+        desktop.set_text_glow("#FFFFFF", 0.2, 0.5).unwrap();
+        desktop.seek(cutlass_model::Micros(1_000_000));
+        desktop
+            .toggle_setting_key(KeyedSetting::GlowStrength)
+            .unwrap();
+        desktop.seek(cutlass_model::Micros(3_000_000));
+        desktop.set_text_glow("#FFFFFF", 0.6, 0.5).unwrap();
+        // Range has no keys, so it is stored all along the title.
+        desktop.set_text_glow("#FFFFFF", 0.6, 0.9).unwrap();
+        let times = |desktop: &Shell, setting| desktop.setting_keys(setting).unwrap().times;
+        assert_eq!(times(&desktop, KeyedSetting::GlowStrength).len(), 2);
+        assert!(times(&desktop, KeyedSetting::GlowRange).is_empty());
+        desktop.seek(cutlass_model::Micros(2_000_000));
+        let look = desktop.text_look().unwrap();
+        assert!((look.glow_strength - 0.4).abs() < 1e-6);
+        assert!((look.glow_range - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn each_text_style_keys_on_its_own() {
+        use super::KeyedSetting;
+        use cutlass_model::TextStyleKey as Style;
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "words");
+        desktop.set_text_size(20.0).unwrap();
+        desktop.set_text_shadow("#000000", 10.0, 45.0, 0.5).unwrap();
+        let (start, end) = (
+            cutlass_model::Micros(1_000_000),
+            cutlass_model::Micros(3_000_000),
+        );
+        desktop.seek(start);
+        desktop
+            .toggle_setting_key(KeyedSetting::TextStyle(Style::Size))
+            .unwrap();
+        desktop
+            .toggle_setting_key(KeyedSetting::TextStyle(Style::ShadowDistance))
+            .unwrap();
+        desktop.seek(end);
+        desktop.set_text_size(60.0).unwrap();
+        desktop.set_text_shadow("#000000", 50.0, 45.0, 0.5).unwrap();
+        // Not keyed, so stored all along the title.
+        desktop.set_letter_spacing(0.5).unwrap();
+        desktop.set_text_shadow("#000000", 50.0, 90.0, 0.5).unwrap();
+        let times = |desktop: &Shell, key| {
+            desktop
+                .setting_keys(KeyedSetting::TextStyle(key))
+                .unwrap()
+                .times
+        };
+        assert_eq!(times(&desktop, Style::Size).len(), 2);
+        assert_eq!(times(&desktop, Style::ShadowDistance).len(), 2);
+        for other in [Style::LetterSpacing, Style::ShadowAngle, Style::ShadowBlur] {
+            assert!(times(&desktop, other).is_empty(), "{other:?}");
+        }
+        desktop.seek(cutlass_model::Micros(2_000_000));
+        let inspection = desktop.inspection().unwrap();
+        assert!((inspection.text_size - 40.0).abs() < 1e-6);
+        assert!((inspection.letter_spacing - 0.5).abs() < 1e-6);
+        let look = desktop.text_look().unwrap();
+        assert!((look.shadow_distance - 30.0).abs() < 1e-6, "{look:?}");
+        assert!((look.shadow_angle - 90.0).abs() < 1e-6, "{look:?}");
+    }
+
+    #[test]
+    fn each_mask_part_keys_on_its_own() {
+        use super::KeyedSetting;
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "main");
+        let circle = cutlass_effects::Mask::new(cutlass_effects::MaskShape::Circle);
+        desktop.set_mask(Some(circle)).unwrap();
+        desktop.seek(cutlass_model::Micros(0));
+        desktop
+            .toggle_setting_key(KeyedSetting::MaskFeather)
+            .unwrap();
+        desktop.seek(cutlass_model::Micros(2_000_000));
+        desktop
+            .set_mask(Some(cutlass_effects::Mask {
+                feather: 1.0,
+                ..circle
+            }))
+            .unwrap();
+        let times = |desktop: &Shell, part| desktop.setting_keys(part).unwrap().times;
+        assert_eq!(times(&desktop, KeyedSetting::MaskFeather).len(), 2);
+        // Moving the mask is stored, not keyed, and the feather keys stay.
+        desktop
+            .set_mask(Some(cutlass_effects::Mask {
+                x: 0.5,
+                feather: 1.0,
+                ..circle
+            }))
+            .unwrap();
+        for part in [
+            KeyedSetting::MaskPosition,
+            KeyedSetting::MaskSize,
+            KeyedSetting::MaskRotation,
+            KeyedSetting::MaskRound,
+        ] {
+            assert!(times(&desktop, part).is_empty(), "{part:?}");
+        }
+        assert_eq!(times(&desktop, KeyedSetting::MaskFeather).len(), 2);
+        desktop.seek(cutlass_model::Micros(1_000_000));
+        let mask = desktop.inspection().unwrap().mask.unwrap();
+        assert!((mask.x - 0.5).abs() < 1e-6, "{mask:?}");
+        assert!(
+            (mask.feather - (circle.feather + 1.0) / 2.0).abs() < 1e-6,
+            "{mask:?}"
+        );
     }
 
     #[test]

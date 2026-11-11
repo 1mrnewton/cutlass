@@ -21,6 +21,7 @@ pub(crate) enum Picker {
     SkillFolder,
     Lut,
     Replace,
+    Link,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -76,6 +77,17 @@ impl Dialogs {
     pub(crate) fn replace(&mut self, parent: Option<&eframe::Frame>) {
         let dialog = dialog(parent);
         self.start(Picker::Replace, async move {
+            dialog
+                .pick_file()
+                .await
+                .map(|file| file.path().to_path_buf())
+        });
+    }
+
+    /// Ask where the selected clip's missing file is now.
+    pub(crate) fn link(&mut self, parent: Option<&eframe::Frame>) {
+        let dialog = dialog(parent);
+        self.start(Picker::Link, async move {
             dialog
                 .pick_file()
                 .await

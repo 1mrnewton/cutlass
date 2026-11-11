@@ -1,123 +1,83 @@
 # cutlass-av1
 
-An AV1 decoder and encoder in safe Rust (`#![forbid(unsafe_code)]`, no
-dependencies outside this workspace, no C libraries). FFmpeg with libdav1d,
-libaom, SVT-AV1 and rav1e is used only as a test oracle and as the
-benchmark baseline. `STATUS.md` is the detailed support and test record.
+An AV1 decoder and encoder. The crate is safe Rust (`#![forbid(unsafe_code)]`),
+depends only on `cutlass-decode` and `cutlass-encode`, and links no C library.
+The desktop app registers it for AV1 decode and encode. On macOS, when hardware
+decode or encode is on in Settings, the VideoToolbox opener is asked first and
+this crate opens when that one declines. The Windows platform crate registers
+no AV1 opener and Linux has no platform codecs, so there it is the only one.
 
-## Decoder
+## What it supports
 
-`dec::decoder::Av1Core` implements the decoding process of the AV1
-specification (v1.0.0 with errata 1) for all three profiles:
+Decoder (`Av1Decoder`, over `dec::decoder::Av1Core`):
 
-- 8, 10 and 12 bits; 4:2:0, 4:2:2, 4:4:4 and monochrome; odd sizes.
-- Every intra tool: directional modes with angle deltas and edge filtering,
-  smooth/Paeth, recursive filter intra, chroma from luma, palette, intra
-  block copy.
-- Every inter tool: single and compound references, NEWMV/NEAR/NEAREST/
-  GLOBAL and the compound modes, reference MV projection
-  (`use_ref_frame_mvs`), OBMC, local and global warped motion, wedge,
-  difference-weighted and distance-weighted compound, inter-intra, skip
-  mode, switchable and dual interpolation filters, scaled references
-  (reference scaling and frame size changes).
-- All transforms (DCT/ADST/flip/identity up to 64 points, WHT for
-  lossless), quantizer matrices, segmentation, delta q / delta lf.
-- Deblocking, CDEF, loop restoration (Wiener and self-guided), super
-  resolution, film grain synthesis.
-- 64x64 and 128x128 superblocks, uniform and non-uniform tiles, multiple
-  tile groups, hidden frames, `show_existing_frame`, error resilient and
-  intra-only frames, frame ids, order hints.
-- Low-overhead OBU streams (as in IVF, MP4 and Matroska) and Annex B
-  length-delimited temporal units (`Av1Core::decode_annexb`).
+| Area | Accepted |
+| --- | --- |
+| Profiles | 0, 1 and 2: 8, 10 and 12 bits; 4:2:0, 4:2:2, 4:4:4, monochrome; odd sizes |
+| Input | Low-overhead OBU temporal units (as in IVF and MP4), one per packet. An `av1C` box in `CodecParams::extra` supplies the configuration OBUs. `Av1Core::decode_annexb` takes Annex B length-delimited units |
+| Frames | Key, inter, intra-only and switch frames, hidden frames, `show_existing_frame`, error resilient mode, frame ids, order hints, 64x64 and 128x128 superblocks, uniform and explicit tiles, several tile groups |
+| Intra | All modes, angle deltas, edge filter, filter intra, chroma from luma, palette, intra block copy |
+| Inter | Single and compound references, motion vector projection, OBMC, local and global warped motion, wedge, difference-weighted and distance-weighted compound, inter-intra, skip mode, switchable and dual filters, scaled references |
+| Residual | Transforms of 4 to 64 points, lossless Walsh-Hadamard, quantizer matrices, segmentation, delta q, delta lf |
+| Filters | Deblocking, CDEF, loop restoration (Wiener and self-guided), super resolution, film grain synthesis |
+| Layers | Operating point 0 unless `select_operating_point` picks another; OBUs of other layers are dropped |
 
-Not implemented: large-scale tile decoding (`OBU_TILE_LIST`, the light-field
-extension), refused with `CodecError::Unsupported`. libdav1d, and therefore
-FFmpeg, does not implement it either.
+Pictures come out as planar bytes in a `PictureOutput`. Samples above 8 bits
+are little-endian `u16`. Monochrome comes out as 4:2:0 with neutral chroma, an
+identity matrix on 4:4:4 as GBR, and an odd 4:2:0 size is padded to even by
+repeating the last column and row. `PictureInfo` carries the color primaries,
+transfer and matrix (named, and as the sequence header's CICP codes), the
+chroma sample position, the render size, the sequence timing info,
+`num_units_in_decoding_tick` and the `seq_level_idx` of the decoded point.
 
-Operating point 0 is decoded unless `Av1Decoder::select_operating_point`
-picks another; OBUs of layers outside it are dropped, and an index past the
-sequence's last point is `Unsupported`. A sequence wider or taller than 16384,
-or a frame of more luma samples than level 6.3 allows (35,651,584,
-`Av1Core::max_pixels`), is `Limit` before its picture is allocated. A tile whose symbols run past the end
-of its data is refused, as libdav1d refuses it.
+Refused by the decoder:
 
-Every shown picture carries its description in `PictureInfo`: the pixel
-format, colour primaries, transfer and matrix (named, and as the sequence
-header's CICP bytes), chroma sample position, the frame's own render size
-(the samples stay the frame size), the sequence's timing info
-(`num_units_in_display_tick`, `time_scale`, `equal_picture_interval`,
-`num_ticks_per_picture_minus_1`), the decoder model's
-`num_units_in_decoding_tick` (parsed; the schedule is not run), and the
-`seq_level_idx` of the operating point decoded. Monochrome comes out as
-4:2:0 with neutral chroma; an identity matrix on 4:4:4 as GBR.
+- A large-scale tile list (`OBU_TILE_LIST`), or an operating point past the
+  sequence's last one: `CodecError::Unsupported`.
+- A sequence wider or taller than 16384, or a frame with more luma samples
+  than `Av1Core::max_pixels` (35,651,584 by default): `CodecError::Limit`.
+- An empty packet: `CodecError::InvalidApi`.
 
-Correctness: the output of 46 streams produced by libaom, SVT-AV1 and rav1e
-through FFmpeg, covering the tools above, matches libdav1d byte for byte
-(`tools/conf.py`, `tools/checkall.sh`), and so does every frame of the
-fixture streams below. A mutation fuzzer
-(`examples/av1fuzz.rs`) finds no panics; corrupt input returns a
-`CodecError` and leaves the reference frames unchanged.
+A unit that fails leaves the reference frames as they were before the call.
 
-Fixtures: `fixtures/` holds 177 files, 86 streams (each `.ivf` is one
-stream; `name_N.obu` files are one stream, a packet per file, in `N`
-order). `tests/fixtures.rs` decodes every stream through `Av1Decoder` and
-compares each shown frame with the libdav1d digest committed in
-`tests/libdav1d-digests.txt`, so CI checks them without FFmpeg. `wide.ivf`
-(16448x64, past level 6.3) is refused instead, as libdav1d refuses it. To
-rewrite the digests from the local `ffmpeg` with libdav1d (which runs
-`ffmpeg -threads 1 [-f obu] -c:v libdav1d -threads 1 -i STREAM -noautoscale
--fps_mode passthrough -f rawvideo -` on each stream):
+Encoder (`Av1Encoder`, over `enc::encoder::Av1Enc`):
 
-```
-cargo test --release -p cutlass-av1 --test fixtures -- --ignored write_libdav1d_digests
-```
+- Input: `Yuv420p`, `Yuv422p`, `Yuv444p` and `Gbrp` at 8, 10 and 12 bits. GBR
+  is written with an identity matrix, sRGB transfer and full range. Another
+  pixel format is `Unsupported`; a side of 0 or above 16384 is `Limit`.
+  `Av1Enc` also codes monochrome (`EncConfig::mono`).
+- Constant quantizer index (`set_quality`), or a bitrate target when
+  `CodecParams::bitrate` is not zero.
+- Hierarchical mini-GOPs behind a hidden alt-ref (8 frames by default, 1 to 32
+  through `set_gop`), shown later with `show_existing_frame`.
+- Partition search up to 64x64; intra modes with angle deltas, filter intra,
+  chroma from luma, and palette on screen content; motion search, compound
+  prediction, temporal motion vector prediction, switchable filters, local
+  warped motion, OBMC and skip mode; transform type and size chosen by rate
+  and distortion; a per-frame search of the deblocking level and CDEF
+  strengths.
+- Tile and superblock-row threads (`set_threads`). Frames 1280 wide and up are
+  split into tile columns when there are threads for them.
+- Options on `EncConfig` only: key frame distance (120 by default), Wiener
+  loop restoration, global motion, alt-ref temporal filtering, explicit tiles.
 
-With several threads (`Av1Core::threads`) parsing, reconstruction and the
-post filters run in a pipeline. It takes about 1.9x the time of libdav1d
-single threaded and 1.6x with 4 threads; libdav1d uses hand-written
-assembly (numbers in `STATUS.md`).
+The encoder codes each frame through the decoder's own tile syntax code with a
+writing arithmetic coder, and an internal `Av1Core` holds the references.
 
-## Encoder
+## Using it
 
-`enc::encoder::Av1Enc` codes 8/10/12-bit 4:2:0, 4:2:2, 4:4:4 and
-monochrome (and RGB via the public wrapper). It runs the decoder's own tile
-syntax code with an arithmetic *writer*, so every bitstream it produces is
-decoded by construction; an internal `Av1Core` decodes each packet to make
-the reference frames. Tools used:
-
-- Hierarchical mini-GOPs (8 frames by default) behind a hidden alt-ref,
-  `show_existing_frame`, up to seven references, per-layer q offsets.
-- Partition search from transform-coded RD estimates (4x4 to 64x64).
-- Intra: all 13 modes, angle deltas, filter intra, chroma from luma,
-  palette (with per-frame screen content detection).
-- Inter: motion search over every distinct reference (pruned by speed),
-  NEAREST/NEAR/GLOBAL/NEW and compound NEAREST/NEW, temporal MV prediction,
-  switchable interpolation filters, local warped motion, OBMC, skip mode.
-  Global motion estimation and alt-ref temporal filtering are optional.
-- Transform type and size by RD; RDOQ with exact coefficient rates from the
-  live CDFs.
-- Per-frame search of the deblocking level and CDEF strengths.
-- Constant q or a bitrate target (`RateControl::Bitrate`).
-- Tile-parallel coding on several threads (`set_threads`); the bitstream
-  does not depend on the thread count.
-
-Quality and speed against FFmpeg's encoders are in `STATUS.md`. In short:
-on natural video it needs fewer bits than rav1e `-speed 8` for the same
-PSNR and about as many as libaom `-cpu-used 6` (within a few percent
-either way); key frames and synthetic content are further behind. It runs at about half the speed of libaom at that
-preset (single thread).
-
-## API
+`register_decoders` and `register_encoders` add the openers to a
+`DecodeFactory` and an `EncodeFactory`. Directly:
 
 ```rust
-use cutlass_av1::{Av1Decoder, Av1Encoder};
+use cutlass_av1::{AsView, Av1Decoder, Av1Encoder};
 use cutlass_decode::{CodecId, CodecParams, Decoder};
 use cutlass_encode::Encoder;
 
 let params = CodecParams::video(CodecId::Av1, 352, 288);
 let mut enc = Av1Encoder::open(&params)?;
 enc.set_quality(120); // base q index; or set a bitrate in CodecParams
-enc.set_speed(6);     // 0 slowest/best .. 10 fastest
+enc.set_speed(6);     // 0 slowest and best .. 10 fastest
 enc.set_gop(8);       // 1 = no reordering, one packet per picture
 let mut packets = Vec::new();
 // for each picture: packets.extend(enc.push_frame(&frame)?);
@@ -127,24 +87,124 @@ let mut dec = Av1Decoder::open(&params)?;
 for p in &packets {
     for out in dec.push(p)? { /* out.as_video() */ }
 }
+for out in dec.drain()? { /* the pictures still being decoded */ }
 ```
 
-Lower level: `dec::decoder::Av1Core::decode(&[u8])` takes one temporal
-unit and returns the shown frames; `enc::encoder::Av1Enc::encode` takes
-plane slices and returns finished temporal units (`flush` at the end).
+One packet is one temporal unit. `Av1Decoder` decodes on as many threads as
+the machine has, and a picture may come out of a later `push` or of `drain`.
 
-## Examples and tools
+Lower level: `Av1Core::decode` takes one temporal unit and returns its shown
+frames; `decode_delayed` and `drain` return them late so that frames decode
+side by side. `Av1Enc::encode` takes plane slices and returns finished
+temporal units, and `flush` returns the rest.
 
-- `examples/av1dec.rs` IVF to raw YUV (`--features stats` prints tool use).
-- `examples/av1enc.rs` Y4M to IVF (`--q`, `--kbps`, `--speed`, `--gop`,
-  `--keyint`, `--tiles`, `--threads`, `--global-motion`,
-  `--temporal-filter`, `--recon`).
-- `examples/av1bench.rs` decode timing with a thread count.
-- `examples/av1fuzz.rs` mutation fuzzer.
-- `examples/roundtrip.rs` asks ffmpeg for one 64x64 keyframe and compares
-  this decoder's picture with libdav1d's (prints `skip` without ffmpeg).
-- `tools/` the scripts behind the numbers in `STATUS.md`: stream generation
-  and libdav1d comparison (`conf.py`, `cases.py`, `checkall.sh`), the
-  encoder format matrix (`encmatrix.sh`), and rate-distortion comparisons
-  (`rdcmp.sh`, `kbd.sh`, `bd.py`). Encoder constants can be overridden from
-  the environment for sweeps when built with `--features tune`.
+Examples: `av1dec` (IVF to raw planes), `av1enc` (Y4M to IVF), `av1bench`,
+`av1fuzz` and `roundtrip`. Cargo features: `stats` counts the coding tools the
+decoder sees, `prof` times the threaded decoder's stages, `tune` lets
+environment variables override encoder constants.
+
+## How it is tested
+
+```
+cargo test --release -p cutlass-av1
+```
+
+- `tests/fixtures.rs` decodes every stream in `fixtures/` (177 files, 86
+  streams; each `.ivf` is one stream, and `name_N.obu` files are one stream
+  with a packet per file) through `Av1Decoder`. Each shown frame of 85 streams
+  must match the libdav1d digest stored in `tests/libdav1d-digests.txt`. The
+  last stream, `wide.ivf` (16448x64), must be refused with `Limit`. This needs
+  no FFmpeg, so it runs in CI.
+- `tests/metadata.rs` checks the published color, timing, render size and
+  operating point. `tests/obu.rs` checks OBU framing and the tile list
+  refusal.
+- Unit tests compare the transform, CDEF and arithmetic coder kernels with
+  direct transcriptions of the specification, round-trip the sequence and
+  frame headers through the writer and the parser, and check that the encoder
+  writes the same bytes with one thread and with several and that its
+  reconstruction is the decoder's.
+- In a separate measurement, the decoder's output for a 600-frame 1080p stream
+  written by SVT-AV1 was byte-identical to that of FFmpeg's libdav1d.
+
+Needs FFmpeg, and is not run by `cargo test`:
+
+- The digests are rewritten from a local `ffmpeg` with libdav1d by
+  `cargo test --release -p cutlass-av1 --test fixtures -- --ignored write_libdav1d_digests`.
+- `tools/conf.py` with `tools/cases.py` writes 46 streams with FFmpeg's
+  libaom, SVT-AV1 and rav1e encoders and compares the `av1dec` example with
+  libdav1d; `tools/checkall.sh` repeats the comparison. `tools/encmatrix.sh`
+  encodes 13 cases with `av1enc` and checks that libdav1d decodes each
+  to the encoder's reconstruction. `tools/rdcmp.sh`, `tools/kbd.sh` and
+  `tools/bd.py` compare rate and distortion with FFmpeg's encoders. None of
+  these scripts were run for this description.
+- `examples/av1fuzz.rs` corrupts IVF streams and checks that decoding does not
+  panic. It is run by hand.
+- `examples/roundtrip.rs` and `benches/decode.rs` print `skip` without `ffmpeg`.
+
+## Speed against FFmpeg
+
+Measured on 10 November 2026 at commit `ed0743d2`, on an Apple M5 Pro (18 cores, 48 GB) running macOS 27.0.1, against FFmpeg 8.1.1. Built with `cargo build --release` and rustc 1.99.1.
+
+**Decode, av1.** Input: 600 frames of 1920×1080 at 30 frames a second (17 MB), written by FFmpeg with `-c:v libsvtav1 -preset 8 -crf 35 -svtav1-params lp=0`.
+
+|  | Cutlass | FFmpeg (`libdav1d`) |
+| --- | ---: | ---: |
+| Wall time | 1.30 s | 0.98 s |
+| Speed | 462 frames/s | 612 frames/s |
+| CPU time | 6.34 s | 3.01 s |
+| Peak memory | 520 MB | 111 MB |
+| Threads allowed | 16 | 16 |
+
+Cutlass is **1.3× slower** than FFmpeg here. Both decoders produced exactly the same samples.
+
+**Encode, av1.** Input: 300 raw frames of 1920×1080 at 30 frames a second, asked for 4 Mbit/s.
+
+|  | Cutlass | FFmpeg (`libsvtav1 preset 10`) | FFmpeg (`libsvtav1 preset 6`) |
+| --- | ---: | ---: | ---: |
+| Wall time | 11.05 s | 0.71 s | 3.02 s |
+| Speed | 27 frames/s | 423 frames/s | 99 frames/s |
+| CPU time | 94.41 s | 7.44 s | 38.37 s |
+| Peak memory | 606 MB | 1252 MB | 1385 MB |
+| Output size | 4.6 MB | 5.0 MB | 4.9 MB |
+| Quality kept (PSNR) | 36.59 dB | 36.48 dB | 38.48 dB |
+| Threads allowed | 16 | 16 | 16 |
+
+Cutlass is **15.6× slower** than `libsvtav1 preset 10` here. Cutlass is **3.7× slower** than `libsvtav1 preset 6` here. Quality is the PSNR between the source pictures and what each encoder's output decodes to; higher is closer to the source. The encoders do not make the same choices, so read speed, size and quality together.
+
+How it was measured: both sides get the same input from disk, do all of the work, and throw the result away. Each side is a whole process timed with `/usr/bin/time -l`, start-up included, run five times in turn; the tables show the median run. FFmpeg is given as many threads as the Rust code used. The Rust side is [`tools/media-bench`](../../../tools/media-bench), which registers only the Rust codecs. For decoding and packet reading the FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which calls libavformat and libavcodec directly; for encoding it is the `ffmpeg` command. The pictures come from a 4K street scene scaled to 1920×1080, and the sound from a music recording.
+
+To run it again: `cargo build --release -p media-bench`, then `python3 scripts/bench_media.py --video <clip> --audio <song> --work <folder>`.
+
+## Limits and gaps
+
+Decoder:
+
+- No large-scale tile decoding.
+- The tiles of one frame are not decoded in parallel. With two or more threads
+  a frame with one tile column is parsed on one thread and reconstructed and
+  filtered on others; a frame with several tile columns or with super
+  resolution is parsed and reconstructed on one thread.
+- At most 16 frames decode at once. `Av1Decoder` has no thread setting; it
+  uses `std::thread::available_parallelism()`.
+- The decoder model info is published but no decoder model is run.
+- `Av1Decoder` copies every shown picture into packed bytes one sample at a
+  time.
+- No SIMD intrinsics; the kernels rely on the compiler's vectorization.
+
+Encoder:
+
+- Never chooses intra block copy, wedge or difference-weighted compound,
+  inter-intra, super resolution, segmentation, 128x128 superblocks or film
+  grain. The dual filter and loop restoration are off by default.
+- Writes `seq_level_idx` 31 for every stream instead of the level the stream
+  fits.
+- `Av1Encoder` has no setting for the key frame distance, monochrome, loop
+  restoration, global motion or the temporal filter; those exist on
+  `EncConfig` only. A bitrate target takes the frame rate from the first
+  frame's duration and falls back to 30.
+
+## Specifications
+
+- AV1 Bitstream & Decoding Process Specification, version 1.0.0 with errata 1.
+- ISO/IEC 23091-4 (ITU-T H.273) for the color codes.
+- AV1 Codec ISO Media File Format Binding, for the `av1C` record.

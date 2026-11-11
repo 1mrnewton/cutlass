@@ -21,7 +21,7 @@ use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
 
 use crate::canvas::over_backdrop;
 use crate::frame::{EvalError, Fonts, Snapshot, compose, compose_layers};
-use crate::gpu::{Composed, GpuLayer, GpuSource};
+use crate::gpu::{FrameLayers, GpuLayer, GpuSource};
 use crate::media::{
     OpenClips, PictureTransform, apply_crop, backdrop_for, gpu_crop, gpu_place, picture_transform,
     place_with,
@@ -50,7 +50,7 @@ enum Child {
     /// Composed on the CPU, then cropped.
     Cpu(CpuBytes),
     /// Left as layers for the GPU, with the crop still to apply.
-    Gpu(Composed, Crop),
+    Gpu(FrameLayers, Crop),
 }
 
 impl PictureSource for NestedPicture {
@@ -77,24 +77,11 @@ impl NestedPicture {
     /// frame placed like a picture. `None` for a child composed on the CPU,
     /// which the caller samples instead.
     pub(crate) fn gpu(&self) -> Option<Vec<GpuLayer>> {
-        let Child::Gpu(composed, crop) = &self.child else {
+        let Child::Gpu(layers, crop) = &self.child else {
             return None;
         };
-        let (source, size) = match composed {
-            Composed::Layers(layers) => (
-                GpuSource::Nested(Box::new(layers.clone())),
-                (layers.width, layers.height),
-            ),
-            Composed::Frame(frame) => {
-                let bytes =
-                    CpuBytes::new(frame.extent.width, frame.extent.height, frame.rgba.clone())
-                        .ok()?;
-                (
-                    GpuSource::Rgba(bytes),
-                    (frame.extent.width, frame.extent.height),
-                )
-            }
-        };
+        let size = (layers.width, layers.height);
+        let source = GpuSource::Nested(Box::new(layers.clone()));
         let (to_oriented, picture) = gpu_crop(*crop, 1.0, size)?;
         let placement = Placement {
             to_picture: gpu_place(self.transform, picture, (self.canvas_w, self.canvas_h))?,
@@ -235,6 +222,7 @@ fn place_child<D: Device>(
         pass.clips,
         pass.width,
         pass.height,
+        time,
     );
     let on_gpu = gpu
         && matches!(
@@ -296,7 +284,7 @@ fn child_layers<D: Device>(
     segment: &SegmentId,
     time: Micros,
     pass: &mut NestPass<'_, D>,
-) -> Result<Option<Composed>, EvalError<D::Error>> {
+) -> Result<Option<FrameLayers>, EvalError<D::Error>> {
     let child_clips = pass.clips.child(segment);
     let chain = descend(pass.ancestors, &draft.id);
     match compose_layers(

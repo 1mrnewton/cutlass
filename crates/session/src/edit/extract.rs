@@ -7,9 +7,12 @@ use super::EditError;
 
 /// Place the picture's sound on its own clip and link that clip to the picture.
 ///
-/// The sound keeps the picture's range, speed, gain, and reverse. A later mix
-/// reads the sound clip and skips the picture, so the file is not heard twice.
-/// One undo removes the sound clip.
+/// The sound keeps the picture's range, speed, gain, and reverse. The
+/// picture's material is marked as having its sound taken off, so the
+/// picture is silent from then on, also once the sound clip is deleted,
+/// until [`recover_audio`] gives the sound back. A picture that shares its
+/// material with other clips takes its own copy first, so they keep their
+/// sound. One undo removes the sound clip and the mark.
 pub fn extract_audio(
     draft: &mut Draft,
     source_id: &SegmentId,
@@ -27,7 +30,7 @@ pub fn extract_audio(
     if path.is_empty() {
         return Err(EditError::NoSound);
     }
-    if sound_is_separate(draft, &source) {
+    if video.has_sound_separated || sound_is_separate(draft, &source) {
         return Err(EditError::AlreadyExtracted);
     }
     if segment_id.as_str().is_empty() {
@@ -46,6 +49,15 @@ pub fn extract_audio(
     }
     let carried = carried_refs(draft, &source);
     let duration = video.duration;
+    let video_id = super::own::own(draft, source_track, source_index, &source.material_id)?;
+    if let Some(video) = draft
+        .materials
+        .videos
+        .iter_mut()
+        .find(|video| video.id == video_id)
+    {
+        video.has_sound_separated = true;
+    }
     if let Some(track) = draft.tracks.iter().find(|track| &track.id == track_id) {
         if track.kind != TrackType::Audio {
             return Err(EditError::TrackKind);
@@ -59,7 +71,7 @@ pub fn extract_audio(
         kind: "video_original_sound".to_owned(),
         path,
         duration,
-        video_id: source.material_id.clone(),
+        video_id: video_id.clone(),
         rest: Default::default(),
     });
     let mut segment = Segment::new(
@@ -76,6 +88,50 @@ pub fn extract_audio(
     segment.extra_material_refs = carried;
     super::place::place(draft, track_id, segment)?;
     super::linkage::link(draft, source_id, segment_id)
+}
+
+/// Give the picture its own sound back: the mark [`extract_audio`] left
+/// on its material is cleared, and the clip that sound went to, when it
+/// is still linked to the picture, is taken off the timeline. A picture
+/// that still has its sound is refused.
+pub fn recover_audio(draft: &mut Draft, segment_id: &SegmentId) -> Result<(), EditError> {
+    let (track_index, segment_index) = super::locate(draft, segment_id)?;
+    super::ensure_unlocked(draft.tracks[track_index].attribute)?;
+    let segment = draft.tracks[track_index].segments[segment_index].clone();
+    let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str()) else {
+        return Err(EditError::NotVideo);
+    };
+    let marked = video.has_sound_separated;
+    let sounds: Vec<SegmentId> = draft
+        .relationships
+        .iter()
+        .filter(|relationship| relationship.kind == "linkage")
+        .flat_map(|relationship| &relationship.id_to_id)
+        .filter(|pair| {
+            pair.owner == segment.id && sound_for(draft, &pair.dependent, &segment.material_id)
+        })
+        .map(|pair| pair.dependent.clone())
+        .collect();
+    if !marked && sounds.is_empty() {
+        return Err(EditError::SoundNotSeparate);
+    }
+    for sound in &sounds {
+        super::linkage::remove(draft, sound)?;
+    }
+    // The picture may have moved in its row when the sound clip left.
+    let (track_index, segment_index) = super::locate(draft, segment_id)?;
+    if marked {
+        let video_id = super::own::own(draft, track_index, segment_index, &segment.material_id)?;
+        if let Some(video) = draft
+            .materials
+            .videos
+            .iter_mut()
+            .find(|video| video.id == video_id)
+        {
+            video.has_sound_separated = false;
+        }
+    }
+    Ok(())
 }
 
 fn sound_path(video: &MaterialVideo, segment: &Segment) -> (String, bool) {
@@ -275,17 +331,31 @@ mod tests {
                 .iter()
                 .all(|item| { item.kind != "linkage" || item.id_to_id.is_empty() })
         );
+        // The sound clip deleted, the picture stays without its sound, so
+        // there is none to extract again until it is given back.
+        let again = Request::ExtractAudio {
+            source_id: "picture".into(),
+            track_id: "sound".into(),
+            segment_id: "sound-again".into(),
+            material_id: "sound-again".into(),
+        };
+        assert!(session.draft().materials.videos[0].has_sound_separated);
+        let before = session.draft().clone();
+        assert_eq!(
+            session.apply(4, std::slice::from_ref(&again)).unwrap_err(),
+            EditError::AlreadyExtracted
+        );
+        assert_eq!(session.draft(), &before);
         session
             .apply(
                 4,
-                &[Request::ExtractAudio {
-                    source_id: "picture".into(),
-                    track_id: "sound".into(),
-                    segment_id: "sound-again".into(),
-                    material_id: "sound-again".into(),
+                &[Request::RecoverAudio {
+                    segment_id: "picture".into(),
                 }],
             )
             .unwrap();
+        assert!(!session.draft().materials.videos[0].has_sound_separated);
+        session.apply(5, &[again]).unwrap();
         assert_eq!(
             session
                 .draft()
@@ -297,6 +367,110 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn recover_gives_the_sound_back_and_takes_the_sound_clip_off() {
+        let (mut draft, segment) = picture();
+        draft.tracks[0].segments.push(segment);
+        let untouched = draft.clone();
+        let mut session = Session::open(draft);
+        let recover = Request::RecoverAudio {
+            segment_id: "picture".into(),
+        };
+        // A picture that still has its sound has none to give back.
+        assert_eq!(
+            session
+                .apply(0, std::slice::from_ref(&recover))
+                .unwrap_err(),
+            EditError::SoundNotSeparate
+        );
+        assert_eq!(session.draft(), &untouched);
+
+        session.apply(0, &[request()]).unwrap();
+        assert!(session.draft().materials.videos[0].has_sound_separated);
+        let extracted = session.draft().clone();
+
+        // Recovered while the sound clip is still there: the clip goes, its
+        // lane with it, and the mark is cleared, in one step.
+        session.apply(1, std::slice::from_ref(&recover)).unwrap();
+        let draft = session.draft();
+        assert!(!draft.materials.videos[0].has_sound_separated);
+        assert!(
+            draft
+                .tracks
+                .iter()
+                .all(|track| track.id.as_str() != "sound")
+        );
+        assert_eq!(draft.tracks[0].segments[0].id.as_str(), "picture");
+        assert!(
+            draft
+                .relationships
+                .iter()
+                .all(|item| item.kind != "linkage" || item.id_to_id.is_empty())
+        );
+        session.undo().unwrap();
+        assert_eq!(session.draft(), &extracted);
+        session.redo().unwrap();
+        assert_eq!(
+            session
+                .apply(4, std::slice::from_ref(&recover))
+                .unwrap_err(),
+            EditError::SoundNotSeparate
+        );
+
+        // A clip that is not a picture, a missing one, and a locked row.
+        let mut draft = untouched.clone();
+        draft.tracks[0].attribute = TrackAttribute(TrackAttribute::LOCK);
+        draft.materials.videos[0].has_sound_separated = true;
+        let mut locked = Session::open(draft);
+        assert_eq!(
+            locked.apply(0, std::slice::from_ref(&recover)).unwrap_err(),
+            EditError::LockedTrack
+        );
+        let mut gone = Session::open(untouched);
+        assert!(
+            gone.apply(
+                0,
+                &[Request::RecoverAudio {
+                    segment_id: "nowhere".into(),
+                }],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn extracting_one_clip_leaves_the_sound_of_another_on_the_same_file() {
+        // Two clips of one material, as two drops of one library file are.
+        let (mut draft, segment) = picture();
+        let mut second = segment.clone();
+        second.id = "other".into();
+        second.target = TimeRange::new(1_000_000, 1_000_000);
+        draft.tracks[0].segments.push(segment);
+        draft.tracks[0].segments.push(second);
+        let mut session = Session::open(draft);
+        session.apply(0, &[request()]).unwrap();
+        let draft = session.draft();
+        let material = |id: &str| {
+            let segment = draft
+                .tracks
+                .iter()
+                .flat_map(|track| &track.segments)
+                .find(|segment| segment.id.as_str() == id)
+                .unwrap();
+            draft
+                .materials
+                .videos
+                .iter()
+                .find(|video| video.id == segment.material_id)
+                .unwrap()
+        };
+        assert!(material("picture").has_sound_separated);
+        assert!(!material("other").has_sound_separated);
+        assert_ne!(material("picture").id, material("other").id);
+        // The sound clip names the picture's own copy of the material.
+        assert_eq!(draft.materials.audios[0].video_id, material("picture").id);
     }
 
     #[test]

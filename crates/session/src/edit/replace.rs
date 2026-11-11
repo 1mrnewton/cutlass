@@ -54,6 +54,66 @@ pub fn replace_media(
     Ok(())
 }
 
+/// Point material `material_id` at the file stored at `path`, `width` by
+/// `height` and `duration` long, as Link to media does for a file that
+/// has moved. Every clip of the material then plays the new file where it
+/// played the old one, so the file must reach as far as the furthest of
+/// them does. A still has no length to reach. Other materials stay.
+pub fn link_media(
+    draft: &mut Draft,
+    material_id: &MaterialId,
+    path: &str,
+    (width, height): (i32, i32),
+    duration: Micros,
+) -> Result<(), EditError> {
+    if path.is_empty() {
+        return Err(EditError::MissingMaterial);
+    }
+    let (_, length) = medium(draft, material_id).ok_or(EditError::MissingMaterial)?;
+    if length.is_some() {
+        if duration.0 <= 0 {
+            return Err(EditError::SourceBounds);
+        }
+        let reach = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .filter(|segment| &segment.material_id == material_id)
+            .filter_map(|segment| segment.source_range.as_ref())
+            .map(|range| range.end().0)
+            .max()
+            .unwrap_or(0);
+        if reach > duration.0 {
+            return Err(EditError::SourceBounds);
+        }
+    }
+    if let Some(video) = draft
+        .materials
+        .videos
+        .iter_mut()
+        .find(|video| &video.id == material_id)
+    {
+        path.clone_into(&mut video.path);
+        video.width = width;
+        video.height = height;
+        if length.is_some() {
+            video.duration = duration;
+        }
+        // A reversed copy was made from the file that is gone.
+        video.reverse_path.clear();
+        video.reverse_intensifies_path.clear();
+    } else if let Some(audio) = draft
+        .materials
+        .audios
+        .iter_mut()
+        .find(|audio| &audio.id == material_id)
+    {
+        path.clone_into(&mut audio.path);
+        audio.duration = duration;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use cutlass_model::{
@@ -166,5 +226,83 @@ mod tests {
                 .unwrap_err(),
             EditError::LockedTrack
         );
+    }
+
+    #[test]
+    fn a_material_is_linked_to_a_file_that_reaches_as_far_as_its_clips() {
+        let mut session = session();
+        let link = |path: &str, length: i64| Request::LinkMedia {
+            material_id: "old".into(),
+            path: path.to_owned(),
+            width: 1280,
+            height: 720,
+            duration: Micros(length),
+        };
+        let before = session.draft().clone();
+        // The clip plays up to five seconds in: a file that long will do.
+        session
+            .apply(0, &[link("Resources/moved.mp4", 5_000_000)])
+            .unwrap();
+        let draft = session.draft();
+        let video = &draft.materials.videos[0];
+        assert_eq!(video.path, "Resources/moved.mp4");
+        assert_eq!((video.width, video.height), (1280, 720));
+        assert_eq!(video.duration, Micros(5_000_000));
+        // The clip is as it was: only the file under it changed.
+        assert_eq!(draft.tracks[0].segments, before.tracks[0].segments);
+        session.undo().unwrap();
+        assert_eq!(session.draft(), &before);
+
+        // A shorter file, no path, and a material that is not there.
+        for (request, error) in [
+            (link("short.mp4", 4_999_999), EditError::SourceBounds),
+            (link("empty.mp4", 0), EditError::SourceBounds),
+            (link("", 9_000_000), EditError::MissingMaterial),
+            (
+                Request::LinkMedia {
+                    material_id: "nowhere".into(),
+                    path: "a.mp4".to_owned(),
+                    width: 1,
+                    height: 1,
+                    duration: Micros(9_000_000),
+                },
+                EditError::MissingMaterial,
+            ),
+        ] {
+            assert_eq!(session.apply(2, &[request]).unwrap_err(), error);
+            assert_eq!(session.draft(), &before);
+        }
+
+        // A still has no length, and a sound takes the new length.
+        let mut draft = before.clone();
+        draft.materials.videos[0].kind = "photo".to_owned();
+        draft.materials.videos[0].reverse_path = "back.mp4".to_owned();
+        draft.materials.audios.push(MaterialAudio {
+            id: "tone".into(),
+            duration: Micros(1_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut stills = Session::open(draft);
+        stills
+            .apply(
+                0,
+                &[
+                    link("still.png", 0),
+                    Request::LinkMedia {
+                        material_id: "tone".into(),
+                        path: "tone.m4a".to_owned(),
+                        width: 0,
+                        height: 0,
+                        duration: Micros(2_000_000),
+                    },
+                ],
+            )
+            .unwrap();
+        let materials = &stills.draft().materials;
+        assert_eq!(materials.videos[0].path, "still.png");
+        assert_eq!(materials.videos[0].duration, Micros(10_000_000));
+        assert_eq!(materials.videos[0].reverse_path, "");
+        assert_eq!(materials.audios[0].path, "tone.m4a");
+        assert_eq!(materials.audios[0].duration, Micros(2_000_000));
     }
 }

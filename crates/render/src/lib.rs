@@ -20,21 +20,26 @@
 #![forbid(unsafe_code)]
 
 mod blur;
+mod colour;
 mod cross;
+mod cut;
 mod effect;
 mod frame;
 mod keep;
 mod layer;
 mod mix;
+mod package;
+mod relight;
 mod target;
 mod transition;
 mod vector;
 
+pub use cut::Selected;
 pub use cutlass_decode::Surface;
 pub use cutlass_effects::{Block, Recipe, Step};
 pub use cutlass_gpu::{Affine, Placement};
-pub use frame::frame_layers;
 pub use layer::{Layer, Plane, PlaneSource, Planes, Rgba};
+pub use relight::Relit;
 pub use target::Canvas;
 pub use wgpu;
 
@@ -83,6 +88,10 @@ pub struct Renderer {
     layers: layer::Pipelines,
     blurs: blur::Blurs,
     effects: effect::Effects,
+    colours: colour::Colours,
+    cuts: cut::Cuts,
+    relights: relight::Relights,
+    packages: package::Packages,
     keep: keep::Keep,
     cross: cross::Cross,
     mix: mix::Mix,
@@ -106,6 +115,10 @@ impl Renderer {
         let layers = layer::Pipelines::new(&device);
         let blurs = blur::Blurs::new(&device);
         let effects = effect::Effects::new(&device);
+        let colours = colour::Colours::new(&device);
+        let cuts = cut::Cuts::new(&device);
+        let relights = relight::Relights::new(&device);
+        let packages = package::Packages::new(&device);
         let keep = keep::Keep::new(&device);
         let cross = cross::Cross::new(&device);
         let mix = mix::Mix::new(&device);
@@ -117,6 +130,10 @@ impl Renderer {
             layers,
             blurs,
             effects,
+            colours,
+            cuts,
+            relights,
+            packages,
             keep,
             cross,
             mix,
@@ -413,6 +430,98 @@ impl Renderer {
                     };
                     bound.push(self.layers.bind(device, queue, &uploaded, fit(*placement)));
                 }
+                Layer::Colour { colour, seed, mask } => {
+                    if colour.is_identity() {
+                        continue;
+                    }
+                    let first = blur::scratch(device, size);
+                    Self::paint(&self.layers, encoder, &first, &bound);
+                    let before = mask.map(|_| {
+                        let before = blur::scratch(device, size);
+                        Self::paint(&self.layers, encoder, &before, &bound);
+                        before
+                    });
+                    let mut result = self
+                        .colours
+                        .run(device, queue, encoder, &first, size, colour, *seed);
+                    if let (Some(mask), Some(before)) = (mask, before) {
+                        let kept = blur::scratch(device, size);
+                        let mask = scaled_mask(mask, scale);
+                        self.keep
+                            .run(device, queue, encoder, &before, &result, &kept, &mask);
+                        result = kept;
+                    }
+                    bound.clear();
+                    bound.push(self.layers.bind(
+                        device,
+                        queue,
+                        &canvas_picture(result, size),
+                        Placement::canvas(size.0, size.1),
+                    ));
+                }
+                Layer::Cut(mask) => {
+                    let first = blur::scratch(device, size);
+                    Self::paint(&self.layers, encoder, &first, &bound);
+                    let kept = blur::scratch(device, size);
+                    let mask = scaled_mask(mask, scale);
+                    self.cuts.mask(device, queue, encoder, &first, &kept, &mask);
+                    bound.clear();
+                    bound.push(self.layers.bind(
+                        device,
+                        queue,
+                        &canvas_picture(kept, size),
+                        Placement::canvas(size.0, size.1),
+                    ));
+                }
+                Layer::Select(selected) => {
+                    let first = blur::scratch(device, size);
+                    Self::paint(&self.layers, encoder, &first, &bound);
+                    let kept = blur::scratch(device, size);
+                    let frame = scaled_frame(selected.frame, scale);
+                    self.cuts.select(
+                        device,
+                        queue,
+                        encoder,
+                        &first,
+                        &kept,
+                        &Selected { frame, ..*selected },
+                    )?;
+                    bound.clear();
+                    bound.push(self.layers.bind(
+                        device,
+                        queue,
+                        &canvas_picture(kept, size),
+                        Placement::canvas(size.0, size.1),
+                    ));
+                }
+                Layer::Package(pass) => {
+                    let first = blur::scratch(device, size);
+                    Self::paint(&self.layers, encoder, &first, &bound);
+                    let painted = blur::scratch(device, size);
+                    self.packages
+                        .run(device, queue, encoder, &first, &painted, pass, scale);
+                    bound.clear();
+                    bound.push(self.layers.bind(
+                        device,
+                        queue,
+                        &canvas_picture(painted, size),
+                        Placement::canvas(size.0, size.1),
+                    ));
+                }
+                Layer::Relight(relit) => {
+                    let first = blur::scratch(device, size);
+                    Self::paint(&self.layers, encoder, &first, &bound);
+                    let lit = blur::scratch(device, size);
+                    self.relights
+                        .run(device, queue, encoder, &first, &lit, size, relit)?;
+                    bound.clear();
+                    bound.push(self.layers.bind(
+                        device,
+                        queue,
+                        &canvas_picture(lit, size),
+                        Placement::canvas(size.0, size.1),
+                    ));
+                }
                 Layer::Effect(steps, mask) => {
                     if steps.is_empty() {
                         continue;
@@ -434,8 +543,9 @@ impl Renderer {
                     // A masked effect shows only inside its shape.
                     if let (Some(mask), Some(before)) = (mask, before) {
                         let kept = blur::scratch(device, size);
+                        let mask = scaled_mask(mask, scale);
                         self.keep
-                            .run(device, queue, encoder, &before, &result, &kept, mask);
+                            .run(device, queue, encoder, &before, &result, &kept, &mask);
                         result = kept;
                     }
                     let uploaded = layer::Uploaded {
@@ -549,6 +659,47 @@ fn shrunk(placement: Placement, scale: (f64, f64)) -> Placement {
     Placement {
         to_picture: Affine([a / sx, b / sy, c, d / sx, e / sy, f]),
         ..placement
+    }
+}
+
+/// `mask`, laid out on a full-size canvas, for a canvas `scale` times that
+/// size each way: a target pixel centre at `p` is the canvas point
+/// `p / scale`.
+fn scaled_mask(
+    mask: &cutlass_effects::CanvasMask,
+    scale: (f64, f64),
+) -> cutlass_effects::CanvasMask {
+    let (sx, sy) = scale;
+    if sx == 1.0 && sy == 1.0 {
+        return *mask;
+    }
+    cutlass_effects::CanvasMask {
+        frame: scaled_frame(mask.frame, scale),
+        ..*mask
+    }
+}
+
+/// `frame`, from full-size canvas pixels to a layer's own frame, from the
+/// pixels of a canvas `scale` times that size each way.
+fn scaled_frame(frame: [f32; 6], scale: (f64, f64)) -> [f32; 6] {
+    let (sx, sy) = scale;
+    if sx == 1.0 && sy == 1.0 {
+        return frame;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let (sx, sy) = (sx as f32, sy as f32);
+    let [a, b, c, d, e, f] = frame;
+    [a / sx, b / sy, c, d / sx, e / sy, f]
+}
+
+/// A canvas-sized texture as a picture the layer pass draws.
+fn canvas_picture(view: wgpu::TextureView, size: (u32, u32)) -> layer::Uploaded {
+    layer::Uploaded {
+        views: [view.clone(), view.clone(), view],
+        size,
+        yuv: false,
+        tone: cutlass_gpu::YuvTone::NONE,
+        interleaved: false,
     }
 }
 

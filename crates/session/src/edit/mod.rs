@@ -13,6 +13,7 @@ mod fade;
 mod follow;
 mod freeze;
 mod grade;
+mod group;
 mod import;
 mod keyframe;
 mod lane;
@@ -51,6 +52,7 @@ use cutlass_model::{
 use crate::request::Request;
 
 pub use canvas::{CANVAS_SHAPES, CanvasShape, canvas_for, follow_first_picture, ratio_request};
+pub use group::ClipAttributes;
 pub use move_segment::move_segment;
 pub use place::place;
 pub use text::{
@@ -124,6 +126,8 @@ pub enum EditError {
     NoSound,
     /// The picture's sound is already its own clip.
     AlreadyExtracted,
+    /// Recover audio on a picture that still has its own sound.
+    SoundNotSeparate,
     /// A track with this id is already on the draft, or this type cannot be a lane.
     TrackKind,
     /// The main track cannot be removed.
@@ -274,6 +278,7 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             material_id,
         } => extract::extract_audio(draft, source_id, track_id, segment_id, material_id),
+        Request::RecoverAudio { segment_id } => extract::recover_audio(draft, segment_id),
         Request::SetTrackAttribute { track_id, bit, on } => {
             track::set_track_attribute(draft, track_id, *bit, *on)
         }
@@ -292,6 +297,9 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             transition,
         } => transition::set_transition(draft, segment_id, (**transition).clone()),
+        Request::RemoveTransition { segment_id } => {
+            transition::remove_transition(draft, segment_id)
+        }
         Request::Split {
             segment_id,
             at,
@@ -308,6 +316,14 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             freeze::set_freeze(draft, segment_id, freeze.clone())
         }
         Request::SetActive { segment_id, active } => mirror::set_active(draft, segment_id, *active),
+        Request::SetGroup {
+            segment_ids,
+            group_id,
+        } => group::set_group(draft, segment_ids, group_id),
+        Request::PasteAttributes {
+            segment_ids,
+            attributes,
+        } => group::paste_attributes(draft, segment_ids, attributes),
         Request::SetMirror {
             segment_id,
             horizontal,
@@ -692,9 +708,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             keyframes,
         } => keyframe::set_keyframes(draft, segment_id, keyframes),
-        Request::AddKeyframe { segment_id, offset } => {
-            keyframe::add_keyframe(draft, segment_id, *offset)
-        }
+        Request::AddKeyframe {
+            segment_id,
+            offset,
+            properties,
+        } => keyframe::add_keyframe(draft, segment_id, *offset, properties),
         Request::RemoveKeyframe { segment_id, offset } => {
             keyframe::remove_keyframe(draft, segment_id, *offset)
         }
@@ -712,7 +730,8 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             offset,
             graph,
-        } => keyframe::set_keyframe_graph(draft, segment_id, *offset, graph.as_deref()),
+            properties,
+        } => keyframe::set_keyframe_graph(draft, segment_id, *offset, graph.as_deref(), properties),
         Request::SetAnimation {
             segment_id,
             kind,
@@ -752,6 +771,13 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             material_id,
         } => replace::replace_media(draft, segment_id, material_id),
+        Request::LinkMedia {
+            material_id,
+            path,
+            width,
+            height,
+            duration,
+        } => replace::link_media(draft, material_id, path, (*width, *height), *duration),
         Request::InsertTrack { track_id, kind } => track::insert_track(draft, track_id, kind),
         Request::InsertTrackAt {
             track_id,
@@ -839,12 +865,16 @@ pub fn apply_all(
         .filter(|track| !track.segments.is_empty())
         .map(|track| track.id.clone())
         .collect();
+    let blended = transition::on_cuts(draft);
     for request in requests {
         let before = linkage::segments_of(draft);
         apply_request(draft, request)?;
         linkage::after_request(draft, &before, linkage)?;
         magnet::pack(draft, linkage)?;
     }
+    // A blend whose two clips no longer meet goes with the edit that
+    // parted them.
+    transition::drop_parted(draft, &blended);
     drop_emptied_lanes(draft, &held);
     sync_duration(draft);
     Ok(())

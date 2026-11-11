@@ -3,17 +3,19 @@
 //!
 //! Vector image is the clip's Transform with the shape's own size first,
 //! then Fill, Stroke, Corner radius and Shadow, each switched on or off by
-//! its box. Keyframes on the shape's own settings and Tracking come later.
+//! its box. Each number row keys on its own; Tracking comes later.
 
-use cutlass_model::{MaterialShape, SHAPE_FILL, SHAPE_SHADOW, SHAPE_STROKE_WIDTH, ShapeKind};
+use cutlass_model::{
+    MaterialShape, SHAPE_FILL, SHAPE_SHADOW, SHAPE_STROKE_WIDTH, ShapeKind, ShapeStyleKey as Key,
+};
 use egui::{ComboBox, RichText, Ui};
 
-use crate::shell::{Inspection, Shell};
+use crate::shell::{Inspection, KeyedSetting, Shell};
 use crate::tokens;
 
 use super::inspector::{
     InspectorState, LATER, ROW_GAP, animation_tab, body, color_row, later_badge, opacity_slider,
-    pair_row, placement, row_label, section, send, slider, tabs,
+    pair_row, placement, row_label, section, send, setting_row, slider, tabs,
 };
 
 /// The stroke's looks, in the order `border_line_style` numbers them.
@@ -104,17 +106,19 @@ pub(super) fn size_row(
 ) {
     let (width, height) = shape.size();
     let line = shape.is_straight();
-    let (new_w, new_h) = if line {
-        pair_row(ui, state, "Size", ("W", width.round()), ("", f64::NAN))
-    } else {
-        pair_row(
-            ui,
-            state,
-            "Size",
-            ("W", width.round()),
-            ("H", height.round()),
-        )
-    };
+    let (new_w, new_h) = setting_row(shell, ui, KeyedSetting::ShapeStyle(Key::Size), true, |ui| {
+        if line {
+            pair_row(ui, state, "Size", ("W", width.round()), ("", f64::NAN))
+        } else {
+            pair_row(
+                ui,
+                state,
+                "Size",
+                ("W", width.round()),
+                ("H", height.round()),
+            )
+        }
+    });
     if new_w.is_some() || new_h.is_some() {
         let width = new_w.unwrap_or(width).max(1.0);
         let height = new_h.unwrap_or(height).max(1.0);
@@ -141,7 +145,14 @@ fn fill(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, shape: &Mate
             if let Some(color) = color_row(ui, state, "shape-fill-color", "Color", shown) {
                 send(shell, |shell| shell.set_shape_fill(&color, opacity));
             }
-            if let Some(value) = percent(ui, state, "shape-fill-opacity", "Opacity", opacity) {
+            let changed = setting_row(
+                shell,
+                ui,
+                KeyedSetting::ShapeStyle(Key::FillOpacity),
+                true,
+                |ui| percent(ui, state, "shape-fill-opacity", "Opacity", opacity),
+            );
+            if let Some(value) = changed {
                 let color = shape.color.clone();
                 send(shell, |shell| shell.set_shape_fill(&color, value));
             }
@@ -213,21 +224,37 @@ fn stroke(
                 });
             }
             let shown = if on { width } else { SHAPE_STROKE_WIDTH };
-            if let Some(value) = slider(
+            let changed = setting_row(
+                shell,
                 ui,
-                state,
-                "shape-stroke-width",
-                "Weight",
-                shown.round(),
-                1.0..=50.0,
-                |v| format!("{v:.0}"),
-            ) {
+                KeyedSetting::ShapeStyle(Key::StrokeWidth),
+                true,
+                |ui| {
+                    slider(
+                        ui,
+                        state,
+                        "shape-stroke-width",
+                        "Weight",
+                        shown.round(),
+                        1.0..=50.0,
+                        |v| format!("{v:.0}"),
+                    )
+                },
+            );
+            if let Some(value) = changed {
                 let color = color.clone();
                 send(shell, |shell| {
                     shell.set_shape_stroke(&color, value, opacity, style)
                 });
             }
-            if let Some(value) = percent(ui, state, "shape-stroke-opacity", "Opacity", opacity) {
+            let changed = setting_row(
+                shell,
+                ui,
+                KeyedSetting::ShapeStyle(Key::StrokeOpacity),
+                true,
+                |ui| percent(ui, state, "shape-stroke-opacity", "Opacity", opacity),
+            );
+            if let Some(value) = changed {
                 let color = color.clone();
                 send(shell, |shell| {
                     shell.set_shape_stroke(&color, width, value, style)
@@ -267,15 +294,24 @@ fn corners(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, shape: &M
     }
     body(ui, |ui| {
         ui.add_enabled_ui(on, |ui| {
-            if let Some(value) = slider(
+            let changed = setting_row(
+                shell,
                 ui,
-                state,
-                "shape-corner-radius",
-                "Corner radius",
-                radius.round(),
-                0.0..=most,
-                |v| format!("{v:.0}"),
-            ) {
+                KeyedSetting::ShapeStyle(Key::Corners),
+                true,
+                |ui| {
+                    slider(
+                        ui,
+                        state,
+                        "shape-corner-radius",
+                        "Corner radius",
+                        radius.round(),
+                        0.0..=most,
+                        |v| format!("{v:.0}"),
+                    )
+                },
+            );
+            if let Some(value) = changed {
                 send(shell, |shell| shell.set_shape_corners(vec![value]));
             }
         });
@@ -329,35 +365,60 @@ fn shadow(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, shape: &Ma
                     shell.set_shape_shadow(&picked, distance, angle, opacity)
                 });
             }
-            if let Some(value) = slider(
+            let changed = setting_row(
+                shell,
                 ui,
-                state,
-                "shape-shadow-distance",
-                "Distance",
-                distance.round(),
-                0.0..=100.0,
-                |v| format!("{v:.0}"),
-            ) {
+                KeyedSetting::ShapeStyle(Key::ShadowDistance),
+                true,
+                |ui| {
+                    slider(
+                        ui,
+                        state,
+                        "shape-shadow-distance",
+                        "Distance",
+                        distance.round(),
+                        0.0..=100.0,
+                        |v| format!("{v:.0}"),
+                    )
+                },
+            );
+            if let Some(value) = changed {
                 let color = color.clone();
                 send(shell, |shell| {
                     shell.set_shape_shadow(&color, value, angle, opacity)
                 });
             }
-            if let Some(value) = slider(
+            let changed = setting_row(
+                shell,
                 ui,
-                state,
-                "shape-shadow-angle",
-                "Angle",
-                angle.round(),
-                -180.0..=180.0,
-                |v| format!("{v:.0}°"),
-            ) {
+                KeyedSetting::ShapeStyle(Key::ShadowAngle),
+                true,
+                |ui| {
+                    slider(
+                        ui,
+                        state,
+                        "shape-shadow-angle",
+                        "Angle",
+                        angle.round(),
+                        -180.0..=180.0,
+                        |v| format!("{v:.0}°"),
+                    )
+                },
+            );
+            if let Some(value) = changed {
                 let color = color.clone();
                 send(shell, |shell| {
                     shell.set_shape_shadow(&color, distance, value, opacity)
                 });
             }
-            if let Some(value) = percent(ui, state, "shape-shadow-opacity", "Opacity", opacity) {
+            let changed = setting_row(
+                shell,
+                ui,
+                KeyedSetting::ShapeStyle(Key::ShadowOpacity),
+                true,
+                |ui| percent(ui, state, "shape-shadow-opacity", "Opacity", opacity),
+            );
+            if let Some(value) = changed {
                 let color = color.clone();
                 send(shell, |shell| {
                     shell.set_shape_shadow(&color, distance, angle, value.max(0.01))

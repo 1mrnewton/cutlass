@@ -11,8 +11,14 @@
 //! runs: from the most wanted one it steps back to the earliest ask of that
 //! file within [`RUN_REACH`], then forward through every ask within reach of
 //! the last picture, so one seek serves a run of tiles.
+//!
+//! A [`ThumbCache`] keeps thumbnails past this run. The worker looks there
+//! before it opens a file, and hands it each thumbnail it decodes, so a
+//! project opened again shows its filmstrips without decoding them. While a
+//! thumbnail is on its way, [`Thumbnails::nearest`] answers the stored one
+//! of that file closest in time, so a tile has a picture to stand in.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -58,6 +64,18 @@ pub struct Thumb {
     pub rgba: Vec<u8>,
 }
 
+/// Thumbnails kept from one run to the next, as files on disk are. The
+/// worker thread owns it and is the only caller, so it may read and write
+/// slowly without holding up a frame.
+pub trait ThumbCache: Send {
+    /// The thumbnail kept for `key`, when there is one and it reads back.
+    fn load(&mut self, key: &ThumbKey) -> Option<Thumb>;
+
+    /// Keep `thumb` for `key`. A failure is the cache's to swallow: the
+    /// thumbnail is in memory either way.
+    fn keep(&mut self, key: &ThumbKey, thumb: &Thumb);
+}
+
 /// The thumbnail store and the thread that fills it.
 pub struct Thumbnails {
     shared: Arc<Shared>,
@@ -72,6 +90,8 @@ struct Shared {
 #[derive(Default)]
 struct State {
     stored: HashMap<ThumbKey, Arc<Thumb>>,
+    /// The times stored for each file, in order, for the nearest one.
+    times: HashMap<PathBuf, BTreeSet<i64>>,
     order: VecDeque<ThumbKey>,
     wanted: VecDeque<ThumbKey>,
     failed: HashSet<ThumbKey>,
@@ -95,6 +115,17 @@ impl Thumbnails {
     /// Start the worker. `ready` runs on the worker after each thumbnail is
     /// stored, so the caller can draw again.
     pub fn start(factory: ReaderFactory, ready: impl Fn() + Send + 'static) -> Self {
+        Self::start_with(factory, None, ready)
+    }
+
+    /// [`Self::start`], with `cache` keeping the thumbnails past this run:
+    /// the worker reads a thumbnail from it when it has one, and decodes
+    /// and hands it the ones it has not.
+    pub fn start_with(
+        factory: ReaderFactory,
+        mut cache: Option<Box<dyn ThumbCache>>,
+        ready: impl Fn() + Send + 'static,
+    ) -> Self {
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
             wake: Condvar::new(),
@@ -103,7 +134,7 @@ impl Thumbnails {
             let shared = Arc::clone(&shared);
             std::thread::Builder::new()
                 .name("cutlass-thumbnails".to_owned())
-                .spawn(move || work(&shared, &factory, &ready))
+                .spawn(move || work(&shared, &factory, cache.as_deref_mut(), &ready))
                 .ok()
         };
         Self { shared, worker }
@@ -113,6 +144,35 @@ impl Thumbnails {
     #[must_use]
     pub fn get(&self, key: &ThumbKey) -> Option<Arc<Thumb>> {
         self.shared.lock().stored.get(key).cloned()
+    }
+
+    /// The stored thumbnail of `key`'s file closest in time to it, for a
+    /// tile to show while its own is on the way. `None` when no thumbnail
+    /// of that file is stored. This never decodes.
+    #[must_use]
+    pub fn nearest(&self, key: &ThumbKey) -> Option<Arc<Thumb>> {
+        let state = self.shared.lock();
+        let times = state.times.get(&key.path)?;
+        let before = times.range(..=key.time.0).next_back();
+        let after = times.range(key.time.0..).next();
+        let time = match (before, after) {
+            (Some(before), Some(after)) => {
+                if key.time.0.saturating_sub(*before) <= after.saturating_sub(key.time.0) {
+                    before
+                } else {
+                    after
+                }
+            }
+            (Some(only), None) | (None, Some(only)) => only,
+            (None, None) => return None,
+        };
+        state
+            .stored
+            .get(&ThumbKey {
+                path: key.path.clone(),
+                time: Micros(*time),
+            })
+            .cloned()
     }
 
     /// Ask for `keys`, most wanted first. The asks replace the earlier ones;
@@ -159,7 +219,12 @@ impl Drop for Thumbnails {
     }
 }
 
-fn work(shared: &Shared, factory: &ReaderFactory, ready: &dyn Fn()) {
+fn work(
+    shared: &Shared,
+    factory: &ReaderFactory,
+    mut cache: Option<&mut (dyn ThumbCache + 'static)>,
+    ready: &dyn Fn(),
+) {
     let mut open: VecDeque<(PathBuf, Media)> = VecDeque::new();
     loop {
         let key = {
@@ -180,23 +245,47 @@ fn work(shared: &Shared, factory: &ReaderFactory, ready: &dyn Fn()) {
                     .unwrap_or_else(PoisonError::into_inner);
             }
         };
-        let made = thumb_for(factory, &mut open, &key);
-        let mut state = shared.lock();
-        if let Some((path, media)) = open.front() {
-            let info = media.info();
-            if let (Some(width), Some(height)) = (info.width, info.height) {
-                state
-                    .shapes
-                    .insert(path.clone(), upright(width, height, info.display));
-            }
+        // A kept thumbnail is read back without opening the file.
+        let kept = cache.as_mut().and_then(|cache| cache.load(&key));
+        let decoded = kept.is_none();
+        let made = match kept {
+            Some(thumb) => Ok(thumb),
+            None => thumb_for(factory, &mut open, &key),
+        };
+        if decoded && let (Ok(thumb), Some(cache)) = (&made, cache.as_mut()) {
+            cache.keep(&key, thumb);
         }
-        state.last = Some(key.clone());
+        let mut state = shared.lock();
+        if decoded {
+            if let Some((path, media)) = open.front() {
+                let info = media.info();
+                if let (Some(width), Some(height)) = (info.width, info.height) {
+                    state
+                        .shapes
+                        .insert(path.clone(), upright(width, height, info.display));
+                }
+            }
+            // Only a decode moves the stream a run goes on from.
+            state.last = Some(key.clone());
+        } else if let Ok(thumb) = &made {
+            // The file was not opened: its shape is the thumbnail's own,
+            // which is upright and keeps the picture's proportions.
+            state
+                .shapes
+                .entry(key.path.clone())
+                .or_insert((thumb.width, thumb.height));
+        }
         match made {
             Ok(thumb) => {
                 state.bytes = state.bytes.saturating_add(thumb.rgba.len());
                 if let Some(old) = state.stored.insert(key.clone(), Arc::new(thumb)) {
                     state.bytes = state.bytes.saturating_sub(old.rgba.len());
                 }
+                state
+                    .times
+                    .entry(key.path.clone())
+                    .or_default()
+                    .insert(key.time.0);
                 state.order.push_back(key);
                 while state.order.len() > MAX_THUMBS || state.bytes > MAX_THUMB_BYTES {
                     let Some(oldest) = state.order.pop_front() else {
@@ -204,6 +293,12 @@ fn work(shared: &Shared, factory: &ReaderFactory, ready: &dyn Fn()) {
                     };
                     if let Some(old) = state.stored.remove(&oldest) {
                         state.bytes = state.bytes.saturating_sub(old.rgba.len());
+                    }
+                    if let Some(times) = state.times.get_mut(&oldest.path) {
+                        times.remove(&oldest.time.0);
+                        if times.is_empty() {
+                            state.times.remove(&oldest.path);
+                        }
                     }
                 }
             }
@@ -455,7 +550,157 @@ fn bt709(luma: u8, cb: u8, cr: u8) -> [u8; 4] {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+
+    /// A cache that holds what it is given, and counts.
+    #[derive(Default)]
+    struct Kept {
+        thumbs: HashMap<ThumbKey, Thumb>,
+        loads: Arc<Mutex<Vec<ThumbKey>>>,
+        keeps: Arc<Mutex<Vec<ThumbKey>>>,
+    }
+
+    impl ThumbCache for Kept {
+        fn load(&mut self, key: &ThumbKey) -> Option<Thumb> {
+            self.loads.lock().unwrap().push(key.clone());
+            self.thumbs.get(key).cloned()
+        }
+
+        fn keep(&mut self, key: &ThumbKey, thumb: &Thumb) {
+            self.keeps.lock().unwrap().push(key.clone());
+            self.thumbs.insert(key.clone(), thumb.clone());
+        }
+    }
+
+    fn key(path: &str, time: i64) -> ThumbKey {
+        ThumbKey {
+            path: PathBuf::from(path),
+            time: Micros(time),
+        }
+    }
+
+    fn gray(level: u8, width: u32, height: u32) -> Thumb {
+        Thumb {
+            width,
+            height,
+            rgba: vec![level; (width * height * 4) as usize],
+        }
+    }
+
+    /// Wait until the worker has no ask left and has answered `count`.
+    fn settle(thumbnails: &Thumbnails, answered: &Arc<Mutex<usize>>, count: usize) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while (*answered.lock().unwrap() < count || thumbnails.pending() > 0)
+            && std::time::Instant::now() < until
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            *answered.lock().unwrap() >= count,
+            "the worker did not answer"
+        );
+    }
+
+    #[test]
+    fn a_kept_thumbnail_is_read_back_without_opening_its_file() {
+        // No file is at these paths, and no decoder is registered: a
+        // thumbnail can only come from the cache.
+        let mut cache = Kept::default();
+        cache
+            .thumbs
+            .insert(key("/a.mp4", 1_000_000), gray(10, 90, 160));
+        cache
+            .thumbs
+            .insert(key("/a.mp4", 5_000_000), gray(50, 90, 160));
+        let (loads, keeps) = (Arc::clone(&cache.loads), Arc::clone(&cache.keeps));
+        let answered = Arc::new(Mutex::new(0_usize));
+        let count = Arc::clone(&answered);
+        let thumbnails =
+            Thumbnails::start_with(ReaderFactory::default(), Some(Box::new(cache)), move || {
+                *count.lock().unwrap() += 1;
+            });
+        assert!(thumbnails.nearest(&key("/a.mp4", 0)).is_none());
+        thumbnails.want([
+            key("/a.mp4", 1_000_000),
+            key("/a.mp4", 5_000_000),
+            key("/a.mp4", 9_000_000),
+        ]);
+        settle(&thumbnails, &answered, 3);
+        assert_eq!(
+            thumbnails
+                .get(&key("/a.mp4", 1_000_000))
+                .map(|thumb| thumb.rgba[0]),
+            Some(10)
+        );
+        assert_eq!(
+            thumbnails
+                .get(&key("/a.mp4", 5_000_000))
+                .map(|thumb| thumb.rgba[0]),
+            Some(50)
+        );
+        // The one the cache does not hold needs the file, which is not
+        // there: it fails, and nothing is kept for it.
+        assert!(thumbnails.get(&key("/a.mp4", 9_000_000)).is_none());
+        assert_eq!(loads.lock().unwrap().len(), 3);
+        assert!(keeps.lock().unwrap().is_empty());
+        // The tile's shape is known from the thumbnail, the file unopened.
+        assert_eq!(thumbnails.shape(Path::new("/a.mp4")), Some((90, 160)));
+
+        // A stored thumbnail is not asked of the cache again, nor a failed one.
+        thumbnails.want([key("/a.mp4", 1_000_000), key("/a.mp4", 9_000_000)]);
+        assert_eq!(thumbnails.pending(), 0);
+        assert_eq!(loads.lock().unwrap().len(), 3);
+
+        // A tile still waiting borrows the stored thumbnail closest in time
+        // of its own file, before or after, and none of another file.
+        let near = |time: i64| {
+            thumbnails
+                .nearest(&key("/a.mp4", time))
+                .map(|thumb| thumb.rgba[0])
+        };
+        assert_eq!(near(0), Some(10));
+        assert_eq!(near(2_900_000), Some(10));
+        assert_eq!(near(3_100_000), Some(50));
+        assert_eq!(near(5_000_000), Some(50));
+        assert_eq!(near(99_000_000), Some(50));
+        assert!(thumbnails.nearest(&key("/b.mp4", 1_000_000)).is_none());
+    }
+
+    #[test]
+    fn a_thumbnail_dropped_for_room_is_no_longer_the_nearest() {
+        // Each thumbnail is a megabyte, so the store holds 96 of them.
+        let mut cache = Kept::default();
+        let asks: Vec<ThumbKey> = (0..120)
+            .map(|index| key("/a.mp4", index * 1_000_000))
+            .collect();
+        for ask in &asks {
+            cache.thumbs.insert(ask.clone(), gray(7, 512, 512));
+        }
+        let answered = Arc::new(Mutex::new(0_usize));
+        let count = Arc::clone(&answered);
+        let thumbnails =
+            Thumbnails::start_with(ReaderFactory::default(), Some(Box::new(cache)), move || {
+                *count.lock().unwrap() += 1;
+            });
+        thumbnails.want(asks.clone());
+        settle(&thumbnails, &answered, asks.len());
+        let stored = asks
+            .iter()
+            .filter(|ask| thumbnails.get(ask).is_some())
+            .count();
+        assert_eq!(stored, MAX_THUMB_BYTES / (512 * 512 * 4));
+        // Every answer of `nearest` is a thumbnail that is still stored.
+        let state = thumbnails.shared.lock();
+        let times = &state.times[Path::new("/a.mp4")];
+        assert_eq!(times.len(), stored);
+        assert!(
+            times
+                .iter()
+                .all(|time| state.stored.contains_key(&key("/a.mp4", *time)))
+        );
+    }
 
     #[test]
     fn a_tall_picture_shrinks_to_the_thumb_height_and_keeps_its_shape() {

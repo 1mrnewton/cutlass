@@ -3,7 +3,7 @@
 //! The file is one packet. Open scans markers. Seek answers from the index
 //! built at open and does not read the payload again. Wall-clock budgets
 //! apply when debug assertions are off. The measured numbers are in
-//! `SUPPORT.md`.
+//! `README.md`.
 
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::sync::Arc;

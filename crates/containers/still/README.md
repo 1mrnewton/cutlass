@@ -1,134 +1,100 @@
 # cutlass-still
 
-Native safe Rust demux and mux for a JPEG, PNG, WebP, or GIF file that is not inside a movie. `#![forbid(unsafe_code)]`. FFmpeg is a comparison tool. It is not a dependency, and this crate does not link it.
+`cutlass-still` reads and writes a JPEG, PNG, WebP, or GIF file that is not inside a movie. It demuxes the file into packets, one per picture, and muxes packets back into a file. It does not decode pixels: Huffman, inflate, and LZW are left to the codec crates. The crate is safe Rust (`#![forbid(unsafe_code)]`). The desktop app opens these files with `StillDemux`, and the export crate writes GIF and animated WebP files with `StillMux`.
 
-## What this crate is
+## What it supports
 
-The crate reads the signature, walks the container just far enough to name the pictures, and returns those pictures as packets. A single JPEG, PNG, or still WebP is one packet: the file bytes. A GIF is one packet per image. An animated WebP is one packet per `ANMF` chunk. Writing the packets back is concatenation, with an optional loop count stored as metadata.
+| Format | Packets | Clock |
+| --- | --- | --- |
+| JPEG | One packet: the file bytes | None. Timescale 0, no timestamp |
+| PNG | One packet: the file bytes. An APNG (`acTL`) is not split | None |
+| Still WebP (`VP8 `, `VP8L`, or `VP8X` without the animation flag) | One packet: the file bytes | None |
+| Animated WebP | One packet per `ANMF` chunk, in file order | `WEBP_TIMESCALE`, 1000 ticks per second |
+| GIF87a and GIF89a | One packet per image, in file order | `GIF_TIMESCALE`, 100 ticks per second, also for a one-image GIF |
 
-Pixel decoding stays in the codec crates. Huffman, inflate, and LZW are not implemented here. Timestamps stay in the file's own clock. A still picture has no clock.
+For GIF and animated WebP the first packet starts at byte 0, so it carries the header. The trailer, or the tail of the RIFF form, stays on the last packet. Joining the packets gives the file back. Only the first frame is a keyframe. Bytes after a JPEG's EOI or a PNG's `IEND` stay in the one packet.
 
-The longer support record is `SUPPORT.md`, next to this file.
+Delays are kept as stored, with two defaults. A GIF frame with no delay or a delay of 0 gets `GIF_DEFAULT_DELAY` (10 ticks, 100 ms). An `ANMF` duration of 0 gets `WEBP_DEFAULT_DELAY_MS` (100 ticks, 100 ms). Any stored value above 0 is kept. The packet bytes are never rewritten.
 
-## Specification
+The stream carries the picture size (`FrameSize`): the first SOF segment of a JPEG, the logical screen of a GIF. The extradata is empty. `loop_count()` returns the Netscape or `ANIM` loop count: `None` when the file stores none, `Some(0)` for repeat forever. The packets are one pass either way. `frame(index)` returns the disposal method and, for WebP, the blend bit of a frame.
 
-The walks follow these documents:
+`StillMux` takes one stream of codec JPEG, PNG, WebP, or GIF and joins its packets. `set_loop_count` writes the loop count into the Netscape block or the `ANIM` chunk. At `finish` the result is parsed again by the demuxer; if it does not open, the mux fails and `bytes()` is `None`.
 
-- ITU-T T.81. A JPEG starts at SOI (`FF D8`). A segment length includes its own two bytes. The entropy-coded scan after SOS is scanned for the next marker, and `FF 00` stays a stuffed byte. EOI (`FF D9`) ends the scan. The scan is not Huffman-decoded. Dimensions come from the first SOF segment.
-- The W3C PNG specification. A chunk is a 32-bit length, a type, that many data bytes, and a CRC-32 over the type and the data. The CRC uses the ISO HDLC polynomial `0xEDB88320`. The image bytes stay compressed.
-- The WebP container specification. The file is a RIFF form whose kind is `WEBP`. A still file is a `VP8 ` or `VP8L` bitstream, or a `VP8X` file whose animation flag is clear. An animated file sets that flag, carries an `ANIM` chunk, and stores one frame per `ANMF` chunk. An `ANMF` duration is milliseconds.
-- GIF87a and GIF89a. A graphic-control delay is a count of hundredths of a second. The logical screen size is the picture size this crate reports.
+What is refused:
 
-## API
+- Any other signature: `OpenError::Unrecognized`. `probe` refuses a movie header (`ftyp`, EBML, RIFF `AVI ` or `WAVE`) within the first 12 bytes.
+- A file above 32 MiB, a JPEG segment, PNG chunk, RIFF chunk, or GIF sub-block whose size runs past the remaining bytes, more than 4096 frames, or WebP chunks nested deeper than the children of `ANMF`: `OpenError::HostileSize`.
+- A cut-off signature or body: `OpenError::Truncated`.
+- A PNG chunk with a wrong CRC-32: `OpenError::Source`.
+- A failed open returns only the error. No stream list and no packets are published.
+- In the muxer: a second stream (`MuxError::TooManyTracks`), a codec that is not one of the four (`MuxError::UnknownCodec`), a total above 32 MiB or 4096 packets (`MuxError::HostileSize`), and a track duration that does not match the packets (`MuxError::DurationMismatch`).
 
-Open a readable, seekable file with `StillDemux::open` and an `Input`:
+## Using it
+
+- `probe` and `StillProbe` decide from the first `PROBE_BYTES` (12). A short prefix of a known signature asks for more bytes.
+- `StillDemux::open` takes a `cutlass_container::Input`. `still_limits()` gives the limits to build it with. `StillDemux` implements `cutlass_container::Demux`.
+- `kind()` is `StillKind::Jpeg`, `Png`, `Webp`, or `Gif`. `animated()`, `loop_count()`, `media_end()`, `frame_count()`, and `frame()` describe the sequence.
+- `StillMux::new()` implements `cutlass_container::Mux`. It writes into memory; `bytes()` is the finished file.
 
 ```rust
-let demux = StillDemux::open(Input::random(file, length, still_limits()))?;
+use cutlass_container::{Demux, Input};
+use cutlass_still::{StillDemux, still_limits};
+
+let file = std::fs::File::open(path)?;
+let length = file.metadata()?.len();
+let mut demux = StillDemux::open(Input::random(file, length, still_limits()))?;
+let size = demux.streams()[0].params().size();
+while let Some(packet) = demux.read_packet()? {
+    let _bytes = packet.bytes();
+}
 ```
 
-`still_limits` caps one file, and therefore one packet, at 32 MiB, and caps a GIF or animated WebP at 4096 frames. `demux.kind()` is `StillKind::Jpeg`, `Png`, `Webp`, or `Gif`. `Demux::read_packet` returns the next packet. `Demux::seek` uses the index built at open.
+`seek` answers from an index built at open and reads nothing. On a forward-only input it returns `SeekError::ForwardOnly`.
 
-`probe` and `StillProbe` look at the first 12 bytes (`PROBE_BYTES`). A finished JPEG, PNG, GIF87a, GIF89a, or RIFF `WEBP` signature is accepted. A short prefix of one of those asks for more bytes. Any other header is refused.
+`cargo run --release -p cutlass-still --example open` asks FFmpeg for one 32×32 PNG, opens it, and prints `32x32`. It fails with `ffmpeg is not installed` when FFmpeg is missing.
 
-`StillMux::new` writes one stream. `Mux::add_stream`, `Mux::write_packet`, and `Mux::finish` produce the file. `set_loop_count` stores a Netscape loop or an `ANIM` loop. `bytes` is the finished file, and it is absent when finish fails.
+## How it is tested
 
-A JPEG, PNG, or still WebP packet has a missing timestamp and timescale 0. GIF uses timescale `GIF_TIMESCALE` (100). Animated WebP uses `WEBP_TIMESCALE` (1000). A missing or zero GIF delay becomes `GIF_DEFAULT_DELAY` (10 ticks). A zero `ANMF` duration becomes `WEBP_DEFAULT_DELAY_MS` (100 ticks). A stored delay above zero is kept, including WebP durations 1 through 10. `loop_count` is metadata: `None` means the file stored none, and `Some(0)` means repeat forever. The packet list is one pass either way. The picture size is the `FrameSize` on the stream returned by `streams()`.
-
-## Support
-
-| Format | Open | Packets |
-| --- | --- | --- |
-| JPEG | Yes | One packet, the file bytes, no clock |
-| PNG | Yes | One packet, the file bytes, no clock. An `acTL` sequence is not split |
-| Still WebP | Yes | One packet, the file bytes, no clock. Lossy `VP8 ` and lossless `VP8L` |
-| Animated WebP | Yes | One packet per `ANMF`, in file order, millisecond delays |
-| GIF87a and GIF89a | Yes | One packet per image, in file order, timescale 100 |
-
-Concatenating GIF packets, or animated WebP packets, is the file. The first packet starts at byte 0. The trailer, or the tail of the RIFF form, stays on the last packet. Only the first frame of a sequence is a keyframe. A still picture is a keyframe at tick 0.
-
-`MAX_FILE_BYTES` is 32 MiB. `MAX_FRAMES` is 4096. `MAX_CHUNK_DEPTH` is 2. A declared size past the remaining bytes is `OpenError::HostileSize`, and no demuxer is returned.
-
-## Accuracy
-
-This crate returns packet bytes. It does not return pixels, so the comparison is the packet payload against ffmpeg.
-
-On Thu Oct 29 21:06:25 GMT 2026, `cargo bench -p cutlass-still` compared each sample to `ffmpeg -c copy` before timing. The packets matched:
-
-| Format | Picture | Packet bytes |
-| --- | --- | --- |
-| JPEG | 32×32 | 230 |
-| PNG | 32×32 | 120 |
-| WebP | 32×32 | 84 |
-| GIF | 32×32 | 911 |
-
-Each of those files is one picture and one packet. The WebP bytes were copied by ffmpeg from a file `cwebp` 1.6.0 wrote. This ffmpeg build has no WebP encoder.
-
-## Performance
-
-The numbers below are the stdout of that same run. Nothing in the table was typed by hand.
-
-Command: `cargo bench -p cutlass-still`
-
-ffmpeg: `ffmpeg version 8.1.1 Copyright (c) 2000-2026 the FFmpeg developers` at `/opt/homebrew/bin/ffmpeg`
-
-CPU: `Apple M5 Pro` (`sysctl -n machdep.cpu.brand_string`)
-
-Date: Thu Oct 29 21:06:25 GMT 2026
-
-One 32×32 picture per format. Cutlass time is `StillDemux::open` plus the packet read in this process. ffmpeg time is `ffmpeg -c copy -f null -` and includes process startup. The figure is the median of 3 after one warmup.
-
-```text
-cutlass-still open versus ffmpeg
-ffmpeg version 8.1.1 Copyright (c) 2000-2026 the FFmpeg developers
-ffmpeg: /opt/homebrew/bin/ffmpeg
-sample: one 32x32 picture
-reps: median of 3 after 1 warmup
-cutlass times StillDemux::open and the packet read in this process
-ffmpeg times -c copy -f null and includes process startup
-packet bytes were compared to ffmpeg -c copy before timing
-jpeg 32x32 230 bytes match ffmpeg, written by ffmpeg
-png 32x32 120 bytes match ffmpeg, written by ffmpeg
-webp 32x32 84 bytes match ffmpeg, written by cwebp 1.6.0
-gif 32x32 911 bytes match ffmpeg, written by ffmpeg
-
-format   side           median          min          max    bytes
-jpeg     cutlass      0.014 ms     0.012 ms     0.020 ms      230
-jpeg     ffmpeg      19.543 ms    19.508 ms    19.674 ms      230
-png      cutlass      0.011 ms     0.011 ms     0.014 ms      120
-png      ffmpeg      17.097 ms    16.819 ms    17.985 ms      120
-webp     cutlass      0.013 ms     0.011 ms     0.014 ms       84
-webp     ffmpeg      17.123 ms    16.603 ms    17.653 ms       84
-gif      cutlass      0.011 ms     0.010 ms     0.014 ms      911
-gif      ffmpeg      20.067 ms    18.404 ms    23.261 ms      911
+```sh
+cargo test -p cutlass-still
 ```
 
-The timed GIF is one frame, and the timed WebP is one still picture. Animated WebP and a multi-frame GIF are opened by the code above. This run did not time them, so they have no speed row.
+- Unit tests in `src/tests.rs` build files by hand. They cover one packet per still picture, trailing bytes, APNG kept whole, GIF and animated WebP splitting and delays, the two default delays, loop counts, the probe, truncation, hostile sizes, a bad PNG CRC, the frame limit, seek, forward input, cancel, and the muxer's round trips and refusals.
+- `tests/external/oracle.rs` makes a JPEG, PNG, WebP, and a two-frame GIF with ImageMagick and compares packet positions, sizes, and GIF delays with `ffprobe`. It prints `skipped` and passes when `ffprobe` or `magick` is not on the `PATH`. FFmpeg does not split an animated WebP, so that case is compared with libwebp's `webpinfo` on a file written by Python's PIL; it is skipped when `python3` or `webpinfo` is missing.
+- `open_scans_a_large_jpeg_and_seek_does_not_read_it_again` opens an 8 MiB JPEG and checks that seek reads zero bytes. In a release build it also fails if open takes 100 ms or seek takes 5 ms.
+- `demux_and_mux_campaign` is a fuzz loop over probe, open, read, seek, and mux. It is `#[ignore]`d and runs for `STILL_FUZZ_SECS` seconds (default 1800) with `cargo test --release -p cutlass-still --test external -- --ignored`.
+- One test opens a PNG and refuses movies from a folder of real files kept outside the repository. It prints `skipped` and passes when the folder is absent.
+- `cargo bench -p cutlass-still` compares each sample's packet bytes with `ffmpeg -c copy` before it times anything. The samples are one-picture files only.
 
-## Example
+## Speed against FFmpeg
 
-`examples/open.rs` asks ffmpeg for one 32×32 PNG, opens it with `StillDemux::open`, and prints the picture size.
+Not measured. A still file is one packet, or one packet per picture for a GIF or an animated WebP, so there is no packet stream to time against libavformat. The codec crates time the decoding.
 
-```text
-cargo run --release -p cutlass-still --example open
-```
+## Limits and gaps
 
-That command printed:
+| Limit | Value |
+| --- | --- |
+| File, and so one packet (`MAX_FILE_BYTES`) | 32 MiB |
+| Frames in a GIF or animated WebP (`MAX_FRAMES`) | 4096 |
+| WebP chunk nesting (`MAX_CHUNK_DEPTH`) | 2 |
+| Probe window | 12 bytes |
 
-```text
-32x32
-```
+The demuxer reads the whole file into memory at open and keeps it. Each packet read copies its bytes out of that buffer. The muxer also holds every packet in memory. A picture file above 32 MiB does not open at all.
 
-## Gaps
+Gaps, also listed in the `UNSUPPORTED` constant:
 
-These are refused or left out. None of them has a speed row.
+- APNG frames are not split. The file is one PNG packet.
+- HEIC and AVIF are not this crate's signatures. They are ISO base media files.
+- No pixel decode, Huffman, inflate, or LZW.
+- A still picture gets no invented frame rate. Its timestamp stays missing.
+- A loop count never repeats packets.
+- A GIF plain-text extension is skipped. It is not a packet.
+- The muxer writes one whole file. It has no fragmented output and does not write to a stream as packets arrive.
+- No fixed-seed fuzz run is part of the normal test run; the fuzz loop only runs when asked.
 
-- HEIC and AVIF. The signature is not JPEG, PNG, WebP, or GIF.
-- A movie container. The probe stops on an `ftyp`, EBML, AVI, or WAVE header.
-- APNG frames. The file opens as one PNG packet. The frames are not split.
-- JPEG 2000, and any other bitstream that does not start with SOI, the PNG signature, `GIF87a`, `GIF89a`, or RIFF `WEBP`.
-- Pixel decode, Huffman, inflate, and LZW.
-- A frame rate invented for a still picture. Timescale 0 and a missing timestamp stay missing.
-- GIF plain text. It is skipped, and it is not a packet.
-- Repeating packets for a loop. The loop count is metadata.
-- Fragmented mux output. Finish writes one file.
+## Specifications
+
+- ITU-T T.81, for the JPEG marker layout.
+- W3C PNG specification, for the signature, chunks, and CRC-32.
+- WebP container specification, for `VP8X`, `ANIM`, and `ANMF`.
+- GIF87a and GIF89a.

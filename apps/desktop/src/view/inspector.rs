@@ -35,6 +35,8 @@ pub(super) const ROW_GAP: f32 = 6.0;
 /// The widest and narrowest gap between the inspector's tabs.
 const TAB_GAP: f32 = 18.0;
 const TAB_GAP_MIN: f32 = 8.0;
+use cutlass_model::TextStyleKey as Style;
+
 pub(super) const LATER: &str = "Later: Cutlass has no edit for this yet";
 
 /// Which tab, page, and sections are open. They reset when another clip
@@ -68,6 +70,8 @@ pub(super) struct InspectorState {
     /// The pictures drawn for the Templates, Bubble and Effects tiles, by
     /// item id. They outlast a pick of another clip.
     pub(super) tiles: HashMap<String, egui::TextureHandle>,
+    /// The pose part the Graphs row eases.
+    ease_part: Option<KeyedSetting>,
 }
 
 /// Where a clip menu row sends the inspector.
@@ -146,6 +150,57 @@ pub(super) fn clip_panel(
             note(ui, &inspection.material);
         }
     });
+}
+
+/// The picked transition: its name, how long it lasts between its
+/// limits, Reset back to the shelf's length, and Apply to all.
+pub(super) fn transition_panel(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    bar: &cutlass_editor::TransitionBar,
+) {
+    let state = &mut view.inspector;
+    let id = bar.segment_id.clone();
+    tabs(ui, &["Transition"], &mut 0);
+    ui.horizontal(|ui| {
+        row_label(ui, "Name");
+        ui.label(RichText::new(&bar.name).size(12.0).color(tokens::TEXT));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if icon_toggle(ui, "reset", "Reset the duration", false).clicked() {
+                send(shell, |shell| shell.reset_transition_length(&id));
+            }
+        });
+    });
+    ui.add_space(ROW_GAP);
+    let seconds = |time: Micros| (time.0 as f64 / 100_000.0).round() / 10.0;
+    if let Some((shortest, longest)) = shell.transition_limits(&id) {
+        let key = format!("transition {}", id.as_str());
+        let moved = slider(
+            ui,
+            state,
+            &key,
+            "Duration",
+            seconds(bar.duration),
+            seconds(shortest)..=seconds(longest),
+            |v| format!("{v:.1}s"),
+        );
+        if let Some(moved) = moved {
+            let duration = Micros((moved * 1_000_000.0).round() as i64);
+            send(shell, |shell| shell.set_transition_length(&id, duration));
+        }
+    }
+    ui.add_space(12.0);
+    if ui
+        .add(
+            ui::Button::new("Apply to all")
+                .text_size(12.0)
+                .tip("Put this transition on every other cut of the track"),
+        )
+        .clicked()
+    {
+        send(shell, |shell| shell.apply_transition_to_all(&id));
+    }
 }
 
 // Panels.
@@ -555,22 +610,28 @@ fn effect_panel(
     body(ui, |ui| {
         if let Some(stored) = shell.effect_strength() {
             let amount = (stored * 100.0).round();
-            if let Some(value) = slider(ui, state, "amount", "Amount", amount, 0.0..=100.0, |v| {
-                format!("{v:.0}")
-            }) {
+            // Only a filter's Amount is played, so only it keys.
+            let keyed = filter && shell.is_filter();
+            let changed = setting_row(shell, ui, KeyedSetting::FilterStrength, keyed, |ui| {
+                slider(ui, state, "amount", "Amount", amount, 0.0..=100.0, |v| {
+                    format!("{v:.0}")
+                })
+            });
+            if let Some(value) = changed {
                 send(shell, |shell| shell.set_effect_strength(value / 100.0));
             }
         } else {
             later_slider(ui, "Amount", 0.0, "0");
         }
         if filter {
-            let key = cutlass_effects::AdjustKey::Temperature;
-            let stored = (f64::from(inspection.adjust.get(key)) * 100.0).round();
-            if let Some(value) = slider(ui, state, "temp", "Temp", stored, -100.0..=100.0, |v| {
-                format!("{v:.0}")
-            }) {
-                send(shell, |shell| shell.set_adjust(key, value / 100.0));
-            }
+            adjust_row(
+                shell,
+                ui,
+                state,
+                inspection,
+                cutlass_effects::AdjustKey::Temperature,
+                "Temp",
+            );
         }
     });
 }
@@ -599,7 +660,15 @@ fn recipe_pages(
             );
         }
         for (control, value) in controls {
-            if let Some(next) = control_slider(ui, state, control, *value) {
+            // A speed control is not keyed; it has no buttons.
+            let setting = shell.effect_control_setting(&control.id);
+            let moved = match setting {
+                Some(setting) => setting_row(shell, ui, setting, true, |ui| {
+                    control_slider(ui, state, control, *value)
+                }),
+                None => control_slider(ui, state, control, *value),
+            };
+            if let Some(next) = moved {
                 let id = control.id.clone();
                 send(shell, move |shell| shell.set_effect_control(&id, next));
             }
@@ -708,15 +777,18 @@ pub(super) fn placement(
         (draft.canvas_config.width, draft.canvas_config.height)
     });
     let keys = shell.keys();
+    let scale_keys = pose_keys(shell, KeyedSetting::Scale);
+    let place_keys = pose_keys(shell, KeyedSetting::Position);
+    let turn_keys = pose_keys(shell, KeyedSetting::Rotation);
     let playhead = shell.playhead();
-    let mut step = None;
+    let (mut scale_step, mut place_step, mut turn_step) = (None, None, None);
     let shape = if size { shell.shape() } else { None };
     body(ui, |ui| {
         if let Some(shape) = &shape {
             super::shape::size_row(shell, ui, state, shape);
         }
         let scale = (inspection.scale_x * 100.0).round();
-        let scaled = keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
+        let scaled = keyed_row(ui, scale_keys.as_ref(), playhead, &mut scale_step, |ui| {
             slider(ui, state, "scale", "Scale", scale, 1.0..=500.0, |v| {
                 format!("{v:.0}%")
             })
@@ -728,7 +800,7 @@ pub(super) fn placement(
         // The prototype counts canvas pixels from the middle, with Y down.
         let (x, y) =
             cutlass_editor::canvas_pixels((inspection.transform_x, inspection.transform_y), canvas);
-        let (new_x, new_y) = keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
+        let (new_x, new_y) = keyed_row(ui, place_keys.as_ref(), playhead, &mut place_step, |ui| {
             pair_row(ui, state, "Position", ("X", x), ("Y", y))
         });
         if new_x.is_some() || new_y.is_some() {
@@ -748,23 +820,18 @@ pub(super) fn placement(
         }
         let rotation = inspection.rotation;
         let turned = rotate_label.map_or((None, None), |label| {
-            keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
+            keyed_row(ui, turn_keys.as_ref(), playhead, &mut turn_step, |ui| {
                 pair_row(ui, state, label, ("°", rotation), ("", f64::NAN))
             })
         });
-        match step {
-            Some(KeyStep::Back) => shell.step_keyframe(false),
-            Some(KeyStep::Toggle) => send(shell, Shell::toggle_keyframe),
-            Some(KeyStep::Forward) => shell.step_keyframe(true),
-            None => {}
-        }
+        setting_step(shell, KeyedSetting::Scale, scale_step);
+        setting_step(shell, KeyedSetting::Position, place_step);
+        setting_step(shell, KeyedSetting::Rotation, turn_step);
         if let (Some(value), _) = turned {
             send(shell, |shell| shell.set_rotation(value));
         }
-        if let Some(keys) = keys.as_ref().filter(|keys| keys.span.is_some())
-            && let Some(graph) = graph_row(ui, keys)
-        {
-            send(shell, |shell| shell.ease_keyframes(graph));
+        if keys.is_some() {
+            ease_rows(shell, ui, state);
         }
         if rotate_label == Some("Rotate") {
             use cutlass_editor::StageAlign;
@@ -1076,11 +1143,24 @@ pub(super) fn opacity_slider(
     inspection: &Inspection,
 ) {
     let opacity = (inspection.opacity * 100.0).round();
-    if let Some(value) = slider(ui, state, "opacity", "Opacity", opacity, 0.0..=100.0, |v| {
-        format!("{v:.0}%")
-    }) {
+    let keys = pose_keys(shell, KeyedSetting::Opacity);
+    let mut step = None;
+    let changed = keyed_row(ui, keys.as_ref(), shell.playhead(), &mut step, |ui| {
+        slider(ui, state, "opacity", "Opacity", opacity, 0.0..=100.0, |v| {
+            format!("{v:.0}%")
+        })
+    });
+    if let Some(value) = changed {
         send(shell, |shell| shell.set_opacity(value / 100.0));
     }
+    setting_step(shell, KeyedSetting::Opacity, step);
+}
+
+/// The selected clip's keys on the pose part `setting`, when it is a
+/// picture or title, which has a pose to key.
+fn pose_keys(shell: &Shell, setting: KeyedSetting) -> Option<cutlass_editor::ClipKeys> {
+    shell.keys()?;
+    shell.setting_keys(setting)
 }
 
 fn canvas(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspection: &Inspection) {
@@ -1096,9 +1176,10 @@ fn canvas(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspection
     }
     if header.open {
         body(ui, |ui| {
-            if let Some(color) =
+            let picked = setting_row(shell, ui, KeyedSetting::CanvasColor, on, |ui| {
                 color_row(ui, state, "canvas-color", "Color", &inspection.letterbox)
-            {
+            });
+            if let Some(color) = picked {
                 send(shell, |shell| shell.set_letterbox(&color));
             }
             later_button(ui, "Apply to all");
@@ -1248,6 +1329,26 @@ pub(super) fn animation_tab(
     later_slider(ui, "Duration", 2.0, "2.0s");
 }
 
+/// `row` with `setting`'s own keyframe buttons at its end when `keyed`,
+/// acting on a press of them. The row's own result.
+pub(super) fn setting_row<R>(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    setting: KeyedSetting,
+    keyed: bool,
+    row: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    let keys = if keyed {
+        shell.setting_keys(setting)
+    } else {
+        None
+    };
+    let mut step = None;
+    let inner = keyed_row(ui, keys.as_ref(), shell.playhead(), &mut step, row);
+    setting_step(shell, setting, step);
+    inner
+}
+
 /// Act on a press of `setting`'s keyframe buttons.
 pub(super) fn setting_step(shell: &mut Shell, setting: KeyedSetting, step: Option<KeyStep>) {
     match step {
@@ -1272,9 +1373,9 @@ const KEY_GAP: f32 = 2.0;
 /// The room the ◀ ◆ ▶ buttons take at a row's end.
 const KEYS_WIDTH: f32 = 3.0 * KEY_BUTTON + 2.0 * KEY_GAP;
 
-/// `row` with the clip's keyframe buttons at its end, when the clip takes
-/// keys. The model keys a clip's whole pose at once, so each row's buttons
-/// step through and toggle the same keys.
+/// `row` with the keyframe buttons for its own setting at its end, when the
+/// clip takes keys. Each row steps through and toggles only its setting's
+/// keys.
 pub(super) fn keyed_row<R>(
     ui: &mut Ui,
     keys: Option<&cutlass_editor::ClipKeys>,
@@ -1383,6 +1484,54 @@ fn key_buttons(ui: &mut Ui, keys: &cutlass_editor::ClipKeys, playhead: Micros) -
 /// The Graphs row for the span of keys the playhead is in: None, then
 /// each curve drawn in its tile, the one easing the span outlined. A
 /// press answers the curve to ease along, or `None` inside for none.
+/// The pose parts the Graphs row can ease, and their names on its chips.
+const EASED_PARTS: [(KeyedSetting, &str); 4] = [
+    (KeyedSetting::Position, "Position"),
+    (KeyedSetting::Scale, "Scale"),
+    (KeyedSetting::Rotation, "Rotate"),
+    (KeyedSetting::Opacity, "Opacity"),
+];
+
+/// A chip for each pose part with keys on both sides of the playhead, and
+/// the Graphs row for the one picked: a curve eases that part's keys only.
+fn ease_rows(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let parts: Vec<(KeyedSetting, &str, cutlass_editor::ClipKeys)> = EASED_PARTS
+        .into_iter()
+        .filter_map(|(part, name)| {
+            let keys = shell.setting_keys(part)?;
+            keys.span.is_some().then_some((part, name, keys))
+        })
+        .collect();
+    let Some(first) = parts.first().map(|(part, _, _)| *part) else {
+        return;
+    };
+    let picked = state
+        .ease_part
+        .filter(|part| parts.iter().any(|(each, _, _)| each == part))
+        .unwrap_or(first);
+    if parts.len() > 1 {
+        ui.add_space(ROW_GAP);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            for (part, name, _) in &parts {
+                let chip = ui::Button::new(*name)
+                    .on(*part == picked)
+                    .text_size(12.0)
+                    .radius(12);
+                if ui.add(chip).on_hover_text(format!("Ease {name}")).clicked() {
+                    state.ease_part = Some(*part);
+                }
+            }
+        });
+    }
+    let Some((_, _, keys)) = parts.iter().find(|(part, _, _)| *part == picked) else {
+        return;
+    };
+    if let Some(graph) = graph_row(ui, keys) {
+        send(shell, |shell| shell.ease_setting_keys(picked, graph));
+    }
+}
+
 fn graph_row(ui: &mut Ui, keys: &cutlass_editor::ClipKeys) -> Option<Option<String>> {
     let mut picked = None;
     ui.add_space(ROW_GAP);
@@ -1670,15 +1819,18 @@ fn lut_section(
         ui.add_space(ROW_GAP);
         if let Some((_, strength)) = &inspection.lut {
             let stored = (f64::from(*strength) * 100.0).round();
-            if let Some(value) = slider(
-                ui,
-                state,
-                "lut-strength",
-                "Intensity",
-                stored,
-                0.0..=100.0,
-                |v| format!("{v:.0}"),
-            ) {
+            let changed = setting_row(shell, ui, KeyedSetting::LutStrength, true, |ui| {
+                slider(
+                    ui,
+                    state,
+                    "lut-strength",
+                    "Intensity",
+                    stored,
+                    0.0..=100.0,
+                    |v| format!("{v:.0}"),
+                )
+            });
+            if let Some(value) = changed {
                 send(shell, |shell| shell.set_lut_strength(value / 100.0));
             }
         }
@@ -1762,18 +1914,36 @@ fn adjust_sliders(
             ui.label(RichText::new(title).size(12.0).color(tokens::MUTED));
             divider(ui);
             for key in keys {
-                let key = *key;
-                let stored = (f64::from(inspection.adjust.get(key)) * 100.0).round();
-                let low = f64::from(key.min()) * 100.0;
-                let id = format!("adjust-{}", key.kind());
-                if let Some(value) = slider(ui, state, &id, key.label(), stored, low..=100.0, |v| {
-                    format!("{v:.0}")
-                }) {
-                    send(shell, |shell| shell.set_adjust(key, value / 100.0));
-                }
+                adjust_row(shell, ui, state, inspection, *key, key.label());
             }
         }
     });
+}
+
+/// One Adjust slider named `label`, with its own keyframe buttons.
+fn adjust_row(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+    key: cutlass_effects::AdjustKey,
+    label: &str,
+) {
+    let setting = KeyedSetting::Adjust(key);
+    let keys = shell.setting_keys(setting);
+    let mut step = None;
+    let stored = (f64::from(inspection.adjust.get(key)) * 100.0).round();
+    let low = f64::from(key.min()) * 100.0;
+    let id = format!("adjust-{}", key.kind());
+    let changed = keyed_row(ui, keys.as_ref(), shell.playhead(), &mut step, |ui| {
+        slider(ui, state, &id, label, stored, low..=100.0, |v| {
+            format!("{v:.0}")
+        })
+    });
+    if let Some(value) = changed {
+        send(shell, |shell| shell.set_adjust(key, value / 100.0));
+    }
+    setting_step(shell, setting, step);
 }
 
 // The text panel's Basic page.
@@ -1813,15 +1983,24 @@ fn text_basic(
         }
         font_row(shell, ui, inspection);
         let size = inspection.text_size.round();
-        if let Some(value) = slider(
+        let changed = setting_row(
+            shell,
             ui,
-            state,
-            "font-size",
-            "Font size",
-            size,
-            1.0..=512.0,
-            |v| format!("{v:.0}"),
-        ) {
+            KeyedSetting::TextStyle(Style::Size),
+            true,
+            |ui| {
+                slider(
+                    ui,
+                    state,
+                    "font-size",
+                    "Font size",
+                    size,
+                    1.0..=512.0,
+                    |v| format!("{v:.0}"),
+                )
+            },
+        );
+        if let Some(value) = changed {
             send(shell, |shell| shell.set_text_size(value));
         }
         pattern_row(shell, ui, inspection);
@@ -1851,12 +2030,20 @@ fn text_basic(
         }
         setting_step(shell, KeyedSetting::TextColor, step);
         spacing_row(shell, ui, state, inspection);
-        let (width, _) = pair_row(
+        let (width, _) = setting_row(
+            shell,
             ui,
-            state,
-            "Line width",
-            ("px", inspection.line_width.round()),
-            ("", f64::NAN),
+            KeyedSetting::TextStyle(Style::LineWidth),
+            true,
+            |ui| {
+                pair_row(
+                    ui,
+                    state,
+                    "Line width",
+                    ("px", inspection.line_width.round()),
+                    ("", f64::NAN),
+                )
+            },
         );
         if let Some(value) = width {
             send(shell, |shell| shell.set_line_width(value.max(0.0)));
@@ -2064,16 +2251,40 @@ fn spacing_row(
     state: &mut InspectorState,
     inspection: &Inspection,
 ) {
-    let (letters, lines) = pair_row(
+    // Each spacing keys on its own, so each has its own row.
+    let (letters, _) = setting_row(
+        shell,
         ui,
-        state,
-        "Character",
-        ("", inspection.letter_spacing),
-        ("Line", inspection.line_spacing),
+        KeyedSetting::TextStyle(Style::LetterSpacing),
+        true,
+        |ui| {
+            pair_row(
+                ui,
+                state,
+                "Character",
+                ("", inspection.letter_spacing),
+                ("", f64::NAN),
+            )
+        },
     );
     if let Some(value) = letters {
         send(shell, |shell| shell.set_letter_spacing(value));
     }
+    let (lines, _) = setting_row(
+        shell,
+        ui,
+        KeyedSetting::TextStyle(Style::LineSpacing),
+        true,
+        |ui| {
+            pair_row(
+                ui,
+                state,
+                "Line spacing",
+                ("", inspection.line_spacing),
+                ("", f64::NAN),
+            )
+        },
+    );
     if let Some(value) = lines {
         send(shell, |shell| shell.set_line_spacing(value));
     }
@@ -2233,15 +2444,24 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
             }
             // Thickness 100 is the widest outline a title takes.
             let thickness = (look.outline_width / 0.25 * 100.0).round();
-            if let Some(value) = slider(
+            let changed = setting_row(
+                shell,
                 ui,
-                state,
-                "thickness",
-                "Thickness",
-                thickness,
-                0.0..=100.0,
-                percent,
-            ) {
+                KeyedSetting::TextStyle(Style::StrokeWidth),
+                true,
+                |ui| {
+                    slider(
+                        ui,
+                        state,
+                        "thickness",
+                        "Thickness",
+                        thickness,
+                        0.0..=100.0,
+                        percent,
+                    )
+                },
+            );
+            if let Some(value) = changed {
                 send(shell, |shell| {
                     shell.set_text_outline(&look.outline_color, value / 100.0 * 0.25)
                 });
@@ -2278,15 +2498,24 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
                 });
             }
             let alpha = (look.background_alpha * 100.0).round();
-            if let Some(value) = slider(
+            let changed = setting_row(
+                shell,
                 ui,
-                state,
-                "box-opacity",
-                "Opacity",
-                alpha,
-                0.0..=100.0,
-                |v| format!("{v:.0}%"),
-            ) {
+                KeyedSetting::TextStyle(Style::BackgroundAlpha),
+                true,
+                |ui| {
+                    slider(
+                        ui,
+                        state,
+                        "box-opacity",
+                        "Opacity",
+                        alpha,
+                        0.0..=100.0,
+                        |v| format!("{v:.0}%"),
+                    )
+                },
+            );
+            if let Some(value) = changed {
                 send(shell, |shell| {
                     shell.set_text_background(
                         &look.background_color,
@@ -2315,21 +2544,27 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
                 });
             }
             let strength = (look.glow_strength * 100.0).round();
-            if let Some(value) = slider(
-                ui,
-                state,
-                "intensity",
-                "Intensity",
-                strength,
-                0.0..=100.0,
-                percent,
-            ) {
+            let changed = setting_row(shell, ui, KeyedSetting::GlowStrength, on, |ui| {
+                slider(
+                    ui,
+                    state,
+                    "intensity",
+                    "Intensity",
+                    strength,
+                    0.0..=100.0,
+                    percent,
+                )
+            });
+            if let Some(value) = changed {
                 send(shell, |shell| {
                     shell.set_text_glow(&look.glow_color, value / 100.0, look.glow_range)
                 });
             }
             let range = (look.glow_range * 100.0).round();
-            if let Some(value) = slider(ui, state, "range", "Range", range, 0.0..=100.0, percent) {
+            let changed = setting_row(shell, ui, KeyedSetting::GlowRange, on, |ui| {
+                slider(ui, state, "range", "Range", range, 0.0..=100.0, percent)
+            });
+            if let Some(value) = changed {
                 send(shell, |shell| {
                     shell.set_text_glow(&look.glow_color, look.glow_strength, value / 100.0)
                 });
@@ -2366,9 +2601,18 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
             }
             later_slider(ui, "Opacity", 90.0, "90%");
             let blur = (look.shadow_blur * 100.0).round();
-            if let Some(value) = slider(ui, state, "blur", "Bluriness", blur, 0.0..=100.0, |v| {
-                format!("{v:.0}%")
-            }) {
+            let changed = setting_row(
+                shell,
+                ui,
+                KeyedSetting::TextStyle(Style::ShadowBlur),
+                true,
+                |ui| {
+                    slider(ui, state, "blur", "Bluriness", blur, 0.0..=100.0, |v| {
+                        format!("{v:.0}%")
+                    })
+                },
+            );
+            if let Some(value) = changed {
                 send(shell, |shell| {
                     shell.set_text_shadow(
                         &look.shadow_color,
@@ -2379,15 +2623,24 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
                 });
             }
             let distance = look.shadow_distance.round();
-            if let Some(value) = slider(
+            let changed = setting_row(
+                shell,
                 ui,
-                state,
-                "distance",
-                "Distance",
-                distance,
-                0.0..=100.0,
-                percent,
-            ) {
+                KeyedSetting::TextStyle(Style::ShadowDistance),
+                true,
+                |ui| {
+                    slider(
+                        ui,
+                        state,
+                        "distance",
+                        "Distance",
+                        distance,
+                        0.0..=100.0,
+                        percent,
+                    )
+                },
+            );
+            if let Some(value) = changed {
                 send(shell, |shell| {
                     shell.set_text_shadow(
                         &look.shadow_color,
@@ -2398,9 +2651,18 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
                 });
             }
             let angle = look.shadow_angle.round();
-            if let Some(value) = slider(ui, state, "angle", "Angle", angle, -180.0..=180.0, |v| {
-                format!("{v:.0}°")
-            }) {
+            let changed = setting_row(
+                shell,
+                ui,
+                KeyedSetting::TextStyle(Style::ShadowAngle),
+                true,
+                |ui| {
+                    slider(ui, state, "angle", "Angle", angle, -180.0..=180.0, |v| {
+                        format!("{v:.0}°")
+                    })
+                },
+            );
+            if let Some(value) = changed {
                 send(shell, |shell| {
                     shell.set_text_shadow(
                         &look.shadow_color,
@@ -2581,15 +2843,16 @@ pub(super) struct Header {
 }
 
 /// A section header: an optional on switch (`(on, editable)`), the name
-/// with a chevron that folds the section, and, with `keys`, the reset and
-/// keyframe buttons.
+/// with a chevron that folds the section, and, with `reset`, a reset
+/// button. Keyframe buttons sit on each keyed row, not on the header, so a
+/// key on one setting never keys the section's others.
 pub(super) fn section(
     ui: &mut Ui,
     state: &mut InspectorState,
     key: &str,
     label: &str,
     check: Option<(bool, bool)>,
-    keys: bool,
+    reset: bool,
 ) -> Header {
     let mut header = Header {
         open: state.open.contains(key),
@@ -2620,15 +2883,8 @@ pub(super) fn section(
                 state.open.remove(key);
             }
         }
-        if keys {
+        if reset {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_enabled_ui(false, |ui| {
-                    icon_toggle(ui, "chevron", "Next keyframe", false);
-                    icon_toggle(ui, "keyframe", "Add keyframe", false);
-                    icon_toggle(ui, "chevronLeft", "Previous keyframe", false);
-                })
-                .response
-                .on_disabled_hover_text(LATER);
                 header.reset = icon_toggle(ui, "reset", &format!("Reset {label}"), false).clicked();
             });
         }

@@ -21,6 +21,7 @@ pub mod catalog;
 pub mod chroma;
 pub mod controls;
 pub mod crossing;
+pub mod gpu;
 pub mod grade;
 pub mod look;
 pub mod lut;
@@ -34,8 +35,8 @@ pub mod source;
 pub mod transitions;
 
 pub use adjust::{
-    ADJUSTMENT, AUTO_KEYS, Adjust, AdjustKey, PictureStats, adjust_rgba, auto_adjust, match_adjust,
-    segment_adjust,
+    ADJUSTMENT, AUTO_KEYS, Adjust, AdjustKey, PictureStats, adjust_rgba, auto_adjust, keyed_adjust,
+    match_adjust, segment_adjust,
 };
 pub use blend::{BLEND_WGSL, blend_pixel, blend_unit, segment_blend};
 pub use catalog::{
@@ -44,20 +45,23 @@ pub use catalog::{
     Transition, entries, entry,
 };
 pub use chroma::{CHROMA, Chroma, parse_hex, segment_chroma};
-pub use controls::{store_control, stored_controls};
+pub use controls::{keyed_controls, store_control, stored_controls};
 pub use crossing::{
     CROSS, CrossKind, Crossing, DEFAULT_CROSSING_SECONDS, PREVIEW_PAIRS, TRANSITION_CATEGORIES,
     TRANSITION_PREVIEW_LOOP, TransitionRecipe, bundled_transitions, transition_preview_t,
     transition_scenes,
 };
+pub use gpu::{
+    COLOUR_UNIFORM_BYTES, COLOUR_VALUES, COLOUR_WGSL, ColourPass, ColourStage, clarity_radius,
+};
 pub use grade::{
     COLOR_CURVES, COLOR_WHEELS, Colour, CurveChannel, Grade, HSL, HSL_COLORS, MAX_CURVE_POINTS,
-    Wheel, WheelSetting, curve_table, is_colour_work, points_json, segment_colour, segment_grade,
-    tidy_points, wheel_json,
+    Wheel, WheelSetting, curve_table, hsl_keys, is_colour_work, keyed_grade, keyed_unit,
+    points_json, segment_colour, segment_colour_at, segment_grade, tidy_points, wheel_json,
 };
 pub use look::{
     FILTER, FILTER_CATEGORIES, LOOK_PREFIX, Look, bundled_look, look_poster, looks, read_look,
-    segment_look,
+    segment_look, segment_look_at,
 };
 pub use lut::{ClipLut, KEPT_SIZE, LUT, Lut, LutError, MAX_CUBE_SIZE, segment_lut};
 pub use mask::{
@@ -79,13 +83,17 @@ pub use recipe::{
     bundled_recipe,
 };
 pub use relight::{
-    CUSTOM_COLOR, Light, Lighting, MAX_LIGHTS, RELIGHT_PRESETS, RelightGroup, RelightPreset,
-    lighting, relight_preset, relight_rgba, relight_tile,
+    CUSTOM_COLOR, Light, Lighting, MAX_LIGHTS, RELIGHT_PRESETS, RELIGHT_UNIFORM_BYTES,
+    RELIGHT_WGSL, RelightGroup, RelightPreset, lighting, relight_preset, relight_rgba,
+    relight_tile, relight_uniform, stretch_axis,
 };
 pub use selection::{
     MAX_SELECTION_SIDE, SELECTION, Selection, segment_has_selection, segment_selection,
 };
-pub use source::{AnimSpan, EffectSource, Progress, progress};
+pub use source::{
+    AnimSpan, EffectSource, PACKAGE_UNIFORM_BYTES, PACKAGE_WGSL, PackagePaint, PackagePass,
+    Progress, progress, segment_pass,
+};
 pub use transitions::{
     BUILT_IN_PREFIX, TRANSITION_WGSL, TransitionKind, blur_radius as transition_blur_radius,
     mix as mix_transition,

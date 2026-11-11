@@ -51,6 +51,13 @@ impl Av1Decoder {
         Ok(d)
     }
 
+    /// Sets the threads decoding may use (at least 1); the default is
+    /// `std::thread::available_parallelism()`. With 1, every frame is
+    /// decoded and filtered on the calling thread.
+    pub fn set_threads(&mut self, threads: usize) {
+        self.core.threads = threads.max(1);
+    }
+
     /// Selects the operating point to decode (AV1 7.2.1); the default is
     /// point 0. Frames of layers outside it are dropped, and pictures report
     /// its `seq_level_idx`. An index past the sequence's last point is

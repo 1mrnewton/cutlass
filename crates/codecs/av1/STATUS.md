@@ -291,6 +291,43 @@ them, as do 10-bit and 12-bit streams and builds without NEON. What is
 left of the gap on these files is deblocking (its edge decisions
 first), inter prediction, and reading blocks and coefficients.
 
+A turn of work on one thread, counted in instructions retired and
+processor cycles (`/usr/bin/time -l`, best of 3 runs for cycles, on a
+machine busy with other work; dav1d 1.5.3 with `--threads 1 --muxer
+null`), 240 frames of each file:
+
+| File | Before | After | dav1d |
+|---|---|---|---|
+| 8x4 tiles, instructions | 55.9G | 47.4G | 27.1G |
+| 8x4 tiles, cycles | 13.3G | 11.8G | 8.1G |
+| 4x1 tiles, instructions | 74.8G | 71.8G | 45.8G |
+| 4x1 tiles, cycles | 16.8G | 15.7G | 10.9G |
+
+So one thread takes about 1.45x dav1d's cycles on both files. What
+changed: 8-bit compound masks blend a row at a time, weights first
+(10.4% of the 8x4 file's instructions); DC, vertical and horizontal
+intra predictions fill their rows with fixed-size stores instead of a
+call to memset or memcpy per row (1.7%); the inverse transform's values
+between its passes are sized by the rows the column transforms read, so
+a large block with few coefficients clears a few hundred bytes and not
+4 KB (1.2%); vertical deblocking edges copy a fixed count of lines to
+and from the kernel, so the copies unroll (1.8%); and the mode info
+kept for every 4x4 is 16 bytes, one vector store, instead of 28 (the
+loop filter deltas in an array of their own for the frames that have
+them, the small fields packed): 0.9% of the instructions, and 3 to 5%
+of the cycles, as less memory is written.
+Tried and dropped: deblocking kernel entries that take a filter and
+limits for each group of four lines (as the edges of four 4x4 units lie
+in a picture), and edge decisions made sixteen units at a time in
+vectors from per-unit level arrays. The first took 12% more
+instructions in all (marshaling the groups cost more per call than the
+separate runs it replaced); with the second the edge scan itself got
+cheaper, but filling the level arrays cost as much, and the time stayed
+the same. What is left of the gap: deblocking is about a fifth of the
+time, most of it the filters themselves (the size-16 wide filter alone
+is 6%); inter prediction's 8-tap filter is 15%; and reading blocks and
+coefficients, and the mode info, follow.
+
 Threading (2+ threads): the calling thread only reads the frame headers.
 Each frame is a task on a thread of its own (the decoder keeps a pool of
 them) that waits for what its parse depends on, and nothing else: the

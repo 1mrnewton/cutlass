@@ -10026,6 +10026,124 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "decodes seconds of a real movie; slow in a debug build"]
+    fn a_sticker_and_a_mask_follow_a_shirt_set_up_from_the_follower_on_a_real_movie() {
+        let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/16929689_1920_1080_30fps.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: the movie is missing");
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 4_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 4_000_000));
+        draft.materials.videos[0].duration = Micros(4_000_000);
+        draft.duration = Micros(4_000_000);
+        let id = draft.tracks[0].segments[0].id.clone();
+        let material = draft.tracks[0].segments[0].material_id.clone();
+        let mut sticker = Segment::new("follower", material.as_str(), TimeRange::new(0, 4_000_000));
+        sticker.clip.transform.y = 0.3;
+        sticker.uniform_scale.value = 0.25;
+        // Drawn over the movie, as an added sticker is.
+        sticker.render_index = TrackType::Sticker.render_floor().unwrap_or(0);
+        let mut lane = Track::main("stickers");
+        lane.kind = TrackType::Sticker;
+        lane.segments.push(sticker);
+        draft.tracks.push(lane);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let wait = |desktop: &mut Shell, what: &str| {
+            let started = std::time::Instant::now();
+            let until = started + std::time::Duration::from_secs(600);
+            while desktop.poll_job() && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            eprintln!(
+                "{what} in {:.1}s; notice {:?}",
+                started.elapsed().as_secs_f64(),
+                desktop.notice()
+            );
+        };
+        // The sticker picks the shirt under it at one second, as the
+        // Tracking tab's Custom does: a box in canvas pixels.
+        desktop.select(Some("follower".into()));
+        desktop.seek(Micros(1_000_000));
+        desktop.start_following().unwrap();
+        assert_eq!(desktop.tracking().unwrap().segment_id, id);
+        desktop
+            .set_track_box((915.0, 435.0), (1080.0, 600.0))
+            .unwrap();
+        desktop.run_tracking().unwrap();
+        wait(&mut desktop, "tracked");
+        let following = desktop.following().expect("the sticker follows");
+        assert_eq!(following.target, id);
+        assert!(!following.by_mask);
+        let draft = desktop.draft().unwrap();
+        let follower = &draft.tracks[1].segments[0];
+        let pose = |draft: &Draft, t: i64| {
+            let follower = &draft.tracks[1].segments[0];
+            let (clip, uniform) =
+                cutlass_model::clip_at(follower, &draft.keyframe_graph_list, Micros(t)).unwrap();
+            (clip.transform.x, clip.transform.y, uniform.value)
+        };
+        let (start, later) = (pose(draft, 1_000_000), pose(draft, 3_900_000));
+        eprintln!(
+            "{} keys; at 1s {start:?}, at 3.9s {later:?}",
+            cutlass_model::key_offsets(follower).len()
+        );
+        assert!((start.2 - 0.25).abs() < 0.01);
+        assert!(later.2 < start.2 * 0.9, "the shirt walks away: {later:?}");
+        assert!(later.1 < start.1, "{later:?}");
+
+        // Fix a frame from the sticker, then stop following.
+        desktop.seek(Micros(2_500_000));
+        desktop.start_fixing_following().unwrap();
+        let ((a, b), (c, d)) = desktop.tracking().unwrap().canvas_box.unwrap();
+        desktop.set_track_box((a, b), (c, d)).unwrap();
+        desktop.run_tracking().unwrap();
+        wait(&mut desktop, "fixed");
+        let draft = desktop.draft().unwrap();
+        assert_eq!(draft.materials.video_trackings.len(), 1);
+        let fixed = pose(draft, 1_000_000);
+        assert!((fixed.2 - start.2).abs() < 1e-9, "the anchor pose stays");
+        desktop.stop_following().unwrap();
+        assert!(desktop.following().is_none());
+        let draft = desktop.draft().unwrap();
+        assert!(draft.materials.video_trackings.is_empty());
+        let after = pose(draft, 3_900_000);
+        assert!(
+            (after.2 - 0.25).abs() < 1e-9,
+            "back to its own size: {after:?}"
+        );
+
+        // The movie's mask follows the shirt from the Mask page's Track.
+        desktop.select(Some(id.clone()));
+        desktop.seek(Micros(1_000_000));
+        desktop.start_mask_following().unwrap();
+        desktop
+            .set_track_box((915.0, 435.0), (1080.0, 600.0))
+            .unwrap();
+        desktop.run_tracking().unwrap();
+        wait(&mut desktop, "mask tracked");
+        assert!(desktop.following().is_some_and(|f| f.by_mask));
+        let draft = desktop.draft().unwrap();
+        let clip = &draft.tracks[0].segments[0];
+        let mask = cutlass_effects::segment_mask(draft, clip).expect("a box mask");
+        let (m0, m1) = (
+            mask.at(clip, &draft.keyframe_graph_list, Micros(1_000_000)),
+            mask.at(clip, &draft.keyframe_graph_list, Micros(3_900_000)),
+        );
+        eprintln!(
+            "mask at 1s {:?}, at 3.9s {:?}",
+            (m0.x, m0.y, m0.width),
+            (m1.x, m1.y, m1.width)
+        );
+        assert!(m1.width < m0.width * 0.9, "the mask shrinks with the shirt");
+    }
+
+    #[test]
     #[ignore = "runs the selection model on a real movie; slow in a debug build"]
     fn a_click_on_a_real_movie_cuts_the_clip_down_to_the_object() {
         let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

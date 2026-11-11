@@ -13,7 +13,7 @@ mod scalar;
 mod tests;
 
 /// The limits of 7.14.4 for 8-bit samples.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Limits {
     pub limit: u8,
     pub blimit: u8,
@@ -118,4 +118,64 @@ pub fn by_line_16(lines: &mut [[u8; 16]; 16], lim: Limits) -> bool {
     }
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     scalar::by_line_16(lines, lim)
+}
+
+/// Four lines of a call to the `*_groups` entries: lines `4 g .. 4 g + 4`
+/// for group `g`. Each group has a filter of its own, or none, and limits
+/// of its own: this is how the edges of four 4x4 units lie in a picture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Group {
+    /// `None`: the group's lines are left as they are.
+    pub size: Option<Size>,
+    pub lim: Limits,
+}
+
+/// [`by_sample`] with a filter and limits for each group of four lines.
+/// Returns whether any line passed the filter mask.
+#[inline]
+pub fn by_sample_groups(taps: &mut [[u8; 16]; 14], groups: &[Group; 4]) -> bool {
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        // SAFETY: the `cfg` above proves NEON is enabled for this build,
+        // and the kernel names AES only where the build has it too.
+        #[allow(unsafe_code)]
+        unsafe {
+            neon::by_sample_groups(taps, groups)
+        }
+    }
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+    scalar::by_sample_groups(taps, groups)
+}
+
+/// [`by_line`] with a filter and limits for each group of four lines. A
+/// group of [`Size::Sixteen`] is left as it is: it needs
+/// [`by_line_16_groups`].
+#[inline]
+pub fn by_line_groups(lines: &mut [[u8; 8]; 16], groups: &[Group; 4]) -> bool {
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        // SAFETY: as in `by_sample_groups`.
+        #[allow(unsafe_code)]
+        unsafe {
+            neon::by_line_groups(lines, groups)
+        }
+    }
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+    scalar::by_line_groups(lines, groups)
+}
+
+/// [`by_line_16`] with a filter and limits for each group of four lines,
+/// of any size.
+#[inline]
+pub fn by_line_16_groups(lines: &mut [[u8; 16]; 16], groups: &[Group; 4]) -> bool {
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        // SAFETY: as in `by_sample_groups`.
+        #[allow(unsafe_code)]
+        unsafe {
+            neon::by_line_16_groups(lines, groups)
+        }
+    }
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+    scalar::by_line_16_groups(lines, groups)
 }

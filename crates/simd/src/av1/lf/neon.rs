@@ -7,11 +7,12 @@ use core::arch::aarch64::{
     vdupq_n_u16, veorq_u8, vget_low_u8, vmaxq_u8, vmaxvq_u8, vqaddq_s8, vqaddq_u8, vqsubq_s8,
     vreinterpretq_s8_u8, vreinterpretq_u8_s8, vreinterpretq_u8_u16, vreinterpretq_u8_u32,
     vreinterpretq_u8_u64, vreinterpretq_u16_u8, vreinterpretq_u32_u8, vreinterpretq_u64_u8,
-    vrshrn_n_u16, vrshrq_n_s8, vshrq_n_s8, vshrq_n_u8, vsubl_high_u8, vsubl_u8, vtrn1q_u8,
+    vcgeq_u8, vqtbl1q_u8, vrshrn_n_u16, vrshrq_n_s8, vshrq_n_s8, vshrq_n_u8, vsubl_high_u8,
+    vsubl_u8, vtrn1q_u8,
     vtrn1q_u16, vtrn1q_u32, vtrn1q_u64, vtrn2q_u8, vtrn2q_u16, vtrn2q_u32, vtrn2q_u64,
 };
 
-use super::{Limits, Size};
+use super::{Group, Limits, Size};
 use crate::neon::{bytes, halves, u8x16, u8x16_pair};
 
 type V = uint8x16_t;
@@ -329,6 +330,259 @@ pub(super) fn by_line_16(lines: &mut [[u8; 16]; 16], lim: Limits) -> bool {
     let mut v = [vdupq_n_u8(0); 14];
     v.copy_from_slice(&cols[1..15]);
     if !filter::<16>(&mut v, lim) {
+        return false;
+    }
+    cols[1..15].copy_from_slice(&v);
+    let rows = transpose16(&cols);
+    for l in 0..16 {
+        lines[l] = bytes(rows[l]);
+    }
+    true
+}
+
+/// The lanes of a call with a filter for each group of four lines.
+struct Lanes {
+    limit: V,
+    blimit: V,
+    thresh: V,
+    /// Lanes with a filter at all, of size 6 or more, 8 or more, and 16.
+    on: V,
+    six: V,
+    eight: V,
+    sixteen: V,
+}
+
+/// Each group's values spread over its four lanes: a table lookup of one
+/// vector holding the four limits, the four `blimit`s, the four
+/// thresholds and the four filter sizes.
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+fn lanes(groups: &[Group; 4]) -> Lanes {
+    let mut packed = [0u8; 16];
+    for (g, grp) in groups.iter().enumerate() {
+        packed[g] = grp.lim.limit;
+        packed[4 + g] = grp.lim.blimit;
+        packed[8 + g] = grp.lim.thresh;
+        packed[12 + g] = match grp.size {
+            None => 0,
+            Some(Size::Four) => 4,
+            Some(Size::Six) => 6,
+            Some(Size::Eight) => 8,
+            Some(Size::Sixteen) => 16,
+        };
+    }
+    let packed = u8x16(&packed);
+    let spread = |first: u8| {
+        let idx: [u8; 16] = core::array::from_fn(|l| first + (l / 4) as u8);
+        vqtbl1q_u8(packed, u8x16(&idx))
+    };
+    let wd = spread(12);
+    Lanes {
+        limit: spread(0),
+        blimit: spread(4),
+        thresh: spread(8),
+        on: vcgeq_u8(wd, vdupq_n_u8(4)),
+        six: vcgeq_u8(wd, vdupq_n_u8(6)),
+        eight: vcgeq_u8(wd, vdupq_n_u8(8)),
+        sixteen: vcgeq_u8(wd, vdupq_n_u8(16)),
+    }
+}
+
+/// [`filter`] with a filter and limits for each lane. `MAX` is the
+/// largest size of any lane: the code for larger ones is left out.
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+fn filter_lanes<const MAX: usize>(v: &mut [V; 14], ln: &Lanes) -> bool {
+    let o = *v;
+    let (p1, p0, q0, q1) = (o[5], o[6], o[7], o[8]);
+    let step = vmaxq_u8(vabdq_u8(p1, p0), vabdq_u8(q1, q0));
+    let hev = vcgtq_u8(step, ln.thresh);
+    let mut inner = step;
+    if MAX >= 6 {
+        let m = vmaxq_u8(vabdq_u8(o[4], p1), vabdq_u8(o[9], q1));
+        inner = vmaxq_u8(inner, vandq_u8(m, ln.six));
+    }
+    if MAX >= 8 {
+        let m = vmaxq_u8(vabdq_u8(o[3], o[4]), vabdq_u8(o[10], o[9]));
+        inner = vmaxq_u8(inner, vandq_u8(m, ln.eight));
+    }
+    let across = vabdq_u8(p0, q0);
+    let outer = vqaddq_u8(vqaddq_u8(across, across), vshrq_n_u8::<1>(vabdq_u8(p1, q1)));
+    let pass = vandq_u8(
+        vandq_u8(vcleq_u8(inner, ln.limit), vcleq_u8(outer, ln.blimit)),
+        ln.on,
+    );
+    if vmaxvq_u8(pass) == 0 {
+        return false;
+    }
+    let one = vdupq_n_u8(1);
+    let mut flat = vdupq_n_u8(0);
+    if MAX >= 6 {
+        let mut f = max3(step, vabdq_u8(o[4], p0), vabdq_u8(o[9], q0));
+        if MAX >= 8 {
+            let m = vmaxq_u8(vabdq_u8(o[3], p0), vabdq_u8(o[10], q0));
+            f = vmaxq_u8(f, vandq_u8(m, ln.eight));
+        }
+        flat = vandq_u8(vandq_u8(vcleq_u8(f, one), pass), ln.six);
+    }
+    let mut flat2 = vdupq_n_u8(0);
+    if MAX == 16 {
+        let f = vmaxq_u8(
+            max3(vabdq_u8(o[0], p0), vabdq_u8(o[1], p0), vabdq_u8(o[2], p0)),
+            max3(
+                vabdq_u8(o[13], q0),
+                vabdq_u8(o[12], q0),
+                vabdq_u8(o[11], q0),
+            ),
+        );
+        flat2 = vandq_u8(vandq_u8(vcleq_u8(f, one), flat), ln.sixteen);
+    }
+    if MAX == 4 || vmaxvq_u8(vbicq_u8(pass, flat)) != 0 {
+        let sign = vdupq_n_u8(0x80);
+        let ps1 = vreinterpretq_s8_u8(veorq_u8(p1, sign));
+        let ps0 = vreinterpretq_s8_u8(veorq_u8(p0, sign));
+        let qs0 = vreinterpretq_s8_u8(veorq_u8(q0, sign));
+        let qs1 = vreinterpretq_s8_u8(veorq_u8(q1, sign));
+        let hev_s = vreinterpretq_s8_u8(hev);
+        let d = vqsubq_s8(qs0, ps0);
+        let f = vandq_s8(vqsubq_s8(ps1, qs1), hev_s);
+        let f = vqaddq_s8(vqaddq_s8(vqaddq_s8(f, d), d), d);
+        let f = vandq_s8(f, vreinterpretq_s8_u8(pass));
+        let f1 = vshrq_n_s8::<3>(vqaddq_s8(f, vdupq_n_s8(4)));
+        let f2 = vshrq_n_s8::<3>(vqaddq_s8(f, vdupq_n_s8(3)));
+        let f3 = vbicq_s8(vrshrq_n_s8::<1>(f1), hev_s);
+        v[5] = veorq_u8(vreinterpretq_u8_s8(vqaddq_s8(ps1, f3)), sign);
+        v[6] = veorq_u8(vreinterpretq_u8_s8(vqaddq_s8(ps0, f2)), sign);
+        v[7] = veorq_u8(vreinterpretq_u8_s8(vqsubq_s8(qs0, f1)), sign);
+        v[8] = veorq_u8(vreinterpretq_u8_s8(vqsubq_s8(qs1, f3)), sign);
+    }
+    if MAX >= 6 && vmaxvq_u8(flat) != 0 {
+        // Chroma's filter over `p1 .. q1` on the lanes of size 6, the one
+        // over `p2 .. q2` (or wider) on the others.
+        let six_only = vbicq_u8(flat, ln.eight);
+        if vmaxvq_u8(six_only) != 0 {
+            wide::<2, 1, 3>(&o, v, six_only);
+        }
+        if MAX >= 8 {
+            let flat8 = vandq_u8(flat, ln.eight);
+            if MAX == 16 {
+                if vmaxvq_u8(flat8) != 0 {
+                    *v = widest(o, *v, flat8, flat2);
+                }
+            } else if vmaxvq_u8(flat8) != 0 {
+                wide::<3, 0, 3>(&o, v, flat8);
+            }
+        }
+    }
+    true
+}
+
+/// The largest filter of any group, as [`filter_lanes`] takes it.
+fn widest_size(groups: &[Group; 4]) -> usize {
+    groups
+        .iter()
+        .filter_map(|g| g.size)
+        .map(|s| match s {
+            Size::Four => 4,
+            Size::Six => 6,
+            Size::Eight => 8,
+            Size::Sixteen => 16,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+fn filter_groups(v: &mut [V; 14], groups: &[Group; 4], max: usize) -> bool {
+    let ln = lanes(groups);
+    match max {
+        4 => filter_lanes::<4>(v, &ln),
+        6 => filter_lanes::<6>(v, &ln),
+        8 => filter_lanes::<8>(v, &ln),
+        16 => filter_lanes::<16>(v, &ln),
+        _ => false,
+    }
+}
+
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+pub(super) fn by_sample_groups(taps: &mut [[u8; 16]; 14], groups: &[Group; 4]) -> bool {
+    let max = widest_size(groups);
+    let (lo, hi) = match max {
+        4 => Size::Four.reads(),
+        6 => Size::Six.reads(),
+        8 => Size::Eight.reads(),
+        16 => Size::Sixteen.reads(),
+        _ => return false,
+    };
+    let mut v = [vdupq_n_u8(0); 14];
+    for k in lo..hi {
+        v[k] = u8x16(&taps[k]);
+    }
+    if !filter_groups(&mut v, groups, max) {
+        return false;
+    }
+    let (lo, hi) = match max {
+        4 | 6 => Size::Four.writes(),
+        8 => Size::Eight.writes(),
+        _ => Size::Sixteen.writes(),
+    };
+    for k in lo..hi {
+        taps[k] = bytes(v[k]);
+    }
+    true
+}
+
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+pub(super) fn by_line_groups(lines: &mut [[u8; 8]; 16], groups: &[Group; 4]) -> bool {
+    let mut groups = *groups;
+    for g in &mut groups {
+        if g.size == Some(Size::Sixteen) {
+            g.size = None;
+        }
+    }
+    let max = widest_size(&groups);
+    if max == 0 {
+        return false;
+    }
+    let rows: [V; 8] = core::array::from_fn(|l| u8x16_pair(&lines[l], &lines[8 + l]));
+    // Lines `l` and `8 + l` share a row vector, so lane `l` of a column
+    // is line `l`: the groups' lanes are in order.
+    let cols = transpose(rows);
+    let mut v = [vdupq_n_u8(0); 14];
+    v[3..11].copy_from_slice(&cols);
+    if !filter_groups(&mut v, &groups, max) {
+        return false;
+    }
+    let mut cols = [vdupq_n_u8(0); 8];
+    cols.copy_from_slice(&v[3..11]);
+    let rows = transpose(cols);
+    for l in 0..8 {
+        (lines[l], lines[8 + l]) = halves(rows[l]);
+    }
+    true
+}
+
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+pub(super) fn by_line_16_groups(lines: &mut [[u8; 16]; 16], groups: &[Group; 4]) -> bool {
+    let max = widest_size(groups);
+    if max == 0 {
+        return false;
+    }
+    let rows: [V; 16] = core::array::from_fn(|l| u8x16(&lines[l]));
+    let mut cols = transpose16(&rows);
+    let mut v = [vdupq_n_u8(0); 14];
+    v.copy_from_slice(&cols[1..15]);
+    if !filter_groups(&mut v, groups, max) {
         return false;
     }
     cols[1..15].copy_from_slice(&v);

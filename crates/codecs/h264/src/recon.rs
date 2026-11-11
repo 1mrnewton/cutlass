@@ -106,6 +106,35 @@ pub(crate) fn level_scale4(qp: i32, row: usize, col: usize, weight: i32) -> i32 
     weight * NORM4[(qp.rem_euclid(6)) as usize][norm4(row, col)]
 }
 
+/// The multipliers that scale a 4×4 block's levels at `qp` (QP′Y), by
+/// raster position, under `weights`: [`dequantize`] of a level and its
+/// multiplier is [`scale4`] of the level, as in FFmpeg's tables. `None`
+/// for a negative `qp`.
+pub fn dequant4(qp: i32, weights: &[u8; 16]) -> Option<[i32; 16]> {
+    let (q, r) = (u32::try_from(qp / 6).ok()?, usize::try_from(qp % 6).ok()?);
+    Some(core::array::from_fn(|pos| {
+        let (row, col) = (pos / 4, pos % 4);
+        (i32::from(weights[pos]) * NORM4[r][norm4(col, row)]) << (q + 2)
+    }))
+}
+
+/// [`dequant4`] for an 8×8 block and [`scale8`].
+pub fn dequant8(qp: i32, weights: &[u8; 64]) -> Option<[i32; 64]> {
+    let (q, r) = (u32::try_from(qp / 6).ok()?, usize::try_from(qp % 6).ok()?);
+    Some(core::array::from_fn(|pos| {
+        let (row, col) = (pos / 8, pos % 8);
+        (i32::from(weights[pos]) * NORM8[r][norm8(col, row)]) << q
+    }))
+}
+
+/// A level scaled by a multiplier from [`dequant4`] or [`dequant8`]. The
+/// rounding add and shift are the clause's for every `qp`: below 24 (4×4)
+/// or 36 (8×8) they are its rounding shift, and above it they drop out.
+#[inline(always)]
+pub fn dequantize(level: i32, mul: i32) -> i32 {
+    ((i64::from(level) * i64::from(mul) + 32) >> 6) as i32
+}
+
 pub fn scale4(coeff: i32, qp: i32, i: usize, j: usize, weight: i32) -> i32 {
     let ls = weight * NORM4[(qp.rem_euclid(6)) as usize][norm4(i, j)];
     let q = qp / 6;
@@ -2209,6 +2238,33 @@ mod tests {
         BlockMc, Depth, Pel, Sample, chroma_mc, chroma_qps, pel, pred_chroma, pred16,
         put_chroma_block, put_luma_block, qpel,
     };
+
+    /// Every QP′Y up to 14-bit samples', every place, and weights and
+    /// levels from both ends of their ranges.
+    #[test]
+    fn table_scaling_is_the_clause_scaling() {
+        let levels = [
+            -70_000, -2_048, -255, -17, -2, -1, 1, 2, 3, 31, 255, 2_047, 70_000,
+        ];
+        for qp in 0..=87 {
+            for weight in [1u8, 6, 16, 42, 128, 255] {
+                let mul4 = super::dequant4(qp, &[weight; 16]).unwrap();
+                let mul8 = super::dequant8(qp, &[weight; 64]).unwrap();
+                for &level in &levels {
+                    for (pos, &mul) in mul4.iter().enumerate() {
+                        let (row, col) = (pos / 4, pos % 4);
+                        let want = super::scale4(level, qp, col, row, i32::from(weight));
+                        assert_eq!(super::dequantize(level, mul), want, "4x4 qp {qp} at {pos}");
+                    }
+                    for (pos, &mul) in mul8.iter().enumerate() {
+                        let (row, col) = (pos / 8, pos % 8);
+                        let want = super::scale8(level, qp, col, row, i32::from(weight));
+                        assert_eq!(super::dequantize(level, mul), want, "8x8 qp {qp} at {pos}");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn ten_bit_chroma_qp_keeps_the_low_indices() {

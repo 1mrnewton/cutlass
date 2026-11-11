@@ -89,6 +89,29 @@ pub(crate) struct Coeffs {
     ac_used: u16,
     /// One bit per block of `block8` that holds levels.
     block8_used: u8,
+    /// The inter luma multipliers of the slice at one QP′Y.
+    inter: InterScale,
+}
+
+/// The multipliers that scale inter luma levels at `qp`, under the slice's
+/// inter luma weights, made again when the QP changes.
+struct InterScale {
+    qp: i32,
+    mul4: [i32; 16],
+    mul8: [i32; 64],
+}
+
+impl InterScale {
+    /// The 4×4 and 8×8 multipliers at `qp`, or `None` for a QP the tables
+    /// do not take.
+    fn at(&mut self, qp: i32, pps: &crate::set::Pps) -> Option<(&[i32; 16], &[i32; 64])> {
+        if qp != self.qp {
+            self.mul4 = recon::dequant4(qp, &pps.weight4[3])?;
+            self.mul8 = recon::dequant8(qp, &pps.weight8[1])?;
+            self.qp = qp;
+        }
+        Some((&self.mul4, &self.mul8))
+    }
 }
 
 impl Coeffs {
@@ -99,6 +122,11 @@ impl Coeffs {
             chroma: ChromaResidual::zero(),
             ac_used: 0,
             block8_used: 0,
+            inter: InterScale {
+                qp: -1,
+                mul4: [0; 16],
+                mul8: [0; 64],
+            },
         }
     }
 
@@ -3351,6 +3379,7 @@ fn decode_intra<S: Sample>(
         chroma: chroma_res,
         ac_used,
         block8_used,
+        ..
     } = coeffs;
     if i16 {
         luma_dc = read_block(
@@ -4225,6 +4254,20 @@ fn cabac_residual(
     coeffs: &mut [i32],
     field: bool,
 ) -> Result<(), CodecError> {
+    let max = coeffs.len();
+    cabac_levels(cab, (cat, max), field, |scan, level| coeffs[scan] = level)?;
+    Ok(())
+}
+
+/// The levels of one block of category `cat` with `max` coefficients, each
+/// handed to `store` with its place in scan order; the count of them.
+#[inline(always)]
+fn cabac_levels(
+    cab: &mut Cabac<'_>,
+    (cat, max): (usize, usize),
+    field: bool,
+    mut store: impl FnMut(usize, i32),
+) -> Result<usize, CodecError> {
     // Table 9-34. A field macroblock uses the second context block.
     const SIG: [[usize; 14]; 2] = [
         [
@@ -4248,7 +4291,6 @@ fn cabac_residual(
     let which = cat.min(13);
     let row = usize::from(field);
     let (sig_base, last_base, level_base) = (SIG[row][which], LAST[row][which], LEVEL[which]);
-    let max = coeffs.len();
     let dc422 = cat == 3 && max == 8;
     // The places of the significant coefficients; a block has at most 64.
     let mut index = [0u8; 64];
@@ -4325,7 +4367,7 @@ fn cabac_residual(
         if cab.decision(level_base + level1[node])? == 0 {
             node = trans1[node];
             let sign = cab.bypass()?;
-            coeffs[scan] = if sign == 1 { -1 } else { 1 };
+            store(scan, if sign == 1 { -1 } else { 1 });
         } else {
             let ctx = level_base + gt1[node];
             node = trans_gt[node];
@@ -4345,7 +4387,92 @@ fn cabac_residual(
                 abs = mag + 14;
             }
             let sign = cab.bypass()?;
-            coeffs[scan] = if sign == 1 { -abs } else { abs };
+            store(scan, if sign == 1 { -abs } else { abs });
+        }
+    }
+    Ok(count)
+}
+
+/// The luma residual of an inter macroblock of a 4:2:0 or 4:2:2 picture
+/// under CABAC, added to its prediction: what [`read8`] or [`read_block`]
+/// and then `add_scaled` do, with each level scaled by `muls` as it is
+/// read and put in raster order, as FFmpeg does. The transform is not
+/// bypassed. `cbp` is the luma coded block pattern and `field` picks the
+/// scans.
+fn inter_luma_scaled<S: Sample>(
+    pic: &mut Frame<S>,
+    cab: &mut Cabac<'_>,
+    at: Place,
+    mb: &mut Mb,
+    (cbp, field): (u8, bool),
+    (mul4, mul8): (&[i32; 16], &[i32; 64]),
+) -> Result<(), CodecError> {
+    let Place { mx, my } = at;
+    let span = luma_span(my, mb.field_mb);
+    if mb.transform8 {
+        let scan = scan8(field);
+        for i in 0..4 {
+            if cbp & (1 << i) == 0 {
+                continue;
+            }
+            // 4:2:0 and 4:2:2 leave out the luma 8×8 coded_block_flag.
+            let mut block = [0i32; 64];
+            let count = cabac_levels(cab, (5, 64), field, |n, level| {
+                let pos = scan[n];
+                block[pos] = recon::dequantize(level, mul8[pos]);
+            })?;
+            let (bx, by) = ((i & 1) * 2, (i >> 1) * 2);
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    mb.nnz_y[(by + dy) * 4 + bx + dx] = count as u8;
+                }
+            }
+            let (x, y) = (mx * 16 + bx * 4, span.at(by * 4));
+            if count == 1 && block[0] != 0 {
+                recon::add_dc(
+                    &mut pic.y,
+                    pic.w,
+                    (x, y, span.step),
+                    (block[0] + 32) >> 6,
+                    8,
+                );
+            } else {
+                recon::idct8_full(&mut block);
+                recon::add_block(&mut pic.y, pic.w, x, y, &block, 8, span.step);
+            }
+        }
+        return Ok(());
+    }
+    let scan = scan4(field);
+    for i in 0..16 {
+        let cell = Cell {
+            bx: blk_x(i),
+            by: blk_y(i),
+        };
+        if cbp & (1 << ((cell.by / 2) * 2 + cell.bx / 2)) == 0 {
+            continue;
+        }
+        let inc = cbf_inc(pic, at, cell, mb, 0, false);
+        if cab.decision(CBF_BASE[2] + inc)? == 0 {
+            continue;
+        }
+        let mut block = [0i32; 16];
+        let count = cabac_levels(cab, (2, 16), field, |n, level| {
+            let pos = scan[n];
+            block[pos] = recon::dequantize(level, mul4[pos]);
+        })?;
+        mb.nnz_y[cell.by * 4 + cell.bx] = count as u8;
+        let (x, y) = (mx * 16 + cell.bx * 4, span.at(cell.by * 4));
+        if count == 1 && block[0] != 0 {
+            recon::add_dc(
+                &mut pic.y,
+                pic.w,
+                (x, y, span.step),
+                (block[0] + 32) >> 6,
+                4,
+            );
+        } else {
+            recon::add_idct4_full(&mut pic.y, pic.w, x, y, &mut block, span.step);
         }
     }
     Ok(())
@@ -7896,7 +8023,17 @@ fn decode_inter<S: Sample>(
         )?;
         return Ok(residual);
     }
-    if mb.transform8 {
+    // The common case reads the levels already scaled, into raster order.
+    let scaled = luma_cbp != 0
+        && !merge
+        && pic.levels.is_empty()
+        && pic.chroma() != 3
+        && !qp_bypass::<S>(slice, *qp);
+    if let (true, Entropy::Cabac(cab)) = (scaled, &mut *entropy)
+        && let Some(muls) = coeffs.inter.at(*qp + S::QP_BD, &slice.pps)
+    {
+        inter_luma_scaled(pic, cab, Place { mx, my }, mb, (luma_cbp, field), muls)?;
+    } else if mb.transform8 {
         for i in 0..4 {
             if luma_cbp & (1 << i) != 0 {
                 let block = read8(pic, entropy, mx, my, i, mb, 0)?;

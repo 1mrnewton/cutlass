@@ -9055,7 +9055,7 @@ fn read_mvd_part<S: Sample>(
         super::clip_ref(i32::from(pred[0]) + dx),
         super::clip_ref(i32::from(pred[1]) + dy),
     ];
-    let mvd = [super::clip_ref(dx), super::clip_ref(dy)];
+    let mvd = [mvd_size(dx), mvd_size(dy)];
     let bw = part.w / 4;
     let bh = part.h / 4;
     for by in 0..bh {
@@ -9073,6 +9073,11 @@ fn read_mvd_part<S: Sample>(
     }
     let _ = slice;
     Ok(())
+}
+
+/// A motion vector difference as kept for the contexts of later ones.
+fn mvd_size(mvd: i32) -> u8 {
+    mvd.unsigned_abs().min(127) as u8
 }
 
 fn ref_of(mb: &Mb, bx: usize, by: usize, list: usize) -> i8 {
@@ -9178,8 +9183,7 @@ fn mvd_at<S: Sample>(
                 mb.mvd0[index][comp]
             } else {
                 mb.mvd1[index][comp]
-            })
-            .abs();
+            });
             // Clause 9.3.3.1.1.7: a vertical difference is counted in this
             // macroblock's lines, a field's being twice a frame's.
             match (comp, current.field_mb, mb.field_mb) {

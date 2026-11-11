@@ -67,8 +67,11 @@ pub(crate) struct Mb {
     /// temporal-direct picture can find that reference after the buffer moves.
     ref_poc0: [i32; 4],
     ref_poc1: [i32; 4],
-    mvd0: [[i16; 2]; 16],
-    mvd1: [[i16; 2]; 16],
+    /// Size of each 4×4 block's motion vector difference, held to 127:
+    /// the CABAC contexts only compare sums of these with 2 and 32, after
+    /// halving or doubling across a field and a frame macroblock.
+    mvd0: [[u8; 2]; 16],
+    mvd1: [[u8; 2]; 16],
     /// 4×4 blocks whose motion vector is already decoded. Same-macroblock predictors ignore the rest.
     ready: u16,
     off_a: i8,

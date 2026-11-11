@@ -293,9 +293,14 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             }
         } else {
             let lim = max_y.min(y + if have_below_left { 2 * h } else { h } - 1);
-            for i in 0..n {
-                left[EDGE_OFF + i] = buf[(lim.min(y + i)) * stride + x - 1];
+            let avail = (lim + 1 - y).min(n);
+            let col = &buf[y * stride + x - 1..];
+            let dst = &mut left[EDGE_OFF..EDGE_OFF + n];
+            for (d, s) in dst[..avail].iter_mut().zip(col.iter().step_by(stride)) {
+                *d = *s;
             }
+            let last = dst[avail - 1];
+            dst[avail..].fill(last);
         }
         let corner = if have_above && have_left {
             up[x - 1]

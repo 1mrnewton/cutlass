@@ -10,16 +10,24 @@ pub(crate) const CONTEXTS: usize = 1053;
 
 pub struct Cabac<'a> {
     data: &'a [u8],
-    /// Next byte that has not been pulled into `cache`.
+    /// Next byte that has not been pulled into `value`. It runs past the
+    /// end of `data` by the zero bytes read there.
     index: usize,
-    cache: u64,
-    /// Valid low bits of `cache`.
-    bits: u32,
+    /// `codIOffset` from bit 54, with room above for the one more bit a
+    /// bypass bin shifts in, then the stream bits read ahead of it, then
+    /// one marker bit, then zeros. Shifting the value left reads the bits
+    /// under the offset; when the marker climbs to bit 46, fewer than eight
+    /// are left and [`Self::refill`] adds more.
+    value: u64,
     range: u32,
-    offset: u32,
     /// Each context is `pStateIdx << 1 | valMPS`.
     ctx: [u8; CONTEXTS],
 }
+
+/// Where `codIOffset` starts in [`Cabac::value`].
+const OFFSET_AT: u32 = 54;
+/// The bits under the marker when at least eight stream bits are ahead.
+const AHEAD: u64 = (1 << (OFFSET_AT - 8)) - 1;
 
 /// `rangeTabLPS` by packed context.
 static LPS_RANGE: [[u8; 4]; 128] = {
@@ -58,67 +66,69 @@ impl<'a> Cabac<'a> {
         let mut eng = Self {
             data,
             index: 0,
-            cache: 0,
-            bits: 0,
+            value: 0,
             range: 510,
-            offset: 0,
             ctx: [0; CONTEXTS],
         };
-        eng.offset = eng.read_bits(9)?;
+        eng.load();
         eng.init_states(qp, init);
         Ok(eng)
     }
 
+    /// Clause 9.3.1.2 on the bytes from `index`: the first nine bits are
+    /// the offset, and the rest of the first four bytes are read ahead.
+    fn load(&mut self) {
+        let word = self.word();
+        self.value = (u64::from(word) << 31) | (1 << 30);
+    }
+
+    /// The next four bytes, zeros past the end of the data.
+    #[inline(always)]
+    fn word(&mut self) -> u32 {
+        let at = self.index;
+        self.index += 4;
+        if let Some(&[a, b, c, d]) = self.data.get(at..at + 4) {
+            return u32::from_be_bytes([a, b, c, d]);
+        }
+        let byte = |i: usize| self.data.get(at + i).copied().unwrap_or(0);
+        u32::from_be_bytes([byte(0), byte(1), byte(2), byte(3)])
+    }
+
+    /// The stream bits read ahead of the offset.
+    fn ahead(&self) -> u32 {
+        OFFSET_AT - 1 - self.value.trailing_zeros().min(OFFSET_AT - 1)
+    }
+
+    /// Bits of the data the offset has taken in so far.
     fn at_bit(&self) -> u64 {
-        u64::try_from(self.index.saturating_mul(8)).unwrap_or(u64::MAX) - u64::from(self.bits)
+        let read = u64::try_from(self.index.saturating_mul(8)).unwrap_or(u64::MAX);
+        read.saturating_sub(u64::from(self.ahead()))
     }
 
-    /// Pulls bytes into the cache: four at once while the stream has them,
-    /// then one at a time. Called with fewer than 32 bits held.
-    fn fill(&mut self) {
-        if self.bits <= 32
-            && let Some(&[a, b, c, d]) = self.data.get(self.index..self.index + 4)
-        {
-            self.cache = (self.cache << 32) | u64::from(u32::from_be_bytes([a, b, c, d]));
-            self.index += 4;
-            self.bits += 32;
-            return;
-        }
-        while self.bits <= 56 && self.index < self.data.len() {
-            self.cache = (self.cache << 8) | u64::from(self.data[self.index]);
-            self.index += 1;
-            self.bits += 8;
-        }
+    /// Whether the offset has taken in bits past the end of the data.
+    fn overran(&self) -> bool {
+        self.at_bit() > u64::try_from(self.data.len().saturating_mul(8)).unwrap_or(u64::MAX)
     }
 
-    /// `n` is at most 9, and may be 0.
+    /// Four more bytes after the read-ahead bits, the first where the
+    /// marker was, and the marker below them. Called with the marker at bit 46 or above.
+    #[cold]
+    #[inline(never)]
+    fn refill(&mut self) {
+        let marker = self.value.trailing_zeros();
+        let word = u64::from(self.word());
+        self.value = (self.value ^ (1 << marker)) | (word << (marker - 31)) | (1 << (marker - 32));
+    }
+
+    /// `codIRange` shifted back to 256..510 and the offset with it.
     #[inline(always)]
-    fn read_bits(&mut self, n: u32) -> Result<u32, CodecError> {
-        if self.bits < n {
-            self.fill();
-            if self.bits < n {
-                return Err(CodecError::Truncated {
-                    at_bit: self.at_bit(),
-                    what: "cabac",
-                });
-            }
+    fn renorm_by(&mut self, range: u32, value: u64) {
+        let shift = range.leading_zeros() - 23;
+        self.range = range << shift;
+        self.value = value << shift;
+        if self.value & AHEAD == 0 {
+            self.refill();
         }
-        self.bits -= n;
-        let mask = (1u64 << n) - 1;
-        Ok(((self.cache >> self.bits) & mask) as u32)
-    }
-
-    #[inline(always)]
-    fn renorm(&mut self) -> Result<(), CodecError> {
-        if self.range >= 256 {
-            return Ok(());
-        }
-        // One shift brings `range` back to 256..510. That is the same bits the
-        // one-at-a-time loop used to read.
-        let shift = self.range.leading_zeros() - 23;
-        self.range <<= shift;
-        self.offset = (self.offset << shift) | self.read_bits(shift)?;
-        Ok(())
     }
 
     #[inline(always)]
@@ -129,36 +139,46 @@ impl<'a> Cabac<'a> {
         let packed = usize::from(self.ctx[ctx] & 127);
         let range_lps = u32::from(LPS_RANGE[packed][((self.range >> 6) & 3) as usize]);
         let range_mps = self.range - range_lps;
-        let lps = u32::from(self.offset >= range_mps);
+        let scaled = u64::from(range_mps) << OFFSET_AT;
+        let lps = u64::from(self.value >= scaled);
         let mask = lps.wrapping_neg();
         self.ctx[ctx] = AFTER[packed + ((lps as usize) << 7)];
-        let offset = self.offset - (range_mps & mask);
-        let range = range_mps ^ ((range_mps ^ range_lps) & mask);
-        // One shift brings `range` back to 256..510; it is 0 when `range`
-        // is already there.
-        let shift = range.leading_zeros() - 23;
-        self.range = range << shift;
-        self.offset = (offset << shift) | self.read_bits(shift)?;
+        let value = self.value - (scaled & mask);
+        let range = range_mps ^ ((range_mps ^ range_lps) & mask as u32);
+        self.renorm_by(range, value);
         Ok((packed as u8 & 1) ^ lps as u8)
     }
 
     #[inline(always)]
     pub fn bypass(&mut self) -> Result<u8, CodecError> {
-        self.offset = (self.offset << 1) | self.read_bits(1)?;
-        if self.offset >= self.range {
-            self.offset -= self.range;
-            Ok(1)
-        } else {
-            Ok(0)
+        let mut value = self.value << 1;
+        let scaled = u64::from(self.range) << OFFSET_AT;
+        let one = value >= scaled;
+        if one {
+            value -= scaled;
         }
+        self.value = value;
+        if value & AHEAD == 0 {
+            self.refill();
+        }
+        Ok(u8::from(one))
     }
 
+    /// `end_of_slice_flag` and the like. Bits read past the end of the data
+    /// come out here as an error: the bins before only see zeros there.
     pub fn terminate(&mut self) -> Result<bool, CodecError> {
+        if self.overran() {
+            return Err(CodecError::Truncated {
+                at_bit: self.at_bit(),
+                what: "cabac",
+            });
+        }
         self.range -= 2;
-        if self.offset >= self.range {
+        let scaled = u64::from(self.range) << OFFSET_AT;
+        if self.value >= scaled {
             Ok(true)
         } else {
-            self.renorm()?;
+            self.renorm_by(self.range, self.value);
             Ok(false)
         }
     }
@@ -176,17 +196,21 @@ impl<'a> Cabac<'a> {
         }
         self.data = data;
         self.index = 0;
-        self.cache = 0;
-        self.bits = 0;
         self.range = 510;
-        self.offset = self.read_bits(9)?;
+        self.load();
         Ok(())
     }
 
+    /// The data after the byte holding the last bit the offset took in.
     pub fn tail(&self) -> &'a [u8] {
-        let consumed = self.index * 8 - usize::try_from(self.bits).unwrap_or(0);
-        let byte = consumed.div_ceil(8);
-        self.data.get(byte..).unwrap_or(&[])
+        let consumed = usize::try_from(self.at_bit()).unwrap_or(usize::MAX);
+        self.data.get(consumed.div_ceil(8)..).unwrap_or(&[])
+    }
+
+    /// `codIOffset`.
+    #[cfg(test)]
+    fn offset(&self) -> u32 {
+        (self.value >> OFFSET_AT) as u32
     }
 
     fn init_states(&mut self, qp: i32, init: usize) {
@@ -257,6 +281,120 @@ pub fn last8(index: usize) -> usize {
 mod tests {
     use super::Cabac;
     use crate::bits::Bits;
+    use crate::tables::{RANGE_LPS, TRANS_LPS, TRANS_MPS};
+
+    /// Clause 9.3.3.2 as written: one bit read at a time while the range
+    /// is below 256.
+    struct Plain<'a> {
+        data: &'a [u8],
+        bit: usize,
+        range: u32,
+        offset: u32,
+        ctx: Vec<u8>,
+    }
+
+    impl Plain<'_> {
+        fn read(&mut self) -> u32 {
+            let byte = self.data.get(self.bit / 8).copied().unwrap_or(0);
+            self.bit += 1;
+            u32::from(byte >> (7 - (self.bit - 1) % 8)) & 1
+        }
+
+        fn renorm(&mut self) {
+            while self.range < 256 {
+                self.range <<= 1;
+                self.offset = (self.offset << 1) | self.read();
+            }
+        }
+
+        fn decision(&mut self, ctx: usize) -> u8 {
+            let state = usize::from(self.ctx[ctx] >> 1);
+            let mps = self.ctx[ctx] & 1;
+            let lps = u32::from(RANGE_LPS[state][((self.range >> 6) & 3) as usize]);
+            self.range -= lps;
+            let bin = if self.offset >= self.range {
+                self.offset -= self.range;
+                self.range = lps;
+                let swapped = if state == 0 { 1 - mps } else { mps };
+                self.ctx[ctx] = (TRANS_LPS[state] << 1) | swapped;
+                1 - mps
+            } else {
+                self.ctx[ctx] = (TRANS_MPS[state] << 1) | mps;
+                mps
+            };
+            self.renorm();
+            bin
+        }
+
+        fn bypass(&mut self) -> u8 {
+            self.offset = (self.offset << 1) | self.read();
+            if self.offset >= self.range {
+                self.offset -= self.range;
+                1
+            } else {
+                0
+            }
+        }
+
+        fn terminate(&mut self) -> u8 {
+            self.range -= 2;
+            if self.offset >= self.range {
+                1
+            } else {
+                self.renorm();
+                0
+            }
+        }
+    }
+
+    /// The engine reads its bits ahead in bulk; every bin, range and offset
+    /// must still be the clause's, through refills and past the end.
+    #[test]
+    fn bins_match_the_plain_engine() {
+        let mut seed = 99u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) as u32
+        };
+        for round in 0..2_000 {
+            let len = 1 + (next() % 300) as usize;
+            let mut data: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            // The first nine bits are below 510 in a stream.
+            data[0] &= 0x7f;
+            let mut bits = Bits::new(&data);
+            let mut fast = Cabac::start(&mut bits, 26, 0).unwrap();
+            let mut plain = Plain {
+                data: &data,
+                bit: 9,
+                range: 510,
+                offset: u32::from(data[0]) << 1 | u32::from(data.get(1).copied().unwrap_or(0) >> 7),
+                ctx: fast.ctx.to_vec(),
+            };
+            for step in 0..4_000 {
+                let r = next();
+                let ctx = (r % 460) as usize;
+                let (got, want) = match r % 50 {
+                    0..=9 => (fast.bypass().unwrap(), plain.bypass()),
+                    10 => match fast.terminate() {
+                        Ok(bin) => (u8::from(bin), plain.terminate()),
+                        Err(_) => {
+                            assert!(plain.bit > data.len() * 8, "round {round} step {step}");
+                            break;
+                        }
+                    },
+                    _ => (fast.decision(ctx).unwrap(), plain.decision(ctx)),
+                };
+                assert_eq!(got, want, "round {round} step {step}");
+                assert_eq!((fast.range, fast.offset()), (plain.range, plain.offset));
+                if r % 50 == 10 && got == 1 {
+                    assert_eq!(fast.at_bit(), plain.bit as u64);
+                    break;
+                }
+            }
+        }
+    }
 
     /// Clause 9.3.1.2 runs again after the samples of an I_PCM macroblock,
     /// and clause 9.3.1.1 does not: the arithmetic decoder starts over on the
@@ -276,7 +414,7 @@ mod tests {
         cab.restart(&next).unwrap();
         assert_eq!(cab.ctx, learned, "the contexts were set up again");
         assert_eq!(cab.range, 510);
-        assert_eq!(cab.offset, 0b1_0100_1011);
+        assert_eq!(cab.offset(), 0b1_0100_1011);
         assert!(cab.restart(&[]).is_err());
     }
 }

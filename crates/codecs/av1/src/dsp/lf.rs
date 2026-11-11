@@ -191,9 +191,19 @@ fn edge_bytes<const FS: usize, const HORZ: bool>(
                 _ => across_rows::<1>(buf, stride, x + i, y, size, lim),
             }
         } else if FS == 16 {
-            across_columns_16(buf, stride, x, y + i, m, lim);
+            match m {
+                16 => across_columns_16::<16>(buf, stride, x, y + i, lim),
+                8 => across_columns_16::<8>(buf, stride, x, y + i, lim),
+                4 => across_columns_16::<4>(buf, stride, x, y + i, lim),
+                _ => across_columns_16::<1>(buf, stride, x, y + i, lim),
+            }
         } else {
-            across_columns(buf, stride, x, y + i, m, size, lim);
+            match m {
+                16 => across_columns::<16>(buf, stride, x, y + i, size, lim),
+                8 => across_columns::<8>(buf, stride, x, y + i, size, lim),
+                4 => across_columns::<4>(buf, stride, x, y + i, size, lim),
+                _ => across_columns::<1>(buf, stride, x, y + i, size, lim),
+            }
         }
         i += m;
     }
@@ -227,47 +237,47 @@ fn across_rows<const M: usize>(
     }
 }
 
-/// `m` lines of a vertical edge of size 4, 6 or 8: rows `y .. y + m`,
+/// `M` lines of a vertical edge of size 4, 6 or 8: rows `y .. y + M`,
 /// columns `x - 4 .. x + 4`, which [`edge`] checked are in the plane.
+/// A fixed count lets the copies unroll and stay out of memory.
 #[inline(always)]
-fn across_columns(
+fn across_columns<const M: usize>(
     buf: &mut [u8],
     stride: usize,
     x: usize,
     y: usize,
-    m: usize,
     size: Size,
     lim: Limits,
 ) {
     let (p, q) = IDLE;
     let mut lines = [[p, p, p, p, q, q, q, q]; 16];
-    for (l, line) in lines.iter_mut().enumerate().take(m) {
+    for (l, line) in lines.iter_mut().enumerate().take(M) {
         let at = (y + l) * stride + x;
         line.copy_from_slice(&buf[at - 4..at + 4]);
     }
     if !by_line(&mut lines, size, lim) {
         return;
     }
-    for (l, line) in lines.iter().enumerate().take(m) {
+    for (l, line) in lines.iter().enumerate().take(M) {
         let at = (y + l) * stride + x;
         buf[at - 4..at + 4].copy_from_slice(line);
     }
 }
 
-/// `m` lines of a vertical edge of size 16: rows `y .. y + m`, columns
+/// `M` lines of a vertical edge of size 16: rows `y .. y + M`, columns
 /// `x - 8 .. x + 8`, which [`edge`] checked are in the plane.
 #[inline(always)]
-fn across_columns_16(buf: &mut [u8], stride: usize, x: usize, y: usize, m: usize, lim: Limits) {
+fn across_columns_16<const M: usize>(buf: &mut [u8], stride: usize, x: usize, y: usize, lim: Limits) {
     let (p, q) = IDLE;
     let mut lines: [[u8; 16]; 16] = [core::array::from_fn(|k| if k < 8 { p } else { q }); 16];
-    for (l, line) in lines.iter_mut().enumerate().take(m) {
+    for (l, line) in lines.iter_mut().enumerate().take(M) {
         let at = (y + l) * stride + x;
         line.copy_from_slice(&buf[at - 8..at + 8]);
     }
     if !by_line_16(&mut lines, lim) {
         return;
     }
-    for (l, line) in lines.iter().enumerate().take(m) {
+    for (l, line) in lines.iter().enumerate().take(M) {
         let at = (y + l) * stride + x;
         buf[at - 8..at + 8].copy_from_slice(line);
     }

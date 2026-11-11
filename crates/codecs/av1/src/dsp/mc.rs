@@ -1437,6 +1437,17 @@ pub fn diffwtd_mask(
     let rnd = 1i32 << (sh - 1);
     let n = w * h;
     let (m, a, b) = (&mut mask[..n], &t0[..n], &t1[..n]);
+    if sh == 4 {
+        // 8 bits: 38 + ((diff + 8) >> 4) / 16 is 38 + ((diff + 8) >> 8),
+        // on 16-bit lanes (a sum that saturates is past 26 either way).
+        let base = if inverse { 64 - 38 } else { 38 };
+        for ((m, &a), &b) in m.iter_mut().zip(a).zip(b) {
+            let diff = a.abs_diff(b);
+            let v = (diff.saturating_add(8) >> 8).min(26) as u8;
+            *m = if inverse { base - v } else { base + v };
+        }
+        return;
+    }
     for i in 0..n {
         let diff = (i32::from(a[i]) - i32::from(b[i])).abs();
         let diff = (diff + rnd) >> sh;

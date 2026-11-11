@@ -10898,79 +10898,72 @@ fn deblock_whole<S: Sample>(
     let (mx, my) = at;
     let (transform8, flat) = shape;
     let (own, beside, over) = known;
-    let Some(current) = pic.mb.get(my * pic.mb_w + mx) else {
+    let index = my * pic.mb_w + mx;
+    let Some(current) = pic.mb.get(index) else {
         return false;
     };
     // The QP an edge is filtered at in luma, Cb and Cr: this macroblock's
     // inside it, and the average with its neighbour's on its boundary.
-    let qps = |mb: &Mb| [i32::from(mb.qp), i32::from(mb.qp_c), i32::from(mb.qp_cr)];
-    let inside = qps(current);
+    let inside = [
+        i32::from(current.qp),
+        i32::from(current.qp_c),
+        i32::from(current.qp_cr),
+    ];
     // For each plane, the edges that run down the picture and then those
     // that run along it.
     let mut luma = [[None; 4]; 2];
     let mut cb = [[None; 4]; 2];
     let mut cr = [[None; 4]; 2];
-    let ways = luma.iter_mut().zip(cb.iter_mut().zip(cr.iter_mut()));
-    for (way, (for_luma, (for_cb, for_cr))) in ways.enumerate() {
+    for way in 0..2 {
         let vertical = way == 0;
-        let across = if vertical { beside } else { over };
-        let slots = for_luma
-            .iter_mut()
-            .zip(for_cb.iter_mut().zip(for_cr.iter_mut()));
-        for (edge, (luma_slot, (cb_slot, cr_slot))) in slots.enumerate() {
-            // Intra covers the whole macroblock, so its strength needs no
-            // look at coefficients or motion: 4 on the boundary, 3 inside.
-            let (bs, qp) = if edge == 0 {
-                let (nx, ny) = if vertical {
-                    (mx as i32 - 1, my as i32)
-                } else {
-                    (mx as i32, above_my(pic, mx, my))
-                };
-                if nx < 0 || ny < 0 || !filter_boundary(pic, mx, my, vertical) {
-                    continue;
-                }
-                let neighbor = coded_mb(pic, nx, ny);
+        // Edge 0, the macroblock's boundary: the macroblock to the left, or
+        // the one above. This picture has neither MBAFF pairs nor field
+        // macroblocks, so that is one column or one row back.
+        let near = if vertical {
+            (mx > 0).then(|| index - 1)
+        } else {
+            (my > 0).then(|| index - pic.mb_w)
+        };
+        if let Some(near) = near {
+            let neighbor = pic.mb.get(near).filter(|mb| mb.slice != u16::MAX);
+            // A slice may ask for its boundaries with other slices to stay.
+            let open = current.deblock != 2 || neighbor.is_some_and(|mb| mb.slice == current.slice);
+            if open {
                 let qp = neighbor.map_or(inside, |mb| {
-                    let side = qps(mb);
                     [
-                        (inside[0] + side[0] + 1) >> 1,
-                        (inside[1] + side[1] + 1) >> 1,
-                        (inside[2] + side[2] + 1) >> 1,
+                        (inside[0] + i32::from(mb.qp) + 1) >> 1,
+                        (inside[1] + i32::from(mb.qp_c) + 1) >> 1,
+                        (inside[2] + i32::from(mb.qp_cr) + 1) >> 1,
                     ]
                 });
                 let bs = if current.intra || neighbor.is_some_and(|mb| mb.intra) {
                     [4; 4]
                 } else {
-                    edge_strength(pic, (mx, my), 0, vertical, (own, across))
+                    let across = if vertical { beside } else { over };
+                    boundary_strength(current, neighbor, own, across, vertical)
                 };
-                (bs, qp)
-            } else {
-                if flat {
-                    break;
-                }
-                let bs = if current.intra {
-                    [3; 4]
-                } else {
-                    edge_strength(pic, (mx, my), edge, vertical, (own, across))
-                };
-                (bs, inside)
-            };
-            if bs == [0; 4] {
+                let slot = (&mut luma[way][0], &mut cb[way][0], &mut cr[way][0]);
+                set_edge(slot, bs, qp, off, (true, true));
+            }
+        }
+        if flat {
+            continue;
+        }
+        // The inner edges. Chroma has an edge under every other luma one,
+        // and an 8×8 transform has no luma edge at 4 or 12.
+        for edge in 1..4 {
+            let luma_edge = !(transform8 && edge != 2);
+            let chroma_edge = edge == 2;
+            if !luma_edge && !chroma_edge {
                 continue;
             }
-            // Worked out once for the three planes.
-            let Some(strong) = recon::whole_edge_strong(bs) else {
-                return false;
+            let bs = if current.intra {
+                [3; 4]
+            } else {
+                inner_strength(current, own, edge, vertical)
             };
-            // An 8×8 transform has no luma edge at 4 or 12.
-            if !(transform8 && (edge == 1 || edge == 3)) {
-                *luma_slot = Some(recon::whole_edge(bs, strong, qp[0], off));
-            }
-            // Chroma has an edge under every other luma one.
-            if edge.is_multiple_of(2) {
-                *cb_slot = Some(recon::whole_edge(bs, strong, qp[1], off));
-                *cr_slot = Some(recon::whole_edge(bs, strong, qp[2], off));
-            }
+            let slot = (&mut luma[way][edge], &mut cb[way][edge], &mut cr[way][edge]);
+            set_edge(slot, bs, inside, off, (luma_edge, chroma_edge));
         }
     }
     let stride = pic.w;
@@ -10997,6 +10990,117 @@ fn deblock_whole<S: Sample>(
         },
     ];
     S::deblock_mb(planes, &all)
+}
+
+/// The filters of one edge from its strengths, in luma (when it has a luma
+/// edge there), Cb and Cr (on edges 0 and 2). A strength of 0 throughout,
+/// or thresholds of 0, change no sample, and leave the edge out.
+#[inline]
+fn set_edge(
+    slot: (
+        &mut Option<recon::EdgeFilter>,
+        &mut Option<recon::EdgeFilter>,
+        &mut Option<recon::EdgeFilter>,
+    ),
+    bs: [u8; 4],
+    qp: [i32; 3],
+    off: (i32, i32),
+    (luma, chroma): (bool, bool),
+) {
+    if bs == [0; 4] {
+        return;
+    }
+    // Intra edges are 4 or 3 throughout; inter ones stay below 4.
+    let strong = bs[0] == 4;
+    let (for_luma, for_cb, for_cr) = slot;
+    if luma {
+        *for_luma = recon::edge_filter(bs, strong, qp[0], off);
+    }
+    if chroma {
+        *for_cb = recon::edge_filter(bs, strong, qp[1], off);
+        *for_cr = recon::edge_filter(bs, strong, qp[2], off);
+    }
+}
+
+/// The strengths of a non-intra macroblock's boundary with the macroblock
+/// left of it (`vertical`) or above it, which is not intra either. `own`
+/// is this macroblock's [`Known`], `across` the neighbour's when the caller
+/// has it. As [`edge_strength`] works out for edge 0.
+#[inline]
+fn boundary_strength(
+    current: &Mb,
+    neighbor: Option<&Mb>,
+    own: Known,
+    across: Option<Known>,
+    vertical: bool,
+) -> [u8; 4] {
+    let (q_mask, single) = own;
+    let far = neighbor.map(|mb| across.unwrap_or_else(|| (coded_mask(mb), single_motion(mb))));
+    let p_mask = far.map_or(0, |(mask, _)| mask);
+    // The blocks on each side, line by line: column 0 of this macroblock
+    // and column 3 of the one to its left, or row 0 and row 3 above.
+    let (q_coded, p_coded) = if vertical {
+        (q_mask & 0x1111, (p_mask >> 3) & 0x1111)
+    } else {
+        (q_mask & 0x000f, (p_mask >> 12) & 0x000f)
+    };
+    let coded = q_coded | p_coded;
+    let step = if vertical { 4 } else { 1 };
+    // Both sides with one motion each: one answer for every line.
+    let apart = match (neighbor, far) {
+        (Some(mb), Some((_, true))) if single => {
+            Some(motion_strength(preds_at(mb, 3, 3), preds_at(current, 0, 0)))
+        }
+        _ => None,
+    };
+    let none = [(-1, [0, 0]), (-1, [0, 0])];
+    let mut out = [0u8; 4];
+    for (line, sample) in out.iter_mut().enumerate() {
+        *sample = if (coded >> (line * step)) & 1 == 1 {
+            2
+        } else if let Some(apart) = apart {
+            apart
+        } else {
+            let (qx, qy, px, py) = if vertical {
+                (0, line, 3, line)
+            } else {
+                (line, 0, line, 3)
+            };
+            let p = neighbor.map_or(none, |mb| preds_at(mb, px, py));
+            motion_strength(p, preds_at(current, qx, qy))
+        };
+    }
+    out
+}
+
+/// The strengths of inner edge `edge` (1, 2 or 3) of a non-intra
+/// macroblock, as [`edge_strength`] works them out.
+#[inline]
+fn inner_strength(current: &Mb, own: Known, edge: usize, vertical: bool) -> [u8; 4] {
+    let (mask, single) = own;
+    // Each block with the one before it along the way across the edge.
+    let (coded, step) = if vertical {
+        (((mask | (mask << 1)) >> edge) & 0x1111, 4)
+    } else {
+        (((mask | (mask << 4)) >> (edge * 4)) & 0x000f, 1)
+    };
+    if single {
+        return [0, 1, 2, 3].map(|line| 2 * ((coded >> (line * step)) & 1) as u8);
+    }
+    let mut out = [0u8; 4];
+    for (line, sample) in out.iter_mut().enumerate() {
+        *sample = if (coded >> (line * step)) & 1 == 1 {
+            2
+        } else {
+            let (qx, qy, px, py) = if vertical {
+                (edge, line, edge - 1, line)
+            } else {
+                (line, edge, line, edge - 1)
+            };
+            motion_strength(preds_at(current, px, py), preds_at(current, qx, qy))
+        };
+    }
+    out
 }
 
 /// One edge of a macroblock, for its chroma. `format` is the picture's

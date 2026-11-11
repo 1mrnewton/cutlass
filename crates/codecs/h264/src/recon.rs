@@ -1819,38 +1819,33 @@ pub struct Edge {
 
 pub use cutlass_h264_kernels::deblock::{Filter as EdgeFilter, MbEdges};
 
-/// Whether a whole edge with these strengths is filtered at strength 4.
-/// `None` is strengths that mix 4 with less, which no whole-edge filter
-/// takes. The strengths are not all zero.
-pub fn whole_edge_strong(bs: [u8; 4]) -> Option<bool> {
-    if bs == [4; 4] {
-        Some(true)
-    } else if bs.iter().all(|&group| group < 4) {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-/// How a whole edge of 8-bit samples is filtered at the QP `qpav`, from
-/// the strength of each quarter of it and [`whole_edge_strong`]'s answer
-/// for them. The thresholds are the ones [`filter_luma16`] works out.
-pub fn whole_edge(bs: [u8; 4], strong: bool, qpav: i32, offsets: (i32, i32)) -> EdgeFilter {
+/// The thresholds of an edge whose strengths are all 4 (`strong`) or all
+/// below 4, at the QP `qpav`. `None` when the thresholds are 0: no sample then passes the
+/// test against them, and the edge is left as it is.
+#[inline]
+pub fn edge_filter(
+    bs: [u8; 4],
+    strong: bool,
+    qpav: i32,
+    offsets: (i32, i32),
+) -> Option<EdgeFilter> {
     let index_a = (qpav + offsets.0).clamp(0, 51) as usize;
     let index_b = (qpav + offsets.1).clamp(0, 51) as usize;
+    let alpha = ALPHA[index_a];
+    let beta = BETA[index_b];
+    if alpha == 0 || beta == 0 {
+        return None;
+    }
     let tc0 = if strong {
         None
     } else {
-        Some(bs.map(|group| match group {
+        let row = |group: u8| match group {
             0 => -1,
             _ => TC0[usize::from(group.min(3)) - 1][index_a] as i8,
-        }))
+        };
+        Some([row(bs[0]), row(bs[1]), row(bs[2]), row(bs[3])])
     };
-    EdgeFilter {
-        alpha: ALPHA[index_a],
-        beta: BETA[index_b],
-        tc0,
-    }
+    Some(EdgeFilter { alpha, beta, tc0 })
 }
 
 /// Filters a whole edge at once: 16 luma samples, or 8 chroma samples when

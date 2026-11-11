@@ -520,6 +520,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetMask { .. } => "set_mask",
         Request::SetSelection { .. } => "set_selection",
         Request::Track { .. } => "track",
+        Request::Untrack { .. } => "untrack",
         Request::SetColorMask { .. } => "set_color_mask",
         Request::SetEffectStrength { .. } => "set_effect_strength",
         Request::SetEffectControl { .. } => "set_effect_control",

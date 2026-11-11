@@ -437,3 +437,85 @@ fn a_clip_follows_by_pose_or_by_mask_not_both() {
     );
     assert!(twice.is_err());
 }
+
+#[test]
+fn a_sticker_that_stops_following_keeps_its_own_pose_and_keys_outside_the_span() {
+    let mut draft = draft();
+    let segment = &mut draft.tracks[1].segments[0];
+    put_key(segment, "KFTypePositionX", Micros(1_900_000), 0.9);
+    put_key(segment, ALPHA, Micros(500_000), 0.5);
+    let slide = path(30, |t| ((0.01 * t, 0.0), 0.1, 0.0));
+    run(&mut draft, &slide).unwrap();
+    untrack(&mut draft, &"s".into()).unwrap();
+    let segment = sticker(&draft);
+    assert!(segment.extra_material_refs.is_empty());
+    assert!(
+        draft.materials.video_trackings.is_empty(),
+        "no clip lists it"
+    );
+    let offsets = key_offsets(segment);
+    assert!(offsets.contains(&Micros(1_900_000)), "{offsets:?}");
+    assert!(offsets.contains(&Micros(500_000)), "the opacity key stays");
+    for group in &segment.common_keyframes {
+        if group.property_type.starts_with("KFTypePosition") {
+            assert!(
+                group
+                    .keyframe_list
+                    .iter()
+                    .all(|key| key.time_offset.0 > 1_000_000),
+                "a tracked key stayed: {group:?}"
+            );
+        }
+    }
+    // Between the tracked span and the later key, the sticker is back on
+    // its own place.
+    let (clip, _) = clip_at(segment, &draft.keyframe_graph_list, Micros(0)).unwrap();
+    assert!((clip.transform.y - 0.25).abs() < 1e-9);
+    assert_eq!(untrack(&mut draft, &"s".into()), Err(EditError::Track));
+}
+
+#[test]
+fn a_mask_stops_following_while_a_sticker_keeps_the_track() {
+    let mut draft = draft();
+    let canvas = path(30, |t| ((-0.5 + 0.02 * t, 0.0), 0.1, 0.0));
+    let own = clip_path(30, |t| ((-0.5 + 0.02 * t, 0.0), (0.1, 0.2), 0.0));
+    track(
+        &mut draft,
+        &"v".into(),
+        &["s".into()],
+        &[("v".into(), own)],
+        &"t1".into(),
+        Micros(0),
+        &canvas,
+    )
+    .unwrap();
+    untrack(&mut draft, &"v".into()).unwrap();
+    let video = &draft.tracks[0].segments[0];
+    assert!(
+        video
+            .extra_material_refs
+            .iter()
+            .all(|id| id.as_str() != "t1")
+    );
+    assert!(key_offsets(video).is_empty(), "the mask keys went");
+    let still = mask_at(&draft, 20 * 1_000_000 / 30);
+    assert!(close(still.x, -0.5), "the mask stays where it was drawn");
+    let record = &draft.materials.video_trackings[0];
+    assert!(record.fields.get("masks").is_none());
+    assert!(
+        !key_offsets(sticker(&draft)).is_empty(),
+        "the sticker still follows"
+    );
+}
+
+#[test]
+fn a_locked_clip_cannot_stop_following() {
+    let mut draft = draft();
+    let slide = path(30, |t| ((0.01 * t, 0.0), 0.1, 0.0));
+    run(&mut draft, &slide).unwrap();
+    draft.tracks[1].attribute = TrackAttribute(TrackAttribute::LOCK);
+    assert_eq!(
+        untrack(&mut draft, &"s".into()),
+        Err(EditError::LockedTrack)
+    );
+}

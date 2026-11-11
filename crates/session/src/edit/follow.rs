@@ -592,5 +592,91 @@ fn record(
     }
 }
 
+/// Stop clip `id` following the track it lists. The keys the track wrote
+/// inside its span go: the pose keys of a clip that followed by its pose,
+/// or the place, size and turn keys of its mask. The clip keeps its own
+/// pose and mask, which the track never changed. A record no clip lists
+/// any more goes too.
+pub fn untrack(draft: &mut Draft, id: &SegmentId) -> Result<(), EditError> {
+    let (t, s) = locate(draft, id)?;
+    ensure_unlocked(draft.tracks[t].attribute)?;
+    let segment = &draft.tracks[t].segments[s];
+    let record = draft
+        .materials
+        .video_trackings
+        .iter()
+        .find(|raw| raw.kind == VIDEO_TRACKING && segment.extra_material_refs.contains(&raw.id))
+        .ok_or(EditError::Track)?;
+    let record_id = record.id.clone();
+    let range = record
+        .fields
+        .get("tracking_time_range")
+        .ok_or(EditError::Track)?;
+    let first = range
+        .get("start")
+        .and_then(Value::as_i64)
+        .ok_or(EditError::Track)?;
+    let length = range
+        .get("duration")
+        .and_then(Value::as_i64)
+        .ok_or(EditError::Track)?;
+    let by_mask = record
+        .fields
+        .get("masks")
+        .and_then(Value::as_array)
+        .is_some_and(|ids| ids.iter().any(|v| v.as_str() == Some(id.as_str())));
+    let names: &[&str] = if by_mask {
+        &MASK_KEYS[..5]
+    } else {
+        &[
+            POSE_KEYS[0],
+            POSE_KEYS[1],
+            POSE_KEYS[2],
+            POSE_KEYS[3],
+            POSE_KEYS[4],
+            "KFTypeScale",
+        ]
+    };
+    let segment = &mut draft.tracks[t].segments[s];
+    let start = segment.target.start.0;
+    let (from, to) = (first - start, first + length - start);
+    for group in &mut segment.common_keyframes {
+        if names.contains(&group.property_type.as_str()) {
+            group
+                .keyframe_list
+                .retain(|key| key.time_offset.0 < from || key.time_offset.0 > to);
+        }
+    }
+    segment
+        .common_keyframes
+        .retain(|group| !group.keyframe_list.is_empty());
+    segment.extra_material_refs.retain(|r| r != &record_id);
+    let listed = draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .any(|segment| segment.extra_material_refs.contains(&record_id));
+    if listed {
+        if let Some(record) = draft
+            .materials
+            .video_trackings
+            .iter_mut()
+            .find(|raw| raw.id == record_id)
+            && let Some(Value::Array(ids)) = record.fields.get_mut("masks")
+        {
+            ids.retain(|v| v.as_str() != Some(id.as_str()));
+            if ids.is_empty() {
+                record.fields.remove("masks");
+            }
+        }
+    } else {
+        draft
+            .materials
+            .video_trackings
+            .retain(|raw| raw.id != record_id);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;

@@ -613,6 +613,10 @@ pub enum Request {
         #[serde(default)]
         masks: Vec<(SegmentId, cutlass_model::TrackPath)>,
     },
+    /// Stop `segment_id` following the track it lists, and take off the
+    /// keys the track wrote: its pose keys, or its mask's when its mask
+    /// followed.
+    Untrack { segment_id: SegmentId },
     /// Limit the clip's colour work, or an adjustment layer, to `mask`, or
     /// take that limit off with `None`.
     SetColorMask {

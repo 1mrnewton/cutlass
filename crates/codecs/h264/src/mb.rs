@@ -10481,7 +10481,34 @@ fn mc_block<S: Sample>(
         let dst = &mut pic.y[y * stride + x..];
         predict_block(dst, stride, frame, (x, y, w, h), mv);
         scale_in_place(dst, stride, (w, h), luma_mix);
-    } else if !(luma_mix.averages() && avg_luma(pic, dpb, slice, (x, y, w, h), motion)?) {
+    } else if luma_mix.averages() && avg_luma(pic, dpb, slice, (x, y, w, h), motion)? {
+    } else if let Mix::Weighted(weight) = luma_mix
+        && r0 >= 0
+        && r1 >= 0
+    {
+        // Two references weighted: the first predicted straight into the
+        // picture, and the second mixed into it there.
+        let stride = pic.w;
+        let dst = &mut pic.y[y * stride + x..];
+        predict_block(
+            dst,
+            stride,
+            reference_frame(dpb, slice, 0, r0)?,
+            (x, y, w, h),
+            mv0,
+        );
+        let mut second = [S::default(); 256];
+        predict_luma(
+            &mut second,
+            reference_frame(dpb, slice, 1, r1)?,
+            x,
+            y,
+            w,
+            h,
+            mv1,
+        );
+        weight_onto(dst, stride, &second, (w, h), weight);
+    } else {
         let mut luma0 = [S::default(); 256];
         let mut luma1 = [S::default(); 256];
         if r0 >= 0 {
@@ -10529,6 +10556,28 @@ fn mc_block<S: Sample>(
         {
             return Ok(());
         }
+        if let (Mix::Weighted(weight_u), Mix::Weighted(weight_v)) = (chroma_mix, chroma_v)
+            && r0 >= 0
+            && r1 >= 0
+        {
+            let at = origin.1 * stride + origin.0;
+            let first = reference_frame(dpb, slice, 0, r0)?;
+            predict_chroma(
+                (&mut pic.u[at..], &mut pic.v[at..]),
+                stride,
+                first,
+                (x, y),
+                size,
+                mv0,
+            );
+            let mut u1 = [S::default(); 256];
+            let mut v1 = [S::default(); 256];
+            let second = reference_frame(dpb, slice, 1, r1)?;
+            predict_chroma((&mut u1, &mut v1), cw, second, (x, y), size, mv1);
+            weight_onto(&mut pic.u[at..], stride, &u1, size, weight_u);
+            weight_onto(&mut pic.v[at..], stride, &v1, size, weight_v);
+            return Ok(());
+        }
         let mut u0 = [S::default(); 256];
         let mut v0 = [S::default(); 256];
         let mut u1 = [S::default(); 256];
@@ -10561,6 +10610,28 @@ fn mc_block<S: Sample>(
         );
     }
     Ok(())
+}
+
+/// The block of `size` at `dst`, rows `stride` apart, mixed in place by
+/// `weight` with the one in `second`, rows `size.0` apart; the block at
+/// `dst` takes the list 0 weight. At most 16 wide.
+fn weight_onto<S: Sample>(
+    dst: &mut [S],
+    stride: usize,
+    second: &[S],
+    size: (usize, usize),
+    weight: recon::BiWeight,
+) {
+    if S::weight_onto_fast((dst, stride), second, size, weight) {
+        return;
+    }
+    let (w, h) = size;
+    let mut first = [S::default(); 16];
+    for row in 0..h {
+        let out = &mut dst[row * stride..row * stride + w];
+        first[..w].copy_from_slice(out);
+        recon::weight_row(out, &first[..w], &second[row * w..row * w + w], weight);
+    }
 }
 
 /// A block of `size` predicted into `dst`, rows `stride` apart, weighted

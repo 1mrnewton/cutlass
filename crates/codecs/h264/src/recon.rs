@@ -442,6 +442,19 @@ pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
         false
     }
 
+    /// The block of `size` at `dst`, rows `dst.1` apart, mixed in place by
+    /// `weight` with the one in `second`, rows `size.0` apart, the block at
+    /// `dst` taking `w0`, with a vector kernel. `false` as for
+    /// [`Self::predict_fast`].
+    fn weight_onto_fast(
+        _dst: (&mut [Self], usize),
+        _second: &[Self],
+        _size: (usize, usize),
+        _weight: BiWeight,
+    ) -> bool {
+        false
+    }
+
     /// The block of `size` at `dst`, rows `dst_stride` apart, weighted in
     /// place by `weight` with `offset` after a rounding shift by `denom`,
     /// with a vector kernel. `false` as for [`Self::predict_fast`].
@@ -626,6 +639,26 @@ impl Sample for u8 {
 
     fn avg_fast(dst: &mut [Self], a: &[Self], b: &[Self]) -> bool {
         cutlass_h264_kernels::mc::avg_row(dst, a, b)
+    }
+
+    fn weight_onto_fast(
+        dst: (&mut [Self], usize),
+        second: &[Self],
+        size: (usize, usize),
+        weight: BiWeight,
+    ) -> bool {
+        use cutlass_h264_kernels::mc;
+        let shift = weight.denom + 1;
+        if !(1..=15).contains(&shift) {
+            return false;
+        }
+        let weight = mc::BiWeight {
+            w0: weight.w0,
+            w1: weight.w1,
+            shift,
+            offset: (weight.o0 + weight.o1 + 1) >> 1,
+        };
+        mc::weight_onto(dst.0, dst.1, second, size, weight)
     }
 
     fn scale_fast(

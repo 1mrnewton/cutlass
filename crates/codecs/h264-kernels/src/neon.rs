@@ -24,6 +24,7 @@ pub(crate) use crate::neon_mc::{
 };
 pub(crate) use crate::neon_qpel::{
     avg_block, chroma_block, chroma_pair, luma_block, luma_pair, scale_block, weight_block,
+    weight_onto,
 };
 pub(crate) use crate::neon_residual::{dc_add, idct4_add, idct8_add};
 

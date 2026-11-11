@@ -68,6 +68,20 @@ pub(crate) fn scale_fits(dst: &[u8], dst_stride: usize, size: (usize, usize)) ->
             .is_some_and(|end| end <= dst.len())
 }
 
+/// Whether a block of `size` mixed by `weight` into the one at `dst`,
+/// rows `dst_stride` apart, from `b`, rows `size.0` apart, fits both and
+/// the kernels' weights: widths a multiple of 4 up to 16.
+pub(crate) fn onto_fits(
+    dst: &[u8],
+    dst_stride: usize,
+    b: &[u8],
+    size: (usize, usize),
+    weight: BiWeight,
+) -> bool {
+    let (w, h) = size;
+    weight.fits() && scale_fits(dst, dst_stride, size) && b.len() >= w * h
+}
+
 /// One mixed sample, for the widths the row kernels leave over.
 #[inline(always)]
 pub(crate) fn weight_one(a: u8, b: u8, weight: BiWeight) -> u8 {

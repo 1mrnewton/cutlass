@@ -779,6 +779,49 @@ pub(crate) fn weight_block(
     true
 }
 
+/// See [`crate::mc::weight_onto`]: [`weight_block`] with the first
+/// prediction read from `dst`.
+#[target_feature(enable = "neon")]
+pub(crate) fn weight_onto(
+    dst: &mut [u8],
+    dst_stride: usize,
+    b: &[u8],
+    size: (usize, usize),
+    weight: crate::mc_block::BiWeight,
+) -> bool {
+    if !crate::mc_block::onto_fits(dst, dst_stride, b, size, weight) {
+        return false;
+    }
+    let (Ok(w0), Ok(w1)) = (i16::try_from(weight.w0), i16::try_from(weight.w1)) else {
+        return false;
+    };
+    let mix = (
+        vdup_n_s16(w0),
+        vdup_n_s16(w1),
+        vdupq_n_s32(-weight.shift),
+        vdupq_n_s32(weight.offset),
+    );
+    let (w, h) = size;
+    let (b, out) = (b.as_ptr(), dst.as_mut_ptr());
+    for row in 0..h {
+        // SAFETY: `onto_fits` checked `h` rows of `w` in `dst` and `w·h`
+        // samples in `b`.
+        unsafe {
+            let at = out.add(row * dst_stride);
+            mix_row(
+                (at, b.add(row * w), at),
+                w,
+                |x, y| {
+                    let low = weigh8(vget_low_u8(x), vget_low_u8(y), mix);
+                    vcombine_u8(low, weigh8(vget_high_u8(x), vget_high_u8(y), mix))
+                },
+                |x, y| weigh8(x, y, mix),
+            );
+        }
+    }
+    true
+}
+
 /// See [`crate::mc::scale_block`]. A sample times a weight of at most 128
 /// fits 16 bits, and the rounding shift does not overflow on the way.
 #[target_feature(enable = "neon")]

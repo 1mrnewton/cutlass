@@ -32,6 +32,21 @@ pub fn scale_block(
     kernel!(scale_block(dst, dst_stride, size, weight))
 }
 
+/// The prediction at `dst`, rows `dst_stride` apart, mixed by `weight`
+/// with the one in `b`, rows `size.0` apart, in place: the first
+/// prediction made straight into the picture. Widths a multiple of 4 up to
+/// 16. `false` means nothing was done: another width, a block that does
+/// not fit, or weights outside the kernels' range.
+pub fn weight_onto(
+    dst: &mut [u8],
+    dst_stride: usize,
+    b: &[u8],
+    size: (usize, usize),
+    weight: BiWeight,
+) -> bool {
+    kernel!(weight_onto(dst, dst_stride, b, size, weight))
+}
+
 /// Two predictions mixed by `weight`, laid out as for [`avg_block`].
 /// `false` also when the weights are outside the kernels' range.
 pub fn weight_block(
@@ -363,6 +378,37 @@ mod tests {
             let before = fast.clone();
             assert!(super::scale_block(&mut fast, stride, (w, h), weight));
             assert!(scalar::scale_block(&mut plain, stride, (w, h), weight));
+            assert_eq!(fast, plain, "{w}x{h} {weight:?}");
+            assert!(
+                fast.chunks(stride)
+                    .zip(before.chunks(stride))
+                    .all(|(row, old)| row[w..] == old[w..])
+            );
+        }
+    }
+
+    #[test]
+    fn weights_onto_a_block_match_the_plain_ones() {
+        let mut rng = Lcg(23);
+        for round in 0..20_000u32 {
+            let w = 4 * (1 + (round % 4) as usize);
+            let h = 1 + (rng.next() % 16) as usize;
+            let pick = |rng: &mut Lcg| {
+                [-255, 256, 1, 2, 64, 255][(rng.next() % 6) as usize] - (rng.next() % 2) as i32
+            };
+            let weight = super::BiWeight {
+                w0: pick(&mut rng),
+                w1: pick(&mut rng),
+                shift: 1 + (rng.next() % 15) as i32,
+                offset: (rng.next() % 511) as i32 - 255,
+            };
+            let stride = 20;
+            let mut fast: Vec<u8> = (0..stride * 16).map(|_| rng.sample()).collect();
+            let b: Vec<u8> = (0..w * h).map(|_| rng.sample()).collect();
+            let mut plain = fast.clone();
+            let before = fast.clone();
+            assert!(super::weight_onto(&mut fast, stride, &b, (w, h), weight));
+            assert!(scalar::weight_onto(&mut plain, stride, &b, (w, h), weight));
             assert_eq!(fast, plain, "{w}x{h} {weight:?}");
             assert!(
                 fast.chunks(stride)

@@ -426,6 +426,27 @@ fn pair(
     true
 }
 
+/// See [`crate::mc::weight_onto`].
+pub fn weight_onto(
+    dst: &mut [u8],
+    dst_stride: usize,
+    b: &[u8],
+    size: (usize, usize),
+    weight: crate::mc_block::BiWeight,
+) -> bool {
+    if !crate::mc_block::onto_fits(dst, dst_stride, b, size, weight) {
+        return false;
+    }
+    let (w, h) = size;
+    for row in 0..h {
+        let out = &mut dst[row * dst_stride..row * dst_stride + w];
+        for (sample, &right) in out.iter_mut().zip(&b[row * w..row * w + w]) {
+            *sample = crate::mc_block::weight_one(*sample, right, weight);
+        }
+    }
+    true
+}
+
 /// See [`crate::mc::scale_block`].
 pub fn scale_block(
     dst: &mut [u8],

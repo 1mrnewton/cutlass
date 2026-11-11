@@ -90,17 +90,23 @@ pub(crate) struct Coeffs {
     /// One bit per block of `block8` that holds levels.
     block8_used: u8,
     /// The inter luma multipliers of the slice at one QP′Y.
-    inter: InterScale,
+    inter: LevelScale,
+    /// The same for intra macroblocks.
+    intra: LevelScale,
 }
 
-/// The multipliers that scale inter luma levels under the slice's inter
-/// luma weights, made for each QP′Y the first time it comes up: a QP that
-/// changes from one macroblock to the next does not make them again.
-struct InterScale {
+/// The multipliers that scale the luma levels of one kind of macroblock,
+/// intra or inter, under the slice's weights for that kind, made for each
+/// QP′Y the first time it comes up: a QP that changes from one macroblock
+/// to the next does not make them again.
+struct LevelScale {
+    /// The weights' places: the 4×4 luma list, the 8×8 luma list, and the
+    /// 4×4 Cb list, which the Cr one follows.
+    lists: (usize, usize, usize),
     /// One bit per QP′Y whose entry in `tables` is made.
     ready: u128,
     tables: Vec<([i32; 16], [i32; 64])>,
-    /// The same for inter Cb and Cr 4×4 blocks, by QP′C.
+    /// The same for Cb and Cr 4×4 blocks, by QP′C.
     chroma_ready: [u128; 2],
     chroma: [Vec<[i32; 16]>; 2],
 }
@@ -108,7 +114,17 @@ struct InterScale {
 /// QP′Y runs to 51 plus 36 for 14-bit samples.
 const QP_TABLES: usize = 88;
 
-impl InterScale {
+impl LevelScale {
+    fn new(lists: (usize, usize, usize)) -> Self {
+        Self {
+            lists,
+            ready: 0,
+            tables: Vec::new(),
+            chroma_ready: [0; 2],
+            chroma: [Vec::new(), Vec::new()],
+        }
+    }
+
     /// The 4×4 and 8×8 multipliers at `qp`, or `None` for a QP the tables
     /// do not take.
     fn at(&mut self, qp: i32, pps: &crate::set::Pps) -> Option<(&[i32; 16], &[i32; 64])> {
@@ -120,8 +136,8 @@ impl InterScale {
                 self.tables = vec![([0; 16], [0; 64]); QP_TABLES];
             }
             self.tables[index] = (
-                recon::dequant4(qp, &pps.weight4[3])?,
-                recon::dequant8(qp, &pps.weight8[1])?,
+                recon::dequant4(qp, pps.weight4.get(self.lists.0)?)?,
+                recon::dequant8(qp, pps.weight8.get(self.lists.1)?)?,
             );
             self.ready |= 1 << index;
         }
@@ -129,7 +145,7 @@ impl InterScale {
         Some((mul4, mul8))
     }
 
-    /// The 4×4 multipliers of inter Cb (`which` 0) or Cr at QP′C `qp`.
+    /// The 4×4 multipliers of Cb (`which` 0) or Cr at QP′C `qp`.
     fn chroma_at(&mut self, which: usize, qp: i32, pps: &crate::set::Pps) -> Option<[i32; 16]> {
         let index = usize::try_from(qp)
             .ok()
@@ -142,7 +158,7 @@ impl InterScale {
             if tables.is_empty() {
                 *tables = vec![[0; 16]; QP_TABLES];
             }
-            tables[index] = recon::dequant4(qp, &pps.weight4[4 + which])?;
+            tables[index] = recon::dequant4(qp, pps.weight4.get(self.lists.2 + which)?)?;
             *ready |= 1 << index;
         }
         tables.get(index).copied()
@@ -157,12 +173,10 @@ impl Coeffs {
             chroma: ChromaResidual::zero(),
             ac_used: 0,
             block8_used: 0,
-            inter: InterScale {
-                ready: 0,
-                tables: Vec::new(),
-                chroma_ready: [0; 2],
-                chroma: [Vec::new(), Vec::new()],
-            },
+            // Table 7-2: intra Y, Cb, Cr are lists 0 to 2 and inter ones
+            // 3 to 5; of the 8×8 lists, intra Y is 0 and inter Y 1.
+            inter: LevelScale::new((3, 1, 4)),
+            intra: LevelScale::new((0, 0, 1)),
         }
     }
 
@@ -3430,6 +3444,24 @@ fn decode_intra<S: Sample>(
         *qp = next_qp::<S>(*qp, delta);
     }
     mb.qpd = delta as i8;
+    if let Entropy::Cabac(cab) = entropy
+        && intra_frame_fast(pic, slice, mb, *qp)
+        && let Some(chroma) = chroma_muls::<S>(&mut coeffs.intra, slice, *qp)
+        && let Some(muls) = coeffs.intra.at(*qp + S::QP_BD, &slice.pps)
+    {
+        let i16 = i16.then_some(mode16);
+        return intra_frame_scaled(
+            pic,
+            cab,
+            slice,
+            Place { mx, my },
+            mb,
+            i16,
+            *qp,
+            muls,
+            chroma,
+        );
+    }
     let mut luma_dc = [0i32; 16];
     coeffs.reset_luma();
     let Coeffs {
@@ -4600,10 +4632,10 @@ fn inter_luma_scaled<S: Sample>(
     Ok(())
 }
 
-/// QP′C of Cb and Cr for a macroblock at QP `qp`, and their inter 4×4
-/// multipliers.
+/// QP′C of Cb and Cr for a macroblock at QP `qp`, and their 4×4
+/// multipliers under `scales`.
 fn chroma_muls<S: Sample>(
-    scales: &mut InterScale,
+    scales: &mut LevelScale,
     slice: &Slice<'_>,
     qp: i32,
 ) -> Option<([i32; 2], [[i32; 16]; 2])> {
@@ -4618,21 +4650,22 @@ fn chroma_muls<S: Sample>(
     Some((qps, muls))
 }
 
-/// The chroma residual of an inter macroblock of a 4:2:0 picture that is
-/// not macroblock-adaptive, under CABAC, added to its prediction: what
+/// The chroma residual of a macroblock of a 4:2:0 picture that is not
+/// macroblock-adaptive, under CABAC, added to its prediction: what
 /// [`read_chroma_into`] and [`recon_chroma`] do, with the AC levels scaled
 /// by `muls` as they are read and put in raster order, and each block's
 /// left and upper level counts taken from the neighbours found once, as
-/// FFmpeg's caches do. `cbp` is the chroma coded block pattern, 1 or 2;
-/// the transform is not bypassed.
-fn inter_chroma_scaled<S: Sample>(
+/// FFmpeg's caches do. `cbp` is the chroma coded block pattern, 1 or 2,
+/// and `dc_weights` the Cb and Cr DC weights of the macroblock's kind; the
+/// transform is not bypassed.
+fn chroma_scaled<S: Sample>(
     pic: &mut Frame<S>,
     cab: &mut Cabac<'_>,
     at: Place,
     mb: &mut Mb,
     cbp: u8,
     (qps, muls): ([i32; 2], [[i32; 16]; 2]),
-    pps: &crate::set::Pps,
+    dc_weights: [i32; 2],
 ) -> Result<(), CodecError> {
     let Place { mx, my } = at;
     let field = mb.field_mb || pic.field;
@@ -4670,8 +4703,7 @@ fn inter_chroma_scaled<S: Sample>(
     for which in 0..2 {
         if dc[which] != [0; 4] {
             let [c0, c1, c2, c3] = dc[which];
-            let weight = i32::from(pps.weight4[4 + which][0]);
-            scaled[which] = recon::chroma_dc(c0, c1, c2, c3, qps[which], weight);
+            scaled[which] = recon::chroma_dc(c0, c1, c2, c3, qps[which], dc_weights[which]);
         }
     }
     let origin = |i: usize| (mx * 8 + (i & 1) * 4, span.at((i >> 1) * 4), span.step);
@@ -4719,6 +4751,306 @@ fn inter_chroma_scaled<S: Sample>(
             let (x, y, step) = origin(i);
             recon::add_idct4_full(plane, stride, x, y, &mut block, step);
         }
+    }
+    Ok(())
+}
+
+/// Which of the macroblocks an intra macroblock predicts from are there:
+/// in its slice and, under constrained intra prediction, intra.
+#[derive(Clone, Copy)]
+struct IntraNear {
+    left: bool,
+    above: bool,
+    above_right: bool,
+}
+
+impl IntraNear {
+    /// Outside a macroblock-adaptive frame each is one macroblock away.
+    fn find<S: Sample>(
+        pic: &Frame<S>,
+        (mx, my): (usize, usize),
+        slice: u16,
+        constrained: bool,
+    ) -> Self {
+        let there = |dx: i32, dy: i32| {
+            neighbor(pic, mx as i32 + dx, my as i32 + dy, slice)
+                .is_some_and(|mb| !constrained || mb.intra)
+        };
+        Self {
+            left: there(-1, 0),
+            above: there(0, -1),
+            above_right: there(1, -1),
+        }
+    }
+}
+
+/// Whether [`intra_frame_scaled`] takes an intra macroblock at `qp`.
+fn intra_frame_fast<S: Sample>(pic: &Frame<S>, slice: &Slice<'_>, mb: &Mb, qp: i32) -> bool {
+    !pic.mbaff
+        && !pic.field
+        && !mb.field_mb
+        && pic.chroma() == 1
+        && !pic.separate_plane
+        && pic.levels.is_empty()
+        && !mb.si
+        && !qp_bypass::<S>(slice, qp)
+}
+
+/// The residual of an intra macroblock of a 4:2:0 frame that is not
+/// macroblock-adaptive, under CABAC, read and added with its prediction:
+/// what reading the levels into [`Coeffs`] and [`recon_intra`] do. Each
+/// block is predicted, its levels read already scaled by `muls` into
+/// raster order and added at once, as FFmpeg does; and which neighbouring
+/// macroblocks a prediction may use is found once for the macroblock, not
+/// for each block. The coded block pattern and modes are in `mb`; `i16`
+/// holds an Intra_16x16 prediction mode.
+#[allow(clippy::too_many_arguments)]
+fn intra_frame_scaled<S: Sample>(
+    pic: &mut Frame<S>,
+    cab: &mut Cabac<'_>,
+    slice: &Slice<'_>,
+    at: Place,
+    mb: &mut Mb,
+    i16: Option<u8>,
+    qp: i32,
+    (mul4, mul8): (&[i32; 16], &[i32; 64]),
+    chroma: ([i32; 2], [[i32; 16]; 2]),
+) -> Result<(), CodecError> {
+    let Place { mx, my } = at;
+    let near = IntraNear::find(pic, (mx, my), mb.slice, slice.pps.constrained_intra);
+    let (x0, y0, stride) = (mx * 16, my * 16, pic.w);
+    let luma_cbp = mb.cbp & 15;
+    let chroma_cbp = mb.cbp >> 4;
+    // The level counts beside the left column and above the top row, for
+    // the coded block flags' contexts. A missing neighbour counts as coded
+    // for an intra macroblock.
+    let side = |near: Option<&Mb>, slots: [usize; 4]| match near {
+        Some(near) if near.pcm => [16; 4],
+        Some(near) => slots.map(|slot| near.nnz_y[slot]),
+        None => [1; 4],
+    };
+    let left_counts = side(
+        neighbor(pic, mx as i32 - 1, my as i32, mb.slice),
+        [3, 7, 11, 15],
+    );
+    let above_counts = side(
+        neighbor(pic, mx as i32, my as i32 - 1, mb.slice),
+        [12, 13, 14, 15],
+    );
+    let cbf_inc = |mb: &Mb, bx: usize, by: usize| {
+        let l = if bx > 0 {
+            mb.nnz_y[by * 4 + bx - 1]
+        } else {
+            left_counts[by]
+        };
+        let a = if by > 0 {
+            mb.nnz_y[(by - 1) * 4 + bx]
+        } else {
+            above_counts[bx]
+        };
+        usize::from(l > 0) + 2 * usize::from(a > 0)
+    };
+    let scan = scan4(false);
+    if let Some(mode) = i16 {
+        let mut above = [S::mid(); 16];
+        let mut left = [S::mid(); 16];
+        if near.above {
+            let at = (y0 - 1) * stride + x0;
+            above.copy_from_slice(&pic.y[at..at + 16]);
+        }
+        if near.left {
+            for (row, sample) in left.iter_mut().enumerate() {
+                *sample = pic.y[(y0 + row) * stride + x0 - 1];
+            }
+        }
+        let corner = if near.above && near.left {
+            pic.y[(y0 - 1) * stride + x0 - 1]
+        } else {
+            S::mid()
+        };
+        let pred = recon::pred16(mode, &above, &left, near.above, near.left, corner);
+        put_block(&mut pic.y, stride, x0, y0, &pred, 16, 1);
+        let mut levels = [0i32; 16];
+        let inc = cbf_dc_plane(pic, mx, my, mb, 0);
+        if cab.decision(CBF_BASE[0] + inc)? == 1 {
+            mb.dc_coded = true;
+            cabac_levels(cab, (0, 16), false, |n, level| levels[n] = level)?;
+        }
+        let dc = recon::luma_dc(
+            &luma_dc_raster(&levels, false),
+            qp + S::QP_BD,
+            i32::from(slice.pps.weight4[0][0]),
+        );
+        for i in 0..16 {
+            let (bx, by) = (blk_x(i), blk_y(i));
+            let (x, y) = (x0 + bx * 4, y0 + by * 4);
+            let own = dc[by * 4 + bx];
+            let mut block = [0i32; 16];
+            let mut count = 0;
+            if luma_cbp != 0 && cab.decision(CBF_BASE[1] + cbf_inc(mb, bx, by))? == 1 {
+                count = cabac_levels(cab, (1, 15), false, |n, level| {
+                    let pos = scan[n + 1];
+                    block[pos] = recon::dequantize(level, mul4[pos]);
+                })?;
+                mb.nnz_y[by * 4 + bx] = count as u8;
+            }
+            if count == 0 {
+                // A lone DC is one value for the whole block.
+                recon::add_dc(&mut pic.y, stride, (x, y, 1), (own + 32) >> 6, 4);
+            } else {
+                block[0] = own;
+                recon::add_idct4_full(&mut pic.y, stride, x, y, &mut block, 1);
+            }
+        }
+    } else if mb.transform8 {
+        for i in 0..4 {
+            let (bx, by) = ((i & 1) * 2, (i >> 1) * 2);
+            let (x, y) = (x0 + bx * 4, y0 + by * 4);
+            let above_ok = by > 0 || near.above;
+            let left_ok = bx > 0 || near.left;
+            // The samples above and right: over the macroblock above, the
+            // one above and right, the upper right quarter, or not yet
+            // decoded.
+            let above_right = match i {
+                0 => near.above,
+                1 => near.above_right,
+                2 => true,
+                _ => false,
+            };
+            let mut raw_above = [S::mid(); 16];
+            let mut raw_left = [S::mid(); 8];
+            if above_ok {
+                let at = (y - 1) * stride + x;
+                raw_above[..8].copy_from_slice(&pic.y[at..at + 8]);
+                if above_right {
+                    raw_above[8..].copy_from_slice(&pic.y[at + 8..at + 16]);
+                } else {
+                    let edge = raw_above[7];
+                    raw_above[8..].fill(edge);
+                }
+            }
+            if left_ok {
+                for (row, sample) in raw_left.iter_mut().enumerate() {
+                    *sample = pic.y[(y + row) * stride + x - 1];
+                }
+            }
+            let corner = if above_ok && left_ok {
+                pic.y[(y - 1) * stride + x - 1]
+            } else {
+                S::mid()
+            };
+            let mode = mb.mode4[by * 4 + bx];
+            let pred = pred8_from(mode, (&raw_above, &raw_left, corner), (above_ok, left_ok));
+            put_block(&mut pic.y, stride, x, y, &pred, 8, 1);
+            if luma_cbp & (1 << i) == 0 {
+                continue;
+            }
+            // 4:2:0 leaves out the luma 8×8 coded_block_flag.
+            let mut block = [0i32; 64];
+            let scan = scan8(false);
+            let count = cabac_levels(cab, (5, 64), false, |n, level| {
+                let pos = scan[n];
+                block[pos] = recon::dequantize(level, mul8[pos]);
+            })?;
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    mb.nnz_y[(by + dy) * 4 + bx + dx] = count as u8;
+                }
+            }
+            if count == 1 && block[0] != 0 {
+                recon::add_dc(&mut pic.y, stride, (x, y, 1), (block[0] + 32) >> 6, 8);
+            } else {
+                recon::add_idct8_full(&mut pic.y, stride, x, y, &mut block, 1);
+            }
+        }
+    } else {
+        for i in 0..16 {
+            let (bx, by) = (blk_x(i), blk_y(i));
+            let (x, y) = (x0 + bx * 4, y0 + by * 4);
+            let above_ok = by > 0 || near.above;
+            let left_ok = bx > 0 || near.left;
+            let above_right = if by == 0 {
+                if bx == 3 {
+                    near.above_right
+                } else {
+                    near.above
+                }
+            } else {
+                bx < 3 && scan_of(bx + 1, by - 1) < scan_of(bx, by)
+            };
+            let mut above = [S::mid(); 8];
+            let mut left = [S::mid(); 4];
+            if above_ok {
+                let at = (y - 1) * stride + x;
+                above[..4].copy_from_slice(&pic.y[at..at + 4]);
+                if above_right {
+                    above[4..].copy_from_slice(&pic.y[at + 4..at + 8]);
+                } else {
+                    let edge = above[3];
+                    above[4..].fill(edge);
+                }
+            }
+            if left_ok {
+                for (row, sample) in left.iter_mut().enumerate() {
+                    *sample = pic.y[(y + row) * stride + x - 1];
+                }
+            }
+            let corner = if above_ok && left_ok {
+                pic.y[(y - 1) * stride + x - 1]
+            } else if above_ok {
+                above[0]
+            } else if left_ok {
+                left[0]
+            } else {
+                S::mid()
+            };
+            let mode = mb.mode4[by * 4 + bx];
+            let pred = recon::pred4(mode, &above, &left, corner, above_ok, left_ok);
+            put_block(&mut pic.y, stride, x, y, &pred, 4, 1);
+            if luma_cbp & (1 << ((by / 2) * 2 + bx / 2)) == 0
+                || cab.decision(CBF_BASE[2] + cbf_inc(mb, bx, by))? == 0
+            {
+                continue;
+            }
+            let mut block = [0i32; 16];
+            let count = cabac_levels(cab, (2, 16), false, |n, level| {
+                let pos = scan[n];
+                block[pos] = recon::dequantize(level, mul4[pos]);
+            })?;
+            mb.nnz_y[by * 4 + bx] = count as u8;
+            if count == 1 && block[0] != 0 {
+                recon::add_dc(&mut pic.y, stride, (x, y, 1), (block[0] + 32) >> 6, 4);
+            } else {
+                recon::add_idct4_full(&mut pic.y, stride, x, y, &mut block, 1);
+            }
+        }
+    }
+    // Chroma: both planes predicted, then their levels read and added.
+    let (cx, cy, chroma_stride) = (mx * 8, my * 8, pic.w / 2);
+    for cb in [true, false] {
+        let plane = if cb { &mut pic.u } else { &mut pic.v };
+        let mut above = [S::mid(); 8];
+        let mut left = [S::mid(); 8];
+        if near.above {
+            let at = (cy - 1) * chroma_stride + cx;
+            above.copy_from_slice(&plane[at..at + 8]);
+        }
+        if near.left {
+            for (row, sample) in left.iter_mut().enumerate() {
+                *sample = plane[(cy + row) * chroma_stride + cx - 1];
+            }
+        }
+        let corner = if near.above && near.left {
+            plane[(cy - 1) * chroma_stride + cx - 1]
+        } else {
+            S::mid()
+        };
+        let pred = recon::pred_chroma(mb.chroma_mode, &above, &left, near.above, near.left, corner);
+        put_block(plane, chroma_stride, cx, cy, &pred, 8, 1);
+    }
+    if chroma_cbp != 0 {
+        let dc_weights = [1, 2].map(|list| i32::from(slice.pps.weight4[list][0]));
+        chroma_scaled(pic, cab, at, mb, chroma_cbp, chroma, dc_weights)?;
     }
     Ok(())
 }
@@ -5208,8 +5540,20 @@ fn pred8_block<S: Sample>(
     } else {
         S::mid()
     };
-    let above = filter_row(&raw_above, corner, above_ok, left_ok);
-    let left = filter_col(&raw_left, corner, above_ok, left_ok);
+    pred8_from(mode, (&raw_above, &raw_left, corner), (above_ok, left_ok))
+}
+
+/// Clause 8.3.2: an 8×8 block of `mode` from the samples above it (with
+/// those above and to the right), left of it and at its corner, before
+/// the reference sample filter, and whether those above and left are
+/// there.
+fn pred8_from<S: Sample>(
+    mode: u8,
+    (raw_above, raw_left, corner): (&[S; 16], &[S; 8], S),
+    (above_ok, left_ok): (bool, bool),
+) -> [S; 64] {
+    let above = filter_row(raw_above, corner, above_ok, left_ok);
+    let left = filter_col(raw_left, corner, above_ok, left_ok);
     let corner = if above_ok && left_ok {
         avg3(raw_above[0], corner, raw_left[0])
     } else {
@@ -8349,7 +8693,8 @@ fn decode_inter<S: Sample>(
         &mut *entropy,
     ) && let Some(muls) = chroma_muls::<S>(&mut coeffs.inter, slice, *qp)
     {
-        inter_chroma_scaled(pic, cab, Place { mx, my }, mb, chroma_cbp, muls, &slice.pps)?;
+        let dc_weights = [4, 5].map(|list| i32::from(slice.pps.weight4[list][0]));
+        chroma_scaled(pic, cab, Place { mx, my }, mb, chroma_cbp, muls, dc_weights)?;
     } else {
         let chroma_res = &mut coeffs.chroma;
         read_chroma_into(pic, entropy, (mx, my), chroma_cbp, mb, chroma_res)?;

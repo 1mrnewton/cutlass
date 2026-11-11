@@ -727,9 +727,7 @@ pub fn put<P: Pixel>(
         (true, true) => {
             if let Some(b) = kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
                 && let Some(out) = P::bytes_mut(dst)
-                && with_mid((h + 7) * w, |mid| {
-                    b.with(|b| kernel::put_hv_u8(out, dst_stride, b, mid))
-                })
+                && b.with(|b| kernel::put_hv_u8(out, dst_stride, b))
             {
                 return;
             }
@@ -907,11 +905,7 @@ pub fn prep<P: Pixel>(
         }
         (true, true)
             if kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
-                .is_some_and(|b| {
-                    with_mid((h + 7) * w, |mid| {
-                        b.with(|b| kernel::prep_hv_u8(tmp, w, b, mid))
-                    })
-                }) => {}
+                .is_some_and(|b| b.with(|b| kernel::prep_hv_u8(tmp, w, b))) => {}
         // pred = Round2(2 * (256 * A + B), 7) = 4 * A + Round2(B, 6).
         (true, true) => hv::<P, i16>(
             tmp,

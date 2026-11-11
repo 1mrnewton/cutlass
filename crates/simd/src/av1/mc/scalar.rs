@@ -8,7 +8,8 @@ fn round2(x: i32, n: u32) -> i32 {
 }
 
 /// The horizontal pass: `mid[r * w + c]` for the `h + 7` rows.
-fn horizontal(b: &Block<'_>, mid: &mut [i16]) {
+fn horizontal(b: &Block<'_>) -> Vec<i16> {
+    let mut mid = vec![0i16; (b.h + 7) * b.w];
     for r in 0..b.h + 7 {
         for c in 0..b.w {
             let at = b.start + r * b.src_stride + c;
@@ -18,6 +19,7 @@ fn horizontal(b: &Block<'_>, mid: &mut [i16]) {
             mid[r * b.w + c] = round2(sum, 3) as i16;
         }
     }
+    mid
 }
 
 /// The vertical sum for output `(r, c)`.
@@ -36,11 +38,11 @@ fn vertical(b: &Block<'_>, mid: &[i16], r: usize, c: usize) -> i32 {
     ),
     allow(dead_code)
 )]
-pub(super) fn prep_hv(dst: &mut [i16], dst_stride: usize, b: &Block<'_>, mid: &mut [i16]) {
-    horizontal(b, mid);
+pub(super) fn prep_hv(dst: &mut [i16], dst_stride: usize, b: &Block<'_>) {
+    let mid = horizontal(b);
     for r in 0..b.h {
         for c in 0..b.w {
-            dst[r * dst_stride + c] = round2(vertical(b, mid, r, c), 7) as i16;
+            dst[r * dst_stride + c] = round2(vertical(b, &mid, r, c), 7) as i16;
         }
     }
 }
@@ -54,11 +56,11 @@ pub(super) fn prep_hv(dst: &mut [i16], dst_stride: usize, b: &Block<'_>, mid: &m
     ),
     allow(dead_code)
 )]
-pub(super) fn put_hv(dst: &mut [u8], dst_stride: usize, b: &Block<'_>, mid: &mut [i16]) {
-    horizontal(b, mid);
+pub(super) fn put_hv(dst: &mut [u8], dst_stride: usize, b: &Block<'_>) {
+    let mid = horizontal(b);
     for r in 0..b.h {
         for c in 0..b.w {
-            dst[r * dst_stride + c] = round2(vertical(b, mid, r, c), 11).clamp(0, 255) as u8;
+            dst[r * dst_stride + c] = round2(vertical(b, &mid, r, c), 11).clamp(0, 255) as u8;
         }
     }
 }

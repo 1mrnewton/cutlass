@@ -43,14 +43,12 @@ pub struct Block<'a> {
 
 impl Block<'_> {
     /// Whether the entries take the block: its size, the source it
-    /// reads, and room in the scratch `mid` (`(h + 7) * w` values, the
-    /// output of the horizontal filter) and in a destination of
-    /// `dst_len` values with rows `dst_stride` apart.
-    fn taken(&self, mid: &[i16], dst_len: usize, dst_stride: usize) -> bool {
+    /// reads, and room in a destination of `dst_len` values with rows
+    /// `dst_stride` apart.
+    fn taken(&self, dst_len: usize, dst_stride: usize) -> bool {
         let (w, h) = (self.w, self.h);
         matches!(w, 8 | 16 | 32 | 64 | 128)
             && (1..=128).contains(&h)
-            && mid.len() >= (h + 7) * w
             && (h - 1) * dst_stride + w <= dst_len
             && self
                 .start
@@ -63,8 +61,8 @@ impl Block<'_> {
 /// the horizontal sums by 3, then of the vertical sums by 7, rows of `w`
 /// values `dst_stride` apart.
 #[inline]
-pub fn prep_hv_u8(dst: &mut [i16], dst_stride: usize, b: &Block<'_>, mid: &mut [i16]) -> bool {
-    if !b.taken(mid, dst.len(), dst_stride) {
+pub fn prep_hv_u8(dst: &mut [i16], dst_stride: usize, b: &Block<'_>) -> bool {
+    if !b.taken(dst.len(), dst_stride) {
         return false;
     }
     #[cfg(all(
@@ -78,7 +76,7 @@ pub fn prep_hv_u8(dst: &mut [i16], dst_stride: usize, b: &Block<'_>, mid: &mut [
         // AES only where the build has it too.
         #[allow(unsafe_code)]
         unsafe {
-            neon::hv(neon::Out::Prep(dst), dst_stride, b, mid);
+            neon::hv(neon::Out::Prep(dst), dst_stride, b);
         }
     }
     #[cfg(not(all(
@@ -86,7 +84,7 @@ pub fn prep_hv_u8(dst: &mut [i16], dst_stride: usize, b: &Block<'_>, mid: &mut [
         target_feature = "neon",
         target_feature = "dotprod"
     )))]
-    scalar::prep_hv(dst, dst_stride, b, mid);
+    scalar::prep_hv(dst, dst_stride, b);
     true
 }
 
@@ -94,8 +92,8 @@ pub fn prep_hv_u8(dst: &mut [i16], dst_stride: usize, b: &Block<'_>, mid: &mut [
 /// horizontal sums by 3, then of the vertical sums by 11, clipped to 8
 /// bits.
 #[inline]
-pub fn put_hv_u8(dst: &mut [u8], dst_stride: usize, b: &Block<'_>, mid: &mut [i16]) -> bool {
-    if !b.taken(mid, dst.len(), dst_stride) {
+pub fn put_hv_u8(dst: &mut [u8], dst_stride: usize, b: &Block<'_>) -> bool {
+    if !b.taken(dst.len(), dst_stride) {
         return false;
     }
     #[cfg(all(
@@ -107,7 +105,7 @@ pub fn put_hv_u8(dst: &mut [u8], dst_stride: usize, b: &Block<'_>, mid: &mut [i1
         // SAFETY: as in `prep_hv_u8`.
         #[allow(unsafe_code)]
         unsafe {
-            neon::hv(neon::Out::Put(dst), dst_stride, b, mid);
+            neon::hv(neon::Out::Put(dst), dst_stride, b);
         }
     }
     #[cfg(not(all(
@@ -115,6 +113,6 @@ pub fn put_hv_u8(dst: &mut [u8], dst_stride: usize, b: &Block<'_>, mid: &mut [i1
         target_feature = "neon",
         target_feature = "dotprod"
     )))]
-    scalar::put_hv(dst, dst_stride, b, mid);
+    scalar::put_hv(dst, dst_stride, b);
     true
 }

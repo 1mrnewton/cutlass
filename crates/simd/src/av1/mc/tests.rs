@@ -44,8 +44,6 @@ fn source(rng: &mut Rng) -> Vec<u8> {
 fn both_outputs_match_the_specification_for_every_block_size() {
     let mut rng = Rng(0x00C0_DEC5);
     let src = source(&mut rng);
-    let mut mid = vec![0i16; 135 * 128];
-    let mut twin = vec![0i16; 135 * 128];
     for (w, h) in [
         (8, 8),
         (8, 4),
@@ -77,7 +75,6 @@ fn both_outputs_match_the_specification_for_every_block_size() {
                     fh,
                     fv
                 },
-                &mut mid
             ));
             scalar::prep_hv(
                 &mut want,
@@ -91,7 +88,6 @@ fn both_outputs_match_the_specification_for_every_block_size() {
                     fh,
                     fv,
                 },
-                &mut twin,
             );
             assert_eq!(got, want, "prep {w}x{h} {fh:?} {fv:?}");
             let mut got = vec![9u8; stride * h];
@@ -108,7 +104,6 @@ fn both_outputs_match_the_specification_for_every_block_size() {
                     fh,
                     fv
                 },
-                &mut mid
             ));
             scalar::put_hv(
                 &mut want,
@@ -122,7 +117,6 @@ fn both_outputs_match_the_specification_for_every_block_size() {
                     fh,
                     fv,
                 },
-                &mut twin,
             );
             assert_eq!(got, want, "put {w}x{h} {fh:?} {fv:?}");
         }
@@ -134,7 +128,6 @@ fn a_flat_block_stays_flat() {
     // The taps add up to 128: a flat source comes back as it is, scaled
     // by 16 in the compound intermediate.
     let src = vec![200u8; STRIDE * 40];
-    let mut mid = vec![0i16; 23 * 16];
     let mut tmp = vec![0i16; 256];
     assert!(prep_hv_u8(
         &mut tmp,
@@ -148,7 +141,6 @@ fn a_flat_block_stays_flat() {
             fh: &FILTERS[3],
             fv: &FILTERS[1]
         },
-        &mut mid
     ));
     assert!(tmp.iter().all(|&v| v == 200 * 16));
     let mut out = vec![0u8; 256];
@@ -164,7 +156,6 @@ fn a_flat_block_stays_flat() {
             fh: &FILTERS[3],
             fv: &FILTERS[1]
         },
-        &mut mid
     ));
     assert!(out.iter().all(|&v| v == 200));
 }
@@ -175,7 +166,6 @@ fn the_final_samples_are_clipped_to_8_bits() {
     let src: Vec<u8> = (0..STRIDE * 40)
         .map(|i| if i % STRIDE >= 12 { 255 } else { 0 })
         .collect();
-    let mut mid = vec![0i16; 15 * 16];
     let mut out = vec![9u8; 16 * 8];
     assert!(put_hv_u8(
         &mut out,
@@ -189,10 +179,8 @@ fn the_final_samples_are_clipped_to_8_bits() {
             fh: &FILTERS[4],
             fv: &FILTERS[4]
         },
-        &mut mid
     ));
     let mut want = vec![0u8; 16 * 8];
-    let mut twin = vec![0i16; 15 * 16];
     scalar::put_hv(
         &mut want,
         16,
@@ -205,7 +193,6 @@ fn the_final_samples_are_clipped_to_8_bits() {
             fh: &FILTERS[4],
             fv: &FILTERS[4],
         },
-        &mut twin,
     );
     assert_eq!(out, want);
     assert!(out.contains(&0) && out.contains(&255));
@@ -214,7 +201,6 @@ fn the_final_samples_are_clipped_to_8_bits() {
 #[test]
 fn a_block_it_does_not_take_is_left_alone() {
     let src = vec![50u8; STRIDE * 40];
-    let mut mid = vec![0i16; 135 * 128];
     let mut tmp = vec![3i16; 64 * 64];
     let (fh, fv) = (&FILTERS[0], &FILTERS[1]);
     // Widths the kernel has no strip for, and no rows.
@@ -232,12 +218,11 @@ fn a_block_it_does_not_take_is_left_alone() {
                     fh,
                     fv
                 },
-                &mut mid
             ),
             "{w}x{h}"
         );
     }
-    // A source, a scratch or a destination too short for the block.
+    // A source or a destination too short for the block.
     assert!(!prep_hv_u8(
         &mut tmp,
         64,
@@ -250,21 +235,6 @@ fn a_block_it_does_not_take_is_left_alone() {
             fh,
             fv
         },
-        &mut mid
-    ));
-    assert!(!prep_hv_u8(
-        &mut tmp,
-        64,
-        &Block {
-            src: &src,
-            start: 0,
-            src_stride: STRIDE,
-            w: 8,
-            h: 8,
-            fh,
-            fv
-        },
-        &mut mid[..100]
     ));
     assert!(!prep_hv_u8(
         &mut tmp[..60],
@@ -278,7 +248,6 @@ fn a_block_it_does_not_take_is_left_alone() {
             fh,
             fv
         },
-        &mut mid
     ));
     assert!(!prep_hv_u8(
         &mut tmp,
@@ -292,7 +261,6 @@ fn a_block_it_does_not_take_is_left_alone() {
             fh,
             fv
         },
-        &mut mid
     ));
     assert!(tmp.iter().all(|&v| v == 3));
     let mut out = vec![3u8; 64];
@@ -308,7 +276,6 @@ fn a_block_it_does_not_take_is_left_alone() {
             fh,
             fv
         },
-        &mut mid
     ));
     assert!(out.iter().all(|&v| v == 3));
 }
@@ -322,8 +289,6 @@ fn a_source_must_hold_one_sample_past_the_last_one_read() {
     let len = (h + 6) * STRIDE + w + 7;
     let mut rng = Rng(3);
     let src: Vec<u8> = (0..len + 1).map(|_| (rng.next() % 256) as u8).collect();
-    let mut mid = vec![0i16; 15 * 16];
-    let mut twin = mid.clone();
     let mut got = vec![0i16; w * h];
     let mut want = got.clone();
     let block = |src| Block {
@@ -335,9 +300,9 @@ fn a_source_must_hold_one_sample_past_the_last_one_read() {
         fh: &FILTERS[3],
         fv: &FILTERS[4],
     };
-    assert!(!prep_hv_u8(&mut got, w, &block(&src[..len]), &mut mid));
+    assert!(!prep_hv_u8(&mut got, w, &block(&src[..len])));
     assert!(got.iter().all(|&v| v == 0), "declined: nothing written");
-    assert!(prep_hv_u8(&mut got, w, &block(&src), &mut mid));
-    scalar::prep_hv(&mut want, w, &block(&src), &mut twin);
+    assert!(prep_hv_u8(&mut got, w, &block(&src)));
+    scalar::prep_hv(&mut want, w, &block(&src));
     assert_eq!(got, want);
 }

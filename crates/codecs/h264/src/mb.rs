@@ -4624,75 +4624,88 @@ fn inter_chroma_scaled<S: Sample>(
 ) -> Result<(), CodecError> {
     let Place { mx, my } = at;
     let field = mb.field_mb || pic.field;
+    // The neighbours, found once for every flag's context. Outside
+    // macroblock-adaptive frames they are the macroblocks to the left and
+    // above.
+    let left_mb = neighbor(pic, mx as i32 - 1, my as i32, mb.slice);
+    let above_mb = neighbor(pic, mx as i32, above_my(pic, mx, my), mb.slice);
+    let missing = u8::from(mb.intra);
+    let dc_flag = |near: Option<&Mb>, which: usize| match near {
+        None => usize::from(missing),
+        Some(near) if near.pcm => 1,
+        Some(near) => usize::from(near.cbp >> 4 != 0 && near.dc_c[which]),
+    };
     let mut dc = [[0i32; 4]; 2];
     for (which, levels) in dc.iter_mut().enumerate() {
-        let inc = cbf_dc_chroma(pic, mx, my, mb, which);
+        let inc = dc_flag(left_mb, which) + 2 * dc_flag(above_mb, which);
         if cab.decision(CBF_BASE[3] + inc)? == 1 {
             mb.dc_c[which] = true;
             cabac_levels(cab, (3, 4), field, |n, level| levels[n] = level)?;
         }
     }
-    let mut ac = [[[0i32; 16]; 4]; 2];
-    let mut counts = [[0usize; 4]; 2];
-    if cbp == 2 {
-        let scan = scan4(field);
-        let left_mb = neighbor(pic, mx as i32 - 1, my as i32, mb.slice);
-        let above_mb = neighbor(pic, mx as i32, above_my(pic, mx, my), mb.slice);
-        let missing = u8::from(mb.intra);
-        for which in 0..2 {
-            let base = which * 16;
-            // The counts beside the left column and above the top row.
-            let side = |near: Option<&Mb>, first: usize, second: usize| match near {
-                Some(near) if near.pcm => [16, 16],
-                Some(near) => [near.nnz_c[base + first], near.nnz_c[base + second]],
-                None => [missing; 2],
-            };
-            let (left, above) = (side(left_mb, 1, 3), side(above_mb, 2, 3));
-            let mul = &muls[which];
-            for i in 0..4 {
-                let (bx, by) = (i & 1, i >> 1);
-                let l = if bx > 0 {
-                    mb.nnz_c[base + by * 2]
-                } else {
-                    left[by]
-                };
-                let a = if by > 0 {
-                    mb.nnz_c[base + bx]
-                } else {
-                    above[bx]
-                };
-                if cab.decision(CBF_BASE[4] + usize::from(l > 0) + 2 * usize::from(a > 0))? == 0 {
-                    continue;
-                }
-                let block = &mut ac[which][i];
-                let count = cabac_levels(cab, (4, 15), field, |n, level| {
-                    let pos = scan[n + 1];
-                    block[pos] = recon::dequantize(level, mul[pos]);
-                })?;
-                mb.nnz_c[base + by * 2 + bx] = count as u8;
-                counts[which][i] = count;
-            }
-        }
-    }
+    // The counts beside the left column and above the top row.
+    let side = |near: Option<&Mb>, base: usize, first: usize, second: usize| match near {
+        Some(near) if near.pcm => [16, 16],
+        Some(near) => [near.nnz_c[base + first], near.nnz_c[base + second]],
+        None => [missing; 2],
+    };
+    let sides = [0, 16].map(|base| (side(left_mb, base, 1, 3), side(above_mb, base, 2, 3)));
+    // The DC levels come first, so each AC block is finished and added as
+    // soon as it is read; a block with no AC levels gets its DC alone.
     let span = chroma_span(my, 8, mb.field_mb);
     let stride = pic.w / 2;
+    let mut scaled = [[0i32; 4]; 2];
     for which in 0..2 {
-        if dc[which] == [0; 4] && counts[which] == [0; 4] {
-            continue;
+        if dc[which] != [0; 4] {
+            let [c0, c1, c2, c3] = dc[which];
+            let weight = i32::from(pps.weight4[4 + which][0]);
+            scaled[which] = recon::chroma_dc(c0, c1, c2, c3, qps[which], weight);
         }
-        let [c0, c1, c2, c3] = dc[which];
-        let weight = i32::from(pps.weight4[4 + which][0]);
-        let scaled = recon::chroma_dc(c0, c1, c2, c3, qps[which], weight);
-        let plane = if which == 0 { &mut pic.u } else { &mut pic.v };
-        for i in 0..4 {
-            let (x, y) = (mx * 8 + (i & 1) * 4, span.at((i >> 1) * 4));
-            if counts[which][i] == 0 {
-                recon::add_dc(plane, stride, (x, y, span.step), (scaled[i] + 32) >> 6, 4);
+    }
+    let origin = |i: usize| (mx * 8 + (i & 1) * 4, span.at((i >> 1) * 4), span.step);
+    if cbp != 2 {
+        for (which, scaled) in scaled.iter().enumerate() {
+            if dc[which] == [0; 4] {
                 continue;
             }
-            let mut block = ac[which][i];
-            block[0] = scaled[i];
-            recon::add_idct4_full(plane, stride, x, y, &mut block, span.step);
+            let plane = if which == 0 { &mut pic.u } else { &mut pic.v };
+            for (i, &value) in scaled.iter().enumerate() {
+                recon::add_dc(plane, stride, origin(i), (value + 32) >> 6, 4);
+            }
+        }
+        return Ok(());
+    }
+    let scan = scan4(field);
+    for which in 0..2 {
+        let base = which * 16;
+        let (left, above) = sides[which];
+        let mul = &muls[which];
+        for (i, &dc) in scaled[which].iter().enumerate() {
+            let (bx, by) = (i & 1, i >> 1);
+            let l = if bx > 0 {
+                mb.nnz_c[base + by * 2]
+            } else {
+                left[by]
+            };
+            let a = if by > 0 {
+                mb.nnz_c[base + bx]
+            } else {
+                above[bx]
+            };
+            let plane = if which == 0 { &mut pic.u } else { &mut pic.v };
+            if cab.decision(CBF_BASE[4] + usize::from(l > 0) + 2 * usize::from(a > 0))? == 0 {
+                recon::add_dc(plane, stride, origin(i), (dc + 32) >> 6, 4);
+                continue;
+            }
+            let mut block = [0i32; 16];
+            let count = cabac_levels(cab, (4, 15), field, |n, level| {
+                let pos = scan[n + 1];
+                block[pos] = recon::dequantize(level, mul[pos]);
+            })?;
+            mb.nnz_c[base + by * 2 + bx] = count as u8;
+            block[0] = dc;
+            let (x, y, step) = origin(i);
+            recon::add_idct4_full(plane, stride, x, y, &mut block, step);
         }
     }
     Ok(())

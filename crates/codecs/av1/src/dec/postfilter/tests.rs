@@ -114,8 +114,12 @@ fn a_stored_block_covers_its_units_inside_the_frame() {
 
 #[test]
 fn rows_filled_from_the_mode_info_match_blocks_stored_one_by_one() {
-    let hdr = header();
+    let hdr = FrameHeader {
+        delta_lf_present: true,
+        ..header()
+    };
     let mut fs = FrameState::new(&SequenceHeader::default(), &hdr);
+    fs.delta_lf.resize(fs.mi.len(), [0; 4]);
     let lv = LfLevels::new(&hdr);
     // 16x16 blocks, then 8x8 blocks in the last 4 rows: each with its
     // own reference, segment and delta.
@@ -131,12 +135,13 @@ fn rows_filled_from_the_mode_info_match_blocks_stored_one_by_one() {
             y_mode: GLOBALMV - 2 + n % 4,
             skip: n.is_multiple_of(3),
             segment_id: n % 8,
-            delta_lf: [(n % 7) as i8 - 3, 0, 0, 0],
             ..MiInfo::default()
         };
+        let delta_lf = [(n % 7) as i8 - 3, 0, 0, 0];
         let size = if bsize == BLOCK_16X16 { 4 } else { 2 };
         for y in 0..size {
             fs.mi[(r + y) * st + c..][..size].fill(m);
+            fs.delta_lf[(r + y) * st + c..][..size].fill(delta_lf);
         }
         let of = lv.info(
             &hdr,
@@ -145,7 +150,7 @@ fn rows_filled_from_the_mode_info_match_blocks_stored_one_by_one() {
             m.y_mode,
             m.skip,
             bsize,
-            m.delta_lf,
+            delta_lf,
         );
         want.store((r, c), (12, 16), of);
     };

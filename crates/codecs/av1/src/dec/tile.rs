@@ -273,7 +273,7 @@ impl RecBlock {
 
 /// The mode info stored for block `b` (see [`TileDec::write_mode_info`]).
 #[inline(always)]
-fn mode_info_of(b: &Block, delta_lf: [i8; 4]) -> MiInfo {
+fn mode_info_of(b: &Block) -> MiInfo {
     MiInfo {
         ref_frame: b.ref_frame,
         mv: if b.ref_frame[1] > INTRA_FRAME {
@@ -293,7 +293,6 @@ fn mode_info_of(b: &Block, delta_lf: [i8; 4]) -> MiInfo {
         compound_idx: b.compound_idx,
         interp_filter: b.interp_filter,
         motion_mode: b.motion_mode,
-        delta_lf,
     }
 }
 
@@ -1559,11 +1558,11 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
     /// The part of the block's mode info that prediction needs (spec stores
     /// it before compute_prediction). Returns the mode info stored.
     fn store_mode_info_pre(&mut self) {
-        let info = mode_info_of(&self.b, self.delta_lf);
-        // Kept in memory so each store is a plain 28-byte copy (field by
+        let info = mode_info_of(&self.b);
+        // Kept in memory so each store is a plain 24-byte copy (field by
         // field stores of the scalarized value cost several times more).
         let info = std::hint::black_box(info);
-        self.write_mode_info(&info);
+        self.write_mode_info(&info, self.delta_lf);
         let b = &self.b;
         let w4 = bw4(b.bsize).min(self.fs.mi_cols - b.mi_col);
         let h4 = bh4(b.bsize).min(self.fs.mi_rows - b.mi_row);
@@ -1589,7 +1588,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
 
     /// Stores `info` as the mode info of every 4x4 of the block `self.b`
     /// (and its uv_mode for intra blocks with chroma).
-    pub fn write_mode_info(&mut self, info: &MiInfo) {
+    pub fn write_mode_info(&mut self, info: &MiInfo, delta_lf: [i8; 4]) {
         let b = &self.b;
         let w4 = bw4(b.bsize).min(self.fs.mi_cols - b.mi_col);
         let h4 = bh4(b.bsize).min(self.fs.mi_rows - b.mi_row);
@@ -1600,6 +1599,13 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         fill_rect(&mut self.fs.mi, stride, at, w4, h4, *info);
         if set_uv {
             fill_rect(&mut self.fs.uv_modes, stride, at, w4, h4, b.uv_mode);
+        }
+        if self.hdr.delta_lf_present {
+            let n = self.fs.mi.len();
+            if self.fs.delta_lf.len() != n {
+                self.fs.delta_lf.resize(n, [0; 4]);
+            }
+            fill_rect(&mut self.fs.delta_lf, stride, at, w4, h4, delta_lf);
         }
     }
 
@@ -3926,8 +3932,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             while bi < end {
                 let rec = &log.blocks[bi];
                 rec.b.apply(&mut self.b);
-                let info = std::hint::black_box(mode_info_of(&self.b, rec.b.delta_lf));
-                self.write_mode_info(&info);
+                let info = std::hint::black_box(mode_info_of(&self.b));
+                self.write_mode_info(&info, rec.b.delta_lf);
                 if let Some((at, cands)) = rec.extra {
                     let b = &mut self.b;
                     if b.palette_size_y != 0 || b.palette_size_uv != 0 {

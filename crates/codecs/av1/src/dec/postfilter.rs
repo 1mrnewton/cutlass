@@ -217,7 +217,11 @@ impl FilterInfo {
                     m.y_mode,
                     m.skip,
                     m.bsize,
-                    m.delta_lf,
+                    if hdr.delta_lf_present {
+                        fs.delta_lf.get(r * st + c).copied().unwrap_or_default()
+                    } else {
+                        [0; 4]
+                    },
                 );
                 for rr in r..bottom {
                     if let Some(out) = self.units.get_mut(rr * st + c..rr * st + end) {

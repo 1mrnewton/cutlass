@@ -118,7 +118,6 @@ pub struct MiInfo {
     pub compound_idx: u8,
     pub interp_filter: [u8; 2],
     pub motion_mode: u8,
-    pub delta_lf: [i8; 4],
 }
 
 impl Default for MiInfo {
@@ -138,7 +137,6 @@ impl Default for MiInfo {
             compound_idx: 0,
             interp_filter: [0; 2],
             motion_mode: 0,
-            delta_lf: [0; 4],
         }
     }
 }

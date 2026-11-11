@@ -240,6 +240,9 @@ pub struct FrameState {
     pub mi_rows: usize,
     pub mi_stride: usize,
     pub mi: Vec<MiInfo>,
+    /// The loop filter deltas of each 4x4, laid out like `mi`: sized and
+    /// written only for frames with delta_lf_present.
+    pub delta_lf: Vec<[i8; 4]>,
     /// uv_mode of the last intra block with chroma at each 4x4.
     pub uv_modes: Vec<u8>,
     pub tx_types: Vec<u8>,
@@ -276,6 +279,7 @@ impl FrameState {
             mi_rows,
             mi_stride,
             mi: vec![MiInfo::default(); n],
+            delta_lf: Vec::new(),
             uv_modes: vec![0; n],
             tx_types: vec![0; n],
             inter_tx_sizes: vec![0; n],
@@ -341,6 +345,7 @@ impl FrameState {
             mi_rows: self.mi_rows,
             mi_stride: self.mi_stride,
             mi: Vec::new(),
+            delta_lf: Vec::new(),
             uv_modes: Vec::new(),
             tx_types: Vec::new(),
             inter_tx_sizes: Vec::new(),

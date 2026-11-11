@@ -208,6 +208,32 @@ fn lr_units(
     (lr, lr_cols, lr_rows)
 }
 
+/// An entry of [`FrameState::lf_tx`]: the width and height in 4x4 units of
+/// the transform block that holds the unit, as base-2 logarithms (0 to 5)
+/// in the low three bits and the three above them.
+///
+/// A skipped inter block gives its own size instead, of the plane: its
+/// loop filter edges are its own sides only (7.14.2), and this changes no
+/// filter size, as such a block's transforms are its own size unless it
+/// is 128 samples wide or high, and every size from 16 samples gives the
+/// same filter.
+#[inline]
+pub fn lf_dims(w_log2: u32, h_log2: u32) -> u8 {
+    (w_log2 | h_log2 << 3) as u8
+}
+
+/// The width in 4x4 units of an [`FrameState::lf_tx`] entry.
+#[inline(always)]
+pub fn lf_w4(v: u8) -> usize {
+    1 << (v & 7)
+}
+
+/// The height in 4x4 units of an [`FrameState::lf_tx`] entry.
+#[inline(always)]
+pub fn lf_h4(v: u8) -> usize {
+    1 << ((v >> 3) & 7)
+}
+
 /// Mutable state of the frame being decoded.
 pub struct FrameState {
     pub mi_cols: usize,
@@ -218,7 +244,8 @@ pub struct FrameState {
     pub uv_modes: Vec<u8>,
     pub tx_types: Vec<u8>,
     pub inter_tx_sizes: Vec<u8>,
-    /// LoopfilterTxSizes per plane, indexed in that plane's 4x4 units with `mi_stride`.
+    /// LoopfilterTxSizes per plane, indexed in that plane's 4x4 units
+    /// with `mi_stride`, as [`lf_dims`] writes them.
     pub lf_tx: [Vec<u8>; 3],
     pub segment_ids: Vec<u8>,
     /// The data of the primary reference frame, when it has the size of

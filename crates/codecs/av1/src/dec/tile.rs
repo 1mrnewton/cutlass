@@ -25,7 +25,7 @@ use crate::spec::tables::{
 
 use super::cdf::CdfContext;
 use super::decoder::Mirror;
-use super::frame::{FrameState, Picture};
+use super::frame::{FrameState, Picture, lf_dims};
 use super::msac::{Hot, Msac};
 use super::obu::{
     FrameHeader, RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_SWITCHABLE, RESTORE_WIENER,
@@ -3752,7 +3752,16 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let step_y = tx_h(tx) >> 2;
         let st = self.fs.mi_stride;
         let at = (row >> sy) * st + (col >> sx);
-        fill_rect(&mut self.fs.lf_tx[plane], st, at, step_x, step_y, tx);
+        let dims = if self.b.skip && self.b.ref_frame[0] > INTRA_FRAME {
+            let psz = plane_residual_size(self.b.bsize, sx != 0, sy != 0);
+            lf_dims(
+                block_width(psz).trailing_zeros() - 2,
+                block_height(psz).trailing_zeros() - 2,
+            )
+        } else {
+            lf_dims(tx_w_log2(tx) - 2, tx_h_log2(tx) - 2)
+        };
+        fill_rect(&mut self.fs.lf_tx[plane], st, at, step_x, step_y, dims);
         if let Some(log) = self.rec.as_deref_mut() {
             let sc = &mut self.scratch;
             let (nz_rows, nz_cols) = if coded && sc.logged {

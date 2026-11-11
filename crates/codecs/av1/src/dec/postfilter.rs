@@ -13,11 +13,10 @@ use crate::dsp::lf::{filter_horizontal_edge, filter_vertical_edge};
 use crate::dsp::lr::{LrPlane, LrScratch, LrUnit, lr_planes, lr_planes_stripes, lr_save_bounds};
 use crate::dsp::superres::upscale_plane;
 
-use super::frame::{FrameState, Picture};
+use super::frame::{FrameState, Picture, lf_h4, lf_w4};
 use super::obu::{FrameHeader, SequenceHeader};
 use super::types::{
-    GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, NEARESTMV, NONE, bh4, block_height, block_width, bw4,
-    plane_residual_size, tx_h, tx_w,
+    GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, NEARESTMV, NONE, bh4, bw4,
 };
 
 #[inline]
@@ -315,7 +314,6 @@ impl<'a> LfPlane<'a> {
             &units[pr * st..(pr + 1) * st]
         };
         let li = self.li;
-        let yp = ur * 4;
         let mut uc = usize::from(pass0);
         while uc < self.nc_vis {
             let tx = tx_row[uc];
@@ -324,13 +322,13 @@ impl<'a> LfPlane<'a> {
             // horizontal edge or none does. A transform block starts at
             // a multiple of its width.
             let at = uc;
-            let rest = (at | ((tx_w(tx) >> 2) - 1)) + 1;
+            let rest = (at | (lf_w4(tx) - 1)) + 1;
             let (t, pos) = if pass0 {
                 uc = rest;
-                (tx_w(tx), at * 4)
+                (lf_w4(tx), at)
             } else {
                 uc += 1;
-                (tx_h(tx), yp)
+                (lf_h4(tx), ur)
             };
             if pos & (t - 1) != 0 {
                 uc = rest;
@@ -339,21 +337,11 @@ impl<'a> LfPlane<'a> {
             let uc = at;
             let c = (uc << sx) | sx;
             let m = &mi_row[c];
-            if m.flags & LF_BLOCK_EDGES != 0 {
-                let psz = plane_residual_size(m.bsize, sx != 0, sy != 0);
-                let bs = if pass0 {
-                    block_width(psz)
-                } else {
-                    block_height(psz)
-                };
-                if pos & (bs - 1) != 0 {
-                    continue;
-                }
-            }
+            // In samples.
             let (base, pm) = if pass0 {
-                (tx_w(tx_row[uc - 1]).min(t), &mi_row[c - (1 << sx)])
+                (4 * lf_w4(tx_row[uc - 1]).min(t), &mi_row[c - (1 << sx)])
             } else {
-                (tx_h(prev_row[uc]).min(t), &mi_prev[c])
+                (4 * lf_h4(prev_row[uc]).min(t), &mi_prev[c])
             };
             let filter_size = if self.plane == 0 {
                 base.min(16)

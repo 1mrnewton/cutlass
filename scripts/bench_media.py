@@ -70,9 +70,10 @@ def audio(name, crate, ext, encode, decoder, seconds=None):
                 decoder=decoder, seconds=seconds, how="sound")
 
 
-def still(name, crate, ext, encode, decoder, frames=1, repeat=STILL_REPEATS):
+def still(name, crate, ext, encode, decoder, frames=1, repeat=STILL_REPEATS, writer="FFmpeg"):
     return dict(name=name, crate=crate, kind="still", ext=ext, encode=encode,
-                decoder=decoder, frames=frames, repeat=repeat, how="picture", convert=None)
+                decoder=decoder, frames=frames, repeat=repeat, how="picture", convert=None,
+                writer=writer)
 
 
 DECODES = [
@@ -102,7 +103,32 @@ DECODES = [
     still("jpeg", "codecs/jpeg", "jpg", ["-c:v", "mjpeg", "-q:v", "3", "-pix_fmt", "yuvj420p"], "mjpeg"),
     still("png", "codecs/png", "png", ["-c:v", "png", "-pix_fmt", "rgb24"], "png"),
     still("gif", "codecs/gif", "gif", ["-vf", "fps=25,scale=960:540"], "gif", frames=250, repeat=10),
+    # This FFmpeg build has no WebP encoder, so libwebp's own tool writes the file.
+    still("webp", "codecs/webp", "webp", ["-q", "80"], "webp", writer="cwebp"),
+    still("webp-lossless", "codecs/webp", "webp", ["-lossless"], "webp", writer="cwebp"),
 ]
+
+# What the tables do not cover, said in the README beside them.
+NOTES = {
+    "codecs/jpeg": "Encoding was not measured: the tool encodes moving pictures and sound only.",
+    "codecs/png": "Encoding was not measured: the tool encodes moving pictures and sound only.",
+    "codecs/gif": "Encoding was not measured: the tool encodes moving pictures and sound only.",
+    "codecs/webp": ("Encoding and animated files were not measured: the tool encodes moving "
+                    "pictures and sound only, and the FFmpeg here cannot write WebP."),
+    "codecs/vp9": ("The encoder was not measured. The decoder is timed from an IVF file, because "
+                   "the desktop app does not register this crate."),
+    "codecs/vp8": "The decoder is timed from an IVF file, read by the tool itself.",
+    "containers/still": ("Not measured. A still file is one packet, or one packet per picture for "
+                         "a GIF or an animated WebP, so there is no packet stream to time against "
+                         "libavformat. The codec crates time the decoding."),
+    "containers/isobmff": "Writing files was not measured.",
+    "containers/riff": "Writing files was not measured.",
+    "containers/aiff": "Writing files was not measured.",
+    "containers/flac": "Writing files was not measured.",
+    "containers/ogg": "Writing files was not measured.",
+    "containers/mp3": "Writing files was not measured.",
+    "containers/adts": "Writing files was not measured. LOAS/LATM was not measured.",
+}
 
 # name, crate, the file to read (made by a decode case, or by the command given).
 DEMUXES = [
@@ -227,6 +253,11 @@ def make(case, args, path):
         command += case["encode"] + [path]
     elif case["frames"] > 1:
         command = ffmpeg(args) + ["-i", args.video, "-t", "10", "-an"] + case["encode"] + [path]
+    elif case["writer"] == "cwebp":
+        plain = path + ".png"
+        run(ffmpeg(args) + ["-ss", "5", "-i", args.video, "-frames:v", "1", "-an",
+                            "-vf", f"scale={WIDTH}:{HEIGHT}", "-pix_fmt", "rgb24", plain])
+        command = ["cwebp", "-quiet", *case["encode"], plain, "-o", path]
     else:
         command = ffmpeg(args) + ["-ss", "5", "-i", args.video, "-frames:v", "1", "-an",
                                   "-vf", f"scale={WIDTH}:{HEIGHT}"] + case["encode"] + [path]
@@ -308,7 +339,7 @@ def decode(args, case):
     path = os.path.join(args.work, f"{case['name']}.{case['ext']}")
     make(case, args, path)
     record = dict(bytes=os.path.getsize(path), made=" ".join(case["encode"]),
-                  rival=case["decoder"], kind=case["kind"])
+                  rival=case["decoder"], kind=case["kind"], writer=case.get("writer", "FFmpeg"))
     times = case.get("repeat", 1)
     repeat = ["--repeat", str(times)] if times > 1 else []
     probe = timed(ours(args, case, path, repeat))
@@ -451,6 +482,8 @@ def seconds(value):
 
 
 def megabytes(value):
+    if value < 100e3:
+        return f"{value / 1e3:.0f} kB"
     return f"{value / 1e6:.0f} MB" if value >= 10e6 else f"{value / 1e6:.1f} MB"
 
 
@@ -501,6 +534,7 @@ def table(rows, heads):
 def what(record):
     """One line on the input of a decode case."""
     size = megabytes(record["bytes"])
+    writer = record.get("writer", "FFmpeg")
     if record["kind"] == "sound":
         minutes = record["units"] / record["rate"] / 60
         return (f"{minutes:.0f} minutes of stereo sound at {record['rate']:,} Hz ({size}), "
@@ -509,7 +543,7 @@ def what(record):
     if record["kind"] == "still":
         each = record["units"] // record["repeat"]
         many = "one picture" if each == 1 else f"{each} pictures in one file"
-        return (f"{many} of {shape} ({size}), written by FFmpeg with `{record['made']}`, "
+        return (f"{many} of {shape} ({size}), written by {writer} with `{record['made']}`, "
                 f"opened and decoded {record['repeat']} times")
     return (f"{record['units']} frames of {shape} at {RATE} frames a second ({size}), "
             f"written by FFmpeg with `{record['made']}`")
@@ -608,7 +642,12 @@ def report(args, results):
     os.makedirs(os.path.join(args.work, "tables"), exist_ok=True)
     order = {"decode": 0, "encode": 1, "demux": 2}
     written = {}
+    for crate in NOTES:
+        by_crate.setdefault(crate, [])
     for crate, records in by_crate.items():
+        if not records:
+            written[crate] = NOTES[crate]
+            continue
         blocks, failures = [], []
         for key, record in sorted(records, key=lambda item: order[item[0].split(":")[0]]):
             mode, name = key.split(":")
@@ -635,7 +674,8 @@ def report(args, results):
             "music recording.\n\n"
             "To run it again: `cargo build --release -p media-bench`, then "
             "`python3 scripts/bench_media.py --video <clip> --audio <song> --work <folder>`.")
-        text = "\n\n".join([head] + blocks + failures + [how])
+        notes = [NOTES[crate]] if crate in NOTES else []
+        text = "\n\n".join([head] + blocks + failures + notes + [how])
         path = os.path.join(args.work, "tables", crate.replace("/", "-") + ".md")
         with open(path, "w") as handle:
             handle.write(text + "\n")

@@ -2280,6 +2280,10 @@ pub(crate) struct Slice<'a> {
     /// weighting, list 0's index times `poc1.len()` plus list 1's; empty
     /// when the slice does not weight that way.
     implicit: Vec<i16>,
+    /// For each list, the decoded-picture-buffer slot and order count of
+    /// reference index `i` at `i + 1`, and −1 and 0 for index −1 and any
+    /// index past the list: what a macroblock keeps of its references.
+    bound: [[(i8, i32); 64]; 2],
     weighted: bool,
     luma_denom: i32,
     chroma_denom: i32,
@@ -2355,6 +2359,7 @@ impl Slice<'_> {
             long0: self.long0,
             long1: self.long1,
             implicit: self.implicit,
+            bound: self.bound,
             weighted: self.weighted,
             luma_denom: self.luma_denom,
             chroma_denom: self.chroma_denom,
@@ -4219,6 +4224,17 @@ fn make_slice<'a, S: Sample>(
     } else {
         Vec::new()
     };
+    let bound = [(&ref0, &poc0), (&ref1, &poc1)].map(|(slots, pocs)| {
+        std::array::from_fn(|at| {
+            let Some(index) = at.checked_sub(1) else {
+                return (-1, 0);
+            };
+            let slot = slots
+                .get(index)
+                .map_or(-1, |&slot| i8::try_from(slot).unwrap_or(-1));
+            (slot, pocs.get(index).copied().unwrap_or(0))
+        })
+    });
     let origin = if sps.mbaff && !header.field {
         header.first_mb.saturating_mul(2)
     } else {
@@ -4273,6 +4289,7 @@ fn make_slice<'a, S: Sample>(
         off_b: header.off_b,
         ref0,
         ref1,
+        bound,
         poc0,
         poc1,
         long0,

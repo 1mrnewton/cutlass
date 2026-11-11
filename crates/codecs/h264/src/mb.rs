@@ -12185,8 +12185,26 @@ fn edge_qp<S: Sample>(
 }
 
 /// Clause 8.7.2.1. Compares the pictures actually referenced, on either list.
+#[inline(always)]
 fn motion_strength(p: [(i8, [i16; 2]); 2], q: [(i8, [i16; 2]); 2]) -> u8 {
+    // Most blocks share their neighbour's motion: two compares of packed
+    // words settle those.
+    if motion_key(p) == motion_key(q) {
+        return 0;
+    }
     motion_strength_by(p, q, mv_apart)
+}
+
+/// Both lists' pictures and vectors of a block, packed for comparing.
+#[inline(always)]
+fn motion_key(p: [(i8, [i16; 2]); 2]) -> (u16, u64) {
+    let [(r0, [x0, y0]), (r1, [x1, y1])] = p;
+    let refs = u16::from_le_bytes([r0 as u8, r1 as u8]);
+    let mvs = u64::from(x0 as u16)
+        | u64::from(y0 as u16) << 16
+        | u64::from(x1 as u16) << 32
+        | u64::from(y1 as u16) << 48;
+    (refs, mvs)
 }
 
 /// [`motion_strength`] with the test for two vectors being far enough apart
@@ -12248,29 +12266,14 @@ fn preds_at(mb: &Mb, bx: usize, by: usize) -> [(i8, [i16; 2]); 2] {
 fn bind_refs(mb: &mut Mb, slice: &Slice<'_>) {
     // A field macroblock's index counts fields, two to a listed frame.
     let halve = u32::from(mb.field_mb);
+    let bound = |list: usize, index: i8| {
+        let at = usize::try_from(i16::from(index >> halve) + 1).unwrap_or(usize::MAX);
+        slice.bound[list].get(at).copied().unwrap_or((-1, 0))
+    };
     for i in 0..4 {
-        mb.slot0[i] = ref_slot(&slice.ref0, mb.ref0[i] >> halve);
-        mb.slot1[i] = ref_slot(&slice.ref1, mb.ref1[i] >> halve);
-        mb.ref_poc0[i] = listed_poc(&slice.poc0, mb.ref0[i] >> halve);
-        mb.ref_poc1[i] = listed_poc(&slice.poc1, mb.ref1[i] >> halve);
+        (mb.slot0[i], mb.ref_poc0[i]) = bound(0, mb.ref0[i]);
+        (mb.slot1[i], mb.ref_poc1[i]) = bound(1, mb.ref1[i]);
     }
-}
-
-fn listed_poc(pocs: &[i32], index: i8) -> i32 {
-    let Ok(index) = usize::try_from(index) else {
-        return 0;
-    };
-    pocs.get(index).copied().unwrap_or(0)
-}
-
-fn ref_slot(list: &[usize], index: i8) -> i8 {
-    let Ok(index) = usize::try_from(index) else {
-        return -1;
-    };
-    let Some(slot) = list.get(index) else {
-        return -1;
-    };
-    i8::try_from(*slot).unwrap_or(-1)
 }
 
 /// A macroblock edge is filtered across slices unless this slice asked not to.

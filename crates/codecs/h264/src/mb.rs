@@ -10706,16 +10706,38 @@ fn predict_chroma<S: Sample>(
     recon::put_chroma_block(v, dst_stride, &frame.v, stride, pic, block);
 }
 
-/// Clause 8.4.3.2. Implicit bipred weights from the picture-order distance.
+/// Clause 8.4.3.2. Implicit bipred weights from the picture-order distance,
+/// as [`implicit_table`] worked them out for the slice.
 fn implicit_weights(slice: &Slice<'_>, r0: i8, r1: i8) -> (i32, i32) {
-    let Some(poc0) = listed(&slice.poc0, r0) else {
+    let (Ok(left), Ok(right)) = (usize::try_from(r0), usize::try_from(r1)) else {
         return (32, 32);
     };
-    let Some(poc1) = listed(&slice.poc1, r1) else {
+    if right >= slice.poc1.len() {
         return (32, 32);
-    };
-    let long = listed(&slice.long0, r0).unwrap_or(true) || listed(&slice.long1, r1).unwrap_or(true);
-    implicit_pair(slice.poc, poc0, poc1, long)
+    }
+    match slice.implicit.get(left * slice.poc1.len() + right) {
+        Some(&w1) => (64 - i32::from(w1), i32::from(w1)),
+        None => (32, 32),
+    }
+}
+
+/// The second implicit weight for each pair of a list 0 and a list 1
+/// reference of a frame with order count `current`, given each list's
+/// order counts and long-term marks: list 0's index times the length of
+/// list 1 plus list 1's.
+pub(crate) fn implicit_table(
+    current: i32,
+    list0: (&[i32], &[bool]),
+    list1: (&[i32], &[bool]),
+) -> Vec<i16> {
+    let mut table = Vec::with_capacity(list0.0.len() * list1.0.len());
+    for (&poc0, &long0) in list0.0.iter().zip(list0.1) {
+        for (&poc1, &long1) in list1.0.iter().zip(list1.1) {
+            let (_, w1) = implicit_pair(current, poc0, poc1, long0 || long1);
+            table.push(i16::try_from(w1).unwrap_or(32));
+        }
+    }
+    table
 }
 
 /// The weights for a picture, or field, with order count `current` that
@@ -10733,11 +10755,6 @@ fn implicit_pair(current: i32, poc0: i32, poc1: i32, long: bool) -> (i32, i32) {
         return (32, 32);
     }
     (64 - w1, w1)
-}
-
-fn listed<T: Copy>(values: &[T], index: i8) -> Option<T> {
-    let index = usize::try_from(index).ok()?;
-    values.get(index).copied()
 }
 
 fn pcm_code<S: Sample>(bytes: &[u8], bit: &mut usize) -> Result<S, CodecError> {

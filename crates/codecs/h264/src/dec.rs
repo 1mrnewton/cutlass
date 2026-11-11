@@ -2273,6 +2273,10 @@ pub(crate) struct Slice<'a> {
     poc1: Vec<i32>,
     long0: Vec<bool>,
     long1: Vec<bool>,
+    /// The second weight of each pair of references under implicit
+    /// weighting, list 0's index times `poc1.len()` plus list 1's; empty
+    /// when the slice does not weight that way.
+    implicit: Vec<i16>,
     weighted: bool,
     luma_denom: i32,
     chroma_denom: i32,
@@ -2347,6 +2351,7 @@ impl Slice<'_> {
             poc1: self.poc1,
             long0: self.long0,
             long1: self.long1,
+            implicit: self.implicit,
             weighted: self.weighted,
             luma_denom: self.luma_denom,
             chroma_denom: self.chroma_denom,
@@ -4206,6 +4211,11 @@ fn make_slice<'a, S: Sample>(
     )?;
     let (poc0, long0) = ref_marks(dpb, &ref0);
     let (poc1, long1) = ref_marks(dpb, &ref1);
+    let implicit = if pps.weighted_bipred == 2 && header.kind == 1 {
+        mb::implicit_table(poc, (&poc0, &long0), (&poc1, &long1))
+    } else {
+        Vec::new()
+    };
     let origin = if sps.mbaff && !header.field {
         header.first_mb.saturating_mul(2)
     } else {
@@ -4264,6 +4274,7 @@ fn make_slice<'a, S: Sample>(
         poc1,
         long0,
         long1,
+        implicit,
         weighted,
         luma_denom,
         chroma_denom,

@@ -43,7 +43,13 @@ impl<P: Pixel> Picture<P> {
     /// Allocates a picture whose planes hold the visible size `w x h` and
     /// enough room for whole superblocks.
     pub fn new(w: usize, h: usize, num_planes: usize, sub_x: bool, sub_y: bool, bd: u32) -> Self {
-        let aw = (w + 127 + 160) & !63;
+        let mut aw = (w + 127 + 160) & !63;
+        // A row a multiple of 1024 samples long puts the rows of a block
+        // in the same few cache sets (4K luma would be 4096): 64 more
+        // spread them.
+        if aw.is_multiple_of(1024) {
+            aw += 64;
+        }
         let ah = (h + 127 + 160) & !63;
         let mut planes = Vec::with_capacity(num_planes);
         for p in 0..num_planes {

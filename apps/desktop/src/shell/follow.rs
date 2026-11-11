@@ -32,6 +32,9 @@ pub struct Tracking {
     pub masks: Vec<SegmentId>,
     /// The track being fixed, when this one fixes a frame of it.
     pub fixing: Option<Fixing>,
+    /// Which way from the drawn frame to track a new track. A fix always
+    /// tracks away from the track's anchor.
+    pub direction: TrackSpan,
 }
 
 /// A track a new box fixes: its anchor and its path in canvas units.
@@ -120,6 +123,7 @@ impl Shell {
             followers: Vec::new(),
             masks: Vec::new(),
             fixing: None,
+            direction: TrackSpan::Both,
         });
         Ok(())
     }
@@ -212,11 +216,19 @@ impl Shell {
             followers,
             masks,
             fixing: Some(Fixing { anchor, path }),
+            direction: TrackSpan::Both,
         })
     }
 
     pub fn stop_tracking(&mut self) {
         self.tracking = None;
+    }
+
+    /// Which way a new track runs from the drawn frame.
+    pub fn set_track_direction(&mut self, direction: TrackSpan) {
+        if let Some(tracking) = self.tracking.as_mut() {
+            tracking.direction = direction;
+        }
     }
 
     pub fn set_track_mode(&mut self, mode: TrackMode) {
@@ -354,13 +366,17 @@ impl Shell {
         let followers = tracking.followers;
         let masks = tracking.masks;
         match tracking.fixing {
-            None => self.track_object(
-                target,
-                tracking.time,
-                corners,
-                tracking.mode,
+            None => self.track_job(
+                TrackAsk {
+                    segment_id: target,
+                    at: tracking.time,
+                    corners,
+                    mode: tracking.mode,
+                    span: tracking.direction,
+                },
                 followers,
                 masks,
+                None,
             )?,
             Some(fixing) => {
                 let span = fix_span(tracking.time, fixing.anchor, fps);
@@ -664,6 +680,14 @@ impl Shell {
         })
     }
 
+    /// The name of the clip the track being set up follows.
+    pub fn tracking_target_name(&self) -> Option<String> {
+        let tracking = self.tracking.as_ref()?;
+        let draft = self.session_draft().ok()?;
+        let (segment, _) = super::placed(draft, &tracking.segment_id)?;
+        Some(super::clip_name(draft, segment))
+    }
+
     /// The video clip the selected text, sticker or shape is drawn over at
     /// the playhead: the nearest one below it.
     pub fn follow_target(&self) -> Result<SegmentId, ShellError> {
@@ -691,6 +715,7 @@ impl Shell {
             followers: vec![follower],
             masks: Vec::new(),
             fixing: None,
+            direction: TrackSpan::Both,
         });
         Ok(())
     }
@@ -709,6 +734,7 @@ impl Shell {
             followers: Vec::new(),
             masks: vec![target],
             fixing: None,
+            direction: TrackSpan::Both,
         });
         Ok(())
     }

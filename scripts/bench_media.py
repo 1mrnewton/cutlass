@@ -90,7 +90,8 @@ DECODES = [
     video("mpeg2", "codecs/mpeg2", "mp4", ["-c:v", "mpeg2video", "-q:v", "4"], "mpeg2video"),
     video("mjpeg", "codecs/mjpeg", "mov", ["-c:v", "mjpeg", "-q:v", "4"], "mjpeg"),
     video("prores", "codecs/prores", "mov",
-          ["-c:v", "prores_ks", "-profile:v", "2", "-pix_fmt", "yuv422p10le"], "prores", seconds=10),
+          ["-c:v", "prores_ks", "-profile:v", "2", "-pix_fmt", "yuv422p10le"], "prores", seconds=10,
+          convert="yuv420p"),
     audio("aac", "codecs/aac", "m4a", ["-c:a", "aac", "-b:a", "128k"], "aac"),
     audio("mp3", "codecs/mp3", "mp3", ["-c:a", "libmp3lame", "-b:a", "128k"], "mp3float"),
     audio("flac", "codecs/flac", "flac", ["-c:a", "flac"], "flac"),
@@ -118,6 +119,9 @@ NOTES = {
     "codecs/vp9": ("The encoder was not measured. The decoder is timed from an IVF file, because "
                    "the desktop app does not register this crate."),
     "codecs/vp8": "The decoder is timed from an IVF file, read by the tool itself.",
+    "codecs/prores": ("The stream is 10-bit 4:2:2. The Rust decoder hands the app 8-bit 4:2:0 and "
+                      "converts to it inside the decoder, so FFmpeg is asked for 8-bit 4:2:0 too, "
+                      "and the two conversions round differently."),
     "containers/still": ("Not measured. A still file is one packet, or one packet per picture for "
                          "a GIF or an animated WebP, so there is no packet stream to time against "
                          "libavformat. The codec crates time the decoding."),

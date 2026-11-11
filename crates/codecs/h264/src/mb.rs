@@ -9999,6 +9999,7 @@ struct Block {
     h: usize,
 }
 
+#[derive(Clone, Copy)]
 struct McMotion {
     r0: i8,
     r1: i8,
@@ -10065,7 +10066,7 @@ fn mc_block<S: Sample>(
         let stride = pic.w;
         let dst = &mut pic.y[y * stride + x..];
         predict_block(dst, stride, frame, (x, y, w, h), mv);
-    } else {
+    } else if !(luma_mix.averages() && avg_luma(pic, dpb, slice, (x, y, w, h), motion)?) {
         let mut luma0 = [S::default(); 256];
         let mut luma1 = [S::default(); 256];
         if r0 >= 0 {
@@ -10102,6 +10103,13 @@ fn mc_block<S: Sample>(
             predict_chroma(planes, stride, frame, (x, y), size, mv);
             return Ok(());
         }
+        if chroma == 1
+            && chroma_mix.averages()
+            && chroma_v.averages()
+            && avg_chroma(pic, dpb, slice, (origin, size), motion)?
+        {
+            return Ok(());
+        }
         let mut u0 = [S::default(); 256];
         let mut v0 = [S::default(); 256];
         let mut u1 = [S::default(); 256];
@@ -10136,6 +10144,146 @@ fn mc_block<S: Sample>(
     Ok(())
 }
 
+/// The default average of two luma predictions written straight into the
+/// picture, when both blocks and the reach of their taps are inside their
+/// references. `false` means nothing was written.
+fn avg_luma<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    block: (usize, usize, usize, usize),
+    motion: McMotion,
+) -> Result<bool, CodecError> {
+    let (x, y, w, h) = block;
+    let first = reference_frame(dpb, slice, 0, motion.r0)?;
+    let second = reference_frame(dpb, slice, 1, motion.r1)?;
+    let (Some(one), Some(two)) = (
+        luma_source(first, block, motion.mv0),
+        luma_source(second, block, motion.mv1),
+    ) else {
+        return Ok(false);
+    };
+    let stride = pic.w;
+    let Some(dst) = pic.y.get_mut(y * stride + x..) else {
+        return Ok(false);
+    };
+    Ok(S::pair_fast(false, (dst, stride), (w, h), one, Some(two)))
+}
+
+/// `block`'s luma source in `frame` for [`Sample::pair_fast`], read through
+/// its published rows while another thread decodes it.
+fn luma_source<S: Sample>(
+    frame: &Frame<S>,
+    block: (usize, usize, usize, usize),
+    mv: [i16; 2],
+) -> Option<recon::McSource<'_, S>> {
+    let (x, y, w, h) = block;
+    let (mvx, mvy) = (i32::from(mv[0]), i32::from(mv[1]));
+    let at = (
+        i32::try_from(x).ok()? + (mvx >> 2),
+        i32::try_from(y).ok()? + (mvy >> 2),
+    );
+    let (src, stride, pic, at) = match &frame.pending {
+        Some(published) => {
+            let window = published.luma(at.0, at.1, h).ok()?;
+            let pic = (
+                i32::try_from(window.stride).ok()?,
+                i32::try_from(window.rows).ok()?,
+            );
+            (window.samples, window.stride, pic, (window.x, window.y))
+        }
+        None => {
+            let pic = (i32::try_from(frame.w).ok()?, i32::try_from(frame.h).ok()?);
+            (&frame.y[..], frame.w, pic, at)
+        }
+    };
+    let block = recon::BlockMc {
+        x: at.0,
+        y: at.1,
+        w,
+        h,
+        x_frac: mvx & 3,
+        y_frac: mvy & 3,
+    };
+    recon::luma_source(src, stride, pic, block)
+}
+
+/// [`avg_luma`] for both chroma planes of a 4:2:0 picture; `place` is the
+/// block's origin and size in them.
+fn avg_chroma<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    place: ((usize, usize), (usize, usize)),
+    motion: McMotion,
+) -> Result<bool, CodecError> {
+    let ((x, y), size) = place;
+    let first = reference_frame(dpb, slice, 0, motion.r0)?;
+    let second = reference_frame(dpb, slice, 1, motion.r1)?;
+    let stride = pic.w / 2;
+    let at = y * stride + x;
+    for cb in [true, false] {
+        let (Some(one), Some(two)) = (
+            chroma_source(first, cb, place, motion.mv0),
+            chroma_source(second, cb, place, motion.mv1),
+        ) else {
+            return Ok(false);
+        };
+        let plane = if cb { &mut pic.u } else { &mut pic.v };
+        let Some(dst) = plane.get_mut(at..) else {
+            return Ok(false);
+        };
+        if !S::pair_fast(true, (dst, stride), size, one, Some(two)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// The Cb (`cb` set) or Cr source of a 4:2:0 chroma block at `place` in
+/// `frame`, as for [`luma_source`].
+fn chroma_source<S: Sample>(
+    frame: &Frame<S>,
+    cb: bool,
+    place: ((usize, usize), (usize, usize)),
+    mv: [i16; 2],
+) -> Option<recon::McSource<'_, S>> {
+    let ((x, y), (w, h)) = place;
+    let (mvx, mvy) = (i32::from(mv[0]), i32::from(mv[1]));
+    let at = (
+        i32::try_from(x).ok()? + (mvx >> 3),
+        i32::try_from(y).ok()? + (mvy >> 3),
+    );
+    let (src, stride, pic, at) = match &frame.pending {
+        Some(published) => {
+            let window = published.chroma(cb, at.0, at.1, h).ok()?;
+            let pic = (
+                i32::try_from(window.stride).ok()?,
+                i32::try_from(window.rows).ok()?,
+            );
+            (window.samples, window.stride, pic, (window.x, window.y))
+        }
+        None => {
+            let stride = frame.w / 2;
+            let pic = (
+                i32::try_from(stride).ok()?,
+                i32::try_from(frame.h / 2).ok()?,
+            );
+            let plane = if cb { &frame.u } else { &frame.v };
+            (&plane[..], stride, pic, at)
+        }
+    };
+    let block = recon::BlockMc {
+        x: at.0,
+        y: at.1,
+        w,
+        h,
+        x_frac: mvx & 7,
+        y_frac: mvy & 7,
+    };
+    recon::chroma_source(src, stride, pic, block)
+}
+
 #[derive(Clone, Copy)]
 enum Mix {
     Fill,
@@ -10148,6 +10296,20 @@ enum Mix {
     },
     Avg,
     Weighted(recon::BiWeight),
+}
+
+impl Mix {
+    /// Whether two predictions are mixed by their rounded average, which
+    /// equal weights with no offsets also give.
+    fn averages(self) -> bool {
+        match self {
+            Mix::Avg => true,
+            Mix::Weighted(weight) => {
+                (weight.w0, weight.w1, weight.o0, weight.o1, weight.denom) == (32, 32, 0, 0, 5)
+            }
+            _ => false,
+        }
+    }
 }
 
 fn mix(slice: &Slice<'_>, r0: i8, r1: i8, plane: i8) -> Mix {

@@ -407,6 +407,21 @@ pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
     fn avg_fast(_dst: &mut [Self], _a: &[Self], _b: &[Self]) -> bool {
         false
     }
+
+    /// The block predicted from `first` written to `dst` and, when
+    /// `second` is there, averaged with the one predicted from it: luma at
+    /// quarter offsets, or chroma at eighth offsets when `chroma` is set.
+    /// Both sources have been checked with [`luma_source`] or
+    /// [`chroma_source`]. `false` means nothing was written.
+    fn pair_fast(
+        _chroma: bool,
+        _dst: (&mut [Self], usize),
+        _size: (usize, usize),
+        _first: McSource<'_, Self>,
+        _second: Option<McSource<'_, Self>>,
+    ) -> bool {
+        false
+    }
 }
 
 /// Which samples [`Sample::predict_fast`] makes.
@@ -562,6 +577,32 @@ impl Sample for u8 {
 
     fn avg_fast(dst: &mut [Self], a: &[Self], b: &[Self]) -> bool {
         cutlass_h264_kernels::mc::avg_row(dst, a, b)
+    }
+
+    fn pair_fast(
+        chroma: bool,
+        dst: (&mut [Self], usize),
+        size: (usize, usize),
+        first: McSource<'_, Self>,
+        second: Option<McSource<'_, Self>>,
+    ) -> bool {
+        use cutlass_h264_kernels::mc;
+        let (dst, dst_stride) = dst;
+        fn block<'a>(source: McSource<'a, u8>, size: (usize, usize)) -> (mc::Block<'a>, (u8, u8)) {
+            let block = mc::Block {
+                src: source.src,
+                stride: source.stride,
+                at: source.at,
+                size,
+            };
+            (block, source.frac)
+        }
+        let (first, second) = (block(first, size), second.map(|source| block(source, size)));
+        if chroma {
+            mc::chroma_pair(dst, dst_stride, first, second)
+        } else {
+            mc::luma_pair(dst, dst_stride, first, second)
+        }
     }
 }
 
@@ -1220,6 +1261,75 @@ pub fn chroma_mc<S: Sample>(plane: &[S], stride: usize, w: i32, h: i32, at: Pel)
     S::clip(
         ((8 - xf) * (8 - yf) * a + xf * (8 - yf) * b + (8 - xf) * yf * c + xf * yf * d + 32) >> 6,
     )
+}
+
+/// The reference samples of one block for [`Sample::pair_fast`]: the plane,
+/// the distance between its rows, the block's first full sample in it, and
+/// the block's fractional offsets.
+#[derive(Clone, Copy)]
+pub struct McSource<'a, S> {
+    pub src: &'a [S],
+    pub stride: usize,
+    pub at: (usize, usize),
+    pub frac: (u8, u8),
+}
+
+/// `block`'s source in `src`, a picture of size `pic` whose rows are
+/// `stride` apart, when every sample its six taps read is inside the
+/// picture. `None` when some of them hang past its edge.
+pub fn luma_source<S>(
+    src: &[S],
+    stride: usize,
+    pic: (i32, i32),
+    block: BlockMc,
+) -> Option<McSource<'_, S>> {
+    let frac = (block.x_frac, block.y_frac);
+    if !(0..4).contains(&frac.0) || !(0..4).contains(&frac.1) {
+        return None;
+    }
+    if !luma_window_inside((block.x, block.y), (block.w, block.h), frac, pic) {
+        return None;
+    }
+    Some(McSource {
+        src,
+        stride,
+        at: (
+            usize::try_from(block.x).ok()?,
+            usize::try_from(block.y).ok()?,
+        ),
+        frac: (frac.0 as u8, frac.1 as u8),
+    })
+}
+
+/// [`luma_source`] for a chroma block at eighth offsets.
+pub fn chroma_source<S>(
+    src: &[S],
+    stride: usize,
+    pic: (i32, i32),
+    block: BlockMc,
+) -> Option<McSource<'_, S>> {
+    let (xf, yf) = (block.x_frac, block.y_frac);
+    if !(0..8).contains(&xf) || !(0..8).contains(&yf) {
+        return None;
+    }
+    let right = block.x + i32::try_from(block.w).ok()?;
+    let below = block.y + i32::try_from(block.h).ok()?;
+    if block.x < 0
+        || block.y < 0
+        || right + i32::from(xf != 0) > pic.0
+        || below + i32::from(yf != 0) > pic.1
+    {
+        return None;
+    }
+    Some(McSource {
+        src,
+        stride,
+        at: (
+            usize::try_from(block.x).ok()?,
+            usize::try_from(block.y).ok()?,
+        ),
+        frac: (xf as u8, yf as u8),
+    })
 }
 
 /// A rectangle whose motion vector is the same for every sample.

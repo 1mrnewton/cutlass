@@ -299,3 +299,68 @@ fn dc_row(samples: u64, dc: i32) -> u64 {
 }
 
 crate::residual::residual_kernels!(pub,);
+
+/// See [`crate::mc::luma_pair`]: each block made whole on its own, then the
+/// two averaged.
+pub fn luma_pair(
+    dst: &mut [u8],
+    dst_stride: usize,
+    first: (crate::mc_block::Block<'_>, (u8, u8)),
+    second: Option<(crate::mc_block::Block<'_>, (u8, u8))>,
+) -> bool {
+    pair(dst, dst_stride, first, second, luma_block)
+}
+
+/// See [`crate::mc::chroma_pair`].
+pub fn chroma_pair(
+    dst: &mut [u8],
+    dst_stride: usize,
+    first: (crate::mc_block::Block<'_>, (u8, u8)),
+    second: Option<(crate::mc_block::Block<'_>, (u8, u8))>,
+) -> bool {
+    pair(dst, dst_stride, first, second, chroma_block)
+}
+
+type Predictor = fn(&mut [u8], usize, crate::mc_block::Block<'_>, (u8, u8)) -> bool;
+
+fn pair(
+    dst: &mut [u8],
+    dst_stride: usize,
+    first: (crate::mc_block::Block<'_>, (u8, u8)),
+    second: Option<(crate::mc_block::Block<'_>, (u8, u8))>,
+    predict: Predictor,
+) -> bool {
+    let (w, h) = first.0.size;
+    if w == 0
+        || h == 0
+        || w > 16
+        || h > 16
+        || dst_stride < w
+        || (h - 1) * dst_stride + w > dst.len()
+    {
+        return false;
+    }
+    let mut one = [0u8; 256];
+    if !predict(&mut one, w, first.0, first.1) {
+        return false;
+    }
+    let mut two = [0u8; 256];
+    if let Some((block, frac)) = second
+        && (block.size != first.0.size || !predict(&mut two, w, block, frac))
+    {
+        return false;
+    }
+    for row in 0..h {
+        let out = &mut dst[row * dst_stride..row * dst_stride + w];
+        let a = &one[row * w..row * w + w];
+        if second.is_some() {
+            let b = &two[row * w..row * w + w];
+            for ((sample, &x), &y) in out.iter_mut().zip(a).zip(b) {
+                *sample = ((u16::from(x) + u16::from(y) + 1) >> 1) as u8;
+            }
+        } else {
+            out.copy_from_slice(a);
+        }
+    }
+    true
+}

@@ -323,16 +323,10 @@ unsafe fn source8<const AVG: bool>(rows: Rows, source: Source) {
     }
 }
 
-/// See [`crate::mc::luma_block`]. Blocks 8 or 16 wide and at most 16 high;
-/// `false` means nothing was done: another size, or a block whose samples
-/// and the reach of the loads around them are not all in the slices.
-#[target_feature(enable = "neon")]
-pub(crate) fn luma_block(
-    dst: &mut [u8],
-    dst_stride: usize,
-    block: Block<'_>,
-    frac: (u8, u8),
-) -> bool {
+/// The sources of a luma block and where its rows start, when its samples
+/// and the reach of the loads around them are all inside `src`: see
+/// [`luma_block`].
+fn luma_rows(block: Block<'_>, frac: (u8, u8)) -> Option<(*const u8, Source, Option<Source>)> {
     let Block {
         src,
         stride,
@@ -340,22 +334,17 @@ pub(crate) fn luma_block(
         size: (w, h),
     } = block;
     if (w != 8 && w != 16) || h == 0 || h > 16 || frac.0 > 3 || frac.1 > 3 {
-        return false;
+        return None;
     }
     // The loads reach two rows above the block and three below, two
     // samples left of it, and 30 (16 wide) or 14 (8 wide) right of x.
     if x < 2 || y < 2 || stride < w + 5 {
-        return false;
+        return None;
     }
     let reach = if w == 16 { 30 } else { 14 };
-    let Some(last) = (y + h + 2)
-        .checked_mul(stride)
-        .and_then(|rows| rows.checked_add(x + reach))
-    else {
-        return false;
-    };
-    if last > src.len() || dst_stride < w || (h - 1) * dst_stride + w > dst.len() {
-        return false;
+    let last = (y + h + 2).checked_mul(stride)?.checked_add(x + reach)?;
+    if last > src.len() {
+        return None;
     }
     let (first, second) = match quarter_sources(frac) {
         Some((first, second)) => (first, Some(second)),
@@ -366,69 +355,175 @@ pub(crate) fn luma_block(
             _ => (Source::Full(0, 0), None),
         },
     };
-    let rows = Rows {
-        // In bounds: `y * stride + x` is below `last`.
-        src: src[y * stride + x..].as_ptr(),
+    // In bounds: `y * stride + x` is below `last`.
+    Some((src[y * stride + x..].as_ptr(), first, second))
+}
+
+/// Writes one luma prediction (`AVG` clear) or averages it into what `dst`
+/// holds (`AVG` set). A quarter sample is made whole before it is averaged
+/// in, so its two sources go through `scratch` first.
+///
+/// # Safety
+///
+/// `src` and the sources from [`luma_rows`] for a block `w` wide and `h`
+/// high, and `h` rows of `w` at `dst`.
+#[target_feature(enable = "neon")]
+unsafe fn luma_into<const AVG: bool>(
+    (dst, dst_stride): (*mut u8, usize),
+    (src, stride): (*const u8, usize),
+    (first, second): (Source, Option<Source>),
+    (w, h): (usize, usize),
+) {
+    let rows = |dst, dst_stride| Rows {
+        src,
         stride,
-        dst: dst.as_mut_ptr(),
+        dst,
         dst_stride,
         h,
     };
-    // SAFETY: the checks above are the span each source needs.
+    // SAFETY: the caller's promise, and `scratch` holds 16 rows of 16.
     unsafe {
-        if w == 16 {
-            source16::<false>(rows, first);
-            if let Some(second) = second {
-                source16::<true>(rows, second);
+        match (second, AVG) {
+            (None, _) => {
+                if w == 16 {
+                    source16::<AVG>(rows(dst, dst_stride), first);
+                } else {
+                    source8::<AVG>(rows(dst, dst_stride), first);
+                }
             }
-        } else {
-            source8::<false>(rows, first);
-            if let Some(second) = second {
-                source8::<true>(rows, second);
+            (Some(second), false) => {
+                if w == 16 {
+                    source16::<false>(rows(dst, dst_stride), first);
+                    source16::<true>(rows(dst, dst_stride), second);
+                } else {
+                    source8::<false>(rows(dst, dst_stride), first);
+                    source8::<true>(rows(dst, dst_stride), second);
+                }
+            }
+            (Some(second), true) => {
+                let mut scratch = [0u8; 256];
+                let at = scratch.as_mut_ptr();
+                if w == 16 {
+                    source16::<false>(rows(at, 16), first);
+                    source16::<true>(rows(at, 16), second);
+                    for row in 0..h {
+                        put16::<true>(dst.add(row * dst_stride), vld1q_u8(at.add(row * 16)));
+                    }
+                } else {
+                    source8::<false>(rows(at, 8), first);
+                    source8::<true>(rows(at, 8), second);
+                    for row in 0..h {
+                        put8::<true>(dst.add(row * dst_stride), vld1_u8(at.add(row * 8)));
+                    }
+                }
             }
         }
     }
-    true
 }
 
-/// See [`crate::mc::chroma_block`]. Blocks 4 or 8 wide; `false` as for
-/// [`luma_block`].
+/// See [`crate::mc::luma_block`]. Blocks 8 or 16 wide and at most 16 high;
+/// `false` means nothing was done: another size, or a block whose samples
+/// and the reach of the loads around them are not all in the slices.
 #[target_feature(enable = "neon")]
-pub(crate) fn chroma_block(
+pub(crate) fn luma_block(
     dst: &mut [u8],
     dst_stride: usize,
     block: Block<'_>,
     frac: (u8, u8),
 ) -> bool {
+    let (w, h) = block.size;
+    let Some((src, first, second)) = luma_rows(block, frac) else {
+        return false;
+    };
+    if dst_stride < w || (h - 1) * dst_stride + w > dst.len() {
+        return false;
+    }
+    // SAFETY: `luma_rows` checked the source and the line above `dst`.
+    unsafe {
+        luma_into::<false>(
+            (dst.as_mut_ptr(), dst_stride),
+            (src, block.stride),
+            (first, second),
+            (w, h),
+        );
+    }
+    true
+}
+
+/// See [`crate::mc::luma_pair`].
+#[target_feature(enable = "neon")]
+pub(crate) fn luma_pair(
+    dst: &mut [u8],
+    dst_stride: usize,
+    first: (Block<'_>, (u8, u8)),
+    second: Option<(Block<'_>, (u8, u8))>,
+) -> bool {
+    let (w, h) = first.0.size;
+    if dst_stride < w || h == 0 || (h - 1) * dst_stride + w > dst.len() {
+        return false;
+    }
+    let Some(one) = luma_rows(first.0, first.1) else {
+        return false;
+    };
+    let two = match second {
+        Some((block, frac)) if block.size == first.0.size => match luma_rows(block, frac) {
+            Some(rows) => Some((rows, block.stride)),
+            None => return false,
+        },
+        Some(_) => return false,
+        None => None,
+    };
+    let out = (dst.as_mut_ptr(), dst_stride);
+    // SAFETY: `luma_rows` checked each source and the line above `dst`.
+    unsafe {
+        luma_into::<false>(out, (one.0, first.0.stride), (one.1, one.2), (w, h));
+        if let Some(((src, a, b), stride)) = two {
+            luma_into::<true>(out, (src, stride), (a, b), (w, h));
+        }
+    }
+    true
+}
+
+/// Where a chroma block's rows start when it and the row and sample after
+/// it, with the reach of the loads, are inside `src`: see [`chroma_block`].
+fn chroma_rows(block: Block<'_>, frac: (u8, u8)) -> Option<*const u8> {
     let Block {
         src,
         stride,
         at: (x, y),
         size: (w, h),
     } = block;
-    let (xf, yf) = frac;
-    if (w != 4 && w != 8) || h == 0 || xf > 7 || yf > 7 {
-        return false;
+    if (w != 4 && w != 8) || h == 0 || frac.0 > 7 || frac.1 > 7 {
+        return None;
     }
-    // Each row reads the 16 bytes from its start (8 + 8 one later for the
-    // second tap), and the row below it.
-    let Some(last) = (y + h)
-        .checked_mul(stride)
-        .and_then(|rows| rows.checked_add(x + 9))
-    else {
-        return false;
-    };
-    if last > src.len() || dst_stride < w || (h - 1) * dst_stride + w > dst.len() {
-        return false;
+    // Each row reads 8 samples from its start and 8 from one later, and
+    // the row below it.
+    let last = (y + h).checked_mul(stride)?.checked_add(x + 9)?;
+    if last > src.len() {
+        return None;
     }
+    Some(src[y * stride + x..].as_ptr())
+}
+
+/// Writes one chroma prediction or averages it into `dst`, as for
+/// [`luma_into`].
+///
+/// # Safety
+///
+/// `src` from [`chroma_rows`] for a block `w` wide and `h` high, and `h`
+/// rows of `w` at `dst`.
+#[target_feature(enable = "neon")]
+unsafe fn chroma_into<const AVG: bool>(
+    (out, dst_stride): (*mut u8, usize),
+    (src, stride): (*const u8, usize),
+    (xf, yf): (u8, u8),
+    (w, h): (usize, usize),
+) {
     let wa = vdup_n_u8((8 - xf) * (8 - yf));
     let wb = vdup_n_u8(xf * (8 - yf));
     let wc = vdup_n_u8((8 - xf) * yf);
     let wd = vdup_n_u8(xf * yf);
-    let src = src[y * stride + x..].as_ptr();
-    let out = dst.as_mut_ptr();
-    // SAFETY: rows `y..=y + h` from `x` to `x + 9` are inside `src`, and
-    // `h` rows of `w` inside `dst`, by the checks above.
+    // SAFETY: the caller's promise.
     unsafe {
         let mut top = (vld1_u8(src), vld1_u8(src.add(1)));
         for row in 0..h {
@@ -442,12 +537,77 @@ pub(crate) fn chroma_block(
             let made = vrshrn_n_u16::<6>(sum);
             let at = out.add(row * dst_stride);
             if w == 8 {
-                vst1_u8(at, made);
+                put8::<AVG>(at, made);
             } else {
-                let four = vget_lane_u32::<0>(vreinterpret_u32_u8(made));
-                at.cast::<u32>().write_unaligned(four);
+                let made = if AVG {
+                    vrhadd_u8(load4(at), made)
+                } else {
+                    made
+                };
+                store4(at, made);
             }
             top = bottom;
+        }
+    }
+}
+
+/// See [`crate::mc::chroma_block`]. Blocks 4 or 8 wide; `false` as for
+/// [`luma_block`].
+#[target_feature(enable = "neon")]
+pub(crate) fn chroma_block(
+    dst: &mut [u8],
+    dst_stride: usize,
+    block: Block<'_>,
+    frac: (u8, u8),
+) -> bool {
+    let (w, h) = block.size;
+    let Some(src) = chroma_rows(block, frac) else {
+        return false;
+    };
+    if dst_stride < w || (h - 1) * dst_stride + w > dst.len() {
+        return false;
+    }
+    // SAFETY: `chroma_rows` checked the source and the line above `dst`.
+    unsafe {
+        chroma_into::<false>(
+            (dst.as_mut_ptr(), dst_stride),
+            (src, block.stride),
+            frac,
+            (w, h),
+        )
+    };
+    true
+}
+
+/// See [`crate::mc::chroma_pair`].
+#[target_feature(enable = "neon")]
+pub(crate) fn chroma_pair(
+    dst: &mut [u8],
+    dst_stride: usize,
+    first: (Block<'_>, (u8, u8)),
+    second: Option<(Block<'_>, (u8, u8))>,
+) -> bool {
+    let (w, h) = first.0.size;
+    if dst_stride < w || h == 0 || (h - 1) * dst_stride + w > dst.len() {
+        return false;
+    }
+    let Some(one) = chroma_rows(first.0, first.1) else {
+        return false;
+    };
+    let two = match second {
+        Some((block, frac)) if block.size == first.0.size => match chroma_rows(block, frac) {
+            Some(src) => Some((src, block.stride, frac)),
+            None => return false,
+        },
+        Some(_) => return false,
+        None => None,
+    };
+    let out = (dst.as_mut_ptr(), dst_stride);
+    // SAFETY: `chroma_rows` checked each source and the line above `dst`.
+    unsafe {
+        chroma_into::<false>(out, (one, first.0.stride), first.1, (w, h));
+        if let Some((src, stride, frac)) = two {
+            chroma_into::<true>(out, (src, stride), frac, (w, h));
         }
     }
     true

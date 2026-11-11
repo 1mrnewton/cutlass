@@ -50,6 +50,30 @@ pub fn chroma_block(dst: &mut [u8], dst_stride: usize, block: Block<'_>, frac: (
 
 /// The rounded average of `a` and `b` into `dst`. `false` means the inputs
 /// are shorter than `dst` and nothing was done.
+/// A luma block predicted from `first` into `dst` and, when `second` is
+/// there, averaged with the block predicted from it, both at their quarter
+/// offsets: default bi-prediction, clause 8.4.2.3.1. Both blocks have one
+/// size. `false` means nothing was written: a size `luma_block` does not
+/// take, or a block whose samples are not all in its source.
+pub fn luma_pair(
+    dst: &mut [u8],
+    dst_stride: usize,
+    first: (Block<'_>, (u8, u8)),
+    second: Option<(Block<'_>, (u8, u8))>,
+) -> bool {
+    kernel!(luma_pair(dst, dst_stride, first, second))
+}
+
+/// [`luma_pair`] for a chroma block at eighth offsets.
+pub fn chroma_pair(
+    dst: &mut [u8],
+    dst_stride: usize,
+    first: (Block<'_>, (u8, u8)),
+    second: Option<(Block<'_>, (u8, u8))>,
+) -> bool {
+    kernel!(chroma_pair(dst, dst_stride, first, second))
+}
+
 pub fn avg_row(dst: &mut [u8], a: &[u8], b: &[u8]) -> bool {
     kernel!(avg_row(dst, a, b))
 }
@@ -256,6 +280,55 @@ mod tests {
                 &plane[100..100 + n]
             ));
             assert_eq!(fast, plain, "average of {n}");
+        }
+    }
+
+    #[test]
+    fn pairs_match_the_plain_ones() {
+        let mut rng = Lcg(18);
+        let (stride, rows) = (48usize, 48usize);
+        let plane: Vec<u8> = (0..stride * rows).map(|_| rng.sample()).collect();
+        let place = |rng: &mut Lcg| {
+            (
+                2 + (rng.next() % 20) as usize,
+                2 + (rng.next() % 20) as usize,
+            )
+        };
+        for round in 0..6_000u32 {
+            let w = [8, 16][(round % 2) as usize];
+            let h = [4, 8, 16][(round / 2 % 3) as usize];
+            let block = |at| super::Block {
+                src: &plane,
+                stride,
+                at,
+                size: (w, h),
+            };
+            let quarter = |rng: &mut Lcg| ((rng.next() % 4) as u8, (rng.next() % 4) as u8);
+            let first = (block(place(&mut rng)), quarter(&mut rng));
+            let second = (round % 5 != 0).then(|| (block(place(&mut rng)), quarter(&mut rng)));
+            let dst_stride = 20;
+            let mut fast = vec![7u8; dst_stride * 16];
+            let mut plain = fast.clone();
+            assert!(super::luma_pair(&mut fast, dst_stride, first, second));
+            assert!(scalar::luma_pair(&mut plain, dst_stride, first, second));
+            assert_eq!(fast, plain, "luma pair {w}x{h}");
+            assert!(
+                fast.chunks(dst_stride)
+                    .all(|row| row[w..] == [7u8; 20][w..])
+            );
+
+            let half = |at| super::Block {
+                size: (w / 2, h / 2),
+                ..block(at)
+            };
+            let eighth = |rng: &mut Lcg| ((rng.next() % 8) as u8, (rng.next() % 8) as u8);
+            let first = (half(place(&mut rng)), eighth(&mut rng));
+            let second = (round % 5 != 0).then(|| (half(place(&mut rng)), eighth(&mut rng)));
+            let mut fast = vec![7u8; dst_stride * 16];
+            let mut plain = fast.clone();
+            assert!(super::chroma_pair(&mut fast, dst_stride, first, second));
+            assert!(scalar::chroma_pair(&mut plain, dst_stride, first, second));
+            assert_eq!(fast, plain, "chroma pair {}x{}", w / 2, h / 2);
         }
     }
 

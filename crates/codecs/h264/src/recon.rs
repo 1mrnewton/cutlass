@@ -1819,33 +1819,55 @@ pub struct Edge {
 
 pub use cutlass_h264_kernels::deblock::{Filter as EdgeFilter, MbEdges};
 
-/// The thresholds of an edge whose strengths are all 4 (`strong`) or all
-/// below 4, at the QP `qpav`. `None` when the thresholds are 0: no sample then passes the
-/// test against them, and the edge is left as it is.
-#[inline]
-pub fn edge_filter(
-    bs: [u8; 4],
-    strong: bool,
-    qpav: i32,
-    offsets: (i32, i32),
-) -> Option<EdgeFilter> {
-    let index_a = (qpav + offsets.0).clamp(0, 51) as usize;
-    let index_b = (qpav + offsets.1).clamp(0, 51) as usize;
-    let alpha = ALPHA[index_a];
-    let beta = BETA[index_b];
-    if alpha == 0 || beta == 0 {
-        return None;
+/// The thresholds of the edges filtered at one QP: alpha, beta, and the
+/// clipping value for each strength. Worked out once for every edge of a
+/// macroblock at that QP.
+#[derive(Clone, Copy)]
+pub struct EdgeQp {
+    alpha: u8,
+    beta: u8,
+    /// Indexed by strength: −1 for strength 0, which leaves its group alone,
+    /// then `tC0` for 1, 2 and 3.
+    tc0: [i8; 4],
+}
+
+impl EdgeQp {
+    /// `None` when alpha or beta is 0: no sample then passes the test
+    /// against them, and every edge at this QP is left as it is.
+    #[inline]
+    pub fn new(qpav: i32, offsets: (i32, i32)) -> Option<Self> {
+        let index_a = (qpav + offsets.0).clamp(0, 51) as usize;
+        let index_b = (qpav + offsets.1).clamp(0, 51) as usize;
+        let alpha = ALPHA[index_a];
+        let beta = BETA[index_b];
+        if alpha == 0 || beta == 0 {
+            return None;
+        }
+        let tc0 = [
+            -1,
+            TC0[0][index_a] as i8,
+            TC0[1][index_a] as i8,
+            TC0[2][index_a] as i8,
+        ];
+        Some(Self { alpha, beta, tc0 })
     }
-    let tc0 = if strong {
-        None
-    } else {
-        let row = |group: u8| match group {
-            0 => -1,
-            _ => TC0[usize::from(group.min(3)) - 1][index_a] as i8,
+
+    /// The filter of an edge whose strengths are all 4 (`strong`) or all
+    /// below 4.
+    #[inline]
+    pub fn filter(&self, bs: [u8; 4], strong: bool) -> EdgeFilter {
+        let tc0 = if strong {
+            None
+        } else {
+            let at = |group: u8| self.tc0[usize::from(group & 3)];
+            Some([at(bs[0]), at(bs[1]), at(bs[2]), at(bs[3])])
         };
-        Some([row(bs[0]), row(bs[1]), row(bs[2]), row(bs[3])])
-    };
-    Some(EdgeFilter { alpha, beta, tc0 })
+        EdgeFilter {
+            alpha: self.alpha,
+            beta: self.beta,
+            tc0,
+        }
+    }
 }
 
 /// Filters a whole edge at once: 16 luma samples, or 8 chroma samples when

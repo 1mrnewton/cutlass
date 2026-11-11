@@ -10909,6 +10909,9 @@ fn deblock_whole<S: Sample>(
         i32::from(current.qp_c),
         i32::from(current.qp_cr),
     ];
+    // The thresholds of the edges inside the macroblock, the same for all,
+    // worked out when the first of them is filtered.
+    let mut thresholds = None;
     // For each plane, the edges that run down the picture and then those
     // that run along it.
     let mut luma = [[None; 4]; 2];
@@ -10929,21 +10932,25 @@ fn deblock_whole<S: Sample>(
             // A slice may ask for its boundaries with other slices to stay.
             let open = current.deblock != 2 || neighbor.is_some_and(|mb| mb.slice == current.slice);
             if open {
-                let qp = neighbor.map_or(inside, |mb| {
-                    [
-                        (inside[0] + i32::from(mb.qp) + 1) >> 1,
-                        (inside[1] + i32::from(mb.qp_c) + 1) >> 1,
-                        (inside[2] + i32::from(mb.qp_cr) + 1) >> 1,
-                    ]
-                });
                 let bs = if current.intra || neighbor.is_some_and(|mb| mb.intra) {
                     [4; 4]
                 } else {
                     let across = if vertical { beside } else { over };
                     boundary_strength(current, neighbor, own, across, vertical)
                 };
-                let slot = (&mut luma[way][0], &mut cb[way][0], &mut cr[way][0]);
-                set_edge(slot, bs, qp, off, (true, true));
+                if bs != [0; 4] {
+                    let qp = neighbor
+                        .map_or(inside, |mb| {
+                            [
+                                (inside[0] + i32::from(mb.qp) + 1) >> 1,
+                                (inside[1] + i32::from(mb.qp_c) + 1) >> 1,
+                                (inside[2] + i32::from(mb.qp_cr) + 1) >> 1,
+                            ]
+                        })
+                        .map(|qp| recon::EdgeQp::new(qp, off));
+                    let slot = (&mut luma[way][0], &mut cb[way][0], &mut cr[way][0]);
+                    set_edge(slot, bs, &qp, (true, true));
+                }
             }
         }
         if flat {
@@ -10962,8 +10969,12 @@ fn deblock_whole<S: Sample>(
             } else {
                 inner_strength(current, own, edge, vertical)
             };
+            if bs == [0; 4] {
+                continue;
+            }
+            let qp = thresholds.get_or_insert_with(|| inside.map(|qp| recon::EdgeQp::new(qp, off)));
             let slot = (&mut luma[way][edge], &mut cb[way][edge], &mut cr[way][edge]);
-            set_edge(slot, bs, inside, off, (luma_edge, chroma_edge));
+            set_edge(slot, bs, qp, (luma_edge, chroma_edge));
         }
     }
     let stride = pic.w;
@@ -10993,8 +11004,9 @@ fn deblock_whole<S: Sample>(
 }
 
 /// The filters of one edge from its strengths, in luma (when it has a luma
-/// edge there), Cb and Cr (on edges 0 and 2). A strength of 0 throughout,
-/// or thresholds of 0, change no sample, and leave the edge out.
+/// edge there), Cb and Cr (on edges 0 and 2), at each plane's thresholds.
+/// A strength of 0 throughout leaves the edge out, as does a plane whose
+/// thresholds change no sample.
 #[inline]
 fn set_edge(
     slot: (
@@ -11003,8 +11015,7 @@ fn set_edge(
         &mut Option<recon::EdgeFilter>,
     ),
     bs: [u8; 4],
-    qp: [i32; 3],
-    off: (i32, i32),
+    qp: &[Option<recon::EdgeQp>; 3],
     (luma, chroma): (bool, bool),
 ) {
     if bs == [0; 4] {
@@ -11014,11 +11025,11 @@ fn set_edge(
     let strong = bs[0] == 4;
     let (for_luma, for_cb, for_cr) = slot;
     if luma {
-        *for_luma = recon::edge_filter(bs, strong, qp[0], off);
+        *for_luma = qp[0].map(|qp| qp.filter(bs, strong));
     }
     if chroma {
-        *for_cb = recon::edge_filter(bs, strong, qp[1], off);
-        *for_cr = recon::edge_filter(bs, strong, qp[2], off);
+        *for_cb = qp[1].map(|qp| qp.filter(bs, strong));
+        *for_cr = qp[2].map(|qp| qp.filter(bs, strong));
     }
 }
 
@@ -11494,6 +11505,10 @@ fn motion_strength_by(
     q: [(i8, [i16; 2]); 2],
     apart: impl Fn([i16; 2], [i16; 2]) -> bool,
 ) -> u8 {
+    // The same pictures with the same vectors, as inside most partitions.
+    if p == q {
+        return 0;
+    }
     let p_used = u8::from(p[0].0 >= 0) + u8::from(p[1].0 >= 0);
     let q_used = u8::from(q[0].0 >= 0) + u8::from(q[1].0 >= 0);
     if p_used != q_used {

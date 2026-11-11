@@ -1,6 +1,8 @@
 //! The CDEF kernels on NEON.
 
-use core::arch::aarch64::{int8x16_t, uint8x16x4_t, vaddq_s8, vaddq_u8, vqtbl4q_u8};
+use core::arch::aarch64::{
+    int8x16_t, uint8x8_t, uint8x16x4_t, vaddq_s8, vaddq_u8, vdup_n_u8, vqtbl4q_u8,
+};
 use core::arch::aarch64::{
     int16x8_t, vaddq_s16, vaddq_s32, vaddvq_s16, vaddvq_s32, vdupq_n_s16, vextq_s16, vget_low_s16,
     vmovl_u8, vmull_high_s16, vmull_s16, vmulq_s32, vnegq_s16, vpaddq_s16, vreinterpretq_s16_u16,
@@ -273,6 +275,47 @@ fn inside(win: &[u16; WINDOW], at: usize) -> uint16x8_t {
     }
 }
 
+/// A padded source the byte filter reads: of 16-bit samples, or of bytes.
+#[derive(Clone, Copy)]
+pub(super) enum WinRef<'a> {
+    Wide(&'a [u16; WINDOW]),
+    Bytes(&'a [u8; WINDOW]),
+}
+
+/// The windows [`filter_inner`] takes. Each type always gives the same
+/// [`WinRef`] variant, so the loads below are chosen at compile time.
+pub(super) trait Window {
+    fn win(&self) -> WinRef<'_>;
+}
+
+impl Window for [u16; WINDOW] {
+    #[inline(always)]
+    fn win(&self) -> WinRef<'_> {
+        WinRef::Wide(self)
+    }
+}
+
+impl Window for [u8; WINDOW] {
+    #[inline(always)]
+    fn win(&self) -> WinRef<'_> {
+        WinRef::Bytes(self)
+    }
+}
+
+/// Eight samples of `win` from `at` as bytes (zeros past its end).
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+fn row8<W: Window>(win: &W, at: usize) -> uint8x8_t {
+    match win.win() {
+        WinRef::Wide(w) => vmovn_u16(inside(w, at)),
+        WinRef::Bytes(w) => match w.get(at..at + 8).and_then(|s| <&[u8; 8]>::try_from(s).ok()) {
+            Some(a) => u8x8(a),
+            None => vdup_n_u8(0),
+        },
+    }
+}
+
 /// Where the samples of a group of sixteen are found for a tap.
 #[derive(Clone, Copy)]
 enum Source {
@@ -299,14 +342,14 @@ impl Source {
     #[inline]
     #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
     #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-    fn new<const WIDE: bool>(win: &[u16; WINDOW], base: usize) -> Self {
+    fn new<const WIDE: bool, W: Window>(win: &W, base: usize) -> Self {
         if WIDE {
             return Self::Rows(base);
         }
         let pair = |r: usize| {
             vcombine_u8(
-                vmovn_u16(inside(win, base + r * STRIDE)),
-                vmovn_u16(inside(win, base + (r + 1) * STRIDE)),
+                row8(win, base + r * STRIDE),
+                row8(win, base + (r + 1) * STRIDE),
             )
         };
         Self::Table(
@@ -321,12 +364,9 @@ impl Source {
     #[inline]
     #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
     #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-    fn at(&self, win: &[u16; WINDOW], at: usize) -> uint8x16_t {
+    fn at<W: Window>(&self, win: &W, at: usize) -> uint8x16_t {
         match *self {
-            Self::Rows(base) => vcombine_u8(
-                vmovn_u16(inside(win, base + at)),
-                vmovn_u16(inside(win, base + at + STRIDE)),
-            ),
+            Self::Rows(base) => vcombine_u8(row8(win, base + at), row8(win, base + at + STRIDE)),
             Self::Table(table, places) => {
                 // Rows and columns of the tap from the window's first
                 // sample: 2 and 2 is the sample itself. A place outside
@@ -377,8 +417,8 @@ impl TapKind {
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-fn tap_inner<const RANGE: bool>(
-    win: &[u16; WINDOW],
+fn tap_inner<const RANGE: bool, W: Window>(
+    win: &W,
     src: &Source,
     at: usize,
     k: TapKind,
@@ -410,10 +450,10 @@ fn tap_inner<const RANGE: bool>(
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-fn inner_with<const WIDE: bool, const PRI: bool, const SEC: bool, const BOTH: bool>(
+fn inner_with<const WIDE: bool, const PRI: bool, const SEC: bool, const BOTH: bool, W: Window>(
     dst: &mut [u8],
     dst_stride: usize,
-    win: &[u16; WINDOW],
+    win: &W,
     f: &Filter,
     rows: usize,
 ) {
@@ -427,7 +467,7 @@ fn inner_with<const WIDE: bool, const PRI: bool, const SEC: bool, const BOTH: bo
         TapKind::new(f.sec, f.sec_shift, 1),
     ];
     for g in 0..rows.div_ceil(per) {
-        let src = Source::new::<WIDE>(win, g * per * STRIDE);
+        let src = Source::new::<WIDE, W>(win, g * per * STRIDE);
         let x = src.at(win, CENTRE);
         let zero = vdupq_n_s16(0);
         let mut grp = Group {
@@ -438,11 +478,11 @@ fn inner_with<const WIDE: bool, const PRI: bool, const SEC: bool, const BOTH: bo
         };
         for (k, &first) in pri.iter().enumerate() {
             if PRI {
-                tap_inner::<BOTH>(win, &src, f.pri_at[k], first, &mut grp);
+                tap_inner::<BOTH, W>(win, &src, f.pri_at[k], first, &mut grp);
             }
             if SEC {
-                tap_inner::<BOTH>(win, &src, f.sec_at[k], sec[0], &mut grp);
-                tap_inner::<BOTH>(win, &src, f.sec_at[2 + k], sec[1], &mut grp);
+                tap_inner::<BOTH, W>(win, &src, f.sec_at[k], sec[0], &mut grp);
+                tap_inner::<BOTH, W>(win, &src, f.sec_at[2 + k], sec[1], &mut grp);
             }
         }
         // (8 + sum - (sum < 0)) >> 4, which fits a signed byte.
@@ -483,28 +523,32 @@ fn inner_with<const WIDE: bool, const PRI: bool, const SEC: bool, const BOTH: bo
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-pub(super) fn filter_inner(
+pub(super) fn filter_inner<W: Window>(
     dst: &mut [u8],
     dst_stride: usize,
-    win: &[u16; WINDOW],
+    win: &W,
     f: &Filter,
     wide: bool,
     rows: usize,
 ) {
     match (wide, f.pri != 0, f.sec != 0) {
-        (true, true, true) => inner_with::<true, true, true, true>(dst, dst_stride, win, f, rows),
-        (true, true, false) => {
-            inner_with::<true, true, false, false>(dst, dst_stride, win, f, rows);
+        (true, true, true) => {
+            inner_with::<true, true, true, true, W>(dst, dst_stride, win, f, rows)
         }
-        (true, false, _) => inner_with::<true, false, true, false>(dst, dst_stride, win, f, rows),
+        (true, true, false) => {
+            inner_with::<true, true, false, false, W>(dst, dst_stride, win, f, rows);
+        }
+        (true, false, _) => {
+            inner_with::<true, false, true, false, W>(dst, dst_stride, win, f, rows)
+        }
         (false, true, true) => {
-            inner_with::<false, true, true, true>(dst, dst_stride, win, f, rows);
+            inner_with::<false, true, true, true, W>(dst, dst_stride, win, f, rows);
         }
         (false, true, false) => {
-            inner_with::<false, true, false, false>(dst, dst_stride, win, f, rows);
+            inner_with::<false, true, false, false, W>(dst, dst_stride, win, f, rows);
         }
         (false, false, _) => {
-            inner_with::<false, false, true, false>(dst, dst_stride, win, f, rows);
+            inner_with::<false, false, true, false, W>(dst, dst_stride, win, f, rows);
         }
     }
 }

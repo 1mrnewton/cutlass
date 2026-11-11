@@ -114,6 +114,56 @@ pub fn filter_u16(win: &[u16; WINDOW], f: &Filter, rows: usize) -> [[u16; 8]; 8]
     scalar::filter(win, f, rows)
 }
 
+/// [`filter_inner_u8`] on a padded source of bytes: the same layout, for
+/// a block whose taps all lie in the picture (so the window has no
+/// [`UNAVAILABLE`] sample to hold). Each tap then loads its samples as
+/// they are, without narrowing them from 16 bits.
+#[inline]
+pub fn filter_inner_bytes(
+    dst: &mut [u8],
+    dst_stride: usize,
+    win: &[u8; WINDOW],
+    f: &Filter,
+    wide: bool,
+    rows: usize,
+) -> bool {
+    let rows = rows.min(8);
+    let w = if wide { 8 } else { 4 };
+    if rows == 0 || (rows - 1) * dst_stride + w > dst.len() {
+        return false;
+    }
+    let f = &Filter {
+        pri_shift: f.pri_shift.min(15),
+        sec_shift: f.sec_shift.min(15),
+        pri_at: f.pri_at.map(|at| at.min(2 * CENTRE)),
+        sec_at: f.sec_at.map(|at| at.min(2 * CENTRE)),
+        ..*f
+    };
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        // SAFETY: the `cfg` above proves NEON is enabled for this build,
+        // and the kernel names AES only where the build has it too.
+        #[allow(unsafe_code)]
+        unsafe {
+            neon::filter_inner(dst, dst_stride, win, f, wide, rows);
+        }
+    }
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+    {
+        let wide_win: [u16; WINDOW] = win.map(u16::from);
+        for (r, row) in scalar::filter(&wide_win, f, rows)
+            .iter()
+            .enumerate()
+            .take(rows)
+        {
+            for (d, &v) in dst[r * dst_stride..r * dst_stride + w].iter_mut().zip(row) {
+                *d = v as u8;
+            }
+        }
+    }
+    true
+}
+
 /// Filters a block of 8-bit samples with every sample its taps read
 /// inside the picture into `dst`, rows `dst_stride` apart: `win` (see
 /// [`filter_u8`]) holds no [`UNAVAILABLE`] sample among them. The block

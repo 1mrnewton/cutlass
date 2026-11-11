@@ -1,6 +1,6 @@
 use super::{
-    CENTRE, Filter, STRIDE, UNAVAILABLE, WINDOW, direction_u8, direction_u16, filter_inner_u8,
-    filter_u8, filter_u16, scalar,
+    CENTRE, Filter, STRIDE, UNAVAILABLE, WINDOW, direction_u8, direction_u16, filter_inner_bytes,
+    filter_inner_u8, filter_u8, filter_u16, scalar,
 };
 
 /// A small fixed-seed generator: the same blocks on every run.
@@ -331,4 +331,40 @@ fn the_byte_filter_declines_a_destination_too_short() {
     assert!(!filter_inner_u8(&mut dst, 11, &win, &f, false, 0));
     assert!(dst.iter().all(|&v| v == 5));
     assert!(filter_inner_u8(&mut dst, 11, &win, &f, false, 4));
+}
+
+#[test]
+fn the_filter_on_a_window_of_bytes_matches_the_one_on_16_bits() {
+    let mut rng = Rng(0x0B17_E5B7);
+    for round in 0..8000u32 {
+        let win = window(&mut rng, 8, 0);
+        let bytes: [u8; WINDOW] = win.map(|v| v as u8);
+        let (pri, sec) = match round % 5 {
+            0 => (1 + rng.next() % 15, 0),
+            1 => (0, [1, 2, 4][(rng.next() % 3) as usize]),
+            _ => (rng.next() % 16, [0, 1, 2, 4][(rng.next() % 4) as usize]),
+        };
+        if pri == 0 && sec == 0 {
+            continue;
+        }
+        let damping = 3 + rng.next() % 4;
+        let f = filter_for(
+            pri as u16,
+            sec as u16,
+            (rng.next() % 8) as usize,
+            damping,
+            8,
+        );
+        for wide in [true, false] {
+            for rows in [8, 4] {
+                let (want, _) = inner(&win, &f, wide, rows);
+                let mut got = vec![0xEE; 8 * 11];
+                assert!(filter_inner_bytes(&mut got, 11, &bytes, &f, wide, rows));
+                assert_eq!(got, want, "wide {wide} rows {rows} {f:?}");
+            }
+        }
+    }
+    let f = filter_for(4, 1, 0, 3, 8);
+    let mut dst = vec![0; 10];
+    assert!(!filter_inner_bytes(&mut dst, 11, &[0; WINDOW], &f, true, 4));
 }

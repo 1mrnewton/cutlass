@@ -419,6 +419,62 @@ mod tests {
     }
 
     #[test]
+    fn weights_held_to_16_bits_match_the_plain_ones() {
+        // The weights a stream uses: implicit ones, whose sum is 64 at a
+        // shift of 6, and explicit ones with small shifts and offsets,
+        // which the vector kernels mix in 16 bits.
+        let mut rng = Lcg(29);
+        for round in 0..40_000u32 {
+            let w = 4 * (1 + (round % 4) as usize);
+            let h = 1 + (rng.next() % 16) as usize;
+            let weight = if round % 2 == 0 {
+                let w1 = (rng.next() % 193) as i32 - 64;
+                super::BiWeight {
+                    w0: 64 - w1,
+                    w1,
+                    shift: 6,
+                    offset: 0,
+                }
+            } else {
+                let shift = 1 + (rng.next() % 8) as i32;
+                let limit: i32 = 1 << (shift - 1).min(7);
+                super::BiWeight {
+                    w0: (rng.next() % (2 * limit + 1) as u32) as i32 - limit,
+                    w1: (rng.next() % (2 * limit + 1) as u32) as i32 - limit,
+                    shift,
+                    offset: (rng.next() % 61) as i32 - 30,
+                }
+            };
+            let stride = 20;
+            let a: Vec<u8> = (0..w * h).map(|_| rng.sample()).collect();
+            let b: Vec<u8> = (0..w * h).map(|_| rng.sample()).collect();
+            let start: Vec<u8> = (0..stride * 16).map(|_| rng.sample()).collect();
+            let (mut fast, mut plain) = (start.clone(), start.clone());
+            assert!(super::weight_block(
+                &mut fast,
+                stride,
+                &a,
+                &b,
+                (w, h),
+                weight
+            ));
+            assert!(scalar::weight_block(
+                &mut plain,
+                stride,
+                &a,
+                &b,
+                (w, h),
+                weight
+            ));
+            assert_eq!(fast, plain, "block {w}x{h} {weight:?}");
+            let (mut fast, mut plain) = (start.clone(), start);
+            assert!(super::weight_onto(&mut fast, stride, &b, (w, h), weight));
+            assert!(scalar::weight_onto(&mut plain, stride, &b, (w, h), weight));
+            assert_eq!(fast, plain, "onto {w}x{h} {weight:?}");
+        }
+    }
+
+    #[test]
     fn a_block_is_the_row_kernels_applied_to_its_rows() {
         // Ties the block functions to the single-row ones the other tests
         // check against the clause's formulas.

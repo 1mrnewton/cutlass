@@ -19,14 +19,15 @@
 #![allow(unsafe_code)]
 
 use core::arch::aarch64::{
-    int16x4_t, int16x8_t, int32x4_t, uint8x8_t, uint8x16_t, vaddl_high_s16, vaddl_high_u8,
-    vaddl_s16, vaddl_u8, vaddq_s32, vcombine_s16, vcombine_u8, vcombine_u16, vdup_n_s16, vdup_n_u8,
-    vdup_n_u32, vdupq_n_s16, vdupq_n_s32, vextq_u8, vget_high_u8, vget_lane_u32, vget_low_s16,
-    vget_low_u8, vld1_u8, vld1q_u8, vmlal_high_s16, vmlal_s16, vmlal_u8, vmlaq_n_s32, vmlaq_n_u16,
+    int16x4_t, int16x8_t, int32x4_t, uint8x8_t, uint8x16_t, uint16x8_t, vaddl_high_s16,
+    vaddl_high_u8, vaddl_s16, vaddl_u8, vaddq_s32, vcombine_s16, vcombine_u8, vcombine_u16,
+    vdup_n_s16, vdup_n_u8, vdup_n_u32, vdupq_n_s16, vdupq_n_s32, vdupq_n_u8, vdupq_n_u16, vextq_u8,
+    vget_high_u8, vget_lane_u32, vget_low_s16, vget_low_u8, vld1_u8, vld1q_u8, vmlal_high_s16,
+    vmlal_high_u8, vmlal_s16, vmlal_u8, vmlaq_n_s32, vmlaq_n_u16, vmlsl_high_u8, vmlsl_u8,
     vmlsq_n_s32, vmlsq_n_u16, vmovl_u8, vmull_high_s16, vmull_s16, vmull_u8, vmulq_s16, vqaddq_s16,
     vqmovn_u16, vqmovun_s16, vqmovun_s32, vqrshrun_high_n_s16, vqrshrun_n_s16, vqrshrun_n_s32,
     vreinterpret_u8_u32, vreinterpret_u32_u8, vreinterpretq_s16_u16, vrhadd_u8, vrhaddq_u8,
-    vrshlq_s16, vrshlq_s32, vrshrn_n_u16, vst1_u8, vst1q_u8,
+    vrshlq_s16, vrshlq_s32, vrshrn_n_u16, vshlq_s16, vst1_u8, vst1q_u8,
 };
 
 use crate::mc_block::{Block, Source, quarter_sources};
@@ -750,6 +751,18 @@ pub(crate) fn weight_block(
     if !weight.fits() || !mix_fits(dst, dst_stride, a, b, size) {
         return false;
     }
+    if let Some(k) = Bi16::new(weight) {
+        let (a, b, out) = (a.as_ptr(), b.as_ptr(), dst.as_mut_ptr());
+        let w = size.0;
+        // SAFETY: `mix_fits` checked `h` rows of `w` in `dst` and `w·h`
+        // samples in `a` and `b`.
+        unsafe {
+            bi16_block(k, size, |row| {
+                (a.add(row * w), b.add(row * w), out.add(row * dst_stride))
+            });
+        }
+        return true;
+    }
     let (w, h) = size;
     let (Ok(w0), Ok(w1)) = (i16::try_from(weight.w0), i16::try_from(weight.w1)) else {
         return false;
@@ -779,6 +792,146 @@ pub(crate) fn weight_block(
     true
 }
 
+/// The constants of FFmpeg's 16-bit two-prediction weighting, its
+/// `biweight`: the rounding and the offset folded into one start value,
+/// each weight's size, and whether it is negative, which picks a
+/// multiply-add or a multiply-subtract. `None` when some sum of two
+/// samples times the weights, with the start value, would leave 16 bits.
+#[derive(Clone, Copy)]
+struct Bi16 {
+    start: i16,
+    sizes: (u8, u8),
+    negative: (bool, bool),
+    shift: i16,
+}
+
+impl Bi16 {
+    fn new(weight: crate::mc_block::BiWeight) -> Option<Self> {
+        let (w0, w1) = (i64::from(weight.w0), i64::from(weight.w1));
+        let shift = i64::from(weight.shift);
+        let start = (1i64 << (shift - 1)) + (i64::from(weight.offset) << shift);
+        let most = start + 255 * (w0.max(0) + w1.max(0));
+        let least = start + 255 * (w0.min(0) + w1.min(0));
+        if most > i64::from(i16::MAX) || least < i64::from(i16::MIN) {
+            return None;
+        }
+        Some(Self {
+            start: i16::try_from(start).ok()?,
+            sizes: (
+                u8::try_from(w0.unsigned_abs()).ok()?,
+                u8::try_from(w1.unsigned_abs()).ok()?,
+            ),
+            negative: (w0 < 0, w1 < 0),
+            shift: i16::try_from(-shift).ok()?,
+        })
+    }
+}
+
+/// `start ± a·w0 ± b·w1` on eight lanes, in wrapping 16 bits that the
+/// checks in [`Bi16::new`] keep exact, shifted and clipped.
+#[inline]
+#[target_feature(enable = "neon")]
+fn bi16_8<const N0: bool, const N1: bool>(
+    a: uint8x8_t,
+    b: uint8x8_t,
+    (start, w0, w1, shift): (uint16x8_t, uint8x8_t, uint8x8_t, int16x8_t),
+) -> uint8x8_t {
+    let sum = if N0 {
+        vmlsl_u8(start, a, w0)
+    } else {
+        vmlal_u8(start, a, w0)
+    };
+    let sum = if N1 {
+        vmlsl_u8(sum, b, w1)
+    } else {
+        vmlal_u8(sum, b, w1)
+    };
+    vqmovun_s16(vshlq_s16(vreinterpretq_s16_u16(sum), shift))
+}
+
+/// [`bi16_8`] on sixteen lanes.
+#[inline]
+#[target_feature(enable = "neon")]
+fn bi16_16<const N0: bool, const N1: bool>(
+    a: uint8x16_t,
+    b: uint8x16_t,
+    (start, w0, w1, shift): (uint16x8_t, uint8x16_t, uint8x16_t, int16x8_t),
+) -> uint8x16_t {
+    let low = bi16_8::<N0, N1>(
+        vget_low_u8(a),
+        vget_low_u8(b),
+        (start, vget_low_u8(w0), vget_low_u8(w1), shift),
+    );
+    let high = if N0 {
+        vmlsl_high_u8(start, a, w0)
+    } else {
+        vmlal_high_u8(start, a, w0)
+    };
+    let high = if N1 {
+        vmlsl_high_u8(high, b, w1)
+    } else {
+        vmlal_high_u8(high, b, w1)
+    };
+    vcombine_u8(
+        low,
+        vqmovun_s16(vshlq_s16(vreinterpretq_s16_u16(high), shift)),
+    )
+}
+
+/// Rows `0..h` of `w` samples mixed by `k`, row `r`'s two predictions and
+/// output at `at(r)`.
+///
+/// # Safety
+///
+/// `w` bytes from each of `at(r)`'s pointers must be in their slices, for
+/// every row.
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn bi16_rows<const N0: bool, const N1: bool>(
+    k: Bi16,
+    (w, h): (usize, usize),
+    at: impl Fn(usize) -> (*const u8, *const u8, *mut u8),
+) {
+    let start = vdupq_n_u16(k.start as u16);
+    let shift = vdupq_n_s16(k.shift);
+    let (w0, w1) = (vdupq_n_u8(k.sizes.0), vdupq_n_u8(k.sizes.1));
+    let wide = (start, w0, w1, shift);
+    let narrow = (start, vget_low_u8(w0), vget_low_u8(w1), shift);
+    for row in 0..h {
+        // SAFETY: the caller's promise.
+        unsafe {
+            mix_row(
+                at(row),
+                w,
+                |x, y| bi16_16::<N0, N1>(x, y, wide),
+                |x, y| bi16_8::<N0, N1>(x, y, narrow),
+            );
+        }
+    }
+}
+
+/// [`bi16_rows`] with the weights' signs picked at run time.
+///
+/// # Safety
+///
+/// As for [`bi16_rows`].
+#[target_feature(enable = "neon")]
+unsafe fn bi16_block(
+    k: Bi16,
+    size: (usize, usize),
+    at: impl Fn(usize) -> (*const u8, *const u8, *mut u8),
+) {
+    // SAFETY: the caller's promise.
+    unsafe {
+        match k.negative {
+            (false, false) => bi16_rows::<false, false>(k, size, at),
+            (true, false) => bi16_rows::<true, false>(k, size, at),
+            (false, true) => bi16_rows::<false, true>(k, size, at),
+            (true, true) => bi16_rows::<true, true>(k, size, at),
+        }
+    }
+}
+
 /// See [`crate::mc::weight_onto`]: [`weight_block`] with the first
 /// prediction read from `dst`.
 #[target_feature(enable = "neon")]
@@ -791,6 +944,19 @@ pub(crate) fn weight_onto(
 ) -> bool {
     if !crate::mc_block::onto_fits(dst, dst_stride, b, size, weight) {
         return false;
+    }
+    if let Some(k) = Bi16::new(weight) {
+        let (b, out) = (b.as_ptr(), dst.as_mut_ptr());
+        let w = size.0;
+        // SAFETY: `onto_fits` checked `h` rows of `w` in `dst` and `w·h`
+        // samples in `b`.
+        unsafe {
+            bi16_block(k, size, |row| {
+                let at = out.add(row * dst_stride);
+                (at.cast_const(), b.add(row * w), at)
+            });
+        }
+        return true;
     }
     let (Ok(w0), Ok(w1)) = (i16::try_from(weight.w0), i16::try_from(weight.w1)) else {
         return false;

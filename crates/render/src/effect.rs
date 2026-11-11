@@ -481,19 +481,57 @@ fn focus(uv: vec2<f32>) -> vec4<f32> {
 }
 
 fn place(uv: vec2<f32>) -> vec4<f32> {
+    let short = min(fx.size.x, fx.size.y);
+    // Behind the card: clear, or a soft, dim copy of the picture.
+    var behind = vec4<f32>(0.0);
+    if (fx.c.y > 0.0) {
+        let reach = fx.c.y * short / fx.size;
+        var sum = vec4<f32>(0.0);
+        for (var k = 0; k < 48; k = k + 1) {
+            let r = sqrt((f32(k) + 0.5) / 48.0);
+            let turn = f32(k) * 2.3999632;
+            sum = sum + fetch(uv + vec2<f32>(cos(turn), sin(turn)) * r * reach);
+        }
+        behind = sum / 48.0;
+        behind = vec4<f32>(behind.rgb * (1.0 - fx.c.z), behind.a);
+    }
     // Pixels from the placed middle, turned back and scaled back.
     let d = (uv - vec2<f32>(0.5) - fx.a.yz) * fx.size;
     let turn = radians(-fx.a.w);
     let r = vec2<f32>(d.x * cos(turn) - d.y * sin(turn), d.x * sin(turn) + d.y * cos(turn));
     let scale = fx.a.x * fx.b.xy;
     if (scale.x <= 0.0001 || scale.y <= 0.0001) {
-        return vec4<f32>(0.0);
+        return behind;
     }
     let back = r / scale / fx.size + vec2<f32>(0.5);
-    if (any(back < vec2<f32>(0.0)) || any(back > vec2<f32>(1.0))) {
-        return vec4<f32>(0.0);
+    let edge = fx.b.w * short * fx.a.x;
+    let foot = fx.c.x * short * fx.a.x;
+    if (edge <= 0.0 && foot <= 0.0 && fx.c.w <= 0.0) {
+        if (any(back < vec2<f32>(0.0)) || any(back > vec2<f32>(1.0))) {
+            return behind;
+        }
+        let card = fetch(back) * fx.b.z;
+        return card + behind * (1.0 - card.a);
     }
-    return fetch(back) * fx.b.z;
+    // A print: the picture on white paper, the bottom edge `foot` deeper.
+    let half = scale * fx.size * 0.5;
+    let paper_middle = vec2<f32>(0.0, foot * 0.5);
+    let paper_half = half + vec2<f32>(edge, edge + foot * 0.5);
+    if (fx.c.w > 0.0) {
+        // A soft shadow below and to the right, as light from above left
+        // casts it.
+        let soft = max(fx.c.w * short * fx.a.x, 1.0);
+        let fall = vec2<f32>(0.3, 0.6) * soft;
+        let distance = rounded_box(r - paper_middle - fall, paper_half, 0.0);
+        let shade = (1.0 - smoothstep(-soft, soft, distance)) * 0.45 * fx.b.z;
+        behind = vec4<f32>(behind.rgb * (1.0 - shade), shade + behind.a * (1.0 - shade));
+    }
+    let paper = 1.0 - smoothstep(-0.5, 0.5, rounded_box(r - paper_middle, paper_half, 0.0));
+    let photo = 1.0 - smoothstep(-0.5, 0.5, rounded_box(r, half, 0.0));
+    let picture = fetch(clamp(back, vec2<f32>(0.0), vec2<f32>(1.0)));
+    let white = vec4<f32>(0.97, 0.97, 0.96, 1.0);
+    let card = mix(white, picture, photo) * paper * fx.b.z;
+    return card + behind * (1.0 - card.a);
 }
 
 fn stretch(uv: vec2<f32>) -> vec4<f32> {
@@ -1547,6 +1585,78 @@ mod tests {
             "pale, not the print's red: {:?}",
             &early[i..i + 3]
         );
+    }
+
+    #[test]
+    fn place_can_lay_the_picture_on_a_white_print_with_a_shadow_over_a_dim_copy() {
+        let Some(renderer) = renderer() else { return };
+        let size = (64u32, 48u32);
+        // Left half red, right half blue.
+        let scene: Vec<u8> = (0..size.0 * size.1)
+            .flat_map(|index| {
+                if index % size.0 < size.0 / 2 {
+                    [255, 0, 0, 255]
+                } else {
+                    [0, 0, 255, 255]
+                }
+            })
+            .collect();
+        let pixel = |frame: &[u8], x: u32, y: u32| {
+            let i = 4 * (y * size.0 + x) as usize;
+            [frame[i], frame[i + 1], frame[i + 2], frame[i + 3]]
+        };
+        // Half size, an edge of 0.05 of 48 at half scale: 1.2 pixels; a
+        // foot of 0.2: 4.8 more below.
+        let print = |back: f32, shadow: f32| {
+            draw(
+                &renderer,
+                &scene,
+                size,
+                &[step(
+                    Block::Place,
+                    &[
+                        (0, 0.5),
+                        (7, 0.05),
+                        (8, 0.2),
+                        (9, back),
+                        (10, 0.5),
+                        (11, shadow),
+                    ],
+                )],
+            )
+        };
+        let plain = print(0.0, 0.0);
+        // The picture, shrunk to the middle: red then blue.
+        let red = pixel(&plain, 24, 24);
+        let blue = pixel(&plain, 40, 24);
+        assert!(red[0] > 200 && red[2] < 60, "{red:?}");
+        assert!(blue[2] > 200 && blue[0] < 60, "{blue:?}");
+        // White paper all round it, deeper below: the picture spans rows
+        // 12 to 36, the paper on to row 41.
+        for (x, y) in [(32, 11), (15, 24), (48, 24), (32, 38), (32, 40)] {
+            let paper = pixel(&plain, x, y);
+            assert!(paper.iter().all(|c| *c > 230), "({x}, {y}) {paper:?}");
+        }
+        // Past the paper, clear.
+        assert_eq!(pixel(&plain, 32, 44), [0; 4]);
+        assert_eq!(pixel(&plain, 2, 2), [0; 4]);
+        // A shadow falls below and to the right of the print, not above.
+        let shaded = print(0.0, 0.1);
+        let below = pixel(&shaded, 50, 43);
+        assert!(below[3] > 20 && below[0] < 5, "{below:?}");
+        assert!(pixel(&shaded, 10, 3)[3] < below[3]);
+        // `back` fills the rest with the picture, soft and dimmed by half.
+        let backed = print(0.02, 0.0);
+        let corner = pixel(&backed, 1, 24);
+        assert_eq!(corner[3], 255, "{corner:?}");
+        assert!(
+            (100..160).contains(&corner[0]) && corner[2] < 30,
+            "{corner:?}"
+        );
+        let far = pixel(&backed, 62, 24);
+        assert!((100..160).contains(&far[2]) && far[0] < 30, "{far:?}");
+        // The print over it is unchanged.
+        assert_eq!(pixel(&backed, 24, 24), pixel(&plain, 24, 24));
     }
 
     #[test]

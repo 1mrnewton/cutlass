@@ -119,7 +119,9 @@ pub enum Block {
     Focus,
     /// Scale, move, stretch, turn and fade the picture as a card: clear
     /// where it no longer reaches, so what is behind it shows. A
-    /// transition slides or flips one picture off the other with it.
+    /// transition slides or flips one picture off the other with it. The
+    /// card can be a white-edged photo print with a shadow, over a soft,
+    /// dim copy of the picture.
     Place,
 }
 
@@ -364,6 +366,13 @@ const FOCUS: &[Param] = &[
 ];
 /// `x` and `y` move the picture right and down, in frames; `stretch_x`
 /// and `stretch_y` scale it across and down on top of `scale`.
+///
+/// `border` puts the picture on a white photo print, its edge that wide,
+/// and `foot` makes the print's bottom edge that much deeper; both are
+/// fractions of the shorter side and shrink with `scale`. `shadow` is how
+/// soft the print's shadow is, none at 0. `back` fills the rest of the
+/// frame with a copy of the picture blurred that far, as a fraction of the
+/// shorter side, and darkened by `dim`; at 0 the rest is clear.
 const PLACE: &[Param] = &[
     param("scale", 1.0, 0.0, 4.0),
     param("x", 0.0, -2.0, 2.0),
@@ -372,6 +381,11 @@ const PLACE: &[Param] = &[
     param("stretch_x", 1.0, 0.0, 4.0),
     param("stretch_y", 1.0, 0.0, 4.0),
     param("opacity", 1.0, 0.0, 1.0),
+    param("border", 0.0, 0.0, 0.2),
+    param("foot", 0.0, 0.0, 0.3),
+    param("back", 0.0, 0.0, 0.1),
+    param("dim", 0.0, 0.0, 1.0),
+    param("shadow", 0.0, 0.0, 0.1),
 ];
 const HALFTONE: &[Param] = &[
     param("size", 0.0, 0.0, 0.1),

@@ -279,6 +279,88 @@ mod tests {
     }
 
     #[test]
+    fn photo_slide_swaps_the_pictures_as_white_prints_over_a_dim_copy() {
+        let Some(renderer) = Renderer::for_test().expect("a GPU is required") else {
+            eprintln!("skipped: no GPU");
+            return;
+        };
+        let kind = TransitionKind::every()
+            .into_iter()
+            .find(|kind| kind.key() == "photo-slide")
+            .expect("photo slide ships");
+        let (w, h) = (96u32, 64u32);
+        let red: Vec<u8> = [240, 20, 20, 255].repeat((w * h) as usize);
+        let blue: Vec<u8> = [20, 20, 240, 255].repeat((w * h) as usize);
+        let canvas = renderer.canvas(w, h).expect("canvas");
+        let draw = |t| {
+            let picture = |bytes| Rgba {
+                width: w,
+                height: h,
+                bytes,
+            };
+            renderer
+                .draw(
+                    &canvas,
+                    &[Layer::Transition {
+                        kind,
+                        t,
+                        outgoing: picture(&red),
+                        incoming: picture(&blue),
+                    }],
+                )
+                .expect("draw");
+            renderer.read(&canvas).expect("read")
+        };
+        let at = |frame: &[u8], x: u32, y: u32| {
+            let i = 4 * (y * w + x) as usize;
+            [frame[i], frame[i + 1], frame[i + 2]]
+        };
+        let white = |c: [u8; 3]| c.iter().all(|v| *v > 220);
+        // Early on, the outgoing picture has shrunk onto its print and is
+        // sliding right: the left edge shows the dim copy, the middle the
+        // picture, the paper between.
+        let early = draw(0.15);
+        let left = at(&early, 1, 32);
+        assert!((150..220).contains(&left[0]) && left[2] < 40, "{left:?}");
+        assert!(at(&early, 60, 32)[0] > 220);
+        assert!(
+            (0..w).any(|x| white(at(&early, x, 32))),
+            "no paper across the middle"
+        );
+        // Then the incoming print settles in the middle, over the dim copy
+        // of the outgoing picture, its paper round it.
+        let settled = draw(0.6);
+        assert!(at(&settled, 48, 30)[2] > 220);
+        let corner = at(&settled, 1, 1);
+        assert!(
+            (150..220).contains(&corner[0]) && corner[2] < 40,
+            "{corner:?}"
+        );
+        assert!((0..w / 2).any(|x| white(at(&settled, x, 32))));
+        // Its bottom paper is deeper than its top.
+        let paper_rows = |from: u32, step: i32| {
+            let mut y = from;
+            let mut rows = 0;
+            while white(at(&settled, 48, y)) {
+                rows += 1;
+                y = y.wrapping_add_signed(step);
+            }
+            rows
+        };
+        let top = (0..32)
+            .rev()
+            .find(|y| white(at(&settled, 48, *y)))
+            .expect("top paper");
+        let bottom = (32..h)
+            .find(|y| white(at(&settled, 48, *y)))
+            .expect("bottom paper");
+        assert!(
+            paper_rows(bottom, 1) > paper_rows(top, -1),
+            "the foot is deeper"
+        );
+    }
+
+    #[test]
     fn every_transition_on_the_gpu_matches_the_cpu() {
         let Some(renderer) = Renderer::for_test().expect("a GPU is required") else {
             eprintln!("skipped: no GPU");

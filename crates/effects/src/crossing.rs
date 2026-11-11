@@ -353,7 +353,7 @@ pub fn transition_preview_t(elapsed: Micros) -> f32 {
 }
 
 /// The transition recipes the app ships, in shelf order.
-const BUNDLED_FILES: [&str; 180] = [
+const BUNDLED_FILES: [&str; 181] = [
     include_str!("../transitions/flash.json"),
     include_str!("../transitions/quick-flash.json"),
     include_str!("../transitions/red-flash.json"),
@@ -392,6 +392,7 @@ const BUNDLED_FILES: [&str; 180] = [
     include_str!("../transitions/reveal-up.json"),
     include_str!("../transitions/reveal-down.json"),
     include_str!("../transitions/card-stack.json"),
+    include_str!("../transitions/photo-slide.json"),
     include_str!("../transitions/swipe-left.json"),
     include_str!("../transitions/swipe-right.json"),
     include_str!("../transitions/swipe-up.json"),
@@ -599,6 +600,29 @@ mod tests {
         assert!((at.outgoing[0].values[0] - 0.05).abs() < 1e-6);
         assert_eq!(late.at(f32::NAN).cross[0], 0.0);
         assert_eq!(CROSS.len(), 12);
+    }
+
+    #[test]
+    fn photo_slide_rests_each_picture_full_frame_at_its_end() {
+        let recipe = super::bundled_transitions()
+            .iter()
+            .find(|recipe| recipe.id == "photo-slide")
+            .expect("photo slide ships");
+        assert_eq!(recipe.category, "Slide");
+        // scale, x, y, rotate, then border and foot.
+        let start = recipe.at(0.0);
+        assert_eq!(start.kind(), CrossKind::Over);
+        assert_eq!(start.outgoing[0].block, Block::Place);
+        assert_eq!(&start.outgoing[0].values[..4], &[1.0, 0.0, 0.0, 0.0]);
+        assert!(start.outgoing[0].values[7] > 0.0 && start.outgoing[0].values[8] > 0.0);
+        // The incoming print waits past the left edge.
+        let incoming = &start.incoming[0].values;
+        assert!(incoming[1] + incoming[0] / 2.0 < -0.5, "{incoming:?}");
+        // The outgoing print has left past the right edge by the end.
+        let end = recipe.at(1.0);
+        let outgoing = &end.outgoing[0].values;
+        assert!(outgoing[1] - outgoing[0] / 2.0 > 0.5, "{outgoing:?}");
+        assert_eq!(&end.incoming[0].values[..4], &[1.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]

@@ -169,8 +169,37 @@ pub fn predict_clipped<P: Pixel>(
 
 fn fill<P: Pixel>(dst: &mut [P], stride: usize, w: usize, h: usize, v: P) {
     for i in 0..h {
-        row_mut(dst, stride, i, w).fill(v);
+        fill_row(row_mut(dst, stride, i, w), v);
     }
+}
+
+/// Sets every sample of `row` to `v`: a block's row is 4 to 64 samples,
+/// which take fixed-size stores in place of a call to `memset`.
+#[inline(always)]
+fn fill_row<P: Pixel>(row: &mut [P], v: P) {
+    macro_rules! put {
+        ($($n:literal)*) => {
+            match row.len() {
+                $($n => row.copy_from_slice(&[v; $n]),)*
+                _ => row.fill(v),
+            }
+        };
+    }
+    put!(4 8 16 32 64);
+}
+
+/// Copies `src` into `row`, as [`fill_row`] for a block's row.
+#[inline(always)]
+fn copy_row<P: Pixel>(row: &mut [P], src: &[P]) {
+    macro_rules! put {
+        ($($n:literal)*) => {
+            match row.len() {
+                $($n => row.copy_from_slice(&src[..$n]),)*
+                _ => row.copy_from_slice(src),
+            }
+        };
+    }
+    put!(4 8 16 32 64);
 }
 
 fn sum_px<P: Pixel>(s: &[P]) -> u32 {
@@ -489,11 +518,11 @@ fn pred_directional<P: Pixel>(
     if p_angle == 90 {
         let top = &above[EDGE_OFF..EDGE_OFF + w];
         for i in 0..h {
-            row_mut(dst, stride, i, w).copy_from_slice(top);
+            copy_row(row_mut(dst, stride, i, w), top);
         }
     } else if p_angle == 180 {
         for i in 0..h {
-            row_mut(dst, stride, i, w).fill(left[EDGE_OFF + i]);
+            fill_row(row_mut(dst, stride, i, w), left[EDGE_OFF + i]);
         }
     } else if p_angle < 90 {
         let dx = DR_INTRA_DERIVATIVE[p_angle as usize] as usize;

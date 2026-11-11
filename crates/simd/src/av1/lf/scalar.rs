@@ -1,7 +1,7 @@
 //! The deblocking sample filter as the specification writes it, one line
 //! at a time.
 
-use super::{Group, Limits, Size};
+use super::{Limits, Size};
 
 /// The wide filter (7.14.6.4) for taps `-n .. n` around the edge: `log2`
 /// is 3 or 4, and taps within `n2` of the centre count twice.
@@ -138,80 +138,6 @@ pub(super) fn by_line_16(lines: &mut [[u8; 16]; 16], lim: Limits) -> bool {
             any = true;
             for (k, &v) in px.iter().enumerate() {
                 l[1 + k] = v as u8;
-            }
-        }
-    }
-    any
-}
-
-/// [`super::by_sample_groups`], one line at a time.
-#[cfg_attr(
-    all(target_arch = "aarch64", target_feature = "neon", not(test)),
-    allow(dead_code)
-)]
-pub(super) fn by_sample_groups(taps: &mut [[u8; 16]; 14], groups: &[Group; 4]) -> bool {
-    let mut any = false;
-    for l in 0..16 {
-        let Some(size) = groups[l / 4].size else {
-            continue;
-        };
-        let mut px: [i32; 14] = core::array::from_fn(|k| i32::from(taps[k][l]));
-        if line(&mut px, size, groups[l / 4].lim) {
-            any = true;
-            for (row, &v) in taps.iter_mut().zip(&px) {
-                row[l] = v as u8;
-            }
-        }
-    }
-    any
-}
-
-/// [`super::by_line_groups`], one line at a time.
-#[cfg_attr(
-    all(target_arch = "aarch64", target_feature = "neon", not(test)),
-    allow(dead_code)
-)]
-pub(super) fn by_line_groups(lines: &mut [[u8; 8]; 16], groups: &[Group; 4]) -> bool {
-    let mut any = false;
-    for (l, line8) in lines.iter_mut().enumerate() {
-        let g = groups[l / 4];
-        let Some(size) = g.size.filter(|&s| s != Size::Sixteen) else {
-            continue;
-        };
-        let mut px = [0i32; 14];
-        for (k, &v) in line8.iter().enumerate() {
-            px[3 + k] = i32::from(v);
-        }
-        if line(&mut px, size, g.lim) {
-            any = true;
-            for (k, v) in line8.iter_mut().enumerate() {
-                *v = px[3 + k] as u8;
-            }
-        }
-    }
-    any
-}
-
-/// [`super::by_line_16_groups`], one line at a time.
-#[cfg_attr(
-    all(target_arch = "aarch64", target_feature = "neon", not(test)),
-    allow(dead_code)
-)]
-pub(super) fn by_line_16_groups(lines: &mut [[u8; 16]; 16], groups: &[Group; 4]) -> bool {
-    let mut any = false;
-    for (l, line16) in lines.iter_mut().enumerate() {
-        let g = groups[l / 4];
-        let Some(size) = g.size else {
-            continue;
-        };
-        let mut px = [0i32; 14];
-        for (k, v) in px.iter_mut().enumerate() {
-            *v = i32::from(line16[1 + k]);
-        }
-        if line(&mut px, size, g.lim) {
-            any = true;
-            for (k, &v) in px.iter().enumerate() {
-                line16[1 + k] = v as u8;
             }
         }
     }

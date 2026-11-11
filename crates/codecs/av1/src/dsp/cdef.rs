@@ -423,6 +423,26 @@ pub fn cdef_filter_taps(
     kernel::filter_inner_u8(dst, dst_stride, win, &taps.filter, w == 8, h)
 }
 
+/// [`cdef_filter_taps`] on a padded source of bytes (the block's taps all
+/// lie in the picture, so it holds no [`CDEF_UNAVAILABLE`]).
+#[inline(always)]
+pub fn cdef_filter_taps_bytes(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    w: usize,
+    h: usize,
+    taps: &CdefTaps,
+) -> bool {
+    if !cutlass_simd::ACCELERATED || !matches!((w, h), (8, 8) | (4, 4) | (4, 8)) {
+        return false;
+    }
+    let Some(win) = src.first_chunk::<{ kernel::WINDOW }>() else {
+        return false;
+    };
+    kernel::filter_inner_bytes(dst, dst_stride, win, &taps.filter, w == 8, h)
+}
+
 /// [`cdef_filter`] on the kernel of `cutlass-simd`, for the block sizes
 /// and the padded source it takes. Returns whether it filtered the block.
 fn filter_kernel<P: Pixel>(

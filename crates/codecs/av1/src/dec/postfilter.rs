@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::dsp::Pixel;
 use crate::dsp::cdef::{
     CDEF_BORDER, CDEF_PAD_STRIDE, CDEF_UNAVAILABLE, CdefTaps, adjust_luma_pri_strength,
-    cdef_damping, cdef_direction, cdef_filter, cdef_filter_inner, cdef_filter_taps, cdef_uv_dir,
+    cdef_damping, cdef_direction, cdef_filter, cdef_filter_inner, cdef_filter_taps,
+    cdef_filter_taps_bytes, cdef_uv_dir,
 };
 use crate::dsp::lf::{filter_horizontal_edge, filter_vertical_edge};
 use crate::dsp::lr::{LrPlane, LrScratch, LrUnit, lr_planes, lr_planes_stripes, lr_save_bounds};
@@ -797,6 +798,10 @@ fn plane_sub(seq: &SequenceHeader, p: usize) -> (u32, u32) {
 /// columns are the pre-CDEF left columns of the next area).
 struct CdefWork<P> {
     pads: [[Vec<u16>; 2]; 3],
+    /// The same for 8-bit pictures, as bytes: only blocks whose taps all
+    /// lie in the picture read them as they are; the others take a copy
+    /// marking the samples outside it (see [`cdef_plane_block`]).
+    pads8: [[Vec<u8>; 2]; 3],
     /// The taps of the 8-bit blocks filtered last, by [`taps_slot`]:
     /// blocks share a few strengths and eight directions.
     taps: Vec<Option<CdefTaps>>,
@@ -814,7 +819,22 @@ impl<P: Pixel> CdefWork<P> {
     fn new() -> Self {
         Self {
             pads: core::array::from_fn(|_| {
-                core::array::from_fn(|_| vec![0u16; CDEF_PAD_STRIDE * CDEF_PAD_STRIDE])
+                core::array::from_fn(|_| {
+                    if P::HBD {
+                        vec![0u16; CDEF_PAD_STRIDE * CDEF_PAD_STRIDE]
+                    } else {
+                        Vec::new()
+                    }
+                })
+            }),
+            pads8: core::array::from_fn(|_| {
+                core::array::from_fn(|_| {
+                    if P::HBD {
+                        Vec::new()
+                    } else {
+                        vec![0u8; CDEF_PAD_STRIDE * CDEF_PAD_STRIDE]
+                    }
+                })
             }),
             taps: vec![None; 256],
             _p: core::marker::PhantomData,
@@ -1153,6 +1173,7 @@ fn cdef_rows<P: Pixel>(
             for p in 0..3 {
                 if padded[p] {
                     sc.pads[p].swap(0, 1);
+                    sc.pads8[p].swap(0, 1);
                 }
                 left_saved[p] = padded[p];
             }
@@ -1192,6 +1213,21 @@ fn cdef_plane_block<P: Pixel>(
     let sb_x = (area.sbc * 4) >> sx;
     let sb_y = (area.sbr * 4) >> sy;
     let (aw, ah) = (64 >> sx, 64 >> sy);
+    if !P::HBD {
+        return cdef_plane_block_8(
+            dst,
+            out,
+            lines,
+            plane,
+            area,
+            (r, c),
+            (sx, sy),
+            sc,
+            padded,
+            fs,
+            (pri, sec, dir, damping),
+        );
+    }
     let CdefWork { pads, taps, .. } = sc;
     let [pad, prev] = &mut pads[plane];
     if !*padded {
@@ -1262,6 +1298,160 @@ fn cdef_plane_block<P: Pixel>(
     );
 }
 
+/// [`cdef_plane_block`] for 8-bit pictures: the area is padded as bytes.
+/// A block whose taps all lie in the picture is filtered from them; any
+/// other gets a 16-bit copy of its window with the samples outside the
+/// picture marked [`CDEF_UNAVAILABLE`].
+#[inline(always)]
+fn cdef_plane_block_8<P: Pixel>(
+    dst: &mut [&mut [P]],
+    out: &CdefOut,
+    lines: &CdefLines<P>,
+    plane: usize,
+    area: &CdefArea,
+    (r, c): (usize, usize),
+    (sx, sy): (u32, u32),
+    sc: &mut CdefWork<P>,
+    padded: &mut bool,
+    fs: &FrameState,
+    (pri, sec, dir, damping): (i32, i32, u8, i32),
+) {
+    let ps = CDEF_PAD_STRIDE;
+    let ds = out.stride[plane];
+    let row0 = out.row0[plane];
+    let sb_x = (area.sbc * 4) >> sx;
+    let sb_y = (area.sbr * 4) >> sy;
+    let (aw, ah) = (64 >> sx, 64 >> sy);
+    let avail_w = (fs.mi_cols * 4) >> sx;
+    let avail_h = (fs.mi_rows * 4) >> sy;
+    let CdefWork { pads8, taps, .. } = sc;
+    let [pad, prev] = &mut pads8[plane];
+    if !*padded {
+        let chunk = &dst[plane][..];
+        let k = area.sbr >> 4;
+        let lw = lines.w[plane];
+        let lr = &lines.rows[plane];
+        let left = (area.left_saved[plane] && sb_x > 0).then_some(&prev[..]);
+        pad_area(
+            pad,
+            chunk,
+            ds,
+            row0,
+            |i| &lr[(4 * k + i) * lw..(4 * k + i + 1) * lw],
+            |i| &lr[(4 * k + 6 + i) * lw..(4 * k + 7 + i) * lw],
+            left,
+            (sb_x, sb_y, aw, ah),
+            (avail_w, avail_h),
+        );
+        *padded = true;
+    }
+    let w = 8 >> sx;
+    let h = 8 >> sy;
+    let x0 = (c * 4) >> sx;
+    let y0 = (r * 4) >> sy;
+    let b = CDEF_BORDER;
+    let inner = x0 >= b && y0 >= b && x0 + w + b <= avail_w && y0 + h + b <= avail_h;
+    let at = (y0 - row0) * ds + x0;
+    let src = &pad[(y0 - sb_y) * ps + (x0 - sb_x)..];
+    if inner && let Some(bytes) = P::bytes_mut(&mut dst[plane][at..]) {
+        let slot = &mut taps[taps_slot(plane > 0, pri, dir)];
+        let ready = match slot {
+            Some(t) if t.is_for(pri, sec, dir, damping) => *t,
+            _ => *slot.insert(CdefTaps::new(pri, sec, dir, damping)),
+        };
+        if cdef_filter_taps_bytes(bytes, ds, src, w, h, &ready) {
+            return;
+        }
+    }
+    // The window of the block, rows y0 - 2 .. y0 + h + 2 and columns
+    // x0 - 2 .. x0 + w + 2, with what lies outside the picture marked.
+    let mut win = [CDEF_UNAVAILABLE; CDEF_PAD_STRIDE * 12];
+    for i in 0..h + 2 * b {
+        let y = (y0 + i).wrapping_sub(b);
+        if y >= avail_h {
+            continue;
+        }
+        for j in 0..w + 2 * b {
+            let x = (x0 + j).wrapping_sub(b);
+            if x < avail_w
+                && let Some(&v) = src.get(i * ps + j)
+            {
+                win[i * ps + j] = u16::from(v);
+            }
+        }
+    }
+    let filter = if inner {
+        cdef_filter_inner::<P>
+    } else {
+        cdef_filter::<P>
+    };
+    filter(
+        &mut dst[plane][at..],
+        ds,
+        &win,
+        ps,
+        w,
+        h,
+        pri,
+        sec,
+        dir,
+        damping,
+        area.bd,
+    );
+}
+
+/// A sample of a padded CDEF source: 16-bit, or a byte for 8-bit pictures
+/// (whose samples outside the picture are then not marked).
+trait PadSample: Copy {
+    /// Whether samples outside the picture are marked.
+    const MARKS: bool;
+    const UNAVAILABLE: Self;
+    fn of<P: Pixel>(p: P) -> Self;
+}
+
+impl PadSample for u16 {
+    const MARKS: bool = true;
+    const UNAVAILABLE: Self = CDEF_UNAVAILABLE;
+    #[inline(always)]
+    fn of<P: Pixel>(p: P) -> Self {
+        p.to_i32() as u16
+    }
+}
+
+impl PadSample for u8 {
+    const MARKS: bool = false;
+    const UNAVAILABLE: Self = 0;
+    #[inline(always)]
+    fn of<P: Pixel>(p: P) -> Self {
+        p.to_i32() as u8
+    }
+}
+
+/// Converts `src` into `out` (as long as the shorter): the widths of a
+/// padded row inside the picture take fixed-size loops, with no call.
+#[inline(always)]
+fn convert_row<P: Pixel, T: PadSample>(out: &mut [T], src: &[P]) {
+    macro_rules! fixed {
+        ($($n:literal)*) => {
+            match out.len().min(src.len()) {
+                $($n => {
+                    if let (Some(o), Some(s)) = (out.first_chunk_mut::<$n>(), src.first_chunk::<$n>()) {
+                        for (o, s) in o.iter_mut().zip(s) {
+                            *o = T::of(*s);
+                        }
+                    }
+                })*
+                _ => {
+                    for (o, s) in out.iter_mut().zip(src) {
+                        *o = T::of(*s);
+                    }
+                }
+            }
+        };
+    }
+    fixed!(68 66 64 36 34 32);
+}
+
 /// Builds the padded source of [`cdef_filter`] for the `w x h` area at
 /// `(x0, y0)` of a plane being filtered in place: rows `y0 - 2 ..= y0 + h + 1`
 /// and columns `x0 - 2 ..= x0 + w + 1`, [`CDEF_UNAVAILABLE`] outside
@@ -1270,14 +1460,14 @@ fn cdef_plane_block<P: Pixel>(
 /// (stride `stride`, first row `row0`). When the area to the left was
 /// filtered, its padded copy `left` gives the two columns left of the area.
 #[inline(never)]
-fn pad_area<'a, P: Pixel>(
-    pad: &mut [u16],
+fn pad_area<'a, P: Pixel, T: PadSample>(
+    pad: &mut [T],
     chunk: &'a [P],
     stride: usize,
     row0: usize,
     top: impl Fn(usize) -> &'a [P],
     bottom: impl Fn(usize) -> &'a [P],
-    left: Option<&[u16]>,
+    left: Option<&[T]>,
     (x0, y0, w, h): (usize, usize, usize, usize),
     (avail_w, avail_h): (usize, usize),
 ) {
@@ -1291,7 +1481,9 @@ fn pad_area<'a, P: Pixel>(
         let out = &mut pad[r * ps..r * ps + w + 2 * b];
         let y = (y0 + r).wrapping_sub(b);
         if y0 + r < b || y >= avail_h {
-            out.fill(CDEF_UNAVAILABLE);
+            if T::MARKS {
+                out.fill(T::UNAVAILABLE);
+            }
             continue;
         }
         let row = if r < b {
@@ -1303,7 +1495,9 @@ fn pad_area<'a, P: Pixel>(
             &chunk[o..o + xe]
         };
         let (lpad, rest) = out.split_at_mut(lead);
-        lpad.fill(CDEF_UNAVAILABLE);
+        if T::MARKS {
+            lpad.fill(T::UNAVAILABLE);
+        }
         let (mid, right) = rest.split_at_mut(n);
         let (mid, rx) = match left {
             Some(l) if xs < x0 => {
@@ -1314,10 +1508,10 @@ fn pad_area<'a, P: Pixel>(
             }
             _ => (mid, xs),
         };
-        for (o, s) in mid.iter_mut().zip(&row[rx..xe]) {
-            *o = s.to_i32() as u16;
+        convert_row(mid, &row[rx..xe]);
+        if T::MARKS {
+            right.fill(T::UNAVAILABLE);
         }
-        right.fill(CDEF_UNAVAILABLE);
     }
 }
 

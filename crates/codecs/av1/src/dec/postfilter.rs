@@ -898,6 +898,13 @@ pub fn loop_filter_rows_with<P: Pixel>(
     }
 }
 
+/// How far, in luma 4x4 rows, [`cdef_sb_rows_in_place`] moves its 64-row
+/// areas up: deblocking the superblock row below changes none of the rows
+/// these areas and the 2 rows past them hold, so a superblock row's areas
+/// are filtered as soon as it is deblocked (the loop restoration stripes
+/// lie the same way).
+pub const CDEF_ROW_OFFSET: usize = 2;
+
 /// The pre-CDEF samples CDEF reads across the boundaries between rows of
 /// 64x64 areas, saved before the areas are filtered in place: boundary
 /// `k` (the top of area row `k`, at plane row `y = (64 k) >> subY`) holds
@@ -916,8 +923,9 @@ pub fn cdef_save_lines<P: Pixel>(
     src: &Picture<P>,
     lines: &mut CdefLines<P>,
     ks: core::ops::Range<usize>,
+    off: usize,
 ) {
-    let n = fs.mi_rows.div_ceil(16) + 1;
+    let n = (fs.mi_rows + off).div_ceil(16) + 1;
     for p in 0..seq.num_planes() {
         let (sx, sy) = plane_sub(seq, p);
         let pl = &src.planes[p];
@@ -928,7 +936,7 @@ pub fn cdef_save_lines<P: Pixel>(
             rows.resize(4 * n * w, P::default());
         }
         for k in ks.start.max(1)..ks.end.min(n) {
-            let y = (64 * k) >> sy;
+            let y = (64 * k - 4 * off) >> sy;
             for i in 0..4 {
                 let yy = (y + i - 2).min(pl.alloc_h - 1);
                 let o = (4 * k + i) * w;
@@ -1025,15 +1033,16 @@ pub fn cdef_sb_rows<P: Pixel>(
     pads: &mut CdefScratch<P>,
 ) {
     let ks = mi_r0 / 16..mi_r1.div_ceil(16) + 1;
-    cdef_save_lines(seq, fs, src, &mut pads.lines, ks);
-    cdef_areas(seq, hdr, fs, None, dst, mi_r0, mi_r1, pads);
+    cdef_save_lines(seq, fs, src, &mut pads.lines, ks, 0);
+    cdef_areas(seq, hdr, fs, None, dst, mi_r0, mi_r1, 0, pads);
 }
 
-/// CDEF (7.15) in place of the deblocked 64x64 areas whose first luma 4x4
-/// row is in `mi_r0..mi_r1`, on the calling thread. Calls go down the
-/// frame in order, each with the same `sc`, and the rows below these areas
-/// that CDEF reads must be deblocked: their pre-CDEF rows next to the
-/// boundaries are saved in `sc` for the next call.
+/// CDEF (7.15) in place of the deblocked luma 4x4 rows `mi_r0..mi_r1`, on
+/// the calling thread, in areas of 64 rows moved up [`CDEF_ROW_OFFSET`]
+/// rows (both ends lie on area boundaries, or end the frame). Calls go
+/// down the frame in order, each with the same `sc`, and the rows below
+/// these areas that CDEF reads must be deblocked: their pre-CDEF rows next
+/// to the boundaries are saved in `sc` for the next call.
 ///
 /// With `info`, the skipped blocks are read from it and `fs` gives the
 /// frame's size and its CDEF indices, not its mode info.
@@ -1047,9 +1056,10 @@ pub fn cdef_sb_rows_in_place<P: Pixel>(
     mi_r1: usize,
     sc: &mut CdefScratch<P>,
 ) {
-    let ks = mi_r0 / 16 + 1..mi_r1.div_ceil(16) + 1;
-    cdef_save_lines(seq, fs, pic, &mut sc.lines, ks);
-    cdef_areas(seq, hdr, fs, info, pic, mi_r0, mi_r1, sc);
+    let off = CDEF_ROW_OFFSET;
+    let ks = (mi_r0 + off) / 16 + 1..(mi_r1 + off).div_ceil(16) + 1;
+    cdef_save_lines(seq, fs, pic, &mut sc.lines, ks, off);
+    cdef_areas(seq, hdr, fs, info, pic, mi_r0, mi_r1, off, sc);
 }
 
 /// CDEF in place of the areas of `mi_r0..mi_r1` with the boundaries in `sc`.
@@ -1061,6 +1071,7 @@ fn cdef_areas<P: Pixel>(
     pic: &mut Picture<P>,
     mi_r0: usize,
     mi_r1: usize,
+    off: usize,
     sc: &mut CdefScratch<P>,
 ) {
     let num_planes = seq.num_planes();
@@ -1085,6 +1096,7 @@ fn cdef_areas<P: Pixel>(
         &out,
         &sc.lines,
         mi_r0..mi_r1,
+        off,
         &mut sc.work,
     );
 }
@@ -1110,7 +1122,7 @@ pub fn cdef<P: Pixel>(
         }
     }
     let mut lines = CdefLines::default();
-    cdef_save_lines(seq, fs, src, &mut lines, 0..usize::MAX);
+    cdef_save_lines(seq, fs, src, &mut lines, 0..usize::MAX, 0);
     cdef_threads(seq, hdr, fs, dst, &lines, threads);
 }
 
@@ -1124,7 +1136,7 @@ pub fn cdef_in_place<P: Pixel>(
     threads: usize,
     sc: &mut CdefScratch<P>,
 ) {
-    cdef_save_lines(seq, fs, pic, &mut sc.lines, 0..usize::MAX);
+    cdef_save_lines(seq, fs, pic, &mut sc.lines, 0..usize::MAX, 0);
     cdef_threads(seq, hdr, fs, pic, &sc.lines, threads);
 }
 
@@ -1184,6 +1196,7 @@ fn cdef_threads<P: Pixel>(
                 &out,
                 lines,
                 i * 16..(i + 1) * 16,
+                0,
                 &mut sc,
             );
         }
@@ -1215,6 +1228,7 @@ fn cdef_rows<P: Pixel>(
     out: &CdefOut,
     lines: &CdefLines<P>,
     mi_rows: core::ops::Range<usize>,
+    off: usize,
     sc: &mut CdefWork<P>,
 ) {
     let coeff_shift = bd - 8;
@@ -1223,100 +1237,116 @@ fn cdef_rows<P: Pixel>(
     let y_damping = cdef_damping(i32::from(hdr.cdef.damping), bd, false);
     let uv_damping = cdef_damping(i32::from(hdr.cdef.damping), bd, true);
     let ls = out.stride[0];
-    for sbr in mi_rows.step_by(16) {
+    for seg in (mi_rows.start + off) / 16..(mi_rows.end + off).div_ceil(16) {
+        // The area's rows: those of 64x64 area `seg` moved up `off` 4x4
+        // rows, which take the strengths of the area above.
+        let top = (16 * seg).saturating_sub(off);
+        let end = (16 * seg + 16 - off).min(fs.mi_rows);
         // Whether the area to the left was filtered (its padded copy, with
         // the pre-CDEF columns, is then in `sc.pads[p][1]`).
         let mut left_saved = [false; 3];
         for sbc in (0..fs.mi_cols).step_by(16) {
             let mut padded = [false; 3];
-            let idx = fs.cdef_idx[(sbr >> 4) * fs.cdef_stride + (sbc >> 4)];
-            let strengths = (idx >= 0).then(|| {
-                let idx = idx as usize;
-                (
-                    i32::from(hdr.cdef.y_pri[idx]) << coeff_shift,
-                    i32::from(hdr.cdef.y_sec[idx]) << coeff_shift,
-                    i32::from(hdr.cdef.uv_pri[idx]) << coeff_shift,
-                    i32::from(hdr.cdef.uv_sec[idx]) << coeff_shift,
-                )
-            });
-            if let Some((y_pri0, y_sec, uv_pri, uv_sec)) = strengths {
-                let luma_on = y_pri0 != 0 || y_sec != 0;
-                let chroma_on = num_planes > 1 && (uv_pri != 0 || uv_sec != 0);
-                let need_dir = y_pri0 != 0 || (chroma_on && uv_pri != 0);
-                let r_end = (sbr + 16).min(fs.mi_rows);
-                let c_end = (sbc + 16).min(fs.mi_cols);
-                let area = CdefArea {
-                    sbr,
-                    sbc,
-                    bd,
-                    left_saved,
-                };
-                for r in (sbr..r_end).step_by(2) {
-                    if !luma_on && !chroma_on {
-                        break;
-                    }
-                    for c in (sbc..c_end).step_by(2) {
-                        let rr = (r + 1).min(fs.mi_rows - 1);
-                        let cc = (c + 1).min(fs.mi_cols - 1);
-                        let skip = match info {
-                            Some(i) => {
-                                i.skip(r, c) && i.skip(rr, c) && i.skip(r, cc) && i.skip(rr, cc)
-                            }
-                            None => {
-                                fs.mi_at(r, c).skip()
-                                    && fs.mi_at(rr, c).skip()
-                                    && fs.mi_at(r, cc).skip()
-                                    && fs.mi_at(rr, cc).skip()
-                            }
-                        };
-                        if skip {
-                            continue;
+            let area = CdefArea {
+                seg,
+                top,
+                rows: 16 * seg + 16 - off - top,
+                sbc,
+                bd,
+                left_saved,
+            };
+            for (sbr, r0, r1) in [
+                (16 * seg).checked_sub(16).map(|a| (a, top, 16 * seg)),
+                Some((16 * seg, 16 * seg, end)),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if r0 >= r1 {
+                    continue;
+                }
+                let idx = fs.cdef_idx[(sbr >> 4) * fs.cdef_stride + (sbc >> 4)];
+                let strengths = (idx >= 0).then(|| {
+                    let idx = idx as usize;
+                    (
+                        i32::from(hdr.cdef.y_pri[idx]) << coeff_shift,
+                        i32::from(hdr.cdef.y_sec[idx]) << coeff_shift,
+                        i32::from(hdr.cdef.uv_pri[idx]) << coeff_shift,
+                        i32::from(hdr.cdef.uv_sec[idx]) << coeff_shift,
+                    )
+                });
+                if let Some((y_pri0, y_sec, uv_pri, uv_sec)) = strengths {
+                    let luma_on = y_pri0 != 0 || y_sec != 0;
+                    let chroma_on = num_planes > 1 && (uv_pri != 0 || uv_sec != 0);
+                    let need_dir = y_pri0 != 0 || (chroma_on && uv_pri != 0);
+                    let c_end = (sbc + 16).min(fs.mi_cols);
+                    for r in (r0..r1).step_by(2) {
+                        if !luma_on && !chroma_on {
+                            break;
                         }
-                        let (ydir, var) = if need_dir {
-                            let o = (r * 4 - out.row0[0]) * ls + c * 4;
-                            cdef_direction(&dst[0][o..], ls, bd)
-                        } else {
-                            (0, 0)
-                        };
-                        if luma_on {
-                            let pri = adjust_luma_pri_strength(y_pri0, var);
-                            let dir = if y_pri0 == 0 { 0 } else { ydir };
-                            if pri != 0 || y_sec != 0 {
-                                cdef_plane_block(
-                                    dst,
-                                    out,
-                                    lines,
-                                    0,
-                                    &area,
-                                    (r, c),
-                                    (0, 0),
-                                    sc,
-                                    &mut padded[0],
-                                    fs,
-                                    (pri, y_sec, dir, y_damping),
-                                );
-                            }
-                        }
-                        if chroma_on {
-                            let dir = if uv_pri == 0 {
-                                0
-                            } else {
-                                cdef_uv_dir(ssx, ssy, ydir)
+                        for c in (sbc..c_end).step_by(2) {
+                            let rr = (r + 1).min(fs.mi_rows - 1);
+                            let cc = (c + 1).min(fs.mi_cols - 1);
+                            let skip = match info {
+                                Some(i) => {
+                                    i.skip(r, c) && i.skip(rr, c) && i.skip(r, cc) && i.skip(rr, cc)
+                                }
+                                None => {
+                                    fs.mi_at(r, c).skip()
+                                        && fs.mi_at(rr, c).skip()
+                                        && fs.mi_at(r, cc).skip()
+                                        && fs.mi_at(rr, cc).skip()
+                                }
                             };
-                            for plane in 1..3 {
-                                cdef_plane_block(
-                                    dst,
-                                    out,
-                                    lines,
-                                    plane,
-                                    &area,
-                                    (r, c),
-                                    (u32::from(ssx), u32::from(ssy)),
-                                    sc,
-                                    &mut padded[plane],
-                                    fs,
-                                    (uv_pri, uv_sec, dir, uv_damping),
-                                );
+                            if skip {
+                                continue;
+                            }
+                            let (ydir, var) = if need_dir {
+                                let o = (r * 4 - out.row0[0]) * ls + c * 4;
+                                cdef_direction(&dst[0][o..], ls, bd)
+                            } else {
+                                (0, 0)
+                            };
+                            if luma_on {
+                                let pri = adjust_luma_pri_strength(y_pri0, var);
+                                let dir = if y_pri0 == 0 { 0 } else { ydir };
+                                if pri != 0 || y_sec != 0 {
+                                    cdef_plane_block(
+                                        dst,
+                                        out,
+                                        lines,
+                                        0,
+                                        &area,
+                                        (r, c),
+                                        (0, 0),
+                                        sc,
+                                        &mut padded[0],
+                                        fs,
+                                        (pri, y_sec, dir, y_damping),
+                                    );
+                                }
+                            }
+                            if chroma_on {
+                                let dir = if uv_pri == 0 {
+                                    0
+                                } else {
+                                    cdef_uv_dir(ssx, ssy, ydir)
+                                };
+                                for plane in 1..3 {
+                                    cdef_plane_block(
+                                        dst,
+                                        out,
+                                        lines,
+                                        plane,
+                                        &area,
+                                        (r, c),
+                                        (u32::from(ssx), u32::from(ssy)),
+                                        sc,
+                                        &mut padded[plane],
+                                        fs,
+                                        (uv_pri, uv_sec, dir, uv_damping),
+                                    );
+                                }
                             }
                         }
                     }
@@ -1338,7 +1368,12 @@ fn cdef_rows<P: Pixel>(
 /// One 64x64 area of [`cdef_rows`]: its position in luma 4x4 units, and
 /// per plane whether the area to its left was filtered (see [`CdefWork`]).
 struct CdefArea {
-    sbr: usize,
+    /// The index of the area (and of its upper boundary in [`CdefLines`]).
+    seg: usize,
+    /// The first luma 4x4 row, and the luma 4x4 rows the area spans when
+    /// inside the picture.
+    top: usize,
+    rows: usize,
     sbc: usize,
     bd: u32,
     left_saved: [bool; 3],
@@ -1365,8 +1400,8 @@ fn cdef_plane_block<P: Pixel>(
     let ds = out.stride[plane];
     let row0 = out.row0[plane];
     let sb_x = (area.sbc * 4) >> sx;
-    let sb_y = (area.sbr * 4) >> sy;
-    let (aw, ah) = (64 >> sx, 64 >> sy);
+    let sb_y = (area.top * 4) >> sy;
+    let (aw, ah) = (64 >> sx, (4 * area.rows) >> sy);
     if !P::HBD {
         return cdef_plane_block_8(
             dst,
@@ -1388,7 +1423,7 @@ fn cdef_plane_block<P: Pixel>(
         let avail_w = (fs.mi_cols * 4) >> sx;
         let avail_h = (fs.mi_rows * 4) >> sy;
         let chunk = &dst[plane][..];
-        let k = area.sbr >> 4;
+        let k = area.seg;
         let lw = lines.w[plane];
         let lr = &lines.rows[plane];
         let left = (area.left_saved[plane] && sb_x > 0).then_some(&prev[..]);
@@ -1474,15 +1509,15 @@ fn cdef_plane_block_8<P: Pixel>(
     let ds = out.stride[plane];
     let row0 = out.row0[plane];
     let sb_x = (area.sbc * 4) >> sx;
-    let sb_y = (area.sbr * 4) >> sy;
-    let (aw, ah) = (64 >> sx, 64 >> sy);
+    let sb_y = (area.top * 4) >> sy;
+    let (aw, ah) = (64 >> sx, (4 * area.rows) >> sy);
     let avail_w = (fs.mi_cols * 4) >> sx;
     let avail_h = (fs.mi_rows * 4) >> sy;
     let CdefWork { pads8, taps, .. } = sc;
     let [pad, prev] = &mut pads8[plane];
     if !*padded {
         let chunk = &dst[plane][..];
-        let k = area.sbr >> 4;
+        let k = area.seg;
         let lw = lines.w[plane];
         let lr = &lines.rows[plane];
         let left = (area.left_saved[plane] && sb_x > 0).then_some(&prev[..]);

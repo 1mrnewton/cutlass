@@ -3061,27 +3061,21 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
         if self.lf_on {
             postfilter::loop_filter_rows_with(seq, hdr, fs, info, cur, a, b, last);
         }
-        // CDEF and loop restoration take whole 64-row areas and read up
-        // to 3 rows past them. Deblocking the next superblock row will
-        // still change the 7 rows above it, so every area but the last
-        // one deblocked is ready: with 128x128 superblocks that is the
-        // upper half of this row, as well as the row above.
+        // Deblocking the next row changes up to 6 luma rows above it (2
+        // chroma rows), and CDEF reads 2 rows past what it filters: the
+        // rows 8 above it get CDEF (in 64-row areas moved up as many rows)
+        // and loop restoration (whose stripes lie the same way) now.
         let start = self.to_filter.take().map_or(a, |(c, _)| c);
         if last {
             self.filter_ready_rows(seq, hdr, fs, info, cur, start, b, true);
             return;
         }
-        // Deblocking the next row changes up to 6 luma rows above it (3
-        // chroma rows): with no CDEF or loop restoration, the rows 8 above
-        // it are final.
-        let lag = if self.cdef_on || self.lr_on { 16 } else { 2 };
-        let ready = b.saturating_sub(lag).max(start);
+        let ready = b.saturating_sub(postfilter::CDEF_ROW_OFFSET).max(start);
         if ready > start {
             self.filter_ready_rows(seq, hdr, fs, info, cur, start, ready, false);
             // Luma rows above 4 * ready are final: deblocking below
-            // changes none of them, and the loop restoration stripes done
-            // end 8 rows higher.
-            let done = if self.lr_on { 4 * ready - 8 } else { 4 * ready };
+            // changes none of them.
+            let done = 4 * ready;
             if let Some(job) = self.publish
                 && done > self.published
                 && job.watched()
@@ -3113,7 +3107,9 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
         b: usize,
         last: bool,
     ) {
-        let stripes = a / 16..if last { usize::MAX } else { b / 16 };
+        // Stripe k ends above luma row 64 k + 56.
+        let off = postfilter::CDEF_ROW_OFFSET;
+        let stripes = (a + off) / 16..if last { usize::MAX } else { (b + off) / 16 };
         if self.lr_on {
             postfilter::lr_save_frame_bounds(seq, hdr, cur, &mut self.lr_bounds, stripes.clone());
         }

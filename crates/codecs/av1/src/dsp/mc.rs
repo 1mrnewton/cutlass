@@ -1321,7 +1321,18 @@ pub fn mask_blend<P: Pixel>(
     if let Some(dst) = P::bytes_mut(dst)
         && w <= 128
     {
-        return mask_blend_u8(dst, dst_stride, t0, t1, w, h, mask, mask_stride, sub_x, sub_y);
+        return mask_blend_u8(
+            dst,
+            dst_stride,
+            t0,
+            t1,
+            w,
+            h,
+            mask,
+            mask_stride,
+            sub_x,
+            sub_y,
+        );
     }
     for r in 0..h {
         let d = &mut dst[r * dst_stride..][..w];

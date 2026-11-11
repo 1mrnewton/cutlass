@@ -267,7 +267,13 @@ fn across_columns<const M: usize>(
 /// `M` lines of a vertical edge of size 16: rows `y .. y + M`, columns
 /// `x - 8 .. x + 8`, which [`edge`] checked are in the plane.
 #[inline(always)]
-fn across_columns_16<const M: usize>(buf: &mut [u8], stride: usize, x: usize, y: usize, lim: Limits) {
+fn across_columns_16<const M: usize>(
+    buf: &mut [u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    lim: Limits,
+) {
     let (p, q) = IDLE;
     let mut lines: [[u8; 16]; 16] = [core::array::from_fn(|k| if k < 8 { p } else { q }); 16];
     for (l, line) in lines.iter_mut().enumerate().take(M) {

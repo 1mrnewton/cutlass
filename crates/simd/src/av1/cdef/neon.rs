@@ -283,19 +283,6 @@ pub(super) fn filter(win: &[u16; WINDOW], f: &Filter, rows: usize) -> [[u16; 8];
 
 /// Eight samples of the window from `at`, which the caller keeps inside
 /// it (zeros otherwise).
-#[inline]
-#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
-#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-fn inside(win: &[u16; WINDOW], at: usize) -> uint16x8_t {
-    match win
-        .get(at..at + 8)
-        .and_then(|s| <&[u16; 8]>::try_from(s).ok())
-    {
-        Some(a) => u16x8(a),
-        None => vdupq_n_u16(0),
-    }
-}
-
 /// A padded source the byte filter reads: of 16-bit samples, or of bytes.
 #[derive(Clone, Copy)]
 pub(super) enum WinRef<'a> {
@@ -323,26 +310,56 @@ impl Window for [u8; WINDOW] {
     }
 }
 
-/// Eight samples of `win` from `at` as bytes (zeros past its end).
-#[inline]
-#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
-#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-fn row8<W: Window>(win: &W, at: usize) -> uint8x8_t {
-    match win.win() {
-        WinRef::Wide(w) => vmovn_u16(inside(w, at)),
-        WinRef::Bytes(w) => match w.get(at..at + 8).and_then(|s| <&[u8; 8]>::try_from(s).ok()) {
-            Some(a) => u8x8(a),
-            None => vdup_n_u8(0),
-        },
+/// The samples of the window from a group's first row on, `N` of them:
+/// one bounds check for the group, after which every load is known to
+/// be inside.
+#[derive(Clone, Copy)]
+enum Part<'a, const N: usize> {
+    Wide(&'a [u16; N]),
+    Bytes(&'a [u8; N]),
+}
+
+impl<'a, const N: usize> Part<'a, N> {
+    /// The `N` samples of `win` from `base`, if it has them.
+    #[inline(always)]
+    fn of<W: Window>(win: &'a W, base: usize) -> Option<Self> {
+        match win.win() {
+            WinRef::Wide(w) => w.get(base..)?.first_chunk::<N>().map(Self::Wide),
+            WinRef::Bytes(w) => w.get(base..)?.first_chunk::<N>().map(Self::Bytes),
+        }
+    }
+
+    /// Eight samples from `at` as bytes; `at` is held to `N - 8`.
+    #[inline]
+    #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+    #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+    fn row8(self, at: usize) -> uint8x8_t {
+        let at = at.min(N - 8);
+        match self {
+            Self::Wide(w) => match w[at..].first_chunk::<8>() {
+                Some(a) => vmovn_u16(u16x8(a)),
+                None => vdup_n_u8(0),
+            },
+            Self::Bytes(w) => match w[at..].first_chunk::<8>() {
+                Some(a) => u8x8(a),
+                None => vdup_n_u8(0),
+            },
+        }
     }
 }
 
+/// The samples an 8-wide group's taps read: its two rows with two rows
+/// and two columns of border each side, up to the last tap's eight.
+const ROWS_PART: usize = 2 * CENTRE + STRIDE + 8;
+/// The samples a 4-wide group's table is built from: eight rows.
+const TABLE_PART: usize = 7 * STRIDE + 8;
+
 /// Where the samples of a group of sixteen are found for a tap.
 #[derive(Clone, Copy)]
-enum Source {
+enum Source<'a> {
     /// An 8-wide block, two rows to a group: the eight samples from the
     /// tap's place in each of the two rows, straight from the window.
-    Rows(usize),
+    Rows(Part<'a, ROWS_PART>),
     /// A 4-wide block, four rows to a group: the 8x8 samples around the
     /// group (two rows and two columns of border each side) as bytes in
     /// four vectors, and for each of the sixteen samples its place among
@@ -357,26 +374,22 @@ const PLACES: [u8; 16] = [
     18, 19, 20, 21, 26, 27, 28, 29, 34, 35, 36, 37, 42, 43, 44, 45,
 ];
 
-impl Source {
+impl<'a> Source<'a> {
     /// The source for the group whose first row starts at `base` in the
-    /// window.
+    /// window, if the window holds all of it.
     #[inline]
     #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
     #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-    fn new<const WIDE: bool, W: Window>(win: &W, base: usize) -> Self {
+    fn new<const WIDE: bool, W: Window>(win: &'a W, base: usize) -> Option<Self> {
         if WIDE {
-            return Self::Rows(base);
+            return Part::of(win, base).map(Self::Rows);
         }
-        let pair = |r: usize| {
-            vcombine_u8(
-                row8(win, base + r * STRIDE),
-                row8(win, base + (r + 1) * STRIDE),
-            )
-        };
-        Self::Table(
+        let part = Part::<TABLE_PART>::of(win, base)?;
+        let pair = |r: usize| vcombine_u8(part.row8(r * STRIDE), part.row8((r + 1) * STRIDE));
+        Some(Self::Table(
             uint8x16x4_t(pair(0), pair(2), pair(4), pair(6)),
             u8x16(&PLACES),
-        )
+        ))
     }
 
     /// The group's samples moved by a tap at `at` from the window's
@@ -385,9 +398,9 @@ impl Source {
     #[inline]
     #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
     #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-    fn at<W: Window>(&self, win: &W, at: usize) -> uint8x16_t {
+    fn at(&self, at: usize) -> uint8x16_t {
         match *self {
-            Self::Rows(base) => vcombine_u8(row8(win, base + at), row8(win, base + at + STRIDE)),
+            Self::Rows(part) => vcombine_u8(part.row8(at), part.row8(at + STRIDE)),
             Self::Table(table, places) => {
                 // Rows and columns of the tap from the window's first
                 // sample: 2 and 2 is the sample itself. A place outside
@@ -438,18 +451,12 @@ impl TapKind {
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-fn tap_inner<const RANGE: bool, W: Window>(
-    win: &W,
-    src: &Source,
-    at: usize,
-    k: TapKind,
-    g: &mut Group,
-) {
+fn tap_inner<const RANGE: bool>(src: &Source<'_>, at: usize, k: TapKind, g: &mut Group) {
     // The two taps' constrained differences add up within a signed byte
     // (a strength is at most 15), so one widening multiply takes both.
     let mut pair = vdupq_n_s8(0);
     for at in [at, 2 * CENTRE - at] {
-        let p = src.at(win, at);
+        let p = src.at(at);
         let size = vabdq_u8(p, g.x);
         let bound = vqsubq_u8(k.strength, vshlq_u8(size, k.down));
         let size = vminq_u8(size, bound);
@@ -487,9 +494,14 @@ fn inner_with<const WIDE: bool, const PRI: bool, const SEC: bool, const BOTH: bo
         TapKind::new(f.sec, f.sec_shift, 2),
         TapKind::new(f.sec, f.sec_shift, 1),
     ];
+    // Every tap within reach, so that no load needs checking.
+    let pri_at = f.pri_at.map(|at| at.min(2 * CENTRE));
+    let sec_at = f.sec_at.map(|at| at.min(2 * CENTRE));
     for g in 0..rows.div_ceil(per) {
-        let src = Source::new::<WIDE, W>(win, g * per * STRIDE);
-        let x = src.at(win, CENTRE);
+        let Some(src) = Source::new::<WIDE, W>(win, g * per * STRIDE) else {
+            break;
+        };
+        let x = src.at(CENTRE);
         let zero = vdupq_n_s16(0);
         let mut grp = Group {
             x,
@@ -499,11 +511,11 @@ fn inner_with<const WIDE: bool, const PRI: bool, const SEC: bool, const BOTH: bo
         };
         for (k, &first) in pri.iter().enumerate() {
             if PRI {
-                tap_inner::<BOTH, W>(win, &src, f.pri_at[k], first, &mut grp);
+                tap_inner::<BOTH>(&src, pri_at[k], first, &mut grp);
             }
             if SEC {
-                tap_inner::<BOTH, W>(win, &src, f.sec_at[k], sec[0], &mut grp);
-                tap_inner::<BOTH, W>(win, &src, f.sec_at[2 + k], sec[1], &mut grp);
+                tap_inner::<BOTH>(&src, sec_at[k], sec[0], &mut grp);
+                tap_inner::<BOTH>(&src, sec_at[2 + k], sec[1], &mut grp);
             }
         }
         // (8 + sum - (sum < 0)) >> 4, which fits a signed byte.

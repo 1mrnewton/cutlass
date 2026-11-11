@@ -748,7 +748,9 @@ fn description(name: &str) -> &'static str {
         }
         "track.poll" => {
             "Read a tracking job: pending, stale when the draft moved, or the revision after \
-             the followers were made to follow the path, as one undo step."
+             the followers were made to follow the path, as one undo step. A clip stops \
+             following, and loses the motion the track gave it, with draft.apply \
+             {\"op\":\"untrack\",\"segment_id\":\"<clip id>\"}."
         }
         "catalog.search" => "Search bundled effect and animation ids.",
         "package.ensure" => "Check that a package id from catalog.search is ready to use.",
@@ -1634,6 +1636,27 @@ mod tests {
         let track = registry.parse("draft.query", r#"track """#).unwrap();
         let text = registry.invoke(track).unwrap();
         assert!(text.contains("kind=video"), "{text}");
+    }
+
+    #[test]
+    fn draft_apply_takes_an_untrack_request() {
+        let temp = Temp::new();
+        let registry = open(&temp, Gate::refuse());
+        let parsed = registry
+            .parse(
+                "draft.apply",
+                r#"{"expected_revision":0,"requests":[{"op":"untrack","segment_id":"s"}]}"#,
+            )
+            .unwrap();
+        let Invocation::DraftApply(input) = parsed else {
+            panic!("not an apply");
+        };
+        assert_eq!(
+            input.requests,
+            vec![Request::Untrack {
+                segment_id: "s".into()
+            }]
+        );
     }
 
     #[test]

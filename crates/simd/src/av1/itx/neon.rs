@@ -250,9 +250,12 @@ fn made_for(nz: usize) -> usize {
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 pub(super) fn add(b: &mut Block<'_>) {
-    // By width and by rows of coefficients, so the values between the
-    // two passes take no more room than the block has.
-    match (b.w, b.h.min(32)) {
+    // By width and by the rows of values between the two passes that
+    // the column transforms read: those the transform made for the
+    // rows of coefficients takes. They take no more room than that, and
+    // only that much is cleared.
+    let rows = b.h.min(32).min(made_for(b.nz_rows).max(4));
+    match (b.w, rows) {
         (4, 4) => sized::<4, 8, 4>(b),
         (4, 8) => sized::<4, 8, 8>(b),
         (4, _) => sized::<4, 8, 16>(b),
@@ -264,15 +267,19 @@ pub(super) fn add(b: &mut Block<'_>) {
         (16, 8) => sized::<16, 16, 8>(b),
         (16, 16) => sized::<16, 16, 16>(b),
         (16, _) => sized::<16, 16, 32>(b),
+        (32, 4) => sized::<32, 32, 4>(b),
         (32, 8) => sized::<32, 32, 8>(b),
         (32, 16) => sized::<32, 32, 16>(b),
         (32, _) => sized::<32, 32, 32>(b),
+        (_, 4) => sized::<64, 64, 4>(b),
+        (_, 8) => sized::<64, 64, 8>(b),
         (_, 16) => sized::<64, 64, 16>(b),
         _ => sized::<64, 64, 32>(b),
     }
 }
 
-/// [`add`] for a block `W` wide with `TH` rows of coefficients. `MW` is
+/// [`add`] for a block `W` wide whose column transforms read at most
+/// `TH` rows of values from the row transforms. `MW` is
 /// the width in whole vectors: 8 for a block 4 wide, whose vectors have
 /// four lanes that nothing reads.
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]

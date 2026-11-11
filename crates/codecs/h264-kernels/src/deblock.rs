@@ -324,6 +324,35 @@ mod tests {
     }
 
     #[test]
+    fn chroma_boundaries_alone_match_the_plain_ones() {
+        let mut rng = Lcg(9);
+        let mut changed = 0;
+        for round in 0..20_000 {
+            let spread = [0, 2, 6, 30][round % 4];
+            let down = 40 + (rng.next() % 9) as usize;
+            let base = rng.next() as u8;
+            let before: Vec<u8> = (0..down * 44).map(|_| rng.sample(base, spread)).collect();
+            let x = [0, 2, 4, 8, 20][(rng.next() % 5) as usize];
+            let y = [0, 2, 3, 16, 24][(rng.next() % 5) as usize];
+            let mut edges = mb_edges(&mut rng, y * down + x, down, false);
+            edges.vertical[0] = edges.vertical[2].filter(|_| x >= 2);
+            edges.horizontal[0] = edges.horizontal[2].filter(|_| y >= 2);
+            edges.vertical[1..].fill(None);
+            edges.horizontal[1..].fill(None);
+            let mut fast = before.clone();
+            let mut plain = before.clone();
+            assert_eq!(
+                super::chroma_mb(&mut fast, &edges),
+                scalar::chroma_mb(&mut plain, &edges),
+                "round {round}: {edges:?}"
+            );
+            assert_eq!(fast, plain, "round {round}: {edges:?}");
+            changed += usize::from(fast != before);
+        }
+        assert!(changed > 5_000, "only {changed} macroblocks were filtered");
+    }
+
+    #[test]
     fn whole_macroblocks_match_the_plain_ones() {
         let mut rng = Lcg(7);
         let mut changed = 0;

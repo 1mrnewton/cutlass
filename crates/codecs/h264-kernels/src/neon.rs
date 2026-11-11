@@ -17,7 +17,7 @@ use core::arch::aarch64::{
     vaddq_u8, vaddq_u16, vaddw_u8, vandq_s16, vandq_u8, vandq_u16, vbicq_u8, vbslq_s16, vbslq_u8,
     vcgezq_s8, vcgezq_s16, vcltq_s16, vcltq_u8, vcombine_s8, vcombine_u8, vcombine_u64,
     vcreate_u64, vdup_n_u8, vdupq_n_s8, vdupq_n_s16, vdupq_n_u8, vget_high_u8, vget_low_u8,
-    vgetq_lane_u32, vgetq_lane_u64, vhaddq_u8, vld1_u8, vld1q_u8, vmaxq_s8, vmaxq_s16, vmaxq_u8,
+    vgetq_lane_u16, vgetq_lane_u32, vgetq_lane_u64, vhaddq_u8, vld1_u8, vld1q_u8, vmaxq_s8, vmaxq_s16, vmaxq_u8,
     vmaxvq_u8, vminq_s8, vminq_s16, vminq_u8, vmovl_u8, vnegq_s8, vnegq_s16, vqaddq_u8,
     vqmovun_s16, vqrshrn_n_s16, vqsubq_u8, vreinterpret_u8_u64, vreinterpretq_s8_u8,
     vreinterpretq_s16_u16, vreinterpretq_u8_s8, vreinterpretq_u8_u16, vreinterpretq_u8_u32,
@@ -1122,6 +1122,82 @@ macro_rules! chroma_both {
     };
 }
 
+/// A chroma macroblock's left edge, 8 lines whose q0 is at `q0` and the
+/// lines `down` apart, as FFmpeg's `h264_h_loop_filter_chroma` does it: the
+/// four samples around the edge on each line go straight to registers,
+/// are turned so each vector holds one of them down the eight lines, and
+/// p0 and q0 go back two bytes a line.
+///
+/// # Safety
+///
+/// Two samples before `q0` and two from it, on each of the eight lines,
+/// must be readable and writable. The thresholds are ones [`small`] takes.
+#[inline]
+#[target_feature(enable = "neon")]
+#[allow(unsafe_code)]
+unsafe fn chroma_left_edge(q0: *mut u8, down: usize, filter: crate::edge::Filter) {
+    // SAFETY: every line's four samples are the caller's promise.
+    unsafe {
+        let p = q0.sub(2);
+        let quad = |n: usize| u64::from(p.add(n * down).cast::<u32>().read_unaligned());
+        let first = pair(quad(0) | quad(1) << 32, quad(2) | quad(3) << 32);
+        let second = pair(quad(4) | quad(5) << 32, quad(6) | quad(7) << 32);
+        // Samples 0 and 2 of every line, then samples 1 and 3; then each
+        // of the four down all eight lines, in the low half.
+        let even = vuzp1q_u8(first, second);
+        let odd = vuzp2q_u8(first, second);
+        let v = [
+            vuzp1q_u8(even, even),
+            vuzp1q_u8(odd, odd),
+            vuzp2q_u8(even, even),
+            vuzp2q_u8(odd, odd),
+        ];
+        let Some([p0, q0]) = chroma_both!(v, chroma_thresholds(Some(filter), None)) else {
+            return;
+        };
+        // p0 and q0 of each line side by side, a 16-bit lane a line.
+        let out = vreinterpretq_u16_u8(vzip1q_u8(p0, q0));
+        let at = p.add(1);
+        let put = |n: usize, value: u16| at.add(n * down).cast::<u16>().write_unaligned(value);
+        put(0, vgetq_lane_u16::<0>(out));
+        put(1, vgetq_lane_u16::<1>(out));
+        put(2, vgetq_lane_u16::<2>(out));
+        put(3, vgetq_lane_u16::<3>(out));
+        put(4, vgetq_lane_u16::<4>(out));
+        put(5, vgetq_lane_u16::<5>(out));
+        put(6, vgetq_lane_u16::<6>(out));
+        put(7, vgetq_lane_u16::<7>(out));
+    }
+}
+
+/// A chroma macroblock's top edge, 8 samples whose q0 row starts at `q0`
+/// with rows `down` apart: the two rows above and two below go straight to
+/// registers, and p0 and q0 straight back.
+///
+/// # Safety
+///
+/// Eight samples on each of the two rows above `q0` and the two from it
+/// must be readable and writable. The thresholds are ones [`small`] takes.
+#[inline]
+#[target_feature(enable = "neon")]
+#[allow(unsafe_code)]
+unsafe fn chroma_top_edge(q0: *mut u8, down: usize, filter: crate::edge::Filter) {
+    // SAFETY: the four rows are the caller's promise.
+    unsafe {
+        let p = q0.sub(2 * down);
+        let row = |n: usize| {
+            let samples = vld1_u8(p.add(n * down));
+            vcombine_u8(samples, samples)
+        };
+        let v = [row(0), row(1), row(2), row(3)];
+        let Some([p0, q0]) = chroma_both!(v, chroma_thresholds(Some(filter), None)) else {
+            return;
+        };
+        vst1_u8(p.add(down), vget_low_u8(p0));
+        vst1_u8(p.add(2 * down), vget_low_u8(q0));
+    }
+}
+
 /// Every edge of an 8×8 chroma macroblock. Its rows are found in the plane
 /// once, and the two edges of each direction, which share no sample, are
 /// filtered side by side in one vector.
@@ -1135,6 +1211,29 @@ pub(crate) fn chroma_mb(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool 
     } = *edges;
     if !crate::edge::mb_fits(plane.len(), edges, 8, 2) {
         return false;
+    }
+    // Most macroblocks filter their boundary alone, if anything: each of
+    // its two edges then goes straight between the plane and registers.
+    let tame = |filter: &Option<crate::edge::Filter>| filter.is_none_or(|filter| filter.tame());
+    if let ([v0, None, None, None], [h0, None, None, None]) = (vertical, horizontal)
+        && tame(&v0)
+        && tame(&h0)
+    {
+        let base = plane.as_mut_ptr();
+        // SAFETY: `mb_fits` found the macroblock's eight rows of eight
+        // inside the plane, the rows at least 10 apart, and two samples
+        // before it when the left edge is filtered and two rows above it
+        // when the top one is: every sample either edge reads or writes.
+        #[allow(unsafe_code)]
+        unsafe {
+            if let Some(filter) = v0 {
+                chroma_left_edge(base.add(at), down, filter);
+            }
+            if let Some(filter) = h0 {
+                chroma_top_edge(base.add(at), down, filter);
+            }
+        }
+        return true;
     }
     let [v0, v1, v2, v3] = vertical;
     let [h0, h1, h2, h3] = horizontal;

@@ -71,11 +71,19 @@ pub enum CrossKind {
     /// `count` stripes along `angle`, each wiping the other way from the
     /// last.
     Zip,
+    /// `count` cards across, each turned edge-on about its upright middle
+    /// and back with the incoming picture on its other face, in a wave
+    /// along `angle`. A card is 1⅔ times as tall as it is wide, so the
+    /// rows follow from the frame's shape. `soft` is how long one card
+    /// takes, as a share of the run; `edge`, a fraction of the shorter
+    /// side, opens a gap of the `red`, `green`, `blue` colour between the
+    /// cards, which also shows behind a turning card.
+    Cards,
 }
 
 impl CrossKind {
     /// Every kind, in the order of its number.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::Wipe,
         Self::Circle,
         Self::Blinds,
@@ -93,6 +101,7 @@ impl CrossKind {
         Self::Heart,
         Self::Squares,
         Self::Zip,
+        Self::Cards,
     ];
 }
 
@@ -113,7 +122,7 @@ const fn param(name: &'static str, default: f32, min: f32, max: f32) -> Param {
 /// outgoing picture instead of opening out of it.
 pub const CROSS: &[Param] = &[
     param("progress", 0.0, 0.0, 1.0),
-    param("kind", 8.0, 0.0, 16.0),
+    param("kind", 8.0, 0.0, 17.0),
     param("angle", 0.0, -360.0, 360.0),
     param("soft", 0.02, 0.0, 1.0),
     param("count", 8.0, 1.0, 64.0),
@@ -353,7 +362,7 @@ pub fn transition_preview_t(elapsed: Micros) -> f32 {
 }
 
 /// The transition recipes the app ships, in shelf order.
-const BUNDLED_FILES: [&str; 181] = [
+const BUNDLED_FILES: [&str; 182] = [
     include_str!("../transitions/flash.json"),
     include_str!("../transitions/quick-flash.json"),
     include_str!("../transitions/red-flash.json"),
@@ -510,6 +519,7 @@ const BUNDLED_FILES: [&str; 181] = [
     include_str!("../transitions/heart-pop.json"),
     include_str!("../transitions/star-burst.json"),
     include_str!("../transitions/tiles.json"),
+    include_str!("../transitions/flip-cards.json"),
     include_str!("../transitions/doors-close.json"),
     include_str!("../transitions/doors-close-down.json"),
     include_str!("../transitions/soft-circle.json"),
@@ -623,6 +633,35 @@ mod tests {
         let outgoing = &end.outgoing[0].values;
         assert!(outgoing[1] - outgoing[0] / 2.0 > 0.5, "{outgoing:?}");
         assert_eq!(&end.incoming[0].values[..4], &[1.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn flip_cards_runs_a_card_wave_left_to_right() {
+        let recipe = super::bundled_transitions()
+            .iter()
+            .find(|recipe| recipe.id == "flip-cards")
+            .expect("flip cards ships");
+        assert_eq!(recipe.category, "Shape");
+        let half = recipe.at(0.5);
+        assert_eq!(half.kind(), CrossKind::Cards);
+        // progress, kind, angle, soft, count, x, y, edge, then black.
+        assert_eq!(half.cross[0], 0.5);
+        assert_eq!(half.cross[4], 5.0);
+        assert!(half.cross[2] > -90.0 && half.cross[2] < 0.0);
+        assert!(half.cross[7] > 0.0);
+        assert_eq!(&half.cross[8..11], &[0.0, 0.0, 0.0]);
+        assert!(half.outgoing.is_empty() && half.incoming.is_empty());
+        // The last kind reads; one past it does not.
+        assert_eq!(
+            read(r#"{"version":1,"id":"a","name":"A","cross":{"kind":17}}"#)
+                .at(0.5)
+                .kind(),
+            CrossKind::Cards
+        );
+        assert!(
+            TransitionRecipe::read(br#"{"version":1,"id":"a","name":"A","cross":{"kind":18}}"#)
+                .is_err()
+        );
     }
 
     #[test]

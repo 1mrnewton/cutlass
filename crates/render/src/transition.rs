@@ -361,6 +361,78 @@ mod tests {
     }
 
     #[test]
+    fn flip_cards_turns_each_card_over_in_a_wave_from_the_left() {
+        let Some(renderer) = Renderer::for_test().expect("a GPU is required") else {
+            eprintln!("skipped: no GPU");
+            return;
+        };
+        let kind = TransitionKind::every()
+            .into_iter()
+            .find(|kind| kind.key() == "flip-cards")
+            .expect("flip cards ships");
+        // Five cards across; on a 5:3 frame, cards 1⅔ times as tall as
+        // wide make two rows of 80 by 120.
+        let (w, h) = (400u32, 240u32);
+        let red: Vec<u8> = [240, 20, 20, 255].repeat((w * h) as usize);
+        let blue: Vec<u8> = [20, 20, 240, 255].repeat((w * h) as usize);
+        let canvas = renderer.canvas(w, h).expect("canvas");
+        let draw = |t| {
+            let picture = |bytes| Rgba {
+                width: w,
+                height: h,
+                bytes,
+            };
+            renderer
+                .draw(
+                    &canvas,
+                    &[Layer::Transition {
+                        kind,
+                        t,
+                        outgoing: picture(&red),
+                        incoming: picture(&blue),
+                    }],
+                )
+                .expect("draw");
+            renderer.read(&canvas).expect("read")
+        };
+        let at = |frame: &[u8], x: u32, y: u32| {
+            let i = 4 * (y * w + x) as usize;
+            [frame[i], frame[i + 1], frame[i + 2]]
+        };
+        let is_red = |c: [u8; 3]| c[0] > 200 && c[2] < 40;
+        let is_blue = |c: [u8; 3]| c[2] > 200 && c[0] < 40;
+        let dark = |c: [u8; 3]| c.iter().all(|v| *v < 10);
+        // Halfway, the top-left card has turned over and the bottom-right
+        // one has not begun.
+        let half = draw(0.5);
+        assert!(is_blue(at(&half, 40, 60)), "{:?}", at(&half, 40, 60));
+        assert!(is_red(at(&half, 360, 180)), "{:?}", at(&half, 360, 180));
+        // A dark gap runs between the cards.
+        assert!(dark(at(&half, 79, 60)), "{:?}", at(&half, 79, 60));
+        assert!(!dark(at(&half, 77, 60)));
+        // Early, the first card is edge-on: dark behind it, its middle
+        // squeezed to a sliver, while a card further along is still whole.
+        let early = draw(0.225);
+        assert!(dark(at(&early, 20, 60)), "{:?}", at(&early, 20, 60));
+        assert!(is_red(at(&early, 280, 180)));
+        // On its way, a turning card is narrower: the card's sides go dark
+        // before its middle does.
+        let turning = draw(0.17);
+        assert!(dark(at(&turning, 3, 60)), "{:?}", at(&turning, 3, 60));
+        assert!(!dark(at(&turning, 40, 60)), "{:?}", at(&turning, 40, 60));
+        // The wave runs left to right: a card in the middle column turns
+        // after the first and before the last.
+        let order = |x: u32, y: u32| {
+            (0..=40)
+                .map(|step| f32::from(u8::try_from(step).expect("step")) / 40.0)
+                .find(|t| is_blue(at(&draw(*t), x, y)))
+                .expect("turns over")
+        };
+        let (first, middle, last) = (order(40, 60), order(200, 60), order(360, 180));
+        assert!(first < middle && middle < last, "{first} {middle} {last}");
+    }
+
+    #[test]
     fn every_transition_on_the_gpu_matches_the_cpu() {
         let Some(renderer) = Renderer::for_test().expect("a GPU is required") else {
             eprintln!("skipped: no GPU");

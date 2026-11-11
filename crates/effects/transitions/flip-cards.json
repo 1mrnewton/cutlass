@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "flip-cards",
+  "name": "Flip Cards",
+  "category": "Shape",
+  "duration": 0.6,
+  "cross": {"kind": 17, "count": 5, "angle": -25, "soft": 0.22, "edge": 0.008, "red": 0, "green": 0, "blue": 0}
+}

@@ -33,6 +33,41 @@ impl BiWeight {
     }
 }
 
+/// Weights for one prediction, clause 8.4.2.3.2: each sample is
+/// `((p·weight + 2^(shift−1)) >> shift) + offset`, or `p·weight + offset`
+/// when `shift` is 0, clipped.
+#[derive(Clone, Copy, Debug)]
+pub struct UniWeight {
+    pub weight: i32,
+    pub offset: i32,
+    pub shift: i32,
+}
+
+impl UniWeight {
+    /// Whether a weighted sample and its offset fit in 16 bits: the range
+    /// clause 7.4.3.2 gives 8-bit weights and offsets, and a little more.
+    pub(crate) fn fits(self) -> bool {
+        (-128..=128).contains(&self.weight)
+            && (-255..=255).contains(&self.offset)
+            && (0..=7).contains(&self.shift)
+    }
+}
+
+/// Whether a block of `size` weighted in place fits `dst`, with rows
+/// `dst_stride` apart: widths a multiple of 4 up to 16.
+pub(crate) fn scale_fits(dst: &[u8], dst_stride: usize, size: (usize, usize)) -> bool {
+    let (w, h) = size;
+    w > 0
+        && w <= 16
+        && w % 4 == 0
+        && h > 0
+        && dst_stride >= w
+        && (h - 1)
+            .checked_mul(dst_stride)
+            .and_then(|start| start.checked_add(w))
+            .is_some_and(|end| end <= dst.len())
+}
+
 /// One mixed sample, for the widths the row kernels leave over.
 #[inline(always)]
 pub(crate) fn weight_one(a: u8, b: u8, weight: BiWeight) -> u8 {

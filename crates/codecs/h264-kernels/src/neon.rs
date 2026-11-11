@@ -23,7 +23,7 @@ pub(crate) use crate::neon_mc::{
     avg_row, avg8, avg16, centre8, centre16, chroma8, half8, half16, raw8, raw16,
 };
 pub(crate) use crate::neon_qpel::{
-    avg_block, chroma_block, chroma_pair, luma_block, luma_pair, weight_block,
+    avg_block, chroma_block, chroma_pair, luma_block, luma_pair, scale_block, weight_block,
 };
 pub(crate) use crate::neon_residual::{dc_add, idct4_add};
 

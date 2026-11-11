@@ -10059,13 +10059,15 @@ fn mc_block<S: Sample>(
     } else {
         mix(slice, r0, r1, 1)
     };
-    // One reference stored as it is: predict straight into the picture.
-    if let Mix::Copy(list) = luma_mix {
+    // One reference: predict straight into the picture, and weight it
+    // there when it is weighted.
+    if let Mix::Copy(list) | Mix::Uni { from: list, .. } = luma_mix {
         let (reference, mv) = if list == 0 { (r0, mv0) } else { (r1, mv1) };
         let frame = reference_frame(dpb, slice, list, reference)?;
         let stride = pic.w;
         let dst = &mut pic.y[y * stride + x..];
         predict_block(dst, stride, frame, (x, y, w, h), mv);
+        scale_in_place(dst, stride, (w, h), luma_mix);
     } else if !(luma_mix.averages() && avg_luma(pic, dpb, slice, (x, y, w, h), motion)?) {
         let mut luma0 = [S::default(); 256];
         let mut luma1 = [S::default(); 256];
@@ -10095,12 +10097,16 @@ fn mc_block<S: Sample>(
             _ => (x / 2, y / 2),
         };
         let size = (cw, ch);
-        if let (Mix::Copy(list), Mix::Copy(_)) = (chroma_mix, chroma_v) {
+        if let (Mix::Copy(list) | Mix::Uni { from: list, .. }, Mix::Copy(_) | Mix::Uni { .. }) =
+            (chroma_mix, chroma_v)
+        {
             let (reference, mv) = if list == 0 { (r0, mv0) } else { (r1, mv1) };
             let frame = reference_frame(dpb, slice, list, reference)?;
             let at = origin.1 * stride + origin.0;
             let planes = (&mut pic.u[at..], &mut pic.v[at..]);
             predict_chroma(planes, stride, frame, (x, y), size, mv);
+            scale_in_place(&mut pic.u[at..], stride, size, chroma_mix);
+            scale_in_place(&mut pic.v[at..], stride, size, chroma_v);
             return Ok(());
         }
         if chroma == 1
@@ -10142,6 +10148,29 @@ fn mc_block<S: Sample>(
         );
     }
     Ok(())
+}
+
+/// A block of `size` predicted into `dst`, rows `stride` apart, weighted
+/// in place when `mix` weights one prediction; left as it is otherwise.
+fn scale_in_place<S: Sample>(dst: &mut [S], stride: usize, size: (usize, usize), mix: Mix) {
+    let Mix::Uni {
+        weight,
+        offset,
+        denom,
+        ..
+    } = mix
+    else {
+        return;
+    };
+    if S::scale_fast((&mut *dst, stride), size, (weight, offset, denom)) {
+        return;
+    }
+    let (w, h) = size;
+    for row in 0..h {
+        for sample in &mut dst[row * stride..row * stride + w] {
+            *sample = recon::weight_uni(*sample, weight, offset, denom);
+        }
+    }
 }
 
 /// The default average of two luma predictions written straight into the

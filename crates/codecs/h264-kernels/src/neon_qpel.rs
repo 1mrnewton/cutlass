@@ -21,11 +21,12 @@
 use core::arch::aarch64::{
     int16x4_t, int16x8_t, int32x4_t, uint8x8_t, uint8x16_t, vaddl_high_s16, vaddl_high_u8,
     vaddl_s16, vaddl_u8, vaddq_s32, vcombine_s16, vcombine_u8, vcombine_u16, vdup_n_s16, vdup_n_u8,
-    vdup_n_u32, vdupq_n_s32, vextq_u8, vget_high_u8, vget_lane_u32, vget_low_s16, vget_low_u8,
-    vld1_u8, vld1q_u8, vmlal_high_s16, vmlal_s16, vmlal_u8, vmlaq_n_s32, vmlaq_n_u16, vmlsq_n_s32,
-    vmlsq_n_u16, vmovl_u8, vmull_high_s16, vmull_s16, vmull_u8, vqmovn_u16, vqmovun_s32,
-    vqrshrun_high_n_s16, vqrshrun_n_s16, vqrshrun_n_s32, vreinterpret_u8_u32, vreinterpret_u32_u8,
-    vreinterpretq_s16_u16, vrhadd_u8, vrhaddq_u8, vrshlq_s32, vrshrn_n_u16, vst1_u8, vst1q_u8,
+    vdup_n_u32, vdupq_n_s16, vdupq_n_s32, vextq_u8, vget_high_u8, vget_lane_u32, vget_low_s16,
+    vget_low_u8, vld1_u8, vld1q_u8, vmlal_high_s16, vmlal_s16, vmlal_u8, vmlaq_n_s32, vmlaq_n_u16,
+    vmlsq_n_s32, vmlsq_n_u16, vmovl_u8, vmull_high_s16, vmull_s16, vmull_u8, vmulq_s16, vqaddq_s16,
+    vqmovn_u16, vqmovun_s16, vqmovun_s32, vqrshrun_high_n_s16, vqrshrun_n_s16, vqrshrun_n_s32,
+    vreinterpret_u8_u32, vreinterpret_u32_u8, vreinterpretq_s16_u16, vrhadd_u8, vrhaddq_u8,
+    vrshlq_s16, vrshlq_s32, vrshrn_n_u16, vst1_u8, vst1q_u8,
 };
 
 use crate::mc_block::{Block, Source, quarter_sources};
@@ -772,6 +773,47 @@ pub(crate) fn weight_block(
                     vcombine_u8(low, weigh8(vget_high_u8(x), vget_high_u8(y), mix))
                 },
                 |x, y| weigh8(x, y, mix),
+            );
+        }
+    }
+    true
+}
+
+/// See [`crate::mc::scale_block`]. A sample times a weight of at most 128
+/// fits 16 bits, and the rounding shift does not overflow on the way.
+#[target_feature(enable = "neon")]
+pub(crate) fn scale_block(
+    dst: &mut [u8],
+    dst_stride: usize,
+    size: (usize, usize),
+    weight: crate::mc_block::UniWeight,
+) -> bool {
+    if !weight.fits() || !crate::mc_block::scale_fits(dst, dst_stride, size) {
+        return false;
+    }
+    let (Ok(mul), Ok(shift), Ok(offset)) = (
+        i16::try_from(weight.weight),
+        i16::try_from(-weight.shift),
+        i16::try_from(weight.offset),
+    ) else {
+        return false;
+    };
+    let (mul, shift, offset) = (vdupq_n_s16(mul), vdupq_n_s16(shift), vdupq_n_s16(offset));
+    let scale = |samples: uint8x8_t| {
+        let product = vmulq_s16(vreinterpretq_s16_u16(vmovl_u8(samples)), mul);
+        vqmovun_s16(vqaddq_s16(vrshlq_s16(product, shift), offset))
+    };
+    let (w, h) = size;
+    let out = dst.as_mut_ptr();
+    for row in 0..h {
+        // SAFETY: `scale_fits` checked `h` rows of `w` in `dst`.
+        unsafe {
+            let at = out.add(row * dst_stride);
+            mix_row(
+                (at, at, at),
+                w,
+                |x, _| vcombine_u8(scale(vget_low_u8(x)), scale(vget_high_u8(x))),
+                |x, _| scale(x),
             );
         }
     }

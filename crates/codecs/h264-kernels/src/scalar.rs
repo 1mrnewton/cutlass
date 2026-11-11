@@ -364,3 +364,28 @@ fn pair(
     }
     true
 }
+
+/// See [`crate::mc::scale_block`].
+pub fn scale_block(
+    dst: &mut [u8],
+    dst_stride: usize,
+    size: (usize, usize),
+    weight: crate::mc_block::UniWeight,
+) -> bool {
+    if !weight.fits() || !crate::mc_block::scale_fits(dst, dst_stride, size) {
+        return false;
+    }
+    let (w, h) = size;
+    for row in 0..h {
+        for sample in &mut dst[row * dst_stride..row * dst_stride + w] {
+            let product = i32::from(*sample) * weight.weight;
+            let scaled = if weight.shift > 0 {
+                (product + (1 << (weight.shift - 1))) >> weight.shift
+            } else {
+                product
+            };
+            *sample = (scaled + weight.offset).clamp(0, 255) as u8;
+        }
+    }
+    true
+}

@@ -408,6 +408,17 @@ pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
         false
     }
 
+    /// The block of `size` at `dst`, rows `dst_stride` apart, weighted in
+    /// place by `weight` with `offset` after a rounding shift by `denom`,
+    /// with a vector kernel. `false` as for [`Self::predict_fast`].
+    fn scale_fast(
+        _dst: (&mut [Self], usize),
+        _size: (usize, usize),
+        _weight: (i32, i32, i32),
+    ) -> bool {
+        false
+    }
+
     /// The block predicted from `first` written to `dst` and, when
     /// `second` is there, averaged with the one predicted from it: luma at
     /// quarter offsets, or chroma at eighth offsets when `chroma` is set.
@@ -577,6 +588,20 @@ impl Sample for u8 {
 
     fn avg_fast(dst: &mut [Self], a: &[Self], b: &[Self]) -> bool {
         cutlass_h264_kernels::mc::avg_row(dst, a, b)
+    }
+
+    fn scale_fast(
+        dst: (&mut [Self], usize),
+        size: (usize, usize),
+        weight: (i32, i32, i32),
+    ) -> bool {
+        let (weight, offset, shift) = weight;
+        let weight = cutlass_h264_kernels::mc::UniWeight {
+            weight,
+            offset,
+            shift,
+        };
+        cutlass_h264_kernels::mc::scale_block(dst.0, dst.1, size, weight)
     }
 
     fn pair_fast(

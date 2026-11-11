@@ -4,7 +4,7 @@
 //! full samples in a line. Along a row the six inputs are six windows of
 //! that row, each one sample further right; down a column they are six rows.
 
-pub use crate::mc_block::{BiWeight, Block};
+pub use crate::mc_block::{BiWeight, Block, UniWeight};
 
 /// The rounded average of two predictions of `size` (width, height), whose
 /// rows are `size.0` apart, into `dst` with rows `dst_stride` apart.
@@ -17,6 +17,19 @@ pub fn avg_block(
     size: (usize, usize),
 ) -> bool {
     kernel!(avg_block(dst, dst_stride, a, b, size))
+}
+
+/// The block of `size` at `dst`, rows `dst_stride` apart, weighted in
+/// place: one prediction under explicit weights. Widths a multiple of 4 up
+/// to 16. `false` means nothing was done: another width, a block that does
+/// not fit `dst`, or weights outside [`UniWeight`]'s range.
+pub fn scale_block(
+    dst: &mut [u8],
+    dst_stride: usize,
+    size: (usize, usize),
+    weight: UniWeight,
+) -> bool {
+    kernel!(scale_block(dst, dst_stride, size, weight))
 }
 
 /// Two predictions mixed by `weight`, laid out as for [`avg_block`].
@@ -329,6 +342,33 @@ mod tests {
             assert!(super::chroma_pair(&mut fast, dst_stride, first, second));
             assert!(scalar::chroma_pair(&mut plain, dst_stride, first, second));
             assert_eq!(fast, plain, "chroma pair {}x{}", w / 2, h / 2);
+        }
+    }
+
+    #[test]
+    fn scaled_blocks_match_the_plain_ones() {
+        let mut rng = Lcg(19);
+        for round in 0..20_000u32 {
+            let w = 4 * (1 + (round % 4) as usize);
+            let h = 1 + (rng.next() % 16) as usize;
+            // The ends of each range, and values between.
+            let weight = super::UniWeight {
+                weight: [-126, 128, 2, 3, 127][(round / 4 % 5) as usize] - (rng.next() % 3) as i32,
+                offset: (rng.next() % 511) as i32 - 255,
+                shift: (rng.next() % 8) as i32,
+            };
+            let stride = 20;
+            let mut fast: Vec<u8> = (0..stride * 16).map(|_| rng.sample()).collect();
+            let mut plain = fast.clone();
+            let before = fast.clone();
+            assert!(super::scale_block(&mut fast, stride, (w, h), weight));
+            assert!(scalar::scale_block(&mut plain, stride, (w, h), weight));
+            assert_eq!(fast, plain, "{w}x{h} {weight:?}");
+            assert!(
+                fast.chunks(stride)
+                    .zip(before.chunks(stride))
+                    .all(|(row, old)| row[w..] == old[w..])
+            );
         }
     }
 

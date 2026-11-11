@@ -142,7 +142,6 @@ impl Shell {
 
     /// The selected clip's track, set up to be fixed at the playhead.
     fn fix_setup(&self) -> Result<Tracking, ShellError> {
-        let unavailable = || ShellError::Unavailable("the clip has no track to fix".to_owned());
         let segment_id = self.track_target()?;
         let draft = self.session_draft()?;
         let record = draft
@@ -154,7 +153,20 @@ impl Shell {
                     && raw.fields.get("segment_id").and_then(|v| v.as_str())
                         == Some(segment_id.as_str())
             })
-            .ok_or_else(unavailable)?;
+            .ok_or_else(|| ShellError::Unavailable("the clip has no track to fix".to_owned()))?;
+        self.record_setup(segment_id, record)
+    }
+
+    /// Track `record` of target `segment_id`, set up to be fixed at the
+    /// playhead: its mode, the clips that follow it, and the tracked box
+    /// there.
+    fn record_setup(
+        &self,
+        segment_id: SegmentId,
+        record: &RawMaterial,
+    ) -> Result<Tracking, ShellError> {
+        let unavailable = || ShellError::Unavailable("the clip has no track to fix".to_owned());
+        let draft = self.session_draft()?;
         let path = record_path(record).ok_or_else(unavailable)?;
         let anchor = record
             .fields
@@ -618,6 +630,201 @@ impl Shell {
         }
         Ok(segment_id)
     }
+}
+
+/// What a clip follows: the video clip tracked, its name, and whether the
+/// clip's mask follows rather than the clip.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Following {
+    pub target: SegmentId,
+    pub target_name: String,
+    pub by_mask: bool,
+}
+
+impl Shell {
+    /// What the selected clip follows, when it follows a track.
+    pub fn following(&self) -> Option<Following> {
+        let id = self.selected()?;
+        let draft = self.session_draft().ok()?;
+        let record = followed_record(draft, id)?;
+        let target = SegmentId::new(record.fields.get("segment_id")?.as_str()?);
+        let target_name = super::placed(draft, &target).map_or_else(
+            || "a removed clip".to_owned(),
+            |(s, _)| super::clip_name(draft, s),
+        );
+        let by_mask = record
+            .fields
+            .get("masks")
+            .and_then(|v| v.as_array())
+            .is_some_and(|ids| ids.iter().any(|v| v.as_str() == Some(id.as_str())));
+        Some(Following {
+            target,
+            target_name,
+            by_mask,
+        })
+    }
+
+    /// The video clip the selected text, sticker or shape is drawn over at
+    /// the playhead: the nearest one below it.
+    pub fn follow_target(&self) -> Result<SegmentId, ShellError> {
+        let id = self
+            .selected()
+            .ok_or_else(|| ShellError::Unavailable("select a text, sticker or shape".to_owned()))?
+            .clone();
+        let draft = self.session_draft()?;
+        video_below(draft, &id, self.playhead())
+    }
+
+    /// Start setting up a track for the selected text, sticker or shape:
+    /// the video under it is tracked and the item follows.
+    pub fn start_following(&mut self) -> Result<(), ShellError> {
+        let target = self.follow_target()?;
+        let follower = self.selected().cloned().ok_or_else(nothing_selected)?;
+        self.refuse_locked(&follower)?;
+        self.picking = None;
+        self.pen = None;
+        self.tracking = Some(Tracking {
+            segment_id: target,
+            time: self.playhead(),
+            mode: TrackMode::Object,
+            canvas_box: None,
+            followers: vec![follower],
+            masks: Vec::new(),
+            fixing: None,
+        });
+        Ok(())
+    }
+
+    /// Start setting up a track for the selected video clip's mask: the
+    /// clip itself is tracked and its mask follows.
+    pub fn start_mask_following(&mut self) -> Result<(), ShellError> {
+        let target = self.track_target()?;
+        self.picking = None;
+        self.pen = None;
+        self.tracking = Some(Tracking {
+            segment_id: target.clone(),
+            time: self.playhead(),
+            mode: TrackMode::Object,
+            canvas_box: None,
+            followers: Vec::new(),
+            masks: vec![target],
+            fixing: None,
+        });
+        Ok(())
+    }
+
+    /// Start fixing the track the selected clip follows, at the playhead.
+    pub fn start_fixing_following(&mut self) -> Result<(), ShellError> {
+        let id = self.selected().cloned().ok_or_else(nothing_selected)?;
+        self.refuse_locked(&id)?;
+        let draft = self.session_draft()?;
+        let record = followed_record(draft, &id)
+            .ok_or_else(|| ShellError::Unavailable("the clip follows no track".to_owned()))?;
+        let target = record
+            .fields
+            .get("segment_id")
+            .and_then(|v| v.as_str())
+            .map(SegmentId::new)
+            .ok_or_else(|| ShellError::Unavailable("the clip follows no track".to_owned()))?;
+        let on_target = super::placed(draft, &target).is_some_and(|(segment, _)| {
+            (segment.target.start.0..segment.target.end().0).contains(&self.playhead().0)
+        });
+        if !on_target {
+            return Err(ShellError::Unavailable(
+                "move the playhead onto the tracked video".to_owned(),
+            ));
+        }
+        let record = record.clone();
+        let tracking = self.record_setup(target, &record)?;
+        self.picking = None;
+        self.pen = None;
+        self.tracking = Some(tracking);
+        Ok(())
+    }
+
+    /// Stop the selected clip following its track, in one undo step.
+    pub fn stop_following(&mut self) -> Result<(), ShellError> {
+        let id = self.selected().cloned().ok_or_else(nothing_selected)?;
+        if self
+            .tracking
+            .as_ref()
+            .is_some_and(|t| t.followers.contains(&id) || t.masks.contains(&id))
+        {
+            self.tracking = None;
+        }
+        self.apply(Request::Untrack { segment_id: id })
+    }
+}
+
+fn nothing_selected() -> ShellError {
+    ShellError::Unavailable("select a text, sticker or shape".to_owned())
+}
+
+/// The `video_tracking` record clip `id` lists.
+fn followed_record<'a>(draft: &'a Draft, id: &SegmentId) -> Option<&'a RawMaterial> {
+    let (segment, _) = super::placed(draft, id)?;
+    draft
+        .materials
+        .video_trackings
+        .iter()
+        .find(|raw| raw.kind == VIDEO_TRACKING && segment.extra_material_refs.contains(&raw.id))
+}
+
+/// The video clip drawn nearest below clip `id` at `time`: clips are drawn
+/// in order of render index, then row, then place on the row.
+fn video_below(draft: &Draft, id: &SegmentId, time: Micros) -> Result<SegmentId, ShellError> {
+    let key = |t: usize, s: usize| (draft.tracks[t].segments[s].render_index, t, s);
+    let mut own = None;
+    for (t, track) in draft.tracks.iter().enumerate() {
+        if let Some(s) = track.segments.iter().position(|segment| &segment.id == id) {
+            own = Some((t, s));
+        }
+    }
+    let (t, s) =
+        own.ok_or_else(|| ShellError::Unavailable("the clip is not on the timeline".to_owned()))?;
+    if !matches!(
+        draft.tracks[t].kind,
+        TrackType::Text | TrackType::Sticker | TrackType::Video
+    ) {
+        return Err(ShellError::Unavailable(
+            "only a text, sticker or shape can follow".to_owned(),
+        ));
+    }
+    let on = |segment: &cutlass_model::Segment| {
+        (segment.target.start.0..segment.target.end().0).contains(&time.0)
+    };
+    if !on(&draft.tracks[t].segments[s]) {
+        return Err(ShellError::Unavailable(
+            "move the playhead onto the clip".to_owned(),
+        ));
+    }
+    let mine = key(t, s);
+    draft
+        .tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, track)| track.kind == TrackType::Video)
+        .flat_map(|(ti, track)| {
+            track
+                .segments
+                .iter()
+                .enumerate()
+                .map(move |(si, seg)| (ti, si, seg))
+        })
+        .filter(|(ti, si, segment)| {
+            &segment.id != id
+                && on(segment)
+                && key(*ti, *si) < mine
+                && matches!(
+                    draft.materials.get(segment.material_id.as_str()),
+                    Some(MaterialRef::Video(video)) if video.kind != "photo"
+                )
+        })
+        .max_by_key(|(ti, si, _)| key(*ti, *si))
+        .map(|(_, _, segment)| segment.id.clone())
+        .ok_or_else(|| {
+            ShellError::Unavailable("put it over a video clip at the playhead".to_owned())
+        })
 }
 
 /// Which way to track a fix at `time` of a track anchored at `anchor`:

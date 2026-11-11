@@ -5,17 +5,18 @@
 //! says what it follows, a frame can be fixed by drawing the box again,
 //! and Stop following takes the motion off in one undo step.
 //!
-//! Finding a face, a body or a hand by itself comes later: Custom, a box
-//! drawn by hand, is the way in for now.
+//! Face, Body and Hand find one at the playhead with a detector and box
+//! it; Custom takes a click on the subject or a box drawn by hand.
 
 use egui::{RichText, Ui};
 
 use cutlass_eval::TrackSpan;
+use cutlass_vision::Part;
 
 use crate::shell::Shell;
-use crate::{tokens, ui};
+use crate::ui;
 
-use super::inspector::{InspectorState, LATER, ROW_GAP, label_row, later_badge, note, send};
+use super::inspector::{InspectorState, ROW_GAP, label_row, later_badge, note, send};
 
 /// The ways to track, by the reference's names.
 const DIRECTIONS: [(TrackSpan, &str); 3] = [
@@ -23,6 +24,24 @@ const DIRECTIONS: [(TrackSpan, &str); 3] = [
     (TrackSpan::After, "Forward"),
     (TrackSpan::Before, "Backward"),
 ];
+
+/// What the detectors find, by the tiles' names.
+const PARTS: [(Part, &str); 3] = [
+    (Part::Face, "Face"),
+    (Part::Body, "Body"),
+    (Part::Hand, "Hand"),
+];
+
+/// Find `part` for the selected item: start a track for it first unless
+/// one is `live`.
+fn find(shell: &mut Shell, part: Part, live: bool) {
+    send(shell, |shell| {
+        if !live {
+            shell.start_following()?;
+        }
+        shell.find_track_part(part)
+    });
+}
 
 /// How the tiles at the top of the tab read.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -71,18 +90,39 @@ pub(super) fn follow_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorSt
         ui.spacing_mut().item_spacing = egui::Vec2::splat(6.0);
         match tiles {
             Tiles::Subjects => {
-                ui.add_enabled_ui(false, |ui| {
-                    for name in ["Face", "Body", "Hand"] {
-                        ui.add_sized([64.0, 48.0], ui::Button::new(name).text_size(11.0))
-                            .on_disabled_hover_text(LATER);
+                let following = matches!(stage, Stage::Following(_));
+                let found = shell.tracking().and_then(|t| t.found);
+                for (part, name) in PARTS {
+                    let ready = shell.detector_ready(part);
+                    let tile = ui
+                        .add_enabled(
+                            ready && !following,
+                            ui::Button::new(name)
+                                .text_size(11.0)
+                                .on(found == Some(part))
+                                .min_size(egui::vec2(64.0, 48.0)),
+                        )
+                        .on_hover_text(format!("Find the {} at the playhead", name.to_lowercase()))
+                        .on_disabled_hover_text(if ready {
+                            "Stop following first".to_owned()
+                        } else {
+                            format!(
+                                "The {} detector is not on this machine",
+                                name.to_lowercase()
+                            )
+                        });
+                    if tile.clicked() {
+                        find(shell, part, live);
                     }
-                });
+                }
                 if ui
                     .add_sized(
                         [64.0, 48.0],
-                        ui::Button::new("Custom").text_size(11.0).on(live),
+                        ui::Button::new("Custom")
+                            .text_size(11.0)
+                            .on(matches!(stage, Stage::Drawing { .. }) && found.is_none()),
                     )
-                    .on_hover_text("Draw a box around what to follow")
+                    .on_hover_text("Click the subject or draw a box around it")
                     .clicked()
                     && !live
                 {
@@ -104,23 +144,13 @@ pub(super) fn follow_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorSt
         }
     });
     ui.add_space(ROW_GAP);
-    if tiles == Tiles::Subjects {
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new("Face, Body and Hand")
-                    .size(11.0)
-                    .color(tokens::FAINT),
-            );
-            later_badge(ui);
-        });
-    }
     match stage {
         Stage::Free => {
             let reason = shell.follow_target().err();
             note(
                 ui,
                 &reason.map_or_else(
-                    || "Pick Custom, then click the subject on the preview or draw a box around it.".to_owned(),
+                    || "Pick Face, Body or Hand to find one at the playhead, or Custom to click the subject or draw a box around it.".to_owned(),
                     |error| format!("To track, {error}."),
                 ),
             );
@@ -199,6 +229,30 @@ fn drawing(
         (true, _) => format!("Tracking {target}. Click or drag again to change the box."),
     };
     note(ui, &text);
+    if what == "mask" {
+        label_row(ui, "Find", |ui| {
+            let found = shell.tracking().and_then(|t| t.found);
+            for (part, name) in PARTS {
+                let ready = shell.detector_ready(part);
+                if ui
+                    .add_enabled(
+                        ready,
+                        ui::Button::new(name)
+                            .text_size(12.0)
+                            .on(found == Some(part)),
+                    )
+                    .on_hover_text(format!("Find the {} at the playhead", name.to_lowercase()))
+                    .on_disabled_hover_text(format!(
+                        "The {} detector is not on this machine",
+                        name.to_lowercase()
+                    ))
+                    .clicked()
+                {
+                    send(shell, |shell| shell.find_track_part(part));
+                }
+            }
+        });
+    }
     if !fixing {
         let current = shell.tracking().map_or(TrackSpan::Both, |t| t.direction);
         if let Some(span) = direction_row(ui, current) {

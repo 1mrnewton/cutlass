@@ -871,6 +871,8 @@ pub struct Shell {
     speech: RefCell<Option<ParakeetUnified>>,
     /// The selection model, loaded on the first click-to-select.
     vision: Option<select::VisionModel>,
+    /// The face, body and hand detectors loaded so far.
+    detectors: Vec<cutlass_vision::Detector>,
     /// The object click-to-select is picking, while the preview takes clicks.
     picking: Option<select::Picking>,
     /// A track being set up on the selected clip.
@@ -1007,6 +1009,7 @@ impl Shell {
             next_id: 0,
             speech: RefCell::new(None),
             vision: None,
+            detectors: Vec::new(),
             picking: None,
             tracking: None,
             pen: None,
@@ -10191,6 +10194,141 @@ mod tests {
             desktop.following().is_some(),
             "notice {:?}",
             desktop.notice()
+        );
+    }
+
+    /// A movie from `local-files` trimmed to `seconds`, opened, or `None`
+    /// with a note when it or the detectors are missing.
+    fn detect_movie(
+        temp: &Temp,
+        file: &str,
+        size: (u32, u32),
+        seconds: i64,
+    ) -> Option<(Shell, SegmentId)> {
+        let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files")
+            .join(file);
+        let here = [
+            cutlass_vision::Part::Face,
+            cutlass_vision::Part::Body,
+            cutlass_vision::Part::Hand,
+        ]
+        .into_iter()
+        .all(super::select::detector_here);
+        if !movie.is_file() || !here {
+            eprintln!("skipped: {file} or the detectors are missing");
+            return None;
+        }
+        let mut draft = crate::open_movie::movie_draft(&movie, size.0, size.1, false).unwrap();
+        let length = seconds * 1_000_000;
+        draft.tracks[0].segments[0].target = TimeRange::new(0, length);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, length));
+        draft.materials.videos[0].duration = Micros(length);
+        draft.duration = Micros(length);
+        let id = draft.tracks[0].segments[0].id.clone();
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        Some((desktop, id))
+    }
+
+    fn finish(desktop: &mut Shell, what: &str) {
+        let started = std::time::Instant::now();
+        let until = started + std::time::Duration::from_secs(600);
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        eprintln!(
+            "{what} in {:.1}s; notice {:?}",
+            started.elapsed().as_secs_f64(),
+            desktop.notice()
+        );
+    }
+
+    #[test]
+    #[ignore = "runs the body detector and the tracker on a real movie"]
+    fn body_finds_the_walking_man_and_a_sticker_and_a_mask_follow_him() {
+        let temp = Temp::new();
+        let Some((mut desktop, movie)) =
+            detect_movie(&temp, "16929689_1920_1080_30fps.mp4", (1920, 1080), 4)
+        else {
+            return;
+        };
+        desktop.seek(Micros(1_000_000));
+        desktop.add_sticker("sticker:heart").unwrap();
+        desktop.start_following().unwrap();
+        desktop.find_track_part(cutlass_vision::Part::Body).unwrap();
+        finish(&mut desktop, "body found");
+        let tracking = desktop.tracking().unwrap();
+        assert_eq!(tracking.found, Some(cutlass_vision::Part::Body));
+        let ((x0, y0), (x1, y1)) = tracking.canvas_box.unwrap();
+        eprintln!("body box ({x0:.0}, {y0:.0}) to ({x1:.0}, {y1:.0})");
+        // Head to foot around the shirt, about (997, 517).
+        assert!(x0 < 997.0 && 997.0 < x1 && y0 < 450.0 && y1 > 900.0);
+        desktop.run_tracking().unwrap();
+        finish(&mut desktop, "tracked");
+        assert!(desktop.following().is_some());
+        // The mask on the movie, from the Mask page's Find.
+        desktop.select(Some(movie.clone()));
+        desktop.seek(Micros(1_000_000));
+        desktop.start_mask_following().unwrap();
+        desktop.find_track_part(cutlass_vision::Part::Body).unwrap();
+        finish(&mut desktop, "body found for the mask");
+        desktop.run_tracking().unwrap();
+        finish(&mut desktop, "mask tracked");
+        assert!(desktop.following().is_some_and(|f| f.by_mask));
+    }
+
+    #[test]
+    #[ignore = "runs the face and hand detectors and the tracker on real movies"]
+    fn face_and_hand_find_their_subject_and_a_text_follows_the_face() {
+        let temp = Temp::new();
+        let Some((mut desktop, _)) =
+            detect_movie(&temp, "9489379-uhd_4096_2160_25fps.mp4", (4096, 2160), 3)
+        else {
+            return;
+        };
+        desktop.seek(Micros(0));
+        let card = cutlass_editor::title_style("title:default")
+            .unwrap()
+            .card_id();
+        desktop.add_title(&card).unwrap();
+        desktop.seek(Micros(2_000_000));
+        desktop.start_following().unwrap();
+        desktop.find_track_part(cutlass_vision::Part::Face).unwrap();
+        finish(&mut desktop, "face found");
+        let ((x0, y0), (x1, y1)) = desktop.tracking().unwrap().canvas_box.unwrap();
+        eprintln!("face box ({x0:.0}, {y0:.0}) to ({x1:.0}, {y1:.0})");
+        // The canvas is the movie's 4096 by 2160; at 1280 wide the face was
+        // about (549, 140) to (728, 378).
+        let k = 4096.0 / 1280.0;
+        assert!((x0 - 549.0 * k).abs() < 60.0 && (y1 - 378.0 * k).abs() < 60.0);
+        desktop.run_tracking().unwrap();
+        finish(&mut desktop, "face tracked");
+        assert!(desktop.following().is_some());
+
+        let temp = Temp::new();
+        let Some((mut desktop, _)) =
+            detect_movie(&temp, "6905095-hd_1920_1080_25fps.mp4", (1920, 1080), 3)
+        else {
+            return;
+        };
+        desktop.seek(Micros(0));
+        desktop.add_sticker("sticker:heart").unwrap();
+        desktop.seek(Micros(2_000_000));
+        desktop.start_following().unwrap();
+        desktop.find_track_part(cutlass_vision::Part::Hand).unwrap();
+        finish(&mut desktop, "hand found");
+        let ((x0, y0), (x1, y1)) = desktop.tracking().unwrap().canvas_box.unwrap();
+        eprintln!("hand box ({x0:.0}, {y0:.0}) to ({x1:.0}, {y1:.0})");
+        // At 1280 wide her palms were near (632, 277) and (496, 229).
+        let k = 1920.0 / 1280.0;
+        let (cx, cy) = ((x0 + x1) / 2.0 / k, (y0 + y1) / 2.0 / k);
+        assert!(
+            [(632.0, 277.0), (496.0, 229.0)]
+                .iter()
+                .any(|(x, y)| (cx - x).abs() < 25.0 && (cy - y).abs() < 25.0),
+            "({cx}, {cy})"
         );
     }
 

@@ -35,6 +35,9 @@ pub struct Tracking {
     /// Which way from the drawn frame to track a new track. A fix always
     /// tracks away from the track's anchor.
     pub direction: TrackSpan,
+    /// What a detector found the box around, when one did; `None` for a
+    /// box drawn or clicked by hand.
+    pub found: Option<cutlass_vision::Part>,
 }
 
 /// A track a new box fixes: its anchor and its path in canvas units.
@@ -124,6 +127,7 @@ impl Shell {
             masks: Vec::new(),
             fixing: None,
             direction: TrackSpan::Both,
+            found: None,
         });
         Ok(())
     }
@@ -217,6 +221,7 @@ impl Shell {
             masks,
             fixing: Some(Fixing { anchor, path }),
             direction: TrackSpan::Both,
+            found: None,
         })
     }
 
@@ -269,6 +274,7 @@ impl Shell {
             ));
         }
         tracking.canvas_box = Some((low, high));
+        tracking.found = None;
         Ok(())
     }
 
@@ -716,6 +722,7 @@ impl Shell {
             masks: Vec::new(),
             fixing: None,
             direction: TrackSpan::Both,
+            found: None,
         });
         Ok(())
     }
@@ -735,6 +742,7 @@ impl Shell {
             masks: vec![target],
             fixing: None,
             direction: TrackSpan::Both,
+            found: None,
         });
         Ok(())
     }

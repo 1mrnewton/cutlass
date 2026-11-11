@@ -6,7 +6,7 @@
 //! the file carries alpha. An `ICCP` profile is passed through on the
 //! picture and not applied.
 //!
-//! The support record is `STATUS.md` next to this crate.
+//! The support record is `README.md` next to this crate.
 
 #![forbid(unsafe_code)]
 

@@ -2,7 +2,7 @@
 //!
 //! A packet is one whole frame, header included, as `cutlass-mp3-container`
 //! returns it. Layers I and II are refused. The support record is
-//! `STATUS.md` next to this crate.
+//! `README.md` next to this crate.
 
 #![forbid(unsafe_code)]
 

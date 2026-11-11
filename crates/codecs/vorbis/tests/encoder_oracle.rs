@@ -1,6 +1,6 @@
 //! The Vorbis encoder against libvorbis and FFmpeg's native decoder.
 //!
-//! Gates, fixed in `STATUS.md` and not lowered after a failure:
+//! Gates, fixed in `README.md` and not lowered after a failure:
 //!
 //! 1. Every item, muxed by `OggMux`, decodes in libvorbis and in FFmpeg's
 //!    native Vorbis decoder to exactly the input's sample count. Both agree

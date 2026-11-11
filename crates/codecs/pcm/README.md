@@ -1,141 +1,126 @@
 # cutlass-pcm
 
-## What this crate is
+`cutlass-pcm` decodes and encodes raw PCM sound in safe Rust (`#![forbid(unsafe_code)]`). A packet is a block of samples a container has already framed; the crate does not read WAV, AIFF or CAF headers.
 
-`cutlass-pcm` converts raw PCM packets to and from the mix buffer. The packet is samples a container has already framed. The crate is native safe Rust, with `unsafe` forbidden. The crate builds without FFmpeg. The benchmark shells out to an installed `ffmpeg` and uses it as an oracle.
+The desktop app registers the decoder and the encoder after the platform codecs. On macOS the platform crate also registers PCM and is asked first, so this crate opens when the platform one declines, for example for a 64-bit float layout. On Windows and Linux it is the only PCM codec the app registers.
 
-`PcmDecoder` and `PcmEncoder` are the software PCM codec. `register_decoders` and `register_encoders` add them to the decode and encode factories.
+## What it supports
 
-## Specification
+Every coding below is accepted little-endian or big-endian, interleaved or planar. Planar bytes are one plane per channel, in channel order. Decoded sound is always interleaved.
 
-Integer and float layouts follow WAVE PCM and IEEE 754. `Layout` names the coding, byte order, and plane order. The container owns the RIFF header.
+| Coding | Decodes to | Encodes from |
+| --- | --- | --- |
+| Signed 16-bit | `SampleFormat::I16`, the same bits | `I16`, the same bits |
+| Signed 24-bit, three bytes | `SampleFormat::F32`, divided by 8388607 | refused |
+| Signed 32-bit | `SampleFormat::F32`, divided by 2147483647 | refused |
+| 32-bit float | `SampleFormat::F32`, the same bits | `F32`, the same bits |
+| 64-bit float | `SampleFormat::F32`, narrowed with `as f32` | `F32`, widened with `f64::from` |
 
-- WAVE format tag `0x0001`: signed 16-bit, packed signed 24-bit, and signed 32-bit two's complement. Positive full scale is the largest positive integer of that width: 32767, 8388607, and 2147483647. Packed 24-bit is three bytes.
-- WAVE format tag `0x0003`: IEEE 754 binary32 and binary64. Float full scale is 1.0. Finite values outside ±1 are kept. A non-finite value fails the frame.
-- `Endian` is little or big. `Arrangement` is interleaved or planar. Planar bytes are one plane per channel, concatenated in channel order. Decode returns interleaved frames.
+Integer full scale is the largest positive value of the width, so the most negative 24-bit code decodes slightly below -1. Finite floats outside ±1 are kept.
 
-The rules come from the IBM and Microsoft *Multimedia Programming Interface and Data Specifications 1.0* (August 1991) for WAVE PCM, Microsoft `WAVEFORMATEX` tags `0x0001` and `0x0003`, and IEEE Std 754-2019.
+The layout is three bytes in `CodecParams.extra`, which the container writes:
 
-A length that is not a whole number of frames fails as a truncated PCM frame. `drain` returns no packets and no audio. The decoder has no delay.
+| Byte | Values |
+| --- | --- |
+| 0, coding | 1 s16, 2 s24, 3 s32, 4 f32, 5 f64 |
+| 1, byte order | 0 little, 1 big |
+| 2, arrangement | 0 interleaved, 1 planar |
 
-## API
+An empty `extra` follows `CodecParams.sample_format`: `I16` is interleaved little-endian s16 and `F32` is interleaved little-endian f32.
 
-Open with `CodecParams` for `CodecId::Pcm`, a sample rate, and a `ChannelLayout`. `Layout::to_extra` stores the coding, endian, and arrangement in `CodecParams.extra`.
+What is refused:
+
+| Input | Error |
+| --- | --- |
+| Coding 6 (8-bit), 7 (A-law), 8 (mu-law), 9 (s64), 10 (24-bit in a 32-bit word), or any other coding byte | `Unsupported` naming it |
+| Encoding s24 or s32 | `Unsupported { what: "s24 encode" }`, `"s32 encode"` |
+| `extra` that is not empty and not three bytes; a bad byte-order or arrangement byte | `Malformed` |
+| Empty `extra` and no `sample_format` | `Unsupported { what: "pcm layout" }` |
+| A `sample_format` that is not what the coding decodes to | `InvalidApi { what: "pcm sample format" }` |
+| A float sample that is not finite, on decode or encode | `NonFinite` |
+| A packet that is not a whole number of frames | `Truncated { what: "pcm frame" }` |
+| An empty packet | `InvalidApi { what: "empty packet" }` |
+| A `SideData::Config` that differs from the open layout | `Unsupported { what: "configuration change" }` |
+| Encoder input with another rate, channel layout or sample format | `InvalidApi` |
+| A picture pushed to the encoder | `Unsupported` |
+
+A partial trailing frame is an error, not silence and not a dropped tail. A failed packet leaves the decoder usable for the next one.
+
+## Using it
+
+- `PcmDecoder::open(&CodecParams)` and `PcmEncoder::open(&CodecParams)` take `CodecId::Pcm`, a sample rate, a `ChannelLayout` and the layout bytes. `layout()` returns the `Layout` that was opened.
+- `Layout::new(Coding, Endian, Arrangement)` describes a layout and `Layout::to_extra` gives its three bytes.
+- `register_decoders` and `register_encoders` add the crate to a `DecodeFactory` and an `EncodeFactory`.
+
+`Decoder::push` returns one `Output::Audio` with the packet's time. `Encoder::push` returns one packet for a buffer with samples and none for an empty buffer; packet times count samples from zero. PCM has no delay, so `drain` returns nothing on both sides. `Encoder::reset` sets the sample count back to zero.
 
 ```rust
+use cutlass_decode::{ChannelLayout, CodecId, CodecParams, Decoder, Packet, SampleFormat};
+use cutlass_encode::{AudioInput, Encoder};
+use cutlass_pcm::{Arrangement, Coding, Endian, Layout, PcmDecoder, PcmEncoder};
+
 let spec = Layout::new(Coding::S16, Endian::Little, Arrangement::Interleaved);
 let mut params = CodecParams::audio(CodecId::Pcm, 48_000, ChannelLayout::stereo());
 params.extra = spec.to_extra().to_vec();
 params.sample_format = Some(SampleFormat::I16);
 
 let mut decoder = PcmDecoder::open(&params)?;
-let outputs = decoder.push(&packet)?;
+let outputs = decoder.push(&Packet::audio(bytes, 0, frames, 48_000))?;
 
 let mut encoder = PcmEncoder::open(&params)?;
 let packets = encoder.push(&AudioInput { pcm })?;
 ```
 
-`CodecParams::audio` starts `sample_format` at `SampleFormat::F32`. Set `SampleFormat::I16` for s16. Empty `extra` with `I16` means interleaved little-endian s16. Empty `extra` with `F32` means interleaved little-endian f32. When both `extra` and `sample_format` are set, the format must be the coding's output format.
+`CodecParams::audio` sets `sample_format` to `F32`, so set `I16` for 16-bit PCM as above. `examples/roundtrip.rs` is a complete program: `cargo run --release -p cutlass-pcm --example roundtrip`.
 
-`extra` is empty or exactly three bytes:
+## How it is tested
 
-| Byte | Values |
-| --- | --- |
-| 0 coding | 1 s16, 2 s24, 3 s32, 4 f32, 5 f64 |
-| 1 endian | 0 little, 1 big |
-| 2 arrangement | 0 interleaved, 1 planar |
+All tests are unit tests inside `src/`; run them with `cargo test -p cutlass-pcm`.
 
-`Decoder::push` takes one `Packet` and returns one `Output::Audio`. `Encoder::push` of a non-empty buffer returns one `Packet`. An empty buffer returns no packet. `Pcm.samples` is the frame count. The buffer is interleaved. `Decoder::reset` keeps the open layout. `Encoder::reset` zeroes the sample clock. A `SideData::Config` whose bytes differ from the open extra fails that push.
+- Known byte patterns for each coding, both byte orders and planar input, including full scale, the most negative code, negative zero and loud finite floats.
+- Round trips: s16, f32 and f64 encode and decode back to the same samples, and random s16 buffers keep every sample.
+- Errors: partial frames, short buffers, overflowing lengths, non-finite floats, refused codings, and that a failed push changes nothing for the next push.
+- Against FFmpeg (`ffmpeg_reads_an_independent_bitstream`): FFmpeg reads encoded s16 and f32 packets back unchanged, and FFmpeg's widening of 24-bit samples matches the decoder's scale. Skipped with a line on stderr when `ffmpeg` is not installed; set `PCM_REQUIRE_ORACLES` to make that a failure.
+- A separate measurement found that a 16-bit WAV file decodes to the same bytes as FFmpeg's output.
+- `local_files_match_an_independent_pcm_dump` decodes FFmpeg's 16-bit dump of two named files from a local media folder that is not in the repository. It is skipped when the folder is missing.
 
-## Support
+Not run by default: `thirty_minute_decoder_campaign` and `bounded_encoder_campaign` (seeded random input; `PCM_FUZZ_SECS` and `PCM_ENCODER_FUZZ_SECS` set the run lengths) and `release_decode_and_encode_throughput` are `#[ignore]`. No result of them is recorded here.
 
-Each coding below accepts either endian and either arrangement.
+## Speed against FFmpeg
 
-| Coding | Decode | Encode |
+Measured on 10 November 2026 at commit `ed0743d2`, on an Apple M5 Pro (18 cores, 48 GB) running macOS 27.0.1, against FFmpeg 8.1.1. Built with `cargo build --release` and rustc 1.99.1.
+
+**Decode, pcm.** Input: 5 minutes of stereo sound at 44,100 Hz (53 MB), written by FFmpeg with `-c:a pcm_s16le`.
+
+|  | Cutlass | FFmpeg (`pcm_s16le`) |
+| --- | ---: | ---: |
+| Wall time | 9.81 s | 0.04 s |
+| Speed | 31× real time | 7,500× real time |
+| CPU time | 9.79 s | 0.03 s |
+| Peak memory | 2.9 MB | 13 MB |
+| Threads allowed | 1 | 1 |
+
+Cutlass is **245.2× slower** than FFmpeg here. Both decoders produced exactly the same samples.
+
+How it was measured: both sides get the same input from disk, do all of the work, and throw the result away. Each side is a whole process timed with `/usr/bin/time -l`, start-up included, run five times in turn; the tables show the median run. FFmpeg is given as many threads as the Rust code used. The Rust side is [`tools/media-bench`](../../../tools/media-bench), which registers only the Rust codecs. For decoding and packet reading the FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which calls libavformat and libavcodec directly; for encoding it is the `ffmpeg` command. The pictures come from a 4K street scene scaled to 1920×1080, and the sound from a music recording.
+
+To run it again: `cargo build --release -p media-bench`, then `python3 scripts/bench_media.py --video <clip> --audio <song> --work <folder>`.
+
+## Limits and gaps
+
+| Limit | Value | Error |
 | --- | --- | --- |
-| s16 | `SampleFormat::I16`, the same bits | the same bits |
-| s24, three bytes | `SampleFormat::F32`, divide by 8388607 | refused |
-| s32 | `SampleFormat::F32`, divide by 2147483647 | refused |
-| f32 | `SampleFormat::F32`, the same bits | the same bits |
-| f64 | `SampleFormat::F32` with `as f32` | `f64::from` of each f32 sample |
+| Packet | 16 MiB | `Limit { what: "packet bytes" }` |
+| Decoded or encoded buffer | 32 MiB | `Limit { what: "allocation" }` |
+| Sample rate | 1 to 384000 Hz | `InvalidApi` at 0, `Limit` above |
+| Channels | 1 to 8, the bound of `ChannelLayout` | `InvalidApi` when the layout is missing |
 
-The most negative s24 code stays below -1. The most negative s32 code becomes -1 in f32.
+- 8-bit PCM, A-law, mu-law, 64-bit integers and 24-bit samples stored in 32-bit words are not decoded.
+- 24-bit and 32-bit integer PCM cannot be encoded. They decode to `f32`, and writing them back would have to quantize.
+- 32-bit integers decode to `f32`, which has a 24-bit mantissa, so their low bits are rounded. The most negative 32-bit code decodes to exactly -1.
+- Resampling, dither and channel remixing are outside the crate.
+- Samples are converted one at a time through a checked closure; there is no bulk copy path for layouts that already match the machine's byte order.
 
-| Limit | Value |
-| --- | --- |
-| Packet | 16 MiB |
-| Decoded or encoded buffer | 32 MiB |
-| Sample rate | 1 through 384000 Hz |
-| Channels | 1 through 8, from `ChannelLayout` |
+## Specifications
 
-8-bit PCM, A-law, mu-law, s64, and 24-bit samples stored in a 32-bit word are refused. An empty packet is refused. A partial trailing frame is refused.
-
-## Accuracy
-
-The benchmark in Performance decoded ffmpeg's s16le stereo payload and compared every i16 sample. The stdout line is `max abs sample delta 0`, so that buffer is bit-exact. The encoder wrote the same bytes. ffmpeg accepted those bytes and read the same s16le payload back. That check ran before the timed passes.
-
-s16 copies the integer bits. f32 copies finite sample bits. f64 narrows with `as f32` on decode and widens with `f64::from` on encode. s24 and s32 decode by the divisions in Support, and the stored value is f32. This run measured the s16le buffer only.
-
-## Performance
-
-One s16le stereo payload. The command was `cargo bench -p cutlass-pcm`.
-
-`date` at the end of that run:
-
-```text
-Thu Oct 29 21:06:06 GMT 2026
-```
-
-`sysctl -n machdep.cpu.brand_string`:
-
-```text
-Apple M5 Pro
-```
-
-`ffmpeg -version`, first line, binary `/opt/homebrew/bin/ffmpeg`:
-
-```text
-ffmpeg version 8.1.1 Copyright (c) 2000-2026 the FFmpeg developers
-```
-
-Bench stdout:
-
-```text
-s16le stereo, 48000 Hz, 48000 frames, 96000 samples, 192000 bytes
-max abs sample delta 0
-ffmpeg accepted the encoded bytes
-median of 3 after 1 warmup
-cutlass times bytes in memory
-ffmpeg time includes process startup
-ffmpeg rows convert pcm_s16le to pcm_s16le
-cutlass decode median 0.000036 s min 0.000035 s max 0.000036 s
-ffmpeg decode median 0.020225 s min 0.020133 s max 0.020420 s
-cutlass encode median 0.000114 s min 0.000114 s max 0.000116 s
-ffmpeg encode median 0.018037 s min 0.017674 s max 0.018272 s
-```
-
-The four medians are copied from that stdout. Each row is the median of 3 timed runs after one warmup. Min and max are those three runs. Cutlass times `push` on bytes already in memory. Both ffmpeg rows are `pcm_s16le` to `pcm_s16le`, and each includes process startup.
-
-## Example
-
-`examples/roundtrip.rs` decodes four stereo s16le frames, encodes those samples, and decodes the packet. The frames are `0, 0`, `32767, -32768`, `1000, -1000`, and `42, -42`. It prints the decoded rate, channel count, and `Pcm.samples`.
-
-```text
-cargo run --release -p cutlass-pcm --example roundtrip
-```
-
-```text
-rate 48000
-channels 2
-samples 4
-```
-
-`samples 4` is the frame count.
-
-## Gaps
-
-8-bit PCM, A-law, mu-law, s64, and 24-bit samples packed into 32-bit words are refused. s24 and s32 encode are refused. Picture input is refused.
-
-WAV, AIFF, and CAF headers stay in the container crates. Resampling, dither, and channel remix stay outside this crate.
-
-The timed result is one interleaved little-endian s16 stereo buffer on the machine named above.
+Raw PCM has no bitstream specification of its own. Integers are two's complement. Floats are IEEE 754 binary32 and binary64.

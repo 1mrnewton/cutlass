@@ -2,6 +2,11 @@ target/
 /dist
 /docs/*
 !/docs/readme/
+# A crate has one document, its README. Older notes stay on disk only.
+/crates/**/STATUS.md
+/crates/**/SCOPE.md
+/crates/**/SUPPORT.md
+/crates/**/TODO.md
 /.cursor/
 local-assets/
 local-files/

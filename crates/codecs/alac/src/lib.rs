@@ -4,7 +4,7 @@
 //! (`ALACSpecificConfig`, then an optional `chan` atom); [`Cookie::parse`]
 //! also reads the MP4 box and legacy `frma` forms. Containers frame the
 //! packets; this crate does not read MP4 or CAF. The support record is
-//! `STATUS.md` next to this crate.
+//! `README.md` next to this crate.
 
 #![forbid(unsafe_code)]
 

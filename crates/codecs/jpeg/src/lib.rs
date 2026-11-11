@@ -3,7 +3,7 @@
 //! A still is one packet and one picture. Baseline SOF0, extended SOF1, and
 //! progressive SOF2 decode to 8-bit grey or RGB. The encoder writes baseline
 //! SOF0. Arithmetic coding is refused by name. The support record is
-//! `STATUS.md`.
+//! `README.md`.
 //!
 //! The planar core is public for codecs built on JPEG images, such as Motion
 //! JPEG: [`decode_image`] returns component planes and carries [`Tables`]

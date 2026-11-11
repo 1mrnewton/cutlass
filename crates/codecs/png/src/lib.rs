@@ -7,7 +7,7 @@
 //! `push_frame` accepts one tightly packed RGBA picture and stamps the
 //! packet with that frame's clock. A platform buffer is refused.
 //!
-//! The support record is `STATUS.md` next to this crate.
+//! The support record is `README.md` next to this crate.
 
 #![forbid(unsafe_code)]
 

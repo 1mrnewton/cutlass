@@ -3162,9 +3162,10 @@ fn decode_frame<P: PicturePixel>(
             || hdr.cdef.uv_sec[0] != 0);
     // The tiles are parsed here, on several threads, and their superblock
     // rows are reconstructed and filtered in order on threads of their
-    // own, a superblock row behind parsing.
-    let pipeline =
-        at_once && threads > 1 && !hdr.use_superres && (lf_on || cdef_on || hdr.lr.uses_lr);
+    // own, a superblock row behind parsing. Frames without in-loop filters
+    // too: the other way lends each of its threads a frame state and a
+    // picture of its own, which the pool then keeps.
+    let pipeline = at_once && threads > 1 && !hdr.use_superres;
     if pipeline {
         return decode_frame_async(
             seq, hdr, fs, tiles, cdf, ref_jobs, ref_hdr, cur, job, rows, spares, workers, mf,

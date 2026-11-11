@@ -9244,9 +9244,9 @@ fn mvp_from<S: Sample>(
 ) -> [i16; 2] {
     let Place { mx, my } = at;
     let Cell { bx, by } = cell;
-    let (w, h) = size;
+    let w = size.0;
     let (list, reference) = wanted;
-    let (a, mut b) = near;
+    let (a, b) = near;
     let above_right = part_motion(
         pic,
         mx,
@@ -9256,11 +9256,27 @@ fn mvp_from<S: Sample>(
         list,
         current,
     );
-    let mut c = if above_right.available {
+    let c = if above_right.available {
         above_right
     } else {
         corner_motion(pic, mx, my, bx as i32, by as i32, list, current)
     };
+    mvp_pick(size, cell, reference, (a, b, c))
+}
+
+/// Clause 8.4.1.3 once the motion left of the partition, above it, and
+/// above and right of it (or above and left when that is missing) are
+/// found: the predictor for reference index `reference`.
+#[inline]
+fn mvp_pick(
+    size: (usize, usize),
+    cell: Cell,
+    reference: i8,
+    near: (Motion, Motion, Motion),
+) -> [i16; 2] {
+    let Cell { bx, by } = cell;
+    let (w, h) = size;
+    let (a, mut b, mut c) = near;
     if w == 16 && h == 8 && by == 0 && b.reference == reference {
         return b.mv;
     }
@@ -9957,33 +9973,16 @@ fn apply_direct<S: Sample>(
         temporal_direct(pic, dpb, slice, mx, my, mb, blocks);
         return;
     }
-    let (ref0, ref1, zero) = direct_refs(pic, mx, my, mb);
-    let pred0 = if zero || ref0 < 0 {
-        [0, 0]
-    } else {
-        mvp(
-            pic,
-            Place { mx, my },
-            Cell { bx: 0, by: 0 },
-            (16, 16),
-            0,
-            ref0,
-            mb,
-        )
+    let (ref0, ref1, zero, near) = direct_refs(pic, mx, my, mb);
+    // The predictors of a 16×16 partition, from the same neighbours.
+    let pred = |reference: i8, near| {
+        if zero || reference < 0 {
+            [0, 0]
+        } else {
+            mvp_pick((16, 16), Cell { bx: 0, by: 0 }, reference, near)
+        }
     };
-    let pred1 = if zero || ref1 < 0 {
-        [0, 0]
-    } else {
-        mvp(
-            pic,
-            Place { mx, my },
-            Cell { bx: 0, by: 0 },
-            (16, 16),
-            1,
-            ref1,
-            mb,
-        )
-    };
+    let (pred0, pred1) = (pred(ref0, near[0]), pred(ref1, near[1]));
     let addr = my * pic.mb_w + mx;
     // The co-located block is asked about only for a reference index of 0,
     // and its macroblock is the same for every block here.
@@ -10061,8 +10060,18 @@ fn apply_direct<S: Sample>(
     }
 }
 
-fn direct_refs<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb) -> (i8, i8, bool) {
-    let reference = |list: usize| {
+/// The reference indices of spatial direct prediction, clause 8.4.1.2.2,
+/// whether both came out unused (and so are 0), and each list's motion
+/// left of, above, and above and right of the macroblock that they came
+/// from, which its motion vector predictors are made from too.
+#[allow(clippy::type_complexity)]
+fn direct_refs<S: Sample>(
+    pic: &Frame<S>,
+    mx: usize,
+    my: usize,
+    mb: &Mb,
+) -> (i8, i8, bool, [(Motion, Motion, Motion); 2]) {
+    let near = |list: usize| {
         let a = part_motion(pic, mx, my, -1, 0, list, mb);
         let b = part_motion(pic, mx, my, 0, -1, list, mb);
         let right = part_motion(pic, mx, my, 4, -1, list, mb);
@@ -10071,16 +10080,17 @@ fn direct_refs<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb) -> (i8,
         } else {
             corner_motion(pic, mx, my, 0, 0, list, mb)
         };
+        (a, b, c)
+    };
+    let motions = [near(0), near(1)];
+    let reference = |(a, b, c): (Motion, Motion, Motion)| {
         min_positive(a.reference, min_positive(b.reference, c.reference))
     };
-    let mut ref0 = reference(0);
-    let mut ref1 = reference(1);
+    let (ref0, ref1) = (reference(motions[0]), reference(motions[1]));
     if ref0 < 0 && ref1 < 0 {
-        ref0 = 0;
-        ref1 = 0;
-        return (ref0, ref1, true);
+        return (0, 0, true, motions);
     }
-    (ref0, ref1, false)
+    (ref0, ref1, false, motions)
 }
 
 fn min_positive(left: i8, right: i8) -> i8 {

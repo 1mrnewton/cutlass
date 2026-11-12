@@ -2526,6 +2526,19 @@ struct Rect<T> {
 impl<T: Copy> Rect<T> {
     /// Copies the area out of `src`, `stride` wide, clipped to it.
     fn take(&mut self, src: &[T], stride: usize, rows: Range<usize>, cols: Range<usize>) {
+        self.take_ring(src, stride, usize::MAX, rows, cols);
+    }
+
+    /// [`Self::take`] from an array whose rows go round a ring: row `r` is
+    /// at row `r & ring` (see [`FrameState::mi_ring`]).
+    fn take_ring(
+        &mut self,
+        src: &[T],
+        stride: usize,
+        ring: usize,
+        rows: Range<usize>,
+        cols: Range<usize>,
+    ) {
         self.data.clear();
         let height = src.len() / stride.max(1);
         let rows = rows.start.min(height)..rows.end.min(height);
@@ -2534,8 +2547,9 @@ impl<T: Copy> Rect<T> {
         // copied each time it doubles.
         self.data.reserve(rows.len() * cols.len());
         for r in rows.clone() {
+            let at = (r & ring) * stride;
             self.data
-                .extend_from_slice(&src[r * stride + cols.start..r * stride + cols.end]);
+                .extend_from_slice(&src[at + cols.start..at + cols.end]);
         }
         self.rows = rows;
         self.cols = cols;
@@ -2666,9 +2680,14 @@ impl RowMsg {
         for (p, (d, s)) in self.lf_tx.iter_mut().zip(&fs.lf_tx).enumerate() {
             let sx = usize::from(p > 0 && seq.subsampling_x);
             let sy = usize::from(p > 0 && seq.subsampling_y);
-            let rows = (r0 >> sy)..if last { usize::MAX } else { r1 >> sy };
+            // Past the last row of the plane, nothing reads them.
+            let rows = (r0 >> sy)..if last {
+                fs.mi_rows.div_ceil(1 << sy)
+            } else {
+                r1 >> sy
+            };
             let c = (cols.start >> sx)..if last_col { st } else { cols.end >> sx };
-            d.take(s, st, rows, c);
+            d.take_ring(s, st, fs.mi_ring, rows, c);
         }
         // CDEF indices are per 64x64 luma: 16 4x4s.
         let cs = fs.cdef_stride;

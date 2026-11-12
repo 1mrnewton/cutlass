@@ -332,6 +332,10 @@ pub(super) fn parse_tiles<P: PicturePixel>(
     let failed = AtomicUsize::new(usize::MAX);
     let one_column = hdr.tile_info.cols <= 1;
     let work = |fs: &mut FrameState| {
+        // A tile's rows are parsed in order and each is done with once
+        // the row below it is (see `row_end`): the mode info goes round a
+        // ring that stays in the cache.
+        fs.mi_ring = super::MI_RING - 1;
         let mut bufs = TileBufs::new(fs, Scratch::<P>::parsing());
         let mut no_pixels = Picture::<P> {
             planes: Vec::new(),

@@ -1100,13 +1100,14 @@ fn mux_session(rng: &mut Rng, label: &str) -> Option<usize> {
     let service = demux.programs()[0].service.clone().expect("an SDT");
     let (provider, name) = names.unwrap_or_else(|| ("Cutlass".to_owned(), "Service01".to_owned()));
     for (have, want) in [(&service.provider, &provider), (&service.name, &name)] {
-        // Cut at a character boundary within 126 bytes.
+        // Cut at a character boundary within 126 bytes, or 125 behind the
+        // UTF-8 selector: up to 3 bytes of a 4-byte character go too.
         assert!(
             want.starts_with(have.as_str()),
             "{label}: {have:?} of {want:?}"
         );
         assert!(
-            have.len() + 4 > want.len().min(126),
+            have.len() + 3 >= want.len().min(125),
             "{label}: {have:?} of {want:?}"
         );
     }

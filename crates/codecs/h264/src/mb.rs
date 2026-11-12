@@ -10497,6 +10497,46 @@ fn direct_refs<S: Sample>(
     my: usize,
     mb: &Mb,
 ) -> (i8, i8, bool, [(Motion, Motion, Motion); 2]) {
+    let motions = if pic.mbaff {
+        direct_near_mbaff(pic, mx, my, mb)
+    } else {
+        // Every neighbour is a frame macroblock, so each is found once and
+        // read for both lists: block 3 of the one to the left, block 12 of
+        // the one above and of the one above and right, and when that is
+        // missing, block 15 of the one above and left.
+        let (x, y) = (mx as i32, my as i32);
+        let left = neighbor(pic, x - 1, y, mb.slice);
+        let above = neighbor(pic, x, y - 1, mb.slice);
+        let (diagonal, index) = match neighbor(pic, x + 1, y - 1, mb.slice) {
+            Some(right) => (Some(right), 12),
+            None => (neighbor(pic, x - 1, y - 1, mb.slice), 15),
+        };
+        let near = |list: usize| {
+            let at = |side: Option<&Mb>, index: usize| {
+                side.map_or(ABSENT, |side| motion_of(side, index, list))
+            };
+            (at(left, 3), at(above, 12), at(diagonal, index))
+        };
+        [near(0), near(1)]
+    };
+    let reference = |(a, b, c): (Motion, Motion, Motion)| {
+        min_positive(a.reference, min_positive(b.reference, c.reference))
+    };
+    let (ref0, ref1) = (reference(motions[0]), reference(motions[1]));
+    if ref0 < 0 && ref1 < 0 {
+        return (0, 0, true, motions);
+    }
+    (ref0, ref1, false, motions)
+}
+
+/// [`direct_refs`]'s neighbouring motion in a macroblock-adaptive frame.
+#[inline(never)]
+fn direct_near_mbaff<S: Sample>(
+    pic: &Frame<S>,
+    mx: usize,
+    my: usize,
+    mb: &Mb,
+) -> [(Motion, Motion, Motion); 2] {
     let near = |list: usize| {
         let a = part_motion(pic, mx, my, -1, 0, list, mb);
         let b = part_motion(pic, mx, my, 0, -1, list, mb);
@@ -10508,15 +10548,7 @@ fn direct_refs<S: Sample>(
         };
         (a, b, c)
     };
-    let motions = [near(0), near(1)];
-    let reference = |(a, b, c): (Motion, Motion, Motion)| {
-        min_positive(a.reference, min_positive(b.reference, c.reference))
-    };
-    let (ref0, ref1) = (reference(motions[0]), reference(motions[1]));
-    if ref0 < 0 && ref1 < 0 {
-        return (0, 0, true, motions);
-    }
-    (ref0, ref1, false, motions)
+    [near(0), near(1)]
 }
 
 fn min_positive(left: i8, right: i8) -> i8 {

@@ -70,6 +70,9 @@ pub fn probe(path: &Path) -> Result<Probed, ProbeError> {
     if let Some(probed) = aiff(path, &header)? {
         return Ok(probed);
     }
+    if let Some(probed) = caf(path, &header)? {
+        return Ok(probed);
+    }
     if let Some(probed) = flac(path, &header)? {
         return Ok(probed);
     }
@@ -196,6 +199,30 @@ fn aiff(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     let demux = cutlass_aiff::AiffDemux::open(file, length)
         .map_err(|error| ProbeError::new(format!("aiff refused the file: {error}")))?;
     let duration = samples_to_micros(demux.duration_samples(), demux.sample_rate())?;
+    Ok(Some(Probed::Audio { duration }))
+}
+
+/// The frames of every packet, priming and remainder included, as the
+/// last packet's end counts AAC priming in an MP4 and the pre-skip in Ogg.
+/// A file whose data runs to its end is measured from the bytes there.
+fn caf(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
+    if !matches!(
+        cutlass_caf::probe(header),
+        cutlass_container::ProbeResult::Accept { .. }
+    ) {
+        return Ok(None);
+    }
+    let file = File::open(path).map_err(|error| io_error(path, error))?;
+    let length = file
+        .metadata()
+        .map_err(|error| io_error(path, error))?
+        .len();
+    let demux = cutlass_caf::CafDemux::open(file, length)
+        .map_err(|error| ProbeError::new(format!("caf refused the file: {error}")))?;
+    let frames = demux
+        .total_frames()
+        .ok_or_else(|| ProbeError::new("caf has no frame count"))?;
+    let duration = samples_to_micros(frames, demux.sample_rate())?;
     Ok(Some(Probed::Audio { duration }))
 }
 
@@ -689,6 +716,44 @@ mod tests {
             assert_eq!((width, height), size, "{matrix:?}");
             assert_eq!(duration, 1_000_000);
         }
+    }
+
+    #[test]
+    fn a_caf_file_is_audio_on_the_sample_clock() {
+        use cutlass_codec::{CodecId, Packet, StreamCodec, StreamParams, Timescale, Timestamp};
+        use cutlass_container::{Mux, NewStream, TrackDuration, TrackId};
+
+        let temp = Temp::new();
+        let mut mux = cutlass_caf::CafMux::new(std::io::Cursor::new(Vec::new()));
+        let params =
+            StreamParams::try_audio(StreamCodec::Known(CodecId::Pcm), 8_000, 1, vec![1, 1, 0])
+                .expect("params");
+        mux.add_stream(NewStream {
+            params,
+            timescale: Timescale::new(8_000),
+            language: None,
+        })
+        .expect("stream");
+        let packet = Packet::try_new(
+            0,
+            vec![0; 8_000],
+            Timestamp::try_new(Some(0), Some(0), Some(4_000)).expect("time"),
+            Timescale::new(8_000),
+            true,
+        )
+        .expect("packet");
+        mux.write_packet(&packet).expect("write");
+        mux.finish(&[TrackDuration {
+            track: TrackId::new(0),
+            timescale: Timescale::new(8_000),
+            ticks: 4_000,
+        }])
+        .expect("finish");
+        let path = temp.write("sound.caf", &mux.into_inner().into_inner());
+        assert_eq!(
+            probe(&path).expect("caf"),
+            Probed::Audio { duration: 500_000 }
+        );
     }
 
     #[test]

@@ -223,12 +223,15 @@ fn row_end(
         for k in r0 / per..r1.min(fs.mi_rows).div_ceil(per) {
             motion.push(mf_band(seq, hdr, fs, k, x8.clone()));
         }
-        seg.take(
-            &fs.segment_ids,
-            fs.mi_stride,
-            r0..r1.min(fs.mi_rows),
-            col.cols.start..col.cols.end.min(fs.mi_cols),
-        );
+        // Without segmentation every id is 0: the frame saves none.
+        if hdr.segmentation.enabled {
+            seg.take(
+                &fs.segment_ids,
+                fs.mi_stride,
+                r0..r1.min(fs.mi_rows),
+                col.cols.start..col.cols.end.min(fs.mi_cols),
+            );
+        }
     }
     RowEnd { msg, motion, seg }
 }
@@ -497,9 +500,13 @@ pub(super) fn parse_tiles<P: PicturePixel>(
         return Err(e);
     }
     if let Some(rd) = out.data {
-        let mut seg = vec![0; fs.segment_ids.len()];
-        for s in &segs {
-            s.put(&mut seg, fs.mi_stride);
+        // As segment_map: none without segmentation.
+        let mut seg = Vec::new();
+        if hdr.segmentation.enabled {
+            seg.resize(fs.segment_ids.len(), 0);
+            for s in &segs {
+                s.put(&mut seg, fs.mi_stride);
+            }
         }
         rd.set_segment_ids(seg);
     }

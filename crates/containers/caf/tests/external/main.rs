@@ -10,5 +10,6 @@
     clippy::unwrap_used
 )]
 
+mod local;
 mod oracle;
 mod support;

@@ -18,6 +18,8 @@ use cutlass_container::{Demux, Landing, SeekTo};
 
 use crate::support::{Packet, audio, ffmpeg, ffmpeg_present, ffprobe, ours, scratch};
 
+type Demuxer = cutlass_mpegts::TsDemux<std::io::BufReader<std::fs::File>>;
+
 pub struct Variant {
     pub name: &'static str,
     pub args: &'static [&'static str],
@@ -212,13 +214,25 @@ pub fn compare(path: &Path) -> Vec<String> {
     problems
 }
 
-/// Seeks the first track of `path` to nine targets, before the start to
-/// past the end. Each landing must be the last keyframe at or before the
-/// target (or the first keyframe), and the next packet of the track must be
+/// Seeks every stream of `path` to nine targets, before the start to past
+/// the end. Each landing must be the stream's last keyframe at or before
+/// the target (or its first keyframe), and the stream's next packet must be
 /// that keyframe.
 pub fn check_seeks(path: &Path) -> Vec<String> {
     let (mut demux, tracks) = ours(path);
-    let (track, packets) = &tracks[0];
+    let mut problems = Vec::new();
+    for (track, packets) in &tracks {
+        problems.extend(
+            check_track_seeks(&mut demux, *track, packets)
+                .into_iter()
+                .map(|problem| format!("stream {track:#x}: {problem}")),
+        );
+    }
+    problems
+}
+
+fn check_track_seeks(demux: &mut Demuxer, track: u32, packets: &[Packet]) -> Vec<String> {
+    let track = &track;
     let keys: Vec<i64> = {
         let mut keys: Vec<i64> = packets
             .iter()

@@ -19,19 +19,26 @@
 //! **Seek.** There is no index. The seek bisects the file on the
 //! timestamps of the asked-for stream's PES headers, at most
 //! [`MAX_SEEK_PROBES`] probes of up to [`MAX_PROBE_WINDOW_BYTES`] each, to a
-//! byte position whose first timestamp is not past the target. Then it
-//! reads transport headers only, back from there in doubling windows (at
-//! most [`MAX_RANDOM_ACCESS_SCAN_BYTES`]), for the last PES packet of the
-//! stream that a muxer marked with the random access indicator and that is
-//! shown by the target. It frames the stream forward from that mark to the
-//! target, and lands on the last keyframe whose presentation time is not
-//! past it. When no mark is found, or the frames after it hold no keyframe
-//! (the indicator is only a hint), it frames from the bisection's position
-//! instead, starting further back while no keyframe comes before the
-//! target, doubling the distance, at most [`MAX_SEEK_WIDENINGS`] times.
-//! Reading resumes at the
-//! transport packet that started the landing's PES packet; packets of other
-//! streams framed before the landing are held and returned right after it.
+//! byte position whose first timestamp is not past the target.
+//!
+//! For a picture stream (H.264, HEVC, MPEG-2) it then reads transport
+//! headers only, back from there in doubling windows (at most
+//! [`MAX_RANDOM_ACCESS_SCAN_BYTES`]), for the last PES packet of the stream
+//! that a muxer marked with the random access indicator and that is shown
+//! by the target. It frames that one access unit and, when it is a
+//! keyframe, lands there; the preroll is the PES packets from it shown
+//! before the target, counted from their headers.
+//!
+//! Otherwise (an audio stream, no mark, or a mark on a picture that is not
+//! a keyframe: the indicator is only a hint) it frames the stream forward
+//! from the bisection's position and lands on the last keyframe whose
+//! presentation time is not past the target, starting further back while
+//! no keyframe comes before the target, doubling the distance, at most
+//! [`MAX_SEEK_WIDENINGS`] times.
+//!
+//! Reading resumes at the transport packet that started the landing's PES
+//! packet; packets of other streams framed before the landing are held and
+//! returned right after it.
 //! A failed seek leaves the read position where it was.
 
 use std::collections::VecDeque;
@@ -629,7 +636,18 @@ impl<R: Read + Seek> TsDemux<R> {
         }
         let best = self.bisect(pid, to.time, cost)?;
         let mut chosen = None;
-        if let Some(mark) = self.random_access_before(pid, to.time, best, cost)? {
+        // Audio PES packets may hold many frames, each a keyframe, so a
+        // mark there is not the frame to land on; audio is framed instead.
+        let pictures = matches!(
+            self.pipeline.tracks[track].kind,
+            Kind::H264 | Kind::Hevc | Kind::Mpeg2Video
+        );
+        let mark = if pictures {
+            self.random_access_before(pid, to.time, best, cost)?
+        } else {
+            None
+        };
+        if let Some(mark) = mark {
             cost.runs += 1;
             let reference = interpolate(
                 (self.data_start, self.start),

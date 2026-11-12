@@ -98,19 +98,27 @@ fn matches_afinfo(file: &Path) -> bool {
     true
 }
 
-/// Decodes with afconvert to WAVE and returns the samples. No `@rate`:
-/// with one, afconvert's decode of the same file differs from run to run.
+/// Decodes with afconvert to WAVE and returns the samples.
+///
+/// No `@rate`: with one, afconvert's decode of the same file differs from
+/// run to run. And the same file names every time: AudioToolbox's AAC
+/// decode depends on the decoding process's memory layout, which the
+/// length of its arguments shifts, so two files decoded under names of
+/// different lengths can differ in the last bits (README, "AudioToolbox's
+/// AAC decode"). With equal arguments the decode is repeatable.
 fn af_decode(file: &Path, dir: &TempDir, format: &str) -> Option<Vec<u8>> {
-    let name = file
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .expect("stem");
-    let out = dir.join(&format!("{name}-decoded.wav"));
-    run(
+    let input = dir.join("decode-in.caf");
+    let out = dir.join("decode-out.wav");
+    std::fs::copy(file, &input).expect("copy for decode");
+    let result = run(
         "afconvert",
-        &["-f", "WAVE", "-d", format, path(file), path(&out)],
-    )?;
-    Some(wave_data(&std::fs::read(out).expect("decoded")))
+        &["-f", "WAVE", "-d", format, path(&input), path(&out)],
+    );
+    let _ = std::fs::remove_file(&input);
+    result?;
+    let decoded = wave_data(&std::fs::read(&out).expect("decoded"));
+    let _ = std::fs::remove_file(&out);
+    Some(decoded)
 }
 
 const AFCONVERT: &[&str] = &[
@@ -294,14 +302,7 @@ fn remuxed_files_read_and_decode_like_the_originals() {
             if let Some(decoded) = af_decode(&original, &dir, "LEF32") {
                 let again = af_decode(&ours, &dir, "LEF32")
                     .unwrap_or_else(|| panic!("afconvert cannot decode {name}"));
-                if stem.ends_with("aac") {
-                    // AudioToolbox's AAC decode of one file differs from run
-                    // to run (seen on this noisy source, likely its noise
-                    // substitution), so only the length is compared.
-                    assert_eq!(decoded.len(), again.len(), "{name}");
-                } else {
-                    assert!(decoded == again, "{name}: afconvert decodes other samples");
-                }
+                assert!(decoded == again, "{name}: afconvert decodes other samples");
             }
             if lossless {
                 let exact = af_decode(&ours, &dir, "LEI16").expect("decode");

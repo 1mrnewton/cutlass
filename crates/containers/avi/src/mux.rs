@@ -438,7 +438,7 @@ impl<W: Write + Seek> AviMux<W> {
             CodecId::Av1 => video(b"AV01")?,
             CodecId::RawVideo => raw_video(&stream.params)?,
             CodecId::Pcm => Kind::Pcm {
-                format: pcm_format(&stream.params)?,
+                format: WavFormat::for_stream(&stream.params)?,
             },
             CodecId::Mp3 => Kind::Compressed { tag: 0x0055 },
             CodecId::Aac => Kind::Compressed { tag: 0x00FF },
@@ -1455,47 +1455,6 @@ fn video_extra(fourcc: [u8; 4], config: &[u8]) -> Result<Vec<u8>, MuxError> {
         return Err(rejected("Motion JPEG B is not stored in AVI"));
     }
     Ok(Vec::new())
-}
-
-/// The wave format of a PCM stream: from its sixteen-byte description,
-/// from the PCM decoder's three layout bytes, or 16-bit integer.
-fn pcm_format(params: &StreamParams) -> Result<WavFormat, MuxError> {
-    let extra = params.extradata();
-    if extra.len() != 3 {
-        return WavFormat::for_stream(params);
-    }
-    let (tag, bits, kind): (u16, u16, u16) = match extra[0] {
-        1 => (1, 16, 0),
-        2 => (1, 24, 0),
-        3 => (1, 32, 0),
-        4 => (3, 32, 1),
-        5 => (3, 64, 1),
-        _ => return Err(rejected("unknown PCM layout")),
-    };
-    let channels = params
-        .channels()
-        .ok_or_else(|| rejected("PCM needs a channel count"))?;
-    let align = u16::try_from(u32::from(bits / 8) * u32::from(channels))
-        .map_err(|_| rejected("PCM block does not fit"))?;
-    let mut description = Vec::with_capacity(16);
-    put16(&mut description, tag);
-    put16(&mut description, bits);
-    put16(&mut description, bits);
-    put16(&mut description, align);
-    put32(&mut description, 0);
-    put16(&mut description, kind);
-    put16(&mut description, 0);
-    let rate = params
-        .sample_rate()
-        .ok_or_else(|| rejected("PCM needs a sample rate"))?;
-    let rebuilt = StreamParams::try_audio(
-        StreamCodec::Known(CodecId::Pcm),
-        rate,
-        channels,
-        description,
-    )
-    .map_err(|error| rejected(error.to_string()))?;
-    WavFormat::for_stream(&rebuilt)
 }
 
 impl<W: Write + Seek> Mux for AviMux<W> {

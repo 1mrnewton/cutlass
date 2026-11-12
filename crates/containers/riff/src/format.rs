@@ -196,6 +196,9 @@ impl WavFormat {
         if bytes.is_empty() {
             return default_format(channels, rate, codec);
         }
+        if let ([coding, order, arrangement], StreamCodec::Known(CodecId::Pcm)) = (bytes, codec) {
+            return layout_format(*coding, *order, *arrangement, channels, rate, codec);
+        }
         if bytes.len() < EXTRA_HEADER {
             return Err(FormatError::Hostile {
                 declared: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
@@ -473,6 +476,64 @@ fn default_format(channels: u16, rate: u32, codec: &StreamCodec) -> Result<WavFo
         extra: Vec::new(),
         samples_per_block: None,
     })
+}
+
+/// The wave format for the PCM decoder's three layout bytes: coding, byte
+/// order (0 little, 1 big) and arrangement (0 interleaved, 1 planar).
+///
+/// Wave stores interleaved little-endian samples, unsigned at 8 bits, so
+/// big-endian, planar and signed 8-bit layouts are refused rather than
+/// written under a header that describes other bytes.
+fn layout_format(
+    coding: u8,
+    order: u8,
+    arrangement: u8,
+    channels: u16,
+    rate: u32,
+    codec: &StreamCodec,
+) -> Result<WavFormat, FormatError> {
+    if arrangement != 0 {
+        return Err(FormatError::Bad("planar pcm cannot be stored in wav"));
+    }
+    let (tag, bits, kind) = match coding {
+        1 => (0x0001, 16, Kind::Integer),
+        2 => (0x0001, 24, Kind::Integer),
+        3 => (0x0001, 32, Kind::Integer),
+        9 => (0x0001, 64, Kind::Integer),
+        11 => (0x0001, 8, Kind::Integer),
+        4 => (0x0003, 32, Kind::Float),
+        5 => (0x0003, 64, Kind::Float),
+        7 => (0x0006, 8, Kind::Compressed),
+        8 => (0x0007, 8, Kind::Compressed),
+        6 => {
+            return Err(FormatError::Bad(
+                "signed 8-bit pcm cannot be stored in wav, whose 8-bit pcm is unsigned",
+            ));
+        }
+        _ => return Err(FormatError::Bad("unknown pcm layout")),
+    };
+    match (order, bits) {
+        (0, _) | (1, 8) => {}
+        (1, _) => return Err(FormatError::Bad("big-endian pcm cannot be stored in wav")),
+        _ => return Err(FormatError::Bad("unknown pcm byte order")),
+    }
+    check_rate_channels(rate, channels)?;
+    let format = WavFormat {
+        tag,
+        channels,
+        sample_rate: rate,
+        block_align: inferred_align(bits, channels)?,
+        bits,
+        valid_bits: 0,
+        channel_mask: 0,
+        kind,
+        extensible: false,
+        codec: codec.clone(),
+        extra: Vec::new(),
+        samples_per_block: None,
+    };
+    check_sample_width(&format)?;
+    Ok(format)
 }
 
 fn inferred_align(bits: u16, channels: u16) -> Result<u16, FormatError> {

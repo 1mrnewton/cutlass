@@ -21,10 +21,11 @@ use cutlass_container::{Demux, Mux, NewStream, TrackDuration};
 use cutlass_isobmff::IsoBmffFile;
 use cutlass_mpegts::{TsDemux, TsMux};
 
-const CARRIED: [CodecId; 8] = [
+const CARRIED: [CodecId; 9] = [
     CodecId::H264,
     CodecId::Hevc,
     CodecId::Mpeg2,
+    CodecId::Mpeg4,
     CodecId::Aac,
     CodecId::Mp3,
     CodecId::Ac3,

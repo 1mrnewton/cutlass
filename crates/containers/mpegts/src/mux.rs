@@ -98,9 +98,11 @@ enum Shape {
         params: Vec<u8>,
         length: Option<u8>,
     },
-    /// The sequence header to put before keyframes that lack one.
+    /// The sequence header (MPEG-2) or the object and layer headers
+    /// (MPEG-4 Part 2) to put before keyframes that lack them.
     Mpeg2 {
         sequence: Vec<u8>,
+        mpeg4: bool,
     },
     /// ADTS fields from the AudioSpecificConfig, when the input is raw.
     Aac {
@@ -411,10 +413,17 @@ impl<W: Write> TsMux<W> {
             Shape::Hevc { params, length } => {
                 Ok(annex_b(bytes, *length, params, keyframe, &HEVC_UNITS)?)
             }
-            Shape::Mpeg2 { sequence } => {
+            Shape::Mpeg2 { sequence, mpeg4 } => {
                 let has_sequence = find_start_code(bytes, 0)
                     .and_then(|at| bytes.get(at + 3))
-                    .is_some_and(|&code| code == 0xB3);
+                    .is_some_and(|&code| {
+                        if *mpeg4 {
+                            // A visual object sequence, object or layer.
+                            code == 0xB0 || code == 0xB5 || code <= 0x2F
+                        } else {
+                            code == 0xB3
+                        }
+                    });
                 let mut out = Vec::with_capacity(sequence.len() + bytes.len());
                 if keyframe && !has_sequence {
                     out.extend_from_slice(sequence);
@@ -472,7 +481,7 @@ impl<W: Write> TsMux<W> {
                 *params = annex;
                 *length = size.or(*length);
             }
-            Shape::Mpeg2 { sequence } => *sequence = config.to_vec(),
+            Shape::Mpeg2 { sequence, .. } => *sequence = config.to_vec(),
             Shape::Aac { header } => {
                 *header = Some(parse_asc(config).ok_or_else(|| {
                     rejected("the AudioSpecificConfig cannot be written as ADTS".to_owned())
@@ -722,6 +731,17 @@ impl<W: Write> Mux for TsMux<W> {
                 video_id,
                 Shape::Mpeg2 {
                     sequence: Vec::new(),
+                    mpeg4: false,
+                },
+                Vec::new(),
+                true,
+            ),
+            CodecId::Mpeg4 => (
+                0x10,
+                video_id,
+                Shape::Mpeg2 {
+                    sequence: Vec::new(),
+                    mpeg4: true,
                 },
                 Vec::new(),
                 true,

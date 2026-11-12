@@ -21,7 +21,7 @@
 //! [`MAX_SEEK_PROBES`] probes of up to [`MAX_PROBE_WINDOW_BYTES`] each, to a
 //! byte position whose first timestamp is not past the target.
 //!
-//! For a picture stream (H.264, HEVC, MPEG-2) it then reads transport
+//! For a picture stream (H.264, HEVC, MPEG-2, MPEG-4 Part 2) it then reads transport
 //! headers only, back from there in doubling windows (at most
 //! [`MAX_RANDOM_ACCESS_SCAN_BYTES`]), for the last PES packet of the stream
 //! that a muxer marked with the random access indicator and that is shown
@@ -640,7 +640,7 @@ impl<R: Read + Seek> TsDemux<R> {
         // mark there is not the frame to land on; audio is framed instead.
         let pictures = matches!(
             self.pipeline.tracks[track].kind,
-            Kind::H264 | Kind::Hevc | Kind::Mpeg2Video
+            Kind::H264 | Kind::Hevc | Kind::Mpeg2Video | Kind::Mpeg4Video
         );
         let mark = if pictures {
             self.random_access_before(pid, to.time, best, cost)?

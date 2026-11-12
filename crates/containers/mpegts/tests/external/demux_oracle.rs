@@ -67,6 +67,19 @@ pub const VARIANTS: &[Variant] = &[
         ],
     },
     Variant {
+        name: "mpeg4_mp3.ts",
+        args: &[
+            "-c:v",
+            "mpeg4",
+            "-bf",
+            "2",
+            "-g",
+            "12",
+            "-c:a",
+            "libmp3lame",
+        ],
+    },
+    Variant {
         name: "h264_latm.ts",
         args: &[
             "-c:v",

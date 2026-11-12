@@ -71,6 +71,10 @@ const SOURCES: &[Source] = &[
         args: &["-c:v", "libx264", "-preset", "veryfast", "-c:a", "eac3"],
     },
     Source {
+        name: "mpeg4_aac.mp4",
+        args: &["-c:v", "mpeg4", "-bf", "2", "-g", "12", "-c:a", "aac"],
+    },
+    Source {
         name: "h264_aac_44100.mp4",
         args: &[
             "-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", "-ar", "44100",

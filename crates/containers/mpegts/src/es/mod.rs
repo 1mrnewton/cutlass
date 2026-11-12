@@ -22,6 +22,7 @@ pub mod hevc;
 pub mod latm;
 pub mod mpa;
 pub mod mpeg2;
+pub mod mpeg4;
 pub mod opus;
 pub mod video;
 
@@ -128,6 +129,7 @@ pub enum Framer {
     H264(video::VideoFramer<h264::H264>),
     Hevc(video::VideoFramer<hevc::Hevc>),
     Mpeg2(video::VideoFramer<mpeg2::Mpeg2>),
+    Mpeg4(video::VideoFramer<mpeg4::Mpeg4>),
     Adts(audio::AudioFramer<adts::Adts>),
     Ac3(audio::AudioFramer<ac3::Ac3>),
     MpegAudio(audio::AudioFramer<mpa::MpegAudio>),
@@ -149,7 +151,8 @@ impl Framer {
             Kind::MpegAudio => Self::MpegAudio(audio::AudioFramer::new(mpa::MpegAudio::default())),
             Kind::Latm => Self::Latm(audio::AudioFramer::new(latm::Loas::default())),
             Kind::Opus => Self::Opus(opus::OpusFramer::new(opus_channels)),
-            Kind::Mpeg4Video | Kind::Other => Self::Whole,
+            Kind::Mpeg4Video => Self::Mpeg4(video::VideoFramer::new(max_unit)),
+            Kind::Other => Self::Whole,
         }
     }
 
@@ -159,6 +162,7 @@ impl Framer {
             Self::H264(framer) => framer.push(pes, out),
             Self::Hevc(framer) => framer.push(pes, out),
             Self::Mpeg2(framer) => framer.push(pes, out),
+            Self::Mpeg4(framer) => framer.push(pes, out),
             Self::Adts(framer) => framer.push(pes, out),
             Self::Ac3(framer) => framer.push(pes, out),
             Self::MpegAudio(framer) => framer.push(pes, out),
@@ -184,6 +188,7 @@ impl Framer {
             Self::H264(framer) => framer.flush(out),
             Self::Hevc(framer) => framer.flush(out),
             Self::Mpeg2(framer) => framer.flush(out),
+            Self::Mpeg4(framer) => framer.flush(out),
             Self::Adts(framer) => framer.flush(out),
             Self::Ac3(framer) => framer.flush(out),
             Self::MpegAudio(framer) => framer.flush(out),
@@ -198,6 +203,7 @@ impl Framer {
             Self::H264(framer) => framer.reset(),
             Self::Hevc(framer) => framer.reset(),
             Self::Mpeg2(framer) => framer.reset(),
+            Self::Mpeg4(framer) => framer.reset(),
             Self::Adts(framer) => framer.reset(),
             Self::Ac3(framer) => framer.reset(),
             Self::MpegAudio(framer) => framer.reset(),
@@ -213,6 +219,7 @@ impl Framer {
             Self::H264(framer) => framer.buffered(),
             Self::Hevc(framer) => framer.buffered(),
             Self::Mpeg2(framer) => framer.buffered(),
+            Self::Mpeg4(framer) => framer.buffered(),
             Self::Adts(framer) => framer.buffered(),
             Self::Ac3(framer) => framer.buffered(),
             Self::MpegAudio(framer) => framer.buffered(),
@@ -228,6 +235,7 @@ impl Framer {
             Self::H264(framer) => framer.facts(),
             Self::Hevc(framer) => framer.facts(),
             Self::Mpeg2(framer) => framer.facts(),
+            Self::Mpeg4(framer) => framer.facts(),
             Self::Adts(framer) => framer.facts(),
             Self::Ac3(framer) => framer.facts(),
             Self::MpegAudio(framer) => framer.facts(),

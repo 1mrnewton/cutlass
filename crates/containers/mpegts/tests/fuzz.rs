@@ -195,6 +195,7 @@ fn remux(bytes: &[u8], options: MuxOptions) -> Option<Vec<u8>> {
                 CodecId::H264
                     | CodecId::Hevc
                     | CodecId::Mpeg2
+                    | CodecId::Mpeg4
                     | CodecId::Aac
                     | CodecId::Mp3
                     | CodecId::Ac3
@@ -869,11 +870,15 @@ fn session_stream(rng: &mut Rng, clean: bool) -> (NewStream, Shape, u32) {
             Shape::Other(CodecId::Pcm),
             timescale,
         ),
-        9 => (
-            video_stream(StreamCodec::Known(CodecId::Vp9), Vec::new(), timescale),
-            Shape::Other(CodecId::Vp9),
-            timescale,
-        ),
+        9 => {
+            // MPEG-4 Part 2 is carried; VP9 is refused.
+            let codec = [CodecId::Mpeg4, CodecId::Vp9][rng.below(2)];
+            (
+                video_stream(StreamCodec::Known(codec), rng.noise(20), timescale),
+                Shape::Other(codec),
+                timescale,
+            )
+        }
         _ => (
             audio_stream(
                 StreamCodec::Known(CodecId::Pcm),

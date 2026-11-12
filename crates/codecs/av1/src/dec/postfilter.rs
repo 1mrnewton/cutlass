@@ -65,6 +65,9 @@ pub const LF_SKIP: u8 = 1;
 /// [`LfInfo::flags`]: the block is skipped and inter, so only its own
 /// edges are filtered, not those of its transform blocks (7.14.2).
 pub const LF_BLOCK_EDGES: u8 = 2;
+/// The bit of the first byte of [`LfInfo::bytes`] that says the block
+/// is skipped, above the 6 bits of the level.
+pub const UNIT_SKIP: u8 = 0x80;
 
 /// What the loop filter and CDEF read of a block, kept for each of its
 /// 4x4 units: its filter level for each loop filter index (7.14.5), its
@@ -76,9 +79,6 @@ pub struct LfInfo {
     pub lvl: [u8; 4],
     pub flags: u8,
     pub bsize: u8,
-    /// Makes the info 8 bytes, which a run of units is filled with as
-    /// whole words.
-    pub pad: [u8; 2],
 }
 
 /// The filter levels of a frame's blocks.
@@ -139,27 +139,23 @@ impl LfLevels {
             flags: u8::from(skip) * LF_SKIP
                 + u8::from(skip && ref_frame > INTRA_FRAME) * LF_BLOCK_EDGES,
             bsize,
-            pad: [0; 2],
         }
     }
 }
 
 impl LfInfo {
-    /// The info as the bytes [`FilterInfo`] keeps: the levels first.
+    /// What [`FilterInfo`] keeps of the info: the levels (6 bits each),
+    /// with [`UNIT_SKIP`] in the first byte for a skipped block. A
+    /// word, so a frame's units take half the memory of eight bytes.
     #[inline(always)]
-    pub fn bytes(self) -> [u8; 8] {
+    pub fn bytes(self) -> [u8; 4] {
         let [a, b, c, d] = self.lvl;
-        [a, b, c, d, self.flags, self.bsize, self.pad[0], self.pad[1]]
-    }
-
-    /// The info of [`Self::bytes`].
-    pub fn of(b: [u8; 8]) -> Self {
-        Self {
-            lvl: [b[0], b[1], b[2], b[3]],
-            flags: b[4],
-            bsize: b[5],
-            pad: [b[6], b[7]],
-        }
+        let skip = if self.flags & LF_SKIP != 0 {
+            UNIT_SKIP
+        } else {
+            0
+        };
+        [a | skip, b, c, d]
     }
 }
 
@@ -167,7 +163,7 @@ impl LfInfo {
 /// [`bytes`](LfInfo::bytes), laid out like [`FrameState::mi`].
 #[derive(Default)]
 pub struct FilterInfo {
-    pub units: Vec<[u8; 8]>,
+    pub units: Vec<[u8; 4]>,
     pub stride: usize,
 }
 
@@ -176,7 +172,7 @@ impl FilterInfo {
     /// until their blocks are stored.
     pub fn size_for(&mut self, fs: &FrameState) {
         self.stride = fs.mi_stride;
-        self.units.resize(fs.lf_tx[0].len(), [0; 8]);
+        self.units.resize(fs.lf_tx[0].len(), [0; 4]);
     }
 
     /// Stores the info of a block at luma 4x4 position `(row, col)`, in
@@ -269,7 +265,7 @@ impl FilterInfo {
     /// Whether the block at luma 4x4 position `(row, col)` is skipped.
     #[inline(always)]
     pub fn skip(&self, row: usize, col: usize) -> bool {
-        self.units[row * self.stride + col][4] & LF_SKIP != 0
+        self.units[row * self.stride + col][0] & UNIT_SKIP != 0
     }
 }
 
@@ -438,7 +434,7 @@ impl<'a> LfPlane<'a> {
 
     /// The level (of this plane and pass) of each unit of a row whose
     /// blocks' info is `mi`.
-    fn levels(&self, mi: &[[u8; 8]], out: &mut [u8]) {
+    fn levels(&self, mi: &[[u8; 4]], out: &mut [u8]) {
         let li = self.li;
         let mut done = 0;
         if self.sx == 0 {
@@ -464,7 +460,7 @@ impl<'a> LfPlane<'a> {
         }
         let sx = self.sx;
         for (i, o) in out.iter_mut().enumerate().skip(done) {
-            *o = mi[(i << sx) | sx][li];
+            *o = mi[(i << sx) | sx][li] & 63;
         }
     }
 }

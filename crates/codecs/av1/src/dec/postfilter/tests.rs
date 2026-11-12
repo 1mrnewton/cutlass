@@ -92,7 +92,6 @@ fn a_stored_block_covers_its_units_inside_the_frame() {
         lvl: [9, 9, 9, 9],
         flags: LF_SKIP,
         bsize: BLOCK_64X64,
-        pad: [0; 2],
     };
     // A 64x64 block at row 8: 4 of its 16 rows are in the 12-row frame.
     info.store((8, 0), (fs.mi_rows, fs.mi_cols), block);
@@ -183,6 +182,6 @@ fn rows_filled_from_the_mode_info_match_blocks_stored_one_by_one() {
         part.units[4 * st..4 * st + 16],
         want.units[4 * st..4 * st + 16]
     );
-    assert!(part.units[..4 * st].iter().all(|u| *u == [0; 8]));
-    assert!(part.units[8 * st..].iter().all(|u| *u == [0; 8]));
+    assert!(part.units[..4 * st].iter().all(|u| *u == [0; 4]));
+    assert!(part.units[8 * st..].iter().all(|u| *u == [0; 4]));
 }

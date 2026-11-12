@@ -52,14 +52,14 @@ pub(super) fn edge_codes(u: &EdgeUnits, edges: Edges, luma: bool) -> ([u16; 16],
     all(target_arch = "aarch64", target_feature = "neon"),
     allow(dead_code)
 )]
-pub(super) fn levels(records: &[[u8; 8]; 16], i: usize) -> [u8; 16] {
-    core::array::from_fn(|k| records[k][i])
+pub(super) fn levels(records: &[[u8; 4]; 16], i: usize) -> [u8; 16] {
+    core::array::from_fn(|k| records[k][i] & 63)
 }
 
 #[cfg_attr(
     all(target_arch = "aarch64", target_feature = "neon"),
     allow(dead_code)
 )]
-pub(super) fn levels_odd(records: &[[u8; 8]; 32], i: usize) -> [u8; 16] {
-    core::array::from_fn(|k| records[2 * k + 1][i])
+pub(super) fn levels_odd(records: &[[u8; 4]; 32], i: usize) -> [u8; 16] {
+    core::array::from_fn(|k| records[2 * k + 1][i] & 63)
 }

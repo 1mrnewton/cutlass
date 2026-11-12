@@ -64,11 +64,11 @@ pub(super) fn edge_codes(u: &EdgeUnits, edges: Edges, luma: bool) -> ([u16; 16],
     )
 }
 
-/// The records as vectors of two.
+/// The records as vectors of four.
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-fn pairs<const N: usize>(records: &[[u8; 8]], out: &mut [V; N]) {
+fn quads<const N: usize>(records: &[[u8; 4]], out: &mut [V; N]) {
     let (chunks, _) = records.as_flattened().as_chunks::<16>();
     for (o, c) in out.iter_mut().zip(chunks) {
         *o = u8x16(c);
@@ -79,26 +79,17 @@ fn pairs<const N: usize>(records: &[[u8; 8]], out: &mut [V; N]) {
 /// lane is 0, or keeps its value.
 const NO: u8 = 0xF0;
 
-/// Where byte 0 of records `0 .. 8` and `8 .. 16` lies in four vectors
-/// of two records.
-const HALVES: [[u8; 16]; 2] = [
-    [0, 8, 16, 24, 32, 40, 48, 56, NO, NO, NO, NO, NO, NO, NO, NO],
-    [NO, NO, NO, NO, NO, NO, NO, NO, 0, 8, 16, 24, 32, 40, 48, 56],
-];
+/// Where byte 0 of each of sixteen records lies in four vectors.
+const ALL: [u8; 16] = [0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60];
 
-/// Where byte 0 of the odd records among each eight lies.
-const ODD: [[u8; 16]; 4] = [
+/// Where byte 0 of the odd records among the first and the last sixteen
+/// lies, each in four vectors.
+const ODD: [[u8; 16]; 2] = [
     [
-        8, 24, 40, 56, NO, NO, NO, NO, NO, NO, NO, NO, NO, NO, NO, NO,
+        4, 12, 20, 28, 36, 44, 52, 60, NO, NO, NO, NO, NO, NO, NO, NO,
     ],
     [
-        NO, NO, NO, NO, 8, 24, 40, 56, NO, NO, NO, NO, NO, NO, NO, NO,
-    ],
-    [
-        NO, NO, NO, NO, NO, NO, NO, NO, 8, 24, 40, 56, NO, NO, NO, NO,
-    ],
-    [
-        NO, NO, NO, NO, NO, NO, NO, NO, NO, NO, NO, NO, 8, 24, 40, 56,
+        NO, NO, NO, NO, NO, NO, NO, NO, 4, 12, 20, 28, 36, 44, 52, 60,
     ],
 ];
 
@@ -113,34 +104,20 @@ fn picks(at: &[u8; 16], i: usize) -> V {
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-pub(super) fn levels(records: &[[u8; 8]; 16], i: usize) -> [u8; 16] {
-    let mut v = [vdupq_n_u8(0); 8];
-    pairs(records, &mut v);
-    // Record `k` is in vector `k / 2` at byte `8 (k % 2)`, so byte `i`
-    // of records `0 .. 8` is at `i + 8 k` of the first four vectors.
-    let t = vqtbl4q_u8(uint8x16x4_t(v[0], v[1], v[2], v[3]), picks(&HALVES[0], i));
-    let t = vqtbx4q_u8(
-        t,
-        uint8x16x4_t(v[4], v[5], v[6], v[7]),
-        picks(&HALVES[1], i),
-    );
-    bytes(t)
+pub(super) fn levels(records: &[[u8; 4]; 16], i: usize) -> [u8; 16] {
+    let mut v = [vdupq_n_u8(0); 4];
+    quads(records, &mut v);
+    let t = vqtbl4q_u8(uint8x16x4_t(v[0], v[1], v[2], v[3]), picks(&ALL, i));
+    bytes(vandq_u8(t, vdupq_n_u8(63)))
 }
 
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-pub(super) fn levels_odd(records: &[[u8; 8]; 32], i: usize) -> [u8; 16] {
-    let mut v = [vdupq_n_u8(0); 16];
-    pairs(records, &mut v);
-    // Odd record `2 k + 1` is the upper half of vector `k`.
+pub(super) fn levels_odd(records: &[[u8; 4]; 32], i: usize) -> [u8; 16] {
+    let mut v = [vdupq_n_u8(0); 8];
+    quads(records, &mut v);
     let t = vqtbl4q_u8(uint8x16x4_t(v[0], v[1], v[2], v[3]), picks(&ODD[0], i));
     let t = vqtbx4q_u8(t, uint8x16x4_t(v[4], v[5], v[6], v[7]), picks(&ODD[1], i));
-    let t = vqtbx4q_u8(t, uint8x16x4_t(v[8], v[9], v[10], v[11]), picks(&ODD[2], i));
-    let t = vqtbx4q_u8(
-        t,
-        uint8x16x4_t(v[12], v[13], v[14], v[15]),
-        picks(&ODD[3], i),
-    );
-    bytes(t)
+    bytes(vandq_u8(t, vdupq_n_u8(63)))
 }

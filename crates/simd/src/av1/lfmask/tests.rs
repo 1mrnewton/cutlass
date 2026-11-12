@@ -91,11 +91,14 @@ fn the_sizes_are_those_of_the_specification() {
 fn levels_pick_their_byte() {
     let mut rng = Rng(5);
     for i in 0..4 {
-        let r: [[u8; 8]; 32] = core::array::from_fn(|_| core::array::from_fn(|_| rng.below(256)));
-        let first: [[u8; 8]; 16] = core::array::from_fn(|k| r[k]);
+        let r: [[u8; 4]; 32] = core::array::from_fn(|_| core::array::from_fn(|_| rng.below(256)));
+        let first: [[u8; 4]; 16] = core::array::from_fn(|k| r[k]);
         assert_eq!(levels(&first, i), scalar::levels(&first, i));
-        assert_eq!(levels(&first, i), core::array::from_fn(|k| r[k][i]));
+        assert_eq!(levels(&first, i), core::array::from_fn(|k| r[k][i] & 63));
         assert_eq!(levels_odd(&r, i), scalar::levels_odd(&r, i));
-        assert_eq!(levels_odd(&r, i), core::array::from_fn(|k| r[2 * k + 1][i]));
+        assert_eq!(
+            levels_odd(&r, i),
+            core::array::from_fn(|k| r[2 * k + 1][i] & 63)
+        );
     }
 }

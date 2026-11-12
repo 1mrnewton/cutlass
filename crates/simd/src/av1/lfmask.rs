@@ -70,10 +70,11 @@ pub fn edge_codes(u: &EdgeUnits, edges: Edges, luma: bool) -> ([u16; 16], u16) {
     scalar::edge_codes(u, edges, luma)
 }
 
-/// Byte `i` (0 to 3, a filter level) of each of sixteen records.
+/// The low 6 bits of byte `i` (0 to 3, a filter level) of each of
+/// sixteen records.
 #[inline]
 #[must_use]
-pub fn levels(records: &[[u8; 8]; 16], i: usize) -> [u8; 16] {
+pub fn levels(records: &[[u8; 4]; 16], i: usize) -> [u8; 16] {
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
         // SAFETY: as in `edge_codes`.
@@ -86,12 +87,12 @@ pub fn levels(records: &[[u8; 8]; 16], i: usize) -> [u8; 16] {
     scalar::levels(records, i & 3)
 }
 
-/// Byte `i` (0 to 3) of each odd record of thirty-two: the records of
-/// the luma units holding the bottom-right corners of sixteen chroma
-/// units, when chroma has half the columns.
+/// [`levels`] of each odd record of thirty-two: the records of the luma
+/// units holding the bottom-right corners of sixteen chroma units, when
+/// chroma has half the columns.
 #[inline]
 #[must_use]
-pub fn levels_odd(records: &[[u8; 8]; 32], i: usize) -> [u8; 16] {
+pub fn levels_odd(records: &[[u8; 4]; 32], i: usize) -> [u8; 16] {
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
         // SAFETY: as in `edge_codes`.

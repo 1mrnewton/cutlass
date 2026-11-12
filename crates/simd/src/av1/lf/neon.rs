@@ -336,3 +336,92 @@ pub(super) fn by_line_16(lines: &mut [[u8; 16]; 16], lim: Limits) -> bool {
     }
     true
 }
+
+/// The sixteen samples of `buf` from `o`.
+#[inline(always)]
+fn at16(buf: &[u8], o: usize) -> &[u8; 16] {
+    &buf[o..o + 16].as_chunks::<16>().0[0]
+}
+
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+pub(super) fn rows_in_place(
+    buf: &mut [u8],
+    stride: usize,
+    at: usize,
+    size: Size,
+    lim: Limits,
+) -> bool {
+    let (lo, hi) = size.reads();
+    let top = at - 7 * stride;
+    let mut v = [vdupq_n_u8(0); 14];
+    for (k, vk) in v.iter_mut().enumerate().take(hi).skip(lo) {
+        *vk = u8x16(at16(buf, top + k * stride));
+    }
+    if !filter_size(&mut v, size, lim) {
+        return false;
+    }
+    let (lo, hi) = size.writes();
+    for (k, &vk) in v.iter().enumerate().take(hi).skip(lo) {
+        let o = top + k * stride;
+        buf[o..o + 16].copy_from_slice(&bytes(vk));
+    }
+    true
+}
+
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+pub(super) fn cols_in_place(
+    buf: &mut [u8],
+    stride: usize,
+    at: usize,
+    size: Size,
+    lim: Limits,
+) -> bool {
+    let left = at - 4;
+    let line = |l: usize| -> &[u8; 8] {
+        let o = left + l * stride;
+        &buf[o..o + 8].as_chunks::<8>().0[0]
+    };
+    let rows: [V; 8] = core::array::from_fn(|l| u8x16_pair(line(l), line(8 + l)));
+    let cols = transpose(rows);
+    let mut v = [vdupq_n_u8(0); 14];
+    v[3..11].copy_from_slice(&cols);
+    if !filter_size(&mut v, size, lim) {
+        return false;
+    }
+    let mut cols = [vdupq_n_u8(0); 8];
+    cols.copy_from_slice(&v[3..11]);
+    let rows = transpose(cols);
+    for (l, &r) in rows.iter().enumerate() {
+        let (a, b) = halves(r);
+        let o = left + l * stride;
+        buf[o..o + 8].copy_from_slice(&a);
+        let o = left + (8 + l) * stride;
+        buf[o..o + 8].copy_from_slice(&b);
+    }
+    true
+}
+
+#[inline]
+#[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
+#[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
+pub(super) fn cols_16_in_place(buf: &mut [u8], stride: usize, at: usize, lim: Limits) -> bool {
+    let left = at - 8;
+    let rows: [V; 16] = core::array::from_fn(|l| u8x16(at16(buf, left + l * stride)));
+    let mut cols = transpose16(&rows);
+    let mut v = [vdupq_n_u8(0); 14];
+    v.copy_from_slice(&cols[1..15]);
+    if !filter::<16>(&mut v, lim) {
+        return false;
+    }
+    cols[1..15].copy_from_slice(&v);
+    let rows = transpose16(&cols);
+    for (l, &r) in rows.iter().enumerate() {
+        let o = left + l * stride;
+        buf[o..o + 16].copy_from_slice(&bytes(r));
+    }
+    true
+}

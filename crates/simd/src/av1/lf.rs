@@ -119,3 +119,59 @@ pub fn by_line_16(lines: &mut [[u8; 16]; 16], lim: Limits) -> bool {
     #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     scalar::by_line_16(lines, lim)
 }
+
+/// [`by_sample`] on sixteen columns of a picture of 8-bit samples, in
+/// place: `buf[at + l]` is line `l`'s `q0`, and sample `k` of the line is
+/// `stride` samples per step from it (`k` rows below `p6`'s row). Panics
+/// unless the rows [`Size::reads`] names hold sixteen samples from there.
+#[inline]
+pub fn rows_in_place(buf: &mut [u8], stride: usize, at: usize, size: Size, lim: Limits) -> bool {
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        // SAFETY: the `cfg` above proves NEON is enabled for this build,
+        // and the kernel names AES only where the build has it too.
+        #[allow(unsafe_code)]
+        unsafe {
+            neon::rows_in_place(buf, stride, at, size, lim)
+        }
+    }
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+    scalar::rows_in_place(buf, stride, at, size, lim)
+}
+
+/// [`by_line`] on sixteen rows of a picture of 8-bit samples, in place:
+/// `buf[at + l * stride]` is line `l`'s `q0`, with `p3 .. q3` the eight
+/// samples from 4 before it. Panics unless they are all in `buf`.
+#[inline]
+pub fn cols_in_place(buf: &mut [u8], stride: usize, at: usize, size: Size, lim: Limits) -> bool {
+    if size == Size::Sixteen {
+        return false;
+    }
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        // SAFETY: as in `rows_in_place`.
+        #[allow(unsafe_code)]
+        unsafe {
+            neon::cols_in_place(buf, stride, at, size, lim)
+        }
+    }
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+    scalar::cols_in_place(buf, stride, at, size, lim)
+}
+
+/// [`by_line_16`] on sixteen rows of a picture of 8-bit samples, in
+/// place: the sixteen samples from 8 before `buf[at + l * stride]` (line
+/// `l`'s `q0`). Panics unless they are all in `buf`.
+#[inline]
+pub fn cols_16_in_place(buf: &mut [u8], stride: usize, at: usize, lim: Limits) -> bool {
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        // SAFETY: as in `rows_in_place`.
+        #[allow(unsafe_code)]
+        unsafe {
+            neon::cols_16_in_place(buf, stride, at, lim)
+        }
+    }
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+    scalar::cols_16_in_place(buf, stride, at, lim)
+}

@@ -1,4 +1,7 @@
-use super::{IDLE, Limits, Size, by_line, by_line_16, by_sample, scalar};
+use super::{
+    IDLE, Limits, Size, by_line, by_line_16, by_sample, cols_16_in_place, cols_in_place,
+    rows_in_place, scalar,
+};
 
 /// A small fixed-seed generator: the same lines on every run.
 struct Rng(u64);
@@ -189,4 +192,63 @@ fn a_step_inside_the_limits_is_smoothed() {
     assert!(by_sample(&mut taps, Size::Eight, lim));
     let got: Vec<u8> = (3..11).map(|k| taps[k][0]).collect();
     assert_eq!(got, [100, 101, 101, 102, 103, 103, 104, 104]);
+}
+
+/// A picture whose rows are lines of [`line`] across a horizontal edge at
+/// row 8 and, along each row, across vertical edges every 16 columns.
+fn picture(rng: &mut Rng, stride: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; stride * 24];
+    for x in 0..stride {
+        let l = line(rng);
+        for (k, &v) in l.iter().enumerate() {
+            buf[(1 + k) * stride + x] = v;
+        }
+    }
+    for y in 0..24 {
+        for x0 in (0..stride).step_by(16) {
+            if rng.below(2) == 0 {
+                let l = line(rng);
+                buf[y * stride + x0..][..14].copy_from_slice(&l);
+            }
+        }
+    }
+    buf
+}
+
+#[test]
+fn in_place_kernels_match_their_scalar_twins() {
+    let mut rng = Rng(0x01A9_1ACE);
+    let stride = 48;
+    let mut moved = 0;
+    for round in 0..3000 {
+        let size = SIZES[round % 4];
+        let lim = limits(&mut rng);
+        let pic = picture(&mut rng, stride);
+        // A horizontal edge at row 8, sixteen columns from 3.
+        let (mut a, mut b) = (pic.clone(), pic.clone());
+        let at = 8 * stride + 3;
+        assert_eq!(
+            rows_in_place(&mut a, stride, at, size, lim),
+            scalar::rows_in_place(&mut b, stride, at, size, lim)
+        );
+        assert_eq!(a, b, "rows, round {round}");
+        // The vertical edge of the lines from column 16 (q0 at column 23)
+        // on rows 2..18.
+        let (mut a, mut b) = (pic.clone(), pic.clone());
+        let at = 2 * stride + 23;
+        if size == Size::Sixteen {
+            assert_eq!(
+                cols_16_in_place(&mut a, stride, at, lim),
+                scalar::cols_16_in_place(&mut b, stride, at, lim)
+            );
+        } else {
+            assert_eq!(
+                cols_in_place(&mut a, stride, at, size, lim),
+                scalar::cols_in_place(&mut b, stride, at, size, lim)
+            );
+        }
+        assert_eq!(a, b, "columns, round {round}");
+        moved += usize::from(a != pic);
+    }
+    assert!(moved > 300, "the edges filter some lines: {moved}");
 }

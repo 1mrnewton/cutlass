@@ -16,7 +16,10 @@
 //! samples), and seven before / seven after the edge for size 16 (writing six).
 
 use super::Pixel;
-use cutlass_simd::av1::lf::{IDLE, Limits, Size, by_line, by_line_16, by_sample};
+use cutlass_simd::av1::lf::{
+    IDLE, Limits, Size, by_line, by_line_16, by_sample, cols_16_in_place, cols_in_place,
+    rows_in_place,
+};
 
 /// Filter limits derived from a level and sharpness (7.14.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,7 +186,15 @@ fn edge_bytes<const FS: usize, const HORZ: bool>(
             4.. => 4,
             _ => 1,
         };
-        if HORZ {
+        if m == 16 {
+            if HORZ {
+                rows_in_place(buf, stride, y * stride + x + i, size, lim);
+            } else if FS == 16 {
+                cols_16_in_place(buf, stride, (y + i) * stride + x, lim);
+            } else {
+                cols_in_place(buf, stride, (y + i) * stride + x, size, lim);
+            }
+        } else if HORZ {
             match m {
                 16 => across_rows::<16>(buf, stride, x + i, y, size, lim),
                 8 => across_rows::<8>(buf, stride, x + i, y, size, lim),

@@ -143,3 +143,80 @@ pub(super) fn by_line_16(lines: &mut [[u8; 16]; 16], lim: Limits) -> bool {
     }
     any
 }
+
+/// [`super::rows_in_place`] through [`by_sample`].
+#[cfg_attr(
+    all(target_arch = "aarch64", target_feature = "neon"),
+    allow(dead_code)
+)]
+pub(super) fn rows_in_place(
+    buf: &mut [u8],
+    stride: usize,
+    at: usize,
+    size: Size,
+    lim: Limits,
+) -> bool {
+    let (lo, hi) = size.reads();
+    let mut taps = [[0u8; 16]; 14];
+    for (k, t) in taps.iter_mut().enumerate().take(hi).skip(lo) {
+        let o = at + k * stride - 7 * stride;
+        t.copy_from_slice(&buf[o..o + 16]);
+    }
+    if !by_sample(&mut taps, size, lim) {
+        return false;
+    }
+    let (lo, hi) = size.writes();
+    for (k, t) in taps.iter().enumerate().take(hi).skip(lo) {
+        let o = at + k * stride - 7 * stride;
+        buf[o..o + 16].copy_from_slice(t);
+    }
+    true
+}
+
+/// [`super::cols_in_place`] through [`by_line`].
+#[cfg_attr(
+    all(target_arch = "aarch64", target_feature = "neon"),
+    allow(dead_code)
+)]
+pub(super) fn cols_in_place(
+    buf: &mut [u8],
+    stride: usize,
+    at: usize,
+    size: Size,
+    lim: Limits,
+) -> bool {
+    let mut lines = [[0u8; 8]; 16];
+    for (l, line) in lines.iter_mut().enumerate() {
+        let o = at + l * stride - 4;
+        line.copy_from_slice(&buf[o..o + 8]);
+    }
+    if !by_line(&mut lines, size, lim) {
+        return false;
+    }
+    for (l, line) in lines.iter().enumerate() {
+        let o = at + l * stride - 4;
+        buf[o..o + 8].copy_from_slice(line);
+    }
+    true
+}
+
+/// [`super::cols_16_in_place`] through [`by_line_16`].
+#[cfg_attr(
+    all(target_arch = "aarch64", target_feature = "neon"),
+    allow(dead_code)
+)]
+pub(super) fn cols_16_in_place(buf: &mut [u8], stride: usize, at: usize, lim: Limits) -> bool {
+    let mut lines = [[0u8; 16]; 16];
+    for (l, line) in lines.iter_mut().enumerate() {
+        let o = at + l * stride - 8;
+        line.copy_from_slice(&buf[o..o + 16]);
+    }
+    if !by_line_16(&mut lines, lim) {
+        return false;
+    }
+    for (l, line) in lines.iter().enumerate() {
+        let o = at + l * stride - 8;
+        buf[o..o + 16].copy_from_slice(line);
+    }
+    true
+}

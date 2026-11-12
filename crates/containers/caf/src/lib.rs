@@ -40,3 +40,6 @@ pub use mux::CafMux;
 pub use pakt::PacketTableHeader;
 pub use probe::{CafFamily, probe};
 pub use walk::Chunk;
+
+#[cfg(test)]
+mod tests;

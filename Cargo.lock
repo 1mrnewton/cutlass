@@ -2960,6 +2960,8 @@ dependencies = [
 name = "cutlass-mpegts"
 version = "0.1.0"
 dependencies = [
+ "cutlass-adts",
+ "cutlass-codec",
  "cutlass-container",
 ]
 

@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod crc;
+pub mod es;
 mod limits;
 pub mod packet;
 mod probe;

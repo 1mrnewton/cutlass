@@ -11165,6 +11165,19 @@ fn mc_block<S: Sample>(
         2 => (w / 2, h),
         _ => (w / 2, h / 2),
     };
+    // Neither explicit nor implicit weights, nor ALC's: one prediction is
+    // copied and two are averaged.
+    let plain = alc.is_none()
+        && !slice.weighted
+        && (r0 < 0 || r1 < 0 || slice.pps.weighted_bipred != 2 || slice.kind != 1);
+    let (luma_done, chroma_done) = if plain && chroma == 1 && !separate {
+        mc_plain(pic, dpb, slice, block, motion)?
+    } else {
+        (false, false)
+    };
+    if luma_done && chroma_done {
+        return Ok(());
+    }
     let (luma_mix, chroma_mix, chroma_v) = if let Some(AlcWeight { weight, denom }) = alc {
         let chroma = Mix::Uni {
             weight: 1,
@@ -11192,7 +11205,8 @@ fn mc_block<S: Sample>(
     };
     // One reference: predict straight into the picture, and weight it
     // there when it is weighted.
-    if let Mix::Copy(list) | Mix::Uni { from: list, .. } = luma_mix {
+    if luma_done {
+    } else if let Mix::Copy(list) | Mix::Uni { from: list, .. } = luma_mix {
         let (reference, mv) = if list == 0 { (r0, mv0) } else { (r1, mv1) };
         let frame = reference_frame(dpb, slice, list, reference)?;
         let stride = pic.w;
@@ -11247,7 +11261,7 @@ fn mc_block<S: Sample>(
             S::default(),
         );
     }
-    if !separate && cw > 0 && ch > 0 {
+    if !separate && cw > 0 && ch > 0 && !chroma_done {
         let stride = if chroma == 3 { pic.w } else { pic.w / 2 };
         let origin = match chroma {
             3 => (x, y),
@@ -11343,6 +11357,70 @@ fn mc_block<S: Sample>(
         );
     }
     Ok(())
+}
+
+/// A partition of a 4:2:0 picture whose one prediction is copied or whose
+/// two are averaged, written straight into the picture by the kernels
+/// when every sample their taps read is inside the references: the
+/// common case, without the steps weights and edges need. Whether the
+/// luma and the chroma block were written; what was not is left alone.
+fn mc_plain<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    block: Block,
+    motion: McMotion,
+) -> Result<(bool, bool), CodecError> {
+    let Block { x, y, w, h } = block;
+    let first = if motion.r0 >= 0 {
+        Some((reference_frame(dpb, slice, 0, motion.r0)?, motion.mv0))
+    } else {
+        None
+    };
+    let second = if motion.r1 >= 0 {
+        Some((reference_frame(dpb, slice, 1, motion.r1)?, motion.mv1))
+    } else {
+        None
+    };
+    let (one, two) = match (first, second) {
+        (Some(one), two) => (one, two),
+        (None, Some(two)) => (two, None),
+        (None, None) => return Ok((false, false)),
+    };
+    let area = (x, y, w, h);
+    let stride = pic.w;
+    let luma = match (
+        luma_source(one.0, area, one.1),
+        two.map(|(frame, mv)| luma_source(frame, area, mv)),
+    ) {
+        (Some(a), None) => pic
+            .y
+            .get_mut(y * stride + x..)
+            .is_some_and(|dst| S::pair_fast((dst, stride), (w, h), a, None)),
+        (Some(a), Some(Some(b))) => pic
+            .y
+            .get_mut(y * stride + x..)
+            .is_some_and(|dst| S::pair_fast((dst, stride), (w, h), a, Some(b))),
+        _ => false,
+    };
+    let place = ((x / 2, y / 2), (w / 2, h / 2));
+    let stride = stride / 2;
+    let at = place.0.1 * stride + place.0.0;
+    let chroma = match (
+        chroma_sources(one.0, place, one.1),
+        two.map(|(frame, mv)| chroma_sources(frame, place, mv)),
+    ) {
+        (Some(a), None) => match (pic.u.get_mut(at..), pic.v.get_mut(at..)) {
+            (Some(u), Some(v)) => S::chroma_planes_fast((u, v, stride), place.1, a, None),
+            _ => false,
+        },
+        (Some(a), Some(Some(b))) => match (pic.u.get_mut(at..), pic.v.get_mut(at..)) {
+            (Some(u), Some(v)) => S::chroma_planes_fast((u, v, stride), place.1, a, Some(b)),
+            _ => false,
+        },
+        _ => false,
+    };
+    Ok((luma, chroma))
 }
 
 /// The block of `size` at `dst`, rows `stride` apart, mixed in place by

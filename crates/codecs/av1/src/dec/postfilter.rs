@@ -1494,11 +1494,16 @@ fn cdef_plane_block<P: Pixel>(
         // 8-bit and inside the picture: the byte kernel, with the taps
         // of the last block that had these strengths and direction.
         let slot = &mut taps[taps_slot(plane > 0, pri, dir)];
-        let ready = match slot {
-            Some(t) if t.is_for(pri, sec, dir, damping) => *t,
-            _ => *slot.insert(CdefTaps::new(pri, sec, dir, damping)),
-        };
-        if cdef_filter_taps(bytes, ds, src, w, h, &ready) {
+        // The taps in place, not a copy of them.
+        if !slot
+            .as_ref()
+            .is_some_and(|t| t.is_for(pri, sec, dir, damping))
+        {
+            *slot = Some(CdefTaps::new(pri, sec, dir, damping));
+        }
+        if let Some(ready) = slot.as_ref()
+            && cdef_filter_taps(bytes, ds, src, w, h, ready)
+        {
             return;
         }
     }
@@ -1579,11 +1584,16 @@ fn cdef_plane_block_8<P: Pixel>(
     let src = &pad[(y0 - sb_y) * ps + (x0 - sb_x)..];
     if inner && let Some(bytes) = P::bytes_mut(&mut dst[plane][at..]) {
         let slot = &mut taps[taps_slot(plane > 0, pri, dir)];
-        let ready = match slot {
-            Some(t) if t.is_for(pri, sec, dir, damping) => *t,
-            _ => *slot.insert(CdefTaps::new(pri, sec, dir, damping)),
-        };
-        if cdef_filter_taps_bytes(bytes, ds, src, w, h, &ready) {
+        // The taps in place, not a copy of them.
+        if !slot
+            .as_ref()
+            .is_some_and(|t| t.is_for(pri, sec, dir, damping))
+        {
+            *slot = Some(CdefTaps::new(pri, sec, dir, damping));
+        }
+        if let Some(ready) = slot.as_ref()
+            && cdef_filter_taps_bytes(bytes, ds, src, w, h, ready)
+        {
             return;
         }
     }

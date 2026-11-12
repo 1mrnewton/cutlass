@@ -371,8 +371,20 @@ const _: () = assert!(CDEF_PAD_STRIDE == kernel::STRIDE && TAP_SPAN == kernel::C
 /// blocks that share them (see [`cdef_filter_taps`]).
 #[derive(Clone, Copy)]
 pub struct CdefTaps {
-    key: (i32, i32, u8, i32),
+    /// [`taps_key`] of the arguments of [`Self::new`].
+    key: u64,
     filter: kernel::Filter,
+}
+
+/// The arguments of [`CdefTaps::new`] in one number, so that one compare
+/// tells whether taps are for them: each fits 16 bits (a strength is at
+/// most 60 at 12 bits, the damping at most 10).
+#[inline(always)]
+fn taps_key(pri: i32, sec: i32, dir: u8, damping: i32) -> u64 {
+    u64::from(pri as u16)
+        | u64::from(sec as u16) << 16
+        | u64::from(dir) << 32
+        | u64::from(damping as u16) << 48
 }
 
 impl CdefTaps {
@@ -381,7 +393,7 @@ impl CdefTaps {
     pub fn new(pri: i32, sec: i32, dir: u8, damping: i32) -> Self {
         let k = Kernel::new(&Params::new(CDEF_PAD_STRIDE, pri, sec, dir, damping, 8));
         Self {
-            key: (pri, sec, dir, damping),
+            key: taps_key(pri, sec, dir, damping),
             filter: kernel::Filter {
                 pri: k.pri_thr,
                 sec: k.sec_thr,
@@ -397,7 +409,7 @@ impl CdefTaps {
     /// Whether these are the taps for the arguments of [`Self::new`].
     #[inline(always)]
     pub fn is_for(&self, pri: i32, sec: i32, dir: u8, damping: i32) -> bool {
-        self.key == (pri, sec, dir, damping)
+        self.key == taps_key(pri, sec, dir, damping)
     }
 }
 

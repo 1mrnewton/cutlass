@@ -3835,9 +3835,10 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             ((self.fs.mi_rows * 4) >> sy).div_ceil(4),
         ];
         let full = [bw4(psz), bh4(psz)];
+        // Steps are powers of two: rounding up to one is a mask.
         let cover = core::array::from_fn(|i| {
             let avail = max[i].saturating_sub(at[i]);
-            full[i].min(avail.div_ceil(step[i]) * step[i])
+            full[i].min((avail + step[i] - 1) & !(step[i] - 1))
         });
         (at, step, cover)
     }
@@ -3863,7 +3864,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             }
             // Also while recording: see transform_block().
             if plane == 0 || self.rec.is_none() {
-                self.skip_mark_decoded(plane);
+                self.mark_decoded_cover(plane, cols, rows);
             }
         }
     }
@@ -3871,8 +3872,14 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
     /// The decoded flags of a plane of a skipped inter block, as
     /// tx_mark_decoded() of each of its transform blocks sets them.
     fn skip_mark_decoded(&mut self, plane: usize) {
-        let (sx, sy) = self.plane_sub(plane);
         let (_, _, [cols, rows]) = self.skip_cover(plane);
+        self.mark_decoded_cover(plane, cols, rows);
+    }
+
+    /// [`Self::skip_mark_decoded`] with the plane's cover, `cols` by
+    /// `rows` 4x4s, from [`Self::skip_cover`].
+    fn mark_decoded_cover(&mut self, plane: usize, cols: usize, rows: usize) {
+        let (sx, sy) = self.plane_sub(plane);
         let sb_mask = self.sb_size4 - 1;
         let sub_row = ((self.b.mi_row >> sy) << sy) & sb_mask;
         let sub_col = ((self.b.mi_col >> sx) << sx) & sb_mask;

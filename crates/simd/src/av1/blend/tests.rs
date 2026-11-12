@@ -1,4 +1,4 @@
-use super::{mask_blend8, scalar};
+use super::{mask_blend8, scalar, weights_pairs8, weights_quads8};
 
 struct Rng(u64);
 
@@ -52,5 +52,36 @@ fn the_kernel_wraps_as_its_twin_on_any_values() {
         let b: [i16; 8] = core::array::from_fn(|_| rng.next() as i16);
         let m: [u8; 8] = core::array::from_fn(|_| (rng.next() % 65) as u8);
         assert_eq!(mask_blend8(&a, &b, &m), scalar::mask_blend8(&a, &b, &m));
+    }
+}
+
+#[test]
+fn the_weights_of_subsampled_planes_are_rounded_means() {
+    let mut rng = Rng(0x2A2);
+    for round in 0..50_000 {
+        // Mask values are 0 to 64; any byte must not overflow either.
+        let value = |rng: &mut Rng| -> u8 {
+            if round % 2 == 0 {
+                (rng.next() % 65) as u8
+            } else {
+                rng.next() as u8
+            }
+        };
+        let a: [u8; 16] = core::array::from_fn(|_| value(&mut rng));
+        let b: [u8; 16] = core::array::from_fn(|_| value(&mut rng));
+        let pairs: [u8; 8] = core::array::from_fn(|i| {
+            (u32::from(a[2 * i]) + u32::from(a[2 * i + 1])).div_ceil(2) as u8
+        });
+        let quads: [u8; 8] = core::array::from_fn(|i| {
+            let s = u32::from(a[2 * i])
+                + u32::from(a[2 * i + 1])
+                + u32::from(b[2 * i])
+                + u32::from(b[2 * i + 1]);
+            ((s + 2) / 4) as u8
+        });
+        assert_eq!(scalar::weights_pairs8(&a), pairs, "{a:?}");
+        assert_eq!(weights_pairs8(&a), pairs, "{a:?}");
+        assert_eq!(scalar::weights_quads8(&a, &b), quads, "{a:?} {b:?}");
+        assert_eq!(weights_quads8(&a, &b), quads, "{a:?} {b:?}");
     }
 }

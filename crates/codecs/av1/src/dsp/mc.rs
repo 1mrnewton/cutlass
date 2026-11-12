@@ -1402,7 +1402,13 @@ fn mask_blend_u8(
             (false, false) => &mask[r * mask_stride..][..w],
             (true, false) => {
                 let a = &mask[r * mask_stride..][..2 * w];
-                for (m, a) in weights[..w].iter_mut().zip(a.as_chunks::<2>().0) {
+                // Eight weights at a time on the kernel, the rest here.
+                let (m8, m_rest) = weights[..w].as_chunks_mut::<8>();
+                let (a16, a_rest) = a.as_chunks::<16>();
+                for (m, a) in m8.iter_mut().zip(a16) {
+                    *m = blend::weights_pairs8(a);
+                }
+                for (m, a) in m_rest.iter_mut().zip(a_rest.as_chunks::<2>().0) {
                     *m = ((u16::from(a[0]) + u16::from(a[1]) + 1) >> 1) as u8;
                 }
                 &weights[..w]
@@ -1412,8 +1418,18 @@ fn mask_blend_u8(
             _ => {
                 let a = &mask[2 * r * mask_stride..][..2 * w];
                 let b = &mask[(2 * r + 1) * mask_stride..][..2 * w];
-                let pairs = a.as_chunks::<2>().0.iter().zip(b.as_chunks::<2>().0);
-                for (m, (a, b)) in weights[..w].iter_mut().zip(pairs) {
+                let (m8, m_rest) = weights[..w].as_chunks_mut::<8>();
+                let (a16, a_rest) = a.as_chunks::<16>();
+                let (b16, b_rest) = b.as_chunks::<16>();
+                for ((m, a), b) in m8.iter_mut().zip(a16).zip(b16) {
+                    *m = blend::weights_quads8(a, b);
+                }
+                let pairs = a_rest
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .zip(b_rest.as_chunks::<2>().0);
+                for (m, (a, b)) in m_rest.iter_mut().zip(pairs) {
                     let s = u16::from(a[0]) + u16::from(a[1]) + u16::from(b[0]) + u16::from(b[1]);
                     *m = ((s + 2) >> 2) as u8;
                 }

@@ -68,6 +68,9 @@ mod tests {
             probe(b"RIFF\0\0\0\0AMV "),
             ProbeResult::Refuse { examined: 12 }
         );
-        assert_eq!(cutlass_riff::probe(b"RIFF\0\0\0\0AVI "), ProbeResult::Refuse { examined: 12 });
+        assert_eq!(
+            cutlass_riff::probe(b"RIFF\0\0\0\0AVI "),
+            ProbeResult::Refuse { examined: 12 }
+        );
     }
 }

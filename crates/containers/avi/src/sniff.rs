@@ -147,13 +147,22 @@ mod tests {
         assert!(!keyframe(Some(CodecId::Hevc), &[0, 0, 1, 0x02, 0x01]));
         assert!(keyframe(Some(CodecId::Mpeg4), &[0, 0, 1, 0xB6, 0x10]));
         assert!(!keyframe(Some(CodecId::Mpeg4), &[0, 0, 1, 0xB6, 0x50]));
-        assert!(keyframe(Some(CodecId::Mpeg2), &[0, 0, 1, 0xB3, 9, 0, 0, 1, 0x00, 0x00, 0x0F]));
-        assert!(!keyframe(Some(CodecId::Mpeg2), &[0, 0, 1, 0x00, 0x00, 0x17]));
+        assert!(keyframe(
+            Some(CodecId::Mpeg2),
+            &[0, 0, 1, 0xB3, 9, 0, 0, 1, 0x00, 0x00, 0x0F]
+        ));
+        assert!(!keyframe(
+            Some(CodecId::Mpeg2),
+            &[0, 0, 1, 0x00, 0x00, 0x17]
+        ));
         assert!(keyframe(Some(CodecId::Vp8), &[0x10]));
         assert!(!keyframe(Some(CodecId::Vp8), &[0x11]));
         assert!(keyframe(Some(CodecId::Vp9), &[0x82]));
         assert!(!keyframe(Some(CodecId::Vp9), &[0x86]));
-        assert!(keyframe(Some(CodecId::Av1), &[0x12, 0x00, 0x0A, 0x01, 0x00]));
+        assert!(keyframe(
+            Some(CodecId::Av1),
+            &[0x12, 0x00, 0x0A, 0x01, 0x00]
+        ));
         assert!(!keyframe(Some(CodecId::Av1), &[0x32, 0x01, 0x00]));
         assert!(keyframe(Some(CodecId::Mjpeg), &[]));
         assert!(!keyframe(None, &[0; 8]));

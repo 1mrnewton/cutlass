@@ -285,7 +285,10 @@ mod tests {
         over.extend_from_slice(&[0; 4]);
         assert!(matches!(
             children(&over),
-            Err(OpenError::HostileSize { declared: 100, limit: 4 })
+            Err(OpenError::HostileSize {
+                declared: 100,
+                limit: 4
+            })
         ));
     }
 
@@ -308,8 +311,17 @@ mod tests {
         limits.max_tracks = 2;
         assert!(matches!(
             parse_hdrl(&data, &limits),
-            Err(OpenError::HostileSize { declared: 3, limit: 2 })
+            Err(OpenError::HostileSize {
+                declared: 3,
+                limit: 2
+            })
         ));
-        assert_eq!(parse_hdrl(&data, &Limits::standard()).unwrap().streams.len(), 3);
+        assert_eq!(
+            parse_hdrl(&data, &Limits::standard())
+                .unwrap()
+                .streams
+                .len(),
+            3
+        );
     }
 }

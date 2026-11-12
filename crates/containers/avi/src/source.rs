@@ -136,7 +136,9 @@ impl<R: Read + Seek> Source<R> {
     }
 
     fn buffered_offset(&self) -> Option<usize> {
-        let end = self.buf_start.checked_add(u64::try_from(self.buf_len).ok()?)?;
+        let end = self
+            .buf_start
+            .checked_add(u64::try_from(self.buf_len).ok()?)?;
         if self.pos >= self.buf_start && self.pos < end {
             usize::try_from(self.pos - self.buf_start).ok()
         } else {
@@ -245,7 +247,10 @@ mod tests {
         assert_eq!(src.read_array::<4>().unwrap(), [0, 1, 2, 3]);
         assert_eq!(src.consumed(), 1000);
         src.seek(500).unwrap();
-        assert_eq!(src.read_array::<2>().unwrap(), [500 % 251, 501 % 251].map(|v| v as u8));
+        assert_eq!(
+            src.read_array::<2>().unwrap(),
+            [500 % 251, 501 % 251].map(|v| v as u8)
+        );
         assert_eq!(src.consumed(), 1000);
     }
 
@@ -254,7 +259,9 @@ mod tests {
         let len = BUFFER * 3;
         let mut src = source(len);
         src.seek(10).unwrap();
-        let out = src.read_vec(u64::try_from(BUFFER * 2).unwrap(), u64::MAX).unwrap();
+        let out = src
+            .read_vec(u64::try_from(BUFFER * 2).unwrap(), u64::MAX)
+            .unwrap();
         assert_eq!(out[0], 10);
         assert_eq!(src.consumed(), u64::try_from(BUFFER * 2).unwrap());
         assert_eq!(src.position(), u64::try_from(BUFFER * 2 + 10).unwrap());
@@ -269,7 +276,10 @@ mod tests {
         ));
         assert!(matches!(
             src.read_vec(17, 1 << 20),
-            Err(SourceError::Truncated { expected: 17, got: 16 })
+            Err(SourceError::Truncated {
+                expected: 17,
+                got: 16
+            })
         ));
         assert_eq!(src.consumed(), 0);
         assert!(matches!(src.seek(17), Err(SourceError::OutOfRange { .. })));

@@ -264,14 +264,11 @@ impl<R: Read + Seek> AviDemux<R> {
         };
         let track = &self.tracks[index];
         let presentation = track.presentation.then_some(entry.time);
-        let timestamp = Timestamp::try_new(
-            Some(entry.time),
-            presentation,
-            Some(i64::from(span.ticks)),
-        )
-        .map_err(|error| ReadError::Source {
-            message: error.to_string(),
-        })?;
+        let timestamp =
+            Timestamp::try_new(Some(entry.time), presentation, Some(i64::from(span.ticks)))
+                .map_err(|error| ReadError::Source {
+                    message: error.to_string(),
+                })?;
         let packet = Packet::try_new(
             track.number,
             bytes,

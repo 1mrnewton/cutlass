@@ -204,7 +204,10 @@ mod tests {
 
     #[test]
     fn a_payload_must_sit_after_a_chunk_header_inside_the_list() {
-        let movi = Movi { list: 100, end: 200 };
+        let movi = Movi {
+            list: 100,
+            end: 200,
+        };
         assert!(movi.holds(112, 88));
         assert!(!movi.holds(112, 89));
         assert!(!movi.holds(104, 4), "no room for the chunk header");

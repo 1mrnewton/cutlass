@@ -71,19 +71,17 @@ pub(crate) fn parse_video(strf: &[u8]) -> Option<VideoFormat> {
 pub(crate) fn video_codec(compression: [u8; 4]) -> Option<CodecId> {
     let tag = compression.map(|byte| byte.to_ascii_uppercase());
     let id = match &tag {
-        b"H264" | b"X264" | b"AVC1" | b"DAVC" | b"SMV2" | b"VSSH" | b"Q264" | b"V264"
-        | b"GAVC" | b"UMSV" | b"TSHD" | b"INMC" => CodecId::H264,
+        b"H264" | b"X264" | b"AVC1" | b"DAVC" | b"SMV2" | b"VSSH" | b"Q264" | b"V264" | b"GAVC"
+        | b"UMSV" | b"TSHD" | b"INMC" => CodecId::H264,
         b"HEVC" | b"H265" | b"X265" | b"HVC1" | b"HEV1" => CodecId::Hevc,
-        b"FMP4" | b"DIVX" | b"DX50" | b"XVID" | b"MP4S" | b"M4S2" | b"MP4V" | b"3IV2"
-        | b"BLZ0" | b"RMP4" | b"DXGM" | b"XVIX" | b"UMP4" | b"HDX4" | b"SEDG" | b"DIGI"
-        | b"EPHV" | b"WV1F" | b"SN40" | b"SIPP" | b"FVFW" | b"DM4V" | b"GEOV" | b"GEOX"
-        | b"DMK2" | b"PVMM" | b"M4CC" | b"EM4A" | b"MP4 " => CodecId::Mpeg4,
-        b"MPG2" | b"MPEG" | b"MPG1" | b"PIM1" | b"PIM2" | b"VCR2" | b"MMES" | b"MPGI"
-        | b"MX5P" | b"DVR " | b"SLIF" | b"LMP2" | b"HDV2" => CodecId::Mpeg2,
-        b"MJPG" | b"JPEG" | b"IJPG" | b"AVRN" | b"AVI1" | b"DMB1" | b"CJPG" | b"SLMJ"
-        | b"QIVG" | b"ACDV" | b"AVDJ" | b"TVMJ" | b"TJPG" | b"JPGL" | b"MJPA" => {
-            CodecId::Mjpeg
-        }
+        b"FMP4" | b"DIVX" | b"DX50" | b"XVID" | b"MP4S" | b"M4S2" | b"MP4V" | b"3IV2" | b"BLZ0"
+        | b"RMP4" | b"DXGM" | b"XVIX" | b"UMP4" | b"HDX4" | b"SEDG" | b"DIGI" | b"EPHV"
+        | b"WV1F" | b"SN40" | b"SIPP" | b"FVFW" | b"DM4V" | b"GEOV" | b"GEOX" | b"DMK2"
+        | b"PVMM" | b"M4CC" | b"EM4A" | b"MP4 " => CodecId::Mpeg4,
+        b"MPG2" | b"MPEG" | b"MPG1" | b"PIM1" | b"PIM2" | b"VCR2" | b"MMES" | b"MPGI" | b"MX5P"
+        | b"DVR " | b"SLIF" | b"LMP2" | b"HDV2" => CodecId::Mpeg2,
+        b"MJPG" | b"JPEG" | b"IJPG" | b"AVRN" | b"AVI1" | b"DMB1" | b"CJPG" | b"SLMJ" | b"QIVG"
+        | b"ACDV" | b"AVDJ" | b"TVMJ" | b"TJPG" | b"JPGL" | b"MJPA" => CodecId::Mjpeg,
         b"VP80" => CodecId::Vp8,
         b"VP90" => CodecId::Vp9,
         b"AV01" => CodecId::Av1,

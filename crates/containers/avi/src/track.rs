@@ -295,7 +295,10 @@ mod tests {
         video.push(100, 5, true, &mut budget).unwrap();
         video.push(200, 0, false, &mut budget).unwrap();
         video.push(300, 5, false, &mut budget).unwrap();
-        assert_eq!(video.entries[1].time, 2002, "an empty chunk is a dropped frame");
+        assert_eq!(
+            video.entries[1].time, 2002,
+            "an empty chunk is a dropped frame"
+        );
         assert_eq!(video.spans[1].ticks, 1001);
         assert_eq!(budget, 8);
     }
@@ -303,20 +306,42 @@ mod tests {
     #[test]
     fn pcm_counts_blocks_and_carries_a_partial_one() {
         let main = MainHeader::default();
-        let clock = Clock::new(&header(4, 176_400, 4), &main, StreamKind::Audio, Some(CodecId::Pcm), 4);
-        assert_eq!((clock.timescale, clock.unit, clock.sample_size), (44_100, 1, 4));
+        let clock = Clock::new(
+            &header(4, 176_400, 4),
+            &main,
+            StreamKind::Audio,
+            Some(CodecId::Pcm),
+            4,
+        );
+        assert_eq!(
+            (clock.timescale, clock.unit, clock.sample_size),
+            (44_100, 1, 4)
+        );
         let mut audio = track(clock, StreamKind::Audio);
         let mut budget = 10;
         audio.push(0, 6, false, &mut budget).unwrap();
         audio.push(10, 6, false, &mut budget).unwrap();
-        assert_eq!((audio.entries[1].time, audio.spans[0].ticks, audio.spans[1].ticks), (1, 1, 2));
+        assert_eq!(
+            (
+                audio.entries[1].time,
+                audio.spans[0].ticks,
+                audio.spans[1].ticks
+            ),
+            (1, 1, 2)
+        );
         assert!(audio.entries.iter().all(|entry| entry.keyframe));
     }
 
     #[test]
     fn variable_bitrate_audio_counts_ceil_of_len_over_block_align() {
         let main = MainHeader::default();
-        let clock = Clock::new(&header(1152, 44_100, 0), &main, StreamKind::Audio, Some(CodecId::Mp3), 1152);
+        let clock = Clock::new(
+            &header(1152, 44_100, 0),
+            &main,
+            StreamKind::Audio,
+            Some(CodecId::Mp3),
+            1152,
+        );
         assert_eq!((clock.timescale, clock.unit), (1225, 32));
         let mut audio = track(clock, StreamKind::Audio);
         let mut budget = 10;
@@ -329,17 +354,62 @@ mod tests {
     #[test]
     fn ffmpegs_header_fixes_apply() {
         let main = MainHeader::default();
-        let tagged = Clock::new(&header(1024, 48_000, 1024), &main, StreamKind::Audio, Some(CodecId::Aac), 1024);
+        let tagged = Clock::new(
+            &header(1024, 48_000, 1024),
+            &main,
+            StreamKind::Audio,
+            Some(CodecId::Aac),
+            1024,
+        );
         assert_eq!(tagged.sample_size, 0);
-        let small = Clock::new(&header(1024, 48_000, 0), &main, StreamKind::Audio, Some(CodecId::Aac), 4);
+        let small = Clock::new(
+            &header(1024, 48_000, 0),
+            &main,
+            StreamKind::Audio,
+            Some(CodecId::Aac),
+            4,
+        );
         assert_eq!(small.block_align, 0);
-        let mismatch = Clock::new(&header(1, 8_000, 2), &main, StreamKind::Audio, Some(CodecId::Pcm), 1);
+        let mismatch = Clock::new(
+            &header(1, 8_000, 2),
+            &main,
+            StreamKind::Audio,
+            Some(CodecId::Pcm),
+            1,
+        );
         assert_eq!(mismatch.sample_size, 1);
-        let zero = Clock::new(&header(0, 0, 0), &MainHeader { micro_sec_per_frame: 40_000, ..main }, StreamKind::Video, None, 0);
+        let zero = Clock::new(
+            &header(0, 0, 0),
+            &MainHeader {
+                micro_sec_per_frame: 40_000,
+                ..main
+            },
+            StreamKind::Video,
+            None,
+            0,
+        );
         assert_eq!((zero.timescale, zero.unit), (25, 1));
-        let start = Clock::new(&StreamHeader { start: 3, ..header(1, 25, 0) }, &main, StreamKind::Video, None, 0);
+        let start = Clock::new(
+            &StreamHeader {
+                start: 3,
+                ..header(1, 25, 0)
+            },
+            &main,
+            StreamKind::Video,
+            None,
+            0,
+        );
         assert_eq!(start.start, 3);
-        let crazy = Clock::new(&StreamHeader { start: 25 * 3_601, ..header(1, 25, 0) }, &main, StreamKind::Video, None, 0);
+        let crazy = Clock::new(
+            &StreamHeader {
+                start: 25 * 3_601,
+                ..header(1, 25, 0)
+            },
+            &main,
+            StreamKind::Video,
+            None,
+            0,
+        );
         assert_eq!(crazy.start, 0);
     }
 

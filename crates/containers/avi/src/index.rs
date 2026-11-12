@@ -5,7 +5,9 @@
 //! 1. OpenDML: each stream's `indx` super index names `ix##` standard
 //!    indexes, one per `RIFF` segment. An `indx` that is itself a standard
 //!    index is read directly. Field indexes (`AVI_INDEX_2FIELD`) are read
-//!    for their first-field offset.
+//!    for their first-field offset. Every stream needs one, with at least
+//!    one row; a writer that reserved an `indx` and never filled it (one
+//!    `RIFF`, the index in `idx1`) falls through to `idx1`.
 //! 2. `idx1`, which covers the first `RIFF` only. Its offsets are relative
 //!    to the `movi` form type, as the specification says, or absolute, as
 //!    some writers store them; the first entry's chunk header decides, and
@@ -29,8 +31,8 @@ use crate::bytes::{id_at, u16_at, u32_at, u64_at};
 use crate::format::StreamKind;
 use crate::layout::{Layout, Movi};
 use crate::limits::{MAX_RESYNC, MAX_SUPER_ENTRIES, SNIFF_BYTES};
-use crate::source::Source;
 use crate::sniff;
+use crate::source::Source;
 use crate::track::Track;
 
 /// `AVIIF_LIST`: the entry is a `rec ` list.
@@ -132,7 +134,12 @@ pub(crate) fn build<R: Read + Seek>(
     Ok(finish(tracks, IndexSource::Scan, fallbacks, resyncs))
 }
 
-fn finish(tracks: &mut [Track], source: IndexSource, fallbacks: Vec<Fallback>, resyncs: u32) -> Built {
+fn finish(
+    tracks: &mut [Track],
+    source: IndexSource,
+    fallbacks: Vec<Fallback>,
+    resyncs: u32,
+) -> Built {
     for track in tracks.iter_mut() {
         track.finish();
     }
@@ -284,7 +291,12 @@ fn idx1_base<R: Read + Seek>(
     Err(broken("idx1 offsets do not point at their chunks"))
 }
 
-fn chunk_matches<R: Read + Seek>(source: &mut Source<R>, header: u64, id: [u8; 4], size: u32) -> bool {
+fn chunk_matches<R: Read + Seek>(
+    source: &mut Source<R>,
+    header: u64,
+    id: [u8; 4],
+    size: u32,
+) -> bool {
     if source.seek(header).is_err() {
         return false;
     }
@@ -325,7 +337,7 @@ fn read_odml<R: Read + Seek>(
 ) -> Result<(), Fail> {
     for track in tracks.iter_mut() {
         let Some(indx) = track.super_index.clone() else {
-            continue;
+            return Err(broken(format!("stream {} has no indx", track.number)));
         };
         let header = IndexHeader::parse(&indx)?;
         if header.stream != Some(track.number) {
@@ -340,6 +352,9 @@ fn read_odml<R: Read + Seek>(
                 let count = usize::try_from(header.entries).unwrap_or(usize::MAX);
                 if count > room || header.entries > MAX_SUPER_ENTRIES {
                     return Err(broken("super index has more entries than bytes"));
+                }
+                if count == 0 {
+                    return Err(broken("super index lists no standard index"));
                 }
                 for row in 0..count {
                     let at = 24 + row * 16;
@@ -396,7 +411,9 @@ fn read_standard<R: Read + Seek>(
         .read_array()
         .map_err(|error| broken(format!("ix chunk: {error}")))?;
     if index_stream_of([head[0], head[1], head[2], head[3]]) != Some(track.number) {
-        return Err(broken("super index entry does not point at this stream's ix chunk"));
+        return Err(broken(
+            "super index entry does not point at this stream's ix chunk",
+        ));
     }
     let declared = u64::from(u32::from_le_bytes([head[4], head[5], head[6], head[7]]));
     if u64::from(size) < declared.saturating_add(8) && size != 0 {
@@ -405,12 +422,14 @@ fn read_standard<R: Read + Seek>(
     let limit = u64::from(limits.max_index_entries)
         .saturating_mul(12)
         .saturating_add(24);
-    let bytes = source.read_vec(declared, limit).map_err(|error| match error {
-        cutlass_container::SourceError::HostileSize { declared, limit } => {
-            Fail::Fatal(OpenError::HostileSize { declared, limit })
-        }
-        other => broken(format!("ix chunk: {other}")),
-    })?;
+    let bytes = source
+        .read_vec(declared, limit)
+        .map_err(|error| match error {
+            cutlass_container::SourceError::HostileSize { declared, limit } => {
+                Fail::Fatal(OpenError::HostileSize { declared, limit })
+            }
+            other => broken(format!("ix chunk: {other}")),
+        })?;
     let header = IndexHeader::parse(&bytes)?;
     if header.kind != 1 || header.stream != Some(track.number) {
         return Err(broken("ix chunk is not a standard index of this stream"));
@@ -444,7 +463,12 @@ fn standard_entries(
         let data = base
             .checked_add(u64::from(offset))
             .ok_or_else(|| broken("standard index offset overflows"))?;
-        if size > 0 && !layout.movi.iter().any(|movi| movi.holds(data, u64::from(size))) {
+        if size > 0
+            && !layout
+                .movi
+                .iter()
+                .any(|movi| movi.holds(data, u64::from(size)))
+        {
             return Err(broken("standard index entry points outside movi"));
         }
         track.push(data, size, raw & 0x8000_0000 == 0, budget)?;
@@ -509,11 +533,21 @@ fn scan<R: Read + Seek>(
 
 /// Chunk ids a scan accepts: `NNxx` with a letter pair, `ix##`, `JUNK`, `LIST`.
 fn plausible(id: [u8; 4]) -> bool {
-    let printable = id.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b' ');
-    printable && (stream_of(id).is_some() || index_stream_of(id).is_some() || matches!(&id, b"JUNK" | b"LIST" | b"idx1"))
+    let printable = id
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b' ');
+    printable
+        && (stream_of(id).is_some()
+            || index_stream_of(id).is_some()
+            || matches!(&id, b"JUNK" | b"LIST" | b"idx1"))
 }
 
-fn resync<R: Read + Seek>(source: &mut Source<R>, from: u64, end: u64, streams: usize) -> Option<u64> {
+fn resync<R: Read + Seek>(
+    source: &mut Source<R>,
+    from: u64,
+    end: u64,
+    streams: usize,
+) -> Option<u64> {
     let stop = from.saturating_add(MAX_RESYNC).min(end);
     let mut window = vec![0u8; 64 * 1024];
     let mut at = from;
@@ -527,11 +561,18 @@ fn resync<R: Read + Seek>(source: &mut Source<R>, from: u64, end: u64, streams: 
                 return None;
             }
             let id = [candidate[0], candidate[1], candidate[2], candidate[3]];
-            let size = u64::from(u32::from_le_bytes([candidate[4], candidate[5], candidate[6], candidate[7]]));
+            let size = u64::from(u32::from_le_bytes([
+                candidate[4],
+                candidate[5],
+                candidate[6],
+                candidate[7],
+            ]));
             let fits = here + 8 + size <= end;
             let stream = stream_of(id)
                 .and_then(|number| usize::try_from(number).ok())
-                .is_some_and(|number| number < streams && id[2].is_ascii_alphabetic() && id[3].is_ascii_alphabetic());
+                .is_some_and(|number| {
+                    number < streams && id[2].is_ascii_alphabetic() && id[3].is_ascii_alphabetic()
+                });
             if fits && (stream || matches!(&id, b"LIST" | b"JUNK")) {
                 return Some(here);
             }

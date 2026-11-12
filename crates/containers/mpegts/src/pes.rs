@@ -58,6 +58,30 @@ pub fn timestamp(bytes: &[u8]) -> Option<u64> {
     )
 }
 
+/// The PTS and DTS of a PES header at the start of `payload`, when the
+/// header's timestamp fields are inside it.
+#[must_use]
+pub fn pes_times(payload: &[u8]) -> (Option<u64>, Option<u64>) {
+    let [0, 0, 1, stream_id, _, _, _, flags, _, ..] = *payload else {
+        return (None, None);
+    };
+    if has_no_header(stream_id) {
+        return (None, None);
+    }
+    let flags = flags >> 6;
+    let pts = if flags & 2 != 0 {
+        payload.get(9..).and_then(timestamp)
+    } else {
+        None
+    };
+    let dts = if flags == 3 {
+        payload.get(14..).and_then(timestamp)
+    } else {
+        None
+    };
+    (pts, dts)
+}
+
 /// Writes a timestamp's five bytes with `prefix` in the top four bits.
 #[must_use]
 pub const fn timestamp_bytes(prefix: u8, value: u64) -> [u8; 5] {

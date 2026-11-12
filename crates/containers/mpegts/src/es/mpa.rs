@@ -4,7 +4,7 @@
 //! unknown codec this workspace does not decode. Free-format frames have
 //! no length in their header and are not framed.
 
-use cutlass_codec::{CodecId, StreamCodec, UnknownCodec};
+use cutlass_codec::{CodecId, StreamCodec};
 
 use super::Facts;
 use super::audio::{Found, Frame, Syntax};
@@ -126,8 +126,8 @@ impl Syntax for MpegAudio {
         };
         let codec = match header.layer {
             3 => StreamCodec::Known(CodecId::Mp3),
-            2 => unknown(b"mpegts:mp2"),
-            _ => unknown(b"mpegts:mp1"),
+            2 => super::unknown(b"mpegts:mp2"),
+            _ => super::unknown(b"mpegts:mp1"),
         };
         self.facts = Some(Facts::Audio {
             codec,
@@ -139,13 +139,6 @@ impl Syntax for MpegAudio {
 
     fn facts(&self) -> Option<Facts> {
         self.facts.clone()
-    }
-}
-
-fn unknown(tag: &[u8]) -> StreamCodec {
-    match UnknownCodec::new(tag.to_vec()) {
-        Ok(codec) => StreamCodec::Unknown(codec),
-        Err(_) => StreamCodec::Known(CodecId::Mp3),
     }
 }
 

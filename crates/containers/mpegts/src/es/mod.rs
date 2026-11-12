@@ -25,7 +25,7 @@ pub mod mpeg2;
 pub mod opus;
 pub mod video;
 
-use cutlass_codec::{CodecId, StreamCodec, StreamParams};
+use cutlass_codec::{CodecId, StreamCodec, StreamParams, UnknownCodec};
 
 use crate::psi::Kind;
 
@@ -110,6 +110,17 @@ impl Facts {
                 .unwrap_or_else(|_| StreamParams::opaque(codec.clone(), extradata.clone())),
         }
     }
+}
+
+/// A codec this workspace does not name, by a tag such as `mpegts:mp2`.
+#[must_use]
+pub fn unknown(tag: &[u8]) -> StreamCodec {
+    let tag = &tag[..tag.len().min(UnknownCodec::MAX_TAG)];
+    // Within `MAX_TAG` the tag is always taken; the empty tag is the
+    // fallback that cannot be refused either.
+    UnknownCodec::new(tag.to_vec())
+        .or_else(|_| UnknownCodec::new(Vec::new()))
+        .map_or(StreamCodec::Known(CodecId::Pcm), StreamCodec::Unknown)
 }
 
 /// The framer of one elementary stream.

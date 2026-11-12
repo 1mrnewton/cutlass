@@ -2,23 +2,11 @@
 //! [`crate::neon`].
 
 use core::arch::aarch64::{
-    int32x4_t, vaddq_s32, vcombine_s16, vcombine_u64, vcreate_u8, vcreate_u64, vdupq_n_s32,
-    vget_lane_u64, vget_low_u16, vmovl_high_u16, vmovl_u8, vmovl_u16, vqaddq_s32, vqmovn_s32,
-    vqmovun_s16, vreinterpret_u64_u8, vreinterpretq_s32_s64, vreinterpretq_s32_u32,
-    vreinterpretq_s32_u64, vreinterpretq_s64_s32, vshrq_n_s32, vsubq_s32, vtrn1q_s32, vtrn1q_s64,
-    vtrn2q_s32, vtrn2q_s64,
+    int32x4_t, vaddq_s32, vcombine_s16, vcreate_u8, vdupq_n_s32, vget_lane_u64, vld4q_s32,
+    vmovl_u8, vqaddq_s16, vqmovun_s16, vqrshrn_n_s32, vreinterpret_u64_u8, vreinterpretq_s16_u16,
+    vreinterpretq_s32_s64, vreinterpretq_s64_s32, vshrq_n_s32, vsubq_s32, vtrn1q_s32, vtrn1q_s64,
+    vtrn2q_s32, vtrn2q_s64, vuzp1q_s32, vuzp2q_s32,
 };
-
-/// Four 32-bit numbers as a vector.
-#[inline]
-#[target_feature(enable = "neon")]
-fn load4(values: [i32; 4]) -> int32x4_t {
-    let half = |a: i32, b: i32| u64::from(a as u32) | u64::from(b as u32) << 32;
-    vreinterpretq_s32_u64(vcombine_u64(
-        vcreate_u64(half(values[0], values[1])),
-        vcreate_u64(half(values[2], values[3])),
-    ))
-}
 
 /// Rows to columns of a 4×4 block held as four vectors.
 #[inline]
@@ -53,37 +41,49 @@ fn pass(d: [int32x4_t; 4]) -> [int32x4_t; 4] {
     ]
 }
 
+/// The sixteen coefficients of a 4×4 block, one column to a vector: lane
+/// `i` of vector `j` is row `i`'s coefficient `j`. One de-interleaving
+/// load turns the rows to columns.
+#[inline]
+#[target_feature(enable = "neon")]
+fn columns4(block: &[i32; 16]) -> [int32x4_t; 4] {
+    // SAFETY: `block` is sixteen readable `i32`s, exactly what the load
+    // reads, and it is aligned for `i32`.
+    #[allow(unsafe_code)]
+    let core::arch::aarch64::int32x4x4_t(a, b, c, d) = unsafe { vld4q_s32(block.as_ptr()) };
+    [a, b, c, d]
+}
+
+/// Two rows of samples with their residuals, `low` and `high`, added:
+/// each residual rounded and shifted down by six and held to 16 bits on
+/// the way, then added with saturation and held to 0 to 255. Holding the
+/// residual to 16 bits changes nothing: one that large takes any sample
+/// past the end of 0 to 255 either way.
+#[inline]
+#[target_feature(enable = "neon")]
+fn finish_pair(samples: u64, low: int32x4_t, high: int32x4_t) -> u64 {
+    let residual = vcombine_s16(vqrshrn_n_s32::<6>(low), vqrshrn_n_s32::<6>(high));
+    let wide = vreinterpretq_s16_u16(vmovl_u8(vcreate_u8(samples)));
+    vget_lane_u64::<0>(vreinterpret_u64_u8(vqmovun_s16(vqaddq_s16(wide, residual))))
+}
+
 #[inline]
 #[target_feature(enable = "neon")]
 fn idct4_rows(block: &[i32; 16], rows: [[u8; 4]; 4]) -> [[u8; 4]; 4] {
-    let line = |index: usize| {
-        load4([
-            block[index * 4],
-            block[index * 4 + 1],
-            block[index * 4 + 2],
-            block[index * 4 + 3],
-        ])
-    };
     // Along each row first: the columns hold one input of every row.
-    let mid = pass(turn4([line(0), line(1), line(2), line(3)]));
+    let mid = pass(columns4(block));
     // Then down each column: the rows of the first pass's result.
     let out = pass(turn4(mid));
-    let round = vdupq_n_s32(32);
-    let finish = |residual: int32x4_t, samples: [u8; 4]| -> [u8; 4] {
-        let residual = vshrq_n_s32::<6>(vaddq_s32(residual, round));
-        let wide = u64::from(u32::from_le_bytes(samples));
-        let samples = vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(vmovl_u8(vcreate_u8(wide)))));
-        // Saturating at each narrowing clips the sum to a sample.
-        let sum = vqmovn_s32(vqaddq_s32(samples, residual));
-        let bytes = vqmovun_s16(vcombine_s16(sum, sum));
-        let packed = vget_lane_u64::<0>(vreinterpret_u64_u8(bytes)).to_le_bytes();
-        [packed[0], packed[1], packed[2], packed[3]]
+    let pair = |first: [u8; 4], second: [u8; 4]| {
+        u64::from(u32::from_le_bytes(first)) | u64::from(u32::from_le_bytes(second)) << 32
     };
+    let top = finish_pair(pair(rows[0], rows[1]), out[0], out[1]);
+    let bottom = finish_pair(pair(rows[2], rows[3]), out[2], out[3]);
     [
-        finish(out[0], rows[0]),
-        finish(out[1], rows[1]),
-        finish(out[2], rows[2]),
-        finish(out[3], rows[3]),
+        (top as u32).to_le_bytes(),
+        ((top >> 32) as u32).to_le_bytes(),
+        (bottom as u32).to_le_bytes(),
+        ((bottom >> 32) as u32).to_le_bytes(),
     ]
 }
 
@@ -128,23 +128,33 @@ fn pass8(d: [int32x4_t; 8]) -> [int32x4_t; 8] {
 #[inline]
 #[target_feature(enable = "neon")]
 fn idct8_rows(block: &[i32; 64], rows: [[u8; 8]; 8]) -> [[u8; 8]; 8] {
-    let at = |row: usize, col: usize| {
-        let start = row * 8 + col;
-        load4([
-            block[start],
-            block[start + 1],
-            block[start + 2],
-            block[start + 3],
-        ])
+    // The eight columns of the four rows from `top`: two de-interleaving
+    // loads of two rows each give every fourth coefficient of a pair of
+    // rows, and the even and odd lanes of those split the rows apart.
+    let columns = |top: usize| -> [int32x4_t; 8] {
+        let pair = |row: usize| {
+            let Some(rows) = block[row * 8..].first_chunk::<16>() else {
+                unreachable!("two rows of an 8×8 block are sixteen coefficients");
+            };
+            // SAFETY: `rows` is sixteen readable `i32`s, exactly what the
+            // load reads, and it is aligned for `i32`.
+            #[allow(unsafe_code)]
+            let core::arch::aarch64::int32x4x4_t(a, b, c, d) = unsafe { vld4q_s32(rows.as_ptr()) };
+            [a, b, c, d]
+        };
+        let (upper, lower) = (pair(top), pair(top + 2));
+        core::array::from_fn(|col| {
+            if col < 4 {
+                vuzp1q_s32(upper[col], lower[col])
+            } else {
+                vuzp2q_s32(upper[col - 4], lower[col - 4])
+            }
+        })
     };
     // `mid[i]` is row `i` of the first pass, its left and right halves.
     let mut mid = [[vdupq_n_s32(0); 2]; 8];
     for top in [0, 4] {
-        let left = turn4([at(top, 0), at(top + 1, 0), at(top + 2, 0), at(top + 3, 0)]);
-        let right = turn4([at(top, 4), at(top + 1, 4), at(top + 2, 4), at(top + 3, 4)]);
-        let f = pass8([
-            left[0], left[1], left[2], left[3], right[0], right[1], right[2], right[3],
-        ]);
+        let f = pass8(columns(top));
         let left = turn4([f[0], f[1], f[2], f[3]]);
         let right = turn4([f[4], f[5], f[6], f[7]]);
         for i in 0..4 {
@@ -153,19 +163,9 @@ fn idct8_rows(block: &[i32; 64], rows: [[u8; 8]; 8]) -> [[u8; 8]; 8] {
     }
     let left = pass8(core::array::from_fn(|i| mid[i][0]));
     let right = pass8(core::array::from_fn(|i| mid[i][1]));
-    let round = vdupq_n_s32(32);
     let mut out = rows;
     for (i, row) in out.iter_mut().enumerate() {
-        let residual = |v: int32x4_t| vshrq_n_s32::<6>(vaddq_s32(v, round));
-        let wide = vmovl_u8(vcreate_u8(u64::from_le_bytes(*row)));
-        let low = vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(wide)));
-        let high = vreinterpretq_s32_u32(vmovl_high_u16(wide));
-        // Saturating at each narrowing clips the sum to a sample.
-        let sum = vcombine_s16(
-            vqmovn_s32(vqaddq_s32(low, residual(left[i]))),
-            vqmovn_s32(vqaddq_s32(high, residual(right[i]))),
-        );
-        *row = vget_lane_u64::<0>(vreinterpret_u64_u8(vqmovun_s16(sum))).to_le_bytes();
+        *row = finish_pair(u64::from_le_bytes(*row), left[i], right[i]).to_le_bytes();
     }
     out
 }
@@ -265,4 +265,34 @@ pub(crate) fn dc_add_quads(plane: &mut [u8], at: usize, down: usize, dcs: [i32; 
     true
 }
 
-crate::residual::residual_kernels!(pub(crate), #[target_feature(enable = "neon")]);
+/// See [`crate::residual::idct4_add`]. The block's rows are found in the
+/// plane with one check, as in [`dc_add`].
+#[target_feature(enable = "neon")]
+pub(crate) fn idct4_add(plane: &mut [u8], at: usize, down: usize, block: &[i32; 16]) -> bool {
+    let Some(window) = plane.get_mut(at..) else {
+        return false;
+    };
+    let Some([r0, r1, r2, r3]) = crate::neon::rows_of::<4, 4>(window, down) else {
+        return false;
+    };
+    let [o0, o1, o2, o3] = idct4_rows(block, [*r0, *r1, *r2, *r3]);
+    (*r0, *r1, *r2, *r3) = (o0, o1, o2, o3);
+    true
+}
+
+/// See [`crate::residual::idct8_add`]. The block's rows are found in the
+/// plane with one check, as in [`dc_add`].
+#[target_feature(enable = "neon")]
+pub(crate) fn idct8_add(plane: &mut [u8], at: usize, down: usize, block: &[i32; 64]) -> bool {
+    let Some(window) = plane.get_mut(at..) else {
+        return false;
+    };
+    let Some(mut rows) = crate::neon::rows_of::<8, 8>(window, down) else {
+        return false;
+    };
+    let out = idct8_rows(block, rows.each_ref().map(|row| **row));
+    for (row, samples) in rows.iter_mut().zip(out) {
+        **row = samples;
+    }
+    true
+}

@@ -7,8 +7,8 @@
 
 /// Inverse-transforms `block`, scaled coefficients in raster order, and
 /// adds it to the 4×4 samples of `plane` whose first is at `at`, with rows
-/// `down` apart. `false` means the samples are not all in the plane and
-/// nothing was done.
+/// `down` apart. `false` means the samples are not all in the plane, or
+/// the rows overlap, and nothing was done.
 #[inline]
 pub fn idct4_add(plane: &mut [u8], at: usize, down: usize, block: &[i32; 16]) -> bool {
     kernel!(idct4_add(plane, at, down, block))
@@ -48,7 +48,7 @@ macro_rules! residual_kernels {
         /// See [`crate::residual::idct4_add`].
         $(#[$feature])*
         $visibility fn idct4_add(plane: &mut [u8], at: usize, down: usize, block: &[i32; 16]) -> bool {
-            if at + 3 * down + 4 > plane.len() {
+            if down < 4 || 3usize.checked_mul(down).and_then(|span| span.checked_add(at)).and_then(|start| start.checked_add(4)).is_none_or(|end| end > plane.len()) {
                 return false;
             }
             let mut rows = [[0u8; 4]; 4];
@@ -67,7 +67,7 @@ macro_rules! residual_kernels {
         /// See [`crate::residual::idct8_add`].
         $(#[$feature])*
         $visibility fn idct8_add(plane: &mut [u8], at: usize, down: usize, block: &[i32; 64]) -> bool {
-            if at + 7 * down + 8 > plane.len() {
+            if down < 8 || 7usize.checked_mul(down).and_then(|span| span.checked_add(at)).and_then(|start| start.checked_add(8)).is_none_or(|end| end > plane.len()) {
                 return false;
             }
             let mut rows = [[0u8; 8]; 8];

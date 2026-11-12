@@ -46,7 +46,9 @@
 //! - PCM: constant bitrate, `dwScale` the block size and `dwSampleSize` the
 //!   same; the stream timescale must be the sample rate and packets must
 //!   follow each other without gaps.
-//! - MP3, AAC, AC-3: variable bitrate, one frame per chunk, `dwSampleSize`
+//! - A-law and mu-law (`wav:0006`, `wav:0007`) are clocked as PCM.
+//! - MP3, MPEG-1 Layer II (`wav:0050`), AAC, AC-3, E-AC-3 and FLAC:
+//!   variable bitrate, one frame per chunk, `dwSampleSize`
 //!   zero and `nBlockAlign` at least the largest frame, so FFmpeg's,
 //!   GStreamer's, and DirectShow's `ceil(len / nBlockAlign)` count is one
 //!   frame per chunk. Every frame but the last has the first one's duration.

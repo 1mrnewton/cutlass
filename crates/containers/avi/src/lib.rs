@@ -132,7 +132,7 @@ pub const FEATURES: &[Feature] = &[
     Feature {
         name: "raw-video",
         demux: true,
-        mux: false,
+        mux: true,
     },
     Feature {
         name: "pcm-integer",
@@ -163,6 +163,41 @@ pub const FEATURES: &[Feature] = &[
         name: "ac3",
         demux: true,
         mux: true,
+    },
+    Feature {
+        name: "eac3",
+        demux: true,
+        mux: true,
+    },
+    Feature {
+        name: "flac",
+        demux: true,
+        mux: true,
+    },
+    Feature {
+        name: "mp2",
+        demux: true,
+        mux: true,
+    },
+    Feature {
+        name: "alaw-mulaw",
+        demux: true,
+        mux: true,
+    },
+    Feature {
+        name: "frames-split-from-audio-chunks",
+        demux: true,
+        mux: false,
+    },
+    Feature {
+        name: "muxer-interleaving",
+        demux: false,
+        mux: true,
+    },
+    Feature {
+        name: "repair-report",
+        demux: true,
+        mux: false,
     },
     Feature {
         name: "other-audio",

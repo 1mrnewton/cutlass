@@ -9,8 +9,8 @@ use core::arch::aarch64::{
     int8x16_t, int16x8_t, int32x4_t, uint8x16_t, vcombine_s16, vcombine_u16, vdotq_s32,
     vdupq_n_s16, vdupq_n_s32, vdupq_n_u8, veorq_u8, vget_lane_u64, vget_low_s16, vget_low_u8,
     vmlal_high_s16, vmlal_s16, vmlaq_s16, vmovl_high_u8, vmovl_u8, vmulq_s16, vqmovn_u16,
-    vqrshrun_n_s16, vqshrun_n_s32, vqtbl1q_s8, vreinterpret_u64_u8, vreinterpretq_s8_u8,
-    vreinterpretq_s16_u16, vrshrq_n_s16, vshrn_n_s32,
+    vqrshrun_n_s16, vqrshrun_n_s32, vqtbl1q_s8, vreinterpret_u64_u8, vreinterpretq_s8_u8,
+    vreinterpretq_s16_u16, vrshrn_n_s32, vrshrq_n_s16, vshrn_n_s32,
 };
 
 use super::Block;
@@ -147,9 +147,10 @@ pub(super) fn hv(out: Out<'_>, dst_stride: usize, b: &Block<'_>) {
     let six = b.fv[0] == 0 && b.fv[7] == 0;
     match out {
         Out::Prep(dst) => {
-            let round = vdupq_n_s32(1 << 6);
+            // The stores round: the sums start at 0.
+            let round = vdupq_n_s32(0);
             let store = |c: usize, r: usize, lo: int32x4_t, hi: int32x4_t| {
-                let v = vcombine_s16(vshrn_n_s32::<7>(lo), vshrn_n_s32::<7>(hi));
+                let v = vcombine_s16(vrshrn_n_s32::<7>(lo), vrshrn_n_s32::<7>(hi));
                 store_i16(dst, r * dst_stride + c, v);
             };
             if six {
@@ -159,9 +160,9 @@ pub(super) fn hv(out: Out<'_>, dst_stride: usize, b: &Block<'_>) {
             }
         }
         Out::Put(dst) => {
-            let round = vdupq_n_s32(1 << 10);
+            let round = vdupq_n_s32(0);
             let store = |c: usize, r: usize, lo: int32x4_t, hi: int32x4_t| {
-                let v = vcombine_u16(vqshrun_n_s32::<11>(lo), vqshrun_n_s32::<11>(hi));
+                let v = vcombine_u16(vqrshrun_n_s32::<11>(lo), vqrshrun_n_s32::<11>(hi));
                 let bytes = vget_lane_u64::<0>(vreinterpret_u64_u8(vqmovn_u16(v)));
                 store_bytes(dst, r * dst_stride + c, bytes);
             };

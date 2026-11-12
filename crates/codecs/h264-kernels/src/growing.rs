@@ -55,6 +55,7 @@ impl<T: Copy> Growing<T> {
     }
 
     /// The items filled so far, from the front.
+    #[inline]
     pub fn filled(&self) -> &[T] {
         let filled = self.filled.load(Ordering::Acquire);
         // SAFETY: the first `filled` items were written before the release

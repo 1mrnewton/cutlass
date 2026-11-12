@@ -146,6 +146,9 @@ impl<S: Sample> Published<S> {
     }
 
     /// The rows of `plane` that are in, once there are `rows` of `width`.
+    /// Inline, as it is asked for every block a later picture predicts,
+    /// and nearly always the rows are in.
+    #[inline(always)]
     fn wait_rows<'a, T: Copy>(
         &'a self,
         plane: &'a Growing<T>,
@@ -157,6 +160,16 @@ impl<S: Sample> Published<S> {
         if filled.len() >= wanted {
             return Ok(filled);
         }
+        self.wait_rows_slow(plane, wanted)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn wait_rows_slow<'a, T: Copy>(
+        &'a self,
+        plane: &'a Growing<T>,
+        wanted: usize,
+    ) -> Result<&'a [T], CodecError> {
         if let Some(permits) = &self.permits {
             permits.give();
         }

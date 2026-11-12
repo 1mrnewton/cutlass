@@ -36,6 +36,10 @@ pub enum Error {
         value: u64,
         limit: u64,
     },
+    /// Two TrackEntry elements share a TrackNumber.
+    DuplicateTrack {
+        number: u64,
+    },
     /// The byte source failed or ended.
     Source(SourceError),
     Cancelled,
@@ -67,6 +71,9 @@ impl fmt::Display for Error {
                     formatter,
                     "matroska {what} {value} is over the limit {limit}"
                 )
+            }
+            Self::DuplicateTrack { number } => {
+                write!(formatter, "matroska track number {number} appears twice")
             }
             Self::Source(error) => write!(formatter, "{error}"),
             Self::Cancelled => formatter.write_str("cancelled"),
@@ -101,6 +108,9 @@ impl Error {
                 family: ContainerId::Matroska,
             },
             Self::Source(error) => OpenError::from_header(error),
+            Self::DuplicateTrack { number } => OpenError::DuplicateTrack {
+                id: u32::try_from(number).unwrap_or(u32::MAX),
+            },
             Self::Limit { value, limit, .. } => OpenError::HostileSize {
                 declared: value,
                 limit,

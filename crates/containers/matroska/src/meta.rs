@@ -246,10 +246,9 @@ pub fn parse_tracks(data: &[u8], max_tracks: u32, max_private: u64) -> Result<Ve
         }
         let track = parse_track(child.data, max_private)?;
         if tracks.iter().any(|other| other.number == track.number) {
-            return Err(Error::malformed(format!(
-                "track number {} appears twice",
-                track.number
-            )));
+            return Err(Error::DuplicateTrack {
+                number: track.number,
+            });
         }
         tracks.push(track);
     }

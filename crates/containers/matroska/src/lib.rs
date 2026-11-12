@@ -4,10 +4,16 @@
 
 pub mod block;
 pub mod codec;
+mod demux;
 pub mod ebml;
 mod error;
 pub mod ids;
 pub mod limits;
 pub mod meta;
+mod probe;
+mod seek;
+mod source;
 
+pub use demux::{Clock, MatroskaDemux};
 pub use error::Error;
+pub use probe::{MatroskaFamily, probe};

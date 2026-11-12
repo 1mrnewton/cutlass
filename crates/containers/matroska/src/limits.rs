@@ -26,6 +26,10 @@ pub const MAX_LACED_FRAMES: usize = 256;
 /// preroll after it. No payload byte is read on that walk.
 pub const MAX_SEEK_WALK: u32 = 1_000_000;
 
+/// Blocks read after the last cue point's Cluster looking for each track's
+/// last DiscardPadding, at open.
+pub const MAX_TAIL_BLOCKS: u32 = 100_000;
+
 /// Block headers seeks keep from their walks, so that a later seek over the
 /// same stretch reads nothing (about 90 bytes each). Past it the kept walks
 /// are dropped and kept again from the next seek on.

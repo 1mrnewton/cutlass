@@ -29,7 +29,7 @@
 use std::collections::VecDeque;
 use std::io::{Read, Seek};
 
-use cutlass_codec::{ContainerId, Packet, Timescale, Timestamp};
+use cutlass_codec::{CodecId, ContainerId, Packet, StreamCodec, Timescale, Timestamp};
 use cutlass_container::{
     Demux, Edit, Gap, Input, Language, Limits, OpenError, ReadError, SeekLanding, SeekTo, Stream,
     TrackId, Trim,
@@ -114,6 +114,14 @@ struct Track {
     fix: FrameFix,
     /// Nanoseconds per frame.
     default_duration: Option<u64>,
+}
+
+/// A block's stated durations: its BlockDuration in Segment Ticks, and the
+/// DiscardPadding at its end in nanoseconds.
+#[derive(Clone, Copy, Debug, Default)]
+struct Durations {
+    block: Option<u64>,
+    discard_ns: u64,
 }
 
 /// The Cluster the reader is inside.
@@ -258,7 +266,7 @@ impl<R: Read + Seek> MatroskaDemux<R> {
             pending: VecDeque::new(),
             finished: walk.first_cluster.is_none(),
         };
-        Ok(Self {
+        let mut demux = Self {
             source,
             header,
             info,
@@ -277,7 +285,51 @@ impl<R: Read + Seek> MatroskaDemux<R> {
             cursor,
             limits,
             cancelled: false,
-        })
+        };
+        demux.read_end_padding()?;
+        Ok(demux)
+    }
+
+    /// Puts each audio track's last DiscardPadding in its stream's trim as
+    /// trailing padding, in samples. Only a random-access input with an
+    /// audio track is read, and it is left where it was.
+    fn read_end_padding(&mut self) -> Result<()> {
+        if !self.source.random()
+            || !self
+                .streams
+                .iter()
+                .any(|stream| stream.params().sample_rate().is_some())
+        {
+            return Ok(());
+        }
+        let back = self.source.position();
+        let paddings = self.end_padding();
+        self.source.seek(back)?;
+        for (number, ns) in paddings {
+            let Some(index) = self.track_index(number) else {
+                continue;
+            };
+            let stream = &self.streams[index];
+            let Some(rate) = stream.params().sample_rate() else {
+                continue;
+            };
+            let samples = (u128::from(ns) * u128::from(rate) + u128::from(SECOND_NS / 2))
+                / u128::from(SECOND_NS);
+            let trim = Trim::new(
+                stream.trim().encoder_delay(),
+                Some(u64::try_from(samples).unwrap_or(u64::MAX)),
+            );
+            self.streams[index] = Stream::new(
+                stream.id(),
+                stream.params().clone(),
+                stream.timescale(),
+                stream.language().cloned(),
+                stream.edits().to_vec(),
+                trim,
+            )
+            .with_display(stream.display());
+        }
+        Ok(())
     }
 
     /// The EBML header: DocType and its versions.
@@ -480,7 +532,14 @@ impl<R: Read + Seek> MatroskaDemux<R> {
                 .map(Some);
         }
         let data = self.source.bytes(body, limit)?;
-        self.emit_laced(index, cluster, header, &data, None, keyframe)
+        self.emit_laced(
+            index,
+            cluster,
+            header,
+            &data,
+            Durations::default(),
+            keyframe,
+        )
     }
 
     fn block_group(&mut self, size: u64) -> Result<Option<Packet>> {
@@ -490,12 +549,14 @@ impl<R: Read + Seek> MatroskaDemux<R> {
         let mut block = None;
         let mut duration = None;
         let mut referenced = false;
+        let mut discard = 0_i64;
         for child in Children::new(&group) {
             let child = child?;
             match child.id {
                 ids::BLOCK => block = Some(child.data),
                 ids::BLOCK_DURATION => duration = Some(ebml::uint(child.id, child.data)?),
                 ids::REFERENCE_BLOCK => referenced = true,
+                ids::DISCARD_PADDING => discard = ebml::int(child.id, child.data)?,
                 _ => {}
             }
         }
@@ -507,7 +568,11 @@ impl<R: Read + Seek> MatroskaDemux<R> {
             return Ok(None);
         };
         let body = data.get(header.len..).unwrap_or(&[]);
-        self.emit_laced(index, cluster, header, body, duration, !referenced)
+        let blocks = Durations {
+            block: duration,
+            discard_ns: u64::try_from(discard).unwrap_or(0),
+        };
+        self.emit_laced(index, cluster, header, body, blocks, !referenced)
     }
 
     /// The largest block body: one access unit, or a full lace of them.
@@ -521,12 +586,29 @@ impl<R: Read + Seek> MatroskaDemux<R> {
         cluster: Option<Cluster>,
         header: BlockHeader,
         body: &[u8],
-        block_duration: Option<u64>,
+        durations: Durations,
         keyframe: bool,
     ) -> Result<Option<Packet>> {
         let ranges = block::frames(body, header.lacing())?;
         let count = ranges.len();
-        let times = self.frame_times(index, cluster, header, count, block_duration)?;
+        let mut times = self.frame_times(index, cluster, header, count, durations.block)?;
+        // An Opus packet's duration is what of it plays, since the decoder
+        // trims by it; any other packet keeps its whole frame and the
+        // stream's trim states the padding. A BlockDuration leaves the
+        // discarded end out, as FFmpeg and this crate's muxer write it; a
+        // DefaultDuration covers it.
+        let opus = self.streams[index].params().codec() == &StreamCodec::Known(CodecId::Opus);
+        if durations.discard_ns > 0
+            && opus != durations.block.is_some()
+            && let Some((_, Some(last))) = times.last_mut()
+        {
+            let discard = self.clock.from_ns(u128::from(durations.discard_ns));
+            *last = if opus {
+                last.saturating_sub(discard).max(0)
+            } else {
+                last.saturating_add(discard)
+            };
+        }
         let fix = self.tracks[index].fix.clone();
         let mut packets = Vec::with_capacity(count);
         for (range, (presentation, duration)) in ranges.into_iter().zip(times) {

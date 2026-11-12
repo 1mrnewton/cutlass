@@ -116,7 +116,9 @@ fn seeks_read_no_frames_and_a_small_part_of_the_file() {
             "seek to {time} read {bytes} of {length}"
         );
     }
-    assert!(opened <= 64 * 1024);
+    // The first buffer, then the Cues and the last GOP, walked for the
+    // AAC track's end padding.
+    assert!(opened <= length / 10 + 2 * 64 * 1024, "open read {opened}");
     // The same seeks again on the same reader go over the kept walks.
     let (_, again) = seek_costs_twice(&path);
     for (time, bytes, _, _) in &again {

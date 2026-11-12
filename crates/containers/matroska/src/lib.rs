@@ -14,6 +14,7 @@ mod mux;
 mod probe;
 mod seek;
 mod source;
+mod tail;
 
 pub use demux::{Clock, MatroskaDemux};
 pub use error::Error;
@@ -132,7 +133,7 @@ pub const FEATURES: &[Feature] = &[
     },
     Feature {
         name: "discard-padding",
-        demux: false,
+        demux: true,
         mux: true,
     },
     Feature {
@@ -227,6 +228,7 @@ mod tests {
             "simple-block",
             "block-group",
             "codec-delay",
+            "discard-padding",
         ] {
             let row = feature(name);
             assert!(row.demux && row.mux, "{name}");
@@ -235,7 +237,6 @@ mod tests {
             let row = feature(name);
             assert!(row.demux && !row.mux, "{name}");
         }
-        assert!(!feature("discard-padding").demux && feature("discard-padding").mux);
         for name in [
             "encryption",
             "zlib-bzlib-lzo",

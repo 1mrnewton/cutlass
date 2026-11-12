@@ -14,7 +14,7 @@ use cutlass_container::{Demux, Landing, SeekTo};
 
 use crate::support::{
     delays, ffmpeg, ffmpeg_payload, ffmpeg_tools, ffprobe_packets, gstreamer_packets, open,
-    read_all, remux, scratch, tool_on_path,
+    paddings, read_all, remux, scratch, tool_on_path,
 };
 
 struct Case {
@@ -217,8 +217,26 @@ pub fn agrees_with_libavformat(path: &Path, dir: &Path, codecs: Option<&[CodecId
         assert_eq!(ours, want, "{}", path.display());
     }
     let delay = delays(&demux);
+    let padding = paddings(&demux);
     let ours = read_all(&mut demux);
     let theirs = ffprobe_packets(path);
+    // Each track's trailing padding is its last packet's DiscardPadding.
+    for (index, stream) in streams.iter().enumerate() {
+        let last = theirs
+            .iter()
+            .rev()
+            .find(|probed| probed.stream == index)
+            .map_or(0, |probed| probed.discard);
+        let want = (stream.params().sample_rate().is_some() && last > 0).then_some(last);
+        // Without Cues the last Cluster is not looked for at open.
+        let read = has_cues(path);
+        assert_eq!(
+            padding[index],
+            want.filter(|_| read),
+            "{} stream {index} padding",
+            path.display()
+        );
+    }
     assert_eq!(ours.len(), theirs.len(), "{} packet count", path.display());
     for (index, (mine, probed)) in ours.iter().zip(&theirs).enumerate() {
         let stream = streams
@@ -241,7 +259,7 @@ pub fn agrees_with_libavformat(path: &Path, dir: &Path, codecs: Option<&[CodecId
             .any(|p| p.stream() == mine.stream());
         if let Some(duration) = mine.timestamp().duration()
             && duration > 0
-            && !probed.discard
+            && probed.discard == 0
             && !last
         {
             assert_eq!(Some(duration), probed.duration, "{what} duration");
@@ -259,6 +277,14 @@ pub fn agrees_with_libavformat(path: &Path, dir: &Path, codecs: Option<&[CodecId
             path.display()
         );
     }
+}
+
+/// The file has a Cues element (its ID, at the top level or not).
+fn has_cues(path: &Path) -> bool {
+    let bytes = std::fs::read(path).expect("read");
+    bytes
+        .windows(4)
+        .any(|window| window == [0x1C, 0x53, 0xBB, 0x6B])
 }
 
 #[test]
@@ -394,6 +420,10 @@ fn files_this_crate_writes_read_in_ffprobe_and_gstreamer() {
         // CodecDelay survives: Opus's is in the OpusHead, and the others
         // come back as the stream's encoder delay, which the copy states.
         assert_eq!(source_delay, after_delay, "{}", case.name);
+        // So does the end padding, where the source's could be read at open.
+        if has_cues(path) {
+            assert_eq!(paddings(&source), paddings(&copy), "{}", case.name);
+        }
         agrees_with_gstreamer(&out);
         // FFmpeg seeks the copy through its Cues.
         if case.codecs.len() > 1 {

@@ -94,8 +94,9 @@ pub struct Probed {
     pub duration: Option<i64>,
     pub size: usize,
     pub key: bool,
-    /// The packet carries DiscardPadding (skip-samples side data with padding).
-    pub discard: bool,
+    /// Samples of DiscardPadding the packet carries (skip-samples side
+    /// data), zero for none.
+    pub discard: u64,
 }
 
 /// Packets in file order, timestamps in each stream's time base (1/1000
@@ -137,7 +138,8 @@ pub fn ffprobe_packets(path: &Path) -> Vec<Probed> {
                     .split("discard_padding=")
                     .nth(1)
                     .and_then(|tail| tail.split('|').next())
-                    .is_some_and(|value| value != "0"),
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0),
             });
         }
     }
@@ -236,6 +238,15 @@ pub fn read_all(demux: &mut Opened) -> Vec<Packet> {
         out.push(packet);
     }
     out
+}
+
+/// Each stream's trailing padding in samples, from its trim.
+pub fn paddings(demux: &Opened) -> Vec<Option<u64>> {
+    demux
+        .streams()
+        .iter()
+        .map(|stream| stream.trim().trailing_padding())
+        .collect()
 }
 
 /// The CodecDelay edit of each stream, in its ticks (zero when none).

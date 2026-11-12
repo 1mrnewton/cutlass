@@ -13,8 +13,8 @@ mod mux;
 use std::io::Cursor;
 
 use build::{
-    Track, bytes, cluster, cues, ebml_header, ebml_laced, element, file, fixed, group, info,
-    live_file, simple, tracks, uint, unknown, unknown_cluster, with_seek_head, xiph,
+    Track, block_head, bytes, cluster, cues, ebml_header, ebml_laced, element, file, fixed, group,
+    info, live_file, simple, tracks, uint, unknown, unknown_cluster, with_seek_head, xiph,
 };
 use cutlass_codec::{CodecId, Packet, StreamCodec};
 use cutlass_container::{Demux, Landing, OpenError, ReadError, SeekError, SeekTo};
@@ -210,7 +210,7 @@ fn block_groups_give_block_duration_and_references_clear_the_keyframe() {
 
 #[test]
 fn a_block_duration_over_a_lace_is_shared_out() {
-    let mut block = build::block_head(2, 0, 0x02);
+    let mut block = block_head(2, 0, 0x02);
     block.push(2);
     block.extend(cutlass_matroska::block::xiph_sizes(&[1, 1]));
     block.extend_from_slice(b"abc");
@@ -459,6 +459,91 @@ fn opus_codec_delay_is_an_edit_and_the_pre_skip_a_trim() {
     assert_eq!(edit.media_time(), Some(7));
     assert_eq!(edit.duration(), 993);
     assert_eq!(stream.trim().encoder_delay(), Some(312));
+}
+
+/// A BlockGroup with DiscardPadding, in nanoseconds.
+fn discarding(track: u64, relative: i16, duration: Option<u64>, discard_ns: u64) -> Vec<u8> {
+    let mut block = block_head(track, relative, 0);
+    block.extend_from_slice(b"pad");
+    let mut body = element(ids::BLOCK, &block);
+    if let Some(duration) = duration {
+        body.extend(uint(ids::BLOCK_DURATION, duration));
+    }
+    // A signed integer: eight octets keep the sign bit clear.
+    body.extend(bytes(ids::DISCARD_PADDING, &discard_ns.to_be_bytes()));
+    element(ids::BLOCK_GROUP, &body)
+}
+
+/// One Cluster of an Opus track with a 20 ms DefaultDuration and an AAC
+/// track, each ending in a block with DiscardPadding: the Opus one has no
+/// BlockDuration, the AAC one has the played part as its BlockDuration.
+/// With `with_cues`, a Cues element points at the Cluster.
+fn padded(with_cues: bool) -> Vec<u8> {
+    let opus = Track::audio(1, "A_OPUS", 48_000.0, 2)
+        .with_private(&opus_head(312))
+        .with_default_duration(20_000_000)
+        .with_extra(&uint(ids::CODEC_DELAY, 6_500_000));
+    let aac = Track::audio(2, "A_AAC", 48_000.0, 2)
+        .with_private(&[0x11, 0x90])
+        .with_extra(&uint(ids::CODEC_DELAY, 21_333_333));
+    let blocks = vec![
+        simple(1, 0, true, b"o"),
+        simple(2, 0, true, b"a"),
+        discarding(1, 20, None, 6_500_000),
+        // 1024 samples less 480 of padding play 11 ms.
+        discarding(2, 21, Some(11), 10_000_000),
+    ];
+    let head = vec![info(1_000_000, Some(42.0)), tracks(&[opus, aac])];
+    let mut position = 0_u64;
+    loop {
+        let mut children = head.clone();
+        let mut wanted = vec![ids::INFO, ids::TRACKS];
+        if with_cues {
+            children.push(cues(&[(0, 1, position)]));
+            wanted.push(ids::CUES);
+        }
+        children.push(cluster(0, &blocks));
+        let bytes = with_seek_head(&wanted, &children);
+        let at = bytes
+            .windows(4)
+            .position(|window| window == [0x1F, 0x43, 0xB6, 0x75])
+            .expect("Cluster");
+        let found = (at - segment_start(&bytes)) as u64;
+        if !with_cues || found == position {
+            return bytes;
+        }
+        position = found;
+    }
+}
+
+#[test]
+fn discard_padding_shortens_an_opus_packet_and_is_the_tracks_end_trim() {
+    for with_cues in [true, false] {
+        let mut demux = open(padded(with_cues)).expect("open");
+        let trims: Vec<Option<u64>> = demux
+            .streams()
+            .iter()
+            .map(|stream| stream.trim().trailing_padding())
+            .collect();
+        // The last block's padding, in samples, once the last Cluster is
+        // found through the Cues.
+        let want = if with_cues {
+            vec![Some(312), Some(480)]
+        } else {
+            vec![None, None]
+        };
+        assert_eq!(trims, want);
+        let got: Vec<(u32, Option<i64>)> = all(&mut demux)
+            .iter()
+            .map(|packet| (packet.stream(), packet.timestamp().duration()))
+            .collect();
+        // Opus plays 20 less 6.5 ms, rounded to the tick; AAC keeps its
+        // whole 21 ms frame and the trim states the padding.
+        assert_eq!(
+            got,
+            vec![(1, Some(20)), (2, None), (1, Some(13)), (2, Some(21))]
+        );
+    }
 }
 
 /// Three Clusters a second apart. Video: a keyframe at each Cluster start
@@ -875,7 +960,7 @@ fn hostile_sizes_are_refused_before_anything_that_size_is_allocated() {
 
 #[test]
 fn bad_lacing_is_an_error_not_a_panic() {
-    let mut block = build::block_head(2, 0, 0x80 | 0x02);
+    let mut block = block_head(2, 0, 0x80 | 0x02);
     block.extend_from_slice(&[3, 255, 255, 255]);
     let bytes = file(
         "matroska",

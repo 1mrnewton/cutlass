@@ -819,12 +819,26 @@ fn share_padding(track: &mut Track) {
     if rate == 0 {
         return;
     }
+    if track.codec == CodecId::Opus {
+        // The duration already leaves the padding out: the last packet
+        // takes all of it, and `trailing` checks it against the TOC.
+        if let Some(held) = track.queue.back_mut().filter(|held| held.tail) {
+            held.padding = track.end_padding;
+        }
+        return;
+    }
     for held in track.queue.iter_mut().rev() {
         if left <= 0 || !held.tail {
             break;
         }
         let duration = i128::from(held.packet.timestamp().duration().unwrap_or(0).max(0));
-        let samples = duration * rate / timescale;
+        // A packet of unknown length, as a Vorbis packet copied from a file
+        // that states none, takes what is left.
+        let samples = if duration == 0 {
+            left
+        } else {
+            duration * rate / timescale
+        };
         let take = left.min(samples);
         held.padding = u64::try_from(take).unwrap_or(0);
         left -= take;
@@ -838,6 +852,7 @@ fn share_padding(track: &mut Track) {
 /// says it decodes to has the rest discarded, as an Opus encoder's last
 /// packet is; a shortfall under one track tick is taken for rounding, so a
 /// file remuxed from millisecond times does not discard inside the stream.
+/// A stated padding within that tick of the shortfall is written exactly.
 fn trailing(track: &Track, held: &Held, duration: i64) -> (i64, u64) {
     let timescale = i128::from(track.timescale.ticks_per_second().max(1));
     if track.codec == CodecId::Opus {
@@ -847,6 +862,12 @@ fn trailing(track: &Track, held: &Held, duration: i64) -> (i64, u64) {
         let have = i128::from(duration) * 48_000 / timescale;
         let slack = (48_000 + timescale - 1) / timescale - 1;
         let extra = i128::from(samples) - have;
+        let stated = i128::from(held.padding);
+        if stated > 0 && stated < i128::from(samples) && (extra - stated).abs() <= slack.max(0) {
+            // The stated padding, which the rounded duration only nears.
+            let ns = u64::try_from(stated * SECOND_NS / 48_000).unwrap_or(0);
+            return (duration, ns);
+        }
         if extra <= slack.max(0) {
             return (duration, 0);
         }
@@ -1078,8 +1099,10 @@ impl<W: Write + Seek + Send> Mux for MatroskaMux<W> {
         self.building()?;
         let index = self.track(track.get()).map_err(|error| self.fail(error))?;
         let entry = &mut self.tracks[index];
-        // An Opus packet's own TOC says what of it is padding.
-        if entry.codec != CodecId::Opus && !entry.is_video() {
+        // An Opus packet's own TOC says what of it is padding; a stated
+        // padding only makes the last packet's exact where its millisecond
+        // duration rounds.
+        if !entry.is_video() {
             entry.end_padding = trim.trailing_padding().unwrap_or(0);
         }
         entry.trim = Some(trim);

@@ -294,10 +294,15 @@ fn trailing_padding_shortens_the_last_block_and_is_written_as_discard_padding() 
     let mut discard = vec![0x75, 0xA2, 0x88];
     discard.extend_from_slice(&10_000_000_u64.to_be_bytes());
     assert!(bytes.windows(discard.len()).any(|window| window == discard));
-    let got = all(&mut read_back(bytes));
-    let durations: Vec<Option<i64>> = got.iter().map(|p| p.timestamp().duration()).collect();
     // 1024 samples: 21.333 ms, rounded to 21; the last plays 544: 11.33.
-    assert_eq!(durations, vec![Some(21), Some(21), Some(11)]);
+    assert_eq!(block_durations(&bytes), vec![11]);
+    // Read back, the packet keeps its whole frame and the trim states the
+    // padding.
+    let mut demux = read_back(bytes);
+    assert_eq!(demux.streams()[0].trim().trailing_padding(), Some(480));
+    let got = all(&mut demux);
+    let durations: Vec<Option<i64>> = got.iter().map(|p| p.timestamp().duration()).collect();
+    assert_eq!(durations, vec![Some(21), Some(21), Some(21)]);
 }
 
 /// An encoder that states its end padding on each of its last packets, as
@@ -326,19 +331,44 @@ fn end_padding_stated_on_several_packets_is_one_total() {
     let bytes = finish(mux, &[(sound, 48_000, 5 * 1024)]);
     // 476 samples off the fourth packet, all 1024 off the fifth.
     assert_eq!(discard_ns(&bytes), vec![9_916_666, 21_333_333]);
-    let got = all(&mut read_back(bytes));
-    let durations: Vec<Option<i64>> = got.iter().map(|p| p.timestamp().duration()).collect();
     // 1024 samples are 21 ms; 548 are 11.
-    assert_eq!(
-        durations,
-        vec![Some(21), Some(21), Some(21), Some(11), Some(0)]
-    );
+    assert_eq!(block_durations(&bytes), vec![11, 0]);
+    let mut demux = read_back(bytes);
+    // The last block's padding is the track's.
+    assert_eq!(demux.streams()[0].trim().trailing_padding(), Some(1024));
+    let got = all(&mut demux);
+    let durations: Vec<Option<i64>> = got.iter().map(|p| p.timestamp().duration()).collect();
+    assert_eq!(durations, vec![Some(21); 5]);
 }
 
 /// One 20 ms CELT frame: TOC config 31, code 0.
 const OPUS_20MS: [u8; 4] = [0xF8, 1, 2, 3];
 /// One 2.5 ms CELT frame: TOC config 28, code 0.
 const OPUS_2_5MS: [u8; 3] = [0xE0, 1, 2];
+
+/// Every BlockDuration value in the file, in order. The tests' payloads
+/// hold no 0x9B octet.
+fn block_durations(bytes: &[u8]) -> Vec<u64> {
+    let mut out = Vec::new();
+    for (at, octet) in bytes.iter().enumerate() {
+        let Some(&size) = bytes.get(at + 1) else {
+            break;
+        };
+        if *octet != 0x9B || !(0x80..=0x88).contains(&size) {
+            continue;
+        }
+        let len = usize::from(size & 0x0F);
+        let Some(value) = bytes.get(at + 2..at + 2 + len) else {
+            continue;
+        };
+        out.push(
+            value
+                .iter()
+                .fold(0, |sum, byte| sum << 8 | u64::from(*byte)),
+        );
+    }
+    out
+}
 
 fn discard_ns(bytes: &[u8]) -> Vec<u64> {
     bytes
@@ -424,9 +454,10 @@ fn trim_in_samples_fits_a_millisecond_track() {
     let mut demux = read_back(bytes);
     assert_eq!(demux.streams()[0].trim().encoder_delay(), Some(1024));
     assert_eq!(demux.track_entries()[0].codec_delay, 21_333_333);
+    assert_eq!(demux.streams()[0].trim().trailing_padding(), Some(480));
     let got = all(&mut demux);
     let durations: Vec<Option<i64>> = got.iter().map(|p| p.timestamp().duration()).collect();
-    assert_eq!(durations, vec![Some(21), Some(21), Some(11)]);
+    assert_eq!(durations, vec![Some(21); 3]);
 }
 
 #[test]

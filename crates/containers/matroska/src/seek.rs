@@ -321,7 +321,7 @@ impl<R: Read + Seek> MatroskaDemux<R> {
 
     /// Reads the Cues the SeekHead points at, once. A Cues element that does
     /// not parse is the same as none: seek falls back to Cluster headers.
-    fn load_cues(&mut self) {
+    pub(crate) fn load_cues(&mut self) {
         if !matches!(self.cues, CueState::Unread) {
             return;
         }
@@ -701,7 +701,7 @@ impl<R: Read + Seek> MatroskaDemux<R> {
         Ok(head.map(|(parsed, frames)| (parsed, !referenced, frames)))
     }
 
-    fn block_head(&mut self, size: u64) -> Result<block::BlockHeader> {
+    pub(crate) fn block_head(&mut self, size: u64) -> Result<block::BlockHeader> {
         let mut bytes = [0_u8; block::MAX_HEADER];
         self.source.fill(&mut bytes[..1])?;
         let len = block::header_len(bytes[0]).ok_or(Error::Ebml(EbmlError::BadSize))?;

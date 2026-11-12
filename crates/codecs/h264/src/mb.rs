@@ -11222,8 +11222,12 @@ fn mc_block<S: Sample>(
             || slice.pps.weighted_bipred != 2
             || slice.kind != 1
             || implicit_weights(slice, r0, r1) == (32, 32));
-    let done = if plain && !pic.separate_plane && pic.chroma() == 1 {
+    let done = if pic.separate_plane || pic.chroma() != 1 {
+        (false, false)
+    } else if plain {
         mc_plain(pic, dpb, slice, &block, motion)?
+    } else if alc.is_none() {
+        mc_weighted(pic, dpb, slice, &block, motion)?
     } else {
         (false, false)
     };
@@ -11498,6 +11502,115 @@ fn mc_plain<S: Sample>(
         _ => false,
     };
     Ok((luma, chroma))
+}
+
+/// [`mc_plain`] for a partition of a 4:2:0 picture that is weighted: one
+/// prediction written straight into the picture and weighted there (each
+/// plane only when its weights are not the default ones), or
+/// two weighted together, the first written into the picture and the
+/// second beside it, as FFmpeg's `mc_part_weighted` does. Each plane is
+/// written only when every sample its taps read is inside the references;
+/// whether the luma and the chroma block were.
+#[inline(never)]
+fn mc_weighted<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    block: &Block,
+    motion: McMotion,
+) -> Result<(bool, bool), CodecError> {
+    let Block { x, y, w, h } = *block;
+    let McMotion { r0, r1, mv0, mv1 } = motion;
+    let (luma_mix, cb_mix, cr_mix) = (
+        mix(slice, r0, r1, -1),
+        mix(slice, r0, r1, 0),
+        mix(slice, r0, r1, 1),
+    );
+    let area = (x, y, w, h);
+    let stride = pic.w;
+    let place = ((x / 2, y / 2), (w / 2, h / 2));
+    let half = stride / 2;
+    let at = place.0.1 * half + place.0.0;
+    match (luma_mix, cb_mix, cr_mix) {
+        (
+            Mix::Copy(from) | Mix::Uni { from, .. },
+            Mix::Copy(_) | Mix::Uni { .. },
+            Mix::Copy(_) | Mix::Uni { .. },
+        ) => {
+            let (reference, mv) = if from == 0 { (r0, mv0) } else { (r1, mv1) };
+            let frame = reference_frame(dpb, slice, from, reference)?;
+            let luma = luma_source(frame, area, mv).is_some_and(|source| {
+                let Some(dst) = pic.y.get_mut(y * stride + x..) else {
+                    return false;
+                };
+                S::pair_fast((&mut *dst, stride), (w, h), source, None) && {
+                    scale_in_place(dst, stride, (w, h), luma_mix);
+                    true
+                }
+            });
+            let chroma = chroma_sources(frame, place, mv).is_some_and(|source| {
+                let (Some(u), Some(v)) = (pic.u.get_mut(at..), pic.v.get_mut(at..)) else {
+                    return false;
+                };
+                S::chroma_planes_fast((&mut *u, &mut *v, half), place.1, source, None) && {
+                    scale_in_place(u, half, place.1, cb_mix);
+                    scale_in_place(v, half, place.1, cr_mix);
+                    true
+                }
+            });
+            Ok((luma, chroma))
+        }
+        (Mix::Weighted(luma_weight), Mix::Weighted(cb_weight), Mix::Weighted(cr_weight)) => {
+            let first = reference_frame(dpb, slice, 0, r0)?;
+            let second = reference_frame(dpb, slice, 1, r1)?;
+            let luma = match (
+                luma_source(first, area, mv0),
+                luma_source(second, area, mv1),
+            ) {
+                (Some(a), Some(b)) => {
+                    let mut beside = [S::default(); 256];
+                    if let Some(dst) = pic.y.get_mut(y * stride + x..)
+                        && S::pair_fast((&mut beside[..], w), (w, h), b, None)
+                        && S::pair_fast((&mut *dst, stride), (w, h), a, None)
+                    {
+                        weight_onto(dst, stride, &beside, (w, h), luma_weight);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+            let chroma = match (
+                chroma_sources(first, place, mv0),
+                chroma_sources(second, place, mv1),
+            ) {
+                (Some(a), Some(b)) => {
+                    let (cw, ch) = place.1;
+                    let mut beside_u = [S::default(); 64];
+                    let mut beside_v = [S::default(); 64];
+                    if let (Some(u), Some(v)) = (pic.u.get_mut(at..), pic.v.get_mut(at..))
+                        && S::chroma_planes_fast(
+                            (&mut beside_u[..], &mut beside_v[..], cw),
+                            (cw, ch),
+                            b,
+                            None,
+                        )
+                        && S::chroma_planes_fast((&mut *u, &mut *v, half), (cw, ch), a, None)
+                    {
+                        weight_onto(u, half, &beside_u, (cw, ch), cb_weight);
+                        weight_onto(v, half, &beside_v, (cw, ch), cr_weight);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+            Ok((luma, chroma))
+        }
+        _ => Ok((false, false)),
+    }
 }
 
 /// The block of `size` at `dst`, rows `stride` apart, mixed in place by

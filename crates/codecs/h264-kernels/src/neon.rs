@@ -854,6 +854,20 @@ pub(crate) fn luma_mb(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
         }
         return true;
     }
+    luma_whole(plane, edges)
+}
+
+/// [`luma_mb`] for a macroblock that filters more than its boundary, out
+/// of line so the boundary alone keeps a small frame.
+#[inline(never)]
+#[target_feature(enable = "neon")]
+fn luma_whole(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
+    let crate::edge::MbEdges {
+        at,
+        down,
+        vertical,
+        horizontal,
+    } = *edges;
     // The rows are taken from four samples before the macroblock and four
     // rows above it. At the picture's top row and its first macroblock
     // those are not there, and each edge is filtered on its own; so is
@@ -1299,6 +1313,20 @@ pub(crate) fn chroma_mb(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool 
         }
         return true;
     }
+    chroma_whole(plane, edges)
+}
+
+/// [`chroma_mb`] for a macroblock that filters more than its boundary, out
+/// of line as [`luma_whole`] is.
+#[inline(never)]
+#[target_feature(enable = "neon")]
+fn chroma_whole(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
+    let crate::edge::MbEdges {
+        at,
+        down,
+        vertical,
+        horizontal,
+    } = *edges;
     let [v0, v1, v2, v3] = vertical;
     let [h0, h1, h2, h3] = horizontal;
     // This takes the edges of 4:2:0 chroma, at 0 and 4, with thresholds

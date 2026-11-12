@@ -3731,6 +3731,10 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
     // Residual (5.11.34 onward).
 
     fn residual(&mut self) -> R<()> {
+        if self.b.skip && self.b.ref_frame[0] > INTRA_FRAME {
+            self.skip_residual();
+            return Ok(());
+        }
         // The fields used below (the whole block is large to copy).
         struct B {
             bsize: u8,
@@ -3804,6 +3808,75 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             }
         }
         Ok(())
+    }
+
+    /// The transform blocks of a plane of `self.b`, a skipped inter
+    /// block, that start inside the frame, as residual() visits them: its
+    /// first 4x4 in plane units, the transform size in 4x4s, and how many
+    /// 4x4 columns and rows they cover.
+    fn skip_cover(&self, plane: usize) -> ([usize; 2], [usize; 2], [usize; 2]) {
+        let b = &self.b;
+        let (sx, sy) = self.plane_sub(plane);
+        let tx = if b.lossless {
+            TX_4X4
+        } else {
+            self.get_tx_size(plane, b.tx_size)
+        };
+        let step = [tx_w(tx) >> 2, tx_h(tx) >> 2];
+        let psz = plane_residual_size(b.bsize, sx != 0, sy != 0);
+        let at = [b.mi_col >> sx, b.mi_row >> sy];
+        // A transform block starts inside when its first sample does.
+        let max = [
+            ((self.fs.mi_cols * 4) >> sx).div_ceil(4),
+            ((self.fs.mi_rows * 4) >> sy).div_ceil(4),
+        ];
+        let full = [bw4(psz), bh4(psz)];
+        let cover = core::array::from_fn(|i| {
+            let avail = max[i].saturating_sub(at[i]);
+            full[i].min(avail.div_ceil(step[i]) * step[i])
+        });
+        (at, step, cover)
+    }
+
+    /// residual() of a skipped inter block: no coefficients and no
+    /// prediction, so only the loop filter transform sizes of the block,
+    /// those of its plane's residual size, and the flags of its decoded
+    /// 4x4s, which are those of its transform blocks together.
+    fn skip_residual(&mut self) {
+        let planes = 1 + 2 * usize::from(self.b.has_chroma);
+        for plane in 0..planes {
+            let (sx, sy) = self.plane_sub(plane);
+            let ([c0, r0], [_, step_y], [cols, rows]) = self.skip_cover(plane);
+            let psz = plane_residual_size(self.b.bsize, sx != 0, sy != 0);
+            let dims = lf_dims(
+                block_width(psz).trailing_zeros() - 2,
+                block_height(psz).trailing_zeros() - 2,
+            );
+            let st = self.fs.mi_stride;
+            for r in (0..rows).step_by(step_y) {
+                let at = self.fs.mi_row(r0 + r) + c0;
+                fill_rect(&mut self.fs.lf_tx[plane], st, at, cols, step_y, dims);
+            }
+            // Also while recording: see transform_block().
+            if plane == 0 || self.rec.is_none() {
+                self.skip_mark_decoded(plane);
+            }
+        }
+    }
+
+    /// The decoded flags of a plane of a skipped inter block, as
+    /// tx_mark_decoded() of each of its transform blocks sets them.
+    fn skip_mark_decoded(&mut self, plane: usize) {
+        let (sx, sy) = self.plane_sub(plane);
+        let (_, _, [cols, rows]) = self.skip_cover(plane);
+        let sb_mask = self.sb_size4 - 1;
+        let sub_row = ((self.b.mi_row >> sy) << sy) & sb_mask;
+        let sub_col = ((self.b.mi_col >> sx) << sx) & sb_mask;
+        let x0 = ((sub_col >> sx) + 1).min(35);
+        let y0 = ((sub_row >> sy) + 1).min(35);
+        let x1 = (x0 + cols).min(35);
+        let y1 = (y0 + rows).min(35);
+        self.block_decoded.mark(plane, y0..y1, x0..x1);
     }
 
     pub fn get_tx_size(&self, plane: usize, tx: u8) -> u8 {
@@ -4098,6 +4171,12 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                     .map_or(log.ops.len(), |n| n.first_op as usize);
                 for op in &log.ops[rec.first_op as usize..op_end] {
                     self.replay_tx(op, &log.coefs);
+                }
+                // A skipped inter block logs no transform blocks.
+                if self.b.skip && self.b.ref_frame[0] > INTRA_FRAME {
+                    for plane in 0..1 + 2 * usize::from(self.b.has_chroma) {
+                        self.skip_mark_decoded(plane);
+                    }
                 }
                 bi += 1;
             }

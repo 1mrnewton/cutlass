@@ -19,12 +19,16 @@
 //! their order, and across streams the packet with the earliest time (its
 //! decode time, else its presentation time, compared in seconds) goes to
 //! the file first. A packet waits until every stream has one waiting, so a
-//! caller may send each stream in long runs. At most
+//! caller may send each stream in long runs. A packet that would go first
+//! anyway is written at once; one that waits is copied, since
+//! [`Mux::write_packet`] lends it. At most
 //! [`AviMuxOptions::interleave_bytes`] wait; past that the earliest waiting
-//! packet is written anyway, and [`FinishedMux::interleaved`] then says the
-//! file may not be in time order. A queued packet that the muxer refuses
-//! (a PCM gap, say) is refused by the call that writes it out, which may be
-//! a later [`Mux::write_packet`] or [`Mux::finish`].
+//! packet is written anyway. With a limit of zero nothing waits and nothing
+//! is copied. [`FinishedMux::interleaved`] is false when a packet went out
+//! earlier in time than one of another stream before it. A queued packet
+//! that the muxer refuses (a PCM gap, say) is refused by the call that
+//! writes it out, which may be a later [`Mux::write_packet`] or
+//! [`Mux::finish`].
 //!
 //! The headers are written once every stream has sent its first packet
 //! (each stream's AVI clock comes from that packet's duration), so packets
@@ -81,7 +85,9 @@ pub struct AviMuxOptions {
     /// Packets held while waiting for every stream's first packet.
     pub header_buffer_bytes: u64,
     /// Packet bytes held to put the streams in time order (16 MiB by
-    /// default). Past it the earliest held packet is written.
+    /// default). Past it the earliest held packet is written. Zero holds
+    /// nothing: packets go out as they arrive, without the copy holding
+    /// one costs, for a caller that already sends them in time order.
     pub interleave_bytes: u64,
 }
 
@@ -94,6 +100,27 @@ impl Default for AviMuxOptions {
             interleave_bytes: 16 << 20,
         }
     }
+}
+
+/// Buffers of written packets kept for reuse.
+const SPARE_BUFFERS: usize = 64;
+
+/// Whether `left` of stream `left_index` goes before `right` of stream
+/// `right_index`: earlier in seconds by decode time, else presentation
+/// time, and on a tie the stream added first.
+fn before(left: &Packet, left_index: usize, right: &Packet, right_index: usize) -> bool {
+    let ((left_time, left_scale), (right_time, right_scale)) = (seconds(left), seconds(right));
+    let (left, right) = (left_time * right_scale, right_time * left_scale);
+    left < right || (left == right && left_index < right_index)
+}
+
+/// A packet's decode time, else its presentation time, with its timescale.
+fn seconds(packet: &Packet) -> (i128, i128) {
+    let stamp = packet.timestamp();
+    (
+        i128::from(stamp.decode().or(stamp.presentation()).unwrap_or(i64::MIN)),
+        i128::from(packet.timescale().ticks_per_second().max(1)),
+    )
 }
 
 /// The largest `RIFF` segment this muxer writes: below 4 GiB, with room
@@ -227,8 +254,15 @@ pub struct AviMux<W: Write + Seek> {
     /// Per stream, packets held to be written in time order.
     queues: Vec<VecDeque<Packet>>,
     queued_bytes: u64,
-    /// A packet went out before every stream had one waiting.
-    forced: bool,
+    /// Buffers of packets already written, reused for the next held ones
+    /// so that holding a packet copies it without a fresh allocation.
+    spare: Vec<Vec<u8>>,
+    /// Per stream, the time in seconds (ticks, timescale) of the latest
+    /// packet written.
+    latest: Vec<Option<(i128, i128)>>,
+    /// A packet went out earlier than one of another stream written
+    /// before it.
+    out_of_order: bool,
     started: bool,
     base: u64,
     position: u64,
@@ -306,7 +340,9 @@ impl<W: Write + Seek> AviMux<W> {
             waiting_bytes: 0,
             queues: Vec::new(),
             queued_bytes: 0,
-            forced: false,
+            spare: Vec::new(),
+            latest: Vec::new(),
+            out_of_order: false,
             started: false,
             base: 0,
             position: 0,
@@ -531,36 +567,77 @@ impl<W: Write + Seek> AviMux<W> {
             let Some(index) = self.earliest() else {
                 return Ok(());
             };
-            if !every && !all {
-                self.forced = true;
-            }
             let Some(packet) = self.queues[index].pop_front() else {
                 return Ok(());
             };
             let size = u64::try_from(packet.bytes().len()).unwrap_or(u64::MAX);
             self.queued_bytes = self.queued_bytes.saturating_sub(size);
-            self.emit(&packet)?;
+            let written = self.put(index, &packet);
+            if self.spare.len() < SPARE_BUFFERS {
+                self.spare.push(packet.into_bytes());
+            }
+            written?;
         }
+    }
+
+    /// Writes `packet` of a started file now, if [`Self::drain`] would
+    /// write it first anyway: nothing of its stream is held, every other
+    /// stream has a packet held, and it is earlier than each of them.
+    /// Otherwise holds a copy of it and drains.
+    fn take(&mut self, index: usize, packet: &Packet) -> Result<(), MuxError> {
+        let first = self.queues[index].is_empty()
+            && self.queues.iter().enumerate().all(|(other, queue)| {
+                other == index
+                    || queue
+                        .front()
+                        .is_some_and(|held| before(packet, index, held, other))
+            });
+        if first || self.options.interleave_bytes == 0 {
+            return self.put(index, packet);
+        }
+        let mut bytes = self.spare.pop().unwrap_or_default();
+        bytes.clear();
+        bytes.extend_from_slice(packet.bytes());
+        let held = Packet::try_new(
+            packet.stream(),
+            bytes,
+            packet.timestamp(),
+            packet.timescale(),
+            packet.keyframe(),
+        )
+        .map_err(|error| rejected(error.to_string()))?;
+        self.hold(held)?;
+        self.drain(false)
+    }
+
+    /// Writes `packet` of stream `index`, noting whether it is earlier
+    /// than a packet of another stream written before it.
+    fn put(&mut self, index: usize, packet: &Packet) -> Result<(), MuxError> {
+        let time = seconds(packet);
+        if self.latest.len() != self.tracks.len() {
+            self.latest = vec![None; self.tracks.len()];
+        }
+        let early = self.latest.iter().enumerate().any(|(other, latest)| {
+            other != index && latest.is_some_and(|(ticks, scale)| time.0 * scale < ticks * time.1)
+        });
+        self.out_of_order |= early;
+        self.latest[index] = Some(time);
+        self.emit(packet)
     }
 
     /// The stream whose first held packet is earliest in seconds; a tie
     /// goes to the stream added first.
     fn earliest(&self) -> Option<usize> {
-        let mut best: Option<(usize, i128, i128)> = None;
+        let mut best: Option<(usize, &Packet)> = None;
         for (index, queue) in self.queues.iter().enumerate() {
             let Some(packet) = queue.front() else {
                 continue;
             };
-            let stamp = packet.timestamp();
-            let time = i128::from(stamp.decode().or(stamp.presentation()).unwrap_or(i64::MIN));
-            let scale = i128::from(packet.timescale().ticks_per_second().max(1));
-            let earlier =
-                best.is_none_or(|(_, best_time, best_scale)| time * best_scale < best_time * scale);
-            if earlier {
-                best = Some((index, time, scale));
+            if best.is_none_or(|(best_index, best)| before(packet, index, best, best_index)) {
+                best = Some((index, packet));
             }
         }
-        best.map(|(index, _, _)| index)
+        best.map(|(index, _)| index)
     }
 
     fn write(&mut self, bytes: &[u8]) -> Result<(), MuxError> {
@@ -1488,7 +1565,7 @@ impl<W: Write + Seek> Mux for AviMux<W> {
             return Err(self.fail(MuxError::MissingTimestamp));
         }
         let result = if self.started {
-            self.hold(packet.clone()).and_then(|()| self.drain(false))
+            self.take(index, packet)
         } else {
             self.queue(packet, index)
         };
@@ -1517,7 +1594,7 @@ impl<W: Write + Seek> Mux for AviMux<W> {
             durations.to_vec(),
             IndexPlace::End,
             MuxMode::Progressive,
-            !self.forced,
+            !self.out_of_order,
             Vec::new(),
             self.payload,
         ))

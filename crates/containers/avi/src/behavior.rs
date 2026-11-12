@@ -1141,6 +1141,43 @@ fn past_the_interleave_limit_packets_go_out_and_the_file_says_so() {
     assert_eq!(drain(&mut demux).len(), 70);
 }
 
+#[test]
+fn with_no_interleave_limit_packets_go_out_as_they_arrive() {
+    // Runs sent with nothing held come out of order, and the file says so.
+    let (bytes, interleaved) = write_runs(0);
+    assert!(!interleaved);
+    assert_eq!(drain(&mut open(&bytes).expect("open")).len(), 70);
+    // Packets sent in time order come out in that order, flagged as such.
+    let options = AviMuxOptions {
+        interleave_bytes: 0,
+        ..AviMuxOptions::default()
+    };
+    let mut mux = AviMux::with_options(Cursor::new(Vec::new()), options);
+    mux.add_stream(video_stream(CodecId::Mjpeg, Vec::new()))
+        .unwrap();
+    mux.add_stream(audio_stream(CodecId::Pcm, 8_000, Vec::new()))
+        .unwrap();
+    for frame in 0..20i64 {
+        mux.write_packet(&packet(0, jpeg(1), frame * 3_600, 3_600, 90_000, true))
+            .unwrap();
+        mux.write_packet(&packet(1, vec![1; 320 * 4], frame * 320, 320, 8_000, true))
+            .unwrap();
+    }
+    let finished = mux
+        .finish(&[
+            duration(0, 90_000, 20 * 3_600),
+            duration(1, 8_000, 20 * 320),
+        ])
+        .expect("finish");
+    assert!(finished.interleaved());
+    let bytes = mux.into_writer().unwrap().into_inner();
+    let streams: Vec<u32> = drain(&mut open(&bytes).expect("open"))
+        .iter()
+        .map(Packet::stream)
+        .collect();
+    assert_eq!(streams, [0, 1].repeat(20));
+}
+
 // ---------------------------------------------------------------- forward
 
 /// A reader that cannot seek, as a pipe is.

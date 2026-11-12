@@ -2695,6 +2695,7 @@ dependencies = [
  "cutlass-aac",
  "cutlass-ac3",
  "cutlass-alac",
+ "cutlass-caf",
  "cutlass-codec",
  "cutlass-container",
  "cutlass-decode",

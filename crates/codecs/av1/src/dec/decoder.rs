@@ -2134,7 +2134,9 @@ struct TileBufs<P> {
     above_palette: [Vec<[u16; 8]>; 2],
     color_map_y: Vec<u8>,
     color_map_uv: Vec<u8>,
-    scratch: Scratch<P>,
+    /// Always there between tile decodes: a decode takes it and gives it
+    /// back (a move, rather than building a placeholder in its place).
+    scratch: Option<Scratch<P>>,
 }
 
 impl<P: Pixel> TileBufs<P> {
@@ -2148,7 +2150,7 @@ impl<P: Pixel> TileBufs<P> {
             above_palette: std::array::from_fn(|_| vec![[0u16; 8]; n_above]),
             color_map_y: vec![0u8; 128 * 128],
             color_map_uv: vec![0u8; 128 * 128],
-            scratch,
+            scratch: Some(scratch),
         }
     }
 }
@@ -2271,7 +2273,7 @@ fn decode_tile_part<P: Pixel>(
         plan_delta_lf: [0; 4],
         color_map_y: std::mem::take(&mut bufs.color_map_y),
         color_map_uv: std::mem::take(&mut bufs.color_map_uv),
-        scratch: std::mem::replace(&mut bufs.scratch, Scratch::empty()),
+        scratch: bufs.scratch.take().unwrap_or_default(),
         rec: logs.map(|l| Box::new(lock(l).logs.pop().unwrap_or_default())),
         y0: 0,
         mi_r0: 0,
@@ -2317,7 +2319,7 @@ fn decode_tile_part<P: Pixel>(
     bufs.above_palette = above_palette;
     bufs.color_map_y = color_map_y;
     bufs.color_map_uv = color_map_uv;
-    bufs.scratch = scratch;
+    bufs.scratch = Some(scratch);
     // The log left holds the buffers of a spare: back to the pool.
     if let (Some(l), Some(mut log)) = (logs, rec) {
         log.clear();
@@ -2412,7 +2414,7 @@ fn decode_tiles<P: Pixel>(
         }
     }
     if let (Some(s), None) = (spares, logs) {
-        lock(s).scratch.push(bufs.scratch);
+        lock(s).scratch.extend(bufs.scratch);
     }
     Ok(saved.unwrap_or_else(|| Box::new(cdf.clone())))
 }
@@ -2496,7 +2498,9 @@ fn decode_tiles_by_rows<P: Pixel>(
             }
             // The row's filters may run now: intra prediction below reads
             // its last lines as they are.
-            bufs.scratch.save_edge(cur, 4 * end, 0);
+            if let Some(s) = &mut bufs.scratch {
+                s.save_edge(cur, 4 * end, 0);
+            }
             after_row(fs, cur, r, end, tr + 1 == ti.rows && end == r1);
             r = end;
         }
@@ -2504,8 +2508,10 @@ fn decode_tiles_by_rows<P: Pixel>(
             saved = Some(c.cdf);
         }
     }
-    bufs.scratch.edge_y = usize::MAX;
-    lock(spares).scratch.push(bufs.scratch);
+    if let Some(mut s) = bufs.scratch {
+        s.edge_y = usize::MAX;
+        lock(spares).scratch.push(s);
+    }
     Some(Ok(saved.unwrap_or_else(|| Box::new(cdf.clone()))))
 }
 

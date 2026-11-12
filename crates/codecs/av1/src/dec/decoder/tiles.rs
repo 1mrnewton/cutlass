@@ -455,7 +455,7 @@ pub(super) fn decode_tiles_threaded<P: PicturePixel>(
     super::prof::add(super::prof::TILE_COPY, copying);
     {
         let mut sp = lock(spares);
-        sp.scratch.push(own.scratch);
+        sp.scratch.extend(own.scratch);
         sp.tile_shells_out -= shells.len();
         sp.tile_shells.append(&mut shells);
     }

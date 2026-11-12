@@ -248,15 +248,15 @@ fn mutate(rng: &mut Rng, input: &[u8]) -> Vec<u8> {
 }
 
 /// What the mutants reached.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct Reach {
     mutants: u64,
     opened: u64,
     packets: u64,
     seeks: u64,
     slowest: Duration,
-    /// The seed and mutant of the slowest input.
-    slowest_at: (u64, usize),
+    /// The slowest inputs, slowest first: time, seed and mutant.
+    slowest_at: Vec<(Duration, u64, usize)>,
 }
 
 /// Probes, opens both ways, reads and seeks one input.
@@ -314,6 +314,9 @@ fn exercise(data: &[u8], reach: &mut Reach) {
     reach.slowest = reach.slowest.max(took);
 }
 
+/// Slowest inputs a campaign names, to replay.
+const SLOWEST_KEPT: usize = 8;
+
 /// The `index`th mutant of campaign `seed`.
 fn mutant(seed: u64, index: usize) -> Vec<u8> {
     let mut rng = Rng::new(seed);
@@ -333,11 +336,14 @@ fn demux_campaign(seed: u64, mutants: usize, reach: &mut Reach) {
         let base = &seeds[rng.below(seeds.len())];
         let data = mutate(&mut rng, base);
         let before = Instant::now();
-        let slowest = reach.slowest;
         exercise(&data, reach);
         let took = before.elapsed();
-        if reach.slowest > slowest {
-            reach.slowest_at = (seed, index);
+        if reach.slowest_at.len() < SLOWEST_KEPT
+            || reach.slowest_at.last().is_some_and(|last| took > last.0)
+        {
+            reach.slowest_at.push((took, seed, index));
+            reach.slowest_at.sort_by_key(|a| std::cmp::Reverse(a.0));
+            reach.slowest_at.truncate(SLOWEST_KEPT);
         }
         assert!(
             took < Duration::from_secs(5),
@@ -580,28 +586,43 @@ fn fuzz_campaign_demux() {
         seed += 1;
     }
     eprintln!(
-        "demux campaign: {} mutants over seeds {origin}..{seed} in {:.1} s; {} opened, {} packets read, {} seeks landed; slowest input {:.1} ms (seed {} mutant {})",
+        "demux campaign: {} mutants over seeds {origin}..{seed} in {:.1} s; {} opened, {} packets read, {} seeks landed; slowest input {:.1} ms; slowest (ms seed:mutant) {}",
         reach.mutants,
         started.elapsed().as_secs_f64(),
         reach.opened,
         reach.packets,
         reach.seeks,
         reach.slowest.as_secs_f64() * 1000.0,
-        reach.slowest_at.0,
-        reach.slowest_at.1,
+        reach
+            .slowest_at
+            .iter()
+            .map(|(took, seed, index)| format!("{:.1} {seed}:{index}", took.as_secs_f64() * 1000.0))
+            .collect::<Vec<_>>()
+            .join(", "),
     );
 }
 
-/// Times one demux mutant ten times: `MKV_FUZZ_REPLAY=seed:mutant`.
+/// Times demux mutants ten times each: `MKV_FUZZ_REPLAY=seed:mutant`, or
+/// several separated by commas.
 #[test]
 #[ignore = "replays one input named by MKV_FUZZ_REPLAY"]
 fn fuzz_replay() {
-    let Some((seed, index)) = std::env::var("MKV_FUZZ_REPLAY").ok().and_then(|value| {
-        let (seed, index) = value.split_once(':')?;
-        Some((seed.parse().ok()?, index.parse().ok()?))
-    }) else {
+    let Ok(list) = std::env::var("MKV_FUZZ_REPLAY") else {
         return;
     };
+    for one in list.split(',') {
+        let Some((seed, index)) = one
+            .trim()
+            .split_once(':')
+            .and_then(|(seed, index)| Some((seed.parse().ok()?, index.parse().ok()?)))
+        else {
+            continue;
+        };
+        replay(seed, index);
+    }
+}
+
+fn replay(seed: u64, index: usize) {
     let data = mutant(seed, index);
     let mut times = Vec::new();
     for _ in 0..10 {

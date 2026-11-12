@@ -11165,10 +11165,16 @@ fn mc_block<S: Sample>(
         2 => (w / 2, h),
         _ => (w / 2, h / 2),
     };
-    // Neither explicit nor implicit weights, nor ALC's: one prediction is
-    // copied and two are averaged.
+    // Neither explicit weights other than the default ones, nor implicit
+    // weights, nor ALC's: one prediction is copied and two are averaged.
+    let default = |list: usize, reference: i8| {
+        reference < 0
+            || !slice.weighted
+            || (reference < 32 && slice.unweighted[list] >> reference & 1 == 1)
+    };
     let plain = alc.is_none()
-        && !slice.weighted
+        && default(0, r0)
+        && default(1, r1)
         && (r0 < 0 || r1 < 0 || slice.pps.weighted_bipred != 2 || slice.kind != 1);
     let (luma_done, chroma_done) = if plain && chroma == 1 && !separate {
         mc_plain(pic, dpb, slice, block, motion)?

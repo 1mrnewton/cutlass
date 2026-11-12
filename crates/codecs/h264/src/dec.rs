@@ -2541,6 +2541,10 @@ pub(crate) struct Slice<'a> {
     /// One entry for each byte, so an index read as a byte finds one.
     bound: [[(i8, i32); 256]; 2],
     weighted: bool,
+    /// For each list, bit `i` set when reference index `i` is weighted by
+    /// the default weights, which leave a prediction as it is: every bit
+    /// when the slice is not weighted.
+    unweighted: [u32; 2],
     luma_denom: i32,
     chroma_denom: i32,
     yw: [[i32; 32]; 2],
@@ -2617,6 +2621,7 @@ impl Slice<'_> {
             implicit: self.implicit,
             bound: self.bound,
             weighted: self.weighted,
+            unweighted: self.unweighted,
             luma_denom: self.luma_denom,
             chroma_denom: self.chroma_denom,
             yw: self.yw,
@@ -4587,6 +4592,19 @@ fn make_slice<'a, S: Sample>(
         chroma_denom = 0;
     }
     let disparity = disparity_tables(sets, sps, header)?;
+    let mut unweighted = [u32::MAX; 2];
+    if weighted {
+        for (list, bits) in unweighted.iter_mut().enumerate() {
+            *bits = 0;
+            for i in 0..32 {
+                let plain = yw[list][i] == 1 << luma_denom
+                    && yo[list][i] == 0
+                    && cw[list][i] == [1 << chroma_denom; 2]
+                    && co[list][i] == [0; 2];
+                *bits |= u32::from(plain) << i;
+            }
+        }
+    }
     Ok(Slice {
         sps: std::borrow::Cow::Borrowed(sps),
         pps: std::borrow::Cow::Borrowed(pps),
@@ -4606,6 +4624,7 @@ fn make_slice<'a, S: Sample>(
         long1,
         implicit,
         weighted,
+        unweighted,
         luma_denom,
         chroma_denom,
         yw,

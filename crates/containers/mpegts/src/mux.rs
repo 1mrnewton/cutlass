@@ -395,7 +395,7 @@ impl<W: Write> TsMux<W> {
                 Ok(out)
             }
             Shape::Aac { header } => {
-                if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] & 0xF6 == 0xF0 {
+                if is_adts(bytes) {
                     return Ok(bytes.to_vec());
                 }
                 let Some((profile, rate, channels)) = *header else {
@@ -637,7 +637,8 @@ impl<W: Write> Mux for TsMux<W> {
             CodecId::Ac3 => (0x81, 0xBD, Shape::Plain, registration(*b"AC-3"), false),
             CodecId::Eac3 => (0x87, 0xBD, Shape::Plain, registration(*b"EAC3"), false),
             CodecId::Opus => {
-                let code = opus_code(stream.params.extradata(), stream.params.channels())?;
+                let code = opus_code(stream.params.extradata(), stream.params.channels())
+                    .map_err(|error| self.fail(error))?;
                 (0x06, 0xBD, Shape::Opus, opus_descriptors(code, &[]), false)
             }
             other => {
@@ -751,6 +752,26 @@ impl<W: Write> Mux for TsMux<W> {
         self.store_config(index, config)
             .map_err(|error| self.fail(error))
     }
+}
+
+/// Whether `bytes` are whole ADTS frames, end to end. A raw AAC frame may
+/// begin with bits that look like a sync word; it is not taken for ADTS
+/// unless the frame lengths also add up to the packet exactly.
+fn is_adts(bytes: &[u8]) -> bool {
+    let mut at = 0;
+    while let Some(header) = bytes.get(at..at + 7) {
+        if header[0] != 0xFF || header[1] & 0xF6 != 0xF0 {
+            return false;
+        }
+        let length = (usize::from(header[3] & 0x03) << 11)
+            | (usize::from(header[4]) << 3)
+            | usize::from(header[5] >> 5);
+        if length < 7 {
+            return false;
+        }
+        at += length;
+    }
+    !bytes.is_empty() && at == bytes.len()
 }
 
 fn rejected(message: String) -> MuxError {
@@ -1067,4 +1088,24 @@ fn opus_descriptors(code: u8, existing: &[u8]) -> Vec<u8> {
         at = end;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{adts_header, is_adts};
+
+    #[test]
+    fn only_whole_adts_frames_pass_as_adts() {
+        let mut frame = adts_header(1, 3, 2, 10).to_vec();
+        frame.extend_from_slice(&[1, 2, 3]);
+        assert!(is_adts(&frame));
+        let mut two = frame.clone();
+        two.extend_from_slice(&frame);
+        assert!(is_adts(&two));
+        // A raw frame that starts like a sync word but whose length does
+        // not add up.
+        assert!(!is_adts(&frame[..9]));
+        assert!(!is_adts(&[0xFF, 0xF1, 0x50, 0x80, 0x00, 0x1F, 0xFC, 0x21]));
+        assert!(!is_adts(&[]));
+    }
 }

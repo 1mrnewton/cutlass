@@ -96,12 +96,10 @@ fn wide<const N: i32, const N2: i32, const LOG2: i32>(o: &[V; 14], out: &mut [V;
     }
 }
 
-/// The wide filters of size 16 for the flat lines, kept out of
-/// [`filter`]: with them inline that function is too large to be inlined
-/// itself, and every size-16 edge then passes its fourteen vectors
-/// through memory. This takes and gives back the lines by value, so the
-/// caller keeps its vectors in registers on the way here.
-#[inline(never)]
+/// The wide filters of size 16 for the flat lines, taking and giving back
+/// the lines by value. Inlined into [`filter`]: called, it took its
+/// twenty-eight vectors through memory (0.5% more cycles on 4K clips).
+#[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
 fn widest(o: [V; 14], mut out: [V; 14], flat: V, flat2: V) -> [V; 14] {

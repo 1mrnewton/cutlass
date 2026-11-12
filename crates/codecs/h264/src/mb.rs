@@ -1008,6 +1008,21 @@ fn cabac_skip<S: Sample>(
     addr: usize,
     mbaff: bool,
 ) -> Result<bool, CodecError> {
+    if !mbaff && !pic.mbaff {
+        // Frame macroblocks only: the neighbours are the record before
+        // this one and the one a row up, looked at directly rather than
+        // through the general search, which costs more than the bin.
+        let records = &pic.mb[..];
+        let coded = |at: usize| {
+            records
+                .get(at)
+                .is_some_and(|mb| mb.slice == slice_id && !mb.skip)
+        };
+        let left = !addr.is_multiple_of(pic.mb_w) && coded(addr - 1);
+        let above = addr >= pic.mb_w && coded(addr - pic.mb_w);
+        let ctx = usize::from(left) + usize::from(above) + if kind == 1 { 13 } else { 0 };
+        return Ok(cab.decision(11 + ctx)? == 1);
+    }
     let (mx, my) = locate(pic, addr, mbaff);
     let left = left_mb(pic, mx, my, slice_id);
     let above = neighbor(pic, mx as i32, above_my(pic, mx, my), slice_id);

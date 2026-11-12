@@ -471,6 +471,26 @@ cycles), and taking the vertical deblocking edges off the filter thread
 (skipping them altogether moved the 18-thread time by only as much as
 their processor time).
 
+Later, the per-4x4 maps (mode info, transform types and sizes, the loop
+filter's transform sizes and block info) go round a ring of 64 rows on
+one thread and in each tile parser, rather than through arrays the size
+of the frame that the cache cannot hold, and the tile parsers read the
+motion field where its thread puts it. Single threaded that takes 12.0G
+and 9.1G cycles (libdav1d 11.0G and 8.2G); with 18 threads 0.37 s and
+0.32 s on a quiet machine (user 5.0 s and 3.9 s), and with 8 threads 0.41 s
+and 0.40 s against libdav1d's 0.52 s and 0.44 s. What is left single
+threaded is spread over the blocks' bookkeeping (mode info, BlockDecoded
+flags, the per-4x4 maps), about 0.5G against libdav1d's block decode;
+the filters, motion compensation, the transforms and coefficient reading
+are within a few percent of it. Threaded, about 10% of the processor time
+is still copies (the published bands above, the rows handed to the filter
+thread, and the loop filter transform sizes passed from the parsers).
+Tried and dropped: walking the saved motion per block (fewer
+instructions, but the short runs cost more than they saved), branch free
+or vectorised motion saving (its time is waiting on memory), and copying
+the samples of emulated edges in fixed chunks (the compiler turns the
+chunk loops back into library calls).
+
 ## Encoder
 
 ### Coverage

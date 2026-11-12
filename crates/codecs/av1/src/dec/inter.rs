@@ -567,17 +567,21 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         // The rows read, in place (in one band of a reference still being
         // decoded).
         let direct = match rv {
-            Some(rv) if inside => ref_rows(
-                rv,
-                mirrors,
-                plane,
-                (iy - top) as usize,
-                (iy + bottom) as usize,
-            ),
+            Some(rv) if inside => {
+                let (y0, y1) = ((iy - top) as usize, (iy + bottom) as usize);
+                // Without a vertical fraction the filters read no rows
+                // above the block, but the vector kernels address their
+                // source from 3 rows above it: the rows start there when
+                // the picture (or the band) has them.
+                let up = if top == 0 { y0.min(3) } else { 0 };
+                ref_rows(rv, mirrors, plane, y0 - up, y1)
+                    .map(|(s, st)| (s, st, up))
+                    .or_else(|| ref_rows(rv, mirrors, plane, y0, y1).map(|(s, st)| (s, st, 0)))
+            }
             _ => None,
         };
         let (src, sstride, soff): (&[P], usize, usize) = match direct {
-            Some((s, st)) => (s, st, top as usize * st + ix as usize),
+            Some((s, st, up)) => (s, st, (top as usize + up) * st + ix as usize),
             None => {
                 if self.scratch.emu.len() < fw * fh {
                     self.scratch.emu.resize(fw * fh, P::default());

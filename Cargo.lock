@@ -3083,6 +3083,7 @@ dependencies = [
  "cutlass-flac-container",
  "cutlass-isobmff",
  "cutlass-jpeg",
+ "cutlass-matroska",
  "cutlass-model",
  "cutlass-mp3-container",
  "cutlass-ogg",

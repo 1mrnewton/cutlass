@@ -1642,8 +1642,10 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let stride = self.fs.mi_stride;
         let at = b.mi_row * stride + b.mi_col;
         fill_rect(&mut self.fs.segment_ids, stride, at, w4, h4, b.segment_id);
-        // Palette colors for later palette caches.
-        if self.hdr.allow_screen_content_tools {
+        // Palette colors for later palette caches, which read as many
+        // colors as the neighbor's mode info says it has: none of a
+        // block without a palette.
+        if self.hdr.allow_screen_content_tools && (b.palette_size_y | b.palette_size_uv) != 0 {
             let sb_mask = self.sb_size4 - 1;
             for x in 0..bw4(b.bsize) {
                 if b.mi_col + x < self.above_palette[0].len() {

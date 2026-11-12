@@ -10458,25 +10458,45 @@ fn apply_direct<S: Sample>(
     // co-located one is filled at once: no co-located macroblock to ask,
     // or, with 8×8 inference, four corner blocks that agree.
     if blocks.len() == 16 && col_frame.is_none() {
-        let agreed = match col_mb {
-            None => Some(false),
+        // With 8×8 inference each quarter asks its corner block, so a
+        // quarter is filled at once too.
+        let corners = match col_mb {
+            None => Some([false; 4]),
             Some(col) if slice.sps.direct_8x8_inference => {
-                let first = col_zero(col, 0);
-                [3, 12, 15]
-                    .into_iter()
-                    .all(|corner| col_zero(col, corner) == first)
-                    .then_some(first)
+                Some([0, 3, 12, 15].map(|corner| col_zero(col, corner)))
             }
             Some(_) => None,
         };
-        if let Some(col_zero) = agreed {
-            let still = |reference: i8| zero || reference < 0 || (reference == 0 && col_zero);
-            mb.mv0 = [if still(ref0) { [0, 0] } else { pred0 }; 16];
-            mb.mv1 = [if still(ref1) { [0, 0] } else { pred1 }; 16];
+        if let Some(corners) = corners {
+            let still = |reference: i8, col_zero: bool| {
+                zero || reference < 0 || (reference == 0 && col_zero)
+            };
             mb.ref0 = [if zero { 0 } else { ref0 }; 4];
             mb.ref1 = [if zero { 0 } else { ref1 }; 4];
             mb.ready = u16::MAX;
-            return true;
+            if corners[1..].iter().all(|&other| other == corners[0]) {
+                mb.mv0 = [if still(ref0, corners[0]) {
+                    [0, 0]
+                } else {
+                    pred0
+                }; 16];
+                mb.mv1 = [if still(ref1, corners[0]) {
+                    [0, 0]
+                } else {
+                    pred1
+                }; 16];
+                return true;
+            }
+            for (part, &col_zero) in corners.iter().enumerate() {
+                let mv0 = if still(ref0, col_zero) { [0, 0] } else { pred0 };
+                let mv1 = if still(ref1, col_zero) { [0, 0] } else { pred1 };
+                let corner = (part / 2) * 8 + (part % 2) * 2;
+                for index in [corner, corner + 1, corner + 4, corner + 5] {
+                    mb.mv0[index] = mv0;
+                    mb.mv1[index] = mv1;
+                }
+            }
+            return false;
         }
     }
     for &(bx, by) in blocks {

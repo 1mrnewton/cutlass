@@ -644,6 +644,27 @@ fn plain_edges(edges: &crate::edge::MbEdges) -> bool {
 #[inline]
 #[target_feature(enable = "neon")]
 pub(crate) fn prefetch(plane: &[u8], at: usize, stride: usize, rows: usize) {
+    // Mostly every row is inside: one check for the last settles it.
+    let last = rows
+        .checked_sub(1)
+        .and_then(|more| more.checked_mul(stride))
+        .and_then(|span| span.checked_add(at));
+    if last.is_some_and(|last| last < plane.len()) {
+        let first = plane.as_ptr().wrapping_add(at);
+        for row in 0..rows {
+            let sample = first.wrapping_add(row * stride);
+            // SAFETY: as below; every row's address is inside `plane`.
+            #[allow(unsafe_code)]
+            unsafe {
+                core::arch::asm!(
+                    "prfm pldl1strm, [{sample}]",
+                    sample = in(reg) sample,
+                    options(nostack, readonly, preserves_flags)
+                );
+            }
+        }
+        return;
+    }
     let mut index = at;
     for _ in 0..rows {
         if index >= plane.len() {

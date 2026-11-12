@@ -4884,12 +4884,17 @@ impl Queued {
     }
 }
 
-/// Pictures kept in flight for each core asked for. Most pictures in a
-/// chain wait on the one in front and use no core while they do.
+/// Threads kept for each core asked for. Most pictures in a chain wait on
+/// the one in front and use no core while they do.
 const IN_FLIGHT_PER_CORE: usize = 4;
+/// Pictures in flight for every two cores asked for. More decode no faster
+/// on 8 or 18 cores, at 1080p or 4K, and each holds its planes.
+const DEPTH_PER_TWO_CORES: usize = 3;
 /// Memory the pictures in flight may take together, which holds their
-/// number down for large pictures.
-const IN_FLIGHT_BYTES: usize = 768 << 20;
+/// number down for large pictures. At eight bytes a sample this lets ten
+/// 4K pictures fly, which with references read from their published rows
+/// takes about as much memory as seven did when each kept a copy.
+const IN_FLIGHT_BYTES: usize = 1 << 30;
 
 type Task = Box<dyn FnOnce() + Send>;
 
@@ -4952,7 +4957,9 @@ impl Pool {
         if workers.is_empty() {
             return Self::inline();
         }
-        let depth = workers.len();
+        let depth = workers
+            .len()
+            .min(cores.saturating_mul(DEPTH_PER_TWO_CORES).div_ceil(2));
         Self {
             sender: Some(sender),
             workers,

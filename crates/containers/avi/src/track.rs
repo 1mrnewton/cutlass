@@ -194,6 +194,14 @@ impl Track {
         self.last_position = None;
     }
 
+    /// Drops the rows read so far and keeps the running byte and unit
+    /// counts, for a reader that keeps no table.
+    pub(crate) fn forget(&mut self) {
+        self.entries.clear();
+        self.spans.clear();
+        self.offsets.clear();
+    }
+
     /// Adds the chunk whose payload starts at `data` and is `size` bytes.
     ///
     /// `budget` is the entry count left across every track. A chunk at the

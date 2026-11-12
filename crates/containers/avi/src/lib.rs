@@ -16,6 +16,7 @@ mod bytes;
 mod cut;
 mod demux;
 mod format;
+mod forward;
 mod frames;
 mod header;
 mod index;
@@ -29,6 +30,7 @@ mod track;
 
 pub use demux::{AviDemux, Repair};
 pub use format::{RawLayout, StreamKind, VideoFormat, raw_layout};
+pub use forward::AviForwardDemux;
 pub use header::{
     AVIF_HASINDEX, AVIF_ISINTERLEAVED, AVIF_MUSTUSEINDEX, AVIF_TRUSTCKTYPE, MainHeader,
     StreamHeader,
@@ -174,7 +176,7 @@ pub const FEATURES: &[Feature] = &[
     },
     Feature {
         name: "forward-only-input",
-        demux: false,
+        demux: true,
         mux: false,
     },
 ];

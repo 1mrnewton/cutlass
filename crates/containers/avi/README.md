@@ -35,7 +35,7 @@ Timestamps stay in each stream's own clock: the timescale is `dwRate / g` and on
 | AC-3 (`0x2000`) | One chunk per packet | `0x2000`, one frame per chunk | ffmpeg `ac3` | Verified (demux); mux unit-tested |
 | Other audio tags | Unknown codec tag `wav:XXXX`, packets read | Refused | `unknown_codecs_are_published_and_read` | Demux only |
 | `txts` and other stream types | Unknown codec tag, packets read | Not written | `unknown_codecs_are_published_and_read` | Demux only |
-| Forward-only input | Not supported: `open` needs `Read + Seek` and the length | The muxer needs `Write + Seek` to patch headers | | Unsupported |
+| Forward-only input | `AviForwardDemux::open(reader)` takes any `Read` and reads chunks in file order, `AVIX` segments included, with no index: keyframes come from the bitstream, a video packet is returned once its stream's next chunk arrives (so dropped frames lengthen it), and seeking is `SeekError::ForwardOnly` | The muxer needs `Write + Seek` to patch headers | `forward_reading_*`; every ffmpeg case read both ways gives the same packets | Demux verified; mux unsupported |
 
 `FEATURES` in the crate lists the same rows as data.
 
@@ -151,7 +151,6 @@ Gaps:
 - The muxer writes packets in arrival order; it does not interleave. It holds packets until every video stream has 8, so the first header write may hold up to 64 MiB.
 - No muxed file over 1 GiB was written in a test; segment switching was checked with small segments.
 - An index that points outside `movi` is replaced by a scan and recorded in `fallbacks()`, not reported as an open error.
-- Forward-only input does not open.
 - The engine does not play 8-bit PCM, and the export path does not write AVI.
 
 ## Specifications

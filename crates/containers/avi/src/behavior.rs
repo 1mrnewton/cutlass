@@ -11,7 +11,7 @@ use cutlass_container::{
     SeekTo, TrackDuration, TrackId,
 };
 
-use crate::{AviDemux, AviMux, AviMuxOptions, IndexSource};
+use crate::{AviDemux, AviForwardDemux, AviMux, AviMuxOptions, IndexSource};
 
 // ---------------------------------------------------------------- builder
 
@@ -517,8 +517,9 @@ fn mp3_frame(fill: u8) -> Vec<u8> {
     frame
 }
 
-#[test]
-fn a_variable_bitrate_chunk_of_several_mp3_frames_is_cut_into_frames() {
+/// A variable-bitrate MP3 stream whose chunks hold two frames, garbage and
+/// a frame split across chunks, and no frame at all.
+fn several_mp3_frames_per_chunk() -> Built {
     let audio = Spec {
         kind: *b"auds",
         handler: [0; 4],
@@ -534,7 +535,7 @@ fn a_variable_bitrate_chunk_of_several_mp3_frames_is_cut_into_frames() {
     odd.extend(mp3_frame(3));
     let split = odd.len() - 100;
     let tail = odd.split_off(split);
-    let file = avi(
+    avi(
         &[audio],
         &[
             (b"00wb", two, true),
@@ -543,7 +544,12 @@ fn a_variable_bitrate_chunk_of_several_mp3_frames_is_cut_into_frames() {
             (b"00wb", vec![9; 50], true),
         ],
         Idx1::Relative,
-    );
+    )
+}
+
+#[test]
+fn a_variable_bitrate_chunk_of_several_mp3_frames_is_cut_into_frames() {
+    let file = several_mp3_frames_per_chunk();
     let mut demux = open(&file.bytes).expect("open");
     let packets = drain(&mut demux);
     let seen: Vec<_> = packets
@@ -1133,4 +1139,158 @@ fn past_the_interleave_limit_packets_go_out_and_the_file_says_so() {
     assert!(!interleaved);
     let mut demux = open(&bytes).expect("open");
     assert_eq!(drain(&mut demux).len(), 70);
+}
+
+// ---------------------------------------------------------------- forward
+
+/// A reader that cannot seek, as a pipe is.
+struct Pipe(Cursor<Vec<u8>>);
+
+impl std::io::Read for Pipe {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        // A few bytes at a time, as a pipe may hand them over.
+        let take = out.len().min(7);
+        self.0.read(&mut out[..take])
+    }
+}
+
+fn forward(bytes: &[u8]) -> Vec<Packet> {
+    let mut demux = AviForwardDemux::open(Pipe(Cursor::new(bytes.to_vec()))).expect("open");
+    let mut out = Vec::new();
+    while let Some(packet) = demux.read_packet().expect("read") {
+        out.push(packet);
+    }
+    assert_eq!(demux.consumed(), u64::try_from(bytes.len()).unwrap());
+    out
+}
+
+/// Forward reading gives each stream the packets the indexed reader gives.
+fn same_as_indexed(name: &str, bytes: &[u8]) {
+    let mut demux = open(bytes).expect("open");
+    let indexed = drain(&mut demux);
+    let read = forward(bytes);
+    assert_eq!(read.len(), indexed.len(), "{name}");
+    for stream in 0..u32::try_from(demux.streams().len()).unwrap() {
+        let left: Vec<_> = indexed.iter().filter(|p| p.stream() == stream).collect();
+        let right: Vec<_> = read.iter().filter(|p| p.stream() == stream).collect();
+        assert_eq!(left.len(), right.len(), "{name} stream {stream}");
+        for (index, (left, right)) in left.iter().zip(&right).enumerate() {
+            assert!(
+                left == right,
+                "{name} stream {stream} packet {index}: {:?} {} / {:?} {}",
+                left.timestamp(),
+                left.bytes().len(),
+                right.timestamp(),
+                right.bytes().len()
+            );
+        }
+    }
+}
+
+#[test]
+fn forward_reading_matches_the_index_without_seeking() {
+    for mode in [Idx1::Relative, Idx1::Absolute, Idx1::None] {
+        same_as_indexed("mjpeg+pcm", &interleaved_mjpeg_pcm(mode).bytes);
+    }
+    same_as_indexed("mp3 frames", &several_mp3_frames_per_chunk().bytes);
+    let dropped = avi(
+        &[mjpeg(1, 25)],
+        &[
+            (b"00dc", jpeg(0), true),
+            (b"00dc", Vec::new(), false),
+            (b"00dc", Vec::new(), false),
+            (b"00dc", jpeg(3), true),
+            (b"00dc", Vec::new(), false),
+        ],
+        Idx1::Relative,
+    );
+    same_as_indexed("dropped frames", &dropped.bytes);
+    let read = forward(&dropped.bytes);
+    assert_eq!(read[0].timestamp().duration(), Some(3));
+    assert_eq!(read[1].timestamp().duration(), Some(2));
+    let (one, _) = write_movie(50, 1 << 30);
+    same_as_indexed("one riff", &one);
+    let (many, riffs) = write_movie(400, 32 * 1024);
+    assert!(riffs > 3);
+    same_as_indexed("many riffs", &many);
+}
+
+#[test]
+fn forward_reading_takes_rec_lists_and_skips_what_is_not_a_packet() {
+    let idr = vec![0, 0, 0, 1, 0x65, 0x88, 0x80];
+    let slice = vec![0, 0, 0, 1, 0x41, 0x9A, 0x00];
+    let header = hdrl(&[video(b"H264")]);
+    let mut rec = b"rec ".to_vec();
+    rec.extend_from_slice(&chunk(b"00dc", &idr));
+    rec.extend_from_slice(&chunk(b"00pc", &[0; 4]));
+    rec.extend_from_slice(&chunk(b"00dc", &slice));
+    let mut body = chunk(b"LIST", &rec);
+    body.extend_from_slice(&chunk(b"JUNK", &[0; 6]));
+    body.extend_from_slice(&chunk(b"ix00", &[0; 24]));
+    body.extend_from_slice(&chunk(b"09wb", &[0; 3]));
+    body.extend_from_slice(&chunk(b"00dc", &slice));
+    let mut bytes = b"RIFF\0\0\0\0AVI ".to_vec();
+    bytes.extend_from_slice(&header);
+    bytes.extend_from_slice(&list(b"movi", &body));
+    bytes.extend_from_slice(&chunk(b"JUNK", &[0; 5]));
+    let size = le32(u32::try_from(bytes.len() - 8).unwrap());
+    bytes[4..8].copy_from_slice(&size);
+    let packets = forward(&bytes);
+    assert_eq!(
+        packets
+            .iter()
+            .map(|packet| (packet.keyframe(), packet.timestamp().decode()))
+            .collect::<Vec<_>>(),
+        [(true, Some(0)), (false, Some(1)), (false, Some(2))]
+    );
+}
+
+#[test]
+fn forward_reading_ends_at_a_cut_and_cannot_seek() {
+    let file = interleaved_mjpeg_pcm(Idx1::None);
+    let cut = usize::try_from(file.data[3]).unwrap() + 100;
+    let packets = forward(&file.bytes[..cut]);
+    assert_eq!(
+        packets.len(),
+        3,
+        "the chunk the cut runs through is dropped"
+    );
+    let mut demux = AviForwardDemux::open(Pipe(Cursor::new(file.bytes.clone()))).expect("open");
+    assert_eq!(
+        demux.seek(SeekTo {
+            track: 0,
+            time: 0,
+            end: None
+        }),
+        Err(ReadError::Seek(SeekError::ForwardOnly))
+    );
+    demux.cancel();
+    assert_eq!(demux.read_packet(), Err(ReadError::Cancelled));
+}
+
+#[test]
+fn forward_reading_survives_every_cut_and_flipped_byte() {
+    let (bytes, _) = write_movie(12, 1 << 30);
+    for end in 0..bytes.len() {
+        if let Ok(mut demux) = AviForwardDemux::open(Pipe(Cursor::new(bytes[..end].to_vec()))) {
+            while let Ok(Some(_)) = demux.read_packet() {}
+        }
+    }
+    let limits = Limits {
+        max_packet_bytes: 256,
+        ..Limits::standard()
+    };
+    for at in 0..bytes.len() {
+        let mut broken = bytes.clone();
+        broken[at] ^= 0xA5;
+        if let Ok(mut demux) = AviForwardDemux::open_with_limits(Pipe(Cursor::new(broken)), limits)
+        {
+            for _ in 0..10_000 {
+                match demux.read_packet() {
+                    Ok(Some(_)) | Err(ReadError::HostileSize { .. }) => {}
+                    _ => break,
+                }
+            }
+        }
+    }
 }

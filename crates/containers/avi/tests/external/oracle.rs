@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use cutlass_avi::{AviMux, IndexSource};
+use cutlass_avi::{AviForwardDemux, AviMux, IndexSource};
 use cutlass_codec::{CodecId, FrameSize, Packet, StreamCodec, StreamParams, Timescale};
 use cutlass_container::{Demux, Mux, NewStream, TrackDuration, TrackId};
 
@@ -409,10 +409,39 @@ fn ffmpeg_made_files_match_ffprobe_packet_for_packet() {
         }
         let packets = check_against_ffprobe(&path);
         assert!(packets.len() > 100, "{}", case.name);
+        same_read_forward(&path, &packets);
         ran += 1;
     }
     assert!(ran > 0, "no case ran");
     eprintln!("ffmpeg cases checked: {ran} of {}", CASES.len());
+}
+
+/// Reading `path` once, front to back, with no index, gives each stream
+/// the packets the indexed reader gave: the same bytes, times, durations
+/// and keyframes (the keyframes read from each bitstream here, from
+/// `idx1` there).
+fn same_read_forward(path: &Path, indexed: &[Packet]) {
+    let file = std::fs::File::open(path).expect("open");
+    let mut demux = AviForwardDemux::open(std::io::BufReader::new(file)).expect("open forward");
+    let read = drain(&mut demux);
+    assert_eq!(read.len(), indexed.len(), "{}", path.display());
+    for stream in 0..u32::try_from(demux.streams().len()).expect("streams") {
+        let left = indexed.iter().filter(|packet| packet.stream() == stream);
+        let right = read.iter().filter(|packet| packet.stream() == stream);
+        for (index, (left, right)) in left.zip(right).enumerate() {
+            assert!(
+                left == right,
+                "{} stream {stream} packet {index}: {:?} {} {} / {:?} {} {}",
+                path.display(),
+                left.timestamp(),
+                left.bytes().len(),
+                left.keyframe(),
+                right.timestamp(),
+                right.bytes().len(),
+                right.keyframe()
+            );
+        }
+    }
 }
 
 /// GStreamer's buffers per stream, in order, from `avidemux`.

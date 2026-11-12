@@ -194,10 +194,11 @@ pub fn parse_pmt(section: &[u8]) -> Result<Pmt, TableError> {
         };
         let found = descriptors(info)?;
         let registration = found.registration.or(program.registration);
+        let hdmv = program.registration == Some(*b"HDMV");
         streams.push(Elementary {
             stream_type: *stream_type,
             pid,
-            kind: kind_of(*stream_type, registration, &found),
+            kind: kind_of(*stream_type, registration, hdmv, &found),
             language: found.language,
             registration: found.registration,
             opus_channels: found.opus_channels,
@@ -216,7 +217,15 @@ pub fn parse_pmt(section: &[u8]) -> Result<Pmt, TableError> {
 /// The framing of `stream_type`, from H.222.0 table 2-34, the ATSC and
 /// Blu-ray (`HDMV`) private assignments, and the descriptors that name a
 /// codec carried as private data (`0x06`).
-fn kind_of(stream_type: u8, registration: Option<[u8; 4]>, found: &Descriptors) -> Kind {
+/// `hdmv` is a Blu-ray registration on the program, which a stream's own
+/// registration (FFmpeg writes `EAC3` on an HDMV E-AC-3 stream) does not
+/// undo.
+fn kind_of(
+    stream_type: u8,
+    registration: Option<[u8; 4]>,
+    hdmv: bool,
+    found: &Descriptors,
+) -> Kind {
     match stream_type {
         0x01 | 0x02 => Kind::Mpeg2Video,
         0x03 | 0x04 => Kind::MpegAudio,
@@ -228,7 +237,9 @@ fn kind_of(stream_type: u8, registration: Option<[u8; 4]>, found: &Descriptors) 
         0x81 => Kind::Ac3,
         0x87 => Kind::Eac3,
         // Blu-ray and AVCHD: E-AC-3, and E-AC-3 secondary audio.
-        0x84 | 0xA1 if registration == Some(*b"HDMV") => Kind::Eac3,
+        0x84 | 0xA1 if hdmv || matches!(registration.as_ref(), Some(b"HDMV" | b"EAC3")) => {
+            Kind::Eac3
+        }
         0x06 => private_kind(registration, found),
         _ => Kind::Other,
     }
@@ -308,8 +319,10 @@ mod tests {
         body.extend_from_slice(&[0x06, 0xE1, 0x02, 0xF0, 0x0A, 0x05, 0x04]);
         body.extend_from_slice(b"Opus");
         body.extend_from_slice(&[0x7F, 0x02, 0x80, 0x02]);
-        // HDMV E-AC-3 on 0x103, and an unknown type on 0x104.
-        body.extend_from_slice(&[0x84, 0xE1, 0x03, 0xF0, 0x00]);
+        // HDMV E-AC-3 on 0x103 with its own EAC3 registration, as FFmpeg
+        // writes it, and an unknown type on 0x104.
+        body.extend_from_slice(&[0x84, 0xE1, 0x03, 0xF0, 0x06, 0x05, 0x04]);
+        body.extend_from_slice(b"EAC3");
         body.extend_from_slice(&[0x90, 0xE1, 0x04, 0xF0, 0x00]);
         let pmt = parse_pmt(&long(2, 1, &body)).expect("pmt");
         assert_eq!(pmt.program, 1);

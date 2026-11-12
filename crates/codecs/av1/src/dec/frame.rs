@@ -171,7 +171,8 @@ impl RefData {
     }
 
     /// The segment ids, indexed like [`FrameState::segment_ids`], once
-    /// the frame's parse has ended. Empty when that parse failed.
+    /// the frame's parse has ended. Empty when that parse failed or the
+    /// frame has no segmentation: every id is then 0.
     pub fn segment_ids(&self) -> &[u8] {
         self.segment_ids.wait()
     }

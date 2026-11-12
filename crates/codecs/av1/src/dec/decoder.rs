@@ -1895,7 +1895,7 @@ impl<P: PicturePixel> FrameTask<P> {
         if let Some(rd) = data {
             // The bands the parse did not save on its way.
             save_motion(seq, hdr, &fs, rd, 0, fs.mi_rows);
-            rd.set_segment_ids(fs.segment_ids.clone());
+            rd.set_segment_ids(segment_map(hdr, &fs));
         }
         lock(&spares).states.push(fs);
         Ok(())
@@ -1971,11 +1971,21 @@ fn mf_band(
     band
 }
 
+/// The segment ids of the parsed frame of `fs` that later frames read:
+/// none without segmentation, where every id is 0.
+fn segment_map(hdr: &FrameHeader, fs: &FrameState) -> Vec<u8> {
+    if hdr.segmentation.enabled {
+        fs.segment_ids.clone()
+    } else {
+        Vec::new()
+    }
+}
+
 /// The data of the parsed frame of `fs`, whole.
 fn ref_data(seq: &SequenceHeader, hdr: &FrameHeader, fs: &FrameState) -> RefData {
     let rd = RefData::new(fs.mi_cols, fs.mi_rows, hdr.frame_type, hdr.order_hints);
     save_motion(seq, hdr, fs, &rd, 0, fs.mi_rows);
-    rd.set_segment_ids(fs.segment_ids.clone());
+    rd.set_segment_ids(segment_map(hdr, fs));
     rd
 }
 

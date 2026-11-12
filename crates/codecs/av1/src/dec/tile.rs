@@ -1665,7 +1665,11 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let h4 = bh4(b.bsize).min(self.fs.mi_rows - b.mi_row);
         let stride = self.fs.mi_stride;
         let at = b.mi_row * stride + b.mi_col;
-        fill_rect(&mut self.fs.segment_ids, stride, at, w4, h4, b.segment_id);
+        // Without segmentation every id is 0, and the frame keeps no map
+        // (see [`super::frame::RefData::segment_ids`]).
+        if self.hdr.segmentation.enabled {
+            fill_rect(&mut self.fs.segment_ids, stride, at, w4, h4, b.segment_id);
+        }
         // Palette colors for later palette caches, which read as many
         // colors as the neighbor's mode info says it has: none of a
         // block without a palette.

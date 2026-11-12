@@ -11960,9 +11960,6 @@ fn deblock_planes<S: Sample>(
     // macroblock to its right and the one below, so it is worked out once.
     above.resize(mb_w, None);
     let mut left: Option<(u16, bool)> = None;
-    // The thresholds inside the last macroblock that had any, which the
-    // next one most often shares.
-    let mut thresholds = Thresholds::default();
     for my in rows.start.min(mb_h)..rows.end.min(mb_h) {
         for mx in 0..mb_w {
             let index = my * mb_w + mx;
@@ -12004,7 +12001,6 @@ fn deblock_planes<S: Sample>(
                     (transform8, flat),
                     (known, beside, over),
                     off,
-                    &mut thresholds,
                 )
             {
                 continue;
@@ -12098,7 +12094,6 @@ fn deblock_whole<S: Sample>(
     shape: (bool, bool),
     known: (Known, Option<Known>, Option<Known>),
     off: (i32, i32),
-    thresholds: &mut Thresholds,
 ) -> bool {
     let (mx, my) = at;
     let (transform8, flat) = shape;
@@ -12151,13 +12146,14 @@ fn deblock_whole<S: Sample>(
                             (inside[2] + i32::from(mb.qp_cr) + 1) >> 1,
                         ]
                     });
-                    // Neighbours mostly share their QPs, and so the
-                    // thresholds inside.
-                    let qp = if qp == inside {
-                        *inner.get_or_insert_with(|| thresholds.get(inside, off))
-                    } else {
-                        qp.map(|qp| recon::EdgeQp::new(qp, off))
-                    };
+                    // Worked out each time rather than kept from the last
+                    // macroblock: whether the QPs match is as good as
+                    // random to the CPU, and the tables are few loads.
+                    let qp = [
+                        recon::EdgeQp::new(qp[0], off),
+                        recon::EdgeQp::new(qp[1], off),
+                        recon::EdgeQp::new(qp[2], off),
+                    ];
                     let slot = (&mut luma[way][0], &mut cb[way][0], &mut cr[way][0]);
                     set_edge(slot, bs, &qp, (true, true));
                 }
@@ -12182,7 +12178,13 @@ fn deblock_whole<S: Sample>(
             if bs == [0; 4] {
                 continue;
             }
-            let qp = inner.get_or_insert_with(|| thresholds.get(inside, off));
+            let qp = inner.get_or_insert_with(|| {
+                [
+                    recon::EdgeQp::new(inside[0], off),
+                    recon::EdgeQp::new(inside[1], off),
+                    recon::EdgeQp::new(inside[2], off),
+                ]
+            });
             let slot = (&mut luma[way][edge], &mut cb[way][edge], &mut cr[way][edge]);
             set_edge(slot, bs, qp, (luma_edge, chroma_edge));
         }
@@ -12211,26 +12213,6 @@ fn deblock_whole<S: Sample>(
         },
     ];
     S::deblock_mb(planes, &all)
-}
-
-/// The thresholds of an edge in luma, Cb and Cr at one set of QPs and
-/// offsets, kept from one macroblock to the next.
-#[derive(Default)]
-struct Thresholds {
-    /// The QPs and offsets they were worked out for; `None` before any.
-    key: Option<([i32; 3], (i32, i32))>,
-    kept: [Option<recon::EdgeQp>; 3],
-}
-
-impl Thresholds {
-    #[inline]
-    fn get(&mut self, qp: [i32; 3], off: (i32, i32)) -> [Option<recon::EdgeQp>; 3] {
-        if self.key != Some((qp, off)) {
-            self.kept = qp.map(|qp| recon::EdgeQp::new(qp, off));
-            self.key = Some((qp, off));
-        }
-        self.kept
-    }
 }
 
 /// The filters of one edge from its strengths, in luma (when it has a luma

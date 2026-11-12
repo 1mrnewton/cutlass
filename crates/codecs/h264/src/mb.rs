@@ -11205,6 +11205,10 @@ struct AlcWeight {
     denom: i32,
 }
 
+/// One partition predicted into the picture. The common one, copied or
+/// averaged from inside its references, is written here; anything else
+/// goes to [`mc_general`], kept out of line so this stays small.
+#[inline]
 fn mc_block<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],
@@ -11213,15 +11217,7 @@ fn mc_block<S: Sample>(
     motion: McMotion,
     alc: Option<AlcWeight>,
 ) -> Result<(), CodecError> {
-    let Block { x, y, w, h } = block;
-    let McMotion { r0, r1, mv0, mv1 } = motion;
-    let chroma = pic.chroma();
-    let separate = pic.separate_plane;
-    let (cw, ch) = match chroma {
-        3 => (w, h),
-        2 => (w / 2, h),
-        _ => (w / 2, h / 2),
-    };
+    let McMotion { r0, r1, .. } = motion;
     // Neither explicit weights other than the default ones, nor implicit
     // weights, nor ALC's: one prediction is copied and two are averaged.
     let default = |list: usize, reference: i8| {
@@ -11233,14 +11229,38 @@ fn mc_block<S: Sample>(
         && default(0, r0)
         && default(1, r1)
         && (r0 < 0 || r1 < 0 || slice.pps.weighted_bipred != 2 || slice.kind != 1);
-    let (luma_done, chroma_done) = if plain && chroma == 1 && !separate {
-        mc_plain(pic, dpb, slice, block, motion)?
+    let done = if plain && !pic.separate_plane && pic.chroma() == 1 {
+        mc_plain(pic, dpb, slice, &block, motion)?
     } else {
         (false, false)
     };
-    if luma_done && chroma_done {
+    if done == (true, true) {
         return Ok(());
     }
+    mc_general(pic, dpb, slice, block, motion, alc, done)
+}
+
+/// [`mc_block`] for what [`mc_plain`] did not write: the luma block, the
+/// chroma one, or both, as `done` says.
+#[inline(never)]
+fn mc_general<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    block: Block,
+    motion: McMotion,
+    alc: Option<AlcWeight>,
+    (luma_done, chroma_done): (bool, bool),
+) -> Result<(), CodecError> {
+    let Block { x, y, w, h } = block;
+    let McMotion { r0, r1, mv0, mv1 } = motion;
+    let chroma = pic.chroma();
+    let separate = pic.separate_plane;
+    let (cw, ch) = match chroma {
+        3 => (w, h),
+        2 => (w / 2, h),
+        _ => (w / 2, h / 2),
+    };
     let (luma_mix, chroma_mix, chroma_v) = if let Some(AlcWeight { weight, denom }) = alc {
         let chroma = Mix::Uni {
             weight: 1,
@@ -11427,14 +11447,15 @@ fn mc_block<S: Sample>(
 /// when every sample their taps read is inside the references: the
 /// common case, without the steps weights and edges need. Whether the
 /// luma and the chroma block were written; what was not is left alone.
+#[inline]
 fn mc_plain<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],
     slice: &Slice<'_>,
-    block: Block,
+    block: &Block,
     motion: McMotion,
 ) -> Result<(bool, bool), CodecError> {
-    let Block { x, y, w, h } = block;
+    let Block { x, y, w, h } = *block;
     let first = if motion.r0 >= 0 {
         Some((reference_frame(dpb, slice, 0, motion.r0)?, motion.mv0))
     } else {

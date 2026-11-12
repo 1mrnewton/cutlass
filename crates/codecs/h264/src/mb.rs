@@ -9656,9 +9656,59 @@ fn mvp_from<S: Sample>(
 
 /// Clause 8.4.1.3 once the motion left of the partition, above it, and
 /// above and right of it (or above and left when that is missing) are
-/// found: the predictor for reference index `reference`.
+/// found: the predictor for reference index `reference`. Which neighbours
+/// use that reference is as good as random to the CPU, so every answer the
+/// clause may give is worked out and one picked by selects, not branches.
 #[inline]
 fn mvp_pick(
+    size: (usize, usize),
+    cell: Cell,
+    reference: i8,
+    near: (Motion, Motion, Motion),
+) -> [i16; 2] {
+    let Cell { bx, by } = cell;
+    let (a, b, c) = near;
+    // A 16×8 or 8×16 partition first looks at one neighbour of its own.
+    let (shaped, own) = match size {
+        (16, 8) => (true, if by == 0 { b } else { a }),
+        (8, 16) => (true, if bx == 0 { a } else { c }),
+        _ => (false, a),
+    };
+    // With only the left neighbour there, it stands in for the other two.
+    let alone = !b.available & !c.available & a.available;
+    let (b, c) = if alone { (a, a) } else { (b, c) };
+    let (in_a, in_b, in_c) = (
+        a.reference == reference,
+        b.reference == reference,
+        c.reference == reference,
+    );
+    let median = [
+        median(a.mv[0], b.mv[0], c.mv[0]),
+        median(a.mv[1], b.mv[1], c.mv[1]),
+    ];
+    let single = if in_a {
+        a.mv
+    } else if in_b {
+        b.mv
+    } else {
+        c.mv
+    };
+    let general = if u8::from(in_a) + u8::from(in_b) + u8::from(in_c) == 1 {
+        single
+    } else {
+        median
+    };
+    if shaped & (own.reference == reference) {
+        own.mv
+    } else {
+        general
+    }
+}
+
+/// [`mvp_pick`] as clause 8.4.1.3 reads, one rule after another; the
+/// tests hold the two to the same answers.
+#[cfg(test)]
+fn mvp_pick_by_rules(
     size: (usize, usize),
     cell: Cell,
     reference: i8,
@@ -13183,6 +13233,48 @@ mod covers {
                     assert_eq!(cover(x, y, w, h), want, "{x} {y} {w} {h}");
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod motion_predictors {
+    use super::{Cell, Motion, mvp_pick, mvp_pick_by_rules};
+
+    #[test]
+    fn picked_predictors_match_the_rules() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |range: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % range
+        };
+        let shapes = [(16, 16), (16, 8), (8, 16), (8, 8), (8, 4), (4, 8), (4, 4)];
+        for _ in 0..2_000_000 {
+            let mut motion = || {
+                let available = next(4) != 0;
+                let reference = if available { next(4) as i8 - 1 } else { -1 };
+                Motion {
+                    available,
+                    mv: [next(9) as i16 - 4, next(9) as i16 - 4],
+                    reference,
+                }
+            };
+            let near = (motion(), motion(), motion());
+            let size = shapes[next(shapes.len() as u64) as usize];
+            let cell = Cell {
+                bx: next(2) as usize * 2,
+                by: next(2) as usize * 2,
+            };
+            let reference = next(3) as i8;
+            assert_eq!(
+                mvp_pick(size, cell, reference, near),
+                mvp_pick_by_rules(size, cell, reference, near),
+                "{size:?} {} {} {reference}",
+                cell.bx,
+                cell.by
+            );
         }
     }
 }

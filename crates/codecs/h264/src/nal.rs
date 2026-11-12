@@ -75,7 +75,7 @@ pub fn rbsp(ebsp: &[u8]) -> Result<Vec<u8>, CodecError> {
     let mut out = Vec::with_capacity(ebsp.len());
     let mut kept = 0usize;
     let mut from = 0usize;
-    while let Some(found) = find_three(&ebsp[from..]) {
+    while let Some(found) = find_byte(&ebsp[from..], 3) {
         let at = from + found;
         if at >= 2 && ebsp[at - 1] == 0 && ebsp[at - 2] == 0 {
             out.extend_from_slice(&ebsp[kept..at]);
@@ -87,25 +87,26 @@ pub fn rbsp(ebsp: &[u8]) -> Result<Vec<u8>, CodecError> {
     Ok(out)
 }
 
-/// Where the first 3 in `bytes` is. Eight bytes are looked at a time, and
-/// only a word that may hold one is looked at byte by byte: in a slice's
-/// data a 3 is rare.
-fn find_three(bytes: &[u8]) -> Option<usize> {
+/// Where the first `value` in `bytes` is. Eight bytes are looked at a
+/// time, and only a word that may hold it is looked at byte by byte: in a
+/// slice's data a 3, or a zero, is rare.
+fn find_byte(bytes: &[u8], value: u8) -> Option<usize> {
     const ONES: u64 = 0x0101_0101_0101_0101;
     const HIGHS: u64 = 0x8080_8080_8080_8080;
     let (words, rest) = bytes.as_chunks::<8>();
     for (index, word) in words.iter().enumerate() {
-        // A byte of the word that is 3 is a zero byte here, which sets its
-        // high bit below; other bytes may too, so they are looked at again.
-        let moved = u64::from_le_bytes(*word) ^ (3 * ONES);
+        // A byte of the word that is `value` is a zero byte here, which
+        // sets its high bit below; other bytes may too, so they are looked
+        // at again.
+        let moved = u64::from_le_bytes(*word) ^ (u64::from(value) * ONES);
         if moved.wrapping_sub(ONES) & !moved & HIGHS != 0
-            && let Some(found) = word.iter().position(|&byte| byte == 3)
+            && let Some(found) = word.iter().position(|&byte| byte == value)
         {
             return Some(index * 8 + found);
         }
     }
     rest.iter()
-        .position(|&byte| byte == 3)
+        .position(|&byte| byte == value)
         .map(|found| words.len() * 8 + found)
 }
 
@@ -246,17 +247,29 @@ fn starts_annex_b(data: &[u8]) -> bool {
     data.starts_with(&[0, 0, 1]) || data.starts_with(&[0, 0, 0, 1])
 }
 
-fn annex_b(data: &[u8]) -> Result<Vec<Nal>, CodecError> {
+/// Where each `00 00 01` in `data` begins, each found after the last one
+/// ends. A start code begins with a zero, so the search goes from one zero
+/// to the next.
+fn start_codes(data: &[u8]) -> Vec<usize> {
     let mut starts = Vec::new();
     let mut i = 0;
     while i + 2 < data.len() {
-        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+        let Some(found) = find_byte(&data[i..data.len() - 2], 0) else {
+            break;
+        };
+        i += found;
+        if data[i + 1] == 0 && data[i + 2] == 1 {
             starts.push(i);
             i += 3;
         } else {
             i += 1;
         }
     }
+    starts
+}
+
+fn annex_b(data: &[u8]) -> Result<Vec<Nal>, CodecError> {
+    let starts = start_codes(data);
     if starts.is_empty() {
         return Err(CodecError::Malformed {
             at_bit: 0,
@@ -420,6 +433,32 @@ fn emulation(rbsp: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn start_codes_are_found_as_byte_by_byte() {
+        let mut seed = 5u32;
+        for round in 0..5_000 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let len = (seed >> 8) as usize % 48;
+            let data: Vec<u8> = (0..len)
+                .map(|i| {
+                    let mix = seed.wrapping_mul(i as u32 + 3).rotate_left(i as u32 % 29);
+                    [0, 0, 1, 3, 0x65, 0x80][(mix >> 5) as usize % 6]
+                })
+                .collect();
+            let mut wanted = Vec::new();
+            let mut i = 0;
+            while i + 2 < data.len() {
+                if data[i..i + 3] == [0, 0, 1] {
+                    wanted.push(i);
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+            }
+            assert_eq!(super::start_codes(&data), wanted, "round {round}: {data:?}");
+        }
+    }
+
+    #[test]
     fn find_three_finds_the_first_three_anywhere() {
         let mut seed = 7u32;
         for round in 0..5_000 {
@@ -433,7 +472,7 @@ mod tests {
                 .collect();
             let wanted = bytes.iter().position(|&byte| byte == 3);
             assert_eq!(
-                super::find_three(&bytes),
+                super::find_byte(&bytes, 3),
                 wanted,
                 "round {round}: {bytes:?}"
             );

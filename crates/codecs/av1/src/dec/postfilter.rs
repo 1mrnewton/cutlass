@@ -1300,10 +1300,16 @@ fn cdef_rows<P: Pixel>(
                     let chroma_on = num_planes > 1 && (uv_pri != 0 || uv_sec != 0);
                     let need_dir = y_pri0 != 0 || (chroma_on && uv_pri != 0);
                     let c_end = (sbc + 16).min(fs.mi_cols);
+                    if !luma_on && !chroma_on {
+                        continue;
+                    }
+                    // The 8x8 blocks to filter and their luma direction and
+                    // variance, then each plane's blocks in a loop of their
+                    // own: one loop for all of it kept too much live and
+                    // spilled.
+                    let mut todo = [(0u16, 0u16, 0u8, 0i32); 64];
+                    let mut n = 0;
                     for r in (r0..r1).step_by(2) {
-                        if !luma_on && !chroma_on {
-                            break;
-                        }
                         for c in (sbc..c_end).step_by(2) {
                             let rr = (r + 1).min(fs.mi_rows - 1);
                             let cc = (c + 1).min(fs.mi_cols - 1);
@@ -1327,46 +1333,55 @@ fn cdef_rows<P: Pixel>(
                             } else {
                                 (0, 0)
                             };
-                            if luma_on {
-                                let pri = adjust_luma_pri_strength(y_pri0, var);
-                                let dir = if y_pri0 == 0 { 0 } else { ydir };
-                                if pri != 0 || y_sec != 0 {
-                                    cdef_plane_block(
-                                        dst,
-                                        out,
-                                        lines,
-                                        0,
-                                        &area,
-                                        (r, c),
-                                        (0, 0),
-                                        sc,
-                                        &mut padded[0],
-                                        fs,
-                                        (pri, y_sec, dir, y_damping),
-                                    );
-                                }
+                            if let Some(t) = todo.get_mut(n) {
+                                *t = (r as u16, c as u16, ydir, var);
+                                n += 1;
                             }
-                            if chroma_on {
+                        }
+                    }
+                    let todo = &todo[..n];
+                    if luma_on {
+                        for &(r, c, ydir, var) in todo {
+                            let pri = adjust_luma_pri_strength(y_pri0, var);
+                            let dir = if y_pri0 == 0 { 0 } else { ydir };
+                            if pri != 0 || y_sec != 0 {
+                                cdef_plane_block(
+                                    dst,
+                                    out,
+                                    lines,
+                                    0,
+                                    &area,
+                                    (usize::from(r), usize::from(c)),
+                                    (0, 0),
+                                    sc,
+                                    &mut padded[0],
+                                    fs,
+                                    (pri, y_sec, dir, y_damping),
+                                );
+                            }
+                        }
+                    }
+                    if chroma_on {
+                        for plane in 1..3 {
+                            for &(r, c, ydir, _) in todo {
                                 let dir = if uv_pri == 0 {
                                     0
                                 } else {
                                     cdef_uv_dir(ssx, ssy, ydir)
                                 };
-                                for plane in 1..3 {
-                                    cdef_plane_block(
-                                        dst,
-                                        out,
-                                        lines,
-                                        plane,
-                                        &area,
-                                        (r, c),
-                                        (u32::from(ssx), u32::from(ssy)),
-                                        sc,
-                                        &mut padded[plane],
-                                        fs,
-                                        (uv_pri, uv_sec, dir, uv_damping),
-                                    );
-                                }
+                                cdef_plane_block(
+                                    dst,
+                                    out,
+                                    lines,
+                                    plane,
+                                    &area,
+                                    (usize::from(r), usize::from(c)),
+                                    (u32::from(ssx), u32::from(ssy)),
+                                    sc,
+                                    &mut padded[plane],
+                                    fs,
+                                    (uv_pri, uv_sec, dir, uv_damping),
+                                );
                             }
                         }
                     }

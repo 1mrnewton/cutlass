@@ -19,7 +19,11 @@
 //! a file this crate reads back to the same packets per track.
 //!
 //! `fuzz_seeds_*` run on every `cargo test`. The long campaigns are
-//! `#[ignore]`; `MKV_FUZZ_SECS` sets their length (default 60 s).
+//! `#[ignore]`; `MKV_FUZZ_SECS` sets their length (default 60 s) and
+//! `MKV_FUZZ_ORIGIN` their first seed (default 1,000 for the demuxer and
+//! 100,000 for the muxer), so a new campaign covers new mutants. The demux
+//! campaign names its slowest input, and `MKV_FUZZ_REPLAY=seed:mutant`
+//! with the ignored `fuzz_replay` times that one input again.
 
 use std::io::Cursor;
 use std::sync::OnceLock;
@@ -251,6 +255,8 @@ struct Reach {
     packets: u64,
     seeks: u64,
     slowest: Duration,
+    /// The seed and mutant of the slowest input.
+    slowest_at: (u64, usize),
 }
 
 /// Probes, opens both ways, reads and seeks one input.
@@ -308,6 +314,18 @@ fn exercise(data: &[u8], reach: &mut Reach) {
     reach.slowest = reach.slowest.max(took);
 }
 
+/// The `index`th mutant of campaign `seed`.
+fn mutant(seed: u64, index: usize) -> Vec<u8> {
+    let mut rng = Rng::new(seed);
+    let seeds = seeds();
+    let mut data = Vec::new();
+    for _ in 0..=index {
+        let base = &seeds[rng.below(seeds.len())];
+        data = mutate(&mut rng, base);
+    }
+    data
+}
+
 fn demux_campaign(seed: u64, mutants: usize, reach: &mut Reach) {
     let mut rng = Rng::new(seed);
     let seeds = seeds();
@@ -315,8 +333,12 @@ fn demux_campaign(seed: u64, mutants: usize, reach: &mut Reach) {
         let base = &seeds[rng.below(seeds.len())];
         let data = mutate(&mut rng, base);
         let before = Instant::now();
+        let slowest = reach.slowest;
         exercise(&data, reach);
         let took = before.elapsed();
+        if reach.slowest > slowest {
+            reach.slowest_at = (seed, index);
+        }
         assert!(
             took < Duration::from_secs(5),
             "seed {seed} mutant {index} took {took:?}"
@@ -530,6 +552,13 @@ fn fuzz_seeds_mux() {
     assert!(finished > 200, "{finished} of 400 finished");
 }
 
+fn campaign_origin(default: u64) -> u64 {
+    std::env::var("MKV_FUZZ_ORIGIN")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
 fn campaign_length() -> Duration {
     let secs = std::env::var("MKV_FUZZ_SECS")
         .ok()
@@ -543,22 +572,54 @@ fn campaign_length() -> Duration {
 fn fuzz_campaign_demux() {
     let length = campaign_length();
     let started = Instant::now();
-    let mut seed = 1_000;
+    let origin = campaign_origin(1_000);
+    let mut seed = origin;
     let mut reach = Reach::default();
     while started.elapsed() < length {
         demux_campaign(seed, 100, &mut reach);
         seed += 1;
     }
     eprintln!(
-        "demux campaign: {} mutants over {} seeds in {:.1} s; {} opened, {} packets read, {} seeks landed; slowest input {:.1} ms",
+        "demux campaign: {} mutants over seeds {origin}..{seed} in {:.1} s; {} opened, {} packets read, {} seeks landed; slowest input {:.1} ms (seed {} mutant {})",
         reach.mutants,
-        seed - 1_000,
         started.elapsed().as_secs_f64(),
         reach.opened,
         reach.packets,
         reach.seeks,
-        reach.slowest.as_secs_f64() * 1000.0
+        reach.slowest.as_secs_f64() * 1000.0,
+        reach.slowest_at.0,
+        reach.slowest_at.1,
     );
+}
+
+/// Times one demux mutant ten times: `MKV_FUZZ_REPLAY=seed:mutant`.
+#[test]
+#[ignore = "replays one input named by MKV_FUZZ_REPLAY"]
+fn fuzz_replay() {
+    let Some((seed, index)) = std::env::var("MKV_FUZZ_REPLAY").ok().and_then(|value| {
+        let (seed, index) = value.split_once(':')?;
+        Some((seed.parse().ok()?, index.parse().ok()?))
+    }) else {
+        return;
+    };
+    let data = mutant(seed, index);
+    let mut times = Vec::new();
+    for _ in 0..10 {
+        let mut reach = Reach::default();
+        let before = Instant::now();
+        exercise(&data, &mut reach);
+        times.push(before.elapsed().as_secs_f64() * 1000.0);
+    }
+    times.sort_by(f64::total_cmp);
+    eprintln!(
+        "seed {seed} mutant {index}: {} bytes, {:.2} ms median, {:.2} ms fastest",
+        data.len(),
+        times[5],
+        times[0]
+    );
+    if let Ok(path) = std::env::var("MKV_FUZZ_SAVE") {
+        std::fs::write(path, &data).expect("save");
+    }
 }
 
 #[test]
@@ -566,15 +627,16 @@ fn fuzz_campaign_demux() {
 fn fuzz_campaign_mux() {
     let length = campaign_length();
     let started = Instant::now();
-    let mut seed = 100_000;
+    let origin = campaign_origin(100_000);
+    let mut seed = origin;
     let mut finished = 0;
     while started.elapsed() < length {
         finished += u64::from(mux_campaign(seed));
         seed += 1;
     }
     eprintln!(
-        "mux campaign: {} sequences in {:.1} s, {finished} finished and read back",
-        seed - 100_000,
+        "mux campaign: {} sequences (seeds {origin}..{seed}) in {:.1} s, {finished} finished and read back",
+        seed - origin,
         started.elapsed().as_secs_f64()
     );
 }

@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod block;
 pub mod codec;
 pub mod ebml;
 mod error;

@@ -53,6 +53,10 @@ pub const MAX_PROBE_WINDOW_BYTES: u64 = 4 * 1024 * 1024;
 /// the keyframe before the target.
 pub const MAX_SEEK_WIDENINGS: u32 = 24;
 
+/// Bytes of transport headers one seek reads back from the target looking
+/// for a random access point before it frames the stream instead.
+pub const MAX_RANDOM_ACCESS_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Packets of other tracks held after a seek until the landing packet is
 /// returned.
 pub const MAX_HELD_PACKETS: usize = 4096;

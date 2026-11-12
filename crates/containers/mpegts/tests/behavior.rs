@@ -267,18 +267,17 @@ fn a_forward_input_reads_the_same_and_cannot_seek() {
     assert_eq!(error, ReadError::Seek(SeekError::ForwardOnly));
 }
 
-#[test]
-fn seeks_land_on_the_last_keyframe_not_after_the_target() {
-    let units = content(10, 0);
-    let bytes = mux(&units, MuxOptions::default());
-    let expected = shifted(&units);
+/// Seeks the video of `bytes` to nine targets: each lands on the last
+/// keyframe not after the target, counts the preroll, and the video then
+/// follows in order.
+fn check_video_seeks(bytes: &[u8], expected: &[Unit]) -> TsDemux<Cursor<Vec<u8>>> {
     let keys: Vec<i64> = expected
         .iter()
         .filter(|unit| unit.track == 0 && unit.key)
         .map(|unit| unit.pts)
         .collect();
     let first_key = keys[0];
-    let mut demux = open(&bytes);
+    let mut demux = open(bytes);
     let end = demux.end().unwrap();
     for target in [
         0,
@@ -344,6 +343,47 @@ fn seeks_land_on_the_last_keyframe_not_after_the_target() {
             .collect();
         assert_eq!(rest, want_rest, "target {target}");
     }
+    demux
+}
+
+/// Sets or clears the random access indicator of PID 0x100's packets that
+/// start a PES packet and have an adaptation field to hold it.
+fn mark_random_access(bytes: &mut [u8], set: bool) -> usize {
+    let mut changed = 0;
+    for packet in bytes.as_chunks_mut::<188>().0 {
+        let pid = u16::from_be_bytes([packet[1] & 0x1F, packet[2]]);
+        let start = packet[1] & 0x40 != 0;
+        let adaptation = packet[3] & 0x20 != 0 && packet[4] > 0;
+        if pid == 0x100 && start && adaptation {
+            let before = packet[5];
+            packet[5] = if set { before | 0x40 } else { before & !0x40 };
+            changed += usize::from(before != packet[5]);
+        }
+    }
+    changed
+}
+
+/// The indicator only speeds a seek up: without it, and with it on
+/// pictures that are not keyframes, seeks land where they did.
+#[test]
+fn seeks_do_not_depend_on_the_random_access_indicator() {
+    let units = content(10, 0);
+    let expected = shifted(&units);
+    let mut cleared = mux(&units, MuxOptions::default());
+    assert!(mark_random_access(&mut cleared, false) > 0);
+    check_video_seeks(&cleared, &expected);
+    let mut false_marks = mux(&units, MuxOptions::default());
+    assert!(mark_random_access(&mut false_marks, true) > 0);
+    check_video_seeks(&false_marks, &expected);
+}
+
+#[test]
+fn seeks_land_on_the_last_keyframe_not_after_the_target() {
+    let units = content(10, 0);
+    let bytes = mux(&units, MuxOptions::default());
+    let expected = shifted(&units);
+    let mut demux = check_video_seeks(&bytes, &expected);
+    let end = demux.end().unwrap();
     let past = demux
         .seek(SeekTo {
             track: 0x100,

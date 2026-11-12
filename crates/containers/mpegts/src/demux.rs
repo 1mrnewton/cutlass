@@ -19,11 +19,17 @@
 //! **Seek.** There is no index. The seek bisects the file on the
 //! timestamps of the asked-for stream's PES headers, at most
 //! [`MAX_SEEK_PROBES`] probes of up to [`MAX_PROBE_WINDOW_BYTES`] each, to a
-//! byte position whose first timestamp is not past the target. From there
-//! it frames the stream forward to the target, and lands on the last
-//! keyframe whose presentation time is not past it. When none comes between
-//! that position and the target, it starts further back, doubling the
-//! distance, at most [`MAX_SEEK_WIDENINGS`] times. Reading resumes at the
+//! byte position whose first timestamp is not past the target. Then it
+//! reads transport headers only, back from there in doubling windows (at
+//! most [`MAX_RANDOM_ACCESS_SCAN_BYTES`]), for the last PES packet of the
+//! stream that a muxer marked with the random access indicator and that is
+//! shown by the target. It frames the stream forward from that mark to the
+//! target, and lands on the last keyframe whose presentation time is not
+//! past it. When no mark is found, or the frames after it hold no keyframe
+//! (the indicator is only a hint), it frames from the bisection's position
+//! instead, starting further back while no keyframe comes before the
+//! target, doubling the distance, at most [`MAX_SEEK_WIDENINGS`] times.
+//! Reading resumes at the
 //! transport packet that started the landing's PES packet; packets of other
 //! streams framed before the landing are held and returned right after it.
 //! A failed seek leaves the read position where it was.
@@ -42,7 +48,7 @@ use cutlass_container::{
 use crate::es::{Unit, unknown};
 use crate::limits::{
     MAX_BUFFERED_BYTES, MAX_HELD_PACKETS, MAX_OPEN_SCAN_BYTES, MAX_PROBE_WINDOW_BYTES,
-    MAX_SEEK_PROBES, MAX_SEEK_WIDENINGS, MAX_TAIL_SCAN_BYTES,
+    MAX_RANDOM_ACCESS_SCAN_BYTES, MAX_SEEK_PROBES, MAX_SEEK_WIDENINGS, MAX_TAIL_SCAN_BYTES,
 };
 use crate::packet::{self, PAT_PID, PacketSize};
 use crate::pes::pes_times;
@@ -88,6 +94,9 @@ pub struct SeekCost {
     pub runs: u32,
     /// Access units of the sought stream framed by those runs.
     pub units: u64,
+    /// Transport packets whose header alone was read looking for a random
+    /// access point.
+    pub headers: u64,
 }
 
 /// What a packet read skips after a seek: the sought stream's units before
@@ -338,14 +347,138 @@ impl<R: Read + Seek> TsDemux<R> {
         }
     }
 
+    /// Reads transport headers only, back from `best` in doubling windows,
+    /// for the last packet of `pid` that starts a PES packet, carries the
+    /// random access indicator, and is shown by `target`. Each window ends
+    /// where the one before began; the first ends at the first PES header
+    /// decoded after the target.
+    fn random_access_before(
+        &mut self,
+        pid: u16,
+        target: i64,
+        best: u64,
+        cost: &mut SeekCost,
+    ) -> Result<Option<u64>, ReadError> {
+        let stride = self.source.size().stride() as u64;
+        let align = |at: u64, start: u64| start + at.saturating_sub(start) / stride * stride;
+        let line = (
+            (self.data_start, self.start),
+            (self.length.unwrap_or(0), self.end.unwrap_or(self.start)),
+        );
+        let (mut lo, mut hi) = (align(best, self.data_start), u64::MAX);
+        let mut step = WIDEN_BYTES;
+        let mut scanned = 0_u64;
+        loop {
+            self.source.seek(lo).map_err(ReadError::from_packet)?;
+            let mut found = None;
+            loop {
+                if self.cancelled {
+                    return Err(ReadError::Cancelled);
+                }
+                let Next::Packet(position, index) =
+                    self.source.next().map_err(ReadError::from_packet)?
+                else {
+                    break;
+                };
+                if position >= hi {
+                    break;
+                }
+                cost.headers += 1;
+                scanned = scanned.saturating_add(stride);
+                let bytes = self.source.packet(index);
+                let header = packet::header(bytes);
+                if header.pid != pid || !header.start || header.error {
+                    continue;
+                }
+                let Ok(parsed) = packet::parse(bytes) else {
+                    continue;
+                };
+                let (pts, dts) = pes_times(&bytes[parsed.payload_at.min(bytes.len())..]);
+                let reference = interpolate(line.0, line.1, position);
+                let Some(decode) = dts.or(pts).map(|raw| unwrap(raw, reference)) else {
+                    continue;
+                };
+                if decode > target {
+                    break;
+                }
+                let shown = pts.map_or(decode, |raw| unwrap(raw, decode));
+                if parsed.adaptation.random_access && shown <= target {
+                    found = Some(position);
+                }
+            }
+            if found.is_some() {
+                return Ok(found);
+            }
+            if lo <= self.data_start || scanned >= MAX_RANDOM_ACCESS_SCAN_BYTES {
+                return Ok(None);
+            }
+            hi = lo;
+            lo = align(
+                lo.saturating_sub(step).max(self.data_start),
+                self.data_start,
+            );
+            step = step.saturating_mul(2);
+        }
+    }
+
+    /// The PES packets of `pid` after the one at `landing` shown before
+    /// `target`, up to the first decoded after it, read from headers alone.
+    /// A PES packet holding several access units counts once.
+    fn shown_before(
+        &mut self,
+        pid: u16,
+        landing: u64,
+        target: i64,
+        cost: &mut SeekCost,
+    ) -> Result<u32, ReadError> {
+        let line = (
+            (self.data_start, self.start),
+            (self.length.unwrap_or(0), self.end.unwrap_or(self.start)),
+        );
+        self.source.seek(landing).map_err(ReadError::from_packet)?;
+        let mut count = 0_u32;
+        loop {
+            if self.cancelled {
+                return Err(ReadError::Cancelled);
+            }
+            let Next::Packet(position, index) =
+                self.source.next().map_err(ReadError::from_packet)?
+            else {
+                return Ok(count);
+            };
+            cost.headers += 1;
+            let bytes = self.source.packet(index);
+            let header = packet::header(bytes);
+            if position == landing || header.pid != pid || !header.start || header.error {
+                continue;
+            }
+            let Ok(parsed) = packet::parse(bytes) else {
+                continue;
+            };
+            let (pts, dts) = pes_times(&bytes[parsed.payload_at.min(bytes.len())..]);
+            let reference = interpolate(line.0, line.1, position);
+            let Some(decode) = dts.or(pts).map(|raw| unwrap(raw, reference)) else {
+                continue;
+            };
+            if decode > target {
+                return Ok(count);
+            }
+            if pts.map_or(decode, |raw| unwrap(raw, decode)) < target {
+                count = count.saturating_add(1);
+            }
+        }
+    }
+
     /// Frames the stream of `track` from `from` up to `target`. Returns the
     /// last keyframe not shown after the target, and the first keyframe.
+    /// With `first_only` the run stops at the stream's first unit.
     fn run(
         &mut self,
         from: u64,
         track: usize,
         target: i64,
         reference: i64,
+        first_only: bool,
         cost: &mut SeekCost,
     ) -> Result<(Option<Candidate>, Option<Candidate>), ReadError> {
         self.source.seek(from).map_err(ReadError::from_packet)?;
@@ -411,12 +544,13 @@ impl<R: Read + Seek> TsDemux<R> {
                 {
                     landing.preroll = landing.preroll.saturating_add(1);
                 }
+                stop |= first_only;
             }
             ended |= stop;
         }
         // Keep looking for the first keyframe when the run began at the
         // start and none came before the target.
-        if first.is_none() && from == self.data_start {
+        if first.is_none() && from == self.data_start && !first_only {
             first = self.first_keyframe(&mut pipeline, track, cost)?;
         }
         Ok((landing, first))
@@ -489,17 +623,36 @@ impl<R: Read + Seek> TsDemux<R> {
             });
         }
         let best = self.bisect(pid, to.time, cost)?;
+        let mut chosen = None;
+        if let Some(mark) = self.random_access_before(pid, to.time, best, cost)? {
+            cost.runs += 1;
+            let reference = interpolate(
+                (self.data_start, self.start),
+                (self.length.unwrap_or(0), self.end.unwrap_or(self.start)),
+                mark,
+            );
+            // The marked unit alone is framed: the units after it, up to
+            // the target, are counted from their PES headers.
+            let (landing, _) = self.run(mark, track, to.time, reference, true, cost)?;
+            if let Some(mut landing) = landing {
+                let after = self.shown_before(pid, landing.position, to.time, cost)?;
+                landing.preroll = landing.preroll.saturating_add(after);
+                chosen = Some((landing, mark));
+            }
+        }
         let mut from = best;
         let mut step = WIDEN_BYTES;
-        let mut chosen = None;
         for _ in 0..=MAX_SEEK_WIDENINGS {
+            if chosen.is_some() {
+                break;
+            }
             cost.runs += 1;
             let reference = interpolate(
                 (self.data_start, self.start),
                 (self.length.unwrap_or(0), self.end.unwrap_or(self.start)),
                 from,
             );
-            let (landing, first) = self.run(from, track, to.time, reference, cost)?;
+            let (landing, first) = self.run(from, track, to.time, reference, false, cost)?;
             if let Some(landing) = landing {
                 chosen = Some((landing, from));
                 break;

@@ -12685,24 +12685,17 @@ fn edge_qp<S: Sample>(
 /// Clause 8.7.2.1. Compares the pictures actually referenced, on either list.
 #[inline(always)]
 fn motion_strength(p: [(i8, [i16; 2]); 2], q: [(i8, [i16; 2]); 2]) -> u8 {
-    // Most blocks share their neighbour's motion: two compares of packed
-    // words settle those.
-    if motion_key(p) == motion_key(q) {
-        return 0;
-    }
-    motion_strength_by(p, q, mv_apart)
-}
-
-/// Both lists' pictures and vectors of a block, packed for comparing.
-#[inline(always)]
-fn motion_key(p: [(i8, [i16; 2]); 2]) -> (u16, u64) {
-    let [(r0, [x0, y0]), (r1, [x1, y1])] = p;
-    let refs = u16::from_le_bytes([r0 as u8, r1 as u8]);
-    let mvs = u64::from(x0 as u16)
-        | u64::from(y0 as u16) << 16
-        | u64::from(x1 as u16) << 32
-        | u64::from(y1 as u16) << 48;
-    (refs, mvs)
+    // Whether two blocks share their motion varies from one block to the
+    // next, so a branch on it is often guessed wrong: both pairings of the
+    // lists are worked out in full instead. A list a block does not use
+    // counts as a zero vector, so it matches only another unused list.
+    let [(p0, a0), (p1, a1)] = p;
+    let [(q0, b0), (q1, b1)] = q;
+    let used = |slot: i8, mv: [i16; 2]| if slot >= 0 { mv } else { [0, 0] };
+    let (a0, a1, b0, b1) = (used(p0, a0), used(p1, a1), used(q0, b0), used(q1, b1));
+    let straight = (p0 != q0) | (p1 != q1) | mv_apart(a0, b0) | mv_apart(a1, b1);
+    let crossed = (p0 != q1) | (p1 != q0) | mv_apart(a0, b1) | mv_apart(a1, b0);
+    u8::from(straight & crossed)
 }
 
 /// [`motion_strength`] with the test for two vectors being far enough apart
@@ -13163,6 +13156,38 @@ fn coded_mb<S: Sample>(pic: &Frame<S>, mx: i32, my: i32) -> Option<&Mb> {
     }
     let mb = pic.mb.get(my as usize * pic.mb_w + mx as usize)?;
     if mb.slice == u16::MAX { None } else { Some(mb) }
+}
+
+#[cfg(test)]
+mod motion_strengths {
+    use super::{motion_strength, motion_strength_by, mv_apart};
+
+    #[test]
+    fn branch_free_strength_matches_the_rules() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = |range: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % range
+        };
+        for _ in 0..2_000_000 {
+            let mut side = || {
+                let mut list = || {
+                    let slot = next(4) as i8 - 1;
+                    let mv = [next(9) as i16 - 4, next(9) as i16 - 4];
+                    (slot, mv)
+                };
+                [list(), list()]
+            };
+            let (p, q) = (side(), side());
+            assert_eq!(
+                motion_strength(p, q),
+                motion_strength_by(p, q, mv_apart),
+                "{p:?} {q:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

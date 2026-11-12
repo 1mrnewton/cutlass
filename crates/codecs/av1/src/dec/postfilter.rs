@@ -663,17 +663,54 @@ fn lf_own_rows(u0: usize, u1: usize, first: bool, last: bool) -> core::ops::Rang
     lo..hi.max(lo)
 }
 
+/// Unit rows of the strips of [`lf_chunk`] when it copies its rows in
+/// as it goes: a strip's samples are still in the cache when its vertical
+/// edges are filtered.
+const LF_FILL_STRIP_UNITS: usize = 4;
+
 /// Filters `job`'s rows; `data` starts at plane sample row `row0`.
-fn lf_chunk<P: Pixel>(job: &LfJob<'_, '_>, data: &mut [P], row0: usize, sharp: u8, bd: u32) {
+///
+/// With `fill`, the plane's sample rows from `fill.1` on (relative to
+/// `row0`, `job.stride` wide) are copied in from `fill.0` first, a strip
+/// at a time just before the strip's vertical edges.
+fn lf_chunk<P: Pixel>(
+    job: &LfJob<'_, '_>,
+    data: &mut [P],
+    row0: usize,
+    sharp: u8,
+    bd: u32,
+    fill: Option<(&[P], usize)>,
+) {
     let (u0, u1, stride) = (job.u0, job.u1, job.stride);
     let nc = job.vert.nc;
     let key = (nc, job.vert.nc_vis);
     let (mut row, mut cols) = lf_scratch(key);
+    // Sample rows copied in so far.
+    let mut filled = fill.map_or(0, |(_, y)| y);
+    let mut fill_to = |y: usize, data: &mut [P]| {
+        if let Some((src, y0)) = fill
+            && y > filled
+        {
+            let a = ((filled - y0) * stride).min(src.len());
+            let b = ((y - y0) * stride).min(src.len());
+            let at = filled * stride;
+            if a < b && at + (b - a) <= data.len() {
+                data[at..at + (b - a)].copy_from_slice(&src[a..b]);
+            }
+            filled = y;
+        }
+    };
+    let step = if fill.is_some() {
+        LF_FILL_STRIP_UNITS
+    } else {
+        LF_STRIP_UNITS
+    };
     // Vertical edges: the edges of a strip of unit rows, gathered into
     // runs down each column. A column's run is filtered when an edge
     // does not continue it, and at the end of the strip.
-    for strip in (u0..u1).step_by(LF_STRIP_UNITS) {
-        let rows = (u1 - strip).min(LF_STRIP_UNITS);
+    for strip in (u0..u1).step_by(step) {
+        let rows = (u1 - strip).min(step);
+        fill_to((strip + rows) * 4 - row0, data);
         let down = |uc: usize, start: usize, len: usize, code: u16, data: &mut [P]| {
             filter_vertical_edge(
                 data,
@@ -695,6 +732,9 @@ fn lf_chunk<P: Pixel>(job: &LfJob<'_, '_>, data: &mut [P], row0: usize, sharp: u
                 down(uc, start, len, code, data)
             });
         }
+    }
+    if let Some((src, y0)) = fill {
+        fill_to(y0 + src.len().div_ceil(stride.max(1)), data);
     }
     // Horizontal edges whose samples stay inside the chunk.
     for ur in lf_own_rows(u0, u1, job.first, job.last) {
@@ -855,7 +895,7 @@ pub fn loop_filter_scratch<P: Pixel>(
                     first: g == 0,
                     last: g + 1 == t,
                 };
-                lf_chunk(&job, data, job.u0 * 4, sharp, bd);
+                lf_chunk(&job, data, job.u0 * 4, sharp, bd, None);
             }
         };
         std::thread::scope(|s| {
@@ -913,7 +953,7 @@ pub fn loop_filter_rows<P: Pixel>(
     info.size_for(fs);
     let end = if last { fs.mi_rows } else { mi_r1 };
     info.fill_rows(hdr, &LfLevels::new(hdr), fs, mi_r0.saturating_sub(2)..end);
-    loop_filter_rows_with(seq, hdr, fs, &info, pic, mi_r0, mi_r1, last);
+    loop_filter_rows_with(seq, hdr, fs, &info, pic, mi_r0, mi_r1, last, None);
 }
 
 /// [`loop_filter_rows`] with the block info of the rows (and of the two
@@ -928,14 +968,25 @@ pub fn loop_filter_rows_with<P: Pixel>(
     mi_r0: usize,
     mi_r1: usize,
     last: bool,
+    src: Option<&Picture<P>>,
 ) {
+    // The planes the filters leave as they are take their rows at once.
+    let copy = |pic: &mut Picture<P>, p: usize| {
+        if let Some(s) = src {
+            copy_plane_rows(pic, p, mi_r0, s);
+        }
+    };
     if hdr.loop_filter.level[0] == 0 && hdr.loop_filter.level[1] == 0 {
+        for p in 0..pic.planes.len() {
+            copy(pic, p);
+        }
         return;
     }
     let bd = pic.bd;
     let sharp = hdr.loop_filter.sharpness;
     for plane in 0..seq.num_planes() {
         if plane > 0 && hdr.loop_filter.level[1 + plane] == 0 {
+            copy(pic, plane);
             continue;
         }
         let (sx, sy) = if plane > 0 {
@@ -951,7 +1002,9 @@ pub fn loop_filter_rows_with<P: Pixel>(
         let nr = fs.mi_rows.div_ceil(1 << sy);
         let u0 = mi_r0 >> sy;
         let u1 = if last { nr } else { (mi_r1 >> sy).min(nr) };
-        if u0 >= u1 {
+        let fill = src.and_then(|s| s.planes.get(plane));
+        if u0 >= u1 || fill.is_some_and(|f| f.stride != pic.planes[plane].stride) {
+            copy(pic, plane);
             continue;
         }
         let pl = &mut pic.planes[plane];
@@ -964,7 +1017,32 @@ pub fn loop_filter_rows_with<P: Pixel>(
             first: true,
             last: true,
         };
-        lf_chunk(&job, &mut pl.data, 0, sharp, bd);
+        let y0 = (4 * mi_r0) >> sy;
+        lf_chunk(
+            &job,
+            &mut pl.data,
+            0,
+            sharp,
+            bd,
+            fill.map(|f| (&f.data[..], y0)),
+        );
+    }
+    for p in seq.num_planes()..pic.planes.len() {
+        copy(pic, p);
+    }
+}
+
+/// Copies plane `p` of `src`, the rows of a superblock row from luma 4x4
+/// row `r0` on, into `pic` (when their strides agree).
+pub fn copy_plane_rows<P: Pixel>(pic: &mut Picture<P>, p: usize, r0: usize, src: &Picture<P>) {
+    let sub_y = pic.sub_y;
+    let (Some(d), Some(s)) = (pic.planes.get_mut(p), src.planes.get(p)) else {
+        return;
+    };
+    let at = ((4 * r0) >> usize::from(p > 0 && sub_y)) * d.stride;
+    let n = s.data.len().min(d.data.len().saturating_sub(at));
+    if d.stride == s.stride {
+        d.data[at..at + n].copy_from_slice(&s.data[..n]);
     }
 }
 

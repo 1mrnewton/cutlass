@@ -2999,8 +2999,9 @@ impl<P: PicturePixel> InPlace<'_, P> {
             m.apply_meta(&mut self.fs);
             if m.row_end {
                 let tf = std::time::Instant::now();
-                self.filt
-                    .deblock(seq, hdr, &self.fs, &self.info, cur, m.r0, m.r1, m.last);
+                self.filt.deblock(
+                    seq, hdr, &self.fs, &self.info, cur, m.r0, m.r1, m.last, None,
+                );
                 prof::add(prof::FILTER, tf);
             }
             self.back.1.push(m);
@@ -3284,9 +3285,10 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
         info: &postfilter::FilterInfo,
         cur: &mut Picture<P>,
         m: &RowMsg,
+        src: Option<&Picture<P>>,
     ) {
         m.apply_meta(fs);
-        self.deblock(seq, hdr, fs, info, cur, m.r0, m.r1, m.last);
+        self.deblock(seq, hdr, fs, info, cur, m.r0, m.r1, m.last, src);
     }
 
     fn deblock(
@@ -3299,9 +3301,14 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
         a: usize,
         b: usize,
         last: bool,
+        src: Option<&Picture<P>>,
     ) {
+        // `src`, the samples of the superblock row from `a` on, are copied
+        // in first (by deblocking, as it goes).
         if self.lf_on {
-            postfilter::loop_filter_rows_with(seq, hdr, fs, info, cur, a, b, last);
+            postfilter::loop_filter_rows_with(seq, hdr, fs, info, cur, a, b, last, src);
+        } else if let Some(src) = src {
+            copy_row_in(cur, a, src);
         }
         // Deblocking the next row changes up to 6 luma rows above it (2
         // chroma rows), and CDEF reads 2 rows past what it filters: the
@@ -3772,9 +3779,9 @@ impl<P: PicturePixel> FilterStage<P> {
                     None => m.apply_meta(&mut fs),
                     Some(Samples::Row(pic)) => {
                         let tf = std::time::Instant::now();
-                        copy_row_in(&mut cur, m.r0, &pic);
+                        // Deblocking copies the rows in as it goes.
+                        filt.row(&seq, &hdr, &mut fs, &info, &mut cur, &m, Some(&pic));
                         give_sb_row(&mut lock(&spares), pic);
-                        filt.row(&seq, &hdr, &mut fs, &info, &mut cur, &m);
                         prof::add(prof::FILTER, tf);
                     }
                     Some(Samples::Rows(bufs)) => {
@@ -3786,7 +3793,7 @@ impl<P: PicturePixel> FilterStage<P> {
                                 sp.bands.push(bufs);
                             }
                         }
-                        filt.row(&seq, &hdr, &mut fs, &info, &mut cur, &m);
+                        filt.row(&seq, &hdr, &mut fs, &info, &mut cur, &m, None);
                         prof::add(prof::FILTER, tf);
                     }
                 }
@@ -4108,7 +4115,7 @@ fn decode_frame_sync<P: PicturePixel>(
                 }
                 // Intra prediction in the row below reads this row's last
                 // lines as they were before the filters, from a copy.
-                filt.deblock(seq, hdr, fs, &info, cur, a, b, last);
+                filt.deblock(seq, hdr, fs, &info, cur, a, b, last, None);
             },
         );
         cdef_sc = filt.cdef;

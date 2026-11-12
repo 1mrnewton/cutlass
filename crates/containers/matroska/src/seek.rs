@@ -17,7 +17,7 @@ use std::io::{Read, Seek};
 use cutlass_container::{Landing, SeekError, SeekLanding, SeekTo};
 
 use crate::block::{self, KEYFRAME};
-use crate::demux::{Cluster, CueState, Cursor, MatroskaDemux};
+use crate::demux::{Cluster, CueState, Cursor, MatroskaDemux, Starts};
 use crate::ebml::{self, EbmlError, Size};
 use crate::error::{Error, Result};
 use crate::ids;
@@ -96,7 +96,29 @@ impl<R: Read + Seek> MatroskaDemux<R> {
     }
 
     fn seek_walk(&mut self, number: u64, target: i64) -> Result<SeekLanding> {
-        let (starts, index_used) = self.starts(number)?;
+        let starts = match self.starts.take() {
+            Some(starts) if starts.track == number => starts,
+            _ => {
+                let (points, from_cues) = self.starts(number)?;
+                Starts {
+                    track: number,
+                    points,
+                    from_cues,
+                }
+            }
+        };
+        let landing = self.walk_starts(&starts.points, starts.from_cues, number, target);
+        self.starts = Some(starts);
+        landing
+    }
+
+    fn walk_starts(
+        &mut self,
+        starts: &[(i64, u64)],
+        index_used: bool,
+        number: u64,
+        target: i64,
+    ) -> Result<SeekLanding> {
         if starts.is_empty() {
             return Err(Error::Seek(SeekError::Empty));
         }

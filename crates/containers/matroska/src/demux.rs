@@ -139,6 +139,14 @@ pub(crate) struct Cursor {
 
 /// Where the Cues are, or what came of loading them.
 #[derive(Clone, Debug)]
+/// Where a track's seek walks may start: (time in packet ticks, Cluster
+/// offset), sorted by time, and whether they came from Cues.
+pub(crate) struct Starts {
+    pub(crate) track: u64,
+    pub(crate) points: Vec<(i64, u64)>,
+    pub(crate) from_cues: bool,
+}
+
 pub(crate) enum CueState {
     /// Not read yet. The SeekHead entries say where to look.
     Unread,
@@ -166,6 +174,9 @@ pub struct MatroskaDemux<R> {
     /// Cluster starts and timestamps, walked on the first seek of a file
     /// without Cues.
     pub(crate) clusters: Option<Vec<(i64, u64)>>,
+    /// The last seek's track and where its walks may start, kept so that
+    /// the next seek on that track does not sort them again.
+    pub(crate) starts: Option<Starts>,
     pub(crate) cursor: Cursor,
     pub(crate) limits: Limits,
     cancelled: bool,
@@ -259,6 +270,7 @@ impl<R: Read + Seek> MatroskaDemux<R> {
             seek_head: walk.seek_head,
             cues,
             clusters: None,
+            starts: None,
             cursor,
             limits,
             cancelled: false,

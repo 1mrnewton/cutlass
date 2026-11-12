@@ -10131,12 +10131,21 @@ fn read_sub<S: Sample>(
             }
         }
     }
+    // Every direct quarter takes its motion from the same neighbours and
+    // co-located macroblock, so they are worked out once for all of them.
+    let mut blocks = [(0usize, 0usize); 16];
+    let mut n = 0;
     for (i, kind) in kinds.iter().copied().enumerate() {
         if direct(kind) {
-            let x0 = (i & 1) * 8;
-            let y0 = (i >> 1) * 8;
-            direct_8(pic, dpb, slice, Place { mx, my }, (x0, y0), mb);
+            let (x, y) = ((i & 1) * 2, (i >> 1) * 2);
+            for (bx, by) in [(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)] {
+                blocks[n] = (bx, by);
+                n += 1;
+            }
         }
+    }
+    if n > 0 {
+        apply_direct(pic, &pic.mb, dpb, slice, (mx, my), mb, &blocks[..n]);
     }
     for list in 0..2 {
         for (i, kind) in kinds.iter().copied().enumerate() {
@@ -10260,27 +10269,6 @@ fn sub_shape(kind: u8, spec: u32) -> (bool, bool, usize, usize) {
         }
     };
     (l0, l1, w, h)
-}
-
-fn direct_8<S: Sample>(
-    pic: &Frame<S>,
-    dpb: &[Frame<S>],
-    slice: &Slice<'_>,
-    at: Place,
-    origin: (usize, usize),
-    mb: &mut Mb,
-) {
-    let Place { mx, my } = at;
-    let (x, y) = origin;
-    let mut blocks = [(0usize, 0usize); 4];
-    let mut n = 0;
-    for by in 0..2 {
-        for bx in 0..2 {
-            blocks[n] = (x / 4 + bx, y / 4 + by);
-            n += 1;
-        }
-    }
-    apply_direct(pic, &pic.mb, dpb, slice, (mx, my), mb, &blocks);
 }
 
 /// Direct prediction of a whole macroblock. `true` means every block came

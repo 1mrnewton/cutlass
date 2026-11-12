@@ -1519,6 +1519,13 @@ fn stream_info(demux: &dyn Demux, byte_size: u64) -> MediaInfo {
 }
 
 fn duration_of(demux: &mut dyn Demux) -> Result<Option<Micros>, EngineError> {
+    // Each stream's time zero, as playback places it: a transport stream's
+    // first picture shows at its edit's media time, not at tick zero.
+    let leads: Vec<(u32, i64)> = demux
+        .streams()
+        .iter()
+        .map(|stream| (stream.id().get(), edit_lead(stream.edits())))
+        .collect();
     let mut end = None;
     while let Some(packet) = demux.read_packet().map_err(from_read)? {
         let timescale = packet.timescale();
@@ -1528,8 +1535,12 @@ fn duration_of(demux: &mut dyn Demux) -> Result<Option<Micros>, EngineError> {
         let Some(start) = packet.timestamp().presentation_or_decode() else {
             continue;
         };
+        let lead = leads
+            .iter()
+            .find(|(id, _)| *id == packet.stream())
+            .map_or(0, |(_, lead)| *lead);
         let duration = packet.timestamp().duration().unwrap_or(0);
-        let ticks = start.saturating_add(duration);
+        let ticks = start.saturating_add(duration).saturating_sub(lead);
         let micros = ticks_to_micros(ticks, timescale)?;
         end = Some(end.map_or(micros.0, |current: i64| current.max(micros.0)));
     }

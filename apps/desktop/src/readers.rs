@@ -507,6 +507,14 @@ mod tests {
             "h264_opus.ts",
         ] {
             let path = fixtures.join(name);
+            // The length counts from the first picture, which a transport
+            // stream shows about 1.4 s into its clock.
+            let length = installed_readers().probe(&path).expect(name).duration;
+            let length = length.expect(name).0;
+            assert!(
+                (1_150_000..=1_300_000).contains(&length),
+                "{name}: {length}"
+            );
             let mut media = installed_readers().open(&path).expect(name);
             let at = cutlass_model::Micros(500_000);
             let held = media

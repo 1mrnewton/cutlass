@@ -9,6 +9,8 @@ pub mod crc;
 mod limits;
 pub mod packet;
 mod probe;
+pub mod psi;
+pub mod section;
 
 pub use limits::{
     MAX_BUFFERED_BYTES, MAX_DESCRIPTORS, MAX_HELD_PACKETS, MAX_OPEN_SCAN_BYTES, MAX_PARAMS_BYTES,

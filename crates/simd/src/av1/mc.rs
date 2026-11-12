@@ -46,6 +46,7 @@ impl Block<'_> {
     /// Whether the entries take the block: its size, the source it
     /// reads, and room in a destination of `dst_len` values with rows
     /// `dst_stride` apart.
+    #[inline]
     fn taken(&self, dst_len: usize, dst_stride: usize) -> bool {
         let (w, h) = (self.w, self.h);
         matches!(w, 8 | 16 | 32 | 64 | 128)

@@ -692,7 +692,16 @@ fn track_of(stream: &NewStream) -> Result<Track, MuxError> {
     })
 }
 
+/// PCM with no extradata is 16-bit little-endian, as the PCM encoder makes
+/// it for 16-bit input and as the WAV muxer takes it.
+const DEFAULT_PCM: [u8; 3] = [1, 0, 0];
+
 fn pcm_track(extra: &[u8], rate: u32, channels: u16) -> Result<Track, MuxError> {
+    let extra = if extra.is_empty() {
+        &DEFAULT_PCM[..]
+    } else {
+        extra
+    };
     let [coding, endian, arrangement] = extra else {
         return Err(rejected("PCM extradata is the three-byte layout"));
     };

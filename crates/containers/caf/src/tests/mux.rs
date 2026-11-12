@@ -83,6 +83,21 @@ fn pcm_round_trips_with_its_layout_and_grouping() {
 }
 
 #[test]
+fn pcm_without_extradata_is_16_bit_little_endian() {
+    let mut mux = writer();
+    mux.add_stream(stream(CodecId::Pcm, 8_000, 2, Vec::new()))
+        .expect("add");
+    mux.write_packet(&packet(vec![1; 8], 0, 2, 8_000))
+        .expect("write");
+    mux.finish(&done(8_000, 2)).expect("finish");
+    let bytes = bytes_of(mux);
+    let demux = open(&bytes).expect("open");
+    assert_eq!(demux.description().flags, crate::FLAG_LITTLE_ENDIAN);
+    assert_eq!(demux.description().bits_per_channel, 16);
+    assert_eq!(demux.streams()[0].params().extradata(), [1, 0, 0]);
+}
+
+#[test]
 fn every_pcm_coding_writes_its_own_description() {
     for (coding, endian, format, flags, bits, frame) in [
         (1_u8, 1_u8, *b"lpcm", 0, 16, 2_u32),

@@ -1154,8 +1154,19 @@ fn p_skip_in_place<S: Sample>(
     // picture's samples.
     let records = std::mem::take(&mut pic.mb);
     let predicted = predict_inter(pic, dpb, slice, (mx, my, true), &records[slot]);
-    pic.mb = records;
+    restore_records(pic, records);
     predicted
+}
+
+/// Puts the records [`std::mem::take`] set aside back in `pic`. What
+/// stood in for them is an empty buffer from no store of spares, which
+/// owns nothing, so it is let go without its drop, which would only find
+/// that out: once for every skipped macroblock, that was 0.5% of a TikTok
+/// clip's cycles.
+#[inline]
+fn restore_records<S: Sample>(pic: &mut Frame<S>, records: super::Shared<Mb>) {
+    let stand_in = std::mem::ManuallyDrop::new(std::mem::replace(&mut pic.mb, records));
+    debug_assert!(stand_in.owns_nothing());
 }
 
 /// [`skip_mb`] for a frame macroblock of a B slice in a picture that is not
@@ -1195,7 +1206,7 @@ fn b_skip_in_place<S: Sample>(
     let whole = apply_direct(pic, before, dpb, slice, (mx, my), held, &blocks);
     let predicted = predict_inter(pic, dpb, slice, (mx, my, whole), held);
     bind_refs(held, slice);
-    pic.mb = records;
+    restore_records(pic, records);
     predicted
 }
 

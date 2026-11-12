@@ -276,6 +276,12 @@ impl<T: Send + 'static> Shared<T> {
         }
     }
 
+    /// Whether this is an empty buffer from no store of spares, as
+    /// [`Default`] makes, whose drop has nothing to do.
+    pub(crate) fn owns_nothing(&self) -> bool {
+        self.home.is_none() && self.capacity() == 0
+    }
+
     /// Makes clones from here on share the buffer.
     pub(crate) fn freeze(&mut self) {
         if let Hold::Owned(held) = &mut self.hold {

@@ -1413,16 +1413,20 @@ fn a_seven_one_wav_reads_in_its_mask_order_and_its_waveform_sees_every_channel()
 }
 
 #[test]
-fn an_eight_bit_wav_is_not_a_pcm_layout_this_decoder_opens() {
+fn an_eight_bit_wav_plays_as_unsigned_samples() {
     let path = std::env::temp_dir().join(format!("cutlass-pcm-eight-{}", std::process::id()));
-    write_pcm_wav(&path, 8_000, 8, &[0x80]);
+    // Wave 8-bit PCM is unsigned: 0x80 is silence, 0x00 the most negative.
+    write_pcm_wav(&path, 8_000, 8, &[0x80, 0xFF, 0x00, 0xC0]);
     let mut readers = ReaderFactory::new();
     readers.register_container(cutlass_riff::probe, open_wav);
     cutlass_pcm::register_decoders(readers.decoders_mut());
-    let Err(error) = readers.open(&path) else {
-        panic!("8-bit opened");
-    };
-    assert_eq!(error, EngineError::Layout);
+    let mut media = readers.open(&path).expect("open");
+    let pcm = media.audio_from(Micros(0), 4).expect("samples");
+    let expected: Vec<f32> = [0_i16, 32_512, -32_768, 16_384]
+        .iter()
+        .map(|sample| f32::from(*sample) / 32_767.0)
+        .collect();
+    assert_eq!(pcm.as_f32(), Some(expected.as_slice()));
     std::fs::remove_file(&path).expect("remove");
 }
 

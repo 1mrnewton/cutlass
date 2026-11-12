@@ -201,9 +201,33 @@ mod tests {
     #[test]
     fn a_caf_frame_decodes_as_big_endian_s16() {
         let path = std::env::temp_dir().join(format!("cutlass-readers-caf-{}", std::process::id()));
+        write_caf_pcm(&path, [1, 1, 0], &[0x40, 0x00]);
+        let mut media = installed_readers().open(&path).expect("open");
+        let ready = media.pull_audio().expect("pull").expect("pcm");
+        std::fs::remove_file(&path).expect("remove");
+        assert_eq!(ready.pcm.as_i16().expect("i16"), &[0x4000]);
+    }
+
+    /// CAF's one-byte codings play: signed 8-bit, A-law and mu-law.
+    #[test]
+    fn caf_eight_bit_and_g711_frames_play() {
+        for (coding, byte, expected) in [(6, 0x40, 0x4000), (7, 0xD5, 8), (8, 0x80, 32_124)] {
+            let path = std::env::temp_dir().join(format!(
+                "cutlass-readers-caf-{coding}-{}",
+                std::process::id()
+            ));
+            write_caf_pcm(&path, [coding, 1, 0], &[byte]);
+            let mut media = installed_readers().open(&path).expect("open");
+            let ready = media.pull_audio().expect("pull").expect("pcm");
+            std::fs::remove_file(&path).expect("remove");
+            assert_eq!(ready.pcm.as_i16().expect("i16"), &[expected], "{coding}");
+        }
+    }
+
+    fn write_caf_pcm(path: &std::path::Path, extra: [u8; 3], frame: &[u8]) {
         let mut mux = cutlass_caf::CafMux::new(std::io::Cursor::new(Vec::new()));
         let params =
-            StreamParams::try_audio(StreamCodec::Known(CodecId::Pcm), 8_000, 1, vec![1, 1, 0])
+            StreamParams::try_audio(StreamCodec::Known(CodecId::Pcm), 8_000, 1, extra.to_vec())
                 .expect("params");
         mux.add_stream(NewStream {
             params,
@@ -213,7 +237,7 @@ mod tests {
         .expect("stream");
         let packet = Packet::try_new(
             0,
-            vec![0x40, 0x00],
+            frame.to_vec(),
             Timestamp::try_new(Some(0), Some(0), Some(1)).expect("time"),
             Timescale::new(8_000),
             true,
@@ -226,11 +250,7 @@ mod tests {
             ticks: 1,
         }])
         .expect("finish");
-        std::fs::write(&path, mux.into_inner().into_inner()).expect("write");
-        let mut media = installed_readers().open(&path).expect("open");
-        let ready = media.pull_audio().expect("pull").expect("pcm");
-        std::fs::remove_file(&path).expect("remove");
-        assert_eq!(ready.pcm.as_i16().expect("i16"), &[0x4000]);
+        std::fs::write(path, mux.into_inner().into_inner()).expect("write");
     }
 
     /// Opus in CAF, as the Opus encoder hands it over: the pre-skip becomes

@@ -3078,6 +3078,7 @@ version = "0.1.0"
 dependencies = [
  "cutlass-adts",
  "cutlass-aiff",
+ "cutlass-avi",
  "cutlass-codec",
  "cutlass-container",
  "cutlass-flac",

@@ -781,7 +781,7 @@ impl Sample for u8 {
         mc::chroma_planes((cb, cr), stride, size, source(first), second.map(source))
     }
 
-    #[inline]
+    #[inline(always)]
     fn plain_fast(
         dst: PicPlanes<'_, Self>,
         block: (usize, usize, usize, usize),

@@ -11618,25 +11618,23 @@ fn mc_weighted<S: Sample>(
         ) => {
             let (reference, mv) = if from == 0 { (r0, mv0) } else { (r1, mv1) };
             let frame = reference_frame(dpb, slice, from, reference)?;
-            let luma = luma_source(frame, area, mv).is_some_and(|source| {
-                let Some(dst) = pic.y.get_mut(y * stride + x..) else {
-                    return false;
-                };
-                S::pair_fast((&mut *dst, stride), (w, h), source, None) && {
-                    scale_in_place(dst, stride, (w, h), luma_mix);
-                    true
-                }
-            });
-            let chroma = chroma_sources(frame, place, mv).is_some_and(|source| {
-                let (Some(u), Some(v)) = (pic.u.get_mut(at..), pic.v.get_mut(at..)) else {
-                    return false;
-                };
-                S::chroma_planes_fast((&mut *u, &mut *v, half), place.1, source, None) && {
-                    scale_in_place(u, half, place.1, cb_mix);
-                    scale_in_place(v, half, place.1, cr_mix);
-                    true
-                }
-            });
+            let Some(source) = ref_planes(frame, block, mv) else {
+                return Ok((false, false));
+            };
+            let size = (pic.w, pic.h);
+            let (luma, chroma) = S::plain_fast(
+                (&mut pic.y, &mut pic.u, &mut pic.v, stride, size),
+                area,
+                source,
+                None,
+            );
+            if luma && let Some(dst) = pic.y.get_mut(y * stride + x..) {
+                scale_in_place(dst, stride, (w, h), luma_mix);
+            }
+            if chroma && let (Some(u), Some(v)) = (pic.u.get_mut(at..), pic.v.get_mut(at..)) {
+                scale_in_place(u, half, place.1, cb_mix);
+                scale_in_place(v, half, place.1, cr_mix);
+            }
             Ok((luma, chroma))
         }
         (Mix::Weighted(luma_weight), Mix::Weighted(cb_weight), Mix::Weighted(cr_weight)) => {

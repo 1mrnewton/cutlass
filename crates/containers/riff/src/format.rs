@@ -493,7 +493,8 @@ fn kind_for(tag: u16, codec: &StreamCodec) -> Kind {
 
 fn codec_for_tag(tag: u16) -> Result<StreamCodec, FormatError> {
     let known = match tag {
-        0x0001 | 0x0003 => Some(CodecId::Pcm),
+        // A-law and mu-law are PCM codings 7 and 8 to the decoder.
+        0x0001 | 0x0003 | 0x0006 | 0x0007 => Some(CodecId::Pcm),
         0x0055 => Some(CodecId::Mp3),
         0x00FF | 0x1600 | 0x706D | 0x4143 | 0xA106 => Some(CodecId::Aac),
         0x2000 => Some(CodecId::Ac3),

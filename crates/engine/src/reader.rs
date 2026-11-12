@@ -1437,9 +1437,10 @@ fn codec_extra(id: CodecId, extra: &[u8]) -> Result<(Vec<u8>, Option<SampleForma
     let tag = u16::from_le_bytes([extra[0], extra[1]]);
     let bits = u16::from_le_bytes([extra[2], extra[3]]);
     let kind = u16::from_le_bytes([extra[12], extra[13]]);
-    // Coding byte: 1 s16, 2 s24, 3 s32, 4 f32, 5 f64, 11 unsigned 8-bit.
-    // Then little-endian interleaved. The container already refused a
-    // big-endian WAV. 8-bit wave PCM is unsigned, unlike AIFF's and CAF's.
+    // Coding byte: 1 s16, 2 s24, 3 s32, 4 f32, 5 f64, 7 A-law, 8 mu-law,
+    // 11 unsigned 8-bit. Then little-endian interleaved. The container
+    // already refused a big-endian WAV. 8-bit wave PCM is unsigned, unlike
+    // AIFF's and CAF's. The container marks A-law and mu-law compressed.
     let coding = match (tag, bits, kind) {
         (0x0001, 8, 0) => 11_u8,
         (0x0001, 16, 0) => 1,
@@ -1447,6 +1448,8 @@ fn codec_extra(id: CodecId, extra: &[u8]) -> Result<(Vec<u8>, Option<SampleForma
         (0x0001, 32, 0) => 3,
         (0x0003, 32, 1) => 4,
         (0x0003, 64, 1) => 5,
+        (0x0006, 8, 2) => 7,
+        (0x0007, 8, 2) => 8,
         _ => return Err(EngineError::Layout),
     };
     Ok((vec![coding, 0, 0], Some(pcm_format(coding)?)))

@@ -1431,6 +1431,32 @@ fn an_eight_bit_wav_plays_as_unsigned_samples() {
 }
 
 #[test]
+fn a_law_and_mu_law_wavs_play_through_the_g711_expansion() {
+    for (tag, bytes, expected) in [
+        (0x0006_u16, [0xD5_u8, 0x55, 0xAA], [8_i16, -8, 32_256]),
+        (0x0007, [0x80, 0x00, 0xFF], [32_124, -32_124, 0]),
+    ] {
+        let path =
+            std::env::temp_dir().join(format!("cutlass-pcm-g711-{tag}-{}", std::process::id()));
+        write_pcm_wav(&path, 8_000, 8, &bytes);
+        let mut file = std::fs::read(&path).expect("read");
+        file[20..22].copy_from_slice(&tag.to_le_bytes());
+        std::fs::write(&path, file).expect("tag");
+        let mut readers = ReaderFactory::new();
+        readers.register_container(cutlass_riff::probe, open_wav);
+        cutlass_pcm::register_decoders(readers.decoders_mut());
+        let mut media = readers.open(&path).expect("open");
+        let pcm = media.audio_from(Micros(0), 3).expect("samples");
+        std::fs::remove_file(&path).expect("remove");
+        let expected: Vec<f32> = expected
+            .iter()
+            .map(|sample| f32::from(*sample) / 32_767.0)
+            .collect();
+        assert_eq!(pcm.as_f32(), Some(expected.as_slice()), "{tag:#06x}");
+    }
+}
+
+#[test]
 fn a_filmstrip_ask_does_not_decode_and_a_fill_stores_the_still() {
     let factory = factory();
     let path = fixture("pattern.png");

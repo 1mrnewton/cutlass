@@ -13,7 +13,7 @@ A file has one sound track. Timestamps are ticks of the sample rate.
 | Integer PCM (tag `0x0001`), 8, 16, 24, 32, or 64 bits | One sample frame per packet | `PCMWAVEFORMAT`, no `fact` |
 | Float PCM (tag `0x0003`), 32 or 64 bits | One sample frame per packet | Written with a `fact` chunk |
 | `WAVEFORMATEXTENSIBLE` | The channel mask is in the stream extradata at byte 8 | Written when the stream has a channel mask, more than two channels, a valid-bit width that differs from the stored width, or came from an extensible file |
-| A-law (`0x0006`), μ-law (`0x0007`) | One sample frame per packet, codec tag `wav:0006` or `wav:0007` | Refused |
+| A-law (`0x0006`), μ-law (`0x0007`), also as an extensible subformat | One sample frame per packet, `CodecId::Pcm`; the extradata keeps the tag and marks the bytes compressed, and the engine hands `cutlass-pcm` codings 7 and 8 | Written back with the same tag and a `fact` chunk |
 | MPEG sound (`0x0050`, `0x0055`) | One MPEG frame per packet. `0x0055` is `CodecId::Mp3` | One frame per packet |
 | ADPCM and other block codecs | One `nBlockAlign` block per packet | The packet duration must match the block |
 | AAC (`0x00FF`, `0x1600`, `0x706D`, `0x4143`, `0xA106`), AC-3 (`0x2000`), FLAC (`0xF1AC`), E-AC-3 (by GUID) | Mapped to that codec id | Stored |
@@ -35,7 +35,7 @@ What is refused:
 - A chunk size that runs past its parent or the file: `OpenError::HostileSize`. The size is not clipped to the bytes that are present.
 - `ds64` values that disagree with the `data` chunk: `OpenError::Source`.
 - A truncated header, or `LIST` nesting deeper than 8: an open error and no stream list.
-- In the muxer: A-law, μ-law, and unknown codecs; a second track; a packet that is not a whole number of frames or whose duration does not match its bytes; a classic RIFF file above 4 GiB (`MuxError::HostileSize`); a track duration that does not equal the sum of the packets (`MuxError::DurationMismatch`), in which case nothing is written.
+- In the muxer: unknown codecs; a second track; a packet that is not a whole number of frames or whose duration does not match its bytes; a classic RIFF file above 4 GiB (`MuxError::HostileSize`); a track duration that does not equal the sum of the packets (`MuxError::DurationMismatch`), in which case nothing is written.
 
 ## Using it
 
@@ -153,7 +153,6 @@ Gaps:
 - `WavMux` keeps every packet in memory and builds the whole file in memory at `finish`. Nothing reaches the writer before that.
 - `WavMux::new` does not switch to RF64 when the file passes 4 GiB. It fails at `finish`. The caller has to pick `WavMux::rf64` up front.
 - `RIFX` (big-endian) and `BW64` files do not open.
-- A-law and μ-law streams are labeled with an unknown codec tag, not a named codec id.
 - A forward reader does not see chunks after `data`. A non-`data` chunk larger than 64 KiB on a forward reader is an error.
 - The language on `NewStream` is accepted and not written.
 - `wavl` and SMV files are not handled.

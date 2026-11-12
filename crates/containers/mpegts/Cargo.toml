@@ -11,5 +11,8 @@ cutlass-adts = { path = "../adts", version = "0.1.0" }
 cutlass-codec = { path = "../../codec", version = "0.1.0" }
 cutlass-container = { path = "../../container", version = "0.1.0" }
 
+[dev-dependencies]
+cutlass-isobmff = { path = "../isobmff", version = "0.1.0" }
+
 [lints]
 workspace = true

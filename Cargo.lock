@@ -2963,6 +2963,7 @@ dependencies = [
  "cutlass-adts",
  "cutlass-codec",
  "cutlass-container",
+ "cutlass-isobmff",
 ]
 
 [[package]]

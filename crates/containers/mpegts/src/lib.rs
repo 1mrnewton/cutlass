@@ -9,6 +9,7 @@ pub mod crc;
 mod demux;
 pub mod es;
 mod limits;
+mod mux;
 pub mod packet;
 pub mod pes;
 pub mod pipeline;
@@ -25,5 +26,6 @@ pub use limits::{
     MAX_SEEK_PROBES, MAX_SEEK_WIDENINGS, MAX_TAIL_SCAN_BYTES, PROBE_BYTES, SYNC_BYTE, SYNC_RUN,
     TS_PACKET_BYTES,
 };
+pub use mux::{MuxOptions, TsMux};
 pub use pipeline::Counters;
 pub use probe::{TsFamily, probe};

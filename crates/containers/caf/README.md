@@ -23,7 +23,7 @@ Ready for the editor to open CAF sound and for export to write it. Every CAF fil
 | Opus | Yes, an `OpusHead` is made (1 or 2 channels) with the pre-skip at 48 kHz | Yes, no `kuki`, as AudioToolbox accepts | desktop test plays from the start what the decoder gives after the pre-skip |
 | MP3 (`.mp3`), AC-3 (`ac-3`) | Yes | Yes | ffmpeg files match libavformat; export files read in afinfo, decode in afconvert |
 | E-AC-3 (`ec-3`) | Yes | Yes | files written here are read by afinfo and decoded by afconvert; libavformat has no `ec-3` CAF tag and no third-party file was available |
-| Other format ids (`ima4`, `QDM2`, ...) | Packets framed, `StreamCodec::Unknown` | Refused (`UnknownCodec`) | afconvert IMA4 matches afinfo |
+| Other format ids (`ima4`, `QDM2`, ...) | Packets framed, `StreamCodec::Unknown`; why each stays unknown is under [Format ids left unknown](#format-ids-left-unknown) | Refused (`UnknownCodec`) | afconvert IMA4 matches afinfo |
 | `pakt`: sizes, frames, or both | Yes, bounded | Written after `data` | all oracle tests |
 | Priming and remainder | `Trim` plus one edit; timestamps are not shifted | From `set_trim` and a short last packet | afinfo counts equal on every remux |
 | `data` of size -1 | Runs to the end of the file; a forward input reads whole frames until the source ends | Written while recording, patched at finish | 501 system files |
@@ -41,6 +41,20 @@ Ready for the editor to open CAF sound and for export to write it. Every CAF fil
 - `packet_count()` is the number of CAF packets (frames, for PCM), which is what afinfo prints.
 - The muxer writes the header at the first packet with `data` of size -1, streams the payload, and at finish writes the `pakt` after `data`, fixes the data size, sets `mFramesPerPacket` (all packets but a shorter last one equal: that count; otherwise 0 with size and frame pairs), and rewrites a same-length `kuki` (the AAC buffer size and bit rates, the final FLAC STREAMINFO). A shorter last packet becomes remainder; the remainder is the larger of that and the trailing padding from `set_trim`. PCM with no extradata is 16-bit little-endian, as for WAV.
 - AAC cookies are written with four-byte descriptor lengths, as AudioToolbox writes them; libavformat's reader skips four bytes as if a full box header were there and only reads such cookies correctly.
+
+## Format ids left unknown
+
+Every `kAudioFormat` id in the macOS 27 SDK's `CoreAudioBaseTypes.h` that this crate does not map is framed and published as `StreamCodec::Unknown` with its four characters, because no Cutlass decoder reads it:
+
+| Id | Why it stays unknown |
+| --- | --- |
+| `ima4` (Apple IMA ADPCM) | No IMA ADPCM decoder or `CodecId` in Cutlass. The decoder would be small, but the id belongs in `cutlass-codec` next to AIFF's `ima4` and WAV's tag `0x0011`, which are framed as unknown too, so it is a decision for all three containers, not this one. 4 of the 2891 system files. |
+| `.mp1`, `.mp2` | `cutlass-mp3` decodes Layer III only; its README lists Layer I and II as `Unsupported { what: "layer" }`. |
+| `cac3` | AC-3 wrapped in IEC 60958 bursts; `cutlass-ac3` reads bare syncframes and this crate does not unwrap bursts. |
+| `MAC3`, `MAC6`, `QDMC`, `QDM2`, `Qclp`, `samr`, `ilbc`, `celp`, `hvxc`, `twvq`, `AUDB`, `apac`, `aes3` | No decoder in Cutlass. |
+| `time`, `midi`, `apvs` | Not sound: timecode, MIDI and parameter streams. |
+
+AAC object types the AAC decoder does not read (`aacl`, `aace`, `aacf`, `aacg`: low delay and enhanced low delay) are mapped to `CodecId::Aac` with their AudioSpecificConfig. Whether they play is the decoders' call: `cutlass-aac`'s README lists LD and ELD as not implemented, and whether the macOS platform decoder plays them was not checked.
 
 ## Integration
 

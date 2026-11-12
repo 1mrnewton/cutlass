@@ -667,11 +667,11 @@ fn lf_own_rows(u0: usize, u1: usize, first: bool, last: bool) -> core::ops::Rang
 fn lf_chunk<P: Pixel>(job: &LfJob<'_, '_>, data: &mut [P], row0: usize, sharp: u8, bd: u32) {
     let (u0, u1, stride) = (job.u0, job.u1, job.stride);
     let nc = job.vert.nc;
-    let mut row = LfRow::new(nc);
+    let key = (nc, job.vert.nc_vis);
+    let (mut row, mut cols) = lf_scratch(key);
     // Vertical edges: the edges of a strip of unit rows, gathered into
     // runs down each column. A column's run is filtered when an edge
     // does not continue it, and at the end of the strip.
-    let mut cols = ColumnRuns::new(nc);
     for strip in (u0..u1).step_by(LF_STRIP_UNITS) {
         let rows = (u1 - strip).min(LF_STRIP_UNITS);
         let down = |uc: usize, start: usize, len: usize, code: u16, data: &mut [P]| {
@@ -700,6 +700,41 @@ fn lf_chunk<P: Pixel>(job: &LfJob<'_, '_>, data: &mut [P], row0: usize, sharp: u
     for ur in lf_own_rows(u0, u1, job.first, job.last) {
         lf_horz_row(job.horz, ur, data, stride, row0, sharp, bd, &mut row);
     }
+    LF_SCRATCH.with_borrow_mut(|s| {
+        // A few sizes at most: a stream that changes size often keeps
+        // the latest.
+        if s.len() >= 4 {
+            s.remove(0);
+        }
+        s.push((key, row, cols));
+    });
+}
+
+/// Buffers an [`lf_chunk`] kept: their width in units and visible width,
+/// the row and the columns.
+type LfKept = ((usize, usize), LfRow, ColumnRuns);
+
+thread_local! {
+    /// The row and column buffers of [`lf_chunk`]s this thread ran, by
+    /// their width in units and the visible width (the codes past it
+    /// stay as they are): a chunk takes them rather than new ones.
+    static LF_SCRATCH: core::cell::RefCell<Vec<LfKept>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+/// The buffers of an [`lf_chunk`] `nc` units wide, `nc_vis` of them
+/// visible, from the ones the thread kept when it has them. Every run of
+/// the columns ended at the end of the chunk that kept them, so they
+/// start with none as new ones do; the row holds no levels yet.
+fn lf_scratch((nc, nc_vis): (usize, usize)) -> (LfRow, ColumnRuns) {
+    let kept = LF_SCRATCH.with_borrow_mut(|s| {
+        let i = s.iter().position(|e| e.0 == (nc, nc_vis))?;
+        let (_, mut row, cols) = s.swap_remove(i);
+        row.n = 0;
+        row.lvl_of = None;
+        Some((row, cols))
+    });
+    kept.unwrap_or_else(|| (LfRow::new(nc), ColumnRuns::new(nc)))
 }
 
 fn lf_horz_row<P: Pixel>(

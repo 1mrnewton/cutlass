@@ -274,3 +274,29 @@ pub fn live_file(doc_type: &str, children: &[Vec<u8>]) -> Vec<u8> {
     out.extend(unknown(ids::SEGMENT, &children.concat()));
     out
 }
+
+/// Builds a Segment of `children` where the SeekHead (first) points at the
+/// elements it names, wherever they ended up.
+pub fn with_seek_head(wanted: &[u32], children: &[Vec<u8>]) -> Vec<u8> {
+    let mut positions: Vec<(u32, u64)> = wanted.iter().map(|id| (*id, 0)).collect();
+    loop {
+        let head = seek_head(&positions);
+        let mut at = head.len() as u64;
+        let mut next = positions.clone();
+        for child in children {
+            let id = cutlass_matroska::ebml::read_id(child).expect("id").0;
+            for entry in &mut next {
+                if entry.0 == id {
+                    entry.1 = at;
+                }
+            }
+            at += child.len() as u64;
+        }
+        if next == positions {
+            let mut all = vec![head];
+            all.extend_from_slice(children);
+            return file("matroska", &all);
+        }
+        positions = next;
+    }
+}

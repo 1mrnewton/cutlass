@@ -19,6 +19,12 @@ use crate::error::{Error, Result};
 /// Read-ahead size. Element headers and small frames come out of it.
 const BUFFER: usize = 64 * 1024;
 
+/// The first read after a seek outside the buffer. A seek's walk reads one
+/// block header and skips the frame, so a full buffer there would mostly
+/// be frame bytes nobody looks at. Each refill after it doubles, back up to
+/// [`BUFFER`] for a sequential read.
+const FIRST_READ: usize = 4 * 1024;
+
 /// One element header and where it sits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Header {
@@ -48,6 +54,8 @@ pub struct Source<R> {
     at: usize,
     /// Bytes of `buffer` that hold data.
     filled: usize,
+    /// Size of the next refill.
+    window: usize,
 }
 
 impl<R: Read + Seek> Source<R> {
@@ -57,6 +65,7 @@ impl<R: Read + Seek> Source<R> {
             buffer: vec![0; BUFFER].into_boxed_slice(),
             at: 0,
             filled: 0,
+            window: FIRST_READ,
         }
     }
 
@@ -91,9 +100,11 @@ impl<R: Read + Seek> Source<R> {
         }
         self.at = 0;
         self.filled = 0;
+        let window = self.window;
+        self.window = (window * 2).min(BUFFER);
         let want = match self.input.remaining() {
-            Some(left) => usize::try_from(left).unwrap_or(BUFFER).min(BUFFER),
-            None => BUFFER,
+            Some(left) => usize::try_from(left).unwrap_or(window).min(window),
+            None => window,
         };
         if want == 0 {
             return Ok(0);
@@ -252,6 +263,7 @@ impl<R: Read + Seek> Source<R> {
         }
         self.at = 0;
         self.filled = 0;
+        self.window = FIRST_READ;
         self.input.seek(position).map_err(Error::Source)
     }
 }

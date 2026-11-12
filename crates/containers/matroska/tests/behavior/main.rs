@@ -14,7 +14,7 @@ use std::io::Cursor;
 
 use build::{
     Track, bytes, cluster, cues, ebml_header, ebml_laced, element, file, fixed, group, info,
-    live_file, seek_head, simple, tracks, uint, unknown, unknown_cluster, xiph,
+    live_file, simple, tracks, uint, unknown, unknown_cluster, with_seek_head, xiph,
 };
 use cutlass_codec::{CodecId, Packet, StreamCodec};
 use cutlass_container::{Demux, Landing, OpenError, ReadError, SeekError, SeekTo};
@@ -406,32 +406,6 @@ fn timestamp_scales_keep_the_file_clock() {
     // Zero is not a scale.
     let bytes = file("matroska", &[info(0, None), tracks(&[mp3()])]);
     assert!(open(bytes).is_err());
-}
-
-/// Builds a Segment of `children` where the SeekHead (first) points at the
-/// elements it names, wherever they ended up.
-fn with_seek_head(wanted: &[u32], children: &[Vec<u8>]) -> Vec<u8> {
-    let mut positions: Vec<(u32, u64)> = wanted.iter().map(|id| (*id, 0)).collect();
-    loop {
-        let head = seek_head(&positions);
-        let mut at = head.len() as u64;
-        let mut next = positions.clone();
-        for child in children {
-            let id = cutlass_matroska::ebml::read_id(child).expect("id").0;
-            for entry in &mut next {
-                if entry.0 == id {
-                    entry.1 = at;
-                }
-            }
-            at += child.len() as u64;
-        }
-        if next == positions {
-            let mut all = vec![head];
-            all.extend_from_slice(children);
-            return file("matroska", &all);
-        }
-        positions = next;
-    }
 }
 
 #[test]

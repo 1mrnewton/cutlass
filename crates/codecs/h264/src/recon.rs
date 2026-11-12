@@ -45,6 +45,17 @@ const TC0: [[u8; 52]; 3] = [
     ],
 ];
 
+/// Alpha and `tC0` at strengths 1, 2 and 3 by `indexA`, side by side.
+static BY_INDEX_A: [[u8; 4]; 52] = {
+    let mut table = [[0u8; 4]; 52];
+    let mut index = 0;
+    while index < 52 {
+        table[index] = [ALPHA[index], TC0[0][index], TC0[1][index], TC0[2][index]];
+        index += 1;
+    }
+    table
+};
+
 const CHROMA_QP: [i32; 52] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
     26, 27, 28, 29, 29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37, 37, 38, 38, 38, 39, 39,
@@ -2127,17 +2138,13 @@ impl EdgeQp {
     pub fn new(qpav: i32, offsets: (i32, i32)) -> Option<Self> {
         let index_a = (qpav + offsets.0).clamp(0, 51) as usize;
         let index_b = (qpav + offsets.1).clamp(0, 51) as usize;
-        let alpha = ALPHA[index_a];
+        // Alpha and the three clipping values in one load.
+        let [alpha, tc1, tc2, tc3] = BY_INDEX_A[index_a];
         let beta = BETA[index_b];
         if alpha == 0 || beta == 0 {
             return None;
         }
-        let tc0 = [
-            -1,
-            TC0[0][index_a] as i8,
-            TC0[1][index_a] as i8,
-            TC0[2][index_a] as i8,
-        ];
+        let tc0 = [-1, tc1 as i8, tc2 as i8, tc3 as i8];
         Some(Self { alpha, beta, tc0 })
     }
 

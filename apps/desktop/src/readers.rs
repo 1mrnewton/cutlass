@@ -224,6 +224,264 @@ mod tests {
         }
     }
 
+    /// G.711 WAV (tags 6 and 7, extensible, RF64) and AIFC (`alaw`, `ulaw`,
+    /// upper case) files from afconvert and ffmpeg play sample for sample as
+    /// AudioToolbox and FFmpeg decode them to s16. So do the WAV files
+    /// `WavMux` writes back from them. Skips, and says so, without the tools.
+    #[test]
+    fn g711_wav_and_aiff_files_play_like_afconvert_and_ffmpeg() {
+        let apple = tool_exists("afconvert");
+        let ffmpeg = tool_exists("ffmpeg");
+        if !apple && !ffmpeg {
+            eprintln!("skipped: neither afconvert nor ffmpeg is on PATH");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("cutlass-readers-g711-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let source = dir.join("source.wav");
+        std::fs::write(&source, s16_wav(8_000, 2, &test_signal(6_000))).expect("source");
+        let mut files = Vec::new();
+        if apple {
+            for (kind, ext, format) in [
+                ("WAVE", "wav", "alaw"),
+                ("WAVE", "wav", "ulaw"),
+                ("AIFC", "aifc", "alaw"),
+                ("AIFC", "aifc", "ulaw"),
+            ] {
+                let out = dir.join(format!("apple-{format}.{ext}"));
+                run_tool(
+                    "afconvert",
+                    &["-f", kind, "-d", format, path_str(&source), path_str(&out)],
+                );
+                files.push(out);
+            }
+        }
+        if ffmpeg {
+            for (codec, ext, extra) in [
+                ("pcm_alaw", "wav", &[][..]),
+                ("pcm_mulaw", "wav", &[][..]),
+                ("pcm_alaw", "aiff", &[][..]),
+                ("pcm_mulaw", "aiff", &[][..]),
+                ("pcm_alaw", "wav", &["-rf64", "always"][..]),
+                ("pcm_mulaw", "wav", &["-ac", "3"][..]),
+                ("pcm_alaw", "wav", &["-ac", "3"][..]),
+            ] {
+                let out = dir.join(format!("ffmpeg-{}-{codec}.{ext}", files.len()));
+                let mut args = vec!["-v", "error", "-y", "-i", path_str(&source)];
+                args.extend_from_slice(extra);
+                args.extend_from_slice(&["-c:a", codec, path_str(&out)]);
+                run_tool("ffmpeg", &args);
+                files.push(out);
+            }
+        }
+        // AudioToolbox does not open the upper-case tags; FFmpeg does.
+        let mut upper = Vec::new();
+        for (index, path) in files.clone().iter().enumerate() {
+            let mut bytes = std::fs::read(path).expect("read");
+            if &bytes[8..12] != b"AIFC" || !ffmpeg {
+                continue;
+            }
+            let at = bytes.windows(4).position(|w| w == b"COMM").expect("COMM") + 8 + 18;
+            bytes[at..at + 4].make_ascii_uppercase();
+            let out = dir.join(format!("upper-{index}.aifc"));
+            std::fs::write(&out, bytes).expect("upper");
+            upper.push(out);
+        }
+        let mut checked = 0;
+        for path in files.iter().chain(&upper) {
+            let ours = play_i16(path);
+            assert!(ours.len() >= 12_000, "{}", path.display());
+            if ffmpeg {
+                assert_eq!(ours, ffmpeg_s16(path, &dir), "ffmpeg {}", path.display());
+                checked += 1;
+            }
+            if apple && !upper.contains(path) {
+                assert_eq!(
+                    ours,
+                    afconvert_s16(path, &dir),
+                    "afconvert {}",
+                    path.display()
+                );
+                checked += 1;
+            }
+            if path.extension().is_some_and(|ext| ext == "wav") {
+                let again = dir.join("remux.wav");
+                std::fs::write(&again, remux_wav(path)).expect("remux");
+                assert_eq!(play_i16(&again), ours, "remux {}", path.display());
+                if ffmpeg {
+                    assert_eq!(
+                        ffmpeg_s16(&again, &dir),
+                        ours,
+                        "remux ffmpeg {}",
+                        path.display()
+                    );
+                }
+                if apple {
+                    assert_eq!(
+                        afconvert_s16(&again, &dir),
+                        ours,
+                        "remux afconvert {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+        std::fs::remove_dir_all(&dir).expect("clean");
+        eprintln!(
+            "g711: {} files, {checked} oracle decodes",
+            files.len() + upper.len()
+        );
+    }
+
+    fn tool_exists(name: &str) -> bool {
+        std::process::Command::new(name)
+            .arg("-h")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+    }
+
+    fn run_tool(name: &str, args: &[&str]) {
+        let status = std::process::Command::new(name)
+            .args(args)
+            .status()
+            .expect(name);
+        assert!(status.success(), "{name} {args:?}");
+    }
+
+    fn path_str(path: &std::path::Path) -> &str {
+        path.to_str().expect("utf-8 path")
+    }
+
+    /// Full-scale ramps and a pseudo-random walk, so every A-law and mu-law
+    /// code shows up.
+    fn test_signal(frames: usize) -> Vec<i16> {
+        let mut state = 0x2545_F491_u32;
+        (0..frames * 2)
+            .map(|index| {
+                if index < 2 * 1024 {
+                    let step = i32::try_from(index / 2).expect("step");
+                    i16::try_from(step * 64 - 32_768).expect("ramp")
+                } else {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    i16::from_le_bytes(state.to_le_bytes()[..2].try_into().expect("two"))
+                }
+            })
+            .collect()
+    }
+
+    fn s16_wav(rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {
+        let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let size = u32::try_from(data.len()).expect("size");
+        let mut out = b"RIFF".to_vec();
+        out.extend_from_slice(&(36 + size).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16_u32.to_le_bytes());
+        out.extend_from_slice(&1_u16.to_le_bytes());
+        out.extend_from_slice(&channels.to_le_bytes());
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&(rate * 2 * u32::from(channels)).to_le_bytes());
+        out.extend_from_slice(&(2 * channels).to_le_bytes());
+        out.extend_from_slice(&16_u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&data);
+        out
+    }
+
+    /// Every sample the desktop readers play from `path`, interleaved.
+    fn play_i16(path: &std::path::Path) -> Vec<i16> {
+        let mut media = installed_readers().open(path).expect("open");
+        let mut out = Vec::new();
+        while let Some(ready) = media.pull_audio().expect("pull") {
+            out.extend_from_slice(ready.pcm.as_i16().expect("i16"));
+        }
+        out
+    }
+
+    fn ffmpeg_s16(path: &std::path::Path, dir: &std::path::Path) -> Vec<i16> {
+        let out = dir.join("oracle.raw");
+        run_tool(
+            "ffmpeg",
+            &[
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                path_str(path),
+                "-f",
+                "s16le",
+                "-c:a",
+                "pcm_s16le",
+                path_str(&out),
+            ],
+        );
+        let bytes = std::fs::read(&out).expect("raw");
+        bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| i16::from_le_bytes(*pair))
+            .collect()
+    }
+
+    fn afconvert_s16(path: &std::path::Path, dir: &std::path::Path) -> Vec<i16> {
+        let out = dir.join("oracle.wav");
+        run_tool(
+            "afconvert",
+            &["-f", "WAVE", "-d", "LEI16", path_str(path), path_str(&out)],
+        );
+        let bytes = std::fs::read(&out).expect("wav");
+        let mut at = 12;
+        loop {
+            let id = &bytes[at..at + 4];
+            let size = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().expect("size"));
+            let size = usize::try_from(size).expect("size");
+            if id == b"data" {
+                return bytes[at + 8..at + 8 + size]
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| i16::from_le_bytes(*pair))
+                    .collect();
+            }
+            at += 8 + size + size % 2;
+        }
+    }
+
+    /// `path` through `WavDemux` and back out of `WavMux`.
+    fn remux_wav(path: &std::path::Path) -> Vec<u8> {
+        use cutlass_container::Demux;
+        let bytes = std::fs::read(path).expect("read");
+        let length = u64::try_from(bytes.len()).expect("length");
+        let mut demux =
+            cutlass_riff::WavDemux::open(std::io::Cursor::new(bytes), length).expect("open");
+        let params = demux.streams()[0].params().clone();
+        let rate = params.sample_rate().expect("rate");
+        let mut mux = cutlass_riff::WavMux::new(std::io::Cursor::new(Vec::new()));
+        mux.add_stream(NewStream {
+            params,
+            timescale: Timescale::new(rate),
+            language: None,
+        })
+        .expect("stream");
+        let mut ticks = 0;
+        while let Some(packet) = demux.read_packet().expect("packet") {
+            ticks += packet.timestamp().duration().expect("duration");
+            mux.write_packet(&packet).expect("write");
+        }
+        mux.finish(&[TrackDuration {
+            track: TrackId::new(0),
+            timescale: Timescale::new(rate),
+            ticks,
+        }])
+        .expect("finish");
+        mux.into_inner().into_inner()
+    }
+
     fn write_caf_pcm(path: &std::path::Path, extra: [u8; 3], frame: &[u8]) {
         let mut mux = cutlass_caf::CafMux::new(std::io::Cursor::new(Vec::new()));
         let params =

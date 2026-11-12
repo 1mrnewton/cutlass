@@ -72,7 +72,9 @@ cargo test -p cutlass-aiff
 - `tests/external/oracle.rs` has FFmpeg write 16-bit big-endian, 16-bit little-endian and 32-bit float AIFF files, reads them here and compares the bytes with the source, then has FFmpeg decode files this crate wrote. `afinfo` is asked for the sample rate when it is installed. The test is skipped when `ffmpeg` or `ffprobe` is not on `PATH`.
 - `tests/external/local.rs` opens private sample files and is skipped when their folder is absent.
 
-There is no long fuzz campaign and no benchmark. The compressed kinds (`alaw`, `ulaw`, `ima4`, MACE, GSM) are tested only with hand-built files, not against another reader.
+A desktop reader test (`g711_wav_and_aiff_files_play_like_afconvert_and_ffmpeg` in `apps/desktop/src/readers.rs`) plays `alaw` and `ulaw` files from afconvert and FFmpeg, and upper-case copies of them, and gets the same s16 samples as `afconvert -d LEI16` and FFmpeg's decode; it skips without the tools.
+
+There is no long fuzz campaign and no benchmark. The compressed kinds (`ima4`, MACE, GSM) are tested only with hand-built files, not against another reader.
 
 ## Speed against FFmpeg
 

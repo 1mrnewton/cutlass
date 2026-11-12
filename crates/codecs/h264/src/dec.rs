@@ -204,8 +204,8 @@ impl std::fmt::Debug for Spares {
     }
 }
 
-/// Planes [`Spares`] keeps at most, a few pictures' worth.
-const SPARES_KEPT: usize = 12;
+/// Planes and record sets [`Spares`] keeps at most, a few pictures' worth.
+const SPARES_KEPT: usize = 16;
 
 impl Spares {
     /// A kept buffer of `len` items, if there is one.
@@ -1630,6 +1630,31 @@ fn plane<S: Sample>(
     match spares {
         Some(home) if written => Shared::spare(home, len, fill),
         _ => Shared::owned(vec![fill; len]),
+    }
+}
+
+/// The macroblock records of a new picture, a spare set when one is kept.
+/// A spare record keeps what its last picture wrote, apart from the two
+/// fields read before a macroblock is decoded: its slice, unset so it reads
+/// as not yet decoded, and its field flag. Every other field of a record is
+/// written by its macroblock before anything reads it.
+fn records(spares: Option<&std::sync::Arc<Spares>>, len: usize) -> Shared<Mb> {
+    let Some(home) = spares else {
+        return Shared::owned(vec![Mb::new(u16::MAX); len]);
+    };
+    let held = match home.take::<Mb>(len) {
+        Some(mut kept) => {
+            for mb in &mut kept {
+                mb.slice = u16::MAX;
+                mb.col.field_mb = false;
+            }
+            kept
+        }
+        None => vec![Mb::new(u16::MAX); len],
+    };
+    Shared {
+        hold: Hold::Owned(held),
+        home: Some(home.clone()),
     }
 }
 
@@ -4255,7 +4280,7 @@ fn new_frame<S: Sample>(
         y: plane(spares, luma, S::default(), true),
         u: plane(spares, chroma, S::mid(), sps.chroma != 0),
         v: plane(spares, chroma, S::mid(), sps.chroma != 0),
-        mb: Shared::owned(vec![Mb::new(u16::MAX); blocks]),
+        mb: records(spares, blocks),
         w,
         h,
         mb_w,
@@ -4859,7 +4884,7 @@ fn run_picture<S: Sample>(job: PictureJob<S>) {
     pic.y = plane(spares, pic.w.saturating_mul(pic.h), S::default(), true);
     pic.u = plane(spares, chroma, S::mid(), true);
     pic.v = plane(spares, chroma, S::mid(), true);
-    pic.mb = Shared::owned(vec![Mb::new(u16::MAX); blocks]);
+    pic.mb = records(spares, blocks);
     let result = decode_picture(&mut pic, &dpb, &slices).map(|()| {
         // The picture is put in its output form here too, so the caller
         // only has to pick it up.

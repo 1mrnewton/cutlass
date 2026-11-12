@@ -2968,9 +2968,10 @@ fn one_mb<S: Sample>(
     mb.off_a = slice.off_a as i8;
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
-    // The macroblock is seen by its own slice from here on. A slot never
-    // decoded holds `Mb::new(u16::MAX)`, so setting what differs from that
-    // is the same as storing `mb` and spares copying all of it.
+    // The macroblock is seen by its own slice from here on. Until it is
+    // stored whole at its end, only these fields of its slot are read, so a
+    // slot not yet decoded needs only them set, sparing a copy of all of it;
+    // the rest may still hold another picture's macroblock.
     match pic.mb.get_mut(slot) {
         Some(held) if held.slice == u16::MAX => {
             held.slice = slice_id;

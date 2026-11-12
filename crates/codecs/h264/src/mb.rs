@@ -8973,21 +8973,8 @@ fn interview_reference<S: Sample>(
 }
 
 fn store_mv(mb: &mut Mb, part: &Part, mv: [i16; 2], list: usize) {
-    let x = part.x / 4;
-    let y = part.y / 4;
-    for by in 0..(part.h / 4) {
-        for bx in 0..(part.w / 4) {
-            let index = (y + by) * 4 + x + bx;
-            if list == 0 {
-                mb.mv0[index] = mv;
-                mb.mvd0[index] = [0, 0];
-            } else {
-                mb.mv1[index] = mv;
-                mb.mvd1[index] = [0, 0];
-            }
-            mb.ready |= 1 << index;
-        }
-    }
+    let blocks = cover(part.x / 4, part.y / 4, part.w / 4, part.h / 4);
+    fill_motion(mb, list, blocks, mv, [0, 0]);
 }
 
 /// J.8.2.1 with `bvsp_flag` 1 and `TextureFirstFlag` 1. The disparity is the
@@ -9470,23 +9457,38 @@ fn read_mvd_part<S: Sample>(
         super::clip_ref(i32::from(pred[1]) + dy),
     ];
     let mvd = [mvd_size(dx), mvd_size(dy)];
-    let bw = part.w / 4;
-    let bh = part.h / 4;
-    for by in 0..bh {
-        for bx in 0..bw {
-            let index = (y + by) * 4 + x + bx;
-            if list == 0 {
-                mb.mv0[index] = mv;
-                mb.mvd0[index] = mvd;
-            } else {
-                mb.mv1[index] = mv;
-                mb.mvd1[index] = mvd;
-            }
-            mb.ready |= 1 << index;
-        }
-    }
+    fill_motion(mb, list, cover(x, y, part.w / 4, part.h / 4), mv, mvd);
     let _ = slice;
     Ok(())
+}
+
+/// The 4×4 blocks, one bit each in raster order, of the `w` by `h` blocks
+/// from block (`x`, `y`) of a macroblock.
+#[inline(always)]
+fn cover(x: usize, y: usize, w: usize, h: usize) -> u16 {
+    let row = ((1u32 << w) - 1) << x;
+    let rows = row * (0x1111 & ((1u32 << (4 * h)) - 1));
+    (rows << (4 * y)) as u16
+}
+
+/// Sets the motion vector and difference of list `list` in the blocks of
+/// `cover`. Every block is written or kept by a select rather than looped
+/// over, as how many there are changes from one partition to the next.
+#[inline(always)]
+fn fill_motion(mb: &mut Mb, list: usize, cover: u16, mv: [i16; 2], mvd: [u8; 2]) {
+    let mvs = if list == 0 { &mut mb.mv0 } else { &mut mb.mv1 };
+    for (index, held) in mvs.iter_mut().enumerate() {
+        *held = if cover >> index & 1 != 0 { mv } else { *held };
+    }
+    let mvds = if list == 0 {
+        &mut mb.mvd0
+    } else {
+        &mut mb.mvd1
+    };
+    for (index, size) in mvds.iter_mut().enumerate() {
+        *size = if cover >> index & 1 != 0 { mvd } else { *size };
+    }
+    mb.ready |= cover;
 }
 
 /// A motion vector difference as kept for the contexts of later ones.
@@ -9695,16 +9697,7 @@ fn median(a: i16, b: i16, c: i16) -> i16 {
 
 /// The partition is decoded, so later motion-vector prediction may see it.
 fn mark_decoded(mb: &mut Mb, x: usize, y: usize, w: usize, h: usize) {
-    let mut py = y;
-    while py < y + h {
-        let mut px = x;
-        while px < x + w {
-            let index = (py / 4) * 4 + (px / 4);
-            mb.ready |= 1 << index;
-            px += 4;
-        }
-        py += 4;
-    }
+    mb.ready |= cover(x / 4, y / 4, w / 4, h / 4);
 }
 
 #[inline]
@@ -13168,6 +13161,28 @@ fn coded_mb<S: Sample>(pic: &Frame<S>, mx: i32, my: i32) -> Option<&Mb> {
     }
     let mb = pic.mb.get(my as usize * pic.mb_w + mx as usize)?;
     if mb.slice == u16::MAX { None } else { Some(mb) }
+}
+
+#[cfg(test)]
+mod covers {
+    use super::cover;
+
+    #[test]
+    fn cover_marks_the_blocks_of_every_partition_shape() {
+        for (w, h) in [(4, 4), (4, 2), (2, 4), (2, 2), (2, 1), (1, 2), (1, 1)] {
+            for y in 0..=4 - h {
+                for x in 0..=4 - w {
+                    let mut want = 0u16;
+                    for by in y..y + h {
+                        for bx in x..x + w {
+                            want |= 1 << (by * 4 + bx);
+                        }
+                    }
+                    assert_eq!(cover(x, y, w, h), want, "{x} {y} {w} {h}");
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

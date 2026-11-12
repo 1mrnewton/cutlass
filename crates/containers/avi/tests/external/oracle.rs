@@ -350,6 +350,21 @@ const CASES: &[Case] = &[
         encoders: &["rawvideo"],
         codecs: &[Some(CodecId::RawVideo), Some(CodecId::Pcm)],
     },
+    Case {
+        name: "vp9-ac3",
+        args: &["-c:v", "libvpx-vp9", "-deadline", "realtime", "-c:a", "ac3"],
+        encoders: &["libvpx-vp9", "ac3"],
+        codecs: &[Some(CodecId::Vp9), Some(CodecId::Ac3)],
+    },
+    Case {
+        // FFmpeg's framecrc gives a FLAC stream in AVI one packet more
+        // than ffprobe does, so the oracle cannot pair them; FLAC is
+        // checked through the muxer copy instead.
+        name: "av1-pcm",
+        args: &["-c:v", "libsvtav1", "-preset", "12", "-c:a", "pcm_s16le"],
+        encoders: &["libsvtav1"],
+        codecs: &[Some(CodecId::Av1), Some(CodecId::Pcm)],
+    },
 ];
 
 #[test]

@@ -63,6 +63,7 @@ struct Tally {
     open_ended: u32,
     widest_open: u64,
     misnamed: u32,
+    forward: u32,
 }
 
 #[test]
@@ -105,7 +106,7 @@ fn real_caf_files_read_and_seek_without_reading_the_sound() {
     eprintln!(
         "{} real CAF files: {} packets, {} payload bytes, {} with a broken chunk after data, \
          {} with data of unknown size, {} checked against afinfo and ffprobe, open read at most {} bytes; \
-         {} files named .caf are not CAF",
+         {} files named .caf are not CAF; {} also read forward",
         tally.files,
         tally.packets,
         tally.bytes,
@@ -113,7 +114,8 @@ fn real_caf_files_read_and_seek_without_reading_the_sound() {
         tally.open_ended,
         tally.oracle,
         tally.widest_open,
-        tally.misnamed
+        tally.misnamed,
+        tally.forward
     );
 }
 
@@ -149,6 +151,26 @@ fn check(file: &Path, tally: &mut Tally) {
         demux.total_frames().expect("frames"),
         "{name}"
     );
+    // A forward reader, as for a file still being copied in, gives the same
+    // packets wherever the table sits before the data.
+    let handle = File::open(file).expect("open");
+    match CafDemux::open_forward(handle) {
+        Ok(mut forward) => {
+            tally.forward += 1;
+            for (at, (_, bytes)) in times.iter().enumerate() {
+                let packet = forward
+                    .read_packet()
+                    .unwrap_or_else(|error| panic!("{name}: forward {error}"))
+                    .unwrap_or_else(|| panic!("{name}: forward read ended at {at}"));
+                assert_eq!(packet.bytes(), &bytes[..], "{name}: forward packet {at}");
+            }
+            assert!(forward.read_packet().expect("end").is_none(), "{name}");
+        }
+        Err(error) => {
+            let table_after = demux.packet_table().is_some() && !demux.description().is_constant();
+            assert!(table_after, "{name}: forward open failed: {error}");
+        }
+    }
     if times.is_empty() {
         return;
     }

@@ -28,6 +28,7 @@ cutlass-encode = { path = "../encode", version = "0.1.0" }
 cutlass-export = { path = "../export", version = "0.1.0" }
 cutlass-isobmff = { path = "../containers/isobmff", version = "0.1.0" }
 cutlass-riff = { path = "../containers/riff", version = "0.1.0" }
+cutlass-avi = { path = "../containers/avi", version = "0.1.0" }
 cutlass-aiff = { path = "../containers/aiff", version = "0.1.0" }
 cutlass-flac-container = { path = "../containers/flac", version = "0.1.0" }
 cutlass-ogg = { path = "../containers/ogg", version = "0.1.0" }

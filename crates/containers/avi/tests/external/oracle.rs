@@ -974,3 +974,233 @@ fn an_ffmpeg_opendml_file_over_one_gib_matches_ffprobe() {
     check_against_ffprobe(&path);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Picture `index` of the big muxed file: H.264-shaped, a keyframe every
+/// 50, about 200 KB.
+fn big_picture(index: u32) -> Vec<u8> {
+    let size = 180_000 + usize::try_from(index.wrapping_mul(7_919) % 40_000).expect("size");
+    let mut bytes = vec![u8::try_from(index % 251).expect("byte"); size];
+    bytes[..5].copy_from_slice(&[
+        0,
+        0,
+        0,
+        1,
+        if index.is_multiple_of(50) { 0x65 } else { 0x41 },
+    ]);
+    bytes[size - 4..].copy_from_slice(&index.to_le_bytes());
+    bytes
+}
+
+/// Sound block `index`: 1920 stereo 16-bit samples, 40 ms at 48 kHz.
+fn big_sound(index: u32) -> Vec<u8> {
+    (0..7_680u32)
+        .map(|at| u8::try_from((at.wrapping_mul(31) ^ index) % 256).expect("byte"))
+        .collect()
+}
+
+/// All of `stream`'s buffers from GStreamer's `avidemux`, back to back in
+/// one file.
+fn gstreamer_concat(path: &Path, pad: &str, into: &Path) -> bool {
+    if !tool_on_path("gst-launch-1.0") {
+        return false;
+    }
+    let location = format!("location={}", path.display());
+    let pad = format!("d.{pad}");
+    let sink = format!("location={}", into.display());
+    let out = output(
+        "perl",
+        &[
+            "-e",
+            "alarm 600; exec @ARGV",
+            "gst-launch-1.0",
+            "-q",
+            "filesrc",
+            &location,
+            "!",
+            "avidemux",
+            "name=d",
+            &pad,
+            "!",
+            "queue",
+            "!",
+            "filesink",
+            &sink,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "gst: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    true
+}
+
+/// A file over 1 GiB from this crate's muxer, written straight to disk:
+/// two RIFF segments of H.264-shaped pictures and PCM. This crate's
+/// indexed and forward readers, ffprobe (every packet's size, Adler-32,
+/// keyframe and time) and GStreamer (every byte of both streams) read it
+/// back. About 2.5 GB of scratch space at the peak and a few minutes.
+#[test]
+#[ignore = "writes a 1.2 GB file; run with --ignored"]
+fn a_muxed_file_over_one_gib_reads_back_in_ffprobe_and_gstreamer() {
+    use std::io::{BufReader, BufWriter, Read};
+
+    const FRAMES: u32 = 6_000;
+    let dir = scratch("muxed-big");
+    let path = dir.join("big.avi");
+    let file = std::fs::File::create(&path).expect("create");
+    let mut mux = AviMux::new(BufWriter::new(file));
+    mux.add_stream(NewStream {
+        params: StreamParams::video(
+            StreamCodec::Known(CodecId::H264),
+            FrameSize::try_new(1280, 720).expect("size"),
+            Vec::new(),
+        ),
+        timescale: Timescale::new(25),
+        language: None,
+    })
+    .expect("video");
+    // Empty PCM extradata is 16-bit little-endian.
+    mux.add_stream(NewStream {
+        params: StreamParams::try_audio(StreamCodec::Known(CodecId::Pcm), 48_000, 2, Vec::new())
+            .expect("audio"),
+        timescale: Timescale::new(48_000),
+        language: None,
+    })
+    .expect("audio");
+    for index in 0..FRAMES {
+        let time = i64::from(index);
+        mux.write_packet(&stamp(
+            0,
+            big_picture(index),
+            time,
+            1,
+            25,
+            index.is_multiple_of(50),
+        ))
+        .expect("picture");
+        mux.write_packet(&stamp(
+            1,
+            big_sound(index),
+            time * 1_920,
+            1_920,
+            48_000,
+            true,
+        ))
+        .expect("sound");
+    }
+    let finished = mux
+        .finish(&[
+            TrackDuration {
+                track: TrackId::new(0),
+                timescale: Timescale::new(25),
+                ticks: i64::from(FRAMES),
+            },
+            TrackDuration {
+                track: TrackId::new(1),
+                timescale: Timescale::new(48_000),
+                ticks: i64::from(FRAMES) * 1_920,
+            },
+        ])
+        .expect("finish");
+    assert!(finished.interleaved());
+    let riffs = mux.riff_count();
+    drop(
+        mux.into_writer()
+            .expect("writer")
+            .into_inner()
+            .expect("flush"),
+    );
+    let length = std::fs::metadata(&path).expect("size").len();
+    assert!(length > 1 << 30, "{length} bytes");
+    assert_eq!(riffs, 2);
+    eprintln!("wrote {length} bytes in {riffs} RIFF segments");
+
+    // This crate, through the indexes and then front to back.
+    let mut demux = open_path(&path);
+    assert_eq!(demux.index_source(), IndexSource::OpenDml);
+    assert_eq!(demux.riff_count(), 2);
+    let check = |demux: &mut dyn Demux, name: &str| {
+        let (mut pictures, mut sound) = (0u32, Vec::new());
+        while let Some(packet) = demux.read_packet().expect("read") {
+            if packet.stream() == 0 {
+                let at = pictures;
+                assert!(packet.bytes() == big_picture(at), "{name} picture {at}");
+                assert_eq!(packet.timestamp().decode(), Some(i64::from(at)), "{name}");
+                assert_eq!(
+                    packet.keyframe(),
+                    at.is_multiple_of(50),
+                    "{name} picture {at}"
+                );
+                pictures += 1;
+            } else {
+                sound.extend_from_slice(packet.bytes());
+            }
+        }
+        assert_eq!(pictures, FRAMES, "{name}");
+        let want: Vec<u8> = (0..FRAMES).flat_map(big_sound).collect();
+        assert!(sound == want, "{name} sound");
+    };
+    check(&mut demux, "indexed");
+    let reader = BufReader::new(std::fs::File::open(&path).expect("open"));
+    let mut forward = AviForwardDemux::open(reader).expect("forward");
+    check(&mut forward, "forward");
+
+    if tool_on_path("ffprobe") && tool_on_path("ffmpeg") {
+        let (bases, probed) = ffprobe(&path);
+        assert_eq!(bases, vec![(1, 25), (1, 48_000)]);
+        assert_eq!(probed[0].len(), FRAMES as usize);
+        for (index, row) in (0..FRAMES).zip(&probed[0]) {
+            let picture = big_picture(index);
+            assert_eq!(row.size, picture.len(), "ffprobe picture {index}");
+            assert_eq!(row.adler, adler32(&picture), "ffprobe picture {index}");
+            assert_eq!(row.key, index.is_multiple_of(50), "ffprobe picture {index}");
+            assert_eq!(row.dts, Some(i64::from(index)), "ffprobe picture {index}");
+        }
+        // FFmpeg cuts long PCM chunks; each piece starts at its first byte.
+        let mut offset = 0usize;
+        for row in &probed[1] {
+            assert_eq!(
+                row.dts,
+                Some(i64::try_from(offset / 4).expect("time")),
+                "ffprobe sound"
+            );
+            offset += row.size;
+        }
+        assert_eq!(offset, FRAMES as usize * 7_680);
+        eprintln!(
+            "ffprobe: {} pictures, {} sound packets",
+            probed[0].len(),
+            probed[1].len()
+        );
+    } else {
+        eprintln!("skipped ffprobe check: ffmpeg or ffprobe is missing");
+    }
+
+    for (pad, stream) in [("video_0", 0), ("audio_0", 1)] {
+        let into = dir.join(format!("{pad}.bin"));
+        if !gstreamer_concat(&path, pad, &into) {
+            eprintln!("skipped GStreamer check: gst-launch-1.0 is missing");
+            break;
+        }
+        let mut got = BufReader::new(std::fs::File::open(&into).expect("gst output"));
+        for index in 0..FRAMES {
+            let want = if stream == 0 {
+                big_picture(index)
+            } else {
+                big_sound(index)
+            };
+            let mut buffer = vec![0; want.len()];
+            got.read_exact(&mut buffer).expect("gst bytes");
+            assert!(buffer == want, "gstreamer {pad} block {index}");
+        }
+        assert_eq!(
+            got.read(&mut [0; 1]).expect("end"),
+            0,
+            "gstreamer {pad} ends"
+        );
+        std::fs::remove_file(&into).expect("remove");
+        eprintln!("GStreamer: {pad} matches byte for byte");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

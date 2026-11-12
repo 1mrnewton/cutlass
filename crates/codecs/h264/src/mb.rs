@@ -12065,6 +12065,33 @@ fn inner_edges_flat(mb: &Mb) -> bool {
     !mb.intra && mb.nnz_y == [0; 16] && single_motion(mb)
 }
 
+/// Whether no edge of the frame macroblock `mb`, at slot `index` and
+/// place `at`, can change a sample: alpha or beta is 0 at every QP its
+/// edges are filtered at, its own inside and the average with the
+/// macroblock to its left and the one above on its boundary, in each
+/// plane. That is so when each such QP plus the smaller of the two
+/// offsets is below 16. FFmpeg passes over such macroblocks the same way;
+/// here the highest QP of the three planes stands for them all, which
+/// never says nothing is filtered when something is.
+#[inline(never)]
+fn filters_nothing<S: Sample>(pic: &Frame<S>, mb: &Mb, index: usize, at: (usize, usize)) -> bool {
+    let highest = |mb: &Mb| i32::from(mb.qp.max(mb.qp_c).max(mb.qp_cr));
+    let limit = 15 - i32::from(mb.off_a.min(mb.off_b));
+    let own = highest(mb);
+    if own > limit {
+        return false;
+    }
+    let (mx, my) = at;
+    let low = |near: Option<&Mb>| near.is_none_or(|near| (own + highest(near) + 1) >> 1 <= limit);
+    let left = if mx > 0 { pic.mb.get(index - 1) } else { None };
+    let above = if my > 0 {
+        pic.mb.get(index - pic.mb_w)
+    } else {
+        None
+    };
+    low(left) && low(above)
+}
+
 fn deblock_planes<S: Sample>(
     pic: &Frame<S>,
     chroma: u8,
@@ -12095,7 +12122,9 @@ fn deblock_planes<S: Sample>(
             let Some(mb) = pic.mb.get(index) else {
                 continue;
             };
-            if mb.deblock == 1 || mb.pcm {
+            // Luma's QP alone rules most macroblocks out of the test below.
+            let low = i32::from(mb.qp) + i32::from(mb.off_a.min(mb.off_b)) < 16;
+            if mb.deblock == 1 || mb.pcm || (low && filters_nothing(pic, mb, index, (mx, my))) {
                 continue;
             }
             let transform8 = mb.transform8;

@@ -52,7 +52,9 @@ pub trait Syntax {
 }
 
 /// Times frames on the 90 kHz clock without drift: the time of a frame is
-/// the last PES timestamp plus the samples since, scaled once.
+/// the last PES timestamp plus the samples since, scaled once and rounded
+/// to the nearest tick. A length is the difference of two such times, so
+/// lengths add up to the exact total.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Clock {
     base: Option<i64>,
@@ -74,7 +76,10 @@ impl Clock {
         if rate == 0 {
             return 0;
         }
-        let ticks = u128::from(samples) * 90_000 / u128::from(rate);
+        // Rounded to the nearest tick, as FFmpeg times frames between PES
+        // timestamps.
+        let rate = u128::from(rate);
+        let ticks = (u128::from(samples) * 90_000 + rate / 2) / rate;
         i64::try_from(ticks).unwrap_or(i64::MAX)
     }
 

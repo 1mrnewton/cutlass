@@ -2549,6 +2549,8 @@ version = "0.1.0"
 dependencies = [
  "cutlass-codec",
  "cutlass-container",
+ "cutlass-decode",
+ "cutlass-pcm",
 ]
 
 [[package]]

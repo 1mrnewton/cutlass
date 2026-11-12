@@ -2,10 +2,19 @@
 //!
 //! Linear PCM extradata is the three-byte layout `cutlass-pcm` reads:
 //! coding, endian (1 is big), arrangement (0, interleaved). Coding 1 to 5
-//! are s16, s24, s32, f32 and f64; 6 is 8-bit, 7 a-law, 8 µ-law, 9 s64.
-//! CAF linear PCM is signed and packed: `mBytesPerPacket` is the channel
-//! count times the whole bytes of `mBitsPerChannel`, and `mFramesPerPacket`
-//! is 1. A layout outside that is published as an unknown `lpcm` stream.
+//! are s16, s24, s32, f32 and f64; 6 is signed 8-bit, 7 a-law, 8 µ-law,
+//! 9 s64. CAF integer PCM is signed. A sample takes `mBytesPerPacket` over
+//! the channel count bytes and `mFramesPerPacket` is 1.
+//!
+//! When `mBitsPerChannel` is less than that word, the sample is unpacked.
+//! The CAF `desc` has no alignment flag; AudioToolbox reports such a file as
+//! high-aligned and decodes the whole word, low bits included (checked for
+//! 8 in 2, 12 in 2, 16 in 4, 20 in 3, 20 in 4 and 24 in 4 bytes against
+//! `afconvert -d LEF32`). So an unpacked sample maps to the integer coding
+//! of its word: 2 bytes s16, 3 bytes s24, 4 bytes s32. A word of 8 bytes is
+//! s64 only when all 64 bits are used, since AudioToolbox refuses to decode
+//! narrower samples in 8 bytes and there is no reference for them. Any
+//! other layout, including unpacked float, is an unknown `lpcm` stream.
 
 use cutlass_codec::{CodecId, StreamCodec, UnknownCodec};
 use cutlass_container::OpenError;
@@ -37,20 +46,32 @@ fn known(codec: CodecId, extradata: Vec<u8>) -> Mapped {
 /// The PCM coding byte for a linear PCM description, or `None` when the
 /// layout is not one `cutlass-pcm` names.
 pub(crate) fn pcm_coding(desc: &Description) -> Option<u8> {
-    let float = desc.flags & FLAG_FLOAT != 0;
-    let coding = match (float, desc.bits_per_channel) {
-        (false, 8) => 6,
-        (false, 16) => 1,
-        (false, 24) => 2,
-        (false, 32) => 3,
-        (false, 64) => 9,
-        (true, 32) => 4,
-        (true, 64) => 5,
-        _ => return None,
-    };
-    let width = desc.bits_per_channel / 8;
-    let packed = desc.channels.checked_mul(width) == Some(desc.bytes_per_packet);
-    (packed && desc.frames_per_packet == 1).then_some(coding)
+    if desc.frames_per_packet != 1
+        || desc.channels == 0
+        || !desc.bytes_per_packet.is_multiple_of(desc.channels)
+    {
+        return None;
+    }
+    let word = desc.bytes_per_packet / desc.channels;
+    let bits = desc.bits_per_channel;
+    if bits == 0 || bits > word.checked_mul(8)? {
+        return None;
+    }
+    if desc.flags & FLAG_FLOAT != 0 {
+        return match (bits, word) {
+            (32, 4) => Some(4),
+            (64, 8) => Some(5),
+            _ => None,
+        };
+    }
+    match (word, bits) {
+        (1, _) => Some(6),
+        (2, _) => Some(1),
+        (3, _) => Some(2),
+        (4, _) => Some(3),
+        (8, 64) => Some(9),
+        _ => None,
+    }
 }
 
 /// Maps a description and its cookie.
@@ -152,17 +173,36 @@ mod tests {
         assert_eq!(pcm_coding(&pcm(64, 3, 1, 8)), Some(5));
         assert_eq!(pcm_coding(&pcm(8, 2, 2, 2)), Some(6));
         assert_eq!(pcm_coding(&pcm(64, 0, 1, 8)), Some(9));
-        // Unpacked, odd widths, and float that is not 32 or 64 bits.
-        assert_eq!(pcm_coding(&pcm(24, 0, 2, 8)), None);
-        assert_eq!(pcm_coding(&pcm(12, 0, 1, 2)), None);
+        // Unpacked integers take the coding of their word.
+        assert_eq!(pcm_coding(&pcm(24, 0, 2, 8)), Some(3));
+        assert_eq!(pcm_coding(&pcm(20, 2, 1, 4)), Some(3));
+        assert_eq!(pcm_coding(&pcm(20, 2, 1, 3)), Some(2));
+        assert_eq!(pcm_coding(&pcm(12, 0, 1, 2)), Some(1));
+        assert_eq!(pcm_coding(&pcm(8, 0, 1, 2)), Some(1));
+        assert_eq!(pcm_coding(&pcm(4, 0, 1, 1)), Some(6));
+        // Not readable: narrower than 64 bits in 8 bytes, wider than the
+        // word, zero bits, a word that is not a whole share of the packet,
+        // several frames a packet, and float that is not 32 or 64 bits.
+        assert_eq!(pcm_coding(&pcm(24, 0, 1, 8)), None);
+        assert_eq!(pcm_coding(&pcm(32, 0, 1, 2)), None);
+        assert_eq!(pcm_coding(&pcm(0, 0, 1, 2)), None);
+        assert_eq!(pcm_coding(&pcm(16, 0, 2, 5)), None);
+        assert_eq!(pcm_coding(&pcm(16, 0, 0, 0)), None);
         assert_eq!(pcm_coding(&pcm(16, 1, 1, 2)), None);
+        assert_eq!(pcm_coding(&pcm(32, 1, 1, 8)), None);
+        assert_eq!(pcm_coding(&pcm(24, 0, 1, 5)), None);
+        let mut several = pcm(16, 0, 1, 4);
+        several.frames_per_packet = 2;
+        assert_eq!(pcm_coding(&several), None);
         let mapped = map(&pcm(16, 2, 2, 4), None, 0).expect("map");
         assert_eq!(mapped.codec, StreamCodec::Known(CodecId::Pcm));
         assert_eq!(mapped.extradata, vec![1, 0, 0]);
         let mapped = map(&pcm(24, 0, 2, 6), None, 0).expect("map");
         assert_eq!(mapped.extradata, vec![2, 1, 0]);
+        let mapped = map(&pcm(24, 2, 2, 8), None, 0).expect("map");
+        assert_eq!(mapped.extradata, vec![3, 0, 0]);
         assert!(
-            map(&pcm(24, 0, 2, 8), None, 0)
+            map(&pcm(24, 0, 1, 8), None, 0)
                 .expect("map")
                 .codec
                 .is_unknown()

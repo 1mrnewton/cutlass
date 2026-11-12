@@ -22,6 +22,11 @@ pub const FEATURES: &[Feature] = &[
         mux: true,
     },
     Feature {
+        name: "lpcm-unpacked",
+        demux: true,
+        mux: false,
+    },
+    Feature {
         name: "lpcm-float",
         demux: true,
         mux: true,
@@ -141,6 +146,8 @@ mod tests {
             assert!(row(name).demux && row(name).mux, "{name}");
         }
         assert!(row("other-format-framed").demux && !row("other-format-framed").mux);
+        // Unpacked samples are read as their word; a remux writes them packed.
+        assert!(row("lpcm-unpacked").demux && !row("lpcm-unpacked").mux);
         assert!(!row("caf-version-other").demux);
     }
 }

@@ -10,6 +10,7 @@
     clippy::unwrap_used
 )]
 
+mod decode;
 mod fuzz;
 mod local;
 mod measure;

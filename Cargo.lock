@@ -5645,6 +5645,7 @@ dependencies = [
  "cutlass-hevc",
  "cutlass-isobmff",
  "cutlass-jpeg",
+ "cutlass-matroska",
  "cutlass-mjpeg",
  "cutlass-mp3",
  "cutlass-mp3-container",

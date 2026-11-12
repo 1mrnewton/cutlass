@@ -3967,6 +3967,10 @@ fn decode_frame_sync<P: PicturePixel>(
     // decoded, while its samples are still in the cache.
     let lf_on = hdr.loop_filter.level[0] != 0 || hdr.loop_filter.level[1] != 0;
     if threads <= 1 && !hdr.use_superres && (lf_on || cdef_on || hdr.lr.uses_lr) {
+        // Everything that reads the mode info of a row does so by the end
+        // of the superblock row below it: the rows go round a ring that
+        // stays in the cache rather than through the frame's.
+        fs.mi_ring = MI_RING - 1;
         info.size_for(fs);
         let levels = postfilter::LfLevels::new(hdr);
         let mut filt = InlineFilter {
@@ -3982,10 +3986,6 @@ fn decode_frame_sync<P: PicturePixel>(
             published: 0,
             overlap: band_overlap(seq.use_128x128_superblock),
         };
-        // Everything that reads the mode info of a row does so by the end
-        // of the superblock row below it: the rows go round a ring that
-        // stays in the cache rather than through the frame's.
-        fs.mi_ring = MI_RING - 1;
         let res = decode_tiles_by_rows(
             seq,
             hdr,

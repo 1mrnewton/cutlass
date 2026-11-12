@@ -3848,7 +3848,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let step_x = tx_w(tx) >> 2;
         let step_y = tx_h(tx) >> 2;
         let st = self.fs.mi_stride;
-        let at = (row >> sy) * st + (col >> sx);
+        let at = self.fs.mi_row(row >> sy) + (col >> sx);
         let dims = if self.b.skip && self.b.ref_frame[0] > INTRA_FRAME {
             let psz = plane_residual_size(self.b.bsize, sx != 0, sy != 0);
             lf_dims(

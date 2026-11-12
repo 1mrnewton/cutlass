@@ -165,6 +165,8 @@ impl LfInfo {
 pub struct FilterInfo {
     pub units: Vec<[u8; 4]>,
     pub stride: usize,
+    /// The rows of the frame go round [`FrameState::mi_ring`] rows.
+    ring: usize,
 }
 
 impl FilterInfo {
@@ -172,7 +174,14 @@ impl FilterInfo {
     /// until their blocks are stored.
     pub fn size_for(&mut self, fs: &FrameState) {
         self.stride = fs.mi_stride;
+        self.ring = fs.mi_ring;
         self.units.resize(fs.lf_tx[0].len(), [0; 4]);
+    }
+
+    /// Where the units of luma 4x4 row `r` start.
+    #[inline(always)]
+    fn row(&self, r: usize) -> usize {
+        (r & self.ring) * self.stride
     }
 
     /// Stores the info of a block at luma 4x4 position `(row, col)`, in
@@ -187,7 +196,7 @@ impl FilterInfo {
         let w4 = bw4(info.bsize).min(mi_cols.saturating_sub(col));
         let h4 = bh4(info.bsize).min(mi_rows.saturating_sub(row));
         for y in 0..h4 {
-            let at = (row + y) * self.stride + col;
+            let at = self.row(row + y) + col;
             if let Some(d) = self.units.get_mut(at..at + w4) {
                 d.fill(info.bytes());
             }
@@ -202,7 +211,6 @@ impl FilterInfo {
         fs: &FrameState,
         rows: core::ops::Range<usize>,
     ) {
-        let st = fs.mi_stride;
         let cols = fs.mi_cols;
         let rows = rows.start..rows.end.min(fs.mi_rows);
         // For the column a block starts at: the row it ends at and its
@@ -255,7 +263,8 @@ impl FilterInfo {
                     },
                 );
                 for rr in r..bottom {
-                    if let Some(out) = self.units.get_mut(rr * st + c..rr * st + end) {
+                    let o = self.row(rr);
+                    if let Some(out) = self.units.get_mut(o + c..o + end) {
                         out.fill(info.bytes());
                     }
                 }
@@ -268,7 +277,7 @@ impl FilterInfo {
     /// Whether the block at luma 4x4 position `(row, col)` is skipped.
     #[inline(always)]
     pub fn skip(&self, row: usize, col: usize) -> bool {
-        self.units[row * self.stride + col][0] & UNIT_SKIP != 0
+        self.units[self.row(row) + col][0] & UNIT_SKIP != 0
     }
 }
 
@@ -343,7 +352,8 @@ impl<'a> LfPlane<'a> {
         // The row of block info holding the unit's bottom-right 4x4 for
         // chroma, and the row above it for the horizontal edges.
         let r = (ur << sy) | sy;
-        let cur = &self.tx[ur * st..ur * st + n];
+        let at = self.fs.mi_row(ur);
+        let cur = &self.tx[at..at + n];
         let key = (self.plane, self.pass, ur);
         let (across, edges) = if pass0 {
             (cur, None)
@@ -353,15 +363,17 @@ impl<'a> LfPlane<'a> {
                 core::mem::swap(&mut row.lvl, &mut row.lvl_prev);
             } else {
                 let pr = r - (1 << sy);
-                self.levels(&units[pr * st..(pr + 1) * st], &mut row.lvl_prev[..n]);
+                let at = self.info.row(pr);
+                self.levels(&units[at..at + st], &mut row.lvl_prev[..n]);
             }
             let zeros = ur.trailing_zeros().min(7) as u8;
             (
-                &self.tx[(ur - 1) * st..(ur - 1) * st + n],
+                &self.tx[self.fs.mi_row(ur - 1)..self.fs.mi_row(ur - 1) + n],
                 Some(Edges::Top { zeros }),
             )
         };
-        self.levels(&units[r * st..(r + 1) * st], &mut row.lvl[..n]);
+        let at = self.info.row(r);
+        self.levels(&units[at..at + st], &mut row.lvl[..n]);
         row.lvl_of = Some(key);
         let luma = self.plane == 0;
         row.n = n;

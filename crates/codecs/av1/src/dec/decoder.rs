@@ -6,6 +6,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use cutlass_decode::CodecError;
+use cutlass_simd::shared_rows::{PlaneBuf, RowsWriter, SharedRows};
 
 use crate::dsp::Pixel;
 use crate::dsp::fg::{FilmGrainParams, apply_film_grain};
@@ -35,19 +36,20 @@ pub enum AnyPicture {
     U16(Picture<u16>),
 }
 
-/// Sample rows of each plane of either sample size (see [`Band`]).
-pub enum AnyRows {
-    U8([Vec<u8>; 3]),
-    U16([Vec<u16>; 3]),
+/// The final rows of a frame still being decoded, of either sample size
+/// (see [`Mirror`]).
+#[derive(Clone)]
+pub enum AnyShared {
+    U8(Arc<SharedRows<u8>>),
+    U16(Arc<SharedRows<u16>>),
 }
 
 /// A sample type that can be viewed inside an [`AnyPicture`].
 pub trait PicturePixel: Pixel {
     fn view(p: &AnyPicture) -> Option<&Picture<Self>>;
     fn wrap(p: Picture<Self>) -> AnyPicture;
-    fn view_rows(r: &AnyRows) -> Option<&[Vec<Self>; 3]>;
-    fn wrap_rows(r: [Vec<Self>; 3]) -> AnyRows;
-    fn unwrap_rows(r: AnyRows) -> Option<[Vec<Self>; 3]>;
+    fn view_shared(r: &AnyShared) -> Option<&Arc<SharedRows<Self>>>;
+    fn wrap_shared(r: Arc<SharedRows<Self>>) -> AnyShared;
 }
 
 impl PicturePixel for u8 {
@@ -60,20 +62,14 @@ impl PicturePixel for u8 {
     fn wrap(p: Picture<u8>) -> AnyPicture {
         AnyPicture::U8(p)
     }
-    fn view_rows(r: &AnyRows) -> Option<&[Vec<u8>; 3]> {
+    fn view_shared(r: &AnyShared) -> Option<&Arc<SharedRows<u8>>> {
         match r {
-            AnyRows::U8(x) => Some(x),
-            AnyRows::U16(_) => None,
+            AnyShared::U8(x) => Some(x),
+            AnyShared::U16(_) => None,
         }
     }
-    fn wrap_rows(r: [Vec<u8>; 3]) -> AnyRows {
-        AnyRows::U8(r)
-    }
-    fn unwrap_rows(r: AnyRows) -> Option<[Vec<u8>; 3]> {
-        match r {
-            AnyRows::U8(x) => Some(x),
-            AnyRows::U16(_) => None,
-        }
+    fn wrap_shared(r: Arc<SharedRows<u8>>) -> AnyShared {
+        AnyShared::U8(r)
     }
 }
 
@@ -87,20 +83,14 @@ impl PicturePixel for u16 {
     fn wrap(p: Picture<u16>) -> AnyPicture {
         AnyPicture::U16(p)
     }
-    fn view_rows(r: &AnyRows) -> Option<&[Vec<u16>; 3]> {
+    fn view_shared(r: &AnyShared) -> Option<&Arc<SharedRows<u16>>> {
         match r {
-            AnyRows::U16(x) => Some(x),
-            AnyRows::U8(_) => None,
+            AnyShared::U16(x) => Some(x),
+            AnyShared::U8(_) => None,
         }
     }
-    fn wrap_rows(r: [Vec<u16>; 3]) -> AnyRows {
-        AnyRows::U16(r)
-    }
-    fn unwrap_rows(r: AnyRows) -> Option<[Vec<u16>; 3]> {
-        match r {
-            AnyRows::U16(x) => Some(x),
-            AnyRows::U8(_) => None,
-        }
+    fn wrap_shared(r: Arc<SharedRows<u16>>) -> AnyShared {
+        AnyShared::U16(r)
     }
 }
 
@@ -186,13 +176,11 @@ struct Slot {
     cdf: CdfPromise,
 }
 
-/// Time spent in the stages of the threaded decoder (summed over threads),
-/// gathered with the `prof` feature.
-#[cfg(test)]
-mod band_tests;
 mod parse;
 mod tiles;
 
+/// Time spent in the stages of the threaded decoder (summed over threads),
+/// gathered with the `prof` feature.
 pub mod prof {
     use std::sync::atomic::{AtomicU64, Ordering};
     /// The calling thread waiting for pictures.
@@ -397,84 +385,40 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Final sample rows of a frame still being decoded: luma rows `y0..y1`
-/// (chroma rows scaled by the subsampling) of each plane.
-pub struct Band {
-    /// The luma rows this band adds to the ones before it.
-    y0: usize,
-    y1: usize,
-    /// First row held of each plane, and the number of rows: the rows
-    /// added, and above them the last rows of the bands before, so that
-    /// the rows of a block lie in one band (see [`band_overlap`]).
-    row0: [usize; 3],
-    nrows: [usize; 3],
-    /// Samples of each row held (the visible width), rows packed.
-    widths: [usize; 3],
-    rows: AnyRows,
+/// The rows of a reference still being decoded that reconstruction reads
+/// ([`RefView::mirror`]): its final rows so far, read in place.
+pub struct Mirror<P> {
+    shared: Option<Arc<SharedRows<P>>>,
 }
 
-/// The rows of a reference still being decoded that reconstruction reads
-/// ([`RefView::mirror`]): the bands it published so far, read in place.
-pub struct Mirror<P> {
-    bands: Vec<Arc<Band>>,
-    view: fn(&AnyRows) -> Option<&[Vec<P>; 3]>,
+impl<P> Default for Mirror<P> {
+    fn default() -> Self {
+        Self { shared: None }
+    }
 }
 
 impl<P> Mirror<P> {
-    pub fn new(view: fn(&AnyRows) -> Option<&[Vec<P>; 3]>) -> Self {
-        Self {
-            bands: Vec::new(),
-            view,
-        }
-    }
-
-    /// Rows `y0..y1` of plane `p` when one band holds them all: its
-    /// samples from row `y0` on, and their stride. Bands overlap, and the
-    /// first one that reaches `y1` starts the highest.
+    /// Rows `y0..y1` of plane `p` when they are final: the samples from
+    /// row `y0` on, and their stride.
     #[inline]
     pub fn rows(&self, p: usize, y0: usize, y1: usize) -> Option<(&[P], usize)> {
-        let p = p.min(2);
-        let i = self.bands.partition_point(|b| b.row0[p] + b.nrows[p] < y1);
-        let b = self.bands.get(i)?;
-        if b.row0[p] > y0 || y1 <= y0 {
-            return None;
-        }
-        let rows = (self.view)(&b.rows)?;
-        let w = b.widths[p];
-        Some((rows[p].get((y0 - b.row0[p]) * w..)?, w))
+        self.shared.as_ref()?.rows(p, y0, y1)
     }
 
-    /// The rows of plane `p` from row `y` on that the band [`Self::rows`]
-    /// takes row `y` from holds: their samples, their stride, and the row
-    /// past the last of them.
+    /// The final rows of plane `p` from row `y` on: their samples, their
+    /// stride, and the row past the last of them.
     #[inline]
     pub fn rows_from(&self, p: usize, y: usize) -> Option<(&[P], usize, usize)> {
-        let p = p.min(2);
-        let i = self.bands.partition_point(|b| b.row0[p] + b.nrows[p] <= y);
-        let b = self.bands.get(i)?;
-        if b.row0[p] > y {
-            return None;
-        }
-        let rows = (self.view)(&b.rows)?;
-        let w = b.widths[p];
-        Some((
-            rows[p].get((y - b.row0[p]) * w..)?,
-            w,
-            b.row0[p] + b.nrows[p],
-        ))
+        self.shared.as_ref()?.rows_from(p, y)
     }
 }
 
 impl<P: PicturePixel> Mirror<P> {
-    /// Drops the bands, handing the buffers no other thread holds back to
-    /// `spares`.
+    /// Drops the rows, handing their buffers back to `spares` when no
+    /// other thread holds them.
     fn release(&mut self, spares: &Mutex<Spares<P>>) {
-        if self.bands.is_empty() {
-            return;
-        }
-        let mut sp = lock(spares);
-        for b in self.bands.drain(..) {
-            sp.give_band(b);
+        if let Some(sh) = self.shared.take() {
+            lock(spares).give_shared(sh);
         }
     }
 }
@@ -482,7 +426,7 @@ impl<P: PicturePixel> Mirror<P> {
 struct JobState {
     result: Option<R<Arc<AnyPicture>>>,
     /// While decoding: the final rows so far, luma rows `0..rows`.
-    bands: Vec<Arc<Band>>,
+    shared: Option<AnyShared>,
     rows: usize,
     /// Whether a frame reads the rows as they become final (else they
     /// are not published).
@@ -514,7 +458,7 @@ impl FrameJob {
         Arc::new(Self {
             state: Mutex::new(JobState {
                 result,
-                bands: Vec::new(),
+                shared: None,
                 rows: 0,
                 watched: false,
                 want: 0,
@@ -537,8 +481,8 @@ impl FrameJob {
         drop(self.finish_take(r));
     }
 
-    /// [`Self::finish`], returning the bands published before.
-    fn finish_take(&self, r: R<Arc<AnyPicture>>) -> Vec<Arc<Band>> {
+    /// [`Self::finish`], returning the rows published before.
+    fn finish_take(&self, r: R<Arc<AnyPicture>>) -> Option<AnyShared> {
         let mut s = lock(&self.state);
         if s.result.is_none() {
             s.result = Some(r);
@@ -547,17 +491,19 @@ impl FrameJob {
                 *lock(&e.n) += 1;
                 e.cv.notify_all();
             }
-            return std::mem::take(&mut s.bands);
+            return s.shared.take();
         }
-        Vec::new()
+        None
     }
 
-    /// Publishes the next final rows.
-    fn publish(&self, band: Band) {
+    /// Publishes the final rows `0..rows` of `shared`.
+    fn publish(&self, shared: &AnyShared, rows: usize) {
         let mut s = lock(&self.state);
-        if s.result.is_none() && band.y0 == s.rows {
-            s.rows = band.y1;
-            s.bands.push(Arc::new(band));
+        if s.result.is_none() && rows > s.rows {
+            if s.shared.is_none() {
+                s.shared = Some(shared.clone());
+            }
+            s.rows = rows;
             self.cv.notify_all();
         }
     }
@@ -611,77 +557,24 @@ impl FrameJob {
     }
 }
 
-/// The visible samples (those prediction reads) of luma rows `y0..` of
-/// a plane (chroma rows scaled by `sy`): the range of rows and the width.
-fn visible_rows<P>(pl: &Plane<P>, y0: usize, y1: usize, sy: usize) -> (usize, usize, usize) {
-    let h = pl.h.min(pl.alloc_h);
-    let a = (y0 >> sy).min(h);
-    let b = if y1 == usize::MAX {
-        h
-    } else {
-        (y1 >> sy).min(h)
-    };
-    (a, b.max(a), pl.w.min(pl.stride))
-}
-
-/// Luma rows a [`Band`] holds above the rows it adds: enough that the
-/// rows any block predicts from lie in one band. A block is at most a
-/// superblock high and its filters read 7 rows more; in chroma that is
-/// half the height and still 7 rows.
-fn band_overlap(sb128: bool) -> usize {
-    if sb128 { 128 + 16 } else { 64 + 16 }
-}
-
-/// Copies the visible samples of luma rows `y0..y1` of every plane of
-/// `src`, and of the `overlap` luma rows above them, into a [`Band`], in
-/// the buffers `bufs`.
-fn band_of<P: PicturePixel>(
-    src: &Picture<P>,
-    y0: usize,
-    y1: usize,
-    overlap: usize,
-    bufs: [Vec<P>; 3],
-) -> Band {
-    let sub_y = usize::from(src.sub_y);
-    let mut row0 = [0; 3];
-    let mut nrows = [0; 3];
+/// The writer of the final rows of `pic` (its visible samples), in the
+/// buffers `bufs` when they fit.
+fn shared_rows_of<P: PicturePixel>(
+    pic: &Picture<P>,
+    bufs: Option<[PlaneBuf<P>; 3]>,
+) -> RowsWriter<P> {
     let mut widths = [0; 3];
-    let mut rows = bufs;
-    for (p, v) in rows.iter_mut().enumerate() {
-        v.clear();
-        let Some(pl) = src.planes.get(p) else {
-            continue;
-        };
-        let sy = if p > 0 { sub_y } else { 0 };
-        let (a, b, w) = visible_rows(pl, y0, y1, sy);
-        let a = a.saturating_sub(overlap >> sy);
-        row0[p] = a;
-        nrows[p] = if w == 0 { 0 } else { b - a };
-        widths[p] = w;
-        // Room for exactly these rows: a buffer grown row by row would
-        // double past them, and the pool keeps buffers as large as the
-        // largest band they held.
-        let need = nrows[p] * w;
-        if v.capacity() > 2 * need {
-            *v = Vec::with_capacity(need);
-        } else {
-            v.reserve_exact(need);
-        }
-        for r in a..b {
-            v.extend_from_slice(&pl.data[r * pl.stride..r * pl.stride + w]);
-        }
+    let mut heights = [0; 3];
+    let mut shifts = [0; 3];
+    for (p, pl) in pic.planes.iter().enumerate().take(3) {
+        widths[p] = pl.w.min(pl.stride);
+        heights[p] = pl.h.min(pl.alloc_h);
+        shifts[p] = u32::from(p > 0 && pic.sub_y);
     }
-    Band {
-        y0,
-        y1,
-        row0,
-        nrows,
-        widths,
-        rows: P::wrap_rows(rows),
-    }
+    RowsWriter::new(widths, heights, shifts, bufs)
 }
 
-/// The bands of a reference still being decoded ([`RefView::mirror`]),
+/// The rows of a reference still being decoded ([`RefView::mirror`]),
 /// brought up to the rows reconstruction reads.
 #[derive(Clone)]
 struct RefFill {
@@ -691,8 +584,7 @@ struct RefFill {
     ref_frame: usize,
     /// Index of the bands in [`TileDec::mirrors`].
     mirror: usize,
-    /// Bands of the job taken so far, and the luma rows they hold.
-    used: usize,
+    /// Luma rows of the job known to be final.
     have: usize,
     /// Every read waits for the whole picture (scaled reference).
     whole: bool,
@@ -717,36 +609,35 @@ impl RefFill {
             return Ok(None);
         }
         let t = std::time::Instant::now();
-        let (bands, fin) = {
+        let (shared, rows, fin) = {
             let mut s = lock(&self.job.state);
             s.want = s.want.max(need.saturating_add(WANT_AHEAD));
             while s.result.is_none() && s.rows < need {
                 s = self.job.cv.wait(s).unwrap_or_else(PoisonError::into_inner);
             }
-            let bands = match s.result {
-                Some(_) => Vec::new(),
-                None => s.bands[self.used.min(s.bands.len())..].to_vec(),
+            let shared = match (&s.result, &m.shared) {
+                (None, None) => s.shared.clone(),
+                _ => None,
             };
-            self.used = s.bands.len();
-            (bands, s.result.clone())
+            (shared, s.rows, s.result.clone())
         };
         prof::add(prof::WAIT_REFS, t);
-        for b in bands {
-            if b.y0 != self.have || P::view_rows(&b.rows).is_none() {
-                // Not rows this reader can use: take the whole picture.
-                m.release(spares);
-                return self.done(self.job.wait());
-            }
-            self.have = b.y1;
-            m.bands.push(b);
+        if let Some(r) = fin {
+            m.release(spares);
+            return self.done(r);
         }
-        match fin {
-            Some(r) => {
-                m.release(spares);
-                self.done(r)
+        if let Some(sh) = shared {
+            match P::view_shared(&sh) {
+                Some(sh) => m.shared = Some(sh.clone()),
+                None => {
+                    // Not rows this reader can use: take the whole picture.
+                    m.release(spares);
+                    return self.done(self.job.wait());
+                }
             }
-            None => Ok(None),
         }
+        self.have = rows;
+        Ok(None)
     }
 
     fn done(&mut self, r: R<Arc<AnyPicture>>) -> R<Option<Arc<AnyPicture>>> {
@@ -876,8 +767,10 @@ struct Spares<P> {
     lr: Vec<LrScratch>,
     /// Frame states of parsed frames.
     states: Vec<FrameState>,
-    /// Buffers of [`Band`]s.
+    /// Buffers of rows sent to the filters ([`copy_rows_out`]).
     bands: Vec<[Vec<P>; 3]>,
+    /// Buffers of the final rows of frames ([`SharedRows`]).
+    shared: Vec<[PlaneBuf<P>; 3]>,
     /// Pictures of a superblock row (see [`take_sb_row`]).
     sb_rows: Vec<Picture<P>>,
     /// Reconstruction scratch of the backends.
@@ -911,17 +804,20 @@ type FilterRows<P> = (
 /// Band buffers kept for reuse, at most.
 const MAX_BANDS: usize = 96;
 
+/// Buffers of final rows ([`Spares::shared`]) kept for reuse, at most.
+const MAX_SHARED: usize = 16;
+
 /// Superblock rows ([`Spares::sb_rows`]) kept for reuse, at most.
 const MAX_SB_ROWS: usize = 64;
 
 impl<P: PicturePixel> Spares<P> {
     /// Keeps the buffers of `b` for reuse when this is its last holder
     /// (the publishing frame and each frame reading it drop theirs).
-    fn give_band(&mut self, b: Arc<Band>) {
-        if let Some(rows) = Arc::into_inner(b).and_then(|b| P::unwrap_rows(b.rows))
-            && self.bands.len() < MAX_BANDS
+    fn give_shared(&mut self, b: Arc<SharedRows<P>>) {
+        if let Some(b) = Arc::into_inner(b)
+            && self.shared.len() < MAX_SHARED
         {
-            self.bands.push(rows);
+            self.shared.push(b.into_buffers());
         }
     }
 }
@@ -944,6 +840,7 @@ impl<P> Default for PixState<P> {
                 lr: Vec::new(),
                 states: Vec::new(),
                 bands: Vec::new(),
+                shared: Vec::new(),
                 sb_rows: Vec::new(),
                 scratch: Vec::new(),
                 filters: Vec::new(),
@@ -3339,15 +3236,26 @@ struct InlineFilter<'a, P> {
     /// No job: nothing waits on the rows (the frame is done on one
     /// thread).
     publish: Option<&'a FrameJob>,
-    /// Where the buffers of the bands come from.
+    /// Where the buffers of the final rows come from.
     spares: &'a Mutex<Spares<P>>,
     /// Deblocked luma 4x4 rows waiting for CDEF and loop restoration.
     to_filter: Option<(usize, usize)>,
     published: usize,
-    /// [`band_overlap`] of the frame.
-    overlap: usize,
+    /// The final rows published, once a frame reads them.
+    rows_out: Option<RowsWriter<P>>,
 }
 
+impl<P: PicturePixel> InlineFilter<'_, P> {
+    /// Hands the buffers of the published rows back once no other thread
+    /// holds them.
+    fn release_rows(&mut self) {
+        if let Some(w) = self.rows_out.take() {
+            let sh = w.shared().clone();
+            drop(w);
+            lock(self.spares).give_shared(sh);
+        }
+    }
+}
 impl<P: PicturePixel> InlineFilter<'_, P> {
     /// Takes the reconstructed superblock row of `m`.
     fn row(
@@ -3403,11 +3311,18 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
                 && job.watched(self.published)
             {
                 let tc = std::time::Instant::now();
-                let bufs = lock(self.spares).bands.pop().unwrap_or_else(|| {
-                    prof::count(prof::NEW_BAND);
-                    Default::default()
+                let w = self.rows_out.get_or_insert_with(|| {
+                    let bufs = lock(self.spares).shared.pop();
+                    if bufs.is_none() {
+                        prof::count(prof::NEW_BAND);
+                    }
+                    shared_rows_of(cur, bufs)
                 });
-                job.publish(band_of(cur, self.published, done, self.overlap, bufs));
+                w.write(done, |p, r| {
+                    let pl = &cur.planes[p];
+                    &pl.data[r * pl.stride..]
+                });
+                job.publish(&P::wrap_shared(w.shared().clone()), done);
                 prof::add(prof::PUBLISH, tc);
                 self.published = done;
             }
@@ -3827,7 +3742,7 @@ impl<P: PicturePixel> FilterStage<P> {
             spares: &spares,
             to_filter: None,
             published: 0,
-            overlap: band_overlap(seq.use_128x128_superblock),
+            rows_out: None,
         };
         let mut back: (Vec<ReconLog>, Vec<RowMsg>) = Default::default();
         for (mut log, m, samples) in rx {
@@ -3885,6 +3800,7 @@ impl<P: PicturePixel> FilterStage<P> {
             pool.logs.append(&mut back.0);
             pool.msgs.append(&mut back.1);
         }
+        filt.release_rows();
         let filter_rows = (filt.cdef, filt.lr_bounds, info);
         lock(&spares).filters.push(filter_rows);
         (cur, fs, lr_scratch)
@@ -3948,11 +3864,10 @@ impl<P: PicturePixel> Backend<P> {
                         job: j.clone(),
                         ref_frame: i,
                         mirror: mirrors.len(),
-                        used: 0,
                         have: 0,
                         whole: false,
                     });
-                    mirrors.push(Mirror::new(P::view_rows));
+                    mirrors.push(Mirror::default());
                 }
             }
         }
@@ -4020,7 +3935,7 @@ impl<P: PicturePixel> Backend<P> {
                             spares: &spares,
                             to_filter: None,
                             published: 0,
-                            overlap: band_overlap(seq.use_128x128_superblock),
+                            rows_out: None,
                         },
                         fs: ft_fs,
                         info,
@@ -4102,11 +4017,10 @@ impl<P: PicturePixel> Backend<P> {
             return job.finish(Err(malformed("filter thread")));
         };
         set_visible_size(&seq, &hdr, &mut fin);
-        let bands = job.finish_take(res.map(|()| Arc::new(P::wrap(fin))));
-        // The buffers of the bands no other thread holds go back.
-        let mut sp = lock(&spares);
-        for b in bands {
-            sp.give_band(b);
+        let shared = job.finish_take(res.map(|()| Arc::new(P::wrap(fin))));
+        // The buffers of the final rows no other thread holds go back.
+        if let Some(sh) = shared.as_ref().and_then(P::view_shared) {
+            lock(&spares).give_shared(sh.clone());
         }
     }
 }
@@ -4165,7 +4079,7 @@ fn decode_frame_sync<P: PicturePixel>(
             spares,
             to_filter: None,
             published: 0,
-            overlap: band_overlap(seq.use_128x128_superblock),
+            rows_out: None,
         };
         let res = decode_tiles_by_rows(
             seq,
@@ -4191,6 +4105,7 @@ fn decode_frame_sync<P: PicturePixel>(
                 filt.deblock(seq, hdr, fs, &info, cur, a, b, last, None);
             },
         );
+        filt.release_rows();
         cdef_sc = filt.cdef;
         bounds = filt.lr_bounds;
         if res.is_none() {

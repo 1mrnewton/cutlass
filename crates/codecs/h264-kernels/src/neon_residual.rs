@@ -174,6 +174,7 @@ fn idct8_rows(block: &[i32; 64], rows: [[u8; 8]; 8]) -> [[u8; 8]; 8] {
 /// plane with one check, and `dc` goes onto all of them at once: its
 /// positive part added and its negative part taken away, both saturating,
 /// which holds each sample to 0 to 255.
+#[inline]
 #[target_feature(enable = "neon")]
 pub(crate) fn dc_add(plane: &mut [u8], at: usize, down: usize, dc: i32, size: usize) -> bool {
     use core::arch::aarch64::{

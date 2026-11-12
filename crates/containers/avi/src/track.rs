@@ -9,7 +9,10 @@
 //!
 //! - Video, and any stream with `dwSampleSize` zero and no `nBlockAlign`:
 //!   one unit per chunk. An empty chunk is a dropped frame: it takes its
-//!   unit and is not returned as a packet.
+//!   unit, is not returned as a packet, and lengthens the video packet
+//!   before it, which stays on screen through it. (FFmpeg's demuxer gives
+//!   that packet one unit; its generic layer later guesses a duration from
+//!   the frame rate.)
 //! - Audio with `dwSampleSize` zero (variable bitrate): `ceil(len /
 //!   nBlockAlign)` units, as DirectShow, FFmpeg, and GStreamer count it.
 //! - Audio with `dwSampleSize` set (constant bitrate, PCM): the chunk's
@@ -212,6 +215,14 @@ impl Track {
             (before, self.units)
         };
         if size == 0 {
+            if self.kind == StreamKind::Video && !self.spans.is_empty() {
+                let more = self.ticks(after)?.saturating_sub(self.ticks(before)?);
+                if let Some(span) = self.spans.last_mut() {
+                    span.ticks = span
+                        .ticks
+                        .saturating_add(u32::try_from(more).unwrap_or(u32::MAX));
+                }
+            }
             return Ok(());
         }
         *budget -= 1;
@@ -300,6 +311,10 @@ mod tests {
             "an empty chunk is a dropped frame"
         );
         assert_eq!(video.spans[1].ticks, 1001);
+        assert_eq!(
+            video.spans[0].ticks, 2002,
+            "the frame before stays on screen"
+        );
         assert_eq!(budget, 8);
     }
 

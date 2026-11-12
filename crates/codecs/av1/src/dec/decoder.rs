@@ -2015,13 +2015,28 @@ fn mf_band(
             // The second list wins when both qualify.
             if let Some(list) = [1, 0].into_iter().find(|&l| ok(m.ref_frame[l], m.mv[l])) {
                 let run = y * w8 + *x8 - cols.start..y * w8 + end - cols.start;
-                refs[run.clone()].fill(m.ref_frame[list]);
-                mvs[run].fill(m.mv[list]);
+                fill_run(&mut refs[run.clone()], m.ref_frame[list]);
+                fill_run(&mut mvs[run], m.mv[list]);
             }
             *x8 = end;
         }
     }
     band
+}
+
+/// `d.fill(v)` for the lengths a block's run of 8x8 positions has (a
+/// power of two up to 16), in stores of a fixed size rather than a
+/// library call.
+#[inline(always)]
+fn fill_run<T: Copy>(d: &mut [T], v: T) {
+    match d {
+        [a] => *a = v,
+        [_, _] => d.copy_from_slice(&[v; 2]),
+        [_, _, _, _] => d.copy_from_slice(&[v; 4]),
+        [_, _, _, _, _, _, _, _] => d.copy_from_slice(&[v; 8]),
+        _ if d.len() == 16 => d.copy_from_slice(&[v; 16]),
+        _ => d.fill(v),
+    }
 }
 
 /// The segment ids of the parsed frame of `fs` that later frames read:

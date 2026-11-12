@@ -862,15 +862,31 @@ unsafe fn top_edge(q0: *mut u8, down: usize, filter: crate::edge::Filter) {
 /// the macroblock's columns, from one turn of it.
 #[target_feature(enable = "neon")]
 pub(crate) fn luma_mb(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
+    if !crate::edge::mb_fits(plane.len(), edges, 16, 4) {
+        return false;
+    }
+    // SAFETY: just checked.
+    #[allow(unsafe_code)]
+    unsafe {
+        luma_mb_fitted(plane, edges)
+    }
+}
+
+/// [`luma_mb`] once its samples are known to be in the plane.
+///
+/// # Safety
+///
+/// `mb_fits(plane.len(), edges, 16, 4)` holds.
+#[inline]
+#[target_feature(enable = "neon")]
+#[allow(unsafe_code)]
+unsafe fn luma_mb_fitted(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
     let crate::edge::MbEdges {
         at,
         down,
         vertical,
         horizontal,
     } = *edges;
-    if !crate::edge::mb_fits(plane.len(), edges, 16, 4) {
-        return false;
-    }
     // Most macroblocks filter their boundary alone, if anything: each of
     // its two edges then goes straight between the plane and registers.
     let tame = |filter: &Option<crate::edge::Filter>| filter.is_none_or(|filter| filter.tame());
@@ -909,6 +925,33 @@ pub(crate) fn luma_mb(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
         return true;
     }
     luma_whole(plane, edges)
+}
+
+/// See [`crate::deblock::mb`]: each plane's samples are checked once,
+/// before any is filtered, rather than again by its kernel.
+#[target_feature(enable = "neon")]
+pub(crate) fn mb_planes(
+    planes: (&mut [u8], &mut [u8], &mut [u8]),
+    edges: &[crate::edge::MbEdges; 3],
+    some: [bool; 3],
+) -> bool {
+    use crate::edge::mb_fits;
+    let (luma, cb, cr) = planes;
+    let [for_luma, for_cb, for_cr] = edges;
+    let [some_luma, some_cb, some_cr] = some;
+    if (some_luma && !mb_fits(luma.len(), for_luma, 16, 4))
+        || (some_cb && !mb_fits(cb.len(), for_cb, 8, 2))
+        || (some_cr && !mb_fits(cr.len(), for_cr, 8, 2))
+    {
+        return false;
+    }
+    // SAFETY: each plane filtered fits its edges, as checked just above.
+    #[allow(unsafe_code)]
+    unsafe {
+        (!some_luma || luma_mb_fitted(luma, for_luma))
+            && (!some_cb || chroma_mb_fitted(cb, for_cb))
+            && (!some_cr || chroma_mb_fitted(cr, for_cr))
+    }
 }
 
 /// [`luma_mb`] for edges 0 and 2 of each way, `[v0, v2, h0, h2]`, out of
@@ -1363,15 +1406,31 @@ unsafe fn chroma_top_edge(q0: *mut u8, down: usize, filter: crate::edge::Filter)
 /// filtered side by side in one vector.
 #[target_feature(enable = "neon")]
 pub(crate) fn chroma_mb(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
+    if !crate::edge::mb_fits(plane.len(), edges, 8, 2) {
+        return false;
+    }
+    // SAFETY: just checked.
+    #[allow(unsafe_code)]
+    unsafe {
+        chroma_mb_fitted(plane, edges)
+    }
+}
+
+/// [`chroma_mb`] once its samples are known to be in the plane.
+///
+/// # Safety
+///
+/// `mb_fits(plane.len(), edges, 8, 2)` holds.
+#[inline(never)]
+#[target_feature(enable = "neon")]
+#[allow(unsafe_code)]
+unsafe fn chroma_mb_fitted(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
     let crate::edge::MbEdges {
         at,
         down,
         vertical,
         horizontal,
     } = *edges;
-    if !crate::edge::mb_fits(plane.len(), edges, 8, 2) {
-        return false;
-    }
     // Most macroblocks filter their boundary alone, if anything: each of
     // its two edges then goes straight between the plane and registers.
     let tame = |filter: &Option<crate::edge::Filter>| filter.is_none_or(|filter| filter.tame());

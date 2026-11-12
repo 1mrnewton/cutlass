@@ -42,6 +42,19 @@ pub fn chroma_mb(plane: &mut [u8], edges: &MbEdges) -> bool {
     kernel!(chroma_mb(plane, edges))
 }
 
+/// [`luma_mb`] on the luma plane and [`chroma_mb`] on each 4:2:0 chroma
+/// plane of one macroblock, each plane only when its `some` is set. Every
+/// plane's samples are checked before any is filtered, and only then:
+/// `false` means one plane's are not all there and nothing was done.
+#[inline]
+pub fn mb(
+    planes: (&mut [u8], &mut [u8], &mut [u8]),
+    edges: &[MbEdges; 3],
+    some: [bool; 3],
+) -> bool {
+    kernel!(mb_planes(planes, edges, some))
+}
+
 /// The four rows around an 8-sample chroma edge: p1, p0, then q0, q1.
 /// Chroma filters change only p0 and q0.
 pub type ChromaRows = [[u8; 8]; 4];
@@ -398,6 +411,58 @@ mod tests {
             }
         }
         assert!(changed > 4_000, "only {changed} macroblocks were filtered");
+    }
+
+    #[test]
+    fn three_planes_match_the_plain_ones_and_all_or_none() {
+        let mut rng = Lcg(12);
+        let mut changed = 0;
+        let mut refused = 0;
+        for round in 0..6_000 {
+            let spread = [0, 2, 6, 30][round % 4];
+            let down = 40 + (rng.next() % 9) as usize;
+            let base = rng.next() as u8;
+            let mut plane =
+                |len: usize| -> Vec<u8> { (0..len).map(|_| rng.sample(base, spread)).collect() };
+            let before = [plane(down * 44), plane(down * 44), plane(down * 44)];
+            let x = [0, 4, 8, 20][(rng.next() % 4) as usize];
+            let y = [0, 3, 4, 16, 24][(rng.next() % 5) as usize];
+            // Now and then one chroma macroblock lies past its plane's end.
+            let far = if round % 7 == 3 { down * 40 } else { 0 };
+            let edges = [
+                mb_edges(&mut rng, y * down + x, down, round % 8 != 1),
+                mb_edges(&mut rng, y * down + x + far, down, false),
+                mb_edges(&mut rng, y * down + x, down, false),
+            ];
+            let some = [0, 1, 2].map(|_| !rng.next().is_multiple_of(5));
+            let [mut fast_y, mut fast_u, mut fast_v] = before.clone();
+            let done = super::mb((&mut fast_y, &mut fast_u, &mut fast_v), &edges, some);
+            let [mut plain_y, mut plain_u, mut plain_v] = before.clone();
+            let [some_y, some_u, some_v] = some;
+            let fits = (!some_y || edges[0].fits(plain_y.len(), 16))
+                && (!some_u || edges[1].fits(plain_u.len(), 8))
+                && (!some_v || edges[2].fits(plain_v.len(), 8));
+            let wanted = fits
+                && (!some_y || scalar::luma_mb(&mut plain_y, &edges[0]))
+                && (!some_u || scalar::chroma_mb(&mut plain_u, &edges[1]))
+                && (!some_v || scalar::chroma_mb(&mut plain_v, &edges[2]));
+            assert_eq!(done, wanted, "round {round}");
+            assert_eq!(
+                [&fast_y, &fast_u, &fast_v],
+                [&plain_y, &plain_u, &plain_v],
+                "round {round}"
+            );
+            if !done {
+                assert_eq!([fast_y, fast_u, fast_v], before, "round {round}");
+                refused += 1;
+            } else {
+                changed += usize::from(
+                    [&fast_y, &fast_u, &fast_v] != [&before[0], &before[1], &before[2]],
+                );
+            }
+        }
+        assert!(changed > 3_000, "only {changed} macroblocks were filtered");
+        assert!(refused > 300, "only {refused} were refused");
     }
 
     #[test]

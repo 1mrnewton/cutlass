@@ -225,6 +225,26 @@ fn chroma_lines(lines: &[[u8; 4]; 8]) -> ChromaRows {
 
 crate::edge::edge_kernels!(pub,);
 
+/// See [`crate::deblock::mb`].
+pub fn mb_planes(
+    planes: (&mut [u8], &mut [u8], &mut [u8]),
+    edges: &[crate::edge::MbEdges; 3],
+    some: [bool; 3],
+) -> bool {
+    let (luma, cb, cr) = planes;
+    let [for_luma, for_cb, for_cr] = edges;
+    let [some_luma, some_cb, some_cr] = some;
+    if (some_luma && !for_luma.fits(luma.len(), 16))
+        || (some_cb && !for_cb.fits(cb.len(), 8))
+        || (some_cr && !for_cr.fits(cr.len(), 8))
+    {
+        return false;
+    }
+    (!some_luma || luma_mb(luma, for_luma))
+        && (!some_cb || chroma_mb(cb, for_cb))
+        && (!some_cr || chroma_mb(cr, for_cr))
+}
+
 /// See [`crate::deblock::luma_mb`]: each edge in turn.
 pub fn luma_mb(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
     if !crate::edge::mb_fits(plane.len(), edges, 16, 4) {

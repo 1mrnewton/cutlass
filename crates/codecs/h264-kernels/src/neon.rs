@@ -34,7 +34,7 @@ use core::arch::aarch64::{
 
 use crate::deblock::{ChromaRows, Lines, Rows};
 
-pub(crate) use crate::neon_intra::{pred_chroma, pred16};
+pub(crate) use crate::neon_intra::{pred_chroma, pred8, pred16};
 pub(crate) use crate::neon_mc::{
     avg_row, avg8, avg16, centre8, centre16, chroma8, half8, half16, raw8, raw16,
 };

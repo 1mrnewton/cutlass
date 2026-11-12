@@ -752,3 +752,133 @@ pub fn pred_chroma(plane: &mut [u8], at: usize, down: usize, mode: u8, near: (bo
     }
     true
 }
+
+/// The filtered edges of the 8×8 block at `at`, as the decoder gathers and
+/// filters them: missing samples are 128 and stay unfiltered, missing
+/// samples above and right repeat the last one above, and a missing corner
+/// is left out of the filter.
+fn edges8(
+    plane: &[u8],
+    (start, at, down): (usize, usize, usize),
+    near: crate::intra::Near8,
+) -> crate::intra::Edges8 {
+    use crate::intra::avg3;
+    let mut raw_above = [128u8; 16];
+    if near.above {
+        raw_above[..8].copy_from_slice(&plane[start + 1..start + 9]);
+        if near.above_right {
+            raw_above[8..].copy_from_slice(&plane[start + 9..start + 17]);
+        } else {
+            let last = raw_above[7];
+            raw_above[8..].fill(last);
+        }
+    }
+    let mut raw_left = [128u8; 8];
+    if near.left {
+        for (y, sample) in raw_left.iter_mut().enumerate() {
+            *sample = plane[at - 1 + y * down];
+        }
+    }
+    let corner = if near.corner { plane[start] } else { 128 };
+    let mut above = raw_above;
+    if near.above {
+        let first = if near.corner { corner } else { raw_above[0] };
+        above[0] = avg3(first, raw_above[0], raw_above[1]);
+        for i in 1..15 {
+            above[i] = avg3(raw_above[i - 1], raw_above[i], raw_above[i + 1]);
+        }
+        above[15] = avg3(raw_above[14], raw_above[15], raw_above[15]);
+    }
+    let mut left = raw_left;
+    if near.left {
+        let first = if near.corner { corner } else { raw_left[0] };
+        left[0] = avg3(first, raw_left[0], raw_left[1]);
+        for i in 1..7 {
+            left[i] = avg3(raw_left[i - 1], raw_left[i], raw_left[i + 1]);
+        }
+        left[7] = avg3(raw_left[6], raw_left[7], raw_left[7]);
+    }
+    let corner = match (near.corner, near.above, near.left) {
+        (true, true, true) => avg3(raw_above[0], corner, raw_left[0]),
+        (true, true, false) => avg3(corner, corner, raw_above[0]),
+        (true, false, true) => avg3(corner, corner, raw_left[0]),
+        _ => corner,
+    };
+    crate::intra::Edges8 {
+        above,
+        left,
+        corner,
+    }
+}
+
+/// See [`crate::intra::pred8`]: each sample worked out on its own.
+pub fn pred8(
+    plane: &mut [u8],
+    at: usize,
+    down: usize,
+    mode: u8,
+    near: crate::intra::Near8,
+) -> bool {
+    use crate::intra::{avg2, avg3, sample8};
+    let Some(start) = crate::intra::corner8_at(plane.len(), at, down) else {
+        return false;
+    };
+    let edges = edges8(plane, (start, at, down), near);
+    let (above, left, corner) = (&edges.above, &edges.left, edges.corner);
+    let dc = match (near.above, near.left) {
+        (true, true) => {
+            let sum: u32 = above[..8].iter().chain(left).map(|&s| u32::from(s)).sum();
+            ((sum + 8) >> 4) as u8
+        }
+        (true, false) => ((above[..8].iter().map(|&s| u32::from(s)).sum::<u32>() + 4) >> 3) as u8,
+        (false, true) => ((left.iter().map(|&s| u32::from(s)).sum::<u32>() + 4) >> 3) as u8,
+        (false, false) => 128,
+    };
+    let both = near.above && near.left;
+    for y in 0..8 {
+        for x in 0..8 {
+            let sample = match mode {
+                0 if near.above => above[x],
+                1 if near.left => left[y],
+                3 if near.above => {
+                    if x == 7 && y == 7 {
+                        avg3(above[14], above[15], above[15])
+                    } else {
+                        avg3(above[x + y], above[x + y + 1], above[x + y + 2])
+                    }
+                }
+                4 if both => {
+                    let at = |i: isize| match usize::try_from(i) {
+                        Ok(i) => above[i],
+                        Err(_) => corner,
+                    };
+                    let beside = |i: isize| match usize::try_from(i) {
+                        Ok(i) => left[i],
+                        Err(_) => corner,
+                    };
+                    let (x, y) = (x as isize, y as isize);
+                    if x > y {
+                        avg3(at(x - y - 2), at(x - y - 1), at(x - y))
+                    } else if x < y {
+                        avg3(beside(y - x - 2), beside(y - x - 1), beside(y - x))
+                    } else {
+                        avg3(above[0], corner, left[0])
+                    }
+                }
+                5 | 6 if both => sample8(mode, x, y, &edges),
+                7 if near.above => {
+                    let base = x + (y >> 1);
+                    if y % 2 == 0 {
+                        avg2(above[base], above[base + 1])
+                    } else {
+                        avg3(above[base], above[base + 1], above[base + 2])
+                    }
+                }
+                8 if near.left => sample8(mode, x, y, &edges),
+                _ => dc,
+            };
+            plane[at + y * down + x] = sample;
+        }
+    }
+    true
+}

@@ -8,9 +8,13 @@
 //! −11,500 and 19,700, so none overflows.
 
 use core::arch::aarch64::{
-    int16x8_t, uint8x16_t, vaddlvq_u8, vaddq_s16, vcombine_u8, vdupq_n_s16, vdupq_n_u8,
-    vget_lane_u64, vld1q_s16, vqshrun_n_s16, vreinterpret_u64_u8,
+    int16x8_t, uint8x8_t, uint8x16_t, vaddlv_u8, vaddlvq_u8, vaddq_s16, vcombine_u8, vcreate_u8,
+    vdup_n_u8, vdupq_n_s16, vdupq_n_u8, vext_u8, vextq_u8, vget_lane_u8, vget_lane_u64,
+    vget_low_u8, vgetq_lane_u8, vhadd_u8, vhaddq_u8, vld1q_s16, vqshrun_n_s16, vreinterpret_u64_u8,
+    vrev64_u8, vrhadd_u8, vrhaddq_u8,
 };
+
+use crate::intra::{Edges8, Near8, avg3, sample8};
 
 use crate::neon::{load16, rows_of, store16};
 
@@ -219,6 +223,207 @@ pub(crate) fn pred_chroma(
             );
             for y in 0..8 {
                 put(y, if y < 4 { upper } else { lower });
+            }
+        }
+    }
+    true
+}
+
+/// The (a + 2b + c + 2) / 4 of each lane: half the sum of the outer two,
+/// then rounded halfway to the middle, which is the same.
+#[inline]
+#[target_feature(enable = "neon")]
+fn avg3q(a: uint8x16_t, b: uint8x16_t, c: uint8x16_t) -> uint8x16_t {
+    vrhaddq_u8(vhaddq_u8(a, c), b)
+}
+
+/// [`avg3q`] on eight lanes.
+#[inline]
+#[target_feature(enable = "neon")]
+fn avg3d(a: uint8x8_t, b: uint8x8_t, c: uint8x8_t) -> uint8x8_t {
+    vrhadd_u8(vhadd_u8(a, c), b)
+}
+
+/// The eight lanes of `vector` as bytes.
+#[inline]
+#[target_feature(enable = "neon")]
+fn bytes8(vector: uint8x8_t) -> [u8; 8] {
+    vget_lane_u64::<0>(vreinterpret_u64_u8(vector)).to_le_bytes()
+}
+
+/// The sixteen lanes of `vector` as bytes.
+#[inline]
+#[target_feature(enable = "neon")]
+fn bytes16(vector: uint8x16_t) -> [u8; 16] {
+    let mut bytes = [0u8; 16];
+    store16(vector, &mut bytes);
+    bytes
+}
+
+/// The eight bytes from lane `N` of the pair `low`, `high`.
+macro_rules! window8 {
+    ($low:expr, $high:expr, $n:literal) => {
+        bytes8(vget_low_u8(vextq_u8::<$n>($low, $high)))
+    };
+}
+
+/// See [`crate::intra::pred8`].
+#[target_feature(enable = "neon")]
+pub(crate) fn pred8(plane: &mut [u8], at: usize, down: usize, mode: u8, near: Near8) -> bool {
+    let Some(start) = crate::intra::corner8_at(plane.len(), at, down) else {
+        return false;
+    };
+    // The corner and the sixteen samples after it, copied out before the
+    // block's rows are borrowed: the two may share bytes.
+    let Some(&top) = plane.get(start..).and_then(|row| row.first_chunk::<17>()) else {
+        return false;
+    };
+    let Some(window) = plane.get_mut(at - 1..) else {
+        return false;
+    };
+    let Some(mut rows) = rows_of::<9, 8>(window, down) else {
+        return false;
+    };
+    let [raw_corner, raw_up @ ..] = top;
+    let raw_side = vcreate_u8(u64::from_le_bytes(core::array::from_fn(|y| rows[y][0])));
+    // The sixteen samples above, the last eight repeating the eighth when
+    // those above and right are not there; 128 when none are.
+    let mut raw_above = load16(&raw_up);
+    if !near.above_right {
+        raw_above = vcombine_u8(vget_low_u8(raw_above), vdup_n_u8(raw_up[7]));
+    }
+    if !near.above {
+        raw_above = vdupq_n_u8(128);
+    }
+    let raw_left = if near.left { raw_side } else { vdup_n_u8(128) };
+    let corner = if near.corner { raw_corner } else { 128 };
+    let first_above = vgetq_lane_u8::<0>(raw_above);
+    let first_left = vget_lane_u8::<0>(raw_left);
+    // The filter of clause 8.3.2.2.1, on edges that are there.
+    let above = if near.above {
+        let before = if near.corner { corner } else { first_above };
+        let last = vdupq_n_u8(vgetq_lane_u8::<15>(raw_above));
+        avg3q(
+            vextq_u8::<15>(vdupq_n_u8(before), raw_above),
+            raw_above,
+            vextq_u8::<1>(raw_above, last),
+        )
+    } else {
+        raw_above
+    };
+    let left = if near.left {
+        let before = if near.corner { corner } else { first_left };
+        let last = vdup_n_u8(vget_lane_u8::<7>(raw_left));
+        avg3d(
+            vext_u8::<7>(vdup_n_u8(before), raw_left),
+            raw_left,
+            vext_u8::<1>(raw_left, last),
+        )
+    } else {
+        raw_left
+    };
+    let corner = match (near.corner, near.above, near.left) {
+        (true, true, true) => avg3(first_above, corner, first_left),
+        (true, true, false) => avg3(corner, corner, first_above),
+        (true, false, true) => avg3(corner, corner, first_left),
+        _ => corner,
+    };
+    let mut put = |y: usize, samples: [u8; 8]| {
+        let [_, row @ ..] = &mut *rows[y];
+        *row = samples;
+    };
+    let both = near.above && near.left;
+    match mode {
+        0 if near.above => {
+            let samples = bytes8(vget_low_u8(above));
+            for y in 0..8 {
+                put(y, samples);
+            }
+        }
+        1 if near.left => {
+            for (y, sample) in bytes8(left).into_iter().enumerate() {
+                put(y, [sample; 8]);
+            }
+        }
+        3 if near.above => {
+            // Each row is the filtered row above, filtered again, from its
+            // own place: the last sample repeats past the end.
+            let last = vdupq_n_u8(vgetq_lane_u8::<15>(above));
+            let next = vextq_u8::<1>(above, last);
+            let after = vextq_u8::<2>(above, last);
+            let t = avg3q(above, next, after);
+            put(0, window8!(t, last, 0));
+            put(1, window8!(t, last, 1));
+            put(2, window8!(t, last, 2));
+            put(3, window8!(t, last, 3));
+            put(4, window8!(t, last, 4));
+            put(5, window8!(t, last, 5));
+            put(6, window8!(t, last, 6));
+            put(7, window8!(t, last, 7));
+        }
+        4 if both => {
+            // The left column bottom up, the corner, then the row above:
+            // each row is that line filtered again, from its own place.
+            let line = vcombine_u8(
+                vrev64_u8(left),
+                vext_u8::<7>(vdup_n_u8(corner), vget_low_u8(above)),
+            );
+            let tail = vextq_u8::<7>(above, above);
+            let d = avg3q(line, vextq_u8::<1>(line, tail), vextq_u8::<2>(line, tail));
+            put(0, window8!(d, d, 7));
+            put(1, window8!(d, d, 6));
+            put(2, window8!(d, d, 5));
+            put(3, window8!(d, d, 4));
+            put(4, window8!(d, d, 3));
+            put(5, window8!(d, d, 2));
+            put(6, window8!(d, d, 1));
+            put(7, window8!(d, d, 0));
+        }
+        7 if near.above => {
+            let next = vextq_u8::<1>(above, above);
+            let after = vextq_u8::<2>(above, above);
+            let halves = vrhaddq_u8(above, next);
+            let thirds = avg3q(above, next, after);
+            put(0, window8!(halves, halves, 0));
+            put(1, window8!(thirds, thirds, 0));
+            put(2, window8!(halves, halves, 1));
+            put(3, window8!(thirds, thirds, 1));
+            put(4, window8!(halves, halves, 2));
+            put(5, window8!(thirds, thirds, 2));
+            put(6, window8!(halves, halves, 3));
+            put(7, window8!(thirds, thirds, 3));
+        }
+        5 | 6 if both => {
+            let edges = Edges8 {
+                above: bytes16(above),
+                left: bytes8(left),
+                corner,
+            };
+            for y in 0..8 {
+                put(y, core::array::from_fn(|x| sample8(mode, x, y, &edges)));
+            }
+        }
+        8 if near.left => {
+            let edges = Edges8 {
+                above: bytes16(above),
+                left: bytes8(left),
+                corner,
+            };
+            for y in 0..8 {
+                put(y, core::array::from_fn(|x| sample8(mode, x, y, &edges)));
+            }
+        }
+        _ => {
+            let sum_above = u32::from(vaddlv_u8(vget_low_u8(above)));
+            let sum_left = u32::from(vaddlv_u8(left));
+            let dc = match (near.above, near.left) {
+                (true, true) => (sum_above + sum_left + 8) >> 4,
+                (true, false) => (sum_above + 4) >> 3,
+                (false, true) => (sum_left + 4) >> 3,
+                (false, false) => 128,
+            } as u8;
+            for y in 0..8 {
+                put(y, [dc; 8]);
             }
         }
     }

@@ -5092,23 +5092,6 @@ fn intra_frame_scaled<S: Sample>(
                 2 => true,
                 _ => false,
             };
-            let mut raw_above = [S::mid(); 16];
-            let mut raw_left = [S::mid(); 8];
-            if above_ok {
-                let at = (y - 1) * stride + x;
-                raw_above[..8].copy_from_slice(&pic.y[at..at + 8]);
-                if above_right {
-                    raw_above[8..].copy_from_slice(&pic.y[at + 8..at + 16]);
-                } else {
-                    let edge = raw_above[7];
-                    raw_above[8..].fill(edge);
-                }
-            }
-            if left_ok {
-                for (row, sample) in raw_left.iter_mut().enumerate() {
-                    *sample = pic.y[(y + row) * stride + x - 1];
-                }
-            }
             // The corner: over the macroblock above and left, the one
             // above, the one left, or inside this one.
             let corner_ok = match i {
@@ -5117,18 +5100,43 @@ fn intra_frame_scaled<S: Sample>(
                 2 => near.left,
                 _ => true,
             };
-            let corner = if corner_ok {
-                pic.y[(y - 1) * stride + x - 1]
-            } else {
-                S::mid()
-            };
             let mode = mb.mode4[by * 4 + bx];
-            let pred = pred8_from(
-                mode,
-                (&raw_above, &raw_left, corner),
-                (above_ok, left_ok, corner_ok),
-            );
-            put_block(&mut pic.y, stride, x, y, &pred, 8, 1);
+            let edges = cutlass_h264_kernels::intra::Near8 {
+                above: above_ok,
+                above_right,
+                left: left_ok,
+                corner: corner_ok,
+            };
+            if !S::pred8_fast(&mut pic.y, y * stride + x, stride, mode, edges) {
+                let mut raw_above = [S::mid(); 16];
+                let mut raw_left = [S::mid(); 8];
+                if above_ok {
+                    let at = (y - 1) * stride + x;
+                    raw_above[..8].copy_from_slice(&pic.y[at..at + 8]);
+                    if above_right {
+                        raw_above[8..].copy_from_slice(&pic.y[at + 8..at + 16]);
+                    } else {
+                        let edge = raw_above[7];
+                        raw_above[8..].fill(edge);
+                    }
+                }
+                if left_ok {
+                    for (row, sample) in raw_left.iter_mut().enumerate() {
+                        *sample = pic.y[(y + row) * stride + x - 1];
+                    }
+                }
+                let corner = if corner_ok {
+                    pic.y[(y - 1) * stride + x - 1]
+                } else {
+                    S::mid()
+                };
+                let pred = pred8_from(
+                    mode,
+                    (&raw_above, &raw_left, corner),
+                    (above_ok, left_ok, corner_ok),
+                );
+                put_block(&mut pic.y, stride, x, y, &pred, 8, 1);
+            }
             if luma_cbp & (1 << i) == 0 {
                 continue;
             }

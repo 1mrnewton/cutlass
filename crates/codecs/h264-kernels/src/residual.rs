@@ -71,7 +71,14 @@ macro_rules! residual_kernels {
             }
             true
         }
+    };
+}
+pub(crate) use residual_kernels;
 
+/// [`dc_add`] row by row over whichever `dc_row` is in scope, which adds
+/// to the eight samples in a `u64`.
+macro_rules! dc_add_rows {
+    ($visibility:vis, $(#[$feature:meta])*) => {
         /// See [`crate::residual::dc_add`]. `dc_row` adds to the eight
         /// samples in a `u64`.
         $(#[$feature])*
@@ -100,7 +107,7 @@ macro_rules! residual_kernels {
         }
     };
 }
-pub(crate) use residual_kernels;
+pub(crate) use dc_add_rows;
 
 #[cfg(test)]
 mod tests {

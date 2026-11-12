@@ -360,6 +360,7 @@ fn dc_row(samples: u64, dc: i32) -> u64 {
 }
 
 crate::residual::residual_kernels!(pub,);
+crate::residual::dc_add_rows!(pub,);
 
 /// See [`crate::mc::luma_pair`]: each block made whole on its own, then the
 /// two averaged.

@@ -525,7 +525,7 @@ crate::edge::edge_kernels!(pub(crate), #[target_feature(enable = "neon")]);
 /// or the rows would overlap. Splitting each row off in turn checks them
 /// one after another, each waiting on the one before.
 #[inline(always)]
-fn rows_of<const N: usize, const C: usize>(
+pub(crate) fn rows_of<const N: usize, const C: usize>(
     window: &mut [u8],
     down: usize,
 ) -> Option<[&mut [u8; N]; C]> {

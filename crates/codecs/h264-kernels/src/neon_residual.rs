@@ -170,19 +170,56 @@ fn idct8_rows(block: &[i32; 64], rows: [[u8; 8]; 8]) -> [[u8; 8]; 8] {
     out
 }
 
-/// `dc` added to each of the eight samples in `samples`, each held to 0 to
-/// 255: its positive part added and its negative part taken away, both
-/// saturating.
-#[inline]
+/// See [`crate::residual::dc_add`]. The block's rows are found in the
+/// plane with one check, and `dc` goes onto all of them at once: its
+/// positive part added and its negative part taken away, both saturating,
+/// which holds each sample to 0 to 255.
 #[target_feature(enable = "neon")]
-fn dc_row(samples: u64, dc: i32) -> u64 {
+pub(crate) fn dc_add(plane: &mut [u8], at: usize, down: usize, dc: i32, size: usize) -> bool {
     use core::arch::aarch64::{
-        vcreate_u8, vdup_n_u8, vget_lane_u64, vqadd_u8, vqsub_u8, vreinterpret_u64_u8,
+        uint8x16_t, vcombine_u8, vcreate_u8, vdupq_n_u8, vgetq_lane_u64, vqaddq_u8, vqsubq_u8,
+        vreinterpretq_u64_u8,
     };
-    let rise = vdup_n_u8(dc.clamp(0, 255) as u8);
-    let fall = vdup_n_u8((-dc.clamp(-255, 0)) as u8);
-    let moved = vqsub_u8(vqadd_u8(vcreate_u8(samples), rise), fall);
-    vget_lane_u64::<0>(vreinterpret_u64_u8(moved))
+    let Some(window) = plane.get_mut(at..) else {
+        return false;
+    };
+    let rise = vdupq_n_u8(dc.clamp(0, 255) as u8);
+    let fall = vdupq_n_u8(dc.clamp(-255, 0).unsigned_abs() as u8);
+    let moved = |low: u64, high: u64| -> (u64, u64) {
+        let samples: uint8x16_t = vcombine_u8(vcreate_u8(low), vcreate_u8(high));
+        let out = vreinterpretq_u64_u8(vqsubq_u8(vqaddq_u8(samples, rise), fall));
+        (vgetq_lane_u64::<0>(out), vgetq_lane_u64::<1>(out))
+    };
+    match size {
+        4 => {
+            let Some([r0, r1, r2, r3]) = crate::neon::rows_of::<4, 4>(window, down) else {
+                return false;
+            };
+            // Two rows to each half of one vector.
+            let pair = |first: &[u8; 4], second: &[u8; 4]| {
+                u64::from(u32::from_le_bytes(*first)) | u64::from(u32::from_le_bytes(*second)) << 32
+            };
+            let (low, high) = moved(pair(r0, r1), pair(r2, r3));
+            *r0 = (low as u32).to_le_bytes();
+            *r1 = ((low >> 32) as u32).to_le_bytes();
+            *r2 = (high as u32).to_le_bytes();
+            *r3 = ((high >> 32) as u32).to_le_bytes();
+            true
+        }
+        8 => {
+            let Some(rows) = crate::neon::rows_of::<8, 8>(window, down) else {
+                return false;
+            };
+            let [r0, r1, r2, r3, r4, r5, r6, r7] = rows;
+            for (first, second) in [(r0, r1), (r2, r3), (r4, r5), (r6, r7)] {
+                let (low, high) = moved(u64::from_le_bytes(*first), u64::from_le_bytes(*second));
+                *first = low.to_le_bytes();
+                *second = high.to_le_bytes();
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 crate::residual::residual_kernels!(pub(crate), #[target_feature(enable = "neon")]);

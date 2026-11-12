@@ -847,12 +847,9 @@ fn ctx_set(d: &mut [u8], at: usize, n: usize, v: u8) {
     }
 }
 
-/// Fills `h` rows of `w` entries of a map of stride `stride` from `at`
-/// with `v`: one dispatch on the width for all the rows, and no library
-/// call for the power-of-two widths.
-#[inline(always)]
 /// [`fill_rect`] of only the first unit, the bottom row and the right
 /// column of the `w` x `h` rectangle at `at`.
+#[inline(always)]
 fn fill_edges<T: Copy>(d: &mut [T], stride: usize, at: usize, w: usize, h: usize, v: T) {
     if w <= 2 && h <= 2 {
         return fill_rect(d, stride, at, w, h, v);
@@ -890,6 +887,9 @@ fn fill_odd_rows<T: Copy>(d: &mut [T], stride: usize, at: usize, w: usize, h: us
     }
 }
 
+/// Fills `h` rows of `w` entries of a map of stride `stride` from `at`
+/// with `v`: one dispatch on the width for all the rows, and no library
+/// call for the power-of-two widths.
 #[inline(always)]
 pub(crate) fn fill_rect<T: Copy>(d: &mut [T], stride: usize, at: usize, w: usize, h: usize, v: T) {
     if size_of::<T>() > 2 {

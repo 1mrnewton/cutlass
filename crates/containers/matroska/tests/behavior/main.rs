@@ -736,6 +736,36 @@ fn duplicate_track_numbers_and_too_many_tracks_are_refused() {
     ));
 }
 
+#[test]
+fn a_track_timestamp_scale_other_than_one_is_refused() {
+    let mut scale = Vec::new();
+    cutlass_matroska::ebml::put_float(&mut scale, ids::TRACK_TIMESTAMP_SCALE, 2.0);
+    let bytes = file(
+        "matroska",
+        &[
+            info(1_000_000, None),
+            tracks(&[mp3().with_extra(&scale)]),
+            cluster(0, &[simple(2, 0, true, b"x")]),
+        ],
+    );
+    let Some(OpenError::Source { message }) = open(bytes).err() else {
+        panic!("opened");
+    };
+    assert!(message.contains("TrackTimestampScale"), "{message}");
+    // A scale of exactly one is the default and opens.
+    let mut one = Vec::new();
+    cutlass_matroska::ebml::put_float(&mut one, ids::TRACK_TIMESTAMP_SCALE, 1.0);
+    let bytes = file(
+        "matroska",
+        &[
+            info(1_000_000, None),
+            tracks(&[mp3().with_extra(&one)]),
+            cluster(0, &[simple(2, 0, true, b"x")]),
+        ],
+    );
+    assert!(open(bytes).is_ok());
+}
+
 /// An element header with an eight-octet size.
 fn huge(id: u32, size: u64) -> Vec<u8> {
     let mut out = Vec::new();

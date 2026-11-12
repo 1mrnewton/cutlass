@@ -138,7 +138,7 @@ Results on 12 November 2026, release build, after the last code change (seed ori
 | mux | `eb074aeb` | 200000 on | 253 s | stopped at seed 216528 | failed: the test's own bound on a cut SDT name was a byte too tight (fixed in `6cee5861`; the muxer was right) |
 | mux | `6cee5861` | 200000 to 246699 | 600 s | 934,000 sessions, 373,717 clean ones read back, 22,231,989 packets | passed |
 
-Earlier rounds on the builds before the SDT: demux 7,643,950 mutants in 1800 s and 4,128,600 in 900 s; mux 959,740 sessions in 600 s. All passed. Since `eb074aeb` only a doc comment and the fuzz test have changed.
+Earlier rounds on older builds: demux 7,643,950 mutants in 1800 s, and 4,128,600 in 900 s at `278b6407` (before the reorder-depth, export, audio-packing and SDT commits); mux 959,740 sessions in 600 s. All passed. Since `eb074aeb` only a doc comment and the fuzz test have changed.
 
 Outside this crate: the export crate's `a_transport_stream_movie_reads_back_with_decode_times` writes H.264 and MPEG-4 Part 2 movies (with B-frames) as `.ts` and `.m2ts` and checks with ffprobe that decode times rise and are never after their picture's time, and that FFmpeg decodes them without a message. The desktop app's `transport_streams_play_their_picture_and_sound` test opens a muxed transport stream through the app's readers and checks its probed length, and the probe crate's `a_transport_stream_reports_its_picture_and_its_length` checks size and length.
 

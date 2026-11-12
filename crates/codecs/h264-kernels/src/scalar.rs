@@ -646,3 +646,109 @@ pub fn predict_420<'r>(
     (luma, chroma)
 }
 
+/// The samples beside an `N`×`N` block of a plane: the corner, the row
+/// above and the column to the left.
+fn beside<const N: usize>(plane: &[u8], start: usize, down: usize) -> (i32, [i32; N], [i32; N]) {
+    (
+        i32::from(plane[start]),
+        core::array::from_fn(|x| i32::from(plane[start + 1 + x])),
+        core::array::from_fn(|y| i32::from(plane[start + (y + 1) * down])),
+    )
+}
+
+/// The plane prediction's gradient along `samples`, equations 8-128 and
+/// 8-129 and their chroma twins: the sample before the first is `corner`.
+fn gradient<const N: usize>(samples: &[i32; N], corner: i32) -> i32 {
+    let half = N / 2;
+    (0..half)
+        .map(|step| {
+            let before = if step == half - 1 {
+                corner
+            } else {
+                samples[half - 2 - step]
+            };
+            (step as i32 + 1) * (samples[half + step] - before)
+        })
+        .sum()
+}
+
+/// See [`crate::intra::pred16`]: each sample worked out on its own.
+pub fn pred16(plane: &mut [u8], at: usize, down: usize, mode: u8, near: (bool, bool)) -> bool {
+    let Some(start) = crate::intra::corner_at::<16>(plane.len(), at, down) else {
+        return false;
+    };
+    let (corner, up, side) = beside::<16>(plane, start, down);
+    let (above, left) = near;
+    let dc = match (above, left) {
+        (true, true) => (up.iter().sum::<i32>() + side.iter().sum::<i32>() + 16) >> 5,
+        (true, false) => (up.iter().sum::<i32>() + 8) >> 4,
+        (false, true) => (side.iter().sum::<i32>() + 8) >> 4,
+        (false, false) => 128,
+    };
+    let (h, v) = (gradient(&up, corner), gradient(&side, corner));
+    let (a, b, c) = (
+        16 * (up[15] + side[15]),
+        (5 * h + 32) >> 6,
+        (5 * v + 32) >> 6,
+    );
+    for y in 0..16 {
+        for x in 0..16 {
+            let sample = match mode {
+                0 if above => up[x],
+                1 if left => side[y],
+                2 => dc,
+                3 if above && left => (a + b * (x as i32 - 7) + c * (y as i32 - 7) + 16) >> 5,
+                _ => 128,
+            };
+            plane[at + y * down + x] = sample.clamp(0, 255) as u8;
+        }
+    }
+    true
+}
+
+/// See [`crate::intra::pred_chroma`]: each sample worked out on its own.
+pub fn pred_chroma(plane: &mut [u8], at: usize, down: usize, mode: u8, near: (bool, bool)) -> bool {
+    let Some(start) = crate::intra::corner_at::<8>(plane.len(), at, down) else {
+        return false;
+    };
+    let (corner, up, side) = beside::<8>(plane, start, down);
+    let (above, left) = near;
+    let sum = |samples: &[i32; 8], half: usize| samples[half * 4..half * 4 + 4].iter().sum::<i32>();
+    // The DC of each 4×4 quarter: from both edges beside it when the
+    // quarter touches both, else from the one edge it touches, else from
+    // the other.
+    let quarter = |x: usize, y: usize| {
+        let (along, down_side) = (sum(&up, x), sum(&side, y));
+        let both = (along + down_side + 4) >> 3;
+        match (above, left) {
+            (true, true) if x == y => both,
+            (true, true) if y == 0 => (along + 2) >> 2,
+            (true, true) => (down_side + 2) >> 2,
+            (true, false) => (along + 2) >> 2,
+            (false, true) => (down_side + 2) >> 2,
+            (false, false) => 128,
+        }
+    };
+    let dcs = [
+        [quarter(0, 0), quarter(1, 0)],
+        [quarter(0, 1), quarter(1, 1)],
+    ];
+    let (h, v) = (gradient(&up, corner), gradient(&side, corner));
+    let (a, b, c) = (
+        16 * (up[7] + side[7]),
+        (17 * h + 16) >> 5,
+        (17 * v + 16) >> 5,
+    );
+    for y in 0..8 {
+        for x in 0..8 {
+            let sample = match mode {
+                1 if left => side[y],
+                2 if above => up[x],
+                3 if above && left => (a + b * (x as i32 - 3) + c * (y as i32 - 3) + 16) >> 5,
+                _ => dcs[y / 4][x / 4],
+            };
+            plane[at + y * down + x] = sample.clamp(0, 255) as u8;
+        }
+    }
+    true
+}

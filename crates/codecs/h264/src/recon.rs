@@ -449,6 +449,33 @@ pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
         false
     }
 
+    /// The 16×16 luma block from `at`, rows `down` apart, predicted in
+    /// place in Intra_16x16 `mode` from the samples beside it, as
+    /// [`pred16`] and putting its result there do; `near` is whether the
+    /// row above and the column to the left may be used. `false` as for
+    /// [`Self::predict_fast`].
+    fn pred16_fast(
+        _plane: &mut [Self],
+        _at: usize,
+        _down: usize,
+        _mode: u8,
+        _near: (bool, bool),
+    ) -> bool {
+        false
+    }
+
+    /// [`Self::pred16_fast`] for an 8×8 chroma block of a 4:2:0 picture,
+    /// as [`pred_chroma`] does.
+    fn pred_chroma_fast(
+        _plane: &mut [Self],
+        _at: usize,
+        _down: usize,
+        _mode: u8,
+        _near: (bool, bool),
+    ) -> bool {
+        false
+    }
+
     /// `rows` written over the `N`×`N` samples from `at`, rows `down`
     /// apart, with the plane checked once. `false` as for
     /// [`Self::predict_fast`].
@@ -687,6 +714,26 @@ impl Sample for u8 {
 
     fn add_dc_quads_fast(plane: &mut [Self], at: usize, down: usize, dcs: [i32; 4]) -> bool {
         cutlass_h264_kernels::residual::dc_add_quads(plane, at, down, dcs)
+    }
+
+    fn pred16_fast(
+        plane: &mut [Self],
+        at: usize,
+        down: usize,
+        mode: u8,
+        near: (bool, bool),
+    ) -> bool {
+        cutlass_h264_kernels::intra::pred16(plane, at, down, mode, near)
+    }
+
+    fn pred_chroma_fast(
+        plane: &mut [Self],
+        at: usize,
+        down: usize,
+        mode: u8,
+        near: (bool, bool),
+    ) -> bool {
+        cutlass_h264_kernels::intra::pred_chroma(plane, at, down, mode, near)
     }
 
     #[inline(always)]

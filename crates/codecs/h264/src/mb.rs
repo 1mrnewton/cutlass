@@ -5024,24 +5024,27 @@ fn intra_frame_scaled<S: Sample>(
     };
     let scan = scan4(false);
     if let Some(mode) = i16 {
-        let mut above = [S::mid(); 16];
-        let mut left = [S::mid(); 16];
-        if near.above {
-            let at = (y0 - 1) * stride + x0;
-            above.copy_from_slice(&pic.y[at..at + 16]);
-        }
-        if near.left {
-            for (row, sample) in left.iter_mut().enumerate() {
-                *sample = pic.y[(y0 + row) * stride + x0 - 1];
+        let edges = (near.above, near.left);
+        if !S::pred16_fast(&mut pic.y, y0 * stride + x0, stride, mode, edges) {
+            let mut above = [S::mid(); 16];
+            let mut left = [S::mid(); 16];
+            if near.above {
+                let at = (y0 - 1) * stride + x0;
+                above.copy_from_slice(&pic.y[at..at + 16]);
             }
+            if near.left {
+                for (row, sample) in left.iter_mut().enumerate() {
+                    *sample = pic.y[(y0 + row) * stride + x0 - 1];
+                }
+            }
+            let corner = if near.above && near.left {
+                pic.y[(y0 - 1) * stride + x0 - 1]
+            } else {
+                S::mid()
+            };
+            let pred = recon::pred16(mode, &above, &left, near.above, near.left, corner);
+            put_block(&mut pic.y, stride, x0, y0, &pred, 16, 1);
         }
-        let corner = if near.above && near.left {
-            pic.y[(y0 - 1) * stride + x0 - 1]
-        } else {
-            S::mid()
-        };
-        let pred = recon::pred16(mode, &above, &left, near.above, near.left, corner);
-        put_block(&mut pic.y, stride, x0, y0, &pred, 16, 1);
         let mut levels = [0i32; 16];
         let inc = cbf_dc_plane(pic, mx, my, mb, 0);
         if cab.decision(CBF_BASE[0] + inc)? == 1 {
@@ -5213,6 +5216,16 @@ fn intra_frame_scaled<S: Sample>(
     let (cx, cy, chroma_stride) = (mx * 8, my * 8, pic.w / 2);
     for cb in [true, false] {
         let plane = if cb { &mut pic.u } else { &mut pic.v };
+        let edges = (near.above, near.left);
+        if S::pred_chroma_fast(
+            plane,
+            cy * chroma_stride + cx,
+            chroma_stride,
+            mb.chroma_mode,
+            edges,
+        ) {
+            continue;
+        }
         let mut above = [S::mid(); 8];
         let mut left = [S::mid(); 8];
         if near.above {

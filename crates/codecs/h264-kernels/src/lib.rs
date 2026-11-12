@@ -61,12 +61,15 @@ pub fn prefetch_item<T>(items: &[T], at: usize) {
 pub mod deblock;
 mod edge;
 pub mod growing;
+pub mod intra;
 pub mod mc;
 mod mc_block;
 pub mod residual;
 
 #[cfg(target_arch = "aarch64")]
 mod neon;
+#[cfg(target_arch = "aarch64")]
+mod neon_intra;
 #[cfg(target_arch = "aarch64")]
 mod neon_mc;
 #[cfg(target_arch = "aarch64")]

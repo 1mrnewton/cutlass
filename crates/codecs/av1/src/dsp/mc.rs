@@ -26,6 +26,7 @@
 
 use cutlass_simd::av1::blend;
 use cutlass_simd::av1::mc as kernel;
+use cutlass_simd::av1::warp;
 use std::sync::OnceLock;
 
 use super::{Pixel, clip_px, round2};
@@ -1929,6 +1930,65 @@ pub fn warp_8x8_put<P: Pixel>(
     );
 }
 
+/// The block warp of an 8x8 block of 8-bit samples on the kernel: `run`
+/// takes the fifteen rows of sixteen samples the filters read and where
+/// they read the table. Rows near the plane's sides are copied with the
+/// clamp of the specification first.
+#[inline(always)]
+fn warp_u8<T>(
+    refp: &[u8],
+    ref_stride: usize,
+    row0: usize,
+    plane_w: usize,
+    plane_h: usize,
+    mat: &[i32; 6],
+    shear: &[i32; 4],
+    x: usize,
+    y: usize,
+    sub_x: bool,
+    sub_y: bool,
+    run: impl FnOnce([&[u8; 16]; 15], &warp::Filters<'_>) -> T,
+) -> T {
+    let [alpha, beta, gamma, delta] = *shear;
+    let (sx_sh, sy_sh) = (u32::from(sub_x), u32::from(sub_y));
+    let src_x = (x as i64 + 4) << sx_sh;
+    let src_y = (y as i64 + 4) << sy_sh;
+    let dst_x = i64::from(mat[2]) * src_x + i64::from(mat[3]) * src_y + i64::from(mat[0]);
+    let dst_y = i64::from(mat[4]) * src_x + i64::from(mat[5]) * src_y + i64::from(mat[1]);
+    let x4 = dst_x >> sx_sh;
+    let y4 = dst_y >> sy_sh;
+    let prec = WARPEDMODEL_PREC_BITS as u32;
+    let mask = (1i64 << prec) - 1;
+    let ix4 = x4 >> prec;
+    let iy4 = y4 >> prec;
+    let f = warp::Filters {
+        table: &WARPED_FILTERS,
+        h: [(x4 & mask) as i32, alpha, beta],
+        v: [(y4 & mask) as i32, gamma, delta],
+    };
+    let last_x = plane_w as i64 - 1;
+    let last_y = plane_h as i64 - 1;
+    let row = |k: usize| {
+        let ry = (iy4 + k as i64 - 7).clamp(0, last_y) as usize;
+        &refp[(ry - row0) * ref_stride..]
+    };
+    if ix4 >= 7 && ix4 + 8 <= last_x {
+        let x0 = (ix4 - 7) as usize;
+        let rows = core::array::from_fn(|k| {
+            row(k)[x0..]
+                .first_chunk::<16>()
+                .unwrap_or_else(|| unreachable!("column {} lies in the plane", ix4 + 8))
+        });
+        run(rows, &f)
+    } else {
+        let copies: [[u8; 16]; 15] = core::array::from_fn(|k| {
+            let row = row(k);
+            core::array::from_fn(|c| row[(ix4 - 7 + c as i64).clamp(0, last_x) as usize])
+        });
+        run(core::array::from_fn(|k| &copies[k]), &f)
+    }
+}
+
 /// [`warp_8x8_put`] reading rows of the reference plane from row `row0`
 /// on: `refp` starts at that row, and holds the rows [`warp_rows`] names
 /// for the block.
@@ -1948,6 +2008,26 @@ pub fn warp_8x8_put_rows<P: Pixel>(
     sub_y: bool,
     bd: u32,
 ) {
+    if let (Some(dst), Some(refp)) = (P::bytes_mut(dst), P::bytes(refp)) {
+        let block = warp_u8(
+            refp,
+            ref_stride,
+            row0,
+            plane_w,
+            plane_h,
+            mat,
+            shear,
+            x,
+            y,
+            sub_x,
+            sub_y,
+            warp::put8x8,
+        );
+        for (d, b) in dst.chunks_mut(dst_stride).zip(&block) {
+            d[..8].copy_from_slice(b);
+        }
+        return;
+    }
     warp_core(
         refp,
         ref_stride,
@@ -2007,6 +2087,27 @@ pub fn warp_8x8_prep_rows<P: Pixel>(
     sub_y: bool,
     bd: u32,
 ) {
+    if let Some(refp) = P::bytes(refp) {
+        // The bias is 0 for 8-bit samples.
+        let block = warp_u8(
+            refp,
+            ref_stride,
+            row0,
+            plane_w,
+            plane_h,
+            mat,
+            shear,
+            x,
+            y,
+            sub_x,
+            sub_y,
+            warp::prep8x8,
+        );
+        for (t, b) in tmp.chunks_mut(tmp_stride).zip(&block) {
+            t[..8].copy_from_slice(b);
+        }
+        return;
+    }
     let bias = prep_bias(bd);
     warp_core(
         refp,

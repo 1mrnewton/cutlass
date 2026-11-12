@@ -8,6 +8,7 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 mod build;
+mod mux;
 
 use std::io::Cursor;
 

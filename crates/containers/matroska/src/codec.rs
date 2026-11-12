@@ -302,7 +302,7 @@ impl Bits {
     }
 }
 
-fn opus_pre_skip(head: &[u8]) -> Option<u16> {
+pub(crate) fn opus_pre_skip(head: &[u8]) -> Option<u16> {
     if head.len() < 19 || head.get(..8) != Some(b"OpusHead") {
         return None;
     }
@@ -411,9 +411,17 @@ pub struct Written {
     pub video: bool,
 }
 
-/// The CodecID and CodecPrivate for a stream, or why the muxer refuses it.
-/// `webm` limits the codecs to VP8, VP9, AV1, Opus, and Vorbis.
-pub fn written(codec: CodecId, extradata: &[u8], webm: bool) -> Result<Written> {
+/// Whether a muxer stores `codec` at all. `webm` limits the codecs to VP8,
+/// VP9, AV1, Opus, and Vorbis; still image codecs are never a track.
+pub fn allowed(codec: CodecId, webm: bool) -> Result<()> {
+    if matches!(
+        codec,
+        CodecId::Jpeg | CodecId::Png | CodecId::Webp | CodecId::Gif
+    ) {
+        return Err(Error::unsupported(format!(
+            "{codec:?} is a still image codec"
+        )));
+    }
     let allowed_in_webm = matches!(
         codec,
         CodecId::Vp8 | CodecId::Vp9 | CodecId::Av1 | CodecId::Opus | CodecId::Vorbis
@@ -423,6 +431,13 @@ pub fn written(codec: CodecId, extradata: &[u8], webm: bool) -> Result<Written> 
             "{codec:?} is not a WebM codec (VP8, VP9, AV1, Opus, Vorbis)"
         )));
     }
+    Ok(())
+}
+
+/// The CodecID and CodecPrivate for a stream, or why the muxer refuses it.
+/// `webm` limits the codecs to VP8, VP9, AV1, Opus, and Vorbis.
+pub fn written(codec: CodecId, extradata: &[u8], webm: bool) -> Result<Written> {
+    allowed(codec, webm)?;
     let keep = extradata.to_vec();
     let video = |codec_id, private| Written {
         codec_id,
@@ -494,9 +509,7 @@ pub fn written(codec: CodecId, extradata: &[u8], webm: bool) -> Result<Written> 
             }
         }
         CodecId::Jpeg | CodecId::Png | CodecId::Webp | CodecId::Gif => {
-            return Err(Error::unsupported(format!(
-                "{codec:?} is a still image codec"
-            )));
+            return Err(Error::unsupported("a still image codec is not a track"));
         }
     };
     let needs_private = matches!(
@@ -516,6 +529,88 @@ pub fn written(codec: CodecId, extradata: &[u8], webm: bool) -> Result<Written> 
         )));
     }
     Ok(written)
+}
+
+/// The bare AudioSpecificConfig `A_AAC` stores. A configuration wrapped in
+/// an MPEG-4 ES descriptor (ISO/IEC 14496-1, 7.2.6.5), as some encoders hand
+/// it over, is unwrapped to the DecoderSpecificInfo inside.
+pub fn aac_config(config: &[u8]) -> Result<Vec<u8>> {
+    if config.first() != Some(&0x03) {
+        return Ok(config.to_vec());
+    }
+    let short = || Error::malformed("short MPEG-4 ES descriptor");
+    let mut at = 0;
+    while at < config.len() {
+        let tag = config[at];
+        at += 1;
+        let mut length = 0_usize;
+        for _ in 0..4 {
+            let byte = *config.get(at).ok_or_else(short)?;
+            at += 1;
+            length = (length << 7) | usize::from(byte & 0x7F);
+            if byte & 0x80 == 0 {
+                break;
+            }
+        }
+        match tag {
+            // ES_Descriptor: ES_ID, then flags that say which fields follow.
+            0x03 => {
+                let flags = *config.get(at + 2).ok_or_else(short)?;
+                at += 3;
+                if flags & 0x80 != 0 {
+                    at += 2;
+                }
+                if flags & 0x40 != 0 {
+                    let url = usize::from(*config.get(at).ok_or_else(short)?);
+                    at += 1 + url;
+                }
+                if flags & 0x20 != 0 {
+                    at += 2;
+                }
+            }
+            // DecoderConfigDescriptor: 13 fixed bytes, then its children.
+            0x04 => at += 13,
+            0x05 => {
+                let end = at.checked_add(length).ok_or_else(short)?;
+                return config.get(at..end).map(<[u8]>::to_vec).ok_or_else(short);
+            }
+            _ => at = at.checked_add(length).ok_or_else(short)?,
+        }
+    }
+    Err(Error::malformed("ES descriptor has no DecoderSpecificInfo"))
+}
+
+/// The `OpusHead` `A_OPUS` stores. An `OpusHead` stays as it is; a `dOps`
+/// body (ISO BMFF Opus mapping, big-endian fields) becomes an `OpusHead`.
+pub fn opus_head(config: &[u8]) -> Result<Vec<u8>> {
+    if config.starts_with(b"OpusHead") {
+        return Ok(config.to_vec());
+    }
+    let [
+        0,
+        channels,
+        skip0,
+        skip1,
+        rate0,
+        rate1,
+        rate2,
+        rate3,
+        gain0,
+        gain1,
+        family,
+        rest @ ..,
+    ] = config
+    else {
+        return Err(Error::malformed(
+            "Opus configuration is not an OpusHead or dOps",
+        ));
+    };
+    let mut head = b"OpusHead".to_vec();
+    head.extend_from_slice(&[1, *channels, *skip1, *skip0]);
+    head.extend_from_slice(&[*rate3, *rate2, *rate1, *rate0]);
+    head.extend_from_slice(&[*gain1, *gain0, *family]);
+    head.extend_from_slice(rest);
+    Ok(head)
 }
 
 /// `A_FLAC` CodecPrivate is the `fLaC` marker and the metadata blocks. A

@@ -583,7 +583,12 @@ fn rows_decoded<S: Sample>(pic: &mut Frame<S>, addr: usize) {
     let Some(mut writer) = pic.writer.take() else {
         return;
     };
-    while writer.deblocked < decoded.min(pic.h / 16) {
+    let ready = if writer.lag {
+        decoded.saturating_sub(1)
+    } else {
+        decoded
+    };
+    while writer.deblocked < ready.min(pic.h / 16) {
         deblock_next_row(pic, &mut writer);
     }
     // Only a picture kept for reference is ever read by another.
@@ -596,15 +601,23 @@ fn rows_decoded<S: Sample>(pic: &mut Frame<S>, addr: usize) {
 }
 
 /// Deblocks the next macroblock row, which is decoded, without waiting for
-/// the row below it.
+/// the row below it, unless the writer lags a row behind.
 ///
 /// That row's intra prediction reads this row's last line as it was before
 /// deblocking. So the line is copied first, and after deblocking the copy
 /// goes back into the picture while the filtered line is set aside; the
 /// two are exchanged again before the next row is deblocked. The
-/// unfiltered line is never published: a band ends above it.
+/// unfiltered line is never published: a band ends above it. A writer
+/// that lags is called once the row below is decoded, and sets nothing
+/// aside.
 fn deblock_next_row<S: Sample>(pic: &mut Frame<S>, writer: &mut super::Writer<S>) {
     let row = writer.deblocked;
+    if writer.lag {
+        // The row below is decoded: nothing reads this one unfiltered.
+        deblock_rows_after(pic, row..row + 1, &mut writer.above);
+        writer.deblocked = row + 1;
+        return;
+    }
     if row > 0 {
         swap_last_line(pic, row - 1, &mut writer.edge);
     }
@@ -657,7 +670,7 @@ pub(crate) fn finish_rows<S: Sample>(pic: &mut Frame<S>) {
         deblock_next_row(pic, &mut writer);
     }
     // The last row's filtered line goes back for good.
-    if rows > 0 {
+    if rows > 0 && !writer.lag {
         swap_last_line(pic, rows - 1, &mut writer.edge);
     }
     if pic.referenced

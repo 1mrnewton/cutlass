@@ -345,6 +345,10 @@ struct Writer<S> {
     /// What the deblocking of the last row worked out about each of its
     /// macroblocks, which the next row's top edges read.
     above: Vec<Option<(u16, bool)>>,
+    /// Rows are deblocked once the row below is decoded too, so that row
+    /// predicted from the last line as it was: no line is set aside. For
+    /// a picture no other thread reads while it is decoded.
+    lag: bool,
 }
 
 /// Output time and the grain blended at emit. `pts` on the frame stays the
@@ -1447,6 +1451,9 @@ fn decode_au<S: Sample>(
                 what: "incomplete picture",
             });
         }
+    } else if pic.writer.is_some() {
+        mb::finish_rows(&mut pic);
+        pic.writer = None;
     } else {
         mb::deblock(&mut pic);
     }
@@ -2643,6 +2650,32 @@ fn decode_slice<S: Sample>(
         let here = jobs.is_none();
         let mut frame = new_frame(&sps, &header, poc, packet, idr, (here, keep_levels))?;
         frame.field_poc = field_poc;
+        // Decoded here, a large plain 4:2:0 frame is deblocked a row at a
+        // time, each once the row below it is decoded, while their samples
+        // are still in the cache; not all at once at its end. Its slices
+        // follow one another, which is checked below. A smaller one stays
+        // in the cache to its end and does better in one pass: 720×1280
+        // decoded 1.2% slower a row at a time, 1920×1080 0.7% faster.
+        const LARGE: usize = 1_500_000;
+        let pps = sets
+            .pps
+            .get(usize::from(header.pps_id))
+            .and_then(|pps| pps.as_ref());
+        if here
+            && frame.w.saturating_mul(frame.h) >= LARGE
+            && !header.field
+            && sps.frame_mbs_only
+            && sps.chroma == 1
+            && !sps.separate
+            && pps.is_some_and(|pps| pps.groups.minus1 == 0)
+            && sets.subset.iter().all(|subset| subset.is_none())
+            && layer.is_none()
+        {
+            frame.writer = Some(Writer {
+                lag: true,
+                ..Writer::default()
+            });
+        }
         *picture = Some(frame);
         *next_mb = 0;
         if header.nal_ref {
@@ -5889,6 +5922,25 @@ mod tests {
                 assert!(got == want, "{threads} threads differ");
             }
         }
+    }
+
+    #[test]
+    fn large_pictures_deblocked_a_row_behind_match_the_threaded_rows() {
+        // Large enough to be deblocked a row at a time on one thread, each
+        // row once the one below is decoded; the threaded way sets the
+        // last line of each row aside instead. A row filtered too early
+        // or too late would show as a difference.
+        let (width, height) = (1600, 960);
+        let packets = moving_pictures(width, height, 6);
+        let mut params = CodecParams::video(CodecId::H264, width, height);
+        params.nal_length_size = 0;
+        let want = shown(&mut H264Decoder::open(&params).unwrap(), &packets);
+        assert_eq!(want.len(), 6);
+        let rows = shown(
+            &mut H264Decoder::open(&params).unwrap().with_rows_inline(),
+            &packets,
+        );
+        assert!(rows == want, "rows a row behind differ from rows set aside");
     }
 
     #[test]

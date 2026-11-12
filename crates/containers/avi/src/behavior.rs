@@ -415,16 +415,31 @@ fn unknown_codecs_are_published_and_read() {
         sample_size: 0,
         strf: wfx(0x1234, 1, 8_000, 1, 0, &[]),
     };
+    let text = Spec {
+        kind: *b"txts",
+        handler: [0; 4],
+        scale: 1,
+        rate: 25,
+        sample_size: 0,
+        strf: Vec::new(),
+    };
     let file = avi(
-        &[odd, audio],
-        &[(b"00dc", vec![1, 2, 3], true), (b"01wb", vec![4], true)],
+        &[odd, audio, text],
+        &[
+            (b"00dc", vec![1, 2, 3], true),
+            (b"01wb", vec![4], true),
+            (b"02tx", vec![5, 6], true),
+        ],
         Idx1::Relative,
     );
     let mut demux = open(&file.bytes).expect("open");
     assert!(demux.streams()[0].params().codec().is_unknown());
     assert_eq!(demux.streams()[0].params().extradata(), &[7, 7]);
     assert!(demux.streams()[1].params().codec().is_unknown());
-    assert_eq!(drain(&mut demux).len(), 2);
+    assert!(demux.streams()[2].params().codec().is_unknown());
+    let packets = drain(&mut demux);
+    assert_eq!(packets.len(), 3);
+    assert_eq!(packets[2].bytes(), &[5, 6]);
 }
 
 #[test]

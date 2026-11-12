@@ -100,6 +100,23 @@ pub const VARIANTS: &[Variant] = &[
             "1",
         ],
     },
+    // FFmpeg's M2TS mode writes AAC as private data with no descriptor
+    // naming it, so the demuxer names it from its first frames.
+    Variant {
+        name: "h264_aac.m2ts",
+        args: &[
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-g",
+            "50",
+            "-c:a",
+            "aac",
+            "-mpegts_m2ts_mode",
+            "1",
+        ],
+    },
     Variant {
         name: "h264_ac3.m2ts",
         args: &[

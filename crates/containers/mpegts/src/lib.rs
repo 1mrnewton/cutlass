@@ -16,6 +16,7 @@ pub mod pipeline;
 mod probe;
 pub mod psi;
 pub mod section;
+mod sniff;
 mod source;
 pub mod time;
 

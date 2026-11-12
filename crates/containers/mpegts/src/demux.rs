@@ -55,6 +55,7 @@ use crate::pes::pes_times;
 use crate::pipeline::{Counters, Pipeline};
 use crate::psi::{Elementary, Kind, Pat, Pmt, parse_pat, parse_pmt};
 use crate::section::SectionBuffer;
+use crate::sniff;
 use crate::source::{Next, Source};
 use crate::time::unwrap;
 
@@ -196,9 +197,13 @@ impl<R: Read + Seek> TsDemux<R> {
         let max_tracks = usize::try_from(limits.max_tracks)
             .unwrap_or(usize::MAX)
             .min(255);
-        let elementaries: Vec<Elementary> = pmt.streams.iter().take(max_tracks).cloned().collect();
+        let mut elementaries: Vec<Elementary> =
+            pmt.streams.iter().take(max_tracks).cloned().collect();
         let limit = usize::try_from(limits.max_packet_bytes).unwrap_or(usize::MAX);
 
+        source.rewind(data_start);
+        sniff::name_private_streams(&mut source, data_start, &mut elementaries)
+            .map_err(OpenError::from_header)?;
         // Read the kept bytes again through the program's streams.
         source.rewind(data_start);
         let mut pipeline = Pipeline::new(&elementaries, limit);

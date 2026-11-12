@@ -279,6 +279,9 @@ pub struct FrameState {
     pub lr_rows: [usize; 3],
     /// MotionFieldMvs[ref][y8][x8] for ref = 1..=7 (index 0 unused).
     pub motion_field: Vec<super::mvpred::MfEntry>,
+    /// The motion field as the thread computing it hands it on, read in
+    /// place of [`Self::motion_field`] when set.
+    pub motion_shared: Option<std::sync::Arc<super::mvpred::MfShared>>,
 }
 
 impl FrameState {
@@ -317,6 +320,7 @@ impl FrameState {
             lr_cols,
             lr_rows,
             motion_field: Vec::new(),
+            motion_shared: None,
         }
     }
 
@@ -337,6 +341,7 @@ impl FrameState {
                 fs.lr_rows = lr_rows;
                 fs.prev_segment_ids = None;
                 fs.motion_field.clear();
+                fs.motion_shared = None;
                 fs.mi_ring = usize::MAX;
                 fs
             }
@@ -396,6 +401,7 @@ impl FrameState {
             lr_cols: self.lr_cols,
             lr_rows: self.lr_rows,
             motion_field: Vec::new(),
+            motion_shared: None,
         }
     }
 

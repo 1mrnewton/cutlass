@@ -388,12 +388,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 if dr == 0 && dc == 0 {
                     self.b.zero_mv_ctx = 1;
                 }
-                let entry = self
-                    .fs
-                    .motion_field
-                    .get((r >> 1) * w8 + (c >> 1))
-                    .copied()
-                    .unwrap_or_default();
+                let entry = self.mf_entry(r >> 1, c >> 1, w8);
                 if entry.offset != 0 {
                     self.add_tpl_entry(dr == 0 && dc == 0, entry, is_compound, dist, &mut memo);
                 }
@@ -415,6 +410,21 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                     self.add_tpl_ref_mv(dr, dc, is_compound, dist, &mut memo);
                 }
             }
+        }
+    }
+
+    /// The motion field entry of the 8x8 at (`y8`, `x8`) of a frame `w8`
+    /// 8x8s wide.
+    #[inline]
+    fn mf_entry(&self, y8: usize, x8: usize, w8: usize) -> MfEntry {
+        match &self.fs.motion_shared {
+            Some(s) => s.at(y8, x8),
+            None => self
+                .fs
+                .motion_field
+                .get(y8 * w8 + x8)
+                .copied()
+                .unwrap_or_default(),
         }
     }
 
@@ -440,12 +450,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         if dr == 0 && dc == 0 {
             self.b.zero_mv_ctx = 1;
         }
-        let entry = self
-            .fs
-            .motion_field
-            .get(y8 * w8 + x8)
-            .copied()
-            .unwrap_or_default();
+        let entry = self.mf_entry(y8, x8, w8);
         if entry.offset == 0 {
             return;
         }
@@ -757,6 +762,45 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
 #[inline]
 fn round2_signed(x: i32, n: u32) -> i32 {
     crate::dsp::round2_signed(x, n)
+}
+
+/// The motion field of a frame, band by band as a thread computes it. A
+/// tile parser waits for the bands it reads, and reads them here.
+pub struct MfShared {
+    pub bands: Vec<std::sync::OnceLock<Vec<MfEntry>>>,
+    pub w8: usize,
+    pub h8: usize,
+}
+
+impl MfShared {
+    #[must_use]
+    pub fn new(plan: &MfPlan) -> Self {
+        Self {
+            bands: (0..plan.bands())
+                .map(|_| std::sync::OnceLock::new())
+                .collect(),
+            w8: plan.w8,
+            h8: plan.h8,
+        }
+    }
+
+    /// An unset band of the field.
+    #[must_use]
+    pub fn blank(&self, k: usize) -> Vec<MfEntry> {
+        let rows = self.h8.saturating_sub(8 * k).min(8);
+        vec![MfEntry::default(); rows * self.w8]
+    }
+
+    /// The entry of the 8x8 at (`y8`, `x8`), unset until its band is there.
+    #[inline]
+    fn at(&self, y8: usize, x8: usize) -> MfEntry {
+        self.bands
+            .get(y8 >> 3)
+            .and_then(std::sync::OnceLock::get)
+            .and_then(|b| b.get((y8 & 7) * self.w8 + x8))
+            .copied()
+            .unwrap_or_default()
+    }
 }
 
 /// One projected motion field entry: the source motion vector and the

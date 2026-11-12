@@ -18,7 +18,6 @@ use cutlass_decode::CodecError;
 
 use super::super::cdf::CdfContext;
 use super::super::frame::{FrameState, MF_BAND_ROWS, MfBand, Picture, RefData};
-use super::super::mvpred::MfEntry;
 use super::super::obu::{FrameHeader, SequenceHeader};
 use super::super::recon::Scratch;
 use super::super::tile::ReconLog;
@@ -281,9 +280,9 @@ pub(super) fn parse_tiles<P: PicturePixel>(
     out: &FrameOut<'_>,
 ) -> R<Box<CdfContext>> {
     let ctx = hdr.tile_info.context_update_tile_id as usize;
-    let field_len = field.map_or(0, |f| f.w8 * f.h8);
+    // The parsers read the motion field where its thread puts it.
     fs.motion_field.clear();
-    fs.motion_field.resize(field_len, MfEntry::default());
+    fs.motion_shared = field.cloned();
     let prev_ids = fs.prev_segment_ids.clone();
     let (mi_cols, mi_rows) = (fs.mi_cols, fs.mi_rows);
     // A pooled frame state for every thread but this one, each made
@@ -416,9 +415,10 @@ pub(super) fn parse_tiles<P: PicturePixel>(
             prof::count(prof::NEW_STATE);
         }
         let mut st = FrameState::reuse(old, seq, hdr);
-        st.motion_field.resize(field_len, MfEntry::default());
+        st.motion_shared = field.cloned();
         st.prev_segment_ids.clone_from(&prev_ids);
         let done = work(&mut st);
+        st.motion_shared = None;
         lock(spares).states.push(st);
         done
     };
@@ -436,6 +436,7 @@ pub(super) fn parse_tiles<P: PicturePixel>(
             })
         });
         let mine = work(fs);
+        fs.motion_shared = None;
         let theirs = match first.map(|h| h.join()) {
             None => Vec::new(),
             Some(Ok(all)) => all,

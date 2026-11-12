@@ -14,7 +14,7 @@ use crate::dsp::lr::LrScratch;
 use super::cdf::CdfContext;
 use super::frame::{FrameState, LrUnitParams, MF_BAND_ROWS, MfBand, Picture, Plane, RefData};
 use super::msac::Msac;
-use super::mvpred::{MfEntry, MfPlan, motion_field_plan};
+use super::mvpred::{MfPlan, MfShared, motion_field_plan};
 use super::obu::{
     FrameHeader, GrainParams, HeaderContext, KEY_FRAME, OBU_FRAME, OBU_FRAME_HEADER,
     OBU_REDUNDANT_FRAME_HEADER, OBU_SEQUENCE_HEADER, OBU_TEMPORAL_DELIMITER, OBU_TILE_GROUP,
@@ -2586,30 +2586,6 @@ struct RowMsg {
     lr: [Rect<LrUnitParams>; 3],
 }
 
-/// The motion field of a frame, band by band as a thread computes it. A
-/// tile parser waits for the bands it reads.
-struct MfShared {
-    bands: Vec<OnceLock<Vec<MfEntry>>>,
-    w8: usize,
-    h8: usize,
-}
-
-impl MfShared {
-    fn new(plan: &MfPlan) -> Self {
-        Self {
-            bands: (0..plan.bands()).map(|_| OnceLock::new()).collect(),
-            w8: plan.w8,
-            h8: plan.h8,
-        }
-    }
-
-    /// An unset band of the field.
-    fn blank(&self, k: usize) -> Vec<MfEntry> {
-        let rows = self.h8.saturating_sub(8 * k).min(8);
-        vec![MfEntry::default(); rows * self.w8]
-    }
-}
-
 /// Ends a motion field when its thread does: the bands it did not get to
 /// stay unset, and no parser waits for them.
 struct MfClose(Arc<MfShared>);
@@ -2622,25 +2598,23 @@ impl Drop for MfClose {
     }
 }
 
-/// One tile parser's copy of the motion field, in its frame state.
+/// One tile parser's wait for the motion field, which its frame state
+/// reads where the thread computing it puts it (see
+/// [`FrameState::motion_shared`]).
 struct MfFeed {
     shared: Arc<MfShared>,
-    /// Bands already in the frame state.
+    /// Bands known to be there.
     have: usize,
 }
 
 impl MfFeed {
-    /// Waits for the bands luma 4x4 rows up to `r1` use and stores them.
-    fn need(&mut self, fs: &mut FrameState, r1: usize) {
+    /// Waits for the bands luma 4x4 rows up to `r1` use.
+    fn need(&mut self, _fs: &mut FrameState, r1: usize) {
         let need = r1.div_ceil(2).div_ceil(8).min(self.shared.bands.len());
         while self.have < need {
             let tw = std::time::Instant::now();
-            let band = self.shared.bands[self.have].wait();
+            self.shared.bands[self.have].wait();
             prof::mark(prof::MF_WAIT, tw);
-            let at = 8 * self.have * self.shared.w8;
-            if let Some(d) = fs.motion_field.get_mut(at..at + band.len()) {
-                d.copy_from_slice(band);
-            }
             self.have += 1;
         }
     }

@@ -11207,7 +11207,8 @@ fn mc_block<S: Sample>(
 ) -> Result<(), CodecError> {
     let McMotion { r0, r1, .. } = motion;
     // Neither explicit weights other than the default ones, nor implicit
-    // weights, nor ALC's: one prediction is copied and two are averaged.
+    // weights other than equal ones, nor ALC's: one prediction is copied
+    // and two are averaged.
     let default = |list: usize, reference: i8| {
         reference < 0
             || !slice.weighted
@@ -11216,7 +11217,11 @@ fn mc_block<S: Sample>(
     let plain = alc.is_none()
         && default(0, r0)
         && default(1, r1)
-        && (r0 < 0 || r1 < 0 || slice.pps.weighted_bipred != 2 || slice.kind != 1);
+        && (r0 < 0
+            || r1 < 0
+            || slice.pps.weighted_bipred != 2
+            || slice.kind != 1
+            || implicit_weights(slice, r0, r1) == (32, 32));
     let done = if plain && !pic.separate_plane && pic.chroma() == 1 {
         mc_plain(pic, dpb, slice, &block, motion)?
     } else {

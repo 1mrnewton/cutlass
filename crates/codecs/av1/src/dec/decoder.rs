@@ -24,7 +24,7 @@ use super::obu::{
 use super::postfilter;
 use super::recon::Scratch;
 use super::tile::{Block, MiFill, ReconLog, RefView, RowHook, TileDec, lr_unit_span, malformed};
-use super::types::{INTRA_FRAME, Mv, bw4};
+use super::types::{INTRA_FRAME, MiInfo, Mv, bw4};
 
 type R<T> = Result<T, CodecError>;
 
@@ -1934,28 +1934,38 @@ fn mf_band(
             && i32::from(mv.row).abs() < (1 << 12)
             && i32::from(mv.col).abs() < (1 << 12)
     };
-    for y in 0..rows {
+    // Block by block: a block is as far from the left as a whole number
+    // of its widths, and its 8x8 positions save the same. The next block
+    // of a row is known only once its block size is read, so the rows go
+    // round, a block of each at a time: their reads wait together.
+    let mut mis: [&[MiInfo]; MF_BAND_ROWS] = [&[]; MF_BAND_ROWS];
+    let mut x8s = [cols.end; MF_BAND_ROWS];
+    for (y, (m, x8)) in mis.iter_mut().zip(&mut x8s).enumerate().take(rows) {
         let at = fs.mi_row(2 * (k * MF_BAND_ROWS + y) + 1);
-        let Some(mi) = fs.mi.get(at..at + 2 * cols.end) else {
-            break;
-        };
-        let refs = &mut band.refs[y * w8..][..w8];
-        let mvs = &mut band.mvs[y * w8..][..w8];
-        // Block by block: a block is as far from the left as a whole
-        // number of its widths, and its 8x8 positions save the same.
-        let mut x8 = cols.start;
-        while x8 < cols.end {
-            let c4 = 2 * x8 + 1;
+        if let Some(mi) = fs.mi.get(at..at + 2 * cols.end) {
+            (*m, *x8) = (mi, cols.start);
+        }
+    }
+    let (refs, mvs) = (&mut band.refs, &mut band.mvs);
+    let mut busy = true;
+    while busy {
+        busy = false;
+        for (y, (mi, x8)) in mis.iter().zip(&mut x8s).enumerate() {
+            if *x8 >= cols.end {
+                continue;
+            }
+            busy = true;
+            let c4 = 2 * *x8 + 1;
             let m = &mi[c4];
             let bw = bw4(m.bsize).max(1);
-            let end = (((c4 & !(bw - 1)) + bw) / 2).clamp(x8 + 1, cols.end);
+            let end = (((c4 & !(bw - 1)) + bw) / 2).clamp(*x8 + 1, cols.end);
             // The second list wins when both qualify.
             if let Some(list) = [1, 0].into_iter().find(|&l| ok(m.ref_frame[l], m.mv[l])) {
-                let run = x8 - cols.start..end - cols.start;
+                let run = y * w8 + *x8 - cols.start..y * w8 + end - cols.start;
                 refs[run.clone()].fill(m.ref_frame[list]);
                 mvs[run].fill(m.mv[list]);
             }
-            x8 = end;
+            *x8 = end;
         }
     }
     band

@@ -182,24 +182,87 @@ impl Mb {
 /// its planes start out [`Shared::owned`]: plain buffers, with nothing to
 /// check on each write. They are [`Shared::freeze`]d into the shared form
 /// when the picture is done. Cloning one that is still owned copies it.
+///
+/// A buffer made by [`Shared::spare`] goes back to the [`Spares`] it came
+/// from when its last holder drops it.
 #[derive(Clone, Debug)]
-pub(crate) struct Shared<T>(Hold<T>);
+pub(crate) struct Shared<T: Send + 'static> {
+    hold: Hold<T>,
+    home: Option<std::sync::Arc<Spares>>,
+}
+
+/// Planes of pictures no longer held, kept for later pictures to be
+/// decoded into rather than made and filled anew: every sample of a
+/// picture that is kept is written before it is read, and one that fails
+/// is dropped, so what a plane held before never shows.
+#[derive(Default)]
+pub(crate) struct Spares(std::sync::Mutex<Vec<Box<dyn std::any::Any + Send>>>);
+
+impl std::fmt::Debug for Spares {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Spares")
+    }
+}
+
+/// Planes [`Spares`] keeps at most, a few pictures' worth.
+const SPARES_KEPT: usize = 12;
+
+impl Spares {
+    /// A kept buffer of `len` items, if there is one.
+    fn take<T: Send + 'static>(&self, len: usize) -> Option<Vec<T>> {
+        let mut held = self.0.lock().ok()?;
+        let at = held.iter().rposition(|kept| {
+            kept.downcast_ref::<Vec<T>>()
+                .is_some_and(|plane| plane.len() == len)
+        })?;
+        held.swap_remove(at)
+            .downcast::<Vec<T>>()
+            .ok()
+            .map(|plane| *plane)
+    }
+
+    fn keep<T: Send + 'static>(&self, plane: Vec<T>) {
+        if let Ok(mut held) = self.0.lock()
+            && held.len() < SPARES_KEPT
+        {
+            held.push(Box::new(plane));
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
-enum Hold<T> {
+enum Hold<T: Send + 'static> {
     Owned(Vec<T>),
     Split(std::sync::Arc<Vec<T>>),
 }
 
-impl<T> Shared<T> {
+impl<T: Send + 'static> Shared<T> {
     /// A buffer with one holder, for the picture being decoded.
     pub(crate) fn owned(held: Vec<T>) -> Self {
-        Self(Hold::Owned(held))
+        Self {
+            hold: Hold::Owned(held),
+            home: None,
+        }
+    }
+
+    /// As [`Self::owned`], `len` items long, for a caller that writes
+    /// every item before it reads it: a buffer `home` kept, holding what
+    /// was there, or else a new one of `fill`. It goes back to `home` when
+    /// it is dropped.
+    pub(crate) fn spare(home: &std::sync::Arc<Spares>, len: usize, fill: T) -> Self
+    where
+        T: Clone,
+    {
+        let held = home.take(len).unwrap_or_else(|| vec![fill; len]);
+        Self {
+            hold: Hold::Owned(held),
+            home: Some(home.clone()),
+        }
     }
 
     /// Whether nothing else holds the buffer.
     fn sole(&mut self) -> bool {
-        match &mut self.0 {
+        match &mut self.hold {
             Hold::Owned(_) => true,
             Hold::Split(held) => std::sync::Arc::get_mut(held).is_some(),
         }
@@ -207,7 +270,7 @@ impl<T> Shared<T> {
 
     /// The buffer, when nothing else holds it, leaving this one empty.
     fn take_sole(&mut self) -> Option<Vec<T>> {
-        match &mut self.0 {
+        match &mut self.hold {
             Hold::Owned(held) => Some(std::mem::take(held)),
             Hold::Split(held) => std::sync::Arc::get_mut(held).map(std::mem::take),
         }
@@ -215,40 +278,54 @@ impl<T> Shared<T> {
 
     /// Makes clones from here on share the buffer.
     pub(crate) fn freeze(&mut self) {
-        if let Hold::Owned(held) = &mut self.0 {
-            self.0 = Hold::Split(std::sync::Arc::new(std::mem::take(held)));
+        if let Hold::Owned(held) = &mut self.hold {
+            self.hold = Hold::Split(std::sync::Arc::new(std::mem::take(held)));
         }
     }
 }
 
-impl<T> Default for Shared<T> {
+impl<T: Send + 'static> Drop for Shared<T> {
+    fn drop(&mut self) {
+        if let Some(home) = self.home.take()
+            && let Some(plane) = self.take_sole()
+            && !plane.is_empty()
+        {
+            home.keep(plane);
+        }
+    }
+}
+
+impl<T: Send + 'static> Default for Shared<T> {
     fn default() -> Self {
-        Self(Hold::Owned(Vec::new()))
+        Self::owned(Vec::new())
     }
 }
 
-impl<T> From<Vec<T>> for Shared<T> {
+impl<T: Send + 'static> From<Vec<T>> for Shared<T> {
     fn from(held: Vec<T>) -> Self {
-        Self(Hold::Split(std::sync::Arc::new(held)))
+        Self {
+            hold: Hold::Split(std::sync::Arc::new(held)),
+            home: None,
+        }
     }
 }
 
-impl<T> std::ops::Deref for Shared<T> {
+impl<T: Send + 'static> std::ops::Deref for Shared<T> {
     type Target = Vec<T>;
 
     #[inline]
     fn deref(&self) -> &Vec<T> {
-        match &self.0 {
+        match &self.hold {
             Hold::Owned(held) => held,
             Hold::Split(held) => held,
         }
     }
 }
 
-impl<T: Clone> std::ops::DerefMut for Shared<T> {
+impl<T: Clone + Send + 'static> std::ops::DerefMut for Shared<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Vec<T> {
-        match &mut self.0 {
+        match &mut self.hold {
             Hold::Owned(held) => held,
             Hold::Split(held) => std::sync::Arc::make_mut(held),
         }
@@ -636,7 +713,7 @@ macro_rules! decode_depth {
             &$nals,
             $packet,
             &mut $grain,
-            $self.pool.as_ref(),
+            ($self.pool.as_ref(), &$self.spares),
         )?;
         if let Some(frame) = dpb.last() {
             $self.picture_samples = frame.w.saturating_mul(frame.h);
@@ -667,6 +744,8 @@ pub struct H264Decoder {
     /// Luma samples in the last picture read, for sizing what may be in
     /// flight.
     picture_samples: usize,
+    /// Planes of finished pictures, decoded into again.
+    spares: std::sync::Arc<Spares>,
 }
 
 pub fn register_decoders(factory: &mut DecodeFactory) {
@@ -710,6 +789,7 @@ impl H264Decoder {
             outbox: std::collections::VecDeque::new(),
             stash: Vec::new(),
             picture_samples: 0,
+            spares: std::sync::Arc::default(),
         };
         if !params.extra.is_empty() {
             dec.apply_extra(&params.extra)?;
@@ -1074,7 +1154,7 @@ fn decode_au<S: Sample>(
     nals: &[Nal],
     packet: &Packet,
     grain: &mut crate::sei::GrainHold,
-    pool: Option<&Pool>,
+    (pool, spares): (Option<&Pool>, &std::sync::Arc<Spares>),
 ) -> Result<Vec<Frame<S>>, CodecError> {
     // A picture goes to another thread only when the unit holds nothing
     // but plain slices; the first slice's headers then have the last word.
@@ -1141,6 +1221,7 @@ fn decode_au<S: Sample>(
                                 held: &mut held_field,
                                 layer: None,
                                 jobs: &mut None,
+                                spares: None,
                             },
                         )?;
                         if built {
@@ -1187,6 +1268,7 @@ fn decode_au<S: Sample>(
                                 held: &mut held_field,
                                 layer: Some(&base),
                                 jobs: &mut None,
+                                spares: None,
                             },
                         )?;
                         if built {
@@ -1227,6 +1309,7 @@ fn decode_au<S: Sample>(
                                 held: &mut held_field,
                                 layer: None,
                                 jobs: &mut None,
+                                spares: None,
                             },
                         )?;
                         if built {
@@ -1271,6 +1354,7 @@ fn decode_au<S: Sample>(
                                 held: &mut held_field,
                                 layer: None,
                                 jobs: &mut None,
+                                spares: None,
                             },
                         )?;
                         if built {
@@ -1306,6 +1390,7 @@ fn decode_au<S: Sample>(
                                 held: &mut held_field,
                                 layer: None,
                                 jobs: &mut None,
+                                spares: None,
                             },
                         )?;
                         if built {
@@ -1353,6 +1438,7 @@ fn decode_au<S: Sample>(
                         held: &mut held_field,
                         layer: None,
                         jobs: &mut plan,
+                        spares: Some(spares),
                     },
                 )?;
                 if built {
@@ -1435,6 +1521,7 @@ fn decode_au<S: Sample>(
             pic,
             dpb: dpb.clone(),
             slices: plan.slices,
+            spares: spares.clone(),
             shown: meta.shown.clone(),
         };
         pool.run(Box::new(move || run_picture(job)));
@@ -1529,6 +1616,20 @@ fn exchange_refs<S: Sample>(picture: &mut Frame<S>, dpb: &mut [Frame<S>], plane:
     exchange_plane(picture, plane);
     for frame in dpb {
         exchange_plane(frame, plane);
+    }
+}
+
+/// A plane of `len` samples, taken from `spares` when there are some and
+/// every sample will be `written`; otherwise new, of `fill`.
+fn plane<S: Sample>(
+    spares: Option<&std::sync::Arc<Spares>>,
+    len: usize,
+    fill: S,
+    written: bool,
+) -> Shared<S> {
+    match spares {
+        Some(home) if written => Shared::spare(home, len, fill),
+        _ => Shared::owned(vec![fill; len]),
     }
 }
 
@@ -2532,6 +2633,8 @@ struct AuScratch<'a, S: Sample> {
     /// Where this picture's slices are kept when it will be decoded on
     /// another thread. `None` decodes each slice here as it is read.
     jobs: &'a mut Option<RowPlan>,
+    /// Where a plain picture's planes come from and go back to.
+    spares: Option<&'a std::sync::Arc<Spares>>,
 }
 
 fn decode_slice<S: Sample>(
@@ -2557,6 +2660,7 @@ fn decode_slice<S: Sample>(
         held,
         layer,
         jobs,
+        spares,
     } = scratch;
     let mut bits = Bits::new(&nal.rbsp);
     let header = read_header(&mut bits, sets, idr, nal.ref_idc != 0, slice_class(nal))?;
@@ -2648,7 +2752,14 @@ fn decode_slice<S: Sample>(
         }
         let keep_levels = sets.subset.iter().flatten().any(|sps| sps.seq_tcoeff);
         let here = jobs.is_none();
-        let mut frame = new_frame(&sps, &header, poc, packet, idr, (here, keep_levels))?;
+        let mut frame = new_frame(
+            &sps,
+            &header,
+            (poc, idr),
+            packet,
+            (here, keep_levels),
+            spares,
+        )?;
         frame.field_poc = field_poc;
         // Decoded here, a large plain 4:2:0 frame is deblocked a row at a
         // time, each once the row below it is decoded, while their samples
@@ -4078,12 +4189,12 @@ fn poc_type1(
 fn new_frame<S: Sample>(
     sps: &Sps,
     header: &Header,
-    poc: i32,
+    (poc, idr): (i32, bool),
     packet: &Packet,
-    idr: bool,
     // Whether to make the planes now, and whether to keep luma levels.
     // A picture bound for another thread gets its planes there.
     (planes, keep_levels): (bool, bool),
+    spares: Option<&std::sync::Arc<Spares>>,
 ) -> Result<Frame<S>, CodecError> {
     let (mut vis_w, mut vis_h) = sps.visible()?;
     let field_pic = header.field;
@@ -4141,9 +4252,9 @@ fn new_frame<S: Sample>(
         (0, 0, 0)
     };
     Ok(Frame {
-        y: Shared::owned(vec![S::default(); luma]),
-        u: Shared::owned(vec![S::mid(); chroma]),
-        v: Shared::owned(vec![S::mid(); chroma]),
+        y: plane(spares, luma, S::default(), true),
+        u: plane(spares, chroma, S::mid(), sps.chroma != 0),
+        v: plane(spares, chroma, S::mid(), sps.chroma != 0),
         mb: Shared::owned(vec![Mb::new(u16::MAX); blocks]),
         w,
         h,
@@ -4707,6 +4818,7 @@ struct PictureJob<S: Sample> {
     pic: Frame<S>,
     dpb: Vec<Frame<S>>,
     slices: Vec<SliceJob>,
+    spares: std::sync::Arc<Spares>,
     /// When and how the picture is shown, settled after its slices.
     shown: Shown,
 }
@@ -4732,6 +4844,7 @@ fn run_picture<S: Sample>(job: PictureJob<S>) {
         mut pic,
         dpb,
         slices,
+        spares: job_spares,
         shown,
     } = job;
     let Some(published) = pic.pending.clone() else {
@@ -4740,9 +4853,12 @@ fn run_picture<S: Sample>(job: PictureJob<S>) {
     let ends = EndsPicture(published);
     // The planes are made here, on the thread that fills them.
     let blocks = pic.mb_w.saturating_mul(pic.h / 16);
-    pic.y = Shared::owned(vec![S::default(); pic.w.saturating_mul(pic.h)]);
-    pic.u = Shared::owned(vec![S::mid(); (pic.w / 2).saturating_mul(pic.h / 2)]);
-    pic.v = Shared::owned(vec![S::mid(); (pic.w / 2).saturating_mul(pic.h / 2)]);
+    // Only 4:2:0 comes here, so every sample is written.
+    let spares = Some(&job_spares);
+    let chroma = (pic.w / 2).saturating_mul(pic.h / 2);
+    pic.y = plane(spares, pic.w.saturating_mul(pic.h), S::default(), true);
+    pic.u = plane(spares, chroma, S::mid(), true);
+    pic.v = plane(spares, chroma, S::mid(), true);
     pic.mb = Shared::owned(vec![Mb::new(u16::MAX); blocks]);
     let result = decode_picture(&mut pic, &dpb, &slices).map(|()| {
         // The picture is put in its output form here too, so the caller

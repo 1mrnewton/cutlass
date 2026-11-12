@@ -470,6 +470,16 @@ struct JobState {
     /// Luma rows a reader asked for so far, with some to spare: rows
     /// below are published only once one is asked for.
     want: usize,
+    /// Told when the job ends (see [`Av1Core::limit_in_flight`]).
+    ended: Option<Arc<Ended>>,
+}
+
+/// How many of the frame jobs that tell it have ended: the decoder waits
+/// on it for any frame decoding to end.
+#[derive(Default)]
+struct Ended {
+    n: Mutex<u64>,
+    cv: Condvar,
 }
 
 /// The picture of a frame whose reconstruction and in-loop filters may
@@ -488,6 +498,7 @@ impl FrameJob {
                 rows: 0,
                 watched: false,
                 want: 0,
+                ended: None,
             }),
             cv: Condvar::new(),
         })
@@ -512,6 +523,10 @@ impl FrameJob {
         if s.result.is_none() {
             s.result = Some(r);
             self.cv.notify_all();
+            if let Some(e) = &s.ended {
+                *lock(&e.n) += 1;
+                e.cv.notify_all();
+            }
             return std::mem::take(&mut s.bands);
         }
         Vec::new()
@@ -970,6 +985,8 @@ pub struct Av1Core {
     /// Frames that may still be decoding.
     /// With their weights (see [`Self::limit_in_flight`]).
     in_flight: Vec<(Arc<FrameJob>, usize)>,
+    /// Told by each of them when it ends.
+    ended: Arc<Ended>,
     /// The weight of the frame being started.
     weight: usize,
     /// Frames started by the current call.
@@ -1030,6 +1047,7 @@ impl Av1Core {
             outstanding: Vec::new(),
             queue: VecDeque::new(),
             in_flight: Vec::new(),
+            ended: Arc::default(),
             weight: 0,
             unit_jobs: Vec::new(),
             max_pixels: 35_651_584,
@@ -1498,6 +1516,7 @@ impl Av1Core {
             self.slots[slot].as_ref().map(|s| s.pic.clone())
         });
         let job = FrameJob::running();
+        lock(&job.state).ended = Some(self.ended.clone());
         let cdf_out = Promise::new();
         let data_out = Promise::new();
         let t = TaskParts {
@@ -1683,12 +1702,31 @@ impl Av1Core {
     /// the weights of those decoding come to at most
     /// `IN_FLIGHT_WEIGHT - w`.
     fn limit_in_flight(&mut self, w: usize) {
-        self.in_flight.retain(|(j, _)| !j.is_done());
-        while self.in_flight.len() >= self.threads.clamp(2, MAX_IN_FLIGHT)
-            || self.in_flight.iter().map(|&(_, w)| w).sum::<usize>() + w > IN_FLIGHT_WEIGHT
-        {
-            let (j, _) = self.in_flight.remove(0);
-            let _ = j.wait();
+        let full = |f: &[(Arc<FrameJob>, usize)]| {
+            f.len() >= self.threads.clamp(2, MAX_IN_FLIGHT)
+                || f.iter().map(|&(_, w)| w).sum::<usize>() + w > IN_FLIGHT_WEIGHT
+        };
+        // Whichever frame ends first makes room, not only the oldest: a
+        // later one often ends before it.
+        loop {
+            // Read before looking at the jobs, so that one ending after
+            // the look moves the count past it (a job counts once its
+            // result is in).
+            let seen = *lock(&self.ended.n);
+            self.in_flight.retain(|(j, _)| !j.is_done());
+            if !full(&self.in_flight) {
+                break;
+            }
+            let t = std::time::Instant::now();
+            let mut n = lock(&self.ended.n);
+            while *n == seen {
+                n = self
+                    .ended
+                    .cv
+                    .wait(n)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+            prof::add(prof::WAIT_OUT, t);
         }
         self.weight = w;
     }

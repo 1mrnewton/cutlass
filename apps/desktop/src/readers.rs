@@ -11,14 +11,14 @@ use cutlass_isobmff::IsoBmffFile;
 use cutlass_still::{StillDemux, still_limits};
 
 /// The codecs [`crate::register_codecs`] installs, plus ISOBMFF, WAV, AIFF,
-/// FLAC, Ogg (Opus and Vorbis), MP3, and stills.
+/// FLAC, Ogg (Opus and Vorbis), Matroska and WebM, MP3, and stills.
 #[cfg(test)]
 pub(crate) fn installed_readers() -> ReaderFactory {
     readers_with(crate::register_codecs().0)
 }
 
-/// ISOBMFF, WAV, AIFF, FLAC, Ogg (Opus and Vorbis), MP3, and stills,
-/// decoded with `decoders`.
+/// ISOBMFF, WAV, AIFF, FLAC, Ogg (Opus and Vorbis), Matroska and WebM, MP3,
+/// and stills, decoded with `decoders`.
 pub(crate) fn readers_with(decoders: DecodeFactory) -> ReaderFactory {
     let mut readers = ReaderFactory::new();
     readers.register_container(probe_isobmff, open_isobmff);
@@ -26,6 +26,7 @@ pub(crate) fn readers_with(decoders: DecodeFactory) -> ReaderFactory {
     readers.register_container(cutlass_aiff::probe, open_aiff);
     readers.register_container(cutlass_flac_container::probe, open_flac);
     readers.register_container(cutlass_ogg::probe, open_ogg);
+    readers.register_container(cutlass_matroska::probe, open_matroska);
     readers.register_container(cutlass_still::probe, open_still);
     readers.register_container(probe_mp3, open_mp3);
     *readers.decoders_mut() = decoders;
@@ -146,6 +147,22 @@ fn open_ogg(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
     Ok(Box::new(cutlass_ogg::OggDemux::open(
         std::io::BufReader::new(file),
         length,
+    )?))
+}
+
+fn open_matroska(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let file = File::open(path).map_err(|error| OpenError::Source {
+        message: error.to_string(),
+    })?;
+    let length = file
+        .metadata()
+        .map_err(|error| OpenError::Source {
+            message: error.to_string(),
+        })?
+        .len();
+    // The demuxer reads ahead itself, so the file goes in unbuffered.
+    Ok(Box::new(cutlass_matroska::MatroskaDemux::open(
+        file, length,
     )?))
 }
 
@@ -282,6 +299,136 @@ mod tests {
         }
         let snr = 10.0 * (signal / noise.max(1e-30)).log10();
         assert!(snr > 30.0, "SNR {snr:.1} dB after a seek");
+    }
+
+    /// Opus at 48 kHz, two seconds of a sine, written to a WebM file whose
+    /// Segment tick is `scale` nanoseconds. Returns what the Rust decoder
+    /// gives for every packet in a row, pre-skip included.
+    fn opus_webm(path: &std::path::Path, scale: u64) -> Vec<f32> {
+        use cutlass_encode::{AudioInput, ChannelLayout, CodecParams, Encoder, Pcm, SideData};
+
+        let samples: Vec<f32> = (0..2 * 96_000)
+            .map(|i| ((i as f32) * 0.011).sin() * 0.4)
+            .collect();
+        let mut spec = CodecParams::audio(CodecId::Opus, 48_000, ChannelLayout::stereo());
+        spec.bitrate = 128_000;
+        let mut encoder = cutlass_opus::OpusEncoder::open(&spec).expect("encoder");
+        let pcm = Pcm::from_f32(48_000, ChannelLayout::stereo(), samples).expect("pcm");
+        let mut packets = encoder.push(&AudioInput { pcm }).expect("push");
+        packets.extend(encoder.drain().expect("drain"));
+        let mut mux =
+            cutlass_matroska::MatroskaMux::webm(std::fs::File::create(path).expect("create"))
+                .with_timestamp_scale(scale);
+        let params =
+            StreamParams::try_audio(StreamCodec::Known(CodecId::Opus), 48_000, 2, Vec::new())
+                .expect("params");
+        let track = mux
+            .add_stream(NewStream {
+                params,
+                timescale: Timescale::new(48_000),
+                language: None,
+            })
+            .expect("stream");
+        let mut ticks = 0;
+        for packet in &packets {
+            for side in &packet.side {
+                if let SideData::Config(head) = side {
+                    mux.set_config(track, head).expect("head");
+                }
+            }
+            let timestamp =
+                Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
+                    .expect("timestamp");
+            let out = Packet::try_new(
+                track.get(),
+                packet.data.clone(),
+                timestamp,
+                Timescale::new(48_000),
+                true,
+            )
+            .expect("packet");
+            mux.write_packet(&out).expect("write");
+            ticks += packet.duration;
+        }
+        mux.finish(&[TrackDuration {
+            track,
+            timescale: Timescale::new(48_000),
+            ticks,
+        }])
+        .expect("finish");
+        drop(mux);
+        let mut decoder = cutlass_opus::OpusDecoder::open(&spec).expect("decoder");
+        let mut expected = Vec::new();
+        for packet in &packets {
+            expected.extend(decoder.decode(&packet.data).expect("decode"));
+        }
+        expected
+    }
+
+    /// A `.webm` file with Opus opens, plays from the start exactly what the
+    /// Rust decoder gives after the pre-skip, and converges on it after a
+    /// seek. The Segment tick here is 0.5 ms, so the 2.5 ms pre-skip is a
+    /// whole number of ticks.
+    #[test]
+    fn a_webm_opus_file_opens_seeks_and_decodes_after_the_pre_skip() {
+        let path =
+            std::env::temp_dir().join(format!("cutlass-readers-opus-{}.webm", std::process::id()));
+        let expected = opus_webm(&path, 500_000);
+        let readers = installed_readers();
+        let info = readers.probe(&path).expect("probe");
+        // As for an `.opus` file, the duration counts the 2.5 ms pre-skip.
+        assert_eq!(info.duration.map(|d| d.0), Some(2_002_500));
+        let mut media = readers.open(&path).expect("open");
+        let first = media
+            .audio_from(cutlass_model::Micros(0), 4800)
+            .expect("audio");
+        let first = first.as_f32().expect("f32");
+        assert_eq!(first.len(), 2 * 4800);
+        for (index, value) in first.iter().enumerate() {
+            assert!(
+                (value - expected[2 * 120 + index]).abs() < 1e-6,
+                "sample {index}"
+            );
+        }
+        let later = media
+            .audio_from(cutlass_model::Micros(1_000_000), 4800)
+            .expect("audio");
+        std::fs::remove_file(&path).expect("remove");
+        let later = later.as_f32().expect("f32");
+        assert_eq!(later.len(), 2 * 4800);
+        let start = 2 * (120 + 48_000);
+        let (mut signal, mut noise) = (0.0f64, 0.0f64);
+        for (index, value) in later.iter().enumerate() {
+            let want = f64::from(expected[start + index]);
+            signal += want * want;
+            noise += (f64::from(*value) - want).powi(2);
+        }
+        let snr = 10.0 * (signal / noise.max(1e-30)).log10();
+        assert!(snr > 30.0, "SNR {snr:.1} dB after a seek");
+    }
+
+    /// At the usual 1 ms Segment tick, the 2.5 ms pre-skip is stored as the
+    /// CodecDelay in nanoseconds but the stream's edit counts whole ticks,
+    /// so the reader starts 3 ms in: 24 samples past the exact pre-skip.
+    #[test]
+    fn a_millisecond_webm_rounds_the_opus_pre_skip_to_its_tick() {
+        let path = std::env::temp_dir().join(format!(
+            "cutlass-readers-opus-ms-{}.webm",
+            std::process::id()
+        ));
+        let expected = opus_webm(&path, 1_000_000);
+        let mut media = installed_readers().open(&path).expect("open");
+        let first = media
+            .audio_from(cutlass_model::Micros(0), 480)
+            .expect("audio");
+        std::fs::remove_file(&path).expect("remove");
+        let first = first.as_f32().expect("f32");
+        for (index, value) in first.iter().enumerate() {
+            assert!(
+                (value - expected[2 * 144 + index]).abs() < 1e-6,
+                "sample {index}"
+            );
+        }
     }
 
     /// An `.ogg` Vorbis file opens, probes, and plays the decoder's own

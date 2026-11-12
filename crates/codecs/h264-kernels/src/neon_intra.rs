@@ -268,6 +268,7 @@ macro_rules! window8 {
 }
 
 /// See [`crate::intra::pred8`].
+#[inline]
 #[target_feature(enable = "neon")]
 pub(crate) fn pred8(plane: &mut [u8], at: usize, down: usize, mode: u8, near: Near8) -> bool {
     let Some(start) = crate::intra::corner8_at(plane.len(), at, down) else {

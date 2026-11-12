@@ -3374,6 +3374,21 @@ fn read_header(
                 },
             )?;
         }
+        // Every weight the default one, 2^denom with no offset, weights
+        // nothing: one prediction comes out as it is and two as their
+        // rounded average, as FFmpeg's `use_weight` left clear has them
+        // predicted. Adaptive luma compensation reads the flag apart.
+        let plain = |list: usize, count: usize| {
+            (0..count.min(32)).all(|i| {
+                yw[list][i] == 1 << luma_denom
+                    && yo[list][i] == 0
+                    && cw[list][i] == [1 << chroma_denom; 2]
+                    && co[list][i] == [0; 2]
+            })
+        };
+        if !sps.alc && plain(0, num_ref_l0) && (kind != 1 || plain(1, num_ref_l1)) {
+            weights = false;
+        }
     }
     let mut no_output_prior = false;
     let mut long_term_ref = false;

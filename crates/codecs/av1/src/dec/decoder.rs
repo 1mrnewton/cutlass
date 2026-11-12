@@ -2931,10 +2931,10 @@ impl<P: PicturePixel> InPlace<'_, P> {
 /// With `inplace`, the filters run here instead, in `cur` (see [`InPlace`]),
 /// and nothing goes to `filters`.
 ///
-/// With `banded`, `cur` is a picture of one superblock row and `fs` holds
-/// the mode info of one superblock row and the row above it: each row
-/// done goes to the filters as it is, and the next is reconstructed into
-/// a new one.
+/// With `banded`, `cur` is a picture of one superblock row: each row done
+/// goes to the filters as it is, and the next is reconstructed into a new
+/// one. With `band_mi`, `fs` holds the mode info of one superblock row and
+/// the row above it.
 fn recon_worker<'r, P: PicturePixel>(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
@@ -2950,6 +2950,7 @@ fn recon_worker<'r, P: PicturePixel>(
     mut inplace: Option<&mut InPlace<'_, P>>,
     spares: &Mutex<Spares<P>>,
     banded: bool,
+    band_mi: bool,
 ) -> R<(Vec<Mirror<P>>, Scratch<P>)> {
     // A reference read through a scale may need any row.
     let scaled = std::array::from_fn::<bool, 8, _>(|i| {
@@ -3099,6 +3100,19 @@ fn recon_worker<'r, P: PicturePixel>(
         if let Some(m) = done {
             down = [down[1], [UNREAD; 8]];
             td.scratch.save_edge(td.cur, 4 * m.r1, td.y0);
+            if band_mi {
+                // The next row's blocks read the mode info of the last row
+                // of this one.
+                let st = td.fs.mi_stride;
+                let from = (m.r1 - 1 - td.mi_r0) * st;
+                if td.fs.mi.len() >= from + st {
+                    td.fs.mi.copy_within(from..from + st, 0);
+                }
+                if td.fs.uv_modes.len() >= from + st {
+                    td.fs.uv_modes.copy_within(from..from + st, 0);
+                }
+                td.mi_r0 = m.r1 - 1;
+            }
         }
         if let Some(ip) = inplace.as_deref_mut() {
             ip.take(seq, hdr, td.cur, log, m);
@@ -3117,17 +3131,6 @@ fn recon_worker<'r, P: PicturePixel>(
             }
             Some(m) => {
                 let row = std::mem::replace(td.cur, take_sb_row(&mut lock(spares), seq, hdr));
-                // The next row's blocks read the mode info of the last row
-                // of this one.
-                let st = td.fs.mi_stride;
-                let from = (m.r1 - 1 - td.mi_r0) * st;
-                if td.fs.mi.len() >= from + st {
-                    td.fs.mi.copy_within(from..from + st, 0);
-                }
-                if td.fs.uv_modes.len() >= from + st {
-                    td.fs.uv_modes.copy_within(from..from + st, 0);
-                }
-                td.mi_r0 = m.r1 - 1;
                 td.y0 = 4 * m.r1;
                 Some(Samples::Row(row))
             }
@@ -3408,9 +3411,13 @@ fn decode_frame_async<P: PicturePixel>(
         && !hdr.allow_intrabc
         && !hdr.use_superres;
     let in_place = hdr.refresh_frame_flags == 0 || !(cdef_on || hdr.lr.uses_lr);
+    // Whatever the picture, reconstruction keeps the mode info of one
+    // superblock row and the row above it: its blocks read no other, and
+    // the filters take theirs from the log.
+    let band_mi = !hdr.allow_intrabc && !hdr.use_superres;
     let (rc_fs, mut ft_fs, lr_scratch, rec, cur) = {
         let mut sp = lock(spares);
-        let (rc_fs, ft_fs) = take_shells(&mut sp, fs, banded.then(|| band_rows(seq)));
+        let (rc_fs, ft_fs) = take_shells(&mut sp, fs, band_mi.then(|| band_rows(seq)));
         let lr = sp.lr.pop().unwrap_or_default();
         let none = || Picture::<P> {
             planes: Vec::new(),
@@ -3463,6 +3470,7 @@ fn decode_frame_async<P: PicturePixel>(
         job: job.clone(),
         rx: rrx,
         banded,
+        band_mi,
         in_place,
     };
     workers.run(Box::new(move || {
@@ -3562,8 +3570,11 @@ struct Backend<P> {
     /// The parsed chunks.
     rx: Receiver<(Option<RowMsg>, ReconLog)>,
     /// Whether `rec` is a picture of a superblock row (see
-    /// [`take_sb_row`]) and `rc_fs` a shell of as many rows.
+    /// [`take_sb_row`]).
     banded: bool,
+    /// Whether `rc_fs` is a shell of the mode info of a superblock row and
+    /// the row above it (see [`TileDec::mi_r0`]).
+    band_mi: bool,
     /// Whether the filters run in place in `rec`, the final picture.
     in_place: bool,
 }
@@ -3704,6 +3715,7 @@ impl<P: PicturePixel> Backend<P> {
             job,
             rx,
             banded,
+            band_mi,
             in_place: filter_here,
         } = self;
         let _guard = FinishGuard(job.clone());
@@ -3785,7 +3797,7 @@ impl<P: PicturePixel> Backend<P> {
             match parked {
                 None => recon_worker(
                     &seq, &hdr, &mut rc_fs, &mut rec, refs, mirrors, &finals, scratch, fills, rx,
-                    &ftx, None, &spares, banded,
+                    &ftx, None, &spares, banded, band_mi,
                 ),
                 Some(stage) => {
                     let FilterStage {
@@ -3840,6 +3852,7 @@ impl<P: PicturePixel> Backend<P> {
                         Some(&mut ip),
                         &spares,
                         false,
+                        band_mi,
                     );
                     ip.give_back();
                     let InPlace {

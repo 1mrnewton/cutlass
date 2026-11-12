@@ -24,6 +24,81 @@ pub struct Cabac<'a> {
     ctx: [u8; CONTEXTS],
 }
 
+/// [`Cabac`] over a run of bins, from [`Cabac::run`]: its bins are the
+/// same, with the offset and the range held here until the run ends.
+pub struct Run<'c, 'a> {
+    cab: &'c mut Cabac<'a>,
+    value: u64,
+    range: u32,
+}
+
+impl Run<'_, '_> {
+    /// `codIRange` shifted back to 256..510 and the offset with it.
+    #[inline(always)]
+    fn renorm_by(&mut self, range: u32, value: u64) {
+        let shift = range.leading_zeros() - 23;
+        self.range = range << shift;
+        self.value = value << shift;
+        if self.value & AHEAD == 0 {
+            self.value = refilled(self.cab, self.value);
+        }
+    }
+
+    /// One bin decoded with context `ctx`, clause 9.3.3.2.1.
+    #[inline(always)]
+    pub fn decision(&mut self, ctx: usize) -> Result<u8, CodecError> {
+        // Which symbol comes out is as good as random to the CPU, so
+        // nothing here branches on it: the two outcomes differ by a mask
+        // and a table half.
+        let packed = usize::from(self.cab.ctx[ctx] & 127);
+        let range_lps = u32::from(LPS_RANGE[packed][((self.range >> 6) & 3) as usize]);
+        let range_mps = self.range - range_lps;
+        let scaled = u64::from(range_mps) << OFFSET_AT;
+        let lps = u64::from(self.value >= scaled);
+        let mask = lps.wrapping_neg();
+        self.cab.ctx[ctx] = AFTER[packed + ((lps as usize) << 7)];
+        let value = self.value - (scaled & mask);
+        let range = range_mps ^ ((range_mps ^ range_lps) & mask as u32);
+        self.renorm_by(range, value);
+        Ok((packed as u8 & 1) ^ lps as u8)
+    }
+
+    /// One bin decoded in bypass mode, clause 9.3.3.2.3.
+    #[inline(always)]
+    pub fn bypass(&mut self) -> Result<u8, CodecError> {
+        let mut value = self.value << 1;
+        let scaled = u64::from(self.range) << OFFSET_AT;
+        let one = value >= scaled;
+        if one {
+            value -= scaled;
+        }
+        self.value = value;
+        if value & AHEAD == 0 {
+            self.value = refilled(self.cab, value);
+        }
+        Ok(u8::from(one))
+    }
+}
+
+/// `value` as the offset of `cab` after [`Cabac::refill`]. Only the offset
+/// is handed over, not the [`Run`], so the run stays where the compiler
+/// put it.
+#[cold]
+#[inline(never)]
+fn refilled(cab: &mut Cabac<'_>, value: u64) -> u64 {
+    cab.value = value;
+    cab.refill();
+    cab.value
+}
+
+impl Drop for Run<'_, '_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        self.cab.value = self.value;
+        self.cab.range = self.range;
+    }
+}
+
 /// Where `codIOffset` starts in [`Cabac::value`].
 const OFFSET_AT: u32 = 54;
 /// The bits under the marker when at least eight stream bits are ahead.
@@ -149,6 +224,8 @@ impl<'a> Cabac<'a> {
         Ok((packed as u8 & 1) ^ lps as u8)
     }
 
+    /// Only the tests read a bypass bin outside a [`Run`].
+    #[cfg(test)]
     #[inline(always)]
     pub fn bypass(&mut self) -> Result<u8, CodecError> {
         let mut value = self.value << 1;
@@ -162,6 +239,18 @@ impl<'a> Cabac<'a> {
             self.refill();
         }
         Ok(u8::from(one))
+    }
+
+    /// The decoder with its offset and range held apart, where the
+    /// compiler can keep them in registers over a run of bins rather than
+    /// store and load them for each; they are put back when the run ends.
+    #[inline(always)]
+    pub fn run(&mut self) -> Run<'_, 'a> {
+        Run {
+            value: self.value,
+            range: self.range,
+            cab: self,
+        }
     }
 
     /// `end_of_slice_flag` and the like. Bits read past the end of the data
@@ -384,6 +473,22 @@ mod tests {
                             break;
                         }
                     },
+                    // A run of bins with the offset and range held
+                    // apart, each checked as it comes.
+                    11..=20 => {
+                        let mut run = fast.run();
+                        let mut last = (0, 0);
+                        for k in 0..(r >> 8) % 12 + 1 {
+                            let ctx = (ctx + k as usize) % 460;
+                            last = if k % 3 == 2 {
+                                (run.bypass().unwrap(), plain.bypass())
+                            } else {
+                                (run.decision(ctx).unwrap(), plain.decision(ctx))
+                            };
+                            assert_eq!(last.0, last.1, "round {round} step {step} bin {k}");
+                        }
+                        last
+                    }
                     _ => (fast.decision(ctx).unwrap(), plain.decision(ctx)),
                 };
                 assert_eq!(got, want, "round {round} step {step}");

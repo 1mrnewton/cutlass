@@ -4426,6 +4426,7 @@ fn cabac_levels(
     const LEVEL: [usize; 14] = [
         227, 237, 247, 257, 266, 426, 952, 962, 972, 708, 982, 992, 1002, 766,
     ];
+    let mut cab = cab.run();
     let which = cat.min(13);
     let row = usize::from(field);
     let (sig_base, last_base, level_base) = (SIG[row][which], LAST[row][which], LEVEL[which]);
@@ -9509,6 +9510,7 @@ fn read_mvd(entropy: &mut Entropy<'_, '_>, sum: i32, base: usize) -> Result<i32,
     match entropy {
         Entropy::Cavlc(bits) => bits.se(),
         Entropy::Cabac(cab) => {
+            let mut cab = cab.run();
             let ctx = usize::from(sum > 2) + usize::from(sum > 32);
             if cab.decision(base + ctx)? == 0 {
                 return Ok(0);

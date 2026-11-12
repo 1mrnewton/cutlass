@@ -194,13 +194,15 @@ fn rate_u32(rate: f64) -> Option<u32> {
 
 /// The three PCM layout bytes for an `A_PCM/*` CodecID and BitDepth.
 /// FFmpeg reads a missing BitDepth as 16 for integers; floats default to 32.
+/// 8-bit integer PCM is unsigned (coding 11) in either byte order, as
+/// FFmpeg's `matroskadec.c` reads it (`AV_CODEC_ID_PCM_U8`).
 #[must_use]
 pub fn pcm_layout(id: &[u8], bits: Option<u64>) -> Option<[u8; 3]> {
     match id {
         b"A_PCM/INT/LIT" | b"A_PCM/INT/BIG" => {
             let big = u8::from(id == b"A_PCM/INT/BIG");
             let coding = match bits.unwrap_or(16) {
-                8 => 6,
+                8 => 11,
                 16 => 1,
                 24 => 2,
                 32 => 3,
@@ -515,7 +517,7 @@ pub fn written(codec: CodecId, extradata: &[u8], webm: bool) -> Result<Written> 
                 [1, 0, _] => ("A_PCM/INT/LIT", 16),
                 [2, 0, _] => ("A_PCM/INT/LIT", 24),
                 [3, 0, _] => ("A_PCM/INT/LIT", 32),
-                [6, _, _] => ("A_PCM/INT/LIT", 8),
+                [11, _, _] => ("A_PCM/INT/LIT", 8),
                 [1, 1, _] => ("A_PCM/INT/BIG", 16),
                 [2, 1, _] => ("A_PCM/INT/BIG", 24),
                 [3, 1, _] => ("A_PCM/INT/BIG", 32),
@@ -781,12 +783,23 @@ mod tests {
     fn pcm_layouts_follow_the_id_and_bit_depth() {
         assert_eq!(pcm_layout(b"A_PCM/INT/LIT", None), Some([1, 0, 0]));
         assert_eq!(pcm_layout(b"A_PCM/INT/BIG", Some(24)), Some([2, 1, 0]));
-        assert_eq!(pcm_layout(b"A_PCM/INT/LIT", Some(8)), Some([6, 0, 0]));
+        assert_eq!(pcm_layout(b"A_PCM/INT/LIT", Some(8)), Some([11, 0, 0]));
+        assert_eq!(pcm_layout(b"A_PCM/INT/BIG", Some(8)), Some([11, 1, 0]));
         assert_eq!(pcm_layout(b"A_PCM/FLOAT/IEEE", Some(64)), Some([5, 0, 0]));
         assert_eq!(pcm_layout(b"A_PCM/INT/LIT", Some(20)), None);
         let mut odd = track(b"A_PCM/INT/LIT", TrackKind::Audio);
         odd.bit_depth = Some(20);
         assert!(map_track(&odd).expect("odd").params.codec().is_unknown());
+    }
+
+    #[test]
+    fn eight_bit_pcm_is_written_unsigned_and_signed_is_refused() {
+        let unsigned = written(CodecId::Pcm, &[11, 0, 0], false).expect("u8");
+        assert_eq!(unsigned.codec_id, "A_PCM/INT/LIT");
+        assert_eq!(unsigned.bit_depth, Some(8));
+        // Matroska has no signed 8-bit PCM, and a container does not
+        // convert samples.
+        assert!(written(CodecId::Pcm, &[6, 0, 0], false).is_err());
     }
 
     #[test]

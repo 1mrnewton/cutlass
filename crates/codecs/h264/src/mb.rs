@@ -11887,137 +11887,126 @@ fn deblock_planes<S: Sample>(
     let (luma, cb, cr) = planes;
     let mb_w = pic.mb_w;
     let mb_h = pic.h / 16;
-    let mbaff = pic.mbaff;
-    let first = rows.start.min(mb_h).saturating_mul(mb_w);
-    let count = rows.end.min(mb_h).saturating_mul(mb_w);
     // What each macroblock's edges need to know about it, kept for the
     // macroblock to its right and the one below, so it is worked out once.
     let mut above: Vec<Option<(u16, bool)>> = vec![None; mb_w];
     let mut left: Option<(u16, bool)> = None;
-    for addr in first..count {
-        let (mx, my) = if mbaff {
-            let pair = addr / 2;
-            (pair % mb_w, (pair / mb_w) * 2 + (addr % 2))
-        } else {
-            (addr % mb_w, addr / mb_w)
-        };
-        let index = my * mb_w + mx;
-        let beside = if mx == 0 { None } else { left.take() };
-        let over = above.get_mut(mx).and_then(|kept| kept.take());
-        if pic
-            .mb
-            .get(index)
-            .is_some_and(|mb| mb.deblock == 1 || mb.pcm)
-        {
-            continue;
-        }
-        let transform8 = pic.mb.get(index).is_some_and(|mb| mb.transform8);
-        let field = pic.mb.get(index).is_some_and(|mb| mb.field_mb);
-        // Worked out once here, not again for each of the eight edges. An
-        // intra macroblock's edges take their strength from that alone, on
-        // its own edges and its neighbours', so its summary is never read.
-        let known = pic.mb.get(index).map_or((0, false), |mb| {
-            if mb.intra {
+    // The thresholds inside the last macroblock that had any, which the
+    // next one most often shares.
+    let mut thresholds = Thresholds::default();
+    for my in rows.start.min(mb_h)..rows.end.min(mb_h) {
+        for mx in 0..mb_w {
+            let index = my * mb_w + mx;
+            let beside = if mx == 0 { None } else { left.take() };
+            let over = above.get_mut(mx).and_then(|kept| kept.take());
+            let Some(mb) = pic.mb.get(index) else {
+                continue;
+            };
+            if mb.deblock == 1 || mb.pcm {
+                continue;
+            }
+            let transform8 = mb.transform8;
+            // Worked out once here, not again for each of the eight edges. An
+            // intra macroblock's edges take their strength from that alone, on
+            // its own edges and its neighbours', so its summary is never read.
+            let known = if mb.intra {
                 (0, false)
             } else {
                 (coded_mask(mb), single_motion(mb))
-            }
-        });
-        let flat = known.1
-            && pic
-                .mb
-                .get(index)
-                .is_some_and(|mb| !mb.intra && mb.nnz_y == [0; 16]);
-        if !mbaff {
+            };
+            // No luma coefficients and one motion: no inner edge is filtered.
+            let flat = known == (0, true);
             left = Some(known);
             if let Some(kept) = above.get_mut(mx) {
                 *kept = Some(known);
             }
-        }
-        let span = luma_span(my, field);
-        let off = offsets(pic, index);
-        // A frame macroblock of an 8-bit 4:2:0 picture has every edge
-        // worked out first, then filtered in one go for each plane.
-        if S::BITS == 8
-            && chroma == 1
-            && span.step == 1
-            && !pic.separate_plane
-            && deblock_whole(
-                pic,
-                (&mut *luma, &mut *cb, &mut *cr),
-                (mx, my),
-                (transform8, flat),
-                (known, beside, over),
-                off,
-            )
-        {
-            continue;
-        }
-        for edge in 0..4 {
-            if edge == 0 && (mx == 0 || !filter_boundary(pic, mx, my, true)) {
+            let span = luma_span(my, mb.field_mb);
+            let off = (i32::from(mb.off_a), i32::from(mb.off_b));
+            // A frame macroblock of an 8-bit 4:2:0 picture has every edge
+            // worked out first, then filtered in one go for each plane.
+            if S::BITS == 8
+                && chroma == 1
+                && span.step == 1
+                && !pic.separate_plane
+                && deblock_whole(
+                    pic,
+                    (&mut *luma, &mut *cb, &mut *cr),
+                    (mx, my),
+                    (transform8, flat),
+                    (known, beside, over),
+                    off,
+                    &mut thresholds,
+                )
+            {
                 continue;
             }
-            if edge != 0 && flat {
-                break;
+            for edge in 0..4 {
+                if edge == 0 && (mx == 0 || !filter_boundary(pic, mx, my, true)) {
+                    continue;
+                }
+                if edge != 0 && flat {
+                    break;
+                }
+                let x = mx * 16 + edge * 4;
+                let bs = edge_strength(pic, (mx, my), edge, true, (known, beside));
+                // An 8×8 transform has no luma edge at 4 or 12.
+                if x >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
+                    let qpav = edge_qp(pic, mx, my, true, true, true, edge == 0);
+                    filter_groups(
+                        luma,
+                        pic.w,
+                        (x, span.y),
+                        (true, false, 4, span.step),
+                        bs,
+                        qpav,
+                        off,
+                    );
+                }
+                if !pic.separate_plane && bs != [0; 4] {
+                    let at = ChromaEdge {
+                        mx,
+                        my,
+                        edge,
+                        vertical: true,
+                        transform8,
+                        format: chroma,
+                    };
+                    filter_chroma(pic, (cb, cr), at, bs, off);
+                }
             }
-            let x = mx * 16 + edge * 4;
-            let bs = edge_strength(pic, (mx, my), edge, true, (known, beside));
-            // An 8×8 transform has no luma edge at 4 or 12.
-            if x >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
-                let qpav = edge_qp(pic, mx, my, true, true, true, edge == 0);
-                filter_groups(
-                    luma,
-                    pic.w,
-                    (x, span.y),
-                    (true, false, 4, span.step),
-                    bs,
-                    qpav,
-                    off,
-                );
-            }
-            if !pic.separate_plane && bs != [0; 4] {
-                let at = ChromaEdge {
-                    mx,
-                    my,
-                    edge,
-                    vertical: true,
-                    transform8,
-                    format: chroma,
-                };
-                filter_chroma(pic, (cb, cr), at, bs, off);
-            }
-        }
-        for edge in 0..4 {
-            if edge == 0 && (above_my(pic, mx, my) < 0 || !filter_boundary(pic, mx, my, false)) {
-                continue;
-            }
-            if edge != 0 && flat {
-                break;
-            }
-            let y = span.at(edge * 4);
-            let bs = edge_strength(pic, (mx, my), edge, false, (known, over));
-            if y >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
-                let qpav = edge_qp(pic, mx, my, true, true, false, edge == 0);
-                filter_groups(
-                    luma,
-                    pic.w,
-                    (mx * 16, y),
-                    (false, false, 4, span.step),
-                    bs,
-                    qpav,
-                    off,
-                );
-            }
-            if !pic.separate_plane && bs != [0; 4] {
-                let at = ChromaEdge {
-                    mx,
-                    my,
-                    edge,
-                    vertical: false,
-                    transform8,
-                    format: chroma,
-                };
-                filter_chroma(pic, (cb, cr), at, bs, off);
+            for edge in 0..4 {
+                if edge == 0 && (above_my(pic, mx, my) < 0 || !filter_boundary(pic, mx, my, false))
+                {
+                    continue;
+                }
+                if edge != 0 && flat {
+                    break;
+                }
+                let y = span.at(edge * 4);
+                let bs = edge_strength(pic, (mx, my), edge, false, (known, over));
+                if y >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
+                    let qpav = edge_qp(pic, mx, my, true, true, false, edge == 0);
+                    filter_groups(
+                        luma,
+                        pic.w,
+                        (mx * 16, y),
+                        (false, false, 4, span.step),
+                        bs,
+                        qpav,
+                        off,
+                    );
+                }
+                if !pic.separate_plane && bs != [0; 4] {
+                    let at = ChromaEdge {
+                        mx,
+                        my,
+                        edge,
+                        vertical: false,
+                        transform8,
+                        format: chroma,
+                    };
+                    filter_chroma(pic, (cb, cr), at, bs, off);
+                }
             }
         }
     }
@@ -12040,6 +12029,7 @@ fn deblock_whole<S: Sample>(
     shape: (bool, bool),
     known: (Known, Option<Known>, Option<Known>),
     off: (i32, i32),
+    thresholds: &mut Thresholds,
 ) -> bool {
     let (mx, my) = at;
     let (transform8, flat) = shape;
@@ -12057,7 +12047,7 @@ fn deblock_whole<S: Sample>(
     ];
     // The thresholds of the edges inside the macroblock, the same for all,
     // worked out when the first of them is filtered.
-    let mut thresholds = None;
+    let mut inner = None;
     // For each plane, the edges that run down the picture and then those
     // that run along it.
     let mut luma = [[None; 4]; 2];
@@ -12085,15 +12075,20 @@ fn deblock_whole<S: Sample>(
                     boundary_strength(current, neighbor, own, across, vertical)
                 };
                 if bs != [0; 4] {
-                    let qp = neighbor
-                        .map_or(inside, |mb| {
-                            [
-                                (inside[0] + i32::from(mb.qp) + 1) >> 1,
-                                (inside[1] + i32::from(mb.qp_c) + 1) >> 1,
-                                (inside[2] + i32::from(mb.qp_cr) + 1) >> 1,
-                            ]
-                        })
-                        .map(|qp| recon::EdgeQp::new(qp, off));
+                    let qp = neighbor.map_or(inside, |mb| {
+                        [
+                            (inside[0] + i32::from(mb.qp) + 1) >> 1,
+                            (inside[1] + i32::from(mb.qp_c) + 1) >> 1,
+                            (inside[2] + i32::from(mb.qp_cr) + 1) >> 1,
+                        ]
+                    });
+                    // Neighbours mostly share their QPs, and so the
+                    // thresholds inside.
+                    let qp = if qp == inside {
+                        *inner.get_or_insert_with(|| thresholds.get(inside, off))
+                    } else {
+                        qp.map(|qp| recon::EdgeQp::new(qp, off))
+                    };
                     let slot = (&mut luma[way][0], &mut cb[way][0], &mut cr[way][0]);
                     set_edge(slot, bs, &qp, (true, true));
                 }
@@ -12118,7 +12113,7 @@ fn deblock_whole<S: Sample>(
             if bs == [0; 4] {
                 continue;
             }
-            let qp = thresholds.get_or_insert_with(|| inside.map(|qp| recon::EdgeQp::new(qp, off)));
+            let qp = inner.get_or_insert_with(|| thresholds.get(inside, off));
             let slot = (&mut luma[way][edge], &mut cb[way][edge], &mut cr[way][edge]);
             set_edge(slot, bs, qp, (luma_edge, chroma_edge));
         }
@@ -12147,6 +12142,26 @@ fn deblock_whole<S: Sample>(
         },
     ];
     S::deblock_mb(planes, &all)
+}
+
+/// The thresholds of an edge in luma, Cb and Cr at one set of QPs and
+/// offsets, kept from one macroblock to the next.
+#[derive(Default)]
+struct Thresholds {
+    /// The QPs and offsets they were worked out for; `None` before any.
+    key: Option<([i32; 3], (i32, i32))>,
+    kept: [Option<recon::EdgeQp>; 3],
+}
+
+impl Thresholds {
+    #[inline]
+    fn get(&mut self, qp: [i32; 3], off: (i32, i32)) -> [Option<recon::EdgeQp>; 3] {
+        if self.key != Some((qp, off)) {
+            self.kept = qp.map(|qp| recon::EdgeQp::new(qp, off));
+            self.key = Some((qp, off));
+        }
+        self.kept
+    }
 }
 
 /// The filters of one edge from its strengths, in luma (when it has a luma
@@ -12351,28 +12366,50 @@ fn coded_mask(mb: &Mb) -> u16 {
     if mb.pcm {
         return u16::MAX;
     }
-    let mut mask = 0u16;
-    for (index, &count) in mb.nnz_y.iter().enumerate() {
-        mask |= u16::from(count > 0) << index;
-    }
+    let mut mask = nonzero_bits(&mb.nnz_y);
     if mb.transform8 {
-        // The four blocks of an 8×8 block hold coefficients together.
-        for corner in [0, 2, 8, 10] {
-            if mask & (0x33 << corner) != 0 {
-                mask |= 0x33 << corner;
-            }
-        }
+        // The four blocks of an 8×8 block hold coefficients together: fold
+        // each 2×2 group onto its top-left bit, then spread that back.
+        let pairs = mask | (mask >> 1);
+        let corners = (pairs | (pairs >> 4)) & 0x0505;
+        mask = corners * 0x33;
     }
     mask
+}
+
+/// Bit `i` set for each nonzero `counts[i]`, without a branch per count.
+#[inline]
+fn nonzero_bits(counts: &[u8; 16]) -> u16 {
+    // Each half's bytes as one word: the top bit of every byte that is not
+    // zero, moved down to the byte's lowest bit and then gathered, byte
+    // `k` to bit `k`, into the top byte by one multiply.
+    let half = |bytes: [u8; 8]| {
+        let word = u64::from_le_bytes(bytes);
+        const LOW: u64 = 0x7f7f_7f7f_7f7f_7f7f;
+        let set = (((word & LOW) + LOW) | word) & !LOW;
+        ((set >> 7).wrapping_mul(0x0102_0408_1020_4080) >> 56) as u16
+    };
+    let (low, high) = counts.split_at(8);
+    let low: [u8; 8] = low.try_into().unwrap_or_default();
+    let high: [u8; 8] = high.try_into().unwrap_or_default();
+    half(low) | (half(high) << 8)
 }
 
 /// Every block of the macroblock predicts from the same pictures with the
 /// same vectors.
 fn single_motion(mb: &Mb) -> bool {
-    mb.slot0 == [mb.slot0[0]; 4]
-        && mb.slot1 == [mb.slot1[0]; 4]
-        && mb.mv0 == [mb.mv0[0]; 16]
-        && mb.mv1 == [mb.mv1[0]; 16]
+    // Every difference from the first block gathered without a branch, so
+    // the compares run side by side.
+    let word = |[x, y]: [i16; 2]| u32::from(x as u16) | u32::from(y as u16) << 16;
+    let differ = |vectors: &[[i16; 2]; 16]| {
+        let first = word(vectors[0]);
+        vectors.iter().fold(0, |any, &mv| any | (word(mv) ^ first))
+    };
+    let slots = |slot: [i8; 4]| {
+        let all = u32::from_le_bytes(slot.map(|s| s as u8));
+        all ^ ((all & 0xff) * 0x0101_0101)
+    };
+    (slots(mb.slot0) | slots(mb.slot1) | differ(&mb.mv0) | differ(&mb.mv1)) == 0
 }
 
 /// The coefficients the 4×4 luma block at `(x, y)` counts for the
@@ -12493,13 +12530,6 @@ fn filter_groups<S: Sample>(
             },
         );
     }
-}
-
-fn offsets<S: Sample>(pic: &Frame<S>, index: usize) -> (i32, i32) {
-    pic.mb
-        .get(index)
-        .map(|mb| (i32::from(mb.off_a), i32::from(mb.off_b)))
-        .unwrap_or((0, 0))
 }
 
 fn filter_chroma<S: Sample>(

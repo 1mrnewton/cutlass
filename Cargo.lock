@@ -2713,6 +2713,7 @@ dependencies = [
  "cutlass-gpu",
  "cutlass-h264",
  "cutlass-isobmff",
+ "cutlass-matroska",
  "cutlass-model",
  "cutlass-mp3",
  "cutlass-mp3-container",
@@ -2729,6 +2730,7 @@ dependencies = [
  "cutlass-session",
  "cutlass-still",
  "cutlass-vorbis",
+ "cutlass-vp8",
  "cutlass-webp",
  "image",
  "serde_json",
@@ -2904,6 +2906,7 @@ dependencies = [
 name = "cutlass-matroska"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
  "cutlass-container",
 ]
 
@@ -3098,6 +3101,7 @@ dependencies = [
  "cutlass-flac-container",
  "cutlass-isobmff",
  "cutlass-jpeg",
+ "cutlass-matroska",
  "cutlass-model",
  "cutlass-mp3-container",
  "cutlass-mpegts",
@@ -5662,6 +5666,7 @@ dependencies = [
  "cutlass-hevc",
  "cutlass-isobmff",
  "cutlass-jpeg",
+ "cutlass-matroska",
  "cutlass-mjpeg",
  "cutlass-mp3",
  "cutlass-mp3-container",

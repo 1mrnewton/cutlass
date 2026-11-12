@@ -82,6 +82,9 @@ pub fn probe(path: &Path) -> Result<Probed, ProbeError> {
     if let Some(probed) = transport_stream(path, &header)? {
         return Ok(probed);
     }
+    if let Some(probed) = matroska(path, &header)? {
+        return Ok(probed);
+    }
     if let Some(probed) = movie(path, &header)? {
         return Ok(probed);
     }
@@ -348,6 +351,64 @@ fn transport_stream(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeE
     ))
 }
 
+/// A Matroska or WebM file: the first video track's size, or the first
+/// audio track, and the Segment's Duration. A live recording that states
+/// no Duration is read to its last packet.
+fn matroska(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
+    if !matches!(
+        cutlass_matroska::probe(header),
+        cutlass_container::ProbeResult::Accept { .. }
+    ) {
+        return Ok(None);
+    }
+    let file = File::open(path).map_err(|error| io_error(path, error))?;
+    let length = file
+        .metadata()
+        .map_err(|error| io_error(path, error))?
+        .len();
+    let mut demux = cutlass_matroska::MatroskaDemux::open(std::io::BufReader::new(file), length)
+        .map_err(|error| ProbeError::new(format!("matroska refused the file: {error}")))?;
+    let timescale = demux.clock().ticks_per_second;
+    let ticks = match demux.duration_ticks().filter(|ticks| *ticks > 0) {
+        Some(ticks) => ticks,
+        None => {
+            let mut end = 0_i64;
+            while let Some(packet) = cutlass_container::Demux::read_packet(&mut demux)
+                .map_err(|error| ProbeError::new(format!("matroska refused the file: {error}")))?
+            {
+                let time = packet.timestamp();
+                if let Some(pts) = time.presentation() {
+                    end = end.max(pts.saturating_add(time.duration().unwrap_or(0)));
+                }
+            }
+            end
+        }
+    };
+    let duration = ticks_to_micros(u64::try_from(ticks).unwrap_or(0), timescale)?;
+    let streams = cutlass_container::Demux::streams(&demux);
+    if let Some(size) = streams.iter().find_map(|stream| stream.params().size()) {
+        let width =
+            i32::try_from(size.width()).map_err(|_| ProbeError::new("the frame is too wide"))?;
+        let height =
+            i32::try_from(size.height()).map_err(|_| ProbeError::new("the frame is too tall"))?;
+        return Ok(Some(Probed::Video {
+            meta: MetaType::Video,
+            width,
+            height,
+            duration,
+        }));
+    }
+    if streams
+        .iter()
+        .any(|stream| stream.params().sample_rate().is_some())
+    {
+        return Ok(Some(Probed::Audio { duration }));
+    }
+    Err(ProbeError::new(
+        "matroska opened a file with no video or audio",
+    ))
+}
+
 fn movie(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     if header.get(4..8) != Some(b"ftyp") {
         return Ok(None);
@@ -498,9 +559,6 @@ pub const RAW_AAC: &str =
     "raw AAC (.aac) files cannot be played yet; the same sound in an .m4a or .mp4 can";
 
 fn unavailable(header: &[u8]) -> Option<&'static str> {
-    if header.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
-        return Some("matroska is not available");
-    }
     if header.starts_with(b"OggS") {
         // A capture pattern with a version other than 0.
         return Some("ogg is not available");
@@ -726,6 +784,53 @@ mod tests {
         let path = temp.write("damaged.ogg", &damaged);
         let error = probe(&path).expect_err("damaged");
         assert!(error.to_string().contains("ogg"), "{error}");
+    }
+
+    /// A WebM written by the Matroska muxer: two seconds of 320x240 VP9
+    /// and a second of Opus. The Segment's Duration is the later end.
+    #[test]
+    fn a_webm_file_is_video_as_long_as_its_segment() {
+        use cutlass_codec::{
+            CodecId, FrameSize, Packet, StreamCodec, StreamParams, Timescale, Timestamp,
+        };
+        use cutlass_container::{Mux, NewStream, TrackDuration};
+        let mut mux = cutlass_matroska::MatroskaMux::webm(std::io::Cursor::new(Vec::new()));
+        let size = FrameSize::try_new(320, 240).expect("size");
+        let picture = mux
+            .add_stream(NewStream {
+                params: StreamParams::video(StreamCodec::Known(CodecId::Vp9), size, Vec::new()),
+                timescale: Timescale::new(1000),
+                language: None,
+            })
+            .expect("video");
+        for index in 0..50 {
+            let time = Timestamp::try_new(None, Some(index * 40), Some(40)).expect("time");
+            let packet = Packet::try_new(1, vec![1; 8], time, Timescale::new(1000), index == 0)
+                .expect("packet");
+            mux.write_packet(&packet).expect("write");
+        }
+        mux.finish(&[TrackDuration {
+            track: picture,
+            timescale: Timescale::new(1000),
+            ticks: 2000,
+        }])
+        .expect("finish");
+        let bytes = mux.into_writer().expect("writer").into_inner();
+        let temp = Temp::new();
+        let path = temp.write("clip.webm", &bytes);
+        assert_eq!(
+            probe(&path).expect("webm"),
+            Probed::Video {
+                meta: MetaType::Video,
+                width: 320,
+                height: 240,
+                duration: 2_000_000,
+            }
+        );
+        // A cut file still names the family in its error.
+        let cut = temp.write("cut.webm", &bytes[..40]);
+        let error = probe(&cut).expect_err("cut");
+        assert!(error.to_string().contains("matroska"), "{error}");
     }
 
     #[test]

@@ -211,6 +211,9 @@ struct Pipe {
     lead: i64,
     /// The container's encoder delay and padding, as decoder side data.
     gapless: Option<SideData>,
+    /// `lead` exactly, as (sample rate, samples), when the edit holds the
+    /// container's encoder delay rounded to a tick it cannot state.
+    lead_samples: Option<(u32, i64)>,
     /// No packet has been pushed since open or the last reset.
     fresh: bool,
 }
@@ -227,6 +230,7 @@ impl Pipe {
             heard: VecDeque::new(),
             lead,
             gapless: None,
+            lead_samples: None,
             fresh: true,
         }
     }
@@ -247,6 +251,29 @@ impl Pipe {
     /// `lead` in `timescale` ticks per second.
     fn lead_in(&self, timescale: u32) -> i64 {
         rescale(self.lead, self.timescale.ticks_per_second(), timescale)
+    }
+
+    /// The sample on the stream's own time line where `output` starts, before
+    /// any samples the decoder marked to skip.
+    fn first_sample(&self, output: &AudioOutput) -> i64 {
+        let rate = i64::from(output.pcm.rate);
+        let per_second = i64::from(output.timescale.max(1));
+        if let Some((exact_rate, samples)) = self.lead_samples
+            && exact_rate == output.pcm.rate
+        {
+            return output
+                .pts
+                .checked_mul(rate)
+                .and_then(|value| value.checked_div(per_second))
+                .unwrap_or(0)
+                .saturating_sub(samples);
+        }
+        output
+            .pts
+            .saturating_sub(self.lead_in(output.timescale))
+            .checked_mul(rate)
+            .and_then(|value| value.checked_div(per_second))
+            .unwrap_or(0)
     }
 
     /// Drop references, held pictures, and the end of stream before a seek.
@@ -798,16 +825,10 @@ impl Media {
             let Some(output) = self.next_audio()? else {
                 break;
             };
-            let lead = self
+            let start = self
                 .audio
                 .as_ref()
-                .map_or(0, |pipe| pipe.lead_in(output.timescale));
-            let start = output
-                .pts
-                .saturating_sub(lead)
-                .checked_mul(i64::from(output.pcm.rate))
-                .and_then(|value| value.checked_div(i64::from(output.timescale.max(1))))
-                .unwrap_or(0)
+                .map_or(0, |pipe| pipe.first_sample(&output))
                 .saturating_add(i64::from(output.skip_leading));
             // Sample ticks one stream tick may round away.
             let slack = i64::from(output.pcm.rate.div_ceil(output.timescale.max(1))) + 1;
@@ -1276,7 +1297,28 @@ fn open_pipe(
         edit_lead(stream.edits()),
     );
     pipe.gapless = gapless_of(stream);
+    pipe.lead_samples = exact_lead(stream, pipe.lead);
     Ok(pipe)
+}
+
+/// The encoder delay in samples, with the sample rate, when the stream's
+/// edit `lead` is that delay rounded to a tick that cannot hold it, as a
+/// 2.5 ms Opus pre-skip is on a 1 ms Matroska tick. A lead that states the
+/// delay exactly, or is not within a tick of it, is kept as it is.
+fn exact_lead(stream: &cutlass_container::Stream, lead: i64) -> Option<(u32, i64)> {
+    let delay = i128::from(stream.trim().encoder_delay()?);
+    let rate = stream.params().sample_rate().filter(|rate| *rate > 0)?;
+    let per_second = i128::from(stream.timescale().ticks_per_second());
+    if per_second == 0 || delay == 0 {
+        return None;
+    }
+    // Both sides in samples times ticks per second.
+    let held = i128::from(lead) * i128::from(rate);
+    let stated = delay * per_second;
+    if held == stated || (held - stated).abs() >= i128::from(rate) {
+        return None;
+    }
+    Some((rate, i64::try_from(delay).ok()?))
 }
 
 /// The stream's encoder delay and padding as [`SideData::Gapless`], when the
@@ -1690,6 +1732,43 @@ mod tests {
             edit_lead(&[edit(None, i64::MAX), edit(Some(i64::MIN), 1)]),
             i64::MIN
         );
+    }
+
+    #[test]
+    fn a_delay_its_edit_rounds_is_taken_in_samples() {
+        let stream = |timescale: u32, delay: Option<u64>| {
+            cutlass_container::Stream::new(
+                cutlass_container::TrackId::new(1),
+                cutlass_codec::StreamParams::try_audio(
+                    StreamCodec::Known(CodecId::Opus),
+                    48_000,
+                    2,
+                    Vec::new(),
+                )
+                .unwrap(),
+                Timescale::new(timescale),
+                None,
+                Vec::new(),
+                cutlass_container::Trim::new(delay, None),
+            )
+        };
+        // A 120-sample pre-skip on a 1 ms tick: the edit says 3 ms.
+        assert_eq!(
+            exact_lead(&stream(1_000, Some(120)), 3),
+            Some((48_000, 120))
+        );
+        assert_eq!(
+            exact_lead(&stream(1_000, Some(120)), 2),
+            Some((48_000, 120))
+        );
+        // An edit that states the delay exactly, as Ogg's and MP4's do, is
+        // kept as it is.
+        assert_eq!(exact_lead(&stream(48_000, Some(312)), 312), None);
+        assert_eq!(exact_lead(&stream(1_000, Some(96)), 2), None);
+        // An edit more than a tick away from the delay means something else.
+        assert_eq!(exact_lead(&stream(1_000, Some(120)), 5), None);
+        assert_eq!(exact_lead(&stream(1_000, None), 3), None);
+        assert_eq!(exact_lead(&stream(1_000, Some(0)), 0), None);
     }
 
     #[test]

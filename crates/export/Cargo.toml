@@ -22,6 +22,7 @@ cutlass-avi = { path = "../containers/avi", version = "0.1.0" }
 cutlass-caf = { path = "../containers/caf", version = "0.1.0" }
 cutlass-flac-container = { path = "../containers/flac", version = "0.1.0" }
 cutlass-ogg = { path = "../containers/ogg", version = "0.1.0" }
+cutlass-matroska = { path = "../containers/matroska", version = "0.1.0" }
 cutlass-still = { path = "../containers/still", version = "0.1.0" }
 cutlass-renderer-software = { path = "../renderer-software", version = "0.1.0" }
 serde_json = "1.0.154"
@@ -38,6 +39,7 @@ cutlass-engine = { path = "../engine", version = "0.1.0" }
 cutlass-picture = { path = "../picture", version = "0.1.0" }
 cutlass-mp3 = { path = "../codecs/mp3", version = "0.1.0" }
 cutlass-mpeg4 = { path = "../codecs/mpeg4", version = "0.1.0" }
+cutlass-vp8 = { path = "../codecs/vp8", version = "0.1.0" }
 cutlass-opus = { path = "../codecs/opus", version = "0.1.0" }
 cutlass-vorbis = { path = "../codecs/vorbis", version = "0.1.0" }
 cutlass-webp = { path = "../codecs/webp", version = "0.1.0" }

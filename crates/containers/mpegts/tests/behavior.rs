@@ -551,6 +551,33 @@ fn a_lost_packet_is_counted_and_drops_only_its_unit() {
 }
 
 #[test]
+fn a_new_pmt_version_is_counted_and_the_streams_stay() {
+    let units = content(4, 0);
+    let mut bytes = mux(&units, MuxOptions::default());
+    let half = bytes.len() / 188 / 2;
+    let mut changed = 0;
+    for (index, packet) in bytes.as_chunks_mut::<188>().0.iter_mut().enumerate() {
+        if index < half || pid(packet) != 0x1000 {
+            continue;
+        }
+        // The PMT starts after the pointer field: version 1 from here on.
+        let section = &mut packet[5..];
+        let length = usize::from(section[1] & 0x0F) << 8 | usize::from(section[2]);
+        section[5] = 0xC3;
+        let crc = crc32(&section[..3 + length - 4]);
+        section[3 + length - 4..3 + length].copy_from_slice(&crc.to_be_bytes());
+        changed += 1;
+    }
+    assert!(changed > 10, "{changed} PMT packets");
+    let mut demux = open(&bytes);
+    let read = drain(&mut demux);
+    assert_eq!(demux.counters().pmt_changes, 1);
+    for which in [0, 1] {
+        assert!(track(&read, which) == track(&shifted(&units), which));
+    }
+}
+
+#[test]
 fn a_duplicate_packet_is_skipped() {
     let units = content(2, 0);
     let bytes = mux(&units, MuxOptions::default());

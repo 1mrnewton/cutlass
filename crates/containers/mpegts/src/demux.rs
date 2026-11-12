@@ -337,6 +337,14 @@ impl<R: Read + Seek> TsDemux<R> {
         // The passes over the opening bytes and the tail are not reads:
         // only what was skipped before the first packet stays counted.
         pipeline.counters = Counters::default();
+        // A PMT PID that is also a stream's stays the stream's.
+        if let Some(program) = programs
+            .iter()
+            .find(|program| program.number == pmt.program)
+            && pipeline.track_of(program.pmt_pid).is_none()
+        {
+            pipeline.watch_pmt(program.pmt_pid, pmt.program, pmt.version);
+        }
         (source.resyncs, source.skipped) = leading;
         source.tail = 0;
         Ok(Self {

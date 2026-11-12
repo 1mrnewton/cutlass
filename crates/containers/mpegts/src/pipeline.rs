@@ -13,7 +13,8 @@ use crate::es::{Framer, Pes, Unit};
 use crate::limits::TS_PACKET_BYTES;
 use crate::packet::{self, NULL_PID};
 use crate::pes::{Assembler, PesFault, RawPes};
-use crate::psi::{Elementary, Kind};
+use crate::psi::{Elementary, Kind, parse_pmt};
+use crate::section::SectionBuffer;
 use crate::time::{Unwrapper, unwrap};
 
 /// What went wrong while reading, counted.
@@ -35,6 +36,18 @@ pub struct Counters {
     pub dropped_units: u64,
     /// PES packets that ended before their declared length.
     pub short_pes: u64,
+    /// PMT sections of the open program with a new `version_number`. The
+    /// streams stay the ones the opening PMT lists: a PID the new version
+    /// adds is not read, and one it drops reads nothing more.
+    pub pmt_changes: u64,
+}
+
+/// The open program's PMT PID, watched for a new version.
+struct PmtWatch {
+    pid: u16,
+    program: u16,
+    version: u8,
+    buffer: SectionBuffer,
 }
 
 pub struct Track {
@@ -55,6 +68,7 @@ pub struct Pipeline {
     limit: usize,
     done: Vec<Result<RawPes, PesFault>>,
     units: Vec<Unit>,
+    pmt: Option<PmtWatch>,
 }
 
 impl Pipeline {
@@ -85,7 +99,49 @@ impl Pipeline {
             limit,
             done: Vec::new(),
             units: Vec::new(),
+            pmt: None,
         }
+    }
+
+    /// Counts the PMT versions after `version` that `pid` carries for
+    /// `program`.
+    pub fn watch_pmt(&mut self, pid: u16, program: u16, version: u8) {
+        self.pmt = Some(PmtWatch {
+            pid,
+            program,
+            version,
+            buffer: SectionBuffer::default(),
+        });
+    }
+
+    fn pmt_packet(&mut self, bytes: &[u8; TS_PACKET_BYTES]) {
+        let Some(PmtWatch {
+            program,
+            version,
+            buffer,
+            ..
+        }) = &mut self.pmt
+        else {
+            return;
+        };
+        let header = packet::header(bytes);
+        if header.error || !header.payload {
+            return;
+        }
+        let Ok(parsed) = packet::parse(bytes) else {
+            return;
+        };
+        let payload = &bytes[parsed.payload_at.min(bytes.len())..];
+        let counters = &mut self.counters;
+        let _ = buffer.push(payload, header.start, &mut |section| {
+            if let Ok(pmt) = parse_pmt(section)
+                && pmt.program == *program
+                && pmt.version != *version
+            {
+                *version = pmt.version;
+                counters.pmt_changes += 1;
+            }
+        });
     }
 
     /// The track index of `pid`.
@@ -102,6 +158,9 @@ impl Pipeline {
             track.assembler.reset();
             track.framer.reset();
             track.cc = None;
+        }
+        if let Some(watch) = &mut self.pmt {
+            watch.buffer.reset();
         }
     }
 
@@ -136,6 +195,14 @@ impl Pipeline {
         out: &mut VecDeque<(usize, Unit)>,
     ) {
         let header = packet::header(bytes);
+        if self
+            .pmt
+            .as_ref()
+            .is_some_and(|watch| watch.pid == header.pid)
+        {
+            self.pmt_packet(bytes);
+            return;
+        }
         let Some(index) = self.track_of(header.pid) else {
             return;
         };

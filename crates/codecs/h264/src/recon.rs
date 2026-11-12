@@ -1932,6 +1932,28 @@ fn edge_window<S: Sample>(
     if pic_w <= 0 || pic_h <= 0 {
         return;
     }
+    // A window that hangs past only the top or bottom of the picture, the
+    // most usual, copies each row whole: at a width known here, without a
+    // call to copy it.
+    if let Ok(left) = usize::try_from(x0)
+        && i32::try_from(width).is_ok_and(|wide| x0 + wide <= pic_w)
+    {
+        let from = EdgeSource {
+            src,
+            src_stride,
+            pic_h,
+            x0: left,
+            y0,
+        };
+        match width {
+            21 => return edge_rows::<S, 21>(window, height, &from),
+            13 => return edge_rows::<S, 13>(window, height, &from),
+            9 => return edge_rows::<S, 9>(window, height, &from),
+            5 => return edge_rows::<S, 5>(window, height, &from),
+            3 => return edge_rows::<S, 3>(window, height, &from),
+            _ => {}
+        }
+    }
     for (row, out) in window.chunks_exact_mut(width).take(height).enumerate() {
         let sy = (y0 + i32::try_from(row).unwrap_or(0)).clamp(0, pic_h - 1) as usize;
         let line = &src[sy * src_stride..sy * src_stride + pic_w as usize];
@@ -1947,6 +1969,42 @@ fn edge_window<S: Sample>(
         left.fill(line[0]);
         middle.copy_from_slice(&line[first..first + inside]);
         right.fill(line[pic_w as usize - 1]);
+    }
+}
+
+/// The picture a window of [`edge_rows`] is read from, with the column and
+/// row of its top-left sample.
+struct EdgeSource<'a, S> {
+    src: &'a [S],
+    src_stride: usize,
+    pic_h: i32,
+    x0: usize,
+    y0: i32,
+}
+
+/// [`edge_window`] for a window `N` samples wide that lies across the
+/// picture from column `x0`: each row is the picture row it hangs nearest.
+#[inline(always)]
+fn edge_rows<S: Sample, const N: usize>(window: &mut [S], height: usize, from: &EdgeSource<'_, S>) {
+    let EdgeSource {
+        src,
+        src_stride,
+        pic_h,
+        x0,
+        y0,
+    } = *from;
+    for (row, out) in window
+        .as_chunks_mut::<N>()
+        .0
+        .iter_mut()
+        .take(height)
+        .enumerate()
+    {
+        let sy = (y0 + i32::try_from(row).unwrap_or(0)).clamp(0, pic_h - 1) as usize;
+        let start = sy * src_stride + x0;
+        if let Some(line) = src.get(start..).and_then(|line| line.first_chunk::<N>()) {
+            *out = *line;
+        }
     }
 }
 

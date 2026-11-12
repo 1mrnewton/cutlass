@@ -2260,10 +2260,7 @@ fn decode_tile_part<P: Pixel>(
         read_deltas: carry.read_deltas,
         ref_lr_wiener: carry.ref_lr_wiener,
         ref_sgr_xqd: carry.ref_sgr_xqd,
-        block_decoded: bufs
-            .block_decoded
-            .take()
-            .unwrap_or_else(|| Box::new([[[false; 35]; 35]; 3])),
+        block_decoded: bufs.block_decoded.take().unwrap_or_default(),
         b: std::mem::take(&mut carry.b),
         pb: Default::default(),
         plan: Default::default(),
@@ -3016,7 +3013,7 @@ fn recon_worker<'r, P: PicturePixel>(
         read_deltas: false,
         ref_lr_wiener: [[[0; 3]; 2]; 3],
         ref_sgr_xqd: [[0; 2]; 3],
-        block_decoded: Box::new([[[false; 35]; 35]; 3]),
+        block_decoded: Box::default(),
         b: Default::default(),
         pb: Default::default(),
         plan: Default::default(),

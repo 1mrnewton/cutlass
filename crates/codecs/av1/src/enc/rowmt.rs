@@ -998,7 +998,7 @@ fn tile_dec<'a, P: Pixel>(
         read_deltas: false,
         ref_lr_wiener: [[[0; 3]; 2]; 3],
         ref_sgr_xqd: [[0; 2]; 3],
-        block_decoded: Box::new([[[false; 35]; 35]; 3]),
+        block_decoded: Box::default(),
         b: Default::default(),
         color_map_y: vec![0u8; 128 * 128],
         color_map_uv: vec![0u8; 128 * 128],

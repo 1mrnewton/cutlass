@@ -590,8 +590,45 @@ pub fn ref_rows<'s, P>(
 }
 
 /// The BlockDecoded flags of the planes of a superblock and the units
-/// around it (see [`TileDec::block_decoded`]).
-pub type BlockDecoded = [[[bool; 35]; 35]; 3];
+/// around it (see [`TileDec::block_decoded`]): flag `[plane][y][x]` is bit
+/// `x` of row `y`, so a transform block marks each of its rows at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockDecoded([[u64; 35]; 3]);
+
+impl Default for BlockDecoded {
+    fn default() -> Self {
+        Self([[0; 35]; 3])
+    }
+}
+
+impl BlockDecoded {
+    /// BlockDecoded[plane][y - 1][x - 1].
+    #[inline]
+    pub fn get(&self, plane: usize, y: usize, x: usize) -> bool {
+        x < 35 && self.0[plane][y] >> x & 1 != 0
+    }
+
+    /// Sets the flags of rows `ys` and columns `xs` of a plane.
+    #[inline]
+    pub fn mark(&mut self, plane: usize, ys: Range<usize>, xs: Range<usize>) {
+        let bits = (1u64 << xs.end) - (1u64 << xs.start.min(xs.end));
+        for row in &mut self.0[plane][ys] {
+            *row |= bits;
+        }
+    }
+
+    /// Starts a plane's flags of a superblock `h` rows high with the
+    /// units around it: row -1 set in its first `n` columns, column -1 in
+    /// its first `left` rows, nothing else.
+    #[inline]
+    pub fn reset(&mut self, plane: usize, h: usize, n: usize, left: usize) {
+        let rows = &mut self.0[plane][..h];
+        rows[0] = (1u64 << n) - 1;
+        for (y, row) in rows[1..].iter_mut().enumerate() {
+            *row = u64::from(y < left);
+        }
+    }
+}
 
 pub struct TileDec<'a, P: Pixel, C: Coder = Msac<'a>> {
     pub seq: &'a SequenceHeader,
@@ -889,20 +926,6 @@ pub(crate) fn fill_rect<T: Copy>(d: &mut [T], stride: usize, at: usize, w: usize
     }
 }
 
-/// `d.fill(v)` without a library call for the short power-of-two runs of
-/// 4x4 unit maps.
-#[inline(always)]
-pub(crate) fn fill_small<T: Copy>(d: &mut [T], v: T) {
-    match d.len() {
-        1 => d[0] = v,
-        2 => d.copy_from_slice(&[v; 2]),
-        4 => d.copy_from_slice(&[v; 4]),
-        8 => d.copy_from_slice(&[v; 8]),
-        16 => d.copy_from_slice(&[v; 16]),
-        _ => d.fill(v),
-    }
-}
-
 pub fn get_tx_class(tx_type: u8) -> usize {
     match tx_type {
         V_DCT | V_ADST | V_FLIPADST => 2,
@@ -1168,17 +1191,12 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             let sbh4 = (self.mi_row_end - r) >> sy;
             let w = (sb4 >> sx) + 2;
             let h = (sb4 >> sy) + 2;
-            let bd = &mut self.block_decoded[plane];
+            let bd = &mut *self.block_decoded;
             // Row -1 is decoded left of the tile's right edge, column -1
             // above its bottom edge.
             let n = (sbw4 + 1).min(w);
-            bd[0] = [false; 35];
-            bd[0][..n].fill(true);
-            for (y, row) in bd[1..h].iter_mut().enumerate() {
-                *row = [false; 35];
-                row[0] = y < sbh4;
-            }
-            bd[h - 1][0] = false;
+            // Column -1 below the superblock is not.
+            bd.reset(plane, h, n, sbh4.min(h - 2));
         }
     }
 
@@ -3955,9 +3973,9 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 } else {
                     self.b.avail_u_chroma
                 }) || y > 0;
-                let bdf = &self.block_decoded[plane];
-                let have_above_right = bdf[sub_row >> sy][(sub_col >> sx) + step_x + 1];
-                let have_below_left = bdf[(sub_row >> sy) + step_y + 1][sub_col >> sx];
+                let bdf = &self.block_decoded;
+                let have_above_right = bdf.get(plane, sub_row >> sy, (sub_col >> sx) + step_x + 1);
+                let have_below_left = bdf.get(plane, (sub_row >> sy) + step_y + 1, sub_col >> sx);
                 self.predict_intra(
                     plane,
                     start_x,
@@ -3989,14 +4007,11 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let sub_col = ((start_x << sx) >> 2) & sb_mask;
         let step_x = tx_w(tx) >> 2;
         let step_y = tx_h(tx) >> 2;
-        let bdf = &mut self.block_decoded[plane];
         let x0 = ((sub_col >> sx) + 1).min(35);
         let x1 = (x0 + step_x).min(35);
         let y0 = ((sub_row >> sy) + 1).min(35);
         let y1 = (y0 + step_y).min(35);
-        for r in &mut bdf[y0..y1] {
-            fill_small(&mut r[x0..x1], true);
-        }
+        self.block_decoded.mark(plane, y0..y1, x0..x1);
     }
 
     /// Predicts and reconstructs the blocks of `log`, recorded by a tile

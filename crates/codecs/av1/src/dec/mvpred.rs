@@ -195,7 +195,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let c0 = self.b.mi_col as isize & !m;
         let y = (r - r0 + 1).clamp(0, 34) as usize;
         let x = (c - c0 + 1).clamp(0, 34) as usize;
-        self.block_decoded[0][y][x]
+        self.block_decoded.get(0, y, x)
     }
 
     fn inside(&self, r: isize, c: isize) -> bool {

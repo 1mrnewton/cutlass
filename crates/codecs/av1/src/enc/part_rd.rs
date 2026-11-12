@@ -28,7 +28,7 @@ pub struct NodeState<P> {
     left: [[u8; 32]; 7],
     above_palette: [Vec<[u16; 8]>; 2],
     left_palette: [[[u16; 8]; 32]; 2],
-    block_decoded: [[[bool; 35]; 35]; 3],
+    block_decoded: crate::dec::tile::BlockDecoded,
     delta_lf: [i8; 4],
     current_q_index: i32,
     read_deltas: bool,

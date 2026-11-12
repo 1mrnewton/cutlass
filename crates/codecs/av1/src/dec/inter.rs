@@ -53,9 +53,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                     2 => H_PRED,
                     _ => SMOOTH_PRED,
                 };
-                let bdf = &self.block_decoded[plane];
-                let ar = bdf[sub_row >> sy][(sub_col >> sx) + n4w + 1];
-                let bl = bdf[(sub_row >> sy) + n4h + 1][sub_col >> sx];
+                let bdf = &self.block_decoded;
+                let ar = bdf.get(plane, sub_row >> sy, (sub_col >> sx) + n4w + 1);
+                let bl = bdf.get(plane, (sub_row >> sy) + n4h + 1, sub_col >> sx);
                 let (al, au) = if plane == 0 {
                     (self.b.avail_l, self.b.avail_u)
                 } else {

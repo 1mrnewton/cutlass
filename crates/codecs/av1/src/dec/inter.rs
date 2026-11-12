@@ -629,10 +629,22 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                         true
                     }
                     (None, Some(k)) => mirrors.get(k).is_some_and(|m| {
+                        // The band of the last row read, while it holds
+                        // the next: its first row, the row past its last,
+                        // the samples from its first and their stride.
+                        let at = core::cell::Cell::new((0, 0, &[][..], 0));
                         mc::emu_edge_rows(
                             emu,
                             fw,
-                            |r| m.rows(plane, r, r + 1).map(|s| s.0),
+                            |r| {
+                                let (a, b, s, st) = at.get();
+                                if (a..b).contains(&r) {
+                                    return s.get((r - a) * st..);
+                                }
+                                let (s, st, end) = m.rows_from(plane, r)?;
+                                at.set((r, end, s, st));
+                                Some(s)
+                            },
                             pw,
                             ph,
                             ex,

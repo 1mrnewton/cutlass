@@ -443,6 +443,26 @@ impl<P> Mirror<P> {
         let w = b.widths[p];
         Some((rows[p].get((y0 - b.row0[p]) * w..)?, w))
     }
+
+    /// The rows of plane `p` from row `y` on that the band [`Self::rows`]
+    /// takes row `y` from holds: their samples, their stride, and the row
+    /// past the last of them.
+    #[inline]
+    pub fn rows_from(&self, p: usize, y: usize) -> Option<(&[P], usize, usize)> {
+        let p = p.min(2);
+        let i = self.bands.partition_point(|b| b.row0[p] + b.nrows[p] <= y);
+        let b = self.bands.get(i)?;
+        if b.row0[p] > y {
+            return None;
+        }
+        let rows = (self.view)(&b.rows)?;
+        let w = b.widths[p];
+        Some((
+            rows[p].get((y - b.row0[p]) * w..)?,
+            w,
+            b.row0[p] + b.nrows[p],
+        ))
+    }
 }
 
 impl<P: PicturePixel> Mirror<P> {

@@ -1142,6 +1142,49 @@ fn past_the_interleave_limit_packets_go_out_and_the_file_says_so() {
 }
 
 #[test]
+fn b_frames_are_interleaved_by_their_decode_order() {
+    // H.264 in decode order stamped only with presentation times (0, 2, 1,
+    // 4, 3, ...), sent in a run before the sound: each picture's chunk is
+    // at its place in decode order, and the sound is put between them by
+    // that time, not by the presentation times that go back.
+    let mut mux = AviMux::new(Cursor::new(Vec::new()));
+    mux.add_stream(video_stream(CodecId::H264, Vec::new()))
+        .unwrap();
+    mux.add_stream(audio_stream(CodecId::Pcm, 8_000, Vec::new()))
+        .unwrap();
+    let order = [0i64, 2, 1, 4, 3, 6, 5, 8, 7, 9];
+    for (index, shown) in order.iter().enumerate() {
+        let key = index == 0;
+        let mut bytes = vec![0, 0, 0, 1, if key { 0x65 } else { 0x41 }];
+        bytes.push(u8::try_from(index).unwrap());
+        let stamp = Timestamp::try_new(None, Some(shown * 3_600), Some(3_600)).unwrap();
+        let picture = Packet::try_new(0, bytes, stamp, Timescale::new(90_000), key).unwrap();
+        mux.write_packet(&picture).unwrap();
+    }
+    for block in 0..10i64 {
+        mux.write_packet(&packet(1, vec![1; 320 * 4], block * 320, 320, 8_000, true))
+            .unwrap();
+    }
+    let finished = mux
+        .finish(&[
+            duration(0, 90_000, 10 * 3_600),
+            duration(1, 8_000, 10 * 320),
+        ])
+        .expect("finish");
+    assert!(finished.interleaved());
+    let bytes = mux.into_writer().unwrap().into_inner();
+    let read = drain(&mut open(&bytes).expect("open"));
+    let streams: Vec<u32> = read.iter().map(Packet::stream).collect();
+    assert_eq!(streams, [0, 1].repeat(10));
+    let pictures: Vec<u8> = read
+        .iter()
+        .filter(|packet| packet.stream() == 0)
+        .map(|packet| packet.bytes()[5])
+        .collect();
+    assert_eq!(pictures, (0..10).collect::<Vec<u8>>());
+}
+
+#[test]
 fn with_no_interleave_limit_packets_go_out_as_they_arrive() {
     // Runs sent with nothing held come out of order, and the file says so.
     let (bytes, interleaved) = write_runs(0);

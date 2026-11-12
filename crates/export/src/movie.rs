@@ -1135,7 +1135,18 @@ mod tests {
             );
             let mut pictures = Vec::new();
             let mut frames_of_sound = Vec::new();
+            // In file order the two streams rise together: no packet is
+            // more than a frame (1/30 s) behind the latest read before it.
+            let mut latest = 0i64;
             while let Some(packet) = demux.read_packet().unwrap() {
+                let scale = i64::from(packet.timescale().ticks_per_second());
+                let micros = packet.timestamp().decode().unwrap() * 1_000_000 / scale;
+                assert!(
+                    micros + 33_334 >= latest,
+                    "{}: {micros} µs after {latest} µs",
+                    names.0
+                );
+                latest = latest.max(micros);
                 if packet.stream() == 0 {
                     pictures.push(packet.into_bytes());
                 } else {

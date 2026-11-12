@@ -16,9 +16,10 @@
 //! knows AVI 1.0 plays the first `RIFF` from `idx1`.
 //!
 //! The muxer interleaves the streams itself: each stream's packets keep
-//! their order, and across streams the packet with the earliest time (its
-//! decode time, else its presentation time, compared in seconds) goes to
-//! the file first. A packet waits until every stream has one waiting, so a
+//! their order, and across streams the packet whose chunk will have the
+//! earliest time (compared in seconds; for video the decode time, which
+//! B-frames make differ from the presentation time) goes to the file
+//! first. A packet waits until every stream has one waiting, so a
 //! caller may send each stream in long runs. A packet that would go first
 //! anyway is written at once; one that waits is copied, since
 //! [`Mux::write_packet`] lends it. At most
@@ -105,22 +106,14 @@ impl Default for AviMuxOptions {
 /// Buffers of written packets kept for reuse.
 const SPARE_BUFFERS: usize = 64;
 
-/// Whether `left` of stream `left_index` goes before `right` of stream
-/// `right_index`: earlier in seconds by decode time, else presentation
-/// time, and on a tie the stream added first.
-fn before(left: &Packet, left_index: usize, right: &Packet, right_index: usize) -> bool {
-    let ((left_time, left_scale), (right_time, right_scale)) = (seconds(left), seconds(right));
-    let (left, right) = (left_time * right_scale, right_time * left_scale);
-    left < right || (left == right && left_index < right_index)
-}
+/// A time in seconds: ticks and the ticks in a second.
+type Seconds = (i128, i128);
 
-/// A packet's decode time, else its presentation time, with its timescale.
-fn seconds(packet: &Packet) -> (i128, i128) {
-    let stamp = packet.timestamp();
-    (
-        i128::from(stamp.decode().or(stamp.presentation()).unwrap_or(i64::MIN)),
-        i128::from(packet.timescale().ticks_per_second().max(1)),
-    )
+/// Whether `left` of stream `left_index` goes before `right` of stream
+/// `right_index`: earlier in seconds, and on a tie the stream added first.
+fn before(left: Seconds, left_index: usize, right: Seconds, right_index: usize) -> bool {
+    let (left, right) = (left.0 * right.1, right.0 * left.1);
+    left < right || (left == right && left_index < right_index)
 }
 
 /// The largest `RIFF` segment this muxer writes: below 4 GiB, with room
@@ -252,14 +245,17 @@ pub struct AviMux<W: Write + Seek> {
     waiting: Vec<Packet>,
     waiting_bytes: u64,
     /// Per stream, packets held to be written in time order.
-    queues: Vec<VecDeque<Packet>>,
+    /// Each with the time its chunk will have ([`AviMux::order_time`]).
+    queues: Vec<VecDeque<(Packet, Seconds)>>,
+    /// Per stream, where the last packet to arrive ends, in its ticks.
+    arrived_end: Vec<Option<i64>>,
     queued_bytes: u64,
     /// Buffers of packets already written, reused for the next held ones
     /// so that holding a packet copies it without a fresh allocation.
     spare: Vec<Vec<u8>>,
     /// Per stream, the time in seconds (ticks, timescale) of the latest
     /// packet written.
-    latest: Vec<Option<(i128, i128)>>,
+    latest: Vec<Option<Seconds>>,
     /// A packet went out earlier than one of another stream written
     /// before it.
     out_of_order: bool,
@@ -339,6 +335,7 @@ impl<W: Write + Seek> AviMux<W> {
             waiting: Vec::new(),
             waiting_bytes: 0,
             queues: Vec::new(),
+            arrived_end: Vec::new(),
             queued_bytes: 0,
             spare: Vec::new(),
             latest: Vec::new(),
@@ -538,20 +535,46 @@ impl<W: Write + Seek> AviMux<W> {
         self.started = true;
         self.riffs = 1;
         self.queues = self.tracks.iter().map(|_| VecDeque::new()).collect();
+        self.arrived_end = vec![None; self.tracks.len()];
+        self.latest = vec![None; self.tracks.len()];
         for packet in std::mem::take(&mut self.waiting) {
-            self.hold(packet)?;
+            let index = self.track_index(packet.stream())?;
+            let time = self.order_time(index, &packet);
+            self.hold(index, packet, time);
         }
         self.waiting_bytes = 0;
         self.drain(false)
     }
 
-    /// Queues a packet of a started file to be written in time order.
-    fn hold(&mut self, packet: Packet) -> Result<(), MuxError> {
-        let index = self.track_index(packet.stream())?;
+    /// Queues a packet of stream `index` to be written in time order.
+    fn hold(&mut self, index: usize, packet: Packet, time: Seconds) {
         let size = u64::try_from(packet.bytes().len()).unwrap_or(u64::MAX);
         self.queued_bytes = self.queued_bytes.saturating_add(size);
-        self.queues[index].push_back(packet);
-        Ok(())
+        self.queues[index].push_back((packet, time));
+    }
+
+    /// The time the chunk of `packet`, the next packet of stream `index`,
+    /// will have: for video, its decode time as [`decode_time`] reads it,
+    /// else the end of the stream's packet before it (B-frames arrive in
+    /// decode order with presentation times that go back); for other
+    /// streams the decode time, else the presentation time.
+    fn order_time(&mut self, index: usize, packet: &Packet) -> Seconds {
+        let track = &self.tracks[index];
+        let stamp = packet.timestamp();
+        let own = if track.video() {
+            decode_time(track, stamp)
+        } else {
+            stamp.decode().or(stamp.presentation())
+        };
+        let time = own
+            .or(self.arrived_end[index])
+            .or(stamp.presentation())
+            .unwrap_or(0);
+        self.arrived_end[index] = Some(time.saturating_add(stamp.duration().unwrap_or(0)));
+        (
+            i128::from(time),
+            i128::from(packet.timescale().ticks_per_second().max(1)),
+        )
     }
 
     /// Writes held packets, earliest first, while every stream has one
@@ -567,12 +590,12 @@ impl<W: Write + Seek> AviMux<W> {
             let Some(index) = self.earliest() else {
                 return Ok(());
             };
-            let Some(packet) = self.queues[index].pop_front() else {
+            let Some((packet, time)) = self.queues[index].pop_front() else {
                 return Ok(());
             };
             let size = u64::try_from(packet.bytes().len()).unwrap_or(u64::MAX);
             self.queued_bytes = self.queued_bytes.saturating_sub(size);
-            let written = self.put(index, &packet);
+            let written = self.put(index, &packet, time);
             if self.spare.len() < SPARE_BUFFERS {
                 self.spare.push(packet.into_bytes());
             }
@@ -585,15 +608,16 @@ impl<W: Write + Seek> AviMux<W> {
     /// stream has a packet held, and it is earlier than each of them.
     /// Otherwise holds a copy of it and drains.
     fn take(&mut self, index: usize, packet: &Packet) -> Result<(), MuxError> {
+        let time = self.order_time(index, packet);
         let first = self.queues[index].is_empty()
             && self.queues.iter().enumerate().all(|(other, queue)| {
                 other == index
                     || queue
                         .front()
-                        .is_some_and(|held| before(packet, index, held, other))
+                        .is_some_and(|&(_, held)| before(time, index, held, other))
             });
         if first || self.options.interleave_bytes == 0 {
-            return self.put(index, packet);
+            return self.put(index, packet, time);
         }
         let mut bytes = self.spare.pop().unwrap_or_default();
         bytes.clear();
@@ -606,17 +630,13 @@ impl<W: Write + Seek> AviMux<W> {
             packet.keyframe(),
         )
         .map_err(|error| rejected(error.to_string()))?;
-        self.hold(held)?;
+        self.hold(index, held, time);
         self.drain(false)
     }
 
     /// Writes `packet` of stream `index`, noting whether it is earlier
     /// than a packet of another stream written before it.
-    fn put(&mut self, index: usize, packet: &Packet) -> Result<(), MuxError> {
-        let time = seconds(packet);
-        if self.latest.len() != self.tracks.len() {
-            self.latest = vec![None; self.tracks.len()];
-        }
+    fn put(&mut self, index: usize, packet: &Packet, time: Seconds) -> Result<(), MuxError> {
         let early = self.latest.iter().enumerate().any(|(other, latest)| {
             other != index && latest.is_some_and(|(ticks, scale)| time.0 * scale < ticks * time.1)
         });
@@ -628,13 +648,13 @@ impl<W: Write + Seek> AviMux<W> {
     /// The stream whose first held packet is earliest in seconds; a tie
     /// goes to the stream added first.
     fn earliest(&self) -> Option<usize> {
-        let mut best: Option<(usize, &Packet)> = None;
+        let mut best: Option<(usize, Seconds)> = None;
         for (index, queue) in self.queues.iter().enumerate() {
-            let Some(packet) = queue.front() else {
+            let Some(&(_, time)) = queue.front() else {
                 continue;
             };
-            if best.is_none_or(|(best_index, best)| before(packet, index, best, best_index)) {
-                best = Some((index, packet));
+            if best.is_none_or(|(best_index, best)| before(time, index, best, best_index)) {
+                best = Some((index, time));
             }
         }
         best.map(|(index, _)| index)
@@ -1066,7 +1086,7 @@ impl<W: Write + Seek> AviMux<W> {
             let waiting: i64 = self
                 .waiting
                 .iter()
-                .chain(self.queues.iter().flatten())
+                .chain(self.queues.iter().flatten().map(|(packet, _)| packet))
                 .filter(|packet| packet.stream() == track.id.get())
                 .filter_map(|packet| packet.timestamp().duration())
                 .sum();

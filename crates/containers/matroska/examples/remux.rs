@@ -31,7 +31,9 @@ fn main() -> Result<(), String> {
     }
     let packets = with_durations(packets)?;
 
-    let out = BufWriter::new(File::create(&output).map_err(|error| error.to_string())?);
+    // A large write buffer turns the muxer's frame-by-frame writes into few.
+    let file = File::create(&output).map_err(|error| error.to_string())?;
+    let out = BufWriter::with_capacity(1 << 20, file);
     let mut mux = if output.ends_with(".webm") {
         MatroskaMux::webm(out)
     } else {

@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 
 use cutlass_container::{Demux, Landing, SeekTo};
 
-use crate::support::{Packet, audio, ffmpeg, ffmpeg_present, ffprobe, ours, scratch};
+use crate::support::{
+    Packet, audio, check_services, ffmpeg, ffmpeg_present, ffprobe, ours, scratch,
+};
 
 type Demuxer = cutlass_mpegts::TsDemux<std::io::BufReader<std::fs::File>>;
 
@@ -166,8 +168,8 @@ pub fn write(dir: &Path, variant: &Variant) -> PathBuf {
 /// difference, empty when the file matches.
 pub fn compare(path: &Path) -> Vec<String> {
     let theirs = ffprobe(path, &[]);
-    let (_, mine) = ours(path);
-    let mut problems = Vec::new();
+    let (demux, mine) = ours(path);
+    let mut problems = check_services(path, &demux);
     for (pid, packets) in &mine {
         let Some(stream) = theirs.iter().find(|stream| stream.id == *pid) else {
             problems.push(format!("PID {pid:#x} is not in ffprobe's streams"));

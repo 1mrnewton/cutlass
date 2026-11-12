@@ -79,6 +79,102 @@ pub fn parse_pat(section: &[u8]) -> Result<Pat, TableError> {
     })
 }
 
+/// `table_id` of an SDT describing this transport stream (ETSI EN 300 468
+/// clause 5.2.3), on PID 0x0011.
+pub const SDT_TABLE: u8 = 0x42;
+
+/// The PID that carries the SDT.
+pub const SDT_PID: u16 = 0x0011;
+
+/// One service an SDT names: the program of the same number.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Service {
+    pub program: u16,
+    /// `service_type` from the service descriptor: 0x01 is television.
+    pub kind: u8,
+    pub provider: String,
+    pub name: String,
+}
+
+/// Reads an SDT section for the actual transport stream: each service with
+/// a service descriptor (tag 0x48).
+pub fn parse_sdt(section: &[u8]) -> Result<Vec<Service>, TableError> {
+    let (header, body) = long_section(section)?;
+    if header.table_id != SDT_TABLE {
+        return Err(TableError::WrongTable {
+            table_id: header.table_id,
+        });
+    }
+    if !header.current {
+        return Err(TableError::NotCurrent);
+    }
+    // original_network_id and a reserved byte.
+    let mut rest = body.get(3..).ok_or(TableError::Overrun)?;
+    let mut services = Vec::new();
+    while rest.len() >= 5 && services.len() < MAX_PROGRAMS {
+        let program = u16::from_be_bytes([rest[0], rest[1]]);
+        let length = usize::from(u16::from_be_bytes([rest[3] & 0x0F, rest[4]]));
+        let descriptors = rest.get(5..5 + length).ok_or(TableError::Overrun)?;
+        rest = &rest[5 + length..];
+        let mut walk = descriptors;
+        for _ in 0..MAX_DESCRIPTORS {
+            let [tag, size, ..] = *walk else {
+                break;
+            };
+            let Some(data) = walk.get(2..2 + usize::from(size)) else {
+                break;
+            };
+            walk = &walk[2 + usize::from(size)..];
+            if tag != 0x48 {
+                continue;
+            }
+            let [kind, provider_len, ..] = *data else {
+                break;
+            };
+            let provider_end = 2 + usize::from(provider_len);
+            let Some(provider) = data.get(2..provider_end) else {
+                break;
+            };
+            let name_len = data.get(provider_end).copied().map_or(0, usize::from);
+            let name = data
+                .get(provider_end + 1..provider_end + 1 + name_len)
+                .unwrap_or_default();
+            services.push(Service {
+                program,
+                kind,
+                provider: dvb_text(provider),
+                name: dvb_text(name),
+            });
+            break;
+        }
+    }
+    Ok(services)
+}
+
+/// A DVB text field (EN 300 468 annex A). A leading 0x15 selects UTF-8;
+/// other leading control bytes select a character table and are dropped,
+/// and the bytes are read as Latin-1, which matches the default table
+/// (ISO/IEC 6937) for letters, digits and punctuation.
+#[must_use]
+pub fn dvb_text(bytes: &[u8]) -> String {
+    match bytes.first() {
+        Some(0x15) => String::from_utf8_lossy(&bytes[1..]).into_owned(),
+        Some(0x10) => latin1(bytes.get(3..).unwrap_or_default()),
+        Some(0x1F) => latin1(bytes.get(2..).unwrap_or_default()),
+        Some(&first) if first < 0x20 => latin1(&bytes[1..]),
+        _ => latin1(bytes),
+    }
+}
+
+fn latin1(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        // DVB control codes 0x80 to 0x9F (emphasis, line break) are not text.
+        .filter(|&&byte| !(0x80..=0x9F).contains(&byte))
+        .map(|&byte| char::from(byte))
+        .collect()
+}
+
 /// How an elementary stream's bytes split into access units.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -263,9 +359,50 @@ fn private_kind(registration: Option<[u8; 4]>, found: &Descriptors) -> Kind {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kind, PatEntry, TableError, parse_pat, parse_pmt};
+    use super::{Kind, PatEntry, Service, TableError, dvb_text, parse_pat, parse_pmt, parse_sdt};
     use crate::crc::crc32;
     use crate::section::SectionError;
+
+    /// The SDT FFmpeg 8.1.1 writes for `-metadata service_provider=Prov
+    /// -metadata service_name=Café`: the name is UTF-8 behind 0x15.
+    const FFMPEG_SDT: [u8; 35] = [
+        0x42, 0xF0, 0x20, 0x00, 0x01, 0xC1, 0x00, 0x00, 0xFF, 0x01, 0xFF, 0x00, 0x01, 0xFC, 0x80,
+        0x0F, 0x48, 0x0D, 0x01, 0x04, 0x50, 0x72, 0x6F, 0x76, 0x06, 0x15, 0x43, 0x61, 0x66, 0xC3,
+        0xA9, 0x87, 0x81, 0xDF, 0x74,
+    ];
+
+    #[test]
+    fn an_sdt_names_the_service() {
+        assert_eq!(
+            parse_sdt(&FFMPEG_SDT),
+            Ok(vec![Service {
+                program: 1,
+                kind: 1,
+                provider: "Prov".to_owned(),
+                name: "Café".to_owned(),
+            }])
+        );
+        let mut broken = FFMPEG_SDT;
+        broken[20] ^= 1;
+        assert!(parse_sdt(&broken).is_err());
+        assert!(matches!(
+            parse_sdt(&long(0x46, 1, &[0xFF, 0x01, 0xFF])),
+            Err(TableError::WrongTable { table_id: 0x46 })
+        ));
+        // A descriptor loop that claims more than the section holds.
+        let short = long(0x42, 1, &[0xFF, 0x01, 0xFF, 0, 1, 0xFC, 0x80, 0x20, 0x48]);
+        assert_eq!(parse_sdt(&short), Err(TableError::Overrun));
+    }
+
+    #[test]
+    fn dvb_text_reads_utf8_and_latin1() {
+        assert_eq!(dvb_text(b"\x15Caf\xC3\xA9"), "Café");
+        assert_eq!(dvb_text(b"Caf\xE9"), "Café");
+        // A table selector is dropped, and so are emphasis controls.
+        assert_eq!(dvb_text(b"\x05News\x86 24\x87"), "News 24");
+        assert_eq!(dvb_text(b"\x10\x00\x01TV"), "TV");
+        assert_eq!(dvb_text(b""), "");
+    }
 
     pub fn long(table: u8, id: u16, body: &[u8]) -> Vec<u8> {
         let length = body.len() + 9;

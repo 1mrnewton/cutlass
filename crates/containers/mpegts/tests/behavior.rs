@@ -109,7 +109,10 @@ fn content(seconds: i64, base: i64) -> Vec<Unit> {
 }
 
 fn mux(units: &[Unit], options: MuxOptions) -> Vec<u8> {
-    let mut mux = TsMux::with_options(Vec::new(), options);
+    mux_into(units, TsMux::with_options(Vec::new(), options))
+}
+
+fn mux_into(units: &[Unit], mut mux: TsMux<Vec<u8>>) -> Vec<u8> {
     let size = cutlass_codec::FrameSize::try_new(1920, 1080).unwrap();
     let video = mux
         .add_stream(NewStream {
@@ -247,6 +250,45 @@ fn every_access_unit_reads_back_from_ts_and_m2ts() {
 
 fn streams_duration(demux: &TsDemux<Cursor<Vec<u8>>>) -> i64 {
     demux.streams()[0].edits()[0].duration()
+}
+
+#[test]
+fn the_service_description_names_the_program() {
+    let units = content(4, 0);
+    let bytes = mux(&units, MuxOptions::default());
+    let service = open(&bytes).programs()[0].service.clone().expect("an SDT");
+    assert_eq!(
+        (
+            service.program,
+            service.provider.as_str(),
+            service.name.as_str()
+        ),
+        (1, "Cutlass", "Service01")
+    );
+    // An SDT every 500 ms of the 4 s, and one at the start.
+    let sdts = packets(&bytes)
+        .iter()
+        .filter(|packet| ((u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2])) == 0x11)
+        .count();
+    assert!((8..=10).contains(&sdts), "{sdts} SDT packets");
+
+    let named =
+        TsMux::with_options(Vec::new(), MuxOptions::default()).with_service("Prov", "Café ☕");
+    let bytes = mux_into(&units, named);
+    let service = open(&bytes).programs()[0].service.clone().expect("an SDT");
+    assert_eq!(
+        (service.provider.as_str(), service.name.as_str()),
+        ("Prov", "Café ☕")
+    );
+    // A name past what the descriptor holds is cut at a character boundary.
+    let long = "é".repeat(100);
+    let bytes = mux_into(&units, TsMux::new(Vec::new()).with_service(&long, &long));
+    let service = open(&bytes).programs()[0].service.clone().expect("an SDT");
+    assert_eq!(service.name, "é".repeat(62));
+    let read = drain(&mut open(&bytes));
+    for which in [0, 1] {
+        assert!(track(&read, which) == track(&shifted(&units), which));
+    }
 }
 
 #[test]

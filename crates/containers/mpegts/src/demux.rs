@@ -60,7 +60,7 @@ use crate::limits::{
 use crate::packet::{self, PAT_PID, PacketSize};
 use crate::pes::pes_times;
 use crate::pipeline::{Counters, Pipeline};
-use crate::psi::{Elementary, Kind, Pat, Pmt, parse_pat, parse_pmt};
+use crate::psi::{Elementary, Kind, Pat, Pmt, SDT_PID, Service, parse_pat, parse_pmt, parse_sdt};
 use crate::section::SectionBuffer;
 use crate::sniff;
 use crate::source::{Next, Source};
@@ -89,6 +89,56 @@ pub struct Program {
     pub pmt_pid: u16,
     /// `None` when its PMT was not found in the opening bytes.
     pub pmt: Option<Pmt>,
+    /// The provider and service name a DVB service description table (PID
+    /// 0x0011) gives this program, when one is in the bytes the open reads.
+    pub service: Option<Service>,
+}
+
+/// Collects the first service description table on PID 0x0011.
+#[derive(Default)]
+struct SdtReader {
+    buffer: SectionBuffer,
+    sections: Vec<Vec<u8>>,
+    services: Option<Vec<Service>>,
+}
+
+impl SdtReader {
+    fn packet(&mut self, bytes: &[u8; 188]) {
+        if self.services.is_some() {
+            return;
+        }
+        let header = packet::header(bytes);
+        if header.pid != SDT_PID || header.error || !header.payload {
+            return;
+        }
+        let Ok(parsed) = packet::parse(bytes) else {
+            return;
+        };
+        let payload = &bytes[parsed.payload_at.min(bytes.len())..];
+        let sections = &mut self.sections;
+        let _ = self.buffer.push(payload, header.start, &mut |section| {
+            sections.push(section.to_vec());
+        });
+        for section in self.sections.drain(..) {
+            // Section 0 of a one-section table is the whole of it; a longer
+            // table is rare and its first section names the main services.
+            if let Ok(services) = parse_sdt(&section) {
+                self.services = Some(services);
+                break;
+            }
+        }
+    }
+
+    fn name(self, programs: &mut [Program]) {
+        for service in self.services.into_iter().flatten() {
+            if let Some(program) = programs
+                .iter_mut()
+                .find(|program| program.number == service.program && program.service.is_none())
+            {
+                program.service = Some(service);
+            }
+        }
+    }
 }
 
 /// What the last seek cost.
@@ -211,7 +261,8 @@ impl<R: Read + Seek> TsDemux<R> {
         wanted: Option<u16>,
     ) -> Result<Self, OpenError> {
         source.keep_from_here();
-        let (data_start, programs, leading) = read_tables(&mut source, wanted)?;
+        let mut sdt = SdtReader::default();
+        let (data_start, mut programs, leading) = read_tables(&mut source, wanted, &mut sdt)?;
         let Some(data_start) = data_start else {
             return Err(OpenError::Unrecognized {
                 family: ContainerId::MpegTs,
@@ -236,7 +287,8 @@ impl<R: Read + Seek> TsDemux<R> {
         // Read the kept bytes again through the program's streams.
         source.rewind(data_start);
         let mut pipeline = Pipeline::new(&elementaries, limit);
-        let start = learn(&mut source, &mut pipeline, data_start)?;
+        let start = learn(&mut source, &mut pipeline, data_start, &mut sdt)?;
+        sdt.name(&mut programs);
 
         let random = length.is_some();
         let mut end = None;
@@ -1046,7 +1098,11 @@ type Tables = (Option<u64>, Vec<Program>, (u64, u64));
 /// Reads the PAT and the PMTs from the opening bytes. Returns the first
 /// packet's position, the programs, and the resyncs and bytes skipped
 /// before the first packet.
-fn read_tables<R: Read>(source: &mut Source<R>, wanted: Option<u16>) -> Result<Tables, OpenError> {
+fn read_tables<R: Read>(
+    source: &mut Source<R>,
+    wanted: Option<u16>,
+    sdt: &mut SdtReader,
+) -> Result<Tables, OpenError> {
     let mut leading = (0, 0);
     let mut first = None;
     let mut pat: Option<Pat> = None;
@@ -1063,6 +1119,7 @@ fn read_tables<R: Read>(source: &mut Source<R>, wanted: Option<u16>) -> Result<T
             break;
         }
         let bytes = source.packet(index);
+        sdt.packet(bytes);
         let header = packet::header(bytes);
         if header.error || !header.payload {
             continue;
@@ -1129,6 +1186,7 @@ fn read_tables<R: Read>(source: &mut Source<R>, wanted: Option<u16>) -> Result<T
                     .iter()
                     .find(|pmt| pmt.program == entry.program)
                     .cloned(),
+                service: None,
             })
             .collect()
     });
@@ -1168,6 +1226,7 @@ fn learn<R: Read>(
     source: &mut Source<R>,
     pipeline: &mut Pipeline,
     data_start: u64,
+    sdt: &mut SdtReader,
 ) -> Result<i64, OpenError> {
     let mut out = VecDeque::new();
     let mut units = vec![0_u32; pipeline.tracks.len()];
@@ -1181,6 +1240,7 @@ fn learn<R: Read>(
                 None
             }
             Next::Packet(position, index) => {
+                sdt.packet(source.packet(index));
                 pipeline.packet(position, source.packet(index), &mut out);
                 if pipeline.buffered() > MAX_BUFFERED_BYTES {
                     pipeline.shed();

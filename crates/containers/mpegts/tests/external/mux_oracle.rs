@@ -18,7 +18,8 @@ use cutlass_mpegts::packet::PacketSize;
 use cutlass_mpegts::{MuxOptions, TsMux};
 
 use crate::support::{
-    ffmpeg, ffmpeg_decode_errors, ffmpeg_present, ffprobe, gstreamer_errors, ours, scratch,
+    check_services, ffmpeg, ffmpeg_decode_errors, ffmpeg_present, ffprobe, gstreamer_errors, ours,
+    scratch,
 };
 
 const DELAY: i64 = 126_000;
@@ -94,6 +95,10 @@ pub fn remux(source: &Path, out: &Path, size: PacketSize) -> usize {
             ..MuxOptions::default()
         },
     );
+    // M2TS output carries a name that is not ASCII, for the UTF-8 form.
+    if size == PacketSize::M2ts {
+        mux = mux.with_service("Prøve", "Kanal ☕");
+    }
     let mut map = Vec::new();
     for stream in demux.streams() {
         let track = mux
@@ -356,7 +361,8 @@ fn remuxed_files_read_back_in_ffprobe_ffmpeg_and_gstreamer() {
                 size,
             )));
             // This crate reads its own output: every packet written.
-            let (_, read) = ours(&out);
+            let (demux, read) = ours(&out);
+            problems.extend(check_services(&out, &demux));
             let total: usize = read.iter().map(|(_, packets)| packets.len()).sum();
             if total != written {
                 problems.push(format!("read back {total} of {written} packets"));

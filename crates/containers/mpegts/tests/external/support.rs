@@ -223,6 +223,55 @@ pub fn ours(path: &Path) -> Read {
     (demux, tracks)
 }
 
+/// The provider and service name ffprobe reads for each program, against
+/// those this crate reads from the SDT.
+pub fn check_services(path: &Path, demux: &TsDemux<BufReader<std::fs::File>>) -> Vec<String> {
+    let out = Command::new("ffprobe")
+        .args(["-v", "error", "-show_entries"])
+        .arg("program=program_id:program_tags=service_name,service_provider")
+        .args(["-of", "default=nw=1"])
+        .arg(path)
+        .output()
+        .expect("ffprobe");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut theirs: Vec<(u16, String, String)> = Vec::new();
+    for line in text.lines() {
+        if let Some(id) = line.strip_prefix("program_id=") {
+            theirs.push((id.parse().unwrap_or(0), String::new(), String::new()));
+        } else if let Some(last) = theirs.last_mut() {
+            if let Some(name) = line.strip_prefix("TAG:service_name=") {
+                name.clone_into(&mut last.2);
+            } else if let Some(provider) = line.strip_prefix("TAG:service_provider=") {
+                provider.clone_into(&mut last.1);
+            }
+        }
+    }
+    let mut problems = Vec::new();
+    for (number, provider, name) in theirs {
+        let Some(program) = demux
+            .programs()
+            .iter()
+            .find(|program| program.number == number)
+        else {
+            problems.push(format!("program {number} is not in this crate's programs"));
+            continue;
+        };
+        let mine = program
+            .service
+            .as_ref()
+            .map_or((String::new(), String::new()), |service| {
+                (service.provider.clone(), service.name.clone())
+            });
+        if mine != (provider.clone(), name.clone()) {
+            problems.push(format!(
+                "program {number}: service {mine:?}, ffprobe {:?}",
+                (provider, name)
+            ));
+        }
+    }
+    problems
+}
+
 /// Codecs whose frames FFmpeg times from the PES timestamp plus the
 /// frames before, rounding each length; this crate rounds the sum, so the
 /// two may differ by a tick.

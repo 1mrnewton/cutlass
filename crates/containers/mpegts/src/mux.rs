@@ -13,7 +13,9 @@
 //! data would leave a longer gap, and a run of them (with the tables every
 //! 100 ms) bridges a stretch of decode time with no data at all. The PAT
 //! and PMT go out first, every 100 ms of decode time, and before each
-//! video keyframe.
+//! video keyframe. A DVB service description table naming the provider and
+//! the service ([`TsMux::with_service`]) goes with them every 500 ms, as
+//! FFmpeg writes one.
 //!
 //! Units are held per stream and written in decode-time order across
 //! streams, so a source whose streams arrive seconds apart (as MP4 chunks
@@ -54,6 +56,16 @@ const PROGRAM: u16 = 1;
 const TRANSPORT_STREAM_ID: u16 = 1;
 /// Decode time between PAT and PMT repeats: 100 ms.
 const PSI_PERIOD: i64 = 9_000;
+/// Decode time between SDT repeats: 500 ms, FFmpeg's `sdt_period`.
+const SDT_PERIOD: i64 = 45_000;
+const SDT_PID: u16 = 0x0011;
+/// The DVB `original_network_id` FFmpeg writes by default.
+const ORIGINAL_NETWORK_ID: u16 = 0xFF01;
+/// The provider written when the caller names none.
+pub const DEFAULT_PROVIDER: &str = "Cutlass";
+/// The service written when the caller names none, as FFmpeg numbers its
+/// first service.
+pub const DEFAULT_SERVICE: &str = "Service01";
 /// Decode time between PCRs: 20 ms, in 27 MHz ticks.
 const PCR_PERIOD: u64 = 540_000;
 /// The PCR runs this far behind the DTS: 0.7 s.
@@ -189,7 +201,11 @@ pub struct TsMux<W: Write> {
     out: Vec<u8>,
     pat_continuity: u8,
     pmt_continuity: u8,
+    sdt_continuity: u8,
     last_psi: Option<i64>,
+    last_sdt: Option<i64>,
+    /// The SDT section, built from the provider and service names.
+    sdt: Vec<u8>,
     last_pcr: Option<u64>,
     /// The PCR of the last packet, for the M2TS arrival time.
     clock: u64,
@@ -217,6 +233,15 @@ impl<W: Write> TsMux<W> {
         )
     }
 
+    /// Names the provider and the service in the SDT. A name is cut to 126
+    /// bytes at a character boundary, so both fit the descriptor; one that
+    /// is not ASCII is written as UTF-8 behind the DVB 0x15 selector.
+    #[must_use]
+    pub fn with_service(mut self, provider: &str, name: &str) -> Self {
+        self.sdt = sdt_section(provider, name);
+        self
+    }
+
     pub fn with_options(writer: W, options: MuxOptions) -> Self {
         Self {
             writer,
@@ -228,7 +253,10 @@ impl<W: Write> TsMux<W> {
             out: Vec::new(),
             pat_continuity: 0,
             pmt_continuity: 0,
+            sdt_continuity: 0,
             last_psi: None,
+            last_sdt: None,
+            sdt: sdt_section(DEFAULT_PROVIDER, DEFAULT_SERVICE),
             last_pcr: None,
             clock: 0,
             last_time: None,
@@ -323,15 +351,13 @@ impl<W: Write> TsMux<W> {
         data.push(0);
         data.extend_from_slice(section);
         for (index, chunk) in data.chunks(TS_PACKET_BYTES - 4).enumerate() {
-            let continuity = if pid == PAT_PID {
-                let value = self.pat_continuity;
-                self.pat_continuity = (value + 1) & 0x0F;
-                value
-            } else {
-                let value = self.pmt_continuity;
-                self.pmt_continuity = (value + 1) & 0x0F;
-                value
+            let counter = match pid {
+                PAT_PID => &mut self.pat_continuity,
+                SDT_PID => &mut self.sdt_continuity,
+                _ => &mut self.pmt_continuity,
             };
+            let continuity = *counter;
+            *counter = (continuity + 1) & 0x0F;
             self.packet_header(pid, index == 0, 0b01, continuity);
             self.out.extend_from_slice(chunk);
             self.out
@@ -339,7 +365,14 @@ impl<W: Write> TsMux<W> {
         }
     }
 
-    fn write_tables(&mut self) {
+    /// The PAT and PMT, and the SDT when it is due at decode time `dts`.
+    fn write_tables(&mut self, dts: i64) {
+        if self.last_sdt.is_none_or(|last| dts - last >= SDT_PERIOD) {
+            let sdt = std::mem::take(&mut self.sdt);
+            self.write_section(SDT_PID, &sdt);
+            self.sdt = sdt;
+            self.last_sdt = Some(dts);
+        }
         let pat = section(
             0x00,
             TRANSPORT_STREAM_ID,
@@ -799,7 +832,7 @@ impl<W: Write> TsMux<W> {
                 .saturating_add(lead);
             if self.last_psi.is_none_or(|last| dts - last >= PSI_PERIOD) {
                 self.clock = pcr;
-                self.write_tables();
+                self.write_tables(dts);
                 self.last_psi = Some(dts);
             }
             self.write_pcr_only(pid, continuity, pcr);
@@ -824,7 +857,7 @@ impl<W: Write> TsMux<W> {
             || self.last_psi.is_none_or(|last| dts - last >= PSI_PERIOD)
             || video && keyframe;
         if psi_due {
-            self.write_tables();
+            self.write_tables(dts);
             self.last_psi = Some(dts);
             self.started = true;
         }
@@ -1041,7 +1074,7 @@ impl<W: Write> Mux for TsMux<W> {
             return Err(FailedMux::incomplete(self.payload, error));
         }
         if !self.started && !self.tracks.is_empty() {
-            self.write_tables();
+            self.write_tables(0);
             self.started = true;
         }
         let flushed = self.flush_out().and_then(|()| {
@@ -1201,6 +1234,51 @@ fn language_code(language: &Language) -> Option<[u8; 3]> {
         ]),
         _ => None,
     }
+}
+
+/// The SDT of one running television service, with a service descriptor
+/// (EN 300 468 clauses 5.2.3 and 6.2.33).
+fn sdt_section(provider: &str, name: &str) -> Vec<u8> {
+    let provider = dvb_string(provider);
+    let name = dvb_string(name);
+    let mut descriptor = vec![0x48, 0, 0x01, provider.len() as u8];
+    descriptor.extend_from_slice(&provider);
+    descriptor.push(name.len() as u8);
+    descriptor.extend_from_slice(&name);
+    descriptor[1] = (descriptor.len() - 2) as u8;
+    let length = descriptor.len();
+    let mut body = vec![
+        (ORIGINAL_NETWORK_ID >> 8) as u8,
+        ORIGINAL_NETWORK_ID as u8,
+        0xFF,
+        (PROGRAM >> 8) as u8,
+        PROGRAM as u8,
+        // No EIT; running_status 4 (running), not scrambled.
+        0xFC,
+        0x80 | (length >> 8) as u8,
+        length as u8,
+    ];
+    body.extend_from_slice(&descriptor);
+    section(0x42, TRANSPORT_STREAM_ID, &body)
+}
+
+/// A DVB text field of at most 126 bytes, so a service descriptor of two
+/// stays within its one-byte length: ASCII as it is, other text as UTF-8
+/// behind the 0x15 selector, cut at a character boundary.
+fn dvb_string(text: &str) -> Vec<u8> {
+    const MAX: usize = 126;
+    let ascii = text.is_ascii() && !text.bytes().any(|byte| byte < 0x20);
+    let room = if ascii { MAX } else { MAX - 1 };
+    let mut end = text.len().min(room);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = Vec::with_capacity(end + 1);
+    if !ascii {
+        out.push(0x15);
+    }
+    out.extend_from_slice(&text.as_bytes()[..end]);
+    out
 }
 
 /// A long-form PSI section with version 0, current, one section.

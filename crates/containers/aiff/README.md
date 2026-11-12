@@ -13,7 +13,7 @@ The stream timescale is the sample rate. `FEATURES` lists the same rows in code.
 | AIFF-C `sowt` (little-endian integer) | Same | Written as AIFF-C |
 | AIFF-C `fl32`, `fl64` (big-endian float) | Same | Written as AIFF-C |
 | 8-bit PCM, including `raw ` | Packets are returned with coding byte 6 | Written |
-| `alaw`, `ulaw` | One byte per channel per packet, still compressed | No |
+| `alaw`, `ulaw` (also `ALAW`, `ULAW`, which FFmpeg reads and AudioToolbox does not) | One sample frame per packet, `CodecId::Pcm` with coding byte 7 or 8 | No |
 | `ima4` | One 34-byte block per channel per packet, 64 sample frames | No |
 | `MAC3`, `MAC6` | One block per packet, 6 sample frames | No |
 | `GSM ` | One 33-byte block per packet, 160 sample frames | No |
@@ -101,9 +101,8 @@ To run it again: `cargo build --release -p media-bench`, then `python3 scripts/b
 - `COMM` stores the sample count in 32 bits and the form size in 32 bits, so the writer refuses a file over 4 GiB.
 - A PCM packet is one sample frame, and each read allocates one packet. `AiffDemux` does not buffer its reader, so wrap a `File` in a `BufReader`.
 - The writer holds every packet in memory and writes the whole file at `finish`.
-- 8-bit files open, but `cutlass-pcm` refuses coding byte 6, so they do not decode.
 - Sample sizes that are not a whole number of bytes (12-bit, 20-bit) are refused.
-- A-law, μ-law, IMA 4:1, MACE and GSM are split into blocks but have no `CodecId`, and the writer does not write them.
+- IMA 4:1, MACE and GSM are split into blocks but have no `CodecId`, and the writer does not write them. The writer does not write A-law or μ-law either.
 - Markers, instrument data, names, comments and ID3 chunks are skipped, not exposed, and not written.
 - A forward reader stops at the sound and never reads chunks after it. A skipped chunk larger than `Limits::max_header_bytes` is refused on a forward reader.
 

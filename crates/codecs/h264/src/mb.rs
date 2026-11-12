@@ -598,10 +598,18 @@ fn set_through<S: Sample>(pic: &mut Frame<S>, addr: usize, all: bool) {
 /// For a picture decoded on its own thread: when decoding has just passed
 /// the end of a macroblock row, deblocks that row and publishes the
 /// samples that makes final.
+/// Called after every macroblock, so only the check that a row has ended
+/// is inline; the work of the end of a row is not.
+#[inline(always)]
 fn rows_decoded<S: Sample>(pic: &mut Frame<S>, addr: usize) {
     if pic.writer.is_none() || pic.mb_w == 0 || !addr.is_multiple_of(pic.mb_w) {
         return;
     }
+    row_decoded(pic, addr);
+}
+
+#[inline(never)]
+fn row_decoded<S: Sample>(pic: &mut Frame<S>, addr: usize) {
     set_through(pic, addr, false);
     let decoded = addr / pic.mb_w;
     let Some(mut writer) = pic.writer.take() else {

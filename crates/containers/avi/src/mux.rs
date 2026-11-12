@@ -24,14 +24,16 @@
 //!
 //! Each stream's clock:
 //!
-//! - Video: `dwScale / dwRate` is the first packet's duration over the
-//!   stream timescale. One chunk is one frame, in the order packets arrive,
+//! - Video: `dwScale / dwRate` is the frame period over the stream
+//!   timescale. One chunk is one frame, in the order packets arrive,
 //!   which is decode order. A packet lasting several frames is followed by
-//!   empty chunks, which readers count as dropped frames (at most
-//!   [`MAX_SKIPPED_FRAMES`] in a row), so the chunk sequence follows the
-//!   packet durations, as the MP4 muxer's decode times do. A duration off
-//!   that frame grid is refused. Times after the first packet's are not
-//!   read: AVI has no presentation time to store them in.
+//!   empty chunks, and a packet whose decode time is past the end of the
+//!   one before is preceded by them; readers count them as dropped frames
+//!   (at most [`MAX_SKIPPED_FRAMES`] in a row). Which times count as decode
+//!   times is in [`decode_time`]; without one, the chunk sequence follows
+//!   the packet durations, as the MP4 muxer's decode times do. The frame
+//!   period comes from the first eight packets ([`frame_period`]); a time
+//!   off that grid lands on the nearest frame.
 //! - PCM: constant bitrate, `dwScale` the block size and `dwSampleSize` the
 //!   same; the stream timescale must be the sample rate and packets must
 //!   follow each other without gaps.
@@ -85,6 +87,8 @@ const AVIH_BYTES: usize = 56;
 const STRH_BYTES: usize = 56;
 const DMLH_BYTES: usize = 248;
 const MP3_EXTRA: usize = 12;
+/// Video packets held before the headers, to find the frame period.
+const VIDEO_CLOCK_PACKETS: u32 = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Kind {
@@ -118,7 +122,10 @@ struct Track {
     next: i64,
     /// A packet shorter than one frame closed a variable-bitrate stream.
     closed: bool,
-    seen: bool,
+    /// Packets waiting for the headers.
+    queued: u32,
+    /// Video: where the last packet ended, in ticks after `origin`.
+    exact_end: i64,
     ticks: i64,
     bytes: u64,
     max_chunk: u32,
@@ -381,23 +388,32 @@ impl<W: Write + Seek> AviMux<W> {
         Ok((kind, [tens, ones, pair[0], pair[1]]))
     }
 
+    /// Holds a packet until every stream has sent enough to set its clock:
+    /// one packet for audio, [`VIDEO_CLOCK_PACKETS`] for video. Past
+    /// [`AviMuxOptions::header_buffer_bytes`] the headers go out with what
+    /// has arrived, unless a stream has sent nothing.
     fn queue(&mut self, packet: &Packet, index: usize) -> Result<(), MuxError> {
         let size = u64::try_from(packet.bytes().len()).unwrap_or(u64::MAX);
         self.waiting_bytes = self.waiting_bytes.saturating_add(size);
-        if self.waiting_bytes > self.options.header_buffer_bytes {
-            let silent = self
-                .tracks
-                .iter()
-                .find(|track| !track.seen)
-                .map_or(0, |track| track.id.get());
+        self.tracks[index].queued = self.tracks[index].queued.saturating_add(1);
+        self.waiting.push(packet.clone());
+        let full = self.waiting_bytes > self.options.header_buffer_bytes;
+        if full && let Some(silent) = self.tracks.iter().find(|track| track.queued == 0) {
             return Err(rejected(format!(
-                "stream {silent} sent no packet in the first {} bytes",
+                "stream {} sent no packet in the first {} bytes",
+                silent.id.get(),
                 self.options.header_buffer_bytes
             )));
         }
-        self.tracks[index].seen = true;
-        self.waiting.push(packet.clone());
-        if self.tracks.iter().all(|track| track.seen) {
+        let ready = self.tracks.iter().all(|track| {
+            let want = if track.video() {
+                VIDEO_CLOCK_PACKETS
+            } else {
+                1
+            };
+            track.queued >= want
+        });
+        if full || ready {
             self.start()?;
         }
         Ok(())
@@ -407,15 +423,23 @@ impl<W: Write + Seek> AviMux<W> {
     /// and writes the packets that waited for them.
     fn start(&mut self) -> Result<(), MuxError> {
         for index in 0..self.tracks.len() {
-            let first = self
-                .waiting
-                .iter()
-                .find(|packet| packet.stream() == self.tracks[index].id.get());
-            let (unit, time) = match first {
-                Some(packet) => {
-                    let stamp = packet.timestamp();
-                    let duration = stamp.duration().ok_or(MuxError::MissingTimestamp)?;
-                    (duration, stamp.decode().or(stamp.presentation()))
+            let id = self.tracks[index].id.get();
+            let mut mine = self.waiting.iter().filter(|packet| packet.stream() == id);
+            let (unit, time) = match mine.next() {
+                Some(first) => {
+                    let stamp = first.timestamp();
+                    let mut unit = stamp.duration().ok_or(MuxError::MissingTimestamp)?;
+                    if self.tracks[index].video() {
+                        let track = &self.tracks[index];
+                        let spans = std::iter::once(first).chain(mine).map(|packet| {
+                            (
+                                packet.timestamp().duration(),
+                                decode_time(track, packet.timestamp()),
+                            )
+                        });
+                        unit = frame_period(spans).unwrap_or(unit);
+                    }
+                    (unit, stamp.decode().or(stamp.presentation()))
                 }
                 None => (1, None),
             };
@@ -632,7 +656,16 @@ impl<W: Write + Seek> AviMux<W> {
         let time = stamp.decode().or(stamp.presentation());
         let track = &self.tracks[index];
         let (before, units) = match &track.kind {
-            Kind::Video { .. } => (0, on_grid(duration, track.unit)?.max(1)),
+            Kind::Video { .. } => {
+                let start = decode_time(track, stamp)
+                    .map_or(track.exact_end, |time| time.saturating_sub(track.origin));
+                let at = nearest(start, track.unit).max(track.next);
+                let end = start.saturating_add(duration);
+                let last = nearest(end, track.unit).max(at + 1);
+                let before = at - track.next;
+                self.tracks[index].exact_end = end;
+                (before, last - at)
+            }
             Kind::Pcm { format } => {
                 let align = u64::from(format.block_align());
                 let len = u64::try_from(packet.bytes().len()).unwrap_or(u64::MAX);
@@ -898,6 +931,76 @@ fn size32(value: u64) -> Result<u32, MuxError> {
     })
 }
 
+/// The time a video packet's chunk sits at, when the packet says it.
+///
+/// A decode time with no presentation time, or one that differs from the
+/// presentation time, is a real decode time. A decode time equal to the
+/// presentation time is taken only for video that never reorders frames:
+/// an encoder that stamps H.264, HEVC, MPEG-4, or MPEG-2 packets with their
+/// presentation time in both fields sends B-frames with times that go back.
+/// Without a usable time the chunk follows the one before it.
+fn decode_time(track: &Track, stamp: cutlass_codec::Timestamp) -> Option<i64> {
+    let reorders = matches!(
+        track.params.codec(),
+        StreamCodec::Known(CodecId::H264 | CodecId::Hevc | CodecId::Mpeg4 | CodecId::Mpeg2)
+    );
+    match (stamp.decode(), stamp.presentation()) {
+        (Some(decode), None) => Some(decode),
+        (Some(decode), Some(presentation)) if decode != presentation || !reorders => Some(decode),
+        (None, Some(presentation)) if !reorders => Some(presentation),
+        _ => None,
+    }
+}
+
+/// Most empty chunks a frame period may cost per frame to keep every time
+/// exact; past it the period is the shortest frame and times round.
+const MAX_EXACT_SPLIT: i64 = 16;
+
+/// The video frame period from the first packets: each duration, and the
+/// step between decode times that count ([`decode_time`]). Their greatest
+/// common divisor keeps every time exact (a first frame that a dropped
+/// frame lengthened, a 24 fps clip on a 600 Hz clock that starts 4 ticks
+/// late) when that costs at most [`MAX_EXACT_SPLIT`] chunks per frame;
+/// otherwise the shortest step, with later times rounded to it.
+fn frame_period(spans: impl Iterator<Item = (Option<i64>, Option<i64>)>) -> Option<i64> {
+    let mut steps = Vec::new();
+    let mut previous: Option<i64> = None;
+    for (duration, time) in spans {
+        if let Some(duration) = duration.filter(|duration| *duration > 0) {
+            steps.push(duration);
+        }
+        if let Some(time) = time {
+            if let Some(before) = previous
+                && time > before
+            {
+                steps.push(time - before);
+            }
+            previous = Some(time);
+        }
+    }
+    let shortest = *steps.iter().min()?;
+    let common = steps
+        .iter()
+        .fold(0u64, |acc, step| gcd(acc, step.unsigned_abs()));
+    let common = i64::try_from(common).ok().filter(|common| *common > 0)?;
+    Some(if shortest / common <= MAX_EXACT_SPLIT {
+        common
+    } else {
+        shortest
+    })
+}
+
+/// The whole number of units nearest `value` ticks.
+fn nearest(value: i64, unit: i64) -> i64 {
+    let unit = unit.max(1);
+    let half = unit / 2;
+    if value >= 0 {
+        value.saturating_add(half) / unit
+    } else {
+        -(value.saturating_neg().saturating_add(half) / unit)
+    }
+}
+
 /// `value / unit`, refusing a value off the grid.
 fn on_grid(value: i64, unit: i64) -> Result<i64, MuxError> {
     if unit <= 0 || value % unit != 0 {
@@ -935,11 +1038,16 @@ fn set_clock(track: &mut Track, unit: i64, time: Option<i64>) -> Result<(), MuxE
     if time < 0 {
         track.origin = time;
     } else if time > 0 {
-        let units = on_grid(time, unit)?;
         if time > hour {
             return Err(rejected("a stream starts more than an hour in"));
         }
-        track.origin = time;
+        // Video lands on the nearest frame; audio must start on its grid.
+        let units = if track.video() {
+            nearest(time, unit)
+        } else {
+            on_grid(time, unit)?
+        };
+        track.origin = units * unit;
         track.start_units = u32::try_from(units).unwrap_or(u32::MAX);
     }
     Ok(())
@@ -1135,7 +1243,8 @@ impl<W: Write + Seek> Mux for AviMux<W> {
             start_units: 0,
             next: 0,
             closed: false,
-            seen: false,
+            queued: 0,
+            exact_end: 0,
             ticks: 0,
             bytes: 0,
             max_chunk: 0,

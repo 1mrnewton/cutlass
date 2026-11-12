@@ -847,18 +847,6 @@ fn the_muxer_refuses_what_avi_cannot_hold() {
         MuxError::Rejected { .. }
     ));
 
-    // A frame duration off the first frame's grid.
-    let mut mux = AviMux::new(Cursor::new(Vec::new()));
-    mux.add_stream(video_stream(CodecId::Mjpeg, Vec::new()))
-        .unwrap();
-    mux.write_packet(&packet(0, jpeg(0), 0, 3_600, 90_000, true))
-        .unwrap();
-    assert!(
-        mux.write_packet(&packet(0, jpeg(1), 3_600, 1_000, 90_000, true))
-            .is_err()
-    );
-    assert!(mux.finish(&[duration(0, 90_000, 4_600)]).is_err());
-
     // A gap in PCM.
     let mut mux = AviMux::new(Cursor::new(Vec::new()));
     mux.add_stream(audio_stream(CodecId::Pcm, 8_000, Vec::new()))
@@ -925,15 +913,73 @@ fn a_config_handed_over_with_the_first_packet_is_stored() {
     mux.set_config(audio, &[0x12, 0x10]).unwrap();
     mux.write_packet(&packet(1, vec![5; 9], 0, 1024, 44_100, true))
         .unwrap();
+    for frame in 1..8 {
+        mux.write_packet(&packet(
+            0,
+            vec![0, 0, 0, 1, 0x41],
+            frame * 3_600,
+            3_600,
+            90_000,
+            false,
+        ))
+        .unwrap();
+    }
     assert!(
         mux.set_config(audio, &[0x12, 0x10, 0x56]).is_err(),
         "the header is written"
     );
     mux.set_config(audio, &[0x12, 0x08]).unwrap();
-    mux.finish(&[duration(0, 90_000, 3_600), duration(1, 44_100, 1024)])
+    mux.finish(&[duration(0, 90_000, 8 * 3_600), duration(1, 44_100, 1024)])
         .expect("finish");
     let bytes = mux.into_writer().unwrap().into_inner();
     let demux = open(&bytes).expect("open");
     assert_eq!(demux.streams()[0].params().extradata(), &[1, 2, 3]);
     assert_eq!(demux.streams()[1].params().extradata(), &[0x12, 0x08]);
+}
+
+#[test]
+fn video_times_off_the_frame_grid_land_on_the_nearest_frame() {
+    // 30 fps on a 1 kHz clock: 33 and 34 ms frames. The first packets set
+    // the period to 33 ms, and every frame lands on the nearest one.
+    let mut mux = AviMux::new(Cursor::new(Vec::new()));
+    mux.add_stream(NewStream {
+        params: StreamParams::video(
+            StreamCodec::Known(CodecId::Mjpeg),
+            FrameSize::try_new(16, 16).unwrap(),
+            Vec::new(),
+        ),
+        timescale: Timescale::new(1_000),
+        language: None,
+    })
+    .unwrap();
+    let mut time = 0;
+    let mut total = 0;
+    for frame in 0..30u8 {
+        let span = if frame % 3 == 2 { 34 } else { 33 };
+        mux.write_packet(&packet(0, jpeg(frame), time, span, 1_000, true))
+            .unwrap();
+        time += span;
+        total += span;
+    }
+    // A late frame after a pause of about three frames.
+    mux.write_packet(&packet(0, jpeg(99), time + 100, 33, 1_000, true))
+        .unwrap();
+    total += 33;
+    mux.finish(&[duration(0, 1_000, total)]).expect("finish");
+    let bytes = mux.into_writer().unwrap().into_inner();
+    let mut demux = open(&bytes).expect("open");
+    assert_eq!(demux.streams()[0].timescale(), Timescale::new(1_000));
+    let times: Vec<i64> = drain(&mut demux)
+        .iter()
+        .map(|packet| packet.timestamp().decode().unwrap())
+        .collect();
+    assert_eq!(times.len(), 31);
+    for (frame, at) in times.iter().take(30).enumerate() {
+        let exact = i64::try_from(frame).unwrap() * 1_000 / 30;
+        assert!(
+            (at - exact).abs() <= 17,
+            "frame {frame} at {at}, exact {exact}"
+        );
+    }
+    assert_eq!(times[30], 33 * 33, "the pause holds three empty chunks");
 }

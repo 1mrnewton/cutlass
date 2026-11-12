@@ -12117,6 +12117,7 @@ fn deblock_whole<S: Sample>(
     let mut luma = [[None; 4]; 2];
     let mut cb = [[None; 4]; 2];
     let mut cr = [[None; 4]; 2];
+    let mut some = [false; 3];
     for way in 0..2 {
         let vertical = way == 0;
         // Edge 0, the macroblock's boundary: the macroblock to the left, or
@@ -12155,7 +12156,7 @@ fn deblock_whole<S: Sample>(
                         recon::EdgeQp::new(qp[2], off),
                     ];
                     let slot = (&mut luma[way][0], &mut cb[way][0], &mut cr[way][0]);
-                    set_edge(slot, bs, &qp, (true, true));
+                    set_edge(slot, bs, &qp, (true, true), &mut some);
                 }
             }
         }
@@ -12186,7 +12187,7 @@ fn deblock_whole<S: Sample>(
                 ]
             });
             let slot = (&mut luma[way][edge], &mut cb[way][edge], &mut cr[way][edge]);
-            set_edge(slot, bs, qp, (luma_edge, chroma_edge));
+            set_edge(slot, bs, qp, (luma_edge, chroma_edge), &mut some);
         }
     }
     let stride = pic.w;
@@ -12212,13 +12213,15 @@ fn deblock_whole<S: Sample>(
             horizontal: cr[1],
         },
     ];
-    S::deblock_mb(planes, &all)
+    S::deblock_mb(planes, &all, some)
 }
 
 /// The filters of one edge from its strengths, in luma (when it has a luma
 /// edge there), Cb and Cr (on edges 0 and 2), at each plane's thresholds.
 /// A strength of 0 throughout leaves the edge out, as does a plane whose
 /// thresholds change no sample.
+/// Which planes, luma, Cb and Cr, have an edge set: kept as each is set,
+/// so the kernels need not look through every edge again for one.
 #[inline]
 fn set_edge(
     slot: (
@@ -12229,6 +12232,7 @@ fn set_edge(
     bs: [u8; 4],
     qp: &[Option<recon::EdgeQp>; 3],
     (luma, chroma): (bool, bool),
+    some: &mut [bool; 3],
 ) {
     if bs == [0; 4] {
         return;
@@ -12238,10 +12242,13 @@ fn set_edge(
     let (for_luma, for_cb, for_cr) = slot;
     if luma {
         *for_luma = qp[0].map(|qp| qp.filter(bs, strong));
+        some[0] |= qp[0].is_some();
     }
     if chroma {
         *for_cb = qp[1].map(|qp| qp.filter(bs, strong));
         *for_cr = qp[2].map(|qp| qp.filter(bs, strong));
+        some[1] |= qp[1].is_some();
+        some[2] |= qp[2].is_some();
     }
 }
 

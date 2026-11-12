@@ -390,9 +390,14 @@ pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
 
     /// Filters every edge of one macroblock of a 4:2:0 frame with vector
     /// kernels: `edges` are its luma, Cb and Cr edges, for the planes in
-    /// that order. `false` means nothing was done and the caller filters
-    /// each edge itself.
-    fn deblock_mb(_planes: (&mut [Self], &mut [Self], &mut [Self]), _edges: &[MbEdges; 3]) -> bool {
+    /// that order, and `some` says which planes have any edge filtered.
+    /// `false` means nothing was done and the caller filters each edge
+    /// itself.
+    fn deblock_mb(
+        _planes: (&mut [Self], &mut [Self], &mut [Self]),
+        _edges: &[MbEdges; 3],
+        _some: [bool; 3],
+    ) -> bool {
         false
     }
 
@@ -584,14 +589,17 @@ impl Sample for u8 {
         deblock_chroma8_eight(plane, edge)
     }
 
-    fn deblock_mb(planes: (&mut [Self], &mut [Self], &mut [Self]), edges: &[MbEdges; 3]) -> bool {
+    fn deblock_mb(
+        planes: (&mut [Self], &mut [Self], &mut [Self]),
+        edges: &[MbEdges; 3],
+        some: [bool; 3],
+    ) -> bool {
         use cutlass_h264_kernels::deblock;
         let (luma, cb, cr) = planes;
         let [for_luma, for_cb, for_cr] = edges;
         // A plane with no edge to filter is not visited. For the others
         // it is all of them or none: each kernel then has its samples.
-        let (some_luma, some_cb, some_cr) =
-            (!for_luma.is_empty(), !for_cb.is_empty(), !for_cr.is_empty());
+        let [some_luma, some_cb, some_cr] = some;
         if (some_luma && !for_luma.fits(luma.len(), 16))
             || (some_cb && !for_cb.fits(cb.len(), 8))
             || (some_cr && !for_cr.fits(cr.len(), 8))

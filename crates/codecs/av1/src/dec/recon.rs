@@ -4,14 +4,14 @@ use crate::dsp::Pixel;
 
 use super::coder::Coder;
 use crate::dsp::ipred::{self, EDGE_LEN, EDGE_OFF};
-use crate::spec::tables::{AC_QLOOKUP, DC_QLOOKUP, QM_OFFSET, QUANTIZER_MATRIX};
+use crate::spec::tables::{AC_QLOOKUP, DC_QLOOKUP, MODE_TO_ANGLE, QM_OFFSET, QUANTIZER_MATRIX};
 
 use super::frame::Picture;
 use super::obu::SEG_LVL_ALT_Q;
 use super::tile::{DequantInfo, TileDec};
 use super::types::{
-    INTRA_FRAME, SMOOTH_PRED, TX_16X32, TX_16X64, TX_32X16, TX_32X32, TX_64X16, TX_64X64, tx_h,
-    tx_h_log2, tx_w, tx_w_log2,
+    D67_PRED, INTRA_FRAME, SMOOTH_PRED, TX_16X32, TX_16X64, TX_32X16, TX_32X32, TX_64X16, TX_64X64,
+    V_PRED, tx_h, tx_h_log2, tx_w, tx_w_log2,
 };
 
 /// Reusable buffers for one tile.
@@ -286,7 +286,22 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let above = &mut self.scratch.above;
         let left = &mut self.scratch.left;
         let base = 1i32 << (bd - 1);
-        let n = w + h;
+        // The edge samples the prediction reads: a directional mode
+        // other than straight up or left reads w + h of each (and
+        // filters them), the others the w above and h to the left.
+        let use_filter_intra = plane == 0 && self.b.use_filter_intra;
+        let angle = if plane == 0 {
+            self.b.angle_delta_y
+        } else {
+            self.b.angle_delta_uv
+        };
+        let angled = !use_filter_intra
+            && (V_PRED..=D67_PRED).contains(&mode)
+            && !matches!(
+                i32::from(MODE_TO_ANGLE[usize::from(mode)]) + i32::from(angle) * 3,
+                90 | 180
+            );
+        let (na, nl) = if angled { (w + h, w + h) } else { (w, h) };
         let up: &[P] = if !have_above {
             &[]
         } else if y << sy == self.scratch.edge_y {
@@ -296,39 +311,39 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         };
         if !have_above && have_left {
             let v = buf[ry * stride + x - 1];
-            for i in 0..n {
+            for i in 0..na {
                 above[EDGE_OFF + i] = v;
             }
         } else if !have_above && !have_left {
             let v = P::from_i32(base - 1);
-            for i in 0..n {
+            for i in 0..na {
                 above[EDGE_OFF + i] = v;
             }
         } else {
             let lim = max_x.min(x + if have_above_right { 2 * w } else { w } - 1);
             let row = up;
-            let avail = (lim + 1).saturating_sub(x).min(n);
+            let avail = (lim + 1).saturating_sub(x).min(na);
             above[EDGE_OFF..EDGE_OFF + avail].copy_from_slice(&row[x..x + avail]);
             let last = row[lim];
-            for i in avail..n {
+            for i in avail..na {
                 above[EDGE_OFF + i] = last;
             }
         }
         if !have_left && have_above {
             let v = up[x];
-            for i in 0..n {
+            for i in 0..nl {
                 left[EDGE_OFF + i] = v;
             }
         } else if !have_left && !have_above {
             let v = P::from_i32(base + 1);
-            for i in 0..n {
+            for i in 0..nl {
                 left[EDGE_OFF + i] = v;
             }
         } else {
             let lim = max_y.min(y + if have_below_left { 2 * h } else { h } - 1);
-            let avail = (lim + 1 - y).min(n);
+            let avail = (lim + 1 - y).min(nl);
             let col = &buf[ry * stride + x - 1..];
-            let dst = &mut left[EDGE_OFF..EDGE_OFF + n];
+            let dst = &mut left[EDGE_OFF..EDGE_OFF + nl];
             for (d, s) in dst[..avail].iter_mut().zip(col.iter().step_by(stride)) {
                 *d = *s;
             }
@@ -347,14 +362,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         above[EDGE_OFF - 1] = corner;
         left[EDGE_OFF - 1] = corner;
         let dst = &mut buf[ry * stride + x..];
-        if plane == 0 && self.b.use_filter_intra {
+        if use_filter_intra {
             ipred::filter_intra(dst, stride, w, h, self.b.filter_intra_mode, above, left, bd);
         } else {
-            let angle = if plane == 0 {
-                self.b.angle_delta_y
-            } else {
-                self.b.angle_delta_uv
-            };
             let edge_w = w.min(max_x + 1 - x);
             let edge_h = h.min(max_y + 1 - y);
             ipred::predict_clipped(

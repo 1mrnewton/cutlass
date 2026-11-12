@@ -1,5 +1,5 @@
 /*
- * The libavformat side of the Matroska benchmark: the same three jobs the
+ * The libavformat side of the Matroska benchmark: the same four jobs the
  * `bench` example does with the Rust demuxer and muxer.
  *
  *     ffmpeg_matroska open  <file>

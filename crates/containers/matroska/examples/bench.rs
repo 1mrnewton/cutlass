@@ -1,4 +1,4 @@
-//! The Rust side of the Matroska benchmark: the same three jobs
+//! The Rust side of the Matroska benchmark: the same four jobs
 //! `bench/ffmpeg_matroska.c` does with libavformat.
 //!
 //! ```text
@@ -8,14 +8,15 @@
 //! cargo run --release -p cutlass-matroska --example bench -- remux movie.mkv out.mkv
 //! ```
 //!
-//! `open` opens the file and reads no packet: the start-up and header cost
-//! the other jobs include. `read` reads every packet of every stream. `seek` seeks the first stream
-//! `count` times, to a fixed shuffle of times across its duration, and reads
-//! one packet after each. `remux` copies every packet into a new file (WebM
-//! when the name ends in `.webm`), streaming: each track holds back one
-//! packet, so a packet the input left without a duration gets the time to
-//! the next one of its track. `bench/against_ffmpeg.sh` times both sides as whole
-//! processes under `/usr/bin/time -l`.
+//! `open` opens the file and reads no packet: the start-up and header
+//! cost the other jobs include. `read` reads every packet of every stream.
+//! `seek` seeks the first stream `count` times, to a fixed shuffle of times
+//! across its duration, and reads one packet after each. `remux` copies
+//! every packet into a new file (WebM when the name ends in `.webm`),
+//! streaming: each track holds back one packet, so a packet the input left
+//! without a duration gets the time to the next one of its track.
+//! `bench/against_ffmpeg.sh` times both sides as whole processes under
+//! `/usr/bin/time -l`.
 
 #![allow(clippy::print_stdout)]
 

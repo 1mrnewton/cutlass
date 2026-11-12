@@ -379,6 +379,29 @@ fn dc_row(samples: u64, dc: i32) -> u64 {
     )
 }
 
+/// See [`crate::residual::store`]: row by row.
+pub fn store<const N: usize>(
+    plane: &mut [u8],
+    at: usize,
+    down: usize,
+    rows: &[[u8; N]; N],
+) -> bool {
+    if down < N
+        || (N.saturating_sub(1))
+            .checked_mul(down)
+            .and_then(|span| span.checked_add(at))
+            .and_then(|start| start.checked_add(N))
+            .is_none_or(|end| end > plane.len())
+    {
+        return false;
+    }
+    for (index, row) in rows.iter().enumerate() {
+        let start = at + index * down;
+        plane[start..start + N].copy_from_slice(row);
+    }
+    true
+}
+
 crate::residual::residual_kernels!(pub,);
 crate::residual::dc_add_rows!(pub,);
 
@@ -622,3 +645,4 @@ pub fn predict_420<'r>(
     };
     (luma, chroma)
 }
+

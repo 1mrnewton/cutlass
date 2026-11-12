@@ -265,6 +265,27 @@ pub(crate) fn dc_add_quads(plane: &mut [u8], at: usize, down: usize, dcs: [i32; 
     true
 }
 
+/// See [`crate::residual::store`]. The rows are found in the plane with
+/// one check, as in [`dc_add`].
+#[target_feature(enable = "neon")]
+pub(crate) fn store<const N: usize>(
+    plane: &mut [u8],
+    at: usize,
+    down: usize,
+    rows: &[[u8; N]; N],
+) -> bool {
+    let Some(window) = plane.get_mut(at..) else {
+        return false;
+    };
+    let Some(out) = crate::neon::rows_of::<N, N>(window, down) else {
+        return false;
+    };
+    for (row, samples) in out.into_iter().zip(rows) {
+        *row = *samples;
+    }
+    true
+}
+
 /// See [`crate::residual::idct4_add`]. The block's rows are found in the
 /// plane with one check, as in [`dc_add`].
 #[target_feature(enable = "neon")]

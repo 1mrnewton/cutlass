@@ -449,6 +449,18 @@ pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
         false
     }
 
+    /// `rows` written over the `N`×`N` samples from `at`, rows `down`
+    /// apart, with the plane checked once. `false` as for
+    /// [`Self::predict_fast`].
+    fn store_fast<const N: usize>(
+        _plane: &mut [Self],
+        _at: usize,
+        _down: usize,
+        _rows: &[[Self; N]; N],
+    ) -> bool {
+        false
+    }
+
     /// `dcs` added to the four 4×4 quarters of the 8×8 samples from `at`,
     /// rows `down` apart, in raster order, with a vector kernel. `false`
     /// as for [`Self::predict_fast`].
@@ -675,6 +687,16 @@ impl Sample for u8 {
 
     fn add_dc_quads_fast(plane: &mut [Self], at: usize, down: usize, dcs: [i32; 4]) -> bool {
         cutlass_h264_kernels::residual::dc_add_quads(plane, at, down, dcs)
+    }
+
+    #[inline(always)]
+    fn store_fast<const N: usize>(
+        plane: &mut [Self],
+        at: usize,
+        down: usize,
+        rows: &[[Self; N]; N],
+    ) -> bool {
+        cutlass_h264_kernels::residual::store(plane, at, down, rows)
     }
 
     fn mix_fast(

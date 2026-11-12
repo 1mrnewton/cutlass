@@ -40,6 +40,20 @@ pub fn dc_add_quads(plane: &mut [u8], at: usize, down: usize, dcs: [i32; 4]) -> 
     kernel!(dc_add_quads(plane, at, down, dcs))
 }
 
+/// Writes `rows` over the `N`×`N` samples of `plane` whose first is at
+/// `at`, with rows `down` apart: a prediction put in place before its
+/// residual is added. `false` means the samples are not all in the plane,
+/// or the rows overlap, and nothing was done.
+#[inline]
+pub fn store<const N: usize>(
+    plane: &mut [u8],
+    at: usize,
+    down: usize,
+    rows: &[[u8; N]; N],
+) -> bool {
+    kernel!(store(plane, at, down, rows))
+}
+
 /// The plane reads and writes around whichever `idct4_rows` is in scope: it
 /// takes the block and the four rows of four samples, and gives the rows
 /// back with the residual added.
@@ -186,6 +200,56 @@ mod tests {
             } else {
                 assert_eq!(fast, before);
             }
+        }
+    }
+
+    #[test]
+    fn the_store_matches_the_plain_one() {
+        let mut rng = Lcg(17);
+        for round in 0..20_000u32 {
+            let down = 3 + (rng.next() % 20) as usize;
+            let before: Vec<u8> = (0..down * 18).map(|_| rng.next() as u8).collect();
+            let at = (rng.next() as usize) % (down * 6);
+            let check = |n: usize, done: bool, wanted: bool, fast: &[u8], plain: &[u8]| {
+                assert_eq!(done, wanted, "round {round} size {n}");
+                assert_eq!(fast, plain, "round {round} size {n}");
+                if !done {
+                    assert_eq!(fast, &before[..]);
+                }
+            };
+            let four: [[u8; 4]; 4] =
+                core::array::from_fn(|_| core::array::from_fn(|_| rng.next() as u8));
+            let (mut fast, mut plain) = (before.clone(), before.clone());
+            let done = super::store(&mut fast, at, down, &four);
+            check(
+                4,
+                done,
+                scalar::store(&mut plain, at, down, &four),
+                &fast,
+                &plain,
+            );
+            let eight: [[u8; 8]; 8] =
+                core::array::from_fn(|_| core::array::from_fn(|_| rng.next() as u8));
+            let (mut fast, mut plain) = (before.clone(), before.clone());
+            let done = super::store(&mut fast, at, down, &eight);
+            check(
+                8,
+                done,
+                scalar::store(&mut plain, at, down, &eight),
+                &fast,
+                &plain,
+            );
+            let sixteen: [[u8; 16]; 16] =
+                core::array::from_fn(|_| core::array::from_fn(|_| rng.next() as u8));
+            let (mut fast, mut plain) = (before.clone(), before.clone());
+            let done = super::store(&mut fast, at, down, &sixteen);
+            check(
+                16,
+                done,
+                scalar::store(&mut plain, at, down, &sixteen),
+                &fast,
+                &plain,
+            );
         }
     }
 

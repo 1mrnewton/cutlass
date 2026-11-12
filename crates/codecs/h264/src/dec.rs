@@ -4870,10 +4870,35 @@ fn put_block<S: Sample>(
     if n == 0 {
         return;
     }
+    let (at, down) = (y * stride + x, stride * step);
+    let stored = match n {
+        4 => store_rows::<S, 4>(plane, at, down, src),
+        8 => store_rows::<S, 8>(plane, at, down, src),
+        16 => store_rows::<S, 16>(plane, at, down, src),
+        _ => false,
+    };
+    if stored {
+        return;
+    }
     for (row, samples) in src.chunks_exact(n).take(n).enumerate() {
         let at = (y + row * step) * stride + x;
         plane[at..at + n].copy_from_slice(samples);
     }
+}
+
+/// The first `N` rows of `N` samples of `src` written over `plane` from
+/// `at`, rows `down` apart, by [`Sample::store_fast`].
+#[inline(always)]
+fn store_rows<S: Sample, const N: usize>(
+    plane: &mut [S],
+    at: usize,
+    down: usize,
+    src: &[S],
+) -> bool {
+    src.as_chunks::<N>()
+        .0
+        .first_chunk::<N>()
+        .is_some_and(|rows| S::store_fast(plane, at, down, rows))
 }
 
 /// One slice of a picture, held so any thread can decode it.

@@ -41,7 +41,7 @@ pub(crate) use crate::neon_pel::{
     chroma_block, chroma_pair, chroma_planes, luma_block, luma_pair, predict_420,
 };
 pub(crate) use crate::neon_qpel::{avg_block, scale_block, weight_block, weight_onto};
-pub(crate) use crate::neon_residual::{dc_add, dc_add_quads, idct4_add, idct8_add};
+pub(crate) use crate::neon_residual::{dc_add, dc_add_quads, idct4_add, idct8_add, store};
 
 /// A vector of the 16 samples in `bytes`.
 #[inline]

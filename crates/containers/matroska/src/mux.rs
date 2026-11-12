@@ -490,12 +490,11 @@ impl<W: Write + Seek> MatroskaMux<W> {
             let Some(index) = self.earliest() else {
                 return Ok(());
             };
-            // The end of a padded track waits for finish, unless holding it
-            // would keep too much.
-            let tail = self.tracks[index]
-                .queue
-                .front()
-                .is_some_and(|held| held.tail);
+            // The end of a padded track waits for finish, unless the packets
+            // after it already take all the padding or holding it would keep
+            // too much.
+            let track = &self.tracks[index];
+            let tail = track.queue.front().is_some_and(|held| held.tail) && !tail_covered(track);
             if !force && tail && self.held < MAX_HELD_BEFORE_HEADER {
                 return Ok(());
             }
@@ -807,6 +806,31 @@ impl<W: Write + Seek> MatroskaMux<W> {
         put_master(&mut out, ids::CUES, &body);
         out
     }
+}
+
+/// Whether the packets queued after a track's first take all of its end
+/// padding, so the first can be written: for Opus the last packet takes it
+/// all, and otherwise it comes off the last packets' samples, a packet of
+/// unknown length taking what is left.
+fn tail_covered(track: &Track) -> bool {
+    if track.codec == CodecId::Opus {
+        return track.queue.len() > 1;
+    }
+    let rate = i128::from(track.params.sample_rate().unwrap_or(0));
+    let timescale = i128::from(track.timescale.ticks_per_second().max(1));
+    let need = i128::from(track.end_padding);
+    let mut have = 0_i128;
+    for held in track.queue.iter().skip(1) {
+        let duration = i128::from(held.packet.timestamp().duration().unwrap_or(0).max(0));
+        if duration == 0 {
+            return true;
+        }
+        have += duration * rate / timescale;
+        if have >= need {
+            return true;
+        }
+    }
+    false
 }
 
 /// Shares a track's end padding out over its held last packets, the last

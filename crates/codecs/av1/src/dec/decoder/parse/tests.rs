@@ -7,7 +7,7 @@ use super::super::super::mvpred::MfEntry;
 use super::super::super::tile::ReconLog;
 use super::super::super::types::Mv;
 use super::super::{MfClose, MfShared, Rect, RowMsg};
-use super::{RowEnd, Sink};
+use super::{RowEnd, Sink, Whole};
 
 /// A log told apart by the number of its coefficients.
 fn log(tag: usize) -> ReconLog {
@@ -34,19 +34,46 @@ fn end(r0: usize, r1: usize, w8: usize, refs: i8) -> RowEnd {
     }
 }
 
+/// A [`Sink`] whose rows made whole save their motion in `data`, as the
+/// parser that ends them does.
+struct Saving<'a> {
+    s: Sink<'a>,
+    data: Option<&'a RefData>,
+}
+
+impl<'a> std::ops::Deref for Saving<'a> {
+    type Target = Sink<'a>;
+    fn deref(&self) -> &Sink<'a> {
+        &self.s
+    }
+}
+
+impl Saving<'_> {
+    fn push(&mut self, col: usize, r0: usize, logs: &mut Vec<ReconLog>, end: Option<RowEnd>) {
+        let mut whole: Vec<Whole> = Vec::new();
+        self.s.push(col, r0, logs, end, &mut whole);
+        for w in whole {
+            if let Some(rd) = self.data {
+                w.save(rd);
+            }
+        }
+    }
+}
+
 fn sink<'a>(
     tx: &'a std::sync::mpsc::Sender<(Option<RowMsg>, ReconLog)>,
     cols: usize,
     data: Option<&'a RefData>,
-) -> Sink<'a> {
-    Sink {
-        tx,
-        cols,
-        next: 0,
-        held: BTreeMap::new(),
+) -> Saving<'a> {
+    Saving {
+        s: Sink {
+            tx,
+            cols,
+            next: 0,
+            held: BTreeMap::new(),
+            segs: Vec::new(),
+        },
         data,
-        seg: Vec::new(),
-        seg_stride: 1,
     }
 }
 
@@ -132,6 +159,17 @@ fn a_whole_row_saves_its_motion_column_beside_column() {
     for row in band.refs.chunks(4) {
         assert_eq!(row, [5, 7, 7, 7]);
     }
+    assert_eq!(band.mvs.len(), 8 * 4);
+}
+
+#[test]
+fn a_lone_column_saves_its_bands_as_they_are() {
+    let rd = RefData::new(8, 16, 1, [0; 8]);
+    let (tx, _rx) = channel();
+    let mut s = sink(&tx, 1, Some(&rd));
+    s.push(0, 0, &mut vec![log(1)], Some(end(0, 16, 4, 6)));
+    let band = rd.band(0).expect("band");
+    assert_eq!(band.refs, [6; 8 * 4]);
     assert_eq!(band.mvs.len(), 8 * 4);
 }
 

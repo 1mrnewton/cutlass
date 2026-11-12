@@ -45,24 +45,72 @@ struct Held {
 
 /// Collects the parts of superblock rows the tile parsers finish, in any
 /// order, and sends each row on once every tile column has ended it and
-/// the rows above have gone: its logs to reconstruction column by column,
-/// its saved motion to the frames that project it.
+/// the rows above have gone: its logs to reconstruction column by column.
+/// Its saved motion goes to the frames that project it, and its segment
+/// ids to the frame's, outside the lock (see [`Whole`]).
 struct Sink<'a> {
     tx: &'a Sender<(Option<RowMsg>, ReconLog)>,
     cols: usize,
     /// First luma 4x4 row not sent yet.
     next: usize,
     held: BTreeMap<usize, Vec<Held>>,
-    data: Option<&'a RefData>,
-    /// The frame's segment ids, gathered for `data`.
-    seg: Vec<u8>,
-    seg_stride: usize,
+    /// The segment ids of the rows sent, in the parts of the tiles.
+    segs: Vec<Rect<u8>>,
+}
+
+/// The saved motion of the bands of a superblock row every tile column
+/// has ended, starting at luma 4x4 row `r0`, a part for each column: put
+/// together by the thread that ended the row once it let the [`Sink`]
+/// go, so that the other parsers do not wait for the copies.
+struct Whole {
+    r0: usize,
+    motion: Vec<Vec<MfBand>>,
+}
+
+impl Whole {
+    /// Saves the bands of the row in `rd`.
+    fn save(mut self, rd: &RefData) {
+        let k0 = self.r0 / (2 * MF_BAND_ROWS);
+        let n = self.motion.iter().map(Vec::len).min().unwrap_or(0);
+        if let [part] = &mut self.motion[..] {
+            // One tile column: its bands are the rows' already.
+            for (b, band) in part.drain(..n).enumerate() {
+                rd.set_band(k0 + b, band);
+            }
+            return;
+        }
+        for b in 0..n {
+            let rows = rd.band_rows(k0 + b);
+            let mut band = MfBand::default();
+            let n: usize = self.motion.iter().map(|part| part[b].refs.len()).sum();
+            band.refs.reserve_exact(n);
+            band.mvs
+                .reserve_exact(self.motion.iter().map(|part| part[b].mvs.len()).sum());
+            for y in 0..rows {
+                for part in &self.motion {
+                    let w = part[b].refs.len() / rows.max(1);
+                    band.refs
+                        .extend_from_slice(&part[b].refs[y * w..(y + 1) * w]);
+                    band.mvs.extend_from_slice(&part[b].mvs[y * w..(y + 1) * w]);
+                }
+            }
+            rd.set_band(k0 + b, band);
+        }
+    }
 }
 
 impl Sink<'_> {
     /// Takes logs of tile column `col` in the row starting at luma 4x4
     /// row `r0`, and the row's end when they are the tile's last there.
-    fn push(&mut self, col: usize, r0: usize, logs: &mut Vec<ReconLog>, end: Option<RowEnd>) {
+    /// The rows this makes whole go to `whole`.
+    fn push(
+        &mut self,
+        col: usize,
+        r0: usize,
+        logs: &mut Vec<ReconLog>,
+        end: Option<RowEnd>,
+        whole: &mut Vec<Whole>,
+    ) {
         if self.cols == 1 && end.is_none() && r0 == self.next {
             // Nothing to wait for: reconstruction starts on the row
             // while its tile is still parsing it.
@@ -82,12 +130,12 @@ impl Sink<'_> {
         h.logs.append(logs);
         if end.is_some() {
             h.end = end;
-            self.flush();
+            self.flush(whole);
         }
     }
 
     /// Sends every whole row from `next` on.
-    fn flush(&mut self) {
+    fn flush(&mut self, out: &mut Vec<Whole>) {
         loop {
             let whole = self
                 .held
@@ -113,7 +161,7 @@ impl Sink<'_> {
                 };
                 self.next = msg.r1;
                 msg.row_end = c == last_col;
-                seg.put(&mut self.seg, self.seg_stride);
+                self.segs.push(seg);
                 motion.push(m);
                 // A send only fails once reconstruction stopped (it
                 // failed): the job reports that.
@@ -124,27 +172,7 @@ impl Sink<'_> {
                     let _ = self.tx.send((m, log));
                 }
             }
-            if let Some(rd) = self.data {
-                let k0 = r0 / (2 * MF_BAND_ROWS);
-                let n = motion.iter().map(Vec::len).min().unwrap_or(0);
-                for b in 0..n {
-                    let rows = rd.band_rows(k0 + b);
-                    let mut band = MfBand::default();
-                    let n: usize = motion.iter().map(|part| part[b].refs.len()).sum();
-                    band.refs.reserve_exact(n);
-                    band.mvs
-                        .reserve_exact(motion.iter().map(|part| part[b].mvs.len()).sum());
-                    for y in 0..rows {
-                        for part in &motion {
-                            let w = part[b].refs.len() / rows.max(1);
-                            band.refs
-                                .extend_from_slice(&part[b].refs[y * w..(y + 1) * w]);
-                            band.mvs.extend_from_slice(&part[b].mvs[y * w..(y + 1) * w]);
-                        }
-                    }
-                    rd.set_band(k0 + b, band);
-                }
-            }
+            out.push(Whole { r0, motion });
         }
     }
 }
@@ -308,16 +336,7 @@ pub(super) fn parse_tiles<P: PicturePixel>(
         cols: hdr.tile_info.cols.max(1),
         next: 0,
         held: BTreeMap::new(),
-        data: out.data,
-        seg: vec![
-            0;
-            if out.data.is_some() {
-                fs.segment_ids.len()
-            } else {
-                0
-            }
-        ],
-        seg_stride: fs.mi_stride,
+        segs: Vec::new(),
     });
     // The tiles in the order they are taken: the context tile first.
     let mut order: Vec<usize> = (0..tiles.len()).collect();
@@ -347,6 +366,7 @@ pub(super) fn parse_tiles<P: PicturePixel>(
             have: 0,
         });
         let mut stash = Stash::default();
+        let mut whole = Vec::new();
         let mut done = Vec::new();
         loop {
             let Some(&i) = order.get(next.fetch_add(1, Ordering::Relaxed)) else {
@@ -395,7 +415,12 @@ pub(super) fn parse_tiles<P: PicturePixel>(
                         let msg = stash.msg(rows);
                         row_end(seq, hdr, fs, &col, r0, r1, msg, out.data.is_some())
                     });
-                    lock(&sink).push(col.index, r0, &mut stash.pending, end);
+                    lock(&sink).push(col.index, r0, &mut stash.pending, end, &mut whole);
+                    for w in whole.drain(..) {
+                        if let Some(rd) = out.data {
+                            w.save(rd);
+                        }
+                    }
                 },
             );
             match &res {
@@ -444,7 +469,7 @@ pub(super) fn parse_tiles<P: PicturePixel>(
         };
         (mine, theirs)
     });
-    let seg = std::mem::take(&mut lock(&sink).seg);
+    let segs = std::mem::take(&mut lock(&sink).segs);
     let mut first_err: Option<(usize, CodecError)> = None;
     let mut saved = None;
     for done in std::iter::once(Some(mine)).chain(theirs) {
@@ -472,6 +497,10 @@ pub(super) fn parse_tiles<P: PicturePixel>(
         return Err(e);
     }
     if let Some(rd) = out.data {
+        let mut seg = vec![0; fs.segment_ids.len()];
+        for s in &segs {
+            s.put(&mut seg, fs.mi_stride);
+        }
         rd.set_segment_ids(seg);
     }
     Ok(saved.unwrap_or_else(|| Box::new(cdf.clone())))

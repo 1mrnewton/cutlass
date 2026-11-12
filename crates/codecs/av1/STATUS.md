@@ -450,6 +450,27 @@ deblocked picture in place: CDEF keeps the pre-CDEF rows next to each
 boundary (as libdav1d does), so no stage copies the picture. Deblocking
 and the 8-bit Wiener filter run on 16-bit lanes.
 
+On two 4K 8-bit clips of 240 frames (one with CDEF, one deblocking only)
+on a 6 performance + 12 efficiency core machine, single threaded the
+decoder takes 12.7G and 9.6G cycles against libdav1d's 11.0G and 8.2G
+(through FFmpeg). With 18 threads it takes 0.41 s and 0.36 s against
+0.31 s and 0.31 s; both keep about 13 cores busy, so the gap is processor
+time (5.3 s against 4.1 s), and up to 6 threads it is faster (0.49 s
+against 0.61 s at 6). Of the threaded processor time about 9% is copies:
+the bands published for frames still reading a reference (each holds
+80 rows above the 64 it adds, so a block's rows lie in one band) and the
+reconstructed rows handed to the filter thread. Tried and dropped there:
+bands with less overlap (blocks across a band edge then gather their own
+copy of the reference rows, which costs more than the overlap; warped
+blocks read across bands by row made no difference), publishing fewer,
+taller bands (less processor time, more wall time: later frames wait
+longer), saving the motion field bands per superblock row on one thread
+(the reads were not cache misses), a branch free motion field band
+selection and CDEF direction choice (fewer instructions, no fewer
+cycles), and taking the vertical deblocking edges off the filter thread
+(skipping them altogether moved the 18-thread time by only as much as
+their processor time).
+
 ## Encoder
 
 ### Coverage

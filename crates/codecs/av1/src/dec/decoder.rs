@@ -467,6 +467,9 @@ struct JobState {
     /// Whether a frame reads the rows as they become final (else they
     /// are not published).
     watched: bool,
+    /// Luma rows a reader asked for so far, with some to spare: rows
+    /// below are published only once one is asked for.
+    want: usize,
 }
 
 /// The picture of a frame whose reconstruction and in-loop filters may
@@ -484,6 +487,7 @@ impl FrameJob {
                 bands: Vec::new(),
                 rows: 0,
                 watched: false,
+                want: 0,
             }),
             cv: Condvar::new(),
         })
@@ -524,8 +528,9 @@ impl FrameJob {
     }
 
     /// Whether the rows are to be published.
-    fn watched(&self) -> bool {
-        lock(&self.state).watched
+    fn watched(&self, published: usize) -> bool {
+        let s = lock(&self.state);
+        s.watched && s.want > published
     }
 
     /// The result, or `None` after asking for the rows to be published.
@@ -658,6 +663,10 @@ struct RefFill {
     whole: bool,
 }
 
+/// Luma rows past those it needs that a reader asks a reference for, so
+/// that they are published before it waits for them.
+const WANT_AHEAD: usize = 512;
+
 impl RefFill {
     /// Waits until the reference has its luma rows `0..need` final (all
     /// of it for `usize::MAX`) and adds their bands to `m`. Once the
@@ -675,6 +684,7 @@ impl RefFill {
         let t = std::time::Instant::now();
         let (bands, fin) = {
             let mut s = lock(&self.job.state);
+            s.want = s.want.max(need.saturating_add(WANT_AHEAD));
             while s.result.is_none() && s.rows < need {
                 s = self.job.cv.wait(s).unwrap_or_else(PoisonError::into_inner);
             }
@@ -3261,7 +3271,7 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
             let done = 4 * ready;
             if let Some(job) = self.publish
                 && done > self.published
-                && job.watched()
+                && job.watched(self.published)
             {
                 let tc = std::time::Instant::now();
                 let bufs = lock(self.spares).bands.pop().unwrap_or_else(|| {

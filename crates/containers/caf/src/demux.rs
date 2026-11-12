@@ -209,6 +209,12 @@ impl<R: Read + Seek> CafDemux<R> {
             return self.read_unbounded();
         }
         let count = self.packets.count();
+        // An entry of no bytes and no frames carries nothing: ffmpeg ends
+        // its FLAC tables with one, which libavformat stops at and
+        // AudioToolbox counts. It is skipped, not handed to a decoder.
+        while self.next < count && self.packets.entry(self.next) == (0, 0) {
+            self.next += 1;
+        }
         if self.next >= count {
             return Ok(None);
         }

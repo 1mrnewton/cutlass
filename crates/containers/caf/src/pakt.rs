@@ -327,9 +327,6 @@ impl Table {
         if u64::from(bytes) > limits.max_packet_bytes {
             return Err(hostile(u64::from(bytes), limits.max_packet_bytes));
         }
-        if frames == 0 {
-            return Err(malformed("a pakt entry has no frames"));
-        }
         if frames > MAX_FRAMES_PER_PACKET {
             return Err(hostile(u64::from(frames), u64::from(MAX_FRAMES_PER_PACKET)));
         }

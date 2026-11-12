@@ -235,13 +235,44 @@ fn packet_sizes_beyond_the_data_or_the_packet_limit_are_refused() {
         refused(&aac_with_pakt(table, &[0; 4])),
         OpenError::HostileSize { .. }
     ));
-    // Zero frames in a pair is refused rather than looping on one time.
+}
+
+#[test]
+fn entries_of_zero_frames_are_read_and_empty_ones_skipped() {
+    // ffmpeg ends a FLAC table with an entry of no bytes and no frames.
     let bytes = file(&[
         chunk(b"desc", &desc_body(44_100.0, b"flac", 0, 0, 0, 2, 0)),
-        chunk(b"pakt", &pakt_body(2, 10, 0, 0, &[1, 0, 1, 10])),
-        chunk(b"data", &data_body(&[0; 2])),
+        chunk(
+            b"pakt",
+            &pakt_body(5, 20, 0, 0, &[1, 0, 2, 10, 0, 0, 3, 10, 0, 0]),
+        ),
+        chunk(b"data", &data_body(&payload_of(&[1, 2, 0, 3]))),
     ]);
-    assert!(open(&bytes).is_err());
+    let mut demux = open(&bytes).expect("open");
+    assert_eq!(demux.packet_count(), Some(5));
+    let mut seen = Vec::new();
+    while let Some(packet) = demux.read_packet().expect("read") {
+        seen.push((
+            packet.bytes().len(),
+            packet.timestamp().presentation().expect("pts"),
+            packet.timestamp().duration().expect("duration"),
+        ));
+    }
+    assert_eq!(seen, [(1, 0, 0), (2, 0, 10), (3, 10, 10)]);
+    for (time, ordinal) in [(0, 1), (5, 1), (10, 3), (19, 3)] {
+        let landing = demux
+            .seek(SeekTo {
+                track: 0,
+                time,
+                end: None,
+            })
+            .expect("seek");
+        assert!(
+            matches!(landing.landing, cutlass_container::Landing::Packet { ordinal: got, .. } if got == ordinal),
+            "{time}: {landing:?}"
+        );
+    }
+    drain(&bytes);
 }
 
 #[test]

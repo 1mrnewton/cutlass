@@ -21,13 +21,17 @@
 //! [`MAX_SEEK_PROBES`] probes of up to [`MAX_PROBE_WINDOW_BYTES`] each, to a
 //! byte position whose first timestamp is not past the target.
 //!
-//! For a picture stream (H.264, HEVC, MPEG-2, MPEG-4 Part 2) it then reads transport
-//! headers only, back from there in doubling windows (at most
+//! For a picture stream (H.264, HEVC, MPEG-2, MPEG-4 Part 2) it then reads
+//! transport headers only, back from there in doubling windows (at most
 //! [`MAX_RANDOM_ACCESS_SCAN_BYTES`]), for the last PES packet of the stream
 //! that a muxer marked with the random access indicator and that is shown
 //! by the target. It frames that one access unit and, when it is a
-//! keyframe, lands there; the preroll is the PES packets from it shown
-//! before the target, counted from their headers.
+//! keyframe, walks the stream's PES packets from there to the target,
+//! reading each one's header and only as much payload as names its first
+//! picture (at most 64 KiB): a later keyframe the muxer left unmarked (an
+//! MP4 sync-sample table may list fewer than the bitstream holds) moves
+//! the landing to it. The preroll is the PES packets from the landing
+//! shown before the target.
 //!
 //! Otherwise (an audio stream, no mark, or a mark on a picture that is not
 //! a keyframe: the indicator is only a hint) it frames the stream forward

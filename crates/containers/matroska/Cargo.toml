@@ -4,9 +4,10 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "Demux and mux for matroska."
+description = "Demux and mux for Matroska and WebM."
 
 [dependencies]
+cutlass-codec = { path = "../../codec", version = "0.1.0" }
 cutlass-container = { path = "../../container", version = "0.1.0" }
 
 [lints]

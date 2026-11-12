@@ -715,11 +715,12 @@ pub enum MiFill {
     /// Its bottom row and right column (a neighbour's above or left of
     /// them) and its first: what later blocks of reconstruction read.
     Edges,
-    /// Those of [`Self::Edges`] and its odd rows: what parsing reads
-    /// besides (the outer row and column scans of the motion vector
-    /// search read odd rows and odd columns, by steps of 2 or more rows),
-    /// the motion field (odd rows and columns) and the loop filter's
-    /// levels (a block's first unit, or the odd row below it).
+    /// Those of [`Self::Edges`] and, of its odd rows, the first and the
+    /// odd columns: what parsing reads besides (the outer row and column
+    /// scans of the motion vector search read odd rows and odd columns,
+    /// by steps of 2 or more), the motion field (odd rows and columns)
+    /// and the loop filter's levels (a block's first unit, or the one of
+    /// the odd row below it).
     OddRows,
 }
 
@@ -867,23 +868,28 @@ fn fill_edges<T: Copy>(d: &mut [T], stride: usize, at: usize, w: usize, h: usize
     }
 }
 
-/// [`fill_edges`] and the odd rows of the `w` x `h` rectangle at `at`,
-/// a block's: one taller than a unit starts at an even row.
+/// [`fill_edges`] and, of the odd rows of the `w` x `h` rectangle at
+/// `at`, a block's, the first and the odd columns: one taller or wider
+/// than a unit starts at an even row or column.
 #[inline(always)]
 fn fill_odd_rows<T: Copy>(d: &mut [T], stride: usize, at: usize, w: usize, h: usize, v: T) {
     if h <= 2 || w == 0 {
         return fill_rect(d, stride, at, w, h, v);
     }
     d[at] = v;
-    for y in 0..h {
-        let row = at + y * stride;
-        if y % 2 == 1 || y == h - 1 {
-            for m in &mut d[row..][..w] {
-                *m = v;
+    for y in 0..h - 1 {
+        let row = &mut d[at + y * stride..][..w];
+        if y % 2 == 1 {
+            row[0] = v;
+            // The odd columns, the last among them.
+            for pair in row.as_chunks_mut::<2>().0 {
+                pair[1] = v;
             }
-        } else {
-            d[row + w - 1] = v;
         }
+        row[w - 1] = v;
+    }
+    for m in &mut d[at + (h - 1) * stride..][..w] {
+        *m = v;
     }
 }
 

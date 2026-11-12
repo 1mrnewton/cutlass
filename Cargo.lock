@@ -2540,7 +2540,9 @@ dependencies = [
 name = "cutlass-avi"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
  "cutlass-container",
+ "cutlass-riff",
 ]
 
 [[package]]

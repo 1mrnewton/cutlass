@@ -1027,6 +1027,14 @@ fn skip_mb<S: Sample>(
 ) -> Result<(), CodecError> {
     let mbaff = slice.sps.mbaff && !pic.field;
     let (mx, my) = locate(pic, addr, mbaff);
+    if super::syntax_kind(slice.kind) == 0
+        && !slice.vsp
+        && !slice.dmvp
+        && slice.kind != 3
+        && !field_mb
+    {
+        return p_skip_in_place(pic, dpb, slice, (slice_id, mx, my), qp);
+    }
     let mut mb = Mb::new(slice_id);
     mb.field_mb = field_mb;
     mb.skip = true;
@@ -1082,6 +1090,46 @@ fn skip_mb<S: Sample>(
     let held = &mut pic.mb[slot];
     *held = mb;
     Ok(())
+}
+
+/// [`skip_mb`] for a frame macroblock of a plain P slice. Its record is
+/// written in its place, not made aside and copied there: what a skipped
+/// macroblock holds is a few fields, and copying a whole record is a good
+/// part of what skipping one costs.
+fn p_skip_in_place<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    (slice_id, mx, my): (u16, usize, usize),
+    qp: i32,
+) -> Result<(), CodecError> {
+    let slot = my * pic.mb_w + mx;
+    let Some(held) = pic.mb.get_mut(slot) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "macroblock address",
+        });
+    };
+    *held = Mb::new(slice_id);
+    held.skip = true;
+    held.qp = qp as i8;
+    held.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
+    held.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
+    held.off_a = slice.off_a as i8;
+    held.off_b = slice.off_b as i8;
+    held.deblock = slice.deblock;
+    let mv = p_skip_mv(pic, mx, my, &pic.mb[slot]);
+    let held = &mut pic.mb[slot];
+    held.ref0 = [0; 4];
+    held.mv0 = [mv; 16];
+    bind_refs(held, slice);
+    // Prediction reads the macroblock's motion and the reference pictures,
+    // never the picture's records, which step aside while it writes the
+    // picture's samples.
+    let records = std::mem::take(&mut pic.mb);
+    let predicted = predict_inter(pic, dpb, slice, (mx, my, true), &records[slot]);
+    pic.mb = records;
+    predicted
 }
 
 /// J.7.3.4.1. `mb_skip_type_flag` is present when a skip run has an interview reference.

@@ -698,6 +698,17 @@ pub fn filter_intra<P: Pixel>(
     bd: u32,
 ) {
     let taps = &INTRA_FILTER_TAPS[mode as usize];
+    if cutlass_simd::ACCELERATED
+        && w <= 32
+        && h <= 32
+        && let Some(d) = P::bytes_mut(dst)
+        && let (Some(a), Some(l)) = (
+            P::bytes(&above[EDGE_OFF - 1..=EDGE_OFF + w]),
+            P::bytes(&left[EDGE_OFF..EDGE_OFF + h]),
+        )
+    {
+        return cutlass_simd::av1::ipred::filter_intra(d, stride, w, h, taps, a, l);
+    }
     let mut t = [[0i32; 7]; 8];
     for k in 0..8 {
         for m in 0..7 {

@@ -612,7 +612,7 @@ fn deblock_next_row<S: Sample>(pic: &mut Frame<S>, writer: &mut super::Writer<S>
         kept.clear();
         kept.extend_from_slice(&plane[at..at + len]);
     }
-    deblock_rows(pic, row..row + 1);
+    deblock_rows_after(pic, row..row + 1, &mut writer.above);
     swap_last_line(pic, row, &mut writer.edge);
     writer.deblocked = row + 1;
 }
@@ -11868,13 +11868,24 @@ pub(crate) fn deblock<S: Sample>(pic: &mut Frame<S>) {
 /// are decoded, each once the row below it is decoded too: intra prediction
 /// of that row reads this one unfiltered.
 pub(crate) fn deblock_rows<S: Sample>(pic: &mut Frame<S>, rows: std::ops::Range<usize>) {
+    deblock_rows_after(pic, rows, &mut Vec::new());
+}
+
+/// [`deblock_rows`] given what the row above them left in `above` about
+/// each of its macroblocks, which they leave there in turn: empty, or
+/// all `None`, when nothing above was deblocked.
+fn deblock_rows_after<S: Sample>(
+    pic: &mut Frame<S>,
+    rows: std::ops::Range<usize>,
+    above: &mut Vec<Option<(u16, bool)>>,
+) {
     let chroma = pic.chroma();
     // The planes leave the picture for the pass, so each is borrowed for
     // writing once and the macroblocks stay readable beside them.
     let mut y = std::mem::take(&mut pic.y);
     let mut u = std::mem::take(&mut pic.u);
     let mut v = std::mem::take(&mut pic.v);
-    deblock_planes(pic, chroma, (&mut y, &mut u, &mut v), rows);
+    deblock_planes(pic, chroma, (&mut y, &mut u, &mut v), rows, above);
     pic.y = y;
     pic.u = u;
     pic.v = v;
@@ -11892,6 +11903,7 @@ fn deblock_planes<S: Sample>(
     chroma: u8,
     planes: (&mut [S], &mut [S], &mut [S]),
     rows: std::ops::Range<usize>,
+    above: &mut Vec<Option<(u16, bool)>>,
 ) {
     if pic.mbaff {
         // Pairs of two kinds meet along edges this loop does not know.
@@ -11903,7 +11915,7 @@ fn deblock_planes<S: Sample>(
     let mb_h = pic.h / 16;
     // What each macroblock's edges need to know about it, kept for the
     // macroblock to its right and the one below, so it is worked out once.
-    let mut above: Vec<Option<(u16, bool)>> = vec![None; mb_w];
+    above.resize(mb_w, None);
     let mut left: Option<(u16, bool)> = None;
     // The thresholds inside the last macroblock that had any, which the
     // next one most often shares.

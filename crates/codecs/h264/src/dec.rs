@@ -342,6 +342,9 @@ struct Writer<S> {
     /// that row is decoded the picture holds the line unfiltered and the
     /// filtered one waits here.
     edge: [Vec<S>; 3],
+    /// What the deblocking of the last row worked out about each of its
+    /// macroblocks, which the next row's top edges read.
+    above: Vec<Option<(u16, bool)>>,
 }
 
 /// Output time and the grain blended at emit. `pts` on the frame stays the

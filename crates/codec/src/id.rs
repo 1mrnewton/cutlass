@@ -18,6 +18,9 @@ pub enum CodecId {
     Mpeg4,
     Mpeg2,
     Mjpeg,
+    /// Uncompressed pictures. The stream's extradata says how the samples
+    /// are laid out; for AVI it is the `BITMAPINFOHEADER` the file stores.
+    RawVideo,
     Prores,
     Aac,
     Opus,
@@ -148,6 +151,7 @@ mod tests {
             CodecId::Mpeg4 => "mpeg4",
             CodecId::Mpeg2 => "mpeg2",
             CodecId::Mjpeg => "mjpeg",
+            CodecId::RawVideo => "rawvideo",
             CodecId::Prores => "prores",
             CodecId::Aac => "aac",
             CodecId::Opus => "opus",

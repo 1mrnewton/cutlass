@@ -3,7 +3,7 @@
 //! The channel mask is copied into stream extradata at
 //! [`crate::CHANNEL_MASK_OFFSET`]. This crate does not decode samples.
 
-use cutlass_codec::{CodecId, StreamCodec, UnknownCodec};
+use cutlass_codec::{CodecId, StreamCodec, StreamParams, UnknownCodec};
 use cutlass_container::{MuxError, OpenError};
 
 use crate::bytes::{guid_at, u16_at, u32_at};
@@ -100,6 +100,33 @@ impl WavFormat {
     #[must_use]
     pub const fn samples_per_block(&self) -> Option<u64> {
         self.samples_per_block
+    }
+
+    /// The codec-specific bytes that followed the parsed header: the
+    /// `cbSize` payload, after the extensible fields when the file used
+    /// WAVEFORMATEXTENSIBLE. An AAC AudioSpecificConfig is here.
+    #[must_use]
+    pub fn extra(&self) -> &[u8] {
+        &self.extra
+    }
+
+    /// The description a muxer stores for `params`: the sixteen-byte
+    /// header [`Self::extradata`] wrote, or empty extradata for the
+    /// default layout of that codec.
+    pub fn for_stream(params: &StreamParams) -> Result<Self, MuxError> {
+        let (Some(channels), Some(rate)) = (params.channels(), params.sample_rate()) else {
+            return Err(MuxError::Rejected {
+                message: "a wave format needs a sample rate and a channel count".to_owned(),
+            });
+        };
+        Self::from_extradata(params.extradata(), channels, rate, params.codec())
+            .map_err(FormatError::into_mux)
+    }
+
+    /// The bytes of a `fmt ` chunk, or of an AVI audio `strf`, for this
+    /// description with `avg_bytes` as `nAvgBytesPerSec`.
+    pub fn fmt_bytes(&self, avg_bytes: u32) -> Result<Vec<u8>, MuxError> {
+        self.fmt_payload(avg_bytes).map_err(FormatError::into_mux)
     }
 
     pub(crate) const fn framing(&self) -> Framing {
@@ -261,6 +288,12 @@ impl WavFormat {
         }
         Ok(out)
     }
+}
+
+/// Parses a WAVEFORMAT, WAVEFORMATEX, or WAVEFORMATEXTENSIBLE payload: a
+/// WAV `fmt ` chunk, or the `strf` of an AVI audio stream.
+pub fn parse_wave_format(payload: &[u8]) -> Result<WavFormat, OpenError> {
+    parse_fmt(payload).map_err(FormatError::into_open)
 }
 
 /// Bytes of one `fmt ` payload.
@@ -687,6 +720,41 @@ mod tests {
         fmt.extend_from_slice(&super::AC3_GUID);
         let format = parse_fmt(&fmt).expect("ac3 guid");
         assert_eq!(format.codec(), &StreamCodec::Known(CodecId::Ac3));
+    }
+
+    #[test]
+    fn the_public_parser_keeps_the_extra_bytes_and_writes_them_back() {
+        let mut fmt = pcm_fmt(2, 48_000, 16);
+        fmt[0] = 0xFF;
+        fmt[1] = 0x00;
+        fmt.extend_from_slice(&2u16.to_le_bytes());
+        fmt.extend_from_slice(&[0x11, 0x90]);
+        let format = super::parse_wave_format(&fmt).expect("aac");
+        assert_eq!(format.codec(), &StreamCodec::Known(CodecId::Aac));
+        assert_eq!(format.extra(), &[0x11, 0x90]);
+        assert_eq!(format.fmt_bytes(24_000).expect("bytes")[18..], [0x11, 0x90]);
+        let short = super::parse_wave_format(&[0; 8]).expect_err("short");
+        assert!(matches!(
+            short,
+            cutlass_container::OpenError::Truncated { expected: 14, .. }
+        ));
+    }
+
+    #[test]
+    fn a_stream_without_a_rate_has_no_wave_format() {
+        let params =
+            cutlass_codec::StreamParams::opaque(StreamCodec::Known(CodecId::Pcm), Vec::new());
+        assert!(super::WavFormat::for_stream(&params).is_err());
+        let pcm = cutlass_codec::StreamParams::try_audio(
+            StreamCodec::Known(CodecId::Pcm),
+            44_100,
+            2,
+            Vec::new(),
+        )
+        .expect("pcm");
+        let format = super::WavFormat::for_stream(&pcm).expect("format");
+        assert_eq!(format.block_align(), 4);
+        assert_eq!(format.fmt_bytes(176_400).expect("bytes").len(), 16);
     }
 
     #[test]

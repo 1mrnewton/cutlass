@@ -10,18 +10,19 @@ use cutlass_eval::ReaderFactory;
 use cutlass_isobmff::IsoBmffFile;
 use cutlass_still::{StillDemux, still_limits};
 
-/// The codecs [`crate::register_codecs`] installs, plus ISOBMFF, WAV, AIFF,
-/// CAF, FLAC, Ogg (Opus and Vorbis), MP3, and stills.
+/// The codecs [`crate::register_codecs`] installs, plus ISOBMFF, AVI, WAV,
+/// AIFF, CAF, FLAC, Ogg (Opus and Vorbis), MP3, and stills.
 #[cfg(test)]
 pub(crate) fn installed_readers() -> ReaderFactory {
     readers_with(crate::register_codecs().0)
 }
 
-/// ISOBMFF, WAV, AIFF, CAF, FLAC, Ogg (Opus and Vorbis), MP3, and stills,
+/// ISOBMFF, AVI, WAV, AIFF, CAF, FLAC, Ogg (Opus and Vorbis), MP3, and stills,
 /// decoded with `decoders`.
 pub(crate) fn readers_with(decoders: DecodeFactory) -> ReaderFactory {
     let mut readers = ReaderFactory::new();
     readers.register_container(probe_isobmff, open_isobmff);
+    readers.register_container(cutlass_avi::probe, open_avi);
     readers.register_container(cutlass_riff::probe, open_wav);
     readers.register_container(cutlass_aiff::probe, open_aiff);
     readers.register_container(cutlass_caf::probe, open_caf);
@@ -90,6 +91,19 @@ fn open_isobmff(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
         message: error.to_string(),
     })?;
     Ok(Box::new(IsoBmffFile::open(file)?))
+}
+
+fn open_avi(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let file = File::open(path).map_err(|error| OpenError::Source {
+        message: error.to_string(),
+    })?;
+    let length = file
+        .metadata()
+        .map_err(|error| OpenError::Source {
+            message: error.to_string(),
+        })?
+        .len();
+    Ok(Box::new(cutlass_avi::AviDemux::open(file, length)?))
 }
 
 fn open_wav(path: &Path) -> Result<Box<dyn Demux>, OpenError> {

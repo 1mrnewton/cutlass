@@ -82,6 +82,9 @@ pub fn probe(path: &Path) -> Result<Probed, ProbeError> {
     if let Some(probed) = movie(path, &header)? {
         return Ok(probed);
     }
+    if let Some(probed) = avi(path, &header)? {
+        return Ok(probed);
+    }
     if let Some(probed) = mpeg_audio(path, &header)? {
         return Ok(probed);
     }
@@ -344,6 +347,60 @@ fn movie(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     ))
 }
 
+/// An AVI's first video stream, or its first audio stream, and how long
+/// that stream's chunks last.
+fn avi(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
+    if !matches!(
+        cutlass_avi::probe(header),
+        cutlass_container::ProbeResult::Accept { .. }
+    ) {
+        return Ok(None);
+    }
+    let file = File::open(path).map_err(|error| io_error(path, error))?;
+    let length = file
+        .metadata()
+        .map_err(|error| io_error(path, error))?
+        .len();
+    let demux = cutlass_avi::AviDemux::open(file, length)
+        .map_err(|error| ProbeError::new(format!("avi refused the file: {error}")))?;
+    let streams = cutlass_container::Demux::streams(&demux);
+    let length_of = |stream: &cutlass_container::Stream| {
+        let ticks = demux.duration_ticks(stream.id().get()).unwrap_or(0);
+        ticks_to_micros(
+            u64::try_from(ticks).unwrap_or(0),
+            stream.timescale().ticks_per_second(),
+        )
+    };
+    if let Some(stream) = streams
+        .iter()
+        .find(|stream| stream.params().size().is_some() && !stream.params().codec().is_unknown())
+    {
+        let Some(size) = stream.params().size() else {
+            return Err(ProbeError::new("avi video stream has no frame size"));
+        };
+        let width =
+            i32::try_from(size.width()).map_err(|_| ProbeError::new("the frame is too wide"))?;
+        let height =
+            i32::try_from(size.height()).map_err(|_| ProbeError::new("the frame is too tall"))?;
+        return Ok(Some(Probed::Video {
+            meta: MetaType::Video,
+            width,
+            height,
+            duration: length_of(stream)?,
+        }));
+    }
+    if let Some(stream) = streams.iter().find(|stream| {
+        stream.params().sample_rate().is_some() && !stream.params().codec().is_unknown()
+    }) {
+        return Ok(Some(Probed::Audio {
+            duration: length_of(stream)?,
+        }));
+    }
+    Err(ProbeError::new(
+        "avi opened a file with no video or audio Cutlass reads",
+    ))
+}
+
 fn mpeg_audio(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     match cutlass_mp3_container::probe(header) {
         cutlass_mp3_container::Probe::Matched => {}
@@ -402,9 +459,6 @@ fn unavailable(header: &[u8]) -> Option<&'static str> {
     }
     if header.starts_with(b"caff") {
         return Some("caf is not available");
-    }
-    if header.starts_with(b"RIFF") && header.get(8..12) == Some(b"AVI ") {
-        return Some("avi is not available");
     }
     if header.first() == Some(&0x47) && header.get(188) == Some(&0x47) {
         return Some("mpegts is not available");
@@ -490,6 +544,47 @@ mod tests {
             } => (meta, width, height, duration),
             Probed::Audio { .. } => panic!("{} opened as audio", path.display()),
         }
+    }
+
+    #[test]
+    fn an_avi_movie_probes_as_video_with_its_length() {
+        use cutlass_codec::{
+            CodecId, FrameSize, Packet, StreamCodec, StreamParams, Timescale, Timestamp,
+        };
+        use cutlass_container::{Mux, NewStream, TrackDuration, TrackId};
+        let mut mux = cutlass_avi::AviMux::new(std::io::Cursor::new(Vec::new()));
+        mux.add_stream(NewStream {
+            params: StreamParams::video(
+                StreamCodec::Known(CodecId::Mjpeg),
+                FrameSize::try_new(64, 36).expect("size"),
+                Vec::new(),
+            ),
+            timescale: Timescale::new(25),
+            language: None,
+        })
+        .expect("stream");
+        for frame in 0..50 {
+            let stamp = Timestamp::try_new(Some(frame), Some(frame), Some(1)).expect("time");
+            let packet = Packet::try_new(
+                0,
+                vec![0xFF, 0xD8, 0xFF, 0xD9],
+                stamp,
+                Timescale::new(25),
+                true,
+            )
+            .expect("packet");
+            mux.write_packet(&packet).expect("write");
+        }
+        mux.finish(&[TrackDuration {
+            track: TrackId::new(0),
+            timescale: Timescale::new(25),
+            ticks: 50,
+        }])
+        .expect("finish");
+        let bytes = mux.into_writer().expect("writer").into_inner();
+        let temp = Temp::new();
+        let path = temp.write("clip.avi", &bytes);
+        assert_eq!(picture(&path), (MetaType::Video, 64, 36, 2_000_000));
     }
 
     /// One second of 20 ms Opus packets after a 312-sample pre-skip, in Ogg.

@@ -6,8 +6,16 @@
 //! starts at a positive time and the PCR can run ahead of every DTS. The
 //! PCR rides on the first video stream, or the first stream, at least every
 //! 20 ms of decode time; a PCR-only packet is sent when another stream's
-//! data would leave a longer gap. The PAT and PMT go out first, every
-//! 100 ms of decode time, and before each video keyframe.
+//! data would leave a longer gap, and a run of them (with the tables every
+//! 100 ms) bridges a stretch of decode time with no data at all. The PAT
+//! and PMT go out first, every 100 ms of decode time, and before each
+//! video keyframe.
+//!
+//! Units are held per stream and written in decode-time order across
+//! streams, so a source whose streams arrive seconds apart (as MP4 chunks
+//! may) still gives every PES its PCR lead. A unit leaves once every stream
+//! holds one, or once the held units span 10 s of decode time or 32 MiB;
+//! [`Mux::finish`] writes the rest.
 //!
 //! H.264 and HEVC are written as Annex B byte streams with an access unit
 //! delimiter; packets in length-prefixed form (with an `avcC` or `hvcC`
@@ -50,6 +58,12 @@ const PCR_LEAD: i64 = 63_000;
 const FLUSH_BYTES: usize = 256 * 1024;
 /// The largest ADTS frame.
 const MAX_ADTS_FRAME: usize = 8191;
+/// Held units leave in decode order once they span this much decode time.
+const INTERLEAVE_SPAN: i64 = 900_000;
+/// Held units leave in decode order once they hold this many bytes.
+const INTERLEAVE_BYTES: usize = 32 << 20;
+/// The most PCR-only packets one stretch without data gets: a minute.
+const MAX_BRIDGE_PACKETS: u64 = 3_000;
 
 /// How the stream is written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,6 +122,17 @@ struct Track {
     video: bool,
     continuity: u8,
     last_dts: Option<i64>,
+    /// Units shaped and waiting to be written, in decode order.
+    held: std::collections::VecDeque<Held>,
+}
+
+/// One access unit ready to be written.
+struct Held {
+    dts: i64,
+    pts: i64,
+    bytes: Vec<u8>,
+    keyframe: bool,
+    declared: u64,
 }
 
 /// Writes one program of MPEG-TS or M2TS.
@@ -128,6 +153,8 @@ pub struct TsMux<W: Write> {
     last_time: Option<i64>,
     in_order: bool,
     payload: u64,
+    /// Bytes of all held units.
+    held_bytes: usize,
 }
 
 impl<W: Write> TsMux<W> {
@@ -164,6 +191,7 @@ impl<W: Write> TsMux<W> {
             last_time: None,
             in_order: true,
             payload: 0,
+            held_bytes: 0,
         }
     }
 
@@ -502,6 +530,93 @@ impl<W: Write> TsMux<W> {
                 limit: 0xFFFF - 13,
             });
         }
+        self.tracks[index].last_dts = Some(dts);
+        self.held_bytes = self.held_bytes.saturating_add(bytes.len());
+        self.tracks[index].held.push_back(Held {
+            dts,
+            pts,
+            bytes,
+            keyframe,
+            declared,
+        });
+        self.release(false)
+    }
+
+    /// Writes held units in decode order while one may leave: every stream
+    /// holds one, the held units are too long or too large, or `all`.
+    fn release(&mut self, all: bool) -> Result<(), MuxError> {
+        loop {
+            let mut first: Option<(i64, usize)> = None;
+            let mut every = true;
+            let mut last = i64::MIN;
+            for (index, track) in self.tracks.iter().enumerate() {
+                match (track.held.front(), track.held.back()) {
+                    (Some(front), Some(back)) => {
+                        if first.is_none_or(|(dts, _)| front.dts < dts) {
+                            first = Some((front.dts, index));
+                        }
+                        last = last.max(back.dts);
+                    }
+                    _ => every = false,
+                }
+            }
+            let Some((dts, index)) = first else {
+                return Ok(());
+            };
+            let due = all
+                || every
+                || last - dts >= INTERLEAVE_SPAN
+                || self.held_bytes >= INTERLEAVE_BYTES;
+            if !due {
+                return Ok(());
+            }
+            let Some(unit) = self.tracks[index].held.pop_front() else {
+                return Ok(());
+            };
+            self.held_bytes = self.held_bytes.saturating_sub(unit.bytes.len());
+            self.emit(index, unit)?;
+        }
+    }
+
+    /// Bridges a stretch of decode time with no data before `pcr_now`: a
+    /// PCR-only packet every PCR period and the tables every PSI period.
+    fn bridge(&mut self, pcr_now: u64) {
+        let Some(mut pcr) = self.last_pcr else {
+            return;
+        };
+        let lead = PCR_LEAD.min(self.options.delay);
+        let track = &self.tracks[self.pcr_track()];
+        let pid = track.pid;
+        let continuity = track.continuity.wrapping_sub(1) & 0x0F;
+        let mut count = 0;
+        while pcr_now.saturating_sub(pcr) > 2 * PCR_PERIOD && count < MAX_BRIDGE_PACKETS {
+            pcr += PCR_PERIOD;
+            let dts = i64::try_from(pcr / 300)
+                .unwrap_or(i64::MAX)
+                .saturating_add(lead);
+            if self.last_psi.is_none_or(|last| dts - last >= PSI_PERIOD) {
+                self.clock = pcr;
+                self.write_tables();
+                self.last_psi = Some(dts);
+            }
+            self.write_pcr_only(pid, continuity, pcr);
+            self.last_pcr = Some(pcr);
+            count += 1;
+        }
+    }
+
+    fn emit(&mut self, index: usize, unit: Held) -> Result<(), MuxError> {
+        let Held {
+            dts,
+            pts,
+            bytes,
+            keyframe,
+            declared,
+        } = unit;
+        let video = self.tracks[index].video;
+        let pcr_index = self.pcr_track();
+        let pcr_now = ((dts - PCR_LEAD.min(self.options.delay)).max(0) as u64) * 300;
+        self.bridge(pcr_now);
         let psi_due = !self.started
             || self.last_psi.is_none_or(|last| dts - last >= PSI_PERIOD)
             || video && keyframe;
@@ -510,8 +625,6 @@ impl<W: Write> TsMux<W> {
             self.last_psi = Some(dts);
             self.started = true;
         }
-        let pcr_index = self.pcr_track();
-        let pcr_now = ((dts - PCR_LEAD.min(self.options.delay)).max(0) as u64) * 300;
         let pcr_now = self.last_pcr.map_or(pcr_now, |last| pcr_now.max(last));
         let pcr_due = self
             .last_pcr
@@ -541,7 +654,6 @@ impl<W: Write> TsMux<W> {
         let mut pes = header;
         pes.extend_from_slice(&bytes);
         self.write_pes(index, &pes, pcr, keyframe && (video || index == pcr_index));
-        self.tracks[index].last_dts = Some(dts);
         if self.last_time.is_some_and(|last| dts < last) {
             self.in_order = false;
         }
@@ -561,7 +673,7 @@ impl<W: Write> Mux for TsMux<W> {
 
     fn add_stream(&mut self, stream: NewStream) -> Result<TrackId, MuxError> {
         self.building()?;
-        if self.started {
+        if self.started || self.tracks.iter().any(|track| track.last_dts.is_some()) {
             return Err(self.fail(rejected(
                 "the PMT is already written; add streams before packets".to_owned(),
             )));
@@ -665,6 +777,7 @@ impl<W: Write> Mux for TsMux<W> {
             video,
             continuity: 0,
             last_dts: None,
+            held: std::collections::VecDeque::new(),
         });
         let index = self.tracks.len() - 1;
         if !stream.params.extradata().is_empty()
@@ -686,8 +799,8 @@ impl<W: Write> Mux for TsMux<W> {
             .map_err(|error| self.fail(error))
     }
 
-    /// Packets are written as they arrive. This checks the mux is still
-    /// building and moves nothing.
+    /// Units are written in decode order as they become due; the rest
+    /// wait for [`Mux::finish`]. This checks the mux is still building.
     fn interleave(&mut self) -> Result<(), MuxError> {
         self.building()
     }
@@ -707,6 +820,10 @@ impl<W: Write> Mux for TsMux<W> {
                 });
                 return Err(FailedMux::incomplete(self.payload, error));
             }
+        }
+        if let Err(error) = self.release(true) {
+            let error = self.fail(error);
+            return Err(FailedMux::incomplete(self.payload, error));
         }
         if !self.started && !self.tracks.is_empty() {
             self.write_tables();

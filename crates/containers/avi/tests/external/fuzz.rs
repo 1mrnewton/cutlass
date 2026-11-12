@@ -329,6 +329,7 @@ fn fuzz_mux(rng: &mut Rng) -> bool {
         riff_bytes: [1 << 30, 2_048, 8_192][rng.below(3)],
         super_index_entries: u32::try_from(rng.below(300) + 1).unwrap_or(1),
         header_buffer_bytes: u64::try_from(rng.below(1 << 16) + 1).unwrap_or(1),
+        interleave_bytes: u64::try_from(rng.below(1 << 14)).unwrap_or(0),
     };
     let mut mux = AviMux::with_options(Cursor::new(Vec::new()), options);
     let mut streams = Vec::new();

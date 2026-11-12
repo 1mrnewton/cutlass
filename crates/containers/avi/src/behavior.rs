@@ -1073,3 +1073,64 @@ fn video_times_off_the_frame_grid_land_on_the_nearest_frame() {
     }
     assert_eq!(times[30], 33 * 33, "the pause holds three empty chunks");
 }
+
+/// MJPEG at 25 fps and PCM, every video packet but the first sent before
+/// the audio.
+fn write_runs(interleave_bytes: u64) -> (Vec<u8>, bool) {
+    let options = AviMuxOptions {
+        interleave_bytes,
+        ..AviMuxOptions::default()
+    };
+    let mut mux = AviMux::with_options(Cursor::new(Vec::new()), options);
+    mux.add_stream(video_stream(CodecId::Mjpeg, Vec::new()))
+        .unwrap();
+    mux.add_stream(audio_stream(CodecId::Pcm, 8_000, Vec::new()))
+        .unwrap();
+    // One audio packet first, so the headers go out after eight frames
+    // and the rest of the run waits in the interleave queue.
+    mux.write_packet(&packet(1, vec![1; 400 * 4], 0, 400, 8_000, true))
+        .unwrap();
+    for frame in 0..50i64 {
+        mux.write_packet(&packet(0, jpeg(1), frame * 3_600, 3_600, 90_000, true))
+            .unwrap();
+    }
+    for block in 1..20i64 {
+        mux.write_packet(&packet(1, vec![1; 400 * 4], block * 400, 400, 8_000, true))
+            .unwrap();
+    }
+    let finished = mux
+        .finish(&[
+            duration(0, 90_000, 50 * 3_600),
+            duration(1, 8_000, 20 * 400),
+        ])
+        .expect("finish");
+    (
+        mux.into_writer().unwrap().into_inner(),
+        finished.interleaved(),
+    )
+}
+
+#[test]
+fn the_muxer_puts_streams_sent_in_runs_in_time_order() {
+    let (bytes, interleaved) = write_runs(AviMuxOptions::default().interleave_bytes);
+    assert!(interleaved);
+    let mut demux = open(&bytes).expect("open");
+    assert!(demux.interleaved());
+    // Read in file order, the times of both streams rise together: no
+    // packet is more than a frame behind the latest time read before it.
+    let mut latest = 0i128;
+    for packet in drain(&mut demux) {
+        let scale = i128::from(packet.timescale().ticks_per_second());
+        let time = i128::from(packet.timestamp().decode().unwrap()) * 90_000 / scale;
+        assert!(time + 3_600 >= latest, "{time} after {latest}");
+        latest = latest.max(time);
+    }
+}
+
+#[test]
+fn past_the_interleave_limit_packets_go_out_and_the_file_says_so() {
+    let (bytes, interleaved) = write_runs(50);
+    assert!(!interleaved);
+    let mut demux = open(&bytes).expect("open");
+    assert_eq!(drain(&mut demux).len(), 70);
+}

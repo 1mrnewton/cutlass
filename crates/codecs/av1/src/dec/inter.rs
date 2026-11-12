@@ -10,8 +10,9 @@ use super::obu::TRANSLATION;
 use super::tile::{R, TileDec, ref_rows};
 use super::types::{
     COMPOUND_AVERAGE, COMPOUND_DIFFWTD, COMPOUND_DISTANCE, COMPOUND_INTRA, COMPOUND_WEDGE, DC_PRED,
-    GLOBAL_GLOBALMV, GLOBALMV, H_PRED, INTRA_FRAME, LOCALWARP, Mv, OBMC, SMOOTH_PRED, V_PRED, bh4,
-    block_height, block_width, bw4, mi_height_log2, mi_width_log2, plane_residual_size,
+    GLOBAL_GLOBALMV, GLOBALMV, H_PRED, INTRA_FRAME, LOCALWARP, Mv, OBMC, SIMPLE, SMOOTH_PRED,
+    V_PRED, bh4, block_height, block_width, bw4, mi_height_log2, mi_width_log2,
+    plane_residual_size,
 };
 
 /// Where a block prediction goes.
@@ -79,15 +80,25 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                     }
                 }
             }
+            let mut rows = n4h * 4;
             if some_use_intra {
                 pred_w = n4w * 4;
                 pred_h = n4h * 4;
                 cand_row = self.b.mi_row;
                 cand_col = self.b.mi_col;
+            } else if base_y + pred_h > (self.fs.mi_rows * 4) >> sy && self.height_free() {
+                // Nothing reads the rows below the decoded area: predict
+                // the block down to it, in whole 8-row groups, where the
+                // height changes nothing else of the prediction.
+                let end = (self.fs.mi_rows * 4) >> sy;
+                let h = end.saturating_sub(base_y).next_multiple_of(8).max(8);
+                if h < pred_h && pred_h == rows {
+                    (pred_h, rows) = (h, h);
+                }
             }
             let mut r = 0;
             let mut y = 0;
-            while y < n4h * 4 {
+            while y < rows {
                 let mut c = 0;
                 let mut x = 0;
                 while x < n4w * 4 {
@@ -108,6 +119,18 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             }
         }
         Ok(())
+    }
+
+    /// Whether the rows of the block's inter prediction are independent
+    /// of its height: no overlapped or warped motion, no inter-intra, and
+    /// not a copy of the frame itself.
+    fn height_free(&self) -> bool {
+        let b = &self.b;
+        let global = (b.y_mode == GLOBALMV || b.y_mode == GLOBAL_GLOBALMV)
+            && b.ref_frame
+                .iter()
+                .any(|&rf| rf > INTRA_FRAME && self.hdr.gm_type[rf as usize] > TRANSLATION);
+        b.motion_mode == SIMPLE && !global && !b.use_intrabc && b.ref_frame[1] != INTRA_FRAME
     }
 
     fn predict_inter(
@@ -912,7 +935,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         }
         self.b.motion_mode = LOCALWARP;
         self.warp_estimation();
-        self.b.motion_mode = super::types::SIMPLE;
+        self.b.motion_mode = SIMPLE;
         if !self.b.local_valid || mc::setup_shear(&self.b.local_warp).is_none() {
             return false;
         }
@@ -957,7 +980,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         }
         self.b.motion_mode = OBMC;
         let ok = self.overlapped_mc(0, w, h).is_ok();
-        self.b.motion_mode = super::types::SIMPLE;
+        self.b.motion_mode = SIMPLE;
         if !ok {
             return false;
         }

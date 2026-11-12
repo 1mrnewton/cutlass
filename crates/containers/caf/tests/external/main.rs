@@ -10,6 +10,8 @@
     clippy::unwrap_used
 )]
 
+mod fuzz;
 mod local;
+mod measure;
 mod oracle;
 mod support;

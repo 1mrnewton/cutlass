@@ -18,8 +18,8 @@ use cutlass_eval::ReaderFactory;
 use cutlass_isobmff::IsoBmffFile;
 use cutlass_still::{StillDemux, still_limits};
 
-/// ISOBMFF, AVI, WAV, AIFF, CAF, FLAC, Ogg (Opus and Vorbis), MP3, and stills,
-/// decoded with [`decoders`].
+/// ISOBMFF, AVI, WAV, AIFF, CAF, FLAC, Ogg (Opus and Vorbis), MPEG-TS, MP3,
+/// and stills, decoded with [`decoders`].
 #[must_use]
 pub fn readers() -> ReaderFactory {
     let mut readers = ReaderFactory::new();
@@ -30,6 +30,7 @@ pub fn readers() -> ReaderFactory {
     readers.register_container(cutlass_caf::probe, open_caf);
     readers.register_container(cutlass_flac_container::probe, open_flac);
     readers.register_container(cutlass_ogg::probe, open_ogg);
+    readers.register_container(cutlass_mpegts::probe, open_ts);
     readers.register_container(cutlass_still::probe, open_still);
     readers.register_container(probe_mp3, open_mp3);
     *readers.decoders_mut() = decoders();
@@ -170,6 +171,14 @@ fn open_flac(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
 fn open_ogg(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
     let (file, length) = open_file(path)?;
     Ok(Box::new(cutlass_ogg::OggDemux::open(
+        std::io::BufReader::new(file),
+        length,
+    )?))
+}
+
+fn open_ts(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let (file, length) = open_file(path)?;
+    Ok(Box::new(cutlass_mpegts::TsDemux::open(
         std::io::BufReader::new(file),
         length,
     )?))

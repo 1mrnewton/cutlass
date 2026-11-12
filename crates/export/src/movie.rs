@@ -19,6 +19,8 @@ use cutlass_flac_container::FlacMux;
 use cutlass_isobmff::{FileBrand, Mp4Mux};
 use cutlass_model::Draft;
 use cutlass_mp3_container::Mp3Mux;
+use cutlass_mpegts::packet::PacketSize;
+use cutlass_mpegts::{MuxOptions, TsMux};
 use cutlass_ogg::OggMux;
 use cutlass_render::Renderer;
 use cutlass_renderer_software::SoftwareDevice;
@@ -74,8 +76,10 @@ pub fn part_path(destination: &Path) -> Option<PathBuf> {
 }
 
 /// Write `request` to `destination` as an MP4, or a QuickTime movie when
-/// the destination ends in `.mov`; or as an AVI when the request's
-/// container is [`ContainerId::Avi`]. A caption sidecar the request asks for
+/// the destination ends in `.mov`; as an AVI when the request's container
+/// is [`ContainerId::Avi`]; or as an MPEG transport stream for
+/// [`ContainerId::MpegTs`], M2TS when the destination ends in `.m2ts` or
+/// `.mts`. A caption sidecar the request asks for
 /// is written in the same folder. `progress` hears the frames done and the
 /// frames in all after each picture, and stops the export by returning
 /// false. Clip sound is each clip's file, mixed as in playback.
@@ -85,7 +89,10 @@ pub fn write_movie(
     destination: &Path,
     progress: &mut dyn FnMut(u64, u64) -> bool,
 ) -> Result<ExportResult, ExportError> {
-    if !matches!(request.container, ContainerId::Isobmff | ContainerId::Avi) {
+    if !matches!(
+        request.container,
+        ContainerId::Isobmff | ContainerId::Avi | ContainerId::MpegTs
+    ) {
         return Err(ExportError::Container);
     }
     let part = part_path(destination).ok_or(ExportError::Path)?;
@@ -110,50 +117,41 @@ fn write_part(
     let (result, out) = match request.container {
         ContainerId::Avi => {
             let mut mux = AviMux::new(out);
-            let result = export_movie(sources, request, part, &mut mux, progress)?;
+            let result = run_movie(sources, request, part, progress, &mut mux)?;
             (result, mux.into_writer().map_err(ExportError::Mux)?)
         }
+        ContainerId::MpegTs => {
+            // The encoders report presentation times only; a transport stream
+            // needs real decode times, so the muxer derives them.
+            let packet_size = if has_extension(part, &["m2ts", "mts"]) {
+                PacketSize::M2ts
+            } else {
+                PacketSize::Ts
+            };
+            let mut mux = TsMux::with_options(
+                out,
+                MuxOptions {
+                    packet_size,
+                    derive_decode_times: true,
+                    ..MuxOptions::default()
+                },
+            );
+            let result = run_movie(sources, request, part, progress, &mut mux)?;
+            (result, mux.into_inner())
+        }
         _ => {
-            let brand = if is_mov(part) {
+            let brand = if has_extension(part, &["mov"]) {
                 FileBrand::Mov
             } else {
                 FileBrand::Mp4
             };
             let mut mux = Mp4Mux::with_brand(out, brand);
-            let result = export_movie(sources, request, part, &mut mux, progress)?;
+            let result = run_movie(sources, request, part, progress, &mut mux)?;
             (result, mux.into_writer().map_err(ExportError::Mux)?)
         }
     };
     finish(out)?;
     Ok(result)
-}
-
-/// Draws, encodes and muxes `request` into `mux`, whatever its family.
-fn export_movie<M: Mux>(
-    sources: &MovieSources<'_>,
-    request: &ExportRequest,
-    part: &Path,
-    mux: &mut M,
-    progress: &mut dyn FnMut(u64, u64) -> bool,
-) -> Result<ExportResult, ExportError> {
-    let mut device = SoftwareDevice::new();
-    export(
-        ExportRun {
-            draft: sources.draft,
-            device: &mut device,
-            request,
-            factory: sources.encoders,
-            readers: sources.readers,
-            mux,
-            // A caption file goes beside the movie.
-            destination: request.sidecar.as_ref().and(part.parent()),
-            root: sources.root,
-            fonts: sources.fonts,
-            renderer: sources.renderer,
-            progress: Some(progress),
-        },
-        file_audio(sources.readers, sources.draft, sources.root),
-    )
 }
 
 /// Write only the timeline's sound over `request.range` to `destination`:
@@ -333,12 +331,45 @@ fn finish(mut writer: BufWriter<File>) -> Result<(), ExportError> {
         .map_err(file)
 }
 
-/// The part file of a `.mov` destination: `.cut.mov.part`.
-fn is_mov(part: &Path) -> bool {
+/// Encodes the movie into `mux`, whatever its family.
+fn run_movie<M: Mux>(
+    sources: &MovieSources<'_>,
+    request: &ExportRequest,
+    part: &Path,
+    progress: &mut dyn FnMut(u64, u64) -> bool,
+    mux: &mut M,
+) -> Result<ExportResult, ExportError> {
+    let mut device = SoftwareDevice::new();
+    export(
+        ExportRun {
+            draft: sources.draft,
+            device: &mut device,
+            request,
+            factory: sources.encoders,
+            readers: sources.readers,
+            mux,
+            // A caption file goes beside the movie.
+            destination: request.sidecar.as_ref().and(part.parent()),
+            root: sources.root,
+            fonts: sources.fonts,
+            renderer: sources.renderer,
+            progress: Some(progress),
+        },
+        file_audio(sources.readers, sources.draft, sources.root),
+    )
+}
+
+/// Whether the part file's movie name ends in one of `extensions`.
+fn has_extension(part: &Path, extensions: &[&str]) -> bool {
     part.file_name()
         .and_then(|name| name.to_str())
         .and_then(|name| name.strip_suffix(".part"))
-        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".mov"))
+        .and_then(|name| name.rsplit_once('.'))
+        .is_some_and(|(_, extension)| {
+            extensions
+                .iter()
+                .any(|wanted| extension.eq_ignore_ascii_case(wanted))
+        })
 }
 
 fn file(error: std::io::Error) -> ExportError {
@@ -354,7 +385,7 @@ mod tests {
     use cutlass_eval::{NoFonts, ReaderFactory};
     use cutlass_model::{Draft, FrameRate, TimeRange};
 
-    use super::{MovieSources, is_mov, part_path, write_animation, write_sound};
+    use super::{MovieSources, has_extension, part_path, write_animation, write_sound};
     use crate::{AudioExport, ExportRequest};
 
     fn sound_request(codec: CodecId, container: ContainerId) -> ExportRequest {
@@ -737,8 +768,114 @@ mod tests {
 
     #[test]
     fn a_mov_destination_names_a_quicktime_movie() {
-        assert!(is_mov(Path::new("/films/.cut.MOV.part")));
-        assert!(!is_mov(Path::new("/films/.cut.mp4.part")));
+        assert!(has_extension(Path::new("/films/.cut.MOV.part"), &["mov"]));
+        assert!(!has_extension(Path::new("/films/.cut.mp4.part"), &["mov"]));
+        assert!(has_extension(
+            Path::new("/films/.cut.m2ts.part"),
+            &["m2ts", "mts"]
+        ));
+    }
+
+    /// H.264 and MPEG-4 Visual with B-VOPs written as TS and M2TS: the
+    /// encoders give presentation times only, and the transport stream
+    /// reads back with decode times that rise and come no later than each
+    /// picture, every picture once at its own time, and FFmpeg decodes it
+    /// without a complaint.
+    #[test]
+    fn a_transport_stream_movie_reads_back_with_decode_times() {
+        use cutlass_container::Demux;
+
+        let dir = std::env::temp_dir().join(format!("cutlass-ts-movie-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let draft = two_colours();
+        let readers = ReaderFactory::new();
+        let ffmpeg = oracle("ffmpeg");
+        for codec in [CodecId::H264, CodecId::Mpeg4] {
+            let mut encoders = EncodeFactory::new();
+            if codec == CodecId::H264 {
+                cutlass_h264::register_encoders(&mut encoders);
+            } else {
+                encoders.register_video(CodecId::Mpeg4, advanced_simple);
+            }
+            let request = ExportRequest {
+                range: TimeRange::new(0, 333_334),
+                short_side: 480,
+                codec,
+                bitrate: 400_000,
+                frame_rate: FrameRate::FPS_30,
+                container: ContainerId::MpegTs,
+                audio: None,
+                sidecar: None,
+                late_by: 0,
+                constant_rate: false,
+                prores: crate::ProresProfile::Standard,
+            };
+            let sources = MovieSources {
+                draft: &draft,
+                root: None,
+                readers: &readers,
+                fonts: &NoFonts,
+                renderer: None,
+                encoders: &encoders,
+            };
+            for name in ["cut.ts", "cut.m2ts"] {
+                let name = format!("{codec:?}-{name}");
+                let path = dir.join(&name);
+                let result =
+                    super::write_movie(&sources, &request, &path, &mut |_, _| true).unwrap();
+                assert_eq!(result.frames.len(), 10, "{name}");
+                let file = std::fs::File::open(&path).unwrap();
+                let length = file.metadata().unwrap().len();
+                let mut demux = cutlass_mpegts::TsDemux::open(file, length).unwrap();
+                let m2ts = demux.packet_size() == cutlass_mpegts::packet::PacketSize::M2ts;
+                assert_eq!(m2ts, name.ends_with(".m2ts"), "{name}");
+                let mut times = Vec::new();
+                while let Some(packet) = demux.read_packet().unwrap() {
+                    let time = packet.timestamp();
+                    times.push((time.decode().unwrap(), time.presentation().unwrap()));
+                }
+                assert_eq!(times.len(), 10, "{name}");
+                assert!(
+                    times.iter().all(|(dts, pts)| dts <= pts),
+                    "{name}: {times:?}"
+                );
+                assert!(
+                    times.windows(2).all(|pair| pair[0].0 < pair[1].0),
+                    "{name}: {times:?}"
+                );
+                let reordered = times.windows(2).any(|pair| pair[1].1 < pair[0].1);
+                if codec == CodecId::Mpeg4 {
+                    assert!(reordered, "{name}: no B-VOP came out of order");
+                }
+                let mut shown: Vec<i64> = times.iter().map(|time| time.1).collect();
+                shown.sort_unstable();
+                let first = shown[0];
+                let steps: Vec<i64> = shown.iter().map(|pts| pts - first).collect();
+                assert_eq!(
+                    steps,
+                    (0..10).map(|i| i * 3000).collect::<Vec<_>>(),
+                    "{name}"
+                );
+                if let Some(ffmpeg) = &ffmpeg {
+                    let out = std::process::Command::new(ffmpeg)
+                        .args(["-v", "error", "-nostdin", "-i"])
+                        .arg(&path)
+                        .args(["-f", "null", "-"])
+                        .output()
+                        .unwrap();
+                    assert!(out.status.success(), "{name}");
+                    assert!(
+                        out.stderr.is_empty(),
+                        "{name}: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+                if let Some(ffprobe) = oracle("ffprobe") {
+                    assert_eq!(probed_pictures(&ffprobe, &path).len(), 10, "{name}");
+                }
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

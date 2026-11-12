@@ -2,7 +2,8 @@
  * Decodes one file end to end with FFmpeg's libraries and drops the output:
  * the same work `media-bench decode` does with the Rust codecs.
  *
- *     ffmpeg_decode <picture|to:FORMAT|sound|demux> <file> <decoder> <threads> <repeat>
+ *     ffmpeg_decode <picture|to:FORMAT|sound|demux|open|seek:N:FIRST:LAST> <file> <decoder>
+ *                   <threads> <repeat>
  *
  * libavformat reads the packets of the first picture or sound stream and
  * libavcodec's named decoder turns them into frames. Nothing is resized or
@@ -12,6 +13,10 @@
  * converts each frame to that layout, so both sides end with the same kind
  * of pixels. `demux` reads every packet of every stream and decodes none,
  * which is what `media-bench demux` does; the decoder name is ignored.
+ * `open` only opens the file and finds its stream parameters. `seek:N:FIRST:LAST`
+ * seeks the first picture stream N times to times drawn from FIRST to LAST
+ * (90 kHz ticks) by the generator `examples/bench.rs` in
+ * `crates/containers/mpegts` uses, and reads to that stream's next packet.
  *
  * The `ffmpeg` command is not used for timing because it also runs a filter
  * graph and an output stage on other threads, which is work the Rust tool
@@ -90,6 +95,55 @@ static int packets(const char *path, long long *count, long long *bytes) {
     return seen == 0xffffffffu ? 2 : 0;
 }
 
+/* Opens the file and finds the parameters of its streams. */
+static int open_only(const char *path, long long *count) {
+    AVFormatContext *file = NULL;
+    int code = avformat_open_input(&file, path, NULL, NULL);
+    if (code < 0) return fail("open", code);
+    code = avformat_find_stream_info(file, NULL);
+    if (code < 0) return fail("stream info", code);
+    *count += file->nb_streams;
+    avformat_close_input(&file);
+    return 0;
+}
+
+/* Seeks `times` times to the same targets as the Rust bench: a 64-bit
+ * xorshift from seed 1, each target first + value % (last - first + 1). */
+static int seeks(const char *path, long long times, long long first, long long last,
+                 long long *landed) {
+    AVFormatContext *file = NULL;
+    int code = avformat_open_input(&file, path, NULL, NULL);
+    if (code < 0) return fail("open", code);
+    code = avformat_find_stream_info(file, NULL);
+    if (code < 0) return fail("stream info", code);
+    int stream = av_find_best_stream(file, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
+    if (stream < 0) return fail("picture stream", stream);
+    AVRational clock = {1, 90000};
+    AVRational base = file->streams[stream]->time_base;
+    AVPacket *packet = av_packet_alloc();
+    unsigned long long state = 1;
+    for (long long turn = 0; turn < times; turn++) {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        long long target = first + (long long)(state % (unsigned long long)(last - first + 1));
+        code = av_seek_frame(file, stream, av_rescale_q(target, clock, base),
+                             AVSEEK_FLAG_BACKWARD);
+        if (code < 0) return fail("seek", code);
+        for (;;) {
+            code = av_read_frame(file, packet);
+            if (code < 0) return fail("read after seek", code);
+            int found = packet->stream_index == stream;
+            if (found) *landed += av_rescale_q(packet->pts, base, clock);
+            av_packet_unref(packet);
+            if (found) break;
+        }
+    }
+    av_packet_free(&packet);
+    avformat_close_input(&file);
+    return 0;
+}
+
 static int once(const char *path, const char *name, int sound, enum AVPixelFormat want,
                 int threads, long long *count) {
     AVFormatContext *file = NULL;
@@ -152,8 +206,8 @@ static int once(const char *path, const char *name, int sound, enum AVPixelForma
 
 int main(int argc, char **argv) {
     if (argc != 6) {
-        fprintf(stderr, "usage: ffmpeg_decode <picture|to:FORMAT|sound|demux> <file> <decoder> "
-                        "<threads> <repeat>\n");
+        fprintf(stderr, "usage: ffmpeg_decode <picture|to:FORMAT|sound|demux|open|"
+                        "seek:N:FIRST:LAST> <file> <decoder> <threads> <repeat>\n");
         return 1;
     }
     int sound = strcmp(argv[1], "sound") == 0;
@@ -169,6 +223,25 @@ int main(int argc, char **argv) {
     int repeat = atoi(argv[5]);
     long long count = 0;
     av_log_set_level(AV_LOG_ERROR);
+    if (strcmp(argv[1], "open") == 0) {
+        for (int turn = 0; turn < repeat; turn++) {
+            int code = open_only(argv[2], &count);
+            if (code) return code;
+        }
+        printf("streams %lld\n", count);
+        return 0;
+    }
+    long long times = 0, first = 0, last = 0;
+    if (sscanf(argv[1], "seek:%lld:%lld:%lld", &times, &first, &last) == 3) {
+        if (last < first) return fail("seek span", AVERROR(EINVAL));
+        for (int turn = 0; turn < repeat; turn++) {
+            count = 0;
+            int code = seeks(argv[2], times, first, last, &count);
+            if (code) return code;
+        }
+        printf("seeks %lld landed %lld\n", times, count);
+        return 0;
+    }
     if (strcmp(argv[1], "demux") == 0) {
         long long bytes = 0;
         for (int turn = 0; turn < repeat; turn++) {

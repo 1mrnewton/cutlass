@@ -1,0 +1,1598 @@
+//! Writing a transport stream: one program, one PID per stream.
+//!
+//! Each video access unit becomes one PES packet. Audio frames that follow
+//! each other without a gap share a PES packet of up to 2930 bytes and
+//! 0.2 s, as FFmpeg packs them; the demuxer times the frames after the
+//! first from their sample counts, so a frame joins only where that time
+//! is its own. Timestamps are moved to the
+//! 90 kHz clock and offset by [`MuxOptions::delay`] (1.4 s by default, as
+//! FFmpeg does), so a stream whose first DTS is below its first PTS still
+//! starts at a positive time and the PCR can run ahead of every DTS. The
+//! PCR rides on the first video stream, or the first stream, at least every
+//! 20 ms of decode time; a PCR-only packet is sent when another stream's
+//! data would leave a longer gap, and a run of them (with the tables every
+//! 100 ms) bridges a stretch of decode time with no data at all. The PAT
+//! and PMT go out first, every 100 ms of decode time, and before each
+//! video keyframe. A DVB service description table naming the provider and
+//! the service ([`TsMux::with_service`]) goes with them every 500 ms, as
+//! FFmpeg writes one.
+//!
+//! Units are held per stream and written in decode-time order across
+//! streams, so a source whose streams arrive seconds apart (as MP4 chunks
+//! may) still gives every PES its PCR lead. A unit leaves once every stream
+//! holds one, or once the held units span 10 s of decode time or 32 MiB;
+//! [`Mux::finish`] writes the rest.
+//!
+//! H.264 and HEVC are written as Annex B byte streams with an access unit
+//! delimiter; packets in length-prefixed form (with an `avcC` or `hvcC`
+//! record) are converted, and the parameter sets are put in front of every
+//! keyframe that does not carry its own. Raw AAC gets an ADTS header from
+//! the AudioSpecificConfig. Opus gets the control header of the Opus
+//! mapping for MPEG-TS and the descriptors FFmpeg writes for it: a
+//! registration descriptor `Opus` and a DVB extension descriptor with the
+//! channel configuration code.
+
+use std::io::Write;
+
+use cutlass_codec::{CodecId, ContainerId, Packet, StreamCodec, Timescale};
+use cutlass_container::{
+    FailedMux, FinishedMux, IndexPlace, Language, Limits, Mux, MuxError, MuxMode, MuxStatus,
+    NewStream, TrackDuration, TrackId,
+};
+
+use crate::crc::crc32;
+use crate::es::bits::{Bits, find_start_code, starts_with_start_code};
+use crate::limits::{SYNC_BYTE, TS_PACKET_BYTES};
+use crate::packet::{PAT_PID, PacketSize, pcr_bytes};
+use crate::pes::timestamp_bytes;
+use crate::time::WRAP;
+
+/// The 90 kHz clock every timestamp is written on.
+const CLOCK: i64 = 90_000;
+/// The first stream's PID, as FFmpeg numbers them.
+const FIRST_PID: u16 = 0x100;
+const PMT_PID: u16 = 0x1000;
+const PROGRAM: u16 = 1;
+const TRANSPORT_STREAM_ID: u16 = 1;
+/// Decode time between PAT and PMT repeats: 100 ms.
+const PSI_PERIOD: i64 = 9_000;
+/// Decode time between SDT repeats: 500 ms, FFmpeg's `sdt_period`.
+const SDT_PERIOD: i64 = 45_000;
+const SDT_PID: u16 = 0x0011;
+/// The DVB `original_network_id` FFmpeg writes by default.
+const ORIGINAL_NETWORK_ID: u16 = 0xFF01;
+/// The provider written when the caller names none.
+pub const DEFAULT_PROVIDER: &str = "Cutlass";
+/// The service written when the caller names none, as FFmpeg numbers its
+/// first service.
+pub const DEFAULT_SERVICE: &str = "Service01";
+/// Decode time between PCRs: 20 ms, in 27 MHz ticks.
+const PCR_PERIOD: u64 = 540_000;
+/// The PCR runs this far behind the DTS: 0.7 s.
+const PCR_LEAD: i64 = 63_000;
+/// Output is written once this much is buffered.
+const FLUSH_BYTES: usize = 256 * 1024;
+/// The largest ADTS frame.
+const MAX_ADTS_FRAME: usize = 8191;
+/// Held units leave in decode order once they span this much decode time.
+const INTERLEAVE_SPAN: i64 = 900_000;
+/// Held units leave in decode order once they hold this many bytes.
+const INTERLEAVE_BYTES: usize = 32 << 20;
+/// An audio PES packet holds frames up to this many bytes, as FFmpeg's
+/// default `pes_payload_size`.
+const AUDIO_PES_BYTES: usize = 2930;
+/// An audio PES packet's frames span less than this decode time: 0.2 s.
+const AUDIO_PES_SPAN: i64 = 18_000;
+/// The most PCR-only packets one stretch without data gets: a minute.
+const MAX_BRIDGE_PACKETS: u64 = 3_000;
+
+/// How the stream is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MuxOptions {
+    /// 188-byte TS or 192-byte M2TS. A FEC stride is written as TS.
+    pub packet_size: PacketSize,
+    /// Ticks of the 90 kHz clock added to every timestamp.
+    pub delay: i64,
+    pub limits: Limits,
+    /// Ignore the packets' decode times and derive them from the
+    /// presentation times, for a source that gives packets in decode order
+    /// without knowing when each decodes (an encoder that reports only
+    /// PTS, or an MP4 whose composition offsets go negative). A stream's
+    /// decode time trails its presentation times by its reorder depth: the
+    /// H.264 `max_num_reorder_frames` or HEVC `sps_max_num_reorder_pics`
+    /// from its parameter sets, one picture for MPEG-2 and MPEG-4 Part 2,
+    /// and none for audio.
+    pub derive_decode_times: bool,
+}
+
+impl Default for MuxOptions {
+    fn default() -> Self {
+        Self {
+            packet_size: PacketSize::Ts,
+            delay: 126_000,
+            limits: Limits::standard(),
+            derive_decode_times: false,
+        }
+    }
+}
+
+/// How one stream's access units are written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Shape {
+    /// Annex B with an AUD; `length` is the NAL length size of
+    /// length-prefixed input, when known.
+    H264 {
+        params: Vec<u8>,
+        length: Option<u8>,
+    },
+    Hevc {
+        params: Vec<u8>,
+        length: Option<u8>,
+    },
+    /// The sequence header (MPEG-2) or the object and layer headers
+    /// (MPEG-4 Part 2) to put before keyframes that lack them.
+    Mpeg2 {
+        sequence: Vec<u8>,
+        mpeg4: bool,
+    },
+    /// ADTS fields from the AudioSpecificConfig, when the input is raw.
+    Aac {
+        header: Option<(u8, u8, u8)>,
+    },
+    /// Written as they come.
+    Plain,
+    Opus,
+}
+
+struct Track {
+    id: TrackId,
+    pid: u16,
+    stream_id: u8,
+    stream_type: u8,
+    descriptors: Vec<u8>,
+    timescale: Timescale,
+    shape: Shape,
+    video: bool,
+    continuity: u8,
+    last_dts: Option<i64>,
+    /// Units shaped and waiting to be written, in decode order.
+    held: std::collections::VecDeque<Held>,
+    /// Decode times being derived: see [`Derive`].
+    derive: Derive,
+}
+
+/// The state of [`MuxOptions::derive_decode_times`] for one stream.
+///
+/// With reorder depth `R`, the `i`-th unit in decode order decodes at the
+/// `(i - R)`-th smallest presentation time of the stream, which is final
+/// once unit `i` has arrived. The first `R` units decode one picture
+/// length apart before the smallest. This is how x264 times its output.
+#[derive(Default)]
+struct Derive {
+    /// `R`, once the first unit gave it.
+    reorder: Option<u32>,
+    /// Presentation times not yet used as a decode time; at most `R + 1`.
+    order: std::collections::BinaryHeap<std::cmp::Reverse<i64>>,
+    /// Units seen.
+    count: u64,
+    /// The first `R` units, until the smallest presentation time is known.
+    waiting: Vec<Held>,
+    /// One picture's length, from the first packet that states one.
+    step: Option<i64>,
+}
+
+/// One access unit ready to be written.
+struct Held {
+    dts: i64,
+    pts: i64,
+    bytes: Vec<u8>,
+    keyframe: bool,
+    declared: u64,
+}
+
+/// Writes one program of MPEG-TS or M2TS.
+pub struct TsMux<W: Write> {
+    writer: W,
+    options: MuxOptions,
+    tracks: Vec<Track>,
+    status: MuxStatus,
+    failure: Option<MuxError>,
+    started: bool,
+    out: Vec<u8>,
+    pat_continuity: u8,
+    pmt_continuity: u8,
+    sdt_continuity: u8,
+    last_psi: Option<i64>,
+    last_sdt: Option<i64>,
+    /// The SDT section, built from the provider and service names.
+    sdt: Vec<u8>,
+    last_pcr: Option<u64>,
+    /// The PCR of the last packet, for the M2TS arrival time.
+    clock: u64,
+    last_time: Option<i64>,
+    in_order: bool,
+    payload: u64,
+    /// Bytes of all held units.
+    held_bytes: usize,
+}
+
+impl<W: Write> TsMux<W> {
+    /// A 188-byte transport stream with the default options.
+    pub fn new(writer: W) -> Self {
+        Self::with_options(writer, MuxOptions::default())
+    }
+
+    /// A 192-byte M2TS stream: each packet carries a 4-byte arrival time.
+    pub fn m2ts(writer: W) -> Self {
+        Self::with_options(
+            writer,
+            MuxOptions {
+                packet_size: PacketSize::M2ts,
+                ..MuxOptions::default()
+            },
+        )
+    }
+
+    /// Names the provider and the service in the SDT. A name is cut to 126
+    /// bytes at a character boundary, so both fit the descriptor; one that
+    /// is not ASCII is written as UTF-8 behind the DVB 0x15 selector.
+    #[must_use]
+    pub fn with_service(mut self, provider: &str, name: &str) -> Self {
+        self.sdt = sdt_section(provider, name);
+        self
+    }
+
+    pub fn with_options(writer: W, options: MuxOptions) -> Self {
+        Self {
+            writer,
+            options,
+            tracks: Vec::new(),
+            status: MuxStatus::Building,
+            failure: None,
+            started: false,
+            out: Vec::new(),
+            pat_continuity: 0,
+            pmt_continuity: 0,
+            sdt_continuity: 0,
+            last_psi: None,
+            last_sdt: None,
+            sdt: sdt_section(DEFAULT_PROVIDER, DEFAULT_SERVICE),
+            last_pcr: None,
+            clock: 0,
+            last_time: None,
+            in_order: true,
+            payload: 0,
+            held_bytes: 0,
+        }
+    }
+
+    /// The writer, after [`Mux::finish`].
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+
+    /// The PID each track was given, in track order.
+    #[must_use]
+    pub fn pids(&self) -> Vec<u16> {
+        self.tracks.iter().map(|track| track.pid).collect()
+    }
+
+    fn fail(&mut self, error: MuxError) -> MuxError {
+        self.status = MuxStatus::Failed;
+        self.failure.get_or_insert_with(|| error.clone());
+        error
+    }
+
+    fn building(&self) -> Result<(), MuxError> {
+        match self.status {
+            MuxStatus::Building => Ok(()),
+            MuxStatus::Finished => Err(MuxError::AlreadyFinished),
+            MuxStatus::Failed => Err(self.failure.clone().unwrap_or(MuxError::NotBuilding)),
+        }
+    }
+
+    fn track_index(&self, id: u32) -> Result<usize, MuxError> {
+        self.tracks
+            .iter()
+            .position(|track| track.id.get() == id)
+            .ok_or(MuxError::UnknownTrack { id })
+    }
+
+    fn flush_out(&mut self) -> Result<(), MuxError> {
+        if self.out.is_empty() {
+            return Ok(());
+        }
+        let result = self.writer.write_all(&self.out);
+        self.out.clear();
+        result.map_err(|error| rejected(format!("write failed: {error}")))
+    }
+
+    /// The 90 kHz time of `ticks` at `scale`, rounded, plus the delay.
+    fn clock_time(&self, ticks: i64, scale: Timescale) -> Result<i64, MuxError> {
+        let rate = i128::from(scale.ticks_per_second());
+        if rate == 0 {
+            return Err(MuxError::Clockless);
+        }
+        let scaled = (i128::from(ticks) * i128::from(CLOCK) * 2 + rate).div_euclid(2 * rate);
+        let time = scaled + i128::from(self.options.delay);
+        if time < 0 {
+            return Err(rejected(format!(
+                "timestamp {ticks} at {} Hz is before the start of the stream",
+                scale.ticks_per_second()
+            )));
+        }
+        i64::try_from(time).map_err(|_| rejected("timestamp out of range".to_owned()))
+    }
+
+    fn pcr_track(&self) -> usize {
+        self.tracks
+            .iter()
+            .position(|track| track.video)
+            .unwrap_or(0)
+    }
+
+    /// Starts one transport packet: the M2TS arrival time, then the header.
+    fn packet_header(&mut self, pid: u16, start: bool, control: u8, continuity: u8) {
+        if self.options.packet_size == PacketSize::M2ts {
+            let arrival = (self.clock % (1 << 30)) as u32;
+            self.out.extend_from_slice(&arrival.to_be_bytes());
+        }
+        self.out.extend_from_slice(&[
+            SYNC_BYTE,
+            (u8::from(start) << 6) | ((pid >> 8) as u8 & 0x1F),
+            pid as u8,
+            (control << 4) | (continuity & 0x0F),
+        ]);
+    }
+
+    /// Writes one PSI section on `pid`, across as many packets as it needs.
+    fn write_section(&mut self, pid: u16, section: &[u8]) {
+        let mut data = Vec::with_capacity(section.len() + 1);
+        data.push(0);
+        data.extend_from_slice(section);
+        for (index, chunk) in data.chunks(TS_PACKET_BYTES - 4).enumerate() {
+            let counter = match pid {
+                PAT_PID => &mut self.pat_continuity,
+                SDT_PID => &mut self.sdt_continuity,
+                _ => &mut self.pmt_continuity,
+            };
+            let continuity = *counter;
+            *counter = (continuity + 1) & 0x0F;
+            self.packet_header(pid, index == 0, 0b01, continuity);
+            self.out.extend_from_slice(chunk);
+            self.out
+                .resize(self.out.len() + TS_PACKET_BYTES - 4 - chunk.len(), 0xFF);
+        }
+    }
+
+    /// The PAT and PMT, and the SDT when it is due at decode time `dts`.
+    fn write_tables(&mut self, dts: i64) {
+        if self.last_sdt.is_none_or(|last| dts - last >= SDT_PERIOD) {
+            let sdt = std::mem::take(&mut self.sdt);
+            self.write_section(SDT_PID, &sdt);
+            self.sdt = sdt;
+            self.last_sdt = Some(dts);
+        }
+        let pat = section(
+            0x00,
+            TRANSPORT_STREAM_ID,
+            &[
+                (PROGRAM >> 8) as u8,
+                PROGRAM as u8,
+                0xE0 | (PMT_PID >> 8) as u8,
+                PMT_PID as u8,
+            ],
+        );
+        self.write_section(PAT_PID, &pat);
+        let pcr_pid = self
+            .tracks
+            .get(self.pcr_track())
+            .map_or(0x1FFF, |track| track.pid);
+        let mut body = vec![0xE0 | (pcr_pid >> 8) as u8, pcr_pid as u8, 0xF0, 0x00];
+        for track in &self.tracks {
+            let length = track.descriptors.len();
+            body.extend_from_slice(&[
+                track.stream_type,
+                0xE0 | (track.pid >> 8) as u8,
+                track.pid as u8,
+                0xF0 | (length >> 8) as u8,
+                length as u8,
+            ]);
+            body.extend_from_slice(&track.descriptors);
+        }
+        let pmt = section(0x02, PROGRAM, &body);
+        self.write_section(PMT_PID, &pmt);
+    }
+
+    /// A packet with only an adaptation field carrying a PCR.
+    fn write_pcr_only(&mut self, pid: u16, continuity: u8, pcr: u64) {
+        self.clock = pcr;
+        self.packet_header(pid, false, 0b10, continuity);
+        self.out.push(183);
+        self.out.push(0x10);
+        self.out.extend_from_slice(&pcr_bytes(pcr));
+        self.out.resize(self.out.len() + 183 - 7, 0xFF);
+    }
+
+    /// Writes one PES packet across transport packets.
+    fn write_pes(&mut self, index: usize, pes: &[u8], pcr: Option<u64>, random_access: bool) {
+        let pid = self.tracks[index].pid;
+        if let Some(pcr) = pcr {
+            self.clock = pcr;
+        }
+        let mut at = 0;
+        let mut first = true;
+        while at < pes.len() || first {
+            let mut fields = Vec::new();
+            if first && (pcr.is_some() || random_access) {
+                let mut flags = 0_u8;
+                if random_access {
+                    flags |= 0x40;
+                }
+                if pcr.is_some() {
+                    flags |= 0x10;
+                }
+                fields.push(flags);
+                if let Some(pcr) = pcr {
+                    fields.extend_from_slice(&pcr_bytes(pcr));
+                }
+            }
+            let remaining = pes.len() - at;
+            // Room for payload when the adaptation field holds `fields`.
+            let header_room = if fields.is_empty() {
+                0
+            } else {
+                1 + fields.len()
+            };
+            let room = TS_PACKET_BYTES - 4 - header_room;
+            let take = remaining.min(room);
+            let stuffing = room - take;
+            let adaptation = if fields.is_empty() && stuffing == 0 {
+                None
+            } else if fields.is_empty() {
+                // The adaptation field itself takes the stuffing.
+                let length = stuffing - 1;
+                let mut field = vec![length as u8];
+                if length > 0 {
+                    field.push(0x00);
+                    field.resize(1 + length, 0xFF);
+                }
+                Some(field)
+            } else {
+                let length = fields.len() + stuffing;
+                let mut field = vec![length as u8];
+                field.extend_from_slice(&fields);
+                field.resize(1 + length, 0xFF);
+                Some(field)
+            };
+            let continuity = self.tracks[index].continuity;
+            self.tracks[index].continuity = (continuity + 1) & 0x0F;
+            let control = if adaptation.is_some() { 0b11 } else { 0b01 };
+            self.packet_header(pid, first, control, continuity);
+            if let Some(field) = adaptation {
+                self.out.extend_from_slice(&field);
+            }
+            self.out.extend_from_slice(&pes[at..at + take]);
+            at += take;
+            first = false;
+        }
+    }
+
+    /// The access unit's bytes as this stream writes them.
+    fn shape(&self, index: usize, bytes: &[u8], keyframe: bool) -> Result<Vec<u8>, MuxError> {
+        match &self.tracks[index].shape {
+            Shape::H264 { params, length } => {
+                Ok(annex_b(bytes, *length, params, keyframe, &H264_UNITS)?)
+            }
+            Shape::Hevc { params, length } => {
+                Ok(annex_b(bytes, *length, params, keyframe, &HEVC_UNITS)?)
+            }
+            Shape::Mpeg2 { sequence, mpeg4 } => {
+                let has_sequence = find_start_code(bytes, 0)
+                    .and_then(|at| bytes.get(at + 3))
+                    .is_some_and(|&code| {
+                        if *mpeg4 {
+                            // A visual object sequence, object or layer.
+                            code == 0xB0 || code == 0xB5 || code <= 0x2F
+                        } else {
+                            code == 0xB3
+                        }
+                    });
+                let mut out = Vec::with_capacity(sequence.len() + bytes.len());
+                if keyframe && !has_sequence {
+                    out.extend_from_slice(sequence);
+                }
+                out.extend_from_slice(bytes);
+                Ok(out)
+            }
+            Shape::Aac { header } => {
+                if is_adts(bytes) {
+                    return Ok(bytes.to_vec());
+                }
+                let Some((profile, rate, channels)) = *header else {
+                    return Err(rejected(
+                        "raw AAC needs an AudioSpecificConfig to write ADTS".to_owned(),
+                    ));
+                };
+                let length = bytes.len() + 7;
+                if length > MAX_ADTS_FRAME {
+                    return Err(MuxError::HostileSize {
+                        declared: length as u64,
+                        limit: MAX_ADTS_FRAME as u64,
+                    });
+                }
+                let mut out = Vec::with_capacity(length);
+                out.extend_from_slice(&adts_header(profile, rate, channels, length));
+                out.extend_from_slice(bytes);
+                Ok(out)
+            }
+            Shape::Opus => {
+                let mut out = Vec::with_capacity(bytes.len() + 2 + bytes.len() / 255 + 1);
+                out.extend_from_slice(&[0x7F, 0xE0]);
+                let mut size = bytes.len();
+                while size >= 255 {
+                    out.push(0xFF);
+                    size -= 255;
+                }
+                out.push(size as u8);
+                out.extend_from_slice(bytes);
+                Ok(out)
+            }
+            Shape::Plain => Ok(bytes.to_vec()),
+        }
+    }
+
+    fn store_config(&mut self, index: usize, config: &[u8]) -> Result<(), MuxError> {
+        let track = &mut self.tracks[index];
+        match &mut track.shape {
+            Shape::H264 { params, length } => {
+                let (annex, size) = parse_config(config, ConfigKind::Avc)?;
+                *params = annex;
+                *length = size.or(*length);
+            }
+            Shape::Hevc { params, length } => {
+                let (annex, size) = parse_config(config, ConfigKind::Hevc)?;
+                *params = annex;
+                *length = size.or(*length);
+            }
+            Shape::Mpeg2 { sequence, .. } => *sequence = config.to_vec(),
+            Shape::Aac { header } => {
+                *header = Some(parse_asc(config).ok_or_else(|| {
+                    rejected("the AudioSpecificConfig cannot be written as ADTS".to_owned())
+                })?);
+            }
+            Shape::Opus => {
+                let code = opus_code(config, None)?;
+                track.descriptors = opus_descriptors(code, &track.descriptors);
+            }
+            Shape::Plain => {}
+        }
+        Ok(())
+    }
+
+    fn write_unit(&mut self, index: usize, packet: &Packet) -> Result<(), MuxError> {
+        let scale = self.tracks[index].timescale;
+        if packet.timescale() != scale {
+            return Err(MuxError::TimescaleMismatch {
+                packet: packet.timescale().ticks_per_second(),
+                stream: scale.ticks_per_second(),
+            });
+        }
+        let time = packet.timestamp();
+        let (Some(dts), Some(pts)) = (
+            time.decode().or(time.presentation()),
+            time.presentation().or(time.decode()),
+        ) else {
+            return Err(MuxError::MissingTimestamp);
+        };
+        let derive = self.options.derive_decode_times;
+        let dts = if derive {
+            0
+        } else {
+            self.clock_time(dts, scale)?
+        };
+        let pts = self.clock_time(pts, scale)?;
+        if !derive {
+            self.check_times(index, dts, pts)?;
+        }
+        let declared = packet.bytes().len() as u64;
+        if declared > self.options.limits.max_packet_bytes {
+            return Err(MuxError::HostileSize {
+                declared,
+                limit: self.options.limits.max_packet_bytes,
+            });
+        }
+        let keyframe = packet.keyframe();
+        let bytes = self.shape(index, packet.bytes(), keyframe)?;
+
+        let video = self.tracks[index].video;
+        // PES header data: 3 bytes of flags and up to 10 of timestamps.
+        if !video && bytes.len() + 13 > 0xFFFF {
+            return Err(MuxError::HostileSize {
+                declared: bytes.len() as u64,
+                limit: 0xFFFF - 13,
+            });
+        }
+        let held = Held {
+            dts,
+            pts,
+            bytes,
+            keyframe,
+            declared,
+        };
+        if derive {
+            let step = match time.duration() {
+                Some(length) if length > 0 => {
+                    Some(self.clock_time(length, scale)? - self.options.delay)
+                }
+                _ => None,
+            };
+            self.derive(index, held, step)?;
+        } else {
+            self.hold(index, held);
+        }
+        self.release(false)
+    }
+
+    fn check_times(&self, index: usize, dts: i64, pts: i64) -> Result<(), MuxError> {
+        if pts < dts {
+            return Err(rejected(format!("PTS {pts} is before DTS {dts}")));
+        }
+        if self.tracks[index].last_dts.is_some_and(|last| dts < last) {
+            return Err(rejected(
+                "decode times of a stream must not go back".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn hold(&mut self, index: usize, held: Held) {
+        self.tracks[index].last_dts = Some(held.dts);
+        self.held_bytes = self.held_bytes.saturating_add(held.bytes.len());
+        self.tracks[index].held.push_back(held);
+    }
+
+    /// Gives `held` its derived decode time, or keeps it until the
+    /// stream's smallest presentation time is known.
+    fn derive(&mut self, index: usize, mut held: Held, step: Option<i64>) -> Result<(), MuxError> {
+        let track = &mut self.tracks[index];
+        let reorder = *track
+            .derive
+            .reorder
+            .get_or_insert_with(|| reorder_depth(&track.shape, track.video, &held.bytes));
+        if track.derive.step.is_none() {
+            track.derive.step = step.filter(|step| *step > 0);
+        }
+        track.derive.order.push(std::cmp::Reverse(held.pts));
+        let seen = track.derive.count;
+        track.derive.count += 1;
+        if seen < u64::from(reorder) {
+            track.derive.waiting.push(held);
+            return Ok(());
+        }
+        let Some(std::cmp::Reverse(dts)) = track.derive.order.pop() else {
+            return Ok(());
+        };
+        if seen == u64::from(reorder) {
+            self.resolve(index, dts)?;
+        }
+        held.dts = dts;
+        self.check_times(index, held.dts, held.pts)?;
+        self.hold(index, held);
+        Ok(())
+    }
+
+    /// Times the units waiting on `index` one picture apart before
+    /// `smallest`, the stream's smallest presentation time.
+    fn resolve(&mut self, index: usize, smallest: i64) -> Result<(), MuxError> {
+        let waiting = std::mem::take(&mut self.tracks[index].derive.waiting);
+        let count = waiting.len() as i64;
+        if count == 0 {
+            return Ok(());
+        }
+        let mut times: Vec<i64> = waiting.iter().map(|held| held.pts).collect();
+        times.push(smallest);
+        times.sort_unstable();
+        let gap = times
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .filter(|gap| *gap > 0)
+            .min();
+        // A picture's length, but never so long that the first decode time
+        // falls before zero.
+        let step = self.tracks[index]
+            .derive
+            .step
+            .or(gap)
+            .unwrap_or(CLOCK / 25)
+            .min(smallest / count)
+            .max(1);
+        for (at, mut held) in (0_i64..).zip(waiting) {
+            held.dts = smallest - (count - at) * step;
+            self.check_times(index, held.dts, held.pts)?;
+            self.hold(index, held);
+        }
+        Ok(())
+    }
+
+    /// Gives every unit still waiting for its decode time one: the stream
+    /// ended before its reorder depth was reached.
+    fn resolve_all(&mut self) -> Result<(), MuxError> {
+        for index in 0..self.tracks.len() {
+            if let Some(std::cmp::Reverse(smallest)) =
+                self.tracks[index].derive.order.peek().copied()
+                && !self.tracks[index].derive.waiting.is_empty()
+            {
+                self.resolve(index, smallest)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes held units in decode order while one may leave: every stream
+    /// holds one, the held units are too long or too large, or `all`.
+    fn release(&mut self, all: bool) -> Result<(), MuxError> {
+        loop {
+            let mut first: Option<(i64, usize)> = None;
+            let mut every = true;
+            let mut last = i64::MIN;
+            for (index, track) in self.tracks.iter().enumerate() {
+                match (track.held.front(), track.held.back()) {
+                    (Some(front), Some(back)) => {
+                        if first.is_none_or(|(dts, _)| front.dts < dts) {
+                            first = Some((front.dts, index));
+                        }
+                        last = last.max(back.dts);
+                    }
+                    _ => every = false,
+                }
+            }
+            let Some((dts, index)) = first else {
+                return Ok(());
+            };
+            let due = all
+                || every
+                || last - dts >= INTERLEAVE_SPAN
+                || self.held_bytes >= INTERLEAVE_BYTES;
+            if !due {
+                return Ok(());
+            }
+            let (count, complete) = self.audio_run(index);
+            let forced = all || last - dts >= AUDIO_PES_SPAN || self.held_bytes >= INTERLEAVE_BYTES;
+            if !complete && !forced {
+                // More frames may join this PES packet.
+                return Ok(());
+            }
+            let mut units = self.tracks[index].held.drain(..count);
+            let Some(mut unit) = units.next() else {
+                return Ok(());
+            };
+            for more in units {
+                unit.bytes.extend_from_slice(&more.bytes);
+                unit.declared = unit.declared.saturating_add(more.declared);
+            }
+            self.held_bytes = self.held_bytes.saturating_sub(unit.bytes.len());
+            self.emit(index, unit)?;
+        }
+    }
+
+    /// How many of the held units at the front of an audio track go into
+    /// one PES packet, and whether that is settled. Frames join while
+    /// each starts exactly where the demuxer will time it, at the first
+    /// frame's PTS plus the samples before it, and the packet stays within
+    /// [`AUDIO_PES_BYTES`] and [`AUDIO_PES_SPAN`]. A video unit, or audio
+    /// whose frames this crate does not read, is one PES packet alone.
+    fn audio_run(&self, index: usize) -> (usize, bool) {
+        let track = &self.tracks[index];
+        let mut held = track.held.iter();
+        let Some(first) = held.next() else {
+            return (0, true);
+        };
+        if track.video {
+            return (1, true);
+        }
+        let Some((mut samples, rate)) = frame_samples(track, &first.bytes) else {
+            return (1, true);
+        };
+        let mut bytes = first.bytes.len();
+        let mut count = 1;
+        for next in held {
+            let expected = first
+                .pts
+                .saturating_add(sample_ticks(u64::from(samples), rate));
+            let fits = bytes + next.bytes.len() <= AUDIO_PES_BYTES
+                && next.dts - first.dts < AUDIO_PES_SPAN;
+            match frame_samples(track, &next.bytes) {
+                Some((more, same)) if same == rate && next.pts == expected && fits => {
+                    samples = samples.saturating_add(more);
+                    bytes += next.bytes.len();
+                    count += 1;
+                }
+                _ => return (count, true),
+            }
+        }
+        (count, false)
+    }
+
+    /// Bridges a stretch of decode time with no data before `pcr_now`: a
+    /// PCR-only packet every PCR period and the tables every PSI period.
+    fn bridge(&mut self, pcr_now: u64) {
+        let Some(mut pcr) = self.last_pcr else {
+            return;
+        };
+        let lead = PCR_LEAD.min(self.options.delay);
+        let track = &self.tracks[self.pcr_track()];
+        let pid = track.pid;
+        let continuity = track.continuity.wrapping_sub(1) & 0x0F;
+        let mut count = 0;
+        while pcr_now.saturating_sub(pcr) > 2 * PCR_PERIOD && count < MAX_BRIDGE_PACKETS {
+            pcr += PCR_PERIOD;
+            let dts = i64::try_from(pcr / 300)
+                .unwrap_or(i64::MAX)
+                .saturating_add(lead);
+            if self.last_psi.is_none_or(|last| dts - last >= PSI_PERIOD) {
+                self.clock = pcr;
+                self.write_tables(dts);
+                self.last_psi = Some(dts);
+            }
+            self.write_pcr_only(pid, continuity, pcr);
+            self.last_pcr = Some(pcr);
+            count += 1;
+        }
+    }
+
+    fn emit(&mut self, index: usize, unit: Held) -> Result<(), MuxError> {
+        let Held {
+            dts,
+            pts,
+            bytes,
+            keyframe,
+            declared,
+        } = unit;
+        let video = self.tracks[index].video;
+        let pcr_index = self.pcr_track();
+        let pcr_now = ((dts - PCR_LEAD.min(self.options.delay)).max(0) as u64) * 300;
+        self.bridge(pcr_now);
+        let psi_due = !self.started
+            || self.last_psi.is_none_or(|last| dts - last >= PSI_PERIOD)
+            || video && keyframe;
+        if psi_due {
+            self.write_tables(dts);
+            self.last_psi = Some(dts);
+            self.started = true;
+        }
+        let pcr_now = self.last_pcr.map_or(pcr_now, |last| pcr_now.max(last));
+        let pcr_due = self
+            .last_pcr
+            .is_none_or(|last| pcr_now.saturating_sub(last) >= PCR_PERIOD);
+        let mut pcr = None;
+        if pcr_due {
+            if index == pcr_index {
+                pcr = Some(pcr_now);
+            } else {
+                let track = &self.tracks[pcr_index];
+                // A PCR-only packet carries no payload: the continuity
+                // counter does not move.
+                let continuity = track.continuity.wrapping_sub(1) & 0x0F;
+                let pid = track.pid;
+                self.write_pcr_only(pid, continuity, pcr_now);
+            }
+            self.last_pcr = Some(pcr_now);
+        }
+
+        let header = pes_header(
+            self.tracks[index].stream_id,
+            pts,
+            (dts != pts).then_some(dts),
+            bytes.len(),
+            video,
+        );
+        let mut pes = header;
+        pes.extend_from_slice(&bytes);
+        self.write_pes(index, &pes, pcr, keyframe && (video || index == pcr_index));
+        if self.last_time.is_some_and(|last| dts < last) {
+            self.in_order = false;
+        }
+        self.last_time = Some(self.last_time.map_or(dts, |last| last.max(dts)));
+        self.payload = self.payload.saturating_add(declared);
+        if self.out.len() >= FLUSH_BYTES {
+            self.flush_out()?;
+        }
+        Ok(())
+    }
+}
+
+impl<W: Write> Mux for TsMux<W> {
+    fn family(&self) -> ContainerId {
+        ContainerId::MpegTs
+    }
+
+    fn add_stream(&mut self, stream: NewStream) -> Result<TrackId, MuxError> {
+        self.building()?;
+        if self.started || self.tracks.iter().any(|track| track.last_dts.is_some()) {
+            return Err(self.fail(rejected(
+                "the PMT is already written; add streams before packets".to_owned(),
+            )));
+        }
+        if !stream.timescale.is_clock() {
+            return Err(self.fail(MuxError::Clockless));
+        }
+        let count = u32::try_from(self.tracks.len()).unwrap_or(u32::MAX);
+        let limit = self.options.limits.max_tracks.min(0x0F00);
+        if count >= limit {
+            return Err(self.fail(MuxError::TooManyTracks { count, limit }));
+        }
+        let codec = match stream.params.codec() {
+            StreamCodec::Known(codec) => *codec,
+            StreamCodec::Unknown(unknown) => {
+                return Err(self.fail(MuxError::UnknownCodec(unknown.clone())));
+            }
+        };
+        let videos = self.tracks.iter().filter(|track| track.video).count() as u8;
+        let audios = self.tracks.iter().filter(|track| !track.video).count() as u8;
+        let video_id = 0xE0 | (videos & 0x0F);
+        let audio_id = 0xC0 | (audios & 0x1F);
+        let (stream_type, stream_id, shape, mut descriptors, video) = match codec {
+            CodecId::H264 => (
+                0x1B,
+                video_id,
+                Shape::H264 {
+                    params: Vec::new(),
+                    length: None,
+                },
+                Vec::new(),
+                true,
+            ),
+            CodecId::Hevc => (
+                0x24,
+                video_id,
+                Shape::Hevc {
+                    params: Vec::new(),
+                    length: None,
+                },
+                registration(*b"HEVC"),
+                true,
+            ),
+            CodecId::Mpeg2 => (
+                0x02,
+                video_id,
+                Shape::Mpeg2 {
+                    sequence: Vec::new(),
+                    mpeg4: false,
+                },
+                Vec::new(),
+                true,
+            ),
+            CodecId::Mpeg4 => (
+                0x10,
+                video_id,
+                Shape::Mpeg2 {
+                    sequence: Vec::new(),
+                    mpeg4: true,
+                },
+                Vec::new(),
+                true,
+            ),
+            CodecId::Aac => (
+                0x0F,
+                audio_id,
+                Shape::Aac { header: None },
+                Vec::new(),
+                false,
+            ),
+            CodecId::Mp3 => {
+                let low = stream
+                    .params
+                    .sample_rate()
+                    .is_some_and(|rate| rate < 32_000);
+                (
+                    if low { 0x04 } else { 0x03 },
+                    audio_id,
+                    Shape::Plain,
+                    Vec::new(),
+                    false,
+                )
+            }
+            CodecId::Ac3 => (0x81, 0xBD, Shape::Plain, registration(*b"AC-3"), false),
+            CodecId::Eac3 => (0x87, 0xBD, Shape::Plain, registration(*b"EAC3"), false),
+            CodecId::Opus => {
+                let code = opus_code(stream.params.extradata(), stream.params.channels())
+                    .map_err(|error| self.fail(error))?;
+                (0x06, 0xBD, Shape::Opus, opus_descriptors(code, &[]), false)
+            }
+            other => {
+                return Err(self.fail(rejected(format!(
+                    "this MPEG-TS muxer does not carry {other:?}"
+                ))));
+            }
+        };
+        if let Some(language) = stream.language.as_ref().and_then(language_code) {
+            descriptors.extend_from_slice(&[0x0A, 4]);
+            descriptors.extend_from_slice(&language);
+            descriptors.push(0);
+        }
+        let pid = FIRST_PID + self.tracks.len() as u16;
+        let id = TrackId::new(count);
+        self.tracks.push(Track {
+            id,
+            pid,
+            stream_id,
+            stream_type,
+            descriptors,
+            timescale: stream.timescale,
+            shape,
+            video,
+            continuity: 0,
+            last_dts: None,
+            held: std::collections::VecDeque::new(),
+            derive: Derive::default(),
+        });
+        let index = self.tracks.len() - 1;
+        if !stream.params.extradata().is_empty()
+            && !matches!(codec, CodecId::Opus)
+            && let Err(error) = self.store_config(index, stream.params.extradata())
+        {
+            self.tracks.pop();
+            return Err(self.fail(error));
+        }
+        Ok(id)
+    }
+
+    fn write_packet(&mut self, packet: &Packet) -> Result<(), MuxError> {
+        self.building()?;
+        let index = self
+            .track_index(packet.stream())
+            .map_err(|error| self.fail(error))?;
+        self.write_unit(index, packet)
+            .map_err(|error| self.fail(error))
+    }
+
+    /// Units are written in decode order as they become due; the rest
+    /// wait for [`Mux::finish`]. This checks the mux is still building.
+    fn interleave(&mut self) -> Result<(), MuxError> {
+        self.building()
+    }
+
+    fn cancel(&mut self) {
+        self.fail(MuxError::Cancelled);
+    }
+
+    fn finish(&mut self, durations: &[TrackDuration]) -> Result<FinishedMux, FailedMux> {
+        if let Err(error) = self.building() {
+            return Err(FailedMux::incomplete(self.payload, error));
+        }
+        for duration in durations {
+            if self.track_index(duration.track.get()).is_err() {
+                let error = self.fail(MuxError::UnknownTrack {
+                    id: duration.track.get(),
+                });
+                return Err(FailedMux::incomplete(self.payload, error));
+            }
+        }
+        if let Err(error) = self.resolve_all().and_then(|()| self.release(true)) {
+            let error = self.fail(error);
+            return Err(FailedMux::incomplete(self.payload, error));
+        }
+        if !self.started && !self.tracks.is_empty() {
+            self.write_tables(0);
+            self.started = true;
+        }
+        let flushed = self.flush_out().and_then(|()| {
+            self.writer
+                .flush()
+                .map_err(|error| rejected(format!("flush failed: {error}")))
+        });
+        if let Err(error) = flushed {
+            let error = self.fail(error);
+            return Err(FailedMux::incomplete(self.payload, error));
+        }
+        self.status = MuxStatus::Finished;
+        Ok(FinishedMux::complete(
+            durations.to_vec(),
+            IndexPlace::Absent,
+            MuxMode::Progressive,
+            self.in_order,
+            Vec::new(),
+            self.payload,
+        ))
+    }
+
+    fn status(&self) -> MuxStatus {
+        self.status
+    }
+
+    /// Stores an `avcC` or `hvcC` record (or Annex B parameter sets), an
+    /// MPEG-2 sequence header, an AAC AudioSpecificConfig, or an
+    /// `OpusHead`. A video configuration may change between packets.
+    fn set_config(&mut self, track: TrackId, config: &[u8]) -> Result<(), MuxError> {
+        self.building()?;
+        let index = self
+            .track_index(track.get())
+            .map_err(|error| self.fail(error))?;
+        if self.started && matches!(self.tracks[index].shape, Shape::Opus) {
+            return Err(self.fail(rejected(
+                "the PMT is already written; set the Opus configuration before packets".to_owned(),
+            )));
+        }
+        self.store_config(index, config)
+            .map_err(|error| self.fail(error))
+    }
+}
+
+/// Whether `bytes` are whole ADTS frames, end to end. A raw AAC frame may
+/// begin with bits that look like a sync word; it is not taken for ADTS
+/// unless the frame lengths also add up to the packet exactly.
+fn is_adts(bytes: &[u8]) -> bool {
+    let mut at = 0;
+    while let Some(header) = bytes.get(at..at + 7) {
+        if header[0] != 0xFF || header[1] & 0xF6 != 0xF0 {
+            return false;
+        }
+        let length = (usize::from(header[3] & 0x03) << 11)
+            | (usize::from(header[4]) << 3)
+            | usize::from(header[5] >> 5);
+        if length < 7 {
+            return false;
+        }
+        at += length;
+    }
+    !bytes.is_empty() && at == bytes.len()
+}
+
+/// The samples and rate of the audio frame (or Opus packet) that starts
+/// `bytes` as this stream writes them, read the way the demuxer reads it.
+fn frame_samples(track: &Track, bytes: &[u8]) -> Option<(u32, u32)> {
+    match track.shape {
+        Shape::Aac { .. } => {
+            let header = crate::es::adts::header(bytes)?;
+            let rate = *crate::es::adts::RATES.get(usize::from(header.rate_index))?;
+            Some((1024 * (u32::from(header.blocks) + 1), rate))
+        }
+        Shape::Opus => {
+            let (start, size) = crate::es::opus::control_header(bytes)?;
+            let packet = bytes.get(start..start + size)?;
+            Some((crate::es::opus::packet_samples(packet)?, 48_000))
+        }
+        Shape::Plain => match track.stream_type {
+            0x81 | 0x87 => {
+                let header = crate::es::ac3::header(bytes)?;
+                Some((header.samples, header.rate))
+            }
+            0x03 | 0x04 => {
+                let header = crate::es::mpa::header(bytes)?;
+                Some((header.samples, header.rate))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+    .filter(|(samples, rate)| *samples > 0 && *rate > 0)
+}
+
+/// `samples` at `rate` in 90 kHz ticks, rounded to the nearest, as the
+/// demuxer times frames after a PES timestamp.
+fn sample_ticks(samples: u64, rate: u32) -> i64 {
+    let rate = u128::from(rate.max(1));
+    let ticks = (u128::from(samples) * 90_000 + rate / 2) / rate;
+    i64::try_from(ticks).unwrap_or(i64::MAX)
+}
+
+/// The reorder depth [`MuxOptions::derive_decode_times`] uses for a
+/// stream: from the SPS in its parameter sets or first unit for H.264 and
+/// HEVC (16, the most either allows, when there is none), one picture for
+/// MPEG-2 and MPEG-4 Part 2, none for audio.
+fn reorder_depth(shape: &Shape, video: bool, unit: &[u8]) -> u32 {
+    let stated = match shape {
+        Shape::H264 { params, .. } => sps_rbsp(params, unit, |header| header & 0x1F == 7, 1)
+            .and_then(|rbsp| crate::es::h264::reorder_frames(&rbsp)),
+        Shape::Hevc { params, .. } => {
+            sps_rbsp(params, unit, |header| (header >> 1) & 0x3F == 33, 2)
+                .and_then(|rbsp| crate::es::hevc::reorder_pictures(&rbsp))
+        }
+        Shape::Mpeg2 { .. } => return 1,
+        _ if video => return 1,
+        _ => return 0,
+    };
+    stated.unwrap_or(16)
+}
+
+/// The RBSP after the NAL header of the first unit in the Annex B bytes of
+/// `params`, then of `unit`, whose first header byte `is_sps` accepts.
+fn sps_rbsp(params: &[u8], unit: &[u8], is_sps: fn(u8) -> bool, header: usize) -> Option<Vec<u8>> {
+    for bytes in [params, unit] {
+        let mut at = find_start_code(bytes, 0);
+        while let Some(start) = at {
+            let body = start + 3;
+            let next = find_start_code(bytes, body);
+            if bytes.get(body).is_some_and(|&byte| is_sps(byte)) {
+                let end = next.unwrap_or(bytes.len());
+                let mut rbsp = Vec::new();
+                crate::es::bits::unescape(&bytes[body..end], 4096, &mut rbsp);
+                return rbsp.get(header..).map(<[u8]>::to_vec);
+            }
+            at = next;
+        }
+    }
+    None
+}
+
+fn rejected(message: String) -> MuxError {
+    MuxError::Rejected { message }
+}
+
+fn registration(tag: [u8; 4]) -> Vec<u8> {
+    vec![0x05, 4, tag[0], tag[1], tag[2], tag[3]]
+}
+
+fn language_code(language: &Language) -> Option<[u8; 3]> {
+    let bytes = language.as_str().as_bytes();
+    match bytes {
+        [a, b, c] if bytes.iter().all(u8::is_ascii_alphabetic) => Some([
+            a.to_ascii_lowercase(),
+            b.to_ascii_lowercase(),
+            c.to_ascii_lowercase(),
+        ]),
+        _ => None,
+    }
+}
+
+/// The SDT of one running television service, with a service descriptor
+/// (EN 300 468 clauses 5.2.3 and 6.2.33).
+fn sdt_section(provider: &str, name: &str) -> Vec<u8> {
+    let provider = dvb_string(provider);
+    let name = dvb_string(name);
+    let mut descriptor = vec![0x48, 0, 0x01, provider.len() as u8];
+    descriptor.extend_from_slice(&provider);
+    descriptor.push(name.len() as u8);
+    descriptor.extend_from_slice(&name);
+    descriptor[1] = (descriptor.len() - 2) as u8;
+    let length = descriptor.len();
+    let mut body = vec![
+        (ORIGINAL_NETWORK_ID >> 8) as u8,
+        ORIGINAL_NETWORK_ID as u8,
+        0xFF,
+        (PROGRAM >> 8) as u8,
+        PROGRAM as u8,
+        // No EIT; running_status 4 (running), not scrambled.
+        0xFC,
+        0x80 | (length >> 8) as u8,
+        length as u8,
+    ];
+    body.extend_from_slice(&descriptor);
+    section(0x42, TRANSPORT_STREAM_ID, &body)
+}
+
+/// A DVB text field of at most 126 bytes, so a service descriptor of two
+/// stays within its one-byte length: ASCII as it is, other text as UTF-8
+/// behind the 0x15 selector, cut at a character boundary.
+fn dvb_string(text: &str) -> Vec<u8> {
+    const MAX: usize = 126;
+    let ascii = text.is_ascii() && !text.bytes().any(|byte| byte < 0x20);
+    let room = if ascii { MAX } else { MAX - 1 };
+    let mut end = text.len().min(room);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = Vec::with_capacity(end + 1);
+    if !ascii {
+        out.push(0x15);
+    }
+    out.extend_from_slice(&text.as_bytes()[..end]);
+    out
+}
+
+/// A long-form PSI section with version 0, current, one section.
+fn section(table: u8, id: u16, body: &[u8]) -> Vec<u8> {
+    let length = body.len() + 5 + 4;
+    let mut out = vec![
+        table,
+        0xB0 | (length >> 8) as u8 & 0x0F,
+        length as u8,
+        (id >> 8) as u8,
+        id as u8,
+        0xC1,
+        0,
+        0,
+    ];
+    out.extend_from_slice(body);
+    let crc = crc32(&out);
+    out.extend_from_slice(&crc.to_be_bytes());
+    out
+}
+
+/// The PES header of one access unit. Video is written with a
+/// `PES_packet_length` of 0, which H.222.0 allows for video in a transport
+/// stream and FFmpeg writes by default; other streams state their length,
+/// which the caller checked fits.
+fn pes_header(stream_id: u8, pts: i64, dts: Option<i64>, payload: usize, video: bool) -> Vec<u8> {
+    let fields = if dts.is_some() { 10 } else { 5 };
+    let length = 3 + fields + payload;
+    let declared = if video { 0 } else { length.min(0xFFFF) as u16 };
+    let mut out = Vec::with_capacity(9 + fields);
+    out.extend_from_slice(&[0, 0, 1, stream_id]);
+    out.extend_from_slice(&declared.to_be_bytes());
+    out.push(0x84);
+    out.push(if dts.is_some() { 0xC0 } else { 0x80 });
+    out.push(fields as u8);
+    let wrap = |time: i64| (time.rem_euclid(WRAP)) as u64;
+    out.extend_from_slice(&timestamp_bytes(
+        if dts.is_some() { 3 } else { 2 },
+        wrap(pts),
+    ));
+    if let Some(dts) = dts {
+        out.extend_from_slice(&timestamp_bytes(1, wrap(dts)));
+    }
+    out
+}
+
+fn adts_header(profile: u8, rate: u8, channels: u8, length: usize) -> [u8; 7] {
+    [
+        0xFF,
+        0xF1,
+        (profile << 6) | (rate << 2) | ((channels >> 2) & 1),
+        ((channels & 3) << 6) | ((length >> 11) as u8 & 3),
+        (length >> 3) as u8,
+        (((length & 7) as u8) << 5) | 0x1F,
+        0xFC,
+    ]
+}
+
+/// The ADTS profile, rate index and channel configuration of an
+/// AudioSpecificConfig. SBR and PS signal their AAC core.
+fn parse_asc(asc: &[u8]) -> Option<(u8, u8, u8)> {
+    let mut bits = Bits::new(asc);
+    let mut object = bits.bits(5)?;
+    if object == 31 {
+        object = 32 + bits.bits(6)?;
+    }
+    let rate = bits.bits(4)?;
+    if rate == 15 {
+        return None;
+    }
+    let channels = bits.bits(4)?;
+    if object == 5 || object == 29 {
+        let extension = bits.bits(4)?;
+        if extension == 15 {
+            bits.skip(24)?;
+        }
+        object = bits.bits(5)?;
+    }
+    if !(1..=4).contains(&object) || channels == 0 || channels > 7 {
+        return None;
+    }
+    Some(((object - 1) as u8, rate as u8, channels as u8))
+}
+
+#[derive(Clone, Copy)]
+enum ConfigKind {
+    Avc,
+    Hevc,
+}
+
+/// Annex B parameter sets and the NAL length size from an `avcC` or `hvcC`
+/// record, or Annex B parameter sets as they are.
+fn parse_config(config: &[u8], kind: ConfigKind) -> Result<(Vec<u8>, Option<u8>), MuxError> {
+    if starts_with_start_code(config) {
+        return Ok((config.to_vec(), None));
+    }
+    let bad = || rejected("the codec configuration record is malformed".to_owned());
+    let mut out = Vec::new();
+    let mut push = |nal: &[u8]| {
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(nal);
+    };
+    let take = |at: &mut usize, count: usize| -> Option<&[u8]> {
+        let slice = config.get(*at..at.checked_add(count)?)?;
+        *at += count;
+        Some(slice)
+    };
+    match kind {
+        ConfigKind::Avc => {
+            if config.first() != Some(&1) || config.len() < 7 {
+                return Err(bad());
+            }
+            let length = (config[4] & 3) + 1;
+            let mut at = 5;
+            let sets = take(&mut at, 1).ok_or_else(bad)?[0] & 0x1F;
+            for _ in 0..sets {
+                let size = take(&mut at, 2).ok_or_else(bad)?;
+                let size = usize::from(u16::from_be_bytes([size[0], size[1]]));
+                push(take(&mut at, size).ok_or_else(bad)?);
+            }
+            let sets = take(&mut at, 1).ok_or_else(bad)?[0];
+            for _ in 0..sets {
+                let size = take(&mut at, 2).ok_or_else(bad)?;
+                let size = usize::from(u16::from_be_bytes([size[0], size[1]]));
+                push(take(&mut at, size).ok_or_else(bad)?);
+            }
+            Ok((out, Some(length)))
+        }
+        ConfigKind::Hevc => {
+            if config.len() < 23 {
+                return Err(bad());
+            }
+            let length = (config[21] & 3) + 1;
+            let mut at = 22;
+            let arrays = take(&mut at, 1).ok_or_else(bad)?[0];
+            for _ in 0..arrays {
+                take(&mut at, 1).ok_or_else(bad)?;
+                let count = take(&mut at, 2).ok_or_else(bad)?;
+                let count = u16::from_be_bytes([count[0], count[1]]);
+                for _ in 0..count {
+                    let size = take(&mut at, 2).ok_or_else(bad)?;
+                    let size = usize::from(u16::from_be_bytes([size[0], size[1]]));
+                    push(take(&mut at, size).ok_or_else(bad)?);
+                }
+            }
+            Ok((out, Some(length)))
+        }
+    }
+}
+
+/// The unit types an H.264 or HEVC access unit is checked for.
+struct Units {
+    /// The unit type of a NAL header's first byte.
+    kind: fn(u8) -> u8,
+    delimiter: &'static [u8],
+    delimiter_type: u8,
+    /// A sequence parameter set.
+    sequence: u8,
+}
+
+const H264_UNITS: Units = Units {
+    kind: |byte| byte & 0x1F,
+    delimiter: &[0, 0, 0, 1, 0x09, 0xF0],
+    delimiter_type: 9,
+    sequence: 7,
+};
+
+const HEVC_UNITS: Units = Units {
+    kind: |byte| (byte >> 1) & 0x3F,
+    delimiter: &[0, 0, 0, 1, 0x46, 0x01, 0x50],
+    delimiter_type: 35,
+    sequence: 33,
+};
+
+/// An access unit as Annex B: from length-prefixed units when `length` is
+/// set or the bytes do not start with a start code, with an access unit
+/// delimiter first and `params` before a keyframe that has no SPS.
+fn annex_b(
+    bytes: &[u8],
+    length: Option<u8>,
+    params: &[u8],
+    keyframe: bool,
+    units: &Units,
+) -> Result<Vec<u8>, MuxError> {
+    let mut nals: Vec<&[u8]> = Vec::new();
+    // With a configuration record the packets are length-prefixed: a NAL of
+    // 256 to 511 bytes has a length field that reads as `00 00 01`.
+    if length.is_none() && starts_with_start_code(bytes) {
+        let mut at = find_start_code(bytes, 0);
+        while let Some(start) = at {
+            let next = find_start_code(bytes, start + 3);
+            let mut end = next.unwrap_or(bytes.len());
+            // A zero byte before the next start code belongs to it.
+            while end > start + 3 && next.is_some() && bytes[end - 1] == 0 {
+                end -= 1;
+            }
+            nals.push(&bytes[start + 3..end]);
+            at = next;
+        }
+    } else {
+        let size = usize::from(length.unwrap_or(4));
+        let mut at = 0;
+        while at < bytes.len() {
+            let Some(field) = bytes.get(at..at + size) else {
+                return Err(rejected("a NAL length field is cut short".to_owned()));
+            };
+            let nal_length = field
+                .iter()
+                .fold(0_usize, |value, &byte| (value << 8) | usize::from(byte));
+            at += size;
+            let Some(nal) = bytes.get(at..at.saturating_add(nal_length)) else {
+                return Err(rejected("a NAL unit runs past the packet".to_owned()));
+            };
+            nals.push(nal);
+            at += nal_length;
+        }
+    }
+    let kinds: Vec<u8> = nals
+        .iter()
+        .map(|nal| nal.first().map_or(0xFF, |&byte| (units.kind)(byte)))
+        .collect();
+    let mut out = Vec::with_capacity(bytes.len() + params.len() + 64);
+    if kinds.first() != Some(&units.delimiter_type) {
+        out.extend_from_slice(units.delimiter);
+    }
+    let has_sequence = kinds.contains(&units.sequence);
+    let mut params_written = !keyframe || has_sequence || params.is_empty();
+    for (nal, kind) in nals.iter().zip(&kinds) {
+        if !params_written && *kind != units.delimiter_type {
+            out.extend_from_slice(params);
+            params_written = true;
+        }
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(nal);
+    }
+    if !params_written {
+        out.extend_from_slice(params);
+    }
+    Ok(out)
+}
+
+/// The Opus `channel_config_code` for an `OpusHead`, or for a channel
+/// count when there is none (FFmpeg's rules).
+fn opus_code(head: &[u8], channels: Option<u16>) -> Result<u8, MuxError> {
+    const COUPLED: [u8; 9] = [1, 0, 1, 1, 2, 2, 2, 3, 3];
+    const MAPS: [&[u8]; 8] = [
+        &[0],
+        &[0, 1],
+        &[0, 2, 1],
+        &[0, 1, 2, 3],
+        &[0, 4, 1, 2, 3],
+        &[0, 4, 1, 2, 3, 5],
+        &[0, 4, 1, 2, 3, 5, 6],
+        &[0, 6, 1, 2, 3, 4, 5, 7],
+    ];
+    let unsupported = || rejected("this Opus channel mapping has no MPEG-TS code".to_owned());
+    if head.len() >= 19 && head.starts_with(b"OpusHead") {
+        let count = head[9];
+        match head[18] {
+            0 if (1..=2).contains(&count) => return Ok(count),
+            1 if (1..=8).contains(&count) && head.len() >= 21 + usize::from(count) => {
+                let coupled = COUPLED[usize::from(count)];
+                if head[19] == count - coupled
+                    && head[20] == coupled
+                    && head[21..21 + usize::from(count)] == *MAPS[usize::from(count) - 1]
+                {
+                    return Ok(count);
+                }
+                return Err(unsupported());
+            }
+            _ => return Err(unsupported()),
+        }
+    }
+    match channels {
+        Some(count @ 1..=2) => Ok(count as u8),
+        _ => Err(unsupported()),
+    }
+}
+
+/// `existing` without its Opus descriptors, then the registration and
+/// extension descriptors for `code`.
+fn opus_descriptors(code: u8, existing: &[u8]) -> Vec<u8> {
+    let mut out = registration(*b"Opus");
+    out.extend_from_slice(&[0x7F, 2, 0x80, code]);
+    // Keep a language descriptor added after the Opus ones.
+    let mut at = 0;
+    while at + 2 <= existing.len() {
+        let tag = existing[at];
+        let length = usize::from(existing[at + 1]);
+        let end = (at + 2 + length).min(existing.len());
+        if tag == 0x0A {
+            out.extend_from_slice(&existing[at..end]);
+        }
+        at = end;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{adts_header, is_adts};
+
+    #[test]
+    fn only_whole_adts_frames_pass_as_adts() {
+        let mut frame = adts_header(1, 3, 2, 10).to_vec();
+        frame.extend_from_slice(&[1, 2, 3]);
+        assert!(is_adts(&frame));
+        let mut two = frame.clone();
+        two.extend_from_slice(&frame);
+        assert!(is_adts(&two));
+        // A raw frame that starts like a sync word but whose length does
+        // not add up.
+        assert!(!is_adts(&frame[..9]));
+        assert!(!is_adts(&[0xFF, 0xF1, 0x50, 0x80, 0x00, 0x1F, 0xFC, 0x21]));
+        assert!(!is_adts(&[]));
+    }
+}

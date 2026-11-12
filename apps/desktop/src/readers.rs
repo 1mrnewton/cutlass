@@ -11,14 +11,14 @@ use cutlass_isobmff::IsoBmffFile;
 use cutlass_still::{StillDemux, still_limits};
 
 /// The codecs [`crate::register_codecs`] installs, plus ISOBMFF, AVI, WAV,
-/// AIFF, CAF, FLAC, Ogg (Opus and Vorbis), MP3, and stills.
+/// AIFF, CAF, FLAC, Ogg (Opus and Vorbis), MPEG-TS, MP3, and stills.
 #[cfg(test)]
 pub(crate) fn installed_readers() -> ReaderFactory {
     readers_with(crate::register_codecs().0)
 }
 
-/// ISOBMFF, AVI, WAV, AIFF, CAF, FLAC, Ogg (Opus and Vorbis), MP3, and stills,
-/// decoded with `decoders`.
+/// ISOBMFF, AVI, WAV, AIFF, CAF, FLAC, Ogg (Opus and Vorbis), MPEG-TS, MP3,
+/// and stills, decoded with `decoders`.
 pub(crate) fn readers_with(decoders: DecodeFactory) -> ReaderFactory {
     let mut readers = ReaderFactory::new();
     readers.register_container(probe_isobmff, open_isobmff);
@@ -28,6 +28,7 @@ pub(crate) fn readers_with(decoders: DecodeFactory) -> ReaderFactory {
     readers.register_container(cutlass_caf::probe, open_caf);
     readers.register_container(cutlass_flac_container::probe, open_flac);
     readers.register_container(cutlass_ogg::probe, open_ogg);
+    readers.register_container(cutlass_mpegts::probe, open_ts);
     readers.register_container(cutlass_still::probe, open_still);
     readers.register_container(probe_mp3, open_mp3);
     *readers.decoders_mut() = decoders;
@@ -172,6 +173,22 @@ fn open_ogg(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
         })?
         .len();
     Ok(Box::new(cutlass_ogg::OggDemux::open(
+        std::io::BufReader::new(file),
+        length,
+    )?))
+}
+
+fn open_ts(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let file = File::open(path).map_err(|error| OpenError::Source {
+        message: error.to_string(),
+    })?;
+    let length = file
+        .metadata()
+        .map_err(|error| OpenError::Source {
+            message: error.to_string(),
+        })?
+        .len();
+    Ok(Box::new(cutlass_mpegts::TsDemux::open(
         std::io::BufReader::new(file),
         length,
     )?))
@@ -680,9 +697,9 @@ mod tests {
         }
         let readers = installed_readers();
         let info = readers.probe(&path).expect("probe");
-        // The probe takes the last packet's end, which counts the 2.5 ms
-        // pre-skip, as it counts AAC priming in an MP4.
-        assert_eq!(info.duration.map(|d| d.0), Some(1_502_500));
+        // The probe measures from the stream's time zero, as playback places
+        // it, so the 2.5 ms pre-skip is not counted: 1.5 s plays.
+        assert_eq!(info.duration.map(|d| d.0), Some(1_500_000));
         let mut media = readers.open(&path).expect("open");
         // From the start, the reader plays exactly the samples after the
         // pre-skip.
@@ -907,6 +924,43 @@ mod tests {
         assert!(held.start.0 <= at.0 && at.0 < held.end.0);
         assert_eq!(held.frame.width(), 1920);
         assert_eq!(held.frame.height(), 1080);
+    }
+
+    /// Transport streams from FFmpeg open through the installed readers,
+    /// decode a picture half a second in, and play their sound.
+    #[test]
+    fn transport_streams_play_their_picture_and_sound() {
+        let fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/containers/mpegts/tests/fixtures");
+        for name in [
+            "h264_aac.ts",
+            "hevc_ac3.ts",
+            "h264_eac3.m2ts",
+            "h264_opus.ts",
+        ] {
+            let path = fixtures.join(name);
+            // The length counts from the first picture, which a transport
+            // stream shows about 1.4 s into its clock.
+            let length = installed_readers().probe(&path).expect(name).duration;
+            let length = length.expect(name).0;
+            assert!(
+                (1_150_000..=1_300_000).contains(&length),
+                "{name}: {length}"
+            );
+            let mut media = installed_readers().open(&path).expect(name);
+            let at = cutlass_model::Micros(500_000);
+            let held = media
+                .decode_at(at, &cutlass_model::TimeRange::new(0, 1_200_000))
+                .expect(name);
+            assert!(held.start.0 <= at.0 && at.0 < held.end.0, "{name}");
+            assert_eq!(
+                (held.frame.width(), held.frame.height()),
+                (96, 64),
+                "{name}"
+            );
+            let sound = media.pull_audio().expect(name).expect(name);
+            assert_eq!(sound.pcm.rate, 48_000, "{name}");
+        }
     }
 
     fn mp3_fixture() -> std::path::PathBuf {

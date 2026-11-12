@@ -17,6 +17,7 @@ cutlass-aiff = { path = "../containers/aiff", version = "0.1.0" }
 cutlass-caf = { path = "../containers/caf", version = "0.1.0" }
 cutlass-flac-container = { path = "../containers/flac", version = "0.1.0" }
 cutlass-ogg = { path = "../containers/ogg", version = "0.1.0" }
+cutlass-mpegts = { path = "../containers/mpegts", version = "0.1.0" }
 cutlass-isobmff = { path = "../containers/isobmff", version = "0.1.0" }
 cutlass-mp3-container = { path = "../containers/mp3", version = "0.1.0" }
 cutlass-adts = { path = "../containers/adts", version = "0.1.0" }

@@ -1511,6 +1511,7 @@ fn decode_au<S: Sample>(
             pic.h,
             pic.mb_w,
             pool.permits.clone(),
+            Some(spares.clone()),
         ));
         let mut meta = pic.clone();
         meta.pending = Some(published.clone());

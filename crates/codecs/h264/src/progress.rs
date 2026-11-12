@@ -15,7 +15,7 @@ use cutlass_h264_kernels::growing::Growing;
 
 use cutlass_decode::CodecError;
 
-use super::{Colocated, Frame, Mb, Shared};
+use super::{Colocated, Frame, Mb, Shared, Spares};
 use crate::recon::Sample;
 
 /// Deblocking macroblock row `e` changes up to three luma rows above it,
@@ -95,6 +95,27 @@ pub(crate) struct Published<S: Sample> {
     /// The decoding threads' permits, when they have them. A reader that
     /// has to wait here is one of those threads.
     permits: Option<std::sync::Arc<Permits>>,
+    /// Where the planes' buffers go once every row is in, for a later
+    /// picture's planes.
+    home: Option<std::sync::Arc<Spares>>,
+}
+
+impl<S: Sample> Drop for Published<S> {
+    fn drop(&mut self) {
+        let Some(home) = self.home.take() else {
+            return;
+        };
+        fn give<T: Copy + Send + 'static>(home: &Spares, growing: &mut Growing<T>) {
+            let full = growing.filled().len() == growing.capacity();
+            let held = std::mem::replace(growing, Growing::new(0)).into_vec();
+            if full && !held.is_empty() {
+                home.keep(held);
+            }
+        }
+        give(&home, &mut self.luma);
+        give(&home, &mut self.cb);
+        give(&home, &mut self.cr);
+    }
 }
 
 /// A block of a published plane: the rows of the plane that are in, the
@@ -116,11 +137,16 @@ fn broken() -> CodecError {
 
 impl<S: Sample> Published<S> {
     /// For a 4:2:0 frame of `w`×`h` luma samples, `h` a multiple of 16.
+    /// Its buffers are made anew, which costs nothing as nothing is written
+    /// in them first, and are given to `home` once every row is in and no
+    /// one reads them: a picture's planes, which are written in full first,
+    /// take them from there.
     pub(crate) fn new(
         w: usize,
         h: usize,
         mb_w: usize,
         permits: Option<std::sync::Arc<Permits>>,
+        home: Option<std::sync::Arc<Spares>>,
     ) -> Self {
         let chroma = (w / 2).saturating_mul(h / 2);
         Self {
@@ -135,6 +161,7 @@ impl<S: Sample> Published<S> {
             gate: Mutex::new(()),
             changed: Condvar::new(),
             permits,
+            home,
         }
     }
 
@@ -379,6 +406,7 @@ fn needed(first: i32, reach: usize, rows: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{Colocated, Mb};
     use super::Published;
     use crate::recon::sample;
 
@@ -392,7 +420,7 @@ mod tests {
         let y: Vec<u8> = (0..w * h).map(|i| (i * 7 % 251) as u8).collect();
         let u: Vec<u8> = (0..w * h / 4).map(|i| (i * 13 % 241) as u8).collect();
         let v: Vec<u8> = (0..w * h / 4).map(|i| (i * 29 % 239) as u8).collect();
-        let published = Published::<u8>::new(w, h, w / 16, None);
+        let published = Published::<u8>::new(w, h, w / 16, None, None);
         let (pic_w, pic_h) = (w as i32, h as i32);
         let mut read = 0;
         for done in 0..=h / 16 {
@@ -452,8 +480,30 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_picture_gives_its_buffers_back_and_a_broken_one_does_not() {
+        let home = std::sync::Arc::new(super::Spares::default());
+        let (w, h) = (32usize, 32usize);
+        let y = vec![9u8; w * h];
+        let c = vec![5u8; w * h / 4];
+        let whole = Published::<u8>::new(w, h, 2, None, Some(home.clone()));
+        whole.fill_rows((&y, &c, &c), h, h / 2);
+        whole.mbs.push(&[Mb::new(0).col; 4]);
+        let at = whole.luma.filled().as_ptr();
+        drop(whole);
+        let luma = home.take::<u8>(w * h).unwrap();
+        assert_eq!((luma.as_ptr(), &luma), (at, &y));
+        assert_eq!(home.take::<u8>(w * h / 4), Some(c.clone()));
+        assert_eq!(home.take::<u8>(w * h / 4), Some(c.clone()));
+        assert!(home.take::<Colocated>(4).is_none());
+        let broken = Published::<u8>::new(w, h, 2, None, Some(home.clone()));
+        broken.fill_rows((&y, &c, &c), h - 3, h / 2 - 1);
+        drop(broken);
+        assert!(home.take::<u8>(w * h).is_none());
+    }
+
+    #[test]
     fn a_failed_picture_lets_its_readers_go() {
-        let published = std::sync::Arc::new(Published::<u8>::new(32, 32, 2, None));
+        let published = std::sync::Arc::new(Published::<u8>::new(32, 32, 2, None, None));
         let reader = {
             let published = published.clone();
             std::thread::spawn(move || {

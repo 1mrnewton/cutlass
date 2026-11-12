@@ -49,6 +49,22 @@ impl<T: Copy> Growing<T> {
         }
     }
 
+    /// The filled items, in the buffer's own memory, its room kept: for a
+    /// full buffer, as many items as it holds.
+    pub fn into_vec(self) -> Vec<T> {
+        let filled = self.filled.load(Ordering::Acquire);
+        let capacity = self.cells.len();
+        let raw = Box::into_raw(self.cells).cast::<T>();
+        // SAFETY: the allocation was made for `capacity` items of `T`'s
+        // layout, which is a `Vec<T>`'s of that capacity, and its first
+        // `filled` items are written. Items are `Copy`, so none need
+        // dropping.
+        #[allow(unsafe_code)]
+        unsafe {
+            Vec::from_raw_parts(raw, filled, capacity)
+        }
+    }
+
     /// How many items the buffer holds when it is full.
     pub fn capacity(&self) -> usize {
         self.cells.len()
@@ -108,6 +124,20 @@ mod tests {
         assert_eq!(growing.filled(), &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         assert_eq!(growing.push(&[13]), 0);
         assert!(Growing::<u16>::new(0).filled().is_empty());
+    }
+
+    #[test]
+    fn gives_the_filled_items_in_its_own_memory() {
+        let growing = Growing::<u16>::new(6);
+        growing.push(&[1, 2, 3, 4]);
+        let at = growing.filled().as_ptr();
+        let part = growing.into_vec();
+        assert_eq!(part, [1, 2, 3, 4]);
+        assert_eq!((part.as_ptr(), part.capacity()), (at, 6));
+        let growing = Growing::<u16>::new(3);
+        growing.push(&[7, 8, 9]);
+        assert_eq!(growing.into_vec(), [7, 8, 9]);
+        assert!(Growing::<u8>::new(0).into_vec().is_empty());
     }
 
     #[test]

@@ -1035,6 +1035,9 @@ fn skip_mb<S: Sample>(
     {
         return p_skip_in_place(pic, dpb, slice, (slice_id, mx, my), qp);
     }
+    if super::syntax_kind(slice.kind) == 1 && !slice.vsp && !mbaff && !pic.mbaff && !field_mb {
+        return b_skip_in_place(pic, dpb, slice, (slice_id, mx, my), qp);
+    }
     let mut mb = Mb::new(slice_id);
     mb.field_mb = field_mb;
     mb.skip = true;
@@ -1128,6 +1131,47 @@ fn p_skip_in_place<S: Sample>(
     // picture's samples.
     let records = std::mem::take(&mut pic.mb);
     let predicted = predict_inter(pic, dpb, slice, (mx, my, true), &records[slot]);
+    pic.mb = records;
+    predicted
+}
+
+/// [`skip_mb`] for a frame macroblock of a B slice in a picture that is not
+/// macroblock-adaptive, written in its place as [`p_skip_in_place`] writes
+/// one. Direct prediction reads the neighbours, which all come before it.
+fn b_skip_in_place<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    (slice_id, mx, my): (u16, usize, usize),
+    qp: i32,
+) -> Result<(), CodecError> {
+    let slot = my * pic.mb_w + mx;
+    if slot >= pic.mb.len() {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "macroblock address",
+        });
+    }
+    // The records step aside while the macroblock is worked out in its
+    // place and its samples are predicted into the picture.
+    let mut records = std::mem::take(&mut pic.mb);
+    let (before, rest) = records.split_at_mut(slot);
+    let held = &mut rest[0];
+    *held = Mb::new(slice_id);
+    held.skip = true;
+    held.qp = qp as i8;
+    held.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
+    held.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
+    held.off_a = slice.off_a as i8;
+    held.off_b = slice.off_b as i8;
+    held.deblock = slice.deblock;
+    let mut blocks = [(0usize, 0usize); 16];
+    for (index, block) in blocks.iter_mut().enumerate() {
+        *block = (index % 4, index / 4);
+    }
+    let whole = apply_direct(pic, before, dpb, slice, (mx, my), held, &blocks);
+    let predicted = predict_inter(pic, dpb, slice, (mx, my, whole), held);
+    bind_refs(held, slice);
     pic.mb = records;
     predicted
 }
@@ -10236,7 +10280,7 @@ fn direct_8<S: Sample>(
             n += 1;
         }
     }
-    apply_direct(pic, dpb, slice, mx, my, mb, &blocks);
+    apply_direct(pic, &pic.mb, dpb, slice, (mx, my), mb, &blocks);
 }
 
 /// Direct prediction of a whole macroblock. `true` means every block came
@@ -10253,7 +10297,15 @@ fn direct_16<S: Sample>(
     for (index, slot) in blocks.iter_mut().enumerate() {
         *slot = (index % 4, index / 4);
     }
-    Ok(apply_direct(pic, dpb, slice, mx, my, mb, &blocks))
+    Ok(apply_direct(
+        pic,
+        &pic.mb,
+        dpb,
+        slice,
+        (mx, my),
+        mb,
+        &blocks,
+    ))
 }
 
 /// Clause 8.4.1.2.3. Scale the co-located motion vector by the picture-order distance.
@@ -10487,19 +10539,21 @@ fn clip_mv(value: i32) -> i16 {
 
 /// Clause 8.4.1.2.2. One reference pair for the macroblock; each 4×4 may be forced to a zero vector.
 /// `true` means the whole macroblock was filled with one motion at once.
+/// `records` are the picture's macroblock records that a frame
+/// macroblock's neighbours are read from, at least those before it.
 fn apply_direct<S: Sample>(
     pic: &Frame<S>,
+    records: &[Mb],
     dpb: &[Frame<S>],
     slice: &Slice<'_>,
-    mx: usize,
-    my: usize,
+    (mx, my): (usize, usize),
     mb: &mut Mb,
     blocks: &[(usize, usize)],
 ) -> bool {
     if !slice.spatial_direct {
         return temporal_direct(pic, dpb, slice, mx, my, mb, blocks);
     }
-    let (ref0, ref1, zero, near) = direct_refs(pic, mx, my, mb);
+    let (ref0, ref1, zero, near) = direct_refs(pic, records, mx, my, mb);
     // The predictors of a 16×16 partition, from the same neighbours.
     let pred = |reference: i8, near| {
         if zero || reference < 0 {
@@ -10614,6 +10668,7 @@ fn apply_direct<S: Sample>(
 #[allow(clippy::type_complexity)]
 fn direct_refs<S: Sample>(
     pic: &Frame<S>,
+    records: &[Mb],
     mx: usize,
     my: usize,
     mb: &Mb,
@@ -10626,11 +10681,13 @@ fn direct_refs<S: Sample>(
         // the one above and of the one above and right, and when that is
         // missing, block 15 of the one above and left.
         let (x, y) = (mx as i32, my as i32);
-        let left = neighbor(pic, x - 1, y, mb.slice);
-        let above = neighbor(pic, x, y - 1, mb.slice);
-        let (diagonal, index) = match neighbor(pic, x + 1, y - 1, mb.slice) {
+        let grid = (pic.mb_w, pic.h / 16);
+        let near = |x, y| neighbor_in(records, grid, x, y, mb.slice);
+        let left = near(x - 1, y);
+        let above = near(x, y - 1);
+        let (diagonal, index) = match near(x + 1, y - 1) {
             Some(right) => (Some(right), 12),
-            None => (neighbor(pic, x - 1, y - 1, mb.slice), 15),
+            None => (near(x - 1, y - 1), 15),
         };
         let near = |list: usize| {
             let at = |side: Option<&Mb>, index: usize| {
@@ -12192,10 +12249,16 @@ fn pcm_chroma<S: Sample>(
 }
 
 fn neighbor<S: Sample>(pic: &Frame<S>, mx: i32, my: i32, slice: u16) -> Option<&Mb> {
-    if mx < 0 || my < 0 || mx as usize >= pic.mb_w || my as usize >= pic.h / 16 {
+    neighbor_in(&pic.mb, (pic.mb_w, pic.h / 16), mx, my, slice)
+}
+
+/// [`neighbor`] among `records`, a picture's macroblock records on a
+/// grid `grid` wide and high, or the first of them.
+fn neighbor_in(records: &[Mb], grid: (usize, usize), mx: i32, my: i32, slice: u16) -> Option<&Mb> {
+    if mx < 0 || my < 0 || mx as usize >= grid.0 || my as usize >= grid.1 {
         return None;
     }
-    let mb = pic.mb.get(my as usize * pic.mb_w + mx as usize)?;
+    let mb = records.get(my as usize * grid.0 + mx as usize)?;
     if mb.slice != slice {
         return None;
     }

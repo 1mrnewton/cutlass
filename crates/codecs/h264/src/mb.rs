@@ -9473,13 +9473,18 @@ fn cover(x: usize, y: usize, w: usize, h: usize) -> u16 {
 }
 
 /// Sets the motion vector and difference of list `list` in the blocks of
-/// `cover`. Every block is written or kept by a select rather than looped
+/// `cover`. Every block is written or kept by a mask rather than looped
 /// over, as how many there are changes from one partition to the next.
 #[inline(always)]
 fn fill_motion(mb: &mut Mb, list: usize, cover: u16, mv: [i16; 2], mvd: [u8; 2]) {
+    // Each block's mask is all ones where it is kept: arithmetic rather than
+    // a select, which the compiler would otherwise make a branch per block.
+    let keep = |index: usize| (i32::from(cover >> index & 1) - 1) as i16;
     let mvs = if list == 0 { &mut mb.mv0 } else { &mut mb.mv1 };
     for (index, held) in mvs.iter_mut().enumerate() {
-        *held = if cover >> index & 1 != 0 { mv } else { *held };
+        let keep = keep(index);
+        held[0] = held[0] & keep | mv[0] & !keep;
+        held[1] = held[1] & keep | mv[1] & !keep;
     }
     let mvds = if list == 0 {
         &mut mb.mvd0
@@ -9487,7 +9492,9 @@ fn fill_motion(mb: &mut Mb, list: usize, cover: u16, mv: [i16; 2], mvd: [u8; 2])
         &mut mb.mvd1
     };
     for (index, size) in mvds.iter_mut().enumerate() {
-        *size = if cover >> index & 1 != 0 { mvd } else { *size };
+        let keep = keep(index) as u8;
+        size[0] = size[0] & keep | mvd[0] & !keep;
+        size[1] = size[1] & keep | mvd[1] & !keep;
     }
     mb.ready |= cover;
 }

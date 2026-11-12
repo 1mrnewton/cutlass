@@ -475,10 +475,11 @@ fn sound(path: &Path, mut sink: Option<&mut BufWriter<File>>) -> Result<String, 
 fn demux(path: &Path) -> Result<String, String> {
     type Probe = fn(&[u8]) -> ProbeResult;
     type Open = fn(&Path) -> Result<Box<dyn Demux>, OpenError>;
-    let families: [(Probe, Open); 8] = [
+    let families: [(Probe, Open); 9] = [
         (probe_isobmff, open_isobmff),
         (cutlass_riff::probe, open_wav),
         (cutlass_aiff::probe, open_aiff),
+        (cutlass_caf::probe, open_caf),
         (cutlass_flac_container::probe, open_flac),
         (cutlass_ogg::probe, open_ogg),
         (cutlass_still::probe, open_still),
@@ -821,6 +822,7 @@ fn readers() -> ReaderFactory {
     readers.register_container(probe_isobmff, open_isobmff);
     readers.register_container(cutlass_riff::probe, open_wav);
     readers.register_container(cutlass_aiff::probe, open_aiff);
+    readers.register_container(cutlass_caf::probe, open_caf);
     readers.register_container(cutlass_flac_container::probe, open_flac);
     readers.register_container(cutlass_ogg::probe, open_ogg);
     readers.register_container(cutlass_still::probe, open_still);
@@ -932,6 +934,11 @@ fn open_wav(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
 fn open_aiff(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
     let (file, length) = sized(path)?;
     Ok(Box::new(cutlass_aiff::AiffDemux::open(file, length)?))
+}
+
+fn open_caf(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let (file, length) = sized(path)?;
+    Ok(Box::new(cutlass_caf::CafDemux::open(file, length)?))
 }
 
 fn open_flac(path: &Path) -> Result<Box<dyn Demux>, OpenError> {

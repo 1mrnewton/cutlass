@@ -22,6 +22,7 @@ cutlass-encode = { path = "../../crates/encode", version = "0.1.0" }
 cutlass-isobmff = { path = "../../crates/containers/isobmff", version = "0.1.0" }
 cutlass-riff = { path = "../../crates/containers/riff", version = "0.1.0" }
 cutlass-aiff = { path = "../../crates/containers/aiff", version = "0.1.0" }
+cutlass-caf = { path = "../../crates/containers/caf", version = "0.1.0" }
 cutlass-still = { path = "../../crates/containers/still", version = "0.1.0" }
 cutlass-mp3-container = { path = "../../crates/containers/mp3", version = "0.1.0" }
 cutlass-ogg = { path = "../../crates/containers/ogg", version = "0.1.0" }

@@ -12087,7 +12087,10 @@ fn deblock_planes<S: Sample>(
     for my in rows.start.min(mb_h)..rows.end.min(mb_h) {
         for mx in 0..mb_w {
             let index = my * mb_w + mx;
-            let beside = if mx == 0 { None } else { left.take() };
+            // Taken even at the start of a row, where it is the last row's
+            // and not this one's neighbour, so that a macroblock passed over
+            // leaves nothing for the next.
+            let beside = left.take().filter(|_| mx > 0);
             let over = above.get_mut(mx).and_then(|kept| kept.take());
             let Some(mb) = pic.mb.get(index) else {
                 continue;

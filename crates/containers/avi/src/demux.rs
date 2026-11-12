@@ -71,6 +71,50 @@ pub struct AviDemux<R: Read + Seek> {
     carries: Vec<Option<Carry>>,
 }
 
+/// What an open had to work around to read a damaged file: an index that
+/// did not match the file (and was replaced by the next index or a scan),
+/// garbage a scan skipped, or a file cut short.
+///
+/// Such a file still opens, as FFmpeg and GStreamer open it, because the
+/// packets that are there are read. [`AviDemux::repair`] says so to a
+/// caller that wants to warn, and [`AviDemux::open_strict`] refuses it.
+/// The crate itself does not log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Repair {
+    /// Where the chunk tables came from in the end.
+    pub index: IndexSource,
+    /// Each index that was there and not used, and why.
+    pub fallbacks: Vec<Fallback>,
+    /// Times a scan skipped garbage to find the next chunk.
+    pub resyncs: u32,
+    /// A `RIFF` or `movi` size ran past the end of the file.
+    pub truncated: bool,
+}
+
+impl std::fmt::Display for Repair {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let source = match self.index {
+            IndexSource::OpenDml => "the OpenDML index",
+            IndexSource::Idx1 => "idx1",
+            IndexSource::Idx1AndScan => "idx1 and a scan of the AVIX segments",
+            IndexSource::Scan => "a scan of the chunks",
+        };
+        write!(out, "avi: damaged file read through {source}")?;
+        for fallback in &self.fallbacks {
+            write!(out, "; {} not used: {}", fallback.index, fallback.reason)?;
+        }
+        if self.resyncs > 0 {
+            write!(out, "; {} runs of garbage skipped", self.resyncs)?;
+        }
+        if self.truncated {
+            write!(out, "; the file is cut short")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for Repair {}
+
 /// A chunk of a framed audio stream, being returned one frame at a time.
 struct Cutting {
     track: usize,
@@ -107,6 +151,18 @@ impl<R: Read + Seek> AviDemux<R> {
     /// Opens a random-access AVI. `length` is the file size.
     pub fn open(reader: R, length: u64) -> Result<Self, OpenError> {
         Self::open_with_limits(reader, length, Limits::standard())
+    }
+
+    /// Opens a random-access AVI and refuses one that needed a [`Repair`],
+    /// with that repair as the error message.
+    pub fn open_strict(reader: R, length: u64) -> Result<Self, OpenError> {
+        let demux = Self::open(reader, length)?;
+        match demux.repair() {
+            Some(repair) => Err(OpenError::Source {
+                message: repair.to_string(),
+            }),
+            None => Ok(demux),
+        }
     }
 
     pub fn open_with_limits(reader: R, length: u64, limits: Limits) -> Result<Self, OpenError> {
@@ -210,6 +266,18 @@ impl<R: Read + Seek> AviDemux<R> {
     #[must_use]
     pub const fn index_source(&self) -> IndexSource {
         self.index_source
+    }
+
+    /// What the open worked around, or `None` for a file read as written.
+    /// A file with no index at all is not damaged: its scan is no repair.
+    #[must_use]
+    pub fn repair(&self) -> Option<Repair> {
+        (!self.fallbacks.is_empty() || self.resyncs > 0 || self.truncated).then(|| Repair {
+            index: self.index_source,
+            fallbacks: self.fallbacks.clone(),
+            resyncs: self.resyncs,
+            truncated: self.truncated,
+        })
     }
 
     /// Indexes the file has that were not used, and why.

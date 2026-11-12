@@ -332,7 +332,19 @@ fn an_idx1_pointing_outside_movi_falls_back_to_a_scan() {
     assert_eq!(demux.index_source(), IndexSource::Scan);
     assert_eq!(demux.fallbacks().len(), 1);
     assert_eq!(demux.fallbacks()[0].index, "idx1");
+    let repair = demux.repair().expect("a repair is reported");
+    assert_eq!(repair.index, IndexSource::Scan);
+    assert!(repair.to_string().contains("idx1 not used"), "{repair}");
     assert_eq!(drain(&mut demux).len(), 5);
+    let strict = AviDemux::open_strict(Cursor::new(file.bytes.clone()), file.bytes.len() as u64);
+    assert!(strict.is_err_and(|error| error.to_string().contains("idx1 not used")));
+    // A file without an index is read by a scan and is not damaged.
+    let plain = interleaved_mjpeg_pcm(Idx1::None);
+    let demux = open(&plain.bytes).expect("open");
+    assert_eq!(demux.index_source(), IndexSource::Scan);
+    assert_eq!(demux.repair(), None);
+    let length = plain.bytes.len() as u64;
+    assert!(AviDemux::open_strict(Cursor::new(plain.bytes), length).is_ok());
 }
 
 #[test]
@@ -341,6 +353,7 @@ fn a_cut_recording_reads_up_to_the_cut() {
     let cut = usize::try_from(file.data[3]).unwrap() + 100;
     let mut demux = open(&file.bytes[..cut]).expect("open");
     assert!(demux.truncated());
+    assert!(demux.repair().is_some_and(|repair| repair.truncated));
     let packets = drain(&mut demux);
     assert_eq!(
         packets.len(),

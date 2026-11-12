@@ -2011,10 +2011,19 @@ fn emit<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
 /// first rows, those rows are the output as they stand, without a copy,
 /// as FFmpeg hands out the very buffer a picture was decoded into.
 fn emit_owned<S: Sample>(mut frame: Frame<S>) -> Option<VideoOutput> {
+    if frame.pending.is_some() || !in_place(&mut frame) {
+        return emit(&frame);
+    }
+    emit_planes(&mut frame)
+}
+
+/// Whether [`emit_planes`] can hand out `frame`'s planes as they stand: no
+/// one else holds them, they are 8-bit 4:2:0 with nothing to add, and the
+/// visible part is their first rows.
+fn in_place<S: Sample>(frame: &mut Frame<S>) -> bool {
     let (w, h) = (frame.vis_w as usize, frame.vis_h as usize);
-    let in_place = S::BITS == 8
+    S::BITS == 8
         && !frame.nonexisting
-        && frame.pending.is_none()
         && frame.shown.grain.is_none()
         && frame.chroma() == 1
         && frame.crop_x == 0
@@ -2024,10 +2033,13 @@ fn emit_owned<S: Sample>(mut frame: Frame<S>) -> Option<VideoOutput> {
         && h <= frame.h
         && frame.y.sole()
         && frame.u.sole()
-        && frame.v.sole();
-    if !in_place {
-        return emit(&frame);
-    }
+        && frame.v.sole()
+}
+
+/// The output made of `frame`'s own planes, cut to the visible rows, for
+/// a frame [`in_place`] passed. Its planes are left empty.
+fn emit_planes<S: Sample>(frame: &mut Frame<S>) -> Option<VideoOutput> {
+    let (w, h) = (frame.vis_w as usize, frame.vis_h as usize);
     let mut planes = [&mut frame.y, &mut frame.u, &mut frame.v]
         .map(|plane| plane.take_sole().map(S::into_eight));
     let sizes = [w * h, (w / 2) * (h / 2), (w / 2) * (h / 2)];
@@ -2045,7 +2057,7 @@ fn emit_owned<S: Sample>(mut frame: Frame<S>) -> Option<VideoOutput> {
         std::mem::take(v),
     )
     .ok()?;
-    Some(output_420(&frame, picture, None, None))
+    Some(output_420(frame, picture, None, None))
 }
 
 /// [`emit`] for a picture whose planes are here.
@@ -4661,8 +4673,17 @@ fn run_picture<S: Sample>(job: PictureJob<S>) {
         // only has to pick it up.
         pic.shown = shown;
         pic.seal();
-        let output = if pic.output { emit_whole(&pic) } else { None };
+        // No later picture reads one that is not a reference, so its
+        // planes can be the output as they stand.
+        let output = if !pic.output {
+            None
+        } else if !pic.referenced && in_place(&mut pic) {
+            emit_planes(&mut pic)
+        } else {
+            emit_whole(&pic)
+        };
         progress::Planes {
+            handed_out: pic.y.is_empty(),
             y: std::mem::take(&mut pic.y),
             u: std::mem::take(&mut pic.u),
             v: std::mem::take(&mut pic.v),
@@ -4735,8 +4756,13 @@ fn decode_picture<S: Sample>(
     Ok(())
 }
 
-/// Gives a picture decoded on another thread its finished planes.
+/// Gives a picture decoded on another thread its finished planes. One
+/// whose planes became its output keeps its link to that output instead:
+/// nothing reads such a picture's samples.
 fn fill<S: Sample>(frame: &mut Frame<S>, planes: &progress::Planes<S>) {
+    if planes.handed_out {
+        return;
+    }
     frame.y = planes.y.clone();
     frame.u = planes.u.clone();
     frame.v = planes.v.clone();

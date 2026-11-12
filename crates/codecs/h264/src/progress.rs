@@ -31,6 +31,8 @@ pub(crate) struct Planes<S: Sample> {
     pub u: Shared<S>,
     pub v: Shared<S>,
     pub mb: Shared<Mb>,
+    /// The planes went out as the picture's output, and are empty here.
+    pub handed_out: bool,
     /// The picture in its output form, made by the thread that decoded
     /// it, until it is handed over.
     pub output: Mutex<Option<cutlass_decode::VideoOutput>>,

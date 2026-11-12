@@ -85,9 +85,9 @@ impl<R: Read + Seek> CafDemux<R> {
     }
 
     fn from_input(mut input: Input<BufReader<R>>) -> Result<Self, OpenError> {
-        let scanned = walk::scan(&mut input)?;
+        let mut scanned = walk::scan(&mut input)?;
         let unbounded = scanned.data.len.is_none() && scanned.desc.is_constant();
-        let packets = plan(&scanned, &input)?;
+        let packets = plan(&mut scanned, &input)?;
         let stream = stream_of(&scanned, &packets, unbounded)?;
         let group = if scanned.desc.is_constant() && scanned.desc.frames_per_packet == 1 {
             (PCM_PACKET_BYTES / u64::from(scanned.desc.bytes_per_packet)).max(1)
@@ -359,8 +359,10 @@ fn source(message: impl Into<String>) -> ReadError {
     }
 }
 
-/// The packet layout, checked against the bytes in `data`.
-fn plan<R: Read>(scanned: &Scanned, input: &Input<R>) -> Result<Packets, OpenError> {
+/// The packet layout, checked against the bytes in `data`. The table moves
+/// out of `scanned` rather than being copied: it is the one large thing an
+/// open holds.
+fn plan<R: Read>(scanned: &mut Scanned, input: &Input<R>) -> Result<Packets, OpenError> {
     let desc = &scanned.desc;
     let data_len = scanned.data.len;
     if desc.is_constant() {
@@ -391,7 +393,7 @@ fn plan<R: Read>(scanned: &Scanned, input: &Input<R>) -> Result<Packets, OpenErr
         }
         return Ok(packets);
     }
-    let Some(table) = scanned.table.clone() else {
+    let Some(table) = scanned.table.take() else {
         if input.access() == Access::Forward {
             return Err(malformed(
                 "variable packets need a pakt chunk before data on a forward input",

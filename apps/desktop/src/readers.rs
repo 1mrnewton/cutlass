@@ -408,10 +408,12 @@ mod tests {
     }
 
     /// At the usual 1 ms Segment tick, the 2.5 ms pre-skip is stored as the
-    /// CodecDelay in nanoseconds but the stream's edit counts whole ticks,
-    /// so the reader starts 3 ms in: 24 samples past the exact pre-skip.
+    /// CodecDelay in nanoseconds and the stream's edit counts whole ticks
+    /// (3 ms), but the reader takes the pre-skip in samples from the trim and
+    /// starts on exactly the sample after it, from the start and after a
+    /// seek.
     #[test]
-    fn a_millisecond_webm_rounds_the_opus_pre_skip_to_its_tick() {
+    fn a_millisecond_webm_starts_after_the_exact_opus_pre_skip() {
         let path = std::env::temp_dir().join(format!(
             "cutlass-readers-opus-ms-{}.webm",
             std::process::id()
@@ -421,14 +423,31 @@ mod tests {
         let first = media
             .audio_from(cutlass_model::Micros(0), 480)
             .expect("audio");
-        std::fs::remove_file(&path).expect("remove");
         let first = first.as_f32().expect("f32");
+        assert_eq!(first.len(), 2 * 480);
         for (index, value) in first.iter().enumerate() {
             assert!(
-                (value - expected[2 * 144 + index]).abs() < 1e-6,
+                (value - expected[2 * 120 + index]).abs() < 1e-6,
                 "sample {index}"
             );
         }
+        // Mid-stream, after a seek, the decoder converges on the same
+        // samples: a 24-sample slip would show as noise here.
+        let later = media
+            .audio_from(cutlass_model::Micros(1_000_000), 4800)
+            .expect("audio");
+        std::fs::remove_file(&path).expect("remove");
+        let later = later.as_f32().expect("f32");
+        assert_eq!(later.len(), 2 * 4800);
+        let start = 2 * (120 + 48_000);
+        let (mut signal, mut noise) = (0.0f64, 0.0f64);
+        for (index, value) in later.iter().enumerate() {
+            let want = f64::from(expected[start + index]);
+            signal += want * want;
+            noise += (f64::from(*value) - want).powi(2);
+        }
+        let snr = 10.0 * (signal / noise.max(1e-30)).log10();
+        assert!(snr > 30.0, "SNR {snr:.1} dB after a seek");
     }
 
     /// An `.ogg` Vorbis file opens, probes, and plays the decoder's own

@@ -75,7 +75,7 @@ pub fn rbsp(ebsp: &[u8]) -> Result<Vec<u8>, CodecError> {
     let mut out = Vec::with_capacity(ebsp.len());
     let mut kept = 0usize;
     let mut from = 0usize;
-    while let Some(found) = ebsp[from..].iter().position(|&byte| byte == 0x03) {
+    while let Some(found) = find_three(&ebsp[from..]) {
         let at = from + found;
         if at >= 2 && ebsp[at - 1] == 0 && ebsp[at - 2] == 0 {
             out.extend_from_slice(&ebsp[kept..at]);
@@ -85,6 +85,28 @@ pub fn rbsp(ebsp: &[u8]) -> Result<Vec<u8>, CodecError> {
     }
     out.extend_from_slice(&ebsp[kept..]);
     Ok(out)
+}
+
+/// Where the first 3 in `bytes` is. Eight bytes are looked at a time, and
+/// only a word that may hold one is looked at byte by byte: in a slice's
+/// data a 3 is rare.
+fn find_three(bytes: &[u8]) -> Option<usize> {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGHS: u64 = 0x8080_8080_8080_8080;
+    let (words, rest) = bytes.as_chunks::<8>();
+    for (index, word) in words.iter().enumerate() {
+        // A byte of the word that is 3 is a zero byte here, which sets its
+        // high bit below; other bytes may too, so they are looked at again.
+        let moved = u64::from_le_bytes(*word) ^ (3 * ONES);
+        if moved.wrapping_sub(ONES) & !moved & HIGHS != 0
+            && let Some(found) = word.iter().position(|&byte| byte == 3)
+        {
+            return Some(index * 8 + found);
+        }
+    }
+    rest.iter()
+        .position(|&byte| byte == 3)
+        .map(|found| words.len() * 8 + found)
 }
 
 fn nal_from_ebsp(ebsp: &[u8]) -> Result<Nal, CodecError> {
@@ -397,6 +419,27 @@ fn emulation(rbsp: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn find_three_finds_the_first_three_anywhere() {
+        let mut seed = 7u32;
+        for round in 0..5_000 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let len = (seed >> 8) as usize % 40;
+            let bytes: Vec<u8> = (0..len)
+                .map(|i| {
+                    let mix = seed.wrapping_mul(i as u32 + 1).rotate_left(i as u32);
+                    [0, 3, 2, 4, 0x83, 0x03 ^ 0x80][(mix >> 3) as usize % 6]
+                })
+                .collect();
+            let wanted = bytes.iter().position(|&byte| byte == 3);
+            assert_eq!(
+                super::find_three(&bytes),
+                wanted,
+                "round {round}: {bytes:?}"
+            );
+        }
+    }
+
     use super::{Extension, access_unit, rbsp};
 
     #[test]

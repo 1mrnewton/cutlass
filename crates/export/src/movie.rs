@@ -10,10 +10,12 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use cutlass_codec::ContainerId;
+use cutlass_container::Mux;
 use cutlass_encode::EncodeFactory;
 use cutlass_eval::{Fonts, ReaderFactory};
 use cutlass_flac_container::FlacMux;
 use cutlass_isobmff::{FileBrand, Mp4Mux};
+use cutlass_matroska::MatroskaMux;
 use cutlass_model::Draft;
 use cutlass_mp3_container::Mp3Mux;
 use cutlass_ogg::OggMux;
@@ -71,17 +73,22 @@ pub fn part_path(destination: &Path) -> Option<PathBuf> {
 }
 
 /// Write `request` to `destination` as an MP4, or a QuickTime movie when
-/// the destination ends in `.mov`. A caption sidecar the request asks for
-/// is written in the same folder. `progress` hears the frames done and the
-/// frames in all after each picture, and stops the export by returning
-/// false. Clip sound is each clip's file, mixed as in playback.
+/// the destination ends in `.mov`; or, when `request.container` is
+/// Matroska, as a Matroska file, or WebM when the destination ends in
+/// `.webm`. A caption sidecar the request asks for is written in the same
+/// folder. `progress` hears the frames done and the frames in all after
+/// each picture, and stops the export by returning false. Clip sound is
+/// each clip's file, mixed as in playback.
 pub fn write_movie(
     sources: &MovieSources<'_>,
     request: &ExportRequest,
     destination: &Path,
     progress: &mut dyn FnMut(u64, u64) -> bool,
 ) -> Result<ExportResult, ExportError> {
-    if request.container != ContainerId::Isobmff {
+    if !matches!(
+        request.container,
+        ContainerId::Isobmff | ContainerId::Matroska
+    ) {
         return Err(ExportError::Container);
     }
     let part = part_path(destination).ok_or(ExportError::Path)?;
@@ -102,21 +109,49 @@ fn write_part(
     part: &Path,
     progress: &mut dyn FnMut(u64, u64) -> bool,
 ) -> Result<ExportResult, ExportError> {
-    let brand = if is_mov(part) {
-        FileBrand::Mov
-    } else {
-        FileBrand::Mp4
+    let out = BufWriter::new(File::create(part).map_err(file)?);
+    let (result, writer) = match request.container {
+        ContainerId::Matroska => {
+            let mut mux = if part_named(part, ".webm") {
+                MatroskaMux::webm(out)
+            } else {
+                MatroskaMux::new(out)
+            };
+            let result = encode_movie(sources, request, part, &mut mux, progress)?;
+            (result, mux.into_writer().map_err(ExportError::Mux)?)
+        }
+        _ => {
+            let brand = if part_named(part, ".mov") {
+                FileBrand::Mov
+            } else {
+                FileBrand::Mp4
+            };
+            let mut mux = Mp4Mux::with_brand(out, brand);
+            let result = encode_movie(sources, request, part, &mut mux, progress)?;
+            (result, mux.into_writer().map_err(ExportError::Mux)?)
+        }
     };
-    let mut mux = Mp4Mux::with_brand(BufWriter::new(File::create(part).map_err(file)?), brand);
+    finish(writer)?;
+    Ok(result)
+}
+
+/// Draws, encodes and muxes `request` into `mux`, whatever its container.
+fn encode_movie<M: Mux>(
+    sources: &MovieSources<'_>,
+    request: &ExportRequest,
+    part: &Path,
+    mux: &mut M,
+    progress: &mut dyn FnMut(u64, u64) -> bool,
+) -> Result<ExportResult, ExportError> {
     let mut device = SoftwareDevice::new();
-    let result = export(
+    export(
         ExportRun {
             draft: sources.draft,
             device: &mut device,
             request,
             factory: sources.encoders,
             readers: sources.readers,
-            mux: &mut mux,
+            mux,
             // A caption file goes beside the movie.
             destination: request.sidecar.as_ref().and(part.parent()),
             root: sources.root,
@@ -125,15 +160,7 @@ fn write_part(
             progress: Some(progress),
         },
         file_audio(sources.readers, sources.draft, sources.root),
-    )?;
-    let mut writer = mux.into_writer().map_err(ExportError::Mux)?;
-    writer.flush().map_err(file)?;
-    writer
-        .into_inner()
-        .map_err(|error| file(error.into_error()))?
-        .sync_all()
-        .map_err(file)?;
-    Ok(result)
+    )
 }
 
 /// Write only the timeline's sound over `request.range` to `destination`:
@@ -290,12 +317,13 @@ fn finish(mut writer: BufWriter<File>) -> Result<(), ExportError> {
         .map_err(file)
 }
 
-/// The part file of a `.mov` destination: `.cut.mov.part`.
-fn is_mov(part: &Path) -> bool {
+/// Whether the part file is for a destination ending in `extension`, as
+/// `.cut.mov.part` is for `.mov`.
+fn part_named(part: &Path, extension: &str) -> bool {
     part.file_name()
         .and_then(|name| name.to_str())
         .and_then(|name| name.strip_suffix(".part"))
-        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".mov"))
+        .is_some_and(|name| name.to_ascii_lowercase().ends_with(extension))
 }
 
 fn file(error: std::io::Error) -> ExportError {
@@ -311,7 +339,7 @@ mod tests {
     use cutlass_eval::{NoFonts, ReaderFactory};
     use cutlass_model::{Draft, FrameRate, TimeRange};
 
-    use super::{MovieSources, is_mov, part_path, write_animation, write_sound};
+    use super::{MovieSources, part_named, part_path, write_animation, write_sound};
     use crate::{AudioExport, ExportRequest};
 
     fn sound_request(codec: CodecId, container: ContainerId) -> ExportRequest {
@@ -636,8 +664,8 @@ mod tests {
 
     #[test]
     fn a_mov_destination_names_a_quicktime_movie() {
-        assert!(is_mov(Path::new("/films/.cut.MOV.part")));
-        assert!(!is_mov(Path::new("/films/.cut.mp4.part")));
+        assert!(part_named(Path::new("/films/.cut.MOV.part"), ".mov"));
+        assert!(!part_named(Path::new("/films/.cut.mp4.part"), ".mov"));
     }
 
     #[test]
@@ -851,6 +879,137 @@ mod tests {
         let mut params = params.clone();
         params.extra = cutlass_mpeg4::ADVANCED_SIMPLE.to_vec();
         Ok(Box::new(cutlass_mpeg4::EngineEncoder::open(&params)?))
+    }
+
+    /// Pictures and sound as Matroska and as WebM: the file reads back here,
+    /// in FFmpeg and in GStreamer, with every picture, the encoder's delay
+    /// as CodecDelay, and the sound as long as the range once the delay and
+    /// the end padding are dropped.
+    #[test]
+    fn a_movie_is_written_as_matroska_or_webm() {
+        use cutlass_container::Demux;
+
+        let dir = std::env::temp_dir().join(format!("cutlass-mkv-movie-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let draft = two_colours();
+        let readers = ReaderFactory::new();
+        let mut encoders = EncodeFactory::new();
+        cutlass_mpeg4::register_engine_encoders(&mut encoders);
+        cutlass_vp8::register_engine_encoders(&mut encoders);
+        cutlass_aac::register_encoders(&mut encoders);
+        cutlass_opus::register_encoders(&mut encoders);
+        let sources = MovieSources {
+            draft: &draft,
+            root: None,
+            readers: &readers,
+            fonts: &NoFonts,
+            renderer: None,
+            encoders: &encoders,
+        };
+        let ffprobe = oracle("ffprobe");
+        let ffmpeg = oracle("ffmpeg");
+        for (name, picture, sound) in [
+            ("cut.mkv", CodecId::Mpeg4, CodecId::Aac),
+            ("cut.webm", CodecId::Vp8, CodecId::Opus),
+        ] {
+            let request = ExportRequest {
+                range: TimeRange::new(0, 1_000_000),
+                short_side: 480,
+                codec: picture,
+                bitrate: 400_000,
+                frame_rate: FrameRate::FPS_30,
+                container: ContainerId::Matroska,
+                audio: Some(AudioExport {
+                    codec: sound,
+                    bitrate: 128_000,
+                    sample_rate: 48_000,
+                    channels: 2,
+                    limiter: 0,
+                }),
+                sidecar: None,
+                late_by: 0,
+                constant_rate: false,
+                prores: crate::ProresProfile::Standard,
+            };
+            let path = dir.join(name);
+            let result = super::write_movie(&sources, &request, &path, &mut |_, _| true).unwrap();
+            assert_eq!(result.frames.len(), 30, "{name}");
+            let bytes = std::fs::read(&path).unwrap();
+            let doc_type: &[u8] = if name.ends_with(".webm") {
+                b"webm"
+            } else {
+                b"matroska"
+            };
+            assert!(
+                bytes.windows(doc_type.len()).any(|w| w == doc_type),
+                "{name}"
+            );
+            let length = bytes.len() as u64;
+            let mut demux =
+                cutlass_matroska::MatroskaDemux::open(std::io::Cursor::new(bytes), length).unwrap();
+            let codecs: Vec<_> = demux
+                .streams()
+                .iter()
+                .map(|stream| stream.params().codec().clone())
+                .collect();
+            assert_eq!(
+                codecs,
+                vec![
+                    cutlass_codec::StreamCodec::Known(picture),
+                    cutlass_codec::StreamCodec::Known(sound)
+                ],
+                "{name}"
+            );
+            // The encoder's delay is the track's CodecDelay: AAC's 1024
+            // samples, Opus's pre-skip.
+            let delay = demux.track_entries()[1].codec_delay;
+            assert!(delay > 0, "{name}: no CodecDelay");
+            let mut pictures = 0;
+            while let Some(packet) = demux.read_packet().unwrap() {
+                pictures += usize::from(packet.stream() == 1);
+            }
+            assert_eq!(pictures, 30, "{name}");
+            if let Some(ffprobe) = &ffprobe {
+                assert_eq!(probed_pictures(ffprobe, &path).len(), 30, "{name}");
+            }
+            if let Some(ffmpeg) = &ffmpeg {
+                // The sound decodes to the range's samples: 48,000 a channel.
+                let out = std::process::Command::new(ffmpeg)
+                    .args(["-v", "error", "-i"])
+                    .arg(&path)
+                    .args(["-map", "0:a", "-f", "f32le", "-"])
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "{name}");
+                assert!(
+                    out.stderr.is_empty(),
+                    "{name}: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                assert_eq!(out.stdout.len(), 48_000 * 2 * 4, "{name}: sound length");
+            }
+            if let Some(gst) = oracle_plain("gst-discoverer-1.0") {
+                let out = std::process::Command::new(gst).arg(&path).output().unwrap();
+                let text = String::from_utf8_lossy(&out.stdout);
+                assert!(out.status.success(), "{name}: {text}");
+                assert!(!text.contains("Missing plugins"), "{name}: {text}");
+                assert!(
+                    text.contains("video") && text.contains("audio"),
+                    "{name}: {text}"
+                );
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A tool on the PATH that answers `--help` (GStreamer's have no
+    /// `-version`).
+    fn oracle_plain(name: &str) -> Option<String> {
+        std::process::Command::new(name)
+            .arg("--help")
+            .output()
+            .is_ok_and(|out| out.status.success())
+            .then(|| name.to_owned())
     }
 
     /// Simple, the export default: I then P-VOPs, each sample shown at its

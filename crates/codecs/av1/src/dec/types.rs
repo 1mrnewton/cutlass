@@ -81,7 +81,7 @@ pub const TX_32X16: u8 = 10;
 pub const TX_16X64: u8 = 17;
 pub const TX_64X16: u8 = 18;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Eq)]
 pub struct Mv {
     pub row: i16,
     pub col: i16,
@@ -98,6 +98,19 @@ impl Mv {
             row: row as i16,
             col: col as i16,
         }
+    }
+
+    /// Both components in one word, to compare them at once.
+    #[inline(always)]
+    fn bits(self) -> u32 {
+        u32::from(self.row as u16) | (u32::from(self.col as u16) << 16)
+    }
+}
+
+impl PartialEq for Mv {
+    #[inline(always)]
+    fn eq(&self, other: &Self) -> bool {
+        self.bits() == other.bits()
     }
 }
 

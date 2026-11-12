@@ -133,9 +133,10 @@ fn obus(name: &str, count: usize) -> Vec<Vec<u8>> {
 
 #[test]
 fn a_block_that_stops_for_reference_rows_is_predicted_again_once_they_are_final() {
-    // Without the wait ahead of each chunk of blocks, a block stops at the
-    // first rows of a reference still being decoded that are not
-    // published, and is taken up again: ordinary and warped blocks alike.
+    // A block stops at the first rows of a reference still being decoded
+    // that are not published, and is taken up again: ordinary and warped
+    // blocks alike. With the wait ahead of each chunk of blocks, the
+    // samples are the same.
     let streams = [
         ivf("sb128-tiles.ivf"),
         ivf("level.ivf"),
@@ -149,10 +150,13 @@ fn a_block_that_stops_for_reference_rows_is_predicted_again_once_they_are_final(
         for packets in &streams {
             let one = samples(&decode(&mut core(1), packets).expect("one thread"));
             let mut four = core(4);
-            super::super::lock(&four.px8.spares).rows_ahead = false;
             let got = samples(&decode(&mut four, packets).expect("four threads"));
             assert_eq!(got, one);
             waits += super::super::lock(&four.px8.spares).row_waits;
+            let mut ahead = core(4);
+            super::super::lock(&ahead.px8.spares).rows_ahead = true;
+            let got = samples(&decode(&mut ahead, packets).expect("waits ahead"));
+            assert_eq!(got, one);
         }
         if waits > 0 {
             break;

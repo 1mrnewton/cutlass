@@ -385,10 +385,12 @@ static LUMA8: [LumaFn; 16] = luma_table!(luma8, false);
 static LUMA8_AVG: [LumaFn; 16] = luma_table!(luma8, true);
 
 /// Where a luma block's routine reads, when that and the block's rows in
-/// `dst` all fit: the block's top-left sample. A full-sample position reads
-/// the block alone; any other reads two rows above it and three below,
-/// and 32 bytes (16 wide) or 16 (8 wide) from two samples left of each
-/// row, whatever its offsets, which covers each source's reach.
+/// `dst` all fit: the block's top-left sample. Each direction is read
+/// beyond the block only when it has an offset. Without a horizontal one,
+/// every source reads the `w` samples of the block's columns; with one,
+/// 32 bytes (16 wide) or 16 (8 wide) from two samples left of each row,
+/// which covers each source's reach. Without a vertical one, the sources
+/// read the block's rows; with one, two rows above them and three below.
 #[inline]
 fn luma_reach(block: &Block<'_>, frac: (u8, u8), dst: (&[u8], usize)) -> Option<*const u8> {
     let Block {
@@ -404,16 +406,16 @@ fn luma_reach(block: &Block<'_>, frac: (u8, u8), dst: (&[u8], usize)) -> Option<
     if dst_stride < w || (h - 1) * dst_stride + w > dst.len() {
         return None;
     }
-    let last = if frac == (0, 0) {
-        (y + h - 1).checked_mul(stride)?.checked_add(x + w)?
-    } else {
-        if x < 2 || y < 2 || stride < w + 5 {
-            return None;
-        }
-        (y + h + 2)
-            .checked_mul(stride)?
-            .checked_add(x + 2 * w - 2)?
-    };
+    // Samples read left of the block and in each row from there.
+    let (left, span) = if frac.0 == 0 { (0, w) } else { (2, 2 * w) };
+    // Rows read above the block's first and below its last.
+    let (above, below) = if frac.1 == 0 { (0, 0) } else { (2, 3) };
+    if x < left || y < above || (frac.0 != 0 && stride < w + 5) {
+        return None;
+    }
+    let last = (y + h - 1 + below)
+        .checked_mul(stride)?
+        .checked_add(x - left + span)?;
     if last > src.len() {
         return None;
     }

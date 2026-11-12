@@ -66,9 +66,9 @@ pub fn weight_block(
 
 /// A luma block at quarter-sample offsets `frac` (each 0 to 3), written to
 /// `dst`, whose rows are `dst_stride` apart. Covers blocks 8 or 16 wide and
-/// at most 16 high; `false` means nothing was done. The source must hold
-/// the two samples before the block and the three after it, in both
-/// directions.
+/// at most 16 high; `false` means nothing was done. In each direction with
+/// an offset, the source must hold the two samples before the block and
+/// the three after it.
 #[inline]
 pub fn luma_block(dst: &mut [u8], dst_stride: usize, block: Block<'_>, frac: (u8, u8)) -> bool {
     kernel!(luma_block(dst, dst_stride, block, frac))
@@ -353,6 +353,55 @@ mod tests {
                 &plane[100..100 + n]
             ));
             assert_eq!(fast, plain, "average of {n}");
+        }
+    }
+
+    #[test]
+    fn blocks_at_the_plane_edges_match_the_plain_ones() {
+        // Every place in a plane with no samples around it. A direction
+        // without an offset needs none beyond the block, so a block at the
+        // plane's edge is taken whenever its offset reaches no further.
+        let mut rng = Lcg(29);
+        let (stride, rows) = (36usize, 36usize);
+        let plane: Vec<u8> = (0..stride * rows).map(|_| rng.sample()).collect();
+        let dst_stride = 16;
+        for (w, h) in [(8, 4), (8, 8), (16, 8), (16, 16)] {
+            for frac in (0..16u8).map(|i| (i % 4, i / 4)) {
+                for y in 0..=rows - h {
+                    for x in 0..=stride - w {
+                        let block = super::Block {
+                            src: &plane,
+                            stride,
+                            at: (x, y),
+                            size: (w, h),
+                        };
+                        // The clause's two samples before the block in a
+                        // direction with an offset, and the routine's last
+                        // load: the block's row, or 2w bytes from two
+                        // samples left of it, three rows below the block
+                        // with a vertical offset. What lies past the
+                        // picture's right edge is the caller's to check.
+                        let before = |at: usize, offset: u8| offset == 0 || at >= 2;
+                        let fits = before(x, frac.0) && before(y, frac.1) && {
+                            let last_row = y + h - 1 + if frac.1 == 0 { 0 } else { 3 };
+                            let last_read = if frac.0 == 0 { x + w } else { x - 2 + 2 * w };
+                            last_row * stride + last_read <= plane.len()
+                        };
+                        // The plain twin reads without checking first.
+                        if !fits && !cfg!(target_arch = "aarch64") {
+                            continue;
+                        }
+                        let mut fast = vec![7u8; dst_stride * 16];
+                        let taken = super::luma_block(&mut fast, dst_stride, block, frac);
+                        assert_eq!(taken, fits, "luma {w}x{h} at {x},{y} frac {frac:?}");
+                        if taken {
+                            let mut plain = vec![7u8; dst_stride * 16];
+                            assert!(scalar::luma_block(&mut plain, dst_stride, block, frac));
+                            assert_eq!(fast, plain, "luma {w}x{h} at {x},{y} frac {frac:?}");
+                        }
+                    }
+                }
+            }
         }
     }
 

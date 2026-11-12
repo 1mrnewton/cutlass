@@ -22,7 +22,7 @@ mod probe;
 mod walk;
 
 pub use demux::WavDemux;
-pub use format::WavFormat;
+pub use format::{WavFormat, parse_wave_format};
 pub use limits::{
     CHANNEL_MASK_OFFSET, EXTRA_HEADER, MAX_CHUNKS, MAX_DEPTH, MAX_DS64_ROWS, MAX_KEPT_CHUNK,
     MAX_MPEG_RESYNC, PROBE_BYTES,

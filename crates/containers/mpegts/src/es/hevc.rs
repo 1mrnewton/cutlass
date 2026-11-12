@@ -161,6 +161,17 @@ fn skip_profile_tier_level(bits: &mut Bits<'_>, max_sub_layers_minus1: u32) -> O
 /// The id and the cropped picture size of an SPS RBSP after its unit
 /// header (clause 7.3.2.2.1).
 fn parse_sps(rbsp: &[u8]) -> Option<(u32, u32, u32)> {
+    parse_sps_fields(rbsp).map(|(id, width, height, _)| (id, width, height))
+}
+
+/// `sps_max_num_reorder_pics` of the highest sub-layer, from an SPS RBSP
+/// after its two-byte NAL header (clause 7.3.2.2).
+#[must_use]
+pub fn reorder_pictures(rbsp: &[u8]) -> Option<u32> {
+    parse_sps_fields(rbsp).and_then(|(.., reorder)| reorder)
+}
+
+fn parse_sps_fields(rbsp: &[u8]) -> Option<(u32, u32, u32, Option<u32>)> {
     let mut bits = Bits::new(rbsp);
     bits.skip(4)?;
     let max_sub_layers_minus1 = bits.bits(3)?;
@@ -197,15 +208,32 @@ fn parse_sps(rbsp: &[u8]) -> Option<(u32, u32, u32)> {
     };
     let crop_x = crop[0].checked_add(crop[1])?.checked_mul(unit_x)?;
     let crop_y = crop[2].checked_add(crop[3])?.checked_mul(unit_y)?;
+    let reorder = sub_layer_reorder(&mut bits, max_sub_layers_minus1);
     match (width.checked_sub(crop_x), height.checked_sub(crop_y)) {
-        (Some(w), Some(h)) if w > 0 && h > 0 => Some((id, w, h)),
-        _ => (width > 0 && height > 0).then_some((id, width, height)),
+        (Some(w), Some(h)) if w > 0 && h > 0 => Some((id, w, h, reorder)),
+        _ => (width > 0 && height > 0).then_some((id, width, height, reorder)),
     }
+}
+
+/// From the bit depths on: the highest sub-layer's reorder count.
+fn sub_layer_reorder(bits: &mut Bits<'_>, max_sub_layers_minus1: u32) -> Option<u32> {
+    bits.ue()?;
+    bits.ue()?;
+    bits.ue()?;
+    let all = bits.bit()?;
+    let first = if all { 0 } else { max_sub_layers_minus1 };
+    let mut reorder = 0;
+    for _ in first..=max_sub_layers_minus1 {
+        bits.ue()?;
+        reorder = bits.ue()?;
+        bits.ue()?;
+    }
+    (reorder <= 16).then_some(reorder)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Hevc, parse_sps};
+    use super::{Hevc, parse_sps, reorder_pictures};
     use crate::es::bits::unescape;
     use crate::es::video::{Class, Syntax};
 
@@ -256,5 +284,19 @@ mod tests {
         let mut rbsp = Vec::new();
         unescape(&sps[2..], 4096, &mut rbsp);
         assert_eq!(parse_sps(&rbsp), Some((0, 1920, 1080)));
+    }
+
+    #[test]
+    fn the_sps_states_the_reorder_depth() {
+        // A libx265 SPS from FFmpeg 8.1.1 at 320x240 with `bframes=3`;
+        // FFmpeg's `trace_headers` reads sps_max_num_reorder_pics 2.
+        let sps = [
+            0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00,
+            0x00, 0x03, 0x00, 0x3C, 0xA0, 0x0A, 0x08, 0x0F, 0x16, 0x59, 0x59, 0x64, 0x93, 0x2B,
+            0xC0, 0x5A, 0x02, 0x00, 0x00, 0x03, 0x00, 0x02, 0x00, 0x00, 0x03, 0x00, 0x32, 0x10,
+        ];
+        let mut rbsp = Vec::new();
+        unescape(&sps, sps.len(), &mut rbsp);
+        assert_eq!(reorder_pictures(&rbsp[2..]), Some(2));
     }
 }

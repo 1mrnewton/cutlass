@@ -33,6 +33,9 @@ struct Sps {
     separate_colour_plane: bool,
     width: u32,
     height: u32,
+    /// Pictures that may come before one in decode order and after it in
+    /// output order: `max_num_reorder_frames`, stated or inferred.
+    reorder: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -318,7 +321,8 @@ fn skip_scaling_list(bits: &mut Bits<'_>, size: u32) -> Option<()> {
 fn parse_sps(rbsp: &[u8]) -> Option<Sps> {
     let mut bits = Bits::new(rbsp);
     let profile = bits.bits(8)?;
-    bits.skip(16)?;
+    let constraints = bits.bits(8)?;
+    let level = bits.bits(8)?;
     let id = bits.ue()?;
     if id > 31 {
         return None;
@@ -349,7 +353,8 @@ fn parse_sps(rbsp: &[u8]) -> Option<Sps> {
     if log2_max_frame_num > 16 {
         return None;
     }
-    match bits.ue()? {
+    let poc_type = bits.ue()?;
+    match poc_type {
         0 => {
             bits.ue()?;
         }
@@ -382,6 +387,25 @@ fn parse_sps(rbsp: &[u8]) -> Option<Sps> {
     } else {
         [0; 4]
     };
+    let field_factor = if frame_mbs_only { 1 } else { 2 };
+    // Picture order count type 2 is output order: nothing is reordered.
+    let reorder = if poc_type == 2 {
+        0
+    } else {
+        let stated = if bits.bit()? {
+            vui_reorder(&mut bits)
+        } else {
+            None
+        };
+        stated.unwrap_or_else(|| {
+            inferred_reorder(
+                profile,
+                constraints,
+                level,
+                width_mbs.saturating_mul(height_units.saturating_mul(field_factor)),
+            )
+        })
+    };
     let chroma_array = if separate_colour_plane {
         0
     } else {
@@ -392,7 +416,6 @@ fn parse_sps(rbsp: &[u8]) -> Option<Sps> {
         2 => (2, 1),
         _ => (1, 1),
     };
-    let field_factor = if frame_mbs_only { 1 } else { 2 };
     let width = width_mbs.checked_mul(16)?;
     let height = height_units.checked_mul(16)?.checked_mul(field_factor)?;
     let crop_x = (crop[0].checked_add(crop[1])?).checked_mul(unit_x)?;
@@ -408,12 +431,109 @@ fn parse_sps(rbsp: &[u8]) -> Option<Sps> {
         separate_colour_plane,
         width,
         height,
+        reorder,
     })
+}
+
+/// `max_num_reorder_frames` of an SPS RBSP after its NAL header, stated in
+/// its VUI or inferred from its level (clause E.2.1).
+#[must_use]
+pub fn reorder_frames(rbsp: &[u8]) -> Option<u32> {
+    parse_sps(rbsp).map(|sps| sps.reorder)
+}
+
+/// Reads the VUI (clause E.1.1) up to `max_num_reorder_frames`; `None` when
+/// it has no bitstream restriction or ends early.
+fn vui_reorder(bits: &mut Bits<'_>) -> Option<u32> {
+    if bits.bit()? && bits.bits(8)? == 255 {
+        bits.skip(32)?;
+    }
+    if bits.bit()? {
+        bits.skip(1)?;
+    }
+    if bits.bit()? {
+        bits.skip(4)?;
+        if bits.bit()? {
+            bits.skip(24)?;
+        }
+    }
+    if bits.bit()? {
+        bits.ue()?;
+        bits.ue()?;
+    }
+    if bits.bit()? {
+        bits.skip(65)?;
+    }
+    let nal_hrd = bits.bit()?;
+    if nal_hrd {
+        skip_hrd(bits)?;
+    }
+    let vcl_hrd = bits.bit()?;
+    if vcl_hrd {
+        skip_hrd(bits)?;
+    }
+    if nal_hrd || vcl_hrd {
+        bits.skip(1)?;
+    }
+    bits.skip(1)?;
+    if !bits.bit()? {
+        return None;
+    }
+    bits.skip(1)?;
+    for _ in 0..4 {
+        bits.ue()?;
+    }
+    let reorder = bits.ue()?;
+    (reorder <= 16).then_some(reorder)
+}
+
+/// Skips `hrd_parameters()` (clause E.1.2).
+fn skip_hrd(bits: &mut Bits<'_>) -> Option<()> {
+    let count = bits.ue()?.checked_add(1)?;
+    if count > 32 {
+        return None;
+    }
+    bits.skip(8)?;
+    for _ in 0..count {
+        bits.ue()?;
+        bits.ue()?;
+        bits.skip(1)?;
+    }
+    bits.skip(20)
+}
+
+/// `max_num_reorder_frames` when the VUI does not state it: 0 for the
+/// intra profiles that set `constraint_set3_flag`, else `MaxDpbFrames` of
+/// the level (Table A-1), at most 16.
+fn inferred_reorder(profile: u32, constraints: u32, level: u32, frame_mbs: u32) -> u32 {
+    let intra = constraints & 0x10 != 0 && matches!(profile, 44 | 86 | 100 | 110 | 122 | 244);
+    if intra {
+        return 0;
+    }
+    // Level 1b is level_idc 11 with constraint_set3 in Baseline, Main and
+    // Extended, or level_idc 9.
+    let level_1b = level == 9 || (level == 11 && constraints & 0x10 != 0);
+    let max_dpb_mbs = match level {
+        _ if level_1b => 396,
+        10 => 396,
+        11 => 900,
+        12 | 13 | 20 => 2376,
+        21 => 4752,
+        22 | 30 => 8100,
+        31 => 18_000,
+        32 => 20_480,
+        40 | 41 => 32_768,
+        42 => 34_816,
+        50 => 110_400,
+        51 | 52 => 184_320,
+        _ => 696_320,
+    };
+    (max_dpb_mbs / frame_mbs.max(1)).min(16)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{has_recovery_point, parse_sps};
+    use super::{has_recovery_point, inferred_reorder, parse_sps, reorder_frames};
 
     #[test]
     fn a_1080p_high_profile_sps_reads_its_cropped_size() {
@@ -436,5 +556,38 @@ mod tests {
         assert!(has_recovery_point(&[5, 2, 0xAA, 0xBB, 6, 1, 0x84, 0x80]));
         assert!(!has_recovery_point(&[5, 2, 0xAA, 0xBB, 0x80]));
         assert!(!has_recovery_point(&[0xFF, 0xFF]));
+    }
+
+    fn rbsp(nal: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        super::unescape(nal, nal.len(), &mut out);
+        out.split_off(1)
+    }
+
+    #[test]
+    fn the_vui_states_the_reorder_depth() {
+        // libx264 SPS units from FFmpeg 8.1.1 at 320x240: `-bf 3` and
+        // `-bf 0`. FFmpeg's `trace_headers` reads max_num_reorder_frames
+        // 2 and 0 from them.
+        let three = [
+            0x67, 0x64, 0x00, 0x0D, 0xAC, 0xD9, 0x41, 0x41, 0xFB, 0x01, 0x10, 0x00, 0x00, 0x03,
+            0x00, 0x10, 0x00, 0x00, 0x03, 0x03, 0x20, 0xF1, 0x42, 0x99, 0x60,
+        ];
+        let none = [
+            0x67, 0x64, 0x00, 0x0D, 0xAC, 0xB2, 0x02, 0x83, 0xF6, 0x02, 0x20, 0x00, 0x00, 0x03,
+            0x00, 0x20, 0x00, 0x00, 0x06, 0x41, 0xE2, 0x85, 0x49,
+        ];
+        assert_eq!(reorder_frames(&rbsp(&three)), Some(2));
+        assert_eq!(reorder_frames(&rbsp(&none)), Some(0));
+    }
+
+    #[test]
+    fn without_a_vui_the_level_bounds_the_reorder_depth() {
+        // Level 3.0 at 320x240: 8100 / 300 macroblocks, capped at 16.
+        assert_eq!(inferred_reorder(100, 0, 30, 300), 16);
+        // Level 4.0 at 1920x1088: 32768 / 8160.
+        assert_eq!(inferred_reorder(100, 0, 40, 8160), 4);
+        // High 10 Intra.
+        assert_eq!(inferred_reorder(110, 0x10, 40, 8160), 0);
     }
 }

@@ -834,3 +834,81 @@ fn other_timescales_are_moved_to_the_90_khz_clock() {
         assert_eq!(*time, want, "frame {index}");
     }
 }
+
+/// An encoder that reports only presentation times: pictures in decode
+/// order I P B B P B B, each given a decode time equal to its presentation
+/// time. Refused as it is; with derived decode times every picture reads
+/// back at its presentation time, decode times rise and are never after
+/// the presentation, and the audio decodes when it shows.
+#[test]
+fn decode_times_are_derived_from_presentation_times() {
+    let mut rng = Rng(0x0BAD_F00D);
+    let mut units = Vec::new();
+    for group in 0..17_i64 {
+        let order: &[i64] = if group == 0 { &[0] } else { &[2, 0, 1] };
+        for &offset in order {
+            let frame = if group == 0 {
+                0
+            } else {
+                group * 3 - 2 + offset
+            };
+            let pts = frame * 3600;
+            units.push(Unit {
+                track: 0,
+                bytes: picture(&mut rng, frame % 24 == 0, 300),
+                pts,
+                dts: pts,
+                key: frame % 24 == 0,
+            });
+        }
+    }
+    for index in 0..80 {
+        units.push(Unit {
+            track: 1,
+            bytes: rng.body(200),
+            pts: index * 1920,
+            dts: index * 1920,
+            key: true,
+        });
+    }
+    let refused = std::panic::catch_unwind(|| mux(&units, MuxOptions::default()));
+    assert!(refused.is_err(), "decode times that go back are refused");
+
+    let bytes = mux(
+        &units,
+        MuxOptions {
+            derive_decode_times: true,
+            ..MuxOptions::default()
+        },
+    );
+    let mut demux = open(&bytes);
+    let read = drain(&mut demux);
+    let video = track(&read, 0);
+    let sent = track(&units, 0);
+    assert_eq!(video.len(), sent.len());
+    let reorder = {
+        let mut rbsp = Vec::new();
+        cutlass_mpegts::es::bits::unescape(SPS, SPS.len(), &mut rbsp);
+        cutlass_mpegts::es::h264::reorder_frames(&rbsp[1..]).expect("reorder")
+    };
+    assert!(reorder >= 1, "this pattern needs one picture of reorder");
+    let mut sorted: Vec<i64> = sent.iter().map(|unit| unit.pts + DELAY).collect();
+    sorted.sort_unstable();
+    for (index, (got, want)) in video.iter().zip(&sent).enumerate() {
+        assert_eq!(got.pts, want.pts + DELAY, "picture {index}");
+        assert_eq!(got.bytes, want.bytes, "picture {index}");
+        assert!(
+            got.dts <= got.pts,
+            "picture {index}: {} > {}",
+            got.dts,
+            got.pts
+        );
+        if let Some(rank) = index.checked_sub(reorder as usize) {
+            assert_eq!(got.dts, sorted[rank], "picture {index}");
+        }
+    }
+    assert!(video.windows(2).all(|pair| pair[0].dts < pair[1].dts));
+    for unit in track(&read, 1) {
+        assert_eq!(unit.dts, unit.pts);
+    }
+}

@@ -73,6 +73,15 @@ pub struct MuxOptions {
     /// Ticks of the 90 kHz clock added to every timestamp.
     pub delay: i64,
     pub limits: Limits,
+    /// Ignore the packets' decode times and derive them from the
+    /// presentation times, for a source that gives packets in decode order
+    /// without knowing when each decodes (an encoder that reports only
+    /// PTS, or an MP4 whose composition offsets go negative). A stream's
+    /// decode time trails its presentation times by its reorder depth: the
+    /// H.264 `max_num_reorder_frames` or HEVC `sps_max_num_reorder_pics`
+    /// from its parameter sets, one picture for MPEG-2 and MPEG-4 Part 2,
+    /// and none for audio.
+    pub derive_decode_times: bool,
 }
 
 impl Default for MuxOptions {
@@ -81,6 +90,7 @@ impl Default for MuxOptions {
             packet_size: PacketSize::Ts,
             delay: 126_000,
             limits: Limits::standard(),
+            derive_decode_times: false,
         }
     }
 }
@@ -126,6 +136,28 @@ struct Track {
     last_dts: Option<i64>,
     /// Units shaped and waiting to be written, in decode order.
     held: std::collections::VecDeque<Held>,
+    /// Decode times being derived: see [`Derive`].
+    derive: Derive,
+}
+
+/// The state of [`MuxOptions::derive_decode_times`] for one stream.
+///
+/// With reorder depth `R`, the `i`-th unit in decode order decodes at the
+/// `(i - R)`-th smallest presentation time of the stream, which is final
+/// once unit `i` has arrived. The first `R` units decode one picture
+/// length apart before the smallest. This is how x264 times its output.
+#[derive(Default)]
+struct Derive {
+    /// `R`, once the first unit gave it.
+    reorder: Option<u32>,
+    /// Presentation times not yet used as a decode time; at most `R + 1`.
+    order: std::collections::BinaryHeap<std::cmp::Reverse<i64>>,
+    /// Units seen.
+    count: u64,
+    /// The first `R` units, until the smallest presentation time is known.
+    waiting: Vec<Held>,
+    /// One picture's length, from the first packet that states one.
+    step: Option<i64>,
 }
 
 /// One access unit ready to be written.
@@ -511,15 +543,15 @@ impl<W: Write> TsMux<W> {
         ) else {
             return Err(MuxError::MissingTimestamp);
         };
-        let dts = self.clock_time(dts, scale)?;
+        let derive = self.options.derive_decode_times;
+        let dts = if derive {
+            0
+        } else {
+            self.clock_time(dts, scale)?
+        };
         let pts = self.clock_time(pts, scale)?;
-        if pts < dts {
-            return Err(rejected(format!("PTS {pts} is before DTS {dts}")));
-        }
-        if self.tracks[index].last_dts.is_some_and(|last| dts < last) {
-            return Err(rejected(
-                "decode times of a stream must not go back".to_owned(),
-            ));
+        if !derive {
+            self.check_times(index, dts, pts)?;
         }
         let declared = packet.bytes().len() as u64;
         if declared > self.options.limits.max_packet_bytes {
@@ -539,16 +571,120 @@ impl<W: Write> TsMux<W> {
                 limit: 0xFFFF - 13,
             });
         }
-        self.tracks[index].last_dts = Some(dts);
-        self.held_bytes = self.held_bytes.saturating_add(bytes.len());
-        self.tracks[index].held.push_back(Held {
+        let held = Held {
             dts,
             pts,
             bytes,
             keyframe,
             declared,
-        });
+        };
+        if derive {
+            let step = match time.duration() {
+                Some(length) if length > 0 => {
+                    Some(self.clock_time(length, scale)? - self.options.delay)
+                }
+                _ => None,
+            };
+            self.derive(index, held, step)?;
+        } else {
+            self.hold(index, held);
+        }
         self.release(false)
+    }
+
+    fn check_times(&self, index: usize, dts: i64, pts: i64) -> Result<(), MuxError> {
+        if pts < dts {
+            return Err(rejected(format!("PTS {pts} is before DTS {dts}")));
+        }
+        if self.tracks[index].last_dts.is_some_and(|last| dts < last) {
+            return Err(rejected(
+                "decode times of a stream must not go back".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn hold(&mut self, index: usize, held: Held) {
+        self.tracks[index].last_dts = Some(held.dts);
+        self.held_bytes = self.held_bytes.saturating_add(held.bytes.len());
+        self.tracks[index].held.push_back(held);
+    }
+
+    /// Gives `held` its derived decode time, or keeps it until the
+    /// stream's smallest presentation time is known.
+    fn derive(&mut self, index: usize, mut held: Held, step: Option<i64>) -> Result<(), MuxError> {
+        let track = &mut self.tracks[index];
+        let reorder = *track
+            .derive
+            .reorder
+            .get_or_insert_with(|| reorder_depth(&track.shape, track.video, &held.bytes));
+        if track.derive.step.is_none() {
+            track.derive.step = step.filter(|step| *step > 0);
+        }
+        track.derive.order.push(std::cmp::Reverse(held.pts));
+        let seen = track.derive.count;
+        track.derive.count += 1;
+        if seen < u64::from(reorder) {
+            track.derive.waiting.push(held);
+            return Ok(());
+        }
+        let Some(std::cmp::Reverse(dts)) = track.derive.order.pop() else {
+            return Ok(());
+        };
+        if seen == u64::from(reorder) {
+            self.resolve(index, dts)?;
+        }
+        held.dts = dts;
+        self.check_times(index, held.dts, held.pts)?;
+        self.hold(index, held);
+        Ok(())
+    }
+
+    /// Times the units waiting on `index` one picture apart before
+    /// `smallest`, the stream's smallest presentation time.
+    fn resolve(&mut self, index: usize, smallest: i64) -> Result<(), MuxError> {
+        let waiting = std::mem::take(&mut self.tracks[index].derive.waiting);
+        let count = waiting.len() as i64;
+        if count == 0 {
+            return Ok(());
+        }
+        let mut times: Vec<i64> = waiting.iter().map(|held| held.pts).collect();
+        times.push(smallest);
+        times.sort_unstable();
+        let gap = times
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .filter(|gap| *gap > 0)
+            .min();
+        // A picture's length, but never so long that the first decode time
+        // falls before zero.
+        let step = self.tracks[index]
+            .derive
+            .step
+            .or(gap)
+            .unwrap_or(CLOCK / 25)
+            .min(smallest / count)
+            .max(1);
+        for (at, mut held) in (0_i64..).zip(waiting) {
+            held.dts = smallest - (count - at) * step;
+            self.check_times(index, held.dts, held.pts)?;
+            self.hold(index, held);
+        }
+        Ok(())
+    }
+
+    /// Gives every unit still waiting for its decode time one: the stream
+    /// ended before its reorder depth was reached.
+    fn resolve_all(&mut self) -> Result<(), MuxError> {
+        for index in 0..self.tracks.len() {
+            if let Some(std::cmp::Reverse(smallest)) =
+                self.tracks[index].derive.order.peek().copied()
+                && !self.tracks[index].derive.waiting.is_empty()
+            {
+                self.resolve(index, smallest)?;
+            }
+        }
+        Ok(())
     }
 
     /// Writes held units in decode order while one may leave: every stream
@@ -798,6 +934,7 @@ impl<W: Write> Mux for TsMux<W> {
             continuity: 0,
             last_dts: None,
             held: std::collections::VecDeque::new(),
+            derive: Derive::default(),
         });
         let index = self.tracks.len() - 1;
         if !stream.params.extradata().is_empty()
@@ -841,7 +978,7 @@ impl<W: Write> Mux for TsMux<W> {
                 return Err(FailedMux::incomplete(self.payload, error));
             }
         }
-        if let Err(error) = self.release(true) {
+        if let Err(error) = self.resolve_all().and_then(|()| self.release(true)) {
             let error = self.fail(error);
             return Err(FailedMux::incomplete(self.payload, error));
         }
@@ -909,6 +1046,45 @@ fn is_adts(bytes: &[u8]) -> bool {
         at += length;
     }
     !bytes.is_empty() && at == bytes.len()
+}
+
+/// The reorder depth [`MuxOptions::derive_decode_times`] uses for a
+/// stream: from the SPS in its parameter sets or first unit for H.264 and
+/// HEVC (16, the most either allows, when there is none), one picture for
+/// MPEG-2 and MPEG-4 Part 2, none for audio.
+fn reorder_depth(shape: &Shape, video: bool, unit: &[u8]) -> u32 {
+    let stated = match shape {
+        Shape::H264 { params, .. } => sps_rbsp(params, unit, |header| header & 0x1F == 7, 1)
+            .and_then(|rbsp| crate::es::h264::reorder_frames(&rbsp)),
+        Shape::Hevc { params, .. } => {
+            sps_rbsp(params, unit, |header| (header >> 1) & 0x3F == 33, 2)
+                .and_then(|rbsp| crate::es::hevc::reorder_pictures(&rbsp))
+        }
+        Shape::Mpeg2 { .. } => return 1,
+        _ if video => return 1,
+        _ => return 0,
+    };
+    stated.unwrap_or(16)
+}
+
+/// The RBSP after the NAL header of the first unit in the Annex B bytes of
+/// `params`, then of `unit`, whose first header byte `is_sps` accepts.
+fn sps_rbsp(params: &[u8], unit: &[u8], is_sps: fn(u8) -> bool, header: usize) -> Option<Vec<u8>> {
+    for bytes in [params, unit] {
+        let mut at = find_start_code(bytes, 0);
+        while let Some(start) = at {
+            let body = start + 3;
+            let next = find_start_code(bytes, body);
+            if bytes.get(body).is_some_and(|&byte| is_sps(byte)) {
+                let end = next.unwrap_or(bytes.len());
+                let mut rbsp = Vec::new();
+                crate::es::bits::unescape(&bytes[body..end], 4096, &mut rbsp);
+                return rbsp.get(header..).map(<[u8]>::to_vec);
+            }
+            at = next;
+        }
+    }
+    None
 }
 
 fn rejected(message: String) -> MuxError {

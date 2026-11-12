@@ -24,7 +24,8 @@
 //! the accepted packets, with times moved by the mux delay.
 //!
 //! `fuzz_seeds_*` run on every `cargo test`. The long campaigns are
-//! `#[ignore]`; `TS_FUZZ_SECS` sets their length (default 60 s).
+//! `#[ignore]`; `TS_FUZZ_SECS` sets their length (default 60 s) and
+//! `TS_FUZZ_SEED` their first seed (default 1000).
 #![allow(
     clippy::expect_used,
     clippy::panic,
@@ -935,12 +936,14 @@ fn session_payload(rng: &mut Rng, track: &mut SessionTrack, clean: bool) -> (Vec
 /// One session: `Some(packets)` read back when it finished clean.
 fn mux_session(rng: &mut Rng, label: &str) -> Option<usize> {
     let clean = rng.chance(40);
+    let derive = rng.chance(4);
     let options = MuxOptions {
         packet_size: if rng.chance(30) {
             cutlass_mpegts::packet::PacketSize::M2ts
         } else {
             cutlass_mpegts::packet::PacketSize::Ts
         },
+        derive_decode_times: derive,
         ..MuxOptions::default()
     };
     let mut mux = TsMux::with_options(Vec::new(), options);
@@ -1087,7 +1090,27 @@ fn mux_session(rng: &mut Rng, label: &str) -> Option<usize> {
         // A track without packets is not in the file's streams.
         assert_eq!(want.len(), have.len(), "{label}: track {index} count");
         for (unit, (want, have)) in want.iter().zip(have).enumerate() {
-            assert_eq!(want, have, "{label}: track {index} unit {unit}");
+            if derive {
+                // Derived decode times follow the muxer's rule, checked in
+                // the behavior tests; here they must only be in order.
+                let have = Expected {
+                    dts: want.dts,
+                    ..have.clone()
+                };
+                assert_eq!(*want, have, "{label}: track {index} unit {unit}");
+            } else {
+                assert_eq!(want, have, "{label}: track {index} unit {unit}");
+            }
+        }
+        if derive {
+            assert!(
+                have.iter().all(|unit| unit.dts <= unit.pts),
+                "{label}: track {index}: a derived decode time after its picture"
+            );
+            assert!(
+                have.windows(2).all(|pair| pair[0].dts <= pair[1].dts),
+                "{label}: track {index}: derived decode times go back"
+            );
         }
         read += have.len();
     }
@@ -1136,6 +1159,14 @@ fn the_corpus_reads_intact() {
     }
 }
 
+/// The first seed of a long campaign: `TS_FUZZ_SEED`, default 1000.
+fn campaign_seed() -> u64 {
+    std::env::var("TS_FUZZ_SEED")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1_000)
+}
+
 fn campaign_length() -> Duration {
     let secs = std::env::var("TS_FUZZ_SECS")
         .ok()
@@ -1149,7 +1180,8 @@ fn campaign_length() -> Duration {
 fn fuzz_campaign_demux() {
     let length = campaign_length();
     let started = Instant::now();
-    let mut seed = 1_000;
+    let first = campaign_seed();
+    let mut seed = first;
     let mut inputs = 0;
     let mut slowest = Duration::ZERO;
     while started.elapsed() < length {
@@ -1158,8 +1190,8 @@ fn fuzz_campaign_demux() {
         seed += 1;
     }
     eprintln!(
-        "demux campaign: {inputs} mutants over {} seeds in {:.1} s, slowest input {:.1} ms",
-        seed - 1_000,
+        "demux campaign: {inputs} mutants over seeds {first} to {} in {:.1} s, slowest input {:.1} ms",
+        seed - 1,
         started.elapsed().as_secs_f64(),
         slowest.as_secs_f64() * 1000.0
     );
@@ -1170,7 +1202,8 @@ fn fuzz_campaign_demux() {
 fn fuzz_campaign_mux() {
     let length = campaign_length();
     let started = Instant::now();
-    let mut seed = 1_000;
+    let first = campaign_seed();
+    let mut seed = first;
     let mut sessions = 0;
     let mut finished = 0;
     let mut packets = 0;
@@ -1182,7 +1215,8 @@ fn fuzz_campaign_mux() {
         seed += 1;
     }
     eprintln!(
-        "mux campaign: {sessions} sessions ({finished} clean ones read back, {packets} packets) in {:.1} s",
+        "mux campaign: {sessions} sessions over seeds {first} to {} ({finished} clean ones read back, {packets} packets) in {:.1} s",
+        seed - 1,
         started.elapsed().as_secs_f64()
     );
     assert!(packets > 0, "no packet was muxed and read back");

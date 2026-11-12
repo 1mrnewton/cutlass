@@ -225,7 +225,20 @@ impl FilterInfo {
                     c += usize::from(width);
                     continue;
                 }
-                let m = &mi[c];
+                let mut m = &mi[c];
+                // The first row may cross a block whose even rows hold
+                // only its edges (parsing's mode info, see
+                // `MiFill::OddRows`): the odd row below is in the block
+                // too when it is taller than a unit, and otherwise this
+                // row is the block's last.
+                if r == rows.start
+                    && r % 2 == 0
+                    && let Some(below) = fs.mi.get((r + 1) * st + c)
+                    && r + 1 < fs.mi_rows
+                    && bh4(below.bsize) > 1
+                {
+                    m = below;
+                }
                 let (w, h) = (bw4(m.bsize).max(1), bh4(m.bsize).max(1));
                 let end = ((c / w + 1) * w).min(cols);
                 let bottom = (r - r % h + h).min(rows.end);

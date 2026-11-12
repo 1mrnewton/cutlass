@@ -661,11 +661,24 @@ pub struct TileDec<'a, P: Pixel, C: Coder = Msac<'a>> {
     /// writes (`mi`, `uv_modes`, `delta_lf`) start at. 0 for a whole
     /// frame's.
     pub mi_r0: usize,
-    /// Whether the mode info of a block need only be in the units later
-    /// blocks of reconstruction read: its bottom row and right column (a
-    /// neighbour's above or left of them) and its first (see
-    /// [`Self::write_mode_info`]).
-    pub mi_edges: bool,
+    /// Which units of a block [`Self::write_mode_info`] writes.
+    pub mi_fill: MiFill,
+}
+
+/// The units of a block whose mode info later readers need.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MiFill {
+    /// All of them (the encoder reads any).
+    All,
+    /// Its bottom row and right column (a neighbour's above or left of
+    /// them) and its first: what later blocks of reconstruction read.
+    Edges,
+    /// Those of [`Self::Edges`] and its odd rows: what parsing reads
+    /// besides (the outer row and column scans of the motion vector
+    /// search read odd rows and odd columns, by steps of 2 or more rows),
+    /// the motion field (odd rows and columns) and the loop filter's
+    /// levels (a block's first unit, or the odd row below it).
+    OddRows,
 }
 
 #[inline]
@@ -812,6 +825,26 @@ fn fill_edges<T: Copy>(d: &mut [T], stride: usize, at: usize, w: usize, h: usize
     }
     for y in 0..h - 1 {
         d[at + y * stride + w - 1] = v;
+    }
+}
+
+/// [`fill_edges`] and the odd rows of the `w` x `h` rectangle at `at`,
+/// a block's: one taller than a unit starts at an even row.
+#[inline(always)]
+fn fill_odd_rows<T: Copy>(d: &mut [T], stride: usize, at: usize, w: usize, h: usize, v: T) {
+    if h <= 2 || w == 0 {
+        return fill_rect(d, stride, at, w, h, v);
+    }
+    d[at] = v;
+    for y in 0..h {
+        let row = at + y * stride;
+        if y % 2 == 1 || y == h - 1 {
+            for m in &mut d[row..][..w] {
+                *m = v;
+            }
+        } else {
+            d[row + w - 1] = v;
+        }
     }
 }
 
@@ -1635,16 +1668,25 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let stride = self.fs.mi_stride;
         let set_uv = b.ref_frame[0] == INTRA_FRAME && b.has_chroma;
         let at = (b.mi_row - self.mi_r0) * stride + b.mi_col;
-        if self.mi_edges {
-            fill_edges(&mut self.fs.mi, stride, at, w4, h4, *info);
-            if set_uv {
-                fill_edges(&mut self.fs.uv_modes, stride, at, w4, h4, b.uv_mode);
+        match self.mi_fill {
+            MiFill::Edges => {
+                fill_edges(&mut self.fs.mi, stride, at, w4, h4, *info);
+                if set_uv {
+                    fill_edges(&mut self.fs.uv_modes, stride, at, w4, h4, b.uv_mode);
+                }
             }
-        } else {
-            // Stores of the value, not a library copy per row.
-            fill_rect(&mut self.fs.mi, stride, at, w4, h4, *info);
-            if set_uv {
-                fill_rect(&mut self.fs.uv_modes, stride, at, w4, h4, b.uv_mode);
+            MiFill::OddRows => {
+                fill_odd_rows(&mut self.fs.mi, stride, at, w4, h4, *info);
+                if set_uv {
+                    fill_rect(&mut self.fs.uv_modes, stride, at, w4, h4, b.uv_mode);
+                }
+            }
+            MiFill::All => {
+                // Stores of the value, not a library copy per row.
+                fill_rect(&mut self.fs.mi, stride, at, w4, h4, *info);
+                if set_uv {
+                    fill_rect(&mut self.fs.uv_modes, stride, at, w4, h4, b.uv_mode);
+                }
             }
         }
         if self.hdr.delta_lf_present {

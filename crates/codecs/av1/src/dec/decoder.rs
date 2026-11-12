@@ -23,7 +23,7 @@ use super::obu::{
 };
 use super::postfilter;
 use super::recon::Scratch;
-use super::tile::{Block, ReconLog, RefView, RowHook, TileDec, lr_unit_span, malformed};
+use super::tile::{Block, MiFill, ReconLog, RefView, RowHook, TileDec, lr_unit_span, malformed};
 use super::types::{INTRA_FRAME, Mv};
 
 type R<T> = Result<T, CodecError>;
@@ -2275,7 +2275,7 @@ fn decode_tile_part<P: Pixel>(
         rec: logs.map(|l| Box::new(lock(l).logs.pop().unwrap_or_default())),
         y0: 0,
         mi_r0: 0,
-        mi_edges: false,
+        mi_fill: MiFill::OddRows,
     };
     if carry.fresh {
         td.begin_tile();
@@ -3030,7 +3030,7 @@ fn recon_worker<'r, P: PicturePixel>(
         y0: 0,
         mi_r0: 0,
         // Reconstruction reads the mode info of neighbours only.
-        mi_edges: true,
+        mi_fill: MiFill::Edges,
     };
     let ahead = lock(spares).rows_ahead;
     td.scratch.edge_y = usize::MAX;

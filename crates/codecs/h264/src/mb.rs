@@ -10190,7 +10190,7 @@ fn temporal_direct<S: Sample>(
     my: usize,
     mb: &mut Mb,
     blocks: &[(usize, usize)],
-) {
+) -> bool {
     if pic.mbaff {
         let col = slice.ref1.first().and_then(|&index| dpb.get(index));
         for &(bx, by) in blocks {
@@ -10211,7 +10211,7 @@ fn temporal_direct<S: Sample>(
             mb.ref1[(by / 2) * 2 + (bx / 2)] = 0;
             mb.ready |= 1 << index;
         }
-        return;
+        return false;
     }
     let addr = my * pic.mb_w + mx;
     let col = slice
@@ -10219,6 +10219,31 @@ fn temporal_direct<S: Sample>(
         .first()
         .and_then(|&index| dpb.get(index))
         .and_then(|frame| frame.mb_at(addr).map(|col| (frame.poc, col)));
+    // With 8×8 inference every block of a quarter reads the same
+    // co-located block, so a whole macroblock is worked out once a
+    // quarter, and filled at once when the four agree.
+    if blocks.len() == 16 && slice.sps.direct_8x8_inference {
+        let quarter = |part: usize| temporal_block(slice, col, (part % 2) * 2, (part / 2) * 2);
+        let found = [quarter(0), quarter(1), quarter(2), quarter(3)];
+        mb.ready = u16::MAX;
+        mb.ref1 = [0; 4];
+        if found[1..].iter().all(|other| *other == found[0]) {
+            let (ref0, mv0, mv1) = found[0];
+            mb.ref0 = [ref0; 4];
+            mb.mv0 = [mv0; 16];
+            mb.mv1 = [mv1; 16];
+            return true;
+        }
+        for (part, &(ref0, mv0, mv1)) in found.iter().enumerate() {
+            mb.ref0[part] = ref0;
+            let corner = (part / 2) * 8 + (part % 2) * 2;
+            for index in [corner, corner + 1, corner + 4, corner + 5] {
+                mb.mv0[index] = mv0;
+                mb.mv1[index] = mv1;
+            }
+        }
+        return false;
+    }
     for &(bx, by) in blocks {
         let index = by * 4 + bx;
         let part = (by / 2) * 2 + (bx / 2);
@@ -10229,6 +10254,7 @@ fn temporal_direct<S: Sample>(
         mb.ref1[part] = 0;
         mb.ready |= 1 << index;
     }
+    false
 }
 
 fn temporal_block(
@@ -10396,8 +10422,7 @@ fn apply_direct<S: Sample>(
     blocks: &[(usize, usize)],
 ) -> bool {
     if !slice.spatial_direct {
-        temporal_direct(pic, dpb, slice, mx, my, mb, blocks);
-        return false;
+        return temporal_direct(pic, dpb, slice, mx, my, mb, blocks);
     }
     let (ref0, ref1, zero, near) = direct_refs(pic, mx, my, mb);
     // The predictors of a 16×16 partition, from the same neighbours.

@@ -9798,35 +9798,20 @@ fn motion_near_mbaff<S: Sample>(
 
 #[inline(always)]
 fn motion_of(mb: &Mb, index: usize, list: usize) -> Motion {
-    if mb.intra {
-        return Motion {
-            available: true,
-            mv: [0, 0],
-            reference: -1,
-        };
-    }
     let part = (index / 4 / 2) * 2 + ((index % 4) / 2);
-    let reference = if list == 0 {
-        mb.ref0[part]
+    let (reference, mv) = if list == 0 {
+        (mb.ref0[part], mb.mv0[index])
     } else {
-        mb.ref1[part]
+        (mb.ref1[part], mb.mv1[index])
     };
-    if reference < 0 {
-        return Motion {
-            available: true,
-            mv: [0, 0],
-            reference: -1,
-        };
-    }
-    let mv = if list == 0 {
-        mb.mv0[index]
-    } else {
-        mb.mv1[index]
-    };
+    // An intra block, or a list the block does not use, reads as no
+    // reference and a zero vector. Masks, not branches: which it is
+    // changes from one neighbour to the next.
+    let keep = -i16::from(!mb.intra && reference >= 0);
     Motion {
         available: true,
-        mv,
-        reference,
+        mv: [mv[0] & keep, mv[1] & keep],
+        reference: reference | !(keep as i8),
     }
 }
 

@@ -15,7 +15,7 @@ use cutlass_h264_kernels::growing::Growing;
 
 use cutlass_decode::CodecError;
 
-use super::{Frame, Mb, Shared};
+use super::{Colocated, Frame, Mb, Shared};
 use crate::recon::Sample;
 
 /// Deblocking macroblock row `e` changes up to three luma rows above it,
@@ -87,7 +87,7 @@ pub(crate) struct Published<S: Sample> {
     luma: Growing<S>,
     cb: Growing<S>,
     cr: Growing<S>,
-    mbs: Growing<Mb>,
+    mbs: Growing<Colocated>,
     /// The whole picture, or why it has none.
     done: OnceLock<Result<Planes<S>, CodecError>>,
     gate: Mutex<()>,
@@ -202,7 +202,8 @@ impl<S: Sample> Published<S> {
         let done = if last { rows } else { deblocked.min(rows) };
         let (first, end) = (from.min(done) * self.mb_w, done * self.mb_w);
         if let Some(mbs) = pic.mb.get(first..end.min(pic.mb.len())) {
-            self.mbs.push(mbs);
+            let cols: Vec<Colocated> = mbs.iter().map(|mb| mb.col).collect();
+            self.mbs.push(&cols);
         }
         let (luma, chroma) = if last {
             (self.h, self.h / 2)
@@ -302,9 +303,10 @@ impl<S: Sample> Published<S> {
         })
     }
 
-    /// The macroblock at address `addr`, once its row is decoded. `None`
-    /// when the picture failed or has no such macroblock.
-    pub(crate) fn mb(&self, addr: usize) -> Option<&Mb> {
+    /// What direct prediction reads of the macroblock at address `addr`,
+    /// once its row is decoded. `None` when the picture failed or has no
+    /// such macroblock.
+    pub(crate) fn col(&self, addr: usize) -> Option<&Colocated> {
         let width = self.mb_w.max(1);
         let rows = (addr / width + 1).min(self.h / 16);
         self.wait_rows(&self.mbs, width, rows).ok()?.get(addr)
@@ -327,10 +329,24 @@ impl<S: Sample> Published<S> {
         })
     }
 
-    /// [`Self::copy_whole`] for the macroblocks.
+    /// [`Self::copy_whole`] for the macroblocks: decoded ones, with what
+    /// direct prediction reads of each, which is all that is read of a
+    /// reference's macroblocks.
     pub(crate) fn copy_mbs(&self) -> Option<Shared<Mb>> {
-        self.complete()
-            .then(|| Shared::from(self.mbs.filled().to_vec()))
+        self.complete().then(|| {
+            let mbs = self.mbs.filled().iter().map(|&col| {
+                let mut mb = Mb::new(0);
+                mb.col = col;
+                mb
+            });
+            Shared::from(mbs.collect::<Vec<_>>())
+        })
+    }
+
+    /// Asks for [`Self::col`]'s answer for `addr` to be brought into the
+    /// cache when its row is in; nothing else changes.
+    pub(crate) fn prefetch_col(&self, addr: usize) {
+        cutlass_h264_kernels::prefetch_item(self.mbs.filled(), addr);
     }
 }
 
@@ -424,7 +440,7 @@ mod tests {
             std::thread::spawn(move || {
                 (
                     published.luma(0, 0, 16).is_err(),
-                    published.mb(0).is_none(),
+                    published.col(0).is_none(),
                     published.planes().is_err(),
                 )
             })

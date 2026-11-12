@@ -705,11 +705,10 @@ pub(crate) fn decode_mbs<S: Sample>(
     // that picture's motion is far from anything else read here.
     let colocated = (super::syntax_kind(slice.kind) == 1 && !mbaff)
         .then(|| slice.ref1.first().and_then(|&index| dpb.get(index)))
-        .flatten()
-        .filter(|frame| frame.pending.is_none());
+        .flatten();
     while addr < total {
         if let Some(frame) = colocated {
-            cutlass_h264_kernels::prefetch_item(&frame.mb, addr + 2);
+            frame.prefetch_col(addr + 2);
         }
         if !super::intra_slice(slice.kind) {
             match &mut entropy {
@@ -1096,7 +1095,7 @@ fn vsp_skip_mb<S: Sample>(
             l1: false,
         };
         let motion = synthesis_motion(pic, dpb, slice, (mx * 16, my * 16), &part)?;
-        fill_ref(&mut mb.ref0, &mut mb.uses0, &part, reference);
+        fill_ref(&mut mb.col.ref0, &mut mb.uses0, &part, reference);
         store_mv(&mut mb, &part, motion, 0);
         if let Some(reference1) = reference1 {
             let part1 = Part {
@@ -1104,7 +1103,7 @@ fn vsp_skip_mb<S: Sample>(
                 l1: true,
                 ..part
             };
-            fill_ref(&mut mb.ref1, &mut mb.uses1, &part1, reference1);
+            fill_ref(&mut mb.col.ref1, &mut mb.uses1, &part1, reference1);
             store_mv(&mut mb, &part1, motion, 1);
         }
     }
@@ -8791,10 +8790,10 @@ fn read_parts<S: Sample>(
         }
         if from_layer0[index] {
             let (_, reference) = layer_motion(layer, mx, my, part, 0)?;
-            fill_ref(&mut mb.ref0, &mut mb.uses0, part, reference);
+            fill_ref(&mut mb.col.ref0, &mut mb.uses0, part, reference);
         } else if mb.alc {
             fill_ref(
-                &mut mb.ref0,
+                &mut mb.col.ref0,
                 &mut mb.uses0,
                 part,
                 list0_interview(pic, dpb, slice)?,
@@ -8805,12 +8804,12 @@ fn read_parts<S: Sample>(
                 ref_count(slice, 0, mb),
                 ref_ctx(pic, mx, my, part.x / 4, part.y / 4, 0, mb),
             )?;
-            fill_ref(&mut mb.ref0, &mut mb.uses0, part, r as i8);
+            fill_ref(&mut mb.col.ref0, &mut mb.uses0, part, r as i8);
             if slice.vsp && interview_reference(pic, dpb, slice, mb, part, 0) {
                 synthesis0[index] = read_flag(entropy)?;
             }
         } else {
-            fill_ref(&mut mb.ref0, &mut mb.uses0, part, 0);
+            fill_ref(&mut mb.col.ref0, &mut mb.uses0, part, 0);
         }
     }
     for (index, part) in parts.iter().enumerate() {
@@ -8819,19 +8818,19 @@ fn read_parts<S: Sample>(
         }
         if from_layer1[index] {
             let (_, reference) = layer_motion(layer, mx, my, part, 1)?;
-            fill_ref(&mut mb.ref1, &mut mb.uses1, part, reference);
+            fill_ref(&mut mb.col.ref1, &mut mb.uses1, part, reference);
         } else if ref_count(slice, 1, mb) > 1 {
             let r = read_te(
                 entropy,
                 ref_count(slice, 1, mb),
                 ref_ctx(pic, mx, my, part.x / 4, part.y / 4, 1, mb),
             )?;
-            fill_ref(&mut mb.ref1, &mut mb.uses1, part, r as i8);
+            fill_ref(&mut mb.col.ref1, &mut mb.uses1, part, r as i8);
             if slice.vsp && interview_reference(pic, dpb, slice, mb, part, 1) {
                 synthesis1[index] = read_flag(entropy)?;
             }
         } else {
-            fill_ref(&mut mb.ref1, &mut mb.uses1, part, 0);
+            fill_ref(&mut mb.col.ref1, &mut mb.uses1, part, 0);
         }
     }
     // A partition that does not use list 0 is still decoded. Its blocks stay
@@ -10173,7 +10172,7 @@ fn temporal_direct<S: Sample>(
 
 fn temporal_block(
     slice: &Slice<'_>,
-    col: Option<(i32, &Mb)>,
+    col: Option<(i32, &super::Colocated)>,
     bx: usize,
     by: usize,
 ) -> (i8, [i16; 2], [i16; 2]) {
@@ -10473,7 +10472,7 @@ fn col_macroblock<'a, S: Sample>(
     dpb: &'a [Frame<S>],
     slice: &Slice<'_>,
     addr: usize,
-) -> Option<&'a Mb> {
+) -> Option<&'a super::Colocated> {
     let frame = dpb.get(*slice.ref1.first()?)?;
     if frame.long_term {
         return None;
@@ -10494,7 +10493,7 @@ fn corner_block(bx: usize, by: usize) -> usize {
 }
 
 /// colZeroFlag of clause 8.4.1.2.2 for block `index` of that macroblock.
-fn col_zero(col: &Mb, index: usize) -> bool {
+fn col_zero(col: &super::Colocated, index: usize) -> bool {
     let part = (index / 4 / 2) * 2 + ((index % 4) / 2);
     let (mv, reference) = if col.ref0[part] >= 0 {
         (col.mv0[index], col.ref0[part])

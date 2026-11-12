@@ -30,11 +30,48 @@ pub(crate) const CBP_INTER: [u8; 48] = [
 pub(crate) const CBP_INTRA_444: [u8; 16] = [15, 0, 7, 11, 13, 14, 3, 5, 10, 12, 1, 2, 4, 8, 6, 9];
 pub(crate) const CBP_INTER_444: [u8; 16] = [0, 1, 2, 4, 8, 3, 5, 10, 12, 15, 7, 11, 13, 14, 6, 9];
 
+/// The part of a macroblock that a later picture's direct prediction reads
+/// as its co-located macroblock (clause 8.4.1.2): kept on its own so a
+/// picture decoded on another thread hands over only this.
 #[derive(Clone, Copy)]
-pub(crate) struct Mb {
-    slice: u16,
+pub(crate) struct Colocated {
     intra: bool,
     pcm: bool,
+    /// `mb_field_decoding_flag`. The macroblock's samples sit on every other line.
+    field_mb: bool,
+    ref0: [i8; 4],
+    ref1: [i8; 4],
+    mv0: [[i16; 2]; 16],
+    mv1: [[i16; 2]; 16],
+    /// Picture order count of the reference each 8×8 partition used. Kept so a later
+    /// temporal-direct picture can find that reference after the buffer moves.
+    ref_poc0: [i32; 4],
+    ref_poc1: [i32; 4],
+}
+
+impl std::ops::Deref for Mb {
+    type Target = Colocated;
+
+    #[inline(always)]
+    fn deref(&self) -> &Colocated {
+        &self.col
+    }
+}
+
+impl std::ops::DerefMut for Mb {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Colocated {
+        &mut self.col
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Mb {
+    /// What a later picture's direct prediction reads of this macroblock,
+    /// the part handed to other threads. Its fields read as the
+    /// macroblock's own.
+    col: Colocated,
+    slice: u16,
     qp: i8,
     qp_c: i8,
     qp_cr: i8,
@@ -51,8 +88,6 @@ pub(crate) struct Mb {
     nnz_c: [u8; 32],
     mode4: [u8; 16],
     chroma_mode: u8,
-    ref0: [i8; 4],
-    ref1: [i8; 4],
     /// 8×8 partitions whose prediction mode is Pred_L0 or BiPred. Direct and skip stay clear
     /// so a reference index stored for motion does not enter the CABAC context.
     uses0: u8,
@@ -61,12 +96,6 @@ pub(crate) struct Mb {
     /// Decoded-picture-buffer index of each list, or −1 when that list is unused.
     slot0: [i8; 4],
     slot1: [i8; 4],
-    mv0: [[i16; 2]; 16],
-    mv1: [[i16; 2]; 16],
-    /// Picture order count of the reference each 8×8 partition used. Kept so a later
-    /// temporal-direct picture can find that reference after the buffer moves.
-    ref_poc0: [i32; 4],
-    ref_poc1: [i32; 4],
     /// Size of each 4×4 block's motion vector difference, held to 127:
     /// the CABAC contexts only compare sums of these with 2 and 32, after
     /// halving or doubling across a field and a frame macroblock.
@@ -85,8 +114,6 @@ pub(crate) struct Mb {
     dc_c: [bool; 2],
     /// Intra_16x16 DC coded_block_flag of Cb and Cr when chroma is coded as luma.
     dc16: [bool; 2],
-    /// `mb_field_decoding_flag`. The macroblock's samples sit on every other line.
-    field_mb: bool,
     /// SI macroblock. Reconstruction is clause 8.6.2, not intra 8.5.
     si: bool,
     /// `mb_alc_flag`. Luma weights come from the neighboring samples.
@@ -98,9 +125,18 @@ pub(crate) struct Mb {
 impl Mb {
     pub(crate) fn new(slice: u16) -> Self {
         Self {
+            col: Colocated {
+                intra: false,
+                pcm: false,
+                ref0: [-1; 4],
+                ref1: [-1; 4],
+                mv0: [[0; 2]; 16],
+                mv1: [[0; 2]; 16],
+                ref_poc0: [0; 4],
+                ref_poc1: [0; 4],
+                field_mb: false,
+            },
             slice,
-            intra: false,
-            pcm: false,
             qp: 0,
             qp_c: 0,
             qp_cr: 0,
@@ -114,16 +150,10 @@ impl Mb {
             nnz_c: [0; 32],
             mode4: [2; 16],
             chroma_mode: 0,
-            ref0: [-1; 4],
-            ref1: [-1; 4],
             uses0: 0,
             uses1: 0,
             slot0: [-1; 4],
             slot1: [-1; 4],
-            mv0: [[0; 2]; 16],
-            mv1: [[0; 2]; 16],
-            ref_poc0: [0; 4],
-            ref_poc1: [0; 4],
             mvd0: [[0; 2]; 16],
             mvd1: [[0; 2]; 16],
             ready: 0,
@@ -134,7 +164,6 @@ impl Mb {
             dc_coded: false,
             dc_c: [false; 2],
             dc16: [false; 2],
-            field_mb: false,
             si: false,
             alc: false,
             alc_spec: 0,
@@ -362,12 +391,22 @@ impl<S: Sample> Frame<S> {
         self.levels.freeze();
     }
 
-    /// The macroblock at address `addr`. For a picture another thread is
-    /// decoding this waits for that macroblock's row.
-    pub(crate) fn mb_at(&self, addr: usize) -> Option<&Mb> {
+    /// What direct prediction reads of the macroblock at address `addr`.
+    /// For a picture another thread is decoding this waits for that
+    /// macroblock's row.
+    pub(crate) fn mb_at(&self, addr: usize) -> Option<&Colocated> {
         match &self.pending {
-            Some(published) => published.mb(addr),
-            None => self.mb.get(addr),
+            Some(published) => published.col(addr),
+            None => self.mb.get(addr).map(|mb| &mb.col),
+        }
+    }
+
+    /// Asks for [`Self::mb_at`]'s answer for `addr` to be brought into the
+    /// cache, when that macroblock is decoded; nothing else changes.
+    pub(crate) fn prefetch_col(&self, addr: usize) {
+        match &self.pending {
+            Some(published) => published.prefetch_col(addr),
+            None => cutlass_h264_kernels::prefetch_item(&self.mb, addr),
         }
     }
 

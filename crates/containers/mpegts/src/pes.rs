@@ -36,7 +36,8 @@ pub struct RawPes {
 pub enum PesFault {
     /// The payload does not start with `00 00 01`.
     StartCode,
-    /// `PES_header_data_length` runs past `PES_packet_length`.
+    /// `PES_header_data_length` runs past `PES_packet_length`, or the
+    /// packet ended before its header did.
     Header,
     /// The payload grew past the packet cap.
     Oversize { declared: u64, limit: u64 },
@@ -252,7 +253,12 @@ impl Assembler {
     fn finish(&mut self, interrupted: bool, sink: &mut dyn FnMut(Result<RawPes, PesFault>)) {
         self.open = false;
         if self.header_len.is_none() {
+            // A header that never completed: the packet is lost.
+            let started = !self.head.is_empty();
             self.head.clear();
+            if started {
+                sink(Err(PesFault::Header));
+            }
             return;
         }
         let mut pes = std::mem::take(&mut self.pes);

@@ -172,7 +172,7 @@ impl<R: Read + Seek> TsDemux<R> {
         wanted: Option<u16>,
     ) -> Result<Self, OpenError> {
         source.keep_from_here();
-        let (data_start, programs) = read_tables(&mut source, wanted)?;
+        let (data_start, programs, leading) = read_tables(&mut source, wanted)?;
         let Some(data_start) = data_start else {
             return Err(OpenError::Unrecognized {
                 family: ContainerId::MpegTs,
@@ -239,6 +239,11 @@ impl<R: Read + Seek> TsDemux<R> {
             .collect();
         pipeline.reset();
         pipeline.clock.set(None);
+        // The passes over the opening bytes and the tail are not reads:
+        // only what was skipped before the first packet stays counted.
+        pipeline.counters = Counters::default();
+        (source.resyncs, source.skipped) = leading;
+        source.tail = 0;
         Ok(Self {
             source,
             random,
@@ -770,12 +775,15 @@ fn interpolate(lo: (u64, i64), hi: (u64, i64), at: u64) -> i64 {
     i64::try_from(time).unwrap_or(lo.1)
 }
 
+/// The first packet's position, the programs, and the resyncs and bytes
+/// skipped before the first packet.
+type Tables = (Option<u64>, Vec<Program>, (u64, u64));
+
 /// Reads the PAT and the PMTs from the opening bytes. Returns the first
-/// packet's position and the programs.
-fn read_tables<R: Read>(
-    source: &mut Source<R>,
-    wanted: Option<u16>,
-) -> Result<(Option<u64>, Vec<Program>), OpenError> {
+/// packet's position, the programs, and the resyncs and bytes skipped
+/// before the first packet.
+fn read_tables<R: Read>(source: &mut Source<R>, wanted: Option<u16>) -> Result<Tables, OpenError> {
+    let mut leading = (0, 0);
     let mut first = None;
     let mut pat: Option<Pat> = None;
     let mut pat_buffer = SectionBuffer::default();
@@ -783,6 +791,9 @@ fn read_tables<R: Read>(
     let mut pmts: Vec<Pmt> = Vec::new();
     let mut sections: Vec<Vec<u8>> = Vec::new();
     while let Next::Packet(position, index) = source.next().map_err(OpenError::from_header)? {
+        if first.is_none() {
+            leading = (source.resyncs, source.skipped);
+        }
         let first = *first.get_or_insert(position);
         if position.saturating_sub(first) > MAX_OPEN_SCAN_BYTES {
             break;
@@ -857,7 +868,7 @@ fn read_tables<R: Read>(
             })
             .collect()
     });
-    Ok((first, programs))
+    Ok((first, programs, leading))
 }
 
 /// The program asked for, or the first with a stream this crate frames,

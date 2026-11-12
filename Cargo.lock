@@ -2547,6 +2547,7 @@ dependencies = [
 name = "cutlass-caf"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
  "cutlass-container",
 ]
 

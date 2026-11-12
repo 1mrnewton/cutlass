@@ -9,7 +9,7 @@
 use cutlass_decode::CodecError;
 
 use crate::layout::{Arrangement, Coding, Endian, Layout};
-use crate::limit::{self, S24_FULL, S32_FULL};
+use crate::limit::{self, S24_FULL, S32_FULL, S64_SCALE};
 
 pub(crate) enum Decoded {
     I16(Vec<i16>),
@@ -39,6 +39,105 @@ pub(crate) fn decode(layout: Layout, channels: usize, data: &[u8]) -> Result<Dec
         )?)),
         Coding::F32 => Ok(Decoded::F32(read(layout, channels, frames, data, f32_of)?)),
         Coding::F64 => Ok(Decoded::F32(read(layout, channels, frames, data, f64_of)?)),
+        Coding::S64 => Ok(Decoded::F32(read(layout, channels, frames, data, s64_of)?)),
+        Coding::S8 => Ok(Decoded::I16(read(
+            layout,
+            channels,
+            frames,
+            data,
+            |bytes, _| Ok(i16::from(i8::from_ne_bytes([byte_of(bytes)?])) << 8),
+        )?)),
+        Coding::U8 => Ok(Decoded::I16(read(
+            layout,
+            channels,
+            frames,
+            data,
+            |bytes, _| Ok((i16::from(byte_of(bytes)?) - 128) << 8),
+        )?)),
+        Coding::ALaw => Ok(Decoded::I16(read(
+            layout,
+            channels,
+            frames,
+            data,
+            |bytes, _| Ok(ALAW[usize::from(byte_of(bytes)?)]),
+        )?)),
+        Coding::MuLaw => Ok(Decoded::I16(read(
+            layout,
+            channels,
+            frames,
+            data,
+            |bytes, _| Ok(MULAW[usize::from(byte_of(bytes)?)]),
+        )?)),
+    }
+}
+
+/// G.711 A-law to 16-bit linear, every code. ITU-T G.711 A-law: the even
+/// bits are inverted on the line, bit 7 set means positive, bits 6..4 are
+/// the segment and bits 3..0 the step. A step decodes to the middle of its
+/// interval, in 13-bit units scaled by 8 to 16 bits. All 256 values are
+/// checked against FFmpeg and AudioToolbox in the tests.
+pub(crate) const ALAW: [i16; 256] = alaw_table();
+
+/// G.711 mu-law to 16-bit linear, every code. ITU-T G.711 mu-law: every
+/// bit is inverted on the line, bit 7 set means negative, bits 6..4 are
+/// the segment and bits 3..0 the step. Values are in 14-bit units scaled
+/// by 4 to 16 bits. All 256 values are checked against FFmpeg and
+/// AudioToolbox in the tests.
+pub(crate) const MULAW: [i16; 256] = mulaw_table();
+
+const fn alaw_table() -> [i16; 256] {
+    let mut table = [0i16; 256];
+    let mut code = 0usize;
+    while code < 256 {
+        #[allow(clippy::cast_possible_truncation)]
+        let line = (code as u8) ^ 0x55;
+        let segment = (line >> 4) & 0x07;
+        let step = (line & 0x0F) as i32;
+        // Interval midpoints: segment 0 covers 0..32 in steps of 2, and
+        // segment s > 0 covers 2^(s+4)..2^(s+5) in steps of 2^s.
+        let magnitude = if segment == 0 {
+            2 * step + 1
+        } else {
+            (2 * step + 33) << (segment - 1)
+        };
+        let linear = magnitude << 3;
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            table[code] = if line & 0x80 == 0 { -linear } else { linear } as i16;
+        }
+        code += 1;
+    }
+    table
+}
+
+const fn mulaw_table() -> [i16; 256] {
+    let mut table = [0i16; 256];
+    let mut code = 0usize;
+    while code < 256 {
+        #[allow(clippy::cast_possible_truncation)]
+        let line = !(code as u8);
+        let segment = (line >> 4) & 0x07;
+        let step = (line & 0x0F) as i32;
+        // Biased by 33: segment s starts at 33 * 2^s - 33 and moves in
+        // steps of 2^(s+1).
+        let magnitude = ((2 * step + 33) << segment) - 33;
+        let linear = magnitude << 2;
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            table[code] = if line & 0x80 == 0 { linear } else { -linear } as i16;
+        }
+        code += 1;
+    }
+    table
+}
+
+fn byte_of(bytes: &[u8]) -> Result<u8, CodecError> {
+    match bytes {
+        [byte] => Ok(*byte),
+        _ => Err(CodecError::Truncated {
+            at_bit: 0,
+            what: "pcm sample",
+        }),
     }
 }
 
@@ -67,8 +166,16 @@ pub(crate) fn encode(
             })?;
             write_f64(layout, channels, samples)
         }
-        Coding::S24 => Err(CodecError::Unsupported { what: "s24 encode" }),
-        Coding::S32 => Err(CodecError::Unsupported { what: "s32 encode" }),
+        Coding::S24
+        | Coding::S32
+        | Coding::S8
+        | Coding::U8
+        | Coding::ALaw
+        | Coding::MuLaw
+        | Coding::S64 => {
+            layout.coding().encode()?;
+            Err(CodecError::Unsupported { what: "pcm encode" })
+        }
     }
 }
 
@@ -202,6 +309,24 @@ fn f64_of(bytes: &[u8], endian: Endian) -> Result<f32, CodecError> {
     } else {
         Err(CodecError::NonFinite)
     }
+}
+
+/// Full scale is 2^63: `i64::MAX` is not a binary64 value and rounds to
+/// 2^63, so this is the same rule as the narrower widths. Rounded once,
+/// straight from the integer to `f32`, then scaled by a power of two,
+/// which is exact.
+fn s64_of(bytes: &[u8], endian: Endian) -> Result<f32, CodecError> {
+    let bytes: [u8; 8] = bytes.try_into().map_err(|_| CodecError::Truncated {
+        at_bit: 0,
+        what: "pcm sample",
+    })?;
+    let value = match endian {
+        Endian::Little => i64::from_le_bytes(bytes),
+        Endian::Big => i64::from_be_bytes(bytes),
+    };
+    #[allow(clippy::cast_precision_loss)]
+    let rounded = value as f32;
+    Ok(rounded * S64_SCALE)
 }
 
 fn unit(value: i32, full: f64) -> f32 {

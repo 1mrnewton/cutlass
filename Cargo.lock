@@ -2547,7 +2547,10 @@ dependencies = [
 name = "cutlass-caf"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
  "cutlass-container",
+ "cutlass-decode",
+ "cutlass-pcm",
 ]
 
 [[package]]
@@ -2694,6 +2697,7 @@ dependencies = [
  "cutlass-aac",
  "cutlass-ac3",
  "cutlass-alac",
+ "cutlass-caf",
  "cutlass-codec",
  "cutlass-container",
  "cutlass-decode",
@@ -2734,6 +2738,7 @@ dependencies = [
  "cutlass-ac3",
  "cutlass-aiff",
  "cutlass-alac",
+ "cutlass-caf",
  "cutlass-codec",
  "cutlass-container",
  "cutlass-decode",
@@ -3076,6 +3081,7 @@ version = "0.1.0"
 dependencies = [
  "cutlass-adts",
  "cutlass-aiff",
+ "cutlass-caf",
  "cutlass-codec",
  "cutlass-container",
  "cutlass-flac",
@@ -5631,6 +5637,7 @@ dependencies = [
  "cutlass-aiff",
  "cutlass-alac",
  "cutlass-av1",
+ "cutlass-caf",
  "cutlass-codec",
  "cutlass-container",
  "cutlass-decode",

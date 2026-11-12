@@ -143,28 +143,56 @@ fn a_stereo_pcm_file_is_one_frame_per_packet_at_the_sample_rate() {
 }
 
 #[test]
-fn alaw_and_mulaw_are_sample_frames_and_are_not_muxed() {
+fn alaw_and_mulaw_are_pcm_sample_frames_and_remux() {
     for tag in [0x0006u16, 0x0007] {
         let mut fmt = pcm_fmt(1, 8_000, 8);
-        fmt[0] = u8::try_from(tag & 0x00FF).expect("low");
-        fmt[1] = u8::try_from(tag >> 8).expect("high");
+        fmt[0..2].copy_from_slice(&tag.to_le_bytes());
         let file = riff(&[chunk(b"fmt ", &fmt), chunk(b"data", &[0xD5, 0x2A])].concat());
         let mut demux = must_open(&file);
-        let StreamCodec::Unknown(codec) = demux.format().codec() else {
-            panic!("pcm");
-        };
-        assert_eq!(codec.tag(), format!("wav:{tag:04x}").as_bytes());
+        assert_eq!(demux.format().codec(), &StreamCodec::Known(CodecId::Pcm));
+        assert!(!demux.format().is_linear_pcm());
+        let extra = demux.streams()[0].params().extradata().to_vec();
+        assert_eq!(&extra[0..4], &[tag.to_le_bytes()[0], 0, 8, 0]);
+        // Field 12 says compressed: these bytes are not linear samples.
+        assert_eq!(&extra[12..14], &[2, 0]);
         let packets = read_all(&mut demux);
         assert_eq!(packets.len(), 2);
         assert_eq!(packets[0].bytes(), &[0xD5]);
         assert_eq!(packets[0].timestamp().duration(), Some(1));
-        let mut mux = WavMux::new(Cursor::new(Vec::new()));
-        let error = mux.add_stream(NewStream {
-            params: demux.streams()[0].params().clone(),
-            timescale: Timescale::new(8_000),
-            language: None,
-        });
-        assert!(error.is_err());
+
+        let written = remux(&file, false);
+        let mut again = must_open(&written);
+        assert_eq!(again.format().tag(), tag);
+        assert_eq!(again.format().bits(), 8);
+        assert_eq!(again.format().block_align(), 1);
+        assert_eq!(again.streams()[0].params().extradata(), extra.as_slice());
+        let bytes: Vec<u8> = read_all(&mut again)
+            .iter()
+            .flat_map(|packet| packet.bytes().to_vec())
+            .collect();
+        assert_eq!(bytes, [0xD5, 0x2A]);
+    }
+}
+
+#[test]
+fn an_extensible_alaw_or_mulaw_subformat_is_pcm() {
+    for tag in [0x0006u16, 0x0007] {
+        let mut fmt = pcm_fmt(1, 8_000, 8);
+        fmt[0] = 0xFE;
+        fmt[1] = 0xFF;
+        fmt.extend_from_slice(&22u16.to_le_bytes());
+        fmt.extend_from_slice(&8u16.to_le_bytes());
+        fmt.extend_from_slice(&4u32.to_le_bytes());
+        fmt.extend_from_slice(&u32::from(tag).to_le_bytes());
+        fmt.extend_from_slice(&0x0010_0000u32.to_le_bytes());
+        fmt.extend_from_slice(&0xAA00_0080u32.to_le_bytes());
+        fmt.extend_from_slice(&0x719B_3800u32.to_le_bytes());
+        let file = riff(&[chunk(b"fmt ", &fmt), chunk(b"data", &[0x55])].concat());
+        let mut demux = must_open(&file);
+        assert!(demux.format().extensible());
+        assert_eq!(demux.format().tag(), tag);
+        assert_eq!(demux.format().codec(), &StreamCodec::Known(CodecId::Pcm));
+        assert_eq!(read_all(&mut demux).len(), 1);
     }
 }
 

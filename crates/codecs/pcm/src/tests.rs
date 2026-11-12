@@ -410,6 +410,103 @@ fn export_selects_the_encoder_by_codec_id() {
     ))
     .expect_err("s32");
     assert_eq!(err, CodecError::Unsupported { what: "s32 encode" });
+    for (coding, what) in [
+        (Coding::S8, "s8 encode"),
+        (Coding::U8, "u8 encode"),
+        (Coding::ALaw, "a-law encode"),
+        (Coding::MuLaw, "mu-law encode"),
+        (Coding::S64, "s64 encode"),
+    ] {
+        let err = PcmEncoder::open(&params(
+            layout(coding, Endian::Little, Arrangement::Interleaved),
+            48_000,
+            ChannelLayout::mono(),
+        ))
+        .expect_err("decode-only coding");
+        assert_eq!(err, CodecError::Unsupported { what });
+    }
+}
+
+#[test]
+fn eight_bit_codings_decode_to_the_mix_sample() {
+    let mut s8 = open_decoder(
+        layout(Coding::S8, Endian::Big, Arrangement::Interleaved),
+        ChannelLayout::mono(),
+    );
+    let pcm = audio(&mut s8, vec![0x00, 0x01, 0x7F, 0x80, 0xFF]).expect("s8");
+    assert_eq!(pcm.format, SampleFormat::I16);
+    assert_eq!(pcm.as_i16(), Some(&[0, 256, 32_512, -32_768, -256][..]));
+
+    let mut u8 = open_decoder(
+        layout(Coding::U8, Endian::Little, Arrangement::Interleaved),
+        ChannelLayout::mono(),
+    );
+    let pcm = audio(&mut u8, vec![0x80, 0x81, 0xFF, 0x00, 0x7F]).expect("u8");
+    assert_eq!(pcm.as_i16(), Some(&[0, 256, 32_512, -32_768, -256][..]));
+
+    // Byte order does not apply to one byte; planar still reorders.
+    let mut planar = open_decoder(
+        layout(Coding::U8, Endian::Big, Arrangement::Planar),
+        ChannelLayout::stereo(),
+    );
+    let pcm = audio(&mut planar, vec![0x80, 0x81, 0x00, 0xFF]).expect("planar u8");
+    assert_eq!(pcm.samples, 2);
+    assert_eq!(pcm.as_i16(), Some(&[0, -32_768, 256, 32_512][..]));
+}
+
+#[test]
+fn g711_codes_decode_to_the_published_values() {
+    let mut alaw = open_decoder(
+        layout(Coding::ALaw, Endian::Little, Arrangement::Interleaved),
+        ChannelLayout::mono(),
+    );
+    // 0xD5 and 0x55 are the smallest steps either side of zero; 0xAA and
+    // 0x2A are full scale.
+    let pcm = audio(&mut alaw, vec![0xD5, 0x55, 0xAA, 0x2A, 0xD4]).expect("a-law");
+    assert_eq!(pcm.as_i16(), Some(&[8, -8, 32_256, -32_256, 24][..]));
+
+    let mut mulaw = open_decoder(
+        layout(Coding::MuLaw, Endian::Little, Arrangement::Interleaved),
+        ChannelLayout::mono(),
+    );
+    // 0xFF and 0x7F are the two zeros; 0x80 and 0x00 are full scale.
+    let pcm = audio(&mut mulaw, vec![0xFF, 0x7F, 0x80, 0x00, 0xFE]).expect("mu-law");
+    assert_eq!(pcm.as_i16(), Some(&[0, 0, 32_124, -32_124, 8][..]));
+}
+
+#[test]
+fn s64_decodes_to_float_with_two_to_the_63_as_full_scale() {
+    let mut le = open_decoder(
+        layout(Coding::S64, Endian::Little, Arrangement::Interleaved),
+        ChannelLayout::mono(),
+    );
+    let mut bytes = Vec::new();
+    for value in [0i64, i64::MAX, i64::MIN, 1 << 62, -(1 << 61)] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    let pcm = audio(&mut le, bytes).expect("s64");
+    assert_eq!(pcm.format, SampleFormat::F32);
+    assert_eq!(pcm.as_f32(), Some(&[0.0, 1.0, -1.0, 0.5, -0.25][..]));
+
+    let mut be = open_decoder(
+        layout(Coding::S64, Endian::Big, Arrangement::Planar),
+        ChannelLayout::stereo(),
+    );
+    let mut bytes = Vec::new();
+    for value in [1i64 << 62, 0, -(1 << 62), i64::MIN] {
+        bytes.extend_from_slice(&value.to_be_bytes());
+    }
+    let pcm = audio(&mut be, bytes).expect("planar s64");
+    assert_eq!(pcm.as_f32(), Some(&[0.5, -0.5, 0.0, -1.0][..]));
+
+    let err = audio(&mut le, vec![0; 12]).expect_err("partial");
+    assert!(matches!(
+        err,
+        CodecError::Truncated {
+            what: "pcm frame",
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -572,18 +669,15 @@ fn ffmpeg_convert(
     let input = dir.join("in.pcm");
     let output = dir.join("out.pcm");
     std::fs::write(&input, bytes).expect("write");
-    let status = std::process::Command::new(ffmpeg)
-        .args([
-            "-v",
-            "error",
-            "-y",
-            "-f",
-            input_format,
-            "-ar",
-            "48000",
-            "-ac",
-        ])
-        .arg(channels.to_string())
+    let mut command = std::process::Command::new(ffmpeg);
+    command.args(["-v", "error", "-y", "-f", input_format]);
+    // A raw input needs its rate and channels; a WAV header has its own.
+    if input_format != "wav" {
+        command
+            .args(["-ar", "48000", "-ac"])
+            .arg(channels.to_string());
+    }
+    let status = command
         .arg("-i")
         .arg(&input)
         .args(["-f", output_format])
@@ -650,6 +744,99 @@ fn ffmpeg_reads_an_independent_bitstream() {
     for (got, integer) in got.iter().zip(ints) {
         assert_eq!(*got, unit(integer, limit::S24_FULL));
     }
+}
+
+/// Every one-byte code through FFmpeg's decoder, widened to s16 by
+/// libswresample, against this decoder. Bit-exact.
+#[test]
+fn ffmpeg_decodes_every_byte_code_the_same() {
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        if !require_or_skip("ffmpeg") {
+            return;
+        }
+        return;
+    };
+    let codes: Vec<u8> = (0..=255).collect();
+    for (coding, format) in [
+        (Coding::ALaw, "alaw"),
+        (Coding::MuLaw, "mulaw"),
+        (Coding::S8, "s8"),
+        (Coding::U8, "u8"),
+    ] {
+        let foreign = ffmpeg_convert(&ffmpeg, format, "s16le", 1, &codes);
+        let expected: Vec<i16> = foreign
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| i16::from_le_bytes(*pair))
+            .collect();
+        let mut decoder = open_decoder(
+            layout(coding, Endian::Little, Arrangement::Interleaved),
+            ChannelLayout::mono(),
+        );
+        let pcm = audio(&mut decoder, codes.clone()).expect("decode");
+        assert_eq!(pcm.as_i16(), Some(expected.as_slice()), "{format}");
+    }
+}
+
+/// Random 64-bit integers in a 64-bit WAV, which FFmpeg reads as
+/// `pcm_s64le` (raw s64 has no FFmpeg demuxer), converted to float by
+/// libswresample, against this decoder. Bit-exact. Big-endian shares the
+/// code after the byte swap and is covered by the known-value test.
+#[test]
+fn ffmpeg_decodes_s64_to_the_same_floats() {
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        if !require_or_skip("ffmpeg") {
+            return;
+        }
+        return;
+    };
+    let mut rng = Rng(0x5336_345F_4F52_4143);
+    let mut values = vec![0i64, 1, -1, i64::MAX, i64::MIN, (1 << 40) + 1];
+    for _ in 0..4_000 {
+        let shift = rng.index(63);
+        #[allow(clippy::cast_possible_wrap)]
+        values.push((rng.next() as i64) >> shift);
+    }
+    let mut bytes = Vec::new();
+    for value in &values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    let data = u32::try_from(bytes.len()).expect("size");
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&48_000u32.to_le_bytes());
+    wav.extend_from_slice(&(48_000u32 * 16).to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(&64u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data.to_le_bytes());
+    wav.extend_from_slice(&bytes);
+    let foreign = ffmpeg_convert(&ffmpeg, "wav", "f32le", 2, &wav);
+    let expected: Vec<u32> = foreign
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| u32::from_le_bytes(*word))
+        .collect();
+    let mut decoder = open_decoder(
+        layout(Coding::S64, Endian::Little, Arrangement::Interleaved),
+        ChannelLayout::stereo(),
+    );
+    let pcm = audio(&mut decoder, bytes).expect("decode");
+    let got: Vec<u32> = pcm
+        .as_f32()
+        .expect("f32")
+        .iter()
+        .map(|sample| sample.to_bits())
+        .collect();
+    assert_eq!(got.len(), values.len());
+    assert_eq!(got, expected);
 }
 
 fn local_root() -> std::path::PathBuf {
@@ -774,7 +961,10 @@ fn thirty_minute_decoder_campaign() {
         .ok()
         .and_then(|text| text.parse().ok())
         .unwrap_or(30 * 60);
-    let seed = 0x5043_4D5F_4655_5A5Au64;
+    let seed = std::env::var("PCM_FUZZ_SEED")
+        .ok()
+        .and_then(|text| u64::from_str_radix(text.trim_start_matches("0x"), 16).ok())
+        .unwrap_or(0x5043_4D5F_4655_5A5A);
     let mut rng = Rng(seed);
     let specs = [
         layout(Coding::S16, Endian::Little, Arrangement::Interleaved),
@@ -783,6 +973,12 @@ fn thirty_minute_decoder_campaign() {
         layout(Coding::S32, Endian::Big, Arrangement::Interleaved),
         layout(Coding::F32, Endian::Little, Arrangement::Planar),
         layout(Coding::F64, Endian::Little, Arrangement::Interleaved),
+        layout(Coding::S8, Endian::Big, Arrangement::Interleaved),
+        layout(Coding::U8, Endian::Little, Arrangement::Planar),
+        layout(Coding::ALaw, Endian::Little, Arrangement::Interleaved),
+        layout(Coding::MuLaw, Endian::Little, Arrangement::Planar),
+        layout(Coding::S64, Endian::Big, Arrangement::Interleaved),
+        layout(Coding::S64, Endian::Little, Arrangement::Planar),
     ];
     let mut decoders: Vec<PcmDecoder> = specs
         .into_iter()

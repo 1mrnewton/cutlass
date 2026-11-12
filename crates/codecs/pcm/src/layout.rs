@@ -20,6 +20,18 @@ pub enum Coding {
     F32,
     /// IEEE-754 binary64, narrowed to [`SampleFormat::F32`].
     F64,
+    /// Signed 8-bit, as AIFF and CAF store it. Decodes to
+    /// [`SampleFormat::I16`], shifted up 8 bits.
+    S8,
+    /// ITU-T G.711 A-law, one byte. Decodes to [`SampleFormat::I16`].
+    ALaw,
+    /// ITU-T G.711 mu-law, one byte. Decodes to [`SampleFormat::I16`].
+    MuLaw,
+    /// Signed 64-bit. Decodes to [`SampleFormat::F32`].
+    S64,
+    /// Unsigned 8-bit with 128 as silence, as WAV, AVI, Matroska and
+    /// QuickTime `raw ` store it. Decodes to [`SampleFormat::I16`].
+    U8,
 }
 
 /// Byte order of one sample. Not inferred from the host.
@@ -51,36 +63,44 @@ impl Coding {
     #[must_use]
     pub const fn output_format(self) -> SampleFormat {
         match self {
-            Self::S16 => SampleFormat::I16,
-            Self::S24 | Self::S32 | Self::F32 | Self::F64 => SampleFormat::F32,
+            Self::S16 | Self::S8 | Self::U8 | Self::ALaw | Self::MuLaw => SampleFormat::I16,
+            Self::S24 | Self::S32 | Self::F32 | Self::F64 | Self::S64 => SampleFormat::F32,
         }
     }
 
     /// Mix format the encoder requires on input.
     #[must_use]
     pub const fn input_format(self) -> SampleFormat {
-        match self {
-            Self::S16 => SampleFormat::I16,
-            Self::S24 | Self::S32 | Self::F32 | Self::F64 => SampleFormat::F32,
-        }
+        self.output_format()
     }
 
     pub(crate) const fn sample_bytes(self) -> usize {
         match self {
+            Self::S8 | Self::U8 | Self::ALaw | Self::MuLaw => 1,
             Self::S16 => 2,
             Self::S24 => 3,
             Self::S32 | Self::F32 => 4,
-            Self::F64 => 8,
+            Self::F64 | Self::S64 => 8,
         }
     }
 
-    /// s24 and s32 decode into float. Encoding them would quantize, so the
-    /// encoder refuses them instead of returning different samples.
+    /// Only s16, f32 and f64 hold the mix sample exactly. Every other
+    /// coding would quantize or companding would round, so the encoder
+    /// refuses it instead of returning different samples.
     pub(crate) const fn encode(self) -> Result<(), CodecError> {
         match self {
             Self::S16 | Self::F32 | Self::F64 => Ok(()),
             Self::S24 => Err(CodecError::Unsupported { what: "s24 encode" }),
             Self::S32 => Err(CodecError::Unsupported { what: "s32 encode" }),
+            Self::S8 => Err(CodecError::Unsupported { what: "s8 encode" }),
+            Self::U8 => Err(CodecError::Unsupported { what: "u8 encode" }),
+            Self::ALaw => Err(CodecError::Unsupported {
+                what: "a-law encode",
+            }),
+            Self::MuLaw => Err(CodecError::Unsupported {
+                what: "mu-law encode",
+            }),
+            Self::S64 => Err(CodecError::Unsupported { what: "s64 encode" }),
         }
     }
 
@@ -91,6 +111,11 @@ impl Coding {
             Self::S32 => 3,
             Self::F32 => 4,
             Self::F64 => 5,
+            Self::S8 => 6,
+            Self::ALaw => 7,
+            Self::MuLaw => 8,
+            Self::S64 => 9,
+            Self::U8 => 11,
         }
     }
 
@@ -101,11 +126,12 @@ impl Coding {
             3 => Ok(Self::S32),
             4 => Ok(Self::F32),
             5 => Ok(Self::F64),
-            6 => Err(CodecError::Unsupported { what: "8-bit pcm" }),
-            7 => Err(CodecError::Unsupported { what: "a-law" }),
-            8 => Err(CodecError::Unsupported { what: "mu-law" }),
-            9 => Err(CodecError::Unsupported { what: "s64 pcm" }),
+            6 => Ok(Self::S8),
+            7 => Ok(Self::ALaw),
+            8 => Ok(Self::MuLaw),
+            9 => Ok(Self::S64),
             10 => Err(CodecError::Unsupported { what: "s24 in 32" }),
+            11 => Ok(Self::U8),
             _ => Err(CodecError::Unsupported { what: "pcm coding" }),
         }
     }
@@ -249,16 +275,29 @@ mod tests {
     }
 
     #[test]
-    fn named_tools_are_refused() {
-        for (tag, what) in [
-            (6, "8-bit pcm"),
-            (7, "a-law"),
-            (8, "mu-law"),
-            (9, "s64 pcm"),
-            (10, "s24 in 32"),
+    fn every_coding_round_trips_its_tag_and_unknown_tags_are_refused() {
+        for (tag, coding, format) in [
+            (1, Coding::S16, SampleFormat::I16),
+            (2, Coding::S24, SampleFormat::F32),
+            (3, Coding::S32, SampleFormat::F32),
+            (4, Coding::F32, SampleFormat::F32),
+            (5, Coding::F64, SampleFormat::F32),
+            (6, Coding::S8, SampleFormat::I16),
+            (7, Coding::ALaw, SampleFormat::I16),
+            (8, Coding::MuLaw, SampleFormat::I16),
+            (9, Coding::S64, SampleFormat::F32),
+            (11, Coding::U8, SampleFormat::I16),
         ] {
-            let err = Layout::from_params(&params(vec![tag, 0, 0], None)).expect_err("tool");
-            assert_eq!(err, CodecError::Unsupported { what });
+            let parsed = Layout::from_params(&params(vec![tag, 1, 0], None)).expect("coding");
+            assert_eq!(parsed.coding(), coding);
+            assert_eq!(parsed.to_extra(), [tag, 1, 0]);
+            assert_eq!(coding.output_format(), format);
+        }
+        let err = Layout::from_params(&params(vec![10, 0, 0], None)).expect_err("s24 in 32");
+        assert_eq!(err, CodecError::Unsupported { what: "s24 in 32" });
+        for tag in [0, 12, 255] {
+            let err = Layout::from_params(&params(vec![tag, 0, 0], None)).expect_err("tag");
+            assert_eq!(err, CodecError::Unsupported { what: "pcm coding" });
         }
     }
 

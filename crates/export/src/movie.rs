@@ -9,6 +9,7 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+use cutlass_caf::CafMux;
 use cutlass_codec::ContainerId;
 use cutlass_encode::EncodeFactory;
 use cutlass_eval::{Fonts, ReaderFactory};
@@ -139,7 +140,8 @@ fn write_part(
 /// Write only the timeline's sound over `request.range` to `destination`:
 /// AAC, ALAC, AC-3, or E-AC-3 in an M4A file, PCM in a WAV file, FLAC in a
 /// FLAC file, MP3 in an MP3 file, Opus in an Ogg (`.opus`) file, or Vorbis
-/// in an Ogg (`.ogg`) file, as `request.audio` names.
+/// in an Ogg (`.ogg`) file, as `request.audio` names. Any of them but
+/// Vorbis also goes in a CAF file when `request.container` asks for one.
 /// The file is written beside its destination and moved there when done.
 pub fn write_sound(
     sources: &MovieSources<'_>,
@@ -208,6 +210,28 @@ pub fn write_sound(
             }
             (CodecId::Opus, ContainerId::Ogg) | (CodecId::Vorbis, ContainerId::Ogg) => {
                 let mut mux = OggMux::new(out);
+                export_sound(
+                    sources.draft,
+                    request,
+                    sources.encoders,
+                    &mut mux,
+                    audio,
+                    Some(progress),
+                )?;
+                mux.into_inner()
+            }
+            (
+                CodecId::Pcm
+                | CodecId::Aac
+                | CodecId::Alac
+                | CodecId::Flac
+                | CodecId::Opus
+                | CodecId::Mp3
+                | CodecId::Ac3
+                | CodecId::Eac3,
+                ContainerId::Caf,
+            ) => {
+                let mut mux = CafMux::new(out);
                 export_sound(
                     sources.draft,
                     request,
@@ -470,6 +494,64 @@ mod tests {
         assert_eq!(params.sample_rate(), Some(44_100));
         // The cookie: 24-bit, as the float mix is kept.
         assert_eq!(params.extradata()[5], 24);
+    }
+
+    /// Half a second of sound in CAF from each encoder: the codec and its
+    /// configuration come back, and the priming, valid and remainder frames
+    /// add up to the packets, with half a second valid.
+    #[test]
+    fn sound_alone_writes_caf() {
+        use cutlass_codec::StreamCodec;
+        use cutlass_container::Demux;
+
+        for codec in [
+            CodecId::Pcm,
+            CodecId::Aac,
+            CodecId::Alac,
+            CodecId::Flac,
+            CodecId::Opus,
+            CodecId::Mp3,
+            CodecId::Ac3,
+            CodecId::Eac3,
+        ] {
+            let (_, bytes) = written(codec, ContainerId::Caf, "cut.caf");
+            assert_eq!(&bytes[..4], b"caff", "{codec:?}");
+            let length = bytes.len() as u64;
+            let mut demux =
+                cutlass_caf::CafDemux::open(std::io::Cursor::new(bytes), length).expect("open");
+            let stream = demux.streams()[0].clone();
+            assert_eq!(stream.params().codec(), &StreamCodec::Known(codec));
+            let rate = stream.timescale().ticks_per_second();
+            let mut ticks = 0;
+            while let Some(packet) = demux.read_packet().expect("read") {
+                ticks += packet.timestamp().duration().expect("duration");
+            }
+            let total = u64::try_from(ticks).expect("ticks");
+            assert_eq!(demux.total_frames(), Some(total), "{codec:?}");
+            let valid = match demux.packet_table() {
+                Some(table) => {
+                    let sum = table.valid_frames
+                        + u64::from(table.priming_frames)
+                        + u64::from(table.remainder_frames);
+                    assert_eq!(sum, total, "{codec:?}");
+                    table.valid_frames
+                }
+                None => total,
+            };
+            assert_eq!(valid, u64::from(rate / 2), "{codec:?} valid frames");
+            match codec {
+                CodecId::Aac => assert_eq!(stream.trim().encoder_delay(), Some(1024)),
+                CodecId::Flac => {
+                    // The STREAMINFO written back at finish counts the samples.
+                    let info = stream.params().extradata();
+                    let samples = u64::from(info[13] & 0x0F) << 32
+                        | u64::from(u32::from_be_bytes([info[14], info[15], info[16], info[17]]));
+                    assert_eq!(samples, 22_050);
+                }
+                CodecId::Alac => assert_eq!(stream.params().extradata()[5], 24),
+                _ => {}
+            }
+        }
     }
 
     /// Half a second of Opus in Ogg: the head, the tags, and audio pages

@@ -11,19 +11,20 @@ use cutlass_isobmff::IsoBmffFile;
 use cutlass_still::{StillDemux, still_limits};
 
 /// The codecs [`crate::register_codecs`] installs, plus ISOBMFF, WAV, AIFF,
-/// FLAC, Ogg (Opus and Vorbis), MP3, and stills.
+/// CAF, FLAC, Ogg (Opus and Vorbis), MP3, and stills.
 #[cfg(test)]
 pub(crate) fn installed_readers() -> ReaderFactory {
     readers_with(crate::register_codecs().0)
 }
 
-/// ISOBMFF, WAV, AIFF, FLAC, Ogg (Opus and Vorbis), MP3, and stills,
+/// ISOBMFF, WAV, AIFF, CAF, FLAC, Ogg (Opus and Vorbis), MP3, and stills,
 /// decoded with `decoders`.
 pub(crate) fn readers_with(decoders: DecodeFactory) -> ReaderFactory {
     let mut readers = ReaderFactory::new();
     readers.register_container(probe_isobmff, open_isobmff);
     readers.register_container(cutlass_riff::probe, open_wav);
     readers.register_container(cutlass_aiff::probe, open_aiff);
+    readers.register_container(cutlass_caf::probe, open_caf);
     readers.register_container(cutlass_flac_container::probe, open_flac);
     readers.register_container(cutlass_ogg::probe, open_ogg);
     readers.register_container(cutlass_still::probe, open_still);
@@ -117,6 +118,19 @@ fn open_aiff(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
     Ok(Box::new(cutlass_aiff::AiffDemux::open(file, length)?))
 }
 
+fn open_caf(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let file = File::open(path).map_err(|error| OpenError::Source {
+        message: error.to_string(),
+    })?;
+    let length = file
+        .metadata()
+        .map_err(|error| OpenError::Source {
+            message: error.to_string(),
+        })?
+        .len();
+    Ok(Box::new(cutlass_caf::CafDemux::open(file, length)?))
+}
+
 fn open_flac(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
     let file = File::open(path).map_err(|error| OpenError::Source {
         message: error.to_string(),
@@ -182,6 +196,410 @@ mod tests {
         std::fs::remove_file(&path).expect("remove");
         let samples = ready.pcm.as_i16().expect("i16");
         assert_eq!(samples, &[0x4000]);
+    }
+
+    #[test]
+    fn a_caf_frame_decodes_as_big_endian_s16() {
+        let path = std::env::temp_dir().join(format!("cutlass-readers-caf-{}", std::process::id()));
+        write_caf_pcm(&path, [1, 1, 0], &[0x40, 0x00]);
+        let mut media = installed_readers().open(&path).expect("open");
+        let ready = media.pull_audio().expect("pull").expect("pcm");
+        std::fs::remove_file(&path).expect("remove");
+        assert_eq!(ready.pcm.as_i16().expect("i16"), &[0x4000]);
+    }
+
+    /// CAF's one-byte codings play: signed 8-bit, A-law and mu-law.
+    #[test]
+    fn caf_eight_bit_and_g711_frames_play() {
+        for (coding, byte, expected) in [(6, 0x40, 0x4000), (7, 0xD5, 8), (8, 0x80, 32_124)] {
+            let path = std::env::temp_dir().join(format!(
+                "cutlass-readers-caf-{coding}-{}",
+                std::process::id()
+            ));
+            write_caf_pcm(&path, [coding, 1, 0], &[byte]);
+            let mut media = installed_readers().open(&path).expect("open");
+            let ready = media.pull_audio().expect("pull").expect("pcm");
+            std::fs::remove_file(&path).expect("remove");
+            assert_eq!(ready.pcm.as_i16().expect("i16"), &[expected], "{coding}");
+        }
+    }
+
+    /// G.711 WAV (tags 6 and 7, extensible, RF64) and AIFC (`alaw`, `ulaw`,
+    /// upper case) files from afconvert and ffmpeg play sample for sample as
+    /// AudioToolbox and FFmpeg decode them to s16. So do the WAV files
+    /// `WavMux` writes back from them. Skips, and says so, without the tools.
+    #[test]
+    fn g711_wav_and_aiff_files_play_like_afconvert_and_ffmpeg() {
+        let apple = tool_exists("afconvert");
+        let ffmpeg = tool_exists("ffmpeg");
+        if !apple && !ffmpeg {
+            eprintln!("skipped: neither afconvert nor ffmpeg is on PATH");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("cutlass-readers-g711-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let source = dir.join("source.wav");
+        std::fs::write(&source, s16_wav(8_000, 2, &test_signal(6_000))).expect("source");
+        let mut files = Vec::new();
+        if apple {
+            for (kind, ext, format) in [
+                ("WAVE", "wav", "alaw"),
+                ("WAVE", "wav", "ulaw"),
+                ("AIFC", "aifc", "alaw"),
+                ("AIFC", "aifc", "ulaw"),
+            ] {
+                let out = dir.join(format!("apple-{format}.{ext}"));
+                run_tool(
+                    "afconvert",
+                    &["-f", kind, "-d", format, path_str(&source), path_str(&out)],
+                );
+                files.push(out);
+            }
+        }
+        if ffmpeg {
+            for (codec, ext, extra) in [
+                ("pcm_alaw", "wav", &[][..]),
+                ("pcm_mulaw", "wav", &[][..]),
+                ("pcm_alaw", "aiff", &[][..]),
+                ("pcm_mulaw", "aiff", &[][..]),
+                ("pcm_alaw", "wav", &["-rf64", "always"][..]),
+                ("pcm_mulaw", "wav", &["-ac", "3"][..]),
+                ("pcm_alaw", "wav", &["-ac", "3"][..]),
+            ] {
+                let out = dir.join(format!("ffmpeg-{}-{codec}.{ext}", files.len()));
+                let mut args = vec!["-v", "error", "-y", "-i", path_str(&source)];
+                args.extend_from_slice(extra);
+                args.extend_from_slice(&["-c:a", codec, path_str(&out)]);
+                run_tool("ffmpeg", &args);
+                files.push(out);
+            }
+        }
+        // AudioToolbox does not open the upper-case tags; FFmpeg does.
+        let mut upper = Vec::new();
+        for (index, path) in files.clone().iter().enumerate() {
+            let mut bytes = std::fs::read(path).expect("read");
+            if &bytes[8..12] != b"AIFC" || !ffmpeg {
+                continue;
+            }
+            let at = bytes.windows(4).position(|w| w == b"COMM").expect("COMM") + 8 + 18;
+            bytes[at..at + 4].make_ascii_uppercase();
+            let out = dir.join(format!("upper-{index}.aifc"));
+            std::fs::write(&out, bytes).expect("upper");
+            upper.push(out);
+        }
+        let mut checked = 0;
+        for path in files.iter().chain(&upper) {
+            let ours = play_i16(path);
+            assert!(ours.len() >= 12_000, "{}", path.display());
+            if ffmpeg {
+                assert_eq!(ours, ffmpeg_s16(path, &dir), "ffmpeg {}", path.display());
+                checked += 1;
+            }
+            if apple && !upper.contains(path) {
+                assert_eq!(
+                    ours,
+                    afconvert_s16(path, &dir),
+                    "afconvert {}",
+                    path.display()
+                );
+                checked += 1;
+            }
+            if path.extension().is_some_and(|ext| ext == "wav") {
+                let again = dir.join("remux.wav");
+                std::fs::write(&again, remux_wav(path)).expect("remux");
+                assert_eq!(play_i16(&again), ours, "remux {}", path.display());
+                if ffmpeg {
+                    assert_eq!(
+                        ffmpeg_s16(&again, &dir),
+                        ours,
+                        "remux ffmpeg {}",
+                        path.display()
+                    );
+                }
+                if apple {
+                    assert_eq!(
+                        afconvert_s16(&again, &dir),
+                        ours,
+                        "remux afconvert {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+        std::fs::remove_dir_all(&dir).expect("clean");
+        eprintln!(
+            "g711: {} files, {checked} oracle decodes",
+            files.len() + upper.len()
+        );
+    }
+
+    fn tool_exists(name: &str) -> bool {
+        std::process::Command::new(name)
+            .arg("-h")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+    }
+
+    fn run_tool(name: &str, args: &[&str]) {
+        let status = std::process::Command::new(name)
+            .args(args)
+            .status()
+            .expect(name);
+        assert!(status.success(), "{name} {args:?}");
+    }
+
+    fn path_str(path: &std::path::Path) -> &str {
+        path.to_str().expect("utf-8 path")
+    }
+
+    /// Full-scale ramps and a pseudo-random walk, so every A-law and mu-law
+    /// code shows up.
+    fn test_signal(frames: usize) -> Vec<i16> {
+        let mut state = 0x2545_F491_u32;
+        (0..frames * 2)
+            .map(|index| {
+                if index < 2 * 1024 {
+                    let step = i32::try_from(index / 2).expect("step");
+                    i16::try_from(step * 64 - 32_768).expect("ramp")
+                } else {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    i16::from_le_bytes(state.to_le_bytes()[..2].try_into().expect("two"))
+                }
+            })
+            .collect()
+    }
+
+    fn s16_wav(rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {
+        let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let size = u32::try_from(data.len()).expect("size");
+        let mut out = b"RIFF".to_vec();
+        out.extend_from_slice(&(36 + size).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16_u32.to_le_bytes());
+        out.extend_from_slice(&1_u16.to_le_bytes());
+        out.extend_from_slice(&channels.to_le_bytes());
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&(rate * 2 * u32::from(channels)).to_le_bytes());
+        out.extend_from_slice(&(2 * channels).to_le_bytes());
+        out.extend_from_slice(&16_u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&data);
+        out
+    }
+
+    /// Every sample the desktop readers play from `path`, interleaved.
+    fn play_i16(path: &std::path::Path) -> Vec<i16> {
+        let mut media = installed_readers().open(path).expect("open");
+        let mut out = Vec::new();
+        while let Some(ready) = media.pull_audio().expect("pull") {
+            out.extend_from_slice(ready.pcm.as_i16().expect("i16"));
+        }
+        out
+    }
+
+    fn ffmpeg_s16(path: &std::path::Path, dir: &std::path::Path) -> Vec<i16> {
+        let out = dir.join("oracle.raw");
+        run_tool(
+            "ffmpeg",
+            &[
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                path_str(path),
+                "-f",
+                "s16le",
+                "-c:a",
+                "pcm_s16le",
+                path_str(&out),
+            ],
+        );
+        let bytes = std::fs::read(&out).expect("raw");
+        bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| i16::from_le_bytes(*pair))
+            .collect()
+    }
+
+    fn afconvert_s16(path: &std::path::Path, dir: &std::path::Path) -> Vec<i16> {
+        let out = dir.join("oracle.wav");
+        run_tool(
+            "afconvert",
+            &["-f", "WAVE", "-d", "LEI16", path_str(path), path_str(&out)],
+        );
+        let bytes = std::fs::read(&out).expect("wav");
+        let mut at = 12;
+        loop {
+            let id = &bytes[at..at + 4];
+            let size = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().expect("size"));
+            let size = usize::try_from(size).expect("size");
+            if id == b"data" {
+                return bytes[at + 8..at + 8 + size]
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| i16::from_le_bytes(*pair))
+                    .collect();
+            }
+            at += 8 + size + size % 2;
+        }
+    }
+
+    /// `path` through `WavDemux` and back out of `WavMux`.
+    fn remux_wav(path: &std::path::Path) -> Vec<u8> {
+        use cutlass_container::Demux;
+        let bytes = std::fs::read(path).expect("read");
+        let length = u64::try_from(bytes.len()).expect("length");
+        let mut demux =
+            cutlass_riff::WavDemux::open(std::io::Cursor::new(bytes), length).expect("open");
+        let params = demux.streams()[0].params().clone();
+        let rate = params.sample_rate().expect("rate");
+        let mut mux = cutlass_riff::WavMux::new(std::io::Cursor::new(Vec::new()));
+        mux.add_stream(NewStream {
+            params,
+            timescale: Timescale::new(rate),
+            language: None,
+        })
+        .expect("stream");
+        let mut ticks = 0;
+        while let Some(packet) = demux.read_packet().expect("packet") {
+            ticks += packet.timestamp().duration().expect("duration");
+            mux.write_packet(&packet).expect("write");
+        }
+        mux.finish(&[TrackDuration {
+            track: TrackId::new(0),
+            timescale: Timescale::new(rate),
+            ticks,
+        }])
+        .expect("finish");
+        mux.into_inner().into_inner()
+    }
+
+    fn write_caf_pcm(path: &std::path::Path, extra: [u8; 3], frame: &[u8]) {
+        let mut mux = cutlass_caf::CafMux::new(std::io::Cursor::new(Vec::new()));
+        let params =
+            StreamParams::try_audio(StreamCodec::Known(CodecId::Pcm), 8_000, 1, extra.to_vec())
+                .expect("params");
+        mux.add_stream(NewStream {
+            params,
+            timescale: Timescale::new(8_000),
+            language: None,
+        })
+        .expect("stream");
+        let packet = Packet::try_new(
+            0,
+            frame.to_vec(),
+            Timestamp::try_new(Some(0), Some(0), Some(1)).expect("time"),
+            Timescale::new(8_000),
+            true,
+        )
+        .expect("packet");
+        mux.write_packet(&packet).expect("write");
+        mux.finish(&[TrackDuration {
+            track: TrackId::new(0),
+            timescale: Timescale::new(8_000),
+            ticks: 1,
+        }])
+        .expect("finish");
+        std::fs::write(path, mux.into_inner().into_inner()).expect("write");
+    }
+
+    /// Opus in CAF, as the Opus encoder hands it over: the pre-skip becomes
+    /// the file's priming, and the reader plays from the start exactly what
+    /// the decoder gives after it.
+    #[test]
+    fn a_caf_opus_file_plays_after_the_priming() {
+        use cutlass_encode::{AudioInput, ChannelLayout, CodecParams, Encoder, Pcm, SideData};
+
+        let path =
+            std::env::temp_dir().join(format!("cutlass-readers-opus-{}.caf", std::process::id()));
+        let samples: Vec<f32> = (0..2 * 48_000)
+            .map(|i| ((i as f32) * 0.013).sin() * 0.4)
+            .collect();
+        let spec = CodecParams::audio(CodecId::Opus, 48_000, ChannelLayout::stereo());
+        let mut encoder = cutlass_opus::OpusEncoder::open(&spec).expect("encoder");
+        let pcm = Pcm::from_f32(48_000, ChannelLayout::stereo(), samples).expect("pcm");
+        let mut packets = encoder.push(&AudioInput { pcm }).expect("push");
+        packets.extend(encoder.drain().expect("drain"));
+        let mut mux = cutlass_caf::CafMux::new(std::fs::File::create(&path).expect("create"));
+        let params =
+            StreamParams::try_audio(StreamCodec::Known(CodecId::Opus), 48_000, 2, Vec::new())
+                .expect("params");
+        let track = mux
+            .add_stream(NewStream {
+                params,
+                timescale: Timescale::new(48_000),
+                language: None,
+            })
+            .expect("stream");
+        let mut ticks = 0;
+        for packet in &packets {
+            for side in &packet.side {
+                match side {
+                    SideData::Config(head) => mux.set_config(track, head).expect("head"),
+                    SideData::Gapless {
+                        encoder_delay,
+                        trailing_padding,
+                        ..
+                    } => mux
+                        .set_trim(
+                            track,
+                            cutlass_container::Trim::new(
+                                Some(u64::from(*encoder_delay)),
+                                Some(u64::from(*trailing_padding)),
+                            ),
+                        )
+                        .expect("trim"),
+                    _ => {}
+                }
+            }
+            let timestamp =
+                Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
+                    .expect("timestamp");
+            let out = Packet::try_new(
+                0,
+                packet.data.clone(),
+                timestamp,
+                Timescale::new(48_000),
+                true,
+            )
+            .expect("packet");
+            mux.write_packet(&out).expect("write");
+            ticks += packet.duration;
+        }
+        mux.finish(&[TrackDuration {
+            track,
+            timescale: Timescale::new(48_000),
+            ticks,
+        }])
+        .expect("finish");
+        drop(mux);
+
+        let mut decoder = cutlass_opus::OpusDecoder::open(&spec).expect("decoder");
+        let mut expected = Vec::new();
+        for packet in &packets {
+            expected.extend(decoder.decode(&packet.data).expect("decode"));
+        }
+        let mut media = installed_readers().open(&path).expect("open");
+        let first = media
+            .audio_from(cutlass_model::Micros(0), 4800)
+            .expect("audio");
+        std::fs::remove_file(&path).expect("remove");
+        let first = first.as_f32().expect("f32");
+        assert_eq!(first.len(), 2 * 4800);
+        for (index, value) in first.iter().enumerate() {
+            assert!(
+                (value - expected[2 * 120 + index]).abs() < 1e-6,
+                "sample {index}"
+            );
+        }
     }
 
     /// An `.opus` file opens, plays from the start exactly what the Rust

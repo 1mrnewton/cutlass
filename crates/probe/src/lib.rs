@@ -76,6 +76,9 @@ pub fn probe(path: &Path) -> Result<Probed, ProbeError> {
     if let Some(probed) = ogg(path, &header)? {
         return Ok(probed);
     }
+    if let Some(probed) = transport_stream(path, &header)? {
+        return Ok(probed);
+    }
     if let Some(probed) = movie(path, &header)? {
         return Ok(probed);
     }
@@ -270,6 +273,51 @@ fn ogg(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     Ok(Some(Probed::Audio { duration }))
 }
 
+/// MPEG-TS (`.ts`, `.m2ts`, `.mts`): the chosen program's first video
+/// size, and its length from the earliest timestamp to the end of the last
+/// frame, found without reading the middle of the file.
+fn transport_stream(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
+    if !matches!(
+        cutlass_mpegts::probe(header),
+        cutlass_container::ProbeResult::Accept { .. }
+    ) {
+        return Ok(None);
+    }
+    let file = File::open(path).map_err(|error| io_error(path, error))?;
+    let length = file
+        .metadata()
+        .map_err(|error| io_error(path, error))?
+        .len();
+    let demux = cutlass_mpegts::TsDemux::open(std::io::BufReader::new(file), length)
+        .map_err(|error| ProbeError::new(format!("mpegts refused the file: {error}")))?;
+    let ticks = demux
+        .end()
+        .map_or(0, |end| u64::try_from(end - demux.start()).unwrap_or(0));
+    let duration = ticks_to_micros(ticks, cutlass_mpegts::TIMESCALE)?;
+    let streams = cutlass_container::Demux::streams(&demux);
+    if let Some(size) = streams.iter().find_map(|stream| stream.params().size()) {
+        let width =
+            i32::try_from(size.width()).map_err(|_| ProbeError::new("the frame is too wide"))?;
+        let height =
+            i32::try_from(size.height()).map_err(|_| ProbeError::new("the frame is too tall"))?;
+        return Ok(Some(Probed::Video {
+            meta: MetaType::Video,
+            width,
+            height,
+            duration,
+        }));
+    }
+    if streams
+        .iter()
+        .any(|stream| stream.params().sample_rate().is_some())
+    {
+        return Ok(Some(Probed::Audio { duration }));
+    }
+    Err(ProbeError::new(
+        "mpegts opened a file with no video or audio",
+    ))
+}
+
 fn movie(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     if header.get(4..8) != Some(b"ftyp") {
         return Ok(None);
@@ -378,9 +426,6 @@ fn unavailable(header: &[u8]) -> Option<&'static str> {
     }
     if header.starts_with(b"RIFF") && header.get(8..12) == Some(b"AVI ") {
         return Some("avi is not available");
-    }
-    if header.first() == Some(&0x47) && header.get(188) == Some(&0x47) {
-        return Some("mpegts is not available");
     }
     None
 }
@@ -805,6 +850,20 @@ mod tests {
         );
         assert!(probe(&temp.0.join("missing.mp4")).is_err());
         assert!(probe(&temp.0).is_err());
+    }
+
+    /// FFmpeg's H.264 and AAC in a transport stream: the picture size, and
+    /// the time from the first AAC frame (PTS 131280) to the end of the last
+    /// (PTS 240720 plus 1920), which is 16 ms past ffprobe's estimate.
+    #[test]
+    fn a_transport_stream_reports_its_picture_and_its_length() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../containers/mpegts/tests/fixtures/h264_aac.ts");
+        assert_eq!(picture(&path), (MetaType::Video, 96, 64, 1_237_333));
+        let temp = Temp::new();
+        let bytes = std::fs::read(&path).expect("fixture");
+        let cut = temp.write("cut.ts", &bytes[..1000]);
+        assert!(probe(&cut).is_err());
     }
 
     #[test]

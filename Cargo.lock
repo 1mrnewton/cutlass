@@ -3087,6 +3087,7 @@ dependencies = [
  "cutlass-jpeg",
  "cutlass-model",
  "cutlass-mp3-container",
+ "cutlass-mpegts",
  "cutlass-ogg",
  "cutlass-riff",
  "cutlass-still",

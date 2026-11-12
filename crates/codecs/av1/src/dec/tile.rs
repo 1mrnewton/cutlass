@@ -2687,10 +2687,28 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 i += sh;
             }
         } else {
-            for i in 0..h4 {
-                let at = self.fs.mi_row(row + i) + col;
-                for v in &mut self.fs.inter_tx_sizes[at..][..w4] {
-                    *v = tx;
+            // Row by row: the rows go round the mode info ring. Stores
+            // of the value for the usual widths, not a library call.
+            let fs = &mut *self.fs;
+            macro_rules! rows {
+                ($n:literal) => {
+                    for i in 0..h4 {
+                        let at = fs.mi_row(row + i) + col;
+                        fs.inter_tx_sizes[at..][..$n].copy_from_slice(&[tx; $n]);
+                    }
+                };
+            }
+            match w4 {
+                1 => rows!(1),
+                2 => rows!(2),
+                4 => rows!(4),
+                8 => rows!(8),
+                16 => rows!(16),
+                _ => {
+                    for i in 0..h4 {
+                        let at = fs.mi_row(row + i) + col;
+                        fs.inter_tx_sizes[at..][..w4].fill(tx);
+                    }
                 }
             }
             self.b.tx_size = tx;

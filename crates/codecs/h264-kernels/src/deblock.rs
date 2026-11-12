@@ -15,12 +15,14 @@ pub use crate::edge::{Edge, Filter, MbEdges};
 
 /// Filters one 16-sample luma edge of `plane` in place. `false` means the
 /// edge's samples are not all in the plane and nothing was done.
+#[inline]
 pub fn luma_edge(plane: &mut [u8], edge: Edge) -> bool {
     kernel!(luma_edge(plane, edge))
 }
 
 /// Filters one 8-sample chroma edge of `plane` in place; `edge.tc0` is per
 /// two samples. `false` as for [`luma_edge`].
+#[inline]
 pub fn chroma_edge(plane: &mut [u8], edge: Edge) -> bool {
     kernel!(chroma_edge(plane, edge))
 }
@@ -28,12 +30,14 @@ pub fn chroma_edge(plane: &mut [u8], edge: Edge) -> bool {
 /// Filters every edge of one 16×16 luma macroblock of `plane` in place,
 /// as [`luma_edge`] on each in turn would. `false` means the macroblock's
 /// samples are not all in the plane and nothing was done.
+#[inline]
 pub fn luma_mb(plane: &mut [u8], edges: &MbEdges) -> bool {
     kernel!(luma_mb(plane, edges))
 }
 
 /// [`luma_mb`] for one 8×8 chroma macroblock, as [`chroma_edge`] on each
 /// edge in turn would.
+#[inline]
 pub fn chroma_mb(plane: &mut [u8], edges: &MbEdges) -> bool {
     kernel!(chroma_mb(plane, edges))
 }
@@ -44,11 +48,13 @@ pub type ChromaRows = [[u8; 8]; 4];
 
 /// The chroma filter for a strength below 4. `tc0` is per group of two
 /// samples along the edge; a negative one leaves its group alone.
+#[inline]
 pub fn chroma_normal(rows: &mut ChromaRows, alpha: i32, beta: i32, tc0: [i8; 4]) {
     kernel!(chroma_normal(rows, alpha, beta, tc0));
 }
 
 /// The chroma filter for strength 4.
+#[inline]
 pub fn chroma_strong(rows: &mut ChromaRows, alpha: i32, beta: i32) {
     kernel!(chroma_strong(rows, alpha, beta));
 }
@@ -58,22 +64,26 @@ pub fn chroma_strong(rows: &mut ChromaRows, alpha: i32, beta: i32) {
 /// `alpha` and `beta` are the edge's thresholds. `tc0` is the clipping
 /// value of each group of four samples along the edge; a negative one
 /// leaves its group alone.
+#[inline]
 pub fn luma_normal_rows(rows: &mut Rows, alpha: i32, beta: i32, tc0: [i8; 4]) {
     kernel!(luma_normal_rows(rows, alpha, beta, tc0));
 }
 
 /// The filter for strength 4 (8.7.2.4), on rows.
+#[inline]
 pub fn luma_strong_rows(rows: &mut Rows, alpha: i32, beta: i32) {
     kernel!(luma_strong_rows(rows, alpha, beta));
 }
 
 /// [`luma_normal_rows`] for an edge that runs down the picture. `tc0` is
 /// per group of four lines.
+#[inline]
 pub fn luma_normal_lines(lines: &mut Lines, alpha: i32, beta: i32, tc0: [i8; 4]) {
     kernel!(luma_normal_lines(lines, alpha, beta, tc0));
 }
 
 /// [`luma_strong_rows`] for an edge that runs down the picture.
+#[inline]
 pub fn luma_strong_lines(lines: &mut Lines, alpha: i32, beta: i32) {
     kernel!(luma_strong_lines(lines, alpha, beta));
 }

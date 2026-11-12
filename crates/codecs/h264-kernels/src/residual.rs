@@ -9,11 +9,13 @@
 /// adds it to the 4×4 samples of `plane` whose first is at `at`, with rows
 /// `down` apart. `false` means the samples are not all in the plane and
 /// nothing was done.
+#[inline]
 pub fn idct4_add(plane: &mut [u8], at: usize, down: usize, block: &[i32; 16]) -> bool {
     kernel!(idct4_add(plane, at, down, block))
 }
 
 /// [`idct4_add`] for an 8×8 block, clause 8.5.13.
+#[inline]
 pub fn idct8_add(plane: &mut [u8], at: usize, down: usize, block: &[i32; 64]) -> bool {
     kernel!(idct8_add(plane, at, down, block))
 }
@@ -22,6 +24,7 @@ pub fn idct8_add(plane: &mut [u8], at: usize, down: usize, block: &[i32; 64]) ->
 /// first sample is at `at`, with rows `down` apart, and holds each to 0 to
 /// 255. `size` is 4 or 8. `false` means it is another size or the samples
 /// are not all in the plane, and nothing was done.
+#[inline]
 pub fn dc_add(plane: &mut [u8], at: usize, down: usize, dc: i32, size: usize) -> bool {
     kernel!(dc_add(plane, at, down, dc, size))
 }

@@ -9,6 +9,7 @@ pub use crate::mc_block::{BiWeight, Block, ChromaSource, UniWeight};
 /// The rounded average of two predictions of `size` (width, height), whose
 /// rows are `size.0` apart, into `dst` with rows `dst_stride` apart.
 /// `false` means a block does not fit its slice and nothing was done.
+#[inline]
 pub fn avg_block(
     dst: &mut [u8],
     dst_stride: usize,
@@ -23,6 +24,7 @@ pub fn avg_block(
 /// place: one prediction under explicit weights. Widths a multiple of 4 up
 /// to 16. `false` means nothing was done: another width, a block that does
 /// not fit `dst`, or weights outside [`UniWeight`]'s range.
+#[inline]
 pub fn scale_block(
     dst: &mut [u8],
     dst_stride: usize,
@@ -37,6 +39,7 @@ pub fn scale_block(
 /// prediction made straight into the picture. Widths a multiple of 4 up to
 /// 16. `false` means nothing was done: another width, a block that does
 /// not fit, or weights outside the kernels' range.
+#[inline]
 pub fn weight_onto(
     dst: &mut [u8],
     dst_stride: usize,
@@ -49,6 +52,7 @@ pub fn weight_onto(
 
 /// Two predictions mixed by `weight`, laid out as for [`avg_block`].
 /// `false` also when the weights are outside the kernels' range.
+#[inline]
 pub fn weight_block(
     dst: &mut [u8],
     dst_stride: usize,
@@ -65,6 +69,7 @@ pub fn weight_block(
 /// at most 16 high; `false` means nothing was done. The source must hold
 /// the two samples before the block and the three after it, in both
 /// directions.
+#[inline]
 pub fn luma_block(dst: &mut [u8], dst_stride: usize, block: Block<'_>, frac: (u8, u8)) -> bool {
     kernel!(luma_block(dst, dst_stride, block, frac))
 }
@@ -82,6 +87,7 @@ pub fn prefetch(plane: &[u8], at: usize, stride: usize, rows: usize) {
 /// A chroma block at eighth-sample offsets `frac` (each 0 to 7). Covers
 /// blocks 4 or 8 wide; `false` means nothing was done. The source must
 /// hold one more sample after the block's last column and row.
+#[inline]
 pub fn chroma_block(dst: &mut [u8], dst_stride: usize, block: Block<'_>, frac: (u8, u8)) -> bool {
     kernel!(chroma_block(dst, dst_stride, block, frac))
 }
@@ -93,6 +99,7 @@ pub fn chroma_block(dst: &mut [u8], dst_stride: usize, block: Block<'_>, frac: (
 /// offsets: default bi-prediction, clause 8.4.2.3.1. Both blocks have one
 /// size. `false` means nothing was written: a size `luma_block` does not
 /// take, or a block whose samples are not all in its source.
+#[inline]
 pub fn luma_pair(
     dst: &mut [u8],
     dst_stride: usize,
@@ -108,6 +115,7 @@ pub fn luma_pair(
 /// average of the two. `size` is the block's, 4 or 8 wide and an even
 /// height up to 8. `false` means nothing was written: another size, or a
 /// source without one more sample after the block's last column and row.
+#[inline]
 pub fn chroma_planes(
     dst: (&mut [u8], &mut [u8]),
     dst_stride: usize,
@@ -119,6 +127,7 @@ pub fn chroma_planes(
 }
 
 /// [`luma_pair`] for a chroma block at eighth offsets.
+#[inline]
 pub fn chroma_pair(
     dst: &mut [u8],
     dst_stride: usize,
@@ -128,55 +137,65 @@ pub fn chroma_pair(
     kernel!(chroma_pair(dst, dst_stride, first, second))
 }
 
+#[inline]
 pub fn avg_row(dst: &mut [u8], a: &[u8], b: &[u8]) -> bool {
     kernel!(avg_row(dst, a, b))
 }
 
 /// Half samples from six lines of full samples: the filter, rounded and
 /// clipped to a sample.
+#[inline]
 pub fn half16(taps: [&[u8; 16]; 6]) -> [u8; 16] {
     kernel!(half16(taps))
 }
 
 /// [`half16`] for eight samples.
+#[inline]
 pub fn half8(taps: [&[u8; 8]; 6]) -> [u8; 8] {
     kernel!(half8(taps))
 }
 
 /// The filter's sum with no rounding, the first pass of a centre sample.
+#[inline]
 pub fn raw16(taps: [&[u8; 16]; 6]) -> [i16; 16] {
     kernel!(raw16(taps))
 }
 
 /// [`raw16`] for eight samples.
+#[inline]
 pub fn raw8(taps: [&[u8; 8]; 6]) -> [i16; 8] {
     kernel!(raw8(taps))
 }
 
 /// Centre samples (the half sample in both directions) from six lines of
 /// [`raw16`] sums: the filter again, rounded and clipped.
+#[inline]
 pub fn centre16(taps: [&[i16; 16]; 6]) -> [u8; 16] {
     kernel!(centre16(taps))
 }
 
 /// [`centre16`] for eight samples.
+#[inline]
 pub fn centre8(taps: [&[i16; 8]; 6]) -> [u8; 8] {
     kernel!(centre8(taps))
 }
 
 /// The rounded average of two lines, which is a quarter sample and also a
 /// default-weight prediction from two references.
+#[inline]
 pub fn avg16(a: &[u8; 16], b: &[u8; 16]) -> [u8; 16] {
     kernel!(avg16(a, b))
 }
 
 /// [`avg16`] for eight samples.
+#[inline]
 pub fn avg8(a: &[u8; 8], b: &[u8; 8]) -> [u8; 8] {
     kernel!(avg8(a, b))
 }
 
 /// Eight chroma samples, clause 8.4.2.2.2, from the nine samples above and
 /// the nine below. `xf` and `yf` are the eighth-sample offsets, 0 to 7.
+#[inline]
 pub fn chroma8(top: &[u8; 9], bottom: &[u8; 9], xf: u8, yf: u8) -> [u8; 8] {
     kernel!(chroma8(top, bottom, xf, yf))
 }

@@ -1096,8 +1096,25 @@ pub fn inv_txfm_add<P: Pixel>(
             dst, dst_stride, coefs, tx_size, tx_type, nz_rows, nz_cols, bd,
         );
     }
-    for i in 0..nz_rows {
-        coefs[i * tw..][..nz_cols].fill(0);
+    // Past the nonzero columns the rows are zero already: each row is
+    // cleared to a power-of-two width, in stores rather than a call.
+    macro_rules! clear {
+        ($n:literal) => {
+            for row in coefs.chunks_exact_mut(tw).take(nz_rows) {
+                row[..$n].copy_from_slice(&[0; $n]);
+            }
+        };
+    }
+    match nz_cols.next_power_of_two().max(4).min(tw) {
+        4 => clear!(4),
+        8 => clear!(8),
+        16 => clear!(16),
+        32 => clear!(32),
+        _ => {
+            for i in 0..nz_rows {
+                coefs[i * tw..][..nz_cols].fill(0);
+            }
+        }
     }
 }
 

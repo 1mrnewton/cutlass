@@ -344,9 +344,10 @@ fn avi(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
             stream.timescale().ticks_per_second(),
         )
     };
-    if let Some(stream) = streams.iter().find(|stream| {
-        stream.params().size().is_some() && !stream.params().codec().is_unknown()
-    }) {
+    if let Some(stream) = streams
+        .iter()
+        .find(|stream| stream.params().size().is_some() && !stream.params().codec().is_unknown())
+    {
         let Some(size) = stream.params().size() else {
             return Err(ProbeError::new("avi video stream has no frame size"));
         };
@@ -520,7 +521,9 @@ mod tests {
 
     #[test]
     fn an_avi_movie_probes_as_video_with_its_length() {
-        use cutlass_codec::{CodecId, FrameSize, Packet, StreamCodec, StreamParams, Timescale, Timestamp};
+        use cutlass_codec::{
+            CodecId, FrameSize, Packet, StreamCodec, StreamParams, Timescale, Timestamp,
+        };
         use cutlass_container::{Mux, NewStream, TrackDuration, TrackId};
         let mut mux = cutlass_avi::AviMux::new(std::io::Cursor::new(Vec::new()));
         mux.add_stream(NewStream {
@@ -535,8 +538,14 @@ mod tests {
         .expect("stream");
         for frame in 0..50 {
             let stamp = Timestamp::try_new(Some(frame), Some(frame), Some(1)).expect("time");
-            let packet = Packet::try_new(0, vec![0xFF, 0xD8, 0xFF, 0xD9], stamp, Timescale::new(25), true)
-                .expect("packet");
+            let packet = Packet::try_new(
+                0,
+                vec![0xFF, 0xD8, 0xFF, 0xD9],
+                stamp,
+                Timescale::new(25),
+                true,
+            )
+            .expect("packet");
             mux.write_packet(&packet).expect("write");
         }
         mux.finish(&[TrackDuration {

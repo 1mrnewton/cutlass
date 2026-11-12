@@ -1006,6 +1006,7 @@ fn tile_dec<'a, P: Pixel>(
         rec: None,
         y0: 0,
         mi_r0: 0,
+        mi_edges: false,
     }
 }
 

@@ -2275,6 +2275,7 @@ fn decode_tile_part<P: Pixel>(
         rec: logs.map(|l| Box::new(lock(l).logs.pop().unwrap_or_default())),
         y0: 0,
         mi_r0: 0,
+        mi_edges: false,
     };
     if carry.fresh {
         td.begin_tile();
@@ -3028,6 +3029,8 @@ fn recon_worker<'r, P: PicturePixel>(
         rec: None,
         y0: 0,
         mi_r0: 0,
+        // Reconstruction reads the mode info of neighbours only.
+        mi_edges: true,
     };
     let ahead = lock(spares).rows_ahead;
     td.scratch.edge_y = usize::MAX;

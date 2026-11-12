@@ -661,6 +661,11 @@ pub struct TileDec<'a, P: Pixel, C: Coder = Msac<'a>> {
     /// writes (`mi`, `uv_modes`, `delta_lf`) start at. 0 for a whole
     /// frame's.
     pub mi_r0: usize,
+    /// Whether the mode info of a block need only be in the units later
+    /// blocks of reconstruction read: its bottom row and right column (a
+    /// neighbour's above or left of them) and its first (see
+    /// [`Self::write_mode_info`]).
+    pub mi_edges: bool,
 }
 
 #[inline]
@@ -791,6 +796,25 @@ fn ctx_set(d: &mut [u8], at: usize, n: usize, v: u8) {
 /// with `v`: one dispatch on the width for all the rows, and no library
 /// call for the power-of-two widths.
 #[inline(always)]
+/// [`fill_rect`] of only the first unit, the bottom row and the right
+/// column of the `w` x `h` rectangle at `at`.
+fn fill_edges<T: Copy>(d: &mut [T], stride: usize, at: usize, w: usize, h: usize, v: T) {
+    if w <= 2 && h <= 2 {
+        return fill_rect(d, stride, at, w, h, v);
+    }
+    if h == 0 || w == 0 {
+        return;
+    }
+    d[at] = v;
+    let last = at + (h - 1) * stride;
+    for m in &mut d[last..][..w] {
+        *m = v;
+    }
+    for y in 0..h - 1 {
+        d[at + y * stride + w - 1] = v;
+    }
+}
+
 pub(crate) fn fill_rect<T: Copy>(d: &mut [T], stride: usize, at: usize, w: usize, h: usize, v: T) {
     if size_of::<T>() > 2 {
         // Larger values (mode info): a store per entry.
@@ -1611,10 +1635,17 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let stride = self.fs.mi_stride;
         let set_uv = b.ref_frame[0] == INTRA_FRAME && b.has_chroma;
         let at = (b.mi_row - self.mi_r0) * stride + b.mi_col;
-        // Stores of the value, not a library copy per row.
-        fill_rect(&mut self.fs.mi, stride, at, w4, h4, *info);
-        if set_uv {
-            fill_rect(&mut self.fs.uv_modes, stride, at, w4, h4, b.uv_mode);
+        if self.mi_edges {
+            fill_edges(&mut self.fs.mi, stride, at, w4, h4, *info);
+            if set_uv {
+                fill_edges(&mut self.fs.uv_modes, stride, at, w4, h4, b.uv_mode);
+            }
+        } else {
+            // Stores of the value, not a library copy per row.
+            fill_rect(&mut self.fs.mi, stride, at, w4, h4, *info);
+            if set_uv {
+                fill_rect(&mut self.fs.uv_modes, stride, at, w4, h4, b.uv_mode);
+            }
         }
         if self.hdr.delta_lf_present {
             let n = self.fs.mi.len();

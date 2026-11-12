@@ -476,17 +476,28 @@ pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
         false
     }
 
-    /// The block predicted from `first` written to `dst` and, when
-    /// `second` is there, averaged with the one predicted from it: luma at
-    /// quarter offsets, or chroma at eighth offsets when `chroma` is set.
-    /// Both sources have been checked with [`luma_source`] or
-    /// [`chroma_source`]. `false` means nothing was written.
+    /// The luma block predicted from `first` written to `dst` and, when
+    /// `second` is there, averaged with the one predicted from it, at
+    /// quarter offsets. Both sources have been checked with
+    /// [`luma_source`]. `false` means nothing was written.
     fn pair_fast(
-        _chroma: bool,
         _dst: (&mut [Self], usize),
         _size: (usize, usize),
         _first: McSource<'_, Self>,
         _second: Option<McSource<'_, Self>>,
+    ) -> bool {
+        false
+    }
+
+    /// Both chroma planes of a 4:2:0 block of `size` predicted at once,
+    /// into `dst`'s two planes, rows `dst.2` apart: from `first`, or the
+    /// rounded average of `first` and `second`. Both sources have been
+    /// checked with [`chroma_source`]. `false` means nothing was written.
+    fn chroma_planes_fast(
+        _dst: (&mut [Self], &mut [Self], usize),
+        _size: (usize, usize),
+        _first: ChromaSources<'_, Self>,
+        _second: Option<ChromaSources<'_, Self>>,
     ) -> bool {
         false
     }
@@ -695,7 +706,6 @@ impl Sample for u8 {
     }
 
     fn pair_fast(
-        chroma: bool,
         dst: (&mut [Self], usize),
         size: (usize, usize),
         first: McSource<'_, Self>,
@@ -713,11 +723,27 @@ impl Sample for u8 {
             (block, source.frac)
         }
         let (first, second) = (block(first, size), second.map(|source| block(source, size)));
-        if chroma {
-            mc::chroma_pair(dst, dst_stride, first, second)
-        } else {
-            mc::luma_pair(dst, dst_stride, first, second)
+        mc::luma_pair(dst, dst_stride, first, second)
+    }
+
+    fn chroma_planes_fast(
+        dst: (&mut [Self], &mut [Self], usize),
+        size: (usize, usize),
+        first: ChromaSources<'_, Self>,
+        second: Option<ChromaSources<'_, Self>>,
+    ) -> bool {
+        use cutlass_h264_kernels::mc;
+        fn source(s: ChromaSources<'_, u8>) -> mc::ChromaSource<'_> {
+            mc::ChromaSource {
+                cb: s.cb,
+                cr: s.cr,
+                stride: s.stride,
+                at: s.at,
+                frac: s.frac,
+            }
         }
+        let (cb, cr, stride) = dst;
+        mc::chroma_planes((cb, cr), stride, size, source(first), second.map(source))
     }
 }
 
@@ -1400,6 +1426,17 @@ pub fn chroma_mc<S: Sample>(plane: &[S], stride: usize, w: i32, h: i32, at: Pel)
 #[derive(Clone, Copy)]
 pub struct McSource<'a, S> {
     pub src: &'a [S],
+    pub stride: usize,
+    pub at: (usize, usize),
+    pub frac: (u8, u8),
+}
+
+/// A chroma block's source in both planes of a picture: the Cb and Cr
+/// samples, whose rows are `stride` apart, read at the same place.
+#[derive(Clone, Copy)]
+pub struct ChromaSources<'a, S> {
+    pub cb: &'a [S],
+    pub cr: &'a [S],
     pub stride: usize,
     pub at: (usize, usize),
     pub frac: (u8, u8),

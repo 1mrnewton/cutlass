@@ -382,6 +382,40 @@ pub fn chroma_pair(
     pair(dst, dst_stride, first, second, chroma_block)
 }
 
+/// See [`crate::mc::chroma_planes`].
+pub fn chroma_planes(
+    dst: (&mut [u8], &mut [u8]),
+    dst_stride: usize,
+    size: (usize, usize),
+    first: crate::mc_block::ChromaSource<'_>,
+    second: Option<crate::mc_block::ChromaSource<'_>>,
+) -> bool {
+    let (w, h) = size;
+    if (w != 4 && w != 8) || h == 0 || h > 8 || h % 2 != 0 {
+        return false;
+    }
+    // Both planes are made aside first, so a failure writes nothing.
+    let (dst_cb, dst_cr) = dst;
+    let mut made = [[0u8; 64]; 2];
+    for (cb, out) in [(true, 0), (false, 1)] {
+        let one = (first.plane(cb, size), first.frac);
+        let two = second.map(|source| (source.plane(cb, size), source.frac));
+        if !chroma_pair(&mut made[out], w, one, two) {
+            return false;
+        }
+    }
+    if dst_stride < w || (h - 1) * dst_stride + w > dst_cb.len().min(dst_cr.len()) {
+        return false;
+    }
+    for (dst, made) in [(dst_cb, &made[0]), (dst_cr, &made[1])] {
+        for row in 0..h {
+            dst[row * dst_stride..row * dst_stride + w]
+                .copy_from_slice(&made[row * w..row * w + w]);
+        }
+    }
+    true
+}
+
 type Predictor = fn(&mut [u8], usize, crate::mc_block::Block<'_>, (u8, u8)) -> bool;
 
 fn pair(

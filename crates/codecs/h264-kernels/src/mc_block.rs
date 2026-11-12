@@ -15,6 +15,30 @@ pub struct Block<'a> {
     pub size: (usize, usize),
 }
 
+/// Where a chroma block of both planes is read: the Cb and Cr planes,
+/// whose rows are `stride` apart, at the same sample `at`, at eighth
+/// offsets `frac` (each 0 to 7).
+#[derive(Clone, Copy)]
+pub struct ChromaSource<'a> {
+    pub cb: &'a [u8],
+    pub cr: &'a [u8],
+    pub stride: usize,
+    pub at: (usize, usize),
+    pub frac: (u8, u8),
+}
+
+impl<'a> ChromaSource<'a> {
+    /// The block of `size` in one plane, Cb when `cb` is set.
+    pub fn plane(&self, cb: bool, size: (usize, usize)) -> Block<'a> {
+        Block {
+            src: if cb { self.cb } else { self.cr },
+            stride: self.stride,
+            at: self.at,
+            size,
+        }
+    }
+}
+
 /// Weights for mixing two predictions, clause 8.4.2.3: each sample is
 /// `((a·w0 + b·w1 + 2^(shift−1)) >> shift) + offset`, clipped.
 #[derive(Clone, Copy, Debug)]

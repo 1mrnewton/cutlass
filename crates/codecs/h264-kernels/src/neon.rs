@@ -37,7 +37,7 @@ use crate::deblock::{ChromaRows, Lines, Rows};
 pub(crate) use crate::neon_mc::{
     avg_row, avg8, avg16, centre8, centre16, chroma8, half8, half16, raw8, raw16,
 };
-pub(crate) use crate::neon_pel::{chroma_block, chroma_pair, luma_block, luma_pair};
+pub(crate) use crate::neon_pel::{chroma_block, chroma_pair, chroma_planes, luma_block, luma_pair};
 pub(crate) use crate::neon_qpel::{avg_block, scale_block, weight_block, weight_onto};
 pub(crate) use crate::neon_residual::{dc_add, idct4_add, idct8_add};
 

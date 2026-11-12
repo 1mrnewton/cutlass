@@ -7,12 +7,13 @@
 //! # Memory
 //!
 //! These routines load and store through pointers. [`luma_block`],
-//! [`chroma_block`] and the pair functions check, before any load, that
-//! every byte the chosen routine loads or stores lies inside the slices
-//! they were given, and return `false` when one does not. The routines
-//! derive every pointer from those slices within the checked span. The
-//! plain twins in [`crate::scalar`] are the reference, and the tests in
-//! [`crate::mc`] compare the two at every quarter and eighth offset.
+//! [`chroma_block`], the pair functions and [`chroma_planes`] check,
+//! before any load, that every byte the chosen routine loads or stores
+//! lies inside the slices they were given, and return `false` when one
+//! does not. The routines derive every pointer from those slices within
+//! the checked span. The plain twins in [`crate::scalar`] are the
+//! reference, and the tests in [`crate::mc`] compare the two at every
+//! quarter and eighth offset.
 #![allow(unsafe_code)]
 
 use core::arch::aarch64::{
@@ -21,7 +22,7 @@ use core::arch::aarch64::{
     vrhaddq_u8, vrshrn_n_u16,
 };
 
-use crate::mc_block::Block;
+use crate::mc_block::{Block, ChromaSource};
 use crate::neon_qpel::{
     centre8, load4, put8, put16, row_taps8, row_taps16, store4, taps8, taps8_high,
 };
@@ -712,6 +713,243 @@ pub(crate) fn chroma_pair(
         if let Some((src, stride, frac)) = two {
             chroma_fn(w, true, frac)(out, dst_stride, src, stride, h, frac);
         }
+    }
+    true
+}
+
+/// The rows of one chroma source, two a step, at eighth offsets whose
+/// zero parts `MODE` names as [`chroma`]'s does; `MODE` [`NONE`] makes
+/// nothing. `top` holds the row a step starts from.
+struct ChromaRows<const MODE: u8> {
+    p: *const u8,
+    stride: usize,
+    taps: [uint8x8_t; 4],
+    top: (uint8x8_t, uint8x8_t),
+}
+
+impl<const MODE: u8> ChromaRows<MODE> {
+    /// The source whose first row starts at `p`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`chroma`]: the rows a block reads from `p` are readable.
+    #[inline(always)]
+    unsafe fn start(p: *const u8, stride: usize, (xf, yf): (u8, u8)) -> Self {
+        // SAFETY: the caller's promise.
+        unsafe {
+            let mut rows = Self {
+                p,
+                stride,
+                taps: [vdup_n_u8(0); 4],
+                top: (vdup_n_u8(0), vdup_n_u8(0)),
+            };
+            match MODE {
+                3 => {
+                    rows.taps = [
+                        vdup_n_u8((8 - xf) * (8 - yf)),
+                        vdup_n_u8(xf * (8 - yf)),
+                        vdup_n_u8((8 - xf) * yf),
+                        vdup_n_u8(xf * yf),
+                    ];
+                    rows.top = (vld1_u8(p), vld1_u8(p.add(1)));
+                }
+                1 => rows.taps[..2].copy_from_slice(&[vdup_n_u8((8 - xf) * 8), vdup_n_u8(xf * 8)]),
+                2 => {
+                    rows.taps[..2].copy_from_slice(&[vdup_n_u8((8 - yf) * 8), vdup_n_u8(yf * 8)]);
+                    rows.top.0 = vld1_u8(p);
+                }
+                _ => {}
+            }
+            rows
+        }
+    }
+
+    /// The next two rows.
+    ///
+    /// # Safety
+    ///
+    /// The two rows, and for a vertical offset the one below them, are
+    /// readable from where this source has got to.
+    #[inline(always)]
+    unsafe fn next2(&mut self) -> (uint8x8_t, uint8x8_t) {
+        // SAFETY: the caller's promise.
+        unsafe {
+            let (p, stride) = (self.p, self.stride);
+            self.p = p.add(2 * stride);
+            let [wa, wb, wc, wd] = self.taps;
+            match MODE {
+                3 => {
+                    let mid = (vld1_u8(p.add(stride)), vld1_u8(p.add(stride + 1)));
+                    let below = (vld1_u8(p.add(2 * stride)), vld1_u8(p.add(2 * stride + 1)));
+                    let top = self.top;
+                    self.top = below;
+                    let first = vmlal_u8(
+                        vmlal_u8(vmlal_u8(vmull_u8(top.0, wa), top.1, wb), mid.0, wc),
+                        mid.1,
+                        wd,
+                    );
+                    let second = vmlal_u8(
+                        vmlal_u8(vmlal_u8(vmull_u8(mid.0, wa), mid.1, wb), below.0, wc),
+                        below.1,
+                        wd,
+                    );
+                    (vrshrn_n_u16::<6>(first), vrshrn_n_u16::<6>(second))
+                }
+                1 => {
+                    let below = p.add(stride);
+                    let first = vmlal_u8(vmull_u8(vld1_u8(p), wa), vld1_u8(p.add(1)), wb);
+                    let second = vmlal_u8(vmull_u8(vld1_u8(below), wa), vld1_u8(below.add(1)), wb);
+                    (vrshrn_n_u16::<6>(first), vrshrn_n_u16::<6>(second))
+                }
+                2 => {
+                    let mid = vld1_u8(p.add(stride));
+                    let below = vld1_u8(p.add(2 * stride));
+                    let top = self.top.0;
+                    self.top.0 = below;
+                    let first = vmlal_u8(vmull_u8(top, wa), mid, wb);
+                    let second = vmlal_u8(vmull_u8(mid, wa), below, wb);
+                    (vrshrn_n_u16::<6>(first), vrshrn_n_u16::<6>(second))
+                }
+                0 => (vld1_u8(p), vld1_u8(p.add(stride))),
+                _ => (vdup_n_u8(0), vdup_n_u8(0)),
+            }
+        }
+    }
+}
+
+/// One plane's source for [`chroma_both`]: its first sample, row
+/// distance, and eighth offsets.
+#[derive(Clone, Copy)]
+struct PlaneSource {
+    p: *const u8,
+    stride: usize,
+    frac: (u8, u8),
+}
+
+/// A block `W` wide of one chroma plane predicted from source `one` at
+/// `A`'s kind of offsets, rounded together with source `two` at `B`'s
+/// when `B` is not [`NONE`], each row made in registers and stored once.
+///
+/// # Safety
+///
+/// `h` is even; `h` rows of `W` from `dst` must be writable, and `h + 1`
+/// rows of 9 bytes from each source readable.
+#[target_feature(enable = "neon")]
+unsafe fn chroma_both<const W: usize, const A: u8, const B: u8>(
+    dst: *mut u8,
+    dst_stride: usize,
+    one: PlaneSource,
+    two: PlaneSource,
+    h: usize,
+) {
+    // SAFETY: the caller's promise.
+    unsafe {
+        let mut first = ChromaRows::<A>::start(one.p, one.stride, one.frac);
+        let mut second = ChromaRows::<B>::start(two.p, two.stride, two.frac);
+        let mut out = dst;
+        for _ in 0..h / 2 {
+            let (mut upper, mut lower) = first.next2();
+            if B != NONE {
+                let (upper_two, lower_two) = second.next2();
+                upper = vrhadd_u8(upper, upper_two);
+                lower = vrhadd_u8(lower, lower_two);
+            }
+            put_chroma::<W, false>(out, upper);
+            put_chroma::<W, false>(out.add(dst_stride), lower);
+            out = out.add(2 * dst_stride);
+        }
+    }
+}
+
+/// The routine for a block of one chroma plane from one or two sources.
+type ChromaBothFn = unsafe fn(*mut u8, usize, PlaneSource, PlaneSource, usize);
+
+macro_rules! both_row {
+    ($w:literal, $a:literal) => {
+        [
+            chroma_both::<$w, $a, 0>,
+            chroma_both::<$w, $a, 1>,
+            chroma_both::<$w, $a, 2>,
+            chroma_both::<$w, $a, 3>,
+            chroma_both::<$w, $a, NONE>,
+        ]
+    };
+}
+
+/// [`chroma_both`] by width (4 then 8), then the first source's kind of
+/// offsets, then the second's, [`NONE`] last.
+static CHROMA_BOTH: [[[ChromaBothFn; 5]; 4]; 2] = [
+    [
+        both_row!(4, 0),
+        both_row!(4, 1),
+        both_row!(4, 2),
+        both_row!(4, 3),
+    ],
+    [
+        both_row!(8, 0),
+        both_row!(8, 1),
+        both_row!(8, 2),
+        both_row!(8, 3),
+    ],
+];
+
+/// Which zero parts a chroma offset has, as [`chroma`]'s `MODE`.
+fn chroma_mode((xf, yf): (u8, u8)) -> usize {
+    usize::from(xf != 0) | usize::from(yf != 0) << 1
+}
+
+/// See [`crate::mc::chroma_planes`].
+#[inline]
+#[target_feature(enable = "neon")]
+pub(crate) fn chroma_planes(
+    dst: (&mut [u8], &mut [u8]),
+    dst_stride: usize,
+    size: (usize, usize),
+    first: ChromaSource<'_>,
+    second: Option<ChromaSource<'_>>,
+) -> bool {
+    let (dst_cb, dst_cr) = dst;
+    if size.1 > 8 || dst_cb.len() != dst_cr.len() {
+        return false;
+    }
+    // Each plane's source and the block's rows are checked as
+    // `chroma_reach` checks one, and the Cr plane is as long as the Cb.
+    let reach = |source: &ChromaSource<'_>| {
+        if source.cb.len() != source.cr.len() {
+            return None;
+        }
+        let cb = chroma_reach(&source.plane(true, size), source.frac, (dst_cb, dst_stride))?;
+        let at = source.at.1 * source.stride + source.at.0;
+        let pick = |plane: &[u8]| PlaneSource {
+            p: plane[at..].as_ptr(),
+            stride: source.stride,
+            frac: source.frac,
+        };
+        Some((
+            PlaneSource {
+                p: cb,
+                ..pick(source.cb)
+            },
+            pick(source.cr),
+        ))
+    };
+    let Some(one) = reach(&first) else {
+        return false;
+    };
+    let (two, kind) = match second {
+        Some(source) => match reach(&source) {
+            Some(two) => (two, chroma_mode(source.frac)),
+            None => return false,
+        },
+        None => (one, usize::from(NONE)),
+    };
+    let routine = CHROMA_BOTH[usize::from(size.0 == 8)][chroma_mode(first.frac)][kind];
+    // SAFETY: `chroma_reach` checked every byte each plane's routine reads
+    // from either source and writes, the Cr plane and block being as long
+    // as the Cb ones.
+    unsafe {
+        routine(dst_cb.as_mut_ptr(), dst_stride, one.0, two.0, size.1);
+        routine(dst_cr.as_mut_ptr(), dst_stride, one.1, two.1, size.1);
     }
     true
 }

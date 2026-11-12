@@ -4,7 +4,7 @@
 //! full samples in a line. Along a row the six inputs are six windows of
 //! that row, each one sample further right; down a column they are six rows.
 
-pub use crate::mc_block::{BiWeight, Block, UniWeight};
+pub use crate::mc_block::{BiWeight, Block, ChromaSource, UniWeight};
 
 /// The rounded average of two predictions of `size` (width, height), whose
 /// rows are `size.0` apart, into `dst` with rows `dst_stride` apart.
@@ -100,6 +100,22 @@ pub fn luma_pair(
     second: Option<(Block<'_>, (u8, u8))>,
 ) -> bool {
     kernel!(luma_pair(dst, dst_stride, first, second))
+}
+
+/// [`chroma_pair`] for both planes at once, as one call: the Cb block
+/// into `dst.0` and the Cr block into `dst.1`, rows `dst_stride` apart,
+/// each predicted from `first` or, when there is a `second`, the rounded
+/// average of the two. `size` is the block's, 4 or 8 wide and an even
+/// height up to 8. `false` means nothing was written: another size, or a
+/// source without one more sample after the block's last column and row.
+pub fn chroma_planes(
+    dst: (&mut [u8], &mut [u8]),
+    dst_stride: usize,
+    size: (usize, usize),
+    first: ChromaSource<'_>,
+    second: Option<ChromaSource<'_>>,
+) -> bool {
+    kernel!(chroma_planes(dst, dst_stride, size, first, second))
 }
 
 /// [`luma_pair`] for a chroma block at eighth offsets.
@@ -368,6 +384,72 @@ mod tests {
             assert!(scalar::chroma_pair(&mut plain, dst_stride, first, second));
             assert_eq!(fast, plain, "chroma pair {}x{}", w / 2, h / 2);
         }
+    }
+
+    #[test]
+    fn both_chroma_planes_match_the_plain_ones() {
+        let mut rng = Lcg(23);
+        let (stride, rows) = (40usize, 30usize);
+        let cb: Vec<u8> = (0..stride * rows).map(|_| rng.sample()).collect();
+        let cr: Vec<u8> = (0..stride * rows).map(|_| rng.sample()).collect();
+        let mut written = 0;
+        for round in 0..20_000u32 {
+            let w = [4, 8][(round % 2) as usize];
+            let h = [2, 4, 8, 3][(round / 2 % 4) as usize];
+            // Places up to the last one whose reach fits.
+            let source = |rng: &mut Lcg| super::ChromaSource {
+                cb: &cb,
+                cr: &cr,
+                stride,
+                at: (
+                    (rng.next() % 32) as usize,
+                    (rng.next() % (rows as u32 - 8)) as usize,
+                ),
+                frac: ((rng.next() % 8) as u8, (rng.next() % 8) as u8),
+            };
+            let first = source(&mut rng);
+            let second = (round % 3 != 0).then(|| source(&mut rng));
+            let dst_stride = 12;
+            let fresh = || -> Vec<u8> { (0..dst_stride * 8).map(|i| (i * 7) as u8).collect() };
+            let (mut fast_cb, mut fast_cr) = (fresh(), fresh());
+            let (mut plain_cb, mut plain_cr) = (fresh(), fresh());
+            let fast = super::chroma_planes(
+                (&mut fast_cb, &mut fast_cr),
+                dst_stride,
+                (w, h),
+                first,
+                second,
+            );
+            let plain = scalar::chroma_planes(
+                (&mut plain_cb, &mut plain_cr),
+                dst_stride,
+                (w, h),
+                first,
+                second,
+            );
+            assert_eq!(fast, plain);
+            if !fast {
+                // An odd height: nothing written.
+                assert_eq!(h, 3);
+                assert_eq!((&fast_cb, &fast_cr), (&fresh(), &fresh()));
+                continue;
+            }
+            written += 1;
+            assert_eq!(
+                (&fast_cb, &fast_cr),
+                (&plain_cb, &plain_cr),
+                "{w}x{h} {round}"
+            );
+            // Each plane is what `chroma_pair` makes of it.
+            for (cb, made) in [(true, &fast_cb), (false, &fast_cr)] {
+                let mut one = fresh();
+                let pair = (first.plane(cb, (w, h)), first.frac);
+                let other = second.map(|s| (s.plane(cb, (w, h)), s.frac));
+                assert!(super::chroma_pair(&mut one, dst_stride, pair, other));
+                assert_eq!(&one, made);
+            }
+        }
+        assert!(written > 10_000);
     }
 
     #[test]

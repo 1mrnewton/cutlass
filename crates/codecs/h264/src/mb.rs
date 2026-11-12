@@ -10983,7 +10983,22 @@ fn mc_block<S: Sample>(
             let frame = reference_frame(dpb, slice, list, reference)?;
             let at = origin.1 * stride + origin.0;
             let planes = (&mut pic.u[at..], &mut pic.v[at..]);
-            predict_chroma(planes, stride, frame, (x, y), size, mv);
+            // Both planes in one go when the block's reach is inside the
+            // reference, each on its own otherwise.
+            let fast = chroma == 1
+                && chroma_sources(frame, (origin, size), mv).is_some_and(|source| {
+                    S::chroma_planes_fast((planes.0, planes.1, stride), size, source, None)
+                });
+            if !fast {
+                predict_chroma(
+                    (&mut pic.u[at..], &mut pic.v[at..]),
+                    stride,
+                    frame,
+                    (x, y),
+                    size,
+                    mv,
+                );
+            }
             scale_in_place(&mut pic.u[at..], stride, size, chroma_mix);
             scale_in_place(&mut pic.v[at..], stride, size, chroma_v);
             return Ok(());
@@ -11119,7 +11134,7 @@ fn avg_luma<S: Sample>(
     let Some(dst) = pic.y.get_mut(y * stride + x..) else {
         return Ok(false);
     };
-    Ok(S::pair_fast(false, (dst, stride), (w, h), one, Some(two)))
+    Ok(S::pair_fast((dst, stride), (w, h), one, Some(two)))
 }
 
 /// `block`'s luma source in `frame` for [`Sample::pair_fast`], read through
@@ -11172,48 +11187,42 @@ fn avg_chroma<S: Sample>(
     let ((x, y), size) = place;
     let first = reference_frame(dpb, slice, 0, motion.r0)?;
     let second = reference_frame(dpb, slice, 1, motion.r1)?;
+    let (Some(one), Some(two)) = (
+        chroma_sources(first, place, motion.mv0),
+        chroma_sources(second, place, motion.mv1),
+    ) else {
+        return Ok(false);
+    };
     let stride = pic.w / 2;
     let at = y * stride + x;
-    for cb in [true, false] {
-        let (Some(one), Some(two)) = (
-            chroma_source(first, cb, place, motion.mv0),
-            chroma_source(second, cb, place, motion.mv1),
-        ) else {
-            return Ok(false);
-        };
-        let plane = if cb { &mut pic.u } else { &mut pic.v };
-        let Some(dst) = plane.get_mut(at..) else {
-            return Ok(false);
-        };
-        if !S::pair_fast(true, (dst, stride), size, one, Some(two)) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    let (Some(u), Some(v)) = (pic.u.get_mut(at..), pic.v.get_mut(at..)) else {
+        return Ok(false);
+    };
+    Ok(S::chroma_planes_fast((u, v, stride), size, one, Some(two)))
 }
 
-/// The Cb (`cb` set) or Cr source of a 4:2:0 chroma block at `place` in
-/// `frame`, as for [`luma_source`].
-fn chroma_source<S: Sample>(
+/// Both chroma planes' source of a 4:2:0 block at `place` in `frame`, as
+/// [`recon::chroma_source`] finds the source in one.
+fn chroma_sources<S: Sample>(
     frame: &Frame<S>,
-    cb: bool,
     place: ((usize, usize), (usize, usize)),
     mv: [i16; 2],
-) -> Option<recon::McSource<'_, S>> {
+) -> Option<recon::ChromaSources<'_, S>> {
     let ((x, y), (w, h)) = place;
     let (mvx, mvy) = (i32::from(mv[0]), i32::from(mv[1]));
     let at = (
         i32::try_from(x).ok()? + (mvx >> 3),
         i32::try_from(y).ok()? + (mvy >> 3),
     );
-    let (src, stride, pic, at) = match &frame.pending {
+    let (cb, cr, stride, pic, at) = match &frame.pending {
         Some(published) => {
-            let window = published.chroma(cb, at.0, at.1, h).ok()?;
-            let pic = (
-                i32::try_from(window.stride).ok()?,
-                i32::try_from(window.rows).ok()?,
-            );
-            (window.samples, window.stride, pic, (window.x, window.y))
+            let cb = published.chroma(true, at.0, at.1, h).ok()?;
+            let cr = published.chroma(false, at.0, at.1, h).ok()?;
+            // Each plane holds every row the block reads; one may hold more.
+            let len = cb.samples.len().min(cr.samples.len());
+            let pic = (i32::try_from(cb.stride).ok()?, i32::try_from(cb.rows).ok()?);
+            let samples = (cb.samples.get(..len)?, cr.samples.get(..len)?);
+            (samples.0, samples.1, cb.stride, pic, (cb.x, cb.y))
         }
         None => {
             let stride = frame.w / 2;
@@ -11221,8 +11230,7 @@ fn chroma_source<S: Sample>(
                 i32::try_from(stride).ok()?,
                 i32::try_from(frame.h / 2).ok()?,
             );
-            let plane = if cb { &frame.u } else { &frame.v };
-            (&plane[..], stride, pic, at)
+            (&frame.u[..], &frame.v[..], stride, pic, at)
         }
     };
     let block = recon::BlockMc {
@@ -11233,7 +11241,14 @@ fn chroma_source<S: Sample>(
         x_frac: mvx & 7,
         y_frac: mvy & 7,
     };
-    recon::chroma_source(src, stride, pic, block)
+    let source = recon::chroma_source(cb, stride, pic, block)?;
+    Some(recon::ChromaSources {
+        cb,
+        cr,
+        stride,
+        at: source.at,
+        frac: source.frac,
+    })
 }
 
 #[derive(Clone, Copy)]

@@ -426,6 +426,11 @@ struct Writer<S> {
     /// predicted from the last line as it was: no line is set aside. For
     /// a picture no other thread reads while it is decoded.
     lag: bool,
+    /// Macroblock records from the first that are this picture's: unset,
+    /// or decoded. The rest may still hold an earlier picture's, and are
+    /// unset a row at a time as decoding comes to them, while their cache
+    /// lines are about to be written anyway.
+    set: usize,
 }
 
 /// Output time and the grain blended at emit. `pts` on the frame stays the
@@ -1638,16 +1643,16 @@ fn plane<S: Sample>(
 /// A spare record keeps what its last picture wrote, apart from the two
 /// fields read before a macroblock is decoded: its slice, unset so it reads
 /// as not yet decoded, and its field flag. Every other field of a record is
-/// written by its macroblock before anything reads it.
-fn records(spares: Option<&std::sync::Arc<Spares>>, len: usize) -> Shared<Mb> {
+/// written by its macroblock before anything reads it. Those two are unset
+/// here when `unset`, or else by the caller before anything reads them.
+fn records(spares: Option<&std::sync::Arc<Spares>>, len: usize, unset: bool) -> Shared<Mb> {
     let Some(home) = spares else {
         return Shared::owned(vec![Mb::new(u16::MAX); len]);
     };
     let held = match home.take::<Mb>(len) {
         Some(mut kept) => {
-            for mb in &mut kept {
-                mb.slice = u16::MAX;
-                mb.col.field_mb = false;
+            if unset {
+                unset_records(&mut kept);
             }
             kept
         }
@@ -1656,6 +1661,14 @@ fn records(spares: Option<&std::sync::Arc<Spares>>, len: usize) -> Shared<Mb> {
     Shared {
         hold: Hold::Owned(held),
         home: Some(home.clone()),
+    }
+}
+
+/// Makes `records` read as not yet decoded: see [`records`].
+pub(crate) fn unset_records(records: &mut [Mb]) {
+    for mb in records {
+        mb.slice = u16::MAX;
+        mb.col.field_mb = false;
     }
 }
 
@@ -2812,6 +2825,9 @@ fn decode_slice<S: Sample>(
                 lag: true,
                 ..Writer::default()
             });
+        } else {
+            // Its records are unset here, all at once: see `new_frame`.
+            unset_records(&mut frame.mb);
         }
         *picture = Some(frame);
         *next_mb = 0;
@@ -4281,7 +4297,7 @@ fn new_frame<S: Sample>(
         y: plane(spares, luma, S::default(), true),
         u: plane(spares, chroma, S::mid(), sps.chroma != 0),
         v: plane(spares, chroma, S::mid(), sps.chroma != 0),
-        mb: records(spares, blocks),
+        mb: records(spares, blocks, false),
         w,
         h,
         mb_w,
@@ -4885,7 +4901,8 @@ fn run_picture<S: Sample>(job: PictureJob<S>) {
     pic.y = plane(spares, pic.w.saturating_mul(pic.h), S::default(), true);
     pic.u = plane(spares, chroma, S::mid(), true);
     pic.v = plane(spares, chroma, S::mid(), true);
-    pic.mb = records(spares, blocks);
+    // Unset a row at a time as it is decoded: see `Writer::set`.
+    pic.mb = records(spares, blocks, false);
     let result = decode_picture(&mut pic, &dpb, &slices).map(|()| {
         // The picture is put in its output form here too, so the caller
         // only has to pick it up.

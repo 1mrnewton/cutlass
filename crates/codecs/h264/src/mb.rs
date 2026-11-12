@@ -572,6 +572,29 @@ fn same_long<S: Sample>(dpb: &[Frame<S>], slot: usize, long_num: u32) -> bool {
     })
 }
 
+/// Unsets the macroblock records of a picture decoded a row at a time up
+/// to the end of the row holding `addr`, or all of them with `all`, when
+/// they are not yet: see [`super::Writer::set`].
+fn set_through<S: Sample>(pic: &mut Frame<S>, addr: usize, all: bool) {
+    let Some(writer) = pic.writer.as_mut() else {
+        return;
+    };
+    if addr < writer.set {
+        return;
+    }
+    let end = if all || pic.mb_w == 0 {
+        pic.mb.len()
+    } else {
+        (addr / pic.mb_w + 1)
+            .saturating_mul(pic.mb_w)
+            .min(pic.mb.len())
+    };
+    if let Some(records) = pic.mb.get_mut(writer.set..end) {
+        super::unset_records(records);
+    }
+    writer.set = end.max(writer.set);
+}
+
 /// For a picture decoded on its own thread: when decoding has just passed
 /// the end of a macroblock row, deblocks that row and publishes the
 /// samples that makes final.
@@ -579,6 +602,7 @@ fn rows_decoded<S: Sample>(pic: &mut Frame<S>, addr: usize) {
     if pic.writer.is_none() || pic.mb_w == 0 || !addr.is_multiple_of(pic.mb_w) {
         return;
     }
+    set_through(pic, addr, false);
     let decoded = addr / pic.mb_w;
     let Some(mut writer) = pic.writer.take() else {
         return;
@@ -705,6 +729,9 @@ pub(crate) fn decode_mbs<S: Sample>(
         slice.origin
     };
     let mut decoded = *next_mb;
+    // Macroblocks come in raster order a row at a time unless they come in
+    // pairs or slice groups.
+    set_through(pic, addr, mbaff || !next.is_empty());
     let mut qp = slice.qp;
     let mut rle = Rle {
         run: 0,

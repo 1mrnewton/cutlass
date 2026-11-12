@@ -16,6 +16,14 @@ use crate::neon::{bytes, halves, i16x8, i16x8_array, i32x4, u8x8, u8x16};
 
 type V = int16x8_t;
 
+std::thread_local! {
+    /// The two sets of 64 vectors [`sized`] works in, kept between
+    /// blocks rather than cleared for each: it loads or clears every
+    /// entry a transform reads.
+    static SCRATCH: core::cell::RefCell<Option<[[V; 64]; 2]>> =
+        const { core::cell::RefCell::new(None) };
+}
+
 /// The arithmetic of a step on the eight values of an entry.
 mod ops {
     use core::arch::aarch64::{
@@ -255,27 +263,31 @@ pub(super) fn add(b: &mut Block<'_>) {
     // rows of coefficients takes. They take no more room than that, and
     // only that much is cleared.
     let rows = b.h.min(32).min(made_for(b.nz_rows).max(4));
-    match (b.w, rows) {
-        (4, 4) => sized::<4, 8, 4>(b),
-        (4, 8) => sized::<4, 8, 8>(b),
-        (4, _) => sized::<4, 8, 16>(b),
-        (8, 4) => sized::<8, 8, 4>(b),
-        (8, 8) => sized::<8, 8, 8>(b),
-        (8, 16) => sized::<8, 8, 16>(b),
-        (8, _) => sized::<8, 8, 32>(b),
-        (16, 4) => sized::<16, 16, 4>(b),
-        (16, 8) => sized::<16, 16, 8>(b),
-        (16, 16) => sized::<16, 16, 16>(b),
-        (16, _) => sized::<16, 16, 32>(b),
-        (32, 4) => sized::<32, 32, 4>(b),
-        (32, 8) => sized::<32, 32, 8>(b),
-        (32, 16) => sized::<32, 32, 16>(b),
-        (32, _) => sized::<32, 32, 32>(b),
-        (_, 4) => sized::<64, 64, 4>(b),
-        (_, 8) => sized::<64, 64, 8>(b),
-        (_, 16) => sized::<64, 64, 16>(b),
-        _ => sized::<64, 64, 32>(b),
-    }
+    let zero = vdupq_n_s16(0);
+    SCRATCH.with_borrow_mut(|s| {
+        let s = s.get_or_insert([[zero; 64]; 2]);
+        match (b.w, rows) {
+            (4, 4) => sized::<4, 8, 4>(b, s),
+            (4, 8) => sized::<4, 8, 8>(b, s),
+            (4, _) => sized::<4, 8, 16>(b, s),
+            (8, 4) => sized::<8, 8, 4>(b, s),
+            (8, 8) => sized::<8, 8, 8>(b, s),
+            (8, 16) => sized::<8, 8, 16>(b, s),
+            (8, _) => sized::<8, 8, 32>(b, s),
+            (16, 4) => sized::<16, 16, 4>(b, s),
+            (16, 8) => sized::<16, 16, 8>(b, s),
+            (16, 16) => sized::<16, 16, 16>(b, s),
+            (16, _) => sized::<16, 16, 32>(b, s),
+            (32, 4) => sized::<32, 32, 4>(b, s),
+            (32, 8) => sized::<32, 32, 8>(b, s),
+            (32, 16) => sized::<32, 32, 16>(b, s),
+            (32, _) => sized::<32, 32, 32>(b, s),
+            (_, 4) => sized::<64, 64, 4>(b, s),
+            (_, 8) => sized::<64, 64, 8>(b, s),
+            (_, 16) => sized::<64, 64, 16>(b, s),
+            _ => sized::<64, 64, 32>(b, s),
+        }
+    })
 }
 
 /// [`add`] for a block `W` wide whose column transforms read at most
@@ -284,7 +296,10 @@ pub(super) fn add(b: &mut Block<'_>) {
 /// four lanes that nothing reads.
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon"))]
-fn sized<const W: usize, const MW: usize, const TH: usize>(b: &mut Block<'_>) {
+fn sized<const W: usize, const MW: usize, const TH: usize>(
+    b: &mut Block<'_>,
+    s: &mut [[V; 64]; 2],
+) {
     // Everything of the block in values of its own: a store to a sample
     // then says nothing about them.
     let (h, stride, coefs) = (b.h, b.stride, b.coefs);
@@ -318,7 +333,7 @@ fn sized<const W: usize, const MW: usize, const TH: usize>(b: &mut Block<'_>) {
     }
     // The entries of `T` a transform reads are loaded or cleared here;
     // the rest it never reads.
-    let mut t = [zero; 64];
+    let [t, second] = s;
     // The values after the row transforms, by row.
     let mut mid = [[0i16; MW]; TH];
     let read = made_for(nc).min(tw);
@@ -350,7 +365,7 @@ fn sized<const W: usize, const MW: usize, const TH: usize>(b: &mut Block<'_>) {
                 *v = zero;
             }
         }
-        run_1d(row_kind, W, nc, &mut t);
+        run_1d(row_kind, W, nc, t);
         // And back: eight outputs become eight values of each row.
         for j0 in (0..W).step_by(8) {
             let Some(m) = t.get(j0..).and_then(|t| t.first_chunk::<8>()) else {
@@ -421,7 +436,7 @@ fn sized<const W: usize, const MW: usize, const TH: usize>(b: &mut Block<'_>) {
                     *v = zero;
                 }
             }
-            run_1d(col_kind, h, nr, &mut t);
+            run_1d(col_kind, h, nr, t);
             let x0 = if flip_lr { MW - 8 - j0 } else { j0 };
             for (i, &v) in t.iter().enumerate().take(h) {
                 let y = if flip_ud { h - 1 - i } else { i };
@@ -433,9 +448,8 @@ fn sized<const W: usize, const MW: usize, const TH: usize>(b: &mut Block<'_>) {
         return;
     }
     // Two groups of eight columns at a time: sixteen samples of a row.
-    let mut second = [zero; 64];
     for j0 in (0..W).step_by(16) {
-        for (g, t) in [&mut t, &mut second].into_iter().enumerate() {
+        for (g, t) in [&mut *t, &mut *second].into_iter().enumerate() {
             for (v, row) in t.iter_mut().zip(&mid).take(read) {
                 if let Some(m) = row.as_chunks::<8>().0.get(j0 / 8 + g) {
                     *v = i16x8(*m);
@@ -449,7 +463,7 @@ fn sized<const W: usize, const MW: usize, const TH: usize>(b: &mut Block<'_>) {
             run_1d(col_kind, h, nr, t);
         }
         let x0 = if flip_lr { W - 16 - j0 } else { j0 };
-        for (i, (&lo, &hi)) in t.iter().zip(&second).enumerate().take(h) {
+        for (i, (&lo, &hi)) in t.iter().zip(second.iter()).enumerate().take(h) {
             let y = if flip_ud { h - 1 - i } else { i };
             let Some(px) = dst
                 .get_mut(y * stride + x0..)

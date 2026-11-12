@@ -11041,35 +11041,30 @@ fn mc_block<S: Sample>(
         2 => (w / 2, h),
         _ => (w / 2, h / 2),
     };
-    let luma_mix = if let Some(AlcWeight { weight, denom }) = alc {
-        Mix::Uni {
+    let (luma_mix, chroma_mix, chroma_v) = if let Some(AlcWeight { weight, denom }) = alc {
+        let chroma = Mix::Uni {
+            weight: 1,
+            offset: 0,
+            denom: 0,
+            from: 0,
+        };
+        let luma = Mix::Uni {
             weight,
             offset: 0,
             denom,
             from: 0,
-        }
+        };
+        (luma, chroma, chroma)
+    } else if slice.weighted {
+        (
+            mix(slice, r0, r1, -1),
+            mix(slice, r0, r1, 0),
+            mix(slice, r0, r1, 1),
+        )
     } else {
-        mix(slice, r0, r1, -1)
-    };
-    let chroma_mix = if alc.is_some() {
-        Mix::Uni {
-            weight: 1,
-            offset: 0,
-            denom: 0,
-            from: 0,
-        }
-    } else {
-        mix(slice, r0, r1, 0)
-    };
-    let chroma_v = if alc.is_some() {
-        Mix::Uni {
-            weight: 1,
-            offset: 0,
-            denom: 0,
-            from: 0,
-        }
-    } else {
-        mix(slice, r0, r1, 1)
+        // Only explicit weights differ from one plane to the next.
+        let same = mix(slice, r0, r1, -1);
+        (same, same, same)
     };
     // One reference: predict straight into the picture, and weight it
     // there when it is weighted.

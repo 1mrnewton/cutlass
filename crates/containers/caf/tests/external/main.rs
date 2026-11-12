@@ -12,6 +12,7 @@
 
 mod decode;
 mod fuzz;
+mod kept;
 mod local;
 mod measure;
 mod oracle;

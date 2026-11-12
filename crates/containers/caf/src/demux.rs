@@ -23,6 +23,7 @@ use crate::codec;
 use crate::desc::Description;
 use crate::error::{hostile, malformed};
 use crate::info::InfoEntry;
+use crate::kept::KeptChunk;
 use crate::limits::PCM_PACKET_BYTES;
 use crate::pakt::{PacketTableHeader, Packets};
 use crate::walk::{self, Chunk, DataChunk, Scanned};
@@ -42,6 +43,7 @@ pub struct CafDemux<R> {
     pakt: Option<PacketTableHeader>,
     chan: Option<ChannelLayout>,
     info: Vec<InfoEntry>,
+    kept: Vec<KeptChunk>,
     chunks: Vec<Chunk>,
     stopped_at: Option<u64>,
     data: DataChunk,
@@ -105,6 +107,7 @@ impl<R: Read + Seek> CafDemux<R> {
             pakt: scanned.pakt,
             chan: scanned.chan,
             info: scanned.info,
+            kept: scanned.kept,
             chunks: scanned.chunks,
             stopped_at: scanned.stopped_at,
             data: scanned.data,
@@ -151,6 +154,16 @@ impl<R: Read + Seek> CafDemux<R> {
     #[must_use]
     pub fn info(&self) -> &[InfoEntry] {
         &self.info
+    }
+
+    /// The `mark`, `regn`, `strg`, `uuid` and `midi` chunks, in file order,
+    /// as stored, for a remux to hand to [`crate::CafMux::add_chunk`]. One
+    /// with less than its fixed head, or past [`crate::MAX_KEPT_BYTES`] in
+    /// all, is left out. A forward input stops at `data` and keeps only
+    /// those before it.
+    #[must_use]
+    pub fn kept_chunks(&self) -> &[KeptChunk] {
+        &self.kept
     }
 
     /// Every chunk the walk read a header of, in file order.

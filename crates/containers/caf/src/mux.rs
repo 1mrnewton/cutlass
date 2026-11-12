@@ -37,7 +37,8 @@ use crate::cookie::{self, AacRates};
 use crate::desc::{Description, FLAG_FLOAT, FLAG_LITTLE_ENDIAN};
 use crate::error::rejected;
 use crate::info::{self, InfoEntry};
-use crate::limits::{MAX_CHANNELS, MAX_FRAMES_PER_PACKET};
+use crate::kept::KeptChunk;
+use crate::limits::{MAX_CHANNELS, MAX_FRAMES_PER_PACKET, MAX_KEPT_BYTES};
 use crate::pakt::PacketTableHeader;
 use crate::varint;
 use crate::walk::{CHUNK_HEADER_BYTES, FILE_HEADER_BYTES};
@@ -92,6 +93,7 @@ pub struct CafMux<W: Write + Seek> {
     track: Option<Track>,
     layout: Option<ChannelLayout>,
     info: Vec<InfoEntry>,
+    kept: Vec<KeptChunk>,
     written: Option<Written>,
     sizes: Vec<u32>,
     frames: Vec<u32>,
@@ -120,6 +122,7 @@ impl<W: Write + Seek> CafMux<W> {
             track: None,
             layout: None,
             info: Vec::new(),
+            kept: Vec::new(),
             written: None,
             sizes: Vec::new(),
             frames: Vec::new(),
@@ -159,6 +162,31 @@ impl<W: Write + Seek> CafMux<W> {
             return Err(rejected("info is written with the header"));
         }
         self.info = entries;
+        Ok(())
+    }
+
+    /// Adds a kept chunk (a demuxer's [`crate::CafDemux::kept_chunks`]),
+    /// written after `info`, before `data`, in the order added. Call before
+    /// the first packet. Marker and region positions are frames, so carry
+    /// them only with the same sound. Refused once all kept chunks together
+    /// would pass [`MAX_KEPT_BYTES`].
+    pub fn add_chunk(&mut self, chunk: KeptChunk) -> Result<(), MuxError> {
+        self.building()?;
+        if self.written.is_some() {
+            return Err(rejected("kept chunks are written with the header"));
+        }
+        let total = self
+            .kept
+            .iter()
+            .map(KeptChunk::len)
+            .fold(chunk.len(), u64::saturating_add);
+        if total > MAX_KEPT_BYTES {
+            return Err(MuxError::HostileSize {
+                declared: total,
+                limit: MAX_KEPT_BYTES,
+            });
+        }
+        self.kept.push(chunk);
         Ok(())
     }
 
@@ -298,6 +326,9 @@ impl<W: Write + Seek> CafMux<W> {
         }
         if !self.info.is_empty() {
             chunk(&mut out, *b"info", &info::to_bytes(&self.info));
+        }
+        for kept in &self.kept {
+            chunk(&mut out, kept.kind(), kept.body());
         }
         out.extend_from_slice(b"data");
         written.data_size = len_u64(out.len());

@@ -24,6 +24,11 @@ pub const MAX_BITS_PER_CHANNEL: u32 = 64;
 /// Largest `info` chunk that is parsed. A larger one is skipped and named.
 pub const MAX_INFO_BYTES: u64 = 64 * 1024;
 
+/// Bytes of kept chunks (`mark`, `regn`, `strg`, `uuid`, `midi`) held for
+/// one file, all of them together. On open, a kept chunk that would pass
+/// this is skipped, still listed in `chunks()`; the muxer refuses it.
+pub const MAX_KEPT_BYTES: u64 = 1024 * 1024;
+
 /// Largest `chan` chunk: the 12-byte head and one 20-byte description per
 /// channel, for [`MAX_CHANNELS`] channels.
 pub const MAX_CHAN_BYTES: u64 = 12 + 20 * MAX_CHANNELS as u64;

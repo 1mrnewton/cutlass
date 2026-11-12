@@ -1,6 +1,7 @@
 //! Copies the packets of a CAF file into a new CAF file with this crate's
 //! muxer, keeping the codec configuration, priming, remainder, channel
-//! layout and info strings.
+//! layout, info strings, and the markers, regions, strings, `uuid` and
+//! `midi` chunks.
 //!
 //! `cargo run --release -p cutlass-caf --example remux -- <in.caf> <out.caf>`
 
@@ -28,6 +29,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if !demux.info().is_empty() {
         mux.set_info(demux.info().to_vec())?;
+    }
+    for chunk in demux.kept_chunks() {
+        mux.add_chunk(chunk.clone())?;
     }
     let track = mux.add_stream(NewStream {
         params: stream.params().clone(),

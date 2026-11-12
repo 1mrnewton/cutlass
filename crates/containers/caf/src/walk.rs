@@ -22,7 +22,8 @@ use crate::chan::ChannelLayout;
 use crate::desc::{DESC_BYTES, Description};
 use crate::error::{hostile, malformed, truncated, unrecognized};
 use crate::info::{self, InfoEntry};
-use crate::limits::{MAX_CHAN_BYTES, MAX_CHUNKS, MAX_INFO_BYTES};
+use crate::kept::KeptChunk;
+use crate::limits::{MAX_CHAN_BYTES, MAX_CHUNKS, MAX_INFO_BYTES, MAX_KEPT_BYTES};
 use crate::pakt::{PAKT_HEADER_BYTES, PacketTableHeader, Table, skip};
 
 /// Bytes of a chunk header: type and `SInt64` size.
@@ -59,6 +60,7 @@ pub(crate) struct Scanned {
     pub table: Option<Table>,
     pub chan: Option<ChannelLayout>,
     pub info: Vec<InfoEntry>,
+    pub kept: Vec<KeptChunk>,
     pub data: DataChunk,
     pub chunks: Vec<Chunk>,
     pub stopped_at: Option<u64>,
@@ -71,6 +73,8 @@ struct Walk {
     table: Option<Table>,
     chan: Option<ChannelLayout>,
     info: Vec<InfoEntry>,
+    kept: Vec<KeptChunk>,
+    kept_bytes: u64,
     data: Option<DataChunk>,
     chunks: Vec<Chunk>,
     stopped_at: Option<u64>,
@@ -119,6 +123,8 @@ pub(crate) fn scan<R: Read + Seek>(input: &mut Input<R>) -> Result<Scanned, Open
         table: None,
         chan: None,
         info: Vec::new(),
+        kept: Vec::new(),
+        kept_bytes: 0,
         data: None,
         chunks: vec![Chunk {
             kind: *b"desc",
@@ -138,6 +144,7 @@ pub(crate) fn scan<R: Read + Seek>(input: &mut Input<R>) -> Result<Scanned, Open
         table: walk.table,
         chan: walk.chan,
         info: walk.info,
+        kept: walk.kept,
         data,
         chunks: walk.chunks,
         stopped_at: walk.stopped_at,
@@ -306,6 +313,16 @@ impl Walk {
                 Ok(())
             }
             b"pakt" => self.packet_table(input, size),
+            b"mark" | b"regn" | b"strg" | b"uuid" | b"midi"
+                if size <= MAX_KEPT_BYTES.saturating_sub(self.kept_bytes) =>
+            {
+                let body = read_bytes(input, size, MAX_KEPT_BYTES)?;
+                if let Some(chunk) = KeptChunk::new(kind, body) {
+                    self.kept_bytes = self.kept_bytes.saturating_add(size);
+                    self.kept.push(chunk);
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }

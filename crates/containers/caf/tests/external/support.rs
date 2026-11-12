@@ -219,7 +219,7 @@ pub fn afinfo(file: &Path) -> Option<AfInfo> {
 }
 
 /// Copies every packet of `from` into a new file at `to` with this crate's
-/// muxer, carrying the trim and the layout over.
+/// muxer, carrying the trim, the layout and the kept chunks over.
 pub fn remux(from: &Path, to: &Path) -> Result<(), MuxError> {
     let mut demux = open(from);
     let stream = demux.streams()[0].clone();
@@ -228,6 +228,9 @@ pub fn remux(from: &Path, to: &Path) -> Result<(), MuxError> {
     let mut mux = CafMux::new(out);
     if let Some(layout) = layout {
         mux.set_channel_layout(layout).expect("layout");
+    }
+    for chunk in demux.kept_chunks() {
+        mux.add_chunk(chunk.clone()).expect("kept chunk");
     }
     let track = mux
         .add_stream(NewStream {

@@ -22,7 +22,7 @@ const DEFAULT_ROOTS: &[&str] = &[
     "/Library/Audio/Apple Loops",
 ];
 
-fn roots() -> Vec<PathBuf> {
+pub fn roots() -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = match std::env::var("CUTLASS_CAF_ROOTS") {
         Ok(list) => list.split(':').map(PathBuf::from).collect(),
         Err(_) => DEFAULT_ROOTS.iter().map(PathBuf::from).collect(),
@@ -32,7 +32,7 @@ fn roots() -> Vec<PathBuf> {
     roots
 }
 
-fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+pub fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };

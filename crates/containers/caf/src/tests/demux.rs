@@ -490,3 +490,33 @@ fn a_file_with_no_packets_opens_and_refuses_to_seek() {
         Err(ReadError::Seek(SeekError::UnknownTrack))
     );
 }
+
+#[test]
+fn kept_chunks_are_read_within_their_limit_and_others_are_only_listed() {
+    use super::build::{chunk, data_body, desc_body, file, open_forward};
+    use crate::MAX_KEPT_BYTES;
+    let desc = chunk(b"desc", &desc_body(8_000.0, b"lpcm", 0, 2, 1, 1, 16));
+    let big = usize::try_from(MAX_KEPT_BYTES).expect("fits") - 20;
+    let bytes = file(&[
+        desc,
+        chunk(b"uuid", &[1; 15]),
+        chunk(b"midi", &vec![2; big]),
+        chunk(b"uuid", &[3; 16]),
+        chunk(b"mark", &[4; 8]),
+        chunk(b"ovvw", &[5; 16]),
+        chunk(b"data", &data_body(&[0, 1, 0, 2])),
+        chunk(b"strg", &[0, 0, 0, 0]),
+    ]);
+    let demux = open(&bytes).expect("open");
+    let kept: Vec<([u8; 4], usize)> = demux
+        .kept_chunks()
+        .iter()
+        .map(|chunk| (chunk.kind(), chunk.body().len()))
+        .collect();
+    // A uuid shorter than its UUID is dropped; the second uuid fits the
+    // budget, the mark does not; ovvw is not kept; strg after data is.
+    assert_eq!(kept, vec![(*b"midi", big), (*b"uuid", 16), (*b"strg", 4)]);
+    assert_eq!(demux.chunks().len(), 8);
+    let forward = open_forward(&bytes).expect("forward");
+    assert_eq!(forward.kept_chunks().len(), 2);
+}

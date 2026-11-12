@@ -20,6 +20,7 @@ mod desc;
 mod error;
 mod features;
 mod info;
+mod kept;
 mod limits;
 mod mux;
 mod pakt;
@@ -34,9 +35,11 @@ pub use demux::CafDemux;
 pub use desc::{Description, FLAG_FLOAT, FLAG_LITTLE_ENDIAN};
 pub use features::{FEATURES, Feature};
 pub use info::InfoEntry;
+pub use kept::{KEPT_KINDS, KeptChunk};
 pub use limits::{
     CHECKPOINT_EVERY, MAX_BITS_PER_CHANNEL, MAX_CHAN_BYTES, MAX_CHANNELS, MAX_CHUNKS,
-    MAX_FRAMES_PER_PACKET, MAX_INFO_BYTES, MAX_VARINT_BYTES, PCM_PACKET_BYTES, PROBE_BYTES,
+    MAX_FRAMES_PER_PACKET, MAX_INFO_BYTES, MAX_KEPT_BYTES, MAX_VARINT_BYTES, PCM_PACKET_BYTES,
+    PROBE_BYTES,
 };
 pub use mux::CafMux;
 pub use pakt::PacketTableHeader;

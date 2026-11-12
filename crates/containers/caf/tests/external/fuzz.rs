@@ -11,7 +11,7 @@ use std::io::Cursor;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
 
-use cutlass_caf::{CafDemux, CafMux, probe};
+use cutlass_caf::{CafDemux, CafMux, KEPT_KINDS, KeptChunk, MAX_KEPT_BYTES, probe};
 use cutlass_codec::{CodecId, Packet, StreamCodec, StreamParams, Timescale, Timestamp};
 use cutlass_container::{
     Demux, Landing, Limits, Mux, NewStream, SeekTo, TrackDuration, TrackId, Trim,
@@ -263,7 +263,10 @@ fn assembled(rng: &mut Rng) -> Vec<u8> {
             5 => data(rng),
             6 => chunk(b"free", [-5, 0, 3, i64::MAX][rng.below(4)], &[0; 3]),
             7 => desc(rng),
-            _ => honest(b"uuid", &rng.noise(40)),
+            _ => {
+                let kind = KEPT_KINDS[rng.below(KEPT_KINDS.len())];
+                honest(&kind, &rng.noise(40))
+            }
         };
         out.extend(part);
     }
@@ -287,8 +290,8 @@ pub fn corpus() -> Vec<Vec<u8>> {
         CodecId::Flac,
         CodecId::Opus,
     ] {
-        if let Some(file) = random_mux(&mut rng, Some(codec), 40) {
-            out.push(file.0);
+        if let Some((file, ..)) = random_mux(&mut rng, Some(codec), 40) {
+            out.push(file);
         }
     }
     // A few of the Mac's own files, when present.
@@ -349,6 +352,12 @@ fn demux_checks(bytes: &[u8], rng: &mut Rng, limits: Limits, stats: &mut Stats) 
     let len = u64::try_from(bytes.len()).expect("len");
     if let Ok(mut demux) = CafDemux::open_limited(Cursor::new(bytes.to_vec()), len, limits) {
         stats.opened += 1;
+        let kept: usize = demux
+            .kept_chunks()
+            .iter()
+            .map(|chunk| chunk.body().len())
+            .sum();
+        assert!(u64::try_from(kept).expect("len") <= MAX_KEPT_BYTES);
         let stream = demux.streams()[0].clone();
         assert!(stream.timescale().ticks_per_second() > 0);
         let mut last = i64::MIN;
@@ -408,13 +417,12 @@ fn audio(codec: CodecId, rate: u32, channels: u16, extradata: Vec<u8>) -> Option
     })
 }
 
-/// Writes a random stream; returns the file and the packets when the mux
-/// finished.
-fn random_mux(
-    rng: &mut Rng,
-    codec: Option<CodecId>,
-    most: usize,
-) -> Option<(Vec<u8>, Vec<Packet>)> {
+/// What a finished random mux wrote: the file, the packets and the kept
+/// chunks.
+type Muxed = (Vec<u8>, Vec<Packet>, Vec<KeptChunk>);
+
+/// Writes a random stream; returns what it wrote when the mux finished.
+fn random_mux(rng: &mut Rng, codec: Option<CodecId>, most: usize) -> Option<Muxed> {
     let codecs = [
         CodecId::Pcm,
         CodecId::Aac,
@@ -475,6 +483,17 @@ fn random_mux(
     limits.max_packet_bytes = 64 * 1024;
     let mut mux = CafMux::with_limits(Cursor::new(Vec::new()), limits);
     mux.add_stream(stream).ok()?;
+    let mut kept = Vec::new();
+    if rng.chance(3) {
+        for _ in 0..1 + rng.below(3) {
+            let kind = KEPT_KINDS[rng.below(KEPT_KINDS.len())];
+            let len = rng.below(48);
+            if let Some(chunk) = KeptChunk::new(kind, rng.bytes(len)) {
+                mux.add_chunk(chunk.clone()).ok()?;
+                kept.push(chunk);
+            }
+        }
+    }
     if rng.chance(3) {
         let delay = rng.below(3000) as u64;
         let padding = rng.below(3000) as u64;
@@ -514,17 +533,18 @@ fn random_mux(
         ticks,
     }])
     .ok()?;
-    Some((mux.into_inner().into_inner(), written))
+    Some((mux.into_inner().into_inner(), written, kept))
 }
 
 /// A finished mux must read back packet for packet.
 fn mux_checks(rng: &mut Rng, stats: &mut Stats) {
-    let Some((file, written)) = random_mux(rng, None, 60) else {
+    let Some((file, written, kept)) = random_mux(rng, None, 60) else {
         return;
     };
     stats.muxed += 1;
     let len = u64::try_from(file.len()).expect("len");
     let mut demux = CafDemux::open(Cursor::new(file), len).expect("a finished mux opens");
+    assert_eq!(demux.kept_chunks(), kept.as_slice(), "kept chunks differ");
     let pcm = demux.streams()[0].params().codec() == &StreamCodec::Known(CodecId::Pcm);
     let mut read = Vec::new();
     while let Some(packet) = demux.read_packet().expect("a finished mux reads") {

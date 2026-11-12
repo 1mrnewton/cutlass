@@ -521,3 +521,82 @@ fn a_failing_writer_fails_the_mux_without_panic() {
         assert_eq!(mux.status(), MuxStatus::Failed);
     }
 }
+
+#[test]
+fn kept_chunks_are_written_before_data_in_order_and_read_back() {
+    use crate::KeptChunk;
+    let mut strg = 1_u32.to_be_bytes().to_vec();
+    strg.extend(7_u32.to_be_bytes());
+    strg.extend(0_i64.to_be_bytes());
+    strg.extend(b"Verse\0");
+    let mut mark = 0_u32.to_be_bytes().to_vec();
+    mark.extend(1_u32.to_be_bytes());
+    mark.extend(0_u32.to_be_bytes());
+    mark.extend(2.0_f64.to_be_bytes());
+    mark.extend(7_u32.to_be_bytes());
+    mark.extend([0xFF; 8]);
+    mark.extend(0_u32.to_be_bytes());
+    let mut regn = 0_u32.to_be_bytes().to_vec();
+    regn.extend(0_u32.to_be_bytes());
+    let mut uuid = vec![0x29; 16];
+    uuid.extend(b"opaque");
+    let chunks = [
+        KeptChunk::new(*b"strg", strg).expect("strg"),
+        KeptChunk::new(*b"mark", mark).expect("mark"),
+        KeptChunk::new(*b"regn", regn).expect("regn"),
+        KeptChunk::new(*b"uuid", uuid.clone()).expect("uuid"),
+        KeptChunk::new(*b"uuid", vec![0x30; 16]).expect("second uuid"),
+        KeptChunk::new(*b"midi", b"MThd".to_vec()).expect("midi"),
+    ];
+    let mut mux = writer();
+    for chunk in &chunks {
+        mux.add_chunk(chunk.clone()).expect("kept");
+    }
+    mux.add_stream(stream(CodecId::Pcm, 8_000, 1, vec![1, 1, 0]))
+        .expect("add");
+    mux.write_packet(&packet(vec![0; 8], 0, 4, 8_000))
+        .expect("write");
+    let late = KeptChunk::new(*b"midi", Vec::new()).expect("midi");
+    assert!(mux.add_chunk(late).is_err(), "header already written");
+    mux.finish(&done(8_000, 4)).expect("finish");
+    let bytes = bytes_of(mux);
+    let demux = open(&bytes).expect("open");
+    assert_eq!(demux.kept_chunks(), &chunks);
+    let kinds: Vec<[u8; 4]> = demux.chunks().iter().map(|chunk| chunk.kind).collect();
+    let data = kinds.iter().position(|kind| kind == b"data").expect("data");
+    let first_kept = kinds.iter().position(|kind| kind == b"strg").expect("strg");
+    assert!(first_kept < data);
+    // The bytes are the chunk as given, framed as any other chunk.
+    let mut framed = b"uuid".to_vec();
+    framed.extend(22_i64.to_be_bytes());
+    framed.extend(&uuid);
+    assert!(bytes.windows(framed.len()).any(|window| window == framed));
+}
+
+#[test]
+fn kept_chunks_past_the_limit_are_refused_and_the_mux_keeps_building() {
+    use crate::{KeptChunk, MAX_KEPT_BYTES};
+    let half = usize::try_from(MAX_KEPT_BYTES / 2).expect("fits");
+    let mut mux = writer();
+    mux.add_chunk(KeptChunk::new(*b"midi", vec![0; half]).expect("first"))
+        .expect("first half");
+    mux.add_chunk(KeptChunk::new(*b"midi", vec![0; half]).expect("second"))
+        .expect("second half");
+    let err = mux
+        .add_chunk(KeptChunk::new(*b"midi", vec![0; 1]).expect("one more"))
+        .expect_err("past the limit");
+    assert_eq!(
+        err,
+        MuxError::HostileSize {
+            declared: MAX_KEPT_BYTES + 1,
+            limit: MAX_KEPT_BYTES,
+        }
+    );
+    mux.add_stream(stream(CodecId::Pcm, 8_000, 1, vec![1, 1, 0]))
+        .expect("add");
+    mux.write_packet(&packet(vec![0; 2], 0, 1, 8_000))
+        .expect("write");
+    mux.finish(&done(8_000, 1)).expect("finish");
+    let demux = open(&bytes_of(mux)).expect("open");
+    assert_eq!(demux.kept_chunks().len(), 2);
+}

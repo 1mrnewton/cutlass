@@ -102,6 +102,11 @@ pub const FEATURES: &[Feature] = &[
         mux: true,
     },
     Feature {
+        name: "kept-chunks",
+        demux: true,
+        mux: true,
+    },
+    Feature {
         name: "other-chunks",
         demux: true,
         mux: false,
@@ -142,6 +147,7 @@ mod tests {
             "flac",
             "opus",
             "packet-table",
+            "kept-chunks",
         ] {
             assert!(row(name).demux && row(name).mux, "{name}");
         }

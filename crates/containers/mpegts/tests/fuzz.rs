@@ -947,6 +947,17 @@ fn mux_session(rng: &mut Rng, label: &str) -> Option<usize> {
         ..MuxOptions::default()
     };
     let mut mux = TsMux::with_options(Vec::new(), options);
+    // Any text for the SDT names, up to past what the descriptor holds.
+    let names = rng.chance(3).then(|| {
+        let mut name = || {
+            let len = rng.below(200);
+            String::from_utf8_lossy(&rng.bytes(len)).into_owned()
+        };
+        (name(), name())
+    });
+    if let Some((provider, service)) = &names {
+        mux = mux.with_service(provider, service);
+    }
     let mut tracks: Vec<SessionTrack> = Vec::new();
     let mut expected: Vec<Vec<Expected>> = Vec::new();
     let mut failed = false;
@@ -1085,6 +1096,20 @@ fn mux_session(rng: &mut Rng, label: &str) -> Option<usize> {
     }
     let counters = demux.counters();
     assert_eq!(counters.cc_errors, 0, "{label}");
+    assert_eq!(counters.pmt_changes, 0, "{label}");
+    let service = demux.programs()[0].service.clone().expect("an SDT");
+    let (provider, name) = names.unwrap_or_else(|| ("Cutlass".to_owned(), "Service01".to_owned()));
+    for (have, want) in [(&service.provider, &provider), (&service.name, &name)] {
+        // Cut at a character boundary within 126 bytes.
+        assert!(
+            want.starts_with(have.as_str()),
+            "{label}: {have:?} of {want:?}"
+        );
+        assert!(
+            have.len() + 4 > want.len().min(126),
+            "{label}: {have:?} of {want:?}"
+        );
+    }
     let mut read = 0;
     for (index, (want, have)) in expected.iter().zip(&got).enumerate() {
         // A track without packets is not in the file's streams.

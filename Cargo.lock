@@ -5635,6 +5635,7 @@ dependencies = [
  "cutlass-aiff",
  "cutlass-alac",
  "cutlass-av1",
+ "cutlass-avi",
  "cutlass-codec",
  "cutlass-container",
  "cutlass-decode",

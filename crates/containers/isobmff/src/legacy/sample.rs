@@ -3,7 +3,10 @@
 pub enum SampleFormat {
     #[default]
     Unknown,
+    /// Unsigned 8-bit, 128 as silence (`raw `).
     U8,
+    /// Signed 8-bit (`twos` or `sowt` at 8 bits).
+    S8,
     S16Le,
     S16Be,
     S24Le,

@@ -144,7 +144,7 @@ fn parse_audio(
     let version = read_u16(&payload[8..10]);
     let mut channels = read_u16(&payload[16..18]);
     let mut bits = read_u16(&payload[18..20]);
-    let mut sample_rate = read_u16(&payload[24..26]);
+    let mut sample_rate = u32::from(read_u16(&payload[24..26]));
     let mut format = pcm_format(fourcc, bits);
     let mut child_at = 28usize;
     if version == 1 {
@@ -165,8 +165,9 @@ fn parse_audio(
             payload[39],
         ]);
         let rounded = f64::from_bits(rate_bits).round();
-        sample_rate = if rounded.is_finite() && rounded > 0.0 && rounded < f64::from(u16::MAX) {
-            u16::try_from(rounded as u64).unwrap_or(0)
+        // The v2 rate is a float64, so 96 kHz and up are stated exactly.
+        sample_rate = if rounded.is_finite() && rounded > 0.0 && rounded <= f64::from(u32::MAX) {
+            u32::try_from(rounded as u64).unwrap_or(0)
         } else {
             0
         };
@@ -199,10 +200,21 @@ fn parse_audio(
     if codec == CodecId::Pcm && format == SampleFormat::Unknown {
         format = pcm_format(fourcc, bits);
     }
+    // QuickTime's `in24`, `in32`, `fl32` and `fl64` are big-endian unless a
+    // `wave` atom's `enda` says little, as FFmpeg writes them.
+    if configured.little_endian && matches!(&fourcc, b"in24" | b"in32" | b"fl32" | b"fl64") {
+        format = match format {
+            SampleFormat::S24Be => SampleFormat::S24Le,
+            SampleFormat::S32Be => SampleFormat::S32Le,
+            SampleFormat::F32Be => SampleFormat::F32Le,
+            SampleFormat::F64Be => SampleFormat::F64Le,
+            other => other,
+        };
+    }
     if !matches!(codec, CodecId::Pcm) {
         format = SampleFormat::Unknown;
     }
-    let mut rate = u32::from(sample_rate);
+    let mut rate = sample_rate;
     if codec == CodecId::Alac
         && let Some(cookie) = alac::join(&configured.extradata, configured.chan.as_deref())
         && let Some(facts) = alac::facts(&cookie)
@@ -239,6 +251,8 @@ struct Configured {
     object_type: Option<u8>,
     /// A `fiel` box: the field count, then the stored order.
     fiel: Option<[u8; 2]>,
+    /// An `enda` box with a nonzero value: PCM samples are little-endian.
+    little_endian: bool,
 }
 
 fn configuration(data: &[u8], budget: &mut u32, depth: u32) -> Result<Configured, Error> {
@@ -247,6 +261,7 @@ fn configuration(data: &[u8], budget: &mut u32, depth: u32) -> Result<Configured
     let mut object_type = None;
     let mut chan = None;
     let mut fiel = None;
+    let mut little_endian = false;
     let boxes = parse::atoms(data, 0, budget)?;
     for atom in boxes {
         match &atom.kind {
@@ -272,7 +287,9 @@ fn configuration(data: &[u8], budget: &mut u32, depth: u32) -> Result<Configured
                 color = color.or(nested.color);
                 object_type = object_type.or(nested.object_type);
                 chan = chan.or(nested.chan);
+                little_endian |= nested.little_endian;
             }
+            b"enda" => little_endian = matches!(*atom.payload, [_, flag, ..] if flag != 0),
             b"colr" => color = color.or(parse_colr(atom.payload)),
             b"chan" => chan = Some(atom.payload.to_vec()),
             b"fiel" => {
@@ -289,6 +306,7 @@ fn configuration(data: &[u8], budget: &mut u32, depth: u32) -> Result<Configured
         color,
         object_type,
         fiel,
+        little_endian,
     })
 }
 
@@ -565,14 +583,16 @@ pub(crate) fn codec_for(fourcc: [u8; 4]) -> CodecId {
 
 fn pcm_format(fourcc: [u8; 4], bits: u16) -> SampleFormat {
     match &fourcc {
+        // 8-bit `sowt` and `twos` are signed, as FFmpeg's mov.c reads them;
+        // unsigned 8-bit is `raw `.
         b"sowt" => match bits {
-            8 => SampleFormat::U8,
+            8 => SampleFormat::S8,
             24 => SampleFormat::S24Le,
             32 => SampleFormat::S32Le,
             _ => SampleFormat::S16Le,
         },
         b"twos" | b"NONE" => match bits {
-            8 => SampleFormat::U8,
+            8 => SampleFormat::S8,
             24 => SampleFormat::S24Be,
             32 => SampleFormat::S32Be,
             _ => SampleFormat::S16Be,
@@ -594,8 +614,9 @@ fn lpcm_format(bits: u16, flags: u32) -> SampleFormat {
         (true, false, 64) => SampleFormat::F64Le,
         (true, true, _) => SampleFormat::F32Be,
         (true, false, _) => SampleFormat::F32Le,
-        (false, true, 8) => SampleFormat::U8,
-        (false, false, 8) => SampleFormat::U8,
+        // kAudioFormatFlagIsSignedInteger (4) marks signed 8-bit.
+        (false, _, 8) if flags & 4 != 0 => SampleFormat::S8,
+        (false, _, 8) => SampleFormat::U8,
         (false, true, 24) => SampleFormat::S24Be,
         (false, false, 24) => SampleFormat::S24Le,
         (false, true, 32) => SampleFormat::S32Be,

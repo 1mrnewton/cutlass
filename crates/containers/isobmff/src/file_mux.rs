@@ -139,8 +139,8 @@ fn prores_color(frame: &[u8]) -> Option<ColorTags> {
 const PRORES_ENTRIES: [[u8; 4]; 6] = [*b"apco", *b"apcs", *b"apcn", *b"apch", *b"ap4h", *b"ap4x"];
 
 /// The box writer's parameters for `stream`: H.264, HEVC, MPEG-4 Visual,
-/// ProRes, Motion JPEG, VP8 or MPEG-2 pictures, or AAC, Opus, or 16-bit PCM
-/// sound. A VP8 track's extradata is its `vpcC` payload. A ProRes track whose extradata is
+/// ProRes, Motion JPEG, VP8 or MPEG-2 pictures, or AAC, Opus, or PCM sound.
+/// PCM keeps the layout its three layout bytes name (empty is s16le). A VP8 track's extradata is its `vpcC` payload. A ProRes track whose extradata is
 /// a profile's four-character code is written with that sample entry.
 /// Motion JPEG is a QuickTime `jpeg` entry, so only a movie takes it.
 fn box_params(stream: &NewStream, brand: FileBrand) -> Result<StreamParams, MuxError> {
@@ -170,7 +170,27 @@ fn box_params(stream: &NewStream, brand: FileBrand) -> Result<StreamParams, MuxE
             };
             StreamParams::video(codec, scale, size.width(), size.height())
         }
-        Id::Aac | Id::Opus | Id::Pcm | Id::Ac3 | Id::Eac3 => {
+        Id::Pcm => {
+            let rate = stream
+                .params
+                .sample_rate()
+                .ok_or_else(|| rejected("a sound track needs a rate"))?;
+            let channels = stream
+                .params
+                .channels()
+                .ok_or_else(|| rejected("a sound track needs channels"))?;
+            let (bits, format) = pcm_entry(stream.params.extradata())?;
+            // The entry states the layout; the PCM track carries no extradata.
+            return Ok(StreamParams::audio(
+                CodecId::Pcm,
+                scale,
+                rate,
+                channels,
+                bits,
+                format,
+            ));
+        }
+        Id::Aac | Id::Opus | Id::Ac3 | Id::Eac3 => {
             let rate = stream
                 .params
                 .sample_rate()
@@ -183,8 +203,7 @@ fn box_params(stream: &NewStream, brand: FileBrand) -> Result<StreamParams, MuxE
                 Id::Aac => CodecId::Aac,
                 Id::Opus => CodecId::Opus,
                 Id::Ac3 => CodecId::Ac3,
-                Id::Eac3 => CodecId::Eac3,
-                _ => CodecId::Pcm,
+                _ => CodecId::Eac3,
             };
             StreamParams::audio(codec, scale, rate, channels, 16, SampleFormat::S16Le)
         }
@@ -231,6 +250,38 @@ fn box_params(stream: &NewStream, brand: FileBrand) -> Result<StreamParams, MuxE
         params.extradata = extradata.to_vec();
     }
     Ok(params)
+}
+
+/// The bit depth and sample format for PCM layout bytes (coding, byte order,
+/// arrangement), as `cutlass-pcm` names them. Empty is interleaved s16le.
+/// A-law, mu-law, s64, planar samples and any other extradata are refused
+/// rather than written under a label that would misread them.
+fn pcm_entry(extradata: &[u8]) -> Result<(u16, SampleFormat), MuxError> {
+    let (coding, big) = match extradata {
+        [] => (1, false),
+        [coding, order @ (0 | 1), 0] => (*coding, *order == 1),
+        _ => {
+            return Err(rejected(
+                "PCM extradata other than three interleaved layout bytes",
+            ));
+        }
+    };
+    let pick =
+        |little: SampleFormat, big_endian: SampleFormat| if big { big_endian } else { little };
+    Ok(match coding {
+        1 => (16, pick(SampleFormat::S16Le, SampleFormat::S16Be)),
+        2 => (24, pick(SampleFormat::S24Le, SampleFormat::S24Be)),
+        3 => (32, pick(SampleFormat::S32Le, SampleFormat::S32Be)),
+        4 => (32, pick(SampleFormat::F32Le, SampleFormat::F32Be)),
+        5 => (64, pick(SampleFormat::F64Le, SampleFormat::F64Be)),
+        6 => (8, SampleFormat::S8),
+        11 => (8, SampleFormat::U8),
+        _ => {
+            return Err(rejected(
+                "PCM coding without an MP4 sample entry (A-law, mu-law or s64)",
+            ));
+        }
+    })
 }
 
 /// The AudioSpecificConfig inside an MPEG-4 ES descriptor, or `config` as
@@ -528,6 +579,301 @@ mod tests {
         assert_eq!(last_end, 2400);
         assert_eq!(sound_bytes.len(), 2400 * 4);
         assert_eq!(sound_bytes[1600 * 4], 7);
+    }
+
+    /// Layout, bytes per sample, rate, channels, sample entry, read-back layout.
+    type WriteCase<'a> = (&'a [u8], usize, u32, u16, &'a [u8; 4], [u8; 3]);
+
+    /// Layout, bytes per sample, rate, channels, FFmpeg codec, afinfo format.
+    type OracleCase<'a> = (&'a [u8], usize, u32, u16, &'a str, &'a str);
+
+    /// A PCM track with these layout bytes, `frames` frames long, written to
+    /// a movie: the file's bytes, or the muxer's refusal.
+    pub(crate) fn pcm_movie(
+        layout: &[u8],
+        rate: u32,
+        channels: u16,
+        payload: &[u8],
+        frames: i64,
+    ) -> Result<Vec<u8>, String> {
+        let mut mux = Mp4Mux::with_brand(Cursor::new(Vec::new()), FileBrand::Mov);
+        let sound = mux
+            .add_stream(NewStream {
+                params: StreamParams::try_audio(
+                    StreamCodec::Known(Id::Pcm),
+                    rate,
+                    channels,
+                    layout.to_vec(),
+                )
+                .unwrap(),
+                timescale: Timescale::new(rate),
+                language: None,
+            })
+            .map_err(|error| format!("{error:?}"))?;
+        mux.write_packet(&packet(sound.get(), payload.to_vec(), 0, frames, rate))
+            .map_err(|error| format!("{error:?}"))?;
+        mux.finish(&[TrackDuration {
+            track: sound,
+            timescale: Timescale::new(rate),
+            ticks: frames,
+        }])
+        .map_err(|error| format!("{error:?}"))?;
+        Ok(mux
+            .into_writer()
+            .map_err(|error| format!("{error:?}"))?
+            .into_inner())
+    }
+
+    /// Every PCM layout the muxer takes is written under an entry that says
+    /// it, and reads back with the same layout bytes, rate, channels and
+    /// samples. Before, every track was declared 16-bit little-endian.
+    #[test]
+    fn every_pcm_layout_reads_back_as_written() {
+        // (layout, bytes per sample, rate, channels, entry, read-back layout)
+        let cases: [WriteCase<'_>; 15] = [
+            (&[], 2, 48_000, 2, b"sowt", [1, 0, 0]),
+            (&[1, 0, 0], 2, 48_000, 2, b"sowt", [1, 0, 0]),
+            (&[1, 1, 0], 2, 44_100, 1, b"twos", [1, 1, 0]),
+            (&[11, 0, 0], 1, 8_000, 1, b"raw ", [11, 0, 0]),
+            (&[6, 0, 0], 1, 8_000, 2, b"twos", [6, 0, 0]),
+            (&[2, 0, 0], 3, 48_000, 2, b"lpcm", [2, 0, 0]),
+            (&[2, 1, 0], 3, 48_000, 2, b"lpcm", [2, 1, 0]),
+            (&[3, 0, 0], 4, 48_000, 2, b"lpcm", [3, 0, 0]),
+            (&[3, 1, 0], 4, 48_000, 1, b"lpcm", [3, 1, 0]),
+            (&[4, 0, 0], 4, 48_000, 2, b"lpcm", [4, 0, 0]),
+            (&[4, 1, 0], 4, 48_000, 2, b"lpcm", [4, 1, 0]),
+            (&[5, 0, 0], 8, 48_000, 1, b"lpcm", [5, 0, 0]),
+            (&[5, 1, 0], 8, 48_000, 1, b"lpcm", [5, 1, 0]),
+            // 16-bit past the version 0 limits: 96 kHz, and six channels.
+            (&[1, 0, 0], 2, 96_000, 2, b"lpcm", [1, 0, 0]),
+            (&[1, 0, 0], 2, 48_000, 6, b"lpcm", [1, 0, 0]),
+        ];
+        for (layout, width, rate, channels, entry, read) in cases {
+            let frames = 300_i64;
+            let size = usize::try_from(frames).unwrap() * width * usize::from(channels);
+            let payload: Vec<u8> = (0..size).map(|i| (i * 7 % 251) as u8).collect();
+            let bytes = pcm_movie(layout, rate, channels, &payload, frames).unwrap();
+            assert!(
+                bytes.windows(4).any(|w| w == entry),
+                "{layout:?}: no {entry:?}"
+            );
+            let mut file = crate::IsoBmffFile::open(Cursor::new(bytes)).unwrap();
+            let stream = &cutlass_container::Demux::streams(&file)[0];
+            assert_eq!(stream.params().extradata(), read, "{layout:?}");
+            assert_eq!(stream.params().sample_rate(), Some(rate), "{layout:?}");
+            assert_eq!(stream.params().channels(), Some(channels), "{layout:?}");
+            let mut back = Vec::new();
+            while let Some(packet) = cutlass_container::Demux::read_packet(&mut file).unwrap() {
+                back.extend_from_slice(packet.bytes());
+            }
+            assert_eq!(back, payload, "{layout:?}");
+        }
+    }
+
+    /// FFmpeg and, where present, Apple's `afinfo` read each layout the
+    /// muxer writes as the format it is: FFmpeg names the codec and gives
+    /// back every byte; `afinfo` states the channels, rate and format.
+    #[test]
+    fn ffmpeg_and_afinfo_read_each_pcm_layout_as_written() {
+        let which = |name: &str| {
+            let out = std::process::Command::new("which")
+                .arg(name)
+                .output()
+                .ok()?;
+            let path = String::from_utf8(out.stdout).ok()?;
+            let path = std::path::PathBuf::from(path.trim());
+            path.is_file().then_some(path)
+        };
+        let (Some(ffmpeg), Some(ffprobe)) = (which("ffmpeg"), which("ffprobe")) else {
+            eprintln!("not available: ffmpeg or ffprobe");
+            return;
+        };
+        let afinfo = which("afinfo");
+        if afinfo.is_none() {
+            eprintln!("not available: afinfo");
+        }
+        let dir = std::env::temp_dir().join(format!("isobmff-pcm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // (layout, bytes per sample, rate, channels, FFmpeg codec, afinfo text)
+        // afinfo's short names (Int16, Float32) are native little-endian.
+        let cases: [OracleCase<'_>; 14] = [
+            (&[1, 0, 0], 2, 48_000, 2, "pcm_s16le", "Int16"),
+            (
+                &[1, 1, 0],
+                2,
+                44_100,
+                1,
+                "pcm_s16be",
+                "16-bit big-endian signed",
+            ),
+            (&[11, 0, 0], 1, 8_000, 1, "pcm_u8", "8-bit unsigned integer"),
+            (&[6, 0, 0], 1, 8_000, 2, "pcm_s8", "8-bit signed integer"),
+            (
+                &[2, 0, 0],
+                3,
+                48_000,
+                2,
+                "pcm_s24le",
+                "24-bit little-endian signed",
+            ),
+            (
+                &[2, 1, 0],
+                3,
+                48_000,
+                2,
+                "pcm_s24be",
+                "24-bit big-endian signed",
+            ),
+            (&[3, 0, 0], 4, 48_000, 2, "pcm_s32le", "Int32"),
+            (
+                &[3, 1, 0],
+                4,
+                48_000,
+                1,
+                "pcm_s32be",
+                "32-bit big-endian signed",
+            ),
+            (&[4, 0, 0], 4, 48_000, 2, "pcm_f32le", "Float32"),
+            (
+                &[4, 1, 0],
+                4,
+                48_000,
+                2,
+                "pcm_f32be",
+                "32-bit big-endian float",
+            ),
+            (&[5, 0, 0], 8, 48_000, 1, "pcm_f64le", "Float64"),
+            (
+                &[5, 1, 0],
+                8,
+                48_000,
+                1,
+                "pcm_f64be",
+                "64-bit big-endian float",
+            ),
+            (&[1, 0, 0], 2, 96_000, 2, "pcm_s16le", "Int16"),
+            (&[1, 0, 0], 2, 48_000, 6, "pcm_s16le", "Int16"),
+        ];
+        for (index, (layout, width, rate, channels, codec, apple)) in cases.into_iter().enumerate()
+        {
+            let frames = 480_i64;
+            let size = usize::try_from(frames).unwrap() * width * usize::from(channels);
+            let payload: Vec<u8> = (0..size).map(|i| (i * 13 % 241) as u8).collect();
+            let path = dir.join(format!("pcm-{index}.mov"));
+            std::fs::write(
+                &path,
+                pcm_movie(layout, rate, channels, &payload, frames).unwrap(),
+            )
+            .unwrap();
+            let probe = std::process::Command::new(&ffprobe)
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_name,sample_rate,channels",
+                ])
+                .args(["-of", "csv=p=0"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            let probed = String::from_utf8_lossy(&probe.stdout).trim().to_owned();
+            assert_eq!(probed, format!("{codec},{rate},{channels}"), "{layout:?}");
+            let copy = std::process::Command::new(&ffmpeg)
+                .args(["-v", "error", "-nostdin", "-i"])
+                .arg(&path)
+                .args(["-map", "0:a", "-c", "copy", "-f", "data", "-"])
+                .output()
+                .unwrap();
+            assert!(copy.status.success(), "{layout:?}");
+            assert_eq!(copy.stdout, payload, "{layout:?}: FFmpeg's packets");
+            if let Some(afinfo) = &afinfo {
+                let out = std::process::Command::new(afinfo)
+                    .arg(&path)
+                    .output()
+                    .unwrap();
+                let text = String::from_utf8_lossy(&out.stdout);
+                assert!(out.status.success(), "{layout:?}: {text}");
+                let line = text
+                    .lines()
+                    .find(|line| line.contains("Data format"))
+                    .unwrap_or("");
+                assert!(
+                    line.contains(&format!("{channels} ch")),
+                    "{layout:?}: {line}"
+                );
+                assert!(line.contains(&format!("{rate} Hz")), "{layout:?}: {line}");
+                assert!(line.contains(apple), "{layout:?} wants {apple}: {line}");
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// PCM movies FFmpeg writes read with the layout they hold: `in24` and
+    /// `fl32` with an `enda` atom are little-endian, 8-bit `twos`/`sowt` is
+    /// signed and `raw ` unsigned. Before, every one handed the decoder no
+    /// layout and only float decoded.
+    #[test]
+    fn ffmpeg_pcm_movies_read_with_their_layout() {
+        let Some(ffmpeg) = std::process::Command::new("which")
+            .arg("ffmpeg")
+            .output()
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .map(|path| std::path::PathBuf::from(path.trim()))
+            .filter(|path| path.is_file())
+        else {
+            eprintln!("not available: ffmpeg");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("isobmff-ffpcm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cases: [(&str, [u8; 3]); 11] = [
+            ("pcm_s16le", [1, 0, 0]),
+            ("pcm_s16be", [1, 1, 0]),
+            ("pcm_u8", [11, 0, 0]),
+            ("pcm_s8", [6, 0, 0]),
+            ("pcm_s24le", [2, 0, 0]),
+            ("pcm_s24be", [2, 1, 0]),
+            ("pcm_s32le", [3, 0, 0]),
+            ("pcm_s32be", [3, 1, 0]),
+            ("pcm_f32le", [4, 0, 0]),
+            ("pcm_f32be", [4, 1, 0]),
+            ("pcm_f64le", [5, 0, 0]),
+        ];
+        for (codec, layout) in cases {
+            let path = dir.join(format!("{codec}.mov"));
+            let made = std::process::Command::new(&ffmpeg)
+                .args(["-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i"])
+                .arg("sine=frequency=440:sample_rate=8000:duration=0.1")
+                .args(["-c:a", codec])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "{codec}");
+            let file = crate::IsoBmffFile::open(std::fs::File::open(&path).unwrap()).unwrap();
+            let stream = &cutlass_container::Demux::streams(&file)[0];
+            assert_eq!(stream.params().extradata(), layout, "{codec}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A-law, mu-law, s64, planar samples and foreign extradata have no
+    /// entry here; they are refused rather than written under a wrong one.
+    #[test]
+    fn pcm_without_an_entry_is_refused() {
+        for layout in [
+            &[7, 0, 0][..],
+            &[8, 0, 0],
+            &[9, 0, 0],
+            &[1, 0, 1],
+            &[1, 2, 0],
+            &[0; 18],
+        ] {
+            assert!(
+                pcm_movie(layout, 8_000, 1, &[0; 64], 8).is_err(),
+                "{layout:?} was written"
+            );
+        }
     }
 
     fn opus_track(mux: &mut Mp4Mux<Cursor<Vec<u8>>>) -> cutlass_container::TrackId {

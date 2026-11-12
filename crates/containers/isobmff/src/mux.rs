@@ -514,14 +514,7 @@ fn entry_code(params: &StreamParams) -> Result<[u8; 4], Error> {
         CodecId::Alac => *b"alac",
         CodecId::Ac3 => *b"ac-3",
         CodecId::Eac3 => *b"ec-3",
-        CodecId::Pcm => match audio_format(params) {
-            SampleFormat::S16Le | SampleFormat::S24Le | SampleFormat::S32Le | SampleFormat::U8 => {
-                *b"sowt"
-            }
-            SampleFormat::F32Le => *b"fl32",
-            SampleFormat::F64Le => *b"fl64",
-            _ => *b"twos",
-        },
+        CodecId::Pcm => pcm_entry_code(params)?,
         CodecId::Unknown(code) => code,
         _ => {
             return Err(Error::CodecRejected {
@@ -532,11 +525,70 @@ fn entry_code(params: &StreamParams) -> Result<[u8; 4], Error> {
     Ok(code)
 }
 
-fn audio_format(params: &StreamParams) -> SampleFormat {
-    match params.kind {
-        MediaKind::Audio(audio) => audio.format,
-        _ => SampleFormat::Unknown,
+/// The QuickTime entry for a PCM track. Mono or stereo 8- and 16-bit sound
+/// at up to 65535 Hz keeps the classic version 0 codes FFmpeg also writes:
+/// `raw ` (unsigned 8-bit), `twos` (signed 8-bit, s16be) and `sowt`
+/// (s16le). Anything else is `lpcm` with a version 2 description, whose
+/// flags state float, byte order and sign exactly.
+fn pcm_entry_code(params: &StreamParams) -> Result<[u8; 4], Error> {
+    let MediaKind::Audio(audio) = params.kind else {
+        return Err(Error::CodecRejected {
+            sample_entry: [0, 0, 0, 0],
+        });
+    };
+    if lpcm_flags(audio.format).is_none() {
+        return Err(Error::Unsupported {
+            what: "PCM track without a sample format",
+        });
     }
+    let classic = audio.channels <= 2 && audio.sample_rate <= u32::from(u16::MAX);
+    Ok(match audio.format {
+        SampleFormat::U8 if classic => *b"raw ",
+        SampleFormat::S8 | SampleFormat::S16Be if classic => *b"twos",
+        SampleFormat::S16Le if classic => *b"sowt",
+        _ => *b"lpcm",
+    })
+}
+
+/// `formatSpecificFlags` of a version 2 `lpcm` description, as Apple's
+/// `AudioStreamBasicDescription` defines them: 1 float, 2 big-endian,
+/// 4 signed integer, 8 packed. The values match FFmpeg's movenc.c.
+fn lpcm_flags(format: SampleFormat) -> Option<u32> {
+    Some(match format {
+        SampleFormat::F32Be | SampleFormat::F64Be => 1 | 2 | 8,
+        SampleFormat::F32Le | SampleFormat::F64Le => 1 | 8,
+        SampleFormat::U8 => 2 | 8,
+        SampleFormat::S16Be | SampleFormat::S24Be | SampleFormat::S32Be => 2 | 4 | 8,
+        SampleFormat::S8 | SampleFormat::S16Le | SampleFormat::S24Le | SampleFormat::S32Le => 4 | 8,
+        SampleFormat::Unknown => return None,
+    })
+}
+
+/// A QuickTime sound description version 2 (QTFF, "Sound Sample Description
+/// (Version 2)"): the fields after the eight-byte sample entry header.
+fn lpcm_description(audio: &crate::legacy::AudioParams) -> Result<Vec<u8>, Error> {
+    let flags = lpcm_flags(audio.format).ok_or(Error::Unsupported {
+        what: "PCM track without a sample format",
+    })?;
+    let bits = u32::from(audio.bits_per_sample);
+    let channels = u32::from(audio.channels);
+    let mut entry = Vec::with_capacity(56);
+    entry.extend_from_slice(&2u16.to_be_bytes()); // version
+    entry.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // revision, vendor
+    entry.extend_from_slice(&3u16.to_be_bytes()); // always 3
+    entry.extend_from_slice(&16u16.to_be_bytes()); // always 16
+    entry.extend_from_slice(&(-2i16).to_be_bytes()); // always -2
+    entry.extend_from_slice(&0u16.to_be_bytes()); // always 0
+    entry.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // always 65536
+    entry.extend_from_slice(&72u32.to_be_bytes()); // size of the struct
+    entry.extend_from_slice(&f64::from(audio.sample_rate).to_bits().to_be_bytes());
+    entry.extend_from_slice(&channels.to_be_bytes());
+    entry.extend_from_slice(&0x7F00_0000u32.to_be_bytes()); // always 0x7F000000
+    entry.extend_from_slice(&bits.to_be_bytes());
+    entry.extend_from_slice(&flags.to_be_bytes());
+    entry.extend_from_slice(&(channels * bits / 8).to_be_bytes()); // bytes per packet
+    entry.extend_from_slice(&1u32.to_be_bytes()); // frames per packet
+    Ok(entry)
 }
 
 fn ftyp_bytes(brand: FileBrand, fragmented: bool) -> Vec<u8> {
@@ -947,6 +999,13 @@ fn stsd(track: &TrackOut) -> Result<Vec<u8>, Error> {
                 audio.bits_per_sample = facts.bits;
             }
             entry.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
+            if &code == b"lpcm" {
+                entry.extend(lpcm_description(&audio)?);
+                entry.extend(config_boxes(track)?);
+                let mut payload = vec![0, 0, 0, 0, 0, 0, 0, 1];
+                payload.extend(box_bytes(&code, &entry));
+                return Ok(box_bytes(b"stsd", &payload));
+            }
             entry.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]);
             entry.extend_from_slice(&audio.channels.to_be_bytes());
             entry.extend_from_slice(&audio.bits_per_sample.to_be_bytes());

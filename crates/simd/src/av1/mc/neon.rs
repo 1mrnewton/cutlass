@@ -7,9 +7,9 @@
 
 use core::arch::aarch64::{
     int8x16_t, int16x8_t, int32x4_t, uint8x16_t, vcombine_s16, vcombine_u16, vdotq_s32,
-    vdupq_n_s16, vdupq_n_s32, vdupq_n_u8, veorq_u8, vget_lane_u64, vget_low_s16, vget_low_u8,
-    vmlal_high_laneq_s16, vmlal_laneq_s16, vmlaq_s16, vmovl_high_u8, vmovl_u8, vmulq_s16,
-    vqmovn_u16, vqrshrun_n_s16, vqrshrun_n_s32, vqtbl1q_s8, vreinterpret_u64_u8,
+    vdupq_n_s32, vdupq_n_u8, veorq_u8, vget_lane_u64, vget_low_s16, vget_low_u8,
+    vmlal_high_laneq_s16, vmlal_laneq_s16, vmlaq_laneq_s16, vmovl_high_u8, vmovl_u8,
+    vmulq_laneq_s16, vqmovn_u16, vqrshrun_n_s16, vqrshrun_n_s32, vqtbl1q_s8, vreinterpret_u64_u8,
     vreinterpretq_s8_u8, vreinterpretq_s16_u16, vrshrn_n_s32, vrshrq_n_s16, vshrn_n_s32,
 };
 
@@ -136,17 +136,6 @@ macro_rules! strips {
             }
         }
     }};
-    // One row on, for `vstrips!`.
-    (@shift $a:ident, $($rest:ident),+; $last:ident) => {
-        $a = strips!(@first $($rest),+);
-        strips!(@shift $($rest),+; $last);
-    };
-    (@shift $a:ident; $last:ident) => {
-        $a = $last;
-    };
-    (@first $a:ident $(, $rest:ident)*) => {
-        $a
-    };
 }
 
 /// Horizontal then vertical filter of a block, eight columns at a time.
@@ -326,42 +315,48 @@ fn wide16(src: &[u8], at: usize) -> Option<(int16x8_t, int16x8_t)> {
 }
 
 /// The vertical filter alone over a block, eight columns at a time, with
-/// the taps `$t0 .. $t0 + N` halved (they are all even) so the sums fit
-/// 16 bits: the last `N` rows stay in registers, one in each name, as in
-/// `strips!`. `$store` takes the column, the row and the sum.
+/// the taps `$t0 ..` halved (they are all even) so the sums fit 16 bits:
+/// the rows an output reads stay in registers and go round the names, as
+/// in `strips!`. `$store` takes the column, the row and the sum.
 macro_rules! vstrips {
-    ($b:expr, $store:expr, $n:literal, $load:ident, $mul:ident, $mla:ident, $each:ident, $t0:literal; $first:ident $(, $v:ident)*; $last:ident) => {{
+    (
+        $b:expr, $store:expr, $n:literal, $load:ident, $mul:ident, $mla:ident, $each:ident, $t0:literal;
+        [$($init:ident),+]; $spare:ident;
+        $([$new:ident; $r0:ident $l0:literal $(, $r:ident $l:literal)*])+
+    ) => {{
         let (b, mut store) = ($b, $store);
-        let taps: [int16x8_t; 8] = core::array::from_fn(|t| {
-            vdupq_n_s16(b.fv.get($t0 + t).map_or(0, |&f| i16::from(f) >> 1))
-        });
+        // As in `strips!`.
+        let taps = core::hint::black_box(i16x8(core::array::from_fn(|t| {
+            b.fv.get($t0 + t).map_or(0, |&f| i16::from(f) >> 1)
+        })));
         let top = b.start + 3;
         'strips: for c in (0..b.w).step_by($n) {
             let mut at = top + $t0 * b.src_stride + c;
-            let Some(mut $first) = $load(b.src, at) else {
-                break 'strips;
-            };
-            at += b.src_stride;
             $(
-                let Some(mut $v) = $load(b.src, at) else {
+                let Some(mut $init) = $load(b.src, at) else {
                     break 'strips;
                 };
                 at += b.src_stride;
-            )*
-            for r in 0..b.h {
-                let Some($last) = $load(b.src, at) else {
-                    break 'strips;
-                };
-                at += b.src_stride;
-                let mut acc = $mul($first, taps[0]);
-                let mut t = 1;
+            )+
+            let mut $spare;
+            let mut r = 0;
+            'rows: loop {
                 $(
-                    acc = $mla(acc, $v, taps[t]);
-                    t += 1;
-                )*
-                acc = $mla(acc, $last, taps[t]);
-                $each(acc, |k, v| store(c + 8 * k, r, v));
-                strips!(@shift $first $(, $v)*; $last);
+                    if r == b.h {
+                        break 'rows;
+                    }
+                    let Some(next) = $load(b.src, at) else {
+                        break 'strips;
+                    };
+                    $new = next;
+                    at += b.src_stride;
+                    let mut acc = $mul::<$l0>($r0, taps);
+                    $(
+                        acc = $mla::<$l>(acc, $r, taps);
+                    )*
+                    $each(acc, |k, v| store(c + 8 * k, r, v));
+                    r += 1;
+                )+
             }
         }
     }};
@@ -371,15 +366,15 @@ macro_rules! vstrips {
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes,dotprod"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon,dotprod"))]
-fn mul8(a: int16x8_t, t: int16x8_t) -> int16x8_t {
-    vmulq_s16(a, t)
+fn mul8<const L: i32>(a: int16x8_t, t: int16x8_t) -> int16x8_t {
+    vmulq_laneq_s16::<L>(a, t)
 }
 
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes,dotprod"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon,dotprod"))]
-fn mla8(acc: int16x8_t, a: int16x8_t, t: int16x8_t) -> int16x8_t {
-    vmlaq_s16(acc, a, t)
+fn mla8<const L: i32>(acc: int16x8_t, a: int16x8_t, t: int16x8_t) -> int16x8_t {
+    vmlaq_laneq_s16::<L>(acc, a, t)
 }
 
 #[inline]
@@ -393,19 +388,22 @@ fn each8(acc: int16x8_t, mut f: impl FnMut(usize, int16x8_t)) {
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes,dotprod"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon,dotprod"))]
-fn mul16(a: (int16x8_t, int16x8_t), t: int16x8_t) -> (int16x8_t, int16x8_t) {
-    (vmulq_s16(a.0, t), vmulq_s16(a.1, t))
+fn mul16<const L: i32>(a: (int16x8_t, int16x8_t), t: int16x8_t) -> (int16x8_t, int16x8_t) {
+    (vmulq_laneq_s16::<L>(a.0, t), vmulq_laneq_s16::<L>(a.1, t))
 }
 
 #[inline]
 #[cfg_attr(target_feature = "aes", target_feature(enable = "neon,aes,dotprod"))]
 #[cfg_attr(not(target_feature = "aes"), target_feature(enable = "neon,dotprod"))]
-fn mla16(
+fn mla16<const L: i32>(
     acc: (int16x8_t, int16x8_t),
     a: (int16x8_t, int16x8_t),
     t: int16x8_t,
 ) -> (int16x8_t, int16x8_t) {
-    (vmlaq_s16(acc.0, a.0, t), vmlaq_s16(acc.1, a.1, t))
+    (
+        vmlaq_laneq_s16::<L>(acc.0, a.0, t),
+        vmlaq_laneq_s16::<L>(acc.1, a.1, t),
+    )
 }
 
 #[inline]
@@ -426,13 +424,41 @@ pub(super) fn v(out: Out<'_>, dst_stride: usize, b: &Block<'_>) {
     macro_rules! taps {
         ($store:expr) => {
             match (six, b.w >= 16) {
-                (true, true) => vstrips!(b, $store, 16, wide16, mul16, mla16, each16, 1; v0, v1, v2, v3, v4; v5),
-                (true, false) => vstrips!(b, $store, 8, wide8, mul8, mla8, each8, 1; v0, v1, v2, v3, v4; v5),
+                (true, true) => vstrips!(b, $store, 16, wide16, mul16, mla16, each16, 1; [v0, v1, v2, v3, v4]; v5;
+                    [v5; v0 0, v1 1, v2 2, v3 3, v4 4, v5 5]
+                    [v0; v1 0, v2 1, v3 2, v4 3, v5 4, v0 5]
+                    [v1; v2 0, v3 1, v4 2, v5 3, v0 4, v1 5]
+                    [v2; v3 0, v4 1, v5 2, v0 3, v1 4, v2 5]
+                    [v3; v4 0, v5 1, v0 2, v1 3, v2 4, v3 5]
+                    [v4; v5 0, v0 1, v1 2, v2 3, v3 4, v4 5]),
+                (true, false) => vstrips!(b, $store, 8, wide8, mul8, mla8, each8, 1; [v0, v1, v2, v3, v4]; v5;
+                    [v5; v0 0, v1 1, v2 2, v3 3, v4 4, v5 5]
+                    [v0; v1 0, v2 1, v3 2, v4 3, v5 4, v0 5]
+                    [v1; v2 0, v3 1, v4 2, v5 3, v0 4, v1 5]
+                    [v2; v3 0, v4 1, v5 2, v0 3, v1 4, v2 5]
+                    [v3; v4 0, v5 1, v0 2, v1 3, v2 4, v3 5]
+                    [v4; v5 0, v0 1, v1 2, v2 3, v3 4, v4 5]),
                 (false, true) => {
-                    vstrips!(b, $store, 16, wide16, mul16, mla16, each16, 0; v0, v1, v2, v3, v4, v5, v6; v7)
+                    vstrips!(b, $store, 16, wide16, mul16, mla16, each16, 0; [v0, v1, v2, v3, v4, v5, v6]; v7;
+                    [v7; v0 0, v1 1, v2 2, v3 3, v4 4, v5 5, v6 6, v7 7]
+                    [v0; v1 0, v2 1, v3 2, v4 3, v5 4, v6 5, v7 6, v0 7]
+                    [v1; v2 0, v3 1, v4 2, v5 3, v6 4, v7 5, v0 6, v1 7]
+                    [v2; v3 0, v4 1, v5 2, v6 3, v7 4, v0 5, v1 6, v2 7]
+                    [v3; v4 0, v5 1, v6 2, v7 3, v0 4, v1 5, v2 6, v3 7]
+                    [v4; v5 0, v6 1, v7 2, v0 3, v1 4, v2 5, v3 6, v4 7]
+                    [v5; v6 0, v7 1, v0 2, v1 3, v2 4, v3 5, v4 6, v5 7]
+                    [v6; v7 0, v0 1, v1 2, v2 3, v3 4, v4 5, v5 6, v6 7])
                 }
                 (false, false) => {
-                    vstrips!(b, $store, 8, wide8, mul8, mla8, each8, 0; v0, v1, v2, v3, v4, v5, v6; v7)
+                    vstrips!(b, $store, 8, wide8, mul8, mla8, each8, 0; [v0, v1, v2, v3, v4, v5, v6]; v7;
+                    [v7; v0 0, v1 1, v2 2, v3 3, v4 4, v5 5, v6 6, v7 7]
+                    [v0; v1 0, v2 1, v3 2, v4 3, v5 4, v6 5, v7 6, v0 7]
+                    [v1; v2 0, v3 1, v4 2, v5 3, v6 4, v7 5, v0 6, v1 7]
+                    [v2; v3 0, v4 1, v5 2, v6 3, v7 4, v0 5, v1 6, v2 7]
+                    [v3; v4 0, v5 1, v6 2, v7 3, v0 4, v1 5, v2 6, v3 7]
+                    [v4; v5 0, v6 1, v7 2, v0 3, v1 4, v2 5, v3 6, v4 7]
+                    [v5; v6 0, v7 1, v0 2, v1 3, v2 4, v3 5, v4 6, v5 7]
+                    [v6; v7 0, v0 1, v1 2, v2 3, v3 4, v4 5, v5 6, v6 7])
                 }
             }
         };

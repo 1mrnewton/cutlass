@@ -12769,9 +12769,11 @@ fn preds_at(mb: &Mb, bx: usize, by: usize) -> [(i8, [i16; 2]); 2] {
 fn bind_refs(mb: &mut Mb, slice: &Slice<'_>) {
     // A field macroblock's index counts fields, two to a listed frame.
     let halve = u32::from(mb.field_mb);
+    // Index −1 lands on the first entry and any other negative one past
+    // the list, as a byte after the one added.
     let bound = |list: usize, index: i8| {
-        let at = usize::try_from(i16::from(index >> halve) + 1).unwrap_or(usize::MAX);
-        slice.bound[list].get(at).copied().unwrap_or((-1, 0))
+        let at = ((index >> halve) as u8).wrapping_add(1);
+        slice.bound[list][usize::from(at)]
     };
     for i in 0..4 {
         (mb.slot0[i], mb.ref_poc0[i]) = bound(0, mb.ref0[i]);

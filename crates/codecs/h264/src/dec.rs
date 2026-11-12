@@ -2391,7 +2391,8 @@ pub(crate) struct Slice<'a> {
     /// For each list, the decoded-picture-buffer slot and order count of
     /// reference index `i` at `i + 1`, and −1 and 0 for index −1 and any
     /// index past the list: what a macroblock keeps of its references.
-    bound: [[(i8, i32); 64]; 2],
+    /// One entry for each byte, so an index read as a byte finds one.
+    bound: [[(i8, i32); 256]; 2],
     weighted: bool,
     luma_denom: i32,
     chroma_denom: i32,

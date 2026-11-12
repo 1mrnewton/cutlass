@@ -27,8 +27,11 @@ use crate::limits::PCM_PACKET_BYTES;
 use crate::pakt::{PacketTableHeader, Packets};
 use crate::walk::{self, Chunk, DataChunk, Scanned};
 
-/// Bytes the demuxer buffers ahead of the parser.
-const READ_BUFFER: usize = 64 * 1024;
+/// Bytes the demuxer buffers ahead of the parser: libavformat's own
+/// buffer size. Each seek refills it, so 64 KiB made a seek and one packet
+/// read cost 1.03 to 1.23 times libavformat's instructions; at 32 KiB it is
+/// 0.73 to 0.91, and a whole read goes from 0.20-0.67 to 0.21-0.77.
+const READ_BUFFER: usize = 32 * 1024;
 
 /// One opened CAF file.
 pub struct CafDemux<R> {

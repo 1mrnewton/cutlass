@@ -2515,7 +2515,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 return block_width(m.bsize);
             }
         }
-        tx_w(self.fs.inter_tx_sizes[(row - 1) * self.fs.mi_stride + col])
+        tx_w(self.fs.inter_tx_sizes[self.fs.mi_row(row - 1) + col])
     }
 
     fn left_tx_height(&self, row: usize, col: usize) -> usize {
@@ -2528,7 +2528,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 return block_height(m.bsize);
             }
         }
-        tx_h(self.fs.inter_tx_sizes[row * self.fs.mi_stride + col - 1])
+        tx_h(self.fs.inter_tx_sizes[self.fs.mi_row(row) + col - 1])
     }
 
     fn read_tx_size(&mut self, allow_select: bool) {
@@ -2604,7 +2604,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         } else {
             self.read_tx_size(!self.b.skip || !self.b.is_inter);
             let t = self.b.tx_size;
-            let at = self.b.mi_row * st + self.b.mi_col;
+            let at = self.fs.mi_row(self.b.mi_row) + self.b.mi_col;
             fill_rect(&mut self.fs.inter_tx_sizes, st, at, w4, h4, t);
         }
         Ok(())
@@ -2664,9 +2664,9 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 i += sh;
             }
         } else {
-            let st = self.fs.mi_stride;
             for i in 0..h4 {
-                for v in &mut self.fs.inter_tx_sizes[(row + i) * st + col..][..w4] {
+                let at = self.fs.mi_row(row + i) + col;
+                for v in &mut self.fs.inter_tx_sizes[at..][..w4] {
                     *v = tx;
                 }
             }
@@ -3790,7 +3790,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         }
         let row = sy >> 2;
         let col = sx >> 2;
-        let luma_tx = self.fs.inter_tx_sizes[row * self.fs.mi_stride + col];
+        let luma_tx = self.fs.inter_tx_sizes[self.fs.mi_row(row) + col];
         if w <= tx_w(luma_tx) && h <= tx_h(luma_tx) {
             let tx = find_tx_size(w, h);
             self.transform_block(0, sx, sy, tx, 0, 0)?;
@@ -4148,14 +4148,13 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             return 0;
         }
         let set = self.get_tx_set(tx);
-        let st = self.fs.mi_stride;
         if plane == 0 {
-            return self.fs.tx_types[by * st + bx];
+            return self.fs.tx_types[self.fs.mi_row(by) + bx];
         }
         if self.b.is_inter {
             let x4 = self.b.mi_col.max(bx << u32::from(self.sub_x));
             let y4 = self.b.mi_row.max(by << u32::from(self.sub_y));
-            let t = self.fs.tx_types[y4 * st + x4];
+            let t = self.fs.tx_types[self.fs.mi_row(y4) + x4];
             if !self.is_tx_type_in_set(set, t) {
                 return 0;
             }
@@ -4221,7 +4220,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         }
         let st = self.fs.mi_stride;
         let (w4, h4) = (tx_w(tx) >> 2, tx_h(tx) >> 2);
-        fill_rect(&mut self.fs.tx_types, st, y4 * st + x4, w4, h4, t);
+        let at = self.fs.mi_row(y4) + x4;
+        fill_rect(&mut self.fs.tx_types, st, at, w4, h4, t);
     }
 
     /// coeffs() — reads one transform block's coefficients into the
@@ -4311,7 +4311,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         if all_zero {
             if plane == 0 {
                 let st = self.fs.mi_stride;
-                fill_rect(&mut self.fs.tx_types, st, y4 * st + x4, w4, h4, 0);
+                let at = self.fs.mi_row(y4) + x4;
+                fill_rect(&mut self.fs.tx_types, st, at, w4, h4, 0);
             }
         } else {
             if plane == 0 {

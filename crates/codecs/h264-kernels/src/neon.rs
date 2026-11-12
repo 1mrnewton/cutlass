@@ -520,22 +520,41 @@ fn chroma_lines(lines: &[[u8; 4]; 8]) -> ChromaRows {
 
 crate::edge::edge_kernels!(pub(crate), #[target_feature(enable = "neon")]);
 
-/// Splits rows of `$n` samples off the front of a plane window, `$down`
-/// samples apart, one for each name, and gives them as an array. The
-/// function it is used in returns `false` if the window is too short.
+/// `C` rows of `N` samples from the front of `window`, `down` samples
+/// apart, checked against the window once, or `None` when it is too short
+/// or the rows would overlap. Splitting each row off in turn checks them
+/// one after another, each waiting on the one before.
+#[inline(always)]
+fn rows_of<const N: usize, const C: usize>(
+    window: &mut [u8],
+    down: usize,
+) -> Option<[&mut [u8; N]; C]> {
+    let end = C.checked_sub(1)?.checked_mul(down)?.checked_add(N)?;
+    if down < N || end > window.len() {
+        return None;
+    }
+    let first = window.as_mut_ptr();
+    Some(core::array::from_fn(|index| {
+        // SAFETY: row `index` is the `N` samples from `index * down`,
+        // which end by `end`, inside the window. The rows are at least `N`
+        // apart, so no two overlap, and all borrow the window for as long
+        // as the window itself is borrowed.
+        #[allow(unsafe_code)]
+        unsafe {
+            &mut *first.add(index * down).cast::<[u8; N]>()
+        }
+    }))
+}
+
+/// Rows of `$n` samples from the front of a plane window, `$down` samples
+/// apart, one for each name, as an array. The function it is used in
+/// returns `false` if the window is too short.
 macro_rules! rows {
     ($window:expr, $down:expr, $n:literal, [$($row:ident),+]) => {{
-        let mut rest: &mut [u8] = $window;
-        $(
-            let taken = core::mem::take(&mut rest);
-            let (row, tail) = taken.split_at_mut($down.min(taken.len()));
-            rest = tail;
-            let Some($row) = row.first_chunk_mut::<$n>() else {
-                return false;
-            };
-        )+
-        let _ = rest;
-        [$($row),+]
+        let Some(rows) = rows_of::<$n, { [$(stringify!($row)),+].len() }>($window, $down) else {
+            return false;
+        };
+        rows
     }};
 }
 

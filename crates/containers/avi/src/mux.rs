@@ -150,7 +150,7 @@ impl Track {
             Kind::Video { .. } => 0,
             Kind::Compressed { tag } => {
                 let conventional = match tag {
-                    0x0055 => 1152,
+                    0x0050 | 0x0055 => 1152,
                     0x2000 => 3840,
                     _ => 1,
                 };
@@ -338,7 +338,25 @@ impl<W: Write + Seek> AviMux<W> {
     fn describe(stream: &NewStream, number: usize) -> Result<(Kind, [u8; 4]), MuxError> {
         let [tens, ones] = digits(number)?;
         let id = match stream.params.codec() {
-            StreamCodec::Unknown(unknown) => return Err(MuxError::UnknownCodec(unknown.clone())),
+            StreamCodec::Unknown(unknown) => {
+                let kind = match unknown.tag() {
+                    // MPEG-1 Layer I or II, which has no codec id here.
+                    b"wav:0050" => Kind::Compressed { tag: 0x0050 },
+                    b"wav:0006" => Kind::Pcm {
+                        format: law_format(&stream.params, 0x0006)?,
+                    },
+                    b"wav:0007" => Kind::Pcm {
+                        format: law_format(&stream.params, 0x0007)?,
+                    },
+                    _ => return Err(MuxError::UnknownCodec(unknown.clone())),
+                };
+                if stream.params.sample_rate().is_none() || stream.params.channels().is_none() {
+                    return Err(rejected(
+                        "an AVI audio stream needs a sample rate and channels",
+                    ));
+                }
+                return Ok((kind, [tens, ones, b'w', b'b']));
+            }
             StreamCodec::Known(id) => *id,
         };
         let video = |fourcc: &[u8; 4]| -> Result<Kind, MuxError> {
@@ -361,12 +379,18 @@ impl<W: Write + Seek> AviMux<W> {
             CodecId::Vp8 => video(b"VP80")?,
             CodecId::Vp9 => video(b"VP90")?,
             CodecId::Av1 => video(b"AV01")?,
+            CodecId::RawVideo => raw_video(&stream.params)?,
             CodecId::Pcm => Kind::Pcm {
                 format: pcm_format(&stream.params)?,
             },
             CodecId::Mp3 => Kind::Compressed { tag: 0x0055 },
             CodecId::Aac => Kind::Compressed { tag: 0x00FF },
             CodecId::Ac3 => Kind::Compressed { tag: 0x2000 },
+            // E-AC-3 has no wave format tag of its own: it is stored as
+            // WAVE_FORMAT_EXTENSIBLE with its subformat GUID, as FFmpeg
+            // and Windows write it.
+            CodecId::Eac3 => Kind::Compressed { tag: EXTENSIBLE },
+            CodecId::Flac => Kind::Compressed { tag: 0xF1AC },
             other => {
                 return Err(rejected(format!(
                     "{other:?} is not stored in AVI by this muxer"
@@ -380,7 +404,9 @@ impl<W: Write + Seek> AviMux<W> {
                 "an AVI audio stream needs a sample rate and channels",
             ));
         }
-        let pair = if matches!(kind, Kind::Video { .. }) {
+        let pair = if id == CodecId::RawVideo {
+            *b"db"
+        } else if matches!(kind, Kind::Video { .. }) {
             *b"dc"
         } else {
             *b"wb"
@@ -1063,7 +1089,30 @@ fn video_fourcc(fourcc: [u8; 4], config: &[u8]) -> [u8; 4] {
     }
 }
 
+/// Raw video keeps the `BITMAPINFOHEADER` its extradata carries: the
+/// compression, bit depth, row order and any palette are the layout.
+fn raw_video(params: &StreamParams) -> Result<Kind, MuxError> {
+    let size = params
+        .size()
+        .ok_or_else(|| rejected("an AVI video stream needs a frame size"))?;
+    let layout = crate::format::raw_layout(params.extradata())
+        .ok_or_else(|| rejected("raw video needs its BITMAPINFOHEADER as extradata"))?;
+    if (layout.width, layout.height) != (size.width(), size.height()) {
+        return Err(rejected(
+            "the raw video BITMAPINFOHEADER disagrees with the frame size",
+        ));
+    }
+    Ok(Kind::Video {
+        fourcc: layout.compression,
+        width: size.width(),
+        height: size.height(),
+    })
+}
+
 fn strf_bytes(track: &Track) -> Result<Vec<u8>, MuxError> {
+    if track.params.codec() == &StreamCodec::Known(CodecId::RawVideo) {
+        return Ok(track.config.clone());
+    }
     match &track.kind {
         Kind::Video {
             fourcc,
@@ -1098,7 +1147,16 @@ fn strf_bytes(track: &Track) -> Result<Vec<u8>, MuxError> {
             let seconds_ticks = track.ticks.max(1);
             let avg = u128::from(track.bytes) * u128::from(track.timescale.ticks_per_second())
                 / u128::try_from(seconds_ticks).unwrap_or(1);
-            let extra = match tag {
+            let extra = match *tag {
+                EXTENSIBLE => {
+                    let mut extra = Vec::with_capacity(22);
+                    put16(&mut extra, 16);
+                    put32(&mut extra, channel_mask(channels));
+                    extra.extend_from_slice(&EAC3_GUID);
+                    extra
+                }
+                0x0050 => mpeg1_extra(&track.config, channels, avg),
+                0xF1AC => track.config.clone(),
                 0x0055 => {
                     let mut extra = Vec::with_capacity(MP3_EXTRA);
                     put16(&mut extra, 1);
@@ -1122,7 +1180,14 @@ fn strf_bytes(track: &Track) -> Result<Vec<u8>, MuxError> {
             put32(&mut out, rate);
             put32(&mut out, u32::try_from(avg).unwrap_or(u32::MAX));
             put16(&mut out, u16::try_from(align).unwrap_or(u16::MAX));
-            put16(&mut out, if *tag == 0x0055 { 0 } else { 16 });
+            put16(
+                &mut out,
+                if matches!(*tag, 0x0050 | 0x0055) {
+                    0
+                } else {
+                    16
+                },
+            );
             put16(
                 &mut out,
                 u16::try_from(extra.len()).map_err(|_| MuxError::HostileSize {
@@ -1134,6 +1199,65 @@ fn strf_bytes(track: &Track) -> Result<Vec<u8>, MuxError> {
             Ok(out)
         }
     }
+}
+
+/// `WAVE_FORMAT_EXTENSIBLE`.
+const EXTENSIBLE: u16 = 0xFFFE;
+
+/// `KSDATAFORMAT_SUBTYPE_IEC61937_DOLBY_DIGITAL_PLUS`, the E-AC-3 subformat.
+const EAC3_GUID: [u8; 16] = [
+    0xAF, 0x87, 0xFB, 0xA7, 0x02, 0x2D, 0xFB, 0x42, 0xA4, 0xD4, 0x05, 0xCD, 0x93, 0x84, 0x3B, 0xDD,
+];
+
+/// The speaker mask Windows uses for a channel count: mono, stereo, 5.1
+/// and 7.1; zero (no mapping) for others.
+const fn channel_mask(channels: u16) -> u32 {
+    match channels {
+        1 => 0x4,
+        2 => 0x3,
+        6 => 0x3F,
+        8 => 0x63F,
+        _ => 0,
+    }
+}
+
+/// `MPEG1WAVEFORMAT` after `WAVEFORMATEX`: the stream's own when it has
+/// one (22 bytes), else Layer II at the stream's bit rate with the channel
+/// mode its count implies.
+fn mpeg1_extra(config: &[u8], channels: u16, avg: u128) -> Vec<u8> {
+    if config.len() == 22 {
+        return config.to_vec();
+    }
+    let mut extra = Vec::with_capacity(22);
+    put16(&mut extra, 2);
+    put32(&mut extra, u32::try_from(avg * 8).unwrap_or(u32::MAX));
+    put16(&mut extra, if channels == 1 { 8 } else { 1 });
+    put16(&mut extra, 0);
+    put16(&mut extra, 1);
+    put16(&mut extra, 0);
+    put32(&mut extra, 0);
+    put32(&mut extra, 0);
+    extra
+}
+
+/// A-law (6) or mu-law (7): one byte per sample, each block a sample of
+/// every channel, written like PCM.
+fn law_format(params: &StreamParams, tag: u16) -> Result<WavFormat, MuxError> {
+    let channels = params
+        .channels()
+        .ok_or_else(|| rejected("a wave format needs a channel count"))?;
+    let rate = params
+        .sample_rate()
+        .ok_or_else(|| rejected("a wave format needs a sample rate"))?;
+    let mut fmt = Vec::with_capacity(18);
+    put16(&mut fmt, tag);
+    put16(&mut fmt, channels);
+    put32(&mut fmt, rate);
+    put32(&mut fmt, rate.saturating_mul(u32::from(channels)));
+    put16(&mut fmt, channels);
+    put16(&mut fmt, 8);
+    put16(&mut fmt, 0);
+    cutlass_riff::parse_wave_format(&fmt).map_err(|error| rejected(error.to_string()))
 }
 
 /// The bytes after the BITMAPINFOHEADER. A QuickTime Motion JPEG

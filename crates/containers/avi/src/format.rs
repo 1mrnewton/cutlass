@@ -11,6 +11,7 @@
 //!   (`FF D8`). Any other bytes there are dropped; the frames carry their
 //!   own tables.
 
+use cutlass_codec::access::PixelFormat;
 use cutlass_codec::{CodecId, FrameSize, StreamCodec, StreamParams, UnknownCodec};
 use cutlass_riff::WavFormat;
 
@@ -106,6 +107,7 @@ pub(crate) fn is_raw(compression: [u8; 4]) -> bool {
             | b"UYVY"
             | b"YVYU"
             | b"Y800"
+            | b"GREY"
             | b"NV12"
             | b"NV21"
             | b"Y41P"
@@ -115,12 +117,66 @@ pub(crate) fn is_raw(compression: [u8; 4]) -> bool {
     )
 }
 
-fn raw_tag(compression: [u8; 4]) -> Vec<u8> {
-    match compression {
-        [0, 0, 0, 0] => b"BI_RGB".to_vec(),
-        [3, 0, 0, 0] => b"BI_BITFIELDS".to_vec(),
-        other => other.to_vec(),
+/// How a raw video stream's samples are laid out, read from the
+/// `BITMAPINFOHEADER` that is its extradata ([`CodecId::RawVideo`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RawLayout {
+    /// `biCompression`: `[0; 4]` is `BI_RGB`, `[3, 0, 0, 0]` `BI_BITFIELDS`.
+    pub compression: [u8; 4],
+    pub bit_count: u16,
+    pub width: u32,
+    pub height: u32,
+    /// Rows run from the top. `BI_RGB` rows run from the bottom unless
+    /// `biHeight` is negative; YUV FourCCs always run from the top.
+    pub top_down: bool,
+    /// The Cutlass layout these bytes are, when one matches exactly:
+    /// `I420` and `IYUV` are planar 4:2:0, `Y800` and `GREY` one plane.
+    pub pixel: Option<PixelFormat>,
+    /// Bytes in one picture, when the layout is known.
+    pub frame_bytes: Option<u64>,
+}
+
+/// The layout a raw video stream's extradata describes, or `None` when it
+/// is not a `BITMAPINFOHEADER` of a raw layout with a picture size.
+#[must_use]
+pub fn raw_layout(extradata: &[u8]) -> Option<RawLayout> {
+    let format = parse_video(extradata)?;
+    if !is_raw(format.compression) {
+        return None;
     }
+    let width = format.width.unsigned_abs();
+    let height = format.height.unsigned_abs();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let rgb = matches!(format.compression, [0, 0, 0, 0] | [3, 0, 0, 0]);
+    let (w, h) = (u64::from(width), u64::from(height));
+    let frame_bytes = match &format.compression {
+        _ if rgb => {
+            let row_bits = w.checked_mul(u64::from(format.bit_count))?;
+            Some(row_bits.div_ceil(32) * 4 * h)
+        }
+        b"I420" | b"IYUV" | b"YV12" | b"NV12" | b"NV21" => {
+            Some(w * h + 2 * (w.div_ceil(2) * h.div_ceil(2)))
+        }
+        b"YUY2" | b"UYVY" | b"YVYU" | b"YV16" | b"Y422" => Some(w.div_ceil(2) * 4 * h),
+        b"Y800" | b"GREY" => Some(w * h),
+        _ => None,
+    };
+    let pixel = match &format.compression {
+        b"I420" | b"IYUV" => Some(PixelFormat::Yuv420p),
+        b"Y800" | b"GREY" => Some(PixelFormat::Gray8),
+        _ => None,
+    };
+    Some(RawLayout {
+        compression: format.compression,
+        bit_count: format.bit_count,
+        width,
+        height,
+        top_down: !rgb || format.height < 0,
+        pixel,
+        frame_bytes,
+    })
 }
 
 fn unknown(mut tag: Vec<u8>) -> Result<StreamCodec, OpenError> {
@@ -152,15 +208,20 @@ pub(crate) fn describe_video(strf: &[u8], main: &MainHeader) -> Result<Described
             block_align: 0,
         });
     };
-    let codec = video_codec(format.compression);
-    let raw = codec.is_none() && is_raw(format.compression);
+    let raw = video_codec(format.compression).is_none() && is_raw(format.compression);
+    let codec = if raw {
+        Some(CodecId::RawVideo)
+    } else {
+        video_codec(format.compression)
+    };
     let stream_codec = match codec {
         Some(id) => StreamCodec::Known(id),
-        None if raw => unknown(raw_tag(format.compression))?,
         None => unknown(format.compression.to_vec())?,
     };
     let extra = match codec {
         Some(CodecId::Mjpeg) if !format.extra.starts_with(&[0xFF, 0xD8]) => Vec::new(),
+        // The whole BITMAPINFOHEADER, palette included, is the layout.
+        Some(CodecId::RawVideo) => strf.to_vec(),
         _ => format.extra,
     };
     let size = picture_size(format.width, format.height)
@@ -278,6 +339,28 @@ mod tests {
     }
 
     #[test]
+    fn raw_layouts_size_their_pictures() {
+        let mut rgb = bih(&[0; 4], 5, 3, &[]);
+        rgb[14] = 24;
+        let layout = super::raw_layout(&rgb).unwrap();
+        // 5 pixels of 24 bits is 15 bytes, padded to 16 per row.
+        assert_eq!(layout.frame_bytes, Some(48));
+        assert!(!layout.top_down);
+        let i420 = super::raw_layout(&bih(b"I420", 5, -3, &[])).unwrap();
+        assert_eq!(i420.frame_bytes, Some(15 + 2 * 6));
+        assert_eq!(i420.pixel, Some(super::PixelFormat::Yuv420p));
+        assert!(i420.top_down);
+        assert_eq!(
+            super::raw_layout(&bih(b"YUY2", 5, 2, &[]))
+                .unwrap()
+                .frame_bytes,
+            Some(24)
+        );
+        assert_eq!(super::raw_layout(&bih(b"H264", 5, 2, &[])), None);
+        assert_eq!(super::raw_layout(&[0; 12]), None);
+    }
+
+    #[test]
     fn the_bytes_after_the_bitmap_header_are_the_extradata() {
         let main = MainHeader::default();
         let video = describe_video(&bih(b"H264", 64, 48, &[0, 0, 0, 1, 0x67]), &main).unwrap();
@@ -285,9 +368,12 @@ mod tests {
         assert_eq!(video.params.extradata(), &[0, 0, 0, 1, 0x67]);
         assert_eq!(video.params.size().unwrap().height(), 48);
         assert!(!video.presentation);
-        let raw = describe_video(&bih(&[0; 4], 8, -8, &[]), &main).unwrap();
-        assert!(raw.params.codec().is_unknown() && raw.intra && raw.presentation);
+        let strf = bih(&[0; 4], 8, -8, &[]);
+        let raw = describe_video(&strf, &main).unwrap();
+        assert_eq!(raw.params.codec(), &StreamCodec::Known(CodecId::RawVideo));
+        assert!(raw.intra && raw.presentation);
         assert_eq!(raw.params.size().unwrap().height(), 8);
+        assert_eq!(raw.params.extradata(), strf.as_slice());
         let jpeg = describe_video(&bih(b"MJPG", 8, 8, b"junk"), &main).unwrap();
         assert!(jpeg.params.extradata().is_empty());
         let short = describe_video(&[0; 12], &main).unwrap();

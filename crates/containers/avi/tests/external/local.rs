@@ -191,7 +191,9 @@ fn seek_without_payload(path: &Path) {
     }
 }
 
-fn remux(input: &Path, output_path: &Path) {
+/// Copies `input` through [`AviDemux`] and [`AviMux`] into `output_path`
+/// and checks the copy with ffprobe and GStreamer.
+pub fn remux(input: &Path, output_path: &Path) {
     let mut demux = open_path(input);
     let mut mux = AviMux::new(std::fs::File::create(output_path).expect("create"));
     let mut durations = Vec::new();

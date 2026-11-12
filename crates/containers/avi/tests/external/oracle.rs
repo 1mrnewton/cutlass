@@ -192,6 +192,11 @@ fn check_pcm(
 }
 
 pub fn pcm_block(packet: &Packet, params: &StreamParams) -> Option<usize> {
+    if let StreamCodec::Unknown(unknown) = params.codec()
+        && matches!(unknown.tag(), b"wav:0006" | b"wav:0007")
+    {
+        return params.channels().map(usize::from);
+    }
     if params.codec() != &StreamCodec::Known(CodecId::Pcm) {
         return None;
     }
@@ -343,7 +348,7 @@ const CASES: &[Case] = &[
         name: "raw-pcm",
         args: &["-c:v", "rawvideo", "-pix_fmt", "bgr24", "-c:a", "pcm_s16le"],
         encoders: &["rawvideo"],
-        codecs: &[None, Some(CodecId::Pcm)],
+        codecs: &[Some(CodecId::RawVideo), Some(CodecId::Pcm)],
     },
 ];
 
@@ -701,6 +706,184 @@ fn written_mjpeg_pcm_and_mp3_read_back() {
         &["video_0", "audio_0", "audio_1"],
         true,
     );
+}
+
+struct Copy {
+    name: &'static str,
+    /// Inputs after the video and one audio source, and the codec options.
+    args: &'static [&'static str],
+    encoders: &'static [&'static str],
+    codecs: &'static [CodecId],
+}
+
+/// FFmpeg makes each file; this crate reads it, `AviMux` writes it again,
+/// and ffprobe and GStreamer must read every packet of the copy back.
+const COPIES: &[Copy] = &[
+    Copy {
+        name: "raw-float",
+        args: &["-c:v", "rawvideo", "-pix_fmt", "bgr24", "-c:a", "pcm_f32le"],
+        encoders: &["rawvideo", "pcm_f32le"],
+        codecs: &[CodecId::RawVideo, CodecId::Pcm],
+    },
+    Copy {
+        name: "yuv420-s24",
+        args: &[
+            "-c:v",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "pcm_s24le",
+        ],
+        encoders: &["rawvideo", "pcm_s24le"],
+        codecs: &[CodecId::RawVideo, CodecId::Pcm],
+    },
+    Copy {
+        name: "vp9-ac3",
+        args: &["-c:v", "libvpx-vp9", "-deadline", "realtime", "-c:a", "ac3"],
+        encoders: &["libvpx-vp9", "ac3"],
+        codecs: &[CodecId::Vp9, CodecId::Ac3],
+    },
+    Copy {
+        name: "av1-eac3",
+        args: &["-c:v", "libsvtav1", "-preset", "12", "-c:a", "eac3"],
+        encoders: &["libsvtav1", "eac3"],
+        codecs: &[CodecId::Av1, CodecId::Eac3],
+    },
+    Copy {
+        name: "mjpeg-flac",
+        args: &["-c:v", "mjpeg", "-c:a", "flac"],
+        encoders: &["mjpeg", "flac"],
+        codecs: &[CodecId::Mjpeg, CodecId::Flac],
+    },
+];
+
+#[test]
+fn ffmpeg_files_copied_through_avimux_read_back() {
+    if !tool_on_path("ffmpeg") || !tool_on_path("ffprobe") {
+        eprintln!("skipped: ffmpeg or ffprobe is missing");
+        return;
+    }
+    let dir = scratch("copied");
+    let mut ran = 0;
+    for copy in COPIES {
+        if !copy.encoders.iter().all(|name| has_encoder(name)) {
+            eprintln!("skipped {}: encoder missing", copy.name);
+            continue;
+        }
+        let source = dir.join(format!("{}.avi", copy.name));
+        let name = source.display().to_string();
+        let mut args = vec![
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=96x64:rate=25",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
+            "-t",
+            "2",
+            "-ac",
+            "2",
+        ];
+        args.extend_from_slice(copy.args);
+        args.push(&name);
+        let made = output("ffmpeg", &args);
+        assert!(
+            made.status.success(),
+            "{}: {}",
+            copy.name,
+            String::from_utf8_lossy(&made.stderr)
+        );
+        let demux = open_path(&source);
+        let codecs: Vec<_> = demux
+            .streams()
+            .iter()
+            .map(|stream| stream.params().codec().clone())
+            .collect();
+        let wanted: Vec<_> = copy
+            .codecs
+            .iter()
+            .map(|id| StreamCodec::Known(*id))
+            .collect();
+        assert_eq!(codecs, wanted, "{}", copy.name);
+        crate::local::remux(&source, &dir.join(format!("{}-copy.avi", copy.name)));
+        eprintln!("  {} copied and read back", copy.name);
+        ran += 1;
+    }
+    assert!(ran > 0, "no case ran");
+}
+
+/// MPEG-1 Layer II, A-law and mu-law have no codec id: they keep their
+/// wave format tag, and the muxer writes them under it.
+#[test]
+fn tagged_audio_copies_through_avimux() {
+    if !tool_on_path("ffmpeg") || !tool_on_path("ffprobe") {
+        eprintln!("skipped: ffmpeg or ffprobe is missing");
+        return;
+    }
+    let dir = scratch("copied-tags");
+    let source = dir.join("tags.avi");
+    let name = source.display().to_string();
+    let made = output(
+        "ffmpeg",
+        &[
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x48:rate=25",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
+            "-t",
+            "2",
+            "-map",
+            "0",
+            "-map",
+            "1",
+            "-map",
+            "1",
+            "-map",
+            "1",
+            "-c:v",
+            "mjpeg",
+            "-c:a:0",
+            "mp2",
+            "-c:a:1",
+            "pcm_alaw",
+            "-c:a:2",
+            "pcm_mulaw",
+            "-ar:a:1",
+            "8000",
+            "-ar:a:2",
+            "8000",
+            &name,
+        ],
+    );
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let demux = open_path(&source);
+    let tags: Vec<_> = demux
+        .streams()
+        .iter()
+        .map(|stream| match stream.params().codec() {
+            StreamCodec::Unknown(unknown) => String::from_utf8_lossy(unknown.tag()).into_owned(),
+            StreamCodec::Known(id) => format!("{id:?}"),
+        })
+        .collect();
+    assert_eq!(tags, ["Mjpeg", "wav:0050", "wav:0006", "wav:0007"]);
+    crate::local::remux(&source, &dir.join("tags-copy.avi"));
 }
 
 /// A file over 1 GiB from FFmpeg: two RIFF segments, OpenDML indexes.

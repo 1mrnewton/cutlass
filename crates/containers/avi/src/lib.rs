@@ -27,7 +27,7 @@ mod source;
 mod track;
 
 pub use demux::{AviDemux, Repair};
-pub use format::{StreamKind, VideoFormat};
+pub use format::{RawLayout, StreamKind, VideoFormat, raw_layout};
 pub use header::{
     AVIF_HASINDEX, AVIF_ISINTERLEAVED, AVIF_MUSTUSEINDEX, AVIF_TRUSTCKTYPE, MainHeader,
     StreamHeader,

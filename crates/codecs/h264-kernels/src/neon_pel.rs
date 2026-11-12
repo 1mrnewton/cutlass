@@ -817,52 +817,64 @@ impl<const MODE: u8> ChromaRows<MODE> {
     }
 }
 
-/// One plane's source for [`chroma_both`]: its first sample, row
-/// distance, and eighth offsets.
+/// Both planes' sources of one prediction for [`chroma_both`]: the Cb and
+/// Cr samples the block starts from, their row distance, and the eighth
+/// offsets.
 #[derive(Clone, Copy)]
-struct PlaneSource {
-    p: *const u8,
+struct PlaneSources {
+    cb: *const u8,
+    cr: *const u8,
     stride: usize,
     frac: (u8, u8),
 }
 
-/// A block `W` wide of one chroma plane predicted from source `one` at
-/// `A`'s kind of offsets, rounded together with source `two` at `B`'s
-/// when `B` is not [`NONE`], each row made in registers and stored once.
+/// A chroma block `W` wide in both planes, from sources `one` at `A`'s
+/// kind of offsets, rounded together with sources `two` at `B`'s when `B`
+/// is not [`NONE`]. Each row is made in registers and stored once, Cb's
+/// and Cr's in the same step from the same taps.
 ///
 /// # Safety
 ///
-/// `h` is even; `h` rows of `W` from `dst` must be writable, and `h + 1`
-/// rows of 9 bytes from each source readable.
+/// `h` is even; `h` rows of `W` from each of `dst` must be writable, and
+/// `h + 1` rows of 9 bytes from each source readable.
 #[target_feature(enable = "neon")]
 unsafe fn chroma_both<const W: usize, const A: u8, const B: u8>(
-    dst: *mut u8,
+    dst: (*mut u8, *mut u8),
     dst_stride: usize,
-    one: PlaneSource,
-    two: PlaneSource,
+    one: &PlaneSources,
+    two: &PlaneSources,
     h: usize,
 ) {
     // SAFETY: the caller's promise.
     unsafe {
-        let mut first = ChromaRows::<A>::start(one.p, one.stride, one.frac);
-        let mut second = ChromaRows::<B>::start(two.p, two.stride, two.frac);
-        let mut out = dst;
+        let mut first_cb = ChromaRows::<A>::start(one.cb, one.stride, one.frac);
+        let mut first_cr = ChromaRows::<A>::start(one.cr, one.stride, one.frac);
+        let mut second_cb = ChromaRows::<B>::start(two.cb, two.stride, two.frac);
+        let mut second_cr = ChromaRows::<B>::start(two.cr, two.stride, two.frac);
+        let (mut cb, mut cr) = dst;
         for _ in 0..h / 2 {
-            let (mut upper, mut lower) = first.next2();
+            let (mut cb_upper, mut cb_lower) = first_cb.next2();
+            let (mut cr_upper, mut cr_lower) = first_cr.next2();
             if B != NONE {
-                let (upper_two, lower_two) = second.next2();
-                upper = vrhadd_u8(upper, upper_two);
-                lower = vrhadd_u8(lower, lower_two);
+                let (upper, lower) = second_cb.next2();
+                cb_upper = vrhadd_u8(cb_upper, upper);
+                cb_lower = vrhadd_u8(cb_lower, lower);
+                let (upper, lower) = second_cr.next2();
+                cr_upper = vrhadd_u8(cr_upper, upper);
+                cr_lower = vrhadd_u8(cr_lower, lower);
             }
-            put_chroma::<W, false>(out, upper);
-            put_chroma::<W, false>(out.add(dst_stride), lower);
-            out = out.add(2 * dst_stride);
+            put_chroma::<W, false>(cb, cb_upper);
+            put_chroma::<W, false>(cb.add(dst_stride), cb_lower);
+            put_chroma::<W, false>(cr, cr_upper);
+            put_chroma::<W, false>(cr.add(dst_stride), cr_lower);
+            cb = cb.add(2 * dst_stride);
+            cr = cr.add(2 * dst_stride);
         }
     }
 }
 
-/// The routine for a block of one chroma plane from one or two sources.
-type ChromaBothFn = unsafe fn(*mut u8, usize, PlaneSource, PlaneSource, usize);
+/// The routine for a block in both chroma planes from one or two sources.
+type ChromaBothFn = unsafe fn((*mut u8, *mut u8), usize, &PlaneSources, &PlaneSources, usize);
 
 macro_rules! both_row {
     ($w:literal, $a:literal) => {
@@ -920,18 +932,12 @@ pub(crate) fn chroma_planes(
         }
         let cb = chroma_reach(&source.plane(true, size), source.frac, (dst_cb, dst_stride))?;
         let at = source.at.1 * source.stride + source.at.0;
-        let pick = |plane: &[u8]| PlaneSource {
-            p: plane[at..].as_ptr(),
+        Some(PlaneSources {
+            cb,
+            cr: source.cr[at..].as_ptr(),
             stride: source.stride,
             frac: source.frac,
-        };
-        Some((
-            PlaneSource {
-                p: cb,
-                ..pick(source.cb)
-            },
-            pick(source.cr),
-        ))
+        })
     };
     let Some(one) = reach(&first) else {
         return false;
@@ -948,8 +954,13 @@ pub(crate) fn chroma_planes(
     // from either source and writes, the Cr plane and block being as long
     // as the Cb ones.
     unsafe {
-        routine(dst_cb.as_mut_ptr(), dst_stride, one.0, two.0, size.1);
-        routine(dst_cr.as_mut_ptr(), dst_stride, one.1, two.1, size.1);
+        routine(
+            (dst_cb.as_mut_ptr(), dst_cr.as_mut_ptr()),
+            dst_stride,
+            &one,
+            &two,
+            size.1,
+        );
     }
     true
 }

@@ -481,7 +481,7 @@ struct LfRow {
 impl LfRow {
     fn new(nc: usize) -> Self {
         Self {
-            codes: vec![0; nc],
+            codes: vec![0; nc.div_ceil(16) * 16],
             masks: vec![0; nc.div_ceil(16)],
             n: 0,
             lvl_of: None,
@@ -491,70 +491,93 @@ impl LfRow {
     }
 }
 
-impl LfRow {
-    /// Calls `edge(unit, code)` for each unit of the row
-    /// [`LfPlane::row_codes`] gave with an edge, from left to right.
-    #[inline]
-    fn edges(&self, mut edge: impl FnMut(usize, u16)) {
-        for (k, &m) in self.masks[..self.n.div_ceil(16)].iter().enumerate() {
-            let mut m = m;
-            while m != 0 {
-                let i = 16 * k + m.trailing_zeros() as usize;
-                m &= m - 1;
-                edge(i, self.codes[i]);
-            }
-        }
+/// For sixteen units, a bit for each whose code differs from `before`'s
+/// at the same place.
+#[inline(always)]
+fn changes(now: &[u16; 16], before: &[u16; 16]) -> u32 {
+    let mut m = 0;
+    for l in 0..16 {
+        m |= u32::from(now[l] != before[l]) << l;
     }
+    m
+}
 
-    /// Calls `run(start, len, code)` for the runs of units of one code,
-    /// from left to right.
+impl LfRow {
+    /// Calls `run(start, len, code)` for the runs of units of one code
+    /// (not 0), from left to right. Only the units where the code changes
+    /// are visited one by one.
     #[inline]
     fn runs(&self, mut run: impl FnMut(usize, usize, u16)) {
-        let (mut start, mut len, mut code) = (0, 0, 0);
-        self.edges(|i, c| {
-            if c == code && start + len == i {
-                len += 1;
-                return;
+        let chunks = self.n.div_ceil(16);
+        let (whole, _) = self.codes.as_chunks::<16>();
+        // The code of the last unit seen, and where its run began.
+        let (mut code, mut start) = (0, 0);
+        for (k, (now, &m)) in whole.iter().zip(&self.masks).take(chunks).enumerate() {
+            if m == 0 && code == 0 {
+                continue;
             }
-            if len != 0 {
-                run(start, len, code);
+            let before: [u16; 16] =
+                core::array::from_fn(|l| if l == 0 { code } else { now[l - 1] });
+            let mut c = changes(now, &before);
+            while c != 0 {
+                let l = c.trailing_zeros() as usize;
+                c &= c - 1;
+                let i = 16 * k + l;
+                if code != 0 {
+                    run(start, i - start, code);
+                }
+                (code, start) = (now[l], i);
             }
-            (start, len, code) = (i, 1, c);
-        });
-        if len != 0 {
-            run(start, len, code);
+        }
+        // The units past the row are 0: a run still open ends with the
+        // last whole chunk.
+        if code != 0 {
+            run(start, 16 * chunks - start, code);
         }
     }
 }
 
-/// A run of edges with one filter size and level: `len` units from
-/// `start`, along a row or down a column. `lvl == 0`: no run.
-#[derive(Clone, Copy, Default)]
-struct EdgeRun {
-    start: u32,
-    len: u32,
-    size: u8,
-    lvl: u8,
+/// The runs of vertical edges down each column of a strip of unit rows
+/// (see [`lf_chunk`]): the code of each column's open run (0: none),
+/// sixteen columns to an entry, and the row it began at.
+struct ColumnRuns {
+    code: Vec<[u16; 16]>,
+    start: Vec<u16>,
 }
 
-impl EdgeRun {
-    /// Takes the edge at unit `at`: the run grows when the edge follows
-    /// it with the same filter. Otherwise the edge starts a run, and the
-    /// run it ends is returned (it may be no run).
-    #[inline(always)]
-    fn take(&mut self, at: usize, size: u8, lvl: u8) -> Option<EdgeRun> {
-        if self.lvl == lvl && self.size == size && (self.start + self.len) as usize == at {
-            self.len += 1;
-            return None;
+impl ColumnRuns {
+    fn new(nc: usize) -> Self {
+        Self {
+            code: vec![[0; 16]; nc.div_ceil(16)],
+            start: vec![0; nc.div_ceil(16) * 16],
         }
-        let ended = *self;
-        *self = EdgeRun {
-            start: at as u32,
-            len: 1,
-            size,
-            lvl,
-        };
-        Some(ended)
+    }
+
+    /// Takes row `i`'s codes (`None`: no edges), calling
+    /// `ended(column, start, len, code)` for each run it ends.
+    #[inline]
+    fn row(
+        &mut self,
+        i: usize,
+        codes: Option<&[[u16; 16]]>,
+        mut ended: impl FnMut(usize, usize, usize, u16),
+    ) {
+        const NONE: [u16; 16] = [0; 16];
+        for (k, cur) in self.code.iter_mut().enumerate() {
+            let now = codes.and_then(|c| c.get(k)).unwrap_or(&NONE);
+            let mut c = changes(now, cur);
+            while c != 0 {
+                let l = c.trailing_zeros() as usize;
+                c &= c - 1;
+                let uc = 16 * k + l;
+                if cur[l] != 0 {
+                    let s = usize::from(self.start[uc]);
+                    ended(uc, s, i - s, cur[l]);
+                }
+                cur[l] = now[l];
+                self.start[uc] = i as u16;
+            }
+        }
     }
 }
 
@@ -631,43 +654,31 @@ fn lf_chunk<P: Pixel>(job: &LfJob<'_, '_>, data: &mut [P], row0: usize, sharp: u
     let nc = job.vert.nc;
     let mut row = LfRow::new(nc);
     // Vertical edges: the edges of a strip of unit rows, gathered into
-    // runs down each column that has any. A column's run is filtered when
-    // an edge does not continue it, and at the end of the strip.
-    let mut cols = vec![EdgeRun::default(); nc];
-    let mut open: Vec<u32> = Vec::new();
+    // runs down each column. A column's run is filtered when an edge
+    // does not continue it, and at the end of the strip.
+    let mut cols = ColumnRuns::new(nc);
     for strip in (u0..u1).step_by(LF_STRIP_UNITS) {
         let rows = (u1 - strip).min(LF_STRIP_UNITS);
-        let down = |uc: usize, run: EdgeRun, data: &mut [P]| {
+        let down = |uc: usize, start: usize, len: usize, code: u16, data: &mut [P]| {
             filter_vertical_edge(
                 data,
                 stride,
                 uc * 4,
-                (strip + run.start as usize) * 4 - row0,
-                run.len as usize * 4,
-                usize::from(run.size),
-                run.lvl,
+                (strip + start) * 4 - row0,
+                len * 4,
+                usize::from(code >> 8),
+                code as u8,
                 sharp,
                 bd,
             );
         };
-        for i in 0..rows {
-            if job.vert.row_codes(strip + i, &mut row) == 0 {
-                continue;
-            }
-            row.edges(|uc, code| {
-                let Some(col) = cols.get_mut(uc) else {
-                    return;
-                };
-                match col.take(i, (code >> 8) as u8, code as u8) {
-                    Some(ended) if ended.lvl != 0 => down(uc, ended, data),
-                    Some(_) => open.push(uc as u32),
-                    None => {}
-                }
+        for i in 0..=rows {
+            // One row past the strip ends every run.
+            let has = i < rows && job.vert.row_codes(strip + i, &mut row) != 0;
+            let codes = has.then(|| row.codes.as_chunks::<16>().0);
+            cols.row(i, codes, |uc, start, len, code| {
+                down(uc, start, len, code, data)
             });
-        }
-        for uc in open.drain(..) {
-            let run = std::mem::take(&mut cols[uc as usize]);
-            down(uc as usize, run, data);
         }
     }
     // Horizontal edges whose samples stay inside the chunk.

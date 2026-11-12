@@ -12160,7 +12160,7 @@ fn deblock_whole<S: Sample>(
                 }
             }
         }
-        if flat {
+        if flat || current.intra {
             continue;
         }
         // The inner edges. Chroma has an edge under every other luma one,
@@ -12171,11 +12171,7 @@ fn deblock_whole<S: Sample>(
             if !luma_edge && !chroma_edge {
                 continue;
             }
-            let bs = if current.intra {
-                [3; 4]
-            } else {
-                inner_strength(current, own, edge, vertical)
-            };
+            let bs = inner_strength(current, own, edge, vertical);
             if bs == [0; 4] {
                 continue;
             }
@@ -12188,6 +12184,30 @@ fn deblock_whole<S: Sample>(
             });
             let slot = (&mut luma[way][edge], &mut cb[way][edge], &mut cr[way][edge]);
             set_edge(slot, bs, qp, (luma_edge, chroma_edge), &mut some);
+        }
+    }
+    // An intra macroblock's inner edges are all strength 3, so which it has
+    // is decided once for it rather than at each edge: the one at 8 in
+    // luma and chroma, and with the 4×4 transform those at 4 and 12 in luma.
+    if current.intra {
+        let qp = [
+            recon::EdgeQp::new(inside[0], off),
+            recon::EdgeQp::new(inside[1], off),
+            recon::EdgeQp::new(inside[2], off),
+        ];
+        for way in 0..2 {
+            let slot = (&mut luma[way][2], &mut cb[way][2], &mut cr[way][2]);
+            set_edge(slot, [3; 4], &qp, (true, true), &mut some);
+        }
+        if !transform8 {
+            let [luma_qp, ..] = qp;
+            if let Some(luma_qp) = luma_qp {
+                let filter = Some(luma_qp.filter([3; 4], false));
+                for way in &mut luma {
+                    way[1] = filter;
+                    way[3] = filter;
+                }
+            }
         }
     }
     let stride = pic.w;

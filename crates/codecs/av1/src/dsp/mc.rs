@@ -2184,14 +2184,78 @@ pub fn emu_edge_rows<'a, P: Pixel + 'a>(
             return false;
         };
         let d = &mut dst[r * dst_stride..][..bw];
-        d[..left].fill(srow[0]);
+        fill_short(&mut d[..left], srow[0]);
         if right > left {
             let sx = (x + left as isize) as usize;
-            d[left..right].copy_from_slice(&srow[sx..sx + right - left]);
+            copy_short(&mut d[left..right], &srow[sx..sx + right - left]);
         }
-        d[right..].fill(srow[plane_w - 1]);
+        fill_short(&mut d[right..], srow[plane_w - 1]);
     }
     true
+}
+
+/// `d.copy_from_slice(s)` for the short rows of a block, without a
+/// library call: sixteen samples at a time and the last sixteen again,
+/// or two overlapping copies of eight or four.
+#[inline(always)]
+fn copy_short<T: Copy>(d: &mut [T], s: &[T]) {
+    let n = d.len().min(s.len());
+    let (d, s) = (&mut d[..n], &s[..n]);
+    match n {
+        16.. => {
+            let (d16, _) = d.as_chunks_mut::<16>();
+            let (s16, _) = s.as_chunks::<16>();
+            for (d, s) in d16.iter_mut().zip(s16) {
+                *d = *s;
+            }
+            if !n.is_multiple_of(16) {
+                d[n - 16..].copy_from_slice(&s[n - 16..]);
+            }
+        }
+        8.. => {
+            d[..8].copy_from_slice(&s[..8]);
+            d[n - 8..].copy_from_slice(&s[n - 8..]);
+        }
+        4.. => {
+            d[..4].copy_from_slice(&s[..4]);
+            d[n - 4..].copy_from_slice(&s[n - 4..]);
+        }
+        _ => {
+            for (d, s) in d.iter_mut().zip(s) {
+                *d = *s;
+            }
+        }
+    }
+}
+
+/// `d.fill(v)` for the short runs beside a block, as [`copy_short`].
+#[inline(always)]
+fn fill_short<T: Copy>(d: &mut [T], v: T) {
+    let n = d.len();
+    match n {
+        16.. => {
+            let (d16, _) = d.as_chunks_mut::<16>();
+            for d in d16 {
+                *d = [v; 16];
+            }
+            if !n.is_multiple_of(16) {
+                d[n - 16..].copy_from_slice(&[v; 16]);
+            }
+        }
+        8.. => {
+            d[..8].copy_from_slice(&[v; 8]);
+            d[n - 8..].copy_from_slice(&[v; 8]);
+        }
+        4.. => {
+            d[..4].copy_from_slice(&[v; 4]);
+            d[n - 4..].copy_from_slice(&[v; 4]);
+        }
+        _ => {
+            for d in d {
+                *d = v;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

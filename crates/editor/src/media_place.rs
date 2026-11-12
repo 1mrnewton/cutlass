@@ -195,7 +195,10 @@ mod tests {
         let Request::Place { segment, .. } = &requests[1] else {
             panic!("the clip is placed");
         };
-        assert_eq!(segment.render_index, TrackType::Sticker.render_floor().unwrap());
+        assert_eq!(
+            segment.render_index,
+            TrackType::Sticker.render_floor().unwrap()
+        );
         // On a sticker row that is already there, too.
         let mut with_row = draft();
         let mut row = cutlass_model::Track::main("s");
@@ -206,7 +209,10 @@ mod tests {
         let Request::Place { segment, .. } = &requests[0] else {
             panic!("the clip is placed");
         };
-        assert_eq!(segment.render_index, TrackType::Sticker.render_floor().unwrap());
+        assert_eq!(
+            segment.render_index,
+            TrackType::Sticker.render_floor().unwrap()
+        );
         // A sound keeps the default.
         let requests = media_requests(&draft(), &place("v", 0, 500_000), false);
         let Request::Place { segment, .. } = &requests[1] else {

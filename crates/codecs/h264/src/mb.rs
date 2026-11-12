@@ -10843,6 +10843,9 @@ fn predict_parts<S: Sample>(
             None,
         );
     }
+    if let Some(quarters) = quarter_motions(mb) {
+        return predict_quarters(pic, dpb, slice, (mx, my), quarters);
+    }
     let mut done = [false; 16];
     for by in 0..4 {
         for bx in 0..4 {
@@ -10887,6 +10890,67 @@ fn predict_parts<S: Sample>(
                 McMotion { r0, r1, mv0, mv1 },
                 None,
             )?;
+        }
+    }
+    Ok(())
+}
+
+/// The motion of each 8×8 quarter of `mb`, in raster order, when each
+/// has one throughout, as with 16×8, 8×16 and 8×8 partitions; `None` when
+/// any is split further. The blocks are compared all together rather
+/// than one by one, as which match is hard to guess ahead.
+#[inline]
+fn quarter_motions(mb: &Mb) -> Option<[McMotion; 4]> {
+    let flat = |mvs: &[[i16; 2]; 16]| {
+        let mut same = true;
+        for first in [0, 2, 8, 10] {
+            let mv = mvs[first];
+            same &= (mvs[first + 1] == mv) & (mvs[first + 4] == mv) & (mvs[first + 5] == mv);
+        }
+        same
+    };
+    if !(flat(&mb.mv0) & flat(&mb.mv1)) {
+        return None;
+    }
+    Some([0, 2, 8, 10].map(|first| {
+        let quarter = first / 8 * 2 + first % 4 / 2;
+        McMotion {
+            r0: mb.ref0[quarter],
+            r1: mb.ref1[quarter],
+            mv0: mb.mv0[first],
+            mv1: mb.mv1[first],
+        }
+    }))
+}
+
+/// [`predict_parts`] for a macroblock whose quarters each have one
+/// motion: a half is predicted at once where its two quarters match.
+fn predict_quarters<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    (mx, my): (usize, usize),
+    quarters: [McMotion; 4],
+) -> Result<(), CodecError> {
+    let same = |a: McMotion, b: McMotion| (a.r0, a.r1, a.mv0, a.mv1) == (b.r0, b.r1, b.mv0, b.mv1);
+    let [q0, q1, q2, q3] = quarters;
+    let (x, y) = (mx * 16, my * 16);
+    let block = |bx: usize, by: usize, w: usize, h: usize| Block {
+        x: x + bx,
+        y: y + by,
+        w,
+        h,
+    };
+    if same(q0, q2) && same(q1, q3) && !(same(q0, q1) && same(q2, q3)) {
+        mc_block(pic, dpb, slice, block(0, 0, 8, 16), q0, None)?;
+        return mc_block(pic, dpb, slice, block(8, 0, 8, 16), q1, None);
+    }
+    for (row, (left, right)) in [(0, (q0, q1)), (8, (q2, q3))] {
+        if same(left, right) {
+            mc_block(pic, dpb, slice, block(0, row, 16, 8), left, None)?;
+        } else {
+            mc_block(pic, dpb, slice, block(0, row, 8, 8), left, None)?;
+            mc_block(pic, dpb, slice, block(8, row, 8, 8), right, None)?;
         }
     }
     Ok(())

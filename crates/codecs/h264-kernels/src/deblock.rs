@@ -365,7 +365,10 @@ mod tests {
             let x = [0, 4, 8, 20][(rng.next() % 4) as usize];
             let y = [0, 3, 4, 16, 24][(rng.next() % 5) as usize];
             for luma in [true, false] {
-                let edges = mb_edges(&mut rng, y * down + x, down, luma || round % 8 == 0);
+                // Luma leaves out edges 1 and 3 now and then, as an 8×8
+                // transform does, which the vector version does on its own path.
+                let odd = if luma { round % 8 != 1 } else { round % 8 == 0 };
+                let edges = mb_edges(&mut rng, y * down + x, down, odd);
                 let mut fast = before.clone();
                 let mut plain = before.clone();
                 let (done, wanted) = if luma {

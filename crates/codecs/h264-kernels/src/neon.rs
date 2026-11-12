@@ -875,7 +875,49 @@ pub(crate) fn luma_mb(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
         }
         return true;
     }
+    // Edges 0 and 2 alone, as with an 8×8 transform, go one by one too:
+    // four edges straight between the plane and registers cost less than
+    // turning the whole macroblock.
+    if let ([v0, None, v2, None], [h0, None, h2, None]) = (vertical, horizontal)
+        && [v0, v2, h0, h2].iter().all(tame)
+    {
+        // SAFETY: as above; the second edges' eight samples or rows are
+        // inside the macroblock.
+        #[allow(unsafe_code)]
+        unsafe {
+            luma_halves(plane.as_mut_ptr().add(at), down, [v0, v2, h0, h2]);
+        }
+        return true;
+    }
     luma_whole(plane, edges)
+}
+
+/// [`luma_mb`] for edges 0 and 2 of each way, `[v0, v2, h0, h2]`, out of
+/// line so the boundary alone keeps a small frame.
+///
+/// # Safety
+///
+/// As [`left_edge`] and [`top_edge`] for each edge given.
+#[inline(never)]
+#[target_feature(enable = "neon")]
+#[allow(unsafe_code)]
+unsafe fn luma_halves(q0: *mut u8, down: usize, edges: [Option<crate::edge::Filter>; 4]) {
+    let [v0, v2, h0, h2] = edges;
+    // SAFETY: the caller's promise.
+    unsafe {
+        if let Some(filter) = v0 {
+            left_edge(q0, down, filter);
+        }
+        if let Some(filter) = v2 {
+            left_edge(q0.add(8), down, filter);
+        }
+        if let Some(filter) = h0 {
+            top_edge(q0, down, filter);
+        }
+        if let Some(filter) = h2 {
+            top_edge(q0.add(8 * down), down, filter);
+        }
+    }
 }
 
 /// [`luma_mb`] for a macroblock that filters more than its boundary, out

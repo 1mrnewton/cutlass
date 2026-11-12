@@ -2710,6 +2710,7 @@ dependencies = [
  "cutlass-mp3",
  "cutlass-mp3-container",
  "cutlass-mpeg4",
+ "cutlass-mpegts",
  "cutlass-ogg",
  "cutlass-opus",
  "cutlass-pcm",

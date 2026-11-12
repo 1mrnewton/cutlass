@@ -1809,20 +1809,6 @@ impl<P: PicturePixel> FrameTask<P> {
             spares,
         } = self;
         let (seq, hdr) = (&t.seq, &t.hdr);
-        let mut cdf: Box<CdfContext> = match &t.primary_cdf {
-            None => CdfContext::new(hdr.quant.base_q_idx),
-            Some(p) => {
-                let tw = std::time::Instant::now();
-                let w = p.wait();
-                prof::mark(prof::CDF_WAIT, tw);
-                let mut c = Box::new((*w?).clone());
-                c.clear_counts();
-                c
-            }
-        };
-        if hdr.disable_frame_end_update_cdf {
-            t.cdf_out.set(Ok(Arc::from(cdf.clone())));
-        }
         let mut refs_data: [Option<Arc<RefData>>; 8] = Default::default();
         for (d, p) in refs_data.iter_mut().zip(&t.deps) {
             if let Some(p) = p {
@@ -1843,10 +1829,32 @@ impl<P: PicturePixel> FrameTask<P> {
             prof::count(prof::NEW_STATE);
         }
         let mut fs = FrameState::reuse(spare, seq, hdr);
-        // Motion field estimation runs in decode_frame.
         let mf_plan = hdr
             .use_ref_frame_mvs
             .then(|| Arc::new(motion_field_plan(seq, hdr, &refs_data)));
+        // A pipelined frame's motion field is computed band by band on a
+        // thread of its own while the tiles are parsed (see MfFeed), from
+        // now on: it reads only the references, and the parse, which
+        // first waits for the CDFs of the frame before, reads it from
+        // its first block (decode_frame computes the others').
+        let field = mf_plan
+            .as_ref()
+            .filter(|_| pipelined(hdr, t.threads, t.at_once))
+            .and_then(|plan| start_motion_field(&t.workers, plan));
+        let mut cdf: Box<CdfContext> = match &t.primary_cdf {
+            None => CdfContext::new(hdr.quant.base_q_idx),
+            Some(p) => {
+                let tw = std::time::Instant::now();
+                let w = p.wait();
+                prof::mark(prof::CDF_WAIT, tw);
+                let mut c = Box::new((*w?).clone());
+                c.clear_counts();
+                c
+            }
+        };
+        if hdr.disable_frame_end_update_cdf {
+            t.cdf_out.set(Ok(Arc::from(cdf.clone())));
+        }
         if hdr.primary_ref_frame != PRIMARY_REF_NONE {
             let slot_idx = hdr.ref_frame_idx[hdr.primary_ref_frame as usize] as usize;
             if let Some(rd) = &refs_data[slot_idx]
@@ -1872,6 +1880,7 @@ impl<P: PicturePixel> FrameTask<P> {
             t.threads,
             t.at_once,
             mf_plan.as_ref(),
+            field,
             &FrameOut {
                 data,
                 cdf: (!hdr.disable_frame_end_update_cdf).then_some(&t.cdf_out),
@@ -3305,6 +3314,7 @@ fn decode_frame<P: PicturePixel>(
     threads: usize,
     at_once: bool,
     mf: Option<&Arc<MfPlan>>,
+    field: Option<Arc<MfShared>>,
     out: &FrameOut<'_>,
 ) -> R<Box<CdfContext>> {
     let lf_on = hdr.loop_filter.level[0] != 0 || hdr.loop_filter.level[1] != 0;
@@ -3321,10 +3331,9 @@ fn decode_frame<P: PicturePixel>(
     // own, a superblock row behind parsing. Frames without in-loop filters
     // too: the other way lends each of its threads a frame state and a
     // picture of its own, which the pool then keeps.
-    let pipeline = at_once && threads > 1 && !hdr.use_superres;
-    if pipeline {
+    if pipelined(hdr, threads, at_once) {
         return decode_frame_async(
-            seq, hdr, fs, tiles, cdf, ref_jobs, ref_hdr, cur, job, rows, spares, workers, mf,
+            seq, hdr, fs, tiles, cdf, ref_jobs, ref_hdr, cur, job, rows, spares, workers, field,
             lf_on, cdef_on, threads, out,
         );
     }
@@ -3361,6 +3370,33 @@ fn decode_frame<P: PicturePixel>(
     Ok(saved)
 }
 
+/// Whether the frame of `hdr` goes through the threaded pipeline
+/// ([`decode_frame_async`]): its tiles parsed here and its rows
+/// reconstructed and filtered on threads of their own.
+fn pipelined(hdr: &FrameHeader, threads: usize, at_once: bool) -> bool {
+    at_once && threads > 1 && !hdr.use_superres
+}
+
+/// Starts computing the motion field of `plan` band by band on a thread
+/// of its own; `None` when it has no bands.
+fn start_motion_field(workers: &Arc<Workers>, plan: &Arc<MfPlan>) -> Option<Arc<MfShared>> {
+    if plan.bands() == 0 {
+        return None;
+    }
+    let field = Arc::new(MfShared::new(plan));
+    let (plan, to) = (plan.clone(), MfClose(field.clone()));
+    workers.run(Box::new(move || {
+        let t = prof::thread_cpu();
+        for (k, b) in to.0.bands.iter().enumerate() {
+            let mut band = to.0.blank(k);
+            plan.run_band(k, &mut band);
+            let _ = b.set(band);
+        }
+        prof::cpu_since(prof::CPU_MF, t);
+    }));
+    Some(field)
+}
+
 /// Sets the visible size of the planes of a final picture.
 fn set_visible_size<P>(seq: &SequenceHeader, hdr: &FrameHeader, pic: &mut Picture<P>) {
     for (p, pl) in pic.planes.iter_mut().enumerate() {
@@ -3393,7 +3429,7 @@ fn decode_frame_async<P: PicturePixel>(
     rows: &Arc<Mutex<RowPools>>,
     spares: &Arc<Mutex<Spares<P>>>,
     workers: &Arc<Workers>,
-    mf: Option<&Arc<MfPlan>>,
+    field: Option<Arc<MfShared>>,
     lf_on: bool,
     cdef_on: bool,
     threads: usize,
@@ -3498,22 +3534,6 @@ fn decode_frame_async<P: PicturePixel>(
     let parse_refs: [Option<&Picture<P>>; 8] =
         std::array::from_fn(|i| ref_jobs[i].as_ref().map(|_| &placeholder));
     let t_parse = std::time::Instant::now();
-    // The motion field is computed band by band on a thread of its own
-    // while the tiles are parsed (see MfFeed).
-    let field = mf.filter(|p| p.bands() > 0).map(|plan| {
-        let field = Arc::new(MfShared::new(plan));
-        let (plan, to) = (plan.clone(), MfClose(field.clone()));
-        workers.run(Box::new(move || {
-            let t = prof::thread_cpu();
-            for (k, b) in to.0.bands.iter().enumerate() {
-                let mut band = to.0.blank(k);
-                plan.run_band(k, &mut band);
-                let _ = b.set(band);
-            }
-            prof::cpu_since(prof::CPU_MF, t);
-        }));
-        field
-    });
     let saved = parse::parse_tiles(
         seq,
         hdr,

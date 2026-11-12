@@ -85,7 +85,7 @@ cargo test -p cutlass-avi --test external -- --ignored   # the two files over 1 
 
 ## Speed against FFmpeg
 
-Measured on 12 November 2026 at commit `dd8eaa7a`, on an Apple M5 Pro (18 cores, 48 GB) running macOS 27.0.1, against FFmpeg 8.1.1 (libavformat). Built with `cargo build --release` and rustc 1.99.1. Each row is the median of five runs after one warm-up; each run is a whole process under `/usr/bin/time -l`, start-up included on both sides (`/usr/bin/true` costs 8.7 M instructions). Instructions retired are the comparison; wall times on this shared machine are only a guide.
+Measured on 12 November 2026 at commit `a48845bf`, on an Apple M5 Pro (18 cores, 48 GB) running macOS 27.0.1, against FFmpeg 8.1.1 (libavformat). Built with `cargo build --release` and rustc 1.99.1. Each row is the median of five runs after one warm-up; each run is a whole process under `/usr/bin/time -l`, start-up included on both sides (`/usr/bin/true` costs 8.5 M instructions). Instructions retired are the comparison; wall times and peak memory on this shared machine are only a guide (the same binary's peak memory for 100 opens varied from 8.0 to 10.7 MB between runs).
 
 Inputs, made with FFmpeg:
 
@@ -93,26 +93,30 @@ Inputs, made with FFmpeg:
 - `mjpeg_pcm.avi`: 300 s of 320×240 MJPEG at 30 fps with 48 kHz stereo s16 PCM, 149 MB, 23,063 packets.
 - `odml.avi`: `h264aac.avi` remuxed by `AviMux` with 16 MiB segments: five `RIFF`s, read through `indx` and `ix##`.
 
-The Rust side is `examples/bench.rs` (and `tools/media-bench demux`, the shared harness); the FFmpeg side is `benches/ffmpeg_avi.c` (and `scripts/ffmpeg_decode.c demux`). Both read every packet and touch its bytes. Packet counts, byte totals and, for seeks, the bytes of every landing packet match between the sides.
+The Rust side is `examples/bench.rs` and `examples/remux.rs` (and `tools/media-bench demux`, the shared harness); the FFmpeg side is `benches/ffmpeg_avi.c` (and `scripts/ffmpeg_decode.c demux`). Both read every packet and touch its bytes. Packet counts, byte totals and, for seeks, the bytes of every landing packet match between the sides.
 
 | Case | Cutlass (M instructions) | FFmpeg (M instructions) | Cutlass / FFmpeg | Peak memory, Cutlass / FFmpeg |
 | --- | ---: | ---: | ---: | --- |
-| h264aac, open ×100 | 5,828 | 22,151 | 0.26 | 5.2 / 15.1 MB |
-| h264aac, read every packet | 151 | 969 | 0.16 | 6.0 / 13.2 MB |
-| h264aac, read (media-bench vs `ffmpeg_decode.c`) | 155 | 1,028 | 0.15 | 6.4 / 21.0 MB |
-| h264aac, 2,000 seeks, one packet read after each | 168 | 803 | 0.21 | 5.3 / 12.9 MB |
-| mjpeg_pcm, open ×100 | 741 | 3,116 | 0.24 | 4.7 / 12.5 MB |
-| mjpeg_pcm, read every packet | 128 | 511 | 0.25 | 4.0 / 11.1 MB |
-| mjpeg_pcm, read (media-bench vs `ffmpeg_decode.c`) | 131 | 515 | 0.25 | 4.5 / 11.9 MB |
-| mjpeg_pcm, 2,000 seeks | 69 | 355 | 0.20 | 4.0 / 11.1 MB |
-| odml, open ×100 | 1,171 | 4,068 | 0.29 | 6.3 / 13.0 MB |
-| odml, read every packet | 103 | 598 | 0.17 | 4.8 / 12.5 MB |
-| odml, read (media-bench vs `ffmpeg_decode.c`) | 107 | 657 | 0.16 | 5.2 / 20.5 MB |
-| odml, 2,000 seeks | 121 | 624 | 0.19 | 4.6 / 13.1 MB |
-| h264aac, remux to AVI | 247 | 1,362 | 0.18 | 7.3 / 103.7 MB |
-| mjpeg_pcm, remux to AVI | 279 | 754 | 0.37 | 5.4 / 187.1 MB |
+| h264aac, open ×100 | 5,947 | 22,142 | 0.27 | 10.0 / 14.1 MB |
+| h264aac, read every packet | 155 | 970 | 0.16 | 5.8 / 12.8 MB |
+| h264aac, read (media-bench vs `ffmpeg_decode.c`) | 158 | 1,028 | 0.15 | 6.0 / 20.8 MB |
+| h264aac, 2,000 seeks, one packet read after each | 169 | 803 | 0.21 | 5.3 / 12.6 MB |
+| mjpeg_pcm, open ×100 | 757 | 3,115 | 0.24 | 7.8 / 12.4 MB |
+| mjpeg_pcm, read every packet | 129 | 511 | 0.25 | 4.0 / 11.1 MB |
+| mjpeg_pcm, read (media-bench vs `ffmpeg_decode.c`) | 133 | 515 | 0.26 | 4.4 / 11.9 MB |
+| mjpeg_pcm, 2,000 seeks | 69 | 355 | 0.20 | 4.0 / 11.0 MB |
+| odml, open ×100 | 1,186 | 4,070 | 0.29 | 6.2 / 12.2 MB |
+| odml, read every packet | 106 | 598 | 0.18 | 4.7 / 12.7 MB |
+| odml, read (media-bench vs `ffmpeg_decode.c`) | 109 | 657 | 0.17 | 5.2 / 20.7 MB |
+| odml, 2,000 seeks | 122 | 623 | 0.20 | 4.4 / 12.6 MB |
+| h264aac, remux to AVI | 276 | 1,357 | 0.20 | 8.0 / 106.0 MB |
+| mjpeg_pcm, remux to AVI | 322 | 757 | 0.43 | 5.4 / 187.1 MB |
 
-Cutlass retires 2.7 to 6.7 times fewer instructions than libavformat in these cases. Wall times were 0.01 to 0.21 s for Cutlass and 0.02 to 1.15 s for FFmpeg.
+Cutlass retires 2.3 to 6.7 times fewer instructions than libavformat in these cases.
+
+Against the first measurement (commit `dd8eaa7a`): opening `h264aac` costs 2% more (5,947 against 5,828 M; the frame-cutting bookkeeping on every index row), and remuxing costs 11 to 15% more (276 against 247 M, 322 against 279 M) because the muxer now interleaves: `Mux::write_packet` lends a packet, so one that has to wait is copied. Measured with the copy switched off, the same remux costs 249 and 284 M. A caller that already sends packets in time order can set `interleave_bytes` to 0 and skip the copy.
+
+`scripts/bench_media.py`'s `avi` case (`--modes demux --only demux:avi`), run at commit `f3acddcb`: FFmpeg copies the shared H.264 + AAC test clip into a 300 MB `long.avi` (57,064 packets), and `media-bench demux` reads it in 326 M instructions against 1,445 M for `ffmpeg_decode.c` (0.23), 0.03 s against 0.10 s, 8.4 MB against 22 MB at peak.
 
 What differs between the sides:
 
@@ -121,7 +125,7 @@ What differs between the sides:
 - FFmpeg's remux writes the 302,367 empty video chunks it read back out (77 MB); Cutlass folds them into frame durations, writes none for this clip, and its output is 70 MB. ffprobe reads 38,765 packets from both outputs.
 - Opening read 136 to 333 KB of the local clips (64 KiB read-ahead blocks over the header and the index); a seek reads nothing.
 
-To run it again: `cargo build --release -p cutlass-avi --examples` and `cargo build --release -p media-bench`, build the C harness as its header says, make the three inputs as above, and time each pair with `/usr/bin/time -l`.
+To run it again: `cargo build --release -p cutlass-avi --examples` and `cargo build --release -p media-bench`, build the C harness as its header says, make the three inputs as above, and time each pair with `/usr/bin/time -l`. For the shared harness: `python3 scripts/bench_media.py --video <clip> --audio <song> --work <folder> --modes decode,demux --only decode:h264,decode:aac,demux:avi` (the decode cases make the clip the `avi` case copies).
 
 ## Limits
 

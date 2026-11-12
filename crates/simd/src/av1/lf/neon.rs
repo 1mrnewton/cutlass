@@ -82,7 +82,13 @@ fn wide<const N: i32, const N2: i32, const LOG2: i32>(o: &[V; 14], out: &mut [V;
         parts[(pair & 1) as usize] = plus(parts[(pair & 1) as usize], s);
     }
     let mut sum = plus(parts[0], parts[1]);
-    for i in -N..N {
+    // Each output spelled out with a constant index, so the lines stay
+    // in registers: a loop over them was left rolled, indexing copies of
+    // the lines on the stack (two fifths of the size-16 filter's time).
+    let mut output = |i: i32| {
+        if i < -N || i >= N {
+            return;
+        }
         if i > -N {
             let moved = plus(
                 diff(at(i + N), at(i - 1 - N)),
@@ -93,7 +99,19 @@ fn wide<const N: i32, const N2: i32, const LOG2: i32>(o: &[V; 14], out: &mut [V;
         let r = vcombine_u8(vrshrn_n_u16::<LOG2>(sum.0), vrshrn_n_u16::<LOG2>(sum.1));
         let k = (7 + i) as usize;
         out[k] = vbslq_u8(on, r, out[k]);
-    }
+    };
+    output(-6);
+    output(-5);
+    output(-4);
+    output(-3);
+    output(-2);
+    output(-1);
+    output(0);
+    output(1);
+    output(2);
+    output(3);
+    output(4);
+    output(5);
 }
 
 /// The wide filters of size 16 for the flat lines, taking and giving back

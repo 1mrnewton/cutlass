@@ -19,6 +19,7 @@ mod header;
 mod index;
 mod layout;
 mod limits;
+mod mux;
 mod probe;
 mod sniff;
 mod source;
@@ -35,4 +36,8 @@ pub use limits::{
     MAX_CHUNKS, MAX_DRIFT_SECONDS, MAX_RESYNC, MAX_RIFFS, MAX_SKIPPED_FRAMES, MAX_STREAMS,
     MAX_SUPER_ENTRIES, PROBE_BYTES, SNIFF_BYTES,
 };
+pub use mux::{AviMux, AviMuxOptions};
 pub use probe::{AviFamily, probe};
+
+#[cfg(test)]
+mod behavior;

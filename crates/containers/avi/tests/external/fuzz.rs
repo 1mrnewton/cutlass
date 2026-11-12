@@ -9,7 +9,7 @@ use std::io::Cursor;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
 
-use cutlass_avi::{AviDemux, AviMux, AviMuxOptions, probe};
+use cutlass_avi::{AviDemux, AviForwardDemux, AviMux, AviMuxOptions, probe};
 use cutlass_codec::{CodecId, FrameSize, StreamCodec, StreamParams, Timescale};
 use cutlass_container::{Demux, Limits, Mux, NewStream, SeekTo, TrackDuration, TrackId};
 
@@ -83,7 +83,7 @@ fn fuzz_campaign() {
     let mut seed = origin;
     let mut exercised = 0u64;
     let mut slowest = Duration::ZERO;
-    let (mut opened, mut packets, mut muxed) = (0u64, 0u64, 0u64);
+    let (mut opened, mut packets, mut forward, mut muxed) = (0u64, 0u64, 0u64, 0u64);
     while started.elapsed() < budget {
         seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let one = Instant::now();
@@ -92,6 +92,7 @@ fn fuzz_campaign() {
             Ok(reach) => {
                 opened += reach.opened;
                 packets += reach.packets;
+                forward += reach.forward;
                 muxed += reach.muxed;
             }
             Err(payload) => panic!("seed {seed:#x} panicked: {payload:?}"),
@@ -101,7 +102,7 @@ fn fuzz_campaign() {
     }
     assert!(exercised > 0);
     eprintln!(
-        "avi fuzz exercised {exercised} seeds in {secs} seconds from origin {origin:#x}, slowest {slowest:?}; {opened} opened, {packets} packets read, {muxed} mux runs finished and read back"
+        "avi fuzz exercised {exercised} seeds in {secs} seconds from origin {origin:#x}, slowest {slowest:?}; {opened} opened, {packets} packets read, {forward} read forward, {muxed} mux runs finished and read back"
     );
 }
 
@@ -110,6 +111,7 @@ fn fuzz_campaign() {
 struct Reach {
     opened: u64,
     packets: u64,
+    forward: u64,
     muxed: u64,
 }
 
@@ -279,6 +281,7 @@ fn drive(bytes: &[u8], rng: &mut Rng, reach: &mut Reach) {
         limits.max_header_bytes = u64::try_from(rng.below(8192) + 12).unwrap_or(12);
         limits.max_tracks = u32::try_from(rng.below(4) + 1).unwrap_or(1);
     }
+    drive_forward(bytes, limits, reach);
     let len = u64::try_from(bytes.len()).expect("len");
     let Ok(mut demux) = AviDemux::open_with_limits(Cursor::new(bytes.to_vec()), len, limits) else {
         return;
@@ -320,6 +323,33 @@ fn drive(bytes: &[u8], rng: &mut Rng, reach: &mut Reach) {
         assert!(demux.read_packet().is_err());
     }
     let _ = demux.consumed();
+}
+
+/// The same input through the forward-only reader, which never seeks.
+fn drive_forward(bytes: &[u8], limits: Limits, reach: &mut Reach) {
+    let Ok(mut demux) = AviForwardDemux::open_with_limits(Cursor::new(bytes.to_vec()), limits)
+    else {
+        return;
+    };
+    let tracks = u32::try_from(demux.streams().len()).unwrap_or(0);
+    let mut failures = 0;
+    for _ in 0..4_000 {
+        match demux.read_packet() {
+            Ok(Some(packet)) => {
+                assert!(packet.stream() < tracks);
+                assert!(packet.timestamp().duration().is_some_and(|span| span >= 0));
+                reach.forward += 1;
+            }
+            Ok(None) => break,
+            Err(_) => {
+                failures += 1;
+                if failures > 8 {
+                    break;
+                }
+            }
+        }
+    }
+    assert!(demux.consumed() <= u64::try_from(bytes.len()).expect("len"));
 }
 
 /// Random packet lists into the muxer. When it finishes, the file must

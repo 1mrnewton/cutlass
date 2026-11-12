@@ -14,7 +14,7 @@
 //! one packet after each. `remux` copies every packet into a new file (WebM
 //! when the name ends in `.webm`), streaming: each track holds back one
 //! packet, so a packet the input left without a duration gets the time to
-//! the next one of its track. `bench/run.sh` times both sides as whole
+//! the next one of its track. `bench/against_ffmpeg.sh` times both sides as whole
 //! processes under `/usr/bin/time -l`.
 
 #![allow(clippy::print_stdout)]

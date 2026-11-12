@@ -21,8 +21,9 @@
  * decode times, which Matroska does not store and which libavformat derives
  * with its parsers; that part of the cost is on the libavformat side only.
  *
- * Only the benchmark uses this; nothing in Cutlass links FFmpeg. `run.sh`
- * builds it with the system C compiler against the FFmpeg `pkg-config` finds.
+ * Only the benchmark uses this; nothing in Cutlass links FFmpeg.
+ * `against_ffmpeg.sh` builds it with the system C compiler against the
+ * FFmpeg `pkg-config` finds.
  */
 
 #include <stdio.h>

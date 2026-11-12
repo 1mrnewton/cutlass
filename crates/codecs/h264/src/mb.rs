@@ -1038,7 +1038,9 @@ fn skip_mb<S: Sample>(
     }
     bind_refs(&mut mb, slice);
     let slot = my * pic.mb_w + mx;
-    pic.mb[slot] = mb;
+    // The place first, so the record is copied once, straight into it.
+    let held = &mut pic.mb[slot];
+    *held = mb;
     Ok(())
 }
 
@@ -3010,7 +3012,8 @@ fn one_mb<S: Sample>(
     if !mb.intra {
         bind_refs(&mut mb, slice);
     }
-    pic.mb[slot] = mb;
+    let held = &mut pic.mb[slot];
+    *held = mb;
     Ok((qp, residual))
 }
 

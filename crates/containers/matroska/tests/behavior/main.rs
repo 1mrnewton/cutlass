@@ -461,6 +461,48 @@ fn opus_codec_delay_is_an_edit_and_the_pre_skip_a_trim() {
     assert_eq!(stream.trim().encoder_delay(), Some(312));
 }
 
+/// Two whole files one after the other, as a live server chains them: the
+/// first Segment is read, forward and random, and the reader ends cleanly
+/// where it ends. FFmpeg and GStreamer read on into the second Segment with
+/// its times starting over, which one track list on one time line cannot
+/// hold, so this reader keeps to the first.
+#[test]
+fn a_second_segment_after_the_first_is_not_read() {
+    let part = |second: u8| {
+        file(
+            "webm",
+            &[
+                info(1_000_000, Some(40.0)),
+                tracks(&[mp3()]),
+                cluster(
+                    0,
+                    &[
+                        simple(2, 0, true, &[second; 4]),
+                        simple(2, 20, true, &[second; 4]),
+                    ],
+                ),
+            ],
+        )
+    };
+    let mut bytes = part(1);
+    bytes.extend(part(2));
+    for forward in [false, true] {
+        let mut demux = if forward {
+            MatroskaDemux::open_forward(Cursor::new(bytes.clone())).expect("open")
+        } else {
+            open(bytes.clone()).expect("open")
+        };
+        let got = all(&mut demux);
+        assert_eq!(got.len(), 2, "forward {forward}");
+        assert!(got.iter().all(|packet| packet.bytes() == [1; 4]));
+        assert!(demux.read_packet().expect("end").is_none());
+        if !forward {
+            assert_eq!(landing_time(&seek(&mut demux, 2, 30)), Some(20));
+            assert_eq!(all(&mut demux).len(), 1);
+        }
+    }
+}
+
 /// A BlockGroup with DiscardPadding, in nanoseconds.
 fn discarding(track: u64, relative: i16, duration: Option<u64>, discard_ns: u64) -> Vec<u8> {
     let mut block = block_head(track, relative, 0);

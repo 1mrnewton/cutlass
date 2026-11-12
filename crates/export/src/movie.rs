@@ -964,6 +964,9 @@ mod tests {
             // samples, Opus's pre-skip.
             let delay = demux.track_entries()[1].codec_delay;
             assert!(delay > 0, "{name}: no CodecDelay");
+            // And its end padding is the last block's DiscardPadding.
+            let padding = demux.streams()[1].trim().trailing_padding();
+            assert!(padding.is_some_and(|p| p > 0), "{name}: no end padding");
             let mut pictures = 0;
             while let Some(packet) = demux.read_packet().unwrap() {
                 pictures += usize::from(packet.stream() == 1);

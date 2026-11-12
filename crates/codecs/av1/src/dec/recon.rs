@@ -310,45 +310,30 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             &buf[(ry - 1) * stride..]
         };
         if !have_above && have_left {
-            let v = buf[ry * stride + x - 1];
-            for i in 0..na {
-                above[EDGE_OFF + i] = v;
-            }
+            fill16(&mut above[EDGE_OFF..], na, buf[ry * stride + x - 1]);
         } else if !have_above && !have_left {
-            let v = P::from_i32(base - 1);
-            for i in 0..na {
-                above[EDGE_OFF + i] = v;
-            }
+            fill16(&mut above[EDGE_OFF..], na, P::from_i32(base - 1));
         } else {
             let lim = max_x.min(x + if have_above_right { 2 * w } else { w } - 1);
             let row = up;
             let avail = (lim + 1).saturating_sub(x).min(na);
-            above[EDGE_OFF..EDGE_OFF + avail].copy_from_slice(&row[x..x + avail]);
-            let last = row[lim];
-            for i in avail..na {
-                above[EDGE_OFF + i] = last;
-            }
+            copy16(&mut above[EDGE_OFF..], &row[x..], avail);
+            fill16(&mut above[EDGE_OFF + avail..], na - avail, row[lim]);
         }
         if !have_left && have_above {
-            let v = up[x];
-            for i in 0..nl {
-                left[EDGE_OFF + i] = v;
-            }
+            fill16(&mut left[EDGE_OFF..], nl, up[x]);
         } else if !have_left && !have_above {
-            let v = P::from_i32(base + 1);
-            for i in 0..nl {
-                left[EDGE_OFF + i] = v;
-            }
+            fill16(&mut left[EDGE_OFF..], nl, P::from_i32(base + 1));
         } else {
             let lim = max_y.min(y + if have_below_left { 2 * h } else { h } - 1);
             let avail = (lim + 1 - y).min(nl);
             let col = &buf[ry * stride + x - 1..];
-            let dst = &mut left[EDGE_OFF..EDGE_OFF + nl];
+            let dst = &mut left[EDGE_OFF..];
             for (d, s) in dst[..avail].iter_mut().zip(col.iter().step_by(stride)) {
                 *d = *s;
             }
             let last = dst[avail - 1];
-            dst[avail..].fill(last);
+            fill16(&mut dst[avail..], nl - avail, last);
         }
         let corner = if have_above && have_left {
             up[x - 1]
@@ -486,5 +471,39 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             self.b.lossless,
             self.bd,
         );
+    }
+}
+
+/// `dst[..n] = src[..n]`, in whole chunks of 16 when both slices hold
+/// them: what lands in `dst` past `n` then means nothing.
+#[inline(always)]
+fn copy16<P: Copy>(dst: &mut [P], src: &[P], n: usize) {
+    let r = n.next_multiple_of(16);
+    match (dst.get_mut(..r), src.get(..r)) {
+        (Some(d), Some(s)) => {
+            for (d, s) in d
+                .as_chunks_mut::<16>()
+                .0
+                .iter_mut()
+                .zip(s.as_chunks::<16>().0)
+            {
+                *d = *s;
+            }
+        }
+        _ => dst[..n].copy_from_slice(&src[..n]),
+    }
+}
+
+/// `dst[..n]` set to `v`, in whole chunks of 16 when `dst` holds them: as
+/// in [`copy16`], what lands past `n` means nothing.
+#[inline(always)]
+fn fill16<P: Copy>(dst: &mut [P], n: usize, v: P) {
+    match dst.get_mut(..n.next_multiple_of(16)) {
+        Some(d) => {
+            for c in d.as_chunks_mut::<16>().0 {
+                *c = [v; 16];
+            }
+        }
+        None => dst[..n].fill(v),
     }
 }

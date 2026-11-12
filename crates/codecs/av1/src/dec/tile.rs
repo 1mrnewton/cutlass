@@ -589,6 +589,10 @@ pub fn ref_rows<'s, P>(
     }
 }
 
+/// The BlockDecoded flags of the planes of a superblock and the units
+/// around it (see [`TileDec::block_decoded`]).
+pub type BlockDecoded = [[[bool; 35]; 35]; 3];
+
 pub struct TileDec<'a, P: Pixel, C: Coder = Msac<'a>> {
     pub seq: &'a SequenceHeader,
     pub hdr: &'a FrameHeader,
@@ -644,8 +648,9 @@ pub struct TileDec<'a, P: Pixel, C: Coder = Msac<'a>> {
     pub read_deltas: bool,
     pub ref_lr_wiener: [[[i8; 3]; 2]; 3],
     pub ref_sgr_xqd: [[i8; 2]; 3],
-    /// BlockDecoded[plane][y + 1][x + 1].
-    pub block_decoded: [[[bool; 35]; 35]; 3],
+    /// BlockDecoded[plane][y + 1][x + 1], each superblock's rows set as
+    /// it starts: boxed, so a tile decoder takes it over without a copy.
+    pub block_decoded: Box<BlockDecoded>,
     pub b: Block,
     pub color_map_y: Vec<u8>,
     pub color_map_uv: Vec<u8>,

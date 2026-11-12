@@ -110,7 +110,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             left,
             above_palette: [ap(0), ap(1)],
             left_palette: self.left_palette,
-            block_decoded: self.block_decoded,
+            block_decoded: *self.block_decoded,
             delta_lf: self.delta_lf,
             current_q_index: self.current_q_index,
             read_deltas: self.read_deltas,
@@ -167,7 +167,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             *v = s.cdef;
         }
         self.left_palette = s.left_palette;
-        self.block_decoded = s.block_decoded;
+        *self.block_decoded = s.block_decoded;
         self.delta_lf = s.delta_lf;
         self.current_q_index = s.current_q_index;
         self.read_deltas = s.read_deltas;

@@ -2137,6 +2137,8 @@ struct TileBufs<P> {
     /// Always there between tile decodes: a decode takes it and gives it
     /// back (a move, rather than building a placeholder in its place).
     scratch: Option<Scratch<P>>,
+    /// The BlockDecoded flags, taken and given back the same way.
+    block_decoded: Option<Box<super::tile::BlockDecoded>>,
 }
 
 impl<P: Pixel> TileBufs<P> {
@@ -2151,6 +2153,7 @@ impl<P: Pixel> TileBufs<P> {
             color_map_y: vec![0u8; 128 * 128],
             color_map_uv: vec![0u8; 128 * 128],
             scratch: Some(scratch),
+            block_decoded: None,
         }
     }
 }
@@ -2257,7 +2260,10 @@ fn decode_tile_part<P: Pixel>(
         read_deltas: carry.read_deltas,
         ref_lr_wiener: carry.ref_lr_wiener,
         ref_sgr_xqd: carry.ref_sgr_xqd,
-        block_decoded: [[[false; 35]; 35]; 3],
+        block_decoded: bufs
+            .block_decoded
+            .take()
+            .unwrap_or_else(|| Box::new([[[false; 35]; 35]; 3])),
         b: std::mem::take(&mut carry.b),
         pb: Default::default(),
         plan: Default::default(),
@@ -2304,6 +2310,7 @@ fn decode_tile_part<P: Pixel>(
         color_map_uv,
         scratch,
         rec,
+        block_decoded,
         ..
     } = td;
     carry.msac = msac;
@@ -2320,6 +2327,7 @@ fn decode_tile_part<P: Pixel>(
     bufs.color_map_y = color_map_y;
     bufs.color_map_uv = color_map_uv;
     bufs.scratch = Some(scratch);
+    bufs.block_decoded = Some(block_decoded);
     // The log left holds the buffers of a spare: back to the pool.
     if let (Some(l), Some(mut log)) = (logs, rec) {
         log.clear();
@@ -3008,7 +3016,7 @@ fn recon_worker<'r, P: PicturePixel>(
         read_deltas: false,
         ref_lr_wiener: [[[0; 3]; 2]; 3],
         ref_sgr_xqd: [[0; 2]; 3],
-        block_decoded: [[[false; 35]; 35]; 3],
+        block_decoded: Box::new([[[false; 35]; 35]; 3]),
         b: Default::default(),
         pb: Default::default(),
         plan: Default::default(),

@@ -26,6 +26,11 @@ pub const MAX_LACED_FRAMES: usize = 256;
 /// preroll after it. No payload byte is read on that walk.
 pub const MAX_SEEK_WALK: u32 = 1_000_000;
 
+/// Block headers seeks keep from their walks, so that a later seek over the
+/// same stretch reads nothing (about 90 bytes each). Past it the kept walks
+/// are dropped and kept again from the next seek on.
+pub const MAX_WALKED_BLOCKS: usize = 16 * 1024;
+
 /// Cluster headers a seek walks to build an index when the file has no Cues.
 pub const MAX_CLUSTER_SCAN: u32 = 4_000_000;
 

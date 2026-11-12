@@ -616,6 +616,59 @@ fn seeks_land_on_the_last_keyframe_at_or_before_the_time_with_or_without_cues() 
 }
 
 #[test]
+fn seeks_over_a_stretch_walked_before_land_as_a_fresh_reader_does() {
+    for (with_cues, cue_tracks) in [(true, vec![1_u64]), (true, vec![1, 2]), (false, vec![])] {
+        let bytes = seekable(with_cues, &cue_tracks);
+        let mut kept = open(bytes.clone()).expect("open");
+        // Back and forth, so later seeks go over walks kept from earlier.
+        let times: Vec<i64> = (0..120_i64).map(|i| (i * 7919) % 3_100 - 40).collect();
+        for (index, time) in times.iter().enumerate() {
+            let track = if index % 3 == 0 { 2 } else { 1 };
+            let mut fresh = open(bytes.clone()).expect("open");
+            let expected = seek(&mut fresh, track, *time);
+            let landing = seek(&mut kept, track, *time);
+            assert_eq!(
+                landing, expected,
+                "cues {with_cues} track {track} at {time}"
+            );
+            assert_eq!(
+                kept.read_packet().expect("read"),
+                fresh.read_packet().expect("read"),
+                "cues {with_cues} track {track} at {time}"
+            );
+        }
+    }
+}
+
+#[test]
+fn seeks_land_the_same_once_the_kept_walks_are_full() {
+    // 60 one-second Clusters of 500 blocks: more than the 16,384 kept.
+    let mut children = vec![info(1_000_000, Some(60_000.0)), tracks(&[h264()])];
+    for second in 0..60_u64 {
+        let blocks: Vec<Vec<u8>> = (0..500_i16)
+            .map(|step| simple(1, step * 2, step % 50 == 0, b"v"))
+            .collect();
+        children.push(cluster(second * 1000, &blocks));
+    }
+    let bytes = with_seek_head(&[ids::INFO, ids::TRACKS], &children);
+    let mut kept = open(bytes.clone()).expect("open");
+    for index in 0..150_i64 {
+        let time = (index * 7919) % 60_000;
+        let mut fresh = open(bytes.clone()).expect("open");
+        assert_eq!(
+            seek(&mut kept, 1, time),
+            seek(&mut fresh, 1, time),
+            "at {time}"
+        );
+        assert_eq!(
+            kept.read_packet().expect("read"),
+            fresh.read_packet().expect("read"),
+            "at {time}"
+        );
+    }
+}
+
+#[test]
 fn cues_that_point_nowhere_fall_back_to_the_cluster_headers() {
     let bytes = with_seek_head(
         &[ids::INFO, ids::TRACKS, ids::CUES],

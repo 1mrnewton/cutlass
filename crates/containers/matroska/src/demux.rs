@@ -177,6 +177,8 @@ pub struct MatroskaDemux<R> {
     /// The last seek's track and where its walks may start, kept so that
     /// the next seek on that track does not sort them again.
     pub(crate) starts: Option<Starts>,
+    /// Block headers earlier seeks walked over, by where the walk started.
+    pub(crate) walked: crate::seek::Walked,
     pub(crate) cursor: Cursor,
     pub(crate) limits: Limits,
     cancelled: bool,
@@ -271,6 +273,7 @@ impl<R: Read + Seek> MatroskaDemux<R> {
             cues,
             clusters: None,
             starts: None,
+            walked: crate::seek::Walked::default(),
             cursor,
             limits,
             cancelled: false,

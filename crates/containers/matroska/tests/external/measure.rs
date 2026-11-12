@@ -15,11 +15,31 @@ use cutlass_matroska::MatroskaDemux;
 
 use crate::support::{ffmpeg, ffmpeg_tools, scratch};
 
-fn seek_costs(path: &Path) -> (u64, Vec<(i64, u64, bool, u32)>) {
+type Costs = Vec<(i64, u64, bool, u32)>;
+
+fn seek_costs(path: &Path) -> (u64, Costs) {
     let file = File::open(path).expect("file");
     let length = file.metadata().expect("metadata").len();
     let mut demux = MatroskaDemux::open(BufReader::new(file), length).expect("open");
     let opened = demux.consumed();
+    (opened, seek_all(&mut demux))
+}
+
+/// The second round of the same seeks on one reader.
+fn seek_costs_twice(path: &Path) -> (u64, Costs) {
+    let file = File::open(path).expect("file");
+    let length = file.metadata().expect("metadata").len();
+    let mut demux = MatroskaDemux::open(BufReader::new(file), length).expect("open");
+    let opened = demux.consumed();
+    let first = seek_all(&mut demux);
+    let again = seek_all(&mut demux);
+    for (one, two) in first.iter().zip(&again) {
+        assert_eq!((one.0, one.2, one.3), (two.0, two.2, two.3));
+    }
+    (opened, again)
+}
+
+fn seek_all(demux: &mut MatroskaDemux<BufReader<File>>) -> Costs {
     let mut costs = Vec::new();
     for time in [15_300, 2_100, 9_999, 19_000, 600, 12_345] {
         let before = demux.consumed();
@@ -51,7 +71,7 @@ fn seek_costs(path: &Path) -> (u64, Vec<(i64, u64, bool, u32)>) {
             landing.entries_visited,
         ));
     }
-    (opened, costs)
+    costs
 }
 
 #[test]
@@ -97,6 +117,11 @@ fn seeks_read_no_frames_and_a_small_part_of_the_file() {
         );
     }
     assert!(opened <= 64 * 1024);
+    // The same seeks again on the same reader go over the kept walks.
+    let (_, again) = seek_costs_twice(&path);
+    for (time, bytes, _, _) in &again {
+        assert_eq!(*bytes, 0, "seek to {time} again read {bytes}");
+    }
 
     // The same packets without Cues: the first seek walks Cluster headers.
     let copy = dir.join("copy.mkv");

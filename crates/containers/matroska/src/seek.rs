@@ -12,6 +12,15 @@
 //!
 //! The landing's `ordinal` is the block's place in its Cluster, counting
 //! from one: Matroska keeps no per-track frame number.
+//!
+//! Each walk keeps the block headers it passed, by the Cluster it started
+//! from, up to [`MAX_WALKED_BLOCKS`] in all. A later walk from the same
+//! Cluster goes over the kept headers first and reads on from where the
+//! last walk stopped only when it needs more, so seeking back and forth
+//! over the same stretch reads nothing again. The file does not change
+//! under the demuxer, so a kept header stays true.
+
+use std::collections::HashMap;
 
 use std::io::{Read, Seek};
 
@@ -22,7 +31,7 @@ use crate::demux::{Cluster, CueState, Cursor, MatroskaDemux, Starts};
 use crate::ebml::{self, EbmlError, Size};
 use crate::error::{Error, Result};
 use crate::ids;
-use crate::limits::{MAX_CLUSTER_SCAN, MAX_CUES_BYTES, MAX_SEEK_WALK};
+use crate::limits::{MAX_CLUSTER_SCAN, MAX_CUES_BYTES, MAX_SEEK_WALK, MAX_WALKED_BLOCKS};
 use crate::meta;
 use crate::source::Header;
 
@@ -52,6 +61,86 @@ struct Walk {
     first: Option<Found>,
     preroll: u32,
     visited: u32,
+}
+
+impl Walk {
+    /// Takes in one block of the seek track. True when the walk is done.
+    fn see(&mut self, found: Found, frames: u32, target: i64) -> bool {
+        if self.first.is_none() {
+            self.first = Some(found);
+        }
+        if found.time > target {
+            if self.best.is_some() {
+                return true;
+            }
+            if found.keyframe {
+                self.after = Some(found);
+                return true;
+            }
+            return false;
+        }
+        if found.keyframe {
+            self.best = Some(found);
+            self.preroll = 0;
+        }
+        if self.best.is_some() && found.time < target {
+            self.preroll = self.preroll.saturating_add(frames);
+        }
+        false
+    }
+}
+
+/// One block header a walk passed.
+#[derive(Clone, Copy, Debug)]
+struct Passed {
+    track: u64,
+    /// In packet ticks; `None` when the Cluster had no Timestamp before it
+    /// or the time does not convert.
+    time: Option<i64>,
+    keyframe: bool,
+    frames: u32,
+    position: u64,
+    cluster: Cluster,
+}
+
+/// Where a kept walk stopped.
+#[derive(Clone, Copy, Debug)]
+enum Resume {
+    /// Reading on starts here, inside `cluster` or between Clusters.
+    At {
+        position: u64,
+        cluster: Option<Cluster>,
+    },
+    /// The walk ran into the end of the Segment or the input.
+    End,
+}
+
+/// The block headers walks from one Cluster passed, in file order.
+#[derive(Debug)]
+struct Trail {
+    blocks: Vec<Passed>,
+    resume: Resume,
+}
+
+/// Walks kept between seeks, by the Cluster offset each started from.
+#[derive(Debug, Default)]
+pub(crate) struct Walked {
+    trails: HashMap<u64, Trail>,
+    blocks: usize,
+}
+
+impl Walked {
+    /// Room for one more block in `trail`, the walk in hand, which is not
+    /// counted in `blocks`. When the total is reached, every other kept
+    /// walk is dropped.
+    fn room(&mut self, trail: &Trail) -> bool {
+        if self.blocks.saturating_add(trail.blocks.len()) < MAX_WALKED_BLOCKS {
+            return true;
+        }
+        self.trails.clear();
+        self.blocks = 0;
+        trail.blocks.len() < MAX_WALKED_BLOCKS
+    }
 }
 
 impl<R: Read + Seek> MatroskaDemux<R> {
@@ -385,8 +474,66 @@ impl<R: Read + Seek> MatroskaDemux<R> {
     }
 
     fn walk_inner(&mut self, start: u64, number: u64, target: i64, walk: &mut Walk) -> Result<()> {
-        self.source.seek(start)?;
-        let mut cluster: Option<Cluster> = None;
+        let mut trail = self.walked.trails.remove(&start).unwrap_or(Trail {
+            blocks: Vec::new(),
+            resume: Resume::At {
+                position: start,
+                cluster: None,
+            },
+        });
+        self.walked.blocks = self.walked.blocks.saturating_sub(trail.blocks.len());
+        let kept = (trail.blocks.len(), trail.resume);
+        let result = self.walk_trail(&mut trail, number, target, walk);
+        if result.is_err() {
+            // What the failed read added is not kept, so the next walk
+            // fails the same way.
+            trail.blocks.truncate(kept.0);
+            trail.resume = kept.1;
+        }
+        self.walked.blocks = self.walked.blocks.saturating_add(trail.blocks.len());
+        self.walked.trails.insert(start, trail);
+        result
+    }
+
+    /// Goes over a kept walk, then reads on from where it stopped while the
+    /// walk needs more, keeping what it reads.
+    fn walk_trail(
+        &mut self,
+        trail: &mut Trail,
+        number: u64,
+        target: i64,
+        walk: &mut Walk,
+    ) -> Result<()> {
+        for passed in &trail.blocks {
+            if walk.visited >= MAX_SEEK_WALK {
+                return Ok(());
+            }
+            walk.visited = walk.visited.saturating_add(1);
+            if passed.track != number {
+                continue;
+            }
+            let Some(time) = passed.time else {
+                continue;
+            };
+            let found = Found {
+                time,
+                keyframe: passed.keyframe,
+                position: passed.position,
+                cluster: passed.cluster,
+            };
+            if walk.see(found, passed.frames, target) {
+                return Ok(());
+            }
+        }
+        let Resume::At {
+            position,
+            mut cluster,
+        } = trail.resume
+        else {
+            return Ok(());
+        };
+        let mut keeping = true;
+        self.source.seek(position)?;
         let mut pending: Option<Header> = None;
         while walk.visited < MAX_SEEK_WALK {
             if let Some(current) = cluster
@@ -462,14 +609,29 @@ impl<R: Read + Seek> MatroskaDemux<R> {
                 continue;
             };
             walk.visited = walk.visited.saturating_add(1);
+            let time = before
+                .timestamp
+                .and_then(|base| base.checked_add(i64::from(head.relative)))
+                .and_then(|segment| self.clock.from_segment(segment));
+            keeping = keeping && self.walked.room(trail);
+            if keeping {
+                trail.blocks.push(Passed {
+                    track: head.track,
+                    time,
+                    keyframe,
+                    frames,
+                    position: header.start,
+                    cluster: before,
+                });
+                trail.resume = Resume::At {
+                    position: self.source.position(),
+                    cluster,
+                };
+            }
             if head.track != number {
                 continue;
             }
-            let Some(time) = before
-                .timestamp
-                .and_then(|base| base.checked_add(i64::from(head.relative)))
-                .and_then(|segment| self.clock.from_segment(segment))
-            else {
+            let Some(time) = time else {
                 continue;
             };
             let found = Found {
@@ -478,26 +640,12 @@ impl<R: Read + Seek> MatroskaDemux<R> {
                 position: header.start,
                 cluster: before,
             };
-            if walk.first.is_none() {
-                walk.first = Some(found);
+            if walk.see(found, frames, target) {
+                return Ok(());
             }
-            if time > target {
-                if walk.best.is_some() {
-                    break;
-                }
-                if keyframe {
-                    walk.after = Some(found);
-                    break;
-                }
-                continue;
-            }
-            if keyframe {
-                walk.best = Some(found);
-                walk.preroll = 0;
-            }
-            if walk.best.is_some() && time < target {
-                walk.preroll = walk.preroll.saturating_add(frames);
-            }
+        }
+        if keeping && walk.visited < MAX_SEEK_WALK {
+            trail.resume = Resume::End;
         }
         Ok(())
     }

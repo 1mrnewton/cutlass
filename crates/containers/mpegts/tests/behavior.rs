@@ -578,6 +578,50 @@ fn a_new_pmt_version_is_counted_and_the_streams_stay() {
 }
 
 #[test]
+fn a_204_byte_stream_reads_as_its_188_byte_packets() {
+    let units = content(3, 0);
+    let bytes = mux(&units, MuxOptions::default());
+    // Each packet followed by 16 bytes of Reed-Solomon parity, as DVB
+    // and ATSC transmissions carry them; the bytes are not checked.
+    let mut fec = Vec::with_capacity(bytes.len() / 188 * 204);
+    for (index, packet) in packets(&bytes).iter().enumerate() {
+        fec.extend_from_slice(packet);
+        fec.extend((0..16).map(|byte| (index * 7 + byte) as u8));
+    }
+    let mut demux = open(&fec);
+    assert_eq!(drain(&mut demux), drain(&mut open(&bytes)));
+    assert_eq!(demux.counters(), cutlass_mpegts::Counters::default());
+    // Seeks land the same.
+    let mut plain = open(&bytes);
+    for target in [0, 90_000, 200_000] {
+        let to = || SeekTo {
+            track: 0x100,
+            time: DELAY + target,
+            end: None,
+        };
+        // The same packet, at its own byte position in each.
+        let landed = |landing: Landing| match landing {
+            Landing::Packet {
+                ordinal,
+                time,
+                keyframe,
+                preroll,
+                ..
+            } => Some((ordinal, time, keyframe, preroll)),
+            _ => None,
+        };
+        let fec_landing = landed(demux.seek(to()).unwrap().landing);
+        assert!(fec_landing.is_some());
+        assert_eq!(fec_landing, landed(plain.seek(to()).unwrap().landing));
+        let (fec, plain) = (demux.read_packet().unwrap(), plain.read_packet().unwrap());
+        assert_eq!(
+            fec.map(|packet| packet.timestamp()),
+            plain.map(|packet| packet.timestamp())
+        );
+    }
+}
+
+#[test]
 fn a_duplicate_packet_is_skipped() {
     let units = content(2, 0);
     let bytes = mux(&units, MuxOptions::default());

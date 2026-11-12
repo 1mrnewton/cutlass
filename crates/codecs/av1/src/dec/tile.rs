@@ -890,6 +890,7 @@ fn fill_odd_rows<T: Copy>(d: &mut [T], stride: usize, at: usize, w: usize, h: us
     }
 }
 
+#[inline(always)]
 pub(crate) fn fill_rect<T: Copy>(d: &mut [T], stride: usize, at: usize, w: usize, h: usize, v: T) {
     if size_of::<T>() > 2 {
         // Larger values (mode info): a store per entry.

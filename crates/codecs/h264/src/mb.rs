@@ -1012,7 +1012,7 @@ fn skip_mb<S: Sample>(
         for block in 0..16 {
             mb.mv0[block] = mv;
         }
-        predict_inter(pic, dpb, slice, mx, my, &mb)?;
+        predict_inter(pic, dpb, slice, (mx, my, true), &mb)?;
         if slice.kind == 3 {
             let luma = [[0i32; 16]; 16];
             let chroma = ChromaResidual::zero();
@@ -1033,8 +1033,8 @@ fn skip_mb<S: Sample>(
         if slice.vsp {
             return Err(CodecError::Unsupported { what: "3d" });
         }
-        direct_16(pic, dpb, slice, mx, my, &mut mb)?;
-        predict_inter(pic, dpb, slice, mx, my, &mb)?;
+        let whole = direct_16(pic, dpb, slice, mx, my, &mut mb)?;
+        predict_inter(pic, dpb, slice, (mx, my, whole), &mb)?;
     }
     bind_refs(&mut mb, slice);
     let slot = my * pic.mb_w + mx;
@@ -1107,7 +1107,7 @@ fn vsp_skip_mb<S: Sample>(
             store_mv(&mut mb, &part1, motion, 1);
         }
     }
-    predict_inter(pic, dpb, slice, mx, my, &mb)?;
+    predict_inter(pic, dpb, slice, (mx, my, false), &mb)?;
     bind_refs(&mut mb, slice);
     let slot = my * pic.mb_w + mx;
     pic.mb[slot] = mb;
@@ -1553,7 +1553,7 @@ fn motion_base<S: Sample>(
         mb.qpd = delta as i8;
     }
     mb.cbp = luma_cbp | (chroma_cbp << 4);
-    predict_inter(pic, dpb, slice, mx, my, &mb)?;
+    predict_inter(pic, dpb, slice, (mx, my, false), &mb)?;
     if mb.transform8 {
         for i in 0..4 {
             if luma_cbp & (1 << i) == 0 {
@@ -8593,8 +8593,14 @@ fn decode_inter<S: Sample>(
             what: "inter-layer prediction",
         });
     }
+    // A single 16×16 partition has one motion throughout.
+    let mut whole = if super::syntax_kind(slice.kind) == 0 {
+        spec == 0
+    } else {
+        matches!(spec, 1..=3)
+    };
     if slice.kind == 1 && spec == 0 {
-        direct_16(pic, dpb, slice, mx, my, mb)?;
+        whole = direct_16(pic, dpb, slice, mx, my, mb)?;
     } else if sub {
         read_sub(pic, dpb, entropy, slice, Place { mx, my }, spec, mb)?;
     } else {
@@ -8618,7 +8624,7 @@ fn decode_inter<S: Sample>(
         *qp = next_qp::<S>(*qp, delta);
     }
     mb.qpd = delta as i8;
-    predict_inter(pic, dpb, slice, mx, my, mb)?;
+    predict_inter(pic, dpb, slice, (mx, my, whole), mb)?;
     let field = mb.field_mb || pic.field;
     let merge = residual && slice.tcoeff;
     if merge && (mb.field_mb || slice.sps.chroma != 1) {
@@ -10104,6 +10110,8 @@ fn direct_8<S: Sample>(
     apply_direct(pic, dpb, slice, mx, my, mb, &blocks);
 }
 
+/// Direct prediction of a whole macroblock. `true` means every block came
+/// out with the same motion, as [`apply_direct`] says.
 fn direct_16<S: Sample>(
     pic: &Frame<S>,
     dpb: &[Frame<S>],
@@ -10111,13 +10119,12 @@ fn direct_16<S: Sample>(
     mx: usize,
     my: usize,
     mb: &mut Mb,
-) -> Result<(), CodecError> {
+) -> Result<bool, CodecError> {
     let mut blocks = [(0usize, 0usize); 16];
     for (index, slot) in blocks.iter_mut().enumerate() {
         *slot = (index % 4, index / 4);
     }
-    apply_direct(pic, dpb, slice, mx, my, mb, &blocks);
-    Ok(())
+    Ok(apply_direct(pic, dpb, slice, mx, my, mb, &blocks))
 }
 
 /// Clause 8.4.1.2.3. Scale the co-located motion vector by the picture-order distance.
@@ -10324,6 +10331,7 @@ fn clip_mv(value: i32) -> i16 {
 }
 
 /// Clause 8.4.1.2.2. One reference pair for the macroblock; each 4×4 may be forced to a zero vector.
+/// `true` means the whole macroblock was filled with one motion at once.
 fn apply_direct<S: Sample>(
     pic: &Frame<S>,
     dpb: &[Frame<S>],
@@ -10332,10 +10340,10 @@ fn apply_direct<S: Sample>(
     my: usize,
     mb: &mut Mb,
     blocks: &[(usize, usize)],
-) {
+) -> bool {
     if !slice.spatial_direct {
         temporal_direct(pic, dpb, slice, mx, my, mb, blocks);
-        return;
+        return false;
     }
     let (ref0, ref1, zero, near) = direct_refs(pic, mx, my, mb);
     // The predictors of a 16×16 partition, from the same neighbours.
@@ -10389,7 +10397,7 @@ fn apply_direct<S: Sample>(
             mb.ref0 = [if zero { 0 } else { ref0 }; 4];
             mb.ref1 = [if zero { 0 } else { ref1 }; 4];
             mb.ready = u16::MAX;
-            return;
+            return true;
         }
     }
     for &(bx, by) in blocks {
@@ -10422,6 +10430,7 @@ fn apply_direct<S: Sample>(
         mb.ref1[part] = if zero { 0 } else { ref1 };
         mb.ready |= 1 << index;
     }
+    false
 }
 
 /// The reference indices of spatial direct prediction, clause 8.4.1.2.2,
@@ -10645,12 +10654,13 @@ fn ref_luma<S: Sample>(frame: &Frame<S>, x: i32, y: i32, frac: (i32, i32)) -> i3
     sample[0].into()
 }
 
+/// The inter prediction of macroblock (`mx`, `my`). `whole` says the
+/// caller knows one motion covers it, as in a 16×16 partition.
 fn predict_inter<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],
     slice: &Slice<'_>,
-    mx: usize,
-    my: usize,
+    (mx, my, whole): (usize, usize, bool),
     mb: &Mb,
 ) -> Result<(), CodecError> {
     if mb.field_mb {
@@ -10689,7 +10699,7 @@ fn predict_inter<S: Sample>(
         return Ok(());
     }
     prefetch_motion(pic, dpb, slice, (mx, my), mb, 0);
-    predict_parts(pic, dpb, slice, mx, my, mb)?;
+    predict_parts(pic, dpb, slice, (mx, my, whole), mb)?;
     prefetch_motion(pic, dpb, slice, (mx, my), mb, 1);
     Ok(())
 }
@@ -10743,21 +10753,23 @@ fn prefetch_motion<S: Sample>(
 }
 
 /// The partitions of a frame macroblock that is not ALC-weighted, each
-/// predicted in turn.
+/// predicted in turn. `whole` as for [`predict_inter`].
 fn predict_parts<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],
     slice: &Slice<'_>,
-    mx: usize,
-    my: usize,
+    (mx, my, whole): (usize, usize, bool),
     mb: &Mb,
 ) -> Result<(), CodecError> {
     // One motion for the whole macroblock, as in a skipped or 16×16 one:
-    // the search for equal neighbours below would find just this.
-    if mb.mv0 == [mb.mv0[0]; 16]
-        && mb.mv1 == [mb.mv1[0]; 16]
-        && mb.ref0 == [mb.ref0[0]; 4]
-        && mb.ref1 == [mb.ref1[0]; 4]
+    // the search for equal neighbours below would find just this. When the
+    // caller knows, the vectors are not compared: whether they all match
+    // is hard to guess ahead.
+    if whole
+        || (mb.mv0 == [mb.mv0[0]; 16]
+            && mb.mv1 == [mb.mv1[0]; 16]
+            && mb.ref0 == [mb.ref0[0]; 4]
+            && mb.ref1 == [mb.ref1[0]; 4])
     {
         return mc_block(
             pic,

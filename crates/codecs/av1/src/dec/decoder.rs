@@ -937,11 +937,19 @@ impl<P: Pixel> PixState<P> {
 
 /// Frames that may be decoding at once (parsing, reconstruction or
 /// filters), at most. Each keeps up to two pictures, its mode info twice,
-/// its block logs and the bands of rows it publishes, and past twelve the
-/// frames mostly wait for the rows of their references (on 18 threads
-/// and 4K, eight to twelve takes one clip from 0.46 s to 0.41 s for
-/// 0.3 GB more).
-const MAX_IN_FLIGHT: usize = 12;
+/// its block logs and the bands of rows it publishes (on 18 threads and
+/// 4K, eight to twelve takes one clip from 0.46 s to 0.41 s for 0.3 GB
+/// more). See also [`IN_FLIGHT_WEIGHT`].
+const MAX_IN_FLIGHT: usize = 16;
+
+/// The most the weights of the frames decoding at once come to: a frame
+/// whose filters run on a thread of their own (see [`banded`]) weighs 4,
+/// another 3. So at most twelve of the first and sixteen of the others:
+/// past those the first mostly wait for the rows of their references,
+/// and more of them make a 4K clip with CDEF slower on 18 threads (0.40 s
+/// rather than 0.38 s at sixteen), while sixteen of the others take a
+/// deblock-only one from 0.34 s to 0.32 s.
+const IN_FLIGHT_WEIGHT: usize = 48;
 
 /// The decoder state that persists between temporal units.
 pub struct Av1Core {
@@ -960,7 +968,10 @@ pub struct Av1Core {
     /// Shown frames not returned yet, in output order.
     queue: VecDeque<Queued>,
     /// Frames that may still be decoding.
-    in_flight: Vec<Arc<FrameJob>>,
+    /// With their weights (see [`Self::limit_in_flight`]).
+    in_flight: Vec<(Arc<FrameJob>, usize)>,
+    /// The weight of the frame being started.
+    weight: usize,
     /// Frames started by the current call.
     unit_jobs: Vec<Arc<FrameJob>>,
     /// Largest picture (upscaled width x height) accepted; larger is `Limit`.
@@ -1019,6 +1030,7 @@ impl Av1Core {
             outstanding: Vec::new(),
             queue: VecDeque::new(),
             in_flight: Vec::new(),
+            weight: 0,
             unit_jobs: Vec::new(),
             max_pixels: 35_651_584,
             threads: std::thread::available_parallelism().map_or(1, usize::from),
@@ -1460,7 +1472,7 @@ impl Av1Core {
                 }
             }
         }
-        self.limit_in_flight();
+        self.limit_in_flight(if banded(seq, &hdr) { 4 } else { 3 });
         self.reclaim_pictures();
         // The parse waits for the motion fields of the references it
         // projects and the segment ids of the primary reference.
@@ -1511,7 +1523,7 @@ impl Av1Core {
         }
         self.unit_jobs.push(job.clone());
         if !job.is_done() {
-            self.in_flight.push(job.clone());
+            self.in_flight.push((job.clone(), self.weight));
         }
         self.store_frame(seq, &hdr, job, cdf_out, data_out, tag);
         Ok(())
@@ -1665,15 +1677,43 @@ impl Av1Core {
         self.px16.collect();
     }
 
-    /// Waits until fewer frames are decoding than the threads allow (as
-    /// many as the threads, at least 2, at most [`MAX_IN_FLIGHT`]).
-    fn limit_in_flight(&mut self) {
-        self.in_flight.retain(|j| !j.is_done());
-        while self.in_flight.len() >= self.threads.clamp(2, MAX_IN_FLIGHT) {
-            let j = self.in_flight.remove(0);
+    /// Waits until a frame of weight `w` (see [`IN_FLIGHT_WEIGHT`]) may
+    /// start: until fewer frames are decoding than the threads allow (as
+    /// many as the threads, at least 2, at most [`MAX_IN_FLIGHT`]), and
+    /// the weights of those decoding come to at most
+    /// `IN_FLIGHT_WEIGHT - w`.
+    fn limit_in_flight(&mut self, w: usize) {
+        self.in_flight.retain(|(j, _)| !j.is_done());
+        while self.in_flight.len() >= self.threads.clamp(2, MAX_IN_FLIGHT)
+            || self.in_flight.iter().map(|&(_, w)| w).sum::<usize>() + w > IN_FLIGHT_WEIGHT
+        {
+            let (j, _) = self.in_flight.remove(0);
             let _ = j.wait();
         }
+        self.weight = w;
     }
+}
+
+/// Whether CDEF filters the frame of `hdr`.
+fn cdef_on(seq: &SequenceHeader, hdr: &FrameHeader) -> bool {
+    seq.enable_cdef
+        && !hdr.coded_lossless
+        && !hdr.allow_intrabc
+        && (hdr.cdef.bits > 0
+            || hdr.cdef.y_pri[0] != 0
+            || hdr.cdef.y_sec[0] != 0
+            || hdr.cdef.uv_pri[0] != 0
+            || hdr.cdef.uv_sec[0] != 0)
+}
+
+/// Whether the threaded pipeline reconstructs the frame of `hdr` a
+/// superblock row at a time and runs its filters on a thread of their own
+/// (see [`decode_frame_async`]).
+fn banded(seq: &SequenceHeader, hdr: &FrameHeader) -> bool {
+    hdr.refresh_frame_flags != 0
+        && (cdef_on(seq, hdr) || hdr.lr.uses_lr)
+        && !hdr.allow_intrabc
+        && !hdr.use_superres
 }
 
 /// What the parse of a frame needs besides its picture and the pools.
@@ -3356,14 +3396,7 @@ fn decode_frame<P: PicturePixel>(
     out: &FrameOut<'_>,
 ) -> R<Box<CdfContext>> {
     let lf_on = hdr.loop_filter.level[0] != 0 || hdr.loop_filter.level[1] != 0;
-    let cdef_on = seq.enable_cdef
-        && !hdr.coded_lossless
-        && !hdr.allow_intrabc
-        && (hdr.cdef.bits > 0
-            || hdr.cdef.y_pri[0] != 0
-            || hdr.cdef.y_sec[0] != 0
-            || hdr.cdef.uv_pri[0] != 0
-            || hdr.cdef.uv_sec[0] != 0);
+    let cdef_on = cdef_on(seq, hdr);
     // The tiles are parsed here, on several threads, and their superblock
     // rows are reconstructed and filtered in order on threads of their
     // own, a superblock row behind parsing. Frames without in-loop filters
@@ -3488,10 +3521,7 @@ fn decode_frame_async<P: PicturePixel>(
     // once into the final picture; intra prediction reads the last lines
     // of the row above from a copy (Scratch::edge). Intra block copy reads
     // any row above, and superres frames take the whole picture.
-    let banded = hdr.refresh_frame_flags != 0
-        && (cdef_on || hdr.lr.uses_lr)
-        && !hdr.allow_intrabc
-        && !hdr.use_superres;
+    let banded = banded(seq, hdr);
     let in_place = hdr.refresh_frame_flags == 0 || !(cdef_on || hdr.lr.uses_lr);
     // Whatever the picture, reconstruction keeps the mode info of one
     // superblock row and the row above it: its blocks read no other, and

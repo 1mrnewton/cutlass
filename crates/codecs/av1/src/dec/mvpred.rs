@@ -231,7 +231,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             .min(self.fs.mi_cols - mi_col)
             .min(16)
             .min(self.mi_col_end.saturating_sub(c0));
-        let row = r as usize * self.fs.mi_stride + c0;
+        let row = self.fs.mi_row(r as usize) + c0;
         let mut i = 0usize;
         while i < end4 {
             let m = self.fs.mi[row + i];
@@ -265,11 +265,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             .min(self.fs.mi_rows - mi_row)
             .min(16)
             .min(self.mi_row_end.saturating_sub(r0));
-        let stride = self.fs.mi_stride;
-        let at = r0 * stride + c as usize;
         let mut i = 0usize;
         while i < end4 {
-            let m = self.fs.mi[at + i * stride];
+            let m = self.fs.mi[self.fs.mi_row(r0 + i) + c as usize];
             let len = h4.min(bh4(m.bsize)).max(min_len);
             self.add_ref_mv_candidate(&m, is_compound, len as u32 * 2, found);
             i += len;

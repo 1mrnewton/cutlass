@@ -210,7 +210,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 if m.ref_frame[0] > INTRA_FRAME {
                     return false;
                 }
-                self.fs.uv_modes[(r - self.mi_r0) * self.fs.mi_stride + c]
+                self.fs.uv_modes[self.fs.mi_row(r - self.mi_r0) + c]
             };
             (SMOOTH_PRED..=SMOOTH_PRED + 2).contains(&mode)
         };

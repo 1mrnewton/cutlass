@@ -211,7 +211,7 @@ impl FilterInfo {
         // multiple of its width and of its height).
         let mut ends = vec![(0u16, 0u8); cols];
         for r in rows.clone() {
-            let Some(mi) = fs.mi.get(r * st..r * st + cols) else {
+            let Some(mi) = fs.mi.get(fs.mi_row(r)..fs.mi_row(r) + cols) else {
                 return;
             };
             let mut c = 0;
@@ -229,7 +229,7 @@ impl FilterInfo {
                 // row is the block's last.
                 if r == rows.start
                     && r % 2 == 0
-                    && let Some(below) = fs.mi.get((r + 1) * st + c)
+                    && let Some(below) = fs.mi.get(fs.mi_row(r + 1) + c)
                     && r + 1 < fs.mi_rows
                     && bh4(below.bsize) > 1
                 {
@@ -246,7 +246,10 @@ impl FilterInfo {
                     m.skip(),
                     m.bsize,
                     if hdr.delta_lf_present {
-                        fs.delta_lf.get(r * st + c).copied().unwrap_or_default()
+                        fs.delta_lf
+                            .get(fs.mi_row(r) + c)
+                            .copied()
+                            .unwrap_or_default()
                     } else {
                         [0; 4]
                     },

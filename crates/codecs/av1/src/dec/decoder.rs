@@ -1926,7 +1926,7 @@ fn mf_band(
             && i32::from(mv.col).abs() < (1 << 12)
     };
     for y in 0..rows {
-        let at = (2 * (k * MF_BAND_ROWS + y) + 1) * fs.mi_stride;
+        let at = fs.mi_row(2 * (k * MF_BAND_ROWS + y) + 1);
         let Some(mi) = fs.mi.get(at + 2 * cols.start..at + 2 * cols.end) else {
             break;
         };
@@ -3355,6 +3355,7 @@ fn decode_frame<P: PicturePixel>(
         threads,
         mf.map(|p| &**p),
         cdef_on,
+        out.data,
     );
     lock(spares).lr.push(lr_scratch);
     let (pic, saved) = r?;
@@ -3929,6 +3930,11 @@ impl<P: PicturePixel> Backend<P> {
     }
 }
 
+/// The mode-info rows a single thread decodes a frame in (see
+/// [`FrameState::mi_ring`]): two rows of 128x128 superblocks, so the row
+/// above one keeps its last rows while that one is decoded and filtered.
+const MI_RING: usize = 64;
+
 /// [`decode_frame`] with the references at hand: parsing and
 /// reconstruction on this thread, then the in-loop filters (on `threads`).
 fn decode_frame_sync<P: PicturePixel>(
@@ -3945,6 +3951,7 @@ fn decode_frame_sync<P: PicturePixel>(
     threads: usize,
     mf: Option<&MfPlan>,
     cdef_on: bool,
+    data: Option<&RefData>,
 ) -> R<(Picture<P>, Box<CdfContext>)> {
     if let Some(p) = mf {
         fs.motion_field = p.run(threads);
@@ -3975,6 +3982,10 @@ fn decode_frame_sync<P: PicturePixel>(
             published: 0,
             overlap: band_overlap(seq.use_128x128_superblock),
         };
+        // Everything that reads the mode info of a row does so by the end
+        // of the superblock row below it: the rows go round a ring that
+        // stays in the cache rather than through the frame's.
+        fs.mi_ring = MI_RING - 1;
         let res = decode_tiles_by_rows(
             seq,
             hdr,
@@ -3986,6 +3997,10 @@ fn decode_frame_sync<P: PicturePixel>(
             &mut cur,
             spares,
             &mut |fs: &FrameState, cur: &mut Picture<P>, a: usize, b: usize, last: bool| {
+                // The row's motion, before the ring reuses its mode info.
+                if let Some(rd) = data {
+                    save_motion(seq, hdr, fs, rd, a, b);
+                }
                 // Deblocking reads the blocks' levels, CDEF their skips.
                 if lf_on || cdef_on {
                     info.fill_rows(hdr, &levels, fs, a..b);
@@ -3997,6 +4012,9 @@ fn decode_frame_sync<P: PicturePixel>(
         );
         cdef_sc = filt.cdef;
         bounds = filt.lr_bounds;
+        if res.is_none() {
+            fs.mi_ring = usize::MAX;
+        }
         if let Some(res) = res {
             lock(spares).filters.push((cdef_sc, bounds, info));
             let saved = res?;

@@ -251,6 +251,11 @@ pub struct FrameState {
     pub mi_cols: usize,
     pub mi_rows: usize,
     pub mi_stride: usize,
+    /// The rows of `mi`, `uv_modes` and `delta_lf` are those of the frame
+    /// masked with this: all ones for the whole frame, or one less than a
+    /// power of two for a ring of rows that a single thread reuses while
+    /// they are in the cache (see [`Self::mi_row`]).
+    pub mi_ring: usize,
     pub mi: Vec<MiInfo>,
     /// The loop filter deltas of each 4x4, laid out like `mi`: sized and
     /// written only for frames with delta_lf_present.
@@ -277,6 +282,13 @@ pub struct FrameState {
 }
 
 impl FrameState {
+    /// Where row `r` (counted from the first row the arrays hold) of `mi`,
+    /// `uv_modes` and `delta_lf` starts.
+    #[inline(always)]
+    pub fn mi_row(&self, r: usize) -> usize {
+        (r & self.mi_ring) * self.mi_stride
+    }
+
     pub fn new(seq: &SequenceHeader, hdr: &FrameHeader) -> Self {
         let mi_cols = hdr.mi_cols as usize;
         let mi_rows = hdr.mi_rows as usize;
@@ -290,6 +302,7 @@ impl FrameState {
             mi_cols,
             mi_rows,
             mi_stride,
+            mi_ring: usize::MAX,
             mi: vec![MiInfo::default(); n],
             delta_lf: Vec::new(),
             uv_modes: vec![0; n],
@@ -324,6 +337,7 @@ impl FrameState {
                 fs.lr_rows = lr_rows;
                 fs.prev_segment_ids = None;
                 fs.motion_field.clear();
+                fs.mi_ring = usize::MAX;
                 fs
             }
             _ => Self::new(seq, hdr),
@@ -367,6 +381,7 @@ impl FrameState {
             mi_cols: self.mi_cols,
             mi_rows: self.mi_rows,
             mi_stride: self.mi_stride,
+            mi_ring: usize::MAX,
             mi: Vec::new(),
             delta_lf: Vec::new(),
             uv_modes: Vec::new(),

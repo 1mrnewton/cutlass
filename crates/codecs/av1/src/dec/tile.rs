@@ -979,7 +979,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
 
     #[inline]
     pub fn mi(&self, r: usize, c: usize) -> &MiInfo {
-        &self.fs.mi[(r - self.mi_r0) * self.fs.mi_stride + c]
+        &self.fs.mi[self.fs.mi_row(r - self.mi_r0) + c]
     }
 
     /// The first row of plane `plane` in `cur` (see [`Self::y0`]).
@@ -1669,7 +1669,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let h4 = bh4(b.bsize).min(self.fs.mi_rows - b.mi_row);
         let stride = self.fs.mi_stride;
         let set_uv = b.ref_frame[0] == INTRA_FRAME && b.has_chroma;
-        let at = (b.mi_row - self.mi_r0) * stride + b.mi_col;
+        let at = self.fs.mi_row(b.mi_row - self.mi_r0) + b.mi_col;
         match self.mi_fill {
             MiFill::Edges => {
                 fill_edges(&mut self.fs.mi, stride, at, w4, h4, *info);

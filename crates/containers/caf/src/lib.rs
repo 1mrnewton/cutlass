@@ -18,6 +18,7 @@ mod cookie;
 mod demux;
 mod desc;
 mod error;
+mod features;
 mod info;
 mod limits;
 mod mux;
@@ -31,6 +32,7 @@ pub use chan::{
 };
 pub use demux::CafDemux;
 pub use desc::{Description, FLAG_FLOAT, FLAG_LITTLE_ENDIAN};
+pub use features::{FEATURES, Feature};
 pub use info::InfoEntry;
 pub use limits::{
     CHECKPOINT_EVERY, MAX_BITS_PER_CHANNEL, MAX_CHAN_BYTES, MAX_CHANNELS, MAX_CHUNKS,

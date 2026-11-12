@@ -9,7 +9,9 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+use cutlass_avi::AviMux;
 use cutlass_codec::ContainerId;
+use cutlass_container::Mux;
 use cutlass_encode::EncodeFactory;
 use cutlass_eval::{Fonts, ReaderFactory};
 use cutlass_flac_container::FlacMux;
@@ -71,7 +73,8 @@ pub fn part_path(destination: &Path) -> Option<PathBuf> {
 }
 
 /// Write `request` to `destination` as an MP4, or a QuickTime movie when
-/// the destination ends in `.mov`. A caption sidecar the request asks for
+/// the destination ends in `.mov`; or as an AVI when the request's
+/// container is [`ContainerId::Avi`]. A caption sidecar the request asks for
 /// is written in the same folder. `progress` hears the frames done and the
 /// frames in all after each picture, and stops the export by returning
 /// false. Clip sound is each clip's file, mixed as in playback.
@@ -81,7 +84,7 @@ pub fn write_movie(
     destination: &Path,
     progress: &mut dyn FnMut(u64, u64) -> bool,
 ) -> Result<ExportResult, ExportError> {
-    if request.container != ContainerId::Isobmff {
+    if !matches!(request.container, ContainerId::Isobmff | ContainerId::Avi) {
         return Err(ExportError::Container);
     }
     let part = part_path(destination).ok_or(ExportError::Path)?;
@@ -102,21 +105,45 @@ fn write_part(
     part: &Path,
     progress: &mut dyn FnMut(u64, u64) -> bool,
 ) -> Result<ExportResult, ExportError> {
-    let brand = if is_mov(part) {
-        FileBrand::Mov
-    } else {
-        FileBrand::Mp4
+    let out = BufWriter::new(File::create(part).map_err(file)?);
+    let (result, out) = match request.container {
+        ContainerId::Avi => {
+            let mut mux = AviMux::new(out);
+            let result = export_movie(sources, request, part, &mut mux, progress)?;
+            (result, mux.into_writer().map_err(ExportError::Mux)?)
+        }
+        _ => {
+            let brand = if is_mov(part) {
+                FileBrand::Mov
+            } else {
+                FileBrand::Mp4
+            };
+            let mut mux = Mp4Mux::with_brand(out, brand);
+            let result = export_movie(sources, request, part, &mut mux, progress)?;
+            (result, mux.into_writer().map_err(ExportError::Mux)?)
+        }
     };
-    let mut mux = Mp4Mux::with_brand(BufWriter::new(File::create(part).map_err(file)?), brand);
+    finish(out)?;
+    Ok(result)
+}
+
+/// Draws, encodes and muxes `request` into `mux`, whatever its family.
+fn export_movie<M: Mux>(
+    sources: &MovieSources<'_>,
+    request: &ExportRequest,
+    part: &Path,
+    mux: &mut M,
+    progress: &mut dyn FnMut(u64, u64) -> bool,
+) -> Result<ExportResult, ExportError> {
     let mut device = SoftwareDevice::new();
-    let result = export(
+    export(
         ExportRun {
             draft: sources.draft,
             device: &mut device,
             request,
             factory: sources.encoders,
             readers: sources.readers,
-            mux: &mut mux,
+            mux,
             // A caption file goes beside the movie.
             destination: request.sidecar.as_ref().and(part.parent()),
             root: sources.root,
@@ -125,15 +152,7 @@ fn write_part(
             progress: Some(progress),
         },
         file_audio(sources.readers, sources.draft, sources.root),
-    )?;
-    let mut writer = mux.into_writer().map_err(ExportError::Mux)?;
-    writer.flush().map_err(file)?;
-    writer
-        .into_inner()
-        .map_err(|error| file(error.into_error()))?
-        .sync_all()
-        .map_err(file)?;
-    Ok(result)
+    )
 }
 
 /// Write only the timeline's sound over `request.range` to `destination`:
@@ -958,6 +977,210 @@ mod tests {
                         "{name}: FFmpeg decodes otherwise"
                     );
                 }
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `ffprobe`'s codec name and packet count of each stream of `path`.
+    fn probed_streams(ffprobe: &str, path: &Path) -> Vec<(String, usize)> {
+        let out = std::process::Command::new(ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-count_packets",
+                "-show_entries",
+                "stream=codec_name,nb_read_packets",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|line| {
+                let (name, count) = line.trim().split_once(',').unwrap();
+                (
+                    name.to_owned(),
+                    count.trim_end_matches(',').parse().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// GStreamer's `avidemux` buffers on `pad` of `path`, in order, or
+    /// `None` when GStreamer is not installed.
+    fn gstreamer_buffers(path: &Path, pad: &str) -> Option<Vec<Vec<u8>>> {
+        let launch = [
+            "/opt/homebrew/bin/gst-launch-1.0",
+            "/usr/local/bin/gst-launch-1.0",
+            "gst-launch-1.0",
+        ]
+        .into_iter()
+        .find(|path| {
+            std::process::Command::new(path)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        });
+        let Some(launch) = launch else {
+            eprintln!("skipped: gst-launch-1.0 was not found");
+            return None;
+        };
+        let dir = path.with_extension(format!("{pad}.gst"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = std::process::Command::new(launch)
+            .arg("-q")
+            .arg("filesrc")
+            .arg(format!("location={}", path.display()))
+            .args(["!", "avidemux", "name=d"])
+            .arg(format!("d.{pad}"))
+            .args(["!", "queue", "!", "multifilesink"])
+            .arg(format!("location={}/%06d", dir.display()))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        names.sort();
+        Some(
+            names
+                .iter()
+                .map(|name| std::fs::read(name).unwrap())
+                .collect(),
+        )
+    }
+
+    /// H.264 with AAC, the movie default, and MPEG-4 Visual with MP3, the
+    /// classic AVI pair, exported as AVI: this crate's demuxer, ffprobe
+    /// and GStreamer each read back every picture, byte for byte where
+    /// GStreamer hands the buffers over, and FFmpeg decodes the file.
+    #[test]
+    fn a_movie_exports_as_avi_that_ffprobe_and_gstreamer_read_back() {
+        use cutlass_codec::StreamCodec;
+        use cutlass_container::Demux;
+
+        let dir = std::env::temp_dir().join(format!("cutlass-avi-movie-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let draft = two_colours();
+        let readers = ReaderFactory::new();
+        let mut encoders = EncodeFactory::new();
+        cutlass_h264::register_encoders(&mut encoders);
+        cutlass_mpeg4::register_engine_encoders(&mut encoders);
+        cutlass_aac::register_encoders(&mut encoders);
+        cutlass_mp3::register_encoders(&mut encoders);
+        let sources = MovieSources {
+            draft: &draft,
+            root: None,
+            readers: &readers,
+            fonts: &NoFonts,
+            renderer: None,
+            encoders: &encoders,
+        };
+        let ffprobe = oracle("ffprobe");
+        let ffmpeg = oracle("ffmpeg");
+        for (video, sound, names) in [
+            (CodecId::H264, CodecId::Aac, ("h264", "aac")),
+            (CodecId::Mpeg4, CodecId::Mp3, ("mpeg4", "mp3")),
+        ] {
+            let request = ExportRequest {
+                range: TimeRange::new(0, 1_000_000),
+                short_side: 480,
+                codec: video,
+                bitrate: 1_000_000,
+                frame_rate: FrameRate::FPS_30,
+                container: ContainerId::Avi,
+                audio: Some(AudioExport {
+                    codec: sound,
+                    ..super::MOVIE_SOUND
+                }),
+                sidecar: None,
+                late_by: 0,
+                constant_rate: false,
+                prores: crate::ProresProfile::Standard,
+            };
+            let path = dir.join(format!("{}.avi", names.0));
+            let result = super::write_movie(&sources, &request, &path, &mut |_, _| true).unwrap();
+            assert!(!part_path(&path).unwrap().exists());
+            let frames = result.frames.len();
+            assert_eq!(frames, 30, "{}", names.0);
+            assert!(result.finished.interleaved(), "{}", names.0);
+            let bytes = std::fs::read(&path).unwrap();
+            assert_eq!((&bytes[..4], &bytes[8..12]), (&b"RIFF"[..], &b"AVI "[..]));
+            let length = bytes.len() as u64;
+            let mut demux =
+                cutlass_avi::AviDemux::open(std::io::Cursor::new(bytes), length).unwrap();
+            let codecs: Vec<_> = demux
+                .streams()
+                .iter()
+                .map(|stream| stream.params().codec().clone())
+                .collect();
+            assert_eq!(
+                codecs,
+                [StreamCodec::Known(video), StreamCodec::Known(sound)],
+                "{}",
+                names.0
+            );
+            let mut pictures = Vec::new();
+            let mut frames_of_sound = Vec::new();
+            while let Some(packet) = demux.read_packet().unwrap() {
+                if packet.stream() == 0 {
+                    pictures.push(packet.into_bytes());
+                } else {
+                    frames_of_sound.push(packet.into_bytes());
+                }
+            }
+            let sounds = frames_of_sound.len();
+            assert_eq!(pictures.len(), frames, "{}", names.0);
+            assert!(sounds > 10, "{}: {sounds} sound packets", names.0);
+            if let Some(ffprobe) = &ffprobe {
+                let probed = probed_streams(ffprobe, &path);
+                assert_eq!(
+                    probed,
+                    [(names.0.to_owned(), frames), (names.1.to_owned(), sounds)],
+                    "{}",
+                    names.0
+                );
+            }
+            if let Some(ffmpeg) = &ffmpeg {
+                let out = std::process::Command::new(ffmpeg)
+                    .args(["-v", "error", "-xerror", "-i"])
+                    .arg(&path)
+                    .args(["-f", "null", "-"])
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success() && out.stderr.is_empty(),
+                    "{}: {}",
+                    names.0,
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            if let Some(buffers) = gstreamer_buffers(&path, "video_0") {
+                assert!(
+                    buffers == pictures,
+                    "{}: GStreamer reads otherwise",
+                    names.0
+                );
+            }
+            if let Some(buffers) = gstreamer_buffers(&path, "audio_0") {
+                assert!(
+                    buffers == frames_of_sound,
+                    "{}: GStreamer reads the sound otherwise",
+                    names.0
+                );
             }
         }
         std::fs::remove_dir_all(&dir).unwrap();

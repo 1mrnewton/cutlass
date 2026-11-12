@@ -356,6 +356,12 @@ impl<S: Sample> Published<S> {
         })
     }
 
+    /// The rows of each plane that are in so far, without waiting for
+    /// more: luma, Cb and Cr.
+    pub(crate) fn filled_planes(&self) -> (&[S], &[S], &[S]) {
+        (self.luma.filled(), self.cb.filled(), self.cr.filled())
+    }
+
     /// Asks for [`Self::col`]'s answer for `addr` to be brought into the
     /// cache when its row is in; nothing else changes.
     pub(crate) fn prefetch_col(&self, addr: usize) {

@@ -10840,7 +10840,9 @@ fn predict_inter<S: Sample>(
 /// list `list`, as FFmpeg's `prefetch_motion` does: 64 luma samples to the
 /// right, eight rows, and in each chroma plane four, the rows taking turns
 /// over two macroblocks so that all of them come. Eight rows at a time
-/// beat FFmpeg's four on a 4K film; sixteen did no better.
+/// beat FFmpeg's four on a 4K film; sixteen did no better. A reference
+/// another thread is decoding, or has decoded, is read from the rows it
+/// has published, and only those are asked for.
 fn prefetch_motion<S: Sample>(
     pic: &Frame<S>,
     dpb: &[Frame<S>],
@@ -10860,9 +10862,10 @@ fn prefetch_motion<S: Sample>(
     let Ok(frame) = reference_frame(dpb, slice, list, reference) else {
         return;
     };
-    if frame.pending.is_some() {
-        return;
-    }
+    let (y_plane, u_plane, v_plane) = match &frame.pending {
+        Some(published) => published.filled_planes(),
+        None => (&frame.y[..], &frame.u[..], &frame.v[..]),
+    };
     let (Ok(mx), Ok(my)) = (i64::try_from(mx), i64::try_from(my)) else {
         return;
     };
@@ -10874,12 +10877,12 @@ fn prefetch_motion<S: Sample>(
     };
     let at = x + 64 + (y + (mx & 1) * 8) * down;
     if let Ok(at) = usize::try_from(at) {
-        S::prefetch(&frame.y, at, stride, 8);
+        S::prefetch(y_plane, at, stride, 8);
     }
     let at = (x >> 1) + 64 + ((y >> 1) + (mx & 1) * 4) * (down / 2);
     if let Ok(at) = usize::try_from(at) {
-        S::prefetch(&frame.u, at, stride / 2, 4);
-        S::prefetch(&frame.v, at, stride / 2, 4);
+        S::prefetch(u_plane, at, stride / 2, 4);
+        S::prefetch(v_plane, at, stride / 2, 4);
     }
 }
 

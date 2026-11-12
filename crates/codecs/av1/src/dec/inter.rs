@@ -479,7 +479,14 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let (sx, sy) = self.plane_sub(plane);
         let fw = i64::from(self.hdr.frame_width);
         let fh = i64::from(self.hdr.frame_height);
-        // Unscaled references (the common case) need no division.
+        if ref_up_w as i64 == fw && ref_h as i64 == fh {
+            // Unscaled (the common case): the scale is 1 << 14, the base
+            // `(orig - 8) << 14`, and the rounding shift by 8 exact.
+            let ox = ((x as i64) << 4) + ((2 * i64::from(mv.col)) >> sx);
+            let oy = ((y as i64) << 4) + ((2 * i64::from(mv.row)) >> sy);
+            return ((ox << 6) + 32, (oy << 6) + 32, 1024, 1024);
+        }
+        // Scaled ones need a division.
         let scale = |r: i64, f: i64| {
             if r == f {
                 1 << 14

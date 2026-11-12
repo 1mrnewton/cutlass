@@ -1,6 +1,10 @@
 //! Copy every stream of an AVI file into a new OpenDML AVI:
 //!
-//! `cargo run -p cutlass-avi --example remux -- in.avi out.avi`
+//! `cargo run -p cutlass-avi --example remux -- in.avi out.avi [riff-mib]`
+//!
+//! `riff-mib` caps each `RIFF` segment (1024, FFmpeg's size, by default); a
+//! small one makes an OpenDML file with many `AVIX` segments from a short
+//! input.
 //!
 //! Packets go from [`cutlass_avi::AviDemux`] to [`cutlass_avi::AviMux`]
 //! unchanged, in the order the demuxer returns them. A stream the muxer
@@ -9,21 +13,25 @@
 #![allow(clippy::print_stdout)]
 
 use std::fs::File;
-use std::io::BufReader;
 
-use cutlass_avi::{AviDemux, AviMux};
+use cutlass_avi::{AviDemux, AviMux, AviMuxOptions};
 use cutlass_container::{Demux, Mux, NewStream, TrackDuration};
 
 fn main() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let (Some(input), Some(output)) = (args.next(), args.next()) else {
-        return Err("usage: remux <in.avi> <out.avi>".to_owned());
+        return Err("usage: remux <in.avi> <out.avi> [riff-mib]".to_owned());
     };
+    let mut options = AviMuxOptions::default();
+    if let Some(mib) = args.next() {
+        let mib: u64 = mib.parse().map_err(|_| "riff-mib is not a number")?;
+        options.riff_bytes = mib.checked_mul(1 << 20).ok_or("riff-mib is too large")?;
+    }
     let file = File::open(&input).map_err(|err| err.to_string())?;
     let length = file.metadata().map_err(|err| err.to_string())?.len();
-    let mut demux = AviDemux::open(BufReader::new(file), length).map_err(|err| err.to_string())?;
+    let mut demux = AviDemux::open(file, length).map_err(|err| err.to_string())?;
     let out = File::create(&output).map_err(|err| err.to_string())?;
-    let mut mux = AviMux::new(out);
+    let mut mux = AviMux::with_options(out, options);
     let mut durations = Vec::new();
     for stream in demux.streams() {
         let track = mux

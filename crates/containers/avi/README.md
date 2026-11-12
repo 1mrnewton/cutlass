@@ -145,16 +145,18 @@ To run it again: `cargo build --release -p cutlass-avi --examples` and `cargo bu
 
 ## Readiness
 
-Fuzzing, 12 November 2026, `cargo test --release` builds of `fuzz_campaign`, seed origin `0xa51000` both times:
+Fuzzing, 12 November 2026, `cargo test --release` builds of `fuzz_campaign`. The two newer runs start from new seed origins, and every input in them also goes through `AviForwardDemux` ("read forward"):
 
-| Code | Build | Time | Seeds | Files opened | Packets read | Mux runs read back | Slowest seed | Result |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| `dd8eaa7a` (the demux and mux code as shipped) | release with overflow checks and debug assertions | 2,100 s | 222,156,780 | 42,549,697 | 856,754,265 | 5,060,562 | 267 ms | No panic, no failure |
-| `d26b5ba4` (before the dropped-frame and decode-time changes) | release | 2,100 s | 240,161,337 | 45,999,757 | 926,205,237 | 4,565,121 | 157 ms | No panic, no failure |
+| Code | Seed origin | Build | Time | Seeds | Files opened | Packets read | Read forward | Mux runs read back | Slowest seed | Result |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `c9cd4cd4` (the code as it stands) | `0xc0ffee5eed` | release with overflow checks and debug assertions | 1,200 s | 115,737,855 | 22,168,959 | 449,401,216 | 938,517,854 | 2,635,410 | 58 ms | No panic, no failure |
+| `982bfe7f` (frame cutting, raw video, interleaving, forward reading; before the copy-saving and decode-order muxer changes) | `0x5eed7c3a91` | release with overflow checks and debug assertions | 2,100 s | 181,088,106 | 34,690,119 | 703,180,191 | 1,468,459,313 | 4,125,093 | 277 ms | No panic, no failure |
+| `dd8eaa7a` (the first demux and mux code) | `0xa51000` | release with overflow checks and debug assertions | 2,100 s | 222,156,780 | 42,549,697 | 856,754,265 | | 5,060,562 | 267 ms | No panic, no failure |
+| `d26b5ba4` (before the dropped-frame and decode-time changes) | `0xa51000` | release | 2,100 s | 240,161,337 | 45,999,757 | 926,205,237 | | 4,565,121 | 157 ms | No panic, no failure |
 
-The two runs start from the same seed origin, so the second walked the same generated inputs over newer code rather than new inputs. Every mux run in them is bounded mux fuzzing: a random packet list either is refused or finishes, and a finished file reads back with every packet. This is an in-process generator and mutator, not a coverage-guided fuzzer; `cargo fuzz` was not used.
+The two oldest runs share a seed origin, so the second walked the same generated inputs over newer code. Every mux run is bounded mux fuzzing: a random packet list, under no interleave limit, a small one or the default, either is refused or finishes, and a finished file reads back with every packet. This is an in-process generator and mutator, not a coverage-guided fuzzer; `cargo fuzz` was not used.
 
-Demux is ready for the formats marked verified above: each was checked packet for packet against ffprobe or GStreamer, the malformed-input tests and the fuzz campaign found no panic, and opening, reading and seeking retired 0.15 to 0.29 times libavformat's instructions in the benchmark. Mux writes OpenDML files that ffprobe and GStreamer read back byte for byte for H.264, MJPEG, PCM, MP3 and AAC.
+Demux is ready for the formats marked verified above: each was checked packet for packet against ffprobe or GStreamer, the malformed-input tests and the fuzz campaigns found no panic, and opening, reading and seeking retired 0.15 to 0.29 times libavformat's instructions in the benchmark. Mux writes OpenDML files, over 1 GiB included, that ffprobe and GStreamer read back byte for byte for H.264, MPEG-4 Visual, VP9, AV1, MJPEG, raw video, PCM (integer, float, A-law, mu-law), MP3, MP2, AAC, AC-3, E-AC-3 and FLAC, and the export path writes AVI through it.
 
 Gaps and choices:
 

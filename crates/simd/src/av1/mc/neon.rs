@@ -8,13 +8,13 @@
 use core::arch::aarch64::{
     int8x16_t, int16x8_t, int32x4_t, uint8x16_t, vcombine_s16, vcombine_u16, vdotq_s32,
     vdupq_n_s16, vdupq_n_s32, vdupq_n_u8, veorq_u8, vget_lane_u64, vget_low_s16, vget_low_u8,
-    vmlal_high_s16, vmlal_s16, vmlaq_s16, vmovl_high_u8, vmovl_u8, vmulq_s16, vqmovn_u16,
-    vqrshrun_n_s16, vqrshrun_n_s32, vqtbl1q_s8, vreinterpret_u64_u8, vreinterpretq_s8_u8,
-    vreinterpretq_s16_u16, vrshrn_n_s32, vrshrq_n_s16, vshrn_n_s32,
+    vmlal_high_laneq_s16, vmlal_laneq_s16, vmlaq_s16, vmovl_high_u8, vmovl_u8, vmulq_s16,
+    vqmovn_u16, vqrshrun_n_s16, vqrshrun_n_s32, vqtbl1q_s8, vreinterpret_u64_u8,
+    vreinterpretq_s8_u8, vreinterpretq_s16_u16, vrshrn_n_s32, vrshrq_n_s16, vshrn_n_s32,
 };
 
 use super::Block;
-use crate::neon::{i16x8_array, u8x8, u8x16};
+use crate::neon::{i16x8, i16x8_array, u8x8, u8x16};
 
 /// Where a block's prediction goes.
 pub(super) enum Out<'a> {
@@ -74,45 +74,69 @@ impl Horizontal<'_> {
     }
 }
 
+/// The vertical sums of one output row, low and high halves: `$round`
+/// plus each named row times the lane of `$taps` after it.
+macro_rules! sums {
+    ($round:expr, $taps:expr; $($r:ident $l:literal),+) => {{
+        let (mut lo, mut hi) = ($round, $round);
+        $(
+            lo = vmlal_laneq_s16::<$l>(lo, vget_low_s16($r), $taps);
+            hi = vmlal_high_laneq_s16::<$l>(hi, $r, $taps);
+        )+
+        (lo, hi)
+    }};
+}
+
 /// Both passes over a block, eight columns at a time, the vertical taps
-/// `$t0 .. $t0 + N` for the `N` names after `;`: the last `N` rows of the
-/// horizontal filter stay in registers, one in each name, and each
-/// output row filters one more source row. `$store` takes the column,
-/// the row and the rounded vertical sums. Names rather than an array,
-/// which the compiler keeps on the stack.
+/// `$t0 ..` in the lanes of one vector. The rows of the horizontal filter
+/// an output row reads stay in registers, one in each name: `$init` the
+/// first ones, and `$spare` the name the next row goes to. Each step in
+/// brackets puts a new row in its first name, the one no later output
+/// reads, and filters the names after it with the lanes beside them: as
+/// many steps as names, so the names go round and no row moves between
+/// registers. `$store` takes the column, the row and the
+/// vertical sums. Names rather than an array, which the compiler keeps
+/// on the stack.
 macro_rules! strips {
-    ($hz:expr, $b:expr, $round:expr, $store:expr, $t0:literal; $($v:ident),+; $last:ident) => {{
+    (
+        $hz:expr, $b:expr, $round:expr, $store:expr, $t0:literal;
+        [$($init:ident),+]; $spare:ident;
+        $([$new:ident; $($r:ident $l:literal),+])+
+    ) => {{
         let (hz, b, round, mut store) = ($hz, $b, $round, $store);
-        let taps: [int16x8_t; 8] = core::array::from_fn(|t| {
-            vdupq_n_s16(b.fv.get($t0 + t).map_or(0, |&f| i16::from(f)))
-        });
+        // Behind `black_box`, so that the multiplies take their lanes
+        // rather than taps the compiler works out apart.
+        let taps = core::hint::black_box(i16x8(core::array::from_fn(|t| {
+            b.fv.get($t0 + t).map_or(0, |&f| i16::from(f))
+        })));
         'strips: for c in (0..b.w).step_by(8) {
             let mut at = b.start + $t0 * b.src_stride + c;
             $(
-                let Some(mut $v) = hz.row(at) else {
+                let Some(mut $init) = hz.row(at) else {
                     break 'strips;
                 };
                 at += b.src_stride;
             )+
-            for r in 0..b.h {
-                let Some($last) = hz.row(at) else {
-                    break 'strips;
-                };
-                at += b.src_stride;
-                let (mut lo, mut hi) = (round, round);
-                let mut t = 0;
+            let mut $spare: int16x8_t;
+            let mut r = 0;
+            'rows: loop {
                 $(
-                    lo = vmlal_s16(lo, vget_low_s16($v), vget_low_s16(taps[t]));
-                    hi = vmlal_high_s16(hi, $v, taps[t]);
-                    t += 1;
+                    if r == b.h {
+                        break 'rows;
+                    }
+                    let Some(next) = hz.row(at) else {
+                        break 'strips;
+                    };
+                    $new = next;
+                    at += b.src_stride;
+                    let (lo, hi) = sums!(round, taps; $($r $l),+);
+                    store(c, r, lo, hi);
+                    r += 1;
                 )+
-                lo = vmlal_s16(lo, vget_low_s16($last), vget_low_s16(taps[t]));
-                hi = vmlal_high_s16(hi, $last, taps[t]);
-                store(c, r, lo, hi);
-                strips!(@shift $($v),+; $last);
             }
         }
     }};
+    // One row on, for `vstrips!`.
     (@shift $a:ident, $($rest:ident),+; $last:ident) => {
         $a = strips!(@first $($rest),+);
         strips!(@shift $($rest),+; $last);
@@ -154,9 +178,23 @@ pub(super) fn hv(out: Out<'_>, dst_stride: usize, b: &Block<'_>) {
                 store_i16(dst, r * dst_stride + c, v);
             };
             if six {
-                strips!(&hz, b, round, store, 1; v0, v1, v2, v3, v4; v5)
+                strips!(&hz, b, round, store, 1; [v0, v1, v2, v3, v4]; v5;
+                    [v5; v0 0, v1 1, v2 2, v3 3, v4 4, v5 5]
+                    [v0; v1 0, v2 1, v3 2, v4 3, v5 4, v0 5]
+                    [v1; v2 0, v3 1, v4 2, v5 3, v0 4, v1 5]
+                    [v2; v3 0, v4 1, v5 2, v0 3, v1 4, v2 5]
+                    [v3; v4 0, v5 1, v0 2, v1 3, v2 4, v3 5]
+                    [v4; v5 0, v0 1, v1 2, v2 3, v3 4, v4 5])
             } else {
-                strips!(&hz, b, round, store, 0; v0, v1, v2, v3, v4, v5, v6; v7)
+                strips!(&hz, b, round, store, 0; [v0, v1, v2, v3, v4, v5, v6]; v7;
+                    [v7; v0 0, v1 1, v2 2, v3 3, v4 4, v5 5, v6 6, v7 7]
+                    [v0; v1 0, v2 1, v3 2, v4 3, v5 4, v6 5, v7 6, v0 7]
+                    [v1; v2 0, v3 1, v4 2, v5 3, v6 4, v7 5, v0 6, v1 7]
+                    [v2; v3 0, v4 1, v5 2, v6 3, v7 4, v0 5, v1 6, v2 7]
+                    [v3; v4 0, v5 1, v6 2, v7 3, v0 4, v1 5, v2 6, v3 7]
+                    [v4; v5 0, v6 1, v7 2, v0 3, v1 4, v2 5, v3 6, v4 7]
+                    [v5; v6 0, v7 1, v0 2, v1 3, v2 4, v3 5, v4 6, v5 7]
+                    [v6; v7 0, v0 1, v1 2, v2 3, v3 4, v4 5, v5 6, v6 7])
             }
         }
         Out::Put(dst) => {
@@ -167,9 +205,23 @@ pub(super) fn hv(out: Out<'_>, dst_stride: usize, b: &Block<'_>) {
                 store_bytes(dst, r * dst_stride + c, bytes);
             };
             if six {
-                strips!(&hz, b, round, store, 1; v0, v1, v2, v3, v4; v5)
+                strips!(&hz, b, round, store, 1; [v0, v1, v2, v3, v4]; v5;
+                    [v5; v0 0, v1 1, v2 2, v3 3, v4 4, v5 5]
+                    [v0; v1 0, v2 1, v3 2, v4 3, v5 4, v0 5]
+                    [v1; v2 0, v3 1, v4 2, v5 3, v0 4, v1 5]
+                    [v2; v3 0, v4 1, v5 2, v0 3, v1 4, v2 5]
+                    [v3; v4 0, v5 1, v0 2, v1 3, v2 4, v3 5]
+                    [v4; v5 0, v0 1, v1 2, v2 3, v3 4, v4 5])
             } else {
-                strips!(&hz, b, round, store, 0; v0, v1, v2, v3, v4, v5, v6; v7)
+                strips!(&hz, b, round, store, 0; [v0, v1, v2, v3, v4, v5, v6]; v7;
+                    [v7; v0 0, v1 1, v2 2, v3 3, v4 4, v5 5, v6 6, v7 7]
+                    [v0; v1 0, v2 1, v3 2, v4 3, v5 4, v6 5, v7 6, v0 7]
+                    [v1; v2 0, v3 1, v4 2, v5 3, v6 4, v7 5, v0 6, v1 7]
+                    [v2; v3 0, v4 1, v5 2, v6 3, v7 4, v0 5, v1 6, v2 7]
+                    [v3; v4 0, v5 1, v6 2, v7 3, v0 4, v1 5, v2 6, v3 7]
+                    [v4; v5 0, v6 1, v7 2, v0 3, v1 4, v2 5, v3 6, v4 7]
+                    [v5; v6 0, v7 1, v0 2, v1 3, v2 4, v3 5, v4 6, v5 7]
+                    [v6; v7 0, v0 1, v1 2, v2 3, v3 4, v4 5, v5 6, v6 7])
             }
         }
     }

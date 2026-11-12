@@ -242,8 +242,7 @@ impl<S: Sample> Published<S> {
         let done = if last { rows } else { deblocked.min(rows) };
         let (first, end) = (from.min(done) * self.mb_w, done * self.mb_w);
         if let Some(mbs) = pic.mb.get(first..end.min(pic.mb.len())) {
-            let cols: Vec<Colocated> = mbs.iter().map(|mb| mb.col).collect();
-            self.mbs.push(&cols);
+            self.mbs.push_with(mbs, |mb| mb.col);
         }
         let (luma, chroma) = if last {
             (self.h, self.h / 2)

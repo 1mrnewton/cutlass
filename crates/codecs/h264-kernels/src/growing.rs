@@ -49,6 +49,32 @@ impl<T: Copy> Growing<T> {
         }
     }
 
+    /// [`Self::push`] for what `make` makes of each of `from`, written in
+    /// place rather than gathered first. If `make` panics, none of this
+    /// call's items are counted in.
+    pub fn push_with<U>(&self, from: &[U], mut make: impl FnMut(&U) -> T) -> usize {
+        let _writing = self
+            .writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let start = self.filled.load(Ordering::Relaxed);
+        let count = from.len().min(self.cells.len() - start);
+        if count == 0 {
+            return 0;
+        }
+        for (cell, item) in self.cells[start..start + count].iter().zip(from) {
+            let made = make(item);
+            // SAFETY: the cell is past the filled items, which is all any
+            // reader is given, and the lock keeps any other writer out.
+            #[allow(unsafe_code)]
+            unsafe {
+                (*cell.get()).write(made);
+            }
+        }
+        self.filled.store(start + count, Ordering::Release);
+        count
+    }
+
     /// The filled items, in the buffer's own memory, its room kept: for a
     /// full buffer, as many items as it holds.
     pub fn into_vec(self) -> Vec<T> {
@@ -124,6 +150,21 @@ mod tests {
         assert_eq!(growing.filled(), &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         assert_eq!(growing.push(&[13]), 0);
         assert!(Growing::<u16>::new(0).filled().is_empty());
+    }
+
+    #[test]
+    fn pushes_what_is_made_of_each_item() {
+        let growing = Growing::<u32>::new(5);
+        assert_eq!(
+            growing.push_with(&[1u8, 2, 3], |&item| u32::from(item) * 10),
+            3
+        );
+        assert_eq!(
+            growing.push_with(&[4u8, 5, 6], |&item| u32::from(item) * 10),
+            2
+        );
+        assert_eq!(growing.filled(), &[10, 20, 30, 40, 50]);
+        assert_eq!(growing.push_with(&[7u8], |_| 0), 0);
     }
 
     #[test]

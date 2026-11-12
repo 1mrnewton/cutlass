@@ -8,7 +8,7 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use cutlass_codec::Packet;
-use cutlass_container::{Demux, Mux, NewStream, TrackDuration, TrackId};
+use cutlass_container::{Demux, Mux, NewStream, TrackDuration, TrackId, Trim};
 use cutlass_matroska::{MatroskaDemux, MatroskaMux};
 
 pub fn tool_on_path(name: &str) -> bool {
@@ -278,6 +278,9 @@ pub fn remux(input: &Path, output: &Path, webm: bool) {
                 language: stream.language().cloned(),
             })
             .expect("add stream");
+        if stream.trim() != Trim::default() {
+            mux.set_trim(id, stream.trim()).expect("trim");
+        }
         tracks.push((stream.id().get(), id, stream.timescale(), 0_i64));
     }
     for (index, packet) in packets.iter().enumerate() {

@@ -669,7 +669,17 @@ fn stream_for(
             .map_err(|error| Error::malformed(error.to_string()))?;
         edits.push(edit);
     }
-    let trim = Trim::new(pre_skip.map(u64::from), None);
+    // Opus states its pre-skip; any other audio track's CodecDelay is its
+    // encoder delay, counted in samples to the nearest.
+    let delay = pre_skip.map(u64::from).or_else(|| {
+        let rate = u128::from(params.sample_rate()?);
+        let ns = u128::from(entry.codec_delay);
+        (ns > 0).then(|| {
+            u64::try_from((ns * rate + u128::from(SECOND_NS / 2)) / u128::from(SECOND_NS))
+                .unwrap_or(u64::MAX)
+        })
+    });
+    let trim = Trim::new(delay, None);
     Ok(Stream::new(
         TrackId::new(id),
         params,

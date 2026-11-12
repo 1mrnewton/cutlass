@@ -223,8 +223,15 @@ fn webm_keeps_to_its_codecs_and_writes_opus_delay() {
             index == 0,
         ))
         .expect("vp9");
-        mux.write_packet(&packet(sound, vec![7; 20], index * 960, 960, 48_000, true))
-            .expect("opus");
+        mux.write_packet(&packet(
+            sound,
+            OPUS_20MS.to_vec(),
+            index * 960,
+            960,
+            48_000,
+            true,
+        ))
+        .expect("opus");
     }
     let bytes = finish(mux, &[(picture, 1000, 400), (sound, 48_000, 9600)]);
     assert!(bytes.windows(4).any(|window| window == b"webm"));
@@ -290,6 +297,100 @@ fn trailing_padding_shortens_the_last_block_and_is_written_as_discard_padding() 
     let got = all(&mut read_back(bytes));
     let durations: Vec<Option<i64>> = got.iter().map(|p| p.timestamp().duration()).collect();
     // 1024 samples: 21.333 ms, rounded to 21; the last plays 544: 11.33.
+    assert_eq!(durations, vec![Some(21), Some(21), Some(11)]);
+}
+
+/// One 20 ms CELT frame: TOC config 31, code 0.
+const OPUS_20MS: [u8; 4] = [0xF8, 1, 2, 3];
+/// One 2.5 ms CELT frame: TOC config 28, code 0.
+const OPUS_2_5MS: [u8; 3] = [0xE0, 1, 2];
+
+fn discard_ns(bytes: &[u8]) -> Vec<u64> {
+    bytes
+        .windows(11)
+        .filter(|window| window[..3] == [0x75, 0xA2, 0x88])
+        .map(|window| u64::from_be_bytes(window[3..].try_into().expect("eight")))
+        .collect()
+}
+
+#[test]
+fn an_opus_packet_shorter_than_its_toc_has_the_rest_discarded() {
+    let mut mux = MatroskaMux::webm(Cursor::new(Vec::new()));
+    let sound = mux
+        .add_stream(audio(CodecId::Opus, &opus_head(), 48_000))
+        .expect("opus");
+    for (index, duration) in [960, 960, 336].into_iter().enumerate() {
+        let pts = index as i64 * 960;
+        mux.write_packet(&packet(
+            sound,
+            OPUS_20MS.to_vec(),
+            pts,
+            duration,
+            48_000,
+            true,
+        ))
+        .expect("packet");
+    }
+    let bytes = finish(mux, &[(sound, 48_000, 2256)]);
+    // The last packet holds 960 samples and plays 336: 624 are 13 ms.
+    assert_eq!(discard_ns(&bytes), vec![13_000_000]);
+    let got = all(&mut read_back(bytes));
+    let durations: Vec<Option<i64>> = got.iter().map(|p| p.timestamp().duration()).collect();
+    assert_eq!(durations, vec![Some(20), Some(20), Some(7)]);
+
+    // Times in whole milliseconds, as from a remuxed file: 2.5 ms frames
+    // land 2 or 3 ms apart, and a 2 ms gap is rounding, not padding.
+    let mut mux = MatroskaMux::webm(Cursor::new(Vec::new()));
+    let stream = NewStream {
+        timescale: Timescale::new(1000),
+        ..audio(CodecId::Opus, &opus_head(), 48_000)
+    };
+    let sound = mux.add_stream(stream).expect("opus");
+    let mut pts = 0;
+    for duration in [3, 2, 3, 2] {
+        mux.write_packet(&packet(
+            sound,
+            OPUS_2_5MS.to_vec(),
+            pts,
+            duration,
+            1000,
+            true,
+        ))
+        .expect("packet");
+        pts += duration;
+    }
+    let bytes = finish(mux, &[(sound, 1000, 10)]);
+    assert!(discard_ns(&bytes).is_empty());
+}
+
+/// Trim is counted in samples whatever the track's timescale: on a
+/// millisecond track, 480 samples of padding take 10 ticks off the last
+/// block, and the encoder delay comes back as samples.
+#[test]
+fn trim_in_samples_fits_a_millisecond_track() {
+    let mut mux = MatroskaMux::new(Cursor::new(Vec::new()));
+    let stream = NewStream {
+        timescale: Timescale::new(1000),
+        ..audio(CodecId::Aac, ASC, 48_000)
+    };
+    let sound = mux.add_stream(stream).expect("aac");
+    mux.set_trim(sound, Trim::new(Some(1024), None))
+        .expect("delay");
+    for index in 0..3 {
+        if index == 2 {
+            mux.set_trim(sound, Trim::new(Some(1024), Some(480)))
+                .expect("trim");
+        }
+        mux.write_packet(&packet(sound, vec![1; 10], index * 21, 21, 1000, true))
+            .expect("packet");
+    }
+    let bytes = finish(mux, &[(sound, 1000, 63)]);
+    assert_eq!(discard_ns(&bytes), vec![10_000_000]);
+    let mut demux = read_back(bytes);
+    assert_eq!(demux.streams()[0].trim().encoder_delay(), Some(1024));
+    assert_eq!(demux.track_entries()[0].codec_delay, 21_333_333);
+    let got = all(&mut demux);
+    let durations: Vec<Option<i64>> = got.iter().map(|p| p.timestamp().duration()).collect();
     assert_eq!(durations, vec![Some(21), Some(21), Some(11)]);
 }
 

@@ -391,13 +391,9 @@ fn files_this_crate_writes_read_in_ffprobe_and_gstreamer() {
         }
         // libavformat reads the copy the same way we do.
         agrees_with_libavformat(&out, &dir, Some(case.codecs));
-        // CodecDelay survives for Opus (it is in the OpusHead); the remux
-        // has no encoder to state it for the others.
-        for (index, codec) in case.codecs.iter().enumerate() {
-            if *codec == CodecId::Opus {
-                assert_eq!(source_delay[index], after_delay[index], "{}", case.name);
-            }
-        }
+        // CodecDelay survives: Opus's is in the OpusHead, and the others
+        // come back as the stream's encoder delay, which the copy states.
+        assert_eq!(source_delay, after_delay, "{}", case.name);
         agrees_with_gstreamer(&out);
         // FFmpeg seeks the copy through its Cues.
         if case.codecs.len() > 1 {

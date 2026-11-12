@@ -309,6 +309,30 @@ pub(crate) fn opus_pre_skip(head: &[u8]) -> Option<u16> {
     Some(u16::from_le_bytes([*head.get(10)?, *head.get(11)?]))
 }
 
+/// Samples at 48 kHz an Opus packet decodes to, from its TOC byte and frame
+/// count (RFC 6716, 3.1). `None` for an empty packet, a code-3 packet with
+/// no count byte, or one longer than the 120 ms the format allows.
+#[must_use]
+pub fn opus_packet_samples(packet: &[u8]) -> Option<u32> {
+    let toc = *packet.first()?;
+    let config = toc >> 3;
+    let frame = match config {
+        // SILK: 10, 20, 40, 60 ms.
+        0..=11 => [480, 960, 1920, 2880][usize::from(config % 4)],
+        // Hybrid: 10, 20 ms.
+        12..=15 => [480, 960][usize::from(config % 2)],
+        // CELT: 2.5, 5, 10, 20 ms.
+        _ => [120, 240, 480, 960][usize::from(config % 4)],
+    };
+    let frames = match toc & 3 {
+        0 => 1,
+        1 | 2 => 2,
+        _ => u32::from(*packet.get(1)? & 0x3F),
+    };
+    let samples = frame * frames;
+    (samples > 0 && samples <= 5760).then_some(samples)
+}
+
 /// `V_MS/VFW/FOURCC`: a BITMAPINFOHEADER. The compression FourCC names the
 /// codec; bytes after the 40-byte header are its extradata.
 fn vfw(track: &TrackEntry, private: &[u8], fix: FrameFix) -> Result<Mapped> {
@@ -627,9 +651,27 @@ fn flac_private(extra: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FrameFix, legacy_aac, map_track, pcm_layout, rate_u32, written};
+    use super::{
+        FrameFix, legacy_aac, map_track, opus_packet_samples, pcm_layout, rate_u32, written,
+    };
     use crate::meta::{Encoding, TrackEntry, TrackKind};
     use cutlass_codec::{CodecId, StreamCodec};
+
+    #[test]
+    fn opus_packets_count_their_samples_from_the_toc() {
+        // SILK 60 ms, one frame.
+        assert_eq!(opus_packet_samples(&[3 << 3]), Some(2880));
+        // Hybrid 20 ms, two frames.
+        assert_eq!(opus_packet_samples(&[(13 << 3) | 1, 0]), Some(1920));
+        // CELT 2.5 ms, code 3 with six frames.
+        assert_eq!(opus_packet_samples(&[(28 << 3) | 3, 6]), Some(720));
+        // CELT 20 ms, code 3 with seven frames: 140 ms, more than allowed.
+        assert_eq!(opus_packet_samples(&[(31 << 3) | 3, 7]), None);
+        // Code 3 with no count byte, a zero count, and nothing at all.
+        assert_eq!(opus_packet_samples(&[(31 << 3) | 3]), None);
+        assert_eq!(opus_packet_samples(&[(31 << 3) | 3, 0]), None);
+        assert_eq!(opus_packet_samples(&[]), None);
+    }
 
     fn track(id: &[u8], kind: TrackKind) -> TrackEntry {
         TrackEntry {

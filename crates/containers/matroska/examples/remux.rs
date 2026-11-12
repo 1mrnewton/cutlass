@@ -9,10 +9,10 @@
 #![allow(clippy::print_stdout)]
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter};
+use std::io::BufWriter;
 
 use cutlass_codec::{Packet, Timestamp};
-use cutlass_container::{Demux, Mux, NewStream, TrackDuration, TrackId};
+use cutlass_container::{Demux, Mux, NewStream, TrackDuration, TrackId, Trim};
 use cutlass_matroska::{MatroskaDemux, MatroskaMux};
 
 fn main() -> Result<(), String> {
@@ -21,8 +21,7 @@ fn main() -> Result<(), String> {
     let output = args.next().ok_or("usage: remux <in> <out>")?;
     let file = File::open(&input).map_err(|error| error.to_string())?;
     let length = file.metadata().map_err(|error| error.to_string())?.len();
-    let mut demux =
-        MatroskaDemux::open(BufReader::new(file), length).map_err(|error| error.to_string())?;
+    let mut demux = MatroskaDemux::open(file, length).map_err(|error| error.to_string())?;
     let streams = demux.streams().to_vec();
     let mut packets = Vec::new();
     while let Some(packet) = demux.read_packet().map_err(|error| error.to_string())? {
@@ -47,6 +46,11 @@ fn main() -> Result<(), String> {
                 language: stream.language().cloned(),
             })
             .map_err(|error| error.to_string())?;
+        // The encoder delay a CodecDelay stated, so that the copy keeps it.
+        if stream.trim() != Trim::default() {
+            mux.set_trim(id, stream.trim())
+                .map_err(|error| error.to_string())?;
+        }
         ids.push((stream.id().get(), id, stream.timescale(), 0_i64));
     }
     for packet in &packets {

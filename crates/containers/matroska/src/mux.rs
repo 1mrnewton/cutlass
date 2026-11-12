@@ -37,12 +37,15 @@
 //! # Codec delay and padding
 //!
 //! An Opus track's CodecDelay is its pre-skip and its SeekPreRoll 80 ms
-//! (RFC 9559, 5.1.4.1.30; the Matroska Opus mapping). An AAC, AC-3, E-AC-3
-//! or MP3 track whose encoder states a delay before the first packet goes
-//! out gets that as CodecDelay. Packet times are not shifted: the stored
-//! timestamps include the delay, which a player subtracts. Trailing padding
-//! stated for those codecs shortens the BlockDuration of the track's next
-//! (last) packet and is written as its DiscardPadding.
+//! (RFC 9559, 5.1.4.1.30; the Matroska Opus mapping). Any other audio
+//! track whose encoder delay is stated ([`Mux::set_trim`]) before its first
+//! packet goes out gets that as CodecDelay. Packet times are not shifted:
+//! the stored timestamps include the delay, which a player subtracts.
+//! Trailing padding stated for those tracks shortens the BlockDuration of
+//! the track's next (last) packet and is written as its DiscardPadding. An
+//! Opus packet whose duration falls short of the samples its TOC byte says
+//! it holds (an encoder's last packet) has the difference written as
+//! DiscardPadding, so a player drops those samples.
 
 use std::collections::VecDeque;
 use std::io::{Seek, SeekFrom, Write};
@@ -53,7 +56,9 @@ use cutlass_container::{
     NewStream, TrackDuration, TrackId, Trim,
 };
 
-use crate::codec::{Written, aac_config, allowed, opus_head, opus_pre_skip, written};
+use crate::codec::{
+    Written, aac_config, allowed, opus_head, opus_packet_samples, opus_pre_skip, written,
+};
 use crate::ebml::{
     UNKNOWN_SIZE, put_bytes, put_float, put_id, put_master, put_size, put_size_width, put_uint,
     put_uint8, put_void, size_width,
@@ -77,8 +82,8 @@ const OPUS_SEEK_PRE_ROLL_NS: u64 = 80_000_000;
 
 const APP: &[u8] = b"Cutlass";
 
-/// One packet waiting for its turn, and the trailing padding (track
-/// ticks) the encoder stated just before it.
+/// One packet waiting for its turn, and the trailing padding (samples)
+/// the encoder stated just before it.
 struct Held {
     packet: Packet,
     padding: u64,
@@ -442,14 +447,12 @@ impl<W: Write + Seek> MatroskaMux<W> {
         Ok((out, offsets))
     }
 
-    /// CodecDelay in nanoseconds: Opus's pre-skip, or the encoder delay an
-    /// AAC, AC-3, E-AC-3 or MP3 encoder stated.
+    /// CodecDelay in nanoseconds: Opus's pre-skip, or the encoder delay
+    /// stated for any other audio track.
     fn codec_delay_ns(&self, track: &Track, written: &Written) -> u64 {
         let samples = match track.codec {
             CodecId::Opus => opus_pre_skip(&written.private).map(u64::from),
-            CodecId::Aac | CodecId::Ac3 | CodecId::Eac3 | CodecId::Mp3 => {
-                track.trim.and_then(Trim::encoder_delay)
-            }
+            _ if !track.is_video() => track.trim.and_then(Trim::encoder_delay),
             _ => None,
         };
         let rate = match track.codec {
@@ -527,13 +530,10 @@ impl<W: Write + Seek> MatroskaMux<W> {
         let time = self
             .to_segment(pts, timescale)
             .ok_or_else(|| rejected("timestamp does not fit"))?;
-        let padding = i64::try_from(held.padding)
-            .unwrap_or(i64::MAX)
-            .min(duration);
-        let played = duration - padding;
+        let (played, discard_ns) = trailing(track, held, duration);
         let video = track.is_video();
         let keyframe = packet.keyframe();
-        let needs_group = track.default_duration != Some(duration) || padding > 0;
+        let needs_group = track.default_duration != Some(duration) || discard_ns > 0;
         let strip = track
             .written
             .as_ref()
@@ -589,15 +589,10 @@ impl<W: Write + Seek> MatroskaMux<W> {
                 put_size(&mut tail, 2);
                 tail.extend_from_slice(&bytes[6..]);
             }
-            if padding > 0 {
-                let rate = self.tracks[index].params.sample_rate().unwrap_or(0);
-                if rate > 0 {
-                    let ns = i128::from(padding) * SECOND_NS / i128::from(rate);
-                    let ns = u64::try_from(ns).unwrap_or(0);
-                    put_id(&mut tail, ids::DISCARD_PADDING);
-                    put_size(&mut tail, 8);
-                    tail.extend_from_slice(&ns.to_be_bytes());
-                }
+            if discard_ns > 0 {
+                put_id(&mut tail, ids::DISCARD_PADDING);
+                put_size(&mut tail, 8);
+                tail.extend_from_slice(&discard_ns.to_be_bytes());
             }
             let group_len = 1 + size_width(block_len) as u64 + block_len + len(&tail);
             put_id(&mut element, ids::BLOCK_GROUP);
@@ -795,6 +790,41 @@ impl<W: Write + Seek> MatroskaMux<W> {
         put_master(&mut out, ids::CUES, &body);
         out
     }
+}
+
+/// A packet's BlockDuration (track ticks) and DiscardPadding (ns).
+///
+/// Trailing padding the encoder stated, in samples, comes off the packet's
+/// duration. An Opus packet whose duration is shorter than what its TOC
+/// says it decodes to has the rest discarded, as an Opus encoder's last
+/// packet is; a shortfall under one track tick is taken for rounding, so a
+/// file remuxed from millisecond times does not discard inside the stream.
+fn trailing(track: &Track, held: &Held, duration: i64) -> (i64, u64) {
+    let timescale = i128::from(track.timescale.ticks_per_second().max(1));
+    if track.codec == CodecId::Opus {
+        let Some(samples) = opus_packet_samples(held.packet.bytes()) else {
+            return (duration, 0);
+        };
+        let have = i128::from(duration) * 48_000 / timescale;
+        let slack = (48_000 + timescale - 1) / timescale - 1;
+        let extra = i128::from(samples) - have;
+        if extra <= slack.max(0) {
+            return (duration, 0);
+        }
+        let ns = u64::try_from(extra * SECOND_NS / 48_000).unwrap_or(0);
+        return (duration, ns);
+    }
+    let rate = i128::from(track.params.sample_rate().unwrap_or(0));
+    if held.padding == 0 || rate == 0 {
+        return (duration, 0);
+    }
+    let padding = i128::from(held.padding);
+    let ticks = (padding * timescale + rate / 2) / rate;
+    let ticks = i64::try_from(ticks)
+        .unwrap_or(i64::MAX)
+        .clamp(0, duration.max(0));
+    let ns = u64::try_from(padding * SECOND_NS / rate).unwrap_or(0);
+    (duration - ticks, ns)
 }
 
 fn len(bytes: &[u8]) -> u64 {
@@ -1009,10 +1039,8 @@ impl<W: Write + Seek + Send> Mux for MatroskaMux<W> {
         self.building()?;
         let index = self.track(track.get()).map_err(|error| self.fail(error))?;
         let entry = &mut self.tracks[index];
-        if matches!(
-            entry.codec,
-            CodecId::Aac | CodecId::Ac3 | CodecId::Eac3 | CodecId::Mp3
-        ) {
+        // An Opus packet's own TOC says what of it is padding.
+        if entry.codec != CodecId::Opus && !entry.is_video() {
             entry.pending_padding = trim.trailing_padding().unwrap_or(0);
         }
         entry.trim = Some(trim);

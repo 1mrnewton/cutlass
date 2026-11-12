@@ -9,7 +9,6 @@
 #![allow(clippy::print_stdout)]
 
 use std::fs::File;
-use std::io::BufReader;
 
 use cutlass_container::{Demux, SeekTo};
 use cutlass_matroska::MatroskaDemux;
@@ -19,7 +18,7 @@ fn main() -> Result<(), String> {
     let path = args.next().ok_or("usage: packets <file> [seek seconds]")?;
     let file = File::open(&path).map_err(|error| error.to_string())?;
     let length = file.metadata().map_err(|error| error.to_string())?.len();
-    let mut demux = MatroskaDemux::open(BufReader::new(file), length).map_err(|e| e.to_string())?;
+    let mut demux = MatroskaDemux::open(file, length).map_err(|e| e.to_string())?;
     println!(
         "doctype {} scale {}",
         demux.ebml_header().doc_type.as_str(),

@@ -5173,35 +5173,42 @@ fn intra_frame_scaled<S: Sample>(
             } else {
                 bx < 3 && scan_of(bx + 1, by - 1) < scan_of(bx, by)
             };
-            let mut above = [S::mid(); 8];
-            let mut left = [S::mid(); 4];
-            if above_ok {
-                let at = (y - 1) * stride + x;
-                above[..4].copy_from_slice(&pic.y[at..at + 4]);
-                if above_right {
-                    above[4..].copy_from_slice(&pic.y[at + 4..at + 8]);
-                } else {
-                    let edge = above[3];
-                    above[4..].fill(edge);
-                }
-            }
-            if left_ok {
-                for (row, sample) in left.iter_mut().enumerate() {
-                    *sample = pic.y[(y + row) * stride + x - 1];
-                }
-            }
-            let corner = if above_ok && left_ok {
-                pic.y[(y - 1) * stride + x - 1]
-            } else if above_ok {
-                above[0]
-            } else if left_ok {
-                left[0]
-            } else {
-                S::mid()
-            };
             let mode = mb.mode4[by * 4 + bx];
-            let pred = recon::pred4(mode, &above, &left, corner, above_ok, left_ok);
-            put_block(&mut pic.y, stride, x, y, &pred, 4, 1);
+            let edges = cutlass_h264_kernels::intra::Near4 {
+                above: above_ok,
+                above_right,
+                left: left_ok,
+            };
+            if !S::pred4_fast(&mut pic.y, y * stride + x, stride, mode, edges) {
+                let mut above = [S::mid(); 8];
+                let mut left = [S::mid(); 4];
+                if above_ok {
+                    let at = (y - 1) * stride + x;
+                    above[..4].copy_from_slice(&pic.y[at..at + 4]);
+                    if above_right {
+                        above[4..].copy_from_slice(&pic.y[at + 4..at + 8]);
+                    } else {
+                        let edge = above[3];
+                        above[4..].fill(edge);
+                    }
+                }
+                if left_ok {
+                    for (row, sample) in left.iter_mut().enumerate() {
+                        *sample = pic.y[(y + row) * stride + x - 1];
+                    }
+                }
+                let corner = if above_ok && left_ok {
+                    pic.y[(y - 1) * stride + x - 1]
+                } else if above_ok {
+                    above[0]
+                } else if left_ok {
+                    left[0]
+                } else {
+                    S::mid()
+                };
+                let pred = recon::pred4(mode, &above, &left, corner, above_ok, left_ok);
+                put_block(&mut pic.y, stride, x, y, &pred, 4, 1);
+            }
             if luma_cbp & (1 << ((by / 2) * 2 + bx / 2)) == 0
                 || cab.decision(CBF_BASE[2] + cbf_inc(mb, bx, by))? == 0
             {

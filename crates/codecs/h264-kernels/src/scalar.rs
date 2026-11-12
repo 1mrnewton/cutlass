@@ -882,3 +882,39 @@ pub fn pred8(
     }
     true
 }
+
+/// See [`crate::intra::pred4`]: each sample worked out on its own.
+pub fn pred4(
+    plane: &mut [u8],
+    at: usize,
+    down: usize,
+    mode: u8,
+    near: crate::intra::Near4,
+) -> bool {
+    use crate::intra::{dc4, edges4, sample4};
+    let Some(start) = crate::intra::corner4_at(plane.len(), at, down) else {
+        return false;
+    };
+    let Some(&top) = plane[start..].first_chunk::<9>() else {
+        return false;
+    };
+    let side = core::array::from_fn(|y| plane[at - 1 + y * down]);
+    let (above, left, corner) = edges4(&top, side, near);
+    let directional = match mode {
+        0 | 3 | 7 => near.above,
+        1 | 8 => near.left,
+        4..=6 => near.above && near.left,
+        _ => false,
+    };
+    let dc = dc4(&above, &left, near);
+    for y in 0..4 {
+        for x in 0..4 {
+            plane[at + y * down + x] = if directional {
+                sample4(mode, x, y, &above, &left, corner)
+            } else {
+                dc
+            };
+        }
+    }
+    true
+}

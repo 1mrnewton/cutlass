@@ -476,6 +476,20 @@ pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
         false
     }
 
+    /// The 4×4 luma block from `at`, rows `down` apart, predicted in
+    /// place in Intra_4x4 `mode` from the samples beside it that `near`
+    /// allows, as gathering them, [`pred4`] and putting its result there
+    /// do. `false` as for [`Self::predict_fast`].
+    fn pred4_fast(
+        _plane: &mut [Self],
+        _at: usize,
+        _down: usize,
+        _mode: u8,
+        _near: cutlass_h264_kernels::intra::Near4,
+    ) -> bool {
+        false
+    }
+
     /// The 8×8 luma block from `at`, rows `down` apart, predicted in
     /// place in Intra_8x8 `mode` from the samples beside it that `near`
     /// allows, as gathering them, `pred8_from` and putting its result
@@ -738,6 +752,16 @@ impl Sample for u8 {
         near: (bool, bool),
     ) -> bool {
         cutlass_h264_kernels::intra::pred16(plane, at, down, mode, near)
+    }
+
+    fn pred4_fast(
+        plane: &mut [Self],
+        at: usize,
+        down: usize,
+        mode: u8,
+        near: cutlass_h264_kernels::intra::Near4,
+    ) -> bool {
+        cutlass_h264_kernels::intra::pred4(plane, at, down, mode, near)
     }
 
     fn pred8_fast(

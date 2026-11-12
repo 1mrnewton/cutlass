@@ -14,7 +14,7 @@ use core::arch::aarch64::{
     vrev64_u8, vrhadd_u8, vrhaddq_u8,
 };
 
-use crate::intra::{Edges8, Near8, avg3, sample8};
+use crate::intra::{Edges8, Near4, Near8, avg3, dc4, edges4, sample4, sample8};
 
 use crate::neon::{load16, rows_of, store16};
 
@@ -424,6 +424,110 @@ pub(crate) fn pred8(plane: &mut [u8], at: usize, down: usize, mode: u8, near: Ne
             } as u8;
             for y in 0..8 {
                 put(y, [dc; 8]);
+            }
+        }
+    }
+    true
+}
+
+/// The four bytes from lane `N` of `vector`, as a row of a 4×4 block.
+macro_rules! window4 {
+    ($vector:expr, $n:literal) => {
+        (vget_lane_u64::<0>(vreinterpret_u64_u8(vext_u8::<$n>($vector, $vector))) as u32)
+            .to_le_bytes()
+    };
+}
+
+/// See [`crate::intra::pred4`].
+#[target_feature(enable = "neon")]
+pub(crate) fn pred4(plane: &mut [u8], at: usize, down: usize, mode: u8, near: Near4) -> bool {
+    let Some(start) = crate::intra::corner4_at(plane.len(), at, down) else {
+        return false;
+    };
+    // The corner and the eight samples after it, copied out before the
+    // block's rows are borrowed: the two may share bytes.
+    let Some(&top) = plane.get(start..).and_then(|row| row.first_chunk::<9>()) else {
+        return false;
+    };
+    let Some(window) = plane.get_mut(at - 1..) else {
+        return false;
+    };
+    let Some(mut rows) = rows_of::<5, 4>(window, down) else {
+        return false;
+    };
+    let side = core::array::from_fn(|y| rows[y][0]);
+    let (above, left, corner) = edges4(&top, side, near);
+    let mut put = |y: usize, samples: [u8; 4]| {
+        let [_, row @ ..] = &mut *rows[y];
+        *row = samples;
+    };
+    let both = near.above && near.left;
+    let line = vcreate_u8(u64::from_le_bytes(above));
+    match mode {
+        0 if near.above => {
+            let Some(&row) = above.first_chunk::<4>() else {
+                unreachable!("eight samples above hold four");
+            };
+            for y in 0..4 {
+                put(y, row);
+            }
+        }
+        1 if near.left => {
+            for (y, sample) in left.into_iter().enumerate() {
+                put(y, [sample; 4]);
+            }
+        }
+        3 if near.above => {
+            // The row above filtered, its last sample repeating past the
+            // end; each row is that from its own place.
+            let last = vdup_n_u8(above[7]);
+            let t = avg3d(line, vext_u8::<1>(line, last), vext_u8::<2>(line, last));
+            put(0, window4!(t, 0));
+            put(1, window4!(t, 1));
+            put(2, window4!(t, 2));
+            put(3, window4!(t, 3));
+        }
+        4 if both => {
+            // The left column bottom up, the corner, then the row above,
+            // filtered; each row is that from its own place.
+            let [l0, l1, l2, l3] = left;
+            let edge = u64::from_le_bytes([l3, l2, l1, l0, corner, above[0], above[1], above[2]]);
+            let e = vcombine_u8(vcreate_u8(edge), vcreate_u8(u64::from(above[3])));
+            let d = vget_low_u8(avg3q(e, vextq_u8::<1>(e, e), vextq_u8::<2>(e, e)));
+            put(0, window4!(d, 3));
+            put(1, window4!(d, 2));
+            put(2, window4!(d, 1));
+            put(3, window4!(d, 0));
+        }
+        7 if near.above => {
+            let next = vext_u8::<1>(line, line);
+            let halves = vrhadd_u8(line, next);
+            let thirds = avg3d(line, next, vext_u8::<2>(line, line));
+            put(0, window4!(halves, 0));
+            put(1, window4!(thirds, 0));
+            put(2, window4!(halves, 1));
+            put(3, window4!(thirds, 1));
+        }
+        5 | 6 if both => {
+            for y in 0..4 {
+                put(
+                    y,
+                    core::array::from_fn(|x| sample4(mode, x, y, &above, &left, corner)),
+                );
+            }
+        }
+        8 if near.left => {
+            for y in 0..4 {
+                put(
+                    y,
+                    core::array::from_fn(|x| sample4(mode, x, y, &above, &left, corner)),
+                );
+            }
+        }
+        _ => {
+            let dc = dc4(&above, &left, near);
+            for y in 0..4 {
+                put(y, [dc; 4]);
             }
         }
     }

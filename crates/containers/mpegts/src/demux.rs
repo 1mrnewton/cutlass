@@ -368,6 +368,7 @@ impl<R: Read + Seek> TsDemux<R> {
                     }
                 }
             }
+            let mut stop = false;
             for (index, unit) in out.drain(..) {
                 if index != track {
                     continue;
@@ -377,10 +378,6 @@ impl<R: Read + Seek> TsDemux<R> {
                     seen += 1;
                     continue;
                 };
-                if unit.dts.unwrap_or(pts) > target {
-                    ended = true;
-                    break;
-                }
                 let candidate = Candidate {
                     pts,
                     dts: unit.dts,
@@ -388,8 +385,19 @@ impl<R: Read + Seek> TsDemux<R> {
                     preroll: u32::from(pts < target),
                     before: seen,
                 };
+                seen += 1;
                 if unit.keyframe && first.is_none() {
-                    first = Some(candidate);
+                    first = Some(Candidate {
+                        preroll: 0,
+                        ..candidate
+                    });
+                }
+                // Decode times only rise: nothing after this is shown
+                // before the target. The rest of the batch is only looked
+                // at for the first keyframe.
+                if stop || unit.dts.unwrap_or(pts) > target {
+                    stop = true;
+                    continue;
                 }
                 if unit.keyframe && pts <= target {
                     landing = Some(candidate);
@@ -398,8 +406,8 @@ impl<R: Read + Seek> TsDemux<R> {
                 {
                     landing.preroll = landing.preroll.saturating_add(1);
                 }
-                seen += 1;
             }
+            ended |= stop;
         }
         // Keep looking for the first keyframe when the run began at the
         // start and none came before the target.

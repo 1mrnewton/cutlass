@@ -149,22 +149,27 @@ pub(crate) fn pred_chroma(
     };
     let [top, body @ ..] = rows;
     let [corner, up @ ..] = &*top;
-    let (corner, up) = (*corner, *up);
+    // The row above as one word, so that a mode that copies it moves it
+    // whole rather than byte by byte.
+    let (corner, up_word) = (*corner, u64::from_le_bytes(*up));
+    let up = up_word.to_le_bytes();
     let side: [u8; 8] = core::array::from_fn(|y| body[y][0]);
-    let mut put = |y: usize, samples: [u8; 8]| {
+    let mut put = |y: usize, samples: u64| {
         let [_, row @ ..] = &mut *body[y];
-        *row = samples;
+        *row = samples.to_le_bytes();
     };
     let (above, left) = near;
+    // Eight copies of a sample, or four of each of two.
+    const ONES: u64 = 0x0101_0101_0101_0101;
     match mode {
         1 if left => {
             for (y, &sample) in side.iter().enumerate() {
-                put(y, [sample; 8]);
+                put(y, u64::from(sample) * ONES);
             }
         }
         2 if above => {
             for y in 0..8 {
-                put(y, up);
+                put(y, up_word);
             }
         }
         3 if above && left => {
@@ -174,8 +179,10 @@ pub(crate) fn pred_chroma(
             let mut sums = load_lanes(&columns(a - 3 * c, b, 0, 3));
             let step = vdupq_n_s16(c as i16);
             for y in 0..8 {
-                let samples = vreinterpret_u64_u8(vqshrun_n_s16::<5>(sums));
-                put(y, vget_lane_u64::<0>(samples).to_le_bytes());
+                put(
+                    y,
+                    vget_lane_u64::<0>(vreinterpret_u64_u8(vqshrun_n_s16::<5>(sums))),
+                );
                 sums = vaddq_s16(sums, step);
             }
         }
@@ -186,25 +193,30 @@ pub(crate) fn pred_chroma(
                     .map(|&s| u32::from(s))
                     .sum()
             };
-            let dc = |x: usize, y: usize| -> u8 {
-                let (along, beside) = (quarter(&up, x), quarter(&side, y));
-                let value = match near {
-                    (true, true) if x == y => (along + beside + 4) >> 3,
-                    (true, true) if y == 0 => (along + 2) >> 2,
+            let (up_left, up_right) = (quarter(&up, 0), quarter(&up, 1));
+            let (side_top, side_bottom) = (quarter(&side, 0), quarter(&side, 1));
+            // The DC of each 4×4 quarter: from both edges beside it when
+            // the quarter touches both, else from the one edge it touches,
+            // else from the other.
+            let dc = |along: u32, beside: u32, diagonal: bool, top: bool| -> u64 {
+                u64::from(match near {
+                    (true, true) if diagonal => (along + beside + 4) >> 3,
+                    (true, true) if top => (along + 2) >> 2,
                     (true, true) => (beside + 2) >> 2,
                     (true, false) => (along + 2) >> 2,
                     (false, true) => (beside + 2) >> 2,
                     (false, false) => 128,
-                };
-                value as u8
+                })
             };
-            // Four copies of the left quarter's DC, then of the right one's.
-            let halves = |left: u8, right: u8| {
-                ((u64::from(left) * 0x0101_0101) | ((u64::from(right) * 0x0101_0101) << 32))
-                    .to_le_bytes()
-            };
-            let upper = halves(dc(0, 0), dc(1, 0));
-            let lower = halves(dc(0, 1), dc(1, 1));
+            let halves = |left: u64, right: u64| (left | right << 32) * (ONES & 0xffff_ffff);
+            let upper = halves(
+                dc(up_left, side_top, true, true),
+                dc(up_right, side_top, false, true),
+            );
+            let lower = halves(
+                dc(up_left, side_bottom, false, false),
+                dc(up_right, side_bottom, true, false),
+            );
             for y in 0..8 {
                 put(y, if y < 4 { upper } else { lower });
             }

@@ -784,10 +784,19 @@ pub fn neg_interleave(x: i32, r: i32, max: i32) -> i32 {
 /// The bytes of the first `n` (at most 16) of 16 lanes.
 #[inline(always)]
 fn lane_mask(n: usize) -> u128 {
-    u128::MAX
-        .checked_shr(128 - 8 * n.min(16) as u32)
-        .unwrap_or(0)
+    LANE_MASKS[n.min(16)]
 }
+
+/// [`lane_mask`] by `n`: a load rather than a 128-bit shift.
+const LANE_MASKS: [u128; 17] = {
+    let mut m = [0u128; 17];
+    let mut n = 1;
+    while n <= 16 {
+        m[n] = u128::MAX >> (128 - 8 * n);
+        n += 1;
+    }
+    m
+};
 
 /// Entries `at..at + n` (`n` at most 16) of a context array as the bytes of
 /// a `u128`, the bytes from `n` on 0: a load and a mask rather than a loop

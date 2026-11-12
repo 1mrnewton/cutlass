@@ -4,8 +4,9 @@
 //! (any track's cue points when the track has none of its own; the Cluster
 //! headers when the file has no Cues) and walks block headers from that
 //! Cluster. The landing is the last keyframe of the track at or before the
-//! target. No frame byte is read on the walk: a block's track, time and
-//! flags are in its first few octets, and the rest is skipped with a seek.
+//! target. No frame byte is inspected on the walk: a block's track, time
+//! and flags are in its first few octets, and the rest is skipped, inside
+//! the read-ahead buffer when it is there and with a seek when not.
 //! When the walk finds no keyframe at or before the target, it starts again
 //! one cue point earlier, a bounded number of times.
 //!

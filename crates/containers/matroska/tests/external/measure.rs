@@ -1,5 +1,5 @@
-//! What a seek costs: no frame is inspected, and the bytes read stay a
-//! small part of the file, with Cues and without.
+//! What a seek costs: no frame is inspected, and the bytes read stay
+//! within the GOP the walk crosses, with Cues and without.
 //!
 //! The file is 20 seconds of 640x360 H.264 at 4 Mb/s with a keyframe every
 //! two seconds, and AAC, written by FFmpeg (about 10 MB). The copy without
@@ -88,9 +88,11 @@ fn seeks_read_no_frames_and_a_small_part_of_the_file() {
     for (time, bytes, index, visited) in &costs {
         eprintln!("  seek {time} ms: {bytes} bytes read, index {index}, {visited} entries");
         assert!(*index);
-        // Each seek reads block headers across at most one GOP.
+        // Each seek reads across at most the GOP it walks (a tenth of the
+        // file) and one buffer past it: the walk reads whole buffers, since
+        // a read call costs far more than the bytes it brings.
         assert!(
-            bytes * 20 < length,
+            *bytes < length / 10 + 64 * 1024,
             "seek to {time} read {bytes} of {length}"
         );
     }

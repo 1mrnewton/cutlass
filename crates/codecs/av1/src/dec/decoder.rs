@@ -2649,12 +2649,18 @@ impl<T: Copy> Rect<T> {
 
     /// Writes the area into `dst`, `stride` wide.
     fn put(&self, dst: &mut [T], stride: usize) {
+        self.put_ring(dst, stride, usize::MAX);
+    }
+
+    /// [`Self::put`] into an array whose rows go round a ring, as in
+    /// [`Self::take_ring`].
+    fn put_ring(&self, dst: &mut [T], stride: usize, ring: usize) {
         let w = self.cols.len();
         if w == 0 {
             return;
         }
         for (r, row) in self.rows.clone().zip(self.data.chunks_exact(w)) {
-            let at = r * stride + self.cols.start;
+            let at = (r & ring) * stride + self.cols.start;
             if let Some(d) = dst.get_mut(at..at + w) {
                 d.copy_from_slice(row);
             }
@@ -2773,9 +2779,9 @@ impl RowMsg {
     /// Writes the transform sizes, CDEF indices and loop restoration units
     /// into `fs` (whose mode info reconstruction wrote).
     fn apply_meta(&self, fs: &mut FrameState) {
-        let st = fs.mi_stride;
+        let (st, ring) = (fs.mi_stride, fs.mi_ring);
         for (d, s) in fs.lf_tx.iter_mut().zip(&self.lf_tx) {
-            s.put(d, st);
+            s.put_ring(d, st, ring);
         }
         self.cdef.put(&mut fs.cdef_idx, fs.cdef_stride);
         for (p, s) in self.lr.iter().enumerate() {
@@ -3529,7 +3535,16 @@ fn decode_frame_async<P: PicturePixel>(
     let band_mi = !hdr.allow_intrabc && !hdr.use_superres;
     let (rc_fs, mut ft_fs, lr_scratch, rec, cur) = {
         let mut sp = lock(spares);
-        let (rc_fs, ft_fs) = take_shells(&mut sp, fs, band_mi.then(|| band_rows(seq)));
+        let (rc_fs, mut ft_fs) = take_shells(&mut sp, fs, band_mi.then(|| band_rows(seq)));
+        // The filters take each row's data as it comes, in order, and are
+        // done with it by the end of the superblock row below: their
+        // transform sizes and block info go round a ring that stays in
+        // the cache (as on one thread).
+        ft_fs.mi_ring = if hdr.use_superres {
+            usize::MAX
+        } else {
+            MI_RING - 1
+        };
         let lr = sp.lr.pop().unwrap_or_default();
         let none = || Picture::<P> {
             planes: Vec::new(),

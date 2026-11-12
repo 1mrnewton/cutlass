@@ -10963,11 +10963,22 @@ fn predict_inter<S: Sample>(
         }
         return Ok(());
     }
-    prefetch_motion(pic, dpb, slice, (mx, my), mb, 0);
+    // References of a smaller picture stay in the cache, and asking for
+    // their samples only costs: without it 720×1280 decoded 1.4% faster,
+    // and 1920×1080 2.6% slower.
+    let prefetch = pic.w.saturating_mul(pic.h) >= PREFETCH_FROM;
+    if prefetch {
+        prefetch_motion(pic, dpb, slice, (mx, my), mb, 0);
+    }
     predict_parts(pic, dpb, slice, (mx, my, whole), mb)?;
-    prefetch_motion(pic, dpb, slice, (mx, my), mb, 1);
+    if prefetch {
+        prefetch_motion(pic, dpb, slice, (mx, my), mb, 1);
+    }
     Ok(())
 }
+
+/// Luma samples from which [`prefetch_motion`] asks for reference samples.
+const PREFETCH_FROM: usize = 1_500_000;
 
 /// Asks the cache for reference samples a macroblock four further along
 /// the row is likely to read, from where this one's first block points in

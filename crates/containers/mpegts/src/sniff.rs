@@ -28,8 +28,8 @@ const fn unnamed(elementary: &Elementary) -> bool {
 }
 
 /// Names the unnamed private streams of `elementaries` from the packets
-/// `source` gives from `data_start`, until every one has [`SNIFF_BYTES`]
-/// of payload or [`MAX_OPEN_SCAN_BYTES`] are read. The caller rewinds the
+/// `source` gives from `data_start`, until each is decided or has
+/// [`SNIFF_BYTES`] of payload, or [`MAX_OPEN_SCAN_BYTES`] are read. The caller rewinds the
 /// source after.
 pub fn name_private_streams<R: Read>(
     source: &mut Source<R>,
@@ -69,9 +69,14 @@ pub fn name_private_streams<R: Read>(
         } else if !data.is_empty() {
             data.extend_from_slice(payload);
         }
-        if data.len() >= SNIFF_BYTES {
-            let (at, data) = gathered.swap_remove(slot);
-            elementaries[at].kind = kind_of_bytes(&data);
+        let decided = if data.len() >= SNIFF_BYTES {
+            Some(kind_of_bytes(data))
+        } else {
+            decide(data)
+        };
+        if let Some(kind) = decided {
+            let (at, _) = gathered.swap_remove(slot);
+            elementaries[at].kind = kind;
         }
     }
     for (at, data) in gathered {
@@ -94,26 +99,46 @@ fn pes_body(payload: &[u8]) -> Option<&[u8]> {
 }
 
 /// ADTS AAC, AC-3 or E-AC-3 when `data` starts with two headers of that
-/// syntax a frame apart; else [`Kind::Other`].
+/// syntax a frame apart, [`Kind::Other`] when it cannot, and `None` while
+/// the second header is not in `data` yet.
+fn decide(data: &[u8]) -> Option<Kind> {
+    if data.len() < 8 {
+        return None;
+    }
+    if let Some(first) = adts::header(data) {
+        let next = data.get(first.frame_len..)?;
+        if next.len() < 8 {
+            return None;
+        }
+        let same = adts::header(next).is_some_and(|second| {
+            (second.rate_index, second.channel_config) == (first.rate_index, first.channel_config)
+        });
+        return Some(if same { Kind::Adts } else { Kind::Other });
+    }
+    if let Some(first) = ac3::header(data) {
+        let next = data.get(first.len..)?;
+        if next.len() < 8 {
+            return None;
+        }
+        let same = ac3::header(next).is_some_and(|second| second.eac3 == first.eac3);
+        return Some(match (same, first.eac3) {
+            (false, _) => Kind::Other,
+            (true, false) => Kind::Ac3,
+            (true, true) => Kind::Eac3,
+        });
+    }
+    Some(Kind::Other)
+}
+
+/// [`decide`], taking a stream that ends before the second header as
+/// [`Kind::Other`].
 fn kind_of_bytes(data: &[u8]) -> Kind {
-    if let Some(first) = adts::header(data)
-        && let Some(second) = data.get(first.frame_len..).and_then(adts::header)
-        && (second.rate_index, second.channel_config) == (first.rate_index, first.channel_config)
-    {
-        return Kind::Adts;
-    }
-    if let Some(first) = ac3::header(data)
-        && let Some(second) = data.get(first.len..).and_then(ac3::header)
-        && second.eac3 == first.eac3
-    {
-        return if first.eac3 { Kind::Eac3 } else { Kind::Ac3 };
-    }
-    Kind::Other
+    decide(data).unwrap_or(Kind::Other)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Kind, kind_of_bytes, pes_body};
+    use super::{Kind, decide, kind_of_bytes, pes_body};
 
     fn adts_frame(len: usize) -> Vec<u8> {
         let mut frame = vec![0_u8; len];
@@ -134,6 +159,17 @@ mod tests {
         let mut data = adts_frame(100);
         data.extend(adts_frame(120));
         assert_eq!(kind_of_bytes(&data), Kind::Adts);
+    }
+
+    #[test]
+    fn the_answer_waits_for_the_second_header() {
+        let mut data = adts_frame(100);
+        assert_eq!(decide(&data), None);
+        data.extend(&adts_frame(120)[..7]);
+        assert_eq!(decide(&data), None);
+        data.push(0);
+        assert_eq!(decide(&data), Some(Kind::Adts));
+        assert_eq!(decide(&[0x47; 8]), Some(Kind::Other));
     }
 
     #[test]

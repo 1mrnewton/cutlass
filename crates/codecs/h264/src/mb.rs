@@ -11519,40 +11519,68 @@ fn mc_plain<S: Sample>(
         (None, Some(two)) => (two, None),
         (None, None) => return Ok((false, false)),
     };
-    let area = (x, y, w, h);
-    let stride = pic.w;
-    let luma = match (
-        luma_source(one.0, area, one.1),
-        two.map(|(frame, mv)| luma_source(frame, area, mv)),
-    ) {
-        (Some(a), None) => pic
-            .y
-            .get_mut(y * stride + x..)
-            .is_some_and(|dst| S::pair_fast((dst, stride), (w, h), a, None)),
-        (Some(a), Some(Some(b))) => pic
-            .y
-            .get_mut(y * stride + x..)
-            .is_some_and(|dst| S::pair_fast((dst, stride), (w, h), a, Some(b))),
-        _ => false,
+    let (Some(one), two) = (
+        ref_planes(one.0, block, one.1),
+        two.map(|(frame, mv)| ref_planes(frame, block, mv)),
+    ) else {
+        return Ok((false, false));
     };
-    let place = ((x / 2, y / 2), (w / 2, h / 2));
-    let stride = stride / 2;
-    let at = place.0.1 * stride + place.0.0;
-    let chroma = match (
-        chroma_sources(one.0, place, one.1),
-        two.map(|(frame, mv)| chroma_sources(frame, place, mv)),
-    ) {
-        (Some(a), None) => match (pic.u.get_mut(at..), pic.v.get_mut(at..)) {
-            (Some(u), Some(v)) => S::chroma_planes_fast((u, v, stride), place.1, a, None),
-            _ => false,
-        },
-        (Some(a), Some(Some(b))) => match (pic.u.get_mut(at..), pic.v.get_mut(at..)) {
-            (Some(u), Some(v)) => S::chroma_planes_fast((u, v, stride), place.1, a, Some(b)),
-            _ => false,
-        },
-        _ => false,
+    let two = match two {
+        Some(None) => return Ok((false, false)),
+        Some(Some(two)) => Some(two),
+        None => None,
     };
-    Ok((luma, chroma))
+    let (stride, size) = (pic.w, (pic.w, pic.h));
+    Ok(S::plain_fast(
+        (&mut pic.y, &mut pic.u, &mut pic.v, stride, size),
+        (x, y, w, h),
+        one,
+        two,
+    ))
+}
+
+/// The planes of `frame` that a 4:2:0 partition `block` moved by `mv`
+/// reads, for [`Sample::plain_fast`]: all of them, or of a picture another
+/// thread is decoding, the rows the block reads once they are in. `None`
+/// when that picture failed.
+#[inline(always)]
+fn ref_planes<'a, S: Sample>(
+    frame: &'a Frame<S>,
+    block: &Block,
+    mv: [i16; 2],
+) -> Option<recon::RefPlanes<'a, S>> {
+    let (y, u, v) = match &frame.pending {
+        None => (&frame.y[..], &frame.u[..], &frame.v[..]),
+        Some(published) => published_planes(published, block, mv)?,
+    };
+    Some(recon::RefPlanes {
+        y,
+        u,
+        v,
+        stride: frame.w,
+        pic: (frame.w, frame.h),
+        mv,
+    })
+}
+
+/// [`ref_planes`] of a picture another thread is decoding.
+#[inline(never)]
+fn published_planes<'a, S: Sample>(
+    published: &'a super::progress::Published<S>,
+    block: &Block,
+    mv: [i16; 2],
+) -> Option<(&'a [S], &'a [S], &'a [S])> {
+    let (x, y) = (i32::try_from(block.x).ok()?, i32::try_from(block.y).ok()?);
+    let (mvx, mvy) = (i32::from(mv[0]), i32::from(mv[1]));
+    let luma = published
+        .luma(x + (mvx >> 2), y + (mvy >> 2), block.h)
+        .ok()?;
+    let (cx, cy) = (x / 2 + (mvx >> 3), y / 2 + (mvy >> 3));
+    let cb = published.chroma(true, cx, cy, block.h / 2).ok()?;
+    let cr = published.chroma(false, cx, cy, block.h / 2).ok()?;
+    // Each plane holds every row the block reads; one may hold more.
+    let len = cb.samples.len().min(cr.samples.len());
+    Some((luma.samples, cb.samples.get(..len)?, cr.samples.get(..len)?))
 }
 
 /// [`mc_plain`] for a partition of a 4:2:0 picture that is weighted: one

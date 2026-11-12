@@ -4,7 +4,7 @@
 //! full samples in a line. Along a row the six inputs are six windows of
 //! that row, each one sample further right; down a column they are six rows.
 
-pub use crate::mc_block::{BiWeight, Block, ChromaSource, UniWeight};
+pub use crate::mc_block::{BiWeight, Block, ChromaSource, Planes420, Planes420Mut, UniWeight};
 
 /// The rounded average of two predictions of `size` (width, height), whose
 /// rows are `size.0` apart, into `dst` with rows `dst_stride` apart.
@@ -124,6 +124,25 @@ pub fn chroma_planes(
     second: Option<ChromaSource<'_>>,
 ) -> bool {
     kernel!(chroma_planes(dst, dst_stride, size, first, second))
+}
+
+/// A partition of a 4:2:0 picture predicted into `dst`: its luma block of
+/// `block` (x, y, width, height) and the chroma blocks at half each, from
+/// `first` moved by its vector or the rounded average of that and
+/// `second` moved by its own, as [`luma_pair`] and [`chroma_planes`]
+/// predict them. Each plane is written only when its block is a size those
+/// take and every sample its taps read is inside each reference picture
+/// and its planes; whether the luma and the chroma blocks were. One call
+/// checks what a pair of those does, from the planes' sizes rather than
+/// each block's.
+#[inline]
+pub fn predict_420(
+    dst: &mut Planes420Mut<'_>,
+    block: (usize, usize, usize, usize),
+    first: (&Planes420<'_>, [i16; 2]),
+    second: Option<(&Planes420<'_>, [i16; 2])>,
+) -> (bool, bool) {
+    kernel!(predict_420(dst, block, first, second))
 }
 
 /// [`luma_pair`] for a chroma block at eighth offsets.
@@ -403,6 +422,75 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn partitions_match_the_plain_ones() {
+        // Pictures 48×32 in planes with rows 56 apart, the references cut
+        // short at a random row as a picture still being decoded is, and
+        // blocks of every partition size at every place moved by up to 8
+        // samples, so that many reach past the picture or the planes.
+        let mut rng = Lcg(41);
+        let (stride, size) = (56usize, (48usize, 32usize));
+        let luma_len = stride * size.1;
+        let chroma_len = stride / 2 * size.1 / 2;
+        let mut plane = |len: usize| -> Vec<u8> { (0..len).map(|_| rng.sample()).collect() };
+        let refs: Vec<[Vec<u8>; 3]> = (0..2)
+            .map(|_| [plane(luma_len), plane(chroma_len), plane(chroma_len)])
+            .collect();
+        let start = [plane(luma_len), plane(chroma_len), plane(chroma_len)];
+        let mut taken = (0, 0);
+        for round in 0..40_000u32 {
+            let (w, h) =
+                [(16, 16), (16, 8), (8, 16), (8, 8), (8, 4), (4, 8), (4, 4)][(round % 7) as usize];
+            let x = (rng.next() as usize % (size.0 / 4)) * 4;
+            let y = (rng.next() as usize % (size.1 / 4)) * 4;
+            let mut vector = || {
+                let mut part = || (rng.next() % 65) as i16 - 32;
+                [part(), part()]
+            };
+            let motion = [vector(), vector()];
+            // Rows of each reference there: all, or cut at a random one.
+            let mut cut = || {
+                let rows = if rng.next().is_multiple_of(5) {
+                    rng.next() as usize % size.1
+                } else {
+                    size.1
+                };
+                (rows * stride, rows / 2 * stride / 2)
+            };
+            let cuts = [cut(), cut()];
+            let planes: Vec<super::Planes420<'_>> = refs
+                .iter()
+                .zip(cuts)
+                .map(|(r, (luma, chroma))| {
+                    super::Planes420::new(
+                        (&r[0][..luma], &r[1][..chroma], &r[2][..chroma]),
+                        stride,
+                        size,
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let first = (&planes[0], motion[0]);
+            let second = (round % 3 != 0).then_some((&planes[1], motion[1]));
+            let mut fast = start.clone();
+            let mut plain = start.clone();
+            let block = (x, y, w, h);
+            let [fy, fu, fv] = &mut fast;
+            let mut out = super::Planes420Mut::new((fy, fu, fv), stride, size).unwrap();
+            let done = super::predict_420(&mut out, block, first, second);
+            let [py, pu, pv] = &mut plain;
+            let mut out = super::Planes420Mut::new((py, pu, pv), stride, size).unwrap();
+            let want = scalar::predict_420(&mut out, block, first, second);
+            assert_eq!(done, want, "{block:?} {motion:?} {cuts:?}");
+            assert_eq!(fast, plain, "{block:?} {motion:?} {cuts:?}");
+            taken.0 += usize::from(done.0);
+            taken.1 += usize::from(done.1);
+        }
+        // Most blocks are taken, and a good share are not.
+        assert!(taken.0 > 5_000 && taken.0 < 35_000, "{taken:?}");
+        assert!(taken.1 > 5_000 && taken.1 < 35_000, "{taken:?}");
     }
 
     #[test]

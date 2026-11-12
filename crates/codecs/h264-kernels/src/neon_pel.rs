@@ -22,7 +22,7 @@ use core::arch::aarch64::{
     vrhaddq_u8, vrshrn_n_u16,
 };
 
-use crate::mc_block::{Block, ChromaSource};
+use crate::mc_block::{Block, ChromaSource, Planes420, Planes420Mut};
 use crate::neon_qpel::{
     centre8, load4, put8, put16, row_taps8, row_taps16, store4, taps8, taps8_high,
 };
@@ -965,4 +965,97 @@ pub(crate) fn chroma_planes(
         );
     }
     true
+}
+
+/// See [`crate::mc::predict_420`].
+#[inline]
+#[target_feature(enable = "neon")]
+pub(crate) fn predict_420<'r>(
+    dst: &mut Planes420Mut<'_>,
+    block: (usize, usize, usize, usize),
+    first: (&Planes420<'r>, [i16; 2]),
+    second: Option<(&Planes420<'r>, [i16; 2])>,
+) -> (bool, bool) {
+    let (x, y, w, h) = block;
+    if !dst.holds((x, y), (w, h)) {
+        return (false, false);
+    }
+    let (dst_y, dst_u, dst_v, stride) = dst.planes();
+    let luma = (w == 8 || w == 16) && (1..=16).contains(&h) && {
+        let from = |(planes, mv): (&Planes420<'r>, [i16; 2])| {
+            let at = (
+                x as i64 + i64::from(mv[0] >> 2),
+                y as i64 + i64::from(mv[1] >> 2),
+            );
+            let frac = ((mv[0] & 3) as u8, (mv[1] & 3) as u8);
+            let at_sample = planes.luma_from(at, (w, h), frac)?;
+            Some((planes.y(), at_sample, planes.stride(), frac))
+        };
+        match (from(first), second.map(from)) {
+            (Some(one), two @ (None | Some(Some(_)))) => {
+                let out = y * stride + x;
+                // SAFETY: `holds` put the block's rows inside `dst_y`, and
+                // `luma_from` every byte each routine reads inside its
+                // plane, from the offsets it gave.
+                unsafe {
+                    let out = dst_y.as_mut_ptr().add(out);
+                    let (src, at, src_stride, frac) = one;
+                    luma_fn(w, false, frac)(out, stride, src.as_ptr().add(at), src_stride, h);
+                    if let Some(Some((src, at, src_stride, frac))) = two {
+                        luma_fn(w, true, frac)(out, stride, src.as_ptr().add(at), src_stride, h);
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    };
+    let (cw, ch) = (w / 2, h / 2);
+    let chroma = (cw == 4 || cw == 8) && ch != 0 && ch <= 8 && ch % 2 == 0 && {
+        let (cx, cy) = (x / 2, y / 2);
+        let from = |(planes, mv): (&Planes420<'r>, [i16; 2])| {
+            let at = (
+                cx as i64 + i64::from(mv[0] >> 3),
+                cy as i64 + i64::from(mv[1] >> 3),
+            );
+            let frac = ((mv[0] & 7) as u8, (mv[1] & 7) as u8);
+            let at_sample = planes.chroma_from(at, (cw, ch), frac)?;
+            // SAFETY: `chroma_from` put the block's reads, from this
+            // sample on, inside both planes, which are as long.
+            Some(unsafe {
+                PlaneSources {
+                    cb: planes.cb().as_ptr().add(at_sample),
+                    cr: planes.cr().as_ptr().add(at_sample),
+                    stride: planes.stride() / 2,
+                    frac,
+                }
+            })
+        };
+        match (from(first), second.map(from)) {
+            (Some(one), two @ (None | Some(Some(_)))) => {
+                let (two, kind) = match two {
+                    Some(Some(two)) => (two, chroma_mode(two.frac)),
+                    _ => (one, usize::from(NONE)),
+                };
+                let routine = CHROMA_BOTH[usize::from(cw == 8)][chroma_mode(one.frac)][kind];
+                let stride = stride / 2;
+                let out = cy * stride + cx;
+                // SAFETY: `holds` put the block's rows inside both chroma
+                // planes of `dst`, and `chroma_from` every byte each
+                // routine reads inside its sources' planes.
+                unsafe {
+                    routine(
+                        (dst_u.as_mut_ptr().add(out), dst_v.as_mut_ptr().add(out)),
+                        stride,
+                        &one,
+                        &two,
+                        ch,
+                    );
+                }
+                true
+            }
+            _ => false,
+        }
+    };
+    (luma, chroma)
 }

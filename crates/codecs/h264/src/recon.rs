@@ -524,6 +524,23 @@ pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
     ) -> bool {
         false
     }
+
+    /// A 4:2:0 partition predicted into the picture's planes `dst`, rows
+    /// `dst.3` apart in luma, of a picture `dst.4` luma samples wide and
+    /// high, from `first` or the rounded average of
+    /// `first` and `second`, each plane only when every sample its taps
+    /// read is inside its reference: [`Self::pair_fast`] and
+    /// [`Self::chroma_planes_fast`] with their sources found, in one go.
+    /// `block` is the luma block's origin and size. Whether the luma and the
+    /// chroma block were written.
+    fn plain_fast(
+        _dst: PicPlanes<'_, Self>,
+        _block: (usize, usize, usize, usize),
+        _first: RefPlanes<'_, Self>,
+        _second: Option<RefPlanes<'_, Self>>,
+    ) -> (bool, bool) {
+        (false, false)
+    }
 }
 
 /// Which samples [`Sample::predict_fast`] makes.
@@ -762,6 +779,33 @@ impl Sample for u8 {
         }
         let (cb, cr, stride) = dst;
         mc::chroma_planes((cb, cr), stride, size, source(first), second.map(source))
+    }
+
+    #[inline]
+    fn plain_fast(
+        dst: PicPlanes<'_, Self>,
+        block: (usize, usize, usize, usize),
+        first: RefPlanes<'_, Self>,
+        second: Option<RefPlanes<'_, Self>>,
+    ) -> (bool, bool) {
+        use cutlass_h264_kernels::mc;
+        let (y, u, v, stride, size) = dst;
+        let Some(mut out) = mc::Planes420Mut::new((y, u, v), stride, size) else {
+            return (false, false);
+        };
+        fn planes<'a>(r: &RefPlanes<'a, u8>) -> Option<mc::Planes420<'a>> {
+            mc::Planes420::new((r.y, r.u, r.v), r.stride, r.pic)
+        }
+        let Some(one) = planes(&first) else {
+            return (false, false);
+        };
+        match second.map(|r| (planes(&r), r.mv)) {
+            None => mc::predict_420(&mut out, block, (&one, first.mv), None),
+            Some((Some(two), mv)) => {
+                mc::predict_420(&mut out, block, (&one, first.mv), Some((&two, mv)))
+            }
+            Some((None, _)) => (false, false),
+        }
     }
 }
 
@@ -1447,6 +1491,25 @@ pub struct McSource<'a, S> {
     pub stride: usize,
     pub at: (usize, usize),
     pub frac: (u8, u8),
+}
+
+/// The picture [`Sample::plain_fast`] writes: its luma, Cb and Cr planes,
+/// the distance between luma rows, and its size in luma samples.
+pub type PicPlanes<'a, S> = (&'a mut [S], &'a mut [S], &'a mut [S], usize, (usize, usize));
+
+/// A reference picture's three 4:2:0 planes as [`Sample::plain_fast`]
+/// reads them, with the motion vector into it: luma rows `stride` apart
+/// and chroma rows half that, of a picture `pic` luma samples wide and
+/// high. The planes may stop short of the picture's last rows when another
+/// thread is still decoding it; the Cb and Cr planes are as long.
+#[derive(Clone, Copy)]
+pub struct RefPlanes<'a, S> {
+    pub y: &'a [S],
+    pub u: &'a [S],
+    pub v: &'a [S],
+    pub stride: usize,
+    pub pic: (usize, usize),
+    pub mv: [i16; 2],
 }
 
 /// A chroma block's source in both planes of a picture: the Cb and Cr

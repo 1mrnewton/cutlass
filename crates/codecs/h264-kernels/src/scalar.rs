@@ -554,3 +554,71 @@ pub fn prefetch(_plane: &[u8], _at: usize, _stride: usize, _rows: usize) {}
 
 /// A cache hint, which has no plain counterpart: it does nothing here.
 pub fn prefetch_item<T>(_items: &[T], _at: usize) {}
+
+/// See [`crate::mc::predict_420`]: the same checks, and the blocks made by
+/// [`luma_pair`] and [`chroma_planes`].
+pub fn predict_420<'r>(
+    dst: &mut crate::mc_block::Planes420Mut<'_>,
+    block: (usize, usize, usize, usize),
+    first: (&crate::mc_block::Planes420<'r>, [i16; 2]),
+    second: Option<(&crate::mc_block::Planes420<'r>, [i16; 2])>,
+) -> (bool, bool) {
+    use crate::mc_block::{Block, ChromaSource, Planes420};
+    let (x, y, w, h) = block;
+    if !dst.holds((x, y), (w, h)) {
+        return (false, false);
+    }
+    let (dst_y, dst_u, dst_v, stride) = dst.planes();
+    let luma = (w == 8 || w == 16) && (1..=16).contains(&h) && {
+        let from = |(planes, mv): (&Planes420<'r>, [i16; 2])| {
+            let at = (
+                x as i64 + i64::from(mv[0] >> 2),
+                y as i64 + i64::from(mv[1] >> 2),
+            );
+            let frac = ((mv[0] & 3) as u8, (mv[1] & 3) as u8);
+            planes.luma_from(at, (w, h), frac)?;
+            let block = Block {
+                src: planes.y(),
+                stride: planes.stride(),
+                at: (at.0 as usize, at.1 as usize),
+                size: (w, h),
+            };
+            Some((block, frac))
+        };
+        match (from(first), second.map(from)) {
+            (Some(one), None) => luma_pair(&mut dst_y[y * stride + x..], stride, one, None),
+            (Some(one), Some(Some(two))) => {
+                luma_pair(&mut dst_y[y * stride + x..], stride, one, Some(two))
+            }
+            _ => false,
+        }
+    };
+    let (cw, ch) = (w / 2, h / 2);
+    let chroma = (cw == 4 || cw == 8) && ch != 0 && ch <= 8 && ch % 2 == 0 && {
+        let (cx, cy) = (x / 2, y / 2);
+        let from = |(planes, mv): (&Planes420<'r>, [i16; 2])| {
+            let at = (
+                cx as i64 + i64::from(mv[0] >> 3),
+                cy as i64 + i64::from(mv[1] >> 3),
+            );
+            let frac = ((mv[0] & 7) as u8, (mv[1] & 7) as u8);
+            planes.chroma_from(at, (cw, ch), frac)?;
+            Some(ChromaSource {
+                cb: planes.cb(),
+                cr: planes.cr(),
+                stride: planes.stride() / 2,
+                at: (at.0 as usize, at.1 as usize),
+                frac,
+            })
+        };
+        let stride = stride / 2;
+        let out = cy * stride + cx;
+        let planes = (&mut dst_u[out..], &mut dst_v[out..]);
+        match (from(first), second.map(from)) {
+            (Some(one), None) => chroma_planes(planes, stride, (cw, ch), one, None),
+            (Some(one), Some(Some(two))) => chroma_planes(planes, stride, (cw, ch), one, Some(two)),
+            _ => false,
+        }
+    };
+    (luma, chroma)
+}

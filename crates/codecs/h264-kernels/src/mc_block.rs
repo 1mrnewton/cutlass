@@ -460,3 +460,178 @@ macro_rules! luma_rows {
     };
 }
 pub(crate) use luma_rows;
+
+/// A reference picture's 4:2:0 planes as [`crate::mc::predict_420`] reads
+/// them: luma `width`×`height` samples with rows `stride` apart, and Cb and
+/// Cr half as wide and high with rows `stride / 2` apart. The planes may
+/// stop short of the picture's last rows, as a picture another thread is
+/// still decoding does; a block is predicted only from rows they hold.
+#[derive(Clone, Copy)]
+pub struct Planes420<'a> {
+    y: &'a [u8],
+    u: &'a [u8],
+    v: &'a [u8],
+    stride: usize,
+    size: (i64, i64),
+}
+
+impl<'a> Planes420<'a> {
+    /// `None` when the luma is wider than `stride`, `stride` is odd, or the
+    /// Cb and Cr planes differ in length.
+    #[inline]
+    pub fn new(
+        (y, u, v): (&'a [u8], &'a [u8], &'a [u8]),
+        stride: usize,
+        (width, height): (usize, usize),
+    ) -> Option<Self> {
+        if width > stride || !stride.is_multiple_of(2) || u.len() != v.len() {
+            return None;
+        }
+        let size = (i64::try_from(width).ok()?, i64::try_from(height).ok()?);
+        Some(Self {
+            y,
+            u,
+            v,
+            stride,
+            size,
+        })
+    }
+
+    pub(crate) fn y(&self) -> &'a [u8] {
+        self.y
+    }
+
+    pub(crate) fn cb(&self) -> &'a [u8] {
+        self.u
+    }
+
+    pub(crate) fn cr(&self) -> &'a [u8] {
+        self.v
+    }
+
+    pub(crate) fn stride(&self) -> usize {
+        self.stride
+    }
+
+    /// Where a luma block of `size` (8 or 16 wide, 1 to 16 high) whose
+    /// first full sample is at `at`, at quarter offsets `frac`, is read
+    /// from: the place of that sample in the luma plane. `None` unless
+    /// every sample its six taps read is inside the picture, and every
+    /// byte the NEON routine loads is in the plane: in each direction with
+    /// an offset, two samples before the block and three after it, and
+    /// along a row with one, `2 × width` bytes from two before it.
+    #[inline]
+    pub(crate) fn luma_from(
+        &self,
+        at: (i64, i64),
+        size: (usize, usize),
+        frac: (u8, u8),
+    ) -> Option<usize> {
+        let (w, h) = (size.0 as i64, size.1 as i64);
+        let (left, right, span) = if frac.0 == 0 {
+            (0, 0, w)
+        } else {
+            (2, 3, 2 * w)
+        };
+        let (above, below) = if frac.1 == 0 { (0, 0) } else { (2, 3) };
+        if at.0 < left
+            || at.1 < above
+            || at.0 + w + right > self.size.0
+            || at.1 + h + below > self.size.1
+        {
+            return None;
+        }
+        // In the picture, so both are at least 0 and fit a row and a plane.
+        let (x, y) = (at.0 as usize, at.1 as usize);
+        let last = (y + size.1 - 1 + below as usize)
+            .checked_mul(self.stride)?
+            .checked_add(x - left as usize + span as usize)?;
+        if last > self.y.len() {
+            return None;
+        }
+        Some(y * self.stride + x)
+    }
+
+    /// [`Self::luma_from`] for a chroma block of `size` (4 or 8 wide, an
+    /// even height up to 8) at eighth offsets, `at` in the chroma planes:
+    /// inside the picture with one more column and row where it has an
+    /// offset that way, and each row the routine reads, nine bytes from the
+    /// block's first sample and one row below its last, in both planes.
+    #[inline]
+    pub(crate) fn chroma_from(
+        &self,
+        at: (i64, i64),
+        size: (usize, usize),
+        frac: (u8, u8),
+    ) -> Option<usize> {
+        let (w, h) = (size.0 as i64, size.1 as i64);
+        if at.0 < 0
+            || at.1 < 0
+            || at.0 + w + i64::from(frac.0 != 0) > self.size.0 / 2
+            || at.1 + h + i64::from(frac.1 != 0) > self.size.1 / 2
+        {
+            return None;
+        }
+        let (x, y) = (at.0 as usize, at.1 as usize);
+        let stride = self.stride / 2;
+        let last = (y + size.1).checked_mul(stride)?.checked_add(x + 9)?;
+        if last > self.u.len() {
+            return None;
+        }
+        Some(y * stride + x)
+    }
+}
+
+/// The 4:2:0 picture [`crate::mc::predict_420`] writes: as
+/// [`Planes420`], and holding every row of the picture.
+pub struct Planes420Mut<'a> {
+    y: &'a mut [u8],
+    u: &'a mut [u8],
+    v: &'a mut [u8],
+    stride: usize,
+    size: (usize, usize),
+}
+
+impl<'a> Planes420Mut<'a> {
+    /// `None` when the luma is wider than `stride`, `stride` is odd, or a
+    /// plane is shorter than the picture.
+    #[inline]
+    pub fn new(
+        (y, u, v): (&'a mut [u8], &'a mut [u8], &'a mut [u8]),
+        stride: usize,
+        (width, height): (usize, usize),
+    ) -> Option<Self> {
+        let chroma = (stride / 2).checked_mul(height / 2)?;
+        if width > stride
+            || !stride.is_multiple_of(2)
+            || y.len() < stride.checked_mul(height)?
+            || u.len() < chroma
+            || v.len() < chroma
+        {
+            return None;
+        }
+        Some(Self {
+            y,
+            u,
+            v,
+            stride,
+            size: (width, height),
+        })
+    }
+
+    /// Whether the luma block of `size` at `at` lies in the picture, and so
+    /// do the chroma blocks at half each.
+    #[inline]
+    pub(crate) fn holds(&self, at: (usize, usize), size: (usize, usize)) -> bool {
+        at.0.checked_add(size.0)
+            .is_some_and(|right| right <= self.size.0)
+            && at
+                .1
+                .checked_add(size.1)
+                .is_some_and(|below| below <= self.size.1)
+    }
+
+    pub(crate) fn planes(&mut self) -> (&mut [u8], &mut [u8], &mut [u8], usize) {
+        (&mut *self.y, &mut *self.u, &mut *self.v, self.stride)
+    }
+}

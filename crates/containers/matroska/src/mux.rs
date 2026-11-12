@@ -41,8 +41,10 @@
 //! track whose encoder delay is stated ([`Mux::set_trim`]) before its first
 //! packet goes out gets that as CodecDelay. Packet times are not shifted:
 //! the stored timestamps include the delay, which a player subtracts.
-//! Trailing padding stated for those tracks shortens the BlockDuration of
-//! the track's next (last) packet and is written as its DiscardPadding. An
+//! Trailing padding stated for those tracks is the number of samples to
+//! drop from the track's end: the packets that come after it are held to
+//! the end, and the padding comes off their BlockDurations, the last packet
+//! first, and is written as their DiscardPadding. An
 //! Opus packet whose duration falls short of the samples its TOC byte says
 //! it holds (an encoder's last packet) has the difference written as
 //! DiscardPadding, so a player drops those samples.
@@ -82,11 +84,13 @@ const OPUS_SEEK_PRE_ROLL_NS: u64 = 80_000_000;
 
 const APP: &[u8] = b"Cutlass";
 
-/// One packet waiting for its turn, and the trailing padding (samples)
-/// the encoder stated just before it.
+/// One packet waiting for its turn. `tail` marks a packet that came after
+/// the encoder stated trailing padding: it is held to the end, when
+/// `padding` (samples) is shared out over the track's last packets.
 struct Held {
     packet: Packet,
     padding: u64,
+    tail: bool,
 }
 
 struct Track {
@@ -97,7 +101,8 @@ struct Track {
     language: Option<Language>,
     config: Option<Vec<u8>>,
     trim: Option<Trim>,
-    pending_padding: u64,
+    /// Samples to drop from the end of the track, as last stated.
+    end_padding: u64,
     queue: VecDeque<Held>,
     /// Sum of the durations of the packets taken, in track ticks.
     next: i64,
@@ -485,6 +490,15 @@ impl<W: Write + Seek> MatroskaMux<W> {
             let Some(index) = self.earliest() else {
                 return Ok(());
             };
+            // The end of a padded track waits for finish, unless holding it
+            // would keep too much.
+            let tail = self.tracks[index]
+                .queue
+                .front()
+                .is_some_and(|held| held.tail);
+            if !force && tail && self.held < MAX_HELD_BEFORE_HEADER {
+                return Ok(());
+            }
             let Some(held) = self.tracks[index].queue.pop_front() else {
                 return Ok(());
             };
@@ -723,6 +737,9 @@ impl<W: Write + Seek> MatroskaMux<W> {
     // Finish.
 
     fn finish_file(&mut self) -> Result<(), MuxError> {
+        for track in &mut self.tracks {
+            share_padding(track);
+        }
         self.drain(true)?;
         if self.layout.is_none() {
             self.write_header()?;
@@ -789,6 +806,28 @@ impl<W: Write + Seek> MatroskaMux<W> {
         let mut out = Vec::new();
         put_master(&mut out, ids::CUES, &body);
         out
+    }
+}
+
+/// Shares a track's end padding out over its held last packets, the last
+/// one first: a packet wholly padding is all discarded, and the rest comes
+/// off the one before it.
+fn share_padding(track: &mut Track) {
+    let rate = i128::from(track.params.sample_rate().unwrap_or(0));
+    let timescale = i128::from(track.timescale.ticks_per_second().max(1));
+    let mut left = i128::from(track.end_padding);
+    if rate == 0 {
+        return;
+    }
+    for held in track.queue.iter_mut().rev() {
+        if left <= 0 || !held.tail {
+            break;
+        }
+        let duration = i128::from(held.packet.timestamp().duration().unwrap_or(0).max(0));
+        let samples = duration * rate / timescale;
+        let take = left.min(samples);
+        held.padding = u64::try_from(take).unwrap_or(0);
+        left -= take;
     }
 }
 
@@ -903,7 +942,7 @@ impl<W: Write + Seek + Send> Mux for MatroskaMux<W> {
             language: stream.language,
             config: None,
             trim: None,
-            pending_padding: 0,
+            end_padding: 0,
             queue: VecDeque::new(),
             next: 0,
             default_duration: None,
@@ -942,11 +981,11 @@ impl<W: Write + Seek + Send> Mux for MatroskaMux<W> {
             }));
         }
         let track = &mut self.tracks[index];
-        let padding = std::mem::take(&mut track.pending_padding);
         track.next = track.next.saturating_add(duration);
         track.queue.push_back(Held {
             packet: packet.clone(),
-            padding,
+            padding: 0,
+            tail: track.end_padding > 0,
         });
         self.held = self.held.saturating_add(bytes);
         self.drain(false).map_err(|error| self.fail(error))
@@ -1041,7 +1080,7 @@ impl<W: Write + Seek + Send> Mux for MatroskaMux<W> {
         let entry = &mut self.tracks[index];
         // An Opus packet's own TOC says what of it is padding.
         if entry.codec != CodecId::Opus && !entry.is_video() {
-            entry.pending_padding = trim.trailing_padding().unwrap_or(0);
+            entry.end_padding = trim.trailing_padding().unwrap_or(0);
         }
         entry.trim = Some(trim);
         Ok(())

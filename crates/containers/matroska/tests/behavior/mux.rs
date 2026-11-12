@@ -300,6 +300,41 @@ fn trailing_padding_shortens_the_last_block_and_is_written_as_discard_padding() 
     assert_eq!(durations, vec![Some(21), Some(21), Some(11)]);
 }
 
+/// An encoder that states its end padding on each of its last packets, as
+/// the AAC encoder does when it drains, means one total: it comes off the
+/// last packet first, and the rest off the one before.
+#[test]
+fn end_padding_stated_on_several_packets_is_one_total() {
+    let mut mux = MatroskaMux::new(Cursor::new(Vec::new()));
+    let sound = mux
+        .add_stream(audio(CodecId::Aac, ASC, 48_000))
+        .expect("aac");
+    for index in 0..5 {
+        let padding = if index >= 3 { 1500 } else { 0 };
+        mux.set_trim(sound, Trim::new(Some(1024), Some(padding)))
+            .expect("trim");
+        mux.write_packet(&packet(
+            sound,
+            vec![1; 10],
+            index * 1024,
+            1024,
+            48_000,
+            true,
+        ))
+        .expect("packet");
+    }
+    let bytes = finish(mux, &[(sound, 48_000, 5 * 1024)]);
+    // 476 samples off the fourth packet, all 1024 off the fifth.
+    assert_eq!(discard_ns(&bytes), vec![9_916_666, 21_333_333]);
+    let got = all(&mut read_back(bytes));
+    let durations: Vec<Option<i64>> = got.iter().map(|p| p.timestamp().duration()).collect();
+    // 1024 samples are 21 ms; 548 are 11.
+    assert_eq!(
+        durations,
+        vec![Some(21), Some(21), Some(21), Some(11), Some(0)]
+    );
+}
+
 /// One 20 ms CELT frame: TOC config 31, code 0.
 const OPUS_20MS: [u8; 4] = [0xF8, 1, 2, 3];
 /// One 2.5 ms CELT frame: TOC config 28, code 0.

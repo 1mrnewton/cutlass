@@ -91,10 +91,12 @@ impl<'a> Msac<'a> {
         let mut v = ((r >> 8) << 7) + MIN_PROB;
         let vw = u64::from(v) << (WIN - 16);
         let ret = dif >= vw;
-        if ret {
-            dif -= vw;
-            v = r - v;
-        }
+        // A select, not a branch: the bit is as good as random.
+        (dif, v) = core::hint::select_unpredictable(
+            ret,
+            (dif.wrapping_sub(vw), r.wrapping_sub(v)),
+            (dif, v),
+        );
         self.norm(dif, v);
         !ret
     }
@@ -107,10 +109,12 @@ impl<'a> Msac<'a> {
         let mut v = (((r >> 8) * (f >> PROB_SHIFT)) >> (7 - PROB_SHIFT)) + MIN_PROB;
         let vw = u64::from(v) << (WIN - 16);
         let ret = dif >= vw;
-        if ret {
-            dif -= vw;
-            v = r - v;
-        }
+        // A select, not a branch: the bit is as good as random.
+        (dif, v) = core::hint::select_unpredictable(
+            ret,
+            (dif.wrapping_sub(vw), r.wrapping_sub(v)),
+            (dif, v),
+        );
         self.norm(dif, v);
         !ret
     }
@@ -124,19 +128,19 @@ impl<'a> Msac<'a> {
         let mut v = (((r >> 8) * (u32::from(cdf[0]) >> PROB_SHIFT)) >> (7 - PROB_SHIFT)) + MIN_PROB;
         let vw = u64::from(v) << (WIN - 16);
         let ret = dif >= vw;
-        if ret {
-            dif -= vw;
-            v = r - v;
-        }
+        // A select, not a branch: the bit is as good as random.
+        (dif, v) = core::hint::select_unpredictable(
+            ret,
+            (dif.wrapping_sub(vw), r.wrapping_sub(v)),
+            (dif, v),
+        );
         let bit = !ret;
         if self.allow_update {
             let count = cdf[1];
             let rate = 4 + (count >> 4);
-            if bit {
-                cdf[0] += (32768 - cdf[0]) >> rate;
-            } else {
-                cdf[0] -= cdf[0] >> rate;
-            }
+            let c = cdf[0];
+            cdf[0] =
+                core::hint::select_unpredictable(bit, c + ((32768 - c) >> rate), c - (c >> rate));
             cdf[1] = count + u16::from(count < 32);
         }
         self.norm(dif, v);

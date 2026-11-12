@@ -497,6 +497,68 @@ fn variable_bitrate_mp3_counts_frames_by_block_align() {
     );
 }
 
+/// MPEG-1 Layer III at 128 kbit/s and 48 kHz: 384 bytes, 1152 samples.
+fn mp3_frame(fill: u8) -> Vec<u8> {
+    let mut frame = vec![fill; 384];
+    frame[..4].copy_from_slice(&[0xFF, 0xFB, 0x94, 0x00]);
+    frame
+}
+
+#[test]
+fn a_variable_bitrate_chunk_of_several_mp3_frames_is_cut_into_frames() {
+    let audio = Spec {
+        kind: *b"auds",
+        handler: [0; 4],
+        scale: 1152,
+        rate: 48_000,
+        sample_size: 0,
+        strf: wfx(0x55, 2, 48_000, 1152, 0, &[]),
+    };
+    let mut two = mp3_frame(1);
+    two.extend(mp3_frame(2));
+    // Garbage, then a frame whose end is in the next chunk.
+    let mut odd = vec![7; 10];
+    odd.extend(mp3_frame(3));
+    let split = odd.len() - 100;
+    let tail = odd.split_off(split);
+    let file = avi(
+        &[audio],
+        &[
+            (b"00wb", two, true),
+            (b"00wb", odd, true),
+            (b"00wb", tail, true),
+            (b"00wb", vec![9; 50], true),
+        ],
+        Idx1::Relative,
+    );
+    let mut demux = open(&file.bytes).expect("open");
+    let packets = drain(&mut demux);
+    let seen: Vec<_> = packets
+        .iter()
+        .map(|packet| {
+            (
+                packet.bytes().len(),
+                packet.bytes()[4],
+                packet.timestamp().decode(),
+                packet.timestamp().duration(),
+            )
+        })
+        .collect();
+    // The clock is 125 Hz and a 1152-sample frame is 3 ticks. Each chunk
+    // counts one unit, as the file's nBlockAlign says, so the frame that
+    // starts in the second chunk takes that chunk's time, as FFmpeg gives
+    // it; a chunk with no frame header is returned whole.
+    assert_eq!(
+        seen,
+        [
+            (384, 1, Some(0), Some(3)),
+            (384, 2, Some(3), Some(3)),
+            (384, 3, Some(3), Some(3)),
+            (50, 9, Some(9), Some(3)),
+        ]
+    );
+}
+
 #[test]
 fn a_non_interleaved_file_reads_in_time_order() {
     let mut chunks: Vec<(&[u8; 4], Vec<u8>, bool)> = Vec::new();

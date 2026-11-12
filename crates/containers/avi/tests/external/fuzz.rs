@@ -374,6 +374,9 @@ fn fuzz_mux(rng: &mut Rng) -> bool {
     let count = rng.below(80);
     let mut written = 0usize;
     let mut empty = 0usize;
+    // MP3 packets come back cut at frame headers, so random payloads are
+    // counted in bytes, which can only shrink by the garbage dropped.
+    let mut mp3_bytes = 0usize;
     for _ in 0..count {
         if streams.is_empty() {
             break;
@@ -409,8 +412,12 @@ fn fuzz_mux(rng: &mut Rng) -> bool {
             return false;
         }
         streams[index].2 = next + duration;
-        written += 1;
-        empty += usize::from(len == 0);
+        if codec == CodecId::Mp3 {
+            mp3_bytes += len;
+        } else {
+            written += 1;
+            empty += usize::from(len == 0);
+        }
     }
     let durations: Vec<_> = streams
         .iter()
@@ -428,9 +435,19 @@ fn fuzz_mux(rng: &mut Rng) -> bool {
     let len = u64::try_from(bytes.len()).expect("len");
     let mut demux = AviDemux::open(Cursor::new(bytes), len).expect("a finished file opens");
     let mut read = 0usize;
-    while let Some(_packet) = demux.read_packet().expect("a finished file reads") {
-        read += 1;
+    let mut mp3_read = 0usize;
+    while let Some(packet) = demux.read_packet().expect("a finished file reads") {
+        let stream = usize::try_from(packet.stream()).expect("stream");
+        if streams[stream].1 == CodecId::Mp3 {
+            mp3_read += packet.bytes().len();
+        } else {
+            read += 1;
+        }
     }
     assert_eq!(read + empty, written, "every packet with bytes comes back");
+    assert!(
+        mp3_read <= mp3_bytes,
+        "MP3 frames come from the bytes written"
+    );
     true
 }

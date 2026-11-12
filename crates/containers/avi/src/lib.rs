@@ -15,6 +15,7 @@
 mod bytes;
 mod demux;
 mod format;
+mod frames;
 mod header;
 mod index;
 mod layout;

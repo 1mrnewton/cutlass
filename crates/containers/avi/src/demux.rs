@@ -16,6 +16,16 @@
 //! reorder frames (H.264, HEVC, MPEG-4 Part 2, MPEG-2) carries none, as
 //! FFmpeg's demuxer reports none; the decoder puts its frames in order.
 //!
+//! An MP3, MPEG-1 Layer I or II, AC-3 or E-AC-3 chunk is cut into its
+//! frames, one packet each, as FFmpeg's demuxer does through its parsers; a
+//! frame that runs on into the stream's next chunk is joined to the rest of
+//! it (see [`Cutting`]). On a constant-bitrate stream a frame's time is the
+//! time of its first byte. On a variable-bitrate stream the first frame that
+//! starts in a chunk takes the chunk's time and each later one follows the
+//! one before by its sample count. Bytes between frames that no header
+//! claims are dropped, and a chunk with no frame header at all is returned
+//! whole.
+//!
 //! A read that fails on the chunk itself (its header disagrees with the
 //! index, or it is larger than [`Limits::max_packet_bytes`]) moves past
 //! that chunk, so the next read returns the one after it. A read that fails
@@ -31,6 +41,7 @@ use cutlass_container::{
 };
 
 use crate::format::{StreamKind, describe_audio, describe_other, describe_video};
+use crate::frames::{Framing, HEADER_BYTES, MAX_FRAME_BYTES};
 use crate::header::{MainHeader, StreamHeader, parse_hdrl};
 use crate::index::{self, Fallback, IndexSource, stream_of};
 use crate::layout::read_layout;
@@ -55,6 +66,41 @@ pub struct AviDemux<R: Read + Seek> {
     truncated: bool,
     riffs: u32,
     cancelled: bool,
+    cutting: Option<Cutting>,
+    /// Per track: the start of a frame that the track's next chunk ends.
+    carries: Vec<Option<Carry>>,
+}
+
+/// A chunk of a framed audio stream, being returned one frame at a time.
+struct Cutting {
+    track: usize,
+    /// A carried partial frame, then the chunk's bytes.
+    bytes: Vec<u8>,
+    at: usize,
+    /// Where the chunk's own bytes begin in `bytes`.
+    chunk_at: usize,
+    /// Constant bitrate: the stream offset of `bytes[0]`.
+    offset: u64,
+    /// Variable bitrate: the chunk's time, and the next frame's.
+    chunk_time: i64,
+    time: i64,
+    /// A frame starting in the chunk's own bytes has been returned.
+    started: bool,
+    /// The chunk's own row, for a chunk returned whole.
+    row: usize,
+}
+
+/// The start of a frame whose end is in the stream's next chunk.
+struct Carry {
+    bytes: Vec<u8>,
+    offset: u64,
+    time: i64,
+}
+
+enum Chunk {
+    Packet(Packet),
+    Cut,
+    End,
 }
 
 impl<R: Read + Seek> AviDemux<R> {
@@ -83,6 +129,11 @@ impl<R: Read + Seek> AviDemux<R> {
                     describe_other(raw.header.kind, raw.header.handler)?
                 }
             };
+            let framing = if kind == StreamKind::Audio {
+                Framing::of(described.params.codec())
+            } else {
+                None
+            };
             let clock = Clock::new(
                 &raw.header,
                 &hdrl.main,
@@ -98,7 +149,7 @@ impl<R: Read + Seek> AviDemux<R> {
                 Vec::new(),
                 Trim::default(),
             ));
-            tracks.push(Track::new(
+            let mut track = Track::new(
                 number,
                 kind,
                 described.codec,
@@ -106,12 +157,15 @@ impl<R: Read + Seek> AviDemux<R> {
                 described.intra,
                 described.presentation,
                 raw.super_index,
-            ));
+            );
+            track.framing = framing;
+            tracks.push(track);
             headers.push(raw.header);
         }
         let built = index::build(&mut source, &mut tracks, &layout, &limits)?;
         let interleaved = interleaved(&tracks);
         let cursors = vec![0; tracks.len()];
+        let carries = tracks.iter().map(|_| None).collect();
         Ok(Self {
             source,
             limits,
@@ -128,6 +182,8 @@ impl<R: Read + Seek> AviDemux<R> {
             truncated: layout.truncated,
             riffs: layout.riffs,
             cancelled: false,
+            cutting: None,
+            carries,
         })
     }
 
@@ -186,7 +242,8 @@ impl<R: Read + Seek> AviDemux<R> {
         self.riffs
     }
 
-    /// Packets in the stream's table.
+    /// Chunks in the stream's table. A framed audio chunk (see the module
+    /// documentation) may return several packets.
     #[must_use]
     pub fn packet_count(&self, track: u32) -> Option<usize> {
         Some(self.tracks.get(usize::try_from(track).ok()?)?.entries.len())
@@ -230,11 +287,24 @@ impl<R: Read + Seek> AviDemux<R> {
     }
 
     fn read_next(&mut self) -> Result<Option<Packet>, ReadError> {
-        if self.cancelled {
-            return Err(ReadError::Cancelled);
+        loop {
+            if self.cancelled {
+                return Err(ReadError::Cancelled);
+            }
+            if let Some(packet) = self.cut_next()? {
+                return Ok(Some(packet));
+            }
+            match self.read_chunk()? {
+                Chunk::Packet(packet) => return Ok(Some(packet)),
+                Chunk::Cut => {}
+                Chunk::End => return self.flush_carry(),
+            }
         }
+    }
+
+    fn read_chunk(&mut self) -> Result<Chunk, ReadError> {
         let Some(index) = self.next() else {
-            return Ok(None);
+            return Ok(Chunk::End);
         };
         let row = self.cursors[index];
         let track = &self.tracks[index];
@@ -263,6 +333,31 @@ impl<R: Read + Seek> AviDemux<R> {
             Err(error) => return Err(ReadError::from_packet(error)),
         };
         let track = &self.tracks[index];
+        if track.framing.is_some() {
+            let carry = self.carries[index].take();
+            let chunk_at = carry.as_ref().map_or(0, |carry| carry.bytes.len());
+            let offset = track.offsets.get(row).copied().unwrap_or(0);
+            let (joined, offset, time) = match carry {
+                Some(mut carry) => {
+                    carry.bytes.extend_from_slice(&bytes);
+                    (carry.bytes, carry.offset, carry.time)
+                }
+                None => (bytes, offset, entry.time),
+            };
+            self.cutting = Some(Cutting {
+                track: index,
+                bytes: joined,
+                at: 0,
+                chunk_at,
+                offset,
+                chunk_time: entry.time,
+                time,
+                started: false,
+                row,
+            });
+            self.cursors[index] = row + 1;
+            return Ok(Chunk::Cut);
+        }
         let presentation = track.presentation.then_some(entry.time);
         let timestamp =
             Timestamp::try_new(Some(entry.time), presentation, Some(i64::from(span.ticks)))
@@ -280,7 +375,132 @@ impl<R: Read + Seek> AviDemux<R> {
             message: error.to_string(),
         })?;
         self.cursors[index] = row + 1;
-        Ok(Some(packet))
+        Ok(Chunk::Packet(packet))
+    }
+
+    /// The next frame of the chunk being cut, or `None` once it is spent;
+    /// a partial frame at its end is kept for the stream's next chunk.
+    fn cut_next(&mut self) -> Result<Option<Packet>, ReadError> {
+        let Some(cutting) = self.cutting.as_mut() else {
+            return Ok(None);
+        };
+        let track = &self.tracks[cutting.track];
+        let Some(framing) = track.framing else {
+            self.cutting = None;
+            return Ok(None);
+        };
+        loop {
+            let rest = &cutting.bytes[cutting.at..];
+            if rest.is_empty() {
+                self.cutting = None;
+                return Ok(None);
+            }
+            match framing.frame(rest) {
+                Some(frame) if frame.len <= rest.len() => {
+                    let start = cutting.at;
+                    cutting.at += frame.len;
+                    let (time, ticks) = if track.clock.sample_size > 0 {
+                        let from = cutting.offset.saturating_add(start as u64);
+                        let time = track.byte_time(from).ok_or_else(too_long)?;
+                        let end = track
+                            .byte_time(from.saturating_add(frame.len as u64))
+                            .ok_or_else(too_long)?;
+                        (time, end.saturating_sub(time))
+                    } else {
+                        let time = if start >= cutting.chunk_at && !cutting.started {
+                            cutting.chunk_time
+                        } else {
+                            cutting.time
+                        };
+                        let ticks = frame_ticks(frame.samples, frame.sample_rate, &track.clock);
+                        cutting.time = time.saturating_add(ticks);
+                        (time, ticks)
+                    };
+                    if start >= cutting.chunk_at {
+                        cutting.started = true;
+                    }
+                    let bytes = cutting.bytes[start..cutting.at].to_vec();
+                    return packet(track.number, bytes, time, ticks, track.clock.timescale)
+                        .map(Some);
+                }
+                Some(frame) if frame.len <= MAX_FRAME_BYTES => break,
+                None if rest.len() < HEADER_BYTES => break,
+                _ => {}
+            }
+            // No frame starts here: a whole chunk with no frame header in it
+            // is returned as it is; otherwise skip to the next possible start.
+            let next = rest
+                .iter()
+                .skip(1)
+                .position(|&byte| byte == sync_byte(framing))
+                .map(|skip| skip + 1);
+            match next {
+                Some(skip) => cutting.at += skip,
+                None if cutting.at == 0 && cutting.chunk_at == 0 => {
+                    let whole = std::mem::take(&mut cutting.bytes);
+                    let row = cutting.row;
+                    let span = track.spans[row];
+                    let time = track.entries[row].time;
+                    self.cutting = None;
+                    return packet(
+                        track.number,
+                        whole,
+                        time,
+                        i64::from(span.ticks),
+                        track.clock.timescale,
+                    )
+                    .map(Some);
+                }
+                None => {
+                    self.cutting = None;
+                    return Ok(None);
+                }
+            }
+        }
+        // A frame that ends in the stream's next chunk.
+        let rest = cutting.bytes[cutting.at..].to_vec();
+        let offset = cutting.offset.saturating_add(cutting.at as u64);
+        let time = if cutting.at >= cutting.chunk_at && !cutting.started {
+            cutting.chunk_time
+        } else {
+            cutting.time
+        };
+        let index = cutting.track;
+        self.cutting = None;
+        self.carries[index] = Some(Carry {
+            bytes: rest,
+            offset,
+            time,
+        });
+        Ok(None)
+    }
+
+    /// At the end of the tables, a carried partial frame is returned as it is.
+    fn flush_carry(&mut self) -> Result<Option<Packet>, ReadError> {
+        let Some(index) = self.carries.iter().position(Option::is_some) else {
+            return Ok(None);
+        };
+        let Some(carry) = self.carries[index].take() else {
+            return Ok(None);
+        };
+        let track = &self.tracks[index];
+        let ticks = if track.clock.sample_size > 0 {
+            let end = carry.offset.saturating_add(carry.bytes.len() as u64);
+            track
+                .byte_time(end)
+                .map_or(0, |end| end.saturating_sub(carry.time_or(track)))
+        } else {
+            0
+        };
+        let time = carry.time_or(track);
+        packet(
+            track.number,
+            carry.bytes,
+            time,
+            ticks,
+            track.clock.timescale,
+        )
+        .map(Some)
     }
 
     fn seek_to(&mut self, to: SeekTo) -> Result<SeekLanding, ReadError> {
@@ -330,7 +550,58 @@ impl<R: Read + Seek> AviDemux<R> {
             }
         }
         self.cursors = cursors;
+        self.cutting = None;
+        for carry in &mut self.carries {
+            *carry = None;
+        }
         Ok(landing)
+    }
+}
+
+impl Carry {
+    /// The carried frame's start time.
+    fn time_or(&self, track: &Track) -> i64 {
+        if track.clock.sample_size > 0 {
+            track.byte_time(self.offset).unwrap_or(self.time)
+        } else {
+            self.time
+        }
+    }
+}
+
+const fn sync_byte(framing: Framing) -> u8 {
+    match framing {
+        Framing::Mpeg => 0xFF,
+        Framing::Ac3 => 0x0B,
+    }
+}
+
+/// `samples` at `rate` in the stream's ticks, to the nearest tick.
+fn frame_ticks(samples: u32, rate: u32, clock: &Clock) -> i64 {
+    let numerator = u128::from(samples) * u128::from(clock.timescale);
+    let rate = u128::from(rate.max(1));
+    i64::try_from((numerator + rate / 2) / rate).unwrap_or(i64::MAX)
+}
+
+fn packet(
+    track: u32,
+    bytes: Vec<u8>,
+    time: i64,
+    ticks: i64,
+    timescale: u32,
+) -> Result<Packet, ReadError> {
+    let source = |error: &dyn std::fmt::Display| ReadError::Source {
+        message: error.to_string(),
+    };
+    let timestamp =
+        Timestamp::try_new(Some(time), Some(time), Some(ticks)).map_err(|error| source(&error))?;
+    Packet::try_new(track, bytes, timestamp, Timescale::new(timescale), true)
+        .map_err(|error| source(&error))
+}
+
+fn too_long() -> ReadError {
+    ReadError::Source {
+        message: "avi: a frame time does not fit".to_owned(),
     }
 }
 

@@ -9,6 +9,7 @@
     clippy::unwrap_used
 )]
 
+mod framed;
 mod fuzz;
 mod local;
 mod oracle;

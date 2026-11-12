@@ -23,7 +23,11 @@
 //! a `dwSampleSize` that differs from a nonzero `nBlockAlign` is replaced
 //! by `nBlockAlign`; AAC with `nBlockAlign` and `dwSampleSize` both 1024 or
 //! 4096, and MP3 with both 1152, are read as variable bitrate; and an AAC or
-//! FLAC `nBlockAlign` of four or less counts one unit per chunk.
+//! FLAC `nBlockAlign` of four or less counts one unit per chunk. This crate
+//! also counts one unit per chunk for AC-3 and E-AC-3 with such a small
+//! `nBlockAlign`, where FFmpeg does not: FFmpeg 8.1 writes E-AC-3 with
+//! `nBlockAlign` 2 and a clock of one unit per frame, and counting half the
+//! bytes as units puts a 1536-sample frame 7 s long.
 //! `dwStart` is added to every time. A start above one hour is ignored, as
 //! FFmpeg ignores it.
 
@@ -31,6 +35,7 @@ use cutlass_codec::CodecId;
 use cutlass_container::{IndexEntry, OpenError};
 
 use crate::format::StreamKind;
+use crate::frames::Framing;
 use crate::header::{MainHeader, StreamHeader};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,7 +93,11 @@ impl Clock {
             if sample_size != 0 && align != 0 && sample_size != align {
                 sample_size = align;
             }
-            if matches!(codec, Some(CodecId::Aac | CodecId::Flac)) && align <= 4 {
+            if matches!(
+                codec,
+                Some(CodecId::Aac | CodecId::Flac | CodecId::Ac3 | CodecId::Eac3)
+            ) && align <= 4
+            {
                 align = 0;
             }
             let vbr_tagged = matches!(
@@ -137,6 +146,11 @@ pub(crate) struct Track {
     pub super_index: Option<Vec<u8>>,
     pub entries: Vec<IndexEntry>,
     pub spans: Vec<Span>,
+    /// Frames of this codec are cut out of its chunks (see [`crate::frames`]).
+    pub framing: Option<Framing>,
+    /// For a framed constant-bitrate stream: the stream bytes before each
+    /// entry, which give each frame's time. Empty otherwise.
+    pub offsets: Vec<u64>,
     bytes: u64,
     units: u64,
     last_position: Option<u64>,
@@ -162,6 +176,8 @@ impl Track {
             super_index,
             entries: Vec::new(),
             spans: Vec::new(),
+            framing: None,
+            offsets: Vec::new(),
             bytes: 0,
             units: 0,
             last_position: None,
@@ -172,6 +188,7 @@ impl Track {
     pub(crate) fn reset(&mut self) {
         self.entries = Vec::new();
         self.spans = Vec::new();
+        self.offsets = Vec::new();
         self.bytes = 0;
         self.units = 0;
         self.last_position = None;
@@ -199,6 +216,7 @@ impl Track {
             });
         }
         self.last_position = Some(data);
+        let offset = self.bytes;
         let (before, after) = if self.clock.sample_size > 0 {
             let width = u64::from(self.clock.sample_size);
             let before = self.bytes / width;
@@ -240,7 +258,16 @@ impl Track {
             size,
             ticks: u32::try_from(ticks).unwrap_or(u32::MAX),
         });
+        if self.framing.is_some() && self.clock.sample_size > 0 {
+            self.offsets.push(offset);
+        }
         Ok(())
+    }
+
+    /// The time of stream byte `offset` of a constant-bitrate stream.
+    pub(crate) fn byte_time(&self, offset: u64) -> Option<i64> {
+        let width = u64::from(self.clock.sample_size.max(1));
+        self.ticks(offset / width).ok()
     }
 
     fn ticks(&self, units: u64) -> Result<i64, OpenError> {

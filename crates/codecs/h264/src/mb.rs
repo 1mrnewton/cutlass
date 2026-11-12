@@ -1405,7 +1405,7 @@ fn intra_base<S: Sample>(
     mb.off_a = slice.off_a as i8;
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
-    pic.mb[slot] = mb.clone();
+    pic.mb[slot] = mb;
     let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, true, slice_id, slice.sps.chroma)?;
     if luma_cbp > 0 && slice.pps.transform_8x8 {
         mb.transform8 = transform8_flag(pic, entropy, mx, my, slice_id)?;
@@ -1542,7 +1542,7 @@ fn motion_base<S: Sample>(
         });
     }
     bind_refs(&mut mb, slice);
-    pic.mb[slot] = mb.clone();
+    pic.mb[slot] = mb;
     let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, false, slice_id, slice.sps.chroma)?;
     if luma_cbp > 0 && slice.pps.transform_8x8 {
         mb.transform8 = transform8_flag(pic, entropy, mx, my, slice_id)?;
@@ -2965,7 +2965,7 @@ fn one_mb<S: Sample>(
             held.off_b = mb.off_b;
             held.deblock = mb.deblock;
         }
-        _ => pic.mb[slot] = mb.clone(),
+        _ => pic.mb[slot] = mb,
     }
     let (intra, mut spec) = mb_type(pic, entropy, slice.kind, mx, my, slice_id)?;
     if spec == SI_MB {
@@ -5231,7 +5231,7 @@ fn recon_intra<S: Sample>(
     let scan = scan4(field);
     // Neighbours inside this macroblock are already reconstructed. Publish it
     // before those samples are read back, so availability sees this slice.
-    pic.mb[my * pic.mb_w + mx] = mb.clone();
+    pic.mb[my * pic.mb_w + mx] = *mb;
     if i16 {
         let (above, left, above_ok, left_ok) =
             edge16(pic, mx, my, mb.slice, slice.pps.constrained_intra, 0);

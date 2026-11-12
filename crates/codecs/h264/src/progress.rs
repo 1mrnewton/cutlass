@@ -31,7 +31,8 @@ pub(crate) struct Planes<S: Sample> {
     pub u: Shared<S>,
     pub v: Shared<S>,
     pub mb: Shared<Mb>,
-    /// The planes went out as the picture's output, and are empty here.
+    /// The planes went out as the picture's output, and are empty here. A
+    /// reference is then read through the rows it published, all in.
     pub handed_out: bool,
     /// The picture in its output form, made by the thread that decoded
     /// it, until it is handed over.
@@ -75,19 +76,18 @@ impl Permits {
     }
 }
 
-/// One band or row, set once.
-type Slot<T> = OnceLock<Box<[T]>>;
-
 pub(crate) struct Published<S: Sample> {
     /// Luma width and height.
     w: usize,
     h: usize,
     mb_w: usize,
+    /// The planes and the macroblocks, row by row. Once every row is in, a
+    /// finished reference is read from these alone: see
+    /// [`Planes::handed_out`].
     luma: Growing<S>,
     cb: Growing<S>,
     cr: Growing<S>,
-    /// One slot per macroblock row.
-    mbs: Vec<Slot<Mb>>,
+    mbs: Growing<Mb>,
     /// The whole picture, or why it has none.
     done: OnceLock<Result<Planes<S>, CodecError>>,
     gate: Mutex<()>,
@@ -114,10 +114,6 @@ fn broken() -> CodecError {
     }
 }
 
-fn slots<T>(count: usize) -> Vec<Slot<T>> {
-    (0..count).map(|_| OnceLock::new()).collect()
-}
-
 impl<S: Sample> Published<S> {
     /// For a 4:2:0 frame of `w`×`h` luma samples, `h` a multiple of 16.
     pub(crate) fn new(
@@ -134,7 +130,7 @@ impl<S: Sample> Published<S> {
             luma: Growing::new(w.saturating_mul(h)),
             cb: Growing::new(chroma),
             cr: Growing::new(chroma),
-            mbs: slots(h / 16),
+            mbs: Growing::new(mb_w.saturating_mul(h / 16)),
             done: OnceLock::new(),
             gate: Mutex::new(()),
             changed: Condvar::new(),
@@ -149,28 +145,13 @@ impl<S: Sample> Published<S> {
         self.changed.notify_all();
     }
 
-    fn wait<'a, T>(&'a self, slot: &'a Slot<T>) -> Result<&'a [T], CodecError> {
-        if let Some(held) = slot.get() {
-            return Ok(held);
-        }
-        // This thread's core goes to another picture while it waits.
-        if let Some(permits) = &self.permits {
-            permits.give();
-        }
-        let found = self.wait_parked(slot);
-        if let Some(permits) = &self.permits {
-            permits.take();
-        }
-        found
-    }
-
     /// The rows of `plane` that are in, once there are `rows` of `width`.
-    fn wait_rows<'a>(
+    fn wait_rows<'a, T: Copy>(
         &'a self,
-        plane: &'a Growing<S>,
+        plane: &'a Growing<T>,
         width: usize,
         rows: usize,
-    ) -> Result<&'a [S], CodecError> {
+    ) -> Result<&'a [T], CodecError> {
         let wanted = rows.saturating_mul(width);
         let filled = plane.filled();
         if filled.len() >= wanted {
@@ -186,11 +167,11 @@ impl<S: Sample> Published<S> {
         found
     }
 
-    fn wait_rows_parked<'a>(
+    fn wait_rows_parked<'a, T: Copy>(
         &'a self,
-        plane: &'a Growing<S>,
+        plane: &'a Growing<T>,
         wanted: usize,
-    ) -> Result<&'a [S], CodecError> {
+    ) -> Result<&'a [T], CodecError> {
         let mut guard = self.gate.lock().map_err(|_| broken())?;
         loop {
             let filled = plane.filled();
@@ -200,22 +181,6 @@ impl<S: Sample> Published<S> {
             match self.done.get() {
                 Some(Err(error)) => return Err(*error),
                 // A finished picture has every row in.
-                Some(Ok(_)) => return Err(broken()),
-                None => {}
-            }
-            guard = self.changed.wait(guard).map_err(|_| broken())?;
-        }
-    }
-
-    fn wait_parked<'a, T>(&'a self, slot: &'a Slot<T>) -> Result<&'a [T], CodecError> {
-        let mut guard = self.gate.lock().map_err(|_| broken())?;
-        loop {
-            if let Some(held) = slot.get() {
-                return Ok(held);
-            }
-            match self.done.get() {
-                Some(Err(error)) => return Err(*error),
-                // A finished picture has every slot filled.
                 Some(Ok(_)) => return Err(broken()),
                 None => {}
             }
@@ -235,11 +200,9 @@ impl<S: Sample> Published<S> {
     ) -> usize {
         let rows = self.h / 16;
         let done = if last { rows } else { deblocked.min(rows) };
-        for row in from.min(done)..done {
-            let start = row * self.mb_w;
-            if let Some(mbs) = pic.mb.get(start..start + self.mb_w) {
-                let _ = self.mbs[row].set(mbs.into());
-            }
+        let (first, end) = (from.min(done) * self.mb_w, done * self.mb_w);
+        if let Some(mbs) = pic.mb.get(first..end.min(pic.mb.len())) {
+            self.mbs.push(mbs);
         }
         let (luma, chroma) = if last {
             (self.h, self.h / 2)
@@ -342,8 +305,32 @@ impl<S: Sample> Published<S> {
     /// The macroblock at address `addr`, once its row is decoded. `None`
     /// when the picture failed or has no such macroblock.
     pub(crate) fn mb(&self, addr: usize) -> Option<&Mb> {
-        let row = self.mbs.get(addr / self.mb_w.max(1))?;
-        self.wait(row).ok()?.get(addr % self.mb_w.max(1))
+        let width = self.mb_w.max(1);
+        let rows = (addr / width + 1).min(self.h / 16);
+        self.wait_rows(&self.mbs, width, rows).ok()?.get(addr)
+    }
+
+    /// Whether every row of the planes and every macroblock is in.
+    pub(crate) fn complete(&self) -> bool {
+        let full = |filled: usize, capacity: usize| filled == capacity;
+        full(self.luma.filled().len(), self.luma.capacity())
+            && full(self.cb.filled().len(), self.cb.capacity())
+            && full(self.cr.filled().len(), self.cr.capacity())
+            && full(self.mbs.filled().len(), self.mbs.capacity())
+    }
+
+    /// Copies of the planes and the macroblocks, for code that reads a
+    /// finished picture directly. `None` until every row is in.
+    pub(crate) fn copy_whole(&self) -> Option<[Shared<S>; 3]> {
+        self.complete().then(|| {
+            [&self.luma, &self.cb, &self.cr].map(|plane| Shared::from(plane.filled().to_vec()))
+        })
+    }
+
+    /// [`Self::copy_whole`] for the macroblocks.
+    pub(crate) fn copy_mbs(&self) -> Option<Shared<Mb>> {
+        self.complete()
+            .then(|| Shared::from(self.mbs.filled().to_vec()))
     }
 }
 

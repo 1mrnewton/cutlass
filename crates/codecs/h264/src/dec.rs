@@ -30,7 +30,7 @@ pub(crate) const CBP_INTER: [u8; 48] = [
 pub(crate) const CBP_INTRA_444: [u8; 16] = [15, 0, 7, 11, 13, 14, 3, 5, 10, 12, 1, 2, 4, 8, 6, 9];
 pub(crate) const CBP_INTER_444: [u8; 16] = [0, 1, 2, 4, 8, 3, 5, 10, 12, 15, 7, 11, 13, 14, 6, 9];
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub(crate) struct Mb {
     slice: u16,
     intra: bool,
@@ -4673,15 +4673,26 @@ fn run_picture<S: Sample>(job: PictureJob<S>) {
         // only has to pick it up.
         pic.shown = shown;
         pic.seal();
-        // No later picture reads one that is not a reference, so its
-        // planes can be the output as they stand.
+        // A reference is read from here on through the rows it published,
+        // all in, as later pictures read it while it was being decoded; so
+        // what it was decoded into is needed only for its output. No later
+        // picture reads one that is not a reference. Either way, its planes
+        // can be the output as they stand.
+        let published = !pic.referenced || ends.0.complete();
         let output = if !pic.output {
             None
-        } else if !pic.referenced && in_place(&mut pic) {
+        } else if published && in_place(&mut pic) {
             emit_planes(&mut pic)
         } else {
             emit_whole(&pic)
         };
+        if pic.referenced && published {
+            // Nor are they kept when the output did not take them.
+            for plane in [&mut pic.y, &mut pic.u, &mut pic.v] {
+                *plane = Shared::default();
+            }
+            pic.mb = Shared::default();
+        }
         progress::Planes {
             handed_out: pic.y.is_empty(),
             y: std::mem::take(&mut pic.y),
@@ -4757,8 +4768,8 @@ fn decode_picture<S: Sample>(
 }
 
 /// Gives a picture decoded on another thread its finished planes. One
-/// whose planes became its output keeps its link to that output instead:
-/// nothing reads such a picture's samples.
+/// whose planes became its output keeps its link to that output, and to
+/// the rows it published, which a later picture reads instead.
 fn fill<S: Sample>(frame: &mut Frame<S>, planes: &progress::Planes<S>) {
     if planes.handed_out {
         return;
@@ -4775,7 +4786,15 @@ fn fill<S: Sample>(frame: &mut Frame<S>, planes: &progress::Planes<S>) {
 fn settle<S: Sample>(dpb: &mut [Frame<S>]) -> Result<(), CodecError> {
     for frame in dpb {
         if let Some(published) = frame.pending.clone() {
-            fill(frame, published.planes()?);
+            let planes = published.planes()?;
+            // A reference whose planes went out is copied from its rows.
+            if planes.handed_out
+                && let (Some([y, u, v]), Some(mb)) = (published.copy_whole(), published.copy_mbs())
+            {
+                (frame.y, frame.u, frame.v, frame.mb) = (y, u, v, mb);
+                frame.pending = None;
+            }
+            fill(frame, planes);
         }
     }
     Ok(())

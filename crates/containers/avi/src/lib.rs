@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 
 mod bytes;
+mod cut;
 mod demux;
 mod format;
 mod frames;

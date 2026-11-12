@@ -182,6 +182,10 @@ impl RefData {
     pub fn close(&self) {
         let w8 = self.mi_cols >> 1;
         for (k, b) in self.mf.iter().enumerate() {
+            // A frame that ended well has them all: nothing to make.
+            if b.get().is_some() {
+                continue;
+            }
             let n = w8 * self.band_rows(k);
             let _ = b.set(MfBand {
                 refs: vec![-1; n],

@@ -375,6 +375,21 @@ fn seeks_do_not_depend_on_the_random_access_indicator() {
     let mut false_marks = mux(&units, MuxOptions::default());
     assert!(mark_random_access(&mut false_marks, true) > 0);
     check_video_seeks(&false_marks, &expected);
+    // Every other keyframe unmarked: a seek past an unmarked keyframe must
+    // still land on it, not on the marked one before.
+    let mut some_marks = mux(&units, MuxOptions::default());
+    let mut keyframe = 0;
+    for packet in some_marks.as_chunks_mut::<188>().0 {
+        let video_start = pid(packet) == 0x100 && packet[1] & 0x40 != 0;
+        if video_start && packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x40 != 0 {
+            if keyframe % 2 == 1 {
+                packet[5] &= !0x40;
+            }
+            keyframe += 1;
+        }
+    }
+    assert!(keyframe > 4);
+    check_video_seeks(&some_marks, &expected);
 }
 
 #[test]
@@ -911,4 +926,24 @@ fn decode_times_are_derived_from_presentation_times() {
     for unit in track(&read, 1) {
         assert_eq!(unit.dts, unit.pts);
     }
+}
+
+/// Audio frames that follow each other share PES packets of at most 2930
+/// bytes, and still read back one by one at their own times.
+#[test]
+fn audio_frames_share_pes_packets() {
+    let units = content(4, 0);
+    let bytes = mux(&units, MuxOptions::default());
+    let starts = packets(&bytes)
+        .into_iter()
+        .filter(|packet| pid(packet) == 0x101 && packet[1] & 0x40 != 0)
+        .count();
+    let frames = track(&units, 1).len();
+    // Frames of 150 to 350 bytes: eight or more fit in 2930.
+    assert!(
+        starts * 5 < frames,
+        "{starts} PES packets for {frames} frames"
+    );
+    let mut demux = open(&bytes);
+    assert_eq!(track(&drain(&mut demux), 1), track(&shifted(&units), 1));
 }

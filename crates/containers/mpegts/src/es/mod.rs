@@ -251,3 +251,37 @@ impl Framer {
         !matches!(self, Self::Whole)
     }
 }
+
+/// Whether the first picture that starts in `bytes`, the start of a video
+/// PES payload, is a keyframe, by the rules its framer uses. `None` when
+/// `bytes` end before that picture's header, or `kind` is not video.
+#[must_use]
+pub fn head_keyframe(kind: Kind, bytes: &[u8]) -> Option<bool> {
+    match kind {
+        Kind::H264 => head::<h264::H264>(bytes),
+        Kind::Hevc => head::<hevc::Hevc>(bytes),
+        Kind::Mpeg2Video => head::<mpeg2::Mpeg2>(bytes),
+        Kind::Mpeg4Video => head::<mpeg4::Mpeg4>(bytes),
+        _ => None,
+    }
+}
+
+fn head<S: video::Syntax>(bytes: &[u8]) -> Option<bool> {
+    let mut syntax = S::default();
+    let mut opened_key = false;
+    let mut at = bits::find_start_code(bytes, 0)?;
+    loop {
+        let body = at + 3;
+        let next = bits::find_start_code(bytes, body);
+        let end = next.unwrap_or(bytes.len());
+        let complete = next.is_some() && end <= body + S::HEAD;
+        let head = bytes.get(body..end.min(body + S::HEAD))?;
+        match syntax.classify(head, complete) {
+            video::Class::NeedMore => return None,
+            video::Class::Opens { key, .. } => opened_key |= key,
+            video::Class::Picture { key, .. } => return Some(key || opened_key),
+            video::Class::Inside { .. } => {}
+        }
+        at = next?;
+    }
+}

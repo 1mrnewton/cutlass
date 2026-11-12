@@ -117,6 +117,28 @@ struct Skip {
     position: u64,
 }
 
+/// What [`TsDemux::walk_to`] found between a landing and the target.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Walk {
+    /// PES packets after the landing shown before the target.
+    shown: u32,
+    /// The last later PES packet whose first picture is a keyframe shown by
+    /// the target, and the PES packets after it shown before the target.
+    later_key: Option<(u64, u32)>,
+    /// Payload bytes read to classify picture heads.
+    head_bytes: u64,
+}
+
+impl Walk {
+    fn mark_key(&mut self, position: u64) {
+        self.later_key = Some((position, 0));
+    }
+}
+
+/// Payload bytes read at the start of a PES packet to find its first
+/// picture header before giving up on it.
+const MAX_HEAD_BYTES: usize = 64 * 1024;
+
 /// A keyframe a forward run found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Candidate {
@@ -433,22 +455,27 @@ impl<R: Read + Seek> TsDemux<R> {
         }
     }
 
-    /// The PES packets of `pid` after the one at `landing` shown before
-    /// `target`, up to the first decoded after it, read from headers alone.
-    /// A PES packet holding several access units counts once.
-    fn shown_before(
+    /// Walks the PES packets of `track` after the one at `landing`, up to
+    /// the first decoded after `target`, reading their headers and only as
+    /// much payload as tells whether their first picture is a keyframe.
+    fn walk_to(
         &mut self,
-        pid: u16,
+        track: usize,
         landing: u64,
         target: i64,
         cost: &mut SeekCost,
-    ) -> Result<u32, ReadError> {
+    ) -> Result<Walk, ReadError> {
+        let pid = self.pipeline.tracks[track].pid;
+        let kind = self.pipeline.tracks[track].kind;
         let line = (
             (self.data_start, self.start),
             (self.length.unwrap_or(0), self.end.unwrap_or(self.start)),
         );
         self.source.seek(landing).map_err(ReadError::from_packet)?;
-        let mut count = 0_u32;
+        let mut walk = Walk::default();
+        // The PES packet whose start is being read: its position, and the
+        // payload so far.
+        let mut head: Option<(u64, Vec<u8>)> = None;
         loop {
             if self.cancelled {
                 return Err(ReadError::Cancelled);
@@ -456,27 +483,72 @@ impl<R: Read + Seek> TsDemux<R> {
             let Next::Packet(position, index) =
                 self.source.next().map_err(ReadError::from_packet)?
             else {
-                return Ok(count);
+                return Ok(walk);
             };
             cost.headers += 1;
             let bytes = self.source.packet(index);
             let header = packet::header(bytes);
-            if position == landing || header.pid != pid || !header.start || header.error {
+            if position == landing || header.pid != pid || header.error {
                 continue;
             }
             let Ok(parsed) = packet::parse(bytes) else {
                 continue;
             };
-            let (pts, dts) = pes_times(&bytes[parsed.payload_at.min(bytes.len())..]);
+            let payload = &bytes[parsed.payload_at.min(bytes.len())..];
+            if !header.start {
+                if let Some((at, data)) = head.as_mut() {
+                    data.extend_from_slice(payload);
+                    let at = *at;
+                    if Self::read_head(kind, &mut head, &mut walk) {
+                        walk.mark_key(at);
+                    }
+                }
+                continue;
+            }
+            head = None;
+            let (pts, dts) = pes_times(payload);
             let reference = interpolate(line.0, line.1, position);
             let Some(decode) = dts.or(pts).map(|raw| unwrap(raw, reference)) else {
                 continue;
             };
             if decode > target {
-                return Ok(count);
+                return Ok(walk);
             }
-            if pts.map_or(decode, |raw| unwrap(raw, decode)) < target {
-                count = count.saturating_add(1);
+            let shown = pts.map_or(decode, |raw| unwrap(raw, decode));
+            if shown > target {
+                continue;
+            }
+            if shown < target {
+                walk.shown = walk.shown.saturating_add(1);
+                if let Some((_, after)) = walk.later_key.as_mut() {
+                    *after = after.saturating_add(1);
+                }
+            }
+            let body = crate::pes::pes_body(payload).unwrap_or_default();
+            head = Some((position, body.to_vec()));
+            if Self::read_head(kind, &mut head, &mut walk) {
+                walk.mark_key(position);
+            }
+        }
+    }
+
+    /// Classifies the PES start in `head`. True when it is a keyframe; the
+    /// head is dropped once decided or too long to be worth reading on.
+    fn read_head(kind: Kind, head: &mut Option<(u64, Vec<u8>)>, walk: &mut Walk) -> bool {
+        let Some((_, data)) = head.as_ref() else {
+            return false;
+        };
+        walk.head_bytes = walk.head_bytes.saturating_add(data.len() as u64);
+        match crate::es::head_keyframe(kind, data) {
+            Some(key) => {
+                *head = None;
+                key
+            }
+            None => {
+                if data.len() > MAX_HEAD_BYTES {
+                    *head = None;
+                }
+                false
             }
         }
     }
@@ -654,13 +726,29 @@ impl<R: Read + Seek> TsDemux<R> {
                 (self.length.unwrap_or(0), self.end.unwrap_or(self.start)),
                 mark,
             );
-            // The marked unit alone is framed: the units after it, up to
-            // the target, are counted from their PES headers.
+            // The marked unit alone is framed. The PES packets after it, up
+            // to the target, are read from their headers and the start of
+            // their payload: a keyframe the muxer did not mark is found
+            // there, and the preroll counted.
             let (landing, _) = self.run(mark, track, to.time, reference, true, cost)?;
             if let Some(mut landing) = landing {
-                let after = self.shown_before(pid, landing.position, to.time, cost)?;
-                landing.preroll = landing.preroll.saturating_add(after);
+                let walk = self.walk_to(track, landing.position, to.time, cost)?;
+                landing.preroll = landing.preroll.saturating_add(walk.shown);
                 chosen = Some((landing, mark));
+                if let Some((later, shown_after)) = walk.later_key {
+                    cost.runs += 1;
+                    let reference = interpolate(
+                        (self.data_start, self.start),
+                        (self.length.unwrap_or(0), self.end.unwrap_or(self.start)),
+                        later,
+                    );
+                    if let (Some(mut key), _) =
+                        self.run(later, track, to.time, reference, true, cost)?
+                    {
+                        key.preroll = key.preroll.saturating_add(shown_after);
+                        chosen = Some((key, later));
+                    }
+                }
             }
         }
         let mut from = best;

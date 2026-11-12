@@ -59,6 +59,20 @@ pub fn timestamp(bytes: &[u8]) -> Option<u64> {
     )
 }
 
+/// The bytes after the PES header at the start of `payload`, when the
+/// header is all there.
+#[must_use]
+pub fn pes_body(payload: &[u8]) -> Option<&[u8]> {
+    let [0, 0, 1, stream_id, ..] = *payload else {
+        return None;
+    };
+    if has_no_header(stream_id) {
+        return payload.get(6..);
+    }
+    let length = usize::from(*payload.get(8)?);
+    payload.get(9 + length..)
+}
+
 /// The PTS and DTS of a PES header at the start of `payload`, when the
 /// header's timestamp fields are inside it.
 #[must_use]

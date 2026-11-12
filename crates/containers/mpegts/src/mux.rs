@@ -1,6 +1,10 @@
 //! Writing a transport stream: one program, one PID per stream.
 //!
-//! Each access unit becomes one PES packet. Timestamps are moved to the
+//! Each video access unit becomes one PES packet. Audio frames that follow
+//! each other without a gap share a PES packet of up to 2930 bytes and
+//! 0.2 s, as FFmpeg packs them; the demuxer times the frames after the
+//! first from their sample counts, so a frame joins only where that time
+//! is its own. Timestamps are moved to the
 //! 90 kHz clock and offset by [`MuxOptions::delay`] (1.4 s by default, as
 //! FFmpeg does), so a stream whose first DTS is below its first PTS still
 //! starts at a positive time and the PCR can run ahead of every DTS. The
@@ -62,6 +66,11 @@ const MAX_ADTS_FRAME: usize = 8191;
 const INTERLEAVE_SPAN: i64 = 900_000;
 /// Held units leave in decode order once they hold this many bytes.
 const INTERLEAVE_BYTES: usize = 32 << 20;
+/// An audio PES packet holds frames up to this many bytes, as FFmpeg's
+/// default `pes_payload_size`.
+const AUDIO_PES_BYTES: usize = 2930;
+/// An audio PES packet's frames span less than this decode time: 0.2 s.
+const AUDIO_PES_SPAN: i64 = 18_000;
 /// The most PCR-only packets one stretch without data gets: a minute.
 const MAX_BRIDGE_PACKETS: u64 = 3_000;
 
@@ -715,12 +724,61 @@ impl<W: Write> TsMux<W> {
             if !due {
                 return Ok(());
             }
-            let Some(unit) = self.tracks[index].held.pop_front() else {
+            let (count, complete) = self.audio_run(index);
+            let forced = all || last - dts >= AUDIO_PES_SPAN || self.held_bytes >= INTERLEAVE_BYTES;
+            if !complete && !forced {
+                // More frames may join this PES packet.
+                return Ok(());
+            }
+            let mut units = self.tracks[index].held.drain(..count);
+            let Some(mut unit) = units.next() else {
                 return Ok(());
             };
+            for more in units {
+                unit.bytes.extend_from_slice(&more.bytes);
+                unit.declared = unit.declared.saturating_add(more.declared);
+            }
             self.held_bytes = self.held_bytes.saturating_sub(unit.bytes.len());
             self.emit(index, unit)?;
         }
+    }
+
+    /// How many of the held units at the front of an audio track go into
+    /// one PES packet, and whether that is settled. Frames join while
+    /// each starts exactly where the demuxer will time it, at the first
+    /// frame's PTS plus the samples before it, and the packet stays within
+    /// [`AUDIO_PES_BYTES`] and [`AUDIO_PES_SPAN`]. A video unit, or audio
+    /// whose frames this crate does not read, is one PES packet alone.
+    fn audio_run(&self, index: usize) -> (usize, bool) {
+        let track = &self.tracks[index];
+        let mut held = track.held.iter();
+        let Some(first) = held.next() else {
+            return (0, true);
+        };
+        if track.video {
+            return (1, true);
+        }
+        let Some((mut samples, rate)) = frame_samples(track, &first.bytes) else {
+            return (1, true);
+        };
+        let mut bytes = first.bytes.len();
+        let mut count = 1;
+        for next in held {
+            let expected = first
+                .pts
+                .saturating_add(sample_ticks(u64::from(samples), rate));
+            let fits = bytes + next.bytes.len() <= AUDIO_PES_BYTES
+                && next.dts - first.dts < AUDIO_PES_SPAN;
+            match frame_samples(track, &next.bytes) {
+                Some((more, same)) if same == rate && next.pts == expected && fits => {
+                    samples = samples.saturating_add(more);
+                    bytes += next.bytes.len();
+                    count += 1;
+                }
+                _ => return (count, true),
+            }
+        }
+        (count, false)
     }
 
     /// Bridges a stretch of decode time with no data before `pcr_now`: a
@@ -1046,6 +1104,44 @@ fn is_adts(bytes: &[u8]) -> bool {
         at += length;
     }
     !bytes.is_empty() && at == bytes.len()
+}
+
+/// The samples and rate of the audio frame (or Opus packet) that starts
+/// `bytes` as this stream writes them, read the way the demuxer reads it.
+fn frame_samples(track: &Track, bytes: &[u8]) -> Option<(u32, u32)> {
+    match track.shape {
+        Shape::Aac { .. } => {
+            let header = crate::es::adts::header(bytes)?;
+            let rate = *crate::es::adts::RATES.get(usize::from(header.rate_index))?;
+            Some((1024 * (u32::from(header.blocks) + 1), rate))
+        }
+        Shape::Opus => {
+            let (start, size) = crate::es::opus::control_header(bytes)?;
+            let packet = bytes.get(start..start + size)?;
+            Some((crate::es::opus::packet_samples(packet)?, 48_000))
+        }
+        Shape::Plain => match track.stream_type {
+            0x81 | 0x87 => {
+                let header = crate::es::ac3::header(bytes)?;
+                Some((header.samples, header.rate))
+            }
+            0x03 | 0x04 => {
+                let header = crate::es::mpa::header(bytes)?;
+                Some((header.samples, header.rate))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+    .filter(|(samples, rate)| *samples > 0 && *rate > 0)
+}
+
+/// `samples` at `rate` in 90 kHz ticks, rounded to the nearest, as the
+/// demuxer times frames after a PES timestamp.
+fn sample_ticks(samples: u64, rate: u32) -> i64 {
+    let rate = u128::from(rate.max(1));
+    let ticks = (u128::from(samples) * 90_000 + rate / 2) / rate;
+    i64::try_from(ticks).unwrap_or(i64::MAX)
 }
 
 /// The reorder depth [`MuxOptions::derive_decode_times`] uses for a

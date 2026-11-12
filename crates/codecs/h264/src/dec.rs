@@ -760,13 +760,13 @@ impl H264Decoder {
     /// behind it; short of that the caller is better off bringing the
     /// next packet.
     fn take_ready(&mut self, out: &mut Vec<VideoOutput>, all: bool) -> Result<(), CodecError> {
-        let (depth, flying) = self
+        let (depth, flying, budget) = self
             .pool
             .as_ref()
-            .map_or((0, 0), |pool| (pool.depth, pool.flying()));
+            .map_or((0, 0, 0), |pool| (pool.depth, pool.flying(), pool.budget));
         // A picture in flight holds its planes, the rows it has published,
         // its macroblocks and its output form: about eight bytes a sample.
-        let affordable = IN_FLIGHT_BYTES / self.picture_samples.saturating_mul(8).max(1);
+        let affordable = budget / self.picture_samples.saturating_mul(8).max(1);
         let depth = depth.min(affordable.max(2));
         let mut flying = flying;
         while let Some(front) = self.outbox.front() {
@@ -4927,11 +4927,12 @@ const IN_FLIGHT_PER_CORE: usize = 4;
 /// Pictures in flight for every two cores asked for. More decode no faster
 /// on 8 or 18 cores, at 1080p or 4K, and each holds its planes.
 const DEPTH_PER_TWO_CORES: usize = 3;
-/// Memory the pictures in flight may take together, which holds their
-/// number down for large pictures. At eight bytes a sample this lets ten
-/// 4K pictures fly, which with references read from their published rows
-/// takes about as much memory as seven did when each kept a copy.
-const IN_FLIGHT_BYTES: usize = 1 << 30;
+/// Memory the pictures in flight may take together, for each core asked
+/// for, which holds their number down for large pictures. On 8 cores, at
+/// eight bytes a sample, this lets ten 4K pictures fly; that is as many as
+/// help there, but on 18 cores held 4K to 0.89 s against 0.71 s with
+/// twenty, as the budget now allows.
+const IN_FLIGHT_BYTES_PER_CORE: usize = 1 << 27;
 
 type Task = Box<dyn FnOnce() + Send>;
 
@@ -4942,6 +4943,8 @@ struct Pool {
     workers: Vec<std::thread::JoinHandle<()>>,
     /// How many pictures the threads can decode at once.
     depth: usize,
+    /// Memory the pictures in flight may take together.
+    budget: usize,
     /// Tasks handed over and not yet finished.
     flying: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// One permit per core asked for. `None` runs tasks where they are
@@ -5001,6 +5004,7 @@ impl Pool {
             sender: Some(sender),
             workers,
             depth,
+            budget: cores.saturating_mul(IN_FLIGHT_BYTES_PER_CORE),
             flying: std::sync::Arc::default(),
             permits: Some(permits),
         }
@@ -5011,6 +5015,7 @@ impl Pool {
             sender: None,
             workers: Vec::new(),
             depth: 0,
+            budget: 0,
             flying: std::sync::Arc::default(),
             permits: None,
         }

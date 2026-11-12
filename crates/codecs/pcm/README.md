@@ -91,7 +91,7 @@ All tests are unit tests inside `src/`; run them with `cargo test -p cutlass-pcm
 - A separate measurement found that a 16-bit WAV file decodes to the same bytes as FFmpeg's output.
 - `local_files_match_an_independent_pcm_dump` decodes FFmpeg's 16-bit dump of two named files from a local media folder that is not in the repository. It is skipped when the folder is missing.
 
-Not run by default: `thirty_minute_decoder_campaign` and `bounded_encoder_campaign` (seeded random input; `PCM_FUZZ_SECS` and `PCM_ENCODER_FUZZ_SECS` set the run lengths, `PCM_FUZZ_SEED` the decoder seed in hex) and `release_decode_and_encode_throughput` are `#[ignore]`. No result of them is recorded here.
+Not run by default: `thirty_minute_decoder_campaign` and `bounded_encoder_campaign` (seeded random input; `PCM_FUZZ_SECS` and `PCM_ENCODER_FUZZ_SECS` set the run lengths, `PCM_FUZZ_SEED` the decoder seed in hex) and `release_decode_and_encode_throughput` are `#[ignore]`. The decoder campaign, with the s8, u8, A-law, mu-law and s64 layouts added, ran 1800 s from seed `0x711d3c0` on 12 November 2026 (release build at `f2d59632`): 15,627,983,193 inputs, 10,755,512,978 refused with an error, no panic and no failed check, at most 2.9 MB resident. The encoder campaign and the throughput test have no recorded result.
 
 ## Speed against FFmpeg
 

@@ -222,4 +222,47 @@ pub(crate) fn dc_add(plane: &mut [u8], at: usize, down: usize, dc: i32, size: us
     }
 }
 
+/// See [`crate::residual::dc_add_quads`]. As [`dc_add`] does for one DC,
+/// each half of a row has its quarter's positive part added and negative
+/// part taken away, both saturating; two rows go in one vector.
+#[target_feature(enable = "neon")]
+pub(crate) fn dc_add_quads(plane: &mut [u8], at: usize, down: usize, dcs: [i32; 4]) -> bool {
+    use core::arch::aarch64::{
+        vcombine_u8, vcreate_u8, vgetq_lane_u64, vqaddq_u8, vqsubq_u8, vreinterpretq_u64_u8,
+    };
+    let Some(window) = plane.get_mut(at..) else {
+        return false;
+    };
+    let Some(rows) = crate::neon::rows_of::<8, 8>(window, down) else {
+        return false;
+    };
+    // Each quarter's DC in the four bytes of its half of a row.
+    let spread = |dc: i32| u64::from(dc as u8) * 0x0101_0101;
+    let half = |left: i32, right: i32| {
+        let rise = spread(left.clamp(0, 255)) | spread(right.clamp(0, 255)) << 32;
+        let fall = spread(left.clamp(-255, 0).abs()) | spread(right.clamp(-255, 0).abs()) << 32;
+        (
+            vcombine_u8(vcreate_u8(rise), vcreate_u8(rise)),
+            vcombine_u8(vcreate_u8(fall), vcreate_u8(fall)),
+        )
+    };
+    let top = half(dcs[0], dcs[1]);
+    let bottom = half(dcs[2], dcs[3]);
+    let [r0, r1, r2, r3, r4, r5, r6, r7] = rows;
+    for (index, (first, second)) in [(r0, r1), (r2, r3), (r4, r5), (r6, r7)]
+        .into_iter()
+        .enumerate()
+    {
+        let (rise, fall) = if index < 2 { top } else { bottom };
+        let samples = vcombine_u8(
+            vcreate_u8(u64::from_le_bytes(*first)),
+            vcreate_u8(u64::from_le_bytes(*second)),
+        );
+        let out = vreinterpretq_u64_u8(vqsubq_u8(vqaddq_u8(samples, rise), fall));
+        *first = vgetq_lane_u64::<0>(out).to_le_bytes();
+        *second = vgetq_lane_u64::<1>(out).to_le_bytes();
+    }
+    true
+}
+
 crate::residual::residual_kernels!(pub(crate), #[target_feature(enable = "neon")]);

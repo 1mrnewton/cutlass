@@ -449,6 +449,13 @@ pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
         false
     }
 
+    /// `dcs` added to the four 4×4 quarters of the 8×8 samples from `at`,
+    /// rows `down` apart, in raster order, with a vector kernel. `false`
+    /// as for [`Self::predict_fast`].
+    fn add_dc_quads_fast(_plane: &mut [Self], _at: usize, _down: usize, _dcs: [i32; 4]) -> bool {
+        false
+    }
+
     /// Two predictions of `size`, rows `size.0` apart, mixed into `dst`
     /// with a vector kernel: averaged when `weight` is `None`. `false` as
     /// for [`Self::predict_fast`].
@@ -647,6 +654,10 @@ impl Sample for u8 {
 
     fn add_dc_fast(plane: &mut [Self], at: usize, down: usize, dc: i32, size: usize) -> bool {
         cutlass_h264_kernels::residual::dc_add(plane, at, down, dc, size)
+    }
+
+    fn add_dc_quads_fast(plane: &mut [Self], at: usize, down: usize, dcs: [i32; 4]) -> bool {
+        cutlass_h264_kernels::residual::dc_add_quads(plane, at, down, dcs)
     }
 
     fn mix_fast(

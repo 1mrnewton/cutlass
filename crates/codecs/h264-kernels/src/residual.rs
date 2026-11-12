@@ -29,6 +29,17 @@ pub fn dc_add(plane: &mut [u8], at: usize, down: usize, dc: i32, size: usize) ->
     kernel!(dc_add(plane, at, down, dc, size))
 }
 
+/// Adds `dcs` to the four 4×4 quarters of the 8×8 block of `plane` whose
+/// first sample is at `at`, with rows `down` apart, in raster order (top
+/// left, top right, bottom left, bottom right), and holds each sample to 0
+/// to 255: four [`dc_add`]s of size 4 at once, as a 4:2:0 chroma block
+/// with only DC levels has. `false` means the samples are not all in the
+/// plane, and nothing was done.
+#[inline]
+pub fn dc_add_quads(plane: &mut [u8], at: usize, down: usize, dcs: [i32; 4]) -> bool {
+    kernel!(dc_add_quads(plane, at, down, dcs))
+}
+
 /// The plane reads and writes around whichever `idct4_rows` is in scope: it
 /// takes the block and the four rows of four samples, and gives the rows
 /// back with the residual added.
@@ -142,6 +153,37 @@ mod tests {
             assert_eq!(done, wanted, "round {round}");
             assert_eq!(fast, plain, "round {round}: dc {dc}, size {size}");
             if !done {
+                assert_eq!(fast, before);
+            }
+        }
+    }
+
+    #[test]
+    fn the_quarter_dc_add_matches_the_plain_one() {
+        let mut rng = Lcg(13);
+        for round in 0..20_000 {
+            let down = 8 + (rng.next() % 8) as usize;
+            let before: Vec<u8> = (0..down * 10).map(|_| rng.next() as u8).collect();
+            // Mostly inside the plane, sometimes off its end.
+            let at = (rng.next() as usize) % (down * 3);
+            let span = [40, 300, 1 << 20][round % 3];
+            let dcs: [i32; 4] =
+                core::array::from_fn(|_| (rng.next() % (2 * span + 1)) as i32 - span as i32);
+            let mut fast = before.clone();
+            let mut plain = before.clone();
+            let done = super::dc_add_quads(&mut fast, at, down, dcs);
+            let wanted = scalar::dc_add_quads(&mut plain, at, down, dcs);
+            assert_eq!(done, wanted, "round {round}");
+            assert_eq!(fast, plain, "round {round}: dcs {dcs:?}");
+            if done {
+                // Four single adds give the same.
+                let mut four = before.clone();
+                for (i, &dc) in dcs.iter().enumerate() {
+                    let corner = at + (i >> 1) * 4 * down + (i & 1) * 4;
+                    assert!(scalar::dc_add(&mut four, corner, down, dc, 4));
+                }
+                assert_eq!(fast, four, "round {round}");
+            } else {
                 assert_eq!(fast, before);
             }
         }

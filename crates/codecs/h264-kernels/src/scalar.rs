@@ -382,6 +382,28 @@ fn dc_row(samples: u64, dc: i32) -> u64 {
 crate::residual::residual_kernels!(pub,);
 crate::residual::dc_add_rows!(pub,);
 
+/// See [`crate::residual::dc_add_quads`]: each sample of each quarter
+/// moved by its DC and held to 0 to 255.
+pub fn dc_add_quads(plane: &mut [u8], at: usize, down: usize, dcs: [i32; 4]) -> bool {
+    if down < 8
+        || 7usize
+            .checked_mul(down)
+            .and_then(|rows| rows.checked_add(8))
+            .and_then(|span| span.checked_add(at))
+            .is_none_or(|end| end > plane.len())
+    {
+        return false;
+    }
+    for row in 0..8 {
+        for column in 0..8 {
+            let dc = dcs[(row / 4) * 2 + column / 4].clamp(-255, 255);
+            let sample = &mut plane[at + row * down + column];
+            *sample = (i32::from(*sample) + dc).clamp(0, 255) as u8;
+        }
+    }
+    true
+}
+
 /// See [`crate::mc::luma_pair`]: each block made whole on its own, then the
 /// two averaged.
 pub fn luma_pair(

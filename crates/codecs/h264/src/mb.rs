@@ -4843,8 +4843,14 @@ fn chroma_scaled<S: Sample>(
                 continue;
             }
             let plane = if which == 0 { &mut pic.u } else { &mut pic.v };
-            for (i, &value) in scaled.iter().enumerate() {
-                recon::add_dc(plane, stride, origin(i), (value + 32) >> 6, 4);
+            // All four blocks at once, as only their DC levels are there.
+            let dcs = scaled.map(|value| (value + 32) >> 6);
+            let (x, y, step) = origin(0);
+            if S::add_dc_quads_fast(plane, y * stride + x, stride * step, dcs) {
+                continue;
+            }
+            for (i, &dc) in dcs.iter().enumerate() {
+                recon::add_dc(plane, stride, origin(i), dc, 4);
             }
         }
         return Ok(());

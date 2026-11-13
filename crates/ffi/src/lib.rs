@@ -2508,6 +2508,13 @@ mod tests {
         let roots = Roots::new(&temp);
         let mut host = roots.create();
         let (first, _) = two_stills(&mut host);
+        // A PNG the phone probes for itself is an image, not a photo.
+        let image = host.import(&fixture("pattern.png")).unwrap();
+        let image = host.append(&image).unwrap();
+        assert!(!host.clip_abilities(&image).unwrap().moving);
+        assert!(host.freeze(&image, Micros(4_500_000)).is_err());
+        assert!(host.extract_audio(&image).is_err());
+        host.undo().unwrap();
         let clip = |host: &PhoneHost| host.draft().tracks[0].segments[0].clone();
         let can = host.clip_abilities(&first).unwrap();
         assert!(can.turn && can.reverse && can.crop);
@@ -2648,5 +2655,18 @@ mod tests {
         assert!(host.to_main(&overlay).is_err(), "it is on main now");
         host.undo().unwrap();
         assert_eq!(on_main(&host), main);
+    }
+
+    #[test]
+    fn the_phone_writes_a_freeze_still_with_its_own_encoders() {
+        let encoders = crate::encoders();
+        for codec in [cutlass_encode::CodecId::Png, cutlass_encode::CodecId::Jpeg] {
+            assert!(
+                encoders
+                    .open(&cutlass_encode::CodecParams::video(codec, 16, 16))
+                    .is_ok(),
+                "{codec:?}"
+            );
+        }
     }
 }

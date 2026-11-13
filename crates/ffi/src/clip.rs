@@ -107,10 +107,13 @@ fn reversible(draft: &Draft, segment: &Segment) -> bool {
     )
 }
 
+/// A movie, not a still: photos, images, GIFs and held frames have no
+/// frame to freeze and no sound to extract.
 fn moving(draft: &Draft, segment: &Segment) -> bool {
     matches!(
         draft.materials.get(segment.material_id.as_str()),
-        Some(MaterialRef::Video(video)) if video.kind != "photo" && video.freeze.is_none()
+        Some(MaterialRef::Video(video))
+            if video.kind == cutlass_model::MetaType::Video.as_str() && video.freeze.is_none()
     )
 }
 
@@ -300,7 +303,7 @@ impl PhoneHost {
         else {
             return Err(refused("an extract belongs on video"));
         };
-        if video.kind == "photo" {
+        if !moving(draft, segment) {
             return Err(refused("the clip has no sound"));
         }
         let stored = if segment.reverse && !video.reverse_path.is_empty() {
@@ -334,6 +337,10 @@ impl PhoneHost {
     /// (or at the clip's edge when the playhead is close to it). Returns
     /// the still's clip.
     pub fn freeze(&mut self, segment_id: &SegmentId, at: Micros) -> Result<SegmentId, FfiError> {
+        let (segment, _) = placed(self.draft(), segment_id)?;
+        if !moving(self.draft(), segment) {
+            return Err(refused("the clip is already a still"));
+        }
         let point = cutlass_eval::freeze_point(self.draft(), segment_id, at).map_err(|miss| {
             refused(match miss {
                 cutlass_eval::FreezeMiss::UnknownSegment => "the clip is not on the timeline",

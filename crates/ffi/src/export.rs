@@ -44,6 +44,10 @@ pub fn encoders() -> EncodeFactory {
     cutlass_ac3::register_encoders(&mut encoders);
     cutlass_vorbis::register_encoders(&mut encoders);
     cutlass_mjpeg::register_encoders(&mut encoders);
+    // Stills, which a freeze frame writes. Android has no platform encoder
+    // for them; on Apple the Rust ones go first, as for sound.
+    cutlass_png::register_encoders(&mut encoders);
+    cutlass_jpeg::register_encoders(&mut encoders);
     #[cfg(target_vendor = "apple")]
     cutlass_platform_apple::register_encoders(&mut encoders);
     // MediaCodec: H.264 and HEVC, the phone's hardware first.

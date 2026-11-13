@@ -379,6 +379,109 @@ mod tests {
     }
 
     #[test]
+    fn the_preview_draws_the_document_over_a_scene_and_over_the_designers_clip() {
+        use super::Backdrop;
+        use crate::studio::{CurveKind, Slot, Stack};
+
+        let mut desktop = crate::shell::tests::shell();
+        let dancer = Backdrop::Scene("dancer".to_owned());
+        // Nothing open, and no GPU: nothing to draw, and nothing in use.
+        assert!(desktop.studio_frame(&dancer, "beach", 0.0, false).is_none());
+        assert!(!desktop.studio_in_use());
+        assert!(!desktop.poll_studio(), "the studio folder is off in a test");
+        desktop.studio_mut().new_effect();
+        assert!(desktop.studio_in_use());
+        assert!(desktop.studio_frame(&dancer, "beach", 0.0, false).is_none());
+
+        // The designer's clip: a picture decodes to one frame on another
+        // thread; a file that is not media is named as the reason.
+        let picture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/effects/previews/beach.jpg");
+        desktop.load_studio_clip(picture.clone());
+        assert_eq!(desktop.studio_clip_loading(), Some(picture.as_path()));
+        let wait = |desktop: &mut crate::shell::Shell| {
+            let start = std::time::Instant::now();
+            while desktop.studio_clip_loading().is_some() {
+                assert!(start.elapsed().as_secs() < 30, "the clip never arrived");
+                desktop.poll_studio();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        wait(&mut desktop);
+        assert_eq!(desktop.studio_clip_error(), None);
+        assert_eq!(desktop.studio_clip(), Some(picture.as_path()));
+        desktop.load_studio_clip(std::path::PathBuf::from(file!()));
+        wait(&mut desktop);
+        assert!(desktop.studio_clip_error().is_some());
+        assert_eq!(
+            desktop.studio_clip(),
+            Some(picture.as_path()),
+            "a clip that fails leaves the one in use"
+        );
+
+        let instance = eframe::wgpu::Instance::new(
+            eframe::wgpu::InstanceDescriptor::new_without_display_handle(),
+        );
+        let Ok(state) = pollster::block_on(eframe::egui_wgpu::RenderState::create(
+            &eframe::egui_wgpu::WgpuConfiguration::default(),
+            &instance,
+            None,
+            eframe::egui_wgpu::RendererOptions::default(),
+        )) else {
+            eprintln!("skipped: no GPU");
+            return;
+        };
+        desktop.attach_gpu(&state);
+        // A scene is drawn three times a card's size each way.
+        let (_, size) = desktop
+            .studio_frame(&dancer, "beach", 0.5, false)
+            .expect("the effect over a scene");
+        assert_eq!(size, [288 * 3, 192 * 3]);
+        assert!(desktop.studio_frame(&dancer, "beach", 0.5, true).is_some());
+        // A scene the app does not ship draws nothing.
+        let nowhere = Backdrop::Scene("nowhere".to_owned());
+        assert!(
+            desktop
+                .studio_frame(&nowhere, "beach", 0.5, false)
+                .is_none()
+        );
+        // The clip is drawn at its own size, whatever time is asked.
+        let (_, size) = desktop
+            .studio_frame(&Backdrop::Clip, "beach", 123.0, false)
+            .expect("the effect over the clip");
+        assert_eq!(size, [288, 192]);
+        // Every pass muted: the picture alone, not nothing.
+        desktop.studio_mut().set_muted(Stack::Effect, 0, true);
+        assert!(desktop.studio_frame(&dancer, "beach", 0.5, false).is_some());
+
+        // A transition crosses from the backdrop to the scene named, and
+        // from the clip to a scene made the clip's size.
+        desktop.studio_mut().new_transition();
+        desktop
+            .studio_mut()
+            .add_pass(Stack::Outgoing, cutlass_effects::Block::Blur);
+        let blur = Slot::pass(Stack::Outgoing, 0, "radius");
+        desktop.studio_mut().set_kind(&blur, CurveKind::Keys);
+        desktop.studio_mut().move_key(&blur, 1, 1.0, 0.05);
+        for progress in [0.0, 0.5, 1.0] {
+            let (_, size) = desktop
+                .studio_frame(&dancer, "beach", progress, false)
+                .expect("the transition between scenes");
+            assert_eq!(size, [288 * 3, 192 * 3]);
+        }
+        assert!(
+            desktop
+                .studio_frame(&Backdrop::Clip, "beach", 0.5, false)
+                .is_some()
+        );
+        assert!(
+            desktop
+                .studio_frame(&dancer, "nowhere", 0.5, false)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn a_clip_keeps_a_few_seconds_of_frames() {
         let times = clip_times(Some(Micros(1_000_000)));
         assert_eq!(times.len(), CLIP_RATE as usize);

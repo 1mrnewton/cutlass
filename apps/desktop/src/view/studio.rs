@@ -204,9 +204,16 @@ fn clock_at(studio: &Studio, time: f32) -> f64 {
 /// side to drag into.
 fn fitted(low: f32, high: f32, min: f32, max: f32) -> (f32, f32) {
     let whole = (max - min).max(f32::EPSILON);
-    let room = ((high - low) * 0.5).max(whole * 0.04);
+    let spread = high - low;
+    // Half the curve's own height each side; for a flat one, a little of
+    // the whole range.
+    let room = if spread > whole * 1e-4 {
+        spread * 0.5
+    } else {
+        whole * 0.04
+    };
     let (bottom, top) = ((low - room).max(min), (high + room).min(max));
-    if top - bottom < whole * 0.02 {
+    if top <= bottom {
         return (min, max);
     }
     (bottom, top)
@@ -1361,7 +1368,9 @@ fn value_row(shell: &mut Shell, ui: &mut Ui, view: &mut StudioView, doc: &Doc, s
                 shell.studio_mut().set_fixed(slot, typed);
             }
         } else {
-            tag(ui, &short(now), NUMBER_WIDTH, tokens::MUTED);
+            // A kind is named by its picker; its number says nothing more.
+            let shown = if kinds { String::new() } else { short(now) };
+            tag(ui, &shown, NUMBER_WIDTH, tokens::MUTED);
         }
         if icon_button(
             ui,
@@ -1585,6 +1594,9 @@ mod tests {
         // The fit never leaves the range, and a curve over all of it shows
         // all of it.
         assert_eq!(super::fitted(0.0, 0.1, 0.0, 0.1), (0.0, 0.1));
+        // A small turn in a range of two full turns is not squashed flat.
+        let (bottom, top) = super::fitted(0.0, 4.0, -360.0, 360.0);
+        assert_eq!((bottom, top), (-2.0, 6.0));
         let (bottom, top) = super::fitted(0.0, 0.0, 0.0, 0.1);
         assert!(bottom == 0.0 && top > 0.0 && top <= 0.1);
     }

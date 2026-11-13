@@ -27,6 +27,10 @@ pub struct Av1Encoder {
     qindex: u8,
     speed: u8,
     gop: u32,
+    keyint: u32,
+    loop_restoration: bool,
+    global_motion: bool,
+    temporal_filter: bool,
     threads: usize,
     color: ColorTags,
     enc: Option<Av1Enc>,
@@ -39,18 +43,21 @@ pub struct Av1Encoder {
     times: std::collections::VecDeque<(i64, i64, u32)>,
 }
 
-/// Bit depth, horizontal and vertical subsampling, and monochrome flag of a pixel format.
-fn format_of(pixel: PixelFormat) -> Option<(u32, bool, bool)> {
+/// Bit depth, horizontal and vertical subsampling, and whether the format
+/// is one grey plane, which is coded as monochrome.
+fn format_of(pixel: PixelFormat) -> Option<(u32, bool, bool, bool)> {
     Some(match pixel {
-        PixelFormat::Yuv420p => (8, true, true),
-        PixelFormat::Yuv422p => (8, true, false),
-        PixelFormat::Yuv444p | PixelFormat::Gbrp => (8, false, false),
-        PixelFormat::Yuv420p10 => (10, true, true),
-        PixelFormat::Yuv422p10 => (10, true, false),
-        PixelFormat::Yuv444p10 | PixelFormat::Gbrp10 => (10, false, false),
-        PixelFormat::Yuv420p12 => (12, true, true),
-        PixelFormat::Yuv422p12 => (12, true, false),
-        PixelFormat::Yuv444p12 | PixelFormat::Gbrp12 => (12, false, false),
+        PixelFormat::Yuv420p => (8, true, true, false),
+        PixelFormat::Yuv422p => (8, true, false, false),
+        PixelFormat::Yuv444p | PixelFormat::Gbrp => (8, false, false, false),
+        PixelFormat::Yuv420p10 => (10, true, true, false),
+        PixelFormat::Yuv422p10 => (10, true, false, false),
+        PixelFormat::Yuv444p10 | PixelFormat::Gbrp10 => (10, false, false, false),
+        PixelFormat::Yuv420p12 => (12, true, true, false),
+        PixelFormat::Yuv422p12 => (12, true, false, false),
+        PixelFormat::Yuv444p12 | PixelFormat::Gbrp12 => (12, false, false, false),
+        PixelFormat::Gray8 => (8, true, true, true),
+        PixelFormat::Gray10 => (10, true, true, true),
         _ => return None,
     })
 }
@@ -134,6 +141,10 @@ impl Av1Encoder {
             qindex: 100,
             speed: 6,
             gop: 8,
+            keyint: 120,
+            loop_restoration: false,
+            global_motion: false,
+            temporal_filter: false,
             threads: std::thread::available_parallelism().map_or(1, usize::from),
             color,
             enc: None,
@@ -172,6 +183,33 @@ impl Av1Encoder {
         self.enc = None;
     }
 
+    /// Pictures from one key frame to the next (120 by default; 1 makes
+    /// every picture a key frame). Zero is raised to one.
+    pub fn set_keyint(&mut self, pictures: u32) {
+        self.keyint = pictures.max(1);
+        self.enc = None;
+    }
+
+    /// Codes Wiener loop restoration where it lowers the error (off by
+    /// default; speeds 8 and up leave it off).
+    pub fn set_loop_restoration(&mut self, on: bool) {
+        self.loop_restoration = on;
+        self.enc = None;
+    }
+
+    /// Estimates a global motion model for each reference (off by default).
+    pub fn set_global_motion(&mut self, on: bool) {
+        self.global_motion = on;
+        self.enc = None;
+    }
+
+    /// Filters every hidden alt-ref with its neighbours (off by default,
+    /// when only the alt-refs of still content are filtered).
+    pub fn set_temporal_filter(&mut self, on: bool) {
+        self.temporal_filter = on;
+        self.enc = None;
+    }
+
     /// Makes the next picture pushed a key frame. The key frame distance is
     /// counted from it.
     pub fn force_keyframe(&mut self) {
@@ -180,7 +218,7 @@ impl Av1Encoder {
 
     fn encoder(&mut self, duration: i64, timescale: u32) -> Result<&mut Av1Enc, CodecError> {
         if self.enc.is_none() {
-            let Some((bd, sx, sy)) = format_of(self.pixel) else {
+            let Some((bd, sx, sy, mono)) = format_of(self.pixel) else {
                 return Err(CodecError::Unsupported {
                     what: "pixel format",
                 });
@@ -189,8 +227,13 @@ impl Av1Encoder {
             cfg.bit_depth = bd;
             cfg.sub_x = sx;
             cfg.sub_y = sy;
+            cfg.mono = mono;
             cfg.speed = self.speed;
             cfg.gop = self.gop;
+            cfg.keyint = self.keyint;
+            cfg.loop_restoration = self.loop_restoration;
+            cfg.global_motion = self.global_motion;
+            cfg.temporal_filter = self.temporal_filter;
             cfg.threads = self.threads;
             cfg.color_primaries = self.color.primaries;
             cfg.transfer = self.color.transfer;
@@ -230,12 +273,11 @@ impl Av1Encoder {
             return Err(CodecError::Cancelled);
         }
         let (w, h) = (self.width as usize, self.height as usize);
-        let Some((cw, ch)) = self.pixel.chroma_wh(self.width, self.height) else {
-            return Err(CodecError::Unsupported {
-                what: "pixel format",
-            });
-        };
-        let (cw, ch) = (cw as usize, ch as usize);
+        // One grey plane has no chroma planes.
+        let (cw, ch) = self
+            .pixel
+            .chroma_wh(self.width, self.height)
+            .map_or((0, 0), |(cw, ch)| (cw as usize, ch as usize));
         let wide = format_of(self.pixel).is_some_and(|f| f.0 > 8);
         let need = (w * h + 2 * cw * ch) * if wide { 2 } else { 1 };
         if bytes.len() != need {
@@ -388,10 +430,15 @@ mod tests {
 
     /// A moving ramp in `pixel` layout, `index` pictures in.
     fn frame(pixel: PixelFormat, width: u32, height: u32, index: u32) -> FrameInput {
-        let (cw, ch) = pixel.chroma_wh(width, height).expect("planar");
+        // One grey plane has no chroma.
+        let (cw, ch) = pixel.chroma_wh(width, height).unwrap_or((0, 0));
         let wide = !matches!(
             pixel,
-            PixelFormat::Yuv420p | PixelFormat::Yuv422p | PixelFormat::Yuv444p | PixelFormat::Gbrp
+            PixelFormat::Yuv420p
+                | PixelFormat::Yuv422p
+                | PixelFormat::Yuv444p
+                | PixelFormat::Gbrp
+                | PixelFormat::Gray8
         );
         let mut bytes = Vec::new();
         for (w, h) in [(width, height), (cw, ch), (cw, ch)] {
@@ -625,6 +672,139 @@ mod tests {
             Av1Encoder::open(&params),
             Err(CodecError::Unsupported { .. })
         ));
+    }
+
+    #[test]
+    fn the_key_frame_distance_is_a_setting() {
+        let params = CodecParams::video(CodecId::Av1, 64, 48);
+        let mut encoder = Av1Encoder::open(&params).expect("encoder");
+        encoder.set_gop(2);
+        encoder.set_keyint(3);
+        let packets = encode(&mut encoder, PixelFormat::Yuv420p, 8);
+        let keys: Vec<usize> = (0..8).filter(|&i| packets[i].keyframe).collect();
+        assert_eq!(keys, [0, 3, 6]);
+        // Zero is one: every picture is a key frame.
+        encoder.set_keyint(0);
+        let packets = encode(&mut encoder, PixelFormat::Yuv420p, 3);
+        assert!(packets.iter().all(|p| p.keyframe));
+    }
+
+    #[test]
+    fn loop_restoration_is_a_setting() {
+        let params = CodecParams::video(CodecId::Av1, 64, 48);
+        let mut encoder = Av1Encoder::open(&params).expect("encoder");
+        encoder.set_gop(1);
+        let off = encode(&mut encoder, PixelFormat::Yuv420p, 2);
+        assert!(!sequence_of(&off[0]).enable_restoration);
+        encoder.set_loop_restoration(true);
+        let on = encode(&mut encoder, PixelFormat::Yuv420p, 2);
+        assert!(sequence_of(&on[0]).enable_restoration);
+        let mut decoder = Av1Decoder::open(&params).expect("decoder");
+        assert_eq!(pictures(&mut decoder, &on).len(), 2);
+    }
+
+    /// Pictures of noise that changes from one to the next, so that no
+    /// mini-GOP is found still and filtered without the setting.
+    fn encode_noise(encoder: &mut Av1Encoder, frames: u32) -> Vec<Packet> {
+        let mut state = 0x2545_f491u32;
+        let mut packets = Vec::new();
+        for i in 0..frames {
+            let bytes: Vec<u8> = (0..64 * 48 * 3 / 2)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (state >> 24) as u8
+                })
+                .collect();
+            let time = FrameTime::new(i64::from(i), 1, 30).expect("time");
+            let frame = CpuFrame::new(64, 48, PixelFormat::Yuv420p, bytes, time).expect("frame");
+            packets.extend(encoder.push_frame(&FrameInput::Cpu(frame)).expect("push"));
+        }
+        packets.extend(encoder.drain().expect("drain"));
+        packets
+    }
+
+    #[test]
+    fn global_motion_and_the_temporal_filter_are_settings() {
+        let params = CodecParams::video(CodecId::Av1, 64, 48);
+        let mut plain = Av1Encoder::open(&params).expect("encoder");
+        plain.set_gop(4);
+        let base = encode_noise(&mut plain, 9);
+        for setting in 0..2 {
+            let mut encoder = Av1Encoder::open(&params).expect("encoder");
+            encoder.set_gop(4);
+            if setting == 0 {
+                encoder.set_global_motion(true);
+            } else {
+                encoder.set_temporal_filter(true);
+            }
+            let packets = encode_noise(&mut encoder, 9);
+            assert_eq!(packets.len(), 9);
+            let mut decoder = Av1Decoder::open(&params).expect("decoder");
+            assert_eq!(pictures(&mut decoder, &packets).len(), 9, "{setting}");
+            if setting == 1 {
+                // A filtered alt-ref is not the picture shown: the stream
+                // differs from the one without the filter.
+                let bytes =
+                    |ps: &[Packet]| -> Vec<u8> { ps.iter().flat_map(|p| p.data.clone()).collect() };
+                assert_ne!(bytes(&packets), bytes(&base));
+            }
+        }
+    }
+
+    #[test]
+    fn a_grey_plane_is_coded_as_monochrome() {
+        for (pixel, out) in [
+            (PixelFormat::Gray8, PixelFormat::Yuv420p),
+            (PixelFormat::Gray10, PixelFormat::Yuv420p10),
+        ] {
+            let mut params = CodecParams::video(CodecId::Av1, 64, 48);
+            params.pixel = pixel;
+            let mut encoder = Av1Encoder::open(&params).expect("encoder");
+            encoder.set_gop(2);
+            encoder.set_quality(40);
+            let packets = encode(&mut encoder, pixel, 3);
+            assert_eq!(packets.len(), 3);
+            let seq = sequence_of(&packets[0]);
+            assert!(seq.mono_chrome);
+            // The record says monochrome, with both chroma bits set.
+            let record = config(&packets[0]).expect("config");
+            assert_eq!(record[2] & 0b0001_1100, 0b0001_1100);
+            // The decoder shows 4:2:0 with neutral chroma and the luma back.
+            let mut decoder = Av1Decoder::open(&params).expect("decoder");
+            let mut shown = Vec::new();
+            for p in &packets {
+                shown.extend(decoder.push(p).expect("decode"));
+            }
+            shown.extend(decoder.drain().expect("drain"));
+            assert_eq!(shown.len(), 3);
+            let Output::Picture(first) = &shown[0] else {
+                panic!("a picture");
+            };
+            assert_eq!(first.info().pixel, out);
+            let cutlass_decode::PictureSamples::Cpu(bytes) = first.samples() else {
+                panic!("cpu samples");
+            };
+            let FrameInput::Cpu(source) = frame(pixel, 64, 48, 0) else {
+                panic!("cpu frame");
+            };
+            let luma = source.bytes();
+            let step = if pixel == PixelFormat::Gray8 { 1 } else { 2 };
+            let sample = |b: &[u8], i: usize| -> i32 {
+                if step == 1 {
+                    i32::from(b[i])
+                } else {
+                    i32::from(u16::from_le_bytes([b[2 * i], b[2 * i + 1]]))
+                }
+            };
+            let tolerance = if step == 1 { 6 } else { 24 };
+            for i in 0..64 * 48 {
+                assert!((sample(bytes, i) - sample(luma, i)).abs() <= tolerance);
+            }
+            let neutral = if step == 1 { 128 } else { 512 };
+            for i in 64 * 48..64 * 48 + 2 * 32 * 24 {
+                assert_eq!(sample(bytes, i), neutral);
+            }
+        }
     }
 
     #[test]

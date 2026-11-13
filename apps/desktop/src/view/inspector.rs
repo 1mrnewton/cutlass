@@ -292,28 +292,15 @@ fn text_panel(
     inspection: &Inspection,
     caption: bool,
 ) {
-    // A caption's tabs lead with its list. AI avatars is paid, and shown
-    // off for now.
+    // A caption's tabs lead with its list. Text to speech and AI avatars,
+    // both generative, wait for the next version.
     let labels: &[&str] = if caption {
-        &[
-            "Captions",
-            "Text",
-            "Animation",
-            "Tracking",
-            "Text to speech",
-            "AI avatars",
-        ]
+        &["Captions", "Text", "Animation", "Tracking"]
     } else {
-        &[
-            "Text",
-            "Animation",
-            "Tracking",
-            "Text to speech",
-            "AI avatars",
-        ]
+        &["Text", "Animation", "Tracking"]
     };
     let tab = state.tab;
-    paid_tabs(ui, labels, &["AI avatars"], &mut state.tab);
+    tabs(ui, labels, &mut state.tab);
     if tab != state.tab {
         state.page = 0;
     }
@@ -358,17 +345,7 @@ fn text_panel(
             }
         }
         "Animation" => animation_tab(shell, ui, state, &["In", "Out", "Loop"], TEXT_MOTIONS),
-        "Tracking" => super::follow::follow_tab(shell, ui, state, super::follow::Tiles::Subjects),
-        _ => {
-            later_note(ui, "Text to speech");
-            later_tiles(
-                ui,
-                &[
-                    "Warm", "Bright", "Even", "Clear", "Light", "Low", "Soft", "Steady", "Quick",
-                    "Dry",
-                ],
-            );
-        }
+        _ => super::follow::follow_tab(shell, ui, state, super::follow::Tiles::Subjects),
     }
 }
 
@@ -2675,23 +2652,12 @@ pub(super) fn send(shell: &mut Shell, edit: impl FnOnce(&mut Shell) -> Result<()
 /// The text tabs across the top. The active one is cyan. Tabs that do not
 /// fit scroll sideways, as the prototype's do.
 pub(super) fn tabs(ui: &mut Ui, labels: &[&str], current: &mut usize) {
-    paid_tabs(ui, labels, &[], current);
-}
-
-/// What a paid tab says on hover. Cutlass will offer these later.
-const PAID: &str = "Paid: Cutlass will offer this later";
-/// The width of the diamond after a paid tab's name.
-const GEM: f32 = 8.0;
-
-/// The tab row, with the `paid` tabs faint, marked with a diamond, and not
-/// picked.
-fn paid_tabs(ui: &mut Ui, labels: &[&str], paid: &[&str], current: &mut usize) {
     ui.add_space(ROW_GAP);
     // The gap shrinks first, then the names down to 11 points, before the
     // row has to scroll, so a narrow inspector still shows every tab.
     let measure = |size: f32| -> f32 {
         let font = FontId::proportional(size);
-        let names: f32 = labels
+        labels
             .iter()
             .map(|label| {
                 ui.painter()
@@ -2699,8 +2665,7 @@ fn paid_tabs(ui: &mut Ui, labels: &[&str], paid: &[&str], current: &mut usize) {
                     .size()
                     .x
             })
-            .sum();
-        names + paid.len() as f32 * (GEM + 3.0)
+            .sum()
     };
     let gaps = labels.len().saturating_sub(1).max(1) as f32;
     let room = ui.available_width() - 1.0;
@@ -2710,7 +2675,6 @@ fn paid_tabs(ui: &mut Ui, labels: &[&str], paid: &[&str], current: &mut usize) {
     } else {
         (13.0 * (room - gaps * TAB_GAP_MIN) / full).clamp(11.0, 13.0)
     };
-    let font = FontId::proportional(size);
     let text = measure(size);
     let gap = ((room - text) / gaps).clamp(TAB_GAP_MIN, TAB_GAP);
     ui::Scroll::horizontal(("inspector-tabs", labels.len()))
@@ -2720,36 +2684,6 @@ fn paid_tabs(ui: &mut Ui, labels: &[&str], paid: &[&str], current: &mut usize) {
                 ui.set_min_height(ROW_HEIGHT);
                 ui.spacing_mut().item_spacing.x = gap;
                 for (index, label) in labels.iter().enumerate() {
-                    if paid.contains(label) {
-                        // The name and a diamond after it, faint, in one
-                        // rect sized to them.
-                        let galley = ui.painter().layout_no_wrap(
-                            (*label).to_owned(),
-                            font.clone(),
-                            tokens::FAINT,
-                        );
-                        let size = Vec2::new(galley.size().x + 3.0 + GEM, galley.size().y);
-                        let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
-                        let top = rect.left_center() - Vec2::new(0.0, galley.size().y / 2.0);
-                        ui.painter().galley(top, galley, tokens::FAINT);
-                        let c = egui::pos2(rect.right() - GEM / 2.0, rect.center().y);
-                        let points = vec![
-                            c + Vec2::new(-4.0, -1.0),
-                            c + Vec2::new(-2.0, -4.0),
-                            c + Vec2::new(2.0, -4.0),
-                            c + Vec2::new(4.0, -1.0),
-                            c + Vec2::new(0.0, 4.0),
-                        ];
-                        ui.painter().add(egui::Shape::convex_polygon(
-                            points,
-                            tokens::FAINT,
-                            Stroke::NONE,
-                        ));
-                        response.on_hover_text(PAID).widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::Role::Label, false, *label)
-                        });
-                        continue;
-                    }
                     let color = if index == *current {
                         ACCENT
                     } else {

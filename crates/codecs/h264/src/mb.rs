@@ -1000,6 +1000,7 @@ fn rle_context<S: Sample>(
     left.is_none_or(|mb| mb.skip) && above.is_none_or(|mb| mb.skip)
 }
 
+#[inline(always)]
 fn cabac_skip<S: Sample>(
     pic: &Frame<S>,
     cab: &mut Cabac<'_>,
@@ -3184,6 +3185,7 @@ fn one_mb<S: Sample>(
     Ok((qp, residual))
 }
 
+#[inline(always)]
 fn field_flag<S: Sample>(
     pic: &Frame<S>,
     entropy: &mut Entropy<'_, '_>,
@@ -4062,6 +4064,7 @@ fn cbp_chroma<S: Sample>(pic: &Frame<S>, mx: i32, my: i32, slice: u16) -> u8 {
 }
 
 /// Clause 9.3.3.1.1.5. The first bin uses context 60 or 61. Later bins use 62, then 63.
+#[inline(always)]
 fn qp_delta(entropy: &mut Entropy<'_, '_>, prev_nonzero: bool) -> Result<i32, CodecError> {
     match entropy {
         Entropy::Cavlc(bits) => bits.se(),
@@ -9476,6 +9479,7 @@ fn fill_ref(refs: &mut [i8; 4], uses: &mut u8, part: &Part, value: i8) {
     }
 }
 
+#[inline(always)]
 fn read_te(entropy: &mut Entropy<'_, '_>, range: usize, ctx: usize) -> Result<u32, CodecError> {
     if range <= 1 {
         return Ok(0);
@@ -9524,6 +9528,7 @@ fn ref_ctx<S: Sample>(
 /// which may lie just outside this macroblock, raises the `ref_idx` context.
 /// It does when its reference index is above 0, or above 1 for a field
 /// macroblock beside a frame macroblock, whose indices count fields.
+#[inline(always)]
 fn ref_above_zero<S: Sample>(
     pic: &Frame<S>,
     mx: usize,
@@ -9818,6 +9823,7 @@ fn mvp<S: Sample>(
 
 /// [`mvp`] with the motion to the left of the partition and above it already
 /// found: `near` is those two, and `wanted` the list and reference index.
+#[inline(always)]
 fn mvp_from<S: Sample>(
     pic: &Frame<S>,
     at: Place,

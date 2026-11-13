@@ -17,11 +17,11 @@ use std::time::{Duration, Instant};
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
     Append, AppendLane, ClipMove, ClipboardMiss, CopiedClip, DropGesture, DropOutcome,
-    EFFECT_LENGTH, EffectPlace, GestureError, MediaPlace, MoveGesture, MovePlan, Pointer,
+    EFFECT_LENGTH, EffectPlace, FreshIds, GestureError, MediaPlace, MoveGesture, MovePlan, Pointer,
     TITLE_LENGTH, TimelineScale, TitlePlace, TrimGesture, TrimPlan, Zoom, ZoomBounds,
     append_placement, copy_clips, drop_gesture, effect_of_card, effect_requests, effect_row_for,
-    effect_target, fit_pixel_size, free_row, hit_test, last_accuracy_step, material_span,
-    media_requests, minimum_pixel_size, move_requests, paste_requests, plan_move,
+    effect_target, fit_pixel_size, free_row, highest_suffix, hit_test, last_accuracy_step,
+    material_span, media_requests, minimum_pixel_size, move_requests, paste_requests, plan_move,
     plan_move_between, title_requests, title_style, trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
@@ -8726,70 +8726,6 @@ pub const EMPTY_SPAN: Micros = Micros(10_000_000);
 
 /// [`EMPTY_SPAN`] across a third of `lane_width`, no closer than the
 /// finest ruler step.
-/// New ids `prefix-N` for several requests planned at once, each past
-/// every `prefix-N` the draft already holds. The counter starts at zero
-/// each launch, so a reopened project would otherwise be handed ids it
-/// already uses and the edit would be refused as a duplicate.
-struct FreshIds<'a> {
-    draft: &'a Draft,
-    /// The last number handed out.
-    next: u64,
-    /// The prefixes the draft has been searched for, once each.
-    looked: Vec<String>,
-}
-
-impl<'a> FreshIds<'a> {
-    fn new(draft: &'a Draft, next: u64) -> Self {
-        Self {
-            draft,
-            next,
-            looked: Vec::new(),
-        }
-    }
-
-    fn make(&mut self, prefix: &str) -> String {
-        if !self.looked.iter().any(|looked| looked == prefix) {
-            self.next = self.next.max(highest_suffix(self.draft, prefix));
-            self.looked.push(prefix.to_owned());
-        }
-        self.next = self.next.saturating_add(1);
-        format!("{prefix}-{}", self.next)
-    }
-}
-
-/// The largest `N` of any string `prefix-N` in `draft`, or zero.
-fn highest_suffix(draft: &Draft, prefix: &str) -> u64 {
-    fn walk(value: &serde_json::Value, prefix: &str, best: &mut u64) {
-        match value {
-            serde_json::Value::String(text) => {
-                let number = text
-                    .strip_prefix(prefix)
-                    .and_then(|rest| rest.strip_prefix('-'))
-                    .and_then(|digits| digits.parse::<u64>().ok());
-                if let Some(number) = number {
-                    *best = (*best).max(number);
-                }
-            }
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    walk(item, prefix, best);
-                }
-            }
-            serde_json::Value::Object(map) => {
-                for item in map.values() {
-                    walk(item, prefix, best);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut best = 0;
-    if let Ok(value) = serde_json::to_value(draft) {
-        walk(&value, prefix, &mut best);
-    }
-    best
-}
-
 fn empty_pixel_size(lane_width: f64, rate: FrameRate) -> Option<f64> {
     let size = lane_width / 3.0 / EMPTY_SPAN.0 as f64;
     if !size.is_finite() || size <= 0.0 {

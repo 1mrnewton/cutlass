@@ -1,0 +1,346 @@
+//! The 16-bit interpolation on AVX2. Samples of 12 bits or fewer fit
+//! signed 16 bits, so every pass multiplies pairs of samples by pairs of
+//! taps (`pmaddwd`) into 32-bit sums. Across a row, the sums of even and
+//! odd outputs come from loads two samples apart and are interleaved back
+//! into order; down the rows, pairs of rows are interleaved first.
+
+// The loops index rows, strips and taps by one position at once.
+#![allow(clippy::needless_range_loop)]
+
+use core::arch::x86_64::{
+    __m128i, __m256i, _mm_add_epi32, _mm_cvtsi32_si128, _mm_cvtsi128_si64, _mm_extract_epi64,
+    _mm_madd_epi16, _mm_packs_epi32, _mm_set_epi64x, _mm_setzero_si128, _mm_sll_epi16,
+    _mm_sra_epi32, _mm_unpackhi_epi32, _mm_unpacklo_epi32, _mm256_add_epi32,
+    _mm256_castsi128_si256, _mm256_castsi256_si128, _mm256_extracti128_si256, _mm256_madd_epi16,
+    _mm256_packs_epi32, _mm256_set_epi64x, _mm256_set1_epi32, _mm256_setzero_si256,
+    _mm256_sll_epi16, _mm256_sra_epi32, _mm256_unpackhi_epi16, _mm256_unpackhi_epi32,
+    _mm256_unpacklo_epi16, _mm256_unpacklo_epi32,
+};
+
+use super::{Src, Taps};
+
+/// Rows of horizontally filtered values kept between the passes: up to
+/// four strips of sixteen for each row of a block's window.
+pub(super) type Strips = [__m256i; 4];
+
+/// Four samples as one 64-bit lane.
+#[inline]
+fn q(a: &[u16]) -> i64 {
+    let mut v = 0u64;
+    for (k, &x) in a.iter().take(4).enumerate() {
+        v |= u64::from(x) << (16 * k);
+    }
+    v as i64
+}
+
+/// Sixteen samples of `r` from `x`, zeros past its end.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn ld16<const R: usize>(r: &[u16; R], x: usize) -> __m256i {
+    match r.get(x..x + 16).and_then(|a| a.first_chunk::<16>()) {
+        Some(a) => _mm256_set_epi64x(q(&a[12..]), q(&a[8..]), q(&a[4..]), q(a)),
+        None => _mm256_setzero_si256(),
+    }
+}
+
+/// Eight samples of `r` from `x`, zeros past its end.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn ld8<const R: usize>(r: &[u16; R], x: usize) -> __m128i {
+    match r.get(x..x + 8).and_then(|a| a.first_chunk::<8>()) {
+        Some(a) => _mm_set_epi64x(q(&a[4..]), q(a)),
+        None => _mm_setzero_si128(),
+    }
+}
+
+/// The sixteen values of `v` to `d[x..]`.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn st16<const W: usize>(d: &mut [i16; W], x: usize, v: __m256i) {
+    let (lo, hi) = (
+        lanes(_mm256_castsi256_si128(v)),
+        lanes(_mm256_extracti128_si256::<1>(v)),
+    );
+    if let Some(d) = d.get_mut(x..x + 16) {
+        d[..8].copy_from_slice(&lo);
+        d[8..].copy_from_slice(&hi);
+    }
+}
+
+/// The eight 16-bit values of `v`.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn lanes(v: __m128i) -> [i16; 8] {
+    let (a, b) = (
+        _mm_cvtsi128_si64(v) as u64,
+        _mm_extract_epi64::<1>(v) as u64,
+    );
+    let mut out = [0i16; 8];
+    for k in 0..4 {
+        out[k] = (a >> (16 * k)) as i16;
+        out[k + 4] = (b >> (16 * k)) as i16;
+    }
+    out
+}
+
+/// The first `W` (at most 8) values of `v` to `d`.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn st8<const W: usize>(d: &mut [i16; W], v: __m128i) {
+    let l = lanes(v);
+    let n = W.min(8);
+    d[..n].copy_from_slice(&l[..n]);
+}
+
+/// Taps `2k` and `2k + 1` as the 16-bit pair `pmaddwd` multiplies by.
+#[inline]
+fn pair(f: &[i8; 8], k: usize) -> i32 {
+    i32::from(f[2 * k] as i16 as u16) | i32::from(f[2 * k + 1] as i16) << 16
+}
+
+/// The horizontal filter of one row, `T` taps, shifted right by `shift`.
+#[derive(Clone, Copy)]
+struct Across<const T: usize> {
+    pairs: [__m256i; 4],
+    shift: __m128i,
+}
+
+impl<const T: usize> Across<T> {
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn new(f: &[i8; 8], shift: u32) -> Self {
+        Self {
+            pairs: core::array::from_fn(|k| _mm256_set1_epi32(pair(f, k))),
+            shift: _mm_cvtsi32_si128(shift as i32),
+        }
+    }
+
+    /// Sixteen outputs from column `x` of row `r`.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn sixteen<const R: usize>(&self, r: &[u16; R], x: usize) -> __m256i {
+        let (mut even, mut odd) = (_mm256_setzero_si256(), _mm256_setzero_si256());
+        for k in 0..T / 2 {
+            let p = self.pairs[k];
+            even = _mm256_add_epi32(even, _mm256_madd_epi16(ld16(r, x + 2 * k), p));
+            odd = _mm256_add_epi32(odd, _mm256_madd_epi16(ld16(r, x + 2 * k + 1), p));
+        }
+        let (even, odd) = (
+            _mm256_sra_epi32(even, self.shift),
+            _mm256_sra_epi32(odd, self.shift),
+        );
+        _mm256_packs_epi32(
+            _mm256_unpacklo_epi32(even, odd),
+            _mm256_unpackhi_epi32(even, odd),
+        )
+    }
+
+    /// Eight outputs from column `x` of row `r`.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn eight<const R: usize>(&self, r: &[u16; R], x: usize) -> __m128i {
+        let (mut even, mut odd) = (_mm_setzero_si128(), _mm_setzero_si128());
+        for k in 0..T / 2 {
+            let p = _mm256_castsi256_si128(self.pairs[k]);
+            even = _mm_add_epi32(even, _mm_madd_epi16(ld8(r, x + 2 * k), p));
+            odd = _mm_add_epi32(odd, _mm_madd_epi16(ld8(r, x + 2 * k + 1), p));
+        }
+        let (even, odd) = (
+            _mm_sra_epi32(even, self.shift),
+            _mm_sra_epi32(odd, self.shift),
+        );
+        _mm_packs_epi32(_mm_unpacklo_epi32(even, odd), _mm_unpackhi_epi32(even, odd))
+    }
+}
+
+/// The vertical filter over window rows `win` of one strip, pairs of rows
+/// times pairs of taps, shifted right by `shift`: sixteen outputs.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn down16<const T: usize>(win: &[__m256i; T], p: &[__m256i; 4], shift: __m128i) -> __m256i {
+    let (mut lo, mut hi) = (_mm256_setzero_si256(), _mm256_setzero_si256());
+    for k in 0..T / 2 {
+        let (a, b) = (win[2 * k], win[2 * k + 1]);
+        lo = _mm256_add_epi32(lo, _mm256_madd_epi16(_mm256_unpacklo_epi16(a, b), p[k]));
+        hi = _mm256_add_epi32(hi, _mm256_madd_epi16(_mm256_unpackhi_epi16(a, b), p[k]));
+    }
+    _mm256_packs_epi32(_mm256_sra_epi32(lo, shift), _mm256_sra_epi32(hi, shift))
+}
+
+/// The intermediates of a block (see [`super::put`]).
+#[target_feature(enable = "avx2")]
+pub(super) fn put(
+    dst: &mut [i16],
+    dst_stride: usize,
+    src: &Src<'_>,
+    (w, h): (usize, usize),
+    taps: &Taps,
+    bit_depth: u32,
+    tmp: &mut Vec<Strips>,
+) {
+    if tmp.len() < 64 + 7 {
+        tmp.resize(64 + 7, [_mm256_setzero_si256(); 4]);
+    }
+    let tmp = tmp.as_mut_slice();
+    let split = |a: usize| Src {
+        at: src.at + a,
+        ..*src
+    };
+    macro_rules! go {
+        ($w:literal, $t:literal, $x:expr) => {
+            put_w::<$w, { $w + 24 }, $t>(
+                dst.get_mut($x..).unwrap_or_default(),
+                dst_stride,
+                &split($x),
+                h,
+                taps,
+                bit_depth,
+                tmp,
+            )
+        };
+    }
+    macro_rules! widths {
+        ($t:literal) => {
+            match w {
+                4 => go!(4, $t, 0),
+                8 => go!(8, $t, 0),
+                12 => {
+                    go!(8, $t, 0);
+                    go!(4, $t, 8);
+                }
+                16 => go!(16, $t, 0),
+                24 => {
+                    go!(16, $t, 0);
+                    go!(8, $t, 16);
+                }
+                32 => go!(32, $t, 0),
+                48 => {
+                    go!(32, $t, 0);
+                    go!(16, $t, 32);
+                }
+                _ => go!(64, $t, 0),
+            }
+        };
+    }
+    if taps.len == 8 {
+        widths!(8);
+    } else {
+        widths!(4);
+    }
+}
+
+/// Window row `j` of `src`: its first `R` samples, which the entry checked
+/// are there.
+#[inline(always)]
+fn src_row<'s, const R: usize>(src: &Src<'s>, j: usize) -> Option<&'s [u16; R]> {
+    src.src.get(src.row(j)..)?.first_chunk::<R>()
+}
+
+/// Output row `j`, `None` when `dst` is too short for it (the entry
+/// checks that it never is).
+#[inline(always)]
+fn out_row<const W: usize>(dst: &mut [i16], stride: usize, j: usize) -> Option<&mut [i16; W]> {
+    dst.get_mut(j * stride..)?.first_chunk_mut::<W>()
+}
+
+/// [`put`] of a block `W` wide with `T` taps; `R` is `W + 24`, the
+/// samples of each window row the loads read.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn put_w<const W: usize, const R: usize, const T: usize>(
+    dst: &mut [i16],
+    dst_stride: usize,
+    src: &Src<'_>,
+    h: usize,
+    taps: &Taps,
+    bit_depth: u32,
+    tmp: &mut [Strips],
+) {
+    let h0 = T / 2 - 1;
+    let h = h.min(64);
+    let strips = W / 16;
+    let shift1 = bit_depth - 8;
+    match (taps.across, taps.down) {
+        (None, None) => {
+            let shift = _mm_cvtsi32_si128((14 - bit_depth) as i32);
+            for j in 0..h {
+                let (Some(r), Some(o)) =
+                    (src_row::<R>(src, j + h0), out_row::<W>(dst, dst_stride, j))
+                else {
+                    return;
+                };
+                if W >= 16 {
+                    for s in 0..strips {
+                        st16(o, 16 * s, _mm256_sll_epi16(ld16(r, h0 + 16 * s), shift));
+                    }
+                } else {
+                    st8(o, _mm_sll_epi16(ld8(r, h0), shift));
+                }
+            }
+        }
+        (Some(fh), None) => {
+            let across = Across::<T>::new(&fh, shift1);
+            for j in 0..h {
+                let (Some(r), Some(o)) =
+                    (src_row::<R>(src, j + h0), out_row::<W>(dst, dst_stride, j))
+                else {
+                    return;
+                };
+                if W >= 16 {
+                    for s in 0..strips {
+                        st16(o, 16 * s, across.sixteen(r, 16 * s));
+                    }
+                } else {
+                    st8(o, across.eight(r, 0));
+                }
+            }
+        }
+        (across, Some(fv)) => {
+            // Window rows, filtered across or as they are, then the taps
+            // down: shifted by `bit_depth - 8` without a filter across, by
+            // 6 after one.
+            let fh = across.map(|f| Across::<T>::new(&f, shift1));
+            let p: [__m256i; 4] = core::array::from_fn(|k| _mm256_set1_epi32(pair(&fv, k)));
+            let shift = _mm_cvtsi32_si128(if fh.is_some() { 6 } else { shift1 as i32 });
+            let Some(rows) = tmp.get_mut(..h + T - 1) else {
+                return;
+            };
+            for (j, t) in rows.iter_mut().enumerate() {
+                let Some(r) = src_row::<R>(src, j) else {
+                    return;
+                };
+                match fh {
+                    Some(a) if W >= 16 => {
+                        for s in 0..strips {
+                            t[s] = a.sixteen(r, 16 * s);
+                        }
+                    }
+                    Some(a) => t[0] = _mm256_castsi128_si256(a.eight(r, 0)),
+                    None if W >= 16 => {
+                        for s in 0..strips {
+                            t[s] = ld16(r, h0 + 16 * s);
+                        }
+                    }
+                    None => t[0] = _mm256_castsi128_si256(ld8(r, h0)),
+                }
+            }
+            for j in 0..h {
+                let (Some(win), Some(o)) = (
+                    rows.get(j..).and_then(|w| w.first_chunk::<T>()),
+                    out_row::<W>(dst, dst_stride, j),
+                ) else {
+                    return;
+                };
+                if W >= 16 {
+                    for s in 0..strips {
+                        let strip: [__m256i; T] = core::array::from_fn(|k| win[k][s]);
+                        st16(o, 16 * s, down16(&strip, &p, shift));
+                    }
+                } else {
+                    let strip: [__m256i; T] = core::array::from_fn(|k| win[k][0]);
+                    st8(o, _mm256_castsi256_si128(down16(&strip, &p, shift)));
+                }
+            }
+        }
+    }
+}

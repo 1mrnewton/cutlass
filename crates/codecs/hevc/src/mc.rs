@@ -42,7 +42,7 @@ pub struct Plane<'a, P> {
 /// The row loops are written to compile to vector code; call this inside
 /// [`cutlass_simd::wide::wide`] to get 256-bit vectors where the CPU has
 /// them.
-#[inline]
+#[inline(always)]
 pub fn interpolate<P: Pixel>(
     plane: &Plane<'_, P>,
     block: Block,
@@ -63,7 +63,7 @@ pub fn interpolate<P: Pixel>(
 /// from one list, or (`other` the intermediates of list 0, rows `w`
 /// apart) the average with it. `false`, with nothing written, when the
 /// kernels do not take the block; the caller then interpolates it.
-#[inline]
+#[inline(always)]
 pub fn predict_px<P: Pixel>(
     plane: &Plane<'_, P>,
     block: Block,
@@ -261,6 +261,7 @@ pub struct Scratch<P> {
     win: Vec<P>,
     tmp: Vec<i16>,
     rows: kernels::Tmp,
+    deep: cutlass_simd::hevc::mc16::Tmp,
 }
 
 impl<P: Pixel> Default for Scratch<P> {
@@ -270,6 +271,7 @@ impl<P: Pixel> Default for Scratch<P> {
             win: vec![P::default(); WINDOW * WINDOW + 32],
             tmp: vec![0; WINDOW * 64],
             rows: kernels::Tmp::default(),
+            deep: cutlass_simd::hevc::mc16::Tmp::default(),
         }
     }
 }
@@ -294,7 +296,12 @@ fn filter<const T: usize, P: Pixel>(
     let sh = h + T - 1;
     let (x0, y0) = (x - half, y - half);
     let out = &mut out[..w * h];
-    let Scratch { win, tmp, rows } = scratch;
+    let Scratch {
+        win,
+        tmp,
+        rows,
+        deep,
+    } = scratch;
     let Some(spot) = place::<T, P>(plane, block) else {
         out.fill(0);
         return;
@@ -341,30 +348,50 @@ fn filter<const T: usize, P: Pixel>(
             return;
         }
     }
-    scalar::<T, P>(
-        &src[base..],
-        stride,
-        bit_depth,
-        [cx, cy],
-        (fx, fy),
-        (w, h),
-        out,
-        tmp,
-    );
+    if let Some(words) = P::words(src) {
+        let s = cutlass_simd::hevc::mc16::Src {
+            src: words,
+            at: base,
+            stride,
+        };
+        if cutlass_simd::hevc::mc16::put(out, w, &s, (w, h), &taps, bit_depth, deep) {
+            return;
+        }
+    }
+    let args = (&src[base..], stride, bit_depth, [cx, cy], (fx, fy), (w, h));
+    if P::bytes(&[]).is_some() {
+        scalar::<T, P>(args, out, tmp);
+    } else {
+        // Deeper samples always take this path: inline, so that it is
+        // compiled with the caller, for AVX2 under `wide::wide`.
+        loops::<T, P>(args, out, tmp);
+    }
 }
 
-/// The interpolation without the vector kernels: deeper samples, or a CPU
-/// without them. Out of line, so the hot path stays small.
+/// The source, stride, bit depth, taps, fractions and size of
+/// [`loops`].
+type Args<'s, const T: usize, P> = (
+    &'s [P],
+    usize,
+    u32,
+    [[i16; T]; 2],
+    (usize, usize),
+    (usize, usize),
+);
+
+/// [`loops`] for 8-bit samples on a CPU without the vector kernels. Out of
+/// line, so the hot path stays small.
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn scalar<const T: usize, P: Pixel>(
-    src: &[P],
-    stride: usize,
-    bit_depth: u32,
-    [cx, cy]: [[i16; T]; 2],
-    (fx, fy): (usize, usize),
-    (w, h): (usize, usize),
+fn scalar<const T: usize, P: Pixel>(args: Args<'_, T, P>, out: &mut [i16], tmp: &mut [i16]) {
+    loops::<T, P>(args, out, tmp);
+}
+
+/// The interpolation as plain loops over rows of fixed width, which the
+/// compiler turns into vector code.
+#[inline(always)]
+fn loops<const T: usize, P: Pixel>(
+    (src, stride, bit_depth, [cx, cy], (fx, fy), (w, h)): Args<'_, T, P>,
     out: &mut [i16],
     tmp: &mut [i16],
 ) {
@@ -645,7 +672,7 @@ pub struct Wp {
 
 /// Write one predicted block: default or explicit weighting of one or two
 /// interpolated blocks (clause 8.5.3.3.4).
-#[inline]
+#[inline(always)]
 pub fn store<P: Pixel>(
     dst: &mut [P],
     stride: usize,

@@ -633,7 +633,8 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
     }
 
     /// The prediction of each plane of one block from `refs`, stored.
-    #[inline]
+    /// Inline, so that deeper samples compile it for AVX2 under `wide`.
+    #[inline(always)]
     fn predict_planes(
         &mut self,
         (x, y, w, h): (usize, usize, usize, usize),

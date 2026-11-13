@@ -52,6 +52,16 @@ pub struct PhoneTextStyle {
     pub glow_strength: f64,
     /// 0 to 1.
     pub glow_range: f64,
+    /// Left, center or right across (0 to 2), or top, middle or bottom
+    /// down a vertical column (3 to 5).
+    pub alignment: i32,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    /// Extra space between letters and between lines, as a fraction of
+    /// the size; 0 is the normal gap.
+    pub letter_spacing: f64,
+    pub line_spacing: f64,
 }
 
 /// One change to a title's look.
@@ -82,6 +92,18 @@ pub enum TextStyleChange {
         strength: f64,
         range: f64,
     },
+    /// Left, center or right (0 to 2), or a vertical column at the top,
+    /// middle or bottom (3 to 5).
+    Align(i32),
+    Pattern {
+        bold: bool,
+        italic: bool,
+        underline: bool,
+    },
+    /// A fraction of the size; 0 is the normal gap.
+    LetterSpacing(f64),
+    /// A fraction of the size; 0 is the normal gap.
+    LineSpacing(f64),
 }
 
 /// The colors the Styles tab offers, as `#RRGGBB`: the background swatches.
@@ -104,6 +126,9 @@ pub struct TextStyleRanges {
     pub background_round_start: f64,
     pub glow_strength_start: f64,
     pub glow_range_start: f64,
+    /// Fractions of the size.
+    pub letter_spacing: (f64, f64),
+    pub line_spacing: (f64, f64),
 }
 
 pub const TEXT_STYLE_RANGES: TextStyleRanges = TextStyleRanges {
@@ -117,6 +142,8 @@ pub const TEXT_STYLE_RANGES: TextStyleRanges = TextStyleRanges {
     background_round_start: 0.3,
     glow_strength_start: 0.6,
     glow_range_start: 0.5,
+    letter_spacing: (-0.2, 1.0),
+    line_spacing: (-0.5, 2.0),
 };
 
 /// Where a new shadow falls: down and to the right.
@@ -184,6 +211,39 @@ pub(crate) fn style_request(
             strength,
             range,
         },
+        // A title with no line width takes the canvas width, and a column
+        // the canvas height.
+        TextStyleChange::Align(alignment) => Request::SetTextAlign {
+            segment_id,
+            alignment,
+            face: String::new(),
+            line_width: f64::from(if alignment >= 3 {
+                draft.canvas_config.height
+            } else {
+                draft.canvas_config.width
+            }),
+        },
+        TextStyleChange::Pattern {
+            bold,
+            italic,
+            underline,
+        } => Request::SetTextPattern {
+            segment_id,
+            bold,
+            italic,
+            underline,
+            face: String::new(),
+        },
+        TextStyleChange::LetterSpacing(spacing) => Request::SetLetterSpacing {
+            segment_id,
+            spacing,
+            face: String::new(),
+        },
+        TextStyleChange::LineSpacing(spacing) => Request::SetLineSpacing {
+            segment_id,
+            spacing,
+            face: String::new(),
+        },
     }
 }
 
@@ -245,6 +305,7 @@ pub fn text_of(draft: &Draft, segment_id: &SegmentId) -> Option<PhoneText> {
         .and_then(|segment| segment_bloom(&draft.materials, segment))
         .and_then(MaterialEffect::bloom)
         .unwrap_or_default();
+    let pattern = cutlass_session::TextPattern::of(text);
     Some(PhoneText {
         content: text.words().unwrap_or_default().into_owned(),
         face: text.font_path.clone(),
@@ -262,6 +323,12 @@ pub fn text_of(draft: &Draft, segment_id: &SegmentId) -> Option<PhoneText> {
             glow_color: glow.color,
             glow_strength: glow.strength,
             glow_range: glow.range,
+            alignment: text.alignment,
+            bold: pattern.bold,
+            italic: pattern.italic,
+            underline: pattern.underline,
+            letter_spacing: text.letter_spacing,
+            line_spacing: text.line_spacing,
         },
     })
 }

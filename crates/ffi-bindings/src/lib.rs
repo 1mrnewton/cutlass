@@ -428,6 +428,11 @@ pub struct TextStyleRanges {
     pub background_round_start: f64,
     pub glow_strength_start: f64,
     pub glow_range_start: f64,
+    /// Fractions of the size; 0 is the normal gap.
+    pub letter_spacing_min: f64,
+    pub letter_spacing_max: f64,
+    pub line_spacing_min: f64,
+    pub line_spacing_max: f64,
 }
 
 /// See [`TextStyleRanges`].
@@ -447,6 +452,10 @@ pub fn text_style_ranges() -> TextStyleRanges {
         background_round_start: ranges.background_round_start,
         glow_strength_start: ranges.glow_strength_start,
         glow_range_start: ranges.glow_range_start,
+        letter_spacing_min: ranges.letter_spacing.0,
+        letter_spacing_max: ranges.letter_spacing.1,
+        line_spacing_min: ranges.line_spacing.0,
+        line_spacing_max: ranges.line_spacing.1,
     }
 }
 
@@ -753,6 +762,15 @@ pub struct TextStyle {
     pub glow_color: String,
     pub glow_strength: f64,
     pub glow_range: f64,
+    /// Left, center or right (0 to 2), or a vertical column at the top,
+    /// middle or bottom (3 to 5).
+    pub alignment: i32,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    /// Fractions of the size; 0 is the normal gap.
+    pub letter_spacing: f64,
+    pub line_spacing: f64,
 }
 
 impl From<cutlass_ffi::PhoneTextStyle> for TextStyle {
@@ -771,6 +789,12 @@ impl From<cutlass_ffi::PhoneTextStyle> for TextStyle {
             glow_color: style.glow_color,
             glow_strength: style.glow_strength,
             glow_range: style.glow_range,
+            alignment: style.alignment,
+            bold: style.bold,
+            italic: style.italic,
+            underline: style.underline,
+            letter_spacing: style.letter_spacing,
+            line_spacing: style.line_spacing,
         }
     }
 }
@@ -802,6 +826,20 @@ pub enum TextStyleChange {
         color: String,
         strength: f64,
         range: f64,
+    },
+    Align {
+        alignment: i32,
+    },
+    Pattern {
+        bold: bool,
+        italic: bool,
+        underline: bool,
+    },
+    LetterSpacing {
+        spacing: f64,
+    },
+    LineSpacing {
+        spacing: f64,
     },
 }
 
@@ -838,6 +876,18 @@ impl From<TextStyleChange> for cutlass_ffi::TextStyleChange {
                 strength,
                 range,
             },
+            TextStyleChange::Align { alignment } => Self::Align(alignment),
+            TextStyleChange::Pattern {
+                bold,
+                italic,
+                underline,
+            } => Self::Pattern {
+                bold,
+                italic,
+                underline,
+            },
+            TextStyleChange::LetterSpacing { spacing } => Self::LetterSpacing(spacing),
+            TextStyleChange::LineSpacing { spacing } => Self::LineSpacing(spacing),
         }
     }
 }

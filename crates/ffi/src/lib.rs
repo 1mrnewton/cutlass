@@ -2458,6 +2458,53 @@ mod tests {
     }
 
     #[test]
+    fn a_title_aligns_takes_bold_italic_underline_and_spaces_its_letters_and_lines() {
+        use crate::TextStyleChange;
+
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        two_stills(&mut host);
+        host.set_font_folders(&[font_folder(&temp)]);
+        let title = host.add_text("A\nB", "", Micros(0)).unwrap();
+        let before = host.text(&title).unwrap().style;
+        assert_eq!(before.alignment, 0);
+        assert!(!before.bold && !before.italic && !before.underline);
+
+        host.style_text(&title, TextStyleChange::Align(2), false)
+            .unwrap();
+        let pattern = TextStyleChange::Pattern {
+            bold: true,
+            italic: false,
+            underline: true,
+        };
+        host.style_text(&title, pattern, false).unwrap();
+        for (spacing, live) in [(0.1, true), (0.3, false)] {
+            host.style_text(&title, TextStyleChange::LetterSpacing(spacing), live)
+                .unwrap();
+        }
+        host.style_text(&title, TextStyleChange::LineSpacing(0.5), false)
+            .unwrap();
+        let style = host.text(&title).unwrap().style;
+        assert_eq!(style.alignment, 2);
+        assert!(style.bold && !style.italic && style.underline);
+        assert_eq!((style.letter_spacing, style.line_spacing), (0.3, 0.5));
+        // A gap that closes the lines is refused.
+        assert!(
+            host.style_text(&title, TextStyleChange::LineSpacing(-1.0), false)
+                .is_err()
+        );
+        assert!(
+            host.style_text(&title, TextStyleChange::Align(9), false)
+                .is_err()
+        );
+        for _ in 0..4 {
+            host.undo().unwrap();
+        }
+        assert_eq!(host.text(&title).unwrap().style, before);
+    }
+
+    #[test]
     fn typing_adds_a_title_as_one_step_and_it_moves_on_the_preview() {
         let temp = Temp::new();
         let roots = Roots::new(&temp);

@@ -358,6 +358,32 @@ pub struct Stage {
     pub text: bool,
 }
 
+/// What the clip bar can do to one clip, and the state its toggles show.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct ClipAbilities {
+    /// A picture: Mirror and Rotate.
+    pub turn: bool,
+    /// A picture or a sound: Reverse and Fade.
+    pub reverse: bool,
+    /// A video or a composition: Crop.
+    pub crop: bool,
+    /// A video that is not a still: Freeze and Extract audio.
+    pub moving: bool,
+    /// On an audio row: Beats.
+    pub beats: bool,
+    pub mirrored: bool,
+    pub reversed: bool,
+    pub cropped: bool,
+}
+
+/// A clip's fade in and fade out. Zero is no fade.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Fade {
+    pub in_us: i64,
+    pub out_us: i64,
+}
+
 /// A clip's keyframes as timeline times, earliest first, the one under the
 /// playhead, and the span between two of them the playhead is in.
 #[derive(Clone, Debug, uniffi::Record)]
@@ -1282,6 +1308,114 @@ impl Editor {
     /// without it, as one undo step.
     pub fn reorder(&self, clip_id: String, place: u32) -> Result<(), EditorError> {
         self.run(move |host| host.reorder(&SegmentId::new(clip_id), place))?
+            .map_err(EditorError::from)
+    }
+
+    /// What the clip bar can do to `clip_id`.
+    pub fn clip_abilities(&self, clip_id: String) -> Result<ClipAbilities, EditorError> {
+        let can = self
+            .run(move |host| host.clip_abilities(&SegmentId::new(clip_id)))?
+            .map_err(EditorError::from)?;
+        Ok(ClipAbilities {
+            turn: can.turn,
+            reverse: can.reverse,
+            crop: can.crop,
+            moving: can.moving,
+            beats: can.beats,
+            mirrored: can.mirrored,
+            reversed: can.reversed,
+            cropped: can.cropped,
+        })
+    }
+
+    /// Flip a picture left to right, or back, as one undo step.
+    pub fn toggle_mirror(&self, clip_id: String) -> Result<(), EditorError> {
+        self.run(move |host| host.toggle_mirror(&SegmentId::new(clip_id)))?
+            .map_err(EditorError::from)
+    }
+
+    /// Turn a picture a quarter clockwise, as one undo step.
+    pub fn turn(&self, clip_id: String) -> Result<(), EditorError> {
+        self.run(move |host| host.turn(&SegmentId::new(clip_id)))?
+            .map_err(EditorError::from)
+    }
+
+    /// Play a picture or a sound backward, or forward again, as one undo step.
+    pub fn toggle_reverse(&self, clip_id: String) -> Result<(), EditorError> {
+        self.run(move |host| host.toggle_reverse(&SegmentId::new(clip_id)))?
+            .map_err(EditorError::from)
+    }
+
+    /// Keep the middle half of a picture, or the whole frame again, as one
+    /// undo step.
+    pub fn toggle_crop(&self, clip_id: String) -> Result<(), EditorError> {
+        self.run(move |host| host.toggle_crop(&SegmentId::new(clip_id)))?
+            .map_err(EditorError::from)
+    }
+
+    /// A picture's or a sound's fade in and fade out.
+    pub fn fade(&self, clip_id: String) -> Result<Fade, EditorError> {
+        self.run(move |host| host.fade(&SegmentId::new(clip_id)))?
+            .map(|fade| Fade {
+                in_us: fade.fade_in.0,
+                out_us: fade.fade_out.0,
+            })
+            .map_err(EditorError::from)
+    }
+
+    /// Fade a picture or a sound in and out, as one undo step.
+    pub fn set_fade(&self, clip_id: String, in_us: i64, out_us: i64) -> Result<(), EditorError> {
+        self.run(move |host| {
+            host.set_fade(&SegmentId::new(clip_id), Micros(in_us), Micros(out_us))
+        })?
+        .map_err(EditorError::from)
+    }
+
+    /// Put a video's sound on its own clip on an audio row, as one undo
+    /// step. Returns the sound's clip.
+    pub fn extract_audio(&self, clip_id: String) -> Result<String, EditorError> {
+        self.run(move |host| host.extract_audio(&SegmentId::new(clip_id)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Hold a video's frame at `at_us` as a still, as one undo step.
+    /// Returns the still's clip.
+    pub fn freeze(&self, clip_id: String, at_us: i64) -> Result<String, EditorError> {
+        self.run(move |host| host.freeze(&SegmentId::new(clip_id), Micros(at_us)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Drop a beat on a sound at `at_us`, or take away the one there.
+    /// Returns whether a beat is there now.
+    pub fn toggle_beat(&self, clip_id: String, at_us: i64) -> Result<bool, EditorError> {
+        self.run(move |host| host.toggle_beat(&SegmentId::new(clip_id), Micros(at_us)))?
+            .map_err(EditorError::from)
+    }
+
+    /// The beats on `clip_id`, as timeline times.
+    pub fn beats(&self, clip_id: String) -> Result<Vec<i64>, EditorError> {
+        self.run(move |host| {
+            host.beats(&SegmentId::new(clip_id))
+                .into_iter()
+                .map(|time| time.0)
+                .collect()
+        })
+    }
+
+    /// Put the whole of a library picture on an overlay row at `at_us`, as
+    /// one undo step. Returns the new clip.
+    pub fn add_overlay(&self, material_id: String, at_us: i64) -> Result<String, EditorError> {
+        self.run(move |host| host.add_overlay(&material_id, Micros(at_us)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Move an overlay picture onto the main row where it starts, as one
+    /// undo step.
+    pub fn to_main(&self, clip_id: String) -> Result<(), EditorError> {
+        self.run(move |host| host.to_main(&SegmentId::new(clip_id)))?
             .map_err(EditorError::from)
     }
 

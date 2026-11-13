@@ -130,12 +130,12 @@ const MAIN_CLIP: &[Tool] = &[
     later(T::Effects, "Effects"),
     ready(T::Delete, "Delete"),
     later(T::Duplicate, "Duplicate"),
-    later(T::Crop, "Crop"),
-    later(T::Mirror, "Mirror"),
-    later(T::Rotate, "Rotate"),
-    later(T::Reverse, "Reverse"),
-    later(T::Freeze, "Freeze"),
-    later(T::ExtractAudio, "Extract audio"),
+    ready(T::Crop, "Crop"),
+    ready(T::Mirror, "Mirror"),
+    ready(T::Rotate, "Rotate"),
+    ready(T::Reverse, "Reverse"),
+    ready(T::Freeze, "Freeze"),
+    ready(T::ExtractAudio, "Extract audio"),
     later(T::Filters, "Filters"),
     later(T::Adjust, "Adjust"),
     later(T::Replace, "Replace"),
@@ -147,14 +147,14 @@ const OVERLAY_CLIP: &[Tool] = &[
     ready(T::Split, "Split"),
     ready(T::Volume, "Volume"),
     ready(T::Speed, "Speed"),
-    later(T::Splice, "To main"),
+    ready(T::Splice, "To main"),
     ready(T::Animations, "Animations"),
     ready(T::Delete, "Delete"),
     later(T::Duplicate, "Duplicate"),
-    later(T::Crop, "Crop"),
-    later(T::Mirror, "Mirror"),
-    later(T::Rotate, "Rotate"),
-    later(T::Reverse, "Reverse"),
+    ready(T::Crop, "Crop"),
+    ready(T::Mirror, "Mirror"),
+    ready(T::Rotate, "Rotate"),
+    ready(T::Reverse, "Reverse"),
     later(T::Filters, "Filters"),
     later(T::Adjust, "Adjust"),
 ];
@@ -163,10 +163,10 @@ const AUDIO_CLIP: &[Tool] = &[
     ready(T::Split, "Split"),
     ready(T::Volume, "Volume"),
     ready(T::Speed, "Speed"),
-    later(T::Fade, "Fade"),
+    ready(T::Fade, "Fade"),
     ready(T::Delete, "Delete"),
     later(T::Duplicate, "Duplicate"),
-    later(T::Beats, "Beats"),
+    ready(T::Beats, "Beats"),
 ];
 
 const TEXT_CLIP: &[Tool] = &[
@@ -184,7 +184,7 @@ const OTHER_CLIP: &[Tool] = &[
 ];
 
 const AUDIO: &[Tool] = &[
-    later(T::ImportSound, "Sounds"),
+    ready(T::ImportSound, "Sounds"),
     later(T::ExtractAudio, "Extract"),
     later(T::Record, "Record"),
 ];
@@ -198,7 +198,7 @@ const TEXT: &[Tool] = &[
 
 const EFFECTS: &[Tool] = &[ready(T::VideoEffects, "Video effects")];
 
-const OVERLAY: &[Tool] = &[later(T::AddOverlay, "Add overlay")];
+const OVERLAY: &[Tool] = &[ready(T::AddOverlay, "Add overlay")];
 
 /// The tools on `bar`, in order.
 #[must_use]

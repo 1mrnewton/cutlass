@@ -591,7 +591,7 @@ mod tests {
     fn context_layout_has_one_entry_per_initial_value() {
         assert_eq!(GREATER2 + 6, CONTEXTS);
         assert_eq!(CONTEXTS, 155);
-        assert!(CONTEXTS <= 256);
+        const { assert!(CONTEXTS <= 256) };
     }
 
     #[test]

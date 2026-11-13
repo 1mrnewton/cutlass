@@ -166,7 +166,7 @@ fn window<'s, const T: usize, P: Pixel>(
 fn by_kernel<const T: usize, P: Pixel>(
     plane: &Plane<'_, P>,
     block: Block,
-    [cx, cy]: [[i16; T]; 2],
+    _: [[i16; T]; 2],
     dst: Dst<'_>,
     stride: usize,
     scratch: &mut Scratch<P>,
@@ -179,11 +179,9 @@ fn by_kernel<const T: usize, P: Pixel>(
     let Some(bytes) = P::bytes(src) else {
         return false;
     };
-    let tap8 =
-        |c: &[i16; T]| -> [i8; 8] { std::array::from_fn(|k| c.get(k).map_or(0, |&v| v as i8)) };
     let taps = Taps {
-        across: (block.fx != 0).then(|| tap8(&cx)),
-        down: (block.fy != 0).then(|| tap8(&cy)),
+        across: (block.fx != 0).then(|| taps8::<T>(block.fx)),
+        down: (block.fy != 0).then(|| taps8::<T>(block.fy)),
         len: T,
     };
     let s = Src {
@@ -194,6 +192,41 @@ fn by_kernel<const T: usize, P: Pixel>(
     };
     kernels::predict(dst, stride, &s, (w, h), &taps, rows)
 }
+
+/// The taps of fraction `f` as the kernels take them: 8 for luma
+/// (quarters), 4 then zeros for chroma (eighths).
+#[inline(always)]
+fn taps8<const T: usize>(f: usize) -> [i8; 8] {
+    if T == 8 { LUMA8[f & 3] } else { CHROMA8[f & 7] }
+}
+
+const LUMA8: [[i8; 8]; 4] = {
+    let mut t = [[0i8; 8]; 4];
+    let mut f = 0;
+    while f < 4 {
+        let mut k = 0;
+        while k < 8 {
+            t[f][k] = LUMA[f][k] as i8;
+            k += 1;
+        }
+        f += 1;
+    }
+    t
+};
+
+const CHROMA8: [[i8; 8]; 8] = {
+    let mut t = [[0i8; 8]; 8];
+    let mut f = 0;
+    while f < 8 {
+        let mut k = 0;
+        while k < 4 {
+            t[f][k] = CHROMA[f][k] as i8;
+            k += 1;
+        }
+        f += 1;
+    }
+    t
+};
 
 const LUMA16: [[i16; 8]; 4] = {
     let mut t = [[0i16; 8]; 4];
@@ -266,11 +299,9 @@ fn filter<const T: usize, P: Pixel>(
         out.fill(0);
         return;
     };
-    let tap8 =
-        |c: &[i16; T]| -> [i8; 8] { std::array::from_fn(|k| c.get(k).map_or(0, |&v| v as i8)) };
     let taps = Taps {
-        across: (fx != 0).then(|| tap8(&cx)),
-        down: (fy != 0).then(|| tap8(&cy)),
+        across: (fx != 0).then(|| taps8::<T>(fx)),
+        down: (fy != 0).then(|| taps8::<T>(fy)),
         len: T,
     };
     // The kernels read the reference itself unless the block reaches out

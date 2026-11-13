@@ -24,6 +24,7 @@
 mod neon;
 
 pub mod av1;
+pub mod hevc;
 pub mod shared_rows;
 pub mod wide;
 

@@ -620,11 +620,9 @@ impl<'a, P: Pixel> SliceDecoder<'a, '_, P> {
             } else {
                 (x / 2, y / 2, w / 2, h / 2)
             };
-            let mut used = [false; 2];
-            for list in 0..2 {
-                let Some(frame) = &refs[list] else {
-                    continue;
-                };
+            let n = cw * ch;
+            let source = |list: usize| -> Option<(Plane<'_, P>, Block)> {
+                let frame = refs[list].as_ref()?;
                 let mv = field.mv[list];
                 let block = if c == 0 {
                     Block {
@@ -660,20 +658,46 @@ impl<'a, P: Pixel> SliceDecoder<'a, '_, P> {
                     height: frame.height >> sub,
                     rows,
                 };
+                Some((plane, block))
+            };
+            let sources = [source(0), source(1)];
+            // Default weighting of 8-bit samples: the last list goes
+            // straight to the picture.
+            if weights.is_none() {
+                match &sources {
+                    [Some((p0, b0)), Some((p1, b1))] => {
+                        mc::interpolate(p0, *b0, bit_depth, &mut self.pred[0][..n], &mut self.mc);
+                        let (dst, stride) = self.out.from(c, cx, cy);
+                        let other = Some(&self.pred[0][..n]);
+                        if mc::predict_px(p1, *b1, (dst, stride), other, &mut self.mc) {
+                            continue;
+                        }
+                    }
+                    [Some((p, b)), None] | [None, Some((p, b))] => {
+                        let (dst, stride) = self.out.from(c, cx, cy);
+                        if mc::predict_px(p, *b, (dst, stride), None, &mut self.mc) {
+                            continue;
+                        }
+                    }
+                    [None, None] => {}
+                }
+            }
+            let mut used = [false; 2];
+            for (list, source) in sources.iter().enumerate() {
+                let Some((plane, block)) = source else {
+                    continue;
+                };
                 mc::interpolate(
-                    &plane,
-                    block,
+                    plane,
+                    *block,
                     bit_depth,
-                    &mut self.pred[list][..cw * ch],
+                    &mut self.pred[list][..n],
                     &mut self.mc,
                 );
                 used[list] = true;
             }
             let (p0, p1) = self.pred.split_at(1);
-            let pred = [
-                used[0].then(|| &p0[0][..cw * ch]),
-                used[1].then(|| &p1[0][..cw * ch]),
-            ];
+            let pred = [used[0].then(|| &p0[0][..n]), used[1].then(|| &p1[0][..n])];
             let (dst, stride) = self.out.from(c, cx, cy);
             mc::store(dst, stride, cw, ch, bit_depth, pred, weights.map(|w| w[c]));
         }

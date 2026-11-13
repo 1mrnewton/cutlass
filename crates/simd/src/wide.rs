@@ -35,9 +35,24 @@ pub fn wide<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
-/// Whether [`wide`] runs its closure compiled for AVX2.
+/// Whether [`wide`] runs its closure compiled for AVX2. Checked once.
 #[must_use]
+#[inline]
 pub fn has_avx2() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    /// 0: not checked yet, 1: no, 2: yes.
+    static HAS: AtomicU8 = AtomicU8::new(0);
+    match HAS.load(Ordering::Relaxed) {
+        0 => {
+            let has = detect();
+            HAS.store(if has { 2 } else { 1 }, Ordering::Relaxed);
+            has
+        }
+        v => v == 2,
+    }
+}
+
+fn detect() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
         std::is_x86_feature_detected!("avx2")

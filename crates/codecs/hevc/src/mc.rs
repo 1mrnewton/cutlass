@@ -21,6 +21,8 @@ const CHROMA: [[i32; 4]; 8] = [
     [-2, 10, 58, -2],
 ];
 
+use cutlass_simd::hevc::mc::{self as kernels, Dst, Src, Taps};
+
 use crate::pixel::Pixel;
 
 /// A reference plane: `rows` of its `height` rows are in `samples`.
@@ -54,6 +56,96 @@ pub fn interpolate<P: Pixel>(
         let taps = [CHROMA16[block.fx & 7], CHROMA16[block.fy & 7]];
         filter::<4, P>(plane, block, bit_depth, taps, (out, scratch));
     }
+}
+
+/// Predict a block straight to 8-bit samples with the vector kernels:
+/// from one list, or (`other` the intermediates of list 0, rows `w`
+/// apart) the average with it. `false`, with nothing written, when the
+/// kernels do not take the block; the caller then interpolates it.
+#[inline(always)]
+pub fn predict_px<P: Pixel>(
+    plane: &Plane<'_, P>,
+    block: Block,
+    (dst, stride): (&mut [P], usize),
+    other: Option<&[i16]>,
+    scratch: &mut Scratch<P>,
+) -> bool {
+    let Some(dst) = P::bytes_mut(dst) else {
+        return false;
+    };
+    let dst = match other {
+        Some(o) => Dst::Bi(dst, o),
+        None => Dst::Uni(dst),
+    };
+    if block.luma {
+        let taps = [LUMA16[block.fx & 3], LUMA16[block.fy & 3]];
+        by_kernel::<8, P>(plane, block, taps, dst, stride, scratch)
+    } else {
+        let taps = [CHROMA16[block.fx & 7], CHROMA16[block.fy & 7]];
+        by_kernel::<4, P>(plane, block, taps, dst, stride, scratch)
+    }
+}
+
+/// The source window of a block: the reference itself, or `win` filled
+/// with the window, edges repeated, when the block reaches outside. The
+/// samples from the window's first, and its stride. `None` for a
+/// reference with no rows.
+#[inline(always)]
+fn window<'s, const T: usize, P: Pixel>(
+    plane: &'s Plane<'s, P>,
+    block: Block,
+    win: &'s mut [P],
+) -> Option<(&'s [P], usize)> {
+    let (w, h) = (block.w.min(64), block.h.min(64));
+    let half = (T / 2 - 1) as isize;
+    let (sw, sh) = (w + T - 1, h + T - 1);
+    let (pw, ph) = (plane.width as isize, plane.height as isize);
+    let (x0, y0) = (block.x - half, block.y - half);
+    let rows = plane.rows.min(plane.height) as isize;
+    if pw == 0 || rows == 0 || plane.samples.len() < plane.width * rows as usize {
+        return None;
+    }
+    let inside = x0 >= 0 && y0 >= 0 && x0 + sw as isize <= pw && y0 + sh as isize <= ph.min(rows);
+    if inside {
+        let base = y0 as usize * plane.width + x0 as usize;
+        Some((&plane.samples[base..], plane.width))
+    } else {
+        pad(plane, (x0, y0), sw, &mut win[..sw * sh]);
+        Some((&*win, sw))
+    }
+}
+
+/// [`predict_px`] for `T` taps.
+#[inline(always)]
+fn by_kernel<const T: usize, P: Pixel>(
+    plane: &Plane<'_, P>,
+    block: Block,
+    [cx, cy]: [[i16; T]; 2],
+    dst: Dst<'_>,
+    stride: usize,
+    scratch: &mut Scratch<P>,
+) -> bool {
+    let (w, h) = (block.w.min(64), block.h.min(64));
+    let Scratch { win, tmp } = scratch;
+    let Some((src, sstride)) = window::<T, P>(plane, block, win) else {
+        return false;
+    };
+    let Some(bytes) = P::bytes(src) else {
+        return false;
+    };
+    let tap8 =
+        |c: &[i16; T]| -> [i8; 8] { std::array::from_fn(|k| c.get(k).map_or(0, |&v| v as i8)) };
+    let taps = Taps {
+        across: (block.fx != 0).then(|| tap8(&cx)),
+        down: (block.fy != 0).then(|| tap8(&cy)),
+        len: T,
+    };
+    let s = Src {
+        src: bytes,
+        at: 0,
+        stride: sstride,
+    };
+    kernels::predict(dst, stride, &s, (w, h), &taps, tmp)
 }
 
 const LUMA16: [[i16; 8]; 4] = {
@@ -93,7 +185,8 @@ pub struct Scratch<P> {
 impl<P: Pixel> Default for Scratch<P> {
     fn default() -> Self {
         Self {
-            win: vec![P::default(); WINDOW * WINDOW],
+            // Slack past the window for the 16-sample loads of the kernels.
+            win: vec![P::default(); WINDOW * WINDOW + 32],
             tmp: vec![0; WINDOW * 64],
         }
     }
@@ -141,6 +234,23 @@ fn filter<const T: usize, P: Pixel>(
         pad(plane, (x0, y0), sw, &mut win[..sw * sh]);
         (&*win, sw, 0)
     };
+    if let Some(bytes) = P::bytes(src) {
+        let tap8 =
+            |c: &[i16; T]| -> [i8; 8] { std::array::from_fn(|k| c.get(k).map_or(0, |&v| v as i8)) };
+        let taps = Taps {
+            across: (fx != 0).then(|| tap8(&cx)),
+            down: (fy != 0).then(|| tap8(&cy)),
+            len: T,
+        };
+        let s = Src {
+            src: bytes,
+            at: base,
+            stride,
+        };
+        if kernels::put(out, w, &s, (w, h), &taps, tmp) {
+            return;
+        }
+    }
     let src = &src[base..];
     // Eight-bit samples times the taps fit 16 bits (at most 88 · 255).
     let k = Kernel {
@@ -425,6 +535,18 @@ pub fn store<P: Pixel>(
     pred: [Option<&[i16]>; 2],
     weights: Option<[Wp; 2]>,
 ) {
+    if weights.is_none()
+        && let Some(bytes) = P::bytes_mut(dst)
+    {
+        let done = match pred {
+            [Some(a), Some(b)] => kernels::bi(bytes, stride, (a, b), w, (w, h)),
+            [Some(a), None] | [None, Some(a)] => kernels::uni(bytes, stride, a, w, (w, h)),
+            [None, None] => true,
+        };
+        if done {
+            return;
+        }
+    }
     let max = (1i32 << bit_depth) - 1;
     let shift1 = 14 - bit_depth;
     let rows = dst.chunks_mut(stride).take(h);
@@ -536,5 +658,59 @@ mod tests {
         };
         store(&mut dst, 4, 4, 4, 10, [Some(&out), None], Some([wp, wp]));
         assert!(dst.iter().all(|&v| v == 104));
+    }
+}
+
+#[cfg(test)]
+mod speed {
+    use super::{Block, Plane, Scratch, interpolate, store};
+
+    /// Nanoseconds per block of interpolation and storing, by size and
+    /// fraction (run by hand: `--ignored --nocapture`).
+    #[test]
+    #[ignore = "timing"]
+    fn mc_speed() {
+        let (w0, h0) = (1920usize, 1080usize);
+        let samples: Vec<u8> = (0..w0 * h0).map(|i| (i * 7 % 251) as u8).collect();
+        let plane = Plane {
+            samples: &samples,
+            width: w0,
+            height: h0,
+            rows: h0,
+        };
+        let mut scratch = Scratch::<u8>::default();
+        let mut out = vec![0i16; 64 * 64];
+        let mut dst = vec![0u8; w0 * 64];
+        for (w, h) in [(8usize, 8usize), (16, 16), (32, 32), (4, 4)] {
+            for (fx, fy) in [(0usize, 0usize), (1, 0), (0, 2), (1, 3)] {
+                let n = 200_000 / (w * h / 16);
+                let t = std::time::Instant::now();
+                for i in 0..n {
+                    // Raster order over a strip, as a picture is decoded.
+                    let per_row = 1800 / w;
+                    let block = Block {
+                        x: ((i % per_row) * w + i % 3) as isize,
+                        y: (((i / per_row) * h) % 960 + i % 5) as isize,
+                        fx,
+                        fy,
+                        w,
+                        h,
+                        luma: true,
+                    };
+                    cutlass_simd::wide::wide(
+                        #[inline(always)]
+                        || {
+                            interpolate(&plane, block, 8, &mut out, &mut scratch);
+                            store(&mut dst, w0, w, h, 8, [Some(&out[..w * h]), None], None);
+                        },
+                    );
+                }
+                let ns = t.elapsed().as_nanos() as f64 / n as f64;
+                println!(
+                    "{w}x{h} f({fx},{fy}): {ns:.0} ns/block, {:.2} ns/sample",
+                    ns / (w * h) as f64
+                );
+            }
+        }
     }
 }

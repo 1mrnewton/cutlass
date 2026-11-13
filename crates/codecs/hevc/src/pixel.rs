@@ -14,6 +14,9 @@ pub trait Pixel: Copy + Default + Send + Sync + std::fmt::Debug + 'static {
     fn of(v: i32) -> Self;
     /// The final rows of a picture of this sample type, if `rows` holds them.
     fn rows(rows: &AnyRows) -> Option<&Arc<SharedRows<Self>>>;
+    /// The samples as bytes, for the 8-bit kernels.
+    fn bytes(s: &[Self]) -> Option<&[u8]>;
+    fn bytes_mut(s: &mut [Self]) -> Option<&mut [u8]>;
 }
 
 impl Pixel for u8 {
@@ -33,6 +36,16 @@ impl Pixel for u8 {
             AnyRows::Deep(_) => None,
         }
     }
+
+    #[inline(always)]
+    fn bytes(s: &[Self]) -> Option<&[u8]> {
+        Some(s)
+    }
+
+    #[inline(always)]
+    fn bytes_mut(s: &mut [Self]) -> Option<&mut [u8]> {
+        Some(s)
+    }
 }
 
 impl Pixel for u16 {
@@ -51,6 +64,16 @@ impl Pixel for u16 {
             AnyRows::Deep(r) => Some(r),
             AnyRows::Eight(_) => None,
         }
+    }
+
+    #[inline(always)]
+    fn bytes(_: &[Self]) -> Option<&[u8]> {
+        None
+    }
+
+    #[inline(always)]
+    fn bytes_mut(_: &mut [Self]) -> Option<&mut [u8]> {
+        None
     }
 }
 

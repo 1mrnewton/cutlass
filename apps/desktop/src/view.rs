@@ -18,7 +18,6 @@ use crate::tokens;
 use crate::ui;
 use crate::widgets;
 
-mod ai_stylize;
 mod assistant;
 mod audio;
 mod follow;
@@ -10475,6 +10474,7 @@ mod tests {
                     "Lip sync",
                     "AI movement",
                     "Video translator",
+                    "AI stylize",
                 ]
                 .as_slice(),
             ),
@@ -11021,26 +11021,6 @@ mod tests {
             "Natural",
             "Manual",
             "Protect face",
-            "Later",
-        ] {
-            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
-        }
-        // The AI stylize tab lays out its effects and styles, marked Later.
-        view.inspector.focus(inspector::Focus {
-            tab: 5,
-            page: 0,
-            section: None,
-        });
-        let _ = frame(&mut shell, &mut view, Vec::new());
-        let lines = galleys(&frame(&mut shell, &mut view, Vec::new()));
-        for label in [
-            "AI effects",
-            "Prompt",
-            "Random",
-            "Generate",
-            "Style",
-            "Trending",
-            "Surreal",
             "Later",
         ] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");

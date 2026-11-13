@@ -213,16 +213,10 @@ fn video_panel(
     still: bool,
 ) {
     let tab = state.tab;
+    // AI stylize, a generative tab, waits for the next version.
     tabs(
         ui,
-        &[
-            "Video",
-            "Audio",
-            "Speed",
-            "Animation",
-            "Adjust",
-            "AI stylize",
-        ],
+        &["Video", "Audio", "Speed", "Animation", "Adjust"],
         &mut state.tab,
     );
     if tab != state.tab {
@@ -287,8 +281,7 @@ fn video_panel(
         2 if still => note(ui, "A photo has no speed."),
         2 => super::speed::speed_tab(shell, ui, state, inspection),
         3 => animation_tab(shell, ui, state, &["In", "Out", "Combo"], VIDEO_MOTIONS),
-        4 => adjust_tab(shell, ui, state, inspection),
-        _ => super::ai_stylize::ai_stylize_tab(ui, state),
+        _ => adjust_tab(shell, ui, state, inspection),
     }
 }
 

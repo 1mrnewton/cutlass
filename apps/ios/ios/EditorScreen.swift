@@ -1,5 +1,6 @@
 import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The editor: preview on top, the transport, the timeline, then the tools.
 struct EditorScreen: View {
@@ -11,10 +12,16 @@ struct EditorScreen: View {
     /// The bar shown while nothing is selected.
     @State private var openBar: ToolBar = .root
     @State private var exporting = false
+    /// The overlay picker is open, and what it picked.
+    @State private var pickingOverlay = false
+    @State private var overlayPicked: [PhotosPickerItem] = []
+    /// The Files picker for a sound is open.
+    @State private var pickingSound = false
 
     /// The tool panel open over the tool bar.
     enum Panel: Equatable {
         case volume, speed, effects, ratio, background, graphs, animations
+        case crop, opacity, fade
         /// Add text, or change the text clip with this id.
         case text(String?)
     }
@@ -53,6 +60,19 @@ struct EditorScreen: View {
         .background(Color(white: 0.06))
         .overlay(alignment: .top) { notice }
         .onChange(of: picked) { _, items in importPicked(items) }
+        .onChange(of: overlayPicked) { _, items in importOverlays(items) }
+        .photosPicker(
+            isPresented: $pickingOverlay, selection: $overlayPicked,
+            matching: .any(of: [.images, .videos]), preferredItemEncoding: .current)
+        .fileImporter(
+            isPresented: $pickingSound, allowedContentTypes: [.audio],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case let .success(urls): if let url = urls.first { model.importSound(at: url) }
+            case let .failure(error): model.show(error)
+            }
+        }
         .onChange(of: model.selectedClip) { _, id in
             if id == nil, panel != .text(nil), panel != .effects, panel != .ratio, panel != .background { panel = nil }
         }
@@ -131,6 +151,15 @@ struct EditorScreen: View {
                 .accessibilityLabel(keys.here ? "Remove keyframe" : "Add keyframe")
                 .padding(.trailing, 16)
             }
+            if model.keys == nil {
+                Button { model.toggleLinkage() } label: {
+                    HugeIcon(model.linkage ? "linkage" : "unlink")
+                        .foregroundStyle(model.linkage ? Palette.accent : .white)
+                }
+                .accessibilityLabel("Linkage")
+                .accessibilityValue(model.linkage ? "On" : "Off")
+                .padding(.trailing, 16)
+            }
             Button { model.undo() } label: { HugeIcon("undo") }
                 .accessibilityLabel("Undo")
             Button { model.redo() } label: { HugeIcon("redo") }
@@ -179,6 +208,9 @@ struct EditorScreen: View {
                 switch panel {
                 case .volume: VolumePanel(model: model, clip: clip) { self.panel = nil }
                 case .speed: SpeedPanel(model: model, clip: clip) { self.panel = nil }
+                case .crop: CropPanel(model: model) { self.panel = nil }
+                case .opacity: OpacityPanel(model: model) { self.panel = nil }
+                case .fade: FadePanel(model: model, clip: clip) { self.panel = nil }
                 case .text, .effects, .ratio, .background, .graphs, .animations: EmptyView()
                 }
             }
@@ -222,6 +254,19 @@ struct EditorScreen: View {
         case .background:
             model.selectedClip = nil
             panel = .background
+        case .duplicate: model.duplicate()
+        case .crop: panel = .crop
+        case .mirror: model.toggleMirror()
+        case .rotate: model.turn()
+        case .opacity: panel = .opacity
+        case .fade: panel = .fade
+        case .reverse: model.toggleReverse()
+        case .freeze: model.freeze()
+        case .extractAudio: model.extractOrRecoverAudio()
+        case .beats: model.toggleBeat()
+        case .splice: model.toMain()
+        case .addOverlay: pickingOverlay = true
+        case .importSound: pickingSound = true
         default: model.say("\(tool.label) is coming soon")
         }
     }
@@ -242,6 +287,25 @@ struct EditorScreen: View {
                     try? await Task.sleep(for: .seconds(2.5))
                     if model.notice == notice { withAnimation { model.clearNotice() } }
                 }
+        }
+    }
+
+    /// Bring each picked item in as an overlay at the playhead.
+    private func importOverlays(_ items: [PhotosPickerItem]) {
+        guard !items.isEmpty else { return }
+        overlayPicked = []
+        model.beginImport()
+        Task {
+            for item in items {
+                do {
+                    let file = try await PickedFile.load(item)
+                    model.addOverlay(at: file)
+                    try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+                } catch {
+                    model.show(error)
+                }
+            }
+            model.endImport()
         }
     }
 

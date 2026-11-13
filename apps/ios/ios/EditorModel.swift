@@ -45,6 +45,10 @@ final class EditorModel {
     private(set) var animations: ClipAnimations?
     /// The Animations panel's presets; they never change.
     let animationList = animationPresets()
+    /// How the selected clip stands at the playhead, for its clip tools.
+    private(set) var clipState: ClipState?
+    /// Whether clips on other rows move and go with the main clip under them.
+    private(set) var linkage = false
 
     /// Points per microsecond on the timeline. Rust holds it inside what
     /// the cut allows.
@@ -380,6 +384,115 @@ final class EditorModel {
         edit { try $0.setSpeed(clipId: clip, speed: speed) }
     }
 
+    // MARK: Clip tools
+
+    /// Put a copy of the selected clip right after it, and select the copy.
+    func duplicate() {
+        guard let clip = selectedClip else { return say("Select a clip to duplicate") }
+        edit { selectedClip = try $0.duplicate(clipId: clip) }
+    }
+
+    func toggleMirror() {
+        guard let clip = selectedClip else { return }
+        edit { try $0.toggleMirror(clipId: clip) }
+    }
+
+    func turn() {
+        guard let clip = selectedClip else { return }
+        edit { try $0.turn(clipId: clip) }
+    }
+
+    func toggleReverse() {
+        guard let clip = selectedClip else { return }
+        pause()
+        let backward = !(clipState?.reversed ?? false)
+        edit { try $0.toggleReverse(clipId: clip) }
+        say(backward ? "The clip plays backward" : "The clip plays forward")
+    }
+
+    /// Hold the frame under the playhead as a still there, and select it.
+    func freeze() {
+        guard let clip = selectedClip else { return }
+        pause()
+        let at = playheadUs
+        edit { selectedClip = try $0.freeze(clipId: clip, atUs: at) }
+    }
+
+    /// Put the video's sound on its own clip, or give it back when it was
+    /// already taken out.
+    func extractOrRecoverAudio() {
+        guard let clip = selectedClip else { return }
+        if clipState?.extracted == true {
+            edit { try $0.recoverAudio(clipId: clip) }
+            say("The clip has its sound again")
+        } else {
+            edit { try $0.extractAudio(clipId: clip) }
+        }
+    }
+
+    /// Mark a beat at the playhead on the selected sound, or take it off.
+    func toggleBeat() {
+        guard let clip = selectedClip else { return }
+        pause()
+        let at = playheadUs
+        edit { try $0.toggleBeat(clipId: clip, atUs: at) }
+    }
+
+    /// Move the selected picture from its row onto main.
+    func toMain() {
+        guard let clip = selectedClip else { return }
+        edit { try $0.toMain(clipId: clip) }
+    }
+
+    /// Crop the selected video to its middle at `ratio`; empty shows it all.
+    func setCrop(_ ratio: String) {
+        guard let clip = selectedClip else { return }
+        edit { try $0.setCrop(clipId: clip, ratio: ratio) }
+    }
+
+    func setOpacity(_ opacity: Double) {
+        guard let clip = selectedClip else { return }
+        edit { try $0.setOpacity(clipId: clip, opacity: opacity) }
+    }
+
+    func setFade(inUs: Int64, outUs: Int64) {
+        guard let clip = selectedClip else { return }
+        edit { try $0.setFade(clipId: clip, fadeInUs: inUs, fadeOutUs: outUs) }
+    }
+
+    /// Turn linkage on or off, saying what it means.
+    func toggleLinkage() {
+        let on = !linkage
+        edit { try $0.setLinkageEnabled(on: on) }
+        say(on
+            ? "Text, stickers and effects move with the main clip under them"
+            : "Text, stickers and effects no longer move or delete with main clips")
+    }
+
+    /// Mute or unmute every clip on a row.
+    func setMuted(_ lane: Lane, _ muted: Bool) {
+        edit { try $0.setRowMuted(rowId: lane.id, muted: muted) }
+    }
+
+    /// Bring in a picked photo or video as an overlay at the playhead.
+    func addOverlay(at url: URL) {
+        let at = playheadUs
+        edit {
+            let material = try $0.import(path: url.path(percentEncoded: false))
+            selectedClip = try $0.addOverlay(materialId: material, atUs: at)
+        }
+    }
+
+    /// Bring in a sound file from Files at the end of the sound row.
+    func importSound(at url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        edit {
+            let material = try $0.import(path: url.path(percentEncoded: false))
+            selectedClip = try $0.append(materialId: material)
+        }
+    }
+
     // MARK: Stage
 
     /// The canvas size in pixels, from the chosen ratio.
@@ -441,6 +554,7 @@ final class EditorModel {
         if now { stage = box }
         keys = selectedClip.flatMap { clip in try? editor?.keyframes(clipId: clip, atUs: at) }
         animations = selectedClip.flatMap { clip in try? editor?.animations(clipId: clip) }
+        clipState = selectedClip.flatMap { clip in try? editor?.clipState(clipId: clip, atUs: at) }
     }
 
     /// The keyframe button: remove the keyframe under the playhead, else key
@@ -513,6 +627,7 @@ final class EditorModel {
             durationUs = try editor.durationUs()
             ratios = try editor.ratios()
             background = try editor.background()
+            linkage = try editor.linkageEnabled()
         } catch {
             show(error)
         }

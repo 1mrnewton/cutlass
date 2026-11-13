@@ -138,6 +138,10 @@ struct TimelineStrip: View {
             ForEach(lane.clips, id: \.id) { clip in
                 clipView(clip, lane: lane, index: index, origin: origin, height: height)
             }
+            if lane.main && !lane.clips.isEmpty {
+                muteButton(lane)
+                    .offset(x: origin - 50, y: (height - 40) / 2)
+            }
             if lane.main && lane.clips.isEmpty {
                 Text("Tap + to add a photo or video")
                     .font(.footnote)
@@ -195,6 +199,19 @@ struct TimelineStrip: View {
                 }
             }
         }
+        .overlay(alignment: .bottomLeading) {
+            if !clip.beatsUs.isEmpty {
+                ZStack(alignment: .bottomLeading) {
+                    ForEach(clip.beatsUs, id: \.self) { time in
+                        Circle()
+                            .fill(Color(red: 1, green: 0.82, blue: 0.2))
+                            .frame(width: 6, height: 6)
+                            .offset(x: x(time - clip.startUs) - 3, y: -3)
+                    }
+                }
+                .allowsHitTesting(false)
+            }
+        }
         .overlay(alignment: .leading) {
             if selected, let keys = model.keys {
                 ZStack(alignment: .leading) {
@@ -215,6 +232,21 @@ struct TimelineStrip: View {
         }
         .gesture(lane.locked ? nil : (lane.main ? reorder(clip) : nil))
         .gesture(lane.locked || lane.main ? nil : move(clip, row: index))
+    }
+
+    /// The main row's sound switch, left of time zero; it scrolls away with
+    /// the rows.
+    private func muteButton(_ lane: Lane) -> some View {
+        Button { model.setMuted(lane, !lane.muted) } label: {
+            VStack(spacing: 2) {
+                HugeIcon(lane.muted ? "volumeOff" : "volume", size: 18)
+                Text(lane.muted ? "Muted" : "Sound").font(.system(size: 9))
+            }
+            .foregroundStyle(.white.opacity(0.85))
+            .frame(width: 40, height: 40)
+            .background(Color(white: 0.17), in: RoundedRectangle(cornerRadius: 6))
+        }
+        .accessibilityLabel(lane.muted ? "Unmute clip audio" : "Mute clip audio")
     }
 
     /// A white tab on one end of the selected clip. Dragging it trims that end.

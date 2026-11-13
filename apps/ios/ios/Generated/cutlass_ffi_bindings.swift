@@ -667,6 +667,11 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func addEffect(effectId: String, atUs: Int64) throws  -> String
     
     /**
+     * Put a library picture at `at_us` on a row above main. Returns the clip.
+     */
+    func addOverlay(materialId: String, atUs: Int64) throws  -> String
+    
+    /**
      * Add `content` at `at_us` in `face`, or in the first face when `face`
      * is empty, as one undo step. Returns the new clip's id.
      */
@@ -695,6 +700,17 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func clipBar(clipId: String) throws  -> ToolBar?
     
     /**
+     * How `clip_id` stands at `at_us`, for its clip tools. `None` when no
+     * row holds it.
+     */
+    func clipState(clipId: String, atUs: Int64) throws  -> ClipState?
+    
+    /**
+     * Put a copy of the clip right after it. Returns the copy.
+     */
+    func duplicate(clipId: String) throws  -> String
+    
+    /**
      * The end of the last clip, in microseconds.
      */
     func durationUs() throws  -> Int64
@@ -715,6 +731,11 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func export(path: String, shortSide: UInt32, progress: ExportProgress) throws  -> Exported
     
     /**
+     * Put the video's sound on a clip of its own. One undo step.
+     */
+    func extractAudio(clipId: String) throws 
+    
+    /**
      * Filmstrip tiles, `height` points tall, for the picture clips that
      * meet `from_us` to `to_us`. Pictures not stored yet are asked for.
      */
@@ -731,11 +752,23 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func frame(timeUs: Int64) throws  -> Frame
     
     /**
+     * Hold the video's frame at `at_us` as a still there. Returns the still.
+     */
+    func freeze(clipId: String, atUs: Int64) throws  -> String
+    
+    /**
      * Read a picked file, copy it into the project, and add it to the
      * library. Rust probes it; the phone only hands over the path.
      * Returns the material id.
      */
     func `import`(path: String) throws  -> String
+    
+    /**
+     * Bring in a subtitle file (SRT or LRC, by the extension of
+     * `file_name`) whose `text` the phone read, as captions on a new
+     * subtitle lane: one undo step.
+     */
+    func importSubtitles(fileName: String, text: String) throws 
     
     /**
      * Play stopped at the end, or was never started.
@@ -752,6 +785,11 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * The rows to draw, top first.
      */
     func lanes() throws  -> [Lane]
+    
+    /**
+     * Whether clips on other rows go with the main clip they sit on.
+     */
+    func linkageEnabled() throws  -> Bool
     
     /**
      * Move a clip to `row` (top is 0) starting near `start_us`, as one undo
@@ -771,6 +809,11 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * The canvas ratios, Original first.
      */
     func ratios() throws  -> [CanvasRatio]
+    
+    /**
+     * Give the video its own sound back. One undo step.
+     */
+    func recoverAudio(clipId: String) throws 
     
     func redo() throws 
     
@@ -811,15 +854,41 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func setBackground(background: Background) throws 
     
     /**
+     * Crop the video to its middle at `ratio`, or show the whole frame
+     * for an empty ratio. One undo step.
+     */
+    func setCrop(clipId: String, ratio: String) throws 
+    
+    /**
+     * Fade the clip in and out over these lengths. One undo step.
+     */
+    func setFade(clipId: String, fadeInUs: Int64, fadeOutUs: Int64) throws 
+    
+    /**
      * Look for faces in `folders` and the folders below them, replacing
      * any found before.
      */
     func setFontFolders(folders: [String]) throws 
     
     /**
+     * Turn linkage on or off. Not an undo step; kept with the project.
+     */
+    func setLinkageEnabled(on: Bool) throws 
+    
+    /**
+     * Make the picture `opacity` solid, 0 to 1. One undo step.
+     */
+    func setOpacity(clipId: String, opacity: Double) throws 
+    
+    /**
      * Give the canvas a ratio from [`Self::ratios`], as one undo step.
      */
     func setRatio(ratio: String) throws 
+    
+    /**
+     * Mute or unmute a row. One undo step.
+     */
+    func setRowMuted(rowId: String, muted: Bool) throws 
     
     /**
      * Play a clip at a constant speed, as one undo step. Its length follows.
@@ -900,16 +969,41 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func tick(elapsedUs: Int64) throws  -> Int64
     
     /**
+     * Move a picture from another row onto main. One undo step.
+     */
+    func toMain(clipId: String) throws 
+    
+    /**
+     * Mark a beat at `at_us` on a sound clip, or take that beat off.
+     */
+    func toggleBeat(clipId: String, atUs: Int64) throws 
+    
+    /**
      * The keyframe button: remove the keyframe under `at_us`, else key the
      * clip there. One undo step.
      */
     func toggleKeyframe(clipId: String, atUs: Int64) throws 
     
     /**
+     * Flip the picture left to right, or back. One undo step.
+     */
+    func toggleMirror(clipId: String) throws 
+    
+    /**
+     * Play the clip backward, or forward again. One undo step.
+     */
+    func toggleReverse(clipId: String) throws 
+    
+    /**
      * Drag a clip's start edge, or its end edge, to `time_us`, as one undo
      * step. Returns where the edge landed.
      */
     func trim(clipId: String, startEdge: Bool, timeUs: Int64, snapUs: Int64, playheadUs: Int64) throws  -> Int64
+    
+    /**
+     * Turn the picture a quarter turn clockwise. One undo step.
+     */
+    func turn(clipId: String) throws 
     
     /**
      * Type into a title as the words change. With no `clip_id`, the first
@@ -1021,6 +1115,20 @@ open func addEffect(effectId: String, atUs: Int64)throws  -> String  {
 }
     
     /**
+     * Put a library picture at `at_us` on a row above main. Returns the clip.
+     */
+open func addOverlay(materialId: String, atUs: Int64)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_add_overlay(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(materialId),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Add `content` at `at_us` in `face`, or in the first face when `face`
      * is empty, as one undo step. Returns the new clip's id.
      */
@@ -1090,6 +1198,34 @@ open func clipBar(clipId: String)throws  -> ToolBar?  {
 }
     
     /**
+     * How `clip_id` stands at `at_us`, for its clip tools. `None` when no
+     * row holds it.
+     */
+open func clipState(clipId: String, atUs: Int64)throws  -> ClipState?  {
+    return try  FfiConverterOptionTypeClipState.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_clip_state(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Put a copy of the clip right after it. Returns the copy.
+     */
+open func duplicate(clipId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_duplicate(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * The end of the last clip, in microseconds.
      */
 open func durationUs()throws  -> Int64  {
@@ -1136,6 +1272,18 @@ open func export(path: String, shortSide: UInt32, progress: ExportProgress)throw
 }
     
     /**
+     * Put the video's sound on a clip of its own. One undo step.
+     */
+open func extractAudio(clipId: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_extract_audio(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Filmstrip tiles, `height` points tall, for the picture clips that
      * meet `from_us` to `to_us`. Pictures not stored yet are asked for.
      */
@@ -1178,6 +1326,20 @@ open func frame(timeUs: Int64)throws  -> Frame  {
 }
     
     /**
+     * Hold the video's frame at `at_us` as a still there. Returns the still.
+     */
+open func freeze(clipId: String, atUs: Int64)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_freeze(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Read a picked file, copy it into the project, and add it to the
      * library. Rust probes it; the phone only hands over the path.
      * Returns the material id.
@@ -1190,6 +1352,21 @@ open func `import`(path: String)throws  -> String  {
         FfiConverterString.lower(path),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Bring in a subtitle file (SRT or LRC, by the extension of
+     * `file_name`) whose `text` the phone read, as captions on a new
+     * subtitle lane: one undo step.
+     */
+open func importSubtitles(fileName: String, text: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_import_subtitles(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(fileName),
+        FfiConverterString.lower(text),uniffiCallStatus
+    )
+}
 }
     
     /**
@@ -1226,6 +1403,18 @@ open func lanes()throws  -> [Lane]  {
     return try  FfiConverterSequenceTypeLane.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
         uniffiCallStatus in
     uniffi_cutlass_ffi_bindings_fn_method_editor_lanes(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Whether clips on other rows go with the main clip they sit on.
+     */
+open func linkageEnabled()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_linkage_enabled(
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
@@ -1279,6 +1468,18 @@ open func ratios()throws  -> [CanvasRatio]  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Give the video its own sound back. One undo step.
+     */
+open func recoverAudio(clipId: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_recover_audio(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),uniffiCallStatus
+    )
+}
 }
     
 open func redo()throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
@@ -1381,6 +1582,34 @@ open func setBackground(background: Background)throws   {try rustCallWithError(F
 }
     
     /**
+     * Crop the video to its middle at `ratio`, or show the whole frame
+     * for an empty ratio. One undo step.
+     */
+open func setCrop(clipId: String, ratio: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_crop(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterString.lower(ratio),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Fade the clip in and out over these lengths. One undo step.
+     */
+open func setFade(clipId: String, fadeInUs: Int64, fadeOutUs: Int64)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_fade(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterInt64.lower(fadeInUs),
+        FfiConverterInt64.lower(fadeOutUs),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Look for faces in `folders` and the folders below them, replacing
      * any found before.
      */
@@ -1394,6 +1623,31 @@ open func setFontFolders(folders: [String])throws   {try rustCallWithError(FfiCo
 }
     
     /**
+     * Turn linkage on or off. Not an undo step; kept with the project.
+     */
+open func setLinkageEnabled(on: Bool)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_linkage_enabled(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(on),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Make the picture `opacity` solid, 0 to 1. One undo step.
+     */
+open func setOpacity(clipId: String, opacity: Double)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_opacity(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterDouble.lower(opacity),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Give the canvas a ratio from [`Self::ratios`], as one undo step.
      */
 open func setRatio(ratio: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
@@ -1401,6 +1655,19 @@ open func setRatio(ratio: String)throws   {try rustCallWithError(FfiConverterTyp
     uniffi_cutlass_ffi_bindings_fn_method_editor_set_ratio(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(ratio),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Mute or unmute a row. One undo step.
+     */
+open func setRowMuted(rowId: String, muted: Bool)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_row_muted(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(rowId),
+        FfiConverterBool.lower(muted),uniffiCallStatus
     )
 }
 }
@@ -1602,6 +1869,31 @@ open func tick(elapsedUs: Int64)throws  -> Int64  {
 }
     
     /**
+     * Move a picture from another row onto main. One undo step.
+     */
+open func toMain(clipId: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_to_main(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Mark a beat at `at_us` on a sound clip, or take that beat off.
+     */
+open func toggleBeat(clipId: String, atUs: Int64)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_beat(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * The keyframe button: remove the keyframe under `at_us`, else key the
      * clip there. One undo step.
      */
@@ -1611,6 +1903,30 @@ open func toggleKeyframe(clipId: String, atUs: Int64)throws   {try rustCallWithE
             self.uniffiCloneHandle(),
         FfiConverterString.lower(clipId),
         FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Flip the picture left to right, or back. One undo step.
+     */
+open func toggleMirror(clipId: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_mirror(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Play the clip backward, or forward again. One undo step.
+     */
+open func toggleReverse(clipId: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_reverse(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),uniffiCallStatus
     )
 }
 }
@@ -1631,6 +1947,18 @@ open func trim(clipId: String, startEdge: Bool, timeUs: Int64, snapUs: Int64, pl
         FfiConverterInt64.lower(playheadUs),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Turn the picture a quarter turn clockwise. One undo step.
+     */
+open func turn(clipId: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_turn(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),uniffiCallStatus
+    )
+}
 }
     
     /**
@@ -2112,6 +2440,10 @@ public struct Clip: Equatable, Hashable {
      * Constant speed: 2 plays twice as fast.
      */
     public var speed: Double
+    /**
+     * Where its beats land on the timeline, earliest first.
+     */
+    public var beatsUs: [Int64]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -2121,13 +2453,17 @@ public struct Clip: Equatable, Hashable {
          */volume: Double, 
         /**
          * Constant speed: 2 plays twice as fast.
-         */speed: Double) {
+         */speed: Double, 
+        /**
+         * Where its beats land on the timeline, earliest first.
+         */beatsUs: [Int64]) {
         self.id = id
         self.name = name
         self.startUs = startUs
         self.durationUs = durationUs
         self.volume = volume
         self.speed = speed
+        self.beatsUs = beatsUs
     }
 
     
@@ -2151,7 +2487,8 @@ public struct FfiConverterTypeClip: FfiConverterRustBuffer {
                 startUs: FfiConverterInt64.read(from: &buf), 
                 durationUs: FfiConverterInt64.read(from: &buf), 
                 volume: FfiConverterDouble.read(from: &buf), 
-                speed: FfiConverterDouble.read(from: &buf)
+                speed: FfiConverterDouble.read(from: &buf), 
+                beatsUs: FfiConverterSequenceInt64.read(from: &buf)
         )
     }
 
@@ -2162,6 +2499,7 @@ public struct FfiConverterTypeClip: FfiConverterRustBuffer {
         FfiConverterInt64.write(value.durationUs, into: &buf)
         FfiConverterDouble.write(value.volume, into: &buf)
         FfiConverterDouble.write(value.speed, into: &buf)
+        FfiConverterSequenceInt64.write(value.beatsUs, into: &buf)
     }
 }
 
@@ -2254,6 +2592,173 @@ public func FfiConverterTypeClipAnimations_lift(_ buf: RustBuffer) throws -> Cli
 #endif
 public func FfiConverterTypeClipAnimations_lower(_ value: ClipAnimations) -> RustBuffer {
     return FfiConverterTypeClipAnimations.lower(value)
+}
+
+
+/**
+ * How a selected clip stands, and which clip tools can change it.
+ */
+public struct ClipState: Equatable, Hashable {
+    /**
+     * A picture that mirrors, turns, crops and fades out of sight.
+     */
+    public var picture: Bool
+    public var mirrored: Bool
+    /**
+     * Degrees, as stored.
+     */
+    public var rotation: Double
+    public var canCrop: Bool
+    /**
+     * The crop ratio kept: empty for the whole frame, one of
+     * [`crop_ratios`], or `custom`.
+     */
+    public var crop: String
+    /**
+     * 1 solid, 0 clear.
+     */
+    public var opacity: Double
+    /**
+     * A picture or a sound, which plays backward and fades.
+     */
+    public var plays: Bool
+    public var reversed: Bool
+    public var fadeInUs: Int64
+    public var fadeOutUs: Int64
+    public var canFreeze: Bool
+    public var canExtract: Bool
+    /**
+     * Its sound was extracted to a clip of its own.
+     */
+    public var extracted: Bool
+    public var canBeat: Bool
+    /**
+     * A beat sits on the clip at the time asked about.
+     */
+    public var beatHere: Bool
+    public var onMain: Bool
+    /**
+     * A picture on another row, which can move to main.
+     */
+    public var canSplice: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * A picture that mirrors, turns, crops and fades out of sight.
+         */picture: Bool, mirrored: Bool, 
+        /**
+         * Degrees, as stored.
+         */rotation: Double, canCrop: Bool, 
+        /**
+         * The crop ratio kept: empty for the whole frame, one of
+         * [`crop_ratios`], or `custom`.
+         */crop: String, 
+        /**
+         * 1 solid, 0 clear.
+         */opacity: Double, 
+        /**
+         * A picture or a sound, which plays backward and fades.
+         */plays: Bool, reversed: Bool, fadeInUs: Int64, fadeOutUs: Int64, canFreeze: Bool, canExtract: Bool, 
+        /**
+         * Its sound was extracted to a clip of its own.
+         */extracted: Bool, canBeat: Bool, 
+        /**
+         * A beat sits on the clip at the time asked about.
+         */beatHere: Bool, onMain: Bool, 
+        /**
+         * A picture on another row, which can move to main.
+         */canSplice: Bool) {
+        self.picture = picture
+        self.mirrored = mirrored
+        self.rotation = rotation
+        self.canCrop = canCrop
+        self.crop = crop
+        self.opacity = opacity
+        self.plays = plays
+        self.reversed = reversed
+        self.fadeInUs = fadeInUs
+        self.fadeOutUs = fadeOutUs
+        self.canFreeze = canFreeze
+        self.canExtract = canExtract
+        self.extracted = extracted
+        self.canBeat = canBeat
+        self.beatHere = beatHere
+        self.onMain = onMain
+        self.canSplice = canSplice
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ClipState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeClipState: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ClipState {
+        return
+            try ClipState(
+                picture: FfiConverterBool.read(from: &buf), 
+                mirrored: FfiConverterBool.read(from: &buf), 
+                rotation: FfiConverterDouble.read(from: &buf), 
+                canCrop: FfiConverterBool.read(from: &buf), 
+                crop: FfiConverterString.read(from: &buf), 
+                opacity: FfiConverterDouble.read(from: &buf), 
+                plays: FfiConverterBool.read(from: &buf), 
+                reversed: FfiConverterBool.read(from: &buf), 
+                fadeInUs: FfiConverterInt64.read(from: &buf), 
+                fadeOutUs: FfiConverterInt64.read(from: &buf), 
+                canFreeze: FfiConverterBool.read(from: &buf), 
+                canExtract: FfiConverterBool.read(from: &buf), 
+                extracted: FfiConverterBool.read(from: &buf), 
+                canBeat: FfiConverterBool.read(from: &buf), 
+                beatHere: FfiConverterBool.read(from: &buf), 
+                onMain: FfiConverterBool.read(from: &buf), 
+                canSplice: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ClipState, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.picture, into: &buf)
+        FfiConverterBool.write(value.mirrored, into: &buf)
+        FfiConverterDouble.write(value.rotation, into: &buf)
+        FfiConverterBool.write(value.canCrop, into: &buf)
+        FfiConverterString.write(value.crop, into: &buf)
+        FfiConverterDouble.write(value.opacity, into: &buf)
+        FfiConverterBool.write(value.plays, into: &buf)
+        FfiConverterBool.write(value.reversed, into: &buf)
+        FfiConverterInt64.write(value.fadeInUs, into: &buf)
+        FfiConverterInt64.write(value.fadeOutUs, into: &buf)
+        FfiConverterBool.write(value.canFreeze, into: &buf)
+        FfiConverterBool.write(value.canExtract, into: &buf)
+        FfiConverterBool.write(value.extracted, into: &buf)
+        FfiConverterBool.write(value.canBeat, into: &buf)
+        FfiConverterBool.write(value.beatHere, into: &buf)
+        FfiConverterBool.write(value.onMain, into: &buf)
+        FfiConverterBool.write(value.canSplice, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeClipState_lift(_ buf: RustBuffer) throws -> ClipState {
+    return try FfiConverterTypeClipState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeClipState_lower(_ value: ClipState) -> RustBuffer {
+    return FfiConverterTypeClipState.lower(value)
 }
 
 
@@ -2767,17 +3272,27 @@ public func FfiConverterTypeKeyframes_lower(_ value: Keyframes) -> RustBuffer {
  * One timeline row, top first.
  */
 public struct Lane: Equatable, Hashable {
+    public var id: String
     public var kind: LaneKind
     public var main: Bool
     public var locked: Bool
+    /**
+     * Its clips are not heard.
+     */
+    public var muted: Bool
     public var clips: [Clip]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(kind: LaneKind, main: Bool, locked: Bool, clips: [Clip]) {
+    public init(id: String, kind: LaneKind, main: Bool, locked: Bool, 
+        /**
+         * Its clips are not heard.
+         */muted: Bool, clips: [Clip]) {
+        self.id = id
         self.kind = kind
         self.main = main
         self.locked = locked
+        self.muted = muted
         self.clips = clips
     }
 
@@ -2797,17 +3312,21 @@ public struct FfiConverterTypeLane: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Lane {
         return
             try Lane(
+                id: FfiConverterString.read(from: &buf), 
                 kind: FfiConverterTypeLaneKind.read(from: &buf), 
                 main: FfiConverterBool.read(from: &buf), 
                 locked: FfiConverterBool.read(from: &buf), 
+                muted: FfiConverterBool.read(from: &buf), 
                 clips: FfiConverterSequenceTypeClip.read(from: &buf)
         )
     }
 
     public static func write(_ value: Lane, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
         FfiConverterTypeLaneKind.write(value.kind, into: &buf)
         FfiConverterBool.write(value.main, into: &buf)
         FfiConverterBool.write(value.locked, into: &buf)
+        FfiConverterBool.write(value.muted, into: &buf)
         FfiConverterSequenceTypeClip.write(value.clips, into: &buf)
     }
 }
@@ -4079,6 +4598,7 @@ public enum ToolKind: Equatable, Hashable {
     case freeze
     case extractAudio
     case fade
+    case opacity
     case beats
     case unlink
     case splice
@@ -4160,25 +4680,27 @@ public struct FfiConverterTypeToolKind: FfiConverterRustBuffer {
         
         case 25: return .fade
         
-        case 26: return .beats
+        case 26: return .opacity
         
-        case 27: return .unlink
+        case 27: return .beats
         
-        case 28: return .splice
+        case 28: return .unlink
         
-        case 29: return .addOverlay
+        case 29: return .splice
         
-        case 30: return .importSound
+        case 30: return .addOverlay
         
-        case 31: return .record
+        case 31: return .importSound
         
-        case 32: return .addText
+        case 32: return .record
         
-        case 33: return .editText
+        case 33: return .addText
         
-        case 34: return .draw
+        case 34: return .editText
         
-        case 35: return .videoEffects
+        case 35: return .draw
+        
+        case 36: return .videoEffects
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -4288,44 +4810,48 @@ public struct FfiConverterTypeToolKind: FfiConverterRustBuffer {
             writeInt(&buf, Int32(25))
         
         
-        case .beats:
+        case .opacity:
             writeInt(&buf, Int32(26))
         
         
-        case .unlink:
+        case .beats:
             writeInt(&buf, Int32(27))
         
         
-        case .splice:
+        case .unlink:
             writeInt(&buf, Int32(28))
         
         
-        case .addOverlay:
+        case .splice:
             writeInt(&buf, Int32(29))
         
         
-        case .importSound:
+        case .addOverlay:
             writeInt(&buf, Int32(30))
         
         
-        case .record:
+        case .importSound:
             writeInt(&buf, Int32(31))
         
         
-        case .addText:
+        case .record:
             writeInt(&buf, Int32(32))
         
         
-        case .editText:
+        case .addText:
             writeInt(&buf, Int32(33))
         
         
-        case .draw:
+        case .editText:
             writeInt(&buf, Int32(34))
         
         
-        case .videoEffects:
+        case .draw:
             writeInt(&buf, Int32(35))
+        
+        
+        case .videoEffects:
+            writeInt(&buf, Int32(36))
         
         }
     }
@@ -4390,6 +4916,30 @@ fileprivate struct FfiConverterOptionTypeClipAnimations: FfiConverterRustBuffer 
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeClipAnimations.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeClipState: FfiConverterRustBuffer {
+    typealias SwiftType = ClipState?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeClipState.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeClipState.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -5019,6 +5569,16 @@ public func createProject(root: String)throws  -> String  {
 })
 }
 /**
+ * The ratios the Crop panel offers after the whole frame, as `w:h`.
+ */
+public func cropRatios() -> [String]  {
+    return try!  FfiConverterSequenceString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_crop_ratios(uniffiCallStatus
+    )
+})
+}
+/**
  * The effects that ship in the app, in picker order.
  */
 public func effectChoices() -> [EffectChoice]  {
@@ -5208,6 +5768,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_func_create_project() != 16508) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_crop_ratios() != 30681) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_func_effect_choices() != 59474) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5253,6 +5816,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_effect() != 55608) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_overlay() != 34969) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_text() != 17542) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5268,6 +5834,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_bar() != 29840) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_state() != 1119) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_duplicate() != 16850) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_duration_us() != 41273) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5275,6 +5847,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_export() != 5234) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_extract_audio() != 33623) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_film() != 35426) {
@@ -5286,7 +5861,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_frame() != 13353) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_freeze() != 19513) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_import() != 38694) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_import_subtitles() != 5378) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_is_playing() != 37181) {
@@ -5296,6 +5877,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_lanes() != 20121) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_linkage_enabled() != 52789) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_move_clip() != 64054) {
@@ -5308,6 +5892,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_ratios() != 56006) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_recover_audio() != 43087) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_redo() != 49063) {
@@ -5334,10 +5921,25 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_background() != 52021) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_crop() != 19401) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_fade() != 62223) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_font_folders() != 41608) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_linkage_enabled() != 48699) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_opacity() != 19016) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_ratio() != 52174) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_row_muted() != 2982) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_speed() != 10406) {
@@ -5382,10 +5984,25 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_tick() != 60373) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_to_main() != 1324) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_beat() != 57877) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_keyframe() != 8108) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_mirror() != 19586) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_reverse() != 56429) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_trim() != 7512) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_turn() != 38996) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_type_text() != 45610) {

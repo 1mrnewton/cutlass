@@ -563,6 +563,74 @@ final class EditorModel {
         }
     }
 
+    /// Bring in the sound of a picked video at the end of the sound row.
+    func extractSound(at url: URL) {
+        edit {
+            let material = try $0.importSoundOf(path: url.path(percentEncoded: false))
+            selectedClip = try $0.append(materialId: material)
+        }
+    }
+
+    /// Play the picked file in the selected clip in place of its media.
+    func replaceSelected(with url: URL) {
+        guard let clip = selectedClip else { return }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        edit { try $0.replaceFile(clipId: clip, path: url.path(percentEncoded: false)) }
+    }
+
+    /// Bring in an SRT or LRC file from Files as captions.
+    func importCaptions(at url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            edit { try $0.importSubtitles(fileName: url.lastPathComponent, text: text) }
+        } catch {
+            show(error)
+        }
+    }
+
+    // MARK: Stickers and drawing
+
+    let stickerList = stickerChoices()
+    let shapeList = shapeChoices()
+
+    /// Put a sticker at the playhead and select it.
+    func addSticker(_ id: String) {
+        let at = playheadUs
+        edit { selectedClip = try $0.addSticker(stickerId: id, atUs: at) }
+    }
+
+    /// Put a shape at the playhead and select it.
+    func addShape(_ id: String) {
+        let at = playheadUs
+        edit { selectedClip = try $0.addShape(shapeId: id, atUs: at) }
+    }
+
+    /// Put a finger's stroke, in canvas pixels, at the playhead.
+    func drawStroke(_ points: [CGPoint]) {
+        let at = playheadUs
+        let trace = points.map { CanvasPoint(x: $0.x, y: $0.y) }
+        edit { _ = try $0.drawStroke(trace: trace, atUs: at) }
+    }
+
+    /// A sticker's shelf tile, drawn once off the main thread.
+    func stickerPoster(_ id: String) -> CGImage? {
+        let key = "sticker:" + id
+        if let image = posters[key] { return image }
+        if !drawingPosters.contains(key) {
+            drawingPosters.insert(key)
+            Task.detached(priority: .utility) {
+                let image = cutlassStickerPoster(id)
+                await MainActor.run {
+                    if let image { self.posters[key] = image }
+                }
+            }
+        }
+        return nil
+    }
+
     // MARK: Stage
 
     /// The canvas size in pixels, from the chosen ratio.
@@ -845,4 +913,10 @@ extension Frame {
             intent: .defaultIntent
         )
     }
+}
+
+/// A sticker's shelf tile. Kept outside the model, whose own
+/// `stickerPoster` would hide the Rust call of the same name.
+nonisolated private func cutlassStickerPoster(_ id: String) -> CGImage? {
+    stickerPoster(stickerId: id, side: 128)?.image
 }

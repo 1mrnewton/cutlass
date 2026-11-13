@@ -690,6 +690,18 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func addOverlay(materialId: String, atUs: Int64) throws  -> String
     
     /**
+     * Put shape `shape_id` at `at_us` on the first sticker row with room,
+     * else a new one. One undo step. Returns the clip's id.
+     */
+    func addShape(shapeId: String, atUs: Int64) throws  -> String
+    
+    /**
+     * Put sticker `sticker_id` at `at_us` on the first sticker row with
+     * room, else a new one. One undo step. Returns the clip's id.
+     */
+    func addSticker(stickerId: String, atUs: Int64) throws  -> String
+    
+    /**
      * Add `content` at `at_us` in `face`, or in the first face when `face`
      * is empty, as one undo step. Returns the new clip's id.
      */
@@ -733,6 +745,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * row holds it.
      */
     func clipState(clipId: String, atUs: Int64) throws  -> ClipState?
+    
+    /**
+     * Put a freehand stroke through `trace` at `at_us` as a smooth line on
+     * a sticker row. One undo step. Returns the clip's id.
+     */
+    func drawStroke(trace: [CanvasPoint], atUs: Int64) throws  -> String
     
     /**
      * Put a copy of the clip right after it. Returns the copy.
@@ -791,6 +809,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * Returns the material id.
      */
     func `import`(path: String) throws  -> String
+    
+    /**
+     * Bring in the sound of the picked video at `path` as a sound in the
+     * library, without its picture. Returns the material id, for `append`.
+     */
+    func importSoundOf(path: String) throws  -> String
     
     /**
      * Bring in a subtitle file (SRT or LRC, by the extension of
@@ -853,6 +877,13 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * without it, as one undo step.
      */
     func reorder(clipId: String, place: UInt32) throws 
+    
+    /**
+     * Play the picked file at `path` in `clip_id` in place of its media,
+     * keeping the clip's place and edits: one undo step. A picture takes
+     * a photo or video, a sound a sound.
+     */
+    func replaceFile(clipId: String, path: String) throws 
     
     /**
      * Ruler ticks from `from_us` through `to_us` at `pixel_size` points per
@@ -1221,6 +1252,36 @@ open func addOverlay(materialId: String, atUs: Int64)throws  -> String  {
 }
     
     /**
+     * Put shape `shape_id` at `at_us` on the first sticker row with room,
+     * else a new one. One undo step. Returns the clip's id.
+     */
+open func addShape(shapeId: String, atUs: Int64)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_add_shape(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(shapeId),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Put sticker `sticker_id` at `at_us` on the first sticker row with
+     * room, else a new one. One undo step. Returns the clip's id.
+     */
+open func addSticker(stickerId: String, atUs: Int64)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_add_sticker(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(stickerId),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Add `content` at `at_us` in `face`, or in the first face when `face`
      * is empty, as one undo step. Returns the new clip's id.
      */
@@ -1326,6 +1387,21 @@ open func clipState(clipId: String, atUs: Int64)throws  -> ClipState?  {
     uniffi_cutlass_ffi_bindings_fn_method_editor_clip_state(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(clipId),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Put a freehand stroke through `trace` at `at_us` as a smooth line on
+     * a sticker row. One undo step. Returns the clip's id.
+     */
+open func drawStroke(trace: [CanvasPoint], atUs: Int64)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_draw_stroke(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceTypeCanvasPoint.lower(trace),
         FfiConverterInt64.lower(atUs),uniffiCallStatus
     )
 })
@@ -1467,6 +1543,20 @@ open func `import`(path: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
         uniffiCallStatus in
     uniffi_cutlass_ffi_bindings_fn_method_editor_import(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(path),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Bring in the sound of the picked video at `path` as a sound in the
+     * library, without its picture. Returns the material id, for `append`.
+     */
+open func importSoundOf(path: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_import_sound_of(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(path),uniffiCallStatus
     )
@@ -1628,6 +1718,21 @@ open func reorder(clipId: String, place: UInt32)throws   {try rustCallWithError(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(clipId),
         FfiConverterUInt32.lower(place),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Play the picked file at `path` in `clip_id` in place of its media,
+     * keeping the clip's place and edits: one undo step. A picture takes
+     * a photo or video, a sound a sound.
+     */
+open func replaceFile(clipId: String, path: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_replace_file(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterString.lower(path),uniffiCallStatus
     )
 }
 }
@@ -2581,6 +2686,63 @@ public func FfiConverterTypeAnimationPreset_lift(_ buf: RustBuffer) throws -> An
 #endif
 public func FfiConverterTypeAnimationPreset_lower(_ value: AnimationPreset) -> RustBuffer {
     return FfiConverterTypeAnimationPreset.lower(value)
+}
+
+
+/**
+ * A point on the canvas, in canvas pixels from the top left, y down.
+ */
+public struct CanvasPoint: Equatable, Hashable {
+    public var x: Double
+    public var y: Double
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(x: Double, y: Double) {
+        self.x = x
+        self.y = y
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension CanvasPoint: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCanvasPoint: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CanvasPoint {
+        return
+            try CanvasPoint(
+                x: FfiConverterDouble.read(from: &buf), 
+                y: FfiConverterDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CanvasPoint, into buf: inout [UInt8]) {
+        FfiConverterDouble.write(value.x, into: &buf)
+        FfiConverterDouble.write(value.y, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCanvasPoint_lift(_ buf: RustBuffer) throws -> CanvasPoint {
+    return try FfiConverterTypeCanvasPoint.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCanvasPoint_lower(_ value: CanvasPoint) -> RustBuffer {
+    return FfiConverterTypeCanvasPoint.lower(value)
 }
 
 
@@ -3773,6 +3935,64 @@ public func FfiConverterTypeProjectSummary_lower(_ value: ProjectSummary) -> Rus
 
 
 /**
+ * A shape the shelf shows. `id` is what `add_shape` takes; `name` is the
+ * shape's own, such as `Circle`, for the phone to draw its tile.
+ */
+public struct ShapeChoice: Equatable, Hashable {
+    public var id: String
+    public var name: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String) {
+        self.id = id
+        self.name = name
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ShapeChoice: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeShapeChoice: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ShapeChoice {
+        return
+            try ShapeChoice(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ShapeChoice, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeShapeChoice_lift(_ buf: RustBuffer) throws -> ShapeChoice {
+    return try FfiConverterTypeShapeChoice.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeShapeChoice_lower(_ value: ShapeChoice) -> RustBuffer {
+    return FfiConverterTypeShapeChoice.lower(value)
+}
+
+
+/**
  * A picture clip's box on the canvas, in canvas pixels with y down. The
  * guides say the clip's centre sits on a canvas centre line.
  */
@@ -3871,6 +4091,73 @@ public func FfiConverterTypeStage_lift(_ buf: RustBuffer) throws -> Stage {
 #endif
 public func FfiConverterTypeStage_lower(_ value: Stage) -> RustBuffer {
     return FfiConverterTypeStage.lower(value)
+}
+
+
+/**
+ * A sticker the shelf shows. `id` is what `add_sticker` takes.
+ */
+public struct StickerChoice: Equatable, Hashable {
+    public var id: String
+    public var name: String
+    /**
+     * It plays round as an animation.
+     */
+    public var animated: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String, 
+        /**
+         * It plays round as an animation.
+         */animated: Bool) {
+        self.id = id
+        self.name = name
+        self.animated = animated
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension StickerChoice: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStickerChoice: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StickerChoice {
+        return
+            try StickerChoice(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                animated: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: StickerChoice, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterBool.write(value.animated, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStickerChoice_lift(_ buf: RustBuffer) throws -> StickerChoice {
+    return try FfiConverterTypeStickerChoice.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStickerChoice_lower(_ value: StickerChoice) -> RustBuffer {
+    return FfiConverterTypeStickerChoice.lower(value)
 }
 
 
@@ -5664,6 +5951,31 @@ fileprivate struct FfiConverterSequenceTypeAnimationPreset: FfiConverterRustBuff
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeCanvasPoint: FfiConverterRustBuffer {
+    typealias SwiftType = [CanvasPoint]
+
+    public static func write(_ value: [CanvasPoint], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCanvasPoint.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CanvasPoint] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CanvasPoint]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCanvasPoint.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeCanvasRatio: FfiConverterRustBuffer {
     typealias SwiftType = [CanvasRatio]
 
@@ -5881,6 +6193,56 @@ fileprivate struct FfiConverterSequenceTypeProjectSummary: FfiConverterRustBuffe
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeProjectSummary.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeShapeChoice: FfiConverterRustBuffer {
+    typealias SwiftType = [ShapeChoice]
+
+    public static func write(_ value: [ShapeChoice], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeShapeChoice.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ShapeChoice] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ShapeChoice]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeShapeChoice.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeStickerChoice: FfiConverterRustBuffer {
+    typealias SwiftType = [StickerChoice]
+
+    public static func write(_ value: [StickerChoice], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeStickerChoice.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [StickerChoice] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [StickerChoice]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeStickerChoice.read(from: &buf))
         }
         return seq
     }
@@ -6141,6 +6503,16 @@ public func listProjects(root: String) -> [ProjectSummary]  {
 })
 }
 /**
+ * Every shape, in shelf order.
+ */
+public func shapeChoices() -> [ShapeChoice]  {
+    return try!  FfiConverterSequenceTypeShapeChoice.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_shape_choices(uniffiCallStatus
+    )
+})
+}
+/**
  * The speed at scale `position`, 0 to 1. The marks 0.1, 1, 2, 5, 10 and
  * 100 sit the same distance apart.
  */
@@ -6177,6 +6549,29 @@ public func start(root: String)throws   {try rustCallWithError(FfiConverterTypeE
         FfiConverterString.lower(root),uniffiCallStatus
     )
 }
+}
+/**
+ * Every sticker the app ships, in shelf order.
+ */
+public func stickerChoices() -> [StickerChoice]  {
+    return try!  FfiConverterSequenceTypeStickerChoice.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_sticker_choices(uniffiCallStatus
+    )
+})
+}
+/**
+ * Sticker `sticker_id` `side` pixels square for its shelf tile; an
+ * animation shows its middle frame. `None` for a sticker not shipped.
+ */
+public func stickerPoster(stickerId: String, side: UInt32) -> Frame?  {
+    return try!  FfiConverterOptionTypeFrame.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_sticker_poster(
+        FfiConverterString.lower(stickerId),
+        FfiConverterUInt32.lower(side),uniffiCallStatus
+    )
+})
 }
 /**
  * The Styles tab's colors, as `#RRGGBB`.
@@ -6290,6 +6685,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_func_list_projects() != 22684) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_shape_choices() != 6033) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_func_speed_at() != 24871) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6297,6 +6695,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_func_start() != 16636) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_sticker_choices() != 17553) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_sticker_poster() != 59649) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_func_text_colors() != 11524) {
@@ -6329,6 +6733,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_overlay() != 34969) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_shape() != 31575) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_sticker() != 61307) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_text() != 17542) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6351,6 +6761,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_state() != 1119) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_draw_stroke() != 20359) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_duplicate() != 16850) {
@@ -6381,6 +6794,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_import() != 38694) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_import_sound_of() != 5995) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_import_subtitles() != 5378) {
@@ -6420,6 +6836,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_reorder() != 12502) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_replace_file() != 25348) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_ruler() != 61631) {

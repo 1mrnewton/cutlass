@@ -113,6 +113,7 @@ pub fn inverse(
         unsafe {
             let out = avx2::Sink::Res(out);
             match n {
+                8 if bit_depth <= 10 => avx2::inverse8(coeffs, out, bit_depth),
                 8 => avx2::inverse::<8>(coeffs, out, (cols, rows), bit_depth),
                 16 => avx2::inverse::<16>(coeffs, out, (cols, rows), bit_depth),
                 _ => avx2::inverse::<32>(coeffs, out, (cols, rows), bit_depth),
@@ -161,7 +162,7 @@ pub fn add(
                         avx2::inverse4(c, out, dst, 8);
                     }
                 }
-                8 => avx2::inverse::<8>(coeffs, out, (cols, rows), 8),
+                8 => avx2::inverse8(coeffs, out, 8),
                 16 => avx2::inverse::<16>(coeffs, out, (cols, rows), 8),
                 _ => avx2::inverse::<32>(coeffs, out, (cols, rows), 8),
             }

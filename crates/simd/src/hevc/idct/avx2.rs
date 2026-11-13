@@ -14,11 +14,12 @@ use core::arch::x86_64::{
     __m128i, __m256i, _mm_add_epi32, _mm_adds_epi16, _mm_cvtepu8_epi16, _mm_cvtsi32_si128,
     _mm_cvtsi128_si32, _mm_cvtsi128_si64, _mm_extract_epi64, _mm_madd_epi16, _mm_packs_epi32,
     _mm_packus_epi16, _mm_set_epi32, _mm_set_epi64x, _mm_set1_epi32, _mm_setzero_si128,
-    _mm_sra_epi32, _mm_srai_epi32, _mm_unpackhi_epi16, _mm_unpacklo_epi16, _mm256_add_epi32,
-    _mm256_castsi256_si128, _mm256_extract_epi64, _mm256_extracti128_si256, _mm256_madd_epi16,
-    _mm256_packs_epi32, _mm256_permute4x64_epi64, _mm256_set_m128i, _mm256_set1_epi32,
-    _mm256_setzero_si256, _mm256_sra_epi32, _mm256_srai_epi32, _mm256_unpackhi_epi16,
-    _mm256_unpacklo_epi16,
+    _mm_sra_epi32, _mm_srai_epi32, _mm_sub_epi32, _mm_unpackhi_epi16, _mm_unpackhi_epi32,
+    _mm_unpackhi_epi64, _mm_unpacklo_epi16, _mm_unpacklo_epi32, _mm_unpacklo_epi64,
+    _mm256_add_epi32, _mm256_castsi256_si128, _mm256_cvtepi16_epi32, _mm256_extract_epi64,
+    _mm256_extracti128_si256, _mm256_madd_epi16, _mm256_packs_epi32, _mm256_permute4x64_epi64,
+    _mm256_set_m128i, _mm256_set1_epi32, _mm256_setzero_si256, _mm256_sra_epi32, _mm256_srai_epi32,
+    _mm256_unpackhi_epi16, _mm256_unpacklo_epi16,
 };
 
 use super::{DCT32, DST4};
@@ -321,6 +322,127 @@ pub(super) fn inverse<const N: usize>(
             }
         }
     }
+}
+
+/// The odd rows of the 8-point DCT (1, 3, 5, 7), their first four entries:
+/// the rest are those negated in reverse order.
+const ODD8: [[i32; 4]; 4] = [
+    [89, 75, 50, 18],
+    [75, -18, -89, -50],
+    [50, -89, 18, 75],
+    [18, -50, 75, -89],
+];
+
+/// The 8×8 inverse DCT by its even and odd parts (the partial butterfly):
+/// 24 products a pass instead of 64, eight transforms at once, and the
+/// block turned in registers between the passes. For bit depths up to 10,
+/// whose residuals fit 16 bits; zeros outside the coefficients' rectangle.
+#[target_feature(enable = "avx2")]
+pub(super) fn inverse8(coeffs: &[i32], mut out: Sink<'_>, bit_depth: u32) {
+    let row = |k: usize| -> __m128i {
+        let v = ld32x8(coeffs, 8 * k);
+        _mm_packs_epi32(_mm256_castsi256_si128(v), _mm256_extracti128_si256::<1>(v))
+    };
+    let rows = [
+        row(0),
+        row(1),
+        row(2),
+        row(3),
+        row(4),
+        row(5),
+        row(6),
+        row(7),
+    ];
+    let mid = butterfly8(&rows, 64, 7);
+    let shift = 20 - bit_depth;
+    let res = butterfly8(&transpose8(&mid), 1 << (shift - 1), shift);
+    for (y, r) in transpose8(&res).iter().enumerate() {
+        let v = _mm256_cvtepi16_epi32(*r);
+        match &mut out {
+            Sink::Res(d) => st32x8(d, 8 * y, v),
+            Sink::Add(d, stride) => add8(d, y * *stride, v),
+        }
+    }
+}
+
+/// Eight 8-point inverse DCTs, one in each 16-bit lane of `s` (`s[k]`
+/// holds coefficient `k`): `(sum + add) >> shift`, saturated to 16 bits.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn butterfly8(s: &[__m128i; 8], add: i32, shift: u32) -> [__m128i; 8] {
+    let pair = |a: i32, b: i32| _mm_set1_epi32((a & 0xffff) | (b << 16));
+    let both = |a: __m128i, b: __m128i| [_mm_unpacklo_epi16(a, b), _mm_unpackhi_epi16(a, b)];
+    let (s13, s57) = (both(s[1], s[3]), both(s[5], s[7]));
+    let (s26, s04) = (both(s[2], s[6]), both(s[0], s[4]));
+    let (add, count) = (_mm_set1_epi32(add), _mm_cvtsi32_si128(shift as i32));
+    let fin = |v: __m128i| _mm_sra_epi32(_mm_add_epi32(v, add), count);
+    let mut out = [_mm_setzero_si128(); 8];
+    let mut half = [[_mm_setzero_si128(); 2]; 8];
+    for h in 0..2 {
+        let eo = [
+            _mm_madd_epi16(s26[h], pair(83, 36)),
+            _mm_madd_epi16(s26[h], pair(36, -83)),
+        ];
+        let ee = [
+            _mm_madd_epi16(s04[h], pair(64, 64)),
+            _mm_madd_epi16(s04[h], pair(64, -64)),
+        ];
+        let e = [
+            _mm_add_epi32(ee[0], eo[0]),
+            _mm_add_epi32(ee[1], eo[1]),
+            _mm_sub_epi32(ee[1], eo[1]),
+            _mm_sub_epi32(ee[0], eo[0]),
+        ];
+        for y in 0..4 {
+            let o = _mm_add_epi32(
+                _mm_madd_epi16(s13[h], pair(ODD8[0][y], ODD8[1][y])),
+                _mm_madd_epi16(s57[h], pair(ODD8[2][y], ODD8[3][y])),
+            );
+            half[y][h] = fin(_mm_add_epi32(e[y], o));
+            half[7 - y][h] = fin(_mm_sub_epi32(e[y], o));
+        }
+    }
+    for (o, [lo, hi]) in out.iter_mut().zip(half) {
+        *o = _mm_packs_epi32(lo, hi);
+    }
+    out
+}
+
+/// The 8×8 block of 16-bit values `r` (a row in each register) turned
+/// about its diagonal.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn transpose8(r: &[__m128i; 8]) -> [__m128i; 8] {
+    let t = [
+        _mm_unpacklo_epi16(r[0], r[1]),
+        _mm_unpackhi_epi16(r[0], r[1]),
+        _mm_unpacklo_epi16(r[2], r[3]),
+        _mm_unpackhi_epi16(r[2], r[3]),
+        _mm_unpacklo_epi16(r[4], r[5]),
+        _mm_unpackhi_epi16(r[4], r[5]),
+        _mm_unpacklo_epi16(r[6], r[7]),
+        _mm_unpackhi_epi16(r[6], r[7]),
+    ];
+    let u = [
+        _mm_unpacklo_epi32(t[0], t[2]),
+        _mm_unpackhi_epi32(t[0], t[2]),
+        _mm_unpacklo_epi32(t[1], t[3]),
+        _mm_unpackhi_epi32(t[1], t[3]),
+        _mm_unpacklo_epi32(t[4], t[6]),
+        _mm_unpackhi_epi32(t[4], t[6]),
+        _mm_unpacklo_epi32(t[5], t[7]),
+        _mm_unpackhi_epi32(t[5], t[7]),
+    ];
+    [
+        _mm_unpacklo_epi64(u[0], u[4]),
+        _mm_unpackhi_epi64(u[0], u[4]),
+        _mm_unpacklo_epi64(u[1], u[5]),
+        _mm_unpackhi_epi64(u[1], u[5]),
+        _mm_unpacklo_epi64(u[2], u[6]),
+        _mm_unpackhi_epi64(u[2], u[6]),
+        _mm_unpacklo_epi64(u[3], u[7]),
+        _mm_unpackhi_epi64(u[3], u[7]),
+    ]
 }
 
 /// The 4×4 matrix: the DCT's rows 0, 8, 16 and 24, or the DST.

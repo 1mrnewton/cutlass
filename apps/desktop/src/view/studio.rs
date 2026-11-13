@@ -288,6 +288,43 @@ fn icon_button(ui: &mut Ui, name: &str, tip: &str, enabled: bool) -> bool {
         .clicked()
 }
 
+/// A small button that is an arrowhead, up or down. The app's font has no
+/// arrows, so the head is drawn.
+fn arrow_button(ui: &mut Ui, up: bool, tip: &str, enabled: bool) -> bool {
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(22.0, ROW), sense);
+    let color = if !enabled {
+        tokens::MENU_DISABLED
+    } else if response.hovered() {
+        tokens::TEXT
+    } else {
+        tokens::MUTED
+    };
+    if enabled && response.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            CornerRadius::same(tokens::ICON_RADIUS),
+            tokens::CHOICE_HOVER,
+        );
+    }
+    let center = rect.center();
+    let tip_y = if up { -3.5 } else { 3.5 };
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            pos2(center.x, center.y + tip_y),
+            pos2(center.x - 4.5, center.y - tip_y),
+            pos2(center.x + 4.5, center.y - tip_y),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+    enabled && response.on_hover_text(tip).clicked()
+}
+
 /// The studio screen over the whole window.
 pub(super) fn show(shell: &mut Shell, ui: &mut Ui, view: &mut StudioView, full: Rect) {
     tick(shell, ui, view);
@@ -597,22 +634,20 @@ fn list_panel(shell: &mut Shell, ui: &mut Ui, view: &mut StudioView, rect: Rect)
                 ui.label(RichText::new(why).size(11.5).color(tokens::MUTED));
                 ui.add_space(4.0);
             }
-            let mut studio_rows = 0;
-            for entry in entries
-                .iter()
-                .filter(|entry| query.is_empty() || entry.name.to_lowercase().contains(&query))
-            {
-                studio_rows += usize::from(entry.studio);
-                if entry_row(ui, entry, open_id.as_deref() == Some(entry.id.as_str())) {
-                    opened = Some(entry.id.clone());
-                }
-            }
-            if studio_rows == 0 && query.is_empty() {
-                ui.add_space(6.0);
+            if query.is_empty() && !entries.iter().any(|entry| entry.studio) {
                 faint(
                     ui,
                     "Nothing of your own yet. A bundled one opens as a copy.",
                 );
+                ui.add_space(6.0);
+            }
+            for entry in entries
+                .iter()
+                .filter(|entry| query.is_empty() || entry.name.to_lowercase().contains(&query))
+            {
+                if entry_row(ui, entry, open_id.as_deref() == Some(entry.id.as_str())) {
+                    opened = Some(entry.id.clone());
+                }
             }
         });
     if let Some(id) = opened {
@@ -1145,19 +1180,10 @@ fn stack_section(shell: &mut Shell, ui: &mut Ui, doc: &Doc, stack: Stack) {
             if response.clicked() {
                 chosen = Some(index);
             }
-            if ui
-                .add_enabled(index > 0, ui::Button::ghost("↑").tip("Run earlier"))
-                .clicked()
-            {
+            if arrow_button(ui, true, "Run earlier", index > 0) {
                 moved = Some((index, index - 1));
             }
-            if ui
-                .add_enabled(
-                    index + 1 < passes.len(),
-                    ui::Button::ghost("↓").tip("Run later"),
-                )
-                .clicked()
-            {
+            if arrow_button(ui, false, "Run later", index + 1 < passes.len()) {
                 moved = Some((index, index + 1));
             }
             if icon_button(ui, "delete", "Remove this pass", true) {

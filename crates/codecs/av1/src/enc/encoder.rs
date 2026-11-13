@@ -233,6 +233,9 @@ pub struct Av1Enc {
     /// The tile count was chosen for the threads: the tile boundaries
     /// follow `sb_work`, the coding work of the last frame's superblocks.
     auto_tiles: bool,
+    /// The alt-ref of a still mini-GOP may be filtered: the hidden frame
+    /// that leaves stays inside the decode rate of the stream's level.
+    still_filter: bool,
     sb_work: Vec<u32>,
     /// Loop filter level and CDEF strengths (y pri, y sec, uv pri, uv sec)
     /// the last frame nothing predicts from chose, until the next such
@@ -402,25 +405,36 @@ impl Av1Enc {
             cfg.tile_rows_log2 = r;
             auto_tiles = l + r > 0 && !seq.use_128x128_superblock;
         }
-        // The level the stream fits, now that its tiles are known. A hidden
-        // alt-ref that is filtered is decoded besides the pictures shown.
+        // The level the stream fits, now that its tiles are known. A
+        // filtered alt-ref is hidden for good (an overlay frame is shown in
+        // its place), so it is decoded besides the pictures shown: one in
+        // every mini-GOP when the filter is asked for.
         let (fps, bitrate) = match cfg.rc {
             RateControl::Qindex(_) => (cfg.fps, None),
             RateControl::Bitrate { bps, fps } => (fps, Some(bps)),
         };
         let fps = if fps > 0.0 { fps } else { 30.0 };
         let gop = f64::from(cfg.gop.max(1));
-        let hidden = if cfg.gop > 1 { (gop + 1.0) / gop } else { 1.0 };
-        let (level, tier) = super::level::pick(&super::level::Stream {
-            width: cfg.width,
-            height: cfg.height,
-            shown_per_second: fps,
-            decoded_per_second: fps * hidden,
-            bitrate,
-            profile,
-            tiles: 1usize << (cfg.tile_cols_log2 + cfg.tile_rows_log2),
-            tile_cols: 1usize << cfg.tile_cols_log2,
-        });
+        let level_with = |decoded_per_shown: f64| {
+            super::level::pick(&super::level::Stream {
+                width: cfg.width,
+                height: cfg.height,
+                shown_per_second: fps,
+                decoded_per_second: fps * decoded_per_shown,
+                bitrate,
+                profile,
+                tiles: 1usize << (cfg.tile_cols_log2 + cfg.tile_rows_log2),
+                tile_cols: 1usize << cfg.tile_cols_log2,
+            })
+        };
+        let asked = cfg.gop > 1 && cfg.temporal_filter;
+        let (level, tier) = level_with(if asked { (gop + 1.0) / gop } else { 1.0 });
+        // Unasked, the alt-ref of a still mini-GOP is filtered too, and such
+        // a mini-GOP is longer than `gop`. Where those hidden frames would
+        // pass the decode rate of the level the picture and its rate fit
+        // (4K at 30 and 60 pictures a second), they are left unfiltered and
+        // the level stays.
+        let still_filter = asked || level_with((gop + 2.0) / (gop + 1.0)) == (level, tier);
         if let Some(op) = seq.operating_points.first_mut() {
             op.seq_level_idx = level;
             op.seq_tier = tier;
@@ -461,6 +475,7 @@ impl Av1Enc {
             screen: false,
             tpl: None,
             auto_tiles,
+            still_filter,
             sb_work: Vec::new(),
             leaf_filters: None,
         })
@@ -591,7 +606,9 @@ impl Av1Enc {
     }
 
     fn use_tf(&self) -> bool {
-        self.cfg.gop > 1 && (self.cfg.temporal_filter || (self.static_gop && self.cfg.speed < 8))
+        self.cfg.gop > 1
+            && (self.cfg.temporal_filter
+                || (self.static_gop && self.still_filter && self.cfg.speed < 8))
     }
 
     fn is_key_disp(&self, d: u64) -> bool {
@@ -2233,6 +2250,16 @@ mod tests {
             fps: 30.0,
         };
         assert_eq!(level_of(hd.clone()), (8, 0));
+        // 2160p is level 5.0 at 30 and 5.1 at 60, as players expect; asking
+        // for a filtered alt-ref in every mini-GOP adds a decoded frame to
+        // each eight shown, which 5.0 has no room for.
+        let mut uhd = EncConfig::new(3840, 2160);
+        assert_eq!(level_of(uhd.clone()), (12, 0));
+        uhd.fps = 60.0;
+        assert_eq!(level_of(uhd.clone()), (13, 0));
+        uhd.fps = 30.0;
+        uhd.temporal_filter = true;
+        assert_eq!(level_of(uhd), (13, 0));
         // Tile columns past a level's count raise it.
         hd.tile_cols_log2 = 4;
         assert_eq!(level_of(hd), (16, 0));

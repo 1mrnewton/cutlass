@@ -16,7 +16,7 @@ use std::fmt;
 use std::sync::OnceLock;
 
 use cutlass_model::Micros;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The recipe format this app reads. A recipe with a higher version needs
 /// blocks or fields this app does not have. Version 2 added eased keys.
@@ -39,7 +39,7 @@ pub const RECIPE_PREFIX: &str = "recipe/";
 pub const MAX_CONTROLS: usize = 6;
 
 /// One building block the GPU runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Block {
     /// Scale, move and turn the frame about its centre.
@@ -527,7 +527,7 @@ impl Block {
 }
 
 /// A value over the effect's time, in seconds from the effect's start.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum Curve {
     Constant(f32),
@@ -538,9 +538,9 @@ pub enum Curve {
     /// and with none named every gap is a straight line.
     Keys {
         keys: Vec<[f32; 2]>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         repeat: Option<f32>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         ease: Vec<Ease>,
     },
     /// A sine from `from` to `to` and back every `period` seconds.
@@ -554,7 +554,7 @@ pub enum Curve {
 }
 
 /// How a value moves from one key to the next.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Ease {
     /// A straight line.
@@ -695,7 +695,7 @@ fn bounce(t: f32) -> f32 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Wave {
     pub period: f32,
@@ -703,18 +703,18 @@ pub struct Wave {
     pub to: f32,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Jitter {
     pub rate: f32,
     pub from: f32,
     pub to: f32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub seed: u32,
 }
 
 /// How a control's value reads in the inspector.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlUnit {
     /// A plain number.
@@ -730,14 +730,14 @@ pub enum ControlUnit {
 
 /// A pass's parameter a control acts on: the pass's place in the recipe
 /// and the parameter's name.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Target(pub usize, pub String);
 
 /// One setting a recipe shows in the inspector, such as Speed or
 /// Intensity. Its value plays the effect faster (`speed`), multiplies
 /// parameters as the recipe writes them (`scale`), or replaces them
 /// (`set`). A value is kept to the parameter's range.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Control {
     /// Lowercase letters, digits and underscores; the name it is stored by.
@@ -747,14 +747,14 @@ pub struct Control {
     pub default: f32,
     pub min: f32,
     pub max: f32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_plain")]
     pub unit: ControlUnit,
     /// The value multiplies the effect's own time.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub speed: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scale: Vec<Target>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub set: Vec<Target>,
     /// The keyframe property it keys under, named when the recipe is read.
     #[serde(skip)]
@@ -783,16 +783,29 @@ impl Control {
 }
 
 /// One pass of a recipe as written.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pass {
     pub block: Block,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, Curve>,
 }
 
+// What a written recipe leaves out: a field at the value a reader gives it.
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_plain(unit: &ControlUnit) -> bool {
+    *unit == ControlUnit::Plain
+}
+
 /// An effect as data.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Recipe {
     /// The format version, at most [`RECIPE_VERSION`].
@@ -803,18 +816,18 @@ pub struct Recipe {
     pub name: String,
     /// The shelf category it is listed under, one of
     /// [`EFFECT_CATEGORIES`]; a recipe without one is listed under All only.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub category: String,
     /// The scene its card shows it over, one of
     /// [`crate::preview_scenes`]; empty is [`crate::DEFAULT_PREVIEW_SCENE`].
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub preview: String,
     /// The second of the effect its card's still is taken from; none is
     /// [`crate::DEFAULT_POSTER`]. A flash names the moment it is brightest.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poster: Option<f32>,
     /// The settings the inspector shows for it, at most [`MAX_CONTROLS`].
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controls: Vec<Control>,
     pub passes: Vec<Pass>,
 }
@@ -905,13 +918,30 @@ impl Recipe {
         if version > RECIPE_VERSION {
             return Err(RecipeError::Newer(version));
         }
-        let mut recipe: Self =
+        let recipe: Self =
             serde_json::from_slice(bytes).map_err(|error| RecipeError::Shape(error.to_string()))?;
-        recipe.check()?;
-        for control in &mut recipe.controls {
+        recipe.checked()
+    }
+
+    /// A recipe built in memory, checked as [`Self::read`] checks a file,
+    /// with each control's keyframe property named.
+    pub fn checked(mut self) -> Result<Self, RecipeError> {
+        self.check()?;
+        for control in &mut self.controls {
             control.keyframe = cutlass_model::effect_control_key(&control.id);
         }
-        Ok(recipe)
+        Ok(self)
+    }
+
+    /// The recipe as the JSON [`Self::read`] reads back to the same recipe.
+    /// It names the lowest version that can hold it, and leaves out every
+    /// field at the value a reader gives it. A recipe that would not read
+    /// back is refused and nothing is written.
+    pub fn to_json(&self) -> Result<String, RecipeError> {
+        let mut written = self.clone();
+        written.version = self.least_version();
+        written.check()?;
+        to_json(&written)
     }
 
     fn check(&self) -> Result<(), RecipeError> {
@@ -1152,6 +1182,18 @@ pub(crate) fn check_curve(block: Block, param: &Param, curve: &Curve) -> Result<
             range(jitter.to)
         }
     }
+}
+
+/// `recipe` as indented JSON with a newline at the end, no larger than a
+/// reader takes.
+pub(crate) fn to_json<T: Serialize>(recipe: &T) -> Result<String, RecipeError> {
+    let mut json = serde_json::to_string_pretty(recipe)
+        .map_err(|error| RecipeError::Shape(error.to_string()))?;
+    json.push('\n');
+    if json.len() > MAX_RECIPE_BYTES {
+        return Err(RecipeError::TooLarge);
+    }
+    Ok(json)
 }
 
 /// The lowest format version that can hold `curves`.
@@ -1769,6 +1811,50 @@ mod tests {
             eased(2, "[[0,1],[1,2]]", r#"["wobble"]"#),
             Err(RecipeError::Shape(_))
         ));
+    }
+
+    #[test]
+    fn every_bundled_recipe_writes_and_reads_back_the_same() {
+        for recipe in bundled() {
+            let json = recipe.to_json().expect("writes");
+            assert!(json.len() <= MAX_RECIPE_BYTES);
+            assert_eq!(&read(&json).expect("reads back"), recipe, "{}", recipe.id);
+        }
+    }
+
+    #[test]
+    fn a_written_recipe_names_its_least_version_and_skips_defaults() {
+        let plain = read(
+            r#"{"version":2,"id":"a","name":"A","passes":[{"block":"blur","params":{"radius":{"jitter":{"rate":4,"from":0,"to":0.05}}}}]}"#,
+        )
+        .unwrap();
+        let json = plain.to_json().unwrap();
+        // No ease, so an app from before eases can read it.
+        assert!(json.contains("\"version\": 1"), "{json}");
+        for absent in ["category", "preview", "poster", "controls", "seed", "ease"] {
+            assert!(!json.contains(absent), "{absent} in {json}");
+        }
+        let eased = eased(2, "[[0,1],[1,2]]", r#"["out"]"#).unwrap();
+        let json = eased.to_json().unwrap();
+        assert!(json.contains("\"version\": 2"), "{json}");
+        assert_eq!(read(&json).unwrap(), eased);
+    }
+
+    #[test]
+    fn a_recipe_that_would_not_read_back_is_not_written() {
+        let mut recipe =
+            read(r#"{"version":1,"id":"a","name":"A","passes":[{"block":"blur"}]}"#).unwrap();
+        recipe.passes.clear();
+        assert_eq!(recipe.to_json(), Err(RecipeError::Passes));
+        assert_eq!(recipe.clone().checked(), Err(RecipeError::Passes));
+        let mut recipe =
+            read(r#"{"version":1,"id":"a","name":"A","passes":[{"block":"blur"}]}"#).unwrap();
+        recipe.passes[0]
+            .params
+            .insert("radius".to_owned(), super::Curve::Constant(9.0));
+        assert!(matches!(recipe.to_json(), Err(RecipeError::Range { .. })));
+        recipe.id = "Not An Id".to_owned();
+        assert_eq!(recipe.to_json(), Err(RecipeError::Name));
     }
 
     #[test]

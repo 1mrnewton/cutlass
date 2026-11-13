@@ -204,7 +204,13 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
     }
 
     /// Availability of a neighbouring prediction block (clause 6.4.2).
-    fn pb_available(&self, pb: Pb, nx: isize, ny: isize) -> bool {
+    /// `near`: the position is left of or above the block within its
+    /// extent, or at its top-left corner (see [`Self::near`]).
+    fn pb_available(&self, pb: Pb, nx: isize, ny: isize, near: bool) -> bool {
+        if near {
+            return self.near(nx, ny)
+                && self.pic.info.get(self.pic.at4(nx as usize, ny as usize)) & 3 == MODE_INTER;
+        }
         let same_cb = nx >= pb.xcb as isize
             && ny >= pb.ycb as isize
             && (nx as usize) < pb.xcb + pb.ncb
@@ -245,8 +251,8 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             (x >> level) == (nx >> level) && (y >> level) == (ny >> level)
         };
         let mut list: Short<MvField, 5> = Short::default();
-        let get = |nx: isize, ny: isize| -> Option<MvField> {
-            if same_region(nx, ny) || !self.pb_available(pb, nx, ny) {
+        let get = |nx: isize, ny: isize, near: bool| -> Option<MvField> {
+            if same_region(nx, ny) || !self.pb_available(pb, nx, ny, near) {
                 None
             } else {
                 Some(self.neighbour(nx, ny))
@@ -268,7 +274,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let a1 = if excluded_a1 {
             None
         } else {
-            get(x - 1, y + h - 1)
+            get(x - 1, y + h - 1, true)
         };
         if let Some(a) = a1 {
             take!(a);
@@ -276,25 +282,25 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let b1 = if excluded_b1 {
             None
         } else {
-            get(x + w - 1, y - 1)
+            get(x + w - 1, y - 1, true)
         };
         if let Some(b) = b1
             && a1 != Some(b)
         {
             take!(b);
         }
-        if let Some(b) = get(x + w, y - 1)
+        if let Some(b) = get(x + w, y - 1, false)
             && b1 != Some(b)
         {
             take!(b);
         }
-        if let Some(a) = get(x - 1, y + h)
+        if let Some(a) = get(x - 1, y + h, false)
             && a1 != Some(a)
         {
             take!(a);
         }
         if list.len() != 4
-            && let Some(b) = get(x - 1, y - 1)
+            && let Some(b) = get(x - 1, y - 1, true)
             && a1 != Some(b)
             && b1 != Some(b)
         {
@@ -465,8 +471,8 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let other = 1 - list;
         let (x, y, w, h) = (pb.x as isize, pb.y as isize, pb.w as isize, pb.h as isize);
         let cur_poc = self.pic.poc;
-        let fetch = |nx: isize, ny: isize| -> Option<MvField> {
-            if self.pb_available(pb, nx, ny) {
+        let fetch = |nx: isize, ny: isize, near: bool| -> Option<MvField> {
+            if self.pb_available(pb, nx, ny, near) {
                 Some(self.neighbour(nx, ny))
             } else {
                 None
@@ -501,7 +507,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             }
             None
         };
-        let a = [fetch(x - 1, y + h), fetch(x - 1, y + h - 1)];
+        let a = [fetch(x - 1, y + h, false), fetch(x - 1, y + h - 1, true)];
         let is_scaled = a[0].is_some() || a[1].is_some();
         let mut mv_a = a.iter().flatten().find_map(&same);
         if mv_a.is_none() {
@@ -514,9 +520,9 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             return Ok(a);
         }
         let b = [
-            fetch(x + w, y - 1),
-            fetch(x + w - 1, y - 1),
-            fetch(x - 1, y - 1),
+            fetch(x + w, y - 1, false),
+            fetch(x + w - 1, y - 1, true),
+            fetch(x - 1, y - 1, true),
         ];
         let mut mv_b = b.iter().flatten().find_map(&same);
         if !is_scaled && mv_b.is_some() && mv_a.is_none() {

@@ -104,6 +104,9 @@ pub struct SliceDecoder<'a, 'p, P: Pixel> {
     pub ctb_x: usize,
     pub ctb_y: usize,
     pub ctb_rs: usize,
+    /// Whether the CTB to the left, above, and above-left of this one may
+    /// be used for prediction (the same slice and tile).
+    pub ctb_near: [bool; 3],
     pub merge_2nx2n: bool,
     pub slice_type: SliceType,
     pub mc: crate::mc::Scratch<P>,
@@ -387,6 +390,9 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             }
             self.pic.ctb_slice[rs].store(self.slice as u16, Relaxed);
             self.pic.ctb_slice_addr[rs].store(slice_addr, Relaxed);
+            let (cx, cy) = (self.ctb_x as isize, self.ctb_y as isize);
+            self.ctb_near = [(cx - 1, cy), (cx, cy - 1), (cx - 1, cy - 1)]
+                .map(|(nx, ny)| self.pic.available(self.ctb_x, self.ctb_y, nx, ny));
             let tile_start =
                 ts == 0 || layout.tile_of[rs] != layout.tile_of[layout.ts_to_rs[ts - 1] as usize];
             let row_start =
@@ -619,13 +625,10 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let split = if x0 + size <= self.pic.width && y0 + size <= self.pic.height && log2 > min_cb
         {
             let mut inc = 0;
-            if self.left_ok(x0, y0)
-                && u32::from(self.pic.depth.get(self.pic.at4(x0 - 1, y0))) > depth
-            {
+            if self.left_ok(x0) && u32::from(self.pic.depth.get(self.pic.at4(x0 - 1, y0))) > depth {
                 inc += 1;
             }
-            if self.up_ok(x0, y0) && u32::from(self.pic.depth.get(self.pic.at4(x0, y0 - 1))) > depth
-            {
+            if self.up_ok(y0) && u32::from(self.pic.depth.get(self.pic.at4(x0, y0 - 1))) > depth {
                 inc += 1;
             }
             self.cabac.decide(cabac::SPLIT_CU + inc)
@@ -704,11 +707,10 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let mut skip = false;
         if self.slice_type != SliceType::I {
             let mut inc = 0;
-            if self.left_ok(x0, y0) && self.pic.info.get(self.pic.at4(x0 - 1, y0)) & FLAG_SKIP != 0
-            {
+            if self.left_ok(x0) && self.pic.info.get(self.pic.at4(x0 - 1, y0)) & FLAG_SKIP != 0 {
                 inc += 1;
             }
-            if self.up_ok(x0, y0) && self.pic.info.get(self.pic.at4(x0, y0 - 1)) & FLAG_SKIP != 0 {
+            if self.up_ok(y0) && self.pic.info.get(self.pic.at4(x0, y0 - 1)) & FLAG_SKIP != 0 {
                 inc += 1;
             }
             skip = self.cabac.decide(cabac::SKIP + inc);
@@ -1291,21 +1293,41 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         intra::predict(&refs, mode, c == 0, bit_depth, dst, stride);
     }
 
-    /// Whether the block left of (`x0`, `y0`) is available (clause
+    /// Whether the block left of column `x0` is available (clause
     /// 6.4.1). Inside the CTB it always is: a block to the left comes
     /// earlier in z-scan order.
     #[inline]
-    fn left_ok(&self, x0: usize, y0: usize) -> bool {
+    fn left_ok(&self, x0: usize) -> bool {
         let mask = (1usize << self.pic.layout.log2_ctb) - 1;
-        x0 & mask != 0 || self.pic.available(x0, y0, x0 as isize - 1, y0 as isize)
+        x0 & mask != 0 || self.ctb_near[0]
     }
 
-    /// Whether the block above (`x0`, `y0`) is available; inside the CTB
+    /// Availability (clause 6.4.1) of (`nx`, `ny`) left of or above the
+    /// block under way, within its height or width or at its top-left
+    /// corner: such a position comes before the block in z-scan order, so
+    /// it is there when its CTB is.
+    #[inline]
+    pub fn near(&self, nx: isize, ny: isize) -> bool {
+        if nx < 0 || ny < 0 {
+            return false;
+        }
+        let log2 = self.pic.layout.log2_ctb;
+        let left = (nx as usize >> log2) != (self.ctb_x >> log2);
+        let up = (ny as usize >> log2) != (self.ctb_y >> log2);
+        match (left, up) {
+            (false, false) => true,
+            (true, false) => self.ctb_near[0],
+            (false, true) => self.ctb_near[1],
+            (true, true) => self.ctb_near[2],
+        }
+    }
+
+    /// Whether the block above row `y0` is available; inside the CTB
     /// it always is.
     #[inline]
-    fn up_ok(&self, x0: usize, y0: usize) -> bool {
+    fn up_ok(&self, y0: usize) -> bool {
         let mask = (1usize << self.pic.layout.log2_ctb) - 1;
-        y0 & mask != 0 || self.pic.available(x0, y0, x0 as isize, y0 as isize - 1)
+        y0 & mask != 0 || self.ctb_near[1]
     }
 
     /// `residual_coding` (clause 7.3.8.11) and the reconstruction of its

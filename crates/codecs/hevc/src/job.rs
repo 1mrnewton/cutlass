@@ -408,6 +408,7 @@ impl<'a> SliceJob<'a> {
             ctb_x: 0,
             ctb_y: 0,
             ctb_rs: 0,
+            ctb_near: [false; 3],
             merge_2nx2n: false,
             slice_type: self.slice_type,
             mc: crate::mc::Scratch::default(),

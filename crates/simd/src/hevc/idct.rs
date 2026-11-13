@@ -4,6 +4,9 @@
 //! both fit 16 bits, so pairs of them are multiplied by pairs of matrix
 //! entries into 32-bit sums (`pmaddwd`).
 //!
+//! The 4×4 blocks take the DCT or, for intra luma, the DST of equation
+//! 8-316, by the same two products.
+//!
 //! An entry returns `false`, having written nothing, when it does not run
 //! on this CPU or does not take the block.
 
@@ -44,6 +47,42 @@ pub const DCT32: [[i8; 32]; 32] = {
     }
     out
 };
+
+/// `transMatrix` of the 4×4 DST (equation 8-316): entry `[k][n]`.
+pub const DST4: [[i8; 4]; 4] = [
+    [29, 55, 74, 84],
+    [74, 74, 0, -74],
+    [84, -29, -74, 55],
+    [55, -84, 74, -29],
+];
+
+/// The residual of a 4×4 block of scaled coefficients `coeffs` (rows of
+/// 4, each within 16 bits) into `out`: the DCT, or the DST when `dst`.
+/// The first pass rounds by 7 bits and clips to 16 bits, the second
+/// rounds by `20 - bit_depth` bits.
+#[inline]
+pub fn inverse4(coeffs: &[i32], out: &mut [i32], dst: bool, bit_depth: u32) -> bool {
+    let (Some(c), Some(o)) = (coeffs.first_chunk::<16>(), out.first_chunk_mut::<16>()) else {
+        return false;
+    };
+    if !(8..=12).contains(&bit_depth) || !crate::wide::has_avx2() {
+        return false;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: `has_avx2` checked at run time that the CPU has AVX2.
+        #[allow(unsafe_code)]
+        unsafe {
+            avx2::inverse4(c, o, dst, bit_depth);
+        }
+        true
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (c, o, dst);
+        false
+    }
+}
 
 /// The residual of an `n`×`n` block (`n` 8, 16 or 32) of scaled
 /// coefficients `coeffs` (rows of `n`, each within 16 bits) into `out`

@@ -1607,23 +1607,14 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         self.clear_coeffs(n, max_x, max_y);
         let (plane, stride) = self.out.from(c, x0 / scale, y0 / scale);
         let res = &self.res[..n * n];
+        let block = (plane, stride, res, flat, maxv);
         cutlass_simd::wide::wide(
             #[inline(always)]
-            || match flat {
-                Some(v) => {
-                    for row in plane.chunks_mut(stride).take(n) {
-                        for s in &mut row[..n] {
-                            *s = P::of((s.i() + v).clamp(0, maxv));
-                        }
-                    }
-                }
-                None => {
-                    for (row, r) in plane.chunks_mut(stride).zip(res.chunks_exact(n)) {
-                        for (s, &r) in row[..n].iter_mut().zip(r) {
-                            *s = P::of((s.i() + r).clamp(0, maxv));
-                        }
-                    }
-                }
+            || match n {
+                4 => add_residual::<4, P>(block),
+                8 => add_residual::<8, P>(block),
+                16 => add_residual::<16, P>(block),
+                _ => add_residual::<32, P>(block),
             },
         );
     }
@@ -1862,5 +1853,34 @@ fn coeff_abs_level_remaining(e: &mut Engine<'_>, rice: u32) -> Option<u32> {
         let base = ((1u64 << (prefix - 3)) + 2) << rice;
         let value = base + u64::from(e.bypass_bits(extra));
         u32::try_from(value.min(u64::from(u32::MAX >> 1))).ok()
+    }
+}
+
+/// Add an `N`×`N` residual, or the one value of a flat one, to the
+/// prediction in `plane` (rows `stride` apart), clipped to `0..=maxv`.
+/// Rows of a fixed width, so the loops compile to whole vectors.
+#[inline(always)]
+fn add_residual<const N: usize, P: Pixel>(
+    (plane, stride, res, flat, maxv): (&mut [P], usize, &[i32], Option<i32>, i32),
+) {
+    for (j, row) in plane.chunks_mut(stride).take(N).enumerate() {
+        let Some(row) = row.first_chunk_mut::<N>() else {
+            return;
+        };
+        match flat {
+            Some(v) => {
+                for s in row.iter_mut() {
+                    *s = P::of((s.i() + v).clamp(0, maxv));
+                }
+            }
+            None => {
+                let Some(r) = res.get(j * N..).and_then(|r| r.first_chunk::<N>()) else {
+                    return;
+                };
+                for (s, &r) in row.iter_mut().zip(r) {
+                    *s = P::of((s.i() + r).clamp(0, maxv));
+                }
+            }
+        }
     }
 }

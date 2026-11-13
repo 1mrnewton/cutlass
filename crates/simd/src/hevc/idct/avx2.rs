@@ -9,14 +9,14 @@
 
 use core::arch::x86_64::{
     __m128i, __m256i, _mm_add_epi32, _mm_cvtsi32_si128, _mm_cvtsi128_si64, _mm_extract_epi64,
-    _mm_madd_epi16, _mm_packs_epi32, _mm_set_epi64x, _mm_set1_epi32, _mm_setzero_si128,
-    _mm_srai_epi32, _mm_unpackhi_epi16, _mm_unpacklo_epi16, _mm256_add_epi32, _mm256_extract_epi64,
-    _mm256_madd_epi16, _mm256_packs_epi32, _mm256_permute4x64_epi64, _mm256_set_m128i,
-    _mm256_set1_epi32, _mm256_setzero_si256, _mm256_sra_epi32, _mm256_srai_epi32,
-    _mm256_unpackhi_epi16, _mm256_unpacklo_epi16,
+    _mm_madd_epi16, _mm_packs_epi32, _mm_set_epi32, _mm_set_epi64x, _mm_set1_epi32,
+    _mm_setzero_si128, _mm_sra_epi32, _mm_srai_epi32, _mm_unpackhi_epi16, _mm_unpacklo_epi16,
+    _mm256_add_epi32, _mm256_extract_epi64, _mm256_madd_epi16, _mm256_packs_epi32,
+    _mm256_permute4x64_epi64, _mm256_set_m128i, _mm256_set1_epi32, _mm256_setzero_si256,
+    _mm256_sra_epi32, _mm256_srai_epi32, _mm256_unpackhi_epi16, _mm256_unpacklo_epi16,
 };
 
-use super::DCT32;
+use super::{DCT32, DST4};
 
 /// Entry `[k][n]` of the `N`-point matrix.
 const fn m<const N: usize>(k: usize, n: usize) -> i32 {
@@ -274,5 +274,81 @@ pub(super) fn inverse<const N: usize>(
         for (s, a) in acc.iter().enumerate().take(N / 8) {
             st32x8(out, y * N + 8 * s, _mm256_sra_epi32(*a, shift));
         }
+    }
+}
+
+/// The 4×4 matrix: the DCT's rows 0, 8, 16 and 24, or the DST.
+const fn m4(dst: bool, k: usize, n: usize) -> i32 {
+    if dst {
+        DST4[k][n] as i32
+    } else {
+        DCT32[k * 8][n] as i32
+    }
+}
+
+/// Entries `k` and `k + 1` of column `n` as one 32-bit pair.
+const fn pair4(dst: bool, k: usize, n: usize) -> i32 {
+    (m4(dst, k, n) & 0xffff) | (m4(dst, k + 1, n) << 16)
+}
+
+/// For each pair of rows `(0, 1)` and `(2, 3)`, the pairs of every column.
+const fn table4(dst: bool) -> [[i32; 4]; 2] {
+    [
+        [
+            pair4(dst, 0, 0),
+            pair4(dst, 0, 1),
+            pair4(dst, 0, 2),
+            pair4(dst, 0, 3),
+        ],
+        [
+            pair4(dst, 2, 0),
+            pair4(dst, 2, 1),
+            pair4(dst, 2, 2),
+            pair4(dst, 2, 3),
+        ],
+    ]
+}
+
+static DCT4: [[i32; 4]; 2] = table4(false);
+static DST4T: [[i32; 4]; 2] = table4(true);
+
+/// The four 32-bit lanes of `v`.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn lanes(v: __m128i) -> [i32; 4] {
+    let (a, b) = (_mm_cvtsi128_si64(v), _mm_extract_epi64::<1>(v));
+    [a as i32, (a >> 32) as i32, b as i32, (b >> 32) as i32]
+}
+
+#[target_feature(enable = "avx2")]
+pub(super) fn inverse4(c: &[i32; 16], out: &mut [i32; 16], dst: bool, bit_depth: u32) {
+    let t = if dst { &DST4T } else { &DCT4 };
+    let tv = |p: usize| _mm_set_epi32(t[p][3], t[p][2], t[p][1], t[p][0]);
+    let (t01, t23) = (tv(0), tv(1));
+    let clip = |v: i32| v.clamp(-32768, 32767);
+    let row = |k: usize| -> [i32; 4] { [c[4 * k], c[4 * k + 1], c[4 * k + 2], c[4 * k + 3]] };
+    // First pass, column x of the intermediates: sum over k of
+    // M[k][y] · c[k][x]. Lanes are y: the pairs (c[0][x], c[1][x]) and
+    // (c[2][x], c[3][x]) broadcast, times the matrix pairs of each y.
+    let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
+    let mut mid = [[0i32; 4]; 4];
+    for x in 0..4 {
+        let a = _mm_set1_epi32((r0[x] & 0xffff) | (r1[x] << 16));
+        let b = _mm_set1_epi32((r2[x] & 0xffff) | (r3[x] << 16));
+        let sum = _mm_add_epi32(_mm_madd_epi16(a, t01), _mm_madd_epi16(b, t23));
+        let v = lanes(_mm_srai_epi32::<7>(_mm_add_epi32(sum, _mm_set1_epi32(64))));
+        for y in 0..4 {
+            mid[y][x] = clip(v[y]);
+        }
+    }
+    // Second pass, row y: sum over k of M[k][x] · mid[y][k], lanes x.
+    let shift = _mm_cvtsi32_si128((20 - bit_depth) as i32);
+    let add = _mm_set1_epi32(1 << (19 - bit_depth));
+    for (y, m) in mid.iter().enumerate() {
+        let a = _mm_set1_epi32((m[0] & 0xffff) | (m[1] << 16));
+        let b = _mm_set1_epi32((m[2] & 0xffff) | (m[3] << 16));
+        let sum = _mm_add_epi32(_mm_madd_epi16(a, t01), _mm_madd_epi16(b, t23));
+        let v = lanes(_mm_sra_epi32(_mm_add_epi32(sum, add), shift));
+        out[4 * y..4 * y + 4].copy_from_slice(&v);
     }
 }

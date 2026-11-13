@@ -66,6 +66,9 @@ pub fn inverse(
         let first = ((64 * coeffs[0] + 64) >> 7).clamp(-32768, 32767);
         return Some((64 * first + add2) >> shift2);
     }
+    if n == 4 && cutlass_simd::hevc::idct::inverse4(coeffs, out, dst, bit_depth) {
+        return None;
+    }
     if dst {
         let mut tmp = [0i32; 16];
         for x in 0..4 {

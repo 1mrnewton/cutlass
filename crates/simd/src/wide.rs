@@ -52,6 +52,44 @@ pub fn has_avx2() -> bool {
     }
 }
 
+/// Whether the CPU has AVX2 ([`has_avx2`]) and the 512-bit integer
+/// instructions of AVX-512 (F and BW), for the kernels that take them.
+/// Checked once. Tests may turn it off ([`set_avx512`]) to run the AVX2
+/// kernels as well.
+#[must_use]
+#[inline]
+pub fn has_avx512() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    /// 0: not checked yet, 1: no, 2: yes.
+    static HAS: AtomicU8 = AtomicU8::new(0);
+    #[cfg(test)]
+    if !USE_AVX512.load(Ordering::Relaxed) {
+        return false;
+    }
+    match HAS.load(Ordering::Relaxed) {
+        0 => {
+            #[cfg(target_arch = "x86_64")]
+            let has = has_avx2()
+                && std::is_x86_feature_detected!("avx512f")
+                && std::is_x86_feature_detected!("avx512bw");
+            #[cfg(not(target_arch = "x86_64"))]
+            let has = false;
+            HAS.store(if has { 2 } else { 1 }, Ordering::Relaxed);
+            has
+        }
+        v => v == 2,
+    }
+}
+
+#[cfg(test)]
+static USE_AVX512: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Let [`has_avx512`] report what the CPU has (`true`), or no AVX-512.
+#[cfg(test)]
+pub(crate) fn set_avx512(on: bool) {
+    USE_AVX512.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn detect() -> bool {
     #[cfg(target_arch = "x86_64")]
     {

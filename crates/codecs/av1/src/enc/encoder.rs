@@ -124,6 +124,10 @@ pub struct EncConfig {
     pub fps: f64,
     /// Distance between key frames.
     pub keyint: u32,
+    /// Start a key frame where the picture changes all at once (a cut),
+    /// no closer to the key frame before it than a mini-GOP or a tenth of
+    /// `keyint`.
+    pub scene_cut: bool,
     /// Mini-GOP length: frames coded as a hierarchical pyramid behind a
     /// hidden alt-ref (1 = each frame predicts from the previous one only).
     pub gop: u32,
@@ -161,6 +165,7 @@ impl EncConfig {
             constant_rate: false,
             fps: 30.0,
             keyint: 120,
+            scene_cut: true,
             gop: 8,
             adaptive_gop: true,
             loop_restoration: false,
@@ -205,6 +210,13 @@ pub struct Av1Enc {
     /// Display indices a caller asked to be key frames, in order, all past
     /// `next_disp` or equal to it.
     forced_keys: std::collections::VecDeque<u64>,
+    /// The last picture given to `encode`, for the cut detector.
+    last_input: Option<Arc<AnyPicture>>,
+    /// How much each of the last pictures differed from the one before.
+    changes: std::collections::VecDeque<f64>,
+    /// Display index of the last key frame started, by distance or by a
+    /// cut or a request.
+    last_key_at: u64,
     /// Display index of the frame each reference slot holds.
     slot_disp: [Option<u64>; 8],
     /// Temporal importance of the frames of the current mini-GOP (display
@@ -440,6 +452,9 @@ impl Av1Enc {
             next_disp: 0,
             next_key: 0,
             forced_keys: std::collections::VecDeque::new(),
+            last_input: None,
+            changes: std::collections::VecDeque::new(),
+            last_key_at: 0,
             slot_disp: [None; 8],
             tpl_imp: Vec::new(),
             static_gop: false,
@@ -521,9 +536,53 @@ impl Av1Enc {
                 what: "sample size",
             });
         }
-        let src = source_picture(&self.cfg, &self.seq, input);
-        self.lookahead.push_back(Arc::new(P::wrap(src)));
+        let src = Arc::new(P::wrap(source_picture(&self.cfg, &self.seq, input)));
+        if self.cfg.scene_cut {
+            self.watch_for_a_cut::<P>(&src);
+        }
+        self.last_input = Some(Arc::clone(&src));
+        self.lookahead.push_back(src);
         self.run::<P>(false)
+    }
+
+    /// Makes `picture`, the next one queued, a key frame when it differs
+    /// from the picture before it all at once: by more than a twentieth
+    /// of the sample range on average, and by three times what the last
+    /// pictures changed. Steady motion, noise and a fade change every
+    /// picture alike and start none.
+    fn watch_for_a_cut<P: PicturePixel>(&mut self, picture: &Arc<AnyPicture>) {
+        let at = self.next_disp + self.lookahead.len() as u64;
+        let change = self
+            .last_input
+            .as_ref()
+            .and_then(|last| P::view(last).zip(P::view(picture)))
+            .map(|(a, b)| mean_change(a, b));
+        let Some(change) = change else {
+            return;
+        };
+        let usual = if self.changes.is_empty() {
+            None
+        } else {
+            Some(self.changes.iter().sum::<f64>() / self.changes.len() as f64)
+        };
+        if self.changes.len() == 4 {
+            self.changes.pop_front();
+        }
+        self.changes.push_back(change);
+        let Some(usual) = usual else {
+            return;
+        };
+        let range = f64::from(1u32 << self.cfg.bit_depth);
+        let near = u64::from(self.cfg.gop.max(self.cfg.keyint / 10).max(1));
+        let pending = self.forced_keys.back().copied().unwrap_or(self.last_key_at);
+        if change > range / 20.0
+            && change > 3.0 * usual + range / 256.0
+            && at >= pending.max(self.last_key_at) + near
+            && self.next_key > at
+        {
+            self.forced_keys.push_back(at);
+            self.next_key = at;
+        }
     }
 
     /// Codes every queued picture.
@@ -578,6 +637,7 @@ impl Av1Enc {
                 self.lookahead.pop_front();
                 self.next_disp += 1;
                 self.next_key = after;
+                self.last_key_at = d;
                 while self.forced_keys.front().is_some_and(|&f| f <= d) {
                     self.forced_keys.pop_front();
                 }
@@ -2048,6 +2108,23 @@ fn source_picture<P: Pixel>(
     pic
 }
 
+/// The mean absolute difference of the luma of two pictures of one size,
+/// over every fourth sample of every fourth row.
+fn mean_change<P: Pixel>(a: &Picture<P>, b: &Picture<P>) -> f64 {
+    let (pa, pb) = (&a.planes[0], &b.planes[0]);
+    let (w, h) = (pa.w.min(pb.w), pa.h.min(pb.h));
+    let (mut sum, mut count) = (0u64, 0u64);
+    for y in (0..h).step_by(4) {
+        let ra = &pa.data[y * pa.stride..][..w];
+        let rb = &pb.data[y * pb.stride..][..w];
+        for (x, y) in ra.iter().zip(rb).step_by(4) {
+            sum += u64::from(x.to_i32().abs_diff(y.to_i32()));
+            count += 1;
+        }
+    }
+    sum as f64 / count.max(1) as f64
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AnyPicture, Av1Core, Av1Enc, EncConfig, InputFrame, RateControl};
@@ -2168,6 +2245,98 @@ mod tests {
             fps: 30.0,
         };
         assert_eq!(level_of(wide), (1, 0));
+    }
+
+    /// Display indices of the key frames of `frames` 64x64 pictures whose
+    /// luma `luma(picture, sample)` gives.
+    fn keys_of(cfg: EncConfig, frames: u64, luma: impl Fn(u64, usize) -> u8) -> Vec<u64> {
+        let (w, h) = (cfg.width, cfg.height);
+        let mut enc = Av1Enc::new(cfg).expect("encoder");
+        let mut units = Vec::new();
+        for f in 0..frames {
+            let y: Vec<u8> = (0..w * h).map(|i| luma(f, i)).collect();
+            let c = vec![128u8; (w / 2) * (h / 2)];
+            units.extend(
+                enc.encode(&InputFrame {
+                    planes: [&y, &c, &c],
+                    strides: [w, w / 2, w / 2],
+                })
+                .expect("encode"),
+            );
+        }
+        units.extend(enc.flush::<u8>().expect("flush"));
+        assert_eq!(units.len() as u64, frames);
+        let mut dec = Av1Core::new();
+        dec.threads = 1;
+        for u in &units {
+            assert_eq!(dec.decode(&u.data).expect("decode").len(), 1);
+        }
+        units.iter().filter(|u| u.key).map(|u| u.display).collect()
+    }
+
+    fn cut_config() -> EncConfig {
+        let mut cfg = EncConfig::new(64, 64);
+        cfg.rc = RateControl::Qindex(120);
+        cfg.gop = 4;
+        cfg.speed = 10;
+        cfg
+    }
+
+    /// Two scenes: a dark ramp that drifts, then a bright grid.
+    fn two_scenes(cut: u64) -> impl Fn(u64, usize) -> u8 {
+        move |f, i| {
+            let (x, y) = (i % 64, i / 64);
+            if f < cut {
+                (20 + (x + y + f as usize) % 40) as u8
+            } else {
+                (160 + ((x / 8 + y / 8 + f as usize) % 2) * 60) as u8
+            }
+        }
+    }
+
+    #[test]
+    fn a_cut_starts_a_key_frame() {
+        assert_eq!(keys_of(cut_config(), 30, two_scenes(17)), [0, 17]);
+        // The key frame distance is counted from the cut.
+        let mut cfg = cut_config();
+        cfg.keyint = 20;
+        assert_eq!(keys_of(cfg, 45, two_scenes(17)), [0, 17, 37]);
+        // Off, only the distance starts one.
+        let mut cfg = cut_config();
+        cfg.scene_cut = false;
+        assert_eq!(keys_of(cfg, 30, two_scenes(17)), [0]);
+    }
+
+    #[test]
+    fn steady_change_starts_no_key_frame() {
+        // A ramp that moves with every picture, noise that is new in every
+        // picture, and a fade to white change each picture as much as the
+        // one before.
+        let drift = |f: u64, i: usize| ((i % 64 + i / 64) * 3 + f as usize * 9) as u8;
+        assert_eq!(keys_of(cut_config(), 30, drift), [0]);
+        let noise = |f: u64, i: usize| {
+            let v = (i as u64 + 1).wrapping_mul(f.wrapping_mul(2_654_435_761) + 40_503);
+            (v >> 13) as u8
+        };
+        assert_eq!(keys_of(cut_config(), 30, noise), [0]);
+        let fade = |f: u64, i: usize| (40 + (i % 64) / 4 + f as usize * 7).min(255) as u8;
+        assert_eq!(keys_of(cut_config(), 30, fade), [0]);
+    }
+
+    #[test]
+    fn a_cut_close_behind_a_key_frame_starts_none() {
+        // Twelve pictures (a tenth of the key frame distance) must lie
+        // between: a cut at 5 is too close to the first key frame, and of
+        // two cuts five apart the second starts none.
+        assert_eq!(keys_of(cut_config(), 30, two_scenes(5)), [0]);
+        let twice = |f: u64, i: usize| {
+            if (17..22).contains(&f) {
+                two_scenes(0)(f, i)
+            } else {
+                two_scenes(u64::MAX)(f, i)
+            }
+        };
+        assert_eq!(keys_of(cut_config(), 30, twice), [0, 17]);
     }
 
     #[test]

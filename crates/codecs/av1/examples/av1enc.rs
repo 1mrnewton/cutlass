@@ -4,6 +4,7 @@
 //!        [--tiles COLSLOG2xROWSLOG2] [--recon out.yuv] [--gop N] [--loop-restoration]
 //!        [--global-motion] [--temporal-filter] [--threads N]
 //!        [--force-key N[,N...]] [--color PRIMARIES:TRANSFER:MATRIX[:full]] [--av1c out.bin]
+//!        [--no-scene-cut]
 //!
 //! `--force-key` makes the pictures at those display indices key frames,
 //! `--color` writes those ISO/IEC 23091-2 codes into the sequence header, and
@@ -156,6 +157,9 @@ fn main() -> Result<(), String> {
     }
     if let Some(s) = arg(&args, "--speed") {
         cfg.speed = s.parse().map_err(|_| "speed")?;
+    }
+    if args.iter().any(|a| a == "--no-scene-cut") {
+        cfg.scene_cut = false;
     }
     if args.iter().any(|a| a == "--global-motion") {
         cfg.global_motion = true;

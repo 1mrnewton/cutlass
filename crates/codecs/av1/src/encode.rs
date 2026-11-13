@@ -31,6 +31,7 @@ pub struct Av1Encoder {
     speed: u8,
     gop: u32,
     keyint: u32,
+    scene_cut: bool,
     loop_restoration: bool,
     global_motion: bool,
     temporal_filter: bool,
@@ -146,6 +147,7 @@ impl Av1Encoder {
             speed: 6,
             gop: 8,
             keyint: 120,
+            scene_cut: true,
             loop_restoration: false,
             global_motion: false,
             temporal_filter: false,
@@ -194,6 +196,14 @@ impl Av1Encoder {
         self.enc = None;
     }
 
+    /// Starts a key frame where the picture changes all at once (on by
+    /// default), no closer to the key frame before it than a mini-GOP or
+    /// a tenth of the key frame distance.
+    pub fn set_scene_cut(&mut self, on: bool) {
+        self.scene_cut = on;
+        self.enc = None;
+    }
+
     /// Codes Wiener loop restoration where it lowers the error (off by
     /// default; speeds 8 and up leave it off).
     pub fn set_loop_restoration(&mut self, on: bool) {
@@ -235,6 +245,7 @@ impl Av1Encoder {
             cfg.speed = self.speed;
             cfg.gop = self.gop;
             cfg.keyint = self.keyint;
+            cfg.scene_cut = self.scene_cut;
             cfg.loop_restoration = self.loop_restoration;
             cfg.global_motion = self.global_motion;
             cfg.temporal_filter = self.temporal_filter;

@@ -2615,6 +2615,43 @@ mod tests {
     }
 
     #[test]
+    fn every_ready_movie_tile_hands_back_its_own_picture() {
+        let movie = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/16929689_1920_1080_30fps.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: the movie is not in ../local-files");
+            return;
+        }
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let id = host.import(&movie).unwrap();
+        host.append(&id).unwrap();
+        let size = 0.000_1;
+        // A few tiles first, so later tiles have a nearby picture to wait on.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut films = host.film(Micros(0), Micros(1_000_000), size, 40.0);
+        while !films[0].tiles.iter().all(|tile| tile.ready) && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            films = host.film(Micros(0), Micros(1_000_000), size, 40.0);
+        }
+        films = host.film(Micros(0), Micros(10_000_000), size, 40.0);
+        while !films[0].tiles.iter().all(|tile| tile.ready) && std::time::Instant::now() < deadline
+        {
+            for tile in films[0].tiles.iter().filter(|tile| tile.ready) {
+                assert!(host.thumb(&tile.key).is_some(), "ready but empty");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            films = host.film(Micros(0), Micros(10_000_000), size, 40.0);
+        }
+        assert!(films[0].tiles.iter().all(|tile| tile.ready));
+        for tile in &films[0].tiles {
+            assert!(host.thumb(&tile.key).is_some());
+        }
+    }
+
+    #[test]
     fn a_dragged_clip_moves_and_a_drop_off_the_rows_is_refused() {
         let temp = Temp::new();
         let roots = Roots::new(&temp);
@@ -2947,6 +2984,53 @@ mod tests {
         assert!(host.set_opacity(&first, 1.5).is_err());
         assert!(host.set_crop(&first, "wide").is_err());
         assert_eq!(host.revision(), revision);
+    }
+
+    #[test]
+    fn a_mirrored_or_turned_picture_still_draws() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        host.apply(
+            0,
+            &[Request::SetCanvasSize {
+                width: 16,
+                height: 16,
+                ratio: "1:1".to_owned(),
+            }],
+        )
+        .unwrap();
+        let empty = host.frame(Micros(0)).unwrap();
+        let id = host
+            .import_probed(&fixture("pattern.png"), still(1_000_000))
+            .unwrap();
+        let clip = host.append(&id).unwrap();
+        let plain = host.frame(Micros(500_000)).unwrap();
+        host.toggle_mirror(&clip).unwrap();
+        let mirrored = host.frame(Micros(500_000)).unwrap();
+        assert_ne!(mirrored, empty);
+        assert_ne!(mirrored, plain);
+        host.undo().unwrap();
+        host.turn(&clip).unwrap();
+        let turned = host.frame(Micros(500_000)).unwrap();
+        assert_ne!(turned, empty);
+
+        let movie = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/16929689_1920_1080_30fps.mp4");
+        if !movie.is_file() {
+            return;
+        }
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let id = host.import(&movie).unwrap();
+        let clip = host.append(&id).unwrap();
+        let lit = |picture: &crate::Picture| picture.rgba.chunks(4).filter(|p| p[0] > 16).count();
+        let plain = host.frame(Micros(0)).unwrap();
+        host.toggle_mirror(&clip).unwrap();
+        let mirrored = host.frame(Micros(0)).unwrap();
+        eprintln!("plain lit {} mirrored lit {}", lit(&plain), lit(&mirrored));
+        assert!(lit(&mirrored) > lit(&plain) / 2);
     }
 
     #[test]

@@ -12,7 +12,7 @@
 use std::cell::Cell;
 use std::sync::atomic::Ordering::Relaxed;
 
-use cutlass_simd::hevc::sao;
+use cutlass_simd::hevc::{deblock, sao};
 
 use crate::ctu::chroma_qp;
 use crate::picture::{FLAG_KEEP, Picture, Work, lock};
@@ -223,6 +223,7 @@ struct EdgeQuery<'m> {
 impl Picture {
     /// Average luma QP, offsets of the slice holding `q0`, and the
     /// do-not-touch flags of both sides.
+    #[inline(always)]
     fn edge_terms(&self, query: &EdgeQuery<'_>) -> Option<(i32, i32, i32, bool, bool)> {
         let rs = self.ctb_rs(query.q.0, query.q.1);
         let (beta_offset, tc_offset) = {
@@ -247,6 +248,30 @@ impl Picture {
         ))
     }
 
+    /// The kernel's parameters of the luma segment between `p` and `q`.
+    #[inline(always)]
+    fn segment(
+        &self,
+        p: (usize, usize),
+        q: (usize, usize),
+        bs: u8,
+        memo: &Cell<(usize, i32, i32)>,
+    ) -> deblock::Segment {
+        if bs == 0 {
+            return deblock::Segment::default();
+        }
+        let query = EdgeQuery { p, q, bs, memo };
+        self.luma_strength(&query)
+            .map(|st| deblock::Segment {
+                beta: st.beta as i16,
+                tc: st.tc as i16,
+                no_p: st.no_p,
+                no_q: st.no_q,
+            })
+            .unwrap_or_default()
+    }
+
+    #[inline(always)]
     fn luma_strength(&self, query: &EdgeQuery<'_>) -> Option<Strength> {
         let (qp, beta_offset, tc_offset, no_p, no_q) = self.edge_terms(query)?;
         let shift = u32::from(self.sps.bit_depth) - 8;
@@ -297,10 +322,58 @@ impl Picture {
         let cw = width / 2;
         let offsets = [self.pps.cb_qp_offset, self.pps.cr_qp_offset];
         let memo = Cell::new((usize::MAX, 0, 0));
-        for y in (top..bottom).step_by(4) {
-            for x in (8..width).step_by(8) {
+        // Eight-bit luma: two segments of four lines at a time.
+        let fast = P::bytes(&band[0]).is_some() && deblock::accelerated();
+        if fast {
+            for y in (top..bottom).step_by(8) {
+                for x in (8..width).step_by(8) {
+                    let at = (y >> 2) * ver_stride + (x >> 3);
+                    let bs0 = self.bs_ver.get(at);
+                    let bs1 = if y + 4 < bottom {
+                        self.bs_ver.get(at + ver_stride)
+                    } else {
+                        0
+                    };
+                    if bs0 == 0 && bs1 == 0 {
+                        continue;
+                    }
+                    let segs = [
+                        self.segment((x - 1, y), (x, y), bs0, &memo),
+                        self.segment((x - 1, y + 4), (x, y + 4), bs1, &memo),
+                    ];
+                    if segs.iter().all(|s| s.beta == 0) {
+                        continue;
+                    }
+                    let Some(luma) = P::bytes_mut(&mut band[0]) else {
+                        continue;
+                    };
+                    let line = |l: usize| (y - top + l) * width + x - 4;
+                    let mut lines = [[0u8; 8]; 8];
+                    for (l, d) in lines.iter_mut().enumerate() {
+                        if let Some(r) = luma.get(line(l)..).and_then(|r| r.first_chunk::<8>()) {
+                            *d = *r;
+                        }
+                    }
+                    if !deblock::luma8_lines(&mut lines, segs) {
+                        continue;
+                    }
+                    for (l, r) in lines.iter().enumerate() {
+                        if let Some(d) = luma
+                            .get_mut(line(l)..)
+                            .and_then(|d| d.first_chunk_mut::<8>())
+                        {
+                            *d = *r;
+                        }
+                    }
+                }
+            }
+        }
+        // Chroma edges lie on the 16×8 grid of luma.
+        let (ystep, xstep) = if fast { (8, 16) } else { (4, 8) };
+        for y in (top..bottom).step_by(ystep) {
+            for x in (xstep..width).step_by(xstep) {
                 let bs = self.bs_ver.get((y >> 2) * ver_stride + (x >> 3));
-                if bs == 0 {
+                if bs == 0 || (fast && !(bs == 2 && x % 16 == 0 && y % 8 == 0)) {
                     continue;
                 }
                 let query = EdgeQuery {
@@ -309,7 +382,7 @@ impl Picture {
                     bs,
                     memo: &memo,
                 };
-                if let Some(st) = self.luma_strength(&query) {
+                if !fast && let Some(st) = self.luma_strength(&query) {
                     let mut edge = Ver {
                         s: &mut band[0],
                         pos: (y - top) * width + x,
@@ -344,10 +417,66 @@ impl Picture {
         let cw = width / 2;
         let offsets = [self.pps.cb_qp_offset, self.pps.cr_qp_offset];
         let memo = Cell::new((usize::MAX, 0, 0));
-        for y in (top.max(8)..bottom).step_by(8) {
-            for x in (0..width).step_by(4) {
+        let fast = P::bytes(&band[0]).is_some() && deblock::accelerated();
+        if fast {
+            for y in (top.max(8)..bottom).step_by(8) {
+                for x in (0..width).step_by(8) {
+                    let row = (y >> 3) * self.w4 + (x >> 2);
+                    let (bs0, bs1) = (self.bs_hor.get(row), self.bs_hor.get(row + 1));
+                    if bs0 == 0 && bs1 == 0 {
+                        continue;
+                    }
+                    let segs = [
+                        self.segment((x, y - 1), (x, y), bs0, &memo),
+                        self.segment((x + 4, y - 1), (x + 4, y), bs1, &memo),
+                    ];
+                    if segs.iter().all(|s| s.beta == 0) {
+                        continue;
+                    }
+                    let (p, q): (&mut [P], &mut [P]) = if y > top {
+                        band[0].split_at_mut((y - top) * width)
+                    } else if let Some(above) = above.as_deref_mut() {
+                        (&mut above[0][..], &mut band[0][..])
+                    } else {
+                        continue;
+                    };
+                    let (Some(p), Some(q)) = (P::bytes_mut(p), P::bytes_mut(q)) else {
+                        continue;
+                    };
+                    let plen = p.len();
+                    let at = |i: usize| {
+                        if i >= 4 {
+                            (i - 4) * width + x
+                        } else {
+                            (plen + x).wrapping_sub((4 - i) * width)
+                        }
+                    };
+                    let mut rows = [[0u8; 8]; 8];
+                    for (i, r) in rows.iter_mut().enumerate() {
+                        let side: &[u8] = if i >= 4 { q } else { p };
+                        if let Some(s) = side.get(at(i)..).and_then(|s| s.first_chunk::<8>()) {
+                            *r = *s;
+                        }
+                    }
+                    if !deblock::luma8(&mut rows, segs) {
+                        continue;
+                    }
+                    for (i, r) in rows.iter().enumerate().take(7).skip(1) {
+                        let side: &mut [u8] = if i >= 4 { &mut *q } else { &mut *p };
+                        if let Some(s) =
+                            side.get_mut(at(i)..).and_then(|s| s.first_chunk_mut::<8>())
+                        {
+                            *s = *r;
+                        }
+                    }
+                }
+            }
+        }
+        let (ystep, xstep) = if fast { (16, 8) } else { (8, 4) };
+        for y in (top.max(8).next_multiple_of(ystep)..bottom).step_by(ystep) {
+            for x in (0..width).step_by(xstep) {
                 let bs = self.bs_hor.get((y >> 3) * self.w4 + (x >> 2));
-                if bs == 0 {
+                if bs == 0 || (fast && !(bs == 2 && y % 16 == 0 && x % 8 == 0)) {
                     continue;
                 }
                 let query = EdgeQuery {
@@ -357,7 +486,7 @@ impl Picture {
                     memo: &memo,
                 };
                 let chroma = bs == 2 && y % 16 == 0 && x % 8 == 0;
-                for c in 0..3 {
+                for c in usize::from(fast)..3 {
                     if c > 0 && !chroma {
                         break;
                     }

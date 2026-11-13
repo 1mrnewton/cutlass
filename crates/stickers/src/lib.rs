@@ -276,6 +276,22 @@ impl Sticker {
         }
     }
 
+    /// Write the sticker's file into the project at `project`, unless it
+    /// is there already, and return where it is kept, relative to the
+    /// project: `Resources/` and [`Self::file_name`].
+    pub fn write_into(&self, project: &std::path::Path) -> Result<String, String> {
+        let stored = format!("Resources/{}", self.file_name());
+        let file = project.join(&stored);
+        if !file.is_file() {
+            let bytes = self.bytes()?;
+            if let Some(folder) = file.parent() {
+                std::fs::create_dir_all(folder).map_err(|error| error.to_string())?;
+            }
+            std::fs::write(&file, bytes).map_err(|error| error.to_string())?;
+        }
+        Ok(stored)
+    }
+
     /// The picture's width and height, in its own pixels.
     pub fn size(&self) -> Result<(u32, u32), String> {
         match self.art {

@@ -18,11 +18,11 @@ use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
     Append, AppendLane, ClipMove, ClipboardMiss, CopiedClip, DropGesture, DropOutcome,
     EFFECT_LENGTH, EffectPlace, FreshIds, GestureError, MediaPlace, MoveGesture, MovePlan, Pointer,
-    TITLE_LENGTH, TimelineScale, TitlePlace, TrimGesture, TrimPlan, Zoom, ZoomBounds,
-    append_placement, copy_clips, drop_gesture, effect_of_card, effect_requests, effect_row_for,
-    effect_target, fit_pixel_size, free_row, highest_suffix, hit_test, last_accuracy_step,
-    material_span, media_requests, minimum_pixel_size, move_requests, paste_requests, plan_move,
-    plan_move_between, title_requests, title_style, trim_gesture,
+    STICKER_LENGTH, TITLE_LENGTH, TimelineScale, TitlePlace, TrimGesture, TrimPlan, Zoom,
+    ZoomBounds, append_placement, copy_clips, drop_gesture, effect_of_card, effect_requests,
+    effect_row_for, effect_target, fit_pixel_size, free_row, highest_suffix, hit_test,
+    last_accuracy_step, material_span, media_requests, minimum_pixel_size, move_requests,
+    paste_requests, plan_move, plan_move_between, title_requests, title_style, trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
@@ -729,9 +729,6 @@ const PREROLL: Micros = Micros(1_000_000);
 /// Card ids on the sticker shelf: this prefix, then the sticker's id.
 pub const STICKER_CARD_PREFIX: &str = "sticker:";
 
-/// How long a sticker lasts when it is placed.
-const STICKER_LENGTH: Micros = Micros(3_000_000);
-
 /// The sticker shelf's `card_id`.
 fn shelf_sticker(card_id: &str) -> Result<&'static cutlass_stickers::Sticker, ShellError> {
     card_id
@@ -742,20 +739,11 @@ fn shelf_sticker(card_id: &str) -> Result<&'static cutlass_stickers::Sticker, Sh
         })
 }
 
-/// How long `sticker` lasts when it is placed: an animation plays as many
-/// whole rounds as fit in [`STICKER_LENGTH`], at least one, so its clip
-/// ends where a round ends; a still lasts [`STICKER_LENGTH`].
+/// How long `sticker` lasts when it is placed, as
+/// [`cutlass_editor::sticker_length`] says.
 pub fn sticker_length(sticker: &cutlass_stickers::Sticker) -> Micros {
-    let Some(seconds) = sticker.seconds().filter(|seconds| *seconds > 0.0) else {
-        return STICKER_LENGTH;
-    };
-    let round = (seconds * 1_000_000.0).round();
-    let rounds = (STICKER_LENGTH.0 as f64 / round).floor().max(1.0);
-    Micros((round * rounds) as i64)
+    cutlass_editor::sticker_length(sticker.seconds())
 }
-
-/// A placed sticker's size against the canvas it would fill.
-const STICKER_SCALE: f64 = 0.4;
 
 pub struct Shell {
     decoders: DecodeFactory,
@@ -3955,62 +3943,27 @@ impl Shell {
         start: Micros,
     ) -> Result<(), ShellError> {
         let project = self.path.clone().ok_or(ShellError::NoProject)?;
-        let stored = format!("Resources/{}", sticker.file_name());
-        let mut requests = Vec::new();
-        let known = self
-            .session_draft()?
-            .materials
-            .videos
-            .iter()
-            .find(|video| video.path == stored)
-            .map(|video| video.id.as_str().to_owned());
-        let material_id = match known {
-            Some(id) => id,
-            None => {
-                let file = project.join(&stored);
-                if !file.is_file() {
-                    let bytes = sticker.bytes().map_err(ShellError::Io)?;
-                    if let Some(folder) = file.parent() {
-                        std::fs::create_dir_all(folder)
-                            .map_err(|error| ShellError::Io(error.to_string()))?;
-                    }
-                    std::fs::write(&file, bytes)
-                        .map_err(|error| ShellError::Io(error.to_string()))?;
-                }
-                let material_id = self.fresh("mat");
-                let mut material = MaterialVideo::new(material_id.as_str());
-                material.kind = MetaType::Sticker.as_str().to_owned();
-                material.path = stored;
-                // A picture has no length of its own; an animation plays
-                // round for as long as its clip lasts.
-                material.duration = MaterialVideo::MAPPING_DURATION.max(length);
-                let (width, height) = sticker.size().map_err(ShellError::Io)?;
-                material.width = i32::try_from(width).unwrap_or(0);
-                material.height = i32::try_from(height).unwrap_or(0);
-                requests.push(Request::Import {
-                    medium: ImportedMedium::Video(Box::new(material)),
-                });
-                material_id
-            }
-        };
-        let new_lane = track_id.is_none().then_some(TrackType::Sticker);
-        let place = MediaPlace {
+        let stored = sticker.write_into(&project).map_err(ShellError::Io)?;
+        let (width, height) = sticker.size().map_err(ShellError::Io)?;
+        let place = cutlass_editor::StickerPlace {
+            new_lane: track_id.is_none(),
             track_id: track_id.unwrap_or_else(|| TrackId::new(self.fresh("track"))),
             segment_id: SegmentId::new(self.fresh("seg")),
-            material_id,
+            material_id: MaterialId::new(self.fresh("mat")),
             start,
-            duration: length,
-            new_lane,
+            length,
         };
-        requests.extend(media_requests(
+        let file = cutlass_editor::StickerFile {
+            stored: &stored,
+            width,
+            height,
+        };
+        let requests = cutlass_editor::sticker_requests(
             self.session_draft()?,
+            file,
             &place,
             self.linkage_enabled(),
-        ));
-        requests.push(Request::SetScale {
-            segment_id: place.segment_id.clone(),
-            scale: STICKER_SCALE,
-        });
+        );
         self.apply_requests(&requests)?;
         self.select(Some(place.segment_id));
         Ok(())

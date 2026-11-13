@@ -38,6 +38,7 @@ mod saved_look;
 mod shape_shelf;
 mod snap;
 mod stage;
+mod sticker_place;
 mod subtitles;
 mod sync;
 mod template;
@@ -120,6 +121,9 @@ pub use stage::{
     MAX_SCALE, MIN_SCALE, NoText, Pose, SCALE_REACH, SNAP_REACH, StageAlign, StageBox,
     StageGesture, StageGuides, StageStep, TURN_REACH, TextSizes, canvas_size, keyed_pose,
     stage_align, stage_box, stage_gesture, stage_pick,
+};
+pub use sticker_place::{
+    STICKER_LENGTH, STICKER_SCALE, StickerFile, StickerPlace, sticker_length, sticker_requests,
 };
 pub use subtitles::{SubtitleFormat, SubtitleMiss, subtitle_request};
 pub use sync::{SyncMiss, SyncPlan, sync_plan, sync_requests};

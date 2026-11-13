@@ -40,22 +40,34 @@ pub struct PhoneRatio {
     pub chosen: bool,
 }
 
-/// Original first, then every named shape, each sized for `draft`.
+/// Original first, then every named shape, each sized for `draft`. The
+/// chosen one is the canvas as it is: an Original canvas keeps the size it
+/// took from the first picture even after that picture is replaced or
+/// moved, and the phone draws its boxes on that canvas.
 pub fn phone_ratios(draft: &Draft) -> Vec<PhoneRatio> {
-    let chosen = draft.canvas_config.ratio.as_str();
+    let config = &draft.canvas_config;
+    let chosen = config.ratio.as_str();
     std::iter::once("original")
         .chain(CANVAS_SHAPES.iter().map(|shape| shape.ratio))
         .filter_map(|ratio| canvas_for(draft, ratio).ok())
-        .map(|shape| PhoneRatio {
-            ratio: shape.ratio.to_owned(),
-            label: if shape.ratio == "original" {
-                "Original".to_owned()
+        .map(|shape| {
+            let chosen = shape.ratio == chosen;
+            let (width, height) = if chosen && config.width > 0 && config.height > 0 {
+                (config.width, config.height)
             } else {
-                shape.ratio.to_owned()
-            },
-            width: shape.width,
-            height: shape.height,
-            chosen: shape.ratio == chosen,
+                (shape.width, shape.height)
+            };
+            PhoneRatio {
+                ratio: shape.ratio.to_owned(),
+                label: if shape.ratio == "original" {
+                    "Original".to_owned()
+                } else {
+                    shape.ratio.to_owned()
+                },
+                width,
+                height,
+                chosen,
+            }
         })
         .collect()
 }
@@ -178,12 +190,33 @@ mod tests {
         assert!(ratios[0].chosen);
         assert_eq!(ratios.iter().filter(|ratio| ratio.chosen).count(), 1);
 
+        // As choosing 9:16 stores it.
         draft.canvas_config.ratio = "9:16".to_owned();
+        draft.canvas_config.width = 1_080;
+        draft.canvas_config.height = 1_920;
         let chosen: Vec<_> = phone_ratios(&draft)
             .into_iter()
             .filter(|ratio| ratio.chosen)
             .map(|ratio| (ratio.ratio, ratio.width, ratio.height))
             .collect();
         assert_eq!(chosen, [("9:16".to_owned(), 1_080, 1_920)]);
+    }
+
+    #[test]
+    fn the_chosen_ratio_is_the_canvas_the_project_has() {
+        // An Original canvas set by a wide clip stays wide when a square
+        // picture leads later; only choosing Original again re-fits it.
+        let mut draft = Draft::empty("D");
+        draft.canvas_config.ratio = "original".to_owned();
+        draft.canvas_config.width = 1_440;
+        draft.canvas_config.height = 1_080;
+        let original = &phone_ratios(&draft)[0];
+        assert!(original.chosen);
+        assert_eq!((original.width, original.height), (1_440, 1_080));
+
+        draft.canvas_config.ratio = "9:16".to_owned();
+        let original = &phone_ratios(&draft)[0];
+        assert!(!original.chosen);
+        assert_eq!((original.width, original.height), (1_920, 1_080));
     }
 }

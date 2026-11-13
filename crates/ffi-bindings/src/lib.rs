@@ -216,6 +216,47 @@ pub fn export_sides() -> Vec<u32> {
     cutlass_ffi::PHONE_EXPORT_SIDES.to_vec()
 }
 
+/// The frame rates an export may be, beside 0 for the project's own.
+#[uniffi::export]
+#[must_use]
+pub fn export_rates() -> Vec<u32> {
+    cutlass_ffi::PHONE_EXPORT_RATES.to_vec()
+}
+
+/// How many bits a second an export's picture gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ExportQuality {
+    /// Half the recommended: a smaller file.
+    Lower,
+    /// About what the phone's camera records at that size.
+    Recommended,
+    /// Double the recommended.
+    Higher,
+}
+
+/// How an export is made: `short_side` one of [`export_sides`],
+/// `frame_rate` one of [`export_rates`] or 0 for the project's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ExportOptions {
+    pub short_side: u32,
+    pub frame_rate: u32,
+    pub quality: ExportQuality,
+}
+
+impl From<ExportOptions> for cutlass_ffi::PhoneExportOptions {
+    fn from(options: ExportOptions) -> Self {
+        Self {
+            short_side: options.short_side,
+            frame_rate: options.frame_rate,
+            quality: match options.quality {
+                ExportQuality::Lower => cutlass_ffi::PhoneQuality::Lower,
+                ExportQuality::Recommended => cutlass_ffi::PhoneQuality::Recommended,
+                ExportQuality::Higher => cutlass_ffi::PhoneQuality::Higher,
+            },
+        }
+    }
+}
+
 /// The transport clock at `time_us`: whole seconds as `MM:SS`, or
 /// `HH:MM:SS` from an hour.
 #[uniffi::export]
@@ -2044,8 +2085,27 @@ impl Editor {
         short_side: u32,
         progress: Arc<dyn ExportProgress>,
     ) -> Result<Exported, EditorError> {
+        self.export_with(
+            path,
+            ExportOptions {
+                short_side,
+                frame_rate: 0,
+                quality: ExportQuality::Recommended,
+            },
+            progress,
+        )
+    }
+
+    /// Write the whole cut to `path` as an MP4 at the size, frame rate and
+    /// quality `options` asks for. Otherwise as [`Self::export`].
+    pub fn export_with(
+        &self,
+        path: String,
+        options: ExportOptions,
+        progress: Arc<dyn ExportProgress>,
+    ) -> Result<Exported, EditorError> {
         let exported = self.run(move |host| {
-            host.export(&PathBuf::from(path), short_side, &mut |done, total| {
+            host.export_with(&PathBuf::from(path), options.into(), &mut |done, total| {
                 progress.progress(done, total)
             })
         })??;
@@ -2351,6 +2411,7 @@ mod tests {
         assert_eq!(done.width.min(done.height), 720);
         assert!(std::fs::metadata(&movie).unwrap().len() > 0);
         assert_eq!(super::export_sides(), [720, 1080, 2160]);
+        assert_eq!(super::export_rates(), [24, 25, 30, 50, 60]);
         // The editor still answers afterwards.
         assert_eq!(editor.lanes().unwrap()[0].clips.len(), 1);
     }

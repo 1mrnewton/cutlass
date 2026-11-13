@@ -57,7 +57,9 @@ pub use cutlass_store::{
 };
 pub use effect::{NEW_EFFECT_LENGTH, PhoneEffect, phone_effects};
 pub use error::FfiError;
-pub use export::{PHONE_EXPORT_SIDES, PhoneExport, encoders};
+pub use export::{
+    PHONE_EXPORT_RATES, PHONE_EXPORT_SIDES, PhoneExport, PhoneExportOptions, PhoneQuality, encoders,
+};
 pub use host::Commands;
 pub use keys::{PhoneGraph, PhoneKeys, graphs};
 pub use layer::{PhoneShape, PhoneSticker, phone_shapes, phone_stickers, sticker_poster};
@@ -664,6 +666,17 @@ impl PhoneHost {
         short_side: u32,
         progress: &mut dyn FnMut(u64, u64) -> bool,
     ) -> Result<PhoneExport, FfiError> {
+        self.export_with(destination, PhoneExportOptions::sized(short_side), progress)
+    }
+
+    /// Write the whole cut to `destination` as `options` asks: its size,
+    /// frame rate and quality. Otherwise as [`Self::export`].
+    pub fn export_with(
+        &mut self,
+        destination: &Path,
+        options: PhoneExportOptions,
+        progress: &mut dyn FnMut(u64, u64) -> bool,
+    ) -> Result<PhoneExport, FfiError> {
         self.pause();
         let draft = self.commands.draft();
         let readers = self.preview.readers().clone();
@@ -678,7 +691,7 @@ impl PhoneHost {
                 renderer: Some(renderer),
             },
             destination,
-            short_side,
+            options,
             progress,
         )
     }

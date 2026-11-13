@@ -110,7 +110,7 @@ To run it again: `cargo build --release -p media-bench`, then `python3 scripts/b
 | Parameter set ids | 16 SPS, 64 PPS | `Malformed` |
 | Workers | 16 | |
 
-Threads: several pictures decode at once, each on a thread of its own, a picture waiting only for the rows of its references that it reads; the CTB rows of a wavefront slice segment decode on threads of their own, each row two CTBs behind the one above. With four threads or more, a picture with wavefronts takes two threads and half as many pictures decode at once; otherwise every thread takes a picture. Deblocking and SAO follow reconstruction a CTB row behind on whichever thread finishes a row. A stream with tiles decodes its CTBs in tile order on one thread per picture. The output does not depend on the number of threads.
+Threads: several pictures decode at once, each on a thread of its own, a picture waiting only for the rows of its references that it reads; the CTB rows of a wavefront slice segment decode on threads of their own, each row two CTBs behind the one above. With four threads or more, a picture with wavefronts takes two threads and half as many pictures decode at once; otherwise every thread takes a picture. Each CTB row is deblocked on whichever thread finishes it, as soon as it is complete and its motion is kept, and gets SAO once the row below is deblocked. A stream with tiles decodes its CTBs in tile order on one thread per picture. The output does not depend on the number of threads.
 
 Gaps:
 

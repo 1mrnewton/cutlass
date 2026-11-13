@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+mod about;
 mod animate;
 mod cache;
 mod canvas;
@@ -30,6 +31,7 @@ mod text;
 mod timeline;
 mod transition;
 
+pub use about::{PHONE_LICENSE, PhoneNotice, notice_text, phone_notices};
 pub use animate::{PhoneAnimation, PhoneAnimationPreset, PhoneAnimations, animation_presets};
 pub use cache::ResourceCache;
 pub use canvas::{
@@ -50,7 +52,9 @@ pub use cutlass_playback::AudioHost;
 pub use cutlass_probe::{ProbeError, Probed};
 pub use cutlass_session::{Micros, SegmentId, TrackId};
 pub use cutlass_storage::Home;
-pub use cutlass_store::{ListedProject, create_project, list_projects};
+pub use cutlass_store::{
+    ListedProject, create_project, delete_project, duplicate_project, list_projects, rename_project,
+};
 pub use effect::{NEW_EFFECT_LENGTH, PhoneEffect, phone_effects};
 pub use error::FfiError;
 pub use export::{PHONE_EXPORT_SIDES, PhoneExport, encoders};

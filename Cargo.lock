@@ -2763,6 +2763,7 @@ dependencies = [
  "cutlass-hevc",
  "cutlass-isobmff",
  "cutlass-jpeg",
+ "cutlass-licenses",
  "cutlass-logger",
  "cutlass-mjpeg",
  "cutlass-model",

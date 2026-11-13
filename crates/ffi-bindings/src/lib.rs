@@ -1112,6 +1112,76 @@ pub fn create_project(root: String) -> Result<String, EditorError> {
         .map_err(|error| EditorError::from(FfiError::from(error)))
 }
 
+/// Give project `project` in the Cutlass folder at `root` the name
+/// `name`. Its folder keeps its own name. An empty name is refused.
+#[uniffi::export]
+pub fn rename_project(root: String, project: String, name: String) -> Result<(), EditorError> {
+    let home = open_home(&root)?;
+    let project = PathBuf::from(project);
+    project_in(&home, &project)?;
+    cutlass_ffi::rename_project(&project, &name)
+        .map_err(|error| EditorError::from(FfiError::from(error)))
+}
+
+/// Copy project `project` in the Cutlass folder at `root`, media and all,
+/// as "… copy", and return the copy's folder.
+#[uniffi::export]
+pub fn duplicate_project(root: String, project: String) -> Result<String, EditorError> {
+    let home = open_home(&root)?;
+    let project = PathBuf::from(project);
+    project_in(&home, &project)?;
+    cutlass_ffi::duplicate_project(&project)
+        .map(|path| path.display().to_string())
+        .map_err(|error| EditorError::from(FfiError::from(error)))
+}
+
+/// Delete project `project` in the Cutlass folder at `root` and every file
+/// in it. A folder that holds no project is refused.
+#[uniffi::export]
+pub fn delete_project(root: String, project: String) -> Result<(), EditorError> {
+    let home = open_home(&root)?;
+    let project = PathBuf::from(project);
+    project_in(&home, &project)?;
+    cutlass_ffi::delete_project(&project).map_err(|error| EditorError::from(FfiError::from(error)))
+}
+
+/// One line on the About page: a sticker set or a crate the app is built
+/// from.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Notice {
+    pub title: String,
+    pub license: String,
+    pub link: String,
+}
+
+/// Cutlass's own license, as an SPDX expression.
+#[uniffi::export]
+#[must_use]
+pub fn cutlass_license() -> String {
+    cutlass_ffi::PHONE_LICENSE.to_owned()
+}
+
+/// Every notice on the About page, sticker sets first.
+#[uniffi::export]
+#[must_use]
+pub fn notices() -> Vec<Notice> {
+    cutlass_ffi::phone_notices()
+        .into_iter()
+        .map(|notice| Notice {
+            title: notice.title,
+            license: notice.license,
+            link: notice.link,
+        })
+        .collect()
+}
+
+/// The license text of notice `index`, word for word.
+#[uniffi::export]
+#[must_use]
+pub fn notice_text(index: u32) -> String {
+    cutlass_ffi::notice_text(usize::try_from(index).unwrap_or(usize::MAX))
+}
+
 /// The app hears this device. Tests keep the software buffer, so they need
 /// no speaker.
 fn device_audio() -> cutlass_ffi::AudioHost {
@@ -1126,9 +1196,18 @@ fn open_home(root: &str) -> Result<Home, EditorError> {
     Home::open(root).map_err(|error| EditorError::from(FfiError::from(error)))
 }
 
-/// A project folder must sit directly in the root's projects folder.
+/// A project folder must sit directly in the root's projects folder,
+/// named plainly: no `.` or `..` in the path.
 fn project_in(home: &Home, project: &Path) -> Result<(), EditorError> {
-    if project.parent() == Some(home.projects().as_path()) {
+    let plain = project.components().all(|part| {
+        matches!(
+            part,
+            std::path::Component::Normal(_)
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    });
+    if plain && project.parent() == Some(home.projects().as_path()) {
         Ok(())
     } else {
         Err(EditorError::Failed {
@@ -2049,7 +2128,10 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{Editor, LaneKind, create_project, list_projects, start};
+    use super::{
+        Editor, LaneKind, create_project, delete_project, duplicate_project, list_projects,
+        rename_project, start,
+    };
 
     struct Temp(PathBuf);
 
@@ -2455,6 +2537,37 @@ mod tests {
         let editor = Editor::open(root, temp.bundle(), made).unwrap();
         assert_eq!(editor.duration_us().unwrap(), 0);
         assert!(temp.0.join("Cutlass/Cache/index.json").is_file());
+    }
+
+    #[test]
+    fn a_project_is_renamed_copied_and_deleted_only_inside_the_root() {
+        let temp = Temp::new();
+        let root = temp.root();
+        let made = create_project(root.clone()).unwrap();
+        rename_project(root.clone(), made.clone(), "Trip".to_owned()).unwrap();
+        assert!(rename_project(root.clone(), made.clone(), " ".to_owned()).is_err());
+        let copy = duplicate_project(root.clone(), made.clone()).unwrap();
+        let mut names: Vec<_> = list_projects(root.clone())
+            .into_iter()
+            .map(|project| project.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, ["Trip", "Trip copy"]);
+        delete_project(root.clone(), copy).unwrap();
+        assert_eq!(list_projects(root.clone()).len(), 1);
+        // Nothing outside the projects folder, or that climbs out of it.
+        let projects = format!("{root}/Projects");
+        for outside in [
+            root.clone(),
+            format!("{projects}/.."),
+            format!("{projects}/./x"),
+        ] {
+            assert!(
+                delete_project(root.clone(), outside.clone()).is_err(),
+                "{outside}"
+            );
+        }
+        assert!(temp.0.join("Cutlass/Projects").is_dir());
     }
 
     #[test]

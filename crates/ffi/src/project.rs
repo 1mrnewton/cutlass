@@ -94,6 +94,12 @@ impl Project {
         )
     }
 
+    /// Record the linkage switch and kinds for the next save. The other
+    /// keys of the biz config stay.
+    pub fn set_linkage(&mut self, settings: LinkageSettings) {
+        self.folder.set_linkage(settings);
+    }
+
     /// A path inside the project. Does not create files and does not read bytes.
     pub fn resolve(&self, relative: &Path) -> Result<PathBuf, FfiError> {
         if leaves_lexically(relative) {

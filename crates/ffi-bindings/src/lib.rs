@@ -238,6 +238,34 @@ pub fn effect_choices() -> Vec<EffectChoice> {
         .collect()
 }
 
+/// The filters that ship in the app, in picker order.
+#[uniffi::export]
+#[must_use]
+pub fn filter_choices() -> Vec<FilterChoice> {
+    cutlass_ffi::phone_filters()
+        .into_iter()
+        .map(|filter| FilterChoice {
+            id: filter.id,
+            name: filter.name,
+            category: filter.category,
+        })
+        .collect()
+}
+
+/// The filter `filter_id` over its own preview scene, `width` by `height`,
+/// for its picker tile. `None` for a filter the app does not ship.
+#[uniffi::export]
+#[must_use]
+pub fn filter_poster(filter_id: String, width: u32, height: u32) -> Option<Frame> {
+    let look = cutlass_ffi::bundled_look(&filter_id)?;
+    let (width, height) = (width.clamp(1, 512), height.clamp(1, 512));
+    Some(Frame {
+        width,
+        height,
+        rgba: cutlass_ffi::look_poster(look, width, height),
+    })
+}
+
 /// One step of a timeline coast: points moved, and the speed after.
 #[derive(Clone, Copy, Debug, uniffi::Record)]
 pub struct Fling {
@@ -558,6 +586,34 @@ pub struct EffectChoice {
     pub preview: String,
 }
 
+/// A filter the picker shows. `id` is what the filter calls take.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct FilterChoice {
+    pub id: String,
+    pub name: String,
+    /// The picker tab it sits under.
+    pub category: String,
+}
+
+/// One adjust slider and where it stands. `key` is what `set_adjust`
+/// takes; `min` is -1, or 0 for a slider that only adds; the top is 1.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct AdjustSlider {
+    pub key: String,
+    pub label: String,
+    pub min: f64,
+    pub value: f64,
+}
+
+/// The filter a clip keeps: its filter layer, the filter, and how strong
+/// it is, 0 to 1.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct ClipFilter {
+    pub layer_id: String,
+    pub filter_id: String,
+    pub strength: f64,
+}
+
 /// What a text clip says, the face it says it in, and how it looks.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct TextInfo {
@@ -680,6 +736,8 @@ pub enum ToolBar {
     OverlayClip,
     AudioClip,
     TextClip,
+    FilterClip,
+    AdjustClip,
     OtherClip,
     Audio,
     Text,
@@ -761,6 +819,8 @@ fn bar_in(bar: ToolBar) -> cutlass_ffi::Bar {
         ToolBar::OverlayClip => Bar::OverlayClip,
         ToolBar::AudioClip => Bar::AudioClip,
         ToolBar::TextClip => Bar::TextClip,
+        ToolBar::FilterClip => Bar::FilterClip,
+        ToolBar::AdjustClip => Bar::AdjustClip,
         ToolBar::OtherClip => Bar::OtherClip,
         ToolBar::Audio => Bar::Audio,
         ToolBar::Text => Bar::Text,
@@ -777,6 +837,8 @@ fn bar_out(bar: cutlass_ffi::Bar) -> ToolBar {
         Bar::OverlayClip => ToolBar::OverlayClip,
         Bar::AudioClip => ToolBar::AudioClip,
         Bar::TextClip => ToolBar::TextClip,
+        Bar::FilterClip => ToolBar::FilterClip,
+        Bar::AdjustClip => ToolBar::AdjustClip,
         Bar::OtherClip => ToolBar::OtherClip,
         Bar::Audio => ToolBar::Audio,
         Bar::Text => ToolBar::Text,
@@ -1040,6 +1102,89 @@ impl Editor {
         self.run(move |host| host.add_effect(&effect_id, Micros(at_us)))?
             .map(|id| id.as_str().to_owned())
             .map_err(EditorError::from)
+    }
+
+    /// Run effect `effect_id` over the picture clip `clip_id` alone, for
+    /// its span. One undo step. Returns the effect clip's id.
+    pub fn add_clip_effect(
+        &self,
+        clip_id: String,
+        effect_id: String,
+    ) -> Result<String, EditorError> {
+        self.run(move |host| host.add_clip_effect(&SegmentId::new(clip_id), &effect_id))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Give the picture clip `clip_id` the filter `filter_id`, swapping out
+    /// the one it kept, or take it off with an empty id; a filter layer
+    /// swaps in place. One undo step. Returns the new layer's id.
+    pub fn set_clip_filter(
+        &self,
+        clip_id: String,
+        filter_id: String,
+    ) -> Result<Option<String>, EditorError> {
+        self.run(move |host| host.set_clip_filter(&SegmentId::new(clip_id), &filter_id))?
+            .map(|id| id.map(|id| id.as_str().to_owned()))
+            .map_err(EditorError::from)
+    }
+
+    /// Put the filter layer `filter_id` at `at_us`, over every picture
+    /// below it. One undo step. Returns the layer's id.
+    pub fn add_filter(&self, filter_id: String, at_us: i64) -> Result<String, EditorError> {
+        self.run(move |host| host.add_filter(&filter_id, Micros(at_us)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Set how strongly a filter, effect or adjustment works, 0 to 1. One
+    /// undo step.
+    pub fn set_strength(&self, clip_id: String, value: f64) -> Result<(), EditorError> {
+        self.edit(move |host| host.set_strength(&SegmentId::new(clip_id), value))
+    }
+
+    /// Put an adjustment layer at `at_us`, its sliders at zero. One undo
+    /// step. Returns the layer's id.
+    pub fn add_adjustment(&self, at_us: i64) -> Result<String, EditorError> {
+        self.run(move |host| host.add_adjustment(Micros(at_us)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Set adjust slider `key` of a picture clip or an adjustment layer to
+    /// `value`. One undo step.
+    pub fn set_adjust(&self, clip_id: String, key: String, value: f64) -> Result<(), EditorError> {
+        self.edit(move |host| host.set_adjust(&SegmentId::new(clip_id), &key, value))
+    }
+
+    /// Every adjust slider of `clip_id`, or `None` for a clip that has
+    /// none.
+    pub fn adjust_sliders(
+        &self,
+        clip_id: String,
+    ) -> Result<Option<Vec<AdjustSlider>>, EditorError> {
+        let sliders = self.run(move |host| host.adjust_sliders(&SegmentId::new(clip_id)))?;
+        Ok(sliders.map(|sliders| {
+            sliders
+                .into_iter()
+                .map(|slider| AdjustSlider {
+                    key: slider.key,
+                    label: slider.label,
+                    min: slider.min,
+                    value: slider.value,
+                })
+                .collect()
+        }))
+    }
+
+    /// The filter `clip_id` keeps, or a filter layer's own.
+    pub fn clip_filter(&self, clip_id: String) -> Result<Option<ClipFilter>, EditorError> {
+        let kept = self.run(move |host| host.clip_filter(&SegmentId::new(clip_id)))?;
+        Ok(kept.map(|kept| ClipFilter {
+            layer_id: kept.segment_id.as_str().to_owned(),
+            filter_id: kept.filter_id,
+            strength: kept.strength,
+        }))
     }
 
     /// Bring in a subtitle file (SRT or LRC, by the extension of
@@ -1922,6 +2067,8 @@ mod tests {
             ToolBar::OverlayClip,
             ToolBar::AudioClip,
             ToolBar::TextClip,
+            ToolBar::FilterClip,
+            ToolBar::AdjustClip,
             ToolBar::OtherClip,
             ToolBar::Audio,
             ToolBar::Text,

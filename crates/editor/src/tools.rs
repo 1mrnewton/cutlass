@@ -20,7 +20,11 @@ pub enum Bar {
     AudioClip,
     /// A text clip.
     TextClip,
-    /// Any other clip: an effect, filter, adjustment or sticker.
+    /// A filter layer.
+    FilterClip,
+    /// An adjustment layer.
+    AdjustClip,
+    /// Any other clip: an effect or a sticker.
     OtherClip,
     Audio,
     Text,
@@ -116,8 +120,8 @@ const ROOT: &[Tool] = &[
     opens(T::Effects, "Effects", Bar::Effects),
     opens(T::Overlay, "Overlay", Bar::Overlay),
     later(T::Captions, "Captions"),
-    later(T::Filters, "Filters"),
-    later(T::Adjust, "Adjust"),
+    ready(T::Filters, "Filters"),
+    ready(T::Adjust, "Adjust"),
     later(T::Stickers, "Stickers"),
     ready(T::AspectRatio, "Ratio"),
     ready(T::Background, "Background"),
@@ -128,7 +132,7 @@ const MAIN_CLIP: &[Tool] = &[
     ready(T::Volume, "Volume"),
     ready(T::Speed, "Speed"),
     ready(T::Animations, "Animations"),
-    later(T::Effects, "Effects"),
+    ready(T::Effects, "Effects"),
     ready(T::Delete, "Delete"),
     ready(T::Duplicate, "Duplicate"),
     ready(T::Crop, "Crop"),
@@ -139,8 +143,8 @@ const MAIN_CLIP: &[Tool] = &[
     ready(T::Reverse, "Reverse"),
     ready(T::Freeze, "Freeze"),
     ready(T::ExtractAudio, "Extract audio"),
-    later(T::Filters, "Filters"),
-    later(T::Adjust, "Adjust"),
+    ready(T::Filters, "Filters"),
+    ready(T::Adjust, "Adjust"),
     later(T::Replace, "Replace"),
 ];
 
@@ -150,6 +154,7 @@ const OVERLAY_CLIP: &[Tool] = &[
     ready(T::Speed, "Speed"),
     ready(T::Splice, "To main"),
     ready(T::Animations, "Animations"),
+    ready(T::Effects, "Effects"),
     ready(T::Delete, "Delete"),
     ready(T::Duplicate, "Duplicate"),
     ready(T::Crop, "Crop"),
@@ -158,8 +163,8 @@ const OVERLAY_CLIP: &[Tool] = &[
     ready(T::Opacity, "Opacity"),
     ready(T::Fade, "Fade"),
     ready(T::Reverse, "Reverse"),
-    later(T::Filters, "Filters"),
-    later(T::Adjust, "Adjust"),
+    ready(T::Filters, "Filters"),
+    ready(T::Adjust, "Adjust"),
 ];
 
 const AUDIO_CLIP: &[Tool] = &[
@@ -177,6 +182,20 @@ const TEXT_CLIP: &[Tool] = &[
     ready(T::EditText, "Edit"),
     ready(T::Split, "Split"),
     ready(T::Animations, "Animations"),
+    ready(T::Delete, "Delete"),
+    ready(T::Duplicate, "Duplicate"),
+];
+
+const FILTER_CLIP: &[Tool] = &[
+    ready(T::Filters, "Filter"),
+    ready(T::Split, "Split"),
+    ready(T::Delete, "Delete"),
+    ready(T::Duplicate, "Duplicate"),
+];
+
+const ADJUST_CLIP: &[Tool] = &[
+    ready(T::Adjust, "Adjust"),
+    ready(T::Split, "Split"),
     ready(T::Delete, "Delete"),
     ready(T::Duplicate, "Duplicate"),
 ];
@@ -212,6 +231,8 @@ pub fn tools(bar: Bar) -> &'static [Tool] {
         Bar::OverlayClip => OVERLAY_CLIP,
         Bar::AudioClip => AUDIO_CLIP,
         Bar::TextClip => TEXT_CLIP,
+        Bar::FilterClip => FILTER_CLIP,
+        Bar::AdjustClip => ADJUST_CLIP,
         Bar::OtherClip => OTHER_CLIP,
         Bar::Audio => AUDIO,
         Bar::Text => TEXT,
@@ -228,6 +249,8 @@ pub fn clip_bar(kind: TrackType, main: bool) -> Bar {
         TrackType::Video => Bar::OverlayClip,
         TrackType::Audio => Bar::AudioClip,
         TrackType::Text => Bar::TextClip,
+        TrackType::Filter => Bar::FilterClip,
+        TrackType::Adjust => Bar::AdjustClip,
         _ => Bar::OtherClip,
     }
 }
@@ -238,12 +261,14 @@ mod tests {
 
     use super::*;
 
-    const BARS: [Bar; 10] = [
+    const BARS: [Bar; 12] = [
         Bar::Root,
         Bar::MainClip,
         Bar::OverlayClip,
         Bar::AudioClip,
         Bar::TextClip,
+        Bar::FilterClip,
+        Bar::AdjustClip,
         Bar::OtherClip,
         Bar::Audio,
         Bar::Text,
@@ -282,6 +307,8 @@ mod tests {
             Bar::OverlayClip,
             Bar::AudioClip,
             Bar::TextClip,
+            Bar::FilterClip,
+            Bar::AdjustClip,
             Bar::OtherClip,
         ] {
             for id in [ToolId::Split, ToolId::Delete] {
@@ -299,6 +326,8 @@ mod tests {
         assert_eq!(clip_bar(TrackType::Video, false), Bar::OverlayClip);
         assert_eq!(clip_bar(TrackType::Audio, false), Bar::AudioClip);
         assert_eq!(clip_bar(TrackType::Text, false), Bar::TextClip);
+        assert_eq!(clip_bar(TrackType::Filter, false), Bar::FilterClip);
+        assert_eq!(clip_bar(TrackType::Adjust, false), Bar::AdjustClip);
         assert_eq!(clip_bar(TrackType::Effect, false), Bar::OtherClip);
     }
 }

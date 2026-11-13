@@ -686,15 +686,21 @@ impl Picture {
         if params.iter().all(|p| p.kind == 0) {
             return;
         }
-        // May this CTB read each of its eight neighbours?
+        // May this CTB read each of its eight neighbours? Those above are
+        // read only when the band holds the CTB's first line, those below
+        // only when it holds its last (the row below may not be decoded
+        // yet otherwise).
+        let size = 1usize << log2_ctb;
+        let (cy0, cy1) = (ry * size, ((ry + 1) * size).min(self.height));
+        let reads = [from <= cy0, true, to >= cy1];
         let mut cross = [[false; 3]; 3];
         for (dy, row) in cross.iter_mut().enumerate() {
             for (dx, cell) in row.iter_mut().enumerate() {
                 let nx = rx as isize + dx as isize - 1;
                 let ny = ry as isize + dy as isize - 1;
-                if nx < 0 || ny < 0 || nx as usize >= ctb_w || ny as usize >= ctb_h {
-                    // Outside the picture: never read (both paths stop at
-                    // the picture's edges), so no restriction.
+                if !reads[dy] || nx < 0 || ny < 0 || nx as usize >= ctb_w || ny as usize >= ctb_h {
+                    // Outside the picture or the band: never read (both
+                    // paths stop at the picture's edges), so no restriction.
                     *cell = true;
                     continue;
                 }

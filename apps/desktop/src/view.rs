@@ -2115,7 +2115,7 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                 let category = view.effect_category.as_str();
                 cards.retain(|card| {
                     cutlass_editor::effect_of_card(&card.id)
-                        .and_then(|id| cutlass_effects::bundled_recipe(&id))
+                        .and_then(|id| cutlass_effects::recipe(&id))
                         .is_some_and(|recipe| recipe.category == category)
                 });
             }

@@ -695,6 +695,12 @@ pub struct TileDec<'a, P: Pixel, C: Coder = Msac<'a>> {
     /// When set, blocks are parsed but not predicted or reconstructed: what
     /// reconstruction needs is appended here for [`TileDec::replay`].
     pub rec: Option<Box<ReconLog>>,
+    /// When set, each block's loop filter info is stored here as the
+    /// block is parsed, with the levels of the frame.
+    pub lf_store: Option<(
+        &'a mut super::postfilter::FilterInfo,
+        &'a super::postfilter::LfLevels,
+    )>,
     /// The luma row `cur` starts at (its chroma planes start at the
     /// subsampled row): reconstruction can write one band of rows of a
     /// picture. 0 for a whole picture.
@@ -1640,6 +1646,19 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             });
         } else {
             self.compute_prediction()?;
+        }
+        if let Some((info, levels)) = &mut self.lf_store {
+            let b = &self.b;
+            let of = levels.info(
+                self.hdr,
+                b.ref_frame[0],
+                b.segment_id,
+                b.y_mode,
+                b.skip,
+                b.bsize,
+                self.delta_lf,
+            );
+            info.store((b.mi_row, b.mi_col), (self.fs.mi_rows, self.fs.mi_cols), of);
         }
         self.residual()?;
         self.store_mode_info_post();

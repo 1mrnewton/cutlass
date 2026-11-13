@@ -2264,6 +2264,7 @@ fn decode_tile_part<P: Pixel>(
     bufs: &mut TileBufs<P>,
     logs: Option<&Mutex<RowPools>>,
     mut feed: Option<&mut MfFeed>,
+    lf_store: Option<(&mut postfilter::FilterInfo, &postfilter::LfLevels)>,
     on_row: &mut RowHook<'_, P>,
 ) -> R<()> {
     let num_planes = seq.num_planes();
@@ -2335,6 +2336,7 @@ fn decode_tile_part<P: Pixel>(
         color_map_uv: std::mem::take(&mut bufs.color_map_uv),
         scratch: bufs.scratch.take().unwrap_or_default(),
         rec: logs.map(|l| Box::new(lock(l).logs.pop().unwrap_or_default())),
+        lf_store,
         y0: 0,
         mi_r0: 0,
         mi_fill: MiFill::OddRows,
@@ -2420,6 +2422,7 @@ fn decode_tile<P: Pixel>(
         bufs,
         logs,
         feed,
+        None,
         on_row,
     )?;
     Ok(carry.cdf)
@@ -2482,7 +2485,8 @@ fn decode_tiles<P: Pixel>(
 }
 
 /// What [`decode_tiles_by_rows`] calls after each superblock row.
-type AfterRow<'h, P> = dyn FnMut(&FrameState, &mut Picture<P>, usize, usize, bool) + 'h;
+type AfterRow<'h, P> =
+    dyn FnMut(&FrameState, &postfilter::FilterInfo, &mut Picture<P>, usize, usize, bool) + 'h;
 
 /// [`decode_tiles`] one superblock row of the frame at a time: each row
 /// of every tile of a tile row in turn, then `after_row(fs, cur, r0, r1,
@@ -2500,6 +2504,8 @@ fn decode_tiles_by_rows<P: Pixel>(
     ref_hdr: &[RefHeaderState; 8],
     cur: &mut Picture<P>,
     spares: &Mutex<Spares<P>>,
+    info: &mut postfilter::FilterInfo,
+    levels: Option<&postfilter::LfLevels>,
     after_row: &mut AfterRow<'_, P>,
 ) -> Option<R<Box<CdfContext>>> {
     let ti = &hdr.tile_info;
@@ -2547,6 +2553,7 @@ fn decode_tiles_by_rows<P: Pixel>(
                     &mut bufs,
                     None,
                     None,
+                    levels.map(|l| (&mut *info, l)),
                     &mut |_: &FrameState,
                           _: &Picture<P>,
                           _: Option<&mut ReconLog>,
@@ -2563,7 +2570,7 @@ fn decode_tiles_by_rows<P: Pixel>(
             if let Some(s) = &mut bufs.scratch {
                 s.save_edge(cur, 4 * end, 0);
             }
-            after_row(fs, cur, r, end, tr + 1 == ti.rows && end == r1);
+            after_row(fs, info, cur, r, end, tr + 1 == ti.rows && end == r1);
             r = end;
         }
         if let Some(c) = carries.into_iter().find(|c| c.tile_num == ctx) {
@@ -3095,6 +3102,7 @@ fn recon_worker<'r, P: PicturePixel>(
         color_map_uv: vec![0u8; 128 * 128],
         scratch,
         rec: None,
+        lf_store: None,
         y0: 0,
         mi_r0: 0,
         // Reconstruction reads the mode info of neighbours only.
@@ -4091,18 +4099,23 @@ fn decode_frame_sync<P: PicturePixel>(
             ref_hdr,
             &mut cur,
             spares,
-            &mut |fs: &FrameState, cur: &mut Picture<P>, a: usize, b: usize, last: bool| {
+            &mut info,
+            // Deblocking reads the blocks' levels, CDEF their skips: each
+            // block stores them as it is parsed.
+            (lf_on || cdef_on).then_some(&levels),
+            &mut |fs: &FrameState,
+                  info: &postfilter::FilterInfo,
+                  cur: &mut Picture<P>,
+                  a: usize,
+                  b: usize,
+                  last: bool| {
                 // The row's motion, before the ring reuses its mode info.
                 if let Some(rd) = data {
                     save_motion(seq, hdr, fs, rd, a, b);
                 }
-                // Deblocking reads the blocks' levels, CDEF their skips.
-                if lf_on || cdef_on {
-                    info.fill_rows(hdr, &levels, fs, a..b);
-                }
                 // Intra prediction in the row below reads this row's last
                 // lines as they were before the filters, from a copy.
-                filt.deblock(seq, hdr, fs, &info, cur, a, b, last, None);
+                filt.deblock(seq, hdr, fs, info, cur, a, b, last, None);
             },
         );
         filt.release_rows();

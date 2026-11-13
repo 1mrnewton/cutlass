@@ -12751,18 +12751,27 @@ fn deblock_whole<S: Sample>(
     let mut cb = [[None; 4]; 2];
     let mut cr = [[None; 4]; 2];
     let mut some = [false; 3];
-    for way in 0..2 {
+    // Edge 0, the macroblock's boundary: the macroblock to the left, or
+    // the one above. This picture has neither MBAFF pairs nor field
+    // macroblocks, so that is one column or one row back. The outer
+    // `None` is no macroblock there, the inner one a macroblock not decoded.
+    let neighbors = [
+        (mx > 0).then(|| index - 1),
+        (my > 0).then(|| index - pic.mb_w),
+    ]
+    .map(|near| near.map(|near| pic.mb.get(near).filter(|mb| mb.slice != u16::MAX)));
+    // When Cb and Cr have the same QP in this macroblock and those beside
+    // it, as they do unless the picture gives them different offsets,
+    // their edges are the same: Cr's are not worked out, and the two
+    // planes are filtered side by side at Cb's.
+    let even = |mb: &Mb| mb.qp_c == mb.qp_cr;
+    let twin = even(current)
+        && neighbors
+            .iter()
+            .all(|&near| near.flatten().is_none_or(even));
+    for (way, &near) in neighbors.iter().enumerate() {
         let vertical = way == 0;
-        // Edge 0, the macroblock's boundary: the macroblock to the left, or
-        // the one above. This picture has neither MBAFF pairs nor field
-        // macroblocks, so that is one column or one row back.
-        let near = if vertical {
-            (mx > 0).then(|| index - 1)
-        } else {
-            (my > 0).then(|| index - pic.mb_w)
-        };
-        if let Some(near) = near {
-            let neighbor = pic.mb.get(near).filter(|mb| mb.slice != u16::MAX);
+        if let Some(neighbor) = near {
             // A slice may ask for its boundaries with other slices to stay.
             let open = current.deblock != 2 || neighbor.is_some_and(|mb| mb.slice == current.slice);
             if open {
@@ -12789,7 +12798,7 @@ fn deblock_whole<S: Sample>(
                         recon::EdgeQp::new(qp[2], off),
                     ];
                     let slot = (&mut luma[way][0], &mut cb[way][0], &mut cr[way][0]);
-                    set_edge(slot, bs, &qp, (true, true), &mut some);
+                    set_edge(slot, bs, &qp, (true, true, twin), &mut some);
                 }
             }
         }
@@ -12816,7 +12825,7 @@ fn deblock_whole<S: Sample>(
                 ]
             });
             let slot = (&mut luma[way][edge], &mut cb[way][edge], &mut cr[way][edge]);
-            set_edge(slot, bs, qp, (luma_edge, chroma_edge), &mut some);
+            set_edge(slot, bs, qp, (luma_edge, chroma_edge, twin), &mut some);
         }
     }
     // An intra macroblock's inner edges are all strength 3, so which it has
@@ -12830,7 +12839,7 @@ fn deblock_whole<S: Sample>(
         ];
         for way in 0..2 {
             let slot = (&mut luma[way][2], &mut cb[way][2], &mut cr[way][2]);
-            set_edge(slot, [3; 4], &qp, (true, true), &mut some);
+            set_edge(slot, [3; 4], &qp, (true, true, twin), &mut some);
         }
         if !transform8 {
             let [luma_qp, ..] = qp;
@@ -12846,19 +12855,24 @@ fn deblock_whole<S: Sample>(
     let stride = pic.w;
     let chroma_stride = pic.w / 2;
     let chroma_at = my * 8 * chroma_stride + mx * 8;
+    let luma = recon::MbEdges {
+        at: my * 16 * stride + mx * 16,
+        down: stride,
+        vertical: luma[0],
+        horizontal: luma[1],
+    };
+    let cb = recon::MbEdges {
+        at: chroma_at,
+        down: chroma_stride,
+        vertical: cb[0],
+        horizontal: cb[1],
+    };
+    if twin {
+        return S::deblock_mb_twin(planes, &luma, &cb, [some[0], some[1]]);
+    }
     let all = [
-        recon::MbEdges {
-            at: my * 16 * stride + mx * 16,
-            down: stride,
-            vertical: luma[0],
-            horizontal: luma[1],
-        },
-        recon::MbEdges {
-            at: chroma_at,
-            down: chroma_stride,
-            vertical: cb[0],
-            horizontal: cb[1],
-        },
+        luma,
+        cb,
         recon::MbEdges {
             at: chroma_at,
             down: chroma_stride,
@@ -12872,10 +12886,11 @@ fn deblock_whole<S: Sample>(
 /// The filters of one edge from its strengths, in luma (when it has a luma
 /// edge there), Cb and Cr (on edges 0 and 2), at each plane's thresholds.
 /// A strength of 0 throughout leaves the edge out, as does a plane whose
-/// thresholds change no sample.
+/// thresholds change no sample. With `twin`, Cr is filtered as Cb is and
+/// its slot is left alone.
 /// Which planes, luma, Cb and Cr, have an edge set: kept as each is set,
 /// so the kernels need not look through every edge again for one.
-#[inline]
+#[inline(always)]
 fn set_edge(
     slot: (
         &mut Option<recon::EdgeFilter>,
@@ -12884,7 +12899,7 @@ fn set_edge(
     ),
     bs: [u8; 4],
     qp: &[Option<recon::EdgeQp>; 3],
-    (luma, chroma): (bool, bool),
+    (luma, chroma, twin): (bool, bool, bool),
     some: &mut [bool; 3],
 ) {
     if bs == [0; 4] {
@@ -12899,9 +12914,11 @@ fn set_edge(
     }
     if chroma {
         *for_cb = qp[1].map(|qp| qp.filter(bs, strong));
-        *for_cr = qp[2].map(|qp| qp.filter(bs, strong));
         some[1] |= qp[1].is_some();
-        some[2] |= qp[2].is_some();
+        if !twin {
+            *for_cr = qp[2].map(|qp| qp.filter(bs, strong));
+            some[2] |= qp[2].is_some();
+        }
     }
 }
 

@@ -55,6 +55,19 @@ pub fn mb(
     kernel!(mb_planes(planes, edges, some))
 }
 
+/// [`mb`] when both chroma planes are filtered at the same edges,
+/// `chroma`, as they are when Cb and Cr share their QPs: `some` is for
+/// luma and for both chroma planes. The two are filtered side by side.
+#[inline]
+pub fn mb_twin(
+    planes: (&mut [u8], &mut [u8], &mut [u8]),
+    luma: &MbEdges,
+    chroma: &MbEdges,
+    some: [bool; 2],
+) -> bool {
+    kernel!(mb_twin(planes, luma, chroma, some))
+}
+
 /// The four rows around an 8-sample chroma edge: p1, p0, then q0, q1.
 /// Chroma filters change only p0 and q0.
 pub type ChromaRows = [[u8; 8]; 4];
@@ -463,6 +476,72 @@ mod tests {
         }
         assert!(changed > 3_000, "only {changed} macroblocks were filtered");
         assert!(refused > 300, "only {refused} were refused");
+    }
+
+    #[test]
+    fn twin_chroma_planes_match_the_plain_ones() {
+        let mut rng = Lcg(13);
+        let mut changed = 0;
+        let mut refused = 0;
+        for round in 0..20_000 {
+            let spread = [0, 2, 6, 30][round % 4];
+            let down = 40 + (rng.next() % 9) as usize;
+            let base = rng.next() as u8;
+            let mut plane =
+                |len: usize| -> Vec<u8> { (0..len).map(|_| rng.sample(base, spread)).collect() };
+            // Now and then Cr is shorter than Cb and the macroblock lies
+            // past its end.
+            let short = if round % 11 == 5 {
+                down * 10
+            } else {
+                down * 44
+            };
+            let before = [plane(down * 44), plane(down * 44), plane(short)];
+            let x = [0, 2, 4, 8, 20][(rng.next() % 5) as usize];
+            let y = [0, 2, 3, 4, 16, 24][(rng.next() % 6) as usize];
+            let luma = mb_edges(&mut rng, y * down + x, down, round % 8 != 1);
+            let mut chroma = mb_edges(&mut rng, y * down + x, down, round % 16 == 0);
+            // Half the time the boundary alone, which has its own path.
+            if round % 2 == 0 {
+                chroma.vertical[1..].fill(None);
+                chroma.horizontal[1..].fill(None);
+                if x < 2 {
+                    chroma.vertical[0] = None;
+                }
+                if y < 2 {
+                    chroma.horizontal[0] = None;
+                }
+            }
+            let some = [0, 1].map(|_| !rng.next().is_multiple_of(5));
+            let [mut fast_y, mut fast_u, mut fast_v] = before.clone();
+            let done = super::mb_twin(
+                (&mut fast_y, &mut fast_u, &mut fast_v),
+                &luma,
+                &chroma,
+                some,
+            );
+            let [mut plain_y, mut plain_u, mut plain_v] = before.clone();
+            let wanted = scalar::mb_twin(
+                (&mut plain_y, &mut plain_u, &mut plain_v),
+                &luma,
+                &chroma,
+                some,
+            );
+            assert_eq!(done, wanted, "round {round}: {chroma:?}");
+            assert_eq!(
+                [&fast_y, &fast_u, &fast_v],
+                [&plain_y, &plain_u, &plain_v],
+                "round {round}: {chroma:?}"
+            );
+            if !done {
+                assert_eq!([fast_y, fast_u, fast_v], before, "round {round}");
+                refused += 1;
+            } else {
+                changed += usize::from([&fast_u, &fast_v] != [&before[1], &before[2]]);
+            }
+        }
+        assert!(changed > 5_000, "only {changed} macroblocks were filtered");
+        assert!(refused > 500, "only {refused} were refused");
     }
 
     #[test]

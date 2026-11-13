@@ -245,6 +245,22 @@ pub fn mb_planes(
         && (!some_cr || chroma_mb(cr, for_cr))
 }
 
+/// See [`crate::deblock::mb_twin`]: [`mb_planes`] with `chroma` for both
+/// chroma planes.
+pub fn mb_twin(
+    planes: (&mut [u8], &mut [u8], &mut [u8]),
+    luma: &crate::edge::MbEdges,
+    chroma: &crate::edge::MbEdges,
+    some: [bool; 2],
+) -> bool {
+    let [some_luma, some_chroma] = some;
+    mb_planes(
+        planes,
+        &[*luma, *chroma, *chroma],
+        [some_luma, some_chroma, some_chroma],
+    )
+}
+
 /// See [`crate::deblock::luma_mb`]: each edge in turn.
 pub fn luma_mb(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
     if !crate::edge::mb_fits(plane.len(), edges, 16, 4) {

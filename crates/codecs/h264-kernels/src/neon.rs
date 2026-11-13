@@ -957,6 +957,32 @@ pub(crate) fn mb_planes(
     }
 }
 
+/// See [`crate::deblock::mb_twin`]: as [`mb_planes`] with `chroma` for
+/// both chroma planes, which are filtered side by side.
+#[target_feature(enable = "neon")]
+pub(crate) fn mb_twin(
+    planes: (&mut [u8], &mut [u8], &mut [u8]),
+    luma_edges: &crate::edge::MbEdges,
+    chroma: &crate::edge::MbEdges,
+    some: [bool; 2],
+) -> bool {
+    use crate::edge::mb_fits;
+    let (luma, cb, cr) = planes;
+    let [some_luma, some_chroma] = some;
+    if (some_luma && !mb_fits(luma.len(), luma_edges, 16, 4))
+        || (some_chroma && !mb_fits(cb.len().min(cr.len()), chroma, 8, 2))
+    {
+        return false;
+    }
+    // SAFETY: each plane filtered fits its edges, as checked just above;
+    // the two chroma planes are checked at the shorter one's length.
+    #[allow(unsafe_code)]
+    unsafe {
+        (!some_luma || luma_mb_fitted(luma, luma_edges))
+            && (!some_chroma || chroma_pair_fitted(cb, cr, chroma))
+    }
+}
+
 /// [`luma_mb`] for edges 0 and 2 of each way, `[v0, v2, h0, h2]`, out of
 /// line so the boundary alone keeps a small frame.
 ///
@@ -1569,6 +1595,238 @@ fn chroma_whole(plane: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
             put(rows[2], vgetq_lane_u64::<0>(q0));
             put(rows[5], vgetq_lane_u64::<1>(p0));
             put(rows[6], vgetq_lane_u64::<1>(q0));
+        }
+    }
+    true
+}
+
+/// [`chroma_left_edge`] on the same edge of Cb at `cb` and Cr at `cr`,
+/// whose eight lines each fill one half of the vectors.
+///
+/// # Safety
+///
+/// As [`chroma_left_edge`] for each of `cb` and `cr`.
+#[inline]
+#[target_feature(enable = "neon")]
+#[allow(unsafe_code)]
+unsafe fn chroma_left_pair(cb: *mut u8, cr: *mut u8, down: usize, filter: crate::edge::Filter) {
+    // SAFETY: every line's four samples in each plane are the caller's
+    // promise.
+    unsafe {
+        let (pb, pr) = (cb.sub(2), cr.sub(2));
+        let quad = |p: *mut u8, n: usize| u64::from(p.add(n * down).cast::<u32>().read_unaligned());
+        let lines = |p: *mut u8| {
+            (
+                pair(quad(p, 0) | quad(p, 1) << 32, quad(p, 2) | quad(p, 3) << 32),
+                pair(quad(p, 4) | quad(p, 5) << 32, quad(p, 6) | quad(p, 7) << 32),
+            )
+        };
+        let (first_b, second_b) = lines(pb);
+        let (first_r, second_r) = lines(pr);
+        // Samples 0 and 2 of every line, then samples 1 and 3, in each
+        // plane; then each of the four down all eight lines, Cb in the low
+        // half and Cr in the high one.
+        let even_b = vuzp1q_u8(first_b, second_b);
+        let odd_b = vuzp2q_u8(first_b, second_b);
+        let even_r = vuzp1q_u8(first_r, second_r);
+        let odd_r = vuzp2q_u8(first_r, second_r);
+        let v = [
+            vuzp1q_u8(even_b, even_r),
+            vuzp1q_u8(odd_b, odd_r),
+            vuzp2q_u8(even_b, even_r),
+            vuzp2q_u8(odd_b, odd_r),
+        ];
+        let Some([p0, q0]) = chroma_both!(v, chroma_thresholds(Some(filter), Some(filter))) else {
+            return;
+        };
+        // p0 and q0 of each line side by side, a 16-bit lane a line.
+        let out_b = vreinterpretq_u16_u8(vzip1q_u8(p0, q0));
+        let out_r = vreinterpretq_u16_u8(vzip2q_u8(p0, q0));
+        let put = |p: *mut u8, n: usize, value: u16| {
+            p.add(1 + n * down).cast::<u16>().write_unaligned(value);
+        };
+        put(pb, 0, vgetq_lane_u16::<0>(out_b));
+        put(pb, 1, vgetq_lane_u16::<1>(out_b));
+        put(pb, 2, vgetq_lane_u16::<2>(out_b));
+        put(pb, 3, vgetq_lane_u16::<3>(out_b));
+        put(pb, 4, vgetq_lane_u16::<4>(out_b));
+        put(pb, 5, vgetq_lane_u16::<5>(out_b));
+        put(pb, 6, vgetq_lane_u16::<6>(out_b));
+        put(pb, 7, vgetq_lane_u16::<7>(out_b));
+        put(pr, 0, vgetq_lane_u16::<0>(out_r));
+        put(pr, 1, vgetq_lane_u16::<1>(out_r));
+        put(pr, 2, vgetq_lane_u16::<2>(out_r));
+        put(pr, 3, vgetq_lane_u16::<3>(out_r));
+        put(pr, 4, vgetq_lane_u16::<4>(out_r));
+        put(pr, 5, vgetq_lane_u16::<5>(out_r));
+        put(pr, 6, vgetq_lane_u16::<6>(out_r));
+        put(pr, 7, vgetq_lane_u16::<7>(out_r));
+    }
+}
+
+/// [`chroma_top_edge`] on the same edge of Cb at `cb` and Cr at `cr`,
+/// Cb's rows in the low half of the vectors and Cr's in the high one.
+///
+/// # Safety
+///
+/// As [`chroma_top_edge`] for each of `cb` and `cr`.
+#[inline]
+#[target_feature(enable = "neon")]
+#[allow(unsafe_code)]
+unsafe fn chroma_top_pair(cb: *mut u8, cr: *mut u8, down: usize, filter: crate::edge::Filter) {
+    // SAFETY: the four rows in each plane are the caller's promise.
+    unsafe {
+        let (pb, pr) = (cb.sub(2 * down), cr.sub(2 * down));
+        let row = |n: usize| vcombine_u8(vld1_u8(pb.add(n * down)), vld1_u8(pr.add(n * down)));
+        let v = [row(0), row(1), row(2), row(3)];
+        let Some([p0, q0]) = chroma_both!(v, chroma_thresholds(Some(filter), Some(filter))) else {
+            return;
+        };
+        vst1_u8(pb.add(down), vget_low_u8(p0));
+        vst1_u8(pb.add(2 * down), vget_low_u8(q0));
+        vst1_u8(pr.add(down), vget_high_u8(p0));
+        vst1_u8(pr.add(2 * down), vget_high_u8(q0));
+    }
+}
+
+/// [`chroma_mb_fitted`] on Cb and Cr at once, both filtered at `edges`.
+///
+/// # Safety
+///
+/// `mb_fits(len, edges, 8, 2)` holds for the length of each plane.
+#[inline(never)]
+#[target_feature(enable = "neon")]
+#[allow(unsafe_code)]
+unsafe fn chroma_pair_fitted(cb: &mut [u8], cr: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
+    let crate::edge::MbEdges {
+        at,
+        down,
+        vertical,
+        horizontal,
+    } = *edges;
+    let tame = |filter: &Option<crate::edge::Filter>| filter.is_none_or(|filter| filter.tame());
+    if let ([v0, None, None, None], [h0, None, None, None]) = (vertical, horizontal)
+        && tame(&v0)
+        && tame(&h0)
+    {
+        // SAFETY: as in `chroma_mb_fitted`, in each plane.
+        #[allow(unsafe_code)]
+        unsafe {
+            let (b, r) = (cb.as_mut_ptr().add(at), cr.as_mut_ptr().add(at));
+            if let Some(filter) = v0 {
+                chroma_left_pair(b, r, down, filter);
+            }
+            if let Some(filter) = h0 {
+                chroma_top_pair(b, r, down, filter);
+            }
+        }
+        return true;
+    }
+    chroma_whole_pair(cb, cr, edges)
+}
+
+/// [`chroma_whole`] on Cb and Cr at once: the edges that run down the
+/// picture are turned for both planes together, Cb's rows in the low
+/// halves and Cr's in the high ones.
+#[inline(never)]
+#[target_feature(enable = "neon")]
+fn chroma_whole_pair(cb: &mut [u8], cr: &mut [u8], edges: &crate::edge::MbEdges) -> bool {
+    let crate::edge::MbEdges {
+        at,
+        down,
+        vertical,
+        horizontal,
+    } = *edges;
+    let [v0, v1, v2, v3] = vertical;
+    let [h0, h1, h2, h3] = horizontal;
+    let fits = |filter: &Option<crate::edge::Filter>| match filter {
+        Some(filter) => filter.tame(),
+        None => true,
+    };
+    let plain = v1.is_none()
+        && v3.is_none()
+        && h1.is_none()
+        && h3.is_none()
+        && fits(&v0)
+        && fits(&v2)
+        && fits(&h0)
+        && fits(&h2);
+    let above = down
+        .checked_mul(2)
+        .and_then(|rows| at.checked_sub(rows + 2));
+    let Some(above) = above.filter(|_| plain) else {
+        return chroma_whole(cb, edges) && chroma_whole(cr, edges);
+    };
+    let (Some(window_b), Some(window_r)) = (cb.get_mut(above..), cr.get_mut(above..)) else {
+        return false;
+    };
+    let rows_b = rows!(window_b, down, 10, [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9]);
+    let rows_r = rows!(window_r, down, 10, [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9]);
+    if v0.is_some() || v2.is_some() {
+        let thresholds = chroma_thresholds(v0, v2);
+        let eight = |row: &[u8; 10]| {
+            let mut samples = [0u8; 8];
+            samples.copy_from_slice(&row[..8]);
+            u64::from_le_bytes(samples)
+        };
+        // `c[n]` holds sample `n` of Cb's eight lines in its low half and
+        // of Cr's in its high half.
+        let line = |n: usize| pair(eight(rows_b[n]), eight(rows_r[n]));
+        let c = turn!([
+            line(2),
+            line(3),
+            line(4),
+            line(5),
+            line(6),
+            line(7),
+            line(8),
+            line(9),
+        ]);
+        // Each plane's edge at 0 in the low half and the one at 4 in the
+        // high half.
+        let (p1_b, p1_r) = zip_halves(c[0], c[4]);
+        let (p0_b, p0_r) = zip_halves(c[1], c[5]);
+        let (q0_b, q0_r) = zip_halves(c[2], c[6]);
+        let (q1_b, q1_r) = zip_halves(c[3], c[7]);
+        let done_b = chroma_both!([p1_b, p0_b, q0_b, q1_b], thresholds);
+        let done_r = chroma_both!([p1_r, p0_r, q0_r, q1_r], thresholds);
+        if done_b.is_some() || done_r.is_some() {
+            let [p0_b, q0_b] = done_b.unwrap_or([p0_b, q0_b]);
+            let [p0_r, q0_r] = done_r.unwrap_or([p0_r, q0_r]);
+            let (p0_first, p0_second) = zip_halves(p0_b, p0_r);
+            let (q0_first, q0_second) = zip_halves(q0_b, q0_r);
+            let back = turn!([
+                c[0], p0_first, q0_first, c[3], c[4], p0_second, q0_second, c[7]
+            ]);
+            for (n, line) in back.into_iter().enumerate() {
+                let line = vreinterpretq_u64_u8(line);
+                rows_b[n + 2][..8].copy_from_slice(&vgetq_lane_u64::<0>(line).to_le_bytes());
+                rows_r[n + 2][..8].copy_from_slice(&vgetq_lane_u64::<1>(line).to_le_bytes());
+            }
+        }
+    }
+    if h0.is_some() || h2.is_some() {
+        let thresholds = chroma_thresholds(h0, h2);
+        let row = |row: &[u8; 10]| {
+            let mut samples = [0u8; 8];
+            samples.copy_from_slice(&row[2..]);
+            u64::from_le_bytes(samples)
+        };
+        for rows in [rows_b, rows_r] {
+            let p1 = pair(row(rows[0]), row(rows[4]));
+            let p0 = pair(row(rows[1]), row(rows[5]));
+            let q0 = pair(row(rows[2]), row(rows[6]));
+            let q1 = pair(row(rows[3]), row(rows[7]));
+            if let Some([p0, q0]) = chroma_both!([p1, p0, q0, q1], thresholds) {
+                let put = |row: &mut [u8; 10], samples: u64| {
+                    row[2..].copy_from_slice(&samples.to_le_bytes());
+                };
+                let (p0, q0) = (vreinterpretq_u64_u8(p0), vreinterpretq_u64_u8(q0));
+                put(rows[1], vgetq_lane_u64::<0>(p0));
+                put(rows[2], vgetq_lane_u64::<0>(q0));
+                put(rows[5], vgetq_lane_u64::<1>(p0));
+                put(rows[6], vgetq_lane_u64::<1>(q0));
+            }
         }
     }
     true

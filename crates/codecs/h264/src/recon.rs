@@ -412,6 +412,17 @@ pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
         false
     }
 
+    /// [`Self::deblock_mb`] with `chroma` the edges of both chroma planes,
+    /// which are filtered side by side; `some` is for luma and for both.
+    fn deblock_mb_twin(
+        _planes: (&mut [Self], &mut [Self], &mut [Self]),
+        _luma: &MbEdges,
+        _chroma: &MbEdges,
+        _some: [bool; 2],
+    ) -> bool {
+        false
+    }
+
     /// Inter prediction with a vector kernel, when this sample width has
     /// one for the block's size. `false` means nothing was done and the
     /// caller runs its own loop. `kind` picks the samples.
@@ -699,6 +710,15 @@ impl Sample for u8 {
         // A plane with no edge to filter is not visited. For the others
         // it is all of them or none, checked once for all three.
         cutlass_h264_kernels::deblock::mb(planes, edges, some)
+    }
+
+    fn deblock_mb_twin(
+        planes: (&mut [Self], &mut [Self], &mut [Self]),
+        luma: &MbEdges,
+        chroma: &MbEdges,
+        some: [bool; 2],
+    ) -> bool {
+        cutlass_h264_kernels::deblock::mb_twin(planes, luma, chroma, some)
     }
 
     fn predict_fast(

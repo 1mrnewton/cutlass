@@ -36,7 +36,6 @@ pub mod video;
 
 pub use surface::{PictureSurface, Surface};
 
-pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
     BitDepth, Channel, ChannelLayout, ChromaSamplePosition, CodecError, CodecParams, ColorMatrix,
     ColorPrimaries, ColorRange, ColorType, FrameError, ImageError, MatrixCoefficients, Packet, Pcm,
@@ -44,6 +43,7 @@ pub use cutlass_codec::access::{
     Transfer, Transparency, VideoFrame, Yuv420High, Yuv420p, Yuv420p10, Yuv422High, Yuv422p,
     Yuv444High, Yuv444p,
 };
+pub use cutlass_codec::{CodecId, nal};
 pub use orient::Orientation;
 pub use video::VideoDecodeFactory;
 

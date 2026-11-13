@@ -62,6 +62,8 @@ pub struct Clip {
     pub volume: f64,
     /// Constant speed: 2 plays twice as fast.
     pub speed: f64,
+    /// Where its beats land on the timeline, earliest first.
+    pub beats_us: Vec<i64>,
 }
 
 /// What a row holds.
@@ -80,10 +82,78 @@ pub enum LaneKind {
 /// One timeline row, top first.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct Lane {
+    pub id: String,
     pub kind: LaneKind,
     pub main: bool,
     pub locked: bool,
+    /// Its clips are not heard.
+    pub muted: bool,
     pub clips: Vec<Clip>,
+}
+
+/// How a selected clip stands, and which clip tools can change it.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct ClipState {
+    /// A picture that mirrors, turns, crops and fades out of sight.
+    pub picture: bool,
+    pub mirrored: bool,
+    /// Degrees, as stored.
+    pub rotation: f64,
+    pub can_crop: bool,
+    /// The crop ratio kept: empty for the whole frame, one of
+    /// [`crop_ratios`], or `custom`.
+    pub crop: String,
+    /// 1 solid, 0 clear.
+    pub opacity: f64,
+    /// A picture or a sound, which plays backward and fades.
+    pub plays: bool,
+    pub reversed: bool,
+    pub fade_in_us: i64,
+    pub fade_out_us: i64,
+    pub can_freeze: bool,
+    pub can_extract: bool,
+    /// Its sound was extracted to a clip of its own.
+    pub extracted: bool,
+    pub can_beat: bool,
+    /// A beat sits on the clip at the time asked about.
+    pub beat_here: bool,
+    pub on_main: bool,
+    /// A picture on another row, which can move to main.
+    pub can_splice: bool,
+}
+
+impl From<cutlass_ffi::PhoneClipState> for ClipState {
+    fn from(state: cutlass_ffi::PhoneClipState) -> Self {
+        Self {
+            picture: state.picture,
+            mirrored: state.mirrored,
+            rotation: state.rotation,
+            can_crop: state.can_crop,
+            crop: state.crop,
+            opacity: state.opacity,
+            plays: state.plays,
+            reversed: state.reversed,
+            fade_in_us: state.fade_in.0,
+            fade_out_us: state.fade_out.0,
+            can_freeze: state.can_freeze,
+            can_extract: state.can_extract,
+            extracted: state.extracted,
+            can_beat: state.can_beat,
+            beat_here: state.beat_here,
+            on_main: state.on_main,
+            can_splice: state.can_splice,
+        }
+    }
+}
+
+/// The ratios the Crop panel offers after the whole frame, as `w:h`.
+#[uniffi::export]
+#[must_use]
+pub fn crop_ratios() -> Vec<String> {
+    cutlass_ffi::CROP_RATIOS
+        .iter()
+        .map(|ratio| (*ratio).to_owned())
+        .collect()
 }
 
 /// One ruler tick. A major tick carries its label.
@@ -1019,9 +1089,11 @@ impl Editor {
         Ok(lanes
             .into_iter()
             .map(|lane| Lane {
+                id: lane.track_id.as_str().to_owned(),
                 kind: lane_kind(lane.kind),
                 main: lane.main,
                 locked: lane.locked,
+                muted: lane.muted,
                 clips: lane
                     .clips
                     .into_iter()
@@ -1032,10 +1104,121 @@ impl Editor {
                         duration_us: clip.duration.0,
                         volume: clip.volume,
                         speed: clip.speed,
+                        beats_us: clip.beats.iter().map(|beat| beat.0).collect(),
                     })
                     .collect(),
             })
             .collect())
+    }
+
+    /// How `clip_id` stands at `at_us`, for its clip tools. `None` when no
+    /// row holds it.
+    pub fn clip_state(
+        &self,
+        clip_id: String,
+        at_us: i64,
+    ) -> Result<Option<ClipState>, EditorError> {
+        let state =
+            self.run(move |host| host.clip_state(&SegmentId::new(clip_id), Micros(at_us)))?;
+        Ok(state.map(ClipState::from))
+    }
+
+    /// Flip the picture left to right, or back. One undo step.
+    pub fn toggle_mirror(&self, clip_id: String) -> Result<(), EditorError> {
+        self.edit(move |host| host.toggle_mirror(&SegmentId::new(clip_id)))
+    }
+
+    /// Turn the picture a quarter turn clockwise. One undo step.
+    pub fn turn(&self, clip_id: String) -> Result<(), EditorError> {
+        self.edit(move |host| host.turn(&SegmentId::new(clip_id)))
+    }
+
+    /// Play the clip backward, or forward again. One undo step.
+    pub fn toggle_reverse(&self, clip_id: String) -> Result<(), EditorError> {
+        self.edit(move |host| host.toggle_reverse(&SegmentId::new(clip_id)))
+    }
+
+    /// Crop the video to its middle at `ratio`, or show the whole frame
+    /// for an empty ratio. One undo step.
+    pub fn set_crop(&self, clip_id: String, ratio: String) -> Result<(), EditorError> {
+        self.edit(move |host| host.set_crop(&SegmentId::new(clip_id), &ratio))
+    }
+
+    /// Make the picture `opacity` solid, 0 to 1. One undo step.
+    pub fn set_opacity(&self, clip_id: String, opacity: f64) -> Result<(), EditorError> {
+        self.edit(move |host| host.set_opacity(&SegmentId::new(clip_id), opacity))
+    }
+
+    /// Fade the clip in and out over these lengths. One undo step.
+    pub fn set_fade(
+        &self,
+        clip_id: String,
+        fade_in_us: i64,
+        fade_out_us: i64,
+    ) -> Result<(), EditorError> {
+        self.edit(move |host| {
+            host.set_fade(
+                &SegmentId::new(clip_id),
+                Micros(fade_in_us),
+                Micros(fade_out_us),
+            )
+        })
+    }
+
+    /// Put a copy of the clip right after it. Returns the copy.
+    pub fn duplicate(&self, clip_id: String) -> Result<String, EditorError> {
+        self.run(move |host| host.duplicate(&SegmentId::new(clip_id)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Hold the video's frame at `at_us` as a still there. Returns the still.
+    pub fn freeze(&self, clip_id: String, at_us: i64) -> Result<String, EditorError> {
+        self.run(move |host| host.freeze(&SegmentId::new(clip_id), Micros(at_us)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Put the video's sound on a clip of its own. One undo step.
+    pub fn extract_audio(&self, clip_id: String) -> Result<(), EditorError> {
+        self.edit(move |host| host.extract_audio(&SegmentId::new(clip_id)))
+    }
+
+    /// Give the video its own sound back. One undo step.
+    pub fn recover_audio(&self, clip_id: String) -> Result<(), EditorError> {
+        self.edit(move |host| host.recover_audio(&SegmentId::new(clip_id)))
+    }
+
+    /// Mark a beat at `at_us` on a sound clip, or take that beat off.
+    pub fn toggle_beat(&self, clip_id: String, at_us: i64) -> Result<(), EditorError> {
+        self.edit(move |host| host.toggle_beat(&SegmentId::new(clip_id), Micros(at_us)))
+    }
+
+    /// Move a picture from another row onto main. One undo step.
+    pub fn to_main(&self, clip_id: String) -> Result<(), EditorError> {
+        self.edit(move |host| host.to_main(&SegmentId::new(clip_id)))
+    }
+
+    /// Put a library picture at `at_us` on a row above main. Returns the clip.
+    pub fn add_overlay(&self, material_id: String, at_us: i64) -> Result<String, EditorError> {
+        self.run(move |host| host.add_overlay(&material_id, Micros(at_us)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Whether clips on other rows go with the main clip they sit on.
+    pub fn linkage_enabled(&self) -> Result<bool, EditorError> {
+        self.run(|host| host.linkage_enabled())
+    }
+
+    /// Turn linkage on or off. Not an undo step; kept with the project.
+    pub fn set_linkage_enabled(&self, on: bool) -> Result<(), EditorError> {
+        self.edit(move |host| host.set_linkage_enabled(on))
+    }
+
+    /// Mute or unmute a row. One undo step.
+    pub fn set_row_muted(&self, row_id: String, muted: bool) -> Result<(), EditorError> {
+        self.edit(move |host| host.set_row_muted(&cutlass_ffi::TrackId::new(row_id), muted))
     }
 
     /// The tool bar for `clip_id` while it is selected, or `None` for an id
@@ -1416,6 +1599,14 @@ impl Editor {
 }
 
 impl Editor {
+    /// Run an edit on the host's thread and turn its failure into a message.
+    fn edit(
+        &self,
+        job: impl FnOnce(&mut PhoneHost) -> Result<(), FfiError> + Send + 'static,
+    ) -> Result<(), EditorError> {
+        self.run(job)?.map_err(EditorError::from)
+    }
+
     /// Run `job` on the host's thread and wait for its answer.
     fn run<T: Send + 'static>(
         &self,
@@ -1527,6 +1718,49 @@ mod tests {
         let super::EditorError::Failed { message } =
             editor.move_clip(first, 9, 0, 0, 0).unwrap_err();
         assert!(!message.is_empty());
+    }
+
+    #[test]
+    fn the_clip_tools_cross_the_boundary_and_show_in_the_clip_state() {
+        let temp = Temp::new();
+        let editor = temp.open();
+        let material = editor.import(pattern()).unwrap();
+        let clip = editor.append(material.clone()).unwrap();
+        let state = editor.clip_state(clip.clone(), 0).unwrap().unwrap();
+        assert!(state.picture && state.on_main && !state.mirrored);
+        editor.toggle_mirror(clip.clone()).unwrap();
+        editor.turn(clip.clone()).unwrap();
+        editor.set_crop(clip.clone(), "1:1".to_owned()).unwrap();
+        editor.set_opacity(clip.clone(), 0.5).unwrap();
+        let state = editor.clip_state(clip.clone(), 0).unwrap().unwrap();
+        assert!(state.mirrored);
+        assert_eq!((state.rotation, state.crop.as_str()), (270.0, "1:1"));
+        assert_eq!(state.opacity, 0.5);
+        assert!(super::crop_ratios().contains(&"1:1".to_owned()));
+
+        let copy = editor.duplicate(clip.clone()).unwrap();
+        assert_eq!(editor.lanes().unwrap()[0].clips[1].id, copy);
+        let over = editor.add_overlay(material, 0).unwrap();
+        let lanes = editor.lanes().unwrap();
+        assert_eq!(lanes[0].clips[0].id, over);
+        let main = lanes.iter().find(|lane| lane.main).unwrap().id.clone();
+        editor.set_row_muted(main, true).unwrap();
+        assert!(
+            editor
+                .lanes()
+                .unwrap()
+                .iter()
+                .any(|lane| lane.main && lane.muted)
+        );
+        editor.set_linkage_enabled(true).unwrap();
+        assert!(editor.linkage_enabled().unwrap());
+        assert!(
+            editor
+                .clip_state("nothing".to_owned(), 0)
+                .unwrap()
+                .is_none()
+        );
+        assert!(editor.toggle_beat(clip, 0).is_err());
     }
 
     #[test]

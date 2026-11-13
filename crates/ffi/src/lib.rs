@@ -44,7 +44,7 @@ pub use cutlass_logger::InitError as LogError;
 pub use cutlass_model::TrackType;
 pub use cutlass_playback::AudioHost;
 pub use cutlass_probe::{ProbeError, Probed};
-pub use cutlass_session::{Micros, SegmentId};
+pub use cutlass_session::{Micros, SegmentId, TrackId};
 pub use cutlass_storage::Home;
 pub use cutlass_store::{ListedProject, create_project, list_projects};
 pub use effect::{NEW_EFFECT_LENGTH, PhoneEffect, phone_effects};
@@ -1287,10 +1287,7 @@ impl PhoneHost {
         let mut ids = cutlass_editor::FreshIds::new(self.draft(), 0);
         let (track_id, new_lane) = match clip::overlay_row(self.draft(), at, duration) {
             Some(track_id) => (track_id, None),
-            None => (
-                cutlass_session::TrackId::new(ids.make("track")),
-                Some(TrackType::Video),
-            ),
+            None => (TrackId::new(ids.make("track")), Some(TrackType::Video)),
         };
         let place = cutlass_editor::MediaPlace {
             track_id,
@@ -1322,11 +1319,7 @@ impl PhoneHost {
     }
 
     /// Mute or unmute every clip on a row, as one undo step.
-    pub fn set_row_muted(
-        &mut self,
-        track_id: &cutlass_session::TrackId,
-        on: bool,
-    ) -> Result<(), FfiError> {
+    pub fn set_row_muted(&mut self, track_id: &TrackId, on: bool) -> Result<(), FfiError> {
         self.apply(
             self.revision(),
             &[Request::SetTrackAttribute {

@@ -60,6 +60,11 @@ impl Spares {
 }
 
 /// A decoded picture, or one still being decoded, as references see it.
+///
+/// What the decoding thread writes as the picture goes (the lock and
+/// signals, the outcome) lies in other cache lines than what the threads
+/// that reference the picture read for every block.
+#[repr(C)]
 pub struct Frame {
     pub poc: i32,
     pub width: usize,
@@ -68,6 +73,8 @@ pub struct Frame {
     pub rows: AnyRows,
     /// Motion of each 16×16 block (clause 8.5.3.2.8), published in luma rows.
     pub col: Arc<SharedRows<ColMv>>,
+    spares: Option<Arc<Spares>>,
+    _apart: [Apart; 0],
     gate: Mutex<()>,
     moved: Condvar,
     /// The job stopped without publishing: waiters take what is there.
@@ -76,8 +83,11 @@ pub struct Frame {
     released: AtomicBool,
     done: Mutex<Option<Done>>,
     finished: Condvar,
-    spares: Option<Arc<Spares>>,
 }
+
+/// Starts a new pair of cache lines in a `#[repr(C)]` struct.
+#[repr(align(128))]
+struct Apart;
 
 impl Frame {
     /// A frame to be decoded: no row published yet. Returns the frame
@@ -101,6 +111,7 @@ impl Frame {
             height,
             rows: wrap(writer.shared().clone()),
             col: col.shared().clone(),
+            _apart: [],
             gate: Mutex::new(()),
             moved: Condvar::new(),
             abandoned: AtomicBool::new(false),
@@ -144,6 +155,7 @@ impl Frame {
             height,
             rows,
             col: col.shared().clone(),
+            _apart: [],
             gate: Mutex::new(()),
             moved: Condvar::new(),
             abandoned: AtomicBool::new(false),

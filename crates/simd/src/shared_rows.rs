@@ -22,14 +22,23 @@ pub type PlaneBuf<P> = Box<[UnsafeCell<P>]>;
 
 /// Rows of up to three planes, published in luma rows; a plane's rows are
 /// the luma rows shifted down by its vertical subsampling.
+///
+/// The count of published rows, which the writer stores as it goes, lies
+/// in other cache lines than the rest, which every reader reads.
+#[repr(C)]
 pub struct SharedRows<P> {
     planes: [PlaneBuf<P>; 3],
     widths: [usize; 3],
     heights: [usize; 3],
     shifts: [u32; 3],
+    _apart: [Apart; 0],
     /// Luma rows `0..published` are final (`usize::MAX`: all).
     published: AtomicUsize,
 }
+
+/// Starts a new pair of cache lines in a `#[repr(C)]` struct.
+#[repr(align(128))]
+struct Apart;
 
 // SAFETY: a `SharedRows` is only written through its one `RowsWriter`, and
 // only in rows no reader can see yet (see the module docs); readers only
@@ -114,6 +123,7 @@ impl<P> SharedRows<P> {
             widths: [0; 3],
             heights: [0; 3],
             shifts: [0; 3],
+            _apart: [],
             published: AtomicUsize::new(usize::MAX),
         }
     }
@@ -197,6 +207,7 @@ impl<P: Copy + Default> RowsWriter<P> {
                 widths,
                 heights,
                 shifts,
+                _apart: [],
                 published: AtomicUsize::new(0),
             }),
             done: 0,

@@ -329,8 +329,10 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             let avail = (lim + 1 - y).min(nl);
             let col = &buf[ry * stride + x - 1..];
             let dst = &mut left[EDGE_OFF..];
-            for (d, s) in dst[..avail].iter_mut().zip(col.iter().step_by(stride)) {
-                *d = *s;
+            // A row at a time: `step_by` kept a count and a bounds
+            // check on each step.
+            for (d, row) in dst[..avail].iter_mut().zip(col.chunks(stride)) {
+                *d = row[0];
             }
             let last = dst[avail - 1];
             fill16(&mut dst[avail..], nl - avail, last);

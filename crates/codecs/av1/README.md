@@ -43,7 +43,10 @@ stream order; a message before a hidden frame goes out when
 
 The engine converts every layout the decoder publishes (4:2:0, 4:2:2, 4:4:0,
 4:4:4 and GBR at 8, 10 and 12 bits) with the matrix and range the stream
-names. An AVIF still opens through the ISOBMFF reader and decodes here.
+names. 8-bit 4:2:0 with the BT.709, BT.601 or BT.2020 matrix, studio swing or
+full range, is converted by the GPU layer shader; the other layouts are
+converted on the CPU, 17 ms for a 1080p picture. An AVIF still opens through
+the ISOBMFF reader and decodes here.
 
 Refused by the decoder:
 

@@ -6,6 +6,8 @@
 //!
 //! [`recipe`] holds effects as data: passes over blocks the GPU runs, with
 //! values that move over time. Ten recipes ship in the app.
+//! [`studio`] reads the studio folder, where the desktop's effect studio
+//! saves the recipes being made, and runs them beside the bundled ones.
 //!
 //! There is no script host and no shader dialect. A checksum proves that
 //! published bytes arrived intact. It does not authorize running those bytes.

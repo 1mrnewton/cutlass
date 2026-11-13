@@ -4,7 +4,17 @@ use crate::shell::Shell;
 use crate::tokens;
 use crate::view::{ViewState, show};
 
+/// Open the window on the projects, or on what the command line names.
 pub fn run() -> eframe::Result {
+    run_on(false)
+}
+
+/// Open the window on the effect studio, as `cutlass studio` does.
+pub fn run_studio() -> eframe::Result {
+    run_on(true)
+}
+
+fn run_on(studio: bool) -> eframe::Result {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Cutlass")
         .with_inner_size([1280.0, 800.0])
@@ -39,7 +49,7 @@ pub fn run() -> eframe::Result {
             viewport,
             ..Default::default()
         },
-        Box::new(|creation| {
+        Box::new(move |creation| {
             let file = Shell::settings_path();
             let loaded = crate::load_settings_file(&file);
             let (decoders, encoders) = crate::register_codecs_with(&loaded.settings.hardware);
@@ -51,8 +61,10 @@ pub fn run() -> eframe::Result {
             shell.check_updates_at_launch();
             // A project folder or files named on the command line, as a
             // file association passes them.
+            // After `cutlass studio` there are none: its one word is the
+            // command, not a file.
             let named: Vec<std::path::PathBuf> = std::env::args_os()
-                .skip(1)
+                .skip(if studio { 2 } else { 1 })
                 .map(std::path::PathBuf::from)
                 .collect();
             if let Err(error) = shell.drop_files(&named) {
@@ -74,9 +86,11 @@ pub fn run() -> eframe::Result {
                 let ctx = creation.egui_ctx.clone();
                 cutlass_platform_apple::wake_on_opened_files(move || ctx.request_repaint());
             }
+            let mut view = ViewState::new();
+            view.studio.open = studio;
             Ok(Box::new(DesktopWindow {
                 shell,
-                view: ViewState::new(),
+                view,
                 last_time: None,
                 #[cfg(target_os = "macos")]
                 menu_bar: None,

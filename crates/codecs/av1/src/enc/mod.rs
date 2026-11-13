@@ -5,6 +5,7 @@ pub mod cdef_search;
 pub mod encoder;
 pub mod fwd_txfm;
 pub mod gm;
+pub mod level;
 pub mod lr_search;
 pub mod me;
 pub mod mode_cost;

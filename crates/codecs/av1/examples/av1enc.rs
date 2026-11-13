@@ -143,6 +143,7 @@ fn main() -> Result<(), String> {
     cfg.sub_x = y.sub_x;
     cfg.sub_y = y.sub_y;
     cfg.mono = y.mono;
+    cfg.fps = y.fps;
     if let Some(q) = arg(&args, "--q") {
         cfg.rc = RateControl::Qindex(q.parse().map_err(|_| "q")?);
     }

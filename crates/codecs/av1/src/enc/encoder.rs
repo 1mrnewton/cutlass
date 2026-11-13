@@ -115,6 +115,9 @@ pub struct EncConfig {
     /// 0 is slowest and best, 10 fastest.
     pub speed: u8,
     pub rc: RateControl,
+    /// Pictures per second, for the level the sequence header names. A
+    /// bitrate target carries its own rate, which is used instead.
+    pub fps: f64,
     /// Distance between key frames.
     pub keyint: u32,
     /// Mini-GOP length: frames coded as a hierarchical pyramid behind a
@@ -151,6 +154,7 @@ impl EncConfig {
             mono: false,
             speed: 6,
             rc: RateControl::Qindex(120),
+            fps: 30.0,
             keyint: 120,
             gop: 8,
             adaptive_gop: true,
@@ -330,13 +334,9 @@ impl Av1Enc {
         } else {
             (cfg.sub_x, cfg.sub_y)
         };
-        let seq = SequenceHeader {
+        let mut seq = SequenceHeader {
             profile,
-            operating_points: vec![OperatingPoint {
-                idc: 0,
-                seq_level_idx: 31,
-                ..OperatingPoint::default()
-            }],
+            operating_points: vec![OperatingPoint::default()],
             frame_width_bits: bits_for(cfg.width),
             frame_height_bits: bits_for(cfg.height),
             max_frame_width: cfg.width as u32,
@@ -381,6 +381,29 @@ impl Av1Enc {
             }
             cfg.tile_rows_log2 = r;
             auto_tiles = l + r > 0 && !seq.use_128x128_superblock;
+        }
+        // The level the stream fits, now that its tiles are known. A hidden
+        // alt-ref that is filtered is decoded besides the pictures shown.
+        let (fps, bitrate) = match cfg.rc {
+            RateControl::Qindex(_) => (cfg.fps, None),
+            RateControl::Bitrate { bps, fps } => (fps, Some(bps)),
+        };
+        let fps = if fps > 0.0 { fps } else { 30.0 };
+        let gop = f64::from(cfg.gop.max(1));
+        let hidden = if cfg.gop > 1 { (gop + 1.0) / gop } else { 1.0 };
+        let (level, tier) = super::level::pick(&super::level::Stream {
+            width: cfg.width,
+            height: cfg.height,
+            shown_per_second: fps,
+            decoded_per_second: fps * hidden,
+            bitrate,
+            profile,
+            tiles: 1usize << (cfg.tile_cols_log2 + cfg.tile_rows_log2),
+            tile_cols: 1usize << cfg.tile_cols_log2,
+        });
+        if let Some(op) = seq.operating_points.first_mut() {
+            op.seq_level_idx = level;
+            op.seq_tier = tier;
         }
         let threads = cfg.threads.max(1);
         let q0 = match cfg.rc {
@@ -2073,6 +2096,54 @@ mod tests {
             assert_eq!(dec.decode(&u.data).expect("decode").len(), 1);
         }
         units.iter().filter(|u| u.key).map(|u| u.display).collect()
+    }
+
+    /// The level and tier a decoder reads from the sequence header.
+    fn level_of(cfg: EncConfig) -> (u8, u8) {
+        let enc = Av1Enc::new(cfg).expect("encoder");
+        let bytes = crate::enc::obu_write::write_sequence_header(enc.sequence_header());
+        let seq = crate::dec::obu::parse_sequence_header(&bytes).expect("sequence header");
+        let op = &seq.operating_points[0];
+        // The av1C record repeats them.
+        let record = enc.config_record();
+        assert_eq!(record[1] & 31, op.seq_level_idx);
+        assert_eq!(record[2] >> 7, op.seq_tier);
+        (op.seq_level_idx, op.seq_tier)
+    }
+
+    #[test]
+    fn the_sequence_header_names_the_level_the_stream_fits() {
+        let mut small = EncConfig::new(320, 192);
+        small.gop = 1;
+        assert_eq!(level_of(small), (0, 0));
+        // 1080p: level 4.0 at 30 pictures a second, 4.1 at 60.
+        let mut hd = EncConfig::new(1920, 1080);
+        assert_eq!(level_of(hd.clone()), (8, 0));
+        hd.fps = 60.0;
+        assert_eq!(level_of(hd.clone()), (9, 0));
+        // A bitrate target carries the rate, and picks the tier.
+        hd.rc = RateControl::Bitrate {
+            bps: 16_000_000,
+            fps: 30.0,
+        };
+        assert_eq!(level_of(hd.clone()), (8, 1));
+        hd.rc = RateControl::Bitrate {
+            bps: 4_000_000,
+            fps: 30.0,
+        };
+        assert_eq!(level_of(hd.clone()), (8, 0));
+        // Tile columns past a level's count raise it.
+        hd.tile_cols_log2 = 4;
+        assert_eq!(level_of(hd), (16, 0));
+        // 4:4:4 is profile 1, which doubles the bitrate of a tier.
+        let mut wide = EncConfig::new(640, 360);
+        wide.sub_x = false;
+        wide.sub_y = false;
+        wide.rc = RateControl::Bitrate {
+            bps: 5_000_000,
+            fps: 30.0,
+        };
+        assert_eq!(level_of(wide), (1, 0));
     }
 
     #[test]

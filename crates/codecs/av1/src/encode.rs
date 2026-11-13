@@ -196,12 +196,13 @@ impl Av1Encoder {
             cfg.transfer = self.color.transfer;
             cfg.matrix = self.color.matrix;
             cfg.full_range = self.color.full_range;
+            let fps = if duration > 0 && timescale > 0 {
+                f64::from(timescale) / duration as f64
+            } else {
+                30.0
+            };
+            cfg.fps = fps;
             cfg.rc = if self.bitrate > 0 {
-                let fps = if duration > 0 && timescale > 0 {
-                    f64::from(timescale) / duration as f64
-                } else {
-                    30.0
-                };
                 RateControl::Bitrate {
                     bps: u64::from(self.bitrate),
                     fps,
@@ -468,6 +469,8 @@ mod tests {
         assert_eq!(obus[0].payload, stream_header.payload);
         let seq = parse_sequence_header(obus[0].payload).expect("sequence header");
         assert_eq!(record[1] & 31, seq.operating_points[0].seq_level_idx);
+        // 64x48 at 30 pictures a second is level 2.0, index 0.
+        assert_eq!(record[1] & 31, 0);
 
         // A decoder opened with the record decodes the stream.
         let mut with_record = params.clone();

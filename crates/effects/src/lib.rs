@@ -32,6 +32,7 @@ pub mod recipe;
 pub mod relight;
 pub mod selection;
 pub mod source;
+pub mod studio;
 pub mod transitions;
 
 pub use adjust::{
@@ -93,6 +94,12 @@ pub use selection::{
 pub use source::{
     AnimSpan, EffectSource, PACKAGE_UNIFORM_BYTES, PACKAGE_WGSL, PackagePaint, PackagePass,
     Progress, progress, segment_pass,
+};
+pub use studio::{
+    Loaded, MAX_STUDIO_FILES, Refused, STUDIO_EFFECTS, STUDIO_TRANSITIONS, StudioError,
+    clear_studio, is_studio_recipe, is_studio_transition, load_studio, recipe, recipes,
+    remove_studio_recipe, remove_studio_transition, studio_generation, studio_recipes,
+    studio_stamp, studio_transitions, write_studio_recipe, write_studio_transition,
 };
 pub use transitions::{
     BUILT_IN_PREFIX, TRANSITION_WGSL, TransitionKind, blur_radius as transition_blur_radius,

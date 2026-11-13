@@ -568,11 +568,11 @@ impl Picture {
         let above = r.checked_sub(1).map(|a| lock(&work.rows[a]));
         let band = lock(&work.rows[r]);
         let below = (r + 1 < rows).then(|| lock(&work.rows[r + 1]));
-        for (c, d) in dst.iter_mut().enumerate() {
-            let n = d.len().min(band[c].len());
-            d[..n].copy_from_slice(&band[c][..n]);
-        }
         if !self.sao_on() {
+            for (c, d) in dst.iter_mut().enumerate() {
+                let n = d.len().min(band[c].len());
+                d[..n].copy_from_slice(&band[c][..n]);
+            }
             return;
         }
         let top = r << work.log2_ctb;
@@ -604,6 +604,31 @@ impl Picture {
             }
         };
         let ctb_w = self.layout.ctb_width as usize;
+        // The samples of CTBs without SAO in a component are copied, in
+        // runs of such CTBs; every other CTB writes all of its samples.
+        let log2_ctb = work.log2_ctb;
+        for (c, d) in dst.iter_mut().enumerate() {
+            let sub = u32::from(c > 0);
+            let pw = self.width >> sub;
+            let size = 1usize << (log2_ctb - sub);
+            let lines = held[c].min(d.len() / pw.max(1));
+            let mut rx = 0;
+            while rx < ctb_w {
+                if self.sao.get(r * ctb_w + rx)[c].kind != 0 {
+                    rx += 1;
+                    continue;
+                }
+                let start = rx;
+                while rx < ctb_w && self.sao.get(r * ctb_w + rx)[c].kind == 0 {
+                    rx += 1;
+                }
+                let (x0, x1) = (start * size, (rx * size).min(pw));
+                for y in 0..lines {
+                    let at = y * pw;
+                    d[at + x0..at + x1].copy_from_slice(&band[c][at + x0..at + x1]);
+                }
+            }
+        }
         for rx in 0..ctb_w {
             self.sao_ctb(r * ctb_w + rx, &line, &mut dst);
         }
@@ -666,6 +691,15 @@ impl Picture {
                 top: y0,
             };
             let out = &mut *dst[c];
+            // Copy the region first unless the path taken writes every
+            // sample of it.
+            let edge_fast = p.kind == 2 && !keep_possible && cross.iter().flatten().all(|&ok| ok);
+            if (p.kind == 1 && keep_possible) || (p.kind == 2 && !edge_fast) {
+                for y in y0..y1 {
+                    let at = (y - y0) * pw;
+                    out[at + x0..at + x1].copy_from_slice(&line(c, y)[x0..x1]);
+                }
+            }
             if p.kind == 1 {
                 let mut table = [0i32; 32];
                 for k in 0..4 {
@@ -701,13 +735,18 @@ impl Picture {
                     _ => (1, -1, -1, 1),
                 };
                 let offsets = p.offsets;
-                if !keep_possible && cross.iter().flatten().all(|&ok| ok) {
+                if edge_fast {
                     // Every neighbour may be read: only the picture
-                    // edges limit the samples that change.
+                    // edges limit the samples that change, and those
+                    // edge samples are copied.
                     let left = usize::from(x0 == 0 && (ax < 0 || bx < 0));
                     let right = usize::from(x1 == pw && (ax > 0 || bx > 0));
                     let top = usize::from(y0 == 0 && (ay < 0 || by < 0));
                     let bottom = usize::from(y1 == ph && (ay > 0 || by > 0));
+                    for y in (y0..y0 + top).chain(y1 - bottom..y1) {
+                        let at = (y - y0) * pw;
+                        out[at + x0..at + x1].copy_from_slice(&line(c, y)[x0..x1]);
+                    }
                     let add = [
                         i32::from(offsets[0]),
                         i32::from(offsets[1]),
@@ -721,6 +760,8 @@ impl Picture {
                         let lb = line(c, y.wrapping_add_signed(by));
                         let o = &mut out[(y - y0) * pw..(y - y0 + 1) * pw];
                         let (xa, xb) = (x0 + left, x1 - right);
+                        o[x0..xa].copy_from_slice(&lv[x0..xa]);
+                        o[xb..x1].copy_from_slice(&lv[xb..x1]);
                         if let (Some(d), Some(v), Some(a), Some(b)) = (
                             P::bytes_mut(&mut o[xa..xb]),
                             P::bytes(&lv[xa..xb]),
@@ -735,10 +776,7 @@ impl Picture {
                             let a = la[x.wrapping_add_signed(ax)].i();
                             let b = lb[x.wrapping_add_signed(bx)].i();
                             let edge = (2 + (v - a).signum() + (v - b).signum()) as usize;
-                            let delta = add[edge];
-                            if delta != 0 {
-                                o[x] = P::of((v + delta).clamp(0, max));
-                            }
+                            o[x] = P::of((v + add[edge]).clamp(0, max));
                         }
                     }
                     continue;

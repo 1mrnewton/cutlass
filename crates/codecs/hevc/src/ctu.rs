@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use cutlass_decode::CodecError;
 
-use crate::cabac::{self, Cabac};
+use crate::cabac::{self, Cabac, Engine};
 use crate::intra::{self, Refs};
 use cutlass_pool::Rows;
 
@@ -1271,11 +1271,15 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
     /// rectangle of the coefficients of the block under way.
     fn residual(&mut self, x0: usize, y0: usize, log2: u32, c: usize) -> Result<(), CodecError> {
         let n = 1usize << log2;
+        // The engine in a local for the whole block: its fields stay in
+        // registers.
+        let mut e = self.cabac.e;
         let mut transform_skip = false;
         if self.pps.transform_skip && !self.cu.bypass && log2 == 2 {
-            transform_skip = self
-                .cabac
-                .decide(cabac::TRANSFORM_SKIP + usize::from(c > 0));
+            transform_skip = e.decide(
+                &mut self.cabac.ctx,
+                cabac::TRANSFORM_SKIP + usize::from(c > 0),
+            );
         }
         // last_sig_coeff prefixes.
         let (offset, shift) = if c == 0 {
@@ -1289,30 +1293,32 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let max = (log2 as usize) * 2 - 1;
         let mut prefix_x = 0;
         while prefix_x < max
-            && self
-                .cabac
-                .decide(cabac::LAST_X + offset + (prefix_x >> shift))
+            && e.decide(
+                &mut self.cabac.ctx,
+                cabac::LAST_X + offset + (prefix_x >> shift),
+            )
         {
             prefix_x += 1;
         }
         let mut prefix_y = 0;
         while prefix_y < max
-            && self
-                .cabac
-                .decide(cabac::LAST_Y + offset + (prefix_y >> shift))
+            && e.decide(
+                &mut self.cabac.ctx,
+                cabac::LAST_Y + offset + (prefix_y >> shift),
+            )
         {
             prefix_y += 1;
         }
         let mut last_x = prefix_x;
         if prefix_x > 3 {
             let bits = (prefix_x >> 1) - 1;
-            let suffix = self.cabac.bypass_bits(bits as u32) as usize;
+            let suffix = e.bypass_bits(bits as u32) as usize;
             last_x = (1 << bits) * (2 + (prefix_x & 1)) + suffix;
         }
         let mut last_y = prefix_y;
         if prefix_y > 3 {
             let bits = (prefix_y >> 1) - 1;
-            let suffix = self.cabac.bypass_bits(bits as u32) as usize;
+            let suffix = e.bypass_bits(bits as u32) as usize;
             last_y = (1 << bits) * (2 + (prefix_y & 1)) + suffix;
         }
         // scanIdx (clause 7.4.9.11).
@@ -1333,6 +1339,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             std::mem::swap(&mut last_x, &mut last_y);
         }
         if last_x >= n || last_y >= n {
+            self.cabac.e = e;
             return Err(malformed("last significant coefficient"));
         }
         let log2s = log2 as usize - 2;
@@ -1359,7 +1366,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             let mut infer_dc = false;
             let coded = if i < last_sub && i > 0 {
                 let inc = usize::from(right || below) + if chroma { 2 } else { 0 };
-                let flag = self.cabac.decide(cabac::CODED_SUB_BLOCK + inc);
+                let flag = e.decide(&mut self.cabac.ctx, cabac::CODED_SUB_BLOCK + inc);
                 infer_dc = true;
                 flag
             } else {
@@ -1399,7 +1406,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             let mut p = start;
             while p > 0 {
                 let pu = p as usize;
-                if self.cabac.decide(base + usize::from(table[pu])) {
+                if e.decide(&mut self.cabac.ctx, base + usize::from(table[pu])) {
                     sig[count] = pu as u8;
                     count += 1;
                     infer_dc = false;
@@ -1418,7 +1425,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                     } else {
                         base + usize::from(table[0])
                     };
-                    self.cabac.decide(ctx)
+                    e.decide(&mut self.cabac.ctx, ctx)
                 };
                 if significant {
                     sig[count] = 0;
@@ -1438,7 +1445,10 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             let mut first_g1 = None;
             let g1_base = cabac::GREATER1 + ctx_set * 4 + if chroma { 16 } else { 0 };
             for (k, flag) in greater1.iter_mut().enumerate().take(count.min(8)) {
-                *flag = self.cabac.decide(g1_base + greater1_state.min(3) as usize);
+                *flag = e.decide(
+                    &mut self.cabac.ctx,
+                    g1_base + greater1_state.min(3) as usize,
+                );
                 if *flag {
                     greater1_state = 0;
                     if first_g1.is_none() {
@@ -1450,15 +1460,16 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             }
             let mut greater2 = false;
             if first_g1.is_some() {
-                greater2 = self
-                    .cabac
-                    .decide(cabac::GREATER2 + ctx_set + if chroma { 4 } else { 0 });
+                greater2 = e.decide(
+                    &mut self.cabac.ctx,
+                    cabac::GREATER2 + ctx_set + if chroma { 4 } else { 0 },
+                );
             }
             let last_sig_pos = usize::from(sig[0]);
             let first_sig_pos = usize::from(sig[count - 1]);
             let hidden = sign_hiding && last_sig_pos - first_sig_pos > 3;
             let coded_signs = if hidden { count - 1 } else { count };
-            let signs = self.cabac.bypass_bits(coded_signs as u32) << (32 - coded_signs as u32);
+            let signs = e.bypass_bits(coded_signs as u32) << (32 - coded_signs as u32);
             // Remaining levels.
             let mut rice = 0u32;
             let mut sum = 0i64;
@@ -1474,7 +1485,10 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                 };
                 let mut level = i64::from(base);
                 if base == needs {
-                    let rem = self.coeff_abs_level_remaining(rice)?;
+                    let Some(rem) = coeff_abs_level_remaining(&mut e, rice) else {
+                        self.cabac.e = e;
+                        return Err(malformed("coeff_abs_level_remaining"));
+                    };
                     level += i64::from(rem);
                     if i64::from(base) + i64::from(rem) > 3 * (1i64 << rice) {
                         rice = (rice + 1).min(4);
@@ -1494,6 +1508,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                 max_y = max_y.max(yc);
             }
         }
+        self.cabac.e = e;
         if self.cabac.overrun() {
             self.clear_coeffs(n, max_x, max_y);
             return Err(truncated("residual"));
@@ -1558,28 +1573,6 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                 add,
                 shift,
             },
-        }
-    }
-
-    fn coeff_abs_level_remaining(&mut self, rice: u32) -> Result<u32, CodecError> {
-        let mut prefix = 0u32;
-        while self.cabac.bypass() {
-            prefix += 1;
-            if prefix > 32 {
-                return Err(malformed("coeff_abs_level_remaining"));
-            }
-        }
-        if prefix <= 3 {
-            Ok((prefix << rice) + self.cabac.bypass_bits(rice))
-        } else {
-            let extra = prefix - 3 + rice;
-            if extra > 31 {
-                return Err(malformed("coeff_abs_level_remaining"));
-            }
-            let base = ((1u64 << (prefix - 3)) + 2) << rice;
-            let value = base + u64::from(self.cabac.bypass_bits(extra));
-            u32::try_from(value.min(u64::from(u32::MAX >> 1)))
-                .map_err(|_| malformed("coeff_abs_level_remaining"))
         }
     }
 
@@ -1845,5 +1838,29 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                     && (far(pm.mv[0], qm.mv[1]) || far(pm.mv[1], qm.mv[0])),
             )
         }
+    }
+}
+
+/// `coeff_abs_level_remaining` (clause 9.3.3.11) with Rice parameter
+/// `rice`; `None` when its prefix is longer than a conforming stream's.
+#[inline(always)]
+fn coeff_abs_level_remaining(e: &mut Engine<'_>, rice: u32) -> Option<u32> {
+    let mut prefix = 0u32;
+    while e.bypass() {
+        prefix += 1;
+        if prefix > 32 {
+            return None;
+        }
+    }
+    if prefix <= 3 {
+        Some((prefix << rice) + e.bypass_bits(rice))
+    } else {
+        let extra = prefix - 3 + rice;
+        if extra > 31 {
+            return None;
+        }
+        let base = ((1u64 << (prefix - 3)) + 2) << rice;
+        let value = base + u64::from(e.bypass_bits(extra));
+        u32::try_from(value.min(u64::from(u32::MAX >> 1))).ok()
     }
 }

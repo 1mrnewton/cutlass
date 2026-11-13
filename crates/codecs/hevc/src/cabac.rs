@@ -279,7 +279,11 @@ static NEXT: [u8; 512] = {
 /// bit is room for a bypass bin, which doubles the offset before it
 /// compares. A renormalization shifts it left; it is refilled once fewer
 /// than 8 bits follow, so a decision (at most 7 bits) never runs out.
-pub struct Cabac<'a> {
+///
+/// The engine is a small value: a hot loop copies it into a local, where
+/// its fields stay in registers, and stores it back after.
+#[derive(Clone, Copy)]
+pub struct Engine<'a> {
     data: &'a [u8],
     /// Bytes moved into `val`, those past the end of `data` included (as
     /// zeros).
@@ -287,31 +291,25 @@ pub struct Cabac<'a> {
     range: u32,
     val: u64,
     bits: i32,
+}
+
+/// The engine with its context variables.
+pub struct Cabac<'a> {
+    pub e: Engine<'a>,
     pub ctx: Contexts,
 }
 
-impl<'a> Cabac<'a> {
-    pub fn new(data: &'a [u8], ctx: Contexts) -> Self {
-        let mut cabac = Self {
+impl<'a> Engine<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        let mut e = Self {
             data,
             pos: 0,
             range: 510,
             val: 0,
             bits: -9,
-            ctx,
         };
-        cabac.refill();
-        cabac
-    }
-
-    /// Start the engine again at `data` (an entry point or after PCM).
-    pub fn restart(&mut self, data: &'a [u8]) {
-        self.data = data;
-        self.pos = 0;
-        self.range = 510;
-        self.val = 0;
-        self.bits = -9;
-        self.refill();
+        e.refill();
+        e
     }
 
     /// Move bytes into `val` while room is left: at least 46 bits follow
@@ -328,12 +326,7 @@ impl<'a> Cabac<'a> {
             self.bits += 48;
             return;
         }
-        while self.bits <= 46 {
-            let byte = self.data.get(self.pos).copied().unwrap_or(0);
-            self.pos += 1;
-            self.val |= u64::from(byte) << (46 - self.bits);
-            self.bits += 8;
-        }
+        (self.pos, self.val, self.bits) = refill_bytes(self.data, self.pos, self.val, self.bits);
     }
 
     /// Bits the engine has consumed since its start.
@@ -348,11 +341,12 @@ impl<'a> Cabac<'a> {
         self.consumed() >= 8 * (self.data.len() + 1)
     }
 
+    /// One context-coded bin, with context variable `index` of `ctx`.
     #[inline(always)]
-    pub fn decide(&mut self, index: usize) -> bool {
+    pub fn decide(&mut self, ctx: &mut Contexts, index: usize) -> bool {
         // Every context index is below 256 (`CONTEXTS`).
         let index = usize::from(index as u8);
-        let s = self.ctx[index];
+        let s = ctx[index];
         let lps = u32::from(LPS[(((self.range >> 6) & 3) as usize) * 256 + usize::from(s)]);
         let rmps = self.range - lps;
         let scaled = u64::from(rmps) << 54;
@@ -360,8 +354,9 @@ impl<'a> Cabac<'a> {
         let mask = u64::from(lps_path).wrapping_neg();
         self.val -= scaled & mask;
         let range = if lps_path { lps } else { rmps };
-        self.ctx[index] = NEXT[usize::from(s) * 2 + usize::from(lps_path)];
-        let shift = range.leading_zeros().saturating_sub(23);
+        ctx[index] = NEXT[usize::from(s) * 2 + usize::from(lps_path)];
+        // The range is below 512 and not zero: 23 leading zeros or more.
+        let shift = (range | 1).leading_zeros().wrapping_sub(23) & 7;
         self.range = range << shift;
         self.val <<= shift;
         self.bits -= shift as i32;
@@ -419,6 +414,63 @@ impl<'a> Cabac<'a> {
     pub fn remaining(&self) -> &'a [u8] {
         let at = 2 + self.consumed() / 8;
         self.data.get(at..).unwrap_or(&[])
+    }
+}
+
+/// The byte-at-a-time refill near the end of the data, out of line so the
+/// engine's fields stay in registers on the common path.
+#[cold]
+#[inline(never)]
+fn refill_bytes(data: &[u8], mut pos: usize, mut val: u64, mut bits: i32) -> (usize, u64, i32) {
+    while bits <= 46 {
+        let byte = data.get(pos).copied().unwrap_or(0);
+        pos += 1;
+        val |= u64::from(byte) << (46 - bits);
+        bits += 8;
+    }
+    (pos, val, bits)
+}
+
+impl<'a> Cabac<'a> {
+    pub fn new(data: &'a [u8], ctx: Contexts) -> Self {
+        Self {
+            e: Engine::new(data),
+            ctx,
+        }
+    }
+
+    /// Start the engine again at `data` (an entry point or after PCM).
+    pub fn restart(&mut self, data: &'a [u8]) {
+        self.e = Engine::new(data);
+    }
+
+    pub fn overrun(&self) -> bool {
+        self.e.overrun()
+    }
+
+    #[inline(always)]
+    pub fn decide(&mut self, index: usize) -> bool {
+        self.e.decide(&mut self.ctx, index)
+    }
+
+    #[inline(always)]
+    pub fn bypass(&mut self) -> bool {
+        self.e.bypass()
+    }
+
+    /// `n` bypass bins, most significant first.
+    #[inline(always)]
+    pub fn bypass_bits(&mut self, n: u32) -> u32 {
+        self.e.bypass_bits(n)
+    }
+
+    pub fn terminate(&mut self) -> bool {
+        self.e.terminate()
+    }
+
+    /// See [`Engine::remaining`].
+    pub fn remaining(&self) -> &'a [u8] {
+        self.e.remaining()
     }
 }
 

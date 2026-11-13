@@ -82,6 +82,11 @@ pub fn inverse(
         }
         return None;
     }
+    if n >= 8
+        && cutlass_simd::hevc::idct::inverse(coeffs, out, n, (max_x + 1, max_y + 1), bit_depth)
+    {
+        return None;
+    }
     let block = (coeffs, out, max_x + 1, max_y + 1, add2, shift2);
     cutlass_simd::wide::wide(
         #[inline(always)]

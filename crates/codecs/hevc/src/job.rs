@@ -74,7 +74,8 @@ impl<P: Pixel> Job<P> {
             output,
             row_threads,
         } = self;
-        let pipe = Pipeline::new(&pic, &work, &frame, writer, col);
+        let out = output.map(|form| OutRows::new(&pic.sps, form));
+        let pipe = Pipeline::new(&pic, &work, &frame, writer, col, out);
         let mut result = Ok(());
         for slice in &slices {
             if let Err(e) = decode_slice(&pic, &work, &pipe, slice, row_threads) {
@@ -82,74 +83,112 @@ impl<P: Pixel> Job<P> {
                 break;
             }
         }
-        let writer = pipe.finish();
-        let out = output.map(|form| out_samples(&writer, &pic.sps, form));
+        let (writer, out) = pipe.finish();
+        let out = out.map(OutRows::finish);
         drop(writer);
         frame.finish(Done { result, out });
         Leftovers { pic, work }
     }
 }
 
-/// The cropped output samples of a finished picture.
-fn out_samples<P: Pixel>(writer: &RowsWriter<P>, sps: &Sps, form: OutForm) -> OutSamples {
-    let shared = writer.shared();
-    let width = sps.width as usize;
-    let height = sps.height as usize;
-    let [left, right, top, bottom] = sps.crop.map(|v| v as usize);
-    let w = width.saturating_sub(left + right);
-    let h = height.saturating_sub(top + bottom);
-    let shift = u32::from(sps.bit_depth) - 8;
-    let crop = |c: usize, out: &mut Vec<u8>| {
-        let (x0, y0, w, h) = if c == 0 {
-            (left, top, w, h)
-        } else {
-            (left / 2, top / 2, w / 2, h / 2)
+/// The cropped output samples of a picture, taken a band of rows at a
+/// time as its final rows are published, while they are still in cache.
+struct OutRows {
+    form: OutForm,
+    /// Bits above 8 per sample.
+    shift: u32,
+    /// Left column, top row, width and height of each cropped plane.
+    crop: [(usize, usize, usize, usize); 3],
+    /// Rows of each cropped plane taken.
+    next: [usize; 3],
+    eight: [Vec<u8>; 3],
+    deep: Option<[Vec<u16>; 3]>,
+}
+
+impl OutRows {
+    fn new(sps: &Sps, form: OutForm) -> Self {
+        let width = sps.width as usize;
+        let height = sps.height as usize;
+        let [left, right, top, bottom] = sps.crop.map(|v| v as usize);
+        let w = width.saturating_sub(left + right);
+        let h = height.saturating_sub(top + bottom);
+        let crop = [
+            (left, top, w, h),
+            (left / 2, top / 2, w / 2, h / 2),
+            (left / 2, top / 2, w / 2, h / 2),
+        ];
+        let shift = u32::from(sps.bit_depth) - 8;
+        let size = |c: usize| crop[c].2 * crop[c].3;
+        // Packed output gathers the chroma planes after luma: the luma
+        // buffer is made large enough for all three.
+        let eight = match form {
+            OutForm::Packed => [
+                Vec::with_capacity(size(0) + size(1) + size(2)),
+                Vec::with_capacity(size(1)),
+                Vec::with_capacity(size(2)),
+            ],
+            OutForm::Planes => std::array::from_fn(|c| Vec::with_capacity(size(c))),
         };
-        let Some((rows, stride, _)) = shared.rows_from(c, y0) else {
-            out.resize(out.len() + w * h, 0);
-            return;
-        };
-        for y in 0..h {
-            let row = &rows[y * stride + x0..y * stride + x0 + w];
-            match P::bytes(row) {
-                Some(bytes) => out.extend_from_slice(bytes),
-                None => out.extend(row.iter().map(|s| (s.i() >> shift) as u8)),
+        let deep = (form == OutForm::Planes && shift > 0)
+            .then(|| std::array::from_fn(|c| Vec::with_capacity(size(c))));
+        Self {
+            form,
+            shift,
+            crop,
+            next: [0; 3],
+            eight,
+            deep,
+        }
+    }
+
+    /// Take the cropped rows published since the last call.
+    fn take<P: Pixel>(&mut self, writer: &RowsWriter<P>) {
+        let shared = writer.shared();
+        for c in 0..3 {
+            let (x0, y0, w, h) = self.crop[c];
+            let y = y0 + self.next[c];
+            if self.next[c] >= h {
+                continue;
+            }
+            let Some((rows, stride, have)) = shared.rows_from(c, y) else {
+                continue;
+            };
+            let n = have.saturating_sub(y).min(h - self.next[c]);
+            for i in 0..n {
+                let row = &rows[i * stride + x0..i * stride + x0 + w];
+                let out = &mut self.eight[c];
+                match P::bytes(row) {
+                    Some(bytes) => out.extend_from_slice(bytes),
+                    None => out.extend(row.iter().map(|s| (s.i() >> self.shift) as u8)),
+                }
+                if let Some(deep) = &mut self.deep {
+                    deep[c].extend(row.iter().map(|s| s.i() as u16));
+                }
+            }
+            self.next[c] += n;
+        }
+    }
+
+    /// The samples; rows never published are zeros.
+    fn finish(mut self) -> OutSamples {
+        for c in 0..3 {
+            let (_, _, w, h) = self.crop[c];
+            self.eight[c].resize(w * h, 0);
+            if let Some(deep) = &mut self.deep {
+                deep[c].resize(w * h, 0);
             }
         }
-    };
-    let deep = |c: usize| -> Vec<u16> {
-        let (x0, y0, w, h) = if c == 0 {
-            (left, top, w, h)
-        } else {
-            (left / 2, top / 2, w / 2, h / 2)
-        };
-        let mut out = Vec::with_capacity(w * h);
-        if let Some((rows, stride, _)) = shared.rows_from(c, y0) {
-            for y in 0..h {
-                let row = &rows[y * stride + x0..y * stride + x0 + w];
-                out.extend(row.iter().map(|s| s.i() as u16));
+        match self.form {
+            OutForm::Packed => {
+                let [mut bytes, cb, cr] = self.eight;
+                bytes.extend_from_slice(&cb);
+                bytes.extend_from_slice(&cr);
+                OutSamples::Packed(bytes)
             }
-        }
-        out
-    };
-    match form {
-        OutForm::Packed => {
-            let mut bytes = Vec::with_capacity(w * h + 2 * (w / 2) * (h / 2));
-            for c in 0..3 {
-                crop(c, &mut bytes);
-            }
-            OutSamples::Packed(bytes)
-        }
-        OutForm::Planes => {
-            let eight = std::array::from_fn(|c| {
-                let mut v = Vec::new();
-                crop(c, &mut v);
-                v
-            });
-            OutSamples::Planes {
-                eight,
-                deep: (shift > 0).then(|| std::array::from_fn(deep)),
-            }
+            OutForm::Planes => OutSamples::Planes {
+                eight: self.eight,
+                deep: self.deep,
+            },
         }
     }
 }
@@ -355,6 +394,8 @@ struct PipeState<P> {
     deblocked: usize,
     /// CTB rows with their final samples published.
     finals: usize,
+    /// The output samples taken so far, when the picture is output.
+    out: Option<OutRows>,
 }
 
 impl<'p, P: Pixel> Pipeline<'p, P> {
@@ -364,6 +405,7 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
         frame: &'p Frame,
         writer: RowsWriter<P>,
         col: RowsWriter<ColMv>,
+        out: Option<OutRows>,
     ) -> Self {
         Self {
             pic,
@@ -377,6 +419,7 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
                 motion: 0,
                 deblocked: 0,
                 finals: 0,
+                out,
             }),
         }
     }
@@ -450,6 +493,9 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
                 st.finals += 1;
                 st.writer
                     .publish(if st.finals == rows { usize::MAX } else { upto });
+                if let Some(out) = &mut st.out {
+                    out.take(&st.writer);
+                }
                 moved = true;
                 continue;
             }
@@ -507,7 +553,7 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
     }
 
     /// Filter and publish every row left, once reconstruction has stopped.
-    fn finish(self) -> RowsWriter<P> {
+    fn finish(self) -> (RowsWriter<P>, Option<OutRows>) {
         let mut st = self
             .state
             .into_inner()
@@ -524,12 +570,17 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
                 motion: 0,
                 deblocked: 0,
                 finals: 0,
+                out: None,
             }),
         };
         this.advance(&mut st, true, None);
         st.writer.publish(usize::MAX);
         st.col.publish(usize::MAX);
         this.frame.notify();
-        st.writer
+        let mut out = st.out.take();
+        if let Some(out) = &mut out {
+            out.take(&st.writer);
+        }
+        (st.writer, out)
     }
 }

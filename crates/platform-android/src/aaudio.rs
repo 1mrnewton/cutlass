@@ -3,8 +3,12 @@
 //! The data callback walks the stored slice on AAudio's thread. It does not
 //! wait on the slice lock: a period that arrives while the slice is replaced
 //! is silence. Past the end of the slice, the rest of the buffer is silence.
-//! An error callback only sets a flag. Stopping and closing happen on the
-//! thread that owns the queue.
+//! An error callback only sets a flag. Pausing, stopping and closing happen
+//! on the thread that owns the queue.
+//!
+//! A phone should not keep its audio path awake for silence, so playback
+//! pauses the stream while nothing plays and starts it again for the next
+//! sound.
 
 #![allow(unsafe_code)]
 
@@ -51,6 +55,7 @@ unsafe extern "C" {
     fn AAudioStreamBuilder_delete(builder: *mut c_void) -> i32;
     fn AAudioStream_requestStart(stream: *mut c_void) -> i32;
     fn AAudioStream_requestStop(stream: *mut c_void) -> i32;
+    fn AAudioStream_requestPause(stream: *mut c_void) -> i32;
     fn AAudioStream_close(stream: *mut c_void) -> i32;
     fn AAudioStream_getState(stream: *mut c_void) -> i32;
     fn AAudioStream_waitForStateChange(
@@ -77,6 +82,7 @@ struct Shared {
 pub struct OutputQueue {
     stream: *mut c_void,
     shared: Arc<Shared>,
+    running: AtomicBool,
 }
 
 impl OutputQueue {
@@ -94,7 +100,37 @@ impl OutputQueue {
         });
         let user = Arc::as_ptr(&shared).cast_mut().cast::<c_void>();
         let stream = open_stream(user)?;
-        Ok(Self { stream, shared })
+        Ok(Self {
+            stream,
+            shared,
+            running: AtomicBool::new(true),
+        })
+    }
+
+    /// Pause the device while nothing plays. Pausing a paused queue does
+    /// nothing.
+    pub fn pause(&self) {
+        if self.stream.is_null() || !self.running.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let _ = unsafe { AAudioStream_requestPause(self.stream) };
+    }
+
+    /// Start the device again after [`Self::pause`]. A stream that failed,
+    /// such as one whose headphones were unplugged, will not start: open a
+    /// new queue.
+    pub fn resume(&self) -> Result<(), QueueError> {
+        if self.stream.is_null() || self.shared.failed.load(Ordering::Acquire) {
+            return Err(QueueError::NoDevice);
+        }
+        if self.running.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if unsafe { AAudioStream_requestStart(self.stream) } != OK {
+            return Err(QueueError::NoDevice);
+        }
+        self.running.store(true, Ordering::Release);
+        Ok(())
     }
 
     /// Replace the slice the callback walks. An empty slice is silence.
@@ -248,5 +284,9 @@ mod tests {
     fn a_queue_opens_on_the_default_device() {
         let queue = OutputQueue::open(48_000, 2).expect("device");
         queue.set_sample(&[0_u8; 8]).expect("sample");
+        queue.pause();
+        queue.pause();
+        queue.resume().expect("resume");
+        queue.resume().expect("resume again");
     }
 }

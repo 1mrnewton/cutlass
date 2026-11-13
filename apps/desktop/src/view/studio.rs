@@ -69,6 +69,10 @@ pub struct StudioView {
     notice: Option<String>,
     /// Set to ask the window for a file to use as the designer's clip.
     pub(super) wants_clip: bool,
+    /// The values the graph shows from bottom to top, for the value it
+    /// shows. Kept while the pointer is down, so a key being dragged does
+    /// not move the graph under it.
+    fit: Option<(Slot, f32, f32)>,
 }
 
 impl Default for StudioView {
@@ -86,6 +90,7 @@ impl Default for StudioView {
             asked: None,
             notice: None,
             wants_clip: false,
+            fit: None,
         }
     }
 }
@@ -191,6 +196,20 @@ fn clock_at(studio: &Studio, time: f32) -> f64 {
         }
         _ => f64::from(time.max(0.0)),
     }
+}
+
+/// The values a graph shows from bottom to top so that a curve running
+/// from `low` to `high` fills about half of it, inside the parameter's own
+/// range `min` to `max`. A curve that is one value still gets room each
+/// side to drag into.
+fn fitted(low: f32, high: f32, min: f32, max: f32) -> (f32, f32) {
+    let whole = (max - min).max(f32::EPSILON);
+    let room = ((high - low) * 0.5).max(whole * 0.04);
+    let (bottom, top) = ((low - room).max(min), (high + room).min(max));
+    if top - bottom < whole * 0.02 {
+        return (min, max);
+    }
+    (bottom, top)
 }
 
 fn faint(ui: &mut Ui, text: &str) {
@@ -1022,32 +1041,59 @@ fn lane_graph(
     });
     let mut on_key = false;
     if let Some((slot, doc, param)) = shown {
-        let range = (param.max - param.min).max(f32::EPSILON);
+        let steps = (plot.width() / 2.0).max(8.0) as usize;
+        let samples: Vec<(f32, f32)> = (0..=steps)
+            .filter_map(|step| {
+                let time = span * step as f32 / steps as f32;
+                Some((time, doc.value_at(slot, time)?))
+            })
+            .collect();
+        // The graph shows the part of the range the curve uses. It is
+        // fitted again only with the pointer up.
+        let held = ui.input(|input| input.pointer.any_down());
+        let kept = view
+            .fit
+            .as_ref()
+            .filter(|(fitted_for, _, _)| held && fitted_for == slot)
+            .map(|(_, bottom, top)| (*bottom, *top));
+        let (bottom, top) = kept.unwrap_or_else(|| {
+            let low = samples
+                .iter()
+                .map(|sample| sample.1)
+                .fold(f32::MAX, f32::min);
+            let high = samples
+                .iter()
+                .map(|sample| sample.1)
+                .fold(f32::MIN, f32::max);
+            if low > high {
+                (param.min, param.max)
+            } else {
+                fitted(low, high, param.min, param.max)
+            }
+        });
+        view.fit = Some((slot.clone(), bottom, top));
+        let range = (top - bottom).max(f32::EPSILON);
         let y_of =
-            |value: f32| plot.max.y - ((value - param.min) / range).clamp(0.0, 1.0) * plot.height();
-        let value_of = |y: f32| {
-            param.min + ((plot.max.y - y) / plot.height().max(1.0)).clamp(0.0, 1.0) * range
-        };
+            |value: f32| plot.max.y - ((value - bottom) / range).clamp(0.0, 1.0) * plot.height();
+        let value_of =
+            |y: f32| bottom + ((plot.max.y - y) / plot.height().max(1.0)).clamp(0.0, 1.0) * range;
         ui.painter().text(
             pos2(rect.min.x + 4.0, rect.min.y + 2.0),
             Align2::LEFT_TOP,
-            short(param.max),
+            short(top),
             FontId::proportional(10.0),
             tokens::FAINT,
         );
         ui.painter().text(
             pos2(rect.min.x + 4.0, plot.max.y),
             Align2::LEFT_BOTTOM,
-            short(param.min),
+            short(bottom),
             FontId::proportional(10.0),
             tokens::FAINT,
         );
-        let steps = (plot.width() / 2.0).max(8.0) as usize;
-        let line: Vec<Pos2> = (0..=steps)
-            .filter_map(|step| {
-                let time = span * step as f32 / steps as f32;
-                Some(pos2(x_of(time), y_of(doc.value_at(slot, time)?)))
-            })
+        let line: Vec<Pos2> = samples
+            .iter()
+            .map(|(time, value)| pos2(x_of(*time), y_of(*value)))
             .collect();
         ui.painter()
             .add(egui::Shape::line(line, Stroke::new(1.5, tokens::EXPORT)));
@@ -1526,6 +1572,22 @@ fn card_section(shell: &mut Shell, ui: &mut Ui, view: &mut StudioView, doc: &Doc
 mod tests {
     use super::{block_label, param_label, short};
     use cutlass_effects::Block;
+
+    #[test]
+    fn a_graph_fits_the_curve_inside_the_values_own_range() {
+        // Scale runs from 0.1 to 4; a punch from 1 to 1.35 fills the graph.
+        let (bottom, top) = super::fitted(1.0, 1.35, 0.1, 4.0);
+        assert!(bottom < 1.0 && bottom > 0.7, "{bottom}");
+        assert!(top > 1.35 && top < 1.7, "{top}");
+        // One fixed value still has room each side.
+        let (bottom, top) = super::fitted(1.0, 1.0, 0.1, 4.0);
+        assert!(bottom < 1.0 && top > 1.0 && top - bottom < 1.0);
+        // The fit never leaves the range, and a curve over all of it shows
+        // all of it.
+        assert_eq!(super::fitted(0.0, 0.1, 0.0, 0.1), (0.0, 0.1));
+        let (bottom, top) = super::fitted(0.0, 0.0, 0.0, 0.1);
+        assert!(bottom == 0.0 && top > 0.0 && top <= 0.1);
+    }
 
     #[test]
     fn names_and_numbers_read_as_words() {

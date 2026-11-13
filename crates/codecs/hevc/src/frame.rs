@@ -36,6 +36,27 @@ pub struct Spares {
     pub eight: Mutex<Vec<[PlaneBuf<u8>; 3]>>,
     pub deep: Mutex<Vec<[PlaneBuf<u16>; 3]>>,
     pub col: Mutex<Vec<[PlaneBuf<ColMv>; 3]>>,
+    /// Frames released so far (see [`Frame::release`]), to wait for any.
+    released: Mutex<u64>,
+    released_one: Condvar,
+}
+
+impl Spares {
+    /// Frames released so far.
+    pub fn released(&self) -> u64 {
+        *lock(&self.released)
+    }
+
+    /// Block until more than `seen` frames have been released.
+    pub fn wait_released(&self, seen: u64) {
+        let mut released = lock(&self.released);
+        while *released == seen {
+            released = self
+                .released_one
+                .wait(released)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
 }
 
 /// A decoded picture, or one still being decoded, as references see it.
@@ -51,6 +72,8 @@ pub struct Frame {
     moved: Condvar,
     /// The job stopped without publishing: waiters take what is there.
     abandoned: AtomicBool,
+    /// The job needs fewer threads than it was given (see [`Self::release`]).
+    released: AtomicBool,
     done: Mutex<Option<Done>>,
     finished: Condvar,
     spares: Option<Arc<Spares>>,
@@ -81,6 +104,7 @@ impl Frame {
             gate: Mutex::new(()),
             moved: Condvar::new(),
             abandoned: AtomicBool::new(false),
+            released: AtomicBool::new(false),
             done: Mutex::new(None),
             finished: Condvar::new(),
             spares: Some(spares.clone()),
@@ -123,6 +147,7 @@ impl Frame {
             gate: Mutex::new(()),
             moved: Condvar::new(),
             abandoned: AtomicBool::new(false),
+            released: AtomicBool::new(false),
             done: Mutex::new(Some(Done {
                 result: Ok(()),
                 out: None,
@@ -197,6 +222,23 @@ impl Frame {
     pub fn finish(&self, done: Done) {
         *lock(&self.done) = Some(done);
         self.finished.notify_all();
+        self.release();
+    }
+
+    /// The job has work left for fewer threads than it was given, or none:
+    /// the decoder may start another picture beside it.
+    pub fn release(&self) {
+        if !self.released.swap(true, SeqCst)
+            && let Some(spares) = &self.spares
+        {
+            *lock(&spares.released) += 1;
+            spares.released_one.notify_all();
+        }
+    }
+
+    /// Whether [`Self::release`] was called.
+    pub fn is_released(&self) -> bool {
+        self.released.load(SeqCst)
     }
 
     /// The job stopped without finishing (it panicked): release every
@@ -216,22 +258,12 @@ impl Frame {
         }
         drop(done);
         self.finished.notify_all();
+        self.release();
     }
 
     /// Whether the decode job ended with an error.
     pub fn failed(&self) -> bool {
         lock(&self.done).as_ref().is_some_and(|d| d.result.is_err())
-    }
-
-    /// Block until the decode job ends.
-    pub fn wait_finished(&self) {
-        let mut done = lock(&self.done);
-        while done.is_none() {
-            done = self
-                .finished
-                .wait(done)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
     }
 
     /// Whether the decode job has ended.

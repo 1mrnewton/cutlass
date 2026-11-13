@@ -691,14 +691,18 @@ impl HevcDecoder {
 
     /// Start the decode of a picture, on a worker or (one thread) here.
     fn start(&mut self, ready: Ready) {
-        // Keep at most so many pictures decoding.
+        // Keep at most so many pictures decoding. The next starts as soon
+        // as any of them is released: done, or down to its last rows with
+        // threads to spare.
         let frames = self.split(ready.wavefront()).0;
-        while self.running.len() >= frames {
-            if let Some(oldest) = self.running.pop_front() {
-                oldest.wait_finished();
+        loop {
+            let seen = self.shared.frames.released();
+            self.running.retain(|f| !f.is_released());
+            if self.running.len() < frames {
+                break;
             }
+            self.shared.frames.wait_released(seen);
         }
-        self.running.retain(|f| !f.is_done());
         let shared = self.shared.clone();
         let frame = ready.frame().clone();
         let job: Box<dyn FnOnce() + Send> = match ready {

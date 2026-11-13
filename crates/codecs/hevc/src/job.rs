@@ -87,8 +87,9 @@ impl<P: Pixel> Job<P> {
             && P::of_bytes_mut(&mut []).is_some();
         let pipe = Pipeline::new(&pic, &work, &frame, writer, col, (out, direct));
         let mut result = Ok(());
-        for slice in &slices {
-            if let Err(e) = decode_slice(&pic, &work, &pipe, slice, row_threads) {
+        for (i, slice) in slices.iter().enumerate() {
+            let last = i + 1 == slices.len();
+            if let Err(e) = decode_slice(&pic, &work, &pipe, slice, (row_threads, last)) {
                 result = Err(e);
                 break;
             }
@@ -253,7 +254,7 @@ fn decode_slice<P: Pixel>(
     work: &Work<P>,
     pipe: &Pipeline<'_, P>,
     slice: &SliceData,
-    threads: usize,
+    (threads, last): (usize, bool),
 ) -> Result<(), CodecError> {
     let Some(data) = slice.nal.rbsp.get(slice.start..) else {
         return Err(CodecError::Truncated {
@@ -289,7 +290,14 @@ fn decode_slice<P: Pixel>(
     // One worker for each CTB row of the segment. The last decodes every
     // row below too, where the segment may go on without entry points.
     let gates: Vec<Rows> = (0..rows).map(|_| Rows::new(ctb_w as u32)).collect();
-    let results = in_parallel(rows, threads, |r| {
+    // In the picture's last segment, a worker without a row left frees
+    // its thread for the next picture.
+    let idle = || {
+        if last {
+            pipe.frame.release();
+        }
+    };
+    let results = in_parallel(rows, threads, idle, |r| {
         let _done = RowDone(&gates[r]);
         let wave = Wave {
             row: first_row + r,
@@ -321,7 +329,13 @@ fn decode_slice<P: Pixel>(
 
 /// Run `count` pieces on up to `threads` threads, this one among them,
 /// each thread taking the next piece in order. Results in index order.
-fn in_parallel<T: Send>(count: usize, threads: usize, work: impl Fn(usize) -> T + Sync) -> Vec<T> {
+/// `idle` runs once, when the first thread finds no piece left.
+fn in_parallel<T: Send>(
+    count: usize,
+    threads: usize,
+    idle: impl Fn() + Sync,
+    work: impl Fn(usize) -> T + Sync,
+) -> Vec<T> {
     let threads = threads.min(count);
     if threads <= 1 {
         return (0..count).map(&work).collect();
@@ -332,6 +346,9 @@ fn in_parallel<T: Send>(count: usize, threads: usize, work: impl Fn(usize) -> T 
         loop {
             let index = next.fetch_add(1, SeqCst);
             if index >= count {
+                if index == count {
+                    idle();
+                }
                 break;
             }
             done.push((index, work(index)));

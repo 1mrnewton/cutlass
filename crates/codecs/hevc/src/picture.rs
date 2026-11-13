@@ -356,12 +356,6 @@ impl<P: Pixel> Work<P> {
         row % self.rows.len().max(1)
     }
 
-    /// Luma lines of CTB row `row`.
-    pub fn lines_of(&self, row: usize) -> usize {
-        let ctb = 1usize << self.log2_ctb;
-        ctb.min(self.height.saturating_sub(row * ctb))
-    }
-
     /// The samples of CTB row `row`, locked.
     pub fn band(&self, row: usize) -> Samples<'_, P> {
         Samples {

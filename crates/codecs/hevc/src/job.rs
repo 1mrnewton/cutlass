@@ -538,8 +538,10 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
         }
         let ctb = 1usize << self.work.log2_ctb;
         self.nudge(None);
-        self.frame
-            .wait_rows_or((row + 2 - slots) * ctb, &self.failed);
+        // The band of the row below the one that used the buffer last
+        // reads it; that band ends `HOLD` lines short of its row.
+        let upto = ((row + 2 - slots) * ctb).saturating_sub(crate::filter::HOLD);
+        self.frame.wait_rows_or(upto, &self.failed);
     }
 
     /// A row worker failed: release whoever waits for a row buffer.
@@ -568,7 +570,6 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
         let touches = |lo: usize, hi: usize| held.is_some_and(|h| h + 1 >= lo && h <= hi);
         let rows = self.work.count;
         let ctb = 1usize << self.work.log2_ctb;
-        let height = self.pic.height;
         let mut moved = false;
         while st.motion < rows && (end || self.complete(st.motion)) {
             self.motion_row(st, st.motion);
@@ -596,10 +597,12 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
                 st.deblocked += 1;
                 continue;
             }
+            // The final lines of row `f` (see `Picture::sao_row`) follow its
+            // deblocking: all but its last few, and those of the row above.
             let f = st.finals;
-            if f < rows && (st.deblocked > f + 1 || st.deblocked == rows) && !touches(f, f + 1) {
-                let upto = ((f + 1) * ctb).min(height);
-                let lines = self.work.lines_of(f);
+            if f < rows && st.deblocked > f && !touches(f, f) {
+                let (from, upto) = self.pic.sao_lines(self.work, f);
+                let lines = upto - from;
                 // Packed output takes luma in place and leaves chroma in the
                 // frame's buffers.
                 let direct = match &mut st.out {

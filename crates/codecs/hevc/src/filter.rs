@@ -19,6 +19,11 @@ use crate::picture::{FLAG_KEEP, Picture, Work, lock};
 use crate::pixel::Pixel;
 
 /// `tC′` of table 8-12, indexed by `Q`.
+/// Luma lines at the end of a CTB row that wait for the row below before
+/// they are final: the three its deblocking changes, the one SAO reads
+/// beside them, rounded up to whole chroma lines on the 8×8 grid.
+pub const HOLD: usize = 8;
+
 const TC: [i32; 54] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 3,
     3, 3, 3, 4, 4, 4, 5, 5, 6, 6, 7, 8, 9, 10, 11, 13, 14, 16, 18, 20, 22, 24,
@@ -560,83 +565,114 @@ impl Picture {
                 .any(|s| s.header.sao_luma || s.header.sao_chroma)
     }
 
-    /// The final samples of CTB row `r` into `dst` (the row's lines of each
-    /// plane): the deblocked samples, with sample adaptive offset where it
-    /// is on (clause 8.7.3). Reads one deblocked line above and below.
+    /// The luma lines [`Self::sao_row`] makes final for CTB row `r`: those
+    /// from [`HOLD`] lines above the row to `HOLD` lines above its end, or
+    /// to the picture's end for the last row.
+    pub fn sao_lines(&self, work: &Work<impl Pixel>, r: usize) -> (usize, usize) {
+        let top = r << work.log2_ctb;
+        let from = top.saturating_sub(HOLD);
+        let to = if r + 1 >= work.count {
+            self.height
+        } else {
+            (top + (1 << work.log2_ctb) - HOLD).min(self.height)
+        };
+        (from, to)
+    }
+
+    /// The final samples of luma lines [`Self::sao_lines`] of CTB row `r`
+    /// into `dst` (those lines of each plane): the deblocked samples, with
+    /// sample adaptive offset where it is on (clause 8.7.3). Once row `r`
+    /// is deblocked they are all final, and the line past them too: the
+    /// deblocking of the row below changes only its last three luma lines
+    /// (one chroma line). So the filters finish a row on the thread that
+    /// made it, and its lines reach other pictures a row sooner.
     pub fn sao_row<P: Pixel>(&self, work: &Work<P>, r: usize, mut dst: [&mut [P]; 3]) {
-        let rows = work.count;
-        let above = r.checked_sub(1).map(|a| lock(&work.rows[work.slot(a)]));
+        let (from, to) = self.sao_lines(work, r);
+        let prev = r.checked_sub(1).map(|a| lock(&work.rows[work.slot(a)]));
         let band = lock(&work.rows[work.slot(r)]);
-        let below = (r + 1 < rows).then(|| lock(&work.rows[work.slot(r + 1)]));
-        if !self.sao_on() {
-            for (c, d) in dst.iter_mut().enumerate() {
-                let n = d.len().min(band[c].len());
-                d[..n].copy_from_slice(&band[c][..n]);
-            }
-            return;
-        }
         let top = r << work.log2_ctb;
         let width = self.width;
-        // Component row `y` of the deblocked picture, for `y` in the band
-        // or one line outside it.
-        let lines = work.lines_of(r);
-        let held = [lines, lines / 2, lines / 2];
+        // Component line `y` of the deblocked picture, in row `r` or the
+        // row above; empty past them.
         let line = |c: usize, y: usize| -> &[P] {
             let (t, stride) = if c == 0 {
                 (top, width)
             } else {
                 (top / 2, width / 2)
             };
-            let lines = held[c];
-            if y < t {
-                above
-                    .as_ref()
-                    .map_or(&[][..], |a| &a[c][a[c].len().saturating_sub(stride)..])
-            } else if y >= t + lines {
-                below
-                    .as_ref()
-                    .map_or(&[][..], |b| &b[c][..stride.min(b[c].len())])
+            if y >= t {
+                band[c]
+                    .get((y - t) * stride..(y - t + 1) * stride)
+                    .unwrap_or(&[])
             } else {
-                &band[c][(y - t) * stride..(y - t + 1) * stride]
+                prev.as_ref().map_or(&[][..], |p| {
+                    let above = p[c].len() / stride.max(1);
+                    (t - y)
+                        .checked_sub(1)
+                        .and_then(|back| above.checked_sub(back + 1))
+                        .and_then(|at| p[c].get(at * stride..(at + 1) * stride))
+                        .unwrap_or(&[])
+                })
             }
         };
+        if !self.sao_on() {
+            for (c, d) in dst.iter_mut().enumerate() {
+                let sub = u32::from(c > 0);
+                let pw = self.width >> sub;
+                for (y, out) in (from >> sub..to >> sub).zip(d.chunks_exact_mut(pw.max(1))) {
+                    let l = line(c, y);
+                    let n = out.len().min(l.len());
+                    out[..n].copy_from_slice(&l[..n]);
+                }
+            }
+            return;
+        }
         let ctb_w = self.layout.ctb_width as usize;
         // The samples of CTBs without SAO in a component are copied, in
         // runs of such CTBs; every other CTB writes all of its samples.
         let log2_ctb = work.log2_ctb;
-        for (c, d) in dst.iter_mut().enumerate() {
-            let sub = u32::from(c > 0);
-            let pw = self.width >> sub;
-            let size = 1usize << (log2_ctb - sub);
-            let lines = held[c].min(d.len() / pw.max(1));
-            let mut rx = 0;
-            while rx < ctb_w {
-                if self.sao.get(r * ctb_w + rx)[c].kind != 0 {
-                    rx += 1;
-                    continue;
-                }
-                let start = rx;
-                while rx < ctb_w && self.sao.get(r * ctb_w + rx)[c].kind == 0 {
-                    rx += 1;
-                }
-                let (x0, x1) = (start * size, (rx * size).min(pw));
-                for y in 0..lines {
-                    let at = y * pw;
-                    d[at + x0..at + x1].copy_from_slice(&band[c][at + x0..at + x1]);
+        let ctb_rows = r.checked_sub(1).into_iter().chain([r]);
+        for row in ctb_rows.clone() {
+            for (c, d) in dst.iter_mut().enumerate() {
+                let sub = u32::from(c > 0);
+                let pw = self.width >> sub;
+                let size = 1usize << (log2_ctb - sub);
+                let base = from >> sub;
+                let ya = (row * size).max(base);
+                let yb = ((row + 1) * size).min(to >> sub);
+                let mut rx = 0;
+                while rx < ctb_w {
+                    if self.sao.get(row * ctb_w + rx)[c].kind != 0 {
+                        rx += 1;
+                        continue;
+                    }
+                    let start = rx;
+                    while rx < ctb_w && self.sao.get(row * ctb_w + rx)[c].kind == 0 {
+                        rx += 1;
+                    }
+                    let (x0, x1) = (start * size, (rx * size).min(pw));
+                    for y in ya..yb {
+                        let at = (y - base) * pw;
+                        d[at + x0..at + x1].copy_from_slice(&line(c, y)[x0..x1]);
+                    }
                 }
             }
         }
-        for rx in 0..ctb_w {
-            self.sao_ctb(r * ctb_w + rx, &line, &mut dst);
+        for row in ctb_rows {
+            for rx in 0..ctb_w {
+                self.sao_ctb(row * ctb_w + rx, &line, &mut dst, (from, to));
+            }
         }
     }
 
-    /// SAO of CTB `rs` into `dst`, the lines of the CTB row that holds it.
+    /// SAO of the luma lines `from..to` of CTB `rs` (and the chroma lines
+    /// they make) into `dst`, which holds those lines of each plane.
     fn sao_ctb<'l, P: Pixel>(
         &self,
         rs: usize,
         line: &impl Fn(usize, usize) -> &'l [P],
         dst: &mut [&mut [P]; 3],
+        (from, to): (usize, usize),
     ) {
         let ctb_w = self.layout.ctb_width as usize;
         let ctb_h = self.layout.ctb_height as usize;
@@ -677,23 +713,29 @@ impl Picture {
             let y0 = ry * size;
             let x1 = (x0 + size).min(pw);
             let y1 = (y0 + size).min(ph);
+            // The lines of this CTB in the band, and the band's first.
+            let (ya, yb) = (y0.max(from >> sub), y1.min(to >> sub));
+            if ya >= yb {
+                continue;
+            }
+            let base = from >> sub;
             let region = Region {
                 x0,
-                y0,
+                y0: ya,
                 x1,
-                y1,
+                y1: yb,
                 pw,
                 sub,
                 keep_possible,
-                top: y0,
+                top: base,
             };
             let out = &mut *dst[c];
             // Copy the region first unless the path taken writes every
             // sample of it.
             let edge_fast = p.kind == 2 && !keep_possible && cross.iter().flatten().all(|&ok| ok);
             if (p.kind == 1 && keep_possible) || (p.kind == 2 && !edge_fast) {
-                for y in y0..y1 {
-                    let at = (y - y0) * pw;
+                for y in ya..yb {
+                    let at = (y - base) * pw;
                     out[at + x0..at + x1].copy_from_slice(&line(c, y)[x0..x1]);
                 }
             }
@@ -704,15 +746,15 @@ impl Picture {
                 }
                 let shift = bit_depth - 5;
                 if !keep_possible {
-                    for y in y0..y1 {
+                    for y in ya..yb {
                         let src = &line(c, y)[x0..x1];
-                        let o = &mut out[(y - y0) * pw + x0..(y - y0) * pw + x1];
+                        let o = &mut out[(y - base) * pw + x0..(y - base) * pw + x1];
                         if let (Some(d), Some(s)) = (P::bytes_mut(o), P::bytes(src))
                             && sao::band_row(d, s, p.class, p.offsets.map(|v| v as i8))
                         {
                             continue;
                         }
-                        let o = &mut out[(y - y0) * pw + x0..(y - y0) * pw + x1];
+                        let o = &mut out[(y - base) * pw + x0..(y - base) * pw + x1];
                         for (o, &s) in o.iter_mut().zip(src) {
                             let v = s.i();
                             *o = P::of((v + table[(v >> shift) as usize & 31]).clamp(0, max));
@@ -741,7 +783,10 @@ impl Picture {
                     let top = usize::from(y0 == 0 && (ay < 0 || by < 0));
                     let bottom = usize::from(y1 == ph && (ay > 0 || by > 0));
                     for y in (y0..y0 + top).chain(y1 - bottom..y1) {
-                        let at = (y - y0) * pw;
+                        if !(ya..yb).contains(&y) {
+                            continue;
+                        }
+                        let at = (y - base) * pw;
                         out[at + x0..at + x1].copy_from_slice(&line(c, y)[x0..x1]);
                     }
                     let add = [
@@ -751,11 +796,11 @@ impl Picture {
                         i32::from(offsets[2]),
                         i32::from(offsets[3]),
                     ];
-                    for y in y0 + top..y1 - bottom {
+                    for y in (y0 + top).max(ya)..(y1 - bottom).min(yb) {
                         let la = line(c, y.wrapping_add_signed(ay));
                         let lv = line(c, y);
                         let lb = line(c, y.wrapping_add_signed(by));
-                        let o = &mut out[(y - y0) * pw..(y - y0 + 1) * pw];
+                        let o = &mut out[(y - base) * pw..(y - base + 1) * pw];
                         let (xa, xb) = (x0 + left, x1 - right);
                         o[x0..xa].copy_from_slice(&lv[x0..xa]);
                         o[xb..x1].copy_from_slice(&lv[xb..x1]);

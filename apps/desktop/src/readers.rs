@@ -1132,6 +1132,23 @@ mod tests {
     }
 
     #[test]
+    fn an_avif_still_decodes_with_the_rust_decoder() {
+        // SVT-AV1 stills FFmpeg wrote as AVIF: a flat 0x4080C0, full range
+        // with the BT.709 matrix, and FFmpeg's test pattern.
+        let (pixel, size, rgba) = av1_software_picture("flat.avif");
+        assert_eq!(pixel, cutlass_decode::PixelFormat::Yuv420p);
+        assert_eq!(size, (128, 96));
+        for (channel, want) in [64i32, 128, 192].into_iter().enumerate() {
+            let got = i32::from(rgba[4 * (48 * 128 + 64) + channel]);
+            assert!((got - want).abs() <= 3, "channel {channel}: {got}");
+        }
+        let (pixel, size, rgba) = av1_software_picture("pattern.avif");
+        assert_eq!(pixel, cutlass_decode::PixelFormat::Yuv420p);
+        assert_eq!(size, (320, 180));
+        assert!(rgba.chunks(4).any(|p| p[..3] != rgba[..3]));
+    }
+
+    #[test]
     fn av1_full_range_and_a_bt601_matrix_come_out_in_the_color_that_went_in() {
         // SVT-AV1, a flat 0x4080C0: once full range with the BT.709 matrix
         // (libdav1d decodes Y 119, U 167, V 92), once studio swing with the

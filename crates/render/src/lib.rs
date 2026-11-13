@@ -339,50 +339,12 @@ impl Renderer {
                     outgoing,
                     incoming,
                 } => {
-                    // Both sides are full-size pictures: they are mixed at
-                    // their own size, then shrunk onto the canvas.
-                    let whole = (outgoing.width, outgoing.height);
-                    for side in [outgoing, incoming] {
-                        if (side.width, side.height) != whole || whole != full {
-                            return Err(RenderError::Size {
-                                width: side.width,
-                                height: side.height,
-                            });
-                        }
-                    }
-                    let size = whole;
+                    let (mut outgoing, mut incoming, size) =
+                        self.two_sides(outgoing, incoming, full)?;
                     let canvas = Placement::canvas(size.0, size.1);
-                    let mut outgoing = layer::Pipelines::upload_rgba(device, queue, outgoing)?;
-                    let mut incoming = layer::Pipelines::upload_rgba(device, queue, incoming)?;
                     if let Some(recipe) = kind.recipe() {
-                        // Each picture through its own steps, then the swap.
-                        let crossing = recipe.at(*t);
-                        let mut sides = Vec::with_capacity(2);
-                        for (side, steps) in [
-                            (&outgoing, &crossing.outgoing),
-                            (&incoming, &crossing.incoming),
-                        ] {
-                            let first = blur::scratch(device, size);
-                            let second = blur::scratch(device, size);
-                            let bound = [self.layers.bind(device, queue, side, canvas)];
-                            Self::paint(&self.layers, encoder, &first, &bound);
-                            let result = self
-                                .effects
-                                .run(device, queue, encoder, &first, &second, size, steps)
-                                .clone();
-                            sides.push(result);
-                        }
-                        let mixed = blur::scratch(device, size);
-                        self.cross.run(
-                            device, queue, encoder, &sides[0], &sides[1], &mixed, &crossing, size,
-                        );
-                        let uploaded = layer::Uploaded {
-                            views: [mixed.clone(), mixed.clone(), mixed],
-                            size,
-                            yuv: false,
-                            tone: cutlass_gpu::YuvTone::NONE,
-                            interleaved: false,
-                        };
+                        let uploaded =
+                            self.crossed(encoder, &outgoing, &incoming, &recipe.at(*t), size);
                         bound.push(self.layers.bind(device, queue, &uploaded, fit(canvas)));
                         continue;
                     }
@@ -408,6 +370,16 @@ impl Renderer {
                         tone: cutlass_gpu::YuvTone::NONE,
                         interleaved: false,
                     };
+                    bound.push(self.layers.bind(device, queue, &uploaded, fit(canvas)));
+                }
+                Layer::Crossing {
+                    crossing,
+                    outgoing,
+                    incoming,
+                } => {
+                    let (outgoing, incoming, size) = self.two_sides(outgoing, incoming, full)?;
+                    let canvas = Placement::canvas(size.0, size.1);
+                    let uploaded = self.crossed(encoder, &outgoing, &incoming, crossing, size);
                     bound.push(self.layers.bind(device, queue, &uploaded, fit(canvas)));
                 }
                 Layer::Vector { scene, placement } => {
@@ -567,6 +539,69 @@ impl Renderer {
         }
         Self::paint(&self.layers, encoder, target, &bound);
         Ok(())
+    }
+
+    /// The two pictures of a transition, uploaded, and their size. Both
+    /// are full-size pictures: they are mixed at their own size, then
+    /// shrunk onto the canvas.
+    fn two_sides(
+        &self,
+        outgoing: &Rgba<'_>,
+        incoming: &Rgba<'_>,
+        full: (u32, u32),
+    ) -> Result<(layer::Uploaded, layer::Uploaded, (u32, u32)), RenderError> {
+        let whole = (outgoing.width, outgoing.height);
+        for side in [outgoing, incoming] {
+            if (side.width, side.height) != whole || whole != full {
+                return Err(RenderError::Size {
+                    width: side.width,
+                    height: side.height,
+                });
+            }
+        }
+        let outgoing = layer::Pipelines::upload_rgba(&self.device, &self.queue, outgoing)?;
+        let incoming = layer::Pipelines::upload_rgba(&self.device, &self.queue, incoming)?;
+        Ok((outgoing, incoming, whole))
+    }
+
+    /// One moment of a transition recipe as a picture: each side through
+    /// its own steps, then the swap.
+    fn crossed(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        outgoing: &layer::Uploaded,
+        incoming: &layer::Uploaded,
+        crossing: &cutlass_effects::Crossing,
+        size: (u32, u32),
+    ) -> layer::Uploaded {
+        let (device, queue) = (&self.device, &self.queue);
+        let canvas = Placement::canvas(size.0, size.1);
+        let mut sides = Vec::with_capacity(2);
+        for (side, steps) in [
+            (outgoing, &crossing.outgoing),
+            (incoming, &crossing.incoming),
+        ] {
+            let first = blur::scratch(device, size);
+            let second = blur::scratch(device, size);
+            let bound = [self.layers.bind(device, queue, side, canvas)];
+            Self::paint(&self.layers, encoder, &first, &bound);
+            let result = self
+                .effects
+                .run(device, queue, encoder, &first, &second, size, steps)
+                .clone();
+            sides.push(result);
+        }
+        let mixed = blur::scratch(device, size);
+        self.cross.run(
+            device, queue, encoder, &sides[0], &sides[1], &mixed, crossing, size,
+        );
+        layer::Uploaded {
+            views: [mixed.clone(), mixed.clone(), mixed],
+            size,
+            yuv: false,
+            tone: cutlass_gpu::YuvTone::NONE,
+            interleaved: false,
+        }
     }
 
     /// Clear `target` and draw `bound` into it in one pass.

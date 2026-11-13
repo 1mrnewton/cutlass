@@ -28,12 +28,17 @@ cd "$root"
 cargo ndk -t arm64-v8a -t x86_64 -P 28 -o "$here/app/src/main/jniLibs" \
 	build -p cutlass-ffi-bindings --lib $flag
 
-# The generator reads the host library's metadata.
+# The generator reads the host library's metadata: a dylib on a Mac, a
+# shared object on Linux, as in CI.
 cargo build -p cutlass-ffi-bindings --lib
+case "$(uname -s)" in
+Darwin) host=target/debug/libcutlass_ffi_bindings.dylib ;;
+*) host=target/debug/libcutlass_ffi_bindings.so ;;
+esac
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 cargo run --quiet --manifest-path tools/uniffi-bindgen/Cargo.toml -- \
-	generate --library target/debug/libcutlass_ffi_bindings.dylib \
+	generate --library "$host" \
 	--language kotlin --out-dir "$out"
 
 rm -rf "$here/app/src/main/java/uniffi"

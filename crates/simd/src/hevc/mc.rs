@@ -43,6 +43,15 @@ impl Src<'_> {
     }
 }
 
+/// Scratch rows the kernels keep between blocks: one vector for each row
+/// of a block's window, made on first use, where vector instructions may
+/// run.
+#[derive(Default)]
+pub struct Tmp {
+    #[cfg(target_arch = "x86_64")]
+    rows: Vec<core::arch::x86_64::__m256i>,
+}
+
 /// Whether the kernels of this module run on this CPU.
 #[must_use]
 pub fn accelerated() -> bool {
@@ -90,7 +99,7 @@ impl Dst<'_> {
 /// The prediction of a `w`×`h` block into `dst` (rows `dst_stride`
 /// apart). The intermediates are `x << 6` with no fraction, the sums of
 /// the taps with one, and with both the vertical sums of the horizontal
-/// ones shifted right by 6. `tmp` holds `(h + 7) * w` values.
+/// ones shifted right by 6.
 #[inline]
 pub fn predict(
     dst: Dst<'_>,
@@ -98,7 +107,7 @@ pub fn predict(
     src: &Src<'_>,
     (w, h): (usize, usize),
     taps: &Taps,
-    tmp: &mut [i16],
+    tmp: &mut Tmp,
 ) -> bool {
     let fits = matches!(w, 4 | 8 | 12 | 16 | 24 | 32 | 48 | 64)
         && (1..=64).contains(&h)
@@ -113,7 +122,6 @@ pub fn predict(
             Dst::UniW(_, wt) => (1..=14).contains(&wt.log2wd),
             _ => true,
         }
-        && tmp.len() >= (h + 7) * w
         && src.holds(w, h, taps.len);
     if !fits || !accelerated() {
         return false;
@@ -123,7 +131,7 @@ pub fn predict(
         // SAFETY: `accelerated` checked at run time that the CPU has AVX2.
         #[allow(unsafe_code)]
         unsafe {
-            avx2::predict(dst, dst_stride, src, (w, h), taps, tmp);
+            avx2::predict(dst, dst_stride, src, (w, h), taps, &mut tmp.rows);
         }
         true
     }
@@ -142,7 +150,7 @@ pub fn put(
     src: &Src<'_>,
     (w, h): (usize, usize),
     taps: &Taps,
-    tmp: &mut [i16],
+    tmp: &mut Tmp,
 ) -> bool {
     predict(Dst::Mid(dst), dst_stride, src, (w, h), taps, tmp)
 }

@@ -8,8 +8,6 @@ use crate::cabac;
 use crate::ctu::{
     PART_2NXN, PART_2NXND, PART_2NXNU, PART_NLX2N, PART_NRX2N, PART_NX2N, SliceDecoder,
 };
-use std::sync::Arc;
-
 use crate::frame::Frame;
 use crate::mc::{self, Block, Plane, Wp};
 use crate::picture::{ColMv, MODE_INTER, Mv, MvField};
@@ -54,7 +52,7 @@ struct Pb {
     part: usize,
 }
 
-impl<'a, P: Pixel> SliceDecoder<'a, '_, P> {
+impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
     pub fn prediction_unit(
         &mut self,
         x: usize,
@@ -541,7 +539,10 @@ impl<'a, P: Pixel> SliceDecoder<'a, '_, P> {
         h: usize,
         field: MvField,
     ) -> Result<(), CodecError> {
-        let slice = &self.pic.slices[self.slice];
+        // The picture outlives this call: its references are borrowed for
+        // `'p`, without touching their reference counts.
+        let pic: &'p crate::picture::Picture = self.pic;
+        let slice = &pic.slices[self.slice];
         let header = &slice.header;
         let explicit = match header.slice_type {
             SliceType::P => self.pps.weighted_pred,
@@ -549,13 +550,13 @@ impl<'a, P: Pixel> SliceDecoder<'a, '_, P> {
             SliceType::I => false,
         };
         let bit_depth = u32::from(self.sps.bit_depth);
-        let mut refs = [None, None];
+        let mut refs: [Option<&'p Frame>; 2] = [None, None];
         for (list, slot) in refs.iter_mut().enumerate() {
             if field.uses(list) {
                 let Some(r) = slice.refs[list].get(field.ref_idx[list] as usize) else {
                     return Err(malformed("reference index"));
                 };
-                *slot = Some(r.frame.clone());
+                *slot = Some(&*r.frame);
             }
         }
         let weights = if explicit {
@@ -616,7 +617,7 @@ impl<'a, P: Pixel> SliceDecoder<'a, '_, P> {
         &mut self,
         (x, y, w, h): (usize, usize, usize, usize),
         field: MvField,
-        refs: &[Option<Arc<Frame>>; 2],
+        refs: &[Option<&Frame>; 2],
         weights: Option<[[Wp; 2]; 3]>,
         bit_depth: u32,
     ) {

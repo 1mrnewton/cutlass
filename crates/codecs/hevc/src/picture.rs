@@ -524,7 +524,7 @@ impl Picture {
 
     /// Z-scan order of a luma position inside its CTB (clause 6.5.2).
     #[inline]
-    fn z_in_ctb(&self, x: usize, y: usize) -> u16 {
+    pub fn z_in_ctb(&self, x: usize, y: usize) -> u16 {
         let layout = &*self.layout;
         let mask = (1usize << layout.log2_ctb) - 1;
         let shift = layout.log2_min_tb;

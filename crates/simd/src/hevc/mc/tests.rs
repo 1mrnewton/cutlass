@@ -65,7 +65,7 @@ fn put_matches_the_specification() {
         .iter()
         .map(|&v| if v & 1 == 0 { 0 } else { 255 })
         .collect::<Vec<u8>>();
-    let mut tmp = vec![0i16; 71 * 64];
+    let mut tmp = super::Tmp::default();
     for plane in [&samples, &edges] {
         for &(w, h) in &[
             (4, 4),
@@ -221,6 +221,6 @@ fn blocks_too_close_to_the_end_are_refused() {
         len: 8,
     };
     let mut out = vec![0i16; 64];
-    let mut tmp = vec![0i16; 15 * 8];
+    let mut tmp = super::Tmp::default();
     assert!(!put(&mut out, 8, &src, (8, 8), &taps, &mut tmp));
 }

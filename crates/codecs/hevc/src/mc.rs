@@ -129,7 +129,7 @@ fn by_kernel<const T: usize, P: Pixel>(
     scratch: &mut Scratch<P>,
 ) -> bool {
     let (w, h) = (block.w.min(64), block.h.min(64));
-    let Scratch { win, tmp } = scratch;
+    let Scratch { win, rows, .. } = scratch;
     let Some((src, sstride)) = window::<T, P>(plane, block, win) else {
         return false;
     };
@@ -148,7 +148,7 @@ fn by_kernel<const T: usize, P: Pixel>(
         at: 0,
         stride: sstride,
     };
-    kernels::predict(dst, stride, &s, (w, h), &taps, tmp)
+    kernels::predict(dst, stride, &s, (w, h), &taps, rows)
 }
 
 const LUMA16: [[i16; 8]; 4] = {
@@ -183,6 +183,7 @@ const CHROMA16: [[i16; 4]; 8] = {
 pub struct Scratch<P> {
     win: Vec<P>,
     tmp: Vec<i16>,
+    rows: kernels::Tmp,
 }
 
 impl<P: Pixel> Default for Scratch<P> {
@@ -191,6 +192,7 @@ impl<P: Pixel> Default for Scratch<P> {
             // Slack past the window for the 16-sample loads of the kernels.
             win: vec![P::default(); WINDOW * WINDOW + 32],
             tmp: vec![0; WINDOW * 64],
+            rows: kernels::Tmp::default(),
         }
     }
 }
@@ -224,7 +226,7 @@ fn filter<const T: usize, P: Pixel>(
         return;
     }
     let inside = x0 >= 0 && y0 >= 0 && x0 + sw as isize <= pw && y0 + sh as isize <= ph.min(rows);
-    let Scratch { win, tmp } = scratch;
+    let Scratch { win, tmp, rows } = scratch;
     // The source rows: the reference itself, or a window with its edges
     // repeated when the block reaches outside.
     let (src, stride, base): (&[P], usize, usize) = if inside {
@@ -250,7 +252,7 @@ fn filter<const T: usize, P: Pixel>(
             at: base,
             stride,
         };
-        if kernels::put(out, w, &s, (w, h), &taps, tmp) {
+        if kernels::put(out, w, &s, (w, h), &taps, rows) {
             return;
         }
     }

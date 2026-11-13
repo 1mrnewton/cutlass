@@ -1175,67 +1175,90 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let mut refs = Refs::new(n);
         let constrained = self.pps.constrained_intra_pred;
         let pic: &Picture = self.pic;
-        // Availability is checked per 4 luma samples (2 chroma samples).
-        let unit = 4 / scale;
-        // The row above a band belongs to another worker: copy what this
-        // block may read of it once.
-        let mut line = [P::default(); 129];
-        let line_x = px.saturating_sub(1);
-        let from_line = py > 0 && !self.out.holds(c, py - 1);
-        if from_line {
-            let end = (px + 2 * n).min(plane_w);
-            self.out.above(c, line_x, &mut line[..end - line_x]);
-        }
-        let out = &self.out;
-        let above = |sx: usize| -> i32 {
-            if from_line {
-                line[sx - line_x].i()
-            } else {
-                out.get(c, sx, py - 1).i()
-            }
-        };
-        let check = |pic: &Picture, sx: isize, sy: isize| -> bool {
-            // sx, sy in component samples.
-            let lx = sx * scale as isize;
-            let ly = sy * scale as isize;
-            if !pic.available(x, y, lx, ly) {
+        // Availability (clause 6.4.1) of the 4×4 luma block at (lx, ly):
+        // inside this CTB by z-scan order, in another CTB by that CTB alone
+        // (the left, above-left, above and above-right CTBs are decoded
+        // before this one or not at all; those right and below are not).
+        let log2_ctb = pic.layout.log2_ctb;
+        let (cx, cy) = (x >> log2_ctb, y >> log2_ctb);
+        let here = pic.z_in_ctb(x, y);
+        let mut ctbs: [[Option<bool>; 3]; 2] = [[None; 3]; 2];
+        let mut avail = |lx: isize, ly: isize| -> bool {
+            if lx < 0 || ly < 0 || lx as usize >= pic.width || ly as usize >= pic.height {
                 return false;
             }
-            !constrained || pic.info.get(pic.at4(lx as usize, ly as usize)) & 3 == MODE_INTRA
+            let (lx, ly) = (lx as usize, ly as usize);
+            let (nx, ny) = (lx >> log2_ctb, ly >> log2_ctb);
+            let ok = if (nx, ny) == (cx, cy) {
+                pic.z_in_ctb(lx, ly) <= here
+            } else if ny > cy || (ny == cy && nx > cx) || nx + 1 < cx || nx > cx + 1 {
+                false
+            } else {
+                let slot = &mut ctbs[ny + 1 - cy][nx + 1 - cx];
+                *slot.get_or_insert_with(|| pic.available(x, y, lx as isize, ly as isize))
+            };
+            ok && (!constrained || pic.info.get(pic.at4(lx, ly)) & 3 == MODE_INTRA)
         };
-        // Left column, bottom to top, and the corner.
+        // Availability is checked per 4 luma samples (2 chroma samples).
+        let unit = 4 / scale;
         let ni = n as isize;
+        // The line above: from this CTB row, or the line the row above saved.
+        let mut line = [P::default(); 129];
+        let line_x = px.saturating_sub(1);
+        if py > 0 {
+            let end = (px + 2 * n).min(plane_w);
+            if self.out.holds(c, py - 1) {
+                let (row, _) = self.out.from(c, line_x, py - 1);
+                line[..end - line_x].copy_from_slice(&row[..end - line_x]);
+            } else {
+                self.out.above(c, line_x, &mut line[..end - line_x]);
+            }
+        }
+        let out = &self.out;
+        // Left column, bottom to top, and the corner.
         let mut yy = 2 * ni - 1;
         while yy >= 0 {
             let base = yy - (yy % unit as isize);
-            let ok = check(pic, px as isize - 1, py as isize + base);
-            for k in 0..unit as isize {
-                let sy = base + k;
-                let idx = refs.left(sy as i32);
-                if ok {
+            if avail(
+                (px as isize - 1) * scale as isize,
+                (py as isize + base) * scale as isize,
+            ) {
+                for k in 0..unit as isize {
+                    let sy = base + k;
+                    let idx = refs.left(sy as i32);
                     refs.samples[idx] = out.get(c, px - 1, py + sy as usize).i();
                     refs.available[idx] = true;
                 }
             }
             yy = base - 1;
         }
-        if check(pic, px as isize - 1, py as isize - 1) {
+        if px > 0
+            && py > 0
+            && avail(
+                (px as isize - 1) * scale as isize,
+                (py as isize - 1) * scale as isize,
+            )
+        {
             let idx = refs.left(-1);
-            refs.samples[idx] = above(px - 1);
+            refs.samples[idx] = line[px - 1 - line_x].i();
             refs.available[idx] = true;
         }
-        let mut xx = 0isize;
-        while xx < 2 * ni {
-            let ok = check(pic, px as isize + xx, py as isize - 1);
-            for k in 0..unit as isize {
-                let sx = xx + k;
-                let idx = refs.top(sx as i32);
-                if ok {
-                    refs.samples[idx] = above(px + sx as usize);
-                    refs.available[idx] = true;
+        if py > 0 {
+            let mut xx = 0isize;
+            while xx < 2 * ni {
+                if avail(
+                    (px as isize + xx) * scale as isize,
+                    (py as isize - 1) * scale as isize,
+                ) {
+                    for k in 0..unit as isize {
+                        let sx = xx + k;
+                        let idx = refs.top(sx as i32);
+                        refs.samples[idx] = line[px + sx as usize - line_x].i();
+                        refs.available[idx] = true;
+                    }
                 }
+                xx += unit as isize;
             }
-            xx += unit as isize;
         }
         let bit_depth = u32::from(self.sps.bit_depth);
         refs.substitute(bit_depth);
@@ -1675,6 +1698,10 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             return false;
         }
         let (px, py) = (px as usize, py as usize);
+        let log2 = self.pic.layout.log2_ctb;
+        if (px >> log2) == (x >> log2) && (py >> log2) == (y >> log2) {
+            return true;
+        }
         let p_ctb = self.pic.ctb_rs(px, py);
         let q_ctb = self.pic.ctb_rs(x, y);
         if p_ctb == q_ctb {
@@ -1748,6 +1775,12 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         }
         let pm = self.pic.mvf.get(p);
         let qm = self.pic.mvf.get(q);
+        // The same motion in the same slice: the same pictures and vectors.
+        let log2 = self.pic.layout.log2_ctb;
+        let same_ctb = (px >> log2) == (qx >> log2) && (py >> log2) == (qy >> log2);
+        if pm == qm && same_ctb {
+            return 0;
+        }
         let p_slice = self.pic.slice_of(px, py);
         let q_slice = &self.pic.slices[self.slice];
         let uid =

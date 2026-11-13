@@ -93,6 +93,11 @@ fn clip_name(draft: &Draft, segment: &Segment) -> String {
             text.words().unwrap_or_default().into_owned()
         }
         Some(MaterialRef::VideoEffect(effect)) if !effect.name.is_empty() => effect.name.clone(),
+        // A filter carries its name; an adjustment layer has none.
+        Some(MaterialRef::Effect(effect)) if !effect.name.is_empty() => effect.name.clone(),
+        Some(MaterialRef::Effect(effect)) if effect.kind == cutlass_effects::ADJUSTMENT => {
+            "Adjustment".to_owned()
+        }
         _ => segment.id.as_str().to_owned(),
     }
 }

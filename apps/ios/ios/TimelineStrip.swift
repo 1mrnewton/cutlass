@@ -178,7 +178,8 @@ struct TimelineStrip: View {
                 ? min(trimming?.dx ?? 0, x(clip.durationUs) - 4) : 0
         )
         .frame(width: max(width - 2, 2), height: height)
-        .overlay(alignment: .topLeading) {
+        // A clip that shows its name keeps the length below it.
+        .overlay(alignment: model.films[clip.id]?.isEmpty == false ? .topLeading : .bottomLeading) {
             if selected {
                 Text(String(format: "%.1fs", Double(shown) / 1_000_000))
                     .font(.system(size: 10, weight: .semibold).monospacedDigit())
@@ -187,7 +188,7 @@ struct TimelineStrip: View {
                     .padding(.vertical, 1)
                     .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 3))
                     .padding(.leading, lane.locked ? 4 : 16)
-                    .padding(.top, 4)
+                    .padding(.vertical, 4)
             }
         }
         .overlay {
@@ -464,7 +465,9 @@ struct ClipBlock: View {
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(.white.opacity(0.9))
                         .lineLimit(1)
-                        .padding(.horizontal, 6)
+                        // Clear of the trim grip while selected.
+                        .padding(.leading, selected ? 16 : 6)
+                        .padding(.trailing, 6)
                         .padding(.top, 4)
                 } else {
                     film

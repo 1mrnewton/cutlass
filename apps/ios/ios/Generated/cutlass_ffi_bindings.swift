@@ -661,10 +661,28 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 public protocol EditorProtocol: AnyObject, Sendable {
     
     /**
+     * Put an adjustment layer at `at_us`, its sliders at zero. One undo
+     * step. Returns the layer's id.
+     */
+    func addAdjustment(atUs: Int64) throws  -> String
+    
+    /**
+     * Run effect `effect_id` over the picture clip `clip_id` alone, for
+     * its span. One undo step. Returns the effect clip's id.
+     */
+    func addClipEffect(clipId: String, effectId: String) throws  -> String
+    
+    /**
      * Add the effect `effect_id` at `at_us` over everything below it, as
      * one undo step. Returns the new clip's id.
      */
     func addEffect(effectId: String, atUs: Int64) throws  -> String
+    
+    /**
+     * Put the filter layer `filter_id` at `at_us`, over every picture
+     * below it. One undo step. Returns the layer's id.
+     */
+    func addFilter(filterId: String, atUs: Int64) throws  -> String
     
     /**
      * Put a library picture at `at_us` on a row above main. Returns the clip.
@@ -676,6 +694,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * is empty, as one undo step. Returns the new clip's id.
      */
     func addText(content: String, face: String, atUs: Int64) throws  -> String
+    
+    /**
+     * Every adjust slider of `clip_id`, or `None` for a clip that has
+     * none.
+     */
+    func adjustSliders(clipId: String) throws  -> [AdjustSlider]?
     
     /**
      * The picture or title clip's in and out animations, or nil for a clip
@@ -698,6 +722,11 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * no row holds.
      */
     func clipBar(clipId: String) throws  -> ToolBar?
+    
+    /**
+     * The filter `clip_id` keeps, or a filter layer's own.
+     */
+    func clipFilter(clipId: String) throws  -> ClipFilter?
     
     /**
      * How `clip_id` stands at `at_us`, for its clip tools. `None` when no
@@ -843,6 +872,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func seek(timeUs: Int64) throws 
     
     /**
+     * Set adjust slider `key` of a picture clip or an adjustment layer to
+     * `value`. One undo step.
+     */
+    func setAdjust(clipId: String, key: String, value: Double) throws 
+    
+    /**
      * Give the clip the in (`enter`) or out animation `id`, `duration_us`
      * long, or clear that side with an empty id. One undo step.
      */
@@ -852,6 +887,13 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * Fill the canvas around the main pictures, as one undo step.
      */
     func setBackground(background: Background) throws 
+    
+    /**
+     * Give the picture clip `clip_id` the filter `filter_id`, swapping out
+     * the one it kept, or take it off with an empty id; a filter layer
+     * swaps in place. One undo step. Returns the new layer's id.
+     */
+    func setClipFilter(clipId: String, filterId: String) throws  -> String?
     
     /**
      * Crop the video to its middle at `ratio`, or show the whole frame
@@ -894,6 +936,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * Play a clip at a constant speed, as one undo step. Its length follows.
      */
     func setSpeed(clipId: String, speed: Double) throws 
+    
+    /**
+     * Set how strongly a filter, effect or adjustment works, 0 to 1. One
+     * undo step.
+     */
+    func setStrength(clipId: String, value: Double) throws 
     
     /**
      * Change what a text clip says, as one undo step.
@@ -1100,6 +1148,35 @@ public static func `open`(root: String, bundle: String, project: String)throws  
 
     
     /**
+     * Put an adjustment layer at `at_us`, its sliders at zero. One undo
+     * step. Returns the layer's id.
+     */
+open func addAdjustment(atUs: Int64)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_add_adjustment(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Run effect `effect_id` over the picture clip `clip_id` alone, for
+     * its span. One undo step. Returns the effect clip's id.
+     */
+open func addClipEffect(clipId: String, effectId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_add_clip_effect(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterString.lower(effectId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Add the effect `effect_id` at `at_us` over everything below it, as
      * one undo step. Returns the new clip's id.
      */
@@ -1109,6 +1186,21 @@ open func addEffect(effectId: String, atUs: Int64)throws  -> String  {
     uniffi_cutlass_ffi_bindings_fn_method_editor_add_effect(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(effectId),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Put the filter layer `filter_id` at `at_us`, over every picture
+     * below it. One undo step. Returns the layer's id.
+     */
+open func addFilter(filterId: String, atUs: Int64)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_add_filter(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(filterId),
         FfiConverterInt64.lower(atUs),uniffiCallStatus
     )
 })
@@ -1140,6 +1232,20 @@ open func addText(content: String, face: String, atUs: Int64)throws  -> String  
         FfiConverterString.lower(content),
         FfiConverterString.lower(face),
         FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Every adjust slider of `clip_id`, or `None` for a clip that has
+     * none.
+     */
+open func adjustSliders(clipId: String)throws  -> [AdjustSlider]?  {
+    return try  FfiConverterOptionSequenceTypeAdjustSlider.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_adjust_sliders(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),uniffiCallStatus
     )
 })
 }
@@ -1191,6 +1297,19 @@ open func clipBar(clipId: String)throws  -> ToolBar?  {
     return try  FfiConverterOptionTypeToolBar.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
         uniffiCallStatus in
     uniffi_cutlass_ffi_bindings_fn_method_editor_clip_bar(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The filter `clip_id` keeps, or a filter layer's own.
+     */
+open func clipFilter(clipId: String)throws  -> ClipFilter?  {
+    return try  FfiConverterOptionTypeClipFilter.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_clip_filter(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(clipId),uniffiCallStatus
     )
@@ -1554,6 +1673,21 @@ open func seek(timeUs: Int64)throws   {try rustCallWithError(FfiConverterTypeEdi
 }
     
     /**
+     * Set adjust slider `key` of a picture clip or an adjustment layer to
+     * `value`. One undo step.
+     */
+open func setAdjust(clipId: String, key: String, value: Double)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_adjust(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterString.lower(key),
+        FfiConverterDouble.lower(value),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Give the clip the in (`enter`) or out animation `id`, `duration_us`
      * long, or clear that side with an empty id. One undo step.
      */
@@ -1579,6 +1713,22 @@ open func setBackground(background: Background)throws   {try rustCallWithError(F
         FfiConverterTypeBackground_lower(background),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * Give the picture clip `clip_id` the filter `filter_id`, swapping out
+     * the one it kept, or take it off with an empty id; a filter layer
+     * swaps in place. One undo step. Returns the new layer's id.
+     */
+open func setClipFilter(clipId: String, filterId: String)throws  -> String?  {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_clip_filter(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterString.lower(filterId),uniffiCallStatus
+    )
+})
 }
     
     /**
@@ -1681,6 +1831,20 @@ open func setSpeed(clipId: String, speed: Double)throws   {try rustCallWithError
             self.uniffiCloneHandle(),
         FfiConverterString.lower(clipId),
         FfiConverterDouble.lower(speed),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Set how strongly a filter, effect or adjustment works, 0 to 1. One
+     * undo step.
+     */
+open func setStrength(clipId: String, value: Double)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_strength(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterDouble.lower(value),uniffiCallStatus
     )
 }
 }
@@ -2278,6 +2442,72 @@ public func FfiConverterTypeExportProgress_lower(_ value: ExportProgress) -> UIn
 
 
 /**
+ * One adjust slider and where it stands. `key` is what `set_adjust`
+ * takes; `min` is -1, or 0 for a slider that only adds; the top is 1.
+ */
+public struct AdjustSlider: Equatable, Hashable {
+    public var key: String
+    public var label: String
+    public var min: Double
+    public var value: Double
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(key: String, label: String, min: Double, value: Double) {
+        self.key = key
+        self.label = label
+        self.min = min
+        self.value = value
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension AdjustSlider: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAdjustSlider: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AdjustSlider {
+        return
+            try AdjustSlider(
+                key: FfiConverterString.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                min: FfiConverterDouble.read(from: &buf), 
+                value: FfiConverterDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AdjustSlider, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.key, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterDouble.write(value.min, into: &buf)
+        FfiConverterDouble.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAdjustSlider_lift(_ buf: RustBuffer) throws -> AdjustSlider {
+    return try FfiConverterTypeAdjustSlider.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAdjustSlider_lower(_ value: AdjustSlider) -> RustBuffer {
+    return FfiConverterTypeAdjustSlider.lower(value)
+}
+
+
+/**
  * One animation in the Animations panel.
  */
 public struct AnimationPreset: Equatable, Hashable {
@@ -2592,6 +2822,68 @@ public func FfiConverterTypeClipAnimations_lift(_ buf: RustBuffer) throws -> Cli
 #endif
 public func FfiConverterTypeClipAnimations_lower(_ value: ClipAnimations) -> RustBuffer {
     return FfiConverterTypeClipAnimations.lower(value)
+}
+
+
+/**
+ * The filter a clip keeps: its filter layer, the filter, and how strong
+ * it is, 0 to 1.
+ */
+public struct ClipFilter: Equatable, Hashable {
+    public var layerId: String
+    public var filterId: String
+    public var strength: Double
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(layerId: String, filterId: String, strength: Double) {
+        self.layerId = layerId
+        self.filterId = filterId
+        self.strength = strength
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ClipFilter: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeClipFilter: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ClipFilter {
+        return
+            try ClipFilter(
+                layerId: FfiConverterString.read(from: &buf), 
+                filterId: FfiConverterString.read(from: &buf), 
+                strength: FfiConverterDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ClipFilter, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.layerId, into: &buf)
+        FfiConverterString.write(value.filterId, into: &buf)
+        FfiConverterDouble.write(value.strength, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeClipFilter_lift(_ buf: RustBuffer) throws -> ClipFilter {
+    return try FfiConverterTypeClipFilter.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeClipFilter_lower(_ value: ClipFilter) -> RustBuffer {
+    return FfiConverterTypeClipFilter.lower(value)
 }
 
 
@@ -2943,6 +3235,73 @@ public func FfiConverterTypeFilm_lift(_ buf: RustBuffer) throws -> Film {
 #endif
 public func FfiConverterTypeFilm_lower(_ value: Film) -> RustBuffer {
     return FfiConverterTypeFilm.lower(value)
+}
+
+
+/**
+ * A filter the picker shows. `id` is what the filter calls take.
+ */
+public struct FilterChoice: Equatable, Hashable {
+    public var id: String
+    public var name: String
+    /**
+     * The picker tab it sits under.
+     */
+    public var category: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String, 
+        /**
+         * The picker tab it sits under.
+         */category: String) {
+        self.id = id
+        self.name = name
+        self.category = category
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FilterChoice: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFilterChoice: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FilterChoice {
+        return
+            try FilterChoice(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                category: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FilterChoice, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.category, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFilterChoice_lift(_ buf: RustBuffer) throws -> FilterChoice {
+    return try FfiConverterTypeFilterChoice.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFilterChoice_lower(_ value: FilterChoice) -> RustBuffer {
+    return FfiConverterTypeFilterChoice.lower(value)
 }
 
 
@@ -4453,6 +4812,8 @@ public enum ToolBar: Equatable, Hashable {
     case overlayClip
     case audioClip
     case textClip
+    case filterClip
+    case adjustClip
     case otherClip
     case audio
     case text
@@ -4489,15 +4850,19 @@ public struct FfiConverterTypeToolBar: FfiConverterRustBuffer {
         
         case 5: return .textClip
         
-        case 6: return .otherClip
+        case 6: return .filterClip
         
-        case 7: return .audio
+        case 7: return .adjustClip
         
-        case 8: return .text
+        case 8: return .otherClip
         
-        case 9: return .effects
+        case 9: return .audio
         
-        case 10: return .overlay
+        case 10: return .text
+        
+        case 11: return .effects
+        
+        case 12: return .overlay
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -4527,24 +4892,32 @@ public struct FfiConverterTypeToolBar: FfiConverterRustBuffer {
             writeInt(&buf, Int32(5))
         
         
-        case .otherClip:
+        case .filterClip:
             writeInt(&buf, Int32(6))
         
         
-        case .audio:
+        case .adjustClip:
             writeInt(&buf, Int32(7))
         
         
-        case .text:
+        case .otherClip:
             writeInt(&buf, Int32(8))
         
         
-        case .effects:
+        case .audio:
             writeInt(&buf, Int32(9))
         
         
-        case .overlay:
+        case .text:
             writeInt(&buf, Int32(10))
+        
+        
+        case .effects:
+            writeInt(&buf, Int32(11))
+        
+        
+        case .overlay:
+            writeInt(&buf, Int32(12))
         
         }
     }
@@ -4924,6 +5297,30 @@ fileprivate struct FfiConverterOptionTypeClipAnimations: FfiConverterRustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeClipFilter: FfiConverterRustBuffer {
+    typealias SwiftType = ClipFilter?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeClipFilter.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeClipFilter.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeClipState: FfiConverterRustBuffer {
     typealias SwiftType = ClipState?
 
@@ -5068,6 +5465,30 @@ fileprivate struct FfiConverterOptionTypeToolBar: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionSequenceTypeAdjustSlider: FfiConverterRustBuffer {
+    typealias SwiftType = [AdjustSlider]?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterSequenceTypeAdjustSlider.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterSequenceTypeAdjustSlider.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceUInt32: FfiConverterRustBuffer {
     typealias SwiftType = [UInt32]
 
@@ -5193,6 +5614,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeAdjustSlider: FfiConverterRustBuffer {
+    typealias SwiftType = [AdjustSlider]
+
+    public static func write(_ value: [AdjustSlider], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAdjustSlider.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AdjustSlider] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AdjustSlider]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAdjustSlider.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeAnimationPreset: FfiConverterRustBuffer {
     typealias SwiftType = [AnimationPreset]
 
@@ -5310,6 +5756,31 @@ fileprivate struct FfiConverterSequenceTypeFilm: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeFilm.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFilterChoice: FfiConverterRustBuffer {
+    typealias SwiftType = [FilterChoice]
+
+    public static func write(_ value: [FilterChoice], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFilterChoice.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FilterChoice] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FilterChoice]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFilterChoice.read(from: &buf))
         }
         return seq
     }
@@ -5599,6 +6070,30 @@ public func exportSides() -> [UInt32]  {
 })
 }
 /**
+ * The filters that ship in the app, in picker order.
+ */
+public func filterChoices() -> [FilterChoice]  {
+    return try!  FfiConverterSequenceTypeFilterChoice.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_filter_choices(uniffiCallStatus
+    )
+})
+}
+/**
+ * The filter `filter_id` over its own preview scene, `width` by `height`,
+ * for its picker tile. `None` for a filter the app does not ship.
+ */
+public func filterPoster(filterId: String, width: UInt32, height: UInt32) -> Frame?  {
+    return try!  FfiConverterOptionTypeFrame.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_filter_poster(
+        FfiConverterString.lower(filterId),
+        FfiConverterUInt32.lower(width),
+        FfiConverterUInt32.lower(height),uniffiCallStatus
+    )
+})
+}
+/**
  * The speed, in points a second, a timeline let go at `velocity` coasts
  * from: zero for a slow swipe.
  */
@@ -5777,6 +6272,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_func_export_sides() != 28968) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_filter_choices() != 57540) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_filter_poster() != 21732) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_func_fling_start() != 16462) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5813,13 +6314,25 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_func_volume_position() != 27181) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_adjustment() != 38275) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_clip_effect() != 39842) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_effect() != 55608) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_filter() != 22333) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_overlay() != 34969) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_text() != 17542) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_adjust_sliders() != 45831) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_animations() != 53700) {
@@ -5832,6 +6345,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_bar() != 29840) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_filter() != 57581) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_state() != 1119) {
@@ -5915,10 +6431,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_seek() != 51490) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_adjust() != 27641) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_animation() != 15913) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_background() != 52021) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_clip_filter() != 8368) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_crop() != 19401) {
@@ -5943,6 +6465,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_speed() != 10406) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_strength() != 31174) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_text() != 55482) {

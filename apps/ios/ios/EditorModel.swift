@@ -49,6 +49,14 @@ final class EditorModel {
     private(set) var clipState: ClipState?
     /// Whether clips on other rows move and go with the main clip under them.
     private(set) var linkage = false
+    /// The Filters panel's filters; they never change.
+    let filterList = filterChoices()
+    /// The filter the selected clip keeps, or a selected filter layer's own.
+    private(set) var clipFilter: ClipFilter?
+    /// The selected picture's or adjustment layer's sliders.
+    private(set) var adjustSliders: [AdjustSlider]?
+    /// Filter tile pictures by filter id, drawn by Rust once each.
+    private(set) var posters: [String: CGImage] = [:]
 
     /// Points per microsecond on the timeline. Rust holds it inside what
     /// the cut allows.
@@ -307,6 +315,68 @@ final class EditorModel {
         if let added { selectedClip = added }
     }
 
+    /// Run `effect` over the selected picture alone, for its span.
+    func addClipEffect(_ effect: String) {
+        guard let clip = selectedClip else { return }
+        pause()
+        edit { _ = try $0.addClipEffect(clipId: clip, effectId: effect) }
+    }
+
+    // MARK: Filters and adjust
+
+    /// Pick `filter` (empty for none): on the selected picture or filter
+    /// layer it takes the place of the one there; with nothing selected a
+    /// filter layer goes at the playhead and is selected.
+    func pickFilter(_ filter: String) {
+        pause()
+        if let clip = selectedClip {
+            var placed: String?
+            edit { placed = try $0.setClipFilter(clipId: clip, filterId: filter) }
+            // A filter layer swapped in place is a new clip: select it.
+            if let placed, selectedClip == nil { selectedClip = placed }
+        } else if !filter.isEmpty {
+            var added: String?
+            edit { added = try $0.addFilter(filterId: filter, atUs: playheadUs) }
+            if let added { selectedClip = added }
+        }
+    }
+
+    /// How strong the kept filter is, 0 to 1.
+    func setFilterStrength(_ value: Double) {
+        guard let layer = clipFilter?.layerId else { return }
+        edit { try $0.setStrength(clipId: layer, value: value) }
+    }
+
+    /// Put an adjustment layer at the playhead and select it.
+    func addAdjustment() {
+        pause()
+        var added: String?
+        edit { added = try $0.addAdjustment(atUs: playheadUs) }
+        if let added { selectedClip = added }
+    }
+
+    func setAdjust(_ key: String, _ value: Double) {
+        guard let clip = selectedClip else { return }
+        edit { try $0.setAdjust(clipId: clip, key: key, value: value) }
+    }
+
+    /// The tile picture for `filter`, drawn off the main thread once.
+    func poster(_ filter: String) -> CGImage? {
+        if let image = posters[filter] { return image }
+        if !drawingPosters.contains(filter) {
+            drawingPosters.insert(filter)
+            Task.detached(priority: .utility) {
+                let image = filterPoster(filterId: filter, width: 120, height: 120)?.image
+                await MainActor.run {
+                    if let image { self.posters[filter] = image }
+                }
+            }
+        }
+        return nil
+    }
+
+    private var drawingPosters: Set<String> = []
+
     // MARK: Text
 
     /// Type into `clip` as the words change, or add a title at the playhead
@@ -555,6 +625,8 @@ final class EditorModel {
         keys = selectedClip.flatMap { clip in try? editor?.keyframes(clipId: clip, atUs: at) }
         animations = selectedClip.flatMap { clip in try? editor?.animations(clipId: clip) }
         clipState = selectedClip.flatMap { clip in try? editor?.clipState(clipId: clip, atUs: at) }
+        clipFilter = selectedClip.flatMap { clip in try? editor?.clipFilter(clipId: clip) }
+        adjustSliders = selectedClip.flatMap { clip in try? editor?.adjustSliders(clipId: clip) }
     }
 
     /// The keyframe button: remove the keyframe under the playhead, else key

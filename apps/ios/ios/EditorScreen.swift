@@ -22,6 +22,7 @@ struct EditorScreen: View {
     enum Panel: Equatable {
         case volume, speed, effects, ratio, background, graphs, animations
         case crop, opacity, fade
+        case filters, adjust, clipEffects
         /// Add text, or change the text clip with this id.
         case text(String?)
     }
@@ -74,7 +75,8 @@ struct EditorScreen: View {
             }
         }
         .onChange(of: model.selectedClip) { _, id in
-            if id == nil, panel != .text(nil), panel != .effects, panel != .ratio, panel != .background { panel = nil }
+            let stays: [Panel] = [.text(nil), .effects, .ratio, .background, .filters]
+            if id == nil, let open = panel, !stays.contains(open) { panel = nil }
         }
         .onDisappear { model.pause() }
         .sheet(isPresented: $exporting) {
@@ -199,6 +201,19 @@ struct EditorScreen: View {
         } else if panel == .graphs {
             GraphsPanel(model: model) { self.panel = nil }
                 .transition(.move(edge: .bottom))
+        } else if panel == .filters {
+            FiltersPanel(model: model) { self.panel = nil }
+                .transition(.move(edge: .bottom))
+        } else if panel == .adjust, model.adjustSliders != nil {
+            AdjustPanel(model: model) { self.panel = nil }
+                .id(model.selectedClip)
+                .transition(.move(edge: .bottom))
+        } else if panel == .clipEffects, let clip = model.selectedClip {
+            EffectsPanel(model: model, title: "Effects", pick: { model.addClipEffect($0) }) {
+                self.panel = nil
+            }
+            .id(clip)
+            .transition(.move(edge: .bottom))
         } else if case let .text(clip) = panel {
             TextPanel(model: model, clip: clip) { self.panel = nil }
                 .id(clip ?? "new")
@@ -211,7 +226,8 @@ struct EditorScreen: View {
                 case .crop: CropPanel(model: model) { self.panel = nil }
                 case .opacity: OpacityPanel(model: model) { self.panel = nil }
                 case .fade: FadePanel(model: model, clip: clip) { self.panel = nil }
-                case .text, .effects, .ratio, .background, .graphs, .animations: EmptyView()
+                case .text, .effects, .ratio, .background, .graphs, .animations,
+                     .filters, .adjust, .clipEffects: EmptyView()
                 }
             }
             .transition(.move(edge: .bottom))
@@ -267,6 +283,11 @@ struct EditorScreen: View {
         case .splice: model.toMain()
         case .addOverlay: pickingOverlay = true
         case .importSound: pickingSound = true
+        case .filters: panel = .filters
+        case .adjust:
+            if model.selectedClip == nil { model.addAdjustment() }
+            panel = .adjust
+        case .effects: panel = .clipEffects
         default: model.say("\(tool.label) is coming soon")
         }
     }

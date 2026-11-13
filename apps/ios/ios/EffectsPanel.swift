@@ -7,6 +7,9 @@ import UIKit
 /// clip below it.
 struct EffectsPanel: View {
     let model: EditorModel
+    var title = "Video effects"
+    /// What a tap does; adding at the playhead when nil.
+    var pick: ((String) -> Void)?
     let close: () -> Void
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 4)
@@ -14,7 +17,7 @@ struct EffectsPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Video effects")
+                Text(title)
                     .font(.subheadline.weight(.semibold))
                 Spacer()
                 Button(action: close) {
@@ -28,7 +31,7 @@ struct EffectsPanel: View {
                 LazyVGrid(columns: columns, spacing: 12) {
                     ForEach(model.effects, id: \.id) { effect in
                         Button {
-                            model.addEffect(effect.id)
+                            if let pick { pick(effect.id) } else { model.addEffect(effect.id) }
                             close()
                         } label: {
                             VStack(spacing: 5) {

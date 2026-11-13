@@ -3058,6 +3058,15 @@ mod tests {
             .expect("placed");
         let kept = host.clip_filter(&first).unwrap();
         assert_eq!(kept.segment_id, layer);
+        let name = |host: &PhoneHost, id: &cutlass_session::SegmentId| {
+            host.lanes()
+                .into_iter()
+                .flat_map(|lane| lane.clips)
+                .find(|clip| &clip.id == id)
+                .unwrap()
+                .name
+        };
+        assert_eq!(name(&host, &layer), filters[0].name);
         assert_eq!(kept.filter_id, filters[0].id);
         assert_eq!(kept.strength, 1.0);
         let span = |host: &PhoneHost, id: &cutlass_session::SegmentId| {
@@ -3123,6 +3132,14 @@ mod tests {
         assert_eq!(host.revision(), revision);
 
         let layer = host.add_adjustment(Micros(0)).unwrap();
+        let named = host
+            .lanes()
+            .into_iter()
+            .flat_map(|lane| lane.clips)
+            .find(|clip| clip.id == layer)
+            .unwrap()
+            .name;
+        assert_eq!(named, "Adjustment");
         host.set_adjust(&layer, "temperature", 0.5).unwrap();
         assert!((value(&host, &layer, "temperature") - 0.5).abs() < 1e-6);
         host.undo().unwrap();

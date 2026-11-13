@@ -105,7 +105,7 @@ pub use library::{
     next_folder_name, parent_of, picked_files, place, rename_folder,
 };
 pub use media_place::{MediaPlace, extract_request, media_requests, sound_row};
-pub use pen::{PEN_DRAG_MIN, PenPath, PenPress};
+pub use pen::{FREEHAND_TOLERANCE, PEN_DRAG_MIN, PenPath, PenPress, freehand};
 pub use project_choices::{
     COLOR_SPACES, PROJECT_RATES, PROJECT_RATIOS, PROJECT_RESOLUTIONS, ProjectSettings,
     color_space_name, is_drop_rate, next_canvas, next_color_space, next_rate, project_canvas,

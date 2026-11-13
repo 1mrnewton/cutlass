@@ -178,6 +178,89 @@ impl PenPath {
     }
 }
 
+/// How far, in canvas pixels, a freehand stroke may stray from the line
+/// that stands in for it before a point is kept.
+pub const FREEHAND_TOLERANCE: f64 = 2.0;
+
+/// A finger's freehand stroke through `trace`, canvas pixels from the top
+/// left, y down, as a smooth open path in the shape's frame for a
+/// `DrawShape` on a `canvas` sized canvas: the trace thinned to the points
+/// that shape it, each with handles that carry the curve smoothly through.
+/// None for a stroke that does not go anywhere.
+#[must_use]
+pub fn freehand(trace: &[[f64; 2]], canvas: (i32, i32)) -> Option<Vec<ShapePoint>> {
+    let trace: Vec<[f64; 2]> = trace
+        .iter()
+        .copied()
+        .filter(|point| point.iter().all(|value| value.is_finite()))
+        .collect();
+    let mut kept = vec![true; trace.len()];
+    thin(&trace, 0, trace.len().checked_sub(1)?, &mut kept);
+    let points: Vec<[f64; 2]> = trace
+        .iter()
+        .zip(&kept)
+        .filter(|(_, keep)| **keep)
+        .map(|(point, _)| *point)
+        .collect();
+    let first = *trace.first()?;
+    let reach = trace
+        .iter()
+        .map(|point| distance(first, *point))
+        .fold(0.0, f64::max);
+    if points.len() < 2 || reach < PEN_DRAG_MIN {
+        return None;
+    }
+    let mut path = PenPath::new();
+    path.points = points
+        .iter()
+        .enumerate()
+        .map(|(index, at)| {
+            // A Catmull-Rom tangent: a sixth of the way from the point
+            // before to the point after.
+            let before = points[index.saturating_sub(1)];
+            let after = points[(index + 1).min(points.len() - 1)];
+            let tangent = [(after[0] - before[0]) / 6.0, (after[1] - before[1]) / 6.0];
+            ShapePoint {
+                at: *at,
+                handle_in: [-tangent[0], -tangent[1]],
+                handle_out: tangent,
+                round: 0.0,
+            }
+        })
+        .collect();
+    path.finish(canvas).map(|(points, _)| points)
+}
+
+/// Mark the points between `from` and `to` to drop where they sit within
+/// [`FREEHAND_TOLERANCE`] of the line between them (Ramer-Douglas-Peucker).
+fn thin(trace: &[[f64; 2]], from: usize, to: usize, kept: &mut [bool]) {
+    if to <= from + 1 {
+        return;
+    }
+    let (a, b) = (trace[from], trace[to]);
+    let length = distance(a, b);
+    let off = |p: [f64; 2]| {
+        if length < f64::EPSILON {
+            distance(a, p)
+        } else {
+            ((b[0] - a[0]) * (a[1] - p[1]) - (a[0] - p[0]) * (b[1] - a[1])).abs() / length
+        }
+    };
+    let (far, gap) =
+        (from + 1..to)
+            .map(|index| (index, off(trace[index])))
+            .fold(
+                (from, 0.0),
+                |best, next| if next.1 > best.1 { next } else { best },
+            );
+    if gap > FREEHAND_TOLERANCE {
+        thin(trace, from, far, kept);
+        thin(trace, far, to, kept);
+    } else {
+        kept[from + 1..to].iter_mut().for_each(|keep| *keep = false);
+    }
+}
+
 fn cubic(from: ShapePoint, to: ShapePoint) -> [[f64; 2]; 4] {
     let add = |p: [f64; 2], d: [f64; 2]| [p[0] + d[0], p[1] + d[1]];
     [
@@ -195,6 +278,35 @@ fn distance(a: [f64; 2], b: [f64; 2]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_freehand_stroke_keeps_the_points_that_shape_it_and_runs_smoothly() {
+        // A straight stroke thins to its two ends.
+        let line: Vec<[f64; 2]> = (0..=50).map(|x| [f64::from(x) * 4.0, 100.0]).collect();
+        let straight = freehand(&line, (400, 200)).unwrap();
+        assert_eq!(straight.len(), 2);
+        assert_eq!(straight[0].at, [-200.0, 0.0]);
+        assert_eq!(straight[1].at, [0.0, 0.0]);
+
+        // A V keeps its bend, and the bend's handles point along the stroke.
+        let mut vee: Vec<[f64; 2]> = (0..=20)
+            .map(|i| [f64::from(i) * 5.0, f64::from(i) * 5.0])
+            .collect();
+        vee.extend((1..=20).map(|i| [100.0 + f64::from(i) * 5.0, 100.0 - f64::from(i) * 5.0]));
+        let bent = freehand(&vee, (200, 200)).unwrap();
+        assert_eq!(bent.len(), 3);
+        assert_eq!(bent[1].at, [0.0, 0.0]);
+        assert_eq!(
+            bent[1].handle_out,
+            [-bent[1].handle_in[0], -bent[1].handle_in[1]]
+        );
+        assert!(bent[1].handle_out[0] > 0.0);
+
+        // A tap, or nothing at all, draws nothing.
+        assert!(freehand(&[[10.0, 10.0], [11.0, 10.5]], (100, 100)).is_none());
+        assert!(freehand(&[], (100, 100)).is_none());
+        assert!(freehand(&[[f64::NAN, 0.0]], (100, 100)).is_none());
+    }
 
     #[test]
     fn clicks_make_corners_and_a_drag_pulls_mirrored_handles() {

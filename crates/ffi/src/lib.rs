@@ -18,6 +18,7 @@ mod error;
 mod export;
 mod host;
 mod keys;
+mod layer;
 mod look;
 mod media;
 mod player;
@@ -54,6 +55,7 @@ pub use error::FfiError;
 pub use export::{PHONE_EXPORT_SIDES, PhoneExport, encoders};
 pub use host::Commands;
 pub use keys::{PhoneGraph, PhoneKeys, graphs};
+pub use layer::{PhoneShape, PhoneSticker, phone_shapes, phone_stickers, sticker_poster};
 pub use look::{
     PhoneAdjust, PhoneClipFilter, PhoneFilter, adjust_sliders, clip_filter, phone_filters,
 };
@@ -319,6 +321,91 @@ impl PhoneHost {
             medium: media::imported(&id, stored, probed),
         };
         if let Err(error) = self.apply(self.revision(), &[request]) {
+            let _ = std::fs::remove_file(copy);
+            return Err(error);
+        }
+        Ok(id)
+    }
+
+    /// Play the file at `source` in `segment_id` in place of its media,
+    /// keeping the clip's place and edits, as one undo step. A picture
+    /// takes a photo or video and a sound a sound; the file must be as
+    /// long as the part the clip plays. A refusal leaves no copy behind.
+    pub fn replace_file(&mut self, segment_id: &SegmentId, source: &Path) -> Result<(), FfiError> {
+        let (_, track) = clip::unlocked(self.draft(), segment_id)?;
+        let wants_picture = matches!(track.kind, TrackType::Video);
+        if !wants_picture && track.kind != TrackType::Audio {
+            return Err(FfiError::Refused {
+                reason: "only a photo, video or sound clip can be replaced".to_owned(),
+            });
+        }
+        let probed = cutlass_probe::probe(source).map_err(|error| FfiError::Refused {
+            reason: error.to_string(),
+        })?;
+        media::check(&probed)?;
+        if matches!(probed, Probed::Video { .. }) != wants_picture {
+            return Err(FfiError::Refused {
+                reason: if wants_picture {
+                    "a picture clip takes a photo or a video".to_owned()
+                } else {
+                    "a sound clip takes a sound".to_owned()
+                },
+            });
+        }
+        let id = media::fresh(&media::ids(self.draft()), "mat");
+        let (stored, copy) = media::copy_in(self.root(), source)?;
+        let requests = [
+            Request::Import {
+                medium: media::imported(&id, stored, probed),
+            },
+            Request::ReplaceMedia {
+                segment_id: segment_id.clone(),
+                material_id: cutlass_model::MaterialId::new(id),
+            },
+        ];
+        if let Err(error) = self.apply(self.revision(), &requests) {
+            let _ = std::fs::remove_file(copy);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Bring in the sound of the video at `source` as a sound in the
+    /// library, without its picture. Returns the new material id, for
+    /// [`Self::append`]. A photo or a video with no sound is refused.
+    pub fn import_sound_of(&mut self, source: &Path) -> Result<String, FfiError> {
+        let probed = cutlass_probe::probe(source).map_err(|error| FfiError::Refused {
+            reason: error.to_string(),
+        })?;
+        let duration = match probed {
+            Probed::Video { meta, duration, .. } if meta != cutlass_model::MetaType::Photo => {
+                duration
+            }
+            _ => {
+                return Err(FfiError::Refused {
+                    reason: "pick a video to take its sound".to_owned(),
+                });
+            }
+        };
+        if !self
+            .preview
+            .readers()
+            .carries_sound(source)
+            .unwrap_or(false)
+        {
+            return Err(FfiError::Refused {
+                reason: "the video has no sound".to_owned(),
+            });
+        }
+        let id = media::fresh(&media::ids(self.draft()), "mat");
+        let (stored, copy) = media::copy_in(self.root(), source)?;
+        let mut medium = media::imported(&id, stored, Probed::Audio { duration });
+        if let cutlass_session::ImportedMedium::Audio(audio) = &mut medium {
+            cutlass_model::MetaType::ExtractMusic
+                .as_str()
+                .clone_into(&mut audio.kind);
+        }
+        if let Err(error) = self.apply(self.revision(), &[Request::Import { medium }]) {
             let _ = std::fs::remove_file(copy);
             return Err(error);
         }
@@ -741,6 +828,33 @@ impl PhoneHost {
     pub fn add_adjustment(&mut self, at: Micros) -> Result<SegmentId, FfiError> {
         let (request, segment_id) = look::adjustment_request(self.draft(), at);
         self.apply(self.revision(), &[request])?;
+        Ok(segment_id)
+    }
+
+    /// Put sticker `id` at `at` on the first sticker row with room, else
+    /// on a new one, as one undo step: an animation lasts whole rounds.
+    /// Its file is written into the project the first time.
+    pub fn add_sticker(&mut self, id: &str, at: Micros) -> Result<SegmentId, FfiError> {
+        let (requests, segment_id) =
+            layer::sticker_at_requests(self.draft(), self.root(), id, at, self.linkage().enabled)?;
+        self.apply(self.revision(), &requests)?;
+        Ok(segment_id)
+    }
+
+    /// Put shape `card_id` at `at` on the first sticker row with room,
+    /// else on a new one, as one undo step.
+    pub fn add_shape(&mut self, card_id: &str, at: Micros) -> Result<SegmentId, FfiError> {
+        let (requests, segment_id) = layer::shape_at_request(self.draft(), card_id, at)?;
+        self.apply(self.revision(), &requests)?;
+        Ok(segment_id)
+    }
+
+    /// Put a freehand stroke through `trace`, canvas pixels from the top
+    /// left, y down, at `at` as a smooth line on a sticker row: one undo
+    /// step. A stroke that goes nowhere is refused.
+    pub fn draw_stroke(&mut self, trace: &[[f64; 2]], at: Micros) -> Result<SegmentId, FfiError> {
+        let (requests, segment_id) = layer::stroke_request(self.draft(), trace, at)?;
+        self.apply(self.revision(), &requests)?;
         Ok(segment_id)
     }
 
@@ -2470,6 +2584,141 @@ mod tests {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
         fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn stickers_shapes_and_strokes_go_on_a_sticker_row_at_the_playhead() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        two_stills(&mut host);
+        let stickers = crate::phone_stickers();
+        assert!(stickers.iter().any(|sticker| sticker.animated));
+        let still = stickers.iter().find(|sticker| !sticker.animated).unwrap();
+        let poster = crate::sticker_poster(&still.id, 64).unwrap();
+        assert_eq!(poster.rgba.len(), 64 * 64 * 4);
+        assert!(crate::sticker_poster("nope", 64).is_none());
+
+        let row_of = |host: &PhoneHost, id: &cutlass_session::SegmentId| {
+            crate::clip::locate(host.draft(), id)
+                .unwrap()
+                .1
+                .kind
+                .clone()
+        };
+        let placed = host.add_sticker(&still.id, Micros(500_000)).unwrap();
+        assert_eq!(row_of(&host, &placed), crate::TrackType::Sticker);
+        let (segment, _) = crate::clip::locate(host.draft(), &placed).unwrap();
+        assert_eq!(segment.target.start, Micros(500_000));
+        assert!(
+            host.root()
+                .join("Resources")
+                .join(format!("sticker-{}.png", still.id))
+                .is_file()
+        );
+        let again = host.add_sticker(&still.id, Micros(500_000)).unwrap();
+        assert_ne!(
+            crate::clip::locate(host.draft(), &again).unwrap().1.id,
+            crate::clip::locate(host.draft(), &placed).unwrap().1.id
+        );
+        assert!(host.add_sticker("nope", Micros(0)).is_err());
+
+        let shapes = crate::phone_shapes();
+        assert_eq!(shapes.len(), 7);
+        let shape = host.add_shape(&shapes[1].id, Micros(0)).unwrap();
+        assert_eq!(row_of(&host, &shape), crate::TrackType::Sticker);
+        assert!(host.add_shape("shape:Hexagon", Micros(0)).is_err());
+
+        let trace: Vec<[f64; 2]> = (0..40)
+            .map(|i| [100.0 + f64::from(i) * 10.0, 200.0 + f64::from(i % 10) * 8.0])
+            .collect();
+        let stroke = host.draw_stroke(&trace, Micros(0)).unwrap();
+        assert_eq!(row_of(&host, &stroke), crate::TrackType::Sticker);
+        // A sticker shows its own name and a shape its kind, not a file
+        // or an id.
+        let name_of = |host: &PhoneHost, id: &cutlass_session::SegmentId| {
+            host.lanes()
+                .into_iter()
+                .flat_map(|lane| lane.clips)
+                .find(|clip| &clip.id == id)
+                .unwrap()
+                .name
+        };
+        assert_eq!(name_of(&host, &placed), still.name);
+        assert_eq!(name_of(&host, &shape), shapes[1].name);
+        let revision = host.revision();
+        assert!(host.draw_stroke(&[[5.0, 5.0]], Micros(0)).is_err());
+        assert_eq!(host.revision(), revision);
+        host.undo().unwrap();
+        assert!(crate::clip::locate(host.draft(), &stroke).is_none());
+    }
+
+    #[test]
+    fn the_sound_of_a_video_comes_in_alone_and_a_sound_or_photo_is_refused() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let sound = temp.path.join("tone.wav");
+        tone(&sound, 1);
+        assert!(host.import_sound_of(&sound).is_err());
+        assert!(host.import_sound_of(&fixture("pattern.png")).is_err());
+        let local = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        // A movie with only a picture, and one with sound (AAC).
+        let silent = local.join("16929689_1920_1080_30fps.mp4");
+        let heard = local.join("7688387224072670472.mp4");
+        if !silent.is_file() || !heard.is_file() {
+            return;
+        }
+        assert!(matches!(
+            host.import_sound_of(&silent),
+            Err(FfiError::Refused { reason }) if reason == "the video has no sound"
+        ));
+        let material = host.import_sound_of(&heard).unwrap();
+        let clip = host.append(&material).unwrap();
+        assert_eq!(
+            crate::clip::locate(host.draft(), &clip).unwrap().1.kind,
+            crate::TrackType::Audio
+        );
+    }
+
+    #[test]
+    fn replace_swaps_a_clips_file_in_one_step_and_refuses_the_wrong_kind() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (first, _) = two_stills(&mut host);
+        let material = |host: &PhoneHost| {
+            crate::clip::locate(host.draft(), &first)
+                .unwrap()
+                .0
+                .material_id
+                .clone()
+        };
+        let stored = |host: &PhoneHost| {
+            fs::read_dir(host.root().join("Resources")).map_or(0, |entries| entries.count())
+        };
+        let before = material(&host);
+        let span = crate::clip::locate(host.draft(), &first)
+            .unwrap()
+            .0
+            .target
+            .clone();
+        host.replace_file(&first, &fixture("pattern.png")).unwrap();
+        assert_ne!(material(&host), before);
+        assert_eq!(
+            crate::clip::locate(host.draft(), &first).unwrap().0.target,
+            span
+        );
+        host.undo().unwrap();
+        assert_eq!(material(&host), before);
+
+        let sound = temp.path.join("tone.wav");
+        tone(&sound, 1);
+        let files = stored(&host);
+        let revision = host.revision();
+        assert!(host.replace_file(&first, &sound).is_err());
+        assert_eq!(host.revision(), revision);
+        assert_eq!(stored(&host), files);
     }
 
     #[test]

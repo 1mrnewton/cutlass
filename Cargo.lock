@@ -2783,6 +2783,7 @@ dependencies = [
  "cutlass-renderer-software",
  "cutlass-riff",
  "cutlass-session",
+ "cutlass-stickers",
  "cutlass-still",
  "cutlass-storage",
  "cutlass-store",

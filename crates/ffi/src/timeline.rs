@@ -87,12 +87,17 @@ fn clip_name(draft: &Draft, segment: &Segment) -> String {
         )
     };
     match draft.materials.get(segment.material_id.as_str()) {
-        Some(MaterialRef::Video(video)) if !video.path.is_empty() => file(&video.path),
+        // A sticker from the shelf shows its own name, not its file's.
+        Some(MaterialRef::Video(video)) if !video.path.is_empty() => {
+            let name = file(&video.path);
+            cutlass_stickers::sticker_of_file(&name).map_or(name, |sticker| sticker.name.to_owned())
+        }
         Some(MaterialRef::Audio(audio)) if !audio.path.is_empty() => file(&audio.path),
         Some(MaterialRef::Text(text)) if text.words().is_some_and(|words| !words.is_empty()) => {
             text.words().unwrap_or_default().into_owned()
         }
         Some(MaterialRef::VideoEffect(effect)) if !effect.name.is_empty() => effect.name.clone(),
+        Some(MaterialRef::Shape(shape)) if !shape.name.is_empty() => shape.name.clone(),
         // A filter carries its name; an adjustment layer has none.
         Some(MaterialRef::Effect(effect)) if !effect.name.is_empty() => effect.name.clone(),
         Some(MaterialRef::Effect(effect)) if effect.kind == cutlass_effects::ADJUSTMENT => {

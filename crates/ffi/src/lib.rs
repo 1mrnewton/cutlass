@@ -25,6 +25,7 @@ mod media;
 mod player;
 mod preview;
 mod project;
+mod shape;
 mod stage;
 mod strip;
 mod text;
@@ -69,6 +70,7 @@ pub use look::{
 pub use player::PhonePlayer;
 pub use preview::{Picture, Preview};
 pub use project::Project;
+pub use shape::{PhoneShapeStyle, SHAPE_STYLE_RANGES, ShapeStyleChange, ShapeStyleRanges};
 pub use stage::PhoneStage;
 pub use strip::{PhoneFilm, PhoneTick, PhoneTile, PhoneWave, Strip};
 pub use text::{
@@ -871,12 +873,38 @@ impl PhoneHost {
     }
 
     /// Put a freehand stroke through `trace`, canvas pixels from the top
-    /// left, y down, at `at` as a smooth line on a sticker row: one undo
-    /// step. A stroke that goes nowhere is refused.
-    pub fn draw_stroke(&mut self, trace: &[[f64; 2]], at: Micros) -> Result<SegmentId, FfiError> {
-        let (requests, segment_id) = layer::stroke_request(self.draft(), trace, at)?;
+    /// left, y down, at `at` as a smooth line on a sticker row, `color`
+    /// (`#RRGGBB`) and `width` canvas pixels wide: one undo step. A stroke
+    /// that goes nowhere is refused.
+    pub fn draw_stroke(
+        &mut self,
+        trace: &[[f64; 2]],
+        at: Micros,
+        color: &str,
+        width: f64,
+    ) -> Result<SegmentId, FfiError> {
+        let (mut requests, segment_id) = layer::stroke_request(self.draft(), trace, at)?;
+        requests.push(shape::pen_request(&segment_id, color, width));
         self.apply(self.revision(), &requests)?;
         Ok(segment_id)
+    }
+
+    /// How `segment_id` looks, or `None` when it is not a shape.
+    #[must_use]
+    pub fn shape_style(&self, segment_id: &SegmentId) -> Option<PhoneShapeStyle> {
+        shape::style_of(self.draft(), segment_id)
+    }
+
+    /// Change how shape `segment_id` looks. Changes made while `live` join
+    /// one undo step, as for [`Self::style_text`].
+    pub fn style_shape(
+        &mut self,
+        segment_id: &SegmentId,
+        change: ShapeStyleChange,
+        live: bool,
+    ) -> Result<(), FfiError> {
+        let requests = [shape::style_request(segment_id, change)];
+        self.restyle(segment_id, &requests, live)
     }
 
     /// The cuts between touching clips on the main row, with their blends.
@@ -1018,15 +1046,26 @@ impl PhoneHost {
         live: bool,
     ) -> Result<(), FfiError> {
         let requests = [text::style_request(self.draft(), segment_id, change)];
+        self.restyle(segment_id, &requests, live)
+    }
+
+    /// Apply a style change to `segment_id`, joining the last one while a
+    /// slider on the same clip is still moving.
+    fn restyle(
+        &mut self,
+        segment_id: &SegmentId,
+        requests: &[Request],
+        live: bool,
+    ) -> Result<(), FfiError> {
         let revision = self.revision();
         let joins = self
             .styling
             .as_ref()
             .is_some_and(|(styled, at)| styled == segment_id && *at == revision);
         let revision = if joins {
-            self.commands.fold(revision, &requests)?
+            self.commands.fold(revision, requests)?
         } else {
-            self.apply(revision, &requests)?
+            self.apply(revision, requests)?
         };
         self.styling = live.then(|| (segment_id.clone(), revision));
         Ok(())
@@ -2819,7 +2858,9 @@ mod tests {
         let trace: Vec<[f64; 2]> = (0..40)
             .map(|i| [100.0 + f64::from(i) * 10.0, 200.0 + f64::from(i % 10) * 8.0])
             .collect();
-        let stroke = host.draw_stroke(&trace, Micros(0)).unwrap();
+        let stroke = host
+            .draw_stroke(&trace, Micros(0), "#ff3b30", 12.0)
+            .unwrap();
         assert_eq!(row_of(&host, &stroke), crate::TrackType::Sticker);
         // A sticker shows its own name and a shape its kind, not a file
         // or an id.
@@ -2834,10 +2875,106 @@ mod tests {
         assert_eq!(name_of(&host, &placed), still.name);
         assert_eq!(name_of(&host, &shape), shapes[1].name);
         let revision = host.revision();
-        assert!(host.draw_stroke(&[[5.0, 5.0]], Micros(0)).is_err());
+        assert!(
+            host.draw_stroke(&[[5.0, 5.0]], Micros(0), "#ff3b30", 12.0)
+                .is_err()
+        );
         assert_eq!(host.revision(), revision);
         host.undo().unwrap();
         assert!(crate::clip::locate(host.draft(), &stroke).is_none());
+    }
+
+    #[test]
+    fn a_shape_takes_a_fill_outline_corners_and_shadow_and_a_pen_line_its_color() {
+        use crate::ShapeStyleChange;
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        two_stills(&mut host);
+        let shapes = crate::phone_shapes();
+        let square = host.add_shape(&shapes[0].id, Micros(0)).unwrap();
+        let style = host.shape_style(&square).unwrap();
+        assert!(!style.line);
+        assert_eq!(style.fill, crate::SHAPE_STYLE_RANGES.fill_start);
+        assert!(style.stroke_width.abs() < f64::EPSILON);
+        assert!(style.corners_max > 0.0);
+
+        let fill = |opacity: f64| ShapeStyleChange::Fill {
+            color: "#ff0000".to_owned(),
+            opacity,
+        };
+        let before = host.revision();
+        host.style_shape(&square, fill(0.8), true).unwrap();
+        host.style_shape(&square, fill(0.5), false).unwrap();
+        let style = host.shape_style(&square).unwrap();
+        assert_eq!(style.fill, "#ff0000");
+        assert!((style.fill_opacity - 0.5).abs() < 1e-9);
+        // The slider's drag is one undo step.
+        host.undo().unwrap();
+        assert_eq!(
+            host.shape_style(&square).unwrap().fill,
+            crate::SHAPE_STYLE_RANGES.fill_start
+        );
+        assert!(host.revision() > before);
+        host.redo().unwrap();
+
+        host.style_shape(
+            &square,
+            ShapeStyleChange::Stroke {
+                color: "#00ff00".to_owned(),
+                width: 6.0,
+                opacity: 1.0,
+                style: 1,
+            },
+            false,
+        )
+        .unwrap();
+        host.style_shape(&square, ShapeStyleChange::Corners(40.0), false)
+            .unwrap();
+        let (distance, angle, opacity) = crate::SHAPE_STYLE_RANGES.shadow_start;
+        host.style_shape(
+            &square,
+            ShapeStyleChange::Shadow {
+                color: "#000000".to_owned(),
+                distance,
+                angle,
+                opacity,
+            },
+            false,
+        )
+        .unwrap();
+        let style = host.shape_style(&square).unwrap();
+        assert_eq!(style.stroke, "#00ff00");
+        assert!((style.stroke_width - 6.0).abs() < 1e-9);
+        assert_eq!(style.stroke_style, 1);
+        assert!((style.corners - 40.0).abs() < 1e-9);
+        assert!((style.shadow_opacity - opacity).abs() < 1e-9);
+        assert!(
+            host.style_shape(&square, ShapeStyleChange::Corners(f64::NAN), false)
+                .is_err()
+        );
+
+        let trace: Vec<[f64; 2]> = (0..30)
+            .map(|i| [100.0 + f64::from(i) * 12.0, 300.0 + f64::from(i % 6) * 9.0])
+            .collect();
+        let pen = host
+            .draw_stroke(&trace, Micros(0), "#ff3b30", 12.0)
+            .unwrap();
+        let style = host.shape_style(&pen).unwrap();
+        assert!(style.line);
+        assert_eq!(style.stroke, "#ff3b30");
+        assert!((style.stroke_width - 12.0).abs() < 1e-9);
+
+        let still = host
+            .lanes()
+            .into_iter()
+            .find(|lane| lane.main)
+            .unwrap()
+            .clips[0]
+            .id
+            .clone();
+        assert!(host.shape_style(&still).is_none());
+        assert!(host.style_shape(&still, fill(1.0), false).is_err());
     }
 
     #[test]

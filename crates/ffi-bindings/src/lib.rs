@@ -840,6 +840,143 @@ impl From<cutlass_ffi::PhoneTextStyle> for TextStyle {
     }
 }
 
+/// How a shape looks. Widths, corners and distances are canvas pixels;
+/// opacities 0 to 1; colors `#RRGGBB`.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct ShapeStyle {
+    /// An open line: it has no fill and no corners.
+    pub line: bool,
+    /// Empty when it has no fill.
+    pub fill: String,
+    pub fill_opacity: f64,
+    /// The outline is off while its width is 0.
+    pub stroke: String,
+    pub stroke_width: f64,
+    pub stroke_opacity: f64,
+    /// Solid (0), dashed (1) or dotted (2).
+    pub stroke_style: i32,
+    pub corners: f64,
+    pub corners_max: f64,
+    /// The shadow is off while its opacity is 0.
+    pub shadow: String,
+    pub shadow_opacity: f64,
+    pub shadow_distance: f64,
+    /// Degrees.
+    pub shadow_angle: f64,
+}
+
+impl From<cutlass_ffi::PhoneShapeStyle> for ShapeStyle {
+    fn from(style: cutlass_ffi::PhoneShapeStyle) -> Self {
+        Self {
+            line: style.line,
+            fill: style.fill,
+            fill_opacity: style.fill_opacity,
+            stroke: style.stroke,
+            stroke_width: style.stroke_width,
+            stroke_opacity: style.stroke_opacity,
+            stroke_style: style.stroke_style,
+            corners: style.corners,
+            corners_max: style.corners_max,
+            shadow: style.shadow,
+            shadow_opacity: style.shadow_opacity,
+            shadow_distance: style.shadow_distance,
+            shadow_angle: style.shadow_angle,
+        }
+    }
+}
+
+/// One change to a shape's look. See [`ShapeStyle`] for the units.
+#[derive(Clone, Debug, PartialEq, uniffi::Enum)]
+pub enum ShapeStyleChange {
+    /// An empty color takes the fill off.
+    Fill {
+        color: String,
+        opacity: f64,
+    },
+    /// A width of 0 takes the outline off.
+    Stroke {
+        color: String,
+        width: f64,
+        opacity: f64,
+        style: i32,
+    },
+    Corners {
+        radius: f64,
+    },
+    /// An opacity of 0 takes the shadow off.
+    Shadow {
+        color: String,
+        distance: f64,
+        angle: f64,
+        opacity: f64,
+    },
+}
+
+impl From<ShapeStyleChange> for cutlass_ffi::ShapeStyleChange {
+    fn from(change: ShapeStyleChange) -> Self {
+        match change {
+            ShapeStyleChange::Fill { color, opacity } => Self::Fill { color, opacity },
+            ShapeStyleChange::Stroke {
+                color,
+                width,
+                opacity,
+                style,
+            } => Self::Stroke {
+                color,
+                width,
+                opacity,
+                style,
+            },
+            ShapeStyleChange::Corners { radius } => Self::Corners(radius),
+            ShapeStyleChange::Shadow {
+                color,
+                distance,
+                angle,
+                opacity,
+            } => Self::Shadow {
+                color,
+                distance,
+                angle,
+                opacity,
+            },
+        }
+    }
+}
+
+/// The shape panel's slider ends and where a part starts when switched on.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct ShapeStyleRanges {
+    pub fill_start: String,
+    pub stroke_max: f64,
+    pub stroke_start: f64,
+    pub shadow_distance_max: f64,
+    pub shadow_distance_start: f64,
+    pub shadow_angle_start: f64,
+    pub shadow_opacity_start: f64,
+    pub pen_min: f64,
+    pub pen_max: f64,
+    pub pen_start: f64,
+}
+
+/// See [`ShapeStyleRanges`].
+#[uniffi::export]
+#[must_use]
+pub fn shape_style_ranges() -> ShapeStyleRanges {
+    let ranges = cutlass_ffi::SHAPE_STYLE_RANGES;
+    ShapeStyleRanges {
+        fill_start: ranges.fill_start.to_owned(),
+        stroke_max: ranges.stroke_max,
+        stroke_start: ranges.stroke_start,
+        shadow_distance_max: ranges.shadow_distance_max,
+        shadow_distance_start: ranges.shadow_start.0,
+        shadow_angle_start: ranges.shadow_start.1,
+        shadow_opacity_start: ranges.shadow_start.2,
+        pen_min: ranges.pen.0,
+        pen_max: ranges.pen.1,
+        pen_start: ranges.pen.2,
+    }
+}
+
 /// One change to a title's look. See [`TextStyle`] for the units.
 #[derive(Clone, Debug, PartialEq, uniffi::Enum)]
 pub enum TextStyleChange {
@@ -1467,11 +1604,37 @@ impl Editor {
     }
 
     /// Put a freehand stroke through `trace` at `at_us` as a smooth line on
-    /// a sticker row. One undo step. Returns the clip's id.
-    pub fn draw_stroke(&self, trace: Vec<CanvasPoint>, at_us: i64) -> Result<String, EditorError> {
+    /// a sticker row, `color` (`#RRGGBB`) and `width` canvas pixels wide.
+    /// One undo step. Returns the clip's id.
+    pub fn draw_stroke(
+        &self,
+        trace: Vec<CanvasPoint>,
+        at_us: i64,
+        color: String,
+        width: f64,
+    ) -> Result<String, EditorError> {
         let trace: Vec<[f64; 2]> = trace.into_iter().map(|point| [point.x, point.y]).collect();
-        self.run(move |host| host.draw_stroke(&trace, Micros(at_us)))?
+        self.run(move |host| host.draw_stroke(&trace, Micros(at_us), &color, width))?
             .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// How a shape clip looks, or `None` when it is not a shape.
+    pub fn shape_style(&self, clip_id: String) -> Result<Option<ShapeStyle>, EditorError> {
+        let style = self.run(move |host| host.shape_style(&SegmentId::new(clip_id)))?;
+        Ok(style.map(ShapeStyle::from))
+    }
+
+    /// Change how a shape looks. Changes made while `live` join one undo
+    /// step, so a slider drag is one step; its last change passes `live`
+    /// false, and so does a single tap.
+    pub fn style_shape(
+        &self,
+        clip_id: String,
+        change: ShapeStyleChange,
+        live: bool,
+    ) -> Result<(), EditorError> {
+        self.run(move |host| host.style_shape(&SegmentId::new(clip_id), change.into(), live))?
             .map_err(EditorError::from)
     }
 

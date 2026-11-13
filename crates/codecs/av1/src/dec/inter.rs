@@ -403,7 +403,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         self.block_pred(plane, ref_frame, x, y, w, h, mv, filters, &Dst::Obmc)
     }
 
-    fn distance_weights(&self, refs: [i8; 2]) -> (i32, i32) {
+    pub(crate) fn distance_weights(&self, refs: [i8; 2]) -> (i32, i32) {
         let mut dist = [0i32; 2];
         for l in 0..2 {
             let hnt = self.hdr.order_hints[refs[l] as usize];

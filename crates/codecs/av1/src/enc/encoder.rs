@@ -202,6 +202,8 @@ pub struct Av1Enc {
     second_frames: u64,
     /// Last reconstructed frame (shown output of the internal decoder).
     last_recon: Option<Arc<AnyPicture>>,
+    #[cfg(test)]
+    tool_use: ToolUse,
     /// Source pictures waiting to be coded, in display order from `next_disp`.
     lookahead: std::collections::VecDeque<Arc<AnyPicture>>,
     next_disp: u64,
@@ -357,6 +359,7 @@ impl Av1Enc {
         } else {
             (cfg.sub_x, cfg.sub_y)
         };
+        let blends = if cfg.speed <= 6 { 1.0 } else { 0.0 };
         let mut seq = SequenceHeader {
             profile,
             operating_points: vec![OperatingPoint::default()],
@@ -373,6 +376,12 @@ impl Av1Enc {
             enable_cdef: true,
             enable_ref_frame_mvs: true,
             enable_warped_motion: true,
+            // Distance weights, compound masks and inter-intra: about half
+            // a percent of the rate for 5% of the time (more on fades),
+            // the exchange of speed 6 for 5.
+            enable_jnt_comp: ev("AV1_JNT", blends) > 0.0,
+            enable_masked_compound: ev("AV1_MASKED", blends) > 0.0,
+            enable_interintra_compound: ev("AV1_II", blends) > 0.0,
             enable_dual_filter: ev("AV1_DUAL", 0.0) > 0.0,
             enable_restoration: cfg.loop_restoration && cfg.speed < 8,
             bit_depth: cfg.bit_depth,
@@ -466,6 +475,8 @@ impl Av1Enc {
             second_bits: 0,
             second_frames: 0,
             last_recon: None,
+            #[cfg(test)]
+            tool_use: ToolUse::default(),
             lookahead: std::collections::VecDeque::new(),
             next_disp: 0,
             next_key: 0,
@@ -1477,6 +1488,9 @@ impl Av1Enc {
                 },
             ),
             inter_rd_modes: ev("AV1_IRM", 1.0) as usize,
+            jnt_comp: self.seq.enable_jnt_comp,
+            masked_compound: self.seq.enable_masked_compound,
+            interintra: self.seq.enable_interintra_compound,
             intra_split_pred: ev("AV1_ITXP", 1.0) > 0.0,
             inter_flag_bits: ev("AV1_IIB", 1.0) > 0.0,
             exact_intra_rates: ev("AV1_XRI", 1.0) > 0.0,
@@ -1597,6 +1611,8 @@ impl Av1Enc {
             tile_bytes.push(m);
             saved_cdf = saved_cdf.or(c);
         }
+        #[cfg(test)]
+        self.tool_use.count(&fs);
         let use_wiener_cdf = cdf.use_wiener;
         let init_cdf = cdf;
         if self.auto_tiles {
@@ -2025,6 +2041,39 @@ pub(crate) fn ev(_name: &str, default: f64) -> f64 {
     default
 }
 
+/// 4x4 units of the frames coded so far by the blend that predicts them,
+/// for the tests.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct ToolUse {
+    /// Two references through a wedge or a difference mask.
+    masked: u64,
+    /// Two references weighted by their distances.
+    distance: u64,
+    /// One reference blended with an intra prediction.
+    interintra: u64,
+}
+
+#[cfg(test)]
+impl ToolUse {
+    fn count(&mut self, fs: &FrameState) {
+        use crate::dec::types::INTRA_FRAME;
+        for r in 0..fs.mi_rows {
+            for m in &fs.mi[r * fs.mi_stride..][..fs.mi_cols] {
+                if m.skip_mode() || m.ref_frame[0] <= INTRA_FRAME {
+                    continue;
+                }
+                if m.ref_frame[1] == INTRA_FRAME {
+                    self.interintra += 1;
+                } else if m.ref_frame[1] > INTRA_FRAME {
+                    self.masked += u64::from(m.comp_group_idx());
+                    self.distance += u64::from(m.comp_group_idx() == 0 && m.compound_idx() == 0);
+                }
+            }
+        }
+    }
+}
+
 /// Squared error over the visible area of every plane.
 fn picture_sse<P: Pixel>(a: &Picture<P>, b: &Picture<P>) -> u64 {
     a.planes
@@ -2422,6 +2471,86 @@ mod tests {
             AnyPicture::U8(p) => rows(p),
             AnyPicture::U16(p) => rows(p),
         }
+    }
+
+    /// A textured square crossing a textured ground the other way while the
+    /// picture fades: what the two references show differs by region and by
+    /// brightness. Returns the tools the encoder used, after checking that a
+    /// decoder makes the encoder's reconstruction of the stream.
+    fn blends_of(speed: u8, bd: u32) -> (super::ToolUse, crate::dec::obu::SequenceHeader) {
+        let (w, h) = (192usize, 128usize);
+        let mut cfg = EncConfig::new(w, h);
+        cfg.rc = RateControl::Qindex(100);
+        cfg.speed = speed;
+        cfg.bit_depth = bd;
+        cfg.gop = 8;
+        cfg.threads = 1;
+        let mut enc = Av1Enc::new(cfg).expect("encoder");
+        let mut units = Vec::new();
+        for f in 0..17usize {
+            let luma = |i: usize| -> u16 {
+                let (x, y) = (i % w, i / w);
+                let (sx, sy) = (40 + 5 * f, 30 + f);
+                let v = if (sx..sx + 56).contains(&x) && (sy..sy + 48).contains(&y) {
+                    let (u, v) = (x - sx, y - sy);
+                    40 + (u * 9 + v * 5) % 97 + ((u / 6 + v / 4) % 2) * 60
+                } else {
+                    let u = x + 3 * f;
+                    30 + (u * 5 + y * 3) % 61 + ((u / 11 + y / 7) % 3) * 35
+                };
+                ((v * (40 - f) / 40) as u16) << (bd - 8)
+            };
+            let y: Vec<u16> = (0..w * h).map(luma).collect();
+            let c = vec![128u16 << (bd - 8); (w / 2) * (h / 2)];
+            if bd == 8 {
+                let y8: Vec<u8> = y.iter().map(|&v| v as u8).collect();
+                let c8: Vec<u8> = c.iter().map(|&v| v as u8).collect();
+                let input = InputFrame {
+                    planes: [&y8[..], &c8[..], &c8[..]],
+                    strides: [w, w / 2, w / 2],
+                };
+                units.extend(enc.encode(&input).expect("encode"));
+            } else {
+                let input = InputFrame {
+                    planes: [&y[..], &c[..], &c[..]],
+                    strides: [w, w / 2, w / 2],
+                };
+                units.extend(enc.encode(&input).expect("encode"));
+            }
+        }
+        if bd == 8 {
+            units.extend(enc.flush::<u8>().expect("flush"));
+        } else {
+            units.extend(enc.flush::<u16>().expect("flush"));
+        }
+        let mut dec = Av1Core::new();
+        dec.threads = 1;
+        for u in &units {
+            let shown = dec.decode(&u.data).expect("decode");
+            let got = shown.last().map(|f| samples(&f.picture));
+            assert!(got == u.recon.as_deref().map(samples), "speed {speed}");
+        }
+        (enc.tool_use, enc.sequence_header().clone())
+    }
+
+    #[test]
+    fn compound_masks_distance_weights_and_inter_intra_are_used() {
+        for (speed, bd) in [(6u8, 8u32), (3, 10)] {
+            let (used, seq) = blends_of(speed, bd);
+            assert!(seq.enable_masked_compound && seq.enable_jnt_comp);
+            assert!(seq.enable_interintra_compound);
+            assert!(used.masked > 0, "speed {speed}: {used:?}");
+            assert!(used.distance > 0, "speed {speed}: {used:?}");
+            assert!(used.interintra > 0, "speed {speed}: {used:?}");
+        }
+    }
+
+    #[test]
+    fn the_fast_speeds_leave_the_blends_out() {
+        let (used, seq) = blends_of(7, 8);
+        assert!(!seq.enable_masked_compound && !seq.enable_jnt_comp);
+        assert!(!seq.enable_interintra_compound);
+        assert_eq!((used.masked, used.distance, used.interintra), (0, 0, 0));
     }
 
     /// The encoder's reconstruction (built from its own tiles, not decoded)

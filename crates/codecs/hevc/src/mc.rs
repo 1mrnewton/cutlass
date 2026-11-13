@@ -21,11 +21,14 @@ const CHROMA: [[i32; 4]; 8] = [
     [-2, 10, 58, -2],
 ];
 
-/// A reference plane.
-pub struct Plane<'a> {
-    pub samples: &'a [u16],
+use crate::pixel::Pixel;
+
+/// A reference plane: `rows` of its `height` rows are in `samples`.
+pub struct Plane<'a, P> {
+    pub samples: &'a [P],
     pub width: usize,
     pub height: usize,
+    pub rows: usize,
 }
 
 /// Interpolate a `w`×`h` block whose integer origin is (`x`, `y`) at
@@ -37,19 +40,19 @@ pub struct Plane<'a> {
 /// [`cutlass_simd::wide::wide`] to get 256-bit vectors where the CPU has
 /// them.
 #[inline(always)]
-pub fn interpolate(
-    plane: &Plane<'_>,
+pub fn interpolate<P: Pixel>(
+    plane: &Plane<'_, P>,
     block: Block,
     bit_depth: u32,
     out: &mut [i16],
-    scratch: &mut Scratch,
+    scratch: &mut Scratch<P>,
 ) {
     if block.luma {
         let taps = [LUMA16[block.fx & 3], LUMA16[block.fy & 3]];
-        filter::<8>(plane, block, bit_depth, taps, (out, scratch));
+        filter::<8, P>(plane, block, bit_depth, taps, (out, scratch));
     } else {
         let taps = [CHROMA16[block.fx & 7], CHROMA16[block.fy & 7]];
-        filter::<4>(plane, block, bit_depth, taps, (out, scratch));
+        filter::<4, P>(plane, block, bit_depth, taps, (out, scratch));
     }
 }
 
@@ -82,15 +85,15 @@ const CHROMA16: [[i16; 4]; 8] = {
 };
 
 /// Buffers the interpolation reuses from block to block.
-pub struct Scratch {
-    win: Vec<u16>,
+pub struct Scratch<P> {
+    win: Vec<P>,
     tmp: Vec<i16>,
 }
 
-impl Default for Scratch {
+impl<P: Pixel> Default for Scratch<P> {
     fn default() -> Self {
         Self {
-            win: vec![0; WINDOW * WINDOW],
+            win: vec![P::default(); WINDOW * WINDOW],
             tmp: vec![0; WINDOW * 64],
         }
     }
@@ -100,12 +103,12 @@ impl Default for Scratch {
 const WINDOW: usize = 64 + 7;
 
 #[inline(always)]
-fn filter<const T: usize>(
-    plane: &Plane<'_>,
+fn filter<const T: usize, P: Pixel>(
+    plane: &Plane<'_, P>,
     block: Block,
     bit_depth: u32,
     [cx, cy]: [[i16; T]; 2],
-    (out, scratch): (&mut [i16], &mut Scratch),
+    (out, scratch): (&mut [i16], &mut Scratch<P>),
 ) {
     let Block {
         x, y, fx, fy, w, h, ..
@@ -119,15 +122,16 @@ fn filter<const T: usize>(
     let (pw, ph) = (plane.width as isize, plane.height as isize);
     let (x0, y0) = (x - half, y - half);
     let out = &mut out[..w * h];
-    if pw == 0 || ph == 0 || plane.samples.len() < plane.width * plane.height {
+    let rows = plane.rows.min(plane.height) as isize;
+    if pw == 0 || rows == 0 || plane.samples.len() < plane.width * rows as usize {
         out.fill(0);
         return;
     }
-    let inside = x0 >= 0 && y0 >= 0 && x0 + sw as isize <= pw && y0 + sh as isize <= ph;
+    let inside = x0 >= 0 && y0 >= 0 && x0 + sw as isize <= pw && y0 + sh as isize <= ph.min(rows);
     let Scratch { win, tmp } = scratch;
     // The source rows: the reference itself, or a window with its edges
     // repeated when the block reaches outside.
-    let (src, stride, base): (&[u16], usize, usize) = if inside {
+    let (src, stride, base): (&[P], usize, usize) = if inside {
         (
             plane.samples,
             plane.width,
@@ -137,42 +141,218 @@ fn filter<const T: usize>(
         pad(plane, (x0, y0), sw, &mut win[..sw * sh]);
         (&*win, sw, 0)
     };
-    let row = |j: usize| -> &[u16] { &src[base + j * stride..][..sw] };
-    let h0 = T / 2 - 1;
+    let src = &src[base..];
     // Eight-bit samples times the taps fit 16 bits (at most 88 · 255).
-    let narrow = bit_depth == 8;
-    match (fx != 0, fy != 0) {
-        (false, false) => {
-            for (j, dst) in out.chunks_exact_mut(w).enumerate() {
-                for (d, &s) in dst.iter_mut().zip(&row(j + h0)[h0..]) {
-                    *d = (s << shift3) as i16;
+    let k = Kernel {
+        c: [cx, cy],
+        mode: u8::from(fx != 0) | u8::from(fy != 0) << 1,
+        narrow: bit_depth == 8,
+        shift1,
+        shift3,
+    };
+    // Widths of luma and chroma prediction blocks: powers of two, and
+    // three quarters of one (asymmetric partitions, 4:2:0 of 6 or 12).
+    macro_rules! go {
+        ($w:literal, $at:expr) => {
+            k.block::<$w, P>(&src[$at..], stride, &mut out[$at..], w, h, tmp)
+        };
+    }
+    match w {
+        64 => go!(64, 0),
+        48 => {
+            go!(32, 0);
+            go!(16, 32);
+        }
+        32 => go!(32, 0),
+        24 => {
+            go!(16, 0);
+            go!(8, 16);
+        }
+        16 => go!(16, 0),
+        12 => {
+            go!(8, 0);
+            go!(4, 8);
+        }
+        8 => go!(8, 0),
+        6 => {
+            go!(4, 0);
+            go!(2, 4);
+        }
+        4 => go!(4, 0),
+        _ => {
+            for at in (0..w).step_by(2) {
+                go!(2, at);
+            }
+        }
+    }
+}
+
+/// One interpolation: the taps across and down, which of them apply
+/// (bit 0 across, bit 1 down), and the shifts of clause 8.5.3.3.3.
+struct Kernel<const T: usize> {
+    c: [[i16; T]; 2],
+    mode: u8,
+    narrow: bool,
+    shift1: u32,
+    shift3: u32,
+}
+
+impl<const T: usize> Kernel<T> {
+    /// A block `W` wide and `h` high: `src` from the window's first
+    /// sample (rows `stride` apart), `out` rows `ostride` apart.
+    #[inline(always)]
+    fn block<const W: usize, P: Pixel>(
+        &self,
+        src: &[P],
+        stride: usize,
+        out: &mut [i16],
+        ostride: usize,
+        h: usize,
+        tmp: &mut [i16],
+    ) {
+        let h0 = T / 2 - 1;
+        let row = |j: usize, from: usize, len: usize| -> &[P] {
+            src.get(j * stride + from..j * stride + from + len)
+                .unwrap_or(&[])
+        };
+        match self.mode {
+            0 => {
+                for j in 0..h {
+                    let (Some(s), Some(o)) = (
+                        row(j + h0, h0, W).first_chunk::<W>(),
+                        out.get_mut(j * ostride..)
+                            .and_then(|o| o.first_chunk_mut::<W>()),
+                    ) else {
+                        return;
+                    };
+                    for l in 0..W {
+                        o[l] = (s[l].i() << self.shift3) as i16;
+                    }
+                }
+            }
+            1 => {
+                for j in 0..h {
+                    let s = row(j + h0, 0, W + T - 1);
+                    let Some(o) = out
+                        .get_mut(j * ostride..)
+                        .and_then(|o| o.first_chunk_mut::<W>())
+                    else {
+                        return;
+                    };
+                    self.across::<W, P>(s, o);
+                }
+            }
+            2 => {
+                for j in 0..h {
+                    let lines: [&[P]; T] = std::array::from_fn(|k| row(j + k, h0, W));
+                    let Some(o) = out
+                        .get_mut(j * ostride..)
+                        .and_then(|o| o.first_chunk_mut::<W>())
+                    else {
+                        return;
+                    };
+                    self.down::<W, P>(&lines, o);
+                }
+            }
+            _ => {
+                let rows = h + T - 1;
+                let Some(tmp) = tmp.get_mut(..rows * W) else {
+                    return;
+                };
+                for (j, t) in tmp.as_chunks_mut::<W>().0.iter_mut().enumerate() {
+                    self.across::<W, P>(row(j, 0, W + T - 1), t);
+                }
+                let tmp = tmp.as_chunks::<W>().0;
+                for j in 0..h {
+                    let Some(o) = out
+                        .get_mut(j * ostride..)
+                        .and_then(|o| o.first_chunk_mut::<W>())
+                    else {
+                        return;
+                    };
+                    let mut acc = [0i32; W];
+                    for k in 0..T {
+                        let ck = i32::from(self.c[1][k]);
+                        let Some(t) = tmp.get(j + k) else {
+                            return;
+                        };
+                        for l in 0..W {
+                            acc[l] += ck * i32::from(t[l]);
+                        }
+                    }
+                    for l in 0..W {
+                        o[l] = (acc[l] >> 6) as i16;
+                    }
                 }
             }
         }
-        (true, false) => {
-            for (j, dst) in out.chunks_exact_mut(w).enumerate() {
-                let line = row(j + h0);
-                let lines: [&[u16]; T] = std::array::from_fn(|k| &line[k..k + w]);
-                taps_u16(&cx, lines, dst, narrow, shift1);
+    }
+
+    /// The taps across one row: `s` holds `W + T - 1` samples.
+    #[inline(always)]
+    fn across<const W: usize, P: Pixel>(&self, s: &[P], o: &mut [i16; W]) {
+        let c = &self.c[0];
+        if s.len() < W + T - 1 {
+            return;
+        }
+        if self.narrow {
+            let mut acc = [0i16; W];
+            for k in 0..T {
+                let ck = c[k];
+                let Some(s) = s[k..].first_chunk::<W>() else {
+                    return;
+                };
+                for l in 0..W {
+                    acc[l] = acc[l].wrapping_add(ck.wrapping_mul(s[l].i() as i16));
+                }
+            }
+            *o = acc;
+        } else {
+            let mut acc = [0i32; W];
+            for k in 0..T {
+                let ck = i32::from(c[k]);
+                let Some(s) = s[k..].first_chunk::<W>() else {
+                    return;
+                };
+                for l in 0..W {
+                    acc[l] += ck * s[l].i();
+                }
+            }
+            for l in 0..W {
+                o[l] = (acc[l] >> self.shift1) as i16;
             }
         }
-        (false, true) => {
-            for (j, dst) in out.chunks_exact_mut(w).enumerate() {
-                let lines: [&[u16]; T] = std::array::from_fn(|k| &row(j + k)[h0..h0 + w]);
-                taps_u16(&cy, lines, dst, narrow, shift1);
+    }
+
+    /// The taps down `T` rows of `W` samples.
+    #[inline(always)]
+    fn down<const W: usize, P: Pixel>(&self, lines: &[&[P]; T], o: &mut [i16; W]) {
+        let c = &self.c[1];
+        if self.narrow {
+            let mut acc = [0i16; W];
+            for k in 0..T {
+                let ck = c[k];
+                let Some(s) = lines[k].first_chunk::<W>() else {
+                    return;
+                };
+                for l in 0..W {
+                    acc[l] = acc[l].wrapping_add(ck.wrapping_mul(s[l].i() as i16));
+                }
             }
-        }
-        (true, true) => {
-            let tmp = &mut tmp[..sh * w];
-            for (j, dst) in tmp.chunks_exact_mut(w).enumerate() {
-                let line = row(j);
-                let lines: [&[u16]; T] = std::array::from_fn(|k| &line[k..k + w]);
-                taps_u16(&cx, lines, dst, narrow, shift1);
+            *o = acc;
+        } else {
+            let mut acc = [0i32; W];
+            for k in 0..T {
+                let ck = i32::from(c[k]);
+                let Some(s) = lines[k].first_chunk::<W>() else {
+                    return;
+                };
+                for l in 0..W {
+                    acc[l] += ck * s[l].i();
+                }
             }
-            let tmp = &*tmp;
-            for (j, dst) in out.chunks_exact_mut(w).enumerate() {
-                let lines: [&[i16]; T] = std::array::from_fn(|k| &tmp[(j + k) * w..(j + k + 1) * w]);
-                taps_i16(&cy, lines, dst);
+            for l in 0..W {
+                o[l] = (acc[l] >> self.shift1) as i16;
             }
         }
     }
@@ -181,8 +361,12 @@ fn filter<const T: usize>(
 /// Copy the `sw`×`sh` window at (`x0`, `y0`) of `plane` into `win`, the
 /// samples outside the plane repeating its nearest edge.
 #[inline(always)]
-fn pad(plane: &Plane<'_>, (x0, y0): (isize, isize), sw: usize, win: &mut [u16]) {
-    let (pw, ph) = (plane.width as isize, plane.height as isize);
+fn pad<P: Pixel>(plane: &Plane<'_, P>, (x0, y0): (isize, isize), sw: usize, win: &mut [P]) {
+    // Rows past those held repeat the last held: a damaged stream only.
+    let (pw, ph) = (
+        plane.width as isize,
+        (plane.height.min(plane.rows)) as isize,
+    );
     // Columns of the window inside the plane: `a..b`.
     let a = (-x0).clamp(0, sw as isize) as usize;
     let b = (pw - x0).clamp(0, sw as isize) as usize;
@@ -198,129 +382,13 @@ fn pad(plane: &Plane<'_>, (x0, y0): (isize, isize), sw: usize, win: &mut [u16]) 
             dst[b..].fill(right);
         } else {
             // Wholly left or right of the plane: its nearest edge sample.
-            let v = if x0 >= pw { line[plane.width - 1] } else { line[0] };
+            let v = if x0 >= pw {
+                line[plane.width - 1]
+            } else {
+                line[0]
+            };
             dst.fill(v);
         }
-    }
-}
-
-/// Run `$f::<L>(i, out)` over `$out` in runs of 16, then 8, 4 and 2
-/// outputs (every block width is even), `i` the first index of a run.
-macro_rules! by_lanes {
-    ($out:expr, |$i:ident, $o:ident| $body16:expr, $body8:expr, $body4:expr, $body2:expr) => {{
-        let out: &mut [i16] = $out;
-        let (runs, rest) = out.as_chunks_mut::<16>();
-        let mut $i = 0usize;
-        for $o in runs {
-            $body16;
-            $i += 16;
-        }
-        let (runs, rest) = rest.as_chunks_mut::<8>();
-        for $o in runs {
-            $body8;
-            $i += 8;
-        }
-        let (runs, rest) = rest.as_chunks_mut::<4>();
-        for $o in runs {
-            $body4;
-            $i += 4;
-        }
-        let (runs, _) = rest.as_chunks_mut::<2>();
-        for $o in runs {
-            $body2;
-            $i += 2;
-        }
-    }};
-}
-
-/// `out[i]` = the sum over `k` of `c[k] · lines[k][i]`, shifted right by
-/// `shift`. With `narrow` the sums are taken in 16 bits, which holds them
-/// for 8-bit samples (and then `shift` is 0).
-#[inline(always)]
-fn taps_u16<const T: usize>(
-    c: &[i16; T],
-    lines: [&[u16]; T],
-    out: &mut [i16],
-    narrow: bool,
-    shift: u32,
-) {
-    let n = out.len();
-    let lines: [&[u16]; T] = lines.map(|l| &l[..n]);
-    if narrow {
-        by_lanes!(out, |i, o| lanes_narrow::<16, T>(c, &lines, i, o),
-            lanes_narrow::<8, T>(c, &lines, i, o),
-            lanes_narrow::<4, T>(c, &lines, i, o),
-            lanes_narrow::<2, T>(c, &lines, i, o));
-    } else {
-        by_lanes!(out, |i, o| lanes_wide::<16, T, u16>(c, &lines, i, shift, o),
-            lanes_wide::<8, T, u16>(c, &lines, i, shift, o),
-            lanes_wide::<4, T, u16>(c, &lines, i, shift, o),
-            lanes_wide::<2, T, u16>(c, &lines, i, shift, o));
-    }
-}
-
-/// The second, vertical pass over 14-bit intermediates: the sums shifted
-/// right by 6.
-#[inline(always)]
-fn taps_i16<const T: usize>(c: &[i16; T], lines: [&[i16]; T], out: &mut [i16]) {
-    let n = out.len();
-    let lines: [&[i16]; T] = lines.map(|l| &l[..n]);
-    by_lanes!(out, |i, o| lanes_wide::<16, T, i16>(c, &lines, i, 6, o),
-        lanes_wide::<8, T, i16>(c, &lines, i, 6, o),
-        lanes_wide::<4, T, i16>(c, &lines, i, 6, o),
-        lanes_wide::<2, T, i16>(c, &lines, i, 6, o));
-}
-
-/// `L` samples of `line` from `i`; zeros past its end (never reached:
-/// every line holds the outputs' width).
-#[inline(always)]
-fn run<const L: usize, S: Copy + Default>(line: &[S], i: usize) -> [S; L] {
-    match line.get(i..).and_then(|l| l.first_chunk::<L>()) {
-        Some(a) => *a,
-        None => [S::default(); L],
-    }
-}
-
-/// `L` outputs from index `i` with 16-bit sums of 8-bit samples.
-#[inline(always)]
-fn lanes_narrow<const L: usize, const T: usize>(
-    c: &[i16; T],
-    lines: &[&[u16]; T],
-    i: usize,
-    out: &mut [i16; L],
-) {
-    let mut acc = [0i16; L];
-    for k in 0..T {
-        let src = run::<L, u16>(lines[k], i);
-        let ck = c[k];
-        for l in 0..L {
-            acc[l] = acc[l].wrapping_add(ck.wrapping_mul(src[l] as i16));
-        }
-    }
-    *out = acc;
-}
-
-/// `L` outputs from index `i` with 32-bit sums, shifted right by `shift`.
-#[inline(always)]
-fn lanes_wide<const L: usize, const T: usize, S: Copy + Default>(
-    c: &[i16; T],
-    lines: &[&[S]; T],
-    i: usize,
-    shift: u32,
-    out: &mut [i16; L],
-) where
-    i32: From<S>,
-{
-    let mut acc = [0i32; L];
-    for k in 0..T {
-        let src = run::<L, S>(lines[k], i);
-        let ck = c[k] as i32;
-        for l in 0..L {
-            acc[l] += ck * i32::from(src[l]);
-        }
-    }
-    for l in 0..L {
-        out[l] = (acc[l] >> shift) as i16;
     }
 }
 
@@ -348,8 +416,8 @@ pub struct Wp {
 /// Write one predicted block: default or explicit weighting of one or two
 /// interpolated blocks (clause 8.5.3.3.4).
 #[inline(always)]
-pub fn store(
-    dst: &mut [u16],
+pub fn store<P: Pixel>(
+    dst: &mut [P],
     stride: usize,
     w: usize,
     h: usize,
@@ -367,7 +435,7 @@ pub fn store(
             for (row, (a, b)) in rows.zip(a.chunks_exact(w).zip(b.chunks_exact(w))) {
                 for (out, (&a, &b)) in row[..w].iter_mut().zip(a.iter().zip(b)) {
                     let v = (i32::from(a) + i32::from(b) + add) >> shift2;
-                    *out = v.clamp(0, max) as u16;
+                    *out = P::of(v.clamp(0, max));
                 }
             }
         }
@@ -378,7 +446,7 @@ pub fn store(
                 for (out, (&a, &b)) in row[..w].iter_mut().zip(a.iter().zip(b)) {
                     let v =
                         (i32::from(a) * w0.weight + i32::from(b) * w1.weight + add) >> (log2wd + 1);
-                    *out = v.clamp(0, max) as u16;
+                    *out = P::of(v.clamp(0, max));
                 }
             }
         }
@@ -387,7 +455,7 @@ pub fn store(
             for (row, a) in rows.zip(a.chunks_exact(w)) {
                 for (out, &a) in row[..w].iter_mut().zip(a) {
                     let v = (i32::from(a) + add) >> shift1;
-                    *out = v.clamp(0, max) as u16;
+                    *out = P::of(v.clamp(0, max));
                 }
             }
         }
@@ -401,7 +469,7 @@ pub fn store(
                     } else {
                         p * wp.weight + wp.offset
                     };
-                    *out = v.clamp(0, max) as u16;
+                    *out = P::of(v.clamp(0, max));
                 }
             }
         }
@@ -415,11 +483,12 @@ mod tests {
 
     #[test]
     fn whole_sample_motion_copies_the_reference() {
-        let samples: Vec<u16> = (0..64).map(|v| v as u16).collect();
+        let samples: Vec<u16> = (0..64).collect();
         let plane = Plane {
             samples: &samples,
             width: 8,
             height: 8,
+            rows: 8,
         };
         let mut out = vec![0i16; 4];
         let block = Block {
@@ -444,6 +513,7 @@ mod tests {
             samples: &samples,
             width: 4,
             height: 4,
+            rows: 4,
         };
         let mut out = vec![0i16; 16];
         let block = Block {

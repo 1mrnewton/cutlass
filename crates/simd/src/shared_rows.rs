@@ -105,6 +105,18 @@ impl<P> SharedRows<P> {
     pub fn into_buffers(self) -> [PlaneBuf<P>; 3] {
         self.planes
     }
+
+    /// Rows of no samples, all published: a stand-in to move a real one
+    /// out of a place that must hold one.
+    pub fn empty() -> Self {
+        Self {
+            planes: core::array::from_fn(|_| Box::default()),
+            widths: [0; 3],
+            heights: [0; 3],
+            shifts: [0; 3],
+            published: AtomicUsize::new(usize::MAX),
+        }
+    }
 }
 
 /// The one writer of a [`SharedRows`].
@@ -122,6 +134,41 @@ impl<P> RowsWriter<P> {
     /// Luma rows published so far.
     pub fn done(&self) -> usize {
         self.done
+    }
+
+    /// The rows that luma rows `done..upto` make in each plane, to write
+    /// in place; [`Self::publish`] then hands them to the readers. Empty
+    /// when `upto` is not past `done`.
+    pub fn pending_mut(&mut self, upto: usize) -> [&mut [P]; 3] {
+        let sh = &*self.shared;
+        let done = self.done;
+        core::array::from_fn(|p| {
+            let w = sh.widths[p];
+            let (a, b) = (sh.plane_rows(p, done), sh.plane_rows(p, upto));
+            if w == 0 || a >= b {
+                return &mut [][..];
+            }
+            let buf = &sh.planes[p];
+            let (lo, hi) = (a * w, (b * w).min(buf.len()));
+            // SAFETY: as in `write`: rows `a..` are past the published
+            // ones, so no reader makes a slice of them, and `&mut self`
+            // keeps this writer from handing them out twice. The planes
+            // are separate buffers, so the three slices never overlap.
+            #[allow(unsafe_code)]
+            unsafe {
+                std::slice::from_raw_parts_mut(UnsafeCell::raw_get(buf.as_ptr().add(lo)), hi - lo)
+            }
+        })
+    }
+
+    /// Publishes luma rows `done..upto`, written in place through
+    /// [`Self::pending_mut`] (`usize::MAX`: every row).
+    pub fn publish(&mut self, upto: usize) {
+        if upto <= self.done {
+            return;
+        }
+        self.done = upto;
+        self.shared.published.store(upto, Ordering::Release);
     }
 }
 
@@ -198,6 +245,25 @@ mod tests {
     use super::RowsWriter;
 
     #[test]
+    fn rows_written_in_place_are_seen_once_published() {
+        let mut w = RowsWriter::<u16>::new([4, 2, 2], [8, 4, 4], [0, 1, 1], None);
+        let s = w.shared().clone();
+        {
+            let [y, u, v] = w.pending_mut(4);
+            assert_eq!((y.len(), u.len(), v.len()), (16, 4, 4));
+            y.fill(7);
+            u.fill(8);
+            v.fill(9);
+        }
+        assert!(s.rows(0, 0, 1).is_none());
+        w.publish(4);
+        assert_eq!(s.rows(0, 3, 4).map(|(r, _)| r[0]), Some(7));
+        assert_eq!(s.rows(2, 1, 2).map(|(r, _)| r[1]), Some(9));
+        let [y, u, _] = w.pending_mut(8);
+        assert_eq!((y.len(), u.len()), (16, 4));
+    }
+
+    #[test]
     fn readers_see_only_published_rows() {
         let rows: Vec<Vec<u8>> = (0..64).map(|r| vec![r as u8; 8]).collect();
         let crow: Vec<Vec<u8>> = (0..32).map(|r| vec![100 + r as u8; 4]).collect();
@@ -214,6 +280,7 @@ mod tests {
         );
         assert!(s.rows(2, 0, 9).is_none());
         w.write(usize::MAX, |p, r| if p == 0 { &rows[r] } else { &crow[r] });
+        assert!(w.pending_mut(usize::MAX).iter().all(|p| p.is_empty()));
         assert_eq!(
             s.rows_from(0, 60).map(|(l, _, end)| (l[0], end)),
             Some((60, 64))

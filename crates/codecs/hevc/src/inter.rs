@@ -8,8 +8,12 @@ use crate::cabac;
 use crate::ctu::{
     PART_2NXN, PART_2NXND, PART_2NXNU, PART_NLX2N, PART_NRX2N, PART_NX2N, SliceDecoder,
 };
+use std::sync::Arc;
+
+use crate::frame::Frame;
 use crate::mc::{self, Block, Plane, Wp};
 use crate::picture::{ColMv, MODE_INTER, Mv, MvField};
+use crate::pixel::Pixel;
 use crate::slice::SliceType;
 
 fn malformed(what: &'static str) -> CodecError {
@@ -50,7 +54,7 @@ struct Pb {
     part: usize,
 }
 
-impl<'a> SliceDecoder<'a, '_> {
+impl<'a, P: Pixel> SliceDecoder<'a, '_, P> {
     pub fn prediction_unit(
         &mut self,
         x: usize,
@@ -398,7 +402,10 @@ impl<'a> SliceDecoder<'a, '_> {
             0
         };
         let col_ref = slice.refs[col_list].get(header.collocated_ref_idx)?;
-        let col = &col_ref.pic;
+        let col = &col_ref.frame;
+        // The candidates lie in this CTB row.
+        let ctb = 1usize << self.sps.log2_ctb;
+        col.wait_motion(((pb.y >> self.sps.log2_ctb) + 1) * ctb);
         let log2 = self.sps.log2_ctb;
         let xbr = pb.x + pb.w;
         let ybr = pb.y + pb.h;
@@ -548,7 +555,7 @@ impl<'a> SliceDecoder<'a, '_> {
                 let Some(r) = slice.refs[list].get(field.ref_idx[list] as usize) else {
                     return Err(malformed("reference index"));
                 };
-                *slot = Some(r.pic.clone());
+                *slot = Some(r.frame.clone());
             }
         }
         let weights = if explicit {
@@ -579,6 +586,16 @@ impl<'a> SliceDecoder<'a, '_> {
         } else {
             None
         };
+        // Wait for the reference rows the block reads: the luma filter
+        // reaches 4 rows below, the chroma one 2 chroma rows.
+        for (list, slot) in refs.iter().enumerate() {
+            if let Some(frame) = slot {
+                let mv = field.mv[list];
+                let luma = (y + h) as isize + (isize::from(mv.y) >> 2) + 4;
+                let chroma = 2 * ((y / 2 + h / 2) as isize + (isize::from(mv.y) >> 3) + 2);
+                frame.wait_rows(luma.max(chroma).max(1) as usize);
+            }
+        }
         let refs = &refs;
         cutlass_simd::wide::wide(
             #[inline(always)]
@@ -593,7 +610,7 @@ impl<'a> SliceDecoder<'a, '_> {
         &mut self,
         (x, y, w, h): (usize, usize, usize, usize),
         field: MvField,
-        refs: &[Option<std::sync::Arc<crate::picture::Decoded>>; 2],
+        refs: &[Option<Arc<Frame>>; 2],
         weights: Option<[[Wp; 2]; 3]>,
         bit_depth: u32,
     ) {
@@ -605,7 +622,7 @@ impl<'a> SliceDecoder<'a, '_> {
             };
             let mut used = [false; 2];
             for list in 0..2 {
-                let Some(pic) = &refs[list] else {
+                let Some(frame) = &refs[list] else {
                     continue;
                 };
                 let mv = field.mv[list];
@@ -633,10 +650,15 @@ impl<'a> SliceDecoder<'a, '_> {
                 // The reference's own size: a damaged stream may name a
                 // picture of another size.
                 let sub = usize::from(c > 0);
+                let (samples, rows) = match P::rows(&frame.rows).and_then(|r| r.rows_from(c, 0)) {
+                    Some((s, _, end)) => (s, end),
+                    None => (&[][..], 0),
+                };
                 let plane = Plane {
-                    samples: &pic.planes[c],
-                    width: pic.width >> sub,
-                    height: pic.height >> sub,
+                    samples,
+                    width: frame.width >> sub,
+                    height: frame.height >> sub,
+                    rows,
                 };
                 mc::interpolate(
                     &plane,

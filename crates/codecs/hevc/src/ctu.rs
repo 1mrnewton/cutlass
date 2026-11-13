@@ -10,10 +10,12 @@ use crate::cabac::{self, Cabac};
 use crate::intra::{self, Refs};
 use cutlass_pool::Rows;
 
+use crate::job::Pipeline;
 use crate::picture::{
     FLAG_CBF, FLAG_KEEP, FLAG_PCM, FLAG_SKIP, MODE_INTER, MODE_INTRA, MvField, Picture, Samples,
-    SaoParams, lock,
+    SaoParams, Work, lock,
 };
+use crate::pixel::Pixel;
 use crate::ps::{Pps, Sps};
 use crate::slice::SliceType;
 use crate::transform;
@@ -79,9 +81,13 @@ pub struct Wave<'p> {
     pub row_only: bool,
 }
 
-pub struct SliceDecoder<'a, 'p> {
+pub struct SliceDecoder<'a, 'p, P: Pixel> {
     pub pic: &'p Picture,
-    pub out: Samples<'p>,
+    pub work: &'p Work<P>,
+    /// The CTB row being reconstructed.
+    pub out: Samples<'p, P>,
+    /// Told of every CTB reconstructed, to run the loop filters behind.
+    pub pipe: &'p Pipeline<'p, P>,
     /// The first CTB, raster order, when it is not the segment's first.
     pub start_rs: Option<usize>,
     pub wave: Option<Wave<'p>>,
@@ -107,7 +113,7 @@ pub struct SliceDecoder<'a, 'p> {
     pub ctb_rs: usize,
     pub merge_2nx2n: bool,
     pub slice_type: SliceType,
-    pub mc: crate::mc::Scratch,
+    pub mc: crate::mc::Scratch<P>,
 }
 
 /// Up-right diagonal, horizontal, and vertical scans of a 4×4 and a 2×2
@@ -242,7 +248,7 @@ fn malformed(what: &'static str) -> CodecError {
     CodecError::Malformed { at_bit: 0, what }
 }
 
-impl<'a, 'p> SliceDecoder<'a, 'p> {
+impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
     /// Decode every CTU of the slice segment.
     pub fn decode(&mut self) -> Result<(), CodecError> {
         let header = self.pic.slices[self.slice].header.clone();
@@ -274,6 +280,10 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
             self.ctb_rs = rs;
             self.ctb_x = col * ctb_size;
             self.ctb_y = (rs / ctb_w) * ctb_size;
+            if self.out.row() != rs / ctb_w {
+                self.out = self.work.band(rs / ctb_w);
+                self.pipe.nudge(Some(rs / ctb_w));
+            }
             self.pic.ctb_slice[rs].store(self.slice as u16, Relaxed);
             self.pic.ctb_slice_addr[rs].store(slice_addr, Relaxed);
             let tile_start =
@@ -308,10 +318,11 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
             {
                 *slot = Some(Box::new(self.cabac.ctx));
             }
+            self.out.publish(self.ctb_x, self.ctb_y, ctb_size, height);
             if let Some(wave) = in_wave {
-                self.out.publish(self.ctb_x, self.ctb_y, ctb_size, height);
                 wave.mine.report_through(col as u32);
             }
+            self.pipe.ctb_done(rs);
             let end = self.cabac.terminate();
             if self.cabac.overrun() {
                 return Err(truncated("slice data"));
@@ -788,7 +799,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         for y in 0..size {
             for x in 0..size {
                 let v = reader.u(luma_bits)?;
-                plane[y * stride + x] = (v << (bit_depth - luma_bits)) as u16;
+                plane[y * stride + x] = P::of((v << (bit_depth - luma_bits)) as i32);
             }
         }
         for c in 1..3 {
@@ -796,7 +807,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
             for y in 0..size / 2 {
                 for x in 0..size / 2 {
                     let v = reader.u(chroma_bits)?;
-                    plane[y * stride + x] = (v << (bit_depth - chroma_bits)) as u16;
+                    plane[y * stride + x] = P::of((v << (bit_depth - chroma_bits)) as i32);
                 }
             }
         }
@@ -1062,7 +1073,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         let unit = 4 / scale;
         // The row above a band belongs to another worker: copy what this
         // block may read of it once.
-        let mut line = [0u16; 129];
+        let mut line = [P::default(); 129];
         let line_x = px.saturating_sub(1);
         let from_line = py > 0 && !self.out.holds(c, py - 1);
         if from_line {
@@ -1072,9 +1083,9 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         let out = &self.out;
         let above = |sx: usize| -> i32 {
             if from_line {
-                i32::from(line[sx - line_x])
+                line[sx - line_x].i()
             } else {
-                i32::from(out.get(c, sx, py - 1))
+                out.get(c, sx, py - 1).i()
             }
         };
         let check = |pic: &Picture, sx: isize, sy: isize| -> bool {
@@ -1096,7 +1107,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
                 let sy = base + k;
                 let idx = refs.left(sy as i32);
                 if ok {
-                    refs.samples[idx] = i32::from(out.get(c, px - 1, py + sy as usize));
+                    refs.samples[idx] = out.get(c, px - 1, py + sy as usize).i();
                     refs.available[idx] = true;
                 }
             }
@@ -1516,7 +1527,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         for y in 0..n {
             let row = &mut plane[y * stride..y * stride + n];
             for (x, sample) in row.iter_mut().enumerate() {
-                *sample = (i32::from(*sample) + coeffs[y * n + x]).clamp(0, max) as u16;
+                *sample = P::of((sample.i() + coeffs[y * n + x]).clamp(0, max));
             }
         }
     }

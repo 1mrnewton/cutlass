@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use cutlass_decode::CodecError;
 
 use crate::cabac::Contexts;
+use crate::frame::Frame;
+use crate::pixel::Pixel;
 use crate::ps::{Layout, Pps, Sps};
 use crate::slice::SliceHeader;
 
@@ -43,50 +45,9 @@ pub struct ColMv {
     pub pred: u8,
 }
 
-/// A decoded picture, immutable once it enters the DPB.
-#[derive(Debug)]
-pub struct Decoded {
-    pub width: usize,
-    pub height: usize,
-    pub planes: [Vec<u16>; 3],
-    pub col: Vec<ColMv>,
-    pub col_stride: usize,
-    pub poc: i32,
-}
-
-impl Decoded {
-    /// A picture that the bitstream named and did not send (clause 8.3.3):
-    /// mid-grey, with no motion.
-    pub fn missing(width: usize, height: usize, bit_depth: u8, poc: i32) -> Self {
-        let grey = 1u16 << (bit_depth - 1);
-        Self {
-            width,
-            height,
-            planes: [
-                vec![grey; width * height],
-                vec![grey; (width / 2) * (height / 2)],
-                vec![grey; (width / 2) * (height / 2)],
-            ],
-            col: Vec::new(),
-            col_stride: 0,
-            poc,
-        }
-    }
-
-    pub fn col_at(&self, x: usize, y: usize) -> ColMv {
-        if self.col_stride == 0 {
-            return ColMv::default();
-        }
-        self.col
-            .get((y >> 4) * self.col_stride + (x >> 4))
-            .copied()
-            .unwrap_or_default()
-    }
-}
-
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RefPic {
-    pub pic: Arc<Decoded>,
+    pub frame: Arc<Frame>,
     pub poc: i32,
     pub long_term: bool,
     /// Identity of the DPB picture, for deblocking's same-picture test.
@@ -94,7 +55,7 @@ pub struct RefPic {
 }
 
 /// One independent or dependent slice segment of the picture.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SliceCtx {
     pub header: SliceHeader,
     pub refs: [Vec<RefPic>; 2],
@@ -180,6 +141,13 @@ impl Bytes {
         self.0[at].store(value, Relaxed);
     }
 
+    /// Every cell to `value`.
+    pub fn fill_all(&self, value: u8) {
+        for cell in &self.0 {
+            cell.store(value, Relaxed);
+        }
+    }
+
     /// Fill the `w`×`h` luma area at (`x`, `y`) of a map on the 4×4 grid.
     pub fn fill4(&self, w4: usize, (x, y): (usize, usize), (w, h): (usize, usize), value: u8) {
         for row in (y >> 2)..((y + h) >> 2) {
@@ -227,6 +195,14 @@ impl Motion {
         }
     }
 
+    /// Every cell to no motion.
+    fn clear(&self) {
+        for (a, b) in self.mv.iter().zip(&self.refs) {
+            a.store(0, Relaxed);
+            b.store(0, Relaxed);
+        }
+    }
+
     /// Store `field` in `len` cells from `start`.
     pub fn fill(&self, start: usize, len: usize, field: MvField) {
         let bits = |v: i16| u64::from(v as u16);
@@ -261,6 +237,13 @@ impl Sao {
         }
     }
 
+    fn clear(&self) {
+        for (a, b) in self.offsets.iter().zip(&self.kind) {
+            a.store(0, Relaxed);
+            b.store(0, Relaxed);
+        }
+    }
+
     pub fn get(&self, rs: usize) -> [SaoParams; 3] {
         let mut out = [SaoParams::default(); 3];
         for (c, p) in out.iter_mut().enumerate() {
@@ -287,42 +270,86 @@ impl Sao {
     }
 }
 
-/// Samples of the picture under reconstruction, read and written by luma
-/// or chroma position. A row worker holds only its own band of CTB rows;
-/// the line above the band comes from what the worker above published.
-pub struct Samples<'p> {
-    planes: [&'p mut [u16]; 3],
+/// The picture under reconstruction, one buffer for each CTB row so that
+/// row workers and the loop filters each lock only the rows they touch,
+/// and the bottom line of every CTB row as reconstruction left it, before
+/// the loop filters, for intra prediction of the row below.
+pub struct Work<P> {
+    pub rows: Vec<Mutex<[Vec<P>; 3]>>,
+    pub lines: Vec<Mutex<[Vec<P>; 3]>>,
+    pub width: usize,
+    pub height: usize,
+    pub log2_ctb: u32,
+}
+
+impl<P: Pixel> Work<P> {
+    pub fn new(width: usize, height: usize, log2_ctb: u32) -> Self {
+        let ctb = 1usize << log2_ctb;
+        let count = height.div_ceil(ctb);
+        let rows = (0..count)
+            .map(|r| {
+                let lines = ctb.min(height - r * ctb);
+                Mutex::new([
+                    vec![P::default(); lines * width],
+                    vec![P::default(); lines / 2 * (width / 2)],
+                    vec![P::default(); lines / 2 * (width / 2)],
+                ])
+            })
+            .collect();
+        let lines = (0..count)
+            .map(|_| {
+                Mutex::new([
+                    vec![P::default(); width],
+                    vec![P::default(); width / 2],
+                    vec![P::default(); width / 2],
+                ])
+            })
+            .collect();
+        Self {
+            rows,
+            lines,
+            width,
+            height,
+            log2_ctb,
+        }
+    }
+
+    /// Whether these buffers fit a picture of this size and CTB.
+    pub fn fits(&self, width: usize, height: usize, log2_ctb: u32) -> bool {
+        self.width == width && self.height == height && self.log2_ctb == log2_ctb
+    }
+
+    /// The samples of CTB row `row`, locked.
+    pub fn band(&self, row: usize) -> Samples<'_, P> {
+        Samples {
+            band: lock(&self.rows[row]),
+            top: row << self.log2_ctb,
+            width: self.width,
+            work: self,
+        }
+    }
+}
+
+/// The samples of one CTB row under reconstruction, read and written by
+/// luma or chroma position. The line above the row comes from what the
+/// row above saved.
+pub struct Samples<'p, P> {
+    band: MutexGuard<'p, [Vec<P>; 3]>,
     /// First luma row held.
     top: usize,
     width: usize,
-    lines: Option<&'p Lines>,
+    work: &'p Work<P>,
 }
 
-impl<'p> Samples<'p> {
-    /// Every row of the picture.
-    pub fn whole(planes: &'p mut [Vec<u16>; 3], width: usize) -> Self {
-        let [y, u, v] = planes;
-        Self {
-            planes: [y.as_mut_slice(), u.as_mut_slice(), v.as_mut_slice()],
-            top: 0,
-            width,
-            lines: None,
-        }
-    }
-
-    /// Luma rows from `top` on, held in `planes`.
-    pub fn band(planes: [&'p mut [u16]; 3], top: usize, width: usize, lines: &'p Lines) -> Self {
-        Self {
-            planes,
-            top,
-            width,
-            lines: Some(lines),
-        }
-    }
-
+impl<P: Pixel> Samples<'_, P> {
     #[inline]
     fn stride(&self, c: usize) -> usize {
         if c == 0 { self.width } else { self.width / 2 }
+    }
+
+    /// The CTB row held.
+    pub fn row(&self) -> usize {
+        self.top >> self.work.log2_ctb
     }
 
     /// Index of component sample (`x`, `y`). The row must be held.
@@ -334,10 +361,10 @@ impl<'p> Samples<'p> {
 
     /// The plane of component `c` from sample (`x`, `y`) on, and its stride.
     #[inline]
-    pub fn from(&mut self, c: usize, x: usize, y: usize) -> (&mut [u16], usize) {
+    pub fn from(&mut self, c: usize, x: usize, y: usize) -> (&mut [P], usize) {
         let at = self.index(c, x, y);
         let stride = self.stride(c);
-        (&mut self.planes[c][at..], stride)
+        (&mut self.band[c][at..], stride)
     }
 
     /// Whether component row `y` is held here (else it is the line above).
@@ -347,30 +374,30 @@ impl<'p> Samples<'p> {
     }
 
     #[inline]
-    pub fn get(&self, c: usize, x: usize, y: usize) -> u16 {
-        self.planes[c][self.index(c, x, y)]
+    pub fn get(&self, c: usize, x: usize, y: usize) -> P {
+        self.band[c][self.index(c, x, y)]
     }
 
     /// Component samples `x..x + out.len()` of the line just above the
-    /// band. Zeros when no line was published.
-    pub fn above(&self, c: usize, x: usize, out: &mut [u16]) {
-        let row = (self.top >> self.lines.map_or(0, |l| l.log2_ctb)).wrapping_sub(1);
-        match self.lines.and_then(|l| l.rows.get(row)) {
+    /// row, as reconstruction left it.
+    pub fn above(&self, c: usize, x: usize, out: &mut [P]) {
+        match self
+            .row()
+            .checked_sub(1)
+            .and_then(|r| self.work.lines.get(r))
+        {
             Some(line) => {
                 let line = lock(line);
                 out.copy_from_slice(&line[c][x..x + out.len()]);
             }
-            None => out.fill(0),
+            None => out.fill(P::default()),
         }
     }
 
-    /// Publish the bottom line of the CTB at luma (`x`, `y`), `size` wide,
-    /// for the worker below. Nothing happens on whole planes.
+    /// Save the bottom line of the CTB at luma (`x`, `y`), `size` wide, for
+    /// the row below.
     pub fn publish(&self, x: usize, y: usize, size: usize, height: usize) {
-        let Some(lines) = self.lines else {
-            return;
-        };
-        let Some(line) = lines.rows.get(y >> lines.log2_ctb) else {
+        let Some(line) = self.work.lines.get(y >> self.work.log2_ctb) else {
             return;
         };
         let bottom = (y + size).min(height) - 1;
@@ -383,55 +410,9 @@ impl<'p> Samples<'p> {
                 (x / 2, bottom / 2, w / 2)
             };
             let at = self.index(c, sx, sy);
-            line[c][sx..sx + sw].copy_from_slice(&self.planes[c][at..at + sw]);
+            line[c][sx..sx + sw].copy_from_slice(&self.band[c][at..at + sw]);
         }
     }
-}
-
-/// The bottom sample line of every CTB row, for the row below when another
-/// worker decodes it.
-pub struct Lines {
-    log2_ctb: u32,
-    rows: Vec<Mutex<[Vec<u16>; 3]>>,
-}
-
-impl Lines {
-    pub fn new(width: usize, ctb_rows: usize, log2_ctb: u32) -> Self {
-        Self {
-            log2_ctb,
-            rows: (0..ctb_rows)
-                .map(|_| Mutex::new([vec![0; width], vec![0; width / 2], vec![0; width / 2]]))
-                .collect(),
-        }
-    }
-}
-
-/// Luma, Cb and Cr rows of one band.
-pub type Band<'a> = [&'a mut [u16]; 3];
-
-/// Split the planes into bands of luma rows starting at `tops` (the first
-/// is 0, each even), the last ending at `height`.
-pub fn split_bands<'a>(
-    planes: &'a mut [Vec<u16>; 3],
-    width: usize,
-    tops: &[usize],
-    height: usize,
-) -> Vec<Mutex<Band<'a>>> {
-    let [y, u, v] = planes;
-    let (mut y, mut u, mut v) = (y.as_mut_slice(), u.as_mut_slice(), v.as_mut_slice());
-    let mut out = Vec::with_capacity(tops.len());
-    for (i, &top) in tops.iter().enumerate() {
-        let bottom = tops.get(i + 1).map_or(height, |&t| t);
-        let rows = bottom - top;
-        let luma = (rows * width).min(y.len());
-        let chroma = (rows / 2 * (width / 2)).min(u.len()).min(v.len());
-        let (band_y, rest_y) = std::mem::take(&mut y).split_at_mut(luma);
-        let (band_u, rest_u) = std::mem::take(&mut u).split_at_mut(chroma);
-        let (band_v, rest_v) = std::mem::take(&mut v).split_at_mut(chroma);
-        (y, u, v) = (rest_y, rest_u, rest_v);
-        out.push(Mutex::new([band_y, band_u, band_v]));
-    }
-    out
 }
 
 pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -439,14 +420,6 @@ pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     }
-}
-
-/// Fresh planes for a picture of `width`×`height` luma samples.
-pub fn planes(width: usize, height: usize) -> Result<[Vec<u16>; 3], CodecError> {
-    let luma = width.checked_mul(height).ok_or(CodecError::Limit {
-        what: "picture size",
-    })?;
-    Ok([vec![0; luma], vec![0; luma / 4], vec![0; luma / 4]])
 }
 
 impl Picture {
@@ -490,6 +463,51 @@ impl Picture {
             pps,
             layout,
         })
+    }
+
+    /// This picture's maps made ready for another picture of the same
+    /// size and layout, or new ones.
+    pub fn reuse(
+        old: Option<Self>,
+        sps: Arc<Sps>,
+        pps: Arc<Pps>,
+        layout: Arc<Layout>,
+        poc: i32,
+    ) -> Result<Self, CodecError> {
+        let Some(mut pic) = old.filter(|p| {
+            p.width == sps.width as usize
+                && p.height == sps.height as usize
+                && p.ctb_slice.len() == layout.ctb_count() as usize
+        }) else {
+            return Self::new(sps, pps, layout, poc);
+        };
+        pic.mvf.clear();
+        pic.info.fill_all(0);
+        pic.intra_mode.fill_all(1);
+        pic.qp.fill_all(0);
+        pic.depth.fill_all(0);
+        pic.bs_ver.fill_all(0);
+        pic.bs_hor.fill_all(0);
+        for (a, b) in pic.ctb_slice.iter().zip(&pic.ctb_slice_addr) {
+            a.store(u16::MAX, Relaxed);
+            b.store(u32::MAX, Relaxed);
+        }
+        pic.sao.clear();
+        pic.slices.clear();
+        pic.poc = poc;
+        *lock(&pic.dependent) = ([0; crate::cabac::CONTEXTS], 0);
+        {
+            let ctbs = layout.ctb_count() as usize;
+            let mut wpp = lock(&pic.wpp_ctx);
+            wpp.clear();
+            if pps.entropy_sync {
+                wpp.resize(ctbs, None);
+            }
+        }
+        pic.sps = sps;
+        pic.pps = pps;
+        pic.layout = layout;
+        Ok(pic)
     }
 
     /// The motion of the 4×4 holding luma (`x`, `y`).

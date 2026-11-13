@@ -1,6 +1,8 @@
 //! Intra sample prediction (clause 8.4.4.2): reference substitution,
 //! filtering, planar, DC, and the 33 angular modes.
 
+use crate::pixel::Pixel;
+
 /// `intraPredAngle` for modes 0..=34 (Table 8-5). Modes 0 and 1 are unused.
 const ANGLE: [i32; 35] = [
     0, 0, 32, 26, 21, 17, 13, 9, 5, 2, 0, -2, -5, -9, -13, -17, -21, -26, -32, -26, -21, -17, -13,
@@ -115,7 +117,14 @@ pub fn filter(refs: &mut Refs, mode: u8, strong_smoothing: bool, bit_depth: u32)
 
 /// Predict an `n`×`n` block into `dst` (row stride `stride`). `edge` turns
 /// on the DC, horizontal, and vertical boundary smoothing of luma.
-pub fn predict(refs: &Refs, mode: u8, edge: bool, bit_depth: u32, dst: &mut [u16], stride: usize) {
+pub fn predict<P: Pixel>(
+    refs: &Refs,
+    mode: u8,
+    edge: bool,
+    bit_depth: u32,
+    dst: &mut [P],
+    stride: usize,
+) {
     let n = refs.n;
     let s = &refs.samples;
     let max = (1i32 << bit_depth) - 1;
@@ -136,7 +145,7 @@ pub fn predict(refs: &Refs, mode: u8, edge: bool, bit_depth: u32, dst: &mut [u16
                         + (ni - 1 - y) * p_top(x)
                         + (y + 1) * bottom_left
                         + ni;
-                    row[x as usize] = (value >> shift) as u16;
+                    row[x as usize] = P::of(value >> shift);
                 }
             }
         }
@@ -148,15 +157,15 @@ pub fn predict(refs: &Refs, mode: u8, edge: bool, bit_depth: u32, dst: &mut [u16
             }
             let dc = sum >> (n.trailing_zeros() + 1);
             for y in 0..n {
-                dst[y * stride..y * stride + n].fill(dc as u16);
+                dst[y * stride..y * stride + n].fill(P::of(dc));
             }
             if edge && n < 32 {
-                dst[0] = ((p_left(0) + 2 * dc + p_top(0) + 2) >> 2) as u16;
+                dst[0] = P::of((p_left(0) + 2 * dc + p_top(0) + 2) >> 2);
                 for x in 1..ni {
-                    dst[x as usize] = ((p_top(x) + 3 * dc + 2) >> 2) as u16;
+                    dst[x as usize] = P::of((p_top(x) + 3 * dc + 2) >> 2);
                 }
                 for y in 1..ni {
-                    dst[y as usize * stride] = ((p_left(y) + 3 * dc + 2) >> 2) as u16;
+                    dst[y as usize * stride] = P::of((p_left(y) + 3 * dc + 2) >> 2);
                 }
             }
         }
@@ -164,7 +173,7 @@ pub fn predict(refs: &Refs, mode: u8, edge: bool, bit_depth: u32, dst: &mut [u16
     }
 }
 
-fn angular(refs: &Refs, mode: u8, edge: bool, max: i32, dst: &mut [u16], stride: usize) {
+fn angular<P: Pixel>(refs: &Refs, mode: u8, edge: bool, max: i32, dst: &mut [P], stride: usize) {
     let n = refs.n as i32;
     let s = &refs.samples;
     let angle = ANGLE[usize::from(mode)];
@@ -215,7 +224,7 @@ fn angular(refs: &Refs, mode: u8, edge: bool, max: i32, dst: &mut [u16], stride:
             };
             // For a horizontal mode the roles of x and y swap.
             let (px, py) = if vertical { (x, y) } else { (y, x) };
-            dst[py as usize * stride + px as usize] = value as u16;
+            dst[py as usize * stride + px as usize] = P::of(value);
         }
     }
     if edge && n < 32 {
@@ -224,14 +233,14 @@ fn angular(refs: &Refs, mode: u8, edge: bool, max: i32, dst: &mut [u16], stride:
             let top = s[refs.top(0)];
             for y in 0..n {
                 let value = top + ((s[refs.left(y)] - corner) >> 1);
-                dst[y as usize * stride] = value.clamp(0, max) as u16;
+                dst[y as usize * stride] = P::of(value.clamp(0, max));
             }
         } else if mode == 10 {
             let corner = s[refs.left(-1)];
             let left = s[refs.left(0)];
             for x in 0..n {
                 let value = left + ((s[refs.top(x)] - corner) >> 1);
-                dst[x as usize] = value.clamp(0, max) as u16;
+                dst[x as usize] = P::of(value.clamp(0, max));
             }
         }
     }

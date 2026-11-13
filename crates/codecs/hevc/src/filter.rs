@@ -1,13 +1,19 @@
 //! In-loop filters: the deblocking filter (clause 8.7.2) and sample
-//! adaptive offset (clause 8.7.3), run over a whole decoded picture.
+//! adaptive offset (clause 8.7.3), one CTB row at a time.
+//!
+//! Deblocking a CTB row filters its vertical edges, then its horizontal
+//! edges, the one on its top boundary included, which changes the last
+//! three lines of the row above. Every vertical edge of a line is then
+//! filtered before any horizontal edge that reaches the line, as the
+//! picture-wide order of the specification has it. SAO of a row reads the
+//! deblocked samples of the row and one line on each side, so it runs once
+//! the row below is deblocked.
 
-use std::sync::Mutex;
 use std::sync::atomic::Ordering::Relaxed;
 
-use cutlass_pool::Pool;
-
 use crate::ctu::chroma_qp;
-use crate::picture::{Band, FLAG_KEEP, Picture, lock, split_bands};
+use crate::picture::{FLAG_KEEP, Picture, Work, lock};
+use crate::pixel::Pixel;
 
 /// `tC′` of table 8-12, indexed by `Q`.
 const TC: [i32; 54] = [
@@ -21,15 +27,6 @@ const BETA: [i32; 52] = [
     20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64,
 ];
 
-/// Four lines across one edge: `pos` is the first `q0` sample, `across`
-/// the step from `p0` to `q0`, `along` the step to the next line.
-#[derive(Clone, Copy)]
-struct Edge {
-    pos: usize,
-    across: usize,
-    along: usize,
-}
-
 /// Decisions of one edge segment.
 #[derive(Clone, Copy)]
 struct Strength {
@@ -40,30 +37,67 @@ struct Strength {
     max: i32,
 }
 
-#[inline]
-fn at(s: &[u16], e: Edge, line: usize, i: isize) -> i32 {
-    let base = e.pos + line * e.along;
-    let index = if i >= 0 {
-        base + i as usize * e.across
-    } else {
-        base - (-i) as usize * e.across
-    };
-    i32::from(s[index])
+/// The samples on both sides of an edge, by line along the edge (0 to 3)
+/// and position across it (-4 to 3, `q0` at 0).
+trait Edge {
+    fn at(&self, line: usize, i: isize) -> i32;
+    fn put(&mut self, line: usize, i: isize, value: i32, max: i32);
 }
 
-#[inline]
-fn put(s: &mut [u16], e: Edge, line: usize, i: isize, value: i32, max: i32) {
-    let base = e.pos + line * e.along;
-    let index = if i >= 0 {
-        base + i as usize * e.across
-    } else {
-        base - (-i) as usize * e.across
-    };
-    s[index] = value.clamp(0, max) as u16;
+/// A vertical edge: the four lines are rows of one buffer.
+struct Ver<'a, P> {
+    s: &'a mut [P],
+    /// `q0` of line 0.
+    pos: usize,
+    stride: usize,
+}
+
+impl<P: Pixel> Edge for Ver<'_, P> {
+    #[inline(always)]
+    fn at(&self, line: usize, i: isize) -> i32 {
+        self.s[(self.pos + line * self.stride).wrapping_add_signed(i)].i()
+    }
+
+    #[inline(always)]
+    fn put(&mut self, line: usize, i: isize, value: i32, max: i32) {
+        self.s[(self.pos + line * self.stride).wrapping_add_signed(i)] = P::of(value.clamp(0, max));
+    }
+}
+
+/// A horizontal edge: `p` ends with the rows above it, `q` starts with the
+/// rows below, the four lines are columns from `x`.
+struct Hor<'a, P> {
+    p: &'a mut [P],
+    q: &'a mut [P],
+    x: usize,
+    stride: usize,
+}
+
+impl<P: Pixel> Edge for Hor<'_, P> {
+    #[inline(always)]
+    fn at(&self, line: usize, i: isize) -> i32 {
+        if i >= 0 {
+            self.q[i as usize * self.stride + self.x + line].i()
+        } else {
+            self.p[self.p.len() - (-i) as usize * self.stride + self.x + line].i()
+        }
+    }
+
+    #[inline(always)]
+    fn put(&mut self, line: usize, i: isize, value: i32, max: i32) {
+        let v = P::of(value.clamp(0, max));
+        if i >= 0 {
+            self.q[i as usize * self.stride + self.x + line] = v;
+        } else {
+            let at = self.p.len() - (-i) as usize * self.stride + self.x + line;
+            self.p[at] = v;
+        }
+    }
 }
 
 /// Luma edge filtering of four lines (clauses 8.7.2.5.3 and 8.7.2.5.7).
-fn luma_edge(s: &mut [u16], e: Edge, st: Strength) {
+#[inline(always)]
+fn luma_edge<E: Edge>(s: &mut E, st: Strength) {
     let Strength {
         beta,
         tc,
@@ -71,54 +105,49 @@ fn luma_edge(s: &mut [u16], e: Edge, st: Strength) {
         no_q,
         max,
     } = st;
-    let dp = |s: &[u16], line: usize| {
-        (at(s, e, line, -3) - 2 * at(s, e, line, -2) + at(s, e, line, -1)).abs()
-    };
-    let dq = |s: &[u16], line: usize| {
-        (at(s, e, line, 2) - 2 * at(s, e, line, 1) + at(s, e, line, 0)).abs()
-    };
-    let dp0 = dp(s, 0);
-    let dp3 = dp(s, 3);
-    let dq0 = dq(s, 0);
-    let dq3 = dq(s, 3);
+    let dp = |s: &E, line: usize| (s.at(line, -3) - 2 * s.at(line, -2) + s.at(line, -1)).abs();
+    let dq = |s: &E, line: usize| (s.at(line, 2) - 2 * s.at(line, 1) + s.at(line, 0)).abs();
+    let dp0 = dp(&*s, 0);
+    let dp3 = dp(&*s, 3);
+    let dq0 = dq(&*s, 0);
+    let dq3 = dq(&*s, 3);
     let d0 = dp0 + dq0;
     let d3 = dp3 + dq3;
     if d0 + d3 >= beta {
         return;
     }
-    let strong_line = |s: &[u16], line: usize, d: i32| -> bool {
+    let strong_line = |s: &E, line: usize, d: i32| -> bool {
         2 * d < (beta >> 2)
-            && (at(s, e, line, -4) - at(s, e, line, -1)).abs()
-                + (at(s, e, line, 0) - at(s, e, line, 3)).abs()
+            && (s.at(line, -4) - s.at(line, -1)).abs() + (s.at(line, 0) - s.at(line, 3)).abs()
                 < (beta >> 3)
-            && (at(s, e, line, -1) - at(s, e, line, 0)).abs() < ((5 * tc + 1) >> 1)
+            && (s.at(line, -1) - s.at(line, 0)).abs() < ((5 * tc + 1) >> 1)
     };
-    if strong_line(s, 0, d0) && strong_line(s, 3, d3) {
+    if strong_line(&*s, 0, d0) && strong_line(&*s, 3, d3) {
         let tc2 = 2 * tc;
         for line in 0..4 {
-            let p3 = at(s, e, line, -4);
-            let p2 = at(s, e, line, -3);
-            let p1 = at(s, e, line, -2);
-            let p0 = at(s, e, line, -1);
-            let q0 = at(s, e, line, 0);
-            let q1 = at(s, e, line, 1);
-            let q2 = at(s, e, line, 2);
-            let q3 = at(s, e, line, 3);
+            let p3 = s.at(line, -4);
+            let p2 = s.at(line, -3);
+            let p1 = s.at(line, -2);
+            let p0 = s.at(line, -1);
+            let q0 = s.at(line, 0);
+            let q1 = s.at(line, 1);
+            let q2 = s.at(line, 2);
+            let q3 = s.at(line, 3);
             if !no_p {
                 let v0 = ((p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3).clamp(p0 - tc2, p0 + tc2);
                 let v1 = ((p2 + p1 + p0 + q0 + 2) >> 2).clamp(p1 - tc2, p1 + tc2);
                 let v2 = ((2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3).clamp(p2 - tc2, p2 + tc2);
-                put(s, e, line, -1, v0, max);
-                put(s, e, line, -2, v1, max);
-                put(s, e, line, -3, v2, max);
+                s.put(line, -1, v0, max);
+                s.put(line, -2, v1, max);
+                s.put(line, -3, v2, max);
             }
             if !no_q {
                 let v0 = ((p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3).clamp(q0 - tc2, q0 + tc2);
                 let v1 = ((p0 + q0 + q1 + q2 + 2) >> 2).clamp(q1 - tc2, q1 + tc2);
                 let v2 = ((p0 + q0 + q1 + 3 * q2 + 2 * q3 + 4) >> 3).clamp(q2 - tc2, q2 + tc2);
-                put(s, e, line, 0, v0, max);
-                put(s, e, line, 1, v1, max);
-                put(s, e, line, 2, v2, max);
+                s.put(line, 0, v0, max);
+                s.put(line, 1, v1, max);
+                s.put(line, 2, v2, max);
             }
         }
         return;
@@ -128,51 +157,52 @@ fn luma_edge(s: &mut [u16], e: Edge, st: Strength) {
     let filter_q1 = dq0 + dq3 < side;
     let half = tc >> 1;
     for line in 0..4 {
-        let p2 = at(s, e, line, -3);
-        let p1 = at(s, e, line, -2);
-        let p0 = at(s, e, line, -1);
-        let q0 = at(s, e, line, 0);
-        let q1 = at(s, e, line, 1);
-        let q2 = at(s, e, line, 2);
+        let p2 = s.at(line, -3);
+        let p1 = s.at(line, -2);
+        let p0 = s.at(line, -1);
+        let q0 = s.at(line, 0);
+        let q1 = s.at(line, 1);
+        let q2 = s.at(line, 2);
         let mut delta = (9 * (q0 - p0) - 3 * (q1 - p1) + 8) >> 4;
         if delta.abs() >= tc * 10 {
             continue;
         }
         delta = delta.clamp(-tc, tc);
         if !no_p {
-            put(s, e, line, -1, p0 + delta, max);
+            s.put(line, -1, p0 + delta, max);
             if filter_p1 {
                 let dp = ((((p2 + p0 + 1) >> 1) - p1 + delta) >> 1).clamp(-half, half);
-                put(s, e, line, -2, p1 + dp, max);
+                s.put(line, -2, p1 + dp, max);
             }
         }
         if !no_q {
-            put(s, e, line, 0, q0 - delta, max);
+            s.put(line, 0, q0 - delta, max);
             if filter_q1 {
                 let dq = ((((q2 + q0 + 1) >> 1) - q1 - delta) >> 1).clamp(-half, half);
-                put(s, e, line, 1, q1 + dq, max);
+                s.put(line, 1, q1 + dq, max);
             }
         }
     }
 }
 
 /// Chroma edge filtering of four lines (clause 8.7.2.5.5).
-fn chroma_edge(s: &mut [u16], e: Edge, st: Strength) {
+#[inline(always)]
+fn chroma_edge<E: Edge>(s: &mut E, st: Strength) {
     let tc = st.tc;
     if tc == 0 {
         return;
     }
     for line in 0..4 {
-        let p1 = at(s, e, line, -2);
-        let p0 = at(s, e, line, -1);
-        let q0 = at(s, e, line, 0);
-        let q1 = at(s, e, line, 1);
+        let p1 = s.at(line, -2);
+        let p0 = s.at(line, -1);
+        let q0 = s.at(line, 0);
+        let q1 = s.at(line, 1);
         let delta = ((((q0 - p0) << 2) + p1 - q1 + 4) >> 3).clamp(-tc, tc);
         if !st.no_p {
-            put(s, e, line, -1, p0 + delta, st.max);
+            s.put(line, -1, p0 + delta, st.max);
         }
         if !st.no_q {
-            put(s, e, line, 0, q0 - delta, st.max);
+            s.put(line, 0, q0 - delta, st.max);
         }
     }
 }
@@ -232,33 +262,22 @@ impl Picture {
         })
     }
 
-    /// The deblocking filter over the whole picture: every vertical edge,
-    /// then every horizontal edge (clause 8.7.2). Bands of rows run on the
-    /// pool's workers; no edge of one direction reaches another band.
-    pub fn deblock(&self, planes: &mut [Vec<u16>; 3], pool: &Pool) {
-        let (width, height) = (self.width, self.height);
-        // Vertical edges change only their own rows: any 8-row bands do.
-        let step = band_rows(height, pool);
-        let mut tops: Vec<usize> = (0..height).step_by(step).collect();
-        let bands = split_bands(planes, width, &tops, height);
-        pool.slices(bands.len(), |i| {
-            let mut band = lock(&bands[i]);
-            self.deblock_vertical(&mut band, tops[i], tops.get(i + 1).map_or(height, |&t| t));
-        });
-        drop(bands);
-        // A horizontal edge on row y reads rows y - 4 to y + 3: bands start
-        // 4 rows past the 8 grid.
-        tops = std::iter::once(0)
-            .chain((step + 4..height).step_by(step))
-            .collect();
-        let bands = split_bands(planes, width, &tops, height);
-        pool.slices(bands.len(), |i| {
-            let mut band = lock(&bands[i]);
-            self.deblock_horizontal(&mut band, tops[i], tops.get(i + 1).map_or(height, |&t| t));
-        });
+    /// Deblock CTB row `r`: its vertical edges, then its horizontal ones,
+    /// the edge on its top boundary included (clause 8.7.2).
+    pub fn deblock_row<P: Pixel>(&self, work: &Work<P>, r: usize) {
+        let log2 = work.log2_ctb;
+        let top = r << log2;
+        let bottom = ((r + 1) << log2).min(self.height);
+        if top >= bottom {
+            return;
+        }
+        let mut above = r.checked_sub(1).map(|a| lock(&work.rows[a]));
+        let mut band = lock(&work.rows[r]);
+        self.deblock_vertical(&mut band, top, bottom);
+        self.deblock_horizontal(above.as_deref_mut(), &mut band, top, bottom);
     }
 
-    fn deblock_vertical(&self, band: &mut Band<'_>, top: usize, bottom: usize) {
+    fn deblock_vertical<P: Pixel>(&self, band: &mut [Vec<P>; 3], top: usize, bottom: usize) {
         let width = self.width;
         let ver_stride = width / 8 + 1;
         let cw = width / 2;
@@ -275,22 +294,22 @@ impl Picture {
                     bs,
                 };
                 if let Some(st) = self.luma_strength(&query) {
-                    let edge = Edge {
+                    let mut edge = Ver {
+                        s: &mut band[0],
                         pos: (y - top) * width + x,
-                        across: 1,
-                        along: width,
+                        stride: width,
                     };
-                    luma_edge(band[0], edge, st);
+                    luma_edge(&mut edge, st);
                 }
                 if bs == 2 && x % 16 == 0 && y % 8 == 0 {
                     for (c, &offset) in offsets.iter().enumerate() {
                         if let Some(st) = self.chroma_strength(&query, offset) {
-                            let edge = Edge {
+                            let mut edge = Ver {
+                                s: &mut band[c + 1],
                                 pos: (y / 2 - top / 2) * cw + x / 2,
-                                across: 1,
-                                along: cw,
+                                stride: cw,
                             };
-                            chroma_edge(band[c + 1], edge, st);
+                            chroma_edge(&mut edge, st);
                         }
                     }
                 }
@@ -298,11 +317,17 @@ impl Picture {
         }
     }
 
-    fn deblock_horizontal(&self, band: &mut Band<'_>, top: usize, bottom: usize) {
+    fn deblock_horizontal<P: Pixel>(
+        &self,
+        mut above: Option<&mut [Vec<P>; 3]>,
+        band: &mut [Vec<P>; 3],
+        top: usize,
+        bottom: usize,
+    ) {
         let width = self.width;
         let cw = width / 2;
         let offsets = [self.pps.cb_qp_offset, self.pps.cr_qp_offset];
-        for y in (top.next_multiple_of(8).max(8)..bottom).step_by(8) {
+        for y in (top.max(8)..bottom).step_by(8) {
             for x in (0..width).step_by(4) {
                 let bs = self.bs_hor.get((y >> 3) * self.w4 + (x >> 2));
                 if bs == 0 {
@@ -313,24 +338,38 @@ impl Picture {
                     q: (x, y),
                     bs,
                 };
-                if let Some(st) = self.luma_strength(&query) {
-                    let edge = Edge {
-                        pos: (y - top) * width + x,
-                        across: width,
-                        along: 1,
+                let chroma = bs == 2 && y % 16 == 0 && x % 8 == 0;
+                for c in 0..3 {
+                    if c > 0 && !chroma {
+                        break;
+                    }
+                    let st = if c == 0 {
+                        self.luma_strength(&query)
+                    } else {
+                        self.chroma_strength(&query, offsets[c - 1])
                     };
-                    luma_edge(band[0], edge, st);
-                }
-                if bs == 2 && y % 16 == 0 && x % 8 == 0 {
-                    for (c, &offset) in offsets.iter().enumerate() {
-                        if let Some(st) = self.chroma_strength(&query, offset) {
-                            let edge = Edge {
-                                pos: (y / 2 - top / 2) * cw + x / 2,
-                                across: cw,
-                                along: 1,
-                            };
-                            chroma_edge(band[c + 1], edge, st);
-                        }
+                    let Some(st) = st else {
+                        continue;
+                    };
+                    let (stride, x, y, top) = if c == 0 {
+                        (width, x, y, top)
+                    } else {
+                        (cw, x / 2, y / 2, top / 2)
+                    };
+                    // Rows from `y` on in this band; the rows above either
+                    // in this band or, on its top boundary, in the one above.
+                    let (p, q) = if y > top {
+                        band[c].split_at_mut((y - top) * stride)
+                    } else if let Some(above) = above.as_deref_mut() {
+                        (&mut above[c][..], &mut band[c][..])
+                    } else {
+                        continue;
+                    };
+                    let mut edge = Hor { p, q, x, stride };
+                    if c == 0 {
+                        luma_edge(&mut edge, st);
+                    } else {
+                        chroma_edge(&mut edge, st);
                     }
                 }
             }
@@ -365,32 +404,66 @@ impl Picture {
         }
     }
 
-    /// Sample adaptive offset over the whole picture (clause 8.7.3), one
-    /// CTB row on each pool job. Every CTB reads the deblocked samples.
-    pub fn sao(&self, planes: &mut [Vec<u16>; 3], pool: &Pool) {
-        let any = self
-            .slices
-            .iter()
-            .any(|s| s.header.sao_luma || s.header.sao_chroma);
-        if !any || !self.sps.sao {
-            return;
-        }
-        let deblocked = copy_planes(planes, pool);
-        let ctb_w = self.layout.ctb_width as usize;
-        let ctb_h = self.layout.ctb_height as usize;
-        let log2_ctb = u32::from(self.layout.log2_ctb);
-        let tops: Vec<usize> = (0..ctb_h).map(|ry| ry << log2_ctb).collect();
-        let bands = split_bands(planes, self.width, &tops, self.height);
-        pool.slices(ctb_h, |ry| {
-            let mut band = lock(&bands[ry]);
-            for rx in 0..ctb_w {
-                self.sao_ctb(ry * ctb_w + rx, &deblocked, &mut band);
-            }
-        });
+    /// Whether any slice of the picture has SAO on.
+    pub fn sao_on(&self) -> bool {
+        self.sps.sao
+            && self
+                .slices
+                .iter()
+                .any(|s| s.header.sao_luma || s.header.sao_chroma)
     }
 
-    /// SAO of CTB `rs` into `band`, the CTB row that holds it.
-    fn sao_ctb(&self, rs: usize, deblocked: &[Vec<u16>; 3], band: &mut Band<'_>) {
+    /// The final samples of CTB row `r` into `dst` (the row's lines of each
+    /// plane): the deblocked samples, with sample adaptive offset where it
+    /// is on (clause 8.7.3). Reads one deblocked line above and below.
+    pub fn sao_row<P: Pixel>(&self, work: &Work<P>, r: usize, mut dst: [&mut [P]; 3]) {
+        let rows = work.rows.len();
+        let above = r.checked_sub(1).map(|a| lock(&work.rows[a]));
+        let band = lock(&work.rows[r]);
+        let below = (r + 1 < rows).then(|| lock(&work.rows[r + 1]));
+        for (c, d) in dst.iter_mut().enumerate() {
+            let n = d.len().min(band[c].len());
+            d[..n].copy_from_slice(&band[c][..n]);
+        }
+        if !self.sao_on() {
+            return;
+        }
+        let top = r << work.log2_ctb;
+        let width = self.width;
+        // Component row `y` of the deblocked picture, for `y` in the band
+        // or one line outside it.
+        let line = |c: usize, y: usize| -> &[P] {
+            let (t, stride) = if c == 0 {
+                (top, width)
+            } else {
+                (top / 2, width / 2)
+            };
+            let lines = band[c].len() / stride.max(1);
+            if y < t {
+                above
+                    .as_ref()
+                    .map_or(&[][..], |a| &a[c][a[c].len().saturating_sub(stride)..])
+            } else if y >= t + lines {
+                below
+                    .as_ref()
+                    .map_or(&[][..], |b| &b[c][..stride.min(b[c].len())])
+            } else {
+                &band[c][(y - t) * stride..(y - t + 1) * stride]
+            }
+        };
+        let ctb_w = self.layout.ctb_width as usize;
+        for rx in 0..ctb_w {
+            self.sao_ctb(r * ctb_w + rx, &line, &mut dst);
+        }
+    }
+
+    /// SAO of CTB `rs` into `dst`, the lines of the CTB row that holds it.
+    fn sao_ctb<'l, P: Pixel>(
+        &self,
+        rs: usize,
+        line: &impl Fn(usize, usize) -> &'l [P],
+        dst: &mut [&mut [P]; 3],
+    ) {
         let ctb_w = self.layout.ctb_width as usize;
         let ctb_h = self.layout.ctb_height as usize;
         let log2_ctb = u32::from(self.layout.log2_ctb);
@@ -400,6 +473,9 @@ impl Picture {
             self.pps.transquant_bypass || self.sps.pcm.is_some_and(|p| p.loop_filter_disabled);
         let (rx, ry) = (rs % ctb_w, rs / ctb_w);
         let params = self.sao.get(rs);
+        if params.iter().all(|p| p.kind == 0) {
+            return;
+        }
         // May this CTB read each of its eight neighbours?
         let mut cross = [[false; 3]; 3];
         for (dy, row) in cross.iter_mut().enumerate() {
@@ -434,16 +510,27 @@ impl Picture {
                 keep_possible,
                 top: y0,
             };
-            let src = &deblocked[c];
+            let out = &mut *dst[c];
             if p.kind == 1 {
                 let mut table = [0i32; 32];
                 for k in 0..4 {
                     table[(k + usize::from(p.class)) & 31] = i32::from(p.offsets[k]);
                 }
                 let shift = bit_depth - 5;
-                self.sao_apply(band[c], &region, |x, y| {
-                    let v = i32::from(src[y * pw + x]);
-                    Some((v + table[(v >> shift) as usize]).clamp(0, max))
+                if !keep_possible {
+                    for y in y0..y1 {
+                        let src = &line(c, y)[x0..x1];
+                        let o = &mut out[(y - y0) * pw + x0..(y - y0) * pw + x1];
+                        for (o, &s) in o.iter_mut().zip(src) {
+                            let v = s.i();
+                            *o = P::of((v + table[(v >> shift) as usize & 31]).clamp(0, max));
+                        }
+                    }
+                    continue;
+                }
+                self.sao_apply(out, &region, |x, y| {
+                    let v = line(c, y)[x].i();
+                    Some((v + table[(v >> shift) as usize & 31]).clamp(0, max))
                 });
             } else {
                 let (ax, ay, bx, by): (isize, isize, isize, isize) = match p.class {
@@ -467,20 +554,19 @@ impl Picture {
                         i32::from(offsets[2]),
                         i32::from(offsets[3]),
                     ];
-                    let da = ay * pw as isize + ax;
-                    let db = by * pw as isize + bx;
-                    let dst = &mut *band[c];
                     for y in y0 + top..y1 - bottom {
+                        let la = line(c, y.wrapping_add_signed(ay));
+                        let lv = line(c, y);
+                        let lb = line(c, y.wrapping_add_signed(by));
+                        let o = &mut out[(y - y0) * pw..(y - y0 + 1) * pw];
                         for x in x0 + left..x1 - right {
-                            let at = y * pw + x;
-                            let out = (y - y0) * pw + x;
-                            let v = i32::from(src[at]);
-                            let a = i32::from(src[(at as isize + da) as usize]);
-                            let b = i32::from(src[(at as isize + db) as usize]);
+                            let v = lv[x].i();
+                            let a = la[x.wrapping_add_signed(ax)].i();
+                            let b = lb[x.wrapping_add_signed(bx)].i();
                             let edge = (2 + (v - a).signum() + (v - b).signum()) as usize;
                             let delta = add[edge];
                             if delta != 0 {
-                                dst[out] = (v + delta).clamp(0, max) as u16;
+                                o[x] = P::of((v + delta).clamp(0, max));
                             }
                         }
                     }
@@ -495,7 +581,7 @@ impl Picture {
                         1
                     }
                 };
-                self.sao_apply(band[c], &region, |x, y| {
+                self.sao_apply(out, &region, |x, y| {
                     let (xa, ya) = (x as isize + ax, y as isize + ay);
                     let (xb, yb) = (x as isize + bx, y as isize + by);
                     if xa < 0
@@ -514,9 +600,9 @@ impl Picture {
                     {
                         return None;
                     }
-                    let v = i32::from(src[y * pw + x]);
-                    let a = i32::from(src[ya as usize * pw + xa as usize]);
-                    let b = i32::from(src[yb as usize * pw + xb as usize]);
+                    let v = line(c, y)[x].i();
+                    let a = line(c, ya as usize)[xa as usize].i();
+                    let b = line(c, yb as usize)[xb as usize].i();
                     let edge = 2 + (v - a).signum() + (v - b).signum();
                     let k = match edge {
                         0 => 0,
@@ -531,7 +617,12 @@ impl Picture {
         }
     }
 
-    fn sao_apply(&self, dst: &mut [u16], r: &Region, f: impl Fn(usize, usize) -> Option<i32>) {
+    fn sao_apply<P: Pixel>(
+        &self,
+        dst: &mut [P],
+        r: &Region,
+        f: impl Fn(usize, usize) -> Option<i32>,
+    ) {
         for y in r.y0..r.y1 {
             for x in r.x0..r.x1 {
                 if r.keep_possible
@@ -540,7 +631,7 @@ impl Picture {
                     continue;
                 }
                 if let Some(v) = f(x, y) {
-                    dst[(y - r.top) * r.pw + x] = v as u16;
+                    dst[(y - r.top) * r.pw + x] = P::of(v);
                 }
             }
         }
@@ -558,33 +649,4 @@ struct Region {
     keep_possible: bool,
     /// First component row of the band written.
     top: usize,
-}
-
-/// Rows per band: the picture split about four times per worker, on the 8 grid.
-fn band_rows(height: usize, pool: &Pool) -> usize {
-    let bands = pool.workers() * 4;
-    height.div_ceil(bands).next_multiple_of(8).max(8)
-}
-
-/// A copy of the planes, made by the pool's workers.
-fn copy_planes(planes: &[Vec<u16>; 3], pool: &Pool) -> [Vec<u16>; 3] {
-    const CHUNK: usize = 1 << 16;
-    let mut out = [
-        vec![0; planes[0].len()],
-        vec![0; planes[1].len()],
-        vec![0; planes[2].len()],
-    ];
-    let mut jobs = Vec::new();
-    for (dst, src) in out.iter_mut().zip(planes) {
-        for (d, s) in dst.chunks_mut(CHUNK).zip(src.chunks(CHUNK)) {
-            jobs.push(Mutex::new((d, s)));
-        }
-    }
-    pool.slices(jobs.len(), |i| {
-        let mut job = lock(&jobs[i]);
-        let (d, s) = &mut *job;
-        d.copy_from_slice(s);
-    });
-    drop(jobs);
-    out
 }

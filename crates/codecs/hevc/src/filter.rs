@@ -579,13 +579,18 @@ impl Picture {
         let width = self.width;
         // Component row `y` of the deblocked picture, for `y` in the band
         // or one line outside it.
+        let held = [
+            band[0].len() / width.max(1),
+            band[1].len() / (width / 2).max(1),
+            band[2].len() / (width / 2).max(1),
+        ];
         let line = |c: usize, y: usize| -> &[P] {
             let (t, stride) = if c == 0 {
                 (top, width)
             } else {
                 (top / 2, width / 2)
             };
-            let lines = band[c].len() / stride.max(1);
+            let lines = held[c];
             if y < t {
                 above
                     .as_ref()
@@ -630,6 +635,9 @@ impl Picture {
                 let nx = rx as isize + dx as isize - 1;
                 let ny = ry as isize + dy as isize - 1;
                 if nx < 0 || ny < 0 || nx as usize >= ctb_w || ny as usize >= ctb_h {
+                    // Outside the picture: never read (both paths stop at
+                    // the picture's edges), so no restriction.
+                    *cell = true;
                     continue;
                 }
                 *cell = self.sao_may_cross(rs, ny as usize * ctb_w + nx as usize);

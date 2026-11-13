@@ -1122,14 +1122,10 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             self.residual(x0, y0, log2, 0)?;
         }
         let w4 = self.pic.w4;
-        let flag_cbf = if cbf_luma { FLAG_CBF } else { 0 };
-        for row in (y0 >> 2)..((y0 + size) >> 2) {
-            for col in (x0 >> 2)..((x0 + size) >> 2) {
-                let at = row * w4 + col;
-                self.pic
-                    .info
-                    .set(at, (self.pic.info.get(at) & !FLAG_CBF) | flag_cbf);
-            }
+        if cbf_luma {
+            // The coding unit filled its cells without the flag.
+            let flags = self.pic.info.get(self.pic.at4(x0, y0)) | FLAG_CBF;
+            self.pic.info.fill4(w4, (x0, y0), (size, size), flags);
         }
         self.deblock_tu(x0, y0, size);
         // Chroma.
@@ -1647,14 +1643,8 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
 
     /// The left and top edges of a coding unit with no transform tree.
     fn deblock_cu(&mut self, _tu: bool) -> Result<(), CodecError> {
+        // The coding unit filled its cells without the coded-block flag.
         let size = 1usize << self.cu.log2;
-        let w4 = self.pic.w4;
-        for row in (self.cu.y >> 2)..((self.cu.y + size) >> 2) {
-            for col in (self.cu.x >> 2)..((self.cu.x + size) >> 2) {
-                let at = row * w4 + col;
-                self.pic.info.set(at, self.pic.info.get(at) & !FLAG_CBF);
-            }
-        }
         self.edges(self.cu.x, self.cu.y, size, size, true);
         Ok(())
     }
@@ -1720,14 +1710,24 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
     }
 
     fn edge_ver(&mut self, x: usize, y0: usize, len: usize, tu: bool) {
-        if !x.is_multiple_of(8) || x >= self.pic.width {
+        if !x.is_multiple_of(8) || x >= self.pic.width || x == 0 {
+            return;
+        }
+        if self.pic.slices[self.slice].header.deblocking_disabled {
             return;
         }
         let stride = self.pic.width / 8 + 1;
+        // Off a CTB boundary both sides share the CTB: every unit counts.
+        let inside = !x.is_multiple_of(1 << self.pic.layout.log2_ctb);
         let mut y = y0;
         while y < y0 + len && y < self.pic.height {
-            if self.edge_allowed(x, y, x as isize - 1, y as isize) {
-                let bs = self.strength(x - 1, y, x, y, tu);
+            if inside || self.edge_allowed(x, y, x as isize - 1, y as isize) {
+                // The q side is in this coding unit.
+                let bs = if self.cu.intra {
+                    2
+                } else {
+                    self.strength(x - 1, y, x, y, tu)
+                };
                 let at = (y >> 2) * stride + (x >> 3);
                 let bs = if tu {
                     bs
@@ -1741,14 +1741,22 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
     }
 
     fn edge_hor(&mut self, x0: usize, y: usize, len: usize, tu: bool) {
-        if !y.is_multiple_of(8) || y >= self.pic.height {
+        if !y.is_multiple_of(8) || y >= self.pic.height || y == 0 {
+            return;
+        }
+        if self.pic.slices[self.slice].header.deblocking_disabled {
             return;
         }
         let w4 = self.pic.w4;
+        let inside = !y.is_multiple_of(1 << self.pic.layout.log2_ctb);
         let mut x = x0;
         while x < x0 + len && x < self.pic.width {
-            if self.edge_allowed(x, y, x as isize, y as isize - 1) {
-                let bs = self.strength(x, y - 1, x, y, tu);
+            if inside || self.edge_allowed(x, y, x as isize, y as isize - 1) {
+                let bs = if self.cu.intra {
+                    2
+                } else {
+                    self.strength(x, y - 1, x, y, tu)
+                };
                 let at = (y >> 3) * w4 + (x >> 2);
                 let bs = if tu {
                     bs

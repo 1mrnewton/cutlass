@@ -105,6 +105,26 @@ impl Kind {
         }
     }
 
+    /// Whether the `avcC` or `hvcC` record names more than 8-bit 4:2:0,
+    /// which Android's own software decoders refuse at the first unit:
+    /// HEVC Main 10 from an iPhone, or H.264 High 10, 4:2:2 or 4:4:4.
+    pub fn beyond_software(self, record: &[u8]) -> bool {
+        match self {
+            // profile_idc 110, 122, 244 and the CAVLC 4:4:4 intra 44.
+            Self::H264 => record
+                .get(1)
+                .is_some_and(|profile| matches!(profile, 44 | 110 | 122 | 244)),
+            // chromaFormat, then the luma and chroma bit depths less 8.
+            Self::Hevc => match record.get(16..19) {
+                Some(&[chroma, luma, chroma_depth]) => {
+                    chroma & 3 != 1 || luma & 7 != 0 || chroma_depth & 7 != 0
+                }
+                _ => false,
+            },
+            Self::Vp9 | Self::Av1 => false,
+        }
+    }
+
     /// Parameter sets and NAL length size from an `avcC` or `hvcC`.
     pub fn read_config(self, extra: &[u8]) -> Result<(u8, Vec<Vec<u8>>), CodecError> {
         match self {
@@ -218,5 +238,26 @@ mod tests {
         assert!(Kind::of(CodecId::Aac).is_err());
         assert!(is_software("c2.android.avc.decoder"));
         assert!(!is_software("c2.qti.avc.decoder"));
+    }
+
+    #[test]
+    fn deep_or_wide_streams_are_beyond_the_software_decoders() {
+        let mut hvcc = vec![0_u8; 23];
+        hvcc[16] = 0xFC | 1;
+        hvcc[17] = 0xF8;
+        hvcc[18] = 0xF8;
+        assert!(!Kind::Hevc.beyond_software(&hvcc), "Main, 8-bit 4:2:0");
+        hvcc[17] = 0xF8 | 2;
+        hvcc[18] = 0xF8 | 2;
+        assert!(Kind::Hevc.beyond_software(&hvcc), "Main 10");
+        hvcc[17] = 0xF8;
+        hvcc[18] = 0xF8;
+        hvcc[16] = 0xFC | 2;
+        assert!(Kind::Hevc.beyond_software(&hvcc), "4:2:2");
+        assert!(!Kind::Hevc.beyond_software(&hvcc[..10]), "a short record");
+        assert!(!Kind::H264.beyond_software(&[1, 100, 0, 40]), "High");
+        assert!(Kind::H264.beyond_software(&[1, 110, 0, 40]), "High 10");
+        assert!(Kind::H264.beyond_software(&[1, 122, 0, 40]), "High 4:2:2");
+        assert!(!Kind::Av1.beyond_software(&[0x81, 0, 0, 0]));
     }
 }

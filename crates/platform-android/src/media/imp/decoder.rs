@@ -74,6 +74,8 @@ pub struct VideoDecoder {
     /// Parameter sets, with no start codes.
     sets: Vec<Vec<u8>>,
     extra: Vec<u8>,
+    /// More than 8-bit 4:2:0, so Android's software decoders are passed over.
+    deep: bool,
     send_sets: bool,
     codec: Codec,
     name: String,
@@ -134,7 +136,14 @@ pub fn open_decoder_on(params: &CodecParams, hardware: bool) -> Result<VideoDeco
     } else {
         params.extra.clone()
     };
-    let (codec, name) = next_codec(kind, &mut rest, width, height, &sets, &extra)?;
+    let deep = kind.uses_nal() && kind.beyond_software(&params.extra);
+    let shape = Shape {
+        kind,
+        width,
+        height,
+        deep,
+    };
+    let (codec, name) = next_codec(shape, &mut rest, &sets, &extra)?;
     Ok(VideoDecoder {
         kind,
         width,
@@ -144,6 +153,7 @@ pub fn open_decoder_on(params: &CodecParams, hardware: bool) -> Result<VideoDeco
         send_sets: !sets.is_empty(),
         sets,
         extra,
+        deep,
         codec,
         name,
         rest,
@@ -418,15 +428,14 @@ impl VideoDecoder {
 
     /// Move to the next candidate after `error` from the one running.
     fn swap(&mut self, error: CodecError) -> Result<(), CodecError> {
-        let (codec, name) = next_codec(
-            self.kind,
-            &mut self.rest,
-            self.width,
-            self.height,
-            &self.sets,
-            &self.extra,
-        )
-        .map_err(|_| error)?;
+        let shape = Shape {
+            kind: self.kind,
+            width: self.width,
+            height: self.height,
+            deep: self.deep,
+        };
+        let (codec, name) =
+            next_codec(shape, &mut self.rest, &self.sets, &self.extra).map_err(|_| error)?;
         self.codec = codec;
         self.name = name;
         self.planes = None;
@@ -460,14 +469,28 @@ enum Taken {
 }
 
 /// The first candidate that configures and starts.
-fn next_codec(
+/// What a decoder is opened for.
+#[derive(Clone, Copy)]
+struct Shape {
     kind: Kind,
-    rest: &mut Vec<Candidate>,
     width: u32,
     height: u32,
+    /// More than 8-bit 4:2:0: Android's software decoders are passed over.
+    deep: bool,
+}
+
+fn next_codec(
+    shape: Shape,
+    rest: &mut Vec<Candidate>,
     sets: &[Vec<u8>],
     extra: &[u8],
 ) -> Result<(Codec, String), CodecError> {
+    let Shape {
+        kind,
+        width,
+        height,
+        deep,
+    } = shape;
     while !rest.is_empty() {
         let candidate = rest.remove(0);
         let codec = match candidate {
@@ -480,6 +503,11 @@ fn next_codec(
         let name = codec.name().unwrap_or_default();
         // The platform's pick may be a software decoder named later.
         rest.retain(|next| !matches!(next, Candidate::Named(known) if *known == name));
+        // A software decoder fails such a stream at its first unit, with
+        // nothing to show: the factory's Rust decoder takes it instead.
+        if deep && is_software(&name) {
+            continue;
+        }
         let Some(format) = Format::new() else {
             continue;
         };

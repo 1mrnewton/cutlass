@@ -46,6 +46,7 @@ pub fn run() -> eframe::Result {
             let mut shell = Shell::new(decoders, encoders, loaded.settings);
             shell.keep_settings_file(file, loaded.generation);
             shell.keep_presets_file(Shell::home().text_presets_file());
+            shell.keep_studio_folder(Shell::home().studio());
             // At most once a day, and never with the switch off.
             shell.check_updates_at_launch();
             // A project folder or files named on the command line, as a

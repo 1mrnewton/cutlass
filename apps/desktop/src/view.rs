@@ -32,6 +32,7 @@ mod remove_bg;
 mod retouch;
 mod shape;
 mod speed;
+mod studio;
 
 const CARD_W: f32 = 144.0;
 const CARD_H: f32 = 96.0;
@@ -274,6 +275,8 @@ pub struct ViewState {
     lanes_down: f32,
     /// The assistant's conversation, and whether its panel is open.
     pub assistant: crate::assistant::Assistant,
+    /// The effect studio screen.
+    pub studio: studio::StudioView,
 }
 
 /// Where a track head's menu opened, and for which track.
@@ -352,6 +355,7 @@ impl Default for ViewState {
             lanes_up: 0.0,
             lanes_down: 0.0,
             assistant: crate::assistant::Assistant::default(),
+            studio: studio::StudioView::default(),
         }
     }
 }
@@ -401,6 +405,20 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     if shell.serve_forwarded() {
         ui.ctx().request_repaint();
     }
+    // The studio folder is looked at whichever screen is up, so a recipe
+    // saved or edited by hand shows on the shelves at once.
+    if shell.poll_studio() {
+        ui.ctx().request_repaint();
+    }
+    // With a recipe in the making the folder is looked at every second;
+    // otherwise only when something else draws a frame.
+    if view.studio.open || shell.studio_in_use() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs(1));
+    }
+    if std::mem::take(&mut view.studio.wants_clip) {
+        view.dialogs.studio_clip(parent);
+    }
     show_imported(shell, view);
     if view.assistant.poll(shell) {
         ui.ctx()
@@ -415,7 +433,15 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     if view.preview_full && shell.draft().is_none() {
         set_full_screen(ui, view, false);
     }
-    if view.preview_full {
+    if view.studio.open {
+        studio::show(shell, ui, &mut view.studio, full);
+        #[cfg(not(target_os = "macos"))]
+        window_buttons(
+            shell,
+            ui,
+            Rect::from_min_size(full.min, Vec2::new(full.width(), tokens::HEAD_HEIGHT)),
+        );
+    } else if view.preview_full {
         if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
             set_full_screen(ui, view, false);
         }
@@ -1075,6 +1101,10 @@ fn file_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Optio
         ui.close();
         view.settings_open = true;
     }
+    if ui.button("Effect studio").clicked() {
+        ui.close();
+        view.studio.open = true;
+    }
     if shell.draft().is_none() {
         return;
     }
@@ -1178,7 +1208,7 @@ fn menu_items(
 /// Run the menu bar item `id`: a window command, or a shortcut action.
 pub fn run_menu(shell: &mut Shell, view: &mut ViewState, parent: Option<&eframe::Frame>, id: &str) {
     use crate::menubar::{
-        CHECK_UPDATES, EXPORT, EXPORT_LOG, IMPORT, LICENSES, OPEN, PROJECTS, SAVE, SETTINGS,
+        CHECK_UPDATES, EXPORT, EXPORT_LOG, IMPORT, LICENSES, OPEN, PROJECTS, SAVE, SETTINGS, STUDIO,
     };
 
     let open = shell.draft().is_some();
@@ -1189,6 +1219,10 @@ pub fn run_menu(shell: &mut Shell, view: &mut ViewState, parent: Option<&eframe:
         }
         SETTINGS => {
             view.settings_open = true;
+            Ok(())
+        }
+        STUDIO => {
+            view.studio.open = true;
             Ok(())
         }
         LICENSES => {
@@ -2866,6 +2900,28 @@ fn middle_ellipsis(ctx: &egui::Context, text: &str, font: &FontId, width: f32) -
 
 /// Read each card's picture or sound from the shell, asking for what is
 /// missing.
+/// What tells one still of a card from the next: nothing for a card the
+/// app ships, and for one from the studio folder the number that moves
+/// each time the studio's recipes change.
+fn studio_card_age(card_id: &str) -> i64 {
+    let studio = card_id
+        .strip_prefix(cutlass_editor::EFFECT_CARD_PREFIX)
+        .is_some_and(cutlass_effects::is_studio_recipe)
+        || card_id
+            .strip_prefix(cutlass_editor::TRANSITION_CARD_PREFIX)
+            .is_some_and(|id| {
+                cutlass_effects::is_studio_transition(&format!(
+                    "{}{id}",
+                    cutlass_effects::BUILT_IN_PREFIX
+                ))
+            });
+    if studio {
+        i64::try_from(cutlass_effects::studio_generation()).unwrap_or(i64::MAX)
+    } else {
+        0
+    }
+}
+
 fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
     let hover = ctx.data(|data| data.get_temp::<(String, f64)>(effect_hover_id()));
     let now = ctx.input(|input| input.time);
@@ -2890,9 +2946,11 @@ fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
                             continue;
                         }
                     }
+                    // A studio card's still is kept for the recipe it was
+                    // drawn from: a saved change draws it again.
                     let key = cutlass_engine::ThumbKey {
                         path: card.id.clone().into(),
-                        time: Micros(0),
+                        time: Micros(studio_card_age(&card.id)),
                     };
                     if let Some(entry) = textures.shown.get_mut(&key) {
                         entry.1 = textures.frame;
@@ -9581,6 +9639,11 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
         Picker::Lut => shell.load_lut(&path),
         Picker::Replace => shell.start_replace(&path),
         Picker::Link => shell.start_link(&path),
+        Picker::StudioClip => {
+            shell.load_studio_clip(path);
+            view.studio.use_clip();
+            Ok(())
+        }
         Picker::SaveLog => Shell::export_log(&path).map(|()| {
             shell.set_notice(format!("Saved the log to {}", path.display()));
         }),
@@ -11344,6 +11407,91 @@ mod tests {
         }
         drop(shell);
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_effect_studio_opens_from_the_menu_and_draws_what_is_being_made() {
+        use crate::studio::{CurveKind, Slot, Stack};
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        let mut view = ViewState::new();
+        assert!(!view.studio.open);
+        run_menu(&mut shell, &mut view, None, crate::menubar::STUDIO);
+        assert!(view.studio.open);
+        let ctx = egui::Context::default();
+        let mut frame = |shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))),
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            let painted = painted_text(&output);
+            output.textures_delta.clear();
+            painted
+        };
+        // Nothing open: the list, and what to do next. The editor's own
+        // screens are not drawn under it.
+        let painted = frame(&mut shell, &mut view);
+        for text in [
+            "Effect studio",
+            "New effect",
+            "Shake",
+            "Open an effect or a transition",
+        ] {
+            assert!(painted.contains(text), "{text} in {painted}");
+        }
+        assert!(!shell.chrome.project_bar && !shell.chrome.projects);
+
+        // An effect: its passes, the picked pass's values, its controls
+        // and its card. Without a GPU the preview says so.
+        shell.studio_mut().new_effect();
+        let slot = Slot::pass(Stack::Effect, 0, "radius");
+        shell.studio_mut().set_kind(&slot, CurveKind::Keys);
+        shell.studio_mut().pick_slot(Some(slot.clone()));
+        shell.studio_mut().pick_key(Some(1));
+        shell.studio_mut().add_control();
+        let painted = frame(&mut shell, &mut view);
+        for text in [
+            "Passes · 1 of 8",
+            "1  Blur",
+            "Radius",
+            "2 keys",
+            "Controls · 1 of 6",
+            "Radius of pass 1",
+            "On the shelf",
+            "Card scene",
+            "The preview needs the GPU.",
+            "Unsaved changes",
+            "Repeat",
+        ] {
+            assert!(painted.contains(text), "{text} in {painted}");
+        }
+        // The other ways a value moves draw their own numbers.
+        for kind in [CurveKind::Wave, CurveKind::Random, CurveKind::Fixed] {
+            shell.studio_mut().set_kind(&slot, kind);
+            frame(&mut shell, &mut view);
+        }
+
+        // A transition: two stacks and the swap, and no controls.
+        shell.studio_mut().new_transition();
+        let painted = frame(&mut shell, &mut view);
+        for text in [
+            "Outgoing picture · 0 of 8",
+            "Incoming picture · 0 of 8",
+            "The swap",
+            "Progress",
+            "Lasts",
+        ] {
+            assert!(painted.contains(text), "{text} in {painted}");
+        }
+        assert!(!painted.contains("Controls ·"), "{painted}");
+
+        // A document that cannot be saved says why.
+        shell.studio_mut().set_id("Not An Id");
+        let painted = frame(&mut shell, &mut view);
+        assert!(painted.contains("id or name is not usable"), "{painted}");
     }
 
     #[test]

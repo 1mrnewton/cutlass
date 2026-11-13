@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use cutlass_decode::{
     CodecError, CodecId, CodecParams, ColorRange, MatrixCoefficients, Packet, PixelFormat, SideData,
 };
-use cutlass_encode::{AudioInput, Encoder, FrameInput};
+use cutlass_encode::{AudioInput, Encoder, FrameInput, VideoEncoder};
 
 use crate::enc::encoder::{Av1Enc, EncConfig, EncodedUnit, InputFrame, RateControl};
 use crate::yuv::VideoInput;
@@ -357,6 +357,105 @@ impl Av1Encoder {
         bytes.extend_from_slice(input.picture.u.samples());
         bytes.extend_from_slice(input.picture.v.samples());
         self.encode_packed(&bytes, input.pts, input.duration, input.timescale)
+    }
+}
+
+/// The AV1 encoder export opens: 8-bit 4:2:0 pictures in, as the shared
+/// adapter makes them from RGBA.
+///
+/// The adapter's 4:2:0 is BT.709 in studio swing, so the stream is tagged
+/// BT.709 primaries, transfer and matrix. The `av1C` record is
+/// [`VideoEncoder::extradata`], which the adapter puts on the first packet;
+/// it is empty until the first picture has been pushed.
+pub struct Av1VideoEncoder {
+    inner: Av1Encoder,
+    extradata: Vec<u8>,
+}
+
+impl Av1VideoEncoder {
+    /// Opens for `params.width` by `params.height` at `params.bitrate` bits
+    /// a second (0 keeps the quality index). The parameters may name RGBA
+    /// or 4:2:0; another pixel format is `Unsupported`.
+    pub fn open(params: &CodecParams) -> Result<Self, CodecError> {
+        if !matches!(params.pixel, PixelFormat::Rgba8 | PixelFormat::Yuv420p) {
+            return Err(CodecError::Unsupported {
+                what: "pixel format",
+            });
+        }
+        let mut planar = params.clone();
+        planar.pixel = PixelFormat::Yuv420p;
+        planar.primaries = cutlass_decode::ColorPrimaries::Bt709;
+        planar.transfer = cutlass_decode::Transfer::Bt709;
+        planar.matrix = MatrixCoefficients::Bt709;
+        planar.range = ColorRange::Limited;
+        Ok(Self {
+            inner: Av1Encoder::open(&planar)?,
+            extradata: Vec::new(),
+        })
+    }
+
+    /// The encoder underneath, for its settings.
+    pub fn encoder_mut(&mut self) -> &mut Av1Encoder {
+        &mut self.inner
+    }
+
+    /// Keeps the record for [`VideoEncoder::extradata`] and takes it off
+    /// the packets: the adapter puts it on the first one.
+    fn settle(&mut self, mut packets: Vec<Packet>) -> Vec<Packet> {
+        if let Some(record) = self.inner.config_record() {
+            self.extradata = record;
+        }
+        for packet in &mut packets {
+            packet
+                .side
+                .retain(|side| !matches!(side, SideData::Config(_)));
+        }
+        packets
+    }
+}
+
+impl VideoEncoder for Av1VideoEncoder {
+    fn codec(&self) -> CodecId {
+        CodecId::Av1
+    }
+
+    fn push(&mut self, input: &cutlass_encode::VideoInput) -> Result<Vec<Packet>, CodecError> {
+        let picture = &input.picture;
+        if picture.width() != self.inner.width || picture.height() != self.inner.height {
+            return Err(CodecError::InvalidApi {
+                what: "picture size",
+            });
+        }
+        if input.force_keyframe {
+            self.inner.force_keyframe();
+        }
+        let mut bytes =
+            Vec::with_capacity(picture.y().len() + picture.u().len() + picture.v().len());
+        bytes.extend_from_slice(picture.y());
+        bytes.extend_from_slice(picture.u());
+        bytes.extend_from_slice(picture.v());
+        let packets =
+            self.inner
+                .encode_packed(&bytes, input.pts, input.duration, input.timescale)?;
+        Ok(self.settle(packets))
+    }
+
+    fn drain(&mut self) -> Result<Vec<Packet>, CodecError> {
+        let packets = Encoder::drain(&mut self.inner)?;
+        Ok(self.settle(packets))
+    }
+
+    fn reset(&mut self) {
+        Encoder::reset(&mut self.inner);
+        self.extradata.clear();
+    }
+
+    fn cancel_flag(&self) -> Arc<AtomicBool> {
+        Encoder::cancel_flag(&self.inner)
+    }
+
+    fn extradata(&self) -> &[u8] {
+        &self.extradata
     }
 }
 
@@ -809,6 +908,112 @@ mod tests {
                 assert_eq!(sample(bytes, i), neutral);
             }
         }
+    }
+
+    #[test]
+    fn the_factory_takes_the_rgba_frames_export_pushes() {
+        use cutlass_encode::EncodeFactory;
+        let mut encoders = EncodeFactory::new();
+        crate::register_encoders(&mut encoders);
+        let mut params = CodecParams::with_format(CodecId::Av1, 64, 48, PixelFormat::Rgba8);
+        params.bitrate = 300_000;
+        let mut encoder = encoders.open(&params).expect("the adapted encoder");
+        assert_eq!(encoder.codec(), CodecId::Av1);
+        let mut packets = Vec::new();
+        for index in 0..6u32 {
+            let rgba: Vec<u8> = (0..64 * 48u32)
+                .flat_map(|i| {
+                    let (x, y) = (i % 64, i / 64);
+                    [(x * 3 + index * 9) as u8, (y * 4) as u8, 180, 255]
+                })
+                .collect();
+            let time = FrameTime::new(i64::from(index), 1, 30).expect("time");
+            let frame = CpuFrame::new(64, 48, PixelFormat::Rgba8, rgba, time).expect("frame");
+            packets.extend(encoder.push_frame(&FrameInput::Cpu(frame)).expect("push"));
+        }
+        packets.extend(encoder.drain().expect("drain"));
+        assert_eq!(packets.len(), 6);
+        // One record, on the first packet.
+        assert!(config(&packets[0]).is_some());
+        assert_eq!(
+            packets
+                .iter()
+                .flat_map(|p| &p.side)
+                .filter(|side| matches!(side, SideData::Config(_)))
+                .count(),
+            1
+        );
+        // The adapter's 4:2:0 is BT.709 studio swing, and the stream says so.
+        let seq = sequence_of(&packets[0]);
+        assert_eq!(
+            (
+                seq.color_primaries,
+                seq.transfer_characteristics,
+                seq.matrix_coefficients,
+                seq.color_range
+            ),
+            (1, 1, 1, false)
+        );
+        let mut read = CodecParams::video(CodecId::Av1, 64, 48);
+        read.extra = config(&packets[0]).expect("record").to_vec();
+        let mut decoder = Av1Decoder::open(&read).expect("decoder");
+        let shown = pictures(&mut decoder, &packets);
+        assert_eq!(shown.len(), 6);
+        assert!(shown.iter().all(|info| info.pixel == PixelFormat::Yuv420p));
+        // A planar pixel format still opens the encoder itself, and one the
+        // adapter does not make is refused.
+        let planar = CodecParams::with_format(CodecId::Av1, 64, 48, PixelFormat::Yuv444p10);
+        assert!(encoders.open(&planar).is_ok());
+        assert!(matches!(
+            super::Av1VideoEncoder::open(&planar),
+            Err(CodecError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn the_video_encoder_takes_a_key_frame_request_and_reports_its_record() {
+        use cutlass_decode::Yuv420p;
+        use cutlass_encode::{VideoEncoder, VideoInput};
+        let params = CodecParams::with_format(CodecId::Av1, 64, 48, PixelFormat::Rgba8);
+        let mut encoder = super::Av1VideoEncoder::open(&params).expect("encoder");
+        encoder.encoder_mut().set_gop(2);
+        assert!(encoder.extradata().is_empty());
+        let mut packets = Vec::new();
+        for index in 0..6u8 {
+            let picture = Yuv420p::solid(64, 48, 40 + 20 * index, 128, 128).expect("picture");
+            packets.extend(
+                encoder
+                    .push(&VideoInput {
+                        picture,
+                        pts: i64::from(index),
+                        duration: 1,
+                        timescale: 30,
+                        force_keyframe: index == 3,
+                    })
+                    .expect("push"),
+            );
+        }
+        packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+        assert_eq!(packets.len(), 6);
+        let keys: Vec<usize> = (0..6).filter(|&i| packets[i].keyframe).collect();
+        assert_eq!(keys, [0, 3]);
+        // The record is the extradata, not side data: the adapter adds it.
+        assert_eq!(encoder.extradata()[0], 0x81);
+        assert!(packets.iter().all(|p| config(p).is_none()));
+        // A picture of another size is refused.
+        let wrong = Yuv420p::solid(32, 32, 0, 128, 128).expect("picture");
+        assert!(matches!(
+            encoder.push(&VideoInput {
+                picture: wrong,
+                pts: 6,
+                duration: 1,
+                timescale: 30,
+                force_keyframe: false,
+            }),
+            Err(CodecError::InvalidApi { .. })
+        ));
+        VideoEncoder::reset(&mut encoder);
+        assert!(encoder.extradata().is_empty());
     }
 
     #[test]

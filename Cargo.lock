@@ -2753,6 +2753,7 @@ dependencies = [
  "cutlass-editor",
  "cutlass-effects",
  "cutlass-encode",
+ "cutlass-engine",
  "cutlass-eval",
  "cutlass-export",
  "cutlass-flac",

@@ -11,6 +11,7 @@
 mod animate;
 mod cache;
 mod canvas;
+mod clip;
 mod codecs;
 mod effect;
 mod error;
@@ -32,6 +33,7 @@ pub use canvas::{
     BACKGROUND_BLURS, BACKGROUND_COLORS, PhoneBackground, PhoneRatio, phone_background,
     phone_ratios,
 };
+pub use clip::{CROP_RATIOS, PhoneClipState, clip_state, clockwise_quarter, crop_for};
 pub use codecs::{decoders, readers};
 pub use cutlass_editor::{
     Bar, Tool, ToolId, clock, fling_start, fling_step, speed_at, speed_position, tools, volume_at,
@@ -916,6 +918,421 @@ impl PhoneHost {
             self.revision(),
             &[Request::Remove {
                 segment_id: segment_id.clone(),
+            }],
+        )?;
+        Ok(())
+    }
+
+    /// How `segment_id` stands at `time`, for its clip tools. `None` when
+    /// no row holds it.
+    #[must_use]
+    pub fn clip_state(&self, segment_id: &SegmentId, time: Micros) -> Option<PhoneClipState> {
+        clip_state(self.draft(), segment_id, time)
+    }
+
+    fn picture_clip(&self, segment_id: &SegmentId, what: &str) -> Result<(), FfiError> {
+        let (segment, track) = clip::unlocked(self.draft(), segment_id)?;
+        if cutlass_editor::can_turn(self.draft(), segment, &track.kind) {
+            Ok(())
+        } else {
+            Err(FfiError::Refused {
+                reason: format!("{what} belongs on a picture"),
+            })
+        }
+    }
+
+    /// Flip the picture left to right, or back, as one undo step.
+    pub fn toggle_mirror(&mut self, segment_id: &SegmentId) -> Result<(), FfiError> {
+        self.picture_clip(segment_id, "a mirror")?;
+        let horizontal = !clip::locate(self.draft(), segment_id)
+            .is_some_and(|(segment, _)| segment.clip.flip.horizontal);
+        self.apply(
+            self.revision(),
+            &[Request::SetMirror {
+                segment_id: segment_id.clone(),
+                horizontal,
+            }],
+        )?;
+        Ok(())
+    }
+
+    /// Turn the picture a quarter turn clockwise, as one undo step. Four
+    /// turns bring it upright.
+    pub fn turn(&mut self, segment_id: &SegmentId) -> Result<(), FfiError> {
+        self.picture_clip(segment_id, "a turn")?;
+        let degrees = clip::locate(self.draft(), segment_id)
+            .map_or(0.0, |(segment, _)| clockwise_quarter(segment.clip.rotation));
+        self.apply(
+            self.revision(),
+            &[Request::SetRotation {
+                segment_id: segment_id.clone(),
+                degrees,
+            }],
+        )?;
+        Ok(())
+    }
+
+    /// Play a picture or a sound backward through its own file, or forward
+    /// again, as one undo step.
+    pub fn toggle_reverse(&mut self, segment_id: &SegmentId) -> Result<(), FfiError> {
+        let (segment, _) = clip::unlocked(self.draft(), segment_id)?;
+        let plays = matches!(
+            self.draft().materials.get(segment.material_id.as_str()),
+            Some(cutlass_model::MaterialRef::Video(_) | cutlass_model::MaterialRef::Audio(_))
+        );
+        if !plays {
+            return Err(FfiError::Refused {
+                reason: "reverse belongs on a picture or a sound".to_owned(),
+            });
+        }
+        let reverse = !segment.reverse;
+        self.apply(
+            self.revision(),
+            &[Request::SetReverse {
+                segment_id: segment_id.clone(),
+                reverse,
+                path: String::new(),
+            }],
+        )?;
+        Ok(())
+    }
+
+    /// Crop the video to its middle at `ratio`, one of [`CROP_RATIOS`], or
+    /// show its whole frame for an empty ratio, as one undo step.
+    pub fn set_crop(&mut self, segment_id: &SegmentId, ratio: &str) -> Result<(), FfiError> {
+        let request = clip::crop_request(self.draft(), segment_id, ratio)?;
+        self.apply(self.revision(), &[request])?;
+        Ok(())
+    }
+
+    /// Make the picture `opacity` solid, from 0 clear to 1, as one undo step.
+    pub fn set_opacity(&mut self, segment_id: &SegmentId, opacity: f64) -> Result<(), FfiError> {
+        self.picture_clip(segment_id, "an opacity")?;
+        if !(0.0..=1.0).contains(&opacity) {
+            return Err(FfiError::Refused {
+                reason: "opacity runs from 0 to 1".to_owned(),
+            });
+        }
+        self.apply(
+            self.revision(),
+            &[Request::SetOpacity {
+                segment_id: segment_id.clone(),
+                opacity,
+            }],
+        )?;
+        Ok(())
+    }
+
+    /// Fade a picture or a sound in over `fade_in` and out over `fade_out`,
+    /// as one undo step.
+    pub fn set_fade(
+        &mut self,
+        segment_id: &SegmentId,
+        fade_in: Micros,
+        fade_out: Micros,
+    ) -> Result<(), FfiError> {
+        let (segment, _) = clip::unlocked(self.draft(), segment_id)?;
+        if fade_in.0 < 0 || fade_out.0 < 0 {
+            return Err(FfiError::Refused {
+                reason: "a fade cannot be shorter than nothing".to_owned(),
+            });
+        }
+        if fade_in.0.saturating_add(fade_out.0) > segment.target.duration.0 {
+            return Err(FfiError::Refused {
+                reason: "the fades are longer than the clip".to_owned(),
+            });
+        }
+        if clip::fades(self.draft(), segment) == (fade_in.0, fade_out.0) {
+            return Ok(());
+        }
+        let fade_id = cutlass_model::MaterialId::new(
+            cutlass_editor::FreshIds::new(self.draft(), 0).make("fade"),
+        );
+        self.apply(
+            self.revision(),
+            &[Request::SetFade {
+                segment_id: segment_id.clone(),
+                fade_id,
+                fade_in,
+                fade_out,
+            }],
+        )?;
+        Ok(())
+    }
+
+    /// Put a copy of the clip right after it, as one undo step, and return
+    /// the copy. On main the clips after it move along; elsewhere the copy
+    /// goes on the first clear row of its kind, as a paste does.
+    pub fn duplicate(&mut self, segment_id: &SegmentId) -> Result<SegmentId, FfiError> {
+        let draft = self.draft();
+        let (segment, track) = clip::unlocked(draft, segment_id)?;
+        let at = segment.target.end();
+        let copies =
+            cutlass_editor::copy_clips(draft, std::slice::from_ref(segment_id)).map_err(|_| {
+                FfiError::Refused {
+                    reason: "the clip cannot be copied".to_owned(),
+                }
+            })?;
+        let mut ids = cutlass_editor::FreshIds::new(draft, 0);
+        let (requests, copy) = if track.is_main() {
+            let mut placed = copies
+                .first()
+                .map(|copy| copy.segment.clone())
+                .ok_or_else(|| FfiError::Refused {
+                    reason: "the clip cannot be copied".to_owned(),
+                })?;
+            let id = SegmentId::new(ids.make("seg"));
+            placed.id = id.clone();
+            placed.target.start = at;
+            let request = Request::Place {
+                track_id: track.id.clone(),
+                segment: Box::new(placed),
+            };
+            (vec![request], id)
+        } else {
+            let mut fresh = |prefix: &str| ids.make(prefix);
+            let (requests, pasted) = cutlass_editor::paste_requests(draft, &copies, at, &mut fresh)
+                .map_err(|_| FfiError::Refused {
+                    reason: "the clip cannot be copied".to_owned(),
+                })?;
+            let copy = pasted.into_iter().next().ok_or_else(|| FfiError::Refused {
+                reason: "the clip cannot be copied".to_owned(),
+            })?;
+            (requests, copy)
+        };
+        self.apply(self.revision(), &requests)?;
+        Ok(copy)
+    }
+
+    /// Hold the frame of the video under `at` as a still for three seconds
+    /// there, splitting the clip around it, as one undo step. The still is
+    /// saved as a picture in the project and its clip returned.
+    pub fn freeze(&mut self, segment_id: &SegmentId, at: Micros) -> Result<SegmentId, FfiError> {
+        let refused = |reason: &str| FfiError::Refused {
+            reason: reason.to_owned(),
+        };
+        clip::unlocked(self.draft(), segment_id)?;
+        let point = cutlass_eval::freeze_point(self.draft(), segment_id, at).map_err(|miss| {
+            refused(match miss {
+                cutlass_eval::FreezeMiss::UnknownSegment => "the clip is not on the timeline",
+                cutlass_eval::FreezeMiss::NotVideo => "a freeze belongs on video",
+                cutlass_eval::FreezeMiss::NoFrame => "the clip has no frame to hold",
+                cutlass_eval::FreezeMiss::Outside => "move the playhead onto the clip",
+                cutlass_eval::FreezeMiss::AlreadyHeld => "the clip is already a still",
+            })
+        })?;
+        let source = self.media_file(&point.freeze.source_material_path)?;
+        let image = cutlass_eval::freeze_image(
+            self.preview.readers(),
+            &encoders(),
+            &source,
+            point.freeze.timestamp,
+        )
+        .ok_or_else(|| refused("the clip's frame could not be read"))?;
+        let name = format!(
+            "freeze-{}-{}.png",
+            segment_id.as_str(),
+            point.freeze.timestamp.0 / 1000
+        );
+        let (stored, written) = media::write_in(self.root(), &name, &image.png)?;
+        let size = |side: u32| i32::try_from(side).unwrap_or(i32::MAX);
+        let mut ids = cutlass_editor::FreshIds::new(self.draft(), 0);
+        let mut fresh = |prefix: &str| ids.make(prefix);
+        let requests = cutlass_editor::freeze_requests(
+            self.draft(),
+            segment_id,
+            point.at,
+            point.freeze,
+            cutlass_editor::FreezeImage {
+                path: stored,
+                width: size(image.width),
+                height: size(image.height),
+            },
+            cutlass_eval::FREEZE_DURATION,
+            &mut fresh,
+        );
+        let Some(requests) = requests else {
+            let _ = std::fs::remove_file(&written);
+            return Err(refused("the clip is not on the timeline"));
+        };
+        let still = requests.iter().rev().find_map(|request| match request {
+            Request::Place { segment, .. } => Some(segment.id.clone()),
+            _ => None,
+        });
+        if let Err(error) = self.apply(self.revision(), &requests) {
+            let _ = std::fs::remove_file(&written);
+            return Err(error);
+        }
+        still.ok_or_else(|| refused("the still was not placed"))
+    }
+
+    /// The file a stored media path names: inside the project when it is
+    /// relative, as it is when absolute.
+    fn media_file(&self, stored: &str) -> Result<PathBuf, FfiError> {
+        if stored.is_empty() {
+            return Err(FfiError::Refused {
+                reason: "the clip has no file".to_owned(),
+            });
+        }
+        let path = Path::new(stored);
+        if path.is_absolute() {
+            Ok(path.to_path_buf())
+        } else {
+            self.resolve(path)
+        }
+    }
+
+    /// Put the video's sound on a clip of its own on a sound row, lined up
+    /// with it, as one undo step. A video with no sound is refused.
+    pub fn extract_audio(&mut self, segment_id: &SegmentId) -> Result<(), FfiError> {
+        let (segment, _) = clip::unlocked(self.draft(), segment_id)?;
+        let Some(cutlass_model::MaterialRef::Video(video)) =
+            self.draft().materials.get(segment.material_id.as_str())
+        else {
+            return Err(FfiError::Refused {
+                reason: "an extract belongs on video".to_owned(),
+            });
+        };
+        let path = if segment.reverse && !video.reverse_path.is_empty() {
+            video.reverse_path.clone()
+        } else {
+            video.path.clone()
+        };
+        let file = self.media_file(&path)?;
+        let heard = self.preview.readers().carries_sound(&file).unwrap_or(false);
+        if !heard {
+            return Err(FfiError::Refused {
+                reason: "the clip has no sound".to_owned(),
+            });
+        }
+        self.place_extracted(segment_id)
+    }
+
+    fn place_extracted(&mut self, segment_id: &SegmentId) -> Result<(), FfiError> {
+        let mut ids = cutlass_editor::FreshIds::new(self.draft(), 0);
+        let mut fresh = |prefix: &str| ids.make(prefix);
+        let request = cutlass_editor::extract_request(self.draft(), segment_id, &mut fresh)
+            .ok_or_else(|| FfiError::Refused {
+                reason: "the clip is not on the timeline".to_owned(),
+            })?;
+        self.apply(self.revision(), &[request])?;
+        Ok(())
+    }
+
+    /// Give a video whose sound was extracted its own sound back, as one
+    /// undo step. The extracted clip goes when it is still linked to it.
+    pub fn recover_audio(&mut self, segment_id: &SegmentId) -> Result<(), FfiError> {
+        clip::unlocked(self.draft(), segment_id)?;
+        self.apply(
+            self.revision(),
+            &[Request::RecoverAudio {
+                segment_id: segment_id.clone(),
+            }],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a beat at `time` on a sound clip, or take off the beat already
+    /// there, as one undo step.
+    pub fn toggle_beat(&mut self, segment_id: &SegmentId, time: Micros) -> Result<(), FfiError> {
+        let mut ids = cutlass_editor::FreshIds::new(self.draft(), 0);
+        let mut fresh = |prefix: &str| ids.make(prefix);
+        let request = clip::beat_request(self.draft(), segment_id, time, &mut fresh)?;
+        self.apply(self.revision(), &[request])?;
+        Ok(())
+    }
+
+    /// Move a picture from another row onto main, where its start puts it
+    /// in the order, as one undo step.
+    pub fn to_main(&mut self, segment_id: &SegmentId) -> Result<(), FfiError> {
+        let state = self
+            .clip_state(segment_id, Micros(0))
+            .ok_or_else(|| FfiError::Refused {
+                reason: "the clip is not on the timeline".to_owned(),
+            })?;
+        if !state.can_splice {
+            return Err(FfiError::Refused {
+                reason: "only a picture on another row moves to main".to_owned(),
+            });
+        }
+        clip::unlocked(self.draft(), segment_id)?;
+        let start = clip::locate(self.draft(), segment_id)
+            .map_or(Micros(0), |(segment, _)| segment.target.start);
+        let track_id = clip::main_row(self.draft())?;
+        self.apply(
+            self.revision(),
+            &[Request::Move {
+                segment_id: segment_id.clone(),
+                track_id,
+                start,
+            }],
+        )?;
+        Ok(())
+    }
+
+    /// Put the whole of the picture `material_id` at `at` on a row above
+    /// main, a new one when none is clear, as one undo step. Returns the
+    /// new clip.
+    pub fn add_overlay(&mut self, material_id: &str, at: Micros) -> Result<SegmentId, FfiError> {
+        let (kind, duration) = cutlass_editor::material_span(self.draft(), material_id)
+            .ok_or_else(|| FfiError::Refused {
+                reason: "the media is not in the library".to_owned(),
+            })?;
+        if kind != TrackType::Video {
+            return Err(FfiError::Refused {
+                reason: "an overlay is a photo or a video".to_owned(),
+            });
+        }
+        let at = Micros(at.0.max(0));
+        let mut ids = cutlass_editor::FreshIds::new(self.draft(), 0);
+        let (track_id, new_lane) = match clip::overlay_row(self.draft(), at, duration) {
+            Some(track_id) => (track_id, None),
+            None => (
+                cutlass_session::TrackId::new(ids.make("track")),
+                Some(TrackType::Video),
+            ),
+        };
+        let place = cutlass_editor::MediaPlace {
+            track_id,
+            segment_id: SegmentId::new(ids.make("seg")),
+            material_id: material_id.to_owned(),
+            start: at,
+            duration,
+            new_lane,
+        };
+        let requests = cutlass_editor::media_requests(self.draft(), &place, self.linkage().enabled);
+        self.apply(self.revision(), &requests)?;
+        Ok(place.segment_id)
+    }
+
+    /// Whether clips on other rows move and go with the main clip they sit on.
+    #[must_use]
+    pub fn linkage_enabled(&self) -> bool {
+        self.commands.linkage().enabled
+    }
+
+    /// Turn linkage on or off and keep the switch with the project. This
+    /// is not an undo step.
+    pub fn set_linkage_enabled(&mut self, on: bool) -> Result<(), FfiError> {
+        let mut settings = self.commands.linkage();
+        settings.enabled = on;
+        self.commands.set_linkage(settings);
+        self.project.set_linkage(settings);
+        self.save()
+    }
+
+    /// Mute or unmute every clip on a row, as one undo step.
+    pub fn set_row_muted(
+        &mut self,
+        track_id: &cutlass_session::TrackId,
+        on: bool,
+    ) -> Result<(), FfiError> {
+        self.apply(
+            self.revision(),
+            &[Request::SetTrackAttribute {
+                track_id: track_id.clone(),
+                bit: cutlass_model::TrackAttribute::MUTE,
+                on,
             }],
         )?;
         Ok(())
@@ -2494,5 +2911,235 @@ mod tests {
         assert_eq!(host.frame(at).unwrap(), cut);
         host.redo().unwrap();
         assert_eq!(host.frame(at).unwrap(), later);
+    }
+
+    fn movie(duration: i64) -> crate::Probed {
+        crate::Probed::Video {
+            meta: cutlass_model::MetaType::Video,
+            width: 16,
+            height: 16,
+            duration,
+        }
+    }
+
+    #[test]
+    fn mirror_turn_crop_and_opacity_change_a_picture_one_step_each() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (first, _) = two_stills(&mut host);
+        let state = host.clip_state(&first, Micros(0)).unwrap();
+        assert!(state.picture && state.can_crop && state.on_main);
+        assert!(!state.mirrored && state.crop.is_empty() && state.opacity == 1.0);
+
+        host.toggle_mirror(&first).unwrap();
+        host.turn(&first).unwrap();
+        host.set_crop(&first, "9:16").unwrap();
+        host.set_opacity(&first, 0.25).unwrap();
+        let state = host.clip_state(&first, Micros(0)).unwrap();
+        assert!(state.mirrored);
+        assert_eq!(state.rotation, 270.0);
+        assert_eq!(state.crop, "9:16");
+        assert_eq!(state.opacity, 0.25);
+
+        // Four steps, four undos.
+        for _ in 0..4 {
+            host.undo().unwrap();
+        }
+        let state = host.clip_state(&first, Micros(0)).unwrap();
+        assert!(!state.mirrored && state.rotation == 0.0 && state.crop.is_empty());
+        assert_eq!(state.opacity, 1.0);
+
+        let revision = host.revision();
+        assert!(host.set_opacity(&first, 1.5).is_err());
+        assert!(host.set_crop(&first, "wide").is_err());
+        assert_eq!(host.revision(), revision);
+    }
+
+    #[test]
+    fn a_fade_and_a_reverse_land_on_the_clip_and_too_long_a_fade_is_refused() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (first, _) = two_stills(&mut host);
+        host.set_fade(&first, Micros(500_000), Micros(250_000))
+            .unwrap();
+        let state = host.clip_state(&first, Micros(0)).unwrap();
+        assert_eq!((state.fade_in.0, state.fade_out.0), (500_000, 250_000));
+        // The same fades again are not a step.
+        let revision = host.revision();
+        host.set_fade(&first, Micros(500_000), Micros(250_000))
+            .unwrap();
+        assert_eq!(host.revision(), revision);
+        assert!(
+            host.set_fade(&first, Micros(1_500_000), Micros(1_000_000))
+                .is_err()
+        );
+        assert!(host.set_fade(&first, Micros(-1), Micros(0)).is_err());
+
+        host.toggle_reverse(&first).unwrap();
+        assert!(host.clip_state(&first, Micros(0)).unwrap().reversed);
+        host.toggle_reverse(&first).unwrap();
+        assert!(!host.clip_state(&first, Micros(0)).unwrap().reversed);
+    }
+
+    #[test]
+    fn a_duplicate_on_main_goes_right_after_and_the_rest_move_along() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (first, second) = two_stills(&mut host);
+        let copy = host.duplicate(&first).unwrap();
+        let main = &host.draft().tracks[0];
+        let order: Vec<_> = main.segments.iter().map(|segment| &segment.id).collect();
+        assert_eq!(order, [&first, &copy, &second]);
+        assert_eq!(main.segments[1].target.start.0, 2_000_000);
+        assert_eq!(main.segments[2].target.start.0, 4_000_000);
+        assert_eq!(main.segments[1].material_id, main.segments[0].material_id);
+        host.undo().unwrap();
+        assert_eq!(host.draft().tracks[0].segments.len(), 2);
+    }
+
+    #[test]
+    fn an_overlay_goes_above_main_and_moves_to_main_as_one_step_each() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (first, _) = two_stills(&mut host);
+        let source = fixture("pattern.png");
+        let picture = host.import_probed(&source, still(1_000_000)).unwrap();
+        let over = host.add_overlay(&picture, Micros(500_000)).unwrap();
+        let lanes = host.lanes();
+        assert_eq!(lanes.len(), 2);
+        assert!(!lanes[0].main && lanes[1].main);
+        assert_eq!(lanes[0].clips[0].id, over);
+        assert_eq!(lanes[0].clips[0].start.0, 500_000);
+        assert!(host.clip_state(&over, Micros(0)).unwrap().can_splice);
+        assert!(!host.clip_state(&first, Micros(0)).unwrap().can_splice);
+
+        // A second overlay at the same time needs a row of its own.
+        let again = host.add_overlay(&picture, Micros(500_000)).unwrap();
+        assert_eq!(host.lanes().len(), 3);
+
+        host.to_main(&over).unwrap();
+        let main = host.lanes().into_iter().find(|lane| lane.main).unwrap();
+        assert!(main.clips.iter().any(|clip| clip.id == over));
+        assert!(host.to_main(&first).is_err());
+
+        let sound = host
+            .import_probed(&source, crate::Probed::Audio { duration: 500_000 })
+            .unwrap();
+        assert!(host.add_overlay(&sound, Micros(0)).is_err());
+        host.remove(&again).unwrap();
+    }
+
+    #[test]
+    fn linkage_and_a_muted_row_are_kept_with_the_project() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        assert!(!host.linkage_enabled());
+        host.set_linkage_enabled(true).unwrap();
+        assert!(host.linkage_enabled());
+        let main = host.lanes()[0].track_id.clone();
+        host.set_row_muted(&main, true).unwrap();
+        assert!(host.lanes()[0].muted);
+        host.save().unwrap();
+        let opened = roots.open();
+        assert!(opened.linkage_enabled());
+        assert!(opened.lanes()[0].muted);
+    }
+
+    #[test]
+    fn a_beat_goes_on_a_sound_at_the_playhead_and_a_second_tap_takes_it_off() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let wave = temp.path.join("tone.wav");
+        tone(&wave, 2);
+        let sound = host.import(&wave).unwrap();
+        let clip = host.append(&sound).unwrap();
+        let state = host.clip_state(&clip, Micros(500_000)).unwrap();
+        assert!(state.can_beat && !state.beat_here && !state.picture);
+
+        host.toggle_beat(&clip, Micros(500_000)).unwrap();
+        assert!(host.clip_state(&clip, Micros(500_000)).unwrap().beat_here);
+        let lane = host.lanes().into_iter().find(|lane| !lane.main).unwrap();
+        assert_eq!(lane.clips[0].beats, [Micros(500_000)]);
+
+        host.toggle_beat(&clip, Micros(500_000)).unwrap();
+        assert!(!host.clip_state(&clip, Micros(500_000)).unwrap().beat_here);
+        assert!(host.toggle_beat(&clip, Micros(9_000_000)).is_err());
+
+        let (picture, _) = two_stills(&mut host);
+        assert!(host.toggle_beat(&picture, Micros(0)).is_err());
+    }
+
+    #[test]
+    fn a_video_freezes_a_frame_into_a_still_and_a_still_does_not() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let source = fixture("pattern.png");
+        let id = host.import_probed(&source, movie(4_000_000)).unwrap();
+        let clip = host.append(&id).unwrap();
+        assert!(host.clip_state(&clip, Micros(0)).unwrap().can_freeze);
+        let still = host.freeze(&clip, Micros(2_000_000)).unwrap();
+        let main = &host.draft().tracks[0];
+        assert_eq!(main.segments.len(), 3);
+        assert_eq!(main.segments[1].id, still);
+        assert_eq!(main.segments[1].target.start.0, 2_000_000);
+        assert_eq!(
+            main.segments[1].target.duration,
+            cutlass_eval::FREEZE_DURATION
+        );
+        let stored = host
+            .draft()
+            .materials
+            .videos
+            .iter()
+            .find(|video| video.id == main.segments[1].material_id)
+            .unwrap()
+            .path
+            .clone();
+        assert!(stored.starts_with("Resources/freeze-"), "{stored}");
+        assert!(host.root().join(&stored).is_file());
+        assert!(
+            !host
+                .clip_state(&still, Micros(2_000_000))
+                .unwrap()
+                .can_freeze
+        );
+        assert!(host.freeze(&still, Micros(2_500_000)).is_err());
+
+        let (photo, _) = two_stills(&mut host);
+        assert!(host.freeze(&photo, Micros(0)).is_err());
+    }
+
+    #[test]
+    fn an_extract_needs_sound_and_places_it_on_a_sound_row_and_recovers() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let source = fixture("pattern.png");
+        let id = host.import_probed(&source, movie(2_000_000)).unwrap();
+        let clip = host.append(&id).unwrap();
+        let revision = host.revision();
+        assert!(host.extract_audio(&clip).is_err());
+        assert_eq!(host.revision(), revision);
+
+        host.place_extracted(&clip).unwrap();
+        let state = host.clip_state(&clip, Micros(0)).unwrap();
+        assert!(state.extracted && !state.can_extract);
+        let sound = host
+            .lanes()
+            .into_iter()
+            .find(|lane| lane.kind == cutlass_model::TrackType::Audio)
+            .unwrap();
+        assert_eq!(sound.clips[0].start.0, 0);
+        assert_eq!(sound.clips[0].duration.0, 2_000_000);
+
+        host.recover_audio(&clip).unwrap();
+        assert!(!host.clip_state(&clip, Micros(0)).unwrap().extracted);
     }
 }

@@ -579,6 +579,24 @@ impl<'a> SliceDecoder<'a, '_> {
         } else {
             None
         };
+        let refs = &refs;
+        cutlass_simd::wide::wide(
+            #[inline(always)]
+            || self.predict_planes((x, y, w, h), field, refs, weights, bit_depth),
+        );
+        Ok(())
+    }
+
+    /// The prediction of each plane of one block from `refs`, stored.
+    #[inline(always)]
+    fn predict_planes(
+        &mut self,
+        (x, y, w, h): (usize, usize, usize, usize),
+        field: MvField,
+        refs: &[Option<std::sync::Arc<crate::picture::Decoded>>; 2],
+        weights: Option<[[Wp; 2]; 3]>,
+        bit_depth: u32,
+    ) {
         for c in 0..3 {
             let (cx, cy, cw, ch) = if c == 0 {
                 (x, y, w, h)
@@ -637,7 +655,6 @@ impl<'a> SliceDecoder<'a, '_> {
             let (dst, stride) = self.out.from(c, cx, cy);
             mc::store(dst, stride, cw, ch, bit_depth, pred, weights.map(|w| w[c]));
         }
-        Ok(())
     }
 }
 

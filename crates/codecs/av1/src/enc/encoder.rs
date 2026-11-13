@@ -188,6 +188,11 @@ pub struct Av1Enc {
     /// Source pictures waiting to be coded, in display order from `next_disp`.
     lookahead: std::collections::VecDeque<Arc<AnyPicture>>,
     next_disp: u64,
+    /// Display index of the next key frame.
+    next_key: u64,
+    /// Display indices a caller asked to be key frames, in order, all past
+    /// `next_disp` or equal to it.
+    forced_keys: std::collections::VecDeque<u64>,
     /// Display index of the frame each reference slot holds.
     slot_disp: [Option<u64>; 8],
     /// Temporal importance of the frames of the current mini-GOP (display
@@ -400,6 +405,8 @@ impl Av1Enc {
             last_recon: None,
             lookahead: std::collections::VecDeque::new(),
             next_disp: 0,
+            next_key: 0,
+            forced_keys: std::collections::VecDeque::new(),
             slot_disp: [None; 8],
             tpl_imp: Vec::new(),
             static_gop: false,
@@ -413,6 +420,59 @@ impl Av1Enc {
 
     pub fn sequence_header(&self) -> &SequenceHeader {
         &self.seq
+    }
+
+    /// The `av1C` record of this stream (AV1 Codec ISO Media File Format
+    /// Binding 2.3): the marker and version, the profile, level, tier, bit
+    /// depth and chroma layout of the sequence header, no presentation
+    /// delay, and the sequence header OBU each key frame also carries. An
+    /// ISOBMFF sample entry and a Matroska `CodecPrivate` hold these bytes.
+    pub fn config_record(&self) -> Vec<u8> {
+        let s = &self.seq;
+        let (level, tier) = s
+            .operating_points
+            .first()
+            .map_or((0, 0), |op| (op.seq_level_idx, op.seq_tier));
+        // chroma_sample_position is in the sequence header for 4:2:0 only.
+        let position = if s.subsampling_x && s.subsampling_y && !s.mono_chrome {
+            s.chroma_sample_position & 3
+        } else {
+            0
+        };
+        let mut out = vec![
+            0x81,
+            (s.profile << 5) | (level & 31),
+            ((tier & 1) << 7)
+                | (u8::from(s.bit_depth > 8) << 6)
+                | (u8::from(s.bit_depth == 12) << 5)
+                | (u8::from(s.mono_chrome) << 4)
+                | (u8::from(s.subsampling_x) << 3)
+                | (u8::from(s.subsampling_y) << 2)
+                | position,
+            0,
+        ];
+        let sh = write_sequence_header(s);
+        write_obu(&mut out, OBU_SEQUENCE_HEADER, 0, 0, false, &sh);
+        out
+    }
+
+    /// Makes the next picture given to [`Self::encode`] a key frame. The
+    /// distance to the following key frame is counted from it.
+    pub fn force_keyframe(&mut self) {
+        let at = self.next_disp + self.lookahead.len() as u64;
+        if self.forced_keys.back() != Some(&at) {
+            self.forced_keys.push_back(at);
+        }
+        self.next_key = self.next_key.min(at);
+    }
+
+    /// Display index of the key frame that follows the key frame at `d`.
+    fn key_after(&self, d: u64) -> u64 {
+        let periodic = d + u64::from(self.cfg.keyint.max(1));
+        self.forced_keys
+            .iter()
+            .find(|&&f| f > d)
+            .map_or(periodic, |&f| f.min(periodic))
     }
 
     /// The reconstruction of the last coded frame.
@@ -443,7 +503,7 @@ impl Av1Enc {
     }
 
     fn is_key_disp(&self, d: u64) -> bool {
-        d.is_multiple_of(u64::from(self.cfg.keyint.max(1)))
+        d == self.next_key
     }
 
     fn run<P: PicturePixel>(&mut self, flush: bool) -> R<Vec<EncodedUnit>> {
@@ -453,10 +513,10 @@ impl Av1Enc {
             if self.is_key_disp(d) {
                 // The key frame's quantizer follows how much of the next
                 // mini-GOP is predicted from it.
-                let keyint = u64::from(self.cfg.keyint.max(1));
+                let after = self.key_after(d);
                 // (A single-frame GOP codes every picture without delay.)
                 let want = if self.cfg.gop > 1 {
-                    u64::from(self.cfg.gop).min(keyint - 1) + 1
+                    u64::from(self.cfg.gop).min(after - d - 1) + 1
                 } else {
                     1
                 };
@@ -484,11 +544,14 @@ impl Av1Enc {
                 self.update_rate_control(bits, 1, true);
                 self.lookahead.pop_front();
                 self.next_disp += 1;
+                self.next_key = after;
+                while self.forced_keys.front().is_some_and(|&f| f <= d) {
+                    self.forced_keys.pop_front();
+                }
                 continue;
             }
             let gop = u64::from(self.cfg.gop.max(1));
-            let keyint = u64::from(self.cfg.keyint.max(1));
-            let to_key = keyint - d % keyint;
+            let to_key = self.next_key - d;
             // Static content takes mini-GOPs two or four times as long.
             let longest = if self.cfg.adaptive_gop && gop >= 4 {
                 gop << ev("AV1_GOPL", 2.0) as u32
@@ -1974,6 +2037,59 @@ mod tests {
             out.extend(u.data);
         }
         out
+    }
+
+    /// Display indices of the key frames of `frames` pictures, with a key
+    /// frame asked for at each index of `forced`.
+    fn key_frames(keyint: u32, gop: u32, frames: u64, forced: &[u64]) -> Vec<u64> {
+        let (w, h) = (64usize, 64usize);
+        let mut cfg = EncConfig::new(w, h);
+        cfg.rc = RateControl::Qindex(120);
+        cfg.keyint = keyint;
+        cfg.gop = gop;
+        cfg.speed = 10;
+        let mut enc = Av1Enc::new(cfg).expect("encoder");
+        let mut units = Vec::new();
+        for f in 0..frames {
+            if forced.contains(&f) {
+                enc.force_keyframe();
+            }
+            let y: Vec<u8> = (0..w * h).map(|i| (i as u64 * 3 + f * 7) as u8).collect();
+            let c = vec![128u8; (w / 2) * (h / 2)];
+            units.extend(
+                enc.encode(&InputFrame {
+                    planes: [&y, &c, &c],
+                    strides: [w, w / 2, w / 2],
+                })
+                .expect("encode"),
+            );
+        }
+        units.extend(enc.flush::<u8>().expect("flush"));
+        assert_eq!(units.len() as u64, frames);
+        let mut dec = Av1Core::new();
+        dec.threads = 1;
+        for (i, u) in units.iter().enumerate() {
+            assert_eq!(u.display, i as u64);
+            assert_eq!(dec.decode(&u.data).expect("decode").len(), 1);
+        }
+        units.iter().filter(|u| u.key).map(|u| u.display).collect()
+    }
+
+    #[test]
+    fn key_frames_keep_their_distance() {
+        assert_eq!(key_frames(4, 4, 10, &[]), [0, 4, 8]);
+        assert_eq!(key_frames(1, 4, 3, &[]), [0, 1, 2]);
+    }
+
+    #[test]
+    fn a_forced_key_frame_restarts_the_distance() {
+        // Inside a mini-GOP, on the periodic key frame, twice in a row,
+        // and on the first picture.
+        assert_eq!(key_frames(4, 4, 12, &[2]), [0, 2, 6, 10]);
+        assert_eq!(key_frames(4, 2, 9, &[4]), [0, 4, 8]);
+        assert_eq!(key_frames(8, 4, 9, &[3, 4]), [0, 3, 4]);
+        assert_eq!(key_frames(8, 4, 5, &[0]), [0]);
+        assert_eq!(key_frames(120, 8, 20, &[13]), [0, 13]);
     }
 
     #[test]

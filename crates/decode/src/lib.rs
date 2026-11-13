@@ -150,8 +150,8 @@ impl PictureInfo {
             chroma_position: ChromaSamplePosition::Unknown,
             render_width: width,
             render_height: height,
-            cicp_primaries: cicp_primaries(primaries),
-            cicp_transfer: cicp_transfer(transfer),
+            cicp_primaries: primaries.cicp(),
+            cicp_transfer: transfer.cicp(),
             cicp_matrix: 2,
             num_units_in_display_tick: 0,
             time_scale: 0,
@@ -160,41 +160,6 @@ impl PictureInfo {
             num_units_in_decoding_tick: 0,
             seq_level_idx: 0,
         }
-    }
-}
-
-fn cicp_primaries(primaries: ColorPrimaries) -> u8 {
-    match primaries {
-        ColorPrimaries::Bt709 => 1,
-        ColorPrimaries::Unspecified => 2,
-        ColorPrimaries::Bt601 => 6,
-        ColorPrimaries::Bt2020 => 9,
-        ColorPrimaries::Bt470m => 4,
-        ColorPrimaries::Smpte240m => 7,
-        ColorPrimaries::Film => 8,
-        ColorPrimaries::Smpte428 => 10,
-        ColorPrimaries::Smpte431 => 11,
-        ColorPrimaries::Smpte432 => 12,
-        ColorPrimaries::Ebu3213 => 22,
-    }
-}
-
-fn cicp_transfer(transfer: Transfer) -> u8 {
-    match transfer {
-        Transfer::Bt709 => 1,
-        Transfer::Unspecified => 2,
-        Transfer::Bt601 => 6,
-        Transfer::Bt2020 => 14,
-        Transfer::Smpte240m => 7,
-        Transfer::Linear => 8,
-        Transfer::Log100 => 9,
-        Transfer::LogSqrt => 10,
-        Transfer::Iec61966_2_4 => 11,
-        Transfer::Bt1361 => 12,
-        Transfer::Srgb => 13,
-        Transfer::Pq => 16,
-        Transfer::Smpte428 => 17,
-        Transfer::Hlg => 18,
     }
 }
 

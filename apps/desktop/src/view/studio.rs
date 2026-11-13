@@ -1292,6 +1292,9 @@ fn value_row(shell: &mut Shell, ui: &mut Ui, view: &mut StudioView, doc: &Doc, s
             if let Some(index) = pick(ui, &key, names[index], &names, rest - 8.0) {
                 shell.studio_mut().set_fixed(slot, index as f32);
             }
+        } else if curve.is_none() && matches!(slot, Slot::Cross { name } if name == "progress") {
+            // Left out, the swap keeps pace with the transition itself.
+            tag(ui, "Follows the transition", rest, tokens::MUTED);
         } else if matches!(curve, None | Some(Curve::Constant(_))) {
             let mut value = f64::from(now);
             let slider = ui::Slider::new(&mut value, f64::from(param.min)..=f64::from(param.max))

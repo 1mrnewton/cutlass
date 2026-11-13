@@ -682,7 +682,7 @@ mod tests {
                         assert_eq!(
                             x, y,
                             "len {len} n {n} step {step} bits {} pos {}",
-                            a.bits, a.pos
+                            a.e.bits, a.e.pos
                         );
                     }
                     1..=3 => assert_eq!(a.bypass(), b.bypass(), "len {len} step {step}"),

@@ -47,6 +47,13 @@ pub(crate) struct Colocated {
     /// temporal-direct picture can find that reference after the buffer moves.
     ref_poc0: [i32; 4],
     ref_poc1: [i32; 4],
+    /// Bits 0, 3, 12 and 15, for the corner 4×4 blocks of a picture with
+    /// 8×8 inference, set when that block's motion makes colZeroFlag 1 for
+    /// a later picture's direct prediction (clause 8.4.1.2.2): the first
+    /// list it uses has reference index 0, and a vector within one quarter
+    /// sample each way. Worked out once with the macroblock's motion, so a
+    /// direct macroblock reads this rather than the motion.
+    zero: u16,
 }
 
 impl std::ops::Deref for Mb {
@@ -135,6 +142,7 @@ impl Mb {
                 ref_poc0: [0; 4],
                 ref_poc1: [0; 4],
                 field_mb: false,
+                zero: 0,
             },
             slice,
             qp: 0,
@@ -2602,6 +2610,10 @@ pub(crate) struct Slice<'a> {
     residual_y: Vec<i32>,
     residual_u: Vec<i32>,
     residual_v: Vec<i32>,
+    /// A reference picture with 8×8 inference, which a later picture's
+    /// direct prediction may take as co-located: each macroblock's
+    /// [`Colocated`] `zero` is worked out.
+    corner_zero: bool,
 }
 
 impl Slice<'_> {
@@ -2613,6 +2625,7 @@ impl Slice<'_> {
             pps: std::borrow::Cow::Owned(self.pps.into_owned()),
             kind: self.kind,
             poc: self.poc,
+            corner_zero: self.corner_zero,
             qp: self.qp,
             cabac: self.cabac,
             deblock: self.deblock,
@@ -4616,6 +4629,7 @@ fn make_slice<'a, S: Sample>(
         pps: std::borrow::Cow::Borrowed(pps),
         kind: header.kind,
         poc,
+        corner_zero: header.nal_ref && sps.direct_8x8_inference,
         qp: header.qp,
         cabac: pps.cabac,
         deblock: header.deblock,

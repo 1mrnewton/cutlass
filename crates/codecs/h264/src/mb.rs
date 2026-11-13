@@ -10648,7 +10648,7 @@ fn apply_direct<S: Sample>(
         let corners = match col_mb {
             None => Some([false; 4]),
             Some(col) if slice.sps.direct_8x8_inference => {
-                Some([0, 3, 12, 15].map(|corner| col_zero(col, corner)))
+                Some([0, 3, 12, 15].map(|corner| corner_col_zero(col, corner)))
             }
             Some(_) => None,
         };
@@ -10692,12 +10692,14 @@ fn apply_direct<S: Sample>(
                 .mb_at(place.slot)
                 .is_some_and(|col| !col.intra && !col.pcm && col_zero(col, place.block))
         } else {
-            let col = if slice.sps.direct_8x8_inference {
-                corner_block(bx, by)
-            } else {
-                index
-            };
-            col_matters && col_mb.is_some_and(|mb| col_zero(mb, col))
+            col_matters
+                && col_mb.is_some_and(|mb| {
+                    if slice.sps.direct_8x8_inference {
+                        corner_col_zero(mb, corner_block(bx, by))
+                    } else {
+                        col_zero(mb, index)
+                    }
+                })
         };
         mb.mv0[index] = if zero || ref0 < 0 || (ref0 == 0 && col_zero) {
             [0, 0]
@@ -10821,6 +10823,14 @@ fn corner_block(bx: usize, by: usize) -> usize {
 }
 
 /// colZeroFlag of clause 8.4.1.2.2 for block `index` of that macroblock.
+/// [`col_zero`] for corner block `index` (0, 3, 12 or 15) of a frame
+/// macroblock of a picture with 8×8 inference, as worked out with its
+/// motion.
+fn corner_col_zero(col: &super::Colocated, index: usize) -> bool {
+    debug_assert_eq!(col.zero >> index & 1 == 1, col_zero(col, index));
+    col.zero >> index & 1 == 1
+}
+
 fn col_zero(col: &super::Colocated, index: usize) -> bool {
     let part = (index / 4 / 2) * 2 + ((index % 4) / 2);
     let (mv, reference) = if col.ref0[part] >= 0 {
@@ -13498,6 +13508,27 @@ fn bind_refs(mb: &mut Mb, slice: &Slice<'_>) {
         (mb.slot0[i], mb.ref_poc0[i]) = bound(0, mb.ref0[i]);
         (mb.slot1[i], mb.ref_poc1[i]) = bound(1, mb.ref1[i]);
     }
+    if slice.corner_zero {
+        mb.zero = corner_zero(mb);
+    }
+}
+
+/// [`super::Colocated`]'s `zero` for a macroblock whose motion is final:
+/// its four corner blocks, the only ones direct prediction asks about
+/// with 8×8 inference. Without a branch.
+fn corner_zero(mb: &Mb) -> u16 {
+    let near = |[x, y]: [i16; 2]| (x as u16).wrapping_add(1).max((y as u16).wrapping_add(1)) <= 2;
+    let mut zero = 0;
+    for (part, corner) in [0, 3, 12, 15].into_iter().enumerate() {
+        let (ref0, ref1) = (mb.ref0[part], mb.ref1[part]);
+        let (reference, mv) = if ref0 >= 0 {
+            (ref0, mb.mv0[corner])
+        } else {
+            (ref1, mb.mv1[corner])
+        };
+        zero |= u16::from(reference == 0 && near(mv)) << corner;
+    }
+    zero
 }
 
 /// A macroblock edge is filtered across slices unless this slice asked not to.

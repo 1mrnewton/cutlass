@@ -234,7 +234,8 @@ pub(super) fn inverse<const N: usize>(
     };
     // The intermediate values, rows of N; columns past `cols` (rounded up
     // to the strip) are never read.
-    let mut mid = [0i16; 32 * 32];
+    let mut mid = [[0i16; N]; N];
+    let mid = mid.as_flattened_mut();
     let pairs = rows.div_ceil(2);
     let row = |k: usize, x: usize| -> __m256i {
         if k < rows {
@@ -260,7 +261,7 @@ pub(super) fn inverse<const N: usize>(
                     sh = _mm256_add_epi32(sh, _mm256_madd_epi16(hi[p], f));
                 }
                 let v = _mm256_packs_epi32(_mm256_srai_epi32::<7>(sl), _mm256_srai_epi32::<7>(sh));
-                st16x16(&mut mid, y * N + x, v);
+                st16x16(mid, y * N + x, v);
             }
         }
     } else {
@@ -288,7 +289,7 @@ pub(super) fn inverse<const N: usize>(
                 sh = _mm_add_epi32(sh, _mm_madd_epi16(hi[p], f));
             }
             let v = _mm_packs_epi32(_mm_srai_epi32::<7>(sl), _mm_srai_epi32::<7>(sh));
-            st16x8(&mut mid, y * N, v);
+            st16x8(mid, y * N, v);
         }
     }
     // Second pass: each row of intermediate values times the matrix.

@@ -1516,10 +1516,21 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         Ok(())
     }
 
-    /// Zero the coefficients of the block just used.
-    fn clear_coeffs(&mut self, n: usize, max_x: usize, max_y: usize) {
-        for row in self.coeffs.chunks_exact_mut(n).take(max_y + 1) {
-            row[..=max_x.min(n - 1)].fill(0);
+    /// Zero the coefficients of the block just used: whole rows of a fixed
+    /// width, which the compiler clears with vector stores in place of a
+    /// call to `memset` for each row.
+    fn clear_coeffs(&mut self, n: usize, _max_x: usize, max_y: usize) {
+        fn rows<const N: usize>(c: &mut [i32], rows: usize) {
+            for row in c.as_chunks_mut::<N>().0.iter_mut().take(rows) {
+                *row = [0; N];
+            }
+        }
+        let c = &mut self.coeffs[..];
+        match n {
+            4 => rows::<4>(c, max_y + 1),
+            8 => rows::<8>(c, max_y + 1),
+            16 => rows::<16>(c, max_y + 1),
+            _ => rows::<32>(c, max_y + 1),
         }
     }
 

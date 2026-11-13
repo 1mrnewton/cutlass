@@ -4069,6 +4069,7 @@ fn qp_delta(entropy: &mut Entropy<'_, '_>, prev_nonzero: bool) -> Result<i32, Co
     match entropy {
         Entropy::Cavlc(bits) => bits.se(),
         Entropy::Cabac(cab) => {
+            let mut cab = cab.run();
             let mut ctx = usize::from(prev_nonzero);
             let mut code = 0u32;
             loop {

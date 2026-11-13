@@ -12795,7 +12795,11 @@ fn deblock_whole<S: Sample>(
                     let qp = [
                         recon::EdgeQp::new(qp[0], off),
                         recon::EdgeQp::new(qp[1], off),
-                        recon::EdgeQp::new(qp[2], off),
+                        if twin {
+                            None
+                        } else {
+                            recon::EdgeQp::new(qp[2], off)
+                        },
                     ];
                     let slot = (&mut luma[way][0], &mut cb[way][0], &mut cr[way][0]);
                     set_edge(slot, bs, &qp, (true, true, twin), &mut some);
@@ -12821,7 +12825,11 @@ fn deblock_whole<S: Sample>(
                 [
                     recon::EdgeQp::new(inside[0], off),
                     recon::EdgeQp::new(inside[1], off),
-                    recon::EdgeQp::new(inside[2], off),
+                    if twin {
+                        None
+                    } else {
+                        recon::EdgeQp::new(inside[2], off)
+                    },
                 ]
             });
             let slot = (&mut luma[way][edge], &mut cb[way][edge], &mut cr[way][edge]);
@@ -12835,7 +12843,11 @@ fn deblock_whole<S: Sample>(
         let qp = [
             recon::EdgeQp::new(inside[0], off),
             recon::EdgeQp::new(inside[1], off),
-            recon::EdgeQp::new(inside[2], off),
+            if twin {
+                None
+            } else {
+                recon::EdgeQp::new(inside[2], off)
+            },
         ];
         for way in 0..2 {
             let slot = (&mut luma[way][2], &mut cb[way][2], &mut cr[way][2]);

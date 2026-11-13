@@ -293,11 +293,11 @@ pub struct Work<P> {
     pub count: usize,
 }
 
-/// Row buffers beyond the rows reconstructed at once. With `t` rows on
-/// threads, row `r` starts once rows up to `r - t` are reconstructed, when
-/// the filters have given the final samples of rows up to `r - t - 2`;
-/// the filters of row `r - t - 1` read rows `r - t - 2` to `r - t`, so
-/// `t + 4` buffers suffice.
+/// Row buffers beyond the rows reconstructed at once. A row's buffer is
+/// read until the final samples of the row below are made, which follows
+/// that row's deblocking ([`Picture::sao_row`]); the spare buffers let
+/// reconstruction run ahead of the filters without waiting (two measured
+/// slower than four).
 pub const RING: usize = 4;
 
 impl<P: Pixel> Work<P> {

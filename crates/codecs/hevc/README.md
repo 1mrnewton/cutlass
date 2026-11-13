@@ -61,7 +61,7 @@ cargo test -p cutlass-hevc
 ```
 
 - **`tests/oracle.rs`.** Small streams are written by libx265 through the `ffmpeg` program, decoded here and by `ffmpeg`, and every sample of every picture must be equal, in output order. Each stream is decoded twice, as Annex B and with 4-byte length prefixes. The cases are intra only, P and B pictures, asymmetric partitions, temporal prediction off, weighted prediction, open and closed groups of pictures, many references, SAO and deblocking on and off, wavefronts, several slices, transform skip, scaling lists, lossless, constrained intra with sign hiding, 16×16 coding tree blocks, and 10-bit and 12-bit streams. One case is written by the `x265` program instead.
-- **Threads.** Three cases are decoded with 1, 2, 5, and 16 workers and every picture must be the same.
+- **Threads.** Three cases are decoded with 1, 2, 5, and 16 workers, and with the rows of each picture on several threads (one picture on three, two on two, two on four), and every picture must be the same.
 - **`tests/malformed.rs`.** Hand-built parameter sets with bad or huge values must be refused, a failed `push` must leave earlier parameter sets in place, and random bytes must not panic. libx265 streams are cut short and have bits flipped, 200 rounds a stream by default (`HEVC_FUZZ_ROUNDS` changes that), and must not panic.
 - **`tests/local_media.rs`.** Phone and screen recordings are read through `cutlass-isobmff` and the first 30 pictures are compared with `ffmpeg`. These files are not in the repository.
 - **Unit tests in `src/`.** Bit reading, the CABAC engine against a byte-at-a-time engine written from clause 9.3.4.3, the transform matrix, intra modes, motion vector scaling, sample interpolation, emulation prevention, and NAL framing.
@@ -80,22 +80,22 @@ What does not run by default:
 
 ## Speed against FFmpeg
 
-**Decode, hevc.** Measured on 13 November 2026 on branch `hevc`, on a cloud VM with 4 cores of an Intel Xeon at 2.1 GHz (other VMs share the host; the same run varies by about 10% from one minute to the next), against FFmpeg 6.1.1 from Ubuntu 24.04. Built with `cargo build --release -p media-bench` (no profile) and rustc 1.97.0. Input: 600 frames of 1920×1080 at 30 frames a second (21 MB), written by libx265 at its medium preset with wavefronts. The Rust side is [`tools/media-bench`](../../../tools/media-bench); the FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which calls libavformat and libavcodec directly. Each is a whole process, run in turn (seven times with four threads, five with one); the table shows the median run.
+**Decode, hevc.** Measured on 13 November 2026 on branch `hevc`, on a cloud VM with 4 cores of an Intel Xeon at 2.1 GHz (other VMs share the host; the same run varies by 5% to 10% from one minute to the next), against FFmpeg 6.1.1 from Ubuntu 24.04. Built with `cargo build --release -p media-bench` (no profile) and rustc 1.97.0. Input: 600 frames of 1920×1080 at 30 frames a second (21 MB), written by libx265 at its medium preset with wavefronts. The Rust side is [`tools/media-bench`](../../../tools/media-bench); the FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which calls libavformat and libavcodec directly. Each is a whole process, run in turn (eleven times with four threads; five times pinned to one core, where both decoders use one thread); the table shows the median run.
 
 |  | Cutlass | FFmpeg (`hevc`) |
 | --- | ---: | ---: |
-| Wall time, 4 threads | 3.11 s | 2.74 s |
-| Speed, 4 threads | 193 frames/s | 219 frames/s |
-| CPU time, 4 threads | 9.89 s | 8.05 s |
-| Wall time, 1 thread | 8.49 s | 7.78 s |
-| Peak memory, 4 threads | 77 MB | 99 MB |
+| Wall time, 4 threads | 2.58 s | 2.55 s |
+| Speed, 4 threads | 233 frames/s | 235 frames/s |
+| CPU time, 4 threads | 7.68 s | 7.55 s |
+| Wall time, 1 thread | 7.12 s | 7.39 s |
+| Peak memory, 4 threads | 95–107 MB | 102 MB |
 | Threads allowed | 4 | 4 |
 
-Cutlass is **1.13× slower** than FFmpeg here with four threads and **1.09× slower** on one. Both decoders produced exactly the same samples. Runs of the same comparison on the same day measured between 1.03× and 1.19× with four threads (median of seven, later the same day: 3.01 s against 2.74 s, 1.10×). `media-bench` also copies every picture into the packed buffer the engine's `Decoder` returns, which the FFmpeg program does not do; `cargo bench -p cutlass-hevc`, which times the decode alone, measured 2.95 s against FFmpeg's 2.88 s (one process, startup included) on this file.
+With four threads the two are even: Cutlass took 1.01× FFmpeg's time by the median, and its fastest run was 0.99× FFmpeg's fastest. Other sessions the same day, eleven runs each, measured from 1.01× to 1.05×. On one core Cutlass is **1.04× faster** (7.12 s against 7.39 s). Both decoders produced exactly the same samples. `media-bench` also writes every picture into the packed buffer the engine's `Decoder` returns, a new 3 MB allocation per picture that the caller frees; the FFmpeg program keeps its pictures in its own frame pool. That costs Cutlass about 0.2 s to 0.4 s of system time in page faults at four threads, where FFmpeg spends about 0.15 s, and it varies from run to run with what the allocator gives back to the system. `cargo bench -p cutlass-hevc`, which times the decode alone against the `ffmpeg` program writing to `-f null`, measured **2.54 s and 2.59 s against FFmpeg's 2.68 s and 2.76 s** (1.05× faster) on this file.
 
-Where the time goes, on one thread and against FFmpeg's own profile on the same file: entropy decoding (CABAC and residual coding) takes about 30% less time than FFmpeg's; the boundary strengths of deblocking about 15% less; interpolation and the motion-vector derivation around it, the deblocking filters, and the writing of final rows and output pictures take more.
+Where the time goes, on one core and against FFmpeg's own profile on the same file: entropy decoding (CABAC and residual coding) takes about 20% less time than FFmpeg's, and deblocking with its boundary strengths about 10% less; interpolation and the motion-vector derivation around it, SAO, and the copies of final rows into frames and output pictures take more.
 
-What made it faster, in order of the gain measured on this machine: decoding into a ring of four CTB-row buffers that stay in cache instead of a picture-sized buffer per picture, and the same for the per-4×4 maps of motion, modes and QP; interpolation kernels that read each row of the reference window as one fixed-size array (1.34G instructions to 0.85G on 40 frames, against FFmpeg's 0.91G); significance and greater-than-one flags handled without a branch on the decoded value; splitting four threads into two pictures of two wavefront rows; writing the final rows of pictures no other picture references straight to the output; the inverse transform adding its residual to the samples itself; the CABAC engine kept in registers through residual coding.
+What made it faster, in order of the gain measured on this machine: decoding into a ring of CTB-row buffers that stay in cache instead of a picture-sized buffer per picture, and the same for the per-4×4 maps of motion, modes and QP; interpolation kernels that read each row of the reference window as one fixed-size array (1.34G instructions to 0.85G on 40 frames, against FFmpeg's 0.91G); significance and greater-than-one flags handled without a branch on the decoded value; deblocking each CTB row as soon as it is complete and making all but its last eight lines final right then, on the thread that built it (6% with four threads); one picture per thread instead of wavefront rows split between threads (2% wall time, 5% CPU time); writing the final rows of pictures no other picture references straight to the output; intra prediction computed a row at a time over whole slices of the references, and the availability of neighbours found once per CTB (1778M instructions to 1663M on 24 frames, with the merge and AMVP lists that stop at the candidate chosen); the inverse transform adding its residual to the samples itself; the CABAC engine kept in registers through residual coding; packed chroma copied once from the frame instead of gathered apart; output buffers allocated by the thread that frees them (half the page faults); wavefront row progress reported without a lock or a system call.
 
 To run it again: `cargo build --release -p media-bench`, then `python3 scripts/bench_media.py --video <clip> --audio <song> --work <folder>`; or `HEVC_BENCH=<clip> cargo bench -p cutlass-hevc`.
 
@@ -110,7 +110,7 @@ To run it again: `cargo build --release -p media-bench`, then `python3 scripts/b
 | Parameter set ids | 16 SPS, 64 PPS | `Malformed` |
 | Workers | 16 | |
 
-Threads: several pictures decode at once, each on a thread of its own, a picture waiting only for the rows of its references that it reads; the CTB rows of a wavefront slice segment decode on threads of their own, each row two CTBs behind the one above. With four threads or more, a picture with wavefronts takes two threads and half as many pictures decode at once; otherwise every thread takes a picture. Each CTB row is deblocked on whichever thread finishes it, as soon as it is complete and its motion is kept, and gets SAO once the row below is deblocked. A stream with tiles decodes its CTBs in tile order on one thread per picture. The output does not depend on the number of threads.
+Threads: several pictures decode at once, each on a thread of its own, a picture waiting only for the rows of its references that it reads. Up to eight threads every thread takes a picture; past eight, the CTB rows of a wavefront slice segment share the threads, each row two CTBs behind the one above (`HevcDecoder::set_threads` chooses either split). Each CTB row is deblocked as soon as it is complete and its motion is kept, and SAO then makes final all but its last eight lines (the rest wait for the row below), on the thread that finished the row; those lines reach the pictures that reference it at once. The next picture starts as soon as any running one ends. A stream with tiles decodes its CTBs in tile order on one thread per picture. The output does not depend on the number of threads.
 
 Gaps:
 
@@ -118,7 +118,7 @@ Gaps:
 - SEI is not read, so HDR metadata carried there (mastering display, content light level) is not returned.
 - `field_seq_flag` is read and ignored. No code pairs fields into frames.
 - The vector kernels take 8-bit samples on x86-64 with AVX2. Deeper streams, and other CPUs, use the scalar code, which is several times slower.
-- A picture that a later picture references, and every picture of a cropped stream, is written to its frame and then copied to the output.
+- A picture that a later picture references, and every picture of a cropped stream, is written to its frame and then copied to the output; the chroma of packed output is always copied from the frame.
 
 ## Specifications
 

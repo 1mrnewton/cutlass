@@ -621,7 +621,14 @@ impl HevcDecoder {
             }
         };
         let old = lock(&self.shared.pics).pop();
-        let pic = Picture::reuse(old, sps.clone(), pps.clone(), layout, poc)?;
+        // The 4×4 maps are a ring of CTB rows unless tiles reorder them.
+        let rows = if pps.entropy_sync {
+            self.split(true).1
+        } else {
+            1
+        };
+        let mask4 = Picture::map_mask(&sps, (!pps.tiles).then_some(rows));
+        let pic = Picture::reuse(old, sps.clone(), pps.clone(), layout, (poc, mask4))?;
         let output = header.pic_output && !(nal.is_rasl() && state.no_rasl_output);
         let uid = state.uid();
         let reference = !(nal.is_sub_layer_non_ref() && nal.temporal_id + 1 >= sps.max_sub_layers);

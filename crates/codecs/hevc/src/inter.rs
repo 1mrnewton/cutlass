@@ -155,9 +155,8 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             }
             field
         };
-        let w4 = self.pic.w4;
         for row in (y >> 2)..((y + h) >> 2) {
-            let start = row * w4 + (x >> 2);
+            let start = self.pic.row4(row) + (x >> 2);
             self.pic.mvf.fill(start, w >> 2, field);
         }
         self.motion_compensate(x, y, w, h, field)

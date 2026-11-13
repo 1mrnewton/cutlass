@@ -98,6 +98,12 @@ pub struct Picture {
     pub height: usize,
     /// Width of the 4×4 grid.
     pub w4: usize,
+    /// The 4×4 maps (`mvf`, `info`, `intra_mode`, `qp`, `depth`) hold a
+    /// ring of rows of 4×4 blocks: row `r` is at `r & mask4`. Nothing reads
+    /// them more than a few CTB rows behind the rows being reconstructed,
+    /// so a few CTB rows serve the picture and stay in cache. `usize::MAX`
+    /// holds the whole picture (tiles reorder the rows).
+    pub mask4: usize,
     pub mvf: Motion,
     /// `MODE_*` and `FLAG_*` of each 4×4.
     pub info: Bytes,
@@ -149,9 +155,15 @@ impl Bytes {
     }
 
     /// Fill the `w`×`h` luma area at (`x`, `y`) of a map on the 4×4 grid.
-    pub fn fill4(&self, w4: usize, (x, y): (usize, usize), (w, h): (usize, usize), value: u8) {
+    pub fn fill4(
+        &self,
+        (w4, mask4): (usize, usize),
+        (x, y): (usize, usize),
+        (w, h): (usize, usize),
+        value: u8,
+    ) {
         for row in (y >> 2)..((y + h) >> 2) {
-            let start = row * w4 + (x >> 2);
+            let start = (row & mask4) * w4 + (x >> 2);
             for cell in &self.0[start..start + (w >> 2)] {
                 cell.store(value, Relaxed);
             }
@@ -454,11 +466,26 @@ pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Picture {
+    /// The row mask of the 4×4 maps when `ring` CTB rows are
+    /// reconstructed at once ([`Self::mask4`]), `None` for the whole
+    /// picture: rows of [`RING`] + 2 more CTB rows, as a power of two of
+    /// 4×4 rows.
+    pub fn map_mask(sps: &Sps, ring: Option<usize>) -> usize {
+        let h4 = sps.height as usize / 4;
+        let ctb4 = (1usize << sps.log2_ctb) / 4;
+        match ring {
+            Some(rows) if ((rows + RING + 2) * ctb4).next_power_of_two() < h4 => {
+                ((rows + RING + 2) * ctb4).next_power_of_two() - 1
+            }
+            _ => usize::MAX,
+        }
+    }
+
     pub fn new(
         sps: Arc<Sps>,
         pps: Arc<Pps>,
         layout: Arc<Layout>,
-        poc: i32,
+        (poc, mask4): (i32, usize),
     ) -> Result<Self, CodecError> {
         let width = sps.width as usize;
         let height = sps.height as usize;
@@ -467,16 +494,19 @@ impl Picture {
         })?;
         let w4 = width / 4;
         let h4 = height / 4;
+        // Rows of the 4×4 maps: the ring, or every row.
+        let r4 = if mask4 == usize::MAX { h4 } else { mask4 + 1 };
         let ctbs = layout.ctb_count() as usize;
         Ok(Self {
             width,
             height,
             w4,
-            mvf: Motion::new(w4 * h4),
-            info: Bytes::new(w4 * h4, 0),
-            intra_mode: Bytes::new(w4 * h4, 1),
-            qp: Bytes::new(w4 * h4, 0),
-            depth: Bytes::new(w4 * h4, 0),
+            mask4,
+            mvf: Motion::new(w4 * r4),
+            info: Bytes::new(w4 * r4, 0),
+            intra_mode: Bytes::new(w4 * r4, 1),
+            qp: Bytes::new(w4 * r4, 0),
+            depth: Bytes::new(w4 * r4, 0),
             bs_ver: Bytes::new((width / 8 + 1) * h4, 0),
             bs_hor: Bytes::new((height / 8 + 1) * w4, 0),
             ctb_slice: (0..ctbs).map(|_| AtomicU16::new(u16::MAX)).collect(),
@@ -503,14 +533,15 @@ impl Picture {
         sps: Arc<Sps>,
         pps: Arc<Pps>,
         layout: Arc<Layout>,
-        poc: i32,
+        (poc, mask4): (i32, usize),
     ) -> Result<Self, CodecError> {
         let Some(mut pic) = old.filter(|p| {
             p.width == sps.width as usize
                 && p.height == sps.height as usize
                 && p.ctb_slice.len() == layout.ctb_count() as usize
+                && p.mask4 == mask4
         }) else {
-            return Self::new(sps, pps, layout, poc);
+            return Self::new(sps, pps, layout, (poc, mask4));
         };
         // Every map but the boundary strengths is written for each block
         // before it is read; edges no block names must read as 0.
@@ -552,7 +583,19 @@ impl Picture {
 
     #[inline]
     pub fn at4(&self, x: usize, y: usize) -> usize {
-        (y >> 2) * self.w4 + (x >> 2)
+        ((y >> 2) & self.mask4) * self.w4 + (x >> 2)
+    }
+
+    /// Width and row mask of the 4×4 maps, for [`Bytes::fill4`].
+    #[inline]
+    pub fn geom4(&self) -> (usize, usize) {
+        (self.w4, self.mask4)
+    }
+
+    /// Where row `row` of 4×4 blocks starts in the 4×4 maps.
+    #[inline]
+    pub fn row4(&self, row: usize) -> usize {
+        (row & self.mask4) * self.w4
     }
 
     #[inline]

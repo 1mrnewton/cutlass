@@ -690,7 +690,6 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         depth: u32,
     ) -> Result<(), CodecError> {
         let size = 1usize << log2;
-        let w4 = self.pic.w4;
         self.cu = Cu {
             x: x0,
             y: y0,
@@ -702,7 +701,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         }
         self.pic
             .depth
-            .fill4(w4, (x0, y0), (size, size), depth as u8);
+            .fill4(self.pic.geom4(), (x0, y0), (size, size), depth as u8);
         let mut skip = false;
         if self.slice_type != SliceType::I {
             let mut inc = 0;
@@ -720,9 +719,12 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         }
         let keep = if self.cu.bypass { FLAG_KEEP } else { 0 };
         if skip {
-            self.pic
-                .info
-                .fill4(w4, (x0, y0), (size, size), MODE_INTER | FLAG_SKIP | keep);
+            self.pic.info.fill4(
+                self.pic.geom4(),
+                (x0, y0),
+                (size, size),
+                MODE_INTER | FLAG_SKIP | keep,
+            );
             self.cu.part = PART_2NX2N;
             self.prediction_unit(x0, y0, (size, size), depth, 0, true)?;
             self.merge_2nx2n = true;
@@ -744,11 +746,13 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         };
         self.cu.part = part;
         let mode = if intra { MODE_INTRA } else { MODE_INTER };
-        self.pic.info.fill4(w4, (x0, y0), (size, size), mode | keep);
+        self.pic
+            .info
+            .fill4(self.pic.geom4(), (x0, y0), (size, size), mode | keep);
         if intra {
             // No motion: the picture's maps are not cleared between pictures.
             for row in (y0 >> 2)..((y0 + size).min(self.pic.height) >> 2) {
-                let start = row * w4 + (x0 >> 2);
+                let start = self.pic.row4(row) + (x0 >> 2);
                 self.pic.mvf.fill(start, size >> 2, MvField::default());
             }
         }
@@ -771,8 +775,12 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                     } else {
                         0
                     };
-                self.pic.info.fill4(w4, (x0, y0), (size, size), flags);
-                self.pic.intra_mode.fill4(w4, (x0, y0), (size, size), 1);
+                self.pic
+                    .info
+                    .fill4(self.pic.geom4(), (x0, y0), (size, size), flags);
+                self.pic
+                    .intra_mode
+                    .fill4(self.pic.geom4(), (x0, y0), (size, size), 1);
             } else {
                 self.intra_modes(x0, y0, log2)?;
             }
@@ -834,11 +842,10 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
 
     fn finish_cu(&mut self) {
         let size = 1usize << self.cu.log2;
-        let w4 = self.pic.w4;
         let qp = self.qp_y as i8 as u8;
         self.pic
             .qp
-            .fill4(w4, (self.cu.x, self.cu.y), (size, size), qp);
+            .fill4(self.pic.geom4(), (self.cu.x, self.cu.y), (size, size), qp);
         self.last_qp = self.qp_y;
         self.first_qg = false;
     }
@@ -930,7 +937,6 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         for flag in prev.iter_mut().take(parts * parts) {
             *flag = self.cabac.decide(cabac::PREV_INTRA);
         }
-        let w4 = self.pic.w4;
         for j in 0..parts {
             for i in 0..parts {
                 let idx = j * parts + i;
@@ -977,7 +983,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                 self.cu.luma_modes[idx] = mode;
                 self.pic
                     .intra_mode
-                    .fill4(w4, (x, y), (pb.max(4), pb.max(4)), mode);
+                    .fill4(self.pic.geom4(), (x, y), (pb.max(4), pb.max(4)), mode);
             }
         }
         // intra_chroma_pred_mode
@@ -1123,11 +1129,12 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         if cbf_luma {
             self.residual(x0, y0, log2, 0)?;
         }
-        let w4 = self.pic.w4;
         if cbf_luma {
             // The coding unit filled its cells without the flag.
             let flags = self.pic.info.get(self.pic.at4(x0, y0)) | FLAG_CBF;
-            self.pic.info.fill4(w4, (x0, y0), (size, size), flags);
+            self.pic
+                .info
+                .fill4(self.pic.geom4(), (x0, y0), (size, size), flags);
         }
         self.deblock_tu(x0, y0, size);
         // Chroma.

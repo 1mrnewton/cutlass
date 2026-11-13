@@ -143,7 +143,7 @@ fn st8(d: &mut [u8], at: usize, v: __m128i, n: usize) {
 /// For output `j` of eight, samples `j + 2k` and `j + 2k + 1`.
 #[inline]
 #[target_feature(enable = "avx2")]
-pub(super) fn pair_mask(k: i8) -> __m128i {
+fn pair_mask(k: i8) -> __m128i {
     let b = 2 * k;
     _mm_setr_epi8(
         b,
@@ -167,13 +167,13 @@ pub(super) fn pair_mask(k: i8) -> __m128i {
 
 /// Taps `2k` and `2k + 1` as the byte pair `pmaddubsw` multiplies by.
 #[inline]
-pub(super) fn tap_pair(f: &[i8; 8], k: usize) -> i16 {
+fn tap_pair(f: &[i8; 8], k: usize) -> i16 {
     i16::from_le_bytes([f[2 * k] as u8, f[2 * k + 1] as u8])
 }
 
 /// Taps `2k` and `2k + 1` as the 16-bit pair `pmaddwd` multiplies by.
 #[inline]
-pub(super) fn tap_pair32(f: &[i8; 8], k: usize) -> i32 {
+fn tap_pair32(f: &[i8; 8], k: usize) -> i32 {
     i32::from(f[2 * k] as i16 as u16) | i32::from(f[2 * k + 1] as i16) << 16
 }
 
@@ -227,7 +227,7 @@ impl<const T: usize> Across<T> {
 /// intermediates in `mid`; 1 rounds them to samples in `px`; 2 averages
 /// them with the intermediates of the other list in `other` into `px`;
 /// 3 and 4 weigh them explicitly, alone or with `other`.
-pub(super) struct Out<'a> {
+struct Out<'a> {
     mid: &'a mut [i16],
     px: &'a mut [u8],
     other: &'a [i16],
@@ -243,7 +243,7 @@ pub(super) struct Out<'a> {
 /// One output row of a block `W` wide, as arrays of its width: stores at
 /// fixed offsets need no checks. Only the fields of the output kind are
 /// filled.
-pub(super) struct Row<'r, const W: usize> {
+struct Row<'r, const W: usize> {
     mid: Option<&'r mut [i16; W]>,
     px: Option<&'r mut [u8; W]>,
     other: Option<&'r [i16; W]>,
@@ -254,7 +254,7 @@ pub(super) struct Row<'r, const W: usize> {
 
 impl Out<'_> {
     /// A sub-block `x` columns in.
-    pub(super) fn at(&mut self, x: usize) -> Out<'_> {
+    fn at(&mut self, x: usize) -> Out<'_> {
         Out {
             mid: self.mid.get_mut(x..).unwrap_or_default(),
             px: self.px.get_mut(x..).unwrap_or_default(),
@@ -270,7 +270,7 @@ impl Out<'_> {
     /// Output row `j`, `None` when a buffer of output kind `M` is too
     /// short for it (the entry checks that it never is).
     #[inline(always)]
-    pub(super) fn row<const W: usize, const M: u8>(&mut self, j: usize) -> Option<Row<'_, W>> {
+    fn row<const W: usize, const M: u8>(&mut self, j: usize) -> Option<Row<'_, W>> {
         let at = j * self.stride;
         let mut row = Row {
             mid: None,
@@ -339,7 +339,7 @@ impl<const W: usize> Row<'_, W> {
     /// Sixteen values from column `x` (a multiple of 16 below `W`).
     #[inline]
     #[target_feature(enable = "avx2")]
-    pub(super) fn v16<const M: u8>(&mut self, x: usize, v: __m256i) {
+    fn v16<const M: u8>(&mut self, x: usize, v: __m256i) {
         if M == 0 {
             if let Some(d) = &mut self.mid
                 && let Some(d) = d.get_mut(x..x + 16)
@@ -408,11 +408,20 @@ impl<const W: usize> Row<'_, W> {
 /// four strips of sixteen for each row of a block's window.
 pub(super) type Strips = [__m256i; 4];
 
-/// The output of a block `w` wide into `dst` (see [`super::Dst`]): its
-/// kind (`M` of [`put_w`]) and where it goes.
-#[inline]
+/// The filtered block (see [`super::predict`]).
 #[target_feature(enable = "avx2")]
-pub(super) fn out_of(dst: super::Dst<'_>, stride: usize, w: usize) -> (u8, Out<'_>) {
+pub(super) fn predict(
+    dst: super::Dst<'_>,
+    stride: usize,
+    src: &Src<'_>,
+    (w, h): (usize, usize),
+    taps: &Taps,
+    tmp: &mut Vec<Strips>,
+) {
+    if tmp.len() < 64 + 7 {
+        tmp.resize(64 + 7, [_mm256_setzero_si256(); 4]);
+    }
+    let tmp = tmp.as_mut_slice();
     let zero = _mm256_setzero_si256();
     let plain = |mid, px, other, other_stride| Out {
         mid,
@@ -424,7 +433,7 @@ pub(super) fn out_of(dst: super::Dst<'_>, stride: usize, w: usize) -> (u8, Out<'
         add: zero,
         shift: _mm_setzero_si128(),
     };
-    let (mode, out) = match dst {
+    let (mode, mut out) = match dst {
         super::Dst::Mid(mid) => (0, plain(mid, &mut [], &[], 0)),
         super::Dst::Uni(px) => (1, plain(&mut [], px, &[], 0)),
         super::Dst::Bi(px, other) => (2, plain(&mut [], px, other, w)),
@@ -444,24 +453,6 @@ pub(super) fn out_of(dst: super::Dst<'_>, stride: usize, w: usize) -> (u8, Out<'
             (4, out)
         }
     };
-    (mode, out)
-}
-
-/// The filtered block (see [`super::predict`]).
-#[target_feature(enable = "avx2")]
-pub(super) fn predict(
-    dst: super::Dst<'_>,
-    stride: usize,
-    src: &Src<'_>,
-    (w, h): (usize, usize),
-    taps: &Taps,
-    tmp: &mut Vec<Strips>,
-) {
-    if tmp.len() < 64 + 7 {
-        tmp.resize(64 + 7, [_mm256_setzero_si256(); 4]);
-    }
-    let tmp = tmp.as_mut_slice();
-    let (mode, mut out) = out_of(dst, stride, w);
     // A width of three quarters of a power of two is two blocks.
     let split = |a: usize| Src {
         at: src.at + a,
@@ -514,7 +505,7 @@ pub(super) fn predict(
 /// Source row `j` of the window: its first `R` samples, which the entry
 /// checked are there.
 #[inline(always)]
-pub(super) fn src_row<'s, const R: usize>(src: &Src<'s>, j: usize) -> Option<&'s [u8; R]> {
+fn src_row<'s, const R: usize>(src: &Src<'s>, j: usize) -> Option<&'s [u8; R]> {
     src.src.get(src.row(j)..)?.first_chunk::<R>()
 }
 
@@ -525,7 +516,7 @@ pub(super) fn src_row<'s, const R: usize>(src: &Src<'s>, j: usize) -> Option<&'s
 /// each window row is kept in `tmp`, row after row, for the vertical one.
 #[inline]
 #[target_feature(enable = "avx2")]
-pub(super) fn put_w<const W: usize, const R: usize, const T: usize, const M: u8>(
+fn put_w<const W: usize, const R: usize, const T: usize, const M: u8>(
     out: &mut Out<'_>,
     src: &Src<'_>,
     h: usize,

@@ -56,15 +56,6 @@ fn reference(src: &Src<'_>, (w, h): (usize, usize), taps: &Taps) -> Vec<i16> {
 
 #[test]
 fn put_matches_the_specification() {
-    // With the AVX-512 kernels where the CPU has them, then the AVX2 ones.
-    for avx512 in [true, false] {
-        crate::wide::set_avx512(avx512);
-        put_check();
-    }
-    crate::wide::set_avx512(true);
-}
-
-fn put_check() {
     if !accelerated() {
         return;
     }

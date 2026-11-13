@@ -10,8 +10,6 @@
 
 #[cfg(target_arch = "x86_64")]
 mod avx2;
-#[cfg(target_arch = "x86_64")]
-mod avx512;
 #[cfg(test)]
 mod tests;
 
@@ -80,8 +78,6 @@ impl Src<'_> {
 pub struct Tmp {
     #[cfg(target_arch = "x86_64")]
     rows: Vec<avx2::Strips>,
-    #[cfg(target_arch = "x86_64")]
-    wide: Vec<avx512::Wide>,
 }
 
 /// Whether the kernels of this module run on this CPU.
@@ -161,22 +157,6 @@ pub fn predict(
     }
     #[cfg(target_arch = "x86_64")]
     {
-        if crate::wide::has_avx512() {
-            // SAFETY: `has_avx512` checked at run time that the CPU has
-            // AVX2, AVX-512F and AVX-512BW.
-            #[allow(unsafe_code)]
-            unsafe {
-                avx512::predict(
-                    dst,
-                    dst_stride,
-                    src,
-                    (w, h),
-                    taps,
-                    (&mut tmp.rows, &mut tmp.wide),
-                );
-            }
-            return true;
-        }
         // SAFETY: `accelerated` checked at run time that the CPU has AVX2.
         #[allow(unsafe_code)]
         unsafe {

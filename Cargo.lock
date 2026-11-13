@@ -2840,6 +2840,15 @@ name = "cutlass-h264-kernels"
 version = "0.1.0"
 
 [[package]]
+name = "cutlass-h264-pgo"
+version = "0.1.0"
+dependencies = [
+ "cutlass-decode",
+ "cutlass-encode",
+ "cutlass-h264",
+]
+
+[[package]]
 name = "cutlass-hevc"
 version = "0.1.0"
 dependencies = [

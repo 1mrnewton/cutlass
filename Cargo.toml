@@ -81,6 +81,7 @@ members = [
     "crates/update",
     "crates/vision",
     "crates/motion",
+    "tools/h264-pgo",
     "tools/icongen",
     "tools/licenses",
 ]

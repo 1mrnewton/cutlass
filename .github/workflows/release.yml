@@ -6,7 +6,9 @@ name: release
 # `-` (such as v1.0.0-rc.1) is published as a pre-release, which the check
 # ignores.
 #
-# The packages are built as in ci.yml, with `--features public-release`.
+# The packages are built as in ci.yml, with `--features public-release`,
+# through scripts/pgo.py: the H.264 codec is optimised from a profile of its
+# own training run, which needs the toolchain's llvm-tools.
 # They are signed ad hoc on macOS and unsigned on Windows until the
 # certificates are set up (see scripts/macos_bundle.py and
 # scripts/windows_installer.py for the variables).
@@ -39,8 +41,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
       - name: Build
-        run: cargo build --release -p cutlass --features public-release
+        run: python3 scripts/pgo.py -p cutlass --features public-release
       - name: Bundle
         run: python3 scripts/macos_bundle.py target/release/cutlass dist
       - name: Smoke test the bundle
@@ -57,8 +61,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
       - name: Build
-        run: cargo build --release -p cutlass --features public-release
+        run: python scripts/pgo.py -p cutlass --features public-release
       - name: NSIS
         shell: bash
         run: |
@@ -87,8 +93,10 @@ jobs:
       - name: GTK and ALSA headers
         run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libasound2-dev
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
       - name: Build
-        run: cargo build --release -p cutlass --features public-release
+        run: python3 scripts/pgo.py -p cutlass --features public-release
       - name: appimagetool 1.9.1
         run: |
           curl -sSL -o "$RUNNER_TEMP/appimagetool" https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage

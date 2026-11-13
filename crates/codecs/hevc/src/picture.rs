@@ -416,9 +416,15 @@ impl<P: Pixel> Samples<'_, P> {
         y >= if c == 0 { self.top } else { self.top / 2 }
     }
 
+    /// Component samples (`x`, `y`) downwards, one per entry of `out`. The
+    /// rows must be held.
     #[inline]
-    pub fn get(&self, c: usize, x: usize, y: usize) -> P {
-        self.band[c][self.index(c, x, y)]
+    pub fn column(&self, c: usize, x: usize, y: usize, out: &mut [i32]) {
+        let stride = self.stride(c);
+        let plane = &self.band[c][self.index(c, x, y)..];
+        for (o, s) in out.iter_mut().zip(plane.iter().step_by(stride)) {
+            *o = s.i();
+        }
     }
 
     /// Component samples `x..x + out.len()` of the line just above the

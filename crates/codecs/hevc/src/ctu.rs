@@ -1202,7 +1202,6 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         };
         // Availability is checked per 4 luma samples (2 chroma samples).
         let unit = 4 / scale;
-        let ni = n as isize;
         // The line above: from this CTB row, or the line the row above saved.
         let mut line = [P::default(); 129];
         let line_x = px.saturating_sub(1);
@@ -1216,22 +1215,37 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             }
         }
         let out = &self.out;
-        // Left column, bottom to top, and the corner.
-        let mut yy = 2 * ni - 1;
-        while yy >= 0 {
-            let base = yy - (yy % unit as isize);
-            if avail(
-                (px as isize - 1) * scale as isize,
-                (py as isize + base) * scale as isize,
-            ) {
-                for k in 0..unit as isize {
-                    let sy = base + k;
-                    let idx = refs.left(sy as i32);
-                    refs.samples[idx] = out.get(c, px - 1, py + sy as usize).i();
+        // Inside the block's own height and width, the samples left of it
+        // and above it come before it in z-scan order: with the CTB they
+        // lie in, they are there or not all together. Without constrained
+        // intra prediction only the units below and right of those need a
+        // check each.
+        let mask = (1usize << log2_ctb) - 1;
+        let units = 2 * n / unit;
+        let near = |ok: bool| ok && !constrained;
+        let left_near = near(x > 0 && (x & mask != 0 || avail(x as isize - 1, y as isize)));
+        let top_near = near(y > 0 && (y & mask != 0 || avail(x as isize, y as isize - 1)));
+        let mut all = true;
+        let mut column = [0i32; 64];
+        for k in 0..units {
+            let sy = k * unit;
+            let ok = (sy < n && left_near)
+                || ((sy >= n || constrained)
+                    && avail(
+                        (px as isize - 1) * scale as isize,
+                        ((py + sy) * scale) as isize,
+                    ));
+            if ok {
+                let rows = &mut column[sy..sy + unit];
+                out.column(c, px - 1, py + sy, rows);
+                for (j, &v) in rows.iter().enumerate() {
+                    let idx = refs.left((sy + j) as i32);
+                    refs.samples[idx] = v;
                     refs.available[idx] = true;
                 }
+            } else {
+                all = false;
             }
-            yy = base - 1;
         }
         if px > 0
             && py > 0
@@ -1243,26 +1257,33 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             let idx = refs.left(-1);
             refs.samples[idx] = line[px - 1 - line_x].i();
             refs.available[idx] = true;
+        } else {
+            all = false;
         }
-        if py > 0 {
-            let mut xx = 0isize;
-            while xx < 2 * ni {
-                if avail(
-                    (px as isize + xx) * scale as isize,
-                    (py as isize - 1) * scale as isize,
-                ) {
-                    for k in 0..unit as isize {
-                        let sx = xx + k;
-                        let idx = refs.top(sx as i32);
-                        refs.samples[idx] = line[px + sx as usize - line_x].i();
-                        refs.available[idx] = true;
-                    }
+        for k in 0..units {
+            let sx = k * unit;
+            let ok = py > 0
+                && ((sx < n && top_near)
+                    || ((sx >= n || constrained)
+                        && avail(
+                            ((px + sx) * scale) as isize,
+                            (py as isize - 1) * scale as isize,
+                        )));
+            if ok {
+                let first = refs.top(sx as i32);
+                let from = px + sx - line_x;
+                for (j, s) in line[from..from + unit].iter().enumerate() {
+                    refs.samples[first + j] = s.i();
+                    refs.available[first + j] = true;
                 }
-                xx += unit as isize;
+            } else {
+                all = false;
             }
         }
         let bit_depth = u32::from(self.sps.bit_depth);
-        refs.substitute(bit_depth);
+        if !all {
+            refs.substitute(bit_depth);
+        }
         if c == 0 {
             intra::filter(&mut refs, mode, self.sps.strong_intra_smoothing, bit_depth);
         }

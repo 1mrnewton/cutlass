@@ -152,29 +152,26 @@ Needs FFmpeg, and is not run by `cargo test`:
 
 ## Speed against FFmpeg
 
-**Decode, av1.** Measured on 13 November 2026 with the AV1 work of branch
-`av1` merged into `development` (`aac363e8`), on an Apple M5 Pro (18 cores,
-48 GB) running macOS 27.0.1 with other work running (load average about 6),
-against FFmpeg 8.1.1. Built with `cargo build --release` and rustc 1.99.1.
+**Decode, av1.** Measured on 13 November 2026 on `development` after the AV1
+work of branch `av1` was merged in and `Av1Decoder` copied pictures out a row
+at a time, on an Apple M5 Pro (18 cores, 48 GB) running macOS 27.0.1 with
+other work running (load average about 4), against FFmpeg 8.1.1. Built with
+`cargo build --release` (no profile) and rustc 1.99.1; median of 9 runs.
 Input: 373 frames of 1920×1080 at 30 frames a second (8.1 MB), written by
 FFmpeg with `-c:v libsvtav1 -preset 8 -crf 35`.
 
 |  | Cutlass | FFmpeg (`libdav1d`) |
 | --- | ---: | ---: |
-| Wall time | 0.67 s | 0.52 s |
-| Speed | 557 frames/s | 717 frames/s |
-| CPU time | 2.40 s | 1.61 s |
-| Peak memory | 332 MB | 110 MB |
+| Wall time | 0.31 s | 0.51 s |
+| Speed | 1,203 frames/s | 731 frames/s |
+| CPU time | 1.87 s | 1.59 s |
+| Peak memory | 377 MB | 110 MB |
 | Threads allowed | 16 | 16 |
 
-Cutlass is **1.3× slower** than FFmpeg here. Both decoders produced exactly the
-same samples. The gap is outside the decoding itself: the `av1bench` example,
-which decodes through `Av1Core` and keeps the pictures as they are, took 307 ms
-on the same file with 16 threads against 537 ms for the `ffmpeg` command with
-libdav1d (median of 9 runs taken in turn; that build used a profile from
-`scripts/pgo_profile.py`, worth 3 to 5%). The likely cost is `Av1Decoder`
-copying each shown picture into packed bytes one sample at a time (1.16 GB
-here); that has not been profiled yet.
+Cutlass is **1.6× faster** than FFmpeg here. Both decoders produced exactly the
+same samples. Before the row copy, `Av1Decoder` packed each shown picture one
+sample at a time (1.16 GB on this file): 46.8G instructions against 28.5G
+after, and 0.67 s against FFmpeg's 0.52 s in the same harness.
 
 **Decode, 4K, `Av1Core`.** Two 4K 8-bit clips of 240 frames, `av1bench`
 against `ffmpeg -c:v libdav1d -threads N -f null`, whole-process wall time,
@@ -218,8 +215,8 @@ Decoder:
   reconstructed on one thread.
 - At most 16 frames decode at once.
 - The decoder model info is published but no decoder model is run.
-- `Av1Decoder` copies every shown picture into packed bytes one sample at a
-  time.
+- `Av1Decoder` copies every shown picture into packed bytes, a row at a time,
+  on the thread that calls `push`.
 - The vector kernels are NEON only; other targets run the scalar twins.
 
 Encoder:

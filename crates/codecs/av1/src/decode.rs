@@ -185,7 +185,8 @@ fn pixel_format(f: &DecodedFrame) -> PixelFormat {
 }
 
 /// Writes one plane tightly packed at `w x h`, repeating the last column and
-/// row when the visible plane is smaller.
+/// row when the visible plane is smaller. A row is copied whole: 8-bit rows as
+/// they are, wider samples as little-endian `u16`.
 fn pack_plane<P: Pixel>(
     out: &mut Vec<u8>,
     pic: &Picture<P>,
@@ -194,28 +195,43 @@ fn pack_plane<P: Pixel>(
     h: usize,
     neutral: i32,
 ) {
-    let wide = P::HBD;
-    if plane >= pic.planes.len() {
-        for _ in 0..w * h {
-            if wide {
-                out.extend_from_slice(&(neutral as u16).to_le_bytes());
-            } else {
-                out.push(neutral as u8);
+    let size = if P::HBD { 2 } else { 1 };
+    let Some(p) = pic.planes.get(plane) else {
+        let at = out.len();
+        out.resize(at + w * h * size, neutral as u8);
+        if P::HBD {
+            let lanes = (neutral as u16).to_le_bytes();
+            for c in out[at..].as_chunks_mut::<2>().0 {
+                *c = lanes;
             }
         }
         return;
-    }
-    let p = &pic.planes[plane];
+    };
     let pw = p.w.max(1);
     let ph = p.h.max(1);
+    let n = w.min(pw);
     for y in 0..h {
-        let row = &p.data[y.min(ph - 1) * p.stride..];
-        for x in 0..w {
-            let v = row[x.min(pw - 1)].to_i32();
-            if wide {
-                out.extend_from_slice(&(v as u16).to_le_bytes());
+        let row = &p.data[y.min(ph - 1) * p.stride..][..n];
+        let at = out.len();
+        match P::bytes(row) {
+            Some(b) => out.extend_from_slice(b),
+            None => {
+                out.resize(at + n * 2, 0);
+                for (c, v) in out[at..].as_chunks_mut::<2>().0.iter_mut().zip(row) {
+                    *c = (v.to_i32() as u16).to_le_bytes();
+                }
+            }
+        }
+        if n < w {
+            // `n` is the visible width here, so the last sample is `row`'s.
+            let last = row[n - 1].to_i32();
+            if P::HBD {
+                let lanes = (last as u16).to_le_bytes();
+                for _ in n..w {
+                    out.extend_from_slice(&lanes);
+                }
             } else {
-                out.push(v as u8);
+                out.resize(at + w, last as u8);
             }
         }
     }
@@ -2048,5 +2064,71 @@ mod tests {
         assert_eq!(packed.len(), 64 * 64 * 3 / 2);
         assert_eq!(packed[0], 51);
         assert_eq!(frame_digest(&packed), 0x5e0f_45d9_39c1_a370);
+    }
+
+    /// The packing as it was, one sample at a time: what `pack_plane` must
+    /// still write.
+    fn pack_slow<P: crate::dsp::Pixel>(
+        pic: &crate::dec::frame::Picture<P>,
+        plane: usize,
+        w: usize,
+        h: usize,
+        neutral: i32,
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        let put = |out: &mut Vec<u8>, v: i32| {
+            if P::HBD {
+                out.extend_from_slice(&(v as u16).to_le_bytes());
+            } else {
+                out.push(v as u8);
+            }
+        };
+        let Some(p) = pic.planes.get(plane) else {
+            for _ in 0..w * h {
+                put(&mut out, neutral);
+            }
+            return out;
+        };
+        let (pw, ph) = (p.w.max(1), p.h.max(1));
+        for y in 0..h {
+            for x in 0..w {
+                put(
+                    &mut out,
+                    p.data[y.min(ph - 1) * p.stride + x.min(pw - 1)].to_i32(),
+                );
+            }
+        }
+        out
+    }
+
+    fn check_pack<P: crate::dsp::Pixel>(bd: u32) {
+        use crate::dec::frame::Picture;
+        let mut seed = 0x9e37_79b9_u32;
+        for (w, h) in [(1, 1), (7, 5), (16, 9), (33, 2)] {
+            let mut pic = Picture::<P>::new(w, h, 1, true, true, bd);
+            for v in &mut pic.planes[0].data {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                *v = P::from_i32((seed % (1 << bd)) as i32);
+            }
+            let neutral = 1 << (bd - 1);
+            // As wide as the plane, one wider and one taller (an odd 4:2:0
+            // size padded to even), and the missing chroma planes.
+            for (plane, pw, ph) in [(0, w, h), (0, w + 1, h + 1), (1, w, h), (2, 3, 2)] {
+                let mut fast = vec![0xAA];
+                super::pack_plane(&mut fast, &pic, plane, pw, ph, neutral);
+                let mut slow = vec![0xAA];
+                slow.extend(pack_slow(&pic, plane, pw, ph, neutral));
+                assert_eq!(fast, slow, "{w}x{h} plane {plane} at {pw}x{ph}, {bd} bits");
+            }
+        }
+    }
+
+    #[test]
+    fn pack_plane_matches_sample_by_sample() {
+        check_pack::<u8>(8);
+        check_pack::<u16>(10);
+        check_pack::<u16>(12);
     }
 }

@@ -41,7 +41,7 @@ pub struct Plane<'a, P> {
 /// The row loops are written to compile to vector code; call this inside
 /// [`cutlass_simd::wide::wide`] to get 256-bit vectors where the CPU has
 /// them.
-#[inline(always)]
+#[inline]
 pub fn interpolate<P: Pixel>(
     plane: &Plane<'_, P>,
     block: Block,
@@ -62,7 +62,7 @@ pub fn interpolate<P: Pixel>(
 /// from one list, or (`other` the intermediates of list 0, rows `w`
 /// apart) the average with it. `false`, with nothing written, when the
 /// kernels do not take the block; the caller then interpolates it.
-#[inline(always)]
+#[inline]
 pub fn predict_px<P: Pixel>(
     plane: &Plane<'_, P>,
     block: Block,
@@ -525,7 +525,7 @@ pub struct Wp {
 
 /// Write one predicted block: default or explicit weighting of one or two
 /// interpolated blocks (clause 8.5.3.3.4).
-#[inline(always)]
+#[inline]
 pub fn store<P: Pixel>(
     dst: &mut [P],
     stride: usize,

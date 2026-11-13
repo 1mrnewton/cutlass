@@ -743,6 +743,13 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         self.cu.part = part;
         let mode = if intra { MODE_INTRA } else { MODE_INTER };
         self.pic.info.fill4(w4, (x0, y0), (size, size), mode | keep);
+        if intra {
+            // No motion: the picture's maps are not cleared between pictures.
+            for row in (y0 >> 2)..((y0 + size).min(self.pic.height) >> 2) {
+                let start = row * w4 + (x0 >> 2);
+                self.pic.mvf.fill(start, size >> 2, MvField::default());
+            }
+        }
         let mut pcm = false;
         if intra {
             self.cu.intra_split = part == PART_NXN;

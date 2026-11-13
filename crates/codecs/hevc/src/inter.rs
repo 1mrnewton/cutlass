@@ -597,15 +597,21 @@ impl<'a, P: Pixel> SliceDecoder<'a, '_, P> {
             }
         }
         let refs = &refs;
-        cutlass_simd::wide::wide(
-            #[inline(always)]
-            || self.predict_planes((x, y, w, h), field, refs, weights, bit_depth),
-        );
+        if P::bytes(&[]).is_some() {
+            // 8-bit samples go through the vector kernels, which pick their
+            // own instructions.
+            self.predict_planes((x, y, w, h), field, refs, weights, bit_depth);
+        } else {
+            cutlass_simd::wide::wide(
+                #[inline(always)]
+                || self.predict_planes((x, y, w, h), field, refs, weights, bit_depth),
+            );
+        }
         Ok(())
     }
 
     /// The prediction of each plane of one block from `refs`, stored.
-    #[inline(always)]
+    #[inline]
     fn predict_planes(
         &mut self,
         (x, y, w, h): (usize, usize, usize, usize),

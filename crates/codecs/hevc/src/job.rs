@@ -111,7 +111,10 @@ fn out_samples<P: Pixel>(writer: &RowsWriter<P>, sps: &Sps, form: OutForm) -> Ou
         };
         for y in 0..h {
             let row = &rows[y * stride + x0..y * stride + x0 + w];
-            out.extend(row.iter().map(|s| (s.i() >> shift) as u8));
+            match P::bytes(row) {
+                Some(bytes) => out.extend_from_slice(bytes),
+                None => out.extend(row.iter().map(|s| (s.i() >> shift) as u8)),
+            }
         }
     };
     let deep = |c: usize| -> Vec<u16> {

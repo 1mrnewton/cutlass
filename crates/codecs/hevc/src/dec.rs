@@ -76,6 +76,8 @@ struct State {
     /// An end of sequence came before the next picture.
     after_eos: bool,
     next_uid: u64,
+    /// The layout of the last parameter sets a picture used.
+    layout: Option<(Arc<Sps>, Arc<Pps>, Arc<Layout>)>,
 }
 
 /// A picture chosen for output, in output order.
@@ -92,6 +94,7 @@ impl State {
             no_rasl_output: true,
             after_eos: false,
             next_uid: 1,
+            layout: None,
         }
     }
 
@@ -571,7 +574,14 @@ impl HevcDecoder {
             .dpb
             .retain(|p| p.output || p.marking != Marking::Unused);
 
-        let layout = Arc::new(Layout::new(&sps, &pps)?);
+        let layout = match &state.layout {
+            Some((s, p, l)) if Arc::ptr_eq(s, &sps) && Arc::ptr_eq(p, &pps) => l.clone(),
+            _ => {
+                let l = Arc::new(Layout::new(&sps, &pps)?);
+                state.layout = Some((sps.clone(), pps.clone(), l.clone()));
+                l
+            }
+        };
         let old = lock(&self.shared.pics).pop();
         let pic = Picture::reuse(old, sps.clone(), pps.clone(), layout, poc)?;
         let output = header.pic_output && !(nal.is_rasl() && state.no_rasl_output);

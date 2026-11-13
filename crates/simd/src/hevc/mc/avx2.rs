@@ -239,19 +239,6 @@ impl<const T: usize> Across<T> {
         }
         sum
     }
-
-    /// A row of `W` outputs from the samples at `at` into `d[o..]`.
-    #[inline]
-    #[target_feature(enable = "avx2")]
-    fn row<const W: usize>(&self, s: &[u8], at: usize, d: &mut [i16], o: usize) {
-        if W >= 16 {
-            for x in (0..W).step_by(16) {
-                st16x16(d, o + x, self.sixteen(s, at + x));
-            }
-        } else {
-            st16x8(d, o, self.eight(s, at), W);
-        }
-    }
 }
 
 /// Where the filtered values of a block go: `M` 0 keeps them as 14-bit
@@ -451,48 +438,74 @@ fn put_w<const W: usize, const T: usize, const M: u8>(
             }
         }
         (None, Some(fv)) => {
+            // Rows of samples as 16-bit values, a window of `T` sliding
+            // down: one new row for each row out.
             let c: [__m256i; 8] = core::array::from_fn(|k| _mm256_set1_epi16(i16::from(fv[k])));
-            for j in 0..h {
-                if W >= 16 {
-                    for x in (0..W).step_by(16) {
-                        let mut sum = _mm256_setzero_si256();
-                        for (k, c) in c.iter().enumerate().take(T) {
-                            let r = _mm256_cvtepu8_epi16(ld8x16(s, row(j + k) + h0 + x));
-                            sum = _mm256_add_epi16(sum, _mm256_mullo_epi16(r, *c));
+            if W >= 16 {
+                for x in (0..W).step_by(16) {
+                    let load = |j: usize| _mm256_cvtepu8_epi16(ld8x16(s, row(j) + h0 + x));
+                    let mut win = [_mm256_setzero_si256(); 8];
+                    for (k, w) in win.iter_mut().enumerate().take(T - 1) {
+                        *w = load(k);
+                    }
+                    for j in 0..h {
+                        win[T - 1] = load(j + T - 1);
+                        let mut sum = _mm256_mullo_epi16(win[0], c[0]);
+                        for k in 1..T {
+                            sum = _mm256_add_epi16(sum, _mm256_mullo_epi16(win[k], c[k]));
                         }
                         out.v16::<M>(j, x, sum);
+                        for k in 0..T - 1 {
+                            win[k] = win[k + 1];
+                        }
                     }
-                } else {
-                    let mut sum = _mm_setzero_si128();
-                    for (k, c) in c.iter().enumerate().take(T) {
-                        let r = _mm_cvtepu8_epi16(ld8x16(s, row(j + k) + h0));
-                        sum = _mm_add_epi16(sum, _mm_mullo_epi16(r, _mm256_castsi256_si128(*c)));
+                }
+            } else {
+                let c: [__m128i; 8] = c.map(|c| _mm256_castsi256_si128(c));
+                let load = |j: usize| _mm_cvtepu8_epi16(ld8x16(s, row(j) + h0));
+                let mut win = [_mm_setzero_si128(); 8];
+                for (k, w) in win.iter_mut().enumerate().take(T - 1) {
+                    *w = load(k);
+                }
+                for j in 0..h {
+                    win[T - 1] = load(j + T - 1);
+                    let mut sum = _mm_mullo_epi16(win[0], c[0]);
+                    for k in 1..T {
+                        sum = _mm_add_epi16(sum, _mm_mullo_epi16(win[k], c[k]));
                     }
                     out.v8::<M>(j, 0, sum, W);
+                    for k in 0..T - 1 {
+                        win[k] = win[k + 1];
+                    }
                 }
             }
         }
         (Some(fh), Some(fv)) => {
+            // The horizontal pass of each source row once, into a window of
+            // `T` rows sliding down; the vertical pass multiplies pairs of
+            // window rows by pairs of taps into 32-bit sums.
+            let _ = tmp;
             let across = Across::<T>::new(&fh);
-            for j in 0..h + T - 1 {
-                across.row::<W>(s, row(j), tmp, j * W);
-            }
-            let tmp = &*tmp;
             let p: [__m256i; 4] = core::array::from_fn(|k| _mm256_set1_epi32(tap_pair32(&fv, k)));
-            for j in 0..h {
-                if W >= 16 {
-                    for x in (0..W).step_by(16) {
+            if W >= 16 {
+                for x in (0..W).step_by(16) {
+                    let load = |j: usize| across.sixteen(s, row(j) + x);
+                    let mut win = [_mm256_setzero_si256(); 8];
+                    for (k, w) in win.iter_mut().enumerate().take(T - 1) {
+                        *w = load(k);
+                    }
+                    for j in 0..h {
+                        win[T - 1] = load(j + T - 1);
                         let (mut lo, mut hi) = (_mm256_setzero_si256(), _mm256_setzero_si256());
-                        for (k, p) in p.iter().enumerate().take(T / 2) {
-                            let a = ld16x16(tmp, (j + 2 * k) * W + x);
-                            let b = ld16x16(tmp, (j + 2 * k + 1) * W + x);
+                        for k in 0..T / 2 {
+                            let (a, b) = (win[2 * k], win[2 * k + 1]);
                             lo = _mm256_add_epi32(
                                 lo,
-                                _mm256_madd_epi16(_mm256_unpacklo_epi16(a, b), *p),
+                                _mm256_madd_epi16(_mm256_unpacklo_epi16(a, b), p[k]),
                             );
                             hi = _mm256_add_epi32(
                                 hi,
-                                _mm256_madd_epi16(_mm256_unpackhi_epi16(a, b), *p),
+                                _mm256_madd_epi16(_mm256_unpackhi_epi16(a, b), p[k]),
                             );
                         }
                         let v = _mm256_packs_epi32(
@@ -500,18 +513,31 @@ fn put_w<const W: usize, const T: usize, const M: u8>(
                             _mm256_srai_epi32::<6>(hi),
                         );
                         out.v16::<M>(j, x, v);
+                        for k in 0..T - 1 {
+                            win[k] = win[k + 1];
+                        }
                     }
-                } else {
+                }
+            } else {
+                let p: [__m128i; 4] = p.map(|p| _mm256_castsi256_si128(p));
+                let load = |j: usize| across.eight(s, row(j));
+                let mut win = [_mm_setzero_si128(); 8];
+                for (k, w) in win.iter_mut().enumerate().take(T - 1) {
+                    *w = load(k);
+                }
+                for j in 0..h {
+                    win[T - 1] = load(j + T - 1);
                     let (mut lo, mut hi) = (_mm_setzero_si128(), _mm_setzero_si128());
-                    for (k, p) in p.iter().enumerate().take(T / 2) {
-                        let p = _mm256_castsi256_si128(*p);
-                        let a = ld16x8(tmp, (j + 2 * k) * W);
-                        let b = ld16x8(tmp, (j + 2 * k + 1) * W);
-                        lo = _mm_add_epi32(lo, _mm_madd_epi16(_mm_unpacklo_epi16(a, b), p));
-                        hi = _mm_add_epi32(hi, _mm_madd_epi16(_mm_unpackhi_epi16(a, b), p));
+                    for k in 0..T / 2 {
+                        let (a, b) = (win[2 * k], win[2 * k + 1]);
+                        lo = _mm_add_epi32(lo, _mm_madd_epi16(_mm_unpacklo_epi16(a, b), p[k]));
+                        hi = _mm_add_epi32(hi, _mm_madd_epi16(_mm_unpackhi_epi16(a, b), p[k]));
                     }
                     let v = _mm_packs_epi32(_mm_srai_epi32::<6>(lo), _mm_srai_epi32::<6>(hi));
                     out.v8::<M>(j, 0, v, W);
+                    for k in 0..T - 1 {
+                        win[k] = win[k + 1];
+                    }
                 }
             }
         }

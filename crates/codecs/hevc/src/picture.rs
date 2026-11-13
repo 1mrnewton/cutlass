@@ -195,14 +195,6 @@ impl Motion {
         }
     }
 
-    /// Every cell to no motion.
-    fn clear(&self) {
-        for (a, b) in self.mv.iter().zip(&self.refs) {
-            a.store(0, Relaxed);
-            b.store(0, Relaxed);
-        }
-    }
-
     /// Store `field` in `len` cells from `start`.
     pub fn fill(&self, start: usize, len: usize, field: MvField) {
         let bits = |v: i16| u64::from(v as u16);
@@ -481,11 +473,8 @@ impl Picture {
         }) else {
             return Self::new(sps, pps, layout, poc);
         };
-        pic.mvf.clear();
-        pic.info.fill_all(0);
-        pic.intra_mode.fill_all(1);
-        pic.qp.fill_all(0);
-        pic.depth.fill_all(0);
+        // Every map but the boundary strengths is written for each block
+        // before it is read; edges no block names must read as 0.
         pic.bs_ver.fill_all(0);
         pic.bs_hor.fill_all(0);
         for (a, b) in pic.ctb_slice.iter().zip(&pic.ctb_slice_addr) {
@@ -533,23 +522,14 @@ impl Picture {
         (y >> log2) * self.layout.ctb_width as usize + (x >> log2)
     }
 
-    /// `MinTbAddrZs` of a luma position (clause 6.5.2), computed from the
-    /// tile scan and the z-order inside the CTB.
+    /// Z-scan order of a luma position inside its CTB (clause 6.5.2).
     #[inline]
-    pub fn zs(&self, x: usize, y: usize) -> u64 {
-        let log2_ctb = u32::from(self.layout.log2_ctb);
-        let log2_tb = u32::from(self.sps.log2_min_tb);
-        let rs = self.ctb_rs(x, y);
-        let ts = u64::from(self.layout.rs_to_ts[rs]);
-        let mask = (1usize << log2_ctb) - 1;
-        let tx = ((x & mask) >> log2_tb) as u64;
-        let ty = ((y & mask) >> log2_tb) as u64;
-        let mut morton = 0u64;
-        for bit in 0..(log2_ctb - log2_tb) {
-            morton |= ((tx >> bit) & 1) << (2 * bit);
-            morton |= ((ty >> bit) & 1) << (2 * bit + 1);
-        }
-        (ts << (2 * (log2_ctb - log2_tb))) | morton
+    fn z_in_ctb(&self, x: usize, y: usize) -> u16 {
+        let layout = &*self.layout;
+        let mask = (1usize << layout.log2_ctb) - 1;
+        let shift = layout.log2_min_tb;
+        let at = ((y & mask) >> shift) * layout.zorder_edge + ((x & mask) >> shift);
+        layout.zorder.get(at).copied().unwrap_or(0)
     }
 
     /// Z-scan availability (clause 6.4.1).
@@ -569,7 +549,7 @@ impl Picture {
         if nb_ctb != cur_ctb {
             return self.layout.rs_to_ts[nb_ctb] < self.layout.rs_to_ts[cur_ctb];
         }
-        self.zs(nx, ny) <= self.zs(x, y)
+        self.z_in_ctb(nx, ny) <= self.z_in_ctb(x, y)
     }
 
     pub fn slice_of(&self, x: usize, y: usize) -> Option<&SliceCtx> {

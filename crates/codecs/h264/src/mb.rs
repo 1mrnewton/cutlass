@@ -1580,7 +1580,7 @@ fn intra_base<S: Sample>(
     }
     let mut qp = qp;
     if luma_cbp > 0 || chroma_cbp > 0 {
-        let delta = qp_delta(entropy, prev_qpd(pic, mx, my, slice_id))?;
+        let delta = qp_delta::<S>(entropy, prev_qpd(pic, mx, my, slice_id))?;
         qp = next_qp::<S>(qp, delta);
         mb.qpd = delta as i8;
     }
@@ -1717,7 +1717,7 @@ fn motion_base<S: Sample>(
     }
     let mut qp = qp;
     if luma_cbp > 0 || chroma_cbp > 0 {
-        let delta = qp_delta(entropy, prev_qpd(pic, mx, my, slice_id))?;
+        let delta = qp_delta::<S>(entropy, prev_qpd(pic, mx, my, slice_id))?;
         qp = next_qp::<S>(qp, delta);
         mb.qpd = delta as i8;
     }
@@ -3626,7 +3626,7 @@ fn decode_intra<S: Sample>(
     }
     let mut delta = 0;
     if luma_cbp > 0 || chroma_cbp > 0 || i16 {
-        delta = qp_delta(entropy, prev_qpd(pic, mx, my, mb.slice))?;
+        delta = qp_delta::<S>(entropy, prev_qpd(pic, mx, my, mb.slice))?;
         *qp = next_qp::<S>(*qp, delta);
     }
     mb.qpd = delta as i8;
@@ -4064,8 +4064,13 @@ fn cbp_chroma<S: Sample>(pic: &Frame<S>, mx: i32, my: i32, slice: u16) -> u8 {
 }
 
 /// Clause 9.3.3.1.1.5. The first bin uses context 60 or 61. Later bins use 62, then 63.
+/// Clause 7.4.5 bounds the value to -(26 + QpBdOffsetY / 2)..=25 + QpBdOffsetY / 2,
+/// so a CABAC code runs to 52 + QpBdOffsetY: 52 at 8 bits, 64 at 10.
 #[inline(always)]
-fn qp_delta(entropy: &mut Entropy<'_, '_>, prev_nonzero: bool) -> Result<i32, CodecError> {
+fn qp_delta<S: Sample>(
+    entropy: &mut Entropy<'_, '_>,
+    prev_nonzero: bool,
+) -> Result<i32, CodecError> {
     match entropy {
         Entropy::Cavlc(bits) => bits.se(),
         Entropy::Cabac(cab) => {
@@ -4077,7 +4082,7 @@ fn qp_delta(entropy: &mut Entropy<'_, '_>, prev_nonzero: bool) -> Result<i32, Co
                     break;
                 }
                 code += 1;
-                if code > 52 {
+                if code > 52 + S::QP_BD as u32 {
                     return Err(CodecError::Malformed {
                         at_bit: 0,
                         what: "qp delta",
@@ -8829,7 +8834,7 @@ fn decode_inter<S: Sample>(
     }
     let mut delta = 0;
     if luma_cbp > 0 || chroma_cbp > 0 {
-        delta = qp_delta(entropy, prev_qpd(pic, mx, my, mb.slice))?;
+        delta = qp_delta::<S>(entropy, prev_qpd(pic, mx, my, mb.slice))?;
         *qp = next_qp::<S>(*qp, delta);
     }
     mb.qpd = delta as i8;

@@ -101,8 +101,8 @@ Encoder (`Av1Encoder`, over `enc::encoder::Av1Enc`):
   split into tile columns when there are threads for them.
 - Off by default, on `Av1Encoder` as settings: Wiener loop restoration
   (`set_loop_restoration`), global motion (`set_global_motion`), alt-ref
-  temporal filtering of every mini-GOP (`set_temporal_filter`). Explicit tiles
-  are on `EncConfig` only.
+  temporal filtering of every mini-GOP (`set_temporal_filter`), explicit
+  tiles (`set_tiles`).
 
 In a file: `cutlass-isobmff` writes an AV1 track as an `av01` sample entry with
 the `av1C` record and lists the `av01` brand, and `cutlass-matroska` writes
@@ -331,7 +331,6 @@ Encoder:
   falls back to 30.
 - Writes no timing info and no HDR metadata OBUs: the light level, mastering
   display and T.35 messages a decoder reads have no way in.
-- Explicit tiles are on `EncConfig` only.
 
 ## Specifications
 

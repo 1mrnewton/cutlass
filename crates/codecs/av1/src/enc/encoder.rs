@@ -415,6 +415,10 @@ impl Av1Enc {
         };
         let fps = if fps > 0.0 { fps } else { 30.0 };
         let gop = f64::from(cfg.gop.max(1));
+        // A tile is at least one 64x64 superblock, so a small frame has
+        // fewer tiles than asked for.
+        let tile_cols = (1usize << cfg.tile_cols_log2.min(6)).min(cfg.width.div_ceil(64));
+        let tile_rows = (1usize << cfg.tile_rows_log2.min(6)).min(cfg.height.div_ceil(64));
         let level_with = |decoded_per_shown: f64| {
             super::level::pick(&super::level::Stream {
                 width: cfg.width,
@@ -423,8 +427,8 @@ impl Av1Enc {
                 decoded_per_second: fps * decoded_per_shown,
                 bitrate,
                 profile,
-                tiles: 1usize << (cfg.tile_cols_log2 + cfg.tile_rows_log2),
-                tile_cols: 1usize << cfg.tile_cols_log2,
+                tiles: tile_cols * tile_rows,
+                tile_cols,
             })
         };
         let asked = cfg.gop > 1 && cfg.temporal_filter;
@@ -2263,6 +2267,13 @@ mod tests {
         // Tile columns past a level's count raise it.
         hd.tile_cols_log2 = 4;
         assert_eq!(level_of(hd), (16, 0));
+        // A frame four superblocks wide has four columns however many are
+        // asked for.
+        let mut narrow = EncConfig::new(256, 128);
+        narrow.gop = 1;
+        narrow.tile_cols_log2 = 6;
+        narrow.tile_rows_log2 = 6;
+        assert_eq!(level_of(narrow), (0, 0));
         // 4:4:4 is profile 1, which doubles the bitrate of a tier.
         let mut wide = EncConfig::new(640, 360);
         wide.sub_x = false;

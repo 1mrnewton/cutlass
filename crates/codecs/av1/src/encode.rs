@@ -35,6 +35,7 @@ pub struct Av1Encoder {
     loop_restoration: bool,
     global_motion: bool,
     temporal_filter: bool,
+    tiles_log2: (u32, u32),
     threads: usize,
     color: ColorTags,
     enc: Option<Av1Enc>,
@@ -151,6 +152,7 @@ impl Av1Encoder {
             loop_restoration: false,
             global_motion: false,
             temporal_filter: false,
+            tiles_log2: (0, 0),
             threads: std::thread::available_parallelism().map_or(1, usize::from),
             color,
             enc: None,
@@ -224,6 +226,16 @@ impl Av1Encoder {
         self.enc = None;
     }
 
+    /// Splits every frame into `1 << cols_log2` tile columns and
+    /// `1 << rows_log2` tile rows of even size, each at most 6 (the format's
+    /// 64). With (0, 0), the default, frames 1280 wide and up are split for
+    /// the threads there are. The frame's size bounds the count: tiles are
+    /// whole superblocks.
+    pub fn set_tiles(&mut self, cols_log2: u32, rows_log2: u32) {
+        self.tiles_log2 = (cols_log2.min(6), rows_log2.min(6));
+        self.enc = None;
+    }
+
     /// Makes the next picture pushed a key frame. The key frame distance is
     /// counted from it.
     pub fn force_keyframe(&mut self) {
@@ -249,6 +261,8 @@ impl Av1Encoder {
             cfg.loop_restoration = self.loop_restoration;
             cfg.global_motion = self.global_motion;
             cfg.temporal_filter = self.temporal_filter;
+            cfg.tile_cols_log2 = self.tiles_log2.0;
+            cfg.tile_rows_log2 = self.tiles_log2.1;
             cfg.threads = self.threads;
             cfg.color_primaries = self.color.primaries;
             cfg.transfer = self.color.transfer;
@@ -860,6 +874,43 @@ mod tests {
         encoder.set_keyint(0);
         let packets = encode(&mut encoder, PixelFormat::Yuv420p, 3);
         assert!(packets.iter().all(|p| p.keyframe));
+    }
+
+    #[test]
+    fn tiles_are_a_setting() {
+        let params = CodecParams::video(CodecId::Av1, 256, 128);
+        let stream = |tiles: Option<(u32, u32)>| {
+            let mut encoder = Av1Encoder::open(&params).expect("encoder");
+            encoder.set_gop(2);
+            encoder.set_threads(1);
+            if let Some((cols, rows)) = tiles {
+                encoder.set_tiles(cols, rows);
+            }
+            let mut packets = Vec::new();
+            for i in 0..3 {
+                packets.extend(
+                    encoder
+                        .push_frame(&frame(PixelFormat::Yuv420p, 256, 128, i))
+                        .expect("push"),
+                );
+            }
+            packets.extend(encoder.drain().expect("drain"));
+            packets
+        };
+        let whole = stream(None);
+        let split = stream(Some((2, 1)));
+        // Four columns and two rows of 64x64 tiles: other bytes, the same
+        // number of pictures.
+        let bytes = |ps: &[Packet]| -> Vec<u8> { ps.iter().flat_map(|p| p.data.clone()).collect() };
+        assert_ne!(bytes(&whole), bytes(&split));
+        for packets in [&whole, &split] {
+            let mut decoder = Av1Decoder::open(&params).expect("decoder");
+            assert_eq!(pictures(&mut decoder, packets).len(), 3);
+        }
+        // Eight tiles reach the level's count for this size: 2.0 allows 8.
+        assert_eq!(sequence_of(&split[0]).operating_points[0].seq_level_idx, 0);
+        // A count past the format's is held to it.
+        assert_eq!(stream(Some((9, 9))).len(), 3);
     }
 
     #[test]

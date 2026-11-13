@@ -310,8 +310,8 @@ impl Picture {
         if top >= bottom {
             return;
         }
-        let mut above = r.checked_sub(1).map(|a| lock(&work.rows[a]));
-        let mut band = lock(&work.rows[r]);
+        let mut above = r.checked_sub(1).map(|a| lock(&work.rows[work.slot(a)]));
+        let mut band = lock(&work.rows[work.slot(r)]);
         self.deblock_vertical(&mut band, top, bottom);
         self.deblock_horizontal(above.as_deref_mut(), &mut band, top, bottom);
     }
@@ -564,10 +564,10 @@ impl Picture {
     /// plane): the deblocked samples, with sample adaptive offset where it
     /// is on (clause 8.7.3). Reads one deblocked line above and below.
     pub fn sao_row<P: Pixel>(&self, work: &Work<P>, r: usize, mut dst: [&mut [P]; 3]) {
-        let rows = work.rows.len();
-        let above = r.checked_sub(1).map(|a| lock(&work.rows[a]));
-        let band = lock(&work.rows[r]);
-        let below = (r + 1 < rows).then(|| lock(&work.rows[r + 1]));
+        let rows = work.count;
+        let above = r.checked_sub(1).map(|a| lock(&work.rows[work.slot(a)]));
+        let band = lock(&work.rows[work.slot(r)]);
+        let below = (r + 1 < rows).then(|| lock(&work.rows[work.slot(r + 1)]));
         if !self.sao_on() {
             for (c, d) in dst.iter_mut().enumerate() {
                 let n = d.len().min(band[c].len());
@@ -579,11 +579,8 @@ impl Picture {
         let width = self.width;
         // Component row `y` of the deblocked picture, for `y` in the band
         // or one line outside it.
-        let held = [
-            band[0].len() / width.max(1),
-            band[1].len() / (width / 2).max(1),
-            band[2].len() / (width / 2).max(1),
-        ];
+        let lines = work.lines_of(r);
+        let held = [lines, lines / 2, lines / 2];
         let line = |c: usize, y: usize| -> &[P] {
             let (t, stride) = if c == 0 {
                 (top, width)

@@ -448,18 +448,21 @@ impl<'a> Cabac<'a> {
         self.e.overrun()
     }
 
-    #[inline(always)]
+    /// One context-coded bin. One shared copy of the decision for the
+    /// syntax elements outside residual coding, as an instruction-cache
+    /// line it stays hot in; residual coding inlines its own.
+    #[inline(never)]
     pub fn decide(&mut self, index: usize) -> bool {
         self.e.decide(&mut self.ctx, index)
     }
 
-    #[inline(always)]
+    #[inline(never)]
     pub fn bypass(&mut self) -> bool {
         self.e.bypass()
     }
 
     /// `n` bypass bins, most significant first.
-    #[inline(always)]
+    #[inline(never)]
     pub fn bypass_bits(&mut self, n: u32) -> u32 {
         self.e.bypass_bits(n)
     }

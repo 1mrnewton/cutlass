@@ -794,11 +794,17 @@ fn make_job<P: Pixel>(
     (pic, slices, output, row_threads): (Picture, Vec<SliceData>, Option<OutForm>, usize),
     (width, height, log2_ctb, poc): (usize, usize, u32, i32),
 ) -> Job<P> {
+    // CTB rows come one after another unless tiles reorder them or rows
+    // of a wavefront run on threads of their own.
+    let ring = !pic.pps.tiles && !(pic.pps.entropy_sync && row_threads > 1);
     let work = {
         let mut works = lock(works);
-        match works.iter().position(|w| w.fits(width, height, log2_ctb)) {
+        match works
+            .iter()
+            .position(|w| w.fits(width, height, log2_ctb, ring))
+        {
             Some(i) => works.swap_remove(i),
-            None => Work::new(width, height, log2_ctb),
+            None => Work::new(width, height, log2_ctb, ring),
         }
     };
     let bufs = lock(frame_bufs).pop();

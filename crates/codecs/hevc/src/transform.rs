@@ -88,16 +88,30 @@ pub fn inverse(
         return None;
     }
     let block = (coeffs, out, max_x + 1, max_y + 1, add2, shift2);
+    if n == 4 {
+        cutlass_simd::wide::wide(
+            #[inline(always)]
+            || dct::<4>(block),
+        );
+    } else {
+        wide_dct(n, block);
+    }
+    None
+}
+
+/// The inverse DCT of 8×8 to 32×32 blocks without the vector kernel: out
+/// of line, so the common path stays small.
+#[cold]
+#[inline(never)]
+fn wide_dct(n: usize, block: (&[i32], &mut [i32], usize, usize, i32, u32)) {
     cutlass_simd::wide::wide(
         #[inline(always)]
         || match n {
-            4 => dct::<4>(block),
             8 => dct::<8>(block),
             16 => dct::<16>(block),
             _ => dct::<32>(block),
         },
     );
-    None
 }
 
 /// The two passes of an `N`-point inverse DCT. Each adds one basis row of

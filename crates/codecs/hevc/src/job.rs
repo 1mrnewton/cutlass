@@ -331,7 +331,7 @@ impl<'a> SliceJob<'a> {
         'a: 'p,
     {
         let qp = self.qp;
-        let row = row.min(work.rows.len().saturating_sub(1));
+        let row = row.min(work.count.saturating_sub(1));
         SliceDecoder {
             pic,
             work,
@@ -411,7 +411,7 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
             pic,
             work,
             frame,
-            counts: (0..work.rows.len()).map(|_| AtomicU32::new(0)).collect(),
+            counts: (0..work.count).map(|_| AtomicU32::new(0)).collect(),
             dirty: AtomicBool::new(false),
             state: Mutex::new(PipeState {
                 writer,
@@ -461,7 +461,7 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
     /// is filtered whether or not the row below came in.
     fn advance(&self, st: &mut PipeState<P>, end: bool, held: Option<usize>) {
         let touches = |lo: usize, hi: usize| held.is_some_and(|h| h + 1 >= lo && h <= hi);
-        let rows = self.work.rows.len();
+        let rows = self.work.count;
         let ctb = 1usize << self.work.log2_ctb;
         let height = self.pic.height;
         let mut moved = false;
@@ -513,7 +513,7 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
         let ctb = 1usize << self.work.log2_ctb;
         let y0 = row * ctb;
         let y1 = ((row + 1) * ctb).min(pic.height);
-        let upto = if row + 1 == self.work.rows.len() {
+        let upto = if row + 1 == self.work.count {
             usize::MAX
         } else {
             y1

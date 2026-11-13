@@ -213,8 +213,6 @@ fn filter<const T: usize, P: Pixel>(
     } = block;
     let (w, h) = (w.min(64), h.min(64));
     let half = (T / 2 - 1) as isize;
-    let shift1 = bit_depth.saturating_sub(8).min(4);
-    let shift3 = 14u32.saturating_sub(bit_depth).max(2);
     let sw = w + T - 1;
     let sh = h + T - 1;
     let (pw, ph) = (plane.width as isize, plane.height as isize);
@@ -256,7 +254,35 @@ fn filter<const T: usize, P: Pixel>(
             return;
         }
     }
-    let src = &src[base..];
+    scalar::<T, P>(
+        &src[base..],
+        stride,
+        bit_depth,
+        [cx, cy],
+        (fx, fy),
+        (w, h),
+        out,
+        tmp,
+    );
+}
+
+/// The interpolation without the vector kernels: deeper samples, or a CPU
+/// without them. Out of line, so the hot path stays small.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn scalar<const T: usize, P: Pixel>(
+    src: &[P],
+    stride: usize,
+    bit_depth: u32,
+    [cx, cy]: [[i16; T]; 2],
+    (fx, fy): (usize, usize),
+    (w, h): (usize, usize),
+    out: &mut [i16],
+    tmp: &mut [i16],
+) {
+    let shift1 = bit_depth.saturating_sub(8).min(4);
+    let shift3 = 14u32.saturating_sub(bit_depth).max(2);
     // Eight-bit samples times the taps fit 16 bits (at most 88 · 255).
     let k = Kernel {
         c: [cx, cy],

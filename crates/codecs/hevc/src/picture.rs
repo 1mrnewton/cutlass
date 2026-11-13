@@ -266,21 +266,41 @@ impl Sao {
 /// row workers and the loop filters each lock only the rows they touch,
 /// and the bottom line of every CTB row as reconstruction left it, before
 /// the loop filters, for intra prediction of the row below.
+///
+/// When CTB rows are reconstructed one after another, a few buffers serve
+/// every row in turn ([`RING`]): a row's buffer is free again once its
+/// final samples are out, and the few in use stay in cache.
 pub struct Work<P> {
     pub rows: Vec<Mutex<[Vec<P>; 3]>>,
     pub lines: Vec<Mutex<[Vec<P>; 3]>>,
     pub width: usize,
     pub height: usize,
     pub log2_ctb: u32,
+    /// CTB rows of the picture.
+    pub count: usize,
 }
 
+/// Row buffers of a picture reconstructed one CTB row after another.
+/// Row `r` starts once row `r - 1` is reconstructed, when the filters have
+/// given the final samples of rows up to `r - 3`; the filters of row
+/// `r - 2` then read rows `r - 3` to `r - 1`, so four buffers suffice.
+pub const RING: usize = 4;
+
 impl<P: Pixel> Work<P> {
-    pub fn new(width: usize, height: usize, log2_ctb: u32) -> Self {
+    /// Buffers for a picture of `width`×`height` with CTBs of `1 <<
+    /// log2_ctb`: [`RING`] of them when `ring`, else one for each CTB row.
+    pub fn new(width: usize, height: usize, log2_ctb: u32, ring: bool) -> Self {
         let ctb = 1usize << log2_ctb;
         let count = height.div_ceil(ctb);
-        let rows = (0..count)
+        let slots = Self::slots(count, ring);
+        let rows = (0..slots)
             .map(|r| {
-                let lines = ctb.min(height - r * ctb);
+                // Without the ring, the last row holds only its lines.
+                let lines = if slots < count {
+                    ctb
+                } else {
+                    ctb.min(height - r * ctb)
+                };
                 Mutex::new([
                     vec![P::default(); lines * width],
                     vec![P::default(); lines / 2 * (width / 2)],
@@ -288,7 +308,7 @@ impl<P: Pixel> Work<P> {
                 ])
             })
             .collect();
-        let lines = (0..count)
+        let lines = (0..slots)
             .map(|_| {
                 Mutex::new([
                     vec![P::default(); width],
@@ -303,18 +323,38 @@ impl<P: Pixel> Work<P> {
             width,
             height,
             log2_ctb,
+            count,
         }
     }
 
+    fn slots(count: usize, ring: bool) -> usize {
+        if ring { count.min(RING) } else { count }
+    }
+
     /// Whether these buffers fit a picture of this size and CTB.
-    pub fn fits(&self, width: usize, height: usize, log2_ctb: u32) -> bool {
-        self.width == width && self.height == height && self.log2_ctb == log2_ctb
+    pub fn fits(&self, width: usize, height: usize, log2_ctb: u32, ring: bool) -> bool {
+        self.width == width
+            && self.height == height
+            && self.log2_ctb == log2_ctb
+            && self.rows.len() == Self::slots(self.count, ring)
+    }
+
+    /// The buffer of CTB row `row`.
+    #[inline]
+    pub fn slot(&self, row: usize) -> usize {
+        row % self.rows.len().max(1)
+    }
+
+    /// Luma lines of CTB row `row`.
+    pub fn lines_of(&self, row: usize) -> usize {
+        let ctb = 1usize << self.log2_ctb;
+        ctb.min(self.height.saturating_sub(row * ctb))
     }
 
     /// The samples of CTB row `row`, locked.
     pub fn band(&self, row: usize) -> Samples<'_, P> {
         Samples {
-            band: lock(&self.rows[row]),
+            band: lock(&self.rows[self.slot(row)]),
             top: row << self.log2_ctb,
             width: self.width,
             work: self,
@@ -376,7 +416,7 @@ impl<P: Pixel> Samples<'_, P> {
         match self
             .row()
             .checked_sub(1)
-            .and_then(|r| self.work.lines.get(r))
+            .and_then(|r| self.work.lines.get(self.work.slot(r)))
         {
             Some(line) => {
                 let line = lock(line);
@@ -389,7 +429,7 @@ impl<P: Pixel> Samples<'_, P> {
     /// Save the bottom line of the CTB at luma (`x`, `y`), `size` wide, for
     /// the row below.
     pub fn publish(&self, x: usize, y: usize, size: usize, height: usize) {
-        let Some(line) = self.work.lines.get(y >> self.work.log2_ctb) else {
+        let Some(line) = self.work.lines.get(self.work.slot(y >> self.work.log2_ctb)) else {
             return;
         };
         let bottom = (y + size).min(height) - 1;

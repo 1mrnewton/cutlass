@@ -245,7 +245,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let same_region = |nx: isize, ny: isize| -> bool {
             (x >> level) == (nx >> level) && (y >> level) == (ny >> level)
         };
-        let mut list: Vec<MvField> = Vec::with_capacity(5);
+        let mut list: Short<MvField, 5> = Short::default();
         let get = |nx: isize, ny: isize| -> Option<MvField> {
             if same_region(nx, ny) || !self.pb_available(pb, nx, ny) {
                 None
@@ -295,8 +295,8 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let header = &self.pic.slices[self.slice].header;
         let max = usize::from(header.max_merge_cand);
         let is_b = header.slice_type == SliceType::B;
-        if merge_idx < list.len() {
-            return Ok(self.restrict(list[merge_idx], orig));
+        if let Some(field) = list.get(merge_idx) {
+            return Ok(self.restrict(field, orig));
         }
         if list.len() < max && header.temporal_mvp {
             let l0 = self.temporal(pb, 0, 0);
@@ -341,8 +341,9 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                 if list.len() >= max {
                     break;
                 }
-                let c0 = list[i0];
-                let c1 = list[i1];
+                let (Some(c0), Some(c1)) = (list.get(i0), list.get(i1)) else {
+                    break;
+                };
                 if c0.uses(0) && c1.uses(1) {
                     let p0 = slice.refs[0].get(c0.ref_idx[0] as usize).map(|r| r.uid);
                     let p1 = slice.refs[1].get(c1.ref_idx[1] as usize).map(|r| r.uid);
@@ -371,7 +372,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             });
             zero += 1;
         }
-        let Some(&chosen) = list.get(merge_idx) else {
+        let Some(chosen) = list.get(merge_idx) else {
             return Err(malformed("merge_idx"));
         };
         Ok(self.restrict(chosen, orig))
@@ -510,7 +511,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         if !is_scaled {
             mv_b = b.iter().flatten().find_map(&scaled);
         }
-        let mut candidates: Vec<Mv> = Vec::with_capacity(3);
+        let mut candidates: Short<Mv, 3> = Short::default();
         if let Some(a) = mv_a {
             candidates.push(a);
         }
@@ -527,7 +528,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         while candidates.len() < 2 {
             candidates.push(Mv::default());
         }
-        Ok(candidates[mvp_flag])
+        Ok(candidates.get(mvp_flag).unwrap_or_default())
     }
 
     /// Predict one block from its references into the picture.
@@ -749,5 +750,38 @@ mod tests {
         let mv = Mv { x: 8, y: -8 };
         assert_eq!(scale(mv, 1, 2), Mv { x: 16, y: -16 });
         assert_eq!(scale(mv, 2, -2), Mv { x: -8, y: 8 });
+    }
+}
+
+/// A list of at most `N` values, kept on the stack.
+struct Short<T, const N: usize> {
+    items: [T; N],
+    len: usize,
+}
+
+impl<T: Copy + Default, const N: usize> Default for Short<T, N> {
+    fn default() -> Self {
+        Self {
+            items: [T::default(); N],
+            len: 0,
+        }
+    }
+}
+
+impl<T: Copy, const N: usize> Short<T, N> {
+    /// Add `value`; past `N` values it is dropped.
+    fn push(&mut self, value: T) {
+        if let Some(slot) = self.items.get_mut(self.len) {
+            *slot = value;
+            self.len += 1;
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn get(&self, i: usize) -> Option<T> {
+        self.items.get(..self.len)?.get(i).copied()
     }
 }

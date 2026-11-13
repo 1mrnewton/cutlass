@@ -35,21 +35,21 @@ pub struct Taps {
 
 impl Src<'_> {
     /// Whether every load of a `w`×`h` block stays inside `src`: the
-    /// kernels read `w + 16` samples of each of `h + taps - 1` rows.
+    /// kernels read `w + 24` samples of each of `h + taps - 1` rows.
     fn holds(&self, w: usize, h: usize, taps: usize) -> bool {
         self.at
-            .checked_add((h + taps - 2) * self.stride + w + 16)
+            .checked_add((h + taps - 2) * self.stride + w + 24)
             .is_some_and(|end| end <= self.src.len())
     }
 }
 
-/// Scratch rows the kernels keep between blocks: one vector for each row
+/// Scratch rows the kernels keep between blocks: four vectors for each row
 /// of a block's window, made on first use, where vector instructions may
 /// run.
 #[derive(Default)]
 pub struct Tmp {
     #[cfg(target_arch = "x86_64")]
-    rows: Vec<core::arch::x86_64::__m256i>,
+    rows: Vec<avx2::Strips>,
 }
 
 /// Whether the kernels of this module run on this CPU.

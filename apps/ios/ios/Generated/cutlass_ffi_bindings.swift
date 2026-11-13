@@ -753,9 +753,10 @@ public protocol EditorProtocol: AnyObject, Sendable {
     
     /**
      * Put a freehand stroke through `trace` at `at_us` as a smooth line on
-     * a sticker row. One undo step. Returns the clip's id.
+     * a sticker row, `color` (`#RRGGBB`) and `width` canvas pixels wide.
+     * One undo step. Returns the clip's id.
      */
-    func drawStroke(trace: [CanvasPoint], atUs: Int64) throws  -> String
+    func drawStroke(trace: [CanvasPoint], atUs: Int64, color: String, width: Double) throws  -> String
     
     /**
      * Put a copy of the clip right after it. Returns the copy.
@@ -1019,6 +1020,11 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func setVolume(clipId: String, volume: Double) throws 
     
     /**
+     * How a shape clip looks, or `None` when it is not a shape.
+     */
+    func shapeStyle(clipId: String) throws  -> ShapeStyle?
+    
+    /**
      * Cut a clip at `at_us`. Returns the right piece's id.
      */
     func split(clipId: String, atUs: Int64) throws  -> String
@@ -1051,6 +1057,13 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * The topmost picture clip under the canvas point `(x, y)` at `at_us`.
      */
     func stagePick(atUs: Int64, x: Double, y: Double) throws  -> String?
+    
+    /**
+     * Change how a shape looks. Changes made while `live` join one undo
+     * step, so a slider drag is one step; its last change passes `live`
+     * false, and so does a single tap.
+     */
+    func styleShape(clipId: String, change: ShapeStyleChange, live: Bool) throws 
     
     /**
      * Change how a title looks. Changes made while `live` join one undo
@@ -1440,15 +1453,18 @@ open func cuts()throws  -> [Cut]  {
     
     /**
      * Put a freehand stroke through `trace` at `at_us` as a smooth line on
-     * a sticker row. One undo step. Returns the clip's id.
+     * a sticker row, `color` (`#RRGGBB`) and `width` canvas pixels wide.
+     * One undo step. Returns the clip's id.
      */
-open func drawStroke(trace: [CanvasPoint], atUs: Int64)throws  -> String  {
+open func drawStroke(trace: [CanvasPoint], atUs: Int64, color: String, width: Double)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
         uniffiCallStatus in
     uniffi_cutlass_ffi_bindings_fn_method_editor_draw_stroke(
             self.uniffiCloneHandle(),
         FfiConverterSequenceTypeCanvasPoint.lower(trace),
-        FfiConverterInt64.lower(atUs),uniffiCallStatus
+        FfiConverterInt64.lower(atUs),
+        FfiConverterString.lower(color),
+        FfiConverterDouble.lower(width),uniffiCallStatus
     )
 })
 }
@@ -2097,6 +2113,19 @@ open func setVolume(clipId: String, volume: Double)throws   {try rustCallWithErr
 }
     
     /**
+     * How a shape clip looks, or `None` when it is not a shape.
+     */
+open func shapeStyle(clipId: String)throws  -> ShapeStyle?  {
+    return try  FfiConverterOptionTypeShapeStyle.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_shape_style(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Cut a clip at `at_us`. Returns the right piece's id.
      */
 open func split(clipId: String, atUs: Int64)throws  -> String  {
@@ -2181,6 +2210,22 @@ open func stagePick(atUs: Int64, x: Double, y: Double)throws  -> String?  {
         FfiConverterDouble.lower(y),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Change how a shape looks. Changes made while `live` join one undo
+     * step, so a slider drag is one step; its last change passes `live`
+     * false, and so does a single tap.
+     */
+open func styleShape(clipId: String, change: ShapeStyleChange, live: Bool)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_style_shape(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterTypeShapeStyleChange_lower(change),
+        FfiConverterBool.lower(live),uniffiCallStatus
+    )
+}
 }
     
     /**
@@ -4335,6 +4380,233 @@ public func FfiConverterTypeShapeChoice_lower(_ value: ShapeChoice) -> RustBuffe
 
 
 /**
+ * How a shape looks. Widths, corners and distances are canvas pixels;
+ * opacities 0 to 1; colors `#RRGGBB`.
+ */
+public struct ShapeStyle: Equatable, Hashable {
+    /**
+     * An open line: it has no fill and no corners.
+     */
+    public var line: Bool
+    /**
+     * Empty when it has no fill.
+     */
+    public var fill: String
+    public var fillOpacity: Double
+    /**
+     * The outline is off while its width is 0.
+     */
+    public var stroke: String
+    public var strokeWidth: Double
+    public var strokeOpacity: Double
+    /**
+     * Solid (0), dashed (1) or dotted (2).
+     */
+    public var strokeStyle: Int32
+    public var corners: Double
+    public var cornersMax: Double
+    /**
+     * The shadow is off while its opacity is 0.
+     */
+    public var shadow: String
+    public var shadowOpacity: Double
+    public var shadowDistance: Double
+    /**
+     * Degrees.
+     */
+    public var shadowAngle: Double
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * An open line: it has no fill and no corners.
+         */line: Bool, 
+        /**
+         * Empty when it has no fill.
+         */fill: String, fillOpacity: Double, 
+        /**
+         * The outline is off while its width is 0.
+         */stroke: String, strokeWidth: Double, strokeOpacity: Double, 
+        /**
+         * Solid (0), dashed (1) or dotted (2).
+         */strokeStyle: Int32, corners: Double, cornersMax: Double, 
+        /**
+         * The shadow is off while its opacity is 0.
+         */shadow: String, shadowOpacity: Double, shadowDistance: Double, 
+        /**
+         * Degrees.
+         */shadowAngle: Double) {
+        self.line = line
+        self.fill = fill
+        self.fillOpacity = fillOpacity
+        self.stroke = stroke
+        self.strokeWidth = strokeWidth
+        self.strokeOpacity = strokeOpacity
+        self.strokeStyle = strokeStyle
+        self.corners = corners
+        self.cornersMax = cornersMax
+        self.shadow = shadow
+        self.shadowOpacity = shadowOpacity
+        self.shadowDistance = shadowDistance
+        self.shadowAngle = shadowAngle
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ShapeStyle: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeShapeStyle: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ShapeStyle {
+        return
+            try ShapeStyle(
+                line: FfiConverterBool.read(from: &buf), 
+                fill: FfiConverterString.read(from: &buf), 
+                fillOpacity: FfiConverterDouble.read(from: &buf), 
+                stroke: FfiConverterString.read(from: &buf), 
+                strokeWidth: FfiConverterDouble.read(from: &buf), 
+                strokeOpacity: FfiConverterDouble.read(from: &buf), 
+                strokeStyle: FfiConverterInt32.read(from: &buf), 
+                corners: FfiConverterDouble.read(from: &buf), 
+                cornersMax: FfiConverterDouble.read(from: &buf), 
+                shadow: FfiConverterString.read(from: &buf), 
+                shadowOpacity: FfiConverterDouble.read(from: &buf), 
+                shadowDistance: FfiConverterDouble.read(from: &buf), 
+                shadowAngle: FfiConverterDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ShapeStyle, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.line, into: &buf)
+        FfiConverterString.write(value.fill, into: &buf)
+        FfiConverterDouble.write(value.fillOpacity, into: &buf)
+        FfiConverterString.write(value.stroke, into: &buf)
+        FfiConverterDouble.write(value.strokeWidth, into: &buf)
+        FfiConverterDouble.write(value.strokeOpacity, into: &buf)
+        FfiConverterInt32.write(value.strokeStyle, into: &buf)
+        FfiConverterDouble.write(value.corners, into: &buf)
+        FfiConverterDouble.write(value.cornersMax, into: &buf)
+        FfiConverterString.write(value.shadow, into: &buf)
+        FfiConverterDouble.write(value.shadowOpacity, into: &buf)
+        FfiConverterDouble.write(value.shadowDistance, into: &buf)
+        FfiConverterDouble.write(value.shadowAngle, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeShapeStyle_lift(_ buf: RustBuffer) throws -> ShapeStyle {
+    return try FfiConverterTypeShapeStyle.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeShapeStyle_lower(_ value: ShapeStyle) -> RustBuffer {
+    return FfiConverterTypeShapeStyle.lower(value)
+}
+
+
+/**
+ * The shape panel's slider ends and where a part starts when switched on.
+ */
+public struct ShapeStyleRanges: Equatable, Hashable {
+    public var fillStart: String
+    public var strokeMax: Double
+    public var strokeStart: Double
+    public var shadowDistanceMax: Double
+    public var shadowDistanceStart: Double
+    public var shadowAngleStart: Double
+    public var shadowOpacityStart: Double
+    public var penMin: Double
+    public var penMax: Double
+    public var penStart: Double
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(fillStart: String, strokeMax: Double, strokeStart: Double, shadowDistanceMax: Double, shadowDistanceStart: Double, shadowAngleStart: Double, shadowOpacityStart: Double, penMin: Double, penMax: Double, penStart: Double) {
+        self.fillStart = fillStart
+        self.strokeMax = strokeMax
+        self.strokeStart = strokeStart
+        self.shadowDistanceMax = shadowDistanceMax
+        self.shadowDistanceStart = shadowDistanceStart
+        self.shadowAngleStart = shadowAngleStart
+        self.shadowOpacityStart = shadowOpacityStart
+        self.penMin = penMin
+        self.penMax = penMax
+        self.penStart = penStart
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ShapeStyleRanges: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeShapeStyleRanges: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ShapeStyleRanges {
+        return
+            try ShapeStyleRanges(
+                fillStart: FfiConverterString.read(from: &buf), 
+                strokeMax: FfiConverterDouble.read(from: &buf), 
+                strokeStart: FfiConverterDouble.read(from: &buf), 
+                shadowDistanceMax: FfiConverterDouble.read(from: &buf), 
+                shadowDistanceStart: FfiConverterDouble.read(from: &buf), 
+                shadowAngleStart: FfiConverterDouble.read(from: &buf), 
+                shadowOpacityStart: FfiConverterDouble.read(from: &buf), 
+                penMin: FfiConverterDouble.read(from: &buf), 
+                penMax: FfiConverterDouble.read(from: &buf), 
+                penStart: FfiConverterDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ShapeStyleRanges, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.fillStart, into: &buf)
+        FfiConverterDouble.write(value.strokeMax, into: &buf)
+        FfiConverterDouble.write(value.strokeStart, into: &buf)
+        FfiConverterDouble.write(value.shadowDistanceMax, into: &buf)
+        FfiConverterDouble.write(value.shadowDistanceStart, into: &buf)
+        FfiConverterDouble.write(value.shadowAngleStart, into: &buf)
+        FfiConverterDouble.write(value.shadowOpacityStart, into: &buf)
+        FfiConverterDouble.write(value.penMin, into: &buf)
+        FfiConverterDouble.write(value.penMax, into: &buf)
+        FfiConverterDouble.write(value.penStart, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeShapeStyleRanges_lift(_ buf: RustBuffer) throws -> ShapeStyleRanges {
+    return try FfiConverterTypeShapeStyleRanges.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeShapeStyleRanges_lower(_ value: ShapeStyleRanges) -> RustBuffer {
+    return FfiConverterTypeShapeStyleRanges.lower(value)
+}
+
+
+/**
  * A picture clip's box on the canvas, in canvas pixels with y down. The
  * guides say the clip's centre sits on a canvas centre line.
  */
@@ -5526,6 +5798,117 @@ public func FfiConverterTypeLaneKind_lower(_ value: LaneKind) -> RustBuffer {
 
 
 /**
+ * One change to a shape's look. See [`ShapeStyle`] for the units.
+ */
+
+public enum ShapeStyleChange: Equatable, Hashable {
+    
+    /**
+     * An empty color takes the fill off.
+     */
+    case fill(color: String, opacity: Double
+    )
+    /**
+     * A width of 0 takes the outline off.
+     */
+    case stroke(color: String, width: Double, opacity: Double, style: Int32
+    )
+    case corners(radius: Double
+    )
+    /**
+     * An opacity of 0 takes the shadow off.
+     */
+    case shadow(color: String, distance: Double, angle: Double, opacity: Double
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ShapeStyleChange: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeShapeStyleChange: FfiConverterRustBuffer {
+    typealias SwiftType = ShapeStyleChange
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ShapeStyleChange {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .fill(color: try FfiConverterString.read(from: &buf), opacity: try FfiConverterDouble.read(from: &buf)
+        )
+        
+        case 2: return .stroke(color: try FfiConverterString.read(from: &buf), width: try FfiConverterDouble.read(from: &buf), opacity: try FfiConverterDouble.read(from: &buf), style: try FfiConverterInt32.read(from: &buf)
+        )
+        
+        case 3: return .corners(radius: try FfiConverterDouble.read(from: &buf)
+        )
+        
+        case 4: return .shadow(color: try FfiConverterString.read(from: &buf), distance: try FfiConverterDouble.read(from: &buf), angle: try FfiConverterDouble.read(from: &buf), opacity: try FfiConverterDouble.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ShapeStyleChange, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .fill(color,opacity):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(color, into: &buf)
+            FfiConverterDouble.write(opacity, into: &buf)
+            
+        
+        case let .stroke(color,width,opacity,style):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(color, into: &buf)
+            FfiConverterDouble.write(width, into: &buf)
+            FfiConverterDouble.write(opacity, into: &buf)
+            FfiConverterInt32.write(style, into: &buf)
+            
+        
+        case let .corners(radius):
+            writeInt(&buf, Int32(3))
+            FfiConverterDouble.write(radius, into: &buf)
+            
+        
+        case let .shadow(color,distance,angle,opacity):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(color, into: &buf)
+            FfiConverterDouble.write(distance, into: &buf)
+            FfiConverterDouble.write(angle, into: &buf)
+            FfiConverterDouble.write(opacity, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeShapeStyleChange_lift(_ buf: RustBuffer) throws -> ShapeStyleChange {
+    return try FfiConverterTypeShapeStyleChange.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeShapeStyleChange_lower(_ value: ShapeStyleChange) -> RustBuffer {
+    return FfiConverterTypeShapeStyleChange.lower(value)
+}
+
+
+
+/**
  * One change to a title's look. See [`TextStyle`] for the units.
  */
 
@@ -5703,6 +6086,7 @@ public enum ToolBar: Equatable, Hashable {
     case filterClip
     case adjustClip
     case otherClip
+    case shapeClip
     case audio
     case text
     case effects
@@ -5744,13 +6128,15 @@ public struct FfiConverterTypeToolBar: FfiConverterRustBuffer {
         
         case 8: return .otherClip
         
-        case 9: return .audio
+        case 9: return .shapeClip
         
-        case 10: return .text
+        case 10: return .audio
         
-        case 11: return .effects
+        case 11: return .text
         
-        case 12: return .overlay
+        case 12: return .effects
+        
+        case 13: return .overlay
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -5792,20 +6178,24 @@ public struct FfiConverterTypeToolBar: FfiConverterRustBuffer {
             writeInt(&buf, Int32(8))
         
         
-        case .audio:
+        case .shapeClip:
             writeInt(&buf, Int32(9))
         
         
-        case .text:
+        case .audio:
             writeInt(&buf, Int32(10))
         
         
-        case .effects:
+        case .text:
             writeInt(&buf, Int32(11))
         
         
-        case .overlay:
+        case .effects:
             writeInt(&buf, Int32(12))
+        
+        
+        case .overlay:
+            writeInt(&buf, Int32(13))
         
         }
     }
@@ -5870,6 +6260,7 @@ public enum ToolKind: Equatable, Hashable {
     case editText
     case draw
     case videoEffects
+    case shapeStyle
 
 
 
@@ -5962,6 +6353,8 @@ public struct FfiConverterTypeToolKind: FfiConverterRustBuffer {
         case 35: return .draw
         
         case 36: return .videoEffects
+        
+        case 37: return .shapeStyle
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -6113,6 +6506,10 @@ public struct FfiConverterTypeToolKind: FfiConverterRustBuffer {
         
         case .videoEffects:
             writeInt(&buf, Int32(36))
+        
+        
+        case .shapeStyle:
+            writeInt(&buf, Int32(37))
         
         }
     }
@@ -6273,6 +6670,30 @@ fileprivate struct FfiConverterOptionTypeKeyframes: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeKeyframes.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeShapeStyle: FfiConverterRustBuffer {
+    typealias SwiftType = ShapeStyle?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeShapeStyle.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeShapeStyle.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -7268,6 +7689,16 @@ public func shapeChoices() -> [ShapeChoice]  {
 })
 }
 /**
+ * See [`ShapeStyleRanges`].
+ */
+public func shapeStyleRanges() -> ShapeStyleRanges  {
+    return try!  FfiConverterTypeShapeStyleRanges_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_shape_style_ranges(uniffiCallStatus
+    )
+})
+}
+/**
  * The speed at scale `position`, 0 to 1. The marks 0.1, 1, 2, 5, 10 and
  * 100 sit the same distance apart.
  */
@@ -7484,6 +7915,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_func_shape_choices() != 6033) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_shape_style_ranges() != 33721) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_func_speed_at() != 24871) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -7568,7 +8002,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_cuts() != 46999) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_draw_stroke() != 20359) {
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_draw_stroke() != 40878) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_duplicate() != 16850) {
@@ -7715,6 +8149,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_volume() != 9150) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_shape_style() != 58512) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_split() != 36702) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -7731,6 +8168,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_pick() != 22121) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_style_shape() != 51484) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_style_text() != 8659) {

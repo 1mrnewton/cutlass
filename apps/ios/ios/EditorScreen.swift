@@ -32,7 +32,7 @@ struct EditorScreen: View {
         case volume, speed, effects, ratio, background, graphs, animations
         case crop, opacity, fade
         case filters, adjust, clipEffects
-        case stickers, draw, transitions
+        case stickers, draw, transitions, shapeStyle
         /// Add text, or change the text clip with this id.
         case text(String?)
     }
@@ -121,6 +121,7 @@ struct EditorScreen: View {
             ]
             if id == nil, let open = panel, !stays.contains(open) { panel = nil }
             if id != nil, panel == .transitions { panel = nil }
+            if panel == .shapeStyle, id.flatMap(model.shapeStyle(of:)) == nil { panel = nil }
         }
         .onChange(of: panel) { _, open in
             if open != .transitions { model.selectedCut = nil }
@@ -267,7 +268,12 @@ struct EditorScreen: View {
             StickersPanel(model: model) { self.panel = nil }
                 .transition(.move(edge: .bottom))
         } else if panel == .draw {
-            DrawPanel { self.panel = nil }
+            DrawPanel(model: model) { self.panel = nil }
+                .transition(.move(edge: .bottom))
+        } else if panel == .shapeStyle, let clip = model.selectedClip,
+                  model.shapeStyle(of: clip) != nil {
+            ShapeStylePanel(model: model, clip: clip) { self.panel = nil }
+                .id(clip)
                 .transition(.move(edge: .bottom))
         } else if panel == .transitions, model.cut != nil {
             TransitionsPanel(model: model) { self.panel = nil }
@@ -285,7 +291,8 @@ struct EditorScreen: View {
                 case .opacity: OpacityPanel(model: model) { self.panel = nil }
                 case .fade: FadePanel(model: model, clip: clip) { self.panel = nil }
                 case .text, .effects, .ratio, .background, .graphs, .animations,
-                     .filters, .adjust, .clipEffects, .stickers, .draw, .transitions: EmptyView()
+                     .filters, .adjust, .clipEffects, .stickers, .draw, .transitions, .shapeStyle:
+                    EmptyView()
                 }
             }
             .transition(.move(edge: .bottom))
@@ -354,6 +361,7 @@ struct EditorScreen: View {
             model.selectedClip = nil
             panel = .draw
         case .captions: pickingCaptions = true
+        case .shapeStyle: panel = .shapeStyle
         case .replace:
             if model.selectionBar == .audioClip { pickingReplaceSound = true } else { pickingReplace = true }
         default: model.say("\(tool.label) is coming soon")

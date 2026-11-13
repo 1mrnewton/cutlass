@@ -612,11 +612,28 @@ final class EditorModel {
         edit { selectedClip = try $0.addShape(shapeId: id, atUs: at) }
     }
 
-    /// Put a finger's stroke, in canvas pixels, at the playhead.
+    /// The pen's color, `#RRGGBB`, and weight in canvas pixels.
+    var penColor = "#FFFFFF"
+    var penWidth = shapeStyleRanges().penStart
+
+    /// Put a finger's stroke, in canvas pixels, at the playhead, in the
+    /// pen's color and weight.
     func drawStroke(_ points: [CGPoint]) {
         let at = playheadUs
         let trace = points.map { CanvasPoint(x: $0.x, y: $0.y) }
-        edit { _ = try $0.drawStroke(trace: trace, atUs: at) }
+        let (color, width) = (penColor, penWidth)
+        edit { _ = try $0.drawStroke(trace: trace, atUs: at, color: color, width: width) }
+    }
+
+    /// How `clip` looks, or nil when it is not a shape.
+    func shapeStyle(of clip: String) -> ShapeStyle? {
+        (try? editor?.shapeStyle(clipId: clip)) ?? nil
+    }
+
+    /// Change how shape `clip` looks. Changes while `live` join one undo
+    /// step and are saved when the last one, not live, arrives.
+    func styleShape(_ clip: String, _ change: ShapeStyleChange, live: Bool) {
+        edit(save: !live) { try $0.styleShape(clipId: clip, change: change, live: live) }
     }
 
     /// A sticker's shelf tile, drawn once off the main thread.

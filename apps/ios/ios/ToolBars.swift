@@ -94,6 +94,7 @@ extension ToolKind {
         case .editText: "editText"
         case .draw: "draw"
         case .videoEffects: "plugin"
+        case .shapeStyle: "shapes"
         }
     }
 }

@@ -137,17 +137,47 @@ private struct ShapeTile: View {
 }
 
 /// Draw: each finger stroke on the preview becomes a smooth line at the
-/// playhead, one undo step each. The panel only says how and closes.
+/// playhead, one undo step each, in the pen's color and weight chosen here.
 struct DrawPanel: View {
+    @Bindable var model: EditorModel
     let close: () -> Void
+
+    private static let colors = textColors()
+    private static let ranges = shapeStyleRanges()
 
     var body: some View {
         PanelFrame(title: "Draw", close: close) {
-            Text("Draw on the picture with one finger. Each stroke is its own layer.")
-                .font(.footnote)
-                .foregroundStyle(.white.opacity(0.7))
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: .infinity)
+            VStack(alignment: .leading, spacing: 10) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(Self.colors, id: \.self) { color in
+                            SwatchTile(
+                                color: color,
+                                chosen: color.caseInsensitiveCompare(model.penColor) == .orderedSame,
+                                size: 36
+                            ) { model.penColor = color }
+                        }
+                    }
+                    .padding(4)
+                }
+                HStack(spacing: 12) {
+                    Text("Width")
+                        .font(.footnote)
+                        .foregroundStyle(.white.opacity(0.75))
+                        .frame(width: 72, alignment: .leading)
+                    Slider(value: $model.penWidth, in: Self.ranges.penMin...Self.ranges.penMax)
+                        .tint(Palette.accent)
+                        .accessibilityLabel("Pen width")
+                    Circle()
+                        .fill(Color(hex: model.penColor))
+                        .frame(width: min(model.penWidth, 28), height: min(model.penWidth, 28))
+                        .frame(width: 36)
+                }
+                Text("Draw on the picture with one finger. Each stroke is its own layer.")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.6))
+                    .frame(maxWidth: .infinity)
+            }
         }
     }
 }
@@ -173,7 +203,10 @@ struct DrawOverlay: View {
                     path.move(to: first)
                     stroke.dropFirst().forEach { path.addLine(to: $0) }
                 }
-                .stroke(.white, style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
+                .stroke(
+                    Color(hex: model.penColor),
+                    style: StrokeStyle(
+                        lineWidth: max(model.penWidth * scale, 1), lineCap: .round, lineJoin: .round))
                 .shadow(color: .black.opacity(0.4), radius: 1)
             }
             .gesture(

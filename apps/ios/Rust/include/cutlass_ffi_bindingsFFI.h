@@ -356,7 +356,7 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_cuts(uint64_t ptr, RustC
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_DRAW_STROKE
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_DRAW_STROKE
-RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_draw_stroke(uint64_t ptr, RustBuffer trace, int64_t at_us, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_draw_stroke(uint64_t ptr, RustBuffer trace, int64_t at_us, RustBuffer color, double width, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_DUPLICATE
@@ -599,6 +599,11 @@ void uniffi_cutlass_ffi_bindings_fn_method_editor_set_transition_length(uint64_t
 void uniffi_cutlass_ffi_bindings_fn_method_editor_set_volume(uint64_t ptr, RustBuffer clip_id, double volume, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SHAPE_STYLE
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SHAPE_STYLE
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_shape_style(uint64_t ptr, RustBuffer clip_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SPLIT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SPLIT
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_split(uint64_t ptr, RustBuffer clip_id, int64_t at_us, RustCallStatus *_Nonnull out_status
@@ -627,6 +632,11 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_stage_move(uint64_t ptr,
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STAGE_PICK
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STAGE_PICK
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_stage_pick(uint64_t ptr, int64_t at_us, double x, double y, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STYLE_SHAPE
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STYLE_SHAPE
+void uniffi_cutlass_ffi_bindings_fn_method_editor_style_shape(uint64_t ptr, RustBuffer clip_id, RustBuffer change, int8_t live, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STYLE_TEXT
@@ -848,6 +858,12 @@ void uniffi_cutlass_ffi_bindings_fn_func_rename_project(RustBuffer root, RustBuf
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_SHAPE_CHOICES
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_SHAPE_CHOICES
 RustBuffer uniffi_cutlass_ffi_bindings_fn_func_shape_choices(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_SHAPE_STYLE_RANGES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_SHAPE_STYLE_RANGES
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_shape_style_ranges(RustCallStatus *_Nonnull out_status
     
 );
 #endif
@@ -1305,6 +1321,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_func_rename_project(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_SHAPE_CHOICES
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_SHAPE_CHOICES
 uint16_t uniffi_cutlass_ffi_bindings_checksum_func_shape_choices(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_SHAPE_STYLE_RANGES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_SHAPE_STYLE_RANGES
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_shape_style_ranges(void
     
 );
 #endif
@@ -1770,6 +1792,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_set_volume(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SHAPE_STYLE
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SHAPE_STYLE
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_shape_style(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SPLIT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SPLIT
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_split(void
@@ -1803,6 +1831,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_move(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_STAGE_PICK
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_STAGE_PICK
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_pick(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_STYLE_SHAPE
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_STYLE_SHAPE
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_style_shape(void
     
 );
 #endif

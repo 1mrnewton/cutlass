@@ -407,7 +407,7 @@ private func percent(_ fraction: Double) -> String {
 /// A labelled slider that reports each move as live and the release as
 /// final, so a drag is one undo step. Between drags it follows the title,
 /// so an undo moves it back.
-private struct StyleSlider: View {
+struct StyleSlider: View {
     let label: String
     let current: Double
     let range: ClosedRange<Double>

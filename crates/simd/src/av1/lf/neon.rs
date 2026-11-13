@@ -372,17 +372,19 @@ pub(super) fn rows_in_place(
     lim: Limits,
 ) -> bool {
     let (lo, hi) = size.reads();
-    let top = at - 7 * stride;
+    // Line `k` is `k - 7` rows from `at`; a filter near the top of the
+    // picture reads none of the lines above it that are missing.
+    let row = |k: usize| at + k * stride - 7 * stride;
     let mut v = [vdupq_n_u8(0); 14];
     for (k, vk) in v.iter_mut().enumerate().take(hi).skip(lo) {
-        *vk = u8x16(at16(buf, top + k * stride));
+        *vk = u8x16(at16(buf, row(k)));
     }
     if !filter_size(&mut v, size, lim) {
         return false;
     }
     let (lo, hi) = size.writes();
     for (k, &vk) in v.iter().enumerate().take(hi).skip(lo) {
-        let o = top + k * stride;
+        let o = row(k);
         buf[o..o + 16].copy_from_slice(&bytes(vk));
     }
     true

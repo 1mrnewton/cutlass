@@ -1077,6 +1077,78 @@ mod tests {
         assert_eq!(sound.pcm.rate, 48_000);
     }
 
+    /// The first picture of an AV1 file from `crates/codecs/av1/tests/mp4`,
+    /// decoded by the Rust decoder: its coded format and its RGBA.
+    fn av1_software_picture(name: &str) -> (cutlass_decode::PixelFormat, (u32, u32), Vec<u8>) {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/codecs/av1/tests/mp4")
+            .join(name);
+        let software = cutlass_settings::Hardware {
+            decode: false,
+            encode: false,
+            ..cutlass_settings::Hardware::default()
+        };
+        let readers = super::readers_with(crate::register_codecs_with(&software).0);
+        let mut media = readers.open(&path).expect(name);
+        let held = media
+            .decode_at(
+                cutlass_model::Micros(0),
+                &cutlass_model::TimeRange::new(0, 1_000_000),
+            )
+            .expect(name);
+        let cutlass_engine::DecodedFrame::Coded { pixel, .. } = &held.frame else {
+            panic!("{name}: not a coded picture");
+        };
+        let size = (held.frame.width(), held.frame.height());
+        let cutlass_picture::Picture::Cpu(bytes) =
+            cutlass_engine::decoded_picture(&held.frame).expect(name)
+        else {
+            panic!("{name}: not on the CPU");
+        };
+        (*pixel, size, bytes.into_rgba())
+    }
+
+    #[test]
+    fn av1_of_every_depth_and_chroma_layout_becomes_a_picture() {
+        use cutlass_decode::PixelFormat as P;
+        // aomenc and SVT-AV1 streams that FFmpeg copied into MP4: HDR10
+        // 10-bit, 4:4:4, 4:2:2 at 10 bits, 12-bit 4:2:0 and 4:4:4, and GBR.
+        for (name, pixel, size) in [
+            ("hdr10.mp4", P::Yuv420p10, (64, 64)),
+            ("yuv444.mp4", P::Yuv444p, (64, 64)),
+            ("yuv422-10.mp4", P::Yuv422p10, (64, 64)),
+            ("yuv420-12.mp4", P::Yuv420p12, (64, 64)),
+            ("yuv444-12.mp4", P::Yuv444p12, (64, 64)),
+            ("gbr.mp4", P::Gbrp, (128, 128)),
+        ] {
+            let (got, got_size, rgba) = av1_software_picture(name);
+            assert_eq!(got, pixel, "{name}");
+            assert_eq!(got_size, size, "{name}");
+            assert_eq!(rgba.len(), (size.0 * size.1 * 4) as usize, "{name}");
+            assert!(rgba.chunks(4).all(|p| p[3] == 255), "{name}");
+            // A picture, not one flat value.
+            assert!(rgba.chunks(4).any(|p| p[..3] != rgba[..3]), "{name}");
+        }
+    }
+
+    #[test]
+    fn av1_full_range_and_a_bt601_matrix_come_out_in_the_color_that_went_in() {
+        // SVT-AV1, a flat 0x4080C0: once full range with the BT.709 matrix
+        // (libdav1d decodes Y 119, U 167, V 92), once studio swing with the
+        // BT.601 matrix (Y 116, U 166, V 95). Read as studio swing BT.709,
+        // the first would come out near (55, 120, 197) and the second near
+        // (53, 123, 197).
+        for name in ["full709.mp4", "limited601.mp4"] {
+            let (pixel, size, rgba) = av1_software_picture(name);
+            assert_eq!(pixel, cutlass_decode::PixelFormat::Yuv420p);
+            assert_eq!(size, (64, 64));
+            for (channel, want) in [64i32, 128, 192].into_iter().enumerate() {
+                let got = i32::from(rgba[4 * (32 * 64 + 32) + channel]);
+                assert!((got - want).abs() <= 3, "{name} channel {channel}: {got}");
+            }
+        }
+    }
+
     #[test]
     fn a_fragmented_movie_without_sidx_or_mfra_decodes_the_picture_at_two_seconds() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

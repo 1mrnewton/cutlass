@@ -211,17 +211,34 @@ struct Shared {
     pics: Mutex<Vec<Picture>>,
     work8: Mutex<Vec<Work<u8>>>,
     work16: Mutex<Vec<Work<u16>>>,
+    /// Buffers the chroma of packed output is gathered in.
+    chroma: Mutex<Vec<Vec<u8>>>,
 }
 
 impl Shared {
     fn give8(&self, left: Leftovers<u8>) {
         put(&self.pics, left.pic);
         put(&self.work8, left.work);
+        self.give_chroma(left.chroma);
     }
 
     fn give16(&self, left: Leftovers<u16>) {
         put(&self.pics, left.pic);
         put(&self.work16, left.work);
+        self.give_chroma(left.chroma);
+    }
+
+    fn give_chroma(&self, chroma: Vec<Vec<u8>>) {
+        for buf in chroma {
+            put(&self.chroma, buf);
+        }
+    }
+
+    /// Two buffers for the chroma of a packed picture.
+    fn take_chroma(&self) -> Vec<Vec<u8>> {
+        let mut spare = lock(&self.chroma);
+        let n = spare.len().saturating_sub(2);
+        spare.split_off(n)
     }
 }
 
@@ -847,6 +864,11 @@ fn make_job<P: Pixel>(
         col,
         slices,
         output,
+        chroma: if output == Some(OutForm::Packed) {
+            shared.take_chroma()
+        } else {
+            Vec::new()
+        },
         row_threads,
         reference,
     }

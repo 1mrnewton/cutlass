@@ -50,6 +50,8 @@ pub struct Job<P> {
     pub slices: Vec<SliceData>,
     /// The output form, when the picture is output.
     pub output: Option<OutForm>,
+    /// Buffers for the chroma of packed output, to reuse.
+    pub chroma: Vec<Vec<u8>>,
     /// Threads for the rows of a wavefront slice segment.
     pub row_threads: usize,
     /// Whether a later picture may reference this one. When not, its final
@@ -61,6 +63,8 @@ pub struct Job<P> {
 pub struct Leftovers<P> {
     pub pic: Picture,
     pub work: Work<P>,
+    /// Buffers the packed output gathered chroma in, emptied.
+    pub chroma: Vec<Vec<u8>>,
 }
 
 impl<P: Pixel> Job<P> {
@@ -75,10 +79,11 @@ impl<P: Pixel> Job<P> {
             col,
             slices,
             output,
+            mut chroma,
             row_threads,
             reference,
         } = self;
-        let out = output.map(|form| OutRows::new(&pic.sps, form));
+        let out = output.map(|form| OutRows::new(&pic.sps, form, &mut chroma));
         // A picture no other references, of 8-bit samples and not cropped,
         // has its final rows written straight to the output.
         let direct = !reference
@@ -94,10 +99,10 @@ impl<P: Pixel> Job<P> {
             }
         }
         let (writer, out) = pipe.finish();
-        let out = out.map(OutRows::finish);
+        let out = out.map(|o| o.finish(&mut chroma));
         drop(writer);
         frame.finish(Done { result, out });
-        Leftovers { pic, work }
+        Leftovers { pic, work, chroma }
     }
 }
 
@@ -116,7 +121,8 @@ struct OutRows {
 }
 
 impl OutRows {
-    fn new(sps: &Sps, form: OutForm) -> Self {
+    /// `spare`: emptied buffers to gather the chroma of packed output in.
+    fn new(sps: &Sps, form: OutForm, spare: &mut Vec<Vec<u8>>) -> Self {
         let width = sps.width as usize;
         let height = sps.height as usize;
         let [left, right, top, bottom] = sps.crop.map(|v| v as usize);
@@ -131,11 +137,17 @@ impl OutRows {
         let size = |c: usize| crop[c].2 * crop[c].3;
         // Packed output gathers the chroma planes after luma: the luma
         // buffer is made large enough for all three.
+        let mut gather = |n: usize| {
+            let mut v = spare.pop().unwrap_or_default();
+            v.clear();
+            v.reserve(n);
+            v
+        };
         let eight = match form {
             OutForm::Packed => [
                 Vec::with_capacity(size(0) + size(1) + size(2)),
-                Vec::with_capacity(size(1)),
-                Vec::with_capacity(size(2)),
+                gather(size(1)),
+                gather(size(2)),
             ],
             OutForm::Planes => std::array::from_fn(|c| Vec::with_capacity(size(c))),
         };
@@ -200,8 +212,9 @@ impl OutRows {
         ])
     }
 
-    /// The samples; rows never published are zeros.
-    fn finish(mut self) -> OutSamples {
+    /// The samples; rows never published are zeros. The chroma buffers of
+    /// packed output go back to `spare`.
+    fn finish(mut self, spare: &mut Vec<Vec<u8>>) -> OutSamples {
         for c in 0..3 {
             let (_, _, w, h) = self.crop[c];
             self.eight[c].resize(w * h, 0);
@@ -214,6 +227,7 @@ impl OutRows {
                 let [mut bytes, cb, cr] = self.eight;
                 bytes.extend_from_slice(&cb);
                 bytes.extend_from_slice(&cr);
+                spare.extend([cb, cr]);
                 OutSamples::Packed(bytes)
             }
             OutForm::Planes => OutSamples::Planes {

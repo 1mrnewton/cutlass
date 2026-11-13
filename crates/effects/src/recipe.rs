@@ -1231,8 +1231,10 @@ pub(crate) fn check_passes(passes: &[Pass]) -> Result<(), RecipeError> {
 }
 
 impl Curve {
-    /// The value at `seconds`, never negative.
-    pub(crate) fn at(&self, seconds: f32) -> f32 {
+    /// The value at `seconds` from the effect's start. A transition's
+    /// curve takes its progress, 0 to 1, in place of seconds.
+    #[must_use]
+    pub fn at(&self, seconds: f32) -> f32 {
         match self {
             Self::Constant(value) => *value,
             Self::Keys { keys, repeat, ease } => {

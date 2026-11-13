@@ -10,7 +10,7 @@ use cutlass_decode::CodecError;
 use cutlass_pool::Rows;
 use cutlass_simd::shared_rows::RowsWriter;
 
-use crate::cabac::{CONTEXTS, Cabac};
+use crate::cabac::Cabac;
 use crate::ctu::{Cu, SliceDecoder, Wave};
 use crate::frame::{Done, Frame, OutSamples};
 use crate::nal::Nal;
@@ -303,7 +303,7 @@ impl<'a> SliceJob<'a> {
             slice: self.index,
             sps: &pic.sps,
             pps: &pic.pps,
-            cabac: Cabac::new(self.data, [0; CONTEXTS]),
+            cabac: Cabac::new(self.data, [0; 256]),
             data: self.data,
             entries: self.entries.to_vec(),
             next_entry,

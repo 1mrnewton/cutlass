@@ -445,7 +445,7 @@ impl Picture {
             sao: Sao::new(ctbs),
             slices: Vec::new(),
             poc,
-            dependent: Mutex::new(([0; crate::cabac::CONTEXTS], 0)),
+            dependent: Mutex::new(([0; 256], 0)),
             wpp_ctx: Mutex::new(if pps.entropy_sync {
                 vec![None; ctbs]
             } else {
@@ -484,7 +484,7 @@ impl Picture {
         pic.sao.clear();
         pic.slices.clear();
         pic.poc = poc;
-        *lock(&pic.dependent) = ([0; crate::cabac::CONTEXTS], 0);
+        *lock(&pic.dependent) = ([0; 256], 0);
         {
             let ctbs = layout.ctb_count() as usize;
             let mut wpp = lock(&pic.wpp_ctx);

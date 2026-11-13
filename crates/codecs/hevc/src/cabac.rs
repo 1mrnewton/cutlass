@@ -217,12 +217,13 @@ static TRANS_LPS: [u8; 64] = [
     34, 35, 35, 35, 36, 36, 36, 37, 37, 37, 38, 38, 63,
 ];
 
-/// Context variables: `pStateIdx << 1 | valMps`.
-pub type Contexts = [u8; CONTEXTS];
+/// Context variables: `pStateIdx << 1 | valMps`, padded to 256 so that a
+/// context index taken as a byte is always in range.
+pub type Contexts = [u8; 256];
 
 /// Initialized contexts for `init_type` and the slice QP (clause 9.3.2.2).
 pub fn init_contexts(init_type: usize, qp: i32) -> Contexts {
-    let mut out = [0u8; CONTEXTS];
+    let mut out = [0u8; 256];
     let qp = qp.clamp(0, 51);
     for (ctx, &value) in out.iter_mut().zip(INIT[init_type.min(2)].iter()) {
         let slope = i32::from(value >> 4) * 5 - 45;
@@ -238,14 +239,15 @@ pub fn init_contexts(init_type: usize, qp: i32) -> Contexts {
 }
 
 /// `rangeTabLps` by the two range bits it reads and the context state
-/// (`pStateIdx << 1 | valMps`): `LPS[q * 128 + state]`.
-static LPS: [u8; 4 * 128] = {
-    let mut out = [0u8; 4 * 128];
+/// (`pStateIdx << 1 | valMps`): `LPS[q * 256 + state]`; padded so that any
+/// byte indexes it.
+static LPS: [u8; 4 * 256] = {
+    let mut out = [0u8; 4 * 256];
     let mut q = 0;
     while q < 4 {
         let mut s = 0;
         while s < 128 {
-            out[q * 128 + s] = RANGE_LPS[s >> 1][q];
+            out[q * 256 + s] = RANGE_LPS[s >> 1][q];
             s += 1;
         }
         q += 1;
@@ -256,8 +258,8 @@ static LPS: [u8; 4 * 128] = {
 /// The state after a bin: `NEXT[state * 2]` after the most probable
 /// value, `NEXT[state * 2 + 1]` after the least probable one (clause
 /// 9.3.4.3.2.2).
-static NEXT: [u8; 256] = {
-    let mut out = [0u8; 256];
+static NEXT: [u8; 512] = {
+    let mut out = [0u8; 512];
     let mut s = 0;
     while s < 128 {
         let (p, mps) = (s >> 1, (s & 1) as u8);
@@ -348,15 +350,17 @@ impl<'a> Cabac<'a> {
 
     #[inline(always)]
     pub fn decide(&mut self, index: usize) -> bool {
+        // Every context index is below 256 (`CONTEXTS`).
+        let index = usize::from(index as u8);
         let s = self.ctx[index];
-        let lps = u32::from(LPS[(((self.range >> 6) & 3) as usize) * 128 + usize::from(s & 127)]);
+        let lps = u32::from(LPS[(((self.range >> 6) & 3) as usize) * 256 + usize::from(s)]);
         let rmps = self.range - lps;
         let scaled = u64::from(rmps) << 54;
         let lps_path = self.val >= scaled;
         let mask = u64::from(lps_path).wrapping_neg();
         self.val -= scaled & mask;
         let range = if lps_path { lps } else { rmps };
-        self.ctx[index] = NEXT[usize::from(s & 127) * 2 + usize::from(lps_path)];
+        self.ctx[index] = NEXT[usize::from(s) * 2 + usize::from(lps_path)];
         let shift = range.leading_zeros().saturating_sub(23);
         self.range = range << shift;
         self.val <<= shift;
@@ -587,6 +591,7 @@ mod tests {
     fn context_layout_has_one_entry_per_initial_value() {
         assert_eq!(GREATER2 + 6, CONTEXTS);
         assert_eq!(CONTEXTS, 155);
+        assert!(CONTEXTS <= 256);
     }
 
     #[test]

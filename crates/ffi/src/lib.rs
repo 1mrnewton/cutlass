@@ -938,6 +938,15 @@ fn program<'a>(commands: &'a Commands, project: &'a Project, preview: &'a Previe
     }
 }
 
+/// This crate's folder, for test fixtures: `CUTLASS_FFI_DIR` when the
+/// tests run on a phone with the fixtures pushed there, else where the
+/// crate was built.
+#[cfg(test)]
+pub(crate) fn crate_dir() -> PathBuf {
+    std::env::var_os("CUTLASS_FFI_DIR")
+        .map_or_else(|| env!("CARGO_MANIFEST_DIR").into(), PathBuf::from)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -1163,9 +1172,7 @@ mod tests {
     }
 
     fn fixture(name: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../engine/fixtures")
-            .join(name)
+        crate::crate_dir().join("../engine/fixtures").join(name)
     }
 
     fn still(duration: i64) -> crate::Probed {
@@ -1770,8 +1777,7 @@ mod tests {
 
     #[test]
     fn every_effect_has_its_preview_video_in_the_phone_app() {
-        let folder =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/ios/ios/EffectPreviews");
+        let folder = crate::crate_dir().join("../../apps/ios/ios/EffectPreviews");
         let effects = crate::phone_effects();
         assert_eq!(effects.len(), cutlass_effects::bundled().len());
         for effect in effects {
@@ -2292,8 +2298,7 @@ mod tests {
         let temp = Temp::new();
         let roots = Roots::new(&temp);
         let mut host = roots.create();
-        let file = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../containers/ogg/tests/fixtures/stereo_44100_q4.ogg");
+        let file = crate::crate_dir().join("../containers/ogg/tests/fixtures/stereo_44100_q4.ogg");
         let material = host.import(&file).unwrap();
         let audio = host
             .draft()
@@ -2466,8 +2471,7 @@ mod tests {
 
     #[test]
     fn a_split_and_a_ripple_delete_redraw_a_movie_at_the_cut() {
-        let movie = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../local-files/16929689_1920_1080_30fps.mp4");
+        let movie = crate::crate_dir().join("../../../local-files/16929689_1920_1080_30fps.mp4");
         if !movie.is_file() {
             eprintln!("skipped: the movie is not in ../local-files");
             return;

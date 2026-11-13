@@ -2745,6 +2745,7 @@ dependencies = [
  "cutlass-ac3",
  "cutlass-aiff",
  "cutlass-alac",
+ "cutlass-av1",
  "cutlass-avi",
  "cutlass-caf",
  "cutlass-codec",
@@ -2773,6 +2774,7 @@ dependencies = [
  "cutlass-ogg",
  "cutlass-opus",
  "cutlass-pcm",
+ "cutlass-platform-android",
  "cutlass-platform-apple",
  "cutlass-playback",
  "cutlass-png",
@@ -2786,6 +2788,7 @@ dependencies = [
  "cutlass-storage",
  "cutlass-store",
  "cutlass-vorbis",
+ "cutlass-vp8",
  "cutlass-webp",
 ]
 

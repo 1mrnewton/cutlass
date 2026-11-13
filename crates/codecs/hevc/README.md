@@ -91,7 +91,7 @@ What does not run by default:
 | Peak memory, 4 threads | 77 MB | 99 MB |
 | Threads allowed | 4 | 4 |
 
-Cutlass is **1.13× slower** than FFmpeg here with four threads and **1.09× slower** on one. Both decoders produced exactly the same samples. Runs of the same comparison on the same day measured between 1.06× and 1.19× with four threads. `media-bench` also copies every picture into the packed buffer the engine's `Decoder` returns, which the FFmpeg program does not do; `cargo bench -p cutlass-hevc`, which times the decode alone, measured 2.95 s against FFmpeg's 2.88 s (one process, startup included) on this file.
+Cutlass is **1.13× slower** than FFmpeg here with four threads and **1.09× slower** on one. Both decoders produced exactly the same samples. Runs of the same comparison on the same day measured between 1.03× and 1.19× with four threads (median of seven, later the same day: 3.01 s against 2.74 s, 1.10×). `media-bench` also copies every picture into the packed buffer the engine's `Decoder` returns, which the FFmpeg program does not do; `cargo bench -p cutlass-hevc`, which times the decode alone, measured 2.95 s against FFmpeg's 2.88 s (one process, startup included) on this file.
 
 Where the time goes, on one thread and against FFmpeg's own profile on the same file: entropy decoding (CABAC and residual coding) takes about 30% less time than FFmpeg's; the boundary strengths of deblocking about 15% less; interpolation and the motion-vector derivation around it, the deblocking filters, and the writing of final rows and output pictures take more.
 

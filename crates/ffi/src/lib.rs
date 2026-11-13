@@ -18,6 +18,7 @@ mod error;
 mod export;
 mod host;
 mod keys;
+mod look;
 mod media;
 mod player;
 mod preview;
@@ -39,6 +40,7 @@ pub use cutlass_editor::{
     Bar, Tool, ToolId, clock, fling_start, fling_step, speed_at, speed_position, tools, volume_at,
     volume_position,
 };
+pub use cutlass_effects::{bundled_look, look_poster};
 pub use cutlass_export::video_bitrate;
 pub use cutlass_logger::InitError as LogError;
 pub use cutlass_model::TrackType;
@@ -52,6 +54,9 @@ pub use error::FfiError;
 pub use export::{PHONE_EXPORT_SIDES, PhoneExport, encoders};
 pub use host::Commands;
 pub use keys::{PhoneGraph, PhoneKeys, graphs};
+pub use look::{
+    PhoneAdjust, PhoneClipFilter, PhoneFilter, adjust_sliders, clip_filter, phone_filters,
+};
 pub use player::PhonePlayer;
 pub use preview::{Picture, Preview};
 pub use project::Project;
@@ -669,6 +674,100 @@ impl PhoneHost {
         let (request, segment_id) = effect::add_request(self.draft(), effect_id, at);
         self.apply(self.revision(), &[request])?;
         Ok(segment_id)
+    }
+
+    /// Run effect `effect_id` over the picture clip `clip` alone, for its
+    /// span and linked to it, as one undo step. Returns the effect clip.
+    pub fn add_clip_effect(
+        &mut self,
+        clip: &SegmentId,
+        effect_id: &str,
+    ) -> Result<SegmentId, FfiError> {
+        let (requests, segment_id) = look::clip_effect_requests(self.draft(), clip, effect_id)?;
+        self.apply(self.revision(), &requests)?;
+        Ok(segment_id)
+    }
+
+    /// Give the picture clip `clip` the filter `filter_id` over its span,
+    /// swapping out the one it kept, or take its filter off with an empty
+    /// id; a filter layer swaps in place. One undo step. Returns the new
+    /// filter layer, if one was placed.
+    pub fn set_clip_filter(
+        &mut self,
+        clip: &SegmentId,
+        filter_id: &str,
+    ) -> Result<Option<SegmentId>, FfiError> {
+        let (requests, placed) = look::clip_filter_requests(self.draft(), clip, filter_id)?;
+        if requests.is_empty() {
+            return Ok(None);
+        }
+        self.apply(self.revision(), &requests)?;
+        Ok(placed)
+    }
+
+    /// Put the filter layer `filter_id` at `at`, over every picture below
+    /// it, as one undo step. Returns the layer.
+    pub fn add_filter(&mut self, filter_id: &str, at: Micros) -> Result<SegmentId, FfiError> {
+        let (request, segment_id) = look::filter_at_request(self.draft(), filter_id, at)?;
+        self.apply(self.revision(), &[request])?;
+        Ok(segment_id)
+    }
+
+    /// Set how strongly the filter, effect or adjustment `segment_id`
+    /// works, 0 to 1, as one undo step.
+    pub fn set_strength(&mut self, segment_id: &SegmentId, value: f64) -> Result<(), FfiError> {
+        clip::unlocked(self.draft(), segment_id)?;
+        if !(0.0..=1.0).contains(&value) {
+            return Err(FfiError::Refused {
+                reason: "strength runs from 0 to 1".to_owned(),
+            });
+        }
+        let material_id = cutlass_model::MaterialId::new(
+            cutlass_editor::FreshIds::new(self.draft(), 0).make("filter"),
+        );
+        self.apply(
+            self.revision(),
+            &[Request::SetEffectStrength {
+                segment_id: segment_id.clone(),
+                material_id,
+                value,
+            }],
+        )?;
+        Ok(())
+    }
+
+    /// Put an adjustment layer at `at`, its sliders at zero, as one undo
+    /// step. Returns the layer.
+    pub fn add_adjustment(&mut self, at: Micros) -> Result<SegmentId, FfiError> {
+        let (request, segment_id) = look::adjustment_request(self.draft(), at);
+        self.apply(self.revision(), &[request])?;
+        Ok(segment_id)
+    }
+
+    /// Set the adjust slider `key` of the picture clip or adjustment layer
+    /// `segment_id` to `value`, as one undo step.
+    pub fn set_adjust(
+        &mut self,
+        segment_id: &SegmentId,
+        key: &str,
+        value: f64,
+    ) -> Result<(), FfiError> {
+        let request = look::adjust_request(self.draft(), segment_id, key, value)?;
+        self.apply(self.revision(), &[request])?;
+        Ok(())
+    }
+
+    /// Every adjust slider of `segment_id`, or `None` for a clip that has
+    /// none.
+    #[must_use]
+    pub fn adjust_sliders(&self, segment_id: &SegmentId) -> Option<Vec<PhoneAdjust>> {
+        adjust_sliders(self.draft(), segment_id)
+    }
+
+    /// The filter `clip` keeps, or a filter layer's own.
+    #[must_use]
+    pub fn clip_filter(&self, clip: &SegmentId) -> Option<PhoneClipFilter> {
+        clip_filter(self.draft(), clip)
     }
 
     /// Bring in the subtitle file `file_name` (SRT or LRC, by its
@@ -2941,6 +3040,108 @@ mod tests {
         assert_eq!(host.frame(at).unwrap(), cut);
         host.redo().unwrap();
         assert_eq!(host.frame(at).unwrap(), later);
+    }
+
+    #[test]
+    fn a_clip_keeps_one_filter_that_swaps_takes_a_strength_and_comes_off() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (first, _) = two_stills(&mut host);
+        let filters = crate::phone_filters();
+        assert!(filters.len() > 1);
+        assert!(host.clip_filter(&first).is_none());
+
+        let layer = host
+            .set_clip_filter(&first, &filters[0].id)
+            .unwrap()
+            .expect("placed");
+        let kept = host.clip_filter(&first).unwrap();
+        assert_eq!(kept.segment_id, layer);
+        assert_eq!(kept.filter_id, filters[0].id);
+        assert_eq!(kept.strength, 1.0);
+        let span = |host: &PhoneHost, id: &cutlass_session::SegmentId| {
+            let (segment, _) = crate::clip::locate(host.draft(), id).unwrap();
+            (segment.target.start, segment.target.duration)
+        };
+        assert_eq!(span(&host, &layer), span(&host, &first));
+
+        let swapped = host
+            .set_clip_filter(&first, &filters[1].id)
+            .unwrap()
+            .expect("placed");
+        let layers = |host: &PhoneHost| {
+            host.draft()
+                .tracks
+                .iter()
+                .filter(|track| track.kind == cutlass_model::TrackType::Filter)
+                .map(|track| track.segments.len())
+                .sum::<usize>()
+        };
+        assert_eq!(layers(&host), 1);
+        assert_eq!(host.clip_filter(&first).unwrap().filter_id, filters[1].id);
+
+        host.set_strength(&swapped, 0.4).unwrap();
+        assert_eq!(host.clip_filter(&first).unwrap().strength, 0.4);
+        assert!(host.set_strength(&swapped, 1.5).is_err());
+
+        assert_eq!(host.set_clip_filter(&first, "").unwrap(), None);
+        assert!(host.clip_filter(&first).is_none());
+        assert_eq!(layers(&host), 0);
+        host.undo().unwrap();
+        assert_eq!(host.clip_filter(&first).unwrap().strength, 0.4);
+
+        assert!(host.set_clip_filter(&first, "look/nope").is_err());
+        let at = host.add_filter(&filters[0].id, Micros(0)).unwrap();
+        assert_eq!(host.clip_filter(&at).unwrap().filter_id, filters[0].id);
+    }
+
+    #[test]
+    fn adjust_sliders_sit_on_a_picture_or_an_adjustment_layer() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (first, _) = two_stills(&mut host);
+        let sliders = host.adjust_sliders(&first).unwrap();
+        assert_eq!(sliders.len(), 17);
+        assert!(sliders.iter().all(|slider| slider.value == 0.0));
+
+        host.set_adjust(&first, "contrast", -0.25).unwrap();
+        let value = |host: &PhoneHost, id: &cutlass_session::SegmentId, key: &str| {
+            host.adjust_sliders(id)
+                .unwrap()
+                .into_iter()
+                .find(|slider| slider.key == key)
+                .unwrap()
+                .value
+        };
+        assert!((value(&host, &first, "contrast") + 0.25).abs() < 1e-6);
+        let revision = host.revision();
+        assert!(host.set_adjust(&first, "contrast", -2.0).is_err());
+        assert!(host.set_adjust(&first, "grain", -0.5).is_err());
+        assert!(host.set_adjust(&first, "nope", 0.5).is_err());
+        assert_eq!(host.revision(), revision);
+
+        let layer = host.add_adjustment(Micros(0)).unwrap();
+        host.set_adjust(&layer, "temperature", 0.5).unwrap();
+        assert!((value(&host, &layer, "temperature") - 0.5).abs() < 1e-6);
+        host.undo().unwrap();
+        assert_eq!(value(&host, &layer, "temperature"), 0.0);
+    }
+
+    #[test]
+    fn an_effect_on_a_clip_runs_over_it_alone_for_its_span() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (first, second) = two_stills(&mut host);
+        let effect = &crate::phone_effects()[0];
+        let placed = host.add_clip_effect(&first, &effect.id).unwrap();
+        let on = cutlass_editor::effects_on(host.draft(), &first);
+        assert_eq!(on.len(), 1);
+        assert_eq!(on[0].segment_id, placed);
+        assert!(cutlass_editor::effects_on(host.draft(), &second).is_empty());
+        assert!(host.add_clip_effect(&first, "recipe/nope").is_err());
     }
 
     fn movie(duration: i64) -> crate::Probed {

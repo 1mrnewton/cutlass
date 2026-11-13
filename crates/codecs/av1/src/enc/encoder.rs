@@ -115,6 +115,10 @@ pub struct EncConfig {
     /// 0 is slowest and best, 10 fastest.
     pub speed: u8,
     pub rc: RateControl,
+    /// With a bitrate target: hold it over each second, so that a second
+    /// that spends less leaves nothing for a later one. Off, the target is
+    /// the average over the whole stream.
+    pub constant_rate: bool,
     /// Pictures per second, for the level the sequence header names. A
     /// bitrate target carries its own rate, which is used instead.
     pub fps: f64,
@@ -154,6 +158,7 @@ impl EncConfig {
             mono: false,
             speed: 6,
             rc: RateControl::Qindex(120),
+            constant_rate: false,
             fps: 30.0,
             keyint: 120,
             gop: 8,
@@ -187,6 +192,9 @@ pub struct Av1Enc {
     rc_q: f64,
     /// Bits produced so far and frames coded, for rate control.
     bits_total: u64,
+    /// Bits and pictures of the second being coded, at a constant rate.
+    second_bits: u64,
+    second_frames: u64,
     /// Last reconstructed frame (shown output of the internal decoder).
     last_recon: Option<Arc<AnyPicture>>,
     /// Source pictures waiting to be coded, in display order from `next_disp`.
@@ -425,6 +433,8 @@ impl Av1Enc {
             frame_num: 0,
             rc_q: q0,
             bits_total: 0,
+            second_bits: 0,
+            second_frames: 0,
             last_recon: None,
             lookahead: std::collections::VecDeque::new(),
             next_disp: 0,
@@ -1084,8 +1094,22 @@ impl Av1Enc {
         let ratio = (bits as f64 / expect.max(1.0)).clamp(0.1, 10.0);
         // About 12 q-index steps per doubling of the rate.
         let step = (12.0 * ratio.log2()).clamp(-20.0, 20.0) * if key { 0.5 } else { 1.0 };
-        // Pull the long-run average toward the target as well.
-        let avg = self.bits_total as f64 / self.frame_num.max(1) as f64;
+        // Pull the average toward the target as well: the long-run one,
+        // or at a constant rate the one of the second being coded, which
+        // starts again with each second so that an easy second saves no
+        // bits for a hard one.
+        let avg = if self.cfg.constant_rate {
+            self.second_bits += bits;
+            self.second_frames += frames.max(1);
+            let avg = self.second_bits as f64 / self.second_frames as f64;
+            if self.second_frames as f64 >= fps.max(1.0) {
+                self.second_bits = 0;
+                self.second_frames = 0;
+            }
+            avg
+        } else {
+            self.bits_total as f64 / self.frame_num.max(1) as f64
+        };
         let drift = (4.0 * (avg / per_frame.max(1.0)).log2()).clamp(-4.0, 4.0);
         self.rc_q = (self.rc_q + step + drift).clamp(10.0, 250.0);
     }

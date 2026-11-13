@@ -18,12 +18,15 @@ use cutlass_encode::{AudioInput, Encoder, FrameInput, VideoEncoder};
 use crate::enc::encoder::{Av1Enc, EncConfig, EncodedUnit, InputFrame, RateControl};
 use crate::yuv::VideoInput;
 
-/// Rust AV1 encoder. `bitrate` of zero keeps the quality index.
+/// Rust AV1 encoder. `bitrate` of zero keeps the quality index. With a
+/// bitrate, `constant_rate` holds it over each second instead of on average
+/// over the stream.
 pub struct Av1Encoder {
     width: u32,
     height: u32,
     pixel: PixelFormat,
     bitrate: u32,
+    constant_rate: bool,
     qindex: u8,
     speed: u8,
     gop: u32,
@@ -138,6 +141,7 @@ impl Av1Encoder {
             height: params.height,
             pixel: params.pixel,
             bitrate: params.bitrate,
+            constant_rate: params.constant_rate,
             qindex: 100,
             speed: 6,
             gop: 8,
@@ -245,6 +249,7 @@ impl Av1Encoder {
                 30.0
             };
             cfg.fps = fps;
+            cfg.constant_rate = self.constant_rate;
             cfg.rc = if self.bitrate > 0 {
                 RateControl::Bitrate {
                     bps: u64::from(self.bitrate),
@@ -775,6 +780,60 @@ mod tests {
             Av1Encoder::open(&params),
             Err(CodecError::Unsupported { .. })
         ));
+    }
+
+    /// Bits spent in each second of a still second then a busy one, at
+    /// `rate` bits a second: 160x96 pictures of a texture that stands, then
+    /// changes with every picture.
+    fn second_bits(constant: bool, rate: u32) -> [usize; 2] {
+        let (w, h) = (160u32, 96u32);
+        let mut params = CodecParams::video(CodecId::Av1, w, h);
+        params.bitrate = rate;
+        params.constant_rate = constant;
+        let mut encoder = Av1Encoder::open(&params).expect("encoder");
+        encoder.set_gop(2);
+        encoder.set_keyint(120);
+        let mut packets = Vec::new();
+        for n in 0..60u32 {
+            let seed = if n < 30 { 0 } else { n };
+            let mut state = 0x9e37_79b9u32.wrapping_mul(seed + 1);
+            let mut bytes: Vec<u8> = (0..w * h)
+                .map(|i| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    let (x, y) = (i % w, i / w);
+                    (((x / 8 + y / 8) * 24 + (state >> 27)) & 255) as u8
+                })
+                .collect();
+            bytes.extend(vec![128u8; (w * h / 2) as usize]);
+            let time = FrameTime::new(i64::from(n), 1, 30).expect("time");
+            let frame = CpuFrame::new(w, h, PixelFormat::Yuv420p, bytes, time).expect("frame");
+            packets.extend(encoder.push_frame(&FrameInput::Cpu(frame)).expect("push"));
+        }
+        packets.extend(encoder.drain().expect("drain"));
+        assert_eq!(packets.len(), 60);
+        let mut seconds = [0usize; 2];
+        for packet in &packets {
+            seconds[(packet.pts / 30) as usize] += packet.data.len() * 8;
+        }
+        seconds
+    }
+
+    #[test]
+    fn a_constant_rate_does_not_spend_a_still_second_s_savings() {
+        let average = second_bits(false, 400_000);
+        let constant = second_bits(true, 400_000);
+        // The still second spends half its budget; on average the busy
+        // second spends what it left, at a constant rate it does not.
+        assert_eq!(constant[0], average[0]);
+        assert!(average[0] < 400_000);
+        assert!(
+            constant[1] * 20 < average[1] * 19,
+            "busy second: constant {} bits, average {} bits",
+            constant[1],
+            average[1]
+        );
+        // Without a bitrate the flag changes nothing.
+        assert_eq!(second_bits(true, 0), second_bits(false, 0));
     }
 
     #[test]

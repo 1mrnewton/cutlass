@@ -209,15 +209,21 @@ mod fuzz {
         );
     }
 
-    /// The fixture streams that decode, with the samples they decode to.
-    fn corpus() -> Vec<(String, Vec<Vec<u8>>, Vec<Vec<u8>>)> {
+    /// One fixture stream and the samples it decodes to.
+    struct Stream {
+        packets: Vec<Vec<u8>>,
+        clean: Vec<Vec<u8>>,
+    }
+
+    /// The fixture streams that decode.
+    fn corpus() -> Vec<Stream> {
         common::streams()
             .into_iter()
             .filter(|(name, _)| name != "wide.ivf")
             .map(|(name, packets)| {
                 let clean = decode(&mut decoder(1), &packets);
                 assert!(!clean.is_empty(), "{name} decodes");
-                (name, packets, clean)
+                Stream { packets, clean }
             })
             .collect()
     }
@@ -230,9 +236,9 @@ mod fuzz {
         let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
         let mut cases = 0;
         for round in 0..6 {
-            for (_, packets, clean) in &corpus {
+            for stream in &corpus {
                 let threads = if round % 2 == 0 { 1 } else { 3 };
-                case(packets, clean, threads, &mut rng);
+                case(&stream.packets, &stream.clean, threads, &mut rng);
                 cases += 1;
             }
         }
@@ -367,8 +373,9 @@ mod fuzz {
         let until = Instant::now() + Duration::from_secs(seconds);
         let (mut decoded, mut encoded) = (0u64, 0u64);
         while Instant::now() < until {
-            for (index, (_, packets, clean)) in corpus.iter().enumerate() {
-                case(packets, clean, 1 + (index + decoded as usize) % 4, &mut rng);
+            for (index, stream) in corpus.iter().enumerate() {
+                let threads = 1 + (index + decoded as usize) % 4;
+                case(&stream.packets, &stream.clean, threads, &mut rng);
                 decoded += 1;
             }
             for _ in 0..4 {

@@ -9706,6 +9706,7 @@ fn ref_of(mb: &Mb, bx: usize, by: usize, list: usize) -> i8 {
     }
 }
 
+#[inline(always)]
 fn read_mvd(entropy: &mut Entropy<'_, '_>, sum: i32, base: usize) -> Result<i32, CodecError> {
     match entropy {
         Entropy::Cavlc(bits) => bits.se(),
@@ -9805,6 +9806,7 @@ struct Motion {
     reference: i8,
 }
 
+#[inline(always)]
 fn mvp<S: Sample>(
     pic: &Frame<S>,
     at: Place,
@@ -10991,6 +10993,7 @@ fn ref_luma<S: Sample>(frame: &Frame<S>, x: i32, y: i32, frac: (i32, i32)) -> i3
 
 /// The inter prediction of macroblock (`mx`, `my`). `whole` says the
 /// caller knows one motion covers it, as in a 16×16 partition.
+#[inline(always)]
 fn predict_inter<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],
@@ -13158,6 +13161,7 @@ fn nonzero_bits(counts: &[u8; 16]) -> u16 {
 
 /// Every block of the macroblock predicts from the same pictures with the
 /// same vectors.
+#[inline(always)]
 fn single_motion(mb: &Mb) -> bool {
     // Every difference from the first block gathered without a branch, so
     // the compares run side by side.

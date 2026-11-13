@@ -24,12 +24,15 @@ import uniffi.cutlass_ffi_bindings.AnimationPreset
 import uniffi.cutlass_ffi_bindings.Background
 import uniffi.cutlass_ffi_bindings.CanvasRatio
 import uniffi.cutlass_ffi_bindings.Clip
+import uniffi.cutlass_ffi_bindings.ClipAbilities
 import uniffi.cutlass_ffi_bindings.ClipAnimations
 import uniffi.cutlass_ffi_bindings.EffectChoice
 import uniffi.cutlass_ffi_bindings.Editor
+import uniffi.cutlass_ffi_bindings.Fade
 import uniffi.cutlass_ffi_bindings.Frame
 import uniffi.cutlass_ffi_bindings.Keyframes
 import uniffi.cutlass_ffi_bindings.Lane
+import uniffi.cutlass_ffi_bindings.LaneKind
 import uniffi.cutlass_ffi_bindings.Stage
 import uniffi.cutlass_ffi_bindings.TextInfo
 import uniffi.cutlass_ffi_bindings.TextStyleChange
@@ -436,6 +439,67 @@ class EditorModel(project: String, private val scope: CoroutineScope) {
     /** Play the clip at a constant speed. Its length follows. */
     fun setSpeed(clip: String, speed: Double) = edit { it.setSpeed(clip, speed) }
 
+    // Clip bar edits. Each is one undo step; a clip it does not suit shows
+    // Rust's reason as a notice.
+
+    /** What the clip bar can do to `clip`, or null when it is gone. */
+    fun abilities(clip: String): ClipAbilities? = runCatching { editor?.clipAbilities(clip) }.getOrNull()
+
+    fun toggleMirror(clip: String) = edit { it.toggleMirror(clip) }
+
+    fun turn(clip: String) = edit { it.turn(clip) }
+
+    fun toggleReverse(clip: String) = edit { it.toggleReverse(clip) }
+
+    fun toggleCrop(clip: String) = edit { it.toggleCrop(clip) }
+
+    /** Hold the frame under the playhead as a still, and select the still. */
+    fun freeze(clip: String) {
+        var still: String? = null
+        edit { still = it.freeze(clip, playheadUs) }
+        still?.let {
+            selectedClip = it
+            say("Frame held")
+        }
+    }
+
+    /** Put the video's sound on its own clip on an audio row, and select that. */
+    fun extractAudio(clip: String) {
+        var sound: String? = null
+        edit { sound = it.extractAudio(clip) }
+        sound?.let {
+            selectedClip = it
+            say("Sound extracted")
+        }
+    }
+
+    /** Drop a beat on the sound at the playhead, or take away the one there. */
+    fun toggleBeat(clip: String) {
+        var there: Boolean? = null
+        edit { there = it.toggleBeat(clip, playheadUs) }
+        there?.let { say(if (it) "Beat added" else "Beat removed") }
+    }
+
+    /** The clip's fade in and fade out, or none. */
+    fun fade(clip: String): Fade = runCatching { editor?.fade(clip) }.getOrNull() ?: Fade(0, 0)
+
+    fun setFade(clip: String, inUs: Long, outUs: Long) = edit { it.setFade(clip, inUs, outUs) }
+
+    /** Move an overlay picture onto the main row where it starts. */
+    fun toMain(clip: String) = edit { it.toMain(clip) }
+
+    /** Import a picture and put it on an overlay row at the playhead, selected. */
+    fun importOverlay(path: String) {
+        edit {
+            val material = it.import(path)
+            selectedClip = it.addOverlay(material, playheadUs)
+        }
+    }
+
+    /** The beats on each sound clip, as timeline times, read again after each edit. */
+    var beats by mutableStateOf<Map<String, List<Long>>>(emptyMap())
+        private set
+
     // Stage
 
     /** The canvas size in pixels, from the chosen ratio. */
@@ -551,6 +615,10 @@ class EditorModel(project: String, private val scope: CoroutineScope) {
             durationUs = editor.durationUs()
             ratios = editor.ratios()
             background = editor.background()
+            beats = lanes.filter { it.kind == LaneKind.AUDIO }
+                .flatMap { lane -> lane.clips }
+                .associate { clip -> clip.id to editor.beats(clip.id) }
+                .filterValues { it.isNotEmpty() }
         } catch (error: Exception) {
             show(error)
         }

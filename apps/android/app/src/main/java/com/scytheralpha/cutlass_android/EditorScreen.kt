@@ -87,10 +87,14 @@ sealed interface Panel {
     data object Background : Panel
     data object Graphs : Panel
     data object Animations : Panel
+    data object Fade : Panel
 
     /** Add text, or change the text clip with this id. */
     data class Text(val clip: String?) : Panel
 }
+
+/** What a tool asks the system to pick. */
+enum class Pick { OVERLAY, SOUND }
 
 /** The editor: preview on top, the transport, the timeline, then the tools. */
 @Composable
@@ -106,6 +110,20 @@ fun EditorScreen(project: ProjectSummary, home: () -> Unit) {
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(),
     ) { uris -> importPicked(context, model, scope, uris) }
+    val overlayPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri -> importPicked(context, model, scope, listOfNotNull(uri), overlay = true) }
+    val soundPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri -> importPicked(context, model, scope, listOfNotNull(uri)) }
+    val pick = { what: Pick ->
+        when (what) {
+            Pick.OVERLAY -> overlayPicker.launch(
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
+            )
+            Pick.SOUND -> soundPicker.launch("audio/*")
+        }
+    }
 
     DisposableEffect(model) { onDispose { model.pause() } }
     // System back steps out one layer at a time: the open panel, then the
@@ -185,6 +203,7 @@ fun EditorScreen(project: ProjectSummary, home: () -> Unit) {
                 setPanel = { panel = it },
                 openBar = openBar,
                 setOpenBar = { openBar = it },
+                pick = pick,
             )
         }
         NoticeBanner(model, Modifier.align(Alignment.TopCenter))
@@ -327,6 +346,7 @@ private fun Bottom(
     setPanel: (Panel?) -> Unit,
     openBar: ToolBar,
     setOpenBar: (ToolBar) -> Unit,
+    pick: (Pick) -> Unit,
 ) {
     val done = { setPanel(null) }
     val selectionBar = model.selectionBar
@@ -348,7 +368,7 @@ private fun Bottom(
         label = "bottom",
     ) { _ ->
         val use: (ToolItem) -> Unit = { tool ->
-            useTool(tool, model, setPanel, setOpenBar)
+            useTool(tool, model, setPanel, setOpenBar, pick)
         }
         when {
             panel == Panel.Effects -> EffectsPanel(model, done)
@@ -359,6 +379,7 @@ private fun Bottom(
             panel is Panel.Text -> TextPanel(model, panel.clip, done)
             panel == Panel.Volume && selection != null -> VolumePanel(model, selection, done)
             panel == Panel.Speed && selection != null -> SpeedPanel(model, selection, done)
+            panel == Panel.Fade && selection != null -> FadePanel(model, selection, done)
             selectionBar != null -> ToolBarView(
                 tools = toolBar(selectionBar),
                 back = { model.selectedClip = null },
@@ -379,6 +400,7 @@ private fun useTool(
     model: EditorModel,
     setPanel: (Panel?) -> Unit,
     setOpenBar: (ToolBar) -> Unit,
+    pick: (Pick) -> Unit,
 ) {
     tool.opens?.let {
         setOpenBar(it)
@@ -397,6 +419,17 @@ private fun useTool(
         ToolKind.DELETE -> model.deleteClip()
         ToolKind.ADD_TEXT -> setPanel(Panel.Text(null))
         ToolKind.EDIT_TEXT -> setPanel(Panel.Text(model.selectedClip))
+        ToolKind.MIRROR -> model.selectedClip?.let(model::toggleMirror)
+        ToolKind.ROTATE -> model.selectedClip?.let(model::turn)
+        ToolKind.REVERSE -> model.selectedClip?.let(model::toggleReverse)
+        ToolKind.CROP -> model.selectedClip?.let(model::toggleCrop)
+        ToolKind.FREEZE -> model.selectedClip?.let(model::freeze)
+        ToolKind.EXTRACT_AUDIO -> model.selectedClip?.let(model::extractAudio)
+        ToolKind.BEATS -> model.selectedClip?.let(model::toggleBeat)
+        ToolKind.SPLICE -> model.selectedClip?.let(model::toMain)
+        ToolKind.FADE -> setPanel(Panel.Fade)
+        ToolKind.ADD_OVERLAY -> pick(Pick.OVERLAY)
+        ToolKind.IMPORT_SOUND -> pick(Pick.SOUND)
         ToolKind.VIDEO_EFFECTS -> setPanel(Panel.Effects)
         ToolKind.ASPECT_RATIO -> {
             model.selectedClip = null
@@ -545,6 +578,7 @@ private fun importPicked(
     model: EditorModel,
     scope: kotlinx.coroutines.CoroutineScope,
     uris: List<Uri>,
+    overlay: Boolean = false,
 ) {
     if (uris.isEmpty()) return
     model.beginImport()
@@ -552,7 +586,7 @@ private fun importPicked(
         for (uri in uris) {
             val copy = withContext(Dispatchers.IO) { runCatching { copyOut(context, uri) } }
             copy.onSuccess { file ->
-                model.importFile(file.path)
+                if (overlay) model.importOverlay(file.path) else model.importFile(file.path)
                 file.parentFile?.deleteRecursively()
             }.onFailure { model.show(it) }
         }

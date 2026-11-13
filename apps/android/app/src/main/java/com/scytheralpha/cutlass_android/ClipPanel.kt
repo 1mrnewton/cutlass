@@ -279,3 +279,60 @@ private fun speedLabel(speed: Double): String {
 /** A size in points with figures of one width, as `monospacedDigit()` gives. */
 private fun clipPanelDigits(size: Int, weight: FontWeight? = null) =
     TextStyle(fontSize = size.sp, fontWeight = weight, fontFeatureSettings = "tnum")
+
+/** The longest fade the panel offers: half the clip, and never past ten seconds. */
+private fun fadeLimit(clip: Clip): Long = minOf(clip.durationUs / 2, 10_000_000L).coerceAtLeast(0)
+
+/** "0.5s", to a tenth of a second. */
+private fun tenths(micros: Long): String = "${micros / 1_000_000}.${micros % 1_000_000 / 100_000}s"
+
+/**
+ * Fade in and fade out, each from none to half the clip. Each slider is
+ * one undo step when it is let go.
+ */
+@Composable
+fun FadePanel(model: EditorModel, clip: Clip, done: () -> Unit) {
+    val limit = fadeLimit(clip)
+    val stored = remember(clip.id, model.edits) { model.fade(clip.id) }
+    var fadeIn by remember { mutableDoubleStateOf(stored.inUs.toDouble()) }
+    var fadeOut by remember { mutableDoubleStateOf(stored.outUs.toDouble()) }
+    LaunchedEffect(stored) {
+        fadeIn = stored.inUs.toDouble()
+        fadeOut = stored.outUs.toDouble()
+    }
+    val commit = { model.setFade(clip.id, fadeIn.toLong(), fadeOut.toLong()) }
+
+    PanelFrame(title = "Fade", close = done) {
+        for ((label, value, set) in listOf(
+            Triple("Fade in", fadeIn) { v: Double -> fadeIn = v },
+            Triple("Fade out", fadeOut) { v: Double -> fadeOut = v },
+        )) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(label, style = clipPanelDigits(13), color = Color.White.copy(alpha = 0.75f))
+                Slider(
+                    value = value.toFloat(),
+                    onValueChange = { set(it.toDouble()) },
+                    onValueChangeFinished = commit,
+                    valueRange = 0f..limit.toFloat().coerceAtLeast(1f),
+                    enabled = limit > 0,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Palette.accent,
+                        activeTrackColor = Palette.accent,
+                        inactiveTrackColor = Palette.white(0.3),
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics {
+                            contentDescription = label
+                            stateDescription = tenths(value.toLong())
+                        },
+                )
+                Text(tenths(value.toLong()), style = clipPanelDigits(12), color = Color.White.copy(alpha = 0.5f))
+            }
+        }
+    }
+}

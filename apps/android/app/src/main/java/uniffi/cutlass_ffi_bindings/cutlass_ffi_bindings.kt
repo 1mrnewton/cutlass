@@ -737,6 +737,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_add_effect(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_add_overlay(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_add_text(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_animations(
@@ -744,6 +746,10 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_append(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_background(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_beats(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_abilities(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_bar(
     ): Int
@@ -753,11 +759,17 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_export(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_extract_audio(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_fade(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_film(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_fonts(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_frame(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_freeze(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_import(
     ): Int
@@ -793,6 +805,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_background(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_fade(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_font_folders(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_ratio(
@@ -825,9 +839,21 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_tick(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_to_main(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_beat(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_crop(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_keyframe(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_mirror(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_reverse(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_trim(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_turn(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_type_text(
     ): Int
@@ -870,6 +896,8 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_add_effect(`ptr`: Long,`effectId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_add_overlay(`ptr`: Long,`materialId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_add_text(`ptr`: Long,`content`: RustBuffer.ByValue,`face`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_animations(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -877,6 +905,10 @@ internal object UniffiLib {
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_append(`ptr`: Long,`materialId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_background(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_beats(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_clip_abilities(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_clip_bar(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -886,11 +918,17 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_export(`ptr`: Long,`path`: RustBuffer.ByValue,`shortSide`: Int,`progress`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_extract_audio(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_fade(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_film(`ptr`: Long,`fromUs`: Long,`toUs`: Long,`pixelSize`: Double,`height`: Double,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_fonts(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_frame(`ptr`: Long,`timeUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_freeze(`ptr`: Long,`clipId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_import(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -926,6 +964,8 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_background(`ptr`: Long,`background`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_fade(`ptr`: Long,`clipId`: RustBuffer.ByValue,`inUs`: Long,`outUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_font_folders(`ptr`: Long,`folders`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_ratio(`ptr`: Long,`ratio`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -958,10 +998,22 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_tick(`ptr`: Long,`elapsedUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_to_main(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_beat(`ptr`: Long,`clipId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_crop(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_keyframe(`ptr`: Long,`clipId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_mirror(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_reverse(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_trim(`ptr`: Long,`clipId`: RustBuffer.ByValue,`startEdge`: Byte,`timeUs`: Long,`snapUs`: Long,`playheadUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_turn(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_type_text(`ptr`: Long,`clipId`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`face`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_undo(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1195,6 +1247,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_add_effect() and 0xFFFF) != 55608) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_add_overlay() and 0xFFFF) != 11159) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_add_text() and 0xFFFF) != 17542) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1205,6 +1260,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_background() and 0xFFFF) != 32988) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_beats() and 0xFFFF) != 22059) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_abilities() and 0xFFFF) != 20857) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_bar() and 0xFFFF) != 29840) {
@@ -1219,6 +1280,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_export() and 0xFFFF) != 5234) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_extract_audio() and 0xFFFF) != 62162) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_fade() and 0xFFFF) != 16188) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_film() and 0xFFFF) != 35426) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1226,6 +1293,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_frame() and 0xFFFF) != 13353) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_freeze() and 0xFFFF) != 5340) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_import() and 0xFFFF) != 38694) {
@@ -1279,6 +1349,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_background() and 0xFFFF) != 52021) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_fade() and 0xFFFF) != 13023) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_font_folders() and 0xFFFF) != 41608) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1327,10 +1400,28 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_tick() and 0xFFFF) != 60373) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_to_main() and 0xFFFF) != 50529) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_beat() and 0xFFFF) != 21214) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_crop() and 0xFFFF) != 39418) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_keyframe() and 0xFFFF) != 8108) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_mirror() and 0xFFFF) != 58666) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_reverse() and 0xFFFF) != 60213) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_trim() and 0xFFFF) != 7512) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_turn() and 0xFFFF) != 44776) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_type_text() and 0xFFFF) != 45610) {
@@ -1884,6 +1975,12 @@ public interface EditorInterface {
     fun `addEffect`(`effectId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String
     
     /**
+     * Put the whole of a library picture on an overlay row at `at_us`, as
+     * one undo step. Returns the new clip.
+     */
+    fun `addOverlay`(`materialId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String
+    
+    /**
      * Add `content` at `at_us` in `face`, or in the first face when `face`
      * is empty, as one undo step. Returns the new clip's id.
      */
@@ -1904,6 +2001,16 @@ public interface EditorInterface {
      * What fills the canvas around the main pictures.
      */
     fun `background`(): Background
+    
+    /**
+     * The beats on `clip_id`, as timeline times.
+     */
+    fun `beats`(`clipId`: kotlin.String): List<kotlin.Long>
+    
+    /**
+     * What the clip bar can do to `clip_id`.
+     */
+    fun `clipAbilities`(`clipId`: kotlin.String): ClipAbilities
     
     /**
      * The tool bar for `clip_id` while it is selected, or `None` for an id
@@ -1932,6 +2039,17 @@ public interface EditorInterface {
     fun `export`(`path`: kotlin.String, `shortSide`: kotlin.UInt, `progress`: ExportProgress): Exported
     
     /**
+     * Put a video's sound on its own clip on an audio row, as one undo
+     * step. Returns the sound's clip.
+     */
+    fun `extractAudio`(`clipId`: kotlin.String): kotlin.String
+    
+    /**
+     * A picture's or a sound's fade in and fade out.
+     */
+    fun `fade`(`clipId`: kotlin.String): Fade
+    
+    /**
      * Filmstrip tiles, `height` points tall, for the picture clips that
      * meet `from_us` to `to_us`. Pictures not stored yet are asked for.
      */
@@ -1946,6 +2064,12 @@ public interface EditorInterface {
      * The picture at `time_us`.
      */
     fun `frame`(`timeUs`: kotlin.Long): Frame
+    
+    /**
+     * Hold a video's frame at `at_us` as a still, as one undo step.
+     * Returns the still's clip.
+     */
+    fun `freeze`(`clipId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String
     
     /**
      * Read a picked file, copy it into the project, and add it to the
@@ -2033,6 +2157,11 @@ public interface EditorInterface {
      * Fill the canvas around the main pictures, as one undo step.
      */
     fun `setBackground`(`background`: Background)
+    
+    /**
+     * Fade a picture or a sound in and out, as one undo step.
+     */
+    fun `setFade`(`clipId`: kotlin.String, `inUs`: kotlin.Long, `outUs`: kotlin.Long)
     
     /**
      * Look for faces in `folders` and the folders below them, replacing
@@ -2124,16 +2253,49 @@ public interface EditorInterface {
     fun `tick`(`elapsedUs`: kotlin.Long): kotlin.Long
     
     /**
+     * Move an overlay picture onto the main row where it starts, as one
+     * undo step.
+     */
+    fun `toMain`(`clipId`: kotlin.String)
+    
+    /**
+     * Drop a beat on a sound at `at_us`, or take away the one there.
+     * Returns whether a beat is there now.
+     */
+    fun `toggleBeat`(`clipId`: kotlin.String, `atUs`: kotlin.Long): kotlin.Boolean
+    
+    /**
+     * Keep the middle half of a picture, or the whole frame again, as one
+     * undo step.
+     */
+    fun `toggleCrop`(`clipId`: kotlin.String)
+    
+    /**
      * The keyframe button: remove the keyframe under `at_us`, else key the
      * clip there. One undo step.
      */
     fun `toggleKeyframe`(`clipId`: kotlin.String, `atUs`: kotlin.Long)
     
     /**
+     * Flip a picture left to right, or back, as one undo step.
+     */
+    fun `toggleMirror`(`clipId`: kotlin.String)
+    
+    /**
+     * Play a picture or a sound backward, or forward again, as one undo step.
+     */
+    fun `toggleReverse`(`clipId`: kotlin.String)
+    
+    /**
      * Drag a clip's start edge, or its end edge, to `time_us`, as one undo
      * step. Returns where the edge landed.
      */
     fun `trim`(`clipId`: kotlin.String, `startEdge`: kotlin.Boolean, `timeUs`: kotlin.Long, `snapUs`: kotlin.Long, `playheadUs`: kotlin.Long): kotlin.Long
+    
+    /**
+     * Turn a picture a quarter clockwise, as one undo step.
+     */
+    fun `turn`(`clipId`: kotlin.String)
     
     /**
      * Type into a title as the words change. With no `clip_id`, the first
@@ -2285,6 +2447,26 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
+     * Put the whole of a library picture on an overlay row at `at_us`, as
+     * one undo step. Returns the new clip.
+     */
+    @Throws(EditorException::class)override fun `addOverlay`(`materialId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_add_overlay(
+        it,
+        
+        FfiConverterString.lower(`materialId`),
+        FfiConverterLong.lower(`atUs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Add `content` at `at_us` in `face`, or in the first face when `face`
      * is empty, as one undo step. Returns the new clip's id.
      */
@@ -2352,6 +2534,42 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
     UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_background(
         it,
         _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * The beats on `clip_id`, as timeline times.
+     */
+    @Throws(EditorException::class)override fun `beats`(`clipId`: kotlin.String): List<kotlin.Long> {
+            return FfiConverterSequenceLong.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_beats(
+        it,
+        
+        FfiConverterString.lower(`clipId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * What the clip bar can do to `clip_id`.
+     */
+    @Throws(EditorException::class)override fun `clipAbilities`(`clipId`: kotlin.String): ClipAbilities {
+            return FfiConverterTypeClipAbilities.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_clip_abilities(
+        it,
+        
+        FfiConverterString.lower(`clipId`),_status)
 }
     }
     )
@@ -2440,6 +2658,43 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
+     * Put a video's sound on its own clip on an audio row, as one undo
+     * step. Returns the sound's clip.
+     */
+    @Throws(EditorException::class)override fun `extractAudio`(`clipId`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_extract_audio(
+        it,
+        
+        FfiConverterString.lower(`clipId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * A picture's or a sound's fade in and fade out.
+     */
+    @Throws(EditorException::class)override fun `fade`(`clipId`: kotlin.String): Fade {
+            return FfiConverterTypeFade.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_fade(
+        it,
+        
+        FfiConverterString.lower(`clipId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Filmstrip tiles, `height` points tall, for the picture clips that
      * meet `from_us` to `to_us`. Pictures not stored yet are asked for.
      */
@@ -2489,6 +2744,26 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
         it,
         
         FfiConverterLong.lower(`timeUs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Hold a video's frame at `at_us` as a still, as one undo step.
+     * Returns the still's clip.
+     */
+    @Throws(EditorException::class)override fun `freeze`(`clipId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_freeze(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterLong.lower(`atUs`),_status)
 }
     }
     )
@@ -2800,6 +3075,25 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
+     * Fade a picture or a sound in and out, as one undo step.
+     */
+    @Throws(EditorException::class)override fun `setFade`(`clipId`: kotlin.String, `inUs`: kotlin.Long, `outUs`: kotlin.Long)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_set_fade(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterLong.lower(`inUs`),
+        FfiConverterLong.lower(`outUs`),_status)
+}
+    }
+    
+    
+
+    
+    /**
      * Look for faces in `folders` and the folders below them, replacing
      * any found before.
      */
@@ -3101,6 +3395,62 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
+     * Move an overlay picture onto the main row where it starts, as one
+     * undo step.
+     */
+    @Throws(EditorException::class)override fun `toMain`(`clipId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_to_main(
+        it,
+        
+        FfiConverterString.lower(`clipId`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Drop a beat on a sound at `at_us`, or take away the one there.
+     * Returns whether a beat is there now.
+     */
+    @Throws(EditorException::class)override fun `toggleBeat`(`clipId`: kotlin.String, `atUs`: kotlin.Long): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_beat(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterLong.lower(`atUs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Keep the middle half of a picture, or the whole frame again, as one
+     * undo step.
+     */
+    @Throws(EditorException::class)override fun `toggleCrop`(`clipId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_crop(
+        it,
+        
+        FfiConverterString.lower(`clipId`),_status)
+}
+    }
+    
+    
+
+    
+    /**
      * The keyframe button: remove the keyframe under `at_us`, else key the
      * clip there. One undo step.
      */
@@ -3113,6 +3463,40 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
         
         FfiConverterString.lower(`clipId`),
         FfiConverterLong.lower(`atUs`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Flip a picture left to right, or back, as one undo step.
+     */
+    @Throws(EditorException::class)override fun `toggleMirror`(`clipId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_mirror(
+        it,
+        
+        FfiConverterString.lower(`clipId`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Play a picture or a sound backward, or forward again, as one undo step.
+     */
+    @Throws(EditorException::class)override fun `toggleReverse`(`clipId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_reverse(
+        it,
+        
+        FfiConverterString.lower(`clipId`),_status)
 }
     }
     
@@ -3139,6 +3523,23 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
     }
     )
     }
+    
+
+    
+    /**
+     * Turn a picture a quarter clockwise, as one undo step.
+     */
+    @Throws(EditorException::class)override fun `turn`(`clipId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_turn(
+        it,
+        
+        FfiConverterString.lower(`clipId`),_status)
+}
+    }
+    
     
 
     
@@ -3781,6 +4182,92 @@ public object FfiConverterTypeClip: FfiConverterRustBuffer<Clip> {
 
 
 /**
+ * What the clip bar can do to one clip, and the state its toggles show.
+ */
+data class ClipAbilities (
+    /**
+     * A picture: Mirror and Rotate.
+     */
+    var `turn`: kotlin.Boolean
+    , 
+    /**
+     * A picture or a sound: Reverse and Fade.
+     */
+    var `reverse`: kotlin.Boolean
+    , 
+    /**
+     * A video or a composition: Crop.
+     */
+    var `crop`: kotlin.Boolean
+    , 
+    /**
+     * A video that is not a still: Freeze and Extract audio.
+     */
+    var `moving`: kotlin.Boolean
+    , 
+    /**
+     * On an audio row: Beats.
+     */
+    var `beats`: kotlin.Boolean
+    , 
+    var `mirrored`: kotlin.Boolean
+    , 
+    var `reversed`: kotlin.Boolean
+    , 
+    var `cropped`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeClipAbilities: FfiConverterRustBuffer<ClipAbilities> {
+    override fun read(buf: ByteBuffer): ClipAbilities {
+        return ClipAbilities(
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ClipAbilities) = (
+            FfiConverterBoolean.allocationSize(value.`turn`) +
+            FfiConverterBoolean.allocationSize(value.`reverse`) +
+            FfiConverterBoolean.allocationSize(value.`crop`) +
+            FfiConverterBoolean.allocationSize(value.`moving`) +
+            FfiConverterBoolean.allocationSize(value.`beats`) +
+            FfiConverterBoolean.allocationSize(value.`mirrored`) +
+            FfiConverterBoolean.allocationSize(value.`reversed`) +
+            FfiConverterBoolean.allocationSize(value.`cropped`)
+    )
+
+    override fun write(value: ClipAbilities, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`turn`, buf)
+            FfiConverterBoolean.write(value.`reverse`, buf)
+            FfiConverterBoolean.write(value.`crop`, buf)
+            FfiConverterBoolean.write(value.`moving`, buf)
+            FfiConverterBoolean.write(value.`beats`, buf)
+            FfiConverterBoolean.write(value.`mirrored`, buf)
+            FfiConverterBoolean.write(value.`reversed`, buf)
+            FfiConverterBoolean.write(value.`cropped`, buf)
+    }
+}
+
+
+
+/**
  * A clip's in and out animations, each a preset's resource id and length
  * in microseconds; an empty id is none.
  */
@@ -3933,6 +4420,47 @@ public object FfiConverterTypeExported: FfiConverterRustBuffer<Exported> {
             FfiConverterULong.write(value.`frames`, buf)
             FfiConverterUInt.write(value.`width`, buf)
             FfiConverterUInt.write(value.`height`, buf)
+    }
+}
+
+
+
+/**
+ * A clip's fade in and fade out. Zero is no fade.
+ */
+data class Fade (
+    var `inUs`: kotlin.Long
+    , 
+    var `outUs`: kotlin.Long
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFade: FfiConverterRustBuffer<Fade> {
+    override fun read(buf: ByteBuffer): Fade {
+        return Fade(
+            FfiConverterLong.read(buf),
+            FfiConverterLong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: Fade) = (
+            FfiConverterLong.allocationSize(value.`inUs`) +
+            FfiConverterLong.allocationSize(value.`outUs`)
+    )
+
+    override fun write(value: Fade, buf: ByteBuffer) {
+            FfiConverterLong.write(value.`inUs`, buf)
+            FfiConverterLong.write(value.`outUs`, buf)
     }
 }
 

@@ -404,6 +404,7 @@ private fun ClipView(
             tiles = model.films[clip.id].orEmpty(),
             thumbs = model.thumbs,
             wave = model.waves[clip.id],
+            beats = model.beats[clip.id].orEmpty().map { model.stripX(it - clip.startUs) },
             shift = trimmedLeft + cut,
             nameLeft = -cut,
             nameWidth = clipWidth,
@@ -776,6 +777,7 @@ private fun ClipBlock(
     tiles: List<Tile>,
     thumbs: Map<String, ImageBitmap>,
     wave: Wave?,
+    beats: List<Float>,
     shift: Float,
     nameLeft: Float,
     nameWidth: Float,
@@ -806,6 +808,21 @@ private fun ClipBlock(
             Film(tiles, thumbs, shift, Modifier.fillMaxSize())
         }
         Sound(wave, height, shift, Modifier.align(Alignment.BottomStart))
+        if (beats.isNotEmpty()) Beats(beats, shift, Modifier.fillMaxSize())
+    }
+}
+
+/** A dot along the bottom of a sound for each beat, `beats` dp from the clip's start. */
+@Composable
+private fun Beats(beats: List<Float>, shift: Float, modifier: Modifier) {
+    Canvas(modifier) {
+        val radius = 2.5.dp.toPx()
+        val y = size.height - radius * 2
+        for (beat in beats) {
+            val x = (beat - shift).dp.toPx()
+            if (x < -radius || x > size.width + radius) continue
+            drawCircle(Color.White, radius, Offset(x, y))
+        }
     }
 }
 

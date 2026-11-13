@@ -2,8 +2,8 @@
 //! kept for temporal prediction, both published row by row while the
 //! picture is still being decoded, and what its decode job left.
 
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Condvar, Mutex};
 
 use cutlass_decode::CodecError;
@@ -39,9 +39,49 @@ pub struct Spares {
     /// Frames released so far (see [`Frame::release`]), to wait for any.
     released: Mutex<u64>,
     released_one: Condvar,
+    /// Threads decoding now, at most `slots` when that is not 0 (see
+    /// [`Frame::run`]).
+    running: Mutex<usize>,
+    slot_free: Condvar,
+    slots: AtomicUsize,
+}
+
+thread_local! {
+    /// Whether this thread holds a slot to decode (see [`Frame::run`]).
+    static HOLDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl Spares {
+    /// At most `slots` threads decode at once (0: no limit).
+    pub fn set_slots(&self, slots: usize) {
+        self.slots.store(slots, SeqCst);
+    }
+
+    /// Take a slot, waiting for one. False when there is no limit.
+    fn enter(&self) -> bool {
+        let slots = self.slots.load(SeqCst);
+        if slots == 0 {
+            return false;
+        }
+        let mut running = lock(&self.running);
+        while *running >= slots {
+            running = self
+                .slot_free
+                .wait(running)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *running += 1;
+        HOLDS.set(true);
+        true
+    }
+
+    /// Give back the slot this thread holds.
+    fn leave(&self) {
+        HOLDS.set(false);
+        *lock(&self.running) -= 1;
+        self.slot_free.notify_one();
+    }
+
     /// Frames released so far.
     pub fn released(&self) -> u64 {
         *lock(&self.released)
@@ -182,6 +222,7 @@ impl Frame {
         if self.rows.published() >= need {
             return;
         }
+        let paused = self.pause();
         let mut gate = lock(&self.gate);
         while self.rows.published() < need && !self.abandoned.load(SeqCst) {
             gate = self
@@ -189,6 +230,8 @@ impl Frame {
                 .wait(gate)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
+        drop(gate);
+        self.resume(paused);
     }
 
     /// Block until luma rows `0..rows` are final, or `stop` is set (and
@@ -211,12 +254,53 @@ impl Frame {
         if self.col.published() >= need {
             return;
         }
+        let paused = self.pause();
         let mut gate = lock(&self.gate);
         while self.col.published() < need && !self.abandoned.load(SeqCst) {
             gate = self
                 .moved
                 .wait(gate)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        drop(gate);
+        self.resume(paused);
+    }
+
+    /// Decode this frame's picture in a slot of the decoder's (see
+    /// [`Spares::set_slots`]): `f` runs once one is free, and gives it
+    /// back while it waits for the rows of another picture, so another
+    /// picture runs in its place.
+    pub fn run<R>(&self, f: impl FnOnce() -> R) -> R {
+        struct Leave<'a>(Option<&'a Spares>);
+        impl Drop for Leave<'_> {
+            fn drop(&mut self) {
+                if let Some(spares) = self.0
+                    && HOLDS.get()
+                {
+                    spares.leave();
+                }
+            }
+        }
+        let spares = self.spares.as_deref().filter(|s| s.enter());
+        let _leave = Leave(spares);
+        f()
+    }
+
+    /// Give back this thread's slot, if it holds one, before blocking.
+    fn pause(&self) -> bool {
+        match &self.spares {
+            Some(spares) if HOLDS.get() => {
+                spares.leave();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Take a slot again after [`Self::pause`].
+    fn resume(&self, paused: bool) {
+        if paused && let Some(spares) = &self.spares {
+            spares.enter();
         }
     }
 

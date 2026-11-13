@@ -716,7 +716,19 @@ impl HevcDecoder {
         // Keep at most so many pictures decoding. The next starts as soon
         // as any of them is released: done, or down to its last rows with
         // threads to spare.
-        let frames = self.split(ready.wavefront()).0;
+        let (frames, rows) = self.split(ready.wavefront());
+        // With a picture to each thread, as many threads decode at once,
+        // and up to half as many pictures again wait ready: a picture that
+        // waits for the rows of a reference lets one of them run in its
+        // place (see `Frame::run`). Rows of a picture on several threads
+        // keep one picture to a thread.
+        let slots = if rows == 1 && frames > 1 { frames } else { 0 };
+        self.shared.frames.set_slots(slots);
+        let frames = if slots > 0 {
+            frames + frames / 2
+        } else {
+            frames
+        };
         loop {
             let seen = self.shared.frames.released();
             self.running.retain(|f| !f.is_released());
@@ -836,7 +848,11 @@ impl Drop for HevcDecoder {
 /// for its rows forever.
 fn guarded<P: Pixel>(job: Job<P>) -> Option<Leftovers<P>> {
     let frame = job.frame.clone();
-    let left = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run())).ok();
+    let left = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let frame = job.frame.clone();
+        frame.run(|| job.run())
+    }))
+    .ok();
     if left.is_none() {
         frame.abandon();
     }

@@ -4436,10 +4436,30 @@ public struct TextStyle: Equatable, Hashable {
     public var glowColor: String
     public var glowStrength: Double
     public var glowRange: Double
+    /**
+     * Left, center or right (0 to 2), or a vertical column at the top,
+     * middle or bottom (3 to 5).
+     */
+    public var alignment: Int32
+    public var bold: Bool
+    public var italic: Bool
+    public var underline: Bool
+    /**
+     * Fractions of the size; 0 is the normal gap.
+     */
+    public var letterSpacing: Double
+    public var lineSpacing: Double
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(size: Double, color: String, outlineColor: String, outlineWidth: Double, shadowColor: String, shadowDistance: Double, shadowBlur: Double, backgroundColor: String, backgroundAlpha: Double, backgroundRound: Double, glowColor: String, glowStrength: Double, glowRange: Double) {
+    public init(size: Double, color: String, outlineColor: String, outlineWidth: Double, shadowColor: String, shadowDistance: Double, shadowBlur: Double, backgroundColor: String, backgroundAlpha: Double, backgroundRound: Double, glowColor: String, glowStrength: Double, glowRange: Double, 
+        /**
+         * Left, center or right (0 to 2), or a vertical column at the top,
+         * middle or bottom (3 to 5).
+         */alignment: Int32, bold: Bool, italic: Bool, underline: Bool, 
+        /**
+         * Fractions of the size; 0 is the normal gap.
+         */letterSpacing: Double, lineSpacing: Double) {
         self.size = size
         self.color = color
         self.outlineColor = outlineColor
@@ -4453,6 +4473,12 @@ public struct TextStyle: Equatable, Hashable {
         self.glowColor = glowColor
         self.glowStrength = glowStrength
         self.glowRange = glowRange
+        self.alignment = alignment
+        self.bold = bold
+        self.italic = italic
+        self.underline = underline
+        self.letterSpacing = letterSpacing
+        self.lineSpacing = lineSpacing
     }
 
     
@@ -4483,7 +4509,13 @@ public struct FfiConverterTypeTextStyle: FfiConverterRustBuffer {
                 backgroundRound: FfiConverterDouble.read(from: &buf), 
                 glowColor: FfiConverterString.read(from: &buf), 
                 glowStrength: FfiConverterDouble.read(from: &buf), 
-                glowRange: FfiConverterDouble.read(from: &buf)
+                glowRange: FfiConverterDouble.read(from: &buf), 
+                alignment: FfiConverterInt32.read(from: &buf), 
+                bold: FfiConverterBool.read(from: &buf), 
+                italic: FfiConverterBool.read(from: &buf), 
+                underline: FfiConverterBool.read(from: &buf), 
+                letterSpacing: FfiConverterDouble.read(from: &buf), 
+                lineSpacing: FfiConverterDouble.read(from: &buf)
         )
     }
 
@@ -4501,6 +4533,12 @@ public struct FfiConverterTypeTextStyle: FfiConverterRustBuffer {
         FfiConverterString.write(value.glowColor, into: &buf)
         FfiConverterDouble.write(value.glowStrength, into: &buf)
         FfiConverterDouble.write(value.glowRange, into: &buf)
+        FfiConverterInt32.write(value.alignment, into: &buf)
+        FfiConverterBool.write(value.bold, into: &buf)
+        FfiConverterBool.write(value.italic, into: &buf)
+        FfiConverterBool.write(value.underline, into: &buf)
+        FfiConverterDouble.write(value.letterSpacing, into: &buf)
+        FfiConverterDouble.write(value.lineSpacing, into: &buf)
     }
 }
 
@@ -4537,10 +4575,20 @@ public struct TextStyleRanges: Equatable, Hashable {
     public var backgroundRoundStart: Double
     public var glowStrengthStart: Double
     public var glowRangeStart: Double
+    /**
+     * Fractions of the size; 0 is the normal gap.
+     */
+    public var letterSpacingMin: Double
+    public var letterSpacingMax: Double
+    public var lineSpacingMin: Double
+    public var lineSpacingMax: Double
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(sizeMin: Double, sizeMax: Double, outlineMax: Double, outlineStart: Double, shadowDistanceMax: Double, shadowDistanceStart: Double, shadowBlurStart: Double, backgroundAlphaStart: Double, backgroundRoundStart: Double, glowStrengthStart: Double, glowRangeStart: Double) {
+    public init(sizeMin: Double, sizeMax: Double, outlineMax: Double, outlineStart: Double, shadowDistanceMax: Double, shadowDistanceStart: Double, shadowBlurStart: Double, backgroundAlphaStart: Double, backgroundRoundStart: Double, glowStrengthStart: Double, glowRangeStart: Double, 
+        /**
+         * Fractions of the size; 0 is the normal gap.
+         */letterSpacingMin: Double, letterSpacingMax: Double, lineSpacingMin: Double, lineSpacingMax: Double) {
         self.sizeMin = sizeMin
         self.sizeMax = sizeMax
         self.outlineMax = outlineMax
@@ -4552,6 +4600,10 @@ public struct TextStyleRanges: Equatable, Hashable {
         self.backgroundRoundStart = backgroundRoundStart
         self.glowStrengthStart = glowStrengthStart
         self.glowRangeStart = glowRangeStart
+        self.letterSpacingMin = letterSpacingMin
+        self.letterSpacingMax = letterSpacingMax
+        self.lineSpacingMin = lineSpacingMin
+        self.lineSpacingMax = lineSpacingMax
     }
 
     
@@ -4580,7 +4632,11 @@ public struct FfiConverterTypeTextStyleRanges: FfiConverterRustBuffer {
                 backgroundAlphaStart: FfiConverterDouble.read(from: &buf), 
                 backgroundRoundStart: FfiConverterDouble.read(from: &buf), 
                 glowStrengthStart: FfiConverterDouble.read(from: &buf), 
-                glowRangeStart: FfiConverterDouble.read(from: &buf)
+                glowRangeStart: FfiConverterDouble.read(from: &buf), 
+                letterSpacingMin: FfiConverterDouble.read(from: &buf), 
+                letterSpacingMax: FfiConverterDouble.read(from: &buf), 
+                lineSpacingMin: FfiConverterDouble.read(from: &buf), 
+                lineSpacingMax: FfiConverterDouble.read(from: &buf)
         )
     }
 
@@ -4596,6 +4652,10 @@ public struct FfiConverterTypeTextStyleRanges: FfiConverterRustBuffer {
         FfiConverterDouble.write(value.backgroundRoundStart, into: &buf)
         FfiConverterDouble.write(value.glowStrengthStart, into: &buf)
         FfiConverterDouble.write(value.glowRangeStart, into: &buf)
+        FfiConverterDouble.write(value.letterSpacingMin, into: &buf)
+        FfiConverterDouble.write(value.letterSpacingMax, into: &buf)
+        FfiConverterDouble.write(value.lineSpacingMin, into: &buf)
+        FfiConverterDouble.write(value.lineSpacingMax, into: &buf)
     }
 }
 
@@ -5252,6 +5312,14 @@ public enum TextStyleChange: Equatable, Hashable {
     )
     case glow(color: String, strength: Double, range: Double
     )
+    case align(alignment: Int32
+    )
+    case pattern(bold: Bool, italic: Bool, underline: Bool
+    )
+    case letterSpacing(spacing: Double
+    )
+    case lineSpacing(spacing: Double
+    )
 
 
 
@@ -5289,6 +5357,18 @@ public struct FfiConverterTypeTextStyleChange: FfiConverterRustBuffer {
         )
         
         case 6: return .glow(color: try FfiConverterString.read(from: &buf), strength: try FfiConverterDouble.read(from: &buf), range: try FfiConverterDouble.read(from: &buf)
+        )
+        
+        case 7: return .align(alignment: try FfiConverterInt32.read(from: &buf)
+        )
+        
+        case 8: return .pattern(bold: try FfiConverterBool.read(from: &buf), italic: try FfiConverterBool.read(from: &buf), underline: try FfiConverterBool.read(from: &buf)
+        )
+        
+        case 9: return .letterSpacing(spacing: try FfiConverterDouble.read(from: &buf)
+        )
+        
+        case 10: return .lineSpacing(spacing: try FfiConverterDouble.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -5334,6 +5414,28 @@ public struct FfiConverterTypeTextStyleChange: FfiConverterRustBuffer {
             FfiConverterString.write(color, into: &buf)
             FfiConverterDouble.write(strength, into: &buf)
             FfiConverterDouble.write(range, into: &buf)
+            
+        
+        case let .align(alignment):
+            writeInt(&buf, Int32(7))
+            FfiConverterInt32.write(alignment, into: &buf)
+            
+        
+        case let .pattern(bold,italic,underline):
+            writeInt(&buf, Int32(8))
+            FfiConverterBool.write(bold, into: &buf)
+            FfiConverterBool.write(italic, into: &buf)
+            FfiConverterBool.write(underline, into: &buf)
+            
+        
+        case let .letterSpacing(spacing):
+            writeInt(&buf, Int32(9))
+            FfiConverterDouble.write(spacing, into: &buf)
+            
+        
+        case let .lineSpacing(spacing):
+            writeInt(&buf, Int32(10))
+            FfiConverterDouble.write(spacing, into: &buf)
             
         }
     }

@@ -121,8 +121,8 @@ struct TextPanel: View {
     }
 }
 
-/// A title's color and size, outline, background, shadow, and glow. Colors,
-/// ranges, and the values a part starts at come from Rust.
+/// A title's color and size, format, outline, background, shadow, and glow.
+/// Colors, ranges, and the values a part starts at come from Rust.
 private struct StylesTab: View {
     let model: EditorModel
     let clip: String
@@ -131,6 +131,7 @@ private struct StylesTab: View {
 
     enum Part: String, CaseIterable {
         case text = "Text"
+        case format = "Format"
         case outline = "Outline"
         case background = "Background"
         case shadow = "Shadow"
@@ -153,7 +154,7 @@ private struct StylesTab: View {
                 }
             }
             if let style {
-                swatches(style)
+                if part == .format { format(style) } else { swatches(style) }
                 // Room for two sliders on every part, so the panel and the
                 // preview above it keep their size.
                 VStack(spacing: 6) { sliders(style) }
@@ -185,10 +186,75 @@ private struct StylesTab: View {
         }
     }
 
+    /// Bold, italic and underline, then left, center and right.
+    private func format(_ style: TextStyle) -> some View {
+        HStack(spacing: 8) {
+            toggle("B", on: style.bold, label: "Bold") {
+                send(.pattern(bold: !style.bold, italic: style.italic, underline: style.underline),
+                     live: false)
+            }
+            toggle("I", on: style.italic, label: "Italic") {
+                send(.pattern(bold: style.bold, italic: !style.italic, underline: style.underline),
+                     live: false)
+            }
+            toggle("U", on: style.underline, label: "Underline") {
+                send(.pattern(bold: style.bold, italic: style.italic, underline: !style.underline),
+                     live: false)
+            }
+            Spacer().frame(width: 12)
+            ForEach(
+                [(0, "text.alignleft", "Left"), (1, "text.aligncenter", "Center"),
+                 (2, "text.alignright", "Right")], id: \.0
+            ) { alignment, icon, label in
+                toggle(icon, symbol: true, on: style.alignment == alignment, label: "Align \(label)") {
+                    send(.align(alignment: Int32(alignment)), live: false)
+                }
+            }
+        }
+        .padding(4)
+        .frame(height: 44)
+    }
+
+    private func toggle(
+        _ text: String, symbol: Bool = false, on: Bool, label: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Group {
+                if symbol {
+                    Image(systemName: text).font(.system(size: 15))
+                } else {
+                    Text(text)
+                        .font(.system(size: 16, weight: text == "B" ? .bold : .regular))
+                        .italic(text == "I")
+                        .underline(text == "U")
+                }
+            }
+            .frame(width: 36, height: 36)
+            .foregroundStyle(on ? .black : .white)
+            .background(on ? Color.white : Color(white: 0.2), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+
     @ViewBuilder
     private func sliders(_ style: TextStyle) -> some View {
         let ranges = Self.ranges
         switch part {
+        case .format:
+            StyleSlider(
+                label: "Letters", value: style.letterSpacing,
+                range: ranges.letterSpacingMin...ranges.letterSpacingMax, shown: percent
+            ) { spacing, live in
+                send(.letterSpacing(spacing: spacing), live: live)
+            }
+            StyleSlider(
+                label: "Lines", value: style.lineSpacing,
+                range: ranges.lineSpacingMin...ranges.lineSpacingMax, shown: percent
+            ) { spacing, live in
+                send(.lineSpacing(spacing: spacing), live: live)
+            }
         case .text:
             StyleSlider(
                 label: "Size", value: style.size, range: ranges.sizeMin...ranges.sizeMax,
@@ -252,6 +318,7 @@ private struct StylesTab: View {
     private func chosenColor(_ style: TextStyle) -> String {
         switch part {
         case .text: style.color.isEmpty ? "#FFFFFF" : style.color
+        case .format: ""
         case .outline: style.outlineColor
         case .background: style.backgroundColor
         case .shadow: style.shadowColor
@@ -265,6 +332,8 @@ private struct StylesTab: View {
         switch part {
         case .text:
             send(.color(color: color), live: false)
+        case .format:
+            break
         case .outline:
             let width = style.outlineWidth > 0 ? style.outlineWidth : ranges.outlineStart
             send(.outline(color: color, width: width), live: false)

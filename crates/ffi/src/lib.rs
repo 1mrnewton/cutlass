@@ -3144,6 +3144,28 @@ mod tests {
         assert!(host.add_clip_effect(&first, "recipe/nope").is_err());
     }
 
+    #[test]
+    fn a_reversed_movie_draws_from_its_first_frame() {
+        let movie = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/16929689_1920_1080_30fps.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: the movie is not in ../local-files");
+            return;
+        }
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let id = host.import(&movie).unwrap();
+        let clip = host.append(&id).unwrap();
+        // The last pictures display after the last one decodes; a reversed
+        // clip starts on them.
+        let lit = |picture: &crate::Picture| picture.rgba.chunks(4).filter(|p| p[0] > 16).count();
+        let last = host.frame(Micros(10_200_000)).unwrap();
+        assert!(lit(&last) > 0);
+        host.toggle_reverse(&clip).unwrap();
+        assert!(lit(&host.frame(Micros(0)).unwrap()) > 0);
+    }
+
     fn movie(duration: i64) -> crate::Probed {
         crate::Probed::Video {
             meta: cutlass_model::MetaType::Video,

@@ -491,6 +491,50 @@ or vectorised motion saving (its time is waiting on memory), and copying
 the samples of emulated edges in fixed chunks (the compiler turns the
 chunk loops back into library calls).
 
+#### Ahead of libdav1d (13 Nov 2026)
+
+The decoder is now faster than FFmpeg 8.1.1 with libdav1d 1.5.3 on the
+same two 4K 8-bit clips of 240 frames, single threaded and with 18
+threads. Release build with `-Cprofile-use` from `scripts/pgo_profile.py`
+(the fixtures, not the benchmark clips); whole-process wall time of
+`av1bench` against `ffmpeg -c:v libdav1d -threads N -f null`, runs
+alternated, on the 6 performance + 12 efficiency core M5 with other work
+running (load about 3.6). Median of 21 runs (11 for the CDEF clip on one
+thread), fastest in brackets where recorded:
+
+| Clip | Threads | cutlass-av1 | FFmpeg + libdav1d |
+|---|---|---|---|
+| 4K, CDEF | 1 | 2453.9 ms | 2583.5 ms |
+| 4K, deblocking only | 1 | 1893.8 ms (1863.6) | 1918.3 ms (1891.9) |
+| 4K, CDEF | 18 | 312.3 ms | 321.9 ms |
+| 4K, deblocking only | 18 | 284.1 ms | 333.1 ms |
+
+Single threaded the decoder takes 10.52G and 8.09G cycles against
+libdav1d's 11.15G and 8.31G (FFmpeg's count includes its demuxing and
+output). What moved it there, each change checked bit-exact on both
+clips and the 8- and 10-bit loop restoration fixtures at 1, 3 and 18
+threads:
+
+- A frame's final rows are published once into one buffer the frames
+  reading it share (`cutlass_simd::shared_rows`), rather than a copy of
+  each 64-row band with the 80 rows above it for each band: 9% fewer
+  cycles at 18 threads on the CDEF clip (365 ms to 330 ms) and a peak of
+  912 MB from 1051 MB.
+- Each block's loop filter info is stored as the block is parsed, as
+  libdav1d builds its masks, rather than by walking each superblock
+  row's mode info again, and in 16-byte stores: 0.5-1.2% fewer cycles.
+- Mode info written only where later blocks read it, the BlockDecoded
+  flags of a row kept as the bits of one word, intra edges gathered a
+  row at a time, and many smaller cuts, each kept only on a cycle count.
+
+Left open: a deblocking that filters the shared rows in place rather
+than a copy (at most about 1.6% of the 18-thread wall time, and needs
+`unsafe` across the loop filter), not keeping the reference frames for
+rollback after a failed decode (about 0.25% on one thread, but a corrupt
+frame could no longer be undone), and the parse, still about 3% more
+than libdav1d's single threaded, spread with no source line above about
+1%.
+
 ## Encoder
 
 ### Coverage

@@ -75,13 +75,22 @@ cargo test --release -p cutlass-av1 --test fixtures -- --ignored write_libdav1d_
 With several threads (`Av1Core::threads`) parsing, reconstruction and the
 post filters of a frame run in a pipeline beside those of other frames,
 and the tiles of a frame are parsed at the same time
-(`Av1Core::frames_at_once` turns that off for less memory). On the 1080p
-benchmark it takes about 1.9x the time of libdav1d single threaded and
-1.6x with 4 threads; on multi-tile 4K files about 1.7x to 2x with 18
-threads and 1.5x to 1.7x on one thread: the deblocking edge decisions
-and inter prediction are the widest gaps, and not every sample loop is
-on a vector kernel yet
-(libdav1d uses hand-written assembly; numbers in `STATUS.md`).
+(`Av1Core::frames_at_once` turns that off for less memory).
+
+It decodes faster than FFmpeg 8.1.1 with libdav1d 1.5.3, which uses
+hand-written assembly, on one thread and on 18. Two 4K 8-bit clips of
+240 frames, release build with a profile from the fixtures
+(`scripts/pgo_profile.py`), whole-process wall time, median:
+
+| Clip | Threads | cutlass-av1 | FFmpeg + libdav1d |
+|---|---|---|---|
+| 4K, CDEF | 1 | 2453.9 ms | 2583.5 ms |
+| 4K, deblocking only | 1 | 1893.8 ms | 1918.3 ms |
+| 4K, CDEF | 18 | 312.3 ms | 321.9 ms |
+| 4K, deblocking only | 18 | 284.1 ms | 333.1 ms |
+
+The sample loops run on NEON kernels in `cutlass-simd`, each with a
+scalar twin for other targets (details and history in `STATUS.md`).
 
 ## Encoder
 

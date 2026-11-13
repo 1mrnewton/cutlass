@@ -761,11 +761,7 @@ mod tests {
         let times = |count: usize| vec![Micros(0); count];
         // Too many pictures, no rows, or too many rows: refused before the
         // file is opened.
-        for (count, rows) in [
-            (MAX_FRAMES + 1, 360),
-            (1, 0),
-            (1, MAX_FRAME_ROWS + 1),
-        ] {
+        for (count, rows) in [(MAX_FRAMES + 1, 360), (1, 0), (1, MAX_FRAME_ROWS + 1)] {
             assert!(matches!(
                 frames_of(&factory, &missing, &times(count), rows),
                 Err(EngineError::Window)

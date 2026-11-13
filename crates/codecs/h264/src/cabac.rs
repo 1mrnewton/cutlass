@@ -256,7 +256,9 @@ impl<'a> Cabac<'a> {
     /// `end_of_slice_flag` and the like. Bits read past the end of the data
     /// come out here as an error: the bins before only see zeros there.
     pub fn terminate(&mut self) -> Result<bool, CodecError> {
-        if self.overran() {
+        // Until `index` passes the end of the data, every bit the offset
+        // took in is from it.
+        if self.index > self.data.len() && self.overran() {
             return Err(CodecError::Truncated {
                 at_bit: self.at_bit(),
                 what: "cabac",

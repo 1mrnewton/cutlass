@@ -11293,8 +11293,9 @@ struct AlcWeight {
 
 /// One partition predicted into the picture. The common one, copied or
 /// averaged from inside its references, is written here; anything else
-/// goes to [`mc_general`], kept out of line so this stays small.
-#[inline]
+/// goes to [`mc_general`], kept out of line so this stays small. Inlined
+/// at each of its callers: with a call, a TikTok clip took 1.1% more cycles.
+#[inline(always)]
 fn mc_block<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],

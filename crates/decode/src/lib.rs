@@ -39,10 +39,10 @@ pub use surface::{PictureSurface, Surface};
 pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
     BitDepth, Channel, ChannelLayout, ChromaSamplePosition, CodecError, CodecParams, ColorMatrix,
-    ColorPrimaries, ColorRange, ColorType, FrameError, ImageError, MatrixCoefficients, Packet, Pcm,
-    PhysicalPixel, PixelFormat, Plane, Rgb8, SampleFormat, SideData, StillImage, TextItem,
-    Transfer, Transparency, VideoFrame, Yuv420High, Yuv420p, Yuv420p10, Yuv422High, Yuv422p,
-    Yuv444High, Yuv444p,
+    ColorPrimaries, ColorRange, ColorType, ContentLight, FrameError, ImageError, ItuT35,
+    MasteringDisplay, MatrixCoefficients, Packet, Pcm, PhysicalPixel, PixelFormat, Plane, Rgb8,
+    SampleFormat, SideData, StillImage, TextItem, Transfer, Transparency, VideoFrame, Yuv420High,
+    Yuv420p, Yuv420p10, Yuv422High, Yuv422p, Yuv444High, Yuv444p,
 };
 pub use orient::Orientation;
 pub use video::VideoDecodeFactory;
@@ -125,6 +125,13 @@ pub struct PictureInfo {
     /// `seq_level_idx` of the operating point this picture was decoded under.
     /// Other codecs leave this 0.
     pub seq_level_idx: u8,
+    /// Sample range the stream names. A decoder that does not read one
+    /// leaves this unspecified, and the samples are then studio swing.
+    pub range: ColorRange,
+    /// Content light level the stream carries for this picture.
+    pub content_light: Option<ContentLight>,
+    /// Mastering display colour volume the stream carries for this picture.
+    pub mastering_display: Option<MasteringDisplay>,
 }
 
 impl PictureInfo {
@@ -159,6 +166,9 @@ impl PictureInfo {
             num_ticks_per_picture_minus_1: None,
             num_units_in_decoding_tick: 0,
             seq_level_idx: 0,
+            range: ColorRange::Unspecified,
+            content_light: None,
+            mastering_display: None,
         }
     }
 }
@@ -174,6 +184,8 @@ pub struct PictureOutput {
     pts: i64,
     timescale: u32,
     storage: PictureStorage,
+    /// ITU-T T.35 messages the stream carries for this picture.
+    t35: Vec<ItuT35>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -341,6 +353,7 @@ impl PictureOutput {
             pts,
             timescale,
             storage: PictureStorage::Cpu(bytes),
+            t35: Vec::new(),
         })
     }
 
@@ -357,6 +370,7 @@ impl PictureOutput {
             pts,
             timescale,
             storage: PictureStorage::Platform { token },
+            t35: Vec::new(),
         })
     }
 
@@ -378,7 +392,23 @@ impl PictureOutput {
             pts,
             timescale,
             storage: PictureStorage::Surface(surface),
+            t35: Vec::new(),
         })
+    }
+
+    /// The same picture with the ITU-T T.35 messages the stream carries
+    /// for it, in stream order.
+    #[must_use]
+    pub fn with_t35(mut self, messages: Vec<ItuT35>) -> Self {
+        self.t35 = messages;
+        self
+    }
+
+    /// ITU-T T.35 messages for this picture, such as HDR10+ dynamic
+    /// metadata. Empty when the stream carries none.
+    #[must_use]
+    pub fn t35(&self) -> &[ItuT35] {
+        &self.t35
     }
 
     #[must_use]
@@ -639,8 +669,8 @@ mod tests {
     use std::cell::Cell;
 
     use super::{
-        AudioOutput, DecodeFactory, Decoder, Output, PictureInfo, PictureOutput, PictureSamples,
-        SampleAspect, SequenceTiming, VideoDecoder, VideoOutput, picture_byte_len,
+        AudioOutput, DecodeFactory, Decoder, ItuT35, Output, PictureInfo, PictureOutput,
+        PictureSamples, SampleAspect, SequenceTiming, VideoDecoder, VideoOutput, picture_byte_len,
     };
     use cutlass_codec::CodecId;
     use cutlass_codec::access::{
@@ -1133,6 +1163,50 @@ mod tests {
         };
         assert_eq!(picture.samples(), PictureSamples::Cpu(&[9, 8, 7, 6, 5, 4]));
         assert_eq!(picture.pts(), 10);
+    }
+
+    #[test]
+    fn a_new_picture_names_no_range_and_no_hdr_metadata() {
+        let info = PictureInfo::new(
+            2,
+            2,
+            PixelFormat::Yuv420p,
+            ColorPrimaries::Bt2020,
+            Transfer::Pq,
+        );
+        assert_eq!(info.range, ColorRange::Unspecified);
+        assert_eq!(info.content_light, None);
+        assert_eq!(info.mastering_display, None);
+        let picture = PictureOutput::cpu(info, vec![0; 6], 0, 1).expect("yuv");
+        assert!(picture.t35().is_empty());
+    }
+
+    #[test]
+    fn a_picture_keeps_its_t35_messages_in_order() {
+        let info = PictureInfo::new(
+            2,
+            2,
+            PixelFormat::Yuv420p,
+            ColorPrimaries::Unspecified,
+            Transfer::Unspecified,
+        );
+        let messages = vec![
+            ItuT35 {
+                country_code: 0xb5,
+                country_code_extension: None,
+                payload: vec![0, 0x3c, 0, 1, 4],
+            },
+            ItuT35 {
+                country_code: 0xff,
+                country_code_extension: Some(7),
+                payload: Vec::new(),
+            },
+        ];
+        let picture = PictureOutput::cpu(info, vec![0; 6], 0, 1)
+            .expect("yuv")
+            .with_t35(messages.clone());
+        assert_eq!(picture.t35(), messages);
+        assert_eq!(picture.clone().t35(), messages);
     }
 
     #[test]

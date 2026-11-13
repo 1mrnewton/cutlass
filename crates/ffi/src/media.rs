@@ -84,8 +84,33 @@ pub(crate) fn copy_in(root: &Path, source: &Path) -> Result<(String, PathBuf), F
         .ok_or_else(|| FfiError::Refused {
             reason: "the file has no name".to_owned(),
         })?;
+    let (stored, destination) = unused(root, name)?;
+    std::fs::copy(source, &destination).map_err(io)?;
+    Ok((stored, destination))
+}
+
+/// Write `bytes` into the project's `Resources` folder as `name`, or as
+/// `name 2` and so on when that is taken. Returns the path as the draft
+/// stores it and the file written.
+pub(crate) fn write_in(
+    root: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(String, PathBuf), FfiError> {
+    let (stored, destination) = unused(root, name)?;
+    std::fs::write(&destination, bytes).map_err(|error| FfiError::Refused {
+        reason: error.to_string(),
+    })?;
+    Ok((stored, destination))
+}
+
+/// The first of `name`, `name 2`, `name 3`... not yet in `Resources`,
+/// which this makes.
+fn unused(root: &Path, name: &str) -> Result<(String, PathBuf), FfiError> {
     let resources = root.join("Resources");
-    std::fs::create_dir_all(&resources).map_err(io)?;
+    std::fs::create_dir_all(&resources).map_err(|error| FfiError::Refused {
+        reason: error.to_string(),
+    })?;
     let (stem, extension) = match name.rsplit_once('.') {
         Some((stem, extension)) if !stem.is_empty() => (stem, Some(extension)),
         _ => (name, None),
@@ -99,9 +124,7 @@ pub(crate) fn copy_in(root: &Path, source: &Path) -> Result<(String, PathBuf), F
             None => format!("{stem} {n}"),
         };
     }
-    let destination = resources.join(&candidate);
-    std::fs::copy(source, &destination).map_err(io)?;
-    Ok((format!("Resources/{candidate}"), destination))
+    Ok((format!("Resources/{candidate}"), resources.join(&candidate)))
 }
 
 /// The requests that add the whole of `material_id` at the end of its lane.

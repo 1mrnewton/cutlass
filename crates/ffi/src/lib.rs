@@ -11,6 +11,7 @@
 mod animate;
 mod cache;
 mod canvas;
+mod clip;
 mod codecs;
 mod effect;
 mod error;
@@ -32,6 +33,7 @@ pub use canvas::{
     BACKGROUND_BLURS, BACKGROUND_COLORS, PhoneBackground, PhoneRatio, phone_background,
     phone_ratios,
 };
+pub use clip::{PhoneClipAbilities, PhoneFade};
 pub use codecs::{decoders, readers};
 pub use cutlass_editor::{
     Bar, Tool, ToolId, clock, fling_start, fling_step, speed_at, speed_position, tools, volume_at,
@@ -2498,5 +2500,153 @@ mod tests {
         assert_eq!(host.frame(at).unwrap(), cut);
         host.redo().unwrap();
         assert_eq!(host.frame(at).unwrap(), later);
+    }
+
+    #[test]
+    fn a_still_mirrors_turns_crops_reverses_and_fades_each_as_one_step() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (first, _) = two_stills(&mut host);
+        let clip = |host: &PhoneHost| host.draft().tracks[0].segments[0].clone();
+        let can = host.clip_abilities(&first).unwrap();
+        assert!(can.turn && can.reverse && can.crop);
+        assert!(!can.moving && !can.beats && !can.mirrored);
+
+        host.toggle_mirror(&first).unwrap();
+        assert!(clip(&host).clip.flip.horizontal);
+        assert!(host.clip_abilities(&first).unwrap().mirrored);
+        host.turn(&first).unwrap();
+        assert_eq!(clip(&host).clip.rotation, 270.0);
+        host.toggle_crop(&first).unwrap();
+        assert!(host.clip_abilities(&first).unwrap().cropped);
+        host.toggle_reverse(&first).unwrap();
+        assert!(clip(&host).reverse);
+
+        host.set_fade(&first, Micros(300_000), Micros(500_000))
+            .unwrap();
+        let fade = host.fade(&first).unwrap();
+        assert_eq!(
+            (fade.fade_in, fade.fade_out),
+            (Micros(300_000), Micros(500_000))
+        );
+        let revision = host.revision();
+        host.set_fade(&first, Micros(300_000), Micros(500_000))
+            .unwrap();
+        assert_eq!(host.revision(), revision, "the same fade is not a step");
+        assert!(host.set_fade(&first, Micros(-1), Micros(0)).is_err());
+
+        for _ in 0..5 {
+            host.undo().unwrap();
+        }
+        let back = clip(&host);
+        assert!(!back.clip.flip.horizontal && !back.reverse);
+        assert_eq!(back.clip.rotation, 0.0);
+        assert!(!host.clip_abilities(&first).unwrap().cropped);
+        assert_eq!(host.fade(&first).unwrap().fade_in, Micros(0));
+
+        assert!(host.extract_audio(&first).is_err(), "a still has no sound");
+        assert!(
+            host.freeze(&first, Micros(500_000)).is_err(),
+            "a still is held already"
+        );
+    }
+
+    #[test]
+    fn a_movie_gives_up_its_sound_freezes_a_frame_and_takes_beats() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        two_stills(&mut host);
+        let tone = temp.path.join("tone.wav");
+        surround_tone(&tone, 2);
+        let material = host.import(&tone).unwrap();
+        host.append(&material).unwrap();
+        let movie = temp.path.join("cut.mp4");
+        host.export(&movie, 720, &mut |_, _| true).unwrap();
+
+        let other = Roots {
+            temp: &temp,
+            project: temp.path.join("second"),
+            bundle: roots.bundle.clone(),
+            cache: roots.cache.clone(),
+        };
+        let mut host = other.create();
+        let material = host.import(&movie).unwrap();
+        let video = host.append(&material).unwrap();
+        let can = host.clip_abilities(&video).unwrap();
+        assert!(can.moving && can.turn && !can.beats);
+
+        let sound = host.extract_audio(&video).unwrap();
+        let lane = host
+            .draft()
+            .tracks
+            .iter()
+            .find(|track| track.segments.iter().any(|segment| segment.id == sound))
+            .unwrap();
+        assert_eq!(lane.kind, crate::TrackType::Audio);
+        assert!(host.clip_abilities(&sound).unwrap().beats);
+
+        assert!(host.toggle_beat(&sound, Micros(1_000_000)).unwrap());
+        assert_eq!(host.beats(&sound), vec![Micros(1_000_000)]);
+        assert!(
+            !host.toggle_beat(&sound, Micros(1_050_000)).unwrap(),
+            "a second tap takes it away"
+        );
+        assert!(host.beats(&sound).is_empty());
+        assert!(host.toggle_beat(&video, Micros(1_000_000)).is_err());
+
+        let main = host.draft().tracks[0].segments.len();
+        let still = host.freeze(&video, Micros(1_000_000)).unwrap();
+        let main_track = &host.draft().tracks[0];
+        assert!(
+            main_track
+                .segments
+                .iter()
+                .any(|segment| segment.id == still)
+        );
+        assert!(main_track.segments.len() > main);
+        let picture = host.frame(Micros(1_500_000)).unwrap();
+        assert!(picture.width > 0);
+        host.undo().unwrap();
+        assert_eq!(host.draft().tracks[0].segments.len(), main);
+    }
+
+    #[test]
+    fn a_picture_goes_on_an_overlay_row_and_back_to_main() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        two_stills(&mut host);
+        let material = host.draft().materials.videos[0].id.as_str().to_owned();
+        let rows = host.draft().tracks.len();
+        let overlay = host.add_overlay(&material, Micros(500_000)).unwrap();
+        assert_eq!(host.draft().tracks.len(), rows + 1);
+        let track = host
+            .draft()
+            .tracks
+            .iter()
+            .find(|track| track.segments.iter().any(|segment| segment.id == overlay))
+            .unwrap();
+        assert!(!track.is_main());
+        assert_eq!(track.kind, crate::TrackType::Video);
+
+        let second = host.add_overlay(&material, Micros(10_000_000)).unwrap();
+        assert_eq!(host.draft().tracks.len(), rows + 1, "a free row is reused");
+        assert_ne!(second, overlay);
+
+        let on_main = |host: &PhoneHost| {
+            host.draft()
+                .tracks
+                .iter()
+                .find(|track| track.is_main())
+                .map_or(0, |track| track.segments.len())
+        };
+        let main = on_main(&host);
+        host.to_main(&overlay).unwrap();
+        assert_eq!(on_main(&host), main + 1);
+        assert!(host.to_main(&overlay).is_err(), "it is on main now");
+        host.undo().unwrap();
+        assert_eq!(on_main(&host), main);
     }
 }

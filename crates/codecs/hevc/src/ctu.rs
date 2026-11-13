@@ -624,8 +624,7 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             {
                 inc += 1;
             }
-            if self.up_ok(x0, y0)
-                && u32::from(self.pic.depth.get(self.pic.at4(x0, y0 - 1))) > depth
+            if self.up_ok(x0, y0) && u32::from(self.pic.depth.get(self.pic.at4(x0, y0 - 1))) > depth
             {
                 inc += 1;
             }
@@ -705,14 +704,11 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let mut skip = false;
         if self.slice_type != SliceType::I {
             let mut inc = 0;
-            if self.left_ok(x0, y0)
-                && self.pic.info.get(self.pic.at4(x0 - 1, y0)) & FLAG_SKIP != 0
+            if self.left_ok(x0, y0) && self.pic.info.get(self.pic.at4(x0 - 1, y0)) & FLAG_SKIP != 0
             {
                 inc += 1;
             }
-            if self.up_ok(x0, y0)
-                && self.pic.info.get(self.pic.at4(x0, y0 - 1)) & FLAG_SKIP != 0
-            {
+            if self.up_ok(x0, y0) && self.pic.info.get(self.pic.at4(x0, y0 - 1)) & FLAG_SKIP != 0 {
                 inc += 1;
             }
             skip = self.cabac.decide(cabac::SKIP + inc);

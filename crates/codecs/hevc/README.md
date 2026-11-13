@@ -80,22 +80,22 @@ What does not run by default:
 
 ## Speed against FFmpeg
 
-**Decode, hevc.** Measured on 13 November 2026 on branch `hevc`, on a cloud VM with 4 cores of an Intel Xeon at 2.1 GHz (other VMs share the host; the same run varies by about 10% from one minute to the next), against FFmpeg 6.1.1 from Ubuntu 24.04. Built with `cargo build --release -p media-bench` (no profile) and rustc 1.97.0. Input: 600 frames of 1920×1080 at 30 frames a second (21 MB), written by libx265 at its medium preset with wavefronts. The Rust side is [`tools/media-bench`](../../../tools/media-bench); the FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which calls libavformat and libavcodec directly. Each is a whole process, run five times in turn; the table shows the median run.
+**Decode, hevc.** Measured on 13 November 2026 on branch `hevc`, on a cloud VM with 4 cores of an Intel Xeon at 2.1 GHz (other VMs share the host; the same run varies by about 10% from one minute to the next), against FFmpeg 6.1.1 from Ubuntu 24.04. Built with `cargo build --release -p media-bench` (no profile) and rustc 1.97.0. Input: 600 frames of 1920×1080 at 30 frames a second (21 MB), written by libx265 at its medium preset with wavefronts. The Rust side is [`tools/media-bench`](../../../tools/media-bench); the FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which calls libavformat and libavcodec directly. Each is a whole process, run in turn (seven times with four threads, five with one); the table shows the median run.
 
 |  | Cutlass | FFmpeg (`hevc`) |
 | --- | ---: | ---: |
-| Wall time, 4 threads | 3.21 s | 2.70 s |
-| Speed, 4 threads | 187 frames/s | 223 frames/s |
-| CPU time, 4 threads | 9.94 s | 7.98 s |
-| Wall time, 1 thread | 8.76 s | 7.86 s |
-| Peak memory, 4 threads | 82 MB | 99 MB |
+| Wall time, 4 threads | 3.11 s | 2.74 s |
+| Speed, 4 threads | 193 frames/s | 219 frames/s |
+| CPU time, 4 threads | 9.89 s | 8.05 s |
+| Wall time, 1 thread | 8.49 s | 7.78 s |
+| Peak memory, 4 threads | 77 MB | 99 MB |
 | Threads allowed | 4 | 4 |
 
-Cutlass is **1.19× slower** than FFmpeg here with four threads and **1.11× slower** on one. Both decoders produced exactly the same samples. Runs of the same comparison on the same day measured between 1.06× and 1.27× with four threads. `media-bench` also copies every picture into the packed buffer the engine's `Decoder` returns, which the FFmpeg program does not do; `cargo bench -p cutlass-hevc`, which times the decode alone, measured 2.95 s against FFmpeg's 2.88 s (one process, startup included) on this file.
+Cutlass is **1.13× slower** than FFmpeg here with four threads and **1.09× slower** on one. Both decoders produced exactly the same samples. Runs of the same comparison on the same day measured between 1.06× and 1.19× with four threads. `media-bench` also copies every picture into the packed buffer the engine's `Decoder` returns, which the FFmpeg program does not do; `cargo bench -p cutlass-hevc`, which times the decode alone, measured 2.95 s against FFmpeg's 2.88 s (one process, startup included) on this file.
 
 Where the time goes, on one thread and against FFmpeg's own profile on the same file: entropy decoding (CABAC and residual coding) takes about 30% less time than FFmpeg's; the boundary strengths of deblocking about 15% less; interpolation and the motion-vector derivation around it, the deblocking filters, and the writing of final rows and output pictures take more.
 
-What made it faster, in order of the gain measured on this machine: decoding into a ring of four CTB-row buffers that stay in cache instead of a picture-sized buffer per picture; interpolation kernels that read each row of the reference window as one fixed-size array (1.34G instructions to 0.85G on 40 frames, against FFmpeg's 0.91G); significance and greater-than-one flags handled without a branch on the decoded value; splitting four threads into two pictures of two wavefront rows; writing the final rows of pictures no other picture references straight to the output; the inverse transform adding its residual to the samples itself; the CABAC engine kept in registers through residual coding.
+What made it faster, in order of the gain measured on this machine: decoding into a ring of four CTB-row buffers that stay in cache instead of a picture-sized buffer per picture, and the same for the per-4×4 maps of motion, modes and QP; interpolation kernels that read each row of the reference window as one fixed-size array (1.34G instructions to 0.85G on 40 frames, against FFmpeg's 0.91G); significance and greater-than-one flags handled without a branch on the decoded value; splitting four threads into two pictures of two wavefront rows; writing the final rows of pictures no other picture references straight to the output; the inverse transform adding its residual to the samples itself; the CABAC engine kept in registers through residual coding.
 
 To run it again: `cargo build --release -p media-bench`, then `python3 scripts/bench_media.py --video <clip> --audio <song> --work <folder>`; or `HEVC_BENCH=<clip> cargo bench -p cutlass-hevc`.
 

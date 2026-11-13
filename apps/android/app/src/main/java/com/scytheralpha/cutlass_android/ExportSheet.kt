@@ -102,6 +102,9 @@ fun ExportSheet(model: EditorModel, name: String, onDismiss: () -> Unit) {
         exportRun.permission = null
     }
 
+    // The export's progress notification. The export runs either way.
+    val notify = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+
     DisposableEffect(Unit) {
         onDispose {
             exportRun.closed = true
@@ -136,11 +139,19 @@ fun ExportSheet(model: EditorModel, name: String, onDismiss: () -> Unit) {
         val chosen = side
         phase = ExportSheetPhase.Writing(0.0)
         val listener = ExportSheetListener { share ->
+            ExportService.progress(context, share)
             scope.launch {
                 if (phase is ExportSheetPhase.Writing) phase = ExportSheetPhase.Writing(share)
             }
         }
         exportRun.listener = listener
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notify.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        ExportService.begin(context, name) { listener.stop() }
         scope.launch {
             // The export holds the editor until it returns, even when the
             // sheet goes away; only then is the editor handed back.
@@ -149,6 +160,7 @@ fun ExportSheet(model: EditorModel, name: String, onDismiss: () -> Unit) {
                     runCatching { editor.export(file.path, chosen, listener) }
                 }
             } finally {
+                ExportService.end(context)
                 model.endExport()
                 exportRun.listener = null
                 if (exportRun.closed) removeExportFolder(folder)

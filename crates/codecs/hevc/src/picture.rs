@@ -147,10 +147,10 @@ impl Bytes {
         self.0[at].store(value, Relaxed);
     }
 
-    /// Every cell to `value`.
-    pub fn fill_all(&self, value: u8) {
-        for cell in &self.0 {
-            cell.store(value, Relaxed);
+    /// Cells `range` (within the map) to 0.
+    pub fn clear(&self, range: std::ops::Range<usize>) {
+        for cell in self.0.get(range).unwrap_or_default() {
+            cell.store(0, Relaxed);
         }
     }
 
@@ -543,10 +543,10 @@ impl Picture {
         }) else {
             return Self::new(sps, pps, layout, (poc, mask4));
         };
-        // Every map but the boundary strengths is written for each block
-        // before it is read; edges no block names must read as 0.
-        pic.bs_ver.fill_all(0);
-        pic.bs_hor.fill_all(0);
+        // Every map is written for each block before it is read, but the
+        // boundary strengths, whose edges no block names must read as 0:
+        // the deblocking of each row clears those it read, and every row
+        // of a picture that comes back is deblocked.
         for (a, b) in pic.ctb_slice.iter().zip(&pic.ctb_slice_addr) {
             a.store(u16::MAX, Relaxed);
             b.store(u32::MAX, Relaxed);

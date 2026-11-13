@@ -319,6 +319,13 @@ impl Picture {
         let mut band = lock(&work.rows[work.slot(r)]);
         self.deblock_vertical(&mut band, top, bottom);
         self.deblock_horizontal(above.as_deref_mut(), &mut band, top, bottom);
+        // The strengths of the row are read: zero again for the picture
+        // that takes these maps next, cleared here while in cache.
+        let ver = self.width / 8 + 1;
+        self.bs_ver
+            .clear((top >> 2) * ver..bottom.div_ceil(4) * ver);
+        self.bs_hor
+            .clear((top >> 3) * self.w4..bottom.div_ceil(8) * self.w4);
     }
 
     fn deblock_vertical<P: Pixel>(&self, band: &mut [Vec<P>; 3], top: usize, bottom: usize) {

@@ -25,7 +25,12 @@ pub struct Edge {
 
 /// How one edge of a macroblock of 8-bit samples is filtered: its
 /// thresholds, and `tc0` as in [`Edge`].
+///
+/// Aligned to eight bytes, so an `Option<Filter>` is one word: the decoder
+/// writes each edge's filter and the kernels read them back moments later,
+/// whole words rather than pieces of a seven-byte value.
 #[derive(Clone, Copy, Debug)]
+#[repr(align(8))]
 pub struct Filter {
     pub alpha: u8,
     pub beta: u8,

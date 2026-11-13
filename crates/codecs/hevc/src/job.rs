@@ -673,7 +673,12 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
                     true
                 });
                 if !direct {
-                    let dst = st.writer.pending_mut(upto);
+                    let mut dst = st.writer.pending_mut(upto);
+                    // As for the output: clearing the band first brings its
+                    // lines into cache without reading them.
+                    for band in &mut dst {
+                        band.fill(P::default());
+                    }
                     self.pic.sao_row(self.work, f, dst);
                 }
                 st.finals += 1;

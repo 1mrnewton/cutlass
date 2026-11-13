@@ -52,6 +52,9 @@ pub struct Job<P> {
     pub output: Option<OutForm>,
     /// Threads for the rows of a wavefront slice segment.
     pub row_threads: usize,
+    /// Whether a later picture may reference this one. When not, its final
+    /// samples need only reach the output.
+    pub reference: bool,
 }
 
 /// What a finished job gives back for the next pictures.
@@ -73,9 +76,16 @@ impl<P: Pixel> Job<P> {
             slices,
             output,
             row_threads,
+            reference,
         } = self;
         let out = output.map(|form| OutRows::new(&pic.sps, form));
-        let pipe = Pipeline::new(&pic, &work, &frame, writer, col, out);
+        // A picture no other references, of 8-bit samples and not cropped,
+        // has its final rows written straight to the output.
+        let direct = !reference
+            && out.is_some()
+            && pic.sps.crop == [0; 4]
+            && P::of_bytes_mut(&mut []).is_some();
+        let pipe = Pipeline::new(&pic, &work, &frame, writer, col, (out, direct));
         let mut result = Ok(());
         for slice in &slices {
             if let Err(e) = decode_slice(&pic, &work, &pipe, slice, row_threads) {
@@ -167,6 +177,27 @@ impl OutRows {
             }
             self.next[c] += n;
         }
+    }
+
+    /// The next `lines` rows of each plane, to write in place (the
+    /// picture uncropped, its samples 8-bit): the rows a band of final
+    /// samples fills.
+    fn band_mut<P: Pixel>(&mut self, lines: [usize; 3]) -> Option<[&mut [P]; 3]> {
+        let [y, u, v] = &mut self.eight;
+        let mut grow = |c: usize, plane: &'_ mut Vec<u8>| -> Option<usize> {
+            let (_, _, w, h) = self.crop[c];
+            let n = lines[c].min(h - self.next[c]);
+            self.next[c] += n;
+            let at = plane.len();
+            plane.resize(at + n * w, 0);
+            Some(at)
+        };
+        let (a, b, c) = (grow(0, y)?, grow(1, u)?, grow(2, v)?);
+        Some([
+            P::of_bytes_mut(&mut y[a..])?,
+            P::of_bytes_mut(&mut u[b..])?,
+            P::of_bytes_mut(&mut v[c..])?,
+        ])
     }
 
     /// The samples; rows never published are zeros.
@@ -403,6 +434,9 @@ struct PipeState<P> {
     finals: usize,
     /// The output samples taken so far, when the picture is output.
     out: Option<OutRows>,
+    /// SAO writes the final rows to `out` instead of the frame, whose rows
+    /// no picture reads (they are published all the same, in step).
+    direct: bool,
 }
 
 impl<'p, P: Pixel> Pipeline<'p, P> {
@@ -412,7 +446,7 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
         frame: &'p Frame,
         writer: RowsWriter<P>,
         col: RowsWriter<ColMv>,
-        out: Option<OutRows>,
+        (out, direct): (Option<OutRows>, bool),
     ) -> Self {
         Self {
             pic,
@@ -428,6 +462,7 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
                 deblocked: 0,
                 finals: 0,
                 out,
+                direct,
             }),
         }
     }
@@ -518,12 +553,23 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
             let f = st.finals;
             if f < rows && (st.deblocked > f + 1 || st.deblocked == rows) && !touches(f, f + 1) {
                 let upto = ((f + 1) * ctb).min(height);
-                let dst = st.writer.pending_mut(upto);
-                self.pic.sao_row(self.work, f, dst);
+                let lines = self.work.lines_of(f);
+                let direct = match &mut st.out {
+                    Some(out) if st.direct => out.band_mut::<P>([lines, lines / 2, lines / 2]),
+                    _ => None,
+                };
+                let direct = direct.is_some_and(|dst| {
+                    self.pic.sao_row(self.work, f, dst);
+                    true
+                });
+                if !direct {
+                    let dst = st.writer.pending_mut(upto);
+                    self.pic.sao_row(self.work, f, dst);
+                }
                 st.finals += 1;
                 st.writer
                     .publish(if st.finals == rows { usize::MAX } else { upto });
-                if let Some(out) = &mut st.out {
+                if !direct && let Some(out) = &mut st.out {
                     out.take(&st.writer);
                 }
                 moved = true;
@@ -602,6 +648,7 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
                 deblocked: 0,
                 finals: 0,
                 out: None,
+                direct: false,
             }),
         };
         this.advance(&mut st, true, None);
@@ -609,7 +656,9 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
         st.col.publish(usize::MAX);
         this.frame.notify();
         let mut out = st.out.take();
-        if let Some(out) = &mut out {
+        if let Some(out) = &mut out
+            && !st.direct
+        {
             out.take(&st.writer);
         }
         (st.writer, out)

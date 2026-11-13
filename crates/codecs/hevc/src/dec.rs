@@ -167,6 +167,9 @@ struct Pending {
     pic: Picture,
     sps: Arc<Sps>,
     output: bool,
+    /// Whether a later picture may reference this one: not when it is a
+    /// sub-layer non-reference picture of the highest sub-layer.
+    reference: bool,
     meta: Arc<Meta>,
     /// The last independent slice segment header, for dependent ones.
     independent: Option<SliceHeader>,
@@ -604,10 +607,12 @@ impl HevcDecoder {
         let pic = Picture::reuse(old, sps.clone(), pps.clone(), layout, poc)?;
         let output = header.pic_output && !(nal.is_rasl() && state.no_rasl_output);
         let uid = state.uid();
+        let reference = !(nal.is_sub_layer_non_ref() && nal.temporal_id + 1 >= sps.max_sub_layers);
         Ok(Some(Pending {
             pic,
             sps: sps.clone(),
             output,
+            reference,
             meta: Arc::new(Meta {
                 pts: packet.pts,
                 duration: packet.duration,
@@ -632,6 +637,7 @@ impl HevcDecoder {
             pic,
             sps,
             output,
+            reference,
             meta,
             uid,
             slices,
@@ -649,7 +655,7 @@ impl HevcDecoder {
                 &self.shared.frames.eight,
                 AnyRows::Eight,
                 (pic, slices, form, row_threads),
-                (width, height, log2_ctb, poc),
+                (width, height, log2_ctb, poc, reference),
             ))
         } else {
             Ready::Deep(make_job(
@@ -658,7 +664,7 @@ impl HevcDecoder {
                 &self.shared.frames.deep,
                 AnyRows::Deep,
                 (pic, slices, form, row_threads),
-                (width, height, log2_ctb, poc),
+                (width, height, log2_ctb, poc, reference),
             ))
         };
         state.dpb.push(DpbPic {
@@ -811,7 +817,7 @@ fn make_job<P: Pixel>(
     frame_bufs: &Mutex<Vec<[cutlass_simd::shared_rows::PlaneBuf<P>; 3]>>,
     wrap: fn(Arc<cutlass_simd::shared_rows::SharedRows<P>>) -> AnyRows,
     (pic, slices, output, row_threads): (Picture, Vec<SliceData>, Option<OutForm>, usize),
-    (width, height, log2_ctb, poc): (usize, usize, u32, i32),
+    (width, height, log2_ctb, poc, reference): (usize, usize, u32, i32, bool),
 ) -> Job<P> {
     // A ring of row buffers, unless tiles reorder the CTB rows.
     let slots = if pic.pps.tiles {
@@ -842,6 +848,7 @@ fn make_job<P: Pixel>(
         slices,
         output,
         row_threads,
+        reference,
     }
 }
 

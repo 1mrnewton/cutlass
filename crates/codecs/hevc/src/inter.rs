@@ -253,16 +253,25 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             }
         };
         // Exclusions apply before the pruning comparisons, as in clause
-        // 8.5.3.2.3: a pruned B1 still prunes B0 and B2.
+        // 8.5.3.2.3: a pruned B1 still prunes B0 and B2. A candidate depends
+        // only on those before it, so the list stops at the one chosen.
         let excluded_a1 = pb.part == 1 && matches!(part_mode, PART_NX2N | PART_NLX2N | PART_NRX2N);
         let excluded_b1 = pb.part == 1 && matches!(part_mode, PART_2NXN | PART_2NXNU | PART_2NXND);
+        macro_rules! take {
+            ($field:expr) => {
+                list.push($field);
+                if list.len() > merge_idx {
+                    return Ok(self.restrict($field, orig));
+                }
+            };
+        }
         let a1 = if excluded_a1 {
             None
         } else {
             get(x - 1, y + h - 1)
         };
         if let Some(a) = a1 {
-            list.push(a);
+            take!(a);
         }
         let b1 = if excluded_b1 {
             None
@@ -272,24 +281,24 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         if let Some(b) = b1
             && a1 != Some(b)
         {
-            list.push(b);
+            take!(b);
         }
         if let Some(b) = get(x + w, y - 1)
             && b1 != Some(b)
         {
-            list.push(b);
+            take!(b);
         }
         if let Some(a) = get(x - 1, y + h)
             && a1 != Some(a)
         {
-            list.push(a);
+            take!(a);
         }
         if list.len() != 4
             && let Some(b) = get(x - 1, y - 1)
             && a1 != Some(b)
             && b1 != Some(b)
         {
-            list.push(b);
+            take!(b);
         }
         let header = &self.pic.slices[self.slice].header;
         let max = usize::from(header.max_merge_cand);
@@ -497,6 +506,12 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let mut mv_a = a.iter().flatten().find_map(&same);
         if mv_a.is_none() {
             mv_a = a.iter().flatten().find_map(&scaled);
+        }
+        // A found is the first candidate whatever B holds.
+        if mvp_flag == 0
+            && let Some(a) = mv_a
+        {
+            return Ok(a);
         }
         let b = [
             fetch(x + w, y - 1),

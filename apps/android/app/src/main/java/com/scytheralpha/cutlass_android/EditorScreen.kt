@@ -47,6 +47,8 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -101,6 +103,19 @@ enum class Pick { OVERLAY, SOUND }
 fun EditorScreen(project: ProjectSummary, home: () -> Unit) {
     val scope = rememberCoroutineScope()
     val model = remember(project.path) { EditorModel(project.path, scope) }
+    // Where the playhead was, kept across Android ending the process in the
+    // background. The project reopens there with nothing selected.
+    var keptPlayhead by rememberSaveable(project.path) { mutableLongStateOf(0L) }
+    var restored by remember(project.path) { mutableStateOf(false) }
+    LaunchedEffect(model.isOpening) {
+        if (!model.isOpening && !restored) {
+            restored = true
+            if (keptPlayhead > 0) model.seek(keptPlayhead)
+        }
+    }
+    LaunchedEffect(model.playheadUs) {
+        if (restored) keptPlayhead = model.playheadUs
+    }
     var panel by remember { mutableStateOf<Panel?>(null) }
     // The bar shown while nothing is selected.
     var openBar by remember { mutableStateOf(ToolBar.ROOT) }

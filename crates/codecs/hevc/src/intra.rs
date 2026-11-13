@@ -170,8 +170,8 @@ fn predict_n<P: Pixel, const N: usize>(
         }
         1 => {
             let mut sum = N as i32;
-            for i in 0..N {
-                sum += top[i] + left(i);
+            for (i, &t) in top[..N].iter().enumerate() {
+                sum += t + left(i);
             }
             let dc = sum >> (N.trailing_zeros() + 1);
             for row in rows {

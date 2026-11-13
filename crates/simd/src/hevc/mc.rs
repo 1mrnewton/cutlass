@@ -56,6 +56,7 @@ impl Src<'_> {
 
     /// Whether every load of a `w`×`h` block stays inside `src`: the
     /// kernels read `w + 24` samples of each of `h + taps - 1` rows.
+    #[inline]
     fn holds(&self, w: usize, h: usize, taps: usize) -> bool {
         let last = match self.clamp {
             None => h + taps - 2,
@@ -81,6 +82,7 @@ pub struct Tmp {
 
 /// Whether the kernels of this module run on this CPU.
 #[must_use]
+#[inline]
 pub fn accelerated() -> bool {
     crate::wide::has_avx2()
 }

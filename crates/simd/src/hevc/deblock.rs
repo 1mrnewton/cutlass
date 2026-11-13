@@ -12,6 +12,7 @@ mod tests;
 
 /// Whether [`luma8`] runs on this CPU.
 #[must_use]
+#[inline]
 pub fn accelerated() -> bool {
     crate::wide::has_avx2()
 }

@@ -104,20 +104,21 @@ pub fn parse(data: &[u8]) -> Result<Nal, CodecError> {
     let payload = &data[2..];
     let mut rbsp = Vec::with_capacity(payload.len());
     let mut epb = Vec::new();
-    let mut zeros = 0usize;
-    for &byte in payload {
-        if zeros >= 2 && byte == 3 {
+    // Each `0x000003` drops its 3, the two zeros counted from the byte
+    // after the last one dropped; the bytes between are copied in runs.
+    let mut start = 0;
+    let mut i = 2;
+    while i < payload.len() {
+        if payload[i] == 3 && payload[i - 1] == 0 && payload[i - 2] == 0 && i - 2 >= start {
+            rbsp.extend_from_slice(&payload[start..i]);
             epb.push(rbsp.len());
-            zeros = 0;
-            continue;
-        }
-        if byte == 0 {
-            zeros += 1;
+            start = i + 1;
+            i += 3;
         } else {
-            zeros = 0;
+            i += 1;
         }
-        rbsp.push(byte);
     }
+    rbsp.extend_from_slice(&payload[start.min(payload.len())..]);
     Ok(Nal {
         kind,
         layer,
@@ -285,6 +286,34 @@ pub fn hvcc(extra: &[u8]) -> Result<(u8, Vec<Nal>), CodecError> {
 #[cfg(test)]
 mod tests {
     use super::{access_unit, hvcc, parse};
+
+    #[test]
+    fn emulation_prevention_matches_the_byte_rule() {
+        let mut seed = 0x9e37_79b9_u64;
+        for _ in 0..2000 {
+            let mut payload = vec![0x40, 0x01];
+            for _ in 0..(seed % 40) {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                payload.push([0, 0, 0, 3, 3, 1, 0xff][(seed % 7) as usize]);
+            }
+            // Clause 7.4.2: a 3 after two zeros is dropped, and the zeros
+            // count again from the byte after it.
+            let (mut want, mut epb, mut zeros) = (Vec::new(), Vec::new(), 0);
+            for &b in &payload[2..] {
+                if zeros >= 2 && b == 3 {
+                    epb.push(want.len());
+                    zeros = 0;
+                    continue;
+                }
+                zeros = if b == 0 { zeros + 1 } else { 0 };
+                want.push(b);
+            }
+            let nal = parse(&payload).unwrap();
+            assert_eq!((nal.rbsp, nal.epb), (want, epb), "{payload:?}");
+        }
+    }
 
     #[test]
     fn emulation_prevention_is_removed_and_remembered() {

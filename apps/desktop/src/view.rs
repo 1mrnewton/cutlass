@@ -11419,7 +11419,7 @@ mod tests {
         run_menu(&mut shell, &mut view, None, crate::menubar::STUDIO);
         assert!(view.studio.open);
         let ctx = egui::Context::default();
-        let mut frame = |shell: &mut Shell, view: &mut ViewState| {
+        let frame = |shell: &mut Shell, view: &mut ViewState| {
             let mut output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))),

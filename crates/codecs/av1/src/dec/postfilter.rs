@@ -169,6 +169,15 @@ pub struct FilterInfo {
     ring: usize,
 }
 
+/// `d.fill(v)` in 16-byte stores: the plain fill stores one unit at a
+/// time.
+#[inline(always)]
+fn fill_units(d: &mut [[u8; 4]], v: [u8; 4]) {
+    let (quads, rest) = d.as_chunks_mut::<4>();
+    quads.fill([v; 4]);
+    rest.fill(v);
+}
+
 impl FilterInfo {
     /// Sizes the array for the frame of `fs`. Units keep stale values
     /// until their blocks are stored.
@@ -198,7 +207,7 @@ impl FilterInfo {
         for y in 0..h4 {
             let at = self.row(row + y) + col;
             if let Some(d) = self.units.get_mut(at..at + w4) {
-                d.fill(info.bytes());
+                fill_units(d, info.bytes());
             }
         }
     }
@@ -265,7 +274,7 @@ impl FilterInfo {
                 for rr in r..bottom {
                     let o = self.row(rr);
                     if let Some(out) = self.units.get_mut(o + c..o + end) {
-                        out.fill(info.bytes());
+                        fill_units(out, info.bytes());
                     }
                 }
                 ends[c] = (bottom as u16, (end - c) as u8);

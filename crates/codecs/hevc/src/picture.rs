@@ -267,9 +267,10 @@ impl Sao {
 /// and the bottom line of every CTB row as reconstruction left it, before
 /// the loop filters, for intra prediction of the row below.
 ///
-/// When CTB rows are reconstructed one after another, a few buffers serve
-/// every row in turn ([`RING`]): a row's buffer is free again once its
-/// final samples are out, and the few in use stay in cache.
+/// Unless tiles reorder the CTB rows, a few buffers serve every row in
+/// turn ([`RING`] more than the rows reconstructed at once): a row's buffer
+/// is free again once its final samples are out, and the few in use stay
+/// in cache.
 pub struct Work<P> {
     pub rows: Vec<Mutex<[Vec<P>; 3]>>,
     pub lines: Vec<Mutex<[Vec<P>; 3]>>,
@@ -280,19 +281,20 @@ pub struct Work<P> {
     pub count: usize,
 }
 
-/// Row buffers of a picture reconstructed one CTB row after another.
-/// Row `r` starts once row `r - 1` is reconstructed, when the filters have
-/// given the final samples of rows up to `r - 3`; the filters of row
-/// `r - 2` then read rows `r - 3` to `r - 1`, so four buffers suffice.
+/// Row buffers beyond the rows reconstructed at once. With `t` rows on
+/// threads, row `r` starts once rows up to `r - t` are reconstructed, when
+/// the filters have given the final samples of rows up to `r - t - 2`;
+/// the filters of row `r - t - 1` read rows `r - t - 2` to `r - t`, so
+/// `t + 4` buffers suffice.
 pub const RING: usize = 4;
 
 impl<P: Pixel> Work<P> {
     /// Buffers for a picture of `width`×`height` with CTBs of `1 <<
-    /// log2_ctb`: [`RING`] of them when `ring`, else one for each CTB row.
-    pub fn new(width: usize, height: usize, log2_ctb: u32, ring: bool) -> Self {
+    /// log2_ctb`: `slots` of them, at most one for each CTB row.
+    pub fn new(width: usize, height: usize, log2_ctb: u32, slots: usize) -> Self {
         let ctb = 1usize << log2_ctb;
         let count = height.div_ceil(ctb);
-        let slots = Self::slots(count, ring);
+        let slots = slots.clamp(1, count.max(1));
         let rows = (0..slots)
             .map(|r| {
                 // Without the ring, the last row holds only its lines.
@@ -327,16 +329,13 @@ impl<P: Pixel> Work<P> {
         }
     }
 
-    fn slots(count: usize, ring: bool) -> usize {
-        if ring { count.min(RING) } else { count }
-    }
-
-    /// Whether these buffers fit a picture of this size and CTB.
-    pub fn fits(&self, width: usize, height: usize, log2_ctb: u32, ring: bool) -> bool {
+    /// Whether these buffers fit a picture of this size and CTB with
+    /// `slots` buffers.
+    pub fn fits(&self, width: usize, height: usize, log2_ctb: u32, slots: usize) -> bool {
         self.width == width
             && self.height == height
             && self.log2_ctb == log2_ctb
-            && self.rows.len() == Self::slots(self.count, ring)
+            && self.rows.len() == slots.clamp(1, self.count.max(1))
     }
 
     /// The buffer of CTB row `row`.

@@ -154,6 +154,19 @@ impl Frame {
         }
     }
 
+    /// Block until luma rows `0..rows` are final, or `stop` is set (and
+    /// [`Self::notify`] called).
+    pub fn wait_rows_or(&self, rows: usize, stop: &AtomicBool) {
+        let need = rows.min(self.height);
+        let mut gate = lock(&self.gate);
+        while self.rows.published() < need && !stop.load(SeqCst) && !self.abandoned.load(SeqCst) {
+            gate = self
+                .moved
+                .wait(gate)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
     /// Block until the motion of luma rows `0..rows` is final.
     #[inline]
     pub fn wait_motion(&self, rows: usize) {

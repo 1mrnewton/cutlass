@@ -245,6 +245,7 @@ fn decode_slice<P: Pixel>(
             row_only: r + 1 < rows,
         };
         let start = (r > 0).then_some((first_row + r) * ctb_w);
+        pipe.wait_slot(first_row + r);
         let result = job
             .decoder(
                 pic,
@@ -256,6 +257,9 @@ fn decode_slice<P: Pixel>(
                 Some(wave),
             )
             .decode();
+        if result.is_err() {
+            pipe.row_failed();
+        }
         pipe.nudge(None);
         result
     });
@@ -382,6 +386,9 @@ pub struct Pipeline<'p, P> {
     /// CTBs reconstructed in each CTB row.
     counts: Vec<AtomicU32>,
     dirty: AtomicBool,
+    /// A row worker failed: rows below it may never be filtered, so
+    /// nothing waits for them.
+    failed: AtomicBool,
     state: Mutex<PipeState<P>>,
 }
 
@@ -413,6 +420,7 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
             frame,
             counts: (0..work.count).map(|_| AtomicU32::new(0)).collect(),
             dirty: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
             state: Mutex::new(PipeState {
                 writer,
                 col,
@@ -441,6 +449,28 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
             return;
         }
         self.nudge(Some(row));
+    }
+
+    /// Wait until the row buffer of CTB row `row` is free: the final
+    /// samples of the row that used it last, and of the row below that
+    /// one, whose filters read it, are out. With the rows on as many
+    /// threads as the ring has room for, they are by the time `row`
+    /// starts; this holds the order if a thread is late.
+    pub fn wait_slot(&self, row: usize) {
+        let slots = self.work.rows.len();
+        if slots >= self.work.count || row < slots {
+            return;
+        }
+        let ctb = 1usize << self.work.log2_ctb;
+        self.nudge(None);
+        self.frame
+            .wait_rows_or((row + 2 - slots) * ctb, &self.failed);
+    }
+
+    /// A row worker failed: release whoever waits for a row buffer.
+    pub fn row_failed(&self) {
+        self.failed.store(true, SeqCst);
+        self.frame.notify();
     }
 
     /// Run what is ready, except what touches CTB row `held`, whose lock
@@ -564,6 +594,7 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
             frame: self.frame,
             counts: self.counts,
             dirty: self.dirty,
+            failed: self.failed,
             state: Mutex::new(PipeState {
                 writer: RowsWriter::new([0; 3], [0; 3], [0; 3], None),
                 col: RowsWriter::new([0; 3], [0; 3], [0; 3], None),

@@ -191,6 +191,14 @@ impl Ready {
             Self::Deep(j) => &j.frame,
         }
     }
+
+    /// Whether the picture's slice segments decode as wavefronts.
+    fn wavefront(&self) -> bool {
+        match self {
+            Self::Eight(j) => j.pic.pps.entropy_sync,
+            Self::Deep(j) => j.pic.pps.entropy_sync,
+        }
+    }
 }
 
 /// Buffers of finished jobs for the next ones.
@@ -295,10 +303,13 @@ pub struct HevcDecoder {
     extra: Vec<u8>,
     state: State,
     drained: bool,
-    /// Pictures decoding at once (1: each on the caller's thread).
+    /// Threads the decoder may use (1: each picture on the caller's
+    /// thread).
     threads: usize,
-    /// Threads for the CTB rows of a wavefront slice segment.
-    row_threads: usize,
+    /// Pictures decoding at once and threads for the CTB rows of a
+    /// wavefront slice segment, when set by [`Self::set_threads`];
+    /// otherwise chosen per picture by [`Self::split`].
+    split: Option<(usize, usize)>,
     form: OutForm,
     shared: Arc<Shared>,
     workers: Arc<Workers>,
@@ -328,7 +339,7 @@ impl HevcDecoder {
             state: State::new(),
             drained: false,
             threads,
-            row_threads: threads,
+            split: None,
             form: OutForm::Planes,
             shared: Arc::new(Shared::default()),
             workers: Arc::new(Workers::default()),
@@ -336,23 +347,30 @@ impl HevcDecoder {
             queue: VecDeque::new(),
         };
         dec.apply_extra()?;
-        if let Some(v) = std::env::var("HEVC_FRAMES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-        {
-            dec.threads = v;
-        }
-        if let Some(v) = std::env::var("HEVC_ROWS").ok().and_then(|v| v.parse().ok()) {
-            dec.row_threads = v;
-        }
         Ok(dec)
     }
 
     /// Pictures decoding at once, and threads for the rows of a wavefront
-    /// slice segment (each at least 1).
+    /// slice segment (each at least 1), in place of the split the decoder
+    /// chooses itself.
     pub fn set_threads(&mut self, frames: usize, rows: usize) {
-        self.threads = frames.clamp(1, MAX_THREADS);
-        self.row_threads = rows.clamp(1, MAX_THREADS);
+        let (frames, rows) = (frames.clamp(1, MAX_THREADS), rows.clamp(1, MAX_THREADS));
+        self.threads = frames;
+        self.split = Some((frames, rows));
+    }
+
+    /// Pictures decoding at once and threads for the rows of a wavefront
+    /// slice segment, for a picture with wavefronts (`wavefront`) or
+    /// without. With four threads or more a wavefront picture takes two
+    /// threads, one row each, and half as many pictures decode at once: a
+    /// picture waiting for the rows of its references then holds less of
+    /// the machine idle.
+    fn split(&self, wavefront: bool) -> (usize, usize) {
+        match self.split {
+            Some(split) => split,
+            None if wavefront && self.threads >= 4 => (self.threads / 2, 2),
+            None => (self.threads, 1),
+        }
     }
 
     fn apply_extra(&mut self) -> Result<(), CodecError> {
@@ -623,7 +641,7 @@ impl HevcDecoder {
         let poc = pic.poc;
         let log2_ctb = u32::from(pic.layout.log2_ctb);
         let form = output.then_some(self.form);
-        let row_threads = self.row_threads;
+        let row_threads = self.split(pic.pps.entropy_sync).1;
         let ready = if sps.bit_depth == 8 {
             Ready::Eight(make_job(
                 &self.shared,
@@ -660,8 +678,9 @@ impl HevcDecoder {
 
     /// Start the decode of a picture, on a worker or (one thread) here.
     fn start(&mut self, ready: Ready) {
-        // Keep at most `threads` pictures decoding.
-        while self.running.len() >= self.threads {
+        // Keep at most so many pictures decoding.
+        let frames = self.split(ready.wavefront()).0;
+        while self.running.len() >= frames {
             if let Some(oldest) = self.running.pop_front() {
                 oldest.wait_finished();
             }
@@ -794,17 +813,22 @@ fn make_job<P: Pixel>(
     (pic, slices, output, row_threads): (Picture, Vec<SliceData>, Option<OutForm>, usize),
     (width, height, log2_ctb, poc): (usize, usize, u32, i32),
 ) -> Job<P> {
-    // CTB rows come one after another unless tiles reorder them or rows
-    // of a wavefront run on threads of their own.
-    let ring = !pic.pps.tiles && !(pic.pps.entropy_sync && row_threads > 1);
+    // A ring of row buffers, unless tiles reorder the CTB rows.
+    let slots = if pic.pps.tiles {
+        usize::MAX
+    } else if pic.pps.entropy_sync {
+        row_threads + crate::picture::RING
+    } else {
+        crate::picture::RING
+    };
     let work = {
         let mut works = lock(works);
         match works
             .iter()
-            .position(|w| w.fits(width, height, log2_ctb, ring))
+            .position(|w| w.fits(width, height, log2_ctb, slots))
         {
             Some(i) => works.swap_remove(i),
-            None => Work::new(width, height, log2_ctb, ring),
+            None => Work::new(width, height, log2_ctb, slots),
         }
     };
     let bufs = lock(frame_bufs).pop();

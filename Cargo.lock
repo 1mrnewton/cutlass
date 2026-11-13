@@ -3047,6 +3047,7 @@ name = "cutlass-platform-windows"
 version = "0.1.0"
 dependencies = [
  "cutlass-aac",
+ "cutlass-color",
  "cutlass-decode",
  "cutlass-encode",
  "cutlass-jpeg",

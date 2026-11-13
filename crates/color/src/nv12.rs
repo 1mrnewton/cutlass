@@ -1,13 +1,12 @@
 //! NV12 in and out of the pictures this workspace passes around.
 //!
-//! The Media Foundation H.264 transforms take and give NV12: a full-size Y
-//! plane, then one plane of interleaved U and V at half size. The caller
-//! has tightly packed RGBA or planar 4:2:0. The colour math is the BT.709
-//! limited-range fixed point that `cutlass-encode` uses for its Rust path.
+//! Media Foundation and MediaCodec take and give NV12: a full-size Y plane,
+//! then one plane of interleaved U and V at half size, each row padded to a
+//! stride. The caller has tightly packed RGBA or planar 4:2:0. The colour
+//! math is the BT.709 limited-range fixed point that `cutlass-encode` uses
+//! for its Rust path.
 
-#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
-
-use cutlass_decode::CodecError;
+use cutlass_codec::access::CodecError;
 
 /// Where one NV12 picture sits inside a transform's buffer.
 ///
@@ -34,7 +33,7 @@ impl Layout {
     }
 
     /// Bytes the buffer must hold for this layout.
-    pub fn len(&self) -> Result<usize, CodecError> {
+    pub fn byte_len(&self) -> Result<usize, CodecError> {
         self.check()?;
         let luma = self.stride.checked_mul(self.rows).ok_or(LIMIT)?;
         let chroma = self
@@ -72,7 +71,7 @@ const LIMIT: CodecError = CodecError::Limit {
 /// Tightly packed RGBA to packed NV12. The alpha byte is ignored.
 pub fn from_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, CodecError> {
     let layout = Layout::packed(width, height);
-    let mut out = vec![0_u8; layout.len()?];
+    let mut out = vec![0_u8; layout.byte_len()?];
     let (w, h) = (width as usize, height as usize);
     if rgba.len() != w * h * 4 {
         return Err(CodecError::InvalidApi {
@@ -107,7 +106,7 @@ pub fn from_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, CodecE
 /// Planar Y, U, V to packed NV12.
 pub fn from_planar(width: u32, height: u32, yuv: &[u8]) -> Result<Vec<u8>, CodecError> {
     let layout = Layout::packed(width, height);
-    let len = layout.len()?;
+    let len = layout.byte_len()?;
     if yuv.len() != len {
         return Err(CodecError::InvalidApi {
             what: "picture length",
@@ -127,7 +126,7 @@ pub fn from_planar(width: u32, height: u32, yuv: &[u8]) -> Result<Vec<u8>, Codec
 
 /// One NV12 picture in a transform buffer to tightly packed planar 4:2:0.
 pub fn to_planar(layout: Layout, buffer: &[u8]) -> Result<Vec<u8>, CodecError> {
-    if buffer.len() < layout.len()? {
+    if buffer.len() < layout.byte_len()? {
         return Err(CodecError::Truncated {
             at_bit: (buffer.len() as u64).saturating_mul(8),
             what: "nv12 buffer",
@@ -154,7 +153,7 @@ pub fn to_planar(layout: Layout, buffer: &[u8]) -> Result<Vec<u8>, CodecError> {
 
 /// One NV12 picture in a transform buffer to tightly packed opaque RGBA.
 pub fn to_rgba(layout: Layout, buffer: &[u8]) -> Result<Vec<u8>, CodecError> {
-    if buffer.len() < layout.len()? {
+    if buffer.len() < layout.byte_len()? {
         return Err(CodecError::Truncated {
             at_bit: (buffer.len() as u64).saturating_mul(8),
             what: "nv12 buffer",
@@ -245,7 +244,7 @@ mod tests {
             stride: 4,
             rows: 4,
         };
-        let mut buffer = vec![0xEE_u8; layout.len().unwrap()];
+        let mut buffer = vec![0xEE_u8; layout.byte_len().unwrap()];
         buffer[0..2].copy_from_slice(&[1, 2]);
         buffer[4..6].copy_from_slice(&[3, 4]);
         buffer[16..18].copy_from_slice(&[5, 6]);

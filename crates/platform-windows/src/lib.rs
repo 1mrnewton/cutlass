@@ -16,7 +16,6 @@ mod limits;
 mod mf;
 #[cfg(target_os = "windows")]
 use cutlass_decode::nal;
-mod nv12;
 mod slice;
 
 #[cfg(not(target_os = "windows"))]

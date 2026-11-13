@@ -19,6 +19,7 @@
 
 mod convert;
 mod lut;
+pub mod nv12;
 mod still;
 mod transfer;
 

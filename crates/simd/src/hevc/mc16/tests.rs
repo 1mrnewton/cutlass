@@ -152,3 +152,62 @@ fn put_matches_the_specification() {
         }
     }
 }
+
+#[test]
+fn store_matches_the_default_weighting() {
+    use super::store;
+    if !crate::hevc::mc::accelerated() {
+        return;
+    }
+    let mut seed = 7u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for bd in [9u32, 10, 12] {
+        let max = (1i32 << bd) - 1;
+        // Intermediates over their whole range, extremes included.
+        let mut inter = || -> i16 {
+            match next() % 8 {
+                0 => i16::MIN,
+                1 => i16::MAX,
+                _ => (next() as i32 % 26000 - 10000) as i16,
+            }
+        };
+        let a: Vec<i16> = (0..64 * 70).map(|_| inter()).collect();
+        let b: Vec<i16> = (0..64 * 70).map(|_| inter()).collect();
+        for w in (4..=64).step_by(4) {
+            for h in [1usize, 2, 7, 64] {
+                for two in [false, true] {
+                    let (stride, ab) = (w + 3, 70);
+                    let mut got = vec![0u16; (h - 1) * stride + w];
+                    assert!(store(
+                        &mut got,
+                        stride,
+                        (&a, two.then_some(&b[..])),
+                        ab,
+                        (w, h),
+                        bd
+                    ));
+                    for y in 0..h {
+                        for x in 0..w {
+                            let (p, q) = (i32::from(a[y * ab + x]), i32::from(b[y * ab + x]));
+                            let want = if two {
+                                (p + q + (1 << (14 - bd))) >> (15 - bd)
+                            } else {
+                                (p + (1 << (13 - bd))) >> (14 - bd)
+                            };
+                            assert_eq!(
+                                i32::from(got[y * stride + x]),
+                                want.clamp(0, max),
+                                "bd {bd} w {w} h {h} two {two} at {x},{y}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

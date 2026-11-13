@@ -58,3 +58,67 @@ pub fn band_row(dst: &mut [u8], cur: &[u8], position: u8, offsets: [i8; 4]) -> b
         false
     }
 }
+
+/// [`edge_row`] for samples of 9 to 12 bits (`bit_depth`), whose offsets
+/// are scaled up and may be as large as 7 << 5.
+#[inline]
+pub fn edge_row16(
+    dst: &mut [u16],
+    cur: &[u16],
+    (a, b): (&[u16], &[u16]),
+    offsets: [i16; 4],
+    bit_depth: u32,
+) -> bool {
+    let n = dst.len();
+    if cur.len() < n
+        || a.len() < n
+        || b.len() < n
+        || !(9..=12).contains(&bit_depth)
+        || !crate::wide::has_avx2()
+    {
+        return false;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: `has_avx2` checked at run time that the CPU has AVX2.
+        #[allow(unsafe_code)]
+        unsafe {
+            avx2::edge_row16(dst, cur, (a, b), offsets, bit_depth);
+        }
+        true
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = offsets;
+        false
+    }
+}
+
+/// [`band_row`] for samples of 9 to 12 bits (`bit_depth`): the band of a
+/// sample is its top five bits, `cur[x] >> (bit_depth - 5)`.
+#[inline]
+pub fn band_row16(
+    dst: &mut [u16],
+    cur: &[u16],
+    position: u8,
+    offsets: [i16; 4],
+    bit_depth: u32,
+) -> bool {
+    if cur.len() < dst.len() || !(9..=12).contains(&bit_depth) || !crate::wide::has_avx2() {
+        return false;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: `has_avx2` checked at run time that the CPU has AVX2.
+        #[allow(unsafe_code)]
+        unsafe {
+            avx2::band_row16(dst, cur, position, offsets, bit_depth);
+        }
+        true
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (position, offsets);
+        false
+    }
+}

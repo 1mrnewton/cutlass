@@ -768,6 +768,12 @@ impl Picture {
                             continue;
                         }
                         let o = &mut out[(y - base) * pw + x0..(y - base) * pw + x1];
+                        if let (Some(d), Some(s)) = (P::words_mut(o), P::words(src))
+                            && sao::band_row16(d, s, p.class, p.offsets, bit_depth)
+                        {
+                            continue;
+                        }
+                        let o = &mut out[(y - base) * pw + x0..(y - base) * pw + x1];
                         for (o, &s) in o.iter_mut().zip(src) {
                             let v = s.i();
                             *o = P::of((v + table[(v >> shift) as usize & 31]).clamp(0, max));
@@ -823,6 +829,15 @@ impl Picture {
                             P::bytes(&la[xa.wrapping_add_signed(ax)..xb.wrapping_add_signed(ax)]),
                             P::bytes(&lb[xa.wrapping_add_signed(bx)..xb.wrapping_add_signed(bx)]),
                         ) && sao::edge_row(d, v, (a, b), offsets.map(|v| v as i8))
+                        {
+                            continue;
+                        }
+                        if let (Some(d), Some(v), Some(a), Some(b)) = (
+                            P::words_mut(&mut o[xa..xb]),
+                            P::words(&lv[xa..xb]),
+                            P::words(&la[xa.wrapping_add_signed(ax)..xb.wrapping_add_signed(ax)]),
+                            P::words(&lb[xa.wrapping_add_signed(bx)..xb.wrapping_add_signed(bx)]),
+                        ) && sao::edge_row16(d, v, (a, b), offsets, bit_depth)
                         {
                             continue;
                         }

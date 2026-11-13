@@ -194,21 +194,34 @@ impl OutRows {
             let n = have.saturating_sub(y0 + next).min(h - next);
             let shift = self.shift;
             let dst = self.rows_mut(c, next, n);
-            for (i, out) in dst.chunks_exact_mut(w).enumerate() {
-                let row = &rows[i * stride + x0..i * stride + x0 + w];
-                match P::bytes(row) {
-                    Some(bytes) => out.copy_from_slice(bytes),
-                    None => {
-                        for (o, s) in out.iter_mut().zip(row) {
-                            *o = (s.i() >> shift) as u8;
-                        }
+            let row = |i: usize| &rows[i * stride + x0..i * stride + x0 + w];
+            if P::bytes(&[]).is_some() {
+                for (i, out) in dst.chunks_exact_mut(w).enumerate() {
+                    if let Some(bytes) = P::bytes(row(i)) {
+                        out.copy_from_slice(bytes);
                     }
                 }
+            } else {
+                // Deeper samples, shifted down to 8 bits: compiled for
+                // AVX2 where the CPU has it.
+                cutlass_simd::wide::wide(
+                    #[inline(always)]
+                    || {
+                        for (i, out) in dst.chunks_exact_mut(w).enumerate() {
+                            if let Some(words) = P::words(row(i)) {
+                                for (o, &s) in out.iter_mut().zip(words) {
+                                    *o = (s >> shift) as u8;
+                                }
+                            }
+                        }
+                    },
+                );
             }
             if let Some(deep) = &mut self.deep {
                 for i in 0..n {
-                    let row = &rows[i * stride + x0..i * stride + x0 + w];
-                    deep[c].extend(row.iter().map(|s| s.i() as u16));
+                    if let Some(words) = P::words(row(i)) {
+                        deep[c].extend_from_slice(words);
+                    }
                 }
             }
             self.next[c] += n;

@@ -10,11 +10,11 @@
 use core::arch::x86_64::{
     __m128i, __m256i, _mm_add_epi32, _mm_cvtsi32_si128, _mm_cvtsi128_si64, _mm_extract_epi64,
     _mm_madd_epi16, _mm_packs_epi32, _mm_set_epi64x, _mm_setzero_si128, _mm_sll_epi16,
-    _mm_sra_epi32, _mm_unpackhi_epi32, _mm_unpacklo_epi32, _mm256_add_epi32,
+    _mm_sra_epi32, _mm_unpackhi_epi32, _mm_unpacklo_epi32, _mm256_add_epi32, _mm256_adds_epi16,
     _mm256_castsi128_si256, _mm256_castsi256_si128, _mm256_extracti128_si256, _mm256_madd_epi16,
-    _mm256_packs_epi32, _mm256_set_epi64x, _mm256_set1_epi32, _mm256_setzero_si256,
-    _mm256_sll_epi16, _mm256_sra_epi32, _mm256_unpackhi_epi16, _mm256_unpackhi_epi32,
-    _mm256_unpacklo_epi16, _mm256_unpacklo_epi32,
+    _mm256_max_epi16, _mm256_min_epi16, _mm256_packs_epi32, _mm256_set_epi64x, _mm256_set1_epi16,
+    _mm256_set1_epi32, _mm256_setzero_si256, _mm256_sll_epi16, _mm256_sra_epi16, _mm256_sra_epi32,
+    _mm256_unpackhi_epi16, _mm256_unpackhi_epi32, _mm256_unpacklo_epi16, _mm256_unpacklo_epi32,
 };
 
 use super::{Src, Taps};
@@ -341,6 +341,109 @@ fn put_w<const W: usize, const R: usize, const T: usize>(
                     st8(o, _mm256_castsi256_si128(down16(&strip, &p, shift)));
                 }
             }
+        }
+    }
+}
+
+// The default weighting. The sums are taken with saturation in 16 bits:
+// a sum that saturates lies past the sample range either way, since the
+// largest sample shifted back up, `((1 << bit_depth) - 1) << shift`, is
+// below 32767 at every bit depth taken.
+
+/// Sixteen intermediates from `s[at..]`, zeros past its end.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn ldi16(s: &[i16], at: usize) -> __m256i {
+    match s.get(at..).and_then(|t| t.first_chunk::<16>()) {
+        Some(a) => {
+            let q = |k: usize| {
+                let mut v = 0u64;
+                for (i, &x) in a[4 * k..4 * k + 4].iter().enumerate() {
+                    v |= u64::from(x as u16) << (16 * i);
+                }
+                v as i64
+            };
+            _mm256_set_epi64x(q(3), q(2), q(1), q(0))
+        }
+        None => _mm256_setzero_si256(),
+    }
+}
+
+/// Eight, or four, intermediates from `s[at..]` (the rest zeros).
+#[inline]
+#[target_feature(enable = "avx2")]
+fn ldi8(s: &[i16], at: usize, n: usize) -> __m128i {
+    let t = s.get(at..).unwrap_or_default();
+    let q = |k: usize| {
+        let mut v = 0u64;
+        for (i, &x) in t.iter().skip(4 * k).take(4).enumerate() {
+            v |= u64::from(x as u16) << (16 * i);
+        }
+        v as i64
+    };
+    if n >= 8 && t.len() >= 8 {
+        _mm_set_epi64x(q(1), q(0))
+    } else if t.len() >= 4 {
+        _mm_set_epi64x(0, q(0))
+    } else {
+        _mm_setzero_si128()
+    }
+}
+
+#[target_feature(enable = "avx2")]
+pub(super) fn store(
+    dst: &mut [u16],
+    dst_stride: usize,
+    (a, b): (&[i16], Option<&[i16]>),
+    ab_stride: usize,
+    (w, h): (usize, usize),
+    bit_depth: u32,
+) {
+    let (shift, add) = match b {
+        Some(_) => (15 - bit_depth, 1i16 << (14 - bit_depth)),
+        None => (14 - bit_depth, 1i16 << (13 - bit_depth)),
+    };
+    let max = ((1i32 << bit_depth) - 1) as i16;
+    let shift = _mm_cvtsi32_si128(shift as i32);
+    let (add16, max16) = (_mm256_set1_epi16(add), _mm256_set1_epi16(max));
+    let one = |x: __m256i, y: __m256i| -> __m256i {
+        let v = _mm256_adds_epi16(_mm256_adds_epi16(x, y), add16);
+        _mm256_min_epi16(
+            _mm256_max_epi16(_mm256_sra_epi16(v, shift), _mm256_setzero_si256()),
+            max16,
+        )
+    };
+    for j in 0..h {
+        let (ra, rb) = (j * ab_stride, b.map(|b| (b, j * ab_stride)));
+        let Some(o) = dst.get_mut(j * dst_stride..j * dst_stride + w) else {
+            return;
+        };
+        let mut x = 0;
+        while x + 16 <= w {
+            let y = rb.map_or(_mm256_setzero_si256(), |(b, r)| ldi16(b, r + x));
+            let v = one(ldi16(a, ra + x), y);
+            if let Some(d) = o.get_mut(x..x + 16).and_then(|d| d.first_chunk_mut::<16>()) {
+                let lo = lanes(_mm256_castsi256_si128(v));
+                let hi = lanes(_mm256_extracti128_si256::<1>(v));
+                for k in 0..8 {
+                    d[k] = lo[k] as u16;
+                    d[k + 8] = hi[k] as u16;
+                }
+            }
+            x += 16;
+        }
+        while x < w {
+            let n = (w - x).min(8);
+            let y = rb.map_or(_mm_setzero_si128(), |(b, r)| ldi8(b, r + x, n));
+            let v = one(
+                _mm256_castsi128_si256(ldi8(a, ra + x, n)),
+                _mm256_castsi128_si256(y),
+            );
+            let l = lanes(_mm256_castsi256_si128(v));
+            for (d, &s) in o[x..x + n].iter_mut().zip(&l) {
+                *d = s as u16;
+            }
+            x += n;
         }
     }
 }

@@ -123,3 +123,137 @@ pub(super) fn band_row(dst: &mut [u8], cur: &[u8], position: u8, o: [i8; 4]) {
         dst[x] = (v + add).clamp(0, 255) as u8;
     }
 }
+
+// Samples of 9 to 12 bits, sixteen at a time: every sample and sum fits
+// signed 16 bits, so the signs come from plain compares, and the offset
+// of each sample from an eight-entry table of 16-bit values by `pshufb`
+// on byte pairs.
+
+use core::arch::x86_64 as x86;
+
+/// Sixteen samples.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn ld16(a: &[u16; 16]) -> __m256i {
+    let word = |k: usize| {
+        let mut v = 0u64;
+        for (i, &s) in a[4 * k..4 * k + 4].iter().enumerate() {
+            v |= u64::from(s) << (16 * i);
+        }
+        v as i64
+    };
+    x86::_mm256_set_epi64x(word(3), word(2), word(1), word(0))
+}
+
+/// The sixteen samples of `v`.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn st16(d: &mut [u16; 16], v: __m256i) {
+    let lanes = [
+        _mm256_extract_epi64::<0>(v),
+        _mm256_extract_epi64::<1>(v),
+        _mm256_extract_epi64::<2>(v),
+        _mm256_extract_epi64::<3>(v),
+    ];
+    for (k, l) in lanes.into_iter().enumerate() {
+        for i in 0..4 {
+            d[4 * k + i] = (l as u64 >> (16 * i)) as u16;
+        }
+    }
+}
+
+/// An eight-entry table of 16-bit values in both lanes, and how to pick
+/// entry `i` of each 16-bit lane: the byte indices `2i` and `2i + 1`.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn table16(t: [i16; 8]) -> __m256i {
+    let b = |i: usize| t[i / 2].to_le_bytes()[i % 2] as i8;
+    table(core::array::from_fn(b))
+}
+
+/// Entry `idx` (0 to 7 in each 16-bit lane) of `t`.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn pick16(t: __m256i, idx: __m256i) -> __m256i {
+    let bytes = x86::_mm256_add_epi16(
+        x86::_mm256_mullo_epi16(idx, x86::_mm256_set1_epi16(0x0202)),
+        x86::_mm256_set1_epi16(0x0100),
+    );
+    _mm256_shuffle_epi8(t, bytes)
+}
+
+/// `v + o` clipped to `0..=max`.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn add_clip16(v: __m256i, o: __m256i, max: __m256i) -> __m256i {
+    x86::_mm256_min_epi16(
+        x86::_mm256_max_epi16(x86::_mm256_add_epi16(v, o), _mm256_setzero_si256()),
+        max,
+    )
+}
+
+#[target_feature(enable = "avx2")]
+pub(super) fn edge_row16(
+    dst: &mut [u16],
+    cur: &[u16],
+    (a, b): (&[u16], &[u16]),
+    o: [i16; 4],
+    bit_depth: u32,
+) {
+    let n = dst.len();
+    let top = (1i32 << bit_depth) - 1;
+    let max = x86::_mm256_set1_epi16(top as i16);
+    let two = x86::_mm256_set1_epi16(2);
+    let offsets = table16([o[0], o[1], 0, o[2], o[3], 0, 0, 0]);
+    let sign = |x: __m256i, y: __m256i| {
+        x86::_mm256_sub_epi16(x86::_mm256_cmpgt_epi16(y, x), x86::_mm256_cmpgt_epi16(x, y))
+    };
+    let (d, _) = dst.as_chunks_mut::<16>();
+    let done = 16 * d.len();
+    let rows = cur
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .zip(a.as_chunks::<16>().0.iter().zip(b.as_chunks::<16>().0));
+    for (d, (c, (a, b))) in d.iter_mut().zip(rows) {
+        let v = ld16(c);
+        let idx = x86::_mm256_add_epi16(
+            two,
+            x86::_mm256_add_epi16(sign(v, ld16(a)), sign(v, ld16(b))),
+        );
+        st16(d, add_clip16(v, pick16(offsets, idx), max));
+    }
+    for x in done..n {
+        let v = i32::from(cur[x]);
+        let idx = 2 + (v - i32::from(a[x])).signum() + (v - i32::from(b[x])).signum();
+        let add = [o[0], o[1], 0, o[2], o[3]][idx as usize];
+        dst[x] = (v + i32::from(add)).clamp(0, top) as u16;
+    }
+}
+
+#[target_feature(enable = "avx2")]
+pub(super) fn band_row16(dst: &mut [u16], cur: &[u16], position: u8, o: [i16; 4], bit_depth: u32) {
+    let n = dst.len();
+    let top = (1i32 << bit_depth) - 1;
+    let max = x86::_mm256_set1_epi16(top as i16);
+    let offsets = table16([o[0], o[1], o[2], o[3], 0, 0, 0, 0]);
+    let pos = x86::_mm256_set1_epi16(i16::from(position));
+    let low5 = x86::_mm256_set1_epi16(31);
+    let four = x86::_mm256_set1_epi16(4);
+    let shift = x86::_mm_cvtsi32_si128(bit_depth as i32 - 5);
+    let (d, _) = dst.as_chunks_mut::<16>();
+    let done = 16 * d.len();
+    for (d, c) in d.iter_mut().zip(cur.as_chunks::<16>().0) {
+        let v = ld16(c);
+        let band = x86::_mm256_srl_epi16(v, shift);
+        let k = _mm256_and_si256(x86::_mm256_sub_epi16(band, pos), low5);
+        let k = x86::_mm256_min_epi16(k, four);
+        st16(d, add_clip16(v, pick16(offsets, k), max));
+    }
+    for x in done..n {
+        let v = i32::from(cur[x]);
+        let k = (((v >> (bit_depth - 5)) - i32::from(position)) & 31) as usize;
+        let add = if k < 4 { i32::from(o[k]) } else { 0 };
+        dst[x] = (v + add).clamp(0, top) as u16;
+    }
+}

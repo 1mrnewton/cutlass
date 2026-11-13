@@ -694,6 +694,19 @@ pub fn store<P: Pixel>(
             return;
         }
     }
+    if weights.is_none()
+        && let Some(words) = P::words_mut(dst)
+    {
+        let done = match pred {
+            [Some(a), b @ Some(_)] | [Some(a), b @ None] | [b @ None, Some(a)] => {
+                cutlass_simd::hevc::mc16::store(words, stride, (a, b), w, (w, h), bit_depth)
+            }
+            [None, None] => true,
+        };
+        if done {
+            return;
+        }
+    }
     let max = (1i32 << bit_depth) - 1;
     let shift1 = 14 - bit_depth;
     let rows = dst.chunks_mut(stride).take(h);

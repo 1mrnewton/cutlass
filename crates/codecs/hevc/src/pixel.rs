@@ -19,6 +19,8 @@ pub trait Pixel: Copy + Default + Send + Sync + std::fmt::Debug + 'static {
     /// The samples as 16-bit words, for the kernels of deeper samples.
     fn words(s: &[Self]) -> Option<&[u16]>;
     fn bytes_mut(s: &mut [Self]) -> Option<&mut [u8]>;
+    /// The samples as 16-bit words to write, for deeper samples.
+    fn words_mut(s: &mut [Self]) -> Option<&mut [u16]>;
     /// Bytes as samples, for 8-bit samples.
     fn of_bytes_mut(s: &mut [u8]) -> Option<&mut [Self]>;
 }
@@ -54,6 +56,11 @@ impl Pixel for u8 {
     #[inline(always)]
     fn bytes_mut(s: &mut [Self]) -> Option<&mut [u8]> {
         Some(s)
+    }
+
+    #[inline(always)]
+    fn words_mut(_: &mut [Self]) -> Option<&mut [u16]> {
+        None
     }
 
     #[inline(always)]
@@ -93,6 +100,11 @@ impl Pixel for u16 {
     #[inline(always)]
     fn bytes_mut(_: &mut [Self]) -> Option<&mut [u8]> {
         None
+    }
+
+    #[inline(always)]
+    fn words_mut(s: &mut [Self]) -> Option<&mut [u16]> {
+        Some(s)
     }
 
     #[inline(always)]

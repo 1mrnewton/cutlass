@@ -90,3 +90,43 @@ pub fn put(
         false
     }
 }
+
+/// The default weighted prediction (clause 8.5.3.3.4.2) of a `w`×`h`
+/// block of `bit_depth` bits (9 to 12) into `dst` (rows `dst_stride`
+/// apart): from one block of intermediates `(a + o1) >> (14 - bit_depth)`,
+/// from two `(a + b + o2) >> (15 - bit_depth)`, clipped to the sample
+/// range. The intermediates' rows lie `ab_stride` apart.
+#[inline]
+pub fn store(
+    dst: &mut [u16],
+    dst_stride: usize,
+    (a, b): (&[i16], Option<&[i16]>),
+    ab_stride: usize,
+    (w, h): (usize, usize),
+    bit_depth: u32,
+) -> bool {
+    let fits = w % 4 == 0
+        && (4..=64).contains(&w)
+        && h >= 1
+        && (9..=12).contains(&bit_depth)
+        && dst_stride >= w
+        && ab_stride >= w
+        && (h - 1) * dst_stride + w <= dst.len()
+        && (h - 1) * ab_stride + w <= a.len().min(b.map_or(usize::MAX, <[i16]>::len));
+    if !fits || !super::mc::accelerated() {
+        return false;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: `accelerated` checked at run time that the CPU has AVX2.
+        #[allow(unsafe_code)]
+        unsafe {
+            avx2::store(dst, dst_stride, (a, b), ab_stride, (w, h), bit_depth);
+        }
+        true
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}

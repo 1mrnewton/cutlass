@@ -417,9 +417,9 @@ impl<'a> SliceJob<'a> {
 
 /// The loop filters and the publication of one picture, run behind its
 /// reconstruction. Every CTB reconstructed is counted; a CTB row whose
-/// CTBs are all in has its motion published; once the row below is in
-/// too it is deblocked, and once that row is deblocked it gets SAO and
-/// its final samples are published.
+/// CTBs are all in has its motion published and is deblocked, and once
+/// the row below is deblocked it gets SAO and its final samples are
+/// published.
 ///
 /// Reconstruction calls [`Self::ctb_done`] while it holds the lock of its
 /// own CTB row, so the filters never wait for the pipeline's lock there:
@@ -557,9 +557,12 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
         }
         loop {
             let d = st.deblocked;
-            // Row `d` is deblocked once nothing reconstructs it any more:
-            // the row below is in, or reconstruction has stopped.
-            if d < rows && (end || (self.complete(d) && self.complete(d + 1))) && !touches(d, d) {
+            // Row `d` is deblocked once it is reconstructed: the row below
+            // reads the line above it from the copy saved before the
+            // filters (`Samples::above`), never the row itself, so the
+            // filters follow reconstruction by one row and find its
+            // samples still in cache.
+            if d < rows && (end || self.complete(d)) && !touches(d, d) {
                 self.pic.deblock_row(self.work, d);
                 st.deblocked += 1;
                 continue;

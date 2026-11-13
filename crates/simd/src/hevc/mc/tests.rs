@@ -1,6 +1,6 @@
 //! The kernels against the filters as clause 8.5.3.3.3 writes them.
 
-use super::{Dst, Src, Taps, accelerated, bi, predict, put, uni};
+use super::{Dst, Src, Taps, Weights, accelerated, bi, predict, put, uni};
 
 const LUMA: [[i8; 8]; 4] = [
     [0, 0, 0, 64, 0, 0, 0, 0],
@@ -119,6 +119,38 @@ fn put_matches_the_specification() {
                             for x in 0..w {
                                 let v = ((i32::from(want[y * w + x]) + 32) >> 6).clamp(0, 255);
                                 assert_eq!(i32::from(px[y * stride + x]), v, "uni {w}x{h}");
+                            }
+                        }
+                        // Explicit weights.
+                        let wt = Weights {
+                            w0: 77,
+                            w1: -13,
+                            o0: -40,
+                            o1: 21,
+                            log2wd: 6 + (f % 3) as u32,
+                        };
+                        let dst = Dst::UniW(&mut px, wt);
+                        assert!(predict(dst, stride, &src, (w, h), &taps, &mut tmp));
+                        for y in 0..h {
+                            for x in 0..w {
+                                let p = i32::from(want[y * w + x]);
+                                let r = 1 << (wt.log2wd - 1);
+                                let v = (((p * i32::from(wt.w0) + r) >> wt.log2wd) + wt.o0)
+                                    .clamp(0, 255);
+                                assert_eq!(i32::from(px[y * stride + x]), v, "uniw {w}x{h}");
+                            }
+                        }
+                        let dst = Dst::BiW(&mut px, &other, wt);
+                        assert!(predict(dst, stride, &src, (w, h), &taps, &mut tmp));
+                        for y in 0..h {
+                            for x in 0..w {
+                                let a = i32::from(other[y * w + x]);
+                                let b = i32::from(want[y * w + x]);
+                                let s = a * i32::from(wt.w0)
+                                    + b * i32::from(wt.w1)
+                                    + ((wt.o0 + wt.o1 + 1) << wt.log2wd);
+                                let v = (s >> (wt.log2wd + 1)).clamp(0, 255);
+                                assert_eq!(i32::from(px[y * stride + x]), v, "biw {w}x{h}");
                             }
                         }
                         assert!(predict(

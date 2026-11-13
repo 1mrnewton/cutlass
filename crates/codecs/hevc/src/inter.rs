@@ -667,26 +667,48 @@ impl<'a, P: Pixel> SliceDecoder<'a, '_, P> {
                 Some((plane, block))
             };
             let sources = [source(0), source(1)];
-            // Default weighting of 8-bit samples: the last list goes
-            // straight to the picture.
-            if weights.is_none() {
-                match &sources {
-                    [Some((p0, b0)), Some((p1, b1))] => {
-                        mc::interpolate(p0, *b0, bit_depth, &mut self.pred[0][..n], &mut self.mc);
-                        let (dst, stride) = self.out.from(c, cx, cy);
-                        let other = Some(&self.pred[0][..n]);
-                        if mc::predict_px(p1, *b1, (dst, stride), other, &mut self.mc) {
-                            continue;
-                        }
+            // 8-bit samples: the last list goes straight to the picture,
+            // weighted there.
+            let shift1 = 14 - bit_depth;
+            let wt = |list: usize| {
+                weights.map(|w| {
+                    let (a, b) = (w[c][0], w[c][1]);
+                    let lead = if list == 1 && sources[0].is_none() {
+                        b
+                    } else {
+                        a
+                    };
+                    mc::Weights {
+                        w0: lead.weight as i16,
+                        w1: b.weight as i16,
+                        o0: lead.offset,
+                        o1: b.offset,
+                        log2wd: lead.log2_denom + shift1,
                     }
-                    [Some((p, b)), None] | [None, Some((p, b))] => {
-                        let (dst, stride) = self.out.from(c, cx, cy);
-                        if mc::predict_px(p, *b, (dst, stride), None, &mut self.mc) {
-                            continue;
-                        }
+                })
+            };
+            match &sources {
+                [Some((p0, b0)), Some((p1, b1))] => {
+                    mc::interpolate(p0, *b0, bit_depth, &mut self.pred[0][..n], &mut self.mc);
+                    let (dst, stride) = self.out.from(c, cx, cy);
+                    let fuse = (Some(&self.pred[0][..n]), wt(0));
+                    if mc::predict_px(p1, *b1, (dst, stride), fuse, &mut self.mc) {
+                        continue;
                     }
-                    [None, None] => {}
                 }
+                [Some((p, b)), None] => {
+                    let (dst, stride) = self.out.from(c, cx, cy);
+                    if mc::predict_px(p, *b, (dst, stride), (None, wt(0)), &mut self.mc) {
+                        continue;
+                    }
+                }
+                [None, Some((p, b))] => {
+                    let (dst, stride) = self.out.from(c, cx, cy);
+                    if mc::predict_px(p, *b, (dst, stride), (None, wt(1)), &mut self.mc) {
+                        continue;
+                    }
+                }
+                [None, None] => {}
             }
             let mut used = [false; 2];
             for (list, source) in sources.iter().enumerate() {

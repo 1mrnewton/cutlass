@@ -14,15 +14,15 @@
 
 use core::arch::x86_64::{
     __m128i, __m256i, _mm_add_epi16, _mm_add_epi32, _mm_adds_epi16, _mm_cvtepu8_epi16,
-    _mm_cvtsi128_si64, _mm_extract_epi64, _mm_madd_epi16, _mm_maddubs_epi16, _mm_mullo_epi16,
-    _mm_packs_epi32, _mm_packus_epi16, _mm_set_epi64x, _mm_set1_epi16, _mm_setr_epi8,
-    _mm_setzero_si128, _mm_shuffle_epi8, _mm_slli_epi16, _mm_srai_epi16, _mm_srai_epi32,
-    _mm_unpackhi_epi16, _mm_unpacklo_epi16, _mm256_add_epi16, _mm256_add_epi32, _mm256_adds_epi16,
-    _mm256_castsi256_si128, _mm256_cvtepu8_epi16, _mm256_extract_epi64, _mm256_extracti128_si256,
-    _mm256_madd_epi16, _mm256_maddubs_epi16, _mm256_mullo_epi16, _mm256_packs_epi32,
-    _mm256_set_m128i, _mm256_set1_epi16, _mm256_set1_epi32, _mm256_setzero_si256,
-    _mm256_shuffle_epi8, _mm256_slli_epi16, _mm256_srai_epi16, _mm256_srai_epi32,
-    _mm256_unpackhi_epi16, _mm256_unpacklo_epi16,
+    _mm_cvtsi32_si128, _mm_cvtsi128_si64, _mm_extract_epi64, _mm_madd_epi16, _mm_maddubs_epi16,
+    _mm_mullo_epi16, _mm_packs_epi32, _mm_packus_epi16, _mm_set_epi64x, _mm_set1_epi16,
+    _mm_setr_epi8, _mm_setzero_si128, _mm_shuffle_epi8, _mm_slli_epi16, _mm_srai_epi16,
+    _mm_srai_epi32, _mm_unpackhi_epi16, _mm_unpacklo_epi16, _mm256_add_epi16, _mm256_add_epi32,
+    _mm256_adds_epi16, _mm256_castsi128_si256, _mm256_castsi256_si128, _mm256_cvtepu8_epi16,
+    _mm256_extract_epi64, _mm256_extracti128_si256, _mm256_madd_epi16, _mm256_maddubs_epi16,
+    _mm256_mullo_epi16, _mm256_packs_epi32, _mm256_set_m128i, _mm256_set1_epi16, _mm256_set1_epi32,
+    _mm256_setzero_si256, _mm256_shuffle_epi8, _mm256_slli_epi16, _mm256_sra_epi32,
+    _mm256_srai_epi16, _mm256_srai_epi32, _mm256_unpackhi_epi16, _mm256_unpacklo_epi16,
 };
 
 use super::{Src, Taps};
@@ -250,6 +250,11 @@ struct Out<'a> {
     other: &'a [i16],
     stride: usize,
     other_stride: usize,
+    /// Explicit weighting (modes 3 and 4): the 16-bit pair each pair of
+    /// values is multiplied by, the 32-bit term added, and the shift.
+    pair: __m256i,
+    add: __m256i,
+    shift: __m128i,
 }
 
 impl Out<'_> {
@@ -261,7 +266,36 @@ impl Out<'_> {
             other: self.other.get(x..).unwrap_or_default(),
             stride: self.stride,
             other_stride: self.other_stride,
+            pair: self.pair,
+            add: self.add,
+            shift: self.shift,
         }
+    }
+
+    /// Explicit weighting of sixteen values `v` (mode 3) or of the other
+    /// list's `o` with `v` (mode 4), to sixteen 16-bit sums.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn weigh16<const M: u8>(&self, v: __m256i, o: __m256i) -> __m256i {
+        let (a, b) = if M == 3 {
+            (v, _mm256_set1_epi16(1))
+        } else {
+            (o, v)
+        };
+        let lo = _mm256_madd_epi16(_mm256_unpacklo_epi16(a, b), self.pair);
+        let hi = _mm256_madd_epi16(_mm256_unpackhi_epi16(a, b), self.pair);
+        let (lo, hi) = if M == 3 {
+            (
+                _mm256_add_epi32(_mm256_sra_epi32(lo, self.shift), self.add),
+                _mm256_add_epi32(_mm256_sra_epi32(hi, self.shift), self.add),
+            )
+        } else {
+            (
+                _mm256_sra_epi32(_mm256_add_epi32(lo, self.add), self.shift),
+                _mm256_sra_epi32(_mm256_add_epi32(hi, self.add), self.shift),
+            )
+        };
+        _mm256_packs_epi32(lo, hi)
     }
 
     /// Sixteen values of row `j` from column `x`.
@@ -277,10 +311,21 @@ impl Out<'_> {
                     _mm_packus_epi16(_mm256_castsi256_si128(v), _mm256_extracti128_si256::<1>(v));
                 st8(self.px, at, p, 16);
             }
-            _ => {
+            2 => {
                 let o = ld16x16(self.other, j * self.other_stride + x);
                 let s = _mm256_adds_epi16(_mm256_adds_epi16(v, o), _mm256_set1_epi16(64));
                 let v = _mm256_srai_epi16::<7>(s);
+                let p =
+                    _mm_packus_epi16(_mm256_castsi256_si128(v), _mm256_extracti128_si256::<1>(v));
+                st8(self.px, at, p, 16);
+            }
+            _ => {
+                let o = if M == 4 {
+                    ld16x16(self.other, j * self.other_stride + x)
+                } else {
+                    v
+                };
+                let v = self.weigh16::<M>(v, o);
                 let p =
                     _mm_packus_epi16(_mm256_castsi256_si128(v), _mm256_extracti128_si256::<1>(v));
                 st8(self.px, at, p, 16);
@@ -299,11 +344,21 @@ impl Out<'_> {
                 let v = _mm_srai_epi16::<6>(_mm_add_epi16(v, _mm_set1_epi16(32)));
                 st8(self.px, at, _mm_packus_epi16(v, v), n);
             }
-            _ => {
+            2 => {
                 let o = ld16x8(self.other, j * self.other_stride + x);
                 let v =
                     _mm_srai_epi16::<7>(_mm_adds_epi16(_mm_adds_epi16(v, o), _mm_set1_epi16(64)));
                 st8(self.px, at, _mm_packus_epi16(v, v), n);
+            }
+            _ => {
+                let o = if M == 4 {
+                    ld16x8(self.other, j * self.other_stride + x)
+                } else {
+                    v
+                };
+                let w = self.weigh16::<M>(_mm256_castsi128_si256(v), _mm256_castsi128_si256(o));
+                let w = _mm256_castsi256_si128(w);
+                st8(self.px, at, _mm_packus_epi16(w, w), n);
             }
         }
     }
@@ -319,6 +374,7 @@ pub(super) fn predict(
     taps: &Taps,
     tmp: &mut [i16],
 ) {
+    let zero = _mm256_setzero_si256();
     let (mode, mut out) = match dst {
         super::Dst::Mid(mid) => (
             0,
@@ -328,6 +384,9 @@ pub(super) fn predict(
                 other: &[],
                 stride,
                 other_stride: 0,
+                pair: zero,
+                add: zero,
+                shift: _mm_setzero_si128(),
             },
         ),
         super::Dst::Uni(px) => (
@@ -338,6 +397,9 @@ pub(super) fn predict(
                 other: &[],
                 stride,
                 other_stride: 0,
+                pair: zero,
+                add: zero,
+                shift: _mm_setzero_si128(),
             },
         ),
         super::Dst::Bi(px, other) => (
@@ -348,8 +410,44 @@ pub(super) fn predict(
                 other,
                 stride,
                 other_stride: w,
+                pair: zero,
+                add: zero,
+                shift: _mm_setzero_si128(),
             },
         ),
+        super::Dst::UniW(px, wt) => {
+            let round = 1i32 << (wt.log2wd - 1);
+            let pair = _mm256_set1_epi32((round << 16) | i32::from(wt.w0 as u16));
+            (
+                3,
+                Out {
+                    mid: &mut [],
+                    px,
+                    other: &[],
+                    stride,
+                    other_stride: 0,
+                    pair,
+                    add: _mm256_set1_epi32(wt.o0),
+                    shift: _mm_cvtsi32_si128(wt.log2wd as i32),
+                },
+            )
+        }
+        super::Dst::BiW(px, other, wt) => {
+            let pair = _mm256_set1_epi32((i32::from(wt.w1) << 16) | i32::from(wt.w0 as u16));
+            (
+                4,
+                Out {
+                    mid: &mut [],
+                    px,
+                    other,
+                    stride,
+                    other_stride: w,
+                    pair,
+                    add: _mm256_set1_epi32((wt.o0 + wt.o1 + 1) << wt.log2wd),
+                    shift: _mm_cvtsi32_si128(wt.log2wd as i32 + 1),
+                },
+            )
+        }
     };
     // A width of three quarters of a power of two is two blocks.
     let split = |a: usize| Src {
@@ -362,7 +460,9 @@ pub(super) fn predict(
             match mode {
                 0 => put_w::<$w, $t, 0>(&mut out.at($x), &split($x), h, taps, tmp),
                 1 => put_w::<$w, $t, 1>(&mut out.at($x), &split($x), h, taps, tmp),
-                _ => put_w::<$w, $t, 2>(&mut out.at($x), &split($x), h, taps, tmp),
+                2 => put_w::<$w, $t, 2>(&mut out.at($x), &split($x), h, taps, tmp),
+                3 => put_w::<$w, $t, 3>(&mut out.at($x), &split($x), h, taps, tmp),
+                _ => put_w::<$w, $t, 4>(&mut out.at($x), &split($x), h, taps, tmp),
             }
         };
     }

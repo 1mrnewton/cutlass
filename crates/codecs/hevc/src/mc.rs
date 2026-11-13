@@ -21,6 +21,7 @@ const CHROMA: [[i32; 4]; 8] = [
     [-2, 10, 58, -2],
 ];
 
+pub use cutlass_simd::hevc::mc::Weights;
 use cutlass_simd::hevc::mc::{self as kernels, Dst, Src, Taps};
 
 use crate::pixel::Pixel;
@@ -67,15 +68,17 @@ pub fn predict_px<P: Pixel>(
     plane: &Plane<'_, P>,
     block: Block,
     (dst, stride): (&mut [P], usize),
-    other: Option<&[i16]>,
+    (other, weights): (Option<&[i16]>, Option<Weights>),
     scratch: &mut Scratch<P>,
 ) -> bool {
     let Some(dst) = P::bytes_mut(dst) else {
         return false;
     };
-    let dst = match other {
-        Some(o) => Dst::Bi(dst, o),
-        None => Dst::Uni(dst),
+    let dst = match (other, weights) {
+        (Some(o), None) => Dst::Bi(dst, o),
+        (None, None) => Dst::Uni(dst),
+        (Some(o), Some(w)) => Dst::BiW(dst, o, w),
+        (None, Some(w)) => Dst::UniW(dst, w),
     };
     if block.luma {
         let taps = [LUMA16[block.fx & 3], LUMA16[block.fy & 3]];

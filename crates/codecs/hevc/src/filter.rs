@@ -9,6 +9,7 @@
 //! deblocked samples of the row and one line on each side, so it runs once
 //! the row below is deblocked.
 
+use std::cell::Cell;
 use std::sync::atomic::Ordering::Relaxed;
 
 use cutlass_simd::hevc::sao;
@@ -210,32 +211,43 @@ fn chroma_edge<E: Edge>(s: &mut E, st: Strength) {
 }
 
 /// Inputs shared by every edge of one direction.
-struct EdgeQuery {
+struct EdgeQuery<'m> {
     /// Luma position of `p0` and `q0`.
     p: (usize, usize),
     q: (usize, usize),
     bs: u8,
+    /// The CTB last looked up and its slice's deblocking offsets.
+    memo: &'m Cell<(usize, i32, i32)>,
 }
 
 impl Picture {
     /// Average luma QP, offsets of the slice holding `q0`, and the
     /// do-not-touch flags of both sides.
-    fn edge_terms(&self, query: &EdgeQuery) -> Option<(i32, i32, i32, bool, bool)> {
-        let header = &self.slice_of(query.q.0, query.q.1)?.header;
+    fn edge_terms(&self, query: &EdgeQuery<'_>) -> Option<(i32, i32, i32, bool, bool)> {
+        let rs = self.ctb_rs(query.q.0, query.q.1);
+        let (beta_offset, tc_offset) = {
+            let mut memo = query.memo.get();
+            if memo.0 != rs {
+                let header = &self.slice_of(query.q.0, query.q.1)?.header;
+                memo = (rs, header.beta_offset, header.tc_offset);
+                query.memo.set(memo);
+            }
+            (memo.1, memo.2)
+        };
         let ip = self.at4(query.p.0, query.p.1);
         let iq = self.at4(query.q.0, query.q.1);
         let qp_at = |at: usize| i32::from(self.qp.get(at) as i8);
         let qp = (qp_at(ip) + qp_at(iq) + 1) >> 1;
         Some((
             qp,
-            header.beta_offset,
-            header.tc_offset,
+            beta_offset,
+            tc_offset,
             self.info.get(ip) & FLAG_KEEP != 0,
             self.info.get(iq) & FLAG_KEEP != 0,
         ))
     }
 
-    fn luma_strength(&self, query: &EdgeQuery) -> Option<Strength> {
+    fn luma_strength(&self, query: &EdgeQuery<'_>) -> Option<Strength> {
         let (qp, beta_offset, tc_offset, no_p, no_q) = self.edge_terms(query)?;
         let shift = u32::from(self.sps.bit_depth) - 8;
         let beta = BETA[(qp + beta_offset).clamp(0, 51) as usize] << shift;
@@ -250,7 +262,7 @@ impl Picture {
         })
     }
 
-    fn chroma_strength(&self, query: &EdgeQuery, offset: i32) -> Option<Strength> {
+    fn chroma_strength(&self, query: &EdgeQuery<'_>, offset: i32) -> Option<Strength> {
         let (qp, _, tc_offset, no_p, no_q) = self.edge_terms(query)?;
         let shift = u32::from(self.sps.bit_depth) - 8;
         let qpc = chroma_qp((qp + offset).clamp(0, 57));
@@ -284,6 +296,7 @@ impl Picture {
         let ver_stride = width / 8 + 1;
         let cw = width / 2;
         let offsets = [self.pps.cb_qp_offset, self.pps.cr_qp_offset];
+        let memo = Cell::new((usize::MAX, 0, 0));
         for y in (top..bottom).step_by(4) {
             for x in (8..width).step_by(8) {
                 let bs = self.bs_ver.get((y >> 2) * ver_stride + (x >> 3));
@@ -294,6 +307,7 @@ impl Picture {
                     p: (x - 1, y),
                     q: (x, y),
                     bs,
+                    memo: &memo,
                 };
                 if let Some(st) = self.luma_strength(&query) {
                     let mut edge = Ver {
@@ -329,6 +343,7 @@ impl Picture {
         let width = self.width;
         let cw = width / 2;
         let offsets = [self.pps.cb_qp_offset, self.pps.cr_qp_offset];
+        let memo = Cell::new((usize::MAX, 0, 0));
         for y in (top.max(8)..bottom).step_by(8) {
             for x in (0..width).step_by(4) {
                 let bs = self.bs_hor.get((y >> 3) * self.w4 + (x >> 2));
@@ -339,6 +354,7 @@ impl Picture {
                     p: (x, y - 1),
                     q: (x, y),
                     bs,
+                    memo: &memo,
                 };
                 let chroma = bs == 2 && y % 16 == 0 && x % 8 == 0;
                 for c in 0..3 {

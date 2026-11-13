@@ -58,13 +58,31 @@ pub enum Dst<'a> {
     /// Samples, `Clip1((x + y + 64) >> 7)` with the intermediates `y` of
     /// the other list, whose rows are `w` apart.
     Bi(&'a mut [u8], &'a [i16]),
+    /// Samples, explicitly weighted (equation 8-252):
+    /// `Clip1(((x · w0 + 2^(log2wd − 1)) >> log2wd) + o0)`.
+    UniW(&'a mut [u8], Weights),
+    /// Samples, explicitly weighted with the intermediates `y` of list 0
+    /// (rows `w` apart; equation 8-253):
+    /// `Clip1((y · w0 + x · w1 + ((o0 + o1 + 1) << log2wd)) >> (log2wd + 1))`.
+    BiW(&'a mut [u8], &'a [i16], Weights),
+}
+
+/// Explicit weights of a block: weights and offsets of lists 0 and 1, and
+/// `log2WD`.
+#[derive(Clone, Copy, Debug)]
+pub struct Weights {
+    pub w0: i16,
+    pub w1: i16,
+    pub o0: i32,
+    pub o1: i32,
+    pub log2wd: u32,
 }
 
 impl Dst<'_> {
     fn len(&self) -> usize {
         match self {
             Self::Mid(d) => d.len(),
-            Self::Uni(d) | Self::Bi(d, _) => d.len(),
+            Self::Uni(d) | Self::Bi(d, _) | Self::UniW(d, _) | Self::BiW(d, _, _) => d.len(),
         }
     }
 }
@@ -89,6 +107,10 @@ pub fn predict(
         && (h - 1) * dst_stride + w <= dst.len()
         && match &dst {
             Dst::Bi(_, other) => (h - 1) * w + w <= other.len(),
+            Dst::BiW(_, other, wt) => {
+                (h - 1) * w + w <= other.len() && (1..=14).contains(&wt.log2wd)
+            }
+            Dst::UniW(_, wt) => (1..=14).contains(&wt.log2wd),
             _ => true,
         }
         && tmp.len() >= (h + 7) * w

@@ -250,6 +250,61 @@ fn webm_keeps_to_its_codecs_and_writes_opus_delay() {
     assert_eq!(entry.seek_pre_roll, 80_000_000);
 }
 
+/// An AV1 Block is the temporal unit without its delimiter and padding,
+/// every OBU with its size; the CodecPrivate is the `av1C` record.
+#[test]
+fn av1_blocks_are_stored_without_delimiters_and_keep_the_av1c_record() {
+    let av1c = [0x81, 0x00, 0x0c, 0x00, 0x0a, 0x03, 1, 2, 3];
+    let obu = |obu_type: u8, payload: &[u8]| {
+        let mut out = vec![(obu_type << 3) | 2, payload.len() as u8];
+        out.extend_from_slice(payload);
+        out
+    };
+    let unit = |index: u8| {
+        let mut out = obu(2, &[]);
+        if index == 1 {
+            out.extend(obu(15, &[0, 0]));
+        }
+        out.extend(obu(6, &[index; 30]));
+        out
+    };
+    for webm in [false, true] {
+        let mut mux = if webm {
+            MatroskaMux::webm(Cursor::new(Vec::new()))
+        } else {
+            MatroskaMux::new(Cursor::new(Vec::new()))
+        };
+        let picture = mux.add_stream(video(CodecId::Av1, &[], 1000)).expect("av1");
+        mux.set_config(picture, &av1c).expect("record");
+        for index in 0..3u8 {
+            mux.write_packet(&packet(
+                picture,
+                unit(index),
+                i64::from(index) * 40,
+                40,
+                1000,
+                index == 0,
+            ))
+            .expect("unit");
+        }
+        let bytes = finish(mux, &[(picture, 1000, 120)]);
+        let mut demux = read_back(bytes);
+        let stream = &demux.streams()[0];
+        assert_eq!(stream.params().codec(), &StreamCodec::Known(CodecId::Av1));
+        assert_eq!(stream.params().extradata(), av1c);
+        let packets = all(&mut demux);
+        assert_eq!(packets.len(), 3);
+        for (index, packet) in packets.iter().enumerate() {
+            assert_eq!(packet.bytes(), obu(6, &[index as u8; 30]).as_slice());
+        }
+    }
+    // A packet that is not whole OBUs is refused.
+    let mut mux = MatroskaMux::new(Cursor::new(Vec::new()));
+    let picture = mux.add_stream(video(CodecId::Av1, &[], 1000)).expect("av1");
+    let _ = mux.write_packet(&packet(picture, vec![0x32, 9, 1], 0, 40, 1000, true));
+    assert!(mux.finish(&[]).is_err() || mux.status() == MuxStatus::Failed);
+}
+
 #[test]
 fn prores_frames_lose_their_first_atom_on_disk_and_get_it_back() {
     let mut mux = MatroskaMux::new(Cursor::new(Vec::new()));

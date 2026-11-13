@@ -13,7 +13,7 @@
 //! | Loop filters | deblocking with slice and PPS overrides, SAO |
 //! | Picture partitions | slices, dependent slice segments, tiles, wavefronts, entry points |
 //! | Reference handling | RPS with inter-RPS prediction, long-term pictures, list modification, missing-reference generation, RASL skipping, C.5.2 bumping |
-//! | Threads | the CTB rows of a wavefront slice segment on the shared pool, each row two CTBs behind the one above; deblocking and SAO in bands of rows; output identical for any worker count |
+//! | Threads | several pictures at once, each waiting only for the reference rows it reads; the CTB rows of a wavefront slice segment on threads of their own, each two CTBs behind the row above; deblocking and SAO a CTB row behind reconstruction; output identical for any thread count |
 //! | Not supported | 4:0:0, 4:2:2, 4:4:4, range-extension tools, multilayer, 3D, screen content: refused as `Unsupported` |
 //!
 //! Limits: at most 16888 samples on an edge and 35 651 584 luma samples
@@ -22,6 +22,9 @@
 //!
 //! A high-bit-depth stream returns the 8-bit picture (each sample shifted
 //! down) plus `yuv420p10` for 10 bits or `yuv420_high` for 9, 11 and 12.
+//!
+//! The vector kernels of 8-bit pictures (interpolation, inverse transforms,
+//! deblocking, SAO) are in `cutlass-simd`; this crate has no `unsafe`.
 
 #![forbid(unsafe_code)]
 

@@ -23,6 +23,10 @@ struct TimelineStrip: View {
     @State private var trimming: (id: String, startEdge: Bool, dx: CGFloat)?
     /// A main clip being reordered: where the finger went down and where it is.
     @State private var reordering: (id: String, pressX: CGFloat, fingerX: CGFloat)?
+    /// How far the rows are scrolled up, in points: 0 or less.
+    @State private var scrollY: CGFloat = 0
+    /// Where `scrollY` was when a mostly upright drag began.
+    @State private var scrollStart: CGFloat?
 
     private let rulerHeight: CGFloat = 26
     private let laneGap: CGFloat = 8
@@ -32,6 +36,7 @@ struct TimelineStrip: View {
         GeometryReader { geometry in
             let middle = geometry.size.width / 2
             let origin = middle - x(model.playheadUs)
+            let shown = geometry.size.height - rulerHeight - 6
             ZStack(alignment: .topLeading) {
                 Color.clear.contentShape(Rectangle())
                 ruler(origin: origin, width: geometry.size.width)
@@ -51,6 +56,11 @@ struct TimelineStrip: View {
                             .zIndex(movingIn(lane) ? 1 : 0)
                     }
                 }
+                // The rows scroll up and down under the ruler, which stays.
+                .offset(y: scrollY)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .clipped()
+                .contentShape(Rectangle())
                 .padding(.top, rulerHeight + 6)
                 Rectangle()
                     .fill(.white)
@@ -62,16 +72,25 @@ struct TimelineStrip: View {
             }
             .coordinateSpace(.named("strip"))
             .clipped()
-            .gesture(scrub)
+            .gesture(scrub(shown: shown))
             .simultaneousGesture(zoom(width: geometry.size.width))
             .onTapGesture {
                 model.stopCoast()
                 model.selectedClip = nil
             }
-            .onAppear { model.refreshStrip(halfWidth: middle) }
+            .onAppear {
+                model.refreshStrip(halfWidth: middle)
+                showMain(shown: shown)
+            }
             .onChange(of: model.playheadUs) { model.refreshStrip(halfWidth: middle) }
             .onChange(of: model.pixelSize) { model.refreshStrip(halfWidth: middle) }
-            .onChange(of: model.lanes) { model.refreshStrip(halfWidth: middle) }
+            .onChange(of: model.lanes) { before, _ in
+                model.refreshStrip(halfWidth: middle)
+                scrollY = clamped(scrollY, shown: shown)
+                // A project's rows come after the strip shows.
+                if before.isEmpty { showMain(shown: shown) }
+            }
+            .onChange(of: shown) { scrollY = clamped(scrollY, shown: shown) }
             .onChange(of: geometry.size.width) { model.refreshStrip(halfWidth: middle) }
         }
     }
@@ -90,6 +109,24 @@ struct TimelineStrip: View {
     private var snapUs: Int64 { micros(10) }
 
     private func rowHeight(_ lane: Lane) -> CGFloat { lane.main ? 56 : 40 }
+
+    /// The rows' whole height, with a gap below the last.
+    private var rowsHeight: CGFloat {
+        model.lanes.reduce(0) { $0 + rowHeight($1) + laneGap }
+    }
+
+    /// `offset` kept between the top row at the top and the last row at
+    /// the bottom of `shown` points.
+    private func clamped(_ offset: CGFloat, shown: CGFloat) -> CGFloat {
+        min(0, max(offset, min(0, shown - rowsHeight)))
+    }
+
+    /// Scroll just far enough that the main row is in full view.
+    private func showMain(shown: CGFloat) {
+        guard let index = model.lanes.firstIndex(where: \.main) else { return }
+        let bottom = model.lanes[...index].reduce(0) { $0 + rowHeight($1) + laneGap }
+        if bottom + scrollY > shown { scrollY = clamped(shown - bottom, shown: shown) }
+    }
 
     private func movingIn(_ lane: Lane) -> Bool {
         guard let id = moving?.id else { return false }
@@ -446,19 +483,34 @@ struct TimelineStrip: View {
 
     // MARK: Scrub and zoom
 
-    private var scrub: some Gesture {
+    /// A sideways drag moves time; a mostly upright one scrolls the rows
+    /// when they are taller than the `shown` points.
+    private func scrub(shown: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 4)
             .onChanged { drag in
                 guard reordering == nil else { return }
-                if dragStart == nil {
-                    model.stopCoast()
-                    model.pause()
-                    dragStart = model.playheadUs
+                if dragStart == nil, scrollStart == nil {
+                    let upright = abs(drag.translation.height) > abs(drag.translation.width)
+                    if upright, rowsHeight > shown {
+                        scrollStart = scrollY
+                    } else {
+                        model.stopCoast()
+                        model.pause()
+                        dragStart = model.playheadUs
+                    }
+                }
+                if let scrollStart {
+                    scrollY = clamped(scrollStart + drag.translation.height, shown: shown)
+                    return
                 }
                 let start = dragStart ?? model.playheadUs
                 model.seek(start - micros(drag.translation.width))
             }
             .onEnded { drag in
+                if scrollStart != nil {
+                    scrollStart = nil
+                    return
+                }
                 guard dragStart != nil else { return }
                 dragStart = nil
                 model.coast(from: drag.velocity.width)

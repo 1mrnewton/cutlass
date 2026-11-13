@@ -40,18 +40,6 @@ struct Tb {
     blk: usize,
 }
 
-/// A coefficient position for the significance context: in the TU, of the
-/// sub-block, and inside the sub-block.
-#[derive(Clone, Copy)]
-struct SigAt {
-    xc: usize,
-    yc: usize,
-    xs: usize,
-    ys: usize,
-    xp: u8,
-    yp: u8,
-}
-
 /// Coding unit state the prediction and transform units read.
 #[derive(Clone, Copy, Default)]
 pub struct Cu {
@@ -106,7 +94,10 @@ pub struct SliceDecoder<'a, 'p, P: Pixel> {
     pub qp_delta_coded: bool,
     pub qp_delta: i32,
     pub cu: Cu,
+    /// Scaled coefficients: zero outside the block under way.
     pub coeffs: [i32; 32 * 32],
+    /// The residual of the block under way.
+    pub res: [i32; 32 * 32],
     pub pred: [[i16; 64 * 64]; 2],
     pub ctb_x: usize,
     pub ctb_y: usize,
@@ -116,103 +107,17 @@ pub struct SliceDecoder<'a, 'p, P: Pixel> {
     pub mc: crate::mc::Scratch<P>,
 }
 
-/// Up-right diagonal, horizontal, and vertical scans of a 4×4 and a 2×2
-/// block as (x, y), clause 6.5.3 to 6.5.5.
-fn scan4(scan: usize) -> &'static [(u8, u8); 16] {
-    const DIAG: [(u8, u8); 16] = [
-        (0, 0),
-        (0, 1),
-        (1, 0),
-        (0, 2),
-        (1, 1),
-        (2, 0),
-        (0, 3),
-        (1, 2),
-        (2, 1),
-        (3, 0),
-        (1, 3),
-        (2, 2),
-        (3, 1),
-        (2, 3),
-        (3, 2),
-        (3, 3),
-    ];
-    const HOR: [(u8, u8); 16] = [
-        (0, 0),
-        (1, 0),
-        (2, 0),
-        (3, 0),
-        (0, 1),
-        (1, 1),
-        (2, 1),
-        (3, 1),
-        (0, 2),
-        (1, 2),
-        (2, 2),
-        (3, 2),
-        (0, 3),
-        (1, 3),
-        (2, 3),
-        (3, 3),
-    ];
-    const VER: [(u8, u8); 16] = [
-        (0, 0),
-        (0, 1),
-        (0, 2),
-        (0, 3),
-        (1, 0),
-        (1, 1),
-        (1, 2),
-        (1, 3),
-        (2, 0),
-        (2, 1),
-        (2, 2),
-        (2, 3),
-        (3, 0),
-        (3, 1),
-        (3, 2),
-        (3, 3),
-    ];
-    match scan {
-        1 => &HOR,
-        2 => &VER,
-        _ => &DIAG,
-    }
-}
-
-/// Sub-block scan of a TU with `size` sub-blocks per edge (1, 2, 4, or 8).
-fn sub_scan(size: usize, scan: usize, i: usize) -> (usize, usize) {
-    match size {
-        1 => (0, 0),
-        2 => {
-            const DIAG: [(usize, usize); 4] = [(0, 0), (0, 1), (1, 0), (1, 1)];
-            const HOR: [(usize, usize); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
-            const VER: [(usize, usize); 4] = [(0, 0), (0, 1), (1, 0), (1, 1)];
-            match scan {
-                1 => HOR[i],
-                2 => VER[i],
-                _ => DIAG[i],
-            }
-        }
-        4 => {
-            let (x, y) = scan4(0)[i];
-            (usize::from(x), usize::from(y))
-        }
-        _ => diag8()[i],
-    }
-}
-
-fn diag8() -> &'static [(usize, usize); 64] {
-    use std::sync::OnceLock;
-    static SCAN: OnceLock<[(usize, usize); 64]> = OnceLock::new();
-    SCAN.get_or_init(|| {
-        let mut out = [(0usize, 0usize); 64];
-        let mut i = 0;
+/// The scans of clause 6.5.3 to 6.5.5 as (x, y): up-right diagonal,
+/// horizontal, vertical.
+const fn scan(size: usize, kind: usize) -> [(u8, u8); 64] {
+    let mut out = [(0u8, 0u8); 64];
+    let mut i = 0;
+    if kind == 0 {
         let (mut x, mut y) = (0i32, 0i32);
-        while i < 64 {
+        while i < size * size {
             while y >= 0 {
-                if x < 8 && y < 8 {
-                    out[i] = (x as usize, y as usize);
+                if (x as usize) < size && (y as usize) < size {
+                    out[i] = (x as u8, y as u8);
                     i += 1;
                 }
                 y -= 1;
@@ -221,12 +126,206 @@ fn diag8() -> &'static [(usize, usize); 64] {
             y = x;
             x = 0;
         }
-        out
-    })
+    } else {
+        while i < size * size {
+            let (a, b) = ((i % size) as u8, (i / size) as u8);
+            out[i] = if kind == 1 { (a, b) } else { (b, a) };
+            i += 1;
+        }
+    }
+    out
+}
+
+/// The scans of a 4×4 block, by scan kind.
+const SCAN4: [[(u8, u8); 16]; 3] = {
+    let mut out = [[(0u8, 0u8); 16]; 3];
+    let mut k = 0;
+    while k < 3 {
+        let s = scan(4, k);
+        let mut i = 0;
+        while i < 16 {
+            out[k][i] = s[i];
+            i += 1;
+        }
+        k += 1;
+    }
+    out
+};
+
+/// The sub-block scans of blocks with 1, 2, 4 and 8 sub-blocks per edge,
+/// by scan kind (the horizontal and vertical scans occur for 4×4 and 8×8
+/// blocks only, so larger ones take the diagonal).
+const SUB_SCANS: [[[(u8, u8); 64]; 3]; 4] = {
+    let mut out = [[[(0u8, 0u8); 64]; 3]; 4];
+    let mut l = 0;
+    while l < 4 {
+        let mut k = 0;
+        while k < 3 {
+            out[l][k] = scan(1 << l, if l > 1 { 0 } else { k });
+            k += 1;
+        }
+        l += 1;
+    }
+    out
+};
+
+/// Each position's place in its scan: `INV4[kind][y * 4 + x]`.
+const INV4: [[u8; 16]; 3] = {
+    let mut out = [[0u8; 16]; 3];
+    let mut k = 0;
+    while k < 3 {
+        let mut i = 0;
+        while i < 16 {
+            let (x, y) = SCAN4[k][i];
+            out[k][y as usize * 4 + x as usize] = i as u8;
+            i += 1;
+        }
+        k += 1;
+    }
+    out
+};
+
+/// Each sub-block's place in its scan: `INV_SUB[log2 - 2][kind][ys * 8 + xs]`.
+const INV_SUB: [[[u8; 64]; 3]; 4] = {
+    let mut out = [[[0u8; 64]; 3]; 4];
+    let mut l = 0;
+    while l < 4 {
+        let mut k = 0;
+        while k < 3 {
+            let mut i = 0;
+            while i < (1 << (2 * l)) {
+                let (x, y) = SUB_SCANS[l][k][i];
+                out[l][k][y as usize * 8 + x as usize] = i as u8;
+                i += 1;
+            }
+            k += 1;
+        }
+        l += 1;
+    }
+    out
+};
+
+fn sub_scan(log2s: usize, kind: usize) -> &'static [(u8, u8); 64] {
+    &SUB_SCANS[log2s.min(3)][kind.min(2)]
 }
 
 /// `ctxIdxMap` of equation 9-50 for 4×4 blocks.
 const CTX_IDX_MAP: [u8; 16] = [0, 1, 4, 5, 2, 3, 4, 5, 6, 6, 8, 8, 7, 7, 8, 8];
+
+/// `sigCtx` of a 4×4 block by scan position: `SIG4[kind][p]`.
+const SIG4: [[u8; 16]; 3] = {
+    let mut out = [[0u8; 16]; 3];
+    let mut k = 0;
+    while k < 3 {
+        let mut p = 0;
+        while p < 16 {
+            let (x, y) = SCAN4[k][p];
+            out[k][p] = CTX_IDX_MAP[(y as usize) * 4 + x as usize];
+            p += 1;
+        }
+        k += 1;
+    }
+    out
+};
+
+/// The part of `sigCtx` of larger blocks that depends on the coded flags
+/// of the sub-blocks to the right and below (`prev`) and the position in
+/// the sub-block, by scan position: `SIG_PATTERN[kind][prev][p]`.
+const SIG_PATTERN: [[[u8; 16]; 4]; 3] = {
+    let mut out = [[[0u8; 16]; 4]; 3];
+    let mut k = 0;
+    while k < 3 {
+        let mut prev = 0;
+        while prev < 4 {
+            let mut p = 0;
+            while p < 16 {
+                let (xp, yp) = SCAN4[k][p];
+                let (xp, yp) = (xp as usize, yp as usize);
+                out[k][prev][p] = match prev {
+                    0 => {
+                        if xp + yp == 0 {
+                            2
+                        } else if xp + yp < 3 {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    1 => {
+                        if yp == 0 {
+                            2
+                        } else if yp == 1 {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    2 => {
+                        if xp == 0 {
+                            2
+                        } else if xp == 1 {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    _ => 2,
+                };
+                p += 1;
+            }
+            prev += 1;
+        }
+        k += 1;
+    }
+    out
+};
+
+/// How the coefficients of one block are scaled.
+#[derive(Clone, Copy)]
+enum Scale<'a> {
+    /// Transquant bypass: as decoded.
+    Bypass,
+    /// One factor for every position.
+    Flat { factor: i64, add: i64, shift: u32 },
+    /// A scaling list: its 8×8 base upsampled by `1 << ratio_log2` (`None`:
+    /// a 4×4 list), and its DC value.
+    List {
+        base: &'a [u8; 64],
+        dc: Option<u8>,
+        ratio_log2: Option<u32>,
+        factor: i64,
+        add: i64,
+        shift: u32,
+    },
+}
+
+impl Scale<'_> {
+    #[inline(always)]
+    fn apply(&self, value: i64, x: usize, y: usize) -> i32 {
+        match *self {
+            Self::Bypass => value as i32,
+            Self::Flat { factor, add, shift } => {
+                ((value * factor + add) >> shift).clamp(-32768, 32767) as i32
+            }
+            Self::List {
+                base,
+                dc,
+                ratio_log2,
+                factor,
+                add,
+                shift,
+            } => {
+                let m = match (dc, ratio_log2) {
+                    (Some(dc), _) if x == 0 && y == 0 => dc,
+                    // A 4×4 list is 4×4, in rows of 4.
+                    (_, None) => base[(y & 3) * 4 + (x & 3)],
+                    (_, Some(r)) => base[((y >> r) & 7) * 8 + ((x >> r) & 7)],
+                };
+                ((value * i64::from(m) * factor + add) >> shift).clamp(-32768, 32767) as i32
+            }
+        }
+    }
+}
 
 /// Chroma QP of 4:2:0 (Table 8-10).
 pub fn chroma_qp(qpi: i32) -> i32 {
@@ -1141,10 +1240,11 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
     }
 
     /// `residual_coding` (clause 7.3.8.11) and the reconstruction of its
-    /// residual into the picture.
+    /// residual into the picture. The coefficients are scaled (clause
+    /// 8.6.3) as they are read, into `coeffs`, which is zero outside the
+    /// rectangle of the coefficients of the block under way.
     fn residual(&mut self, x0: usize, y0: usize, log2: u32, c: usize) -> Result<(), CodecError> {
         let n = 1usize << log2;
-        self.coeffs[..n * n].fill(0);
         let mut transform_skip = false;
         if self.pps.transform_skip && !self.cu.bypass && log2 == 2 {
             transform_skip = self
@@ -1209,42 +1309,60 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         if last_x >= n || last_y >= n {
             return Err(malformed("last significant coefficient"));
         }
-        let sub = n >> 2;
+        let log2s = log2 as usize - 2;
+        let sub = 1usize << log2s;
+        let subs = sub_scan(log2s, scan);
         // The scan positions of the last sub-block and of the last
         // coefficient inside it.
-        let last_sub = (0..sub * sub)
-            .find(|&i| sub_scan(sub, scan, i) == (last_x >> 2, last_y >> 2))
-            .unwrap_or(0);
-        let last_pos = scan4(scan)
-            .iter()
-            .position(|&(xp, yp)| (usize::from(xp), usize::from(yp)) == (last_x & 3, last_y & 3))
-            .unwrap_or(0);
-        let mut csbf = [[false; 8]; 8];
+        let last_sub = usize::from(INV_SUB[log2s][scan][(last_y >> 2) * 8 + (last_x >> 2)]);
+        let last_pos = usize::from(INV4[scan][(last_y & 3) * 4 + (last_x & 3)]);
+        let scan4 = &SCAN4[scan];
+        let scale = self.scaling(log2, c, transform_skip);
+        // Coded sub-block flags, bit `ys * 8 + xs`.
+        let mut csbf = 0u64;
         let sign_hiding = self.pps.sign_data_hiding && !self.cu.bypass;
+        let chroma = c > 0;
         let mut greater1_state = 1u32;
         let mut max_x = 0usize;
         let mut max_y = 0usize;
         for i in (0..=last_sub).rev() {
-            let (xs, ys) = sub_scan(sub, scan, i);
-            let right = xs + 1 < sub && csbf[xs + 1][ys];
-            let below = ys + 1 < sub && csbf[xs][ys + 1];
+            let (xs, ys) = subs[i];
+            let (xs, ys) = (usize::from(xs), usize::from(ys));
+            let right = xs + 1 < sub && csbf >> (ys * 8 + xs + 1) & 1 != 0;
+            let below = ys + 1 < sub && csbf >> ((ys + 1) * 8 + xs) & 1 != 0;
             let mut infer_dc = false;
             let coded = if i < last_sub && i > 0 {
-                let inc = usize::from(right || below) + if c > 0 { 2 } else { 0 };
+                let inc = usize::from(right || below) + if chroma { 2 } else { 0 };
                 let flag = self.cabac.decide(cabac::CODED_SUB_BLOCK + inc);
                 infer_dc = true;
                 flag
             } else {
                 true
             };
-            csbf[xs][ys] = coded;
             if !coded {
                 continue;
             }
+            csbf |= 1 << (ys * 8 + xs);
             // Significant coefficients, high to low scan position.
+            let prev = usize::from(right) | (usize::from(below) << 1);
+            let (table, base): (&[u8; 16], usize) = if log2 == 2 {
+                (&SIG4[scan], cabac::SIG_COEFF + if chroma { 27 } else { 0 })
+            } else {
+                let base = if chroma {
+                    27 + if log2 == 3 { 9 } else { 12 }
+                } else {
+                    (if xs + ys > 0 { 3 } else { 0 })
+                        + if log2 == 3 {
+                            if scan == 0 { 9 } else { 15 }
+                        } else {
+                            21
+                        }
+                };
+                (&SIG_PATTERN[scan][prev], cabac::SIG_COEFF + base)
+            };
+            let dc_ctx = cabac::SIG_COEFF + if chroma { 27 } else { 0 };
             let mut sig = [0u8; 16];
             let mut count = 0usize;
-            let prev = usize::from(right) | (usize::from(below) << 1);
             let start = if i == last_sub {
                 sig[0] = last_pos as u8;
                 count = 1;
@@ -1253,48 +1371,48 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                 15
             };
             let mut p = start;
-            while p >= 0 {
+            while p > 0 {
                 let pu = p as usize;
-                let (xp, yp) = scan4(scan)[pu];
-                let (xc, yc) = ((xs << 2) + usize::from(xp), (ys << 2) + usize::from(yp));
-                let significant = if pu > 0 || !infer_dc {
-                    let at = SigAt {
-                        xc,
-                        yc,
-                        xs,
-                        ys,
-                        xp,
-                        yp,
-                    };
-                    let ctx = self.sig_ctx(log2, c, at, prev, scan);
-                    let flag = self.cabac.decide(cabac::SIG_COEFF + ctx);
-                    if flag {
-                        infer_dc = false;
-                    }
-                    flag
-                } else {
-                    true
-                };
-                if significant {
+                if self.cabac.decide(base + usize::from(table[pu])) {
                     sig[count] = pu as u8;
                     count += 1;
+                    infer_dc = false;
                 }
                 p -= 1;
+            }
+            if p == 0 {
+                // Position 0: inferred when the sub-block is coded and no
+                // other coefficient was; the DC of a large block has its
+                // own context.
+                let significant = if infer_dc {
+                    true
+                } else {
+                    let ctx = if log2 > 2 && i == 0 {
+                        dc_ctx
+                    } else {
+                        base + usize::from(table[0])
+                    };
+                    self.cabac.decide(ctx)
+                };
+                if significant {
+                    sig[count] = 0;
+                    count += 1;
+                }
             }
             if count == 0 {
                 continue;
             }
             // Greater-than-one flags.
-            let mut ctx_set = if i == 0 || c > 0 { 0 } else { 2 };
+            let mut ctx_set = if i == 0 || chroma { 0 } else { 2 };
             if greater1_state == 0 {
                 ctx_set += 1;
             }
             greater1_state = 1;
             let mut greater1 = [false; 16];
             let mut first_g1 = None;
+            let g1_base = cabac::GREATER1 + ctx_set * 4 + if chroma { 16 } else { 0 };
             for (k, flag) in greater1.iter_mut().enumerate().take(count.min(8)) {
-                let inc = ctx_set * 4 + greater1_state.min(3) as usize + if c > 0 { 16 } else { 0 };
-                *flag = self.cabac.decide(cabac::GREATER1 + inc);
+                *flag = self.cabac.decide(g1_base + greater1_state.min(3) as usize);
                 if *flag {
                     greater1_state = 0;
                     if first_g1.is_none() {
@@ -1308,16 +1426,13 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             if first_g1.is_some() {
                 greater2 = self
                     .cabac
-                    .decide(cabac::GREATER2 + ctx_set + if c > 0 { 4 } else { 0 });
+                    .decide(cabac::GREATER2 + ctx_set + if chroma { 4 } else { 0 });
             }
             let last_sig_pos = usize::from(sig[0]);
             let first_sig_pos = usize::from(sig[count - 1]);
             let hidden = sign_hiding && last_sig_pos - first_sig_pos > 3;
-            let mut signs = [false; 16];
             let coded_signs = if hidden { count - 1 } else { count };
-            for sign in signs.iter_mut().take(coded_signs) {
-                *sign = self.cabac.bypass();
-            }
+            let signs = self.cabac.bypass_bits(coded_signs as u32) << (32 - coded_signs as u32);
             // Remaining levels.
             let mut rice = 0u32;
             let mut sum = 0i64;
@@ -1339,25 +1454,85 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                         rice = (rice + 1).min(4);
                     }
                 }
-                let pos = usize::from(sig[k]);
-                let (xp, yp) = scan4(scan)[pos];
+                let (xp, yp) = scan4[usize::from(sig[k])];
                 let (xc, yc) = ((xs << 2) + usize::from(xp), (ys << 2) + usize::from(yp));
-                let negative = signs[k];
+                let negative = k < coded_signs && (signs << k) & 0x8000_0000 != 0;
                 sum += level;
                 let mut value = if negative { -level } else { level };
                 if hidden && k == count - 1 && sum % 2 == 1 {
                     value = -value;
                 }
-                self.coeffs[yc * n + xc] = value.clamp(-32768, 32767) as i32;
+                let value = value.clamp(-32768, 32767);
+                self.coeffs[yc * n + xc] = scale.apply(value, xc, yc);
                 max_x = max_x.max(xc);
                 max_y = max_y.max(yc);
             }
         }
         if self.cabac.overrun() {
+            self.clear_coeffs(n, max_x, max_y);
             return Err(truncated("residual"));
         }
         self.reconstruct(x0, y0, log2, c, transform_skip, (max_x, max_y));
         Ok(())
+    }
+
+    /// Zero the coefficients of the block just used.
+    fn clear_coeffs(&mut self, n: usize, max_x: usize, max_y: usize) {
+        for row in self.coeffs.chunks_exact_mut(n).take(max_y + 1) {
+            row[..=max_x.min(n - 1)].fill(0);
+        }
+    }
+
+    /// How the coefficients of a block are scaled (clause 8.6.3).
+    fn scaling(&self, log2: u32, c: usize, transform_skip: bool) -> Scale<'a> {
+        let n = 1usize << log2;
+        let bit_depth = u32::from(self.sps.bit_depth);
+        if self.cu.bypass {
+            return Scale::Bypass;
+        }
+        let qp = if c == 0 {
+            self.qp_y + self.sps.qp_bd_offset()
+        } else {
+            let slice = &self.pic.slices[self.slice].header;
+            let offset = if c == 1 {
+                self.pps.cb_qp_offset + slice.cb_qp_offset
+            } else {
+                self.pps.cr_qp_offset + slice.cr_qp_offset
+            };
+            let qpi = (self.qp_y + offset).clamp(-self.sps.qp_bd_offset_c(), 57);
+            chroma_qp(qpi) + self.sps.qp_bd_offset_c()
+        };
+        let shift = bit_depth + log2 - 5;
+        let add = 1i64 << (shift - 1);
+        let factor = transform::LEVEL_SCALE[(qp % 6) as usize] << (qp / 6);
+        let list = self
+            .pps
+            .scaling_list
+            .as_ref()
+            .or(self.sps.scaling_list.as_ref());
+        match list {
+            Some(list) if !(transform_skip && n > 4) => {
+                let size_id = log2 as usize - 2;
+                let matrix = if size_id == 3 {
+                    if self.cu.intra { 0 } else { 3 }
+                } else {
+                    c + if self.cu.intra { 0 } else { 3 }
+                };
+                Scale::List {
+                    base: &list.lists[size_id][matrix],
+                    dc: (size_id > 1).then(|| list.dc[size_id - 2][matrix]),
+                    ratio_log2: log2.checked_sub(3),
+                    factor,
+                    add,
+                    shift,
+                }
+            }
+            _ => Scale::Flat {
+                factor: factor * 16,
+                add,
+                shift,
+            },
+        }
     }
 
     fn coeff_abs_level_remaining(&mut self, rice: u32) -> Result<u32, CodecError> {
@@ -1382,72 +1557,8 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         }
     }
 
-    fn sig_ctx(&self, log2: u32, c: usize, at: SigAt, prev: usize, scan: usize) -> usize {
-        let SigAt {
-            xc,
-            yc,
-            xs,
-            ys,
-            xp,
-            yp,
-        } = at;
-        let sig = if log2 == 2 {
-            usize::from(CTX_IDX_MAP[(yc << 2) + xc])
-        } else if xc + yc == 0 {
-            0
-        } else {
-            let (xp, yp) = (usize::from(xp), usize::from(yp));
-            let mut s = match prev {
-                0 => {
-                    if xp + yp == 0 {
-                        2
-                    } else if xp + yp < 3 {
-                        1
-                    } else {
-                        0
-                    }
-                }
-                1 => {
-                    if yp == 0 {
-                        2
-                    } else if yp == 1 {
-                        1
-                    } else {
-                        0
-                    }
-                }
-                2 => {
-                    if xp == 0 {
-                        2
-                    } else if xp == 1 {
-                        1
-                    } else {
-                        0
-                    }
-                }
-                _ => 2,
-            };
-            if c == 0 {
-                if xs + ys > 0 {
-                    s += 3;
-                }
-                if log2 == 3 {
-                    s += if scan == 0 { 9 } else { 15 };
-                } else {
-                    s += 21;
-                }
-            } else if log2 == 3 {
-                s += 9;
-            } else {
-                s += 12;
-            }
-            s
-        };
-        if c == 0 { sig } else { 27 + sig }
-    }
-
-    /// Scale, transform, and add a residual block. `max` is the largest
-    /// column and row holding a coefficient.
+    /// Transform, and add a residual block to the prediction. `max` is the
+    /// largest column and row holding a coefficient.
     fn reconstruct(
         &mut self,
         x0: usize,
@@ -1460,76 +1571,42 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let (max_x, max_y) = max;
         let n = 1usize << log2;
         let bit_depth = u32::from(self.sps.bit_depth);
-        let coeffs = &mut self.coeffs[..n * n];
-        if !self.cu.bypass {
-            let qp = if c == 0 {
-                self.qp_y + self.sps.qp_bd_offset()
-            } else {
-                let slice = &self.pic.slices[self.slice].header;
-                let offset = if c == 1 {
-                    self.pps.cb_qp_offset + slice.cb_qp_offset
-                } else {
-                    self.pps.cr_qp_offset + slice.cr_qp_offset
-                };
-                let qpi = (self.qp_y + offset).clamp(-self.sps.qp_bd_offset_c(), 57);
-                chroma_qp(qpi) + self.sps.qp_bd_offset_c()
-            };
-            let list = self
-                .pps
-                .scaling_list
-                .as_ref()
-                .or(self.sps.scaling_list.as_ref());
-            let scale = match list {
-                Some(list) if !(transform_skip && n > 4) => {
-                    let size_id = log2 as usize - 2;
-                    let matrix = if size_id == 3 {
-                        if self.cu.intra { 0 } else { 3 }
-                    } else {
-                        c + if self.cu.intra { 0 } else { 3 }
-                    };
-                    let mut factors = [0u8; 32 * 32];
-                    let base = &list.lists[size_id][matrix];
-                    if size_id == 0 {
-                        factors[..16].copy_from_slice(&base[..16]);
-                    } else {
-                        let ratio = n / 8;
-                        for y in 0..n {
-                            for x in 0..n {
-                                factors[y * n + x] = base[(y / ratio) * 8 + x / ratio];
-                            }
-                        }
-                        if size_id > 1 {
-                            factors[0] = list.dc[size_id - 2][matrix];
+        let scale = if c == 0 { 1 } else { 2 };
+        let maxv = (1i32 << bit_depth) - 1;
+        let coeffs = &self.coeffs[..n * n];
+        let res = &mut self.res[..n * n];
+        let flat = if self.cu.bypass {
+            res.copy_from_slice(coeffs);
+            None
+        } else if transform_skip {
+            transform::skip(coeffs, res, bit_depth);
+            None
+        } else {
+            let dst = c == 0 && log2 == 2 && self.cu.intra;
+            transform::inverse(coeffs, res, log2, dst, bit_depth, max_x, max_y)
+        };
+        self.clear_coeffs(n, max_x, max_y);
+        let (plane, stride) = self.out.from(c, x0 / scale, y0 / scale);
+        let res = &self.res[..n * n];
+        cutlass_simd::wide::wide(
+            #[inline(always)]
+            || match flat {
+                Some(v) => {
+                    for row in plane.chunks_mut(stride).take(n) {
+                        for s in &mut row[..n] {
+                            *s = P::of((s.i() + v).clamp(0, maxv));
                         }
                     }
-                    Some(factors)
                 }
-                _ => None,
-            };
-            transform::dequantize(
-                coeffs,
-                log2,
-                qp,
-                bit_depth,
-                scale.as_ref().map(|f| &f[..n * n]),
-            );
-            if transform_skip {
-                transform::skip(coeffs, bit_depth);
-            } else {
-                let dst = c == 0 && log2 == 2 && self.cu.intra;
-                let (mx, my) = if dst { (n - 1, n - 1) } else { (max_x, max_y) };
-                transform::inverse(coeffs, log2, dst, bit_depth, mx, my);
-            }
-        }
-        let scale = if c == 0 { 1 } else { 2 };
-        let max = (1i32 << bit_depth) - 1;
-        let (plane, stride) = self.out.from(c, x0 / scale, y0 / scale);
-        for y in 0..n {
-            let row = &mut plane[y * stride..y * stride + n];
-            for (x, sample) in row.iter_mut().enumerate() {
-                *sample = P::of((sample.i() + coeffs[y * n + x]).clamp(0, max));
-            }
-        }
+                None => {
+                    for (row, r) in plane.chunks_mut(stride).zip(res.chunks_exact(n)) {
+                        for (s, &r) in row[..n].iter_mut().zip(r) {
+                            *s = P::of((s.i() + r).clamp(0, maxv));
+                        }
+                    }
+                }
+            },
+        );
     }
 
     /// Boundary strengths of the left and top edges of a transform unit

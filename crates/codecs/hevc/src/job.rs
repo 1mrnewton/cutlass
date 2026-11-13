@@ -312,6 +312,7 @@ impl<'a> SliceJob<'a> {
             qp_delta: 0,
             cu: Cu::default(),
             coeffs: [0; 32 * 32],
+            res: [0; 32 * 32],
             pred: [[0; 64 * 64]; 2],
             ctb_x: 0,
             ctb_y: 0,

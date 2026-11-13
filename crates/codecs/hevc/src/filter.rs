@@ -11,6 +11,8 @@
 
 use std::sync::atomic::Ordering::Relaxed;
 
+use cutlass_simd::hevc::sao;
+
 use crate::ctu::chroma_qp;
 use crate::picture::{FLAG_KEEP, Picture, Work, lock};
 use crate::pixel::Pixel;
@@ -521,6 +523,12 @@ impl Picture {
                     for y in y0..y1 {
                         let src = &line(c, y)[x0..x1];
                         let o = &mut out[(y - y0) * pw + x0..(y - y0) * pw + x1];
+                        if let (Some(d), Some(s)) = (P::bytes_mut(o), P::bytes(src))
+                            && sao::band_row(d, s, p.class, p.offsets.map(|v| v as i8))
+                        {
+                            continue;
+                        }
+                        let o = &mut out[(y - y0) * pw + x0..(y - y0) * pw + x1];
                         for (o, &s) in o.iter_mut().zip(src) {
                             let v = s.i();
                             *o = P::of((v + table[(v >> shift) as usize & 31]).clamp(0, max));
@@ -559,6 +567,16 @@ impl Picture {
                         let lv = line(c, y);
                         let lb = line(c, y.wrapping_add_signed(by));
                         let o = &mut out[(y - y0) * pw..(y - y0 + 1) * pw];
+                        let (xa, xb) = (x0 + left, x1 - right);
+                        if let (Some(d), Some(v), Some(a), Some(b)) = (
+                            P::bytes_mut(&mut o[xa..xb]),
+                            P::bytes(&lv[xa..xb]),
+                            P::bytes(&la[xa.wrapping_add_signed(ax)..xb.wrapping_add_signed(ax)]),
+                            P::bytes(&lb[xa.wrapping_add_signed(bx)..xb.wrapping_add_signed(bx)]),
+                        ) && sao::edge_row(d, v, (a, b), offsets.map(|v| v as i8))
+                        {
+                            continue;
+                        }
                         for x in x0 + left..x1 - right {
                             let v = lv[x].i();
                             let a = la[x.wrapping_add_signed(ax)].i();

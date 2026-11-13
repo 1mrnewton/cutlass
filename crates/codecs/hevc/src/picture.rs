@@ -578,17 +578,23 @@ impl Picture {
             return false;
         }
         let (nx, ny) = (nx as usize, ny as usize);
+        // Most neighbours lie in the same CTB, which slices and tiles never
+        // split: only the decoding order inside it counts.
+        let log2 = self.layout.log2_ctb;
+        if (nx >> log2, ny >> log2) == (x >> log2, y >> log2) {
+            return self.z_in_ctb(nx, ny) <= self.z_in_ctb(x, y);
+        }
         let nb_ctb = self.ctb_rs(nx, ny);
         let cur_ctb = self.ctb_rs(x, y);
-        if self.slice_addr(nb_ctb) != self.slice_addr(cur_ctb)
-            || self.layout.tile_of[nb_ctb] != self.layout.tile_of[cur_ctb]
-        {
+        if self.slice_addr(nb_ctb) != self.slice_addr(cur_ctb) {
             return false;
         }
-        if nb_ctb != cur_ctb {
-            return self.layout.rs_to_ts[nb_ctb] < self.layout.rs_to_ts[cur_ctb];
+        // Without tiles, tile scan is raster scan.
+        if !self.pps.tiles {
+            return nb_ctb < cur_ctb;
         }
-        self.z_in_ctb(nx, ny) <= self.z_in_ctb(x, y)
+        self.layout.tile_of[nb_ctb] == self.layout.tile_of[cur_ctb]
+            && self.layout.rs_to_ts[nb_ctb] < self.layout.rs_to_ts[cur_ctb]
     }
 
     pub fn slice_of(&self, x: usize, y: usize) -> Option<&SliceCtx> {

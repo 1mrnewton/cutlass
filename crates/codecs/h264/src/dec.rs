@@ -2161,6 +2161,44 @@ fn wide_plane<S: Sample>(len: usize) -> Option<Vec<u16>> {
     }
 }
 
+/// The visible part of a plane `stride` samples wide: `w` by `h` from
+/// column `x0` and row `y0`.
+#[derive(Clone, Copy)]
+struct Window {
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    w: usize,
+    h: usize,
+}
+
+/// Every row of `window` in `plane`, packed as [`pack_row`] packs one.
+/// When the window is as wide as the plane its rows lie end to end, as
+/// with a 720×1280 or 1920×1080 picture, and go in one copy rather than
+/// a copy each.
+fn pack_plane<S: Sample>(
+    plane: &[S],
+    window: Window,
+    eight: &mut Vec<u8>,
+    mut wide: Option<&mut Vec<u16>>,
+) {
+    let Window {
+        stride,
+        x0,
+        y0,
+        w,
+        h,
+    } = window;
+    if x0 == 0 && w == stride {
+        pack_row(&plane[y0 * stride..(y0 + h) * stride], eight, wide);
+        return;
+    }
+    for row in 0..h {
+        let src = (y0 + row) * stride + x0;
+        pack_row(&plane[src..src + w], eight, wide.as_deref_mut());
+    }
+}
+
 fn pack_row<S: Sample>(src: &[S], eight: &mut Vec<u8>, mut wide: Option<&mut Vec<u16>>) {
     // 8-bit pictures have no wide plane; the row is a plain copy, added
     // straight on the end, so the plane is never zeroed first.
@@ -2305,16 +2343,23 @@ fn emit_420<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
     let mut y_wide = wide_plane::<S>(w * h);
     let mut u_wide = wide_plane::<S>((w / 2) * (h / 2));
     let mut v_wide = wide_plane::<S>((w / 2) * (h / 2));
-    for row in 0..h {
-        let src = (y0 + row) * frame.w + x0;
-        pack_row(&frame.y[src..src + w], &mut y, y_wide.as_mut());
-    }
-    for row in 0..h / 2 {
-        let src = (y0 / 2 + row) * (frame.w / 2) + x0 / 2;
-        let n = w / 2;
-        pack_row(&frame.u[src..src + n], &mut u, u_wide.as_mut());
-        pack_row(&frame.v[src..src + n], &mut v, v_wide.as_mut());
-    }
+    let luma = Window {
+        stride: frame.w,
+        x0,
+        y0,
+        w,
+        h,
+    };
+    pack_plane(&frame.y, luma, &mut y, y_wide.as_mut());
+    let chroma = Window {
+        stride: frame.w / 2,
+        x0: x0 / 2,
+        y0: y0 / 2,
+        w: w / 2,
+        h: h / 2,
+    };
+    pack_plane(&frame.u, chroma, &mut u, u_wide.as_mut());
+    pack_plane(&frame.v, chroma, &mut v, v_wide.as_mut());
     let picture = Yuv420p::try_new(frame.vis_w, frame.vis_h, y, u, v).ok()?;
     let (yuv420p10, yuv420_high) =
         wide_output::<S>(frame.vis_w, frame.vis_h, y_wide, u_wide, v_wide);

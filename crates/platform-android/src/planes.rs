@@ -7,8 +7,7 @@
 //! layout is read the way FFmpeg reads it: planar 4:2:0 puts U then V after
 //! `slice-height` rows of Y, each at half the stride; the semi-planar formats
 //! put one plane of interleaved U and V there. Tiled and opaque formats are
-//! refused. An encoder's input buffer is described the same way, and
-//! [`Planes::write`] fills it from tightly packed planar 4:2:0.
+//! refused.
 //!
 //! A crop rectangle moves the picture's top-left corner inside the buffer.
 //! Ten-bit samples (`COLOR_FormatYUVP010`, or a `MediaImage2` with 16
@@ -20,13 +19,14 @@
 use cutlass_decode::{CodecError, PixelFormat, picture_byte_len};
 
 /// `COLOR_FormatYUV420Planar`.
-pub const PLANAR: i32 = 0x13;
+const PLANAR: i32 = 0x13;
 /// `COLOR_FormatYUV420SemiPlanar`.
-pub const SEMI_PLANAR: i32 = 0x15;
+const SEMI_PLANAR: i32 = 0x15;
 /// `COLOR_FormatYUVP010`.
-pub const P010: i32 = 0x36;
+const P010: i32 = 0x36;
 /// `COLOR_FormatYUV420Flexible`. Only `image-data` says where its planes are.
-pub const FLEXIBLE: i32 = 0x7F42_0888;
+#[cfg(test)]
+const FLEXIBLE: i32 = 0x7F42_0888;
 /// `COLOR_QCOM_FormatYUV420SemiPlanar`.
 const QCOM_SEMI_PLANAR: i32 = 0x7FA3_0C00;
 /// `COLOR_QCOM_FormatYUV420SemiPlanar32m`.
@@ -158,46 +158,6 @@ impl Planes {
         Ok(out)
     }
 
-    /// Write tightly packed 8-bit planar 4:2:0 into `buffer` at these planes.
-    pub fn write(&self, yuv: &[u8], buffer: &mut [u8]) -> Result<(), CodecError> {
-        if self.depth != 8 {
-            return Err(CodecError::Unsupported {
-                what: "ten-bit encoder input",
-            });
-        }
-        let (w, h) = (self.width as usize, self.height as usize);
-        if yuv.len() != picture_byte_len(self.width, self.height, PixelFormat::Yuv420p)? {
-            return Err(CodecError::InvalidApi {
-                what: "picture length",
-            });
-        }
-        if buffer.len() < self.reach()? {
-            return Err(CodecError::Limit {
-                what: "mediacodec input buffer",
-            });
-        }
-        let (luma, chroma) = yuv.split_at(w * h);
-        let (u, v) = chroma.split_at(w * h / 4);
-        for (plane, source, columns, rows) in [
-            (self.y, luma, w, h),
-            (self.u, u, w / 2, h / 2),
-            (self.v, v, w / 2, h / 2),
-        ] {
-            for line in 0..rows {
-                let start = plane.offset + line * plane.row;
-                let samples = &source[line * columns..(line + 1) * columns];
-                if plane.column == 1 {
-                    buffer[start..start + columns].copy_from_slice(samples);
-                } else {
-                    for (column, sample) in samples.iter().enumerate() {
-                        buffer[start + column * plane.column] = *sample;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// The same planes moved to the crop's top-left corner.
     fn cropped(self, left: usize, top: usize, width: u32, height: u32) -> Result<Self, CodecError> {
         let shift = |plane: Plane, x: usize, y: usize| -> Result<Plane, CodecError> {
@@ -217,27 +177,6 @@ impl Planes {
             v: shift(self.v, left / 2, top / 2)?,
         })
     }
-}
-
-/// An input buffer for an encoder at `width` by `height`: the codec's own
-/// layout when its input format says one, else the color format packed at
-/// the picture's width.
-pub fn encoder_input(described: &Described, width: u32, height: u32) -> Result<Planes, CodecError> {
-    let mut described = described.clone();
-    described.width = i32::try_from(width).map_err(|_| LIMIT)?;
-    described.height = i32::try_from(height).map_err(|_| LIMIT)?;
-    described.crop = None;
-    if described.image.is_none() && described.color_format == FLEXIBLE {
-        // Codec2 reads a flexible ByteBuffer input as planar 4:2:0.
-        described.color_format = PLANAR;
-    }
-    let planes = Planes::of(&described)?;
-    if planes.width != width || planes.height != height {
-        return Err(CodecError::Unsupported {
-            what: "encoder input size",
-        });
-    }
-    Ok(planes)
 }
 
 const LIMIT: CodecError = CodecError::Limit {
@@ -560,21 +499,5 @@ mod tests {
             Err(CodecError::Truncated { .. })
         ));
         assert_eq!(planes.read(&PACKED).expect("exact"), PACKED);
-    }
-
-    #[test]
-    fn writing_then_reading_round_trips_each_layout() {
-        for format in [PLANAR, SEMI_PLANAR] {
-            let planes = encoder_input(&described(format, 0, 0, 16, 4), 4, 2).expect("planes");
-            let mut buffer = vec![0_u8; planes.reach().expect("reach")];
-            planes.write(&PACKED, &mut buffer).expect("write");
-            assert_eq!(planes.read(&buffer).expect("read"), PACKED);
-        }
-        let flexible = encoder_input(&described(FLEXIBLE, 0, 0, 0, 0), 4, 2).expect("planes");
-        assert_eq!(flexible.u.column, 1, "a flexible input is planar");
-        let planes = encoder_input(&described(PLANAR, 0, 0, 0, 0), 4, 2).expect("planes");
-        let mut short = vec![0_u8; 4];
-        assert!(planes.write(&PACKED, &mut short).is_err());
-        assert!(planes.write(&PACKED[..11], &mut [0; 12]).is_err());
     }
 }

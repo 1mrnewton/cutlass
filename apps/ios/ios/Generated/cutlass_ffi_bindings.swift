@@ -783,6 +783,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func export(path: String, shortSide: UInt32, progress: ExportProgress) throws  -> Exported
     
     /**
+     * Write the whole cut to `path` as an MP4 at the size, frame rate and
+     * quality `options` asks for. Otherwise as [`Self::export`].
+     */
+    func exportWith(path: String, options: ExportOptions, progress: ExportProgress) throws  -> Exported
+    
+    /**
      * Put the video's sound on a clip of its own. One undo step.
      */
     func extractAudio(clipId: String) throws 
@@ -1501,6 +1507,22 @@ open func export(path: String, shortSide: UInt32, progress: ExportProgress)throw
             self.uniffiCloneHandle(),
         FfiConverterString.lower(path),
         FfiConverterUInt32.lower(shortSide),
+        FfiConverterTypeExportProgress_lower(progress),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Write the whole cut to `path` as an MP4 at the size, frame rate and
+     * quality `options` asks for. Otherwise as [`Self::export`].
+     */
+open func exportWith(path: String, options: ExportOptions, progress: ExportProgress)throws  -> Exported  {
+    return try  FfiConverterTypeExported_lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_export_with(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(path),
+        FfiConverterTypeExportOptions_lower(options),
         FfiConverterTypeExportProgress_lower(progress),uniffiCallStatus
     )
 })
@@ -3475,6 +3497,68 @@ public func FfiConverterTypeEffectChoice_lower(_ value: EffectChoice) -> RustBuf
 
 
 /**
+ * How an export is made: `short_side` one of [`export_sides`],
+ * `frame_rate` one of [`export_rates`] or 0 for the project's own.
+ */
+public struct ExportOptions: Equatable, Hashable {
+    public var shortSide: UInt32
+    public var frameRate: UInt32
+    public var quality: ExportQuality
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(shortSide: UInt32, frameRate: UInt32, quality: ExportQuality) {
+        self.shortSide = shortSide
+        self.frameRate = frameRate
+        self.quality = quality
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ExportOptions: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeExportOptions: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ExportOptions {
+        return
+            try ExportOptions(
+                shortSide: FfiConverterUInt32.read(from: &buf), 
+                frameRate: FfiConverterUInt32.read(from: &buf), 
+                quality: FfiConverterTypeExportQuality.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ExportOptions, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.shortSide, into: &buf)
+        FfiConverterUInt32.write(value.frameRate, into: &buf)
+        FfiConverterTypeExportQuality.write(value.quality, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeExportOptions_lift(_ buf: RustBuffer) throws -> ExportOptions {
+    return try FfiConverterTypeExportOptions.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeExportOptions_lower(_ value: ExportOptions) -> RustBuffer {
+    return FfiConverterTypeExportOptions.lower(value)
+}
+
+
+/**
  * A finished export.
  */
 public struct Exported: Equatable, Hashable {
@@ -4061,6 +4145,68 @@ public func FfiConverterTypeLane_lift(_ buf: RustBuffer) throws -> Lane {
 #endif
 public func FfiConverterTypeLane_lower(_ value: Lane) -> RustBuffer {
     return FfiConverterTypeLane.lower(value)
+}
+
+
+/**
+ * One line on the About page: a sticker set or a crate the app is built
+ * from.
+ */
+public struct Notice: Equatable, Hashable {
+    public var title: String
+    public var license: String
+    public var link: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(title: String, license: String, link: String) {
+        self.title = title
+        self.license = license
+        self.link = link
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Notice: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNotice: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Notice {
+        return
+            try Notice(
+                title: FfiConverterString.read(from: &buf), 
+                license: FfiConverterString.read(from: &buf), 
+                link: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Notice, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.license, into: &buf)
+        FfiConverterString.write(value.link, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNotice_lift(_ buf: RustBuffer) throws -> Notice {
+    return try FfiConverterTypeNotice.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNotice_lower(_ value: Notice) -> RustBuffer {
+    return FfiConverterTypeNotice.lower(value)
 }
 
 
@@ -5181,6 +5327,91 @@ public func FfiConverterTypeEditorError_lift(_ buf: RustBuffer) throws -> Editor
 public func FfiConverterTypeEditorError_lower(_ value: EditorError) -> RustBuffer {
     return FfiConverterTypeEditorError.lower(value)
 }
+
+
+/**
+ * How many bits a second an export's picture gets.
+ */
+
+public enum ExportQuality: Equatable, Hashable {
+    
+    /**
+     * Half the recommended: a smaller file.
+     */
+    case lower
+    /**
+     * About what the phone's camera records at that size.
+     */
+    case recommended
+    /**
+     * Double the recommended.
+     */
+    case higher
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ExportQuality: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeExportQuality: FfiConverterRustBuffer {
+    typealias SwiftType = ExportQuality
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ExportQuality {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .lower
+        
+        case 2: return .recommended
+        
+        case 3: return .higher
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ExportQuality, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .lower:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .recommended:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .higher:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeExportQuality_lift(_ buf: RustBuffer) throws -> ExportQuality {
+    return try FfiConverterTypeExportQuality.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeExportQuality_lower(_ value: ExportQuality) -> RustBuffer {
+    return FfiConverterTypeExportQuality.lower(value)
+}
+
 
 
 /**
@@ -6571,6 +6802,31 @@ fileprivate struct FfiConverterSequenceTypeLane: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeNotice: FfiConverterRustBuffer {
+    typealias SwiftType = [Notice]
+
+    public static func write(_ value: [Notice], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeNotice.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Notice] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Notice]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeNotice.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeProjectSummary: FfiConverterRustBuffer {
     typealias SwiftType = [ProjectSummary]
 
@@ -6832,12 +7088,57 @@ public func cropRatios() -> [String]  {
 })
 }
 /**
+ * Cutlass's own license, as an SPDX expression.
+ */
+public func cutlassLicense() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_cutlass_license(uniffiCallStatus
+    )
+})
+}
+/**
+ * Delete project `project` in the Cutlass folder at `root` and every file
+ * in it. A folder that holds no project is refused.
+ */
+public func deleteProject(root: String, project: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_delete_project(
+        FfiConverterString.lower(root),
+        FfiConverterString.lower(project),uniffiCallStatus
+    )
+}
+}
+/**
+ * Copy project `project` in the Cutlass folder at `root`, media and all,
+ * as "… copy", and return the copy's folder.
+ */
+public func duplicateProject(root: String, project: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_duplicate_project(
+        FfiConverterString.lower(root),
+        FfiConverterString.lower(project),uniffiCallStatus
+    )
+})
+}
+/**
  * The effects that ship in the app, in picker order.
  */
 public func effectChoices() -> [EffectChoice]  {
     return try!  FfiConverterSequenceTypeEffectChoice.lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_cutlass_ffi_bindings_fn_func_effect_choices(uniffiCallStatus
+    )
+})
+}
+/**
+ * The frame rates an export may be, beside 0 for the project's own.
+ */
+public func exportRates() -> [UInt32]  {
+    return try!  FfiConverterSequenceUInt32.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_export_rates(uniffiCallStatus
     )
 })
 }
@@ -6921,6 +7222,40 @@ public func listProjects(root: String) -> [ProjectSummary]  {
         FfiConverterString.lower(root),uniffiCallStatus
     )
 })
+}
+/**
+ * The license text of notice `index`, word for word.
+ */
+public func noticeText(index: UInt32) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_notice_text(
+        FfiConverterUInt32.lower(index),uniffiCallStatus
+    )
+})
+}
+/**
+ * Every notice on the About page, sticker sets first.
+ */
+public func notices() -> [Notice]  {
+    return try!  FfiConverterSequenceTypeNotice.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_notices(uniffiCallStatus
+    )
+})
+}
+/**
+ * Give project `project` in the Cutlass folder at `root` the name
+ * `name`. Its folder keeps its own name. An empty name is refused.
+ */
+public func renameProject(root: String, project: String, name: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_rename_project(
+        FfiConverterString.lower(root),
+        FfiConverterString.lower(project),
+        FfiConverterString.lower(name),uniffiCallStatus
+    )
+}
 }
 /**
  * Every shape, in shelf order.
@@ -7101,7 +7436,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_func_crop_ratios() != 30681) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_cutlass_license() != 21176) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_delete_project() != 11651) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_duplicate_project() != 36546) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_func_effect_choices() != 59474) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_export_rates() != 11988) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_func_export_sides() != 28968) {
@@ -7123,6 +7470,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_func_list_projects() != 22684) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_notice_text() != 58668) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_notices() != 20508) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_rename_project() != 53408) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_func_shape_choices() != 6033) {
@@ -7225,6 +7581,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_export() != 5234) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_export_with() != 46881) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_extract_audio() != 33623) {

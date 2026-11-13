@@ -379,6 +379,11 @@ void uniffi_cutlass_ffi_bindings_fn_method_editor_ease_keyframes(uint64_t ptr, R
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_export(uint64_t ptr, RustBuffer path, uint32_t short_side, uint64_t progress, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_EXPORT_WITH
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_EXPORT_WITH
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_export_with(uint64_t ptr, RustBuffer path, RustBuffer options, uint64_t progress, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_EXTRACT_AUDIO
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_EXTRACT_AUDIO
 void uniffi_cutlass_ffi_bindings_fn_method_editor_extract_audio(uint64_t ptr, RustBuffer clip_id, RustCallStatus *_Nonnull out_status
@@ -758,9 +763,31 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_func_crop_ratios(RustCallStatus *_Nonn
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_CUTLASS_LICENSE
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_CUTLASS_LICENSE
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_cutlass_license(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_DELETE_PROJECT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_DELETE_PROJECT
+void uniffi_cutlass_ffi_bindings_fn_func_delete_project(RustBuffer root, RustBuffer project, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_DUPLICATE_PROJECT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_DUPLICATE_PROJECT
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_duplicate_project(RustBuffer root, RustBuffer project, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_EFFECT_CHOICES
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_EFFECT_CHOICES
 RustBuffer uniffi_cutlass_ffi_bindings_fn_func_effect_choices(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_EXPORT_RATES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_EXPORT_RATES
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_export_rates(RustCallStatus *_Nonnull out_status
     
 );
 #endif
@@ -800,6 +827,22 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_func_graph_curves(RustCallStatus *_Non
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_LIST_PROJECTS
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_LIST_PROJECTS
 RustBuffer uniffi_cutlass_ffi_bindings_fn_func_list_projects(RustBuffer root, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_NOTICE_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_NOTICE_TEXT
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_notice_text(uint32_t index, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_NOTICES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_NOTICES
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_notices(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_RENAME_PROJECT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_RENAME_PROJECT
+void uniffi_cutlass_ffi_bindings_fn_func_rename_project(RustBuffer root, RustBuffer project, RustBuffer name, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_SHAPE_CHOICES
@@ -1169,9 +1212,33 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_func_crop_ratios(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_CUTLASS_LICENSE
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_CUTLASS_LICENSE
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_cutlass_license(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_DELETE_PROJECT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_DELETE_PROJECT
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_delete_project(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_DUPLICATE_PROJECT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_DUPLICATE_PROJECT
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_duplicate_project(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_EFFECT_CHOICES
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_EFFECT_CHOICES
 uint16_t uniffi_cutlass_ffi_bindings_checksum_func_effect_choices(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_EXPORT_RATES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_EXPORT_RATES
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_export_rates(void
     
 );
 #endif
@@ -1214,6 +1281,24 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_func_graph_curves(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_LIST_PROJECTS
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_LIST_PROJECTS
 uint16_t uniffi_cutlass_ffi_bindings_checksum_func_list_projects(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_NOTICE_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_NOTICE_TEXT
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_notice_text(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_NOTICES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_NOTICES
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_notices(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_RENAME_PROJECT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_RENAME_PROJECT
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_rename_project(void
     
 );
 #endif
@@ -1418,6 +1503,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_ease_keyframes(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_EXPORT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_EXPORT
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_export(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_EXPORT_WITH
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_EXPORT_WITH
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_export_with(void
     
 );
 #endif

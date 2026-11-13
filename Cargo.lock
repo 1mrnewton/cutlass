@@ -5689,6 +5689,7 @@ dependencies = [
  "cutlass-ogg",
  "cutlass-opus",
  "cutlass-pcm",
+ "cutlass-platform-android",
  "cutlass-png",
  "cutlass-prores",
  "cutlass-riff",

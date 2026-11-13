@@ -245,7 +245,19 @@ impl TransitionRecipe {
             };
             crate::recipe::check_curve(crate::Block::Reveal, param, curve)?;
         }
-        Ok(())
+        crate::recipe::check_version(self.version, self.least_version())
+    }
+
+    /// The lowest format version that can hold this recipe.
+    #[must_use]
+    pub fn least_version(&self) -> u32 {
+        crate::recipe::least_version(
+            self.outgoing
+                .iter()
+                .chain(&self.incoming)
+                .flat_map(|pass| pass.params.values())
+                .chain(self.cross.values()),
+        )
     }
 
     /// The `effect_id` a material stores for it.

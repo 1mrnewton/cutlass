@@ -78,9 +78,9 @@ pub use preview::{
     preview_scenes, preview_time,
 };
 pub use recipe::{
-    Block, Control, ControlUnit, Curve, EFFECT_CATEGORIES, MAX_CONTROLS, MAX_PASSES, MAX_VALUES,
-    Param, Pass, RECIPE_PREFIX, RECIPE_VERSION, Recipe, RecipeError, Step, Target, bundled,
-    bundled_recipe,
+    Block, Control, ControlUnit, Curve, EASE_VERSION, EFFECT_CATEGORIES, Ease, MAX_CONTROLS,
+    MAX_PASSES, MAX_VALUES, Param, Pass, RECIPE_PREFIX, RECIPE_VERSION, Recipe, RecipeError, Step,
+    Target, bundled, bundled_recipe, gap_ease,
 };
 pub use relight::{
     CUSTOM_COLOR, Light, Lighting, MAX_LIGHTS, RELIGHT_PRESETS, RELIGHT_UNIFORM_BYTES,

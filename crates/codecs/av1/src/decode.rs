@@ -12,8 +12,8 @@
 use std::collections::VecDeque;
 
 use cutlass_decode::{
-    ChromaSamplePosition, CodecError, CodecId, CodecParams, ColorMatrix, ColorPrimaries, Decoder,
-    Output, Packet, PictureInfo, PictureOutput, PixelFormat, Transfer,
+    ChromaSamplePosition, CodecError, CodecId, CodecParams, ColorMatrix, ColorPrimaries,
+    ColorRange, Decoder, Output, Packet, PictureInfo, PictureOutput, PixelFormat, Transfer,
 };
 
 use crate::dec::decoder::{AnyPicture, Av1Core, DecodedFrame};
@@ -265,17 +265,23 @@ fn picture_output(f: &DecodedFrame, pts: i64, timescale: u32) -> Result<PictureO
             pack_plane(&mut bytes, p, 2, cw, ch, neutral);
         }
     }
-    PictureOutput::cpu(
+    let picture = PictureOutput::cpu(
         picture_info(f, w as u32, h as u32, pixel),
         bytes,
         pts,
         timescale,
-    )
+    )?;
+    Ok(if f.t35.is_empty() {
+        picture
+    } else {
+        picture.with_t35(f.t35.to_vec())
+    })
 }
 
-/// The shown frame's description: its sample size, colour, display size,
-/// and the sequence's timing and level. The CICP bytes are the sequence
-/// header's own codes.
+/// The shown frame's description: its sample size, colour and range,
+/// display size, the sequence's timing and level, and the light level and
+/// mastering display its metadata OBUs gave. The CICP bytes are the
+/// sequence header's own codes.
 fn picture_info(f: &DecodedFrame, width: u32, height: u32, pixel: PixelFormat) -> PictureInfo {
     PictureInfo {
         width,
@@ -296,6 +302,13 @@ fn picture_info(f: &DecodedFrame, width: u32, height: u32, pixel: PixelFormat) -
         num_ticks_per_picture_minus_1: f.num_ticks_per_picture_minus_1,
         num_units_in_decoding_tick: f.num_units_in_decoding_tick,
         seq_level_idx: f.seq_level_idx,
+        range: if f.full_range {
+            ColorRange::Full
+        } else {
+            ColorRange::Limited
+        },
+        content_light: f.content_light,
+        mastering_display: f.mastering_display,
     }
 }
 

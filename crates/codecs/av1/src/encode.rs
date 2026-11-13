@@ -597,7 +597,8 @@ mod tests {
         params.matrix = MatrixCoefficients::Bt601;
         let mut encoder = Av1Encoder::open(&params).expect("encoder");
         encoder.set_gop(1);
-        let seq = sequence_of(&encode(&mut encoder, PixelFormat::Yuv420p, 1)[0]);
+        let packets = encode(&mut encoder, PixelFormat::Yuv420p, 1);
+        let seq = sequence_of(&packets[0]);
         assert!(seq.color_range);
         assert_eq!(
             (
@@ -607,6 +608,9 @@ mod tests {
             ),
             (2, 2, 6)
         );
+        // The decoder publishes the range it read.
+        let mut decoder = Av1Decoder::open(&params).expect("decoder");
+        assert_eq!(pictures(&mut decoder, &packets)[0].range, ColorRange::Full);
 
         let unnamed = CodecParams::video(CodecId::Av1, 64, 48);
         let mut encoder = Av1Encoder::open(&unnamed).expect("encoder");

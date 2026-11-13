@@ -1,6 +1,6 @@
 //! OBU, sequence header and frame header parsing (spec 5.3 – 5.9, 7.5, 7.8, 7.20, 7.21).
 
-use cutlass_decode::CodecError;
+use cutlass_decode::{CodecError, ContentLight, ItuT35, MasteringDisplay};
 
 use super::bits::{BitReader, R};
 
@@ -1714,6 +1714,86 @@ pub fn annexb_to_low_overhead(data: &[u8]) -> R<Vec<u8>> {
     Ok(out)
 }
 
+pub const METADATA_TYPE_HDR_CLL: u64 = 1;
+pub const METADATA_TYPE_HDR_MDCV: u64 = 2;
+pub const METADATA_TYPE_ITUT_T35: u64 = 4;
+
+/// What a metadata OBU carries (5.8).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Metadata {
+    /// `metadata_hdr_cll()`.
+    ContentLight(ContentLight),
+    /// `metadata_hdr_mdcv()`.
+    MasteringDisplay(MasteringDisplay),
+    /// `metadata_itut_t35()`.
+    ItuT35(ItuT35),
+    /// A type this decoder does not read (scalability, timecode, a reserved
+    /// or unregistered type): the `metadata_type`.
+    Other(u64),
+}
+
+/// Parses the payload of a metadata OBU (5.8.1 – 5.8.4).
+///
+/// The light level, the mastering display and an ITU-T T.35 message are
+/// read; another type is named and left alone. A T.35 payload runs up to
+/// the trailing bits: its last byte is the one before the last byte that
+/// is not zero (5.8.2), and it is empty when no byte follows the code.
+pub fn parse_metadata(data: &[u8]) -> R<Metadata> {
+    let (metadata_type, used) = super::bits::leb128(data)?;
+    let body = &data[used..];
+    match metadata_type {
+        METADATA_TYPE_HDR_CLL => {
+            let mut r = BitReader::new(body);
+            Ok(Metadata::ContentLight(ContentLight {
+                max_cll: r.f(16)? as u16,
+                max_fall: r.f(16)? as u16,
+            }))
+        }
+        METADATA_TYPE_HDR_MDCV => {
+            let mut r = BitReader::new(body);
+            let mut primaries = [[0u16; 2]; 3];
+            for primary in &mut primaries {
+                primary[0] = r.f(16)? as u16;
+                primary[1] = r.f(16)? as u16;
+            }
+            let white_point = [r.f(16)? as u16, r.f(16)? as u16];
+            Ok(Metadata::MasteringDisplay(MasteringDisplay {
+                primaries,
+                white_point,
+                max_luminance: r.f(32)?,
+                min_luminance: r.f(32)?,
+            }))
+        }
+        METADATA_TYPE_ITUT_T35 => {
+            let Some((&country_code, mut rest)) = body.split_first() else {
+                return Err(CodecError::Truncated {
+                    at_bit: (used * 8) as u64,
+                    what: "itu_t_t35_country_code",
+                });
+            };
+            let mut country_code_extension = None;
+            if country_code == 0xff {
+                let Some((&extension, after)) = rest.split_first() else {
+                    return Err(CodecError::Truncated {
+                        at_bit: (used * 8 + 8) as u64,
+                        what: "itu_t_t35_country_code_extension_byte",
+                    });
+                };
+                country_code_extension = Some(extension);
+                rest = after;
+            }
+            // The last byte that is not zero holds the trailing bits.
+            let end = rest.iter().rposition(|&b| b != 0).unwrap_or(0);
+            Ok(Metadata::ItuT35(ItuT35 {
+                country_code,
+                country_code_extension,
+                payload: rest[..end].to_vec(),
+            }))
+        }
+        other => Ok(Metadata::Other(other)),
+    }
+}
+
 /// Splits a low-overhead bitstream (or one Annex-B-free temporal unit) into OBUs.
 pub fn split_obus(mut data: &[u8]) -> R<Vec<Obu<'_>>> {
     let mut out = Vec::new();
@@ -1857,5 +1937,48 @@ mod annexb_tests {
             }
         }
         assert_eq!(shown, 6);
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::{Metadata, parse_metadata};
+    use cutlass_decode::{CodecError, ItuT35};
+
+    fn t35(data: &[u8]) -> ItuT35 {
+        match parse_metadata(data).expect("metadata") {
+            Metadata::ItuT35(message) => message,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_t35_payload_ends_before_the_last_byte_that_is_not_zero() {
+        assert_eq!(t35(&[4, 0xb5, 1, 2, 0x80]).payload, [1, 2]);
+        assert_eq!(t35(&[4, 0xb5, 1, 2, 0x80, 0, 0]).payload, [1, 2]);
+        // A zero inside the payload is payload.
+        assert_eq!(t35(&[4, 0xb5, 1, 0, 0, 0x80]).payload, [1, 0, 0]);
+        // Only the trailing bits, or nothing at all, is an empty payload.
+        assert!(t35(&[4, 0xb5, 0x80]).payload.is_empty());
+        assert!(t35(&[4, 0xb5]).payload.is_empty());
+        assert!(t35(&[4, 0xb5, 0, 0]).payload.is_empty());
+        let extended = t35(&[4, 0xff, 0x26, 7, 0x80]);
+        assert_eq!(extended.country_code_extension, Some(0x26));
+        assert_eq!(extended.payload, [7]);
+    }
+
+    #[test]
+    fn a_type_past_one_byte_is_named_and_a_cut_type_is_refused() {
+        // leb128(300) is 0xac 0x02.
+        assert_eq!(parse_metadata(&[0xac, 0x02, 9]), Ok(Metadata::Other(300)));
+        assert_eq!(parse_metadata(&[0]), Ok(Metadata::Other(0)));
+        assert!(matches!(
+            parse_metadata(&[0x80]),
+            Err(CodecError::Truncated { .. })
+        ));
+        assert!(matches!(
+            parse_metadata(&[]),
+            Err(CodecError::Truncated { .. })
+        ));
     }
 }

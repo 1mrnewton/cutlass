@@ -9,7 +9,8 @@ pub fn run() -> eframe::Result {
     run_on(false)
 }
 
-/// Open the window on the effect studio, as `cutlass studio` does.
+/// Open the window on the effect studio, as `cutlass studio` does. A word
+/// after it is the id of an effect or a transition to open there.
 pub fn run_studio() -> eframe::Result {
     run_on(true)
 }
@@ -61,12 +62,20 @@ fn run_on(studio: bool) -> eframe::Result {
             shell.check_updates_at_launch();
             // A project folder or files named on the command line, as a
             // file association passes them.
-            // After `cutlass studio` there are none: its one word is the
-            // command, not a file.
+            // After `cutlass studio` there are none: what follows is the
+            // command and the recipe to open, not files.
             let named: Vec<std::path::PathBuf> = std::env::args_os()
-                .skip(if studio { 2 } else { 1 })
+                .skip(1)
+                .filter(|_| !studio)
                 .map(std::path::PathBuf::from)
                 .collect();
+            if studio
+                && let Some(id) = std::env::args().nth(2)
+                && !shell.studio_mut().open_effect(&id)
+                && !shell.studio_mut().open_transition(&id)
+            {
+                cutlass_logger::warn!("cutlass studio: no effect or transition {id}");
+            }
             if let Err(error) = shell.drop_files(&named) {
                 shell.notice_error(&error);
             }

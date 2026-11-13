@@ -565,6 +565,26 @@ impl Studio {
         self.slot = None;
         self.key = None;
         self.muted.clear();
+        // The first value that moves, so the lane opens on a curve.
+        let moving = self.doc.as_ref().and_then(|doc| {
+            doc.stacks().iter().find_map(|stack| {
+                doc.passes(*stack)
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, pass)| {
+                        let (name, _) = pass
+                            .params
+                            .iter()
+                            .find(|(_, curve)| !matches!(curve, Curve::Constant(_)))?;
+                        Some((*stack, index, name.clone()))
+                    })
+            })
+        });
+        if let Some((stack, pass, name)) = moving {
+            self.stack = stack;
+            self.pass = Some(pass);
+            self.slot = Some(Slot::pass(stack, pass, &name));
+        }
     }
 
     fn show(&mut self, doc: Doc, saved: Option<Doc>) {
@@ -1581,6 +1601,16 @@ mod tests {
         );
         assert!(!studio.is_saved());
         assert_eq!(studio.problem(), None);
+        // Shake moves, so the lane opens on the first value that does.
+        let slot = studio.picked_slot().cloned().expect("a moving value");
+        assert!(!matches!(
+            studio.doc().unwrap().curve(&slot),
+            None | Some(Curve::Constant(_))
+        ));
+        assert!(
+            matches!(&slot, Slot::Pass { stack: Stack::Effect, pass, .. }
+            if studio.picked_pass() == Some((Stack::Effect, *pass)))
+        );
         assert!(!studio.open_effect("no-such-effect"));
         // The bundled id itself is taken.
         studio.set_id("shake");

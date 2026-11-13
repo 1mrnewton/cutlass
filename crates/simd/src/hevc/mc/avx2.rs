@@ -418,6 +418,7 @@ pub(super) fn predict(
     taps: &Taps,
     tmp: &mut Vec<Strips>,
 ) {
+    prefetch(src, (w, h), taps.len);
     if tmp.len() < 64 + 7 {
         tmp.resize(64 + 7, [_mm256_setzero_si256(); 4]);
     }
@@ -499,6 +500,22 @@ pub(super) fn predict(
         widths!(8);
     } else {
         widths!(4);
+    }
+}
+
+/// Asks for every line of the window of a `w`×`h` block with `t` taps
+/// to be brought into cache: the kernels then find rows of a reference
+/// read from memory already on their way.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn prefetch(src: &Src<'_>, (w, h): (usize, usize), t: usize) {
+    use core::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+    for j in 0..h + t - 1 {
+        if let Some(row) = src.src.get(src.row(j)..) {
+            let p = row.as_ptr().cast::<i8>();
+            _mm_prefetch::<_MM_HINT_T0>(p);
+            _mm_prefetch::<_MM_HINT_T0>(p.wrapping_add(w + t - 2));
+        }
     }
 }
 

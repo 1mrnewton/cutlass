@@ -178,6 +178,19 @@ pub(super) fn put(
     bit_depth: u32,
     tmp: &mut Vec<Strips>,
 ) {
+    // Ask for the window's lines first, as the 8-bit kernels do.
+    for j in 0..h + taps.len - 1 {
+        if let Some(row) = src.src.get(src.row(j)..) {
+            // Two bytes a sample: up to three lines a row.
+            let p = row.as_ptr().cast::<i8>();
+            let last = 2 * (w + taps.len - 2);
+            for at in (0..last).step_by(64).chain([last]) {
+                core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(
+                    p.wrapping_add(at),
+                );
+            }
+        }
+    }
     if tmp.len() < 64 + 7 {
         tmp.resize(64 + 7, [_mm256_setzero_si256(); 4]);
     }

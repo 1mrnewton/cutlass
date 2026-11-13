@@ -92,11 +92,13 @@ struct LoopingVideo: UIViewRepresentable {
         var looper: AVPlayerLooper?
     }
 
-    /// Xcode may copy the folder's files to the bundle's top level or keep
-    /// the folder; look in both.
+    /// Xcode may copy the folders' files to the bundle's top level or keep
+    /// the folders; look in each.
     static func url(of name: String) -> URL? {
         Bundle.main.url(forResource: name, withExtension: nil)
             ?? Bundle.main.url(forResource: name, withExtension: nil, subdirectory: "EffectPreviews")
+            ?? Bundle.main.url(
+                forResource: name, withExtension: nil, subdirectory: "TransitionPreviews")
     }
 
     final class PlayerView: UIView {

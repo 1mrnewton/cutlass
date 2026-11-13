@@ -747,6 +747,11 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func clipState(clipId: String, atUs: Int64) throws  -> ClipState?
     
     /**
+     * The cuts between touching clips on the main row, earliest first.
+     */
+    func cuts() throws  -> [Cut]
+    
+    /**
      * Put a freehand stroke through `trace` at `at_us` as a smooth line on
      * a sticker row. One undo step. Returns the clip's id.
      */
@@ -873,6 +878,11 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func remove(clipId: String) throws 
     
     /**
+     * Take the transition off the cut after `outgoing_id`. One undo step.
+     */
+    func removeTransition(outgoingId: String) throws 
+    
+    /**
      * Put a main clip at `place` in the main row's order, counted from zero
      * without it, as one undo step.
      */
@@ -985,6 +995,18 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func setTextFont(clipId: String, face: String) throws 
     
     /**
+     * Put transition `transition_id` on the cut after `outgoing_id`,
+     * fitted to the clips; one there already is swapped. One undo step.
+     */
+    func setTransition(outgoingId: String, transitionId: String) throws 
+    
+    /**
+     * Make the transition after `outgoing_id` last `duration_us`, held to
+     * its range. One undo step.
+     */
+    func setTransitionLength(outgoingId: String, durationUs: Int64) throws 
+    
+    /**
      * Remove one clip.
      * Set a clip's linear gain, as one undo step. Below zero is refused.
      */
@@ -1072,6 +1094,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * Play the clip backward, or forward again. One undo step.
      */
     func toggleReverse(clipId: String) throws 
+    
+    /**
+     * Copy the transition after `outgoing_id` to every other cut of the
+     * main row, each fitted to its clips. One undo step.
+     */
+    func transitionEverywhere(outgoingId: String) throws 
     
     /**
      * Drag a clip's start edge, or its end edge, to `time_us`, as one undo
@@ -1393,6 +1421,18 @@ open func clipState(clipId: String, atUs: Int64)throws  -> ClipState?  {
 }
     
     /**
+     * The cuts between touching clips on the main row, earliest first.
+     */
+open func cuts()throws  -> [Cut]  {
+    return try  FfiConverterSequenceTypeCut.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_cuts(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Put a freehand stroke through `trace` at `at_us` as a smooth line on
      * a sticker row. One undo step. Returns the clip's id.
      */
@@ -1709,6 +1749,18 @@ open func remove(clipId: String)throws   {try rustCallWithError(FfiConverterType
 }
     
     /**
+     * Take the transition off the cut after `outgoing_id`. One undo step.
+     */
+open func removeTransition(outgoingId: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_remove_transition(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(outgoingId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Put a main clip at `place` in the main row's order, counted from zero
      * without it, as one undo step.
      */
@@ -1981,6 +2033,34 @@ open func setTextFont(clipId: String, face: String)throws   {try rustCallWithErr
 }
     
     /**
+     * Put transition `transition_id` on the cut after `outgoing_id`,
+     * fitted to the clips; one there already is swapped. One undo step.
+     */
+open func setTransition(outgoingId: String, transitionId: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_transition(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(outgoingId),
+        FfiConverterString.lower(transitionId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Make the transition after `outgoing_id` last `duration_us`, held to
+     * its range. One undo step.
+     */
+open func setTransitionLength(outgoingId: String, durationUs: Int64)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_transition_length(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(outgoingId),
+        FfiConverterInt64.lower(durationUs),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Remove one clip.
      * Set a clip's linear gain, as one undo step. Below zero is refused.
      */
@@ -2196,6 +2276,19 @@ open func toggleReverse(clipId: String)throws   {try rustCallWithError(FfiConver
     uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_reverse(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(clipId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Copy the transition after `outgoing_id` to every other cut of the
+     * main row, each fitted to its clips. One undo step.
+     */
+open func transitionEverywhere(outgoingId: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_transition_everywhere(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(outgoingId),uniffiCallStatus
     )
 }
 }
@@ -3213,6 +3306,109 @@ public func FfiConverterTypeClipState_lift(_ buf: RustBuffer) throws -> ClipStat
 #endif
 public func FfiConverterTypeClipState_lower(_ value: ClipState) -> RustBuffer {
     return FfiConverterTypeClipState.lower(value)
+}
+
+
+/**
+ * A cut between two touching clips on the main row, and its transition.
+ */
+public struct Cut: Equatable, Hashable {
+    /**
+     * The clip before the cut, which the transition calls take.
+     */
+    public var outgoingId: String
+    public var atUs: Int64
+    /**
+     * The shelf id of its transition; none for a plain cut.
+     */
+    public var transition: String?
+    /**
+     * The transition's name; empty for a plain cut.
+     */
+    public var name: String
+    /**
+     * How long it lasts and the range it can be set to; zero for a
+     * plain cut.
+     */
+    public var durationUs: Int64
+    public var shortestUs: Int64
+    public var longestUs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The clip before the cut, which the transition calls take.
+         */outgoingId: String, atUs: Int64, 
+        /**
+         * The shelf id of its transition; none for a plain cut.
+         */transition: String?, 
+        /**
+         * The transition's name; empty for a plain cut.
+         */name: String, 
+        /**
+         * How long it lasts and the range it can be set to; zero for a
+         * plain cut.
+         */durationUs: Int64, shortestUs: Int64, longestUs: Int64) {
+        self.outgoingId = outgoingId
+        self.atUs = atUs
+        self.transition = transition
+        self.name = name
+        self.durationUs = durationUs
+        self.shortestUs = shortestUs
+        self.longestUs = longestUs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Cut: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCut: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Cut {
+        return
+            try Cut(
+                outgoingId: FfiConverterString.read(from: &buf), 
+                atUs: FfiConverterInt64.read(from: &buf), 
+                transition: FfiConverterOptionString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                durationUs: FfiConverterInt64.read(from: &buf), 
+                shortestUs: FfiConverterInt64.read(from: &buf), 
+                longestUs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Cut, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.outgoingId, into: &buf)
+        FfiConverterInt64.write(value.atUs, into: &buf)
+        FfiConverterOptionString.write(value.transition, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterInt64.write(value.durationUs, into: &buf)
+        FfiConverterInt64.write(value.shortestUs, into: &buf)
+        FfiConverterInt64.write(value.longestUs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCut_lift(_ buf: RustBuffer) throws -> Cut {
+    return try FfiConverterTypeCut.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCut_lower(_ value: Cut) -> RustBuffer {
+    return FfiConverterTypeCut.lower(value)
 }
 
 
@@ -4609,6 +4805,78 @@ public func FfiConverterTypeToolItem_lift(_ buf: RustBuffer) throws -> ToolItem 
 #endif
 public func FfiConverterTypeToolItem_lower(_ value: ToolItem) -> RustBuffer {
     return FfiConverterTypeToolItem.lower(value)
+}
+
+
+/**
+ * A transition the shelf shows. `id` is what `set_transition` takes;
+ * `preview` is the file name of its looping preview video in the app.
+ */
+public struct TransitionChoice: Equatable, Hashable {
+    public var id: String
+    public var name: String
+    /**
+     * The shelf tab it sits under.
+     */
+    public var category: String
+    public var preview: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String, 
+        /**
+         * The shelf tab it sits under.
+         */category: String, preview: String) {
+        self.id = id
+        self.name = name
+        self.category = category
+        self.preview = preview
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TransitionChoice: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTransitionChoice: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TransitionChoice {
+        return
+            try TransitionChoice(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                category: FfiConverterString.read(from: &buf), 
+                preview: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TransitionChoice, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.category, into: &buf)
+        FfiConverterString.write(value.preview, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTransitionChoice_lift(_ buf: RustBuffer) throws -> TransitionChoice {
+    return try FfiConverterTypeTransitionChoice.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTransitionChoice_lower(_ value: TransitionChoice) -> RustBuffer {
+    return FfiConverterTypeTransitionChoice.lower(value)
 }
 
 
@@ -6026,6 +6294,31 @@ fileprivate struct FfiConverterSequenceTypeClip: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeCut: FfiConverterRustBuffer {
+    typealias SwiftType = [Cut]
+
+    public static func write(_ value: [Cut], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCut.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Cut] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Cut]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCut.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeEffectChoice: FfiConverterRustBuffer {
     typealias SwiftType = [EffectChoice]
 
@@ -6326,6 +6619,31 @@ fileprivate struct FfiConverterSequenceTypeToolItem: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeTransitionChoice: FfiConverterRustBuffer {
+    typealias SwiftType = [TransitionChoice]
+
+    public static func write(_ value: [TransitionChoice], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTransitionChoice.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TransitionChoice] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TransitionChoice]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTransitionChoice.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeWave: FfiConverterRustBuffer {
     typealias SwiftType = [Wave]
 
@@ -6605,6 +6923,26 @@ public func toolBar(bar: ToolBar) -> [ToolItem]  {
 })
 }
 /**
+ * The transition shelf's tabs, in order.
+ */
+public func transitionCategories() -> [String]  {
+    return try!  FfiConverterSequenceString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_transition_categories(uniffiCallStatus
+    )
+})
+}
+/**
+ * Every transition the app ships, in shelf order.
+ */
+public func transitionChoices() -> [TransitionChoice]  {
+    return try!  FfiConverterSequenceTypeTransitionChoice.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_transition_choices(uniffiCallStatus
+    )
+})
+}
+/**
  * The gain at volume slider `position`, 0 to 1. Unity is the middle and
  * the right end is ten times.
  */
@@ -6712,6 +7050,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_func_tool_bar() != 18374) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_transition_categories() != 17202) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_transition_choices() != 11507) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_func_volume_at() != 31091) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6761,6 +7105,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_state() != 1119) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_cuts() != 46999) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_draw_stroke() != 20359) {
@@ -6835,6 +7182,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_remove() != 65039) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_remove_transition() != 61176) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_reorder() != 12502) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6895,6 +7245,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_text_font() != 34181) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_transition() != 5556) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_transition_length() != 36827) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_volume() != 9150) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6941,6 +7297,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_reverse() != 56429) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_transition_everywhere() != 8533) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_trim() != 7512) {

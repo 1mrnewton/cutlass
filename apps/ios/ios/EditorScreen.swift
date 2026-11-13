@@ -32,7 +32,7 @@ struct EditorScreen: View {
         case volume, speed, effects, ratio, background, graphs, animations
         case crop, opacity, fade
         case filters, adjust, clipEffects
-        case stickers, draw
+        case stickers, draw, transitions
         /// Add text, or change the text clip with this id.
         case text(String?)
     }
@@ -60,7 +60,7 @@ struct EditorScreen: View {
             .overlay(alignment: .trailing) { exportButton }
             preview
             transport
-            TimelineStrip(model: model, picked: $picked)
+            TimelineStrip(model: model, picked: $picked) { _ in panel = .transitions }
                 .frame(maxHeight: .infinity)
                 .background(Color(white: 0.09))
             bottom
@@ -116,8 +116,14 @@ struct EditorScreen: View {
                 }
         }
         .onChange(of: model.selectedClip) { _, id in
-            let stays: [Panel] = [.text(nil), .effects, .ratio, .background, .filters, .stickers, .draw]
+            let stays: [Panel] = [
+                .text(nil), .effects, .ratio, .background, .filters, .stickers, .draw, .transitions,
+            ]
             if id == nil, let open = panel, !stays.contains(open) { panel = nil }
+            if id != nil, panel == .transitions { panel = nil }
+        }
+        .onChange(of: panel) { _, open in
+            if open != .transitions { model.selectedCut = nil }
         }
         .onDisappear { model.pause() }
         .sheet(isPresented: $exporting) {
@@ -263,6 +269,9 @@ struct EditorScreen: View {
         } else if panel == .draw {
             DrawPanel { self.panel = nil }
                 .transition(.move(edge: .bottom))
+        } else if panel == .transitions, model.cut != nil {
+            TransitionsPanel(model: model) { self.panel = nil }
+                .transition(.move(edge: .bottom))
         } else if case let .text(clip) = panel {
             TextPanel(model: model, clip: clip) { self.panel = nil }
                 .id(clip ?? "new")
@@ -276,7 +285,7 @@ struct EditorScreen: View {
                 case .opacity: OpacityPanel(model: model) { self.panel = nil }
                 case .fade: FadePanel(model: model, clip: clip) { self.panel = nil }
                 case .text, .effects, .ratio, .background, .graphs, .animations,
-                     .filters, .adjust, .clipEffects, .stickers, .draw: EmptyView()
+                     .filters, .adjust, .clipEffects, .stickers, .draw, .transitions: EmptyView()
                 }
             }
             .transition(.move(edge: .bottom))

@@ -14,6 +14,10 @@ import os
 @Observable
 final class EditorModel {
     private(set) var lanes: [Lane] = []
+    /// The cuts between touching main clips, with their transitions.
+    private(set) var cuts: [Cut] = []
+    /// The cut whose transition the panel edits, by the clip before it.
+    var selectedCut: String?
     private(set) var durationUs: Int64 = 0
     private(set) var playheadUs: Int64 = 0 {
         didSet { if playheadUs != oldValue, selectedClip != nil { refreshStage() } }
@@ -631,6 +635,41 @@ final class EditorModel {
         return nil
     }
 
+    // MARK: Transitions
+
+    let transitionList = transitionChoices()
+    let transitionTabs = transitionCategories()
+
+    /// The cut the transition panel edits.
+    var cut: Cut? { cuts.first { $0.outgoingId == selectedCut } }
+
+    /// Put transition `id` on the selected cut, or take it off for nil.
+    func setTransition(_ id: String?) {
+        guard let outgoing = selectedCut else { return }
+        pause()
+        edit {
+            if let id {
+                try $0.setTransition(outgoingId: outgoing, transitionId: id)
+            } else {
+                try $0.removeTransition(outgoingId: outgoing)
+            }
+        }
+        // Play the cut so the transition shows.
+        if let cut { seek(max(cut.atUs - cut.durationUs, 0)) }
+    }
+
+    func setTransitionLength(_ us: Int64) {
+        guard let outgoing = selectedCut else { return }
+        edit { try $0.setTransitionLength(outgoingId: outgoing, durationUs: us) }
+    }
+
+    /// Put the selected cut's transition on every cut of the main row.
+    func transitionEverywhere() {
+        guard let outgoing = selectedCut else { return }
+        edit { try $0.transitionEverywhere(outgoingId: outgoing) }
+        say("Applied to every cut")
+    }
+
     // MARK: Stage
 
     /// The canvas size in pixels, from the chosen ratio.
@@ -764,6 +803,7 @@ final class EditorModel {
         edits += 1
         do {
             lanes = try editor.lanes()
+            cuts = try editor.cuts()
             durationUs = try editor.durationUs()
             ratios = try editor.ratios()
             background = try editor.background()
@@ -773,6 +813,9 @@ final class EditorModel {
         }
         if let id = selectedClip, !lanes.contains(where: { $0.clips.contains { $0.id == id } }) {
             selectedClip = nil
+        }
+        if let id = selectedCut, !cuts.contains(where: { $0.outgoingId == id }) {
+            selectedCut = nil
         }
         playheadUs = min(playheadUs, durationUs)
         refreshStage()

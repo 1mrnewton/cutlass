@@ -13,6 +13,8 @@ import SwiftUI
 struct TimelineStrip: View {
     @Bindable var model: EditorModel
     @Binding var picked: [PhotosPickerItem]
+    /// A tap on the button between two main clips, with the clip before it.
+    var openCut: (String) -> Void = { _ in }
     @State private var dragStart: Int64?
     @State private var pinchStart: Double?
     /// A clip off main being moved, and how far the finger has gone.
@@ -138,6 +140,12 @@ struct TimelineStrip: View {
             ForEach(lane.clips, id: \.id) { clip in
                 clipView(clip, lane: lane, index: index, origin: origin, height: height)
             }
+            if lane.main {
+                ForEach(model.cuts, id: \.outgoingId) { cut in
+                    junction(cut)
+                        .offset(x: origin + x(cut.atUs) - 11, y: (height - 22) / 2)
+                }
+            }
             if lane.main && !lane.clips.isEmpty {
                 muteButton(lane)
                     .offset(x: origin - 50, y: (height - 40) / 2)
@@ -233,6 +241,34 @@ struct TimelineStrip: View {
         }
         .gesture(lane.locked ? nil : (lane.main ? reorder(clip) : nil))
         .gesture(lane.locked || lane.main ? nil : move(clip, row: index))
+    }
+
+    /// The button on a cut between two main clips: white, marked when the
+    /// cut has a transition. A tap opens the transitions.
+    private func junction(_ cut: Cut) -> some View {
+        let chosen = model.selectedCut == cut.outgoingId
+        return Button {
+            model.stopCoast()
+            model.pause()
+            model.selectedClip = nil
+            model.selectedCut = cut.outgoingId
+            openCut(cut.outgoingId)
+        } label: {
+            Group {
+                if cut.transition != nil || !cut.name.isEmpty {
+                    Image(systemName: "arrow.left.and.right")
+                        .font(.system(size: 9, weight: .bold))
+                } else {
+                    Rectangle().frame(width: 2, height: 10)
+                }
+            }
+            .foregroundStyle(.black)
+            .frame(width: 22, height: 22)
+            .background(chosen ? Color.cyan : .white, in: RoundedRectangle(cornerRadius: 5))
+            .shadow(color: .black.opacity(0.4), radius: 2)
+            .contentShape(Rectangle().inset(by: -6))
+        }
+        .accessibilityLabel(cut.name.isEmpty ? "Add transition" : "Transition \(cut.name)")
     }
 
     /// The main row's sound switch, left of time zero; it scrolls away with

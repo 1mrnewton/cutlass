@@ -852,9 +852,16 @@ unsafe fn top_edge(q0: *mut u8, down: usize, filter: crate::edge::Filter) {
         let Some((v, changed)) = filter8!(v, filter) else {
             return;
         };
-        for n in changed {
-            vst1q_u8(p.add(n * down), v[n]);
+        // Each row by its own store: a loop over the rows changed would
+        // index the vectors and so keep them on the stack.
+        if changed.start == 1 {
+            vst1q_u8(p.add(down), v[1]);
+            vst1q_u8(p.add(6 * down), v[6]);
         }
+        vst1q_u8(p.add(2 * down), v[2]);
+        vst1q_u8(p.add(3 * down), v[3]);
+        vst1q_u8(p.add(4 * down), v[4]);
+        vst1q_u8(p.add(5 * down), v[5]);
     }
 }
 

@@ -238,6 +238,28 @@ pub fn effect_choices() -> Vec<EffectChoice> {
         .collect()
 }
 
+/// Every transition the app ships, in shelf order.
+#[uniffi::export]
+#[must_use]
+pub fn transition_choices() -> Vec<TransitionChoice> {
+    cutlass_ffi::phone_transitions()
+        .into_iter()
+        .map(|item| TransitionChoice {
+            id: item.id,
+            name: item.name,
+            category: item.category,
+            preview: item.preview,
+        })
+        .collect()
+}
+
+/// The transition shelf's tabs, in order.
+#[uniffi::export]
+#[must_use]
+pub fn transition_categories() -> Vec<String> {
+    cutlass_ffi::phone_transition_categories()
+}
+
 /// The filters that ship in the app, in picker order.
 #[uniffi::export]
 #[must_use]
@@ -648,6 +670,34 @@ pub struct EffectChoice {
     pub id: String,
     pub name: String,
     pub preview: String,
+}
+
+/// A transition the shelf shows. `id` is what `set_transition` takes;
+/// `preview` is the file name of its looping preview video in the app.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct TransitionChoice {
+    pub id: String,
+    pub name: String,
+    /// The shelf tab it sits under.
+    pub category: String,
+    pub preview: String,
+}
+
+/// A cut between two touching clips on the main row, and its transition.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Cut {
+    /// The clip before the cut, which the transition calls take.
+    pub outgoing_id: String,
+    pub at_us: i64,
+    /// The shelf id of its transition; none for a plain cut.
+    pub transition: Option<String>,
+    /// The transition's name; empty for a plain cut.
+    pub name: String,
+    /// How long it lasts and the range it can be set to; zero for a
+    /// plain cut.
+    pub duration_us: i64,
+    pub shortest_us: i64,
+    pub longest_us: i64,
 }
 
 /// A filter the picker shows. `id` is what the filter calls take.
@@ -1253,6 +1303,56 @@ impl Editor {
         self.run(move |host| host.draw_stroke(&trace, Micros(at_us)))?
             .map(|id| id.as_str().to_owned())
             .map_err(EditorError::from)
+    }
+
+    /// The cuts between touching clips on the main row, earliest first.
+    pub fn cuts(&self) -> Result<Vec<Cut>, EditorError> {
+        let cuts = self.run(|host| host.cuts())?;
+        Ok(cuts
+            .into_iter()
+            .map(|cut| Cut {
+                outgoing_id: cut.outgoing_id.as_str().to_owned(),
+                at_us: cut.at.0,
+                transition: cut.transition,
+                name: cut.name,
+                duration_us: cut.duration.0,
+                shortest_us: cut.shortest.0,
+                longest_us: cut.longest.0,
+            })
+            .collect())
+    }
+
+    /// Put transition `transition_id` on the cut after `outgoing_id`,
+    /// fitted to the clips; one there already is swapped. One undo step.
+    pub fn set_transition(
+        &self,
+        outgoing_id: String,
+        transition_id: String,
+    ) -> Result<(), EditorError> {
+        self.edit(move |host| host.set_transition(&SegmentId::new(outgoing_id), &transition_id))
+    }
+
+    /// Make the transition after `outgoing_id` last `duration_us`, held to
+    /// its range. One undo step.
+    pub fn set_transition_length(
+        &self,
+        outgoing_id: String,
+        duration_us: i64,
+    ) -> Result<(), EditorError> {
+        self.edit(move |host| {
+            host.set_transition_length(&SegmentId::new(outgoing_id), Micros(duration_us))
+        })
+    }
+
+    /// Copy the transition after `outgoing_id` to every other cut of the
+    /// main row, each fitted to its clips. One undo step.
+    pub fn transition_everywhere(&self, outgoing_id: String) -> Result<(), EditorError> {
+        self.edit(move |host| host.transition_everywhere(&SegmentId::new(outgoing_id)))
+    }
+
+    /// Take the transition off the cut after `outgoing_id`. One undo step.
+    pub fn remove_transition(&self, outgoing_id: String) -> Result<(), EditorError> {
+        self.edit(move |host| host.remove_transition(&SegmentId::new(outgoing_id)))
     }
 
     /// Set adjust slider `key` of a picture clip or an adjustment layer to

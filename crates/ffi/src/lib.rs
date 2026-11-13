@@ -28,6 +28,7 @@ mod stage;
 mod strip;
 mod text;
 mod timeline;
+mod transition;
 
 pub use animate::{PhoneAnimation, PhoneAnimationPreset, PhoneAnimations, animation_presets};
 pub use cache::ResourceCache;
@@ -69,6 +70,9 @@ pub use text::{
     TextStyleChange, TextStyleRanges,
 };
 pub use timeline::{Drag, PhoneClip, PhoneLane, phone_lanes};
+pub use transition::{
+    PhoneCut, PhoneTransition, phone_cuts, phone_transition_categories, phone_transitions,
+};
 
 use std::path::{Path, PathBuf};
 
@@ -856,6 +860,54 @@ impl PhoneHost {
         let (requests, segment_id) = layer::stroke_request(self.draft(), trace, at)?;
         self.apply(self.revision(), &requests)?;
         Ok(segment_id)
+    }
+
+    /// The cuts between touching clips on the main row, with their blends.
+    #[must_use]
+    pub fn cuts(&self) -> Vec<PhoneCut> {
+        phone_cuts(self.draft())
+    }
+
+    /// Put transition `card_id` on the cut after `outgoing_id`, fitted to
+    /// the clips; a blend already there is swapped. One undo step.
+    pub fn set_transition(
+        &mut self,
+        outgoing_id: &SegmentId,
+        card_id: &str,
+    ) -> Result<(), FfiError> {
+        let request = transition::set_request(self.draft(), outgoing_id, card_id)?;
+        self.apply(self.revision(), &[request])?;
+        Ok(())
+    }
+
+    /// Make the blend after `outgoing_id` last `duration`, held to its
+    /// range. One undo step; nothing when it lasts that long already.
+    pub fn set_transition_length(
+        &mut self,
+        outgoing_id: &SegmentId,
+        duration: Micros,
+    ) -> Result<(), FfiError> {
+        if let Some(request) = transition::length_request(self.draft(), outgoing_id, duration)? {
+            self.apply(self.revision(), &[request])?;
+        }
+        Ok(())
+    }
+
+    /// Copy the blend after `outgoing_id` to every other cut of the main
+    /// row, each fitted to its clips, as one undo step.
+    pub fn transition_everywhere(&mut self, outgoing_id: &SegmentId) -> Result<(), FfiError> {
+        let requests = transition::everywhere_requests(self.draft(), outgoing_id)?;
+        if !requests.is_empty() {
+            self.apply(self.revision(), &requests)?;
+        }
+        Ok(())
+    }
+
+    /// Take the blend off the cut after `outgoing_id`. One undo step.
+    pub fn remove_transition(&mut self, outgoing_id: &SegmentId) -> Result<(), FfiError> {
+        let request = transition::remove_request(self.draft(), outgoing_id)?;
+        self.apply(self.revision(), &[request])?;
+        Ok(())
     }
 
     /// Set the adjust slider `key` of the picture clip or adjustment layer
@@ -2127,6 +2179,62 @@ mod tests {
     }
 
     #[test]
+    fn a_transition_goes_on_a_cut_swaps_grows_spreads_and_comes_off() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (first, second) = two_stills(&mut host);
+        let source = fixture("pattern.png");
+        let third = host.import_probed(&source, still(1_000_000)).unwrap();
+        let third = host.append(&third).unwrap();
+
+        let shelf = crate::phone_transitions();
+        assert!(shelf.len() > 20);
+        assert!(
+            shelf
+                .iter()
+                .all(|item| item.preview.starts_with("transition-"))
+        );
+        assert!(!crate::phone_transition_categories().is_empty());
+
+        let cuts = host.cuts();
+        assert_eq!(cuts.len(), 2);
+        assert_eq!(cuts[0].outgoing_id, first);
+        assert_eq!(cuts[0].at, Micros(2_000_000));
+        assert_eq!(cuts[0].transition, None);
+        assert_eq!(cuts[0].duration, Micros(0));
+
+        let before = host.draft().clone();
+        host.set_transition(&first, &shelf[0].id).unwrap();
+        let cut = &host.cuts()[0];
+        assert_eq!(cut.transition.as_deref(), Some(shelf[0].id.as_str()));
+        assert_eq!(cut.name, shelf[0].name);
+        assert!(cut.shortest.0 > 0 && cut.longest >= cut.duration);
+        // Swapping keeps one blend on the cut.
+        host.set_transition(&first, &shelf[3].id).unwrap();
+        assert_eq!(host.draft().materials.transitions.len(), 1);
+        assert_eq!(host.cuts()[0].name, shelf[3].name);
+
+        host.set_transition_length(&first, Micros(800_000)).unwrap();
+        assert_eq!(host.cuts()[0].duration, Micros(800_000));
+        host.transition_everywhere(&first).unwrap();
+        assert_eq!(host.cuts()[1].name, shelf[3].name);
+        assert_eq!(host.draft().materials.transitions.len(), 2);
+
+        host.remove_transition(&second).unwrap();
+        assert_eq!(host.cuts()[1].transition, None);
+        assert!(host.remove_transition(&second).is_err());
+        assert!(host.set_transition(&third, &shelf[0].id).is_err());
+        assert!(host.set_transition(&first, "transition:nope").is_err());
+        assert!(host.set_transition_length(&second, Micros(1)).is_err());
+
+        for _ in 0..5 {
+            host.undo().unwrap();
+        }
+        assert_eq!(host.draft(), &before);
+    }
+
+    #[test]
     fn a_dragged_edge_trims_the_clip_as_one_undo_step() {
         let temp = Temp::new();
         let roots = Roots::new(&temp);
@@ -2401,6 +2509,21 @@ mod tests {
             assert!(effect.id.starts_with("recipe/"), "{}", effect.id);
             assert!(!effect.name.is_empty());
             assert!(folder.join(&effect.preview).is_file(), "{}", effect.preview);
+        }
+    }
+
+    #[test]
+    fn every_transition_has_its_preview_video_in_the_phone_app() {
+        let folder =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/ios/ios/TransitionPreviews");
+        let transitions = crate::phone_transitions();
+        assert_eq!(transitions.len(), cutlass_editor::transition_offers().len());
+        for transition in transitions {
+            assert!(
+                folder.join(&transition.preview).is_file(),
+                "{}",
+                transition.preview
+            );
         }
     }
 

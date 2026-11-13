@@ -333,6 +333,15 @@ impl HevcDecoder {
             queue: VecDeque::new(),
         };
         dec.apply_extra()?;
+        if let Some(v) = std::env::var("HEVC_FRAMES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            dec.threads = v;
+        }
+        if let Some(v) = std::env::var("HEVC_ROWS").ok().and_then(|v| v.parse().ok()) {
+            dec.row_threads = v;
+        }
         Ok(dec)
     }
 

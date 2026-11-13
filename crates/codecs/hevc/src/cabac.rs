@@ -237,14 +237,54 @@ pub fn init_contexts(init_type: usize, qp: i32) -> Contexts {
     out
 }
 
+/// `rangeTabLps` by the two range bits it reads and the context state
+/// (`pStateIdx << 1 | valMps`): `LPS[q * 128 + state]`.
+static LPS: [u8; 4 * 128] = {
+    let mut out = [0u8; 4 * 128];
+    let mut q = 0;
+    while q < 4 {
+        let mut s = 0;
+        while s < 128 {
+            out[q * 128 + s] = RANGE_LPS[s >> 1][q];
+            s += 1;
+        }
+        q += 1;
+    }
+    out
+};
+
+/// The state after a bin: `NEXT[state * 2]` after the most probable
+/// value, `NEXT[state * 2 + 1]` after the least probable one (clause
+/// 9.3.4.3.2.2).
+static NEXT: [u8; 256] = {
+    let mut out = [0u8; 256];
+    let mut s = 0;
+    while s < 128 {
+        let (p, mps) = (s >> 1, (s & 1) as u8);
+        let up = if p < 62 { p + 1 } else { p };
+        out[s * 2] = ((up as u8) << 1) | mps;
+        let flip = if p == 0 { 1 - mps } else { mps };
+        out[s * 2 + 1] = (TRANS_LPS[p] << 1) | flip;
+        s += 1;
+    }
+    out
+};
+
+/// The arithmetic decoding engine (clause 9.3.4.3).
+///
+/// `val` holds the coded bits from its second bit down: bits 62 to 54 are
+/// `ivlOffset`, the `bits` below them are the bits that follow, and the top
+/// bit is room for a bypass bin, which doubles the offset before it
+/// compares. A renormalization shifts it left; it is refilled once fewer
+/// than 8 bits follow, so a decision (at most 7 bits) never runs out.
 pub struct Cabac<'a> {
     data: &'a [u8],
-    at: usize,
+    /// Bytes moved into `val`, those past the end of `data` included (as
+    /// zeros).
+    pos: usize,
     range: u32,
-    value: u32,
-    bits_needed: i32,
-    /// Bytes fed past the end of `data`.
-    overrun: usize,
+    val: u64,
+    bits: i32,
     pub ctx: Contexts,
 }
 
@@ -252,102 +292,92 @@ impl<'a> Cabac<'a> {
     pub fn new(data: &'a [u8], ctx: Contexts) -> Self {
         let mut cabac = Self {
             data,
-            at: 0,
+            pos: 0,
             range: 510,
-            value: 0,
-            bits_needed: 8,
-            overrun: 0,
+            val: 0,
+            bits: -9,
             ctx,
         };
-        cabac.start();
+        cabac.refill();
         cabac
-    }
-
-    fn start(&mut self) {
-        self.range = 510;
-        self.bits_needed = 8;
-        self.value = 0;
-        self.value = u32::from(self.next_byte()) << 8;
-        self.bits_needed -= 8;
-        self.value |= u32::from(self.next_byte());
-        self.bits_needed -= 8;
     }
 
     /// Start the engine again at `data` (an entry point or after PCM).
     pub fn restart(&mut self, data: &'a [u8]) {
         self.data = data;
-        self.at = 0;
-        self.start();
+        self.pos = 0;
+        self.range = 510;
+        self.val = 0;
+        self.bits = -9;
+        self.refill();
     }
 
+    /// Move bytes into `val` while room is left: at least 46 bits follow
+    /// the offset afterwards.
     #[inline(always)]
-    fn next_byte(&mut self) -> u8 {
-        if let Some(&byte) = self.data.get(self.at) {
-            self.at += 1;
-            byte
-        } else {
-            self.overrun += 1;
-            0
+    fn refill(&mut self) {
+        if let Some(chunk) = self.data.get(self.pos..).and_then(|d| d.first_chunk::<8>())
+            && self.bits <= 0
+        {
+            // Six bytes at once: the window then holds 9 + bits + 48 bits.
+            let next = u64::from_be_bytes(*chunk) >> 16;
+            self.val |= next << (6 - self.bits);
+            self.pos += 6;
+            self.bits += 48;
+            return;
+        }
+        while self.bits <= 46 {
+            let byte = self.data.get(self.pos).copied().unwrap_or(0);
+            self.pos += 1;
+            self.val |= u64::from(byte) << (46 - self.bits);
+            self.bits += 8;
         }
     }
 
-    /// More than the two bytes of look-ahead the engine may hold were read
-    /// past the end.
+    /// Bits the engine has consumed since its start.
+    #[inline]
+    fn consumed(&self) -> usize {
+        (self.pos * 8).saturating_sub((9 + self.bits) as usize)
+    }
+
+    /// The engine read more than two bytes past the end of its data, as a
+    /// byte-at-a-time engine with 7 bits of look-ahead would have.
     pub fn overrun(&self) -> bool {
-        self.overrun > 2
+        self.consumed() >= 8 * (self.data.len() + 1)
     }
 
     #[inline(always)]
     pub fn decide(&mut self, index: usize) -> bool {
-        let model = self.ctx[index];
-        let state = usize::from(model >> 1);
-        let mps = model & 1;
-        let lps = u32::from(RANGE_LPS[state][((self.range >> 6) & 3) as usize]);
-        self.range -= lps;
-        let scaled = self.range << 7;
-        if self.value < scaled {
-            self.ctx[index] = (((state as u8) + u8::from(state < 62)) << 1) | mps;
-            if scaled < (256 << 7) {
-                self.range = scaled >> 6;
-                self.value <<= 1;
-                self.bits_needed += 1;
-                if self.bits_needed == 0 {
-                    self.bits_needed = -8;
-                    self.value |= u32::from(self.next_byte());
-                }
-            }
-            mps == 1
-        } else {
-            self.value -= scaled;
-            let shift = RENORM[(lps >> 3) as usize];
-            self.value <<= shift;
-            self.range = lps << shift;
-            let new_mps = if state == 0 { 1 - mps } else { mps };
-            self.ctx[index] = (TRANS_LPS[state] << 1) | new_mps;
-            self.bits_needed += i32::from(shift);
-            if self.bits_needed >= 0 {
-                self.value |= u32::from(self.next_byte()) << self.bits_needed;
-                self.bits_needed -= 8;
-            }
-            mps == 0
+        let s = self.ctx[index];
+        let lps = u32::from(LPS[(((self.range >> 6) & 3) as usize) * 128 + usize::from(s & 127)]);
+        let rmps = self.range - lps;
+        let scaled = u64::from(rmps) << 54;
+        let lps_path = self.val >= scaled;
+        let mask = u64::from(lps_path).wrapping_neg();
+        self.val -= scaled & mask;
+        let range = if lps_path { lps } else { rmps };
+        self.ctx[index] = NEXT[usize::from(s & 127) * 2 + usize::from(lps_path)];
+        let shift = range.leading_zeros().saturating_sub(23);
+        self.range = range << shift;
+        self.val <<= shift;
+        self.bits -= shift as i32;
+        if self.bits < 8 {
+            self.refill();
         }
+        (s & 1 != 0) != lps_path
     }
 
     #[inline(always)]
     pub fn bypass(&mut self) -> bool {
-        self.value <<= 1;
-        self.bits_needed += 1;
-        if self.bits_needed >= 0 {
-            self.bits_needed = -8;
-            self.value |= u32::from(self.next_byte());
+        self.val <<= 1;
+        self.bits -= 1;
+        let scaled = u64::from(self.range) << 54;
+        let one = self.val >= scaled;
+        self.val -= scaled & u64::from(one).wrapping_neg();
+        if self.bits < 8 {
+            self.refill();
         }
-        let scaled = self.range << 7;
-        if self.value >= scaled {
-            self.value -= scaled;
-            true
-        } else {
-            false
-        }
+        one
     }
 
     /// `n` bypass bins, most significant first.
@@ -362,17 +392,16 @@ impl<'a> Cabac<'a> {
 
     pub fn terminate(&mut self) -> bool {
         self.range -= 2;
-        let scaled = self.range << 7;
-        if self.value >= scaled {
+        let scaled = u64::from(self.range) << 54;
+        if self.val >= scaled {
             true
         } else {
-            if scaled < (256 << 7) {
-                self.range = scaled >> 6;
-                self.value <<= 1;
-                self.bits_needed += 1;
-                if self.bits_needed == 0 {
-                    self.bits_needed = -8;
-                    self.value |= u32::from(self.next_byte());
+            if self.range < 256 {
+                self.range <<= 1;
+                self.val <<= 1;
+                self.bits -= 1;
+                if self.bits < 8 {
+                    self.refill();
                 }
             }
             false
@@ -380,16 +409,175 @@ impl<'a> Cabac<'a> {
     }
 
     /// The bytes after a terminate bin of 1. The stop bit and the alignment
-    /// zeros after it sit in the last byte the engine read, so the next
-    /// aligned data starts at the next byte.
+    /// zeros after it sit in the last byte a byte-at-a-time engine with 7
+    /// bits of look-ahead read, so the next aligned data starts at the next
+    /// byte.
     pub fn remaining(&self) -> &'a [u8] {
-        self.data.get(self.at..).unwrap_or(&[])
+        let at = 2 + self.consumed() / 8;
+        self.data.get(at..).unwrap_or(&[])
     }
 }
 
-static RENORM: [u8; 32] = [
-    6, 5, 4, 4, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-];
+/// The engine as the specification writes it, one byte at a time.
+#[cfg(test)]
+mod reference {
+    use super::{Contexts, RANGE_LPS, TRANS_LPS};
+
+    static RENORM: [u8; 32] = [
+        6, 5, 4, 4, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1,
+    ];
+
+    pub struct Reference<'a> {
+        data: &'a [u8],
+        at: usize,
+        pub range: u32,
+        pub value: u32,
+        pub bits_needed: i32,
+        /// Bytes fed past the end of `data`.
+        overrun: usize,
+        pub ctx: Contexts,
+    }
+
+    impl<'a> Reference<'a> {
+        pub fn new(data: &'a [u8], ctx: Contexts) -> Self {
+            let mut cabac = Self {
+                data,
+                at: 0,
+                range: 510,
+                value: 0,
+                bits_needed: 8,
+                overrun: 0,
+                ctx,
+            };
+            cabac.start();
+            cabac
+        }
+
+        fn start(&mut self) {
+            self.range = 510;
+            self.bits_needed = 8;
+            self.value = 0;
+            self.value = u32::from(self.next_byte()) << 8;
+            self.bits_needed -= 8;
+            self.value |= u32::from(self.next_byte());
+            self.bits_needed -= 8;
+        }
+
+        /// Start the engine again at `data` (an entry point or after PCM).
+        pub fn restart(&mut self, data: &'a [u8]) {
+            self.data = data;
+            self.at = 0;
+            self.start();
+        }
+
+        #[inline(always)]
+        fn next_byte(&mut self) -> u8 {
+            if let Some(&byte) = self.data.get(self.at) {
+                self.at += 1;
+                byte
+            } else {
+                self.overrun += 1;
+                0
+            }
+        }
+
+        /// More than the two bytes of look-ahead the engine may hold were read
+        /// past the end.
+        pub fn overrun(&self) -> bool {
+            self.overrun > 2
+        }
+
+        #[inline(always)]
+        pub fn decide(&mut self, index: usize) -> bool {
+            let model = self.ctx[index];
+            let state = usize::from(model >> 1);
+            let mps = model & 1;
+            let lps = u32::from(RANGE_LPS[state][((self.range >> 6) & 3) as usize]);
+            self.range -= lps;
+            let scaled = self.range << 7;
+            if self.value < scaled {
+                self.ctx[index] = (((state as u8) + u8::from(state < 62)) << 1) | mps;
+                if scaled < (256 << 7) {
+                    self.range = scaled >> 6;
+                    self.value <<= 1;
+                    self.bits_needed += 1;
+                    if self.bits_needed == 0 {
+                        self.bits_needed = -8;
+                        self.value |= u32::from(self.next_byte());
+                    }
+                }
+                mps == 1
+            } else {
+                self.value -= scaled;
+                let shift = RENORM[(lps >> 3) as usize];
+                self.value <<= shift;
+                self.range = lps << shift;
+                let new_mps = if state == 0 { 1 - mps } else { mps };
+                self.ctx[index] = (TRANS_LPS[state] << 1) | new_mps;
+                self.bits_needed += i32::from(shift);
+                if self.bits_needed >= 0 {
+                    self.value |= u32::from(self.next_byte()) << self.bits_needed;
+                    self.bits_needed -= 8;
+                }
+                mps == 0
+            }
+        }
+
+        #[inline(always)]
+        pub fn bypass(&mut self) -> bool {
+            self.value <<= 1;
+            self.bits_needed += 1;
+            if self.bits_needed >= 0 {
+                self.bits_needed = -8;
+                self.value |= u32::from(self.next_byte());
+            }
+            let scaled = self.range << 7;
+            if self.value >= scaled {
+                self.value -= scaled;
+                true
+            } else {
+                false
+            }
+        }
+
+        /// `n` bypass bins, most significant first.
+        #[inline(always)]
+        pub fn bypass_bits(&mut self, n: u32) -> u32 {
+            let mut value = 0;
+            for _ in 0..n {
+                value = (value << 1) | u32::from(self.bypass());
+            }
+            value
+        }
+
+        pub fn terminate(&mut self) -> bool {
+            self.range -= 2;
+            let scaled = self.range << 7;
+            if self.value >= scaled {
+                true
+            } else {
+                if scaled < (256 << 7) {
+                    self.range = scaled >> 6;
+                    self.value <<= 1;
+                    self.bits_needed += 1;
+                    if self.bits_needed == 0 {
+                        self.bits_needed = -8;
+                        self.value |= u32::from(self.next_byte());
+                    }
+                }
+                false
+            }
+        }
+
+        /// The bytes after a terminate bin of 1. The stop bit and the alignment
+        /// zeros after it sit in the last byte the engine read, so the next
+        /// aligned data starts at the next byte.
+        pub fn remaining(&self) -> &'a [u8] {
+            self.data.get(self.at..).unwrap_or(&[])
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -409,6 +597,54 @@ mod tests {
         // initValue 63: m = -30, n = 104. At QP 30: ((-30 * 30) >> 4) + 104 = 47.
         // 47 <= 63, so MPS 0 and state 63 - 47 = 16.
         assert_eq!(ctx[super::CHROMA_PRED], 16 << 1);
+    }
+
+    /// The engine against the byte-at-a-time one on random data: every
+    /// bin, every state, the position after each terminate.
+    #[test]
+    fn matches_the_reference_engine() {
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for len in [0usize, 1, 2, 3, 7, 9, 64, 1000] {
+            let data: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            let ctx = init_contexts(1, 30);
+            let mut a = Cabac::new(&data, ctx);
+            let mut b = super::reference::Reference::new(&data, ctx);
+            for step in 0..20_000 {
+                let pick = next() % 16;
+                let index = (next() % CONTEXTS as u64) as usize;
+                match pick {
+                    0 => {
+                        let n = (next() % 17) as u32;
+                        let (x, y) = (a.bypass_bits(n), b.bypass_bits(n));
+                        assert_eq!(
+                            x, y,
+                            "len {len} n {n} step {step} bits {} pos {}",
+                            a.bits, a.pos
+                        );
+                    }
+                    1..=3 => assert_eq!(a.bypass(), b.bypass(), "len {len} step {step}"),
+                    4 => {
+                        let (x, y) = (a.terminate(), b.terminate());
+                        assert_eq!(x, y);
+                        if x {
+                            assert_eq!(a.remaining(), b.remaining());
+                            let rest = a.remaining();
+                            a.restart(rest);
+                            b.restart(rest);
+                        }
+                    }
+                    _ => assert_eq!(a.decide(index), b.decide(index), "len {len} step {step}"),
+                }
+                assert_eq!(a.ctx, b.ctx);
+                assert_eq!(a.overrun(), b.overrun(), "len {len}");
+            }
+        }
     }
 
     #[test]

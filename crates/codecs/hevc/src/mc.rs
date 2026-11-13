@@ -89,6 +89,10 @@ pub fn predict_px<P: Pixel>(
     }
 }
 
+/// A block's source window: samples, where it starts in them, its stride,
+/// and the rows to hold it within ([`Src::clamp`]).
+type Window<'s, P> = (&'s [P], usize, usize, Option<(isize, usize)>);
+
 /// Where a block's source window comes from.
 #[derive(Clone, Copy)]
 enum Place {
@@ -138,7 +142,7 @@ fn window<'s, const T: usize, P: Pixel>(
     plane: &'s Plane<'s, P>,
     block: Block,
     win: &'s mut [P],
-) -> Option<(&'s [P], usize, usize, Option<(isize, usize)>)> {
+) -> Option<Window<'s, P>> {
     Some(match place::<T, P>(plane, block)? {
         Place::Inside(at) => (plane.samples, at, plane.width, None),
         Place::Rows(at, top, rows) => (plane.samples, at, plane.width, Some((top, rows))),

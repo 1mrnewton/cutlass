@@ -734,25 +734,6 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{Mv, scale};
-
-    #[test]
-    fn scaling_by_equal_distances_keeps_the_vector() {
-        let mv = Mv { x: 13, y: -7 };
-        assert_eq!(scale(mv, 3, 3), mv);
-        assert_eq!(scale(mv, 1, 1), mv);
-    }
-
-    #[test]
-    fn scaling_doubles_for_twice_the_distance() {
-        let mv = Mv { x: 8, y: -8 };
-        assert_eq!(scale(mv, 1, 2), Mv { x: 16, y: -16 });
-        assert_eq!(scale(mv, 2, -2), Mv { x: -8, y: 8 });
-    }
-}
-
 /// A list of at most `N` values, kept on the stack.
 struct Short<T, const N: usize> {
     items: [T; N],
@@ -783,5 +764,24 @@ impl<T: Copy, const N: usize> Short<T, N> {
 
     fn get(&self, i: usize) -> Option<T> {
         self.items.get(..self.len)?.get(i).copied()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Mv, scale};
+
+    #[test]
+    fn scaling_by_equal_distances_keeps_the_vector() {
+        let mv = Mv { x: 13, y: -7 };
+        assert_eq!(scale(mv, 3, 3), mv);
+        assert_eq!(scale(mv, 1, 1), mv);
+    }
+
+    #[test]
+    fn scaling_doubles_for_twice_the_distance() {
+        let mv = Mv { x: 8, y: -8 };
+        assert_eq!(scale(mv, 1, 2), Mv { x: 16, y: -16 });
+        assert_eq!(scale(mv, 2, -2), Mv { x: -8, y: 8 });
     }
 }

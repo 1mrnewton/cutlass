@@ -7,6 +7,9 @@
 //! a pair of intermediate values broadcast, times the interleaved matrix
 //! rows of a table.
 
+// The loops index rows, strips and taps by one position at once.
+#![allow(clippy::needless_range_loop)]
+
 use core::arch::x86_64::{
     __m128i, __m256i, _mm_add_epi32, _mm_adds_epi16, _mm_cvtepu8_epi16, _mm_cvtsi32_si128,
     _mm_cvtsi128_si32, _mm_cvtsi128_si64, _mm_extract_epi64, _mm_madd_epi16, _mm_packs_epi32,

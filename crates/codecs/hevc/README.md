@@ -2,6 +2,8 @@
 
 An HEVC (H.265) video decoder in safe Rust. There is no encoder. The crate has `#![forbid(unsafe_code)]`; its vector kernels (interpolation, inverse transforms, deblocking, SAO) are in [`cutlass-simd`](../../simd), which checks at run time that the CPU has AVX2 and otherwise leaves the work to this crate's scalar code. The desktop app registers it after the platform decoders: on macOS and Windows the platform decoder is asked first when hardware decode is on in Settings, and this decoder is used when that opener declines, when hardware decode is off, and always on Linux.
 
+It is built the way [`cutlass-av1`](../av1)'s decoder is: safe Rust over the kernels of `cutlass-simd`; references shared between pictures decoding at once through `cutlass_simd::shared_rows`, whose rows readers see as they become final; `register_decoders` for the engine's `DecodeFactory`; a `decode` bench (`harness = false`) that times it against FFmpeg; `dec`, `bench`, and `fuzz` examples; and this README's sections.
+
 ## What it supports
 
 It takes what an MP4 or QuickTime track holds (the `hvcC` record as extradata and length-prefixed samples) or an Annex B byte stream, and returns pictures in output order, cropped by the conformance window.
@@ -65,8 +67,8 @@ cargo test -p cutlass-hevc
 - **`tests/malformed.rs`.** Hand-built parameter sets with bad or huge values must be refused, a failed `push` must leave earlier parameter sets in place, and random bytes must not panic. libx265 streams are cut short and have bits flipped, 200 rounds a stream by default (`HEVC_FUZZ_ROUNDS` changes that), and must not panic.
 - **`tests/local_media.rs`.** Phone and screen recordings are read through `cutlass-isobmff` and the first 30 pictures are compared with `ffmpeg`. These files are not in the repository.
 - **Unit tests in `src/`.** Bit reading, the CABAC engine against a byte-at-a-time engine written from clause 9.3.4.3, the transform matrix, intra modes, motion vector scaling, sample interpolation, emulation prevention, and NAL framing.
-- **Kernels.** Each vector kernel in `cutlass-simd` (`hevc::mc`, `hevc::idct`, `hevc::deblock`, `hevc::sao`) is compared with a scalar version written from the specification on random blocks, sizes and edges: `cargo test -p cutlass-simd`.
-- **`examples/`.** `hevcdec <in> <out.yuv> [threads]` writes the pictures of an MP4, QuickTime or Annex B stream as raw planes (the bytes `ffmpeg -f rawvideo` writes); `hevcbench <in> [runs] [threads] [frames rows]` times whole decodes.
+- **Kernels.** Each vector kernel in `cutlass-simd` (`hevc::mc` and `hevc::mc16` for 8 and for 9 to 12 bits, `hevc::idct`, `hevc::deblock`, `hevc::sao` at 8, 9, 10 and 12 bits) is compared with a scalar version written from the specification on random blocks, sizes and edges, and `shared_rows` with the frames it lends out as output: `cargo test -p cutlass-simd`.
+- **`examples/`.** As for `cutlass-av1` (`av1dec`, `av1bench`, `av1fuzz`): `hevcdec <in> <out.yuv> [threads]` writes the pictures of an MP4, QuickTime or Annex B stream as raw planes (the bytes `ffmpeg -f rawvideo` writes); `hevcbench <in> [runs] [threads] [frames rows]` times whole decodes; `hevcfuzz <iterations> <in>...` flips bits, overwrites bytes, cuts access units short and scrambles their headers, decodes each result with 1, 2 and 4 threads in turn, and fails on any panic or on a decode not finished within 60 seconds. On 13 November 2026, 3,000 iterations on each of four small libx265 streams (8-bit with B pictures and weighted prediction, 10-bit with slices and transform skip, lossless with 16×16 blocks, 12-bit) and 150 on a 1080p clip ran with no panic and no hang.
 - **`benches/decode.rs`.** `cargo bench -p cutlass-hevc` writes 240 pictures of 1080p with libx265 (or takes `HEVC_BENCH=<file>`), checks that the samples equal FFmpeg's, then times both with the same number of threads. Without `ffmpeg` it prints `skip:`.
 - A 600-frame 1080p Main-profile stream written by libx265 decodes to the same bytes as FFmpeg's decoder (see the speed section).
 
@@ -80,24 +82,56 @@ What does not run by default:
 
 ## Speed against FFmpeg
 
-**Decode, hevc.** Measured on 13 November 2026 on branch `hevc`, on a cloud VM with 4 cores of an Intel Xeon at 2.1 GHz (other VMs share the host; the same run varies by 5% to 10% from one minute to the next), against FFmpeg 6.1.1 from Ubuntu 24.04. Built with `cargo build --release -p media-bench` (no profile) and rustc 1.97.0. Input: 600 frames of 1920×1080 at 30 frames a second (21 MB), written by libx265 at its medium preset with wavefronts. The Rust side is [`tools/media-bench`](../../../tools/media-bench); the FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which calls libavformat and libavcodec directly. Each is a whole process, run in turn (21 times with four threads; five times pinned to one core, where both decoders use one thread); the table shows the median run.
+**Decode, hevc.** Measured on 13 November 2026 on branch `hevc` (commit `e143d5e`), on a cloud VM with 4 cores of an Intel Xeon at 2.1 GHz, one thread a core (other VMs share the host; the same run varies by 5% to 10% from one minute to the next), against FFmpeg 6.1.1 from Ubuntu 24.04. Built with `cargo build --release -p media-bench` (no profile) and rustc 1.97.0. The Rust side is [`tools/media-bench`](../../../tools/media-bench); the FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which calls libavformat and libavcodec directly. Each is a whole process, start-up included, run in turn five times; the tables show the median run. "4 threads" gives each decoder four threads on the four cores; "1 core" pins each to one core with one thread. Every 8-bit input decodes to exactly FFmpeg's samples.
 
-|  | Cutlass | FFmpeg (`hevc`) |
+The inputs were all written by libx265 3.5 with 64×64 coding tree blocks, SAO, weighted prediction, and three reference pictures (two for 2160p):
+
+| Input | Size | Frames | Written with |
+| --- | --- | ---: | --- |
+| `mandel` | 1920×1080 | 600 | preset medium, CRF 26, 4 B pictures, wavefronts (21 MB) |
+| `m120`, `mid40` | 1920×1080 | 120, 40 | the same settings, other scenes |
+| `small` | 480×272 | 600 | the same settings |
+| `nowpp` | 1920×1080 | 300 | CRF 28, 4 B pictures, no wavefronts |
+| `pframes` | 1920×1080 | 300 | CRF 28, P pictures only, each referencing the last |
+| `uhd` | 3840×2160 | 90 | CRF 28, 4 B pictures, wavefronts |
+| `ten` | 1920×1080, 10-bit | 240 | CRF 28, 4 B pictures, wavefronts |
+
+Wall time, Cutlass against FFmpeg (`hevc`), and Cutlass's time as a fraction of FFmpeg's:
+
+| Input | 4 threads | | | 1 core | | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| | Cutlass | FFmpeg | ratio | Cutlass | FFmpeg | ratio |
+| `mandel` | 2.32 s | 2.96 s | **0.78** | 7.01 s | 7.68 s | **0.91** |
+| `m120` | 0.40 s | 0.53 s | **0.75** | 1.25 s | 1.37 s | **0.91** |
+| `mid40` | 0.17 s | 0.27 s | **0.63** | 0.44 s | 0.53 s | **0.83** |
+| `small` | 0.27 s | 0.43 s | **0.63** | 0.60 s | 0.59 s | 1.02 |
+| `nowpp` | 1.01 s | 1.35 s | **0.75** | 2.80 s | 2.99 s | **0.94** |
+| `pframes` | 1.38 s | 1.38 s | 1.00 | 3.79 s | 4.26 s | **0.89** |
+| `uhd` | 1.01 s | 1.19 s | **0.85** | 2.84 s | 3.28 s | **0.87** |
+| `ten` | 1.27 s | 1.49 s | **0.85** | 3.89 s | 3.91 s | **0.99** |
+
+Peak memory (resident set), Cutlass against FFmpeg:
+
+| Input | 4 threads | 1 core |
 | --- | ---: | ---: |
-| Wall time, 4 threads | 2.25 s | 2.59 s |
-| Speed, 4 threads | 267 frames/s | 232 frames/s |
-| CPU time, 4 threads | 7.62 s | 7.61 s |
-| Wall time, 1 thread | 7.15 s | 7.38 s |
-| Peak memory, 4 threads | 142–149 MB | 102 MB |
-| Threads allowed | 4 | 4 |
+| `mandel` | 104 MB / 99 MB | 28 MB / 68 MB |
+| `m120` | 86 MB / 96 MB | 28 MB / 67 MB |
+| `mid40` | 72 MB / 99 MB | 28 MB / 69 MB |
+| `small` | 16 MB / 46 MB | 9 MB / 41 MB |
+| `nowpp` | 87 MB / 95 MB | 28 MB / 68 MB |
+| `pframes` | 80 MB / 83 MB | 25 MB / 63 MB |
+| `uhd` | 260 MB / 252 MB | 87 MB / 156 MB |
+| `ten` | 207 MB / 127 MB | 55 MB / 89 MB |
 
-Cutlass is **1.15× faster** than FFmpeg here with four threads (its fastest run against FFmpeg's fastest: 2.12 s against 2.44 s), for the same processor time, and **1.03× faster** on one core. Both decoders produced exactly the same samples. With four threads no more than four of Cutlass's threads decode at once: a picture waiting for rows of a reference gives its place to one of two more pictures started beside the four (see Threads below), which is where the gain over one core comes from; FFmpeg's frame threads wait instead. `media-bench` also writes every picture into the packed buffer the engine's `Decoder` returns, which the FFmpeg program does not do. `cargo bench -p cutlass-hevc`, which times the decode alone against the `ffmpeg` program writing to `-f null`, measured **2.11 s and 2.17 s against FFmpeg's 2.63 s** (1.2× faster) on this file. Earlier the same day, before pictures lent their places, the four-thread comparison measured between 1.00× and 1.05× FFmpeg's time.
+Cutlass is faster than FFmpeg on every input with four threads but `pframes`, where the two tie in this run (15 runs in turn on their own measured 1.27 s against 1.36 s, **0.93**), and on every input on one core but `small`, a 480×272 clip where the two are within the timer's 0.01 s. Processor time is lower than FFmpeg's on all but `pframes` and `ten` with four threads. The `ten` row compares the same output: Cutlass's engine decoder returns 8-bit pictures, so the FFmpeg program converts each 10-bit frame to `yuv420p` (its `to:yuv420p` mode). Left in the 10-bit frames it decodes into, FFmpeg takes 1.23 s with four threads and 3.40 s on one core, and Cutlass is 1.03× and 1.14× its time there.
 
-Where the time goes, on one core and against FFmpeg's own profile on the same file: entropy decoding (CABAC and residual coding) takes about 20% less time than FFmpeg's, and deblocking with its boundary strengths about 10% less; interpolation and the motion-vector derivation around it, SAO, and the copies of final rows into frames and output pictures take more.
+**Decode alone.** `HEVC_BENCH=<mandel> cargo bench -p cutlass-hevc`, which pushes the access units straight into `HevcDecoder` with four threads and times FFmpeg's `ffmpeg -f null` on the same file, measured **2.41 s against FFmpeg's 3.15 s** (1.30× faster), with the samples checked equal to FFmpeg's first.
 
-What made it faster, in order of the gain measured on this machine: decoding into a ring of CTB-row buffers that stay in cache instead of a picture-sized buffer per picture, and the same for the per-4×4 maps of motion, modes and QP; a picture waiting for a reference lending its place to another (1.15× from 1.00× to 1.05× with four threads); interpolation kernels that read each row of the reference window as one fixed-size array (1.34G instructions to 0.85G on 40 frames, against FFmpeg's 0.91G); significance and greater-than-one flags handled without a branch on the decoded value; deblocking each CTB row as soon as it is complete and making all but its last eight lines final right then, on the thread that built it (6% with four threads); one picture per thread instead of wavefront rows split between threads (2% wall time, 5% processor time); writing the final rows of pictures no other picture references straight to the output; intra prediction computed a row at a time over whole slices of the references, and the availability of neighbours found once per CTB (1778M instructions to 1663M on 24 frames, with the merge and AMVP lists that stop at the candidate chosen); the inverse transform adding its residual to the samples itself; the CABAC engine kept in registers through residual coding; packed output pictures shared with the caller and filled again once the caller lets them go, instead of new memory for each; wavefront row progress reported without a lock or a system call. An AVX-512 interpolation kernel was tried and was slower on this CPU.
+Where the time goes, on one core against FFmpeg's own profile of `nowpp`: entropy decoding (CABAC and residual coding) takes about 10% less time than FFmpeg's, interpolation 25% less, and deblocking with its boundary strengths 15% less; motion vector derivation and the setup of each prediction block take about 40% more, and the copies of final rows into frames twice as long.
 
-To run it again: `cargo build --release -p media-bench`, then `python3 scripts/bench_media.py --video <clip> --audio <song> --work <folder>`; or `HEVC_BENCH=<clip> cargo bench -p cutlass-hevc`.
+What made it faster, in order of the gain measured on this machine: decoding into a ring of CTB-row buffers that stay in cache instead of a picture-sized buffer per picture, and the same for the per-4×4 maps of motion, modes and QP; a picture waiting for a reference lending its place to another (1.15× from 1.00× to 1.05× with four threads); interpolation kernels that read each row of the reference window as one fixed-size array (1.34G instructions to 0.85G on 40 frames, against FFmpeg's 0.91G); asking for every line of a block's reference window before filtering it (5% to 9% on one core, 5% with four threads); the 16-bit interpolation, SAO and weighting kernels for deeper samples (the 10-bit stream from 2.07× the time of FFmpeg left in 10-bit frames to 1.03×); significance and greater-than-one flags handled without a branch on the decoded value; deblocking each CTB row as soon as it is complete and making all but its last eight lines final right then, on the thread that built it (6% with four threads); output pictures that are their frame's own samples, one buffer shared with the caller, instead of a copy (30 to 40 MB less memory with four threads on 1080p, 137 MB on 2160p, and 1% to 3% faster); clearing each band of a frame or an output picture before SAO writes it, so its lines come into cache without being read (3%); one picture per thread instead of wavefront rows split between threads (2% wall time, 5% processor time); intra prediction computed a row at a time over whole slices of the references, and the availability of neighbours found once per CTB (1778M instructions to 1663M on 24 frames, with the merge and AMVP lists that stop at the candidate chosen); the inverse transform adding its residual to the samples itself; the CABAC engine kept in registers through residual coding; wavefront row progress reported without a lock or a system call. Tried and dropped: an AVX-512 interpolation kernel (slower on this CPU), waiting further behind a reference (10% to 30% slower), fewer pictures in flight, and asking for the chroma windows before luma is filtered (2% to 4% slower).
+
+To run it again: `cargo build --release -p media-bench`, then `python3 scripts/bench_media.py --video <clip> --audio <song> --work <folder>`; or `HEVC_BENCH=<clip> cargo bench -p cutlass-hevc`. For a 10-bit clip, time the FFmpeg program with `to:yuv420p` for the same output.
 
 ## Limits and gaps
 
@@ -117,9 +151,9 @@ Gaps:
 - No error concealment. A damaged access unit is an error and the decoder keeps its earlier state.
 - SEI is not read, so HDR metadata carried there (mastering display, content light level) is not returned.
 - `field_seq_flag` is read and ignored. No code pairs fields into frames.
-- The vector kernels take 8-bit samples on x86-64 with AVX2. Deeper streams, and other CPUs, use the scalar code, which is several times slower.
-- A picture that a later picture references, and every picture of a cropped stream, is written to its frame and then copied to the output.
-- With four threads the decoder holds up to six pictures at once and keeps the packed pictures it has handed out to fill again, so it takes about 45 MB more memory than FFmpeg at its peak on 1080p.
+- The vector kernels need x86-64 with AVX2; other CPUs use the scalar code, which is several times slower. For samples above 8 bits, interpolation, default weighting, SAO, and the inverse transforms have kernels; deblocking and explicit weighting of those samples are scalar code compiled for AVX2.
+- A picture of a cropped stream, and every picture of a stream above 8 bits, is written to its frame and then copied to the output (shifted down to 8 bits). Other pictures are their frame's own samples, shared with the caller.
+- With four threads the decoder holds up to six pictures at once. On 8-bit 1080p its peak memory is between 27 MB below and 5 MB above FFmpeg's; on the 10-bit stream, whose 16-bit frames cannot be the 8-bit output, it is 80 MB above.
 
 ## Specifications
 

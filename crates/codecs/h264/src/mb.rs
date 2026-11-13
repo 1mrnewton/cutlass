@@ -12864,6 +12864,11 @@ fn deblock_whole<S: Sample>(
             }
         }
     }
+    // No edge of any plane changes a sample, as for most flat macroblocks
+    // of a still scene: done, without the kernels' checks of the edges.
+    if some == [false; 3] {
+        return true;
+    }
     let stride = pic.w;
     let chroma_stride = pic.w / 2;
     let chroma_at = my * 8 * chroma_stride + mx * 8;

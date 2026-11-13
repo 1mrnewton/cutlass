@@ -6,6 +6,8 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use cutlass_decode::CodecError;
 
+use cutlass_simd::hevc::idct;
+
 use crate::cabac::{self, Cabac, Engine};
 use crate::intra::{self, Refs};
 use cutlass_pool::Rows;
@@ -1593,6 +1595,18 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let scale = if c == 0 { 1 } else { 2 };
         let maxv = (1i32 << bit_depth) - 1;
         let coeffs = &self.coeffs[..n * n];
+        let dst = c == 0 && log2 == 2 && self.cu.intra;
+        // Eight-bit samples: the transform adds its residual to them, unless
+        // the block is flat (its DC alone, below).
+        if bit_depth == 8 && !self.cu.bypass && !transform_skip && (dst || max_x > 0 || max_y > 0) {
+            let (plane, stride) = self.out.from(c, x0 / scale, y0 / scale);
+            if let Some(px) = P::bytes_mut(plane)
+                && idct::add(coeffs, n, (max_x + 1, max_y + 1), dst, (px, stride))
+            {
+                self.clear_coeffs(n, max_x, max_y);
+                return;
+            }
+        }
         let res = &mut self.res[..n * n];
         let flat = if self.cu.bypass {
             res.copy_from_slice(coeffs);
@@ -1601,7 +1615,6 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             transform::skip(coeffs, res, bit_depth);
             None
         } else {
-            let dst = c == 0 && log2 == 2 && self.cu.intra;
             transform::inverse(coeffs, res, log2, dst, bit_depth, max_x, max_y)
         };
         self.clear_coeffs(n, max_x, max_y);

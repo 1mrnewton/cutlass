@@ -16,11 +16,18 @@ mod tests;
 /// The reference samples of one block: `src[at]` is the first sample of
 /// the window the filters read, `T / 2 - 1` rows above and columns left
 /// of the block's first sample for a `T`-tap filter.
+///
+/// Row `j` of the window is row `j` from `at`, or, with `clamp`, the row
+/// `top + j` of the plane, `top` being the window's first row relative to
+/// the row of `at`, held within the plane's first `rows` rows: the window
+/// of a block reaching above or below the picture, with no copy.
 #[derive(Clone, Copy, Debug)]
 pub struct Src<'a> {
     pub src: &'a [u8],
     pub at: usize,
     pub stride: usize,
+    /// `(top, rows)`.
+    pub clamp: Option<(isize, usize)>,
 }
 
 /// The filters of one block: taps across and down (`None`: the fraction
@@ -34,11 +41,31 @@ pub struct Taps {
 }
 
 impl Src<'_> {
+    /// Where row `j` of the window starts.
+    #[inline]
+    #[must_use]
+    pub fn row(&self, j: usize) -> usize {
+        match self.clamp {
+            None => self.at + j * self.stride,
+            Some((top, rows)) => {
+                let r = (top + j as isize).clamp(0, rows.max(1) as isize - 1) as usize;
+                self.at + r * self.stride
+            }
+        }
+    }
+
     /// Whether every load of a `w`×`h` block stays inside `src`: the
     /// kernels read `w + 24` samples of each of `h + taps - 1` rows.
     fn holds(&self, w: usize, h: usize, taps: usize) -> bool {
-        self.at
-            .checked_add((h + taps - 2) * self.stride + w + 24)
+        let last = match self.clamp {
+            None => h + taps - 2,
+            Some((top, rows)) => {
+                (top + (h + taps - 2) as isize).clamp(0, rows.max(1) as isize - 1) as usize
+            }
+        };
+        last.checked_mul(self.stride)
+            .and_then(|r| r.checked_add(self.at))
+            .and_then(|r| r.checked_add(w + 24))
             .is_some_and(|end| end <= self.src.len())
     }
 }

@@ -8,15 +8,53 @@
 //! rows of a table.
 
 use core::arch::x86_64::{
-    __m128i, __m256i, _mm_add_epi32, _mm_cvtsi32_si128, _mm_cvtsi128_si64, _mm_extract_epi64,
-    _mm_madd_epi16, _mm_packs_epi32, _mm_set_epi32, _mm_set_epi64x, _mm_set1_epi32,
-    _mm_setzero_si128, _mm_sra_epi32, _mm_srai_epi32, _mm_unpackhi_epi16, _mm_unpacklo_epi16,
-    _mm256_add_epi32, _mm256_extract_epi64, _mm256_madd_epi16, _mm256_packs_epi32,
-    _mm256_permute4x64_epi64, _mm256_set_m128i, _mm256_set1_epi32, _mm256_setzero_si256,
-    _mm256_sra_epi32, _mm256_srai_epi32, _mm256_unpackhi_epi16, _mm256_unpacklo_epi16,
+    __m128i, __m256i, _mm_add_epi32, _mm_adds_epi16, _mm_cvtepu8_epi16, _mm_cvtsi32_si128,
+    _mm_cvtsi128_si32, _mm_cvtsi128_si64, _mm_extract_epi64, _mm_madd_epi16, _mm_packs_epi32,
+    _mm_packus_epi16, _mm_set_epi32, _mm_set_epi64x, _mm_set1_epi32, _mm_setzero_si128,
+    _mm_sra_epi32, _mm_srai_epi32, _mm_unpackhi_epi16, _mm_unpacklo_epi16, _mm256_add_epi32,
+    _mm256_castsi256_si128, _mm256_extract_epi64, _mm256_extracti128_si256, _mm256_madd_epi16,
+    _mm256_packs_epi32, _mm256_permute4x64_epi64, _mm256_set_m128i, _mm256_set1_epi32,
+    _mm256_setzero_si256, _mm256_sra_epi32, _mm256_srai_epi32, _mm256_unpackhi_epi16,
+    _mm256_unpacklo_epi16,
 };
 
 use super::{DCT32, DST4};
+
+/// Where the residual goes: stored as 32-bit values (rows of `N`), or
+/// added to 8-bit samples (rows `stride` apart) and clipped.
+pub(super) enum Sink<'a> {
+    Res(&'a mut [i32]),
+    Add(&'a mut [u8], usize),
+}
+
+/// Add eight residuals (32-bit) to the eight samples at `d[at..]`,
+/// clipped to bytes. The residuals saturate at 16 bits first: a value
+/// past either end clips to the same sample.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn add8(d: &mut [u8], at: usize, v: __m256i) {
+    let Some(d) = d.get_mut(at..).and_then(|d| d.first_chunk_mut::<8>()) else {
+        return;
+    };
+    let r = _mm_packs_epi32(_mm256_castsi256_si128(v), _mm256_extracti128_si256::<1>(v));
+    let px = _mm_cvtepu8_epi16(_mm_set_epi64x(0, i64::from_le_bytes(*d)));
+    let sum = _mm_adds_epi16(px, r);
+    *d = _mm_cvtsi128_si64(_mm_packus_epi16(sum, sum)).to_le_bytes();
+}
+
+/// Add four residuals to the four samples at `d[at..]`, clipped.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn add4(d: &mut [u8], at: usize, v: __m128i) {
+    let Some(d) = d.get_mut(at..).and_then(|d| d.first_chunk_mut::<4>()) else {
+        return;
+    };
+    let r = _mm_packs_epi32(v, v);
+    let px = _mm_cvtepu8_epi16(_mm_cvtsi32_si128(i32::from_le_bytes(*d)));
+    let sum = _mm_adds_epi16(px, r);
+    let b = _mm_cvtsi128_si32(_mm_packus_epi16(sum, sum));
+    *d = b.to_le_bytes();
+}
 
 /// Entry `[k][n]` of the `N`-point matrix.
 const fn m<const N: usize>(k: usize, n: usize) -> i32 {
@@ -182,7 +220,7 @@ fn row16(c: &[i32], at: usize) -> __m256i {
 #[target_feature(enable = "avx2")]
 pub(super) fn inverse<const N: usize>(
     coeffs: &[i32],
-    out: &mut [i32],
+    mut out: Sink<'_>,
     (cols, rows): (usize, usize),
     bit_depth: u32,
 ) {
@@ -230,7 +268,7 @@ pub(super) fn inverse<const N: usize>(
                 if k < rows {
                     let v = _mm256_packs_epi32(ld32x8(coeffs, k * N), _mm256_setzero_si256());
                     let v = _mm256_permute4x64_epi64::<0b11_01_10_00>(v);
-                    core::arch::x86_64::_mm256_castsi256_si128(v)
+                    _mm256_castsi256_si128(v)
                 } else {
                     _mm_setzero_si128()
                 }
@@ -272,7 +310,11 @@ pub(super) fn inverse<const N: usize>(
             }
         }
         for (s, a) in acc.iter().enumerate().take(N / 8) {
-            st32x8(out, y * N + 8 * s, _mm256_sra_epi32(*a, shift));
+            let v = _mm256_sra_epi32(*a, shift);
+            match &mut out {
+                Sink::Res(r) => st32x8(r, y * N + 8 * s, v),
+                Sink::Add(d, stride) => add8(d, y * *stride + 8 * s, v),
+            }
         }
     }
 }
@@ -321,7 +363,7 @@ fn lanes(v: __m128i) -> [i32; 4] {
 }
 
 #[target_feature(enable = "avx2")]
-pub(super) fn inverse4(c: &[i32; 16], out: &mut [i32; 16], dst: bool, bit_depth: u32) {
+pub(super) fn inverse4(c: &[i32; 16], mut out: Sink<'_>, dst: bool, bit_depth: u32) {
     let t = if dst { &DST4T } else { &DCT4 };
     let tv = |p: usize| _mm_set_epi32(t[p][3], t[p][2], t[p][1], t[p][0]);
     let (t01, t23) = (tv(0), tv(1));
@@ -348,7 +390,14 @@ pub(super) fn inverse4(c: &[i32; 16], out: &mut [i32; 16], dst: bool, bit_depth:
         let a = _mm_set1_epi32((m[0] & 0xffff) | (m[1] << 16));
         let b = _mm_set1_epi32((m[2] & 0xffff) | (m[3] << 16));
         let sum = _mm_add_epi32(_mm_madd_epi16(a, t01), _mm_madd_epi16(b, t23));
-        let v = lanes(_mm_sra_epi32(_mm_add_epi32(sum, add), shift));
-        out[4 * y..4 * y + 4].copy_from_slice(&v);
+        let v = _mm_sra_epi32(_mm_add_epi32(sum, add), shift);
+        match &mut out {
+            Sink::Res(r) => {
+                if let Some(r) = r.get_mut(4 * y..4 * y + 4) {
+                    r.copy_from_slice(&lanes(v));
+                }
+            }
+            Sink::Add(d, stride) => add4(d, y * *stride, v),
+        }
     }
 }

@@ -89,33 +89,72 @@ pub fn predict_px<P: Pixel>(
     }
 }
 
-/// The source window of a block: the reference itself, or `win` filled
-/// with the window, edges repeated, when the block reaches outside. The
-/// samples from the window's first, and its stride. `None` for a
+/// Where a block's source window comes from.
+#[derive(Clone, Copy)]
+enum Place {
+    /// Inside the rows held: its first sample is at this offset.
+    Inside(usize),
+    /// Inside across, reaching above or below the rows held: the column
+    /// of its first sample, its first row, and the rows held (see
+    /// [`Src::clamp`]).
+    Rows(usize, isize, usize),
+    /// Reaching outside on the left or the right: copied with its edges
+    /// repeated.
+    Pad,
+}
+
+/// Where the window of `block` comes from, for `T` taps; `None` for a
 /// reference with no rows.
+#[inline(always)]
+fn place<const T: usize, P>(plane: &Plane<'_, P>, block: Block) -> Option<Place> {
+    let (w, h) = (block.w.min(64), block.h.min(64));
+    let half = (T / 2 - 1) as isize;
+    let (sw, sh) = (w + T - 1, h + T - 1);
+    let pw = plane.width as isize;
+    let (x0, y0) = (block.x - half, block.y - half);
+    let rows = plane.rows.min(plane.height);
+    if pw == 0 || rows == 0 || plane.samples.len() < plane.width * rows {
+        return None;
+    }
+    let across = x0 >= 0 && x0 + sw as isize <= pw;
+    Some(if across && y0 >= 0 && y0 + sh as isize <= rows as isize {
+        Place::Inside(y0 as usize * plane.width + x0 as usize)
+    } else if across && x0 as usize + w + 24 <= plane.width {
+        // The kernels' loads run `w + 24` samples into a row: past its end
+        // but for the last row.
+        Place::Rows(x0 as usize, y0, rows)
+    } else {
+        Place::Pad
+    })
+}
+
+/// The source window of a block for the kernels: the reference itself
+/// (with its rows held within those of the plane when the block reaches
+/// above or below them), or `win` filled with the window, edges repeated.
+/// The samples, where the window starts, its stride, and the rows to hold
+/// it within ([`Src::clamp`]).
 #[inline(always)]
 fn window<'s, const T: usize, P: Pixel>(
     plane: &'s Plane<'s, P>,
     block: Block,
     win: &'s mut [P],
-) -> Option<(&'s [P], usize)> {
-    let (w, h) = (block.w.min(64), block.h.min(64));
-    let half = (T / 2 - 1) as isize;
-    let (sw, sh) = (w + T - 1, h + T - 1);
-    let (pw, ph) = (plane.width as isize, plane.height as isize);
-    let (x0, y0) = (block.x - half, block.y - half);
-    let rows = plane.rows.min(plane.height) as isize;
-    if pw == 0 || rows == 0 || plane.samples.len() < plane.width * rows as usize {
-        return None;
-    }
-    let inside = x0 >= 0 && y0 >= 0 && x0 + sw as isize <= pw && y0 + sh as isize <= ph.min(rows);
-    if inside {
-        let base = y0 as usize * plane.width + x0 as usize;
-        Some((&plane.samples[base..], plane.width))
-    } else {
-        pad(plane, (x0, y0), sw, &mut win[..sw * sh]);
-        Some((&*win, sw))
-    }
+) -> Option<(&'s [P], usize, usize, Option<(isize, usize)>)> {
+    Some(match place::<T, P>(plane, block)? {
+        Place::Inside(at) => (plane.samples, at, plane.width, None),
+        Place::Rows(at, top, rows) => (plane.samples, at, plane.width, Some((top, rows))),
+        Place::Pad => {
+            let (w, h) = (block.w.min(64), block.h.min(64));
+            let half = (T / 2 - 1) as isize;
+            let (sw, sh) = (w + T - 1, h + T - 1);
+            pad(
+                plane,
+                (block.x - half, block.y - half),
+                sw,
+                &mut win[..sw * sh],
+            );
+            (&*win, 0, sw, None)
+        }
+    })
 }
 
 /// [`predict_px`] for `T` taps.
@@ -130,7 +169,7 @@ fn by_kernel<const T: usize, P: Pixel>(
 ) -> bool {
     let (w, h) = (block.w.min(64), block.h.min(64));
     let Scratch { win, rows, .. } = scratch;
-    let Some((src, sstride)) = window::<T, P>(plane, block, win) else {
+    let Some((src, at, sstride, clamp)) = window::<T, P>(plane, block, win) else {
         return false;
     };
     let Some(bytes) = P::bytes(src) else {
@@ -145,8 +184,9 @@ fn by_kernel<const T: usize, P: Pixel>(
     };
     let s = Src {
         src: bytes,
-        at: 0,
+        at,
         stride: sstride,
+        clamp,
     };
     kernels::predict(dst, stride, &s, (w, h), &taps, rows)
 }
@@ -215,40 +255,52 @@ fn filter<const T: usize, P: Pixel>(
     let half = (T / 2 - 1) as isize;
     let sw = w + T - 1;
     let sh = h + T - 1;
-    let (pw, ph) = (plane.width as isize, plane.height as isize);
     let (x0, y0) = (x - half, y - half);
     let out = &mut out[..w * h];
-    let rows = plane.rows.min(plane.height) as isize;
-    if pw == 0 || rows == 0 || plane.samples.len() < plane.width * rows as usize {
+    let Scratch { win, tmp, rows } = scratch;
+    let Some(spot) = place::<T, P>(plane, block) else {
         out.fill(0);
         return;
+    };
+    let tap8 =
+        |c: &[i16; T]| -> [i8; 8] { std::array::from_fn(|k| c.get(k).map_or(0, |&v| v as i8)) };
+    let taps = Taps {
+        across: (fx != 0).then(|| tap8(&cx)),
+        down: (fy != 0).then(|| tap8(&cy)),
+        len: T,
+    };
+    // The kernels read the reference itself unless the block reaches out
+    // on the left or the right.
+    if let (Some(bytes), Place::Inside(_) | Place::Rows(..)) = (P::bytes(plane.samples), spot) {
+        let (at, clamp) = match spot {
+            Place::Inside(at) => (at, None),
+            Place::Rows(at, top, held) => (at, Some((top, held))),
+            Place::Pad => (0, None),
+        };
+        let s = Src {
+            src: bytes,
+            at,
+            stride: plane.width,
+            clamp,
+        };
+        if kernels::put(out, w, &s, (w, h), &taps, rows) {
+            return;
+        }
     }
-    let inside = x0 >= 0 && y0 >= 0 && x0 + sw as isize <= pw && y0 + sh as isize <= ph.min(rows);
-    let Scratch { win, tmp, rows } = scratch;
-    // The source rows: the reference itself, or a window with its edges
-    // repeated when the block reaches outside.
-    let (src, stride, base): (&[P], usize, usize) = if inside {
-        (
-            plane.samples,
-            plane.width,
-            y0 as usize * plane.width + x0 as usize,
-        )
-    } else {
-        pad(plane, (x0, y0), sw, &mut win[..sw * sh]);
-        (&*win, sw, 0)
+    // A window copied with its edges repeated.
+    let (src, stride, base): (&[P], usize, usize) = match spot {
+        Place::Inside(at) => (plane.samples, plane.width, at),
+        _ => {
+            pad(plane, (x0, y0), sw, &mut win[..sw * sh]);
+            (&*win, sw, 0)
+        }
     };
     if let Some(bytes) = P::bytes(src) {
-        let tap8 =
-            |c: &[i16; T]| -> [i8; 8] { std::array::from_fn(|k| c.get(k).map_or(0, |&v| v as i8)) };
-        let taps = Taps {
-            across: (fx != 0).then(|| tap8(&cx)),
-            down: (fy != 0).then(|| tap8(&cy)),
-            len: T,
-        };
         let s = Src {
             src: bytes,
             at: base,
             stride,
+            clamp: None,
         };
         if kernels::put(out, w, &s, (w, h), &taps, rows) {
             return;
@@ -516,11 +568,13 @@ fn pad<P: Pixel>(plane: &Plane<'_, P>, (x0, y0): (isize, isize), sw: usize, win:
         let line = &plane.samples[sy..sy + plane.width];
         if a < b {
             let from = (x0 + a as isize) as usize;
-            dst[a..b].copy_from_slice(&line[from..from + (b - a)]);
-            let left = line[0];
-            let right = line[plane.width - 1];
-            dst[..a].fill(left);
-            dst[b..].fill(right);
+            copy_short(&mut dst[a..b], &line[from..from + (b - a)]);
+            if a > 0 {
+                dst[..a].fill(line[0]);
+            }
+            if b < sw {
+                dst[b..].fill(line[plane.width - 1]);
+            }
         } else {
             // Wholly left or right of the plane: its nearest edge sample.
             let v = if x0 >= pw {
@@ -743,5 +797,37 @@ mod speed {
                 );
             }
         }
+    }
+}
+
+/// `dst.copy_from_slice(src)` for rows of at most 127 samples, as copies
+/// of fixed sizes the compiler writes inline: a call to `memcpy` for a few
+/// dozen bytes costs more than the copy.
+#[inline(always)]
+fn copy_short<P: Copy>(dst: &mut [P], src: &[P]) {
+    let n = dst.len().min(src.len());
+    let mut at = 0;
+    macro_rules! part {
+        ($k:literal) => {
+            if n & $k != 0 {
+                if let (Some(d), Some(s)) = (
+                    dst.get_mut(at..).and_then(|d| d.first_chunk_mut::<$k>()),
+                    src.get(at..).and_then(|s| s.first_chunk::<$k>()),
+                ) {
+                    *d = *s;
+                }
+                at += $k;
+            }
+        };
+    }
+    part!(64);
+    part!(32);
+    part!(16);
+    part!(8);
+    part!(4);
+    part!(2);
+    part!(1);
+    if n > 127 {
+        dst[at..n].copy_from_slice(&src[at..n]);
     }
 }

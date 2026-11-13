@@ -73,7 +73,7 @@ pub fn inverse4(coeffs: &[i32], out: &mut [i32], dst: bool, bit_depth: u32) -> b
         // SAFETY: `has_avx2` checked at run time that the CPU has AVX2.
         #[allow(unsafe_code)]
         unsafe {
-            avx2::inverse4(c, o, dst, bit_depth);
+            avx2::inverse4(c, avx2::Sink::Res(o), dst, bit_depth);
         }
         true
     }
@@ -111,6 +111,7 @@ pub fn inverse(
         // SAFETY: `has_avx2` checked at run time that the CPU has AVX2.
         #[allow(unsafe_code)]
         unsafe {
+            let out = avx2::Sink::Res(out);
             match n {
                 8 => avx2::inverse::<8>(coeffs, out, (cols, rows), bit_depth),
                 16 => avx2::inverse::<16>(coeffs, out, (cols, rows), bit_depth),
@@ -121,6 +122,55 @@ pub fn inverse(
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
+        false
+    }
+}
+
+/// The residual of an `n`×`n` block (`n` 4 to 32) of scaled coefficients,
+/// as [`inverse`] and [`inverse4`] compute it (`dst` the 4×4 DST), added
+/// to the 8-bit samples of `px` (rows `stride` apart) and clipped to
+/// 0..=255: the reconstruction of an 8-bit block without a residual
+/// buffer.
+#[inline]
+pub fn add(
+    coeffs: &[i32],
+    n: usize,
+    (cols, rows): (usize, usize),
+    dst: bool,
+    (px, stride): (&mut [u8], usize),
+) -> bool {
+    let fits = matches!(n, 4 | 8 | 16 | 32)
+        && (1..=n).contains(&cols)
+        && (1..=n).contains(&rows)
+        && coeffs.len() >= n * n
+        && stride >= n
+        && (n - 1) * stride + n <= px.len()
+        && (!dst || n == 4);
+    if !fits || !crate::wide::has_avx2() {
+        return false;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        let out = avx2::Sink::Add(px, stride);
+        // SAFETY: `has_avx2` checked at run time that the CPU has AVX2.
+        #[allow(unsafe_code)]
+        unsafe {
+            match n {
+                4 => {
+                    if let Some(c) = coeffs.first_chunk::<16>() {
+                        avx2::inverse4(c, out, dst, 8);
+                    }
+                }
+                8 => avx2::inverse::<8>(coeffs, out, (cols, rows), 8),
+                16 => avx2::inverse::<16>(coeffs, out, (cols, rows), 8),
+                _ => avx2::inverse::<32>(coeffs, out, (cols, rows), 8),
+            }
+        }
+        true
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (px, dst);
         false
     }
 }

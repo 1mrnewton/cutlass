@@ -452,9 +452,8 @@ pub(super) fn predict(
     };
     // A width of three quarters of a power of two is two blocks.
     let split = |a: usize| Src {
-        src: src.src,
         at: src.at + a,
-        stride: src.stride,
+        ..*src
     };
     // `R`: the samples of each source row the loads of a block `W` wide
     // read: `W + 8`, and 24 for narrow blocks, whose one load starts up to
@@ -504,7 +503,7 @@ pub(super) fn predict(
 /// checked are there.
 #[inline(always)]
 fn src_row<'s, const R: usize>(src: &Src<'s>, j: usize) -> Option<&'s [u8; R]> {
-    src.src.get(src.at + j * src.stride..)?.first_chunk::<R>()
+    src.src.get(src.row(j)..)?.first_chunk::<R>()
 }
 
 /// [`predict`] of a block `W` wide (4, 8, 16, 32 or 64) with `T` taps

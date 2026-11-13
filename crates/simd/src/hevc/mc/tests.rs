@@ -35,7 +35,7 @@ fn noise(n: usize, mut seed: u64) -> Vec<u8> {
 fn reference(src: &Src<'_>, (w, h): (usize, usize), taps: &Taps) -> Vec<i16> {
     let t = taps.len;
     let h0 = t / 2 - 1;
-    let at = |r: usize, c: usize| i32::from(src.src[src.at + r * src.stride + c]);
+    let at = |r: usize, c: usize| i32::from(src.src[src.row(r) + c]);
     let sum = |f: &[i8; 8], v: &dyn Fn(usize) -> i32| -> i32 {
         (0..t).map(|k| i32::from(f[k]) * v(k)).sum()
     };
@@ -88,9 +88,17 @@ fn put_matches_the_specification() {
                             down: (g > 0).then(|| tap(g)),
                             len,
                         };
+                        // Rows held within the plane, the window
+                        // reaching above it or below it in turn.
+                        let clamp = match (f + g) % 3 {
+                            0 => None,
+                            1 => Some((-5, sh)),
+                            _ => Some((sh as isize - h as isize - 3, sh)),
+                        };
                         let src = Src {
+                            clamp,
                             src: plane,
-                            at: 3 * sw + 5,
+                            at: if clamp.is_some() { 5 } else { 3 * sw + 5 },
                             stride: sw,
                         };
                         let want = reference(&src, (w, h), &taps);
@@ -211,6 +219,7 @@ fn weighting_matches_the_specification() {
 fn blocks_too_close_to_the_end_are_refused() {
     let samples = vec![0u8; 64];
     let src = Src {
+        clamp: None,
         src: &samples,
         at: 0,
         stride: 8,

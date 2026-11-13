@@ -211,9 +211,27 @@ struct Shared {
     pics: Mutex<Vec<Picture>>,
     work8: Mutex<Vec<Work<u8>>>,
     work16: Mutex<Vec<Work<u16>>>,
+    /// The packed pictures handed out, to fill again once every other
+    /// holder has let one go.
+    packed: Mutex<Vec<Arc<Vec<u8>>>>,
 }
 
 impl Shared {
+    /// A packed picture handed out earlier that no one else holds now.
+    fn spare_packed(&self) -> Option<Vec<u8>> {
+        let mut packed = lock(&self.packed);
+        let free = packed.iter().position(|p| Arc::strong_count(p) == 1)?;
+        Arc::try_unwrap(packed.swap_remove(free)).ok()
+    }
+
+    /// Keep a packed picture handed out, to fill again later.
+    fn keep_packed(&self, picture: &Arc<Vec<u8>>) {
+        let mut packed = lock(&self.packed);
+        if packed.len() < 2 * MAX_THREADS {
+            packed.push(picture.clone());
+        }
+    }
+
     fn give8(&self, left: Leftovers<u8>) {
         put(&self.pics, left.pic);
         put(&self.work8, left.work);
@@ -854,7 +872,10 @@ fn make_job<P: Pixel>(
     };
     let bufs = lock(frame_bufs).pop();
     let (frame, writer, col) = Frame::new((width, height), poc, &shared.frames, wrap, bufs);
-    let out = output.map(|form| OutRows::new(&pic.sps, form));
+    let spare = (output == Some(OutForm::Packed))
+        .then(|| shared.spare_packed())
+        .flatten();
+    let out = output.map(|form| OutRows::new(&pic.sps, form, spare));
     Job {
         frame,
         pic,
@@ -1051,7 +1072,11 @@ fn video_output(samples: OutSamples, meta: &Meta) -> Option<VideoOutput> {
 }
 
 /// The engine's packed picture.
-fn packed_output(samples: OutSamples, meta: &Meta) -> Result<Option<Output>, CodecError> {
+fn packed_output(
+    samples: OutSamples,
+    meta: &Meta,
+    shared: &Shared,
+) -> Result<Option<Output>, CodecError> {
     let OutSamples::Packed(bytes) = samples else {
         return Ok(None);
     };
@@ -1060,7 +1085,9 @@ fn packed_output(samples: OutSamples, meta: &Meta) -> Result<Option<Output>, Cod
     let w = (sps.width as usize).saturating_sub(left + right);
     let h = (sps.height as usize).saturating_sub(top + bottom);
     let vui = &sps.vui;
-    let picture = PictureOutput::cpu(
+    let bytes = Arc::new(bytes);
+    shared.keep_packed(&bytes);
+    let picture = PictureOutput::cpu_shared(
         PictureInfo::new(
             w as u32,
             h as u32,
@@ -1131,7 +1158,7 @@ impl Decoder for AccessDecoder {
         let out = self.inner.push_unit(packet)?;
         let mut pictures = Vec::with_capacity(out.len());
         for (s, m) in out {
-            if let Some(p) = packed_output(s, &m)? {
+            if let Some(p) = packed_output(s, &m, &self.inner.shared)? {
                 pictures.push(p);
             }
         }
@@ -1142,7 +1169,7 @@ impl Decoder for AccessDecoder {
         let out = self.inner.drain_all()?;
         let mut pictures = Vec::with_capacity(out.len());
         for (s, m) in out {
-            if let Some(p) = packed_output(s, &m)? {
+            if let Some(p) = packed_output(s, &m, &self.inner.shared)? {
                 pictures.push(p);
             }
         }

@@ -97,7 +97,7 @@ impl<P: Pixel> Job<P> {
             }
         }
         let (writer, out) = pipe.finish();
-        let out = out.map(|o| o.finish(&writer));
+        let out = out.map(OutRows::finish);
         drop(writer);
         frame.finish(Done { result, out });
         Leftovers { pic, work }
@@ -106,9 +106,11 @@ impl<P: Pixel> Job<P> {
 
 /// The cropped output samples of a picture, taken a band of rows at a
 /// time as its final rows are published, while they are still in cache.
-/// Packed output holds luma here; its chroma stays in the frame's own
-/// buffers and follows the luma once the picture is done, so it is never
-/// gathered apart and copied twice.
+/// Packed output is one buffer of the picture's full size, its three planes
+/// one after another, each row written in its place; it is a buffer of an
+/// earlier picture when its holders have let it go (see
+/// [`crate::dec::HevcDecoder`]), and every byte of it is written again.
+/// Planes grow a band at a time.
 pub struct OutRows {
     form: OutForm,
     /// Bits above 8 per sample.
@@ -117,12 +119,14 @@ pub struct OutRows {
     crop: [(usize, usize, usize, usize); 3],
     /// Rows of each cropped plane taken.
     next: [usize; 3],
+    /// Packed: the three planes in the first buffer. Planes: one each.
     eight: [Vec<u8>; 3],
     deep: Option<[Vec<u16>; 3]>,
 }
 
 impl OutRows {
-    pub fn new(sps: &Sps, form: OutForm) -> Self {
+    /// `spare`: a buffer of an earlier packed picture, to fill again.
+    pub fn new(sps: &Sps, form: OutForm, spare: Option<Vec<u8>>) -> Self {
         let width = sps.width as usize;
         let height = sps.height as usize;
         let [left, right, top, bottom] = sps.crop.map(|v| v as usize);
@@ -135,9 +139,12 @@ impl OutRows {
         ];
         let shift = u32::from(sps.bit_depth) - 8;
         let size = |c: usize| crop[c].2 * crop[c].3;
+        let total = size(0) + size(1) + size(2);
         let eight = match form {
             OutForm::Packed => [
-                Vec::with_capacity(size(0) + size(1) + size(2)),
+                spare
+                    .filter(|b| b.len() == total)
+                    .unwrap_or_else(|| vec![0; total]),
                 Vec::new(),
                 Vec::new(),
             ],
@@ -155,38 +162,52 @@ impl OutRows {
         }
     }
 
-    /// The planes taken a band at a time: packed output takes its chroma
-    /// at the end.
-    fn banded(&self) -> usize {
+    /// Rows `from..from + n` of plane `c`, to write: in place for packed
+    /// output, appended for planes.
+    fn rows_mut(&mut self, c: usize, from: usize, n: usize) -> &mut [u8] {
+        let w = self.crop[c].2;
         match self.form {
-            OutForm::Packed => 1,
-            OutForm::Planes => 3,
+            OutForm::Packed => {
+                let base: usize = self.crop[..c].iter().map(|&(_, _, w, h)| w * h).sum();
+                &mut self.eight[0][base + from * w..base + (from + n) * w]
+            }
+            OutForm::Planes => {
+                let plane = &mut self.eight[c];
+                plane.resize((from + n) * w, 0);
+                &mut plane[from * w..]
+            }
         }
     }
 
-    /// Take the cropped rows of planes `planes` published since the last
-    /// call.
-    fn take<P: Pixel>(&mut self, writer: &RowsWriter<P>, planes: std::ops::Range<usize>) {
+    /// Take the cropped rows published since the last call.
+    fn take<P: Pixel>(&mut self, writer: &RowsWriter<P>) {
         let shared = writer.shared();
-        for c in planes {
+        for c in 0..3 {
             let (x0, y0, w, h) = self.crop[c];
-            let y = y0 + self.next[c];
-            if self.next[c] >= h {
+            let next = self.next[c];
+            if next >= h || w == 0 {
                 continue;
             }
-            let Some((rows, stride, have)) = shared.rows_from(c, y) else {
+            let Some((rows, stride, have)) = shared.rows_from(c, y0 + next) else {
                 continue;
             };
-            let n = have.saturating_sub(y).min(h - self.next[c]);
-            // Packed chroma goes after the luma.
-            let out = &mut self.eight[if self.form == OutForm::Packed { 0 } else { c }];
-            for i in 0..n {
+            let n = have.saturating_sub(y0 + next).min(h - next);
+            let shift = self.shift;
+            let dst = self.rows_mut(c, next, n);
+            for (i, out) in dst.chunks_exact_mut(w).enumerate() {
                 let row = &rows[i * stride + x0..i * stride + x0 + w];
                 match P::bytes(row) {
-                    Some(bytes) => out.extend_from_slice(bytes),
-                    None => out.extend(row.iter().map(|s| (s.i() >> self.shift) as u8)),
+                    Some(bytes) => out.copy_from_slice(bytes),
+                    None => {
+                        for (o, s) in out.iter_mut().zip(row) {
+                            *o = (s.i() >> shift) as u8;
+                        }
+                    }
                 }
-                if let Some(deep) = &mut self.deep {
+            }
+            if let Some(deep) = &mut self.deep {
+                for i in 0..n {
+                    let row = &rows[i * stride + x0..i * stride + x0 + w];
                     deep[c].extend(row.iter().map(|s| s.i() as u16));
                 }
             }
@@ -194,50 +215,59 @@ impl OutRows {
         }
     }
 
-    /// The next `lines` rows of each plane taken a band at a time, to write
-    /// in place (the picture uncropped, its samples 8-bit): the rows a band
-    /// of final samples fills.
+    /// The next `lines` rows of each plane, to write in place (the
+    /// picture uncropped, its samples 8-bit): the rows a band of final
+    /// samples fills.
     fn band_mut<P: Pixel>(&mut self, lines: [usize; 3]) -> Option<[&mut [P]; 3]> {
-        let banded = self.banded();
-        let mut at = [0; 3];
-        for (c, plane) in self.eight.iter_mut().enumerate().take(banded) {
-            let (_, _, w, h) = self.crop[c];
-            let n = lines[c].min(h - self.next[c]);
-            self.next[c] += n;
-            at[c] = plane.len();
-            plane.resize(at[c] + n * w, 0);
+        let (crop, next) = (self.crop, self.next);
+        let mut taken = [0; 3];
+        for c in 0..3 {
+            taken[c] = lines[c].min(crop[c].3 - next[c]);
+            self.next[c] += taken[c];
+            if self.form == OutForm::Planes {
+                self.eight[c].resize((next[c] + taken[c]) * crop[c].2, 0);
+            }
         }
-        let [y, u, v] = &mut self.eight;
+        let rows = |c: usize| next[c] * crop[c].2..(next[c] + taken[c]) * crop[c].2;
+        // Clearing the band first brings its lines into cache without
+        // reading them, before the filters store into every sample.
+        let [y, u, v] = match self.form {
+            OutForm::Packed => {
+                let (y, rest) = self.eight[0].split_at_mut(crop[0].2 * crop[0].3);
+                let (u, v) = rest.split_at_mut(crop[1].2 * crop[1].3);
+                [y, u, v]
+            }
+            OutForm::Planes => {
+                let [y, u, v] = &mut self.eight;
+                [&mut y[..], &mut u[..], &mut v[..]]
+            }
+        };
+        let (y, u, v) = (&mut y[rows(0)], &mut u[rows(1)], &mut v[rows(2)]);
+        if self.form == OutForm::Packed {
+            for band in [&mut *y, &mut *u, &mut *v] {
+                band.fill(0);
+            }
+        }
         Some([
-            P::of_bytes_mut(&mut y[at[0]..])?,
-            P::of_bytes_mut(&mut u[at[1]..])?,
-            P::of_bytes_mut(&mut v[at[2]..])?,
+            P::of_bytes_mut(y)?,
+            P::of_bytes_mut(u)?,
+            P::of_bytes_mut(v)?,
         ])
     }
 
-    /// The samples; rows never published are zeros. Packed chroma comes
-    /// from the frame's rows, all published by now.
-    fn finish<P: Pixel>(mut self, writer: &RowsWriter<P>) -> OutSamples {
-        let crop = self.crop;
-        let size = |c: usize| crop[c].2 * crop[c].3;
+    /// The samples; for planes, rows never published are zeros.
+    fn finish(mut self) -> OutSamples {
         match self.form {
             OutForm::Packed => {
-                let mut end = 0;
-                for c in 0..3 {
-                    if c > 0 {
-                        self.take(writer, c..c + 1);
-                    }
-                    end += size(c);
-                    self.eight[0].resize(end, 0);
-                }
                 let [bytes, _, _] = self.eight;
                 OutSamples::Packed(bytes)
             }
             OutForm::Planes => {
                 for c in 0..3 {
-                    self.eight[c].resize(size(c), 0);
+                    let (_, _, w, h) = self.crop[c];
+                    self.eight[c].resize(w * h, 0);
                     if let Some(deep) = &mut self.deep {
-                        deep[c].resize(size(c), 0);
+                        deep[c].resize(w * h, 0);
                     }
                 }
                 OutSamples::Planes {
@@ -608,20 +638,11 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
                 // Packed output takes luma in place and leaves chroma in the
                 // frame's buffers.
                 let direct = match &mut st.out {
-                    Some(out) if st.direct => {
-                        let banded = out.banded();
-                        out.band_mut::<P>([lines, lines / 2, lines / 2])
-                            .map(|band| (band, banded))
-                    }
+                    Some(out) if st.direct => out.band_mut::<P>([lines, lines / 2, lines / 2]),
                     _ => None,
                 };
-                let direct = direct.is_some_and(|([y, u, v], banded)| {
-                    if banded == 1 {
-                        let [_, fu, fv] = st.writer.pending_mut(upto);
-                        self.pic.sao_row(self.work, f, [y, fu, fv]);
-                    } else {
-                        self.pic.sao_row(self.work, f, [y, u, v]);
-                    }
+                let direct = direct.is_some_and(|dst| {
+                    self.pic.sao_row(self.work, f, dst);
                     true
                 });
                 if !direct {
@@ -632,8 +653,7 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
                 st.writer
                     .publish(if st.finals == rows { usize::MAX } else { upto });
                 if !direct && let Some(out) = &mut st.out {
-                    let banded = out.banded();
-                    out.take(&st.writer, 0..banded);
+                    out.take(&st.writer);
                 }
                 moved = true;
                 continue;
@@ -722,8 +742,7 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
         if let Some(out) = &mut out
             && !st.direct
         {
-            let banded = out.banded();
-            out.take(&st.writer, 0..banded);
+            out.take(&st.writer);
         }
         (st.writer, out)
     }

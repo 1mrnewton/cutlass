@@ -1206,7 +1206,7 @@ fn frame_from_picture(picture: PictureOutput) -> DecodedFrame {
         pixel: info.pixel,
         primaries: info.primaries,
         transfer: info.transfer,
-        bytes: Arc::new(picture.into_cpu().unwrap_or_default()),
+        bytes: picture.into_shared().unwrap_or_default(),
     }
 }
 

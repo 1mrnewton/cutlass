@@ -248,7 +248,7 @@ impl<W: Write + Seek> IsoBmffMux<W> {
         if self.started {
             return Ok(());
         }
-        let ftyp = ftyp_bytes(self.options.brand, self.options.fragmented);
+        let ftyp = ftyp_bytes(self.options.brand, self.options.fragmented, &self.tracks);
         self.write_bytes(&ftyp)?;
         if self.options.fragmented {
             let moov = init_moov(&self.tracks, self.movie_scale()?)?;
@@ -314,6 +314,23 @@ impl<W: Write + Seek> Mux for IsoBmffMux<W> {
             .position(|track| track.params.track_id == packet.track_id)
         else {
             return Err(Error::Missing { what: "track" });
+        };
+        // An `av01` sample is the temporal unit without its delimiter,
+        // padding and redundant headers, each OBU with its size (AV1 Codec
+        // ISO Media File Format Binding 2.4).
+        let sample;
+        let packet = if self.tracks[track].params.sample_entry == *b"av01" {
+            let payload =
+                cutlass_container::av1_sample(&packet.payload).ok_or(Error::Unsupported {
+                    what: "AV1 packet that is not whole OBUs",
+                })?;
+            sample = Packet {
+                payload,
+                ..packet.clone()
+            };
+            &sample
+        } else {
+            packet
         };
         let timescale = self.tracks[track].params.timescale;
         if packet.timescale != timescale {
@@ -427,7 +444,7 @@ impl<W: Write + Seek> Mux for IsoBmffMux<W> {
             let moov = movie_bytes(&self.tracks, &self.held, scale, |offset| offset)?;
             self.write_bytes(&moov)?;
         } else {
-            let ftyp = ftyp_bytes(self.options.brand, false);
+            let ftyp = ftyp_bytes(self.options.brand, false, &self.tracks);
             let scale = self.movie_scale()?;
             let probe = movie_bytes(&self.tracks, &self.held, scale, |_| 0)?;
             let payload_at = u64::try_from(ftyp.len() + probe.len()).unwrap_or(0) + 16;
@@ -591,7 +608,14 @@ fn lpcm_description(audio: &crate::legacy::AudioParams) -> Result<Vec<u8>, Error
     Ok(entry)
 }
 
-fn ftyp_bytes(brand: FileBrand, fragmented: bool) -> Vec<u8> {
+/// The file type box. A file with an AV1 track that is not a QuickTime
+/// movie lists `av01` among its compatible brands, as the AV1 binding
+/// requires (2.1).
+fn ftyp_bytes(brand: FileBrand, fragmented: bool, tracks: &[TrackOut]) -> Vec<u8> {
+    let av1 = brand != FileBrand::Mov
+        && tracks
+            .iter()
+            .any(|track| track.params.sample_entry == *b"av01");
     let (major, compatible): ([u8; 4], &[&[u8; 4]]) = if fragmented {
         (*b"iso5", &[b"iso5", b"iso6", b"mp41"])
     } else {
@@ -608,6 +632,9 @@ fn ftyp_bytes(brand: FileBrand, fragmented: bool) -> Vec<u8> {
     payload.extend_from_slice(&0u32.to_be_bytes());
     for brand in compatible {
         payload.extend_from_slice(*brand);
+    }
+    if av1 {
+        payload.extend_from_slice(b"av01");
     }
     box_bytes(b"ftyp", &payload)
 }

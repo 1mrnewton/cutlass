@@ -4,6 +4,7 @@
 //! queue. This crate does not mix samples. MediaCodec openers are not in
 //! this crate yet.
 
+mod planes;
 mod slice;
 
 #[cfg(target_os = "android")]

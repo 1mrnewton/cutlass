@@ -69,8 +69,12 @@ pub fn predict_px<P: Pixel>(
     block: Block,
     (dst, stride): (&mut [P], usize),
     (other, weights): (Option<&[i16]>, Option<Weights>),
+    bit_depth: u32,
     scratch: &mut Scratch<P>,
 ) -> bool {
+    if P::bytes(&[]).is_none() {
+        return weights.is_none() && deep(plane, block, (dst, stride), other, bit_depth, scratch);
+    }
     let Some(dst) = P::bytes_mut(dst) else {
         return false;
     };
@@ -87,6 +91,74 @@ pub fn predict_px<P: Pixel>(
         let taps = [CHROMA16[block.fx & 7], CHROMA16[block.fy & 7]];
         by_kernel::<4, P>(plane, block, taps, dst, stride, scratch)
     }
+}
+
+/// [`predict_px`] for samples of 9 to 12 bits, default weighting only.
+#[inline(always)]
+fn deep<P: Pixel>(
+    plane: &Plane<'_, P>,
+    block: Block,
+    (dst, stride): (&mut [P], usize),
+    other: Option<&[i16]>,
+    bit_depth: u32,
+    scratch: &mut Scratch<P>,
+) -> bool {
+    if block.luma {
+        deep_t::<8, P>(plane, block, (dst, stride), other, bit_depth, scratch)
+    } else {
+        deep_t::<4, P>(plane, block, (dst, stride), other, bit_depth, scratch)
+    }
+}
+
+#[inline(always)]
+fn deep_t<const T: usize, P: Pixel>(
+    plane: &Plane<'_, P>,
+    block: Block,
+    (dst, stride): (&mut [P], usize),
+    other: Option<&[i16]>,
+    bit_depth: u32,
+    scratch: &mut Scratch<P>,
+) -> bool {
+    let Some(px) = P::words_mut(dst) else {
+        return false;
+    };
+    let (w, h) = (block.w.min(64), block.h.min(64));
+    let Some(spot) = place::<T, P>(plane, block) else {
+        return false;
+    };
+    let half = (T / 2 - 1) as isize;
+    let (sw, sh) = (w + T - 1, h + T - 1);
+    let Scratch { win, deep, .. } = scratch;
+    let (src, at, sstride): (&[P], usize, usize) = match spot {
+        Place::Inside(at) => (plane.samples, at, plane.width),
+        _ => {
+            pad(
+                plane,
+                (block.x - half, block.y - half),
+                sw,
+                &mut win[..sw * sh],
+            );
+            (&*win, 0, sw)
+        }
+    };
+    let Some(words) = P::words(src) else {
+        return false;
+    };
+    let taps = Taps {
+        across: (block.fx != 0).then(|| taps8::<T>(block.fx)),
+        down: (block.fy != 0).then(|| taps8::<T>(block.fy)),
+        len: T,
+    };
+    let s = cutlass_simd::hevc::mc16::Src {
+        src: words,
+        at,
+        stride: sstride,
+    };
+    let out = match other {
+        Some(o) => cutlass_simd::hevc::mc16::Dst::Bi(px, o),
+        None => cutlass_simd::hevc::mc16::Dst::Uni(px),
+    };
+    cutlass_simd::hevc::mc16::predict(out, stride, &s, (w, h), &taps, bit_depth, deep)
 }
 
 /// A block's source window: samples, where it starts in them, its stride,

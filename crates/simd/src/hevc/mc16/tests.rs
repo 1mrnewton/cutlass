@@ -211,3 +211,76 @@ fn store_matches_the_default_weighting() {
         }
     }
 }
+
+#[test]
+fn predict_to_samples_matches_put_then_store() {
+    use super::{Dst, predict, store};
+    if !crate::hevc::mc::accelerated() {
+        return;
+    }
+    let mut seed = 0xfeed_u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut tmp = Tmp::default();
+    for bd in [10u32, 12] {
+        let max = (1u64 << bd) - 1;
+        let (sw, sh) = (64 + 7 + 24, 64 + 7);
+        let src: Vec<u16> = (0..sw * sh).map(|_| (next() & max) as u16).collect();
+        let s = Src {
+            src: &src,
+            at: 0,
+            stride: sw,
+        };
+        for t in [8usize, 4] {
+            for w in [4usize, 8, 12, 16, 24, 32, 48, 64] {
+                for h in [1usize, 4, 7, 64] {
+                    for (fx, fy) in [(0, 0), (1, 0), (0, 3), (2, 1)] {
+                        let tap = |f: usize| -> [i8; 8] {
+                            if t == 8 {
+                                LUMA[f]
+                            } else {
+                                let mut c = [0i8; 8];
+                                c[..4].copy_from_slice(&CHROMA[2 * f + 1]);
+                                c
+                            }
+                        };
+                        let taps = Taps {
+                            across: (fx != 0).then(|| tap(fx)),
+                            down: (fy != 0).then(|| tap(fy)),
+                            len: t,
+                        };
+                        let other: Vec<i16> =
+                            (0..w * h).map(|_| (next() % 20000) as i16 - 4000).collect();
+                        let mut mid = vec![0i16; w * h];
+                        assert!(put(&mut mid, w, &s, (w, h), &taps, bd, &mut tmp));
+                        let stride = w + 5;
+                        for two in [false, true] {
+                            let mut want = vec![0u16; (h - 1) * stride + w];
+                            let pair = if two {
+                                (&other[..], Some(&mid[..]))
+                            } else {
+                                (&mid[..], None)
+                            };
+                            assert!(store(&mut want, stride, pair, w, (w, h), bd));
+                            let mut got = vec![0u16; (h - 1) * stride + w];
+                            let dst = if two {
+                                Dst::Bi(&mut got, &other)
+                            } else {
+                                Dst::Uni(&mut got)
+                            };
+                            assert!(predict(dst, stride, &s, (w, h), &taps, bd, &mut tmp));
+                            assert_eq!(
+                                got, want,
+                                "bd {bd} t {t} w {w} h {h} f {fx},{fy} two {two}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

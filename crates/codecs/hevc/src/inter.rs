@@ -715,19 +715,21 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                     mc::interpolate(p0, *b0, bit_depth, &mut self.pred[0][..n], &mut self.mc);
                     let (dst, stride) = self.out.from(c, cx, cy);
                     let fuse = (Some(&self.pred[0][..n]), wt(0));
-                    if mc::predict_px(p1, *b1, (dst, stride), fuse, &mut self.mc) {
+                    if mc::predict_px(p1, *b1, (dst, stride), fuse, bit_depth, &mut self.mc) {
                         continue;
                     }
                 }
                 [Some((p, b)), None] => {
                     let (dst, stride) = self.out.from(c, cx, cy);
-                    if mc::predict_px(p, *b, (dst, stride), (None, wt(0)), &mut self.mc) {
+                    if mc::predict_px(p, *b, (dst, stride), (None, wt(0)), bit_depth, &mut self.mc)
+                    {
                         continue;
                     }
                 }
                 [None, Some((p, b))] => {
                     let (dst, stride) = self.out.from(c, cx, cy);
-                    if mc::predict_px(p, *b, (dst, stride), (None, wt(1)), &mut self.mc) {
+                    if mc::predict_px(p, *b, (dst, stride), (None, wt(1)), bit_depth, &mut self.mc)
+                    {
                         continue;
                     }
                 }

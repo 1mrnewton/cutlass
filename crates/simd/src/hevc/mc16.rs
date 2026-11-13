@@ -51,6 +51,17 @@ pub struct Tmp {
     rows: Vec<avx2::Strips>,
 }
 
+/// Where [`predict`] puts a block, rows `dst_stride` apart.
+pub enum Dst<'a> {
+    /// The 14-bit intermediates ([`put`]).
+    Mid(&'a mut [i16]),
+    /// Samples, the default weighting of this list alone.
+    Uni(&'a mut [u16]),
+    /// Samples, the default weighting of this list with the other list's
+    /// intermediates, rows `w` apart.
+    Bi(&'a mut [u16], &'a [i16]),
+}
+
 /// The intermediates of a `w`×`h` block of samples of `bit_depth` bits
 /// (9 to 12) into `dst` (rows `dst_stride` apart): `x << (14 - bit_depth)`
 /// with no fraction, the sums of the taps shifted right by `bit_depth - 8`
@@ -65,12 +76,32 @@ pub fn put(
     bit_depth: u32,
     tmp: &mut Tmp,
 ) -> bool {
+    predict(Dst::Mid(dst), dst_stride, src, (w, h), taps, bit_depth, tmp)
+}
+
+/// The intermediates of [`put`], or the samples they make as [`store`]
+/// makes them, in one pass.
+#[inline]
+pub fn predict(
+    dst: Dst<'_>,
+    dst_stride: usize,
+    src: &Src<'_>,
+    (w, h): (usize, usize),
+    taps: &Taps,
+    bit_depth: u32,
+    tmp: &mut Tmp,
+) -> bool {
+    let room = |len: usize| (h - 1) * dst_stride + w <= len;
     let fits = matches!(w, 4 | 8 | 12 | 16 | 24 | 32 | 48 | 64)
         && (1..=64).contains(&h)
         && (9..=12).contains(&bit_depth)
         && matches!(taps.len, 4 | 8)
         && dst_stride >= w
-        && (h - 1) * dst_stride + w <= dst.len()
+        && match &dst {
+            Dst::Mid(d) => room(d.len()),
+            Dst::Uni(d) => room(d.len()),
+            Dst::Bi(d, o) => room(d.len()) && o.len() >= w * h,
+        }
         && src.holds(w, h, taps.len);
     if !fits || !super::mc::accelerated() {
         return false;
@@ -80,13 +111,19 @@ pub fn put(
         // SAFETY: `accelerated` checked at run time that the CPU has AVX2.
         #[allow(unsafe_code)]
         unsafe {
-            avx2::put(dst, dst_stride, src, (w, h), taps, bit_depth, &mut tmp.rows);
+            let (mut out, mode) = avx2::Sink::new(dst, dst_stride, w, bit_depth);
+            let args = (src, (w, h), taps, bit_depth, &mut tmp.rows);
+            match mode {
+                0 => avx2::predict::<0>(&mut out, args.0, args.1, args.2, args.3, args.4),
+                1 => avx2::predict::<1>(&mut out, args.0, args.1, args.2, args.3, args.4),
+                _ => avx2::predict::<2>(&mut out, args.0, args.1, args.2, args.3, args.4),
+            }
         }
         true
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
-        let _ = tmp;
+        let _ = (tmp, dst);
         false
     }
 }

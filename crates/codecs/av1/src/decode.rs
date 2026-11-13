@@ -58,6 +58,13 @@ impl Av1Decoder {
         self.core.threads = threads.max(1);
     }
 
+    /// The largest picture decoded, in luma samples (upscaled width times
+    /// height); a larger frame is refused with `Limit`. The default is the
+    /// largest picture an AV1 level allows, 35,651,584.
+    pub fn set_max_pixels(&mut self, pixels: u64) {
+        self.core.max_pixels = pixels;
+    }
+
     /// Selects the operating point to decode (AV1 7.2.1); the default is
     /// point 0. Frames of layers outside it are dropped, and pictures report
     /// its `seq_level_idx`. An index past the sequence's last point is

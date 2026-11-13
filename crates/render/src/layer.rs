@@ -16,7 +16,7 @@
 
 use cutlass_decode::Surface;
 use cutlass_effects::Step;
-use cutlass_gpu::{Affine, Placement, ToneCurve, YuvTone};
+use cutlass_gpu::{Affine, Placement, ToneCurve, YuvMatrix, YuvTone};
 
 use crate::{CANVAS_FORMAT, RenderError};
 
@@ -55,7 +55,8 @@ pub enum PlaneSource<'a> {
     },
 }
 
-/// One 4:2:0 picture. `tone` follows the matrix.
+/// One 4:2:0 picture. `tone` names its range and matrix and what follows
+/// the matrix.
 #[derive(Clone, Copy, Debug)]
 pub struct Planes<'a> {
     pub source: PlaneSource<'a>,
@@ -104,7 +105,8 @@ impl<'a> Planes<'a> {
         }
     }
 
-    /// The same planes with `tone` after the matrix.
+    /// The same planes read with the range, matrix and transfer step of
+    /// `tone`.
     #[must_use]
     pub fn with_tone(self, tone: YuvTone) -> Self {
         Self { tone, ..self }
@@ -207,7 +209,10 @@ struct Params {
     // Tone after the matrix: source curve, destination curve (0 Rec.709,
     // 1 HLG, 2 PQ), PQ reference nits, and 1 when it changes the sample.
     tone: vec4<f32>,
-    // Linear gamut adaptation rows; w is 1 on the first row when there is one.
+    // Linear gamut adaptation rows; w is 1 on the first row when there is
+    // one. On the second row w is the matrix of a yuv picture (0 BT.709,
+    // 1 BT.601, 2 BT.2020), and on the third 1 when its samples are full
+    // range.
     adapt_r: vec4<f32>,
     adapt_g: vec4<f32>,
     adapt_b: vec4<f32>,
@@ -324,16 +329,34 @@ fn picture_pixel(index: vec2<f32>) -> vec4<f32> {
         return textureLoad(tex0, texel, 0);
     }
     let chroma = texel / 2;
-    // Limited-range BT.709, as the CPU conversion.
-    let y = (textureLoad(tex0, texel, 0).r * 255.0 - 16.0) / 219.0;
+    // The range and the matrix the stream names, as the CPU conversion:
+    // studio swing is (Y - 16) / 219 and (C - 128) / 224, full range
+    // Y / 255 and (C - 128) / 255.
+    var y = textureLoad(tex0, texel, 0).r * 255.0;
     var cbcr = vec2<f32>(textureLoad(tex1, chroma, 0).r, textureLoad(tex2, chroma, 0).r);
     if (params.source.w > 1.5) {
         cbcr = textureLoad(tex1, chroma, 0).rg;
     }
-    let cb = (cbcr.x * 255.0 - 128.0) / 224.0;
-    let cr = (cbcr.y * 255.0 - 128.0) / 224.0;
-    let kr = 0.2126;
-    let kb = 0.0722;
+    var cb = cbcr.x * 255.0 - 128.0;
+    var cr = cbcr.y * 255.0 - 128.0;
+    if (params.adapt_b.w > 0.5) {
+        y = y / 255.0;
+        cb = cb / 255.0;
+        cr = cr / 255.0;
+    } else {
+        y = (y - 16.0) / 219.0;
+        cb = cb / 224.0;
+        cr = cr / 224.0;
+    }
+    var kr = 0.2126;
+    var kb = 0.0722;
+    if (params.adapt_g.w > 1.5) {
+        kr = 0.2627;
+        kb = 0.0593;
+    } else if (params.adapt_g.w > 0.5) {
+        kr = 0.299;
+        kb = 0.114;
+    }
     let kg = 1.0 - kr - kb;
     let rgb = tone(clamp(
         vec3<f32>(
@@ -612,8 +635,15 @@ impl Pipelines {
                 },
             ],
             adapt_row(0, has_adapt),
-            adapt_row(1, 0.0),
-            adapt_row(2, 0.0),
+            adapt_row(
+                1,
+                match tone.matrix {
+                    YuvMatrix::Bt709 => 0.0,
+                    YuvMatrix::Bt601 => 1.0,
+                    YuvMatrix::Bt2020 => 2.0,
+                },
+            ),
+            adapt_row(2, if tone.full_range { 1.0 } else { 0.0 }),
         ];
         let mut bytes = Vec::with_capacity(PARAMS as usize);
         for value in values.iter().flatten() {

@@ -40,11 +40,23 @@ pub struct Picture<P> {
 }
 
 impl<P: Pixel> Picture<P> {
+    /// The luma stride and allocated height of a picture of visible size
+    /// `w x h`.
+    pub fn geometry(w: usize, h: usize) -> (usize, usize) {
+        let mut aw = (w + 127 + 160) & !63;
+        // A row a multiple of 1024 samples long puts the rows of a block
+        // in the same few cache sets (4K luma would be 4096): 64 more
+        // spread them.
+        if aw.is_multiple_of(1024) {
+            aw += 64;
+        }
+        (aw, (h + 127 + 160) & !63)
+    }
+
     /// Allocates a picture whose planes hold the visible size `w x h` and
     /// enough room for whole superblocks.
     pub fn new(w: usize, h: usize, num_planes: usize, sub_x: bool, sub_y: bool, bd: u32) -> Self {
-        let aw = (w + 127 + 160) & !63;
-        let ah = (h + 127 + 160) & !63;
+        let (aw, ah) = Self::geometry(w, h);
         let mut planes = Vec::with_capacity(num_planes);
         for p in 0..num_planes {
             let (sx, sy) = if p > 0 {
@@ -74,17 +86,114 @@ pub struct LrUnitParams {
     pub sgr_xqd: [i8; 2],
 }
 
+/// Rows of 8x8 positions in a band of a frame's saved motion: the rows a
+/// 64x64 superblock row covers, and the rows motion field estimation
+/// projects together (7.9).
+pub const MF_BAND_ROWS: usize = 8;
+
+/// MfRefFrames and MfMvs of one band: whole rows of 8x8 positions (the
+/// odd 4x4 positions).
+#[derive(Clone, Default)]
+pub struct MfBand {
+    pub refs: Vec<i8>,
+    pub mvs: Vec<Mv>,
+}
+
 /// What a reference slot keeps besides its picture (spec 7.20).
+///
+/// The frame's size and order hints are known from its header. Its saved
+/// motion arrives band by band while the frame is parsed, and its segment
+/// ids when the parse ends: a reader waits for the band or the ids it
+/// asks for. Whoever makes one must [`close`](Self::close) it, or its
+/// readers wait for ever.
 #[derive(Clone)]
 pub struct RefData {
     pub mi_cols: usize,
     pub mi_rows: usize,
     pub frame_type: u8,
-    /// MfRefFrames / MfMvs at 8x8 granularity (the odd 4x4 positions).
-    pub mf_ref: Vec<i8>,
-    pub mf_mv: Vec<Mv>,
-    pub segment_ids: Vec<u8>,
     pub saved_order_hints: [u32; 8],
+    mf: Vec<std::sync::OnceLock<MfBand>>,
+    segment_ids: std::sync::OnceLock<Vec<u8>>,
+}
+
+impl RefData {
+    /// The data of a frame not parsed yet.
+    pub fn new(
+        mi_cols: usize,
+        mi_rows: usize,
+        frame_type: u8,
+        saved_order_hints: [u32; 8],
+    ) -> Self {
+        let bands = (mi_rows >> 1).div_ceil(MF_BAND_ROWS);
+        Self {
+            mi_cols,
+            mi_rows,
+            frame_type,
+            saved_order_hints,
+            mf: (0..bands).map(|_| std::sync::OnceLock::new()).collect(),
+            segment_ids: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Number of motion bands.
+    pub fn bands(&self) -> usize {
+        self.mf.len()
+    }
+
+    /// Rows of 8x8 positions in band `k`.
+    pub fn band_rows(&self, k: usize) -> usize {
+        (self.mi_rows >> 1)
+            .saturating_sub(k * MF_BAND_ROWS)
+            .min(MF_BAND_ROWS)
+    }
+
+    /// Whether band `k` has its motion (or there is no such band).
+    pub fn has_band(&self, k: usize) -> bool {
+        self.mf.get(k).is_none_or(|b| b.get().is_some())
+    }
+
+    /// Gives band `k` its motion. Only the first call for a band counts.
+    pub fn set_band(&self, k: usize, band: MfBand) {
+        if let Some(b) = self.mf.get(k) {
+            let _ = b.set(band);
+        }
+    }
+
+    /// The motion of band `k`, once the frame's parse has got there.
+    /// `None` past the last band.
+    pub fn band(&self, k: usize) -> Option<&MfBand> {
+        self.mf.get(k).map(std::sync::OnceLock::wait)
+    }
+
+    /// Gives the frame its segment ids (the first call counts).
+    pub fn set_segment_ids(&self, ids: Vec<u8>) {
+        let _ = self.segment_ids.set(ids);
+    }
+
+    /// The segment ids, indexed like [`FrameState::segment_ids`], once
+    /// the frame's parse has ended. Empty when that parse failed or the
+    /// frame has no segmentation: every id is then 0.
+    pub fn segment_ids(&self) -> &[u8] {
+        self.segment_ids.wait()
+    }
+
+    /// Ends the data: bands still without motion get none, and so do
+    /// the segment ids. A frame that failed leaves its readers this.
+    pub fn close(&self) {
+        let w8 = self.mi_cols >> 1;
+        for (k, b) in self.mf.iter().enumerate() {
+            // A frame that ended well has them all: nothing to make.
+            if b.get().is_some() {
+                continue;
+            }
+            let n = w8 * self.band_rows(k);
+            let _ = b.set(MfBand {
+                refs: vec![-1; n],
+                mvs: vec![Mv::ZERO; n],
+            });
+        }
+        let _ = self.segment_ids.set(Vec::new());
+    }
 }
 
 /// The loop restoration units of each plane (all unset), with their
@@ -116,17 +225,52 @@ fn lr_units(
     (lr, lr_cols, lr_rows)
 }
 
+/// An entry of [`FrameState::lf_tx`]: the width and height in 4x4 units of
+/// the transform block that holds the unit, as base-2 logarithms (0 to 5)
+/// in the low three bits and the three above them.
+///
+/// A skipped inter block gives its own size instead, of the plane: its
+/// loop filter edges are its own sides only (7.14.2), and this changes no
+/// filter size, as such a block's transforms are its own size unless it
+/// is 128 samples wide or high, and every size from 16 samples gives the
+/// same filter.
+#[inline]
+pub fn lf_dims(w_log2: u32, h_log2: u32) -> u8 {
+    (w_log2 | h_log2 << 3) as u8
+}
+
+/// The width in 4x4 units of an [`FrameState::lf_tx`] entry.
+#[inline(always)]
+pub fn lf_w4(v: u8) -> usize {
+    1 << (v & 7)
+}
+
+/// The height in 4x4 units of an [`FrameState::lf_tx`] entry.
+#[inline(always)]
+pub fn lf_h4(v: u8) -> usize {
+    1 << ((v >> 3) & 7)
+}
+
 /// Mutable state of the frame being decoded.
 pub struct FrameState {
     pub mi_cols: usize,
     pub mi_rows: usize,
     pub mi_stride: usize,
+    /// The rows of `mi`, `uv_modes` and `delta_lf` are those of the frame
+    /// masked with this: all ones for the whole frame, or one less than a
+    /// power of two for a ring of rows that a single thread reuses while
+    /// they are in the cache (see [`Self::mi_row`]).
+    pub mi_ring: usize,
     pub mi: Vec<MiInfo>,
+    /// The loop filter deltas of each 4x4, laid out like `mi`: sized and
+    /// written only for frames with delta_lf_present.
+    pub delta_lf: Vec<[i8; 4]>,
     /// uv_mode of the last intra block with chroma at each 4x4.
     pub uv_modes: Vec<u8>,
     pub tx_types: Vec<u8>,
     pub inter_tx_sizes: Vec<u8>,
-    /// LoopfilterTxSizes per plane, indexed in that plane's 4x4 units with `mi_stride`.
+    /// LoopfilterTxSizes per plane, indexed in that plane's 4x4 units
+    /// with `mi_stride`, as [`lf_dims`] writes them.
     pub lf_tx: [Vec<u8>; 3],
     pub segment_ids: Vec<u8>,
     /// The data of the primary reference frame, when it has the size of
@@ -140,9 +284,19 @@ pub struct FrameState {
     pub lr_rows: [usize; 3],
     /// MotionFieldMvs[ref][y8][x8] for ref = 1..=7 (index 0 unused).
     pub motion_field: Vec<super::mvpred::MfEntry>,
+    /// The motion field as the thread computing it hands it on, read in
+    /// place of [`Self::motion_field`] when set.
+    pub motion_shared: Option<std::sync::Arc<super::mvpred::MfShared>>,
 }
 
 impl FrameState {
+    /// Where row `r` (counted from the first row the arrays hold) of `mi`,
+    /// `uv_modes` and `delta_lf` starts.
+    #[inline(always)]
+    pub fn mi_row(&self, r: usize) -> usize {
+        (r & self.mi_ring) * self.mi_stride
+    }
+
     pub fn new(seq: &SequenceHeader, hdr: &FrameHeader) -> Self {
         let mi_cols = hdr.mi_cols as usize;
         let mi_rows = hdr.mi_rows as usize;
@@ -156,7 +310,9 @@ impl FrameState {
             mi_cols,
             mi_rows,
             mi_stride,
+            mi_ring: usize::MAX,
             mi: vec![MiInfo::default(); n],
+            delta_lf: Vec::new(),
             uv_modes: vec![0; n],
             tx_types: vec![0; n],
             inter_tx_sizes: vec![0; n],
@@ -169,6 +325,7 @@ impl FrameState {
             lr_cols,
             lr_rows,
             motion_field: Vec::new(),
+            motion_shared: None,
         }
     }
 
@@ -189,41 +346,92 @@ impl FrameState {
                 fs.lr_rows = lr_rows;
                 fs.prev_segment_ids = None;
                 fs.motion_field.clear();
+                fs.motion_shared = None;
+                fs.mi_ring = usize::MAX;
                 fs
             }
             _ => Self::new(seq, hdr),
         }
     }
+    /// A state of the same size holding only what reconstruction keeps of
+    /// the blocks it replays (their mode info), to be filled row by row.
+    pub fn recon_shell(&self) -> Self {
+        Self {
+            mi: vec![MiInfo::default(); self.mi.len()],
+            uv_modes: vec![0; self.uv_modes.len()],
+            ..self.empty_shell()
+        }
+    }
+
+    /// [`Self::recon_shell`] for `rows` mode-info rows of the frame (see
+    /// [`crate::dec::tile::TileDec::mi_r0`]).
+    pub fn band_recon_shell(&self, rows: usize) -> Self {
+        let n = (rows * self.mi_stride).min(self.mi.len());
+        Self {
+            mi: vec![MiInfo::default(); n],
+            uv_modes: vec![0; n.min(self.uv_modes.len())],
+            ..self.empty_shell()
+        }
+    }
+
     /// A state of the same size holding only what the in-loop filters read
-    /// (mode info, loop filter transform sizes, CDEF indices), to be filled
-    /// row by row.
+    /// besides their block info (loop filter transform sizes, CDEF
+    /// indices, loop restoration units), to be filled row by row.
     pub fn filter_shell(&self) -> Self {
+        Self {
+            lf_tx: std::array::from_fn(|p| vec![0; self.lf_tx[p].len()]),
+            cdef_idx: vec![-1; self.cdef_idx.len()],
+            ..self.empty_shell()
+        }
+    }
+
+    /// A state with the dimensions of this one and no arrays.
+    fn empty_shell(&self) -> Self {
         Self {
             mi_cols: self.mi_cols,
             mi_rows: self.mi_rows,
             mi_stride: self.mi_stride,
-            mi: vec![MiInfo::default(); self.mi.len()],
-            uv_modes: vec![0; self.uv_modes.len()],
+            mi_ring: usize::MAX,
+            mi: Vec::new(),
+            delta_lf: Vec::new(),
+            uv_modes: Vec::new(),
             tx_types: Vec::new(),
             inter_tx_sizes: Vec::new(),
-            lf_tx: std::array::from_fn(|p| vec![0; self.lf_tx[p].len()]),
+            lf_tx: Default::default(),
             segment_ids: Vec::new(),
             prev_segment_ids: None,
-            cdef_idx: vec![-1; self.cdef_idx.len()],
+            cdef_idx: Vec::new(),
             cdef_stride: self.cdef_stride,
             lr: Default::default(),
             lr_cols: self.lr_cols,
             lr_rows: self.lr_rows,
             motion_field: Vec::new(),
+            motion_shared: None,
         }
+    }
+
+    /// Whether `self`, a [`Self::recon_shell`], has the array sizes of a
+    /// reconstruction shell of `fs` (its contents are rewritten row by
+    /// row).
+    pub fn fits_recon_shell(&self, fs: &FrameState) -> bool {
+        self.mi_stride == fs.mi_stride
+            && self.mi.len() == fs.mi.len()
+            && self.uv_modes.len() == fs.uv_modes.len()
+    }
+
+    /// Whether `self`, a [`Self::band_recon_shell`] of `rows` rows, has the
+    /// array sizes of one of `fs`.
+    pub fn fits_band_shell(&self, fs: &FrameState, rows: usize) -> bool {
+        let n = (rows * fs.mi_stride).min(fs.mi.len());
+        self.mi_stride == fs.mi_stride
+            && self.mi.len() == n
+            && self.uv_modes.len() == n.min(fs.uv_modes.len())
     }
 
     /// Whether `self`, a [`Self::filter_shell`], has the array sizes of a
     /// filter shell of `fs` (its contents are rewritten row by row).
     pub fn fits_filter_shell(&self, fs: &FrameState) -> bool {
         self.mi_stride == fs.mi_stride
-            && self.mi.len() == fs.mi.len()
-            && self.uv_modes.len() == fs.uv_modes.len()
             && self.cdef_idx.len() == fs.cdef_idx.len()
             && self
                 .lf_tx
@@ -232,8 +440,8 @@ impl FrameState {
                 .all(|(a, b)| a.len() == b.len())
     }
 
-    /// Takes on the dimensions of `fs` (see [`Self::fits_filter_shell`]).
-    pub fn reshape_filter_shell(mut self, fs: &FrameState) -> Self {
+    /// Takes on the dimensions of `fs`, whose shell it fits.
+    pub fn reshape_shell(mut self, fs: &FrameState) -> Self {
         self.mi_cols = fs.mi_cols;
         self.mi_rows = fs.mi_rows;
         self.cdef_stride = fs.cdef_stride;
@@ -245,5 +453,98 @@ impl FrameState {
     #[inline(always)]
     pub fn mi_at(&self, row: usize, col: usize) -> &MiInfo {
         &self.mi[row * self.mi_stride + col]
+    }
+}
+
+#[cfg(test)]
+mod ref_data_tests {
+    use super::{MF_BAND_ROWS, MfBand, RefData};
+    use crate::dec::types::Mv;
+
+    /// 40 rows of 4x4 units: 20 rows of 8x8 in bands of 8, 8 and 4.
+    fn data() -> RefData {
+        RefData::new(16, 40, 1, [0; 8])
+    }
+
+    #[test]
+    fn bands_cover_the_rows_of_8x8_positions() {
+        let rd = data();
+        assert_eq!(rd.bands(), 3);
+        assert_eq!(
+            [rd.band_rows(0), rd.band_rows(1), rd.band_rows(2)],
+            [MF_BAND_ROWS, MF_BAND_ROWS, 4]
+        );
+        assert_eq!(rd.band_rows(3), 0);
+        assert!(rd.band(3).is_none(), "no band past the last");
+        assert!(rd.has_band(3), "nothing to wait for there");
+    }
+
+    #[test]
+    fn a_reader_waits_for_the_band_it_asks_for() {
+        let rd = std::sync::Arc::new(data());
+        rd.set_band(
+            0,
+            MfBand {
+                refs: vec![1; 64],
+                mvs: vec![Mv::ZERO; 64],
+            },
+        );
+        // Band 0 is there while band 1 is not.
+        assert!(rd.has_band(0) && !rd.has_band(1));
+        assert_eq!(rd.band(0).map(|b| b.refs[0]), Some(1));
+        let reader = {
+            let rd = rd.clone();
+            std::thread::spawn(move || rd.band(1).map(|b| b.refs[0]))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(!reader.is_finished(), "band 1 has no motion yet");
+        rd.set_band(
+            1,
+            MfBand {
+                refs: vec![3; 64],
+                mvs: vec![Mv::ZERO; 64],
+            },
+        );
+        assert_eq!(reader.join().ok().flatten(), Some(3));
+    }
+
+    #[test]
+    fn only_the_first_motion_of_a_band_counts() {
+        let rd = data();
+        for r in [2, 5] {
+            rd.set_band(
+                2,
+                MfBand {
+                    refs: vec![r; 32],
+                    mvs: vec![Mv::ZERO; 32],
+                },
+            );
+        }
+        assert_eq!(rd.band(2).map(|b| b.refs[0]), Some(2));
+    }
+
+    #[test]
+    fn closing_leaves_readers_no_motion_and_no_ids() {
+        let rd = std::sync::Arc::new(data());
+        rd.set_band(
+            0,
+            MfBand {
+                refs: vec![4; 64],
+                mvs: vec![Mv::ZERO; 64],
+            },
+        );
+        let reader = {
+            let rd = rd.clone();
+            std::thread::spawn(move || (rd.band(2).map(|b| b.refs.clone()), rd.segment_ids().len()))
+        };
+        rd.close();
+        let (last, ids) = reader.join().unwrap_or_default();
+        // 4 rows of 8 positions, all without a reference.
+        assert_eq!(last, Some(vec![-1; 32]));
+        assert_eq!(ids, 0);
+        assert_eq!(rd.band(0).map(|b| b.refs[0]), Some(4), "saved motion stays");
+        // Ids that come after the close are too late.
+        rd.set_segment_ids(vec![1; 8]);
+        assert!(rd.segment_ids().is_empty());
     }
 }

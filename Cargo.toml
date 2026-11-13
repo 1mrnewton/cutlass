@@ -72,6 +72,7 @@ members = [
     "crates/renderer-software",
     "crates/session",
     "crates/settings",
+    "crates/simd",
     "crates/stickers",
     "crates/storage",
     "crates/store",

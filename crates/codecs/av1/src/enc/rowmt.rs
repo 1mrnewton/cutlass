@@ -24,7 +24,7 @@ use crate::dec::cdf::{CdfContext, pack4, unpack4};
 use crate::dec::coder::{Coder, masked_prob};
 use crate::dec::frame::{FrameState, Picture};
 use crate::dec::obu::{FrameHeader, SequenceHeader};
-use crate::dec::tile::{EncPlan, RefView, TileDec};
+use crate::dec::tile::{EncPlan, MiFill, RefView, TileDec};
 use crate::dec::types::MiInfo;
 use crate::dsp::Pixel;
 
@@ -998,12 +998,16 @@ fn tile_dec<'a, P: Pixel>(
         read_deltas: false,
         ref_lr_wiener: [[[0; 3]; 2]; 3],
         ref_sgr_xqd: [[0; 2]; 3],
-        block_decoded: [[[false; 35]; 35]; 3],
+        block_decoded: Box::default(),
         b: Default::default(),
         color_map_y: vec![0u8; 128 * 128],
         color_map_uv: vec![0u8; 128 * 128],
         scratch: Default::default(),
         rec: None,
+        lf_store: None,
+        y0: 0,
+        mi_r0: 0,
+        mi_fill: MiFill::All,
     }
 }
 

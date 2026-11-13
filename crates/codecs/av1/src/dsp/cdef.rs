@@ -22,6 +22,7 @@
 
 use super::Pixel;
 use crate::spec::tables::{CDEF_DIRECTIONS, CDEF_PRI_TAPS, CDEF_SEC_TAPS, CDEF_UV_DIR, DIV_TABLE};
+use cutlass_simd::av1::cdef as kernel;
 
 /// Value in the padded source of a sample that is not CdefAvailable.
 pub const CDEF_UNAVAILABLE: u16 = 0x7000;
@@ -78,10 +79,29 @@ fn weighted_squares(v: &[Lanes; 2], w: &[i32; 16]) -> i32 {
 /// Direction search on the 8x8 luma block at `src` (7.15.2). Returns
 /// `(yDir, var)`.
 ///
+/// A build with vector kernels runs the one in `cutlass-simd`.
+pub fn cdef_direction<P: Pixel>(src: &[P], stride: usize, bd: u32) -> (u8, i32) {
+    if !cutlass_simd::ACCELERATED {
+        return direction_lanes(src, stride, bd);
+    }
+    let row = |i: usize| &src[i * stride..i * stride + 8];
+    if P::HBD {
+        let px: [[u16; 8]; 8] =
+            std::array::from_fn(|i| std::array::from_fn(|j| row(i)[j].to_i32() as u16));
+        cutlass_simd::av1::cdef::direction_u16(&px, bd)
+    } else {
+        let px: [[u8; 8]; 8] =
+            std::array::from_fn(|i| std::array::from_fn(|j| row(i)[j].to_i32() as u8));
+        cutlass_simd::av1::cdef::direction_u8(&px)
+    }
+}
+
+/// [`cdef_direction`] where the build has no vector kernel.
+///
 /// The partial sums run on 16-bit lanes (a sum covers at most 16 samples
 /// of `-128..=127`): every row is added at its own lane offset, so the
 /// sums along the diagonals become sums of whole lane vectors.
-pub fn cdef_direction<P: Pixel>(src: &[P], stride: usize, bd: u32) -> (u8, i32) {
+fn direction_lanes<P: Pixel>(src: &[P], stride: usize, bd: u32) -> (u8, i32) {
     let sh = bd - 8;
     let mut img = [[0i16; 8]; 8];
     for (i, r) in img.iter_mut().enumerate() {
@@ -267,8 +287,8 @@ fn constrain(diff: i32, threshold: i32, shift: u32) -> i32 {
 /// `damping` the per-plane damping from [`cdef_damping`] (at most 10, as in
 /// any conformant stream).
 ///
-/// 8x8, 4x4 and 4x8 blocks with `src_stride == CDEF_PAD_STRIDE` take the
-/// vector kernel; anything else the scalar one.
+/// 8x8, 4x4 and 4x8 blocks with `src_stride == CDEF_PAD_STRIDE` take a
+/// vector path; anything else the scalar one.
 pub fn cdef_filter<P: Pixel>(
     dst: &mut [P],
     dst_stride: usize,
@@ -282,6 +302,48 @@ pub fn cdef_filter<P: Pixel>(
     damping: i32,
     bd: u32,
 ) {
+    filter_block(
+        dst, dst_stride, src, src_stride, w, h, pri, sec, dir, damping, bd, false,
+    );
+}
+
+/// [`cdef_filter`] for a block at least [`CDEF_BORDER`] samples from
+/// every edge of the picture: no sample its taps read is
+/// [`CDEF_UNAVAILABLE`]. A build with vector kernels then filters 8-bit
+/// samples as bytes, sixteen to a vector.
+pub fn cdef_filter_inner<P: Pixel>(
+    dst: &mut [P],
+    dst_stride: usize,
+    src: &[u16],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    pri: i32,
+    sec: i32,
+    dir: u8,
+    damping: i32,
+    bd: u32,
+) {
+    filter_block(
+        dst, dst_stride, src, src_stride, w, h, pri, sec, dir, damping, bd, true,
+    );
+}
+
+#[inline(always)]
+fn filter_block<P: Pixel>(
+    dst: &mut [P],
+    dst_stride: usize,
+    src: &[u16],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    pri: i32,
+    sec: i32,
+    dir: u8,
+    damping: i32,
+    bd: u32,
+    inner: bool,
+) {
     if pri == 0 && sec == 0 {
         // Every tap constrains to 0: the block is unchanged.
         for i in 0..h {
@@ -293,8 +355,173 @@ pub fn cdef_filter<P: Pixel>(
         return;
     }
     let p = Params::new(src_stride, pri, sec, dir, damping, bd);
+    // The byte kernel takes 8-bit blocks inside the picture.
+    let bytes = inner && !P::HBD && bd == 8;
+    if cutlass_simd::ACCELERATED && filter_kernel(dst, dst_stride, src, src_stride, w, h, &p, bytes)
+    {
+        return;
+    }
+    filter_lanes(dst, dst_stride, src, src_stride, w, h, &p);
+}
+
+const _: () = assert!(CDEF_PAD_STRIDE == kernel::STRIDE && TAP_SPAN == kernel::CENTRE);
+
+/// What [`cdef_filter_inner`] derives from the strengths, the direction
+/// and the damping of an 8-bit block before it filters, kept for the
+/// blocks that share them (see [`cdef_filter_taps`]).
+#[derive(Clone, Copy)]
+pub struct CdefTaps {
+    /// [`taps_key`] of the arguments of [`Self::new`].
+    key: u64,
+    filter: kernel::Filter,
+}
+
+/// The arguments of [`CdefTaps::new`] in one number, so that one compare
+/// tells whether taps are for them: each fits 16 bits (a strength is at
+/// most 60 at 12 bits, the damping at most 10).
+#[inline(always)]
+fn taps_key(pri: i32, sec: i32, dir: u8, damping: i32) -> u64 {
+    u64::from(pri as u16)
+        | u64::from(sec as u16) << 16
+        | u64::from(dir) << 32
+        | u64::from(damping as u16) << 48
+}
+
+impl CdefTaps {
+    /// The taps of 8-bit blocks in a padded source of stride
+    /// [`CDEF_PAD_STRIDE`]. `pri` and `sec` are not both 0.
+    pub fn new(pri: i32, sec: i32, dir: u8, damping: i32) -> Self {
+        let k = Kernel::new(&Params::new(CDEF_PAD_STRIDE, pri, sec, dir, damping, 8));
+        Self {
+            key: taps_key(pri, sec, dir, damping),
+            filter: kernel::Filter {
+                pri: k.pri_thr,
+                sec: k.sec_thr,
+                pri_shift: k.pri_shift,
+                sec_shift: k.sec_shift,
+                pri_taps: k.pt,
+                pri_at: k.pri_o,
+                sec_at: k.sec_o,
+            },
+        }
+    }
+
+    /// Whether these are the taps for the arguments of [`Self::new`].
+    #[inline(always)]
+    pub fn is_for(&self, pri: i32, sec: i32, dir: u8, damping: i32) -> bool {
+        self.key == taps_key(pri, sec, dir, damping)
+    }
+}
+
+/// [`cdef_filter_inner`] for an 8x8, 4x4 or 4x8 block of 8-bit samples
+/// with its taps ready, on the byte kernel. Returns `false`, having
+/// written nothing, when the build has no kernel or the block is not one
+/// it takes: the caller then calls [`cdef_filter_inner`].
+#[inline(always)]
+pub fn cdef_filter_taps(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u16],
+    w: usize,
+    h: usize,
+    taps: &CdefTaps,
+) -> bool {
+    if !cutlass_simd::ACCELERATED || !matches!((w, h), (8, 8) | (4, 4) | (4, 8)) {
+        return false;
+    }
+    let Some(win) = src.first_chunk::<{ kernel::WINDOW }>() else {
+        return false;
+    };
+    kernel::filter_inner_u8(dst, dst_stride, win, &taps.filter, w == 8, h)
+}
+
+/// [`cdef_filter_taps`] on a padded source of bytes (the block's taps all
+/// lie in the picture, so it holds no [`CDEF_UNAVAILABLE`]).
+#[inline(always)]
+pub fn cdef_filter_taps_bytes(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    w: usize,
+    h: usize,
+    taps: &CdefTaps,
+) -> bool {
+    if !cutlass_simd::ACCELERATED || !matches!((w, h), (8, 8) | (4, 4) | (4, 8)) {
+        return false;
+    }
+    let Some(win) = src.first_chunk::<{ kernel::WINDOW }>() else {
+        return false;
+    };
+    kernel::filter_inner_bytes(dst, dst_stride, win, &taps.filter, w == 8, h)
+}
+
+/// [`cdef_filter`] on the kernel of `cutlass-simd`, for the block sizes
+/// and the padded source it takes. Returns whether it filtered the block.
+fn filter_kernel<P: Pixel>(
+    dst: &mut [P],
+    dst_stride: usize,
+    src: &[u16],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    p: &Params,
+    bytes: bool,
+) -> bool {
+    if src_stride != CDEF_PAD_STRIDE || !matches!((w, h), (8, 8) | (4, 4) | (4, 8)) {
+        return false;
+    }
+    // On 16-bit lanes, with one strength the lanes below are as fast as
+    // the kernel, and they filter a 4-wide block two rows at a time.
+    if !bytes && (p.pri == 0 || p.sec == 0) {
+        return false;
+    }
+    // The kernel filters eight columns of every row, so it wants the
+    // source that far even for a narrower or shorter block.
+    let Some(win) = src.first_chunk::<{ kernel::WINDOW }>() else {
+        return false;
+    };
+    let k = Kernel::new(p);
+    let f = kernel::Filter {
+        pri: k.pri_thr,
+        sec: k.sec_thr,
+        pri_shift: k.pri_shift,
+        sec_shift: k.sec_shift,
+        pri_taps: k.pt,
+        pri_at: k.pri_o,
+        sec_at: k.sec_o,
+    };
+    if bytes {
+        let Some(out) = P::bytes_mut(dst) else {
+            return false;
+        };
+        return kernel::filter_inner_u8(out, dst_stride, win, &f, w == 8, h);
+    }
+    let rows = kernel::filter_u16(win, &f, h);
+    for (i, row) in rows.iter().enumerate().take(h) {
+        let Some(out) = dst.get_mut(i * dst_stride..i * dst_stride + w) else {
+            return true;
+        };
+        for (o, &v) in out.iter_mut().zip(row) {
+            *o = P::from_i32(i32::from(v));
+        }
+    }
+    true
+}
+
+/// [`cdef_filter`] where the build has no vector kernel: 8x8, 4x4 and
+/// 4x8 blocks with `src_stride == CDEF_PAD_STRIDE` run on lanes the
+/// compiler turns into vectors, anything else one sample at a time.
+fn filter_lanes<P: Pixel>(
+    dst: &mut [P],
+    dst_stride: usize,
+    src: &[u16],
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    p: &Params,
+) {
     if src_stride == CDEF_PAD_STRIDE {
-        let k = Kernel::new(&p);
+        let k = Kernel::new(p);
         match (w, h) {
             (8, 8) => return dispatch::<P, 8, 8, 1, 8>(dst, dst_stride, src, &k),
             (4, 4) => return dispatch::<P, 4, 4, 2, 8>(dst, dst_stride, src, &k),
@@ -302,7 +529,7 @@ pub fn cdef_filter<P: Pixel>(
             _ => {}
         }
     }
-    filter_scalar(dst, dst_stride, src, src_stride, w, h, &p);
+    filter_scalar(dst, dst_stride, src, src_stride, w, h, p);
 }
 
 /// Per-block constants of [`cdef_filter`].
@@ -767,6 +994,7 @@ mod tests {
         let mut rng = Rng(seed);
         let max = (1 << bd) - 1;
         let mut dirs_seen = [0u32; 8];
+        let mut inner = 0;
         for iter in 0..3000 {
             let mi_cols = 2 + 2 * rng.range(4);
             let mi_rows = 2 + 2 * rng.range(4);
@@ -810,6 +1038,8 @@ mod tests {
             let (rd, rv) = ref_direction(&f, stride, dx0, dy0, bd);
             let (gd, gv) = cdef_direction(&plane[dy0 * stride + dx0..], stride, bd);
             assert_eq!((gd as i32, gv), (rd, rv), "direction iter {iter}");
+            let (ld, lv) = super::direction_lanes(&plane[dy0 * stride + dx0..], stride, bd);
+            assert_eq!((ld as i32, lv), (rd, rv), "lanes direction iter {iter}");
             dirs_seen[gd as usize] += 1;
 
             let pri_raw = rng.range(16) << (bd - 8);
@@ -858,9 +1088,54 @@ mod tests {
             );
             let got: Vec<i32> = out.iter().map(|v| v.to_i32()).collect();
             assert_eq!(got, expect, "filter iter {iter} bd {bd}");
+            if pri != 0 || sec_raw != 0 {
+                // The lanes, which a build with vector kernels skips.
+                let p = super::Params::new(pstride, pri, sec_raw, dir, damping, bd);
+                let mut lanes = vec![P::default(); bw * bh];
+                super::filter_lanes(&mut lanes, bw, &pad, pstride, bw, bh, &p);
+                let got: Vec<i32> = lanes.iter().map(|v| v.to_i32()).collect();
+                assert_eq!(got, expect, "lanes iter {iter} bd {bd}");
+                // The kernel wants its whole window, as a decoder's padded
+                // area gives it: what lies past the block changes nothing.
+                let mut long = pad.clone();
+                long.resize(pad.len().max(super::kernel::WINDOW), CDEF_UNAVAILABLE);
+                let mut out = vec![P::default(); bw * bh];
+                cdef_filter(
+                    &mut out, bw, &long, pstride, bw, bh, pri, sec_raw, dir, damping, bd,
+                );
+                let got: Vec<i32> = out.iter().map(|v| v.to_i32()).collect();
+                assert_eq!(got, expect, "long source iter {iter} bd {bd}");
+                if !pad.contains(&CDEF_UNAVAILABLE) {
+                    // Inside the picture: the byte kernel's blocks.
+                    let mut out = vec![P::default(); bw * bh];
+                    super::cdef_filter_inner(
+                        &mut out, bw, &long, pstride, bw, bh, pri, sec_raw, dir, damping, bd,
+                    );
+                    let got: Vec<i32> = out.iter().map(|v| v.to_i32()).collect();
+                    assert_eq!(got, expect, "inner iter {iter} bd {bd}");
+                    inner += 1;
+                    if let Some(bytes) = P::bytes_mut(&mut out)
+                        && pstride == CDEF_PAD_STRIDE
+                    {
+                        // With the taps ready, where the build has the
+                        // byte kernel.
+                        let taps = super::CdefTaps::new(pri, sec_raw, dir, damping);
+                        assert!(taps.is_for(pri, sec_raw, dir, damping));
+                        assert!(!taps.is_for(pri, sec_raw, dir ^ 1, damping));
+                        bytes.fill(0);
+                        if super::cdef_filter_taps(bytes, bw, &long, bw, bh, &taps) {
+                            let got: Vec<i32> = bytes.iter().map(|&v| i32::from(v)).collect();
+                            assert_eq!(got, expect, "ready taps iter {iter}");
+                        } else {
+                            assert!(!cutlass_simd::ACCELERATED || (bw, bh) == (8, 4));
+                        }
+                    }
+                }
+            }
             assert!(pad.contains(&CDEF_UNAVAILABLE) || (bx > 0 && by > 0));
         }
         assert!(dirs_seen.iter().all(|&c| c > 0), "{dirs_seen:?}");
+        assert!(inner > 20, "{inner} blocks inside the picture");
     }
 
     #[test]

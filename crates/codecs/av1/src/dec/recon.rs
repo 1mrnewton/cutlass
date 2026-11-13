@@ -4,17 +4,23 @@ use crate::dsp::Pixel;
 
 use super::coder::Coder;
 use crate::dsp::ipred::{self, EDGE_LEN, EDGE_OFF};
-use crate::spec::tables::{AC_QLOOKUP, DC_QLOOKUP, QM_OFFSET, QUANTIZER_MATRIX};
+use crate::spec::tables::{AC_QLOOKUP, DC_QLOOKUP, MODE_TO_ANGLE, QM_OFFSET, QUANTIZER_MATRIX};
 
+use super::frame::Picture;
 use super::obu::SEG_LVL_ALT_Q;
 use super::tile::{DequantInfo, TileDec};
 use super::types::{
-    INTRA_FRAME, SMOOTH_PRED, TX_16X32, TX_16X64, TX_32X16, TX_32X32, TX_64X16, TX_64X64, tx_h,
-    tx_h_log2, tx_w, tx_w_log2,
+    D67_PRED, INTRA_FRAME, SMOOTH_PRED, TX_16X32, TX_16X64, TX_32X16, TX_32X32, TX_64X16, TX_64X64,
+    V_PRED, tx_h, tx_h_log2, tx_w, tx_w_log2,
 };
 
 /// Reusable buffers for one tile.
 pub struct Scratch<P> {
+    /// Set when prediction stops for rows of a reference still being
+    /// decoded that are not published yet: the copy read through
+    /// ([`super::tile::RefView::mirror`]) and the luma rows needed, up to
+    /// which the caller waits before it resumes.
+    pub want_rows: Option<(usize, usize)>,
     pub levels: Box<[u16; super::tile::LEVELS_LEN]>,
     /// [`super::tile::level_table`] entries of the nonzero levels of the
     /// transform block being read,
@@ -39,20 +45,40 @@ pub struct Scratch<P> {
     pub mask: Vec<u8>,
     pub emu: Vec<P>,
     pub obmc: Vec<P>,
-    /// Per plane: the bottom row of the superblock row above, saved before
-    /// that row was deblocked (intra prediction reads it unfiltered), and
-    /// its index (`usize::MAX`: none saved).
-    pub above_line: [Vec<P>; 3],
-    pub above_line_y: [usize; 3],
     /// Encoder work buffers (empty until the encoder first uses them).
     pub enc_i32: [Vec<i32>; 4],
     pub enc_px: [Vec<P>; 4],
     pub enc_q: Option<Box<crate::enc::quant::QuantScratch>>,
+    /// The last line of each plane of the superblock row that ends at luma
+    /// row `edge_y`, as reconstruction left it: intra prediction at the
+    /// top of the next row reads it instead of the picture's, which the
+    /// in-loop filters may have changed by then (see [`Self::save_edge`]).
+    /// `usize::MAX` when the picture's lines are read.
+    pub edge: [Vec<P>; 3],
+    pub edge_y: usize,
+}
+
+impl<P: Pixel> Scratch<P> {
+    /// Saves the last lines of the superblock row of `pic`, whose first
+    /// row is luma row `y0`, that ends at luma row `y` (see
+    /// [`Self::edge`]).
+    pub fn save_edge(&mut self, pic: &Picture<P>, y: usize, y0: usize) {
+        for (p, (e, pl)) in self.edge.iter_mut().zip(&pic.planes).enumerate() {
+            let sy = usize::from(p > 0 && pic.sub_y);
+            let r = (y >> sy).saturating_sub(1).saturating_sub(y0 >> sy);
+            e.clear();
+            if let Some(line) = pl.data.get(r * pl.stride..(r + 1) * pl.stride) {
+                e.extend_from_slice(line);
+            }
+        }
+        self.edge_y = y;
+    }
 }
 
 impl<P: Pixel> Scratch<P> {
     pub fn new() -> Self {
         Self {
+            want_rows: None,
             levels: Box::new([0; super::tile::LEVELS_LEN]),
             nz_scan: Box::new([0; 1024]),
             want: vec![0; 1024],
@@ -70,11 +96,11 @@ impl<P: Pixel> Scratch<P> {
             mask: vec![0; 128 * 128],
             emu: vec![P::default(); (128 * 2 + 16) * (128 * 2 + 16)],
             obmc: vec![P::default(); 128 * 128],
-            above_line: Default::default(),
-            above_line_y: [usize::MAX; 3],
             enc_i32: Default::default(),
             enc_px: Default::default(),
             enc_q: None,
+            edge: Default::default(),
+            edge_y: usize::MAX,
         }
     }
 }
@@ -83,6 +109,7 @@ impl<P: Pixel> Scratch<P> {
     /// A placeholder that allocates nothing.
     pub fn empty() -> Self {
         Self {
+            want_rows: None,
             levels: Box::new([0; super::tile::LEVELS_LEN]),
             nz_scan: Box::new([0; 1024]),
             want: Vec::new(),
@@ -100,11 +127,11 @@ impl<P: Pixel> Scratch<P> {
             mask: Vec::new(),
             emu: Vec::new(),
             obmc: Vec::new(),
-            above_line: Default::default(),
-            above_line_y: [usize::MAX; 3],
             enc_i32: Default::default(),
             enc_px: Default::default(),
             enc_q: None,
+            edge: Default::default(),
+            edge_y: usize::MAX,
         }
     }
 }
@@ -183,7 +210,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 if m.ref_frame[0] > INTRA_FRAME {
                     return false;
                 }
-                self.fs.uv_modes[r * self.fs.mi_stride + c]
+                self.fs.uv_modes[self.fs.mi_row(r - self.mi_r0) + c]
             };
             (SMOOTH_PRED..=SMOOTH_PRED + 2).contains(&mode)
         };
@@ -251,78 +278,80 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         } else {
             false
         };
+        // Rows of `cur` from its first (`y` stays a row of the plane).
+        let ry = y - self.row0(plane);
         let pl = &mut self.cur.planes[plane];
         let stride = pl.stride;
         let buf = &mut pl.data;
         let above = &mut self.scratch.above;
         let left = &mut self.scratch.left;
         let base = 1i32 << (bd - 1);
-        let n = w + h;
-        // The row above: its unfiltered copy at a superblock row boundary
-        // once that row may be deblocked.
+        // The edge samples the prediction reads: a directional mode
+        // other than straight up or left reads w + h of each (and
+        // filters them), the others the w above and h to the left.
+        let use_filter_intra = plane == 0 && self.b.use_filter_intra;
+        let angle = if plane == 0 {
+            self.b.angle_delta_y
+        } else {
+            self.b.angle_delta_uv
+        };
+        let angled = !use_filter_intra
+            && (V_PRED..=D67_PRED).contains(&mode)
+            && !matches!(
+                i32::from(MODE_TO_ANGLE[usize::from(mode)]) + i32::from(angle) * 3,
+                90 | 180
+            );
+        let (na, nl) = if angled { (w + h, w + h) } else { (w, h) };
         let up: &[P] = if !have_above {
             &[]
-        } else if y.wrapping_sub(1) == self.scratch.above_line_y[plane] {
-            &self.scratch.above_line[plane]
+        } else if y << sy == self.scratch.edge_y {
+            &self.scratch.edge[plane]
         } else {
-            &buf[(y - 1) * stride..]
+            &buf[(ry - 1) * stride..]
         };
         if !have_above && have_left {
-            let v = buf[y * stride + x - 1];
-            for i in 0..n {
-                above[EDGE_OFF + i] = v;
-            }
+            fill16(&mut above[EDGE_OFF..], na, buf[ry * stride + x - 1]);
         } else if !have_above && !have_left {
-            let v = P::from_i32(base - 1);
-            for i in 0..n {
-                above[EDGE_OFF + i] = v;
-            }
+            fill16(&mut above[EDGE_OFF..], na, P::from_i32(base - 1));
         } else {
             let lim = max_x.min(x + if have_above_right { 2 * w } else { w } - 1);
             let row = up;
-            let avail = (lim + 1).saturating_sub(x).min(n);
-            above[EDGE_OFF..EDGE_OFF + avail].copy_from_slice(&row[x..x + avail]);
-            let last = row[lim];
-            for i in avail..n {
-                above[EDGE_OFF + i] = last;
-            }
+            let avail = (lim + 1).saturating_sub(x).min(na);
+            copy16(&mut above[EDGE_OFF..], &row[x..], avail);
+            fill16(&mut above[EDGE_OFF + avail..], na - avail, row[lim]);
         }
         if !have_left && have_above {
-            let v = up[x];
-            for i in 0..n {
-                left[EDGE_OFF + i] = v;
-            }
+            fill16(&mut left[EDGE_OFF..], nl, up[x]);
         } else if !have_left && !have_above {
-            let v = P::from_i32(base + 1);
-            for i in 0..n {
-                left[EDGE_OFF + i] = v;
-            }
+            fill16(&mut left[EDGE_OFF..], nl, P::from_i32(base + 1));
         } else {
             let lim = max_y.min(y + if have_below_left { 2 * h } else { h } - 1);
-            for i in 0..n {
-                left[EDGE_OFF + i] = buf[(lim.min(y + i)) * stride + x - 1];
+            let avail = (lim + 1 - y).min(nl);
+            let col = &buf[ry * stride + x - 1..];
+            let dst = &mut left[EDGE_OFF..];
+            // A row at a time: `step_by` kept a count and a bounds
+            // check on each step.
+            for (d, row) in dst[..avail].iter_mut().zip(col.chunks(stride)) {
+                *d = row[0];
             }
+            let last = dst[avail - 1];
+            fill16(&mut dst[avail..], nl - avail, last);
         }
         let corner = if have_above && have_left {
             up[x - 1]
         } else if have_above {
             up[x]
         } else if have_left {
-            buf[y * stride + x - 1]
+            buf[ry * stride + x - 1]
         } else {
             P::from_i32(base)
         };
         above[EDGE_OFF - 1] = corner;
         left[EDGE_OFF - 1] = corner;
-        let dst = &mut buf[y * stride + x..];
-        if plane == 0 && self.b.use_filter_intra {
+        let dst = &mut buf[ry * stride + x..];
+        if use_filter_intra {
             ipred::filter_intra(dst, stride, w, h, self.b.filter_intra_mode, above, left, bd);
         } else {
-            let angle = if plane == 0 {
-                self.b.angle_delta_y
-            } else {
-                self.b.angle_delta_uv
-            };
             let edge_w = w.min(max_x + 1 - x);
             let edge_h = h.min(max_y + 1 - y);
             ipred::predict_clipped(
@@ -361,9 +390,10 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         } else {
             self.b.cfl_alpha_v
         });
+        let (y0, cy0) = (self.y0, self.row0(plane));
         let (luma, rest) = self.cur.planes.split_at_mut(1);
         let lp = &luma[0];
-        let off = (sy0 << sys) * lp.stride + (sx0 << sxs);
+        let off = ((sy0 << sys) - y0) * lp.stride + (sx0 << sxs);
         ipred::cfl_ac(
             &mut self.scratch.ac,
             &lp.data[off..],
@@ -378,7 +408,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let cp = &mut rest[plane - 1];
         let stride = cp.stride;
         ipred::cfl_pred(
-            &mut cp.data[sy0 * stride + sx0..],
+            &mut cp.data[(sy0 - cy0) * stride + sx0..],
             stride,
             w,
             h,
@@ -413,10 +443,11 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             }
             (&self.color_map_uv, bw)
         };
+        let r0 = self.row0(plane);
         let pl = &mut self.cur.planes[plane];
         let stride = pl.stride;
         for i in 0..h {
-            let row = &mut pl.data[(sy0 + i) * stride + sx0..][..w];
+            let row = &mut pl.data[(sy0 + i - r0) * stride + sx0..][..w];
             let mrow = &map[(y * 4 + i) * mstride + x * 4..];
             for j in 0..w {
                 row[j] = P::from_i32(i32::from(palette[mrow[j] as usize]));
@@ -427,6 +458,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
     /// Reconstruct process (7.12.3): inverse transform of the dequantized
     /// coefficients, added to the prediction.
     pub fn reconstruct(&mut self, plane: usize, x: usize, y: usize, tx: u8) {
+        let y = y - self.row0(plane);
         let pl = &mut self.cur.planes[plane];
         let stride = pl.stride;
         let _ = (tx_w_log2(tx), tx_h_log2(tx));
@@ -441,5 +473,39 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             self.b.lossless,
             self.bd,
         );
+    }
+}
+
+/// `dst[..n] = src[..n]`, in whole chunks of 16 when both slices hold
+/// them: what lands in `dst` past `n` then means nothing.
+#[inline(always)]
+fn copy16<P: Copy>(dst: &mut [P], src: &[P], n: usize) {
+    let r = n.next_multiple_of(16);
+    match (dst.get_mut(..r), src.get(..r)) {
+        (Some(d), Some(s)) => {
+            for (d, s) in d
+                .as_chunks_mut::<16>()
+                .0
+                .iter_mut()
+                .zip(s.as_chunks::<16>().0)
+            {
+                *d = *s;
+            }
+        }
+        _ => dst[..n].copy_from_slice(&src[..n]),
+    }
+}
+
+/// `dst[..n]` set to `v`, in whole chunks of 16 when `dst` holds them: as
+/// in [`copy16`], what lands past `n` means nothing.
+#[inline(always)]
+fn fill16<P: Copy>(dst: &mut [P], n: usize, v: P) {
+    match dst.get_mut(..n.next_multiple_of(16)) {
+        Some(d) => {
+            for c in d.as_chunks_mut::<16>().0 {
+                *c = [v; 16];
+            }
+        }
+        None => dst[..n].fill(v),
     }
 }

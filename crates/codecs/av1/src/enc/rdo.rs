@@ -802,9 +802,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                         self.b.palette_size_y = 0;
                         let sb_mask = self.sb_size4 - 1;
                         let (sr, sc) = (self.b.mi_row & sb_mask, self.b.mi_col & sb_mask);
-                        let bdf = &self.block_decoded[0];
-                        let ar = bdf[sr][sc + (w >> 2) + 1];
-                        let bl = bdf[sr + (h >> 2) + 1][sc];
+                        let bdf = &self.block_decoded;
+                        let ar = bdf.get(0, sr, sc + (w >> 2) + 1);
+                        let bl = bdf.get(0, sr + (h >> 2) + 1, sc);
                         let (al, au) = (self.b.avail_l, self.b.avail_u);
                         self.predict_intra(
                             0,
@@ -1174,10 +1174,10 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         }
         // Prediction of the first transform block with the chosen mode.
         let sb_mask = self.sb_size4 - 1;
-        let bdf = &self.block_decoded[0];
+        let bdf = &self.block_decoded;
         let (sr, sc) = (pb.mi_row & sb_mask, pb.mi_col & sb_mask);
-        let ar = bdf[sr][sc + (w >> 2) + 1];
-        let bl = bdf[sr + (h >> 2) + 1][sc];
+        let ar = bdf.get(0, sr, sc + (w >> 2) + 1);
+        let bl = bdf.get(0, sr + (h >> 2) + 1, sc);
         let saved = self.b.clone();
         self.b.use_filter_intra = pb.use_filter_intra;
         self.b.filter_intra_mode = pb.filter_intra_mode;
@@ -1241,23 +1241,24 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             for j in 0..nc {
                 let (px, py) = (x + j * sw, y + i * sh);
                 // Decoded state of the 4x4 at (r4, c4) relative to the superblock.
-                let decoded = |r4: isize, c4: isize, bdf: &[[bool; 35]; 35]| -> bool {
-                    let (ra, ca) = (sr as isize, sc as isize);
-                    let inside = r4 >= ra
-                        && r4 < ra + (h / 4) as isize
-                        && c4 >= ca
-                        && c4 < ca + (w / 4) as isize;
-                    if inside {
-                        let ti = ((r4 - ra) as usize * 4) / sh;
-                        let tj = ((c4 - ca) as usize * 4) / sw;
-                        ti < i || (ti == i && tj < j)
-                    } else if r4 + 1 < 0 || c4 + 1 < 0 || r4 + 1 >= 35 || c4 + 1 >= 35 {
-                        false
-                    } else {
-                        bdf[(r4 + 1) as usize][(c4 + 1) as usize]
-                    }
-                };
-                let bdf = &self.block_decoded[0];
+                let decoded =
+                    |r4: isize, c4: isize, bdf: &crate::dec::tile::BlockDecoded| -> bool {
+                        let (ra, ca) = (sr as isize, sc as isize);
+                        let inside = r4 >= ra
+                            && r4 < ra + (h / 4) as isize
+                            && c4 >= ca
+                            && c4 < ca + (w / 4) as isize;
+                        if inside {
+                            let ti = ((r4 - ra) as usize * 4) / sh;
+                            let tj = ((c4 - ca) as usize * 4) / sw;
+                            ti < i || (ti == i && tj < j)
+                        } else if r4 + 1 < 0 || c4 + 1 < 0 || r4 + 1 >= 35 || c4 + 1 >= 35 {
+                            false
+                        } else {
+                            bdf.get(0, (r4 + 1) as usize, (c4 + 1) as usize)
+                        }
+                    };
+                let bdf = &*self.block_decoded;
                 let r0 = (sr + i * sh / 4) as isize;
                 let c0 = (sc + j * sw / 4) as isize;
                 let ar = decoded(r0 - 1, c0 + (sw / 4) as isize, bdf);
@@ -1313,9 +1314,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let sub_col = self.b.mi_col & sb_mask;
         let step_x = tx_w(tx) >> 2;
         let step_y = tx_h(tx) >> 2;
-        let bdf = &self.block_decoded[0];
-        let have_ar = bdf[sub_row][sub_col + step_x + 1];
-        let have_bl = bdf[sub_row + step_y + 1][sub_col];
+        let bdf = &self.block_decoded;
+        let have_ar = bdf.get(0, sub_row, sub_col + step_x + 1);
+        let have_bl = bdf.get(0, sub_row + step_y + 1, sub_col);
         let (al, au) = (self.b.avail_l, self.b.avail_u);
         let lw = tx_w(tx).trailing_zeros();
         let lh = tx_h(tx).trailing_zeros();

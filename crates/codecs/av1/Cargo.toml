@@ -17,6 +17,7 @@ prof = []
 [dependencies]
 cutlass-decode = { path = "../../decode", version = "0.1.0" }
 cutlass-encode = { path = "../../encode", version = "0.1.0" }
+cutlass-simd = { path = "../../simd", version = "0.1.0" }
 
 [[bench]]
 name = "decode"

@@ -109,10 +109,15 @@ mod fixtures {
             "every stream has references, and only those"
         );
         let mut frames = 0;
-        for (name, want) in &references {
+        // On the default threads, then on the calling thread alone, which
+        // decodes and filters a frame its own way.
+        for (name, want, threads) in references
+            .iter()
+            .flat_map(|(n, w)| [(n, w, None), (n, w, Some(1))])
+        {
             let first = &want[0];
-            let pictures = common::decode(&streams[name], first.width, first.height)
-                .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            let pictures = common::decode_on(&streams[name], first.width, first.height, threads)
+                .unwrap_or_else(|error| panic!("{name} ({threads:?} threads): {error:?}"));
             assert_eq!(pictures.len(), want.len(), "{name}: frames shown");
             for (index, (picture, want)) in pictures.iter().zip(want).enumerate() {
                 let info = picture.info();
@@ -168,7 +173,7 @@ mod fixtures {
                 assert_eq!(
                     fnv1a(compared),
                     want.digest,
-                    "{name} frame {index}: samples differ from libdav1d"
+                    "{name} frame {index} ({threads:?} threads): samples differ from libdav1d"
                 );
                 frames += 1;
             }

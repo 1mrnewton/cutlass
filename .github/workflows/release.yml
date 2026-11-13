@@ -39,8 +39,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
+      # The AV1 decoder builds guided by a profile of its own fixtures
+      # (see scripts/pgo_profile.py): 3 to 5% fewer instructions on 4K.
+      # Only here so far, where it was measured.
+      - name: Profile the AV1 decoder
+        run: python3 scripts/pgo_profile.py "$RUNNER_TEMP/av1.profdata"
       - name: Build
-        run: cargo build --release -p cutlass --features public-release
+        run: RUSTFLAGS="-Cprofile-use=$RUNNER_TEMP/av1.profdata" cargo build --release -p cutlass --features public-release
       - name: Bundle
         run: python3 scripts/macos_bundle.py target/release/cutlass dist
       - name: Smoke test the bundle

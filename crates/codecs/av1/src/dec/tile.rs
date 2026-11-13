@@ -1,6 +1,8 @@
 //! Tile decoding: partition, mode info, transform sizes, palette and coefficients
 //! (spec 5.11 with the CDF selection of 8.3.2).
 
+use std::ops::Range;
+
 use cutlass_decode::CodecError;
 
 use crate::dsp::Pixel;
@@ -23,7 +25,7 @@ use crate::spec::tables::{
 
 use super::cdf::CdfContext;
 use super::decoder::Mirror;
-use super::frame::{FrameState, Picture};
+use super::frame::{FrameState, Picture, lf_dims};
 use super::msac::{Hot, Msac};
 use super::obu::{
     FrameHeader, RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_SWITCHABLE, RESTORE_WIENER,
@@ -33,12 +35,12 @@ use super::types::{
     ALTREF_FRAME, ALTREF2_FRAME, BLOCK_4X4, BLOCK_8X8, BLOCK_32X32, BLOCK_64X64, BLOCK_128X128,
     BWDREF_FRAME, COMPOUND_AVERAGE, COMPOUND_DIFFWTD, COMPOUND_DISTANCE, COMPOUND_INTRA,
     COMPOUND_WEDGE, DC_PRED, GLOBAL_GLOBALMV, GLOBALMV, GOLDEN_FRAME, H_ADST, H_DCT, H_FLIPADST,
-    IDTX, INTRA_FRAME, LAST_FRAME, LAST2_FRAME, LAST3_FRAME, LOCALWARP, MiInfo, Mv, NEAR_NEARMV,
-    NEAR_NEWMV, NEAREST_NEARESTMV, NEAREST_NEWMV, NEARESTMV, NEARMV, NEW_NEARESTMV, NEW_NEARMV,
-    NEW_NEWMV, NEWMV, NONE, OBMC, SIMPLE, TX_4X4, TX_16X32, TX_16X64, TX_32X16, TX_32X32, TX_64X16,
-    TX_64X64, UV_CFL_PRED, V_ADST, V_DCT, V_FLIPADST, bh4, block_height, block_width, bw4,
-    find_tx_size, is_directional, mi_height_log2, mi_width_log2, plane_residual_size, tx_h,
-    tx_h_log2, tx_w, tx_w_log2,
+    IDTX, INTRA_FRAME, LAST_FRAME, LAST2_FRAME, LAST3_FRAME, LOCALWARP, MiFields, MiInfo, Mv,
+    NEAR_NEARMV, NEAR_NEWMV, NEAREST_NEARESTMV, NEAREST_NEWMV, NEARESTMV, NEARMV, NEW_NEARESTMV,
+    NEW_NEARMV, NEW_NEWMV, NEWMV, NONE, OBMC, SIMPLE, TX_4X4, TX_16X32, TX_16X64, TX_32X16,
+    TX_32X32, TX_64X16, TX_64X64, UV_CFL_PRED, V_ADST, V_DCT, V_FLIPADST, bh4, block_height,
+    block_width, bw4, find_tx_size, is_directional, mi_height_log2, mi_width_log2,
+    plane_residual_size, tx_h, tx_h_log2, tx_w, tx_w_log2,
 };
 
 pub type R<T> = Result<T, CodecError>;
@@ -48,6 +50,37 @@ pub type R<T> = Result<T, CodecError>;
 /// luma 4x4 rows `r0..r1` of the row.
 pub type RowHook<'h, P> =
     dyn FnMut(&FrameState, &Picture<P>, Option<&mut ReconLog>, usize, usize, bool) + 'h;
+
+/// The loop restoration units of `plane` that the superblocks covering
+/// luma 4x4 rows `rows` and columns `cols` read (see
+/// [`TileDec::read_lr`]): the unit rows and the unit columns. The spans of
+/// neighbouring superblocks meet, so those of a tile's superblocks make
+/// the span of the tile.
+pub fn lr_unit_span(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &FrameState,
+    plane: usize,
+    rows: Range<usize>,
+    cols: Range<usize>,
+) -> (Range<usize>, Range<usize>) {
+    let (sx, sy) = if plane > 0 {
+        (u32::from(seq.subsampling_x), u32::from(seq.subsampling_y))
+    } else {
+        (0, 0)
+    };
+    let unit_size = hdr.lr.unit_size[plane] as usize;
+    let row_start = (rows.start * (4 >> sy)).div_ceil(unit_size);
+    let row_end = fs.lr_rows[plane].min((rows.end * (4 >> sy)).div_ceil(unit_size));
+    let (num, den) = if hdr.use_superres {
+        ((4 >> sx) * hdr.superres_denom as usize, unit_size * 8)
+    } else {
+        (4 >> sx, unit_size)
+    };
+    let col_start = (cols.start * num).div_ceil(den);
+    let col_end = fs.lr_cols[plane].min((cols.end * num).div_ceil(den));
+    (row_start..row_end, col_start..col_end)
+}
 
 /// While recording, the superblocks after which the log is handed on
 /// before the end of their row (see [`TileDec::decode_tile_rows`]).
@@ -240,8 +273,8 @@ impl RecBlock {
 
 /// The mode info stored for block `b` (see [`TileDec::write_mode_info`]).
 #[inline(always)]
-fn mode_info_of(b: &Block, delta_lf: [i8; 4]) -> MiInfo {
-    MiInfo {
+fn mode_info_of(b: &Block) -> MiInfo {
+    MiFields {
         ref_frame: b.ref_frame,
         mv: if b.ref_frame[1] > INTRA_FRAME {
             b.mv
@@ -260,8 +293,8 @@ fn mode_info_of(b: &Block, delta_lf: [i8; 4]) -> MiInfo {
         compound_idx: b.compound_idx,
         interp_filter: b.interp_filter,
         motion_mode: b.motion_mode,
-        delta_lf,
     }
+    .into()
 }
 
 /// A transform block of a [`ReconLog`]: the arguments of transform_block(),
@@ -524,6 +557,7 @@ pub struct PlannedTx {
 }
 
 /// A reference frame as the tile decoder sees it.
+#[derive(Clone, Copy)]
 pub struct RefView<'a, P> {
     pub pic: &'a Picture<P>,
     /// The samples are in [`TileDec::mirrors`] at this index instead of
@@ -551,6 +585,47 @@ pub fn ref_rows<'s, P>(
         None => {
             let p = rv.pic.planes.get(plane)?;
             Some((p.data.get(y0 * p.stride..)?, p.stride))
+        }
+    }
+}
+
+/// The BlockDecoded flags of the planes of a superblock and the units
+/// around it (see [`TileDec::block_decoded`]): flag `[plane][y][x]` is bit
+/// `x` of row `y`, so a transform block marks each of its rows at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockDecoded([[u64; 35]; 3]);
+
+impl Default for BlockDecoded {
+    fn default() -> Self {
+        Self([[0; 35]; 3])
+    }
+}
+
+impl BlockDecoded {
+    /// BlockDecoded[plane][y - 1][x - 1].
+    #[inline]
+    pub fn get(&self, plane: usize, y: usize, x: usize) -> bool {
+        x < 35 && self.0[plane][y] >> x & 1 != 0
+    }
+
+    /// Sets the flags of rows `ys` and columns `xs` of a plane.
+    #[inline]
+    pub fn mark(&mut self, plane: usize, ys: Range<usize>, xs: Range<usize>) {
+        let bits = (1u64 << xs.end) - (1u64 << xs.start.min(xs.end));
+        for row in &mut self.0[plane][ys] {
+            *row |= bits;
+        }
+    }
+
+    /// Starts a plane's flags of a superblock `h` rows high with the
+    /// units around it: row -1 set in its first `n` columns, column -1 in
+    /// its first `left` rows, nothing else.
+    #[inline]
+    pub fn reset(&mut self, plane: usize, h: usize, n: usize, left: usize) {
+        let rows = &mut self.0[plane][..h];
+        rows[0] = (1u64 << n) - 1;
+        for (y, row) in rows[1..].iter_mut().enumerate() {
+            *row = u64::from(y < left);
         }
     }
 }
@@ -610,8 +685,9 @@ pub struct TileDec<'a, P: Pixel, C: Coder = Msac<'a>> {
     pub read_deltas: bool,
     pub ref_lr_wiener: [[[i8; 3]; 2]; 3],
     pub ref_sgr_xqd: [[i8; 2]; 3],
-    /// BlockDecoded[plane][y + 1][x + 1].
-    pub block_decoded: [[[bool; 35]; 35]; 3],
+    /// BlockDecoded[plane][y + 1][x + 1], each superblock's rows set as
+    /// it starts: boxed, so a tile decoder takes it over without a copy.
+    pub block_decoded: Box<BlockDecoded>,
     pub b: Block,
     pub color_map_y: Vec<u8>,
     pub color_map_uv: Vec<u8>,
@@ -619,6 +695,39 @@ pub struct TileDec<'a, P: Pixel, C: Coder = Msac<'a>> {
     /// When set, blocks are parsed but not predicted or reconstructed: what
     /// reconstruction needs is appended here for [`TileDec::replay`].
     pub rec: Option<Box<ReconLog>>,
+    /// When set, each block's loop filter info is stored here as the
+    /// block is parsed, with the levels of the frame.
+    pub lf_store: Option<(
+        &'a mut super::postfilter::FilterInfo,
+        &'a super::postfilter::LfLevels,
+    )>,
+    /// The luma row `cur` starts at (its chroma planes start at the
+    /// subsampled row): reconstruction can write one band of rows of a
+    /// picture. 0 for a whole picture.
+    pub y0: usize,
+    /// The mode-info row the grids of `fs` that reconstruction reads and
+    /// writes (`mi`, `uv_modes`, `delta_lf`) start at. 0 for a whole
+    /// frame's.
+    pub mi_r0: usize,
+    /// Which units of a block [`Self::write_mode_info`] writes.
+    pub mi_fill: MiFill,
+}
+
+/// The units of a block whose mode info later readers need.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MiFill {
+    /// All of them (the encoder reads any).
+    All,
+    /// Its bottom row and right column (a neighbour's above or left of
+    /// them) and its first: what later blocks of reconstruction read.
+    Edges,
+    /// Those of [`Self::Edges`] and, of its odd rows, the first and the
+    /// odd columns: what parsing reads besides (the outer row and column
+    /// scans of the motion vector search read odd rows and odd columns,
+    /// by steps of 2 or more), the motion field (odd rows and columns)
+    /// and the loop filter's levels (a block's first unit, or the one of
+    /// the odd row below it).
+    OddRows,
 }
 
 #[inline]
@@ -681,10 +790,19 @@ pub fn neg_interleave(x: i32, r: i32, max: i32) -> i32 {
 /// The bytes of the first `n` (at most 16) of 16 lanes.
 #[inline(always)]
 fn lane_mask(n: usize) -> u128 {
-    u128::MAX
-        .checked_shr(128 - 8 * n.min(16) as u32)
-        .unwrap_or(0)
+    LANE_MASKS[n.min(16)]
 }
+
+/// [`lane_mask`] by `n`: a load rather than a 128-bit shift.
+const LANE_MASKS: [u128; 17] = {
+    let mut m = [0u128; 17];
+    let mut n = 1;
+    while n <= 16 {
+        m[n] = u128::MAX >> (128 - 8 * n);
+        n += 1;
+    }
+    m
+};
 
 /// Entries `at..at + n` (`n` at most 16) of a context array as the bytes of
 /// a `u128`, the bytes from `n` on 0: a load and a mask rather than a loop
@@ -745,6 +863,51 @@ fn ctx_set(d: &mut [u8], at: usize, n: usize, v: u8) {
     }
 }
 
+/// [`fill_rect`] of only the first unit, the bottom row and the right
+/// column of the `w` x `h` rectangle at `at`.
+#[inline(always)]
+fn fill_edges<T: Copy>(d: &mut [T], stride: usize, at: usize, w: usize, h: usize, v: T) {
+    if w <= 2 && h <= 2 {
+        return fill_rect(d, stride, at, w, h, v);
+    }
+    if h == 0 || w == 0 {
+        return;
+    }
+    d[at] = v;
+    let last = at + (h - 1) * stride;
+    for m in &mut d[last..][..w] {
+        *m = v;
+    }
+    for y in 0..h - 1 {
+        d[at + y * stride + w - 1] = v;
+    }
+}
+
+/// [`fill_edges`] and, of the odd rows of the `w` x `h` rectangle at
+/// `at`, a block's, the first and the odd columns: one taller or wider
+/// than a unit starts at an even row or column.
+#[inline(always)]
+fn fill_odd_rows<T: Copy>(d: &mut [T], stride: usize, at: usize, w: usize, h: usize, v: T) {
+    if h <= 2 || w == 0 {
+        return fill_rect(d, stride, at, w, h, v);
+    }
+    d[at] = v;
+    for y in 0..h - 1 {
+        let row = &mut d[at + y * stride..][..w];
+        if y % 2 == 1 {
+            row[0] = v;
+            // The odd columns, the last among them.
+            for pair in row.as_chunks_mut::<2>().0 {
+                pair[1] = v;
+            }
+        }
+        row[w - 1] = v;
+    }
+    for m in &mut d[at + (h - 1) * stride..][..w] {
+        *m = v;
+    }
+}
+
 /// Fills `h` rows of `w` entries of a map of stride `stride` from `at`
 /// with `v`: one dispatch on the width for all the rows, and no library
 /// call for the power-of-two widths.
@@ -782,20 +945,6 @@ pub(crate) fn fill_rect<T: Copy>(d: &mut [T], stride: usize, at: usize, w: usize
                 d[at + y * stride..][..w].fill(v);
             }
         }
-    }
-}
-
-/// `d.fill(v)` without a library call for the short power-of-two runs of
-/// 4x4 unit maps.
-#[inline(always)]
-pub(crate) fn fill_small<T: Copy>(d: &mut [T], v: T) {
-    match d.len() {
-        1 => d[0] = v,
-        2 => d.copy_from_slice(&[v; 2]),
-        4 => d.copy_from_slice(&[v; 4]),
-        8 => d.copy_from_slice(&[v; 8]),
-        16 => d.copy_from_slice(&[v; 16]),
-        _ => d.fill(v),
     }
 }
 
@@ -880,7 +1029,13 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
 
     #[inline]
     pub fn mi(&self, r: usize, c: usize) -> &MiInfo {
-        &self.fs.mi[r * self.fs.mi_stride + c]
+        &self.fs.mi[self.fs.mi_row(r - self.mi_r0) + c]
+    }
+
+    /// The first row of plane `plane` in `cur` (see [`Self::y0`]).
+    #[inline]
+    pub fn row0(&self, plane: usize) -> usize {
+        self.y0 >> self.plane_sub(plane).1
     }
 
     fn seg_feature_active(&self, feature: usize) -> bool {
@@ -930,9 +1085,21 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         before_row: &mut dyn FnMut(&mut FrameState, usize),
     ) -> R<()> {
         self.begin_tile();
+        self.decode_rows(self.mi_row_start..self.mi_row_end, on_row, before_row)
+    }
+
+    /// The superblock rows of the tile starting in luma 4x4 rows `rows`
+    /// (a part of [`Self::decode_tile_rows`], after [`Self::begin_tile`]
+    /// and the rows above), with the same hooks.
+    pub fn decode_rows(
+        &mut self,
+        rows: Range<usize>,
+        on_row: &mut RowHook<'_, P>,
+        before_row: &mut dyn FnMut(&mut FrameState, usize),
+    ) -> R<()> {
         let sb4 = self.sb_size4;
-        let mut r = self.mi_row_start;
-        while r < self.mi_row_end {
+        let mut r = rows.start.max(self.mi_row_start);
+        while r < rows.end.min(self.mi_row_end) {
             self.begin_sb_row();
             let r1 = (r + sb4).min(self.mi_row_end);
             before_row(self.fs, r1);
@@ -955,9 +1122,11 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
 
     /// Start of decode_tile(): clears the above context and the per-tile state.
     pub fn begin_tile(&mut self) {
-        let s = self.mi_col_start;
-        let e = (self.mi_col_end + 32).min(self.above_seg_pred.len());
+        // Each plane's contexts are indexed in that plane's 4x4 units.
         for p in 0..3 {
+            let (sx, _) = self.plane_sub(p);
+            let s = self.mi_col_start >> sx;
+            let e = ((self.mi_col_end >> sx) + 32).min(self.above_seg_pred.len());
             for v in &mut self.above_level[p][s..e] {
                 *v = 0;
             }
@@ -965,6 +1134,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 *v = 0;
             }
         }
+        let s = self.mi_col_start;
+        let e = (self.mi_col_end + 32).min(self.above_seg_pred.len());
         for v in &mut self.above_seg_pred[s..e] {
             *v = 0;
         }
@@ -1042,17 +1213,12 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             let sbh4 = (self.mi_row_end - r) >> sy;
             let w = (sb4 >> sx) + 2;
             let h = (sb4 >> sy) + 2;
-            let bd = &mut self.block_decoded[plane];
+            let bd = &mut *self.block_decoded;
             // Row -1 is decoded left of the tile's right edge, column -1
             // above its bottom edge.
             let n = (sbw4 + 1).min(w);
-            bd[0] = [false; 35];
-            bd[0][..n].fill(true);
-            for (y, row) in bd[1..h].iter_mut().enumerate() {
-                *row = [false; 35];
-                row[0] = y < sbh4;
-            }
-            bd[h - 1][0] = false;
+            // Column -1 below the superblock is not.
+            bd.reset(plane, h, n, sbh4.min(h - 2));
         }
     }
 
@@ -1079,21 +1245,9 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             if ftype == RESTORE_NONE {
                 continue;
             }
-            let (sx, sy) = self.plane_sub(plane);
-            let unit_size = self.hdr.lr.unit_size[plane] as usize;
-            let unit_rows = self.fs.lr_rows[plane];
-            let unit_cols = self.fs.lr_cols[plane];
-            let row_start = (r * (4 >> sy)).div_ceil(unit_size);
-            let row_end = unit_rows.min(((r + h) * (4 >> sy)).div_ceil(unit_size));
-            let (num, den) = if self.hdr.use_superres {
-                ((4 >> sx) * self.hdr.superres_denom as usize, unit_size * 8)
-            } else {
-                (4 >> sx, unit_size)
-            };
-            let col_start = (c * num).div_ceil(den);
-            let col_end = unit_cols.min(((c + w) * num).div_ceil(den));
-            for ur in row_start..row_end {
-                for uc in col_start..col_end {
+            let (rows, cols) = lr_unit_span(self.seq, self.hdr, self.fs, plane, r..r + h, c..c + w);
+            for ur in rows {
+                for uc in cols.clone() {
                     self.read_lr_unit(plane, ur, uc, ftype)?;
                 }
             }
@@ -1493,6 +1647,19 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         } else {
             self.compute_prediction()?;
         }
+        if let Some((info, levels)) = &mut self.lf_store {
+            let b = &self.b;
+            let of = levels.info(
+                self.hdr,
+                b.ref_frame[0],
+                b.segment_id,
+                b.y_mode,
+                b.skip,
+                b.bsize,
+                self.delta_lf,
+            );
+            info.store((b.mi_row, b.mi_col), (self.fs.mi_rows, self.fs.mi_cols), of);
+        }
         self.residual()?;
         self.store_mode_info_post();
         Ok(())
@@ -1522,19 +1689,25 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
     /// The part of the block's mode info that prediction needs (spec stores
     /// it before compute_prediction). Returns the mode info stored.
     fn store_mode_info_pre(&mut self) {
-        let info = mode_info_of(&self.b, self.delta_lf);
-        // Kept in memory so each store is a plain 28-byte copy (field by
+        let info = mode_info_of(&self.b);
+        // Kept in memory so each store is a plain 16-byte copy (field by
         // field stores of the scalarized value cost several times more).
         let info = std::hint::black_box(info);
-        self.write_mode_info(&info);
+        self.write_mode_info(&info, self.delta_lf);
         let b = &self.b;
         let w4 = bw4(b.bsize).min(self.fs.mi_cols - b.mi_col);
         let h4 = bh4(b.bsize).min(self.fs.mi_rows - b.mi_row);
         let stride = self.fs.mi_stride;
         let at = b.mi_row * stride + b.mi_col;
-        fill_rect(&mut self.fs.segment_ids, stride, at, w4, h4, b.segment_id);
-        // Palette colors for later palette caches.
-        if self.hdr.allow_screen_content_tools {
+        // Without segmentation every id is 0, and the frame keeps no map
+        // (see [`super::frame::RefData::segment_ids`]).
+        if self.hdr.segmentation.enabled {
+            fill_rect(&mut self.fs.segment_ids, stride, at, w4, h4, b.segment_id);
+        }
+        // Palette colors for later palette caches, which read as many
+        // colors as the neighbor's mode info says it has: none of a
+        // block without a palette.
+        if self.hdr.allow_screen_content_tools && (b.palette_size_y | b.palette_size_uv) != 0 {
             let sb_mask = self.sb_size4 - 1;
             for x in 0..bw4(b.bsize) {
                 if b.mi_col + x < self.above_palette[0].len() {
@@ -1552,17 +1725,40 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
 
     /// Stores `info` as the mode info of every 4x4 of the block `self.b`
     /// (and its uv_mode for intra blocks with chroma).
-    pub fn write_mode_info(&mut self, info: &MiInfo) {
+    pub fn write_mode_info(&mut self, info: &MiInfo, delta_lf: [i8; 4]) {
         let b = &self.b;
         let w4 = bw4(b.bsize).min(self.fs.mi_cols - b.mi_col);
         let h4 = bh4(b.bsize).min(self.fs.mi_rows - b.mi_row);
         let stride = self.fs.mi_stride;
         let set_uv = b.ref_frame[0] == INTRA_FRAME && b.has_chroma;
-        let at = b.mi_row * stride + b.mi_col;
-        // Stores of the value, not a library copy per row.
-        fill_rect(&mut self.fs.mi, stride, at, w4, h4, *info);
-        if set_uv {
-            fill_rect(&mut self.fs.uv_modes, stride, at, w4, h4, b.uv_mode);
+        let at = self.fs.mi_row(b.mi_row - self.mi_r0) + b.mi_col;
+        match self.mi_fill {
+            MiFill::Edges => {
+                fill_edges(&mut self.fs.mi, stride, at, w4, h4, *info);
+                if set_uv {
+                    fill_edges(&mut self.fs.uv_modes, stride, at, w4, h4, b.uv_mode);
+                }
+            }
+            MiFill::OddRows => {
+                fill_odd_rows(&mut self.fs.mi, stride, at, w4, h4, *info);
+                if set_uv {
+                    fill_rect(&mut self.fs.uv_modes, stride, at, w4, h4, b.uv_mode);
+                }
+            }
+            MiFill::All => {
+                // Stores of the value, not a library copy per row.
+                fill_rect(&mut self.fs.mi, stride, at, w4, h4, *info);
+                if set_uv {
+                    fill_rect(&mut self.fs.uv_modes, stride, at, w4, h4, b.uv_mode);
+                }
+            }
+        }
+        if self.hdr.delta_lf_present {
+            let n = self.fs.mi.len();
+            if self.fs.delta_lf.len() != n {
+                self.fs.delta_lf.resize(n, [0; 4]);
+            }
+            fill_rect(&mut self.fs.delta_lf, stride, at, w4, h4, delta_lf);
         }
     }
 
@@ -1790,10 +1986,10 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         }
         let mut ctx = 0;
         if self.b.avail_u {
-            ctx += usize::from(self.mi(self.b.mi_row - 1, self.b.mi_col).skip);
+            ctx += usize::from(self.mi(self.b.mi_row - 1, self.b.mi_col).skip());
         }
         if self.b.avail_l {
-            ctx += usize::from(self.mi(self.b.mi_row, self.b.mi_col - 1).skip);
+            ctx += usize::from(self.mi(self.b.mi_row, self.b.mi_col - 1).skip());
         }
         self.b.skip = self.msac.bool_adapt(&mut self.cdf.skip[ctx], self.pb.skip);
     }
@@ -1812,10 +2008,10 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         }
         let mut ctx = 0;
         if self.b.avail_u {
-            ctx += usize::from(self.mi(self.b.mi_row - 1, self.b.mi_col).skip_mode);
+            ctx += usize::from(self.mi(self.b.mi_row - 1, self.b.mi_col).skip_mode());
         }
         if self.b.avail_l {
-            ctx += usize::from(self.mi(self.b.mi_row, self.b.mi_col - 1).skip_mode);
+            ctx += usize::from(self.mi(self.b.mi_row, self.b.mi_col - 1).skip_mode());
         }
         self.b.skip_mode = self
             .msac
@@ -2033,12 +2229,12 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
     fn palette_cache(&self, plane_type: usize) -> ([u16; 16], usize) {
         let b = &self.b;
         let above_n = if !(b.mi_row * 4).is_multiple_of(64) {
-            self.mi(b.mi_row - 1, b.mi_col).palette_size[plane_type] as usize
+            self.mi(b.mi_row - 1, b.mi_col).palette_size()[plane_type] as usize
         } else {
             0
         };
         let left_n = if b.avail_l {
-            self.mi(b.mi_row, b.mi_col - 1).palette_size[plane_type] as usize
+            self.mi(b.mi_row, b.mi_col - 1).palette_size()[plane_type] as usize
         } else {
             0
         };
@@ -2167,10 +2363,10 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let bsize_ctx = (mi_width_log2(bs) + mi_height_log2(bs) - 2) as usize;
         if self.b.y_mode == DC_PRED {
             let mut ctx = 0;
-            if self.b.avail_u && self.mi(self.b.mi_row - 1, self.b.mi_col).palette_size[0] > 0 {
+            if self.b.avail_u && self.mi(self.b.mi_row - 1, self.b.mi_col).palette_size()[0] > 0 {
                 ctx += 1;
             }
-            if self.b.avail_l && self.mi(self.b.mi_row, self.b.mi_col - 1).palette_size[0] > 0 {
+            if self.b.avail_l && self.mi(self.b.mi_row, self.b.mi_col - 1).palette_size()[0] > 0 {
                 ctx += 1;
             }
             if self.msac.bool_adapt(
@@ -2377,11 +2573,11 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 return 64;
             }
             let m = self.mi(row - 1, col);
-            if m.skip && m.is_inter {
+            if m.skip() && m.is_inter() {
                 return block_width(m.bsize);
             }
         }
-        tx_w(self.fs.inter_tx_sizes[(row - 1) * self.fs.mi_stride + col])
+        tx_w(self.fs.inter_tx_sizes[self.fs.mi_row(row - 1) + col])
     }
 
     fn left_tx_height(&self, row: usize, col: usize) -> usize {
@@ -2390,11 +2586,11 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 return 64;
             }
             let m = self.mi(row, col - 1);
-            if m.skip && m.is_inter {
+            if m.skip() && m.is_inter() {
                 return block_height(m.bsize);
             }
         }
-        tx_h(self.fs.inter_tx_sizes[row * self.fs.mi_stride + col - 1])
+        tx_h(self.fs.inter_tx_sizes[self.fs.mi_row(row) + col - 1])
     }
 
     fn read_tx_size(&mut self, allow_select: bool) {
@@ -2408,14 +2604,14 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         self.b.tx_size = max_rect;
         if bs > BLOCK_4X4 && allow_select && self.hdr.tx_mode == TX_MODE_SELECT {
             let (r, c) = (self.b.mi_row, self.b.mi_col);
-            let above_w = if self.b.avail_u && self.mi(r - 1, c).is_inter {
+            let above_w = if self.b.avail_u && self.mi(r - 1, c).is_inter() {
                 block_width(self.mi(r - 1, c).bsize)
             } else if self.b.avail_u {
                 self.above_tx_width(r, c)
             } else {
                 0
             };
-            let left_h = if self.b.avail_l && self.mi(r, c - 1).is_inter {
+            let left_h = if self.b.avail_l && self.mi(r, c - 1).is_inter() {
                 block_height(self.mi(r, c - 1).bsize)
             } else if self.b.avail_l {
                 self.left_tx_height(r, c)
@@ -2470,7 +2666,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         } else {
             self.read_tx_size(!self.b.skip || !self.b.is_inter);
             let t = self.b.tx_size;
-            let at = self.b.mi_row * st + self.b.mi_col;
+            let at = self.fs.mi_row(self.b.mi_row) + self.b.mi_col;
             fill_rect(&mut self.fs.inter_tx_sizes, st, at, w4, h4, t);
         }
         Ok(())
@@ -2530,10 +2726,28 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 i += sh;
             }
         } else {
-            let st = self.fs.mi_stride;
-            for i in 0..h4 {
-                for v in &mut self.fs.inter_tx_sizes[(row + i) * st + col..][..w4] {
-                    *v = tx;
+            // Row by row: the rows go round the mode info ring. Stores
+            // of the value for the usual widths, not a library call.
+            let fs = &mut *self.fs;
+            macro_rules! rows {
+                ($n:literal) => {
+                    for i in 0..h4 {
+                        let at = fs.mi_row(row + i) + col;
+                        fs.inter_tx_sizes[at..][..$n].copy_from_slice(&[tx; $n]);
+                    }
+                };
+            }
+            match w4 {
+                1 => rows!(1),
+                2 => rows!(2),
+                4 => rows!(4),
+                8 => rows!(8),
+                16 => rows!(16),
+                _ => {
+                    for i in 0..h4 {
+                        let at = fs.mi_row(row + i) + col;
+                        fs.inter_tx_sizes[at..][..w4].fill(tx);
+                    }
                 }
             }
             self.b.tx_size = tx;
@@ -2592,13 +2806,16 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let Some(prev) = &self.fs.prev_segment_ids else {
             return 0;
         };
-        let prev = &prev.segment_ids;
+        // Waits for the end of that frame's parse. A frame that failed
+        // has no ids: this frame predicts 0 and fails with it.
+        let prev = prev.segment_ids();
         let xm = (self.fs.mi_cols - b.mi_col).min(bw4(b.bsize));
         let ym = (self.fs.mi_rows - b.mi_row).min(bh4(b.bsize));
         let mut seg = 7;
         for y in 0..ym {
-            for x in 0..xm {
-                seg = seg.min(prev[(b.mi_row + y) * self.fs.mi_stride + b.mi_col + x]);
+            let at = (b.mi_row + y) * self.fs.mi_stride + b.mi_col;
+            for &id in prev.get(at..at + xm).unwrap_or(&[0]) {
+                seg = seg.min(id);
             }
         }
         seg
@@ -3087,13 +3304,13 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         if b.avail_l {
             let m = self.mi(b.mi_row, b.mi_col - 1);
             if m.ref_frame[0] == b.ref_frame[0] || m.ref_frame[1] == b.ref_frame[0] {
-                left_type = m.interp_filter[dir];
+                left_type = m.interp_filter()[dir];
             }
         }
         if b.avail_u {
             let m = self.mi(b.mi_row - 1, b.mi_col);
             if m.ref_frame[0] == b.ref_frame[0] || m.ref_frame[1] == b.ref_frame[0] {
-                above_type = m.interp_filter[dir];
+                above_type = m.interp_filter()[dir];
             }
         }
         ctx += if left_type == above_type {
@@ -3239,14 +3456,14 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 let mut ctx = 0;
                 if au {
                     if above[1] > INTRA_FRAME {
-                        ctx += self.mi(r - 1, c).comp_group_idx as usize;
+                        ctx += self.mi(r - 1, c).comp_group_idx() as usize;
                     } else if above[0] == ALTREF_FRAME {
                         ctx += 3;
                     }
                 }
                 if al {
                     if left[1] > INTRA_FRAME {
-                        ctx += self.mi(r, c - 1).comp_group_idx as usize;
+                        ctx += self.mi(r, c - 1).comp_group_idx() as usize;
                     } else if left[0] == ALTREF_FRAME {
                         ctx += 3;
                     }
@@ -3276,14 +3493,14 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                     let mut ctx = if fwd == bck { 3 } else { 0 };
                     if au {
                         if above[1] > INTRA_FRAME {
-                            ctx += self.mi(r - 1, c).compound_idx as usize;
+                            ctx += self.mi(r - 1, c).compound_idx() as usize;
                         } else if above[0] == ALTREF_FRAME {
                             ctx += 1;
                         }
                     }
                     if al {
                         if left[1] > INTRA_FRAME {
-                            ctx += self.mi(r, c - 1).compound_idx as usize;
+                            ctx += self.mi(r, c - 1).compound_idx() as usize;
                         } else if left[0] == ALTREF_FRAME {
                             ctx += 1;
                         }
@@ -3552,6 +3769,10 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
     // Residual (5.11.34 onward).
 
     fn residual(&mut self) -> R<()> {
+        if self.b.skip && self.b.ref_frame[0] > INTRA_FRAME {
+            self.skip_residual();
+            return Ok(());
+        }
         // The fields used below (the whole block is large to copy).
         struct B {
             bsize: u8,
@@ -3627,6 +3848,82 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         Ok(())
     }
 
+    /// The transform blocks of a plane of `self.b`, a skipped inter
+    /// block, that start inside the frame, as residual() visits them: its
+    /// first 4x4 in plane units, the transform size in 4x4s, and how many
+    /// 4x4 columns and rows they cover.
+    fn skip_cover(&self, plane: usize) -> ([usize; 2], [usize; 2], [usize; 2]) {
+        let b = &self.b;
+        let (sx, sy) = self.plane_sub(plane);
+        let tx = if b.lossless {
+            TX_4X4
+        } else {
+            self.get_tx_size(plane, b.tx_size)
+        };
+        let step = [tx_w(tx) >> 2, tx_h(tx) >> 2];
+        let psz = plane_residual_size(b.bsize, sx != 0, sy != 0);
+        let at = [b.mi_col >> sx, b.mi_row >> sy];
+        // A transform block starts inside when its first sample does.
+        let max = [
+            ((self.fs.mi_cols * 4) >> sx).div_ceil(4),
+            ((self.fs.mi_rows * 4) >> sy).div_ceil(4),
+        ];
+        let full = [bw4(psz), bh4(psz)];
+        // Steps are powers of two: rounding up to one is a mask.
+        let cover = core::array::from_fn(|i| {
+            let avail = max[i].saturating_sub(at[i]);
+            full[i].min((avail + step[i] - 1) & !(step[i] - 1))
+        });
+        (at, step, cover)
+    }
+
+    /// residual() of a skipped inter block: no coefficients and no
+    /// prediction, so only the loop filter transform sizes of the block,
+    /// those of its plane's residual size, and the flags of its decoded
+    /// 4x4s, which are those of its transform blocks together.
+    fn skip_residual(&mut self) {
+        let planes = 1 + 2 * usize::from(self.b.has_chroma);
+        for plane in 0..planes {
+            let (sx, sy) = self.plane_sub(plane);
+            let ([c0, r0], [_, step_y], [cols, rows]) = self.skip_cover(plane);
+            let psz = plane_residual_size(self.b.bsize, sx != 0, sy != 0);
+            let dims = lf_dims(
+                block_width(psz).trailing_zeros() - 2,
+                block_height(psz).trailing_zeros() - 2,
+            );
+            let st = self.fs.mi_stride;
+            for r in (0..rows).step_by(step_y) {
+                let at = self.fs.mi_row(r0 + r) + c0;
+                fill_rect(&mut self.fs.lf_tx[plane], st, at, cols, step_y, dims);
+            }
+            // Also while recording: see transform_block().
+            if plane == 0 || self.rec.is_none() {
+                self.mark_decoded_cover(plane, cols, rows);
+            }
+        }
+    }
+
+    /// The decoded flags of a plane of a skipped inter block, as
+    /// tx_mark_decoded() of each of its transform blocks sets them.
+    fn skip_mark_decoded(&mut self, plane: usize) {
+        let (_, _, [cols, rows]) = self.skip_cover(plane);
+        self.mark_decoded_cover(plane, cols, rows);
+    }
+
+    /// [`Self::skip_mark_decoded`] with the plane's cover, `cols` by
+    /// `rows` 4x4s, from [`Self::skip_cover`].
+    fn mark_decoded_cover(&mut self, plane: usize, cols: usize, rows: usize) {
+        let (sx, sy) = self.plane_sub(plane);
+        let sb_mask = self.sb_size4 - 1;
+        let sub_row = ((self.b.mi_row >> sy) << sy) & sb_mask;
+        let sub_col = ((self.b.mi_col >> sx) << sx) & sb_mask;
+        let x0 = ((sub_col >> sx) + 1).min(35);
+        let y0 = ((sub_row >> sy) + 1).min(35);
+        let x1 = (x0 + cols).min(35);
+        let y1 = (y0 + rows).min(35);
+        self.block_decoded.mark(plane, y0..y1, x0..x1);
+    }
+
     pub fn get_tx_size(&self, plane: usize, tx: u8) -> u8 {
         if plane == 0 {
             return tx;
@@ -3653,7 +3950,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         }
         let row = sy >> 2;
         let col = sx >> 2;
-        let luma_tx = self.fs.inter_tx_sizes[row * self.fs.mi_stride + col];
+        let luma_tx = self.fs.inter_tx_sizes[self.fs.mi_row(row) + col];
         if w <= tx_w(luma_tx) && h <= tx_h(luma_tx) {
             let tx = find_tx_size(w, h);
             self.transform_block(0, sx, sy, tx, 0, 0)?;
@@ -3711,8 +4008,17 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let step_x = tx_w(tx) >> 2;
         let step_y = tx_h(tx) >> 2;
         let st = self.fs.mi_stride;
-        let at = (row >> sy) * st + (col >> sx);
-        fill_rect(&mut self.fs.lf_tx[plane], st, at, step_x, step_y, tx);
+        let at = self.fs.mi_row(row >> sy) + (col >> sx);
+        let dims = if self.b.skip && self.b.ref_frame[0] > INTRA_FRAME {
+            let psz = plane_residual_size(self.b.bsize, sx != 0, sy != 0);
+            lf_dims(
+                block_width(psz).trailing_zeros() - 2,
+                block_height(psz).trailing_zeros() - 2,
+            )
+        } else {
+            lf_dims(tx_w_log2(tx) - 2, tx_h_log2(tx) - 2)
+        };
+        fill_rect(&mut self.fs.lf_tx[plane], st, at, step_x, step_y, dims);
         if let Some(log) = self.rec.as_deref_mut() {
             let sc = &mut self.scratch;
             let (nz_rows, nz_cols) = if coded && sc.logged {
@@ -3804,9 +4110,9 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 } else {
                     self.b.avail_u_chroma
                 }) || y > 0;
-                let bdf = &self.block_decoded[plane];
-                let have_above_right = bdf[sub_row >> sy][(sub_col >> sx) + step_x + 1];
-                let have_below_left = bdf[(sub_row >> sy) + step_y + 1][sub_col >> sx];
+                let bdf = &self.block_decoded;
+                let have_above_right = bdf.get(plane, sub_row >> sy, (sub_col >> sx) + step_x + 1);
+                let have_below_left = bdf.get(plane, (sub_row >> sy) + step_y + 1, sub_col >> sx);
                 self.predict_intra(
                     plane,
                     start_x,
@@ -3838,29 +4144,35 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let sub_col = ((start_x << sx) >> 2) & sb_mask;
         let step_x = tx_w(tx) >> 2;
         let step_y = tx_h(tx) >> 2;
-        let bdf = &mut self.block_decoded[plane];
         let x0 = ((sub_col >> sx) + 1).min(35);
         let x1 = (x0 + step_x).min(35);
         let y0 = ((sub_row >> sy) + 1).min(35);
         let y1 = (y0 + step_y).min(35);
-        for r in &mut bdf[y0..y1] {
-            fill_small(&mut r[x0..x1], true);
-        }
+        self.block_decoded.mark(plane, y0..y1, x0..x1);
     }
 
     /// Predicts and reconstructs the blocks of `log`, recorded by a tile
-    /// decoder of the same frame whose mode info `self.fs` holds. The
-    /// blocks are swapped out of the log (it is spent afterwards).
-    pub fn replay(&mut self, log: &mut ReconLog) -> R<()> {
-        let mut bi = 0;
-        for (si, sb) in log.sbs.iter().enumerate() {
+    /// decoder of the same frame whose mode info `self.fs` holds, from the
+    /// superblock and block `from` on (both 0 to start).
+    ///
+    /// When the prediction of a block fails, `from` is left at that block:
+    /// a caller that can mend the cause (rows of a reference that were not
+    /// published yet, see [`Scratch::want_rows`]) calls again with it, and
+    /// the block is predicted afresh. Nothing of it was reconstructed.
+    pub fn replay(&mut self, log: &ReconLog, from: &mut (usize, usize)) -> R<()> {
+        let mut bi = from.1;
+        for (si, sb) in log.sbs.iter().enumerate().skip(from.0) {
             [
                 self.mi_row_start,
                 self.mi_row_end,
                 self.mi_col_start,
                 self.mi_col_end,
             ] = sb.tile;
-            self.clear_block_decoded_flags(sb.r, sb.c, self.num_planes);
+            // A superblock taken up again part way keeps the flags of the
+            // blocks it has done.
+            if bi <= sb.first_block {
+                self.clear_block_decoded_flags(sb.r, sb.c, self.num_planes);
+            }
             let end = log
                 .sbs
                 .get(si + 1)
@@ -3868,8 +4180,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             while bi < end {
                 let rec = &log.blocks[bi];
                 rec.b.apply(&mut self.b);
-                let info = std::hint::black_box(mode_info_of(&self.b, rec.b.delta_lf));
-                self.write_mode_info(&info);
+                let info = std::hint::black_box(mode_info_of(&self.b));
+                self.write_mode_info(&info, rec.b.delta_lf);
                 if let Some((at, cands)) = rec.extra {
                     let b = &mut self.b;
                     if b.palette_size_y != 0 || b.palette_size_uv != 0 {
@@ -3894,13 +4206,22 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                         b.cand_list[..n].copy_from_slice(&log.cands[cands as usize..][..n]);
                     }
                 }
-                self.compute_prediction()?;
+                if let Err(e) = self.compute_prediction() {
+                    *from = (si, bi);
+                    return Err(e);
+                }
                 let op_end = log
                     .blocks
                     .get(bi + 1)
                     .map_or(log.ops.len(), |n| n.first_op as usize);
                 for op in &log.ops[rec.first_op as usize..op_end] {
                     self.replay_tx(op, &log.coefs);
+                }
+                // A skipped inter block logs no transform blocks.
+                if self.b.skip && self.b.ref_frame[0] > INTRA_FRAME {
+                    for plane in 0..1 + 2 * usize::from(self.b.has_chroma) {
+                        self.skip_mark_decoded(plane);
+                    }
                 }
                 bi += 1;
             }
@@ -3990,14 +4311,13 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             return 0;
         }
         let set = self.get_tx_set(tx);
-        let st = self.fs.mi_stride;
         if plane == 0 {
-            return self.fs.tx_types[by * st + bx];
+            return self.fs.tx_types[self.fs.mi_row(by) + bx];
         }
         if self.b.is_inter {
             let x4 = self.b.mi_col.max(bx << u32::from(self.sub_x));
             let y4 = self.b.mi_row.max(by << u32::from(self.sub_y));
-            let t = self.fs.tx_types[y4 * st + x4];
+            let t = self.fs.tx_types[self.fs.mi_row(y4) + x4];
             if !self.is_tx_type_in_set(set, t) {
                 return 0;
             }
@@ -4063,7 +4383,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         }
         let st = self.fs.mi_stride;
         let (w4, h4) = (tx_w(tx) >> 2, tx_h(tx) >> 2);
-        fill_rect(&mut self.fs.tx_types, st, y4 * st + x4, w4, h4, t);
+        let at = self.fs.mi_row(y4) + x4;
+        fill_rect(&mut self.fs.tx_types, st, at, w4, h4, t);
     }
 
     /// coeffs() — reads one transform block's coefficients into the
@@ -4153,7 +4474,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         if all_zero {
             if plane == 0 {
                 let st = self.fs.mi_stride;
-                fill_rect(&mut self.fs.tx_types, st, y4 * st + x4, w4, h4, 0);
+                let at = self.fs.mi_row(y4) + x4;
+                fill_rect(&mut self.fs.tx_types, st, at, w4, h4, 0);
             }
         } else {
             if plane == 0 {

@@ -28,7 +28,7 @@ pub struct NodeState<P> {
     left: [[u8; 32]; 7],
     above_palette: [Vec<[u16; 8]>; 2],
     left_palette: [[[u16; 8]; 32]; 2],
-    block_decoded: [[[bool; 35]; 35]; 3],
+    block_decoded: crate::dec::tile::BlockDecoded,
     delta_lf: [i8; 4],
     current_q_index: i32,
     read_deltas: bool,
@@ -110,7 +110,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             left,
             above_palette: [ap(0), ap(1)],
             left_palette: self.left_palette,
-            block_decoded: self.block_decoded,
+            block_decoded: *self.block_decoded,
             delta_lf: self.delta_lf,
             current_q_index: self.current_q_index,
             read_deltas: self.read_deltas,
@@ -167,7 +167,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             *v = s.cdef;
         }
         self.left_palette = s.left_palette;
-        self.block_decoded = s.block_decoded;
+        *self.block_decoded = s.block_decoded;
         self.delta_lf = s.delta_lf;
         self.current_q_index = s.current_q_index;
         self.read_deltas = s.read_deltas;
@@ -293,7 +293,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let first = first?;
         if pa == PARTITION_NONE
             && self.mode.inter_frame
-            && (self.fs.mi[nd.r * self.fs.mi_stride + nd.c].skip
+            && (self.fs.mi[nd.r * self.fs.mi_stride + nd.c].skip()
                 || (self.mode.merge_accept > 0.0 && {
                     let h = n / 2;
                     let es = self.est_block(x, y, h, h)

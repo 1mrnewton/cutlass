@@ -1,7 +1,9 @@
 # cutlass-av1
 
 An AV1 decoder and encoder. The crate is safe Rust (`#![forbid(unsafe_code)]`),
-depends only on `cutlass-decode` and `cutlass-encode`, and links no C library.
+depends only on `cutlass-decode`, `cutlass-encode` and `cutlass-simd`, and links
+no C library. Its sample loops run on the NEON kernels of `cutlass-simd` on
+aarch64, and on their scalar twins elsewhere.
 The desktop app registers it for AV1 decode and encode. On macOS, when hardware
 decode or encode is on in Settings, the VideoToolbox opener is asked first and
 this crate opens when that one declines. The Windows platform crate registers
@@ -91,7 +93,11 @@ for out in dec.drain()? { /* the pictures still being decoded */ }
 ```
 
 One packet is one temporal unit. `Av1Decoder` decodes on as many threads as
-the machine has, and a picture may come out of a later `push` or of `drain`.
+the machine has unless `set_threads` says otherwise, and a picture may come out
+of a later `push` or of `drain`. With two or more threads the parse,
+reconstruction and filters of a frame run in a pipeline beside other frames',
+and the tiles of a frame are parsed at the same time;
+`Av1Core::frames_at_once` turns that off for less memory.
 
 Lower level: `Av1Core::decode` takes one temporal unit and returns its shown
 frames; `decode_delayed` and `drain` return them late so that frames decode
@@ -118,6 +124,9 @@ cargo test --release -p cutlass-av1
 - `tests/metadata.rs` checks the published color, timing, render size and
   operating point. `tests/obu.rs` checks OBU framing and the tile list
   refusal.
+- Every NEON kernel in `cutlass-simd` has a scalar twin written from the
+  specification and a test comparing the two on random and edge inputs
+  (`cargo test --release -p cutlass-simd`).
 - Unit tests compare the transform, CDEF and arithmetic coder kernels with
   direct transcriptions of the specification, round-trip the sequence and
   frame headers through the writer and the parser, and check that the encoder
@@ -143,21 +152,46 @@ Needs FFmpeg, and is not run by `cargo test`:
 
 ## Speed against FFmpeg
 
-Measured on 10 November 2026 at commit `ed0743d2`, on an Apple M5 Pro (18 cores, 48 GB) running macOS 27.0.1, against FFmpeg 8.1.1. Built with `cargo build --release` and rustc 1.99.1.
-
-**Decode, av1.** Input: 600 frames of 1920×1080 at 30 frames a second (17 MB), written by FFmpeg with `-c:v libsvtav1 -preset 8 -crf 35 -svtav1-params lp=0`.
+**Decode, av1.** Measured on 13 November 2026 with the AV1 work of branch
+`av1` merged into `development` (`aac363e8`), on an Apple M5 Pro (18 cores,
+48 GB) running macOS 27.0.1 with other work running (load average about 6),
+against FFmpeg 8.1.1. Built with `cargo build --release` and rustc 1.99.1.
+Input: 373 frames of 1920×1080 at 30 frames a second (8.1 MB), written by
+FFmpeg with `-c:v libsvtav1 -preset 8 -crf 35`.
 
 |  | Cutlass | FFmpeg (`libdav1d`) |
 | --- | ---: | ---: |
-| Wall time | 1.30 s | 0.98 s |
-| Speed | 462 frames/s | 612 frames/s |
-| CPU time | 6.34 s | 3.01 s |
-| Peak memory | 520 MB | 111 MB |
+| Wall time | 0.67 s | 0.52 s |
+| Speed | 557 frames/s | 717 frames/s |
+| CPU time | 2.40 s | 1.61 s |
+| Peak memory | 332 MB | 110 MB |
 | Threads allowed | 16 | 16 |
 
-Cutlass is **1.3× slower** than FFmpeg here. Both decoders produced exactly the same samples.
+Cutlass is **1.3× slower** than FFmpeg here. Both decoders produced exactly the
+same samples. The gap is outside the decoding itself: the `av1bench` example,
+which decodes through `Av1Core` and keeps the pictures as they are, took 307 ms
+on the same file with 16 threads against 537 ms for the `ffmpeg` command with
+libdav1d (median of 9 runs taken in turn; that build used a profile from
+`scripts/pgo_profile.py`, worth 3 to 5%). The likely cost is `Av1Decoder`
+copying each shown picture into packed bytes one sample at a time (1.16 GB
+here); that has not been profiled yet.
 
-**Encode, av1.** Input: 300 raw frames of 1920×1080 at 30 frames a second, asked for 4 Mbit/s.
+**Decode, 4K, `Av1Core`.** Two 4K 8-bit clips of 240 frames, `av1bench`
+against `ffmpeg -c:v libdav1d -threads N -f null`, whole-process wall time,
+median of 11 to 21 runs taken in turn (13 November 2026, commit `67cc080d` of
+branch `av1`, release build with a profile from the fixtures, not the clips):
+
+| Clip | Threads | Cutlass | FFmpeg (`libdav1d`) |
+| --- | ---: | ---: | ---: |
+| CDEF on | 1 | 2453.9 ms | 2583.5 ms |
+| Deblocking only | 1 | 1893.8 ms | 1918.3 ms |
+| CDEF on | 18 | 312.3 ms | 321.9 ms |
+| Deblocking only | 18 | 284.1 ms | 333.1 ms |
+
+The decoder is faster than libdav1d, which uses hand-written assembly, on one
+thread and on 18 on both clips, with the same output.
+
+**Encode, av1.** Measured on 10 November 2026 at commit `ed0743d2`, same machine, FFmpeg 8.1.1, rustc 1.99.1. Input: 300 raw frames of 1920×1080 at 30 frames a second, asked for 4 Mbit/s.
 
 |  | Cutlass | FFmpeg (`libsvtav1 preset 10`) | FFmpeg (`libsvtav1 preset 6`) |
 | --- | ---: | ---: | ---: |
@@ -180,16 +214,13 @@ To run it again: `cargo build --release -p media-bench`, then `python3 scripts/b
 Decoder:
 
 - No large-scale tile decoding.
-- The tiles of one frame are not decoded in parallel. With two or more threads
-  a frame with one tile column is parsed on one thread and reconstructed and
-  filtered on others; a frame with several tile columns or with super
-  resolution is parsed and reconstructed on one thread.
-- At most 16 frames decode at once. `Av1Decoder` has no thread setting; it
-  uses `std::thread::available_parallelism()`.
+- A frame with super resolution is not pipelined: it is parsed and
+  reconstructed on one thread.
+- At most 16 frames decode at once.
 - The decoder model info is published but no decoder model is run.
 - `Av1Decoder` copies every shown picture into packed bytes one sample at a
   time.
-- No SIMD intrinsics; the kernels rely on the compiler's vectorization.
+- The vector kernels are NEON only; other targets run the scalar twins.
 
 Encoder:
 

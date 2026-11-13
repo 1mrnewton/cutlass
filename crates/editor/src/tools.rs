@@ -93,15 +93,6 @@ const fn ready(id: ToolId, label: &'static str) -> Tool {
     }
 }
 
-const fn later(id: ToolId, label: &'static str) -> Tool {
-    Tool {
-        id,
-        label,
-        ready: false,
-        opens: None,
-    }
-}
-
 const fn opens(id: ToolId, label: &'static str, bar: Bar) -> Tool {
     Tool {
         id,
@@ -119,10 +110,10 @@ const ROOT: &[Tool] = &[
     opens(T::Text, "Text", Bar::Text),
     opens(T::Effects, "Effects", Bar::Effects),
     opens(T::Overlay, "Overlay", Bar::Overlay),
-    later(T::Captions, "Captions"),
+    ready(T::Captions, "Captions"),
     ready(T::Filters, "Filters"),
     ready(T::Adjust, "Adjust"),
-    later(T::Stickers, "Stickers"),
+    ready(T::Stickers, "Stickers"),
     ready(T::AspectRatio, "Ratio"),
     ready(T::Background, "Background"),
 ];
@@ -145,7 +136,7 @@ const MAIN_CLIP: &[Tool] = &[
     ready(T::ExtractAudio, "Extract audio"),
     ready(T::Filters, "Filters"),
     ready(T::Adjust, "Adjust"),
-    later(T::Replace, "Replace"),
+    ready(T::Replace, "Replace"),
 ];
 
 const OVERLAY_CLIP: &[Tool] = &[
@@ -165,6 +156,7 @@ const OVERLAY_CLIP: &[Tool] = &[
     ready(T::Reverse, "Reverse"),
     ready(T::Filters, "Filters"),
     ready(T::Adjust, "Adjust"),
+    ready(T::Replace, "Replace"),
 ];
 
 const AUDIO_CLIP: &[Tool] = &[
@@ -176,6 +168,7 @@ const AUDIO_CLIP: &[Tool] = &[
     ready(T::Duplicate, "Duplicate"),
     ready(T::Beats, "Beats"),
     ready(T::Reverse, "Reverse"),
+    ready(T::Replace, "Replace"),
 ];
 
 const TEXT_CLIP: &[Tool] = &[
@@ -208,14 +201,14 @@ const OTHER_CLIP: &[Tool] = &[
 
 const AUDIO: &[Tool] = &[
     ready(T::ImportSound, "Sounds"),
-    later(T::ExtractAudio, "Extract"),
+    ready(T::ExtractAudio, "Extract"),
 ];
 
 const TEXT: &[Tool] = &[
     ready(T::AddText, "Add text"),
-    later(T::Captions, "Captions"),
-    later(T::Stickers, "Stickers"),
-    later(T::Draw, "Draw"),
+    ready(T::Captions, "Captions"),
+    ready(T::Stickers, "Stickers"),
+    ready(T::Draw, "Draw"),
 ];
 
 const EFFECTS: &[Tool] = &[ready(T::VideoEffects, "Video effects")];

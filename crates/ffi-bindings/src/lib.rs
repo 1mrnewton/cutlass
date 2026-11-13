@@ -266,6 +266,70 @@ pub fn filter_poster(filter_id: String, width: u32, height: u32) -> Option<Frame
     })
 }
 
+/// A sticker the shelf shows. `id` is what `add_sticker` takes.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct StickerChoice {
+    pub id: String,
+    pub name: String,
+    /// It plays round as an animation.
+    pub animated: bool,
+}
+
+/// Every sticker the app ships, in shelf order.
+#[uniffi::export]
+#[must_use]
+pub fn sticker_choices() -> Vec<StickerChoice> {
+    cutlass_ffi::phone_stickers()
+        .into_iter()
+        .map(|sticker| StickerChoice {
+            id: sticker.id,
+            name: sticker.name,
+            animated: sticker.animated,
+        })
+        .collect()
+}
+
+/// Sticker `sticker_id` `side` pixels square for its shelf tile; an
+/// animation shows its middle frame. `None` for a sticker not shipped.
+#[uniffi::export]
+#[must_use]
+pub fn sticker_poster(sticker_id: String, side: u32) -> Option<Frame> {
+    let picture = cutlass_ffi::sticker_poster(&sticker_id, side)?;
+    Some(Frame {
+        width: picture.width,
+        height: picture.height,
+        rgba: picture.rgba,
+    })
+}
+
+/// A shape the shelf shows. `id` is what `add_shape` takes; `name` is the
+/// shape's own, such as `Circle`, for the phone to draw its tile.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct ShapeChoice {
+    pub id: String,
+    pub name: String,
+}
+
+/// Every shape, in shelf order.
+#[uniffi::export]
+#[must_use]
+pub fn shape_choices() -> Vec<ShapeChoice> {
+    cutlass_ffi::phone_shapes()
+        .into_iter()
+        .map(|shape| ShapeChoice {
+            id: shape.id,
+            name: shape.name,
+        })
+        .collect()
+}
+
+/// A point on the canvas, in canvas pixels from the top left, y down.
+#[derive(Clone, Copy, Debug, uniffi::Record)]
+pub struct CanvasPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
 /// One step of a timeline coast: points moved, and the speed after.
 #[derive(Clone, Copy, Debug, uniffi::Record)]
 pub struct Fling {
@@ -1038,6 +1102,21 @@ impl Editor {
             .map_err(EditorError::from)
     }
 
+    /// Play the picked file at `path` in `clip_id` in place of its media,
+    /// keeping the clip's place and edits: one undo step. A picture takes
+    /// a photo or video, a sound a sound.
+    pub fn replace_file(&self, clip_id: String, path: String) -> Result<(), EditorError> {
+        self.run(move |host| host.replace_file(&SegmentId::new(clip_id), &PathBuf::from(path)))?
+            .map_err(EditorError::from)
+    }
+
+    /// Bring in the sound of the picked video at `path` as a sound in the
+    /// library, without its picture. Returns the material id, for `append`.
+    pub fn import_sound_of(&self, path: String) -> Result<String, EditorError> {
+        self.run(move |host| host.import_sound_of(&PathBuf::from(path)))?
+            .map_err(EditorError::from)
+    }
+
     /// Add a library item at the end of its lane. Returns the clip id.
     pub fn append(&self, material_id: String) -> Result<String, EditorError> {
         self.run(move |host| host.append(&material_id))?
@@ -1147,6 +1226,31 @@ impl Editor {
     /// step. Returns the layer's id.
     pub fn add_adjustment(&self, at_us: i64) -> Result<String, EditorError> {
         self.run(move |host| host.add_adjustment(Micros(at_us)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Put sticker `sticker_id` at `at_us` on the first sticker row with
+    /// room, else a new one. One undo step. Returns the clip's id.
+    pub fn add_sticker(&self, sticker_id: String, at_us: i64) -> Result<String, EditorError> {
+        self.run(move |host| host.add_sticker(&sticker_id, Micros(at_us)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Put shape `shape_id` at `at_us` on the first sticker row with room,
+    /// else a new one. One undo step. Returns the clip's id.
+    pub fn add_shape(&self, shape_id: String, at_us: i64) -> Result<String, EditorError> {
+        self.run(move |host| host.add_shape(&shape_id, Micros(at_us)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Put a freehand stroke through `trace` at `at_us` as a smooth line on
+    /// a sticker row. One undo step. Returns the clip's id.
+    pub fn draw_stroke(&self, trace: Vec<CanvasPoint>, at_us: i64) -> Result<String, EditorError> {
+        let trace: Vec<[f64; 2]> = trace.into_iter().map(|point| [point.x, point.y]).collect();
+        self.run(move |host| host.draw_stroke(&trace, Micros(at_us)))?
             .map(|id| id.as_str().to_owned())
             .map_err(EditorError::from)
     }

@@ -3,6 +3,7 @@ package com.scytheralpha.cutlass_android
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -20,6 +21,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -55,6 +57,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -105,6 +108,15 @@ fun EditorScreen(project: ProjectSummary, home: () -> Unit) {
     ) { uris -> importPicked(context, model, scope, uris) }
 
     DisposableEffect(model) { onDispose { model.pause() } }
+    // System back steps out one layer at a time: the open panel, then the
+    // selection, then a sub bar. Only then does it leave for the projects.
+    BackHandler(enabled = panel != null || model.selectedClip != null || openBar != ToolBar.ROOT) {
+        when {
+            panel != null -> panel = null
+            model.selectedClip != null -> model.selectedClip = null
+            else -> openBar = ToolBar.ROOT
+        }
+    }
     LaunchedEffect(model.selectedClip) {
         if (model.selectedClip == null && panel !is Panel.Text && panel != Panel.Effects &&
             panel != Panel.Ratio && panel != Panel.Background
@@ -184,35 +196,41 @@ fun EditorScreen(project: ProjectSummary, home: () -> Unit) {
 
 @Composable
 private fun Preview(model: EditorModel, editText: (String) -> Unit) {
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .aspectRatio(16f / 10f)
-            // A box larger than the preview stays inside it.
-            .clipToBounds()
-            .background(Palette.editor),
-        contentAlignment = Alignment.Center,
-    ) {
-        // Lighter than the canvas, so the canvas shows its ratio.
+    // Fit 16:10 into the width, but never past this share of the screen's
+    // height, so a phone on its side keeps the transport and the timeline.
+    // The canvas inside keeps its own ratio either way.
+    val tallest = (LocalConfiguration.current.screenHeightDp * 0.45f).dp
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
         Box(
             Modifier
-                .aspectRatio(model.canvasAspect, matchHeightConstraintsFirst = model.canvasAspect < 1.6f)
-                .background(Color.Black),
+                .fillMaxWidth()
+                .height(minOf(maxWidth / 1.6f, tallest))
+                // A box larger than the preview stays inside it.
+                .clipToBounds()
+                .background(Palette.editor),
+            contentAlignment = Alignment.Center,
         ) {
-            model.picture?.let {
-                Image(
-                    it,
-                    contentDescription = null,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize(),
-                )
+            // Lighter than the canvas, so the canvas shows its ratio.
+            Box(
+                Modifier
+                    .aspectRatio(model.canvasAspect, matchHeightConstraintsFirst = model.canvasAspect < 1.6f)
+                    .background(Color.Black),
+            ) {
+                model.picture?.let {
+                    Image(
+                        it,
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+                if (!model.isPlaying) {
+                    StageOverlay(model = model, editText = editText)
+                }
             }
-            if (!model.isPlaying) {
-                StageOverlay(model = model, editText = editText)
+            if (model.isOpening || model.isImporting) {
+                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(32.dp))
             }
-        }
-        if (model.isOpening || model.isImporting) {
-            CircularProgressIndicator(color = Color.White, modifier = Modifier.size(32.dp))
         }
     }
 }

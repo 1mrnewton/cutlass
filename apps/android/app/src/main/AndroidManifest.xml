@@ -17,6 +17,7 @@
         android:theme="@style/Theme.Cutlassandroid">
         <activity
             android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|density|uiMode|fontScale|locale|layoutDirection"
             android:exported="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.Cutlassandroid">

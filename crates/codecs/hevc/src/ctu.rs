@@ -1408,11 +1408,12 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             let mut p = start;
             while p > 0 {
                 let pu = p as usize;
-                if e.decide(&mut self.cabac.ctx, base + usize::from(table[pu])) {
-                    sig[count] = pu as u8;
-                    count += 1;
-                    infer_dc = false;
-                }
+                // Without a branch on the flag, which no predictor guesses:
+                // the position is written every time and kept when set.
+                let flag = e.decide(&mut self.cabac.ctx, base + usize::from(table[pu]));
+                sig[count & 15] = pu as u8;
+                count += usize::from(flag);
+                infer_dc &= !flag;
                 p -= 1;
             }
             if p == 0 {
@@ -1444,22 +1445,18 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             }
             greater1_state = 1;
             let mut greater1 = [false; 16];
-            let mut first_g1 = None;
             let g1_base = cabac::GREATER1 + ctx_set * 4 + if chroma { 16 } else { 0 };
+            // `greater1Ctx` after a flag (clause 9.3.4.2.6): 0 once a flag
+            // was set, else counting up to 3.
+            const G1_NEXT: [u32; 8] = [0, 0, 2, 0, 3, 0, 3, 0];
+            let mut first = 8usize;
             for (k, flag) in greater1.iter_mut().enumerate().take(count.min(8)) {
-                *flag = e.decide(
-                    &mut self.cabac.ctx,
-                    g1_base + greater1_state.min(3) as usize,
-                );
-                if *flag {
-                    greater1_state = 0;
-                    if first_g1.is_none() {
-                        first_g1 = Some(k);
-                    }
-                } else if greater1_state > 0 && greater1_state < 3 {
-                    greater1_state += 1;
-                }
+                let f = e.decide(&mut self.cabac.ctx, g1_base + greater1_state as usize);
+                *flag = f;
+                greater1_state = G1_NEXT[(greater1_state as usize & 3) * 2 + usize::from(f)];
+                first = if f && first == 8 { k } else { first };
             }
+            let first_g1 = (first < 8).then_some(first);
             let mut greater2 = false;
             if first_g1.is_some() {
                 greater2 = e.decide(

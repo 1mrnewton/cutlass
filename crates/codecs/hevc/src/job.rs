@@ -15,7 +15,7 @@ use crate::ctu::{Cu, SliceDecoder, Wave};
 use crate::frame::{Done, Frame, OutSamples};
 use crate::nal::Nal;
 use crate::picture::{ColMv, Picture, Work};
-use crate::pixel::Pixel;
+use crate::pixel::{AnyRows, Pixel};
 use crate::ps::Sps;
 use crate::slice::SliceType;
 
@@ -53,6 +53,9 @@ pub struct Job<P> {
     /// the same memory from picture to picture instead of giving it back
     /// to the system and taking it again, page by page.
     pub out: Option<OutRows>,
+    /// The picture is output as its frame's own samples
+    /// ([`OutSamples::Shared`]), and `out` is `None`.
+    pub share: bool,
     /// Threads for the rows of a wavefront slice segment.
     pub row_threads: usize,
     /// Whether a later picture may reference this one. When not, its final
@@ -78,6 +81,7 @@ impl<P: Pixel> Job<P> {
             col,
             slices,
             out,
+            share,
             row_threads,
             reference,
         } = self;
@@ -97,7 +101,10 @@ impl<P: Pixel> Job<P> {
             }
         }
         let (writer, out) = pipe.finish();
-        let out = out.map(OutRows::finish);
+        let out = match &frame.rows {
+            AnyRows::Eight(rows) if share => rows.whole().map(OutSamples::Shared),
+            _ => out.map(OutRows::finish),
+        };
         drop(writer);
         frame.finish(Done { result, out });
         Leftovers { pic, work }
@@ -195,7 +202,14 @@ impl OutRows {
             let shift = self.shift;
             let dst = self.rows_mut(c, next, n);
             let row = |i: usize| &rows[i * stride + x0..i * stride + x0 + w];
-            if P::bytes(&[]).is_some() {
+            if x0 == 0
+                && w == stride
+                && let Some(bytes) = P::bytes(rows.get(..n * w).unwrap_or_default())
+                && bytes.len() == dst.len()
+            {
+                // Uncropped rows lie end to end on both sides: one copy.
+                dst.copy_from_slice(bytes);
+            } else if P::bytes(&[]).is_some() {
                 for (i, out) in dst.chunks_exact_mut(w).enumerate() {
                     if let Some(bytes) = P::bytes(row(i)) {
                         out.copy_from_slice(bytes);

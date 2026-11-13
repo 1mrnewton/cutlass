@@ -559,10 +559,7 @@ impl FrameJob {
 
 /// The writer of the final rows of `pic` (its visible samples), in the
 /// buffers `bufs` when they fit.
-fn shared_rows_of<P: PicturePixel>(
-    pic: &Picture<P>,
-    bufs: Option<[PlaneBuf<P>; 3]>,
-) -> RowsWriter<P> {
+fn shared_rows_of<P: PicturePixel>(pic: &Picture<P>, bufs: Option<PlaneBuf<P>>) -> RowsWriter<P> {
     let mut widths = [0; 3];
     let mut heights = [0; 3];
     let mut shifts = [0; 3];
@@ -770,7 +767,7 @@ struct Spares<P> {
     /// Buffers of rows sent to the filters ([`copy_rows_out`]).
     bands: Vec<[Vec<P>; 3]>,
     /// Buffers of the final rows of frames ([`SharedRows`]).
-    shared: Vec<[PlaneBuf<P>; 3]>,
+    shared: Vec<PlaneBuf<P>>,
     /// Pictures of a superblock row (see [`take_sb_row`]).
     sb_rows: Vec<Picture<P>>,
     /// Reconstruction scratch of the backends.

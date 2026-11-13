@@ -863,7 +863,7 @@ fn guarded<P: Pixel>(job: Job<P>) -> Option<Leftovers<P>> {
 fn make_job<P: Pixel>(
     shared: &Shared,
     works: &Mutex<Vec<Work<P>>>,
-    frame_bufs: &Mutex<Vec<[cutlass_simd::shared_rows::PlaneBuf<P>; 3]>>,
+    frame_bufs: &Mutex<Vec<cutlass_simd::shared_rows::PlaneBuf<P>>>,
     wrap: fn(Arc<cutlass_simd::shared_rows::SharedRows<P>>) -> AnyRows,
     (pic, slices, output, row_threads): (Picture, Vec<SliceData>, Option<OutForm>, usize),
     (width, height, log2_ctb, poc, reference): (usize, usize, u32, i32, bool),
@@ -886,12 +886,18 @@ fn make_job<P: Pixel>(
             None => Work::new(width, height, log2_ctb, slots),
         }
     };
-    let bufs = lock(frame_bufs).pop();
+    let bufs = crate::frame::free(frame_bufs);
     let (frame, writer, col) = Frame::new((width, height), poc, &shared.frames, wrap, bufs);
-    let spare = (output == Some(OutForm::Packed))
+    // The frame of an 8-bit picture that is not cropped holds its planes
+    // as the packed picture does: it is the output itself.
+    let share =
+        output == Some(OutForm::Packed) && pic.sps.crop == [0; 4] && P::bytes(&[]).is_some();
+    let spare = (output == Some(OutForm::Packed) && !share)
         .then(|| shared.spare_packed())
         .flatten();
-    let out = output.map(|form| OutRows::new(&pic.sps, form, spare));
+    let out = output
+        .filter(|_| !share)
+        .map(|form| OutRows::new(&pic.sps, form, spare));
     Job {
         frame,
         pic,
@@ -900,6 +906,7 @@ fn make_job<P: Pixel>(
         col,
         slices,
         out,
+        share,
         row_threads,
         reference,
     }
@@ -1093,16 +1100,20 @@ fn packed_output(
     meta: &Meta,
     shared: &Shared,
 ) -> Result<Option<Output>, CodecError> {
-    let OutSamples::Packed(bytes) = samples else {
-        return Ok(None);
+    let bytes = match samples {
+        OutSamples::Packed(bytes) => {
+            let bytes = Arc::new(bytes);
+            shared.keep_packed(&bytes);
+            bytes
+        }
+        OutSamples::Shared(bytes) => bytes,
+        OutSamples::Planes { .. } => return Ok(None),
     };
     let sps = &meta.sps;
     let [left, right, top, bottom] = sps.crop.map(|v| v as usize);
     let w = (sps.width as usize).saturating_sub(left + right);
     let h = (sps.height as usize).saturating_sub(top + bottom);
     let vui = &sps.vui;
-    let bytes = Arc::new(bytes);
-    shared.keep_packed(&bytes);
     let picture = PictureOutput::cpu_shared(
         PictureInfo::new(
             w as u32,

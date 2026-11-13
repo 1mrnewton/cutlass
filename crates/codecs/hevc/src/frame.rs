@@ -23,6 +23,9 @@ pub struct Done {
 pub enum OutSamples {
     /// Luma, then Cb, then Cr, 8 bits each, one buffer.
     Packed(Vec<u8>),
+    /// The frame's own samples, 8 bits, packed as above: the picture is
+    /// not cropped, so its frame is the output.
+    Shared(Arc<Vec<u8>>),
     /// Each plane on its own, 8 bits, and above 8 bits the full samples.
     Planes {
         eight: [Vec<u8>; 3],
@@ -33,9 +36,9 @@ pub enum OutSamples {
 /// Buffers of finished pictures for the next ones.
 #[derive(Default)]
 pub struct Spares {
-    pub eight: Mutex<Vec<[PlaneBuf<u8>; 3]>>,
-    pub deep: Mutex<Vec<[PlaneBuf<u16>; 3]>>,
-    pub col: Mutex<Vec<[PlaneBuf<ColMv>; 3]>>,
+    pub eight: Mutex<Vec<PlaneBuf<u8>>>,
+    pub deep: Mutex<Vec<PlaneBuf<u16>>>,
+    pub col: Mutex<Vec<PlaneBuf<ColMv>>>,
     /// Frames released so far (see [`Frame::release`]), to wait for any.
     released: Mutex<u64>,
     released_one: Condvar,
@@ -44,6 +47,13 @@ pub struct Spares {
     running: Mutex<usize>,
     slot_free: Condvar,
     slots: AtomicUsize,
+}
+
+/// A buffer of `pool` that no one else holds now, to fill again.
+pub fn free<P>(pool: &Mutex<Vec<PlaneBuf<P>>>) -> Option<PlaneBuf<P>> {
+    let mut pool = lock(pool);
+    let at = pool.iter().position(|b| Arc::strong_count(b) == 1)?;
+    Some(pool.swap_remove(at))
 }
 
 thread_local! {
@@ -137,13 +147,13 @@ impl Frame {
         poc: i32,
         spares: &Arc<Spares>,
         wrap: impl FnOnce(Arc<SharedRows<P>>) -> AnyRows,
-        bufs: Option<[PlaneBuf<P>; 3]>,
+        bufs: Option<PlaneBuf<P>>,
     ) -> (Arc<Self>, RowsWriter<P>, RowsWriter<ColMv>) {
         let (cw, ch) = (width / 2, height / 2);
         let writer = RowsWriter::new([width, cw, cw], [height, ch, ch], [0, 1, 1], bufs);
         let col_stride = width.div_ceil(16);
         let col_rows = height.div_ceil(16);
-        let col_bufs = lock(&spares.col).pop();
+        let col_bufs = free(&spares.col);
         let col = RowsWriter::new([col_stride, 0, 0], [col_rows, 0, 0], [4, 0, 0], col_bufs);
         let frame = Arc::new(Self {
             poc,

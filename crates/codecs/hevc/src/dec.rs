@@ -20,7 +20,7 @@ use cutlass_decode::{
 };
 
 use crate::frame::{Frame, OutSamples, Spares};
-use crate::job::{Job, Leftovers, OutForm, SliceData};
+use crate::job::{Job, Leftovers, OutForm, OutRows, SliceData};
 use crate::nal::{self, Nal};
 use crate::picture::{Picture, RefPic, SliceCtx, Work, lock};
 use crate::pixel::{AnyRows, Pixel};
@@ -371,7 +371,11 @@ impl HevcDecoder {
     fn split(&self, wavefront: bool) -> (usize, usize) {
         match self.split {
             Some(split) => split,
-            None if wavefront && self.threads >= 4 => (self.threads / 2, 2),
+            // Pictures decode at once up to eight, each on a thread of its
+            // own: their data stays on one core, and a picture waits only
+            // for the rows of its references it reads. Past eight, the rows
+            // of a wavefront picture share the threads.
+            None if wavefront && self.threads > 8 => (8, self.threads / 8),
             None => (self.threads, 1),
         }
     }
@@ -850,6 +854,7 @@ fn make_job<P: Pixel>(
     };
     let bufs = lock(frame_bufs).pop();
     let (frame, writer, col) = Frame::new((width, height), poc, &shared.frames, wrap, bufs);
+    let out = output.map(|form| OutRows::new(&pic.sps, form));
     Job {
         frame,
         pic,
@@ -857,7 +862,7 @@ fn make_job<P: Pixel>(
         writer,
         col,
         slices,
-        output,
+        out,
         row_threads,
         reference,
     }

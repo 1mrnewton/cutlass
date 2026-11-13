@@ -48,8 +48,11 @@ pub struct Job<P> {
     pub writer: RowsWriter<P>,
     pub col: RowsWriter<ColMv>,
     pub slices: Vec<SliceData>,
-    /// The output form, when the picture is output.
-    pub output: Option<OutForm>,
+    /// The output, when the picture is output. It is made on the thread
+    /// that takes the pictures and frees them: the allocator then hands
+    /// the same memory from picture to picture instead of giving it back
+    /// to the system and taking it again, page by page.
+    pub out: Option<OutRows>,
     /// Threads for the rows of a wavefront slice segment.
     pub row_threads: usize,
     /// Whether a later picture may reference this one. When not, its final
@@ -74,11 +77,10 @@ impl<P: Pixel> Job<P> {
             writer,
             col,
             slices,
-            output,
+            out,
             row_threads,
             reference,
         } = self;
-        let out = output.map(|form| OutRows::new(&pic.sps, form));
         // A picture no other references, of 8-bit samples and not cropped,
         // has its final rows written straight to the output.
         let direct = !reference

@@ -26,6 +26,8 @@ pub enum Bar {
     AdjustClip,
     /// Any other clip: an effect or a sticker.
     OtherClip,
+    /// A shape or a pen drawing on a sticker row.
+    ShapeClip,
     Audio,
     Text,
     Effects,
@@ -71,6 +73,7 @@ pub enum ToolId {
     EditText,
     Draw,
     VideoEffects,
+    ShapeStyle,
 }
 
 /// A tool as a bar shows it.
@@ -199,6 +202,13 @@ const OTHER_CLIP: &[Tool] = &[
     ready(T::Duplicate, "Duplicate"),
 ];
 
+const SHAPE_CLIP: &[Tool] = &[
+    ready(T::ShapeStyle, "Style"),
+    ready(T::Split, "Split"),
+    ready(T::Delete, "Delete"),
+    ready(T::Duplicate, "Duplicate"),
+];
+
 const AUDIO: &[Tool] = &[
     ready(T::ImportSound, "Sounds"),
     ready(T::ExtractAudio, "Extract"),
@@ -227,6 +237,7 @@ pub fn tools(bar: Bar) -> &'static [Tool] {
         Bar::FilterClip => FILTER_CLIP,
         Bar::AdjustClip => ADJUST_CLIP,
         Bar::OtherClip => OTHER_CLIP,
+        Bar::ShapeClip => SHAPE_CLIP,
         Bar::Audio => AUDIO,
         Bar::Text => TEXT,
         Bar::Effects => EFFECTS,
@@ -234,7 +245,8 @@ pub fn tools(bar: Bar) -> &'static [Tool] {
     }
 }
 
-/// The bar for a clip selected on a row of `kind`.
+/// The bar for a clip selected on a row of `kind`. A shape on a sticker
+/// row takes [`Bar::ShapeClip`] instead; the row alone cannot say so.
 #[must_use]
 pub fn clip_bar(kind: TrackType, main: bool) -> Bar {
     match kind {
@@ -254,7 +266,7 @@ mod tests {
 
     use super::*;
 
-    const BARS: [Bar; 12] = [
+    const BARS: [Bar; 13] = [
         Bar::Root,
         Bar::MainClip,
         Bar::OverlayClip,
@@ -263,6 +275,7 @@ mod tests {
         Bar::FilterClip,
         Bar::AdjustClip,
         Bar::OtherClip,
+        Bar::ShapeClip,
         Bar::Audio,
         Bar::Text,
         Bar::Effects,
@@ -303,6 +316,7 @@ mod tests {
             Bar::FilterClip,
             Bar::AdjustClip,
             Bar::OtherClip,
+            Bar::ShapeClip,
         ] {
             for id in [ToolId::Split, ToolId::Delete] {
                 assert!(

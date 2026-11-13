@@ -1081,6 +1081,7 @@ pub enum ToolBar {
     FilterClip,
     AdjustClip,
     OtherClip,
+    ShapeClip,
     Audio,
     Text,
     Effects,
@@ -1126,6 +1127,7 @@ pub enum ToolKind {
     EditText,
     Draw,
     VideoEffects,
+    ShapeStyle,
 }
 
 /// A tool as a bar shows it. `ready` says it works on the phone today;
@@ -1164,6 +1166,7 @@ fn bar_in(bar: ToolBar) -> cutlass_ffi::Bar {
         ToolBar::FilterClip => Bar::FilterClip,
         ToolBar::AdjustClip => Bar::AdjustClip,
         ToolBar::OtherClip => Bar::OtherClip,
+        ToolBar::ShapeClip => Bar::ShapeClip,
         ToolBar::Audio => Bar::Audio,
         ToolBar::Text => Bar::Text,
         ToolBar::Effects => Bar::Effects,
@@ -1182,6 +1185,7 @@ fn bar_out(bar: cutlass_ffi::Bar) -> ToolBar {
         Bar::FilterClip => ToolBar::FilterClip,
         Bar::AdjustClip => ToolBar::AdjustClip,
         Bar::OtherClip => ToolBar::OtherClip,
+        Bar::ShapeClip => ToolBar::ShapeClip,
         Bar::Audio => ToolBar::Audio,
         Bar::Text => ToolBar::Text,
         Bar::Effects => ToolBar::Effects,
@@ -1228,6 +1232,7 @@ fn tool_kind(id: cutlass_ffi::ToolId) -> ToolKind {
         T::EditText => ToolKind::EditText,
         T::Draw => ToolKind::Draw,
         T::VideoEffects => ToolKind::VideoEffects,
+        T::ShapeStyle => ToolKind::ShapeStyle,
     }
 }
 
@@ -2630,6 +2635,7 @@ mod tests {
             ToolBar::FilterClip,
             ToolBar::AdjustClip,
             ToolBar::OtherClip,
+            ToolBar::ShapeClip,
             ToolBar::Audio,
             ToolBar::Text,
             ToolBar::Effects,

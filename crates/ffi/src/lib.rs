@@ -1091,7 +1091,13 @@ impl PhoneHost {
             lane.clips
                 .iter()
                 .any(|clip| &clip.id == segment_id)
-                .then(|| cutlass_editor::clip_bar(lane.kind, lane.main))
+                .then(|| {
+                    if self.shape_style(segment_id).is_some() {
+                        Bar::ShapeClip
+                    } else {
+                        cutlass_editor::clip_bar(lane.kind, lane.main)
+                    }
+                })
         })
     }
 
@@ -2886,13 +2892,14 @@ mod tests {
 
     #[test]
     fn a_shape_takes_a_fill_outline_corners_and_shadow_and_a_pen_line_its_color() {
-        use crate::ShapeStyleChange;
+        use crate::{Bar, ShapeStyleChange};
         let temp = Temp::new();
         let roots = Roots::new(&temp);
         let mut host = roots.create();
         two_stills(&mut host);
         let shapes = crate::phone_shapes();
         let square = host.add_shape(&shapes[0].id, Micros(0)).unwrap();
+        assert_eq!(host.clip_bar(&square), Some(Bar::ShapeClip));
         let style = host.shape_style(&square).unwrap();
         assert!(!style.line);
         assert_eq!(style.fill, crate::SHAPE_STYLE_RANGES.fill_start);

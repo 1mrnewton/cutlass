@@ -256,15 +256,9 @@ fn video_panel(
             super::relight::relight(shell, ui, state);
             super::reframe::auto_reframe(shell, ui, state);
             super::motion_blur::motion_blur(shell, ui, state);
-            for label in [
-                "AI remove",
-                "AI expand",
-                "AI remix",
-                "Lip sync",
-                "Removing video flickers",
-                "AI movement",
-                "Camera tracking",
-            ] {
+            // The generative AI rows (AI remove, AI expand, AI remix, Lip
+            // sync, AI movement) wait for the next version.
+            for label in ["Removing video flickers", "Camera tracking"] {
                 later_row(ui, label);
             }
             canvas(shell, ui, state, inspection);
@@ -283,7 +277,6 @@ fn video_panel(
             for label in [
                 "Loudness normalization",
                 "Enhance voice",
-                "Video translator",
                 "Reduce noise",
                 "Isolate voice",
                 "Fill channel",

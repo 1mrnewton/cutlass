@@ -619,12 +619,12 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let split = if x0 + size <= self.pic.width && y0 + size <= self.pic.height && log2 > min_cb
         {
             let mut inc = 0;
-            if self.pic.available(x0, y0, x0 as isize - 1, y0 as isize)
+            if self.left_ok(x0, y0)
                 && u32::from(self.pic.depth.get(self.pic.at4(x0 - 1, y0))) > depth
             {
                 inc += 1;
             }
-            if self.pic.available(x0, y0, x0 as isize, y0 as isize - 1)
+            if self.up_ok(x0, y0)
                 && u32::from(self.pic.depth.get(self.pic.at4(x0, y0 - 1))) > depth
             {
                 inc += 1;
@@ -705,12 +705,12 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let mut skip = false;
         if self.slice_type != SliceType::I {
             let mut inc = 0;
-            if self.pic.available(x0, y0, x0 as isize - 1, y0 as isize)
+            if self.left_ok(x0, y0)
                 && self.pic.info.get(self.pic.at4(x0 - 1, y0)) & FLAG_SKIP != 0
             {
                 inc += 1;
             }
-            if self.pic.available(x0, y0, x0 as isize, y0 as isize - 1)
+            if self.up_ok(x0, y0)
                 && self.pic.info.get(self.pic.at4(x0, y0 - 1)) & FLAG_SKIP != 0
             {
                 inc += 1;
@@ -1272,6 +1272,23 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         }
         let (dst, stride) = self.out.from(c, px, py);
         intra::predict(&refs, mode, c == 0, bit_depth, dst, stride);
+    }
+
+    /// Whether the block left of (`x0`, `y0`) is available (clause
+    /// 6.4.1). Inside the CTB it always is: a block to the left comes
+    /// earlier in z-scan order.
+    #[inline]
+    fn left_ok(&self, x0: usize, y0: usize) -> bool {
+        let mask = (1usize << self.pic.layout.log2_ctb) - 1;
+        x0 & mask != 0 || self.pic.available(x0, y0, x0 as isize - 1, y0 as isize)
+    }
+
+    /// Whether the block above (`x0`, `y0`) is available; inside the CTB
+    /// it always is.
+    #[inline]
+    fn up_ok(&self, x0: usize, y0: usize) -> bool {
+        let mask = (1usize << self.pic.layout.log2_ctb) - 1;
+        y0 & mask != 0 || self.pic.available(x0, y0, x0 as isize, y0 as isize - 1)
     }
 
     /// `residual_coding` (clause 7.3.8.11) and the reconstruction of its

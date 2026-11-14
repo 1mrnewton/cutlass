@@ -6,7 +6,9 @@
 //! for kerning and marks, and `hb-vector --variations=...` for outlines.
 
 use crate::fixture_var::{
-    A, A_HEAVY, B, C, D, MARK, SPACE, table_of, variable, variable_edges, variable_with,
+    A, A_HEAVY, B, C, D, MARK, NARROW, Place, SPACE, bends_of, composite, definitions_of,
+    moving_anchor, outlines_of, positions_of, store, table_of, variable, variable_edges,
+    variable_with, variable_with_tables,
 };
 use crate::{Adjust, Anchor, Axis, Font, FontError, Instance, Positioning, Segment, Tag, read};
 
@@ -628,4 +630,222 @@ fn counts_past_a_table_are_refused_and_not_walked() {
     let table = font.gsub().expect("substitutions");
     assert_eq!(table.feature_lookups(0).expect("feature").len(), 0);
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+/// The fixture with its mark's own anchor moving too: a quarter of a
+/// unit right and three quarters up for each quarter of the way to the
+/// heavy end, so that the two anchors lie between whole units.
+fn moving_anchors() -> Vec<u8> {
+    variable_with_tables(vec![
+        (b"GDEF", definitions_of(&[&[-40], &[50], &[30], &[1], &[3]])),
+        (b"GPOS", positions_of(moving_anchor((200, 750), 3, 4))),
+    ])
+}
+
+/// The fixture with the mark of `C` put where its first point lands on
+/// the top middle point of `A`, and scaled by `scale` when that is given.
+fn matched(scale: Option<i16>) -> Vec<u8> {
+    let made = composite(
+        [50, 0, 450, 850],
+        &[
+            (A, Place::At(0, 0), true, None),
+            (MARK, Place::Matched(3, 0), false, scale),
+        ],
+    );
+    variable_with_tables(outlines_of(made).into_iter().collect())
+}
+
+/// The fixture with bending of the second version: after each axis's
+/// own, weight is moved half the way to its heavy end at the narrow end
+/// of width.
+fn bent_by_width() -> Vec<u8> {
+    variable_with(b"avar", Some(bent_by_width_table()))
+}
+
+/// The `avar` table of that face.
+fn bent_by_width_table() -> Vec<u8> {
+    let mut table = bends_of(2);
+    // No map of axes to rows: each axis has the row of its number.
+    table.extend(0_u32.to_be_bytes());
+    table.extend(
+        u32::try_from(table.len() + 4)
+            .expect("offset")
+            .to_be_bytes(),
+    );
+    table.extend(store(&[NARROW], 1, &[&[8_192], &[0]]));
+    table
+}
+
+/// The faces above, by a file name for each.
+fn variants() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        ("anchors.ttf", moving_anchors()),
+        ("matched.ttf", matched(None)),
+        ("matched-scaled.ttf", matched(Some(4_096))),
+        ("bent-by-width.ttf", bent_by_width()),
+    ]
+}
+
+/// Write the faces of [`variants`] into the folder `CUTLASS_VARIANTS`
+/// names, to ask HarfBuzz what it makes of them: the tests that use them
+/// expect what it says.
+#[test]
+#[ignore = "writes the variant faces into the folder named in CUTLASS_VARIANTS"]
+fn write_the_variant_faces() {
+    let Ok(folder) = std::env::var("CUTLASS_VARIANTS") else {
+        return;
+    };
+    for (name, bytes) in variants() {
+        std::fs::write(std::path::Path::new(&folder).join(name), bytes).expect("write");
+    }
+}
+
+#[test]
+fn each_of_a_marks_two_anchors_is_rounded_by_itself() {
+    // Both anchors lie between whole units part of the way to the heavy
+    // end. HarfBuzz shapes `A` and the mark to a mark moved, after `A`'s
+    // advance is taken off, by these distances between the two anchors:
+    // each anchor's own change rounded, and not the distance.
+    let bytes = moving_anchors();
+    let apart = |settings: &[(Tag, f32)]| {
+        let (_, (mark, base)) = placed(&set(&bytes, settings), true);
+        (base.x - mark.x, base.y - mark.y)
+    };
+    assert_eq!(apart(&[]), (50, -50));
+    // A quarter of the way: 262.5 and 200.25 are 62.25 apart, and each
+    // rounded they are 63.
+    assert_eq!(apart(&[(WGHT, 650.0)]), (63, -43));
+    assert_eq!(apart(&[(WGHT, 700.0)]), (70, -39));
+    assert_eq!(apart(&[(WGHT, 800.0)]), (84, -31));
+    assert_eq!(apart(&[(WGHT, 900.0)]), (99, -23));
+    assert_eq!(apart(&[(WGHT, 700.0), (WDTH, 75.0)]), (70, -39));
+    let (_, (mark, _)) = placed(&set(&bytes, &[(WGHT, 650.0)]), true);
+    assert_eq!(mark, Anchor { x: 200, y: 751 });
+}
+
+#[test]
+fn a_part_placed_by_matching_points_follows_the_points() {
+    // The mark's first point on the top middle point of `A`, wherever
+    // the face's setting puts the two; the move the glyph's own tuple
+    // has for the part counts for nothing.
+    let bytes = matched(None);
+    let at = |settings: &[(Tag, f32)]| drawn(&set(&bytes, settings), C);
+    assert_eq!(
+        at(&[]),
+        "M50,0L450,0L450,700L250,700L50,700L50,0ZM250,700L450,700L450,850L250,850L250,700Z"
+    );
+    assert_eq!(
+        at(&[(WGHT, 650.0)]),
+        "M50,0L475,0L475,700L262.5,700L50,700L50,0ZM262.5,700L462.5,700L462.5,850L262.5,850L262.5,700Z"
+    );
+    assert_eq!(
+        at(&[(WGHT, 800.0)]),
+        "M50,0L520,0L520,700L285,724L50,700L50,0ZM285,724L485,724L485,874L285,874L285,724Z"
+    );
+    assert_eq!(
+        at(&[(WGHT, 900.0)]),
+        "M50,0L550,0L550,700L300,700L50,700L50,0ZM300,700L500,700L500,850L300,850L300,700Z"
+    );
+    assert_eq!(
+        at(&[(WDTH, 50.0)]),
+        "M40,0L360,0L360,700L200,700L40,700L40,0ZM200,700L400,700L400,850L200,850L200,700Z"
+    );
+    assert_eq!(
+        at(&[(WGHT, 900.0), (WDTH, 50.0)]),
+        "M60,0L480,0L480,700L270,700L60,700L60,0ZM270,700L470,700L470,850L270,850L270,700Z"
+    );
+    assert_eq!(set(&bytes, &[(WGHT, 900.0)]).advance(C), Ok(600));
+    // A part that is scaled is matched by where its matrix puts its
+    // point, and lands there exactly, between whole units or not.
+    let bytes = matched(Some(4_096));
+    let at = |settings: &[(Tag, f32)]| drawn(&set(&bytes, settings), C);
+    assert_eq!(
+        at(&[]),
+        "M50,0L450,0L450,700L250,700L50,700L50,0ZM250,700L300,700L300,737.5L250,737.5L250,700Z"
+    );
+    assert_eq!(
+        at(&[(WGHT, 650.0)]),
+        "M50,0L475,0L475,700L262.5,700L50,700L50,0ZM262.5,700L312.5,700L312.5,737.5L262.5,737.5L262.5,700Z"
+    );
+    assert_eq!(
+        at(&[(WGHT, 800.0)]),
+        "M50,0L520,0L520,700L285,724L50,700L50,0ZM285,724L335,724L335,761.5L285,761.5L285,724Z"
+    );
+    assert_eq!(
+        at(&[(WGHT, 900.0)]),
+        "M50,0L550,0L550,700L300,700L50,700L50,0ZM300,700L350,700L350,737.5L300,737.5L300,700Z"
+    );
+    // A point the glyph does not have is an error, not a guess.
+    let made = composite(
+        [50, 0, 450, 850],
+        &[
+            (A, Place::At(0, 0), true, None),
+            (MARK, Place::Matched(9, 0), false, None),
+        ],
+    );
+    let bytes = variable_with_tables(outlines_of(made).into_iter().collect());
+    assert_eq!(
+        set(&bytes, &[(WGHT, 900.0)]).outline(C),
+        Err(FontError::BadTable)
+    );
+}
+
+#[test]
+fn bending_of_the_second_version_moves_an_axis_by_the_others() {
+    let bytes = bent_by_width();
+    let places = |settings: &[(Tag, f32)]| set(&bytes, settings).variations().to_vec();
+    assert_eq!(places(&[]), [0, 0]);
+    // At the narrow end weight is half the way to its heavy end, and
+    // halfway there a quarter.
+    assert_eq!(places(&[(WDTH, 50.0)]), [8_192, -16_384]);
+    assert_eq!(places(&[(WDTH, 75.0)]), [4_096, -8_192]);
+    assert_eq!(places(&[(WDTH, 150.0)]), [0, 16_384]);
+    // After weight's own bending, and no further than its end.
+    assert_eq!(places(&[(WGHT, 650.0), (WDTH, 75.0)]), [8_192, -8_192]);
+    assert_eq!(places(&[(WGHT, 900.0), (WDTH, 50.0)]), [16_384, -16_384]);
+    assert_eq!(places(&[(WGHT, 100.0), (WDTH, 50.0)]), [-8_192, -16_384]);
+    assert_eq!(places(&[(WGHT, 250.0), (WDTH, 75.0)]), [-4_096, -8_192]);
+    // The advances HarfBuzz gives the face there.
+    let at = |settings: &[(Tag, f32)]| {
+        let font = set(&bytes, settings);
+        [A, B, SPACE, D].map(|glyph| font.advance(glyph).expect("advance"))
+    };
+    assert_eq!(at(&[]), [500, 600, 250, 700]);
+    assert_eq!(at(&[(WDTH, 50.0)]), [450, 580, 250, 655]);
+    assert_eq!(at(&[(WDTH, 75.0)]), [475, 590, 250, 678]);
+    assert_eq!(at(&[(WDTH, 150.0)]), [500, 600, 250, 700]);
+    assert_eq!(at(&[(WGHT, 650.0), (WDTH, 75.0)]), [500, 610, 263, 705]);
+    assert_eq!(at(&[(WGHT, 900.0), (WDTH, 50.0)]), [500, 620, 275, 710]);
+    assert_eq!(at(&[(WGHT, 100.0), (WDTH, 50.0)]), [400, 540, 225, 600]);
+    assert_eq!(at(&[(WGHT, 250.0), (WDTH, 75.0)]), [450, 570, 238, 650]);
+    // And its outlines, and the feature that draws another glyph for
+    // `A` from halfway along the heavy side.
+    let font = set(&bytes, &[(WDTH, 50.0)]);
+    assert_eq!(drawn(&font, A), "M50,0L420,0L420,700L235,740L50,700L50,0Z");
+    let table = font.gsub().expect("substitutions");
+    assert_eq!(table.feature_lookups(0).expect("feature").len(), 1);
+    assert_eq!(
+        drawn(&set(&bytes, &[(WGHT, 650.0), (WDTH, 75.0)]), A),
+        "M50,0L460,0L460,700L255,740L50,700L50,0Z"
+    );
+    assert_eq!(
+        drawn(&set(&bytes, &[(WGHT, 100.0), (WDTH, 50.0)]), A),
+        "M40,0L360,0L360,700L200,700L40,700L40,0Z"
+    );
+    // A table of that version cut short, or with a store that is not
+    // one, cannot set the face, and one with no store bends as the
+    // first version does.
+    let whole = bent_by_width_table();
+    for length in 30..whole.len() {
+        let bytes = variable_with(b"avar", Some(whole[..length].to_vec()));
+        let face = read(&bytes).expect("face");
+        let _set = face.varied(&[(WDTH, 50.0)]);
+    }
+    let mut none = bends_of(2);
+    none.extend([0; 8]);
+    let bytes = variable_with(b"avar", Some(none));
+    assert_eq!(
+        set(&bytes, &[(WGHT, 650.0), (WDTH, 50.0)]).variations(),
+        [4_096, -16_384]
+    );
 }

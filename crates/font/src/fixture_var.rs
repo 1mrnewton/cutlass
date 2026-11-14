@@ -79,20 +79,47 @@ fn simple(points: &[(i16, i16)]) -> Vec<u8> {
     record
 }
 
-/// A glyph of parts: each a glyph, where it goes, and whether the whole
-/// takes its metrics.
-fn composite(corners: [i16; 4], parts: &[(u16, i16, i16, bool)]) -> Vec<u8> {
+/// Where a part of a glyph goes.
+#[derive(Clone, Copy)]
+pub(crate) enum Place {
+    /// So far right and up.
+    At(i16, i16),
+    /// Where a point of the part, the second number, lands on a point of
+    /// the glyph so far, the first.
+    Matched(u16, u16),
+}
+
+/// One part of a glyph of parts: a glyph, where it goes, whether the
+/// whole takes its metrics, and how much it is scaled by, as a 2.14
+/// number.
+pub(crate) type Part = (u16, Place, bool, Option<i16>);
+
+/// A glyph of parts.
+pub(crate) fn composite(corners: [i16; 4], parts: &[Part]) -> Vec<u8> {
     let mut record = signed_bytes(&[-1, corners[0], corners[1], corners[2], corners[3]]);
-    for (index, (glyph, x, y, metrics)) in parts.iter().enumerate() {
-        // The place is two words, and is a place and not points to match.
-        let mut flags = 0x0003;
+    for (index, (glyph, place, metrics, scale)) in parts.iter().enumerate() {
+        // The place is two words: a place, or two points to match.
+        let mut flags = match place {
+            Place::At(..) => 0x0003,
+            Place::Matched(..) => 0x0001,
+        };
         if index + 1 < parts.len() {
             flags |= 0x0020;
         }
         if *metrics {
             flags |= 0x0200;
         }
-        record.extend(be(&[flags, *glyph, signed(*x), signed(*y)]));
+        if scale.is_some() {
+            flags |= 0x0008;
+        }
+        let (first, second) = match *place {
+            Place::At(x, y) => (signed(x), signed(y)),
+            Place::Matched(onto, point) => (onto, point),
+        };
+        record.extend(be(&[flags, *glyph, first, second]));
+        if let Some(scale) = scale {
+            record.extend(scale.to_be_bytes());
+        }
     }
     record
 }
@@ -102,6 +129,17 @@ pub(crate) const A_POINTS: [(i16, i16); 5] = [(50, 0), (450, 0), (450, 700), (25
 
 /// The `glyf`, `loca` and `hmtx` tables.
 fn outlines() -> [(&'static [u8; 4], Vec<u8>); 3] {
+    outlines_of(composite(
+        [50, 0, 450, 1100],
+        &[
+            (A, Place::At(0, 0), true, None),
+            (MARK, Place::At(100, 200), false, None),
+        ],
+    ))
+}
+
+/// The same tables with `made` for `C`, the glyph of parts.
+pub(crate) fn outlines_of(made: Vec<u8>) -> [(&'static [u8; 4], Vec<u8>); 3] {
     let square = |left: i16, bottom: i16, right: i16, top: i16| {
         simple(&[(left, bottom), (right, bottom), (right, top), (left, top)])
     };
@@ -110,14 +148,7 @@ fn outlines() -> [(&'static [u8; 4], Vec<u8>); 3] {
         (square(50, 0, 450, 700), 500, 50),
         (simple(&A_POINTS), 500, 50),
         (square(50, 0, 550, 700), 600, 50),
-        (
-            composite(
-                [50, 0, 450, 1100],
-                &[(A, 0, 0, true), (MARK, 100, 200, false)],
-            ),
-            500,
-            50,
-        ),
+        (made, 500, 50),
         (Vec::new(), 250, 0),
         (square(100, 750, 300, 900), 0, 100),
         (square(50, 0, 470, 700), 520, 50),
@@ -231,7 +262,13 @@ fn axes() -> Vec<u8> {
 /// `avar`: halfway along the heavy side of weight is a quarter of the
 /// way; width is left straight.
 fn bends() -> Vec<u8> {
-    let mut table = be(&[1, 0, 0, 2]);
+    bends_of(1)
+}
+
+/// `avar` of version `version`, without what a later version has after
+/// each axis's own bending.
+pub(crate) fn bends_of(version: u16) -> Vec<u8> {
+    let mut table = be(&[version, 0, 0, 2]);
     table.extend(be(&[4]));
     table.extend(signed_bytes(&[
         -ONE,
@@ -487,7 +524,7 @@ fn moves() -> Vec<u8> {
 /// a peak and an end along each axis, and one group of rows with a
 /// number for each region, the first `words` of them words and the rest
 /// bytes.
-fn store(regions: &[[(i16, i16, i16); 2]], words: u16, rows: &[&[i16]]) -> Vec<u8> {
+pub(crate) fn store(regions: &[[(i16, i16, i16); 2]], words: u16, rows: &[&[i16]]) -> Vec<u8> {
     let mut list = be(&[2, count(regions.len())]);
     for region in regions {
         for (start, peak, end) in region {
@@ -517,8 +554,8 @@ fn store(regions: &[[(i16, i16, i16); 2]], words: u16, rows: &[&[i16]]) -> Vec<u
 
 /// The region of the heavy side of weight, and of the narrow side of
 /// width.
-const HEAVY: [(i16, i16, i16); 2] = [(0, ONE, ONE), (0, 0, 0)];
-const NARROW: [(i16, i16, i16); 2] = [(0, 0, 0), (-ONE, -ONE, 0)];
+pub(crate) const HEAVY: [(i16, i16, i16); 2] = [(0, ONE, ONE), (0, 0, 0)];
+pub(crate) const NARROW: [(i16, i16, i16); 2] = [(0, 0, 0), (-ONE, -ONE, 0)];
 
 /// `HVAR`: how much wider each glyph is at the heavy end and at the
 /// narrow one. The map of glyphs to rows stops at glyph 6, so glyph 7
@@ -555,8 +592,13 @@ fn advances() -> Vec<u8> {
 /// positioning table's values name rows of: the kerning, and the two
 /// numbers of the anchor on `A`, at the heavy end.
 fn definitions() -> Vec<u8> {
+    definitions_of(&[&[-40], &[50], &[30]])
+}
+
+/// `GDEF` with a store of `rows`, each a number for the heavy end.
+pub(crate) fn definitions_of(rows: &[&[i16]]) -> Vec<u8> {
     let classes = classes(&[(A, C, 1), (MARK, MARK, 3), (A_HEAVY, D, 1)]);
-    let store = store(&[HEAVY], 0, &[&[-40], &[50], &[30]]);
+    let store = store(&[HEAVY], 0, rows);
     let mut table = be(&[1, 3, 18, 0, 0, 0, 0]);
     table.extend(long(18 + classes.len()));
     table.extend(classes);
@@ -572,6 +614,22 @@ fn row(row: u16) -> Vec<u8> {
 /// `GPOS`: `A` before `B` kerned by -50, less 40 more at the heavy end;
 /// and the mark set on `A` at an anchor that moves.
 fn positions() -> Vec<u8> {
+    positions_of(be(&[1, 200, 750]))
+}
+
+/// An anchor that rows `x` and `y` of the store move.
+pub(crate) fn moving_anchor(at: (i16, i16), x: u16, y: u16) -> Vec<u8> {
+    table(vec![
+        V(3),
+        V(signed(at.0)),
+        V(signed(at.1)),
+        Off(row(x)),
+        Off(row(y)),
+    ])
+}
+
+/// `GPOS` with `mark_anchor` for the mark's own anchor.
+pub(crate) fn positions_of(mark_anchor: Vec<u8>) -> Vec<u8> {
     // The first glyph's advance, and what changes it.
     let pair = table(vec![
         V(1),
@@ -586,11 +644,8 @@ fn positions() -> Vec<u8> {
         Off(coverage(&[MARK])),
         Off(coverage(&[A])),
         V(1),
-        Off(table(vec![V(1), V(0), Off(be(&[1, 200, 750]))])),
-        Off(table(vec![
-            V(1),
-            Off(table(vec![V(3), V(250), V(700), Off(row(1)), Off(row(2))])),
-        ])),
+        Off(table(vec![V(1), V(0), Off(mark_anchor)])),
+        Off(table(vec![V(1), Off(moving_anchor((250, 700), 1, 2))])),
     ]);
     layout_table(
         &[(b"DFLT", &[0, 1])],

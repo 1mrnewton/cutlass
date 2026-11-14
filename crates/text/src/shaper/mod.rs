@@ -16,7 +16,7 @@ mod fallback;
 mod indic;
 mod morx;
 
-use cutlass_font::{Font, GlyphClass, LayoutTable, Tag};
+use cutlass_font::{Font, GlyphClass, LayoutTable, Tag, Variant};
 
 use self::apply::{Engine, LookupRef, settle};
 use self::buffer::{Buffer, Glyph, Space};
@@ -474,12 +474,35 @@ fn normalize(
             starter = out.len() - 1;
         }
     }
-    for glyph in &mut out {
+    let mut mapped: Vec<Glyph> = Vec::with_capacity(out.len());
+    let mut rest = out.into_iter().peekable();
+    while let Some(mut glyph) = rest.next() {
         let drawn = if glyph.space.is_some() {
             ' '
         } else {
             glyph.character
         };
+        // A character and the selector after it that the face lists as a
+        // pair are one glyph, and the selector is then spent.
+        let pair = match rest.peek() {
+            Some(next) if selects(next.character) => {
+                match font
+                    .variant(drawn, next.character)
+                    .map_err(TextError::Font)?
+                {
+                    Variant::Glyph(id) => Some(id),
+                    Variant::Plain => font.glyph_id(drawn).map_err(TextError::Font)?,
+                    Variant::Unlisted => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(id) = pair {
+            glyph.id = id;
+            let _selector = rest.next();
+            mapped.push(glyph);
+            continue;
+        }
         match font.glyph_id(drawn).map_err(TextError::Font)? {
             Some(id) => glyph.id = id,
             None => {
@@ -487,8 +510,18 @@ fn normalize(
                 glyph.missing = !glyph.ignorable;
             }
         }
+        mapped.push(glyph);
     }
-    Ok(out)
+    Ok(mapped)
+}
+
+/// Whether `character` is a variation selector: it picks a form of the
+/// character before it and draws nothing itself.
+fn selects(character: char) -> bool {
+    matches!(
+        u32::from(character),
+        0x180B..=0x180D | 0x180F | 0xFE00..=0xFE0F | 0xE0100..=0xE01EF
+    )
 }
 
 /// The Hebrew letter with its point as one character, for the pairs
@@ -859,6 +892,39 @@ mod tests {
             ligatures: true,
         };
         printed(&font, &run)
+    }
+
+    #[test]
+    fn a_character_and_its_selector_draw_the_glyph_the_face_lists_for_them() {
+        const VARIED: &[u8] = include_bytes!("../../../font/fixtures/varied.ttf");
+        let font = cutlass_font::read(VARIED).expect("fixture");
+        let shaped = |text: &str, backward: bool| {
+            let run = Run {
+                text,
+                start: 0,
+                end: text.len(),
+                script: Script(*b"Zyyy"),
+                backward,
+                ligatures: true,
+            };
+            printed(&font, &run)
+        };
+        // The digit with the emoji selector is its keycap picture, and the
+        // selector is spent: the face's own glyph for it is not drawn.
+        assert_eq!(shaped("1\u{FE0F}", false), "[3=0+900]");
+        assert_eq!(shaped("1\u{FE0F}\u{20E3}", false), "[3=0+900|6=0+800]");
+        // A pair listed as plain draws the letter, and another selector
+        // picks another glyph of it.
+        assert_eq!(shaped("A\u{FE0F}A\u{FE0E}", false), "[1=0+600|5=4+650]");
+        assert_eq!(shaped("A\u{FE0F}A\u{FE0E}", true), "[5=4+650|1=0+600]");
+        // A pair the face does not list draws the character, and the
+        // selector draws nothing.
+        assert_eq!(shaped("1\u{FE0E}A\u{FE00}", false), "[2=0+500|1=4+600]");
+        // Only the character before the selector is changed.
+        assert_eq!(shaped("11\u{FE0F}1", false), "[2=0+500|3=1+900|2=5+500]");
+        assert_eq!(shaped("11\u{FE0F}1", true), "[2=5+500|3=1+900|2=0+500]");
+        // A selector with nothing before it draws nothing.
+        assert_eq!(shaped("\u{FE0F}1", false), "[2=0+500]");
     }
 
     #[test]

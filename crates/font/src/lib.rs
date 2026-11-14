@@ -34,6 +34,7 @@ pub mod morx;
 mod otf;
 mod strike;
 mod ttf;
+mod variants;
 
 pub use colr::{
     Affine, ClipBox, Color, ColorGlyph, ColorLine, ColorStop, CompositeMode, Extend, Paint,
@@ -46,6 +47,7 @@ pub use layout::{
     SequenceContext, SequenceRule, Tag, U16s,
 };
 pub use strike::{BitmapGlyph, BitmapPixels};
+pub use variants::Variant;
 
 use std::cmp::Ordering;
 use std::error::Error;
@@ -167,6 +169,7 @@ pub struct Font<'a> {
     morx: Option<morx::Morx<'a>>,
     outlines: Outlines<'a>,
     strikes: strike::Strikes<'a>,
+    variants: Option<variants::Variants<'a>>,
     fingerprint: u64,
     colr: Option<colr::Colr<'a>>,
 }
@@ -291,6 +294,22 @@ impl<'a> Font<'a> {
         Ok(Some(glyph_id))
     }
 
+    /// What the face draws for `character` with the variation selector
+    /// `selector` after it. A glyph past the face's glyph count is a bad
+    /// table.
+    pub fn variant(&self, character: char, selector: char) -> Result<Variant, FontError> {
+        let Some(variants) = &self.variants else {
+            return Ok(Variant::Unlisted);
+        };
+        let variant = variants.variant(u32::from(character), u32::from(selector))?;
+        if let Variant::Glyph(glyph) = variant
+            && glyph >= self.num_glyphs
+        {
+            return Err(FontError::BadTable);
+        }
+        Ok(variant)
+    }
+
     /// Glyph 0. OpenType requires this to be the face's missing glyph.
     #[must_use]
     pub fn missing_glyph(&self) -> u16 {
@@ -408,6 +427,7 @@ impl<'a> Font<'a> {
         let metrics = parse_hhea(directory.table(b"hhea")?, num_glyphs)?;
         let hmtx = Hmtx::parse(directory.table(b"hmtx")?, metrics, num_glyphs)?;
         let cmap = parse_cmap(directory.table(b"cmap")?)?;
+        let variants = variants::Variants::find(directory.table(b"cmap")?)?;
         // A kern table in a form this reader cannot apply, such as Apple's
         // version 1 tables, leaves the face without kerning. A torn one is
         // still an error.
@@ -467,6 +487,7 @@ impl<'a> Font<'a> {
             morx,
             outlines,
             strikes,
+            variants,
             fingerprint,
             colr,
         })

@@ -320,6 +320,106 @@ pub(crate) fn boxed(advance: u16) -> Glyph {
     }
 }
 
+/// A character, the variation selector after it, and the glyph the two
+/// draw: `None` when they draw as the character alone does.
+pub(crate) type Varied = (char, char, Option<u16>);
+
+/// A `cmap` table of `map`, in character order, and of `varied`. One group
+/// for each character: format 12 holds every plane. The pairs with a
+/// selector, when there are any, go in a format 14 subtable before it.
+pub(crate) fn character_map(map: &[(char, u16)], varied: &[Varied]) -> Vec<u8> {
+    let mut groups = be(&[12, 0]);
+    let count = u32::try_from(map.len()).expect("groups");
+    groups.extend((16 + count * 12).to_be_bytes());
+    groups.extend(0_u32.to_be_bytes());
+    groups.extend(count.to_be_bytes());
+    for (character, glyph) in map {
+        groups.extend(u32::from(*character).to_be_bytes());
+        groups.extend(u32::from(*character).to_be_bytes());
+        groups.extend(u32::from(*glyph).to_be_bytes());
+    }
+    if varied.is_empty() {
+        let mut cmap = be(&[0, 1, 3, 10, 0, 12]);
+        cmap.extend(groups);
+        return cmap;
+    }
+    let three = |value: u32| value.to_be_bytes()[1..].to_vec();
+    let mut selectors: Vec<char> = varied.iter().map(|(_, selector, _)| *selector).collect();
+    selectors.sort_unstable();
+    selectors.dedup();
+    let mut records = Vec::new();
+    let mut lists = Vec::new();
+    let lists_at = 10 + selectors.len() * 11;
+    for selector in &selectors {
+        let mut of: Vec<&Varied> = varied
+            .iter()
+            .filter(|(_, with, _)| with == selector)
+            .collect();
+        of.sort_by_key(|(character, _, _)| *character);
+        let plain: Vec<u32> = of
+            .iter()
+            .filter(|(_, _, glyph)| glyph.is_none())
+            .map(|(character, _, _)| u32::from(*character))
+            .collect();
+        let own: Vec<(u32, u16)> = of
+            .iter()
+            .filter_map(|(character, _, glyph)| Some((u32::from(*character), (*glyph)?)))
+            .collect();
+        records.extend(three(u32::from(*selector)));
+        let mut place = |empty: bool, list: Vec<u8>| {
+            let at = if empty { 0 } else { lists_at + lists.len() };
+            records.extend(u32::try_from(at).expect("offset").to_be_bytes());
+            if !empty {
+                lists.extend(list);
+            }
+        };
+        let mut ranges = u32::try_from(plain.len())
+            .expect("ranges")
+            .to_be_bytes()
+            .to_vec();
+        for character in &plain {
+            ranges.extend(three(*character));
+            ranges.push(0);
+        }
+        place(plain.is_empty(), ranges);
+        let mut mappings = u32::try_from(own.len())
+            .expect("mappings")
+            .to_be_bytes()
+            .to_vec();
+        for (character, glyph) in &own {
+            mappings.extend(three(*character));
+            mappings.extend(glyph.to_be_bytes());
+        }
+        place(own.is_empty(), mappings);
+    }
+    let mut variants = be(&[14]);
+    variants.extend(
+        u32::try_from(lists_at + lists.len())
+            .expect("length")
+            .to_be_bytes(),
+    );
+    variants.extend(
+        u32::try_from(selectors.len())
+            .expect("selectors")
+            .to_be_bytes(),
+    );
+    variants.extend(records);
+    variants.extend(lists);
+    // Two records: the selectors under platform 0, encoding 5, and then
+    // the characters.
+    let mut cmap = be(&[0, 2, 0, 5]);
+    cmap.extend(20_u32.to_be_bytes());
+    cmap.extend(be(&[3, 10]));
+    cmap.extend(
+        u32::try_from(20 + variants.len())
+            .expect("offset")
+            .to_be_bytes(),
+    );
+    cmap.extend(variants);
+    cmap.extend(groups);
+    cmap
+}
+
 /// A TrueType font, 1000 units to the em, of `glyphs` (the first is the
 /// missing glyph), a character map in character order, and extra tables.
 pub(crate) fn font(
@@ -365,17 +465,7 @@ pub(crate) fn font(
         }
     }
     loca.extend(u32::try_from(glyf.len()).expect("loca").to_be_bytes());
-    // One group for each character: format 12 holds every plane.
-    let mut cmap = be(&[0, 1, 3, 10, 0, 12, 12, 0]);
-    let groups = u32::try_from(map.len()).expect("groups");
-    cmap.extend((16 + groups * 12).to_be_bytes());
-    cmap.extend(0_u32.to_be_bytes());
-    cmap.extend(groups.to_be_bytes());
-    for (character, glyph) in map {
-        cmap.extend(u32::from(*character).to_be_bytes());
-        cmap.extend(u32::from(*character).to_be_bytes());
-        cmap.extend(u32::from(*glyph).to_be_bytes());
-    }
+    let cmap = character_map(map, &[]);
     let mut tables: Vec<([u8; 4], Vec<u8>)> = vec![
         (*b"cmap", cmap),
         (*b"glyf", glyf),
@@ -385,6 +475,8 @@ pub(crate) fn font(
         (*b"loca", loca),
         (*b"maxp", maxp),
     ];
+    // An extra table of a name above takes that table's place.
+    tables.retain(|(name, _)| !extra.iter().any(|(extra, _)| *extra == name));
     tables.extend(extra.iter().map(|(name, bytes)| (**name, bytes.clone())));
     tables.sort_by_key(|table| table.0);
     let mut file = vec![0, 1, 0, 0];

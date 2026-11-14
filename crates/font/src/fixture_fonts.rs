@@ -264,13 +264,39 @@ pub(crate) fn machines() -> Vec<u8> {
     font(&glyphs, &[('A', 2), ('B', 3), ('D', 5)], &[(b"morx", morx)])
 }
 
+/// A face whose character map lists variation sequences, as an emoji face
+/// and a face of Han characters do: `A` 1, `1` 2, the keycap `1` with the
+/// emoji selector draws 3, a glyph for that selector 4, the `A` the text
+/// selector picks 5, and the enclosing keycap 6. `A` with the emoji
+/// selector is listed as drawing what `A` alone does.
+pub(crate) fn varied() -> Vec<u8> {
+    let glyphs = [
+        boxed(500),
+        boxed(600),
+        boxed(500),
+        boxed(900),
+        boxed(100),
+        boxed(650),
+        boxed(800),
+    ];
+    let map = [('1', 2), ('A', 1), ('\u{20E3}', 6), ('\u{FE0F}', 4)];
+    let pairs = [
+        ('1', '\u{FE0F}', Some(3)),
+        ('A', '\u{FE0F}', None),
+        ('A', '\u{FE0E}', Some(5)),
+    ];
+    let cmap = crate::fixture::character_map(&map, &pairs);
+    font(&glyphs, &map, &[(b"cmap", cmap)])
+}
+
 /// A fixture's file name and what builds it.
 type Built = (&'static str, fn() -> Vec<u8>);
 
-const FILES: [Built; 3] = [
+const FILES: [Built; 4] = [
     ("shaping.ttf", shaping),
     ("hostile.ttf", hostile),
     ("machines.ttf", machines),
+    ("varied.ttf", varied),
 ];
 
 fn path(name: &str) -> std::path::PathBuf {
@@ -288,7 +314,11 @@ fn the_fixture_files_are_what_the_builder_writes() {
             "{name} is stale: write the fixtures again"
         );
         let face = crate::read(&stored).expect("font");
-        assert!(face.gsub().is_some() || face.morx().is_some(), "{name}");
+        let varied = face.variant('1', '\u{FE0F}') != Ok(crate::Variant::Unlisted);
+        assert!(
+            face.gsub().is_some() || face.morx().is_some() || varied,
+            "{name}"
+        );
     }
 }
 

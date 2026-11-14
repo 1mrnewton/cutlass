@@ -144,7 +144,7 @@ fn main() {
         FIXTURE,
         "fie fie AVA eve fife five if a vie fief eve AVA fie",
     );
-    let system: [(&str, &str, &str); 4] = [
+    let system: [(&str, &str, &str); 6] = [
         (
             "Latin, Arial",
             "/System/Library/Fonts/Supplemental/Arial.ttf",
@@ -159,6 +159,16 @@ fn main() {
             "Devanagari, Arial Unicode",
             "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
             "\u{928}\u{92E}\u{938}\u{94D}\u{924}\u{947} \u{926}\u{941}\u{928}\u{93F}\u{92F}\u{93E} \u{939}\u{93F}\u{928}\u{94D}\u{926}\u{940} \u{92D}\u{93E}\u{937}\u{93E}",
+        ),
+        (
+            "Khmer, Khmer Sangam MN",
+            "/System/Library/Fonts/Supplemental/Khmer Sangam MN.ttf",
+            "\u{1797}\u{17B6}\u{179F}\u{17B6}\u{1781}\u{17D2}\u{1798}\u{17C2}\u{179A} \u{179F}\u{17D2}\u{179A}\u{17A1}\u{17B6}\u{1789}\u{17CB} \u{1780}\u{1798}\u{17D2}\u{1796}\u{17BB}\u{1787}\u{17B6} \u{1780}\u{17D2}\u{179A}\u{17BB}\u{1784} \u{1796}\u{17D2}\u{179A}\u{17C7}\u{179A}\u{17B6}\u{1787}\u{17B6}\u{178E}\u{17B6}\u{1785}\u{1780}\u{17D2}\u{179A}",
+        ),
+        (
+            "Javanese, Noto Sans Javanese",
+            "/System/Library/Fonts/Supplemental/NotoSansJavanese-Regular.otf",
+            "\u{A9A7}\u{A9B1}\u{A997}\u{A9AE} \u{A9B2}\u{A98F}\u{A9C0}\u{A9B1}\u{A9AB} \u{A98F}\u{A9BF}\u{A9A0}\u{A9BA}\u{A9B4}\u{A9A4}\u{A9C0} \u{A994}\u{A9AA}\u{A9BA}\u{A9B4}\u{A992}\u{A9BE}\u{A98F}\u{A982}\u{A9A0}",
         ),
         (
             "mixed, Arial",

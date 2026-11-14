@@ -268,6 +268,10 @@ pub struct ViewState {
     quitting: bool,
     listed: Vec<ListedProject>,
     listed_stamp: String,
+    /// The recent projects outside the projects folder, read again only
+    /// when the list or one of their drafts changes.
+    recent: Vec<ListedProject>,
+    recent_stamp: String,
     /// When the projects folder was last looked at.
     listed_checked: Option<std::time::Instant>,
     marquee_press: Option<Pos2>,
@@ -355,6 +359,8 @@ impl Default for ViewState {
             projects_root: None,
             quitting: false,
             listed: Vec::new(),
+            recent: Vec::new(),
+            recent_stamp: String::new(),
             listed_stamp: String::new(),
             listed_checked: None,
             marquee_press: None,
@@ -708,7 +714,7 @@ fn projects_home(
         Pos2::new(full.max.x - 28.0, full.max.y - 28.0),
     );
     let root = projects_root(view);
-    let projects = listed_projects(view);
+    let (projects, recent) = listed_projects(shell, view);
     let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body));
     ui::Scroll::vertical("projects")
         .auto_shrink([false, false])
@@ -717,7 +723,6 @@ fn projects_home(
                 open_created(shell, &root);
             }
             ui.add_space(20.0);
-            let recent = shell.recent_projects(&root);
             if !recent.is_empty() {
                 ui.label(
                     RichText::new("Recent, elsewhere")
@@ -761,7 +766,13 @@ fn projects_home(
 /// How often the projects home looks at the folder for changes.
 const PROJECTS_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
 
-fn listed_projects(view: &mut ViewState) -> Vec<ListedProject> {
+/// The projects under the projects folder and the recent ones elsewhere.
+/// Each is read again only when a check, once a second, finds a project
+/// added, removed, renamed or saved; between, the last reading is kept.
+fn listed_projects(
+    shell: &Shell,
+    view: &mut ViewState,
+) -> (Vec<ListedProject>, Vec<ListedProject>) {
     let due = view
         .listed_checked
         .is_none_or(|checked| checked.elapsed() >= PROJECTS_CHECK);
@@ -773,8 +784,30 @@ fn listed_projects(view: &mut ViewState) -> Vec<ListedProject> {
             view.listed = Shell::list_projects(&root);
             view.listed_stamp = stamp;
         }
+        let recent = &shell.settings().recent_projects;
+        let stamp = format!(
+            "{}|{}",
+            root.display(),
+            recent
+                .iter()
+                .map(|path| project_stamp(path, &path.display().to_string()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        if view.recent_stamp != stamp {
+            view.recent = shell.recent_projects(&root);
+            view.recent_stamp = stamp;
+        }
     }
-    view.listed.clone()
+    (view.listed.clone(), view.recent.clone())
+}
+
+/// A project's name and when it was saved, to notice a change.
+fn project_stamp(path: &std::path::Path, name: &str) -> String {
+    let saved = cutlass_store::saved_at(path)
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |since| since.as_nanos());
+    format!("{name}:{saved}")
 }
 
 fn directory_stamp(root: &std::path::Path) -> String {
@@ -783,16 +816,9 @@ fn directory_stamp(root: &std::path::Path) -> String {
     };
     let mut names = Vec::new();
     for entry in entries.flatten() {
-        let modified = entry
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0);
-        names.push(format!(
-            "{}:{modified}",
-            entry.file_name().to_string_lossy()
+        names.push(project_stamp(
+            &entry.path(),
+            &entry.file_name().to_string_lossy(),
         ));
     }
     names.sort();
@@ -17684,6 +17710,46 @@ mod tests {
         assert!(!pass(&mut shell, &mut view, true));
         assert!(shell.draft().is_some());
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn recent_projects_are_read_once_and_again_only_after_a_change() {
+        let root = std::env::temp_dir().join(format!("cutlass-recent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // A project outside the projects folder, opened and closed, so it
+        // is a recent one.
+        let (mut shell, project) = blue_project("recent");
+        shell.close_project().unwrap();
+        let mut view = ViewState::new();
+        view.projects_root = Some(root.clone());
+        let ctx = egui::Context::default();
+        let painted = |shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            painted_text(&output)
+        };
+        // Untitled: the card shows the folder's name.
+        let folder = project.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(painted(&mut shell, &mut view).contains(&folder));
+        // Renamed on disk: until the next check the kept reading shows.
+        cutlass_store::rename_project(&project, "Renamed").unwrap();
+        let shown = painted(&mut shell, &mut view);
+        assert!(
+            shown.contains(&folder) && !shown.contains("Renamed"),
+            "{shown}"
+        );
+        // At the check the change is seen and the project read again.
+        view.listed_checked = None;
+        assert!(painted(&mut shell, &mut view).contains("Renamed"));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&project);
     }
 
     #[test]

@@ -79,7 +79,20 @@ where
         if call.name != DELEGATE {
             return self.inner.run_tool(call);
         }
-        let task = call.arguments.trim();
+        self.inner.helper_started(call);
+        let outcome = self.help(call.arguments.trim());
+        self.inner.helper_finished(call, &outcome);
+        outcome
+    }
+}
+
+impl<S, F, M> Delegating<S, F>
+where
+    S: ToolSink,
+    F: FnMut() -> Result<M, String>,
+    M: Model,
+{
+    fn help(&mut self, task: &str) -> ToolOutcome {
         if task.is_empty() {
             return failed("agent.delegate needs the task as its input".to_owned());
         }

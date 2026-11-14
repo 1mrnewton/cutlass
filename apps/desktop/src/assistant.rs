@@ -59,6 +59,11 @@ enum Event {
         call: ToolCall,
         answer: Sender<ToolOutcome>,
     },
+    /// A helper took a look-up, then gave its answer.
+    Helper {
+        call: ToolCall,
+        outcome: Option<ToolOutcome>,
+    },
     Finished(Result<(String, Vec<Message>), String>),
 }
 
@@ -323,6 +328,28 @@ impl Assistant {
             };
             match event {
                 Event::Said(text) => self.entries.push(Entry::Said(text)),
+                Event::Helper {
+                    call,
+                    outcome: None,
+                } => self.entries.push(Entry::Step {
+                    tool: call.name,
+                    input: call.arguments,
+                    result: None,
+                    failed: false,
+                }),
+                Event::Helper {
+                    call,
+                    outcome: Some(outcome),
+                } => {
+                    if let Some(Entry::Step { result, failed, .. }) =
+                        self.entries.iter_mut().rev().find(|entry| {
+                            matches!(entry, Entry::Step { tool, result: None, .. } if *tool == call.name)
+                        })
+                    {
+                        *result = Some(outcome.content);
+                        *failed = outcome.is_error;
+                    }
+                }
                 Event::Tool { call, answer } => {
                     let run = shell.run_agent_tool(&call, &[]);
                     if let Some(action) = run.wants {
@@ -547,13 +574,27 @@ impl ToolSink for Relay {
         }
         answered.recv().unwrap_or_else(|_| stopped())
     }
+
+    fn helper_started(&mut self, call: &ToolCall) {
+        let _ = self.events.send(Event::Helper {
+            call: call.clone(),
+            outcome: None,
+        });
+    }
+
+    fn helper_finished(&mut self, call: &ToolCall, outcome: &ToolOutcome) {
+        let _ = self.events.send(Event::Helper {
+            call: call.clone(),
+            outcome: Some(outcome.clone()),
+        });
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
 
-    use cutlass_agent::{Completion, LocalModel, ToolCall};
+    use cutlass_agent::{Completion, LocalModel, Message, ToolCall};
     use cutlass_model::{Draft, Micros, Segment, TimeRange};
     use cutlass_store::Folder;
 
@@ -710,14 +751,20 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(steps, [("draft.query", false)]);
+        // The hand-off shows first, then the helper's read.
+        assert_eq!(steps, [("agent.delegate", false), ("draft.query", false)]);
+        assert!(assistant.entries.iter().any(|entry| matches!(
+            entry,
+            Entry::Step { tool, result: Some(answer), .. }
+                if tool == "agent.delegate" && answer == "It is short."
+        )));
         assert_eq!(
             assistant.entries.last(),
             Some(&Entry::Said("The helper says it is short.".to_owned()))
         );
         assert!(assistant.history.iter().any(|message| matches!(
             message,
-            cutlass_agent::Message::Tool { name, content, .. }
+            Message::Tool { name, content, .. }
                 if name == "agent.delegate" && content == "It is short."
         )));
         let _ = std::fs::remove_dir_all(&path);
@@ -898,6 +945,46 @@ mod tests {
         assert_eq!(clips, 2, "{:?}", assistant.entries);
         shell.undo().unwrap();
         assert_eq!(shell.draft().unwrap().tracks[0].segments.len(), 1);
+
+        // And a skill: it looks the bundled ones up before answering.
+        assistant.entries.clear();
+        assistant.draft = "Which skills can you load? Look them up.".to_owned();
+        assistant.send(&settings, "");
+        let deadline = Instant::now() + Duration::from_secs(600);
+        while assistant.poll(&mut shell) {
+            assert!(Instant::now() < deadline, "the model did not answer");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        eprintln!("{:#?}", assistant.entries);
+        assert!(
+            assistant.entries.iter().any(|entry| matches!(
+                entry,
+                Entry::Step { tool, failed: false, .. } if tool == "skill.load"
+            )),
+            "{:?}",
+            assistant.entries
+        );
+
+        // And a helper: the look-up is handed off and its answer comes back.
+        assistant.entries.clear();
+        assistant.draft =
+            "Use a helper (agent.delegate) to find how long the main track is, then tell me."
+                .to_owned();
+        assistant.send(&settings, "");
+        let deadline = Instant::now() + Duration::from_secs(600);
+        while assistant.poll(&mut shell) {
+            assert!(Instant::now() < deadline, "the model did not answer");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        eprintln!("{:#?}", assistant.entries);
+        assert!(
+            assistant.history.iter().any(|message| matches!(
+                message,
+                Message::Tool { name, is_error: false, .. } if name == "agent.delegate"
+            )),
+            "{:?}",
+            assistant.entries
+        );
         let _ = std::fs::remove_dir_all(&path);
     }
 }

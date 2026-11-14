@@ -88,6 +88,14 @@ fn pair<P: Pixel>(buf: &mut [P], base: usize, stride: usize, x: usize, y: usize,
     if P::lf_fast(buf, at, stride, vertical, wd, thr) {
         return;
     }
+    pair_scalar(buf, at, stride, vertical, wd, thr, bd);
+}
+
+/// [`pair`] without vector instructions, kept out of line so that the
+/// drivers stay small.
+#[cold]
+#[inline(never)]
+fn pair_scalar<P: Pixel>(buf: &mut [P], at: usize, stride: usize, vertical: bool, wd: [Option<Wd>; 2], thr: [Thresh; 2], bd: u32) {
     let (step, line) = if vertical { (1, stride) } else { (stride, 1) };
     for (h, w) in wd.iter().enumerate() {
         if let Some(w) = *w {

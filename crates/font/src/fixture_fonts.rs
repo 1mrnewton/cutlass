@@ -1021,10 +1021,74 @@ pub(crate) fn devanagari_plain() -> Vec<u8> {
     devanagari_named(b"DFLT")
 }
 
+/// A face for the features every script takes first, under a default
+/// script and the names of four scripts shaped by syllable, Devanagari,
+/// Javanese, Khmer and Myanmar: `A` and the first letter ka of each are
+/// 1, `B` and the second, kha, 4; the opening parenthesis is 6.
+///
+/// Read left to right ka is 2 and the parenthesis 7; read right to left
+/// ka is 3 and the parenthesis, whose mirror the face lacks, 8. Kha is 5
+/// by the feature a face's variations go through.
+pub(crate) fn direction() -> Vec<u8> {
+    let mut glyphs = vec![boxed(500); 9];
+    for (glyph, advance) in [
+        (2, 510),
+        (3, 520),
+        (4, 600),
+        (5, 610),
+        (6, 300),
+        (7, 305),
+        (8, 310),
+    ] {
+        glyphs[glyph] = boxed(advance);
+    }
+    let every: &[u16] = &[0, 1, 2, 3, 4];
+    let substitutions = layout_table(
+        &[
+            (b"DFLT", every),
+            (b"dev2", every),
+            (b"java", every),
+            (b"khmr", every),
+            (b"mym2", every),
+        ],
+        &[
+            (b"ltra", &[0]),
+            (b"ltrm", &[1]),
+            (b"rtla", &[2]),
+            (b"rtlm", &[3]),
+            (b"rvrn", &[4]),
+        ],
+        vec![
+            LookupSpec::new(1, vec![single(&[(1, 2)])]),
+            LookupSpec::new(1, vec![single(&[(6, 7)])]),
+            LookupSpec::new(1, vec![single(&[(1, 3)])]),
+            LookupSpec::new(1, vec![single(&[(6, 8)])]),
+            LookupSpec::new(1, vec![single(&[(4, 5)])]),
+        ],
+    );
+    font(
+        &glyphs,
+        &[
+            ('(', 6),
+            ('A', 1),
+            ('B', 4),
+            ('\u{915}', 1),
+            ('\u{916}', 4),
+            ('\u{1000}', 1),
+            ('\u{1001}', 4),
+            ('\u{1780}', 1),
+            ('\u{1781}', 4),
+            ('\u{A98F}', 1),
+            ('\u{A990}', 4),
+        ],
+        &[(b"GSUB", substitutions)],
+    )
+}
+
 /// A fixture's file name and what builds it.
 type Built = (&'static str, fn() -> Vec<u8>);
 
-const FILES: [Built; 18] = [
+const FILES: [Built; 19] = [
     ("shaping.ttf", shaping),
     ("hostile.ttf", hostile),
     ("machines.ttf", machines),
@@ -1043,6 +1107,7 @@ const FILES: [Built; 18] = [
     ("devanagari-two.ttf", devanagari_two),
     ("devanagari-three.ttf", devanagari_three),
     ("devanagari-plain.ttf", devanagari_plain),
+    ("direction.ttf", direction),
 ];
 
 fn path(name: &str) -> std::path::PathBuf {

@@ -252,7 +252,20 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
     let mut buffer = Buffer::new(glyphs);
     if machines {
     } else if syllabic {
-        let engine = Engine::new(font, false, backward, count, trusted);
+        let mut engine = Engine::new(font, false, backward, count, trusted);
+        // The face's variations and the forms the direction asks for
+        // come first, as in any script; the syllables are found in what
+        // they leave.
+        if let (Some(engine), Some(table)) = (engine.as_mut(), font.gsub()) {
+            for stage in [
+                vec![Feature::every(b"rvrn")],
+                direction_features(run.backward).to_vec(),
+            ] {
+                for lookup in lookups(table, &scripts, &stage)? {
+                    engine.apply(&mut buffer, &lookup)?;
+                }
+            }
+        }
         match shaping {
             Shaping::Khmer => khmer::substitute(font, engine, &mut buffer, &scripts)?,
             Shaping::Myanmar => {
@@ -266,7 +279,7 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
     } else if let Some(mut engine) = Engine::new(font, false, backward, count, trusted)
         && let Some(table) = font.gsub()
     {
-        let mut stages = substitution_stages(shaping, backward, run.ligatures);
+        let mut stages = substitution_stages(shaping, run.backward, run.ligatures);
         if korean {
             hangul::stages(&mut stages);
         }
@@ -940,13 +953,20 @@ fn space_width(font: &Font<'_>, space: Space, plain: i32) -> i32 {
     }
 }
 
-/// The substitution features for a script, in the steps they run in.
-fn substitution_stages(shaping: Shaping, backward: bool, ligatures: bool) -> Vec<Vec<Feature>> {
-    let direction = if backward {
+/// The features for the way a run is read, which may not be the way its
+/// script is written: its alternates, and the mirrored forms, which
+/// right to left only the characters whose mirror the face lacks take.
+fn direction_features(backward: bool) -> [Feature; 2] {
+    if backward {
         [Feature::every(b"rtla"), Feature::masked(b"rtlm", MIRRORED)]
     } else {
         [Feature::every(b"ltra"), Feature::every(b"ltrm")]
-    };
+    }
+}
+
+/// The substitution features for a script, in the steps they run in.
+fn substitution_stages(shaping: Shaping, backward: bool, ligatures: bool) -> Vec<Vec<Feature>> {
+    let direction = direction_features(backward);
     let mut common = vec![
         Feature::every(b"ccmp"),
         Feature::every(b"locl"),
@@ -2129,6 +2149,39 @@ mod tests {
             ligatures: true,
         };
         printed(&font, &run)
+    }
+
+    #[test]
+    fn the_features_for_the_way_a_run_is_read_come_first_in_every_script() {
+        const FACE: &[u8] = include_bytes!("../../../font/fixtures/direction.ttf");
+        // Each expected string is what HarfBuzz 14.2 prints for the face.
+        // A script shaped plainly and four shaped by syllable, each by
+        // its own rules: read left to right the first letter takes the
+        // left-to-right alternate and the parenthesis its left-to-right
+        // form, and the second letter the form a face's variations go
+        // through.
+        for (script, text, clusters) in [
+            (b"Latn", "AB(", [0, 1, 2]),
+            (b"Deva", "\u{915}\u{916}(", [0, 3, 6]),
+            (b"Java", "\u{A98F}\u{A990}(", [0, 3, 6]),
+            (b"Khmr", "\u{1780}\u{1781}(", [0, 3, 6]),
+            (b"Mymr", "\u{1000}\u{1001}(", [0, 3, 6]),
+        ] {
+            let [first, second, third] = clusters;
+            assert_eq!(
+                shaped_in(FACE, script, text),
+                format!("[2={first}+510|5={second}+610|7={third}+305]"),
+                "{script:?}"
+            );
+            // Read right to left, though the script is written left to
+            // right, they take the right-to-left ones: the parenthesis,
+            // whose mirror the face lacks, its mirrored form.
+            assert_eq!(
+                shaped_back(FACE, script, text),
+                format!("[8={third}+310|5={second}+610|3={first}+520]"),
+                "{script:?}"
+            );
+        }
     }
 
     #[test]

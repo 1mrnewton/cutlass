@@ -4,8 +4,8 @@
 //! kerning pairs, and a bitmap strike when the file has one. A strike stored
 //! as PNG pictures is handed back still encoded, and a glyph of layered
 //! color (`COLR`) as the paints that fill its outlines. Glyph 0 is the
-//! missing glyph. A face with `CFF2` and no `CFF ` table has no outlines this
-//! reader can draw. A variable face with TrueType outlines is read at any
+//! missing glyph. A variable face, of TrueType outlines or of `CFF2`, is
+//! read at any
 //! setting of its axes ([`Font::set_variations`]), and one instance of it
 //! can be written out as a face of its own ([`pin_instance`]) that opens
 //! already set. The layout tables (`GDEF`, `GSUB`, `GPOS`) are read
@@ -408,10 +408,10 @@ impl<'a> Font<'a> {
         }
     }
 
-    /// `true` when this face has TrueType or CFF outlines.
+    /// `true` when this face has TrueType, CFF or `CFF2` outlines.
     ///
-    /// A `CFF2` face is readable and returns `false`. Sampling those outlines
-    /// is [`FontError::Unsupported`].
+    /// A face whose `CFF2` table does not read still opens, and returns
+    /// `false`. Sampling its outlines is [`FontError::Unsupported`].
     #[must_use]
     pub fn has_outlines(&self) -> bool {
         match &self.outlines {
@@ -508,7 +508,16 @@ impl<'a> Font<'a> {
         }
         match &self.outlines {
             Outlines::TrueType(source) => ttf::outline(source, glyph_id, &self.reading()),
-            Outlines::OpenType(source) => otf::outline(source, glyph_id),
+            Outlines::OpenType(source) => {
+                // The blends of a `CFF2` glyph are weighted by where the
+                // face is set; at its default they are their defaults.
+                let places = self
+                    .variation
+                    .as_ref()
+                    .filter(|variation| variation.set)
+                    .map_or(&[][..], |variation| &variation.places);
+                otf::outline(source, glyph_id, places)
+            }
             Outlines::Pictures => Err(FontError::Unsupported),
         }
     }

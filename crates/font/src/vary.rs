@@ -539,6 +539,34 @@ impl<'a> Store<'a> {
     ) -> Result<f32, FontError> {
         self.row(outer, inner, |region| self.region_weight(region, places))
     }
+
+    /// How much each region group `outer` has numbers for counts at
+    /// `places`, in the order the group lists them: what a CFF2 glyph's
+    /// blends are weighted by. A group of more than `most` regions is
+    /// refused, and a group the store lacks has none.
+    pub(crate) fn group_weights(
+        &self,
+        outer: usize,
+        places: &[i16],
+        most: usize,
+    ) -> Result<Vec<f32>, FontError> {
+        if outer >= self.groups {
+            return Ok(Vec::new());
+        }
+        let at =
+            usize::try_from(u32_at(self.data, 8 + outer * 4)?).map_err(|_| FontError::BadTable)?;
+        let group = self.data.get(at..).ok_or(FontError::Truncated)?;
+        let columns = usize::from(u16_at(group, 4)?);
+        if columns > most {
+            return Err(FontError::BadTable);
+        }
+        Ok(bytes_at(group, 6, columns * 2)?
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|region| self.region_weight(usize::from(u16::from_be_bytes(*region)), places))
+            .collect())
+    }
 }
 
 /// A map from a glyph, or another index, to a row of a [`Store`].

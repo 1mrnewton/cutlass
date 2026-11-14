@@ -346,6 +346,10 @@ const SUBBLOCK: [[u8; 2]; 4] = [[1, 2], [1, 3], [3, 2], [3, 3]];
 /// Speeds at and below which inter frames try blocks under 8×8.
 const SUB8_SPEED: u8 = 1;
 
+/// Up to this speed the fast path also tries its best inter candidate
+/// with the next smaller transform ([`Tile::fast_block`]).
+const FAST_TX_SPEED: u8 = 7;
+
 /// From this speed the search's trials take each coefficient's dead-zone
 /// level (costed as RD quantization costs it, with its end of block
 /// chosen); the blocks the search chooses are coded with RD quantization.
@@ -674,6 +678,18 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         self.inter_cands(&base, &mut cands);
         if self.intra_worth(&base, &cands) {
             self.intra_cands(&base, &mut cands);
+        }
+        // Up to FAST_TX_SPEED, the best inter candidate also with the next
+        // smaller transform.
+        if self.s.speed <= FAST_TX_SPEED
+            && let Some(&b0) = cands.first()
+            && b0.tx > 0
+            && b0.refs[0] != INTRA_FRAME
+        {
+            cands.push(Blk {
+                tx: b0.tx - 1,
+                ..b0
+            });
         }
         let pick = if cands.len() <= 1 {
             0

@@ -274,7 +274,7 @@ struct Blk {
 pub struct Tile<'s, 't, 'r, 'v> {
     s: &'s Shared<'s>,
     f: &'t mut State,
-    w: &'t mut BoolWriter,
+    w: &'t mut Out,
     rec: &'t mut Recon<'r, 'v, u8>,
     col0: usize,
     col1: usize,
@@ -321,7 +321,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     pub fn new(
         s: &'s Shared<'s>,
         f: &'t mut State,
-        w: &'t mut BoolWriter,
+        w: &'t mut Out,
         rec: &'t mut Recon<'r, 'v, u8>,
         (col0, col1): (usize, usize),
         mut seeds: Vec<Mv>,
@@ -1196,7 +1196,18 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         if self.trial {
             self.cost += u64::from(bit_cost(bit != 0, prob as u8));
         } else {
-            self.w.write(bit, prob);
+            self.w.push((bit as u8, prob as u16));
+        }
+    }
+
+    /// A coefficient token bit, at the probability `id` names (which the
+    /// frame's update may change).
+    #[inline]
+    fn put_coef(&mut self, bit: u32, prob: u8, id: u16) {
+        if self.trial {
+            self.cost += u64::from(bit_cost(bit != 0, prob));
+        } else {
+            self.w.push((bit as u8, COEF_ID + id));
         }
     }
 
@@ -1207,7 +1218,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             tree_to(&mut c, tree, probs, symbol);
             self.cost += u64::from(c.0);
         } else {
-            prob::write_tree(self.w, tree, probs, symbol);
+            tree_to(self.w, tree, probs, symbol);
         }
     }
 
@@ -2156,26 +2167,26 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 if collect {
                     self.f.counts.eob[ti][pi][ri][band][ctx] += 1;
                 }
-                self.put(1, u32::from(p[0]));
+                self.put_coef(1, p[0], coef_flat(ti, pi, ri, band, ctx, 0));
             }
             if v == 0 {
-                self.put(0, u32::from(p[1]));
+                self.put_coef(0, p[1], coef_flat(ti, pi, ri, band, ctx, 1));
                 if collect {
                     self.f.counts.coef[ti][pi][ri][band][ctx][0] += 1;
                 }
                 self.cache[rc] = 0;
                 after_zero = true;
             } else {
-                self.put(1, u32::from(p[1]));
+                self.put_coef(1, p[1], coef_flat(ti, pi, ri, band, ctx, 1));
                 let a = v.unsigned_abs();
                 if a == 1 {
-                    self.put(0, u32::from(p[2]));
+                    self.put_coef(0, p[2], coef_flat(ti, pi, ri, band, ctx, 2));
                     if collect {
                         self.f.counts.coef[ti][pi][ri][band][ctx][1] += 1;
                     }
                     self.cache[rc] = 1;
                 } else {
-                    self.put(1, u32::from(p[2]));
+                    self.put_coef(1, p[2], coef_flat(ti, pi, ri, band, ctx, 2));
                     if collect {
                         self.f.counts.coef[ti][pi][ri][band][ctx][2] += 1;
                     }
@@ -2186,7 +2197,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                         self.cost += u64::from(c.0);
                         e
                     } else {
-                        write_big(self.w, pp, a)
+                        let p2 = coef_flat(ti, pi, ri, band, ctx, 2);
+                        write_big(&mut BigOut { out: self.w, p2 }, pp, a)
                     };
                 }
                 self.put(u32::from(v < 0), 128);
@@ -2207,7 +2219,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 self.f.counts.eob[ti][pi][ri][band][ctx] += 1;
                 self.f.counts.coef[ti][pi][ri][band][ctx][3] += 1;
             }
-            self.put(0, u32::from(probs[band][ctx][0]));
+            self.put_coef(0, probs[band][ctx][0], coef_flat(ti, pi, ri, band, ctx, 0));
         }
         let on = u8::from(eob > 0);
         let above = &mut self.f.above_nz[plane];
@@ -2228,6 +2240,67 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
 /// Where token bits go: the bool coder, or a running cost.
 trait Sink {
     fn write(&mut self, bit: u32, prob: u32);
+
+    /// A bit at probability `k` of a Pareto row.
+    #[inline]
+    fn pareto(&mut self, bit: u32, k: usize, pp: &[u8; 8]) {
+        self.write(bit, u32::from(pp[k]));
+    }
+}
+
+/// The final pass's symbols, kept to be written once the frame's
+/// probability updates are known: a bit and what gives its probability
+/// (see [`prob_of`]).
+pub type Out = Vec<(u8, u16)>;
+
+/// Symbol ids below 256 are the probability itself.
+const COEF_ID: u16 = 0x1000;
+const PARETO_ID: u16 = 0x4000;
+
+/// The index of a coefficient probability in the flattened table.
+#[inline]
+fn coef_flat(tx: usize, plane: usize, r: usize, band: usize, ctx: usize, node: usize) -> u16 {
+    (((((tx * 2 + plane) * 2 + r) * 6 + band) * 6 + ctx) * 3 + node) as u16
+}
+
+/// The probability symbol `id` is coded at, given the frame's
+/// coefficient probabilities flattened.
+#[inline]
+pub fn prob_of(id: u16, coef: &[u8; 1728]) -> u32 {
+    if id < 256 {
+        u32::from(id)
+    } else if id < PARETO_ID {
+        u32::from(coef[usize::from(id - COEF_ID)])
+    } else {
+        let f = usize::from((id & 0x3fff) >> 3);
+        u32::from(PARETO8[usize::from(coef[f].max(1)) - 1][usize::from(id & 7)])
+    }
+}
+
+impl Sink for Out {
+    #[inline]
+    fn write(&mut self, bit: u32, prob: u32) {
+        self.push((bit as u8, prob as u16));
+    }
+}
+
+/// The big-token bits of a token whose node-2 probability is `p2`.
+struct BigOut<'a> {
+    out: &'a mut Out,
+    p2: u16,
+}
+
+impl Sink for BigOut<'_> {
+    #[inline]
+    fn write(&mut self, bit: u32, prob: u32) {
+        self.out.push((bit as u8, prob as u16));
+    }
+
+    #[inline]
+    fn pareto(&mut self, bit: u32, k: usize, _pp: &[u8; 8]) {
+        self.out
+            .push((bit as u8, PARETO_ID | (self.p2 << 3) | k as u16));
+    }
 }
 
 impl Sink for BoolWriter {
@@ -2294,47 +2367,46 @@ fn write_big<S: Sink>(w: &mut S, pp: &[u8; 8], a: u32) -> u8 {
             w.write((v >> (probs.len() - 1 - i)) & 1, u32::from(p));
         }
     };
-    let p = |k: usize| u32::from(pp[k]);
     if a <= 4 {
-        w.write(0, p(0));
+        w.pareto(0, 0, pp);
         if a == 2 {
-            w.write(0, p(1));
+            w.pareto(0, 1, pp);
             2
         } else {
-            w.write(1, p(1));
-            w.write(a - 3, p(2));
+            w.pareto(1, 1, pp);
+            w.pareto(a - 3, 2, pp);
             3
         }
     } else {
-        w.write(1, p(0));
+        w.pareto(1, 0, pp);
         if a <= 10 {
-            w.write(0, p(3));
+            w.pareto(0, 3, pp);
             if a <= 6 {
-                w.write(0, p(4));
+                w.pareto(0, 4, pp);
                 bits(w, a - 5, &[159]);
             } else {
-                w.write(1, p(4));
+                w.pareto(1, 4, pp);
                 bits(w, a - 7, &[165, 145]);
             }
             4
         } else {
-            w.write(1, p(3));
+            w.pareto(1, 3, pp);
             if a <= 34 {
-                w.write(0, p(5));
+                w.pareto(0, 5, pp);
                 if a <= 18 {
-                    w.write(0, p(6));
+                    w.pareto(0, 6, pp);
                     bits(w, a - 11, &[173, 148, 140]);
                 } else {
-                    w.write(1, p(6));
+                    w.pareto(1, 6, pp);
                     bits(w, a - 19, &[176, 155, 140, 135]);
                 }
             } else {
-                w.write(1, p(5));
+                w.pareto(1, 5, pp);
                 if a <= 66 {
-                    w.write(0, p(7));
+                    w.pareto(0, 7, pp);
                     bits(w, a - 35, &[180, 157, 141, 134, 130]);
                 } else {
-                    w.write(1, p(7));
+                    w.pareto(1, 7, pp);
                     bits(w, (a - 67).min((1 << 14) - 1), &CAT6_PROB);
                 }
             }

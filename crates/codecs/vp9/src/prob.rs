@@ -360,7 +360,7 @@ fn decode_uniform(r: &mut BoolDecoder<'_>) -> Result<u8, CodecError> {
     }
 }
 
-fn inv_remap(v: u8, m: u8) -> u8 {
+pub(crate) fn inv_remap(v: u8, m: u8) -> u8 {
     let mapped = u32::from(INV_MAP_TABLE[usize::from(v)]);
     let m = u32::from(m).saturating_sub(1);
     let value = if (m << 1) <= 255 {

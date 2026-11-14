@@ -72,7 +72,8 @@ struct TileWork {
     seeds: Vec<Mv>,
     state: State,
     scratch: Scratch<u8>,
-    data: Vec<u8>,
+    /// The tile's symbols, written once the frame's probabilities are.
+    out: tile::Out,
 }
 
 impl TileWork {
@@ -82,7 +83,7 @@ impl TileWork {
             seeds: Vec::new(),
             state: State::empty(),
             scratch: Scratch::new(),
-            data: Vec::new(),
+            out: Vec::new(),
         }
     }
 }
@@ -139,22 +140,43 @@ impl FrameEncoder {
     /// Codes the loaded source.
     pub fn encode(&mut self, fp: FrameParams) -> Result<Coded, CodecError> {
         let key = fp.key || self.dec.ref8(0).is_none();
-        let head = self.headers(key, fp.golden, fp.qindex)?;
+        let lossless = fp.qindex == 0;
+        // The tiles are coded against the probabilities as they stand; their
+        // symbols are kept, the coefficient probabilities that pay for
+        // their update are updated, and the symbols written with them.
+        let head = self.headers(key, fp.golden, fp.qindex, None)?;
         let parsed = header::parse(self.dec.persist(), &head)?;
-        let h = &parsed.header;
-        let tile_data = self.tiles(&parsed, fp)?;
-        let mut data = head.clone();
-        data.extend_from_slice(&tile_data.0);
-        let (counts, mvs, segmap, pic) = (tile_data.1, tile_data.2, tile_data.3, tile_data.4);
-        let _ = h;
+        let (counts, mvs, segmap, pic, ntiles) = self.tiles(&parsed, fp)?;
+        let old = flat_coef(&parsed.fc);
+        let new = coef_updates(&old, &counts, if lossless { 0 } else { 3 });
+        let head = self.headers(key, fp.golden, fp.qindex, Some((&old, &new)))?;
+        let mut data = head;
+        for (i, t) in self.work[..ntiles].iter().enumerate() {
+            let mut w = BoolWriter::new();
+            for &(bit, id) in &t.out {
+                w.write(u32::from(bit), tile::prob_of(id, &new));
+            }
+            let d = w.finish()?;
+            if i + 1 < ntiles {
+                data.extend_from_slice(&(d.len() as u32).to_be_bytes());
+            }
+            data.extend_from_slice(&d);
+        }
+        let parsed = header::parse(self.dec.persist(), &data)?;
         let _shown = self.dec.commit(&parsed, &counts, mvs, segmap, pic);
         Ok(Coded { data, key })
     }
 
     /// The uncompressed and compressed headers.
-    fn headers(&self, key: bool, golden: bool, qindex: u8) -> Result<Vec<u8>, CodecError> {
+    fn headers(
+        &self,
+        key: bool,
+        golden: bool,
+        qindex: u8,
+        coef: Option<(&[u8; 1728], &[u8; 1728])>,
+    ) -> Result<Vec<u8>, CodecError> {
         let lossless = qindex == 0;
-        let compressed = compressed_header(lossless, !key)?;
+        let compressed = compressed_header(lossless, !key, coef)?;
         let mut b = BitWriter::new();
         b.write(2, 2); // frame marker
         b.write(0, 2); // profile 0
@@ -231,11 +253,11 @@ impl FrameEncoder {
         fp: FrameParams,
     ) -> Result<
         (
-            Vec<u8>,
             prob::Counts,
             Vec<frame::MvRef>,
             Vec<u8>,
             Arc<Pic<u8>>,
+            usize,
         ),
         CodecError,
     > {
@@ -330,7 +352,7 @@ impl FrameEncoder {
             let tsb = (col1 - col0).div_ceil(8);
             t.state
                 .reset(col0, col1 - col0, mi_rows, sb_rows * tsb, false);
-            let mut w = BoolWriter::new();
+            t.out.clear();
             let [y, u, v] = &mut t.pix;
             let mut views = [
                 View {
@@ -352,13 +374,18 @@ impl FrameEncoder {
             let mut seeds = std::mem::take(&mut t.seeds);
             for r in 0..sb_rows {
                 let mut rec = Recon::new(&ctx, &mut views, &mut t.scratch);
-                let mut tile =
-                    Tile::new(&shared, &mut t.state, &mut w, &mut rec, (col0, col1), seeds);
+                let mut tile = Tile::new(
+                    &shared,
+                    &mut t.state,
+                    &mut t.out,
+                    &mut rec,
+                    (col0, col1),
+                    seeds,
+                );
                 tile.sb_row(r * 8);
                 seeds = tile.finish();
             }
             t.seeds = seeds;
-            t.data = w.finish()?;
             Ok(())
         };
         let work = &mut self.work[..ntiles];
@@ -395,7 +422,6 @@ impl FrameEncoder {
         let mut masks = vec![lpf::Mask::default(); sb_rows * sb_cols];
         let mut mvs = vec![frame::MvRef::default(); mi_cols * mi_rows];
         let mut counts = prob::Counts::new();
-        let mut data = Vec::new();
         {
             let mut views = writer.tails().map(View::of);
             for (i, t) in work.iter().enumerate() {
@@ -421,11 +447,6 @@ impl FrameEncoder {
                         .copy_from_slice(&st.mvs[r * w..r * w + w]);
                 }
                 counts.add(&st.counts);
-                let d = &t.data;
-                if i + 1 < ntiles {
-                    data.extend_from_slice(&(d.len() as u32).to_be_bytes());
-                }
-                data.extend_from_slice(d);
             }
             if filter_on {
                 for r in 0..sb_rows {
@@ -446,7 +467,7 @@ impl FrameEncoder {
             made: AtomicBool::new(false),
         });
         let segmap = vec![0u8; mi_cols * mi_rows];
-        Ok((data, counts, mvs, segmap, pic))
+        Ok((counts, mvs, segmap, pic, ntiles))
     }
 }
 
@@ -474,7 +495,11 @@ pub fn filter_level(qindex: u8, key: bool) -> u8 {
     guess.clamp(0, 63) as u8
 }
 
-fn compressed_header(lossless: bool, inter: bool) -> Result<Vec<u8>, CodecError> {
+fn compressed_header(
+    lossless: bool,
+    inter: bool,
+    coef: Option<(&[u8; 1728], &[u8; 1728])>,
+) -> Result<Vec<u8>, CodecError> {
     let mut w = BoolWriter::new();
     if !lossless {
         // TX_MODE_SELECT, its probabilities as they are.
@@ -485,8 +510,8 @@ fn compressed_header(lossless: bool, inter: bool) -> Result<Vec<u8>, CodecError>
         }
     }
     let max_tx = if lossless { 0 } else { 3 };
-    for _ in 0..=max_tx {
-        w.write(0, 128); // no coefficient updates
+    for tx in 0..=max_tx {
+        write_coef_updates(&mut w, tx, coef);
     }
     for _ in 0..3 {
         w.write(0, 252); // skip
@@ -522,3 +547,169 @@ fn compressed_header(lossless: bool, inter: bool) -> Result<Vec<u8>, CodecError>
 
 #[cfg(test)]
 mod tests;
+
+/// The coefficient probabilities in the order of the compressed header:
+/// size, plane, reference, band, context, node.
+fn flat_coef(fc: &FrameContext) -> [u8; 1728] {
+    let mut out = [0u8; 1728];
+    let mut i = 0;
+    for tx in &fc.coef {
+        for plane in tx {
+            for r in plane {
+                for band in r {
+                    for ctx in band {
+                        for &p in ctx {
+                            out[i] = p;
+                            i += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether band `band` codes context `ctx`.
+fn coded(band: usize, ctx: usize) -> bool {
+    band > 0 || ctx < 3
+}
+
+/// The bits of `v` in the header's sub-exponential code.
+fn subexp_bits(v: u8) -> u32 {
+    match v {
+        0..=15 => 5,
+        16..=31 => 6,
+        32..=63 => 8,
+        _ => 3 + if v - 64 < 65 { 7 } else { 8 },
+    }
+}
+
+/// The code of probability `new` against `old` (`prob::inv_remap`'s
+/// inverse).
+fn remap(new: u8, old: u8) -> Option<u8> {
+    (0..=254u8).find(|&v| prob::inv_remap(v, old) == new)
+}
+
+/// The coefficient probabilities after the updates that save bits on this
+/// frame's counts (libvpx's savings test, a size at a time).
+fn coef_updates(old: &[u8; 1728], counts: &prob::Counts, max_tx: usize) -> [u8; 1728] {
+    let mut new = *old;
+    let flag = |b: bool| u64::from(tile::bit_cost(b, 252));
+    for tx in 0..=max_tx {
+        let mut gain = 0i64;
+        let mut coded_probs = 0u64;
+        let mut changed = Vec::new();
+        for plane in 0..2 {
+            for r in 0..2 {
+                for band in 0..6 {
+                    for ctx in 0..6 {
+                        if !coded(band, ctx) {
+                            continue;
+                        }
+                        let c = &counts.coef[tx][plane][r][band][ctx];
+                        let branch = counts.eob[tx][plane][r][band][ctx];
+                        let pairs = [
+                            (c[3], branch.saturating_sub(c[3])),
+                            (c[0], c[1] + c[2]),
+                            (c[1], c[2]),
+                        ];
+                        for (node, (c0, c1)) in pairs.into_iter().enumerate() {
+                            coded_probs += 1;
+                            let i = ((((tx * 2 + plane) * 2 + r) * 6 + band) * 6 + ctx) * 3 + node;
+                            let total = u64::from(c0) + u64::from(c1);
+                            if total == 0 {
+                                continue;
+                            }
+                            let p = ((256 * u64::from(c0) + total / 2) / total).clamp(1, 255) as u8;
+                            if p == old[i] {
+                                continue;
+                            }
+                            let Some(v) = remap(p, old[i]) else { continue };
+                            let cost = |q: u8| {
+                                u64::from(c0) * u64::from(tile::bit_cost(false, q))
+                                    + u64::from(c1) * u64::from(tile::bit_cost(true, q))
+                            };
+                            let save = cost(old[i]) as i64
+                                - cost(p) as i64
+                                - (flag(true) as i64 - flag(false) as i64)
+                                - i64::from(subexp_bits(v)) * 256;
+                            if save > 0 {
+                                gain += save;
+                                changed.push((i, p));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Updating a size costs a flag for every probability in it.
+        if gain > (coded_probs * flag(false) + 256) as i64 {
+            for (i, p) in changed {
+                new[i] = p;
+            }
+        }
+    }
+    new
+}
+
+/// The coefficient updates of size `tx` in the compressed header.
+fn write_coef_updates(w: &mut BoolWriter, tx: usize, coef: Option<(&[u8; 1728], &[u8; 1728])>) {
+    let base = tx * 2 * 2 * 6 * 6 * 3;
+    let Some((old, new)) = coef.filter(|(o, n)| o[base..base + 432] != n[base..base + 432]) else {
+        w.write(0, 128);
+        return;
+    };
+    w.write(1, 128);
+    for plane in 0..2 {
+        for r in 0..2 {
+            for band in 0..6 {
+                for ctx in 0..6 {
+                    if !coded(band, ctx) {
+                        continue;
+                    }
+                    for node in 0..3 {
+                        let i = ((((tx * 2 + plane) * 2 + r) * 6 + band) * 6 + ctx) * 3 + node;
+                        match (new[i] != old[i]).then(|| remap(new[i], old[i])).flatten() {
+                            Some(v) => {
+                                w.write(1, 252);
+                                write_subexp(w, v);
+                            }
+                            None => w.write(0, 252),
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// libvpx `encode_term_subexp`.
+fn write_subexp(w: &mut BoolWriter, v: u8) {
+    let v = u32::from(v);
+    if v < 16 {
+        w.write(0, 128);
+        w.write_literal(v, 4);
+    } else if v < 32 {
+        w.write(1, 128);
+        w.write(0, 128);
+        w.write_literal(v - 16, 4);
+    } else if v < 64 {
+        w.write(1, 128);
+        w.write(1, 128);
+        w.write(0, 128);
+        w.write_literal(v - 32, 5);
+    } else {
+        w.write(1, 128);
+        w.write(1, 128);
+        w.write(1, 128);
+        let u = v - 64;
+        let m = 65;
+        if u < m {
+            w.write_literal(u, 7);
+        } else {
+            w.write_literal((u + m) >> 1, 7);
+            w.write((u + m) & 1, 128);
+        }
+    }
+}

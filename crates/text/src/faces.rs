@@ -10,11 +10,13 @@ use cutlass_font::Font;
 use crate::linebreak::ends_line;
 use crate::richtext::{Run, run_at};
 use crate::shaper::has_space_for;
-use crate::unicode::{decompose, props};
+use crate::unicode::{compose, decompose, props};
 
 /// The most fallback faces one title takes. Past it, a character no face
 /// so far can draw is drawn as missing.
 pub const MAX_FALLBACK_FACES: usize = 8;
+/// The most marks on one letter that are looked at when its face is chosen.
+const MAX_MARKS: usize = 8;
 
 /// Where a title's other faces come from.
 pub trait FaceSource {
@@ -234,7 +236,25 @@ pub(crate) fn gather<'f>(
             let able = chosen.is_some_and(|font| draws(font, character));
             let in_color =
                 chosen.is_some_and(|font| font.has_color_strike() || font.has_color_layers());
-            if !able || (emoji && !in_color) {
+            // The marks on this letter: a face draws the letter whole
+            // only if it has each of them, alone or as one glyph with the
+            // letter.
+            let marks: Vec<char> = text[at + character.len_utf8()..]
+                .chars()
+                .take_while(|next| {
+                    let props = crate::unicode::props(*next);
+                    props.is_mark() && !props.default_ignorable()
+                })
+                .take(MAX_MARKS)
+                .collect();
+            let whole = |font: &Font<'_>| {
+                marks.iter().all(|mark| {
+                    has(font, *mark)
+                        || compose(character, *mark).is_some_and(|both| has(font, both))
+                })
+            };
+            let marked = able && !emoji && !chosen.is_some_and(&whole);
+            if !able || (emoji && !in_color) || marked {
                 let mut held = |bytes: &'f [u8]| {
                     let key = (bytes.as_ptr(), bytes.len());
                     let known = fallbacks
@@ -267,6 +287,21 @@ pub(crate) fn gather<'f>(
                     .and_then(&mut held);
                 let found =
                     beside.or_else(|| source.fallback(character, emoji).and_then(&mut held));
+                // A face for one of the marks that draws the letter too,
+                // for when the face found so far lacks a mark: a letter
+                // and its accent are not set in two faces, and an accent
+                // is not left as an empty box.
+                let with_marks: Vec<usize> = marks
+                    .iter()
+                    .filter_map(|mark| source.fallback(*mark, false).and_then(&mut held))
+                    .collect();
+                let covers = |index: &usize| fonts.get(*index).is_some_and(&whole);
+                let found = found
+                    .filter(&covers)
+                    .or_else(|| with_marks.into_iter().find(&covers))
+                    // With no face for the whole of it, the letter is
+                    // still drawn where it can be.
+                    .or(found.filter(|_| !marked));
                 if let Some(index) = found {
                     face = index;
                     real_bold = false;
@@ -409,6 +444,56 @@ mod tests {
         let japanese = cutlass_font::read(KANA).expect("kana");
         let faces = gather(japanese, "\u{AC00}\u{6C34}", &[], PLAIN, &source);
         assert_eq!(faces.pick(3), 0);
+    }
+
+    #[test]
+    fn a_letter_and_its_accent_are_set_in_one_face_that_has_both() {
+        // The sample face has A and B and no accents; the shaping face has
+        // A, e and a combining acute.
+        let source = Table::new(
+            |_| None,
+            |character| matches!(character, '\u{301}' | 'e' | 'A').then_some(SHAPING),
+        );
+        let pick = |text: &str| -> Vec<usize> {
+            let faces = gather(own(), text, &[], PLAIN, &source);
+            text.char_indices().map(|(at, _)| faces.pick(at)).collect()
+        };
+        // A alone stays in the title's face. With an acute on it, which
+        // that face lacks, the letter goes to the face that has both, and
+        // the letters around it stay.
+        assert_eq!(pick("AB"), [0, 0]);
+        assert_eq!(pick("A\u{301}B"), [1, 0, 0]);
+        assert_eq!(pick("BA\u{301}"), [0, 1, 0]);
+        // A letter the title's face has, with an accent no face has both
+        // for: the letter stays where it is drawn.
+        assert_eq!(pick("B\u{301}"), [0, 0]);
+        assert_eq!(pick("A\u{302}"), [0, 0]);
+        // The face that has the letter and the accent as one glyph draws
+        // them whole and asks for nothing.
+        let quiet = Table::new(|_| None, |_| None);
+        let shaping = cutlass_font::read(SHAPING).expect("shaping");
+        let _faces = gather(shaping, "e\u{301} \u{E9}", &[], PLAIN, &quiet);
+        assert!(quiet.asked.borrow().is_empty());
+        // A letter the title's face lacks takes the face that has its
+        // accent too, over one that has the letter alone.
+        const HAN: &[u8] = include_bytes!("../../font/fixtures/han.ttf");
+        let two = Table::new(
+            |_| None,
+            |character| match character {
+                'e' => Some(HAN),
+                '\u{301}' => Some(SHAPING),
+                _ => None,
+            },
+        );
+        let faces = gather(own(), "e\u{301}", &[], PLAIN, &two);
+        let font = &faces.fonts[faces.pick(0)];
+        assert!(font.glyph_id('\u{301}').expect("map").is_some());
+        // Many marks on one letter are looked at up to a limit, quickly.
+        let started = std::time::Instant::now();
+        let stacked = format!("A{}", "\u{301}".repeat(5_000)).repeat(20);
+        let faces = gather(own(), &stacked, &[], PLAIN, &source);
+        assert_eq!(faces.pick(0), 1);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]

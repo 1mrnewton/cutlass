@@ -628,16 +628,9 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
             }
         }
         let refs = &refs;
-        if P::bytes(&[]).is_some() {
-            // 8-bit samples go through the vector kernels, which pick their
-            // own instructions.
-            self.predict_planes((x, y, w, h), field, refs, weights, bit_depth);
-        } else {
-            cutlass_simd::wide::wide(
-                #[inline(always)]
-                || self.predict_planes((x, y, w, h), field, refs, weights, bit_depth),
-            );
-        }
+        // The vector kernels pick their own instructions, for 8-bit samples
+        // and deeper ones alike.
+        self.predict_planes((x, y, w, h), field, refs, weights, bit_depth);
         Ok(())
     }
 

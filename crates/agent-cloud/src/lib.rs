@@ -328,4 +328,25 @@ mod tests {
         });
         assert!(refused.contains("did not answer"), "{refused}");
     }
+
+    /// The real service, with a key it refuses: the request reaches it over
+    /// HTTPS and its refusal reads plainly.
+    /// `cargo test -p cutlass-agent-cloud real_service -- --ignored`.
+    #[test]
+    #[ignore = "reaches api.anthropic.com"]
+    fn the_real_service_names_a_wrong_key() {
+        let settings = cutlass_settings::Settings::default();
+        let mut model = super::model(&settings, "sk-ant-not-a-key", "").unwrap();
+        let error = model
+            .complete(&CompletionRequest {
+                messages: vec![Message::User {
+                    text: "hi".to_owned(),
+                }],
+                tools: cutlass_agent::tool_definitions(),
+            })
+            .unwrap_err()
+            .to_string();
+        eprintln!("{error}");
+        assert!(error.contains("invalid x-api-key"), "{error}");
+    }
 }

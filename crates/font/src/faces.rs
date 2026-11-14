@@ -26,6 +26,11 @@ pub struct FaceEntry {
     /// The family the face belongs to: a regular face and its bold and
     /// italic share one.
     pub family: Option<String>,
+    /// The family as its maker thinks of it, when the face names one
+    /// apart from `family`: a face of many weights may give each weight
+    /// a family of its own there, "Montserrat Thin", and the whole
+    /// design's name here, "Montserrat".
+    pub design_family: Option<String>,
     /// The face is the family's bold, or bold italic.
     pub bold: bool,
     /// The face is the family's italic, or bold italic.
@@ -354,6 +359,7 @@ fn entry_at(
         index,
         full_name: None,
         family: None,
+        design_family: None,
         bold: false,
         italic: false,
         instances: Vec::new(),
@@ -370,6 +376,7 @@ fn entry_at(
                 if let Ok(table) = read(start, length as usize) {
                     entry.full_name = name(&table, 4);
                     entry.family = name(&table, 1);
+                    entry.design_family = name(&table, 16);
                     names = Some(table);
                 }
             }
@@ -867,6 +874,18 @@ mod tests {
         let both = face(&build(Some(0x21), 0));
         assert_eq!(both.family.as_deref(), Some("Fam"));
         assert_eq!(both.full_name.as_deref(), Some("Fam Bold Italic"));
+        // It names no design apart from its family.
+        assert_eq!(both.design_family, None);
+        // A weight filed as a family of its own names the whole design.
+        let glyphs = [crate::fixture::boxed(500); 3];
+        let thin = crate::fixture::font(
+            &glyphs,
+            &[('A', 2)],
+            &[(b"name", names(&[(1, "Fam Thin"), (16, "Fam")]))],
+        );
+        let thin = face(&thin);
+        assert_eq!(thin.family.as_deref(), Some("Fam Thin"));
+        assert_eq!(thin.design_family.as_deref(), Some("Fam"));
         assert!(both.bold && both.italic);
         let bold = face(&build(Some(0x20), 0));
         assert!(bold.bold && !bold.italic);

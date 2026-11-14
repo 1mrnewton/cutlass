@@ -1,7 +1,8 @@
 //! Reads a TrueType or OpenType font, including one face of a collection.
 //!
 //! The file yields a glyph id, an advance width, an outline, horizontal
-//! kerning pairs, and a bitmap strike when the file has one. Glyph 0 is the
+//! kerning pairs, and a bitmap strike when the file has one. A strike stored
+//! as PNG pictures is handed back still encoded. Glyph 0 is the
 //! missing glyph. A face with `CFF2` and no `CFF ` table has no outlines this
 //! reader can draw. The layout tables (`GDEF`, `GSUB`, `GPOS`) are read
 //! for a shaper to ask; shaping, atlases, and meshes are not part of this
@@ -13,6 +14,8 @@ mod collection;
 mod faces;
 #[cfg(test)]
 mod fixture;
+#[cfg(test)]
+mod fixture_color;
 #[cfg(test)]
 mod fixture_fonts;
 mod gpos;
@@ -307,12 +310,35 @@ impl<'a> Font<'a> {
         self.strikes.is_some()
     }
 
+    /// `true` when the face has a color strike: `CBLC`/`CBDT` or `sbix`.
+    #[must_use]
+    pub fn has_color_strike(&self) -> bool {
+        self.strikes.has_color()
+    }
+
     /// Bitmap for one glyph, when this face has a strike and this glyph has pixels.
     ///
     /// `Ok(None)` means the face has no strike, or this glyph has no bitmap in it.
-    /// A color strike is premultiplied RGBA. A gray or mono strike is coverage.
+    /// The largest strike that holds the glyph answers, a color strike before a
+    /// gray one. A color strike is premultiplied RGBA or a PNG picture that is
+    /// still encoded. A gray or mono strike is coverage.
     pub fn bitmap(&self, glyph_id: u16) -> Result<Option<BitmapGlyph>, FontError> {
         self.strikes.glyph(glyph_id, self.num_glyphs)
+    }
+
+    /// Color bitmap for one glyph, from the largest color strike whose picture
+    /// is at most `max_edge` pixels wide and high.
+    ///
+    /// `Ok(None)` means the face has no color strike, or none holds this glyph.
+    /// When every strike's picture is larger than `max_edge`, the smallest is
+    /// returned; the caller compares its size and refuses it.
+    pub fn color_bitmap(
+        &self,
+        glyph_id: u16,
+        max_edge: u32,
+    ) -> Result<Option<BitmapGlyph>, FontError> {
+        self.strikes
+            .color_glyph(glyph_id, self.num_glyphs, max_edge)
     }
 
     /// Horizontal kerning for a glyph pair, in font design units.

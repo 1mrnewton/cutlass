@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use cutlass_font::{BitmapPixels, Contour, Font, Outline, Segment};
+use cutlass_font::{BitmapPixels, Contour, Font, FontError, Outline, Segment};
 
 use crate::TextError;
 
@@ -202,6 +202,7 @@ fn paint_bitmap(font: &Font<'_>, glyph_id: u16) -> Result<GlyphImage, TextError>
             }
             (GlyphKind::Color, Vec::new(), bytes)
         }
+        BitmapPixels::Png(_) => return Err(TextError::Font(FontError::Unsupported)),
     };
     #[allow(clippy::cast_precision_loss)]
     let bearing_x = bitmap.bearing_x as f32;

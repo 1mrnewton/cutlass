@@ -347,7 +347,9 @@ fn entry_at(
 }
 
 /// One name from a `name` table: English Windows or Unicode first, then
-/// any Windows or Unicode entry, then a plain-ASCII Macintosh one.
+/// a plain-ASCII Macintosh one in English, then a Windows entry in any
+/// other language. A face may name itself in several, and no English
+/// among its Windows names.
 fn name(table: &[u8], id: u16) -> Option<String> {
     let count = usize::from(u16_at(table, 2).ok()?);
     let storage = usize::from(u16_at(table, 4).ok()?);
@@ -370,12 +372,12 @@ fn name(table: &[u8], id: u16) -> Option<String> {
                 let rank = if platform == 0 || language == 0x0409 {
                     0
                 } else {
-                    1
+                    2
                 };
                 (rank, utf16(raw)?)
             }
             (1, 0) if language == 0 && raw.is_ascii() => {
-                (2, String::from_utf8_lossy(raw).into_owned())
+                (1, String::from_utf8_lossy(raw).into_owned())
             }
             _ => continue,
         };
@@ -709,6 +711,14 @@ mod tests {
         table.extend_from_slice(b"Mac");
         table.extend_from_slice(&[0, b'W', 0, b'n']);
         assert_eq!(name(&table, 4).as_deref(), Some("Wn"));
+        // The Windows name in another language, Urdu: the Macintosh
+        // English one is the name, as for the Mac's own Arabic face.
+        table[22..24].copy_from_slice(&0x0420_u16.to_be_bytes());
+        assert_eq!(name(&table, 4).as_deref(), Some("Mac"));
+        // Only the Windows one in that language: it is used.
+        table[6..8].copy_from_slice(&7_u16.to_be_bytes());
+        assert_eq!(name(&table, 4).as_deref(), Some("Wn"));
+        table[6..8].copy_from_slice(&1_u16.to_be_bytes());
         // Only the Macintosh one: it is used.
         table[2..4].copy_from_slice(&1_u16.to_be_bytes());
         assert_eq!(name(&table, 4).as_deref(), Some("Mac"));

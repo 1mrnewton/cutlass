@@ -21,6 +21,7 @@ use cutlass_model::MaterialText;
 
 use crate::TextError;
 use crate::bidi::visual_order;
+use crate::cache::{TextCache, layout_key};
 use crate::faces::{FaceSource, Wanted, gather};
 use crate::linebreak::{Boundary, boundaries};
 use crate::shape::{Shaped, ShapedGlyph, shape_faces};
@@ -116,6 +117,22 @@ pub fn layout_with<'f>(
     let words = crate::richtext::read(material)?;
     let gathered = gather(font, &words.text, &words.runs, Wanted::of(material), faces);
     layout_faces(&gathered.fonts, material, &|source| gathered.pick(source))
+}
+
+/// [`layout_with`], keeping the layout in `cache`: while the words, the
+/// faces and the sizes are the same, it is not made again.
+pub fn layout_cached<'f>(
+    bytes: &'f [u8],
+    material: &MaterialText,
+    faces: &'f dyn FaceSource,
+    cache: &TextCache,
+) -> Result<std::sync::Arc<Layout>, TextError> {
+    let font = cutlass_font::read(bytes).map_err(TextError::Font)?;
+    let words = crate::richtext::read(material)?;
+    let gathered = gather(font, &words.text, &words.runs, Wanted::of(material), faces);
+    let pick = |source: usize| gathered.pick(source);
+    let key = layout_key(&gathered.fonts, material, &words.text, &words.runs, &pick);
+    cache.layout(key, || layout_faces(&gathered.fonts, material, &pick))
 }
 
 /// Lay out `material` with a face that has already been read.

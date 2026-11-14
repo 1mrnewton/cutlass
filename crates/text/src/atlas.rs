@@ -105,6 +105,12 @@ impl Atlas {
             None => Err(TextError::Limit),
         }
     }
+
+    /// Take an image of `glyph_id` that was painted before, so it is not
+    /// painted again. A glyph already here keeps the image it has.
+    pub(crate) fn adopt(&mut self, glyph_id: u16, image: &GlyphImage) {
+        self.cells.entry(glyph_id).or_insert_with(|| image.clone());
+    }
 }
 
 /// Read `bytes` and paint one glyph. The length is the cached texel count.

@@ -18,6 +18,7 @@ use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::TextError;
 use crate::atlas::{Atlas, GlyphKind};
+use crate::cache::{TextCache, layout_key};
 use crate::faces::{FaceSource, NoFaces, Wanted, gather};
 use crate::layout::layout_faces;
 use crate::mesh::{GlyphRecord, TextMesh, build_faces};
@@ -83,6 +84,10 @@ struct Chosen<'c, 'f> {
     pick: &'c dyn Fn(usize) -> usize,
     /// Whether that face is itself bold, and itself italic.
     real: &'c dyn Fn(usize) -> (bool, bool),
+    /// The words being set.
+    text: &'c str,
+    /// Where glyph images and layouts are kept between opens.
+    cache: Option<&'c TextCache>,
 }
 
 /// Bold, italic and underline for one glyph, in picture pixels.
@@ -294,6 +299,35 @@ impl TextSource {
         segment: &Segment,
         faces: &'f dyn FaceSource,
     ) -> Result<Self, TextError> {
+        Self::open_any(bytes, face, material, glow, segment, faces, None)
+    }
+
+    /// [`Self::open_with_faces`], keeping in `cache` what the next open of
+    /// a title in these faces can use again: each glyph's image, and the
+    /// layout while the words, faces and sizes are the same.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_cached<'f>(
+        bytes: &'f [u8],
+        face: Option<u32>,
+        material: &MaterialText,
+        glow: Option<&BloomParams>,
+        segment: &Segment,
+        faces: &'f dyn FaceSource,
+        cache: &TextCache,
+    ) -> Result<Self, TextError> {
+        Self::open_any(bytes, face, material, glow, segment, faces, Some(cache))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_any<'f>(
+        bytes: &'f [u8],
+        face: Option<u32>,
+        material: &MaterialText,
+        glow: Option<&BloomParams>,
+        segment: &Segment,
+        faces: &'f dyn FaceSource,
+        cache: Option<&TextCache>,
+    ) -> Result<Self, TextError> {
         if segment.target.duration.0 > 0
             && segment
                 .target
@@ -314,6 +348,8 @@ impl TextSource {
             fonts: &gathered.fonts,
             pick: &|source| gathered.pick(source),
             real: &|source| gathered.real(source),
+            text: &words.text,
+            cache,
         };
         Self::from_fonts(&chosen, &words.runs, material, glow, segment)
     }
@@ -325,16 +361,42 @@ impl TextSource {
         glow: Option<&BloomParams>,
         segment: &Segment,
     ) -> Result<Self, TextError> {
-        let Chosen { fonts, pick, real } = *chosen;
+        let Chosen {
+            fonts,
+            pick,
+            real,
+            text,
+            cache,
+        } = *chosen;
         let fill = fill_rgba(material)?;
-        let laid = layout_faces(fonts, material, pick)?;
+        let laid = match cache {
+            Some(cache) => cache.layout(layout_key(fonts, material, text, runs, pick), || {
+                layout_faces(fonts, material, pick)
+            })?,
+            None => std::sync::Arc::new(layout_faces(fonts, material, pick)?),
+        };
         let mut atlases: Vec<Atlas> = fonts.iter().map(|_| Atlas::new()).collect();
         for placed in laid.glyphs() {
             let (Some(atlas), Some(font)) = (atlases.get_mut(placed.face), fonts.get(placed.face))
             else {
                 return Err(TextError::Limit);
             };
-            let _image = atlas.glyph(font, placed.glyph_id)?;
+            if atlas.image(placed.glyph_id).is_some() {
+                continue;
+            }
+            match cache {
+                // A glyph painted for an earlier title is taken as it is.
+                Some(cache) => {
+                    let image = cache.glyph(font.fingerprint(), placed.glyph_id, || {
+                        let mut alone = Atlas::new();
+                        alone.glyph(font, placed.glyph_id).cloned()
+                    })?;
+                    atlas.adopt(placed.glyph_id, &image);
+                }
+                None => {
+                    let _image = atlas.glyph(font, placed.glyph_id)?;
+                }
+            }
         }
         let mesh = build_faces(material.id.clone(), &laid, &atlases)?;
         let style = Style::of(material, glow, laid.font_size)?;
@@ -2036,6 +2098,53 @@ mod tests {
         assert_ne!(
             cpu(source.sample(Micros(1_000))),
             cpu(alone.sample(Micros(1_000)))
+        );
+    }
+
+    #[test]
+    fn a_cached_open_paints_and_lays_out_once_and_draws_the_same() {
+        let cache = crate::TextCache::new();
+        let text = material("AB AB");
+        let open = |text: &MaterialText| {
+            TextSource::open_cached(TTF, None, text, None, &segment(), &crate::NoFaces, &cache)
+                .unwrap()
+        };
+        let first = open(&text);
+        // A, B and the space, and one layout.
+        assert_eq!(cache.misses(), (3, 1));
+        assert_eq!((cache.glyphs(), cache.layouts()), (3, 1));
+        let again = open(&text);
+        assert_eq!(
+            cache.misses(),
+            (3, 1),
+            "nothing is painted or laid out again"
+        );
+        // The picture is the one an open with no cache draws.
+        let plain = TextSource::open(TTF, None, &text, &segment()).unwrap();
+        let drawn = cpu(plain.sample(Micros(1_000)));
+        assert_eq!(cpu(first.sample(Micros(1_000))), drawn);
+        assert_eq!(cpu(again.sample(Micros(1_000))), drawn);
+        assert_eq!(again.records(), plain.records());
+
+        // Another color is the same layout and the same glyphs.
+        let mut red = text.clone();
+        red.text_color = "#FF0000".to_owned();
+        let colored = open(&red);
+        assert_eq!(cache.misses(), (3, 1));
+        assert_ne!(cpu(colored.sample(Micros(1_000))), drawn);
+        // Other words are a new layout of glyphs that are already kept.
+        let other = open(&material("BA"));
+        assert_eq!(cache.misses(), (3, 2));
+        assert_eq!(other.records().len(), 2);
+        // Another size is a new layout too.
+        let mut large = text.clone();
+        large.font_size *= 2.0;
+        let _large = open(&large);
+        assert_eq!(cache.misses(), (3, 3));
+        // A face that does not read fails as it does without a cache.
+        assert!(
+            TextSource::open_cached(&[], None, &text, None, &segment(), &crate::NoFaces, &cache)
+                .is_err()
         );
     }
 

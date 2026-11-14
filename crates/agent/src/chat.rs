@@ -363,14 +363,13 @@ impl LoopbackHttp {
     /// `/v1/models` beside the chat address (Ollama, llama.cpp's server and
     /// LM Studio all answer it).
     pub fn models(&self) -> Result<Vec<String>, ModelError> {
-        let path = self.path.strip_suffix("/chat/completions").map_or_else(
-            || "/v1/models".to_owned(),
-            |base| format!("{base}/models"),
-        );
+        let path = self
+            .path
+            .strip_suffix("/chat/completions")
+            .map_or_else(|| "/v1/models".to_owned(), |base| format!("{base}/models"));
         let reply = self.exchange("GET", &path, "")?;
-        let value: Value = serde_json::from_str(&reply).map_err(|error| {
-            ModelError::Inner(format!("the model list is not JSON: {error}"))
-        })?;
+        let value: Value = serde_json::from_str(&reply)
+            .map_err(|error| ModelError::Inner(format!("the model list is not JSON: {error}")))?;
         let mut names: Vec<String> = value
             .get("data")
             .and_then(Value::as_array)
@@ -732,7 +731,8 @@ mod tests {
                     break;
                 }
             }
-            let answer = r#"{"object":"list","data":[{"id":"qwen3.8:27b"},{"id":"gemma4:latest"}]}"#;
+            let answer =
+                r#"{"object":"list","data":[{"id":"qwen3.8:27b"},{"id":"gemma4:latest"}]}"#;
             let mut stream = stream;
             write!(
                 stream,

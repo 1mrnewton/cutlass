@@ -72,6 +72,14 @@ pub(super) struct InspectorState {
     pub(super) tiles: HashMap<String, egui::TextureHandle>,
     /// The pose part the Graphs row eases.
     ease_part: Option<KeyedSetting>,
+    /// The letters selected in a title's text box, as a first character
+    /// and the one after the last, while the box has the keyboard and
+    /// through a click on the Pattern row, which then styles them alone.
+    pub(super) text_selection: Option<(usize, usize)>,
+    /// The text box, to give the keyboard and the selection back to.
+    words_box: Option<egui::Id>,
+    /// Where the Pattern row was drawn last.
+    pattern_rect: Option<Rect>,
 }
 
 /// Where a clip menu row sends the inspector.
@@ -2008,7 +2016,7 @@ fn text_basic(
         if let Some(value) = changed {
             send(shell, |shell| shell.set_text_size(value));
         }
-        pattern_row(shell, ui, inspection);
+        pattern_row(shell, ui, state, inspection);
         label_row(ui, "Case", |ui| {
             for (label, tip, case) in [
                 ("TT", "Upper case", LetterCase::Upper),
@@ -2071,13 +2079,102 @@ fn words_box(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
     let stored = shell.text_words().unwrap_or_default();
     let text = state.fields.entry("words".to_owned()).or_default();
     let response = ui::Field::multiline(text, 3).name("Text").show(ui).response;
+    let focused = response.has_focus();
+    let typed = text.clone();
     if super::commits(ui, &response) && *text != stored {
         let content = text.clone();
         send(shell, |shell| shell.set_text(content));
-    } else if !response.has_focus() {
+    } else if !focused {
         stored.clone_into(text);
     }
+    state.words_box = Some(response.id);
+    if focused {
+        // The letters selected, to style on their own.
+        state.text_selection = egui::TextEdit::load_state(ui.ctx(), response.id)
+            .and_then(|edit| edit.cursor.char_range())
+            .map(|range| range.as_sorted_char_range())
+            .filter(|range| !range.is_empty())
+            .map(|range| (range.start.0, range.end.0));
+        // Bold, italic and underline from the keyboard, as in any editor.
+        let pressed = |ui: &mut Ui, key: egui::Key| {
+            ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, key))
+        };
+        let part = if pressed(ui, egui::Key::B) {
+            Some(PatternPart::Bold)
+        } else if pressed(ui, egui::Key::I) {
+            Some(PatternPart::Italic)
+        } else if pressed(ui, egui::Key::U) {
+            Some(PatternPart::Underline)
+        } else {
+            None
+        };
+        if let Some(part) = part {
+            // What was typed is kept first, so the letters are counted in
+            // the words as they now are.
+            if typed != stored {
+                send(shell, |shell| shell.set_text(typed));
+            }
+            toggle_pattern(shell, state.text_selection, part);
+        }
+    } else if response.lost_focus() {
+        // A click on the Pattern row keeps the selection, for the row to
+        // style; a click anywhere else lets it go.
+        let on_pattern = ui
+            .input(|input| input.pointer.interact_pos())
+            .zip(state.pattern_rect)
+            .is_some_and(|(at, row)| row.contains(at));
+        if !on_pattern {
+            state.text_selection = None;
+        }
+    }
     ui.add_space(6.0);
+}
+
+/// One of the three parts of a text's pattern.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PatternPart {
+    Bold,
+    Italic,
+    Underline,
+}
+
+/// Turn `part` on or off: for the `selected` letters of the picked title
+/// when there are some, else for the whole text.
+fn toggle_pattern(shell: &mut Shell, selected: Option<(usize, usize)>, part: PatternPart) {
+    let Some(inspection) = shell.inspection() else {
+        return;
+    };
+    let whole = inspection.text_pattern;
+    let now = selected
+        .and_then(|(start, end)| shell.text_range_pattern(start, end))
+        .unwrap_or(whole);
+    let on = match part {
+        PatternPart::Bold => !now.bold,
+        PatternPart::Italic => !now.italic,
+        PatternPart::Underline => !now.underline,
+    };
+    match selected {
+        Some((start, end)) => {
+            let mut change = cutlass_model::PatternChange::default();
+            match part {
+                PatternPart::Bold => change.bold = Some(on),
+                PatternPart::Italic => change.italic = Some(on),
+                PatternPart::Underline => change.underline = Some(on),
+            }
+            send(shell, |shell| {
+                shell.set_text_range_pattern(start, end, change)
+            });
+        }
+        None => {
+            let mut pattern = whole;
+            match part {
+                PatternPart::Bold => pattern.bold = on,
+                PatternPart::Italic => pattern.italic = on,
+                PatternPart::Underline => pattern.underline = on,
+            }
+            send(shell, |shell| shell.set_text_pattern(pattern));
+        }
+    }
 }
 
 /// One field per paragraph, "The N paragraph", each a page or line of the
@@ -2189,22 +2286,60 @@ fn caption_words(
 }
 
 /// Bold, underline and italic, each a switch over the whole text.
-fn pattern_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
-    let stored = inspection.text_pattern;
-    let mut pattern = stored;
-    label_row(ui, "Pattern", |ui| {
-        if icon_toggle(ui, "bold", "Bold", stored.bold).clicked() {
-            pattern.bold = !stored.bold;
-        }
-        if icon_toggle(ui, "underline", "Underline", stored.underline).clicked() {
-            pattern.underline = !stored.underline;
-        }
-        if icon_toggle(ui, "italic", "Italic", stored.italic).clicked() {
-            pattern.italic = !stored.italic;
-        }
-    });
-    if pattern != stored {
-        send(shell, |shell| shell.set_text_pattern(pattern));
+fn pattern_row(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+) {
+    // With letters selected in the text box the row shows and changes
+    // theirs; else the whole text's.
+    let selected = state.text_selection;
+    let stored = selected
+        .and_then(|(start, end)| shell.text_range_pattern(start, end))
+        .unwrap_or(inspection.text_pattern);
+    let mut picked = None;
+    let row = ui
+        .scope(|ui| {
+            label_row(ui, "Pattern", |ui| {
+                let (bold, underline, italic) = if selected.is_some() {
+                    (
+                        "Bold the selected letters",
+                        "Underline the selected letters",
+                        "Italic the selected letters",
+                    )
+                } else {
+                    ("Bold", "Underline", "Italic")
+                };
+                if icon_toggle(ui, "bold", bold, stored.bold).clicked() {
+                    picked = Some(PatternPart::Bold);
+                }
+                if icon_toggle(ui, "underline", underline, stored.underline).clicked() {
+                    picked = Some(PatternPart::Underline);
+                }
+                if icon_toggle(ui, "italic", italic, stored.italic).clicked() {
+                    picked = Some(PatternPart::Italic);
+                }
+            });
+        })
+        .response
+        .rect;
+    state.pattern_rect = Some(row);
+    let Some(part) = picked else {
+        return;
+    };
+    toggle_pattern(shell, selected, part);
+    // The text box takes the keyboard back with its letters still
+    // selected, so another part can be set on them.
+    if let (Some((start, end)), Some(id)) = (selected, state.words_box) {
+        let mut edit = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+        edit.cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(start),
+                egui::text::CCursor::new(end),
+            )));
+        edit.store(ui.ctx(), id);
+        ui.ctx().memory_mut(|memory| memory.request_focus(id));
     }
 }
 

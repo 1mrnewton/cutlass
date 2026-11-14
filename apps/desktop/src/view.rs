@@ -18940,6 +18940,97 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp);
     }
 
+    /// Letters selected in a title's text box are made bold, italic or
+    /// underlined on their own, from the keyboard and from the Pattern
+    /// row; with none selected the row changes the whole text.
+    #[test]
+    fn selected_letters_of_a_title_take_a_pattern_of_their_own() {
+        use cutlass_model::SegmentId;
+        use egui::{Key, Modifiers};
+        use egui_kittest::kittest::Queryable;
+        let temp = std::env::temp_dir().join(format!("cutlass-range-{}", std::process::id()));
+        let mut shell = text_inspector_shell(&temp);
+        shell.select(Some(SegmentId::new("words")));
+        shell.set_text("Hello world".to_owned()).unwrap();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(1280.0, 1600.0))
+            .build_ui_state(
+                |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+                (shell, {
+                    // The empty media shelf's hint has a glyph the test
+                    // fonts lack.
+                    let mut view = ViewState::new();
+                    view.library_shelf = Shelf::Stickers;
+                    view
+                }),
+            );
+        harness.run_steps(4);
+        let range =
+            |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>, start: usize, end: usize| {
+                harness.state().0.text_range_pattern(start, end).unwrap()
+            };
+        let whole = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>| {
+            harness.state().0.inspection().unwrap().text_pattern
+        };
+        // Into the text box, and its first word selected from the keyboard.
+        // The Text tab and the Text shelf have the same name.
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::TextInput, "Text")
+            .click();
+        harness.run_steps(3);
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness.run_steps(2);
+        assert_eq!(harness.state().1.inspector.text_selection, Some((0, 11)));
+        harness.key_press(Key::Home);
+        harness.run_steps(2);
+        assert_eq!(harness.state().1.inspector.text_selection, None);
+        for _ in 0..5 {
+            harness.key_press_modifiers(Modifiers::SHIFT, Key::ArrowRight);
+            harness.run_steps(1);
+        }
+        assert_eq!(harness.state().1.inspector.text_selection, Some((0, 5)));
+        // Command-B makes those letters bold and no others.
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::B);
+        harness.run_steps(3);
+        assert!(range(&harness, 0, 5).bold);
+        assert!(!range(&harness, 5, 11).bold);
+        assert!(!whole(&harness).bold);
+        assert_eq!(harness.state().0.text_words().unwrap(), "Hello world");
+        // The Pattern row shows the selection's pattern and changes it:
+        // a click on Italic leans the same letters, and the text box has
+        // the keyboard and the selection back.
+        harness.get_by_label("Italic the selected letters").click();
+        harness.run_steps(4);
+        let first = range(&harness, 0, 5);
+        assert!(first.bold && first.italic && !first.underline);
+        assert!(!range(&harness, 5, 11).italic);
+        assert_eq!(harness.state().1.inspector.text_selection, Some((0, 5)));
+        // Bold again takes it off those letters.
+        harness.get_by_label("Bold the selected letters").click();
+        harness.run_steps(4);
+        assert!(!range(&harness, 0, 5).bold);
+        assert!(range(&harness, 0, 5).italic);
+        // Each was one step back.
+        harness.state_mut().0.undo().unwrap();
+        harness.run_steps(2);
+        assert!(range(&harness, 0, 5).bold);
+        // A click away from the box and the row lets the selection go,
+        // and the row is the whole text's again.
+        harness
+            .query_all_by_label("Font size")
+            .next()
+            .unwrap()
+            .click();
+        harness.run_steps(3);
+        assert_eq!(harness.state().1.inspector.text_selection, None);
+        harness.get_by_label("Underline").click();
+        harness.run_steps(3);
+        assert!(whole(&harness).underline);
+        assert!(range(&harness, 5, 11).underline);
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
     /// Nothing in the text or caption inspector draws past its content's
     /// right edge, 16 points in from the panel, where the scroll bar runs.
     #[test]

@@ -29,6 +29,7 @@ pub use faces::{FaceSource, MAX_FALLBACK_FACES, NoFaces, StyledFace};
 pub use layout::{
     Alignment, Layout, Line, PlacedGlyph, layout, layout_cached, layout_text, layout_with,
 };
+pub use linebreak::{LINE_BREAK_WORDS, WordLists};
 pub use mesh::{GlyphRecord, TextMesh, build, build_text};
 pub use paint::{DrawnGlyph, paint_glyphs};
 pub use script::script_tag;

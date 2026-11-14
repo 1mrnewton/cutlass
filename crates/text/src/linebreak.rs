@@ -3,13 +3,19 @@
 //! Each place between two characters is one [`Boundary`]. A line ends at an
 //! allowed place when it can. When one word is wider than the line, it ends
 //! at any place that is not inside a letter with its marks, an emoji
-//! sequence, a flag, or a syllable. The rules are the default ones, with no
-//! dictionary: Thai, Lao, Khmer and Burmese words are not told apart.
-//! Those scripts write no spaces between words, so they also break where
-//! their spelling shows a syllable starting, which is never inside a word
-//! part that must stay whole: before a vowel written ahead of its
-//! consonant in Thai and Lao, and before a consonant that opens a
-//! syllable in Khmer and Burmese.
+//! sequence, a flag, or a syllable. The rules are the default ones. Thai,
+//! Lao, Khmer and Burmese write no spaces between words, so the rules
+//! cannot tell their words apart: a run of one of them is divided by a
+//! list of the language's words, as ICU divides it, and a line may end
+//! where a word does. Their spelling still says where a syllable must
+//! stay whole, for a word wider than the line: a vowel written ahead of
+//! its consonant stays with it in Thai and Lao, and a stacked or killed
+//! consonant with the one before it in Khmer and Burmese.
+
+mod dictionary;
+mod words;
+
+pub use words::{LINE_BREAK_WORDS, WordLists};
 
 use crate::unicode::{Props, ea, gc, lb, props};
 
@@ -33,17 +39,85 @@ pub(crate) enum Boundary {
 pub(crate) fn boundaries(text: &str) -> Vec<Boundary> {
     let units = units(text);
     let mut found = vec![Boundary::Joined; text.len()];
+    let mut unspaced = false;
     for at in 1..units.len() {
+        unspaced |= units[at].unspaced;
         if let Some(entry) = found.get_mut(units[at].start) {
             *entry = match between(&units, at) {
-                Boundary::Inside => {
-                    syllable(&units[at - 1], &units[at]).unwrap_or(Boundary::Inside)
-                }
+                // Where a word of a script written without spaces ends is
+                // for its word list to say; its spelling says only where
+                // a syllable must stay whole.
+                Boundary::Inside => match syllable(&units[at - 1], &units[at]) {
+                    Some(Boundary::Joined) => Boundary::Joined,
+                    _ => Boundary::Inside,
+                },
                 other => other,
             };
         }
     }
+    if unspaced || units.first().is_some_and(|unit| unit.unspaced) {
+        end_words(text, &units, &mut found);
+    }
     found
+}
+
+/// Allow a line to end where a word does in each run of Thai, Lao, Khmer
+/// or Burmese: a stretch of one of those scripts' characters that the
+/// rules leave whole.
+fn end_words(text: &str, units: &[Unit], found: &mut [Boundary]) {
+    let mut run: Vec<char> = Vec::new();
+    // Where each character of the run starts, and the run's script.
+    let mut starts: Vec<usize> = Vec::new();
+    let mut script = None;
+    let close = |script: Option<dictionary::Script>,
+                 run: &mut Vec<char>,
+                 starts: &mut Vec<usize>,
+                 found: &mut [Boundary]| {
+        if let Some(script) = script {
+            for end in dictionary::word_ends(script, run) {
+                let Some(start) = starts.get(end).copied() else {
+                    continue;
+                };
+                // Never inside a letter with its marks, and never under
+                // the sign that stacks the next consonant below the one
+                // before it: the stack is drawn as one.
+                let whole = units
+                    .binary_search_by_key(&start, |unit| unit.start)
+                    .is_ok();
+                let stacked = end
+                    .checked_sub(1)
+                    .and_then(|before| run.get(before))
+                    .is_some_and(|before| matches!(before, '\u{17D2}' | '\u{1039}'));
+                if let Some(entry) = found.get_mut(start)
+                    && whole
+                    && !stacked
+                    && *entry != Boundary::Mandatory
+                {
+                    *entry = Boundary::Allowed;
+                }
+            }
+        }
+        run.clear();
+        starts.clear();
+    };
+    for (start, character) in text.char_indices() {
+        let of = dictionary::Script::of(character);
+        // A run ends where the script changes and where the rules
+        // already end a line.
+        let broken = matches!(
+            found.get(start),
+            Some(Boundary::Allowed | Boundary::Mandatory)
+        );
+        if of != script || broken {
+            close(script, &mut run, &mut starts, found);
+            script = of;
+        }
+        if of.is_some() {
+            run.push(character);
+            starts.push(start);
+        }
+    }
+    close(script, &mut run, &mut starts, found);
 }
 
 /// Whether a line ends after `character` whatever follows, aside from a
@@ -676,77 +750,168 @@ mod tests {
     }
 
     #[test]
-    fn scripts_without_spaces_break_where_a_syllable_starts() {
-        // Thai: before a vowel written ahead of its consonant, and after a
-        // vowel that closes a syllable. "Thai language", "will go".
+    fn scripts_without_spaces_break_where_a_word_ends() {
+        // Each line is where ICU 78 ends a line, by the same word lists.
+        // Thai: "Thai language", "hello, everyone", "I love Thai a lot".
         assert_eq!(
             lines("\u{E20}\u{E32}\u{E29}\u{E32}\u{E44}\u{E17}\u{E22}"),
             "\u{E20}\u{E32}\u{E29}\u{E32}|\u{E44}\u{E17}\u{E22}"
         );
         assert_eq!(
-            lines("\u{E08}\u{E30}\u{E44}\u{E1B}"),
-            "\u{E08}\u{E30}|\u{E44}\u{E1B}"
+            lines(
+                "\u{E2A}\u{E27}\u{E31}\u{E2A}\u{E14}\u{E35}\u{E04}\u{E23}\u{E31}\u{E1A}\u{E17}\u{E38}\u{E01}\u{E04}\u{E19}"
+            ),
+            "\u{E2A}\u{E27}\u{E31}\u{E2A}\u{E14}\u{E35}|\u{E04}\u{E23}\u{E31}\u{E1A}|\u{E17}\u{E38}\u{E01}|\u{E04}\u{E19}"
         );
-        // The vowel ahead stays with its consonant, and the vowels after
-        // with theirs, even when a word is too wide for the line.
+        assert_eq!(
+            lines(
+                "\u{E1C}\u{E21}\u{E23}\u{E31}\u{E01}\u{E20}\u{E32}\u{E29}\u{E32}\u{E44}\u{E17}\u{E22}\u{E21}\u{E32}\u{E01}"
+            ),
+            "\u{E1C}\u{E21}|\u{E23}\u{E31}\u{E01}|\u{E20}\u{E32}\u{E29}\u{E32}|\u{E44}\u{E17}\u{E22}|\u{E21}\u{E32}\u{E01}"
+        );
+        // A run of four characters is one word, whatever its spelling.
+        assert_eq!(
+            lines("\u{E08}\u{E30}\u{E44}\u{E1B}"),
+            "\u{E08}\u{E30}\u{E44}\u{E1B}"
+        );
+        // The sign that says a word again stays with it, and so does the
+        // one that cuts a name short: "Bangkok is the capital".
+        assert_eq!(
+            lines("\u{E14}\u{E35}\u{E46}\u{E19}\u{E30}\u{E04}\u{E23}\u{E31}\u{E1A}"),
+            "\u{E14}\u{E35}\u{E46}|\u{E19}\u{E30}|\u{E04}\u{E23}\u{E31}\u{E1A}"
+        );
+        assert_eq!(
+            lines(
+                "\u{E01}\u{E23}\u{E38}\u{E07}\u{E40}\u{E17}\u{E1E}\u{E2F}\u{E40}\u{E1B}\u{E47}\u{E19}\u{E40}\u{E21}\u{E37}\u{E2D}\u{E07}\u{E2B}\u{E25}\u{E27}\u{E07}"
+            ),
+            "\u{E01}\u{E23}\u{E38}\u{E07}\u{E40}\u{E17}\u{E1E}\u{E2F}|\u{E40}\u{E1B}\u{E47}\u{E19}|\u{E40}\u{E21}\u{E37}\u{E2D}\u{E07}|\u{E2B}\u{E25}\u{E27}\u{E07}"
+        );
+        // Letters no word is made of are taken two at a time.
+        assert_eq!(
+            lines("\u{E01}\u{E01}\u{E01}\u{E01}\u{E01}\u{E01}\u{E01}"),
+            "\u{E01}\u{E01}|\u{E01}\u{E01}|\u{E01}\u{E01}\u{E01}"
+        );
+        // Spaces and other scripts end a run; the words on each side of
+        // Latin letters are found, and the letters stay with them.
+        assert_eq!(
+            lines("\u{E20}\u{E32}\u{E29}\u{E32}\u{E44}\u{E17}\u{E22} abc \u{E44}\u{E17}\u{E22}"),
+            "\u{E20}\u{E32}\u{E29}\u{E32}|\u{E44}\u{E17}\u{E22} |abc |\u{E44}\u{E17}\u{E22}"
+        );
+        assert_eq!(
+            lines("a\u{E44}\u{E17}\u{E22}\u{E20}\u{E32}\u{E29}\u{E32}b"),
+            "a\u{E44}\u{E17}\u{E22}|\u{E20}\u{E32}\u{E29}\u{E32}b"
+        );
+        // Lao: "Lao language", and a sentence of it.
+        assert_eq!(
+            lines("\u{E9E}\u{EB2}\u{EAA}\u{EB2}\u{EA5}\u{EB2}\u{EA7}"),
+            "\u{E9E}\u{EB2}\u{EAA}\u{EB2}|\u{EA5}\u{EB2}\u{EA7}"
+        );
+        assert_eq!(
+            lines(
+                "\u{E9E}\u{EB2}\u{EAA}\u{EB2}\u{EA5}\u{EB2}\u{EA7}\u{EC1}\u{EA1}\u{EC8}\u{E99}\u{E9E}\u{EB2}\u{EAA}\u{EB2}\u{E97}\u{EB2}\u{E87}\u{E81}\u{EB2}\u{E99}"
+            ),
+            "\u{E9E}\u{EB2}\u{EAA}\u{EB2}|\u{EA5}\u{EB2}\u{EA7}|\u{EC1}\u{EA1}\u{EC8}\u{E99}|\u{E9E}\u{EB2}\u{EAA}\u{EB2}|\u{E97}\u{EB2}\u{E87}\u{E81}\u{EB2}\u{E99}"
+        );
+        // A run of Thai and one of Lao side by side are each divided,
+        // and nothing ends between them.
+        assert_eq!(
+            lines(
+                "\u{E20}\u{E32}\u{E29}\u{E32}\u{E44}\u{E17}\u{E22}\u{E9E}\u{EB2}\u{EAA}\u{EB2}\u{EA5}\u{EB2}\u{EA7}"
+            ),
+            "\u{E20}\u{E32}\u{E29}\u{E32}|\u{E44}\u{E17}\u{E22}\u{E9E}\u{EB2}\u{EAA}\u{EB2}|\u{EA5}\u{EB2}\u{EA7}"
+        );
+        // Khmer: "Khmer language" is one word, and in "I love Khmer
+        // language" it is the third.
+        assert_eq!(
+            lines("\u{1797}\u{17B6}\u{179F}\u{17B6}\u{1781}\u{17D2}\u{1798}\u{17C2}\u{179A}"),
+            "\u{1797}\u{17B6}\u{179F}\u{17B6}\u{1781}\u{17D2}\u{1798}\u{17C2}\u{179A}"
+        );
+        assert_eq!(
+            lines(
+                "\u{1781}\u{17D2}\u{1789}\u{17BB}\u{17C6}\u{179F}\u{17D2}\u{179A}\u{17A1}\u{17B6}\u{1789}\u{17CB}\u{1797}\u{17B6}\u{179F}\u{17B6}\u{1781}\u{17D2}\u{1798}\u{17C2}\u{179A}"
+            ),
+            "\u{1781}\u{17D2}\u{1789}\u{17BB}\u{17C6}|\u{179F}\u{17D2}\u{179A}\u{17A1}\u{17B6}\u{1789}\u{17CB}|\u{1797}\u{17B6}\u{179F}\u{17B6}\u{1781}\u{17D2}\u{1798}\u{17C2}\u{179A}"
+        );
+        // Burmese: "Myanmar script", and a sentence.
+        assert_eq!(
+            lines("\u{1019}\u{103C}\u{1014}\u{103A}\u{1019}\u{102C}\u{1005}\u{102C}"),
+            "\u{1019}\u{103C}\u{1014}\u{103A}\u{1019}\u{102C}|\u{1005}\u{102C}"
+        );
+        assert_eq!(
+            lines(
+                "\u{1019}\u{103C}\u{1014}\u{103A}\u{1019}\u{102C}\u{1005}\u{1000}\u{102C}\u{1038}\u{1000}\u{102D}\u{102F}\u{1015}\u{103C}\u{1031}\u{102C}\u{1010}\u{1010}\u{103A}\u{1015}\u{102B}\u{1010}\u{101A}\u{103A}"
+            ),
+            "\u{1019}\u{103C}\u{1014}\u{103A}\u{1019}\u{102C}|\u{1005}\u{1000}\u{102C}\u{1038}|\u{1000}\u{102D}\u{102F}|\u{1015}\u{103C}\u{1031}\u{102C}|\u{1010}\u{1010}\u{103A}|\u{1015}\u{102B}|\u{1010}\u{101A}\u{103A}"
+        );
+    }
+
+    #[test]
+    fn a_syllable_stays_whole_where_a_word_is_wider_than_the_line() {
+        // A word may be cut only between syllables: the vowel written
+        // ahead stays with its consonant, and the vowels after with
+        // theirs.
         assert_eq!(
             marked("\u{E44}\u{E17}\u{E22}\u{E32}"),
             "\u{E44}\u{E17}~\u{E22}\u{E32}"
         );
-        // After sara am, and after the repeat sign.
         assert_eq!(
-            lines("\u{E17}\u{E33}\u{E07}\u{E32}\u{E19}"),
-            "\u{E17}\u{E33}|\u{E07}\u{E32}\u{E19}"
+            marked("\u{E20}\u{E32}\u{E29}\u{E32}\u{E44}\u{E17}\u{E22}"),
+            "\u{E20}\u{E32}~\u{E29}\u{E32}|\u{E44}\u{E17}~\u{E22}"
         );
         assert_eq!(
-            lines("\u{E14}\u{E35}\u{E46}\u{E19}\u{E30}"),
-            "\u{E14}\u{E35}\u{E46}|\u{E19}\u{E30}"
+            marked("\u{E9E}\u{EB2}\u{EAA}\u{EB2}\u{EA5}\u{EB2}\u{EA7}"),
+            "\u{E9E}\u{EB2}~\u{EAA}\u{EB2}|\u{EA5}\u{EB2}~\u{EA7}"
         );
-        // Lao the same way: "Lao language".
-        assert_eq!(
-            lines("\u{E9E}\u{EB2}\u{EAA}\u{EB2}\u{EA5}\u{EB2}\u{EA7}"),
-            "\u{E9E}\u{EB2}\u{EAA}\u{EB2}\u{EA5}\u{EB2}\u{EA7}"
-        );
-        assert_eq!(
-            lines("\u{E84}\u{EB3}\u{EC0}\u{EA7}\u{EBB}\u{EC9}\u{EB2}"),
-            "\u{E84}\u{EB3}|\u{EC0}\u{EA7}\u{EBB}\u{EC9}\u{EB2}"
-        );
-        // Khmer, "Khmer language": before a consonant with a vowel or a
-        // stack; the consonant under the stacking sign stays, and the
-        // bare consonant that ends the word is not set on a line alone.
+        // Khmer: the consonant under the stacking sign stays with the
+        // one above it.
         assert_eq!(
             marked("\u{1797}\u{17B6}\u{179F}\u{17B6}\u{1781}\u{17D2}\u{1798}\u{17C2}\u{179A}"),
-            "\u{1797}\u{17B6}|\u{179F}\u{17B6}|\u{1781}\u{17D2}\u{1798}\u{17C2}~\u{179A}"
+            "\u{1797}\u{17B6}~\u{179F}\u{17B6}~\u{1781}\u{17D2}\u{1798}\u{17C2}~\u{179A}"
         );
-        // Burmese, "Myanmar script": a consonant with its killer ends the
-        // syllable before it and stays there; the others open one.
+        // Burmese: a consonant with its killer stays with the syllable
+        // it ends.
         assert_eq!(
             marked("\u{1019}\u{103C}\u{1014}\u{103A}\u{1019}\u{102C}\u{1005}\u{102C}"),
-            "\u{1019}\u{103C}\u{1014}\u{103A}|\u{1019}\u{102C}|\u{1005}\u{102C}"
+            "\u{1019}\u{103C}\u{1014}\u{103A}~\u{1019}\u{102C}|\u{1005}\u{102C}"
         );
-        // A killer after a vowel is part of the vowel: that consonant
-        // opens its syllable. A stacked consonant stays under its stack.
-        assert_eq!(
-            lines("\u{1000}\u{1031}\u{102C}\u{103A}\u{1010}\u{1031}\u{102C}\u{103A}"),
-            "\u{1000}\u{1031}\u{102C}\u{103A}|\u{1010}\u{1031}\u{102C}\u{103A}"
-        );
+        // No line ends under the sign that stacks the next consonant,
+        // though the other implementation ends one there in a run it
+        // has no word for: the stack is drawn as one.
         assert_eq!(
             marked("\u{1000}\u{1039}\u{1000}\u{1014}"),
             "\u{1000}\u{1039}\u{1000}|\u{1014}"
         );
         // Beside a letter of another script nothing changes.
         assert_eq!(marked("a\u{E44}"), "a~\u{E44}");
-        // A long run is walked once.
+    }
+
+    #[test]
+    fn a_long_or_strange_run_of_these_scripts_is_divided_in_time() {
         let started = std::time::Instant::now();
+        // A paragraph of one word twenty thousand times: a line may end
+        // after each.
         let long = "\u{1019}\u{103C}\u{1014}\u{103A}\u{1019}\u{102C}".repeat(20_000);
         assert_eq!(
             boundaries(&long)
                 .iter()
                 .filter(|place| **place == Boundary::Allowed)
                 .count(),
-            39_999
+            19_999
         );
-        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        // A megabyte of one Thai letter, text that is all marks, and
+        // marks with a letter now and then.
+        let letters = "\u{E01}".repeat(350_000);
+        let found = boundaries(&letters);
+        assert_eq!(found.len(), letters.len());
+        assert!(found.contains(&Boundary::Allowed));
+        let marks = "\u{E31}".repeat(200_000);
+        assert!(!boundaries(&marks).contains(&Boundary::Allowed));
+        let mixed = "\u{E01}\u{E48}\u{E48}\u{E48}\u{17D2}\u{1039}\u{103A}".repeat(30_000);
+        assert_eq!(boundaries(&mixed).len(), mixed.len());
+        // The four scripts a letter at a time, in turn.
+        let turns = "\u{E01}\u{E81}\u{1780}\u{1000}".repeat(50_000);
+        assert!(!boundaries(&turns).contains(&Boundary::Allowed));
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
     }
 
     #[test]
@@ -765,13 +930,14 @@ mod tests {
     /// `CUTLASS_LINEBREAK_CASES` names such a file.
     #[test]
     #[ignore = "needs a file of cases from another implementation"]
+    #[allow(clippy::print_stdout)]
     fn another_implementation_agrees() {
         let Ok(path) = std::env::var("CUTLASS_LINEBREAK_CASES") else {
             return;
         };
         let cases = std::fs::read_to_string(path).expect("cases");
         let mut wrong = Vec::new();
-        let mut skipped = 0;
+        let (mut signs, mut stacks) = (0_usize, 0_usize);
         for case in cases.lines() {
             let (points, expected) = case.split_once(';').expect("case");
             let text: String = points
@@ -780,17 +946,6 @@ mod tests {
                     char::from_u32(u32::from_str_radix(hex, 16).expect("hex")).expect("char")
                 })
                 .collect();
-            // The other implementation breaks these four scripts by its
-            // dictionaries, where this one goes by their spelling.
-            if text.chars().any(|character| {
-                matches!(
-                    u32::from(character),
-                    0x0E00..=0x0EFF | 0x1000..=0x109F | 0x1780..=0x17FF
-                )
-            }) {
-                skipped += 1;
-                continue;
-            }
             let found = boundaries(&text);
             let ours: Vec<String> = text
                 .char_indices()
@@ -801,7 +956,36 @@ mod tests {
                     Boundary::Inside | Boundary::Joined => None,
                 })
                 .collect();
-            if ours.join(" ") != expected.trim() {
+            // The other implementation ends a Thai word after the sign
+            // that cuts it short or says it again even when a mark is
+            // typed on that sign, and ends a word it does not know under
+            // the sign that stacks the next consonant. No line ends
+            // before a mark here, or inside a stack.
+            let letters: Vec<char> = text.chars().collect();
+            let theirs: Vec<&str> = expected
+                .split_whitespace()
+                .filter(|place| {
+                    let index = place.parse::<usize>().ok().filter(|index| *index > 0);
+                    let before = index.and_then(|index| letters.get(index - 1)).copied();
+                    let on_a_sign = matches!(before, Some('\u{E2F}' | '\u{E46}'))
+                        && index
+                            .and_then(|index| letters.get(index))
+                            .is_some_and(|mark| crate::unicode::props(*mark).is_mark());
+                    let in_a_stack = matches!(before, Some('\u{17D2}' | '\u{1039}'))
+                        && index
+                            .and_then(|index| letters.get(index))
+                            .is_some_and(|next| super::dictionary::Script::of(*next).is_some());
+                    // Only where the two differ: the rules may end a
+                    // line at such a place too.
+                    if ours.iter().any(|have| have == place) {
+                        return true;
+                    }
+                    signs += usize::from(on_a_sign);
+                    stacks += usize::from(in_a_stack && !on_a_sign);
+                    !(on_a_sign || in_a_stack)
+                })
+                .collect();
+            if ours.join(" ") != theirs.join(" ") {
                 wrong.push(format!(
                     "{points}: ours [{}] theirs [{}]",
                     ours.join(" "),
@@ -809,8 +993,11 @@ mod tests {
                 ));
             }
         }
-        let total = cases.lines().count() - skipped;
+        let total = cases.lines().count();
         let report: Vec<&String> = wrong.iter().take(60).collect();
+        println!(
+            "{total} cases; set aside: {signs} breaks before a mark on a Thai sign, {stacks} inside a stack"
+        );
         assert!(
             wrong.is_empty(),
             "{} of {total} differ: {report:#?}",

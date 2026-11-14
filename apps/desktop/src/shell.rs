@@ -885,6 +885,8 @@ pub struct Shell {
     wants_speech_model: bool,
     /// The update check, the offer, and the restart after an install.
     updates: update::Updates,
+    /// The MCP servers the assistant has started, kept for its next calls.
+    mcp_servers: crate::mcp_servers::McpServers,
     /// The assistant's speech jobs, carried from one tool call to the next.
     agent_speech_jobs: std::collections::BTreeMap<String, cutlass_agent::SpeechJob>,
     /// The assistant's tracking jobs, carried from one tool call to the next.
@@ -1025,6 +1027,7 @@ impl Shell {
             hearings: 0,
             wants_speech_model: false,
             updates: update::Updates::default(),
+            mcp_servers: crate::mcp_servers::McpServers::default(),
             agent_speech_jobs: std::collections::BTreeMap::new(),
             agent_track_jobs: std::collections::BTreeMap::new(),
             agent_tracks: follow::AgentTracks::default(),

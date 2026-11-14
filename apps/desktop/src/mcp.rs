@@ -16,9 +16,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use cutlass_agent::{
-    ApprovalAction, Approver, Catalog, DraftTools, Export, Forward, McpClient, McpError, McpServer,
-    McpTransport, Media, MediaInfo, Packages, Player, Registry, SettingsTool, Speech, ToolSink,
-    TrackAsk, Tracking,
+    ApprovalAction, Approver, Catalog, DraftTools, Export, Forward, McpClient, McpServer, Media,
+    MediaInfo, Packages, Player, Registry, SettingsTool, Speech, ToolSink, TrackAsk, Tracking,
 };
 
 use crate::shell::{ExportRequest, Shell, ShellError};
@@ -63,6 +62,8 @@ pub fn serve(path: Option<&Path>, input: impl BufRead, output: impl Write) -> Re
         .ok_or_else(|| "the project did not open".to_owned())?;
     let mut saved = session.revision();
     let settings = SettingsTool::open(&settings_path).map_err(|error| error.to_string())?;
+    let mut servers = crate::mcp_servers::McpServers::default();
+    servers.configure(&settings.settings().mcp_servers);
     let shell = Rc::new(RefCell::new(shell));
     let registry = Registry::new(
         DraftTools::new(session),
@@ -76,7 +77,7 @@ pub fn serve(path: Option<&Path>, input: impl BufRead, output: impl Write) -> Re
             Headless(Rc::clone(&shell)),
             crate::sandbox::local_sandbox(crate::sandbox::this_program(), Some(path)),
             Refuse,
-            McpClient::new(NoServers),
+            McpClient::new(servers),
             Headless(Rc::clone(&shell)),
         ),
     );
@@ -299,21 +300,6 @@ impl Approver for Refuse {
     fn decide(&mut self, action: &ApprovalAction) -> bool {
         cutlass_logger::info!("mcp: refused {action:?}, as no one can allow it here");
         false
-    }
-}
-
-struct NoServers;
-
-impl McpTransport for NoServers {
-    fn call(
-        &mut self,
-        server_name: &str,
-        _tool: &str,
-        _arguments: &str,
-    ) -> Result<String, McpError> {
-        Err(McpError::Transport(format!(
-            "cutlass mcp does not call other servers, so {server_name} was not reached"
-        )))
     }
 }
 

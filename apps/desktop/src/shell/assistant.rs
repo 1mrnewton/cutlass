@@ -4,8 +4,8 @@
 //! the window's playhead.
 
 use cutlass_agent::{
-    ApprovalAction, Approver, DraftTools, Export, McpClient, McpError, McpTransport, Player,
-    Registry, SettingsTool, Speech, ToolCall, ToolOutcome, ToolSink, TrackAsk, Tracking,
+    ApprovalAction, Approver, DraftTools, Export, McpClient, Player, Registry, SettingsTool,
+    Speech, ToolCall, ToolOutcome, ToolSink, TrackAsk, Tracking,
 };
 use cutlass_codec::CodecId;
 use cutlass_model::Micros;
@@ -123,21 +123,6 @@ impl Export for Exports {
     }
 }
 
-struct NoServers;
-
-impl McpTransport for NoServers {
-    fn call(
-        &mut self,
-        server_name: &str,
-        _tool: &str,
-        _arguments: &str,
-    ) -> Result<String, McpError> {
-        Err(McpError::Transport(format!(
-            "the assistant does not call other servers yet, so {server_name} was not reached"
-        )))
-    }
-}
-
 /// What one assistant tool call did, and the approval it waits for when
 /// it needs one the user has not given.
 pub struct AgentRun {
@@ -230,6 +215,8 @@ impl Shell {
             now: self.agent_tracks_now(),
             started: None,
         };
+        let mut servers = std::mem::take(&mut self.mcp_servers);
+        servers.configure(&self.settings.mcp_servers);
         let sandbox =
             crate::sandbox::local_sandbox(crate::sandbox::this_program(), self.project_folder());
         let mut registry = Registry::new(
@@ -247,7 +234,7 @@ impl Shell {
                     allowed,
                     wanted: None,
                 },
-                McpClient::new(NoServers),
+                McpClient::new(servers),
                 tracks,
             ),
         );
@@ -256,6 +243,7 @@ impl Shell {
         let mut outcome = registry.run_tool(call);
         let wants = registry.approver.wanted.take();
         let settings_now = registry.settings.get();
+        let servers = std::mem::take(registry.mcp.transport_mut());
         let session = registry.draft.session().clone();
         let moves = std::mem::take(&mut registry.player);
         let exported = registry.export.path.take();
@@ -269,6 +257,7 @@ impl Shell {
             },
         );
         drop(registry);
+        self.mcp_servers = servers;
         if settings_now.generation != generation {
             // The settings tool already wrote the file at this generation.
             cutlass_logger::info!(

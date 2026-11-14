@@ -118,6 +118,11 @@ pub struct Scratch<P> {
     pub emu: Vec<P>,
     pub mc: Vec<u8>,
     pub itx: itx::Tmp,
+    /// Each plane's last row of the superblock row above, as reconstructed
+    /// and before the loop filter changed it: intra prediction at the top
+    /// of a superblock reads it from here, so that the row above can be
+    /// filtered as soon as it is made (empty: read the picture).
+    pub above: [Vec<P>; 3],
 }
 
 impl<P: Pixel> Scratch<P> {
@@ -127,6 +132,7 @@ impl<P: Pixel> Scratch<P> {
             emu: vec![P::default(); 80 * 80],
             mc: vec![0; cutlass_simd::vp9::mc::TMP],
             itx: itx::Tmp::new(),
+            above: [Vec::new(), Vec::new(), Vec::new()],
         }
     }
 }
@@ -366,15 +372,30 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
         if have_above {
             let avail = if tx == 0 && have_right { 2 * n } else { n };
             let count = avail.min(fw.saturating_sub(x)).max(1);
-            let row = (y - 1) * stride + x;
-            for (i, a) in e.above.iter_mut().enumerate().take(2 * n) {
-                *a = px(row + i.min(count - 1));
-            }
-            e.tl = if have_left {
-                px(row - 1)
+            let sb = 64 >> if plane == 0 { 0 } else { self.c.dims.ss_y };
+            let saved = &self.s.above[plane];
+            if y % sb == 0 && !saved.is_empty() {
+                // The top of a superblock: the row above as it was before
+                // its filter.
+                for (i, a) in e.above.iter_mut().enumerate().take(2 * n) {
+                    *a = saved[x + i.min(count - 1)];
+                }
+                e.tl = if have_left {
+                    saved[x - 1]
+                } else {
+                    P::new(base + 1)
+                };
             } else {
-                P::new(base + 1)
-            };
+                let row = (y - 1) * stride + x;
+                for (i, a) in e.above.iter_mut().enumerate().take(2 * n) {
+                    *a = px(row + i.min(count - 1));
+                }
+                e.tl = if have_left {
+                    px(row - 1)
+                } else {
+                    P::new(base + 1)
+                };
+            }
         }
         e
     }

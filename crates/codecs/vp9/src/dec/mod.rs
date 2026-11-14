@@ -556,10 +556,21 @@ impl<P: Pixel> FrameRecon<P> {
         {
             let mut views = self.writer.tails().map(View::of);
             Recon::new(&self.ctx, &mut views, &mut self.scratch).sb_row(tiles, sb_row);
-            if self.filter_on && sb_row > 0 {
-                lf::sb_row(&mut views, masks, grid, &self.levels, &self.geo, sb_row - 1);
-            }
-            if sb_row + 1 == self.sb_rows && self.filter_on {
+            if self.filter_on {
+                // The row's last line of each plane, kept for the intra
+                // prediction of the row below; then the row is filtered at
+                // once, while it is in the caches (as FFmpeg does), not
+                // after the next one is made.
+                if sb_row + 1 < self.sb_rows {
+                    for (p, v) in views.iter().enumerate() {
+                        let sb = 64 >> if p == 0 { 0 } else { self.ctx.dims.ss_y };
+                        let line = (sb_row + 1) * sb - 1;
+                        let start = line * v.stride - v.base;
+                        let keep = &mut self.scratch.above[p];
+                        keep.clear();
+                        keep.extend_from_slice(&v.data[start..start + v.stride]);
+                    }
+                }
                 lf::sb_row(&mut views, masks, grid, &self.levels, &self.geo, sb_row);
             }
         }
@@ -568,7 +579,7 @@ impl<P: Pixel> FrameRecon<P> {
         } else {
             // The filter of the next row changes the last 8 chroma rows
             // (16 luma rows for 4:2:0) above it.
-            self.writer.publish((sb_row * 64).saturating_sub(16));
+            self.writer.publish(((sb_row + 1) * 64).saturating_sub(16));
         }
     }
 }

@@ -43,6 +43,9 @@ pub struct Vp9Options {
     pub aq: bool,
 }
 
+/// The fastest speed an alt-ref frame is coded at.
+const ARF_SPEED: u8 = 6;
+
 impl Vp9Options {
     fn threads(&self) -> usize {
         match self.threads {
@@ -264,7 +267,14 @@ impl Vp9Encoder {
             } else {
                 3
             };
-            arf_source = Some(super::arf::filter(&pics, c - lo, w, h, strength));
+            arf_source = Some(super::arf::filter(
+                &pics,
+                c - lo,
+                w,
+                h,
+                strength,
+                self.opts.threads(),
+            ));
         }
         let mut data = Vec::new();
         if let Some(src) = arf_source {
@@ -275,7 +285,9 @@ impl Vp9Encoder {
                 golden: false,
                 hidden: true,
                 qindex,
-                speed: self.opts.speed,
+                // Its match is a golden interval away: the one-pass path's
+                // short search would code it as intra.
+                speed: self.opts.speed.min(ARF_SPEED),
                 altref_future: false,
                 aq: self.opts.aq,
             })?;

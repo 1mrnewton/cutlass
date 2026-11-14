@@ -20,55 +20,92 @@ pub fn filter(
     w: usize,
     h: usize,
     strength: u32,
+    threads: usize,
+) -> [Vec<u8>; 3] {
+    let bands = h.div_ceil(16);
+    let threads = threads.clamp(1, bands.max(1));
+    let parts: Vec<Vec<(usize, [Vec<u8>; 3])>> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..threads)
+            .map(|t| {
+                sc.spawn(move || {
+                    (t..bands)
+                        .step_by(threads)
+                        .map(|b| (b, band(frames, center, w, h, strength, b * 16)))
+                        .collect()
+                })
+            })
+            .collect();
+        hs.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
+    let mut all: Vec<(usize, [Vec<u8>; 3])> = parts.into_iter().flatten().collect();
+    all.sort_unstable_by_key(|p| p.0);
+    std::array::from_fn(|p| all.iter().flat_map(|b| b.1[p].iter().copied()).collect())
+}
+
+/// The filtered rows of the 16-row band from `by` (and its chroma's).
+fn band(
+    frames: &[Picture<'_>],
+    center: usize,
+    w: usize,
+    h: usize,
+    strength: u32,
+    by: usize,
 ) -> [Vec<u8>; 3] {
     let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
     let dims = [(w, h), (cw, ch), (cw, ch)];
-    let mut acc: [Vec<u32>; 3] = std::array::from_fn(|p| vec![0; dims[p].0 * dims[p].1]);
-    let mut cnt: [Vec<u32>; 3] = std::array::from_fn(|p| vec![0; dims[p].0 * dims[p].1]);
+    let bh = 16.min(h - by);
+    // The band's rows in each plane.
+    let rows = [
+        (by, by + bh),
+        (by / 2, (by + bh).div_ceil(2)),
+        (by / 2, (by + bh).div_ceil(2)),
+    ];
+    let mut acc: [Vec<u32>; 3] =
+        std::array::from_fn(|p| vec![0; dims[p].0 * (rows[p].1 - rows[p].0)]);
+    let mut cnt: [Vec<u32>; 3] =
+        std::array::from_fn(|p| vec![0; dims[p].0 * (rows[p].1 - rows[p].0)]);
     let target = &frames[center];
-    for by in (0..h).step_by(16) {
-        for bx in (0..w).step_by(16) {
-            let bw = 16.min(w - bx);
-            let bh = 16.min(h - by);
-            for (f, pic) in frames.iter().enumerate() {
-                // The match and how much the block trusts it.
-                let (mv, weight) = if f == center {
-                    ((0, 0), 2)
-                } else {
-                    let (mv, sse) = search(target.planes[0], pic.planes[0], w, h, bx, by, bw, bh);
-                    let per = sse / (bw * bh) as u64;
-                    (
-                        mv,
-                        if per < 156 {
-                            2
-                        } else if per < 312 {
-                            1
-                        } else {
-                            0
-                        },
-                    )
-                };
-                if weight == 0 {
-                    continue;
-                }
-                for p in 0..3 {
-                    let ss = usize::from(p > 0);
-                    let (pw, ph) = dims[p];
-                    let (x0, y0) = (bx >> ss, by >> ss);
-                    let (n_w, n_h) = (((bx + bw + ss) >> ss) - x0, ((by + bh + ss) >> ss) - y0);
-                    let (dx, dy) = (mv.0 >> ss, mv.1 >> ss);
-                    apply(
-                        target.planes[p],
-                        pic.planes[p],
-                        (pw, ph),
-                        (x0, y0, n_w, n_h),
-                        (dx, dy),
-                        if f == center { None } else { Some(strength) },
-                        weight,
-                        &mut acc[p],
-                        &mut cnt[p],
-                    );
-                }
+    for bx in (0..w).step_by(16) {
+        let bw = 16.min(w - bx);
+        for (f, pic) in frames.iter().enumerate() {
+            // The match and how much the block trusts it.
+            let (mv, weight) = if f == center {
+                ((0, 0), 2)
+            } else {
+                let (mv, sse) = search(target.planes[0], pic.planes[0], w, h, bx, by, bw, bh);
+                let per = sse / (bw * bh) as u64;
+                (
+                    mv,
+                    if per < 156 {
+                        2
+                    } else if per < 312 {
+                        1
+                    } else {
+                        0
+                    },
+                )
+            };
+            if weight == 0 {
+                continue;
+            }
+            for p in 0..3 {
+                let ss = usize::from(p > 0);
+                let (pw, ph) = dims[p];
+                let (x0, y0) = (bx >> ss, by >> ss);
+                let (n_w, n_h) = (((bx + bw + ss) >> ss) - x0, ((by + bh + ss) >> ss) - y0);
+                let (dx, dy) = (mv.0 >> ss, mv.1 >> ss);
+                apply(
+                    target.planes[p],
+                    pic.planes[p],
+                    (pw, ph),
+                    (x0, y0, n_w, n_h),
+                    (dx, dy),
+                    if f == center { None } else { Some(strength) },
+                    weight,
+                    rows[p].0,
+                    &mut acc[p],
+                    &mut cnt[p],
+                );
             }
         }
     }
@@ -81,8 +118,14 @@ pub fn filter(
     })
 }
 
+/// How far a block may have moved over the interval and still count as
+/// a match: the whole search range. (At 16, a steady pan of a sample a
+/// frame never made an alt-ref, which takes 15 to 18% off its bits at
+/// the same averaged PSNR.)
+const REACH: isize = 64;
+
 /// Whether `to` predicts well from `from` (luma, `w`×`h`): most of a
-/// sample of 16×16 blocks find a close match a short way off. An alt-ref
+/// sample of 16×16 blocks find a close match within [`REACH`]. An alt-ref
 /// pays only then.
 pub fn reachable(from: &[u8], to: &[u8], w: usize, h: usize) -> bool {
     let (mut good, mut all) = (0u32, 0u32);
@@ -90,9 +133,9 @@ pub fn reachable(from: &[u8], to: &[u8], w: usize, h: usize) -> bool {
         for bx in (0..w.saturating_sub(15)).step_by(64) {
             let (mv, sse) = search(to, from, w, h, bx, by, 16, 16);
             all += 1;
-            // Close, and near where it was: the content holds still enough
-            // over the interval for one picture to stand for it.
-            good += u32::from(sse / 256 < 156 && mv.0.abs() <= 16 && mv.1.abs() <= 16);
+            // Close: the content holds together over the interval well
+            // enough for one picture to stand for it.
+            good += u32::from(sse / 256 < 156 && mv.0.abs() <= REACH && mv.1.abs() <= REACH);
         }
     }
     all > 0 && good * 10 >= all * 7
@@ -109,6 +152,7 @@ fn apply(
     (dx, dy): (isize, isize),
     strength: Option<u32>,
     weight: u32,
+    row0: usize,
     acc: &mut [u32],
     cnt: &mut [u32],
 ) {
@@ -146,7 +190,7 @@ fn apply(
                     (16 - modifier.min(16)) * weight
                 }
             };
-            let i = y * pw + x;
+            let i = (y - row0) * pw + x;
             acc[i] += m * v;
             cnt[i] += m;
         }

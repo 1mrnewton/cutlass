@@ -2815,7 +2815,10 @@ dependencies = [
 name = "cutlass-ffi-bindings"
 version = "0.1.0"
 dependencies = [
+ "cutlass-agent",
+ "cutlass-agent-cloud",
  "cutlass-ffi",
+ "cutlass-settings",
  "uniffi",
 ]
 

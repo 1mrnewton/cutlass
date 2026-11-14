@@ -672,7 +672,14 @@ impl Walk<'_, '_> {
         if first.checked_add(count).ok_or(BAD)? > total {
             return Err(BAD);
         }
-        let offsets = bytes_at(self.colr.table, list + 4 + first * 4, count * 4)?;
+        // The run is found with checked sums, so a count near the top of 32
+        // bits is an error where a pointer is that wide, and never a wrap.
+        let run_at = first
+            .checked_mul(4)
+            .and_then(|offset| offset.checked_add(list))
+            .and_then(|at| at.checked_add(4))
+            .ok_or(BAD)?;
+        let offsets = bytes_at(self.colr.table, run_at, count * 4)?;
         let mut layers = Vec::with_capacity(count);
         for index in 0..count {
             let offset = offset32(offsets, index * 4)?;

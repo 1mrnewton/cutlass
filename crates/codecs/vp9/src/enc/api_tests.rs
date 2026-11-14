@@ -494,9 +494,11 @@ fn first_mismatch(got: &[u8], want: &[u8]) -> Option<usize> {
 }
 
 #[test]
-fn thirty_frames_stay_near_500_kbps() {
+fn thirty_frames_stay_near_250_kbps() {
     let mut params = CodecParams::with_format(CodecId::Vp9, 160, 96, PixelFormat::Yuv420p);
-    params.bitrate = 500_000;
+    // At more, this simple picture takes every bit it can at the finest
+    // quantizer.
+    params.bitrate = 250_000;
     let mut encoder = Vp9Encoder::open(&params).expect("encoder");
     let mut total = 0usize;
     for index in 0..30u32 {
@@ -511,7 +513,7 @@ fn thirty_frames_stay_near_500_kbps() {
             .expect("encode");
         total += packets[0].data.len();
     }
-    let target = 500_000.0 / 8.0;
+    let target = 250_000.0 / 8.0;
     let ratio = total as f64 / target;
     assert!(
         (0.70..=1.25).contains(&ratio),

@@ -540,6 +540,7 @@ fn codec_id(name: &str) -> Result<CodecId, String> {
         "h264" => CodecId::H264,
         "av1" => CodecId::Av1,
         "vp8" => CodecId::Vp8,
+        "vp9" => CodecId::Vp9,
         "mpeg4" => CodecId::Mpeg4,
         "mpeg2" => CodecId::Mpeg2,
         "mjpeg" => CodecId::Mjpeg,
@@ -831,6 +832,7 @@ fn rust_encoders() -> EncodeFactory {
     cutlass_h264::register_encoders(&mut encoders);
     cutlass_prores::register_encoders(&mut encoders);
     cutlass_vp8::register_engine_encoders(&mut encoders);
+    cutlass_vp9::register_engine_encoders(&mut encoders);
     cutlass_mpeg2::register_encoders(&mut encoders);
     cutlass_mpeg4::register_engine_encoders(&mut encoders);
     encoders

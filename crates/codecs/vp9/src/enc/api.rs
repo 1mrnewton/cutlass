@@ -50,7 +50,7 @@ impl Default for Vp9Options {
             qindex: DEFAULT_Q,
             keyint: 240,
             speed: 5,
-            min_q: 4,
+            min_q: 1,
             max_q: 236,
             threads: 0,
         }
@@ -91,7 +91,7 @@ impl Vp9Encoder {
             enc: FrameEncoder::new(width, height, opts.threads()),
             since_key: 0,
             force_key: true,
-            rc: Rate::new(opts),
+            rc: Rate::new(opts, u64::from(width) * u64::from(height)),
             cancel: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -148,7 +148,7 @@ impl Vp9Encoder {
             2
         };
         self.enc.load(planes);
-        let qindex = self.rc.qindex(kind);
+        let qindex = self.rc.qindex(kind, seconds);
         let coded = self.enc.encode(FrameParams {
             key,
             golden,
@@ -232,7 +232,7 @@ impl VideoEncoder for Vp9Encoder {
         self.enc = FrameEncoder::new(self.width, self.height, self.opts.threads());
         self.force_key = true;
         self.since_key = 0;
-        self.rc = Rate::new(self.opts);
+        self.rc = Rate::new(self.opts, u64::from(self.width) * u64::from(self.height));
     }
 
     fn cancel_flag(&self) -> Arc<AtomicBool> {
@@ -382,27 +382,36 @@ struct Rate {
     model: [Option<f64>; 3],
     last_q: u8,
     per_frame: f64,
+    pixels: f64,
+    /// Frames coded so far.
+    frames: u32,
 }
 
 /// How bits fall with the quantizer step: bits ∝ step^-EXP.
 const EXP: f64 = 1.25;
+
+/// Bits a sample of an inter frame at quantizer step 1 (bits ∝ step^-EXP):
+/// a start for the model, from a detailed 720p picture moving.
+const FIRST_K: f64 = 48.0;
 
 fn step_of(q: u8) -> f64 {
     f64::from(crate::tables::AC_QLOOKUP[usize::from(q)])
 }
 
 impl Rate {
-    fn new(opts: Vp9Options) -> Self {
+    fn new(opts: Vp9Options, pixels: u64) -> Self {
         Self {
             opts,
             debt: 0.0,
             model: [None; 3],
             last_q: opts.qindex,
             per_frame: 0.0,
+            pixels: pixels as f64,
+            frames: 0,
         }
     }
 
-    fn qindex(&mut self, kind: usize) -> u8 {
+    fn qindex(&mut self, kind: usize, seconds: f64) -> u8 {
         if self.opts.bitrate == 0 {
             let q = self.opts.qindex;
             if q == 0 {
@@ -412,15 +421,22 @@ impl Rate {
                 .clamp(self.opts.min_q, q.max(self.opts.min_q));
         }
         if self.per_frame == 0.0 {
-            return q_of_step(step_of(self.last_q) * STEP_SCALE[kind]);
+            // The first frame: the inter quantizer that a typical picture
+            // would take at this many bits a sample, finer for its type.
+            let target = f64::from(self.opts.bitrate) * seconds.max(1e-3) * SHARE[2];
+            let step = (FIRST_K * self.pixels / target.max(1.0)).powf(1.0 / EXP);
+            self.last_q = q_of_step(step).clamp(self.opts.min_q, self.opts.max_q);
+            return q_of_step(step * STEP_SCALE[kind]).clamp(self.opts.min_q, self.opts.max_q);
         }
         let m = match (self.model[kind], self.model[0]) {
             (Some(m), _) => m,
             (None, Some(k)) => k * [1.0, 0.5, 0.2][kind],
             (None, None) => return self.last_q,
         };
-        // The debt is paid back over about a second.
-        let target = (self.per_frame * SHARE[kind] - self.debt / 30.0).max(self.per_frame * 0.2);
+        // The debt is paid back over about a second, sooner at the start
+        // while the model is still a guess.
+        let horizon = f64::from(self.frames.saturating_add(4).min(30));
+        let target = (self.per_frame * SHARE[kind] - self.debt / horizon).max(self.per_frame * 0.2);
         let step = (m / target).powf(1.0 / EXP);
         let q = q_of_step(step).clamp(self.opts.min_q, self.opts.max_q);
         // Inter frames move the quantizer at most a few steps a frame.
@@ -443,6 +459,7 @@ impl Rate {
             return;
         }
         let bits = bytes as f64 * 8.0;
+        self.frames = self.frames.saturating_add(1);
         self.per_frame = f64::from(self.opts.bitrate) * seconds;
         self.debt += bits - self.per_frame;
         let m = bits * step_of(qindex).powf(EXP);

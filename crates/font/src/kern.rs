@@ -27,6 +27,10 @@ impl Kerning {
         Self { pairs: Vec::new() }
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
+
     pub(crate) fn get(&self, left: u16, right: u16) -> i16 {
         let mut low = 0;
         let mut high = self.pairs.len();

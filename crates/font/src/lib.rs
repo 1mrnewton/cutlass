@@ -3,18 +3,33 @@
 //! The file yields a glyph id, an advance width, an outline, horizontal
 //! kerning pairs, and a bitmap strike when the file has one. Glyph 0 is the
 //! missing glyph. A face with `CFF2` and no `CFF ` table has no outlines this
-//! reader can draw. Shaping, atlases, and meshes are not part of this crate.
+//! reader can draw. The layout tables (`GDEF`, `GSUB`, `GPOS`) are read
+//! for a shaper to ask; shaping, atlases, and meshes are not part of this
+//! crate.
 
 #![forbid(unsafe_code)]
 
 mod collection;
 mod faces;
+#[cfg(test)]
+mod fixture;
+mod gpos;
+mod gsub;
 mod kern;
+mod layout;
+#[cfg(test)]
+mod layout_tests;
 mod otf;
 mod strike;
 mod ttf;
 
 pub use faces::{FaceEntry, MAX_COLLECTION_FACES, list_faces, single_face};
+pub use gpos::{Adjust, Anchor, Cursive, Joins, MarkAttach, PairAdjust, Positioning, SingleAdjust};
+pub use gsub::{Ligature, Ligatures, Sequences, Single, Substitution};
+pub use layout::{
+    ClassDef, Coverage, Gdef, GlyphClass, Language, LayoutTable, Lookup, LookupFlags, ReverseChain,
+    SequenceContext, SequenceRule, Tag, U16s,
+};
 pub use strike::{BitmapGlyph, BitmapPixels};
 
 use std::cmp::Ordering;
@@ -131,6 +146,9 @@ pub struct Font<'a> {
     hmtx: Hmtx<'a>,
     cmap: Cmap<'a>,
     kern: kern::Kerning,
+    gdef: Option<Gdef<'a>>,
+    gsub: Option<LayoutTable<'a>>,
+    gpos: Option<LayoutTable<'a>>,
     outlines: Outlines<'a>,
     strikes: strike::Strikes<'a>,
 }
@@ -164,7 +182,31 @@ impl fmt::Debug for Font<'_> {
     }
 }
 
-impl Font<'_> {
+impl<'a> Font<'a> {
+    /// What kind each glyph is, when the face says.
+    #[must_use]
+    pub fn gdef(&self) -> Option<&Gdef<'a>> {
+        self.gdef.as_ref()
+    }
+
+    /// The face's substitutions, when it has any.
+    #[must_use]
+    pub fn gsub(&self) -> Option<&LayoutTable<'a>> {
+        self.gsub.as_ref()
+    }
+
+    /// The face's positioning, when it has any.
+    #[must_use]
+    pub fn gpos(&self) -> Option<&LayoutTable<'a>> {
+        self.gpos.as_ref()
+    }
+
+    /// Whether the face has kerning pairs in a `kern` table.
+    #[must_use]
+    pub fn has_kern_table(&self) -> bool {
+        !self.kern.is_empty()
+    }
+
     #[must_use]
     pub fn kind(&self) -> FontKind {
         self.kind
@@ -282,7 +324,7 @@ impl Font<'_> {
         }
     }
 
-    fn from_directory(directory: Directory<'_>) -> Result<Font<'_>, FontError> {
+    fn from_directory(directory: Directory<'a>) -> Result<Font<'a>, FontError> {
         let head = parse_head(directory.table(b"head")?)?;
         let num_glyphs = parse_maxp(directory.table(b"maxp")?)?;
         let metrics = parse_hhea(directory.table(b"hhea")?, num_glyphs)?;
@@ -296,6 +338,21 @@ impl Font<'_> {
             Err(FontError::MissingTable | FontError::Unsupported) => kern::Kerning::empty(),
             Err(error) => return Err(error),
         };
+        // A layout table that is absent or empty is no table; a torn one
+        // is still an error.
+        let optional = |tag: &[u8; 4]| match directory.table(tag) {
+            Ok([]) => Ok(None),
+            Ok(table) => Ok(Some(table)),
+            Err(FontError::MissingTable) => Ok(None),
+            Err(error) => Err(error),
+        };
+        let gdef = optional(b"GDEF")?.map(Gdef::read).transpose()?;
+        let gsub = optional(b"GSUB")?
+            .map(|table| LayoutTable::read(table, 7))
+            .transpose()?;
+        let gpos = optional(b"GPOS")?
+            .map(|table| LayoutTable::read(table, 9))
+            .transpose()?;
         let outlines = match directory.kind {
             FontKind::TrueType => {
                 Outlines::TrueType(ttf::source(&directory, head.loca, num_glyphs)?)
@@ -310,6 +367,9 @@ impl Font<'_> {
             hmtx,
             cmap,
             kern,
+            gdef,
+            gsub,
+            gpos,
             outlines,
             strikes,
         })

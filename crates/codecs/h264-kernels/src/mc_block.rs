@@ -259,6 +259,19 @@ macro_rules! predict_kernels {
             if w != 4 && w != 8 {
                 return false;
             }
+            // Every row reads `w + 1` samples of its own source row and the
+            // one below, so the last reaches row `y + h`. A block past the
+            // source or `dst` is refused, as the vector kernels refuse it,
+            // and the caller predicts it from a padded copy instead.
+            if h == 0 || dst_stride < w || (h - 1) * dst_stride + w > dst.len() {
+                return false;
+            }
+            let reach = (y + h)
+                .checked_mul(stride)
+                .and_then(|row| row.checked_add(x + w + 1));
+            if reach.is_none_or(|end| end > src.len()) {
+                return false;
+            }
             for row in 0..h {
                 let start = (y + row) * stride + x;
                 let out = &mut dst[row * dst_stride..row * dst_stride + w];

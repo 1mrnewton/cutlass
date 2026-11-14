@@ -216,13 +216,7 @@ impl<'a> Fvar<'a> {
         if let Some(avar) = avar {
             bend(avar, &mut fine)?;
         }
-        Ok(fine
-            .into_iter()
-            .map(|place| {
-                let place = (place.clamp(-FINE_ONE, FINE_ONE) + 2) >> 2;
-                i16::try_from(place).unwrap_or_default()
-            })
-            .collect())
+        Ok(fine.into_iter().map(cut).collect())
     }
 }
 
@@ -250,22 +244,64 @@ impl AxisRecord {
 }
 
 /// Bend each of `places`, in 16.16 fixed point, by its axis's segment map
-/// in `avar`.
+/// in `avar`. A table of the second version then moves each axis by
+/// where all of them are: it has a store of deltas like the other
+/// tables', a row for each axis, asked where the axes are after their
+/// own bending.
 fn bend(avar: &[u8], places: &mut [i32]) -> Result<(), FontError> {
-    // A later version bends one axis by where the others are; only the
-    // maps of each axis alone are read.
-    if !(1..=2).contains(&u16_at(avar, 0)?) {
+    let version = u16_at(avar, 0)?;
+    if !(1..=2).contains(&version) {
         return Ok(());
     }
     let axes = usize::from(u16_at(avar, 6)?);
+    if axes > MAX_AXES {
+        return Err(FontError::BadTable);
+    }
     let mut at = 8;
-    for place in places.iter_mut().take(axes) {
+    for axis in 0..axes {
         let count = usize::from(u16_at(avar, at)?);
         let pairs = bytes_at(avar, at + 2, count * 4)?;
-        *place = bent(pairs, *place);
+        if let Some(place) = places.get_mut(axis) {
+            *place = bent(pairs, *place);
+        }
         at += 2 + count * 4;
     }
+    if version < 2 {
+        return Ok(());
+    }
+    // After the maps: where the map from an axis to its row is, and
+    // where the store is. No map gives each axis the row of its number.
+    let offset = |at: usize| {
+        usize::try_from(u32_at(avar, at)?)
+            .map_err(|_| FontError::BadTable)
+            .map(|offset| (offset != 0).then_some(offset))
+    };
+    let Some(store) = offset(at + 4)? else {
+        return Ok(());
+    };
+    let store = Store::read(avar.get(store..).ok_or(FontError::Truncated)?)?;
+    let map = match offset(at)? {
+        Some(map) => Some(IndexMap::read(
+            avar.get(map..).ok_or(FontError::Truncated)?,
+        )?),
+        None => None,
+    };
+    // The store is asked in the 2.14 the other tables use; what it gives
+    // back is 2.14 as well.
+    let coarse: Vec<i16> = places.iter().map(|place| cut(*place)).collect();
+    for (axis, place) in places.iter_mut().enumerate() {
+        let (outer, inner) = map.as_ref().map_or((0, axis), |map| map.get(axis));
+        let delta = store.delta_at(outer, inner, &coarse)?;
+        #[allow(clippy::cast_possible_truncation)]
+        let moved = nearest(delta * 4.0).clamp(-262_144.0, 262_144.0) as i32;
+        *place = (*place + moved).clamp(-FINE_ONE, FINE_ONE);
+    }
     Ok(())
+}
+
+/// A place in 16.16 fixed point as the 2.14 the tables use.
+fn cut(place: i32) -> i16 {
+    i16::try_from((place.clamp(-FINE_ONE, FINE_ONE) + 2) >> 2).unwrap_or_default()
 }
 
 /// `place` through a map of pairs, each a place and what it becomes, in

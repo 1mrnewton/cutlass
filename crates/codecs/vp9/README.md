@@ -191,7 +191,6 @@ most recently:
 - The common motion compensation call no longer carries the frame of
   the rare paths (scaled references, windows crossing the edge): a
   quarter fewer instructions a call.
-
 - The kernels' entry points took their block by value and rebound it,
   which moved all 144 bytes through a `memcpy` call on every prediction
   and every edge (6% of a 4:4:4 decode).
@@ -214,11 +213,10 @@ most recently:
 
 The machine is a shared VM and single runs vary by ±10% (FFmpeg's own
 times moved from 0.80 s to 0.98 s on the 4:4:4 stream within a day).
-What is left on one core is the coefficient parse (the bool decoder is
-libvpx's and FFmpeg's, but FFmpeg's whole token loop takes about 0.43 s
-of the 4:4:4 stream against Cutlass's 0.55 s) and the loop filter,
-whose kernel retires fewer instructions than FFmpeg's but waits longer
-on its transposed loads.
+What is left on one core is small and spread out: the coefficient loop
+runs 426 M instructions on the first 60 frames of the 4:2:0 stream
+against FFmpeg's 394 M, the loop filter's kernel fewer than FFmpeg's but
+with more time on its transposed loads, and the block parse around them.
 
 **Encode** (`tools/encbench.sh`, BD-rate with `tools/bdrate.py`): 30
 frames of 1280×720, 4 threads on both sides (libvpx with `-row-mt 1

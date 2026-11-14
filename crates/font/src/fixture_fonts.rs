@@ -399,10 +399,123 @@ pub(crate) fn khmer() -> Vec<u8> {
     )
 }
 
+/// A face for the Myanmar script, which names it `script`: ka 1, nga 2,
+/// the asat 3, the virama 4, the medial ra 6, the vowel e 7, the vowel u
+/// 8, the anusvara 9, the dotted circle 10, kha 11, the vowel aa 15 and
+/// the visarga 16.
+///
+/// Nga with the asat and the virama is the kinzi 5; the virama and kha
+/// are the subscript kha 12; the medial ra before ka is the wide one 13;
+/// and ka with aa is one glyph, 14. The anusvara and the vowel u sit on
+/// anchors over and under ka.
+fn myanmar_named(script: &[u8; 4]) -> Vec<u8> {
+    let mut glyphs = vec![boxed(500); 17];
+    for (glyph, advance) in [
+        (1, 700),
+        (2, 650),
+        (6, 300),
+        (7, 400),
+        (10, 600),
+        (11, 650),
+        (13, 450),
+        (14, 1_000),
+        (15, 350),
+        (16, 300),
+    ] {
+        glyphs[glyph] = boxed(advance);
+    }
+    for glyph in [3, 4, 5, 8, 12] {
+        glyphs[glyph] = mark();
+    }
+    // A mark the face gives room of its own.
+    glyphs[9] = Glyph {
+        advance: 200,
+        outline: Some([20, 750, 180, 850]),
+    };
+    let mut map = vec![
+        ('\u{1000}', 1),
+        ('\u{1004}', 2),
+        ('\u{103A}', 3),
+        ('\u{1039}', 4),
+        ('\u{103C}', 6),
+        ('\u{1031}', 7),
+        ('\u{102F}', 8),
+        ('\u{1036}', 9),
+        ('\u{25CC}', 10),
+        ('\u{1001}', 11),
+        ('\u{102C}', 15),
+        ('\u{1038}', 16),
+    ];
+    map.sort_unstable();
+    let substitutions = layout_table(
+        &[(script, &[0, 1, 2, 3])],
+        &[
+            (b"blwf", &[1]),
+            (b"pres", &[2]),
+            (b"psts", &[3]),
+            (b"rphf", &[0]),
+        ],
+        vec![
+            LookupSpec::new(4, vec![ligatures(&[(2, &[(&[3, 4], 5)])])]),
+            LookupSpec::new(4, vec![ligatures(&[(4, &[(&[11], 12)])])]),
+            LookupSpec::new(4, vec![ligatures(&[(6, &[(&[1], 13)])])]),
+            LookupSpec::new(4, vec![ligatures(&[(1, &[(&[15], 14)])])]),
+        ],
+    );
+    let positioning = layout_table(
+        &[(script, &[0])],
+        &[(b"mark", &[0])],
+        vec![LookupSpec::new(
+            4,
+            vec![mark_attach(
+                &[(8, 0, (-150, -100)), (9, 1, (100, 750))],
+                &[
+                    (1, &[(350, -50), (350, 720)]),
+                    (14, &[(500, -50), (500, 720)]),
+                ],
+            )],
+        )],
+    );
+    let kinds = gdef(
+        &[
+            (1, 2, 1),
+            (3, 5, 3),
+            (6, 7, 1),
+            (8, 9, 3),
+            (10, 11, 1),
+            (12, 12, 3),
+            (13, 14, 2),
+            (15, 16, 1),
+        ],
+        &[],
+        &[],
+    );
+    font(
+        &glyphs,
+        &map,
+        &[
+            (b"GDEF", kinds),
+            (b"GPOS", positioning),
+            (b"GSUB", substitutions),
+        ],
+    )
+}
+
+/// The Myanmar face under the script's tag.
+pub(crate) fn myanmar() -> Vec<u8> {
+    myanmar_named(b"mym2")
+}
+
+/// The same face under the tag from before the script's shaping was set
+/// down: a face that names it so is shaped with its lookups alone.
+pub(crate) fn myanmar_old() -> Vec<u8> {
+    myanmar_named(b"mymr")
+}
+
 /// A fixture's file name and what builds it.
 type Built = (&'static str, fn() -> Vec<u8>);
 
-const FILES: [Built; 8] = [
+const FILES: [Built; 10] = [
     ("shaping.ttf", shaping),
     ("hostile.ttf", hostile),
     ("machines.ttf", machines),
@@ -411,6 +524,8 @@ const FILES: [Built; 8] = [
     ("han-kana.ttf", han_kana),
     ("han-hangul.ttf", han_hangul),
     ("khmer.ttf", khmer),
+    ("myanmar.ttf", myanmar),
+    ("myanmar-old.ttf", myanmar_old),
 ];
 
 fn path(name: &str) -> std::path::PathBuf {

@@ -57,6 +57,19 @@ if len(sys.argv)>2 and sys.argv[2]=="khmer":
            "ឥ ឧ ឱ្យ ឲ្យ ឬ","ប្រទេស កម្ពុជា រាជធានី ភ្នំពេញ","ខ្មែរ​អង់គ្លេស","abc កខគ 12"]
     for f,i in [(SUP+"Khmer MN.ttc",0),(SUP+"Khmer MN.ttc",1),(SUP+"Khmer Sangam MN.ttf",0)]:
         for t in khmer: cases.append((f,i,"Khmr","ltr",t))
+if len(sys.argv)>2 and sys.argv[2]=="myanmar":
+    # Burmese words, then Shan, Mon and Karen letters, then the hard
+    # clusters: the kinzi, stacks, medials and vowels written before, an
+    # anusvara after a vowel below, joiners, selectors, and clusters with
+    # no letter. The MN faces shape by their own machines, as in HarfBuzz.
+    cases=[]
+    myanmar=["မြန်မာ","မင်္ဂလာပါ","ကျွန်တော်","ကြောင် ကြွေ","ပြည်ထောင်စု နိုင်ငံ","သမ္မတ ဗုဒ္ဓ တက္ကသိုလ်","အင်္ဂလိပ် သင်္ဘော",
+             "ဦး ဩ ဪ ၎င်း ဣ ဤ","ကျေးဇူးတင်ပါတယ်","ရွှေ လှိုင် ငြိမ်း စွဲ ဆုံး ဉာဏ်","၁၂၃၄ ၊ ။","ေ ္က ် ြ ံ့",
+             "ၽူႈ မႂ်ႇ ၵႂႃႇ လိၵ်ႈ","ၚဳ ဗွဲ ကၠံ ၜါ","က်‌က က်‍ က္‌က","ကုံ ကုံး ကိုံ့","က︀ ေ︀က ကေ︀ႄ","◌ေ ◌် ◌ျ",
+             "ႇႇ ံံ ့့","က² ၁ာ က်²","င်္က္က င်္ကြ င်္ကျွေ","ကျြွှ ကြွှေါ်","ဿ ၏ ၍ ၌","abc ကခဂ 12"]
+    for f,i in [(SYS+"NotoSansMyanmar.ttc",0),(SYS+"NotoSansMyanmar.ttc",4),(SYS+"NotoSerifMyanmar.ttc",0),
+                (SUP+"Myanmar MN.ttc",0),(SUP+"Myanmar Sangam MN.ttc",0)]:
+        for t in myanmar: cases.append((f,i,"Mymr","ltr",t))
 with open(sys.argv[1],"w") as out:
     for f,i,s,d,t in cases: out.write(f"{f}\t{i}\t{s}\t{d}\t{esc(t)}\n")
 print(len(cases))

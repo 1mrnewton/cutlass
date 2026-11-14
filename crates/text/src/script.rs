@@ -20,6 +20,8 @@ pub(crate) enum Shaping {
     Syllabic,
     /// The same for Khmer, by its own rules.
     Khmer,
+    /// And for the Myanmar script.
+    Myanmar,
 }
 
 impl Script {
@@ -87,6 +89,7 @@ impl Script {
             b"Deva" | b"Beng" | b"Guru" | b"Gujr" | b"Orya" | b"Taml" | b"Telu" | b"Knda"
             | b"Mlym" => Shaping::Syllabic,
             b"Khmr" => Shaping::Khmer,
+            b"Mymr" => Shaping::Myanmar,
             _ => Shaping::Plain,
         }
     }

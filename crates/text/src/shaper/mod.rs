@@ -18,6 +18,7 @@ mod indic;
 mod kern;
 mod khmer;
 mod morx;
+mod myanmar;
 mod pattern;
 mod syllables;
 mod thai;
@@ -150,8 +151,8 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
             }
         }
     }
-    let shaping = run.script.shaping();
     let scripts = run.script.tags();
+    let shaping = shaping_in(font, run.script.shaping(), &scripts);
     // A face places Hebrew points only when its positioning table knows
     // Hebrew; one made for another script would place them wrongly.
     let placing = font.gpos().filter(|table| {
@@ -209,6 +210,7 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
     if syllabic {
         match shaping {
             Shaping::Khmer => khmer::describe_all(&mut glyphs),
+            Shaping::Myanmar => myanmar::describe_all(&mut glyphs),
             _ => indic::describe_all(&mut glyphs, run.script),
         }
     }
@@ -237,6 +239,9 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
         let engine = Engine::new(font, false, backward, count, trusted);
         match shaping {
             Shaping::Khmer => khmer::substitute(font, engine, &mut buffer, &scripts)?,
+            Shaping::Myanmar => {
+                myanmar::substitute(font, engine, &mut buffer, &scripts, run.ligatures)?;
+            }
             _ => indic::substitute(font, engine, &mut buffer, &scripts, run.script)?,
         }
     } else if let Some(mut engine) = Engine::new(font, false, backward, count, trusted)
@@ -260,6 +265,20 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
         glyph.x_advance = i32::from(font.advance(glyph.id).map_err(TextError::Font)?);
         if let Some(space) = glyph.space {
             glyph.x_advance = space_width(font, space, glyph.x_advance);
+        }
+    }
+    // Myanmar gives its marks no room before they are placed, so a
+    // font's placing of them starts from there.
+    if syllabic && shaping == Shaping::Myanmar {
+        let back = placing.is_none()
+            && kerx.is_empty()
+            && !font.kern_passes().iter().any(KernPass::cross_stream)
+            && !backward;
+        for glyph in glyphs.iter_mut().filter(|glyph| glyph.is_mark()) {
+            if back {
+                glyph.x_offset -= glyph.x_advance;
+            }
+            glyph.x_advance = 0;
         }
     }
     let positioned = match placing {
@@ -353,6 +372,23 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
         glyphs.reverse();
     }
     Ok(glyphs)
+}
+
+/// The shaping a run takes in `font`. A face that names Myanmar by the
+/// tag from before the script's shaping was set down, or that has only
+/// its default script for it, was drawn to be shaped with its lookups
+/// alone.
+fn shaping_in(font: &Font<'_>, shaping: Shaping, scripts: &[Tag]) -> Shaping {
+    if shaping != Shaping::Myanmar {
+        return shaping;
+    }
+    let chosen = font
+        .gsub()
+        .and_then(|table| table.language(scripts, None).ok()?.script);
+    match chosen {
+        Some(tag) if tag == *b"DFLT" || tag == *b"latn" || tag == *b"mymr" => Shaping::Plain,
+        _ => shaping,
+    }
 }
 
 fn has(font: &Font<'_>, character: char) -> bool {
@@ -814,7 +850,7 @@ fn substitution_stages(shaping: Shaping, backward: bool, ligatures: bool) -> Vec
     }
     let mut stages = vec![vec![Feature::every(b"rvrn")]];
     match shaping {
-        Shaping::Plain | Shaping::Syllabic | Shaping::Khmer => {
+        Shaping::Plain | Shaping::Syllabic | Shaping::Khmer | Shaping::Myanmar => {
             let mut stage = direction.to_vec();
             stage.extend(common);
             stages.push(stage);
@@ -1512,6 +1548,94 @@ mod tests {
         assert!(shaped(&heavy).starts_with("[1=0+700|"));
         let broken = "\u{17C1}".repeat(4_000);
         assert_eq!(shaped(&broken).matches("7=").count(), 4_000);
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    }
+
+    #[test]
+    fn myanmar_syllables_are_sorted_and_take_their_forms() {
+        const MYANMAR: &[u8] = include_bytes!("../../../font/fixtures/myanmar.ttf");
+        let shaped = |text: &str| shaped_in(MYANMAR, b"Mymr", text);
+        // Each expected string is what HarfBuzz 14.2 prints for the face.
+        assert_eq!(shaped("\u{1000}"), "[1=0+700]");
+        // The vowel e and the medial ra are written before the consonant,
+        // and the ra then takes its wide form.
+        assert_eq!(shaped("\u{1000}\u{1031}"), "[7=0+400|1=0+700]");
+        assert_eq!(shaped("\u{1000}\u{103C}"), "[13=0+450]");
+        assert_eq!(shaped("\u{1000}\u{103C}\u{1031}"), "[7=0+400|13=0+450]");
+        // The kinzi is drawn over the consonant after it.
+        assert_eq!(
+            shaped("\u{1004}\u{103A}\u{1039}\u{1000}"),
+            "[1=0+700|5=0+0]"
+        );
+        assert_eq!(
+            shaped("\u{1004}\u{103A}\u{1039}\u{1000}\u{103C}\u{1031}\u{102C}"),
+            "[7=0+400|13=0+450|5=0+0|15=0+350]"
+        );
+        // A stacked consonant, and a form that spans the syllable.
+        assert_eq!(shaped("\u{1000}\u{1039}\u{1001}"), "[1=0+700|12=0+0]");
+        assert_eq!(shaped("\u{1000}\u{102C}"), "[14=0+1000]");
+        // An anusvara typed after a vowel below goes before it. A mark
+        // has no room of its own, whatever the face gives it, and is set
+        // on its anchor.
+        assert_eq!(
+            shaped("\u{1000}\u{102F}\u{1036}"),
+            "[1=0+700|9=0@-450,-30+0|8=0@-200,50+0]"
+        );
+        assert_eq!(shaped("\u{1000}\u{1036}"), "[1=0+700|9=0@-450,-30+0]");
+        assert_eq!(
+            shaped("\u{1000}\u{102C}\u{1036}"),
+            "[14=0+1000|9=0@-600,-30+0]"
+        );
+        // Parts with no consonant stand on a dotted circle.
+        assert_eq!(shaped("\u{1031}"), "[7=0+400|10=0+600]");
+        assert_eq!(shaped("\u{1039}\u{1001}"), "[10=0+600|12=0+0]");
+        assert_eq!(shaped("\u{1036}\u{1000}"), "[10=0+600|9=0+0|1=3+700]");
+        assert_eq!(shaped("\u{1038}\u{1038}"), "[10=0+600|16=0+300|16=0+300]");
+        // Each syllable is sorted on its own.
+        assert_eq!(
+            shaped("\u{1000}\u{1000}\u{1031}\u{1000}"),
+            "[1=0+700|7=3+400|1=3+700|1=9+700]"
+        );
+        assert_eq!(
+            shaped("\u{1000}\u{103A}\u{1004}\u{103A}"),
+            "[1=0+700|3=0+0|2=6+650|3=6+0]"
+        );
+        // A non-joiner keeps a stack from forming; a joiner before a
+        // vowel leaves it with no consonant.
+        assert_eq!(
+            shaped("\u{1000}\u{1039}\u{200C}\u{1001}"),
+            "[1=0+700|4=0+0|11=9+650]"
+        );
+        assert_eq!(
+            shaped("\u{1000}\u{200D}\u{102C}"),
+            "[1=0+700|10=0+600|15=0+350]"
+        );
+        assert_eq!(shaped(""), "[]");
+        // A face that names the script by its old tag is shaped with its
+        // lookups alone: nothing is moved and no circle is put in.
+        const OLD: &[u8] = include_bytes!("../../../font/fixtures/myanmar-old.ttf");
+        let old = |text: &str| shaped_in(OLD, b"Mymr", text);
+        assert_eq!(old("\u{1000}\u{1031}"), "[1=0+700|7=0+400]");
+        assert_eq!(old("\u{1000}\u{103C}"), "[1=0+700|6=0+300]");
+        assert_eq!(
+            old("\u{1004}\u{103A}\u{1039}\u{1000}"),
+            "[2=0+650|3=0+0|4=0+0|1=9+700]"
+        );
+        assert_eq!(old("\u{1000}\u{1039}\u{1001}"), "[1=0+700|4=0+0|11=6+650]");
+        assert_eq!(old("\u{1031}"), "[7=0+400]");
+        assert_eq!(
+            old("\u{1000}\u{102F}\u{1036}"),
+            "[1=0+700|8=0@-200,50+0|9=0@-450,-30+0]"
+        );
+        // One consonant under thousands of stacks and tones, and
+        // thousands of vowels with no consonant, are shaped in time.
+        let started = std::time::Instant::now();
+        let mut heavy = String::from("\u{1000}");
+        heavy.push_str(&"\u{1039}\u{1001}".repeat(2_000));
+        heavy.push_str(&"\u{1038}".repeat(4_000));
+        assert!(shaped(&heavy).starts_with("[1=0+700|"));
+        let broken = "\u{1039}".repeat(4_000);
+        assert_eq!(shaped(&broken).matches("10=").count(), 4_000);
         assert!(started.elapsed() < std::time::Duration::from_secs(20));
     }
 

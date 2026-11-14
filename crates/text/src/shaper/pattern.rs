@@ -213,9 +213,31 @@ pub(super) fn merge(glyphs: &mut [Glyph], start: usize, end: usize) {
     }
 }
 
+/// Move the glyph at `from` to `to`, before it, and the glyphs between
+/// one place on.
+pub(super) fn move_back(glyphs: &mut [Glyph], from: usize, to: usize) {
+    if to < from && from < glyphs.len() {
+        merge(glyphs, to, from + 1);
+        glyphs[to..=from].rotate_right(1);
+    }
+}
+
+/// Sort the glyphs from `start` up to `end` by `key`, keeping the order
+/// of equals. A glyph that moves takes the glyphs it passes into its
+/// place in the text.
+pub(super) fn sort_by(glyphs: &mut [Glyph], start: usize, end: usize, key: impl Fn(&Glyph) -> u8) {
+    for index in start + 1..end.min(glyphs.len()) {
+        let mut to = index;
+        while to > start && key(&glyphs[to - 1]) > key(&glyphs[index]) {
+            to -= 1;
+        }
+        move_back(glyphs, index, to);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Pattern, cut, either, maybe, number, one, repeat, seq};
+    use super::{Pattern, cut, either, maybe, merge, number, one, repeat, seq, sort_by};
     use crate::shaper::buffer::Glyph;
 
     /// A letter, then any number of marks, then maybe a final sign; or a
@@ -257,6 +279,28 @@ mod tests {
         // A cut past the run is held to it.
         number(&mut glyphs[..3], &[(9, 1)]);
         assert_eq!(glyphs[2].syllable, (1 << 4) | 1);
+    }
+
+    #[test]
+    fn a_sort_keeps_equals_in_order_and_merges_what_moves() {
+        let mut glyphs: Vec<Glyph> = [3_u8, 1, 3, 2, 1]
+            .iter()
+            .enumerate()
+            .map(|(at, place)| {
+                let mut glyph = Glyph::new('a', at);
+                glyph.place = *place;
+                glyph
+            })
+            .collect();
+        sort_by(&mut glyphs, 0, 5, |glyph| glyph.place);
+        let places: Vec<u8> = glyphs.iter().map(|glyph| glyph.place).collect();
+        assert_eq!(places, [1, 1, 2, 3, 3]);
+        // Everything a glyph passed shares its place in the text.
+        assert!(glyphs.iter().all(|glyph| glyph.cluster == 0));
+        let mut apart: Vec<Glyph> = (0..4).map(|at| Glyph::new('a', at)).collect();
+        merge(&mut apart, 1, 3);
+        let clusters: Vec<usize> = apart.iter().map(|glyph| glyph.cluster).collect();
+        assert_eq!(clusters, [0, 1, 1, 3]);
     }
 
     #[test]

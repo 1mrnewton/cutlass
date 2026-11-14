@@ -36,15 +36,45 @@ pub fn sb_row<P: Pixel>(
         let mut m = masks[sb_row * g.sb_cols + sb_col];
         let (mi_row, mi_col) = (sb_row * 8, sb_col * 8);
         m.adjust(mi_row, mi_col, g.mi_rows, g.mi_cols);
-        luma(y.data, y.base, y.stride, &m, levels, g, mi_row, mi_col);
+        match (g.ss_x, g.ss_y) {
+            (0, 0) => {
+                // The three planes share the masks and levels: one pass
+                // walks them, filtering each edge of all three.
+                let mut t = [
+                    (&mut *y.data, y.base, y.stride),
+                    (&mut *u.data, u.base, u.stride),
+                    (&mut *v.data, v.base, v.stride),
+                ];
+                luma(&mut t, &m, levels, g, mi_row, mi_col);
+                continue;
+            }
+            _ => luma(
+                &mut [(&mut *y.data, y.base, y.stride)],
+                &m,
+                levels,
+                g,
+                mi_row,
+                mi_col,
+            ),
+        }
         match (g.ss_x, g.ss_y) {
             (1, 1) => {
-                chroma420(u.data, u.base, u.stride, &m, levels, g, mi_row, mi_col);
-                chroma420(v.data, v.base, v.stride, &m, levels, g, mi_row, mi_col);
-            }
-            (0, 0) => {
-                luma(u.data, u.base, u.stride, &m, levels, g, mi_row, mi_col);
-                luma(v.data, v.base, v.stride, &m, levels, g, mi_row, mi_col);
+                chroma420(
+                    &mut [(&mut *u.data, u.base, u.stride)],
+                    &m,
+                    levels,
+                    g,
+                    mi_row,
+                    mi_col,
+                );
+                chroma420(
+                    &mut [(&mut *v.data, v.base, v.stride)],
+                    &m,
+                    levels,
+                    g,
+                    mi_row,
+                    mi_col,
+                );
             }
             _ => {
                 for pl in [&mut *u, &mut *v] {
@@ -72,9 +102,7 @@ pub fn sb_row_plane<P: Pixel>(
         m.adjust(mi_row, mi_col, g.mi_rows, g.mi_cols);
         match (plane, g.ss_x, g.ss_y) {
             (0, _, _) | (_, 0, 0) => luma(
-                view.data,
-                view.base,
-                view.stride,
+                &mut [(&mut *view.data, view.base, view.stride)],
                 &m,
                 levels,
                 g,
@@ -82,9 +110,7 @@ pub fn sb_row_plane<P: Pixel>(
                 mi_col,
             ),
             (_, 1, 1) => chroma420(
-                view.data,
-                view.base,
-                view.stride,
+                &mut [(&mut *view.data, view.base, view.stride)],
                 &m,
                 levels,
                 g,
@@ -123,6 +149,31 @@ struct Run {
     narrow: u8,
     inner: u8,
     lfl: [u8; 8],
+}
+
+/// A plane the drivers filter: its samples, the offset of the view's
+/// first sample in them, and the row stride. Planes of one size share
+/// their masks and levels, and go through the drivers together.
+pub type Target<'a, P> = (&'a mut [P], usize, usize);
+
+/// [`pair`] on each of `t`.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn pairs<P: Pixel>(
+    tg: &mut [Target<'_, P>],
+    x: usize,
+    y: usize,
+    vertical: bool,
+    wd: [Option<Wd>; 2],
+    thr: [Thresh; 2],
+    bd: u32,
+) {
+    if wd[0].is_none() && wd[1].is_none() {
+        return;
+    }
+    for (buf, base, stride) in tg.iter_mut() {
+        pair(buf, *base, *stride, x, y, vertical, wd, thr, bd);
+    }
 }
 
 /// Two halves of 8 lines across one edge: a vertical edge at column `x`
@@ -240,9 +291,7 @@ impl Empty for Strips {
 /// edge 4 to its right reads them back.
 #[allow(clippy::too_many_arguments)]
 fn vertical<P: Pixel>(
-    buf: &mut [P],
-    base: usize,
-    stride: usize,
+    tg: &mut [Target<'_, P>],
     x0: usize,
     cols: usize,
     strips: &[Strips],
@@ -270,7 +319,7 @@ fn vertical<P: Pixel>(
             } else {
                 [ta, tb]
             };
-            pair(buf, base, stride, x, *y, true, [ka, kb], thr, bd);
+            pairs(tg, x, *y, true, [ka, kb], thr, bd);
         }
         for (y, a, b) in strips {
             let ta = levels.dsp(a.lfl[col]);
@@ -279,7 +328,7 @@ fn vertical<P: Pixel>(
             let ib = b
                 .as_ref()
                 .and_then(|b| (b.inner & bit != 0).then_some(Wd::W4));
-            pair(buf, base, stride, x + 4, *y, true, [ia, ib], [ta, tb], bd);
+            pairs(tg, x + 4, *y, true, [ia, ib], [ta, tb], bd);
         }
     }
 }
@@ -289,9 +338,7 @@ fn vertical<P: Pixel>(
 /// share the first's level.
 #[allow(clippy::too_many_arguments)]
 fn horizontal<P: Pixel>(
-    buf: &mut [P],
-    base: usize,
-    stride: usize,
+    tg: &mut [Target<'_, P>],
     x0: usize,
     y: usize,
     cols: usize,
@@ -315,17 +362,7 @@ fn horizontal<P: Pixel>(
         let x = x0 + col * 8;
         let t = levels.dsp(r.lfl[col]);
         if wide & bit != 0 && wide & (bit << 1) != 0 && col + 1 < cols {
-            pair(
-                buf,
-                base,
-                stride,
-                x,
-                y,
-                false,
-                [Some(Wd::W16); 2],
-                [t, t],
-                bd,
-            );
+            pairs(tg, x, y, false, [Some(Wd::W16); 2], [t, t], bd);
             col += 2;
             continue;
         }
@@ -337,27 +374,15 @@ fn horizontal<P: Pixel>(
         let kn = if merge { kind(r, next) } else { None };
         let i0 = (r.inner & bit != 0).then_some(Wd::W4);
         let i1 = (merge && r.inner & next != 0).then_some(Wd::W4);
-        pair(
-            buf,
-            base,
-            stride,
-            x,
-            y,
-            false,
-            [kind(r, bit), kn],
-            [t, tn],
-            bd,
-        );
-        pair(buf, base, stride, x, y + 4, false, [i0, i1], [t, tn], bd);
+        pairs(tg, x, y, false, [kind(r, bit), kn], [t, tn], bd);
+        pairs(tg, x, y + 4, false, [i0, i1], [t, tn], bd);
         col += if merge { 2 } else { 1 };
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn luma<P: Pixel>(
-    buf: &mut [P],
-    base: usize,
-    stride: usize,
+    tg: &mut [Target<'_, P>],
     m: &Mask,
     levels: &Levels,
     g: &Geo,
@@ -382,16 +407,7 @@ fn luma<P: Pixel>(
         n += 1;
         row += 2;
     }
-    vertical(
-        buf,
-        base,
-        stride,
-        mi_col * 8,
-        cols,
-        &strips[..n],
-        levels,
-        g.bd,
-    );
+    vertical(tg, mi_col * 8, cols, &strips[..n], levels, g.bd);
     for row in 0..8 {
         if mi_row + row >= g.mi_rows {
             break;
@@ -405,25 +421,13 @@ fn luma<P: Pixel>(
             inner: byte(m.int_y, row),
             lfl: lfl(row),
         };
-        horizontal(
-            buf,
-            base,
-            stride,
-            mi_col * 8,
-            (mi_row + row) * 8,
-            cols,
-            &r,
-            levels,
-            g.bd,
-        );
+        horizontal(tg, mi_col * 8, (mi_row + row) * 8, cols, &r, levels, g.bd);
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn chroma420<P: Pixel>(
-    buf: &mut [P],
-    base: usize,
-    stride: usize,
+    tg: &mut [Target<'_, P>],
     m: &Mask,
     levels: &Levels,
     g: &Geo,
@@ -450,16 +454,7 @@ fn chroma420<P: Pixel>(
         n += 1;
         row += 2;
     }
-    vertical(
-        buf,
-        base,
-        stride,
-        mi_col * 4,
-        cols,
-        &strips[..n],
-        levels,
-        g.bd,
-    );
+    vertical(tg, mi_col * 4, cols, &strips[..n], levels, g.bd);
     for row in 0..4 {
         let mi = mi_row + row * 2;
         if mi >= g.mi_rows {
@@ -478,17 +473,7 @@ fn chroma420<P: Pixel>(
             },
             lfl: lfl(row),
         };
-        horizontal(
-            buf,
-            base,
-            stride,
-            mi_col * 4,
-            mi_row * 4 + row * 8,
-            cols,
-            &r,
-            levels,
-            g.bd,
-        );
+        horizontal(tg, mi_col * 4, mi_row * 4 + row * 8, cols, &r, levels, g.bd);
     }
 }
 
@@ -622,7 +607,7 @@ mod order_tests {
             };
             let cols = (rnd() % 8 + 1) as usize;
             let mut a = buf.clone();
-            horizontal(&mut a, 0, stride, 8, 16, cols, &r, &levels, 8);
+            horizontal(&mut [(&mut a[..], 0, stride)], 8, 16, cols, &r, &levels, 8);
             let mut b = buf.clone();
             let mut col = 0;
             while col < cols {

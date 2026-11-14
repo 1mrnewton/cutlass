@@ -1005,24 +1005,6 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
 
     // Motion search -------------------------------------------------------
 
-    /// The sum of absolute differences of the luma block at `(x, y)`, `n`
-    /// wide and high, against the reference at whole-sample offset
-    /// `(dr, dc)`, or `None` when the window leaves the reference.
-    fn sad_int(&self, x: usize, y: usize, w: usize, h: usize, dr: i32, dc: i32) -> Option<u64> {
-        let s = self.s;
-        let rp = self.rec_ref()?;
-        let (data, stride) = rp.0;
-        let (rw, rh) = rp.1;
-        let (bx, by) = (x as i32 + dc, y as i32 + dr);
-        if bx < 0 || by < 0 || bx + w as i32 > rw || by + h as i32 > rh {
-            return None;
-        }
-        let (src, ss) = (s.src.planes[0], s.src.strides[0]);
-        let a = &src[y * ss + x..];
-        let b = &data[by as usize * stride + bx as usize..];
-        Some(u64::from(sad::sad(a, ss, b, stride, w, h)))
-    }
-
     #[allow(clippy::type_complexity)]
     fn rec_ref(&self) -> Option<((&[u8], usize), (i32, i32))> {
         let c = self.rec.ctx();
@@ -1103,6 +1085,11 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     /// and quarters. Returns the vector (eighths) and its SAD.
     fn search(&mut self, row: usize, col: usize, bsize: u8) -> (Mv, u64) {
         let s = self.s;
+        // The reference and source planes, fetched once for the search.
+        let Some(rp) = self.rec_ref() else {
+            return (Mv::ZERO, u64::MAX / 4);
+        };
+        let src = (s.src.planes[0], s.src.strides[0]);
         let (bw, bh) = MI_WH[usize::from(bsize)];
         let (w, h) = (bw * 8, bh * 8);
         let (x, y) = (col * 8, row * 8);
@@ -1137,7 +1124,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let mut best_sad = u64::MAX;
         for m in &cands[..nc] {
             let (r, c) = ((i32::from(m.row) + 4) >> 3, (i32::from(m.col) + 4) >> 3);
-            if let Some(v) = self.sad_int(x, y, w, h, r, c) {
+            if let Some(v) = sad_ref(src, rp, (x, y, w, h), r, c) {
                 let v = v + mvcost_px(r, c, best);
                 if v < best_sad {
                     best_sad = v;
@@ -1153,6 +1140,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         // step.
         let range = 64;
         let mut step = match (bsize, s.speed) {
+            (BLOCK_64X64, 9..) => 4,
+            (_, 9..) => 1,
             (BLOCK_64X64, _) | (_, 0..=2) => 8,
             (_, 3..=6) => 4,
             _ => 2,
@@ -1169,7 +1158,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                     if r.abs() > range || c.abs() > range {
                         continue;
                     }
-                    if let Some(v) = self.sad_int(x, y, w, h, r, c)
+                    if let Some(v) = sad_ref(src, rp, (x, y, w, h), r, c)
                         && v < best_sad
                     {
                         best_sad = v;
@@ -1189,7 +1178,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                         continue;
                     }
                     let (r, cc) = (c.0 + dr, c.1 + dc);
-                    if let Some(v) = self.sad_int(x, y, w, h, r, cc)
+                    if let Some(v) = sad_ref(src, rp, (x, y, w, h), r, cc)
                         && v < best_sad
                     {
                         best_sad = v;
@@ -1693,9 +1682,14 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 kind & 2 == 2,
                 &mut self.fcoef,
             );
-            let (eob, rd) = self.rd_levels(plane, tx, kind, x, y, intra, &mut levels);
-            self.rd = rd;
-            rd_eob = Some(eob);
+            if s.speed >= 9 {
+                // Fastest: a dead zone, and costs from a bit model.
+                self.rd = self.dz_levels(tx, dc_q, ac_q, intra, &mut levels);
+            } else {
+                let (eob, rd) = self.rd_levels(plane, tx, kind, x, y, intra, &mut levels);
+                self.rd = rd;
+                rd_eob = Some(eob);
+            }
         }
         // End of block in the decoder's scan; drop what lies past it.
         let (scan, _) = scan_pair(tx, kind);
@@ -1733,6 +1727,43 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 .add_residual(plane, x, y, tx, kind, eob, (max_r + 1, max_c + 1));
         }
         (levels, eob)
+    }
+
+    /// Dead-zone quantization of `self.fcoef` into `levels`, with the
+    /// costs of coding and dropping the block from a rough bit model.
+    fn dz_levels(&self, tx: u8, dc_q: i32, ac_q: i32, intra: bool, levels: &mut [i32]) -> TxRd {
+        let s = self.s;
+        let n = 4usize << tx;
+        let max = n * n;
+        let shift = u32::from(tx == 3);
+        let g = super::tx::gain(usize::from(tx));
+        let inv = [
+            (1 << shift) as f32 / dc_q as f32,
+            (1 << shift) as f32 / ac_q as f32,
+        ];
+        let steps = [
+            dc_q as f32 / (1 << shift) as f32,
+            ac_q as f32 / (1 << shift) as f32,
+        ];
+        let round = if intra { 0.42 } else { 0.33 };
+        let (mut d_coded, mut d_all, mut bits) = (0.0f32, 0.0f32, 0.0f32);
+        for (i, (l, &v)) in levels[..max].iter_mut().zip(&self.fcoef[..max]).enumerate() {
+            let k = usize::from(i > 0);
+            let a = v.abs() * inv[k];
+            let q = (a + if k == 0 { 0.5 } else { round }) as i32;
+            *l = if v < 0.0 { -q } else { q };
+            let e = (a - q as f32) * steps[k];
+            d_coded += e * e;
+            d_all += v * v;
+            if q != 0 {
+                bits += 5.0 + 2.0 * (q as f32).log2();
+            }
+        }
+        let lam = s.rd_lambda;
+        TxRd {
+            coded: (d_coded + lam * (bits + 1.0) * g) / g,
+            dropped: (d_all + lam * g) / g,
+        }
     }
 
     /// Rate-distortion quantization of `self.fcoef` into `levels`: each
@@ -2785,4 +2816,24 @@ fn satd(src: &[u8], ss: usize, pred: &[u8], w: usize, h: usize) -> u64 {
         }
     }
     total / 2
+}
+
+/// The SAD of the source block at `(x, y)`, `w`×`h`, against the reference
+/// at whole-sample offset `(dr, dc)`, or `None` outside the reference.
+#[inline]
+#[allow(clippy::type_complexity)]
+fn sad_ref(
+    (src, ss): (&[u8], usize),
+    ((data, stride), (rw, rh)): ((&[u8], usize), (i32, i32)),
+    (x, y, w, h): (usize, usize, usize, usize),
+    dr: i32,
+    dc: i32,
+) -> Option<u64> {
+    let (bx, by) = (x as i32 + dc, y as i32 + dr);
+    if bx < 0 || by < 0 || bx + w as i32 > rw || by + h as i32 > rh {
+        return None;
+    }
+    let a = &src[y * ss + x..];
+    let b = &data[by as usize * stride + bx as usize..];
+    Some(u64::from(sad::sad(a, ss, b, stride, w, h)))
 }

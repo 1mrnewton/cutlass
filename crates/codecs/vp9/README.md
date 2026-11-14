@@ -175,15 +175,22 @@ threads; one core is the fastest of five, pinned with `taskset`.
 
 | Stream | Threads | Cutlass | FFmpeg `vp9` | Ratio | Memory (Cutlass / FFmpeg) |
 | --- | --- | ---: | ---: | ---: | --- |
-| 4:2:0 | 1 core | 1.03 s | 0.97 s | 1.06 | |
-| 4:2:0 | 4 | 0.42 s | 0.44 s | 0.96 | 54 MB / 57 MB |
-| 4:4:4 | 1 core | 1.93 s | 1.80 s | 1.07 | |
-| 4:4:4 | 4 | 0.81 s | 0.80 s | 1.01 | 78 MB / 78 MB |
+| 4:2:0 | 1 core | 1.01 s | 0.96 s | 1.05 | |
+| 4:2:0 | 4 | 0.44 s | 0.45 s | 0.99 | 59 MB / 57 MB |
+| 4:4:4 | 1 core | 1.96 s | 1.91 s | 1.03 | |
+| 4:4:4 | 4 | 0.88 s | 0.92 s | 0.95 | 80 MB / 78 MB |
 
-On four threads Cutlass is level with FFmpeg on the 4:4:4 stream (it
-won 6 of the 9 runs) and ahead on the 4:2:0 one (6 of 9). (The 4:4:4
-stream started at 38.8 s on one core.) What moved the decoder most
-recently:
+On four threads Cutlass is ahead of FFmpeg on both streams (it won 7 of
+the 9 runs on 4:4:4 and 6 of 9 on 4:2:0); on one core it is within 5%.
+(The 4:4:4 stream started at 38.8 s on one core.) What moved the decoder
+most recently:
+
+- The coefficient loop tops the bool decoder's window up once a token,
+  so its end-of-block, zero, one and sign reads skip their refill check
+  (2% fewer instructions), and runs as a function of its own.
+- The common motion compensation call no longer carries the frame of
+  the rare paths (scaled references, windows crossing the edge): a
+  quarter fewer instructions a call.
 
 - The kernels' entry points took their block by value and rebound it,
   which moved all 144 bytes through a `memcpy` call on every prediction

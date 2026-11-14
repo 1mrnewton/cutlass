@@ -5,7 +5,8 @@ import SwiftUI
 /// on the preview as they are typed: the first letter adds the clip at the
 /// playhead, and the whole typing is one undo step. Picking a face or a
 /// color applies it at once, as an undo step of its own, and each slider
-/// drag is one step.
+/// drag is one step. Bold, italic and underline go on the letters selected
+/// in the words, or on the whole title when none are.
 struct TextPanel: View {
     let model: EditorModel
     /// The clip being changed, or nil to add one.
@@ -16,7 +17,19 @@ struct TextPanel: View {
     @State private var words: String
     @State private var face: String
     @State private var tab: Tab = .fonts
+    /// The letters selected in the words, counted in characters as Rust
+    /// counts them; nil when none are.
+    @State private var marked: Range<Int>?
+    /// What every selected letter has, or the title's own pattern when
+    /// none are selected.
+    @State private var pattern: TextPattern?
+    @State private var query = ""
+    /// The faces Rust matched to the search.
+    @State private var found: [Font]
+    /// The axes the clip's face varies along.
+    @State private var axes: [FontAxis] = []
     @FocusState private var typing: Bool
+    @FocusState private var searching: Bool
 
     enum Tab: String, CaseIterable {
         case fonts = "Fonts"
@@ -31,18 +44,25 @@ struct TextPanel: View {
         let text = clip.flatMap { model.text(of: $0) }
         _words = State(initialValue: text?.content ?? "")
         _face = State(initialValue: text?.face ?? model.fonts.first?.name ?? "")
+        _found = State(initialValue: model.fonts)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
-                TextField("Enter text", text: $words, axis: .vertical)
-                    .lineLimit(1...3)
-                    .focused($typing)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 9)
-                    .background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 8))
-                    .submitLabel(.done)
+                Group {
+                    if #available(iOS 18.0, *) {
+                        SelectingField(words: $words, marked: $marked)
+                    } else {
+                        TextField("Enter text", text: $words, axis: .vertical)
+                    }
+                }
+                .lineLimit(1...3)
+                .focused($typing)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 8))
+                .submitLabel(.done)
                 Button(action: done) {
                     HugeIcon("done", size: 20)
                         .frame(width: 40, height: 36)
@@ -71,25 +91,112 @@ struct TextPanel: View {
         .padding(.top, 12)
         .padding(.bottom, 16)
         .background(Color(white: 0.11))
-        .onAppear { typing = clip == nil }
+        .onAppear {
+            typing = clip == nil
+            read()
+        }
         .onChange(of: words) { _, words in
             typed = model.typeText(into: typed, words, face: face)
         }
         .onChange(of: tab) { _, tab in
-            if tab == .styles { typing = false }
+            if tab == .styles {
+                typing = false
+                searching = false
+            }
+        }
+        .onChange(of: query) { _, query in found = model.fontsMatching(query) }
+        .onChange(of: marked) { _, _ in read() }
+        .onChange(of: typing) { _, _ in read() }
+        .onChange(of: model.edits) { _, _ in read() }
+    }
+
+    /// The letters the buttons act on. The field keeps its selection after
+    /// the keyboard leaves it, where nothing shows it, so it counts only
+    /// while the words are being typed.
+    private var selected: Range<Int>? { typing ? marked : nil }
+
+    /// Read what the buttons and the sliders show from the clip.
+    private func read() {
+        guard let typed, let style = model.text(of: typed)?.style else {
+            pattern = nil
+            axes = []
+            return
+        }
+        pattern = selected.flatMap { model.textPattern(of: typed, letters: $0) }
+            ?? TextPattern(bold: style.bold, italic: style.italic, underline: style.underline)
+        axes = model.fontAxes(of: typed)
+    }
+
+    private var fonts: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                letterToggle("bold", on: pattern?.bold, label: "Bold") {
+                    setPattern(bold: $0)
+                }
+                letterToggle("italic", on: pattern?.italic, label: "Italic") {
+                    setPattern(italic: $0)
+                }
+                letterToggle("underline", on: pattern?.underline, label: "Underline") {
+                    setPattern(underline: $0)
+                }
+                search
+            }
+            if found.isEmpty {
+                Text(model.fonts.isEmpty ? "No fonts were found on this device." : "No fonts match.")
+                    .lineLimit(1)
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.6))
+                    .frame(height: 34)
+            } else {
+                faces
+            }
+            ForEach(axes.filter { $0.min < $0.max }, id: \.tag) { axis in
+                StyleSlider(
+                    label: axis.name, value: axis.value, range: axis.min...axis.max,
+                    shown: { "\(Int($0.rounded()))" }
+                ) { value, live in
+                    if let typed {
+                        model.setTextFontAxis(typed, tag: axis.tag, value: value, live: live)
+                    }
+                }
+                .id(face + axis.tag)
+            }
         }
     }
 
-    @ViewBuilder
-    private var fonts: some View {
-        if model.fonts.isEmpty {
-            Text("No fonts were found on this device.")
-                .font(.footnote)
+    /// The search over the faces. Rust matches the words.
+    private var search: some View {
+        HStack(spacing: 8) {
+            HugeIcon("search", size: 16)
                 .foregroundStyle(.white.opacity(0.6))
-        } else {
+            TextField("Search fonts", text: $query)
+                .font(.footnote)
+                .focused($searching)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .submitLabel(.search)
+            if !query.isEmpty {
+                Button { query = "" } label: {
+                    HugeIcon("close", size: 14)
+                        .foregroundStyle(.white.opacity(0.6))
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 36)
+        .background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// The faces in a row. Only the ones on screen are built, so a long
+    /// list stays quick.
+    private var faces: some View {
+        ScrollViewReader { row in
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(model.fonts, id: \.name) { font in
+                LazyHStack(spacing: 8) {
+                    ForEach(found, id: \.name) { font in
                         Button { pick(font.name) } label: {
                             Text(font.label)
                                 .font(.footnote)
@@ -105,6 +212,53 @@ struct TextPanel: View {
                     }
                 }
             }
+            .frame(height: 34)
+            .onAppear { row.scrollTo(face, anchor: .center) }
+            .onChange(of: found) { _, found in
+                // A search shows its faces from the first; the whole list
+                // shows the chosen face again.
+                if query.isEmpty {
+                    row.scrollTo(face, anchor: .center)
+                } else if let first = found.first {
+                    row.scrollTo(first.name, anchor: .leading)
+                }
+            }
+        }
+    }
+
+    /// A button for one of bold, italic and underline. `on` is nil while
+    /// there are no letters to act on.
+    private func letterToggle(
+        _ icon: String, on: Bool?, label: String, set: @escaping (Bool) -> Void
+    ) -> some View {
+        let lit = on == true
+        return Button { set(!lit) } label: {
+            HugeIcon(icon, size: 18)
+                .frame(width: 36, height: 36)
+                .foregroundStyle(lit ? .black : .white)
+                .background(
+                    lit ? Color.white : Color(white: 0.2), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .disabled(on == nil)
+        .opacity(on == nil ? 0.4 : 1)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(lit ? .isSelected : [])
+    }
+
+    /// Change the selected letters, or the title's own pattern when none
+    /// are selected, as the desktop's buttons do.
+    private func setPattern(bold: Bool? = nil, italic: Bool? = nil, underline: Bool? = nil) {
+        guard let typed else { return }
+        if let selected {
+            model.setTextPattern(
+                typed, letters: selected, bold: bold, italic: italic, underline: underline)
+        } else if let pattern {
+            model.styleText(
+                typed,
+                .pattern(
+                    bold: bold ?? pattern.bold, italic: italic ?? pattern.italic,
+                    underline: underline ?? pattern.underline),
+                live: false)
         }
     }
 
@@ -117,7 +271,32 @@ struct TextPanel: View {
     /// and leave a clip's words as they were.
     private func done() {
         typing = false
+        searching = false
         close()
+    }
+}
+
+/// The words, in a field that also tells which letters are selected. The
+/// selection is counted in characters, as Rust counts a title's letters.
+@available(iOS 18.0, *)
+private struct SelectingField: View {
+    @Binding var words: String
+    @Binding var marked: Range<Int>?
+    @State private var selection: TextSelection?
+
+    var body: some View {
+        TextField("Enter text", text: $words, selection: $selection, axis: .vertical)
+            .onChange(of: selection) { _, _ in marked = letters() }
+            .onChange(of: words) { _, _ in marked = letters() }
+    }
+
+    private func letters() -> Range<Int>? {
+        guard case let .selection(range) = selection?.indices, !range.isEmpty,
+              range.upperBound <= words.endIndex
+        else { return nil }
+        let scalars = words.unicodeScalars
+        let start = scalars.distance(from: scalars.startIndex, to: range.lowerBound)
+        return start..<start + scalars.distance(from: range.lowerBound, to: range.upperBound)
     }
 }
 
@@ -432,6 +611,8 @@ struct StyleSlider: View {
         HStack(spacing: 12) {
             Text(label)
                 .font(.footnote)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
                 .foregroundStyle(.white.opacity(0.75))
                 .frame(width: 72, alignment: .leading)
             Slider(

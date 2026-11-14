@@ -399,6 +399,51 @@ final class EditorModel {
         edit { try $0.setTextFont(clipId: clip, face: face) }
     }
 
+    /// The faces whose names have every word of `query`, as Rust matches
+    /// them; all of them for no words.
+    func fontsMatching(_ query: String) -> [Font] {
+        (try? editor?.fontsMatching(query: query)) ?? fonts
+    }
+
+    /// Which of bold, italic and underline every letter of `clip` in
+    /// `letters` has, counting characters; nil when it has no such letters.
+    func textPattern(of clip: String, letters: Range<Int>) -> TextPattern? {
+        guard let start = UInt32(exactly: letters.lowerBound),
+              let end = UInt32(exactly: letters.upperBound)
+        else { return nil }
+        return try? editor?.textRangePattern(clipId: clip, start: start, end: end)
+    }
+
+    /// Turn bold, italic or underline on or off for `letters` of `clip`; a
+    /// part left nil stays as it is.
+    func setTextPattern(
+        _ clip: String, letters: Range<Int>,
+        bold: Bool? = nil, italic: Bool? = nil, underline: Bool? = nil
+    ) {
+        guard let start = UInt32(exactly: letters.lowerBound),
+              let end = UInt32(exactly: letters.upperBound)
+        else { return }
+        edit {
+            try $0.setTextRangePattern(
+                clipId: clip, start: start, end: end,
+                bold: bold, italic: italic, underline: underline)
+        }
+    }
+
+    /// The axes the face of `clip` varies along, each with where the clip
+    /// has it; none for a face that does not vary.
+    func fontAxes(of clip: String) -> [FontAxis] {
+        (try? editor?.textFontAxes(clipId: clip)) ?? []
+    }
+
+    /// Move the face of `clip` along the axis `tag`. Changes while `live`
+    /// join one undo step and are saved when the last one, not live, arrives.
+    func setTextFontAxis(_ clip: String, tag: String, value: Double, live: Bool) {
+        edit(save: !live) {
+            try $0.setTextFontAxis(clipId: clip, tag: tag, value: value, live: live)
+        }
+    }
+
     /// Change how `clip` looks. Changes while `live` join one undo step and
     /// are saved when the last one, not live, arrives.
     func styleText(_ clip: String, _ change: TextStyleChange, live: Bool) {

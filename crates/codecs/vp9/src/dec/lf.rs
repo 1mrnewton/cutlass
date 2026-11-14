@@ -349,6 +349,14 @@ fn horizontal<P: Pixel>(
     let limit = if cols >= 8 { 0xff } else { (1u8 << cols) - 1 };
     let bits = any(r) & limit;
     let wide = r.wide & limit;
+    // The strip's pairs of 8-column edges, at row `y` and the inner ones
+    // at `y + 4`: each inner edge reads what the edge above it in its own
+    // columns wrote, and nothing of other columns, so the edges go first
+    // across the strip, then the inner ones, libvpx's order in every
+    // column. Pairs side by side go through the filter together.
+    let mut edges: [Pair; 8] = [Pair::NONE; 8];
+    let mut inner: [Pair; 8] = [Pair::NONE; 8];
+    let (mut ne, mut ni) = (0, 0);
     let mut col = 0;
     while col < cols {
         if bits >> col == 0 {
@@ -362,7 +370,8 @@ fn horizontal<P: Pixel>(
         let x = x0 + col * 8;
         let t = levels.dsp(r.lfl[col]);
         if wide & bit != 0 && wide & (bit << 1) != 0 && col + 1 < cols {
-            pairs(tg, x, y, false, [Some(Wd::W16); 2], [t, t], bd);
+            edges[ne] = (x, [Some(Wd::W16); 2], [t, t]);
+            ne += 1;
             col += 2;
             continue;
         }
@@ -374,9 +383,59 @@ fn horizontal<P: Pixel>(
         let kn = if merge { kind(r, next) } else { None };
         let i0 = (r.inner & bit != 0).then_some(Wd::W4);
         let i1 = (merge && r.inner & next != 0).then_some(Wd::W4);
-        pairs(tg, x, y, false, [kind(r, bit), kn], [t, tn], bd);
-        pairs(tg, x, y + 4, false, [i0, i1], [t, tn], bd);
+        edges[ne] = (x, [kind(r, bit), kn], [t, tn]);
+        ne += 1;
+        inner[ni] = (x, [i0, i1], [t, tn]);
+        ni += 1;
         col += if merge { 2 } else { 1 };
+    }
+    row_pairs(tg, &edges[..ne], y, bd);
+    row_pairs(tg, &inner[..ni], y + 4, bd);
+}
+
+/// One pair of 8-column horizontal edges: its first column, and each
+/// half's filter and thresholds.
+type Pair = (usize, [Option<Wd>; 2], [Thresh; 2]);
+
+trait NoPair {
+    const NONE: Self;
+}
+
+impl NoPair for Pair {
+    const NONE: Self = (
+        0,
+        [None; 2],
+        [Thresh {
+            blimit: 0,
+            limit: 0,
+            hev: 0,
+        }; 2],
+    );
+}
+
+/// The pairs of one row of horizontal edges at `y`, two at once where one
+/// starts 16 columns after the other.
+fn row_pairs<P: Pixel>(tg: &mut [Target<'_, P>], list: &[Pair], y: usize, bd: u32) {
+    let mut i = 0;
+    while i < list.len() {
+        let (x, wd, thr) = list[i];
+        if let Some(&(x2, wd2, thr2)) = list.get(i + 1)
+            && x2 == x + 16
+        {
+            let wd4 = [wd[0], wd[1], wd2[0], wd2[1]];
+            let thr4 = [thr[0], thr[1], thr2[0], thr2[1]];
+            for (buf, base, stride) in tg.iter_mut() {
+                let at = y * *stride + x - *base;
+                if !P::lf_fast32(buf, at, *stride, wd4, thr4) {
+                    pair(buf, *base, *stride, x, y, false, wd, thr, bd);
+                    pair(buf, *base, *stride, x2, y, false, wd2, thr2, bd);
+                }
+            }
+            i += 2;
+        } else {
+            pairs(tg, x, y, false, wd, thr, bd);
+            i += 1;
+        }
     }
 }
 

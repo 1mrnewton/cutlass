@@ -4,15 +4,13 @@
 //! transposes them, and back.
 
 use core::arch::x86_64::{
-    __m128i, __m256i, _mm_adds_epi8, _mm_adds_epu8, _mm_and_si128, _mm_andnot_si128,
-    _mm_blendv_epi8, _mm_cmpeq_epi8, _mm_cmpgt_epi8, _mm_loadl_epi64, _mm_loadu_si128,
-    _mm_max_epu8, _mm_or_si128, _mm_set_epi64x, _mm_set1_epi8, _mm_setzero_si128, _mm_srli_epi16,
-    _mm_storel_epi64, _mm_storeu_si128, _mm_subs_epi8, _mm_subs_epu8, _mm_testz_si128,
-    _mm_unpackhi_epi8, _mm_unpackhi_epi16, _mm_unpackhi_epi32, _mm_unpackhi_epi64,
-    _mm_unpacklo_epi8, _mm_unpacklo_epi16, _mm_unpacklo_epi32, _mm_unpacklo_epi64, _mm_xor_si128,
-    _mm256_add_epi16, _mm256_castsi256_si128, _mm256_cvtepu8_epi16, _mm256_packus_epi16,
-    _mm256_permute4x64_epi64, _mm256_set1_epi16, _mm256_slli_epi16, _mm256_srli_epi16,
-    _mm256_sub_epi16,
+    __m128i, __m256i, _mm_and_si128, _mm_cmpeq_epi8, _mm_cmpgt_epi8, _mm_loadl_epi64,
+    _mm_loadu_si128, _mm_or_si128, _mm_set_epi64x, _mm_set1_epi8, _mm_setzero_si128,
+    _mm_srli_epi16, _mm_storel_epi64, _mm_storeu_si128, _mm_subs_epu8, _mm_unpackhi_epi8,
+    _mm_unpackhi_epi16, _mm_unpackhi_epi32, _mm_unpackhi_epi64, _mm_unpacklo_epi8,
+    _mm_unpacklo_epi16, _mm_unpacklo_epi32, _mm_unpacklo_epi64, _mm256_castsi256_si128,
+    _mm256_cvtepu8_epi16, _mm256_loadu_si256, _mm256_packus_epi16, _mm256_permute4x64_epi64,
+    _mm256_setzero_si256, _mm256_storeu_si256,
 };
 
 use super::{Thresh, Wd};
@@ -114,181 +112,480 @@ enum Changed {
     Outer,
 }
 
-/// Filters the taps `v` (p7 at 0, q0 at 8; sixteen lines a vector) in
-/// place, each half of the lines with its own filter (libvpx's SSE2
-/// arithmetic, which equals its C). `v` comes with p3 to q3; `outer`
-/// fills p7 to p4 and q4 to q7 when the 15-tap filter may run.
-#[inline]
-#[target_feature(enable = "avx2")]
-fn lanes(
-    v: &mut [__m128i; 16],
-    wds: [Option<Wd>; 2],
-    wd: Wd,
-    thr: &[Thresh; 2],
-    outer: impl FnOnce(&mut [__m128i; 16]),
-) -> Changed {
-    let (p3, p2, p1, p0) = (v[4], v[5], v[6], v[7]);
-    let (q0, q1, q2, q3) = (v[8], v[9], v[10], v[11]);
-    let limit = split8(thr[0].limit, thr[1].limit);
-    let blimit = split8(thr[0].blimit, thr[1].blimit);
-    let hevt = split8(thr[0].hev, thr[1].hev);
-    let ap = absd(p1, p0);
-    let aq = absd(q1, q0);
-    let m = _mm_max_epu8(
-        _mm_max_epu8(
-            _mm_max_epu8(absd(p3, p2), absd(p2, p1)),
-            _mm_max_epu8(ap, aq),
-        ),
-        _mm_max_epu8(absd(q2, q1), absd(q3, q2)),
-    );
-    let apq0 = absd(p0, q0);
-    let apq1 = _mm_and_si128(_mm_srli_epi16::<1>(absd(p1, q1)), _mm_set1_epi8(0x7f));
-    let e = _mm_adds_epu8(_mm_adds_epu8(apq0, apq0), apq1);
-    let on = halves8([wds[0].is_some(), wds[1].is_some()]);
-    let mask = _mm_and_si128(_mm_and_si128(le(m, limit), le(e, blimit)), on);
-    if _mm_testz_si128(mask, mask) != 0 {
-        return Changed::None;
-    }
-    let hev = _mm_xor_si128(le(_mm_max_epu8(ap, aq), hevt), _mm_set1_epi8(-1));
-    // filter4, in signed bytes.
-    let x80 = _mm_set1_epi8(-128);
-    let (ps1, ps0) = (_mm_xor_si128(p1, x80), _mm_xor_si128(p0, x80));
-    let (qs0, qs1) = (_mm_xor_si128(q0, x80), _mm_xor_si128(q1, x80));
-    let f = _mm_and_si128(_mm_subs_epi8(ps1, qs1), hev);
-    let d = _mm_subs_epi8(qs0, ps0);
-    let f = _mm_adds_epi8(_mm_adds_epi8(_mm_adds_epi8(f, d), d), d);
-    let f = _mm_and_si128(f, mask);
-    let f1 = sra8::<3>(_mm_adds_epi8(f, _mm_set1_epi8(4)));
-    let f2 = sra8::<3>(_mm_adds_epi8(f, _mm_set1_epi8(3)));
-    let nq0 = _mm_xor_si128(_mm_subs_epi8(qs0, f1), x80);
-    let np0 = _mm_xor_si128(_mm_adds_epi8(ps0, f2), x80);
-    let fo = _mm_andnot_si128(hev, sra8::<1>(_mm_adds_epi8(f1, _mm_set1_epi8(1))));
-    let nq1 = _mm_xor_si128(_mm_subs_epi8(qs1, fo), x80);
-    let np1 = _mm_xor_si128(_mm_adds_epi8(ps1, fo), x80);
-    v[6] = np1;
-    v[7] = np0;
-    v[8] = nq0;
-    v[9] = nq1;
-    if wd == Wd::W4 {
-        return Changed::Inner;
-    }
-    let one = _mm_set1_epi8(1);
-    let fm = _mm_max_epu8(
-        _mm_max_epu8(
-            _mm_max_epu8(ap, aq),
-            _mm_max_epu8(absd(p2, p0), absd(q2, q0)),
-        ),
-        _mm_max_epu8(absd(p3, p0), absd(q3, q0)),
-    );
-    let big = |w: Option<Wd>| matches!(w, Some(Wd::W8 | Wd::W16));
-    let w8 = halves8([big(wds[0]), big(wds[1])]);
-    let flat = _mm_and_si128(_mm_and_si128(le(fm, one), mask), w8);
-    if _mm_testz_si128(flat, flat) != 0 {
-        return Changed::Inner;
-    }
-    // Where the 15-tap filter runs it replaces the 7-tap one.
-    let flat2 = if wd == Wd::W16 {
-        outer(v);
-        let f2m = _mm_max_epu8(
-            _mm_max_epu8(
-                _mm_max_epu8(absd(v[3], p0), absd(v[2], p0)),
-                _mm_max_epu8(absd(v[1], p0), absd(v[0], p0)),
-            ),
-            _mm_max_epu8(
-                _mm_max_epu8(absd(v[12], q0), absd(v[13], q0)),
-                _mm_max_epu8(absd(v[14], q0), absd(v[15], q0)),
-            ),
-        );
-        let w16 = halves8([wds[0] == Some(Wd::W16), wds[1] == Some(Wd::W16)]);
-        _mm_and_si128(_mm_and_si128(le(f2m, one), flat), w16)
-    } else {
-        _mm_setzero_si128()
-    };
-    let flat_only = _mm_andnot_si128(flat2, flat);
-    if _mm_testz_si128(flat_only, flat_only) == 0 {
-        let flat = flat_only;
-        // The 7-tap sums in 16-bit lanes.
-        let (w3, w2, w1, w0) = (wide16(p3), wide16(p2), wide16(p1), wide16(p0));
-        let (x0, x1, x2, x3) = (wide16(q0), wide16(q1), wide16(q2), wide16(q3));
-        let add = |a: __m256i, b: __m256i| _mm256_add_epi16(a, b);
-        let r3 = |x: __m256i| pack(_mm256_srli_epi16::<3>(add(x, _mm256_set1_epi16(4))));
-        let o2 = r3(add(
-            add(add(w3, w3), add(w3, w2)),
-            add(add(w2, w1), add(w0, x0)),
-        ));
-        let o1 = r3(add(
-            add(add(w3, w3), add(w2, w1)),
-            add(add(w1, w0), add(x0, x1)),
-        ));
-        let o0 = r3(add(
-            add(add(w3, w2), add(w1, w0)),
-            add(add(w0, x0), add(x1, x2)),
-        ));
-        let oq0 = r3(add(
-            add(add(w2, w1), add(w0, x0)),
-            add(add(x0, x1), add(x2, x3)),
-        ));
-        let oq1 = r3(add(
-            add(add(w1, w0), add(x0, x1)),
-            add(add(x1, x2), add(x3, x3)),
-        ));
-        let oq2 = r3(add(
-            add(add(w0, x0), add(x1, x2)),
-            add(add(x2, x3), add(x3, x3)),
-        ));
-        v[5] = _mm_blendv_epi8(p2, o2, flat);
-        v[6] = _mm_blendv_epi8(np1, o1, flat);
-        v[7] = _mm_blendv_epi8(np0, o0, flat);
-        v[8] = _mm_blendv_epi8(nq0, oq0, flat);
-        v[9] = _mm_blendv_epi8(nq1, oq1, flat);
-        v[10] = _mm_blendv_epi8(q2, oq2, flat);
-    }
-    if _mm_testz_si128(flat2, flat2) != 0 {
-        return Changed::Inner;
-    }
-    let s: [__m256i; 16] = [
-        wide16(v[0]),
-        wide16(v[1]),
-        wide16(v[2]),
-        wide16(v[3]),
-        wide16(p3),
-        wide16(p2),
-        wide16(p1),
-        wide16(p0),
-        wide16(q0),
-        wide16(q1),
-        wide16(q2),
-        wide16(q3),
-        wide16(v[12]),
-        wide16(v[13]),
-        wide16(v[14]),
-        wide16(v[15]),
-    ];
-    let add = |a: __m256i, b: __m256i| _mm256_add_epi16(a, b);
-    // The 15-tap window as a running sum, as libvpx writes it out.
-    let mut sum = add(
-        add(_mm256_slli_epi16::<3>(s[0]), _mm256_sub_epi16(s[1], s[0])),
-        add(
-            add(s[1], s[2]),
-            add(add(s[3], s[4]), add(add(s[5], s[6]), add(s[7], s[8]))),
-        ),
-    );
-    let r4 = |x: __m256i| pack(_mm256_srli_epi16::<4>(add(x, _mm256_set1_epi16(8))));
-    let mut out = [v[0]; 14];
-    out[0] = r4(sum);
-    for k in 1usize..14 {
-        let drop_a = s[k.saturating_sub(7)];
-        let drop_b = s[k];
-        let add_a = s[k + 1];
-        let add_b = s[(k + 8).min(15)];
-        sum = _mm256_sub_epi16(add(sum, add(add_a, add_b)), add(drop_a, drop_b));
-        out[k] = r4(sum);
-    }
-    for k in 0..14 {
-        v[k + 1] = _mm_blendv_epi8(v[k + 1], out[k], flat2);
-    }
-    Changed::Outer
+/// Whether a half's filter reaches the 7-tap one.
+#[inline(always)]
+fn big(w: Option<Wd>) -> bool {
+    matches!(w, Some(Wd::W8 | Wd::W16))
 }
+
+/// The filter's operations on 16 lines (one edge) a vector, and on its
+/// taps widened to 16 bits.
+#[allow(dead_code)]
+mod x16 {
+    use super::{Thresh, Wd};
+    use core::arch::x86_64::{
+        __m128i, __m256i, _mm_adds_epi8, _mm_adds_epu8, _mm_and_si128, _mm_andnot_si128,
+        _mm_blendv_epi8, _mm_max_epu8, _mm_or_si128, _mm_set1_epi8, _mm_setzero_si128,
+        _mm_srli_epi16, _mm_subs_epi8, _mm_testz_si128, _mm_xor_si128, _mm256_add_epi16,
+        _mm256_set1_epi16, _mm256_slli_epi16, _mm256_srli_epi16, _mm256_sub_epi16,
+    };
+
+    pub type V = __m128i;
+    pub type W = __m256i;
+
+    macro_rules! two {
+        ($($f:ident => $i:ident),*) => {$(
+            #[inline]
+            #[target_feature(enable = "avx2")]
+            pub fn $f(a: V, b: V) -> V {
+                $i(a, b)
+            }
+        )*};
+    }
+    two!(max_u8 => _mm_max_epu8, and => _mm_and_si128, or => _mm_or_si128,
+        xor => _mm_xor_si128, andnot => _mm_andnot_si128, adds_u8 => _mm_adds_epu8,
+        subs_i8 => _mm_subs_epi8, adds_i8 => _mm_adds_epi8);
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn zero() -> V {
+        _mm_setzero_si128()
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn splat(b: i8) -> V {
+        _mm_set1_epi8(b)
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn blendv(a: V, b: V, m: V) -> V {
+        _mm_blendv_epi8(a, b, m)
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn srli16<const N: i32>(a: V) -> V {
+        _mm_srli_epi16::<N>(a)
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn none(a: V) -> bool {
+        _mm_testz_si128(a, a) != 0
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn absd(a: V, b: V) -> V {
+        super::absd(a, b)
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn le(x: V, t: V) -> V {
+        super::le(x, t)
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn sra8<const N: i32>(x: V) -> V {
+        super::sra8::<N>(x)
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn thresholds(t: &[Thresh; 2]) -> (V, V, V) {
+        (
+            super::split8(t[0].limit, t[1].limit),
+            super::split8(t[0].blimit, t[1].blimit),
+            super::split8(t[0].hev, t[1].hev),
+        )
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn masks_some(w: &[Option<Wd>; 2]) -> V {
+        super::halves8([w[0].is_some(), w[1].is_some()])
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn masks_big(w: &[Option<Wd>; 2]) -> V {
+        super::halves8([super::big(w[0]), super::big(w[1])])
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn masks16(w: &[Option<Wd>; 2]) -> V {
+        super::halves8([w[0] == Some(Wd::W16), w[1] == Some(Wd::W16)])
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn wide(x: V) -> W {
+        super::wide16(x)
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn pack(w: W) -> V {
+        super::pack(w)
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn wadd(a: W, b: W) -> W {
+        _mm256_add_epi16(a, b)
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn wsub(a: W, b: W) -> W {
+        _mm256_sub_epi16(a, b)
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn wset1(k: i16) -> W {
+        _mm256_set1_epi16(k)
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn wsrli<const N: i32>(a: W) -> W {
+        _mm256_srli_epi16::<N>(a)
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn wslli<const N: i32>(a: W) -> W {
+        _mm256_slli_epi16::<N>(a)
+    }
+}
+
+/// [`x16`]'s operations on two edges a vector, one in each 128-bit half
+/// (four groups of eight lines); the taps widen to pairs of vectors, each
+/// half's low and high eight bytes, which keeps every half in order.
+#[allow(dead_code)]
+mod x32 {
+    use super::{Thresh, Wd};
+    use core::arch::x86_64::{
+        __m256i, _mm256_add_epi16, _mm256_adds_epi8, _mm256_adds_epu8, _mm256_and_si256,
+        _mm256_andnot_si256, _mm256_blendv_epi8, _mm256_cmpeq_epi8, _mm256_cmpgt_epi8,
+        _mm256_max_epu8, _mm256_or_si256, _mm256_packus_epi16, _mm256_set_epi64x, _mm256_set1_epi8,
+        _mm256_set1_epi16, _mm256_setzero_si256, _mm256_slli_epi16, _mm256_srli_epi16,
+        _mm256_sub_epi16, _mm256_subs_epi8, _mm256_subs_epu8, _mm256_testz_si256,
+        _mm256_unpackhi_epi8, _mm256_unpacklo_epi8, _mm256_xor_si256,
+    };
+
+    pub type V = __m256i;
+    pub type W = (__m256i, __m256i);
+
+    macro_rules! two {
+        ($($f:ident => $i:ident),*) => {$(
+            #[inline]
+            #[target_feature(enable = "avx2")]
+            pub fn $f(a: V, b: V) -> V {
+                $i(a, b)
+            }
+        )*};
+    }
+    two!(max_u8 => _mm256_max_epu8, and => _mm256_and_si256, or => _mm256_or_si256,
+        xor => _mm256_xor_si256, andnot => _mm256_andnot_si256,
+        adds_u8 => _mm256_adds_epu8, subs_i8 => _mm256_subs_epi8,
+        adds_i8 => _mm256_adds_epi8);
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn zero() -> V {
+        _mm256_setzero_si256()
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn splat(b: i8) -> V {
+        _mm256_set1_epi8(b)
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn blendv(a: V, b: V, m: V) -> V {
+        _mm256_blendv_epi8(a, b, m)
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn srli16<const N: i32>(a: V) -> V {
+        _mm256_srli_epi16::<N>(a)
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn none(a: V) -> bool {
+        _mm256_testz_si256(a, a) != 0
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn absd(a: V, b: V) -> V {
+        _mm256_or_si256(_mm256_subs_epu8(a, b), _mm256_subs_epu8(b, a))
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn le(x: V, t: V) -> V {
+        _mm256_cmpeq_epi8(_mm256_subs_epu8(x, t), _mm256_setzero_si256())
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn sra8<const N: i32>(x: V) -> V {
+        let neg = _mm256_cmpgt_epi8(_mm256_setzero_si256(), x);
+        let keep = (0xffu8 >> N) as i8;
+        let shifted = _mm256_and_si256(_mm256_srli_epi16::<N>(x), _mm256_set1_epi8(keep));
+        _mm256_or_si256(shifted, _mm256_and_si256(neg, _mm256_set1_epi8(!keep)))
+    }
+    /// Bytes `g[i]` in the lanes of group `i` (eight lanes each).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn groups(g: [u8; 4]) -> V {
+        let q = |b: u8| i64::from_le_bytes([b; 8]);
+        _mm256_set_epi64x(q(g[3]), q(g[2]), q(g[1]), q(g[0]))
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn on(b: bool) -> u8 {
+        if b { 0xff } else { 0 }
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn thresholds(t: &[Thresh; 4]) -> (V, V, V) {
+        (
+            groups([t[0].limit, t[1].limit, t[2].limit, t[3].limit]),
+            groups([t[0].blimit, t[1].blimit, t[2].blimit, t[3].blimit]),
+            groups([t[0].hev, t[1].hev, t[2].hev, t[3].hev]),
+        )
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn masks_some(w: &[Option<Wd>; 4]) -> V {
+        groups([
+            on(w[0].is_some()),
+            on(w[1].is_some()),
+            on(w[2].is_some()),
+            on(w[3].is_some()),
+        ])
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn masks_big(w: &[Option<Wd>; 4]) -> V {
+        let b = super::big;
+        groups([on(b(w[0])), on(b(w[1])), on(b(w[2])), on(b(w[3]))])
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn masks16(w: &[Option<Wd>; 4]) -> V {
+        let b = |x: Option<Wd>| x == Some(Wd::W16);
+        groups([on(b(w[0])), on(b(w[1])), on(b(w[2])), on(b(w[3]))])
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn wide(x: V) -> W {
+        let z = _mm256_setzero_si256();
+        (_mm256_unpacklo_epi8(x, z), _mm256_unpackhi_epi8(x, z))
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn pack(w: W) -> V {
+        _mm256_packus_epi16(w.0, w.1)
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn wadd(a: W, b: W) -> W {
+        (_mm256_add_epi16(a.0, b.0), _mm256_add_epi16(a.1, b.1))
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn wsub(a: W, b: W) -> W {
+        (_mm256_sub_epi16(a.0, b.0), _mm256_sub_epi16(a.1, b.1))
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn wset1(k: i16) -> W {
+        (_mm256_set1_epi16(k), _mm256_set1_epi16(k))
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn wsrli<const N: i32>(a: W) -> W {
+        (_mm256_srli_epi16::<N>(a.0), _mm256_srli_epi16::<N>(a.1))
+    }
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn wslli<const N: i32>(a: W) -> W {
+        (_mm256_slli_epi16::<N>(a.0), _mm256_slli_epi16::<N>(a.1))
+    }
+}
+
+macro_rules! lanes_fn {
+    ($name:ident, $m:ident, $g:literal) => {
+        #[inline]
+        #[target_feature(enable = "avx2")]
+        fn $name(
+            v: &mut [$m::V; 16],
+            wds: [Option<Wd>; $g],
+            wd: Wd,
+            thr: &[Thresh; $g],
+            outer: impl FnOnce(&mut [$m::V; 16]),
+        ) -> Changed {
+            let (p3, p2, p1, p0) = (v[4], v[5], v[6], v[7]);
+            let (q0, q1, q2, q3) = (v[8], v[9], v[10], v[11]);
+            let (limit, blimit, hevt) = $m::thresholds(thr);
+            let ap = $m::absd(p1, p0);
+            let aq = $m::absd(q1, q0);
+            let m = $m::max_u8(
+                $m::max_u8(
+                    $m::max_u8($m::absd(p3, p2), $m::absd(p2, p1)),
+                    $m::max_u8(ap, aq),
+                ),
+                $m::max_u8($m::absd(q2, q1), $m::absd(q3, q2)),
+            );
+            let apq0 = $m::absd(p0, q0);
+            let apq1 = $m::and($m::srli16::<1>($m::absd(p1, q1)), $m::splat(0x7f));
+            let e = $m::adds_u8($m::adds_u8(apq0, apq0), apq1);
+            let on = $m::masks_some(&wds);
+            let mask = $m::and($m::and($m::le(m, limit), $m::le(e, blimit)), on);
+            if $m::none(mask) {
+                return Changed::None;
+            }
+            let hev = $m::xor($m::le($m::max_u8(ap, aq), hevt), $m::splat(-1));
+            // filter4, in signed bytes.
+            let x80 = $m::splat(-128);
+            let (ps1, ps0) = ($m::xor(p1, x80), $m::xor(p0, x80));
+            let (qs0, qs1) = ($m::xor(q0, x80), $m::xor(q1, x80));
+            let f = $m::and($m::subs_i8(ps1, qs1), hev);
+            let d = $m::subs_i8(qs0, ps0);
+            let f = $m::adds_i8($m::adds_i8($m::adds_i8(f, d), d), d);
+            let f = $m::and(f, mask);
+            let f1 = $m::sra8::<3>($m::adds_i8(f, $m::splat(4)));
+            let f2 = $m::sra8::<3>($m::adds_i8(f, $m::splat(3)));
+            let nq0 = $m::xor($m::subs_i8(qs0, f1), x80);
+            let np0 = $m::xor($m::adds_i8(ps0, f2), x80);
+            let fo = $m::andnot(hev, $m::sra8::<1>($m::adds_i8(f1, $m::splat(1))));
+            let nq1 = $m::xor($m::subs_i8(qs1, fo), x80);
+            let np1 = $m::xor($m::adds_i8(ps1, fo), x80);
+            v[6] = np1;
+            v[7] = np0;
+            v[8] = nq0;
+            v[9] = nq1;
+            if wd == Wd::W4 {
+                return Changed::Inner;
+            }
+            let one = $m::splat(1);
+            let fm = $m::max_u8(
+                $m::max_u8(
+                    $m::max_u8(ap, aq),
+                    $m::max_u8($m::absd(p2, p0), $m::absd(q2, q0)),
+                ),
+                $m::max_u8($m::absd(p3, p0), $m::absd(q3, q0)),
+            );
+            let w8 = $m::masks_big(&wds);
+            let flat = $m::and($m::and($m::le(fm, one), mask), w8);
+            if $m::none(flat) {
+                return Changed::Inner;
+            }
+            // Where the 15-tap filter runs it replaces the 7-tap one.
+            let flat2 = if wd == Wd::W16 {
+                outer(v);
+                let f2m = $m::max_u8(
+                    $m::max_u8(
+                        $m::max_u8($m::absd(v[3], p0), $m::absd(v[2], p0)),
+                        $m::max_u8($m::absd(v[1], p0), $m::absd(v[0], p0)),
+                    ),
+                    $m::max_u8(
+                        $m::max_u8($m::absd(v[12], q0), $m::absd(v[13], q0)),
+                        $m::max_u8($m::absd(v[14], q0), $m::absd(v[15], q0)),
+                    ),
+                );
+                let w16 = $m::masks16(&wds);
+                $m::and($m::and($m::le(f2m, one), flat), w16)
+            } else {
+                $m::zero()
+            };
+            let flat_only = $m::andnot(flat2, flat);
+            if !$m::none(flat_only) {
+                let flat = flat_only;
+                // The 7-tap sums in 16-bit lanes.
+                let (w3, w2, w1, w0) = ($m::wide(p3), $m::wide(p2), $m::wide(p1), $m::wide(p0));
+                let (x0, x1, x2, x3) = ($m::wide(q0), $m::wide(q1), $m::wide(q2), $m::wide(q3));
+                let add = |a: $m::W, b: $m::W| $m::wadd(a, b);
+                let r3 = |x: $m::W| $m::pack($m::wsrli::<3>(add(x, $m::wset1(4))));
+                let o2 = r3(add(
+                    add(add(w3, w3), add(w3, w2)),
+                    add(add(w2, w1), add(w0, x0)),
+                ));
+                let o1 = r3(add(
+                    add(add(w3, w3), add(w2, w1)),
+                    add(add(w1, w0), add(x0, x1)),
+                ));
+                let o0 = r3(add(
+                    add(add(w3, w2), add(w1, w0)),
+                    add(add(w0, x0), add(x1, x2)),
+                ));
+                let oq0 = r3(add(
+                    add(add(w2, w1), add(w0, x0)),
+                    add(add(x0, x1), add(x2, x3)),
+                ));
+                let oq1 = r3(add(
+                    add(add(w1, w0), add(x0, x1)),
+                    add(add(x1, x2), add(x3, x3)),
+                ));
+                let oq2 = r3(add(
+                    add(add(w0, x0), add(x1, x2)),
+                    add(add(x2, x3), add(x3, x3)),
+                ));
+                v[5] = $m::blendv(p2, o2, flat);
+                v[6] = $m::blendv(np1, o1, flat);
+                v[7] = $m::blendv(np0, o0, flat);
+                v[8] = $m::blendv(nq0, oq0, flat);
+                v[9] = $m::blendv(nq1, oq1, flat);
+                v[10] = $m::blendv(q2, oq2, flat);
+            }
+            if $m::none(flat2) {
+                return Changed::Inner;
+            }
+            let s: [$m::W; 16] = [
+                $m::wide(v[0]),
+                $m::wide(v[1]),
+                $m::wide(v[2]),
+                $m::wide(v[3]),
+                $m::wide(p3),
+                $m::wide(p2),
+                $m::wide(p1),
+                $m::wide(p0),
+                $m::wide(q0),
+                $m::wide(q1),
+                $m::wide(q2),
+                $m::wide(q3),
+                $m::wide(v[12]),
+                $m::wide(v[13]),
+                $m::wide(v[14]),
+                $m::wide(v[15]),
+            ];
+            let add = |a: $m::W, b: $m::W| $m::wadd(a, b);
+            // The 15-tap window as a running sum, as libvpx writes it out.
+            let mut sum = add(
+                add($m::wslli::<3>(s[0]), $m::wsub(s[1], s[0])),
+                add(
+                    add(s[1], s[2]),
+                    add(add(s[3], s[4]), add(add(s[5], s[6]), add(s[7], s[8]))),
+                ),
+            );
+            let r4 = |x: $m::W| $m::pack($m::wsrli::<4>(add(x, $m::wset1(8))));
+            let mut out = [v[0]; 14];
+            out[0] = r4(sum);
+            for k in 1usize..14 {
+                let drop_a = s[k.saturating_sub(7)];
+                let drop_b = s[k];
+                let add_a = s[k + 1];
+                let add_b = s[(k + 8).min(15)];
+                sum = $m::wsub(add(sum, add(add_a, add_b)), add(drop_a, drop_b));
+                out[k] = r4(sum);
+            }
+            for k in 0..14 {
+                v[k + 1] = $m::blendv(v[k + 1], out[k], flat2);
+            }
+            Changed::Outer
+        }
+    };
+}
+
+// `lanes` filters the taps `v` (p7 at 0, q0 at 8; sixteen lines a vector)
+// in place, each half of the lines with its own filter (libvpx's SSE2
+// arithmetic, which equals its C). `v` comes with p3 to q3; `outer` fills
+// p7 to p4 and q4 to q7 when the 15-tap filter may run.
+lanes_fn!(lanes, x16, 2);
+
+// `lanes32` is `lanes` for two edges side by side, each half of a 256-bit
+// vector one edge (the instructions keep to their 128-bit halves): four
+// groups of eight lines, each with its own filter.
+lanes_fn!(lanes32, x32, 4);
 
 /// The transpose of 16 rows of 8 bytes (the low half of each): 8
 /// vectors of 16, one per column.
@@ -500,5 +797,84 @@ pub(super) fn filter(
                 }
             }
         }
+    }
+}
+
+/// Thirty-two bytes at `o` of `r`.
+///
+/// # Safety
+/// `o + 32 <= r.len()`.
+#[inline]
+#[target_feature(enable = "avx2")]
+#[allow(unsafe_code)]
+unsafe fn ld32(r: &[u8], o: usize) -> __m256i {
+    debug_assert!(o + 32 <= r.len());
+    // SAFETY: the caller proves the 32 bytes lie in `r`.
+    unsafe { _mm256_loadu_si256(r.as_ptr().add(o).cast()) }
+}
+
+/// Stores thirty-two bytes at `o` of `r`.
+///
+/// # Safety
+/// `o + 32 <= r.len()`.
+#[inline]
+#[target_feature(enable = "avx2")]
+#[allow(unsafe_code)]
+unsafe fn st32(r: &mut [u8], o: usize, v: __m256i) {
+    debug_assert!(o + 32 <= r.len());
+    // SAFETY: the caller proves the 32 bytes lie in `r`.
+    unsafe { _mm256_storeu_si256(r.as_mut_ptr().add(o).cast(), v) }
+}
+
+/// Two horizontal edges side by side, 32 columns from `at`: four groups
+/// of eight columns, each with its own filter, as two [`filter`] calls
+/// on `at` and `at + 16` would filter them.
+#[target_feature(enable = "avx2")]
+pub(super) fn filter32(
+    buf: &mut [u8],
+    at: usize,
+    stride: usize,
+    wds: [Option<Wd>; 4],
+    thr: [Thresh; 4],
+) {
+    let w01 = super::widest([wds[0], wds[1]]);
+    let w23 = super::widest([wds[2], wds[3]]);
+    let Some(wd) = super::widest([w01, w23]) else {
+        return;
+    };
+    let taps = if wd == Wd::W16 { 8 } else { 4 };
+    let (back, span) = (taps * stride, (2 * taps - 1) * stride + 32);
+    let Some(first) = at.checked_sub(back) else {
+        return;
+    };
+    let Some(reg) = buf.get_mut(first..first + span) else {
+        return;
+    };
+    let mut v = [_mm256_setzero_si256(); 16];
+    // SAFETY (every load and store below): `reg` holds `span` bytes, so
+    // each of rows `0..2 * taps` holds 32 from its start.
+    #[allow(unsafe_code)]
+    for k in 0..8 {
+        v[4 + k] = unsafe { ld32(reg, (k + taps - 4) * stride) };
+    }
+    let changed = {
+        let reg = &*reg;
+        #[allow(unsafe_code)]
+        lanes32(&mut v, wds, wd, &thr, |v| {
+            for k in 0..4 {
+                v[k] = unsafe { ld32(reg, k * stride) };
+                v[12 + k] = unsafe { ld32(reg, (12 + k) * stride) };
+            }
+        })
+    };
+    let (first, last) = match changed {
+        Changed::None => return,
+        Changed::Outer => (1, 15),
+        Changed::Inner => (5, 11),
+    };
+    // An index loop: the iterator chain stays out of line.
+    #[allow(clippy::needless_range_loop, unsafe_code)]
+    for k in first..last {
+        unsafe { st32(reg, (k + taps - 8) * stride, v[k]) };
     }
 }

@@ -91,6 +91,47 @@ pub fn filter(e: Edge<'_>) -> bool {
     false
 }
 
+/// Two horizontal edges side by side: 32 columns from `at` of `buf`
+/// (rows `stride` apart), four groups of eight columns each with its own
+/// filter and thresholds.
+pub struct Edge32<'a> {
+    pub buf: &'a mut [u8],
+    pub at: usize,
+    pub stride: usize,
+    pub wd: [Option<Wd>; 4],
+    pub thr: [Thresh; 4],
+}
+
+/// Filters `e` as [`filter`] would filter its two halves (`at` and
+/// `at + 16`), in one pass of 256-bit vectors; `false`, having written
+/// nothing, when the CPU or the edge is not one the kernel takes.
+#[must_use]
+#[inline(always)]
+pub fn filter32(e: Edge32<'_>) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let wd = widest([widest([e.wd[0], e.wd[1]]), widest([e.wd[2], e.wd[3]])]);
+        let Some(wd) = wd else {
+            return true;
+        };
+        let taps = if wd == Wd::W16 { 8 } else { 4 };
+        if super::avx2()
+            && e.at >= taps * e.stride
+            && e.at + (taps - 1) * e.stride + 32 <= e.buf.len()
+        {
+            // SAFETY: `avx2` checked at run time that the CPU has AVX2,
+            // the only feature `avx2::filter32` enables.
+            #[allow(unsafe_code)]
+            unsafe {
+                avx2::filter32(e.buf, e.at, e.stride, e.wd, e.thr);
+            }
+            return true;
+        }
+    }
+    let _ = e;
+    false
+}
+
 /// The scalar twin of [`filter`], from libvpx's C.
 pub fn filter_scalar(e: Edge<'_>) {
     let Edge {

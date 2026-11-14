@@ -60,6 +60,20 @@ pub trait Pixel: Copy + Default + PartialEq + Send + Sync + core::fmt::Debug + '
     ) -> bool {
         false
     }
+
+    /// Two horizontal edges side by side (32 columns from `at`), four
+    /// groups of eight columns each with its own filter, with vector
+    /// instructions; `false` when not taken.
+    #[inline(always)]
+    fn lf_fast32(
+        _buf: &mut [Self],
+        _at: usize,
+        _stride: usize,
+        _wd: [Option<super::lf::Wd>; 4],
+        _thr: [super::lf::Thresh; 4],
+    ) -> bool {
+        false
+    }
 }
 
 /// A finished 8-bit plane, shared with the caller's picture. The decoder
@@ -121,6 +135,35 @@ impl Pixel for u8 {
             vertical,
             wd: [w(wd[0]), w(wd[1])],
             thr: [t(thr[0]), t(thr[1])],
+        })
+    }
+    #[inline(always)]
+    fn lf_fast32(
+        buf: &mut [Self],
+        at: usize,
+        stride: usize,
+        wd: [Option<super::lf::Wd>; 4],
+        thr: [super::lf::Thresh; 4],
+    ) -> bool {
+        use cutlass_simd::vp9::lf;
+        let t = |t: super::lf::Thresh| lf::Thresh {
+            blimit: t.blimit,
+            limit: t.limit,
+            hev: t.hev,
+        };
+        let w = |w: Option<super::lf::Wd>| {
+            w.map(|w| match w {
+                super::lf::Wd::W4 => lf::Wd::W4,
+                super::lf::Wd::W8 => lf::Wd::W8,
+                super::lf::Wd::W16 => lf::Wd::W16,
+            })
+        };
+        lf::filter32(lf::Edge32 {
+            buf,
+            at,
+            stride,
+            wd: [w(wd[0]), w(wd[1]), w(wd[2]), w(wd[3])],
+            thr: [t(thr[0]), t(thr[1]), t(thr[2]), t(thr[3])],
         })
     }
     #[inline(always)]

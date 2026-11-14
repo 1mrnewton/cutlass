@@ -416,8 +416,25 @@ fn on_cpu(outputs: Vec<Output>) -> Result<Vec<Vec<u8>>, String> {
 /// The three planes of a frame, row by row without any padding.
 fn tight(frame: &cutlass_codec::access::VideoFrame) -> Vec<&[u8]> {
     let mut rows = Vec::new();
+    let bytes = if matches!(
+        frame.format,
+        PixelFormat::Yuv420p10
+            | PixelFormat::Yuv420p12
+            | PixelFormat::Yuv422p10
+            | PixelFormat::Yuv422p12
+            | PixelFormat::Yuv440p10
+            | PixelFormat::Yuv440p12
+            | PixelFormat::Yuv444p10
+            | PixelFormat::Yuv444p12
+            | PixelFormat::Gbrp10
+            | PixelFormat::Gbrp12
+    ) {
+        2
+    } else {
+        1
+    };
     for plane in [&frame.y, &frame.u, &frame.v] {
-        let width = plane.width as usize;
+        let width = plane.width as usize * bytes;
         if plane.stride == width {
             rows.push(plane.samples.as_slice());
             continue;

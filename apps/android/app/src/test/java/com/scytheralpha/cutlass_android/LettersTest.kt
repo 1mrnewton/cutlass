@@ -2,13 +2,15 @@ package com.scytheralpha.cutlass_android
 
 import androidx.compose.ui.text.TextRange
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class LettersTest {
     @Test
-    fun a_caret_stands_for_the_whole_of_the_words() {
-        assertEquals(0 until 11, letters("Hello world", TextRange(4)))
-        assertEquals(0 until 0, letters("", TextRange(0)))
+    fun a_caret_selects_no_letters() {
+        assertNull(letters("Hello world", TextRange(4)))
+        assertNull(letters("", TextRange(0)))
+        assertNull(letters("Hello", TextRange(40, 40)))
     }
 
     @Test
@@ -21,7 +23,7 @@ class LettersTest {
     fun a_letter_outside_the_basic_plane_counts_once() {
         // The field counts the clapper board as two UTF-16 units.
         val words = "a🎬b"
-        assertEquals(0 until 3, letters(words, TextRange(0)))
+        assertEquals(0 until 3, letters(words, TextRange(0, 4)))
         assertEquals(2 until 3, letters(words, TextRange(3, 4)))
         assertEquals(1 until 2, letters(words, TextRange(1, 3)))
     }

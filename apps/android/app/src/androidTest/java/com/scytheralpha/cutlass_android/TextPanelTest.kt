@@ -104,7 +104,7 @@ class TextPanelTest {
     @Test
     fun bold_italic_and_underline_go_on_the_selected_letters() {
         show()
-        // Nothing selected is the whole title, which starts plain.
+        // Nothing selected is the title itself, which starts plain.
         compose.onNodeWithContentDescription("Bold").assertIsOff()
         compose.onNodeWithContentDescription("Words").performTextInputSelection(TextRange(0, 5))
         compose.waitForIdle()
@@ -131,7 +131,8 @@ class TextPanelTest {
             assertFalse(model.textPattern(title, 0, 5)!!.underline)
         }
 
-        // A caret alone is every letter again: italic goes on them all.
+        // A caret alone is the title itself again: italic becomes its own
+        // pattern, as on the desktop and the iPhone, and every letter has it.
         compose.onNodeWithContentDescription("Words").performTextInputSelection(TextRange(3))
         compose.waitForIdle()
         compose.onNodeWithContentDescription("Bold").assertIsOff()
@@ -140,6 +141,8 @@ class TextPanelTest {
         compose.onNodeWithContentDescription("Italic").assertIsOn()
         compose.runOnUiThread {
             assertTrue(model.textPattern(title, 0, 11)!!.italic)
+            assertTrue(model.text(title)!!.style.italic)
+            assertFalse(model.text(title)!!.style.bold)
             // Each tap was one undo step.
             model.undo()
             assertFalse(model.textPattern(title, 0, 11)!!.italic)

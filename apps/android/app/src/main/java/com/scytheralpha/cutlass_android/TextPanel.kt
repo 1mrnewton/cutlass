@@ -76,6 +76,7 @@ import androidx.compose.ui.unit.sp
 import java.util.Locale
 import kotlin.math.roundToInt
 import uniffi.cutlass_ffi_bindings.FontAxis
+import uniffi.cutlass_ffi_bindings.TextPattern
 import uniffi.cutlass_ffi_bindings.TextStyleChange
 import uniffi.cutlass_ffi_bindings.TextStyleRanges
 import uniffi.cutlass_ffi_bindings.textColors
@@ -230,39 +231,50 @@ fun TextPanel(model: EditorModel, clip: String?, done: () -> Unit) {
 
 /**
  * The letters a selection in `words` covers, as the characters Rust
- * counts: a code point each, where the field counts UTF-16 units. A caret
- * with nothing selected stands for the whole of the words.
+ * counts: a code point each, where the field counts UTF-16 units. Null
+ * for a caret with nothing selected.
  */
-fun letters(words: String, selection: TextRange): IntRange {
+fun letters(words: String, selection: TextRange): IntRange? {
     val from = selection.min.coerceIn(0, words.length)
     val to = selection.max.coerceIn(0, words.length)
-    if (from == to) return 0 until words.codePointCount(0, words.length)
+    if (from == to) return null
     return words.codePointCount(0, from) until words.codePointCount(0, to)
 }
 
 /**
- * Bold, italic and underline for the letters selected in the words, or
- * for all of them when none are, beside the tabs. A button is lit when
- * every one of those letters has it, as Rust reports; a tap is one undo
- * step.
+ * Bold, italic and underline for the letters selected in the words,
+ * beside the tabs, or for the title itself when none are selected, as the
+ * desktop's and the iPhone's buttons do. A button is lit when every one
+ * of those letters has it, as Rust reports; a tap is one undo step.
  */
 @Composable
 private fun RowScope.PatternToggles(model: EditorModel, clip: String?, words: String, selection: TextRange) {
     val range = letters(words, selection)
-    val start = range.first
-    val end = range.last + 1
-    val pattern = remember(clip, start, end, model.edits) {
-        clip?.let { model.textPattern(it, start, end) }
+    val pattern = remember(clip, range, model.edits) {
+        clip?.let { id ->
+            if (range != null) {
+                model.textPattern(id, range.first, range.last + 1)
+            } else {
+                model.text(id)?.style?.let { TextPattern(it.bold, it.italic, it.underline) }
+            }
+        }
     }
-    PatternToggle("bold", "Bold", pattern?.bold) { wanted ->
-        clip?.let { model.setTextPattern(it, start, end, bold = wanted) }
+    fun set(bold: Boolean? = null, italic: Boolean? = null, underline: Boolean? = null) {
+        if (clip == null || pattern == null) return
+        if (range != null) {
+            model.setTextPattern(clip, range.first, range.last + 1, bold, italic, underline)
+        } else {
+            val whole = TextStyleChange.Pattern(
+                bold ?: pattern.bold,
+                italic ?: pattern.italic,
+                underline ?: pattern.underline,
+            )
+            model.styleText(clip, whole, live = false)
+        }
     }
-    PatternToggle("italic", "Italic", pattern?.italic) { wanted ->
-        clip?.let { model.setTextPattern(it, start, end, italic = wanted) }
-    }
-    PatternToggle("underline", "Underline", pattern?.underline) { wanted ->
-        clip?.let { model.setTextPattern(it, start, end, underline = wanted) }
-    }
+    PatternToggle("bold", "Bold", pattern?.bold) { set(bold = it) }
+    PatternToggle("italic", "Italic", pattern?.italic) { set(italic = it) }
+    PatternToggle("underline", "Underline", pattern?.underline) { set(underline = it) }
 }
 
 /** One of the three, as tall as the tabs. `lit` is null while there are no letters to change. */

@@ -180,7 +180,8 @@ fn lanes(
         ),
         _mm_max_epu8(absd(p3, p0), absd(q3, q0)),
     );
-    let w8 = halves8(wds.map(|w| matches!(w, Some(Wd::W8 | Wd::W16))));
+    let big = |w: Option<Wd>| matches!(w, Some(Wd::W8 | Wd::W16));
+    let w8 = halves8([big(wds[0]), big(wds[1])]);
     let flat = _mm_and_si128(_mm_and_si128(le(fm, one), mask), w8);
     if _mm_testz_si128(flat, flat) != 0 {
         return Changed::Inner;
@@ -198,7 +199,7 @@ fn lanes(
                 _mm_max_epu8(absd(v[14], q0), absd(v[15], q0)),
             ),
         );
-        let w16 = halves8(wds.map(|w| w == Some(Wd::W16)));
+        let w16 = halves8([wds[0] == Some(Wd::W16), wds[1] == Some(Wd::W16)]);
         _mm_and_si128(_mm_and_si128(le(f2m, one), flat), w16)
     } else {
         _mm_setzero_si128()

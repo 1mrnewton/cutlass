@@ -37,6 +37,10 @@ pub struct Vp9Options {
     /// at its end, that the pictures between predict from. Pictures then
     /// come out that many pushes later (and from `drain`).
     pub lag: u32,
+    /// Adaptive quantization (libvpx's `aq-mode=1`): flat regions finer,
+    /// busy ones coarser, by segment. Better looking, a little worse in
+    /// PSNR.
+    pub aq: bool,
 }
 
 impl Vp9Options {
@@ -59,6 +63,7 @@ impl Default for Vp9Options {
             max_q: 236,
             threads: 0,
             lag: 0,
+            aq: false,
         }
     }
 }
@@ -272,6 +277,7 @@ impl Vp9Encoder {
                 qindex,
                 speed: self.opts.speed,
                 altref_future: false,
+                aq: self.opts.aq,
             })?;
             self.rc.account(coded.data.len(), 0.0, 1, qindex);
             self.overlay_at = Some(target);
@@ -322,6 +328,7 @@ impl Vp9Encoder {
             qindex,
             speed: self.opts.speed,
             altref_future,
+            aq: self.opts.aq,
         })?;
         let kind = if coded.key { 0 } else { kind };
         self.rc.account(coded.data.len(), seconds, kind, qindex);

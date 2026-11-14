@@ -11,6 +11,7 @@
 //! loop filter of `dec::lf`).
 
 pub mod api;
+pub mod aq;
 pub mod arf;
 pub mod probs;
 pub mod tile;
@@ -52,6 +53,8 @@ pub struct FrameParams {
     /// overlay): its sign bias is set, and blocks may predict from it and
     /// a past picture at once.
     pub altref_future: bool,
+    /// Adaptive quantization by segment ([`aq`]).
+    pub aq: bool,
 }
 
 /// Speeds at and below which a frame with a future ALTREF lets each block
@@ -78,6 +81,9 @@ pub struct FrameEncoder {
     log2_tiles: u8,
     /// The fast search's vectors of the last frame, by 8×8 block.
     pre_seeds: Vec<Mv>,
+    /// The segmentation of the frame being coded, with adaptive
+    /// quantization.
+    aq: Option<aq::Plan>,
 }
 
 /// What one tile column's encoder keeps from frame to frame.
@@ -125,6 +131,7 @@ impl FrameEncoder {
             work: Vec::new(),
             log2_tiles: threads.max(1).ilog2().min(6) as u8,
             pre_seeds: Vec::new(),
+            aq: None,
         }
     }
 
@@ -157,6 +164,16 @@ impl FrameEncoder {
     pub fn encode(&mut self, fp: FrameParams) -> Result<Coded, CodecError> {
         let key = fp.key || self.dec.ref8(0).is_none();
         let lossless = fp.qindex == 0;
+        self.aq = (fp.aq && !lossless).then(|| {
+            let (w, h) = (self.width as usize, self.height as usize);
+            aq::plan(
+                &self.src[0],
+                self.strides[0],
+                (w, h),
+                (w.div_ceil(8), h.div_ceil(8)),
+                fp.qindex,
+            )
+        });
         // The tiles are coded against the probabilities as they stand; their
         // symbols are kept, the coefficient probabilities that pay for
         // their update are updated, and the symbols written with them.
@@ -294,7 +311,33 @@ impl FrameEncoder {
         b.write_bit(false); // no update
         b.write(u32::from(qindex), 8);
         b.write(0, 3); // no dc / uv deltas
-        b.write_bit(false); // no segmentation
+        match &self.aq {
+            Some(plan) => {
+                b.write_bit(true); // segmentation
+                b.write_bit(true); // update_map
+                for p in plan.tree_probs {
+                    b.write_bit(p != 255);
+                    if p != 255 {
+                        b.write(u32::from(p), 8);
+                    }
+                }
+                b.write_bit(false); // no temporal prediction
+                b.write_bit(true); // update_data
+                b.write_bit(false); // deltas
+                for d in plan.deltas {
+                    // Feature 0, the quantizer; no others.
+                    b.write_bit(d != 0);
+                    if d != 0 {
+                        b.write(u32::from(d.unsigned_abs()), 8);
+                        b.write_bit(d < 0);
+                    }
+                    for _ in 1..4 {
+                        b.write_bit(false);
+                    }
+                }
+            }
+            None => b.write_bit(false), // no segmentation
+        }
         let (min_log2, max_log2) = header::tile_limits(geom::mi_count(self.width));
         let log2 = u32::from(self.log2_tiles).clamp(min_log2, max_log2);
         for _ in min_log2..log2 {
@@ -400,10 +443,13 @@ impl FrameEncoder {
                 planes: [&self.src[0], &self.src[1], &self.src[2]],
                 strides: self.strides,
             },
-            dq: [
-                [i32::from(h.y_dq[0][0]), ac],
-                [i32::from(h.uv_dq[0][0]), i32::from(h.uv_dq[0][1])],
-            ],
+            dq: std::array::from_fn(|g| {
+                [
+                    [i32::from(h.y_dq[g][0]), i32::from(h.y_dq[g][1])],
+                    [i32::from(h.uv_dq[g][0]), i32::from(h.uv_dq[g][1])],
+                ]
+            }),
+            seg_map: self.aq.as_ref().map_or(&[][..], |p| &p.map[..]),
             speed: fp.speed,
             refs_live,
             switchable: h.interp == geom::SWITCHABLE,
@@ -617,7 +663,17 @@ impl FrameEncoder {
             made_cv: std::sync::Condvar::new(),
             made: AtomicBool::new(false),
         });
-        let segmap = vec![0u8; mi_cols * mi_rows];
+        let mut segmap = vec![0u8; mi_cols * mi_rows];
+        if self.aq.is_some() {
+            for (i, t) in work.iter().enumerate() {
+                let (c0, c1) = (edges[i], edges[i + 1]);
+                let (st, w) = (&t.state, c1 - c0);
+                for r in 0..mi_rows {
+                    segmap[r * mi_cols + c0..r * mi_cols + c1]
+                        .copy_from_slice(&st.segmap[r * w..r * w + w]);
+                }
+            }
+        }
         Ok((counts, mvs, segmap, pic, ntiles))
     }
 }

@@ -202,8 +202,11 @@ pub struct Shared<'a> {
     /// The sample SSE a bit of rate is worth.
     pub rd_lambda: f32,
     pub src: Source<'a>,
-    /// The quantizer steps of luma and chroma, DC and AC.
-    pub dq: [[i32; 2]; 2],
+    /// The quantizer steps of luma and chroma, DC and AC, by segment.
+    pub dq: [[[i32; 2]; 2]; 8],
+    /// The segment of every 8×8 block of the frame (empty: segmentation
+    /// off).
+    pub seg_map: &'a [u8],
     /// Search effort: higher is faster.
     pub speed: u8,
     /// Whether each inter block codes its filter.
@@ -277,6 +280,8 @@ struct Blk {
     mv: Mv,
     /// The vector of the second reference, in compound prediction.
     mv2: Mv,
+    /// The segment.
+    seg: u8,
     /// The inter prediction filter (EIGHTTAP, SMOOTH, SHARP).
     interp: u8,
     /// The four 4×4 luma modes of a block under 8×8 (`AUTO`: chosen as the
@@ -304,6 +309,8 @@ pub struct Tile<'s, 't, 'r, 'v> {
     left_part: [u8; 8],
     left_nz: [[u8; 16]; 3],
     cache: [u8; 1024],
+    /// The segment of the block being coded (its quantizer).
+    seg: usize,
     pred: Vec<u8>,
     res: Vec<i32>,
     fcoef: Vec<f32>,
@@ -373,6 +380,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             left_part: [0; 8],
             left_nz: [[0; 16]; 3],
             cache: [0; 1024],
+            seg: 0,
             pred: vec![0; 64 * 64],
             res: vec![0; 64 * 64],
             fcoef: vec![0.0; 32 * 32],
@@ -676,7 +684,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         // under the quantizer's own noise.
         if whole && best.1 == PARTITION_NONE && none_skip.0 {
             let pixels = (n * 8 * n * 8) as f64;
-            let step = f64::from(s.dq[0][1]) / 8.0;
+            let step = f64::from(s.dq[0][0][1]) / 8.0;
             if none_skip.1 < pixels * step * step / 24.0 {
                 self.restore(before + 1);
                 self.part[Self::node(row, col, level)] = PARTITION_NONE;
@@ -820,6 +828,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             refs: [INTRA_FRAME, INTRA_FRAME],
             mv: Mv::ZERO,
             mv2: Mv::ZERO,
+            seg: s.seg_map.get(row * s.mi_cols + col).copied().unwrap_or(0),
             interp: geom::EIGHTTAP,
             bmode: [geom::DC; 4],
         }
@@ -1577,6 +1586,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     fn code_block(&mut self, b0: &Blk) -> f64 {
         let s = self.s;
         let mut b = *b0;
+        self.seg = usize::from(b.seg);
         let (row, col, bsize) = (b.row, b.col, b.bsize);
         let (bw, bh) = (b.bw, b.bh);
         let inter = b.refs[0] != INTRA_FRAME;
@@ -1643,6 +1653,9 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             for y in 0..b.y_mis {
                 let at = (row + y) * tw + col - self.col0;
                 self.f.mvs[at..at + b.x_mis].fill(r);
+                if let Some(cells) = self.f.segmap.get_mut(at..at + b.x_mis) {
+                    cells.fill(b.seg);
+                }
             }
         }
         if b.skip {
@@ -1683,7 +1696,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                     tx: b.tx,
                     skip: b.skip,
                     inter,
-                    seg: 0,
+                    seg: b.seg,
                     mode: b.mode,
                     reference: b.refs[0],
                     bw,
@@ -1698,7 +1711,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                     tx: b.tx,
                     skip: b.skip,
                     ref0: b.refs[0],
-                    seg: 0,
+                    seg: b.seg,
                     mode: b.mode,
                 };
                 for y in 0..b.y_mis {
@@ -1894,7 +1907,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         self.rd = TxRd::default();
         let mut rd_eob = None;
         let dqi = usize::from(plane > 0);
-        let (dc_q, ac_q) = (s.dq[dqi][0], s.dq[dqi][1]);
+        let (dc_q, ac_q) = (s.dq[self.seg][dqi][0], s.dq[self.seg][dqi][1]);
         let shift = u32::from(tx == 3);
         let quiet = {
             // No coefficient can reach 0.3 of a step when the residual's
@@ -2066,7 +2079,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let log2n = 2 + usize::from(tx);
         let shift = u32::from(tx == 3);
         let dqi = usize::from(plane > 0);
-        let (dc_q, ac_q) = (s.dq[dqi][0], s.dq[dqi][1]);
+        let (dc_q, ac_q) = (s.dq[self.seg][dqi][0], s.dq[self.seg][dqi][1]);
         let g = super::tx::gain(usize::from(tx));
         let lam = s.rd_lambda * g / 256.0;
         let (scan, nb) = scan_pair(tx, kind);
@@ -2330,7 +2343,17 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         }
     }
 
+    /// The block's segment, when the frame codes a map (never predicted
+    /// from the last frame's).
+    fn write_seg(&mut self, b: &Blk) {
+        if !self.s.seg_map.is_empty() {
+            let probs = self.s.h.seg.tree_probs;
+            self.put_tree(&prob::SEG_TREE, &probs, b.seg);
+        }
+    }
+
     fn write_intra_frame_info(&mut self, b: &Blk) {
+        self.write_seg(b);
         self.write_skip(b);
         self.write_tx(b, true);
         let above = self.above_nb(b).copied();
@@ -2379,6 +2402,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
 
     fn write_inter_frame_info(&mut self, b: &Blk) {
         let s = self.s;
+        self.write_seg(b);
         self.write_skip(b);
         let inter = b.refs[0] != INTRA_FRAME;
         let ctx = ctx::intra_inter_ctx(self.above_nb(b), self.left_nb(b));

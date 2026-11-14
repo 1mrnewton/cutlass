@@ -43,6 +43,18 @@ fn round_trip(w: usize, h: usize, frames: usize, qindex: u8) {
 }
 
 fn round_trip_threads(w: usize, h: usize, frames: usize, qindex: u8, threads: usize, speed: u8) {
+    round_trip_with(w, h, frames, qindex, threads, speed, false);
+}
+
+fn round_trip_with(
+    w: usize,
+    h: usize,
+    frames: usize,
+    qindex: u8,
+    threads: usize,
+    speed: u8,
+    aq: bool,
+) {
     let mut enc = FrameEncoder::new(w as u32, h as u32, threads);
     let mut dec = Decoder::new();
     let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
@@ -58,6 +70,7 @@ fn round_trip_threads(w: usize, h: usize, frames: usize, qindex: u8, threads: us
                 qindex,
                 speed,
                 altref_future: false,
+                aq,
             })
             .expect("encode");
         bytes += coded.data.len();
@@ -100,6 +113,14 @@ fn round_trips_odd_sizes() {
     round_trip(100, 70, 4, 100);
     round_trip(8, 8, 2, 40);
     round_trip(200, 136, 3, 20);
+}
+
+#[test]
+fn round_trips_with_segments() {
+    // Adaptive quantization: a quantizer by segment, the map coded per
+    // block, on both search paths.
+    round_trip_with(200, 136, 3, 120, 2, 5, true);
+    round_trip_with(200, 136, 3, 120, 2, 9, true);
 }
 
 #[test]

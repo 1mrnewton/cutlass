@@ -407,6 +407,10 @@ class EditorModel(project: String, private val scope: CoroutineScope) {
     /** What `clip` says, or null when it is not a text clip. */
     fun text(clip: String): TextInfo? = runCatching { editor?.text(clip) }.getOrNull()
 
+    /** The faces whose names have every word of `query`, as Rust matches them; all of them for no words. */
+    fun fontsMatching(query: String): List<FaceInfo> =
+        runCatching { editor?.fontsMatching(query) }.getOrNull() ?: fonts
+
     fun deleteClip() {
         val clip = deleteTarget
         if (clip == null) {

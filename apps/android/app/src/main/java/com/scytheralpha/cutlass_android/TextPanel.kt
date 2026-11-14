@@ -1,5 +1,6 @@
 package com.scytheralpha.cutlass_android
 
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
@@ -40,6 +42,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
@@ -198,7 +201,10 @@ fun TextPanel(model: EditorModel, clip: String?, done: () -> Unit) {
     }
 }
 
-/** The faces Rust found, each a capsule, the chosen one in the accent. */
+/**
+ * A search over the faces and the faces Rust matched in one row, each a
+ * capsule with the chosen one in the accent.
+ */
 @Composable
 private fun FontsTab(model: EditorModel, face: String, pick: (String) -> Unit) {
     if (model.fonts.isEmpty()) {
@@ -209,22 +215,107 @@ private fun FontsTab(model: EditorModel, face: String, pick: (String) -> Unit) {
         )
         return
     }
-    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(model.fonts, key = { it.name }) { font ->
-            val chosen = font.name == face
-            Text(
-                font.label,
-                fontSize = 13.sp,
-                maxLines = 1,
-                color = if (chosen) Color.Black else Color.White,
-                modifier = Modifier
-                    .clip(CircleShape)
-                    .background(if (chosen) Palette.accent else Palette.white(0.18))
-                    .selectable(selected = chosen) { pick(font.name) }
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-            )
+    var query by remember { mutableStateOf("") }
+    val found = remember(query, model.fonts) { model.fontsMatching(query) }
+    val row = rememberLazyListState()
+    // New words start the row again, at the first face they match.
+    LaunchedEffect(query) { row.scrollToItem(0) }
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            FontSearch(query) { query = it }
+            if (found.isEmpty()) {
+                Text(
+                    "No fonts match.",
+                    fontSize = 13.sp,
+                    color = Color.White.copy(alpha = 0.6f),
+                    maxLines = 1,
+                )
+            } else {
+                LazyRow(
+                    Modifier.weight(1f),
+                    state = row,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(found, key = { it.name }) { font ->
+                        val chosen = font.name == face
+                        Text(
+                            font.label,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            color = if (chosen) Color.Black else Color.White,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(if (chosen) Palette.accent else Palette.white(0.18))
+                                .selectable(selected = chosen) { pick(font.name) }
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                        )
+                    }
+                }
+            }
         }
     }
+}
+
+/**
+ * The search before the faces: a round button until it is tapped, then a
+ * line to type part of a face's name into, with a cross that empties it.
+ * It stays open while it holds words, so the faces beside it keep the row.
+ */
+@Composable
+private fun FontSearch(query: String, change: (String) -> Unit) {
+    val keyboard = LocalSoftwareKeyboardController.current
+    var focused by remember { mutableStateOf(false) }
+    val open = focused || query.isNotEmpty()
+    val width by animateDpAsState(if (open) 168.dp else 34.dp, label = "search")
+    BasicTextField(
+        value = query,
+        onValueChange = change,
+        modifier = Modifier
+            .width(width)
+            .onFocusChanged { focused = it.isFocused }
+            .semantics { contentDescription = "Search fonts" },
+        textStyle = TextStyle(color = Color.White, fontSize = 13.sp),
+        keyboardOptions = KeyboardOptions(
+            capitalization = KeyboardCapitalization.None,
+            autoCorrectEnabled = false,
+            imeAction = ImeAction.Search,
+        ),
+        keyboardActions = KeyboardActions(onSearch = { keyboard?.hide() }),
+        singleLine = true,
+        cursorBrush = SolidColor(Palette.accent),
+        decorationBox = { field ->
+            Row(
+                Modifier
+                    .height(34.dp)
+                    .background(Palette.white(0.18), CircleShape)
+                    .padding(start = 9.dp, end = if (open) 3.dp else 9.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                HugeIcon("search", size = 16.dp, tint = Color.White.copy(alpha = if (open) 0.6f else 1f))
+                // The line is there while shut too, so a tap on the button lands in it.
+                Box(Modifier.weight(1f)) {
+                    if (open && query.isEmpty()) {
+                        Text("Search", color = Color.White.copy(alpha = 0.4f), fontSize = 13.sp, maxLines = 1)
+                    }
+                    field()
+                }
+                if (query.isNotEmpty()) {
+                    Box(
+                        Modifier
+                            .size(28.dp)
+                            .clip(CircleShape)
+                            .clickable { change("") }
+                            .semantics { contentDescription = "Clear search" },
+                        contentAlignment = Alignment.Center,
+                    ) { HugeIcon("close", size = 13.dp, tint = Color.White.copy(alpha = 0.6f)) }
+                }
+            }
+        },
+    )
 }
 
 /**

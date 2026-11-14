@@ -2497,8 +2497,10 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         if last_sig <= 1 {
             last_sig = usize::from(a_nat[0] >= th_dc);
         }
-        for (k, a) in av[..last_sig].iter_mut().enumerate() {
-            *a = a_nat[tr(k)];
+        if !one {
+            for (k, a) in av[..last_sig].iter_mut().enumerate() {
+                *a = a_nat[tr(k)];
+            }
         }
         if last_sig == 0 {
             let e0 = lam * bit_cost(false, probs[0][ctx0][0]) as f32;
@@ -2525,69 +2527,125 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         j_pref[0] = 0.0;
         let mut last_nz = 0usize;
         let mut d_rest = d_all;
-        for k in 0..last_sig {
-            let rc = usize::from(scan[k]);
-            let t = usize::from(tpos[k]);
-            let st = steps[usize::from(k > 0)];
-            let a = av[k];
-            let band = usize::from(bands[k]);
-            let tcs = &tc[band][ctx];
-            eob_cost[k] = lam * tcs[1] as f32;
-            let lo = a as u32;
-            let more = if prev_zero { 0 } else { tcs[0] };
-            let d_of = |l: u32| {
+        // A trial's walk: each level the dead zone's, costed as below.
+        if one {
+            for k in 0..last_sig {
+                let rc = usize::from(scan[k]);
+                let t = usize::from(tpos[k]);
+                let (st, r0) = if k == 0 {
+                    (steps[0], 0.5)
+                } else {
+                    (steps[1], rnd)
+                };
+                let a = a_nat[t];
+                let band = usize::from(bands[k]);
+                let tcs = &tc[band][ctx];
+                eob_cost[k] = lam * tcs[1] as f32;
+                let l = (a + r0) as u32;
+                let more = if prev_zero { 0 } else { tcs[0] };
+                let r = more
+                    + match l {
+                        0 => tcs[2],
+                        1 => tcs[3],
+                        _ => {
+                            let mut c = Cost(0);
+                            write_big(
+                                &mut c,
+                                &PARETO8[usize::from(probs[band][ctx][2].max(1)) - 1],
+                                l,
+                            );
+                            tcs[4] + c.0
+                        }
+                    };
                 let e = (a - l as f32) * st;
-                e * e
-            };
-            let r_of = |l: u32| -> u32 {
-                match l {
-                    0 => more + tcs[2],
-                    1 => more + tcs[3],
-                    _ => {
-                        let mut c = Cost(0);
-                        write_big(
-                            &mut c,
-                            &PARETO8[usize::from(probs[band][ctx][2].max(1)) - 1],
-                            l,
-                        );
-                        more + tcs[4] + c.0
+                let z = a * st;
+                j_pref[k + 1] = j_pref[k] + (e * e + lam * r as f32);
+                d_tail[k] = d_rest;
+                d_rest -= z * z;
+                levels[t] = if l == 0 {
+                    0
+                } else {
+                    last_nz = k + 1;
+                    if self.fcoef[t] < 0.0 {
+                        -(l as i32)
+                    } else {
+                        l as i32
+                    }
+                };
+                energy[rc] = ENERGY[l.min(11) as usize];
+                prev_zero = l == 0;
+                if k + 1 < max {
+                    ctx = (1
+                        + usize::from(energy[usize::from(nb[2 * (k + 1)])])
+                        + usize::from(energy[usize::from(nb[2 * (k + 1) + 1])]))
+                        >> 1;
+                }
+            }
+        } else {
+            for k in 0..last_sig {
+                let rc = usize::from(scan[k]);
+                let t = usize::from(tpos[k]);
+                let st = steps[usize::from(k > 0)];
+                let a = av[k];
+                let band = usize::from(bands[k]);
+                let tcs = &tc[band][ctx];
+                eob_cost[k] = lam * tcs[1] as f32;
+                let lo = a as u32;
+                let more = if prev_zero { 0 } else { tcs[0] };
+                let d_of = |l: u32| {
+                    let e = (a - l as f32) * st;
+                    e * e
+                };
+                let r_of = |l: u32| -> u32 {
+                    match l {
+                        0 => more + tcs[2],
+                        1 => more + tcs[3],
+                        _ => {
+                            let mut c = Cost(0);
+                            write_big(
+                                &mut c,
+                                &PARETO8[usize::from(probs[band][ctx][2].max(1)) - 1],
+                                l,
+                            );
+                            more + tcs[4] + c.0
+                        }
+                    }
+                };
+                let mut best = (f32::MAX, 0u32);
+                let only;
+                let cands: &[u32] = if one {
+                    only = [(a + if k == 0 { 0.5 } else { rnd }) as u32];
+                    &only
+                } else if lo == 0 {
+                    &[0, 1]
+                } else if lo == 1 {
+                    &[0, 1, 2]
+                } else {
+                    &[lo, lo + 1]
+                };
+                for &l in cands {
+                    let j = d_of(l) + lam * r_of(l) as f32;
+                    if j < best.0 {
+                        best = (j, l);
                     }
                 }
-            };
-            let mut best = (f32::MAX, 0u32);
-            let only;
-            let cands: &[u32] = if one {
-                only = [(a + if k == 0 { 0.5 } else { rnd }) as u32];
-                &only
-            } else if lo == 0 {
-                &[0, 1]
-            } else if lo == 1 {
-                &[0, 1, 2]
-            } else {
-                &[lo, lo + 1]
-            };
-            for &l in cands {
-                let j = d_of(l) + lam * r_of(l) as f32;
-                if j < best.0 {
-                    best = (j, l);
+                let l = best.1;
+                let v = self.fcoef[t];
+                levels[t] = if v < 0.0 { -(l as i32) } else { l as i32 };
+                j_pref[k + 1] = j_pref[k] + best.0;
+                d_tail[k] = d_rest;
+                d_rest -= d_of(0);
+                if l != 0 {
+                    last_nz = k + 1;
                 }
-            }
-            let l = best.1;
-            let v = self.fcoef[t];
-            levels[t] = if v < 0.0 { -(l as i32) } else { l as i32 };
-            j_pref[k + 1] = j_pref[k] + best.0;
-            d_tail[k] = d_rest;
-            d_rest -= d_of(0);
-            if l != 0 {
-                last_nz = k + 1;
-            }
-            energy[rc] = ENERGY[l.min(11) as usize];
-            prev_zero = l == 0;
-            if k + 1 < max {
-                ctx = (1
-                    + usize::from(energy[usize::from(nb[2 * (k + 1)])])
-                    + usize::from(energy[usize::from(nb[2 * (k + 1) + 1])]))
-                    >> 1;
+                energy[rc] = ENERGY[l.min(11) as usize];
+                prev_zero = l == 0;
+                if k + 1 < max {
+                    ctx = (1
+                        + usize::from(energy[usize::from(nb[2 * (k + 1)])])
+                        + usize::from(energy[usize::from(nb[2 * (k + 1) + 1])]))
+                        >> 1;
+                }
             }
         }
         d_tail[last_sig] = d_rest.max(0.0);

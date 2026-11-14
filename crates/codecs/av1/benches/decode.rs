@@ -2,7 +2,7 @@
 //!
 //! FFmpeg decodes AV1 by calling dav1d. This bench does not link either
 //! program. It compares pixels before it times anything. Cutlass time is one
-//! `Av1Decoder::push`. FFmpeg time is one process and includes startup.
+//! `Av1Decoder::push` and `drain`. FFmpeg time is one process and includes startup.
 //!
 //! The frame comes from `../local-files` when that folder is present. Without
 //! ffmpeg the bench prints `skip: ffmpeg is not installed` and exits 0.
@@ -15,7 +15,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use cutlass_av1::{AsView, Av1Decoder};
-use cutlass_decode::{CodecId, CodecParams, Decoder, Packet};
+use cutlass_decode::{CodecId, CodecParams, Decoder, Output, Packet};
 
 fn main() -> Result<(), String> {
     let Some(ffmpeg) = ffmpeg_bin() else {
@@ -60,7 +60,7 @@ fn compare(ffmpeg: &Path, input: &Path, ivf: &Path, yuv: &Path) -> Result<(), St
     say(&machine());
     say(&format!("ffmpeg: {}", ffmpeg_version(ffmpeg)?));
     say(
-        "one sample. cutlass times one Av1Decoder::push in this process. ffmpeg times one process and includes startup. bench profile, no link-time optimization. cutlass decodes tiles in parallel.",
+        "one sample. cutlass times one Av1Decoder::push and drain in this process. ffmpeg times one process and includes startup. bench profile, no link-time optimization. cutlass decodes tiles in parallel.",
     );
 
     let ours = decode_once(packet)?;
@@ -80,7 +80,7 @@ fn compare(ffmpeg: &Path, input: &Path, ivf: &Path, yuv: &Path) -> Result<(), St
     say("pixels: match");
 
     let cutlass = time_cutlass(packet)?;
-    say(&format!("cutlass-av1: {cutlass:.4} s  one push"));
+    say(&format!("cutlass-av1: {cutlass:.4} s  one push and drain"));
     let ffmpeg_seconds = time_ffmpeg(ffmpeg, ivf)?;
     say(&format!(
         "ffmpeg libdav1d -threads 1: {ffmpeg_seconds:.4} s  one process, includes startup"
@@ -93,9 +93,7 @@ fn time_cutlass(packet: &[u8]) -> Result<f64, String> {
     let mut decoder = Av1Decoder::open(&params).map_err(|error| format!("open {error:?}"))?;
     let frame = Packet::video(packet.to_vec(), 0, 1, 30, true);
     let start = Instant::now();
-    let decoded = decoder
-        .push(&frame)
-        .map_err(|error| format!("push {error:?}"))?;
+    let decoded = push_and_drain(&mut decoder, &frame)?;
     let elapsed = start.elapsed().as_secs_f64();
     let picture = decoded
         .first()
@@ -108,9 +106,10 @@ fn time_cutlass(packet: &[u8]) -> Result<f64, String> {
 fn decode_once(packet: &[u8]) -> Result<Vec<u8>, String> {
     let params = CodecParams::video(CodecId::Av1, 64, 64);
     let mut decoder = Av1Decoder::open(&params).map_err(|error| format!("open {error:?}"))?;
-    let decoded = decoder
-        .push(&Packet::video(packet.to_vec(), 0, 1, 30, true))
-        .map_err(|error| format!("push {error:?}"))?;
+    let decoded = push_and_drain(
+        &mut decoder,
+        &Packet::video(packet.to_vec(), 0, 1, 30, true),
+    )?;
     let picture = decoded
         .first()
         .and_then(|frame| frame.as_video())
@@ -119,6 +118,20 @@ fn decode_once(packet: &[u8]) -> Result<Vec<u8>, String> {
     packed.extend_from_slice(picture.picture.u.samples());
     packed.extend_from_slice(picture.picture.v.samples());
     Ok(packed)
+}
+
+/// The packet's picture: the decoder may hold it past `push`, while it
+/// would parse the next packet, so it is drained too.
+fn push_and_drain(decoder: &mut Av1Decoder, packet: &Packet) -> Result<Vec<Output>, String> {
+    let mut decoded = decoder
+        .push(packet)
+        .map_err(|error| format!("push {error:?}"))?;
+    decoded.extend(
+        decoder
+            .drain()
+            .map_err(|error| format!("drain {error:?}"))?,
+    );
+    Ok(decoded)
 }
 
 fn time_ffmpeg(ffmpeg: &Path, ivf: &Path) -> Result<f64, String> {

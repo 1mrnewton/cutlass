@@ -107,13 +107,17 @@ pub(crate) fn read_scalefactors(
         let slen1 = u32::from(SLEN[0][compress]);
         let slen2 = u32::from(SLEN[1][compress]);
         if shape.short_start < 13 {
-            for band in 0..shape.long_end {
-                sf.long[band] = reader.read(slen1, "scalefactor")? as u8;
+            for value in &mut sf.long[..shape.long_end] {
+                *value = reader.read(slen1, "scalefactor")? as u8;
             }
-            for band in shape.short_start..12 {
+            for (band, row) in sf.short[..12]
+                .iter_mut()
+                .enumerate()
+                .skip(shape.short_start)
+            {
                 let slen = if band < 6 { slen1 } else { slen2 };
-                for w in 0..3 {
-                    sf.short[band][w] = reader.read(slen, "scalefactor")? as u8;
+                for value in &mut row[..3] {
+                    *value = reader.read(slen, "scalefactor")? as u8;
                 }
             }
         } else {

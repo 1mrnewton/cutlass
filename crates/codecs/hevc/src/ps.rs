@@ -932,6 +932,12 @@ pub struct Layout {
     pub tile_of: Vec<u16>,
     /// Column boundaries in CTBs, `columns + 1` entries.
     pub col_bd: Vec<u32>,
+    /// Z-scan order of the minimum transform blocks inside a CTB, by row
+    /// then column (clause 6.5.2), and their count per edge.
+    pub zorder: Vec<u16>,
+    pub zorder_edge: usize,
+    /// `Log2MinTrafoSize`.
+    pub log2_min_tb: u8,
 }
 
 impl Layout {
@@ -976,6 +982,18 @@ impl Layout {
                 tile = tile.saturating_add(1);
             }
         }
+        let edge_log2 = u32::from(sps.log2_ctb.saturating_sub(sps.log2_min_tb));
+        let edge = 1usize << edge_log2;
+        let mut zorder = vec![0u16; edge * edge];
+        for (i, z) in zorder.iter_mut().enumerate() {
+            let (tx, ty) = (i % edge, i / edge);
+            let mut morton = 0usize;
+            for bit in 0..edge_log2 {
+                morton |= ((tx >> bit) & 1) << (2 * bit);
+                morton |= ((ty >> bit) & 1) << (2 * bit + 1);
+            }
+            *z = morton as u16;
+        }
         Ok(Self {
             ctb_width,
             ctb_height,
@@ -984,6 +1002,9 @@ impl Layout {
             ts_to_rs,
             tile_of,
             col_bd,
+            zorder,
+            zorder_edge: edge,
+            log2_min_tb: sps.log2_min_tb,
         })
     }
 

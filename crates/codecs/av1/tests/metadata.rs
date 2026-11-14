@@ -12,10 +12,362 @@ mod common;
 mod metadata {
     use super::common;
     use cutlass_av1::Av1Decoder;
+    use cutlass_av1::dec::obu::{OBU_FRAME, OBU_FRAME_HEADER, OBU_METADATA, split_obus};
+    use cutlass_av1::enc::bitwriter::write_obu;
     use cutlass_decode::{
         ChromaSamplePosition, CodecError, CodecId, CodecParams, ColorMatrix, ColorPrimaries,
-        PixelFormat, Transfer,
+        ColorRange, ContentLight, ItuT35, MasteringDisplay, PixelFormat, Transfer,
     };
+
+    /// `packet` with its OBUs passed through `edit`, which returns the OBUs
+    /// (type and payload) to write in place of each one.
+    fn edit_obus(packet: &[u8], mut edit: impl FnMut(u8, &[u8]) -> Vec<(u8, Vec<u8>)>) -> Vec<u8> {
+        let mut out = Vec::new();
+        for obu in split_obus(packet).expect("obus") {
+            for (obu_type, payload) in edit(obu.obu_type, obu.payload) {
+                write_obu(&mut out, obu_type, 0, 0, false, &payload);
+            }
+        }
+        out
+    }
+
+    /// `packet` with `extra` metadata payloads before its `nth` frame or
+    /// frame header OBU.
+    fn metadata_before_frame(packet: &[u8], nth: usize, extra: &[Vec<u8>]) -> Vec<u8> {
+        let mut seen = 0;
+        edit_obus(packet, |obu_type, payload| {
+            let mut out = Vec::new();
+            if obu_type == OBU_FRAME || obu_type == OBU_FRAME_HEADER {
+                if seen == nth {
+                    out.extend(extra.iter().map(|m| (OBU_METADATA, m.clone())));
+                }
+                seen += 1;
+            }
+            out.push((obu_type, payload.to_vec()));
+            out
+        })
+    }
+
+    fn without_metadata(packet: &[u8]) -> Vec<u8> {
+        edit_obus(packet, |obu_type, payload| {
+            if obu_type == OBU_METADATA {
+                Vec::new()
+            } else {
+                vec![(obu_type, payload.to_vec())]
+            }
+        })
+    }
+
+    /// A `metadata_itut_t35()` payload with its trailing bits.
+    fn t35(country: u8, extension: Option<u8>, payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![4, country];
+        out.extend(extension);
+        out.extend_from_slice(payload);
+        out.push(0x80);
+        out
+    }
+
+    fn message(country: u8, extension: Option<u8>, payload: &[u8]) -> ItuT35 {
+        ItuT35 {
+            country_code: country,
+            country_code_extension: extension,
+            payload: payload.to_vec(),
+        }
+    }
+
+    /// What `ffprobe -c:v libdav1d -show_frames` reports for `hdr10.ivf`.
+    const HDR10_LIGHT: ContentLight = ContentLight {
+        max_cll: 1000,
+        max_fall: 400,
+    };
+    const HDR10_DISPLAY: MasteringDisplay = MasteringDisplay {
+        primaries: [[44564, 20972], [17367, 45220], [9830, 3932]],
+        white_point: [20493, 21561],
+        max_luminance: 256_000,
+        min_luminance: 82,
+    };
+
+    #[test]
+    fn the_light_level_and_mastering_display_match_libdav1d() {
+        // SVT-AV1 4.1.0 through FFmpeg, 64x64 10-bit, four frames with a
+        // key frame every two, each key frame behind a light level and a
+        // mastering display OBU: G(0.265,0.69) B(0.15,0.06) R(0.68,0.32)
+        // WP(0.3127,0.329) L(1000,0.005), light level 1000 and 400. The
+        // constants are the side data libdav1d attaches to each frame.
+        let pictures = common::decode(&common::stream("hdr10.ivf"), 64, 64).expect("decode");
+        assert_eq!(pictures.len(), 4);
+        for picture in &pictures {
+            let info = picture.info();
+            assert_eq!(info.pixel, PixelFormat::Yuv420p10);
+            assert_eq!(info.range, ColorRange::Limited);
+            assert_eq!(info.content_light, Some(HDR10_LIGHT));
+            assert_eq!(info.mastering_display, Some(HDR10_DISPLAY));
+            assert!(picture.t35().is_empty());
+        }
+        let display = HDR10_DISPLAY;
+        assert!((display.max_nits() - 1000.0).abs() < 1e-9);
+        assert!((display.min_nits() - 0.005).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_stream_without_metadata_publishes_none_and_names_its_range() {
+        let packets: Vec<Vec<u8>> = common::stream("hdr10.ivf")
+            .iter()
+            .map(|p| without_metadata(p))
+            .collect();
+        let pictures = common::decode(&packets, 64, 64).expect("decode");
+        assert_eq!(pictures.len(), 4);
+        for picture in &pictures {
+            assert_eq!(picture.info().content_light, None);
+            assert_eq!(picture.info().mastering_display, None);
+            assert_eq!(picture.info().range, ColorRange::Limited);
+        }
+    }
+
+    #[test]
+    fn later_metadata_replaces_earlier_and_holds_from_where_it_appears() {
+        let mut packets = common::stream("hdr10.ivf");
+        // The second key frame's light level becomes 2000 and 300.
+        packets[2] = edit_obus(&packets[2], |obu_type, payload| {
+            if obu_type == OBU_METADATA && payload[0] == 1 {
+                vec![(obu_type, vec![1, 0x07, 0xd0, 0x01, 0x2c, 0x80])]
+            } else {
+                vec![(obu_type, payload.to_vec())]
+            }
+        });
+        let pictures = common::decode(&packets, 64, 64).expect("decode");
+        let later = ContentLight {
+            max_cll: 2000,
+            max_fall: 300,
+        };
+        let lights: Vec<_> = pictures.iter().map(|p| p.info().content_light).collect();
+        assert_eq!(
+            lights,
+            [
+                Some(HDR10_LIGHT),
+                Some(HDR10_LIGHT),
+                Some(later),
+                Some(later)
+            ]
+        );
+        assert!(
+            pictures
+                .iter()
+                .all(|p| p.info().mastering_display == Some(HDR10_DISPLAY))
+        );
+    }
+
+    #[test]
+    fn metadata_stays_through_a_repeated_header_and_a_reset_and_ends_with_its_sequence() {
+        let hdr = common::stream("hdr10.ivf");
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        common::decode_with(&mut decoder, &hdr[..2]).expect("first key frame");
+        // The second key frame repeats the sequence header. Without its own
+        // metadata OBUs it is still described by the first key frame's.
+        let bare = vec![without_metadata(&hdr[2]), hdr[3].clone()];
+        let pictures = common::decode_with(&mut decoder, &bare).expect("second key frame");
+        assert!(
+            pictures
+                .iter()
+                .all(|p| p.info().content_light == Some(HDR10_LIGHT)
+                    && p.info().mastering_display == Some(HDR10_DISPLAY))
+        );
+        // A reset keeps the sequence header and what describes it.
+        use cutlass_decode::Decoder as _;
+        decoder.reset();
+        let pictures = common::decode_with(&mut decoder, &bare).expect("after the reset");
+        assert_eq!(pictures.len(), 2);
+        assert_eq!(pictures[0].info().content_light, Some(HDR10_LIGHT));
+        // Another sequence header starts another sequence: none of it.
+        let other = common::decode_with(&mut decoder, &common::stream("color.ivf")).expect("8-bit");
+        assert_eq!(other.len(), 2);
+        for picture in &other {
+            assert_eq!(picture.info().pixel, PixelFormat::Yuv420p);
+            assert_eq!(picture.info().content_light, None);
+            assert_eq!(picture.info().mastering_display, None);
+        }
+    }
+
+    #[test]
+    fn metadata_in_the_av1c_record_describes_the_stream() {
+        // The record's configuration OBUs: the sequence header and the two
+        // metadata OBUs of the first key frame. The samples carry none.
+        let hdr = common::stream("hdr10.ivf");
+        let mut record = vec![0x81, 0x00, 0x4c, 0x00];
+        record.extend(edit_obus(&hdr[0], |obu_type, payload| {
+            if obu_type == OBU_METADATA || obu_type == 1 {
+                vec![(obu_type, payload.to_vec())]
+            } else {
+                Vec::new()
+            }
+        }));
+        let mut params = CodecParams::video(CodecId::Av1, 64, 64);
+        params.extra = record;
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let bare: Vec<Vec<u8>> = hdr.iter().map(|p| without_metadata(p)).collect();
+        let pictures = common::decode_with(&mut decoder, &bare).expect("decode");
+        assert_eq!(pictures.len(), 4);
+        for picture in &pictures {
+            assert_eq!(picture.info().content_light, Some(HDR10_LIGHT));
+            assert_eq!(picture.info().mastering_display, Some(HDR10_DISPLAY));
+        }
+    }
+
+    #[test]
+    fn a_t35_message_goes_out_with_the_frame_after_it() {
+        let mut packets = common::stream("hdr10.ivf");
+        // An HDR10+ style message (United States, then the provider's own
+        // bytes) on the second picture; two on the fourth, one with an
+        // extended country code and one whose padding follows its trailing
+        // bits.
+        let mut padded = t35(0xb5, None, &[9, 0, 8]);
+        padded.extend_from_slice(&[0, 0, 0]);
+        packets[1] =
+            metadata_before_frame(&packets[1], 0, &[t35(0xb5, None, &[0, 0x3c, 0, 1, 4, 1])]);
+        packets[3] =
+            metadata_before_frame(&packets[3], 0, &[t35(0xff, Some(0x26), &[1, 2]), padded]);
+        let pictures = common::decode(&packets, 64, 64).expect("decode");
+        assert_eq!(pictures.len(), 4);
+        assert!(pictures[0].t35().is_empty());
+        assert_eq!(
+            pictures[1].t35(),
+            [message(0xb5, None, &[0, 0x3c, 0, 1, 4, 1])]
+        );
+        assert!(pictures[2].t35().is_empty());
+        assert_eq!(
+            pictures[3].t35(),
+            [
+                message(0xff, Some(0x26), &[1, 2]),
+                message(0xb5, None, &[9, 0, 8])
+            ]
+        );
+        // The samples are the ones libdav1d shows without the messages.
+        let plain = common::decode(&common::stream("hdr10.ivf"), 64, 64).expect("decode");
+        for (a, b) in pictures.iter().zip(&plain) {
+            assert_eq!(common::samples(a), common::samples(b));
+        }
+    }
+
+    #[test]
+    fn a_t35_message_stays_with_a_hidden_frame_until_it_is_shown() {
+        use cutlass_av1::Av1Encoder;
+        use cutlass_encode::{CpuFrame, Encoder as _, FrameInput, FrameTime};
+        // A mini-GOP of four: the unit of picture 1 codes the hidden
+        // pictures 4 and 2 before it, and pictures 2 and 4 are shown later
+        // by show_existing_frame.
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut encoder = Av1Encoder::open(&params).expect("encoder");
+        encoder.set_gop(4);
+        let mut packets = Vec::new();
+        for i in 0..5u32 {
+            let bytes: Vec<u8> = (0..64 * 64 * 3 / 2)
+                .map(|k| ((k * 7 + i * 13) % 200 + 20) as u8)
+                .collect();
+            let time = FrameTime::new(i64::from(i), 1, 30).expect("time");
+            let frame = CpuFrame::new(64, 64, PixelFormat::Yuv420p, bytes, time).expect("frame");
+            packets.extend(encoder.push_frame(&FrameInput::Cpu(frame)).expect("push"));
+        }
+        packets.extend(encoder.drain().expect("drain"));
+        let mut data: Vec<Vec<u8>> = packets.into_iter().map(|p| p.data).collect();
+        assert_eq!(data.len(), 5);
+        let frames = |packet: &[u8]| -> Vec<bool> {
+            split_obus(packet)
+                .expect("obus")
+                .iter()
+                .filter(|o| o.obu_type == OBU_FRAME || o.obu_type == OBU_FRAME_HEADER)
+                .map(|o| o.payload[0] & 0x80 != 0)
+                .collect()
+        };
+        // Three coded frames, then a shown stored one, a coded one, a
+        // shown stored one.
+        assert_eq!(frames(&data[1]), [false, false, false]);
+        assert_eq!(frames(&data[2]), [true]);
+        assert_eq!(frames(&data[4]), [true]);
+        let unit = data[1].clone();
+        let unit = metadata_before_frame(&unit, 0, &[t35(0xb5, None, b"four")]);
+        let unit = metadata_before_frame(&unit, 1, &[t35(0xb5, None, b"two")]);
+        data[1] = metadata_before_frame(&unit, 2, &[t35(0xb5, None, b"one")]);
+        data[4] = metadata_before_frame(&data[4], 0, &[t35(0xb5, None, b"shown")]);
+        let pictures = common::decode(&data, 64, 64).expect("decode");
+        assert_eq!(pictures.len(), 5);
+        assert!(pictures[0].t35().is_empty());
+        assert_eq!(pictures[1].t35(), [message(0xb5, None, b"one")]);
+        assert_eq!(pictures[2].t35(), [message(0xb5, None, b"two")]);
+        assert!(pictures[3].t35().is_empty());
+        assert_eq!(
+            pictures[4].t35(),
+            [message(0xb5, None, b"four"), message(0xb5, None, b"shown")]
+        );
+    }
+
+    #[test]
+    fn metadata_this_decoder_does_not_read_is_left_alone() {
+        let mut packets = common::stream("hdr10.ivf");
+        // Scalability (3) and timecode (5) are not read, nor an
+        // unregistered type; a message after the last frame of its unit
+        // belongs to no frame.
+        packets[1] = metadata_before_frame(
+            &packets[1],
+            0,
+            &[vec![3, 0, 0x80], vec![5, 0, 0, 0, 0x80], vec![31, 1, 2, 3]],
+        );
+        packets[1].extend_from_slice(&{
+            let mut tail = Vec::new();
+            write_obu(
+                &mut tail,
+                OBU_METADATA,
+                0,
+                0,
+                false,
+                &t35(0xb5, None, b"late"),
+            );
+            tail
+        });
+        let pictures = common::decode(&packets, 64, 64).expect("decode");
+        assert_eq!(pictures.len(), 4);
+        assert!(pictures.iter().all(|p| p.t35().is_empty()));
+        let plain = common::decode(&common::stream("hdr10.ivf"), 64, 64).expect("decode");
+        for (a, b) in pictures.iter().zip(&plain) {
+            assert_eq!(common::samples(a), common::samples(b));
+            assert_eq!(a.info(), b.info());
+        }
+    }
+
+    #[test]
+    fn cut_short_metadata_is_refused_and_leaves_the_decoder_as_it_was() {
+        let packets = common::stream("hdr10.ivf");
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        for bad in [
+            vec![1, 0x03],       // a light level of one byte
+            vec![2, 0, 1, 2, 3], // a mastering display of four
+            vec![4],             // a T.35 message without its country
+            vec![4, 0xff],       // and without its extension byte
+            Vec::new(),          // no metadata_type at all
+        ] {
+            let mut decoder = Av1Decoder::open(&params).expect("open");
+            common::decode_with(&mut decoder, &packets[..1]).expect("key frame");
+            let broken = metadata_before_frame(&packets[1], 0, std::slice::from_ref(&bad));
+            let error = common::decode_with(&mut decoder, &[broken]).expect_err("cut short");
+            assert!(
+                matches!(error, CodecError::Truncated { .. }),
+                "{bad:?}: {error:?}"
+            );
+            // The good unit still decodes, with the metadata from before.
+            let pictures = common::decode_with(&mut decoder, &packets[1..2]).expect("good unit");
+            assert_eq!(pictures.len(), 1);
+            assert_eq!(pictures[0].info().content_light, Some(HDR10_LIGHT));
+        }
+        // Metadata of a unit that fails does not stay.
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        common::decode_with(&mut decoder, &packets[..1]).expect("key frame");
+        let mut failing =
+            metadata_before_frame(&packets[1], 0, &[vec![1, 0x07, 0xd0, 0x01, 0x2c, 0x80]]);
+        failing.truncate(failing.len() - 20);
+        assert!(common::decode_with(&mut decoder, &[failing]).is_err());
+        let pictures = common::decode_with(&mut decoder, &packets[1..2]).expect("good unit");
+        assert_eq!(pictures[0].info().content_light, Some(HDR10_LIGHT));
+    }
 
     #[test]
     fn colour_timing_and_render_size_stay_on_the_picture() {

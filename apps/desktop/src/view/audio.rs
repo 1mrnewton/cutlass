@@ -11,7 +11,7 @@ use crate::{tokens, ui};
 
 use super::inspector::{
     BOX, CATALOG_TILE, InspectorState, LATER, ROW_GAP, ROW_HEIGHT, body, check_box, chevron,
-    divider, later_badge, pages, row_label, sound_section, tabs, tile_frame, value_box,
+    divider, later_badge, pages, row_label, sound_section, tile_frame, value_box,
 };
 
 /// The parts Separate audio can pull out of a clip.
@@ -68,20 +68,12 @@ const CHARACTERS: &[&str] = &[
     "Kitten",
 ];
 
-/// Speech to song: the voice sung in a style.
-const SONG_STYLES: &[&str] = &["Jazz", "Reggae", "R&B", "Folk", "Hip-hop"];
-
 pub(super) fn audio_panel(
     shell: &mut Shell,
     ui: &mut Ui,
     state: &mut InspectorState,
     inspection: &Inspection,
 ) {
-    let tab = state.tab;
-    tabs(ui, &["Basic", "Voice changer", "Speed"], &mut state.tab);
-    if tab != state.tab {
-        state.page = 0;
-    }
     match state.tab {
         0 => basic_tab(shell, ui, state, inspection),
         1 => voice_tab(ui, state),
@@ -106,18 +98,6 @@ fn basic_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspect
         "Enhance voice",
         Some("Make speech clearer and fuller."),
         Some(&mut |ui: &mut Ui| later_slider(ui, "Intensity", 75.0)),
-    );
-    later_section(
-        ui,
-        state,
-        "translate",
-        "Audio translator",
-        Some("Speak the clip in another language."),
-        Some(&mut |ui: &mut Ui| {
-            choice_row(ui, Some("Language"), "Detect source language");
-            choice_row(ui, None, "Select target language");
-            right_button(ui, "Apply");
-        }),
     );
     later_section(
         ui,
@@ -156,11 +136,8 @@ fn basic_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspect
 }
 
 fn voice_tab(ui: &mut Ui, state: &mut InspectorState) {
-    pages(
-        ui,
-        &["Voice filters", "Voice characters", "Speech to song"],
-        &mut state.page,
-    );
+    // Speech to song, a generative voice, waits for the next version.
+    pages(ui, &["Voice filters", "Voice characters"], &mut state.page);
     ui.add_enabled_ui(false, |ui| {
         ui.horizontal(|ui| {
             check_box(ui, false, "Apply to all");
@@ -168,14 +145,8 @@ fn voice_tab(ui: &mut Ui, state: &mut InspectorState) {
             later_badge(ui);
         });
         ui.add_space(ROW_GAP);
-        let (names, first) = match state.page {
-            0 => (FILTERS, Some("Original")),
-            1 => (CHARACTERS, Some("Original")),
-            _ => (SONG_STYLES, None),
-        };
-        if first.is_some() {
-            search_box(ui, "Search voices");
-        }
+        let names = if state.page == 0 { FILTERS } else { CHARACTERS };
+        search_box(ui, "Search voices");
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new("The voices are laid out; none changes the sound yet.")
@@ -185,7 +156,7 @@ fn voice_tab(ui: &mut Ui, state: &mut InspectorState) {
             later_badge(ui);
         });
         ui.add_space(ROW_GAP);
-        voice_tiles(ui, first, names);
+        voice_tiles(ui, names);
     })
     .response
     .on_disabled_hover_text(LATER);
@@ -354,19 +325,11 @@ fn search_box(ui: &mut Ui, hint: &str) {
     ui.add_space(ROW_GAP * 2.0);
 }
 
-/// A grid of named tiles. The first is the clip as it is, worn: "Original"
-/// by name, or the None mark when `first` is `None`.
-fn voice_tiles(ui: &mut Ui, first: Option<&str>, names: &[&str]) {
+/// A grid of named tiles, led by "Original", the clip as it is, worn.
+fn voice_tiles(ui: &mut Ui, names: &[&str]) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::splat(8.0);
-        match first {
-            Some(first) => {
-                name_tile(ui, first, true);
-            }
-            None => {
-                super::inspector::none_tile(ui, true);
-            }
-        }
+        name_tile(ui, "Original", true);
         for name in names {
             name_tile(ui, name, false);
         }
@@ -414,7 +377,7 @@ pub(super) fn name_tile(ui: &mut Ui, name: &str, on: bool) -> egui::Response {
 mod tests {
     #[test]
     fn the_lists_have_no_repeats() {
-        for list in [super::FILTERS, super::CHARACTERS, super::SONG_STYLES] {
+        for list in [super::FILTERS, super::CHARACTERS] {
             let mut seen = std::collections::HashSet::new();
             for name in list {
                 assert!(seen.insert(*name), "{name} twice");

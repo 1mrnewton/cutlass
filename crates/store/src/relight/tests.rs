@@ -95,6 +95,7 @@ fn a_depth_video_and_an_enhanced_copy_never_share_a_name() {
         source: key.source.clone(),
         level: 0,
         denoise: 0,
+        deflicker: 0,
         interpolate: 0,
         motion_blur: String::new(),
         model: key.model.clone(),

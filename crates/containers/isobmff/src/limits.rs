@@ -36,6 +36,10 @@ pub const MAX_ATOMS: u32 = 2_000_000;
 /// Bytes of a header `probe` needs to see a brand. `open` reads the real size.
 pub const PROBE_BYTES: usize = 64;
 
+/// Cover art written into `moov`. It keeps the movie index well under
+/// `MAX_METADATA_BYTES`, so the file opens again.
+pub const MAX_COVER_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Payloads buffered when `moov` is written before `mdat`.
 pub const MAX_BUFFERED_MUX_BYTES: u64 = 256 * 1024 * 1024;
 

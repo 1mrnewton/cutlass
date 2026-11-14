@@ -41,7 +41,13 @@ fn main() -> ExitCode {
             Err(error) => fail("cutlass new", &error.to_string()),
         };
     }
-    if let Err(error) = cutlass::window::run() {
+    // `cutlass studio`: the window, open on the effect studio.
+    let opened = if first.as_ref().is_some_and(|first| first == "studio") {
+        cutlass::window::run_studio()
+    } else {
+        cutlass::window::run()
+    };
+    if let Err(error) = opened {
         cutlass::report_error(&error.to_string());
     }
     ExitCode::SUCCESS

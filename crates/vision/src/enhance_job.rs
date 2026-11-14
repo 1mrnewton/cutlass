@@ -1,10 +1,11 @@
-//! The Enhance quality, Reduce image noise, Optical flow and Motion blur
-//! job: read a clip's stretch frame by frame, denoise it from the frames
-//! around it, make the frames between its own that the copy's rate asks
+//! The Enhance quality, Reduce image noise, Remove flicker, Optical flow
+//! and Motion blur job: read a clip's stretch frame by frame, even out its
+//! brightness, denoise it from the frames around it, make the frames between its own that the copy's rate asks
 //! for, blur each frame by averaging frames made across its blur in linear
 //! light, enhance it and size it for the level, and write the copy into
 //! the project, where eval draws the clip from it. A clip with more than
-//! one on gets one copy, in that order: the enhance model sharpens noise
+//! one on gets one copy, in that order: the brightness is evened before
+//! the denoiser reads it, the enhance model sharpens noise
 //! it is handed, and frames are made from the clip's own before they are
 //! grown, at a quarter or less of the pixels.
 //!
@@ -21,7 +22,7 @@ use cutlass_store::{StoreError, enhanced_file};
 use image::imageops::{self, FilterType};
 use image::{ImageBuffer, Rgb};
 
-use crate::{Denoiser, Enhancer, Image, Interpolator, Prepared, VisionError};
+use crate::{Deflicker, Denoiser, Enhancer, Image, Interpolator, Prepared, VisionError};
 
 /// The short side of each level's copy.
 const HD_SIDE: u32 = 1080;
@@ -102,7 +103,8 @@ pub struct CopyModels<'a> {
 }
 
 /// Make `ask`'s copy in the project at `project` and return its path: the
-/// clip denoised when its noise level is on, filled with frames made
+/// clip's brightness evened out when Remove flicker is on, denoised when
+/// its noise level is, filled with frames made
 /// between its own when Optical flow is, then enhanced when its Enhance
 /// quality level is. `progress` hears the share done after each
 /// frame, and stops the job by answering `false`.
@@ -136,10 +138,10 @@ pub fn enhance_clip(
         (true, None) if ask.interpolate > 0 => return Err(missing("Optical flow")),
         (true, None) => return Err(missing("Motion blur")),
     };
-    if enhancer.is_none() && denoiser.is_none() && interpolator.is_none() {
+    if enhancer.is_none() && denoiser.is_none() && interpolator.is_none() && ask.deflicker <= 0 {
         return Err(EnhanceJobError::Clip(EnhanceError::Clip {
-            reason: "Enhance quality, Reduce image noise, Optical flow and Motion blur are off \
-                     for this clip"
+            reason: "Enhance quality, Reduce image noise, Remove flicker, Optical flow and Motion \
+                     blur are off for this clip"
                 .into(),
         }));
     }
@@ -176,7 +178,7 @@ pub fn enhance_clip(
         .map_err(|error: StoreError| EnhanceJobError::Store(error.to_string()))?;
     let mut first = Some(first);
     // Frame `k` of the clip as RGB at the first frame's size.
-    let mut read = |k: usize| -> Result<Vec<u8>, EnhanceJobError> {
+    let mut decode = |k: usize| -> Result<Vec<u8>, EnhanceJobError> {
         let picture = match first.take() {
             Some(picture) if k == 0 => picture,
             kept => {
@@ -196,6 +198,14 @@ pub fn enhance_clip(
             }));
         }
         Ok(rgb_of(picture.rgba()))
+    };
+    // Its brightness evened out first, when Remove flicker is on.
+    let mut deflicker = (ask.deflicker > 0).then(|| Deflicker::new(count));
+    let mut read = |k: usize| -> Result<Vec<u8>, EnhanceJobError> {
+        match deflicker.as_mut() {
+            Some(deflicker) => deflicker.frame(k, &mut decode),
+            None => decode(k),
+        }
     };
     // The clip's own frames in order, denoised when that is on.
     let mut own = |index: usize| -> Result<Vec<u8>, EnhanceJobError> {

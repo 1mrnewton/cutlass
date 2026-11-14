@@ -22,8 +22,8 @@ use cutlass_picture::CpuBytes;
 /// The pixels one layer draws.
 #[derive(Clone, Debug, PartialEq)]
 pub enum GpuSource {
-    /// 8-bit 4:2:0, limited-range BT.709, then `tone`, as the CPU
-    /// conversion does.
+    /// 8-bit 4:2:0 in the range and matrix `tone` names, then its
+    /// transfer step, as the CPU conversion does.
     Yuv {
         width: u32,
         height: u32,

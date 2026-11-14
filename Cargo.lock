@@ -2409,6 +2409,7 @@ dependencies = [
  "cutlass-flac",
  "cutlass-flac-container",
  "cutlass-font",
+ "cutlass-fonts",
  "cutlass-gif",
  "cutlass-h264",
  "cutlass-hevc",
@@ -2445,6 +2446,7 @@ dependencies = [
  "cutlass-still",
  "cutlass-storage",
  "cutlass-store",
+ "cutlass-text",
  "cutlass-transcription",
  "cutlass-update",
  "cutlass-vision",
@@ -2455,6 +2457,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui_kittest",
+ "epaint_default_fonts",
  "image",
  "muda",
  "pollster",
@@ -2754,15 +2757,18 @@ dependencies = [
  "cutlass-editor",
  "cutlass-effects",
  "cutlass-encode",
+ "cutlass-engine",
  "cutlass-eval",
  "cutlass-export",
  "cutlass-flac",
  "cutlass-flac-container",
+ "cutlass-fonts",
  "cutlass-gif",
  "cutlass-h264",
  "cutlass-hevc",
  "cutlass-isobmff",
  "cutlass-jpeg",
+ "cutlass-licenses",
  "cutlass-logger",
  "cutlass-mjpeg",
  "cutlass-model",
@@ -2784,6 +2790,7 @@ dependencies = [
  "cutlass-renderer-software",
  "cutlass-riff",
  "cutlass-session",
+ "cutlass-stickers",
  "cutlass-still",
  "cutlass-storage",
  "cutlass-store",
@@ -2824,6 +2831,13 @@ name = "cutlass-font"
 version = "0.1.0"
 
 [[package]]
+name = "cutlass-fonts"
+version = "0.1.0"
+dependencies = [
+ "cutlass-font",
+]
+
+[[package]]
 name = "cutlass-generated"
 version = "0.1.0"
 dependencies = [
@@ -2850,6 +2864,20 @@ version = "0.1.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-h264-kernels",
+]
+
+[[package]]
+name = "cutlass-h264-kernels"
+version = "0.1.0"
+
+[[package]]
+name = "cutlass-h264-pgo"
+version = "0.1.0"
+dependencies = [
+ "cutlass-decode",
+ "cutlass-encode",
+ "cutlass-h264",
 ]
 
 [[package]]
@@ -2862,6 +2890,7 @@ dependencies = [
  "cutlass-encode",
  "cutlass-isobmff",
  "cutlass-pool",
+ "cutlass-simd",
 ]
 
 [[package]]
@@ -3081,6 +3110,7 @@ dependencies = [
  "cutlass-renderer-software",
  "cutlass-riff",
  "cutlass-session",
+ "cutlass-text",
  "image",
 ]
 
@@ -3232,9 +3262,11 @@ dependencies = [
 name = "cutlass-text"
 version = "0.1.0"
 dependencies = [
+ "cutlass-decode",
  "cutlass-font",
  "cutlass-model",
  "cutlass-picture",
+ "cutlass-png",
 ]
 
 [[package]]

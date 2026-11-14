@@ -38,6 +38,11 @@ impl Commands {
         self.session.linkage()
     }
 
+    /// Change the linkage switches. This is not an undo step.
+    pub fn set_linkage(&mut self, linkage: LinkageSettings) {
+        self.session.set_linkage(linkage);
+    }
+
     /// The session these calls forward to.
     #[must_use]
     pub fn session(&self) -> &Session {

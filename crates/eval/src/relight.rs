@@ -54,6 +54,7 @@ impl RelightAsk {
             rate: self.rate,
             level: 0,
             denoise: 0,
+            deflicker: 0,
             interpolate: 0,
             motion_blur: None,
             keyed_blur: Vec::new(),

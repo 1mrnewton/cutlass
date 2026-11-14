@@ -16,12 +16,28 @@ const HEIGHT: usize = 96;
 
 #[test]
 fn high10_420_matches_ffmpeg() {
+    matches_ffmpeg("testsrc");
+}
+
+/// libx264 changes QP by more than 26 at once on this pattern, which only
+/// a High 10 stream may: `mb_qp_delta` there runs from -32 to 31.
+#[test]
+fn high10_wide_qp_steps_match_ffmpeg() {
+    matches_ffmpeg("testsrc2");
+}
+
+/// Encodes 0.2 s of the FFmpeg test pattern `source` as High 10 and
+/// compares every decoded 10-bit sample with FFmpeg's.
+fn matches_ffmpeg(source: &str) {
     let Some(ffmpeg) = ffmpeg_bin() else {
         eprintln!("skipped: ffmpeg is not installed");
         return;
     };
     let dir = std::env::temp_dir();
-    let h264 = dir.join(format!("cutlass-h264-high10-{}.h264", std::process::id()));
+    let h264 = dir.join(format!(
+        "cutlass-h264-high10-{source}-{}.h264",
+        std::process::id()
+    ));
     let encoded = Command::new(&ffmpeg)
         .args([
             "-y",
@@ -31,7 +47,7 @@ fn high10_420_matches_ffmpeg() {
             "-f",
             "lavfi",
             "-i",
-            "testsrc=size=160x96:rate=30:duration=0.2",
+            &format!("{source}=size=160x96:rate=30:duration=0.2"),
             "-an",
             "-c:v",
             "libx264",

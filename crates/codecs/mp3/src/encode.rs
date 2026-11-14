@@ -960,8 +960,8 @@ fn write_granule(writer: &mut BitWriter, ctx: &Context, coded: &Coded, lsf: bool
             } else {
                 coded.slen[1]
             };
-            for w in 0..3 {
-                writer.put(u32::from(coded.sf_short[band][w]), u32::from(slen));
+            for &value in &coded.sf_short[band][..3] {
+                writer.put(u32::from(value), u32::from(slen));
             }
         }
     } else {

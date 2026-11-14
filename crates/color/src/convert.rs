@@ -8,7 +8,9 @@
 //! The inverse matrix is the one in ITU-R BT.601, BT.709, and BT.2020:
 //! `R = Y + 2 (1 − Kr) Cr`, and the same form for B and G. Kr and Kb are the
 //! spec luma weights. Each chroma sample covers its subsampled cell with no
-//! interpolation filter: 4:2:0 is the top-left 2×2, 4:2:2 is the left-right pair.
+//! interpolation filter: 4:2:0 is the top-left 2×2, 4:2:2 is the left-right
+//! pair, and 4:4:0 the top-bottom pair. 12-bit scales the 8-bit levels by
+//! sixteen. GBR planes take no matrix: each is expanded as luma is.
 
 use cutlass_codec::access::{ColorRange, PixelFormat};
 
@@ -84,12 +86,9 @@ fn chroma_size(layout: Layout, width: u32, height: u32) -> Result<(u32, u32), Er
             }
             Ok((width / 2, height / 2))
         }
-        Layout::Yuv422 => {
-            if !width.is_multiple_of(2) {
-                return Err(Error::Odd);
-            }
-            Ok((width / 2, height))
-        }
+        // An odd edge keeps a chroma sample for its last column or row.
+        Layout::Yuv422 => Ok((width.div_ceil(2), height)),
+        Layout::Yuv440 => Ok((width, height.div_ceil(2))),
         Layout::Yuv444 => Ok((width, height)),
         Layout::Nv12 => Err(Error::Layout(Layout::Nv12)),
     }
@@ -110,7 +109,7 @@ fn row_bytes(width: u32, depth: Depth) -> Result<usize, Error> {
     let samples = usize::try_from(width).map_err(|_| Error::Limit)?;
     let bytes = match depth {
         Depth::Eight => 1,
-        Depth::Ten => 2,
+        Depth::Ten | Depth::Twelve => 2,
     };
     samples.checked_mul(bytes).ok_or(Error::Limit)
 }
@@ -149,6 +148,7 @@ fn chroma_at(layout: Layout, x: u32, y: u32) -> (u32, u32) {
     match layout {
         Layout::Yuv420 => (x / 2, y / 2),
         Layout::Yuv422 => (x / 2, y),
+        Layout::Yuv440 => (x, y / 2),
         Layout::Yuv444 | Layout::Nv12 => (x, y),
     }
 }
@@ -166,7 +166,7 @@ fn sample(plane: &[u8], stride: usize, x: u32, y: u32, depth: Depth) -> Result<u
                 .map(u16::from)
                 .ok_or(Error::Length)
         }
-        Depth::Ten => {
+        Depth::Ten | Depth::Twelve => {
             let index = origin
                 .checked_add(col.checked_mul(2).ok_or(Error::Limit)?)
                 .ok_or(Error::Limit)?;
@@ -177,7 +177,8 @@ fn sample(plane: &[u8], stride: usize, x: u32, y: u32, depth: Depth) -> Result<u
                 return Err(Error::Length);
             };
             let value = u16::from_le_bytes([pair.0, pair.1]);
-            if value > 1023 {
+            let max = if depth == Depth::Ten { 1023 } else { 4095 };
+            if value > max {
                 return Err(Error::Range);
             }
             Ok(value)
@@ -193,8 +194,18 @@ fn ycbcr_to_rgb(y: u16, cb: u16, cr: u16, depth: Depth, limited: bool, matrix: M
     let bits = match depth {
         Depth::Eight => 8,
         Depth::Ten => 10,
+        Depth::Twelve => 12,
     };
-    let (kr, kb) = weights(matrix);
+    let (kr, kb) = match matrix {
+        Matrix::Bt709 => (0.2126, 0.0722),
+        Matrix::Bt601 => (0.299, 0.114),
+        Matrix::Bt2020 => (0.2627, 0.0593),
+        // The planes are G, B, and R.
+        Matrix::Identity => {
+            let unit = |code: u16| clamp01(expand(f64::from(code), bits, limited, false));
+            return [unit(cr), unit(y), unit(cb)];
+        }
+    };
     let ey = expand(f64::from(y), bits, limited, false);
     let ecb = expand(f64::from(cb), bits, limited, true);
     let ecr = expand(f64::from(cr), bits, limited, true);
@@ -203,14 +214,6 @@ fn ycbcr_to_rgb(y: u16, cb: u16, cr: u16, depth: Depth, limited: bool, matrix: M
     let blue = ey + 2.0 * (1.0 - kb) * ecb;
     let green = ey - 2.0 * kb * (1.0 - kb) / kg * ecb - 2.0 * kr * (1.0 - kr) / kg * ecr;
     [clamp01(red), clamp01(green), clamp01(blue)]
-}
-
-fn weights(matrix: Matrix) -> (f64, f64) {
-    match matrix {
-        Matrix::Bt709 => (0.2126, 0.0722),
-        Matrix::Bt601 => (0.299, 0.114),
-        Matrix::Bt2020 => (0.2627, 0.0593),
-    }
 }
 
 fn expand(code: f64, bits: u32, limited: bool, chroma: bool) -> f64 {

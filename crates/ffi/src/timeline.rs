@@ -27,6 +27,8 @@ pub struct PhoneClip {
     pub volume: f64,
     /// Constant speed: 2 plays twice as fast.
     pub speed: f64,
+    /// Where its beats land on the timeline, earliest first.
+    pub beats: Vec<Micros>,
 }
 
 /// One row, top first.
@@ -36,12 +38,15 @@ pub struct PhoneLane {
     pub kind: TrackType,
     pub main: bool,
     pub locked: bool,
+    /// Its clips are not heard.
+    pub muted: bool,
     pub clips: Vec<PhoneClip>,
 }
 
 /// The rows of `draft`, top first.
 #[must_use]
 pub fn phone_lanes(draft: &Draft) -> Vec<PhoneLane> {
+    let beats = cutlass_model::visible_beats(draft);
     lanes(draft)
         .into_iter()
         .filter_map(|lane| {
@@ -51,6 +56,7 @@ pub fn phone_lanes(draft: &Draft) -> Vec<PhoneLane> {
                 kind: lane.kind,
                 main: lane.main,
                 locked: track.attribute.contains(TrackAttribute::LOCK),
+                muted: track.attribute.contains(TrackAttribute::MUTE),
                 clips: track
                     .segments
                     .iter()
@@ -61,6 +67,11 @@ pub fn phone_lanes(draft: &Draft) -> Vec<PhoneLane> {
                         duration: segment.target.duration,
                         volume: segment.volume,
                         speed: segment.speed,
+                        beats: beats
+                            .iter()
+                            .filter(|beat| beat.segment_id == segment.id)
+                            .map(|beat| beat.time)
+                            .collect(),
                     })
                     .collect(),
             })
@@ -76,12 +87,22 @@ fn clip_name(draft: &Draft, segment: &Segment) -> String {
         )
     };
     match draft.materials.get(segment.material_id.as_str()) {
-        Some(MaterialRef::Video(video)) if !video.path.is_empty() => file(&video.path),
+        // A sticker from the shelf shows its own name, not its file's.
+        Some(MaterialRef::Video(video)) if !video.path.is_empty() => {
+            let name = file(&video.path);
+            cutlass_stickers::sticker_of_file(&name).map_or(name, |sticker| sticker.name.to_owned())
+        }
         Some(MaterialRef::Audio(audio)) if !audio.path.is_empty() => file(&audio.path),
         Some(MaterialRef::Text(text)) if text.words().is_some_and(|words| !words.is_empty()) => {
             text.words().unwrap_or_default().into_owned()
         }
         Some(MaterialRef::VideoEffect(effect)) if !effect.name.is_empty() => effect.name.clone(),
+        Some(MaterialRef::Shape(shape)) if !shape.name.is_empty() => shape.name.clone(),
+        // A filter carries its name; an adjustment layer has none.
+        Some(MaterialRef::Effect(effect)) if !effect.name.is_empty() => effect.name.clone(),
+        Some(MaterialRef::Effect(effect)) if effect.kind == cutlass_effects::ADJUSTMENT => {
+            "Adjustment".to_owned()
+        }
         _ => segment.id.as_str().to_owned(),
     }
 }

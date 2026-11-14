@@ -15,6 +15,8 @@ use crate::set::{self, Pps, Sps, ZIGZAG4, ZIGZAG8};
 
 #[path = "mb.rs"]
 mod mb;
+#[path = "progress.rs"]
+mod progress;
 
 pub(crate) const CBP_INTRA: [u8; 48] = [
     47, 31, 15, 0, 23, 27, 29, 30, 7, 11, 13, 14, 39, 43, 45, 46, 16, 3, 5, 10, 12, 19, 21, 26, 28,
@@ -28,11 +30,55 @@ pub(crate) const CBP_INTER: [u8; 48] = [
 pub(crate) const CBP_INTRA_444: [u8; 16] = [15, 0, 7, 11, 13, 14, 3, 5, 10, 12, 1, 2, 4, 8, 6, 9];
 pub(crate) const CBP_INTER_444: [u8; 16] = [0, 1, 2, 4, 8, 3, 5, 10, 12, 15, 7, 11, 13, 14, 6, 9];
 
-#[derive(Clone)]
-pub(crate) struct Mb {
-    slice: u16,
+/// The part of a macroblock that a later picture's direct prediction reads
+/// as its co-located macroblock (clause 8.4.1.2): kept on its own so a
+/// picture decoded on another thread hands over only this.
+#[derive(Clone, Copy)]
+pub(crate) struct Colocated {
     intra: bool,
     pcm: bool,
+    /// `mb_field_decoding_flag`. The macroblock's samples sit on every other line.
+    field_mb: bool,
+    ref0: [i8; 4],
+    ref1: [i8; 4],
+    mv0: [[i16; 2]; 16],
+    mv1: [[i16; 2]; 16],
+    /// Picture order count of the reference each 8×8 partition used. Kept so a later
+    /// temporal-direct picture can find that reference after the buffer moves.
+    ref_poc0: [i32; 4],
+    ref_poc1: [i32; 4],
+    /// Bits 0, 3, 12 and 15, for the corner 4×4 blocks of a picture with
+    /// 8×8 inference, set when that block's motion makes colZeroFlag 1 for
+    /// a later picture's direct prediction (clause 8.4.1.2.2): the first
+    /// list it uses has reference index 0, and a vector within one quarter
+    /// sample each way. Worked out once with the macroblock's motion, so a
+    /// direct macroblock reads this rather than the motion.
+    zero: u16,
+}
+
+impl std::ops::Deref for Mb {
+    type Target = Colocated;
+
+    #[inline(always)]
+    fn deref(&self) -> &Colocated {
+        &self.col
+    }
+}
+
+impl std::ops::DerefMut for Mb {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Colocated {
+        &mut self.col
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Mb {
+    /// What a later picture's direct prediction reads of this macroblock,
+    /// the part handed to other threads. Its fields read as the
+    /// macroblock's own.
+    col: Colocated,
+    slice: u16,
     qp: i8,
     qp_c: i8,
     qp_cr: i8,
@@ -49,8 +95,6 @@ pub(crate) struct Mb {
     nnz_c: [u8; 32],
     mode4: [u8; 16],
     chroma_mode: u8,
-    ref0: [i8; 4],
-    ref1: [i8; 4],
     /// 8×8 partitions whose prediction mode is Pred_L0 or BiPred. Direct and skip stay clear
     /// so a reference index stored for motion does not enter the CABAC context.
     uses0: u8,
@@ -59,14 +103,11 @@ pub(crate) struct Mb {
     /// Decoded-picture-buffer index of each list, or −1 when that list is unused.
     slot0: [i8; 4],
     slot1: [i8; 4],
-    mv0: [[i16; 2]; 16],
-    mv1: [[i16; 2]; 16],
-    /// Picture order count of the reference each 8×8 partition used. Kept so a later
-    /// temporal-direct picture can find that reference after the buffer moves.
-    ref_poc0: [i32; 4],
-    ref_poc1: [i32; 4],
-    mvd0: [[i16; 2]; 16],
-    mvd1: [[i16; 2]; 16],
+    /// Size of each 4×4 block's motion vector difference, held to 127:
+    /// the CABAC contexts only compare sums of these with 2 and 32, after
+    /// halving or doubling across a field and a frame macroblock.
+    mvd0: [[u8; 2]; 16],
+    mvd1: [[u8; 2]; 16],
     /// 4×4 blocks whose motion vector is already decoded. Same-macroblock predictors ignore the rest.
     ready: u16,
     off_a: i8,
@@ -80,8 +121,6 @@ pub(crate) struct Mb {
     dc_c: [bool; 2],
     /// Intra_16x16 DC coded_block_flag of Cb and Cr when chroma is coded as luma.
     dc16: [bool; 2],
-    /// `mb_field_decoding_flag`. The macroblock's samples sit on every other line.
-    field_mb: bool,
     /// SI macroblock. Reconstruction is clause 8.6.2, not intra 8.5.
     si: bool,
     /// `mb_alc_flag`. Luma weights come from the neighboring samples.
@@ -93,9 +132,19 @@ pub(crate) struct Mb {
 impl Mb {
     pub(crate) fn new(slice: u16) -> Self {
         Self {
+            col: Colocated {
+                intra: false,
+                pcm: false,
+                ref0: [-1; 4],
+                ref1: [-1; 4],
+                mv0: [[0; 2]; 16],
+                mv1: [[0; 2]; 16],
+                ref_poc0: [0; 4],
+                ref_poc1: [0; 4],
+                field_mb: false,
+                zero: 0,
+            },
             slice,
-            intra: false,
-            pcm: false,
             qp: 0,
             qp_c: 0,
             qp_cr: 0,
@@ -109,16 +158,10 @@ impl Mb {
             nnz_c: [0; 32],
             mode4: [2; 16],
             chroma_mode: 0,
-            ref0: [-1; 4],
-            ref1: [-1; 4],
             uses0: 0,
             uses1: 0,
             slot0: [-1; 4],
             slot1: [-1; 4],
-            mv0: [[0; 2]; 16],
-            mv1: [[0; 2]; 16],
-            ref_poc0: [0; 4],
-            ref_poc1: [0; 4],
             mvd0: [[0; 2]; 16],
             mvd1: [[0; 2]; 16],
             ready: 0,
@@ -129,7 +172,6 @@ impl Mb {
             dc_coded: false,
             dc_c: [false; 2],
             dc16: [false; 2],
-            field_mb: false,
             si: false,
             alc: false,
             alc_spec: 0,
@@ -137,16 +179,186 @@ impl Mb {
     }
 }
 
+/// A buffer that a clone shares until one side writes to it.
+///
+/// The decoder copies its picture buffer before each access unit, so one
+/// that fails leaves no trace. A stored picture is almost always only read
+/// after that, and sharing makes its copy free. The first write through a
+/// shared buffer copies it, so a clone still never sees the other's writes.
+///
+/// A picture being decoded is written to constantly and by one holder, so
+/// its planes start out [`Shared::owned`]: plain buffers, with nothing to
+/// check on each write. They are [`Shared::freeze`]d into the shared form
+/// when the picture is done. Cloning one that is still owned copies it.
+///
+/// A buffer made by [`Shared::spare`] goes back to the [`Spares`] it came
+/// from when its last holder drops it.
+#[derive(Clone, Debug)]
+pub(crate) struct Shared<T: Send + 'static> {
+    hold: Hold<T>,
+    home: Option<std::sync::Arc<Spares>>,
+}
+
+/// Planes of pictures no longer held, kept for later pictures to be
+/// decoded into rather than made and filled anew: every sample of a
+/// picture that is kept is written before it is read, and one that fails
+/// is dropped, so what a plane held before never shows.
+#[derive(Default)]
+pub(crate) struct Spares(std::sync::Mutex<Vec<Box<dyn std::any::Any + Send>>>);
+
+impl std::fmt::Debug for Spares {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Spares")
+    }
+}
+
+/// Planes and record sets [`Spares`] keeps at most, a few pictures' worth.
+const SPARES_KEPT: usize = 16;
+
+impl Spares {
+    /// A kept buffer of `len` items, if there is one.
+    fn take<T: Send + 'static>(&self, len: usize) -> Option<Vec<T>> {
+        let mut held = self.0.lock().ok()?;
+        let at = held.iter().rposition(|kept| {
+            kept.downcast_ref::<Vec<T>>()
+                .is_some_and(|plane| plane.len() == len)
+        })?;
+        held.swap_remove(at)
+            .downcast::<Vec<T>>()
+            .ok()
+            .map(|plane| *plane)
+    }
+
+    fn keep<T: Send + 'static>(&self, plane: Vec<T>) {
+        if let Ok(mut held) = self.0.lock()
+            && held.len() < SPARES_KEPT
+        {
+            held.push(Box::new(plane));
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum Hold<T: Send + 'static> {
+    Owned(Vec<T>),
+    Split(std::sync::Arc<Vec<T>>),
+}
+
+impl<T: Send + 'static> Shared<T> {
+    /// A buffer with one holder, for the picture being decoded.
+    pub(crate) fn owned(held: Vec<T>) -> Self {
+        Self {
+            hold: Hold::Owned(held),
+            home: None,
+        }
+    }
+
+    /// As [`Self::owned`], `len` items long, for a caller that writes
+    /// every item before it reads it: a buffer `home` kept, holding what
+    /// was there, or else a new one of `fill`. It goes back to `home` when
+    /// it is dropped.
+    pub(crate) fn spare(home: &std::sync::Arc<Spares>, len: usize, fill: T) -> Self
+    where
+        T: Clone,
+    {
+        let held = home.take(len).unwrap_or_else(|| vec![fill; len]);
+        Self {
+            hold: Hold::Owned(held),
+            home: Some(home.clone()),
+        }
+    }
+
+    /// Whether nothing else holds the buffer.
+    fn sole(&mut self) -> bool {
+        match &mut self.hold {
+            Hold::Owned(_) => true,
+            Hold::Split(held) => std::sync::Arc::get_mut(held).is_some(),
+        }
+    }
+
+    /// The buffer, when nothing else holds it, leaving this one empty.
+    fn take_sole(&mut self) -> Option<Vec<T>> {
+        match &mut self.hold {
+            Hold::Owned(held) => Some(std::mem::take(held)),
+            Hold::Split(held) => std::sync::Arc::get_mut(held).map(std::mem::take),
+        }
+    }
+
+    /// Whether this is an empty buffer from no store of spares, as
+    /// [`Default`] makes, whose drop has nothing to do.
+    pub(crate) fn owns_nothing(&self) -> bool {
+        self.home.is_none() && self.capacity() == 0
+    }
+
+    /// Makes clones from here on share the buffer.
+    pub(crate) fn freeze(&mut self) {
+        if let Hold::Owned(held) = &mut self.hold {
+            self.hold = Hold::Split(std::sync::Arc::new(std::mem::take(held)));
+        }
+    }
+}
+
+impl<T: Send + 'static> Drop for Shared<T> {
+    fn drop(&mut self) {
+        if let Some(home) = self.home.take()
+            && let Some(plane) = self.take_sole()
+            && !plane.is_empty()
+        {
+            home.keep(plane);
+        }
+    }
+}
+
+impl<T: Send + 'static> Default for Shared<T> {
+    fn default() -> Self {
+        Self::owned(Vec::new())
+    }
+}
+
+impl<T: Send + 'static> From<Vec<T>> for Shared<T> {
+    fn from(held: Vec<T>) -> Self {
+        Self {
+            hold: Hold::Split(std::sync::Arc::new(held)),
+            home: None,
+        }
+    }
+}
+
+impl<T: Send + 'static> std::ops::Deref for Shared<T> {
+    type Target = Vec<T>;
+
+    #[inline]
+    fn deref(&self) -> &Vec<T> {
+        match &self.hold {
+            Hold::Owned(held) => held,
+            Hold::Split(held) => held,
+        }
+    }
+}
+
+impl<T: Clone + Send + 'static> std::ops::DerefMut for Shared<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Vec<T> {
+        match &mut self.hold {
+            Hold::Owned(held) => held,
+            Hold::Split(held) => std::sync::Arc::make_mut(held),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Frame<S: Sample = u8> {
-    y: Vec<S>,
-    u: Vec<S>,
-    v: Vec<S>,
-    mb: Vec<Mb>,
+    y: Shared<S>,
+    u: Shared<S>,
+    v: Shared<S>,
+    mb: Shared<Mb>,
     w: usize,
     h: usize,
     mb_w: usize,
     poc: i32,
+    /// Order counts of the top and the bottom field. A frame's own count is
+    /// the smaller. Field macroblocks measure distances between fields.
+    field_poc: [i32; 2],
     frame_num: u32,
     referenced: bool,
     long_term: bool,
@@ -200,7 +412,39 @@ pub(crate) struct Frame<S: Sample = u8> {
     svc_bottom: i32,
     /// Luma 4×4 levels, 256 per macroblock, raster inside each block.
     /// Empty unless a stored subset has `seq_tcoeff_level_prediction_flag`.
-    levels: Vec<i32>,
+    levels: Shared<i32>,
+    /// Set when another thread decodes, or decoded, this picture: its rows
+    /// as they are finished. The planes above are then empty until the
+    /// picture is whole and settled here.
+    pending: Option<std::sync::Arc<progress::Published<S>>>,
+    /// The thread decoding this picture keeps its place here.
+    writer: Option<Writer<S>>,
+}
+
+/// How far the thread decoding a picture has taken its rows.
+#[derive(Clone, Debug, Default)]
+struct Writer<S> {
+    /// Macroblock rows deblocked.
+    deblocked: usize,
+    /// Macroblock rows whose samples are published.
+    published: usize,
+    /// The last line of the last deblocked row, in each plane. The row
+    /// below predicts from that line as it was before deblocking, so while
+    /// that row is decoded the picture holds the line unfiltered and the
+    /// filtered one waits here.
+    edge: [Vec<S>; 3],
+    /// What the deblocking of the last row worked out about each of its
+    /// macroblocks, which the next row's top edges read.
+    above: Vec<Option<(u16, bool)>>,
+    /// Rows are deblocked once the row below is decoded too, so that row
+    /// predicted from the last line as it was: no line is set aside. For
+    /// a picture no other thread reads while it is decoded.
+    lag: bool,
+    /// Macroblock records from the first that are this picture's: unset,
+    /// or decoded. The rest may still hold an earlier picture's, and are
+    /// unset a row at a time as decoding comes to them, while their cache
+    /// lines are about to be written anyway.
+    set: usize,
 }
 
 /// Output time and the grain blended at emit. `pts` on the frame stays the
@@ -241,6 +485,34 @@ impl Shown {
 }
 
 impl<S: Sample> Frame<S> {
+    /// The picture is finished: from here its copies share its planes.
+    fn seal(&mut self) {
+        self.y.freeze();
+        self.u.freeze();
+        self.v.freeze();
+        self.mb.freeze();
+        self.levels.freeze();
+    }
+
+    /// What direct prediction reads of the macroblock at address `addr`.
+    /// For a picture another thread is decoding this waits for that
+    /// macroblock's row.
+    pub(crate) fn mb_at(&self, addr: usize) -> Option<&Colocated> {
+        match &self.pending {
+            Some(published) => published.col(addr),
+            None => self.mb.get(addr).map(|mb| &mb.col),
+        }
+    }
+
+    /// Asks for [`Self::mb_at`]'s answer for `addr` to be brought into the
+    /// cache, when that macroblock is decoded; nothing else changes.
+    pub(crate) fn prefetch_col(&self, addr: usize) {
+        match &self.pending {
+            Some(published) => published.prefetch_col(addr),
+            None => cutlass_h264_kernels::prefetch_item(&self.mb, addr),
+        }
+    }
+
     /// 1 is 4:2:0, 2 is 4:2:2, 3 is 4:4:4. The plane lengths decide it.
     pub(crate) fn chroma(&self) -> u8 {
         let y = self.w.saturating_mul(self.h);
@@ -338,12 +610,15 @@ impl<S: Sample> Frame<S> {
 
 #[derive(Clone)]
 struct Sets {
-    sps: Vec<Option<Sps>>,
+    // Each table is shared between copies until one is written to: the
+    // decoder copies its sets for every access unit, and a parameter set
+    // arrives far less often than that.
+    sps: Shared<Option<Sps>>,
     /// Subset SPS, NAL type 15. A slice extension resolves its id here.
-    subset: Vec<Option<Sps>>,
-    pps: Vec<Option<Pps>>,
+    subset: Shared<Option<Sps>>,
+    pps: Shared<Option<Pps>>,
     /// Depth parameter sets, NAL type 16. Index 0 stays empty.
-    dps: Vec<Option<set::DepthSet>>,
+    dps: Shared<Option<set::DepthSet>>,
     /// First slice header of each view component, for 3D header prediction.
     copies: Vec<HeaderCopy>,
 }
@@ -351,10 +626,10 @@ struct Sets {
 impl Sets {
     fn new() -> Self {
         Self {
-            sps: vec![None; set::MAX_SPS],
-            subset: vec![None; set::MAX_SPS],
-            pps: vec![None; set::MAX_PPS],
-            dps: vec![None; 64],
+            sps: vec![None; set::MAX_SPS].into(),
+            subset: vec![None; set::MAX_SPS].into(),
+            pps: vec![None; set::MAX_PPS].into(),
+            dps: vec![None; 64].into(),
             copies: Vec::new(),
         }
     }
@@ -424,36 +699,49 @@ impl Store {
         }
     }
 
-    fn release(&mut self, keep: usize) -> Vec<VideoOutput> {
+    fn release(&mut self, keep: usize) -> Vec<Queued> {
+        fn queue<S: Sample>(dpb: &mut Vec<Frame<S>>, keep: usize) -> Vec<Queued> {
+            take_output(dpb, keep)
+                .into_iter()
+                .map(Queued::new)
+                .collect()
+        }
         match self {
-            Store::Eight(dpb) => take_output(dpb, keep),
-            Store::Nine(dpb) => take_output(dpb, keep),
-            Store::Ten(dpb) => take_output(dpb, keep),
-            Store::Eleven(dpb) => take_output(dpb, keep),
-            Store::Twelve(dpb) => take_output(dpb, keep),
-            Store::Thirteen(dpb) => take_output(dpb, keep),
-            Store::Fourteen(dpb) => take_output(dpb, keep),
+            Store::Eight(dpb) => queue(dpb, keep),
+            Store::Nine(dpb) => queue(dpb, keep),
+            Store::Ten(dpb) => queue(dpb, keep),
+            Store::Eleven(dpb) => queue(dpb, keep),
+            Store::Twelve(dpb) => queue(dpb, keep),
+            Store::Thirteen(dpb) => queue(dpb, keep),
+            Store::Fourteen(dpb) => queue(dpb, keep),
         }
     }
 }
 
 macro_rules! decode_depth {
-    ($self:ident, $sets:ident, $poc:ident, $packet:ident, $grain:ident, $variant:ident, $sample:ty) => {{
+    ($self:ident, $sets:ident, $poc:ident, $packet:ident, $nals:ident, $grain:ident, $variant:ident, $sample:ty) => {{
         let mut dpb = match &$self.dpb {
             Store::$variant(held) => held.clone(),
             _ => Vec::new(),
         };
+        settle_finished(&mut dpb);
         let decoded = decode_au::<$sample>(
             &mut $sets,
             &mut $poc,
             &mut dpb,
-            &$packet.data,
-            $self.length_size,
+            &$nals,
             $packet,
             &mut $grain,
+            ($self.pool.as_ref(), &$self.spares),
         )?;
+        if let Some(frame) = dpb.last() {
+            $self.picture_samples = frame.w.saturating_mul(frame.h);
+        }
         $self.dpb = Store::$variant(dpb);
         decoded
+            .into_iter()
+            .map(Queued::new)
+            .collect::<Vec<Queued>>()
     }};
 }
 
@@ -465,6 +753,18 @@ pub struct H264Decoder {
     drained: bool,
     extra: Vec<u8>,
     grain: crate::sei::GrainHold,
+    /// Threads that decode pictures, when asked for.
+    pool: Option<Pool>,
+    /// Pictures chosen for output, in order, that may still be decoding.
+    outbox: std::collections::VecDeque<Queued>,
+    /// Pictures that were ready when a call ended in an error. The next
+    /// call returns them first.
+    stash: Vec<VideoOutput>,
+    /// Luma samples in the last picture read, for sizing what may be in
+    /// flight.
+    picture_samples: usize,
+    /// Planes of finished pictures, decoded into again.
+    spares: std::sync::Arc<Spares>,
 }
 
 pub fn register_decoders(factory: &mut DecodeFactory) {
@@ -504,11 +804,92 @@ impl H264Decoder {
             drained: false,
             extra: params.extra.clone(),
             grain: crate::sei::GrainHold::default(),
+            pool: None,
+            outbox: std::collections::VecDeque::new(),
+            stash: Vec::new(),
+            picture_samples: 0,
+            spares: std::sync::Arc::default(),
         };
         if !params.extra.is_empty() {
             dec.apply_extra(&params.extra)?;
         }
         Ok(dec)
+    }
+
+    /// Decodes pictures on other threads, sized for `threads` processor
+    /// cores. A picture starts as soon as its headers are read and waits,
+    /// row by row, for the rows of other pictures it predicts from, so
+    /// several are in flight at once.
+    ///
+    /// A picture that is waiting holds a thread but no core, and in a
+    /// chain of pictures most are waiting on the one in front. So more
+    /// pictures are kept in flight than there are cores, four times as
+    /// many, each on its own thread, within a budget of memory for the
+    /// pictures themselves.
+    ///
+    /// The pictures and their order are the same as on one thread. Two
+    /// things differ. A picture comes out later than it otherwise would,
+    /// by up to the number of pictures in flight, so
+    /// [`VideoDecoder::drain`] returns more. And an error in a picture's
+    /// data is returned by the call that would have returned that picture,
+    /// not by the call that pushed it.
+    ///
+    /// Interlaced, 4:2:2, 4:4:4, multi-view and scalable pictures are
+    /// decoded on the calling thread as before. One thread or none keeps
+    /// everything on the calling thread.
+    #[must_use]
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.pool = (threads > 1).then(|| Pool::new(threads));
+        self
+    }
+
+    /// As [`Self::with_threads`], with each picture decoded to its end on
+    /// the calling thread. For testing the row-by-row path without threads.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_rows_inline(mut self) -> Self {
+        self.pool = Some(Pool::inline());
+        self
+    }
+
+    /// Moves queued pictures that are ready into `out`, in order. With
+    /// `all` it waits for every one. Otherwise it waits for the next one
+    /// only while every thread has a picture to decode and one more is
+    /// lined up, or while a great many finished pictures are held up
+    /// behind it; short of that the caller is better off bringing the
+    /// next packet.
+    fn take_ready(&mut self, out: &mut Vec<VideoOutput>, all: bool) -> Result<(), CodecError> {
+        let (depth, flying, budget) = self
+            .pool
+            .as_ref()
+            .map_or((0, 0, 0), |pool| (pool.depth, pool.flying(), pool.budget));
+        // A picture in flight holds its planes, the rows it has published,
+        // its macroblocks and its output form: about eight bytes a sample.
+        let affordable = budget / self.picture_samples.saturating_mul(8).max(1);
+        let depth = depth.min(affordable.max(2));
+        let mut flying = flying;
+        while let Some(front) = self.outbox.front() {
+            let fed = flying > depth || self.outbox.len() > 4 * depth + 8;
+            if !all && !fed && !(front.ready)() {
+                break;
+            }
+            if !(front.ready)() {
+                // Waiting for it lets at least this one finish.
+                flying = flying.saturating_sub(1);
+            }
+            let Some(queued) = self.outbox.pop_front() else {
+                break;
+            };
+            match (queued.take)() {
+                Ok(Some(picture)) => out.push(picture),
+                Ok(None) => {}
+                Err(error) => {
+                    self.stash = std::mem::take(out);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn apply_extra(&mut self, extra: &[u8]) -> Result<(), CodecError> {
@@ -540,22 +921,18 @@ impl H264Decoder {
         Ok(())
     }
 
-    /// The reconstructed picture for `pts`, including one still held for reorder.
-    pub(crate) fn picture_at(&self, pts: i64) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-        let output = match &self.dpb {
-            Store::Eight(dpb) => held_picture(dpb, pts)?,
-            Store::Nine(dpb) => held_picture(dpb, pts)?,
-            Store::Ten(dpb) => held_picture(dpb, pts)?,
-            Store::Eleven(dpb) => held_picture(dpb, pts)?,
-            Store::Twelve(dpb) => held_picture(dpb, pts)?,
-            Store::Thirteen(dpb) => held_picture(dpb, pts)?,
-            Store::Fourteen(dpb) => held_picture(dpb, pts)?,
+    /// The 8-bit reconstruction for `pts`, including one still held for
+    /// reorder, at its coded size before cropping: whole macroblocks, as
+    /// later pictures predict from it.
+    pub(crate) fn coded_picture_at(&self, pts: i64) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+        let Store::Eight(dpb) = &self.dpb else {
+            return None;
         };
-        Some((
-            output.picture.y().to_vec(),
-            output.picture.u().to_vec(),
-            output.picture.v().to_vec(),
-        ))
+        let frame = dpb
+            .iter()
+            .rev()
+            .find(|frame| frame.pts == pts && !frame.nonexisting)?;
+        Some((frame.y.to_vec(), frame.u.to_vec(), frame.v.to_vec()))
     }
 }
 
@@ -626,8 +1003,11 @@ impl VideoDecoder for H264Decoder {
         let mut sets = self.sets.clone();
         let mut poc = self.poc.clone();
         let mut grain = self.grain.clone();
-        let depth = au_depth(&self.sets, &packet.data, self.length_size, self.dpb.depth())?;
-        let mut prior = if depth == self.dpb.depth() {
+        // The unit is split into NAL units once, for both passes over it.
+        let nals = nal::access_unit(&packet.data, self.length_size)?;
+        let depth = au_depth(&self.sets, &nals, self.dpb.depth())?;
+        let mut out = std::mem::take(&mut self.stash);
+        let prior = if depth == self.dpb.depth() {
             Vec::new()
         } else {
             poc = Poc::new();
@@ -635,22 +1015,59 @@ impl VideoDecoder for H264Decoder {
             let mut old = self.dpb.clone();
             old.release(0)
         };
-        let out = match depth {
-            8 => decode_depth!(self, sets, poc, packet, grain, Eight, u8),
-            9 => decode_depth!(self, sets, poc, packet, grain, Nine, recon::Depth<9>),
-            10 => decode_depth!(self, sets, poc, packet, grain, Ten, recon::Ten),
-            11 => decode_depth!(self, sets, poc, packet, grain, Eleven, recon::Depth<11>),
-            12 => decode_depth!(self, sets, poc, packet, grain, Twelve, recon::Depth<12>),
-            13 => decode_depth!(self, sets, poc, packet, grain, Thirteen, recon::Depth<13>),
-            14 => decode_depth!(self, sets, poc, packet, grain, Fourteen, recon::Depth<14>),
+        let queued = match depth {
+            8 => decode_depth!(self, sets, poc, packet, nals, grain, Eight, u8),
+            9 => decode_depth!(self, sets, poc, packet, nals, grain, Nine, recon::Depth<9>),
+            10 => decode_depth!(self, sets, poc, packet, nals, grain, Ten, recon::Ten),
+            11 => decode_depth!(
+                self,
+                sets,
+                poc,
+                packet,
+                nals,
+                grain,
+                Eleven,
+                recon::Depth<11>
+            ),
+            12 => decode_depth!(
+                self,
+                sets,
+                poc,
+                packet,
+                nals,
+                grain,
+                Twelve,
+                recon::Depth<12>
+            ),
+            13 => decode_depth!(
+                self,
+                sets,
+                poc,
+                packet,
+                nals,
+                grain,
+                Thirteen,
+                recon::Depth<13>
+            ),
+            14 => decode_depth!(
+                self,
+                sets,
+                poc,
+                packet,
+                nals,
+                grain,
+                Fourteen,
+                recon::Depth<14>
+            ),
             _ => return Err(CodecError::Unsupported { what: "bit depth" }),
         };
-        prior.extend(out);
-        let out = prior;
+        self.outbox.extend(prior);
+        self.outbox.extend(queued);
         self.sets = sets;
         self.poc = poc;
         self.grain = grain;
         self.drained = false;
+        self.take_ready(&mut out, false)?;
         Ok(out)
     }
 
@@ -658,11 +1075,17 @@ impl VideoDecoder for H264Decoder {
         if self.drained {
             return Ok(Vec::new());
         }
+        let mut out = std::mem::take(&mut self.stash);
+        let rest = self.dpb.release(0);
+        self.outbox.extend(rest);
+        self.take_ready(&mut out, true)?;
         self.drained = true;
-        Ok(self.dpb.release(0))
+        Ok(out)
     }
 
     fn reset(&mut self) {
+        self.outbox.clear();
+        self.stash.clear();
         self.dpb = Store::Eight(Vec::new());
         self.poc = Poc::new();
         self.drained = false;
@@ -675,18 +1098,9 @@ impl VideoDecoder for H264Decoder {
     }
 }
 
-fn held_picture<S: Sample>(dpb: &[Frame<S>], pts: i64) -> Option<VideoOutput> {
-    let frame = dpb
-        .iter()
-        .rev()
-        .find(|frame| frame.pts == pts && !frame.nonexisting)?;
-    emit(frame)
-}
-
-fn au_depth(sets: &Sets, data: &[u8], length_size: u8, current: u8) -> Result<u8, CodecError> {
-    let nals = nal::access_unit(data, length_size)?;
+fn au_depth(sets: &Sets, nals: &[Nal], current: u8) -> Result<u8, CodecError> {
     let mut sets = sets.clone();
-    for nal in &nals {
+    for nal in nals {
         match nal.kind {
             7 => {
                 let sps = set::parse_sps(&nal.rbsp)?;
@@ -744,12 +1158,20 @@ fn decode_au<S: Sample>(
     sets: &mut Sets,
     poc: &mut Poc,
     dpb: &mut Vec<Frame<S>>,
-    data: &[u8],
-    length_size: u8,
+    nals: &[Nal],
     packet: &Packet,
     grain: &mut crate::sei::GrainHold,
-) -> Result<Vec<VideoOutput>, CodecError> {
-    let nals = nal::access_unit(data, length_size)?;
+    (pool, spares): (Option<&Pool>, &std::sync::Arc<Spares>),
+) -> Result<Vec<Frame<S>>, CodecError> {
+    // A picture goes to another thread only when the unit holds nothing
+    // but plain slices; the first slice's headers then have the last word.
+    let plain = nals
+        .iter()
+        .all(|nal| !matches!(nal.kind, 2 | 3 | 4 | 14 | 15 | 16 | 20 | 21));
+    let mut plan = (pool.is_some() && plain).then(RowPlan::default);
+    if plan.is_none() {
+        settle(dpb)?;
+    }
     let mut picture: Option<Frame<S>> = None;
     let mut prior = Vec::new();
     let mut slice_id = 0u16;
@@ -805,6 +1227,8 @@ fn decode_au<S: Sample>(
                                 planes: &mut planes,
                                 held: &mut held_field,
                                 layer: None,
+                                jobs: &mut None,
+                                spares: None,
                             },
                         )?;
                         if built {
@@ -850,6 +1274,8 @@ fn decode_au<S: Sample>(
                                 planes: &mut planes,
                                 held: &mut held_field,
                                 layer: Some(&base),
+                                jobs: &mut None,
+                                spares: None,
                             },
                         )?;
                         if built {
@@ -860,6 +1286,7 @@ fn decode_au<S: Sample>(
                         });
                         if keep_base {
                             base.output = false;
+                            base.seal();
                             dpb.push(base);
                         }
                         index += 1;
@@ -888,6 +1315,8 @@ fn decode_au<S: Sample>(
                                 planes: &mut planes,
                                 held: &mut held_field,
                                 layer: None,
+                                jobs: &mut None,
+                                spares: None,
                             },
                         )?;
                         if built {
@@ -931,6 +1360,8 @@ fn decode_au<S: Sample>(
                                 planes: &mut planes,
                                 held: &mut held_field,
                                 layer: None,
+                                jobs: &mut None,
+                                spares: None,
                             },
                         )?;
                         if built {
@@ -965,6 +1396,8 @@ fn decode_au<S: Sample>(
                                 planes: &mut planes,
                                 held: &mut held_field,
                                 layer: None,
+                                jobs: &mut None,
+                                spares: None,
                             },
                         )?;
                         if built {
@@ -980,7 +1413,7 @@ fn decode_au<S: Sample>(
             }
             1 | 5 | 2 => {
                 let attached = if kind == 2 {
-                    following_parts(&nals, index)?
+                    following_parts(nals, index)?
                 } else {
                     Attached {
                         intra: None,
@@ -1011,6 +1444,8 @@ fn decode_au<S: Sample>(
                         planes: &mut planes,
                         held: &mut held_field,
                         layer: None,
+                        jobs: &mut plan,
+                        spares: Some(spares),
                     },
                 )?;
                 if built {
@@ -1074,6 +1509,34 @@ fn decode_au<S: Sample>(
             what: "incomplete picture",
         });
     }
+    if let (Some(plan), Some(pool)) = (plan.take(), pool) {
+        // The picture leaves for another thread with the references as its
+        // slices saw them. What stays here is its description, which is
+        // all that marking, ordering and the next pictures' headers need.
+        let published = std::sync::Arc::new(progress::Published::new(
+            pic.w,
+            pic.h,
+            pic.mb_w,
+            pool.permits.clone(),
+            Some(spares.clone()),
+        ));
+        let mut meta = pic.clone();
+        meta.pending = Some(published.clone());
+        present(&mut meta, &messages, grain, idr_pic)?;
+        pic.pending = Some(published);
+        pic.writer = Some(Writer::default());
+        let job = PictureJob {
+            pic,
+            dpb: dpb.clone(),
+            slices: plan.slices,
+            spares: spares.clone(),
+            shown: meta.shown.clone(),
+        };
+        pool.run(Box::new(move || run_picture(job)));
+        let mut pictures = prior;
+        pictures.extend(finish_picture(poc, dpb, meta)?);
+        return Ok(pictures);
+    }
     if pic.separate_plane {
         mb::deblock(&mut pic);
         exchange_refs(&mut pic, dpb, planes.active);
@@ -1083,6 +1546,9 @@ fn decode_au<S: Sample>(
                 what: "incomplete picture",
             });
         }
+    } else if pic.writer.is_some() {
+        mb::finish_rows(&mut pic);
+        pic.writer = None;
     } else {
         mb::deblock(&mut pic);
     }
@@ -1158,6 +1624,53 @@ fn exchange_refs<S: Sample>(picture: &mut Frame<S>, dpb: &mut [Frame<S>], plane:
     exchange_plane(picture, plane);
     for frame in dpb {
         exchange_plane(frame, plane);
+    }
+}
+
+/// A plane of `len` samples, taken from `spares` when there are some and
+/// every sample will be `written`; otherwise new, of `fill`.
+fn plane<S: Sample>(
+    spares: Option<&std::sync::Arc<Spares>>,
+    len: usize,
+    fill: S,
+    written: bool,
+) -> Shared<S> {
+    match spares {
+        Some(home) if written => Shared::spare(home, len, fill),
+        _ => Shared::owned(vec![fill; len]),
+    }
+}
+
+/// The macroblock records of a new picture, a spare set when one is kept.
+/// A spare record keeps what its last picture wrote, apart from the two
+/// fields read before a macroblock is decoded: its slice, unset so it reads
+/// as not yet decoded, and its field flag. Every other field of a record is
+/// written by its macroblock before anything reads it. Those two are unset
+/// here when `unset`, or else by the caller before anything reads them.
+fn records(spares: Option<&std::sync::Arc<Spares>>, len: usize, unset: bool) -> Shared<Mb> {
+    let Some(home) = spares else {
+        return Shared::owned(vec![Mb::new(u16::MAX); len]);
+    };
+    let held = match home.take::<Mb>(len) {
+        Some(mut kept) => {
+            if unset {
+                unset_records(&mut kept);
+            }
+            kept
+        }
+        None => vec![Mb::new(u16::MAX); len],
+    };
+    Shared {
+        hold: Hold::Owned(held),
+        home: Some(home.clone()),
+    }
+}
+
+/// Makes `records` read as not yet decoded: see [`records`].
+pub(crate) fn unset_records(records: &mut [Mb]) {
+    for mb in records {
+        mb.slice = u16::MAX;
+        mb.col.field_mb = false;
     }
 }
 
@@ -1243,15 +1756,15 @@ fn weave<S: Sample>(first: Frame<S>, second: Frame<S>) -> Result<Frame<S>, Codec
     let key = top.key || bottom.key;
     let referenced = top.referenced || bottom.referenced;
     let mut frame = top;
-    frame.y = y;
-    frame.u = u;
-    frame.v = v;
+    frame.y = y.into();
+    frame.u = u.into();
+    frame.v = v.into();
     frame.h = h;
     frame.vis_h = frame.vis_h.saturating_mul(2);
     frame.crop_y = frame.crop_y.saturating_mul(2);
     frame.field = false;
     frame.bottom = false;
-    frame.mb = vec![Mb::new(u16::MAX); frame.mb_w.saturating_mul(h / 16)];
+    frame.mb = vec![Mb::new(u16::MAX); frame.mb_w.saturating_mul(h / 16)].into();
     frame.poc = poc;
     frame.key = key;
     frame.referenced = referenced;
@@ -1262,7 +1775,7 @@ fn finish_picture<S: Sample>(
     _poc: &mut Poc,
     dpb: &mut Vec<Frame<S>>,
     mut pic: Frame<S>,
-) -> Result<Vec<VideoOutput>, CodecError> {
+) -> Result<Vec<Frame<S>>, CodecError> {
     let max_ref = dpb_max(dpb, &pic);
     if pic.referenced {
         if pic.adaptive {
@@ -1272,6 +1785,7 @@ fn finish_picture<S: Sample>(
         }
     }
     let reorder = pic_reorder(&pic);
+    pic.seal();
     dpb.push(pic);
     dpb.retain(|frame| frame.referenced || frame.output);
     Ok(take_output(dpb, reorder))
@@ -1547,14 +2061,15 @@ fn ghost_order(sps: &Sps, state: &Poc, frame_num: u32) -> Result<(i32, u32), Cod
 
 fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
     Frame {
-        y: Vec::new(),
-        u: Vec::new(),
-        v: Vec::new(),
-        mb: Vec::new(),
+        y: Shared::default(),
+        u: Shared::default(),
+        v: Shared::default(),
+        mb: Shared::default(),
         w: sps.width as usize,
         h: sps.height as usize,
         mb_w: sps.mb_width,
         poc,
+        field_poc: [poc; 2],
         frame_num,
         referenced: true,
         long_term: false,
@@ -1595,11 +2110,16 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         svc_top: 0,
         svc_right: 0,
         svc_bottom: 0,
-        levels: Vec::new(),
+        levels: Vec::new().into(),
+        pending: None,
+        writer: None,
     }
 }
 
-fn take_output<S: Sample>(dpb: &mut Vec<Frame<S>>, keep: usize) -> Vec<VideoOutput> {
+/// The pictures whose turn it is to be shown, in order. Each is still to
+/// be turned into an output; one decoded on another thread may not be
+/// finished yet.
+fn take_output<S: Sample>(dpb: &mut Vec<Frame<S>>, keep: usize) -> Vec<Frame<S>> {
     let mut out = Vec::new();
     loop {
         let pending: Vec<usize> = dpb
@@ -1613,8 +2133,8 @@ fn take_output<S: Sample>(dpb: &mut Vec<Frame<S>>, keep: usize) -> Vec<VideoOutp
         }
         let pos = pending.into_iter().min_by_key(|&i| dpb[i].poc).unwrap_or(0);
         dpb[pos].output = false;
-        if let Some(picture) = emit(&dpb[pos]) {
-            out.push(picture);
+        if !dpb[pos].nonexisting {
+            out.push(dpb[pos].clone());
         }
     }
     dpb.retain(|frame| frame.referenced || frame.output);
@@ -1629,9 +2149,53 @@ fn wide_plane<S: Sample>(len: usize) -> Option<Vec<u16>> {
     }
 }
 
-fn pack_row<S: Sample>(src: &[S], eight: &mut [u8], mut wide: Option<&mut Vec<u16>>) {
-    for (out, sample) in eight.iter_mut().zip(src) {
-        *out = sample.pack_eight();
+/// The visible part of a plane `stride` samples wide: `w` by `h` from
+/// column `x0` and row `y0`.
+#[derive(Clone, Copy)]
+struct Window {
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    w: usize,
+    h: usize,
+}
+
+/// Every row of `window` in `plane`, packed as [`pack_row`] packs one.
+/// When the window is as wide as the plane its rows lie end to end, as
+/// with a 720×1280 or 1920×1080 picture, and go in one copy rather than
+/// a copy each.
+fn pack_plane<S: Sample>(
+    plane: &[S],
+    window: Window,
+    eight: &mut Vec<u8>,
+    mut wide: Option<&mut Vec<u16>>,
+) {
+    let Window {
+        stride,
+        x0,
+        y0,
+        w,
+        h,
+    } = window;
+    if x0 == 0 && w == stride {
+        pack_row(&plane[y0 * stride..(y0 + h) * stride], eight, wide);
+        return;
+    }
+    for row in 0..h {
+        let src = (y0 + row) * stride + x0;
+        pack_row(&plane[src..src + w], eight, wide.as_deref_mut());
+    }
+}
+
+fn pack_row<S: Sample>(src: &[S], eight: &mut Vec<u8>, mut wide: Option<&mut Vec<u16>>) {
+    // 8-bit pictures have no wide plane; the row is a plain copy, added
+    // straight on the end, so the plane is never zeroed first.
+    if wide.is_none() {
+        eight.extend(src.iter().map(|sample| sample.pack_eight()));
+        return;
+    }
+    for sample in src {
+        eight.push(sample.pack_eight());
         if let (Some(plane), Some(value)) = (wide.as_mut(), sample.pack_wide()) {
             plane.push(value);
         }
@@ -1662,6 +2226,71 @@ fn emit<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
     if frame.nonexisting {
         return None;
     }
+    // A picture decoded on another thread is shown once it is whole.
+    if let Some(published) = &frame.pending {
+        let mut whole = frame.clone();
+        fill(&mut whole, published.planes().ok()?);
+        return emit_whole(&whole);
+    }
+    emit_whole(frame)
+}
+
+/// [`emit`] for a picture nothing here needs any more. When its planes
+/// are held nowhere else, are 8-bit 4:2:0, and its visible part is their
+/// first rows, those rows are the output as they stand, without a copy,
+/// as FFmpeg hands out the very buffer a picture was decoded into.
+fn emit_owned<S: Sample>(mut frame: Frame<S>) -> Option<VideoOutput> {
+    if frame.pending.is_some() || !in_place(&mut frame) {
+        return emit(&frame);
+    }
+    emit_planes(&mut frame)
+}
+
+/// Whether [`emit_planes`] can hand out `frame`'s planes as they stand: no
+/// one else holds them, they are 8-bit 4:2:0 with nothing to add, and the
+/// visible part is their first rows.
+fn in_place<S: Sample>(frame: &mut Frame<S>) -> bool {
+    let (w, h) = (frame.vis_w as usize, frame.vis_h as usize);
+    S::BITS == 8
+        && !frame.nonexisting
+        && frame.shown.grain.is_none()
+        && frame.chroma() == 1
+        && frame.crop_x == 0
+        && frame.crop_y == 0
+        && w == frame.w
+        && w % 2 == 0
+        && h <= frame.h
+        && frame.y.sole()
+        && frame.u.sole()
+        && frame.v.sole()
+}
+
+/// The output made of `frame`'s own planes, cut to the visible rows, for
+/// a frame [`in_place`] passed. Its planes are left empty.
+fn emit_planes<S: Sample>(frame: &mut Frame<S>) -> Option<VideoOutput> {
+    let (w, h) = (frame.vis_w as usize, frame.vis_h as usize);
+    let mut planes = [&mut frame.y, &mut frame.u, &mut frame.v]
+        .map(|plane| plane.take_sole().map(S::into_eight));
+    let sizes = [w * h, (w / 2) * (h / 2), (w / 2) * (h / 2)];
+    let [Some(Ok(y)), Some(Ok(u)), Some(Ok(v))] = &mut planes else {
+        return None;
+    };
+    for (plane, size) in [&mut *y, &mut *u, &mut *v].into_iter().zip(sizes) {
+        plane.truncate(size);
+    }
+    let picture = Yuv420p::try_new(
+        frame.vis_w,
+        frame.vis_h,
+        std::mem::take(y),
+        std::mem::take(u),
+        std::mem::take(v),
+    )
+    .ok()?;
+    Some(output_420(frame, picture, None, None))
+}
+
+/// [`emit`] for a picture whose planes are here.
+fn emit_whole<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
     if frame.shown.grain.is_some() {
         let mut copy = frame.clone();
         if let Some(grain) = copy.shown.grain.take() {
@@ -1696,38 +2325,42 @@ fn emit_420<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
     let y0 = frame.crop_y as usize;
     let w = frame.vis_w as usize;
     let h = frame.vis_h as usize;
-    let mut y = vec![0u8; w * h];
-    let mut u = vec![0u8; (w / 2) * (h / 2)];
-    let mut v = vec![0u8; (w / 2) * (h / 2)];
+    let mut y = Vec::with_capacity(w * h);
+    let mut u = Vec::with_capacity((w / 2) * (h / 2));
+    let mut v = Vec::with_capacity((w / 2) * (h / 2));
     let mut y_wide = wide_plane::<S>(w * h);
     let mut u_wide = wide_plane::<S>((w / 2) * (h / 2));
     let mut v_wide = wide_plane::<S>((w / 2) * (h / 2));
-    for row in 0..h {
-        let src = (y0 + row) * frame.w + x0;
-        pack_row(
-            &frame.y[src..src + w],
-            &mut y[row * w..row * w + w],
-            y_wide.as_mut(),
-        );
-    }
-    for row in 0..h / 2 {
-        let src = (y0 / 2 + row) * (frame.w / 2) + x0 / 2;
-        let n = w / 2;
-        pack_row(
-            &frame.u[src..src + n],
-            &mut u[row * n..row * n + n],
-            u_wide.as_mut(),
-        );
-        pack_row(
-            &frame.v[src..src + n],
-            &mut v[row * n..row * n + n],
-            v_wide.as_mut(),
-        );
-    }
+    let luma = Window {
+        stride: frame.w,
+        x0,
+        y0,
+        w,
+        h,
+    };
+    pack_plane(&frame.y, luma, &mut y, y_wide.as_mut());
+    let chroma = Window {
+        stride: frame.w / 2,
+        x0: x0 / 2,
+        y0: y0 / 2,
+        w: w / 2,
+        h: h / 2,
+    };
+    pack_plane(&frame.u, chroma, &mut u, u_wide.as_mut());
+    pack_plane(&frame.v, chroma, &mut v, v_wide.as_mut());
     let picture = Yuv420p::try_new(frame.vis_w, frame.vis_h, y, u, v).ok()?;
     let (yuv420p10, yuv420_high) =
         wide_output::<S>(frame.vis_w, frame.vis_h, y_wide, u_wide, v_wide);
-    Some(VideoOutput {
+    Some(output_420(frame, picture, yuv420p10, yuv420_high))
+}
+
+fn output_420<S: Sample>(
+    frame: &Frame<S>,
+    picture: Yuv420p,
+    yuv420p10: Option<Yuv420p10>,
+    yuv420_high: Option<Yuv420High>,
+) -> VideoOutput {
+    VideoOutput {
         picture,
         yuv420p10,
         yuv420_high,
@@ -1749,7 +2382,7 @@ fn emit_420<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
             time_scale: frame.time_scale,
             fixed: frame.fixed_rate,
         },
-    })
+    }
 }
 
 fn emit_422<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
@@ -1884,12 +2517,12 @@ fn pack_rect<S: Sample>(
     if w == 0 || h == 0 {
         return None;
     }
-    let mut eight = vec![0u8; w * h];
+    let mut eight = Vec::with_capacity(w * h);
     let mut wide = wide_plane::<S>(w * h);
     for row in 0..h {
         let start = (y0 + row).checked_mul(stride)?.checked_add(x0)?;
         let src = plane.get(start..start + w)?;
-        pack_row(src, &mut eight[row * w..row * w + w], wide.as_mut());
+        pack_row(src, &mut eight, wide.as_mut());
     }
     Some((eight, wide))
 }
@@ -1928,8 +2561,10 @@ fn output_of<S: Sample>(
 }
 
 pub(crate) struct Slice<'a> {
-    sps: &'a Sps,
-    pps: &'a Pps,
+    /// Borrowed while the slice is decoded where it was read; owned once
+    /// it has been handed to another thread.
+    sps: std::borrow::Cow<'a, Sps>,
+    pps: std::borrow::Cow<'a, Pps>,
     kind: u8,
     poc: i32,
     qp: i32,
@@ -1943,7 +2578,20 @@ pub(crate) struct Slice<'a> {
     poc1: Vec<i32>,
     long0: Vec<bool>,
     long1: Vec<bool>,
+    /// The second weight of each pair of references under implicit
+    /// weighting, list 0's index times `poc1.len()` plus list 1's; empty
+    /// when the slice does not weight that way.
+    implicit: Vec<i16>,
+    /// For each list, the decoded-picture-buffer slot and order count of
+    /// reference index `i` at `i + 1`, and −1 and 0 for index −1 and any
+    /// index past the list: what a macroblock keeps of its references.
+    /// One entry for each byte, so an index read as a byte finds one.
+    bound: [[(i8, i32); 256]; 2],
     weighted: bool,
+    /// For each list, bit `i` set when reference index `i` is weighted by
+    /// the default weights, which leave a prediction as it is: every bit
+    /// when the slice is not weighted.
+    unweighted: [u32; 2],
     luma_denom: i32,
     chroma_denom: i32,
     yw: [[i32; 32]; 2],
@@ -1995,6 +2643,68 @@ pub(crate) struct Slice<'a> {
     residual_y: Vec<i32>,
     residual_u: Vec<i32>,
     residual_v: Vec<i32>,
+    /// A reference picture with 8×8 inference, which a later picture's
+    /// direct prediction may take as co-located: each macroblock's
+    /// [`Colocated`] `zero` is worked out.
+    corner_zero: bool,
+}
+
+impl Slice<'_> {
+    /// The same slice holding its own parameter sets, so it can leave the
+    /// thread that read it.
+    fn into_owned(self) -> Slice<'static> {
+        Slice {
+            sps: std::borrow::Cow::Owned(self.sps.into_owned()),
+            pps: std::borrow::Cow::Owned(self.pps.into_owned()),
+            kind: self.kind,
+            poc: self.poc,
+            corner_zero: self.corner_zero,
+            qp: self.qp,
+            cabac: self.cabac,
+            deblock: self.deblock,
+            off_a: self.off_a,
+            off_b: self.off_b,
+            ref0: self.ref0,
+            ref1: self.ref1,
+            poc0: self.poc0,
+            poc1: self.poc1,
+            long0: self.long0,
+            long1: self.long1,
+            implicit: self.implicit,
+            bound: self.bound,
+            weighted: self.weighted,
+            unweighted: self.unweighted,
+            luma_denom: self.luma_denom,
+            chroma_denom: self.chroma_denom,
+            yw: self.yw,
+            yo: self.yo,
+            cw: self.cw,
+            co: self.co,
+            num_ref_l0: self.num_ref_l0,
+            num_ref_l1: self.num_ref_l1,
+            spatial_direct: self.spatial_direct,
+            origin: self.origin,
+            group_next: self.group_next,
+            sp_switch: self.sp_switch,
+            qs: self.qs,
+            base_mode: self.base_mode,
+            adaptive_base: self.adaptive_base,
+            adaptive_motion: self.adaptive_motion,
+            motion_pred: self.motion_pred,
+            residual_pred: self.residual_pred,
+            tcoeff: self.tcoeff,
+            adaptive_residual: self.adaptive_residual,
+            scale: self.scale,
+            dmvp: self.dmvp,
+            vsp: self.vsp,
+            disparity_scale: self.disparity_scale,
+            disparity_offset: self.disparity_offset,
+            ndr: self.ndr,
+            residual_y: self.residual_y,
+            residual_u: self.residual_u,
+            residual_v: self.residual_v,
+        }
+    }
 }
 
 struct SliceCursor<'a> {
@@ -2011,11 +2721,16 @@ struct SliceCursor<'a> {
 struct AuScratch<'a, S: Sample> {
     picture: &'a mut Option<Frame<S>>,
     next_mb: &'a mut usize,
-    prior: &'a mut Vec<VideoOutput>,
+    prior: &'a mut Vec<Frame<S>>,
     planes: &'a mut ColourPlanes,
     held: &'a mut Option<Frame<S>>,
     /// Reference layer for inter-layer intra prediction.
     layer: Option<&'a Frame<S>>,
+    /// Where this picture's slices are kept when it will be decoded on
+    /// another thread. `None` decodes each slice here as it is read.
+    jobs: &'a mut Option<RowPlan>,
+    /// Where a plain picture's planes come from and go back to.
+    spares: Option<&'a std::sync::Arc<Spares>>,
 }
 
 fn decode_slice<S: Sample>(
@@ -2040,6 +2755,8 @@ fn decode_slice<S: Sample>(
         planes,
         held,
         layer,
+        jobs,
+        spares,
     } = scratch;
     let mut bits = Bits::new(&nal.rbsp);
     let header = read_header(&mut bits, sets, idr, nal.ref_idc != 0, slice_class(nal))?;
@@ -2063,6 +2780,29 @@ fn decode_slice<S: Sample>(
     if sps.bit_depth != S::BITS as u8 {
         return Err(CodecError::Unsupported { what: "bit depth" });
     }
+    if jobs.is_some() {
+        // Rows are handed over as they finish only for a plain 4:2:0
+        // frame decoded in raster order. Anything else is decoded here,
+        // with every picture it may read brought here whole first.
+        let pps = sets
+            .pps
+            .get(usize::from(header.pps_id))
+            .and_then(|pps| pps.as_ref());
+        let rows = !header.field
+            && sps.frame_mbs_only
+            && sps.chroma == 1
+            && !sps.separate
+            && pps.is_some_and(|pps| pps.groups.minus1 == 0)
+            && sets.subset.iter().all(|subset| subset.is_none())
+            && layer.is_none();
+        if !rows {
+            if picture.is_some() {
+                return Err(bits.malformed("picture structure"));
+            }
+            *jobs = None;
+            settle(dpb)?;
+        }
+    }
     if header.field
         && let Some(existing) = picture.as_ref()
     {
@@ -2083,6 +2823,13 @@ fn decode_slice<S: Sample>(
         fill_frame_num_gap(&sps, poc_state, dpb, header.frame_num)?;
     }
     let (poc, frame_num_offset) = picture_order(&header, &sps, poc_state, idr)?;
+    let field_poc = field_orders(&sps, &header, poc);
+    // Clause 8.2.1: a frame's order count is the smaller of its fields'.
+    let poc = if header.field {
+        poc
+    } else {
+        field_poc[0].min(field_poc[1])
+    };
     let _ = frame_num_offset;
     let fresh = picture.is_none();
     if fresh {
@@ -2100,7 +2847,46 @@ fn decode_slice<S: Sample>(
             prior.extend(take_output(dpb, 0));
         }
         let keep_levels = sets.subset.iter().flatten().any(|sps| sps.seq_tcoeff);
-        *picture = Some(new_frame(&sps, &header, poc, packet, idr, keep_levels)?);
+        let here = jobs.is_none();
+        let mut frame = new_frame(
+            &sps,
+            &header,
+            (poc, idr),
+            packet,
+            (here, keep_levels),
+            spares,
+        )?;
+        frame.field_poc = field_poc;
+        // Decoded here, a large plain 4:2:0 frame is deblocked a row at a
+        // time, each once the row below it is decoded, while their samples
+        // are still in the cache; not all at once at its end. Its slices
+        // follow one another, which is checked below. A smaller one stays
+        // in the cache to its end and does better in one pass: 720×1280
+        // decoded 1.2% slower a row at a time, 1920×1080 0.7% faster.
+        const LARGE: usize = 1_500_000;
+        let pps = sets
+            .pps
+            .get(usize::from(header.pps_id))
+            .and_then(|pps| pps.as_ref());
+        if here
+            && frame.w.saturating_mul(frame.h) >= LARGE
+            && !header.field
+            && sps.frame_mbs_only
+            && sps.chroma == 1
+            && !sps.separate
+            && pps.is_some_and(|pps| pps.groups.minus1 == 0)
+            && sets.subset.iter().all(|subset| subset.is_none())
+            && layer.is_none()
+        {
+            frame.writer = Some(Writer {
+                lag: true,
+                ..Writer::default()
+            });
+        } else {
+            // Its records are unset here, all at once: see `new_frame`.
+            unset_records(&mut frame.mb);
+        }
+        *picture = Some(frame);
         *next_mb = 0;
         if header.nal_ref {
             poc_state.prev_frame_num = header.frame_num;
@@ -2127,6 +2913,20 @@ fn decode_slice<S: Sample>(
         return Err(bits.malformed("picture"));
     };
     let total = pic.mb_w.saturating_mul(pic.h / 16);
+    if let Some(plan) = jobs.as_mut() {
+        // Kept for the thread that will decode the picture. It checks
+        // there that the slices follow one another and cover the picture.
+        let cabac_init = slice.cabac.then(|| cabac_init(&header));
+        plan.slices.push(SliceJob {
+            rbsp: nal.rbsp.clone(),
+            start_bit: bits.pos(),
+            slice: slice.into_owned(),
+            slice_id,
+            cabac_init,
+        });
+        *next_mb = total;
+        return Ok(true);
+    }
     let wrong_start = if slice.group_next.is_empty() {
         slice.origin != *next_mb
     } else {
@@ -2531,11 +3331,12 @@ fn read_header(
         let _ = bits.ue()?;
     }
     let mut poc_lsb = 0i32;
+    // For order count type 0 the second entry is delta_pic_order_cnt_bottom.
     let mut delta_poc = [0i32; 2];
     if sps.poc_type == 0 {
         poc_lsb = bits.u(u32::from(sps.log2_max_poc_lsb))? as i32;
         if pps.bottom_field_pic_order && !field {
-            let _ = bits.se()?;
+            delta_poc[1] = bits.se()?;
         }
     } else if sps.poc_type == 1 && !sps.delta_pic_order_always_zero {
         delta_poc[0] = bits.se()?;
@@ -2629,6 +3430,21 @@ fn read_header(
                     co: &mut co,
                 },
             )?;
+        }
+        // Every weight the default one, 2^denom with no offset, weights
+        // nothing: one prediction comes out as it is and two as their
+        // rounded average, as FFmpeg's `use_weight` left clear has them
+        // predicted. Adaptive luma compensation reads the flag apart.
+        let plain = |list: usize, count: usize| {
+            (0..count.min(32)).all(|i| {
+                yw[list][i] == 1 << luma_denom
+                    && yo[list][i] == 0
+                    && cw[list][i] == [1 << chroma_denom; 2]
+                    && co[list][i] == [0; 2]
+            })
+        };
+        if !sps.alc && plain(0, num_ref_l0) && (kind != 1 || plain(1, num_ref_l1)) {
+            weights = false;
         }
     }
     let mut no_output_prior = false;
@@ -3422,6 +4238,26 @@ fn picture_order(
     Ok((poc, offset))
 }
 
+/// Clause 8.2.1: the order counts of a frame's top and bottom fields, from
+/// the count [`picture_order`] gave. Type 0 gives the top field's and sends
+/// the bottom one as a difference; type 1 gives the smaller of the two,
+/// which lie a known distance apart; type 2 gives both the same. A field
+/// picture has the one count.
+fn field_orders(sps: &Sps, header: &Header, poc: i32) -> [i32; 2] {
+    if header.field {
+        return [poc; 2];
+    }
+    match sps.poc_type {
+        0 => [poc, poc.saturating_add(header.delta_poc[1])],
+        1 => {
+            let apart = sps.offset_top_bottom.saturating_add(header.delta_poc[1]);
+            let top = poc.saturating_sub(apart.min(0));
+            [top, top.saturating_add(apart)]
+        }
+        _ => [poc; 2],
+    }
+}
+
 /// Clause 8.2.1.2. A frame's order count is the smaller of the two fields.
 fn poc_type1(
     sps: &Sps,
@@ -3467,10 +4303,12 @@ fn poc_type1(
 fn new_frame<S: Sample>(
     sps: &Sps,
     header: &Header,
-    poc: i32,
+    (poc, idr): (i32, bool),
     packet: &Packet,
-    idr: bool,
-    keep_levels: bool,
+    // Whether to make the planes now, and whether to keep luma levels.
+    // A picture bound for another thread gets its planes there.
+    (planes, keep_levels): (bool, bool),
+    spares: Option<&std::sync::Arc<Spares>>,
 ) -> Result<Frame<S>, CodecError> {
     let (mut vis_w, mut vis_h) = sps.visible()?;
     let field_pic = header.field;
@@ -3522,15 +4360,21 @@ fn new_frame<S: Sample>(
     } else {
         0
     };
+    let (luma, chroma, blocks) = if planes {
+        (w.saturating_mul(h), chroma, mb_w.saturating_mul(mb_h))
+    } else {
+        (0, 0, 0)
+    };
     Ok(Frame {
-        y: vec![S::default(); w.saturating_mul(h)],
-        u: vec![S::mid(); chroma],
-        v: vec![S::mid(); chroma],
-        mb: vec![Mb::new(u16::MAX); mb_w.saturating_mul(mb_h)],
+        y: plane(spares, luma, S::default(), true),
+        u: plane(spares, chroma, S::mid(), sps.chroma != 0),
+        v: plane(spares, chroma, S::mid(), sps.chroma != 0),
+        mb: records(spares, blocks, false),
         w,
         h,
         mb_w,
         poc,
+        field_poc: [poc; 2],
         frame_num: header.frame_num,
         referenced: header.nal_ref,
         long_term: header.long_term_ref,
@@ -3586,7 +4430,10 @@ fn new_frame<S: Sample>(
             vec![0; mb_w.saturating_mul(mb_h).saturating_mul(stride)]
         } else {
             Vec::new()
-        },
+        }
+        .into(),
+        pending: None,
+        writer: None,
     })
 }
 
@@ -3739,6 +4586,22 @@ fn make_slice<'a, S: Sample>(
     )?;
     let (poc0, long0) = ref_marks(dpb, &ref0);
     let (poc1, long1) = ref_marks(dpb, &ref1);
+    let implicit = if pps.weighted_bipred == 2 && header.kind == 1 {
+        mb::implicit_table(poc, (&poc0, &long0), (&poc1, &long1))
+    } else {
+        Vec::new()
+    };
+    let bound = [(&ref0, &poc0), (&ref1, &poc1)].map(|(slots, pocs)| {
+        std::array::from_fn(|at| {
+            let Some(index) = at.checked_sub(1) else {
+                return (-1, 0);
+            };
+            let slot = slots
+                .get(index)
+                .map_or(-1, |&slot| i8::try_from(slot).unwrap_or(-1));
+            (slot, pocs.get(index).copied().unwrap_or(0))
+        })
+    });
     let origin = if sps.mbaff && !header.field {
         header.first_mb.saturating_mul(2)
     } else {
@@ -3781,11 +4644,25 @@ fn make_slice<'a, S: Sample>(
         chroma_denom = 0;
     }
     let disparity = disparity_tables(sets, sps, header)?;
+    let mut unweighted = [u32::MAX; 2];
+    if weighted {
+        for (list, bits) in unweighted.iter_mut().enumerate() {
+            *bits = 0;
+            for i in 0..32 {
+                let plain = yw[list][i] == 1 << luma_denom
+                    && yo[list][i] == 0
+                    && cw[list][i] == [1 << chroma_denom; 2]
+                    && co[list][i] == [0; 2];
+                *bits |= u32::from(plain) << i;
+            }
+        }
+    }
     Ok(Slice {
-        sps,
-        pps,
+        sps: std::borrow::Cow::Borrowed(sps),
+        pps: std::borrow::Cow::Borrowed(pps),
         kind: header.kind,
         poc,
+        corner_zero: header.nal_ref && sps.direct_8x8_inference,
         qp: header.qp,
         cabac: pps.cabac,
         deblock: header.deblock,
@@ -3793,11 +4670,14 @@ fn make_slice<'a, S: Sample>(
         off_b: header.off_b,
         ref0,
         ref1,
+        bound,
         poc0,
         poc1,
         long0,
         long1,
+        implicit,
         weighted,
+        unweighted,
         luma_denom,
         chroma_denom,
         yw,
@@ -4034,11 +4914,436 @@ fn put_block<S: Sample>(
     n: usize,
     step: usize,
 ) {
-    for row in 0..n {
-        for col in 0..n {
-            plane[(y + row * step) * stride + x + col] = src[row * n + col];
+    if n == 0 {
+        return;
+    }
+    let (at, down) = (y * stride + x, stride * step);
+    let stored = match n {
+        4 => store_rows::<S, 4>(plane, at, down, src),
+        8 => store_rows::<S, 8>(plane, at, down, src),
+        16 => store_rows::<S, 16>(plane, at, down, src),
+        _ => false,
+    };
+    if stored {
+        return;
+    }
+    for (row, samples) in src.chunks_exact(n).take(n).enumerate() {
+        let at = (y + row * step) * stride + x;
+        plane[at..at + n].copy_from_slice(samples);
+    }
+}
+
+/// The first `N` rows of `N` samples of `src` written over `plane` from
+/// `at`, rows `down` apart, by [`Sample::store_fast`].
+#[inline(always)]
+fn store_rows<S: Sample, const N: usize>(
+    plane: &mut [S],
+    at: usize,
+    down: usize,
+    src: &[S],
+) -> bool {
+    src.as_chunks::<N>()
+        .0
+        .first_chunk::<N>()
+        .is_some_and(|rows| S::store_fast(plane, at, down, rows))
+}
+
+/// One slice of a picture, held so any thread can decode it.
+struct SliceJob {
+    rbsp: Vec<u8>,
+    /// Where the slice data starts in `rbsp`, in bits.
+    start_bit: usize,
+    slice: Slice<'static>,
+    slice_id: u16,
+    /// The CABAC table choice. `None` is a CAVLC slice.
+    cabac_init: Option<usize>,
+}
+
+/// The slices of the access unit being read, when its picture will be
+/// decoded on another thread.
+#[derive(Default)]
+struct RowPlan {
+    slices: Vec<SliceJob>,
+}
+
+/// A picture to decode: its empty planes, the pictures its slices refer to
+/// as the decoded picture buffer stood when they were read, and the slices.
+struct PictureJob<S: Sample> {
+    pic: Frame<S>,
+    dpb: Vec<Frame<S>>,
+    slices: Vec<SliceJob>,
+    spares: std::sync::Arc<Spares>,
+    /// When and how the picture is shown, settled after its slices.
+    shown: Shown,
+}
+
+/// Ends a picture as failed if its thread stops before saying how it went,
+/// so nothing waits on it for ever.
+struct EndsPicture<S: Sample>(std::sync::Arc<progress::Published<S>>);
+
+impl<S: Sample> Drop for EndsPicture<S> {
+    fn drop(&mut self) {
+        if !self.0.finished() {
+            self.0.finish(Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "picture",
+            }));
         }
     }
+}
+
+/// Decodes one picture and publishes it, rows first and then whole.
+fn run_picture<S: Sample>(job: PictureJob<S>) {
+    let PictureJob {
+        mut pic,
+        dpb,
+        slices,
+        spares: job_spares,
+        shown,
+    } = job;
+    let Some(published) = pic.pending.clone() else {
+        return;
+    };
+    let ends = EndsPicture(published);
+    // The planes are made here, on the thread that fills them.
+    let blocks = pic.mb_w.saturating_mul(pic.h / 16);
+    // Only 4:2:0 comes here, so every sample is written.
+    let spares = Some(&job_spares);
+    let chroma = (pic.w / 2).saturating_mul(pic.h / 2);
+    pic.y = plane(spares, pic.w.saturating_mul(pic.h), S::default(), true);
+    pic.u = plane(spares, chroma, S::mid(), true);
+    pic.v = plane(spares, chroma, S::mid(), true);
+    // Unset a row at a time as it is decoded: see `Writer::set`.
+    pic.mb = records(spares, blocks, false);
+    let result = decode_picture(&mut pic, &dpb, &slices).map(|()| {
+        // The picture is put in its output form here too, so the caller
+        // only has to pick it up.
+        pic.shown = shown;
+        pic.seal();
+        // A reference is read from here on through the rows it published,
+        // all in, as later pictures read it while it was being decoded; so
+        // what it was decoded into is needed only for its output. No later
+        // picture reads one that is not a reference. Either way, its planes
+        // can be the output as they stand.
+        let published = !pic.referenced || ends.0.complete();
+        let output = if !pic.output {
+            None
+        } else if published && in_place(&mut pic) {
+            emit_planes(&mut pic)
+        } else {
+            emit_whole(&pic)
+        };
+        if pic.referenced && published {
+            // Nor are they kept when the output did not take them.
+            for plane in [&mut pic.y, &mut pic.u, &mut pic.v] {
+                *plane = Shared::default();
+            }
+            pic.mb = Shared::default();
+        }
+        progress::Planes {
+            handed_out: pic.y.is_empty(),
+            y: std::mem::take(&mut pic.y),
+            u: std::mem::take(&mut pic.u),
+            v: std::mem::take(&mut pic.v),
+            mb: std::mem::take(&mut pic.mb),
+            output: std::sync::Mutex::new(output),
+        }
+    });
+    ends.0.finish(result);
+}
+
+fn decode_picture<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slices: &[SliceJob],
+) -> Result<(), CodecError> {
+    let total = pic.mb_w.saturating_mul(pic.h / 16);
+    let mut next_mb = 0usize;
+    for job in slices {
+        if job.slice.origin != next_mb {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "first macroblock",
+            });
+        }
+        let mut bits = Bits::at(&job.rbsp, job.start_bit)?;
+        let entropy_slice = &job.slice;
+        match job.cabac_init {
+            Some(init) => {
+                let mut cab = Cabac::start(&mut bits, entropy_slice.qp, init)?;
+                mb::decode_mbs(
+                    pic,
+                    dpb,
+                    entropy_slice,
+                    job.slice_id,
+                    &mut next_mb,
+                    Entropy::Cabac(&mut cab),
+                    None,
+                )?;
+            }
+            None => mb::decode_mbs(
+                pic,
+                dpb,
+                entropy_slice,
+                job.slice_id,
+                &mut next_mb,
+                Entropy::Cavlc(Cavlc::plain(bits)),
+                None,
+            )?,
+        }
+    }
+    if next_mb != total {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "incomplete picture",
+        });
+    }
+    mb::finish_rows(pic);
+    // A picture that read from one that failed is not to be shown either.
+    for job in slices {
+        for &index in job.slice.ref0.iter().chain(&job.slice.ref1) {
+            let failure = dpb
+                .get(index)
+                .and_then(|frame| frame.pending.as_ref())
+                .and_then(|pending| pending.failure());
+            if let Some(error) = failure {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Gives a picture decoded on another thread its finished planes. One
+/// whose planes became its output keeps its link to that output, and to
+/// the rows it published, which a later picture reads instead.
+fn fill<S: Sample>(frame: &mut Frame<S>, planes: &progress::Planes<S>) {
+    if planes.handed_out {
+        return;
+    }
+    frame.y = planes.y.clone();
+    frame.u = planes.u.clone();
+    frame.v = planes.v.clone();
+    frame.mb = planes.mb.clone();
+    frame.pending = None;
+}
+
+/// Waits for every picture still being decoded and brings each here
+/// whole, for code that reads pictures directly.
+fn settle<S: Sample>(dpb: &mut [Frame<S>]) -> Result<(), CodecError> {
+    for frame in dpb {
+        if let Some(published) = frame.pending.clone() {
+            let planes = published.planes()?;
+            // A reference whose planes went out is copied from its rows.
+            if planes.handed_out
+                && let (Some([y, u, v]), Some(mb)) = (published.copy_whole(), published.copy_mbs())
+            {
+                (frame.y, frame.u, frame.v, frame.mb) = (y, u, v, mb);
+                frame.pending = None;
+            }
+            fill(frame, planes);
+        }
+    }
+    Ok(())
+}
+
+/// [`settle`] for the pictures that are already finished, without waiting.
+fn settle_finished<S: Sample>(dpb: &mut [Frame<S>]) {
+    for frame in dpb {
+        if let Some(published) = frame.pending.clone()
+            && published.finished()
+            && let Ok(planes) = published.planes()
+        {
+            fill(frame, planes);
+        }
+    }
+}
+
+/// A picture waiting its turn to be returned.
+struct Queued {
+    /// Whether taking it will not wait.
+    ready: Box<dyn Fn() -> bool + Send>,
+    /// The picture, `None` when it has nothing to show, or the error that
+    /// ended its decoding.
+    take: Box<dyn FnOnce() -> Result<Option<VideoOutput>, CodecError> + Send>,
+}
+
+impl Queued {
+    fn new<S: Sample>(frame: Frame<S>) -> Self {
+        let pending = frame.pending.clone();
+        Self {
+            ready: Box::new(move || pending.as_ref().is_none_or(|pending| pending.finished())),
+            take: Box::new(move || {
+                if let Some(pending) = &frame.pending {
+                    // Its thread left the picture ready to hand over.
+                    let made = pending
+                        .planes()?
+                        .output
+                        .lock()
+                        .ok()
+                        .and_then(|mut made| made.take());
+                    if made.is_some() {
+                        return Ok(made);
+                    }
+                }
+                Ok(emit_owned(frame))
+            }),
+        }
+    }
+}
+
+/// Threads kept for each core asked for. Most pictures in a chain wait on
+/// the one in front and use no core while they do.
+const IN_FLIGHT_PER_CORE: usize = 4;
+/// Pictures in flight for every two cores asked for. More decode no faster
+/// on 8 or 18 cores, at 1080p or 4K, and each holds its planes.
+const DEPTH_PER_TWO_CORES: usize = 3;
+/// Memory the pictures in flight may take together, for each core asked
+/// for, which holds their number down for large pictures. On 8 cores, at
+/// eight bytes a sample, this lets ten 4K pictures fly; that is as many as
+/// help there, but on 18 cores held 4K to 0.89 s against 0.71 s with
+/// twenty, as the budget now allows.
+const IN_FLIGHT_BYTES_PER_CORE: usize = 1 << 27;
+
+type Task = Box<dyn FnOnce() + Send>;
+
+/// The threads that decode pictures.
+struct Pool {
+    /// `None` runs each task where it is handed over.
+    sender: Option<std::sync::mpsc::Sender<Task>>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+    /// How many pictures the threads can decode at once.
+    depth: usize,
+    /// Memory the pictures in flight may take together.
+    budget: usize,
+    /// Tasks handed over and not yet finished.
+    flying: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// One permit per core asked for. `None` runs tasks where they are
+    /// handed over, with nothing to share.
+    permits: Option<std::sync::Arc<progress::Permits>>,
+}
+
+/// Counts a task as finished when it ends, however it ends.
+struct Lands(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for Lands {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl Pool {
+    /// For `cores` processor cores: that many permits to decode, and a
+    /// thread for each picture that may be in flight.
+    fn new(cores: usize) -> Self {
+        let (sender, receiver) = std::sync::mpsc::channel::<Task>();
+        let receiver = std::sync::Arc::new(std::sync::Mutex::new(receiver));
+        let permits = std::sync::Arc::new(progress::Permits::new(cores));
+        let mut workers = Vec::new();
+        for index in 0..cores.saturating_mul(IN_FLIGHT_PER_CORE) {
+            let receiver = receiver.clone();
+            let permits = permits.clone();
+            let spawned = std::thread::Builder::new()
+                .name(format!("h264-{index}"))
+                .spawn(move || {
+                    loop {
+                        let task = match receiver.lock() {
+                            Ok(receiver) => receiver.recv(),
+                            Err(_) => return,
+                        };
+                        let Ok(task) = task else {
+                            return;
+                        };
+                        // A task that unwinds has already marked its
+                        // picture failed; the thread goes on to the next.
+                        permits.take();
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task));
+                        permits.give();
+                    }
+                });
+            if let Ok(worker) = spawned {
+                workers.push(worker);
+            }
+        }
+        if workers.is_empty() {
+            return Self::inline();
+        }
+        let depth = workers
+            .len()
+            .min(cores.saturating_mul(DEPTH_PER_TWO_CORES).div_ceil(2));
+        Self {
+            sender: Some(sender),
+            workers,
+            depth,
+            budget: cores.saturating_mul(IN_FLIGHT_BYTES_PER_CORE),
+            flying: std::sync::Arc::default(),
+            permits: Some(permits),
+        }
+    }
+
+    fn inline() -> Self {
+        Self {
+            sender: None,
+            workers: Vec::new(),
+            depth: 0,
+            budget: 0,
+            flying: std::sync::Arc::default(),
+            permits: None,
+        }
+    }
+
+    fn flying(&self) -> usize {
+        self.flying.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn run(&self, task: Task) {
+        self.flying
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        let lands = Lands(self.flying.clone());
+        let task: Task = Box::new(move || {
+            let _lands = lands;
+            task();
+        });
+        match &self.sender {
+            Some(sender) => {
+                if let Err(unsent) = sender.send(task) {
+                    (unsent.0)();
+                }
+            }
+            None => task(),
+        }
+    }
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        // Closing the channel ends each thread once it has no task left.
+        self.sender = None;
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// One bit for each of the first 64 levels of `coeffs` that is not zero.
+fn level_set(coeffs: &[i32]) -> u64 {
+    let mut set = 0u64;
+    for (index, &level) in coeffs.iter().enumerate().take(64) {
+        set |= u64::from(level != 0) << index;
+    }
+    set
+}
+
+/// The places of the bits of `set`, lowest first.
+fn set_places(mut set: u64) -> impl Iterator<Item = usize> {
+    core::iter::from_fn(move || {
+        if set == 0 {
+            return None;
+        }
+        let index = set.trailing_zeros() as usize;
+        set &= set - 1;
+        Some(index)
+    })
 }
 
 fn add_scaled<S: Sample>(
@@ -4048,48 +5353,72 @@ fn add_scaled<S: Sample>(
     coeffs: &[i32],
     quant: (i32, bool),
     weight: &[u8],
-    n: usize,
+    // The block's size, and whether its coefficients are in field order.
+    (n, field): (usize, bool),
 ) {
     let (x, y, step) = origin;
     let (qp, bypass) = quant;
+    // A block whose flag said it holds no coefficients adds nothing. The
+    // levels are tested without stopping early, which is one pass the
+    // compiler can widen; most of a block is zero either way.
+    let set = level_set(coeffs);
+    if set == 0 {
+        return;
+    }
+    // A lone DC level is one value for the whole block.
+    if set == 1 && !bypass && (n == 4 || n == 8) {
+        let (Some(&level), Some(&weight)) = (coeffs.first(), weight.first()) else {
+            return;
+        };
+        let dc = if n == 4 {
+            recon::scale4(level, qp + S::QP_BD, 0, 0, i32::from(weight))
+        } else {
+            recon::scale8(level, qp + S::QP_BD, 0, 0, i32::from(weight))
+        };
+        recon::add_dc(plane, stride, (x, y, step), (dc + 32) >> 6, n);
+        return;
+    }
     if n == 4 {
+        let scan = set::scan4(field);
         let mut block = [0i32; 16];
         if bypass {
-            for (i, &pos) in ZIGZAG4.iter().enumerate() {
+            for (i, &pos) in scan.iter().enumerate() {
                 block[pos] = coeffs.get(i).copied().unwrap_or(0);
             }
         } else {
-            for (i, &pos) in ZIGZAG4.iter().enumerate() {
+            // A zero level scales to zero, and most are zero.
+            for i in set_places(set) {
+                let (Some(&pos), Some(&level)) = (scan.get(i), coeffs.get(i)) else {
+                    break;
+                };
                 let (ry, rx) = (pos / 4, pos % 4);
-                block[ry * 4 + rx] = recon::scale4(
-                    coeffs.get(i).copied().unwrap_or(0),
-                    qp + S::QP_BD,
-                    rx,
-                    ry,
-                    i32::from(weight[ry * 4 + rx]),
-                );
+                block[ry * 4 + rx] =
+                    recon::scale4(level, qp + S::QP_BD, rx, ry, i32::from(weight[ry * 4 + rx]));
             }
-            recon::idct4(&mut block);
+            // A lone DC went the short way above.
+            recon::add_idct4_full(plane, stride, x, y, &mut block, step);
+            return;
         }
         recon::add_block(plane, stride, x, y, &block, 4, step);
     } else {
+        let scan = set::scan8(field);
         let mut block = [0i32; 64];
         if bypass {
-            for (i, &pos) in ZIGZAG8.iter().enumerate() {
+            for (i, &pos) in scan.iter().enumerate() {
                 block[pos] = coeffs.get(i).copied().unwrap_or(0);
             }
         } else {
-            for (i, &pos) in ZIGZAG8.iter().enumerate() {
+            for i in set_places(set) {
+                let (Some(&pos), Some(&level)) = (scan.get(i), coeffs.get(i)) else {
+                    break;
+                };
                 let (ry, rx) = (pos / 8, pos % 8);
-                block[ry * 8 + rx] = recon::scale8(
-                    coeffs.get(i).copied().unwrap_or(0),
-                    qp + S::QP_BD,
-                    rx,
-                    ry,
-                    i32::from(weight[pos]),
-                );
+                block[ry * 8 + rx] =
+                    recon::scale8(level, qp + S::QP_BD, rx, ry, i32::from(weight[pos]));
             }
-            recon::idct8(&mut block);
+            // A lone DC went the short way above.
+            recon::add_idct8_full(plane, stride, x, y, &mut block, step);
+            return;
         }
         recon::add_block(plane, stride, x, y, &block, 8, step);
     }
@@ -4151,6 +5480,33 @@ mod tests {
         assert_eq!(order(2, false, [3, -8]), -3);
         let wide = type1_sps(&[2_000_000_000], 0, 0);
         assert!(super::poc_type1(&wide, 0, 2, true, [0, 0]).is_err());
+    }
+
+    /// Clause 8.2.1: each field of a frame has its own order count. Type 0
+    /// sends the bottom field's as a difference from the top's; type 1
+    /// places the fields a set distance apart around the smaller count.
+    #[test]
+    fn a_frame_keeps_the_order_count_of_each_field() {
+        let mut header = p_header(1, 1, Vec::new());
+        let mut sps = type1_sps(&[2, 4], -1, 1);
+        sps.poc_type = 0;
+        header.delta_poc = [0, -1];
+        assert_eq!(super::field_orders(&sps, &header, 8), [8, 7]);
+        header.delta_poc = [0, 3];
+        assert_eq!(super::field_orders(&sps, &header, 8), [8, 11]);
+        // Type 1: `poc` is already the smaller of the two.
+        sps.poc_type = 1;
+        header.delta_poc = [0, 0];
+        assert_eq!(super::field_orders(&sps, &header, 8), [8, 9]);
+        header.delta_poc = [0, -4];
+        assert_eq!(super::field_orders(&sps, &header, 8), [11, 8]);
+        sps.poc_type = 2;
+        assert_eq!(super::field_orders(&sps, &header, 8), [8, 8]);
+        // A field picture has the one count.
+        sps.poc_type = 0;
+        header.field = true;
+        header.delta_poc = [0, 5];
+        assert_eq!(super::field_orders(&sps, &header, 8), [8, 8]);
     }
 
     #[test]
@@ -4325,14 +5681,15 @@ mod tests {
     fn held(frame_num: u32) -> super::Frame {
         use cutlass_decode::{ColorMatrix, ColorPrimaries, ColorRange, SampleAspect, Transfer};
         super::Frame {
-            y: Vec::new(),
-            u: Vec::new(),
-            v: Vec::new(),
-            mb: Vec::new(),
+            y: Vec::new().into(),
+            u: Vec::new().into(),
+            v: Vec::new().into(),
+            mb: Vec::new().into(),
             w: 16,
             h: 16,
             mb_w: 1,
             poc: i32::try_from(frame_num).unwrap_or(0),
+            field_poc: [i32::try_from(frame_num).unwrap_or(0); 2],
             frame_num,
             referenced: true,
             long_term: false,
@@ -4373,7 +5730,9 @@ mod tests {
             svc_top: 0,
             svc_right: 0,
             svc_bottom: 0,
-            levels: Vec::new(),
+            levels: Vec::new().into(),
+            pending: None,
+            writer: None,
         }
     }
 
@@ -4683,12 +6042,25 @@ mod tests {
             "cabac=1:slices=4:bframes=2:ref=2:keyint=30:scenecut=0".to_owned(),
             "main",
         ));
+        // Constrained intra prediction over noise: intra 8×8 blocks of
+        // P and B pictures whose upper-left neighbour is inter, so the
+        // corner sample is missing while those above and left are not.
+        cases.push((
+            "high constrained intra noisy".to_owned(),
+            "cabac=1:8x8dct=1:constrained-intra=1:bframes=2:keyint=8:scenecut=0".to_owned(),
+            "high",
+        ));
         for (index, (name, params, profile)) in cases.iter().enumerate() {
+            let noise = if name.contains("noisy") {
+                ",noise=alls=80:allf=t"
+            } else {
+                ""
+            };
             let h264 = dir.join(format!("{index}.h264"));
             let yuv = dir.join(format!("{index}.yuv"));
             let encoded = Command::new(&ff)
                 .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
-                .arg(format!("testsrc2=size={width}x{height}:rate=30"))
+                .arg(format!("testsrc2=size={width}x{height}:rate=30{noise}"))
                 .args([
                     "-frames:v",
                     &frames.to_string(),
@@ -4751,6 +6123,145 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pictures with motion in every direction, some of it off the edges.
+    fn moving_pictures(width: u32, height: u32, count: usize) -> Vec<Packet> {
+        let mut params = CodecParams::video(CodecId::H264, width, height);
+        params.nal_length_size = 0;
+        params.bitrate = 600_000;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let (w, h) = (width as usize, height as usize);
+        let mut packets = Vec::new();
+        for index in 0..count {
+            let shift = index * 3;
+            let luma = |x: usize, y: usize| {
+                let (x, y) = (x + shift, y + shift / 2);
+                (((x / 8) ^ (y / 8)) * 37 + x * 2 + y) as u8
+            };
+            let y: Vec<u8> = (0..w * h).map(|i| luma(i % w, i / w)).collect();
+            let u: Vec<u8> = (0..w * h / 4)
+                .map(|i| luma(i % (w / 2), i / (w / 2)) / 2 + 60)
+                .collect();
+            let v: Vec<u8> = (0..w * h / 4)
+                .map(|i| 200 - luma(i / (w / 2), i % (w / 2)) / 2)
+                .collect();
+            let input = VideoInput {
+                picture: Yuv420p::try_new(width, height, y, u, v).unwrap(),
+                pts: index as i64,
+                duration: 1,
+                timescale: 30,
+                force_keyframe: index == 0,
+            };
+            packets.extend(encoder.push(&input).unwrap());
+        }
+        packets.extend(encoder.drain().unwrap());
+        packets
+    }
+
+    type Shown = (i64, Vec<u8>, Vec<u8>, Vec<u8>);
+
+    fn shown(decoder: &mut H264Decoder, packets: &[Packet]) -> Vec<Shown> {
+        let mut out = Vec::new();
+        for packet in packets {
+            out.extend(decoder.push(packet).unwrap());
+        }
+        out.extend(decoder.drain().unwrap());
+        out.into_iter()
+            .map(|frame| {
+                (
+                    frame.pts,
+                    frame.picture.y().to_vec(),
+                    frame.picture.u().to_vec(),
+                    frame.picture.v().to_vec(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn threads_give_the_same_pictures_in_the_same_order() {
+        let packets = moving_pictures(176, 144, 40);
+        let mut params = CodecParams::video(CodecId::H264, 176, 144);
+        params.nal_length_size = 0;
+        let want = shown(&mut H264Decoder::open(&params).unwrap(), &packets);
+        assert_eq!(want.len(), 40);
+        let inline = shown(
+            &mut H264Decoder::open(&params).unwrap().with_rows_inline(),
+            &packets,
+        );
+        assert!(inline == want, "rows decoded in turn on one thread differ");
+        for threads in [2, 3, 8] {
+            for _ in 0..4 {
+                let mut decoder = H264Decoder::open(&params).unwrap().with_threads(threads);
+                let got = shown(&mut decoder, &packets);
+                assert!(got == want, "{threads} threads differ");
+            }
+        }
+    }
+
+    #[test]
+    fn large_pictures_deblocked_a_row_behind_match_the_threaded_rows() {
+        // Large enough to be deblocked a row at a time on one thread, each
+        // row once the one below is decoded; the threaded way sets the
+        // last line of each row aside instead. A row filtered too early
+        // or too late would show as a difference.
+        let (width, height) = (1600, 960);
+        let packets = moving_pictures(width, height, 6);
+        let mut params = CodecParams::video(CodecId::H264, width, height);
+        params.nal_length_size = 0;
+        let want = shown(&mut H264Decoder::open(&params).unwrap(), &packets);
+        assert_eq!(want.len(), 6);
+        let rows = shown(
+            &mut H264Decoder::open(&params).unwrap().with_rows_inline(),
+            &packets,
+        );
+        assert!(rows == want, "rows a row behind differ from rows set aside");
+    }
+
+    #[test]
+    fn a_threaded_decoder_can_be_reset_and_used_again() {
+        let packets = moving_pictures(64, 48, 12);
+        let mut params = CodecParams::video(CodecId::H264, 64, 48);
+        params.nal_length_size = 0;
+        let want = shown(&mut H264Decoder::open(&params).unwrap(), &packets);
+        let mut decoder = H264Decoder::open(&params).unwrap().with_threads(4);
+        // Stop part of the way through, with pictures still in flight.
+        for packet in &packets[..7] {
+            decoder.push(packet).unwrap();
+        }
+        decoder.reset();
+        assert!(shown(&mut decoder, &packets) == want);
+    }
+
+    #[test]
+    fn threads_report_a_broken_picture_and_do_not_hang() {
+        let mut packets = moving_pictures(64, 48, 12);
+        // Cut a later picture's slice data short.
+        let cut = packets[5].data.len() / 2;
+        packets[5].data.truncate(cut);
+        let mut params = CodecParams::video(CodecId::H264, 64, 48);
+        params.nal_length_size = 0;
+        let mut decoder = H264Decoder::open(&params).unwrap().with_threads(4);
+        let mut errors = 0;
+        let mut pictures = 0;
+        for packet in &packets {
+            match decoder.push(packet) {
+                Ok(out) => pictures += out.len(),
+                Err(_) => errors += 1,
+            }
+        }
+        for _ in 0..packets.len() + 2 {
+            match decoder.drain() {
+                Ok(out) => {
+                    pictures += out.len();
+                    break;
+                }
+                Err(_) => errors += 1,
+            }
+        }
+        assert!(errors > 0, "the broken picture was not reported");
+        assert!(pictures < packets.len());
     }
 
     #[test]

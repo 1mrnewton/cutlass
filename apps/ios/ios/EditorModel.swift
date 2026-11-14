@@ -14,6 +14,10 @@ import os
 @Observable
 final class EditorModel {
     private(set) var lanes: [Lane] = []
+    /// The cuts between touching main clips, with their transitions.
+    private(set) var cuts: [Cut] = []
+    /// The cut whose transition the panel edits, by the clip before it.
+    var selectedCut: String?
     private(set) var durationUs: Int64 = 0
     private(set) var playheadUs: Int64 = 0 {
         didSet { if playheadUs != oldValue, selectedClip != nil { refreshStage() } }
@@ -45,6 +49,18 @@ final class EditorModel {
     private(set) var animations: ClipAnimations?
     /// The Animations panel's presets; they never change.
     let animationList = animationPresets()
+    /// How the selected clip stands at the playhead, for its clip tools.
+    private(set) var clipState: ClipState?
+    /// Whether clips on other rows move and go with the main clip under them.
+    private(set) var linkage = false
+    /// The Filters panel's filters; they never change.
+    let filterList = filterChoices()
+    /// The filter the selected clip keeps, or a selected filter layer's own.
+    private(set) var clipFilter: ClipFilter?
+    /// The selected picture's or adjustment layer's sliders.
+    private(set) var adjustSliders: [AdjustSlider]?
+    /// Filter tile pictures by filter id, drawn by Rust once each.
+    private(set) var posters: [String: CGImage] = [:]
 
     /// Points per microsecond on the timeline. Rust holds it inside what
     /// the cut allows.
@@ -303,6 +319,68 @@ final class EditorModel {
         if let added { selectedClip = added }
     }
 
+    /// Run `effect` over the selected picture alone, for its span.
+    func addClipEffect(_ effect: String) {
+        guard let clip = selectedClip else { return }
+        pause()
+        edit { _ = try $0.addClipEffect(clipId: clip, effectId: effect) }
+    }
+
+    // MARK: Filters and adjust
+
+    /// Pick `filter` (empty for none): on the selected picture or filter
+    /// layer it takes the place of the one there; with nothing selected a
+    /// filter layer goes at the playhead and is selected.
+    func pickFilter(_ filter: String) {
+        pause()
+        if let clip = selectedClip {
+            var placed: String?
+            edit { placed = try $0.setClipFilter(clipId: clip, filterId: filter) }
+            // A filter layer swapped in place is a new clip: select it.
+            if let placed, selectedClip == nil { selectedClip = placed }
+        } else if !filter.isEmpty {
+            var added: String?
+            edit { added = try $0.addFilter(filterId: filter, atUs: playheadUs) }
+            if let added { selectedClip = added }
+        }
+    }
+
+    /// How strong the kept filter is, 0 to 1.
+    func setFilterStrength(_ value: Double) {
+        guard let layer = clipFilter?.layerId else { return }
+        edit { try $0.setStrength(clipId: layer, value: value) }
+    }
+
+    /// Put an adjustment layer at the playhead and select it.
+    func addAdjustment() {
+        pause()
+        var added: String?
+        edit { added = try $0.addAdjustment(atUs: playheadUs) }
+        if let added { selectedClip = added }
+    }
+
+    func setAdjust(_ key: String, _ value: Double) {
+        guard let clip = selectedClip else { return }
+        edit { try $0.setAdjust(clipId: clip, key: key, value: value) }
+    }
+
+    /// The tile picture for `filter`, drawn off the main thread once.
+    func poster(_ filter: String) -> CGImage? {
+        if let image = posters[filter] { return image }
+        if !drawingPosters.contains(filter) {
+            drawingPosters.insert(filter)
+            Task.detached(priority: .utility) {
+                let image = filterPoster(filterId: filter, width: 120, height: 120)?.image
+                await MainActor.run {
+                    if let image { self.posters[filter] = image }
+                }
+            }
+        }
+        return nil
+    }
+
+    private var drawingPosters: Set<String> = []
+
     // MARK: Text
 
     /// Type into `clip` as the words change, or add a title at the playhead
@@ -380,6 +458,235 @@ final class EditorModel {
         edit { try $0.setSpeed(clipId: clip, speed: speed) }
     }
 
+    // MARK: Clip tools
+
+    /// Put a copy of the selected clip right after it, and select the copy.
+    func duplicate() {
+        guard let clip = selectedClip else { return say("Select a clip to duplicate") }
+        edit { selectedClip = try $0.duplicate(clipId: clip) }
+    }
+
+    func toggleMirror() {
+        guard let clip = selectedClip else { return }
+        edit { try $0.toggleMirror(clipId: clip) }
+    }
+
+    func turn() {
+        guard let clip = selectedClip else { return }
+        edit { try $0.turn(clipId: clip) }
+    }
+
+    func toggleReverse() {
+        guard let clip = selectedClip else { return }
+        pause()
+        let backward = !(clipState?.reversed ?? false)
+        edit { try $0.toggleReverse(clipId: clip) }
+        say(backward ? "The clip plays backward" : "The clip plays forward")
+    }
+
+    /// Hold the frame under the playhead as a still there, and select it.
+    func freeze() {
+        guard let clip = selectedClip else { return }
+        pause()
+        let at = playheadUs
+        edit { selectedClip = try $0.freeze(clipId: clip, atUs: at) }
+    }
+
+    /// Put the video's sound on its own clip, or give it back when it was
+    /// already taken out.
+    func extractOrRecoverAudio() {
+        guard let clip = selectedClip else { return }
+        if clipState?.extracted == true {
+            edit { try $0.recoverAudio(clipId: clip) }
+            say("The clip has its sound again")
+        } else {
+            edit { try $0.extractAudio(clipId: clip) }
+        }
+    }
+
+    /// Mark a beat at the playhead on the selected sound, or take it off.
+    func toggleBeat() {
+        guard let clip = selectedClip else { return }
+        pause()
+        let at = playheadUs
+        edit { try $0.toggleBeat(clipId: clip, atUs: at) }
+    }
+
+    /// Move the selected picture from its row onto main.
+    func toMain() {
+        guard let clip = selectedClip else { return }
+        edit { try $0.toMain(clipId: clip) }
+    }
+
+    /// Crop the selected video to its middle at `ratio`; empty shows it all.
+    func setCrop(_ ratio: String) {
+        guard let clip = selectedClip else { return }
+        edit { try $0.setCrop(clipId: clip, ratio: ratio) }
+    }
+
+    func setOpacity(_ opacity: Double) {
+        guard let clip = selectedClip else { return }
+        edit { try $0.setOpacity(clipId: clip, opacity: opacity) }
+    }
+
+    func setFade(inUs: Int64, outUs: Int64) {
+        guard let clip = selectedClip else { return }
+        edit { try $0.setFade(clipId: clip, fadeInUs: inUs, fadeOutUs: outUs) }
+    }
+
+    /// Turn linkage on or off, saying what it means.
+    func toggleLinkage() {
+        let on = !linkage
+        edit { try $0.setLinkageEnabled(on: on) }
+        say(on
+            ? "Text, stickers and effects move with the main clip under them"
+            : "Text, stickers and effects no longer move or delete with main clips")
+    }
+
+    /// Mute or unmute every clip on a row.
+    func setMuted(_ lane: Lane, _ muted: Bool) {
+        edit { try $0.setRowMuted(rowId: lane.id, muted: muted) }
+    }
+
+    /// Bring in a picked photo or video as an overlay at the playhead.
+    func addOverlay(at url: URL) {
+        let at = playheadUs
+        edit {
+            let material = try $0.import(path: url.path(percentEncoded: false))
+            selectedClip = try $0.addOverlay(materialId: material, atUs: at)
+        }
+    }
+
+    /// Bring in a sound file from Files at the end of the sound row.
+    func importSound(at url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        edit {
+            let material = try $0.import(path: url.path(percentEncoded: false))
+            selectedClip = try $0.append(materialId: material)
+        }
+    }
+
+    /// Bring in the sound of a picked video at the end of the sound row.
+    func extractSound(at url: URL) {
+        edit {
+            let material = try $0.importSoundOf(path: url.path(percentEncoded: false))
+            selectedClip = try $0.append(materialId: material)
+        }
+    }
+
+    /// Play the picked file in the selected clip in place of its media.
+    func replaceSelected(with url: URL) {
+        guard let clip = selectedClip else { return }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        edit { try $0.replaceFile(clipId: clip, path: url.path(percentEncoded: false)) }
+    }
+
+    /// Bring in an SRT or LRC file from Files as captions.
+    func importCaptions(at url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            edit { try $0.importSubtitles(fileName: url.lastPathComponent, text: text) }
+        } catch {
+            show(error)
+        }
+    }
+
+    // MARK: Stickers and drawing
+
+    let stickerList = stickerChoices()
+    let shapeList = shapeChoices()
+
+    /// Put a sticker at the playhead and select it.
+    func addSticker(_ id: String) {
+        let at = playheadUs
+        edit { selectedClip = try $0.addSticker(stickerId: id, atUs: at) }
+    }
+
+    /// Put a shape at the playhead and select it.
+    func addShape(_ id: String) {
+        let at = playheadUs
+        edit { selectedClip = try $0.addShape(shapeId: id, atUs: at) }
+    }
+
+    /// The pen's color, `#RRGGBB`, and weight in canvas pixels.
+    var penColor = "#FFFFFF"
+    var penWidth = shapeStyleRanges().penStart
+
+    /// Put a finger's stroke, in canvas pixels, at the playhead, in the
+    /// pen's color and weight.
+    func drawStroke(_ points: [CGPoint]) {
+        let at = playheadUs
+        let trace = points.map { CanvasPoint(x: $0.x, y: $0.y) }
+        let (color, width) = (penColor, penWidth)
+        edit { _ = try $0.drawStroke(trace: trace, atUs: at, color: color, width: width) }
+    }
+
+    /// How `clip` looks, or nil when it is not a shape.
+    func shapeStyle(of clip: String) -> ShapeStyle? {
+        (try? editor?.shapeStyle(clipId: clip)) ?? nil
+    }
+
+    /// Change how shape `clip` looks. Changes while `live` join one undo
+    /// step and are saved when the last one, not live, arrives.
+    func styleShape(_ clip: String, _ change: ShapeStyleChange, live: Bool) {
+        edit(save: !live) { try $0.styleShape(clipId: clip, change: change, live: live) }
+    }
+
+    /// A sticker's shelf tile, drawn once off the main thread.
+    func stickerPoster(_ id: String) -> CGImage? {
+        let key = "sticker:" + id
+        if let image = posters[key] { return image }
+        if !drawingPosters.contains(key) {
+            drawingPosters.insert(key)
+            Task.detached(priority: .utility) {
+                let image = cutlassStickerPoster(id)
+                await MainActor.run {
+                    if let image { self.posters[key] = image }
+                }
+            }
+        }
+        return nil
+    }
+
+    // MARK: Transitions
+
+    let transitionList = transitionChoices()
+    let transitionTabs = transitionCategories()
+
+    /// The cut the transition panel edits.
+    var cut: Cut? { cuts.first { $0.outgoingId == selectedCut } }
+
+    /// Put transition `id` on the selected cut, or take it off for nil.
+    func setTransition(_ id: String?) {
+        guard let outgoing = selectedCut else { return }
+        pause()
+        edit {
+            if let id {
+                try $0.setTransition(outgoingId: outgoing, transitionId: id)
+            } else {
+                try $0.removeTransition(outgoingId: outgoing)
+            }
+        }
+        // Play the cut so the transition shows.
+        if let cut { seek(max(cut.atUs - cut.durationUs, 0)) }
+    }
+
+    func setTransitionLength(_ us: Int64) {
+        guard let outgoing = selectedCut else { return }
+        edit { try $0.setTransitionLength(outgoingId: outgoing, durationUs: us) }
+    }
+
+    /// Put the selected cut's transition on every cut of the main row.
+    func transitionEverywhere() {
+        guard let outgoing = selectedCut else { return }
+        edit { try $0.transitionEverywhere(outgoingId: outgoing) }
+        say("Applied to every cut")
+    }
+
     // MARK: Stage
 
     /// The canvas size in pixels, from the chosen ratio.
@@ -441,6 +748,9 @@ final class EditorModel {
         if now { stage = box }
         keys = selectedClip.flatMap { clip in try? editor?.keyframes(clipId: clip, atUs: at) }
         animations = selectedClip.flatMap { clip in try? editor?.animations(clipId: clip) }
+        clipState = selectedClip.flatMap { clip in try? editor?.clipState(clipId: clip, atUs: at) }
+        clipFilter = selectedClip.flatMap { clip in try? editor?.clipFilter(clipId: clip) }
+        adjustSliders = selectedClip.flatMap { clip in try? editor?.adjustSliders(clipId: clip) }
     }
 
     /// The keyframe button: remove the keyframe under the playhead, else key
@@ -510,14 +820,19 @@ final class EditorModel {
         edits += 1
         do {
             lanes = try editor.lanes()
+            cuts = try editor.cuts()
             durationUs = try editor.durationUs()
             ratios = try editor.ratios()
             background = try editor.background()
+            linkage = try editor.linkageEnabled()
         } catch {
             show(error)
         }
         if let id = selectedClip, !lanes.contains(where: { $0.clips.contains { $0.id == id } }) {
             selectedClip = nil
+        }
+        if let id = selectedCut, !cuts.contains(where: { $0.outgoingId == id }) {
+            selectedCut = nil
         }
         playheadUs = min(playheadUs, durationUs)
         refreshStage()
@@ -658,4 +973,10 @@ extension Frame {
             intent: .defaultIntent
         )
     }
+}
+
+/// A sticker's shelf tile. Kept outside the model, whose own
+/// `stickerPoster` would hide the Rust call of the same name.
+nonisolated private func cutlassStickerPoster(_ id: String) -> CGImage? {
+    stickerPoster(stickerId: id, side: 128)?.image
 }

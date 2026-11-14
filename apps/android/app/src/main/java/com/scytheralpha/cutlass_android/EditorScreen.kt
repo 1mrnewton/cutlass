@@ -542,6 +542,7 @@ val ToolKind.icon: String
         ToolKind.FREEZE -> "freeze"
         ToolKind.EXTRACT_AUDIO -> "extractAudio"
         ToolKind.FADE -> "fade"
+        ToolKind.OPACITY -> "opacity"
         ToolKind.BEATS -> "beat"
         ToolKind.UNLINK -> "unlink"
         ToolKind.SPLICE -> "splice"
@@ -552,6 +553,7 @@ val ToolKind.icon: String
         ToolKind.EDIT_TEXT -> "editText"
         ToolKind.DRAW -> "draw"
         ToolKind.VIDEO_EFFECTS -> "plugin"
+        ToolKind.SHAPE_STYLE -> "shapes"
     }
 
 @Composable

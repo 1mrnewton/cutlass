@@ -6,6 +6,8 @@
 //!
 //! [`recipe`] holds effects as data: passes over blocks the GPU runs, with
 //! values that move over time. Ten recipes ship in the app.
+//! [`studio`] reads the studio folder, where the desktop's effect studio
+//! saves the recipes being made, and runs them beside the bundled ones.
 //!
 //! There is no script host and no shader dialect. A checksum proves that
 //! published bytes arrived intact. It does not authorize running those bytes.
@@ -32,6 +34,7 @@ pub mod recipe;
 pub mod relight;
 pub mod selection;
 pub mod source;
+pub mod studio;
 pub mod transitions;
 
 pub use adjust::{
@@ -78,9 +81,10 @@ pub use preview::{
     preview_scenes, preview_time,
 };
 pub use recipe::{
-    Block, Control, ControlUnit, Curve, EFFECT_CATEGORIES, MAX_CONTROLS, MAX_PASSES, MAX_VALUES,
-    Param, Pass, RECIPE_PREFIX, RECIPE_VERSION, Recipe, RecipeError, Step, Target, bundled,
-    bundled_recipe,
+    Block, Control, ControlUnit, Curve, EASE_VERSION, EFFECT_CATEGORIES, Ease, Jitter,
+    MAX_CONTROLS, MAX_JITTER_RATE, MAX_KEYS, MAX_PASSES, MAX_RECIPE_BYTES, MAX_VALUES, Param, Pass,
+    RECIPE_PREFIX, RECIPE_VERSION, Recipe, RecipeError, Step, Target, Wave, bundled,
+    bundled_recipe, gap_ease,
 };
 pub use relight::{
     CUSTOM_COLOR, Light, Lighting, MAX_LIGHTS, RELIGHT_PRESETS, RELIGHT_UNIFORM_BYTES,
@@ -93,6 +97,12 @@ pub use selection::{
 pub use source::{
     AnimSpan, EffectSource, PACKAGE_UNIFORM_BYTES, PACKAGE_WGSL, PackagePaint, PackagePass,
     Progress, progress, segment_pass,
+};
+pub use studio::{
+    Loaded, MAX_STUDIO_FILES, Refused, STUDIO_EFFECTS, STUDIO_TRANSITIONS, StudioError,
+    clear_studio, is_studio_recipe, is_studio_transition, load_studio, recipe, recipes,
+    remove_studio_recipe, remove_studio_transition, studio_generation, studio_recipes,
+    studio_stamp, studio_transitions, write_studio_recipe, write_studio_transition,
 };
 pub use transitions::{
     BUILT_IN_PREFIX, TRANSITION_WGSL, TransitionKind, blur_radius as transition_blur_radius,

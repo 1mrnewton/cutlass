@@ -1,7 +1,9 @@
 //! Write a short, low-rate preview video of every transition: the outgoing
 //! scene held, the transition, then the incoming scene held, over the
-//! middle square of the two scenes its card plays between. Named by the
-//! transition's key. Run it again after a transition or a block changes:
+//! middle square of the two scenes its card plays between. Named
+//! `transition-` and the transition's key, so no name meets an effect's
+//! when the app bundle keeps both flat. Run it again after a transition or
+//! a block changes:
 //!
 //! ```sh
 //! cargo run -p cutlass-render --release --example transition_previews -- apps/ios/ios/TransitionPreviews
@@ -44,7 +46,7 @@ fn main() -> Result<(), Failure> {
             middle_square(scene.width, scene.height, &scene.rgba, SIDE)
         };
         let bytes = preview(&renderer, &square(from)?, &square(to)?, kind)?;
-        std::fs::write(out.join(format!("{}.mp4", kind.key())), bytes)?;
+        std::fs::write(out.join(format!("transition-{}.mp4", kind.key())), bytes)?;
     }
     Ok(())
 }

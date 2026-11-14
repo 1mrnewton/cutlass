@@ -12,7 +12,9 @@ use std::sync::Arc;
 use cutlass_model::{MaterialId, Micros, SegmentId};
 use cutlass_session::Request;
 
-use super::{FreshIds, Shell, ShellError, snap_window};
+use cutlass_editor::FreshIds;
+
+use super::{Shell, ShellError, snap_window};
 
 /// What a transition dropped on the lanes did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

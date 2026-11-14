@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use crate::StoreError;
 
-const LOCK_FILE: &str = ".locked";
+pub(crate) const LOCK_FILE: &str = ".locked";
 const ABSENT_ADDRESS: &[u8] = b"{\"address\":null}\n";
 const OPEN_MARK: &[u8] = b"\"open\":true";
 const HELD_OPEN: &[u8] = b"{\"address\":null,\"open\":true}\n";

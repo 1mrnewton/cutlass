@@ -8,20 +8,34 @@
 #![forbid(unsafe_code)]
 
 mod atlas;
+mod bidi;
+mod cache;
+mod faces;
 mod layout;
+mod linebreak;
 mod mesh;
 mod paint;
 mod richtext;
+mod script;
 mod shape;
+mod shaper;
 mod source;
 mod style;
+mod unicode;
 
 pub use atlas::{Atlas, AtlasRoute, GlyphImage, paint_bytes, route};
-pub use layout::{Alignment, Layout, Line, PlacedGlyph, layout, layout_text};
+pub use cache::TextCache;
+pub use faces::{FaceSource, MAX_FALLBACK_FACES, NoFaces, StyledFace};
+pub use layout::{
+    Alignment, Layout, Line, PlacedGlyph, layout, layout_cached, layout_text, layout_with,
+};
+pub use linebreak::{LINE_BREAK_WORDS, WordLists};
 pub use mesh::{GlyphRecord, TextMesh, build, build_text};
 pub use paint::{DrawnGlyph, paint_glyphs};
-pub use shape::{MAX_CHARS, ShapeItem, Shaped, ShapedGlyph, shape, shape_text};
+pub use script::script_tag;
+pub use shape::{MAX_CHARS, Paragraph, Shaped, ShapedGlyph, shape, shape_text};
 pub use source::{GlyphLook, TextSource, text_fill};
+pub use unicode::unicode_version;
 
 use std::error::Error;
 use std::fmt;

@@ -48,7 +48,7 @@ fn output_flag_keeps_the_extension_off_the_display() {
         .expect("decode");
     assert!(pictures.is_empty());
     assert!(decoder.drain().expect("drain").is_empty());
-    let (y, u, v) = decoder.picture_at(0).expect("held");
+    let (y, u, v) = decoder.coded_picture_at(0).expect("held");
     assert!(
         y.iter()
             .chain(u.iter())

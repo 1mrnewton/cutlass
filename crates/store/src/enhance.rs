@@ -1,6 +1,7 @@
-//! Enhanced, denoised and interpolated copies of clips, kept in the
-//! project's `Resources/video_enhance` folder, `Resources/video_denoise`
-//! for a copy that is denoised but not enhanced, or
+//! Enhanced, denoised, deflickered and interpolated copies of clips, kept
+//! in the project's `Resources/video_enhance` folder,
+//! `Resources/video_denoise` for a copy that is denoised but not enhanced,
+//! `Resources/video_deflicker` for one that is deflickered but neither,
 //! `Resources/video_interpolate` for one that is only interpolated, or
 //! `Resources/video_motion_blur` for one that is only blurred.
 //!
@@ -23,6 +24,7 @@ use crate::folder::{RESOURCES_DIR, io_error, stay_inside};
 
 const ENHANCE_DIR: &str = "video_enhance";
 const DENOISE_DIR: &str = "video_denoise";
+const DEFLICKER_DIR: &str = "video_deflicker";
 const INTERPOLATE_DIR: &str = "video_interpolate";
 const MOTION_BLUR_DIR: &str = "video_motion_blur";
 
@@ -38,6 +40,9 @@ pub struct EnhanceKey {
     pub level: i64,
     /// The Reduce image noise level, 0 for a copy that is not denoised.
     pub denoise: i64,
+    /// The Remove flicker level, 0 for a copy whose brightness is as the
+    /// clip's.
+    pub deflicker: i64,
     /// The Optical flow frame rate, 0 for a copy with no frames made
     /// between the clip's own.
     pub interpolate: i64,
@@ -61,6 +66,10 @@ impl EnhanceKey {
         if self.denoise > 0 {
             bytes.extend_from_slice(&self.denoise.to_le_bytes());
         }
+        if self.deflicker > 0 {
+            bytes.push(b'f');
+            bytes.extend_from_slice(&self.deflicker.to_le_bytes());
+        }
         if self.interpolate > 0 {
             bytes.push(b'i');
             bytes.extend_from_slice(&self.interpolate.to_le_bytes());
@@ -82,6 +91,8 @@ impl EnhanceKey {
             ENHANCE_DIR
         } else if self.denoise > 0 {
             DENOISE_DIR
+        } else if self.deflicker > 0 {
+            DEFLICKER_DIR
         } else if self.interpolate > 0 {
             INTERPOLATE_DIR
         } else {

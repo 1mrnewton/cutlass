@@ -194,7 +194,7 @@ pub const FEATURES: &[Feature] = &[
     Feature {
         name: "attachments",
         demux: false,
-        mux: false,
+        mux: true,
     },
     Feature {
         name: "block-additions",
@@ -237,6 +237,8 @@ mod tests {
             let row = feature(name);
             assert!(row.demux && !row.mux, "{name}");
         }
+        let row = feature("attachments");
+        assert!(!row.demux && row.mux);
         for name in [
             "encryption",
             "zlib-bzlib-lzo",

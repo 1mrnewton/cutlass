@@ -34,14 +34,16 @@ pub mod orient;
 mod surface;
 pub mod video;
 
+use std::sync::Arc;
+
 pub use surface::{PictureSurface, Surface};
 
 pub use cutlass_codec::access::{
     BitDepth, Channel, ChannelLayout, ChromaSamplePosition, CodecError, CodecParams, ColorMatrix,
-    ColorPrimaries, ColorRange, ColorType, FrameError, ImageError, MatrixCoefficients, Packet, Pcm,
-    PhysicalPixel, PixelFormat, Plane, Rgb8, SampleFormat, SideData, StillImage, TextItem,
-    Transfer, Transparency, VideoFrame, Yuv420High, Yuv420p, Yuv420p10, Yuv422High, Yuv422p,
-    Yuv444High, Yuv444p,
+    ColorPrimaries, ColorRange, ColorType, ContentLight, FrameError, ImageError, ItuT35,
+    MasteringDisplay, MatrixCoefficients, Packet, Pcm, PhysicalPixel, PixelFormat, Plane, Rgb8,
+    SampleFormat, SideData, StillImage, TextItem, Transfer, Transparency, VideoFrame, Yuv420High,
+    Yuv420p, Yuv420p10, Yuv422High, Yuv422p, Yuv444High, Yuv444p,
 };
 pub use cutlass_codec::{CodecId, nal};
 pub use orient::Orientation;
@@ -125,6 +127,13 @@ pub struct PictureInfo {
     /// `seq_level_idx` of the operating point this picture was decoded under.
     /// Other codecs leave this 0.
     pub seq_level_idx: u8,
+    /// Sample range the stream names. A decoder that does not read one
+    /// leaves this unspecified, and the samples are then studio swing.
+    pub range: ColorRange,
+    /// Content light level the stream carries for this picture.
+    pub content_light: Option<ContentLight>,
+    /// Mastering display colour volume the stream carries for this picture.
+    pub mastering_display: Option<MasteringDisplay>,
 }
 
 impl PictureInfo {
@@ -150,8 +159,8 @@ impl PictureInfo {
             chroma_position: ChromaSamplePosition::Unknown,
             render_width: width,
             render_height: height,
-            cicp_primaries: cicp_primaries(primaries),
-            cicp_transfer: cicp_transfer(transfer),
+            cicp_primaries: primaries.cicp(),
+            cicp_transfer: transfer.cicp(),
             cicp_matrix: 2,
             num_units_in_display_tick: 0,
             time_scale: 0,
@@ -159,42 +168,10 @@ impl PictureInfo {
             num_ticks_per_picture_minus_1: None,
             num_units_in_decoding_tick: 0,
             seq_level_idx: 0,
+            range: ColorRange::Unspecified,
+            content_light: None,
+            mastering_display: None,
         }
-    }
-}
-
-fn cicp_primaries(primaries: ColorPrimaries) -> u8 {
-    match primaries {
-        ColorPrimaries::Bt709 => 1,
-        ColorPrimaries::Unspecified => 2,
-        ColorPrimaries::Bt601 => 6,
-        ColorPrimaries::Bt2020 => 9,
-        ColorPrimaries::Bt470m => 4,
-        ColorPrimaries::Smpte240m => 7,
-        ColorPrimaries::Film => 8,
-        ColorPrimaries::Smpte428 => 10,
-        ColorPrimaries::Smpte431 => 11,
-        ColorPrimaries::Smpte432 => 12,
-        ColorPrimaries::Ebu3213 => 22,
-    }
-}
-
-fn cicp_transfer(transfer: Transfer) -> u8 {
-    match transfer {
-        Transfer::Bt709 => 1,
-        Transfer::Unspecified => 2,
-        Transfer::Bt601 => 6,
-        Transfer::Bt2020 => 14,
-        Transfer::Smpte240m => 7,
-        Transfer::Linear => 8,
-        Transfer::Log100 => 9,
-        Transfer::LogSqrt => 10,
-        Transfer::Iec61966_2_4 => 11,
-        Transfer::Bt1361 => 12,
-        Transfer::Srgb => 13,
-        Transfer::Pq => 16,
-        Transfer::Smpte428 => 17,
-        Transfer::Hlg => 18,
     }
 }
 
@@ -209,13 +186,45 @@ pub struct PictureOutput {
     pts: i64,
     timescale: u32,
     storage: PictureStorage,
+    /// ITU-T T.35 messages the stream carries for this picture.
+    t35: Vec<ItuT35>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 enum PictureStorage {
     Cpu(Vec<u8>),
-    Platform { token: u64 },
+    /// CPU bytes the decoder also holds, to fill again for a later
+    /// picture once every other holder has let them go.
+    Shared(Arc<Vec<u8>>),
+    Platform {
+        token: u64,
+    },
     Surface(Surface),
+}
+
+impl PartialEq for PictureStorage {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Platform { token: a }, Self::Platform { token: b }) => a == b,
+            (Self::Surface(a), Self::Surface(b)) => a == b,
+            (Self::Cpu(_) | Self::Shared(_), Self::Cpu(_) | Self::Shared(_)) => {
+                self.cpu_bytes() == other.cpu_bytes()
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for PictureStorage {}
+
+impl PictureStorage {
+    fn cpu_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Cpu(bytes) => Some(bytes),
+            Self::Shared(bytes) => Some(bytes),
+            Self::Platform { .. } | Self::Surface(_) => None,
+        }
+    }
 }
 
 /// Borrowed view of a [`PictureOutput`].
@@ -376,6 +385,31 @@ impl PictureOutput {
             pts,
             timescale,
             storage: PictureStorage::Cpu(bytes),
+            t35: Vec::new(),
+        })
+    }
+
+    /// CPU bytes as [`Self::cpu`], shared with the decoder, which may fill
+    /// them again for a later picture once no one else holds them (it
+    /// checks with [`Arc::get_mut`]).
+    pub fn cpu_shared(
+        info: PictureInfo,
+        bytes: Arc<Vec<u8>>,
+        pts: i64,
+        timescale: u32,
+    ) -> Result<Self, CodecError> {
+        let len = picture_byte_len(info.width, info.height, info.pixel)?;
+        if bytes.len() != len {
+            return Err(CodecError::InvalidApi {
+                what: "picture byte length",
+            });
+        }
+        Ok(Self {
+            info,
+            pts,
+            timescale,
+            storage: PictureStorage::Shared(bytes),
+            t35: Vec::new(),
         })
     }
 
@@ -392,6 +426,7 @@ impl PictureOutput {
             pts,
             timescale,
             storage: PictureStorage::Platform { token },
+            t35: Vec::new(),
         })
     }
 
@@ -413,7 +448,23 @@ impl PictureOutput {
             pts,
             timescale,
             storage: PictureStorage::Surface(surface),
+            t35: Vec::new(),
         })
+    }
+
+    /// The same picture with the ITU-T T.35 messages the stream carries
+    /// for it, in stream order.
+    #[must_use]
+    pub fn with_t35(mut self, messages: Vec<ItuT35>) -> Self {
+        self.t35 = messages;
+        self
+    }
+
+    /// ITU-T T.35 messages for this picture, such as HDR10+ dynamic
+    /// metadata. Empty when the stream carries none.
+    #[must_use]
+    pub fn t35(&self) -> &[ItuT35] {
+        &self.t35
     }
 
     #[must_use]
@@ -433,10 +484,27 @@ impl PictureOutput {
 
     /// The CPU bytes, moved out without a copy, or `None` for a platform
     /// buffer.
+    ///
+    /// Bytes shared with the decoder are copied unless no one else holds
+    /// them; [`Self::into_shared`] keeps them shared.
     #[must_use]
     pub fn into_cpu(self) -> Option<Vec<u8>> {
         match self.storage {
             PictureStorage::Cpu(bytes) => Some(bytes),
+            PictureStorage::Shared(bytes) => {
+                Some(Arc::try_unwrap(bytes).unwrap_or_else(|bytes| (*bytes).clone()))
+            }
+            PictureStorage::Platform { .. } | PictureStorage::Surface(_) => None,
+        }
+    }
+
+    /// The CPU bytes as shared bytes, without a copy, or `None` for a
+    /// platform buffer.
+    #[must_use]
+    pub fn into_shared(self) -> Option<Arc<Vec<u8>>> {
+        match self.storage {
+            PictureStorage::Cpu(bytes) => Some(Arc::new(bytes)),
+            PictureStorage::Shared(bytes) => Some(bytes),
             PictureStorage::Platform { .. } | PictureStorage::Surface(_) => None,
         }
     }
@@ -445,6 +513,7 @@ impl PictureOutput {
     pub fn samples(&self) -> PictureSamples<'_> {
         match &self.storage {
             PictureStorage::Cpu(bytes) => PictureSamples::Cpu(bytes),
+            PictureStorage::Shared(bytes) => PictureSamples::Cpu(bytes),
             PictureStorage::Platform { token } => PictureSamples::Platform { token: *token },
             PictureStorage::Surface(surface) => PictureSamples::Surface(surface),
         }
@@ -674,8 +743,8 @@ mod tests {
     use std::cell::Cell;
 
     use super::{
-        AudioOutput, DecodeFactory, Decoder, Output, PictureInfo, PictureOutput, PictureSamples,
-        SampleAspect, SequenceTiming, VideoDecoder, VideoOutput, picture_byte_len,
+        AudioOutput, DecodeFactory, Decoder, ItuT35, Output, PictureInfo, PictureOutput,
+        PictureSamples, SampleAspect, SequenceTiming, VideoDecoder, VideoOutput, picture_byte_len,
     };
     use cutlass_codec::CodecId;
     use cutlass_codec::access::{
@@ -722,6 +791,36 @@ mod tests {
             });
         }
         Ok(Box::new(Silent))
+    }
+
+    #[test]
+    fn shared_bytes_stay_shared_and_compare_by_value() {
+        let info = PictureInfo::new(
+            2,
+            2,
+            PixelFormat::Yuv420p,
+            ColorPrimaries::Unspecified,
+            Transfer::Unspecified,
+        );
+        let bytes = std::sync::Arc::new(vec![1, 2, 3, 4, 5, 6]);
+        assert!(
+            PictureOutput::cpu_shared(info, std::sync::Arc::new(vec![1, 2, 3]), 0, 1).is_err(),
+            "the length is checked"
+        );
+        let shared = PictureOutput::cpu_shared(info, bytes.clone(), 0, 1).expect("yuv");
+        let owned = PictureOutput::cpu(info, vec![1, 2, 3, 4, 5, 6], 0, 1).expect("yuv");
+        assert_eq!(shared, owned);
+        assert_eq!(shared.samples(), PictureSamples::Cpu(&[1, 2, 3, 4, 5, 6]));
+        let back = shared.clone().into_shared().expect("cpu");
+        assert!(std::sync::Arc::ptr_eq(&back, &bytes), "no copy");
+        // Still held by `bytes`: a copy.
+        assert_eq!(shared.into_cpu().expect("cpu"), vec![1, 2, 3, 4, 5, 6]);
+        drop(back);
+        assert_eq!(
+            std::sync::Arc::strong_count(&bytes),
+            1,
+            "every other holder let go"
+        );
     }
 
     fn rgba(width: u32, height: u32) -> PictureInfo {
@@ -1168,6 +1267,50 @@ mod tests {
         };
         assert_eq!(picture.samples(), PictureSamples::Cpu(&[9, 8, 7, 6, 5, 4]));
         assert_eq!(picture.pts(), 10);
+    }
+
+    #[test]
+    fn a_new_picture_names_no_range_and_no_hdr_metadata() {
+        let info = PictureInfo::new(
+            2,
+            2,
+            PixelFormat::Yuv420p,
+            ColorPrimaries::Bt2020,
+            Transfer::Pq,
+        );
+        assert_eq!(info.range, ColorRange::Unspecified);
+        assert_eq!(info.content_light, None);
+        assert_eq!(info.mastering_display, None);
+        let picture = PictureOutput::cpu(info, vec![0; 6], 0, 1).expect("yuv");
+        assert!(picture.t35().is_empty());
+    }
+
+    #[test]
+    fn a_picture_keeps_its_t35_messages_in_order() {
+        let info = PictureInfo::new(
+            2,
+            2,
+            PixelFormat::Yuv420p,
+            ColorPrimaries::Unspecified,
+            Transfer::Unspecified,
+        );
+        let messages = vec![
+            ItuT35 {
+                country_code: 0xb5,
+                country_code_extension: None,
+                payload: vec![0, 0x3c, 0, 1, 4],
+            },
+            ItuT35 {
+                country_code: 0xff,
+                country_code_extension: Some(7),
+                payload: Vec::new(),
+            },
+        ];
+        let picture = PictureOutput::cpu(info, vec![0; 6], 0, 1)
+            .expect("yuv")
+            .with_t35(messages.clone());
+        assert_eq!(picture.t35(), messages);
+        assert_eq!(picture.clone().t35(), messages);
     }
 
     #[test]

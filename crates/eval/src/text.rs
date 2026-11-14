@@ -19,7 +19,7 @@ use cutlass_model::{
     SegmentId, TrackAttribute, UniformScale, WordColumns,
 };
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
-use cutlass_text::{GlyphLook, TextSource, text_fill};
+use cutlass_text::{FaceSource, GlyphLook, StyledFace, TextCache, TextSource, text_fill};
 
 use crate::Fonts;
 use crate::gpu::{GpuLayer, GpuSource};
@@ -73,6 +73,27 @@ impl PlacedText {
     }
 }
 
+/// A still title's picture: the density asked for, the density it was
+/// drawn at, which is lower when the title is too large to draw at what
+/// was asked, and the picture.
+pub(crate) type KeptTitle = (f64, f64, CpuBytes);
+
+/// Text rasters kept from frame to frame within one revision of a draft.
+pub(crate) struct KeptText<'a> {
+    /// A still title's picture, by its clip.
+    pub(crate) titles: &'a mut HashMap<SegmentId, KeptTitle>,
+    /// A caption's last picture, with a key for what went into it and the
+    /// density it was drawn at.
+    pub(crate) captions: &'a mut HashMap<SegmentId, (u64, f64, CpuBytes)>,
+}
+
+/// The glyph images and layouts every draft's text shares. They are kept
+/// by what they were made from, so nothing here goes stale with an edit.
+fn text_cache() -> &'static TextCache {
+    static CACHE: std::sync::OnceLock<TextCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(TextCache::new)
+}
+
 /// The most picture pixels a title draws to each pixel it is shown at.
 const MAX_DENSITY: f64 = 8.0;
 /// The largest face, in pixels, a title is drawn with to keep it sharp.
@@ -81,16 +102,22 @@ const MAX_FACE_PX: f64 = 1_024.0;
 /// Text segments covering `time`, placed. A title is drawn at its scale, so
 /// one scaled up keeps sharp edges; its raster is kept in `rasters` for its
 /// segment with that density, so a later frame of the same revision and
-/// scale does not lay it out and draw it again. Captions change with time
-/// and are drawn each frame.
+/// scale does not lay it out and draw it again. A caption changes with
+/// time: its picture is kept with a key for what was drawn, and drawn
+/// again when a word lights up or the page turns. Glyph images and
+/// layouts are kept for every title and caption alike.
 pub(crate) fn text_layers(
     draft: &Draft,
     fonts: &dyn Fonts,
     width: u32,
     height: u32,
     time: Micros,
-    rasters: &mut HashMap<SegmentId, (f64, CpuBytes)>,
+    kept: KeptText<'_>,
 ) -> Vec<TextLayer> {
+    let KeptText {
+        titles: rasters,
+        captions,
+    } = kept;
     let mut layers = Vec::new();
     for (track_index, track) in draft.tracks.iter().enumerate() {
         if track.attribute.contains(TrackAttribute::HIDE) {
@@ -144,14 +171,19 @@ pub(crate) fn text_layers(
             }
             let (raster, transform) = if words_present(material) {
                 let wanted = density(&clip, &uniform, material.font_size);
+                // A caption whose style is keyed is another picture at
+                // every frame, and is not kept.
                 let Some((drawn, bytes)) = caption_picture(
                     Faces { fonts, face },
-                    material,
-                    glow(draft, segment, time).as_ref(),
-                    segment,
-                    time,
-                    wanted,
-                    f64::from(width),
+                    &Shown {
+                        material,
+                        glow: glow(draft, segment, time).as_ref(),
+                        segment,
+                        time,
+                        density: wanted,
+                        canvas_width: f64::from(width),
+                    },
+                    keyed.is_none().then_some(&mut *captions),
                 ) else {
                     continue;
                 };
@@ -161,26 +193,34 @@ pub(crate) fn text_layers(
                 let glow = glow(draft, segment, time);
                 // Letters on the move are drawn for each frame and not kept.
                 let steps = cutlass_model::letters_at(draft, segment, time);
+                // A title too large to draw at the density asked for was
+                // drawn at a lower one: it is kept for what was asked, so
+                // it is not tried and drawn again at every frame.
+                let still = steps.is_empty() && keyed.is_none();
                 let kept = rasters
                     .get(&segment.id)
-                    .filter(|(drawn, _)| *drawn == wanted && steps.is_empty() && keyed.is_none())
-                    .cloned();
-                let Some((drawn, bytes)) = kept.or_else(|| {
-                    title_picture(
-                        Faces { fonts, face },
-                        material,
-                        glow.as_ref(),
-                        segment,
-                        time,
-                        wanted,
-                        &steps,
-                    )
-                }) else {
-                    continue;
+                    .filter(|(asked, _, _)| *asked == wanted && still)
+                    .map(|(_, drawn, bytes)| (*drawn, bytes.clone()));
+                let (drawn, bytes) = match kept {
+                    Some(kept) => kept,
+                    None => {
+                        let Some((drawn, bytes)) = title_picture(
+                            Faces { fonts, face },
+                            material,
+                            glow.as_ref(),
+                            segment,
+                            time,
+                            wanted,
+                            &steps,
+                        ) else {
+                            continue;
+                        };
+                        if still {
+                            rasters.insert(segment.id.clone(), (wanted, drawn, bytes.clone()));
+                        }
+                        (drawn, bytes)
+                    }
                 };
-                if steps.is_empty() && keyed.is_none() {
-                    rasters.insert(segment.id.clone(), (drawn, bytes.clone()));
-                }
                 (bytes, transform.dense(drawn))
             };
             layers.push(TextLayer {
@@ -236,9 +276,15 @@ fn title_picture(
         let mut source = logged(
             "title",
             segment,
-            TextSource::open_with_faces(faces.face, None, &larger, glow, segment, &|path| {
-                faces.named(path)
-            }),
+            TextSource::open_cached(
+                faces.face,
+                None,
+                &larger,
+                glow,
+                segment,
+                &faces,
+                text_cache(),
+            ),
         )?;
         if !steps.is_empty() {
             let poses = source
@@ -327,12 +373,15 @@ pub fn text_size_at(
     let canvas_width = f64::from(draft.canvas_config.width.max(1));
     let (_, bytes) = caption_picture(
         Faces { fonts, face },
-        material,
-        glow(draft, segment, time).as_ref(),
-        segment,
-        time,
-        1.0,
-        canvas_width,
+        &Shown {
+            material,
+            glow: glow(draft, segment, time).as_ref(),
+            segment,
+            time,
+            density: 1.0,
+            canvas_width,
+        },
+        None,
     )?;
     let extent = bytes.extent();
     Some((extent.width, extent.height))
@@ -351,9 +400,15 @@ fn title_size(
     let source = logged(
         "title",
         segment,
-        TextSource::open_with_faces(face, None, material, glow.as_ref(), segment, &|path| {
-            faces.named(path)
-        }),
+        TextSource::open_cached(
+            face,
+            None,
+            material,
+            glow.as_ref(),
+            segment,
+            &faces,
+            text_cache(),
+        ),
     )?;
     Some(source.size())
 }
@@ -406,6 +461,31 @@ impl<'a> Faces<'a> {
     }
 }
 
+impl FaceSource for Faces<'_> {
+    fn named(&self, path: &str) -> Option<&[u8]> {
+        Faces::named(self, path)
+    }
+
+    fn fallback(&self, character: char, emoji: bool) -> Option<&[u8]> {
+        self.fonts.fallback(character, emoji)
+    }
+
+    fn styled(&self, path: &str, bold: bool, italic: bool) -> Option<StyledFace<'_>> {
+        // By the whole path, else its file name, else a collection's
+        // first face, as a range's face is found.
+        let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
+        let first = format!("{file}#0");
+        [path, file, first.as_str()]
+            .into_iter()
+            .find_map(|name| self.fonts.styled(name, bold, italic))
+            .map(|(bytes, bold, italic)| StyledFace {
+                bytes,
+                bold,
+                italic,
+            })
+    }
+}
+
 /// The glow a title's clip points at, when it reads as one, keyed as it
 /// is at `time`.
 fn glow(draft: &Draft, segment: &Segment, time: Micros) -> Option<BloomParams> {
@@ -428,18 +508,34 @@ fn columns_present(columns: &WordColumns) -> bool {
 /// not opaque white replaces it. Position is a pixel shift, right and down;
 /// scale sizes a word about its middle, and a background is a round box
 /// behind the word. Rotation on the style is not applied.
+/// A caption as one frame shows it.
+#[derive(Clone, Copy)]
+struct Shown<'a> {
+    material: &'a MaterialText,
+    glow: Option<&'a BloomParams>,
+    segment: &'a Segment,
+    time: Micros,
+    /// Picture pixels to each shown pixel.
+    density: f64,
+    canvas_width: f64,
+}
+
 /// The share of the canvas width a caption with no line width wraps at.
 const CAPTION_WIDTH: f64 = 0.9;
 
 fn caption_picture(
     faces: Faces<'_>,
-    material: &MaterialText,
-    glow: Option<&BloomParams>,
-    segment: &Segment,
-    time: Micros,
-    density: f64,
-    canvas_width: f64,
+    shown: &Shown<'_>,
+    kept: Option<&mut HashMap<SegmentId, (u64, f64, CpuBytes)>>,
 ) -> Option<(f64, CpuBytes)> {
+    let Shown {
+        material,
+        glow,
+        segment,
+        time,
+        density,
+        canvas_width,
+    } = *shown;
     let style = cutlass_captions::caption_style(&material.caption_style);
     let styles = style.map_or_else(RangeStyles::identity, |style| {
         style.styles(material.font_size)
@@ -448,6 +544,10 @@ fn caption_picture(
     let frame = sample_caption(&CaptionQuery {
         material,
         font: faces.face,
+        faces: cutlass_captions::Faces {
+            source: &faces,
+            cache: Some(text_cache()),
+        },
         timeline: time,
         placed_at: segment.target.start,
         limits,
@@ -457,6 +557,15 @@ fn caption_picture(
     });
     let frame = logged("caption", segment, frame)?;
     let looks = caption_looks(&frame, logged("caption", segment, text_fill(material))?)?;
+    // The same page with the same words lit is the same picture.
+    let key = caption_key(&frame.letters.text, &looks, glow, density);
+    if let Some((_, drawn, bytes)) = kept
+        .as_deref()
+        .and_then(|kept| kept.get(&segment.id))
+        .filter(|(have, _, _)| *have == key)
+    {
+        return Some((*drawn, bytes.clone()));
+    }
     let hidden = GlyphLook {
         pose: LetterPose {
             alpha: 0.0,
@@ -477,9 +586,7 @@ fn caption_picture(
         let mut source = logged(
             "caption",
             segment,
-            TextSource::open_with_faces(faces.face, None, &page, glow, segment, &|path| {
-                faces.named(path)
-            }),
+            TextSource::open_cached(faces.face, None, &page, glow, segment, &faces, text_cache()),
         )?;
         let each: Vec<GlyphLook> = source
             .records()
@@ -492,12 +599,40 @@ fn caption_picture(
             _ => None,
         }
     };
-    if density > 1.0
-        && let Some(drawn) = draw(density)
-    {
-        return Some(drawn);
+    let drawn = if density > 1.0 { draw(density) } else { None }.or_else(|| draw(1.0))?;
+    if let Some(kept) = kept {
+        kept.insert(segment.id.clone(), (key, drawn.0, drawn.1.clone()));
     }
-    draw(1.0)
+    Some(drawn)
+}
+
+/// A key for a caption's picture: its page of words, how each glyph
+/// looks, its glow, and how densely it is drawn.
+fn caption_key(
+    text: &str,
+    looks: &HashMap<usize, GlyphLook>,
+    glow: Option<&BloomParams>,
+    density: f64,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    text.hash(&mut hasher);
+    density.to_bits().hash(&mut hasher);
+    let mut sources: Vec<&usize> = looks.keys().collect();
+    sources.sort_unstable();
+    for source in sources {
+        let Some(look) = looks.get(source) else {
+            continue;
+        };
+        source.hash(&mut hasher);
+        for value in [look.pose.alpha, look.pose.dx, look.pose.dy, look.pose.scale] {
+            value.to_bits().hash(&mut hasher);
+        }
+        (look.ink, look.back).hash(&mut hasher);
+    }
+    // A glow has no hash of its own; its written form stands for it.
+    glow.map(|glow| format!("{glow:?}")).hash(&mut hasher);
+    hasher.finish()
 }
 
 /// The caption's marked words, each whole. A mark past its words is left
@@ -696,6 +831,159 @@ mod tests {
 
     fn ink(rgba: &[u8]) -> bool {
         rgba.chunks(4).any(|pixel| pixel == [255, 255, 255, 255])
+    }
+
+    #[test]
+    fn a_letter_the_face_lacks_is_drawn_from_a_fallback_face() {
+        const OTHER: &[u8] = include_bytes!("../../font/fixtures/shaping.ttf");
+        struct WithFallback;
+        impl Fonts for WithFallback {
+            fn face(&self, path: &str) -> Option<&[u8]> {
+                (path == "sample.ttf").then_some(FONT)
+            }
+
+            fn fallback(&self, _character: char, _emoji: bool) -> Option<&[u8]> {
+                Some(OTHER)
+            }
+        }
+        let draw = |fonts: &dyn Fonts| {
+            // x is not in the title's face.
+            let draft = text_segment("x", false);
+            let mut device = SoftwareDevice::new();
+            let media = ReaderFactory::new();
+            let mut clips = OpenClips::new();
+            frame(
+                &Snapshot::with_fonts(&draft, fonts),
+                Micros(0),
+                &mut device,
+                &media,
+                &mut clips,
+                0,
+            )
+            .expect("frame")
+            .rgba
+        };
+        assert!(!ink(&draw(&OneFont)), "the missing glyph draws nothing");
+        assert!(
+            ink(&draw(&WithFallback)),
+            "the fallback face draws the letter"
+        );
+    }
+
+    #[test]
+    fn a_caption_key_changes_with_the_page_the_looks_and_the_density() {
+        use cutlass_text::GlyphLook;
+        let look = |alpha: f64| GlyphLook {
+            pose: cutlass_model::LetterPose {
+                alpha,
+                ..cutlass_model::LetterPose::REST
+            },
+            ..GlyphLook::REST
+        };
+        let looks =
+            |alpha: f64| std::collections::HashMap::from([(0, look(1.0)), (2, look(alpha))]);
+        let key = |text: &str, alpha: f64, density: f64| {
+            super::caption_key(text, &looks(alpha), None, density)
+        };
+        let base = key("A AB", 1.0, 1.0);
+        assert_eq!(base, key("A AB", 1.0, 1.0));
+        assert_ne!(base, key("A BA", 1.0, 1.0));
+        assert_ne!(base, key("A AB", 0.0, 1.0));
+        assert_ne!(base, key("A AB", 1.0, 2.0));
+        let glow = BloomParams::default();
+        assert_ne!(
+            base,
+            super::caption_key("A AB", &looks(1.0), Some(&glow), 1.0)
+        );
+    }
+
+    #[test]
+    fn a_caption_drawn_again_with_nothing_changed_is_the_picture_kept() {
+        let draw = |draft: &Draft, times: &[i64]| {
+            let mut titles = std::collections::HashMap::new();
+            let mut captions = std::collections::HashMap::new();
+            times
+                .iter()
+                .map(|time| {
+                    let layers = super::text_layers(
+                        draft,
+                        &OneFont,
+                        256,
+                        256,
+                        Micros(*time),
+                        super::KeptText {
+                            titles: &mut titles,
+                            captions: &mut captions,
+                        },
+                    );
+                    let key = captions
+                        .get(&draft.tracks[0].segments[0].id)
+                        .map(|kept| kept.0);
+                    (layers[0].placed.raster.clone(), key)
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut draft = text_segment("", false);
+        draft.materials.texts[0].words = words(&[("A", 0, 400), ("AB", 500, 1_000)]);
+        // A plain caption shows all its words throughout: each frame has
+        // the key of the first, and its picture.
+        let frames = draw(&draft, &[100_000, 120_000, 600_000]);
+        assert!(frames[0].1.is_some());
+        assert!(frames.iter().all(|frame| frame.1 == frames[0].1));
+        assert!(
+            frames
+                .iter()
+                .all(|frame| frame.0.rgba() == frames[0].0.rgba())
+        );
+        // Other words are another key and another picture.
+        draft.materials.texts[0].words = words(&[("B", 0, 400), ("A", 500, 1_000)]);
+        let other = draw(&draft, &[100_000]);
+        assert_ne!(other[0].1, frames[0].1);
+        assert_ne!(other[0].0.rgba(), frames[0].0.rgba());
+    }
+
+    #[test]
+    fn a_still_title_is_drawn_once_and_its_picture_shared_by_later_frames() {
+        let draw = |draft: &Draft, times: &[i64]| {
+            let mut titles = std::collections::HashMap::new();
+            let mut captions = std::collections::HashMap::new();
+            times
+                .iter()
+                .map(|time| {
+                    let layers = super::text_layers(
+                        draft,
+                        &OneFont,
+                        256,
+                        256,
+                        Micros(*time),
+                        super::KeptText {
+                            titles: &mut titles,
+                            captions: &mut captions,
+                        },
+                    );
+                    layers[0].placed.raster.clone()
+                })
+                .collect::<Vec<_>>()
+        };
+        // Each later frame has the first frame's bytes, not a copy.
+        let draft = text_segment("AB", false);
+        let frames = draw(&draft, &[0, 40_000, 80_000, 900_000]);
+        assert!(frames.iter().all(|frame| frame.shares(&frames[0])));
+        // A title scaled up is drawn at that density, once.
+        let mut scaled = text_segment("AB", false);
+        scaled.tracks[0].segments[0].uniform_scale.value = 2.0;
+        let dense = draw(&scaled, &[0, 40_000]);
+        assert!(dense[1].shares(&dense[0]));
+        assert_eq!(dense[0].width(), frames[0].width() * 2);
+        // A title too wide to draw at the density its scale asks for is
+        // drawn at 1, and that picture is kept too: it is not tried and
+        // drawn again at each frame.
+        let mut wide = text_segment(&"A".repeat(30), false);
+        wide.tracks[0].segments[0].uniform_scale.value = 8.0;
+        let plain = draw(&text_segment(&"A".repeat(30), false), &[0]);
+        let shown = draw(&wide, &[0, 40_000, 80_000]);
+        assert_eq!(shown[0].width(), plain[0].width());
+        assert!(shown.iter().all(|frame| frame.shares(&shown[0])));
     }
 
     #[test]
@@ -1021,7 +1309,10 @@ mod tests {
                 256,
                 256,
                 Micros(time),
-                &mut std::collections::HashMap::new(),
+                super::KeptText {
+                    titles: &mut std::collections::HashMap::new(),
+                    captions: &mut std::collections::HashMap::new(),
+                },
             );
             let extent = layers[0].placed.raster.extent();
             (extent.width, extent.height)

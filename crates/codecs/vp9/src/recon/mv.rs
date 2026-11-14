@@ -1673,9 +1673,12 @@ fn count_component(counts: &mut Counts, comp: usize, value: i32) {
             counts.mv_class0_fp[comp][bit][frac as usize].saturating_add(1);
         counts.mv_class0_hp[comp][hp] = counts.mv_class0_hp[comp][hp].saturating_add(1);
     } else {
-        for i in 0..usize::from(class) {
+        for (i, bits) in counts.mv_bits[comp][..usize::from(class)]
+            .iter_mut()
+            .enumerate()
+        {
             let bit = ((class_bit >> i) & 1) as usize;
-            counts.mv_bits[comp][i][bit] = counts.mv_bits[comp][i][bit].saturating_add(1);
+            bits[bit] = bits[bit].saturating_add(1);
         }
         counts.mv_fp[comp][frac as usize] = counts.mv_fp[comp][frac as usize].saturating_add(1);
         counts.mv_hp[comp][hp] = counts.mv_hp[comp][hp].saturating_add(1);

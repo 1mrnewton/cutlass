@@ -80,28 +80,26 @@ const BUILT_IN_OFFERS: &[TransitionOffer] = &[
 ];
 
 /// Every transition the shelf offers: the built-in ones, then each
-/// bundled recipe, each with its category.
+/// bundled recipe, then each from the studio folder, each with its
+/// category. The studio's change as its files do.
 #[must_use]
-pub fn transition_offers() -> &'static [TransitionOffer] {
-    static OFFERS: std::sync::OnceLock<Vec<TransitionOffer>> = std::sync::OnceLock::new();
-    OFFERS.get_or_init(|| {
-        let built_in = BUILT_IN_OFFERS.iter().map(|offer| TransitionOffer {
-            category: offer.kind.category(),
-            ..*offer
-        });
-        let recipes = TransitionKind::every().into_iter().filter_map(|kind| {
-            let recipe = kind.recipe()?;
-            Some(TransitionOffer {
-                id: recipe.id.as_str(),
-                name: recipe.name.as_str(),
-                duration: recipe.duration().0,
-                overlap: true,
-                kind,
-                category: recipe.category.as_str(),
-            })
-        });
-        built_in.chain(recipes).collect()
-    })
+pub fn transition_offers() -> Vec<TransitionOffer> {
+    let built_in = BUILT_IN_OFFERS.iter().map(|offer| TransitionOffer {
+        category: offer.kind.category(),
+        ..*offer
+    });
+    let recipes = TransitionKind::every().into_iter().filter_map(|kind| {
+        let recipe = kind.recipe()?;
+        Some(TransitionOffer {
+            id: recipe.id.as_str(),
+            name: recipe.name.as_str(),
+            duration: recipe.duration().0,
+            overlap: true,
+            kind,
+            category: recipe.category.as_str(),
+        })
+    });
+    built_in.chain(recipes).collect()
 }
 
 /// The shelf's categories that hold at least one transition, in shelf
@@ -123,8 +121,7 @@ pub fn transition_categories() -> Vec<&'static str> {
 #[must_use]
 pub fn transition_of_card(card_id: &str) -> Option<TransitionOffer> {
     transition_offers()
-        .iter()
-        .copied()
+        .into_iter()
         .find(|offer| offer.card_id() == card_id)
 }
 
@@ -514,17 +511,41 @@ pub fn transition_request(
         return Err(TransitionMiss::NotMain);
     }
     let cut = drop_cut(draft, hit.time, reach)?;
-    // Held to the room beside the blends on the cuts before and after.
-    let (outgoing, incoming) = cut_room(draft, &cut.outgoing_id).map_or(
-        (cut.outgoing.0, cut.incoming.0),
-        |(outgoing, incoming, _)| (outgoing, incoming),
-    );
+    transition_on_cut(draft, offer, &cut.outgoing_id, material_id)
+}
+
+/// The request that stores `offer` on the main-track cut after
+/// `outgoing_id`, shortened to fit the room beside the blends on the cuts
+/// before and after. A cut that has a blend takes this one in its place
+/// and keeps its material id; `material_id` names a new one.
+pub fn transition_on_cut(
+    draft: &Draft,
+    offer: TransitionOffer,
+    outgoing_id: &SegmentId,
+    material_id: MaterialId,
+) -> Result<Request, TransitionMiss> {
+    let main = draft
+        .tracks
+        .iter()
+        .find(|track| track.is_main())
+        .ok_or(TransitionMiss::NoCut)?;
+    if !main
+        .segments
+        .iter()
+        .any(|segment| &segment.id == outgoing_id)
+    {
+        return Err(TransitionMiss::NotMain);
+    }
+    if main.attribute.contains(TrackAttribute::LOCK) {
+        return Err(TransitionMiss::Locked);
+    }
+    let (outgoing, incoming, blend) = cut_room(draft, outgoing_id).ok_or(TransitionMiss::NoCut)?;
     let fitted = fit_transition(offer.duration, outgoing, incoming, offer.overlap)
         .ok_or(TransitionMiss::TooShort)?;
     Ok(Request::SetTransition {
-        segment_id: cut.outgoing_id,
+        segment_id: outgoing_id.clone(),
         transition: Box::new(MaterialTransition {
-            id: material_id,
+            id: blend.map_or(material_id, |blend| blend.id.clone()),
             kind: "transition".to_owned(),
             name: offer.name.to_owned(),
             effect_id: offer.kind.effect_id(),
@@ -533,6 +554,15 @@ pub fn transition_request(
             ..Default::default()
         }),
     })
+}
+
+/// The shelf offer a stored blend came from.
+#[must_use]
+pub fn offer_of(blend: &MaterialTransition) -> Option<TransitionOffer> {
+    transition_offers()
+        .iter()
+        .copied()
+        .find(|offer| offer.kind.effect_id() == blend.effect_id)
 }
 
 #[cfg(test)]
@@ -812,6 +842,43 @@ mod tests {
             Some(transition_offers()[1])
         );
         assert_eq!(transition_of_card("transition:none"), None);
+    }
+
+    #[test]
+    fn a_blend_goes_on_a_named_cut_and_swaps_in_place() {
+        let plain = draft(&[(0, 1_000_000), (1_000_000, 300_000), (2_000_000, 1_000_000)]);
+        let dip = transition_offers()[1];
+        let set = |draft: &Draft, offer: TransitionOffer, id: &str| {
+            transition_on_cut(draft, offer, &SegmentId::new(id), MaterialId::new("fresh"))
+        };
+        let Ok(Request::SetTransition {
+            segment_id,
+            transition,
+        }) = set(&plain, transition_offers()[0], "s0")
+        else {
+            panic!("the cut after s0 takes a blend");
+        };
+        assert_eq!(segment_id, SegmentId::new("s0"));
+        assert_eq!(transition.id, MaterialId::new("fresh"));
+        // The incoming clip is 0.3s, so the crossing blend is at most 0.6s.
+        assert_eq!(transition.duration, Micros(500_000));
+        assert_eq!(offer_of(&transition), Some(transition_offers()[0]));
+        // A gap after s1 is no cut, and s2 has nothing after it.
+        assert_eq!(set(&plain, dip, "s1"), Err(TransitionMiss::NoCut));
+        assert_eq!(set(&plain, dip, "s2"), Err(TransitionMiss::NoCut));
+        assert_eq!(set(&plain, dip, "nope"), Err(TransitionMiss::NotMain));
+
+        // A cut with a blend keeps its material and takes the new kind.
+        let blended = with_blend(plain.clone(), 0, blend("cross", 400_000, true));
+        let Ok(Request::SetTransition { transition, .. }) = set(&blended, dip, "s0") else {
+            panic!("the blend swaps");
+        };
+        assert_eq!(transition.id, MaterialId::new("cross"));
+        assert_eq!(offer_of(&transition), Some(dip));
+
+        let mut locked = plain;
+        locked.tracks[0].attribute = TrackAttribute(TrackAttribute::LOCK);
+        assert_eq!(set(&locked, dip, "s0"), Err(TransitionMiss::Locked));
     }
 
     #[test]

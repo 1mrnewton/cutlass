@@ -133,9 +133,9 @@ pub(crate) fn plan(
         let mut wide = false;
         scratch.parts.clear();
         // First pass with 5-bit parameters, to see whether any wants k > 14.
-        for part in 0..count {
+        for (part, &sum) in scratch.sums[..count].iter().enumerate() {
             let n = if part == 0 { size - order as u64 } else { size };
-            let (_, k) = rice_cost(n, scratch.sums[part], RICE2_MAX);
+            let (_, k) = rice_cost(n, sum, RICE2_MAX);
             if k > RICE1_MAX {
                 wide = true;
             }

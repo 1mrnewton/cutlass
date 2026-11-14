@@ -24,6 +24,22 @@ use crate::text::{TextLayer, text_layers};
 pub trait Fonts {
     /// The font file named by `path`, or `None` when this table does not have it.
     fn face(&self, path: &str) -> Option<&[u8]>;
+
+    /// A face that draws `character`, for a title whose own face cannot:
+    /// with `emoji`, one that draws it in color. `None` when this table
+    /// has no such face; the character is then drawn as missing.
+    fn fallback(&self, character: char, emoji: bool) -> Option<&[u8]> {
+        let _ = (character, emoji);
+        None
+    }
+
+    /// The face of the family of the face named `path` that is bold,
+    /// italic, or both, with which of the two it is. `None` when the
+    /// family has no such face; the letters are then thickened or leaned.
+    fn styled(&self, path: &str, bold: bool, italic: bool) -> Option<(&[u8], bool, bool)> {
+        let _ = (path, bold, italic);
+        None
+    }
 }
 
 /// No font bytes. Text segments are not drawn.
@@ -1891,6 +1907,34 @@ mod recipe_tests {
         let recipe = bundled_recipe("recipe/white-flash").expect("recipe");
         assert_eq!(steps, &recipe.steps_at(Micros(100_000)));
         assert_eq!(draft, before);
+    }
+
+    // The one test here that loads a studio folder: the studio's recipes
+    // are shared by every test in this process.
+    #[test]
+    fn a_studio_recipe_is_a_gpu_layer_like_a_bundled_one() {
+        let studio =
+            std::env::temp_dir().join(format!("cutlass-eval-studio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&studio);
+        let draft = with_effect("recipe/studio-soft");
+        // Before the studio holds it, the id names nothing a frame draws.
+        assert_eq!(effects(&layers(&draft, 600_000)), Vec::<usize>::new());
+        let recipe = cutlass_effects::Recipe::read(
+            br#"{"version":2,"id":"studio-soft","name":"Soft","passes":[{"block":"blur","params":{"radius":{"keys":[[0,0],[1,0.05]],"ease":["out"]}}}]}"#,
+        )
+        .expect("a recipe");
+        cutlass_effects::write_studio_recipe(&studio, &recipe).expect("saved");
+        cutlass_effects::load_studio(&studio);
+        let frame = layers(&draft, 600_000);
+        assert_eq!(effects(&frame), vec![frame.layers.len() - 1]);
+        let Some(GpuSource::Effect(steps, _)) = frame.layers.last().map(|layer| &layer.source)
+        else {
+            panic!("no effect layer");
+        };
+        assert_eq!(steps, &recipe.steps_at(Micros(100_000)));
+        cutlass_effects::clear_studio();
+        assert_eq!(effects(&layers(&draft, 600_000)), Vec::<usize>::new());
+        let _ = std::fs::remove_dir_all(studio);
     }
 
     #[test]

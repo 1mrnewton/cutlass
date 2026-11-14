@@ -47,7 +47,8 @@ pub use source::{
     open_segment_in,
 };
 pub use thumbs::{
-    MAX_THUMB_BYTES, MAX_THUMBS, THUMB_HEIGHT, Thumb, ThumbCache, ThumbKey, Thumbnails,
+    MAX_FRAME_ROWS, MAX_FRAMES, MAX_THUMB_BYTES, MAX_THUMBS, THUMB_HEIGHT, Thumb, ThumbCache,
+    ThumbKey, Thumbnails, frames_of,
 };
 pub use waveform::{MAX_BUCKETS, Peak, Waveform};
 pub use waves::{BUCKETS_PER_SECOND, Peaks, Waveforms};

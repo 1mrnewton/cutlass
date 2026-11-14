@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use cutlass_model::{
-    AnimType, CommonKeyframeGroup, Crop, FreezeInfo, MaterialAudio, MaterialId, MaterialTransition,
-    MaterialVideo, Micros, Segment, SegmentId, ShapeKind, ShapePoint, SpeedPoint, TimeRange,
-    TrackId, TrackType, WordColumns,
+    AnimType, CommonKeyframeGroup, Cover, Crop, FreezeInfo, MaterialAudio, MaterialId,
+    MaterialTransition, MaterialVideo, Micros, Segment, SegmentId, ShapeKind, ShapePoint,
+    SpeedPoint, TimeRange, TrackId, TrackType, WordColumns,
 };
 
 /// A media record stored in the library. A segment places it later.
@@ -252,6 +252,10 @@ pub enum Request {
     /// Reduce a video clip's noise at `level` (1 Weak, 2 Strong), or stop
     /// at 0 or below. The denoised copy is made apart from the draft.
     SetDenoise { segment_id: SegmentId, level: i64 },
+    /// Even out a video clip's brightness from frame to frame at `level`
+    /// (1), or stop at 0 or below. The evened copy is made apart from the
+    /// draft.
+    SetDeflicker { segment_id: SegmentId, level: i64 },
     /// Fill a video clip with frames made between its own, to `fps` frames
     /// a second (30, 50 or 60) however slow it plays, or stop at 0 or
     /// below. The filled copy is made apart from the draft.
@@ -328,6 +332,19 @@ pub enum Request {
         underline: bool,
         face: String,
     },
+    /// Turn bold, italic or underline on or off for the letters from
+    /// `start` up to `end`, which count characters of the words; a part
+    /// that is `None` stays as it is. A plain title becomes a rich one.
+    /// An empty face path is filled.
+    SetTextRangePattern {
+        segment_id: SegmentId,
+        start: usize,
+        end: usize,
+        bold: Option<bool>,
+        italic: Option<bool>,
+        underline: Option<bool>,
+        face: String,
+    },
     /// Store extra space between letters, as a fraction of the text size.
     SetLetterSpacing {
         segment_id: SegmentId,
@@ -348,6 +365,10 @@ pub enum Request {
     },
     /// Store the face file name on a text clip.
     SetTextFont { segment_id: SegmentId, face: String },
+    /// Set a text clip's face along the axes it varies on, written as
+    /// `wght=650,wdth=80`: each axis by its tag and a value in the axis's
+    /// own units. Empty leaves the face as its file has it.
+    SetTextFontAxes { segment_id: SegmentId, axes: String },
     /// Ring the letters in `color`, `width` ems wide. An empty color
     /// takes the outline off.
     SetTextOutline {
@@ -824,6 +845,9 @@ pub enum Request {
     SetColorSpace { space: i32 },
     /// Store the project name. Surrounding whitespace is dropped.
     SetProjectName { name: String },
+    /// Store the project's cover, or take it away with `None`. The cover's
+    /// picture file is the caller's to write.
+    SetCover { cover: Option<Cover> },
     /// Stack picture clips by their own layer (on) or by their tracks
     /// (off, which puts every clip back on its track's layer).
     SetFreeLayer { on: bool },

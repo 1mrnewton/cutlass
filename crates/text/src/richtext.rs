@@ -39,6 +39,11 @@ pub(crate) struct Run {
     pub(crate) shadow: Option<Option<Shadow>>,
     /// The face file its letters are set in, when not the title's.
     pub(crate) font: Option<String>,
+    /// Bold, italic and underline for its letters; `None` takes the
+    /// title's.
+    pub(crate) bold: Option<bool>,
+    pub(crate) italic: Option<bool>,
+    pub(crate) underline: Option<bool>,
 }
 
 /// The range holding the letter at byte `source`. A later range wins.
@@ -112,6 +117,9 @@ pub(crate) fn read(material: &MaterialText) -> Result<Words<'_>, TextError> {
                     .as_ref()
                     .map(|font| font.path.trim().to_owned())
                     .filter(|path| !path.is_empty()),
+                bold: style.bold,
+                italic: style.italic,
+                underline: style.underline,
             }
         })
         .filter(|run| run.start < run.end)

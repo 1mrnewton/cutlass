@@ -1,39 +1,70 @@
-//! One-tap clip edits the phone's clip bars offer: mirror, turn, reverse,
-//! crop, fade, freeze, extract audio and beats. Each follows the desktop's
-//! rule for the same button, and each is one undo step.
+//! The clip tools a phone bar offers on a selected clip: what each can do
+//! to the clip and how the clip stands, and the requests they send.
+//!
+//! Each tool is one undo step. The rules are the desktop's: a mirror, turn,
+//! crop or opacity belongs on a picture, a fade or reverse on a picture or a
+//! sound, a freeze or an extract on a video, a beat on a sound row.
 
-use std::collections::HashSet;
-use std::path::Path;
+use cutlass_model::{
+    Crop, Draft, MaterialRef, Micros, Segment, SegmentId, TrackAttribute, TrackId, TrackType,
+    segment_beats, source_time_at, track_holds_beats, user_beats,
+};
+use cutlass_session::Request;
 
-use cutlass_model::{Crop, Draft, MaterialId, MaterialRef, Segment, SegmentId, TrackType};
-use cutlass_session::{Micros, Request};
+use crate::error::FfiError;
 
-use crate::{FfiError, PhoneHost, media};
-
-/// A clip's fade in and fade out, in microseconds. Zero is no fade.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PhoneFade {
+/// How a selected clip stands, and which clip tools can change it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PhoneClipState {
+    /// A picture that mirrors, turns and fades out of sight.
+    pub picture: bool,
+    /// Flipped left to right.
+    pub mirrored: bool,
+    /// Degrees, as stored.
+    pub rotation: f64,
+    /// A video whose frame can be cropped.
+    pub can_crop: bool,
+    /// The crop ratio the clip keeps: empty for the whole frame, one of
+    /// [`CROP_RATIOS`], or `custom` for a crop made elsewhere.
+    pub crop: String,
+    /// How solid the picture is: 1 solid, 0 clear.
+    pub opacity: f64,
+    /// A picture or a sound, which plays backward and fades.
+    pub plays: bool,
+    pub reversed: bool,
     pub fade_in: Micros,
     pub fade_out: Micros,
+    /// A video that is not already a still.
+    pub can_freeze: bool,
+    /// A video whose sound still plays from it.
+    pub can_extract: bool,
+    /// A video whose sound was extracted to a clip of its own.
+    pub extracted: bool,
+    /// On a row that keeps beats.
+    pub can_beat: bool,
+    /// A beat sits on the clip at the time asked about.
+    pub beat_here: bool,
+    /// The clip is on the main row.
+    pub on_main: bool,
+    /// A picture on another row, which can move to main.
+    pub can_splice: bool,
 }
 
-/// What the clip bar can do to one clip, so a shell can dim the rest.
-#[allow(clippy::struct_excessive_bools)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PhoneClipAbilities {
-    /// A picture: mirror and turn.
-    pub turn: bool,
-    /// A picture or a sound: reverse and fade.
-    pub reverse: bool,
-    /// A video or a composition: crop.
-    pub crop: bool,
-    /// A video that is not a still: freeze and extract audio.
-    pub moving: bool,
-    /// On an audio row: beats.
-    pub beats: bool,
-    pub mirrored: bool,
-    pub reversed: bool,
-    pub cropped: bool,
+/// The crop ratios the Crop panel offers after the whole frame.
+pub const CROP_RATIOS: [&str; 6] = ["1:1", "4:5", "9:16", "16:9", "4:3", "3:4"];
+
+/// The clip `segment_id` and its row.
+pub(crate) fn locate<'a>(
+    draft: &'a Draft,
+    segment_id: &SegmentId,
+) -> Option<(&'a Segment, &'a cutlass_model::Track)> {
+    draft.tracks.iter().find_map(|track| {
+        track
+            .segments
+            .iter()
+            .find(|segment| &segment.id == segment_id)
+            .map(|segment| (segment, track))
+    })
 }
 
 fn refused(reason: &str) -> FfiError {
@@ -42,477 +73,234 @@ fn refused(reason: &str) -> FfiError {
     }
 }
 
-fn placed<'a>(draft: &'a Draft, id: &SegmentId) -> Result<(&'a Segment, &'a TrackType), FfiError> {
-    draft
-        .tracks
-        .iter()
-        .find_map(|track| {
-            track
-                .segments
-                .iter()
-                .find(|segment| &segment.id == id)
-                .map(|segment| (segment, &track.kind))
-        })
-        .ok_or_else(|| refused("the clip is not on the timeline"))
+/// The clip and its row, refused when no row holds it or its row is locked.
+pub(crate) fn unlocked<'a>(
+    draft: &'a Draft,
+    segment_id: &SegmentId,
+) -> Result<(&'a Segment, &'a cutlass_model::Track), FfiError> {
+    let (segment, track) =
+        locate(draft, segment_id).ok_or_else(|| refused("the clip is not on the timeline"))?;
+    if track.attribute.contains(TrackAttribute::LOCK) {
+        return Err(refused("the clip's row is locked"));
+    }
+    Ok((segment, track))
 }
 
-fn stored_crop(draft: &Draft, segment: &Segment) -> Option<Crop> {
-    match draft.materials.get(segment.material_id.as_str()) {
-        Some(MaterialRef::Video(video)) => Some(video.crop),
-        Some(MaterialRef::Draft(compound)) => Some(compound.crop),
+/// How `segment_id` stands at `time`. `None` when no row holds it.
+#[must_use]
+pub fn clip_state(draft: &Draft, segment_id: &SegmentId, time: Micros) -> Option<PhoneClipState> {
+    let (segment, track) = locate(draft, segment_id)?;
+    let material = draft.materials.get(segment.material_id.as_str());
+    let video = match material {
+        Some(MaterialRef::Video(video)) => Some(video),
         _ => None,
-    }
+    };
+    let picture = cutlass_editor::can_turn(draft, segment, &track.kind);
+    let plays = matches!(
+        material,
+        Some(MaterialRef::Video(_) | MaterialRef::Audio(_))
+    );
+    let (fade_in, fade_out) = fades(draft, segment);
+    let can_beat = track_holds_beats(&track.kind);
+    let beat_here = can_beat && beat_at(draft, segment, time).is_some();
+    let extracted = cutlass_engine::original_sound_is_separate(draft, segment);
+    Some(PhoneClipState {
+        picture,
+        mirrored: picture && segment.clip.flip.horizontal,
+        rotation: segment.clip.rotation,
+        can_crop: video.is_some(),
+        crop: video.map_or_else(String::new, |video| {
+            crop_name(&video.crop, video.width, video.height)
+        }),
+        opacity: segment.clip.alpha,
+        plays,
+        reversed: plays && segment.reverse,
+        fade_in: Micros(fade_in),
+        fade_out: Micros(fade_out),
+        can_freeze: video.is_some_and(|video| video.freeze.is_none() && !is_still(&video.kind)),
+        can_extract: video.is_some_and(|video| !is_still(&video.kind)) && !extracted,
+        extracted,
+        can_beat,
+        beat_here,
+        on_main: track.is_main(),
+        can_splice: !track.is_main() && track.kind == TrackType::Video && video.is_some(),
+    })
 }
 
-/// The middle half of the picture, as the desktop's Crop button keeps.
-/// Coordinates are fractions, Y downward.
-fn center_crop() -> Crop {
-    Crop {
-        upper_left_x: 0.25,
-        upper_left_y: 0.25,
-        upper_right_x: 0.75,
-        upper_right_y: 0.25,
-        lower_left_x: 0.25,
-        lower_left_y: 0.75,
-        lower_right_x: 0.75,
-        lower_right_y: 0.75,
-    }
+/// A photo, or a still the phone probed for itself, which it calls an
+/// image: neither has a frame to hold or a sound to take out.
+fn is_still(kind: &str) -> bool {
+    matches!(kind, "photo" | "image")
 }
 
-/// One clockwise quarter turn. The stored angle turns the other way.
-fn clockwise_quarter(degrees: f64) -> f64 {
+/// The fade-in and fade-out lengths stored on the clip, in microseconds.
+pub(crate) fn fades(draft: &Draft, segment: &Segment) -> (i64, i64) {
+    for id in &segment.extra_material_refs {
+        if let Some(MaterialRef::Fade(fade)) = draft.materials.get(id.as_str()) {
+            return (fade.fade_in_duration.0, fade.fade_out_duration.0);
+        }
+    }
+    (0, 0)
+}
+
+/// The stored source time of the beat within a frame of `time` on the clip.
+fn beat_at(draft: &Draft, segment: &Segment, time: Micros) -> Option<i64> {
+    let raw = segment_beats(&draft.materials, segment)?;
+    let frame = frame_length(draft);
+    user_beats(raw).into_iter().find(|source| {
+        cutlass_model::beat_timeline_time(segment, *source)
+            .is_some_and(|shown| (shown.0 - time.0).abs() < frame)
+    })
+}
+
+fn frame_length(draft: &Draft) -> i64 {
+    let fps = if draft.fps.is_finite() && draft.fps > 0.0 {
+        draft.fps
+    } else {
+        30.0
+    };
+    (1_000_000.0 / fps).round() as i64
+}
+
+/// The request that adds a beat at `time` on a sound clip, or takes off
+/// the beat already within a frame of it. `fresh` names a new beats material.
+pub(crate) fn beat_request(
+    draft: &Draft,
+    segment_id: &SegmentId,
+    time: Micros,
+    fresh: &mut dyn FnMut(&str) -> String,
+) -> Result<Request, FfiError> {
+    let (segment, track) = unlocked(draft, segment_id)?;
+    if !track_holds_beats(&track.kind) {
+        return Err(refused("a beat belongs on a sound"));
+    }
+    if let Some(source) = beat_at(draft, segment, time) {
+        return Ok(Request::RemoveBeat {
+            segment_id: segment_id.clone(),
+            source: Micros(source),
+        });
+    }
+    let source =
+        source_time_at(segment, time).ok_or_else(|| refused("move the playhead onto the clip"))?;
+    Ok(Request::AddBeat {
+        segment_id: segment_id.clone(),
+        source: Micros(source),
+        material_id: cutlass_model::MaterialId::new(fresh("beat")),
+    })
+}
+
+/// A quarter turn clockwise from `degrees`.
+#[must_use]
+pub fn clockwise_quarter(degrees: f64) -> f64 {
     let current = if degrees.is_finite() { degrees } else { 0.0 };
     (current - 90.0).rem_euclid(360.0)
 }
 
-fn fade_of(draft: &Draft, segment: &Segment) -> PhoneFade {
-    for id in &segment.extra_material_refs {
-        if let Some(MaterialRef::Fade(fade)) = draft.materials.get(id.as_str()) {
-            return PhoneFade {
-                fade_in: fade.fade_in_duration,
-                fade_out: fade.fade_out_duration,
-            };
-        }
+/// The middle of a `width` by `height` frame at `ratio` (`w:h`), as a crop
+/// quad in fractions of the frame, y down. An empty ratio is the whole
+/// frame. `None` for a ratio that does not read or a frame with no size.
+#[must_use]
+pub fn crop_for(ratio: &str, width: i32, height: i32) -> Option<Crop> {
+    if ratio.is_empty() {
+        return Some(Crop::default());
     }
-    PhoneFade {
-        fade_in: Micros(0),
-        fade_out: Micros(0),
+    let (w, h) = ratio.split_once(':')?;
+    let (w, h) = (w.trim().parse::<f64>().ok()?, h.trim().parse::<f64>().ok()?);
+    if !(w > 0.0 && h > 0.0 && width > 0 && height > 0) {
+        return None;
     }
+    let want = w / h;
+    let have = f64::from(width) / f64::from(height);
+    let (across, down) = if want < have {
+        (want / have, 1.0)
+    } else {
+        (1.0, have / want)
+    };
+    let (left, top) = ((1.0 - across) / 2.0, (1.0 - down) / 2.0);
+    let (right, bottom) = (left + across, top + down);
+    Some(Crop {
+        upper_left_x: left,
+        upper_left_y: top,
+        upper_right_x: right,
+        upper_right_y: top,
+        lower_left_x: left,
+        lower_left_y: bottom,
+        lower_right_x: right,
+        lower_right_y: bottom,
+    })
 }
 
-fn reversible(draft: &Draft, segment: &Segment) -> bool {
-    matches!(
-        draft.materials.get(segment.material_id.as_str()),
-        Some(MaterialRef::Video(_) | MaterialRef::Audio(_))
-    )
-}
-
-/// A movie, not a still: photos, images, GIFs and held frames have no
-/// frame to freeze and no sound to extract.
-fn moving(draft: &Draft, segment: &Segment) -> bool {
-    matches!(
-        draft.materials.get(segment.material_id.as_str()),
-        Some(MaterialRef::Video(video))
-            if video.kind == cutlass_model::MetaType::Video.as_str() && video.freeze.is_none()
-    )
-}
-
-/// Every id the draft uses, clips' extra materials included, so a new fade
-/// or beat id is unused.
-fn taken(draft: &Draft) -> HashSet<String> {
-    let mut taken = media::ids(draft);
-    for track in &draft.tracks {
-        for segment in &track.segments {
-            for id in &segment.extra_material_refs {
-                taken.insert(id.as_str().to_owned());
-            }
-        }
+/// The ratio a stored crop keeps, as [`PhoneClipState::crop`] names it.
+fn crop_name(crop: &Crop, width: i32, height: i32) -> String {
+    let near = |a: &Crop, b: &Crop| {
+        [
+            (a.upper_left_x, b.upper_left_x),
+            (a.upper_left_y, b.upper_left_y),
+            (a.upper_right_x, b.upper_right_x),
+            (a.upper_right_y, b.upper_right_y),
+            (a.lower_left_x, b.lower_left_x),
+            (a.lower_left_y, b.lower_left_y),
+            (a.lower_right_x, b.lower_right_x),
+            (a.lower_right_y, b.lower_right_y),
+        ]
+        .iter()
+        .all(|(x, y)| (x - y).abs() < 1e-6)
+    };
+    if *crop == Crop::default() {
+        return String::new();
     }
-    taken
+    CROP_RATIOS
+        .iter()
+        .find(|ratio| crop_for(ratio, width, height).is_some_and(|made| near(&made, crop)))
+        .map_or_else(|| "custom".to_owned(), |ratio| (*ratio).to_owned())
 }
 
-fn fresher(draft: &Draft) -> impl FnMut(&str) -> String {
-    let mut taken = taken(draft);
-    move |prefix: &str| {
-        let id = media::fresh(&taken, prefix);
-        taken.insert(id.clone());
-        id
-    }
+/// The request that crops the video clip to the middle at `ratio`, or
+/// shows its whole frame for an empty ratio.
+pub(crate) fn crop_request(
+    draft: &Draft,
+    segment_id: &SegmentId,
+    ratio: &str,
+) -> Result<Request, FfiError> {
+    let (segment, _) = unlocked(draft, segment_id)?;
+    let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str()) else {
+        return Err(refused("a crop belongs on a video or a photo"));
+    };
+    let crop = crop_for(ratio, video.width, video.height)
+        .ok_or_else(|| refused("that ratio does not fit the clip"))?;
+    Ok(Request::SetCrop {
+        segment_id: segment_id.clone(),
+        crop,
+    })
 }
 
-/// `seconds` as a fade length. Below zero, or not a number, is refused.
-fn fade_length(micros: i64) -> Result<Micros, FfiError> {
-    if micros < 0 {
-        return Err(refused("a fade cannot be negative"));
-    }
-    Ok(Micros(micros))
+/// The main row's id.
+pub(crate) fn main_row(draft: &Draft) -> Result<TrackId, FfiError> {
+    draft
+        .tracks
+        .iter()
+        .find(|track| track.is_main())
+        .map(|track| track.id.clone())
+        .ok_or_else(|| refused("the project has no main row"))
 }
 
-/// Where a beat dropped at `at` on the timeline sits in the clip's own
-/// file, so a later move carries it.
-fn beat_source(segment: &Segment, at: Micros) -> Result<i64, FfiError> {
-    cutlass_model::source_time_at(segment, at)
-        .ok_or_else(|| refused("move the playhead onto the clip"))
-}
-
-/// A beat this close to the playhead, on the clip's own time, is the one a
-/// second tap takes away.
-const BEAT_REACH: i64 = 100_000;
-
-impl PhoneHost {
-    /// What the clip bar can do to `segment_id`.
-    pub fn clip_abilities(&self, segment_id: &SegmentId) -> Result<PhoneClipAbilities, FfiError> {
-        let draft = self.draft();
-        let (segment, kind) = placed(draft, segment_id)?;
-        let turn = cutlass_editor::can_turn(draft, segment, kind);
-        let crop = stored_crop(draft, segment);
-        Ok(PhoneClipAbilities {
-            turn,
-            reverse: reversible(draft, segment),
-            crop: crop.is_some(),
-            moving: moving(draft, segment),
-            beats: cutlass_model::track_holds_beats(kind),
-            mirrored: turn && segment.clip.flip.horizontal,
-            reversed: segment.reverse,
-            cropped: crop.is_some_and(|crop| crop != Crop::default()),
+/// The first unlocked picture row above main with room from `at` for
+/// `length`.
+pub(crate) fn overlay_row(draft: &Draft, at: Micros, length: Micros) -> Option<TrackId> {
+    let end = at.0.saturating_add(length.0);
+    draft
+        .tracks
+        .iter()
+        .find(|track| {
+            track.kind == TrackType::Video
+                && !track.is_main()
+                && !track.attribute.contains(TrackAttribute::LOCK)
+                && track
+                    .segments
+                    .iter()
+                    .all(|segment| segment.target.end().0 <= at.0 || segment.target.start.0 >= end)
         })
-    }
-
-    /// Flip a picture left to right. A second tap restores it.
-    pub fn toggle_mirror(&mut self, segment_id: &SegmentId) -> Result<(), FfiError> {
-        let draft = self.draft();
-        let (segment, kind) = placed(draft, segment_id)?;
-        if !cutlass_editor::can_turn(draft, segment, kind) {
-            return Err(refused("a mirror belongs on a picture"));
-        }
-        let horizontal = !segment.clip.flip.horizontal;
-        self.apply(
-            self.revision(),
-            &[Request::SetMirror {
-                segment_id: segment_id.clone(),
-                horizontal,
-            }],
-        )?;
-        Ok(())
-    }
-
-    /// Turn a picture clockwise by a quarter. Four taps bring it upright.
-    pub fn turn(&mut self, segment_id: &SegmentId) -> Result<(), FfiError> {
-        let draft = self.draft();
-        let (segment, kind) = placed(draft, segment_id)?;
-        if !cutlass_editor::can_turn(draft, segment, kind) {
-            return Err(refused("a rotate belongs on a picture"));
-        }
-        let degrees = clockwise_quarter(segment.clip.rotation);
-        self.apply(
-            self.revision(),
-            &[Request::SetRotation {
-                segment_id: segment_id.clone(),
-                degrees,
-            }],
-        )?;
-        Ok(())
-    }
-
-    /// Play a picture or a sound backward through its own file. A second
-    /// tap plays it forward.
-    pub fn toggle_reverse(&mut self, segment_id: &SegmentId) -> Result<(), FfiError> {
-        let draft = self.draft();
-        let (segment, _) = placed(draft, segment_id)?;
-        if !reversible(draft, segment) {
-            return Err(refused("reverse belongs on a picture or a sound"));
-        }
-        let reverse = !segment.reverse;
-        self.apply(
-            self.revision(),
-            &[Request::SetReverse {
-                segment_id: segment_id.clone(),
-                reverse,
-                path: String::new(),
-            }],
-        )?;
-        Ok(())
-    }
-
-    /// Keep the middle half of a picture. A second tap restores the whole
-    /// frame. The crop is stored on the video, so its other clips keep it too.
-    pub fn toggle_crop(&mut self, segment_id: &SegmentId) -> Result<(), FfiError> {
-        let draft = self.draft();
-        let (segment, _) = placed(draft, segment_id)?;
-        let current =
-            stored_crop(draft, segment).ok_or_else(|| refused("a crop belongs on a picture"))?;
-        let crop = if current == Crop::default() {
-            center_crop()
-        } else {
-            Crop::default()
-        };
-        self.apply(
-            self.revision(),
-            &[Request::SetCrop {
-                segment_id: segment_id.clone(),
-                crop,
-            }],
-        )?;
-        Ok(())
-    }
-
-    /// A picture's or a sound's fade in and fade out.
-    pub fn fade(&self, segment_id: &SegmentId) -> Result<PhoneFade, FfiError> {
-        let draft = self.draft();
-        let (segment, _) = placed(draft, segment_id)?;
-        Ok(fade_of(draft, segment))
-    }
-
-    /// Fade a picture or a sound in over `fade_in` and out over `fade_out`.
-    /// The same fade again is not a step.
-    pub fn set_fade(
-        &mut self,
-        segment_id: &SegmentId,
-        fade_in: Micros,
-        fade_out: Micros,
-    ) -> Result<(), FfiError> {
-        let fade_in = fade_length(fade_in.0)?;
-        let fade_out = fade_length(fade_out.0)?;
-        let draft = self.draft();
-        let (segment, _) = placed(draft, segment_id)?;
-        if !reversible(draft, segment) {
-            return Err(refused("a fade belongs on a picture or a sound"));
-        }
-        if fade_of(draft, segment) == (PhoneFade { fade_in, fade_out }) {
-            return Ok(());
-        }
-        let fade_id = MaterialId::new(fresher(draft)("fade"));
-        self.apply(
-            self.revision(),
-            &[Request::SetFade {
-                segment_id: segment_id.clone(),
-                fade_id,
-                fade_in,
-                fade_out,
-            }],
-        )?;
-        Ok(())
-    }
-
-    /// Place a video's sound on its own clip on an audio row, lined up with
-    /// it, and silence the video. Returns the new sound clip.
-    pub fn extract_audio(&mut self, segment_id: &SegmentId) -> Result<SegmentId, FfiError> {
-        let draft = self.draft();
-        let (segment, _) = placed(draft, segment_id)?;
-        let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str())
-        else {
-            return Err(refused("an extract belongs on video"));
-        };
-        if !moving(draft, segment) {
-            return Err(refused("the clip has no sound"));
-        }
-        let stored = if segment.reverse && !video.reverse_path.is_empty() {
-            &video.reverse_path
-        } else {
-            &video.path
-        };
-        let file = self.resolve(Path::new(stored))?;
-        let heard = self
-            .preview
-            .readers()
-            .carries_sound(&file)
-            .map_err(|_| refused("the clip's sound could not be read"))?;
-        if !heard {
-            return Err(refused("the clip has no sound"));
-        }
-        let request = cutlass_editor::extract_request(draft, segment_id, &mut fresher(draft))
-            .ok_or_else(|| refused("the clip is not on the timeline"))?;
-        let Request::ExtractAudio {
-            segment_id: sound, ..
-        } = &request
-        else {
-            return Err(refused("the clip is not on the timeline"));
-        };
-        let sound = sound.clone();
-        self.apply(self.revision(), &[request])?;
-        Ok(sound)
-    }
-
-    /// Hold the video's frame under `at` as a still, cut in at the playhead
-    /// (or at the clip's edge when the playhead is close to it). Returns
-    /// the still's clip.
-    pub fn freeze(&mut self, segment_id: &SegmentId, at: Micros) -> Result<SegmentId, FfiError> {
-        let (segment, _) = placed(self.draft(), segment_id)?;
-        if !moving(self.draft(), segment) {
-            return Err(refused("the clip is already a still"));
-        }
-        let point = cutlass_eval::freeze_point(self.draft(), segment_id, at).map_err(|miss| {
-            refused(match miss {
-                cutlass_eval::FreezeMiss::UnknownSegment => "the clip is not on the timeline",
-                cutlass_eval::FreezeMiss::NotVideo => "a freeze belongs on video",
-                cutlass_eval::FreezeMiss::NoFrame => "the clip has no frame to hold",
-                cutlass_eval::FreezeMiss::Outside => "move the playhead onto the clip",
-                cutlass_eval::FreezeMiss::AlreadyHeld => "the clip is already a still",
-            })
-        })?;
-        let unreadable = || refused("the clip's frame could not be read");
-        let source = self.resolve(Path::new(&point.freeze.source_material_path))?;
-        let image = cutlass_eval::freeze_image(
-            self.preview.readers(),
-            &crate::encoders(),
-            &source,
-            point.freeze.timestamp,
-        )
-        .ok_or_else(unreadable)?;
-        let name = format!(
-            "freeze_{}_{}.png",
-            segment_id
-                .as_str()
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                    c
-                } else {
-                    '_'
-                })
-                .collect::<String>(),
-            point.freeze.timestamp.0
-        );
-        let (stored, written) = media::write_in(self.root(), &name, &image.png)?;
-        let size = |side: u32| i32::try_from(side).unwrap_or(i32::MAX);
-        let still = cutlass_editor::FreezeImage {
-            path: stored,
-            width: size(image.width),
-            height: size(image.height),
-        };
-        let requests = cutlass_editor::freeze_requests(
-            self.draft(),
-            segment_id,
-            point.at,
-            point.freeze,
-            still,
-            cutlass_eval::FREEZE_DURATION,
-            &mut fresher(self.draft()),
-        );
-        let Some(requests) = requests else {
-            let _ = std::fs::remove_file(&written);
-            return Err(refused("the clip is not on the timeline"));
-        };
-        let placed = requests.iter().rev().find_map(|request| match request {
-            Request::Place { segment, .. } => Some(segment.id.clone()),
-            _ => None,
-        });
-        if let Err(error) = self.apply(self.revision(), &requests) {
-            let _ = std::fs::remove_file(&written);
-            return Err(error);
-        }
-        placed.ok_or_else(|| refused("the still was not placed"))
-    }
-
-    /// Drop a beat on a sound at the playhead `at`, or take away the beat
-    /// already there. Returns whether a beat is there now.
-    pub fn toggle_beat(&mut self, segment_id: &SegmentId, at: Micros) -> Result<bool, FfiError> {
-        let draft = self.draft();
-        let (segment, kind) = placed(draft, segment_id)?;
-        if !cutlass_model::track_holds_beats(kind) {
-            return Err(refused("a beat belongs on audio"));
-        }
-        let source = beat_source(segment, at)?;
-        let near = cutlass_model::visible_beats(draft)
-            .into_iter()
-            .filter(|beat| &beat.segment_id == segment_id)
-            .find(|beat| (beat.source - source).abs() <= BEAT_REACH);
-        if let Some(beat) = near {
-            self.apply(
-                self.revision(),
-                &[Request::RemoveBeat {
-                    segment_id: segment_id.clone(),
-                    source: Micros(beat.source),
-                }],
-            )?;
-            return Ok(false);
-        }
-        let material_id = MaterialId::new(fresher(draft)("beats"));
-        self.apply(
-            self.revision(),
-            &[Request::AddBeat {
-                segment_id: segment_id.clone(),
-                source: Micros(source),
-                material_id,
-            }],
-        )?;
-        Ok(true)
-    }
-
-    /// Put the whole of a picture from the library on an overlay row at
-    /// `at`: the first free one, or a new one above the others. Returns the
-    /// new clip.
-    pub fn add_overlay(&mut self, material_id: &str, at: Micros) -> Result<SegmentId, FfiError> {
-        let draft = self.draft();
-        let (kind, duration) = cutlass_editor::material_span(draft, material_id)
-            .ok_or_else(|| refused("the media is not in the library"))?;
-        if kind != TrackType::Video {
-            return Err(refused("an overlay is a picture"));
-        }
-        if duration.0 <= 0 {
-            return Err(refused("the media has no duration"));
-        }
-        let at = Micros(at.0.max(0));
-        let (track_id, segment_id, _) = media::room(draft, TrackType::Video, at, duration);
-        let mut requests = Vec::new();
-        let main = draft
-            .tracks
-            .iter()
-            .find(|track| track.is_main())
-            .map(|track| &track.id);
-        let open = draft.tracks.iter().any(|track| track.id == track_id);
-        if !open {
-            requests.push(Request::InsertTrack {
-                track_id: track_id.clone(),
-                kind: TrackType::Video,
-            });
-        }
-        if open && main == Some(&track_id) {
-            return Err(refused("the overlay found no row"));
-        }
-        let mut segment = Segment::new(
-            segment_id.clone(),
-            material_id,
-            cutlass_model::TimeRange::new(at.0, duration.0),
-        );
-        segment.source_range = Some(cutlass_model::TimeRange::new(0, duration.0));
-        requests.push(Request::Place {
-            track_id,
-            segment: Box::new(segment),
-        });
-        self.apply(self.revision(), &requests)?;
-        Ok(segment_id)
-    }
-
-    /// Move an overlay picture onto the main row where it starts. The main
-    /// row makes room for it.
-    pub fn to_main(&mut self, segment_id: &SegmentId) -> Result<(), FfiError> {
-        let draft = self.draft();
-        let (segment, kind) = placed(draft, segment_id)?;
-        let main = draft
-            .tracks
-            .iter()
-            .find(|track| track.is_main())
-            .ok_or_else(|| refused("the project has no main row"))?;
-        if *kind != TrackType::Video || main.segments.iter().any(|other| &other.id == segment_id) {
-            return Err(refused("only an overlay picture goes to main"));
-        }
-        let request = Request::Move {
-            segment_id: segment_id.clone(),
-            track_id: main.id.clone(),
-            start: segment.target.start,
-        };
-        self.apply(self.revision(), &[request])?;
-        Ok(())
-    }
-
-    /// The beats on `segment_id`, as timeline times.
-    pub fn beats(&self, segment_id: &SegmentId) -> Vec<Micros> {
-        cutlass_model::visible_beats(self.draft())
-            .into_iter()
-            .filter(|beat| &beat.segment_id == segment_id)
-            .map(|beat| beat.time)
-            .collect()
-    }
+        .map(|track| track.id.clone())
 }
 
 #[cfg(test)]
@@ -520,26 +308,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_quarter_turn_goes_clockwise_and_four_come_back() {
+    fn a_square_crop_keeps_the_middle_of_a_wide_frame() {
+        let crop = crop_for("1:1", 1920, 1080).unwrap();
+        let side = 1080.0 / 1920.0;
+        assert!((crop.upper_left_x - (1.0 - side) / 2.0).abs() < 1e-9);
+        assert!((crop.lower_right_x - (1.0 + side) / 2.0).abs() < 1e-9);
+        assert_eq!((crop.upper_left_y, crop.lower_right_y), (0.0, 1.0));
+        assert_eq!(crop_name(&crop, 1920, 1080), "1:1");
+    }
+
+    #[test]
+    fn a_wide_crop_keeps_the_middle_band_of_a_tall_frame() {
+        let crop = crop_for("16:9", 1080, 1920).unwrap();
+        assert_eq!((crop.upper_left_x, crop.lower_right_x), (0.0, 1.0));
+        let band = (1080.0 / 1920.0) / (16.0 / 9.0);
+        assert!((crop.lower_left_y - crop.upper_left_y - band).abs() < 1e-9);
+        assert_eq!(crop_name(&crop, 1080, 1920), "16:9");
+    }
+
+    #[test]
+    fn the_whole_frame_is_the_empty_crop_and_a_bad_ratio_is_refused() {
+        assert_eq!(crop_for("", 10, 10), Some(Crop::default()));
+        assert_eq!(crop_name(&Crop::default(), 10, 10), "");
+        for bad in ["square", "0:1", "1:-1", "1:"] {
+            assert_eq!(crop_for(bad, 10, 10), None, "{bad}");
+        }
+        assert_eq!(crop_for("1:1", 0, 10), None);
+        let mut odd = crop_for("1:1", 1920, 1080).unwrap();
+        odd.upper_left_x += 0.01;
+        assert_eq!(crop_name(&odd, 1920, 1080), "custom");
+    }
+
+    #[test]
+    fn four_quarter_turns_come_back_upright() {
         let mut degrees = 0.0;
         for expected in [270.0, 180.0, 90.0, 0.0] {
             degrees = clockwise_quarter(degrees);
             assert_eq!(degrees, expected);
         }
         assert_eq!(clockwise_quarter(f64::NAN), 270.0);
-    }
-
-    #[test]
-    fn a_negative_fade_is_refused() {
-        assert!(fade_length(-1).is_err());
-        assert_eq!(fade_length(0).unwrap(), Micros(0));
-    }
-
-    #[test]
-    fn the_center_crop_keeps_the_middle_half() {
-        let crop = center_crop();
-        assert_ne!(crop, Crop::default());
-        assert_eq!(crop.lower_right_x - crop.upper_left_x, 0.5);
-        assert_eq!(crop.lower_right_y - crop.upper_left_y, 0.5);
     }
 }

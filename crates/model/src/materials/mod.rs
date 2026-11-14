@@ -37,7 +37,8 @@ pub use mark::{
     segment_time_mark, set_time_mark_items, time_mark_items, visible_marks,
 };
 pub use rich::{
-    RichFill, RichFont, RichPaint, RichShadow, RichSolid, RichStroke, RichStyle, RichText,
+    PatternChange, RichFill, RichFont, RichPaint, RichPattern, RichShadow, RichSolid, RichStroke,
+    RichStyle, RichText,
 };
 pub use shape::{
     MaterialShape, SHAPE_ARROW, SHAPE_CONTOUR, SHAPE_FILL, SHAPE_LINE, SHAPE_LINE_WIDTH, SHAPE_PEN,
@@ -48,7 +49,10 @@ pub use speed::{
     constant_target_duration, curve_speed_at, curve_speed_factor, curve_target_duration,
     split_curve,
 };
-pub use text::{Bubble, CAPTION_STYLE_KEYS, MaterialText};
+pub use text::{
+    Bubble, CAPTION_STYLE_KEYS, MAX_FONT_AXES, MaterialText, TEXT_BOLD_WIDTH, TEXT_ITALIC_DEGREE,
+    read_font_axes, write_font_axes,
+};
 pub use transition::{MaterialTransition, blend_extents, blend_window};
 pub use video::{
     Algorithm, Crop, FreezeInfo, MaterialVideo, MotionBlur, Reframe, Relight, VideoAlgorithm,

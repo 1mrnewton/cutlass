@@ -15,6 +15,9 @@
 //! The third is Reduce image noise: [`Denoiser`] cleans each frame of a
 //! clip from the frames around it, so the noise it takes out stays still.
 //!
+//! Remove flicker needs no model: [`Deflicker`] evens out each frame's
+//! brightness with the frames around it.
+//!
 //! The fourth is Optical flow: [`Interpolator`] makes the frames between
 //! two frames, for a clip at a higher frame rate or slowed down.
 //!
@@ -28,6 +31,7 @@
 
 #![forbid(unsafe_code)]
 
+mod deflicker;
 mod denoise;
 mod depth;
 mod detect;
@@ -46,6 +50,7 @@ mod relight_job;
 use std::fmt;
 use std::path::PathBuf;
 
+pub use deflicker::{DEFLICKER_REACH, Deflicker, mean_brightness};
 pub use denoise::{
     DENOISE_MAX_SIDE, DENOISE_WEIGHTS, DenoiseStream, Denoiser, MAX_NOISE, MIN_NOISE,
     convert_fastdvdnet,

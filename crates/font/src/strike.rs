@@ -1,15 +1,17 @@
 //! Bitmap strikes from `CBLC`/`CBDT`, `EBLC`/`EBDT`, and `sbix`.
 //!
-//! A color strike stays premultiplied color. A gray or mono strike is
-//! coverage. PNG, JPEG, TIFF, PDF, masks, and component bitmaps are refused
-//! instead of being replaced with an empty cell. A face with none of these
-//! tables has no strike.
+//! A color strike stays premultiplied color, or the PNG picture the font
+//! stores, still encoded: this crate has no decoder, so the caller decodes
+//! it. A gray or mono strike is coverage. JPEG, TIFF, PDF, masks, and
+//! component bitmaps are refused instead of being replaced with an empty
+//! cell. A face with none of these tables has no strike.
 
 use crate::{Directory, FontError, bytes_at, u16_at, u32_at};
 
 const MAX_STRIKES: usize = 64;
 const MAX_RANGES: usize = 256;
 const MAX_DUPE: u8 = 4;
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
 
 /// Pixels for one glyph in one strike.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,6 +24,9 @@ pub struct BitmapGlyph {
     pub bearing_y: i32,
     /// Strike pixels per em.
     pub ppem: u16,
+    /// The picture is drawn flipped left to right. Only an `sbix` strike
+    /// asks for this, for a glyph that faces the other way.
+    pub mirrored: bool,
     pub pixels: BitmapPixels,
 }
 
@@ -30,12 +35,21 @@ pub struct BitmapGlyph {
 pub enum BitmapPixels {
     Coverage(Vec<u8>),
     Color(Vec<u8>),
+    /// One PNG picture as the font stores it. The glyph's `width` and
+    /// `height` are the size its header declares; the bytes after the
+    /// header are not checked.
+    Png(Vec<u8>),
 }
 
+#[derive(Clone)]
 pub(crate) struct Strikes<'a> {
-    source: Option<Source<'a>>,
+    /// `CBLC`/`CBDT`, or `sbix` when the face has no color bitmap tables.
+    color: Option<Source<'a>>,
+    /// `EBLC`/`EBDT`.
+    gray: Option<Source<'a>>,
 }
 
+#[derive(Clone)]
 enum Source<'a> {
     Embedded {
         color: bool,
@@ -46,37 +60,24 @@ enum Source<'a> {
 }
 
 impl<'a> Strikes<'a> {
-    pub(crate) fn none() -> Self {
-        Self { source: None }
-    }
-
     pub(crate) fn parse(directory: &Directory<'a>) -> Result<Self, FontError> {
-        if let Some(source) = embedded(directory, true)? {
-            return Ok(Self {
-                source: Some(source),
-            });
-        }
-        if let Some(source) = embedded(directory, false)? {
-            return Ok(Self {
-                source: Some(source),
-            });
-        }
-        match directory.table(b"sbix") {
-            Ok(table) => {
-                validate_sbix(table)?;
-                Ok(Self {
-                    source: Some(Source::Sbix(table)),
-                })
-            }
-            Err(FontError::MissingTable) => Ok(Self::none()),
-            Err(error) => Err(error),
-        }
+        let color = match embedded(directory, true)? {
+            Some(source) => Some(source),
+            None => sbix(directory)?,
+        };
+        let gray = embedded(directory, false)?;
+        Ok(Self { color, gray })
     }
 
     pub(crate) fn is_some(&self) -> bool {
-        self.source.is_some()
+        self.color.is_some() || self.gray.is_some()
     }
 
+    pub(crate) fn has_color(&self) -> bool {
+        self.color.is_some()
+    }
+
+    /// The glyph from the largest strike that holds it: color first, then gray.
     pub(crate) fn glyph(
         &self,
         glyph_id: u16,
@@ -85,17 +86,142 @@ impl<'a> Strikes<'a> {
         if glyph_id >= num_glyphs {
             return Err(FontError::UnknownGlyph);
         }
-        let Some(source) = &self.source else {
-            return Ok(None);
-        };
-        match source {
-            Source::Embedded {
+        for source in [&self.color, &self.gray].into_iter().flatten() {
+            if let Some(glyph) = source.glyph(glyph_id, num_glyphs, u32::MAX)? {
+                return Ok(Some(glyph));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The glyph from the largest color strike whose picture is at most
+    /// `max_edge` pixels on each side. When every strike is larger, the
+    /// smallest is returned and the caller decides.
+    pub(crate) fn color_glyph(
+        &self,
+        glyph_id: u16,
+        num_glyphs: u16,
+        max_edge: u32,
+    ) -> Result<Option<BitmapGlyph>, FontError> {
+        if glyph_id >= num_glyphs {
+            return Err(FontError::UnknownGlyph);
+        }
+        match &self.color {
+            Some(source) => source.glyph(glyph_id, num_glyphs, max_edge),
+            None => Ok(None),
+        }
+    }
+}
+
+impl Source<'_> {
+    fn glyph(
+        &self,
+        glyph_id: u16,
+        num_glyphs: u16,
+        max_edge: u32,
+    ) -> Result<Option<BitmapGlyph>, FontError> {
+        match self {
+            Self::Embedded {
                 color,
                 location,
                 data,
-            } => embedded_glyph(location, data, *color, glyph_id),
-            Source::Sbix(table) => sbix_glyph(table, glyph_id, num_glyphs, 0),
+            } => embedded_glyph(location, data, *color, glyph_id, max_edge),
+            Self::Sbix(table) => sbix_glyph(table, glyph_id, num_glyphs, max_edge),
         }
+    }
+}
+
+/// One glyph found in one strike, before its pixels are unpacked or copied.
+struct Found<'a> {
+    width: u32,
+    height: u32,
+    bearing_x: i32,
+    bearing_y: i32,
+    ppem: u16,
+    mirrored: bool,
+    data: Data<'a>,
+}
+
+enum Data<'a> {
+    Empty,
+    Packed {
+        bytes: &'a [u8],
+        bit_depth: u8,
+        byte_aligned: bool,
+        color_table: bool,
+    },
+    Png(&'a [u8]),
+}
+
+impl Found<'_> {
+    fn fits(&self, max_edge: u32) -> bool {
+        self.width <= max_edge && self.height <= max_edge
+    }
+
+    fn finish(self) -> Result<BitmapGlyph, FontError> {
+        let pixels = match self.data {
+            Data::Empty => BitmapPixels::Coverage(Vec::new()),
+            Data::Packed {
+                bytes,
+                bit_depth,
+                byte_aligned,
+                color_table,
+            } => unpack(
+                bytes,
+                self.width,
+                self.height,
+                bit_depth,
+                byte_aligned,
+                color_table,
+            )?,
+            Data::Png(bytes) => BitmapPixels::Png(bytes.to_vec()),
+        };
+        Ok(BitmapGlyph {
+            width: self.width,
+            height: self.height,
+            bearing_x: self.bearing_x,
+            bearing_y: self.bearing_y,
+            ppem: self.ppem,
+            mirrored: self.mirrored,
+            pixels,
+        })
+    }
+}
+
+/// The first candidate that fits, from strikes offered largest first. When
+/// none fits, the last one, which is the smallest. A strike whose graphic
+/// this reader does not accept is passed over for the next; the refusal is
+/// the answer only when no strike gave a picture.
+fn pick<'a>(
+    candidates: impl Iterator<Item = Result<Option<Found<'a>>, FontError>>,
+    max_edge: u32,
+) -> Result<Option<BitmapGlyph>, FontError> {
+    let mut smallest = None;
+    let mut refused = false;
+    for candidate in candidates {
+        match candidate {
+            Ok(Some(found)) if found.fits(max_edge) => return found.finish().map(Some),
+            Ok(Some(found)) => smallest = Some(found),
+            Ok(None) => {}
+            Err(FontError::Unsupported) => refused = true,
+            Err(error) => return Err(error),
+        }
+    }
+    match smallest {
+        Some(found) => found.finish().map(Some),
+        None if refused => Err(FontError::Unsupported),
+        None => Ok(None),
+    }
+}
+
+fn sbix<'a>(directory: &Directory<'a>) -> Result<Option<Source<'a>>, FontError> {
+    match directory.table(b"sbix") {
+        Ok(table) => {
+            validate_sbix(table)?;
+            Ok(Some(Source::Sbix(table)))
+        }
+        Err(FontError::MissingTable) => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -242,6 +368,7 @@ fn embedded_glyph(
     data: &[u8],
     color: bool,
     glyph_id: u16,
+    max_edge: u32,
 ) -> Result<Option<BitmapGlyph>, FontError> {
     let count = strike_count(location)?;
     let mut order: Vec<(u16, usize)> = Vec::with_capacity(count);
@@ -249,13 +376,13 @@ fn embedded_glyph(
         order.push((strike_at(location, index)?.ppem, index));
     }
     order.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
-    for (_, index) in order {
+    let candidates = order.into_iter().map(|(_, index)| {
         let strike = strike_at(location, index)?;
-        if let Some(hit) = range_hit(location, data, &strike, glyph_id)? {
-            return decode_hit(hit, color);
-        }
-    }
-    Ok(None)
+        range_hit(location, data, &strike, glyph_id)?
+            .map(|hit| found(&hit, color))
+            .transpose()
+    });
+    pick(candidates, max_edge)
 }
 
 type Located = (Option<u32>, Option<u32>, Option<Metrics>);
@@ -269,6 +396,7 @@ struct Hit<'a> {
     ppem: u16,
 }
 
+#[derive(Clone, Copy)]
 struct Metrics {
     height: u8,
     width: u8,
@@ -431,76 +559,87 @@ fn sparse_offset(body: &[u8], glyph_id: u16) -> Result<Located, FontError> {
     Ok((None, None, None))
 }
 
-fn decode_hit(hit: Hit<'_>, color_table: bool) -> Result<Option<BitmapGlyph>, FontError> {
-    if matches!(hit.format, 8 | 9 | 17 | 18 | 19) {
-        return refuse_encoded(&hit);
+fn found<'a>(hit: &Hit<'a>, color_table: bool) -> Result<Found<'a>, FontError> {
+    match hit.format {
+        1 | 2 | 5 | 6 | 7 => packed(hit, color_table),
+        17..=19 if color_table => png(hit),
+        _ => Err(FontError::Unsupported),
     }
-    if !matches!(hit.format, 1 | 2 | 5 | 6 | 7) {
-        return Err(FontError::Unsupported);
-    }
+}
+
+fn packed<'a>(hit: &Hit<'a>, color_table: bool) -> Result<Found<'a>, FontError> {
     let (metrics, pixels_at) = if matches!(hit.format, 5) {
         let metrics = hit.shared.ok_or(FontError::BadTable)?;
         (metrics, 0)
     } else {
         let big = matches!(hit.format, 6 | 7);
-        let (metrics, next) = metrics_at(hit.bytes, 0, big)?;
-        (metrics, next)
+        metrics_at(hit.bytes, 0, big)?
     };
     if !hit.horizontal && matches!(hit.format, 1 | 2) {
         return Err(FontError::Unsupported);
     }
     if metrics.width == 0 || metrics.height == 0 {
-        return Ok(Some(empty_glyph(hit.ppem)));
+        return Ok(Found {
+            width: 0,
+            height: 0,
+            bearing_x: 0,
+            bearing_y: 0,
+            ppem: hit.ppem,
+            mirrored: false,
+            data: Data::Empty,
+        });
     }
-    let byte_aligned = matches!(hit.format, 1 | 6);
-    let packed = unpack(
-        hit.bytes.get(pixels_at..).ok_or(FontError::Truncated)?,
-        metrics.width,
-        metrics.height,
-        hit.bit_depth,
-        byte_aligned,
-        color_table,
-    )?;
-    Ok(Some(BitmapGlyph {
+    Ok(Found {
         width: u32::from(metrics.width),
         height: u32::from(metrics.height),
         bearing_x: i32::from(metrics.bearing_x),
         bearing_y: i32::from(metrics.bearing_y),
         ppem: hit.ppem,
-        pixels: packed,
-    }))
+        mirrored: false,
+        data: Data::Packed {
+            bytes: hit.bytes.get(pixels_at..).ok_or(FontError::Truncated)?,
+            bit_depth: hit.bit_depth,
+            byte_aligned: matches!(hit.format, 1 | 6),
+            color_table,
+        },
+    })
 }
 
-fn refuse_encoded(hit: &Hit<'_>) -> Result<Option<BitmapGlyph>, FontError> {
-    match hit.format {
-        17 => png_length(hit.bytes, 5)?,
-        18 => png_length(hit.bytes, 8)?,
-        19 => png_length(hit.bytes, 0)?,
-        _ => {}
-    }
-    Err(FontError::Unsupported)
+/// Formats 17, 18 and 19: a PNG picture after small metrics, after big
+/// metrics, or with the metrics its index subtable shares. The bearings
+/// come from the metrics and the size from the picture's own header.
+fn png<'a>(hit: &Hit<'a>) -> Result<Found<'a>, FontError> {
+    let (metrics, at) = match hit.format {
+        17 => metrics_at(hit.bytes, 0, false)?,
+        18 => metrics_at(hit.bytes, 0, true)?,
+        _ => (hit.shared.ok_or(FontError::BadTable)?, 0),
+    };
+    let len = usize::try_from(u32_at(hit.bytes, at)?).map_err(|_| FontError::BadTable)?;
+    let picture = bytes_at(hit.bytes, at + 4, len)?;
+    let (width, height) = png_size(picture)?;
+    Ok(Found {
+        width,
+        height,
+        bearing_x: i32::from(metrics.bearing_x),
+        bearing_y: i32::from(metrics.bearing_y),
+        ppem: hit.ppem,
+        mirrored: false,
+        data: Data::Png(picture),
+    })
 }
 
-fn png_length(bytes: &[u8], metrics: usize) -> Result<(), FontError> {
-    let len_at = metrics;
-    let header = bytes_at(bytes, len_at, 4)?;
-    let len = usize::try_from(u32_at(header, 0)?).map_err(|_| FontError::BadTable)?;
-    let start = len_at.checked_add(4).ok_or(FontError::BadTable)?;
-    if bytes.len() < start.checked_add(len).ok_or(FontError::BadTable)? {
-        return Err(FontError::Truncated);
+/// The width and height a PNG picture's header declares.
+fn png_size(picture: &[u8]) -> Result<(u32, u32), FontError> {
+    let header = bytes_at(picture, 0, 24)?;
+    if header[..8] != PNG_SIGNATURE || &header[12..16] != b"IHDR" {
+        return Err(FontError::BadTable);
     }
-    Ok(())
-}
-
-fn empty_glyph(ppem: u16) -> BitmapGlyph {
-    BitmapGlyph {
-        width: 0,
-        height: 0,
-        bearing_x: 0,
-        bearing_y: 0,
-        ppem,
-        pixels: BitmapPixels::Coverage(Vec::new()),
+    let width = u32_at(header, 16)?;
+    let height = u32_at(header, 20)?;
+    if width == 0 || height == 0 {
+        return Err(FontError::BadTable);
     }
+    Ok((width, height))
 }
 
 fn metrics_at(data: &[u8], offset: usize, big: bool) -> Result<(Metrics, usize), FontError> {
@@ -519,8 +658,8 @@ fn metrics_at(data: &[u8], offset: usize, big: bool) -> Result<(Metrics, usize),
 
 fn unpack(
     data: &[u8],
-    width: u8,
-    height: u8,
+    width: u32,
+    height: u32,
     bit_depth: u8,
     byte_aligned: bool,
     color_table: bool,
@@ -592,11 +731,8 @@ fn sbix_glyph(
     table: &[u8],
     glyph_id: u16,
     num_glyphs: u16,
-    depth: u8,
+    max_edge: u32,
 ) -> Result<Option<BitmapGlyph>, FontError> {
-    if depth > MAX_DUPE {
-        return Err(FontError::BadTable);
-    }
     let count = strike_count_sbix(table)?;
     let mut strikes = Vec::with_capacity(count);
     for index in 0..count {
@@ -613,12 +749,16 @@ fn sbix_glyph(
         strikes.push((ppem, offset));
     }
     strikes.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
-    for (ppem, offset) in strikes {
-        if let Some(glyph) = sbix_at(table, offset, glyph_id, num_glyphs, ppem, depth)? {
-            return Ok(Some(glyph));
-        }
-    }
-    Ok(None)
+    let candidates = strikes.into_iter().map(|(ppem, offset)| {
+        let strike = SbixStrike {
+            table,
+            at: offset,
+            num_glyphs,
+            ppem,
+        };
+        strike.glyph(glyph_id, false, 0)
+    });
+    pick(candidates, max_edge)
 }
 
 fn strike_count_sbix(table: &[u8]) -> Result<usize, FontError> {
@@ -636,55 +776,73 @@ fn strike_count_sbix(table: &[u8]) -> Result<usize, FontError> {
     Ok(count)
 }
 
-fn sbix_at(
-    table: &[u8],
-    strike: usize,
-    glyph_id: u16,
+struct SbixStrike<'a> {
+    table: &'a [u8],
+    at: usize,
     num_glyphs: u16,
     ppem: u16,
-    depth: u8,
-) -> Result<Option<BitmapGlyph>, FontError> {
-    let entries = usize::from(num_glyphs)
-        .checked_add(1)
-        .and_then(|count| count.checked_mul(4))
-        .ok_or(FontError::BadTable)?;
-    let array_at = strike.checked_add(4).ok_or(FontError::BadTable)?;
-    let _entries = bytes_at(table, array_at, entries)?;
-    let array = array_at
-        .checked_add(
-            usize::from(glyph_id)
-                .checked_mul(4)
-                .ok_or(FontError::BadTable)?,
-        )
-        .ok_or(FontError::BadTable)?;
-    let pair = bytes_at(table, array, 8)?;
-    let start = usize::try_from(u32_at(pair, 0)?).map_err(|_| FontError::BadTable)?;
-    let end = usize::try_from(u32_at(pair, 4)?).map_err(|_| FontError::BadTable)?;
-    if start == end {
-        return Ok(None);
-    }
-    if end < start {
-        return Err(FontError::BadTable);
-    }
-    let glyph = bytes_at(table, strike + start, end - start)?;
-    if glyph.len() < 8 {
-        return Err(FontError::Truncated);
-    }
-    let origin_x = i16::from_be_bytes([glyph[0], glyph[1]]);
-    let origin_y = i16::from_be_bytes([glyph[2], glyph[3]]);
-    let kind = &glyph[4..8];
-    if kind == b"dupe" {
-        if glyph.len() < 10 {
+}
+
+impl<'a> SbixStrike<'a> {
+    /// The glyph's picture in this strike. A `dupe` or `flip` record names
+    /// another glyph of the same strike, whose picture is used as it is or
+    /// flipped left to right.
+    fn glyph(
+        &self,
+        glyph_id: u16,
+        mirrored: bool,
+        depth: u8,
+    ) -> Result<Option<Found<'a>>, FontError> {
+        if depth > MAX_DUPE || glyph_id >= self.num_glyphs {
+            return Err(FontError::BadTable);
+        }
+        let entries = usize::from(self.num_glyphs)
+            .checked_add(1)
+            .and_then(|count| count.checked_mul(4))
+            .ok_or(FontError::BadTable)?;
+        let array_at = self.at.checked_add(4).ok_or(FontError::BadTable)?;
+        let array = bytes_at(self.table, array_at, entries)?;
+        let pair = bytes_at(array, usize::from(glyph_id) * 4, 8)?;
+        let start = usize::try_from(u32_at(pair, 0)?).map_err(|_| FontError::BadTable)?;
+        let end = usize::try_from(u32_at(pair, 4)?).map_err(|_| FontError::BadTable)?;
+        if start == end {
+            return Ok(None);
+        }
+        if end < start {
+            return Err(FontError::BadTable);
+        }
+        let record_at = self.at.checked_add(start).ok_or(FontError::BadTable)?;
+        let record = bytes_at(self.table, record_at, end - start)?;
+        if record.len() < 8 {
             return Err(FontError::Truncated);
         }
-        let next = u16_at(glyph, 8)?;
-        return sbix_glyph(table, next, num_glyphs, depth + 1);
+        let kind = &record[4..8];
+        if kind == b"dupe" || kind == b"flip" {
+            let next = u16_at(record, 8)?;
+            let mirrored = mirrored != (kind == b"flip");
+            return self.glyph(next, mirrored, depth + 1);
+        }
+        if kind != b"png " {
+            return Err(FontError::Unsupported);
+        }
+        let picture = &record[8..];
+        let (width, height) = png_size(picture)?;
+        // The origin offsets place the picture's left and bottom edges.
+        let origin_x = i16::from_be_bytes([record[0], record[1]]);
+        let origin_y = i16::from_be_bytes([record[2], record[3]]);
+        let rise = i32::try_from(height).map_err(|_| FontError::BadTable)?;
+        Ok(Some(Found {
+            width,
+            height,
+            bearing_x: i32::from(origin_x),
+            bearing_y: i32::from(origin_y)
+                .checked_add(rise)
+                .ok_or(FontError::BadTable)?,
+            ppem: self.ppem,
+            mirrored,
+            data: Data::Png(picture),
+        }))
     }
-    if kind == b"png " || kind == b"jpg " || kind == b"tiff" || kind == b"pdf " || kind == b"mask" {
-        return Err(FontError::Unsupported);
-    }
-    let _ = (origin_x, origin_y, ppem);
-    Err(FontError::Unsupported)
 }
 
 #[cfg(test)]
@@ -752,18 +910,171 @@ mod tests {
             glyph.pixels,
             BitmapPixels::Coverage(vec![255, 0, 255, 255, 0, 0, 0, 0])
         );
+        // Four bytes are not a PNG picture, in either kind of color strike.
         let png = png_font();
         let font = read(&png).expect("png");
-        assert!(matches!(font.bitmap(1), Err(FontError::Unsupported)));
+        assert!(matches!(font.bitmap(1), Err(FontError::Truncated)));
         let sbix = sbix_font(b"png ");
         let font = read(&sbix).expect("sbix");
         assert!(font.has_bitmap_strike());
-        assert!(matches!(font.bitmap(1), Err(FontError::Unsupported)));
+        assert!(matches!(font.bitmap(1), Err(FontError::Truncated)));
+        // A record that names itself never ends.
         let dupe = sbix_font(b"dupe");
         assert!(matches!(
             read(&dupe).and_then(|font| font.bitmap(1)),
-            Err(FontError::BadTable) | Err(FontError::Truncated)
+            Err(FontError::BadTable)
         ));
+        let other = sbix_font(b"tiff");
+        assert!(matches!(
+            read(&other).and_then(|font| font.bitmap(1)),
+            Err(FontError::Unsupported)
+        ));
+    }
+
+    const SBIX: &[u8] = include_bytes!("../fixtures/sbix-png.ttf");
+    const CBDT: &[u8] = include_bytes!("../fixtures/cbdt-png.ttf");
+
+    #[test]
+    fn an_sbix_png_picture_is_handed_back_encoded_with_its_place() {
+        let font = read(SBIX).expect("sbix");
+        assert!(font.has_outlines());
+        assert!(font.has_color_strike());
+        assert!(font.outline(2).expect("outline").contours.is_empty());
+        let glyph = font.color_bitmap(2, 256).expect("glyph").expect("picture");
+        assert_eq!((glyph.width, glyph.height, glyph.ppem), (2, 2, 2));
+        assert_eq!((glyph.bearing_x, glyph.bearing_y), (0, 2));
+        assert!(!glyph.mirrored);
+        assert_eq!(
+            glyph.pixels,
+            BitmapPixels::Png(crate::fixture_color::rgba_picture())
+        );
+        // The origin offsets move the left and bottom edges.
+        let moved = font.color_bitmap(14, 256).expect("glyph").expect("moved");
+        assert_eq!((moved.bearing_x, moved.bearing_y), (3, 1));
+        assert_eq!(moved.pixels, glyph.pixels);
+        // A flipped record and a repeated one both use glyph 2's picture.
+        let flipped = font.color_bitmap(7, 256).expect("glyph").expect("flip");
+        assert!(flipped.mirrored);
+        assert_eq!(flipped.pixels, glyph.pixels);
+        let repeated = font.color_bitmap(8, 256).expect("glyph").expect("dupe");
+        assert!(!repeated.mirrored);
+        assert_eq!(repeated.pixels, glyph.pixels);
+        // The letter has an outline and no picture.
+        assert!(font.color_bitmap(1, 256).expect("letter").is_none());
+        assert!(font.bitmap(1).expect("letter").is_none());
+        assert_eq!(font.color_bitmap(16, 256), Err(FontError::UnknownGlyph));
+    }
+
+    #[test]
+    fn the_largest_strike_that_fits_is_chosen() {
+        let font = read(SBIX).expect("sbix");
+        let largest = font.bitmap(2).expect("glyph").expect("largest");
+        assert_eq!((largest.width, largest.ppem), (600, 600));
+        let fitting = font.color_bitmap(2, 256).expect("glyph").expect("fits");
+        assert_eq!((fitting.width, fitting.ppem), (2, 2));
+        let exact = font.color_bitmap(2, 600).expect("glyph").expect("exact");
+        assert_eq!(exact.ppem, 600);
+        let tiny = font.color_bitmap(2, 1).expect("glyph").expect("tiny");
+        assert_eq!((tiny.width, tiny.ppem), (1, 1));
+        // When nothing fits, the smallest is handed back for the caller to refuse.
+        let none = font.color_bitmap(2, 0).expect("glyph").expect("smallest");
+        assert_eq!(none.ppem, 1);
+        // The size a header declares is reported and not believed here.
+        let bomb = font.color_bitmap(9, 256).expect("glyph").expect("bomb");
+        assert_eq!((bomb.width, bomb.height), (100_000, 100_000));
+    }
+
+    #[test]
+    fn a_graphic_that_is_not_png_is_refused() {
+        let font = read(SBIX).expect("sbix");
+        assert_eq!(font.color_bitmap(13, 256), Err(FontError::Unsupported));
+        assert_eq!(font.bitmap(13), Err(FontError::Unsupported));
+        // A strike with a graphic that is refused is passed over for one
+        // that holds a PNG picture of the glyph.
+        let passed = font.bitmap(15).expect("glyph").expect("picture");
+        assert_eq!((passed.width, passed.ppem), (2, 2));
+        assert!(matches!(passed.pixels, BitmapPixels::Png(_)));
+    }
+
+    #[test]
+    fn cbdt_png_pictures_take_their_metrics_from_each_format() {
+        let font = read(CBDT).expect("cbdt");
+        assert!(font.has_color_strike());
+        let small = font.color_bitmap(1, 256).expect("glyph").expect("small");
+        assert_eq!((small.width, small.height, small.ppem), (2, 2, 2));
+        assert_eq!((small.bearing_x, small.bearing_y), (0, 2));
+        assert_eq!(
+            small.pixels,
+            BitmapPixels::Png(crate::fixture_color::rgba_picture())
+        );
+        let big = font.color_bitmap(2, 256).expect("glyph").expect("big");
+        assert_eq!((big.bearing_x, big.bearing_y), (1, 3));
+        assert_eq!(
+            big.pixels,
+            BitmapPixels::Png(crate::fixture_color::palette_picture())
+        );
+        let shared = font.color_bitmap(3, 256).expect("glyph").expect("shared");
+        assert_eq!((shared.bearing_x, shared.bearing_y), (-1, 2));
+        assert_eq!(
+            shared.pixels,
+            BitmapPixels::Png(crate::fixture_color::gray_alpha_picture())
+        );
+        assert!(font.color_bitmap(0, 256).expect("missing").is_none());
+    }
+
+    #[test]
+    fn a_torn_png_strike_is_an_error() {
+        // Cut inside the last picture: its bytes run past the table.
+        let font = read(CBDT).expect("cbdt");
+        let data_at = table_at(CBDT, b"CBDT");
+        let mut short = CBDT.to_vec();
+        let cut = data_at.1 - 8;
+        set_table_length(&mut short, b"CBDT", cut);
+        let torn = read(&short).expect("font");
+        assert_eq!(torn.color_bitmap(3, 256), Err(FontError::Truncated));
+        assert!(font.color_bitmap(3, 256).is_ok());
+        // A picture that does not start as a PNG.
+        let mut wrong = CBDT.to_vec();
+        let at = data_at.0 + 4 + 5 + 4;
+        wrong[at] = 0;
+        let wrong = read(&wrong).expect("font");
+        assert_eq!(wrong.color_bitmap(1, 256), Err(FontError::BadTable));
+        // An sbix table cut inside its strikes.
+        let mut cut_sbix = SBIX.to_vec();
+        set_table_length(&mut cut_sbix, b"sbix", 40);
+        assert!(matches!(
+            read(&cut_sbix).and_then(|font| font.color_bitmap(2, 256)),
+            Err(FontError::Truncated)
+        ));
+    }
+
+    /// Where a table starts, and its length.
+    fn table_at(bytes: &[u8], tag: &[u8; 4]) -> (usize, usize) {
+        let at = record_at(bytes, tag);
+        let read = |at: usize| {
+            usize::try_from(u32::from_be_bytes([
+                bytes[at],
+                bytes[at + 1],
+                bytes[at + 2],
+                bytes[at + 3],
+            ]))
+            .expect("field")
+        };
+        (read(at + 8), read(at + 12))
+    }
+
+    fn record_at(bytes: &[u8], tag: &[u8; 4]) -> usize {
+        let count = usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
+        (0..count)
+            .map(|index| 12 + index * 16)
+            .find(|at| &bytes[*at..*at + 4] == tag)
+            .expect("table")
+    }
+
+    fn set_table_length(bytes: &mut [u8], tag: &[u8; 4], length: usize) {
+        let at = record_at(bytes, tag);
+        bytes[at + 12..at + 16]
+            .copy_from_slice(&u32::try_from(length).expect("length").to_be_bytes());
     }
 
     fn mono_font() -> Vec<u8> {

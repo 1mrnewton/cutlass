@@ -21,6 +21,16 @@ pub fn set_denoise(draft: &mut Draft, segment_id: &SegmentId, level: i64) -> Res
     set_algorithm(draft, segment_id, Algorithm::NOISE_REDUCTION, level)
 }
 
+/// Even out the clip's brightness from frame to frame at `level` (1), or
+/// stop at 0 or below, as [`set_enhance`] does.
+pub fn set_deflicker(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    level: i64,
+) -> Result<(), EditError> {
+    set_algorithm(draft, segment_id, Algorithm::DEFLICKER, level)
+}
+
 /// Fill the clip to `fps` frames a second with Optical flow, one of
 /// [`Algorithm::FRAME_RATES`], or stop at 0 or below, as [`set_enhance`]
 /// does.
@@ -266,6 +276,33 @@ mod tests {
         assert_eq!(block(&session), None);
         session.undo().unwrap();
         assert_eq!(level(&session), Some(Algorithm::UHD));
+    }
+
+    #[test]
+    fn remove_flicker_is_stored_beside_the_other_levels_and_zero_stops_it() {
+        let mut session = session_with(None);
+        set(&mut session, "picture", Algorithm::HD).unwrap();
+        let deflicker = |session: &mut Session, segment: &str, level: i64| {
+            let revision = session.revision();
+            session.apply(
+                revision,
+                &[Request::SetDeflicker {
+                    segment_id: segment.into(),
+                    level,
+                }],
+            )
+        };
+        deflicker(&mut session, "picture", Algorithm::DEFLICKER_ON).unwrap();
+        let video = &session.draft().materials.videos[0];
+        assert_eq!(
+            video.deflicker().map(|a| a.level),
+            Some(Algorithm::DEFLICKER_ON)
+        );
+        assert_eq!(video.enhance().map(|a| a.level), Some(Algorithm::HD));
+        deflicker(&mut session, "picture", 0).unwrap();
+        assert!(session.draft().materials.videos[0].deflicker().is_none());
+        assert_eq!(level(&session), Some(Algorithm::HD));
+        assert_eq!(deflicker(&mut session, "tone", 1), Err(EditError::NotVideo));
     }
 
     #[test]

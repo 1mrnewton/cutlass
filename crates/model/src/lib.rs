@@ -37,7 +37,7 @@ pub use animation::{
 };
 pub use bin::{BinFolder, BinLink, BinPath, VirtualStore};
 pub use clip::{Clip, Flip, Point, UniformScale};
-pub use draft::{CanvasConfig, Draft, DraftConfig};
+pub use draft::{COVER_FILE, CanvasConfig, Cover, Draft, DraftConfig, THUMBNAIL_FILE};
 pub use enums::{
     AnimType, ApplyType, CanvasRatio, CropRatio, HdrDisplayMode, HdrType, KeyframeCurve,
     RenderIndexMode, SegmentSource, SpeedMode, TrackAttribute, TrackFlag, TrackType,
@@ -59,20 +59,21 @@ pub use keyframe::{
 pub use linkage::{KindSwitches, LinkageSettings, linkage_from_biz};
 pub use materials::{
     Algorithm, BloomParams, Bubble, CAPTION_STYLE_KEYS, CaptionTemplateInfo, ConstantSpeedError,
-    Crop, CurveSpeed, FreezeInfo, Kept, MaterialAnimations, MaterialAudio, MaterialAudioFade,
-    MaterialCanvas, MaterialColorConfig, MaterialDraft, MaterialEffect, MaterialHsl,
-    MaterialPictureAdjust, MaterialPluginEffect, MaterialRef, MaterialShape, MaterialSpeed,
-    MaterialText, MaterialTransition, MaterialVideo, MaterialVideoEffect, Materials, MotionBlur,
-    RawMaterial, Reframe, Relight, RichFill, RichFont, RichPaint, RichShadow, RichSolid,
-    RichStroke, RichStyle, RichText, SHAPE_ARROW, SHAPE_CONTOUR, SHAPE_FILL, SHAPE_LINE,
-    SHAPE_LINE_WIDTH, SHAPE_PEN, SHAPE_SHADOW, SHAPE_SIZE, SHAPE_STROKE_WIDTH, ShapeKind,
-    ShapePoint, SpeedPoint, SpeedPreset, StickerAnimation, SubtitleKeywords, TextRange,
-    TimeMarkItem, VideoAlgorithm, VideoStable, VisibleBeat, VisibleMark, WordColumns,
-    beat_timeline_time, blend_extents, blend_window, clip_mark_time, constant_target_duration,
-    curve_speed_at, curve_speed_factor, curve_target_duration, keywords_in_ranges, new_beats,
-    new_time_mark, referenced_time_marks, segment_beats, segment_bloom, segment_time_mark,
-    set_time_mark_items, set_user_beats, source_time_at, split_curve, time_mark_items,
-    track_holds_beats, user_beats, visible_beats, visible_marks,
+    Crop, CurveSpeed, FreezeInfo, Kept, MAX_FONT_AXES, MaterialAnimations, MaterialAudio,
+    MaterialAudioFade, MaterialCanvas, MaterialColorConfig, MaterialDraft, MaterialEffect,
+    MaterialHsl, MaterialPictureAdjust, MaterialPluginEffect, MaterialRef, MaterialShape,
+    MaterialSpeed, MaterialText, MaterialTransition, MaterialVideo, MaterialVideoEffect, Materials,
+    MotionBlur, PatternChange, RawMaterial, Reframe, Relight, RichFill, RichFont, RichPaint,
+    RichPattern, RichShadow, RichSolid, RichStroke, RichStyle, RichText, SHAPE_ARROW,
+    SHAPE_CONTOUR, SHAPE_FILL, SHAPE_LINE, SHAPE_LINE_WIDTH, SHAPE_PEN, SHAPE_SHADOW, SHAPE_SIZE,
+    SHAPE_STROKE_WIDTH, ShapeKind, ShapePoint, SpeedPoint, SpeedPreset, StickerAnimation,
+    SubtitleKeywords, TEXT_BOLD_WIDTH, TEXT_ITALIC_DEGREE, TextRange, TimeMarkItem, VideoAlgorithm,
+    VideoStable, VisibleBeat, VisibleMark, WordColumns, beat_timeline_time, blend_extents,
+    blend_window, clip_mark_time, constant_target_duration, curve_speed_at, curve_speed_factor,
+    curve_target_duration, keywords_in_ranges, new_beats, new_time_mark, read_font_axes,
+    referenced_time_marks, segment_beats, segment_bloom, segment_time_mark, set_time_mark_items,
+    set_user_beats, source_time_at, split_curve, time_mark_items, track_holds_beats, user_beats,
+    visible_beats, visible_marks, write_font_axes,
 };
 pub use meta::MetaType;
 pub use relationship::{LinkPair, Relationship};

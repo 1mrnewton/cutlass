@@ -27,18 +27,21 @@ pub mod spec;
 mod yuv;
 
 pub use decode::Av1Decoder;
-pub use encode::Av1Encoder;
+pub use encode::{Av1Encoder, Av1VideoEncoder};
 pub use yuv::{AsView, View};
 
 use cutlass_decode::{CodecError, CodecId, CodecParams, DecodeFactory, Decoder};
-use cutlass_encode::{EncodeFactory, Encoder};
+use cutlass_encode::{EncodeFactory, Encoder, VideoEncoder};
 
 pub fn register_decoders(factory: &mut DecodeFactory) {
     factory.register(CodecId::Av1, open_decoder);
 }
 
+/// Registers [`Av1Encoder`] for planar pictures and [`Av1VideoEncoder`]
+/// behind the shared adapter for the RGBA frames export pushes.
 pub fn register_encoders(factory: &mut EncodeFactory) {
     factory.register(CodecId::Av1, open_encoder);
+    factory.register_video(CodecId::Av1, open_video_encoder);
 }
 
 fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
@@ -47,4 +50,8 @@ fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
 
 fn open_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError> {
     Ok(Box::new(Av1Encoder::open(params)?))
+}
+
+fn open_video_encoder(params: &CodecParams) -> Result<Box<dyn VideoEncoder>, CodecError> {
+    Ok(Box::new(Av1VideoEncoder::open(params)?))
 }

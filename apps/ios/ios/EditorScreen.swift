@@ -1,5 +1,6 @@
 import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The editor: preview on top, the transport, the timeline, then the tools.
 struct EditorScreen: View {
@@ -11,10 +12,27 @@ struct EditorScreen: View {
     /// The bar shown while nothing is selected.
     @State private var openBar: ToolBar = .root
     @State private var exporting = false
+    /// The overlay picker is open, and what it picked.
+    @State private var pickingOverlay = false
+    @State private var overlayPicked: [PhotosPickerItem] = []
+    /// The Files picker for a sound is open.
+    @State private var pickingSound = false
+    /// The Files picker for captions is open.
+    @State private var pickingCaptions = false
+    /// The picker for what replaces the selected clip is open.
+    @State private var pickingReplace = false
+    @State private var replacePicked: [PhotosPickerItem] = []
+    @State private var pickingReplaceSound = false
+    /// The picker for a video whose sound comes in is open.
+    @State private var pickingExtract = false
+    @State private var extractPicked: [PhotosPickerItem] = []
 
     /// The tool panel open over the tool bar.
     enum Panel: Equatable {
         case volume, speed, effects, ratio, background, graphs, animations
+        case crop, opacity, fade
+        case filters, adjust, clipEffects
+        case stickers, draw, transitions, shapeStyle
         /// Add text, or change the text clip with this id.
         case text(String?)
     }
@@ -42,7 +60,7 @@ struct EditorScreen: View {
             .overlay(alignment: .trailing) { exportButton }
             preview
             transport
-            TimelineStrip(model: model, picked: $picked)
+            TimelineStrip(model: model, picked: $picked) { _ in panel = .transitions }
                 .frame(maxHeight: .infinity)
                 .background(Color(white: 0.09))
             bottom
@@ -53,8 +71,60 @@ struct EditorScreen: View {
         .background(Color(white: 0.06))
         .overlay(alignment: .top) { notice }
         .onChange(of: picked) { _, items in importPicked(items) }
+        .onChange(of: overlayPicked) { _, items in importOverlays(items) }
+        .onChange(of: replacePicked) { _, items in importOne(items) { model.replaceSelected(with: $0) } }
+        .onChange(of: extractPicked) { _, items in importOne(items) { model.extractSound(at: $0) } }
+        .photosPicker(
+            isPresented: $pickingOverlay, selection: $overlayPicked,
+            matching: .any(of: [.images, .videos]), preferredItemEncoding: .current)
+        .photosPicker(
+            isPresented: $pickingReplace, selection: $replacePicked, maxSelectionCount: 1,
+            matching: .any(of: [.images, .videos]), preferredItemEncoding: .current)
+        .photosPicker(
+            isPresented: $pickingExtract, selection: $extractPicked, maxSelectionCount: 1,
+            matching: .videos, preferredItemEncoding: .current)
+        .fileImporter(
+            isPresented: $pickingSound, allowedContentTypes: [.audio],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case let .success(urls): if let url = urls.first { model.importSound(at: url) }
+            case let .failure(error): model.show(error)
+            }
+        }
+        .background {
+            // One file importer per view, so the others hang off their own.
+            Color.clear
+                .fileImporter(
+                    isPresented: $pickingCaptions, allowedContentTypes: EditorScreen.subtitleTypes,
+                    allowsMultipleSelection: false
+                ) { result in
+                    switch result {
+                    case let .success(urls): if let url = urls.first { model.importCaptions(at: url) }
+                    case let .failure(error): model.show(error)
+                    }
+                }
+            Color.clear
+                .fileImporter(
+                    isPresented: $pickingReplaceSound, allowedContentTypes: [.audio],
+                    allowsMultipleSelection: false
+                ) { result in
+                    switch result {
+                    case let .success(urls): if let url = urls.first { model.replaceSelected(with: url) }
+                    case let .failure(error): model.show(error)
+                    }
+                }
+        }
         .onChange(of: model.selectedClip) { _, id in
-            if id == nil, panel != .text(nil), panel != .effects, panel != .ratio, panel != .background { panel = nil }
+            let stays: [Panel] = [
+                .text(nil), .effects, .ratio, .background, .filters, .stickers, .draw, .transitions,
+            ]
+            if id == nil, let open = panel, !stays.contains(open) { panel = nil }
+            if id != nil, panel == .transitions { panel = nil }
+            if panel == .shapeStyle, id.flatMap(model.shapeStyle(of:)) == nil { panel = nil }
+        }
+        .onChange(of: panel) { _, open in
+            if open != .transitions { model.selectedCut = nil }
         }
         .onDisappear { model.pause() }
         .sheet(isPresented: $exporting) {
@@ -91,7 +161,9 @@ struct EditorScreen: View {
                     .resizable()
                     .aspectRatio(model.canvasAspect, contentMode: .fit)
             }
-            if !model.isPlaying {
+            if panel == .draw {
+                DrawOverlay(model: model)
+            } else if !model.isPlaying {
                 StageOverlay(model: model) { panel = .text($0) }
             }
             if model.isOpening || model.isImporting {
@@ -129,6 +201,15 @@ struct EditorScreen: View {
                         }
                 }
                 .accessibilityLabel(keys.here ? "Remove keyframe" : "Add keyframe")
+                .padding(.trailing, 16)
+            }
+            if model.keys == nil {
+                Button { model.toggleLinkage() } label: {
+                    HugeIcon(model.linkage ? "linkage" : "unlink")
+                        .foregroundStyle(model.linkage ? Palette.accent : .white)
+                }
+                .accessibilityLabel("Linkage")
+                .accessibilityValue(model.linkage ? "On" : "Off")
                 .padding(.trailing, 16)
             }
             Button { model.undo() } label: { HugeIcon("undo") }
@@ -170,6 +251,33 @@ struct EditorScreen: View {
         } else if panel == .graphs {
             GraphsPanel(model: model) { self.panel = nil }
                 .transition(.move(edge: .bottom))
+        } else if panel == .filters {
+            FiltersPanel(model: model) { self.panel = nil }
+                .transition(.move(edge: .bottom))
+        } else if panel == .adjust, model.adjustSliders != nil {
+            AdjustPanel(model: model) { self.panel = nil }
+                .id(model.selectedClip)
+                .transition(.move(edge: .bottom))
+        } else if panel == .clipEffects, let clip = model.selectedClip {
+            EffectsPanel(model: model, title: "Effects", pick: { model.addClipEffect($0) }) {
+                self.panel = nil
+            }
+            .id(clip)
+            .transition(.move(edge: .bottom))
+        } else if panel == .stickers {
+            StickersPanel(model: model) { self.panel = nil }
+                .transition(.move(edge: .bottom))
+        } else if panel == .draw {
+            DrawPanel(model: model) { self.panel = nil }
+                .transition(.move(edge: .bottom))
+        } else if panel == .shapeStyle, let clip = model.selectedClip,
+                  model.shapeStyle(of: clip) != nil {
+            ShapeStylePanel(model: model, clip: clip) { self.panel = nil }
+                .id(clip)
+                .transition(.move(edge: .bottom))
+        } else if panel == .transitions, model.cut != nil {
+            TransitionsPanel(model: model) { self.panel = nil }
+                .transition(.move(edge: .bottom))
         } else if case let .text(clip) = panel {
             TextPanel(model: model, clip: clip) { self.panel = nil }
                 .id(clip ?? "new")
@@ -179,7 +287,12 @@ struct EditorScreen: View {
                 switch panel {
                 case .volume: VolumePanel(model: model, clip: clip) { self.panel = nil }
                 case .speed: SpeedPanel(model: model, clip: clip) { self.panel = nil }
-                case .text, .effects, .ratio, .background, .graphs, .animations: EmptyView()
+                case .crop: CropPanel(model: model) { self.panel = nil }
+                case .opacity: OpacityPanel(model: model) { self.panel = nil }
+                case .fade: FadePanel(model: model, clip: clip) { self.panel = nil }
+                case .text, .effects, .ratio, .background, .graphs, .animations,
+                     .filters, .adjust, .clipEffects, .stickers, .draw, .transitions, .shapeStyle:
+                    EmptyView()
                 }
             }
             .transition(.move(edge: .bottom))
@@ -222,6 +335,35 @@ struct EditorScreen: View {
         case .background:
             model.selectedClip = nil
             panel = .background
+        case .duplicate: model.duplicate()
+        case .crop: panel = .crop
+        case .mirror: model.toggleMirror()
+        case .rotate: model.turn()
+        case .opacity: panel = .opacity
+        case .fade: panel = .fade
+        case .reverse: model.toggleReverse()
+        case .freeze: model.freeze()
+        case .extractAudio:
+            // The Audio bar takes a video's sound; a clip gives up its own.
+            if model.selectedClip == nil { pickingExtract = true } else { model.extractOrRecoverAudio() }
+        case .beats: model.toggleBeat()
+        case .splice: model.toMain()
+        case .addOverlay: pickingOverlay = true
+        case .importSound: pickingSound = true
+        case .filters: panel = .filters
+        case .adjust:
+            if model.selectedClip == nil { model.addAdjustment() }
+            panel = .adjust
+        case .effects: panel = .clipEffects
+        case .stickers: panel = .stickers
+        case .draw:
+            model.pause()
+            model.selectedClip = nil
+            panel = .draw
+        case .captions: pickingCaptions = true
+        case .shapeStyle: panel = .shapeStyle
+        case .replace:
+            if model.selectionBar == .audioClip { pickingReplaceSound = true } else { pickingReplace = true }
         default: model.say("\(tool.label) is coming soon")
         }
     }
@@ -242,6 +384,48 @@ struct EditorScreen: View {
                     try? await Task.sleep(for: .seconds(2.5))
                     if model.notice == notice { withAnimation { model.clearNotice() } }
                 }
+        }
+    }
+
+    /// SRT and LRC files, by extension, or any text.
+    static let subtitleTypes: [UTType] =
+        [UTType(filenameExtension: "srt"), UTType(filenameExtension: "lrc")].compactMap { $0 }
+        + [.plainText]
+
+    /// Hand the one picked item to `use`, then drop the copy.
+    private func importOne(_ items: [PhotosPickerItem], use: @escaping (URL) -> Void) {
+        guard let item = items.first else { return }
+        replacePicked = []
+        extractPicked = []
+        model.beginImport()
+        Task {
+            do {
+                let file = try await PickedFile.load(item)
+                use(file)
+                try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+            } catch {
+                model.show(error)
+            }
+            model.endImport()
+        }
+    }
+
+    /// Bring each picked item in as an overlay at the playhead.
+    private func importOverlays(_ items: [PhotosPickerItem]) {
+        guard !items.isEmpty else { return }
+        overlayPicked = []
+        model.beginImport()
+        Task {
+            for item in items {
+                do {
+                    let file = try await PickedFile.load(item)
+                    model.addOverlay(at: file)
+                    try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+                } catch {
+                    model.show(error)
+                }
+            }
+            model.endImport()
         }
     }
 

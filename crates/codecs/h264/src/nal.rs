@@ -70,21 +70,44 @@ pub fn rbsp(ebsp: &[u8]) -> Result<Vec<u8>, CodecError> {
     if ebsp.len() > NAL_LIMIT {
         return Err(CodecError::Limit { what: "nal unit" });
     }
+    // An emulation prevention byte is a 3 after two zeros. Everything
+    // between two of them is copied in one piece.
     let mut out = Vec::with_capacity(ebsp.len());
-    let mut zeros = 0u8;
-    for &byte in ebsp {
-        if zeros >= 2 && byte == 0x03 {
-            zeros = 0;
-            continue;
+    let mut kept = 0usize;
+    let mut from = 0usize;
+    while let Some(found) = find_byte(&ebsp[from..], 3) {
+        let at = from + found;
+        if at >= 2 && ebsp[at - 1] == 0 && ebsp[at - 2] == 0 {
+            out.extend_from_slice(&ebsp[kept..at]);
+            kept = at + 1;
         }
-        out.push(byte);
-        if byte == 0 {
-            zeros = zeros.saturating_add(1);
-        } else {
-            zeros = 0;
+        from = at + 1;
+    }
+    out.extend_from_slice(&ebsp[kept..]);
+    Ok(out)
+}
+
+/// Where the first `value` in `bytes` is. Eight bytes are looked at a
+/// time, and only a word that may hold it is looked at byte by byte: in a
+/// slice's data a 3, or a zero, is rare.
+fn find_byte(bytes: &[u8], value: u8) -> Option<usize> {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGHS: u64 = 0x8080_8080_8080_8080;
+    let (words, rest) = bytes.as_chunks::<8>();
+    for (index, word) in words.iter().enumerate() {
+        // A byte of the word that is `value` is a zero byte here, which
+        // sets its high bit below; other bytes may too, so they are looked
+        // at again.
+        let moved = u64::from_le_bytes(*word) ^ (u64::from(value) * ONES);
+        if moved.wrapping_sub(ONES) & !moved & HIGHS != 0
+            && let Some(found) = word.iter().position(|&byte| byte == value)
+        {
+            return Some(index * 8 + found);
         }
     }
-    Ok(out)
+    rest.iter()
+        .position(|&byte| byte == value)
+        .map(|found| words.len() * 8 + found)
 }
 
 fn nal_from_ebsp(ebsp: &[u8]) -> Result<Nal, CodecError> {
@@ -224,17 +247,29 @@ fn starts_annex_b(data: &[u8]) -> bool {
     data.starts_with(&[0, 0, 1]) || data.starts_with(&[0, 0, 0, 1])
 }
 
-fn annex_b(data: &[u8]) -> Result<Vec<Nal>, CodecError> {
+/// Where each `00 00 01` in `data` begins, each found after the last one
+/// ends. A start code begins with a zero, so the search goes from one zero
+/// to the next.
+fn start_codes(data: &[u8]) -> Vec<usize> {
     let mut starts = Vec::new();
     let mut i = 0;
     while i + 2 < data.len() {
-        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+        let Some(found) = find_byte(&data[i..data.len() - 2], 0) else {
+            break;
+        };
+        i += found;
+        if data[i + 1] == 0 && data[i + 2] == 1 {
             starts.push(i);
             i += 3;
         } else {
             i += 1;
         }
     }
+    starts
+}
+
+fn annex_b(data: &[u8]) -> Result<Vec<Nal>, CodecError> {
+    let starts = start_codes(data);
     if starts.is_empty() {
         return Err(CodecError::Malformed {
             at_bit: 0,
@@ -397,6 +432,53 @@ fn emulation(rbsp: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn start_codes_are_found_as_byte_by_byte() {
+        let mut seed = 5u32;
+        for round in 0..5_000 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let len = (seed >> 8) as usize % 48;
+            let data: Vec<u8> = (0..len)
+                .map(|i| {
+                    let mix = seed.wrapping_mul(i as u32 + 3).rotate_left(i as u32 % 29);
+                    [0, 0, 1, 3, 0x65, 0x80][(mix >> 5) as usize % 6]
+                })
+                .collect();
+            let mut wanted = Vec::new();
+            let mut i = 0;
+            while i + 2 < data.len() {
+                if data[i..i + 3] == [0, 0, 1] {
+                    wanted.push(i);
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+            }
+            assert_eq!(super::start_codes(&data), wanted, "round {round}: {data:?}");
+        }
+    }
+
+    #[test]
+    fn find_three_finds_the_first_three_anywhere() {
+        let mut seed = 7u32;
+        for round in 0..5_000 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let len = (seed >> 8) as usize % 40;
+            let bytes: Vec<u8> = (0..len)
+                .map(|i| {
+                    let mix = seed.wrapping_mul(i as u32 + 1).rotate_left(i as u32);
+                    [0, 3, 2, 4, 0x83, 0x03 ^ 0x80][(mix >> 3) as usize % 6]
+                })
+                .collect();
+            let wanted = bytes.iter().position(|&byte| byte == 3);
+            assert_eq!(
+                super::find_byte(&bytes, 3),
+                wanted,
+                "round {round}: {bytes:?}"
+            );
+        }
+    }
+
     use super::{Extension, access_unit, rbsp};
 
     #[test]
@@ -405,6 +487,48 @@ mod tests {
             rbsp(&[0x00, 0x00, 0x03, 0x01]).unwrap(),
             vec![0x00, 0x00, 0x01]
         );
+    }
+
+    #[test]
+    fn rbsp_drops_exactly_the_bytes_the_rule_names() {
+        // Clause 7.4.1: a 3 that follows two zero bytes is dropped, and the
+        // count of zeros starts again after it.
+        fn by_the_rule(ebsp: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut zeros = 0u8;
+            for &byte in ebsp {
+                if zeros >= 2 && byte == 0x03 {
+                    zeros = 0;
+                    continue;
+                }
+                out.push(byte);
+                zeros = if byte == 0 {
+                    zeros.saturating_add(1)
+                } else {
+                    0
+                };
+            }
+            out
+        }
+        // Every string of up to seven bytes over 0, 1 and 3, then long ones.
+        for len in 0..=7u32 {
+            for code in 0..3u32.pow(len) {
+                let bytes: Vec<u8> = (0..len)
+                    .map(|i| [0, 1, 3][(code / 3u32.pow(i) % 3) as usize])
+                    .collect();
+                assert_eq!(rbsp(&bytes).unwrap(), by_the_rule(&bytes), "{bytes:?}");
+            }
+        }
+        let mut state = 9u32;
+        for _ in 0..200 {
+            let bytes: Vec<u8> = (0..300)
+                .map(|_| {
+                    state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                    [0, 0, 0, 3, 3, 1, 255][(state >> 16) as usize % 7]
+                })
+                .collect();
+            assert_eq!(rbsp(&bytes).unwrap(), by_the_rule(&bytes));
+        }
     }
 
     #[test]

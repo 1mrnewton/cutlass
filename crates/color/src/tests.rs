@@ -1,5 +1,5 @@
 use cutlass_codec::access::{
-    ColorPrimaries, ColorRange, MatrixCoefficients, PixelFormat, Transfer, Yuv420p,
+    ColorMatrix, ColorPrimaries, ColorRange, MatrixCoefficients, PixelFormat, Transfer, Yuv420p,
 };
 
 use crate::{
@@ -812,4 +812,129 @@ fn an_unknown_draft_code_has_no_signal() {
         crate::Signal::for_tags(ColorPrimaries::Bt709, Transfer::Bt709, Matrix::Bt709, 5,),
         Err(Error::Draft(5))
     );
+}
+
+#[test]
+fn twelve_bit_levels_are_the_eight_bit_ones_times_sixteen() {
+    let request = Request::draft(0);
+    // Limited black 256, white 3760, and a neutral 2048 at the level a
+    // 10-bit 512 has.
+    let le = |code: u16| code.to_le_bytes();
+    for (code, want) in [(256u16, 0u8), (3760, 255), (2048, 130)] {
+        let y = le(code);
+        let c = le(2048);
+        let picture = planes(Layout::Yuv444, Depth::Twelve, 1, 1, &y, &c, &c);
+        assert_eq!(at(picture, &request, 0, 0), [want, want, want, 255]);
+    }
+    // Full range ends at 4095, and a code past it is refused.
+    let (y, c) = (le(4095), le(2048));
+    let mut white = planes(Layout::Yuv444, Depth::Twelve, 1, 1, &y, &c, &c);
+    white.range = ColorRange::Full;
+    assert_eq!(at(white, &request, 0, 0), [255, 255, 255, 255]);
+    let y = le(4096);
+    let overflow = planes(Layout::Yuv444, Depth::Twelve, 1, 1, &y, &c, &c);
+    assert_eq!(
+        convert(Input::Cpu(overflow), &request).expect_err("range"),
+        Error::Range
+    );
+    // A 10-bit picture still ends at 1023.
+    let y = le(1024);
+    let c = le(512);
+    let ten = planes(Layout::Yuv444, Depth::Ten, 1, 1, &y, &c, &c);
+    assert_eq!(
+        convert(Input::Cpu(ten), &request).expect_err("range"),
+        Error::Range
+    );
+}
+
+#[test]
+fn a_440_chroma_sample_covers_the_rows_above_and_below() {
+    let request = Request::draft(0);
+    // 2 wide, 4 tall: chroma is 2 by 2. The top pair of rows is neutral and
+    // the bottom pair is red-difference heavy.
+    let y = [126u8; 8];
+    let u = [128, 128, 128, 128];
+    let v = [128, 128, 240, 240];
+    let picture = planes(Layout::Yuv440, Depth::Eight, 2, 4, &y, &u, &v);
+    let grey = at(picture, &request, 1, 1);
+    assert_eq!(grey[0], grey[1]);
+    assert_eq!(grey[1], grey[2]);
+    let red = at(picture, &request, 1, 2);
+    assert_eq!(red, at(picture, &request, 0, 3));
+    assert!(red[0] > grey[0] && red[1] < grey[1]);
+    // An odd height keeps a chroma row for its last luma row.
+    let y = [126u8; 6];
+    let odd = planes(Layout::Yuv440, Depth::Eight, 2, 3, &y, &u, &v);
+    assert_eq!(at(odd, &request, 0, 2), red);
+    // One chroma row is too few for three luma rows.
+    let short = planes(Layout::Yuv440, Depth::Eight, 2, 3, &y, &u[..2], &v[..2]);
+    assert_eq!(
+        convert(Input::Cpu(short), &request).expect_err("short"),
+        Error::Length
+    );
+}
+
+#[test]
+fn an_odd_422_width_keeps_a_chroma_sample_for_its_last_column() {
+    let request = Request::draft(0);
+    let y = [126u8; 3];
+    let u = [128, 128];
+    let v = [128, 240];
+    let picture = planes(Layout::Yuv422, Depth::Eight, 3, 1, &y, &u, &v);
+    let grey = at(picture, &request, 1, 0);
+    let red = at(picture, &request, 2, 0);
+    assert_eq!(grey[0], grey[1]);
+    assert!(red[0] > grey[0]);
+    let short = planes(Layout::Yuv422, Depth::Eight, 3, 1, &y, &u[..1], &v[..1]);
+    assert_eq!(
+        convert(Input::Cpu(short), &request).expect_err("short"),
+        Error::Length
+    );
+}
+
+#[test]
+fn gbr_planes_take_no_matrix() {
+    let request = Request::draft(0);
+    // Planes are G, B, R. Full range comes out as stored.
+    let mut picture = planes(Layout::Yuv444, Depth::Eight, 1, 1, &[10], &[20], &[30]);
+    picture.matrix = Matrix::Identity;
+    picture.range = ColorRange::Full;
+    assert_eq!(at(picture, &request, 0, 0), [30, 10, 20, 255]);
+    // Limited range expands each plane as luma is: 16 is 0 and 235 is 255.
+    let mut limited = planes(Layout::Yuv444, Depth::Eight, 1, 1, &[16], &[235], &[126]);
+    limited.matrix = Matrix::Identity;
+    assert_eq!(at(limited, &request, 0, 0), [128, 0, 255, 255]);
+    // Ten bits, full range: 1023 is 255.
+    let (g, b, r) = (
+        1023u16.to_le_bytes(),
+        0u16.to_le_bytes(),
+        512u16.to_le_bytes(),
+    );
+    let mut ten = planes(Layout::Yuv444, Depth::Ten, 1, 1, &g, &b, &r);
+    ten.matrix = Matrix::Identity;
+    ten.range = ColorRange::Full;
+    assert_eq!(at(ten, &request, 0, 0), [128, 255, 0, 255]);
+}
+
+#[test]
+fn a_decoded_matrix_maps_to_the_weights_this_crate_has() {
+    assert_eq!(
+        Matrix::from_matrix(ColorMatrix::Unspecified),
+        Ok(Matrix::Bt709)
+    );
+    assert_eq!(Matrix::from_matrix(ColorMatrix::Bt709), Ok(Matrix::Bt709));
+    assert_eq!(Matrix::from_matrix(ColorMatrix::Bt601), Ok(Matrix::Bt601));
+    assert_eq!(Matrix::from_matrix(ColorMatrix::Bt2020), Ok(Matrix::Bt2020));
+    assert_eq!(
+        Matrix::from_matrix(ColorMatrix::Identity),
+        Ok(Matrix::Identity)
+    );
+    for other in [
+        ColorMatrix::Fcc,
+        ColorMatrix::Smpte240m,
+        ColorMatrix::Ycgco,
+        ColorMatrix::Ictcp,
+    ] {
+        assert_eq!(Matrix::from_matrix(other), Err(Error::Matrix));
+    }
 }

@@ -183,6 +183,66 @@ pub enum MatrixCoefficients {
     Rgb,
 }
 
+impl ColorPrimaries {
+    /// The `colour_primaries` code of ISO/IEC 23091-2. BT.601 is written as
+    /// 6, the 525-line value, and an unnamed stream as 2.
+    #[must_use]
+    pub const fn cicp(self) -> u8 {
+        match self {
+            Self::Bt709 => 1,
+            Self::Unspecified => 2,
+            Self::Bt470m => 4,
+            Self::Bt601 => 6,
+            Self::Smpte240m => 7,
+            Self::Film => 8,
+            Self::Bt2020 => 9,
+            Self::Smpte428 => 10,
+            Self::Smpte431 => 11,
+            Self::Smpte432 => 12,
+            Self::Ebu3213 => 22,
+        }
+    }
+}
+
+impl Transfer {
+    /// The `transfer_characteristics` code of ISO/IEC 23091-2. BT.601 is
+    /// written as 6 and BT.2020 as 14, the 10-bit value.
+    #[must_use]
+    pub const fn cicp(self) -> u8 {
+        match self {
+            Self::Bt709 => 1,
+            Self::Unspecified => 2,
+            Self::Bt601 => 6,
+            Self::Smpte240m => 7,
+            Self::Linear => 8,
+            Self::Log100 => 9,
+            Self::LogSqrt => 10,
+            Self::Iec61966_2_4 => 11,
+            Self::Bt1361 => 12,
+            Self::Srgb => 13,
+            Self::Bt2020 => 14,
+            Self::Pq => 16,
+            Self::Smpte428 => 17,
+            Self::Hlg => 18,
+        }
+    }
+}
+
+impl MatrixCoefficients {
+    /// The `matrix_coefficients` code of ISO/IEC 23091-2. BT.601 is written
+    /// as 6 and BT.2020 as 9, non-constant luminance.
+    #[must_use]
+    pub const fn cicp(self) -> u8 {
+        match self {
+            Self::Rgb => 0,
+            Self::Bt709 => 1,
+            Self::Unspecified => 2,
+            Self::Bt601 => 6,
+            Self::Bt2020 => 9,
+        }
+    }
+}
+
 impl PixelFormat {
     /// Chroma width and height for a planar format. `None` when the format has no chroma planes.
     #[must_use]
@@ -201,5 +261,31 @@ impl PixelFormat {
             | Self::Gbrp12 => Some((width, height)),
             Self::None | Self::Rgba8 | Self::Gray8 | Self::Gray10 => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ColorPrimaries, MatrixCoefficients, Transfer};
+
+    #[test]
+    fn the_color_names_have_their_cicp_codes() {
+        assert_eq!(ColorPrimaries::Unspecified.cicp(), 2);
+        assert_eq!(ColorPrimaries::Bt709.cicp(), 1);
+        assert_eq!(ColorPrimaries::Bt601.cicp(), 6);
+        assert_eq!(ColorPrimaries::Bt2020.cicp(), 9);
+        assert_eq!(ColorPrimaries::Smpte432.cicp(), 12);
+        assert_eq!(ColorPrimaries::Ebu3213.cicp(), 22);
+        assert_eq!(Transfer::Unspecified.cicp(), 2);
+        assert_eq!(Transfer::Bt709.cicp(), 1);
+        assert_eq!(Transfer::Srgb.cicp(), 13);
+        assert_eq!(Transfer::Bt2020.cicp(), 14);
+        assert_eq!(Transfer::Pq.cicp(), 16);
+        assert_eq!(Transfer::Hlg.cicp(), 18);
+        assert_eq!(MatrixCoefficients::Rgb.cicp(), 0);
+        assert_eq!(MatrixCoefficients::Bt709.cicp(), 1);
+        assert_eq!(MatrixCoefficients::Unspecified.cicp(), 2);
+        assert_eq!(MatrixCoefficients::Bt601.cicp(), 6);
+        assert_eq!(MatrixCoefficients::Bt2020.cicp(), 9);
     }
 }

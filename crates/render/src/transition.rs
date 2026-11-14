@@ -279,6 +279,70 @@ mod tests {
     }
 
     #[test]
+    fn a_crossing_draws_what_its_recipes_kind_draws_and_refuses_a_wrong_size() {
+        let Some(renderer) = Renderer::for_test().expect("a GPU is required") else {
+            eprintln!("skipped: no GPU");
+            return;
+        };
+        let kind = TransitionKind::every()
+            .into_iter()
+            .find(|kind| kind.key() == "photo-slide")
+            .expect("photo slide ships");
+        let recipe = kind.recipe().expect("a recipe");
+        let (w, h) = (96u32, 64u32);
+        let red: Vec<u8> = [240, 20, 20, 255].repeat((w * h) as usize);
+        let blue: Vec<u8> = [20, 20, 240, 255].repeat((w * h) as usize);
+        let canvas = renderer.canvas(w, h).expect("canvas");
+        let picture = |bytes| Rgba {
+            width: w,
+            height: h,
+            bytes,
+        };
+        for t in [0.0, 0.3, 0.5, 1.0] {
+            renderer
+                .draw(
+                    &canvas,
+                    &[Layer::Transition {
+                        kind,
+                        t,
+                        outgoing: picture(&red),
+                        incoming: picture(&blue),
+                    }],
+                )
+                .expect("draw");
+            let by_kind = renderer.read(&canvas).expect("read");
+            let crossing = recipe.at(t);
+            renderer
+                .draw(
+                    &canvas,
+                    &[Layer::Crossing {
+                        crossing: &crossing,
+                        outgoing: picture(&red),
+                        incoming: picture(&blue),
+                    }],
+                )
+                .expect("draw");
+            assert_eq!(renderer.read(&canvas).expect("read"), by_kind, "at {t}");
+        }
+        // A side that is not the canvas's size is refused, not stretched.
+        let small: Vec<u8> = [0, 0, 0, 255].repeat(4);
+        let crossing = recipe.at(0.5);
+        let refused = renderer.draw(
+            &canvas,
+            &[Layer::Crossing {
+                crossing: &crossing,
+                outgoing: picture(&red),
+                incoming: Rgba {
+                    width: 2,
+                    height: 2,
+                    bytes: &small,
+                },
+            }],
+        );
+        assert!(matches!(refused, Err(crate::RenderError::Size { .. })));
+    }
+
+    #[test]
     fn photo_slide_swaps_the_pictures_as_white_prints_over_a_dim_copy() {
         let Some(renderer) = Renderer::for_test().expect("a GPU is required") else {
             eprintln!("skipped: no GPU");

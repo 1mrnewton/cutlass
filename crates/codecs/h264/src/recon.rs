@@ -45,6 +45,17 @@ const TC0: [[u8; 52]; 3] = [
     ],
 ];
 
+/// Alpha and `tC0` at strengths 1, 2 and 3 by `indexA`, side by side.
+static BY_INDEX_A: [[u8; 4]; 52] = {
+    let mut table = [[0u8; 4]; 52];
+    let mut index = 0;
+    while index < 52 {
+        table[index] = [ALPHA[index], TC0[0][index], TC0[1][index], TC0[2][index]];
+        index += 1;
+    }
+    table
+};
+
 const CHROMA_QP: [i32; 52] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
     26, 27, 28, 29, 29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37, 37, 38, 38, 38, 39, 39,
@@ -106,6 +117,35 @@ pub(crate) fn level_scale4(qp: i32, row: usize, col: usize, weight: i32) -> i32 
     weight * NORM4[(qp.rem_euclid(6)) as usize][norm4(row, col)]
 }
 
+/// The multipliers that scale a 4×4 block's levels at `qp` (QP′Y), by
+/// raster position, under `weights`: [`dequantize`] of a level and its
+/// multiplier is [`scale4`] of the level, as in FFmpeg's tables. `None`
+/// for a negative `qp`.
+pub fn dequant4(qp: i32, weights: &[u8; 16]) -> Option<[i32; 16]> {
+    let (q, r) = (u32::try_from(qp / 6).ok()?, usize::try_from(qp % 6).ok()?);
+    Some(core::array::from_fn(|pos| {
+        let (row, col) = (pos / 4, pos % 4);
+        (i32::from(weights[pos]) * NORM4[r][norm4(col, row)]) << (q + 2)
+    }))
+}
+
+/// [`dequant4`] for an 8×8 block and [`scale8`].
+pub fn dequant8(qp: i32, weights: &[u8; 64]) -> Option<[i32; 64]> {
+    let (q, r) = (u32::try_from(qp / 6).ok()?, usize::try_from(qp % 6).ok()?);
+    Some(core::array::from_fn(|pos| {
+        let (row, col) = (pos / 8, pos % 8);
+        (i32::from(weights[pos]) * NORM8[r][norm8(col, row)]) << q
+    }))
+}
+
+/// A level scaled by a multiplier from [`dequant4`] or [`dequant8`]. The
+/// rounding add and shift are the clause's for every `qp`: below 24 (4×4)
+/// or 36 (8×8) they are its rounding shift, and above it they drop out.
+#[inline(always)]
+pub fn dequantize(level: i32, mul: i32) -> i32 {
+    ((i64::from(level) * i64::from(mul) + 32) >> 6) as i32
+}
+
 pub fn scale4(coeff: i32, qp: i32, i: usize, j: usize, weight: i32) -> i32 {
     let ls = weight * NORM4[(qp.rem_euclid(6)) as usize][norm4(i, j)];
     let q = qp / 6;
@@ -130,7 +170,24 @@ pub fn scale8(coeff: i32, qp: i32, i: usize, j: usize, weight: i32) -> i32 {
     scaled as i32
 }
 
+/// Every coefficient of `block` after the first is zero. The values are
+/// combined without stopping early, which is one short pass with no branch
+/// per value.
+fn only_dc(block: &[i32]) -> bool {
+    block.iter().skip(1).fold(0, |any, &value| any | value) == 0
+}
+
 pub fn idct4(block: &mut [i32; 16]) {
+    // Only the DC coefficient: both passes spread it over the block as it
+    // is, so every sample is the same rounded value.
+    if only_dc(block) {
+        *block = [(block[0] + 32) >> 6; 16];
+        return;
+    }
+    idct4_full(block);
+}
+
+fn idct4_full(block: &mut [i32; 16]) {
     let mut mid = [0i32; 16];
     for i in 0..4 {
         let d0 = block[i * 4];
@@ -248,6 +305,15 @@ pub fn chroma_dc422(raster: &[i32; 8], qp: i32, weight: i32) -> [i32; 8] {
 }
 
 pub fn idct8(block: &mut [i32; 64]) {
+    // Only the DC coefficient, as in [`idct4`].
+    if only_dc(block) {
+        *block = [(block[0] + 32) >> 6; 64];
+        return;
+    }
+    idct8_full(block);
+}
+
+pub(crate) fn idct8_full(block: &mut [i32; 64]) {
     let mut mid = [0i32; 64];
     for i in 0..8 {
         idct8_1d(&block[i * 8..i * 8 + 8], &mut mid[i * 8..i * 8 + 8]);
@@ -293,7 +359,7 @@ fn idct8_1d(d: &[i32], f: &mut [i32]) {
 }
 
 /// One sample width. `u8` is 8-bit. [`Depth`] is 9 through 14 bits.
-pub trait Sample: Copy + Default + Into<i32> {
+pub trait Sample: Copy + Default + Into<i32> + Send + Sync + 'static {
     const LIMIT: i32;
     const MID: i32;
     const SHIFT: i32;
@@ -314,6 +380,291 @@ pub trait Sample: Copy + Default + Into<i32> {
 
     /// The sample in a `u16` plane. 8-bit has no wide plane.
     fn pack_wide(self) -> Option<u16>;
+
+    /// The plane as 8-bit samples as it stands, when that is what it holds.
+    fn into_eight(plane: Vec<Self>) -> Result<Vec<u8>, Vec<Self>> {
+        Err(plane)
+    }
+
+    /// Filters one 16-sample luma edge with a vector kernel, when this
+    /// sample width has one. `false` means nothing was done and the caller
+    /// filters the edge itself.
+    fn deblock_luma16(_plane: &mut [Self], _edge: LumaEdge) -> bool {
+        false
+    }
+
+    /// [`Self::deblock_luma16`] for an 8-sample chroma edge. The clipping
+    /// values are per group of two samples.
+    fn deblock_chroma8(_plane: &mut [Self], _edge: LumaEdge) -> bool {
+        false
+    }
+
+    /// Filters every edge of one macroblock of a 4:2:0 frame with vector
+    /// kernels: `edges` are its luma, Cb and Cr edges, for the planes in
+    /// that order, and `some` says which planes have any edge filtered.
+    /// `false` means nothing was done and the caller filters each edge
+    /// itself.
+    fn deblock_mb(
+        _planes: (&mut [Self], &mut [Self], &mut [Self]),
+        _edges: &[MbEdges; 3],
+        _some: [bool; 3],
+    ) -> bool {
+        false
+    }
+
+    /// [`Self::deblock_mb`] with `chroma` the edges of both chroma planes,
+    /// which are filtered side by side; `some` is for luma and for both.
+    fn deblock_mb_twin(
+        _planes: (&mut [Self], &mut [Self], &mut [Self]),
+        _luma: &MbEdges,
+        _chroma: &MbEdges,
+        _some: [bool; 2],
+    ) -> bool {
+        false
+    }
+
+    /// Inter prediction with a vector kernel, when this sample width has
+    /// one for the block's size. `false` means nothing was done and the
+    /// caller runs its own loop. `kind` picks the samples.
+    fn predict_fast(
+        _kind: Predict,
+        _dst: &mut [Self],
+        _dst_stride: usize,
+        _src: &[Self],
+        _src_stride: usize,
+        _place: ((usize, usize), (usize, usize)),
+    ) -> bool {
+        false
+    }
+
+    /// Asks the cache for `rows` rows of `plane`, `stride` apart from
+    /// sample `at`, ahead of motion compensation reading them. Nothing
+    /// changes; without a kernel, nothing is done.
+    fn prefetch(_plane: &[Self], _at: usize, _stride: usize, _rows: usize) {}
+
+    /// The 4×4 inverse transform of `block` added to the samples from `at`,
+    /// rows `down` apart, with a vector kernel. `false` as for
+    /// [`Self::predict_fast`].
+    fn idct4_add_fast(_plane: &mut [Self], _at: usize, _down: usize, _block: &[i32; 16]) -> bool {
+        false
+    }
+
+    /// [`Self::idct4_add_fast`] for an 8×8 block.
+    fn idct8_add_fast(_plane: &mut [Self], _at: usize, _down: usize, _block: &[i32; 64]) -> bool {
+        false
+    }
+
+    /// `dc` added to the `size`×`size` samples from `at`, rows `down`
+    /// apart, with a vector kernel. `false` as for [`Self::predict_fast`].
+    fn add_dc_fast(_plane: &mut [Self], _at: usize, _down: usize, _dc: i32, _size: usize) -> bool {
+        false
+    }
+
+    /// The 16×16 luma block from `at`, rows `down` apart, predicted in
+    /// place in Intra_16x16 `mode` from the samples beside it, as
+    /// [`pred16`] and putting its result there do; `near` is whether the
+    /// row above and the column to the left may be used. `false` as for
+    /// [`Self::predict_fast`].
+    fn pred16_fast(
+        _plane: &mut [Self],
+        _at: usize,
+        _down: usize,
+        _mode: u8,
+        _near: (bool, bool),
+    ) -> bool {
+        false
+    }
+
+    /// [`Self::pred16_fast`] for an 8×8 chroma block of a 4:2:0 picture,
+    /// as [`pred_chroma`] does.
+    fn pred_chroma_fast(
+        _plane: &mut [Self],
+        _at: usize,
+        _down: usize,
+        _mode: u8,
+        _near: (bool, bool),
+    ) -> bool {
+        false
+    }
+
+    /// The 4×4 luma block from `at`, rows `down` apart, predicted in
+    /// place in Intra_4x4 `mode` from the samples beside it that `near`
+    /// allows, as gathering them, [`pred4`] and putting its result there
+    /// do. `false` as for [`Self::predict_fast`].
+    fn pred4_fast(
+        _plane: &mut [Self],
+        _at: usize,
+        _down: usize,
+        _mode: u8,
+        _near: cutlass_h264_kernels::intra::Near4,
+    ) -> bool {
+        false
+    }
+
+    /// The 8×8 luma block from `at`, rows `down` apart, predicted in
+    /// place in Intra_8x8 `mode` from the samples beside it that `near`
+    /// allows, as gathering them, `pred8_from` and putting its result
+    /// there do. `false` as for [`Self::predict_fast`].
+    fn pred8_fast(
+        _plane: &mut [Self],
+        _at: usize,
+        _down: usize,
+        _mode: u8,
+        _near: cutlass_h264_kernels::intra::Near8,
+    ) -> bool {
+        false
+    }
+
+    /// `rows` written over the `N`×`N` samples from `at`, rows `down`
+    /// apart, with the plane checked once. `false` as for
+    /// [`Self::predict_fast`].
+    fn store_fast<const N: usize>(
+        _plane: &mut [Self],
+        _at: usize,
+        _down: usize,
+        _rows: &[[Self; N]; N],
+    ) -> bool {
+        false
+    }
+
+    /// `dcs` added to the four 4×4 quarters of the 8×8 samples from `at`,
+    /// rows `down` apart, in raster order, with a vector kernel. `false`
+    /// as for [`Self::predict_fast`].
+    fn add_dc_quads_fast(_plane: &mut [Self], _at: usize, _down: usize, _dcs: [i32; 4]) -> bool {
+        false
+    }
+
+    /// Two predictions of `size`, rows `size.0` apart, mixed into `dst`
+    /// with a vector kernel: averaged when `weight` is `None`. `false` as
+    /// for [`Self::predict_fast`].
+    fn mix_fast(
+        _dst: &mut [Self],
+        _dst_stride: usize,
+        _predictions: (&[Self], &[Self]),
+        _size: (usize, usize),
+        _weight: Option<BiWeight>,
+    ) -> bool {
+        false
+    }
+
+    /// The rounded average of two rows with a vector kernel. `false` as for
+    /// [`Self::predict_fast`].
+    fn avg_fast(_dst: &mut [Self], _a: &[Self], _b: &[Self]) -> bool {
+        false
+    }
+
+    /// The block of `size` at `dst`, rows `dst.1` apart, mixed in place by
+    /// `weight` with the one in `second`, rows `size.0` apart, the block at
+    /// `dst` taking `w0`, with a vector kernel. `false` as for
+    /// [`Self::predict_fast`].
+    fn weight_onto_fast(
+        _dst: (&mut [Self], usize),
+        _second: &[Self],
+        _size: (usize, usize),
+        _weight: BiWeight,
+    ) -> bool {
+        false
+    }
+
+    /// The block of `size` at `dst`, rows `dst_stride` apart, weighted in
+    /// place by `weight` with `offset` after a rounding shift by `denom`,
+    /// with a vector kernel. `false` as for [`Self::predict_fast`].
+    fn scale_fast(
+        _dst: (&mut [Self], usize),
+        _size: (usize, usize),
+        _weight: (i32, i32, i32),
+    ) -> bool {
+        false
+    }
+
+    /// The luma block predicted from `first` written to `dst` and, when
+    /// `second` is there, averaged with the one predicted from it, at
+    /// quarter offsets. Both sources have been checked with
+    /// [`luma_source`]. `false` means nothing was written.
+    fn pair_fast(
+        _dst: (&mut [Self], usize),
+        _size: (usize, usize),
+        _first: McSource<'_, Self>,
+        _second: Option<McSource<'_, Self>>,
+    ) -> bool {
+        false
+    }
+
+    /// Both chroma planes of a 4:2:0 block of `size` predicted at once,
+    /// into `dst`'s two planes, rows `dst.2` apart: from `first`, or the
+    /// rounded average of `first` and `second`. Both sources have been
+    /// checked with [`chroma_source`]. `false` means nothing was written.
+    fn chroma_planes_fast(
+        _dst: (&mut [Self], &mut [Self], usize),
+        _size: (usize, usize),
+        _first: ChromaSources<'_, Self>,
+        _second: Option<ChromaSources<'_, Self>>,
+    ) -> bool {
+        false
+    }
+
+    /// A 4:2:0 partition predicted into the picture's planes `dst`, rows
+    /// `dst.3` apart in luma, of a picture `dst.4` luma samples wide and
+    /// high, from `first` or the rounded average of
+    /// `first` and `second`, each plane only when every sample its taps
+    /// read is inside its reference: [`Self::pair_fast`] and
+    /// [`Self::chroma_planes_fast`] with their sources found, in one go.
+    /// `block` is the luma block's origin and size. Whether the luma and the
+    /// chroma block were written.
+    fn plain_fast(
+        _dst: PicPlanes<'_, Self>,
+        _block: (usize, usize, usize, usize),
+        _first: RefPlanes<'_, Self>,
+        _second: Option<RefPlanes<'_, Self>>,
+    ) -> (bool, bool) {
+        (false, false)
+    }
+}
+
+/// Which samples [`Sample::predict_fast`] makes.
+#[derive(Clone, Copy)]
+pub enum Predict {
+    /// Luma at these quarter-sample offsets.
+    Luma(u8, u8),
+    /// Chroma at these eighth-sample offsets.
+    Chroma(u8, u8),
+}
+
+/// One 16-sample luma edge for [`Sample::deblock_luma16`].
+#[derive(Clone, Copy)]
+pub struct LumaEdge {
+    /// The first q0 sample.
+    at: usize,
+    /// Samples between one picture row of the edge and the next.
+    down: usize,
+    vertical: bool,
+    alpha: i32,
+    beta: i32,
+    /// The clipping value of each group of four samples for a strength
+    /// below 4, negative for a group that is not filtered. `None` is
+    /// strength 4.
+    tc0: Option<[i8; 4]>,
+}
+
+impl LumaEdge {
+    fn for_kernel(self) -> cutlass_h264_kernels::deblock::Edge {
+        cutlass_h264_kernels::deblock::Edge {
+            at: self.at,
+            down: self.down,
+            vertical: self.vertical,
+            alpha: self.alpha,
+            beta: self.beta,
+            tc0: self.tc0,
+        }
+    }
+}
+
+fn deblock_chroma8_eight(plane: &mut [u8], edge: LumaEdge) -> bool {
+    cutlass_h264_kernels::deblock::chroma_edge(plane, edge.for_kernel())
+}
+
+fn deblock_luma16_eight(plane: &mut [u8], edge: LumaEdge) -> bool {
+    cutlass_h264_kernels::deblock::luma_edge(plane, edge.for_kernel())
 }
 
 impl Sample for u8 {
@@ -337,6 +688,261 @@ impl Sample for u8 {
 
     fn pack_wide(self) -> Option<u16> {
         None
+    }
+
+    fn into_eight(plane: Vec<Self>) -> Result<Vec<u8>, Vec<Self>> {
+        Ok(plane)
+    }
+
+    fn deblock_luma16(plane: &mut [Self], edge: LumaEdge) -> bool {
+        deblock_luma16_eight(plane, edge)
+    }
+
+    fn deblock_chroma8(plane: &mut [Self], edge: LumaEdge) -> bool {
+        deblock_chroma8_eight(plane, edge)
+    }
+
+    fn deblock_mb(
+        planes: (&mut [Self], &mut [Self], &mut [Self]),
+        edges: &[MbEdges; 3],
+        some: [bool; 3],
+    ) -> bool {
+        // A plane with no edge to filter is not visited. For the others
+        // it is all of them or none, checked once for all three.
+        cutlass_h264_kernels::deblock::mb(planes, edges, some)
+    }
+
+    fn deblock_mb_twin(
+        planes: (&mut [Self], &mut [Self], &mut [Self]),
+        luma: &MbEdges,
+        chroma: &MbEdges,
+        some: [bool; 2],
+    ) -> bool {
+        cutlass_h264_kernels::deblock::mb_twin(planes, luma, chroma, some)
+    }
+
+    fn predict_fast(
+        kind: Predict,
+        dst: &mut [Self],
+        dst_stride: usize,
+        src: &[Self],
+        src_stride: usize,
+        place: ((usize, usize), (usize, usize)),
+    ) -> bool {
+        use cutlass_h264_kernels::mc;
+        let (at, size) = place;
+        let block = mc::Block {
+            src,
+            stride: src_stride,
+            at,
+            size,
+        };
+        match kind {
+            Predict::Luma(xf, yf) => mc::luma_block(dst, dst_stride, block, (xf, yf)),
+            Predict::Chroma(xf, yf) => mc::chroma_block(dst, dst_stride, block, (xf, yf)),
+        }
+    }
+
+    #[inline]
+    fn prefetch(plane: &[Self], at: usize, stride: usize, rows: usize) {
+        cutlass_h264_kernels::mc::prefetch(plane, at, stride, rows);
+    }
+
+    fn idct4_add_fast(plane: &mut [Self], at: usize, down: usize, block: &[i32; 16]) -> bool {
+        cutlass_h264_kernels::residual::idct4_add(plane, at, down, block)
+    }
+
+    fn idct8_add_fast(plane: &mut [Self], at: usize, down: usize, block: &[i32; 64]) -> bool {
+        cutlass_h264_kernels::residual::idct8_add(plane, at, down, block)
+    }
+
+    fn add_dc_fast(plane: &mut [Self], at: usize, down: usize, dc: i32, size: usize) -> bool {
+        cutlass_h264_kernels::residual::dc_add(plane, at, down, dc, size)
+    }
+
+    fn add_dc_quads_fast(plane: &mut [Self], at: usize, down: usize, dcs: [i32; 4]) -> bool {
+        cutlass_h264_kernels::residual::dc_add_quads(plane, at, down, dcs)
+    }
+
+    fn pred16_fast(
+        plane: &mut [Self],
+        at: usize,
+        down: usize,
+        mode: u8,
+        near: (bool, bool),
+    ) -> bool {
+        cutlass_h264_kernels::intra::pred16(plane, at, down, mode, near)
+    }
+
+    fn pred4_fast(
+        plane: &mut [Self],
+        at: usize,
+        down: usize,
+        mode: u8,
+        near: cutlass_h264_kernels::intra::Near4,
+    ) -> bool {
+        cutlass_h264_kernels::intra::pred4(plane, at, down, mode, near)
+    }
+
+    fn pred8_fast(
+        plane: &mut [Self],
+        at: usize,
+        down: usize,
+        mode: u8,
+        near: cutlass_h264_kernels::intra::Near8,
+    ) -> bool {
+        cutlass_h264_kernels::intra::pred8(plane, at, down, mode, near)
+    }
+
+    fn pred_chroma_fast(
+        plane: &mut [Self],
+        at: usize,
+        down: usize,
+        mode: u8,
+        near: (bool, bool),
+    ) -> bool {
+        cutlass_h264_kernels::intra::pred_chroma(plane, at, down, mode, near)
+    }
+
+    #[inline(always)]
+    fn store_fast<const N: usize>(
+        plane: &mut [Self],
+        at: usize,
+        down: usize,
+        rows: &[[Self; N]; N],
+    ) -> bool {
+        cutlass_h264_kernels::residual::store(plane, at, down, rows)
+    }
+
+    fn mix_fast(
+        dst: &mut [Self],
+        dst_stride: usize,
+        predictions: (&[Self], &[Self]),
+        size: (usize, usize),
+        weight: Option<BiWeight>,
+    ) -> bool {
+        use cutlass_h264_kernels::mc;
+        let (a, b) = predictions;
+        let Some(weight) = weight else {
+            return mc::avg_block(dst, dst_stride, a, b, size);
+        };
+        let shift = weight.denom + 1;
+        if !(1..=15).contains(&shift) {
+            return false;
+        }
+        let weight = mc::BiWeight {
+            w0: weight.w0,
+            w1: weight.w1,
+            shift,
+            offset: (weight.o0 + weight.o1 + 1) >> 1,
+        };
+        mc::weight_block(dst, dst_stride, a, b, size, weight)
+    }
+
+    fn avg_fast(dst: &mut [Self], a: &[Self], b: &[Self]) -> bool {
+        cutlass_h264_kernels::mc::avg_row(dst, a, b)
+    }
+
+    fn weight_onto_fast(
+        dst: (&mut [Self], usize),
+        second: &[Self],
+        size: (usize, usize),
+        weight: BiWeight,
+    ) -> bool {
+        use cutlass_h264_kernels::mc;
+        let shift = weight.denom + 1;
+        if !(1..=15).contains(&shift) {
+            return false;
+        }
+        let weight = mc::BiWeight {
+            w0: weight.w0,
+            w1: weight.w1,
+            shift,
+            offset: (weight.o0 + weight.o1 + 1) >> 1,
+        };
+        mc::weight_onto(dst.0, dst.1, second, size, weight)
+    }
+
+    fn scale_fast(
+        dst: (&mut [Self], usize),
+        size: (usize, usize),
+        weight: (i32, i32, i32),
+    ) -> bool {
+        let (weight, offset, shift) = weight;
+        let weight = cutlass_h264_kernels::mc::UniWeight {
+            weight,
+            offset,
+            shift,
+        };
+        cutlass_h264_kernels::mc::scale_block(dst.0, dst.1, size, weight)
+    }
+
+    fn pair_fast(
+        dst: (&mut [Self], usize),
+        size: (usize, usize),
+        first: McSource<'_, Self>,
+        second: Option<McSource<'_, Self>>,
+    ) -> bool {
+        use cutlass_h264_kernels::mc;
+        let (dst, dst_stride) = dst;
+        fn block<'a>(source: McSource<'a, u8>, size: (usize, usize)) -> (mc::Block<'a>, (u8, u8)) {
+            let block = mc::Block {
+                src: source.src,
+                stride: source.stride,
+                at: source.at,
+                size,
+            };
+            (block, source.frac)
+        }
+        let (first, second) = (block(first, size), second.map(|source| block(source, size)));
+        mc::luma_pair(dst, dst_stride, first, second)
+    }
+
+    fn chroma_planes_fast(
+        dst: (&mut [Self], &mut [Self], usize),
+        size: (usize, usize),
+        first: ChromaSources<'_, Self>,
+        second: Option<ChromaSources<'_, Self>>,
+    ) -> bool {
+        use cutlass_h264_kernels::mc;
+        fn source(s: ChromaSources<'_, u8>) -> mc::ChromaSource<'_> {
+            mc::ChromaSource {
+                cb: s.cb,
+                cr: s.cr,
+                stride: s.stride,
+                at: s.at,
+                frac: s.frac,
+            }
+        }
+        let (cb, cr, stride) = dst;
+        mc::chroma_planes((cb, cr), stride, size, source(first), second.map(source))
+    }
+
+    #[inline(always)]
+    fn plain_fast(
+        dst: PicPlanes<'_, Self>,
+        block: (usize, usize, usize, usize),
+        first: RefPlanes<'_, Self>,
+        second: Option<RefPlanes<'_, Self>>,
+    ) -> (bool, bool) {
+        use cutlass_h264_kernels::mc;
+        let (y, u, v, stride, size) = dst;
+        let Some(mut out) = mc::Planes420Mut::new((y, u, v), stride, size) else {
+            return (false, false);
+        };
+        fn planes<'a>(r: &RefPlanes<'a, u8>) -> Option<mc::Planes420<'a>> {
+            mc::Planes420::new((r.y, r.u, r.v), r.stride, r.pic)
+        }
+        let Some(one) = planes(&first) else {
+            return (false, false);
+        };
+        match second.map(|r| (planes(&r), r.mv)) {
+            None => mc::predict_420(&mut out, block, (&one, first.mv), None),
+            Some((Some(two), mv)) => {
+                mc::predict_420(&mut out, block, (&one, first.mv), Some((&two, mv)))
+            }
+            Some((None, _)) => (false, false),
+        }
     }
 }
 
@@ -383,6 +989,66 @@ fn pel<S: Sample>(value: S) -> i32 {
     value.into()
 }
 
+/// Inverse-transforms a 4×4 block of scaled coefficients and adds it to
+/// the plane at (`x0`, `y0`), rows `step` picture rows apart. The caller
+/// sends a block with a lone DC to [`add_dc`] instead, so this one is not
+/// scanned to find out; a block that has only a DC is still transformed
+/// correctly.
+pub fn add_idct4_full<S: Sample>(
+    plane: &mut [S],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    block: &mut [i32; 16],
+    step: usize,
+) {
+    if S::idct4_add_fast(plane, y0 * stride + x0, stride * step, block) {
+        return;
+    }
+    idct4_full(block);
+    add_block(plane, stride, x0, y0, block, 4, step);
+}
+
+/// [`add_idct4_full`] for an 8×8 block of scaled coefficients.
+pub fn add_idct8_full<S: Sample>(
+    plane: &mut [S],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    block: &mut [i32; 64],
+    step: usize,
+) {
+    if S::idct8_add_fast(plane, y0 * stride + x0, stride * step, block) {
+        return;
+    }
+    idct8_full(block);
+    add_block(plane, stride, x0, y0, block, 8, step);
+}
+
+/// Adds `dc` to every sample of the `n`×`n` block at `origin`: its column,
+/// its row, and the picture rows between its rows.
+pub fn add_dc<S: Sample>(
+    plane: &mut [S],
+    stride: usize,
+    origin: (usize, usize, usize),
+    dc: i32,
+    n: usize,
+) {
+    let (x0, y0, step) = origin;
+    if dc == 0 {
+        return;
+    }
+    if S::add_dc_fast(plane, y0 * stride + x0, stride * step, dc, n) {
+        return;
+    }
+    for row in 0..n {
+        let at = (y0 + row * step) * stride + x0;
+        for sample in &mut plane[at..at + n] {
+            *sample = S::clip(pel(*sample) + dc);
+        }
+    }
+}
+
 pub fn add_block<S: Sample>(
     plane: &mut [S],
     stride: usize,
@@ -392,11 +1058,13 @@ pub fn add_block<S: Sample>(
     n: usize,
     step: usize,
 ) {
-    for y in 0..n {
-        for x in 0..n {
-            let at = (y0 + y * step) * stride + x0 + x;
-            let sample = pel(plane[at]) + block[y * n + x];
-            plane[at] = S::clip(sample);
+    if n == 0 || block.iter().all(|&value| value == 0) {
+        return;
+    }
+    for (y, residual) in block.chunks_exact(n).take(n).enumerate() {
+        let at = (y0 + y * step) * stride + x0;
+        for (sample, &value) in plane[at..at + n].iter_mut().zip(residual) {
+            *sample = S::clip(pel(*sample) + value);
         }
     }
 }
@@ -404,6 +1072,39 @@ pub fn add_block<S: Sample>(
 /// `above` is 8 samples, `left` is 4, `corner` is p[-1,-1]. `above_ok[4..]` may be copied from above[3].
 pub fn pred4<S: Sample>(
     mode: u8,
+    above: &[S; 8],
+    left: &[S; 4],
+    corner: S,
+    above_ok: bool,
+    left_ok: bool,
+) -> [S; 16] {
+    // DC, and every mode whose edge is missing, is one value for the block.
+    let directional = match mode {
+        0 | 3 | 7 => above_ok,
+        1 | 8 => left_ok,
+        4..=6 => above_ok && left_ok,
+        _ => false,
+    };
+    if !directional {
+        return [S::clip(dc4(above, left, above_ok, left_ok)); 16];
+    }
+    // Each mode has its own copy of the rules, so the choice of mode is
+    // made once here and not for every sample.
+    match mode {
+        0 => pred4_rule::<S, 0>(above, left, corner, above_ok, left_ok),
+        1 => pred4_rule::<S, 1>(above, left, corner, above_ok, left_ok),
+        3 => pred4_rule::<S, 3>(above, left, corner, above_ok, left_ok),
+        4 => pred4_rule::<S, 4>(above, left, corner, above_ok, left_ok),
+        5 => pred4_rule::<S, 5>(above, left, corner, above_ok, left_ok),
+        6 => pred4_rule::<S, 6>(above, left, corner, above_ok, left_ok),
+        7 => pred4_rule::<S, 7>(above, left, corner, above_ok, left_ok),
+        8 => pred4_rule::<S, 8>(above, left, corner, above_ok, left_ok),
+        _ => pred4_rule::<S, 2>(above, left, corner, above_ok, left_ok),
+    }
+}
+
+/// [`pred4`] for the one mode `MODE`, sample by sample.
+fn pred4_rule<S: Sample, const MODE: u8>(
     above: &[S; 8],
     left: &[S; 4],
     corner: S,
@@ -424,7 +1125,7 @@ pub fn pred4<S: Sample>(
     };
     for y in 0..4 {
         for x in 0..4 {
-            let sample = match mode {
+            let sample = match MODE {
                 0 if above_ok => p(x, -1),
                 1 if left_ok => p(-1, y),
                 2 => dc4(above, left, above_ok, left_ok),
@@ -829,7 +1530,7 @@ pub fn sample<S: Sample>(plane: &[S], stride: usize, w: i32, h: i32, x: i32, y: 
     pel(plane[y * stride + x])
 }
 
-fn tap<S: Sample>(
+pub(crate) fn tap<S: Sample>(
     plane: &[S],
     stride: usize,
     w: i32,
@@ -918,6 +1619,105 @@ pub fn chroma_mc<S: Sample>(plane: &[S], stride: usize, w: i32, h: i32, at: Pel)
     )
 }
 
+/// The reference samples of one block for [`Sample::pair_fast`]: the plane,
+/// the distance between its rows, the block's first full sample in it, and
+/// the block's fractional offsets.
+#[derive(Clone, Copy)]
+pub struct McSource<'a, S> {
+    pub src: &'a [S],
+    pub stride: usize,
+    pub at: (usize, usize),
+    pub frac: (u8, u8),
+}
+
+/// The picture [`Sample::plain_fast`] writes: its luma, Cb and Cr planes,
+/// the distance between luma rows, and its size in luma samples.
+pub type PicPlanes<'a, S> = (&'a mut [S], &'a mut [S], &'a mut [S], usize, (usize, usize));
+
+/// A reference picture's three 4:2:0 planes as [`Sample::plain_fast`]
+/// reads them, with the motion vector into it: luma rows `stride` apart
+/// and chroma rows half that, of a picture `pic` luma samples wide and
+/// high. The planes may stop short of the picture's last rows when another
+/// thread is still decoding it; the Cb and Cr planes are as long.
+#[derive(Clone, Copy)]
+pub struct RefPlanes<'a, S> {
+    pub y: &'a [S],
+    pub u: &'a [S],
+    pub v: &'a [S],
+    pub stride: usize,
+    pub pic: (usize, usize),
+    pub mv: [i16; 2],
+}
+
+/// A chroma block's source in both planes of a picture: the Cb and Cr
+/// samples, whose rows are `stride` apart, read at the same place.
+#[derive(Clone, Copy)]
+pub struct ChromaSources<'a, S> {
+    pub cb: &'a [S],
+    pub cr: &'a [S],
+    pub stride: usize,
+    pub at: (usize, usize),
+    pub frac: (u8, u8),
+}
+
+/// `block`'s source in `src`, a picture of size `pic` whose rows are
+/// `stride` apart, when every sample its six taps read is inside the
+/// picture. `None` when some of them hang past its edge.
+pub fn luma_source<S>(
+    src: &[S],
+    stride: usize,
+    pic: (i32, i32),
+    block: BlockMc,
+) -> Option<McSource<'_, S>> {
+    let frac = (block.x_frac, block.y_frac);
+    if !(0..4).contains(&frac.0) || !(0..4).contains(&frac.1) {
+        return None;
+    }
+    if !luma_window_inside((block.x, block.y), (block.w, block.h), frac, pic) {
+        return None;
+    }
+    Some(McSource {
+        src,
+        stride,
+        at: (
+            usize::try_from(block.x).ok()?,
+            usize::try_from(block.y).ok()?,
+        ),
+        frac: (frac.0 as u8, frac.1 as u8),
+    })
+}
+
+/// [`luma_source`] for a chroma block at eighth offsets.
+pub fn chroma_source<S>(
+    src: &[S],
+    stride: usize,
+    pic: (i32, i32),
+    block: BlockMc,
+) -> Option<McSource<'_, S>> {
+    let (xf, yf) = (block.x_frac, block.y_frac);
+    if !(0..8).contains(&xf) || !(0..8).contains(&yf) {
+        return None;
+    }
+    let right = block.x + i32::try_from(block.w).ok()?;
+    let below = block.y + i32::try_from(block.h).ok()?;
+    if block.x < 0
+        || block.y < 0
+        || right + i32::from(xf != 0) > pic.0
+        || below + i32::from(yf != 0) > pic.1
+    {
+        return None;
+    }
+    Some(McSource {
+        src,
+        stride,
+        at: (
+            usize::try_from(block.x).ok()?,
+            usize::try_from(block.y).ok()?,
+        ),
+        frac: (xf as u8, yf as u8),
+    })
+}
+
 /// A rectangle whose motion vector is the same for every sample.
 #[derive(Clone, Copy)]
 pub struct BlockMc {
@@ -946,15 +1746,28 @@ pub fn put_luma_block<S: Sample>(
         x_frac,
         y_frac,
     } = block;
-    if w == 0 || h == 0 || w > 16 || h > 16 || dst.len() < h * dst_stride {
+    if w == 0 || h == 0 || w > 16 || h > 16 || dst.len() < (h - 1) * dst_stride + w {
         return;
     }
     let (pic_w, pic_h) = pic;
-    if !luma_window_inside(x, y, w, h, pic_w, pic_h) {
+    if !luma_window_inside((x, y), (w, h), (x_frac, y_frac), (pic_w, pic_h)) {
         put_luma_extended(dst, dst_stride, src, src_stride, pic, block);
         return;
     }
     let size = (w, h);
+    if (0..4).contains(&x_frac) && (0..4).contains(&y_frac) {
+        let kind = Predict::Luma(x_frac as u8, y_frac as u8);
+        let place = (
+            (
+                usize::try_from(x).unwrap_or(0),
+                usize::try_from(y).unwrap_or(0),
+            ),
+            size,
+        );
+        if S::predict_fast(kind, dst, dst_stride, src, src_stride, place) {
+            return;
+        }
+    }
     let at = |dx, dy| src_at(src, src_stride, x + dx, y + dy);
     match (x_frac, y_frac) {
         (0, 0) => copy_block(dst, dst_stride, at(0, 0), size),
@@ -1030,22 +1843,29 @@ pub fn put_chroma_block<S: Sample>(
         x_frac,
         y_frac,
     } = block;
-    if w == 0 || h == 0 || dst.len() < h * dst_stride {
+    if w == 0 || h == 0 || dst.len() < (h - 1) * dst_stride + w {
         return;
     }
     let (pic_w, pic_h) = pic;
     let xf = x_frac.clamp(0, 7);
     let yf = y_frac.clamp(0, 7);
-    if x < 0
-        || y < 0
-        || x + i32::try_from(w).unwrap_or(i32::MAX) >= pic_w
-        || y + i32::try_from(h).unwrap_or(i32::MAX) >= pic_h
-    {
+    // The sample after the block is read only along a fractional offset.
+    let right = x + i32::try_from(w).unwrap_or(i32::MAX);
+    let below = y + i32::try_from(h).unwrap_or(i32::MAX);
+    if x < 0 || y < 0 || right + i32::from(xf != 0) > pic_w || below + i32::from(yf != 0) > pic_h {
         put_chroma_extended(dst, dst_stride, src, src_stride, pic, block);
         return;
     }
     let x0 = usize::try_from(x).unwrap_or(0);
     let y0 = usize::try_from(y).unwrap_or(0);
+    // The kernel reads the sample after the block both ways.
+    let kind = Predict::Chroma(xf as u8, yf as u8);
+    if right < pic_w
+        && below < pic_h
+        && S::predict_fast(kind, dst, dst_stride, src, src_stride, ((x0, y0), (w, h)))
+    {
+        return;
+    }
     if xf == 0 && yf == 0 {
         copy_block(dst, dst_stride, src_at(src, src_stride, x, y), (w, h));
         return;
@@ -1097,10 +1917,115 @@ pub fn put_chroma_block<S: Sample>(
     }
 }
 
-fn luma_window_inside(x: i32, y: i32, w: usize, h: usize, pic_w: i32, pic_h: i32) -> bool {
-    let bw = i32::try_from(w).unwrap_or(i32::MAX);
-    let bh = i32::try_from(h).unwrap_or(i32::MAX);
-    x >= 2 && y >= 2 && x + bw + 3 <= pic_w && y + bh + 3 <= pic_h
+/// Whether every sample the block reads lies in the picture. The six-tap
+/// filter reaches two samples before the block and three after it, but
+/// only along a direction with a fractional offset: a full-sample offset
+/// reads the block alone.
+fn luma_window_inside(
+    at: (i32, i32),
+    size: (usize, usize),
+    frac: (i32, i32),
+    pic: (i32, i32),
+) -> bool {
+    let (x, y) = at;
+    let bw = i32::try_from(size.0).unwrap_or(i32::MAX);
+    let bh = i32::try_from(size.1).unwrap_or(i32::MAX);
+    let (before_x, after_x) = if frac.0 != 0 { (2, 3) } else { (0, 0) };
+    let (before_y, after_y) = if frac.1 != 0 { (2, 3) } else { (0, 0) };
+    x >= before_x && y >= before_y && x + bw + after_x <= pic.0 && y + bh + after_y <= pic.1
+}
+
+/// Copies the `width`×`height` window whose top-left sample is (`x0`, `y0`)
+/// out of the picture, repeating the picture's edge samples where the
+/// window hangs past it.
+fn edge_window<S: Sample>(
+    window: &mut [S],
+    size: (usize, usize),
+    src: &[S],
+    src_stride: usize,
+    pic: (i32, i32),
+    origin: (i32, i32),
+) {
+    let (width, height) = size;
+    let (pic_w, pic_h) = pic;
+    let (x0, y0) = origin;
+    if pic_w <= 0 || pic_h <= 0 {
+        return;
+    }
+    // A window that hangs past only the top or bottom of the picture, the
+    // most usual, copies each row whole: at a width known here, without a
+    // call to copy it.
+    if let Ok(left) = usize::try_from(x0)
+        && i32::try_from(width).is_ok_and(|wide| x0 + wide <= pic_w)
+    {
+        let from = EdgeSource {
+            src,
+            src_stride,
+            pic_h,
+            x0: left,
+            y0,
+        };
+        match width {
+            21 => return edge_rows::<S, 21>(window, height, &from),
+            13 => return edge_rows::<S, 13>(window, height, &from),
+            9 => return edge_rows::<S, 9>(window, height, &from),
+            5 => return edge_rows::<S, 5>(window, height, &from),
+            3 => return edge_rows::<S, 3>(window, height, &from),
+            _ => {}
+        }
+    }
+    for (row, out) in window.chunks_exact_mut(width).take(height).enumerate() {
+        let sy = (y0 + i32::try_from(row).unwrap_or(0)).clamp(0, pic_h - 1) as usize;
+        let line = &src[sy * src_stride..sy * src_stride + pic_w as usize];
+        // The part of the row inside the picture is copied whole; the rest
+        // repeats the picture's first or last sample.
+        let before = usize::try_from(-x0).unwrap_or(0).min(width);
+        let inside = usize::try_from(pic_w - x0.max(0))
+            .unwrap_or(0)
+            .min(width - before);
+        let first = usize::try_from(x0).unwrap_or(0).min(pic_w as usize);
+        let (left, rest) = out.split_at_mut(before);
+        let (middle, right) = rest.split_at_mut(inside);
+        left.fill(line[0]);
+        middle.copy_from_slice(&line[first..first + inside]);
+        right.fill(line[pic_w as usize - 1]);
+    }
+}
+
+/// The picture a window of [`edge_rows`] is read from, with the column and
+/// row of its top-left sample.
+struct EdgeSource<'a, S> {
+    src: &'a [S],
+    src_stride: usize,
+    pic_h: i32,
+    x0: usize,
+    y0: i32,
+}
+
+/// [`edge_window`] for a window `N` samples wide that lies across the
+/// picture from column `x0`: each row is the picture row it hangs nearest.
+#[inline(always)]
+fn edge_rows<S: Sample, const N: usize>(window: &mut [S], height: usize, from: &EdgeSource<'_, S>) {
+    let EdgeSource {
+        src,
+        src_stride,
+        pic_h,
+        x0,
+        y0,
+    } = *from;
+    for (row, out) in window
+        .as_chunks_mut::<N>()
+        .0
+        .iter_mut()
+        .take(height)
+        .enumerate()
+    {
+        let sy = (y0 + i32::try_from(row).unwrap_or(0)).clamp(0, pic_h - 1) as usize;
+        let start = sy * src_stride + x0;
+        if let Some(line) = src.get(start..).and_then(|line| line.first_chunk::<N>()) {
+            *out = *line;
+        }
+    }
 }
 
 fn put_chroma_extended<S: Sample>(
@@ -1115,13 +2040,14 @@ fn put_chroma_extended<S: Sample>(
     let width = block.w + 1;
     let height = block.h + 1;
     let mut window = [S::default(); 17 * 17];
-    for row in 0..height {
-        for col in 0..width {
-            let sx = block.x + i32::try_from(col).unwrap_or(0);
-            let sy = block.y + i32::try_from(row).unwrap_or(0);
-            window[row * width + col] = S::clip(sample(src, src_stride, pic_w, pic_h, sx, sy));
-        }
-    }
+    edge_window(
+        &mut window,
+        (width, height),
+        src,
+        src_stride,
+        (pic_w, pic_h),
+        (block.x, block.y),
+    );
     let wide = i32::try_from(width).unwrap_or(0);
     let high = i32::try_from(height).unwrap_or(0);
     put_chroma_block(
@@ -1152,14 +2078,18 @@ fn put_luma_extended<S: Sample>(
     let (pic_w, pic_h) = pic;
     let width = block.w + 5;
     let height = block.h + 5;
-    let mut window = [S::default(); 21 * 21];
-    for row in 0..height {
-        for col in 0..width {
-            let sx = block.x - 2 + i32::try_from(col).unwrap_or(0);
-            let sy = block.y - 2 + i32::try_from(row).unwrap_or(0);
-            window[row * width + col] = S::clip(sample(src, src_stride, pic_w, pic_h, sx, sy));
-        }
-    }
+    // The vector kernels load whole rows of 16 or 32 from two samples left
+    // of the block; the last row's loads reach past the window's 21 by up
+    // to 11 samples, which the spare ones at its end hold.
+    let mut window = [S::default(); 21 * 21 + 16];
+    edge_window(
+        &mut window,
+        (width, height),
+        src,
+        src_stride,
+        (pic_w, pic_h),
+        (block.x - 2, block.y - 2),
+    );
     let wide = i32::try_from(width).unwrap_or(0);
     let high = i32::try_from(height).unwrap_or(0);
     put_luma_block(
@@ -1218,11 +2148,21 @@ fn avg_blocks<S: Sample>(
     fill(&mut left, &mut right);
     for row in 0..h {
         let out = &mut dst[row * dst_stride..row * dst_stride + w];
-        let a = &left[row * w..row * w + w];
-        let b = &right[row * w..row * w + w];
-        for (sample, (&left_px, &right_px)) in out.iter_mut().zip(a.iter().zip(b)) {
-            *sample = avg(left_px, right_px);
-        }
+        avg_row(
+            out,
+            &left[row * w..row * w + w],
+            &right[row * w..row * w + w],
+        );
+    }
+}
+
+/// The rounded average of two rows of samples.
+pub fn avg_row<S: Sample>(dst: &mut [S], a: &[S], b: &[S]) {
+    if S::avg_fast(dst, a, b) {
+        return;
+    }
+    for (sample, (&left, &right)) in dst.iter_mut().zip(a.iter().zip(b)) {
+        *sample = avg(left, right);
     }
 }
 
@@ -1244,10 +2184,46 @@ fn src_at<S: Sample>(samples: &[S], stride: usize, x: i32, y: i32) -> Src<'_, S>
 
 fn copy_block<S: Sample>(dst: &mut [S], dst_stride: usize, src: Src<'_, S>, size: (usize, usize)) {
     let (w, h) = size;
-    for row in 0..h {
-        let from = (src.y + row) * src.stride + src.x;
-        dst[row * dst_stride..row * dst_stride + w].copy_from_slice(&src.samples[from..from + w]);
+    // The usual widths get a copy of known length, which is a few moves
+    // rather than a call.
+    match w {
+        16 => copy_rows::<S, 16>(dst, dst_stride, &src, h),
+        8 => copy_rows::<S, 8>(dst, dst_stride, &src, h),
+        4 => copy_rows::<S, 4>(dst, dst_stride, &src, h),
+        _ => {
+            for row in 0..h {
+                let from = (src.y + row) * src.stride + src.x;
+                dst[row * dst_stride..row * dst_stride + w]
+                    .copy_from_slice(&src.samples[from..from + w]);
+            }
+        }
     }
+}
+
+fn copy_rows<S: Sample, const W: usize>(
+    dst: &mut [S],
+    dst_stride: usize,
+    src: &Src<'_, S>,
+    h: usize,
+) {
+    if h == 0 || dst_stride < W || src.stride < W {
+        return;
+    }
+    // The block is cut from each plane once. Every row but the last is
+    // then a whole stride-long piece, at least `W` long, so taking its
+    // first `W` samples needs no further test.
+    let from = src.y * src.stride + src.x;
+    let source = &src.samples[from..from + (h - 1) * src.stride + W];
+    let target = &mut dst[..(h - 1) * dst_stride + W];
+    let (source, last_source) = source.split_at((h - 1) * src.stride);
+    let (target, last_target) = target.split_at_mut((h - 1) * dst_stride);
+    let rows = target
+        .chunks_exact_mut(dst_stride)
+        .zip(source.chunks_exact(src.stride));
+    for (out, row) in rows {
+        out[..W].copy_from_slice(&row[..W]);
+    }
+    last_target[..W].copy_from_slice(&last_source[..W]);
 }
 
 fn half_h_block<S: Sample>(
@@ -1398,6 +2374,98 @@ pub struct Edge {
     pub row_step: usize,
 }
 
+pub use cutlass_h264_kernels::deblock::{Filter as EdgeFilter, MbEdges};
+
+/// The thresholds of the edges filtered at one QP: alpha, beta, and the
+/// clipping value for each strength. Worked out once for every edge of a
+/// macroblock at that QP.
+#[derive(Clone, Copy)]
+pub struct EdgeQp {
+    alpha: u8,
+    beta: u8,
+    /// Indexed by strength: −1 for strength 0, which leaves its group alone,
+    /// then `tC0` for 1, 2 and 3.
+    tc0: [i8; 4],
+}
+
+impl EdgeQp {
+    /// `None` when alpha or beta is 0: no sample then passes the test
+    /// against them, and every edge at this QP is left as it is.
+    #[inline]
+    pub fn new(qpav: i32, offsets: (i32, i32)) -> Option<Self> {
+        let index_a = (qpav + offsets.0).clamp(0, 51) as usize;
+        let index_b = (qpav + offsets.1).clamp(0, 51) as usize;
+        // Alpha and the three clipping values in one load.
+        let [alpha, tc1, tc2, tc3] = BY_INDEX_A[index_a];
+        let beta = BETA[index_b];
+        if alpha == 0 || beta == 0 {
+            return None;
+        }
+        let tc0 = [-1, tc1 as i8, tc2 as i8, tc3 as i8];
+        Some(Self { alpha, beta, tc0 })
+    }
+
+    /// The filter of an edge whose strengths are all 4 (`strong`) or all
+    /// below 4.
+    #[inline]
+    pub fn filter(&self, bs: [u8; 4], strong: bool) -> EdgeFilter {
+        let tc0 = if strong {
+            None
+        } else {
+            let at = |group: u8| self.tc0[usize::from(group & 3)];
+            Some([at(bs[0]), at(bs[1]), at(bs[2]), at(bs[3])])
+        };
+        EdgeFilter {
+            alpha: self.alpha,
+            beta: self.beta,
+            tc0,
+        }
+    }
+}
+
+/// Filters a whole edge at once: 16 luma samples, or 8 chroma samples when
+/// `edge.chroma` is set. `bs` is the strength of each quarter of the edge
+/// and `edge.bs` is not read. `false` means nothing
+/// was done: the sample width has no vector kernel, or the strengths mix 4
+/// with less.
+pub fn filter_luma16<S: Sample>(
+    plane: &mut [S],
+    stride: usize,
+    x: usize,
+    y: usize,
+    edge: Edge,
+    bs: [u8; 4],
+) -> bool {
+    if bs == [0; 4] {
+        return true;
+    }
+    let index_a = (edge.qpav + edge.offset_a).clamp(0, 51) as usize;
+    let index_b = (edge.qpav + edge.offset_b).clamp(0, 51) as usize;
+    let tc0 = if bs == [4; 4] {
+        None
+    } else if bs.iter().all(|&group| group < 4) {
+        Some(bs.map(|group| match group {
+            0 => -1,
+            _ => TC0[usize::from(group) - 1][index_a] as i8,
+        }))
+    } else {
+        return false;
+    };
+    let whole = LumaEdge {
+        at: y * stride + x,
+        down: stride * edge.row_step,
+        vertical: edge.vertical,
+        alpha: i32::from(ALPHA[index_a]) << S::SHIFT,
+        beta: i32::from(BETA[index_b]) << S::SHIFT,
+        tc0,
+    };
+    if edge.chroma {
+        S::deblock_chroma8(plane, whole)
+    } else {
+        S::deblock_luma16(plane, whole)
+    }
+}
+
 pub fn filter_edge<S: Sample>(plane: &mut [S], stride: usize, x: usize, y: usize, edge: Edge) {
     let Edge {
         vertical,
@@ -1443,75 +2511,114 @@ fn filter_span<S: Sample, const VERTICAL: bool>(
     plane: &mut [S],
     stride: usize,
     row_step: usize,
-    mut at: usize,
+    at: usize,
     run: FilterRun,
 ) {
-    let FilterRun {
-        len,
-        bs,
-        alpha,
-        beta,
-        index_a,
-        chroma,
-    } = run;
+    let len = run.len;
     let vert = stride * row_step;
-    let across = if VERTICAL { 1 } else { vert };
-    let along = if VERTICAL { vert } else { 1 };
-    for _ in 0..len {
-        let p0 = pel(plane[at - across]);
-        let q0 = pel(plane[at]);
-        let p1 = pel(plane[at - 2 * across]);
-        let q1 = pel(plane[at + across]);
-        if (p0 - q0).abs() >= alpha || (p1 - p0).abs() >= beta || (q1 - q0).abs() >= beta {
-            at += along;
-            continue;
-        }
-        let p2 = pel(plane[at - 3 * across]);
-        let q2 = pel(plane[at + 2 * across]);
-        let p3 = pel(plane[at - 4 * across]);
-        let q3 = pel(plane[at + 3 * across]);
-        if bs < 4 {
-            let tc0 = i32::from(TC0[bs as usize - 1][index_a]) << S::SHIFT;
-            let ap = (p2 - p0).abs();
-            let aq = (q2 - q0).abs();
-            let tc = if chroma {
-                tc0 + 1
-            } else {
-                tc0 + i32::from(ap < beta) + i32::from(aq < beta)
+    let tc0 = if run.bs < 4 {
+        i32::from(TC0[usize::from(run.bs) - 1][run.index_a]) << S::SHIFT
+    } else {
+        0
+    };
+    if VERTICAL {
+        // The edge runs down the picture: each line across it is eight
+        // samples in a row.
+        let mut at = at;
+        for _ in 0..len {
+            let Some(line) = plane.get_mut(at - 4..at + 4) else {
+                return;
             };
-            let delta = ((((q0 - p0) << 2) + (p1 - q1) + 4) >> 3).clamp(-tc, tc);
-            plane[at - across] = S::clip(p0 + delta);
-            plane[at] = S::clip(q0 - delta);
-            if !chroma && ap < beta {
-                let d = ((p2 + ((p0 + q0 + 1) >> 1) - (p1 << 1)) >> 1).clamp(-tc0, tc0);
-                plane[at - 2 * across] = S::clip(p1 + d);
+            if let Ok(line) = <&mut [S; 8]>::try_from(line) {
+                filter_line(line, &run, tc0);
             }
-            if !chroma && aq < beta {
-                let d = ((q2 + ((p0 + q0 + 1) >> 1) - (q1 << 1)) >> 1).clamp(-tc0, tc0);
-                plane[at + across] = S::clip(q1 + d);
-            }
-        } else {
-            let strong_p =
-                !chroma && (p2 - p0).abs() < beta && (p0 - q0).abs() < ((alpha >> 2) + 2);
-            let strong_q =
-                !chroma && (q2 - q0).abs() < beta && (p0 - q0).abs() < ((alpha >> 2) + 2);
-            if strong_p {
-                plane[at - across] = S::clip((p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3);
-                plane[at - 2 * across] = S::clip((p2 + p1 + p0 + q0 + 2) >> 2);
-                plane[at - 3 * across] = S::clip((2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3);
-            } else {
-                plane[at - across] = S::clip((2 * p1 + p0 + q1 + 2) >> 2);
-            }
-            if strong_q {
-                plane[at] = S::clip((p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3);
-                plane[at + across] = S::clip((p0 + q0 + q1 + q2 + 2) >> 2);
-                plane[at + 2 * across] = S::clip((2 * q3 + 3 * q2 + q1 + q0 + p0 + 4) >> 3);
-            } else {
-                plane[at] = S::clip((2 * q1 + q0 + p1 + 2) >> 2);
-            }
+            at += vert;
         }
-        at += along;
+        return;
     }
+    // The edge runs along a row: the eight rows around it, four above and
+    // four below, each `len` long.
+    let first = at - 4 * vert;
+    let Some(window) = plane.get_mut(first..first + 7 * vert + len) else {
+        return;
+    };
+    let (r0, rest) = window.split_at_mut(vert);
+    let (r1, rest) = rest.split_at_mut(vert);
+    let (r2, rest) = rest.split_at_mut(vert);
+    let (r3, rest) = rest.split_at_mut(vert);
+    let (r4, rest) = rest.split_at_mut(vert);
+    let (r5, rest) = rest.split_at_mut(vert);
+    let (r6, r7) = rest.split_at_mut(vert);
+    let (r0, r1, r2, r3) = (&r0[..len], &mut r1[..len], &mut r2[..len], &mut r3[..len]);
+    let (r4, r5, r6, r7) = (&mut r4[..len], &mut r5[..len], &mut r6[..len], &r7[..len]);
+    for i in 0..len {
+        let mut line = [r0[i], r1[i], r2[i], r3[i], r4[i], r5[i], r6[i], r7[i]];
+        if filter_line(&mut line, &run, tc0) {
+            r1[i] = line[1];
+            r2[i] = line[2];
+            r3[i] = line[3];
+            r4[i] = line[4];
+            r5[i] = line[5];
+            r6[i] = line[6];
+        }
+    }
+}
+
+/// Clause 8.7.2.3 and 8.7.2.4 on one line of samples across an edge:
+/// p3, p2, p1, p0, then q0, q1, q2, q3. Says whether the line was filtered.
+/// `tc0` is the table value for a strength below 4.
+#[inline(always)]
+fn filter_line<S: Sample>(line: &mut [S; 8], run: &FilterRun, tc0: i32) -> bool {
+    let (alpha, beta, chroma) = (run.alpha, run.beta, run.chroma);
+    let p1 = pel(line[2]);
+    let p0 = pel(line[3]);
+    let q0 = pel(line[4]);
+    let q1 = pel(line[5]);
+    if (p0 - q0).abs() >= alpha || (p1 - p0).abs() >= beta || (q1 - q0).abs() >= beta {
+        return false;
+    }
+    let p3 = pel(line[0]);
+    let p2 = pel(line[1]);
+    let q2 = pel(line[6]);
+    let q3 = pel(line[7]);
+    if run.bs < 4 {
+        let ap = (p2 - p0).abs();
+        let aq = (q2 - q0).abs();
+        let tc = if chroma {
+            tc0 + 1
+        } else {
+            tc0 + i32::from(ap < beta) + i32::from(aq < beta)
+        };
+        let delta = ((((q0 - p0) << 2) + (p1 - q1) + 4) >> 3).clamp(-tc, tc);
+        line[3] = S::clip(p0 + delta);
+        line[4] = S::clip(q0 - delta);
+        if !chroma && ap < beta {
+            let d = ((p2 + ((p0 + q0 + 1) >> 1) - (p1 << 1)) >> 1).clamp(-tc0, tc0);
+            line[2] = S::clip(p1 + d);
+        }
+        if !chroma && aq < beta {
+            let d = ((q2 + ((p0 + q0 + 1) >> 1) - (q1 << 1)) >> 1).clamp(-tc0, tc0);
+            line[5] = S::clip(q1 + d);
+        }
+    } else {
+        let strong_p = !chroma && (p2 - p0).abs() < beta && (p0 - q0).abs() < ((alpha >> 2) + 2);
+        let strong_q = !chroma && (q2 - q0).abs() < beta && (p0 - q0).abs() < ((alpha >> 2) + 2);
+        if strong_p {
+            line[3] = S::clip((p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3);
+            line[2] = S::clip((p2 + p1 + p0 + q0 + 2) >> 2);
+            line[1] = S::clip((2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3);
+        } else {
+            line[3] = S::clip((2 * p1 + p0 + q1 + 2) >> 2);
+        }
+        if strong_q {
+            line[4] = S::clip((p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3);
+            line[5] = S::clip((p0 + q0 + q1 + q2 + 2) >> 2);
+            line[6] = S::clip((2 * q3 + 3 * q2 + q1 + q0 + p0 + 4) >> 3);
+        } else {
+            line[4] = S::clip((2 * q1 + q0 + p1 + 2) >> 2);
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -1520,6 +2627,33 @@ mod tests {
         BlockMc, Depth, Pel, Sample, chroma_mc, chroma_qps, pel, pred_chroma, pred16,
         put_chroma_block, put_luma_block, qpel,
     };
+
+    /// Every QP′Y up to 14-bit samples', every place, and weights and
+    /// levels from both ends of their ranges.
+    #[test]
+    fn table_scaling_is_the_clause_scaling() {
+        let levels = [
+            -70_000, -2_048, -255, -17, -2, -1, 1, 2, 3, 31, 255, 2_047, 70_000,
+        ];
+        for qp in 0..=87 {
+            for weight in [1u8, 6, 16, 42, 128, 255] {
+                let mul4 = super::dequant4(qp, &[weight; 16]).unwrap();
+                let mul8 = super::dequant8(qp, &[weight; 64]).unwrap();
+                for &level in &levels {
+                    for (pos, &mul) in mul4.iter().enumerate() {
+                        let (row, col) = (pos / 4, pos % 4);
+                        let want = super::scale4(level, qp, col, row, i32::from(weight));
+                        assert_eq!(super::dequantize(level, mul), want, "4x4 qp {qp} at {pos}");
+                    }
+                    for (pos, &mul) in mul8.iter().enumerate() {
+                        let (row, col) = (pos / 8, pos % 8);
+                        let want = super::scale8(level, qp, col, row, i32::from(weight));
+                        assert_eq!(super::dequantize(level, mul), want, "8x8 qp {qp} at {pos}");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn ten_bit_chroma_qp_keeps_the_low_indices() {
@@ -1536,6 +2670,62 @@ mod tests {
         assert_eq!(chroma_qps(26, 0, 30), (56, 26));
         assert_eq!(chroma_qps(26, 0, 36), (62, 26));
         assert_eq!(chroma_qps(51, 0, 36), (75, 39));
+    }
+
+    #[test]
+    fn an_edge_window_repeats_the_picture_edge() {
+        let (pic_w, pic_h, stride) = (6i32, 5i32, 8usize);
+        let plane: Vec<u8> = (0..stride * 5).map(|i| (i * 7 % 251) as u8).collect();
+        // Windows inside, across each edge and corner, and wholly outside.
+        for y0 in -9..9 {
+            for x0 in -9..12 {
+                for (width, height) in [(1usize, 1usize), (4, 3), (9, 9)] {
+                    let mut window = vec![0u8; width * height];
+                    super::edge_window(
+                        &mut window,
+                        (width, height),
+                        &plane,
+                        stride,
+                        (pic_w, pic_h),
+                        (x0, y0),
+                    );
+                    for row in 0..height {
+                        for col in 0..width {
+                            let want = super::sample(
+                                &plane,
+                                stride,
+                                pic_w,
+                                pic_h,
+                                x0 + col as i32,
+                                y0 + row as i32,
+                            );
+                            let got = i32::from(window[row * width + col]);
+                            assert_eq!(got, want, "window {width}x{height} at {x0},{y0}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_dc_only_block_takes_the_same_values_as_the_full_transform() {
+        for dc in [
+            -4000, -65, -64, -33, -32, -31, -1, 0, 1, 31, 32, 33, 64, 100, 4000,
+        ] {
+            let mut four = [0i32; 16];
+            four[0] = dc;
+            let mut full = four;
+            super::idct4(&mut four);
+            super::idct4_full(&mut full);
+            assert_eq!(four, full, "4x4 dc {dc}");
+            let mut eight = [0i32; 64];
+            eight[0] = dc;
+            let mut full = eight;
+            super::idct8(&mut eight);
+            super::idct8_full(&mut full);
+            assert_eq!(eight, full, "8x8 dc {dc}");
+        }
     }
 
     #[test]

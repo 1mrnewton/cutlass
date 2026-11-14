@@ -1,0 +1,326 @@
+//! The inverse transform of a 4×4 or 8×8 residual block added to the
+//! picture, clauses 8.5.12 and 8.5.13.
+//!
+//! The arithmetic is 32-bit, as wide as the decoder's own, so the vector
+//! version gives the same samples as the plain one for any coefficients,
+//! not only ones a conforming stream can hold.
+
+/// Inverse-transforms `block`, scaled coefficients in raster order, and
+/// adds it to the 4×4 samples of `plane` whose first is at `at`, with rows
+/// `down` apart. `false` means the samples are not all in the plane, or
+/// the rows overlap, and nothing was done.
+#[inline]
+pub fn idct4_add(plane: &mut [u8], at: usize, down: usize, block: &[i32; 16]) -> bool {
+    kernel!(idct4_add(plane, at, down, block))
+}
+
+/// [`idct4_add`] for an 8×8 block, clause 8.5.13.
+#[inline]
+pub fn idct8_add(plane: &mut [u8], at: usize, down: usize, block: &[i32; 64]) -> bool {
+    kernel!(idct8_add(plane, at, down, block))
+}
+
+/// Adds `dc` to each sample of the `size`×`size` block of `plane` whose
+/// first sample is at `at`, with rows `down` apart, and holds each to 0 to
+/// 255. `size` is 4 or 8. `false` means it is another size or the samples
+/// are not all in the plane, and nothing was done.
+#[inline]
+pub fn dc_add(plane: &mut [u8], at: usize, down: usize, dc: i32, size: usize) -> bool {
+    kernel!(dc_add(plane, at, down, dc, size))
+}
+
+/// Adds `dcs` to the four 4×4 quarters of the 8×8 block of `plane` whose
+/// first sample is at `at`, with rows `down` apart, in raster order (top
+/// left, top right, bottom left, bottom right), and holds each sample to 0
+/// to 255: four [`dc_add`]s of size 4 at once, as a 4:2:0 chroma block
+/// with only DC levels has. `false` means the samples are not all in the
+/// plane, and nothing was done.
+#[inline]
+pub fn dc_add_quads(plane: &mut [u8], at: usize, down: usize, dcs: [i32; 4]) -> bool {
+    kernel!(dc_add_quads(plane, at, down, dcs))
+}
+
+/// Writes `rows` over the `N`×`N` samples of `plane` whose first is at
+/// `at`, with rows `down` apart: a prediction put in place before its
+/// residual is added. `false` means the samples are not all in the plane,
+/// or the rows overlap, and nothing was done.
+#[inline]
+pub fn store<const N: usize>(
+    plane: &mut [u8],
+    at: usize,
+    down: usize,
+    rows: &[[u8; N]; N],
+) -> bool {
+    kernel!(store(plane, at, down, rows))
+}
+
+/// The plane reads and writes around whichever `idct4_rows` is in scope: it
+/// takes the block and the four rows of four samples, and gives the rows
+/// back with the residual added.
+macro_rules! residual_kernels {
+    ($visibility:vis, $(#[$feature:meta])*) => {
+        /// See [`crate::residual::idct4_add`].
+        $(#[$feature])*
+        $visibility fn idct4_add(plane: &mut [u8], at: usize, down: usize, block: &[i32; 16]) -> bool {
+            if down < 4 || 3usize.checked_mul(down).and_then(|span| span.checked_add(at)).and_then(|start| start.checked_add(4)).is_none_or(|end| end > plane.len()) {
+                return false;
+            }
+            let mut rows = [[0u8; 4]; 4];
+            for (index, row) in rows.iter_mut().enumerate() {
+                let start = at + index * down;
+                row.copy_from_slice(&plane[start..start + 4]);
+            }
+            let rows = idct4_rows(block, rows);
+            for (index, row) in rows.iter().enumerate() {
+                let start = at + index * down;
+                plane[start..start + 4].copy_from_slice(row);
+            }
+            true
+        }
+
+        /// See [`crate::residual::idct8_add`].
+        $(#[$feature])*
+        $visibility fn idct8_add(plane: &mut [u8], at: usize, down: usize, block: &[i32; 64]) -> bool {
+            if down < 8 || 7usize.checked_mul(down).and_then(|span| span.checked_add(at)).and_then(|start| start.checked_add(8)).is_none_or(|end| end > plane.len()) {
+                return false;
+            }
+            let mut rows = [[0u8; 8]; 8];
+            for (index, row) in rows.iter_mut().enumerate() {
+                let start = at + index * down;
+                row.copy_from_slice(&plane[start..start + 8]);
+            }
+            let rows = idct8_rows(block, rows);
+            for (index, row) in rows.iter().enumerate() {
+                let start = at + index * down;
+                plane[start..start + 8].copy_from_slice(row);
+            }
+            true
+        }
+    };
+}
+pub(crate) use residual_kernels;
+
+/// [`dc_add`] row by row over whichever `dc_row` is in scope, which adds
+/// to the eight samples in a `u64`.
+macro_rules! dc_add_rows {
+    ($visibility:vis, $(#[$feature:meta])*) => {
+        /// See [`crate::residual::dc_add`]. `dc_row` adds to the eight
+        /// samples in a `u64`.
+        $(#[$feature])*
+        $visibility fn dc_add(plane: &mut [u8], at: usize, down: usize, dc: i32, size: usize) -> bool {
+            if !(size == 4 || size == 8) {
+                return false;
+            }
+            let Some(rest) = plane.len().checked_sub(at) else {
+                return false;
+            };
+            if (size - 1).checked_mul(down).is_none_or(|rows| rows + size > rest) {
+                return false;
+            }
+            for index in 0..size {
+                let row = &mut plane[at + index * down..];
+                if size == 8 {
+                    if let Some(row) = row.first_chunk_mut::<8>() {
+                        *row = dc_row(u64::from_le_bytes(*row), dc).to_le_bytes();
+                    }
+                } else if let Some(row) = row.first_chunk_mut::<4>() {
+                    let samples = u64::from(u32::from_le_bytes(*row));
+                    *row = (dc_row(samples, dc) as u32).to_le_bytes();
+                }
+            }
+            true
+        }
+    };
+}
+pub(crate) use dc_add_rows;
+
+#[cfg(test)]
+mod tests {
+    use crate::scalar;
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 33) as u32
+        }
+    }
+
+    #[test]
+    fn the_dc_add_matches_the_plain_one() {
+        let mut rng = Lcg(11);
+        for round in 0..20_000 {
+            let down = 9 + (rng.next() % 8) as usize;
+            let before: Vec<u8> = (0..down * 12).map(|_| rng.next() as u8).collect();
+            let size = [4, 8, 5][round % 3];
+            // Mostly inside the plane, sometimes off its end.
+            let at = (rng.next() as usize) % (down * 6);
+            let dc = (rng.next() % 1201) as i32 - 600;
+            let mut fast = before.clone();
+            let mut plain = before.clone();
+            let done = super::dc_add(&mut fast, at, down, dc, size);
+            let wanted = scalar::dc_add(&mut plain, at, down, dc, size);
+            assert_eq!(done, wanted, "round {round}");
+            assert_eq!(fast, plain, "round {round}: dc {dc}, size {size}");
+            if !done {
+                assert_eq!(fast, before);
+            }
+        }
+    }
+
+    #[test]
+    fn the_quarter_dc_add_matches_the_plain_one() {
+        let mut rng = Lcg(13);
+        for round in 0..20_000 {
+            let down = 8 + (rng.next() % 8) as usize;
+            let before: Vec<u8> = (0..down * 10).map(|_| rng.next() as u8).collect();
+            // Mostly inside the plane, sometimes off its end.
+            let at = (rng.next() as usize) % (down * 3);
+            let span = [40, 300, 1 << 20][round % 3];
+            let dcs: [i32; 4] =
+                core::array::from_fn(|_| (rng.next() % (2 * span + 1)) as i32 - span as i32);
+            let mut fast = before.clone();
+            let mut plain = before.clone();
+            let done = super::dc_add_quads(&mut fast, at, down, dcs);
+            let wanted = scalar::dc_add_quads(&mut plain, at, down, dcs);
+            assert_eq!(done, wanted, "round {round}");
+            assert_eq!(fast, plain, "round {round}: dcs {dcs:?}");
+            if done {
+                // Four single adds give the same.
+                let mut four = before.clone();
+                for (i, &dc) in dcs.iter().enumerate() {
+                    let corner = at + (i >> 1) * 4 * down + (i & 1) * 4;
+                    assert!(scalar::dc_add(&mut four, corner, down, dc, 4));
+                }
+                assert_eq!(fast, four, "round {round}");
+            } else {
+                assert_eq!(fast, before);
+            }
+        }
+    }
+
+    #[test]
+    fn the_store_matches_the_plain_one() {
+        let mut rng = Lcg(17);
+        for round in 0..20_000u32 {
+            let down = 3 + (rng.next() % 20) as usize;
+            let before: Vec<u8> = (0..down * 18).map(|_| rng.next() as u8).collect();
+            let at = (rng.next() as usize) % (down * 6);
+            let check = |n: usize, done: bool, wanted: bool, fast: &[u8], plain: &[u8]| {
+                assert_eq!(done, wanted, "round {round} size {n}");
+                assert_eq!(fast, plain, "round {round} size {n}");
+                if !done {
+                    assert_eq!(fast, &before[..]);
+                }
+            };
+            let four: [[u8; 4]; 4] =
+                core::array::from_fn(|_| core::array::from_fn(|_| rng.next() as u8));
+            let (mut fast, mut plain) = (before.clone(), before.clone());
+            let done = super::store(&mut fast, at, down, &four);
+            check(
+                4,
+                done,
+                scalar::store(&mut plain, at, down, &four),
+                &fast,
+                &plain,
+            );
+            let eight: [[u8; 8]; 8] =
+                core::array::from_fn(|_| core::array::from_fn(|_| rng.next() as u8));
+            let (mut fast, mut plain) = (before.clone(), before.clone());
+            let done = super::store(&mut fast, at, down, &eight);
+            check(
+                8,
+                done,
+                scalar::store(&mut plain, at, down, &eight),
+                &fast,
+                &plain,
+            );
+            let sixteen: [[u8; 16]; 16] =
+                core::array::from_fn(|_| core::array::from_fn(|_| rng.next() as u8));
+            let (mut fast, mut plain) = (before.clone(), before.clone());
+            let done = super::store(&mut fast, at, down, &sixteen);
+            check(
+                16,
+                done,
+                scalar::store(&mut plain, at, down, &sixteen),
+                &fast,
+                &plain,
+            );
+        }
+    }
+
+    #[test]
+    fn the_transform_and_add_match_the_plain_ones() {
+        let mut rng = Lcg(21);
+        let stride = 12usize;
+        for round in 0..60_000u32 {
+            let plane: Vec<u8> = (0..stride * 8)
+                .map(|_| match rng.next() % 6 {
+                    0 => 0,
+                    1 => 255,
+                    _ => rng.next() as u8,
+                })
+                .collect();
+            // Small coefficients, ones as large as a stream can scale to,
+            // and ones far past that.
+            let span = [16, 1 << 9, 1 << 15, 1 << 24][(round % 4) as usize];
+            let fill = 1 + rng.next() % 16;
+            let mut block = [0i32; 16];
+            for level in block.iter_mut().take(fill as usize) {
+                *level = (rng.next() % (2 * span)) as i32 - span as i32;
+            }
+            let at = (rng.next() % 4) as usize * stride + (rng.next() % 8) as usize;
+            let (mut fast, mut plain) = (plane.clone(), plane.clone());
+            assert!(super::idct4_add(&mut fast, at, stride, &block));
+            assert!(scalar::idct4_add(&mut plain, at, stride, &block));
+            assert_eq!(fast, plain, "round {round} block {block:?}");
+        }
+    }
+
+    #[test]
+    fn the_8x8_transform_and_add_match_the_plain_ones() {
+        let mut rng = Lcg(31);
+        let stride = 20usize;
+        for round in 0..40_000u32 {
+            let plane: Vec<u8> = (0..stride * 12)
+                .map(|_| match rng.next() % 6 {
+                    0 => 0,
+                    1 => 255,
+                    _ => rng.next() as u8,
+                })
+                .collect();
+            let span = [16, 1 << 9, 1 << 15, 1 << 26][(round % 4) as usize];
+            let fill = 1 + rng.next() % 64;
+            let mut block = [0i32; 64];
+            for _ in 0..fill {
+                let at = (rng.next() % 64) as usize;
+                block[at] = (rng.next() % (2 * span)) as i32 - span as i32;
+            }
+            let at = (rng.next() % 4) as usize * stride + (rng.next() % 12) as usize;
+            let (mut fast, mut plain) = (plane.clone(), plane.clone());
+            assert!(super::idct8_add(&mut fast, at, stride, &block));
+            assert!(scalar::idct8_add(&mut plain, at, stride, &block));
+            assert_eq!(fast, plain, "round {round} block {block:?}");
+        }
+        let mut plane = vec![9u8; 64];
+        assert!(!super::idct8_add(&mut plane, 1, 8, &[0; 64]));
+    }
+
+    #[test]
+    fn a_lone_dc_adds_the_same_value_everywhere() {
+        let mut plane = vec![100u8; 16];
+        let mut block = [0i32; 16];
+        block[0] = 640;
+        assert!(super::idct4_add(&mut plane, 0, 4, &block));
+        assert_eq!(plane, vec![110u8; 16]);
+        block[0] = -64_000;
+        assert!(super::idct4_add(&mut plane, 0, 4, &block));
+        assert_eq!(plane, vec![0u8; 16]);
+        // A block that does not fit is refused.
+        assert!(!super::idct4_add(&mut plane, 4, 4, &block));
+    }
+}

@@ -1077,6 +1077,358 @@ mod tests {
         assert_eq!(sound.pcm.rate, 48_000);
     }
 
+    /// The first picture of an AV1 file from `crates/codecs/av1/tests/mp4`,
+    /// decoded by the Rust decoder: its coded format and its RGBA.
+    fn av1_software_picture(name: &str) -> (cutlass_decode::PixelFormat, (u32, u32), Vec<u8>) {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/codecs/av1/tests/mp4")
+            .join(name);
+        let software = cutlass_settings::Hardware {
+            decode: false,
+            encode: false,
+            ..cutlass_settings::Hardware::default()
+        };
+        let readers = super::readers_with(crate::register_codecs_with(&software).0);
+        let mut media = readers.open(&path).expect(name);
+        let held = media
+            .decode_at(
+                cutlass_model::Micros(0),
+                &cutlass_model::TimeRange::new(0, 1_000_000),
+            )
+            .expect(name);
+        let cutlass_engine::DecodedFrame::Coded { pixel, .. } = &held.frame else {
+            panic!("{name}: not a coded picture");
+        };
+        let size = (held.frame.width(), held.frame.height());
+        let cutlass_picture::Picture::Cpu(bytes) =
+            cutlass_engine::decoded_picture(&held.frame).expect(name)
+        else {
+            panic!("{name}: not on the CPU");
+        };
+        (*pixel, size, bytes.into_rgba())
+    }
+
+    #[test]
+    fn av1_of_every_depth_and_chroma_layout_becomes_a_picture() {
+        use cutlass_decode::PixelFormat as P;
+        // aomenc and SVT-AV1 streams that FFmpeg copied into MP4: HDR10
+        // 10-bit, 4:4:4, 4:2:2 at 10 bits, 12-bit 4:2:0 and 4:4:4, and GBR.
+        for (name, pixel, size) in [
+            ("hdr10.mp4", P::Yuv420p10, (64, 64)),
+            ("yuv444.mp4", P::Yuv444p, (64, 64)),
+            ("yuv422-10.mp4", P::Yuv422p10, (64, 64)),
+            ("yuv420-12.mp4", P::Yuv420p12, (64, 64)),
+            ("yuv444-12.mp4", P::Yuv444p12, (64, 64)),
+            ("gbr.mp4", P::Gbrp, (128, 128)),
+        ] {
+            let (got, got_size, rgba) = av1_software_picture(name);
+            assert_eq!(got, pixel, "{name}");
+            assert_eq!(got_size, size, "{name}");
+            assert_eq!(rgba.len(), (size.0 * size.1 * 4) as usize, "{name}");
+            assert!(rgba.chunks(4).all(|p| p[3] == 255), "{name}");
+            // A picture, not one flat value.
+            assert!(rgba.chunks(4).any(|p| p[..3] != rgba[..3]), "{name}");
+        }
+    }
+
+    #[test]
+    fn an_avif_still_decodes_with_the_rust_decoder() {
+        // SVT-AV1 stills FFmpeg wrote as AVIF: a flat 0x4080C0, full range
+        // with the BT.709 matrix, and FFmpeg's test pattern.
+        let (pixel, size, rgba) = av1_software_picture("flat.avif");
+        assert_eq!(pixel, cutlass_decode::PixelFormat::Yuv420p);
+        assert_eq!(size, (128, 96));
+        for (channel, want) in [64i32, 128, 192].into_iter().enumerate() {
+            let got = i32::from(rgba[4 * (48 * 128 + 64) + channel]);
+            assert!((got - want).abs() <= 3, "channel {channel}: {got}");
+        }
+        let (pixel, size, rgba) = av1_software_picture("pattern.avif");
+        assert_eq!(pixel, cutlass_decode::PixelFormat::Yuv420p);
+        assert_eq!(size, (320, 180));
+        assert!(rgba.chunks(4).any(|p| p[..3] != rgba[..3]));
+    }
+
+    #[test]
+    fn av1_full_range_and_a_bt601_matrix_come_out_in_the_color_that_went_in() {
+        // SVT-AV1, a flat 0x4080C0: once full range with the BT.709 matrix
+        // (libdav1d decodes Y 119, U 167, V 92), once studio swing with the
+        // BT.601 matrix (Y 116, U 166, V 95). Read as studio swing BT.709,
+        // the first would come out near (55, 120, 197) and the second near
+        // (53, 123, 197).
+        for name in ["full709.mp4", "limited601.mp4"] {
+            let (pixel, size, rgba) = av1_software_picture(name);
+            assert_eq!(pixel, cutlass_decode::PixelFormat::Yuv420p);
+            assert_eq!(size, (64, 64));
+            for (channel, want) in [64i32, 128, 192].into_iter().enumerate() {
+                let got = i32::from(rgba[4 * (32 * 64 + 32) + channel]);
+                assert!((got - want).abs() <= 3, "{name} channel {channel}: {got}");
+            }
+        }
+    }
+
+    const AV1_SIZE: (u32, u32) = (96, 64);
+    const AV1_FRAMES: u32 = 10;
+
+    /// The RGBA picture `index` of the AV1 movie: a gradient that moves.
+    fn av1_rgba(index: u32) -> Vec<u8> {
+        let (w, h) = AV1_SIZE;
+        (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                [
+                    (40 + (x * 2 + index * 6) % 160) as u8,
+                    (60 + (y * 2) % 120) as u8,
+                    (200 - (x + y) % 100) as u8,
+                    255,
+                ]
+            })
+            .collect()
+    }
+
+    /// What export does with the Rust AV1 encoder: RGBA frames through the
+    /// installed encode factory, the packets and the `av1C` record into
+    /// `mux`. Returns the record.
+    fn av1_into<M: Mux>(mux: &mut M) -> Vec<u8> {
+        use cutlass_decode::{CodecParams, PixelFormat, SideData};
+        use cutlass_encode::{CpuFrame, FrameInput, FrameTime};
+
+        let software = cutlass_settings::Hardware {
+            decode: false,
+            encode: false,
+            ..cutlass_settings::Hardware::default()
+        };
+        let (_, encoders) = crate::register_codecs_with(&software);
+        let (w, h) = AV1_SIZE;
+        let mut params = CodecParams::with_format(CodecId::Av1, w, h, PixelFormat::Rgba8);
+        params.bitrate = 400_000;
+        let mut encoder = encoders
+            .open(&params)
+            .expect("the Rust AV1 encoder takes RGBA");
+        assert_eq!(encoder.codec(), CodecId::Av1);
+        let mut packets = Vec::new();
+        for index in 0..AV1_FRAMES {
+            let time = FrameTime::new(i64::from(index), 1, 30).expect("time");
+            let frame =
+                CpuFrame::new(w, h, PixelFormat::Rgba8, av1_rgba(index), time).expect("frame");
+            packets.extend(encoder.push_frame(&FrameInput::Cpu(frame)).expect("push"));
+        }
+        packets.extend(encoder.drain().expect("drain"));
+        assert_eq!(packets.len(), AV1_FRAMES as usize);
+        let configs: Vec<&Vec<u8>> = packets
+            .iter()
+            .flat_map(|packet| &packet.side)
+            .filter_map(|side| match side {
+                SideData::Config(bytes) => Some(bytes),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(configs.len(), 1, "one av1C record");
+        assert!(matches!(packets[0].side.first(), Some(SideData::Config(_))));
+        let config = configs[0].clone();
+        assert_eq!(config[0], 0x81);
+
+        let size = cutlass_codec::FrameSize::try_new(w, h).expect("size");
+        let track = mux
+            .add_stream(NewStream {
+                params: StreamParams::video(StreamCodec::Known(CodecId::Av1), size, Vec::new()),
+                timescale: Timescale::new(30),
+                language: None,
+            })
+            .expect("track");
+        mux.set_config(track, &config).expect("config");
+        for packet in &packets {
+            let time =
+                Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
+                    .expect("time");
+            let out = Packet::try_new(
+                track.get(),
+                packet.data.clone(),
+                time,
+                Timescale::new(30),
+                packet.keyframe,
+            )
+            .expect("packet");
+            mux.write_packet(&out).expect("write");
+        }
+        mux.finish(&[TrackDuration {
+            track,
+            timescale: Timescale::new(30),
+            ticks: i64::from(AV1_FRAMES),
+        }])
+        .expect("finish");
+        config
+    }
+
+    /// Every picture of the AV1 movie at `path` through the installed
+    /// readers with the Rust decoder: the packed 4:2:0 bytes, and the first
+    /// picture's RGBA.
+    fn av1_read_back(path: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
+        let software = cutlass_settings::Hardware {
+            decode: false,
+            encode: false,
+            ..cutlass_settings::Hardware::default()
+        };
+        let readers = super::readers_with(crate::register_codecs_with(&software).0);
+        let info = readers.probe(path).expect("probe");
+        assert_eq!(
+            (info.width, info.height),
+            (Some(AV1_SIZE.0), Some(AV1_SIZE.1))
+        );
+        let length = info.duration.expect("duration").0;
+        let want = i64::from(AV1_FRAMES) * 1_000_000 / 30;
+        assert!((length - want).abs() <= 34_000, "{length} against {want}");
+        let mut media = readers.open(path).expect("open");
+        let mut yuv = Vec::new();
+        let mut first = Vec::new();
+        for index in 0..AV1_FRAMES {
+            // The middle of each picture's time.
+            let at = cutlass_model::Micros((i64::from(index) * 2 + 1) * 1_000_000 / 60);
+            let held = media
+                .decode_at(at, &cutlass_model::TimeRange::new(0, 10_000_000))
+                .expect("picture");
+            let cutlass_engine::DecodedFrame::Coded { pixel, bytes, .. } = &held.frame else {
+                panic!("not a coded picture");
+            };
+            assert_eq!(*pixel, cutlass_decode::PixelFormat::Yuv420p);
+            assert_eq!((held.frame.width(), held.frame.height()), AV1_SIZE);
+            yuv.extend_from_slice(bytes);
+            if index == 0 {
+                let cutlass_picture::Picture::Cpu(rgba) =
+                    cutlass_engine::decoded_picture(&held.frame).expect("picture")
+                else {
+                    panic!("not on the CPU");
+                };
+                first = rgba.into_rgba();
+            }
+        }
+        (yuv, first)
+    }
+
+    /// Peak signal to noise of the red, green and blue of two RGBA pictures.
+    fn rgb_psnr(a: &[u8], b: &[u8]) -> f64 {
+        assert_eq!(a.len(), b.len());
+        let mut sum = 0.0f64;
+        let mut count = 0.0f64;
+        for (pa, pb) in a.chunks(4).zip(b.chunks(4)) {
+            for channel in 0..3 {
+                let d = f64::from(pa[channel]) - f64::from(pb[channel]);
+                sum += d * d;
+                count += 1.0;
+            }
+        }
+        10.0 * (255.0 * 255.0 / (sum / count).max(1e-9)).log10()
+    }
+
+    /// FFmpeg's libdav1d decodes `path` to `ours`, and ffprobe reads AV1
+    /// tagged BT.709. Skipped without FFmpeg.
+    fn av1_matches_ffmpeg(path: &std::path::Path, ours: &[u8]) {
+        use std::process::Command;
+        let Ok(probe) = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name,pix_fmt,width,height,color_range,color_space,color_primaries,color_transfer,nb_read_frames",
+                "-count_frames",
+                "-of",
+                "default=noprint_wrappers=1",
+            ])
+            .arg(path)
+            .output()
+        else {
+            eprintln!("skipped: ffprobe is missing");
+            return;
+        };
+        assert!(
+            probe.status.success(),
+            "ffprobe: {}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        let text = String::from_utf8_lossy(&probe.stdout);
+        for line in [
+            "codec_name=av1",
+            "pix_fmt=yuv420p",
+            "width=96",
+            "height=64",
+            "color_range=tv",
+            "color_space=bt709",
+            "color_primaries=bt709",
+            "color_transfer=bt709",
+            "nb_read_frames=10",
+        ] {
+            assert!(text.contains(line), "ffprobe has no {line}: {text}");
+        }
+        let decoded = Command::new("ffmpeg")
+            .args(["-v", "error", "-c:v", "libdav1d", "-i"])
+            .arg(path)
+            .args([
+                "-fps_mode",
+                "passthrough",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
+                "-",
+            ])
+            .output()
+            .expect("ffmpeg");
+        if !decoded.status.success() {
+            let message = String::from_utf8_lossy(&decoded.stderr);
+            if message.contains("libdav1d") && message.contains("Unknown decoder") {
+                eprintln!("skipped: this ffmpeg has no libdav1d");
+                return;
+            }
+            panic!("ffmpeg: {message}");
+        }
+        assert!(
+            decoded.stdout == ours,
+            "libdav1d decodes the file differently"
+        );
+    }
+
+    #[test]
+    fn an_av1_export_to_mp4_opens_here_and_in_ffmpeg() {
+        let path =
+            std::env::temp_dir().join(format!("cutlass-readers-av1-{}.mp4", std::process::id()));
+        let mut mux = cutlass_isobmff::Mp4Mux::new(std::fs::File::create(&path).expect("create"));
+        let config = av1_into(&mut mux);
+        drop(mux);
+        // The sample entry holds the record.
+        let file = std::fs::read(&path).expect("read");
+        let at = file
+            .windows(4)
+            .position(|bytes| bytes == b"av1C")
+            .expect("an av1C box");
+        let size = u32::from_be_bytes(file[at - 4..at].try_into().expect("size")) as usize;
+        assert_eq!(&file[at + 4..at - 4 + size], config.as_slice());
+        let (yuv, first) = av1_read_back(&path);
+        assert_eq!(yuv.len(), (96 * 64 * 3 / 2 * AV1_FRAMES) as usize);
+        // The picture that went in comes back, through the coding and the
+        // BT.709 studio swing both ends agree on.
+        let psnr = rgb_psnr(&first, &av1_rgba(0));
+        assert!(psnr > 30.0, "first picture {psnr:.1} dB");
+        av1_matches_ffmpeg(&path, &yuv);
+        std::fs::remove_file(&path).expect("remove");
+    }
+
+    #[test]
+    fn an_av1_export_to_webm_opens_here_and_in_ffmpeg() {
+        let path =
+            std::env::temp_dir().join(format!("cutlass-readers-av1-{}.webm", std::process::id()));
+        let mut mux =
+            cutlass_matroska::MatroskaMux::webm(std::fs::File::create(&path).expect("create"));
+        av1_into(&mut mux);
+        drop(mux);
+        let (yuv, first) = av1_read_back(&path);
+        assert_eq!(yuv.len(), (96 * 64 * 3 / 2 * AV1_FRAMES) as usize);
+        let psnr = rgb_psnr(&first, &av1_rgba(0));
+        assert!(psnr > 30.0, "first picture {psnr:.1} dB");
+        av1_matches_ffmpeg(&path, &yuv);
+        std::fs::remove_file(&path).expect("remove");
+    }
+
     #[test]
     fn a_fragmented_movie_without_sidx_or_mfra_decodes_the_picture_at_two_seconds() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

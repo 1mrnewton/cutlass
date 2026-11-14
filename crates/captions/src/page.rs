@@ -7,7 +7,7 @@
 use std::ops::Range;
 
 use cutlass_model::MaterialText;
-use cutlass_text::{Layout, PlacedGlyph, layout_text};
+use cutlass_text::{FaceSource, Layout, PlacedGlyph, TextCache, layout_cached, layout_with};
 
 use crate::CaptionError;
 use crate::clock::WordSpan;
@@ -65,6 +65,24 @@ pub fn paginate(words: &[WordSpan<'_>], limits: PageLimits) -> Pages {
     pages.finish(limits)
 }
 
+/// The faces a caption is set in beside its own, and where its layout is
+/// kept between frames.
+#[derive(Clone, Copy)]
+pub struct Faces<'c, 'f> {
+    /// The faces its ranges name, and a fallback for a character its own
+    /// face cannot draw.
+    pub source: &'f dyn FaceSource,
+    pub cache: Option<&'c TextCache>,
+}
+
+impl Faces<'static, 'static> {
+    /// No other faces, and nothing kept.
+    pub const NONE: Self = Self {
+        source: &cutlass_text::NoFaces,
+        cache: None,
+    };
+}
+
 /// Byte range of one placed word inside [`LetterMap::text`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WordBytes {
@@ -97,13 +115,14 @@ pub struct LetterMap {
 /// `material` is cloned. Its `content` is not written. Break markers are
 /// skipped. An empty join still calls layout, so a bad font is
 /// [`CaptionError::Text`].
-pub fn map_letters(
-    font_bytes: &[u8],
+pub fn map_letters<'f>(
+    font_bytes: &'f [u8],
+    faces: Faces<'_, 'f>,
     material: &MaterialText,
     words: &[WordSpan<'_>],
 ) -> Result<LetterMap, CaptionError> {
     let (text, placed) = join_words(words);
-    lay_out(font_bytes, material, text, placed)
+    lay_out(font_bytes, faces, material, text, placed)
 }
 
 /// The page shown at `millis`: the one under way, else the last one that
@@ -121,8 +140,9 @@ pub fn page_at(pages: &Pages, millis: i64) -> Option<&CaptionPage> {
 /// The words of `page`, a line of them to each of its lines, laid out
 /// alone with a line break between its lines, and each glyph mapped to its
 /// word as [`map_letters`] maps them. The words keep their column indices.
-pub fn map_page(
-    font_bytes: &[u8],
+pub fn map_page<'f>(
+    font_bytes: &'f [u8],
+    faces: Faces<'_, 'f>,
     material: &MaterialText,
     words: &[WordSpan<'_>],
     pages: &Pages,
@@ -152,18 +172,26 @@ pub fn map_page(
             });
         }
     }
-    lay_out(font_bytes, material, text, placed)
+    lay_out(font_bytes, faces, material, text, placed)
 }
 
-fn lay_out(
-    font_bytes: &[u8],
+fn lay_out<'f>(
+    font_bytes: &'f [u8],
+    faces: Faces<'_, 'f>,
     material: &MaterialText,
     text: String,
     placed: Vec<WordBytes>,
 ) -> Result<LetterMap, CaptionError> {
     let mut layout_material = material.clone();
     layout_material.content = text.clone();
-    let layout = layout_text(font_bytes, &layout_material).map_err(CaptionError::Text)?;
+    // A page's layout is the same from frame to frame: with a cache it is
+    // made once.
+    let layout = match faces.cache {
+        Some(cache) => layout_cached(font_bytes, &layout_material, faces.source, cache)
+            .map(|kept| (*kept).clone()),
+        None => layout_with(font_bytes, &layout_material, faces.source),
+    }
+    .map_err(CaptionError::Text)?;
     let mut letters = Vec::new();
     for (layout_line, line) in layout.lines.iter().enumerate() {
         for glyph in &line.glyphs {
@@ -302,7 +330,7 @@ fn word_at(words: &[WordBytes], source: usize) -> Option<usize> {
 mod tests {
     use cutlass_model::MaterialText;
 
-    use super::{LetterMap, PageLimits, WordBytes, map_letters, paginate};
+    use super::{Faces, LetterMap, PageLimits, WordBytes, map_letters, paginate};
     use crate::CaptionError;
     use crate::clock::WordSpan;
 
@@ -477,7 +505,7 @@ mod tests {
         let source = material("do not replace", 64.0, 0.0);
         let before = source.clone();
         let words = [span(0, "A", 0, 10), span(1, "B", 10, 20)];
-        let mapped = map_letters(SAMPLE_FONT, &source, &words)?;
+        let mapped = map_letters(SAMPLE_FONT, Faces::NONE, &source, &words)?;
         assert_eq!(source, before);
         assert_eq!(source.content, "do not replace");
         assert_eq!(mapped.text, "A B");
@@ -520,7 +548,7 @@ mod tests {
             span(2, "\n\n", 1, 1),
             span(3, "B", 1, 2),
         ];
-        let mapped = map_letters(SAMPLE_FONT, &material("x", 64.0, 0.0), &words)?;
+        let mapped = map_letters(SAMPLE_FONT, Faces::NONE, &material("x", 64.0, 0.0), &words)?;
         assert_eq!(mapped.text, "A B");
         assert_eq!(
             mapped
@@ -535,15 +563,19 @@ mod tests {
 
     #[test]
     fn a_truncated_font_is_a_text_error() {
-        let error = map_letters(&[], &material("A", 64.0, 0.0), &[]);
+        let error = map_letters(&[], Faces::NONE, &material("A", 64.0, 0.0), &[]);
         assert!(matches!(error, Err(CaptionError::Text(_))));
     }
 
     #[test]
     fn a_narrow_measure_wraps_onto_more_than_one_line() -> Result<(), CaptionError> {
         let words = [span(2, "AB", 0, 10)];
-        let mapped: LetterMap =
-            map_letters(SAMPLE_FONT, &material("AB", 1_000.0, 1_000.0), &words)?;
+        let mapped: LetterMap = map_letters(
+            SAMPLE_FONT,
+            Faces::NONE,
+            &material("AB", 1_000.0, 1_000.0),
+            &words,
+        )?;
         assert_eq!(mapped.text, "AB");
         assert!(mapped.layout.lines.len() > 1);
         assert!(mapped.letters.iter().any(|letter| letter.layout_line == 0));

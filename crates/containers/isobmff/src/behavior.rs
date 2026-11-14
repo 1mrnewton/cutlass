@@ -451,6 +451,14 @@ fn seek_lands_on_a_sync_sample_that_displays_at_or_before_the_time() {
     );
     let at = movie.seek(&mut source, 1, 65).unwrap();
     assert_eq!(at.dts, 40);
+    // P5 decodes last but displays from 90 to 100, after the last decode
+    // time ends at 80: a time in that span still lands on K4.
+    let at = movie.seek(&mut source, 1, 85).unwrap();
+    assert_eq!(at.dts, 40);
+    assert_eq!(
+        movie.read_packet(&mut source).unwrap().unwrap().payload,
+        b"K4"
+    );
 }
 
 #[test]

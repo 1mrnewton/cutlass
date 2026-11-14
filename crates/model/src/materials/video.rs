@@ -244,6 +244,11 @@ impl Algorithm {
     pub const WEAK: i64 = 1;
     /// Heavy noise taken out.
     pub const STRONG: i64 = 2;
+    /// The reference editor's name for Remove flicker, which evens out a
+    /// clip's brightness from frame to frame.
+    pub const DEFLICKER: &'static str = "Deflicker";
+    /// Remove flicker on: Cutlass has the one level.
+    pub const DEFLICKER_ON: i64 = 1;
     /// The reference editor's name for Optical flow, which fills a slowed
     /// clip with frames made between its own.
     pub const COMPLEMENT_FRAME: &'static str = "ComplementFrame";
@@ -277,6 +282,12 @@ impl MaterialVideo {
     #[must_use]
     pub fn denoise(&self) -> Option<&Algorithm> {
         self.algorithm(Algorithm::NOISE_REDUCTION)
+    }
+
+    /// The clip's Remove flicker, when it has one that is on.
+    #[must_use]
+    pub fn deflicker(&self) -> Option<&Algorithm> {
+        self.algorithm(Algorithm::DEFLICKER)
     }
 
     /// The clip's Optical flow, when it has one that is on.

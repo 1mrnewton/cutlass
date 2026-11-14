@@ -571,7 +571,7 @@ impl Vop<'_> {
             &t.intra
         };
         let alt = self.pic.alternate_scan;
-        for k in 0..6 {
+        for (k, coef) in blocks.coef.iter_mut().enumerate() {
             let coded = cbp & (32 >> k) != 0;
             let mut levels = [0i32; 64];
             let scan = |dir: u8| {
@@ -609,7 +609,7 @@ impl Vop<'_> {
             };
             self.ac_complete(mbx, mby, k, dir, ac_pred, &mut levels);
             let scale = self.dc_scale(k);
-            blocks.coef[k] = dequant_intra(&levels, qf * scale, self.q, self.layer.quant);
+            *coef = dequant_intra(&levels, qf * scale, self.q, self.layer.quant);
         }
         blocks.coded = 0x3F;
         Ok(())
@@ -1850,7 +1850,7 @@ impl Vop<'_> {
         }
         let mut blocks = Blocks::new();
         if intra {
-            for k in 0..6 {
+            for (k, coef) in blocks.coef.iter_mut().enumerate() {
                 let v = r.read(8) as i32;
                 if v == 0 || v == 128 {
                     return Err(r.malformed("intra_dc_coefficient"));
@@ -1868,7 +1868,7 @@ impl Vop<'_> {
                         &mut levels,
                     )?;
                 }
-                blocks.coef[k] = dequant_intra(&levels, dc, self.q, Quant::H263);
+                *coef = dequant_intra(&levels, dc, self.q, Quant::H263);
             }
             blocks.coded = 0x3F;
             self.set_mvs(mbx, mby, [(0, 0); 4]);

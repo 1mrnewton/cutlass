@@ -115,8 +115,19 @@ pub struct EncConfig {
     /// 0 is slowest and best, 10 fastest.
     pub speed: u8,
     pub rc: RateControl,
+    /// With a bitrate target: hold it over each second, so that a second
+    /// that spends less leaves nothing for a later one. Off, the target is
+    /// the average over the whole stream.
+    pub constant_rate: bool,
+    /// Pictures per second, for the level the sequence header names. A
+    /// bitrate target carries its own rate, which is used instead.
+    pub fps: f64,
     /// Distance between key frames.
     pub keyint: u32,
+    /// Start a key frame where the picture changes all at once (a cut),
+    /// no closer to the key frame before it than a mini-GOP or a tenth of
+    /// `keyint`.
+    pub scene_cut: bool,
     /// Mini-GOP length: frames coded as a hierarchical pyramid behind a
     /// hidden alt-ref (1 = each frame predicts from the previous one only).
     pub gop: u32,
@@ -151,7 +162,10 @@ impl EncConfig {
             mono: false,
             speed: 6,
             rc: RateControl::Qindex(120),
+            constant_rate: false,
+            fps: 30.0,
             keyint: 120,
+            scene_cut: true,
             gop: 8,
             adaptive_gop: true,
             loop_restoration: false,
@@ -183,11 +197,28 @@ pub struct Av1Enc {
     rc_q: f64,
     /// Bits produced so far and frames coded, for rate control.
     bits_total: u64,
+    /// Bits and pictures of the second being coded, at a constant rate.
+    second_bits: u64,
+    second_frames: u64,
     /// Last reconstructed frame (shown output of the internal decoder).
     last_recon: Option<Arc<AnyPicture>>,
+    #[cfg(test)]
+    tool_use: ToolUse,
     /// Source pictures waiting to be coded, in display order from `next_disp`.
     lookahead: std::collections::VecDeque<Arc<AnyPicture>>,
     next_disp: u64,
+    /// Display index of the next key frame.
+    next_key: u64,
+    /// Display indices a caller asked to be key frames, in order, all past
+    /// `next_disp` or equal to it.
+    forced_keys: std::collections::VecDeque<u64>,
+    /// The last picture given to `encode`, for the cut detector.
+    last_input: Option<Arc<AnyPicture>>,
+    /// How much each of the last pictures differed from the one before.
+    changes: std::collections::VecDeque<f64>,
+    /// Display index of the last key frame started, by distance or by a
+    /// cut or a request.
+    last_key_at: u64,
     /// Display index of the frame each reference slot holds.
     slot_disp: [Option<u64>; 8],
     /// Temporal importance of the frames of the current mini-GOP (display
@@ -204,6 +235,9 @@ pub struct Av1Enc {
     /// The tile count was chosen for the threads: the tile boundaries
     /// follow `sb_work`, the coding work of the last frame's superblocks.
     auto_tiles: bool,
+    /// The alt-ref of a still mini-GOP may be filtered: the hidden frame
+    /// that leaves stays inside the decode rate of the stream's level.
+    still_filter: bool,
     sb_work: Vec<u32>,
     /// Loop filter level and CDEF strengths (y pri, y sec, uv pri, uv sec)
     /// the last frame nothing predicts from chose, until the next such
@@ -325,13 +359,10 @@ impl Av1Enc {
         } else {
             (cfg.sub_x, cfg.sub_y)
         };
-        let seq = SequenceHeader {
+        let blends = if cfg.speed <= 6 { 1.0 } else { 0.0 };
+        let mut seq = SequenceHeader {
             profile,
-            operating_points: vec![OperatingPoint {
-                idc: 0,
-                seq_level_idx: 31,
-                ..OperatingPoint::default()
-            }],
+            operating_points: vec![OperatingPoint::default()],
             frame_width_bits: bits_for(cfg.width),
             frame_height_bits: bits_for(cfg.height),
             max_frame_width: cfg.width as u32,
@@ -345,6 +376,12 @@ impl Av1Enc {
             enable_cdef: true,
             enable_ref_frame_mvs: true,
             enable_warped_motion: true,
+            // Distance weights, compound masks and inter-intra: about half
+            // a percent of the rate for 5% of the time (more on fades),
+            // the exchange of speed 6 for 5.
+            enable_jnt_comp: ev("AV1_JNT", blends) > 0.0,
+            enable_masked_compound: ev("AV1_MASKED", blends) > 0.0,
+            enable_interintra_compound: ev("AV1_II", blends) > 0.0,
             enable_dual_filter: ev("AV1_DUAL", 0.0) > 0.0,
             enable_restoration: cfg.loop_restoration && cfg.speed < 8,
             bit_depth: cfg.bit_depth,
@@ -377,6 +414,44 @@ impl Av1Enc {
             cfg.tile_rows_log2 = r;
             auto_tiles = l + r > 0 && !seq.use_128x128_superblock;
         }
+        // The level the stream fits, now that its tiles are known. A
+        // filtered alt-ref is hidden for good (an overlay frame is shown in
+        // its place), so it is decoded besides the pictures shown: one in
+        // every mini-GOP when the filter is asked for.
+        let (fps, bitrate) = match cfg.rc {
+            RateControl::Qindex(_) => (cfg.fps, None),
+            RateControl::Bitrate { bps, fps } => (fps, Some(bps)),
+        };
+        let fps = if fps > 0.0 { fps } else { 30.0 };
+        let gop = f64::from(cfg.gop.max(1));
+        // A tile is at least one 64x64 superblock, so a small frame has
+        // fewer tiles than asked for.
+        let tile_cols = (1usize << cfg.tile_cols_log2.min(6)).min(cfg.width.div_ceil(64));
+        let tile_rows = (1usize << cfg.tile_rows_log2.min(6)).min(cfg.height.div_ceil(64));
+        let level_with = |decoded_per_shown: f64| {
+            super::level::pick(&super::level::Stream {
+                width: cfg.width,
+                height: cfg.height,
+                shown_per_second: fps,
+                decoded_per_second: fps * decoded_per_shown,
+                bitrate,
+                profile,
+                tiles: tile_cols * tile_rows,
+                tile_cols,
+            })
+        };
+        let asked = cfg.gop > 1 && cfg.temporal_filter;
+        let (level, tier) = level_with(if asked { (gop + 1.0) / gop } else { 1.0 });
+        // Unasked, the alt-ref of a still mini-GOP is filtered too, and such
+        // a mini-GOP is longer than `gop`. Where those hidden frames would
+        // pass the decode rate of the level the picture and its rate fit
+        // (4K at 30 and 60 pictures a second), they are left unfiltered and
+        // the level stays.
+        let still_filter = asked || level_with((gop + 2.0) / (gop + 1.0)) == (level, tier);
+        if let Some(op) = seq.operating_points.first_mut() {
+            op.seq_level_idx = level;
+            op.seq_tier = tier;
+        }
         let threads = cfg.threads.max(1);
         let q0 = match cfg.rc {
             RateControl::Qindex(q) => f64::from(q),
@@ -397,15 +472,25 @@ impl Av1Enc {
             frame_num: 0,
             rc_q: q0,
             bits_total: 0,
+            second_bits: 0,
+            second_frames: 0,
             last_recon: None,
+            #[cfg(test)]
+            tool_use: ToolUse::default(),
             lookahead: std::collections::VecDeque::new(),
             next_disp: 0,
+            next_key: 0,
+            forced_keys: std::collections::VecDeque::new(),
+            last_input: None,
+            changes: std::collections::VecDeque::new(),
+            last_key_at: 0,
             slot_disp: [None; 8],
             tpl_imp: Vec::new(),
             static_gop: false,
             screen: false,
             tpl: None,
             auto_tiles,
+            still_filter,
             sb_work: Vec::new(),
             leaf_filters: None,
         })
@@ -413,6 +498,59 @@ impl Av1Enc {
 
     pub fn sequence_header(&self) -> &SequenceHeader {
         &self.seq
+    }
+
+    /// The `av1C` record of this stream (AV1 Codec ISO Media File Format
+    /// Binding 2.3): the marker and version, the profile, level, tier, bit
+    /// depth and chroma layout of the sequence header, no presentation
+    /// delay, and the sequence header OBU each key frame also carries. An
+    /// ISOBMFF sample entry and a Matroska `CodecPrivate` hold these bytes.
+    pub fn config_record(&self) -> Vec<u8> {
+        let s = &self.seq;
+        let (level, tier) = s
+            .operating_points
+            .first()
+            .map_or((0, 0), |op| (op.seq_level_idx, op.seq_tier));
+        // chroma_sample_position is in the sequence header for 4:2:0 only.
+        let position = if s.subsampling_x && s.subsampling_y && !s.mono_chrome {
+            s.chroma_sample_position & 3
+        } else {
+            0
+        };
+        let mut out = vec![
+            0x81,
+            (s.profile << 5) | (level & 31),
+            ((tier & 1) << 7)
+                | (u8::from(s.bit_depth > 8) << 6)
+                | (u8::from(s.bit_depth == 12) << 5)
+                | (u8::from(s.mono_chrome) << 4)
+                | (u8::from(s.subsampling_x) << 3)
+                | (u8::from(s.subsampling_y) << 2)
+                | position,
+            0,
+        ];
+        let sh = write_sequence_header(s);
+        write_obu(&mut out, OBU_SEQUENCE_HEADER, 0, 0, false, &sh);
+        out
+    }
+
+    /// Makes the next picture given to [`Self::encode`] a key frame. The
+    /// distance to the following key frame is counted from it.
+    pub fn force_keyframe(&mut self) {
+        let at = self.next_disp + self.lookahead.len() as u64;
+        if self.forced_keys.back() != Some(&at) {
+            self.forced_keys.push_back(at);
+        }
+        self.next_key = self.next_key.min(at);
+    }
+
+    /// Display index of the key frame that follows the key frame at `d`.
+    fn key_after(&self, d: u64) -> u64 {
+        let periodic = d + u64::from(self.cfg.keyint.max(1));
+        self.forced_keys
+            .iter()
+            .find(|&&f| f > d)
+            .map_or(periodic, |&f| f.min(periodic))
     }
 
     /// The reconstruction of the last coded frame.
@@ -428,9 +566,53 @@ impl Av1Enc {
                 what: "sample size",
             });
         }
-        let src = source_picture(&self.cfg, &self.seq, input);
-        self.lookahead.push_back(Arc::new(P::wrap(src)));
+        let src = Arc::new(P::wrap(source_picture(&self.cfg, &self.seq, input)));
+        if self.cfg.scene_cut {
+            self.watch_for_a_cut::<P>(&src);
+        }
+        self.last_input = Some(Arc::clone(&src));
+        self.lookahead.push_back(src);
         self.run::<P>(false)
+    }
+
+    /// Makes `picture`, the next one queued, a key frame when it differs
+    /// from the picture before it all at once: by more than a twentieth
+    /// of the sample range on average, and by three times what the last
+    /// pictures changed. Steady motion, noise and a fade change every
+    /// picture alike and start none.
+    fn watch_for_a_cut<P: PicturePixel>(&mut self, picture: &Arc<AnyPicture>) {
+        let at = self.next_disp + self.lookahead.len() as u64;
+        let change = self
+            .last_input
+            .as_ref()
+            .and_then(|last| P::view(last).zip(P::view(picture)))
+            .map(|(a, b)| mean_change(a, b));
+        let Some(change) = change else {
+            return;
+        };
+        let usual = if self.changes.is_empty() {
+            None
+        } else {
+            Some(self.changes.iter().sum::<f64>() / self.changes.len() as f64)
+        };
+        if self.changes.len() == 4 {
+            self.changes.pop_front();
+        }
+        self.changes.push_back(change);
+        let Some(usual) = usual else {
+            return;
+        };
+        let range = f64::from(1u32 << self.cfg.bit_depth);
+        let near = u64::from(self.cfg.gop.max(self.cfg.keyint / 10).max(1));
+        let pending = self.forced_keys.back().copied().unwrap_or(self.last_key_at);
+        if change > range / 20.0
+            && change > 3.0 * usual + range / 256.0
+            && at >= pending.max(self.last_key_at) + near
+            && self.next_key > at
+        {
+            self.forced_keys.push_back(at);
+            self.next_key = at;
+        }
     }
 
     /// Codes every queued picture.
@@ -439,11 +621,13 @@ impl Av1Enc {
     }
 
     fn use_tf(&self) -> bool {
-        self.cfg.gop > 1 && (self.cfg.temporal_filter || (self.static_gop && self.cfg.speed < 8))
+        self.cfg.gop > 1
+            && (self.cfg.temporal_filter
+                || (self.static_gop && self.still_filter && self.cfg.speed < 8))
     }
 
     fn is_key_disp(&self, d: u64) -> bool {
-        d.is_multiple_of(u64::from(self.cfg.keyint.max(1)))
+        d == self.next_key
     }
 
     fn run<P: PicturePixel>(&mut self, flush: bool) -> R<Vec<EncodedUnit>> {
@@ -453,10 +637,10 @@ impl Av1Enc {
             if self.is_key_disp(d) {
                 // The key frame's quantizer follows how much of the next
                 // mini-GOP is predicted from it.
-                let keyint = u64::from(self.cfg.keyint.max(1));
+                let after = self.key_after(d);
                 // (A single-frame GOP codes every picture without delay.)
                 let want = if self.cfg.gop > 1 {
-                    u64::from(self.cfg.gop).min(keyint - 1) + 1
+                    u64::from(self.cfg.gop).min(after - d - 1) + 1
                 } else {
                     1
                 };
@@ -484,11 +668,15 @@ impl Av1Enc {
                 self.update_rate_control(bits, 1, true);
                 self.lookahead.pop_front();
                 self.next_disp += 1;
+                self.next_key = after;
+                self.last_key_at = d;
+                while self.forced_keys.front().is_some_and(|&f| f <= d) {
+                    self.forced_keys.pop_front();
+                }
                 continue;
             }
             let gop = u64::from(self.cfg.gop.max(1));
-            let keyint = u64::from(self.cfg.keyint.max(1));
-            let to_key = keyint - d % keyint;
+            let to_key = self.next_key - d;
             // Static content takes mini-GOPs two or four times as long.
             let longest = if self.cfg.adaptive_gop && gop >= 4 {
                 gop << ev("AV1_GOPL", 2.0) as u32
@@ -998,8 +1186,22 @@ impl Av1Enc {
         let ratio = (bits as f64 / expect.max(1.0)).clamp(0.1, 10.0);
         // About 12 q-index steps per doubling of the rate.
         let step = (12.0 * ratio.log2()).clamp(-20.0, 20.0) * if key { 0.5 } else { 1.0 };
-        // Pull the long-run average toward the target as well.
-        let avg = self.bits_total as f64 / self.frame_num.max(1) as f64;
+        // Pull the average toward the target as well: the long-run one,
+        // or at a constant rate the one of the second being coded, which
+        // starts again with each second so that an easy second saves no
+        // bits for a hard one.
+        let avg = if self.cfg.constant_rate {
+            self.second_bits += bits;
+            self.second_frames += frames.max(1);
+            let avg = self.second_bits as f64 / self.second_frames as f64;
+            if self.second_frames as f64 >= fps.max(1.0) {
+                self.second_bits = 0;
+                self.second_frames = 0;
+            }
+            avg
+        } else {
+            self.bits_total as f64 / self.frame_num.max(1) as f64
+        };
         let drift = (4.0 * (avg / per_frame.max(1.0)).log2()).clamp(-4.0, 4.0);
         self.rc_q = (self.rc_q + step + drift).clamp(10.0, 250.0);
     }
@@ -1286,6 +1488,9 @@ impl Av1Enc {
                 },
             ),
             inter_rd_modes: ev("AV1_IRM", 1.0) as usize,
+            jnt_comp: self.seq.enable_jnt_comp,
+            masked_compound: self.seq.enable_masked_compound,
+            interintra: self.seq.enable_interintra_compound,
             intra_split_pred: ev("AV1_ITXP", 1.0) > 0.0,
             inter_flag_bits: ev("AV1_IIB", 1.0) > 0.0,
             exact_intra_rates: ev("AV1_XRI", 1.0) > 0.0,
@@ -1406,6 +1611,8 @@ impl Av1Enc {
             tile_bytes.push(m);
             saved_cdf = saved_cdf.or(c);
         }
+        #[cfg(test)]
+        self.tool_use.count(&fs);
         let use_wiener_cdf = cdf.use_wiener;
         let init_cdf = cdf;
         if self.auto_tiles {
@@ -1834,6 +2041,39 @@ pub(crate) fn ev(_name: &str, default: f64) -> f64 {
     default
 }
 
+/// 4x4 units of the frames coded so far by the blend that predicts them,
+/// for the tests.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct ToolUse {
+    /// Two references through a wedge or a difference mask.
+    masked: u64,
+    /// Two references weighted by their distances.
+    distance: u64,
+    /// One reference blended with an intra prediction.
+    interintra: u64,
+}
+
+#[cfg(test)]
+impl ToolUse {
+    fn count(&mut self, fs: &FrameState) {
+        use crate::dec::types::INTRA_FRAME;
+        for r in 0..fs.mi_rows {
+            for m in &fs.mi[r * fs.mi_stride..][..fs.mi_cols] {
+                if m.skip_mode() || m.ref_frame[0] <= INTRA_FRAME {
+                    continue;
+                }
+                if m.ref_frame[1] == INTRA_FRAME {
+                    self.interintra += 1;
+                } else if m.ref_frame[1] > INTRA_FRAME {
+                    self.masked += u64::from(m.comp_group_idx());
+                    self.distance += u64::from(m.comp_group_idx() == 0 && m.compound_idx() == 0);
+                }
+            }
+        }
+    }
+}
+
 /// Squared error over the visible area of every plane.
 fn picture_sse<P: Pixel>(a: &Picture<P>, b: &Picture<P>) -> u64 {
     a.planes
@@ -1938,6 +2178,23 @@ fn source_picture<P: Pixel>(
     pic
 }
 
+/// The mean absolute difference of the luma of two pictures of one size,
+/// over every fourth sample of every fourth row.
+fn mean_change<P: Pixel>(a: &Picture<P>, b: &Picture<P>) -> f64 {
+    let (pa, pb) = (&a.planes[0], &b.planes[0]);
+    let (w, h) = (pa.w.min(pb.w), pa.h.min(pb.h));
+    let (mut sum, mut count) = (0u64, 0u64);
+    for y in (0..h).step_by(4) {
+        let ra = &pa.data[y * pa.stride..][..w];
+        let rb = &pb.data[y * pb.stride..][..w];
+        for (x, y) in ra.iter().zip(rb).step_by(4) {
+            sum += u64::from(x.to_i32().abs_diff(y.to_i32()));
+            count += 1;
+        }
+    }
+    sum as f64 / count.max(1) as f64
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AnyPicture, Av1Core, Av1Enc, EncConfig, InputFrame, RateControl};
@@ -1976,6 +2233,216 @@ mod tests {
         out
     }
 
+    /// Display indices of the key frames of `frames` pictures, with a key
+    /// frame asked for at each index of `forced`.
+    fn key_frames(keyint: u32, gop: u32, frames: u64, forced: &[u64]) -> Vec<u64> {
+        let (w, h) = (64usize, 64usize);
+        let mut cfg = EncConfig::new(w, h);
+        cfg.rc = RateControl::Qindex(120);
+        cfg.keyint = keyint;
+        cfg.gop = gop;
+        cfg.speed = 10;
+        let mut enc = Av1Enc::new(cfg).expect("encoder");
+        let mut units = Vec::new();
+        for f in 0..frames {
+            if forced.contains(&f) {
+                enc.force_keyframe();
+            }
+            let y: Vec<u8> = (0..w * h).map(|i| (i as u64 * 3 + f * 7) as u8).collect();
+            let c = vec![128u8; (w / 2) * (h / 2)];
+            units.extend(
+                enc.encode(&InputFrame {
+                    planes: [&y, &c, &c],
+                    strides: [w, w / 2, w / 2],
+                })
+                .expect("encode"),
+            );
+        }
+        units.extend(enc.flush::<u8>().expect("flush"));
+        assert_eq!(units.len() as u64, frames);
+        let mut dec = Av1Core::new();
+        dec.threads = 1;
+        for (i, u) in units.iter().enumerate() {
+            assert_eq!(u.display, i as u64);
+            assert_eq!(dec.decode(&u.data).expect("decode").len(), 1);
+        }
+        units.iter().filter(|u| u.key).map(|u| u.display).collect()
+    }
+
+    /// The level and tier a decoder reads from the sequence header.
+    fn level_of(cfg: EncConfig) -> (u8, u8) {
+        let enc = Av1Enc::new(cfg).expect("encoder");
+        let bytes = crate::enc::obu_write::write_sequence_header(enc.sequence_header());
+        let seq = crate::dec::obu::parse_sequence_header(&bytes).expect("sequence header");
+        let op = &seq.operating_points[0];
+        // The av1C record repeats them.
+        let record = enc.config_record();
+        assert_eq!(record[1] & 31, op.seq_level_idx);
+        assert_eq!(record[2] >> 7, op.seq_tier);
+        (op.seq_level_idx, op.seq_tier)
+    }
+
+    #[test]
+    fn the_sequence_header_names_the_level_the_stream_fits() {
+        let mut small = EncConfig::new(320, 192);
+        small.gop = 1;
+        assert_eq!(level_of(small), (0, 0));
+        // 1080p: level 4.0 at 30 pictures a second, 4.1 at 60.
+        let mut hd = EncConfig::new(1920, 1080);
+        assert_eq!(level_of(hd.clone()), (8, 0));
+        hd.fps = 60.0;
+        assert_eq!(level_of(hd.clone()), (9, 0));
+        // A bitrate target carries the rate, and picks the tier.
+        hd.rc = RateControl::Bitrate {
+            bps: 16_000_000,
+            fps: 30.0,
+        };
+        assert_eq!(level_of(hd.clone()), (8, 1));
+        hd.rc = RateControl::Bitrate {
+            bps: 4_000_000,
+            fps: 30.0,
+        };
+        assert_eq!(level_of(hd.clone()), (8, 0));
+        // 2160p is level 5.0 at 30 and 5.1 at 60, as players expect; asking
+        // for a filtered alt-ref in every mini-GOP adds a decoded frame to
+        // each eight shown, which 5.0 has no room for.
+        let mut uhd = EncConfig::new(3840, 2160);
+        assert_eq!(level_of(uhd.clone()), (12, 0));
+        uhd.fps = 60.0;
+        assert_eq!(level_of(uhd.clone()), (13, 0));
+        uhd.fps = 30.0;
+        uhd.temporal_filter = true;
+        assert_eq!(level_of(uhd), (13, 0));
+        // Tile columns past a level's count raise it.
+        hd.tile_cols_log2 = 4;
+        assert_eq!(level_of(hd), (16, 0));
+        // A frame four superblocks wide has four columns however many are
+        // asked for.
+        let mut narrow = EncConfig::new(256, 128);
+        narrow.gop = 1;
+        narrow.tile_cols_log2 = 6;
+        narrow.tile_rows_log2 = 6;
+        assert_eq!(level_of(narrow), (0, 0));
+        // 4:4:4 is profile 1, which doubles the bitrate of a tier.
+        let mut wide = EncConfig::new(640, 360);
+        wide.sub_x = false;
+        wide.sub_y = false;
+        wide.rc = RateControl::Bitrate {
+            bps: 5_000_000,
+            fps: 30.0,
+        };
+        assert_eq!(level_of(wide), (1, 0));
+    }
+
+    /// Display indices of the key frames of `frames` 64x64 pictures whose
+    /// luma `luma(picture, sample)` gives.
+    fn keys_of(cfg: EncConfig, frames: u64, luma: impl Fn(u64, usize) -> u8) -> Vec<u64> {
+        let (w, h) = (cfg.width, cfg.height);
+        let mut enc = Av1Enc::new(cfg).expect("encoder");
+        let mut units = Vec::new();
+        for f in 0..frames {
+            let y: Vec<u8> = (0..w * h).map(|i| luma(f, i)).collect();
+            let c = vec![128u8; (w / 2) * (h / 2)];
+            units.extend(
+                enc.encode(&InputFrame {
+                    planes: [&y, &c, &c],
+                    strides: [w, w / 2, w / 2],
+                })
+                .expect("encode"),
+            );
+        }
+        units.extend(enc.flush::<u8>().expect("flush"));
+        assert_eq!(units.len() as u64, frames);
+        let mut dec = Av1Core::new();
+        dec.threads = 1;
+        for u in &units {
+            assert_eq!(dec.decode(&u.data).expect("decode").len(), 1);
+        }
+        units.iter().filter(|u| u.key).map(|u| u.display).collect()
+    }
+
+    fn cut_config() -> EncConfig {
+        let mut cfg = EncConfig::new(64, 64);
+        cfg.rc = RateControl::Qindex(120);
+        cfg.gop = 4;
+        cfg.speed = 10;
+        cfg
+    }
+
+    /// Two scenes: a dark ramp that drifts, then a bright grid.
+    fn two_scenes(cut: u64) -> impl Fn(u64, usize) -> u8 {
+        move |f, i| {
+            let (x, y) = (i % 64, i / 64);
+            if f < cut {
+                (20 + (x + y + f as usize) % 40) as u8
+            } else {
+                (160 + ((x / 8 + y / 8 + f as usize) % 2) * 60) as u8
+            }
+        }
+    }
+
+    #[test]
+    fn a_cut_starts_a_key_frame() {
+        assert_eq!(keys_of(cut_config(), 30, two_scenes(17)), [0, 17]);
+        // The key frame distance is counted from the cut.
+        let mut cfg = cut_config();
+        cfg.keyint = 20;
+        assert_eq!(keys_of(cfg, 45, two_scenes(17)), [0, 17, 37]);
+        // Off, only the distance starts one.
+        let mut cfg = cut_config();
+        cfg.scene_cut = false;
+        assert_eq!(keys_of(cfg, 30, two_scenes(17)), [0]);
+    }
+
+    #[test]
+    fn steady_change_starts_no_key_frame() {
+        // A ramp that moves with every picture, noise that is new in every
+        // picture, and a fade to white change each picture as much as the
+        // one before.
+        let drift = |f: u64, i: usize| ((i % 64 + i / 64) * 3 + f as usize * 9) as u8;
+        assert_eq!(keys_of(cut_config(), 30, drift), [0]);
+        let noise = |f: u64, i: usize| {
+            let v = (i as u64 + 1).wrapping_mul(f.wrapping_mul(2_654_435_761) + 40_503);
+            (v >> 13) as u8
+        };
+        assert_eq!(keys_of(cut_config(), 30, noise), [0]);
+        let fade = |f: u64, i: usize| (40 + (i % 64) / 4 + f as usize * 7).min(255) as u8;
+        assert_eq!(keys_of(cut_config(), 30, fade), [0]);
+    }
+
+    #[test]
+    fn a_cut_close_behind_a_key_frame_starts_none() {
+        // Twelve pictures (a tenth of the key frame distance) must lie
+        // between: a cut at 5 is too close to the first key frame, and of
+        // two cuts five apart the second starts none.
+        assert_eq!(keys_of(cut_config(), 30, two_scenes(5)), [0]);
+        let twice = |f: u64, i: usize| {
+            if (17..22).contains(&f) {
+                two_scenes(0)(f, i)
+            } else {
+                two_scenes(u64::MAX)(f, i)
+            }
+        };
+        assert_eq!(keys_of(cut_config(), 30, twice), [0, 17]);
+    }
+
+    #[test]
+    fn key_frames_keep_their_distance() {
+        assert_eq!(key_frames(4, 4, 10, &[]), [0, 4, 8]);
+        assert_eq!(key_frames(1, 4, 3, &[]), [0, 1, 2]);
+    }
+
+    #[test]
+    fn a_forced_key_frame_restarts_the_distance() {
+        // Inside a mini-GOP, on the periodic key frame, twice in a row,
+        // and on the first picture.
+        assert_eq!(key_frames(4, 4, 12, &[2]), [0, 2, 6, 10]);
+        assert_eq!(key_frames(4, 2, 9, &[4]), [0, 4, 8]);
+        assert_eq!(key_frames(8, 4, 9, &[3, 4]), [0, 3, 4]);
+        assert_eq!(key_frames(8, 4, 5, &[0]), [0]);
+        assert_eq!(key_frames(120, 8, 20, &[13]), [0, 13]);
+    }
+
     #[test]
     fn tile_threads_do_not_change_the_bitstream() {
         assert_eq!(encode(1, 1), encode(3, 1));
@@ -2004,6 +2471,86 @@ mod tests {
             AnyPicture::U8(p) => rows(p),
             AnyPicture::U16(p) => rows(p),
         }
+    }
+
+    /// A textured square crossing a textured ground the other way while the
+    /// picture fades: what the two references show differs by region and by
+    /// brightness. Returns the tools the encoder used, after checking that a
+    /// decoder makes the encoder's reconstruction of the stream.
+    fn blends_of(speed: u8, bd: u32) -> (super::ToolUse, crate::dec::obu::SequenceHeader) {
+        let (w, h) = (192usize, 128usize);
+        let mut cfg = EncConfig::new(w, h);
+        cfg.rc = RateControl::Qindex(100);
+        cfg.speed = speed;
+        cfg.bit_depth = bd;
+        cfg.gop = 8;
+        cfg.threads = 1;
+        let mut enc = Av1Enc::new(cfg).expect("encoder");
+        let mut units = Vec::new();
+        for f in 0..17usize {
+            let luma = |i: usize| -> u16 {
+                let (x, y) = (i % w, i / w);
+                let (sx, sy) = (40 + 5 * f, 30 + f);
+                let v = if (sx..sx + 56).contains(&x) && (sy..sy + 48).contains(&y) {
+                    let (u, v) = (x - sx, y - sy);
+                    40 + (u * 9 + v * 5) % 97 + ((u / 6 + v / 4) % 2) * 60
+                } else {
+                    let u = x + 3 * f;
+                    30 + (u * 5 + y * 3) % 61 + ((u / 11 + y / 7) % 3) * 35
+                };
+                ((v * (40 - f) / 40) as u16) << (bd - 8)
+            };
+            let y: Vec<u16> = (0..w * h).map(luma).collect();
+            let c = vec![128u16 << (bd - 8); (w / 2) * (h / 2)];
+            if bd == 8 {
+                let y8: Vec<u8> = y.iter().map(|&v| v as u8).collect();
+                let c8: Vec<u8> = c.iter().map(|&v| v as u8).collect();
+                let input = InputFrame {
+                    planes: [&y8[..], &c8[..], &c8[..]],
+                    strides: [w, w / 2, w / 2],
+                };
+                units.extend(enc.encode(&input).expect("encode"));
+            } else {
+                let input = InputFrame {
+                    planes: [&y[..], &c[..], &c[..]],
+                    strides: [w, w / 2, w / 2],
+                };
+                units.extend(enc.encode(&input).expect("encode"));
+            }
+        }
+        if bd == 8 {
+            units.extend(enc.flush::<u8>().expect("flush"));
+        } else {
+            units.extend(enc.flush::<u16>().expect("flush"));
+        }
+        let mut dec = Av1Core::new();
+        dec.threads = 1;
+        for u in &units {
+            let shown = dec.decode(&u.data).expect("decode");
+            let got = shown.last().map(|f| samples(&f.picture));
+            assert!(got == u.recon.as_deref().map(samples), "speed {speed}");
+        }
+        (enc.tool_use, enc.sequence_header().clone())
+    }
+
+    #[test]
+    fn compound_masks_distance_weights_and_inter_intra_are_used() {
+        for (speed, bd) in [(6u8, 8u32), (3, 10)] {
+            let (used, seq) = blends_of(speed, bd);
+            assert!(seq.enable_masked_compound && seq.enable_jnt_comp);
+            assert!(seq.enable_interintra_compound);
+            assert!(used.masked > 0, "speed {speed}: {used:?}");
+            assert!(used.distance > 0, "speed {speed}: {used:?}");
+            assert!(used.interintra > 0, "speed {speed}: {used:?}");
+        }
+    }
+
+    #[test]
+    fn the_fast_speeds_leave_the_blends_out() {
+        let (used, seq) = blends_of(7, 8);
+        assert!(!seq.enable_masked_compound && !seq.enable_jnt_comp);
+        assert!(!seq.enable_interintra_compound);
+        assert_eq!((used.masked, used.distance, used.interintra), (0, 0, 0));
     }
 
     /// The encoder's reconstruction (built from its own tiles, not decoded)

@@ -1,30 +1,102 @@
-//! OpenType outlines stored in a `CFF ` table.
+//! OpenType outlines stored in a `CFF ` or a `CFF2` table.
 //!
 //! Glyphs are Type 2 charstrings. Advances still come from `hmtx`; the
 //! charstring width is only consumed so the path operators stay aligned.
+//! A `CFF2` table is the same machine with less in it and one thing more:
+//! its glyphs have no widths and no end mark, and a number in one may be
+//! a blend, a default with a change for each region of the face's design
+//! space, which is how a face of these outlines varies.
 
-use crate::{Contour, Directory, FontError, FontKind, Outline, Segment, bytes_at, i16_at, u16_at};
+use crate::vary::Store;
+use crate::{
+    Contour, Directory, FontError, FontKind, Outline, Segment, bytes_at, i16_at, u16_at, u32_at,
+};
 
 const STACK_LIMIT: usize = 48;
+/// A `CFF2` glyph may hold this many numbers at once, for its blends.
+const STACK_LIMIT_2: usize = 513;
 const HINT_LIMIT: usize = 96;
 const SUBR_DEPTH: u32 = 10;
+/// The most numbers and operators one glyph may run through, its
+/// subroutines' with its own. A glyph of a real face runs a few thousand;
+/// subroutines that call one another many times over could run without
+/// end.
+const STEP_LIMIT: u32 = 1 << 20;
 const TRANSIENT: usize = 32;
 
+#[derive(Clone)]
 pub(crate) struct Source<'a> {
     kind: Kind<'a>,
 }
 
+#[derive(Clone)]
 enum Kind<'a> {
     Cff(Cff<'a>),
+    Cff2(Cff2<'a>),
     Unsupported,
 }
 
+/// A `CFF2` table.
+#[derive(Clone)]
+struct Cff2<'a> {
+    charstrings: Index<'a>,
+    gsubrs: Index<'a>,
+    /// Each font dictionary's subroutines, and the group of the store
+    /// its glyphs' blends are drawn for unless a glyph says otherwise.
+    groups: Vec<(Index<'a>, usize)>,
+    /// Which dictionary each glyph uses; with none, the first.
+    select: Option<Select<'a>>,
+    /// The regions the blends are drawn for.
+    store: Option<Store<'a>>,
+}
+
+#[derive(Clone)]
 struct Cff<'a> {
     charstrings: Index<'a>,
     gsubrs: Index<'a>,
     subrs: Index<'a>,
+    /// A face keyed by character ids keeps its glyphs in groups, each
+    /// with subroutines of its own.
+    groups: Option<Groups<'a>>,
 }
 
+/// The font dictionaries of a face keyed by character ids, and which of
+/// them each glyph belongs to.
+#[derive(Clone)]
+struct Groups<'a> {
+    subrs: Vec<Index<'a>>,
+    select: Select<'a>,
+}
+
+/// Which font dictionary each glyph uses, as `FDSelect` stores it.
+#[derive(Clone)]
+enum Select<'a> {
+    /// Format 0: one byte for each glyph.
+    Each(&'a [u8]),
+    /// Format 3: ranges of glyphs, each a first glyph and a dictionary,
+    /// in rising order, and then the glyph after the last.
+    Ranges { data: &'a [u8], count: usize },
+    /// Format 4: the same with glyphs in four bytes and dictionaries in
+    /// two.
+    Wide { data: &'a [u8], count: usize },
+}
+
+/// The subroutines one glyph's program may call, and for a `CFF2` glyph
+/// what its blends are weighted by.
+struct Routines<'c, 'a> {
+    global: &'c Index<'a>,
+    local: &'c Index<'a>,
+    blends: Option<Blends<'c, 'a>>,
+}
+
+/// What a `CFF2` glyph's blends are weighted by: the regions they are
+/// drawn for, and where along its axes the face is set.
+struct Blends<'c, 'a> {
+    store: Option<&'c Store<'a>>,
+    places: &'c [i16],
+}
+
+#[derive(Clone)]
 struct Index<'a> {
     data: &'a [u8],
     count: usize,
@@ -40,20 +112,30 @@ struct Dict {
     subrs: Option<usize>,
     charstring_type: i32,
     cid: bool,
+    groups: Option<usize>,
+    select: Option<usize>,
 }
 
 struct Pen {
     contours: Vec<Contour>,
     segments: Vec<Segment>,
-    x: f32,
-    y: f32,
-    start_x: f32,
-    start_y: f32,
+    x: f64,
+    y: f64,
+    start_x: f64,
+    start_y: f64,
     open: bool,
     width_seen: bool,
     hint_count: usize,
-    stack: Vec<f32>,
-    transient: [f32; TRANSIENT],
+    stack: Vec<f64>,
+    transient: [f64; TRANSIENT],
+    /// How many numbers the glyph may hold at once.
+    limit: usize,
+    /// How many numbers and operators the glyph has run through.
+    steps: u32,
+    /// The group of the store a `CFF2` glyph's blends are drawn for.
+    group: usize,
+    /// How much each region of that group counts, once a blend asks.
+    weights: Option<Vec<f32>>,
 }
 
 enum Stop {
@@ -69,26 +151,242 @@ pub(crate) fn source<'a>(directory: &Directory<'a>) -> Result<Source<'a>, FontEr
         Ok(table) => Ok(Source {
             kind: Kind::Cff(parse_cff(table)?),
         }),
-        Err(FontError::MissingTable) if directory.table(b"CFF2").is_ok() => Ok(Source {
-            kind: Kind::Unsupported,
-        }),
+        // A `CFF2` table that does not read leaves the face open, with
+        // no outlines to draw.
+        Err(FontError::MissingTable) => match directory.table(b"CFF2") {
+            Ok(table) => Ok(Source {
+                kind: parse_cff2(table).map_or(Kind::Unsupported, Kind::Cff2),
+            }),
+            Err(error) => Err(error),
+        },
         Err(error) => Err(error),
     }
 }
 
 pub(crate) fn has_outlines(source: &Source<'_>) -> bool {
-    matches!(source.kind, Kind::Cff(_))
+    matches!(source.kind, Kind::Cff(_) | Kind::Cff2(_))
 }
 
-pub(crate) fn outline(source: &Source<'_>, glyph_id: u16) -> Result<Outline, FontError> {
-    let Kind::Cff(cff) = &source.kind else {
-        return Err(FontError::Unsupported);
+/// The outline of `glyph_id`. `places` is where along its axes a face
+/// that varies is set, and empty for a face at its default: a `CFF2`
+/// glyph's blends are weighted by it.
+pub(crate) fn outline(
+    source: &Source<'_>,
+    glyph_id: u16,
+    places: &[i16],
+) -> Result<Outline, FontError> {
+    let cff = match &source.kind {
+        Kind::Cff(cff) => cff,
+        Kind::Cff2(cff) => return outline2(cff, glyph_id, places),
+        Kind::Unsupported => return Err(FontError::Unsupported),
     };
     let program = cff.charstrings.get(usize::from(glyph_id))?;
+    let local = match &cff.groups {
+        Some(groups) => {
+            let group = groups.select.group(glyph_id)?;
+            groups.subrs.get(group).ok_or(FontError::BadTable)?
+        }
+        None => &cff.subrs,
+    };
+    let routines = Routines {
+        global: &cff.gsubrs,
+        local,
+        blends: None,
+    };
     let mut pen = Pen::new();
-    match interpret(program, cff, &mut pen, 0)? {
+    match interpret(program, &routines, &mut pen, 0)? {
         Stop::End => Ok(pen.outline()),
         Stop::Return => Err(FontError::BadTable),
+    }
+}
+
+/// The outline of a glyph of a `CFF2` table.
+fn outline2(cff: &Cff2<'_>, glyph_id: u16, places: &[i16]) -> Result<Outline, FontError> {
+    let program = cff.charstrings.get(usize::from(glyph_id))?;
+    let group = match &cff.select {
+        Some(select) => select.group(glyph_id)?,
+        None => 0,
+    };
+    let (local, blended) = cff.groups.get(group).ok_or(FontError::BadTable)?;
+    let routines = Routines {
+        global: &cff.gsubrs,
+        local,
+        blends: Some(Blends {
+            store: cff.store.as_ref(),
+            places,
+        }),
+    };
+    let mut pen = Pen::new();
+    // A glyph of this table has no width before its first move, and may
+    // hold many numbers for its blends.
+    pen.width_seen = true;
+    pen.limit = STACK_LIMIT_2;
+    pen.group = *blended;
+    interpret(program, &routines, &mut pen, 0)?;
+    Ok(pen.outline())
+}
+
+/// The offsets a `CFF2` dictionary holds that this reader follows.
+#[derive(Default)]
+struct Dict2 {
+    charstrings: Option<usize>,
+    groups: Option<usize>,
+    select: Option<usize>,
+    store: Option<usize>,
+    private: Option<(usize, usize)>,
+    subrs: Option<usize>,
+    blended: usize,
+}
+
+/// A `CFF2` dictionary: numbers, each run of them ended by what they are
+/// for. A dictionary's numbers may be blends, so it may hold as many at
+/// once as a glyph; the blended ones are for hinting and are not read.
+fn parse_dict2(data: &[u8]) -> Result<Dict2, FontError> {
+    let mut dict = Dict2::default();
+    let mut pos = 0;
+    let mut stack: Vec<f64> = Vec::new();
+    while pos < data.len() {
+        let byte = data[pos];
+        if dict_number(byte) {
+            let (value, used) = read_dict_number(&data[pos..])?;
+            pos += used;
+            if stack.len() >= STACK_LIMIT_2 {
+                return Err(FontError::BadTable);
+            }
+            stack.push(value);
+            continue;
+        }
+        match byte {
+            12 => {
+                match *data.get(pos + 1).ok_or(FontError::Truncated)? {
+                    36 => dict.groups = Some(one_offset(&stack)?),
+                    37 => dict.select = Some(one_offset(&stack)?),
+                    _ => {}
+                }
+                pos += 2;
+            }
+            0..=27 => {
+                match byte {
+                    17 => dict.charstrings = Some(one_offset(&stack)?),
+                    18 => dict.private = Some(two_offsets(&stack)?),
+                    19 => dict.subrs = Some(one_offset(&stack)?),
+                    22 => dict.blended = one_offset(&stack)?,
+                    24 => dict.store = Some(one_offset(&stack)?),
+                    _ => {}
+                }
+                pos += 1;
+            }
+            _ => return Err(FontError::BadTable),
+        }
+        stack.clear();
+    }
+    Ok(dict)
+}
+
+fn parse_cff2(data: &[u8]) -> Result<Cff2<'_>, FontError> {
+    if data.len() < 5 {
+        return Err(FontError::Truncated);
+    }
+    if data[0] != 2 {
+        return Err(FontError::Unsupported);
+    }
+    let header = usize::from(data[2]);
+    if header < 5 {
+        return Err(FontError::BadTable);
+    }
+    let top_length = usize::from(u16_at(data, 3)?);
+    let top = parse_dict2(bytes_at(data, header, top_length)?)?;
+    let mut pos = header + top_length;
+    let gsubrs = Index::parse_wide(data, &mut pos)?;
+    let mut cursor = top.charstrings.ok_or(FontError::BadTable)?;
+    let charstrings = Index::parse_wide(data, &mut cursor)?;
+    if charstrings.count == 0 {
+        return Err(FontError::EmptyTable);
+    }
+    let mut cursor = top.groups.ok_or(FontError::BadTable)?;
+    let dicts = Index::parse_wide(data, &mut cursor)?;
+    // A dictionary is named by two bytes at most.
+    if dicts.count == 0 || dicts.count > 65_536 {
+        return Err(FontError::BadTable);
+    }
+    let mut groups = Vec::with_capacity(dicts.count);
+    for index in 0..dicts.count {
+        let dict = parse_dict2(dicts.get(index)?)?;
+        let (subrs, blended) = match dict.private {
+            Some((size, at)) if size > 0 => {
+                let private = parse_dict2(bytes_at(data, at, size)?)?;
+                let subrs = match private.subrs {
+                    Some(relative) => {
+                        let mut cursor = at.checked_add(relative).ok_or(FontError::BadTable)?;
+                        Index::parse_wide(data, &mut cursor)?
+                    }
+                    None => Index::empty(),
+                };
+                (subrs, private.blended)
+            }
+            _ => (Index::empty(), 0),
+        };
+        groups.push((subrs, blended));
+    }
+    let select = match top.select {
+        Some(at) => Some(parse_select(
+            data.get(at..).ok_or(FontError::Truncated)?,
+            charstrings.count,
+        )?),
+        None => None,
+    };
+    // The store is its length in two bytes, and then a store as the
+    // other tables of a face that varies have one.
+    let store = match top.store {
+        Some(at) => {
+            let table = data.get(at..).ok_or(FontError::Truncated)?;
+            let length = usize::from(u16_at(table, 0)?);
+            Some(Store::read(bytes_at(table, 2, length)?)?)
+        }
+        None => None,
+    };
+    Ok(Cff2 {
+        charstrings,
+        gsubrs,
+        groups,
+        select,
+        store,
+    })
+}
+
+/// Which font dictionary each of `glyphs` glyphs uses, from the table
+/// that says.
+fn parse_select(table: &[u8], glyphs: usize) -> Result<Select<'_>, FontError> {
+    match table.first().copied().ok_or(FontError::Truncated)? {
+        0 => Ok(Select::Each(bytes_at(table, 1, glyphs)?)),
+        3 => {
+            let count = usize::from(u16_at(table, 1)?);
+            if count == 0 {
+                return Err(FontError::BadTable);
+            }
+            // Each range is three bytes, and two more name the end.
+            let bytes = count * 3 + 2;
+            Ok(Select::Ranges {
+                data: bytes_at(table, 3, bytes)?,
+                count,
+            })
+        }
+        4 => {
+            let count = usize::try_from(u32_at(table, 1)?).map_err(|_| FontError::BadTable)?;
+            if count == 0 {
+                return Err(FontError::BadTable);
+            }
+            // Each range is six bytes, and four more name the end.
+            let bytes = count
+                .checked_mul(6)
+                .and_then(|bytes| bytes.checked_add(4))
+                .ok_or(FontError::BadTable)?;
+            Ok(Select::Wide {
+                data: bytes_at(table, 5, bytes)?,
+                count,
+            })
+        }
+        _ => Err(FontError::Unsupported),
     }
 }
 
@@ -115,7 +413,7 @@ fn parse_cff(data: &[u8]) -> Result<Cff<'_>, FontError> {
     let _strings = Index::parse(data, &mut pos)?;
     let gsubrs = Index::parse(data, &mut pos)?;
     let top = parse_dict(tops.get(0)?)?;
-    if top.cid || top.charstring_type != 2 {
+    if top.charstring_type != 2 {
         return Err(FontError::Unsupported);
     }
     let Some(charstrings_at) = top.charstrings else {
@@ -127,11 +425,94 @@ fn parse_cff(data: &[u8]) -> Result<Cff<'_>, FontError> {
         return Err(FontError::EmptyTable);
     }
     let subrs = private_subrs(data, &top)?;
+    let groups = if top.cid {
+        Some(parse_groups(data, &top, charstrings.count)?)
+    } else {
+        None
+    };
     Ok(Cff {
         charstrings,
         gsubrs,
         subrs,
+        groups,
     })
+}
+
+/// The font dictionaries of a face keyed by character ids. A dictionary
+/// is named by one byte, so there are at most 256.
+fn parse_groups<'a>(data: &'a [u8], top: &Dict, glyphs: usize) -> Result<Groups<'a>, FontError> {
+    let (Some(array_at), Some(select_at)) = (top.groups, top.select) else {
+        return Err(FontError::BadTable);
+    };
+    let mut cursor = array_at;
+    let dicts = Index::parse(data, &mut cursor)?;
+    if dicts.count == 0 || dicts.count > 256 {
+        return Err(FontError::BadTable);
+    }
+    let mut subrs = Vec::with_capacity(dicts.count);
+    for index in 0..dicts.count {
+        let dict = parse_dict(dicts.get(index)?)?;
+        subrs.push(private_subrs(data, &dict)?);
+    }
+    let table = data.get(select_at..).ok_or(FontError::Truncated)?;
+    // A dictionary of this table is named by one byte.
+    let select = match parse_select(table, glyphs)? {
+        Select::Wide { .. } => return Err(FontError::Unsupported),
+        select => select,
+    };
+    Ok(Groups { subrs, select })
+}
+
+impl Select<'_> {
+    /// The font dictionary of `glyph`.
+    fn group(&self, glyph: u16) -> Result<usize, FontError> {
+        match self {
+            Self::Each(groups) => groups
+                .get(usize::from(glyph))
+                .map(|group| usize::from(*group))
+                .ok_or(FontError::BadTable),
+            Self::Ranges { data, count } => {
+                // The last range that starts at or before the glyph.
+                let (mut low, mut high) = (0, *count);
+                while low < high {
+                    let mid = low + (high - low) / 2;
+                    if u16_at(data, mid * 3)? <= glyph {
+                        low = mid + 1;
+                    } else {
+                        high = mid;
+                    }
+                }
+                let Some(range) = low.checked_sub(1) else {
+                    return Err(FontError::BadTable);
+                };
+                if glyph >= u16_at(data, count * 3)? {
+                    return Err(FontError::BadTable);
+                }
+                data.get(range * 3 + 2)
+                    .map(|group| usize::from(*group))
+                    .ok_or(FontError::Truncated)
+            }
+            Self::Wide { data, count } => {
+                let glyph = u32::from(glyph);
+                let (mut low, mut high) = (0, *count);
+                while low < high {
+                    let mid = low + (high - low) / 2;
+                    if u32_at(data, mid * 6)? <= glyph {
+                        low = mid + 1;
+                    } else {
+                        high = mid;
+                    }
+                }
+                let Some(range) = low.checked_sub(1) else {
+                    return Err(FontError::BadTable);
+                };
+                if glyph >= u32_at(data, count * 6)? {
+                    return Err(FontError::BadTable);
+                }
+                u16_at(data, range * 6 + 4).map(usize::from)
+            }
+        }
+    }
 }
 
 fn private_subrs<'a>(data: &'a [u8], top: &Dict) -> Result<Index<'a>, FontError> {
@@ -165,6 +546,18 @@ impl<'a> Index<'a> {
     fn parse(data: &'a [u8], pos: &mut usize) -> Result<Self, FontError> {
         let count = usize::from(u16_at(data, *pos)?);
         *pos += 2;
+        Self::parse_body(data, pos, count)
+    }
+
+    /// An index of a `CFF2` table, whose count is four bytes.
+    fn parse_wide(data: &'a [u8], pos: &mut usize) -> Result<Self, FontError> {
+        let count = usize::try_from(u32_at(data, *pos)?).map_err(|_| FontError::BadTable)?;
+        *pos = pos.checked_add(4).ok_or(FontError::BadTable)?;
+        Self::parse_body(data, pos, count)
+    }
+
+    /// An index of `count` items, after its count.
+    fn parse_body(data: &'a [u8], pos: &mut usize, count: usize) -> Result<Self, FontError> {
         if count == 0 {
             return Ok(Self::empty());
         }
@@ -258,6 +651,8 @@ fn parse_dict(data: &[u8]) -> Result<Dict, FontError> {
         subrs: None,
         charstring_type: 2,
         cid: false,
+        groups: None,
+        select: None,
     };
     let mut pos = 0;
     let mut stack = Vec::new();
@@ -311,6 +706,8 @@ fn apply_escape(dict: &mut Dict, operator: u8, stack: &[f64]) -> Result<(), Font
             dict.charstring_type = if one_number(stack)? == 2.0 { 2 } else { -1 };
         }
         30 => dict.cid = true,
+        36 => dict.groups = Some(one_offset(stack)?),
+        37 => dict.select = Some(one_offset(stack)?),
         _ => {}
     }
     Ok(())
@@ -425,6 +822,10 @@ impl Pen {
             hint_count: 0,
             stack: Vec::new(),
             transient: [0.0; TRANSIENT],
+            limit: STACK_LIMIT,
+            steps: 0,
+            group: 0,
+            weights: None,
         }
     }
 
@@ -443,21 +844,22 @@ impl Pen {
         if self.segments.is_empty() {
             return;
         }
+        let (start_x, start_y) = (single(self.start_x), single(self.start_y));
         let (end_x, end_y) = segment_end(self.segments.last());
-        if end_x != self.start_x || end_y != self.start_y {
+        if end_x != start_x || end_y != start_y {
             self.segments.push(Segment::Line {
-                x: self.start_x,
-                y: self.start_y,
+                x: start_x,
+                y: start_y,
             });
         }
         self.contours.push(Contour {
-            x: self.start_x,
-            y: self.start_y,
+            x: start_x,
+            y: start_y,
             segments: std::mem::take(&mut self.segments),
         });
     }
 
-    fn move_to(&mut self, dx: f32, dy: f32) -> Result<(), FontError> {
+    fn move_to(&mut self, dx: f64, dy: f64) -> Result<(), FontError> {
         self.close();
         self.x = finite(self.x + dx)?;
         self.y = finite(self.y + dy)?;
@@ -467,27 +869,27 @@ impl Pen {
         Ok(())
     }
 
-    fn line(&mut self, dx: f32, dy: f32) -> Result<(), FontError> {
+    fn line(&mut self, dx: f64, dy: f64) -> Result<(), FontError> {
         if !self.open {
             return Err(FontError::BadTable);
         }
         self.x = finite(self.x + dx)?;
         self.y = finite(self.y + dy)?;
         self.segments.push(Segment::Line {
-            x: self.x,
-            y: self.y,
+            x: single(self.x),
+            y: single(self.y),
         });
         Ok(())
     }
 
     fn curve(
         &mut self,
-        dx1: f32,
-        dy1: f32,
-        dx2: f32,
-        dy2: f32,
-        dx3: f32,
-        dy3: f32,
+        dx1: f64,
+        dy1: f64,
+        dx2: f64,
+        dy2: f64,
+        dx3: f64,
+        dy3: f64,
     ) -> Result<(), FontError> {
         if !self.open {
             return Err(FontError::BadTable);
@@ -499,27 +901,37 @@ impl Pen {
         self.x = finite(c2x + dx3)?;
         self.y = finite(c2y + dy3)?;
         self.segments.push(Segment::Cubic {
-            c1x,
-            c1y,
-            c2x,
-            c2y,
-            x: self.x,
-            y: self.y,
+            c1x: single(c1x),
+            c1y: single(c1y),
+            c2x: single(c2x),
+            c2y: single(c2y),
+            x: single(self.x),
+            y: single(self.y),
         });
         Ok(())
     }
 
-    fn push(&mut self, value: f32) -> Result<(), FontError> {
-        if !value.is_finite() || self.stack.len() >= STACK_LIMIT {
+    fn push(&mut self, value: f64) -> Result<(), FontError> {
+        if !value.is_finite() || self.stack.len() >= self.limit {
             return Err(FontError::BadTable);
         }
         self.stack.push(value);
         Ok(())
     }
 
-    fn pop(&mut self) -> Result<f32, FontError> {
+    fn pop(&mut self) -> Result<f64, FontError> {
         self.stack.pop().ok_or(FontError::BadTable)
     }
+}
+
+/// A coordinate as an outline holds it. The pen adds its moves up in
+/// double precision, as other readers do, so that a sum of many small
+/// moves, or of blended ones, comes out the same; an outline's points are
+/// single precision.
+fn single(value: f64) -> f32 {
+    #[allow(clippy::cast_possible_truncation)]
+    let single = value as f32;
+    single
 }
 
 fn segment_end(segment: Option<&Segment>) -> (f32, f32) {
@@ -531,7 +943,7 @@ fn segment_end(segment: Option<&Segment>) -> (f32, f32) {
     }
 }
 
-fn finite(value: f32) -> Result<f32, FontError> {
+fn finite(value: f64) -> Result<f64, FontError> {
     if value.is_finite() {
         Ok(value)
     } else {
@@ -539,12 +951,21 @@ fn finite(value: f32) -> Result<f32, FontError> {
     }
 }
 
-fn interpret(bytes: &[u8], cff: &Cff<'_>, pen: &mut Pen, depth: u32) -> Result<Stop, FontError> {
+fn interpret(
+    bytes: &[u8],
+    cff: &Routines<'_, '_>,
+    pen: &mut Pen,
+    depth: u32,
+) -> Result<Stop, FontError> {
     if depth > SUBR_DEPTH {
         return Err(FontError::BadTable);
     }
     let mut pos = 0;
     while pos < bytes.len() {
+        pen.steps += 1;
+        if pen.steps > STEP_LIMIT {
+            return Err(FontError::BadTable);
+        }
         let byte = bytes[pos];
         match byte {
             1 | 3 | 18 | 23 => stems(pen)?,
@@ -568,6 +989,8 @@ fn interpret(bytes: &[u8], cff: &Cff<'_>, pen: &mut Pen, depth: u32) -> Result<S
                 endchar(pen)?;
                 return Ok(Stop::End);
             }
+            15 if cff.blends.is_some() => set_group(pen)?,
+            16 => blend(pen, cff.blends.as_ref().ok_or(FontError::BadTable)?)?,
             21 => rmoveto(pen)?,
             22 => hmoveto(pen)?,
             24 => rcurveline(pen)?,
@@ -575,7 +998,7 @@ fn interpret(bytes: &[u8], cff: &Cff<'_>, pen: &mut Pen, depth: u32) -> Result<S
             26 => vvcurveto(pen)?,
             27 => hhcurveto(pen)?,
             28 => {
-                let value = f32::from(i16_at(bytes, pos + 1)?);
+                let value = f64::from(i16_at(bytes, pos + 1)?);
                 pen.push(value)?;
                 pos += 2;
             }
@@ -590,17 +1013,17 @@ fn interpret(bytes: &[u8], cff: &Cff<'_>, pen: &mut Pen, depth: u32) -> Result<S
                 pos += 1;
                 escape(pen, operator)?;
             }
-            32..=246 => pen.push(f32::from(i16::from(byte) - 139))?,
+            32..=246 => pen.push(f64::from(i16::from(byte) - 139))?,
             247..=250 => {
                 let second = *bytes.get(pos + 1).ok_or(FontError::Truncated)?;
                 let value = (i32::from(byte) - 247) * 256 + i32::from(second) + 108;
-                pen.push(value as f32)?;
+                pen.push(f64::from(value))?;
                 pos += 1;
             }
             251..=254 => {
                 let second = *bytes.get(pos + 1).ok_or(FontError::Truncated)?;
                 let value = -((i32::from(byte) - 251) * 256) - i32::from(second) - 108;
-                pen.push(value as f32)?;
+                pen.push(f64::from(value))?;
                 pos += 1;
             }
             255 => {
@@ -611,14 +1034,67 @@ fn interpret(bytes: &[u8], cff: &Cff<'_>, pen: &mut Pen, depth: u32) -> Result<S
                         .try_into()
                         .map_err(|_| FontError::Truncated)?,
                 );
-                pen.push(raw as f32 / 65_536.0)?;
+                pen.push(f64::from(raw) / 65_536.0)?;
                 pos += 4;
             }
             _ => return Err(FontError::BadTable),
         }
         pos += 1;
     }
-    Err(FontError::BadTable)
+    // A `CFF2` glyph and its subroutines end where their bytes end.
+    match (&cff.blends, depth) {
+        (Some(_), 0) => Ok(Stop::End),
+        (Some(_), _) => Ok(Stop::Return),
+        (None, _) => Err(FontError::BadTable),
+    }
+}
+
+/// Take the group of the store the glyph's blends are drawn for from the
+/// glyph itself. It may say once, before its first blend.
+fn set_group(pen: &mut Pen) -> Result<(), FontError> {
+    let group = whole(pen.pop()?)?;
+    if pen.weights.is_some() {
+        return Err(FontError::BadTable);
+    }
+    pen.group = usize::try_from(group).map_err(|_| FontError::BadTable)?;
+    Ok(())
+}
+
+/// Blend the numbers the glyph holds: the last is how many values there
+/// are; before it each value's default, and then for each value a change
+/// for each region of the glyph's group. Each value becomes its default
+/// and its changes, each weighted by how much its region counts where the
+/// face is set.
+fn blend(pen: &mut Pen, blends: &Blends<'_, '_>) -> Result<(), FontError> {
+    let count = usize::try_from(whole(pen.pop()?)?).map_err(|_| FontError::BadTable)?;
+    let weights = match (pen.weights.take(), blends.store) {
+        (Some(weights), _) => weights,
+        // Too many regions for a glyph to hold a change for each is a
+        // group no glyph can blend with.
+        (None, Some(store)) => store.group_weights(pen.group, blends.places, STACK_LIMIT_2)?,
+        (None, None) => Vec::new(),
+    };
+    let regions = weights.len();
+    let Some(start) = count
+        .checked_mul(regions + 1)
+        .and_then(|needed| pen.stack.len().checked_sub(needed))
+    else {
+        return Err(FontError::BadTable);
+    };
+    for value in 0..count {
+        // The changes are added up first and then to the default, the
+        // order HarfBuzz adds them in, so a sum on a half comes out as
+        // its does.
+        let mut change = 0.0;
+        let changes = start + count + value * regions;
+        for (one, weight) in pen.stack[changes..changes + regions].iter().zip(&weights) {
+            change += f64::from(*weight) * one;
+        }
+        pen.stack[start + value] = finite(pen.stack[start + value] + change)?;
+    }
+    pen.stack.truncate(start + count);
+    pen.weights = Some(weights);
+    Ok(())
 }
 
 fn mask_length(pen: &Pen, rest: &[u8]) -> Result<usize, FontError> {
@@ -933,8 +1409,8 @@ fn get(pen: &mut Pen) -> Result<(), FontError> {
     pen.push(pen.transient[index])
 }
 
-fn transient_index(value: f32) -> Result<usize, FontError> {
-    if !(0.0..TRANSIENT as f32).contains(&value) || value.fract() != 0.0 {
+fn transient_index(value: f64) -> Result<usize, FontError> {
+    if !(0.0..TRANSIENT as f64).contains(&value) || value.fract() != 0.0 {
         return Err(FontError::BadTable);
     }
     Ok(usize::from(value as u8))
@@ -1017,9 +1493,14 @@ fn flex1(pen: &mut Pen) -> Result<(), FontError> {
     pen.curve(args[6], args[7], args[8], args[9], dx6, dy6)
 }
 
-fn call_subr(cff: &Cff<'_>, pen: &mut Pen, depth: u32, global: bool) -> Result<Stop, FontError> {
+fn call_subr(
+    cff: &Routines<'_, '_>,
+    pen: &mut Pen,
+    depth: u32,
+    global: bool,
+) -> Result<Stop, FontError> {
     let encoded = whole(pen.pop()?)?;
-    let index = if global { &cff.gsubrs } else { &cff.subrs };
+    let index = if global { cff.global } else { cff.local };
     let biased = encoded
         .checked_add(bias(index.count))
         .ok_or(FontError::BadTable)?;
@@ -1040,14 +1521,14 @@ fn bias(count: usize) -> i32 {
     }
 }
 
-fn path_args(pen: &mut Pen) -> Result<Vec<f32>, FontError> {
+fn path_args(pen: &mut Pen) -> Result<Vec<f64>, FontError> {
     if !pen.width_seen {
         pen.width_seen = true;
     }
     Ok(std::mem::take(&mut pen.stack))
 }
 
-fn take_width(pen: &mut Pen, width_when_even: bool) -> Result<Vec<f32>, FontError> {
+fn take_width(pen: &mut Pen, width_when_even: bool) -> Result<Vec<f64>, FontError> {
     let mut args = std::mem::take(&mut pen.stack);
     if !pen.width_seen {
         pen.width_seen = true;
@@ -1062,15 +1543,15 @@ fn take_width(pen: &mut Pen, width_when_even: bool) -> Result<Vec<f32>, FontErro
     Ok(args)
 }
 
-fn one(args: Vec<f32>) -> Result<[f32; 1], FontError> {
+fn one(args: Vec<f64>) -> Result<[f64; 1], FontError> {
     args.try_into().map_err(|_| FontError::BadTable)
 }
 
-fn two(args: Vec<f32>) -> Result<[f32; 2], FontError> {
+fn two(args: Vec<f64>) -> Result<[f64; 2], FontError> {
     args.try_into().map_err(|_| FontError::BadTable)
 }
 
-fn exactly(args: Vec<f32>, count: usize) -> Result<Vec<f32>, FontError> {
+fn exactly(args: Vec<f64>, count: usize) -> Result<Vec<f64>, FontError> {
     if args.len() == count {
         Ok(args)
     } else {
@@ -1078,10 +1559,10 @@ fn exactly(args: Vec<f32>, count: usize) -> Result<Vec<f32>, FontError> {
     }
 }
 
-fn whole(value: f32) -> Result<i32, FontError> {
+fn whole(value: f64) -> Result<i32, FontError> {
     if !value.is_finite()
         || value.fract() != 0.0
-        || !(f32::from(i16::MIN)..=f32::from(i16::MAX)).contains(&value)
+        || !(f64::from(i16::MIN)..=f64::from(i16::MAX)).contains(&value)
     {
         return Err(FontError::BadTable);
     }

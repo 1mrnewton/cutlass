@@ -23,6 +23,8 @@ const LOGS: &str = "Logs";
 const SETTINGS: &str = "settings.json";
 const PRESETS: &str = "Presets";
 const TEXT_PRESETS: &str = "text.json";
+const STUDIO: &str = "Studio";
+const FONTS: &str = "Fonts";
 
 /// The Cutlass root and the folders under it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,6 +130,20 @@ impl Home {
     #[must_use]
     pub fn text_presets_file(&self) -> PathBuf {
         self.root.join(PRESETS).join(TEXT_PRESETS)
+    }
+
+    /// Font files the person adds for their titles, beside the system's.
+    /// The folder is not made here; one that is missing holds no fonts.
+    #[must_use]
+    pub fn fonts(&self) -> PathBuf {
+        self.root.join(FONTS)
+    }
+
+    /// The effects and transitions being made in the effect studio, as
+    /// recipe files. The folder is made when the first one is saved.
+    #[must_use]
+    pub fn studio(&self) -> PathBuf {
+        self.root.join(STUDIO)
     }
 
     fn folders(&self) -> [PathBuf; 6] {
@@ -256,6 +272,8 @@ mod tests {
             home.text_presets_file(),
             root.join("Presets").join("text.json")
         );
+        assert_eq!(home.studio(), root.join("Studio"));
+        assert_eq!(home.fonts(), root.join("Fonts"));
     }
 
     #[test]

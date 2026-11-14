@@ -19,6 +19,7 @@ Timestamps stay in the file's clock. A stream's timescale is 10⁹ / TimestampSc
 | Tracks: number, type, CodecID, CodecPrivate, language, DefaultDuration, CodecDelay, SeekPreRoll, picture size, sample rate and channels | Read; a repeated track number is `OpenError::DuplicateTrack` | Written | ffprobe comparisons |
 | CodecIDs | H.264, HEVC, AV1, VP8, VP9, MPEG-1/2, MPEG-4 Part 2, Motion JPEG, ProRes, AAC (with the legacy `A_AAC/MPEG4/...` ids), Opus, Vorbis, FLAC, MP3, AC-3, E-AC-3, ALAC, PCM (integer little and big endian, float), and `V_MS/VFW/FOURCC` and `A_MS/ACM` for those codecs. Anything else, subtitles included, opens as a stream with an unknown codec tag and its packets | The same codecs under their native CodecIDs; an unknown codec is `MuxError::UnknownCodec` | `codec.rs` tests, 17 ffmpeg cases |
 | ProRes | The 8-byte frame size and `icpf` atom go back in front of each frame | Taken off each frame, as the mapping asks | `prores_frames_lose_their_first_atom_on_disk_and_get_it_back`; ffmpeg payloads match |
+| AV1 | A Block is read as it is stored | Each Block is the temporal unit without its temporal delimiter, padding and redundant frame headers, every OBU with a size; the CodecPrivate is the `av1C` record | `av1_blocks_are_stored_without_delimiters_and_keep_the_av1c_record` |
 | Clusters of known size | Read | Written, the size filled in when the Cluster closes. A new Cluster starts at a video keyframe once the Cluster holds 4 KiB, after 5 s or 5 MiB, or when a block offset would not fit 16 bits | behavior tests |
 | Clusters of unknown size (live recordings) | Read; one ends at the next top-level element | Not written | `vp9_live.webm` oracle case, behavior tests |
 | SimpleBlock, BlockGroup (BlockDuration, ReferenceBlock) | Read; a BlockGroup without ReferenceBlock is a keyframe | SimpleBlock when the packet lasts the track's DefaultDuration, else a BlockGroup with BlockDuration; ReferenceBlock on non-keyframes | behavior tests, ffprobe keyframe flags |
@@ -34,7 +35,8 @@ Timestamps stay in the file's clock. A stream's timescale is 10⁹ / TimestampSc
 | FLAC STREAMINFO sent again at the end | n/a | Written over the first when it is the same length; a different length is refused | behavior test |
 | TrackTimestampScale other than 1 | Refused at open (`OpenError::Source`): the two mature readers disagree on what it scales (see below) | Never written | `a_track_timestamp_scale_other_than_one_is_refused` |
 | Chained Segments | Only the first Segment is read, forward and random; the reader ends cleanly where it ends (see below) | One Segment | `a_second_segment_after_the_first_is_not_read` |
-| Chapters, Tags, Attachments, BlockAdditions | Skipped | Not written | - |
+| Attachments | Skipped | A JPEG cover from `set_cover_art`: one AttachedFile, `cover.jpg`, `image/jpeg`, with a FileUID hashed from the picture, after Tracks and named in the SeekHead. Never in WebM, which has no Attachments | `a_cover_is_one_attached_file_after_tracks_and_the_packets_read_the_same`; ffprobe reads it as an attached picture |
+| Chapters, Tags, BlockAdditions | Skipped | Not written | - |
 
 `FEATURES` in `src/lib.rs` lists the same rows as data.
 

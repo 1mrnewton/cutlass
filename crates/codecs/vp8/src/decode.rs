@@ -470,9 +470,9 @@ fn reconstruct_intra(
     predict::load_edges(&mut buf, &frame.y, ys, mbx, mby, 16, 4);
     if mb.y_mode == B_PRED {
         predict::copy_above_right(&mut buf);
-        for b in 0..16 {
+        for (b, &mode) in sub.b_modes.iter().enumerate() {
             let (r, c) = (b >> 2, b & 3);
-            predict::predict_sub(&mut buf, r, c, sub.b_modes[b]);
+            predict::predict_sub(&mut buf, r, c, mode);
             add_block(
                 coeffs,
                 b,
@@ -558,9 +558,8 @@ fn reconstruct_inter(
     let y0 = (mby * 16) as i32;
     let base = mby * 16 * ys + mbx * 16;
     if mb.y_mode == SPLITMV {
-        for b in 0..16 {
+        for (b, &mv) in sub.mvs.iter().enumerate() {
             let (r, c) = (b >> 2, b & 3);
-            let mv = sub.mvs[b];
             let at = base + 4 * r * ys + 4 * c;
             inter::predict(
                 reference.luma(),

@@ -2,9 +2,17 @@
 //!
 //! Layout, in file order: the EBML header; a Segment whose size is patched
 //! at finish; room for a SeekHead, filled at finish; Info (TimestampScale,
-//! the writing apps, and a Duration patched at finish); Tracks; Clusters;
-//! and Cues. The SeekHead points at Info, Tracks and Cues, so a reader that
-//! wants the Cues finds them without scanning (RFC 9559, 25.1).
+//! the writing apps, and a Duration patched at finish); Tracks; Attachments
+//! when a cover is set; Clusters; and Cues. The SeekHead points at Info,
+//! Tracks, Attachments and Cues, so a reader that wants the Cues finds them
+//! without scanning (RFC 9559, 25.1).
+//!
+//! # Cover
+//!
+//! [`MatroskaMux::set_cover_art`] attaches a JPEG as the one AttachedFile
+//! `cover.jpg`, `image/jpeg`, the name RFC 9559 (21.1) gives a cover. It is
+//! written after Tracks, as FFmpeg and the spec's layout (25.3.1) place
+//! Attachments. WebM has no Attachments, so a WebM file goes without.
 //!
 //! # Packets
 //!
@@ -67,14 +75,18 @@ use crate::ebml::{
 };
 use crate::error::Error;
 use crate::ids;
-use crate::limits::{CLUSTER_BYTES, CLUSTER_SPAN_NS, MAX_HELD_BEFORE_HEADER};
+use crate::limits::{CLUSTER_BYTES, CLUSTER_SPAN_NS, MAX_COVER_BYTES, MAX_HELD_BEFORE_HEADER};
 use crate::meta::DocType;
 
 const SECOND_NS: i128 = 1_000_000_000;
 
-/// Bytes kept for the SeekHead: three Seek entries with eight-octet
-/// positions take 68, and a Void fills the rest.
+/// Bytes kept for the SeekHead: four Seek entries with eight-octet
+/// positions take 89, and a Void fills the rest.
 const SEEK_HEAD_ROOM: usize = 96;
+
+/// The attached cover's FileName and FileMediaType.
+const COVER_NAME: &[u8] = b"cover.jpg";
+const COVER_TYPE: &[u8] = b"image/jpeg";
 
 /// A video keyframe starts a new Cluster once the open one holds this much.
 const KEYFRAME_CLUSTER_BYTES: u64 = 4 * 1024;
@@ -141,6 +153,7 @@ struct Layout {
     info_at: u64,
     duration_at: u64,
     tracks_at: u64,
+    attachments_at: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -193,6 +206,8 @@ pub struct MatroskaMux<W: Write + Seek> {
     cues: Vec<CueEntry>,
     /// Latest packet end, in nanoseconds.
     end_ns: i128,
+    /// A JPEG attached as the cover.
+    cover: Option<Vec<u8>>,
 }
 
 impl<W: Write + Seek> MatroskaMux<W> {
@@ -225,7 +240,31 @@ impl<W: Write + Seek> MatroskaMux<W> {
             cluster: None,
             cues: Vec::new(),
             end_ns: 0,
+            cover: None,
         }
+    }
+
+    /// Attaches `jpeg` as the file's cover: one AttachedFile, `cover.jpg`,
+    /// `image/jpeg`, written with the header, so it must come before the
+    /// first packet goes out. A WebM file takes it and writes nothing, as
+    /// WebM has no Attachments. Bytes that do not start with a JPEG
+    /// start-of-image marker, or more than [`MAX_COVER_BYTES`], are refused;
+    /// a refused cover leaves the file as it was and the muxer building.
+    pub fn set_cover_art(&mut self, jpeg: Vec<u8>) -> Result<(), MuxError> {
+        self.building()?;
+        if self.layout.is_some() {
+            return Err(rejected("the cover comes after the header was written"));
+        }
+        if !jpeg.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            return Err(rejected("the cover is not a JPEG"));
+        }
+        if jpeg.len() > MAX_COVER_BYTES {
+            return Err(rejected("the cover is too large"));
+        }
+        if !self.webm_only() {
+            self.cover = Some(jpeg);
+        }
+        Ok(())
     }
 
     /// Nanoseconds per Segment tick. One millisecond by default; a finer
@@ -364,6 +403,11 @@ impl<W: Write + Seek> MatroskaMux<W> {
         for (index, offset) in private_offsets {
             self.tracks[index].private_at = Some(entries_at + offset);
         }
+        let attachments_at = self.cover.as_deref().map(|jpeg| {
+            let at = self.position + len(&out);
+            out.extend(cover_attachments(jpeg));
+            at
+        });
         self.emit(&out)?;
         self.layout = Some(Layout {
             segment_size_at,
@@ -372,6 +416,7 @@ impl<W: Write + Seek> MatroskaMux<W> {
             info_at,
             duration_at,
             tracks_at,
+            attachments_at,
         });
         Ok(())
     }
@@ -551,8 +596,21 @@ impl<W: Write + Seek> MatroskaMux<W> {
             .written
             .as_ref()
             .is_some_and(|written| written.strip_prores);
+        // An AV1 Block is the temporal unit without its delimiter, padding
+        // and redundant headers, each OBU with its size, as an `av01`
+        // sample is.
+        let av1 = track
+            .written
+            .as_ref()
+            .is_some_and(|written| written.codec_id == "V_AV1");
+        let sample;
         let frame = match packet.bytes() {
             bytes if strip && bytes.get(4..8) == Some(b"icpf") => &bytes[8..],
+            bytes if av1 => {
+                sample = cutlass_container::av1_sample(bytes)
+                    .ok_or_else(|| rejected("AV1 packet that is not whole OBUs"))?;
+                sample.as_slice()
+            }
             bytes => bytes,
         };
         let frame_len = len(frame);
@@ -755,6 +813,9 @@ impl<W: Write + Seek> MatroskaMux<W> {
             (ids::INFO, layout.info_at - layout.segment_data),
             (ids::TRACKS, layout.tracks_at - layout.segment_data),
         ];
+        if let Some(at) = layout.attachments_at {
+            entries.push((ids::ATTACHMENTS, at - layout.segment_data));
+        }
         if !self.cues.is_empty() {
             entries.push((ids::CUES, cues_at - layout.segment_data));
         }
@@ -806,6 +867,32 @@ impl<W: Write + Seek> MatroskaMux<W> {
         put_master(&mut out, ids::CUES, &body);
         out
     }
+}
+
+/// Attachments with one AttachedFile, the cover: FileName, FileMediaType,
+/// FileData and FileUID, in the order FFmpeg's matroskaenc.c writes them
+/// (RFC 9559, 5.1.6). The UID must not be zero and should be as random as
+/// possible; it is a 64-bit FNV-1a hash of the picture, so the same cover
+/// gives the same file.
+fn cover_attachments(jpeg: &[u8]) -> Vec<u8> {
+    let mut file = Vec::with_capacity(jpeg.len() + 48);
+    put_bytes(&mut file, ids::FILE_NAME, COVER_NAME);
+    put_bytes(&mut file, ids::FILE_MEDIA_TYPE, COVER_TYPE);
+    put_bytes(&mut file, ids::FILE_DATA, jpeg);
+    put_uint(&mut file, ids::FILE_UID, file_uid(jpeg));
+    let mut attached = Vec::with_capacity(file.len() + 12);
+    put_master(&mut attached, ids::ATTACHED_FILE, &file);
+    let mut out = Vec::with_capacity(attached.len() + 12);
+    put_master(&mut out, ids::ATTACHMENTS, &attached);
+    out
+}
+
+/// A FileUID for `bytes`: their 64-bit FNV-1a hash, never zero.
+fn file_uid(bytes: &[u8]) -> u64 {
+    let hash = bytes.iter().fold(0xCBF2_9CE4_8422_2325_u64, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01B3)
+    });
+    hash.max(1)
 }
 
 /// Whether the packets queued after a track's first take all of its end

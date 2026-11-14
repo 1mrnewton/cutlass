@@ -174,6 +174,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         self.b.clone_from(&s.b);
         self.me_scratch.pred_cache.clear();
         self.me_scratch.tx_memo = None;
+        self.me_scratch.alt_pred = None;
     }
 
     /// Squared error of the node's reconstruction (all planes, visible part).

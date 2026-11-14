@@ -9,10 +9,10 @@ use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
 use cutlass_codec::access::{
-    BitDepth, ColorPrimaries, ColorRange, ColorType, MatrixCoefficients, PixelFormat, Transfer,
-    Transparency, Yuv420p,
+    BitDepth, ColorMatrix, ColorPrimaries, ColorRange, ColorType, PixelFormat, Transfer,
+    Transparency,
 };
-use cutlass_color::{Input, Matrix, Outcome, Picture as ColorPicture, Request};
+use cutlass_color::{Depth, Input, Layout, Matrix, Outcome, Picture as ColorPicture, Request};
 use cutlass_container::DisplayQuarter;
 use cutlass_decode::StillImage;
 use cutlass_gpu::Extent;
@@ -456,8 +456,15 @@ fn to_picture(frame: &DecodedFrame) -> Result<Picture, EngineError> {
             pixel,
             primaries,
             transfer,
+            matrix,
+            range,
             bytes,
-        } => coded_bytes(*pixel, *width, *height, *primaries, *transfer, bytes),
+        } => coded_bytes(
+            *pixel,
+            (*width, *height),
+            (*primaries, *transfer, *matrix, *range),
+            bytes,
+        ),
         DecodedFrame::Surface { .. } => Err(EngineError::ColorMiss {
             layout: "surface".to_owned(),
         }),
@@ -466,13 +473,13 @@ fn to_picture(frame: &DecodedFrame) -> Result<Picture, EngineError> {
 
 fn coded_bytes(
     pixel: PixelFormat,
-    width: u32,
-    height: u32,
-    primaries: ColorPrimaries,
-    transfer: Transfer,
+    (width, height): (u32, u32),
+    (primaries, transfer, matrix, range): (ColorPrimaries, Transfer, ColorMatrix, ColorRange),
     bytes: &[u8],
 ) -> Result<Picture, EngineError> {
-    let layout = pixel_layout(pixel);
+    let miss = || EngineError::ColorMiss {
+        layout: pixel_layout(pixel).to_owned(),
+    };
     if pixel == PixelFormat::Rgba8 {
         // Straight sRGB RGBA, such as each frame of a GIF: premultiply it.
         let mut rgba = bytes.to_vec();
@@ -484,68 +491,121 @@ fn coded_bytes(
         }
         return CpuBytes::new(width, height, rgba)
             .map(Picture::Cpu)
-            .map_err(|_| EngineError::ColorMiss {
-                layout: layout.to_owned(),
-            });
+            .map_err(|_| miss());
     }
-    if pixel != PixelFormat::Yuv420p {
-        return Err(EngineError::ColorMiss {
-            layout: layout.to_owned(),
-        });
-    }
-    let Some(yuv) = yuv420(width, height, bytes) else {
-        return Err(EngineError::ColorMiss {
-            layout: layout.to_owned(),
-        });
-    };
-    let Ok(matrix) = Matrix::from_coefficients(MatrixCoefficients::Bt709) else {
-        return Err(EngineError::ColorMiss {
-            layout: layout.to_owned(),
-        });
-    };
-    let picture = ColorPicture::from_yuv420p(
-        &yuv,
-        ColorRange::Limited,
-        matrix,
-        primaries,
-        cutlass_color::curve_from_codec(transfer),
-    );
+    let picture = planar(pixel, width, height, bytes)
+        .and_then(|planes| planes.tagged(primaries, transfer, matrix, range))
+        .ok_or_else(miss)?;
     let working = match cutlass_color::convert(Input::Cpu(picture), &Request::draft(0)) {
         Ok(Outcome::Working(working)) => working,
-        Ok(Outcome::Platform { .. }) | Err(_) => {
-            return Err(EngineError::ColorMiss {
-                layout: layout.to_owned(),
-            });
-        }
+        Ok(Outcome::Platform { .. }) | Err(_) => return Err(miss()),
     };
-    let cpu = CpuBytes::new(width, height, working.rgba).map_err(|_| EngineError::ColorMiss {
-        layout: layout.to_owned(),
-    })?;
-    Ok(Picture::Cpu(cpu))
+    CpuBytes::new(width, height, working.rgba)
+        .map(Picture::Cpu)
+        .map_err(|_| miss())
 }
 
-/// Packed 4:2:0 is Y, then U, then V, with no stride. That is the byte order
-/// `PictureOutput` stores for [`PixelFormat::Yuv420p`].
-fn yuv420(width: u32, height: u32, bytes: &[u8]) -> Option<Yuv420p> {
-    let y_len = usize::try_from(width)
-        .ok()?
-        .checked_mul(usize::try_from(height).ok()?)?;
-    let chroma_width = usize::try_from(width / 2).ok()?;
-    let chroma_height = usize::try_from(height / 2).ok()?;
-    let chroma_len = chroma_width.checked_mul(chroma_height)?;
+/// The planes of a tightly packed planar picture, borrowed from its bytes.
+struct Planes<'a> {
+    layout: Layout,
+    depth: Depth,
+    /// The planes are G, B, and R.
+    gbr: bool,
+    width: u32,
+    height: u32,
+    y: &'a [u8],
+    u: &'a [u8],
+    v: &'a [u8],
+}
+
+/// Packed planar bytes are the first plane, then the second, then the third,
+/// with no stride: the order `PictureOutput` stores. A sample past 8 bits
+/// is two bytes. `None` for a format that is not three planes, or bytes of
+/// another length.
+fn planar(pixel: PixelFormat, width: u32, height: u32, bytes: &[u8]) -> Option<Planes<'_>> {
+    use PixelFormat as P;
+    let (layout, depth, gbr) = match pixel {
+        P::Yuv420p => (Layout::Yuv420, Depth::Eight, false),
+        P::Yuv422p => (Layout::Yuv422, Depth::Eight, false),
+        P::Yuv440p => (Layout::Yuv440, Depth::Eight, false),
+        P::Yuv444p => (Layout::Yuv444, Depth::Eight, false),
+        P::Gbrp => (Layout::Yuv444, Depth::Eight, true),
+        P::Yuv420p10 => (Layout::Yuv420, Depth::Ten, false),
+        P::Yuv422p10 => (Layout::Yuv422, Depth::Ten, false),
+        P::Yuv440p10 => (Layout::Yuv440, Depth::Ten, false),
+        P::Yuv444p10 => (Layout::Yuv444, Depth::Ten, false),
+        P::Gbrp10 => (Layout::Yuv444, Depth::Ten, true),
+        P::Yuv420p12 => (Layout::Yuv420, Depth::Twelve, false),
+        P::Yuv422p12 => (Layout::Yuv422, Depth::Twelve, false),
+        P::Yuv440p12 => (Layout::Yuv440, Depth::Twelve, false),
+        P::Yuv444p12 => (Layout::Yuv444, Depth::Twelve, false),
+        P::Gbrp12 => (Layout::Yuv444, Depth::Twelve, true),
+        P::None | P::Rgba8 | P::Gray8 | P::Gray10 => return None,
+    };
+    let sample = if depth == Depth::Eight { 1 } else { 2 };
+    let (chroma_width, chroma_height) = pixel.chroma_wh(width, height)?;
+    let plane = |w: u32, h: u32| -> Option<usize> {
+        usize::try_from(w)
+            .ok()?
+            .checked_mul(usize::try_from(h).ok()?)?
+            .checked_mul(sample)
+    };
+    let y_len = plane(width, height)?;
+    let chroma_len = plane(chroma_width, chroma_height)?;
     let u_end = y_len.checked_add(chroma_len)?;
     let v_end = u_end.checked_add(chroma_len)?;
     if bytes.len() != v_end {
         return None;
     }
-    Yuv420p::try_new(
+    Some(Planes {
+        layout,
+        depth,
+        gbr,
         width,
         height,
-        bytes[..y_len].to_vec(),
-        bytes[y_len..u_end].to_vec(),
-        bytes[u_end..v_end].to_vec(),
-    )
-    .ok()
+        y: &bytes[..y_len],
+        u: &bytes[y_len..u_end],
+        v: &bytes[u_end..v_end],
+    })
+}
+
+impl<'a> Planes<'a> {
+    /// The picture the color crate converts, with the tags the stream
+    /// names. GBR planes take no matrix. An unnamed matrix is BT.709 and
+    /// an unnamed range is studio swing. `None` for a matrix the color
+    /// crate has no weights for, or the identity matrix on planes that
+    /// are not GBR.
+    fn tagged(
+        self,
+        primaries: ColorPrimaries,
+        transfer: Transfer,
+        matrix: ColorMatrix,
+        range: ColorRange,
+    ) -> Option<ColorPicture<'a>> {
+        let matrix = if self.gbr {
+            Matrix::Identity
+        } else {
+            match Matrix::from_matrix(matrix).ok()? {
+                Matrix::Identity => return None,
+                named => named,
+            }
+        };
+        Some(ColorPicture {
+            layout: self.layout,
+            depth: self.depth,
+            width: self.width,
+            height: self.height,
+            y: self.y,
+            u: self.u,
+            v: self.v,
+            y_stride: 0,
+            chroma_stride: 0,
+            range,
+            matrix,
+            primaries,
+            curve: cutlass_color::curve_from_codec(transfer),
+        })
+    }
 }
 
 /// Coded samples become premultiplied 8-bit RGBA.
@@ -967,6 +1027,213 @@ mod tests {
 
     fn fixed(value: f64) -> i32 {
         value.mul_add(65_536.0, 0.0).round() as i32
+    }
+
+    /// The RGBA of a coded picture with BT.709 primaries and transfer, the
+    /// draft's own, so that only the matrix and the range move a sample.
+    fn coded(
+        pixel: PixelFormat,
+        size: (u32, u32),
+        matrix: ColorMatrix,
+        range: ColorRange,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, EngineError> {
+        let tags = (ColorPrimaries::Bt709, Transfer::Bt709, matrix, range);
+        match coded_bytes(pixel, size, tags, bytes)? {
+            Picture::Cpu(bytes) => Ok(bytes.into_rgba()),
+            Picture::Platform(_) => panic!("cpu"),
+        }
+    }
+
+    /// `samples` as little-endian `u16`.
+    fn wide(samples: &[u16]) -> Vec<u8> {
+        samples.iter().flat_map(|s| s.to_le_bytes()).collect()
+    }
+
+    const UNNAMED: (ColorMatrix, ColorRange) = (ColorMatrix::Unspecified, ColorRange::Unspecified);
+
+    #[test]
+    fn a_coded_picture_uses_the_range_its_stream_names() {
+        // 2x2 4:2:0, luma 128, neutral chroma. Studio swing puts 128 at
+        // (128 - 16) / 219; full range leaves it at 128 / 255.
+        let bytes = [128, 128, 128, 128, 128, 128];
+        let studio =
+            coded(PixelFormat::Yuv420p, (2, 2), UNNAMED.0, UNNAMED.1, &bytes).expect("rgba");
+        assert_eq!(&studio[..4], [130, 130, 130, 255]);
+        let limited = coded(
+            PixelFormat::Yuv420p,
+            (2, 2),
+            ColorMatrix::Bt709,
+            ColorRange::Limited,
+            &bytes,
+        )
+        .expect("rgba");
+        assert_eq!(limited, studio);
+        let full = coded(
+            PixelFormat::Yuv420p,
+            (2, 2),
+            ColorMatrix::Bt709,
+            ColorRange::Full,
+            &bytes,
+        )
+        .expect("rgba");
+        assert_eq!(&full[..4], [128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn a_coded_picture_uses_the_matrix_its_stream_names() {
+        // One 4:4:4 sample with a strong red difference. The red weight of
+        // BT.601 is larger than BT.709's, so its red gain is smaller.
+        let bytes = [126, 128, 200];
+        let rgba = |matrix| {
+            coded(
+                PixelFormat::Yuv444p,
+                (1, 1),
+                matrix,
+                ColorRange::Limited,
+                &bytes,
+            )
+            .expect("rgba")
+        };
+        let bt709 = rgba(ColorMatrix::Bt709);
+        let bt601 = rgba(ColorMatrix::Bt601);
+        let bt2020 = rgba(ColorMatrix::Bt2020);
+        assert_eq!(rgba(ColorMatrix::Unspecified), bt709);
+        // R = Y + 2 (1 - Kr) Cr with Cr = 72 / 224.
+        let red = |kr: f64| {
+            let y = (126.0 - 16.0) / 219.0;
+            ((y + 2.0 * (1.0 - kr) * 72.0 / 224.0) * 255.0).round() as u8
+        };
+        assert_eq!(bt709[0], red(0.2126));
+        assert_eq!(bt601[0], red(0.299));
+        assert_eq!(bt2020[0], red(0.2627));
+        assert!(bt601[0] < bt2020[0] && bt2020[0] < bt709[0]);
+    }
+
+    #[test]
+    fn every_planar_layout_and_depth_becomes_a_picture() {
+        // A neutral studio grey at each depth: 126, 504 and 2016 are the
+        // same level, and neutral chroma is 128, 512 and 2048.
+        let grey = [128, 128, 128, 255];
+        for (pixel, size) in [
+            (PixelFormat::Yuv420p, (2, 2)),
+            (PixelFormat::Yuv422p, (2, 2)),
+            (PixelFormat::Yuv422p, (3, 1)),
+            (PixelFormat::Yuv440p, (2, 2)),
+            (PixelFormat::Yuv440p, (1, 3)),
+            (PixelFormat::Yuv444p, (2, 2)),
+        ] {
+            let (cw, ch) = pixel.chroma_wh(size.0, size.1).expect("planar");
+            let mut bytes = vec![126u8; (size.0 * size.1) as usize];
+            bytes.extend(vec![128u8; 2 * (cw * ch) as usize]);
+            let rgba = coded(pixel, size, UNNAMED.0, UNNAMED.1, &bytes).expect("8-bit");
+            assert_eq!(rgba.len(), (size.0 * size.1 * 4) as usize, "{pixel:?}");
+            assert!(rgba.chunks(4).all(|p| p == grey), "{pixel:?}");
+        }
+        for (pixel, luma, chroma) in [
+            (PixelFormat::Yuv420p10, 504u16, 512u16),
+            (PixelFormat::Yuv422p10, 504, 512),
+            (PixelFormat::Yuv440p10, 504, 512),
+            (PixelFormat::Yuv444p10, 504, 512),
+            (PixelFormat::Yuv420p12, 2016, 2048),
+            (PixelFormat::Yuv422p12, 2016, 2048),
+            (PixelFormat::Yuv440p12, 2016, 2048),
+            (PixelFormat::Yuv444p12, 2016, 2048),
+        ] {
+            let (cw, ch) = pixel.chroma_wh(2, 2).expect("planar");
+            let mut samples = vec![luma; 4];
+            samples.extend(vec![chroma; 2 * (cw * ch) as usize]);
+            let rgba = coded(pixel, (2, 2), UNNAMED.0, UNNAMED.1, &wide(&samples)).expect("wide");
+            assert!(rgba.chunks(4).all(|p| p == grey), "{pixel:?}");
+        }
+    }
+
+    #[test]
+    fn gbr_planes_come_out_as_red_green_blue() {
+        // Planes G, B, R. An identity stream is full range unless it says
+        // otherwise; the unnamed range here is studio swing, as for Y′CbCr.
+        let full = coded(
+            PixelFormat::Gbrp,
+            (1, 1),
+            ColorMatrix::Identity,
+            ColorRange::Full,
+            &[10, 20, 30],
+        )
+        .expect("gbr");
+        assert_eq!(full, [30, 10, 20, 255]);
+        let ten = coded(
+            PixelFormat::Gbrp10,
+            (1, 1),
+            ColorMatrix::Identity,
+            ColorRange::Full,
+            &wide(&[1023, 0, 512]),
+        )
+        .expect("gbr10");
+        assert_eq!(ten, [128, 255, 0, 255]);
+        let twelve = coded(
+            PixelFormat::Gbrp12,
+            (1, 1),
+            ColorMatrix::Identity,
+            ColorRange::Full,
+            &wide(&[0, 4095, 2048]),
+        )
+        .expect("gbr12");
+        assert_eq!(twelve, [128, 0, 255, 255]);
+    }
+
+    #[test]
+    fn a_picture_the_color_crate_cannot_read_is_a_color_miss() {
+        let miss = |pixel, size, matrix, bytes: &[u8]| {
+            matches!(
+                coded(pixel, size, matrix, ColorRange::Limited, bytes),
+                Err(EngineError::ColorMiss { .. })
+            )
+        };
+        // Bytes of another length, one grey plane, a matrix with no
+        // weights, the identity matrix on planes that are not GBR, a
+        // sample past its depth, and an odd 4:2:0 size.
+        assert!(miss(
+            PixelFormat::Yuv420p,
+            (2, 2),
+            ColorMatrix::Bt709,
+            &[0; 5]
+        ));
+        assert!(miss(
+            PixelFormat::Yuv420p10,
+            (2, 2),
+            ColorMatrix::Bt709,
+            &[0; 6]
+        ));
+        assert!(miss(
+            PixelFormat::Gray8,
+            (2, 2),
+            ColorMatrix::Bt709,
+            &[0; 4]
+        ));
+        assert!(miss(
+            PixelFormat::Yuv444p,
+            (1, 1),
+            ColorMatrix::Ycgco,
+            &[0; 3]
+        ));
+        assert!(miss(
+            PixelFormat::Yuv444p,
+            (1, 1),
+            ColorMatrix::Identity,
+            &[0; 3]
+        ));
+        assert!(miss(
+            PixelFormat::Yuv444p10,
+            (1, 1),
+            ColorMatrix::Bt709,
+            &wide(&[1024, 512, 512])
+        ));
+        assert!(miss(
+            PixelFormat::Yuv420p,
+            (3, 3),
+            ColorMatrix::Bt709,
+            &[0; 17]
+        ));
     }
 
     #[test]

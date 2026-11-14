@@ -401,8 +401,8 @@ fn read_audfrm(r: &mut BitReader<'_>, bsi: &Bsi) -> Result<FrameInfo, CodecError
             if fi.cplinu[blk] {
                 fi.cplexpstr[blk] = r.read(2, "cplexpstr")? as u8;
             }
-            for ch in 0..nf {
-                fi.chexpstr[blk][ch] = r.read(2, "chexpstr")? as u8;
+            for slot in &mut fi.chexpstr[blk][..nf] {
+                *slot = r.read(2, "chexpstr")? as u8;
             }
         }
     } else {
@@ -425,8 +425,8 @@ fn read_audfrm(r: &mut BitReader<'_>, bsi: &Bsi) -> Result<FrameInfo, CodecError
         }
     }
     if bsi.lfeon {
-        for blk in 0..blocks {
-            fi.lfeexpstr[blk] = r.read(1, "lfeexpstr")? as u8;
+        for slot in &mut fi.lfeexpstr[..blocks] {
+            *slot = r.read(1, "lfeexpstr")? as u8;
         }
     }
     if bsi.stream_type == StreamType::Independent {
@@ -460,9 +460,9 @@ fn read_audfrm(r: &mut BitReader<'_>, bsi: &Bsi) -> Result<FrameInfo, CodecError
         fi.frm_fsnr = r.read(4, "frmfsnroffst")?;
     }
     if transproce {
-        for ch in 0..nf {
+        for slot in &mut fi.transients[..nf] {
             if r.bit("chintransproc")? {
-                fi.transients[ch] = Some(Transient {
+                *slot = Some(Transient {
                     location: r.read(10, "transprocloc")? as u16,
                     length: r.read(8, "transproclen")? as u8,
                 });
@@ -470,9 +470,9 @@ fn read_audfrm(r: &mut BitReader<'_>, bsi: &Bsi) -> Result<FrameInfo, CodecError
         }
     }
     if spxattene {
-        for ch in 0..nf {
+        for slot in &mut fi.spxatten[..nf] {
             if r.bit("chinspxatten")? {
-                fi.spxatten[ch] = Some(r.read(5, "spxattencod")? as u8);
+                *slot = Some(r.read(5, "spxattencod")? as u8);
             }
         }
     }
@@ -650,25 +650,25 @@ impl<'a> State<'a> {
         let acmod = self.bsi.acmod;
 
         if !eac3 || fi.blkswe {
-            for ch in 0..nf {
-                self.blksw[ch] = r.bit("blksw")?;
+            for flag in &mut self.blksw[..nf] {
+                *flag = r.bit("blksw")?;
             }
         } else {
             self.blksw = [false; MAX_FBW];
         }
         if !eac3 || fi.dithflage {
-            for ch in 0..nf {
-                self.dith[ch] = r.bit("dithflag")?;
+            for flag in &mut self.dith[..nf] {
+                *flag = r.bit("dithflag")?;
             }
         } else {
             self.dith = [true; MAX_FBW];
         }
         let programs = if acmod == 0 { 2 } else { 1 };
-        for program in 0..programs {
+        for slot in &mut self.dynrng[..programs] {
             if r.bit("dynrnge")? {
-                self.dynrng[program] = Some(r.read(8, "dynrng")? as u8);
+                *slot = Some(r.read(8, "dynrng")? as u8);
             } else if blk == 0 {
-                self.dynrng[program] = None;
+                *slot = None;
             }
         }
 
@@ -868,8 +868,8 @@ impl<'a> State<'a> {
                 if self.bsi.acmod == 1 {
                     self.chinspx[0] = true;
                 } else {
-                    for ch in 0..nf {
-                        self.chinspx[ch] = r.bit("chinspx")?;
+                    for flag in &mut self.chinspx[..nf] {
+                        *flag = r.bit("chinspx")?;
                     }
                 }
                 let start = r.read(2, "spxstrtf")? as usize;
@@ -880,8 +880,8 @@ impl<'a> State<'a> {
                     return Err(malformed(r, "spectral extension range"));
                 }
                 if r.bit("spxbndstrce")? {
-                    for sbnd in begin + 1..end {
-                        self.spx_struct[sbnd] = r.bit("spxbndstrc")?;
+                    for flag in &mut self.spx_struct[begin + 1..end] {
+                        *flag = r.bit("spxbndstrc")?;
                     }
                 }
                 self.spx = spx::Range {
@@ -964,8 +964,8 @@ impl<'a> State<'a> {
         if self.eac3 && acmod == 2 {
             self.chincpl = [true, true, false, false, false];
         } else {
-            for ch in 0..nf {
-                self.chincpl[ch] = r.bit("chincpl")?;
+            for flag in &mut self.chincpl[..nf] {
+                *flag = r.bit("chincpl")?;
             }
         }
         if enhanced {
@@ -1022,8 +1022,8 @@ impl<'a> State<'a> {
         if r.bit("ecplbndstrce")? {
             self.ecpl_struct = [false; ecpl::MAX_BANDS];
             let from = 9.max(begin + 1);
-            for sub in from..end {
-                self.ecpl_struct[sub] = r.bit("ecplbndstrc")?;
+            for flag in self.ecpl_struct.iter_mut().take(end).skip(from) {
+                *flag = r.bit("ecplbndstrc")?;
             }
         } else if fresh {
             self.ecpl_struct = ecpl::default_structure();
@@ -1115,8 +1115,8 @@ impl<'a> State<'a> {
                 (amp, angle)
             };
             if send_amp {
-                for band in 0..bands {
-                    self.ecpl_amp[ch][band] = r.read(5, "ecplamp")? as u8;
+                for amp in &mut self.ecpl_amp[ch][..bands] {
+                    *amp = r.read(5, "ecplamp")? as u8;
                 }
                 self.ecpl_have[ch] = true;
             } else if !self.ecpl_have[ch] {
@@ -1969,8 +1969,8 @@ mod tests {
         let mut words = Drc::default();
         let full = run(DynamicRange::Off, &words);
         // Code 0xE0 is a gain of one half.
-        for blk in 0..MAX_BLOCKS {
-            words.dynrng[blk] = [Some(0xE0); 2];
+        for slot in &mut words.dynrng[..MAX_BLOCKS] {
+            *slot = [Some(0xE0); 2];
         }
         words.compr = [Some(0xEF); 2];
         let heavy_gain = compr_gain(0xEF);

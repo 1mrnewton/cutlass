@@ -939,6 +939,10 @@ fn covering_offset<T>(
     covered.or(earliest).map(|(_, offset)| offset)
 }
 
+/// How many of the last samples can display after the last one decodes:
+/// past the deepest reorder any picture codec allows.
+const REORDER_TAIL: usize = 32;
+
 fn locate(samples: Option<&Vec<Sample>>, ticks: i64) -> Result<Landing, Error> {
     let Some(samples) = samples else {
         return Err(Error::SeekLimited {
@@ -956,7 +960,15 @@ fn locate(samples: Option<&Vec<Sample>>, ticks: i64) -> Result<Landing, Error> {
         });
     };
     let mut visited = 1u32;
-    let end = last.dts.saturating_add(i64::from(last.duration));
+    // `ticks` is a presentation time, and with reordered pictures the last
+    // ones display after the last decode time ends. The track ends where
+    // the latest of its last pictures stops showing.
+    let end = samples
+        .iter()
+        .rev()
+        .take(REORDER_TAIL)
+        .map(|sample| sample.pts.saturating_add(i64::from(sample.duration)))
+        .fold(last.dts.saturating_add(i64::from(last.duration)), i64::max);
     if ticks >= end {
         return Ok(Landing {
             cursor: samples.len(),

@@ -466,6 +466,71 @@ fn kernel_block<P: Pixel>(
     })
 }
 
+/// A block of 10-bit or 12-bit samples for the two-pass kernel of
+/// `cutlass-simd`.
+struct KernelBlock16<'a> {
+    src: &'a [u16],
+    start: usize,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fh: [i8; 8],
+    fv: [i8; 8],
+    bd: u32,
+}
+
+impl KernelBlock16<'_> {
+    fn with<R>(&self, f: impl FnOnce(&kernel::Block16<'_>) -> R) -> R {
+        f(&kernel::Block16 {
+            src: self.src,
+            start: self.start,
+            src_stride: self.src_stride,
+            w: self.w,
+            h: self.h,
+            fh: &self.fh,
+            fv: &self.fv,
+            bd: self.bd,
+        })
+    }
+}
+
+/// [`kernel_block`] for samples past 8 bits.
+#[inline(always)]
+fn kernel_block16<P: Pixel>(
+    src: &[P],
+    src_off: usize,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    (fx, mx): (usize, usize),
+    (fy, my): (usize, usize),
+    bd: u32,
+) -> Option<KernelBlock16<'_>> {
+    if !kernel::ACCELERATED || !P::HBD {
+        return None;
+    }
+    let row = |f: &[i16; 8], frac: usize| -> Option<[i8; 8]> {
+        let mut out = [0i8; 8];
+        if frac == 0 {
+            return Some(out);
+        }
+        for (o, &t) in out.iter_mut().zip(f) {
+            *o = i8::try_from(t).ok()?;
+        }
+        Some(out)
+    };
+    Some(KernelBlock16 {
+        src: P::words(src)?,
+        start: src_off.checked_sub(3 * src_stride + 3)?,
+        src_stride,
+        w,
+        h,
+        fh: row(&SUBPEL_FILTERS[fx][mx], mx)?,
+        fv: row(&SUBPEL_FILTERS[fy][my], my)?,
+        bd,
+    })
+}
+
 /// Horizontal then vertical filtering through an `i16` intermediate.
 /// `wr(A, B)` receives the split vertical sums.
 #[inline]
@@ -685,6 +750,12 @@ pub fn put<P: Pixel>(
             {
                 return;
             }
+            if let Some(b) = kernel_block16(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                && let Some(out) = P::words_mut(dst)
+                && b.with(|b| kernel::put_h_u16(out, dst_stride, b))
+            {
+                return;
+            }
             // The vertical filter is the identity: Round2(i * 128, r1).
             let sh = r1 - 7;
             let rnd = 1i16 << (sh - 1);
@@ -707,6 +778,12 @@ pub fn put<P: Pixel>(
             if let Some(b) = kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
                 && let Some(out) = P::bytes_mut(dst)
                 && b.with(|b| kernel::put_v_u8(out, dst_stride, b))
+            {
+                return;
+            }
+            if let Some(b) = kernel_block16(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                && let Some(out) = P::words_mut(dst)
+                && b.with(|b| kernel::put_v_u16(out, dst_stride, b))
             {
                 return;
             }
@@ -745,6 +822,12 @@ pub fn put<P: Pixel>(
             if let Some(b) = kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
                 && let Some(out) = P::bytes_mut(dst)
                 && b.with(|b| kernel::put_hv_u8(out, dst_stride, b))
+            {
+                return;
+            }
+            if let Some(b) = kernel_block16(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                && let Some(out) = P::words_mut(dst)
+                && b.with(|b| kernel::put_hv_u16(out, dst_stride, b))
             {
                 return;
             }
@@ -878,6 +961,12 @@ pub fn prep<P: Pixel>(
         (false, true)
             if kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
                 .is_some_and(|b| b.with(|b| kernel::prep_v_u8(tmp, w, b))) => {}
+        (true, false)
+            if kernel_block16(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                .is_some_and(|b| b.with(|b| kernel::prep_h_u16(tmp, w, b))) => {}
+        (false, true)
+            if kernel_block16(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                .is_some_and(|b| b.with(|b| kernel::prep_v_u16(tmp, w, b))) => {}
         (true, false) => h_pass_dyn::<P, i16>(
             tmp,
             w,
@@ -929,6 +1018,9 @@ pub fn prep<P: Pixel>(
         (true, true)
             if kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
                 .is_some_and(|b| b.with(|b| kernel::prep_hv_u8(tmp, w, b))) => {}
+        (true, true)
+            if kernel_block16(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                .is_some_and(|b| b.with(|b| kernel::prep_hv_u16(tmp, w, b))) => {}
         // pred = Round2(2 * (256 * A + B), 7) = 4 * A + Round2(B, 6).
         (true, true) => hv::<P, i16>(
             tmp,

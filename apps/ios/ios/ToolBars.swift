@@ -83,6 +83,7 @@ extension ToolKind {
         case .freeze: "freeze"
         case .extractAudio: "extractAudio"
         case .fade: "fade"
+        case .opacity: "opacity"
         case .beats: "beat"
         case .unlink: "unlink"
         case .splice: "splice"
@@ -93,6 +94,7 @@ extension ToolKind {
         case .editText: "editText"
         case .draw: "draw"
         case .videoEffects: "plugin"
+        case .shapeStyle: "shapes"
         }
     }
 }

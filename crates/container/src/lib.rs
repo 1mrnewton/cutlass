@@ -48,6 +48,7 @@
 
 #![forbid(unsafe_code)]
 
+mod av1;
 mod demux;
 mod error;
 mod input;
@@ -59,6 +60,7 @@ mod seek;
 mod stream;
 mod time;
 
+pub use av1::av1_sample;
 pub use demux::Demux;
 pub use error::{MuxError, OpenError, ReadError, SeekError, SourceError};
 pub use input::{Access, Input};

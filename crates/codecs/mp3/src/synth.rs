@@ -210,9 +210,9 @@ impl Synthesis {
             *slot = sum;
         }
         // V[i] = sum_k S[k] cos((16 + i)(2k + 1) pi / 64).
-        for i in 0..64 {
+        for (i, value) in self.v[..64].iter_mut().enumerate() {
             let n = 16 + i;
-            self.v[i] = match n {
+            *value = match n {
                 16..=32 => x[n],
                 33..=48 => -x[64 - n],
                 _ => -x[n.abs_diff(64)],
@@ -253,12 +253,12 @@ mod tests {
         let mut synth = Synthesis::default();
         let mut pcm = [0f32; 32];
         synth.run(&subbands, &mut pcm);
-        for i in 0..64 {
+        for (i, value) in synth.v[..64].iter().enumerate() {
             let mut direct = 0f64;
             for (k, s) in subbands.iter().enumerate() {
                 direct += f64::from(*s) * ((16 + i) as f64 * (2 * k + 1) as f64 * PI / 64.0).cos();
             }
-            assert!((direct - f64::from(synth.v[i])).abs() < 1e-5, "V[{i}]");
+            assert!((direct - f64::from(*value)).abs() < 1e-5, "V[{i}]");
         }
     }
 

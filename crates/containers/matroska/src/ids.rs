@@ -97,6 +97,13 @@ pub const CUE_TRACK: u32 = 0xF7;
 pub const CUE_CLUSTER_POSITION: u32 = 0xF1;
 pub const CUE_RELATIVE_POSITION: u32 = 0xF0;
 
+// Attachments (5.1.6).
+pub const ATTACHED_FILE: u32 = 0x61A7;
+pub const FILE_NAME: u32 = 0x466E;
+pub const FILE_MEDIA_TYPE: u32 = 0x4660;
+pub const FILE_DATA: u32 = 0x465C;
+pub const FILE_UID: u32 = 0x46AE;
+
 /// Elements whose appearance ends an unknown-size Cluster: the Segment's
 /// other children and the root (RFC 8794, 6.2: a valid parent, sibling, or
 /// root element ends an unknown-sized element).

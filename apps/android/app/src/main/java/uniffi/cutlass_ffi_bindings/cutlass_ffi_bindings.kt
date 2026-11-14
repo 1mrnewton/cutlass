@@ -707,9 +707,23 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_create_project(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_crop_ratios(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_cutlass_license(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_delete_project(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_duplicate_project(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_effect_choices(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_export_rates(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_export_sides(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_filter_choices(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_filter_poster(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_fling_start(
     ): Int
@@ -719,11 +733,25 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_list_projects(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_notice_text(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_notices(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_rename_project(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_shape_choices(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_shape_style_ranges(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_speed_at(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_speed_position(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_start(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_sticker_choices(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_sticker_poster(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_text_colors(
     ): Int
@@ -731,15 +759,31 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_tool_bar(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_transition_categories(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_func_transition_choices(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_volume_at(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_func_volume_position(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_add_adjustment(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_add_clip_effect(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_add_effect(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_add_filter(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_add_overlay(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_add_shape(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_add_sticker(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_add_text(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_adjust_sliders(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_animations(
     ): Int
@@ -747,11 +791,17 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_background(
     ): Int
-    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_beats(
-    ): Int
-    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_abilities(
-    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_bar(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_filter(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_state(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_cuts(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_draw_stroke(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_duplicate(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_duration_us(
     ): Int
@@ -759,19 +809,23 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_export(
     ): Int
-    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_extract_audio(
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_export_with(
     ): Int
-    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_fade(
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_extract_audio(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_film(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_fonts(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_fonts_matching(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_frame(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_freeze(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_import(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_import_sound_of(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_import_subtitles(
     ): Int
@@ -781,6 +835,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_lanes(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_linkage_enabled(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_move_clip(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_pause(
@@ -789,11 +845,17 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_ratios(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_recover_audio(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_redo(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_remove(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_remove_transition(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_reorder(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_replace_file(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_ruler(
     ): Int
@@ -801,23 +863,47 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_seek(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_adjust(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_animation(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_background(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_clip_filter(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_crop(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_fade(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_font_folders(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_linkage_enabled(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_opacity(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_ratio(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_row_muted(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_speed(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_strength(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_text(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_text_font(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_text_font_axis(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_text_range_pattern(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_transition(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_transition_length(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_set_volume(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_shape_style(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_split(
     ): Int
@@ -831,9 +917,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_pick(
     ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_style_shape(
+    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_style_text(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_text(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_text_font_axes(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_text_range_pattern(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_thumb(
     ): Int
@@ -843,13 +935,13 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_beat(
     ): Int
-    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_crop(
-    ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_keyframe(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_mirror(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_reverse(
+    ): Int
+    external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_transition_everywhere(
     ): Int
     external fun uniffi_cutlass_ffi_bindings_checksum_method_editor_trim(
     ): Int
@@ -894,11 +986,23 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_constructor_editor_open(`root`: RustBuffer.ByValue,`bundle`: RustBuffer.ByValue,`project`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_add_adjustment(`ptr`: Long,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_add_clip_effect(`ptr`: Long,`clipId`: RustBuffer.ByValue,`effectId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_add_effect(`ptr`: Long,`effectId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_add_filter(`ptr`: Long,`filterId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_add_overlay(`ptr`: Long,`materialId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_add_shape(`ptr`: Long,`shapeId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_add_sticker(`ptr`: Long,`stickerId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_add_text(`ptr`: Long,`content`: RustBuffer.ByValue,`face`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_adjust_sliders(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_animations(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -906,11 +1010,17 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_background(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_beats(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_clip_abilities(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_clip_bar(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_clip_filter(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_clip_state(`ptr`: Long,`clipId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_cuts(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_draw_stroke(`ptr`: Long,`trace`: RustBuffer.ByValue,`atUs`: Long,`color`: RustBuffer.ByValue,`width`: Double,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_duplicate(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_duration_us(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -918,19 +1028,23 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_export(`ptr`: Long,`path`: RustBuffer.ByValue,`shortSide`: Int,`progress`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_export_with(`ptr`: Long,`path`: RustBuffer.ByValue,`options`: RustBuffer.ByValue,`progress`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_extract_audio(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_fade(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
+    ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_film(`ptr`: Long,`fromUs`: Long,`toUs`: Long,`pixelSize`: Double,`height`: Double,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_fonts(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_fonts_matching(`ptr`: Long,`query`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_frame(`ptr`: Long,`timeUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_freeze(`ptr`: Long,`clipId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_import(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_import_sound_of(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_import_subtitles(`ptr`: Long,`fileName`: RustBuffer.ByValue,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -940,6 +1054,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_lanes(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_linkage_enabled(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_move_clip(`ptr`: Long,`clipId`: RustBuffer.ByValue,`row`: Int,`startUs`: Long,`snapUs`: Long,`playheadUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_pause(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -948,11 +1064,17 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_ratios(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_recover_audio(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_redo(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_remove(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_remove_transition(`ptr`: Long,`outgoingId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_reorder(`ptr`: Long,`clipId`: RustBuffer.ByValue,`place`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_replace_file(`ptr`: Long,`clipId`: RustBuffer.ByValue,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_ruler(`ptr`: Long,`pixelSize`: Double,`fromUs`: Long,`toUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -960,24 +1082,48 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_seek(`ptr`: Long,`timeUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_adjust(`ptr`: Long,`clipId`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`value`: Double,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_animation(`ptr`: Long,`clipId`: RustBuffer.ByValue,`enter`: Byte,`id`: RustBuffer.ByValue,`durationUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_background(`ptr`: Long,`background`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_fade(`ptr`: Long,`clipId`: RustBuffer.ByValue,`inUs`: Long,`outUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_clip_filter(`ptr`: Long,`clipId`: RustBuffer.ByValue,`filterId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_crop(`ptr`: Long,`clipId`: RustBuffer.ByValue,`ratio`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_fade(`ptr`: Long,`clipId`: RustBuffer.ByValue,`fadeInUs`: Long,`fadeOutUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_font_folders(`ptr`: Long,`folders`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_linkage_enabled(`ptr`: Long,`on`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_opacity(`ptr`: Long,`clipId`: RustBuffer.ByValue,`opacity`: Double,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_ratio(`ptr`: Long,`ratio`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_row_muted(`ptr`: Long,`rowId`: RustBuffer.ByValue,`muted`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_speed(`ptr`: Long,`clipId`: RustBuffer.ByValue,`speed`: Double,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_strength(`ptr`: Long,`clipId`: RustBuffer.ByValue,`value`: Double,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_text(`ptr`: Long,`clipId`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_text_font(`ptr`: Long,`clipId`: RustBuffer.ByValue,`face`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_text_font_axis(`ptr`: Long,`clipId`: RustBuffer.ByValue,`tag`: RustBuffer.ByValue,`value`: Double,`live`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_text_range_pattern(`ptr`: Long,`clipId`: RustBuffer.ByValue,`start`: Int,`end`: Int,`bold`: RustBuffer.ByValue,`italic`: RustBuffer.ByValue,`underline`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_transition(`ptr`: Long,`outgoingId`: RustBuffer.ByValue,`transitionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_transition_length(`ptr`: Long,`outgoingId`: RustBuffer.ByValue,`durationUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_set_volume(`ptr`: Long,`clipId`: RustBuffer.ByValue,`volume`: Double,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_shape_style(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_split(`ptr`: Long,`clipId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_stage(`ptr`: Long,`clipId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -990,9 +1136,15 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_stage_pick(`ptr`: Long,`atUs`: Long,`x`: Double,`y`: Double,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_style_shape(`ptr`: Long,`clipId`: RustBuffer.ByValue,`change`: RustBuffer.ByValue,`live`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_style_text(`ptr`: Long,`clipId`: RustBuffer.ByValue,`change`: RustBuffer.ByValue,`live`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_text(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_text_font_axes(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_text_range_pattern(`ptr`: Long,`clipId`: RustBuffer.ByValue,`start`: Int,`end`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_thumb(`ptr`: Long,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1001,14 +1153,14 @@ internal object UniffiLib {
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_to_main(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_beat(`ptr`: Long,`clipId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Byte
-    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_crop(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_keyframe(`ptr`: Long,`clipId`: RustBuffer.ByValue,`atUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_mirror(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_reverse(`ptr`: Long,`clipId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_method_editor_transition_everywhere(`ptr`: Long,`outgoingId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_cutlass_ffi_bindings_fn_method_editor_trim(`ptr`: Long,`clipId`: RustBuffer.ByValue,`startEdge`: Byte,`timeUs`: Long,`snapUs`: Long,`playheadUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -1040,9 +1192,23 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_create_project(`root`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_func_crop_ratios(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_func_cutlass_license(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_func_delete_project(`root`: RustBuffer.ByValue,`project`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_func_duplicate_project(`root`: RustBuffer.ByValue,`project`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_effect_choices(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_func_export_rates(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_export_sides(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_func_filter_choices(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_func_filter_poster(`filterId`: RustBuffer.ByValue,`width`: Int,`height`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_fling_start(`velocity`: Double,uniffi_out_err: UniffiRustCallStatus, 
     ): Double
@@ -1052,17 +1218,35 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_list_projects(`root`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_func_notice_text(`index`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_func_notices(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_func_rename_project(`root`: RustBuffer.ByValue,`project`: RustBuffer.ByValue,`name`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_func_shape_choices(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_func_shape_style_ranges(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_speed_at(`position`: Double,uniffi_out_err: UniffiRustCallStatus, 
     ): Double
     external fun uniffi_cutlass_ffi_bindings_fn_func_speed_position(`speed`: Double,uniffi_out_err: UniffiRustCallStatus, 
     ): Double
     external fun uniffi_cutlass_ffi_bindings_fn_func_start(`root`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_cutlass_ffi_bindings_fn_func_sticker_choices(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_func_sticker_poster(`stickerId`: RustBuffer.ByValue,`side`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_text_colors(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_text_style_ranges(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_tool_bar(`bar`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_func_transition_categories(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_cutlass_ffi_bindings_fn_func_transition_choices(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_cutlass_ffi_bindings_fn_func_volume_at(`position`: Double,uniffi_out_err: UniffiRustCallStatus, 
     ): Double
@@ -1202,10 +1386,31 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_create_project() and 0xFFFF) != 16508) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_crop_ratios() and 0xFFFF) != 30681) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_cutlass_license() and 0xFFFF) != 21176) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_delete_project() and 0xFFFF) != 11651) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_duplicate_project() and 0xFFFF) != 36546) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_effect_choices() and 0xFFFF) != 59474) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_export_rates() and 0xFFFF) != 11988) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_export_sides() and 0xFFFF) != 28968) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_filter_choices() and 0xFFFF) != 57540) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_filter_poster() and 0xFFFF) != 21732) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_fling_start() and 0xFFFF) != 16462) {
@@ -1220,6 +1425,21 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_list_projects() and 0xFFFF) != 22684) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_notice_text() and 0xFFFF) != 58668) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_notices() and 0xFFFF) != 20508) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_rename_project() and 0xFFFF) != 53408) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_shape_choices() and 0xFFFF) != 6033) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_shape_style_ranges() and 0xFFFF) != 33721) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_speed_at() and 0xFFFF) != 24871) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1227,6 +1447,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_start() and 0xFFFF) != 16636) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_sticker_choices() and 0xFFFF) != 17553) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_sticker_poster() and 0xFFFF) != 59649) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_text_colors() and 0xFFFF) != 11524) {
@@ -1238,19 +1464,43 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_tool_bar() and 0xFFFF) != 18374) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_transition_categories() and 0xFFFF) != 17202) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_transition_choices() and 0xFFFF) != 11507) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_volume_at() and 0xFFFF) != 31091) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_func_volume_position() and 0xFFFF) != 27181) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_add_adjustment() and 0xFFFF) != 38275) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_add_clip_effect() and 0xFFFF) != 39842) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_add_effect() and 0xFFFF) != 55608) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_add_overlay() and 0xFFFF) != 11159) {
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_add_filter() and 0xFFFF) != 22333) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_add_overlay() and 0xFFFF) != 34969) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_add_shape() and 0xFFFF) != 31575) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_add_sticker() and 0xFFFF) != 61307) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_add_text() and 0xFFFF) != 17542) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_adjust_sliders() and 0xFFFF) != 45831) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_animations() and 0xFFFF) != 53700) {
@@ -1262,13 +1512,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_background() and 0xFFFF) != 32988) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_beats() and 0xFFFF) != 22059) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_abilities() and 0xFFFF) != 20857) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_bar() and 0xFFFF) != 29840) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_filter() and 0xFFFF) != 57581) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_state() and 0xFFFF) != 1119) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_cuts() and 0xFFFF) != 46999) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_draw_stroke() and 0xFFFF) != 40878) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_duplicate() and 0xFFFF) != 16850) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_duration_us() and 0xFFFF) != 41273) {
@@ -1280,10 +1539,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_export() and 0xFFFF) != 5234) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_extract_audio() and 0xFFFF) != 62162) {
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_export_with() and 0xFFFF) != 46881) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_fade() and 0xFFFF) != 16188) {
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_extract_audio() and 0xFFFF) != 33623) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_film() and 0xFFFF) != 35426) {
@@ -1292,13 +1551,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_fonts() and 0xFFFF) != 7751) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_fonts_matching() and 0xFFFF) != 20572) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_frame() and 0xFFFF) != 13353) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_freeze() and 0xFFFF) != 5340) {
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_freeze() and 0xFFFF) != 19513) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_import() and 0xFFFF) != 38694) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_import_sound_of() and 0xFFFF) != 5995) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_import_subtitles() and 0xFFFF) != 5378) {
@@ -1313,6 +1578,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_lanes() and 0xFFFF) != 20121) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_linkage_enabled() and 0xFFFF) != 52789) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_move_clip() and 0xFFFF) != 64054) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1325,13 +1593,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_ratios() and 0xFFFF) != 56006) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_recover_audio() and 0xFFFF) != 43087) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_redo() and 0xFFFF) != 49063) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_remove() and 0xFFFF) != 65039) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_remove_transition() and 0xFFFF) != 61176) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_reorder() and 0xFFFF) != 12502) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_replace_file() and 0xFFFF) != 25348) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_ruler() and 0xFFFF) != 61631) {
@@ -1343,22 +1620,43 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_seek() and 0xFFFF) != 51490) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_adjust() and 0xFFFF) != 27641) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_animation() and 0xFFFF) != 15913) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_background() and 0xFFFF) != 52021) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_fade() and 0xFFFF) != 13023) {
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_clip_filter() and 0xFFFF) != 8368) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_crop() and 0xFFFF) != 19401) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_fade() and 0xFFFF) != 62223) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_font_folders() and 0xFFFF) != 41608) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_linkage_enabled() and 0xFFFF) != 48699) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_opacity() and 0xFFFF) != 19016) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_ratio() and 0xFFFF) != 52174) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_row_muted() and 0xFFFF) != 2982) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_speed() and 0xFFFF) != 10406) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_strength() and 0xFFFF) != 31174) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_text() and 0xFFFF) != 55482) {
@@ -1367,7 +1665,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_text_font() and 0xFFFF) != 34181) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_text_font_axis() and 0xFFFF) != 26173) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_text_range_pattern() and 0xFFFF) != 20616) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_transition() and 0xFFFF) != 5556) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_transition_length() and 0xFFFF) != 36827) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_set_volume() and 0xFFFF) != 9150) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_shape_style() and 0xFFFF) != 58512) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_split() and 0xFFFF) != 36702) {
@@ -1388,10 +1701,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_pick() and 0xFFFF) != 22121) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_style_shape() and 0xFFFF) != 51484) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_style_text() and 0xFFFF) != 8659) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_text() and 0xFFFF) != 30726) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_text_font_axes() and 0xFFFF) != 28854) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_text_range_pattern() and 0xFFFF) != 22874) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_thumb() and 0xFFFF) != 28776) {
@@ -1400,28 +1722,28 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_tick() and 0xFFFF) != 60373) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_to_main() and 0xFFFF) != 50529) {
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_to_main() and 0xFFFF) != 1324) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_beat() and 0xFFFF) != 21214) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_crop() and 0xFFFF) != 39418) {
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_beat() and 0xFFFF) != 57877) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_keyframe() and 0xFFFF) != 8108) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_mirror() and 0xFFFF) != 58666) {
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_mirror() and 0xFFFF) != 19586) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_reverse() and 0xFFFF) != 60213) {
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_reverse() and 0xFFFF) != 56429) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_transition_everywhere() and 0xFFFF) != 8533) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_trim() and 0xFFFF) != 7512) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_turn() and 0xFFFF) != 44776) {
+    if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_turn() and 0xFFFF) != 38996) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_cutlass_ffi_bindings_checksum_method_editor_type_text() and 0xFFFF) != 45610) {
@@ -1969,22 +2291,57 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 public interface EditorInterface {
     
     /**
+     * Put an adjustment layer at `at_us`, its sliders at zero. One undo
+     * step. Returns the layer's id.
+     */
+    fun `addAdjustment`(`atUs`: kotlin.Long): kotlin.String
+    
+    /**
+     * Run effect `effect_id` over the picture clip `clip_id` alone, for
+     * its span. One undo step. Returns the effect clip's id.
+     */
+    fun `addClipEffect`(`clipId`: kotlin.String, `effectId`: kotlin.String): kotlin.String
+    
+    /**
      * Add the effect `effect_id` at `at_us` over everything below it, as
      * one undo step. Returns the new clip's id.
      */
     fun `addEffect`(`effectId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String
     
     /**
-     * Put the whole of a library picture on an overlay row at `at_us`, as
-     * one undo step. Returns the new clip.
+     * Put the filter layer `filter_id` at `at_us`, over every picture
+     * below it. One undo step. Returns the layer's id.
+     */
+    fun `addFilter`(`filterId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String
+    
+    /**
+     * Put a library picture at `at_us` on a row above main. Returns the clip.
      */
     fun `addOverlay`(`materialId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String
+    
+    /**
+     * Put shape `shape_id` at `at_us` on the first sticker row with room,
+     * else a new one. One undo step. Returns the clip's id.
+     */
+    fun `addShape`(`shapeId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String
+    
+    /**
+     * Put sticker `sticker_id` at `at_us` on the first sticker row with
+     * room, else a new one. One undo step. Returns the clip's id.
+     */
+    fun `addSticker`(`stickerId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String
     
     /**
      * Add `content` at `at_us` in `face`, or in the first face when `face`
      * is empty, as one undo step. Returns the new clip's id.
      */
     fun `addText`(`content`: kotlin.String, `face`: kotlin.String, `atUs`: kotlin.Long): kotlin.String
+    
+    /**
+     * Every adjust slider of `clip_id`, or `None` for a clip that has
+     * none.
+     */
+    fun `adjustSliders`(`clipId`: kotlin.String): List<AdjustSlider>?
     
     /**
      * The picture or title clip's in and out animations, or nil for a clip
@@ -2003,20 +2360,38 @@ public interface EditorInterface {
     fun `background`(): Background
     
     /**
-     * The beats on `clip_id`, as timeline times.
-     */
-    fun `beats`(`clipId`: kotlin.String): List<kotlin.Long>
-    
-    /**
-     * What the clip bar can do to `clip_id`.
-     */
-    fun `clipAbilities`(`clipId`: kotlin.String): ClipAbilities
-    
-    /**
      * The tool bar for `clip_id` while it is selected, or `None` for an id
      * no row holds.
      */
     fun `clipBar`(`clipId`: kotlin.String): ToolBar?
+    
+    /**
+     * The filter `clip_id` keeps, or a filter layer's own.
+     */
+    fun `clipFilter`(`clipId`: kotlin.String): ClipFilter?
+    
+    /**
+     * How `clip_id` stands at `at_us`, for its clip tools. `None` when no
+     * row holds it.
+     */
+    fun `clipState`(`clipId`: kotlin.String, `atUs`: kotlin.Long): ClipState?
+    
+    /**
+     * The cuts between touching clips on the main row, earliest first.
+     */
+    fun `cuts`(): List<Cut>
+    
+    /**
+     * Put a freehand stroke through `trace` at `at_us` as a smooth line on
+     * a sticker row, `color` (`#RRGGBB`) and `width` canvas pixels wide.
+     * One undo step. Returns the clip's id.
+     */
+    fun `drawStroke`(`trace`: List<CanvasPoint>, `atUs`: kotlin.Long, `color`: kotlin.String, `width`: kotlin.Double): kotlin.String
+    
+    /**
+     * Put a copy of the clip right after it. Returns the copy.
+     */
+    fun `duplicate`(`clipId`: kotlin.String): kotlin.String
     
     /**
      * The end of the last clip, in microseconds.
@@ -2039,15 +2414,15 @@ public interface EditorInterface {
     fun `export`(`path`: kotlin.String, `shortSide`: kotlin.UInt, `progress`: ExportProgress): Exported
     
     /**
-     * Put a video's sound on its own clip on an audio row, as one undo
-     * step. Returns the sound's clip.
+     * Write the whole cut to `path` as an MP4 at the size, frame rate and
+     * quality `options` asks for. Otherwise as [`Self::export`].
      */
-    fun `extractAudio`(`clipId`: kotlin.String): kotlin.String
+    fun `exportWith`(`path`: kotlin.String, `options`: ExportOptions, `progress`: ExportProgress): Exported
     
     /**
-     * A picture's or a sound's fade in and fade out.
+     * Put the video's sound on a clip of its own. One undo step.
      */
-    fun `fade`(`clipId`: kotlin.String): Fade
+    fun `extractAudio`(`clipId`: kotlin.String)
     
     /**
      * Filmstrip tiles, `height` points tall, for the picture clips that
@@ -2061,13 +2436,19 @@ public interface EditorInterface {
     fun `fonts`(): List<Font>
     
     /**
+     * The faces whose names have every word of `query`, in the order
+     * `fonts` gives them; all of them for no words. Case does not
+     * matter.
+     */
+    fun `fontsMatching`(`query`: kotlin.String): List<Font>
+    
+    /**
      * The picture at `time_us`.
      */
     fun `frame`(`timeUs`: kotlin.Long): Frame
     
     /**
-     * Hold a video's frame at `at_us` as a still, as one undo step.
-     * Returns the still's clip.
+     * Hold the video's frame at `at_us` as a still there. Returns the still.
      */
     fun `freeze`(`clipId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String
     
@@ -2077,6 +2458,12 @@ public interface EditorInterface {
      * Returns the material id.
      */
     fun `import`(`path`: kotlin.String): kotlin.String
+    
+    /**
+     * Bring in the sound of the picked video at `path` as a sound in the
+     * library, without its picture. Returns the material id, for `append`.
+     */
+    fun `importSoundOf`(`path`: kotlin.String): kotlin.String
     
     /**
      * Bring in a subtitle file (SRT or LRC, by the extension of
@@ -2102,6 +2489,11 @@ public interface EditorInterface {
     fun `lanes`(): List<Lane>
     
     /**
+     * Whether clips on other rows go with the main clip they sit on.
+     */
+    fun `linkageEnabled`(): kotlin.Boolean
+    
+    /**
      * Move a clip to `row` (top is 0) starting near `start_us`, as one undo
      * step. It snaps to a cut or the playhead within `snap_us`. Returns the
      * start it landed on.
@@ -2120,15 +2512,32 @@ public interface EditorInterface {
      */
     fun `ratios`(): List<CanvasRatio>
     
+    /**
+     * Give the video its own sound back. One undo step.
+     */
+    fun `recoverAudio`(`clipId`: kotlin.String)
+    
     fun `redo`()
     
     fun `remove`(`clipId`: kotlin.String)
+    
+    /**
+     * Take the transition off the cut after `outgoing_id`. One undo step.
+     */
+    fun `removeTransition`(`outgoingId`: kotlin.String)
     
     /**
      * Put a main clip at `place` in the main row's order, counted from zero
      * without it, as one undo step.
      */
     fun `reorder`(`clipId`: kotlin.String, `place`: kotlin.UInt)
+    
+    /**
+     * Play the picked file at `path` in `clip_id` in place of its media,
+     * keeping the clip's place and edits: one undo step. A picture takes
+     * a photo or video, a sound a sound.
+     */
+    fun `replaceFile`(`clipId`: kotlin.String, `path`: kotlin.String)
     
     /**
      * Ruler ticks from `from_us` through `to_us` at `pixel_size` points per
@@ -2148,6 +2557,12 @@ public interface EditorInterface {
     fun `seek`(`timeUs`: kotlin.Long)
     
     /**
+     * Set adjust slider `key` of a picture clip or an adjustment layer to
+     * `value`. One undo step.
+     */
+    fun `setAdjust`(`clipId`: kotlin.String, `key`: kotlin.String, `value`: kotlin.Double)
+    
+    /**
      * Give the clip the in (`enter`) or out animation `id`, `duration_us`
      * long, or clear that side with an empty id. One undo step.
      */
@@ -2159,9 +2574,22 @@ public interface EditorInterface {
     fun `setBackground`(`background`: Background)
     
     /**
-     * Fade a picture or a sound in and out, as one undo step.
+     * Give the picture clip `clip_id` the filter `filter_id`, swapping out
+     * the one it kept, or take it off with an empty id; a filter layer
+     * swaps in place. One undo step. Returns the new layer's id.
      */
-    fun `setFade`(`clipId`: kotlin.String, `inUs`: kotlin.Long, `outUs`: kotlin.Long)
+    fun `setClipFilter`(`clipId`: kotlin.String, `filterId`: kotlin.String): kotlin.String?
+    
+    /**
+     * Crop the video to its middle at `ratio`, or show the whole frame
+     * for an empty ratio. One undo step.
+     */
+    fun `setCrop`(`clipId`: kotlin.String, `ratio`: kotlin.String)
+    
+    /**
+     * Fade the clip in and out over these lengths. One undo step.
+     */
+    fun `setFade`(`clipId`: kotlin.String, `fadeInUs`: kotlin.Long, `fadeOutUs`: kotlin.Long)
     
     /**
      * Look for faces in `folders` and the folders below them, replacing
@@ -2170,14 +2598,35 @@ public interface EditorInterface {
     fun `setFontFolders`(`folders`: List<kotlin.String>)
     
     /**
+     * Turn linkage on or off. Not an undo step; kept with the project.
+     */
+    fun `setLinkageEnabled`(`on`: kotlin.Boolean)
+    
+    /**
+     * Make the picture `opacity` solid, 0 to 1. One undo step.
+     */
+    fun `setOpacity`(`clipId`: kotlin.String, `opacity`: kotlin.Double)
+    
+    /**
      * Give the canvas a ratio from [`Self::ratios`], as one undo step.
      */
     fun `setRatio`(`ratio`: kotlin.String)
     
     /**
+     * Mute or unmute a row. One undo step.
+     */
+    fun `setRowMuted`(`rowId`: kotlin.String, `muted`: kotlin.Boolean)
+    
+    /**
      * Play a clip at a constant speed, as one undo step. Its length follows.
      */
     fun `setSpeed`(`clipId`: kotlin.String, `speed`: kotlin.Double)
+    
+    /**
+     * Set how strongly a filter, effect or adjustment works, 0 to 1. One
+     * undo step.
+     */
+    fun `setStrength`(`clipId`: kotlin.String, `value`: kotlin.Double)
     
     /**
      * Change what a text clip says, as one undo step.
@@ -2190,10 +2639,42 @@ public interface EditorInterface {
     fun `setTextFont`(`clipId`: kotlin.String, `face`: kotlin.String)
     
     /**
+     * Move a text clip's face to `value` along the axis `tag`, the other
+     * axes staying where they are. Changes made while `live` join one
+     * undo step, so a slider drag is one step; its last change passes
+     * `live` false.
+     */
+    fun `setTextFontAxis`(`clipId`: kotlin.String, `tag`: kotlin.String, `value`: kotlin.Double, `live`: kotlin.Boolean)
+    
+    /**
+     * Turn bold, italic or underline on or off for the letters of a text
+     * clip from `start` up to `end`; a part that is `None` stays as it
+     * is. One undo step.
+     */
+    fun `setTextRangePattern`(`clipId`: kotlin.String, `start`: kotlin.UInt, `end`: kotlin.UInt, `bold`: kotlin.Boolean?, `italic`: kotlin.Boolean?, `underline`: kotlin.Boolean?)
+    
+    /**
+     * Put transition `transition_id` on the cut after `outgoing_id`,
+     * fitted to the clips; one there already is swapped. One undo step.
+     */
+    fun `setTransition`(`outgoingId`: kotlin.String, `transitionId`: kotlin.String)
+    
+    /**
+     * Make the transition after `outgoing_id` last `duration_us`, held to
+     * its range. One undo step.
+     */
+    fun `setTransitionLength`(`outgoingId`: kotlin.String, `durationUs`: kotlin.Long)
+    
+    /**
      * Remove one clip.
      * Set a clip's linear gain, as one undo step. Below zero is refused.
      */
     fun `setVolume`(`clipId`: kotlin.String, `volume`: kotlin.Double)
+    
+    /**
+     * How a shape clip looks, or `None` when it is not a shape.
+     */
+    fun `shapeStyle`(`clipId`: kotlin.String): ShapeStyle?
     
     /**
      * Cut a clip at `at_us`. Returns the right piece's id.
@@ -2230,6 +2711,13 @@ public interface EditorInterface {
     fun `stagePick`(`atUs`: kotlin.Long, `x`: kotlin.Double, `y`: kotlin.Double): kotlin.String?
     
     /**
+     * Change how a shape looks. Changes made while `live` join one undo
+     * step, so a slider drag is one step; its last change passes `live`
+     * false, and so does a single tap.
+     */
+    fun `styleShape`(`clipId`: kotlin.String, `change`: ShapeStyleChange, `live`: kotlin.Boolean)
+    
+    /**
      * Change how a title looks. Changes made while `live` join one undo
      * step, so a slider drag is one step; its last change passes `live`
      * false, and so does a single tap.
@@ -2240,6 +2728,19 @@ public interface EditorInterface {
      * What a text clip says, or `None` when it is not a text clip.
      */
     fun `text`(`clipId`: kotlin.String): TextInfo?
+    
+    /**
+     * The axes a text clip's face varies along, each with where the
+     * clip has it; none for a face that does not vary.
+     */
+    fun `textFontAxes`(`clipId`: kotlin.String): List<FontAxis>
+    
+    /**
+     * Which of bold, italic and underline every letter of a text clip
+     * from `start` up to `end` has, the two counting characters of its
+     * words. `None` when it is no text clip or has no such letters.
+     */
+    fun `textRangePattern`(`clipId`: kotlin.String, `start`: kotlin.UInt, `end`: kotlin.UInt): TextPattern?
     
     /**
      * The picture of a tile [`Self::film`] named, once stored.
@@ -2253,22 +2754,14 @@ public interface EditorInterface {
     fun `tick`(`elapsedUs`: kotlin.Long): kotlin.Long
     
     /**
-     * Move an overlay picture onto the main row where it starts, as one
-     * undo step.
+     * Move a picture from another row onto main. One undo step.
      */
     fun `toMain`(`clipId`: kotlin.String)
     
     /**
-     * Drop a beat on a sound at `at_us`, or take away the one there.
-     * Returns whether a beat is there now.
+     * Mark a beat at `at_us` on a sound clip, or take that beat off.
      */
-    fun `toggleBeat`(`clipId`: kotlin.String, `atUs`: kotlin.Long): kotlin.Boolean
-    
-    /**
-     * Keep the middle half of a picture, or the whole frame again, as one
-     * undo step.
-     */
-    fun `toggleCrop`(`clipId`: kotlin.String)
+    fun `toggleBeat`(`clipId`: kotlin.String, `atUs`: kotlin.Long)
     
     /**
      * The keyframe button: remove the keyframe under `at_us`, else key the
@@ -2277,14 +2770,20 @@ public interface EditorInterface {
     fun `toggleKeyframe`(`clipId`: kotlin.String, `atUs`: kotlin.Long)
     
     /**
-     * Flip a picture left to right, or back, as one undo step.
+     * Flip the picture left to right, or back. One undo step.
      */
     fun `toggleMirror`(`clipId`: kotlin.String)
     
     /**
-     * Play a picture or a sound backward, or forward again, as one undo step.
+     * Play the clip backward, or forward again. One undo step.
      */
     fun `toggleReverse`(`clipId`: kotlin.String)
+    
+    /**
+     * Copy the transition after `outgoing_id` to every other cut of the
+     * main row, each fitted to its clips. One undo step.
+     */
+    fun `transitionEverywhere`(`outgoingId`: kotlin.String)
     
     /**
      * Drag a clip's start edge, or its end edge, to `time_us`, as one undo
@@ -2293,7 +2792,7 @@ public interface EditorInterface {
     fun `trim`(`clipId`: kotlin.String, `startEdge`: kotlin.Boolean, `timeUs`: kotlin.Long, `snapUs`: kotlin.Long, `playheadUs`: kotlin.Long): kotlin.Long
     
     /**
-     * Turn a picture a quarter clockwise, as one undo step.
+     * Turn the picture a quarter turn clockwise. One undo step.
      */
     fun `turn`(`clipId`: kotlin.String)
     
@@ -2427,6 +2926,45 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
+     * Put an adjustment layer at `at_us`, its sliders at zero. One undo
+     * step. Returns the layer's id.
+     */
+    @Throws(EditorException::class)override fun `addAdjustment`(`atUs`: kotlin.Long): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_add_adjustment(
+        it,
+        
+        FfiConverterLong.lower(`atUs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Run effect `effect_id` over the picture clip `clip_id` alone, for
+     * its span. One undo step. Returns the effect clip's id.
+     */
+    @Throws(EditorException::class)override fun `addClipEffect`(`clipId`: kotlin.String, `effectId`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_add_clip_effect(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterString.lower(`effectId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Add the effect `effect_id` at `at_us` over everything below it, as
      * one undo step. Returns the new clip's id.
      */
@@ -2447,8 +2985,27 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
-     * Put the whole of a library picture on an overlay row at `at_us`, as
-     * one undo step. Returns the new clip.
+     * Put the filter layer `filter_id` at `at_us`, over every picture
+     * below it. One undo step. Returns the layer's id.
+     */
+    @Throws(EditorException::class)override fun `addFilter`(`filterId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_add_filter(
+        it,
+        
+        FfiConverterString.lower(`filterId`),
+        FfiConverterLong.lower(`atUs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Put a library picture at `at_us` on a row above main. Returns the clip.
      */
     @Throws(EditorException::class)override fun `addOverlay`(`materialId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String {
             return FfiConverterString.lift(
@@ -2458,6 +3015,46 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
         it,
         
         FfiConverterString.lower(`materialId`),
+        FfiConverterLong.lower(`atUs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Put shape `shape_id` at `at_us` on the first sticker row with room,
+     * else a new one. One undo step. Returns the clip's id.
+     */
+    @Throws(EditorException::class)override fun `addShape`(`shapeId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_add_shape(
+        it,
+        
+        FfiConverterString.lower(`shapeId`),
+        FfiConverterLong.lower(`atUs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Put sticker `sticker_id` at `at_us` on the first sticker row with
+     * room, else a new one. One undo step. Returns the clip's id.
+     */
+    @Throws(EditorException::class)override fun `addSticker`(`stickerId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_add_sticker(
+        it,
+        
+        FfiConverterString.lower(`stickerId`),
         FfiConverterLong.lower(`atUs`),_status)
 }
     }
@@ -2480,6 +3077,25 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
         FfiConverterString.lower(`content`),
         FfiConverterString.lower(`face`),
         FfiConverterLong.lower(`atUs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Every adjust slider of `clip_id`, or `None` for a clip that has
+     * none.
+     */
+    @Throws(EditorException::class)override fun `adjustSliders`(`clipId`: kotlin.String): List<AdjustSlider>? {
+            return FfiConverterOptionalSequenceTypeAdjustSlider.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_adjust_sliders(
+        it,
+        
+        FfiConverterString.lower(`clipId`),_status)
 }
     }
     )
@@ -2542,42 +3158,6 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
-     * The beats on `clip_id`, as timeline times.
-     */
-    @Throws(EditorException::class)override fun `beats`(`clipId`: kotlin.String): List<kotlin.Long> {
-            return FfiConverterSequenceLong.lift(
-    callWithHandle {
-    uniffiRustCallWithError(EditorException) { _status ->
-    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_beats(
-        it,
-        
-        FfiConverterString.lower(`clipId`),_status)
-}
-    }
-    )
-    }
-    
-
-    
-    /**
-     * What the clip bar can do to `clip_id`.
-     */
-    @Throws(EditorException::class)override fun `clipAbilities`(`clipId`: kotlin.String): ClipAbilities {
-            return FfiConverterTypeClipAbilities.lift(
-    callWithHandle {
-    uniffiRustCallWithError(EditorException) { _status ->
-    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_clip_abilities(
-        it,
-        
-        FfiConverterString.lower(`clipId`),_status)
-}
-    }
-    )
-    }
-    
-
-    
-    /**
      * The tool bar for `clip_id` while it is selected, or `None` for an id
      * no row holds.
      */
@@ -2586,6 +3166,102 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
     callWithHandle {
     uniffiRustCallWithError(EditorException) { _status ->
     UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_clip_bar(
+        it,
+        
+        FfiConverterString.lower(`clipId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * The filter `clip_id` keeps, or a filter layer's own.
+     */
+    @Throws(EditorException::class)override fun `clipFilter`(`clipId`: kotlin.String): ClipFilter? {
+            return FfiConverterOptionalTypeClipFilter.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_clip_filter(
+        it,
+        
+        FfiConverterString.lower(`clipId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * How `clip_id` stands at `at_us`, for its clip tools. `None` when no
+     * row holds it.
+     */
+    @Throws(EditorException::class)override fun `clipState`(`clipId`: kotlin.String, `atUs`: kotlin.Long): ClipState? {
+            return FfiConverterOptionalTypeClipState.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_clip_state(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterLong.lower(`atUs`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * The cuts between touching clips on the main row, earliest first.
+     */
+    @Throws(EditorException::class)override fun `cuts`(): List<Cut> {
+            return FfiConverterSequenceTypeCut.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_cuts(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Put a freehand stroke through `trace` at `at_us` as a smooth line on
+     * a sticker row, `color` (`#RRGGBB`) and `width` canvas pixels wide.
+     * One undo step. Returns the clip's id.
+     */
+    @Throws(EditorException::class)override fun `drawStroke`(`trace`: List<CanvasPoint>, `atUs`: kotlin.Long, `color`: kotlin.String, `width`: kotlin.Double): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_draw_stroke(
+        it,
+        
+        FfiConverterSequenceTypeCanvasPoint.lower(`trace`),
+        FfiConverterLong.lower(`atUs`),
+        FfiConverterString.lower(`color`),
+        FfiConverterDouble.lower(`width`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Put a copy of the clip right after it. Returns the copy.
+     */
+    @Throws(EditorException::class)override fun `duplicate`(`clipId`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_duplicate(
         it,
         
         FfiConverterString.lower(`clipId`),_status)
@@ -2658,17 +3334,19 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
-     * Put a video's sound on its own clip on an audio row, as one undo
-     * step. Returns the sound's clip.
+     * Write the whole cut to `path` as an MP4 at the size, frame rate and
+     * quality `options` asks for. Otherwise as [`Self::export`].
      */
-    @Throws(EditorException::class)override fun `extractAudio`(`clipId`: kotlin.String): kotlin.String {
-            return FfiConverterString.lift(
+    @Throws(EditorException::class)override fun `exportWith`(`path`: kotlin.String, `options`: ExportOptions, `progress`: ExportProgress): Exported {
+            return FfiConverterTypeExported.lift(
     callWithHandle {
     uniffiRustCallWithError(EditorException) { _status ->
-    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_extract_audio(
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_export_with(
         it,
         
-        FfiConverterString.lower(`clipId`),_status)
+        FfiConverterString.lower(`path`),
+        FfiConverterTypeExportOptions.lower(`options`),
+        FfiConverterTypeExportProgress.lower(`progress`),_status)
 }
     }
     )
@@ -2677,20 +3355,19 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
-     * A picture's or a sound's fade in and fade out.
+     * Put the video's sound on a clip of its own. One undo step.
      */
-    @Throws(EditorException::class)override fun `fade`(`clipId`: kotlin.String): Fade {
-            return FfiConverterTypeFade.lift(
+    @Throws(EditorException::class)override fun `extractAudio`(`clipId`: kotlin.String)
+        = 
     callWithHandle {
     uniffiRustCallWithError(EditorException) { _status ->
-    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_fade(
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_extract_audio(
         it,
         
         FfiConverterString.lower(`clipId`),_status)
 }
     }
-    )
-    }
+    
     
 
     
@@ -2734,6 +3411,26 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
+     * The faces whose names have every word of `query`, in the order
+     * `fonts` gives them; all of them for no words. Case does not
+     * matter.
+     */
+    @Throws(EditorException::class)override fun `fontsMatching`(`query`: kotlin.String): List<Font> {
+            return FfiConverterSequenceTypeFont.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_fonts_matching(
+        it,
+        
+        FfiConverterString.lower(`query`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * The picture at `time_us`.
      */
     @Throws(EditorException::class)override fun `frame`(`timeUs`: kotlin.Long): Frame {
@@ -2752,8 +3449,7 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
-     * Hold a video's frame at `at_us` as a still, as one undo step.
-     * Returns the still's clip.
+     * Hold the video's frame at `at_us` as a still there. Returns the still.
      */
     @Throws(EditorException::class)override fun `freeze`(`clipId`: kotlin.String, `atUs`: kotlin.Long): kotlin.String {
             return FfiConverterString.lift(
@@ -2781,6 +3477,25 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
     callWithHandle {
     uniffiRustCallWithError(EditorException) { _status ->
     UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_import(
+        it,
+        
+        FfiConverterString.lower(`path`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Bring in the sound of the picked video at `path` as a sound in the
+     * library, without its picture. Returns the material id, for `append`.
+     */
+    @Throws(EditorException::class)override fun `importSoundOf`(`path`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_import_sound_of(
         it,
         
         FfiConverterString.lower(`path`),_status)
@@ -2866,6 +3581,23 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
+     * Whether clips on other rows go with the main clip they sit on.
+     */
+    @Throws(EditorException::class)override fun `linkageEnabled`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_linkage_enabled(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Move a clip to `row` (top is 0) starting near `start_us`, as one undo
      * step. It snaps to a cut or the playhead within `snap_us`. Returns the
      * start it landed on.
@@ -2935,6 +3667,23 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
     
 
     
+    /**
+     * Give the video its own sound back. One undo step.
+     */
+    @Throws(EditorException::class)override fun `recoverAudio`(`clipId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_recover_audio(
+        it,
+        
+        FfiConverterString.lower(`clipId`),_status)
+}
+    }
+    
+    
+
+    
     @Throws(EditorException::class)override fun `redo`()
         = 
     callWithHandle {
@@ -2963,6 +3712,23 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
+     * Take the transition off the cut after `outgoing_id`. One undo step.
+     */
+    @Throws(EditorException::class)override fun `removeTransition`(`outgoingId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_remove_transition(
+        it,
+        
+        FfiConverterString.lower(`outgoingId`),_status)
+}
+    }
+    
+    
+
+    
+    /**
      * Put a main clip at `place` in the main row's order, counted from zero
      * without it, as one undo step.
      */
@@ -2975,6 +3741,26 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
         
         FfiConverterString.lower(`clipId`),
         FfiConverterUInt.lower(`place`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Play the picked file at `path` in `clip_id` in place of its media,
+     * keeping the clip's place and edits: one undo step. A picture takes
+     * a photo or video, a sound a sound.
+     */
+    @Throws(EditorException::class)override fun `replaceFile`(`clipId`: kotlin.String, `path`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_replace_file(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterString.lower(`path`),_status)
 }
     }
     
@@ -3037,6 +3823,26 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
+     * Set adjust slider `key` of a picture clip or an adjustment layer to
+     * `value`. One undo step.
+     */
+    @Throws(EditorException::class)override fun `setAdjust`(`clipId`: kotlin.String, `key`: kotlin.String, `value`: kotlin.Double)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_set_adjust(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterString.lower(`key`),
+        FfiConverterDouble.lower(`value`),_status)
+}
+    }
+    
+    
+
+    
+    /**
      * Give the clip the in (`enter`) or out animation `id`, `duration_us`
      * long, or clear that side with an empty id. One undo step.
      */
@@ -3075,9 +3881,49 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
-     * Fade a picture or a sound in and out, as one undo step.
+     * Give the picture clip `clip_id` the filter `filter_id`, swapping out
+     * the one it kept, or take it off with an empty id; a filter layer
+     * swaps in place. One undo step. Returns the new layer's id.
      */
-    @Throws(EditorException::class)override fun `setFade`(`clipId`: kotlin.String, `inUs`: kotlin.Long, `outUs`: kotlin.Long)
+    @Throws(EditorException::class)override fun `setClipFilter`(`clipId`: kotlin.String, `filterId`: kotlin.String): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_set_clip_filter(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterString.lower(`filterId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Crop the video to its middle at `ratio`, or show the whole frame
+     * for an empty ratio. One undo step.
+     */
+    @Throws(EditorException::class)override fun `setCrop`(`clipId`: kotlin.String, `ratio`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_set_crop(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterString.lower(`ratio`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Fade the clip in and out over these lengths. One undo step.
+     */
+    @Throws(EditorException::class)override fun `setFade`(`clipId`: kotlin.String, `fadeInUs`: kotlin.Long, `fadeOutUs`: kotlin.Long)
         = 
     callWithHandle {
     uniffiRustCallWithError(EditorException) { _status ->
@@ -3085,8 +3931,8 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
         it,
         
         FfiConverterString.lower(`clipId`),
-        FfiConverterLong.lower(`inUs`),
-        FfiConverterLong.lower(`outUs`),_status)
+        FfiConverterLong.lower(`fadeInUs`),
+        FfiConverterLong.lower(`fadeOutUs`),_status)
 }
     }
     
@@ -3112,6 +3958,41 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
+     * Turn linkage on or off. Not an undo step; kept with the project.
+     */
+    @Throws(EditorException::class)override fun `setLinkageEnabled`(`on`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_set_linkage_enabled(
+        it,
+        
+        FfiConverterBoolean.lower(`on`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Make the picture `opacity` solid, 0 to 1. One undo step.
+     */
+    @Throws(EditorException::class)override fun `setOpacity`(`clipId`: kotlin.String, `opacity`: kotlin.Double)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_set_opacity(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterDouble.lower(`opacity`),_status)
+}
+    }
+    
+    
+
+    
+    /**
      * Give the canvas a ratio from [`Self::ratios`], as one undo step.
      */
     @Throws(EditorException::class)override fun `setRatio`(`ratio`: kotlin.String)
@@ -3122,6 +4003,24 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
         it,
         
         FfiConverterString.lower(`ratio`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Mute or unmute a row. One undo step.
+     */
+    @Throws(EditorException::class)override fun `setRowMuted`(`rowId`: kotlin.String, `muted`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_set_row_muted(
+        it,
+        
+        FfiConverterString.lower(`rowId`),
+        FfiConverterBoolean.lower(`muted`),_status)
 }
     }
     
@@ -3140,6 +4039,25 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
         
         FfiConverterString.lower(`clipId`),
         FfiConverterDouble.lower(`speed`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Set how strongly a filter, effect or adjustment works, 0 to 1. One
+     * undo step.
+     */
+    @Throws(EditorException::class)override fun `setStrength`(`clipId`: kotlin.String, `value`: kotlin.Double)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_set_strength(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterDouble.lower(`value`),_status)
 }
     }
     
@@ -3183,6 +4101,91 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
+     * Move a text clip's face to `value` along the axis `tag`, the other
+     * axes staying where they are. Changes made while `live` join one
+     * undo step, so a slider drag is one step; its last change passes
+     * `live` false.
+     */
+    @Throws(EditorException::class)override fun `setTextFontAxis`(`clipId`: kotlin.String, `tag`: kotlin.String, `value`: kotlin.Double, `live`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_set_text_font_axis(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterString.lower(`tag`),
+        FfiConverterDouble.lower(`value`),
+        FfiConverterBoolean.lower(`live`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Turn bold, italic or underline on or off for the letters of a text
+     * clip from `start` up to `end`; a part that is `None` stays as it
+     * is. One undo step.
+     */
+    @Throws(EditorException::class)override fun `setTextRangePattern`(`clipId`: kotlin.String, `start`: kotlin.UInt, `end`: kotlin.UInt, `bold`: kotlin.Boolean?, `italic`: kotlin.Boolean?, `underline`: kotlin.Boolean?)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_set_text_range_pattern(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterUInt.lower(`start`),
+        FfiConverterUInt.lower(`end`),
+        FfiConverterOptionalBoolean.lower(`bold`),
+        FfiConverterOptionalBoolean.lower(`italic`),
+        FfiConverterOptionalBoolean.lower(`underline`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Put transition `transition_id` on the cut after `outgoing_id`,
+     * fitted to the clips; one there already is swapped. One undo step.
+     */
+    @Throws(EditorException::class)override fun `setTransition`(`outgoingId`: kotlin.String, `transitionId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_set_transition(
+        it,
+        
+        FfiConverterString.lower(`outgoingId`),
+        FfiConverterString.lower(`transitionId`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Make the transition after `outgoing_id` last `duration_us`, held to
+     * its range. One undo step.
+     */
+    @Throws(EditorException::class)override fun `setTransitionLength`(`outgoingId`: kotlin.String, `durationUs`: kotlin.Long)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_set_transition_length(
+        it,
+        
+        FfiConverterString.lower(`outgoingId`),
+        FfiConverterLong.lower(`durationUs`),_status)
+}
+    }
+    
+    
+
+    
+    /**
      * Remove one clip.
      * Set a clip's linear gain, as one undo step. Below zero is refused.
      */
@@ -3198,6 +4201,24 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 }
     }
     
+    
+
+    
+    /**
+     * How a shape clip looks, or `None` when it is not a shape.
+     */
+    @Throws(EditorException::class)override fun `shapeStyle`(`clipId`: kotlin.String): ShapeStyle? {
+            return FfiConverterOptionalTypeShapeStyle.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_shape_style(
+        it,
+        
+        FfiConverterString.lower(`clipId`),_status)
+}
+    }
+    )
+    }
     
 
     
@@ -3319,6 +4340,27 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
+     * Change how a shape looks. Changes made while `live` join one undo
+     * step, so a slider drag is one step; its last change passes `live`
+     * false, and so does a single tap.
+     */
+    @Throws(EditorException::class)override fun `styleShape`(`clipId`: kotlin.String, `change`: ShapeStyleChange, `live`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_style_shape(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterTypeShapeStyleChange.lower(`change`),
+        FfiConverterBoolean.lower(`live`),_status)
+}
+    }
+    
+    
+
+    
+    /**
      * Change how a title looks. Changes made while `live` join one undo
      * step, so a slider drag is one step; its last change passes `live`
      * false, and so does a single tap.
@@ -3350,6 +4392,47 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
         it,
         
         FfiConverterString.lower(`clipId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * The axes a text clip's face varies along, each with where the
+     * clip has it; none for a face that does not vary.
+     */
+    @Throws(EditorException::class)override fun `textFontAxes`(`clipId`: kotlin.String): List<FontAxis> {
+            return FfiConverterSequenceTypeFontAxis.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_text_font_axes(
+        it,
+        
+        FfiConverterString.lower(`clipId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Which of bold, italic and underline every letter of a text clip
+     * from `start` up to `end` has, the two counting characters of its
+     * words. `None` when it is no text clip or has no such letters.
+     */
+    @Throws(EditorException::class)override fun `textRangePattern`(`clipId`: kotlin.String, `start`: kotlin.UInt, `end`: kotlin.UInt): TextPattern? {
+            return FfiConverterOptionalTypeTextPattern.lift(
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_text_range_pattern(
+        it,
+        
+        FfiConverterString.lower(`clipId`),
+        FfiConverterUInt.lower(`start`),
+        FfiConverterUInt.lower(`end`),_status)
 }
     }
     )
@@ -3395,8 +4478,7 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
-     * Move an overlay picture onto the main row where it starts, as one
-     * undo step.
+     * Move a picture from another row onto main. One undo step.
      */
     @Throws(EditorException::class)override fun `toMain`(`clipId`: kotlin.String)
         = 
@@ -3413,11 +4495,10 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
-     * Drop a beat on a sound at `at_us`, or take away the one there.
-     * Returns whether a beat is there now.
+     * Mark a beat at `at_us` on a sound clip, or take that beat off.
      */
-    @Throws(EditorException::class)override fun `toggleBeat`(`clipId`: kotlin.String, `atUs`: kotlin.Long): kotlin.Boolean {
-            return FfiConverterBoolean.lift(
+    @Throws(EditorException::class)override fun `toggleBeat`(`clipId`: kotlin.String, `atUs`: kotlin.Long)
+        = 
     callWithHandle {
     uniffiRustCallWithError(EditorException) { _status ->
     UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_beat(
@@ -3425,25 +4506,6 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
         
         FfiConverterString.lower(`clipId`),
         FfiConverterLong.lower(`atUs`),_status)
-}
-    }
-    )
-    }
-    
-
-    
-    /**
-     * Keep the middle half of a picture, or the whole frame again, as one
-     * undo step.
-     */
-    @Throws(EditorException::class)override fun `toggleCrop`(`clipId`: kotlin.String)
-        = 
-    callWithHandle {
-    uniffiRustCallWithError(EditorException) { _status ->
-    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_crop(
-        it,
-        
-        FfiConverterString.lower(`clipId`),_status)
 }
     }
     
@@ -3470,7 +4532,7 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
-     * Flip a picture left to right, or back, as one undo step.
+     * Flip the picture left to right, or back. One undo step.
      */
     @Throws(EditorException::class)override fun `toggleMirror`(`clipId`: kotlin.String)
         = 
@@ -3487,7 +4549,7 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
-     * Play a picture or a sound backward, or forward again, as one undo step.
+     * Play the clip backward, or forward again. One undo step.
      */
     @Throws(EditorException::class)override fun `toggleReverse`(`clipId`: kotlin.String)
         = 
@@ -3497,6 +4559,24 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
         it,
         
         FfiConverterString.lower(`clipId`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Copy the transition after `outgoing_id` to every other cut of the
+     * main row, each fitted to its clips. One undo step.
+     */
+    @Throws(EditorException::class)override fun `transitionEverywhere`(`outgoingId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_method_editor_transition_everywhere(
+        it,
+        
+        FfiConverterString.lower(`outgoingId`),_status)
 }
     }
     
@@ -3527,7 +4607,7 @@ open class Editor: Disposable, AutoCloseable, EditorInterface
 
     
     /**
-     * Turn a picture a quarter clockwise, as one undo step.
+     * Turn the picture a quarter turn clockwise. One undo step.
      */
     @Throws(EditorException::class)override fun `turn`(`clipId`: kotlin.String)
         = 
@@ -4001,6 +5081,58 @@ public object FfiConverterTypeExportProgress: FfiConverter<ExportProgress, Long>
 
 
 /**
+ * One adjust slider and where it stands. `key` is what `set_adjust`
+ * takes; `min` is -1, or 0 for a slider that only adds; the top is 1.
+ */
+data class AdjustSlider (
+    var `key`: kotlin.String
+    , 
+    var `label`: kotlin.String
+    , 
+    var `min`: kotlin.Double
+    , 
+    var `value`: kotlin.Double
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeAdjustSlider: FfiConverterRustBuffer<AdjustSlider> {
+    override fun read(buf: ByteBuffer): AdjustSlider {
+        return AdjustSlider(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: AdjustSlider) = (
+            FfiConverterString.allocationSize(value.`key`) +
+            FfiConverterString.allocationSize(value.`label`) +
+            FfiConverterDouble.allocationSize(value.`min`) +
+            FfiConverterDouble.allocationSize(value.`value`)
+    )
+
+    override fun write(value: AdjustSlider, buf: ByteBuffer) {
+            FfiConverterString.write(value.`key`, buf)
+            FfiConverterString.write(value.`label`, buf)
+            FfiConverterDouble.write(value.`min`, buf)
+            FfiConverterDouble.write(value.`value`, buf)
+    }
+}
+
+
+
+/**
  * One animation in the Animations panel.
  */
 data class AnimationPreset (
@@ -4052,6 +5184,47 @@ public object FfiConverterTypeAnimationPreset: FfiConverterRustBuffer<AnimationP
             FfiConverterBoolean.write(value.`enter`, buf)
             FfiConverterString.write(value.`id`, buf)
             FfiConverterLong.write(value.`durationUs`, buf)
+    }
+}
+
+
+
+/**
+ * A point on the canvas, in canvas pixels from the top left, y down.
+ */
+data class CanvasPoint (
+    var `x`: kotlin.Double
+    , 
+    var `y`: kotlin.Double
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCanvasPoint: FfiConverterRustBuffer<CanvasPoint> {
+    override fun read(buf: ByteBuffer): CanvasPoint {
+        return CanvasPoint(
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: CanvasPoint) = (
+            FfiConverterDouble.allocationSize(value.`x`) +
+            FfiConverterDouble.allocationSize(value.`y`)
+    )
+
+    override fun write(value: CanvasPoint, buf: ByteBuffer) {
+            FfiConverterDouble.write(value.`x`, buf)
+            FfiConverterDouble.write(value.`y`, buf)
     }
 }
 
@@ -4135,6 +5308,11 @@ data class Clip (
      * Constant speed: 2 plays twice as fast.
      */
     var `speed`: kotlin.Double
+    , 
+    /**
+     * Where its beats land on the timeline, earliest first.
+     */
+    var `beatsUs`: List<kotlin.Long>
     
 ){
     
@@ -4157,6 +5335,7 @@ public object FfiConverterTypeClip: FfiConverterRustBuffer<Clip> {
             FfiConverterLong.read(buf),
             FfiConverterDouble.read(buf),
             FfiConverterDouble.read(buf),
+            FfiConverterSequenceLong.read(buf),
         )
     }
 
@@ -4166,7 +5345,8 @@ public object FfiConverterTypeClip: FfiConverterRustBuffer<Clip> {
             FfiConverterLong.allocationSize(value.`startUs`) +
             FfiConverterLong.allocationSize(value.`durationUs`) +
             FfiConverterDouble.allocationSize(value.`volume`) +
-            FfiConverterDouble.allocationSize(value.`speed`)
+            FfiConverterDouble.allocationSize(value.`speed`) +
+            FfiConverterSequenceLong.allocationSize(value.`beatsUs`)
     )
 
     override fun write(value: Clip, buf: ByteBuffer) {
@@ -4176,92 +5356,7 @@ public object FfiConverterTypeClip: FfiConverterRustBuffer<Clip> {
             FfiConverterLong.write(value.`durationUs`, buf)
             FfiConverterDouble.write(value.`volume`, buf)
             FfiConverterDouble.write(value.`speed`, buf)
-    }
-}
-
-
-
-/**
- * What the clip bar can do to one clip, and the state its toggles show.
- */
-data class ClipAbilities (
-    /**
-     * A picture: Mirror and Rotate.
-     */
-    var `turn`: kotlin.Boolean
-    , 
-    /**
-     * A picture or a sound: Reverse and Fade.
-     */
-    var `reverse`: kotlin.Boolean
-    , 
-    /**
-     * A video or a composition: Crop.
-     */
-    var `crop`: kotlin.Boolean
-    , 
-    /**
-     * A video that is not a still: Freeze and Extract audio.
-     */
-    var `moving`: kotlin.Boolean
-    , 
-    /**
-     * On an audio row: Beats.
-     */
-    var `beats`: kotlin.Boolean
-    , 
-    var `mirrored`: kotlin.Boolean
-    , 
-    var `reversed`: kotlin.Boolean
-    , 
-    var `cropped`: kotlin.Boolean
-    
-){
-    
-
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeClipAbilities: FfiConverterRustBuffer<ClipAbilities> {
-    override fun read(buf: ByteBuffer): ClipAbilities {
-        return ClipAbilities(
-            FfiConverterBoolean.read(buf),
-            FfiConverterBoolean.read(buf),
-            FfiConverterBoolean.read(buf),
-            FfiConverterBoolean.read(buf),
-            FfiConverterBoolean.read(buf),
-            FfiConverterBoolean.read(buf),
-            FfiConverterBoolean.read(buf),
-            FfiConverterBoolean.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: ClipAbilities) = (
-            FfiConverterBoolean.allocationSize(value.`turn`) +
-            FfiConverterBoolean.allocationSize(value.`reverse`) +
-            FfiConverterBoolean.allocationSize(value.`crop`) +
-            FfiConverterBoolean.allocationSize(value.`moving`) +
-            FfiConverterBoolean.allocationSize(value.`beats`) +
-            FfiConverterBoolean.allocationSize(value.`mirrored`) +
-            FfiConverterBoolean.allocationSize(value.`reversed`) +
-            FfiConverterBoolean.allocationSize(value.`cropped`)
-    )
-
-    override fun write(value: ClipAbilities, buf: ByteBuffer) {
-            FfiConverterBoolean.write(value.`turn`, buf)
-            FfiConverterBoolean.write(value.`reverse`, buf)
-            FfiConverterBoolean.write(value.`crop`, buf)
-            FfiConverterBoolean.write(value.`moving`, buf)
-            FfiConverterBoolean.write(value.`beats`, buf)
-            FfiConverterBoolean.write(value.`mirrored`, buf)
-            FfiConverterBoolean.write(value.`reversed`, buf)
-            FfiConverterBoolean.write(value.`cropped`, buf)
+            FfiConverterSequenceLong.write(value.`beatsUs`, buf)
     }
 }
 
@@ -4328,6 +5423,273 @@ public object FfiConverterTypeClipAnimations: FfiConverterRustBuffer<ClipAnimati
 
 
 /**
+ * The filter a clip keeps: its filter layer, the filter, and how strong
+ * it is, 0 to 1.
+ */
+data class ClipFilter (
+    var `layerId`: kotlin.String
+    , 
+    var `filterId`: kotlin.String
+    , 
+    var `strength`: kotlin.Double
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeClipFilter: FfiConverterRustBuffer<ClipFilter> {
+    override fun read(buf: ByteBuffer): ClipFilter {
+        return ClipFilter(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterDouble.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ClipFilter) = (
+            FfiConverterString.allocationSize(value.`layerId`) +
+            FfiConverterString.allocationSize(value.`filterId`) +
+            FfiConverterDouble.allocationSize(value.`strength`)
+    )
+
+    override fun write(value: ClipFilter, buf: ByteBuffer) {
+            FfiConverterString.write(value.`layerId`, buf)
+            FfiConverterString.write(value.`filterId`, buf)
+            FfiConverterDouble.write(value.`strength`, buf)
+    }
+}
+
+
+
+/**
+ * How a selected clip stands, and which clip tools can change it.
+ */
+data class ClipState (
+    /**
+     * A picture that mirrors, turns, crops and fades out of sight.
+     */
+    var `picture`: kotlin.Boolean
+    , 
+    var `mirrored`: kotlin.Boolean
+    , 
+    /**
+     * Degrees, as stored.
+     */
+    var `rotation`: kotlin.Double
+    , 
+    var `canCrop`: kotlin.Boolean
+    , 
+    /**
+     * The crop ratio kept: empty for the whole frame, one of
+     * [`crop_ratios`], or `custom`.
+     */
+    var `crop`: kotlin.String
+    , 
+    /**
+     * 1 solid, 0 clear.
+     */
+    var `opacity`: kotlin.Double
+    , 
+    /**
+     * A picture or a sound, which plays backward and fades.
+     */
+    var `plays`: kotlin.Boolean
+    , 
+    var `reversed`: kotlin.Boolean
+    , 
+    var `fadeInUs`: kotlin.Long
+    , 
+    var `fadeOutUs`: kotlin.Long
+    , 
+    var `canFreeze`: kotlin.Boolean
+    , 
+    var `canExtract`: kotlin.Boolean
+    , 
+    /**
+     * Its sound was extracted to a clip of its own.
+     */
+    var `extracted`: kotlin.Boolean
+    , 
+    var `canBeat`: kotlin.Boolean
+    , 
+    /**
+     * A beat sits on the clip at the time asked about.
+     */
+    var `beatHere`: kotlin.Boolean
+    , 
+    var `onMain`: kotlin.Boolean
+    , 
+    /**
+     * A picture on another row, which can move to main.
+     */
+    var `canSplice`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeClipState: FfiConverterRustBuffer<ClipState> {
+    override fun read(buf: ByteBuffer): ClipState {
+        return ClipState(
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ClipState) = (
+            FfiConverterBoolean.allocationSize(value.`picture`) +
+            FfiConverterBoolean.allocationSize(value.`mirrored`) +
+            FfiConverterDouble.allocationSize(value.`rotation`) +
+            FfiConverterBoolean.allocationSize(value.`canCrop`) +
+            FfiConverterString.allocationSize(value.`crop`) +
+            FfiConverterDouble.allocationSize(value.`opacity`) +
+            FfiConverterBoolean.allocationSize(value.`plays`) +
+            FfiConverterBoolean.allocationSize(value.`reversed`) +
+            FfiConverterLong.allocationSize(value.`fadeInUs`) +
+            FfiConverterLong.allocationSize(value.`fadeOutUs`) +
+            FfiConverterBoolean.allocationSize(value.`canFreeze`) +
+            FfiConverterBoolean.allocationSize(value.`canExtract`) +
+            FfiConverterBoolean.allocationSize(value.`extracted`) +
+            FfiConverterBoolean.allocationSize(value.`canBeat`) +
+            FfiConverterBoolean.allocationSize(value.`beatHere`) +
+            FfiConverterBoolean.allocationSize(value.`onMain`) +
+            FfiConverterBoolean.allocationSize(value.`canSplice`)
+    )
+
+    override fun write(value: ClipState, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`picture`, buf)
+            FfiConverterBoolean.write(value.`mirrored`, buf)
+            FfiConverterDouble.write(value.`rotation`, buf)
+            FfiConverterBoolean.write(value.`canCrop`, buf)
+            FfiConverterString.write(value.`crop`, buf)
+            FfiConverterDouble.write(value.`opacity`, buf)
+            FfiConverterBoolean.write(value.`plays`, buf)
+            FfiConverterBoolean.write(value.`reversed`, buf)
+            FfiConverterLong.write(value.`fadeInUs`, buf)
+            FfiConverterLong.write(value.`fadeOutUs`, buf)
+            FfiConverterBoolean.write(value.`canFreeze`, buf)
+            FfiConverterBoolean.write(value.`canExtract`, buf)
+            FfiConverterBoolean.write(value.`extracted`, buf)
+            FfiConverterBoolean.write(value.`canBeat`, buf)
+            FfiConverterBoolean.write(value.`beatHere`, buf)
+            FfiConverterBoolean.write(value.`onMain`, buf)
+            FfiConverterBoolean.write(value.`canSplice`, buf)
+    }
+}
+
+
+
+/**
+ * A cut between two touching clips on the main row, and its transition.
+ */
+data class Cut (
+    /**
+     * The clip before the cut, which the transition calls take.
+     */
+    var `outgoingId`: kotlin.String
+    , 
+    var `atUs`: kotlin.Long
+    , 
+    /**
+     * The shelf id of its transition; none for a plain cut.
+     */
+    var `transition`: kotlin.String?
+    , 
+    /**
+     * The transition's name; empty for a plain cut.
+     */
+    var `name`: kotlin.String
+    , 
+    /**
+     * How long it lasts and the range it can be set to; zero for a
+     * plain cut.
+     */
+    var `durationUs`: kotlin.Long
+    , 
+    var `shortestUs`: kotlin.Long
+    , 
+    var `longestUs`: kotlin.Long
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCut: FfiConverterRustBuffer<Cut> {
+    override fun read(buf: ByteBuffer): Cut {
+        return Cut(
+            FfiConverterString.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterLong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: Cut) = (
+            FfiConverterString.allocationSize(value.`outgoingId`) +
+            FfiConverterLong.allocationSize(value.`atUs`) +
+            FfiConverterOptionalString.allocationSize(value.`transition`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterLong.allocationSize(value.`durationUs`) +
+            FfiConverterLong.allocationSize(value.`shortestUs`) +
+            FfiConverterLong.allocationSize(value.`longestUs`)
+    )
+
+    override fun write(value: Cut, buf: ByteBuffer) {
+            FfiConverterString.write(value.`outgoingId`, buf)
+            FfiConverterLong.write(value.`atUs`, buf)
+            FfiConverterOptionalString.write(value.`transition`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterLong.write(value.`durationUs`, buf)
+            FfiConverterLong.write(value.`shortestUs`, buf)
+            FfiConverterLong.write(value.`longestUs`, buf)
+    }
+}
+
+
+
+/**
  * An effect the picker shows. `id` is what `add_effect` takes; `preview`
  * is the file name of its looping preview video in the app bundle.
  */
@@ -4369,6 +5731,53 @@ public object FfiConverterTypeEffectChoice: FfiConverterRustBuffer<EffectChoice>
             FfiConverterString.write(value.`id`, buf)
             FfiConverterString.write(value.`name`, buf)
             FfiConverterString.write(value.`preview`, buf)
+    }
+}
+
+
+
+/**
+ * How an export is made: `short_side` one of [`export_sides`],
+ * `frame_rate` one of [`export_rates`] or 0 for the project's own.
+ */
+data class ExportOptions (
+    var `shortSide`: kotlin.UInt
+    , 
+    var `frameRate`: kotlin.UInt
+    , 
+    var `quality`: ExportQuality
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeExportOptions: FfiConverterRustBuffer<ExportOptions> {
+    override fun read(buf: ByteBuffer): ExportOptions {
+        return ExportOptions(
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterTypeExportQuality.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ExportOptions) = (
+            FfiConverterUInt.allocationSize(value.`shortSide`) +
+            FfiConverterUInt.allocationSize(value.`frameRate`) +
+            FfiConverterTypeExportQuality.allocationSize(value.`quality`)
+    )
+
+    override fun write(value: ExportOptions, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`shortSide`, buf)
+            FfiConverterUInt.write(value.`frameRate`, buf)
+            FfiConverterTypeExportQuality.write(value.`quality`, buf)
     }
 }
 
@@ -4426,47 +5835,6 @@ public object FfiConverterTypeExported: FfiConverterRustBuffer<Exported> {
 
 
 /**
- * A clip's fade in and fade out. Zero is no fade.
- */
-data class Fade (
-    var `inUs`: kotlin.Long
-    , 
-    var `outUs`: kotlin.Long
-    
-){
-    
-
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeFade: FfiConverterRustBuffer<Fade> {
-    override fun read(buf: ByteBuffer): Fade {
-        return Fade(
-            FfiConverterLong.read(buf),
-            FfiConverterLong.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: Fade) = (
-            FfiConverterLong.allocationSize(value.`inUs`) +
-            FfiConverterLong.allocationSize(value.`outUs`)
-    )
-
-    override fun write(value: Fade, buf: ByteBuffer) {
-            FfiConverterLong.write(value.`inUs`, buf)
-            FfiConverterLong.write(value.`outUs`, buf)
-    }
-}
-
-
-
-/**
  * The filmstrip tiles of one clip.
  */
 data class Film (
@@ -4502,6 +5870,55 @@ public object FfiConverterTypeFilm: FfiConverterRustBuffer<Film> {
     override fun write(value: Film, buf: ByteBuffer) {
             FfiConverterString.write(value.`clipId`, buf)
             FfiConverterSequenceTypeTile.write(value.`tiles`, buf)
+    }
+}
+
+
+
+/**
+ * A filter the picker shows. `id` is what the filter calls take.
+ */
+data class FilterChoice (
+    var `id`: kotlin.String
+    , 
+    var `name`: kotlin.String
+    , 
+    /**
+     * The picker tab it sits under.
+     */
+    var `category`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFilterChoice: FfiConverterRustBuffer<FilterChoice> {
+    override fun read(buf: ByteBuffer): FilterChoice {
+        return FilterChoice(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FilterChoice) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterString.allocationSize(value.`category`)
+    )
+
+    override fun write(value: FilterChoice, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterString.write(value.`category`, buf)
     }
 }
 
@@ -4585,6 +6002,72 @@ public object FfiConverterTypeFont: FfiConverterRustBuffer<Font> {
     override fun write(value: Font, buf: ByteBuffer) {
             FfiConverterString.write(value.`name`, buf)
             FfiConverterString.write(value.`label`, buf)
+    }
+}
+
+
+
+/**
+ * One axis a text clip's face varies along, for a slider: weight, width
+ * and whatever else the face's maker gave it. `tag` names the axis when
+ * it is set; `name` is for people.
+ */
+data class FontAxis (
+    var `tag`: kotlin.String
+    , 
+    var `name`: kotlin.String
+    , 
+    var `min`: kotlin.Double
+    , 
+    var `default`: kotlin.Double
+    , 
+    var `max`: kotlin.Double
+    , 
+    /**
+     * Where the clip has its face along the axis.
+     */
+    var `value`: kotlin.Double
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFontAxis: FfiConverterRustBuffer<FontAxis> {
+    override fun read(buf: ByteBuffer): FontAxis {
+        return FontAxis(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FontAxis) = (
+            FfiConverterString.allocationSize(value.`tag`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterDouble.allocationSize(value.`min`) +
+            FfiConverterDouble.allocationSize(value.`default`) +
+            FfiConverterDouble.allocationSize(value.`max`) +
+            FfiConverterDouble.allocationSize(value.`value`)
+    )
+
+    override fun write(value: FontAxis, buf: ByteBuffer) {
+            FfiConverterString.write(value.`tag`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterDouble.write(value.`min`, buf)
+            FfiConverterDouble.write(value.`default`, buf)
+            FfiConverterDouble.write(value.`max`, buf)
+            FfiConverterDouble.write(value.`value`, buf)
     }
 }
 
@@ -4748,11 +6231,18 @@ public object FfiConverterTypeKeyframes: FfiConverterRustBuffer<Keyframes> {
  * One timeline row, top first.
  */
 data class Lane (
+    var `id`: kotlin.String
+    , 
     var `kind`: LaneKind
     , 
     var `main`: kotlin.Boolean
     , 
     var `locked`: kotlin.Boolean
+    , 
+    /**
+     * Its clips are not heard.
+     */
+    var `muted`: kotlin.Boolean
     , 
     var `clips`: List<Clip>
     
@@ -4771,7 +6261,9 @@ data class Lane (
 public object FfiConverterTypeLane: FfiConverterRustBuffer<Lane> {
     override fun read(buf: ByteBuffer): Lane {
         return Lane(
+            FfiConverterString.read(buf),
             FfiConverterTypeLaneKind.read(buf),
+            FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterSequenceTypeClip.read(buf),
@@ -4779,17 +6271,68 @@ public object FfiConverterTypeLane: FfiConverterRustBuffer<Lane> {
     }
 
     override fun allocationSize(value: Lane) = (
+            FfiConverterString.allocationSize(value.`id`) +
             FfiConverterTypeLaneKind.allocationSize(value.`kind`) +
             FfiConverterBoolean.allocationSize(value.`main`) +
             FfiConverterBoolean.allocationSize(value.`locked`) +
+            FfiConverterBoolean.allocationSize(value.`muted`) +
             FfiConverterSequenceTypeClip.allocationSize(value.`clips`)
     )
 
     override fun write(value: Lane, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
             FfiConverterTypeLaneKind.write(value.`kind`, buf)
             FfiConverterBoolean.write(value.`main`, buf)
             FfiConverterBoolean.write(value.`locked`, buf)
+            FfiConverterBoolean.write(value.`muted`, buf)
             FfiConverterSequenceTypeClip.write(value.`clips`, buf)
+    }
+}
+
+
+
+/**
+ * One line on the About page: a sticker set or a crate the app is built
+ * from.
+ */
+data class Notice (
+    var `title`: kotlin.String
+    , 
+    var `license`: kotlin.String
+    , 
+    var `link`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNotice: FfiConverterRustBuffer<Notice> {
+    override fun read(buf: ByteBuffer): Notice {
+        return Notice(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: Notice) = (
+            FfiConverterString.allocationSize(value.`title`) +
+            FfiConverterString.allocationSize(value.`license`) +
+            FfiConverterString.allocationSize(value.`link`)
+    )
+
+    override fun write(value: Notice, buf: ByteBuffer) {
+            FfiConverterString.write(value.`title`, buf)
+            FfiConverterString.write(value.`license`, buf)
+            FfiConverterString.write(value.`link`, buf)
     }
 }
 
@@ -4842,6 +6385,244 @@ public object FfiConverterTypeProjectSummary: FfiConverterRustBuffer<ProjectSumm
             FfiConverterString.write(value.`name`, buf)
             FfiConverterLong.write(value.`durationUs`, buf)
             FfiConverterLong.write(value.`modifiedMs`, buf)
+    }
+}
+
+
+
+/**
+ * A shape the shelf shows. `id` is what `add_shape` takes; `name` is the
+ * shape's own, such as `Circle`, for the phone to draw its tile.
+ */
+data class ShapeChoice (
+    var `id`: kotlin.String
+    , 
+    var `name`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeShapeChoice: FfiConverterRustBuffer<ShapeChoice> {
+    override fun read(buf: ByteBuffer): ShapeChoice {
+        return ShapeChoice(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ShapeChoice) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`name`)
+    )
+
+    override fun write(value: ShapeChoice, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`name`, buf)
+    }
+}
+
+
+
+/**
+ * How a shape looks. Widths, corners and distances are canvas pixels;
+ * opacities 0 to 1; colors `#RRGGBB`.
+ */
+data class ShapeStyle (
+    /**
+     * An open line: it has no fill and no corners.
+     */
+    var `line`: kotlin.Boolean
+    , 
+    /**
+     * Empty when it has no fill.
+     */
+    var `fill`: kotlin.String
+    , 
+    var `fillOpacity`: kotlin.Double
+    , 
+    /**
+     * The outline is off while its width is 0.
+     */
+    var `stroke`: kotlin.String
+    , 
+    var `strokeWidth`: kotlin.Double
+    , 
+    var `strokeOpacity`: kotlin.Double
+    , 
+    /**
+     * Solid (0), dashed (1) or dotted (2).
+     */
+    var `strokeStyle`: kotlin.Int
+    , 
+    var `corners`: kotlin.Double
+    , 
+    var `cornersMax`: kotlin.Double
+    , 
+    /**
+     * The shadow is off while its opacity is 0.
+     */
+    var `shadow`: kotlin.String
+    , 
+    var `shadowOpacity`: kotlin.Double
+    , 
+    var `shadowDistance`: kotlin.Double
+    , 
+    /**
+     * Degrees.
+     */
+    var `shadowAngle`: kotlin.Double
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeShapeStyle: FfiConverterRustBuffer<ShapeStyle> {
+    override fun read(buf: ByteBuffer): ShapeStyle {
+        return ShapeStyle(
+            FfiConverterBoolean.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterInt.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ShapeStyle) = (
+            FfiConverterBoolean.allocationSize(value.`line`) +
+            FfiConverterString.allocationSize(value.`fill`) +
+            FfiConverterDouble.allocationSize(value.`fillOpacity`) +
+            FfiConverterString.allocationSize(value.`stroke`) +
+            FfiConverterDouble.allocationSize(value.`strokeWidth`) +
+            FfiConverterDouble.allocationSize(value.`strokeOpacity`) +
+            FfiConverterInt.allocationSize(value.`strokeStyle`) +
+            FfiConverterDouble.allocationSize(value.`corners`) +
+            FfiConverterDouble.allocationSize(value.`cornersMax`) +
+            FfiConverterString.allocationSize(value.`shadow`) +
+            FfiConverterDouble.allocationSize(value.`shadowOpacity`) +
+            FfiConverterDouble.allocationSize(value.`shadowDistance`) +
+            FfiConverterDouble.allocationSize(value.`shadowAngle`)
+    )
+
+    override fun write(value: ShapeStyle, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`line`, buf)
+            FfiConverterString.write(value.`fill`, buf)
+            FfiConverterDouble.write(value.`fillOpacity`, buf)
+            FfiConverterString.write(value.`stroke`, buf)
+            FfiConverterDouble.write(value.`strokeWidth`, buf)
+            FfiConverterDouble.write(value.`strokeOpacity`, buf)
+            FfiConverterInt.write(value.`strokeStyle`, buf)
+            FfiConverterDouble.write(value.`corners`, buf)
+            FfiConverterDouble.write(value.`cornersMax`, buf)
+            FfiConverterString.write(value.`shadow`, buf)
+            FfiConverterDouble.write(value.`shadowOpacity`, buf)
+            FfiConverterDouble.write(value.`shadowDistance`, buf)
+            FfiConverterDouble.write(value.`shadowAngle`, buf)
+    }
+}
+
+
+
+/**
+ * The shape panel's slider ends and where a part starts when switched on.
+ */
+data class ShapeStyleRanges (
+    var `fillStart`: kotlin.String
+    , 
+    var `strokeMax`: kotlin.Double
+    , 
+    var `strokeStart`: kotlin.Double
+    , 
+    var `shadowDistanceMax`: kotlin.Double
+    , 
+    var `shadowDistanceStart`: kotlin.Double
+    , 
+    var `shadowAngleStart`: kotlin.Double
+    , 
+    var `shadowOpacityStart`: kotlin.Double
+    , 
+    var `penMin`: kotlin.Double
+    , 
+    var `penMax`: kotlin.Double
+    , 
+    var `penStart`: kotlin.Double
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeShapeStyleRanges: FfiConverterRustBuffer<ShapeStyleRanges> {
+    override fun read(buf: ByteBuffer): ShapeStyleRanges {
+        return ShapeStyleRanges(
+            FfiConverterString.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ShapeStyleRanges) = (
+            FfiConverterString.allocationSize(value.`fillStart`) +
+            FfiConverterDouble.allocationSize(value.`strokeMax`) +
+            FfiConverterDouble.allocationSize(value.`strokeStart`) +
+            FfiConverterDouble.allocationSize(value.`shadowDistanceMax`) +
+            FfiConverterDouble.allocationSize(value.`shadowDistanceStart`) +
+            FfiConverterDouble.allocationSize(value.`shadowAngleStart`) +
+            FfiConverterDouble.allocationSize(value.`shadowOpacityStart`) +
+            FfiConverterDouble.allocationSize(value.`penMin`) +
+            FfiConverterDouble.allocationSize(value.`penMax`) +
+            FfiConverterDouble.allocationSize(value.`penStart`)
+    )
+
+    override fun write(value: ShapeStyleRanges, buf: ByteBuffer) {
+            FfiConverterString.write(value.`fillStart`, buf)
+            FfiConverterDouble.write(value.`strokeMax`, buf)
+            FfiConverterDouble.write(value.`strokeStart`, buf)
+            FfiConverterDouble.write(value.`shadowDistanceMax`, buf)
+            FfiConverterDouble.write(value.`shadowDistanceStart`, buf)
+            FfiConverterDouble.write(value.`shadowAngleStart`, buf)
+            FfiConverterDouble.write(value.`shadowOpacityStart`, buf)
+            FfiConverterDouble.write(value.`penMin`, buf)
+            FfiConverterDouble.write(value.`penMax`, buf)
+            FfiConverterDouble.write(value.`penStart`, buf)
     }
 }
 
@@ -4936,6 +6717,55 @@ public object FfiConverterTypeStage: FfiConverterRustBuffer<Stage> {
 
 
 /**
+ * A sticker the shelf shows. `id` is what `add_sticker` takes.
+ */
+data class StickerChoice (
+    var `id`: kotlin.String
+    , 
+    var `name`: kotlin.String
+    , 
+    /**
+     * It plays round as an animation.
+     */
+    var `animated`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeStickerChoice: FfiConverterRustBuffer<StickerChoice> {
+    override fun read(buf: ByteBuffer): StickerChoice {
+        return StickerChoice(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: StickerChoice) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterBoolean.allocationSize(value.`animated`)
+    )
+
+    override fun write(value: StickerChoice, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterBoolean.write(value.`animated`, buf)
+    }
+}
+
+
+
+/**
  * What a text clip says, the face it says it in, and how it looks.
  */
 data class TextInfo (
@@ -4982,6 +6812,53 @@ public object FfiConverterTypeTextInfo: FfiConverterRustBuffer<TextInfo> {
 
 
 /**
+ * Which of bold, italic and underline every letter of a stretch of a
+ * text clip has.
+ */
+data class TextPattern (
+    var `bold`: kotlin.Boolean
+    , 
+    var `italic`: kotlin.Boolean
+    , 
+    var `underline`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTextPattern: FfiConverterRustBuffer<TextPattern> {
+    override fun read(buf: ByteBuffer): TextPattern {
+        return TextPattern(
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: TextPattern) = (
+            FfiConverterBoolean.allocationSize(value.`bold`) +
+            FfiConverterBoolean.allocationSize(value.`italic`) +
+            FfiConverterBoolean.allocationSize(value.`underline`)
+    )
+
+    override fun write(value: TextPattern, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`bold`, buf)
+            FfiConverterBoolean.write(value.`italic`, buf)
+            FfiConverterBoolean.write(value.`underline`, buf)
+    }
+}
+
+
+
+/**
  * How a title looks. A part with an empty color is off. Widths and
  * distances are in ems and hundredths of an em; the rest are 0 to 1.
  */
@@ -5011,6 +6888,25 @@ data class TextStyle (
     var `glowStrength`: kotlin.Double
     , 
     var `glowRange`: kotlin.Double
+    , 
+    /**
+     * Left, center or right (0 to 2), or a vertical column at the top,
+     * middle or bottom (3 to 5).
+     */
+    var `alignment`: kotlin.Int
+    , 
+    var `bold`: kotlin.Boolean
+    , 
+    var `italic`: kotlin.Boolean
+    , 
+    var `underline`: kotlin.Boolean
+    , 
+    /**
+     * Fractions of the size; 0 is the normal gap.
+     */
+    var `letterSpacing`: kotlin.Double
+    , 
+    var `lineSpacing`: kotlin.Double
     
 ){
     
@@ -5040,6 +6936,12 @@ public object FfiConverterTypeTextStyle: FfiConverterRustBuffer<TextStyle> {
             FfiConverterString.read(buf),
             FfiConverterDouble.read(buf),
             FfiConverterDouble.read(buf),
+            FfiConverterInt.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
         )
     }
 
@@ -5056,7 +6958,13 @@ public object FfiConverterTypeTextStyle: FfiConverterRustBuffer<TextStyle> {
             FfiConverterDouble.allocationSize(value.`backgroundRound`) +
             FfiConverterString.allocationSize(value.`glowColor`) +
             FfiConverterDouble.allocationSize(value.`glowStrength`) +
-            FfiConverterDouble.allocationSize(value.`glowRange`)
+            FfiConverterDouble.allocationSize(value.`glowRange`) +
+            FfiConverterInt.allocationSize(value.`alignment`) +
+            FfiConverterBoolean.allocationSize(value.`bold`) +
+            FfiConverterBoolean.allocationSize(value.`italic`) +
+            FfiConverterBoolean.allocationSize(value.`underline`) +
+            FfiConverterDouble.allocationSize(value.`letterSpacing`) +
+            FfiConverterDouble.allocationSize(value.`lineSpacing`)
     )
 
     override fun write(value: TextStyle, buf: ByteBuffer) {
@@ -5073,6 +6981,12 @@ public object FfiConverterTypeTextStyle: FfiConverterRustBuffer<TextStyle> {
             FfiConverterString.write(value.`glowColor`, buf)
             FfiConverterDouble.write(value.`glowStrength`, buf)
             FfiConverterDouble.write(value.`glowRange`, buf)
+            FfiConverterInt.write(value.`alignment`, buf)
+            FfiConverterBoolean.write(value.`bold`, buf)
+            FfiConverterBoolean.write(value.`italic`, buf)
+            FfiConverterBoolean.write(value.`underline`, buf)
+            FfiConverterDouble.write(value.`letterSpacing`, buf)
+            FfiConverterDouble.write(value.`lineSpacing`, buf)
     }
 }
 
@@ -5105,6 +7019,17 @@ data class TextStyleRanges (
     var `glowStrengthStart`: kotlin.Double
     , 
     var `glowRangeStart`: kotlin.Double
+    , 
+    /**
+     * Fractions of the size; 0 is the normal gap.
+     */
+    var `letterSpacingMin`: kotlin.Double
+    , 
+    var `letterSpacingMax`: kotlin.Double
+    , 
+    var `lineSpacingMin`: kotlin.Double
+    , 
+    var `lineSpacingMax`: kotlin.Double
     
 ){
     
@@ -5132,6 +7057,10 @@ public object FfiConverterTypeTextStyleRanges: FfiConverterRustBuffer<TextStyleR
             FfiConverterDouble.read(buf),
             FfiConverterDouble.read(buf),
             FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
+            FfiConverterDouble.read(buf),
         )
     }
 
@@ -5146,7 +7075,11 @@ public object FfiConverterTypeTextStyleRanges: FfiConverterRustBuffer<TextStyleR
             FfiConverterDouble.allocationSize(value.`backgroundAlphaStart`) +
             FfiConverterDouble.allocationSize(value.`backgroundRoundStart`) +
             FfiConverterDouble.allocationSize(value.`glowStrengthStart`) +
-            FfiConverterDouble.allocationSize(value.`glowRangeStart`)
+            FfiConverterDouble.allocationSize(value.`glowRangeStart`) +
+            FfiConverterDouble.allocationSize(value.`letterSpacingMin`) +
+            FfiConverterDouble.allocationSize(value.`letterSpacingMax`) +
+            FfiConverterDouble.allocationSize(value.`lineSpacingMin`) +
+            FfiConverterDouble.allocationSize(value.`lineSpacingMax`)
     )
 
     override fun write(value: TextStyleRanges, buf: ByteBuffer) {
@@ -5161,6 +7094,10 @@ public object FfiConverterTypeTextStyleRanges: FfiConverterRustBuffer<TextStyleR
             FfiConverterDouble.write(value.`backgroundRoundStart`, buf)
             FfiConverterDouble.write(value.`glowStrengthStart`, buf)
             FfiConverterDouble.write(value.`glowRangeStart`, buf)
+            FfiConverterDouble.write(value.`letterSpacingMin`, buf)
+            FfiConverterDouble.write(value.`letterSpacingMax`, buf)
+            FfiConverterDouble.write(value.`lineSpacingMin`, buf)
+            FfiConverterDouble.write(value.`lineSpacingMax`, buf)
     }
 }
 
@@ -5311,6 +7248,61 @@ public object FfiConverterTypeToolItem: FfiConverterRustBuffer<ToolItem> {
             FfiConverterString.write(value.`label`, buf)
             FfiConverterBoolean.write(value.`ready`, buf)
             FfiConverterOptionalTypeToolBar.write(value.`opens`, buf)
+    }
+}
+
+
+
+/**
+ * A transition the shelf shows. `id` is what `set_transition` takes;
+ * `preview` is the file name of its looping preview video in the app.
+ */
+data class TransitionChoice (
+    var `id`: kotlin.String
+    , 
+    var `name`: kotlin.String
+    , 
+    /**
+     * The shelf tab it sits under.
+     */
+    var `category`: kotlin.String
+    , 
+    var `preview`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTransitionChoice: FfiConverterRustBuffer<TransitionChoice> {
+    override fun read(buf: ByteBuffer): TransitionChoice {
+        return TransitionChoice(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: TransitionChoice) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterString.allocationSize(value.`category`) +
+            FfiConverterString.allocationSize(value.`preview`)
+    )
+
+    override fun write(value: TransitionChoice, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterString.write(value.`category`, buf)
+            FfiConverterString.write(value.`preview`, buf)
     }
 }
 
@@ -5533,6 +7525,53 @@ public object FfiConverterTypeEditorError : FfiConverterRustBuffer<EditorExcepti
 
 
 /**
+ * How many bits a second an export's picture gets.
+ */
+
+enum class ExportQuality {
+    
+    /**
+     * Half the recommended: a smaller file.
+     */
+    LOWER,
+    /**
+     * About what the phone's camera records at that size.
+     */
+    RECOMMENDED,
+    /**
+     * Double the recommended.
+     */
+    HIGHER;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeExportQuality: FfiConverterRustBuffer<ExportQuality> {
+    override fun read(buf: ByteBuffer) = try {
+        ExportQuality.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: ExportQuality) = 4UL
+
+    override fun write(value: ExportQuality, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
  * What a row holds.
  */
 
@@ -5568,6 +7607,177 @@ public object FfiConverterTypeLaneKind: FfiConverterRustBuffer<LaneKind> {
 
     override fun write(value: LaneKind, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * One change to a shape's look. See [`ShapeStyle`] for the units.
+ */
+sealed class ShapeStyleChange {
+    
+    /**
+     * An empty color takes the fill off.
+     */
+    data class Fill(
+        val `color`: kotlin.String, 
+        val `opacity`: kotlin.Double) : ShapeStyleChange()
+        
+    {
+        
+
+        companion object
+    }
+    
+    /**
+     * A width of 0 takes the outline off.
+     */
+    data class Stroke(
+        val `color`: kotlin.String, 
+        val `width`: kotlin.Double, 
+        val `opacity`: kotlin.Double, 
+        val `style`: kotlin.Int) : ShapeStyleChange()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Corners(
+        val `radius`: kotlin.Double) : ShapeStyleChange()
+        
+    {
+        
+
+        companion object
+    }
+    
+    /**
+     * An opacity of 0 takes the shadow off.
+     */
+    data class Shadow(
+        val `color`: kotlin.String, 
+        val `distance`: kotlin.Double, 
+        val `angle`: kotlin.Double, 
+        val `opacity`: kotlin.Double) : ShapeStyleChange()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeShapeStyleChange : FfiConverterRustBuffer<ShapeStyleChange>{
+    override fun read(buf: ByteBuffer): ShapeStyleChange {
+        return when(buf.getInt()) {
+            1 -> ShapeStyleChange.Fill(
+                FfiConverterString.read(buf),
+                FfiConverterDouble.read(buf),
+                )
+            2 -> ShapeStyleChange.Stroke(
+                FfiConverterString.read(buf),
+                FfiConverterDouble.read(buf),
+                FfiConverterDouble.read(buf),
+                FfiConverterInt.read(buf),
+                )
+            3 -> ShapeStyleChange.Corners(
+                FfiConverterDouble.read(buf),
+                )
+            4 -> ShapeStyleChange.Shadow(
+                FfiConverterString.read(buf),
+                FfiConverterDouble.read(buf),
+                FfiConverterDouble.read(buf),
+                FfiConverterDouble.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: ShapeStyleChange): ULong = when(value) {
+        is ShapeStyleChange.Fill -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`color`)
+                + FfiConverterDouble.allocationSize(value.`opacity`)
+            )
+        }
+        is ShapeStyleChange.Stroke -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`color`)
+                + FfiConverterDouble.allocationSize(value.`width`)
+                + FfiConverterDouble.allocationSize(value.`opacity`)
+                + FfiConverterInt.allocationSize(value.`style`)
+            )
+        }
+        is ShapeStyleChange.Corners -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterDouble.allocationSize(value.`radius`)
+            )
+        }
+        is ShapeStyleChange.Shadow -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`color`)
+                + FfiConverterDouble.allocationSize(value.`distance`)
+                + FfiConverterDouble.allocationSize(value.`angle`)
+                + FfiConverterDouble.allocationSize(value.`opacity`)
+            )
+        }
+    }
+
+    override fun write(value: ShapeStyleChange, buf: ByteBuffer) {
+        when(value) {
+            is ShapeStyleChange.Fill -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`color`, buf)
+                FfiConverterDouble.write(value.`opacity`, buf)
+                Unit
+            }
+            is ShapeStyleChange.Stroke -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`color`, buf)
+                FfiConverterDouble.write(value.`width`, buf)
+                FfiConverterDouble.write(value.`opacity`, buf)
+                FfiConverterInt.write(value.`style`, buf)
+                Unit
+            }
+            is ShapeStyleChange.Corners -> {
+                buf.putInt(3)
+                FfiConverterDouble.write(value.`radius`, buf)
+                Unit
+            }
+            is ShapeStyleChange.Shadow -> {
+                buf.putInt(4)
+                FfiConverterString.write(value.`color`, buf)
+                FfiConverterDouble.write(value.`distance`, buf)
+                FfiConverterDouble.write(value.`angle`, buf)
+                FfiConverterDouble.write(value.`opacity`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
 
@@ -5641,6 +7851,44 @@ sealed class TextStyleChange {
         companion object
     }
     
+    data class Align(
+        val `alignment`: kotlin.Int) : TextStyleChange()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Pattern(
+        val `bold`: kotlin.Boolean, 
+        val `italic`: kotlin.Boolean, 
+        val `underline`: kotlin.Boolean) : TextStyleChange()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class LetterSpacing(
+        val `spacing`: kotlin.Double) : TextStyleChange()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class LineSpacing(
+        val `spacing`: kotlin.Double) : TextStyleChange()
+        
+    {
+        
+
+        companion object
+    }
+    
 
     
 
@@ -5680,6 +7928,20 @@ public object FfiConverterTypeTextStyleChange : FfiConverterRustBuffer<TextStyle
             6 -> TextStyleChange.Glow(
                 FfiConverterString.read(buf),
                 FfiConverterDouble.read(buf),
+                FfiConverterDouble.read(buf),
+                )
+            7 -> TextStyleChange.Align(
+                FfiConverterInt.read(buf),
+                )
+            8 -> TextStyleChange.Pattern(
+                FfiConverterBoolean.read(buf),
+                FfiConverterBoolean.read(buf),
+                FfiConverterBoolean.read(buf),
+                )
+            9 -> TextStyleChange.LetterSpacing(
+                FfiConverterDouble.read(buf),
+                )
+            10 -> TextStyleChange.LineSpacing(
                 FfiConverterDouble.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -5736,6 +7998,36 @@ public object FfiConverterTypeTextStyleChange : FfiConverterRustBuffer<TextStyle
                 + FfiConverterDouble.allocationSize(value.`range`)
             )
         }
+        is TextStyleChange.Align -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterInt.allocationSize(value.`alignment`)
+            )
+        }
+        is TextStyleChange.Pattern -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterBoolean.allocationSize(value.`bold`)
+                + FfiConverterBoolean.allocationSize(value.`italic`)
+                + FfiConverterBoolean.allocationSize(value.`underline`)
+            )
+        }
+        is TextStyleChange.LetterSpacing -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterDouble.allocationSize(value.`spacing`)
+            )
+        }
+        is TextStyleChange.LineSpacing -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterDouble.allocationSize(value.`spacing`)
+            )
+        }
     }
 
     override fun write(value: TextStyleChange, buf: ByteBuffer) {
@@ -5777,6 +8069,28 @@ public object FfiConverterTypeTextStyleChange : FfiConverterRustBuffer<TextStyle
                 FfiConverterDouble.write(value.`range`, buf)
                 Unit
             }
+            is TextStyleChange.Align -> {
+                buf.putInt(7)
+                FfiConverterInt.write(value.`alignment`, buf)
+                Unit
+            }
+            is TextStyleChange.Pattern -> {
+                buf.putInt(8)
+                FfiConverterBoolean.write(value.`bold`, buf)
+                FfiConverterBoolean.write(value.`italic`, buf)
+                FfiConverterBoolean.write(value.`underline`, buf)
+                Unit
+            }
+            is TextStyleChange.LetterSpacing -> {
+                buf.putInt(9)
+                FfiConverterDouble.write(value.`spacing`, buf)
+                Unit
+            }
+            is TextStyleChange.LineSpacing -> {
+                buf.putInt(10)
+                FfiConverterDouble.write(value.`spacing`, buf)
+                Unit
+            }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
@@ -5796,7 +8110,10 @@ enum class ToolBar {
     OVERLAY_CLIP,
     AUDIO_CLIP,
     TEXT_CLIP,
+    FILTER_CLIP,
+    ADJUST_CLIP,
     OTHER_CLIP,
+    SHAPE_CLIP,
     AUDIO,
     TEXT,
     EFFECTS,
@@ -5861,6 +8178,7 @@ enum class ToolKind {
     FREEZE,
     EXTRACT_AUDIO,
     FADE,
+    OPACITY,
     BEATS,
     UNLINK,
     SPLICE,
@@ -5870,7 +8188,8 @@ enum class ToolKind {
     ADD_TEXT,
     EDIT_TEXT,
     DRAW,
-    VIDEO_EFFECTS;
+    VIDEO_EFFECTS,
+    SHAPE_STYLE;
 
     
 
@@ -5897,6 +8216,38 @@ public object FfiConverterTypeToolKind: FfiConverterRustBuffer<ToolKind> {
 }
 
 
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalBoolean: FfiConverterRustBuffer<kotlin.Boolean?> {
+    override fun read(buf: ByteBuffer): kotlin.Boolean? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterBoolean.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.Boolean?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterBoolean.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.Boolean?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterBoolean.write(value, buf)
+        }
+    }
+}
 
 
 
@@ -5958,6 +8309,70 @@ public object FfiConverterOptionalTypeClipAnimations: FfiConverterRustBuffer<Cli
         } else {
             buf.put(1)
             FfiConverterTypeClipAnimations.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeClipFilter: FfiConverterRustBuffer<ClipFilter?> {
+    override fun read(buf: ByteBuffer): ClipFilter? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeClipFilter.read(buf)
+    }
+
+    override fun allocationSize(value: ClipFilter?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeClipFilter.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ClipFilter?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeClipFilter.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeClipState: FfiConverterRustBuffer<ClipState?> {
+    override fun read(buf: ByteBuffer): ClipState? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeClipState.read(buf)
+    }
+
+    override fun allocationSize(value: ClipState?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeClipState.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ClipState?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeClipState.write(value, buf)
         }
     }
 }
@@ -6032,6 +8447,38 @@ public object FfiConverterOptionalTypeKeyframes: FfiConverterRustBuffer<Keyframe
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeShapeStyle: FfiConverterRustBuffer<ShapeStyle?> {
+    override fun read(buf: ByteBuffer): ShapeStyle? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeShapeStyle.read(buf)
+    }
+
+    override fun allocationSize(value: ShapeStyle?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeShapeStyle.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ShapeStyle?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeShapeStyle.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeStage: FfiConverterRustBuffer<Stage?> {
     override fun read(buf: ByteBuffer): Stage? {
         if (buf.get().toInt() == 0) {
@@ -6096,6 +8543,38 @@ public object FfiConverterOptionalTypeTextInfo: FfiConverterRustBuffer<TextInfo?
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeTextPattern: FfiConverterRustBuffer<TextPattern?> {
+    override fun read(buf: ByteBuffer): TextPattern? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeTextPattern.read(buf)
+    }
+
+    override fun allocationSize(value: TextPattern?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeTextPattern.allocationSize(value)
+        }
+    }
+
+    override fun write(value: TextPattern?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeTextPattern.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeToolBar: FfiConverterRustBuffer<ToolBar?> {
     override fun read(buf: ByteBuffer): ToolBar? {
         if (buf.get().toInt() == 0) {
@@ -6118,6 +8597,38 @@ public object FfiConverterOptionalTypeToolBar: FfiConverterRustBuffer<ToolBar?> 
         } else {
             buf.put(1)
             FfiConverterTypeToolBar.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalSequenceTypeAdjustSlider: FfiConverterRustBuffer<List<AdjustSlider>?> {
+    override fun read(buf: ByteBuffer): List<AdjustSlider>? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterSequenceTypeAdjustSlider.read(buf)
+    }
+
+    override fun allocationSize(value: List<AdjustSlider>?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterSequenceTypeAdjustSlider.allocationSize(value)
+        }
+    }
+
+    override fun write(value: List<AdjustSlider>?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterSequenceTypeAdjustSlider.write(value, buf)
         }
     }
 }
@@ -6268,6 +8779,34 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeAdjustSlider: FfiConverterRustBuffer<List<AdjustSlider>> {
+    override fun read(buf: ByteBuffer): List<AdjustSlider> {
+        val len = buf.getInt()
+        return List<AdjustSlider>(len) {
+            FfiConverterTypeAdjustSlider.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<AdjustSlider>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeAdjustSlider.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<AdjustSlider>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeAdjustSlider.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeAnimationPreset: FfiConverterRustBuffer<List<AnimationPreset>> {
     override fun read(buf: ByteBuffer): List<AnimationPreset> {
         val len = buf.getInt()
@@ -6286,6 +8825,34 @@ public object FfiConverterSequenceTypeAnimationPreset: FfiConverterRustBuffer<Li
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeAnimationPreset.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeCanvasPoint: FfiConverterRustBuffer<List<CanvasPoint>> {
+    override fun read(buf: ByteBuffer): List<CanvasPoint> {
+        val len = buf.getInt()
+        return List<CanvasPoint>(len) {
+            FfiConverterTypeCanvasPoint.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<CanvasPoint>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeCanvasPoint.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<CanvasPoint>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeCanvasPoint.write(it, buf)
         }
     }
 }
@@ -6352,6 +8919,34 @@ public object FfiConverterSequenceTypeClip: FfiConverterRustBuffer<List<Clip>> {
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeCut: FfiConverterRustBuffer<List<Cut>> {
+    override fun read(buf: ByteBuffer): List<Cut> {
+        val len = buf.getInt()
+        return List<Cut>(len) {
+            FfiConverterTypeCut.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<Cut>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeCut.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<Cut>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeCut.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeEffectChoice: FfiConverterRustBuffer<List<EffectChoice>> {
     override fun read(buf: ByteBuffer): List<EffectChoice> {
         val len = buf.getInt()
@@ -6408,6 +9003,34 @@ public object FfiConverterSequenceTypeFilm: FfiConverterRustBuffer<List<Film>> {
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeFilterChoice: FfiConverterRustBuffer<List<FilterChoice>> {
+    override fun read(buf: ByteBuffer): List<FilterChoice> {
+        val len = buf.getInt()
+        return List<FilterChoice>(len) {
+            FfiConverterTypeFilterChoice.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FilterChoice>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeFilterChoice.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FilterChoice>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFilterChoice.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeFont: FfiConverterRustBuffer<List<Font>> {
     override fun read(buf: ByteBuffer): List<Font> {
         val len = buf.getInt()
@@ -6426,6 +9049,34 @@ public object FfiConverterSequenceTypeFont: FfiConverterRustBuffer<List<Font>> {
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeFont.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeFontAxis: FfiConverterRustBuffer<List<FontAxis>> {
+    override fun read(buf: ByteBuffer): List<FontAxis> {
+        val len = buf.getInt()
+        return List<FontAxis>(len) {
+            FfiConverterTypeFontAxis.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FontAxis>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeFontAxis.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FontAxis>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFontAxis.write(it, buf)
         }
     }
 }
@@ -6492,6 +9143,34 @@ public object FfiConverterSequenceTypeLane: FfiConverterRustBuffer<List<Lane>> {
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeNotice: FfiConverterRustBuffer<List<Notice>> {
+    override fun read(buf: ByteBuffer): List<Notice> {
+        val len = buf.getInt()
+        return List<Notice>(len) {
+            FfiConverterTypeNotice.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<Notice>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNotice.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<Notice>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNotice.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeProjectSummary: FfiConverterRustBuffer<List<ProjectSummary>> {
     override fun read(buf: ByteBuffer): List<ProjectSummary> {
         val len = buf.getInt()
@@ -6510,6 +9189,62 @@ public object FfiConverterSequenceTypeProjectSummary: FfiConverterRustBuffer<Lis
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeProjectSummary.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeShapeChoice: FfiConverterRustBuffer<List<ShapeChoice>> {
+    override fun read(buf: ByteBuffer): List<ShapeChoice> {
+        val len = buf.getInt()
+        return List<ShapeChoice>(len) {
+            FfiConverterTypeShapeChoice.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<ShapeChoice>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeShapeChoice.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<ShapeChoice>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeShapeChoice.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeStickerChoice: FfiConverterRustBuffer<List<StickerChoice>> {
+    override fun read(buf: ByteBuffer): List<StickerChoice> {
+        val len = buf.getInt()
+        return List<StickerChoice>(len) {
+            FfiConverterTypeStickerChoice.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<StickerChoice>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeStickerChoice.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<StickerChoice>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeStickerChoice.write(it, buf)
         }
     }
 }
@@ -6594,6 +9329,34 @@ public object FfiConverterSequenceTypeToolItem: FfiConverterRustBuffer<List<Tool
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeToolItem.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeTransitionChoice: FfiConverterRustBuffer<List<TransitionChoice>> {
+    override fun read(buf: ByteBuffer): List<TransitionChoice> {
+        val len = buf.getInt()
+        return List<TransitionChoice>(len) {
+            FfiConverterTypeTransitionChoice.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<TransitionChoice>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeTransitionChoice.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<TransitionChoice>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeTransitionChoice.write(it, buf)
         }
     }
 }
@@ -6696,11 +9459,83 @@ public object FfiConverterSequenceTypeWave: FfiConverterRustBuffer<List<Wave>> {
     
 
         /**
+         * The ratios the Crop panel offers after the whole frame, as `w:h`.
+         */ fun `cropRatios`(): List<kotlin.String> {
+            return FfiConverterSequenceString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_crop_ratios(
+    
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * Cutlass's own license, as an SPDX expression.
+         */ fun `cutlassLicense`(): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_cutlass_license(
+    
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * Delete project `project` in the Cutlass folder at `root` and every file
+         * in it. A folder that holds no project is refused.
+         */
+    @Throws(EditorException::class) fun `deleteProject`(`root`: kotlin.String, `project`: kotlin.String)
+        = 
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_delete_project(
+    
+        
+        FfiConverterString.lower(`root`),
+        FfiConverterString.lower(`project`),_status)
+}
+    
+    
+
+        /**
+         * Copy project `project` in the Cutlass folder at `root`, media and all,
+         * as "… copy", and return the copy's folder.
+         */
+    @Throws(EditorException::class) fun `duplicateProject`(`root`: kotlin.String, `project`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_duplicate_project(
+    
+        
+        FfiConverterString.lower(`root`),
+        FfiConverterString.lower(`project`),_status)
+}
+    )
+    }
+    
+
+        /**
          * The effects that ship in the app, in picker order.
          */ fun `effectChoices`(): List<EffectChoice> {
             return FfiConverterSequenceTypeEffectChoice.lift(
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_effect_choices(
+    
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * The frame rates an export may be, beside 0 for the project's own.
+         */ fun `exportRates`(): List<kotlin.UInt> {
+            return FfiConverterSequenceUInt.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_export_rates(
     
         _status)
 }
@@ -6716,6 +9551,36 @@ public object FfiConverterSequenceTypeWave: FfiConverterRustBuffer<List<Wave>> {
     UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_export_sides(
     
         _status)
+}
+    )
+    }
+    
+
+        /**
+         * The filters that ship in the app, in picker order.
+         */ fun `filterChoices`(): List<FilterChoice> {
+            return FfiConverterSequenceTypeFilterChoice.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_filter_choices(
+    
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * The filter `filter_id` over its own preview scene, `width` by `height`,
+         * for its picker tile. `None` for a filter the app does not ship.
+         */ fun `filterPoster`(`filterId`: kotlin.String, `width`: kotlin.UInt, `height`: kotlin.UInt): Frame? {
+            return FfiConverterOptionalTypeFrame.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_filter_poster(
+    
+        
+        FfiConverterString.lower(`filterId`),
+        FfiConverterUInt.lower(`width`),
+        FfiConverterUInt.lower(`height`),_status)
 }
     )
     }
@@ -6781,6 +9646,76 @@ public object FfiConverterSequenceTypeWave: FfiConverterRustBuffer<List<Wave>> {
     
 
         /**
+         * The license text of notice `index`, word for word.
+         */ fun `noticeText`(`index`: kotlin.UInt): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_notice_text(
+    
+        
+        FfiConverterUInt.lower(`index`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Every notice on the About page, sticker sets first.
+         */ fun `notices`(): List<Notice> {
+            return FfiConverterSequenceTypeNotice.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_notices(
+    
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * Give project `project` in the Cutlass folder at `root` the name
+         * `name`. Its folder keeps its own name. An empty name is refused.
+         */
+    @Throws(EditorException::class) fun `renameProject`(`root`: kotlin.String, `project`: kotlin.String, `name`: kotlin.String)
+        = 
+    uniffiRustCallWithError(EditorException) { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_rename_project(
+    
+        
+        FfiConverterString.lower(`root`),
+        FfiConverterString.lower(`project`),
+        FfiConverterString.lower(`name`),_status)
+}
+    
+    
+
+        /**
+         * Every shape, in shelf order.
+         */ fun `shapeChoices`(): List<ShapeChoice> {
+            return FfiConverterSequenceTypeShapeChoice.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_shape_choices(
+    
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * See [`ShapeStyleRanges`].
+         */ fun `shapeStyleRanges`(): ShapeStyleRanges {
+            return FfiConverterTypeShapeStyleRanges.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_shape_style_ranges(
+    
+        _status)
+}
+    )
+    }
+    
+
+        /**
          * The speed at scale `position`, 0 to 1. The marks 0.1, 1, 2, 5, 10 and
          * 100 sit the same distance apart.
          */ fun `speedAt`(`position`: kotlin.Double): kotlin.Double {
@@ -6829,6 +9764,35 @@ public object FfiConverterSequenceTypeWave: FfiConverterRustBuffer<List<Wave>> {
     
 
         /**
+         * Every sticker the app ships, in shelf order.
+         */ fun `stickerChoices`(): List<StickerChoice> {
+            return FfiConverterSequenceTypeStickerChoice.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_sticker_choices(
+    
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * Sticker `sticker_id` `side` pixels square for its shelf tile; an
+         * animation shows its middle frame. `None` for a sticker not shipped.
+         */ fun `stickerPoster`(`stickerId`: kotlin.String, `side`: kotlin.UInt): Frame? {
+            return FfiConverterOptionalTypeFrame.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_sticker_poster(
+    
+        
+        FfiConverterString.lower(`stickerId`),
+        FfiConverterUInt.lower(`side`),_status)
+}
+    )
+    }
+    
+
+        /**
          * The Styles tab's colors, as `#RRGGBB`.
          */ fun `textColors`(): List<kotlin.String> {
             return FfiConverterSequenceString.lift(
@@ -6863,6 +9827,32 @@ public object FfiConverterSequenceTypeWave: FfiConverterRustBuffer<List<Wave>> {
     
         
         FfiConverterTypeToolBar.lower(`bar`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * The transition shelf's tabs, in order.
+         */ fun `transitionCategories`(): List<kotlin.String> {
+            return FfiConverterSequenceString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_transition_categories(
+    
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * Every transition the app ships, in shelf order.
+         */ fun `transitionChoices`(): List<TransitionChoice> {
+            return FfiConverterSequenceTypeTransitionChoice.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_cutlass_ffi_bindings_fn_func_transition_choices(
+    
+        _status)
 }
     )
     }

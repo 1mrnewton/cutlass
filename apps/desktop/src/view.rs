@@ -18,9 +18,9 @@ use crate::tokens;
 use crate::ui;
 use crate::widgets;
 
-mod ai_stylize;
 mod assistant;
 mod audio;
+mod cover;
 mod follow;
 mod grade;
 mod inspector;
@@ -32,6 +32,7 @@ mod remove_bg;
 mod retouch;
 mod shape;
 mod speed;
+mod studio;
 
 const CARD_W: f32 = 144.0;
 const CARD_H: f32 = 96.0;
@@ -169,6 +170,8 @@ pub struct ViewState {
     export_open: bool,
     /// The project dialog's unsaved choices while it is open.
     project_dialog: Option<cutlass_editor::ProjectSettings>,
+    /// The cover dialog while it is open.
+    cover: Option<cover::CoverDialog>,
     /// "Do not ask again" is ticked in the replace-transition question.
     never_ask_transition: bool,
     /// The project dialog shows its Performance tab, not Details.
@@ -179,6 +182,9 @@ pub struct ViewState {
     project_proxy_side: Option<u32>,
     /// The third-party notices, read when the Licenses window opens.
     licenses: Option<cutlass_licenses::Notices>,
+    /// The title families the app ships are listed in that window, each
+    /// with its license; folded away until asked for.
+    title_fonts_shown: bool,
     settings_open: bool,
     settings_tab: SettingsTab,
     /// The action whose new keys the settings window waits for.
@@ -260,8 +266,15 @@ pub struct ViewState {
     /// A folder being named, and what is typed so far.
     library_renaming: Option<(String, String)>,
     projects_root: Option<std::path::PathBuf>,
+    /// The app itself asked to quit (to restart after an update), so a
+    /// close is not turned back into a return to the projects.
+    quitting: bool,
     listed: Vec<ListedProject>,
     listed_stamp: String,
+    /// The recent projects outside the projects folder, read again only
+    /// when the list or one of their drafts changes.
+    recent: Vec<ListedProject>,
+    recent_stamp: String,
     /// When the projects folder was last looked at.
     listed_checked: Option<std::time::Instant>,
     marquee_press: Option<Pos2>,
@@ -274,6 +287,8 @@ pub struct ViewState {
     lanes_down: f32,
     /// The assistant's conversation, and whether its panel is open.
     pub assistant: crate::assistant::Assistant,
+    /// The effect studio screen.
+    pub studio: studio::StudioView,
 }
 
 /// Where a track head's menu opened, and for which track.
@@ -295,11 +310,13 @@ impl Default for ViewState {
             wants_link: false,
             export_open: false,
             project_dialog: None,
+            cover: None,
             never_ask_transition: false,
             project_performance: false,
             project_proxies: None,
             project_proxy_side: None,
             licenses: None,
+            title_fonts_shown: false,
             settings_open: false,
             settings_tab: SettingsTab::General,
             recording: None,
@@ -344,7 +361,10 @@ impl Default for ViewState {
             filter_category: String::new(),
             library_renaming: None,
             projects_root: None,
+            quitting: false,
             listed: Vec::new(),
+            recent: Vec::new(),
+            recent_stamp: String::new(),
             listed_stamp: String::new(),
             listed_checked: None,
             marquee_press: None,
@@ -352,6 +372,7 @@ impl Default for ViewState {
             lanes_up: 0.0,
             lanes_down: 0.0,
             assistant: crate::assistant::Assistant::default(),
+            studio: studio::StudioView::default(),
         }
     }
 }
@@ -401,6 +422,20 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     if shell.serve_forwarded() {
         ui.ctx().request_repaint();
     }
+    // The studio folder is looked at whichever screen is up, so a recipe
+    // saved or edited by hand shows on the shelves at once.
+    if shell.poll_studio() {
+        ui.ctx().request_repaint();
+    }
+    // With a recipe in the making the folder is looked at every second;
+    // otherwise only when something else draws a frame.
+    if view.studio.open || shell.studio_in_use() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs(1));
+    }
+    if std::mem::take(&mut view.studio.wants_clip) {
+        view.dialogs.studio_clip(parent);
+    }
     show_imported(shell, view);
     if view.assistant.poll(shell) {
         ui.ctx()
@@ -415,7 +450,15 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     if view.preview_full && shell.draft().is_none() {
         set_full_screen(ui, view, false);
     }
-    if view.preview_full {
+    if view.studio.open {
+        studio::show(shell, ui, &mut view.studio, full);
+        #[cfg(not(target_os = "macos"))]
+        window_buttons(
+            shell,
+            ui,
+            Rect::from_min_size(full.min, Vec2::new(full.width(), tokens::HEAD_HEIGHT)),
+        );
+    } else if view.preview_full {
         if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
             set_full_screen(ui, view, false);
         }
@@ -457,6 +500,16 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         if view.project_dialog.is_some() {
             project_dialog(shell, ui, view);
         }
+        if cover::take_open_request(ui.ctx()) && view.cover.is_none() {
+            view.cover = Some(cover::CoverDialog::open(shell));
+        }
+        if view.cover.is_some() {
+            let mut pick = false;
+            cover::dialog(shell, ui, &mut view.cover, &mut pick);
+            if pick {
+                view.dialogs.cover(parent);
+            }
+        }
         job_strip(shell, ui, full);
         shortcuts(shell, ui, view);
         if shell.playing() || shell.preview_pending() || !shell.meter_resting() {
@@ -485,7 +538,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     if shell.update_offer().is_some() {
         update_dialog(shell, ui);
     }
-    restart_for_update(shell, ui);
+    restart_for_update(shell, ui, view);
     dropped_files(shell, ui);
 }
 
@@ -665,7 +718,7 @@ fn projects_home(
         Pos2::new(full.max.x - 28.0, full.max.y - 28.0),
     );
     let root = projects_root(view);
-    let projects = listed_projects(view);
+    let (projects, recent) = listed_projects(shell, view);
     let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body));
     ui::Scroll::vertical("projects")
         .auto_shrink([false, false])
@@ -674,7 +727,6 @@ fn projects_home(
                 open_created(shell, &root);
             }
             ui.add_space(20.0);
-            let recent = shell.recent_projects(&root);
             if !recent.is_empty() {
                 ui.label(
                     RichText::new("Recent, elsewhere")
@@ -685,7 +737,7 @@ fn projects_home(
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::new(16.0, 16.0);
                     for project in &recent {
-                        if project_card(ui, project)
+                        if project_card(ui, shell, project)
                             && let Err(error) = shell.open_folder(&project.path)
                         {
                             shell.notice_error(&error);
@@ -704,7 +756,7 @@ fn projects_home(
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(16.0, 16.0);
                 for project in &projects {
-                    if project_card(ui, project)
+                    if project_card(ui, shell, project)
                         && let Err(error) = shell.open_folder(&project.path)
                     {
                         shell.notice_error(&error);
@@ -718,7 +770,13 @@ fn projects_home(
 /// How often the projects home looks at the folder for changes.
 const PROJECTS_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
 
-fn listed_projects(view: &mut ViewState) -> Vec<ListedProject> {
+/// The projects under the projects folder and the recent ones elsewhere.
+/// Each is read again only when a check, once a second, finds a project
+/// added, removed, renamed or saved; between, the last reading is kept.
+fn listed_projects(
+    shell: &Shell,
+    view: &mut ViewState,
+) -> (Vec<ListedProject>, Vec<ListedProject>) {
     let due = view
         .listed_checked
         .is_none_or(|checked| checked.elapsed() >= PROJECTS_CHECK);
@@ -730,8 +788,30 @@ fn listed_projects(view: &mut ViewState) -> Vec<ListedProject> {
             view.listed = Shell::list_projects(&root);
             view.listed_stamp = stamp;
         }
+        let recent = &shell.settings().recent_projects;
+        let stamp = format!(
+            "{}|{}",
+            root.display(),
+            recent
+                .iter()
+                .map(|path| project_stamp(path, &path.display().to_string()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        if view.recent_stamp != stamp {
+            view.recent = shell.recent_projects(&root);
+            view.recent_stamp = stamp;
+        }
     }
-    view.listed.clone()
+    (view.listed.clone(), view.recent.clone())
+}
+
+/// A project's name and when it was saved, to notice a change.
+fn project_stamp(path: &std::path::Path, name: &str) -> String {
+    let saved = cutlass_store::saved_at(path)
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |since| since.as_nanos());
+    format!("{name}:{saved}")
 }
 
 fn directory_stamp(root: &std::path::Path) -> String {
@@ -740,16 +820,9 @@ fn directory_stamp(root: &std::path::Path) -> String {
     };
     let mut names = Vec::new();
     for entry in entries.flatten() {
-        let modified = entry
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0);
-        names.push(format!(
-            "{}:{modified}",
-            entry.file_name().to_string_lossy()
+        names.push(project_stamp(
+            &entry.path(),
+            &entry.file_name().to_string_lossy(),
         ));
     }
     names.sort();
@@ -776,19 +849,46 @@ fn new_project_button(ui: &mut Ui) -> bool {
     .clicked()
 }
 
-fn project_card(ui: &mut Ui, project: &ListedProject) -> bool {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(220.0, 88.0), Sense::click());
+/// A project at home: its first frame over its name, length and date,
+/// black when nothing is at the timeline's start. Until the picture is
+/// drawn, a quiet field shows there instead.
+fn project_card(ui: &mut Ui, shell: &mut Shell, project: &ListedProject) -> bool {
+    const WIDTH: f32 = 220.0;
+    const PICTURE: f32 = 124.0;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(WIDTH, PICTURE + 60.0), Sense::click());
     let fill = if response.hovered() {
         tokens::ACTIVE
     } else {
         tokens::PROJECT_BAR
     };
     ui.painter().rect_filled(rect, CornerRadius::same(12), fill);
+    let picture = Rect::from_min_size(rect.min, Vec2::new(WIDTH, PICTURE));
+    let top = CornerRadius {
+        nw: 12,
+        ne: 12,
+        sw: 0,
+        se: 0,
+    };
+    match cover::card_picture(shell, ui.ctx(), &project.path) {
+        Some(texture) => {
+            let [w, h] = texture.size();
+            ui.painter().add(
+                egui::epaint::RectShape::filled(picture, top, Color32::WHITE)
+                    .with_texture(texture.id(), cover_uv(picture.size(), w as f32, h as f32)),
+            );
+        }
+        None => {
+            ui.painter().rect_filled(picture, top, tokens::LANE);
+            let icon = Rect::from_center_size(picture.center(), Vec2::splat(22.0));
+            let _ = icons::paint(ui.painter(), icon, "media", tokens::FAINT);
+        }
+    }
+    let text = picture.left_bottom() + Vec2::new(14.0, 12.0);
     ui.painter().text(
-        rect.min + Vec2::new(16.0, 18.0),
+        text,
         Align2::LEFT_TOP,
         &project.name,
-        FontId::proportional(15.0),
+        FontId::proportional(14.0),
         tokens::TEXT,
     );
     let meta = if project.duration.0 > 0 {
@@ -801,7 +901,7 @@ fn project_card(ui: &mut Ui, project: &ListedProject) -> bool {
         modified_label(project.modified)
     };
     ui.painter().text(
-        rect.min + Vec2::new(16.0, 46.0),
+        text + Vec2::new(0.0, 22.0),
         Align2::LEFT_TOP,
         meta,
         FontId::proportional(12.0),
@@ -832,6 +932,22 @@ fn utc_date(seconds: u64) -> String {
         year += 1;
     }
     format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// The window's close button with a project open saves it and goes back
+/// to the projects, as leaving the editor does, instead of quitting. At the
+/// projects the button closes the app. Quit from the menu or the Dock ends
+/// the app without asking the window, so it is never held here.
+pub fn close_to_projects(shell: &mut Shell, view: &mut ViewState, ctx: &egui::Context) {
+    if view.quitting
+        || shell.draft().is_none()
+        || !ctx.input(|input| input.viewport().close_requested())
+    {
+        return;
+    }
+    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+    cutlass_logger::info!("window closed with a project open: back to the projects");
+    return_to_projects(shell, view);
 }
 
 fn return_to_projects(shell: &mut Shell, view: &mut ViewState) {
@@ -956,6 +1072,13 @@ fn project_bar(
 ) {
     let bar = Rect::from_min_size(full.min, Vec2::new(full.width(), height));
     ui::Surface::bar().paint(ui.painter(), bar);
+    // A line along its foot, end to end, so the inspector's header, the
+    // same grey, does not run into it.
+    ui.painter().hline(
+        bar.x_range(),
+        bar.bottom() - 0.5,
+        egui::Stroke::new(1.0, inspector::TAB_LINE),
+    );
     shell.chrome.project_bar = true;
     #[cfg(not(target_os = "macos"))]
     window_buttons(shell, ui, bar);
@@ -1075,6 +1198,10 @@ fn file_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Optio
         ui.close();
         view.settings_open = true;
     }
+    if ui.button("Effect studio").clicked() {
+        ui.close();
+        view.studio.open = true;
+    }
     if shell.draft().is_none() {
         return;
     }
@@ -1178,7 +1305,7 @@ fn menu_items(
 /// Run the menu bar item `id`: a window command, or a shortcut action.
 pub fn run_menu(shell: &mut Shell, view: &mut ViewState, parent: Option<&eframe::Frame>, id: &str) {
     use crate::menubar::{
-        CHECK_UPDATES, EXPORT, EXPORT_LOG, IMPORT, LICENSES, OPEN, PROJECTS, SAVE, SETTINGS,
+        CHECK_UPDATES, EXPORT, EXPORT_LOG, IMPORT, LICENSES, OPEN, PROJECTS, SAVE, SETTINGS, STUDIO,
     };
 
     let open = shell.draft().is_some();
@@ -1189,6 +1316,10 @@ pub fn run_menu(shell: &mut Shell, view: &mut ViewState, parent: Option<&eframe:
         }
         SETTINGS => {
             view.settings_open = true;
+            Ok(())
+        }
+        STUDIO => {
+            view.studio.open = true;
             Ok(())
         }
         LICENSES => {
@@ -1261,6 +1392,9 @@ fn licenses_window(ui: &mut Ui, view: &mut ViewState) {
                 ui.add_space(8.0);
                 sticker_credits(ui);
                 ui.add_space(8.0);
+                font_credits(ui, &mut view.title_fonts_shown);
+                word_list_credits(ui);
+                ui.add_space(8.0);
                 for krate in &notices.crates {
                     egui::CollapsingHeader::new(format!("{} {}", krate.name, krate.version))
                         .id_salt(("license", &krate.name, &krate.version))
@@ -1297,6 +1431,70 @@ fn sticker_credits(ui: &mut Ui) {
             .id_salt(("sticker license", credit.set))
             .show(ui, |ui| {
                 ui.label(RichText::new(credit.text).monospace().size(10.0));
+            });
+    }
+}
+
+/// The word lists the app breaks lines of Thai, Lao, Khmer and Burmese
+/// by, on one row that opens: whose they are, their license and their
+/// home, and the notices and license text.
+fn word_list_credits(ui: &mut Ui) {
+    let words = cutlass_text::LINE_BREAK_WORDS;
+    egui::CollapsingHeader::new("Word lists for Thai, Lao, Khmer and Burmese")
+        .id_salt("word lists license")
+        .show(ui, |ui| {
+            ui.label(format!(
+                "{} by {}, licensed under the {}.",
+                words.name, words.author, words.license
+            ));
+            ui.label(RichText::new(words.link).color(tokens::FAINT));
+            ui.label(RichText::new(words.text).monospace().size(10.0));
+        });
+}
+
+/// The faces that are part of the app: each face, who made it, its
+/// license and its home, and the license text under it. The title
+/// families are many, and are listed when `shown`, which a link turns.
+fn font_credits(ui: &mut Ui, shown: &mut bool) {
+    ui.label(RichText::new("Fonts").strong());
+    for face in crate::face::BUILT_IN {
+        ui.label(format!(
+            "{} by {}, licensed under the {}.",
+            face.family, face.author, face.license
+        ));
+        ui.label(RichText::new(face.link).color(tokens::FAINT));
+        egui::CollapsingHeader::new(format!("{} license", face.family))
+            .id_salt(("font license", face.name))
+            .show(ui, |ui| {
+                ui.label(RichText::new(face.text).monospace().size(10.0));
+            });
+    }
+    let families = cutlass_fonts::FAMILIES;
+    ui.label(format!(
+        "{} title families by other makers ship with the app, each under an open license.",
+        families.len()
+    ));
+    let turn = if *shown {
+        "Hide the title families"
+    } else {
+        "Show the title families"
+    };
+    if ui.link(turn).clicked() {
+        *shown = !*shown;
+    }
+    if !*shown {
+        return;
+    }
+    for family in families {
+        ui.label(format!(
+            "{} by {}, licensed under the {}.",
+            family.name, family.author, family.license
+        ));
+        ui.label(RichText::new(family.link).color(tokens::FAINT));
+        egui::CollapsingHeader::new(format!("{} license", family.name))
+            .id_salt(("font family license", family.name))
+            .show(ui, |ui| {
+                ui.label(RichText::new(family.text).monospace().size(10.0));
             });
     }
 }
@@ -1641,13 +1839,14 @@ fn update_dialog(shell: &mut Shell, ui: &mut Ui) {
 
 /// An update is in place: start the new version once this one quits, and
 /// close. The project is saved on the way out.
-fn restart_for_update(shell: &mut Shell, ui: &Ui) {
+fn restart_for_update(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
     let Some(relaunch) = shell.take_restart() else {
         return;
     };
     match relaunch.spawn() {
         Ok(()) => {
             cutlass_logger::info!("update installed; restarting");
+            view.quitting = true;
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
         Err(error) => shell.notice_error(&format!(
@@ -2115,7 +2314,7 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                 let category = view.effect_category.as_str();
                 cards.retain(|card| {
                     cutlass_editor::effect_of_card(&card.id)
-                        .and_then(|id| cutlass_effects::bundled_recipe(&id))
+                        .and_then(|id| cutlass_effects::recipe(&id))
                         .is_some_and(|recipe| recipe.category == category)
                 });
             }
@@ -2866,6 +3065,28 @@ fn middle_ellipsis(ctx: &egui::Context, text: &str, font: &FontId, width: f32) -
 
 /// Read each card's picture or sound from the shell, asking for what is
 /// missing.
+/// What tells one still of a card from the next: nothing for a card the
+/// app ships, and for one from the studio folder the number that moves
+/// each time the studio's recipes change.
+fn studio_card_age(card_id: &str) -> i64 {
+    let studio = card_id
+        .strip_prefix(cutlass_editor::EFFECT_CARD_PREFIX)
+        .is_some_and(cutlass_effects::is_studio_recipe)
+        || card_id
+            .strip_prefix(cutlass_editor::TRANSITION_CARD_PREFIX)
+            .is_some_and(|id| {
+                cutlass_effects::is_studio_transition(&format!(
+                    "{}{id}",
+                    cutlass_effects::BUILT_IN_PREFIX
+                ))
+            });
+    if studio {
+        i64::try_from(cutlass_effects::studio_generation()).unwrap_or(i64::MAX)
+    } else {
+        0
+    }
+}
+
 fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
     let hover = ctx.data(|data| data.get_temp::<(String, f64)>(effect_hover_id()));
     let now = ctx.input(|input| input.time);
@@ -2890,9 +3111,11 @@ fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
                             continue;
                         }
                     }
+                    // A studio card's still is kept for the recipe it was
+                    // drawn from: a saved change draws it again.
                     let key = cutlass_engine::ThumbKey {
                         path: card.id.clone().into(),
-                        time: Micros(0),
+                        time: Micros(studio_card_age(&card.id)),
                     };
                     if let Some(entry) = textures.shown.get_mut(&key) {
                         entry.1 = textures.frame;
@@ -4702,9 +4925,45 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     } else {
         rect
     };
-    // The whole body scrolls, so the bar sits on the panel edge; the
-    // content keeps 16 points in from each side.
     let content_width = body.width() - 32.0;
+    // A clip's or a transition's tabs sit in a header band that stays put
+    // while the body under it scrolls.
+    let inspection = shell.inspection();
+    let body = if transition.is_some() || inspection.is_some() {
+        let band = ui.painter().add(egui::Shape::Noop);
+        let inner = Rect::from_min_max(
+            body.min + Vec2::new(16.0, 0.0),
+            body.max - Vec2::new(16.0, 0.0),
+        );
+        let mut header = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("inspector-header")
+                .max_rect(inner),
+        );
+        header.set_clip_rect(body);
+        header.add_space(6.0);
+        if transition.is_some() {
+            inspector::tabs(&mut header, &["Transition"], &mut 0);
+        } else if let Some(inspection) = &inspection {
+            inspector::clip_tabs(shell, &mut header, view, inspection);
+        }
+        let bottom = header.min_rect().bottom().clamp(body.top(), body.bottom());
+        let header_rect = Rect::from_min_max(body.min, egui::pos2(body.right(), bottom));
+        ui.painter().set(
+            band,
+            egui::Shape::rect_filled(header_rect, CornerRadius::ZERO, tokens::PROJECT_BAR),
+        );
+        ui.painter().hline(
+            header_rect.x_range(),
+            bottom,
+            egui::Stroke::new(1.0, inspector::TAB_LINE),
+        );
+        Rect::from_min_max(egui::pos2(body.left(), bottom + 1.0), body.max)
+    } else {
+        body
+    };
+    // The body scrolls, so the bar sits on the panel edge; the content
+    // keeps 16 points in from each side.
     let mut details = ui.new_child(egui::UiBuilder::new().max_rect(body));
     details.set_clip_rect(body);
     ui::Scroll::vertical("inspector")
@@ -4714,9 +4973,9 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
             if let Some(bar) = &transition {
                 ui.add_space(6.0);
                 inspector::transition_panel(shell, ui, view, bar);
-            } else if let Some(inspection) = shell.inspection() {
+            } else if let Some(inspection) = &inspection {
                 ui.add_space(6.0);
-                inspector::clip_panel(shell, ui, view, &inspection, content_width);
+                inspector::clip_panel(shell, ui, view, inspection);
             } else {
                 ui.add_space(14.0);
                 section_title(ui, "Details");
@@ -7076,76 +7335,13 @@ fn paint_lane(
     }
 }
 
-/// The Cover box in the bare column beside the main lane: a pencil and the
-/// word Cover in a dashed square, with the Later badge under it. It picks
-/// no cover yet; a click says so.
-fn paint_cover(shell: &mut Shell, ui: &Ui, row: Rect) {
-    const SIDE: f32 = 52.0;
-    const BADGE_GAP: f32 = 4.0;
-    const BADGE: f32 = 16.0;
+/// The Cover box in the bare column beside the main lane.
+fn paint_cover(shell: &Shell, ui: &Ui, row: Rect) {
     let column = Rect::from_x_y_ranges(
         egui::Rangef::new(head_rect(row).right(), row.left()),
         row.y_range(),
     );
-    let side = SIDE
-        .min(column.height() - BADGE_GAP - BADGE - 8.0)
-        .max(28.0);
-    let block = side + BADGE_GAP + BADGE;
-    let card = Rect::from_center_size(
-        Pos2::new(column.center().x, column.center().y - (block - side) / 2.0),
-        Vec2::splat(side),
-    );
-    let response = ui.interact(card, ui.scope_id().with("cover"), Sense::click());
-    let painter = ui.painter();
-    let fill = if response.hovered() {
-        tokens::DIALOG_HEAD
-    } else {
-        tokens::LANE_LINE
-    };
-    painter.rect_filled(card, CornerRadius::same(6), fill);
-    let dash = egui::Stroke::new(1.0, tokens::FAINT);
-    let inner = card.shrink(6.0);
-    for (from, to) in [
-        (
-            Pos2::new(inner.left(), card.top()),
-            Pos2::new(inner.right(), card.top()),
-        ),
-        (
-            Pos2::new(inner.left(), card.bottom()),
-            Pos2::new(inner.right(), card.bottom()),
-        ),
-        (
-            Pos2::new(card.left(), inner.top()),
-            Pos2::new(card.left(), inner.bottom()),
-        ),
-        (
-            Pos2::new(card.right(), inner.top()),
-            Pos2::new(card.right(), inner.bottom()),
-        ),
-    ] {
-        painter.extend(egui::Shape::dashed_line(&[from, to], dash, 3.0, 2.0));
-    }
-    let icon = Rect::from_center_size(
-        Pos2::new(card.center().x, card.top() + side * 0.36),
-        Vec2::splat(14.0),
-    );
-    let _ = icons::paint(painter, icon, "editText", tokens::TEXT);
-    painter.text(
-        Pos2::new(card.center().x, card.top() + side * 0.72),
-        Align2::CENTER_CENTER,
-        "Cover",
-        FontId::proportional(11.0),
-        tokens::TEXT,
-    );
-    crate::menu::paint_later_badge(
-        ui.ctx(),
-        painter,
-        Pos2::new(card.center().x, card.bottom() + BADGE_GAP + BADGE / 2.0),
-    );
-    if response.clicked() {
-        shell.set_notice("Cover is not built yet".to_owned());
-    }
-    response.on_hover_text("Pick the project's cover");
+    cover::paint_box(shell, ui, column);
 }
 
 /// The lane's kind as an icon at the head's left. Its name is not written
@@ -9005,11 +9201,11 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
                 view.export_mov = true;
             }
         });
-        // ProRes and Motion JPEG are written in a MOV, VP8 and MPEG-2 in an
-        // MP4. MPEG-4 in either.
+        // ProRes and Motion JPEG are written in a MOV, AV1, VP8 and MPEG-2
+        // in an MP4. MPEG-4 in either.
         let fits = |codec: CodecId| match codec {
             CodecId::Prores | CodecId::Mjpeg => view.export_mov,
-            CodecId::Vp8 | CodecId::Mpeg2 => !view.export_mov,
+            CodecId::Av1 | CodecId::Vp8 | CodecId::Mpeg2 => !view.export_mov,
             _ => true,
         };
         if !fits(export.codec) {
@@ -9019,6 +9215,7 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
             for (codec, name) in [
                 (CodecId::H264, "H.264"),
                 (CodecId::Hevc, "HEVC"),
+                (CodecId::Av1, "AV1"),
                 (CodecId::Mpeg4, "MPEG-4"),
                 (CodecId::Vp8, "VP8"),
                 (CodecId::Mpeg2, "MPEG-2"),
@@ -9581,6 +9778,17 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
         Picker::Lut => shell.load_lut(&path),
         Picker::Replace => shell.start_replace(&path),
         Picker::Link => shell.start_link(&path),
+        Picker::StudioClip => {
+            shell.load_studio_clip(path);
+            view.studio.use_clip();
+            Ok(())
+        }
+        Picker::Cover => {
+            if let Some(dialog) = view.cover.as_mut() {
+                dialog.picked(path);
+            }
+            Ok(())
+        }
         Picker::SaveLog => Shell::export_log(&path).map(|()| {
             shell.set_notice(format!("Saved the log to {}", path.display()));
         }),
@@ -10454,6 +10662,7 @@ mod tests {
                     "Rotate",
                     "Blend",
                     "Stabilize",
+                    "Remove flicker",
                     "Motion blur",
                     "Canvas",
                     "Later",
@@ -10469,6 +10678,14 @@ mod tests {
                     "Line width",
                     "Flip upside down",
                     "Tracking",
+                    "AI remove",
+                    "AI expand",
+                    "AI remix",
+                    "Lip sync",
+                    "AI movement",
+                    "Video translator",
+                    "AI stylize",
+                    "Removing video flickers",
                 ]
                 .as_slice(),
             ),
@@ -10483,7 +10700,6 @@ mod tests {
                     "Fade out",
                     "Normalize loudness",
                     "Enhance voice",
-                    "Audio translator",
                     "Reduce noise",
                     "Separate audio",
                     "Vocals",
@@ -10491,7 +10707,13 @@ mod tests {
                     "Fill channel",
                     "Later",
                 ],
-                &["Position & Size", "Stroke", "Video"],
+                &[
+                    "Position & Size",
+                    "Stroke",
+                    "Video",
+                    "Audio translator",
+                    "Speech to song",
+                ],
             ),
             (
                 "words",
@@ -10499,8 +10721,6 @@ mod tests {
                     "Text",
                     "Animation",
                     "Tracking",
-                    "Text to speech",
-                    "AI avatars",
                     "Basic",
                     "Bubble",
                     "Effects",
@@ -10523,23 +10743,14 @@ mod tests {
                     "Shadow",
                     "Hello",
                 ],
-                &["Volume", "Rotate", "Mode"],
+                &["Volume", "Rotate", "Mode", "Text to speech", "AI avatars"],
             ),
             (
                 "said",
                 &[
-                    "Captions",
-                    "Text",
-                    "Tracking",
-                    "AI avatars",
-                    "Search",
-                    "Replace",
-                    "Re-run",
-                    "?",
-                    "1",
-                    "+",
+                    "Captions", "Text", "Tracking", "Search", "Replace", "Re-run", "?", "1", "+",
                 ],
-                &["Volume", "Font size"],
+                &["Volume", "Font size", "Text to speech", "AI avatars"],
             ),
             (
                 "look",
@@ -11014,26 +11225,6 @@ mod tests {
         ] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }
-        // The AI stylize tab lays out its effects and styles, marked Later.
-        view.inspector.focus(inspector::Focus {
-            tab: 5,
-            page: 0,
-            section: None,
-        });
-        let _ = frame(&mut shell, &mut view, Vec::new());
-        let lines = galleys(&frame(&mut shell, &mut view, Vec::new()));
-        for label in [
-            "AI effects",
-            "Prompt",
-            "Random",
-            "Generate",
-            "Style",
-            "Trending",
-            "Surreal",
-            "Later",
-        ] {
-            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
-        }
         shell.set_chroma("", 0.0, 0.0).unwrap();
         assert!(shell.inspection().unwrap().chroma.is_none());
         assert!(shell.set_chroma("#00ff00", 2.0, 0.0).is_err());
@@ -11344,6 +11535,91 @@ mod tests {
         }
         drop(shell);
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_effect_studio_opens_from_the_menu_and_draws_what_is_being_made() {
+        use crate::studio::{CurveKind, Slot, Stack};
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        let mut view = ViewState::new();
+        assert!(!view.studio.open);
+        run_menu(&mut shell, &mut view, None, crate::menubar::STUDIO);
+        assert!(view.studio.open);
+        let ctx = egui::Context::default();
+        let frame = |shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))),
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            let painted = painted_text(&output);
+            output.textures_delta.clear();
+            painted
+        };
+        // Nothing open: the list, and what to do next. The editor's own
+        // screens are not drawn under it.
+        let painted = frame(&mut shell, &mut view);
+        for text in [
+            "Effect studio",
+            "New effect",
+            "Shake",
+            "Open an effect or a transition",
+        ] {
+            assert!(painted.contains(text), "{text} in {painted}");
+        }
+        assert!(!shell.chrome.project_bar && !shell.chrome.projects);
+
+        // An effect: its passes, the picked pass's values, its controls
+        // and its card. Without a GPU the preview says so.
+        shell.studio_mut().new_effect();
+        let slot = Slot::pass(Stack::Effect, 0, "radius");
+        shell.studio_mut().set_kind(&slot, CurveKind::Keys);
+        shell.studio_mut().pick_slot(Some(slot.clone()));
+        shell.studio_mut().pick_key(Some(1));
+        shell.studio_mut().add_control();
+        let painted = frame(&mut shell, &mut view);
+        for text in [
+            "Passes · 1 of 8",
+            "1  Blur",
+            "Radius",
+            "2 keys",
+            "Controls · 1 of 6",
+            "Radius of pass 1",
+            "On the shelf",
+            "Card scene",
+            "The preview needs the GPU.",
+            "Unsaved changes",
+            "Repeat",
+        ] {
+            assert!(painted.contains(text), "{text} in {painted}");
+        }
+        // The other ways a value moves draw their own numbers.
+        for kind in [CurveKind::Wave, CurveKind::Random, CurveKind::Fixed] {
+            shell.studio_mut().set_kind(&slot, kind);
+            frame(&mut shell, &mut view);
+        }
+
+        // A transition: two stacks and the swap, and no controls.
+        shell.studio_mut().new_transition();
+        let painted = frame(&mut shell, &mut view);
+        for text in [
+            "Outgoing picture · 0 of 8",
+            "Incoming picture · 0 of 8",
+            "The swap",
+            "Progress",
+            "Lasts",
+        ] {
+            assert!(painted.contains(text), "{text} in {painted}");
+        }
+        assert!(!painted.contains("Controls ·"), "{painted}");
+
+        // A document that cannot be saved says why.
+        shell.studio_mut().set_id("Not An Id");
+        let painted = frame(&mut shell, &mut view);
+        assert!(painted.contains("id or name is not usable"), "{painted}");
     }
 
     #[test]
@@ -12569,7 +12845,8 @@ mod tests {
         let run = |shell: &mut Shell, view: &mut ViewState, events| {
             let mut output = ctx.run_ui(
                 egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    // Tall enough for the credits and the first crates under them.
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 1000.0))),
                     events,
                     ..Default::default()
                 },
@@ -12598,6 +12875,43 @@ mod tests {
             painted.contains("https://googlefonts.github.io/noto-emoji-animation/"),
             "{painted}"
         );
+        // So are the faces that are part of the app, each with its license.
+        assert!(painted.contains("Fonts"), "{painted}");
+        for credit in [
+            "Ubuntu Light by Dalton Maag, for Canonical, licensed under the Ubuntu Font Licence 1.0.",
+            "Hack by Source Foundry, licensed under the MIT, with the Bitstream Vera license.",
+            "Noto Emoji by Google, licensed under the SIL Open Font License 1.1.",
+            "https://design.ubuntu.com/font",
+        ] {
+            assert!(painted.contains(credit), "{credit}: {painted}");
+        }
+        // The word lists lines of Thai and its neighbours are broken by
+        // have a row of their own, which opens on their terms.
+        assert!(
+            painted.contains("Word lists for Thai, Lao, Khmer and Burmese"),
+            "{painted}"
+        );
+        let words = cutlass_text::LINE_BREAK_WORDS;
+        assert!(words.text.contains("UNICODE LICENSE V3"));
+        assert!(words.link.starts_with("https://"));
+        // The title families are counted, and listed when asked for,
+        // each with who made it and its license.
+        assert!(
+            painted.contains("24 title families by other makers ship with the app"),
+            "{painted}"
+        );
+        assert!(painted.contains("Show the title families"), "{painted}");
+        assert!(!painted.contains("Inter by Rasmus Andersson"), "{painted}");
+        view.title_fonts_shown = true;
+        let listed = painted_text(&run(&mut shell, &mut view, Vec::new()));
+        for credit in [
+            "Hide the title families",
+            // The first of them; the rest are further down the list.
+            "Inter by Rasmus Andersson, licensed under the SIL Open Font License 1.1.",
+        ] {
+            assert!(listed.contains(credit), "{credit}: {listed}");
+        }
+        view.title_fonts_shown = false;
         run(
             &mut shell,
             &mut view,
@@ -16628,8 +16942,7 @@ mod tests {
         assert!(!lane_fill_at(cover), "the cover column takes no lane fill");
         assert!(lane_fill_at(head), "the head keeps its lane fill");
         let cover = text_pos(&output, "Cover").expect("the Cover box");
-        let later = text_pos(&output, "Later").expect("its Later badge");
-        assert!(later.y > cover.y, "the badge sits under the box");
+        assert!(text_pos(&output, "Later").is_none(), "the box is built");
         assert!(
             cover.x < at.x && cover.x > head.x,
             "the box is in the column"
@@ -17309,6 +17622,343 @@ mod tests {
             .rev()
             .find_map(|clipped| shape_pos(&clipped.shape, wanted))
             .map(|pos| pos + Vec2::new(4.0, 4.0))
+    }
+
+    /// Wait for the cover job to land.
+    fn land_cover(shell: &mut Shell) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while shell.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(shell.job().is_none(), "the cover job did not finish");
+    }
+
+    /// A project of one blue clip two seconds long on a 64 by 32 canvas.
+    fn blue_project(name: &str) -> (Shell, std::path::PathBuf) {
+        let temp =
+            std::env::temp_dir().join(format!("cutlass-cover-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 64;
+        draft.canvas_config.height = 32;
+        draft
+            .materials
+            .material_colors
+            .push(cutlass_model::MaterialColorConfig {
+                id: "color".into(),
+                is_color_clip: true,
+                solid_color: "0xFF336699".to_owned(),
+                ..cutlass_model::MaterialColorConfig::default()
+            });
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "blue",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        draft.duration = Micros(2_000_000);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        (shell, temp)
+    }
+
+    #[test]
+    fn the_cover_box_opens_the_dialog_and_save_makes_the_frame_the_cover() {
+        let (mut shell, temp) = blue_project("frame");
+        shell.seek(Micros(500_000));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            let event = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            [
+                vec![egui::Event::PointerMoved(pos), event(true)],
+                vec![event(false)],
+            ]
+        };
+        let press = |shell: &mut Shell, view: &mut ViewState, label: &str| {
+            let output = frame(shell, view, Vec::new());
+            let at = last_text_pos(&output, label).unwrap_or_else(|| panic!("no {label}"));
+            for events in click(at) {
+                frame(shell, view, events);
+            }
+        };
+        // The box beside the main lane says Cover, with no Later badge.
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(text_pos(&output, "Later").is_none());
+        press(&mut shell, &mut view, "Cover");
+        assert!(view.cover.is_some());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        for label in [
+            "Select a cover",
+            "Select from video",
+            "Local",
+            "Save",
+            "Cancel",
+        ] {
+            assert!(text_pos(&output, label).is_some(), "{label}");
+        }
+        // Cancel leaves no cover and the playhead where it was.
+        press(&mut shell, &mut view, "Cancel");
+        assert!(view.cover.is_none());
+        assert_eq!(shell.cover(), None);
+        assert_eq!(shell.playhead(), Micros(500_000));
+
+        // Dragging the strip's handle picks a later frame and leaves the
+        // project's playhead alone.
+        press(&mut shell, &mut view, "Cover");
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let tabs = text_pos(&output, "Select from video").expect("the tabs");
+        let strip_y = tabs.y + 50.0;
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let from = Pos2::new(400.0, strip_y);
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(from), button(from, true)],
+        );
+        for x in [500.0, 700.0, 900.0] {
+            frame(
+                &mut shell,
+                &mut view,
+                vec![egui::Event::PointerMoved(Pos2::new(x, strip_y))],
+            );
+            assert_eq!(shell.playhead(), Micros(500_000));
+        }
+        let to = Pos2::new(900.0, strip_y);
+        frame(&mut shell, &mut view, vec![button(to, false)]);
+        assert_eq!(shell.playhead(), Micros(500_000));
+        press(&mut shell, &mut view, "Save");
+        assert!(view.cover.is_none());
+        land_cover(&mut shell);
+        assert_eq!(shell.playhead(), Micros(500_000));
+        let Some(cutlass_model::Cover::Frame { time }) = shell.cover() else {
+            panic!("no frame cover: {:?}", shell.cover());
+        };
+        assert!(time.0 > 1_000_000, "{time:?}");
+        assert!(temp.join(cutlass_model::COVER_FILE).is_file());
+        // The box now shows the cover, under the word.
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(text_pos(&output, "Cover").is_some());
+    }
+
+    #[test]
+    fn closing_the_window_in_a_project_goes_back_to_the_projects() {
+        let (mut shell, temp) = blue_project("close");
+        shell.seek(Micros(700_000));
+        shell
+            .apply(cutlass_session::Request::SetProjectName {
+                name: "Kept".to_owned(),
+            })
+            .unwrap();
+        assert!(shell.unsaved());
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        // One pass as eframe runs it: the logic hook, then the window.
+        let pass = |shell: &mut Shell, view: &mut ViewState, close: bool| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            };
+            if close {
+                input.viewports.insert(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportInfo {
+                        events: vec![egui::ViewportEvent::Close],
+                        ..Default::default()
+                    },
+                );
+            }
+            let mut output = ctx.run_ui(input, |ui| {
+                close_to_projects(shell, view, ui.ctx());
+                show(shell, ui, view, None);
+            });
+            output.textures_delta.clear();
+            output.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .contains(&egui::ViewportCommand::CancelClose)
+        };
+        pass(&mut shell, &mut view, false);
+        // The close button in the editor: the app stays, the project is
+        // saved and closed, and the projects show.
+        assert!(pass(&mut shell, &mut view, true));
+        assert!(shell.draft().is_none());
+        let saved = cutlass_store::Folder::read(&temp).unwrap();
+        assert_eq!(saved.draft.name, "Kept");
+        pass(&mut shell, &mut view, false);
+        assert!(shell.chrome.projects);
+        // At the projects the button closes the app.
+        assert!(!pass(&mut shell, &mut view, true));
+
+        // When the app quits by itself, as for an update, nothing holds it.
+        shell.open_folder(&temp).unwrap();
+        view.quitting = true;
+        assert!(!pass(&mut shell, &mut view, true));
+        assert!(shell.draft().is_some());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn recent_projects_are_read_once_and_again_only_after_a_change() {
+        let root = std::env::temp_dir().join(format!("cutlass-recent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // A project outside the projects folder, opened and closed, so it
+        // is a recent one.
+        let (mut shell, project) = blue_project("recent");
+        shell.close_project().unwrap();
+        let mut view = ViewState::new();
+        view.projects_root = Some(root.clone());
+        let ctx = egui::Context::default();
+        let painted = |shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            painted_text(&output)
+        };
+        // Untitled: the card shows the folder's name.
+        let folder = project.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(painted(&mut shell, &mut view).contains(&folder));
+        // Renamed on disk: until the next check the kept reading shows.
+        cutlass_store::rename_project(&project, "Renamed").unwrap();
+        let shown = painted(&mut shell, &mut view);
+        assert!(
+            shown.contains(&folder) && !shown.contains("Renamed"),
+            "{shown}"
+        );
+        // At the check the change is seen and the project read again.
+        view.listed_checked = None;
+        assert!(painted(&mut shell, &mut view).contains("Renamed"));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn a_home_card_shows_the_first_frame_and_not_the_picked_cover() {
+        let root = std::env::temp_dir().join(format!("cutlass-cards-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (_, project) = blue_project("card");
+        let folder = root.join("Blue");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::rename(&project, &folder).unwrap();
+        // A picked cover, 10 by 10 and red, which the card does not show.
+        image::RgbImage::from_pixel(10, 10, image::Rgb([255, 0, 0]))
+            .save(folder.join(cutlass_model::COVER_FILE))
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        let mut view = ViewState::new();
+        view.projects_root = Some(root.clone());
+        let ctx = egui::Context::default();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut uploaded = Vec::new();
+        while !uploaded.contains(&[64, 32]) {
+            assert!(std::time::Instant::now() < until, "no card picture");
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, &mut view, None),
+            );
+            uploaded.extend(
+                output
+                    .textures_delta
+                    .set
+                    .values()
+                    .flat_map(|deltas| deltas.iter().map(|delta| delta.image.size())),
+            );
+            output.textures_delta.clear();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!uploaded.contains(&[10, 10]));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_local_tab_takes_a_picture_from_the_picker_and_saves_it() {
+        let (mut shell, temp) = blue_project("local");
+        let png = temp.join("poster.png");
+        image::RgbaImage::from_pixel(40, 20, image::Rgba([0x33, 0x66, 0x99, 255]))
+            .save(&png)
+            .unwrap();
+        let mut view = ViewState::new();
+        view.cover = Some(cover::CoverDialog::open(&shell));
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        frame(&mut shell, &mut view);
+        view.dialogs
+            .finish_for_test(Picker::Cover, Some(png.clone()));
+        frame(&mut shell, &mut view);
+        let output = frame(&mut shell, &mut view);
+        assert!(text_pos(&output, "poster.png").is_some());
+        assert!(text_pos(&output, "Choose picture").is_some());
+        let save = last_text_pos(&output, "Save").unwrap();
+        for pressed in [true, false] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events: vec![
+                        egui::Event::PointerMoved(save),
+                        egui::Event::PointerButton {
+                            pos: save,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+        }
+        land_cover(&mut shell);
+        assert_eq!(
+            shell.cover(),
+            Some(&cutlass_model::Cover::Image {
+                path: png.display().to_string()
+            })
+        );
     }
 
     #[test]
@@ -18174,6 +18824,90 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp);
     }
 
+    /// The inspector's tabs sit in a header band that stays put while the
+    /// body under it scrolls, painted by the real renderer. With
+    /// `CUTLASS_RENDER_DIR` set the pictures are kept there to look at.
+    #[test]
+    fn the_inspector_tabs_stay_put_while_its_body_scrolls() {
+        use cutlass_model::{MaterialVideo, Segment, TimeRange};
+        use egui_kittest::kittest::Queryable;
+        let temp = std::env::temp_dir().join(format!("cutlass-render-tabs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.materials.videos.push(MaterialVideo {
+            width: 1920,
+            height: 1080,
+            ..MaterialVideo::new("movie")
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("main", "movie", TimeRange::new(0, 2_000_000)));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(1280.0, 800.0))
+            .wgpu()
+            .build_ui_state(
+                |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+                (shell, ViewState::new()),
+            );
+        harness.run_steps(4);
+        // The rightmost of each name is the inspector's.
+        let at = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>, label: &str| {
+            harness
+                .query_all_by_label(label)
+                .map(|node| node.rect())
+                .max_by(|a, b| a.min.x.total_cmp(&b.min.x))
+                .unwrap_or_else(|| panic!("no {label}"))
+        };
+        let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
+        let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
+            let image = harness.render().expect("the renderer draws the window");
+            if let Some(dir) = &keep {
+                std::fs::create_dir_all(dir).unwrap();
+                image.save(dir.join(format!("{name}.png"))).unwrap();
+            }
+            image
+        };
+        let tab = at(&harness, "Video");
+        let row = at(&harness, "Position & Size");
+        let before = picture(&mut harness, "inspector-top");
+        // The header band, in the gutter left of the tabs, is not the
+        // panel's colour under it.
+        let x = (tab.min.x - 8.0) as u32;
+        let header = before.get_pixel(x, tab.center().y as u32);
+        let panel = before.get_pixel(x, (row.min.y - 6.0) as u32);
+        assert_ne!(header, panel, "the header has no band of its own");
+        harness.hover_at(row.center());
+        for _ in 0..6 {
+            harness.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, -80.0),
+                modifiers: egui::Modifiers::default(),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+            });
+            harness.run_steps(2);
+        }
+        harness.run_steps(4);
+        picture(&mut harness, "inspector-scrolled");
+        assert_eq!(at(&harness, "Video"), tab, "the tabs moved");
+        let scrolled = harness
+            .query_all_by_label("Position & Size")
+            .map(|node| node.rect())
+            .max_by(|a, b| a.min.x.total_cmp(&b.min.x));
+        assert!(
+            scrolled.is_none_or(|moved| moved.min.y < row.min.y - 200.0),
+            "the body did not scroll: {row:?} to {scrolled:?}"
+        );
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
     /// A project with a title "AA" and a caption "AB BA" in the sample
     /// face, saved at `temp`, open.
     fn text_inspector_shell(temp: &std::path::Path) -> Shell {
@@ -18214,6 +18948,305 @@ mod tests {
         )]);
         shell.keep_presets_file(temp.join("Presets").join("text.json"));
         shell
+    }
+
+    /// A title in a face that varies has a slider for each of its axes,
+    /// which moves the title's own setting of the face.
+    #[test]
+    fn a_face_that_varies_has_a_slider_for_each_axis() {
+        use cutlass_model::SegmentId;
+        use egui_kittest::kittest::Queryable;
+        let temp = std::env::temp_dir().join(format!("cutlass-font-axes-{}", std::process::id()));
+        let mut shell = text_inspector_shell(&temp);
+        shell.use_faces(vec![
+            (
+                "sample.ttf",
+                include_bytes!("../../../crates/font/fixtures/sample.ttf").to_vec(),
+            ),
+            (
+                "vary.ttf",
+                include_bytes!("../../../crates/font/fixtures/variable.ttf").to_vec(),
+            ),
+        ]);
+        shell.select(Some(SegmentId::new("words")));
+        let stored = |shell: &Shell| {
+            let draft = shell.draft().unwrap();
+            draft
+                .materials
+                .texts
+                .iter()
+                .find(|text| text.id.as_str() == "title")
+                .unwrap()
+                .font_variations
+                .clone()
+        };
+        // A face that does not vary has no axes, and none can be set.
+        shell.set_text_face("sample.ttf").unwrap();
+        assert!(shell.text_font_axes().is_empty());
+        assert!(shell.set_text_font_axis(*b"wght", 700.0).is_err());
+        // The fixture face varies in weight and in width.
+        shell.set_text_face("vary.ttf").unwrap();
+        let axes = shell.text_font_axes();
+        let shown: Vec<(&str, f32, f32, f32)> = axes
+            .iter()
+            .map(|axis| (axis.name.as_str(), axis.min, axis.max, axis.value))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("Weight", 100.0, 900.0, 400.0),
+                ("Width", 50.0, 150.0, 100.0)
+            ]
+        );
+        // One axis moves and the other stays; every axis is written.
+        shell.set_text_font_axis(*b"wght", 650.0).unwrap();
+        assert_eq!(stored(&shell), "wght=650,wdth=100");
+        shell.set_text_font_axis(*b"wdth", 75.0).unwrap();
+        assert_eq!(stored(&shell), "wght=650,wdth=75");
+        let values: Vec<f32> = shell
+            .text_font_axes()
+            .iter()
+            .map(|axis| axis.value)
+            .collect();
+        assert_eq!(values, [650.0, 75.0]);
+        // Past an end is the end; the same value again is no undo step.
+        shell.set_text_font_axis(*b"wght", 5_000.0).unwrap();
+        assert_eq!(stored(&shell), "wght=900,wdth=75");
+        let before = shell.revision();
+        shell.set_text_font_axis(*b"wght", 900.0).unwrap();
+        assert_eq!(shell.revision(), before);
+        shell.undo().unwrap();
+        assert_eq!(stored(&shell), "wght=650,wdth=75");
+        // An axis the face lacks, and a value that is no number.
+        assert!(shell.set_text_font_axis(*b"slnt", -8.0).is_err());
+        assert!(shell.set_text_font_axis(*b"wght", f64::NAN).is_err());
+        assert_eq!(stored(&shell), "wght=650,wdth=75");
+        // The inspector shows a slider for each, by the axis's name, and
+        // none for a face that does not vary.
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(1280.0, 1600.0))
+            .build_ui_state(
+                |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+                (shell, {
+                    let mut view = ViewState::new();
+                    view.library_shelf = Shelf::Stickers;
+                    view
+                }),
+            );
+        harness.run_steps(4);
+        for name in ["Weight", "Width"] {
+            assert!(
+                harness
+                    .query_all_by_role_and_label(egui::accesskit::Role::Slider, name)
+                    .next()
+                    .is_some(),
+                "{name}"
+            );
+        }
+        // Another face has other axes: the setting goes with the face.
+        harness.state_mut().0.set_text_face("sample.ttf").unwrap();
+        harness.run_steps(3);
+        assert_eq!(stored(&harness.state().0), "");
+        for name in ["Weight", "Width"] {
+            assert!(
+                harness
+                    .query_all_by_role_and_label(egui::accesskit::Role::Slider, name)
+                    .next()
+                    .is_none(),
+                "{name}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// The font menu has a search: typing leaves the faces whose names
+    /// have what was typed, and Enter takes the first of them.
+    #[test]
+    fn the_font_menu_is_searched_by_name() {
+        use cutlass_model::SegmentId;
+        use egui_kittest::kittest::Queryable;
+        let temp = std::env::temp_dir().join(format!("cutlass-font-search-{}", std::process::id()));
+        let mut shell = text_inspector_shell(&temp);
+        shell.use_faces(vec![
+            (
+                "sample.ttf",
+                include_bytes!("../../../crates/font/fixtures/sample.ttf").to_vec(),
+            ),
+            (
+                "shaping.ttf",
+                include_bytes!("../../../crates/font/fixtures/shaping.ttf").to_vec(),
+            ),
+            (
+                "han-kana.ttf",
+                include_bytes!("../../../crates/font/fixtures/han-kana.ttf").to_vec(),
+            ),
+        ]);
+        shell.select(Some(SegmentId::new("words")));
+        // With `CUTLASS_RENDER_DIR` set the open menu is painted by the
+        // real renderer and kept there to look at.
+        let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
+        let builder = egui_kittest::Harness::builder().with_size(Vec2::new(1280.0, 1600.0));
+        let builder = if keep.is_some() {
+            builder.wgpu()
+        } else {
+            builder
+        };
+        let mut harness = builder.build_ui_state(
+            |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+            (shell, {
+                // The empty media shelf's hint has a glyph the test
+                // fonts lack.
+                let mut view = ViewState::new();
+                view.library_shelf = Shelf::Stickers;
+                view
+            }),
+        );
+        harness.run_steps(4);
+        let listed = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>, label: &str| {
+            harness.query_all_by_label(label).count()
+        };
+        // Shut, the menu lists nothing and has no search.
+        assert_eq!(listed(&harness, "Search fonts"), 0);
+        assert_eq!(listed(&harness, "shaping"), 0);
+        harness.get_by_label("Font").click();
+        harness.run_steps(3);
+        // Open: the search, and every face.
+        assert_eq!(listed(&harness, "Search fonts"), 1);
+        assert_eq!(listed(&harness, "shaping"), 1);
+        assert_eq!(listed(&harness, "han kana"), 1);
+        // Typing a part of a name, in any case, leaves the faces with it.
+        harness.get_by_label("Search fonts").type_text("HAP");
+        harness.run_steps(3);
+        assert_eq!(listed(&harness, "shaping"), 1);
+        assert_eq!(listed(&harness, "han kana"), 0);
+        assert_eq!(listed(&harness, "No font has that name"), 0);
+        if let Some(dir) = &keep {
+            std::fs::create_dir_all(dir).unwrap();
+            let image = harness.render().expect("the renderer draws the window");
+            image.save(dir.join("font-search.png")).unwrap();
+        }
+        // A click in the field kept the menu open; more letters that no
+        // name has leave a line that says so.
+        harness.get_by_label("Search fonts").type_text("zz");
+        harness.run_steps(3);
+        assert_eq!(listed(&harness, "shaping"), 0);
+        assert_eq!(listed(&harness, "No font has that name"), 1);
+        // With a name typed, Enter takes the first face left and shuts
+        // the menu.
+        harness
+            .state_mut()
+            .1
+            .inspector
+            .fields
+            .insert("font search".to_owned(), "kana".to_owned());
+        harness.run_steps(2);
+        assert_eq!(listed(&harness, "han kana"), 1);
+        harness.key_press(egui::Key::Enter);
+        harness.run_steps(3);
+        assert_eq!(harness.state().0.inspection().unwrap().font, "han-kana.ttf");
+        assert_eq!(listed(&harness, "Search fonts"), 0);
+        // Opened again, the search is empty and every face is back.
+        harness.get_by_label("Font").click();
+        harness.run_steps(3);
+        assert_eq!(listed(&harness, "shaping"), 1);
+        assert_eq!(listed(&harness, "sample"), 1);
+        // A click on a face takes it.
+        harness.get_by_label("shaping").click();
+        harness.run_steps(3);
+        assert_eq!(harness.state().0.inspection().unwrap().font, "shaping.ttf");
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Letters selected in a title's text box are made bold, italic or
+    /// underlined on their own, from the keyboard and from the Pattern
+    /// row; with none selected the row changes the whole text.
+    #[test]
+    fn selected_letters_of_a_title_take_a_pattern_of_their_own() {
+        use cutlass_model::SegmentId;
+        use egui::{Key, Modifiers};
+        use egui_kittest::kittest::Queryable;
+        let temp = std::env::temp_dir().join(format!("cutlass-range-{}", std::process::id()));
+        let mut shell = text_inspector_shell(&temp);
+        shell.select(Some(SegmentId::new("words")));
+        shell.set_text("Hello world".to_owned()).unwrap();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(1280.0, 1600.0))
+            .build_ui_state(
+                |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+                (shell, {
+                    // The empty media shelf's hint has a glyph the test
+                    // fonts lack.
+                    let mut view = ViewState::new();
+                    view.library_shelf = Shelf::Stickers;
+                    view
+                }),
+            );
+        harness.run_steps(4);
+        let range =
+            |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>, start: usize, end: usize| {
+                harness.state().0.text_range_pattern(start, end).unwrap()
+            };
+        let whole = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>| {
+            harness.state().0.inspection().unwrap().text_pattern
+        };
+        // Into the text box, and its first word selected from the keyboard.
+        // The Text tab and the Text shelf have the same name.
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::TextInput, "Text")
+            .click();
+        harness.run_steps(3);
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness.run_steps(2);
+        assert_eq!(harness.state().1.inspector.text_selection, Some((0, 11)));
+        harness.key_press(Key::Home);
+        harness.run_steps(2);
+        assert_eq!(harness.state().1.inspector.text_selection, None);
+        for _ in 0..5 {
+            harness.key_press_modifiers(Modifiers::SHIFT, Key::ArrowRight);
+            harness.run_steps(1);
+        }
+        assert_eq!(harness.state().1.inspector.text_selection, Some((0, 5)));
+        // Command-B makes those letters bold and no others.
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::B);
+        harness.run_steps(3);
+        assert!(range(&harness, 0, 5).bold);
+        assert!(!range(&harness, 5, 11).bold);
+        assert!(!whole(&harness).bold);
+        assert_eq!(harness.state().0.text_words().unwrap(), "Hello world");
+        // The Pattern row shows the selection's pattern and changes it:
+        // a click on Italic leans the same letters, and the text box has
+        // the keyboard and the selection back.
+        harness.get_by_label("Italic the selected letters").click();
+        harness.run_steps(4);
+        let first = range(&harness, 0, 5);
+        assert!(first.bold && first.italic && !first.underline);
+        assert!(!range(&harness, 5, 11).italic);
+        assert_eq!(harness.state().1.inspector.text_selection, Some((0, 5)));
+        // Bold again takes it off those letters.
+        harness.get_by_label("Bold the selected letters").click();
+        harness.run_steps(4);
+        assert!(!range(&harness, 0, 5).bold);
+        assert!(range(&harness, 0, 5).italic);
+        // Each was one step back.
+        harness.state_mut().0.undo().unwrap();
+        harness.run_steps(2);
+        assert!(range(&harness, 0, 5).bold);
+        // A click away from the box and the row lets the selection go,
+        // and the row is the whole text's again.
+        harness
+            .query_all_by_label("Font size")
+            .next()
+            .unwrap()
+            .click();
+        harness.run_steps(3);
+        assert_eq!(harness.state().1.inspector.text_selection, None);
+        harness.get_by_label("Underline").click();
+        harness.run_steps(3);
+        assert!(whole(&harness).underline);
+        assert!(range(&harness, 5, 11).underline);
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     /// Nothing in the text or caption inspector draws past its content's

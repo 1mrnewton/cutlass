@@ -57,6 +57,7 @@ pub use move_segment::move_segment;
 pub use place::place;
 pub use text::{
     BOLD_WIDTH, ITALIC_DEGREE, MAX_CAPTION_STAGGER_MS, NEW_TEXT_SIZE, Pattern as TextPattern,
+    text_range_pattern,
 };
 pub use track::{lane_fits, new_lane_index};
 pub use trim::trim;
@@ -163,6 +164,9 @@ pub enum EditError {
     TextColor,
     /// Text alignment is not left, center, or right.
     TextAlign,
+    /// The letters to style are not in the text, or the text is a
+    /// caption, whose words are styled as one.
+    TextRange,
     /// Letter spacing is not a fraction from -1 through 4.
     LetterSpacing,
     /// Line spacing is not greater than -1 and at most 4.
@@ -171,6 +175,8 @@ pub enum EditError {
     LineWidth,
     /// The face is empty or is not a file name.
     TextFont,
+    /// The axes of a text clip's face are not written as tags and numbers.
+    TextFontAxes,
     /// An outline, shadow, or background amount is out of its range.
     TextStyle,
     /// A new text clip needs something to say.
@@ -359,6 +365,9 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::SetDenoise { segment_id, level } => {
             enhance::set_denoise(draft, segment_id, *level)
         }
+        Request::SetDeflicker { segment_id, level } => {
+            enhance::set_deflicker(draft, segment_id, *level)
+        }
         Request::SetInterpolate { segment_id, fps } => {
             enhance::set_interpolate(draft, segment_id, *fps)
         }
@@ -429,6 +438,25 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             },
             face,
         ),
+        Request::SetTextRangePattern {
+            segment_id,
+            start,
+            end,
+            bold,
+            italic,
+            underline,
+            face,
+        } => text::set_text_range_pattern(
+            draft,
+            segment_id,
+            (*start, *end),
+            cutlass_model::PatternChange {
+                bold: *bold,
+                italic: *italic,
+                underline: *underline,
+            },
+            face,
+        ),
         Request::SetLetterSpacing {
             segment_id,
             spacing,
@@ -445,6 +473,9 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             face,
         } => text::set_line_width(draft, segment_id, *width, face),
         Request::SetTextFont { segment_id, face } => text::set_text_font(draft, segment_id, face),
+        Request::SetTextFontAxes { segment_id, axes } => {
+            text::set_text_font_axes(draft, segment_id, axes)
+        }
         Request::SetTextOutline {
             segment_id,
             color,
@@ -824,6 +855,10 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::SetColorSpace { space } => color::set_color_space(draft, *space),
         Request::SetProjectName { name } => {
             name::set_project_name(draft, name);
+            Ok(())
+        }
+        Request::SetCover { cover } => {
+            name::set_cover(draft, cover.clone());
             Ok(())
         }
         Request::SetFreeLayer { on } => {

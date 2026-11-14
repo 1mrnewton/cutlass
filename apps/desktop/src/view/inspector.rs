@@ -72,6 +72,14 @@ pub(super) struct InspectorState {
     pub(super) tiles: HashMap<String, egui::TextureHandle>,
     /// The pose part the Graphs row eases.
     ease_part: Option<KeyedSetting>,
+    /// The letters selected in a title's text box, as a first character
+    /// and the one after the last, while the box has the keyboard and
+    /// through a click on the Pattern row, which then styles them alone.
+    pub(super) text_selection: Option<(usize, usize)>,
+    /// The text box, to give the keyboard and the selection back to.
+    words_box: Option<egui::Id>,
+    /// Where the Pattern row was drawn last.
+    pattern_rect: Option<Rect>,
 }
 
 /// Where a clip menu row sends the inspector.
@@ -90,13 +98,32 @@ impl InspectorState {
     }
 }
 
-pub(super) fn clip_panel(
-    shell: &mut Shell,
-    ui: &mut Ui,
-    view: &mut ViewState,
-    inspection: &Inspection,
-    _width: f32,
-) {
+/// The tabs each kind of clip has, across the inspector's header.
+fn tab_labels(panel: Panel) -> &'static [&'static str] {
+    match panel {
+        // AI stylize, a generative tab, waits for the next version.
+        Panel::Main { .. } | Panel::Overlay { .. } => {
+            &["Video", "Audio", "Speed", "Animation", "Adjust"]
+        }
+        // A caption's tabs lead with its list. Text to speech and AI
+        // avatars, both generative, wait for the next version.
+        Panel::Caption => &["Captions", "Text", "Animation", "Tracking"],
+        Panel::Text => &["Text", "Animation", "Tracking"],
+        Panel::Audio => &["Basic", "Voice changer", "Speed"],
+        Panel::Sticker => &["Sticker", "Animation", "Tracking"],
+        Panel::Shape => &["Vector image", "Animation", "Tracking"],
+        Panel::Effect => &["Effect"],
+        Panel::Filter => &["Filter"],
+        Panel::Adjust => &["Adjust"],
+        Panel::Other => &["Clip"],
+    }
+}
+
+/// The picked clip's tabs, in the inspector's header, which stays put
+/// while the body scrolls. A newly picked clip starts its tabs, pages and
+/// sections afresh, and a tab a menu row asked for opens here; picking
+/// another tab starts it on its first page.
+pub(super) fn clip_tabs(shell: &Shell, ui: &mut Ui, view: &mut ViewState, inspection: &Inspection) {
     let panel = shell.panel().unwrap_or(Panel::Other);
     let state = &mut view.inspector;
     let pending = state.pending.take();
@@ -129,6 +156,24 @@ pub(super) fn clip_panel(
             state.open.insert(section.to_owned());
         }
     }
+    let tab = state.tab;
+    ui.add_enabled_ui(!inspection.locked, |ui| {
+        tabs(ui, tab_labels(panel), &mut state.tab);
+    });
+    if tab != state.tab {
+        state.page = 0;
+    }
+}
+
+/// The picked clip's body: the tab [`clip_tabs`] shows.
+pub(super) fn clip_panel(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    inspection: &Inspection,
+) {
+    let panel = shell.panel().unwrap_or(Panel::Other);
+    let state = &mut view.inspector;
     if inspection.locked {
         note(ui, "This clip's row is locked.");
     }
@@ -142,13 +187,10 @@ pub(super) fn clip_panel(
         Panel::Audio => audio_panel(shell, ui, state, inspection),
         Panel::Sticker => sticker_panel(shell, ui, state, inspection),
         Panel::Shape => super::shape::shape_panel(shell, ui, state, inspection),
-        Panel::Effect => effect_panel(shell, ui, state, inspection, "Effect", false),
-        Panel::Filter => effect_panel(shell, ui, state, inspection, "Filter", true),
+        Panel::Effect => effect_panel(shell, ui, state, inspection, false),
+        Panel::Filter => effect_panel(shell, ui, state, inspection, true),
         Panel::Adjust => adjust_panel(shell, ui, state, inspection),
-        Panel::Other => {
-            tabs(ui, &["Clip"], &mut 0);
-            note(ui, &inspection.material);
-        }
+        Panel::Other => note(ui, &inspection.material),
     });
 }
 
@@ -162,7 +204,6 @@ pub(super) fn transition_panel(
 ) {
     let state = &mut view.inspector;
     let id = bar.segment_id.clone();
-    tabs(ui, &["Transition"], &mut 0);
     ui.horizontal(|ui| {
         row_label(ui, "Name");
         ui.label(RichText::new(&bar.name).size(12.0).color(tokens::TEXT));
@@ -212,22 +253,6 @@ fn video_panel(
     inspection: &Inspection,
     still: bool,
 ) {
-    let tab = state.tab;
-    tabs(
-        ui,
-        &[
-            "Video",
-            "Audio",
-            "Speed",
-            "Animation",
-            "Adjust",
-            "AI stylize",
-        ],
-        &mut state.tab,
-    );
-    if tab != state.tab {
-        state.page = 0;
-    }
     match state.tab {
         0 => {
             pages(
@@ -252,21 +277,14 @@ fn video_panel(
             stabilize(shell, ui, state);
             enhance_quality(shell, ui, state);
             reduce_noise(shell, ui, state);
+            remove_flicker(shell, ui, state);
             optical_flow(shell, ui, state);
             super::relight::relight(shell, ui, state);
             super::reframe::auto_reframe(shell, ui, state);
             super::motion_blur::motion_blur(shell, ui, state);
-            for label in [
-                "AI remove",
-                "AI expand",
-                "AI remix",
-                "Lip sync",
-                "Removing video flickers",
-                "AI movement",
-                "Camera tracking",
-            ] {
-                later_row(ui, label);
-            }
+            // The generative AI rows (AI remove, AI expand, AI remix, Lip
+            // sync, AI movement) wait for the next version.
+            later_row(ui, "Camera tracking");
             canvas(shell, ui, state, inspection);
         }
         1 => {
@@ -283,7 +301,6 @@ fn video_panel(
             for label in [
                 "Loudness normalization",
                 "Enhance voice",
-                "Video translator",
                 "Reduce noise",
                 "Isolate voice",
                 "Fill channel",
@@ -294,8 +311,7 @@ fn video_panel(
         2 if still => note(ui, "A photo has no speed."),
         2 => super::speed::speed_tab(shell, ui, state, inspection),
         3 => animation_tab(shell, ui, state, &["In", "Out", "Combo"], VIDEO_MOTIONS),
-        4 => adjust_tab(shell, ui, state, inspection),
-        _ => super::ai_stylize::ai_stylize_tab(ui, state),
+        _ => adjust_tab(shell, ui, state, inspection),
     }
 }
 
@@ -306,31 +322,7 @@ fn text_panel(
     inspection: &Inspection,
     caption: bool,
 ) {
-    // A caption's tabs lead with its list. AI avatars is paid, and shown
-    // off for now.
-    let labels: &[&str] = if caption {
-        &[
-            "Captions",
-            "Text",
-            "Animation",
-            "Tracking",
-            "Text to speech",
-            "AI avatars",
-        ]
-    } else {
-        &[
-            "Text",
-            "Animation",
-            "Tracking",
-            "Text to speech",
-            "AI avatars",
-        ]
-    };
-    let tab = state.tab;
-    paid_tabs(ui, labels, &["AI avatars"], &mut state.tab);
-    if tab != state.tab {
-        state.page = 0;
-    }
+    let labels = tab_labels(if caption { Panel::Caption } else { Panel::Text });
     match labels.get(state.tab).copied().unwrap_or_default() {
         "Captions" => caption_list(shell, ui, state),
         "Text" => {
@@ -372,17 +364,7 @@ fn text_panel(
             }
         }
         "Animation" => animation_tab(shell, ui, state, &["In", "Out", "Loop"], TEXT_MOTIONS),
-        "Tracking" => super::follow::follow_tab(shell, ui, state, super::follow::Tiles::Subjects),
-        _ => {
-            later_note(ui, "Text to speech");
-            later_tiles(
-                ui,
-                &[
-                    "Warm", "Bright", "Even", "Clear", "Light", "Low", "Soft", "Steady", "Quick",
-                    "Dry",
-                ],
-            );
-        }
+        _ => super::follow::follow_tab(shell, ui, state, super::follow::Tiles::Subjects),
     }
 }
 
@@ -567,11 +549,6 @@ fn sticker_panel(
     state: &mut InspectorState,
     inspection: &Inspection,
 ) {
-    let tab = state.tab;
-    tabs(ui, &["Sticker", "Animation", "Tracking"], &mut state.tab);
-    if tab != state.tab {
-        state.page = 0;
-    }
     if state.tab == 2 {
         super::follow::follow_tab(shell, ui, state, super::follow::Tiles::Subjects);
         return;
@@ -599,10 +576,8 @@ fn effect_panel(
     ui: &mut Ui,
     state: &mut InspectorState,
     inspection: &Inspection,
-    title: &str,
     filter: bool,
 ) {
-    tabs(ui, &[title], &mut 0);
     if !filter && let Some(controls) = shell.effect_controls() {
         recipe_pages(shell, ui, state, inspection, &controls);
         return;
@@ -717,7 +692,6 @@ fn adjust_panel(
     state: &mut InspectorState,
     inspection: &Inspection,
 ) {
-    tabs(ui, &["Adjust"], &mut 0);
     pages(
         ui,
         &["Basic", "HSL", "Curves", "Color wheel", "Mask"],
@@ -1074,6 +1048,44 @@ fn reduce_noise(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
         if let Some(value) = picked.filter(|value| *value != level) {
             send(shell, move |shell| shell.set_denoise(value));
         }
+    });
+}
+
+/// Remove flicker: on, it makes the clip's copy with its brightness evened
+/// out from frame to frame as a job, unless the project has one. It needs
+/// no model. With another copy level on as well, the one copy is made
+/// under that section and shows its progress there.
+fn remove_flicker(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let level = shell.deflicker_level();
+    let header = section(
+        ui,
+        state,
+        "deflicker",
+        "Remove flicker",
+        Some((level > 0, true)),
+        false,
+    );
+    if header.toggled {
+        let next = if level > 0 {
+            0
+        } else {
+            cutlass_model::Algorithm::DEFLICKER_ON
+        };
+        send(shell, move |shell| shell.set_deflicker(next));
+    }
+    if !header.open || level <= 0 {
+        return;
+    }
+    let progress = shell.deflicker_progress();
+    body(ui, |ui| {
+        if let Some(done) = progress {
+            note(ui, &format!("Processing {:.1}%", done * 100.0));
+        }
+        note(
+            ui,
+            "Evens out brightness that pulses from frame to frame. Bands that roll \
+             across the picture stay.",
+        );
     });
 }
 
@@ -1982,7 +1994,8 @@ fn text_basic(
         } else {
             words_box(shell, ui, state);
         }
-        font_row(shell, ui, inspection);
+        font_row(shell, ui, state, inspection);
+        font_axis_rows(shell, ui, state);
         let size = inspection.text_size.round();
         let changed = setting_row(
             shell,
@@ -2004,7 +2017,7 @@ fn text_basic(
         if let Some(value) = changed {
             send(shell, |shell| shell.set_text_size(value));
         }
-        pattern_row(shell, ui, inspection);
+        pattern_row(shell, ui, state, inspection);
         label_row(ui, "Case", |ui| {
             for (label, tip, case) in [
                 ("TT", "Upper case", LetterCase::Upper),
@@ -2067,13 +2080,102 @@ fn words_box(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
     let stored = shell.text_words().unwrap_or_default();
     let text = state.fields.entry("words".to_owned()).or_default();
     let response = ui::Field::multiline(text, 3).name("Text").show(ui).response;
+    let focused = response.has_focus();
+    let typed = text.clone();
     if super::commits(ui, &response) && *text != stored {
         let content = text.clone();
         send(shell, |shell| shell.set_text(content));
-    } else if !response.has_focus() {
+    } else if !focused {
         stored.clone_into(text);
     }
+    state.words_box = Some(response.id);
+    if focused {
+        // The letters selected, to style on their own.
+        state.text_selection = egui::TextEdit::load_state(ui.ctx(), response.id)
+            .and_then(|edit| edit.cursor.char_range())
+            .map(|range| range.as_sorted_char_range())
+            .filter(|range| !range.is_empty())
+            .map(|range| (range.start.0, range.end.0));
+        // Bold, italic and underline from the keyboard, as in any editor.
+        let pressed = |ui: &mut Ui, key: egui::Key| {
+            ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, key))
+        };
+        let part = if pressed(ui, egui::Key::B) {
+            Some(PatternPart::Bold)
+        } else if pressed(ui, egui::Key::I) {
+            Some(PatternPart::Italic)
+        } else if pressed(ui, egui::Key::U) {
+            Some(PatternPart::Underline)
+        } else {
+            None
+        };
+        if let Some(part) = part {
+            // What was typed is kept first, so the letters are counted in
+            // the words as they now are.
+            if typed != stored {
+                send(shell, |shell| shell.set_text(typed));
+            }
+            toggle_pattern(shell, state.text_selection, part);
+        }
+    } else if response.lost_focus() {
+        // A click on the Pattern row keeps the selection, for the row to
+        // style; a click anywhere else lets it go.
+        let on_pattern = ui
+            .input(|input| input.pointer.interact_pos())
+            .zip(state.pattern_rect)
+            .is_some_and(|(at, row)| row.contains(at));
+        if !on_pattern {
+            state.text_selection = None;
+        }
+    }
     ui.add_space(6.0);
+}
+
+/// One of the three parts of a text's pattern.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PatternPart {
+    Bold,
+    Italic,
+    Underline,
+}
+
+/// Turn `part` on or off: for the `selected` letters of the picked title
+/// when there are some, else for the whole text.
+fn toggle_pattern(shell: &mut Shell, selected: Option<(usize, usize)>, part: PatternPart) {
+    let Some(inspection) = shell.inspection() else {
+        return;
+    };
+    let whole = inspection.text_pattern;
+    let now = selected
+        .and_then(|(start, end)| shell.text_range_pattern(start, end))
+        .unwrap_or(whole);
+    let on = match part {
+        PatternPart::Bold => !now.bold,
+        PatternPart::Italic => !now.italic,
+        PatternPart::Underline => !now.underline,
+    };
+    match selected {
+        Some((start, end)) => {
+            let mut change = cutlass_model::PatternChange::default();
+            match part {
+                PatternPart::Bold => change.bold = Some(on),
+                PatternPart::Italic => change.italic = Some(on),
+                PatternPart::Underline => change.underline = Some(on),
+            }
+            send(shell, |shell| {
+                shell.set_text_range_pattern(start, end, change)
+            });
+        }
+        None => {
+            let mut pattern = whole;
+            match part {
+                PatternPart::Bold => pattern.bold = on,
+                PatternPart::Italic => pattern.italic = on,
+                PatternPart::Underline => pattern.underline = on,
+            }
+            send(shell, |shell| shell.set_text_pattern(pattern));
+        }
+    }
 }
 
 /// One field per paragraph, "The N paragraph", each a page or line of the
@@ -2185,56 +2287,169 @@ fn caption_words(
 }
 
 /// Bold, underline and italic, each a switch over the whole text.
-fn pattern_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
-    let stored = inspection.text_pattern;
-    let mut pattern = stored;
-    label_row(ui, "Pattern", |ui| {
-        if icon_toggle(ui, "bold", "Bold", stored.bold).clicked() {
-            pattern.bold = !stored.bold;
-        }
-        if icon_toggle(ui, "underline", "Underline", stored.underline).clicked() {
-            pattern.underline = !stored.underline;
-        }
-        if icon_toggle(ui, "italic", "Italic", stored.italic).clicked() {
-            pattern.italic = !stored.italic;
-        }
-    });
-    if pattern != stored {
-        send(shell, |shell| shell.set_text_pattern(pattern));
+fn pattern_row(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+) {
+    // With letters selected in the text box the row shows and changes
+    // theirs; else the whole text's.
+    let selected = state.text_selection;
+    let stored = selected
+        .and_then(|(start, end)| shell.text_range_pattern(start, end))
+        .unwrap_or(inspection.text_pattern);
+    let mut picked = None;
+    let row = ui
+        .scope(|ui| {
+            label_row(ui, "Pattern", |ui| {
+                let (bold, underline, italic) = if selected.is_some() {
+                    (
+                        "Bold the selected letters",
+                        "Underline the selected letters",
+                        "Italic the selected letters",
+                    )
+                } else {
+                    ("Bold", "Underline", "Italic")
+                };
+                if icon_toggle(ui, "bold", bold, stored.bold).clicked() {
+                    picked = Some(PatternPart::Bold);
+                }
+                if icon_toggle(ui, "underline", underline, stored.underline).clicked() {
+                    picked = Some(PatternPart::Underline);
+                }
+                if icon_toggle(ui, "italic", italic, stored.italic).clicked() {
+                    picked = Some(PatternPart::Italic);
+                }
+            });
+        })
+        .response
+        .rect;
+    state.pattern_rect = Some(row);
+    let Some(part) = picked else {
+        return;
+    };
+    toggle_pattern(shell, selected, part);
+    // The text box takes the keyboard back with its letters still
+    // selected, so another part can be set on them.
+    if let (Some((start, end)), Some(id)) = (selected, state.words_box) {
+        let mut edit = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+        edit.cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(start),
+                egui::text::CCursor::new(end),
+            )));
+        edit.store(ui.ctx(), id);
+        ui.ctx().memory_mut(|memory| memory.request_focus(id));
     }
 }
 
-fn font_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
-    let faces = shell.text_faces();
+/// Where the font menu's search keeps what was typed.
+const FONT_SEARCH: &str = "font search";
+
+/// A slider for each axis the title's face varies along: weight, width
+/// and whatever else its maker gave it. A face that does not vary has
+/// none. The track moves the title's own setting; the styles its maker
+/// named are in the font menu.
+fn font_axis_rows(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    for axis in shell.text_font_axes() {
+        let tag = String::from_utf8_lossy(&axis.tag).into_owned();
+        // An axis a few units long is set to a hundredth, a longer one
+        // to a whole unit.
+        let fine = axis.max - axis.min <= 20.0;
+        let (low, high) = (f64::from(axis.min), f64::from(axis.max));
+        let stored = f64::from(axis.value);
+        let moved = slider(
+            ui,
+            state,
+            &format!("font-axis-{tag}"),
+            &axis.name,
+            stored,
+            low..=high,
+            |value| {
+                if fine {
+                    format!("{value:.2}")
+                } else {
+                    format!("{value:.0}")
+                }
+            },
+        );
+        if let Some(value) = moved {
+            let value = if fine { value } else { value.round() };
+            send(shell, |shell| shell.set_text_font_axis(axis.tag, value));
+        }
+    }
+}
+
+fn font_row(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspection: &Inspection) {
+    let faces = shell.text_face_labels();
     let current = if inspection.font.is_empty() {
         "System".to_owned()
     } else {
-        face_label(&inspection.font)
+        faces
+            .iter()
+            .find(|(name, _)| *name == inspection.font)
+            .map_or_else(|| face_label(&inspection.font), |(_, label)| label.clone())
     };
+    let query = state.fields.entry(FONT_SEARCH.to_owned()).or_default();
     let mut picked = None;
     label_row(ui, "Font", |ui| {
         let shown = current.clone();
-        egui::ComboBox::from_id_salt("text-font")
+        let menu = egui::ComboBox::from_id_salt("text-font")
             .selected_text(current)
             .width(ui.available_width())
+            // A click in the search field keeps the menu open; a pick
+            // closes it.
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show_ui(ui, |ui| {
-                for face in &faces {
+                // A machine has hundreds of faces: typing a part of a
+                // name leaves the ones that have it.
+                let field = ui::Field::new(query)
+                    .hint("Search fonts")
+                    .name("Search fonts")
+                    .icon("search")
+                    .focus()
+                    .show(ui);
+                let matching = cutlass_playback::matching_faces(&faces, query);
+                // Enter takes the first face left.
+                let entered = field.response.lost_focus()
+                    && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                if entered && let Some((face, _)) = matching.first() {
+                    picked = Some(face.clone());
+                }
+                if matching.is_empty() {
+                    ui.label(
+                        RichText::new("No font has that name")
+                            .size(12.0)
+                            .color(tokens::FAINT),
+                    );
+                }
+                for (face, label) in matching {
                     if ui
-                        .add(ui::Choice::new(*face == inspection.font, face_label(face)).wide())
+                        .add(ui::Choice::new(*face == inspection.font, label.as_str()).wide())
                         .clicked()
                     {
                         picked = Some(face.clone());
                     }
                 }
-            })
-            .response
-            .widget_info(|| {
-                let mut info = egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Font");
-                info.current_text_value = Some(shown.clone());
-                info
+                if picked.is_some() {
+                    ui.close();
+                }
             });
+        // The search starts empty each time the menu opens.
+        if menu.inner.is_none() {
+            query.clear();
+        }
+        menu.response.widget_info(|| {
+            let mut info = egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Font");
+            info.current_text_value = Some(shown.clone());
+            info
+        });
     });
     if let Some(face) = picked {
+        if let Some(query) = state.fields.get_mut(FONT_SEARCH) {
+            query.clear();
+        }
         send(shell, |shell| shell.set_text_face(&face));
     }
 }
@@ -2686,26 +2901,16 @@ pub(super) fn send(shell: &mut Shell, edit: impl FnOnce(&mut Shell) -> Result<()
     }
 }
 
-/// The text tabs across the top. The active one is cyan. Tabs that do not
-/// fit scroll sideways, as the prototype's do.
+/// The text tabs across the inspector's header. The active one is cyan.
+/// Tabs that do not fit scroll sideways, as the prototype's do. The header
+/// draws the line under them.
 pub(super) fn tabs(ui: &mut Ui, labels: &[&str], current: &mut usize) {
-    paid_tabs(ui, labels, &[], current);
-}
-
-/// What a paid tab says on hover. Cutlass will offer these later.
-const PAID: &str = "Paid: Cutlass will offer this later";
-/// The width of the diamond after a paid tab's name.
-const GEM: f32 = 8.0;
-
-/// The tab row, with the `paid` tabs faint, marked with a diamond, and not
-/// picked.
-fn paid_tabs(ui: &mut Ui, labels: &[&str], paid: &[&str], current: &mut usize) {
     ui.add_space(ROW_GAP);
     // The gap shrinks first, then the names down to 11 points, before the
     // row has to scroll, so a narrow inspector still shows every tab.
     let measure = |size: f32| -> f32 {
         let font = FontId::proportional(size);
-        let names: f32 = labels
+        labels
             .iter()
             .map(|label| {
                 ui.painter()
@@ -2713,8 +2918,7 @@ fn paid_tabs(ui: &mut Ui, labels: &[&str], paid: &[&str], current: &mut usize) {
                     .size()
                     .x
             })
-            .sum();
-        names + paid.len() as f32 * (GEM + 3.0)
+            .sum()
     };
     let gaps = labels.len().saturating_sub(1).max(1) as f32;
     let room = ui.available_width() - 1.0;
@@ -2724,7 +2928,6 @@ fn paid_tabs(ui: &mut Ui, labels: &[&str], paid: &[&str], current: &mut usize) {
     } else {
         (13.0 * (room - gaps * TAB_GAP_MIN) / full).clamp(11.0, 13.0)
     };
-    let font = FontId::proportional(size);
     let text = measure(size);
     let gap = ((room - text) / gaps).clamp(TAB_GAP_MIN, TAB_GAP);
     ui::Scroll::horizontal(("inspector-tabs", labels.len()))
@@ -2734,36 +2937,6 @@ fn paid_tabs(ui: &mut Ui, labels: &[&str], paid: &[&str], current: &mut usize) {
                 ui.set_min_height(ROW_HEIGHT);
                 ui.spacing_mut().item_spacing.x = gap;
                 for (index, label) in labels.iter().enumerate() {
-                    if paid.contains(label) {
-                        // The name and a diamond after it, faint, in one
-                        // rect sized to them.
-                        let galley = ui.painter().layout_no_wrap(
-                            (*label).to_owned(),
-                            font.clone(),
-                            tokens::FAINT,
-                        );
-                        let size = Vec2::new(galley.size().x + 3.0 + GEM, galley.size().y);
-                        let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
-                        let top = rect.left_center() - Vec2::new(0.0, galley.size().y / 2.0);
-                        ui.painter().galley(top, galley, tokens::FAINT);
-                        let c = egui::pos2(rect.right() - GEM / 2.0, rect.center().y);
-                        let points = vec![
-                            c + Vec2::new(-4.0, -1.0),
-                            c + Vec2::new(-2.0, -4.0),
-                            c + Vec2::new(2.0, -4.0),
-                            c + Vec2::new(4.0, -1.0),
-                            c + Vec2::new(0.0, 4.0),
-                        ];
-                        ui.painter().add(egui::Shape::convex_polygon(
-                            points,
-                            tokens::FAINT,
-                            Stroke::NONE,
-                        ));
-                        response.on_hover_text(PAID).widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::Role::Label, false, *label)
-                        });
-                        continue;
-                    }
                     let color = if index == *current {
                         ACCENT
                     } else {
@@ -2781,11 +2954,10 @@ fn paid_tabs(ui: &mut Ui, labels: &[&str], paid: &[&str], current: &mut usize) {
             });
         });
     ui.add_space(6.0);
-    let line = ui.cursor().min.y;
-    let span = ui.max_rect().x_range();
-    ui.painter()
-        .hline(span, line, Stroke::new(1.0, Color32::from_white_alpha(20)));
 }
+
+/// The line under the inspector's header.
+pub(super) const TAB_LINE: Color32 = Color32::from_rgba_premultiplied(20, 20, 20, 20);
 
 /// The rounded page switch under the tabs.
 pub(super) fn pages(ui: &mut Ui, labels: &[&str], current: &mut usize) {

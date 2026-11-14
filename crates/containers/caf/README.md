@@ -13,7 +13,7 @@ Ready for the editor to open CAF sound and for export to write it. Every CAF fil
 | Row | Demux | Mux | Evidence |
 | --- | --- | --- | --- |
 | `caff` header, version 1 | Yes | Yes | all tests |
-| Other versions | `UnsupportedBrand` | — | `tests/hostile.rs` |
+| Other versions | `UnsupportedBrand` | — | `src/tests/hostile.rs` |
 | Linear PCM, integer 8/16/24/32/64 bit, float 32/64, either endian | Yes, codec `Pcm` codings 1–6 and 9 | Yes | afconvert and ffmpeg files match libavformat; PCM written here decodes to the source in afconvert and ffmpeg; 8-bit decodes through `cutlass-pcm` bit-exact like AudioToolbox |
 | Unpacked integer LPCM: fewer bits than the word (8 or 12 in 2 bytes, 20 in 3, 16, 20 or 24 in 4) | Yes, as the coding of the word (s16, s24, s32), all bits of the word, as AudioToolbox decodes it | Not written unpacked: a remux writes the word packed, the same bytes with `mBitsPerChannel` set to the word | `tests/external/decode.rs`: hand-built files, both byte orders, decode bit-exact like `afconvert -d LEI16/24/32` |
 | a-law, µ-law | Yes, codings 7 and 8 | Yes | as above; afconvert files and all 256 codes decode through `cutlass-pcm` bit-exact like AudioToolbox |

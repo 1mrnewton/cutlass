@@ -101,8 +101,8 @@ impl ModeCosts {
         let mut kf_b = Box::new([[[0u32; 10]; 10]; 10]);
         for a in 0..10 {
             for l in 0..10 {
-                for m in 0..10 {
-                    kf_b[a][l][m] = tree_cost(&B_MODE_TREE, &KF_B_MODE_PROBS[a][l], m as u8);
+                for (m, cost) in kf_b[a][l].iter_mut().enumerate() {
+                    *cost = tree_cost(&B_MODE_TREE, &KF_B_MODE_PROBS[a][l], m as u8);
                 }
             }
         }

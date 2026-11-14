@@ -118,6 +118,18 @@ keyBackspace   custom
 splitAt        custom
 trimLeft       custom
 trimRight      custom
+opacity        TransparencyIcon
+fullScreen     FullScreenIcon
+shapes         ShapesIcon
+pen            Pen01Icon
+highlighter    HighlighterIcon
+eraser         EraserIcon
+letterSpacing  LetterSpacingIcon
+subtitles      SubtitleIcon
+rename         Edit02Icon
+settings       Settings01Icon
+blend          BlendIcon
+mask           MaskIcon
 
 # Custom marks.
 blade          custom

@@ -268,6 +268,11 @@ pub fn delays(demux: &Opened) -> Vec<i64> {
 /// [`MatroskaMux`]. Missing durations become the time to the next packet
 /// of the track.
 pub fn remux(input: &Path, output: &Path, webm: bool) {
+    remux_with_cover(input, output, webm, None);
+}
+
+/// [`remux`], with `cover` attached as the file's cover when given.
+pub fn remux_with_cover(input: &Path, output: &Path, webm: bool, cover: Option<Vec<u8>>) {
     let mut demux = open(input);
     let streams = demux.streams().to_vec();
     let packets: Vec<Packet> = read_all(&mut demux)
@@ -293,6 +298,9 @@ pub fn remux(input: &Path, output: &Path, webm: bool) {
             mux.set_trim(id, stream.trim()).expect("trim");
         }
         tracks.push((stream.id().get(), id, stream.timescale(), 0_i64));
+    }
+    if let Some(cover) = cover {
+        mux.set_cover_art(cover).expect("cover");
     }
     for (index, packet) in packets.iter().enumerate() {
         let time = packet.timestamp();

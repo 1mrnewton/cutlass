@@ -6,6 +6,7 @@
 
 mod error;
 mod frame;
+mod hdr;
 mod packet;
 mod params;
 mod pixel;
@@ -17,6 +18,7 @@ pub use frame::{
     Alpha, FrameError, Plane, VideoFrame, Yuv420High, Yuv420p, Yuv420p10, Yuv422High, Yuv422p,
     Yuv444High, Yuv444p,
 };
+pub use hdr::{ContentLight, ItuT35, MasteringDisplay};
 pub use packet::{Packet, SideData};
 pub use params::CodecParams;
 pub use pixel::{

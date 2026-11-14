@@ -347,8 +347,8 @@ fn audfrm(
         if block.cplinu {
             w.put(2, u32::from(block.expstr[CPL]));
         }
-        for ch in 0..nf {
-            w.put(2, u32::from(block.expstr[ch]));
+        for &strategy in &block.expstr[..nf] {
+            w.put(2, u32::from(strategy));
         }
     }
     if shape.lfeon {
@@ -454,13 +454,13 @@ fn audblk(
     let nf = shape.nf;
     let acmod = shape.acmod;
     if flags.blkswe {
-        for ch in 0..nf {
-            w.flag(block.blksw[ch]);
+        for &flag in &block.blksw[..nf] {
+            w.flag(flag);
         }
     }
     if flags.dithflage {
-        for ch in 0..nf {
-            w.flag(block.dith[ch]);
+        for &flag in &block.dith[..nf] {
+            w.flag(flag);
         }
     }
     w.flag(block.dynrnge);
@@ -484,8 +484,8 @@ fn audblk(
                 w.flag(false); // ecplinu
             }
             if !(eac3 && acmod == 2) {
-                for ch in 0..nf {
-                    w.flag(block.chincpl[ch]);
+                for &flag in &block.chincpl[..nf] {
+                    w.flag(flag);
                 }
             }
             if acmod == 2 {
@@ -558,8 +558,8 @@ fn audblk(
         if block.cplinu {
             w.put(2, u32::from(block.expstr[CPL]));
         }
-        for ch in 0..nf {
-            w.put(2, u32::from(block.expstr[ch]));
+        for &strategy in &block.expstr[..nf] {
+            w.put(2, u32::from(strategy));
         }
         if shape.lfeon {
             w.flag(block.expstr[LFE] != REUSE);

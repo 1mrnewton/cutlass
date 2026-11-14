@@ -17,7 +17,8 @@
 use cutlass_compositor::{ComposeError, Device, Extent, Frame, submit};
 use cutlass_effects::{
     ADJUSTMENT, Colour, EffectSource, Mask, PackageKind, PackageStore, Step, animation_package_id,
-    bundled_recipe, entry, package_id, plugin_package_id, segment_package_id, video_package_id,
+    entry, package_id, plugin_package_id, recipe as find_recipe, segment_package_id,
+    video_package_id,
 };
 use cutlass_model::{Draft, MaterialRef, Micros, Segment, SegmentId, TrackAttribute};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
@@ -305,7 +306,7 @@ fn paint<D: Device>(
 
 fn global_marks<'a>(draft: &'a Draft, time: Micros, stack: &[StackLayer<'_>]) -> Vec<Mark<'a>> {
     let mut marks: Vec<Mark<'a>> = effect_segments(draft, time, stack)
-        .filter(|(_, _, _, id)| bundled_recipe(id).is_none())
+        .filter(|(_, _, _, id)| find_recipe(id).is_none())
         .filter(|(_, _, _, id)| {
             !matches!(entry(id).map(|row| row.kind), Some(PackageKind::Blend(_)))
         })
@@ -503,7 +504,7 @@ pub(crate) struct RecipeMark {
     pub(crate) mask: Option<cutlass_effects::CanvasMask>,
 }
 
-/// The bundled recipe effects covering `time`, back to front. Their steps
+/// The recipe effects covering `time`, back to front. Their steps
 /// are worked out at `time` less the segment's start. An effect bound to a
 /// clip the draft no longer has is not run.
 pub(crate) fn recipe_marks(
@@ -514,7 +515,7 @@ pub(crate) fn recipe_marks(
 ) -> Vec<RecipeMark> {
     let mut marks: Vec<RecipeMark> = effect_segments(draft, time, stack)
         .filter_map(|(track_index, segment_index, segment, id)| {
-            let recipe = bundled_recipe(id)?;
+            let recipe = find_recipe(id)?;
             let bound = match segment.bound_clip() {
                 Some(clip) => Some(find_segment(draft, &clip)?),
                 None => None,

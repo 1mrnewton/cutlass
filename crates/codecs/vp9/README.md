@@ -37,22 +37,30 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
 
 - Profile 0, any size up to 65536×65536 (odd sizes too), quantizer index 0
   (lossless, Walsh-Hadamard) to 255.
-- Partitions from 64×64 to 8×8 (rectangles below speed 4), and 4×4
-  intra blocks on key frames (each 4×4 with its own mode), all ten
-  intra modes,
-  NEAREST/NEAR/ZERO/NEW inter modes on LAST and GOLDEN, sub-sample motion
+- Partitions from 64×64 to 8×8 (rectangles below speed 4), 4×4 intra
+  blocks on key frames (each 4×4 with its own mode), and inter blocks
+  under 8×8 (4×4, 8×4, 4×8, each sub-block with its own mode and vector,
+  speeds 0–1); all ten intra modes, NEAREST/NEAR/ZERO/NEW inter modes on
+  LAST, GOLDEN and ALTREF, compound prediction (a past picture averaged
+  with the alt-ref ahead, chosen per block, speeds 0–6), sub-sample motion
   (to eighths where the vector may be), per-block transform size
   (`TX_MODE_SELECT`, 4×4 to 32×32 with the intra ADST types), skip, the loop
   filter (libvpx's level from the quantizer), probability adaptation.
+- Segmentation: with `Vp9Options::aq` (libvpx's `aq-mode=1`) each 32×32
+  region goes in one of five segments by its luma variance, each with
+  its own quantizer (flat regions finer); the map is coded per block.
 - A golden frame every 12 frames, key frames every `keyint` (240) frames;
   key and golden frames take finer quantizers. With `Vp9Options::lag`
   (15 and up) an interval whose end the current picture reaches starts
   with a hidden alt-ref frame, the temporally filtered (`enc::arf`, after
   libvpx) picture at its end, sent in a superframe with the next shown
   frame; the overlay at its position refreshes GOLDEN.
-- Coefficient probability updates in the compressed header, chosen on
-  the frame's own counts (the final pass's symbols are kept and written
-  once the updates are known).
+- Probability updates in the compressed header, chosen on the frame's own
+  counts: the coefficients' and every other updatable one (skip, tx size,
+  inter modes, filters, intra/inter, references and compound, intra modes,
+  partitions, motion vectors). The final pass's symbols name their
+  probabilities (`enc::probs`) and are written once the updates are
+  known.
 - Speeds 0–10 (`Vp9Options::speed`, default 5). Up to 6 every superblock is
   searched by trial coding; 7 and up code inter frames in one pass.
 - Threads: tile columns, each on its own thread (`Vp9Options::threads`, 0 =
@@ -160,14 +168,30 @@ cargo test -p cutlass-vp9
 Machine: the 4-core x86-64 VM this branch is developed on (AVX2),
 FFmpeg 7 with libvpx. Timings are medians of whole-process runs.
 
-**Decode** (`tools/bench.py`): 300 frames of 1920×1080 written by libvpx.
+**Decode** (`tools/bench.py`): 1920×1080 streams written by libvpx, 300
+frames of 4:4:4 (profile 1, `mandel.ivf`) and 200 of 4:2:0 (`m420.ivf`,
+libvpx at 4 Mb/s, four tile columns). Medians of seven runs.
 
-| Threads | Cutlass | FFmpeg `vp9` | Ratio |
-| --- | ---: | ---: | ---: |
-| 1 core | 3.10 s | 2.07 s | 1.49 |
-| 4 | 1.15 s | 0.93 s | 1.24 |
+| Stream | Threads | Cutlass | FFmpeg `vp9` | Ratio |
+| --- | --- | ---: | ---: | ---: |
+| 4:2:0 | 1 core | 1.23 s | 1.11 s | 1.11 |
+| 4:2:0 | 4 | 0.56 s | 0.56 s | 1.00 |
+| 4:4:4 | 1 core | 2.53 s | 2.02 s | 1.25 |
+| 4:4:4 | 4 | 1.09 s | 0.94 s | 1.16 |
 
-(Started at 38.8 s on one core: 18× faster so far.)
+(The 4:4:4 stream started at 38.8 s on one core.) What moved the decoder
+most recently: the interpolation kernel with vector loads and stores and
+row pairs kept between output rows (1.56× to 1.30× on one core), the
+loop filter loading its outer taps only when the 15-tap filter can run,
+the kernels taking their block by reference (a store-forwarding stall
+per block), and the calling thread parsing a tile column itself.
+
+The machine is a shared VM and single runs vary by ±10%; the instruction
+counts (`tools/ir.sh`) are steady: on the first 60 frames of the 4:2:0
+stream Cutlass runs 2.60 G instructions against FFmpeg's 2.06 G, with
+fewer cache misses, so what is left is code: motion compensation
+(1.8× FFmpeg's instructions with its callers), the loop filter's edge
+walk, and the inverse transforms on portable lanes.
 
 **Encode** (`tools/encbench.sh`, BD-rate with `tools/bdrate.py`): 30
 frames of 1280×720, 4 threads on both sides (libvpx with `-row-mt 1
@@ -206,7 +230,11 @@ on the real 8-tap filters and an exhaustive ±2 whole-sample check −2.3%; RD p
 finer than inter frames with GOLDEN as a second reference −45% (from
 +131% to +28% against libvpx good), the partition breakout −7% (and 2–3×
 faster), coefficient probability updates −2.6%, rectangular partitions
-−0.9% (speed < 4 only: they double the time). Alt-refs gain on still
+−0.9% (speed < 4 only: they double the time), compound prediction with
+the alt-ref −2.5% at speed 3 and −1.5% at speed 5 (on the nearly still
+clip with `lag 16`), the non-coefficient probability updates −2% on the
+first inter frame (within ±0.5% over 30 frames), inter blocks under 8×8
+−0.3% at 352×288 (speed 1). Alt-refs gain on still
 content (−1.8% overall, −16% at the highest rates) and are left out where
 the picture moves too far for one picture to stand for the interval.
 
@@ -217,19 +245,26 @@ the picture moves too far for one picture to stand for the interval.
   for the engine's `EncodeFactory`.
 - Interpolation filters switch per block (EIGHTTAP, SMOOTH, SHARP, by
   trial) at speeds 0–2; faster speeds keep EIGHTTAP.
-- The encoder writes profile 0 only: no compound prediction, no 4×4
-  inter blocks, no segmentation, no updates of the mode and vector
-  probabilities in the compressed header.
+- The encoder writes profile 0 (8-bit 4:2:0) only, BT.601 studio range.
+- Encoder tools, by speed: compound prediction (a past picture with the
+  alt-ref ahead, chosen per block) at 0–6 with `lag`; inter blocks under
+  8×8 (4×4, 8×4, 4×8, each sub-block NEAREST, NEAR, ZERO or NEW) at 0–1;
+  rectangular partitions below 4; probability updates of the
+  coefficients and of every other updatable probability (modes, filter,
+  references, partition, tx size, skip, vectors) at all speeds;
+  segmentation with adaptive quantization (`aq`, off by default).
+  Segment features other than the quantizer, temporal segment maps and
+  frame-parallel or error-resilient streams are not written.
 - At equal time the encoder is within about 8% of libvpx's good presets
   on moving content (ahead with more time, and far ahead on still content
-  and against the realtime presets), and its fastest speed is 1.3–1.4×
+  and against the realtime presets), and its fastest speed is 1.2–1.3×
   libvpx realtime's time; tile columns limit how well 4 threads share a
-  720p frame. The decoder is 1.24× FFmpeg's time on 4 threads and 1.5× on
-  one core. Its 8-bit pictures go out without a copy, as shared views of
-  the decoder's own planes at their padded stride (`Plane::samples` is a
-  `Samples`, copied only on a first write; `Plane::packed` gives the
-  visible rows); high-bit-depth pictures are still packed into new buffers.
-- The encoder always writes BT.601, studio range.
+  720p frame. The decoder is level with FFmpeg on 4 threads on 4:2:0 and
+  1.1–1.25× its time on one core. Its 8-bit pictures go out without a
+  copy, as shared views of the decoder's own planes at their padded
+  stride (`Plane::samples` is a `Samples`, copied only on a first write;
+  `Plane::packed` gives the visible rows); high-bit-depth pictures are
+  still packed into new buffers.
 
 ## Specifications
 

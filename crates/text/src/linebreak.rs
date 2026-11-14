@@ -4,8 +4,12 @@
 //! allowed place when it can. When one word is wider than the line, it ends
 //! at any place that is not inside a letter with its marks, an emoji
 //! sequence, a flag, or a syllable. The rules are the default ones, with no
-//! dictionary: Thai, Lao, Khmer and Burmese words are not told apart, so
-//! those scripts break at spaces and, failing that, between letters.
+//! dictionary: Thai, Lao, Khmer and Burmese words are not told apart.
+//! Those scripts write no spaces between words, so they also break where
+//! their spelling shows a syllable starting, which is never inside a word
+//! part that must stay whole: before a vowel written ahead of its
+//! consonant in Thai and Lao, and before a consonant that opens a
+//! syllable in Khmer and Burmese.
 
 use crate::unicode::{Props, ea, gc, lb, props};
 
@@ -31,7 +35,12 @@ pub(crate) fn boundaries(text: &str) -> Vec<Boundary> {
     let mut found = vec![Boundary::Joined; text.len()];
     for at in 1..units.len() {
         if let Some(entry) = found.get_mut(units[at].start) {
-            *entry = between(&units, at);
+            *entry = match between(&units, at) {
+                Boundary::Inside => {
+                    syllable(&units[at - 1], &units[at]).unwrap_or(Boundary::Inside)
+                }
+                other => other,
+            };
         }
     }
     found
@@ -68,6 +77,16 @@ struct Unit {
     number: bool,
     /// A regional indicator that is the first half of a flag.
     flag_open: bool,
+    /// Its first character, and its last with its marks.
+    first: char,
+    last: char,
+    /// A letter of a script written without spaces between words.
+    unspaced: bool,
+    /// Its marks are a Burmese killer and tone marks alone: with them a
+    /// consonant ends the syllable before it.
+    killed: bool,
+    /// It has a mark that is not one of those.
+    vowelled: bool,
 }
 
 fn units(text: &str) -> Vec<Unit> {
@@ -90,6 +109,13 @@ fn units(text: &str) -> Vec<Unit> {
             )
         {
             base.joiner_last = joiner;
+            base.last = character;
+            base.killed = match character {
+                '\u{103A}' => !base.vowelled,
+                '\u{1037}' | '\u{1038}' => base.killed,
+                _ => false,
+            };
+            base.vowelled |= !matches!(character, '\u{103A}' | '\u{1037}' | '\u{1038}');
             continue;
         }
         let east_asian = matches!(props.east_asian(), ea::FULLWIDTH | ea::WIDE | ea::HALFWIDTH);
@@ -119,9 +145,62 @@ fn units(text: &str) -> Vec<Unit> {
             past_spaces,
             number,
             flag_open,
+            first: character,
+            last: character,
+            unspaced: props.line_break() == lb::COMPLEX_CONTEXT,
+            killed: false,
+            vowelled: false,
         });
     }
     units
+}
+
+/// Where a syllable starts or must stay whole between two letters of a
+/// script written without spaces, when its spelling says. `None` leaves
+/// the place inside a word.
+fn syllable(before: &Unit, after: &Unit) -> Option<Boundary> {
+    if !(before.unspaced && after.unspaced) {
+        return None;
+    }
+    let code = |character: char| u32::from(character);
+    let (ahead, behind) = (code(after.first), code(before.first));
+    // Thai and Lao: a vowel written ahead of its consonant opens a
+    // syllable and stays with the consonant; the vowels and signs written
+    // after it close one and stay with what is before them.
+    let leading = |code: u32| matches!(code, 0x0E40..=0x0E44 | 0x0EC0..=0x0EC4);
+    let closing = |code: u32| {
+        matches!(
+            code,
+            0x0E2F | 0x0E30 | 0x0E33 | 0x0E46 | 0x0EAF | 0x0EB0 | 0x0EB3 | 0x0EC6
+        )
+    };
+    let following =
+        |code: u32| matches!(code, 0x0E30..=0x0E33 | 0x0E45 | 0x0EB0..=0x0EB3) || closing(code);
+    if leading(behind) || following(ahead) {
+        return Some(Boundary::Joined);
+    }
+    if leading(ahead) || closing(behind) {
+        return Some(Boundary::Allowed);
+    }
+    // Khmer: a consonant under the sign that stacks it stays with the one
+    // above; a consonant with a vowel or a stack of its own opens a
+    // syllable. A bare consonant may end the syllable before it.
+    if before.last == '\u{17D2}' || before.last == '\u{1039}' {
+        return Some(Boundary::Joined);
+    }
+    if matches!(ahead, 0x1780..=0x17B3) {
+        return (after.last != after.first).then_some(Boundary::Allowed);
+    }
+    // Burmese: a consonant with its killer ends the syllable before it;
+    // any other consonant opens one.
+    if matches!(ahead, 0x1000..=0x102A | 0x103F | 0x104E | 0x1050..=0x1055) {
+        return Some(if after.killed {
+            Boundary::Joined
+        } else {
+            Boundary::Allowed
+        });
+    }
+    None
 }
 
 /// Rule LB1: the classes the rules do not name become ones they do.
@@ -588,11 +667,86 @@ mod tests {
             lines("\u{5E9}\u{5DC}\u{5D5}\u{5DD}-a"),
             "\u{5E9}\u{5DC}\u{5D5}\u{5DD}-a"
         );
-        // Thai has no dictionary here: only its spaces break.
+        // Thai with nothing in its spelling to show a syllable breaks at
+        // its spaces alone.
         assert_eq!(
             lines("\u{E2A}\u{E27}\u{E31} \u{E2A}"),
             "\u{E2A}\u{E27}\u{E31} |\u{E2A}"
         );
+    }
+
+    #[test]
+    fn scripts_without_spaces_break_where_a_syllable_starts() {
+        // Thai: before a vowel written ahead of its consonant, and after a
+        // vowel that closes a syllable. "Thai language", "will go".
+        assert_eq!(
+            lines("\u{E20}\u{E32}\u{E29}\u{E32}\u{E44}\u{E17}\u{E22}"),
+            "\u{E20}\u{E32}\u{E29}\u{E32}|\u{E44}\u{E17}\u{E22}"
+        );
+        assert_eq!(
+            lines("\u{E08}\u{E30}\u{E44}\u{E1B}"),
+            "\u{E08}\u{E30}|\u{E44}\u{E1B}"
+        );
+        // The vowel ahead stays with its consonant, and the vowels after
+        // with theirs, even when a word is too wide for the line.
+        assert_eq!(
+            marked("\u{E44}\u{E17}\u{E22}\u{E32}"),
+            "\u{E44}\u{E17}~\u{E22}\u{E32}"
+        );
+        // After sara am, and after the repeat sign.
+        assert_eq!(
+            lines("\u{E17}\u{E33}\u{E07}\u{E32}\u{E19}"),
+            "\u{E17}\u{E33}|\u{E07}\u{E32}\u{E19}"
+        );
+        assert_eq!(
+            lines("\u{E14}\u{E35}\u{E46}\u{E19}\u{E30}"),
+            "\u{E14}\u{E35}\u{E46}|\u{E19}\u{E30}"
+        );
+        // Lao the same way: "Lao language".
+        assert_eq!(
+            lines("\u{E9E}\u{EB2}\u{EAA}\u{EB2}\u{EA5}\u{EB2}\u{EA7}"),
+            "\u{E9E}\u{EB2}\u{EAA}\u{EB2}\u{EA5}\u{EB2}\u{EA7}"
+        );
+        assert_eq!(
+            lines("\u{E84}\u{EB3}\u{EC0}\u{EA7}\u{EBB}\u{EC9}\u{EB2}"),
+            "\u{E84}\u{EB3}|\u{EC0}\u{EA7}\u{EBB}\u{EC9}\u{EB2}"
+        );
+        // Khmer, "Khmer language": before a consonant with a vowel or a
+        // stack; the consonant under the stacking sign stays, and the
+        // bare consonant that ends the word is not set on a line alone.
+        assert_eq!(
+            marked("\u{1797}\u{17B6}\u{179F}\u{17B6}\u{1781}\u{17D2}\u{1798}\u{17C2}\u{179A}"),
+            "\u{1797}\u{17B6}|\u{179F}\u{17B6}|\u{1781}\u{17D2}\u{1798}\u{17C2}~\u{179A}"
+        );
+        // Burmese, "Myanmar script": a consonant with its killer ends the
+        // syllable before it and stays there; the others open one.
+        assert_eq!(
+            marked("\u{1019}\u{103C}\u{1014}\u{103A}\u{1019}\u{102C}\u{1005}\u{102C}"),
+            "\u{1019}\u{103C}\u{1014}\u{103A}|\u{1019}\u{102C}|\u{1005}\u{102C}"
+        );
+        // A killer after a vowel is part of the vowel: that consonant
+        // opens its syllable. A stacked consonant stays under its stack.
+        assert_eq!(
+            lines("\u{1000}\u{1031}\u{102C}\u{103A}\u{1010}\u{1031}\u{102C}\u{103A}"),
+            "\u{1000}\u{1031}\u{102C}\u{103A}|\u{1010}\u{1031}\u{102C}\u{103A}"
+        );
+        assert_eq!(
+            marked("\u{1000}\u{1039}\u{1000}\u{1014}"),
+            "\u{1000}\u{1039}\u{1000}|\u{1014}"
+        );
+        // Beside a letter of another script nothing changes.
+        assert_eq!(marked("a\u{E44}"), "a~\u{E44}");
+        // A long run is walked once.
+        let started = std::time::Instant::now();
+        let long = "\u{1019}\u{103C}\u{1014}\u{103A}\u{1019}\u{102C}".repeat(20_000);
+        assert_eq!(
+            boundaries(&long)
+                .iter()
+                .filter(|place| **place == Boundary::Allowed)
+                .count(),
+            39_999
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]
@@ -617,6 +771,7 @@ mod tests {
         };
         let cases = std::fs::read_to_string(path).expect("cases");
         let mut wrong = Vec::new();
+        let mut skipped = 0;
         for case in cases.lines() {
             let (points, expected) = case.split_once(';').expect("case");
             let text: String = points
@@ -625,6 +780,17 @@ mod tests {
                     char::from_u32(u32::from_str_radix(hex, 16).expect("hex")).expect("char")
                 })
                 .collect();
+            // The other implementation breaks these four scripts by its
+            // dictionaries, where this one goes by their spelling.
+            if text.chars().any(|character| {
+                matches!(
+                    u32::from(character),
+                    0x0E00..=0x0EFF | 0x1000..=0x109F | 0x1780..=0x17FF
+                )
+            }) {
+                skipped += 1;
+                continue;
+            }
             let found = boundaries(&text);
             let ours: Vec<String> = text
                 .char_indices()
@@ -643,7 +809,7 @@ mod tests {
                 ));
             }
         }
-        let total = cases.lines().count();
+        let total = cases.lines().count() - skipped;
         let report: Vec<&String> = wrong.iter().take(60).collect();
         assert!(
             wrong.is_empty(),

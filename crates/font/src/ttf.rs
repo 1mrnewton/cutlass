@@ -23,8 +23,10 @@ const WE_HAVE_INSTRUCTIONS: u16 = 0x0100;
 const SCALED_COMPONENT_OFFSET: u16 = 0x0800;
 const UNSCALED_COMPONENT_OFFSET: u16 = 0x1000;
 
-const MAX_CONTOURS: usize = 256;
-const MAX_POINTS: usize = 4_096;
+// An ornate glyph of a real face has 158 contours and 4,103 points; a
+// glyph's points are numbered in 16 bits.
+const MAX_CONTOURS: usize = 1_024;
+const MAX_POINTS: usize = 16_384;
 const MAX_COMPONENTS: usize = 64;
 const MAX_DEPTH: usize = 16;
 
@@ -568,4 +570,43 @@ fn close_to_start(segments: &mut Vec<Segment>, x: f32, y: f32) {
 
 fn midpoint(left: Point, right: Point) -> (f32, f32) {
     ((left.x + right.x) / 2.0, (left.y + right.y) / 2.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::fixture::{boxed, font};
+    use crate::{FontError, read};
+
+    /// A face whose glyph 1 is one contour of `points` points, each one
+    /// unit right and one up from the last.
+    fn many_points(points: u16) -> Vec<u8> {
+        let mut glyph = vec![0, 1, 0, 0, 0, 0];
+        glyph.extend(points.to_be_bytes());
+        glyph.extend(points.to_be_bytes());
+        glyph.extend((points - 1).to_be_bytes());
+        glyph.extend([0, 0]);
+        let count = usize::from(points);
+        // On the curve, each delta one positive byte.
+        glyph.extend(std::iter::repeat_n(0x37, count));
+        glyph.extend(std::iter::repeat_n(1, count * 2));
+        let mut loca = vec![0; 8];
+        loca.extend(u32::try_from(glyph.len()).expect("length").to_be_bytes());
+        let glyphs = [boxed(500), boxed(500)];
+        font(&glyphs, &[('A', 1)], &[(b"glyf", glyph), (b"loca", loca)])
+    }
+
+    #[test]
+    fn an_ornate_glyph_of_thousands_of_points_is_outlined() {
+        // A real face has a glyph of 4,103 points.
+        let bytes = many_points(5_000);
+        let face = read(&bytes).expect("face");
+        let outline = face.outline(1).expect("outline");
+        assert_eq!(outline.contours.len(), 1);
+        assert!(outline.contours[0].segments.len() >= 4_999);
+        // Past the limit a glyph is refused, and the face still opens.
+        let bytes = many_points(20_000);
+        let face = read(&bytes).expect("face");
+        assert_eq!(face.outline(1), Err(FontError::BadTable));
+        assert!(face.outline(0).is_ok());
+    }
 }

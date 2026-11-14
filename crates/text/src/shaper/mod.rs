@@ -14,6 +14,7 @@ mod arabic;
 pub(crate) mod buffer;
 mod fallback;
 mod indic;
+mod morx;
 
 use cutlass_font::{Font, GlyphClass, LayoutTable, Tag};
 
@@ -151,8 +152,18 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
         arabic::join(&mut glyphs);
     }
     let count = glyphs.len();
+    // A face made for Apple's layout engine makes its ligatures, forms and
+    // emoji sequences with its own machines, and those are used ahead of
+    // any OpenType substitutions it also has: they are what it was drawn
+    // for.
+    let machines = font.morx().is_some();
+    if machines {
+        glyphs = morx::apply(font, glyphs, backward)?;
+        classify(font, &mut glyphs, true);
+    }
     let mut buffer = Buffer::new(glyphs);
-    if syllabic {
+    if machines {
+    } else if syllabic {
         let engine = Engine::new(font, false, backward, count, trusted);
         indic::substitute(font, engine, &mut buffer, &scripts, run.script)?;
     } else if let Some(mut engine) = Engine::new(font, false, backward, count, trusted)
@@ -205,8 +216,10 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
     let unplaced = placing.is_none();
     for glyph in &mut glyphs {
         // The marks of a script written by syllable keep their advance:
-        // its fonts place them by it.
-        if glyph.is_mark() && !syllabic {
+        // its fonts place them by it. So do those of a script with shaping
+        // of its own in a face that shapes by its own machines.
+        let kept = syllabic || (machines && shaping != Shaping::Plain);
+        if glyph.is_mark() && !kept {
             if unplaced && !backward {
                 glyph.x_offset -= glyph.x_advance;
             }
@@ -214,7 +227,7 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
         }
     }
     settle(&mut glyphs, backward);
-    if unplaced && !syllabic {
+    if unplaced && !syllabic && !(machines && shaping != Shaping::Plain) {
         fallback::place_marks(font, &mut glyphs, backward, !backward);
     }
     // What draws nothing is taken out with the glyphs in the order they
@@ -558,8 +571,13 @@ fn take_apart(
 /// accent a base letter, and then every glyph of the run is guessed and
 /// the face's mark classes are left unused.
 fn classify(font: &Font<'_>, glyphs: &mut [Glyph], syllabic: bool) -> bool {
+    // With no classes in the face, a mark is a mark even when the face
+    // has no glyph for it. Where the face has classes that are not taken
+    // at their word, its missing glyph stays the base it says it is.
+    let classed = font.gdef().is_some_and(|gdef| gdef.has_classes());
     let guess = |glyph: &Glyph| {
-        if glyph.category == gc::NONSPACING_MARK && !glyph.ignorable && !glyph.missing {
+        if glyph.category == gc::NONSPACING_MARK && !glyph.ignorable && !(classed && glyph.missing)
+        {
             GlyphClass::Mark
         } else {
             GlyphClass::Base
@@ -575,6 +593,7 @@ fn classify(font: &Font<'_>, glyphs: &mut [Glyph], syllabic: bool) -> bool {
             syllabic
                 || !glyphs.iter().any(|glyph| {
                     glyph.combining != 0
+                        && !glyph.missing
                         && guess(glyph) == GlyphClass::Mark
                         && matches!(
                             gdef.class(glyph.id),
@@ -950,6 +969,79 @@ mod tests {
             ),
             "[27=0+300|22=0+700|1=6+250|26=7+900|1=16+250|25=17+400|30=23+650|1=26+250|27=27+300|22=27+700|29=27+0]"
         );
+    }
+
+    #[test]
+    fn a_face_that_shapes_by_state_machines_makes_its_ligatures() {
+        const MACHINES: &[u8] = include_bytes!("../../../font/fixtures/machines.ttf");
+        let font = cutlass_font::read(MACHINES).expect("fixture");
+        let shaped = |text: &'static str, backward: bool| {
+            printed(
+                &font,
+                &Run {
+                    text,
+                    start: 0,
+                    end: text.len(),
+                    script: Script::LATIN,
+                    backward,
+                    ligatures: true,
+                },
+            )
+        };
+        // The face swaps D for B, then makes A and B one glyph. Each
+        // expected string is what HarfBuzz prints for the same face.
+        assert_eq!(shaped("ABAB", false), "[4=0+500|4=2+500]");
+        assert_eq!(shaped("AD", false), "[4=0+500]");
+        assert_eq!(shaped("AAB", false), "[2=0+500|4=1+500]");
+        assert_eq!(shaped("BA", false), "[3=0+500|2=1+500]");
+        assert_eq!(shaped("DAD", false), "[3=0+500|4=1+500]");
+        assert_eq!(shaped("", false), "[]");
+        // A long run is walked once, a step a glyph.
+        let long = "AB".repeat(20_000);
+        let glyphs = shape_run(
+            &font,
+            &Run {
+                text: &long,
+                start: 0,
+                end: long.len(),
+                script: Script::LATIN,
+                backward: false,
+                ligatures: true,
+            },
+        )
+        .expect("long");
+        assert_eq!(glyphs.len(), 20_000);
+        assert!(glyphs.iter().all(|glyph| glyph.id == 4));
+    }
+
+    #[test]
+    fn a_state_machine_that_never_moves_on_is_stopped() {
+        const MACHINES: &[u8] = include_bytes!("../../../font/fixtures/machines.ttf");
+        // The entry that marks an A now also stays on it, for ever.
+        let mut stuck = MACHINES.to_vec();
+        let entry = [0, 2, 0x80, 0, 0, 0];
+        let at = stuck
+            .windows(entry.len())
+            .position(|window| window == entry)
+            .expect("entry");
+        stuck[at + 2] = 0xC0;
+        let font = cutlass_font::read(&stuck).expect("font");
+        let text = "AB".repeat(2_000);
+        let started = std::time::Instant::now();
+        let shaped = shape_run(
+            &font,
+            &Run {
+                text: &text,
+                start: 0,
+                end: text.len(),
+                script: Script::LATIN,
+                backward: false,
+                ligatures: true,
+            },
+        );
+        // It ends, with the run shaped or refused, and not after long.
+        assert!(shaped.is_ok() || matches!(shaped, Err(crate::TextError::Limit)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]

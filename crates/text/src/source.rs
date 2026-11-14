@@ -1321,9 +1321,11 @@ fn ink_at(
             let white = image.tint().and_then(|tint| tint.get(offset..offset + 4));
             let channel = |at: usize| match white {
                 Some(white) => {
-                    let (black, white) = (u16::from(pixel[at]), u16::from(white[at]));
-                    let toward = white.saturating_sub(black) * u16::from(fill[at]) / 255;
-                    u8::try_from(black + toward).unwrap_or(u8::MAX)
+                    // White text may leave a pixel darker than black
+                    // does, under a blend that takes one from the other.
+                    let (black, white) = (i32::from(pixel[at]), i32::from(white[at]));
+                    let mixed = black + (white - black) * i32::from(fill[at]) / 255;
+                    u8::try_from(mixed.clamp(0, 255)).unwrap_or(u8::MAX)
                 }
                 None => pixel[at],
             };
@@ -2319,6 +2321,40 @@ mod tests {
         let rgba = cpu(faded.sample(Micros(1_000)));
         assert!(has_color(&rgba, [128, 0, 0, 128]), "half the red");
         assert!(!has_color(&rgba, [255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn a_pixel_between_black_text_and_white_goes_either_way() {
+        // One pixel painted twice: with black text it is bright in red
+        // and dark in blue, and with white text the other way about.
+        let image = crate::GlyphImage {
+            width: 1,
+            height: 1,
+            left: 0.0,
+            top: 0.0,
+            unit: 1.0,
+            pixels_per_em: 1.0,
+            kind: crate::atlas::GlyphKind::Color,
+            sdf: Vec::new(),
+            color: vec![200, 50, 0, 255, 100, 50, 250, 255],
+        };
+        let ink = |fill: [u8; 4]| super::ink_at(&image, 0.5, 0.5, 1.0, fill);
+        assert_eq!(ink([0, 0, 0, 255]), Some([200, 50, 0, 255]));
+        assert_eq!(ink([255, 255, 255, 255]), Some([100, 50, 250, 255]));
+        // Red text takes the white picture's red and the black one's blue.
+        assert_eq!(ink([255, 0, 0, 255]), Some([100, 50, 0, 255]));
+        // Text half shown shows the pixel half as much.
+        assert_eq!(ink([255, 255, 255, 128]), Some([50, 25, 125, 128]));
+        // A picture that says it was painted twice and is cut short is
+        // read as painted once.
+        let short = crate::GlyphImage {
+            color: vec![200, 50, 0, 255, 100, 50],
+            ..image.clone()
+        };
+        assert_eq!(
+            super::ink_at(&short, 0.5, 0.5, 1.0, [255, 255, 255, 255]),
+            Some([200, 50, 0, 255])
+        );
     }
 
     #[test]

@@ -1579,14 +1579,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let dqi = usize::from(plane > 0);
         let (dc_q, ac_q) = (s.dq[dqi][0], s.dq[dqi][1]);
         let shift = u32::from(tx == 3);
-        if s.h.lossless {
-            let mut c = [0i32; 16];
-            fwht(&self.res, n, &mut c);
-            for (i, v) in c.iter().enumerate() {
-                let q = if i == 0 { dc_q } else { ac_q };
-                levels[i] = *v / q.max(1);
-            }
-        } else if {
+        let quiet = {
             // No coefficient can reach 0.3 of a step when the residual's
             // energy (by Parseval, through the transform's gain) is below
             // that: every level is zero, as quantizing would find.
@@ -1598,7 +1591,15 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             let g = super::tx::gain(usize::from(tx));
             let floor = 0.3 * step;
             (ss as f32) * g < floor * floor
-        } {
+        };
+        if s.h.lossless {
+            let mut c = [0i32; 16];
+            fwht(&self.res, n, &mut c);
+            for (i, v) in c.iter().enumerate() {
+                let q = if i == 0 { dc_q } else { ac_q };
+                levels[i] = *v / q.max(1);
+            }
+        } else if quiet {
             // Dropped and coded cost the same: the samples' error and an end
             // of block.
             let ss: i64 = self.res[..n * n]

@@ -357,6 +357,29 @@ pub(crate) fn cbdt() -> Vec<u8> {
     font(&glyphs, &map, &[(b"CBDT", data), (b"CBLC", location)])
 }
 
+/// The `CBDT` face as an emoji face of pictures alone is stored: without
+/// `glyf` and `loca`. Their two records leave the directory, and the tables
+/// that stay keep their places.
+pub(crate) fn pictures_only() -> Vec<u8> {
+    let mut bytes = cbdt();
+    let count = usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
+    let records: Vec<[u8; 16]> = (0..count)
+        .map(|record| {
+            let at = 12 + record * 16;
+            <[u8; 16]>::try_from(&bytes[at..at + 16]).expect("record")
+        })
+        .filter(|record| &record[..4] != b"glyf" && &record[..4] != b"loca")
+        .collect();
+    assert_eq!(records.len(), count - 2);
+    bytes[12..12 + count * 16].fill(0);
+    for (index, record) in records.iter().enumerate() {
+        bytes[12 + index * 16..28 + index * 16].copy_from_slice(record);
+    }
+    let kept = u16::try_from(records.len()).expect("count");
+    bytes[4..6].copy_from_slice(&kept.to_be_bytes());
+    bytes
+}
+
 /// The layered color face with a color strike beside its layers, to show
 /// which a glyph takes. The strike has the two by two color picture for
 /// glyph 1, the letter `A` with an outline, and for glyph 10, which also
@@ -373,9 +396,10 @@ pub(crate) fn layers_and_strike() -> Vec<u8> {
 /// A fixture's file name and what builds it.
 type Built = (&'static str, fn() -> Vec<u8>);
 
-const FILES: [Built; 4] = [
+const FILES: [Built; 5] = [
     ("sbix-png.ttf", sbix),
     ("cbdt-png.ttf", cbdt),
+    ("cbdt-only.ttf", pictures_only),
     ("colr.ttf", crate::fixture_colr::layered),
     ("colr-sbix.ttf", layers_and_strike),
 ];

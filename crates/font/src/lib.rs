@@ -320,6 +320,7 @@ impl<'a> Font<'a> {
         match &self.outlines {
             Outlines::TrueType(_) => true,
             Outlines::OpenType(source) => otf::has_outlines(source),
+            Outlines::Pictures => false,
         }
     }
 
@@ -397,6 +398,7 @@ impl<'a> Font<'a> {
         match &self.outlines {
             Outlines::TrueType(source) => ttf::outline(source, glyph_id, self.num_glyphs),
             Outlines::OpenType(source) => otf::outline(source, glyph_id),
+            Outlines::Pictures => Err(FontError::Unsupported),
         }
     }
 
@@ -437,6 +439,13 @@ impl<'a> Font<'a> {
             Err(error) => return Err(error),
         };
         let outlines = match directory.kind {
+            // An emoji face of pictures alone carries neither outline table.
+            FontKind::TrueType
+                if directory.table(b"glyf") == Err(FontError::MissingTable)
+                    && directory.table(b"loca") == Err(FontError::MissingTable) =>
+            {
+                Outlines::Pictures
+            }
             FontKind::TrueType => {
                 Outlines::TrueType(ttf::source(&directory, head.loca, num_glyphs)?)
             }
@@ -467,6 +476,9 @@ impl<'a> Font<'a> {
 enum Outlines<'a> {
     TrueType(ttf::Source<'a>),
     OpenType(otf::Source<'a>),
+    /// A TrueType face with no `glyf` and no `loca`: its glyphs are the
+    /// pictures of a strike.
+    Pictures,
 }
 
 impl fmt::Debug for Outlines<'_> {
@@ -474,6 +486,7 @@ impl fmt::Debug for Outlines<'_> {
         match self {
             Self::TrueType(_) => formatter.write_str("TrueType"),
             Self::OpenType(_) => formatter.write_str("OpenType"),
+            Self::Pictures => formatter.write_str("Pictures"),
         }
     }
 }
@@ -1185,6 +1198,26 @@ mod tests {
         let at = table_offset(&edited, b"hmtx");
         edited[at + 1] ^= 1;
         assert_ne!(read(&edited).expect("edited").fingerprint(), sample);
+    }
+
+    #[test]
+    fn a_face_of_pictures_alone_opens_without_its_outline_tables() {
+        let bytes = crate::fixture_color::pictures_only();
+        let font = read(&bytes).expect("pictures");
+        assert_eq!(font.kind(), FontKind::TrueType);
+        assert!(!font.has_outlines());
+        assert!(font.has_color_strike());
+        assert_eq!(font.outline(1), Err(FontError::Unsupported));
+        let picture = font.color_bitmap(1, 256).expect("strike").expect("picture");
+        assert_eq!((picture.width, picture.height), (2, 2));
+        // One outline table without the other is still a broken face.
+        let mut half = crate::fixture_color::cbdt();
+        let at = (0..usize::from(u16::from_be_bytes([half[4], half[5]])))
+            .map(|record| 12 + record * 16)
+            .find(|at| &half[*at..*at + 4] == b"loca")
+            .expect("loca");
+        half[at..at + 4].copy_from_slice(b"lock");
+        assert_eq!(read(&half).err(), Some(FontError::MissingTable));
     }
 
     #[test]

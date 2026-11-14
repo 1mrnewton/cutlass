@@ -835,6 +835,110 @@ mod tests {
         }
     }
 
+    /// Paint every glyph of the faces named in `CUTLASS_COLOR_FACES` (paths
+    /// with `:` between them), and say what each face gave. With
+    /// `CUTLASS_COLOR_SHEET` set, the color pictures of each face are also
+    /// written side by side to `<that>-<n>.rgba`, 12 pictures of 192 pixels
+    /// to a row, for looking at.
+    #[test]
+    #[ignore = "reads the color faces named in CUTLASS_COLOR_FACES"]
+    #[allow(clippy::print_stdout)]
+    fn the_named_color_faces_paint() {
+        const CELL: usize = 192;
+        const ACROSS: usize = 12;
+        let Ok(paths) = std::env::var("CUTLASS_COLOR_FACES") else {
+            return;
+        };
+        let sheet = std::env::var("CUTLASS_COLOR_SHEET").ok();
+        let every = std::env::var("CUTLASS_COLOR_EVERY")
+            .ok()
+            .and_then(|every| every.parse::<usize>().ok())
+            .unwrap_or(1);
+        for (number, path) in paths.split(':').enumerate() {
+            let bytes = std::fs::read(path).expect("face file");
+            let font = cutlass_font::read_collection(&bytes, 0)
+                .or_else(|_| read(&bytes))
+                .expect("face");
+            let started = std::time::Instant::now();
+            let mut atlas = Atlas::new();
+            let (mut color, mut distance, mut coverage, mut failed) = (0, 0, 0, 0);
+            let mut pictures: Vec<super::GlyphImage> = Vec::new();
+            for glyph in 0..font.glyph_count() {
+                match atlas.glyph(&font, glyph) {
+                    Ok(image) => match image.kind {
+                        super::GlyphKind::Color => {
+                            assert_eq!(
+                                image.color.len(),
+                                usize::try_from(image.width * image.height * 4).expect("size")
+                            );
+                            assert!(
+                                image.color.as_chunks::<4>().0.iter().all(
+                                    |[red, green, blue, alpha]| red <= alpha
+                                        && green <= alpha
+                                        && blue <= alpha
+                                ),
+                                "glyph {glyph} is not premultiplied"
+                            );
+                            if color % every == 0 {
+                                pictures.push(image.clone());
+                            }
+                            color += 1;
+                        }
+                        super::GlyphKind::Distance => distance += 1,
+                        super::GlyphKind::Coverage => coverage += 1,
+                    },
+                    Err(error) => {
+                        if failed < 8 {
+                            println!("  glyph {glyph}: {error:?}");
+                        }
+                        failed += 1;
+                    }
+                }
+            }
+            println!(
+                "{path}: {} glyphs, {color} color, {distance} outline, {coverage} gray, {failed} failed, {:?}",
+                font.glyph_count(),
+                started.elapsed()
+            );
+            let Some(sheet) = &sheet else {
+                continue;
+            };
+            let down = pictures.len().div_ceil(ACROSS).max(1);
+            let mut rgba = vec![0_u8; ACROSS * CELL * down * CELL * 4];
+            for (index, image) in pictures.iter().enumerate() {
+                let (left, top) = ((index % ACROSS) * CELL, (index / ACROSS) * CELL);
+                let width = usize::try_from(image.width).expect("width");
+                let height = usize::try_from(image.height).expect("height");
+                // The em square of the picture: where the glyph sits in it.
+                let origin_x = (image.left / image.unit).round();
+                let origin_y = (image.pixels_per_em - image.top / image.unit).round();
+                for y in 0..height {
+                    for x in 0..width {
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+                        let (cell_x, cell_y) = (
+                            (x as f32 + origin_x + 16.0) as i64,
+                            (y as f32 + origin_y + 24.0) as i64,
+                        );
+                        if !(0..CELL as i64).contains(&cell_x)
+                            || !(0..CELL as i64).contains(&cell_y)
+                        {
+                            continue;
+                        }
+                        let to = ((top + usize::try_from(cell_y).expect("y")) * ACROSS * CELL
+                            + left
+                            + usize::try_from(cell_x).expect("x"))
+                            * 4;
+                        let from = (y * width + x) * 4;
+                        rgba[to..to + 4].copy_from_slice(&image.color[from..from + 4]);
+                    }
+                }
+            }
+            let name = format!("{sheet}-{number}.rgba");
+            std::fs::write(&name, &rgba).expect("sheet");
+            println!("  {name}: {} by {}", ACROSS * CELL, down * CELL);
+        }
+    }
+
     /// The fixture's two by two color picture, premultiplied.
     const RGBA: [u8; 16] = [255, 0, 0, 255, 0, 128, 0, 128, 0, 0, 255, 255, 0, 0, 0, 0];
 
@@ -868,6 +972,19 @@ mod tests {
         assert_eq!(letter.kind, super::GlyphKind::Distance);
         assert!(letter.sdf.iter().any(|texel| *texel >= 250));
         assert!(letter.color.is_empty());
+    }
+
+    #[test]
+    fn a_face_of_pictures_alone_draws_them_and_leaves_the_rest_blank() {
+        let font = read(include_bytes!("../../font/fixtures/cbdt-only.ttf")).expect("pictures");
+        assert_eq!(route(&font), AtlasRoute::Bitmap);
+        let mut atlas = Atlas::new();
+        let image = atlas.glyph(&font, 1).expect("picture");
+        assert_eq!(image.kind, super::GlyphKind::Color);
+        assert_eq!(image.color, RGBA);
+        // The missing glyph has no picture, and that is a blank and no error.
+        let blank = atlas.glyph(&font, 0).expect("blank");
+        assert_eq!((blank.width, blank.height), (0, 0));
     }
 
     #[test]

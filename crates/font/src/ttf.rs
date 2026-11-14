@@ -78,13 +78,27 @@ pub(crate) fn source<'a>(
     Ok(Source { glyf, loca })
 }
 
+/// The outline of `glyph_id`. A TrueType glyph is drawn with the left edge
+/// of its box at `bearing`, the left side bearing its face gives it, and
+/// not where its points happen to be stored: an old face hangs a mark back
+/// over the letter before it this way. Most glyphs are stored where they
+/// are drawn, and are not moved.
 pub(crate) fn outline(
     source: &Source<'_>,
     glyph_id: u16,
     num_glyphs: u16,
+    bearing: Option<i16>,
 ) -> Result<Outline, FontError> {
     let mut stack = Vec::new();
-    let contours = flatten(source, glyph_id, num_glyphs, &mut stack)?;
+    let mut contours = flatten(source, glyph_id, num_glyphs, &mut stack)?;
+    if let (Some(bearing), Some(stored)) = (bearing, left_edge(source, glyph_id))
+        && bearing != stored
+    {
+        let shift = f32::from(bearing) - f32::from(stored);
+        for point in contours.iter_mut().flatten() {
+            point.x += shift;
+        }
+    }
     let mut outline = Outline {
         contours: Vec::with_capacity(contours.len()),
     };
@@ -94,6 +108,17 @@ pub(crate) fn outline(
         }
     }
     Ok(outline)
+}
+
+/// The left edge of the box a glyph's own record gives it; `None` for a
+/// glyph with no outline.
+fn left_edge(source: &Source<'_>, glyph_id: u16) -> Option<i16> {
+    let (start, end) = source.loca.span(glyph_id).ok()?;
+    if start == end {
+        return None;
+    }
+    let data = bytes_at(source.glyf, start, end - start).ok()?;
+    i16_at(data, 2).ok()
 }
 
 fn flatten(
@@ -593,6 +618,68 @@ mod tests {
         loca.extend(u32::try_from(glyph.len()).expect("length").to_be_bytes());
         let glyphs = [boxed(500), boxed(500)];
         font(&glyphs, &[('A', 1)], &[(b"glyf", glyph), (b"loca", loca)])
+    }
+
+    /// The left and right edges of a glyph's outline.
+    fn edges(bytes: &[u8], glyph: u16) -> (f32, f32) {
+        let face = read(bytes).expect("face");
+        let outline = face.outline(glyph).expect("outline");
+        let mut xs: Vec<f32> = Vec::new();
+        for contour in &outline.contours {
+            xs.push(contour.x);
+            for segment in &contour.segments {
+                if let crate::Segment::Line { x, .. } = *segment {
+                    xs.push(x);
+                }
+            }
+        }
+        (
+            xs.iter().copied().fold(f32::MAX, f32::min),
+            xs.iter().copied().fold(f32::MIN, f32::max),
+        )
+    }
+
+    #[test]
+    fn a_glyph_is_drawn_with_its_left_edge_at_its_bearing() {
+        // Glyph 1 is stored from 50 to 450. Its metrics say its left
+        // edge is 300 before its origin, as an old face's accent is, to
+        // hang over the letter before it; glyph 2's say what is stored.
+        let glyphs = [boxed(500), boxed(500), boxed(500)];
+        let metrics = |first: i16, second: i16| {
+            let mut hmtx = Vec::new();
+            for bearing in [0, first, second] {
+                hmtx.extend(500_u16.to_be_bytes());
+                hmtx.extend(bearing.to_be_bytes());
+            }
+            hmtx
+        };
+        let bytes = font(&glyphs, &[('A', 1)], &[(b"hmtx", metrics(-300, 50))]);
+        assert_eq!(edges(&bytes, 1), (-300.0, 100.0));
+        assert_eq!(edges(&bytes, 2), (50.0, 450.0));
+        // Forward as well as back, and the advance is what it was.
+        let bytes = font(&glyphs, &[('A', 1)], &[(b"hmtx", metrics(250, 50))]);
+        assert_eq!(edges(&bytes, 1), (250.0, 650.0));
+        assert_eq!(read(&bytes).expect("face").advance(1), Ok(500));
+        // A face whose metrics stop before a glyph leaves it as stored.
+        let short: Vec<u8> = metrics(-300, 50)[..8].to_vec();
+        let mut with = font(&glyphs, &[('A', 1)], &[(b"hmtx", short)]);
+        // Two glyphs have metrics of their own; the third has neither an
+        // advance nor a bearing in the table.
+        let hhea = (0..usize::from(u16::from_be_bytes([with[4], with[5]])))
+            .map(|record| 12 + record * 16)
+            .find(|at| &with[*at..*at + 4] == b"hhea")
+            .expect("hhea");
+        let at = usize::try_from(u32::from_be_bytes([
+            with[hhea + 8],
+            with[hhea + 9],
+            with[hhea + 10],
+            with[hhea + 11],
+        ]))
+        .expect("offset");
+        with[at + 34..at + 36].copy_from_slice(&2_u16.to_be_bytes());
+        if let Ok(face) = read(&with) {
+            assert!(face.outline(2).is_ok());
+        }
     }
 
     #[test]

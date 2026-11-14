@@ -446,7 +446,9 @@ pub(crate) fn font(
     let mut loca = Vec::new();
     for glyph in glyphs {
         hmtx.extend(glyph.advance.to_be_bytes());
-        hmtx.extend([0, 0]);
+        // The left side bearing is where the outline's box starts, as a
+        // font tool writes it.
+        hmtx.extend(signed(glyph.outline.map_or(0, |[left, ..]| left)).to_be_bytes());
         loca.extend(u32::try_from(glyf.len()).expect("loca").to_be_bytes());
         if let Some([left, bottom, right, top]) = glyph.outline {
             // One contour of four corners, each on the curve, as deltas.

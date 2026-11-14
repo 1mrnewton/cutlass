@@ -457,7 +457,12 @@ impl<'a> Font<'a> {
             return Err(FontError::UnknownGlyph);
         }
         match &self.outlines {
-            Outlines::TrueType(source) => ttf::outline(source, glyph_id, self.num_glyphs),
+            Outlines::TrueType(source) => ttf::outline(
+                source,
+                glyph_id,
+                self.num_glyphs,
+                self.hmtx.bearing(glyph_id),
+            ),
             Outlines::OpenType(source) => otf::outline(source, glyph_id),
             Outlines::Pictures => Err(FontError::Unsupported),
         }
@@ -653,6 +658,18 @@ impl<'a> Hmtx<'a> {
             data: table,
             metrics,
         })
+    }
+
+    /// How far from its origin the left edge of `glyph`'s ink is, as the
+    /// table gives it: beside the advance for the glyphs that have their
+    /// own, and in the list after those for the rest.
+    fn bearing(&self, glyph: u16) -> Option<i16> {
+        let offset = if glyph < self.metrics {
+            usize::from(glyph) * 4 + 2
+        } else {
+            usize::from(self.metrics) * 4 + usize::from(glyph - self.metrics) * 2
+        };
+        i16_at(self.data, offset).ok()
     }
 
     fn advance(&self, glyph: u16) -> Result<u16, FontError> {

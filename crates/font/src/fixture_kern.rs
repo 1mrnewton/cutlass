@@ -305,6 +305,19 @@ pub(crate) fn wide() -> Vec<u8> {
     font(&glyphs, &[('A', 1), ('B', 2), ('C', 3)], &[])
 }
 
+/// A face whose class table is wrong the way some widely installed faces
+/// are: it calls the letter `B` a mark, beside the acute, which is one.
+/// `A` and `C` are letters as they should be. A version 0 `kern` table
+/// brings `B` 100 closer after `A`.
+pub(crate) fn misclassed() -> Vec<u8> {
+    // Classes: 1 is a base, 3 is a mark.
+    let classes = crate::fixture::gdef(&[(A, A, 1), (B, ACUTE, 3), (C, C, 1)], &[], &[]);
+    let mut kern = be(&[0, 1, 0, 6 + 8 + 6, 1, 1, 6, 0, 0]);
+    kern.extend(be(&[A, B]));
+    kern.extend(signed(&[-100]));
+    font(&glyphs(), &MAP, &[(b"GDEF", classes), (b"kern", kern)])
+}
+
 /// A fixture's file name and what builds it.
 type Built = (&'static str, fn() -> Vec<u8>);
 
@@ -315,7 +328,7 @@ const FILES: [Built; 3] = [
 ];
 
 /// Fixtures with no kerning, kept and checked the same way.
-const OTHER_FILES: [Built; 1] = [("wide.ttf", wide)];
+const OTHER_FILES: [Built; 2] = [("wide.ttf", wide), ("misclassed.ttf", misclassed)];
 
 fn path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

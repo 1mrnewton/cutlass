@@ -26,8 +26,14 @@ use cutlass_eval::Fonts;
 pub const MAX_FACES: usize = 400;
 /// The most bytes one face is read into. A face of a larger file is read
 /// alone, without the file's other faces, and of an emoji face one size
-/// of its pictures is read.
-pub const MAX_FACE_BYTES: u64 = 40 * 1024 * 1024;
+/// of its pictures is read: the sharpest that fits. A desktop has the
+/// room for the sharpest a Mac's emoji face holds, which is 80 MB; a
+/// phone keeps the size below it.
+pub const MAX_FACE_BYTES: u64 = if cfg!(any(target_os = "ios", target_os = "android")) {
+    40 * 1024 * 1024
+} else {
+    96 * 1024 * 1024
+};
 /// The largest font file a scan looks in.
 const MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 /// Faces new text should start in, best first. A scan puts the first of
@@ -305,14 +311,14 @@ impl FaceTable {
     fn rank_fallbacks(&mut self) {
         // The file a face is from, when it is the file's only or first face.
         let file = |name: &str| match name.split_once('#') {
-            None => Some(name.to_lowercase()),
-            Some((file, "0")) => Some(file.to_lowercase()),
+            None => Some(fold(name)),
+            Some((file, "0")) => Some(fold(file)),
             Some(_) => None,
         };
         let files: Vec<Option<String>> = self.faces.iter().map(|face| file(&face.name)).collect();
         let mut ranked: Vec<usize> = Vec::new();
         for wanted in FALLBACK_FACES {
-            let wanted = wanted.to_lowercase();
+            let wanted = fold(wanted);
             if let Some(at) = files
                 .iter()
                 .position(|file| file.as_deref() == Some(&wanted))
@@ -445,10 +451,8 @@ impl Fonts for FaceTable {
         let leads = |at: &usize| {
             self.faces.get(*at).is_some_and(|face| {
                 // A collection's first face is named with `#0` after the file.
-                let file = face.name.strip_suffix("#0").unwrap_or(&face.name);
-                leading
-                    .iter()
-                    .any(|name| file.to_lowercase() == name.to_lowercase())
+                let file = fold(face.name.strip_suffix("#0").unwrap_or(&face.name));
+                leading.iter().any(|name| fold(name) == file)
             })
         };
         let (own, rest): (Vec<usize>, Vec<usize>) =
@@ -502,9 +506,32 @@ fn is_fallback_file(name: &str) -> bool {
         Some((file, "0")) => file,
         Some(_) => return false,
     };
-    FALLBACK_FACES
-        .iter()
-        .any(|wanted| wanted.eq_ignore_ascii_case(file))
+    let file = fold(file);
+    FALLBACK_FACES.iter().any(|wanted| fold(wanted) == file)
+}
+
+/// A file name as names are compared: in lower case, and with a kana's
+/// voicing mark left off however it is written. A Mac stores such a mark
+/// as a character of its own after the kana, and other systems as one
+/// character with it, so the two spellings of a name are one name here.
+fn fold(name: &str) -> String {
+    // The kana that take a voicing mark as the next character, and a
+    // half-voicing mark as the one after that, in both kana blocks.
+    const VOICED: &str =
+        "かきくけこさしすせそたちつてとはひふへほカキクケコサシスセソタチツテトハヒフヘホ";
+    const HALF_VOICED: &str = "はひふへほハヒフヘホ";
+    let base = |character: char, back: u32, bases: &str| {
+        char::from_u32(u32::from(character).wrapping_sub(back)).filter(|base| bases.contains(*base))
+    };
+    name.chars()
+        .filter(|character| !matches!(character, '\u{3099}' | '\u{309A}'))
+        .map(|character| {
+            base(character, 1, VOICED)
+                .or_else(|| base(character, 2, HALF_VOICED))
+                .unwrap_or(character)
+        })
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// A face's name for people: the file name without its extension, with
@@ -832,7 +859,8 @@ mod tests {
             ("PingFang.ttc", HAN.to_vec()),
             ("Hiragino Sans GB.ttc", padded(KANA)),
             ("msyh.ttc", padded(HANGUL)),
-            ("ヒラギノ角ゴシック W3.ttc", KANA.to_vec()),
+            // As a Mac stores the name: each voicing mark on its own.
+            ("ヒラキ\u{3099}ノ角コ\u{3099}シック W3.ttc", KANA.to_vec()),
             ("malgun.ttf", HANGUL.to_vec()),
         ] {
             std::fs::write(folder.0.join(name), bytes).expect("face");
@@ -851,8 +879,16 @@ mod tests {
         // Kana and Hangul pass over the Chinese faces that have them.
         assert_eq!(
             table.fallback('\u{3042}', false),
-            face("ヒラギノ角ゴシック W3.ttc")
+            face("ヒラキ\u{3099}ノ角コ\u{3099}シック W3.ttc")
         );
+        // A name is the same name however its voicing marks are written,
+        // and whatever its case.
+        assert_eq!(
+            fold("ガギパ.TTC"),
+            fold("カ\u{3099}キ\u{3099}ハ\u{309A}.ttc")
+        );
+        assert_eq!(fold("Arial.TTF"), "arial.ttf");
+        assert_ne!(fold("カナ.ttc"), fold("キナ.ttc"));
         assert_eq!(table.fallback('\u{AC00}', false), face("malgun.ttf"));
         // Without a face of the language, a Chinese face that has it is used.
         std::fs::remove_file(folder.0.join("malgun.ttf")).expect("remove");

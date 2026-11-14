@@ -136,12 +136,6 @@ unsafe fn s256(s: &mut [u8], o: usize, v: __m256i) {
 
 // Filters ------------------------------------------------------------------
 
-/// Taps `2k` and `2k + 1` as the byte pair `pmaddubsw` multiplies by.
-#[inline]
-fn pair(f: &[i16; 8], k: usize) -> i16 {
-    i16::from_le_bytes([f[2 * k] as i8 as u8, f[2 * k + 1] as i8 as u8])
-}
-
 /// For output `j` of eight, samples `j + 2k` and `j + 2k + 1`.
 #[inline]
 #[target_feature(enable = "avx2")]
@@ -178,9 +172,9 @@ struct Taps {
 impl Taps {
     #[inline]
     #[target_feature(enable = "avx2")]
-    fn new(f: &[i16; 8]) -> Self {
+    fn new(f: &super::Filter) -> Self {
         let m = [pair_mask(0), pair_mask(1), pair_mask(2), pair_mask(3)];
-        let p: [i16; 4] = core::array::from_fn(|k| pair(f, k));
+        let p = f.pairs;
         Self {
             masks: m.map(|m| _mm256_set_m128i(m, m)),
             pairs: p.map(|v| _mm256_set1_epi16(v)),

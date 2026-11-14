@@ -10,7 +10,9 @@ fn main() {
     let src: Vec<u8> = (0..stride * 128).map(|i| (i * 7 % 251) as u8).collect();
     let mut dst = vec![0u8; 64 * 64];
     let mut tmp = vec![0u8; cutlass_simd::vp9::mc::TMP];
-    let f = Some([-1i16, 6, -19, 78, 78, -19, 6, -1]);
+    let f = Some(cutlass_simd::vp9::mc::Filter::new([
+        -1i16, 6, -19, 78, 78, -19, 6, -1,
+    ]));
     for &(w, h) in &[(8usize, 8usize), (16, 16), (32, 32), (64, 64)] {
         for (name, fx, fy) in [
             ("copy", None, None),

@@ -4,8 +4,32 @@
 
 use super::pixel::Pixel;
 
-/// The filters of one kind, by sixteenth of a sample.
-pub type Filter = [[i16; 8]; 16];
+/// The filters of one kind, by sixteenth of a sample: the taps, and the
+/// same taps as the 8-bit kernels take them (paired once, here).
+pub struct Filter {
+    pub taps: [[i16; 8]; 16],
+    pub simd: [cutlass_simd::vp9::mc::Filter; 16],
+}
+
+impl Filter {
+    const fn of(taps: &[[i16; 8]; 16]) -> Self {
+        let mut simd = [cutlass_simd::vp9::mc::Filter::new([0; 8]); 16];
+        let mut i = 0;
+        while i < 16 {
+            simd[i] = cutlass_simd::vp9::mc::Filter::new(taps[i]);
+            i += 1;
+        }
+        Self { taps: *taps, simd }
+    }
+}
+
+/// EIGHTTAP, SMOOTH, SHARP and BILINEAR, in the header's order.
+pub static FILTERS: [Filter; 4] = [
+    Filter::of(&crate::tables::SUBPEL_FILTERS[0]),
+    Filter::of(&crate::tables::SUBPEL_FILTERS[1]),
+    Filter::of(&crate::tables::SUBPEL_FILTERS[2]),
+    Filter::of(&crate::tables::SUBPEL_FILTERS[3]),
+];
 
 /// Predicts a `w`×`h` block into `dst` from `src`, whose element `at` is
 /// the block's first reference sample. With a fraction across, `src` holds
@@ -26,8 +50,8 @@ pub fn predict<P: Pixel>(
     avg: bool,
     scratch: &mut [u8],
 ) {
-    let fx = (mx != 0).then(|| filter[mx]);
-    let fy = (my != 0).then(|| filter[my]);
+    let fx = (mx != 0).then(|| filter.simd[mx]);
+    let fy = (my != 0).then(|| filter.simd[my]);
     if P::mc_fast(
         dst,
         dst_stride,
@@ -56,7 +80,7 @@ pub fn predict<P: Pixel>(
             }
         }
         (true, false) => {
-            let f = &filter[mx];
+            let f = &filter.taps[mx];
             for r in 0..h {
                 let row = at + r * src_stride - 3;
                 let d = &mut dst[r * dst_stride..r * dst_stride + w];
@@ -64,7 +88,7 @@ pub fn predict<P: Pixel>(
             }
         }
         (false, true) => {
-            let f = &filter[my];
+            let f = &filter.taps[my];
             let base = at - 3 * src_stride;
             for r in 0..h {
                 let d = &mut dst[r * dst_stride..r * dst_stride + w];
@@ -72,8 +96,8 @@ pub fn predict<P: Pixel>(
             }
         }
         (true, true) => {
-            let fx = &filter[mx];
-            let fy = &filter[my];
+            let fx = &filter.taps[mx];
+            let fy = &filter.taps[my];
             let mut tmp = [P::default(); 64 * 71];
             let rows = h + 7;
             for r in 0..rows {
@@ -175,7 +199,7 @@ pub fn predict_scaled<P: Pixel>(
         for c in 0..w {
             tmp[r * w + c] = if horiz {
                 let x = x0 + (xq >> 4);
-                let f = &filter[(xq & 15) as usize];
+                let f = &filter.taps[(xq & 15) as usize];
                 tap(core::array::from_fn(|k| get(x - 3 + k as i32, y).get()), f)
             } else {
                 get(x0 + c as i32, y).get()
@@ -188,7 +212,7 @@ pub fn predict_scaled<P: Pixel>(
             let v = if vert {
                 let yq = sy + r as i32 * ys;
                 let base = (yq >> 4) as usize;
-                let f = &filter[(yq & 15) as usize];
+                let f = &filter.taps[(yq & 15) as usize];
                 tap(core::array::from_fn(|k| tmp[(base + k) * w + c]), f)
             } else {
                 tmp[r * w + c]

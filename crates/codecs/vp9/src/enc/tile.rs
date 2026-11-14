@@ -1318,7 +1318,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         }
         let mut pred = std::mem::take(&mut self.pred);
         let mut tmp = std::mem::take(&mut self.mctmp);
-        let filter = &crate::tables::SUBPEL_FILTERS[usize::from(geom::EIGHTTAP)];
+        let filter = &crate::dsp::mc::FILTERS[usize::from(geom::EIGHTTAP)];
         let mut ok = true;
         for (k, (&r, mv)) in refs.iter().zip(mvs).enumerate() {
             let c = self.rec.ctx();
@@ -1506,7 +1506,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             {
                 return None;
             }
-            let filter = &crate::tables::SUBPEL_FILTERS[usize::from(geom::EIGHTTAP)];
+            let filter = &crate::dsp::mc::FILTERS[usize::from(geom::EIGHTTAP)];
             let at = by as usize * stride + bx as usize;
             crate::dsp::mc::predict(
                 &mut pred,

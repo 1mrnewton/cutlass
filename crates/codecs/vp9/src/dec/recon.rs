@@ -11,7 +11,6 @@ use crate::dsp::itx::{self, Kind};
 use crate::dsp::mc;
 use crate::dsp::pixel::Pixel;
 use crate::geom::{self, BLOCK_8X8, INTRA_FRAME};
-use crate::tables::SUBPEL_FILTERS;
 
 use super::frame::Dims;
 use super::syntax::{BlockRec, TileSyntax};
@@ -382,7 +381,7 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
 
     pub(crate) fn predict_inter(&mut self, b: &BlockRec) {
         let nref = 1 + usize::from(b.refs[1] > INTRA_FRAME);
-        let filter = &SUBPEL_FILTERS[usize::from(b.interp).min(3)];
+        let filter = &mc::FILTERS[usize::from(b.interp).min(3)];
         let (bw, bh) = MI_WH[usize::from(b.bsize)];
         let (row, col) = (usize::from(b.row), usize::from(b.col));
         // Luma alone, then the two chroma planes together: they share

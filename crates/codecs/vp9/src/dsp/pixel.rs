@@ -35,7 +35,10 @@ pub trait Pixel: Copy + Default + PartialEq + Send + Sync + core::fmt::Debug + '
         _at: usize,
         _ss: usize,
         _wh: (usize, usize),
-        _f: (Option<[i16; 8]>, Option<[i16; 8]>),
+        _f: (
+            Option<cutlass_simd::vp9::mc::Filter>,
+            Option<cutlass_simd::vp9::mc::Filter>,
+        ),
         _avg: bool,
         _tmp: &mut [u8],
     ) -> bool {
@@ -128,7 +131,10 @@ impl Pixel for u8 {
         at: usize,
         ss: usize,
         (w, h): (usize, usize),
-        (fx, fy): (Option<[i16; 8]>, Option<[i16; 8]>),
+        (fx, fy): (
+            Option<cutlass_simd::vp9::mc::Filter>,
+            Option<cutlass_simd::vp9::mc::Filter>,
+        ),
         avg: bool,
         tmp: &mut [u8],
     ) -> bool {

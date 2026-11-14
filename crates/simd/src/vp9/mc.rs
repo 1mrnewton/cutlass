@@ -8,6 +8,43 @@ mod avx2;
 #[cfg(test)]
 mod tests;
 
+/// An 8-tap filter, with its taps paired the way the kernels multiply
+/// them, worked out once (a `const fn`, for tables).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Filter {
+    taps: [i16; 8],
+    /// Taps `2k` and `2k + 1` as the signed byte pair `pmaddubsw` takes.
+    pairs: [i16; 4],
+    /// Whether every tap fits a signed byte (the kernels need it).
+    bytes: bool,
+}
+
+impl Filter {
+    pub const fn new(taps: [i16; 8]) -> Self {
+        let mut pairs = [0i16; 4];
+        let mut bytes = true;
+        let mut k = 0;
+        while k < 8 {
+            if taps[k] < -128 || taps[k] > 127 {
+                bytes = false;
+            }
+            k += 1;
+        }
+        let mut k = 0;
+        while k < 4 {
+            let lo = taps[2 * k] as i8 as u8 as u16;
+            let hi = taps[2 * k + 1] as i8 as u8 as u16;
+            pairs[k] = (lo | (hi << 8)) as i16;
+            k += 1;
+        }
+        Self { taps, pairs, bytes }
+    }
+
+    pub const fn taps(&self) -> &[i16; 8] {
+        &self.taps
+    }
+}
+
 /// A block's prediction: `w`×`h` samples to `dst` (rows `dst_stride`
 /// apart) from `src`, whose element `at` is the block's first reference
 /// sample (rows `src_stride` apart), with the filter `fx` across and `fy`
@@ -21,8 +58,8 @@ pub struct Block<'a> {
     pub src_stride: usize,
     pub w: usize,
     pub h: usize,
-    pub fx: Option<[i16; 8]>,
-    pub fy: Option<[i16; 8]>,
+    pub fx: Option<Filter>,
+    pub fy: Option<Filter>,
     pub avg: bool,
     /// Scratch for the rows filtered across before the filter down:
     /// [`TMP`] samples.
@@ -59,15 +96,9 @@ impl Block<'_> {
         };
         let last_row = first + (self.h - 1 + above + below) * self.src_stride;
         last_row + self.w + 24 <= self.src.len()
-            && self.fx.is_none_or(ok_taps)
-            && self.fy.is_none_or(ok_taps)
+            && self.fx.is_none_or(|f| f.bytes)
+            && self.fy.is_none_or(|f| f.bytes)
     }
-}
-
-/// Taps the kernels take: each fits a signed byte.
-#[inline]
-fn ok_taps(f: [i16; 8]) -> bool {
-    f.iter().all(|&t| (-128..=127).contains(&t))
 }
 
 /// Predicts `b` with vector instructions. `false`, having written nothing,
@@ -120,7 +151,7 @@ pub fn predict_scalar(b: Block<'_>) {
         for c in 0..w {
             let p = top + r * src_stride + c;
             tmp[r * w + c] = match &fx {
-                Some(f) => tap(f, core::array::from_fn(|k| src[p + k - 3])),
+                Some(f) => tap(&f.taps, core::array::from_fn(|k| src[p + k - 3])),
                 None => src[p],
             };
         }
@@ -128,7 +159,7 @@ pub fn predict_scalar(b: Block<'_>) {
     for r in 0..h {
         for c in 0..w {
             let v = match &fy {
-                Some(f) => tap(f, core::array::from_fn(|k| tmp[(r + k) * w + c])),
+                Some(f) => tap(&f.taps, core::array::from_fn(|k| tmp[(r + k) * w + c])),
                 None => tmp[r * w + c],
             };
             let d = &mut dst[r * dst_stride + c];

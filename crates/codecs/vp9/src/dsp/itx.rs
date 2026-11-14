@@ -28,6 +28,48 @@ fn tx1d<V: Lanes>(n: usize, adst: bool, i: &[V], o: &mut [V]) {
     }
 }
 
+/// Scratch of the transforms' first pass, kept from block to block: the
+/// second pass reads only the rows the first wrote, so it is never
+/// cleared.
+pub struct Tmp {
+    i: Vec<i32>,
+    l: Vec<i64>,
+}
+
+impl Tmp {
+    pub fn new() -> Self {
+        Self {
+            i: vec![0; 32 * 32],
+            l: vec![0; 32 * 32],
+        }
+    }
+}
+
+impl Default for Tmp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The scratch of an element type.
+trait Pick: Elem {
+    fn pick(t: &mut Tmp) -> &mut [Self];
+}
+
+impl Pick for i32 {
+    #[inline(always)]
+    fn pick(t: &mut Tmp) -> &mut [Self] {
+        &mut t.i
+    }
+}
+
+impl Pick for i64 {
+    #[inline(always)]
+    fn pick(t: &mut Tmp) -> &mut [Self] {
+        &mut t.l
+    }
+}
+
 /// The residual of one transform block added into `dst` (rows `stride`
 /// apart), whose coefficients `coef` (transposed, `n * n` of them) are
 /// cleared again. `nz` is the number of leading rows and columns that can
@@ -44,6 +86,7 @@ pub fn add<P: Pixel>(
     eob: usize,
     nz: (usize, usize),
     max: i32,
+    scratch: &mut Tmp,
 ) {
     let n = 4usize << log2n;
     if eob == 1 && col_type == Kind::Dct && row_type == Kind::Dct {
@@ -53,11 +96,10 @@ pub fn add<P: Pixel>(
     cutlass_simd::vp9::wide(
         #[inline(always)]
         || {
-            // Each size has its own scratch: no more is cleared than used.
             macro_rules! go {
                 ($t:ty, $ln:literal, $n:literal) => {{
-                    let mut tmp = [<$t as Elem>::ZERO; $n * $n];
-                    run::<P, $t, $ln, $n>(dst, stride, coef, &mut tmp, col_type, row_type, nz, max)
+                    let tmp = &mut <$t as Pick>::pick(scratch)[..$n * $n];
+                    run::<P, $t, $ln, $n>(dst, stride, coef, tmp, col_type, row_type, nz, max)
                 }};
             }
             match (P::HIGH, n) {
@@ -243,6 +285,7 @@ mod tests {
                         2,
                         (n, n),
                         255,
+                        &mut super::Tmp::new(),
                     );
                     assert_eq!(got, want, "n {n} type {t}");
                     assert!(transposed.iter().all(|&v| v == 0));

@@ -175,18 +175,24 @@ impl<'p> FrameParse<'p> {
                 row_end: 0,
             });
         }
-        let mut masks = std::mem::take(&mut bufs.masks);
-        masks.clear();
-        masks.resize(
+        // The tiles' masks, grid and motion are copied over all of these:
+        // only a new size needs them made.
+        fn sized<T: Clone + Default>(mut v: Vec<T>, n: usize) -> Vec<T> {
+            if v.len() != n {
+                v.clear();
+                v.resize(n, T::default());
+            }
+            v
+        }
+        let masks = sized(
+            std::mem::take(&mut bufs.masks),
             if filter_on { sb_cols * sb_rows } else { 0 },
-            lpf::Mask::default(),
         );
-        let mut grid = std::mem::take(&mut bufs.grid);
-        grid.clear();
-        grid.resize(if needs_grid { cells } else { 0 }, LfMi::default());
-        let mut mvs = std::mem::take(&mut bufs.mvs);
-        mvs.clear();
-        mvs.resize(cells, MvRef::default());
+        let grid = sized(
+            std::mem::take(&mut bufs.grid),
+            if needs_grid { cells } else { 0 },
+        );
+        let mvs = sized(std::mem::take(&mut bufs.mvs), cells);
         Ok(Self {
             parsed,
             levels: lpf::levels(h),

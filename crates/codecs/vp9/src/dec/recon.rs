@@ -118,6 +118,7 @@ pub struct Scratch<P> {
     pub coef: Vec<i32>,
     pub emu: Vec<P>,
     pub mc: Vec<u8>,
+    pub itx: itx::Tmp,
 }
 
 impl<P: Pixel> Scratch<P> {
@@ -126,6 +127,7 @@ impl<P: Pixel> Scratch<P> {
             coef: vec![0; 1024],
             emu: vec![P::default(); 80 * 80],
             mc: vec![0; cutlass_simd::vp9::mc::TMP],
+            itx: itx::Tmp::new(),
         }
     }
 }
@@ -304,6 +306,7 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
             eob,
             nz,
             max,
+            &mut self.s.itx,
         );
     }
 

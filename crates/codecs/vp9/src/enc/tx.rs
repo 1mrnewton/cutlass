@@ -278,7 +278,18 @@ mod tests {
                     if t & 1 == 1 { Kind::Adst } else { Kind::Dct },
                     if t & 2 == 2 { Kind::Adst } else { Kind::Dct },
                 );
-                add(&mut dst, n, &mut coef, log2n, col, row, n * n, (n, n), 255);
+                add(
+                    &mut dst,
+                    n,
+                    &mut coef,
+                    log2n,
+                    col,
+                    row,
+                    n * n,
+                    (n, n),
+                    255,
+                    &mut crate::dsp::itx::Tmp::new(),
+                );
                 let worst = dst
                     .iter()
                     .zip(&res)

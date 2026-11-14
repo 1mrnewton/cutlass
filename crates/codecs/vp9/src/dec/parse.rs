@@ -235,8 +235,12 @@ impl State {
         let a8 = width.div_ceil(8) * 8;
         self.col0 = col0;
         self.width = width;
-        self.mvs.clear();
-        self.mvs.resize(cells, MvRef::default());
+        // Every block writes its cells' motion (and grid entries) before
+        // anything reads them: only a new size needs the buffers made.
+        if self.mvs.len() != cells {
+            self.mvs.clear();
+            self.mvs.resize(cells, MvRef::default());
+        }
         self.segmap.clear();
         self.segmap.resize(cells, 0);
         self.above.clear();
@@ -249,9 +253,11 @@ impl State {
         }
         self.masks.clear();
         self.masks.resize(masks, lpf::Mask::default());
-        self.grid.clear();
-        self.grid
-            .resize(if grid { cells } else { 0 }, LfMi::default());
+        let gn = if grid { cells } else { 0 };
+        if self.grid.len() != gn {
+            self.grid.clear();
+            self.grid.resize(gn, LfMi::default());
+        }
         self.counts = Counts::new();
     }
 }

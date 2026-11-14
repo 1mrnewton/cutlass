@@ -930,7 +930,21 @@ impl Mask<'_> {
     /// with its coverage when the glyph is grown by each of `grows`
     /// pixels. The glyph is read once for a pixel however many widths are
     /// asked for.
-    fn each_of<const N: usize>(&self, grows: [f32; N], mut put: impl FnMut(usize, [f32; N])) {
+    fn each_of<const N: usize>(&self, grows: [f32; N], put: impl FnMut(usize, [f32; N])) {
+        self.each_in(grows, true, put);
+    }
+
+    /// [`Self::each_of`], over the whole of the glyph's quad when `tight`
+    /// is not set. A distance field has [`SPREAD`](crate::atlas::SPREAD)
+    /// texels of room around the letter, which a letter grown by little
+    /// leaves empty: `tight` steps over the pixels that far from the
+    /// letter, which no width asked for covers.
+    fn each_in<const N: usize>(
+        &self,
+        grows: [f32; N],
+        tight: bool,
+        mut put: impl FnMut(usize, [f32; N]),
+    ) {
         let Self {
             width,
             height,
@@ -951,26 +965,29 @@ impl Mask<'_> {
         let left = record.x - origin_x;
         let top = record.y - origin_y;
         let baseline = baseline - origin_y;
-        // A leaning letter reaches past its quad on the side it leans to.
-        let lean_top = shear * (baseline - top);
-        let lean_bottom = shear * (baseline - (top + record.height));
-        let Some((x0, x1)) = span(
-            left + lean_top.min(lean_bottom),
-            left + record.width + lean_top.max(lean_bottom),
-            width,
-        ) else {
-            return;
-        };
-        let Some((y0, y1)) = span(top, top + record.height, height) else {
-            return;
-        };
         let texels = pixel(image.width) / record.width;
+        let (inset_x, inset_y) = if tight {
+            self.empty_room(texels, grows)
+        } else {
+            (0.0, 0.0)
+        };
+        let Some((y0, y1)) = span(top + inset_y, top + record.height - inset_y, height) else {
+            return;
+        };
         for y in y0..y1 {
+            // A leaning letter reaches past its quad on the side it leans to.
             let lean = shear * (baseline - (pixel(y) + 0.5));
             let v = (pixel(y) + 0.5 - top) / record.height;
             if !(0.0..1.0).contains(&v) {
                 continue;
             }
+            let Some((x0, x1)) = span(
+                left + inset_x + lean,
+                left + record.width - inset_x + lean,
+                width,
+            ) else {
+                continue;
+            };
             for x in x0..x1 {
                 let u = (pixel(x) + 0.5 - lean - left) / record.width;
                 if !(0.0..1.0).contains(&u) {
@@ -984,6 +1001,27 @@ impl Mask<'_> {
                 }
             }
         }
+    }
+
+    /// How many pixels in from each side of the quad, across and down, no
+    /// width of `grows` covers anything: the room a distance field keeps
+    /// around its letter, less what the widest of `grows` reaches into it,
+    /// the pixel an edge is soft over, and a texel for the mixing of
+    /// neighbours. Nothing when the letter is drawn so small, or grown so
+    /// far, that its room is used up.
+    fn empty_room<const N: usize>(&self, texels: f32, grows: [f32; N]) -> (f32, f32) {
+        if self.image.kind != GlyphKind::Distance || !(texels.is_finite() && texels > 0.0) {
+            return (0.0, 0.0);
+        }
+        let grow = grows.iter().copied().fold(0.0_f32, f32::max);
+        let spare = crate::atlas::SPREAD - ((grow + 1.0) * texels + 1.0);
+        let down = pixel(self.image.height) / self.record.height;
+        if !(spare > 0.0 && down.is_finite() && down > 0.0) {
+            return (0.0, 0.0);
+        }
+        // The field is read with one scale both ways: the room down the
+        // quad is measured in the texels it has to a pixel that way.
+        (spare / texels, spare / down)
     }
 }
 
@@ -2279,5 +2317,121 @@ mod tests {
             TextSource::open(TTF, None, &huge, &clip),
             Err(TextError::Limit)
         ));
+    }
+
+    /// What each pixel of a glyph laid in a 160 by 160 picture is covered
+    /// by at the widths of `grows`, leaving out the pixels no width covers.
+    fn covered(mask: &super::Mask<'_>, grows: [f32; 2], tight: bool) -> Vec<(usize, [f32; 2])> {
+        let mut seen = Vec::new();
+        mask.each_in(grows, tight, |index, covers| {
+            if covers.iter().any(|cover| *cover > 0.0) {
+                seen.push((index, covers));
+            }
+        });
+        seen
+    }
+
+    /// Lay every `every`th glyph of the face in `bytes` at several sizes,
+    /// leans and widths, with and without stepping over its empty room,
+    /// and give how many were laid and how many pixels were spared.
+    fn spared_in(bytes: &[u8], index: Option<u32>, every: usize) -> (u32, u32) {
+        let font = match index {
+            Some(index) => cutlass_font::read_collection(bytes, index),
+            None => cutlass_font::read(bytes),
+        }
+        .expect("face");
+        let mut atlas = crate::Atlas::new();
+        let (mut compared, mut spared) = (0_u32, 0_u32);
+        for glyph in (0..font.glyph_count()).step_by(every) {
+            let Ok(image) = atlas.glyph(&font, glyph).cloned() else {
+                continue;
+            };
+            if image.width == 0 || image.height == 0 {
+                continue;
+            }
+            let (wide, tall) = (super::pixel(image.width), super::pixel(image.height));
+            for scale in [0.11_f32, 0.3, 0.5, 1.0, 1.37, 2.5] {
+                let record = crate::GlyphRecord {
+                    glyph_id: glyph,
+                    missing: false,
+                    source: 0,
+                    line: 0,
+                    face: 0,
+                    x: 20.3,
+                    y: 17.6,
+                    width: wide * scale,
+                    height: tall * scale,
+                };
+                for shear in [0.0_f32, 0.25, -0.4] {
+                    let mask = super::Mask {
+                        width: 160,
+                        height: 160,
+                        record: &record,
+                        image: &image,
+                        origin_x: 3.25,
+                        origin_y: -1.5,
+                        alpha: 0.8,
+                        shear,
+                        baseline: record.y + record.height * 0.7,
+                    };
+                    for grows in [[0.0_f32, 0.0], [0.4, 0.0], [2.0, 0.3], [9.0, 0.0]] {
+                        let whole = covered(&mask, grows, false);
+                        assert_eq!(
+                            covered(&mask, grows, true),
+                            whole,
+                            "glyph {glyph} at {scale} leaning {shear} grown {grows:?}"
+                        );
+                        let mut visits = [0_u32; 2];
+                        mask.each_in(grows, false, |_, _| visits[0] += 1);
+                        mask.each_in(grows, true, |_, _| visits[1] += 1);
+                        assert!(visits[1] <= visits[0]);
+                        spared += visits[0] - visits[1];
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        (compared, spared)
+    }
+
+    #[test]
+    fn the_room_around_a_letter_is_stepped_over_without_losing_a_pixel() {
+        let (mut compared, mut spared) = (0, 0);
+        for bytes in [
+            TTF,
+            include_bytes!("../../font/fixtures/wide.ttf").as_slice(),
+            include_bytes!("../../font/fixtures/thai.ttf").as_slice(),
+        ] {
+            let (laid, saved) = spared_in(bytes, None, 1);
+            compared += laid;
+            spared += saved;
+        }
+        assert!(compared > 500, "{compared} glyphs compared");
+        assert!(spared > 0, "no pixel was stepped over");
+    }
+
+    /// The same over the faces named in `CUTLASS_MASK_FACES`, each a path
+    /// with an optional `#index` into a collection, separated by colons;
+    /// `CUTLASS_MASK_EVERY` is the step between glyphs.
+    #[test]
+    #[ignore = "reads the faces named in CUTLASS_MASK_FACES"]
+    #[allow(clippy::print_stdout)]
+    fn the_named_faces_lose_no_pixel_to_the_stepping() {
+        let Ok(named) = std::env::var("CUTLASS_MASK_FACES") else {
+            return;
+        };
+        let every = std::env::var("CUTLASS_MASK_EVERY")
+            .ok()
+            .and_then(|every| every.parse().ok())
+            .unwrap_or(1);
+        for name in named.split(':').filter(|name| !name.is_empty()) {
+            let (path, index) = match name.rsplit_once('#') {
+                Some((path, index)) => (path, index.parse().ok()),
+                None => (name, None),
+            };
+            let bytes = std::fs::read(path).expect("face file");
+            let (compared, spared) = spared_in(&bytes, index, every);
+            println!("{name}: {compared} laid, {spared} pixels spared");
+        }
     }
 }

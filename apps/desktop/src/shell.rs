@@ -49,6 +49,7 @@ use cutlass_transcription::{
 
 mod assistant;
 mod compound;
+mod cover;
 mod effect_preview;
 mod follow;
 mod group;
@@ -887,6 +888,10 @@ pub struct Shell {
     job: Option<RunningJob>,
     /// The movie the last export wrote.
     exported: Option<PathBuf>,
+    /// Bumped when the cover file is written or removed.
+    cover_version: u64,
+    /// The cover dialog's strip, while it is drawn.
+    cover_strip: Option<cover::CoverStrip>,
     /// What the last import that landed added, until the window looks.
     imported: Option<ImportedKind>,
     /// An autosave writing on its own thread.
@@ -1014,6 +1019,8 @@ impl Shell {
             agent_tracks: follow::AgentTracks::default(),
             job: None,
             exported: None,
+            cover_version: 0,
+            cover_strip: None,
             imported: None,
             saving: None,
             holding: false,
@@ -2729,10 +2736,12 @@ impl Shell {
     }
 
     pub fn undo(&mut self) -> Result<(), ShellError> {
+        let before = self.cover().cloned();
         let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
         match session.undo() {
             Ok(revision) => {
                 cutlass_logger::info!("undo: revision {revision}");
+                self.follow_cover(before);
                 Ok(())
             }
             Err(error) => {
@@ -2744,10 +2753,12 @@ impl Shell {
     }
 
     pub fn redo(&mut self) -> Result<(), ShellError> {
+        let before = self.cover().cloned();
         let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
         match session.redo() {
             Ok(revision) => {
                 cutlass_logger::info!("redo: revision {revision}");
+                self.follow_cover(before);
                 Ok(())
             }
             Err(error) => {

@@ -2818,6 +2818,7 @@ dependencies = [
  "cutlass-agent",
  "cutlass-agent-cloud",
  "cutlass-ffi",
+ "cutlass-logger",
  "cutlass-settings",
  "uniffi",
 ]

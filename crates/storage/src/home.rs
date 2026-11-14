@@ -134,6 +134,23 @@ impl Home {
         self.root.join(ASSISTANT).join(NOTES)
     }
 
+    /// Where the assistant keeps its conversation about the project at
+    /// `project`, named by the folder's path so it stays the same across
+    /// builds. Its folder is made when the first turn is kept.
+    #[must_use]
+    pub fn assistant_chat_file(&self, project: &Path) -> PathBuf {
+        let hash = project
+            .to_string_lossy()
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+            });
+        self.root
+            .join(ASSISTANT)
+            .join("chats")
+            .join(format!("{hash:016x}.json"))
+    }
+
     /// The cloud model's keys, by provider, apart from the settings. Its
     /// folder is made when the first key is kept.
     #[must_use]

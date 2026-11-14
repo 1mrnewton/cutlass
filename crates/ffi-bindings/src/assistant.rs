@@ -61,6 +61,8 @@ pub struct CloudChoice {
 }
 
 struct State {
+    /// Where the conversation is kept while Memory is on.
+    chat_file: Option<PathBuf>,
     lines: Vec<AssistantLine>,
     history: Vec<Message>,
     busy: bool,
@@ -90,12 +92,30 @@ impl Assistant {
     /// the Cutlass folder at `root`.
     #[uniffi::constructor]
     pub fn new(editor: &Arc<Editor>, root: String) -> Result<Arc<Self>, EditorError> {
+        let home = open_home(&root)?;
+        let project = editor.run(|host| host.root().to_path_buf())?;
+        let memory = SettingsTool::open(home.settings_file())
+            .map(|file| file.settings().memory)
+            .unwrap_or(true);
+        // Memory on, the project's conversation picks up where it was.
+        let chat_file = memory.then(|| home.assistant_chat_file(&project));
+        let history = chat_file
+            .as_deref()
+            .map(|file| {
+                cutlass_agent::load_chat(file).unwrap_or_else(|error| {
+                    cutlass_logger::warn!("assistant chat: {error}");
+                    Vec::new()
+                })
+            })
+            .unwrap_or_default();
+        let lines = shown(&history);
         Ok(Arc::new(Self {
             jobs: editor.jobs.clone(),
-            home: open_home(&root)?,
+            home,
             state: Arc::new(Mutex::new(State {
-                lines: Vec::new(),
-                history: Vec::new(),
+                chat_file,
+                lines,
+                history,
                 busy: false,
                 stop: Arc::new(AtomicBool::new(false)),
             })),
@@ -149,6 +169,7 @@ impl Assistant {
         }
         state.lines.clear();
         state.history.clear();
+        keep(&state);
     }
 
     /// The cloud model's settings.
@@ -245,6 +266,7 @@ impl Assistant {
                                 .push(line(LineKind::Said, &turn.completion.text));
                         }
                         state.history = turn.messages;
+                        keep(&state);
                     }
                     Err(error) => {
                         let text = if state.stop.load(Ordering::Relaxed) {
@@ -292,6 +314,61 @@ fn build(
     );
     cutlass_agent_cloud::model(settings, &key, &context)
         .map(|model| CloudModel::from_settings(settings, model))
+}
+
+/// Write the conversation to its file, when it has one.
+fn keep(state: &State) {
+    if let Some(file) = &state.chat_file
+        && let Err(error) = cutlass_agent::save_chat(file, &state.history)
+    {
+        cutlass_logger::warn!("assistant chat: {error}");
+    }
+}
+
+/// The lines for a conversation read back: each tool call with its answer.
+fn shown(history: &[Message]) -> Vec<AssistantLine> {
+    let mut lines: Vec<AssistantLine> = Vec::new();
+    for message in history {
+        match message {
+            Message::User { text } => lines.push(line(LineKind::Asked, text)),
+            Message::Assistant { text, calls } => {
+                if !text.is_empty() {
+                    lines.push(line(LineKind::Said, text));
+                }
+                for call in calls {
+                    lines.push(AssistantLine {
+                        kind: LineKind::Step,
+                        text: call.arguments.clone(),
+                        tool: call.name.clone(),
+                        result: String::new(),
+                        running: true,
+                        failed: false,
+                    });
+                }
+            }
+            Message::Tool {
+                name,
+                content,
+                is_error,
+                ..
+            } => {
+                if let Some(step) = lines
+                    .iter_mut()
+                    .rev()
+                    .find(|line| line.running && line.tool == *name)
+                {
+                    step.running = false;
+                    step.result.clone_from(content);
+                    step.failed = *is_error;
+                }
+            }
+        }
+    }
+    // A call with no answer saved did not finish.
+    for step in &mut lines {
+        step.running = false;
+    }
+    lines
 }
 
 fn line(kind: LineKind, text: &str) -> AssistantLine {

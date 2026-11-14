@@ -16,6 +16,7 @@ crate-type = ["lib", "staticlib", "cdylib"]
 cutlass-agent = { path = "../agent", version = "0.1.0" }
 cutlass-agent-cloud = { path = "../agent-cloud", version = "0.1.0" }
 cutlass-ffi = { path = "../ffi", version = "0.1.0" }
+cutlass-logger = { path = "../logger", version = "0.1.0" }
 cutlass-settings = { path = "../settings", version = "0.1.0" }
 uniffi = { version = "0.32.2", default-features = false }
 

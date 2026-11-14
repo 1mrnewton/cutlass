@@ -6,7 +6,7 @@
 //! project between frames and sends the result back. Stop lets the turn go
 //! at once: the thread finds out at its next call and ends.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -290,7 +290,15 @@ impl Assistant {
             return;
         }
         self.pending = None;
-        self.history = file.as_deref().map(load_chat).unwrap_or_default();
+        self.history = file
+            .as_deref()
+            .map(|file| {
+                cutlass_agent::load_chat(file).unwrap_or_else(|error| {
+                    cutlass_logger::warn!("assistant chat: {error}");
+                    Vec::new()
+                })
+            })
+            .unwrap_or_default();
         self.entries = shown(&self.history);
         self.chat_file = file;
     }
@@ -300,7 +308,7 @@ impl Assistant {
         let Some(file) = &self.chat_file else {
             return;
         };
-        if let Err(error) = save_chat(file, &self.history) {
+        if let Err(error) = cutlass_agent::save_chat(file, &self.history) {
             cutlass_logger::warn!("assistant chat: {error}");
         }
     }
@@ -391,38 +399,6 @@ impl Assistant {
             }
         }
     }
-}
-
-/// A conversation saved by [`save_chat`]; empty when there is none or it
-/// does not read.
-fn load_chat(file: &Path) -> Vec<Message> {
-    let Ok(text) = std::fs::read_to_string(file) else {
-        return Vec::new();
-    };
-    serde_json::from_str::<serde_json::Value>(&text)
-        .ok()
-        .and_then(|saved| serde_json::from_value(saved.get("messages")?.clone()).ok())
-        .unwrap_or_else(|| {
-            cutlass_logger::warn!("assistant chat {} does not read", file.display());
-            Vec::new()
-        })
-}
-
-/// Write `messages` to `file`, or remove it when there are none.
-fn save_chat(file: &Path, messages: &[Message]) -> std::io::Result<()> {
-    if messages.is_empty() {
-        return match std::fs::remove_file(file) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
-            _ => Ok(()),
-        };
-    }
-    if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let saved = serde_json::json!({ "version": 1, "messages": messages });
-    let temporary = file.with_extension("json.part");
-    std::fs::write(&temporary, saved.to_string())?;
-    std::fs::rename(&temporary, file)
 }
 
 /// The panel's lines for a conversation read back.

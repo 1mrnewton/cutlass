@@ -2625,8 +2625,26 @@ mod tests {
             std::fs::read_to_string(std::path::Path::new(&temp.root()).join("settings.json"))
                 .unwrap();
         assert!(!settings.contains("sk-test"));
+        // Memory is on by default: the project's conversation comes back,
+        // each step with its answer.
+        let again = Assistant::new(&editor, temp.root()).unwrap();
+        let back = again.lines();
+        assert_eq!(back.first().unwrap().text, "make it tall");
+        assert_eq!(back.last().unwrap().text, "It is tall now.");
+        assert!(
+            back.iter()
+                .any(|line| line.tool == "agent.delegate" && line.result == "1080 by 1920."),
+            "{back:?}"
+        );
         assistant.clear();
         assert!(assistant.lines().is_empty());
+        // Clear forgets the kept conversation too.
+        assert!(
+            Assistant::new(&editor, temp.root())
+                .unwrap()
+                .lines()
+                .is_empty()
+        );
     }
 
     fn pattern() -> String {

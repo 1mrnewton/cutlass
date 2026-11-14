@@ -11,6 +11,7 @@
 mod anthropic;
 mod approval;
 mod chat;
+mod chat_file;
 mod delegate;
 mod draft;
 mod forward;
@@ -37,6 +38,7 @@ pub use approval::{ApprovalAction, ApprovalError, Approver, authorize, authorize
 pub use chat::{
     ChatModel, ChatTransport, LoopbackHttp, SYSTEM_PROMPT, parse_reply, prompt_context,
 };
+pub use chat_file::{load_chat, save_chat};
 pub use delegate::{
     CHILD_TOOLS, DELEGATE, Delegating, definitions_with_delegate, delegate_definition,
 };

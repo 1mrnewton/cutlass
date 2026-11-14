@@ -202,6 +202,8 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
         // These scripts take a letter apart even when the face has it
         // whole, so its parts can take their own forms.
         whole_first: !syllabic,
+        // Korean syllables were made and taken apart above.
+        settled: korean && !own_machines,
         keeps_whole: &|character| {
             syllabic && shaping == Shaping::Syllabic && indic::keeps_whole(character)
         },
@@ -546,6 +548,9 @@ fn reverse_graphemes(glyphs: &mut [Glyph]) {
 struct Normal<'n> {
     /// A character the face has a glyph for is left whole.
     whole_first: bool,
+    /// And so even with marks after it, and nothing is put together:
+    /// the script's own shaping has done both already.
+    settled: bool,
     /// Characters never taken apart.
     keeps_whole: &'n dyn Fn(char) -> bool,
     /// The one or two parts a character is written as, when it has them.
@@ -612,7 +617,7 @@ fn normalize(
     let groups = groups(&glyphs);
     // Text with no marks in it is not put back together: a letter taken
     // apart for its parts' forms stays apart, as HarfBuzz leaves it.
-    let composes = groups.iter().any(|group| *group != Group::Alone);
+    let composes = !normal.settled && groups.iter().any(|group| *group != Group::Alone);
     // Take apart what the face cannot draw whole. A letter with marks
     // after it is taken apart even when the face has it whole, and so
     // are its marks: sorted and put together again below, they may make
@@ -620,7 +625,8 @@ fn normalize(
     // left as they were typed.
     let mut parts: Vec<Glyph> = Vec::with_capacity(glyphs.len());
     for (glyph, group) in glyphs.into_iter().zip(groups) {
-        if normal.whole_first && group != Group::Marked && has(font, glyph.character) {
+        let marked = group == Group::Marked && !normal.settled;
+        if normal.whole_first && !marked && has(font, glyph.character) {
             parts.push(glyph);
             continue;
         }
@@ -633,7 +639,7 @@ fn normalize(
                 &glyph,
                 glyph.character,
                 &mut parts,
-                !normal.whole_first || group == Group::Marked,
+                !normal.whole_first || marked,
                 0,
             );
         if !apart {

@@ -155,6 +155,14 @@ enum Bytes {
     /// Read on the first ask, face `index` copied out of a collection. `None`
     /// once it failed to read as one face.
     Later(Source, OnceLock<Option<Vec<u8>>>),
+    /// A named style of a variable face that is part of the program: the
+    /// face, the setting of each axis, and the face with that setting
+    /// written into it, made on the first ask.
+    Pinned(
+        &'static [u8],
+        Vec<(cutlass_font::Tag, f32)>,
+        OnceLock<Option<Vec<u8>>>,
+    ),
 }
 
 /// Where a face found by a scan is read from: its file, which face of a
@@ -183,6 +191,10 @@ struct Face {
     plain: bool,
     /// A face of emoji, by its name.
     emoji: bool,
+    /// Where the face stands among the faces that ship with the program,
+    /// which are given best first for standing in for a letter another
+    /// face lacks; the greatest number there is for any other face.
+    shipped: usize,
 }
 
 impl Face {
@@ -191,7 +203,7 @@ impl Face {
     fn has(&self, character: char) -> bool {
         let map = self.map.get_or_init(|| match &self.bytes {
             Bytes::Read(bytes) => character_map(bytes),
-            Bytes::Fixed(bytes) => character_map(bytes),
+            Bytes::Fixed(bytes) | Bytes::Pinned(bytes, ..) => character_map(bytes),
             Bytes::Later(Source { path, index, .. }, _) => {
                 let mut file = File::open(path).ok()?;
                 cutlass_font::load_character_map(
@@ -346,6 +358,92 @@ impl FaceTable {
         self
     }
 
+    /// This table with the faces of the families that ship with the
+    /// program, each a file name and its bytes, listed among the faces it
+    /// has by label. A face is labelled by the name it gives itself, and
+    /// a face that varies is listed once for each style its maker named.
+    /// A name or a label the table already has is the table's: a
+    /// person's own copy of a family is the one used. These faces are
+    /// not ones a missing character is looked for in first; they are
+    /// looked in with every other face, and ahead of the others in the
+    /// order they are given here, so the plainest should come first.
+    #[must_use]
+    pub fn with_bundled(mut self, files: &[(&str, &'static [u8])]) -> Self {
+        for (place, (file, bytes)) in files.iter().enumerate() {
+            let Ok(faces) = cutlass_font::list_faces(|offset, len| {
+                let start = usize::try_from(offset).ok()?;
+                bytes
+                    .get(start..start.checked_add(len)?)
+                    .map(<[u8]>::to_vec)
+            }) else {
+                continue;
+            };
+            // A file of one face: a collection is not pinned or handed
+            // out whole.
+            let [face] = &faces[..] else {
+                continue;
+            };
+            if face.index.is_some() || cutlass_font::read(bytes).is_err() {
+                continue;
+            }
+            let label = face.full_name.clone().unwrap_or_else(|| face_label(file));
+            for listed in styles_of(file, &label, face) {
+                let said = listed.label.to_lowercase();
+                if self
+                    .faces
+                    .iter()
+                    .any(|face| face.label.to_lowercase() == said)
+                {
+                    continue;
+                }
+                let bytes = match listed.pinned {
+                    Some(pinned) => Bytes::Pinned(bytes, pinned, OnceLock::new()),
+                    None => Bytes::Fixed(bytes),
+                };
+                let before = self.faces.len();
+                self.push(listed.name, listed.label, bytes, listed.style);
+                if let Some(face) = self.faces.get_mut(before) {
+                    face.shipped = place;
+                }
+            }
+        }
+        self.sort_by_label();
+        self
+    }
+
+    /// Put the faces in the order of their labels, and keep the fallback
+    /// faces pointing at the faces they were.
+    fn sort_by_label(&mut self) {
+        let mut order: Vec<usize> = (0..self.faces.len()).collect();
+        order.sort_by(|a, b| {
+            let (a, b) = (&self.faces[*a], &self.faces[*b]);
+            a.label
+                .to_lowercase()
+                .cmp(&b.label.to_lowercase())
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        let mut now = vec![0; order.len()];
+        for (to, from) in order.iter().enumerate() {
+            now[*from] = to;
+        }
+        let mut faces: Vec<Option<Face>> = std::mem::take(&mut self.faces)
+            .into_iter()
+            .map(Some)
+            .collect();
+        self.faces = order
+            .iter()
+            .filter_map(|from| faces.get_mut(*from).and_then(Option::take))
+            .collect();
+        for fallback in &mut self.fallbacks {
+            if let Some(to) = now.get(*fallback) {
+                *fallback = *to;
+            }
+        }
+        if let Ok(mut found) = self.found.lock() {
+            found.clear();
+        }
+    }
+
     /// One face given as bytes.
     #[must_use]
     pub fn named(name: impl Into<String>, bytes: Vec<u8>) -> Self {
@@ -458,8 +556,9 @@ impl FaceTable {
     /// Every other face that has `character`, for one no fallback face
     /// draws: a script the list knows no face for is drawn in whatever
     /// face the machine has for it. Each face is asked through its
-    /// character map alone, read once; a plain face comes first, and an
-    /// emoji face only for an emoji.
+    /// character map alone, read once; a plain face comes first, of the
+    /// plain ones a face that ships with the program in the order those
+    /// were given, and an emoji face only for an emoji.
     fn elsewhere(&self, character: char, emoji: bool) -> Vec<usize> {
         let mut others: Vec<usize> = self
             .faces
@@ -473,7 +572,10 @@ impl FaceTable {
             })
             .map(|(at, _)| at)
             .collect();
-        others.sort_by_key(|at| (!self.faces[*at].plain, *at));
+        others.sort_by_key(|at| {
+            let face = &self.faces[*at];
+            (!face.plain, face.shipped, *at)
+        });
         others
     }
 
@@ -493,6 +595,9 @@ impl FaceTable {
             Bytes::Read(bytes) => Some(bytes),
             Bytes::Fixed(bytes) => Some(bytes),
             Bytes::Later(source, cell) => cell.get_or_init(|| read_face(source)).as_deref(),
+            Bytes::Pinned(bytes, pinned, cell) => cell
+                .get_or_init(|| cutlass_font::pin_instance(bytes, pinned).ok())
+                .as_deref(),
         }
     }
 
@@ -542,6 +647,7 @@ impl FaceTable {
             general: GENERAL_FACES.iter().any(|general| fold(general) == file),
             plain: !(style.bold || style.italic || CUTS.iter().any(|cut| said.contains(cut))),
             emoji: file.contains("emoji"),
+            shipped: usize::MAX,
             name,
             label,
             bytes,
@@ -788,56 +894,77 @@ fn faces_in(path: &Path, found: &mut Vec<Found>) {
         {
             continue;
         }
-        let style = Style::of(&face);
-        let (name, label) = match face.index {
-            None => (name.clone(), face_label(&name)),
-            Some(index) => (
-                format!("{name}#{index}"),
-                face.full_name
-                    .clone()
-                    .unwrap_or_else(|| format!("{} {}", face_label(&name), index + 1)),
-            ),
+        let label = match face.index {
+            None => face_label(&name),
+            Some(index) => face
+                .full_name
+                .clone()
+                .unwrap_or_else(|| format!("{} {}", face_label(&name), index + 1)),
         };
-        // A variable face is listed once for each style its maker named,
-        // as a family of separate files would be. The style the file
-        // draws when nothing is set keeps the face's plain name, so a
-        // title made before the others were listed still finds it.
-        let family = face.family.clone().unwrap_or_else(|| label.clone());
-        // A family the system keeps for its own interface, named with a
-        // dot, lists no styles; the face stays for what falls back to it.
-        let instances: &[cutlass_font::InstanceEntry] = if family.starts_with('.') {
-            &[]
-        } else {
-            &face.instances
-        };
-        // A face that measures weight on a scale of its own does not say
-        // which style is its bold: the one named so is.
-        let named_bold = |instance: &cutlass_font::InstanceEntry| {
-            let said = instance.name.to_lowercase();
-            matches!(said.as_str(), "bold" | "bold italic" | "bold oblique")
-        };
-        let bold_said = |italic: bool| {
-            instances
-                .iter()
-                .any(|instance| instance.bold && instance.italic == italic)
-        };
-        for instance in instances {
-            let bold = instance.bold || (!bold_said(instance.italic) && named_bold(instance));
-            let (name, label) = style_names(
-                &name,
-                &label,
-                face.family.as_deref(),
-                &instance.name,
-                instance.default,
-            );
+        for listed in styles_of(&name, &label, &face) {
             found.push(Found {
-                name,
-                label,
+                name: listed.name,
+                label: listed.label,
                 source: Source {
                     path: path.to_owned(),
                     index: face.index,
-                    pinned: Some(instance.coordinates.clone()),
+                    pinned: listed.pinned,
                 },
+                style: listed.style,
+            });
+        }
+    }
+}
+
+/// One entry a face gives a table: the face itself, or one named style
+/// of a face that varies, with the setting it is pinned to.
+struct Listed {
+    name: String,
+    label: String,
+    style: Style,
+    pinned: Option<Vec<(cutlass_font::Tag, f32)>>,
+}
+
+/// The entries of `face`, a face of the file named `file` that is
+/// labelled `label`. A variable face is listed once for each style its
+/// maker named, as a family of separate files would be; any other face
+/// once.
+fn styles_of(file: &str, label: &str, face: &cutlass_font::FaceEntry) -> Vec<Listed> {
+    let style = Style::of(face);
+    let name = match face.index {
+        None => file.to_owned(),
+        Some(index) => format!("{file}#{index}"),
+    };
+    // The whole design's name, where the face gives one apart from the
+    // family its default weight is filed under.
+    let named = face.design_family.as_deref().or(face.family.as_deref());
+    let family = named.map_or_else(|| label.to_owned(), str::to_owned);
+    // A family the system keeps for its own interface, named with a
+    // dot, lists no styles; the face stays for what falls back to it.
+    let instances: &[cutlass_font::InstanceEntry] = if family.starts_with('.') {
+        &[]
+    } else {
+        &face.instances
+    };
+    // A face that measures weight on a scale of its own does not say
+    // which style is its bold: the one named so is.
+    let named_bold = |instance: &cutlass_font::InstanceEntry| {
+        let said = instance.name.to_lowercase();
+        matches!(said.as_str(), "bold" | "bold italic" | "bold oblique")
+    };
+    let bold_said = |italic: bool| {
+        instances
+            .iter()
+            .any(|instance| instance.bold && instance.italic == italic)
+    };
+    let mut listed: Vec<Listed> = instances
+        .iter()
+        .map(|instance| {
+            let bold = instance.bold || (!bold_said(instance.italic) && named_bold(instance));
+            let (name, label) = style_names(&name, label, named, &instance.name, instance.default);
+            Listed {
+                name,
+                label,
                 style: Style {
                     // The styles of one file are a family, whether or
                     // not the file names one.
@@ -849,22 +976,21 @@ fn faces_in(path: &Path, found: &mut Vec<Found>) {
                     bold,
                     italic: instance.italic,
                 },
-            });
-        }
-        if instances.iter().any(|instance| instance.default) {
-            continue;
-        }
-        found.push(Found {
+                pinned: Some(instance.coordinates.clone()),
+            }
+        })
+        .collect();
+    // The face as it is, when no named style is the one it draws with
+    // nothing set.
+    if !instances.iter().any(|instance| instance.default) {
+        listed.push(Listed {
             name,
-            label,
-            source: Source {
-                path: path.to_owned(),
-                index: face.index,
-                pinned: None,
-            },
+            label: label.to_owned(),
             style,
+            pinned: None,
         });
     }
+    listed
 }
 
 /// The name and the label of one named style of a variable face, whose
@@ -1288,6 +1414,70 @@ mod tests {
             style_names("Many.ttc#2", "Many Light", Some("Many"), "Thin", false),
             pair("Many.ttc#2@Thin", "Many Thin")
         );
+    }
+
+    #[test]
+    fn the_programs_own_families_are_listed_among_the_tables_faces_by_label() {
+        use cutlass_eval::Fonts;
+        let table = FaceTable::from_pairs(vec![
+            ("Zeta.ttf".to_owned(), SHAPING.to_vec()),
+            ("Middle.ttf".to_owned(), SAMPLE.to_vec()),
+        ])
+        .with_bundled(&[
+            ("Vary.ttf", VARIABLE),
+            ("Alpha.ttf", SAMPLE),
+            // Not a font, a collection, and a name the table has: none
+            // of them is added.
+            ("Junk.ttf", b"not a font"),
+            ("Many.ttc", SAMPLE_TTC),
+            ("Zeta.ttf", SAMPLE),
+        ]);
+        // In the order of their labels, the variable face once for each
+        // style its maker named.
+        assert_eq!(
+            table.labelled(),
+            [
+                // The sample face names itself, and is labelled so.
+                ("Alpha.ttf".to_owned(), "Cutlass Sample".to_owned()),
+                ("Middle.ttf".to_owned(), "Middle".to_owned()),
+                ("Vary.ttf".to_owned(), "Vary".to_owned()),
+                ("Vary.ttf@Bold".to_owned(), "Vary Bold".to_owned()),
+                (
+                    "Vary.ttf@Condensed Bold".to_owned(),
+                    "Vary Condensed Bold".to_owned()
+                ),
+                ("Zeta.ttf".to_owned(), "Zeta".to_owned()),
+            ]
+        );
+        // The faces a missing character was looked for in are the same
+        // faces, wherever they now stand, and the table's own Zeta is
+        // still the one with f.
+        assert_eq!(table.fallback_names(), ["Zeta.ttf", "Middle.ttf"]);
+        assert_eq!(table.fallback('f', false), table.face("Zeta.ttf"));
+        assert_eq!(table.face("Alpha.ttf"), Some(SAMPLE));
+        // A style reads as the face set to it, and the one named bold is
+        // the family's bold.
+        let whole = cutlass_font::read(VARIABLE).expect("face");
+        let bold = whole.varied(&[(*b"wght", 700.0)]).expect("bold");
+        let pinned = cutlass_font::read(table.face("Vary.ttf@Bold").expect("bytes")).expect("font");
+        assert_eq!(pinned.variations(), bold.variations());
+        for glyph in 0..whole.glyph_count() {
+            assert_eq!(pinned.advance(glyph).ok(), bold.advance(glyph).ok());
+        }
+        let (styled, is_bold, _) = table.styled("Vary.ttf", true, false).expect("bold");
+        assert_eq!(Some(styled), table.face("Vary.ttf@Bold"));
+        assert!(is_bold);
+        // A letter no fallback face has comes from the shipped face
+        // given first that has it, whatever its label: both of these
+        // have ko kai, and the one named last by label was given first.
+        let thai = FaceTable::default().with_bundled(&[("Zz.ttf", THAI), ("Aa.ttf", THAI)]);
+        assert_eq!(thai.names(), ["Aa.ttf", "Zz.ttf"]);
+        assert_eq!(thai.fallback('\u{E01}', false), thai.face("Zz.ttf"));
+        // A label the table already has is the table's.
+        let again = table.with_bundled(&[("Other.ttf", SAMPLE)]);
+        assert!(!again.names().iter().any(|name| name.starts_with("Other")));
+        // Nothing to add, to nothing.
+        assert!(FaceTable::default().with_bundled(&[]).names().is_empty());
     }
 
     #[test]

@@ -382,8 +382,10 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
         let filter = &SUBPEL_FILTERS[usize::from(b.interp).min(3)];
         let (bw, bh) = MI_WH[usize::from(b.bsize)];
         let (row, col) = (usize::from(b.row), usize::from(b.col));
-        for plane in 0..3 {
-            let (ssx, ssy) = self.plane_ss(plane);
+        // Luma alone, then the two chroma planes together: they share
+        // the reference, the vector and the block's place.
+        for planes in [&[0usize][..], &[1, 2][..]] {
+            let (ssx, ssy) = self.plane_ss(planes[0]);
             let x0 = (col * 8) >> ssx;
             let y0 = (row * 8) >> ssy;
             for r in 0..nref {
@@ -391,21 +393,23 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
                 if b.bsize < BLOCK_8X8 {
                     let n4w = (bw * 2) >> ssx;
                     let n4h = (bh * 2) >> ssy;
-                    let mut i = 0;
-                    for y in 0..n4h {
-                        for x in 0..n4w {
-                            let mv = split_mv(b, plane, i, r, ssx, ssy);
-                            i += 1;
-                            self.mc(
-                                slot,
-                                plane,
-                                (x0 + 4 * x, y0 + 4 * y),
-                                (4, 4),
-                                mv,
-                                (col * 8 + 4 * x, row * 8 + 4 * y),
-                                filter,
-                                r == 1,
-                            );
+                    for &plane in planes {
+                        let mut i = 0;
+                        for y in 0..n4h {
+                            for x in 0..n4w {
+                                let mv = split_mv(b, plane, i, r, ssx, ssy);
+                                i += 1;
+                                self.mc(
+                                    slot,
+                                    &[plane],
+                                    (x0 + 4 * x, y0 + 4 * y),
+                                    (4, 4),
+                                    mv,
+                                    (col * 8 + 4 * x, row * 8 + 4 * y),
+                                    filter,
+                                    r == 1,
+                                );
+                            }
                         }
                     }
                 } else {
@@ -418,7 +422,7 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
                     let h = (bh * 8) >> ssy;
                     self.mc(
                         slot,
-                        plane,
+                        planes,
                         (x0, y0),
                         (w, h),
                         q,
@@ -431,36 +435,56 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
         }
     }
 
-    /// One prediction of a `w`×`h` block at `(x, y)` of a plane, with the
-    /// vector `(row, col)` in sixteenths of a sample of that plane. `luma`
-    /// is the luma position libvpx scales the vector's offset at.
+    /// One prediction of a `w`×`h` block at `(x, y)` of each of `planes`
+    /// (luma alone, or chroma planes of the same size), with the vector
+    /// `(row, col)` in sixteenths of a sample of those planes. `luma` is
+    /// the luma position libvpx scales the vector's offset at.
     #[allow(clippy::too_many_arguments)]
     fn mc(
         &mut self,
         slot: usize,
-        plane: usize,
+        planes: &[usize],
         (x, y): (usize, usize),
         (w, h): (usize, usize),
-        (mv_row, mv_col): (i32, i32),
-        (lx, ly): (usize, usize),
+        mv: (i32, i32),
+        luma: (usize, usize),
         filter: &mc::Filter,
         avg: bool,
     ) {
-        let v = &mut self.views[plane];
-        let ds = v.stride;
-        let dst = v.at(y, x);
+        let [v0, v1, v2] = &mut *self.views;
+        fn at<'a, P>(v: &'a mut View<'_, P>, y: usize, x: usize) -> (&'a mut [P], usize) {
+            let ds = v.stride;
+            (v.at(y, x), ds)
+        }
+        let dsts: [Option<(usize, &mut [P], usize)>; 2] = match planes {
+            [0] => {
+                let (d, ds) = at(v0, y, x);
+                [Some((0, d, ds)), None]
+            }
+            [_, _] => {
+                let (d1, s1) = at(v1, y, x);
+                let (d2, s2) = at(v2, y, x);
+                [Some((1, d1, s1)), Some((2, d2, s2))]
+            }
+            [1] => {
+                let (d, ds) = at(v1, y, x);
+                [Some((1, d, ds)), None]
+            }
+            _ => {
+                let (d, ds) = at(v2, y, x);
+                [Some((2, d, ds)), None]
+            }
+        };
         mc_into(
             self.c,
             &mut *self.s,
             self.max,
             slot,
-            plane,
-            dst,
-            ds,
+            dsts,
             (x, y),
             (w, h),
-            (mv_row, mv_col),
-            (lx, ly),
+            mv,
+            luma,
             filter,
             avg,
         );
@@ -482,19 +506,19 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
     }
 }
 
-/// One prediction of a `w`×`h` block at `(x, y)` of a plane, into `dst`
-/// (rows `ds` apart), with the vector `(row, col)` in sixteenths of a
-/// sample of that plane. `(lx, ly)` is the luma position libvpx scales the
-/// vector's offset at.
+/// One prediction of a `w`×`h` block at `(x, y)` into each plane `dsts`
+/// names (its index, the destination and its row stride; planes of one
+/// size), with the vector `(row, col)` in sixteenths of a sample of those
+/// planes. `(lx, ly)` is the luma position libvpx scales the vector's
+/// offset at. Where the reference rows lie and whether the block needs
+/// the edge copy are worked out once for all of them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn mc_into<P: Pixel>(
     c: &Ctx<P>,
     s: &mut Scratch<P>,
     max: i32,
     slot: usize,
-    plane: usize,
-    dst: &mut [P],
-    ds: usize,
+    dsts: [Option<(usize, &mut [P], usize)>; 2],
     (x, y): (usize, usize),
     (w, h): (usize, usize),
     (mv_row, mv_col): (i32, i32),
@@ -502,22 +526,25 @@ pub(crate) fn mc_into<P: Pixel>(
     filter: &mc::Filter,
     avg: bool,
 ) {
-    {
-        let Some(rp) = c.refs[slot].as_ref() else {
-            return;
-        };
-        let shift = if plane == 0 { 0 } else { rp.dims.ss_y };
-        let (rw, rh) = (rp.dims.w[plane] as i32, rp.dims.h[plane] as i32);
-        if let Some(sc_) = rp.scale {
-            // libvpx `dec_build_inter_predictors` for a scaled reference.
-            rp.buf.wait(usize::MAX);
+    let Some(rp) = c.refs[slot].as_ref() else {
+        return;
+    };
+    let Some(first) = dsts[0].as_ref().map(|d| d.0) else {
+        return;
+    };
+    let shift = if first == 0 { 0 } else { rp.dims.ss_y };
+    let (rw, rh) = (rp.dims.w[first] as i32, rp.dims.h[first] as i32);
+    if let Some(sc_) = rp.scale {
+        // libvpx `dec_build_inter_predictors` for a scaled reference.
+        rp.buf.wait(usize::MAX);
+        let col = sc(mv_col, sc_.x_fp)
+            + ((((i64::from(lx as i32) << 4) * i64::from(sc_.x_fp)) >> 14) as i32 & 15);
+        let row = sc(mv_row, sc_.y_fp)
+            + ((((i64::from(ly as i32) << 4) * i64::from(sc_.y_fp)) >> 14) as i32 & 15);
+        let x0 = sc(x as i32, sc_.x_fp) + (col >> 4);
+        let y0 = sc(y as i32, sc_.y_fp) + (row >> 4);
+        for (plane, dst, ds) in dsts.into_iter().flatten() {
             let (data, stride) = rp.buf.plane(plane);
-            let col = sc(mv_col, sc_.x_fp)
-                + ((((i64::from(lx as i32) << 4) * i64::from(sc_.x_fp)) >> 14) as i32 & 15);
-            let row = sc(mv_row, sc_.y_fp)
-                + ((((i64::from(ly as i32) << 4) * i64::from(sc_.y_fp)) >> 14) as i32 & 15);
-            let x0 = sc(x as i32, sc_.x_fp) + (col >> 4);
-            let y0 = sc(y as i32, sc_.y_fp) + (row >> 4);
             let get = |xx: i32, yy: i32| -> P {
                 let xx = xx.clamp(0, rw - 1) as usize;
                 let yy = yy.clamp(0, rh - 1) as usize;
@@ -535,21 +562,24 @@ pub(crate) fn mc_into<P: Pixel>(
                 max,
                 avg,
             );
-            return;
         }
-        let mx = (mv_col & 15) as usize;
-        let my = (mv_row & 15) as usize;
-        let bx = x as i32 + (mv_col >> 4);
-        let by = y as i32 + (mv_row >> 4);
-        let (l, r) = if mx != 0 { (3, 4) } else { (0, 0) };
-        let (t, bo) = if my != 0 { (3, 4) } else { (0, 0) };
-        // The reference rows this block reads (the edge copy below reads 4
-        // past the block whatever the fraction), and one more for the
-        // kernels' loads past the end of a row, must be final.
-        let last = (by + h as i32 + 4).clamp(1, rh) as usize;
-        rp.buf.wait((last + 1) << shift);
+        return;
+    }
+    let mx = (mv_col & 15) as usize;
+    let my = (mv_row & 15) as usize;
+    let bx = x as i32 + (mv_col >> 4);
+    let by = y as i32 + (mv_row >> 4);
+    let (l, r) = if mx != 0 { (3, 4) } else { (0, 0) };
+    let (t, bo) = if my != 0 { (3, 4) } else { (0, 0) };
+    // The reference rows this block reads (the edge copy below reads 4
+    // past the block whatever the fraction), and one more for the
+    // kernels' loads past the end of a row, must be final.
+    let last = (by + h as i32 + 4).clamp(1, rh) as usize;
+    rp.buf.wait((last + 1) << shift);
+    let inside = bx - l >= 0 && by - t >= 0 && bx + w as i32 + r <= rw && by + h as i32 + bo <= rh;
+    for (plane, dst, ds) in dsts.into_iter().flatten() {
         let (data, stride) = rp.buf.plane(plane);
-        if bx - l >= 0 && by - t >= 0 && bx + w as i32 + r <= rw && by + h as i32 + bo <= rh {
+        if inside {
             let at = by as usize * stride + bx as usize;
             mc::predict(
                 dst,

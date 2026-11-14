@@ -287,18 +287,25 @@ impl<'p> FrameParse<'p> {
                 run(0, col, syn)?;
             }
         } else {
+            // The first column here, the rest on threads of their own: the
+            // thread already running starts at once.
             let results: Vec<Result<(), CodecError>> = std::thread::scope(|scope| {
-                let handles: Vec<_> = self
-                    .cols
-                    .iter_mut()
-                    .zip(self.tiles.iter_mut())
+                let mut cols = self.cols.iter_mut().zip(self.tiles.iter_mut());
+                let first = cols.next();
+                let handles: Vec<_> = cols
                     .enumerate()
-                    .map(|(tc, (col, syn))| scope.spawn(move || run(tc, col, syn)))
+                    .map(|(i, (col, syn))| scope.spawn(move || run(i + 1, col, syn)))
                     .collect();
-                handles
-                    .into_iter()
-                    .map(|h| h.join().unwrap_or(Err(bad("tile thread"))))
-                    .collect()
+                let mut out = Vec::with_capacity(tile_cols);
+                if let Some((col, syn)) = first {
+                    out.push(run(0, col, syn));
+                }
+                out.extend(
+                    handles
+                        .into_iter()
+                        .map(|h| h.join().unwrap_or(Err(bad("tile thread")))),
+                );
+                out
             });
             for r in results {
                 r?;

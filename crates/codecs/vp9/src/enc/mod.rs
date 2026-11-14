@@ -736,9 +736,12 @@ fn sad_per_bit(ac: i32) -> u32 {
 }
 
 /// The sample SSE a bit is worth: libvpx's `rdmult` (88·q²/24, on
-/// distortions 16 times the SSE, rates in 1/512 bits over a 128 scale).
+/// distortions 16 times the SSE, rates in 1/512 bits over a 128 scale),
+/// doubled: measured against libvpx's good quality on grainy and clean
+/// 720p, twice the weight on rate takes 8 to 17% off the bitrate at the
+/// same PSNR, Y or averaged over the planes, in the same time.
 fn rd_lambda(dc: i32) -> f32 {
-    0.00179 * (dc * dc) as f32
+    0.00358 * (dc * dc) as f32
 }
 
 /// libvpx's loop filter level from the quantizer (`LPF_PICK_FROM_Q`,

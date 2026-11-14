@@ -45,9 +45,10 @@ pub struct Vp9Options {
     pub aq: bool,
 }
 
-/// The lookahead below speed 9 unless set: with it, alt-refs take 15 to
-/// 18% off the bits at the same averaged PSNR on a grainy pan and 6% on
-/// a clean clip, for about a fifth more time.
+/// The lookahead below speed 9 unless set: with it, alt-refs take 10 to
+/// 11% off the bits at the same PSNR (Y or averaged over the planes) on
+/// a grainy pan and 6 to 10% on a clean clip, for about a fifth more
+/// time.
 pub const DEFAULT_LAG: u32 = 16;
 
 /// The fastest speed an alt-ref frame is coded at.

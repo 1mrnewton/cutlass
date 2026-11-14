@@ -120,8 +120,8 @@ fn band(
 
 /// How far a block may have moved over the interval and still count as
 /// a match: the whole search range. (At 16, a steady pan of a sample a
-/// frame never made an alt-ref, which takes 15 to 18% off its bits at
-/// the same averaged PSNR.)
+/// frame never made an alt-ref, which takes 10 to 11% off its bits at
+/// the same PSNR, Y or averaged over the planes.)
 const REACH: isize = 64;
 
 /// Whether `to` predicts well from `from` (luma, `w`×`h`): most of a

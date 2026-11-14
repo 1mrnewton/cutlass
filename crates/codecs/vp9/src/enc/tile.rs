@@ -10,6 +10,8 @@
 //! probabilities.
 
 use crate::bits::BoolWriter;
+
+use super::probs;
 use crate::dec::ctx::{self, Nb};
 use crate::dec::frame::{Mv, MvRef};
 use crate::dec::parse::{LfMi, State};
@@ -1310,12 +1312,25 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             left * 2 + above + n8 * 4
         };
         let probs = s.part_probs[ctx];
-        if has_rows && has_cols {
-            self.put_tree(&prob::PARTITION_TREE, &probs, p);
-        } else if !has_rows && has_cols {
-            self.put(u32::from(p == PARTITION_SPLIT), u32::from(probs[1]));
-        } else if has_rows && !has_cols {
-            self.put(u32::from(p == PARTITION_SPLIT), u32::from(probs[2]));
+        let split = u32::from(p == PARTITION_SPLIT);
+        if s.intra_frame {
+            // A key frame's partition probabilities are fixed.
+            if has_rows && has_cols {
+                self.put_tree(&prob::PARTITION_TREE, &probs, p);
+            } else if !has_rows && has_cols {
+                self.put(split, u32::from(probs[1]));
+            } else if has_rows && !has_cols {
+                self.put(split, u32::from(probs[2]));
+            }
+        } else {
+            let at = probs::PARTITION + 3 * ctx;
+            if has_rows && has_cols {
+                self.put_tree_nc(&prob::PARTITION_TREE, &probs, p, at);
+            } else if !has_rows && has_cols {
+                self.put_nc(split, probs[1], at + 1);
+            } else if has_rows && !has_cols {
+                self.put_nc(split, probs[2], at + 2);
+            }
         }
         if self.collect() {
             self.f.counts.partition[ctx][usize::from(p)] += 1;
@@ -1366,6 +1381,30 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             self.cost += u64::from(bit_cost(bit != 0, prob));
         } else {
             self.w.push((bit as u8, COEF_ID + id));
+        }
+    }
+
+    /// A bit at the updatable probability `at` of [`probs`](super::probs)
+    /// (which holds `prob` now).
+    #[inline]
+    fn put_nc(&mut self, bit: u32, prob: u8, at: usize) {
+        if self.trial {
+            self.cost += u64::from(bit_cost(bit != 0, prob));
+        } else {
+            self.w.push((bit as u8, NC_ID + at as u16));
+        }
+    }
+
+    /// A symbol of a tree whose probabilities `probs` are the updatable
+    /// ones from `at` on.
+    fn put_tree_nc(&mut self, tree: &[i8], probs: &[u8], symbol: u8, at: usize) {
+        if self.trial {
+            self.put_tree(tree, probs, symbol);
+        } else {
+            let w = &mut *self.w;
+            probs::walk(tree, symbol, |bit, node| {
+                w.push((bit as u8, NC_ID + (at + node) as u16));
+            });
         }
     }
 
@@ -2086,7 +2125,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     fn write_skip(&mut self, b: &Blk) {
         let ctx = usize::from(self.above_nb(b).is_some_and(|n| n.skip))
             + usize::from(self.left_nb(b).is_some_and(|n| n.skip));
-        self.put(u32::from(b.skip), u32::from(self.s.fc.skip[ctx]));
+        self.put_nc(u32::from(b.skip), self.s.fc.skip[ctx], probs::SKIP + ctx);
         if self.collect() {
             self.f.counts.skip[ctx][usize::from(b.skip)] += 1;
         }
@@ -2118,12 +2157,17 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             geom::TX_16X16 => [fc.tx16[ctx][0], fc.tx16[ctx][1], 0],
             _ => fc.tx32[ctx],
         };
+        let at = match limit {
+            geom::TX_8X8 => probs::TX8 + ctx,
+            geom::TX_16X16 => probs::TX16 + 2 * ctx,
+            _ => probs::TX32 + 3 * ctx,
+        };
         let tx = b.tx;
-        self.put(u32::from(tx != 0), u32::from(probs[0]));
+        self.put_nc(u32::from(tx != 0), probs[0], at);
         if tx != 0 && limit >= geom::TX_16X16 {
-            self.put(u32::from(tx > 1), u32::from(probs[1]));
+            self.put_nc(u32::from(tx > 1), probs[1], at + 1);
             if tx != 1 && limit >= TX_32X32 {
-                self.put(u32::from(tx > 2), u32::from(probs[2]));
+                self.put_nc(u32::from(tx > 2), probs[2], at + 2);
             }
         }
         if self.collect() {
@@ -2188,14 +2232,23 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         self.write_skip(b);
         let inter = b.refs[0] != INTRA_FRAME;
         let ctx = ctx::intra_inter_ctx(self.above_nb(b), self.left_nb(b));
-        self.put(u32::from(inter), u32::from(s.fc.intra_inter[ctx]));
+        self.put_nc(
+            u32::from(inter),
+            s.fc.intra_inter[ctx],
+            probs::INTRA_INTER + ctx,
+        );
         if self.collect() {
             self.f.counts.intra_inter[ctx][usize::from(inter)] += 1;
         }
         self.write_tx(b, !b.skip || !inter);
         if !inter {
             let group = geom::size_group(b.bsize);
-            self.put_tree(&prob::INTRA_TREE, &s.fc.y_mode[group], b.mode);
+            self.put_tree_nc(
+                &prob::INTRA_TREE,
+                &s.fc.y_mode[group],
+                b.mode,
+                probs::Y_MODE + 9 * group,
+            );
             if self.collect() {
                 self.f.counts.y_mode[group][usize::from(b.mode)] += 1;
             }
@@ -2208,14 +2261,14 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         // Single reference: LAST, or GOLDEN / ALTREF.
         let c0 = ctx::single_p1(self.above_nb(b), self.left_nb(b));
         let bit0 = u32::from(b.refs[0] != LAST_FRAME);
-        self.put(bit0, u32::from(s.fc.single_ref[c0][0]));
+        self.put_nc(bit0, s.fc.single_ref[c0][0], probs::SINGLE_REF + 2 * c0);
         if self.collect() {
             self.f.counts.single_ref[c0][0][bit0 as usize] += 1;
         }
         if bit0 == 1 {
             let c1 = ctx::single_p2(self.above_nb(b), self.left_nb(b));
             let bit1 = u32::from(b.refs[0] == geom::ALTREF_FRAME);
-            self.put(bit1, u32::from(s.fc.single_ref[c1][1]));
+            self.put_nc(bit1, s.fc.single_ref[c1][1], probs::SINGLE_REF + 2 * c1 + 1);
             if self.collect() {
                 self.f.counts.single_ref[c1][1][bit1 as usize] += 1;
             }
@@ -2230,23 +2283,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let mctx = usize::from(COUNTER_CTX[counter as usize]).min(6);
         let k = (b.mode - NEAREST) as usize;
         let p = s.fc.inter_mode[mctx];
-        match k {
-            2 => self.put(0, u32::from(p[0])),
-            0 => {
-                self.put(1, u32::from(p[0]));
-                self.put(0, u32::from(p[1]));
-            }
-            1 => {
-                self.put(1, u32::from(p[0]));
-                self.put(1, u32::from(p[1]));
-                self.put(0, u32::from(p[2]));
-            }
-            _ => {
-                self.put(1, u32::from(p[0]));
-                self.put(1, u32::from(p[1]));
-                self.put(1, u32::from(p[2]));
-            }
-        }
+        self.put_tree_nc(&prob::INTER_TREE, &p, k as u8, probs::INTER_MODE + 3 * mctx);
         if self.collect() {
             self.f.counts.inter_mode[mctx][k] += 1;
         }
@@ -2254,7 +2291,12 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             let l = self.left_nb(b).map(|n| n.interp);
             let a = self.above_nb(b).map(|n| n.interp);
             let ctx = ctx::interp_ctx(l, a);
-            self.put_tree(&prob::INTERP_TREE, &s.fc.interp[ctx], b.interp);
+            self.put_tree_nc(
+                &prob::INTERP_TREE,
+                &s.fc.interp[ctx],
+                b.interp,
+                probs::INTERP + 2 * ctx,
+            );
             if self.collect() {
                 self.f.counts.interp[ctx][usize::from(b.interp)] += 1;
             }
@@ -2278,7 +2320,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         } else {
             3
         };
-        self.put_tree(&prob::JOINT_TREE, &s.fc.mv.joints, joint);
+        self.put_tree_nc(&prob::JOINT_TREE, &s.fc.mv.joints, joint, probs::MV_JOINTS);
         let hp = s.h.allow_hp && best.row.unsigned_abs() < 64 && best.col.unsigned_abs() < 64;
         if joint == 2 || joint == 3 {
             self.write_mv_comp(0, i32::from(d.row), hp);
@@ -2301,21 +2343,29 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let d = o >> 3;
         let f = (o >> 1) & 3;
         let e = o & 1;
-        self.put(u32::from(sign), u32::from(c.sign));
-        self.put_tree(&prob::CLASS_TREE, &c.classes, class as u8);
+        let at = probs::MV_COMP + which * probs::MV_COMP_LEN;
+        let fp = probs::MV_FP + which * probs::MV_FP_LEN;
+        let hp = probs::MV_HP + 2 * which;
+        self.put_nc(u32::from(sign), c.sign, at);
+        self.put_tree_nc(&prob::CLASS_TREE, &c.classes, class as u8, at + 1);
         if class == 0 {
-            self.put(d, u32::from(c.class0));
-            self.put_tree(&prob::FP_TREE, &c.class0_fp[d as usize], f as u8);
+            self.put_nc(d, c.class0, at + 11);
+            self.put_tree_nc(
+                &prob::FP_TREE,
+                &c.class0_fp[d as usize],
+                f as u8,
+                fp + 3 * d as usize,
+            );
             if use_hp {
-                self.put(e, u32::from(c.class0_hp));
+                self.put_nc(e, c.class0_hp, hp);
             }
         } else {
             for i in 0..class {
-                self.put((d >> i) & 1, u32::from(c.bits[i]));
+                self.put_nc((d >> i) & 1, c.bits[i], at + 12 + i);
             }
-            self.put_tree(&prob::FP_TREE, &c.fp, f as u8);
+            self.put_tree_nc(&prob::FP_TREE, &c.fp, f as u8, fp + 6);
             if use_hp {
-                self.put(e, u32::from(c.hp));
+                self.put_nc(e, c.hp, hp + 1);
             }
         }
     }
@@ -2626,6 +2676,9 @@ pub type Out = Vec<(u8, u16)>;
 
 /// Symbol ids below 256 are the probability itself.
 const COEF_ID: u16 = 0x1000;
+/// The updatable probabilities other than the coefficients'
+/// ([`probs`](super::probs)).
+const NC_ID: u16 = 0x2000;
 const PARETO_ID: u16 = 0x4000;
 
 /// The index of a coefficient probability in the flattened table.
@@ -2635,11 +2688,13 @@ fn coef_flat(tx: usize, plane: usize, r: usize, band: usize, ctx: usize, node: u
 }
 
 /// The probability symbol `id` is coded at, given the frame's
-/// coefficient probabilities flattened.
+/// coefficient and other updatable probabilities flattened.
 #[inline]
-pub fn prob_of(id: u16, coef: &[u8; 1728]) -> u32 {
+pub fn prob_of(id: u16, coef: &[u8; 1728], nc: &probs::Flat) -> u32 {
     if id < 256 {
         u32::from(id)
+    } else if (NC_ID..PARETO_ID).contains(&id) {
+        u32::from(nc[usize::from(id - NC_ID)])
     } else if id < PARETO_ID {
         u32::from(coef[usize::from(id - COEF_ID)])
     } else {

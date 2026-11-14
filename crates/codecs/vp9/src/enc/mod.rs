@@ -12,6 +12,7 @@
 
 pub mod api;
 pub mod arf;
+pub mod probs;
 pub mod tile;
 pub mod tx;
 
@@ -151,18 +152,20 @@ impl FrameEncoder {
         // The tiles are coded against the probabilities as they stand; their
         // symbols are kept, the coefficient probabilities that pay for
         // their update are updated, and the symbols written with them.
-        let head = self.headers(key, fp, None)?;
+        let head = self.headers(key, fp, None, None)?;
         let parsed = header::parse(self.dec.persist(), &head)?;
         let (counts, mvs, segmap, pic, ntiles) = self.tiles(&parsed, fp)?;
         let old = flat_coef(&parsed.fc);
         let new = coef_updates(&old, &counts, if lossless { 0 } else { 3 });
-        let head = self.headers(key, fp, Some((&old, &new)))?;
+        let old_nc = probs::flatten(&parsed.fc);
+        let new_nc = probs::updates(&old_nc, &counts, &Self::coded(key, fp));
+        let head = self.headers(key, fp, Some((&old, &new)), Some((&old_nc, &new_nc)))?;
         let mut data = head;
         // Each tile's symbols into its own coder, on threads.
         let write = |t: &TileWork| -> Result<Vec<u8>, CodecError> {
             let mut w = BoolWriter::new();
             for &(bit, id) in &t.out {
-                w.write(u32::from(bit), tile::prob_of(id, &new));
+                w.write(u32::from(bit), tile::prob_of(id, &new, &new_nc));
             }
             w.finish()
         };
@@ -194,18 +197,31 @@ impl FrameEncoder {
         Ok(Coded { data, key })
     }
 
+    /// What the headers of a frame code (and so which probabilities it
+    /// can update).
+    fn coded(key: bool, fp: FrameParams) -> probs::Coded {
+        probs::Coded {
+            tx_select: fp.qindex != 0,
+            inter: !key,
+            switchable: !key && fp.speed <= SWITCHABLE_SPEED,
+            allow_hp: true,
+            compound: None,
+        }
+    }
+
     /// The uncompressed and compressed headers.
     fn headers(
         &self,
         key: bool,
         fp: FrameParams,
         coef: Option<(&[u8; 1728], &[u8; 1728])>,
+        nc: Option<(&probs::Flat, &probs::Flat)>,
     ) -> Result<Vec<u8>, CodecError> {
         let qindex = fp.qindex;
         let hidden = fp.hidden && !key;
         let lossless = qindex == 0;
         let switchable = !key && fp.speed <= SWITCHABLE_SPEED;
-        let compressed = compressed_header(lossless, !key, switchable, coef)?;
+        let compressed = compressed_header(lossless, &Self::coded(key, fp), coef, nc)?;
         let mut b = BitWriter::new();
         b.write(2, 2); // frame marker
         b.write(0, 2); // profile 0
@@ -622,55 +638,24 @@ pub const SWITCHABLE_SPEED: u8 = 2;
 
 fn compressed_header(
     lossless: bool,
-    inter: bool,
-    switchable: bool,
+    coded: &probs::Coded,
     coef: Option<(&[u8; 1728], &[u8; 1728])>,
+    nc: Option<(&probs::Flat, &probs::Flat)>,
 ) -> Result<Vec<u8>, CodecError> {
+    let none = [0u8; probs::LEN];
+    let (old, new) = nc.unwrap_or((&none, &none));
     let mut w = BoolWriter::new();
     if !lossless {
-        // TX_MODE_SELECT, its probabilities as they are.
+        // TX_MODE_SELECT.
         w.write_literal(u32::from(geom::ALLOW_32X32), 2);
         w.write(1, 128);
-        for _ in 0..2 * (1 + 2 + 3) {
-            w.write(0, 252);
-        }
+        probs::write(&mut w, old, new, coded, true);
     }
     let max_tx = if lossless { 0 } else { 3 };
     for tx in 0..=max_tx {
         write_coef_updates(&mut w, tx, coef);
     }
-    for _ in 0..3 {
-        w.write(0, 252); // skip
-    }
-    if inter {
-        let fc = FrameContext::defaults();
-        let none = |w: &mut BoolWriter, n: usize| {
-            for _ in 0..n {
-                w.write(0, 252);
-            }
-        };
-        none(&mut w, fc.inter_mode.len() * fc.inter_mode[0].len());
-        if switchable {
-            none(&mut w, fc.interp.len() * fc.interp[0].len());
-        }
-        none(&mut w, fc.intra_inter.len());
-        none(&mut w, fc.single_ref.len() * 2);
-        none(&mut w, fc.y_mode.len() * fc.y_mode[0].len());
-        none(&mut w, fc.partition.len() * 3);
-        none(&mut w, fc.mv.joints.len());
-        for c in &fc.mv.comp {
-            none(&mut w, 1 + c.classes.len() + 1 + c.bits.len());
-        }
-        for c in &fc.mv.comp {
-            none(
-                &mut w,
-                c.class0_fp.len() * c.class0_fp[0].len() + c.fp.len(),
-            );
-        }
-        for _ in &fc.mv.comp {
-            none(&mut w, 2); // class0_hp, hp
-        }
-    }
+    probs::write(&mut w, old, new, coded, false);
     w.finish()
 }
 

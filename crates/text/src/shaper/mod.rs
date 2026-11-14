@@ -16,7 +16,10 @@ mod fallback;
 mod hangul;
 mod indic;
 mod kern;
+mod khmer;
 mod morx;
+mod pattern;
+mod syllables;
 mod thai;
 
 use cutlass_font::morx::DELETED_GLYPH;
@@ -57,6 +60,8 @@ pub(super) struct Feature {
     mask: u32,
     /// The script's own shaping decides what a zero width joiner does.
     manual_joiners: bool,
+    /// And what a zero width non-joiner does where a rule looks around.
+    manual_non_joiners: bool,
 }
 
 impl Feature {
@@ -65,6 +70,7 @@ impl Feature {
             tag: *tag,
             mask: EVERY,
             manual_joiners: false,
+            manual_non_joiners: false,
         }
     }
 
@@ -73,11 +79,19 @@ impl Feature {
             tag: *tag,
             mask,
             manual_joiners: false,
+            manual_non_joiners: false,
         }
     }
 
     pub(super) const fn manual(mut self) -> Self {
         self.manual_joiners = true;
+        self
+    }
+
+    /// Both joiners are the script's own to read.
+    pub(super) const fn manual_both(mut self) -> Self {
+        self.manual_joiners = true;
+        self.manual_non_joiners = true;
         self
     }
 }
@@ -161,24 +175,42 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
     // A script written by syllable is put in order and given its forms
     // here, unless the face does that with its own machines: those are
     // given the text as it is.
-    let by_syllable = shaping == Shaping::Syllabic;
+    let by_syllable = shaping != Shaping::Plain && shaping != Shaping::Joined;
     let syllabic = by_syllable && !machines;
     let join = |first: char, second: char| {
-        if syllabic {
-            return indic::compose(first, second);
+        if !syllabic {
+            return compose(first, second)
+                .or_else(|| pointed.then(|| hebrew_form(first, second)).flatten());
         }
-        compose(first, second).or_else(|| pointed.then(|| hebrew_form(first, second)).flatten())
+        match shaping {
+            Shaping::Syllabic => indic::compose(first, second),
+            // A vowel sign in two parts stays in two parts.
+            Shaping::Khmer if props(first).is_mark() => None,
+            _ => compose(first, second),
+        }
+    };
+    let apart = |character: char| {
+        (syllabic && shaping == Shaping::Khmer)
+            .then(|| khmer::take_apart(character))
+            .flatten()
+            .or_else(|| decompose(character))
     };
     let normal = Normal {
         // These scripts take a letter apart even when the face has it
         // whole, so its parts can take their own forms.
         whole_first: !syllabic,
-        keeps_whole: &|character| syllabic && indic::keeps_whole(character),
+        keeps_whole: &|character| {
+            syllabic && shaping == Shaping::Syllabic && indic::keeps_whole(character)
+        },
+        apart: &apart,
         join: &join,
     };
     let mut glyphs = normalize(font, glyphs, &normal)?;
     if syllabic {
-        indic::describe_all(&mut glyphs, run.script);
+        match shaping {
+            Shaping::Khmer => khmer::describe_all(&mut glyphs),
+            _ => indic::describe_all(&mut glyphs, run.script),
+        }
     }
     merge_graphemes(&mut glyphs);
     let trusted = classify(font, &mut glyphs, syllabic);
@@ -203,7 +235,10 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
     if machines {
     } else if syllabic {
         let engine = Engine::new(font, false, backward, count, trusted);
-        indic::substitute(font, engine, &mut buffer, &scripts, run.script)?;
+        match shaping {
+            Shaping::Khmer => khmer::substitute(font, engine, &mut buffer, &scripts)?,
+            _ => indic::substitute(font, engine, &mut buffer, &scripts, run.script)?,
+        }
     } else if let Some(mut engine) = Engine::new(font, false, backward, count, trusted)
         && let Some(table) = font.gsub()
     {
@@ -456,6 +491,8 @@ struct Normal<'n> {
     whole_first: bool,
     /// Characters never taken apart.
     keeps_whole: &'n dyn Fn(char) -> bool,
+    /// The one or two parts a character is written as, when it has them.
+    apart: &'n dyn Fn(char) -> Option<(char, Option<char>)>,
     /// The character two compose, when they should.
     join: &'n dyn Fn(char, char) -> Option<char>,
 }
@@ -481,6 +518,7 @@ fn normalize(
         let apart = !(normal.keeps_whole)(glyph.character)
             && take_apart(
                 font,
+                normal.apart,
                 &glyph,
                 glyph.character,
                 &mut parts,
@@ -634,13 +672,14 @@ fn hebrew_form(letter: char, point: char) -> Option<char> {
 /// too whenever it can be.
 fn take_apart(
     font: &Font<'_>,
+    apart: &dyn Fn(char) -> Option<(char, Option<char>)>,
     origin: &Glyph,
     character: char,
     out: &mut Vec<Glyph>,
     deep: bool,
     depth: u8,
 ) -> bool {
-    let Some((first, second)) = decompose(character) else {
+    let Some((first, second)) = apart(character) else {
         return false;
     };
     if second.is_some_and(|second| !has(font, second)) || depth > 8 {
@@ -657,7 +696,7 @@ fn take_apart(
     let from = out.len();
     if !deep && has(font, first) {
         push(first, out);
-    } else if !take_apart(font, origin, first, out, deep, depth + 1) {
+    } else if !take_apart(font, apart, origin, first, out, deep, depth + 1) {
         out.truncate(from);
         if !has(font, first) {
             return false;
@@ -775,7 +814,7 @@ fn substitution_stages(shaping: Shaping, backward: bool, ligatures: bool) -> Vec
     }
     let mut stages = vec![vec![Feature::every(b"rvrn")]];
     match shaping {
-        Shaping::Plain | Shaping::Syllabic => {
+        Shaping::Plain | Shaping::Syllabic | Shaping::Khmer => {
             let mut stage = direction.to_vec();
             stage.extend(common);
             stages.push(stage);
@@ -839,7 +878,7 @@ pub(super) fn lookups(
                     index: lookup,
                     mask: feature.mask,
                     auto_joiner: !feature.manual_joiners,
-                    auto_non_joiner: true,
+                    auto_non_joiner: !feature.manual_non_joiners,
                     per_syllable: false,
                 });
             }
@@ -1402,6 +1441,78 @@ mod tests {
             ),
             "[27=0+300|22=0+700|1=6+250|26=7+900|1=16+250|25=17+400|30=23+650|1=26+250|27=27+300|22=27+700|29=27+0]"
         );
+    }
+
+    #[test]
+    fn khmer_syllables_are_reordered_and_take_their_forms() {
+        const KHMER: &[u8] = include_bytes!("../../../font/fixtures/khmer.ttf");
+        let shaped = |text: &str| shaped_in(KHMER, b"Khmr", text);
+        // Each expected string is what HarfBuzz 14.2 prints for the face.
+        assert_eq!(shaped("\u{1780}"), "[1=0+700]");
+        // A vowel written before its letter, and one in two parts.
+        assert_eq!(shaped("\u{1780}\u{17C1}"), "[4=0+400|1=0+700]");
+        assert_eq!(shaped("\u{1780}\u{17BE}"), "[4=0+400|1=0+700|6=0+0]");
+        // The subscript ro goes before the letter; a subscript ta stays
+        // after it, and is the narrow one once a ro has been moved.
+        assert_eq!(shaped("\u{1780}\u{17D2}\u{179A}"), "[11=0+300|1=0+700]");
+        assert_eq!(shaped("\u{1780}\u{17D2}\u{178F}"), "[1=0+700|10=0+0]");
+        assert_eq!(
+            shaped("\u{1780}\u{17D2}\u{179A}\u{17D2}\u{178F}"),
+            "[11=0+300|1=0+700|13=0+0]"
+        );
+        assert_eq!(
+            shaped("\u{1780}\u{17D2}\u{178F}\u{17D2}\u{179A}"),
+            "[11=0+300|1=0+700|10=0+0]"
+        );
+        // A form that spans the syllable, and a mark set on its anchor.
+        assert_eq!(shaped("\u{1780}\u{17B6}"), "[14=0+1000]");
+        assert_eq!(shaped("\u{1780}\u{17C6}"), "[1=0+700|8=0@-200,-30+0]");
+        assert_eq!(
+            shaped("\u{1780}\u{17B6}\u{17C6}"),
+            "[14=0+1000|8=0@-350,-30+0]"
+        );
+        assert_eq!(
+            shaped("\u{1780}\u{17D2}\u{179A}\u{17C1}\u{17B6}\u{17C6}"),
+            "[4=0+400|11=0+300|14=0+1000|8=0@-350,-30+0]"
+        );
+        assert_eq!(
+            shaped("\u{1780}\u{17C9}\u{17B6}"),
+            "[1=0+700|15=0+0|5=0+350]"
+        );
+        // A vowel, a coeng or a sign with no letter stands on a dotted
+        // circle.
+        assert_eq!(shaped("\u{17C1}"), "[4=0+400|7=0+600]");
+        assert_eq!(shaped("\u{17D2}\u{1780}"), "[7=0+600|3=0+0|1=3+700]");
+        assert_eq!(
+            shaped("\u{17C6}\u{1780}\u{17D2}"),
+            "[7=0+600|8=0+0|1=3+700|3=3+0]"
+        );
+        // Each syllable is ordered on its own.
+        assert_eq!(
+            shaped("\u{1780}\u{1780}\u{17C1}\u{1780}"),
+            "[1=0+700|4=3+400|1=3+700|1=9+700]"
+        );
+        // A non-joiner ends the syllable before the coeng, and a joiner
+        // after it keeps the subscript from forming.
+        assert_eq!(
+            shaped("\u{1780}\u{200C}\u{17D2}\u{178F}"),
+            "[1=0+700|7=3+600|10=3+0]"
+        );
+        assert_eq!(
+            shaped("\u{1780}\u{17D2}\u{200D}\u{178F}"),
+            "[1=0+700|3=0+0|9=9+650]"
+        );
+        assert_eq!(shaped(""), "[]");
+        // One letter under thousands of subscripts and signs, and
+        // thousands of signs with no letter, are shaped in time.
+        let started = std::time::Instant::now();
+        let mut heavy = String::from("\u{1780}");
+        heavy.push_str(&"\u{17D2}\u{178F}".repeat(2_000));
+        heavy.push_str(&"\u{17C6}".repeat(4_000));
+        assert!(shaped(&heavy).starts_with("[1=0+700|"));
+        let broken = "\u{17C1}".repeat(4_000);
+        assert_eq!(shaped(&broken).matches("7=").count(), 4_000);
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
     }
 
     #[test]

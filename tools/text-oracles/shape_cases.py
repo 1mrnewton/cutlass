@@ -46,6 +46,17 @@ if len(sys.argv)>2 and sys.argv[2]=="indic":
                      (SYS+"NotoSansOriya.ttc",0,"Orya",["ଓଡ଼ିଆ ଭାଷା","କ୍ଷ କି କୋ"]),
                      (SUP+"Gurmukhi MN.ttc",0,"Guru",["ਪੰਜਾਬੀ ਭਾਸ਼ਾ"])]:
         for t in ts: cases.append((f,i,s,"ltr",t))
+if len(sys.argv)>2 and sys.argv[2]=="khmer":
+    # Words, then the hard clusters: vowels written before and in two
+    # parts, stacks of subscripts with the subscript ro, shifters, a non
+    # joiner, and clusters with no letter to stand on.
+    cases=[]
+    khmer=["សួស្តី","កម្ពុជា","ភាសាខ្មែរ","ខ្ញុំ","ស្រឡាញ់","ព្រះរាជាណាចក្រ","ក្រុង ស្ត្រី","សង្គ្រាម បង្អែម",
+           "ញ៉ាំ ប៊ី ស៊ី អ៊ំ","សំឡេង កើត","កៀ កឿ កោ កៅ កេ កែ កៃ","កា់ កះ កំ កាំ","ង្រ្គ ង្គ្រ","ក្រ្ក ក្ក្រ ក្រ្រ",
+           "េក ្ក ា ់ ៉","ក‌្ក ក្‌ក ក‍ ក្‍ក","១២៣ ៖ ។ ៛","◌ា ◌្ក ◌េ","កាា កេេ កុុ","ក្ក្ក្ក ស្ត្រ្យ",
+           "ឥ ឧ ឱ្យ ឲ្យ ឬ","ប្រទេស កម្ពុជា រាជធានី ភ្នំពេញ","ខ្មែរ​អង់គ្លេស","abc កខគ 12"]
+    for f,i in [(SUP+"Khmer MN.ttc",0),(SUP+"Khmer MN.ttc",1),(SUP+"Khmer Sangam MN.ttf",0)]:
+        for t in khmer: cases.append((f,i,"Khmr","ltr",t))
 with open(sys.argv[1],"w") as out:
     for f,i,s,d,t in cases: out.write(f"{f}\t{i}\t{s}\t{d}\t{esc(t)}\n")
 print(len(cases))

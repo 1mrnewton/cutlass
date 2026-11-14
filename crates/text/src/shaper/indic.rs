@@ -14,6 +14,7 @@ use cutlass_font::{Font, GlyphClass, LayoutTable, Substitution, Tag};
 
 use super::apply::Engine;
 use super::buffer::{Buffer, Glyph};
+use super::pattern::{Pattern, each_syllable, maybe, merge, one, repeat, seq};
 use super::{Feature, lookups};
 use crate::TextError;
 use crate::script::Script;
@@ -234,89 +235,6 @@ fn is_joiner(glyph: &Glyph) -> bool {
 
 fn is_halant(glyph: &Glyph) -> bool {
     is(glyph, bit(kind::HALANT))
-}
-
-/// A pattern over kinds of character.
-enum Pattern {
-    /// One character of any of these kinds.
-    One(u32),
-    Sequence(Vec<Pattern>),
-    Either(Vec<Pattern>),
-    Maybe(Box<Pattern>),
-    Repeat(Box<Pattern>),
-}
-
-impl Pattern {
-    /// Every place a match starting at `from` may end, in order.
-    fn ends(&self, kinds: &[u8], from: usize) -> Vec<usize> {
-        match self {
-            Self::One(mask) => kinds
-                .get(from)
-                .filter(|kind| bit(**kind) & mask != 0)
-                .map(|_| vec![from + 1])
-                .unwrap_or_default(),
-            Self::Sequence(parts) => {
-                let mut ends = vec![from];
-                for part in parts {
-                    let mut next: Vec<usize> =
-                        ends.iter().flat_map(|end| part.ends(kinds, *end)).collect();
-                    next.sort_unstable();
-                    next.dedup();
-                    if next.is_empty() {
-                        return next;
-                    }
-                    ends = next;
-                }
-                ends
-            }
-            Self::Either(choices) => {
-                let mut ends: Vec<usize> = choices
-                    .iter()
-                    .flat_map(|choice| choice.ends(kinds, from))
-                    .collect();
-                ends.sort_unstable();
-                ends.dedup();
-                ends
-            }
-            Self::Maybe(inner) => {
-                let mut ends = inner.ends(kinds, from);
-                if !ends.contains(&from) {
-                    ends.insert(0, from);
-                }
-                ends
-            }
-            Self::Repeat(inner) => {
-                let mut ends = vec![from];
-                let mut frontier = vec![from];
-                while let Some(at) = frontier.pop() {
-                    for end in inner.ends(kinds, at) {
-                        if end > at && !ends.contains(&end) {
-                            ends.push(end);
-                            frontier.push(end);
-                        }
-                    }
-                }
-                ends.sort_unstable();
-                ends
-            }
-        }
-    }
-}
-
-fn seq(parts: Vec<Pattern>) -> Pattern {
-    Pattern::Sequence(parts)
-}
-
-fn maybe(pattern: Pattern) -> Pattern {
-    Pattern::Maybe(Box::new(pattern))
-}
-
-fn repeat(pattern: Pattern) -> Pattern {
-    Pattern::Repeat(Box::new(pattern))
-}
-
-fn one(kinds: &[u8]) -> Pattern {
-    Pattern::One(kinds.iter().fold(0, |mask, kind| mask | bit(*kind)))
 }
 
 /// The kinds of syllable, each with its pattern, in the order of choice
@@ -651,21 +569,6 @@ pub(crate) fn substitute<'a>(
     Ok(())
 }
 
-/// Call `act` with each syllable's range. `act` may move glyphs within
-/// the range but not change how many there are.
-fn each_syllable(glyphs: &mut [Glyph], mut act: impl FnMut(&mut [Glyph], usize, usize)) {
-    let mut start = 0;
-    while start < glyphs.len() {
-        let syllable = glyphs[start].syllable;
-        let mut end = start + 1;
-        while end < glyphs.len() && glyphs[end].syllable == syllable {
-            end += 1;
-        }
-        act(glyphs, start, end);
-        start = end;
-    }
-}
-
 /// Whether each consonant goes below or behind the main one, by asking
 /// the font what it would do with the consonant and a virama.
 fn consonant_places(plan: &Plan<'_, '_>, glyphs: &mut [Glyph]) {
@@ -724,25 +627,6 @@ fn insert_dotted_circles(font: &Font<'_>, glyphs: &mut Vec<Glyph>) {
         glyph.category = gc::OTHER_LETTER;
         glyphs.insert(at, glyph);
         index = at + 1;
-    }
-}
-
-fn merge(glyphs: &mut [Glyph], start: usize, end: usize) {
-    let end = end.min(glyphs.len());
-    if end.saturating_sub(start) < 2 {
-        return;
-    }
-    let (mut start, mut end) = (start, end);
-    while end < glyphs.len() && glyphs[end].cluster == glyphs[end - 1].cluster {
-        end += 1;
-    }
-    while start > 0 && glyphs[start - 1].cluster == glyphs[start].cluster {
-        start -= 1;
-    }
-    if let Some(first) = glyphs[start..end].iter().map(|glyph| glyph.cluster).min() {
-        for glyph in &mut glyphs[start..end] {
-            glyph.cluster = first;
-        }
     }
 }
 

@@ -16,8 +16,10 @@ pub(crate) enum Shaping {
     /// Letters take a form from the letters they join.
     Joined,
     /// Syllables are found and their parts put in the order they are
-    /// written.
+    /// written, as Devanagari and the scripts like it are.
     Syllabic,
+    /// The same for Khmer, by its own rules.
+    Khmer,
 }
 
 impl Script {
@@ -84,6 +86,7 @@ impl Script {
             | b"Adlm" | b"Rohg" | b"Sogd" | b"Chrs" | b"Ougr" => Shaping::Joined,
             b"Deva" | b"Beng" | b"Guru" | b"Gujr" | b"Orya" | b"Taml" | b"Telu" | b"Knda"
             | b"Mlym" => Shaping::Syllabic,
+            b"Khmr" => Shaping::Khmer,
             _ => Shaping::Plain,
         }
     }

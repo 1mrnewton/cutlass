@@ -313,10 +313,96 @@ pub(crate) fn han_hangul() -> Vec<u8> {
     font(&glyphs, &[(WATER, 1), ('\u{AC00}', 2)], &[])
 }
 
+/// A face for Khmer: ka 1, ro 2, the coeng 3, the vowel e 4, the vowel
+/// aa 5, the upper part of the vowel oe 6, the dotted circle 7, the sign
+/// nikahit 8, ta 9, and a shifter 15.
+///
+/// The coeng and ta are the subscript ta 10; the coeng and ro are the ro
+/// written before its letter, 11; a subscript ta after such a ro is the
+/// narrow one 13; and ka with aa is one glyph, 14. The nikahit sits on an
+/// anchor over ka and over that glyph.
+pub(crate) fn khmer() -> Vec<u8> {
+    let mut glyphs = vec![boxed(500); 16];
+    for (glyph, advance) in [(1, 700), (2, 600), (4, 400), (5, 350), (7, 600), (9, 650)] {
+        glyphs[glyph] = boxed(advance);
+    }
+    glyphs[11] = boxed(300);
+    glyphs[14] = boxed(1_000);
+    for glyph in [3, 6, 8, 10, 13, 15] {
+        glyphs[glyph] = mark();
+    }
+    let mut map = vec![
+        ('\u{1780}', 1),
+        ('\u{179A}', 2),
+        ('\u{17D2}', 3),
+        ('\u{17C1}', 4),
+        ('\u{17B6}', 5),
+        ('\u{17BE}', 6),
+        ('\u{25CC}', 7),
+        ('\u{17C6}', 8),
+        ('\u{178F}', 9),
+        ('\u{17C9}', 15),
+    ];
+    map.sort_unstable();
+    let substitutions = layout_table(
+        &[(b"khmr", &[0, 1, 2, 3])],
+        &[
+            (b"blwf", &[1]),
+            (b"cfar", &[2]),
+            (b"pref", &[0]),
+            (b"pres", &[3]),
+        ],
+        vec![
+            LookupSpec::new(4, vec![ligatures(&[(3, &[(&[2], 11)])])]),
+            LookupSpec::new(4, vec![ligatures(&[(3, &[(&[9], 10)])])]),
+            LookupSpec::new(1, vec![single(&[(10, 13)])]),
+            LookupSpec::new(4, vec![ligatures(&[(1, &[(&[5], 14)])])]),
+        ],
+    );
+    let positioning = layout_table(
+        &[(b"khmr", &[0])],
+        &[(b"mark", &[0])],
+        vec![LookupSpec::new(
+            4,
+            vec![mark_attach(
+                &[(8, 0, (-150, 750))],
+                &[(1, &[(350, 720)]), (14, &[(500, 720)])],
+            )],
+        )],
+    );
+    let kinds = gdef(
+        &[
+            (1, 2, 1),
+            (3, 3, 3),
+            (4, 5, 1),
+            (6, 6, 3),
+            (7, 7, 1),
+            (8, 8, 3),
+            (9, 9, 1),
+            (10, 10, 3),
+            (11, 12, 1),
+            (13, 13, 3),
+            (14, 14, 2),
+            (15, 15, 3),
+        ],
+        &[],
+        &[],
+    );
+    font(
+        &glyphs,
+        &map,
+        &[
+            (b"GDEF", kinds),
+            (b"GPOS", positioning),
+            (b"GSUB", substitutions),
+        ],
+    )
+}
+
 /// A fixture's file name and what builds it.
 type Built = (&'static str, fn() -> Vec<u8>);
 
-const FILES: [Built; 7] = [
+const FILES: [Built; 8] = [
     ("shaping.ttf", shaping),
     ("hostile.ttf", hostile),
     ("machines.ttf", machines),
@@ -324,6 +410,7 @@ const FILES: [Built; 7] = [
     ("han.ttf", han),
     ("han-kana.ttf", han_kana),
     ("han-hangul.ttf", han_hangul),
+    ("khmer.ttf", khmer),
 ];
 
 fn path(name: &str) -> std::path::PathBuf {

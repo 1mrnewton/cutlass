@@ -166,6 +166,9 @@ pub struct Font<'a> {
     num_glyphs: u16,
     hmtx: Hmtx<'a>,
     cmap: Cmap<'a>,
+    /// The map is a symbol face's: its pictures are also where the
+    /// letters are typed.
+    symbols: bool,
     kern: kern::Kerning,
     gdef: Option<Gdef<'a>>,
     gsub: Option<LayoutTable<'a>>,
@@ -289,7 +292,15 @@ impl<'a> Font<'a> {
     /// still [`Self::missing_glyph`]. A map entry past the face's glyph count
     /// is a bad table.
     pub fn glyph_id(&self, character: char) -> Result<Option<u16>, FontError> {
-        let Some(glyph_id) = self.cmap.glyph(u32::from(character))? else {
+        let code = u32::from(character);
+        let found = match self.cmap.glyph(code)? {
+            // A symbol face draws the key that types each picture.
+            None if self.symbols && (0x20..=0xFF).contains(&code) => {
+                self.cmap.glyph(0xF000 + code)?
+            }
+            found => found,
+        };
+        let Some(glyph_id) = found else {
             return Ok(None);
         };
         if glyph_id >= self.num_glyphs {
@@ -430,7 +441,7 @@ impl<'a> Font<'a> {
         let num_glyphs = parse_maxp(directory.table(b"maxp")?)?;
         let metrics = parse_hhea(directory.table(b"hhea")?, num_glyphs)?;
         let hmtx = Hmtx::parse(directory.table(b"hmtx")?, metrics, num_glyphs)?;
-        let cmap = parse_cmap(directory.table(b"cmap")?)?;
+        let (cmap, symbols) = parse_cmap(directory.table(b"cmap")?)?;
         let variants = variants::Variants::find(directory.table(b"cmap")?)?;
         // A kern table in a form this reader cannot apply, such as Apple's
         // version 1 tables, leaves the face without kerning. A torn one is
@@ -484,6 +495,7 @@ impl<'a> Font<'a> {
             num_glyphs,
             hmtx,
             cmap,
+            symbols,
             kern,
             gdef,
             gsub,
@@ -648,7 +660,9 @@ struct Groups<'a> {
     constant: bool,
 }
 
-fn parse_cmap(table: &[u8]) -> Result<Cmap<'_>, FontError> {
+/// The character map of a face, and whether it is the map of a symbol
+/// face, which keeps its pictures at U+F020 to U+F0FF.
+fn parse_cmap(table: &[u8]) -> Result<(Cmap<'_>, bool), FontError> {
     if table.len() < 4 {
         return Err(short(table));
     }
@@ -661,12 +675,14 @@ fn parse_cmap(table: &[u8]) -> Result<Cmap<'_>, FontError> {
     }
     let record_bytes = records.checked_mul(8).ok_or(FontError::BadTable)?;
     let header = bytes_at(table, 4, record_bytes)?;
-    let mut chosen: Option<(u8, usize)> = None;
+    let mut chosen: Option<(u8, usize, bool)> = None;
     for index in 0..records {
         let at = index * 8;
         let platform = u16_at(header, at)?;
         let encoding = u16_at(header, at + 2)?;
-        if !unicode_cmap(platform, encoding) {
+        // A symbol face's map counts only when the face has no other.
+        let symbols = (platform, encoding) == (3, 0);
+        if !(symbols || unicode_cmap(platform, encoding)) {
             continue;
         }
         let offset = usize::try_from(u32_at(header, at + 4)?).map_err(|_| FontError::BadTable)?;
@@ -674,25 +690,27 @@ fn parse_cmap(table: &[u8]) -> Result<Cmap<'_>, FontError> {
         let Some(score) = cmap_score(format) else {
             continue;
         };
-        if chosen.as_ref().is_some_and(|(best, _)| *best >= score) {
+        let score = if symbols { score } else { score + 8 };
+        if chosen.as_ref().is_some_and(|(best, _, _)| *best >= score) {
             continue;
         }
-        chosen = Some((score, offset));
+        chosen = Some((score, offset, symbols));
     }
-    let Some((_, offset)) = chosen else {
+    let Some((_, offset, symbols)) = chosen else {
         return Err(FontError::Unsupported);
     };
     let subtable = table.get(offset..).ok_or(FontError::Truncated)?;
     if subtable.len() < 2 {
         return Err(FontError::Truncated);
     }
-    match u16_at(subtable, 0)? {
-        4 => Ok(Cmap::Format4(parse_format4(subtable)?)),
-        6 => Ok(Cmap::Format6(parse_format6(subtable)?)),
-        12 => Ok(Cmap::Groups(parse_groups(subtable, false)?)),
-        13 => Ok(Cmap::Groups(parse_groups(subtable, true)?)),
-        _ => Err(FontError::Unsupported),
-    }
+    let map = match u16_at(subtable, 0)? {
+        4 => Cmap::Format4(parse_format4(subtable)?),
+        6 => Cmap::Format6(parse_format6(subtable)?),
+        12 => Cmap::Groups(parse_groups(subtable, false)?),
+        13 => Cmap::Groups(parse_groups(subtable, true)?),
+        _ => return Err(FontError::Unsupported),
+    };
+    Ok((map, symbols))
 }
 
 fn unicode_cmap(platform: u16, encoding: u16) -> bool {

@@ -157,6 +157,36 @@ mod tests {
     }
 
     #[test]
+    fn a_symbol_face_draws_its_pictures_for_the_keys_that_type_them() {
+        // A symbol face maps U+F041 and not `A`, under platform 3,
+        // encoding 0.
+        let glyphs = [boxed(500), boxed(500), boxed(500)];
+        let pictures = [('\u{F041}', 1), ('\u{F0FF}', 2)];
+        let mut cmap = character_map(&pictures, &[]);
+        cmap[6..8].copy_from_slice(&[0, 0]);
+        let bytes = font(&glyphs, &pictures, &[(b"cmap", cmap.clone())]);
+        let face = read(&bytes).expect("symbol face");
+        assert_eq!(face.glyph_id('A'), Ok(Some(1)));
+        assert_eq!(face.glyph_id('\u{F041}'), Ok(Some(1)));
+        assert_eq!(face.glyph_id('\u{FF}'), Ok(Some(2)));
+        // Only the keys: a character past them is not moved there.
+        assert_eq!(face.glyph_id('B'), Ok(None));
+        assert_eq!(face.glyph_id('\u{141}'), Ok(None));
+        // A face that also has a map of characters uses that one alone.
+        let letters = character_map(&[('B', 2)], &[]);
+        let mut both = vec![0, 0, 0, 2, 0, 3, 0, 0, 0, 0, 0, 20, 0, 3, 0, 10];
+        let second = u32::try_from(20 + cmap.len() - 12).expect("offset");
+        both.extend(second.to_be_bytes());
+        both.extend(&cmap[12..]);
+        both.extend(&letters[12..]);
+        let bytes = font(&glyphs, &pictures, &[(b"cmap", both)]);
+        let face = read(&bytes).expect("both maps");
+        assert_eq!(face.glyph_id('B'), Ok(Some(2)));
+        assert_eq!(face.glyph_id('A'), Ok(None));
+        assert_eq!(face.glyph_id('\u{F041}'), Ok(None));
+    }
+
+    #[test]
     fn a_face_without_the_subtable_lists_no_pair() {
         let bytes = font(&[boxed(500), boxed(500)], &[('A', 1)], &[]);
         let face = read(&bytes).expect("face");

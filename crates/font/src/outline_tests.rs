@@ -175,3 +175,95 @@ fn outlines_agree_with_harfbuzz() {
     }
     assert_eq!(wrong, 0);
 }
+
+/// Open every face of every font file under the folders named in
+/// `CUTLASS_FACE_FOLDERS` (with `:` between them) and outline every glyph,
+/// and say which faces do not open or have glyphs that do not outline.
+/// Nothing is asserted: a system has faces in forms this reader does not
+/// take, and the list is what to look at.
+#[test]
+#[ignore = "reads the font folders named in CUTLASS_FACE_FOLDERS"]
+#[allow(clippy::print_stdout)]
+fn the_faces_of_the_named_folders_open() {
+    fn walk(folder: &std::path::Path, depth: u8, files: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if depth < 4 {
+                    walk(&path, depth + 1, files);
+                }
+            } else if path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    ["ttf", "otf", "ttc", "otc"].contains(&extension.to_lowercase().as_str())
+                })
+            {
+                files.push(path);
+            }
+        }
+    }
+    let Ok(folders) = std::env::var("CUTLASS_FACE_FOLDERS") else {
+        return;
+    };
+    let mut files = Vec::new();
+    for folder in folders.split(':') {
+        walk(std::path::Path::new(folder), 0, &mut files);
+    }
+    files.sort();
+    let (mut faces, mut opened, mut glyphs, mut failed) = (0, 0, 0_u64, 0_u64);
+    let started = std::time::Instant::now();
+    for path in &files {
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let count = if bytes.starts_with(b"ttcf") && bytes.len() >= 12 {
+            u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]).min(64)
+        } else {
+            1
+        };
+        for index in 0..count {
+            faces += 1;
+            let font = if bytes.starts_with(b"ttcf") {
+                read_collection(&bytes, index)
+            } else {
+                read(&bytes)
+            };
+            let font = match font {
+                Ok(font) => font,
+                Err(error) => {
+                    println!("{}#{index}: {error:?}", path.display());
+                    continue;
+                }
+            };
+            opened += 1;
+            if !font.has_outlines() {
+                continue;
+            }
+            let mut bad = 0;
+            let mut first = None;
+            for glyph in 0..font.glyph_count() {
+                glyphs += 1;
+                if let Err(error) = font.outline(glyph) {
+                    bad += 1;
+                    first.get_or_insert((glyph, error));
+                }
+            }
+            if let Some((glyph, error)) = first {
+                println!(
+                    "{}#{index}: {bad} glyphs do not outline, the first {glyph}: {error:?}",
+                    path.display()
+                );
+                failed += bad;
+            }
+        }
+    }
+    println!(
+        "{} files, {opened} of {faces} faces open, {failed} of {glyphs} glyphs do not outline, {:?}",
+        files.len(),
+        started.elapsed()
+    );
+}

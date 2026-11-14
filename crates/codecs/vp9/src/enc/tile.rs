@@ -282,6 +282,9 @@ struct Blk {
     mv2: Mv,
     /// The segment.
     seg: u8,
+    /// The vectors of the sub-blocks of an inter block under 8×8, in
+    /// raster order (a sub-block of two 4×4 cells repeats its vector).
+    smv: [Mv; 4],
     /// The inter prediction filter (EIGHTTAP, SMOOTH, SHARP).
     interp: u8,
     /// The four 4×4 luma modes of a block under 8×8 (`AUTO`: chosen as the
@@ -291,6 +294,22 @@ struct Blk {
 
 /// A sub-block mode to choose while coding.
 const AUTO: u8 = 255;
+
+/// Which sub-block of a neighbour under 8×8 gives sub-block `i`'s
+/// candidate: `[i][from above]` (libvpx `idx_n_column_to_subblock`).
+const SUBBLOCK: [[u8; 2]; 4] = [[1, 2], [1, 3], [3, 2], [3, 3]];
+
+/// Speeds at and below which inter frames try blocks under 8×8.
+const SUB8_SPEED: u8 = 1;
+
+/// The 4×4 steps of a block under 8×8's sub-blocks across and down.
+fn sub_steps(bsize: u8) -> (usize, usize) {
+    match bsize {
+        geom::BLOCK_4X8 => (1, 2),
+        geom::BLOCK_8X4 => (2, 1),
+        _ => (1, 1),
+    }
+}
 
 /// Whether the 4×4 column `c` of a block has samples on its left.
 fn have_left_of(c: usize, b: &Blk, col0: usize) -> bool {
@@ -337,8 +356,10 @@ pub struct Tile<'s, 't, 'r, 'v> {
     pool: Vec<Vec<i32>>,
     /// The 4×4 modes the block coded last chose.
     sub: [u8; 4],
-    /// Which 8×8 squares of the superblock code as four 4×4 blocks.
-    sub8: [bool; 64],
+    /// How each 8×8 square of the superblock is divided: `PARTITION_NONE`,
+    /// or the partition of its block under 8×8 (four 4×4, two 8×4 or two
+    /// 4×8).
+    sub8: [u8; 64],
     /// Scratch of the 8-tap filters across.
     mctmp: Vec<u8>,
     /// The reference the searches read (0 LAST, 1 GOLDEN, 2 ALTREF).
@@ -395,7 +416,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             found: [(Mv::ZERO, u64::MAX); 85],
             pool: Vec::new(),
             sub: [geom::DC; 4],
-            sub8: [false; 64],
+            sub8: [PARTITION_NONE; 64],
             mctmp: vec![0; cutlass_simd::vp9::mc::TMP],
             cur_ref: 0,
             coded_skip: false,
@@ -619,7 +640,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         }
         if level == 0 {
             let i8 = (row & 7) * 8 + (col & 7);
-            self.sub8[i8] = false;
+            self.sub8[i8] = PARTITION_NONE;
             // Key frames: four 4×4 blocks instead.
             if s.intra_frame && s.speed <= 6 && whole {
                 self.save(row, col, (1, 1), before + 1);
@@ -640,10 +661,45 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                     let mut chosen = b;
                     chosen.bmode = self.sub;
                     self.choice[Self::slot(row, col, bsize)] = chosen;
-                    self.sub8[i8] = true;
+                    self.sub8[i8] = PARTITION_SPLIT;
                     return j;
                 }
                 self.restore(before + 1);
+            }
+            // Inter frames: the best whole block's reference over 4×4,
+            // 8×4 or 4×8 sub-blocks, each with its own vector.
+            let whole_b = self.choice[Self::slot(row, col, bsize)];
+            if !s.intra_frame
+                && s.speed <= SUB8_SPEED
+                && whole
+                && whole_b.refs[0] != INTRA_FRAME
+                && whole_b.refs[1] == INTRA_FRAME
+            {
+                self.save(row, col, (1, 1), before + 1);
+                let mut won = None;
+                for (p, sbs) in [
+                    (PARTITION_SPLIT, BLOCK_4X4),
+                    (PARTITION_HORZ, geom::BLOCK_8X4),
+                    (PARTITION_VERT, geom::BLOCK_4X8),
+                ] {
+                    self.restore(before);
+                    let b = self.sub_inter(&whole_b, sbs);
+                    let c0 = self.cost;
+                    self.part_symbol(row, col, bsize, p);
+                    let d = self.code_block(&b);
+                    self.part_after(row, col, bsize, p);
+                    let j = d + (self.cost - c0) as f64 * lam;
+                    if j < best.0 {
+                        best = (j, p);
+                        won = Some((p, b));
+                        self.save(row, col, (1, 1), before + 1);
+                    }
+                }
+                self.restore(before + 1);
+                if let Some((p, b)) = won {
+                    self.choice[Self::slot(row, col, bsize)] = b;
+                    self.sub8[i8] = p;
+                }
             }
             return best.0;
         }
@@ -829,9 +885,149 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             mv: Mv::ZERO,
             mv2: Mv::ZERO,
             seg: s.seg_map.get(row * s.mi_cols + col).copied().unwrap_or(0),
+            smv: [Mv::ZERO; 4],
             interp: geom::EIGHTTAP,
             bmode: [geom::DC; 4],
         }
+    }
+
+    /// The 8×8 block `whole` as an inter block of size `bsize` under 8×8
+    /// on the same reference and filter: each sub-block's vector by a
+    /// small search from the whole block's, coded new (or zero).
+    fn sub_inter(&mut self, whole: &Blk, bsize: u8) -> Blk {
+        let s = self.s;
+        let mut b = Blk {
+            bsize,
+            tx: 0,
+            refs: whole.refs,
+            interp: whole.interp,
+            ..self.blk(whole.row, whole.col, bsize)
+        };
+        let best = self.find_mv(&b, NEW);
+        let hp_ok = s.h.allow_hp && best.row.unsigned_abs() < 64 && best.col.unsigned_abs() < 64;
+        let (sw, sh) = sub_steps(bsize);
+        let (x0, y0) = (whole.col * 8, whole.row * 8);
+        self.cur_ref = usize::from(whole.refs[0]) - 1;
+        for idy in (0..2).step_by(sh) {
+            for idx in (0..2).step_by(sw) {
+                let j = idy * 2 + idx;
+                let (x, y) = (x0 + 4 * idx, y0 + 4 * idy);
+                let (bw4, bh4) = (4 * sw, 4 * sh);
+                let new = self.sub_search(x, y, (bw4, bh4), whole.mv, best, hp_ok);
+                // The sub-block's own candidates, from the ones before it;
+                // a mode costs about a bit, a new vector its rate too.
+                let lam = u64::from(s.lambda);
+                let nearest = self.sub_candidate(&b, NEAREST, j);
+                let near = self.sub_candidate(&b, NEAR, j);
+                let new_rate = u64::from(mv_bits(Mv {
+                    row: new.row - best.row,
+                    col: new.col - best.col,
+                })) + 512;
+                let mut pick = (u64::MAX, ZERO, Mv::ZERO);
+                for (m, mv, rate) in [
+                    (NEAREST, nearest, 256),
+                    (NEAR, near, 384),
+                    (ZERO, Mv::ZERO, 256),
+                    (NEW, new, new_rate),
+                ] {
+                    if let Some(d) = self.sad_sub(x, y, bw4, bh4, mv) {
+                        let c = d + lam * rate / 256;
+                        if c < pick.0 {
+                            pick = (c, m, mv);
+                        }
+                    }
+                }
+                let (_, mode, mv) = pick;
+                b.smv[j] = mv;
+                b.bmode[j] = mode;
+                if sw == 2 {
+                    b.smv[j + 1] = mv;
+                    b.bmode[j + 1] = b.bmode[j];
+                }
+                if sh == 2 {
+                    b.smv[j + 2] = mv;
+                    b.bmode[j + 2] = b.bmode[j];
+                }
+            }
+        }
+        self.cur_ref = 0;
+        b.mv = b.smv[3];
+        b.mode = b.bmode[3];
+        b
+    }
+
+    /// A sub-block's vector: from `seed`, whole samples two around, then
+    /// halves, quarters and (where `hp`) eighths, by SAD and the vector's
+    /// rate against `best`.
+    fn sub_search(
+        &self,
+        x: usize,
+        y: usize,
+        (w, h): (usize, usize),
+        seed: Mv,
+        best: Mv,
+        hp: bool,
+    ) -> Mv {
+        let lam = u64::from(self.s.lambda);
+        let cost = |mv: Mv| -> Option<u64> {
+            let d = self.sad_sub(x, y, w, h, mv)?;
+            let rate = if mv == Mv::ZERO {
+                0
+            } else {
+                u64::from(mv_bits(Mv {
+                    row: mv.row - best.row,
+                    col: mv.col - best.col,
+                })) + 512
+            };
+            Some(d + lam * rate / 256)
+        };
+        let even = |v: i16| if v & 1 != 0 { v - v.signum() } else { v };
+        let fix = |m: Mv| {
+            if hp {
+                m
+            } else {
+                Mv {
+                    row: even(m.row),
+                    col: even(m.col),
+                }
+            }
+        };
+        let mut at = fix(seed);
+        let mut bc = cost(at).unwrap_or(u64::MAX);
+        for c in [Mv::ZERO, fix(best)] {
+            if let Some(v) = cost(c)
+                && v < bc
+            {
+                (at, bc) = (c, v);
+            }
+        }
+        // Steps in eighths: whole samples two around, then one half, one
+        // quarter and (where coded) one eighth.
+        let steps: &[(i16, i16)] = if hp {
+            &[(8, 2), (4, 1), (2, 1), (1, 1)]
+        } else {
+            &[(8, 2), (4, 1), (2, 1)]
+        };
+        for &(st, reach) in steps {
+            let center = at;
+            for dr in -reach..=reach {
+                for dc in -reach..=reach {
+                    if dr == 0 && dc == 0 {
+                        continue;
+                    }
+                    let m = Mv {
+                        row: center.row + dr * st,
+                        col: center.col + dc * st,
+                    };
+                    if let Some(v) = cost(m)
+                        && v < bc
+                    {
+                        (at, bc) = (m, v);
+                    }
+                }
+            }
+        }
+        at
     }
 
     /// Intra candidates: the luma modes whose predictions are nearest the
@@ -1418,10 +1614,10 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             Self::node(row, col, n8 as usize)
         };
         let p = if hbs == 0 {
-            if self.sub8[(row & 7) * 8 + (col & 7)] && !self.fast() {
-                PARTITION_SPLIT
-            } else {
+            if self.fast() {
                 PARTITION_NONE
+            } else {
+                self.sub8[(row & 7) * 8 + (col & 7)]
             }
         } else if !fits {
             PARTITION_SPLIT
@@ -1439,13 +1635,13 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                     self.code_block(&b);
                 }
             }
-            PARTITION_HORZ | PARTITION_VERT => {
+            PARTITION_HORZ | PARTITION_VERT if hbs > 0 => {
                 let [a, b] = self.rect[usize::from(p == PARTITION_VERT)][node];
                 self.code_block(&a);
                 self.code_block(&b);
             }
             _ if hbs == 0 => {
-                // Four 4×4 blocks, coded as one.
+                // A block under 8×8, coded as one.
                 let b = self.choice[Self::slot(row, col, bsize)];
                 self.code_block(&b);
             }
@@ -1590,6 +1786,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let (row, col, bsize) = (b.row, b.col, b.bsize);
         let (bw, bh) = (b.bw, b.bh);
         let inter = b.refs[0] != INTRA_FRAME;
+        let sub_inter = inter && bsize < BLOCK_8X8;
         let rec = BlockRec {
             row: row as u16,
             col: col as u16,
@@ -1598,11 +1795,15 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             tx: b.tx,
             uv_tx: self.uv_tx(&b),
             mode: b.mode,
-            bmode: [b.mode; 4],
+            bmode: if sub_inter { b.bmode } else { [b.mode; 4] },
             uv: b.uv,
             interp: b.interp,
             refs: b.refs,
-            bmv: [[b.mv, b.mv2]; 4],
+            bmv: if sub_inter {
+                b.smv.map(|m| [m, Mv::ZERO])
+            } else {
+                [[b.mv, b.mv2]; 4]
+            },
         };
         if inter {
             self.rec.predict_inter(&rec);
@@ -1669,7 +1870,9 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let nb = Nb {
             bsize,
             mode: b.mode,
-            bmode: if bsize < BLOCK_8X8 {
+            // A block under 8×8 shows its 4×4 modes when intra; when inter,
+            // its last sub-block's mode (as the decoder keeps it).
+            bmode: if bsize < BLOCK_8X8 && !inter {
                 b.bmode
             } else {
                 [b.mode; 4]
@@ -1679,7 +1882,11 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             seg_pred: false,
             interp: if inter { b.interp } else { 3 },
             refs: b.refs,
-            bmv: [[b.mv, b.mv2]; 4],
+            bmv: if sub_inter {
+                b.smv.map(|m| [m, Mv::ZERO])
+            } else {
+                [[b.mv, b.mv2]; 4]
+            },
         };
         let a = col - self.col0;
         let end = (a + bw).min(self.f.above.len());
@@ -2480,11 +2687,9 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             }
         }
         let mctx = usize::from(COUNTER_CTX[counter as usize]).min(6);
-        let k = (b.mode - NEAREST) as usize;
         let p = s.fc.inter_mode[mctx];
-        self.put_tree_nc(&prob::INTER_TREE, &p, k as u8, probs::INTER_MODE + 3 * mctx);
-        if self.collect() {
-            self.f.counts.inter_mode[mctx][k] += 1;
+        if b.bsize >= BLOCK_8X8 {
+            self.write_inter_mode(b.mode, &p, mctx);
         }
         if s.switchable {
             let l = self.left_nb(b).map(|n| n.interp);
@@ -2500,13 +2705,36 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 self.f.counts.interp[ctx][usize::from(b.interp)] += 1;
             }
         }
-        if b.mode == NEW {
+        if b.bsize < BLOCK_8X8 {
+            // Each sub-block's mode, and its vector when new, against the
+            // block's list.
+            let best = self.find_mv(b, NEW);
+            let (sw, sh) = sub_steps(b.bsize);
+            for idy in (0..2).step_by(sh) {
+                for idx in (0..2).step_by(sw) {
+                    let j = idy * 2 + idx;
+                    self.write_inter_mode(b.bmode[j], &p, mctx);
+                    if b.bmode[j] == NEW {
+                        self.write_mv(b.smv[j], best);
+                    }
+                }
+            }
+        } else if b.mode == NEW {
             let best = self.find_mv(b, NEW);
             self.write_mv(b.mv, best);
             if compound {
                 let best = self.find_mv_of(b, NEW, b.refs[1]);
                 self.write_mv(b.mv2, best);
             }
+        }
+    }
+
+    /// An inter mode, in context `mctx` (probabilities `p`).
+    fn write_inter_mode(&mut self, mode: u8, p: &[u8; 3], mctx: usize) {
+        let k = mode - NEAREST;
+        self.put_tree_nc(&prob::INTER_TREE, p, k, probs::INTER_MODE + 3 * mctx);
+        if self.collect() {
+            self.f.counts.inter_mode[mctx][usize::from(k)] += 1;
         }
     }
 
@@ -2612,6 +2840,13 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
 
     /// [`Tile::find_mv`] for reference `frame` of the block.
     fn find_mv_of(&self, b: &Blk, mode: u8, frame: u8) -> Mv {
+        let (list, count) = self.find_list(b, mode, frame, -1);
+        lower_precision(list[count - 1], self.s.h.allow_hp)
+    }
+
+    /// The reference list of `dec::parse::find_mv`: for sub-block `block`
+    /// of a block under 8×8 (`-1` the whole block), clamped.
+    fn find_list(&self, b: &Blk, mode: u8, frame: u8, block: i32) -> ([Mv; 2], usize) {
         let s = self.s;
         let bias = &s.h.sign_bias;
         let early = mode != NEAR;
@@ -2641,7 +2876,35 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             None
         };
         'search: {
-            for pos in search {
+            let mut i = 0;
+            if block >= 0 {
+                // The two nearest neighbours by their sub-blocks' vectors.
+                while i < 2 {
+                    if let Some(n) = self.near(b, search[i]) {
+                        different = true;
+                        let which = if n.refs[0] == frame {
+                            Some(0)
+                        } else if n.refs[1] == frame {
+                            Some(1)
+                        } else {
+                            None
+                        };
+                        if let Some(w) = which {
+                            let mv = if n.bsize < BLOCK_8X8 {
+                                let k = SUBBLOCK[block as usize][usize::from(search[i][1] == 0)];
+                                n.bmv[usize::from(k)][w]
+                            } else {
+                                n.bmv[3][w]
+                            };
+                            if push(&mut list, &mut count, mv) {
+                                break 'search;
+                            }
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            for pos in &search[i..] {
                 if let Some(c) = self.cell(b, *pos) {
                     different = true;
                     let mv = if c.refs[0] == frame {
@@ -2721,7 +2984,31 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             mv.row = i32::from(mv.row).clamp(top, bottom.max(top)) as i16;
             mv.col = i32::from(mv.col).clamp(left, right.max(left)) as i16;
         }
-        lower_precision(list[count.max(1) - 1], s.h.allow_hp)
+        (list, count.max(1))
+    }
+
+    /// The NEAREST or NEAR vector of sub-block `j` of an inter block under
+    /// 8×8, from the sub-blocks before it (`dec::parse::sub_candidate`).
+    fn sub_candidate(&self, b: &Blk, bm: u8, j: usize) -> Mv {
+        let frame = b.refs[0];
+        if j == 0 {
+            let (list, count) = self.find_list(b, bm, frame, 0);
+            return list[count - 1];
+        }
+        if bm == NEAREST {
+            return b.smv[if j == 3 { 2 } else { 0 }];
+        }
+        let (list, _) = self.find_list(b, bm, frame, j as i32);
+        if j == 3 {
+            [b.smv[1], b.smv[0], list[0], list[1]]
+                .into_iter()
+                .find(|&c| c != b.smv[2])
+                .unwrap_or(Mv::ZERO)
+        } else {
+            list.into_iter()
+                .find(|&c| c != b.smv[0])
+                .unwrap_or(Mv::ZERO)
+        }
     }
 
     fn reset_nz(&mut self, b: &Blk) {

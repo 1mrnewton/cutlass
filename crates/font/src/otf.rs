@@ -17,6 +17,11 @@ const STACK_LIMIT: usize = 48;
 const STACK_LIMIT_2: usize = 513;
 const HINT_LIMIT: usize = 96;
 const SUBR_DEPTH: u32 = 10;
+/// The most numbers and operators one glyph may run through, its
+/// subroutines' with its own. A glyph of a real face runs a few thousand;
+/// subroutines that call one another many times over could run without
+/// end.
+const STEP_LIMIT: u32 = 1 << 20;
 const TRANSIENT: usize = 32;
 
 #[derive(Clone)]
@@ -125,6 +130,8 @@ struct Pen {
     transient: [f64; TRANSIENT],
     /// How many numbers the glyph may hold at once.
     limit: usize,
+    /// How many numbers and operators the glyph has run through.
+    steps: u32,
     /// The group of the store a `CFF2` glyph's blends are drawn for.
     group: usize,
     /// How much each region of that group counts, once a blend asks.
@@ -816,6 +823,7 @@ impl Pen {
             stack: Vec::new(),
             transient: [0.0; TRANSIENT],
             limit: STACK_LIMIT,
+            steps: 0,
             group: 0,
             weights: None,
         }
@@ -954,6 +962,10 @@ fn interpret(
     }
     let mut pos = 0;
     while pos < bytes.len() {
+        pen.steps += 1;
+        if pen.steps > STEP_LIMIT {
+            return Err(FontError::BadTable);
+        }
         let byte = bytes[pos];
         match byte {
             1 | 3 | 18 | 23 => stems(pen)?,

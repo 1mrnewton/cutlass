@@ -1429,7 +1429,9 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     /// Keeps in snapshot `k` everything coding the square of `n` 8×8
     /// blocks at `(row, col)` changes: its contexts, motion and samples.
     fn save(&mut self, row: usize, col: usize, (nw, nh): (usize, usize), k: usize) {
-        let mut sn = std::mem::take(&mut self.snaps[k]);
+        // In place: taking it out left a new snapshot behind, three
+        // cleared buffers allocated and freed on every call.
+        let sn = &mut self.snaps[k];
         sn.at = (row, col, nw, nh);
         sn.cost = self.cost;
         let a = col - self.col0;
@@ -1470,12 +1472,11 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 sn.pix[p][r * 64..r * 64 + mw].copy_from_slice(&src[r * stride..r * stride + mw]);
             }
         }
-        self.snaps[k] = sn;
     }
 
     /// Puts back what snapshot `k` kept.
     fn restore(&mut self, k: usize) {
-        let sn = std::mem::take(&mut self.snaps[k]);
+        let sn = &self.snaps[k];
         let (row, col, nw, nh) = sn.at;
         self.cost = sn.cost;
         let a = col - self.col0;
@@ -1516,7 +1517,6 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 dst[r * stride..r * stride + mw].copy_from_slice(&sn.pix[p][r * 64..r * 64 + mw]);
             }
         }
-        self.snaps[k] = sn;
     }
 
     // Motion search -------------------------------------------------------

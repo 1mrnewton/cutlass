@@ -837,6 +837,79 @@ mod tests {
         }
     }
 
+    /// What the CPU conversion makes of one Y′CbCr sample: the range
+    /// expanded, then the matrix with the weights `kr` and `kb`.
+    fn cpu_rgb([y, cb, cr]: [u8; 3], (kr, kb): (f64, f64), full: bool) -> [u8; 3] {
+        let (y, cb, cr) = if full {
+            (
+                f64::from(y) / 255.0,
+                (f64::from(cb) - 128.0) / 255.0,
+                (f64::from(cr) - 128.0) / 255.0,
+            )
+        } else {
+            (
+                (f64::from(y) - 16.0) / 219.0,
+                (f64::from(cb) - 128.0) / 224.0,
+                (f64::from(cr) - 128.0) / 224.0,
+            )
+        };
+        let kg = 1.0 - kr - kb;
+        [
+            y + 2.0 * (1.0 - kr) * cr,
+            y - 2.0 * kb * (1.0 - kb) / kg * cb - 2.0 * kr * (1.0 - kr) / kg * cr,
+            y + 2.0 * (1.0 - kb) * cb,
+        ]
+        .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+    }
+
+    #[test]
+    fn a_yuv_layer_is_read_with_the_matrix_and_range_of_its_stream() {
+        use cutlass_gpu::{YuvMatrix, YuvTone};
+        let Some(renderer) = renderer() else { return };
+        // Saturated and muted samples, the same bytes read each way.
+        let samples: [[u8; 3]; 6] = [
+            [63, 102, 240],
+            [81, 90, 240],
+            [54, 99, 255],
+            [126, 128, 128],
+            [200, 60, 170],
+            [35, 212, 114],
+        ];
+        for matrix in [YuvMatrix::Bt709, YuvMatrix::Bt601, YuvMatrix::Bt2020] {
+            for full in [false, true] {
+                let tone = YuvTone {
+                    matrix,
+                    full_range: full,
+                    ..YuvTone::NONE
+                };
+                for sample in samples {
+                    let mut bytes = vec![sample[0]; 4];
+                    bytes.push(sample[1]);
+                    bytes.push(sample[2]);
+                    let planes = Planes::packed(2, 2, &bytes).unwrap().with_tone(tone);
+                    let canvas = renderer.canvas(2, 2).unwrap();
+                    renderer
+                        .draw(&canvas, &[Layer::Yuv(planes, Placement::canvas(2, 2))])
+                        .unwrap();
+                    let want = cpu_rgb(sample, matrix.weights(), full);
+                    for pixel in renderer.read(&canvas).unwrap().chunks(4) {
+                        close(&pixel[..3], &want, 1);
+                        assert_eq!(pixel[3], 255);
+                    }
+                }
+            }
+        }
+        // The matrices and the ranges do differ on these bytes.
+        assert_ne!(
+            cpu_rgb(samples[4], YuvMatrix::Bt709.weights(), false),
+            cpu_rgb(samples[4], YuvMatrix::Bt601.weights(), false)
+        );
+        assert_ne!(
+            cpu_rgb(samples[4], YuvMatrix::Bt709.weights(), false),
+            cpu_rgb(samples[4], YuvMatrix::Bt709.weights(), true)
+        );
+    }
+
     #[test]
     fn a_quarter_turn_and_half_opacity_land_where_the_maps_say() {
         let Some(renderer) = renderer() else { return };

@@ -44,6 +44,10 @@ grain-identity.ivf 0 128x128 gbrp b4c1cb3592637630
 grain-lag3.ivf 0 128x128 yuv420p 9041c406f2e98581
 grain-scale.ivf 0 128x128 yuv420p e6ca50e219b7855b
 grain-shift.ivf 0 128x128 yuv420p a9a524f84c39a52b
+hdr10.ivf 0 64x64 yuv420p10le 73a259888ff6ff41
+hdr10.ivf 1 64x64 yuv420p10le 8dd70307ef2b19f6
+hdr10.ivf 2 64x64 yuv420p10le 6f12c16b453d5c8d
+hdr10.ivf 3 64x64 yuv420p10le 0366a7e0ec6d6bfe
 ibc.obu 0 256x256 yuv420p 8734a3645973d327
 ibc.obu 1 256x256 yuv420p 8734a3645973d327
 interintra-wedge.ivf 0 64x64 yuv420p 79f74b34bf004135

@@ -551,8 +551,21 @@ impl<W: Write + Seek> MatroskaMux<W> {
             .written
             .as_ref()
             .is_some_and(|written| written.strip_prores);
+        // An AV1 Block is the temporal unit without its delimiter, padding
+        // and redundant headers, each OBU with its size, as an `av01`
+        // sample is.
+        let av1 = track
+            .written
+            .as_ref()
+            .is_some_and(|written| written.codec_id == "V_AV1");
+        let sample;
         let frame = match packet.bytes() {
             bytes if strip && bytes.get(4..8) == Some(b"icpf") => &bytes[8..],
+            bytes if av1 => {
+                sample = cutlass_container::av1_sample(bytes)
+                    .ok_or_else(|| rejected("AV1 packet that is not whole OBUs"))?;
+                sample.as_slice()
+            }
             bytes => bytes,
         };
         let frame_len = len(frame);

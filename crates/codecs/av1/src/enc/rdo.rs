@@ -15,6 +15,7 @@ use crate::dec::types::{
 use crate::dsp::Pixel;
 use crate::dsp::ipred::{EDGE_LEN, EDGE_OFF, cfl_ac, cfl_pred, predict_clipped};
 use crate::dsp::itx::inv_txfm_add;
+use crate::dsp::mc;
 use crate::spec::tables::{
     MAX_TX_SIZE_RECT, NUM_4X4_BLOCKS_WIDE, PARTITION_SUBSIZE, SPLIT_TX_SIZE,
 };
@@ -138,6 +139,12 @@ pub struct ModeParams {
     /// sample, and the whole block is not tried where it is above this.
     pub intra_split_skip: [f64; 3],
     pub intra_none_skip: [f64; 3],
+    /// Compound blocks: try the distance weights against the average.
+    pub jnt_comp: bool,
+    /// Compound blocks: try a difference mask and the wedges.
+    pub masked_compound: bool,
+    /// Single-reference blocks of 8x8 to 32x32: try inter-intra.
+    pub interintra: bool,
 }
 
 impl Default for ModeParams {
@@ -195,6 +202,9 @@ impl Default for ModeParams {
             merge_tx_search: 3,
             intra_split_skip: [0.0; 3],
             intra_none_skip: [f64::MAX; 3],
+            jnt_comp: false,
+            masked_compound: false,
+            interintra: false,
         }
     }
 }
@@ -214,6 +224,29 @@ struct InterChoice {
 /// A single-reference mode option: mode, vector, `ref_mv_idx`, SATD cost
 /// (with its signalling) and signalling bits.
 type ModeOpt = (u8, Mv, usize, f64, f64);
+
+/// An inter-intra prediction of a block: its SATD cost with `bits` of
+/// signalling, the mode, the wedge when it has one, and the samples.
+struct InterIntra<P> {
+    cost: f64,
+    bits: f64,
+    mode: u8,
+    wedge: Option<u8>,
+    pred: Vec<P>,
+}
+
+/// A way to combine the two predictions of a compound block other than
+/// their average: its SATD cost with `bits` of signalling, the compound
+/// type, the wedge index, the wedge sign or mask type, and the weights of
+/// the first prediction in 64ths.
+struct Compound {
+    cost: f64,
+    bits: f64,
+    kind: u8,
+    index: u8,
+    bit: u8,
+    weights: Vec<u8>,
+}
 
 /// What a translational prediction in the mode search depends on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -722,6 +755,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let lam = self.mode.lambda_satd;
 
         self.me_scratch.tx_memo = None;
+        self.me_scratch.alt_pred = None;
 
         // Intra luma.
         self.cur_filters = [0, 0];
@@ -893,8 +927,18 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 pb.interp_filter = self.pick_filter(&pb);
             }
             self.cur_filters = pb.interp_filter;
-            if (self.mode.local_warp || self.mode.obmc) && c.refs[1] <= INTRA_FRAME {
-                pb.motion_mode = self.pick_motion_mode(&pb);
+            if c.refs[1] > INTRA_FRAME {
+                self.pick_compound(&mut pb, tx);
+            } else {
+                let mut plain = None;
+                if self.mode.local_warp || self.mode.obmc {
+                    let (mode, cost) = self.pick_motion_mode(&pb);
+                    pb.motion_mode = mode;
+                    plain = cost;
+                }
+                if self.mode.interintra {
+                    self.pick_interintra(&mut pb, tx, plain);
+                }
             }
             pb.uv_mode = DC_PRED;
             pb.tx_size = self.pick_inter_tx(&pb, tx);
@@ -1113,7 +1157,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let w = block_width(pb.bsize).min(self.fs.mi_cols * 4 - x);
         let h = block_height(pb.bsize).min(self.fs.mi_rows * 4 - y);
         let (w, h) = (w & !(tx_w(tx) - 1), h & !(tx_h(tx) - 1));
-        if w == 0 || h == 0 || !self.pred_luma(pb.ref_frame, pb.mv, x, y, w, h) {
+        if w == 0 || h == 0 || !self.final_luma(pb, x, y, w, h) {
             return tx;
         }
         let mut res = vec![0i32; w * h];
@@ -2010,7 +2054,12 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 pw,
                 ph,
             ) as f64;
-            if !self.pred_plane_f(plane, cur_refs, cur_mv, px, py, pw, ph, cur_f) {
+            let made = if plane == 0 {
+                self.final_luma(pb, px, py, pw, ph)
+            } else {
+                self.pred_plane_f(plane, cur_refs, cur_mv, px, py, pw, ph, cur_f)
+            };
+            if !made {
                 return;
             }
             sse_cur += sse(
@@ -2035,6 +2084,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             pb.interp_filter = [0, 0];
             pb.motion_mode = 0;
             pb.compound_idx = 1;
+            pb.comp_group_idx = 0;
+            pb.interintra = false;
+            self.me_scratch.alt_pred = None;
             pb.palette_size_y = 0;
             pb.use_filter_intra = false;
             pb.uv_mode = DC_PRED;
@@ -2042,17 +2094,22 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
     }
 
     /// SIMPLE or LOCALWARP, whichever predicts the luma with less SATD.
-    fn pick_motion_mode(&mut self, pb: &Block) -> u8 {
-        let Some(src) = self.src else { return 0 };
+    /// The motion mode of a single-reference block and the SATD cost of
+    /// its prediction with that mode's signalling (`None` when no
+    /// prediction was made).
+    fn pick_motion_mode(&mut self, pb: &Block) -> (u8, Option<f64>) {
+        let Some(src) = self.src else {
+            return (0, None);
+        };
         let x = pb.mi_col * 4;
         let y = pb.mi_row * 4;
         let w = block_width(pb.bsize);
         let h = block_height(pb.bsize);
         if x + w > self.fs.mi_cols * 4 || y + h > self.fs.mi_rows * 4 {
-            return 0;
+            return (0, None);
         }
         if !self.pred_plane(0, pb.ref_frame, pb.mv, x, y, w, h) {
-            return 0;
+            return (0, None);
         }
         let sp = &src.planes[0];
         let simple = f64::from(satd(
@@ -2099,7 +2156,350 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             }
         }
         self.b = saved;
-        best.0
+        (best.0, Some(best.1))
+    }
+
+    /// Luma position and size of `pb` when the whole block lies inside the
+    /// frame.
+    fn whole_inside(&self, pb: &Block) -> Option<(usize, usize, usize, usize)> {
+        let (x, y) = (pb.mi_col * 4, pb.mi_row * 4);
+        let (w, h) = (block_width(pb.bsize), block_height(pb.bsize));
+        (x + w <= self.fs.mi_cols * 4 && y + h <= self.fs.mi_rows * 4).then_some((x, y, w, h))
+    }
+
+    /// The luma prediction of `pb` into the scratch: the blend its compound
+    /// type or inter-intra makes when one was chosen, else the plain one.
+    fn final_luma(&mut self, pb: &Block, x: usize, y: usize, w: usize, h: usize) -> bool {
+        if let Some(alt) = &self.me_scratch.alt_pred
+            && alt.len() == w * h
+            && w == block_width(pb.bsize)
+        {
+            self.scratch.obmc[..w * h].copy_from_slice(alt);
+            return true;
+        }
+        self.pred_luma(pb.ref_frame, pb.mv, x, y, w, h)
+    }
+
+    /// Whether coding the residual of the luma prediction `alt` of the
+    /// whole of `pb`, with `alt_bits` of signalling, costs less than that
+    /// of its plain prediction with `plain_bits` (transform-coded, with
+    /// transforms of `tx`). `alt` then becomes the prediction the transform
+    /// size and the skip decision are made on.
+    fn confirm_alt(
+        &mut self,
+        pb: &Block,
+        tx: u8,
+        alt: &[P],
+        alt_bits: f64,
+        plain_bits: f64,
+    ) -> bool {
+        let (x, y) = (pb.mi_col * 4, pb.mi_row * 4);
+        let (w, h) = (block_width(pb.bsize), block_height(pb.bsize));
+        if !w.is_multiple_of(tx_w(tx))
+            || !h.is_multiple_of(tx_h(tx))
+            || !self.pred_luma(pb.ref_frame, pb.mv, x, y, w, h)
+        {
+            return false;
+        }
+        let lam_b = self.enc.lambda;
+        let energy = |res: &[i32]| -> f64 { res.iter().map(|&v| f64::from(v * v)).sum() };
+        let mut res = vec![0i32; w * h];
+        let pred = std::mem::take(&mut self.scratch.obmc);
+        self.residual_of(&pred, w, x, y, w, h, &mut res);
+        self.scratch.obmc = pred;
+        let key = self.pred_key(0, pb.ref_frame, pb.mv, [x, y, w, h]);
+        let plain_coded = match self.me_scratch.tx_memo {
+            Some((k, t, c)) if k == key && t == tx => c,
+            _ => self.tx_cost(&res, w, h, tx),
+        };
+        let plain = plain_coded.min(energy(&res) + lam_b) + lam_b * plain_bits;
+        self.residual_of(alt, w, x, y, w, h, &mut res);
+        let alt_coded = self.tx_cost(&res, w, h, tx);
+        let rd = alt_coded.min(energy(&res) + lam_b) + lam_b * alt_bits;
+        if rd < plain {
+            self.me_scratch.tx_memo = Some((key, tx, alt_coded));
+            self.me_scratch.alt_pred = Some(alt.to_vec());
+            true
+        } else {
+            self.me_scratch.tx_memo = Some((key, tx, plain_coded));
+            false
+        }
+    }
+
+    /// How the two predictions of a compound block are combined: their
+    /// average, or the distance weights, a difference mask or a wedge when
+    /// the best of those by SATD also costs less transform-coded. The
+    /// blends are made of the two rounded predictions, which is what the
+    /// decoder makes of its intermediates to within a rounding.
+    fn pick_compound(&mut self, pb: &mut Block, tx: u8) {
+        use crate::dec::types::{
+            COMPOUND_AVERAGE, COMPOUND_DIFFWTD, COMPOUND_DISTANCE, COMPOUND_WEDGE,
+        };
+        let jnt = self.mode.jnt_comp && self.seq.enable_jnt_comp;
+        let masked = self.mode.masked_compound && self.seq.enable_masked_compound;
+        if !jnt && !masked {
+            return;
+        }
+        let Some(src) = self.src else { return };
+        let Some((x, y, w, h)) = self.whole_inside(pb) else {
+            return;
+        };
+        let n = w * h;
+        let mut p: [Vec<i32>; 2] = [Vec::new(), Vec::new()];
+        for (k, out) in p.iter_mut().enumerate() {
+            let (refs, mv) = ([pb.ref_frame[k], NONE], [pb.mv[k], Mv::ZERO]);
+            if !self.pred_plane(0, refs, mv, x, y, w, h) {
+                return;
+            }
+            out.extend(self.scratch.obmc[..n].iter().map(|v| v.to_i32()));
+        }
+        let [p0, p1] = &p;
+        let sp = &src.planes[0];
+        let source = &sp.data[y * sp.stride + x..];
+        let lam = self.mode.lambda_satd;
+        let refs = pb.ref_frame;
+        // The blend whose weight of the first prediction at sample `i` is
+        // `m[i]` in 64ths, and its SATD.
+        let blend = |m: &[u8], out: &mut [P]| -> f64 {
+            for (i, d) in out.iter_mut().enumerate() {
+                let w0 = i32::from(m[i]);
+                *d = P::from_i32((w0 * p0[i] + (64 - w0) * p1[i] + 32) >> 6);
+            }
+            f64::from(satd(source, sp.stride, out, w, w, h))
+        };
+        let mut buf = vec![P::default(); n];
+        let mut mask = vec![32u8; n];
+        let plain_bits = self.compound_type_bits(refs, COMPOUND_AVERAGE, 0);
+        let plain = blend(&mask, &mut buf) + lam * plain_bits;
+        // The best other way so far.
+        let mut best: Option<Compound> = None;
+        let mut offer = |cost: f64, bits: f64, kind: u8, index: u8, bit: u8, m: &[u8]| {
+            let cost = cost + lam * bits;
+            if best.as_ref().is_none_or(|b| cost < b.cost) {
+                best = Some(Compound {
+                    cost,
+                    bits,
+                    kind,
+                    index,
+                    bit,
+                    weights: m.to_vec(),
+                });
+            }
+        };
+        if jnt {
+            let (fwd, _) = self.distance_weights(refs);
+            mask.fill((4 * fwd).clamp(0, 64) as u8);
+            let bits = self.compound_type_bits(refs, COMPOUND_DISTANCE, 0);
+            offer(blend(&mask, &mut buf), bits, COMPOUND_DISTANCE, 0, 0, &mask);
+        }
+        if masked {
+            // 38 plus a sixteenth of the difference of the predictions, at
+            // 8 bits, or that taken from 64.
+            let down = self.bd - 8;
+            let bits = self.compound_type_bits(refs, COMPOUND_DIFFWTD, 0);
+            for mask_type in 0..2u8 {
+                for (i, m) in mask.iter_mut().enumerate() {
+                    let d = (38 + ((p0[i] - p1[i]).abs() >> down) / 16).min(64) as u8;
+                    *m = if mask_type == 0 { d } else { 64 - d };
+                }
+                offer(
+                    blend(&mask, &mut buf),
+                    bits,
+                    COMPOUND_DIFFWTD,
+                    0,
+                    mask_type,
+                    &mask,
+                );
+            }
+            if crate::spec::tables::WEDGE_BITS[pb.bsize as usize] > 0 {
+                // Rank the 32 wedges by the SAD of their blend, which the
+                // two residuals give without making it; SATD for the best.
+                let r: Vec<(i32, i32)> = (0..n)
+                    .map(|i| {
+                        let s = source[(i / w) * sp.stride + i % w].to_i32();
+                        (s - p0[i], s - p1[i])
+                    })
+                    .collect();
+                let mut ranked: Option<(i64, u8, u8, &'static [u8])> = None;
+                for sign in 0..2u8 {
+                    for index in 0..16u8 {
+                        let Some(m) =
+                            mc::wedge_mask(pb.bsize as usize, sign != 0, usize::from(index))
+                        else {
+                            continue;
+                        };
+                        let sad: i64 = r
+                            .iter()
+                            .zip(m)
+                            .map(|(&(r0, r1), &m)| {
+                                let m = i32::from(m);
+                                i64::from((m * r0 + (64 - m) * r1).abs())
+                            })
+                            .sum();
+                        if ranked.is_none_or(|b| sad < b.0) {
+                            ranked = Some((sad, index, sign, m));
+                        }
+                    }
+                }
+                if let Some((_, index, sign, m)) = ranked {
+                    let bits = self.compound_type_bits(refs, COMPOUND_WEDGE, index);
+                    offer(
+                        blend(&m[..n], &mut buf),
+                        bits,
+                        COMPOUND_WEDGE,
+                        index,
+                        sign,
+                        &m[..n],
+                    );
+                }
+            }
+        }
+        let Some(c) = best else {
+            return;
+        };
+        if c.cost >= plain {
+            return;
+        }
+        blend(&c.weights, &mut buf);
+        if !self.confirm_alt(pb, tx, &buf, c.bits, plain_bits) {
+            return;
+        }
+        pb.compound_type = c.kind;
+        pb.comp_group_idx = u8::from(c.kind != COMPOUND_DISTANCE);
+        pb.compound_idx = u8::from(c.kind != COMPOUND_DISTANCE);
+        if c.kind == COMPOUND_WEDGE {
+            pb.wedge_index = c.index;
+            pb.wedge_sign = c.bit;
+        } else if c.kind == COMPOUND_DIFFWTD {
+            pb.mask_type = c.bit;
+        }
+    }
+
+    /// Inter-intra for a single-reference block of 8x8 to 32x32: its
+    /// prediction blended with a DC, vertical, horizontal or smooth intra
+    /// prediction through that mode's ramp or through a wedge. Taken when
+    /// the best of those leaves less SATD after its signalling than
+    /// `plain`, the cost of the block's motion mode (made here when
+    /// `None`), and also costs less transform-coded.
+    fn pick_interintra(&mut self, pb: &mut Block, tx: u8, plain: Option<f64>) {
+        use crate::dec::types::{BLOCK_32X32, H_PRED, V_PRED};
+        if !self.seq.enable_interintra_compound || !(BLOCK_8X8..=BLOCK_32X32).contains(&pb.bsize) {
+            return;
+        }
+        let Some(src) = self.src else { return };
+        let Some((x, y, w, h)) = self.whole_inside(pb) else {
+            return;
+        };
+        if !self.pred_plane(0, pb.ref_frame, pb.mv, x, y, w, h) {
+            return;
+        }
+        let n = w * h;
+        let inter: Vec<P> = self.scratch.obmc[..n].to_vec();
+        let sp = &src.planes[0];
+        let source = &sp.data[y * sp.stride + x..];
+        let lam = self.mode.lambda_satd;
+        let plain_bits = self.interintra_bits(None);
+        let plain = plain.unwrap_or_else(|| f64::from(satd(source, sp.stride, &inter, w, w, h)))
+            + lam * plain_bits;
+        // The four intra predictions, as the decoder makes them.
+        let sb_mask = self.sb_size4 - 1;
+        let (sr, sc) = (pb.mi_row & sb_mask, pb.mi_col & sb_mask);
+        let ar = self.block_decoded.get(0, sr, sc + (w >> 2) + 1);
+        let bl = self.block_decoded.get(0, sr + (h >> 2) + 1, sc);
+        let (log2w, log2h) = (w.trailing_zeros(), h.trailing_zeros());
+        let mut mask = vec![0u8; n];
+        let mut blend = vec![P::default(); n];
+        let mut best: Option<InterIntra<P>> = None;
+        // The intra prediction of the best mode.
+        let mut best_intra: Vec<P> = Vec::new();
+        // The intra half has no angle and no filter intra.
+        let saved = (self.b.angle_delta_y, self.b.use_filter_intra);
+        (self.b.angle_delta_y, self.b.use_filter_intra) = (0, false);
+        for (ii_mode, mode) in [DC_PRED, V_PRED, H_PRED, SMOOTH_PRED]
+            .into_iter()
+            .enumerate()
+        {
+            let ii_mode = ii_mode as u8;
+            self.predict_intra(0, x, y, pb.avail_l, pb.avail_u, ar, bl, mode, log2w, log2h);
+            let cp = &self.cur.planes[0];
+            let cy = y - self.row0(0);
+            let intra: Vec<P> = (0..h)
+                .flat_map(|i| cp.data[(cy + i) * cp.stride + x..][..w].iter().copied())
+                .collect();
+            mc::ii_smooth_mask(&mut mask, w, w, h, ii_mode);
+            blend.copy_from_slice(&inter);
+            mc::interintra_blend(&mut blend, w, &intra, w, w, h, &mask, w, false, false);
+            let bits = self.interintra_bits(Some((ii_mode, None)));
+            let c = f64::from(satd(source, sp.stride, &blend, w, w, h)) + lam * bits;
+            if best.as_ref().is_none_or(|b| c < b.cost) {
+                best = Some(InterIntra {
+                    cost: c,
+                    bits,
+                    mode: ii_mode,
+                    wedge: None,
+                    pred: blend.clone(),
+                });
+                best_intra = intra;
+            }
+        }
+        if crate::spec::tables::WEDGE_BITS[pb.bsize as usize] > 0
+            && let Some(ii_mode) = best.as_ref().map(|b| b.mode)
+        {
+            // That mode through the wedge whose blend has the least SAD,
+            // from the residuals of the two predictions.
+            let r: Vec<(i32, i32)> = (0..n)
+                .map(|i| {
+                    let s = source[(i / w) * sp.stride + i % w].to_i32();
+                    (s - best_intra[i].to_i32(), s - inter[i].to_i32())
+                })
+                .collect();
+            let mut ranked: Option<(i64, u8, &'static [u8])> = None;
+            for index in 0..16u8 {
+                let Some(m) = mc::wedge_mask(pb.bsize as usize, false, usize::from(index)) else {
+                    continue;
+                };
+                let sad: i64 = r
+                    .iter()
+                    .zip(m)
+                    .map(|(&(ri, rp), &m)| {
+                        let m = i32::from(m);
+                        i64::from((m * ri + (64 - m) * rp).abs())
+                    })
+                    .sum();
+                if ranked.is_none_or(|b| sad < b.0) {
+                    ranked = Some((sad, index, m));
+                }
+            }
+            if let Some((_, index, m)) = ranked {
+                blend.copy_from_slice(&inter);
+                mc::interintra_blend(&mut blend, w, &best_intra, w, w, h, m, w, false, false);
+                let bits = self.interintra_bits(Some((ii_mode, Some(index))));
+                let c = f64::from(satd(source, sp.stride, &blend, w, w, h)) + lam * bits;
+                if best.as_ref().is_none_or(|b| c < b.cost) {
+                    best = Some(InterIntra {
+                        cost: c,
+                        bits,
+                        mode: ii_mode,
+                        wedge: Some(index),
+                        pred: blend.clone(),
+                    });
+                }
+            }
+        }
+        (self.b.angle_delta_y, self.b.use_filter_intra) = saved;
+        let Some(ii) = best else {
+            return;
+        };
+        if ii.cost >= plain || !self.confirm_alt(pb, tx, &ii.pred, ii.bits, plain_bits) {
+            return;
+        }
+        pb.interintra = true;
+        pb.interintra_mode = ii.mode;
+        pb.wedge_interintra = ii.wedge.is_some();
+        pb.wedge_index = ii.wedge.unwrap_or(0);
+        pb.wedge_sign = 0;
+        // An inter-intra block has no other motion mode.
+        pb.motion_mode = 0;
     }
 
     /// Interpolation filter (same both directions) with the least SATD.
@@ -2438,7 +2838,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let fh = self.fs.mi_rows * 4;
         let w = block_width(pb.bsize).min(fw - x);
         let h = block_height(pb.bsize).min(fh - y);
-        if !self.pred_luma(pb.ref_frame, pb.mv, x, y, w, h) {
+        if !self.final_luma(pb, x, y, w, h) {
             return false;
         }
         let sp = &src.planes[0];

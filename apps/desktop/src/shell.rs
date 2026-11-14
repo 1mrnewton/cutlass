@@ -601,15 +601,15 @@ pub enum ExportQuality {
 
 impl ExportQuality {
     /// The bitrate for a picture `short_side` pixels on its short side.
-    /// HEVC gets the same picture from fewer bits; MPEG-2 needs twice what
-    /// H.264 spends. Motion JPEG codes every frame alone: a 1080p frame of
+    /// HEVC and AV1 get the same picture from fewer bits; MPEG-2 needs twice
+    /// what H.264 spends. Motion JPEG codes every frame alone: a 1080p frame of
     /// footage at quality 75 is about 240 KB, near five times H.264's rate at
     /// 30 frames a second. The other picture codecs spend what H.264 does.
     #[must_use]
     pub fn bitrate(self, short_side: u32, codec: CodecId) -> u32 {
         let base = cutlass_export::video_bitrate(short_side);
         let base = match codec {
-            CodecId::Hevc => base / 10 * 6,
+            CodecId::Hevc | CodecId::Av1 => base / 10 * 6,
             CodecId::Mjpeg => base.saturating_mul(5),
             CodecId::Mpeg2 => base.saturating_mul(2),
             _ => base,
@@ -7730,6 +7730,11 @@ impl Shell {
                 "VP8 is written in an MP4".to_owned(),
             ));
         }
+        if request.codec == CodecId::Av1 && mov {
+            return Err(ShellError::Unavailable(
+                "AV1 is written in an MP4".to_owned(),
+            ));
+        }
         if request.codec == CodecId::Mpeg2 && mov {
             return Err(ShellError::Unavailable(
                 "MPEG-2 is written in an MP4".to_owned(),
@@ -7796,6 +7801,7 @@ impl Shell {
                 | CodecId::Prores
                 | CodecId::Mjpeg
                 | CodecId::Vp8
+                | CodecId::Av1
                 | CodecId::Mpeg2
         ) {
             return Err(ShellError::ExportUnavailable);
@@ -17240,6 +17246,98 @@ mod tests {
         let (u, v) = chroma.split_at(chroma.len() / 2);
         let near = |plane: &[u8], value: u8| plane.iter().all(|&s| s.abs_diff(value) <= 4);
         assert!(near(y, 97) && near(u, 156) && near(v, 104));
+    }
+
+    /// AV1 exports through the Rust encoder into an MP4 `av01` track with
+    /// its `av1C` record and the `av01` brand, which the desktop's readers
+    /// decode back to the clip's colour with the Rust decoder; a MOV is
+    /// refused.
+    #[test]
+    fn an_av1_export_lands_an_mp4_that_plays_back() {
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        // Hardware off: the Rust encoder and decoder are the ones asked.
+        let software = cutlass_settings::Hardware {
+            decode: false,
+            encode: false,
+            ..cutlass_settings::Hardware::default()
+        };
+        let (decoders, encoders) = crate::register_codecs_with(&software);
+        let mut desktop = Shell::new(decoders, encoders, Settings::default());
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.encodes(CodecId::Av1));
+        let mov = desktop.export(ExportRequest {
+            path: temp.path.join("av1.mov"),
+            short_side: 480,
+            codec: CodecId::Av1,
+            ..ExportRequest::default()
+        });
+        assert_eq!(mov.unwrap_err().to_string(), "AV1 is written in an MP4");
+
+        let destination = temp.path.join("av1.mp4");
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                short_side: 480,
+                codec: CodecId::Av1,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        land_job(&mut desktop);
+        assert_eq!(desktop.notice(), "Exported av1.mp4");
+        let bytes = std::fs::read(&destination).unwrap();
+        assert!(bytes.windows(4).any(|w| w == b"av1C"));
+        let ftyp = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+        assert!(bytes[16..ftyp].chunks(4).any(|brand| brand == b"av01"));
+
+        let readers = crate::readers::readers_with(crate::register_codecs_with(&software).0);
+        let mut media = readers.open(&destination).unwrap();
+        assert_eq!(
+            (media.info().width, media.info().height),
+            (Some(960), Some(480))
+        );
+        let held = media
+            .decode_at(Micros(1_500_000), &TimeRange::new(0, 2_000_000))
+            .unwrap();
+        let cutlass_engine::DecodedFrame::Coded {
+            width,
+            height,
+            pixel,
+            primaries,
+            matrix,
+            range,
+            bytes,
+            ..
+        } = held.frame
+        else {
+            panic!("a coded picture");
+        };
+        assert_eq!((width, height), (960, 480));
+        assert_eq!(pixel, PixelFormat::Yuv420p);
+        assert_eq!(primaries, ColorPrimaries::Bt709);
+        assert_eq!(matrix, cutlass_decode::ColorMatrix::Bt709);
+        assert_eq!(range, cutlass_decode::ColorRange::Limited);
+        // 0x336699 in BT.709 limited range, as export converts it: Y 97,
+        // Cb 156, Cr 104.
+        let (y, chroma) = bytes.split_at(960 * 480);
+        let (u, v) = chroma.split_at(chroma.len() / 2);
+        let near = |plane: &[u8], value: u8| plane.iter().all(|&s| s.abs_diff(value) <= 4);
+        assert!(near(y, 97) && near(u, 156) && near(v, 104));
+    }
+
+    #[test]
+    fn av1_spends_what_hevc_does() {
+        for quality in [
+            super::ExportQuality::Lower,
+            super::ExportQuality::Recommended,
+            super::ExportQuality::Higher,
+        ] {
+            assert_eq!(
+                quality.bitrate(1080, CodecId::Av1),
+                quality.bitrate(1080, CodecId::Hevc)
+            );
+            assert!(quality.bitrate(1080, CodecId::Av1) < quality.bitrate(1080, CodecId::H264));
+        }
     }
 
     /// MPEG-2 exports through the Rust encoder at twice H.264's rate into

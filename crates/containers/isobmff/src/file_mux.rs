@@ -139,14 +139,15 @@ fn prores_color(frame: &[u8]) -> Option<ColorTags> {
 const PRORES_ENTRIES: [[u8; 4]; 6] = [*b"apco", *b"apcs", *b"apcn", *b"apch", *b"ap4h", *b"ap4x"];
 
 /// The box writer's parameters for `stream`: H.264, HEVC, MPEG-4 Visual,
-/// ProRes, Motion JPEG, VP8 or MPEG-2 pictures, or AAC, Opus, or PCM sound.
-/// PCM keeps the layout its three layout bytes name (empty is s16le). A VP8 track's extradata is its `vpcC` payload. A ProRes track whose extradata is
+/// ProRes, Motion JPEG, VP8, AV1 or MPEG-2 pictures, or AAC, Opus, or PCM sound.
+/// PCM keeps the layout its three layout bytes name (empty is s16le). A VP8 track's extradata is its `vpcC` payload,
+/// and an AV1 track's is its `av1C` record. A ProRes track whose extradata is
 /// a profile's four-character code is written with that sample entry.
 /// Motion JPEG is a QuickTime `jpeg` entry, so only a movie takes it.
 fn box_params(stream: &NewStream, brand: FileBrand) -> Result<StreamParams, MuxError> {
     let StreamCodec::Known(codec) = stream.params.codec() else {
         return Err(rejected(
-            "mp4 export writes H.264, HEVC, MPEG-4 Visual, ProRes, Motion JPEG, VP8, MPEG-2, AAC, ALAC, Opus, AC-3, E-AC-3, and PCM",
+            "mp4 export writes H.264, HEVC, MPEG-4 Visual, ProRes, Motion JPEG, VP8, AV1, MPEG-2, AAC, ALAC, Opus, AC-3, E-AC-3, and PCM",
         ));
     };
     let scale = BoxScale(stream.timescale.ticks_per_second());
@@ -154,7 +155,14 @@ fn box_params(stream: &NewStream, brand: FileBrand) -> Result<StreamParams, MuxE
         Id::Mjpeg if brand != FileBrand::Mov => {
             return Err(rejected("Motion JPEG is written to a .mov movie"));
         }
-        Id::H264 | Id::Hevc | Id::Mpeg4 | Id::Prores | Id::Mjpeg | Id::Vp8 | Id::Mpeg2 => {
+        Id::H264
+        | Id::Hevc
+        | Id::Mpeg4
+        | Id::Prores
+        | Id::Mjpeg
+        | Id::Vp8
+        | Id::Av1
+        | Id::Mpeg2 => {
             let size = stream
                 .params
                 .size()
@@ -164,6 +172,7 @@ fn box_params(stream: &NewStream, brand: FileBrand) -> Result<StreamParams, MuxE
                 Id::Hevc => CodecId::Hevc,
                 Id::Mpeg4 => CodecId::Mpeg4,
                 Id::Vp8 => CodecId::Vp8,
+                Id::Av1 => CodecId::Av1,
                 Id::Mjpeg => CodecId::Mjpeg,
                 Id::Mpeg2 => CodecId::Mpeg2,
                 _ => CodecId::ProRes,
@@ -229,7 +238,7 @@ fn box_params(stream: &NewStream, brand: FileBrand) -> Result<StreamParams, MuxE
         }
         _ => {
             return Err(rejected(
-                "mp4 export writes H.264, HEVC, MPEG-4 Visual, ProRes, Motion JPEG, VP8, MPEG-2, AAC, ALAC, Opus, AC-3, E-AC-3, and PCM",
+                "mp4 export writes H.264, HEVC, MPEG-4 Visual, ProRes, Motion JPEG, VP8, AV1, MPEG-2, AAC, ALAC, Opus, AC-3, E-AC-3, and PCM",
             ));
         }
     };
@@ -1292,6 +1301,115 @@ mod tests {
             samples += 1;
         }
         assert_eq!(samples, 3);
+    }
+
+    /// An AV1 track is an `av01` sample entry whose `av1C` box holds the
+    /// record the first packet carries, in a file that lists the `av01`
+    /// brand. Each sample is its temporal unit without the delimiter and
+    /// padding, every OBU with a size, and reads back as that.
+    #[test]
+    fn an_av1_track_is_av01_with_its_av1c_brand_and_bare_samples() {
+        // The record of a 64x32 8-bit 4:2:0 stream: marker and version,
+        // profile and level, the chroma bits, no delay, a sequence header.
+        let av1c = vec![0x81, 0x00, 0x0c, 0x00, 0x0a, 0x03, 1, 2, 3];
+        let obu = |obu_type: u8, payload: &[u8]| {
+            let mut out = vec![(obu_type << 3) | 2, payload.len() as u8];
+            out.extend_from_slice(payload);
+            out
+        };
+        // A delimiter, then a frame; the second unit also pads.
+        let unit = |index: u8| {
+            let mut out = obu(2, &[]);
+            if index == 1 {
+                out.extend(obu(15, &[0, 0]));
+            }
+            out.extend(obu(6, &[index; 30]));
+            out
+        };
+        let mut mux = Mp4Mux::new(Cursor::new(Vec::new()));
+        let picture = mux
+            .add_stream(NewStream {
+                params: StreamParams::video(
+                    StreamCodec::Known(Id::Av1),
+                    FrameSize::try_new(64, 32).unwrap(),
+                    Vec::new(),
+                ),
+                timescale: Timescale::new(30),
+                language: None,
+            })
+            .unwrap();
+        mux.set_config(picture, &av1c).unwrap();
+        for index in 0..3u8 {
+            mux.write_packet(&packet(picture.get(), unit(index), i64::from(index), 1, 30))
+                .unwrap();
+        }
+        mux.finish(&[TrackDuration {
+            track: picture,
+            timescale: Timescale::new(30),
+            ticks: 3,
+        }])
+        .unwrap();
+        let bytes = mux.into_writer().unwrap().into_inner();
+        assert!(bytes.windows(4).any(|w| w == b"av01"));
+        let at = bytes.windows(4).position(|w| w == b"av1C").unwrap();
+        assert_eq!(&bytes[at + 4..at + 4 + av1c.len()], av1c.as_slice());
+        // The file type box lists the brand.
+        assert_eq!(&bytes[4..8], b"ftyp");
+        let ftyp = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+        assert!(bytes[16..ftyp].chunks(4).any(|brand| brand == b"av01"));
+
+        let mut file = crate::IsoBmffFile::open(Cursor::new(bytes)).unwrap();
+        let stream = &cutlass_container::Demux::streams(&file)[0];
+        assert_eq!(stream.params().codec(), &StreamCodec::Known(Id::Av1));
+        assert_eq!(stream.params().extradata(), av1c.as_slice());
+        let mut samples = 0u8;
+        while let Some(packet) = cutlass_container::Demux::read_packet(&mut file).unwrap() {
+            assert_eq!(packet.bytes(), obu(6, &[samples; 30]).as_slice());
+            samples += 1;
+        }
+        assert_eq!(samples, 3);
+
+        // A packet that is not whole OBUs is refused, and a movie without
+        // an AV1 track does not list the brand.
+        let mut mux = Mp4Mux::new(Cursor::new(Vec::new()));
+        let picture = mux
+            .add_stream(NewStream {
+                params: StreamParams::video(
+                    StreamCodec::Known(Id::Av1),
+                    FrameSize::try_new(64, 32).unwrap(),
+                    Vec::new(),
+                ),
+                timescale: Timescale::new(30),
+                language: None,
+            })
+            .unwrap();
+        assert!(
+            mux.write_packet(&packet(picture.get(), vec![0x32, 9, 1], 0, 1, 30))
+                .is_err()
+        );
+        let mut mux = Mp4Mux::new(Cursor::new(Vec::new()));
+        let picture = mux
+            .add_stream(NewStream {
+                params: StreamParams::video(
+                    StreamCodec::Known(Id::Vp8),
+                    FrameSize::try_new(64, 32).unwrap(),
+                    Vec::new(),
+                ),
+                timescale: Timescale::new(30),
+                language: None,
+            })
+            .unwrap();
+        mux.write_packet(&packet(picture.get(), vec![0; 8], 0, 1, 30))
+            .unwrap();
+        mux.finish(&[TrackDuration {
+            track: picture,
+            timescale: Timescale::new(30),
+            ticks: 1,
+        }])
+        .unwrap();
+        let bytes = mux.into_writer().unwrap().into_inner();
+        let ftyp = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+        assert!(!bytes[16..ftyp].chunks(4).any(|brand| brand == b"av01"));
     }
 
     /// An MPEG-2 track is an `mp4v` entry whose ES descriptor names Main

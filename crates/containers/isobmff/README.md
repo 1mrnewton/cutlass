@@ -51,7 +51,7 @@ Writing, with `IsoBmffMux`:
 
 The default layout is `ftyp`, `mdat`, `moov`. `moov_at_end: false` puts `moov` first and holds the payloads in memory until `finish`. `fragmented: true` writes `moov` with `mvex`, then `moof`/`mdat` pairs, then `mfra`, under the brands `iso5`, `iso6`, `mp41`. Decode times on a track must start at 0 and continue by each packet's duration. `set_edits` writes an `elst`.
 
-`Mp4Mux` is the export muxer. It accepts H.264, HEVC, MPEG-4 Visual, MPEG-2, ProRes, VP8, and Motion JPEG pictures, and AAC, ALAC, Opus, AC-3, E-AC-3, and 16-bit PCM sound. Motion JPEG is written only to a QuickTime movie.
+`Mp4Mux` is the export muxer. It accepts H.264, HEVC, MPEG-4 Visual, MPEG-2, ProRes, VP8, AV1, and Motion JPEG pictures, and AAC, ALAC, Opus, AC-3, E-AC-3, and 16-bit PCM sound. Motion JPEG is written only to a QuickTime movie. An AV1 track is an `av01` entry with its `av1C` record in a file that lists the `av01` brand; each sample is the temporal unit without its temporal delimiter, padding and redundant frame headers, every OBU with a size (AV1 Codec ISO Media File Format Binding 2.1 and 2.4).
 
 What is refused:
 

@@ -1,9 +1,10 @@
 //! CPU color conversion for the software path.
 //!
-//! A picture is planar Y′CbCr or a platform buffer. Planar 4:2:0, 4:2:2, and
-//! 4:4:4 become tightly packed 8-bit RGBA, the bytes the software path samples.
-//! Semi-planar [`Layout::Nv12`] is refused. 10-bit samples are scaled into that
-//! same 8-bit RGBA; a right shift is not the conversion.
+//! A picture is planar Y′CbCr, planar GBR, or a platform buffer. Planar 4:2:0,
+//! 4:2:2, 4:4:0, and 4:4:4 become tightly packed 8-bit RGBA, the bytes the
+//! software path samples. Semi-planar [`Layout::Nv12`] is refused. 10-bit and
+//! 12-bit samples are scaled into that same 8-bit RGBA; a right shift is not
+//! the conversion. GBR planes ([`Matrix::Identity`]) take no matrix.
 //!
 //! Rec.709, HLG, and PQ are transfer functions. HLG here is the BT.2100 OETF
 //! and its inverse. The HLG system-gamma OOTF is not applied. A segment HDR
@@ -25,7 +26,7 @@ mod transfer;
 use std::fmt;
 
 use cutlass_codec::access::{
-    ColorPrimaries, ColorRange, MatrixCoefficients, PixelFormat, Transfer, Yuv420p,
+    ColorMatrix, ColorPrimaries, ColorRange, MatrixCoefficients, PixelFormat, Transfer, Yuv420p,
 };
 
 pub use lut::{Cube, Lut, ThreeDl};
@@ -40,19 +41,23 @@ pub const MAX_EDGE: u32 = 8_192;
 pub enum Layout {
     /// Planar 4:2:0. Chroma is half the width and half the height.
     Yuv420,
-    /// Planar 4:2:2. Chroma is half the width and the full height.
+    /// Planar 4:2:2. Chroma is half the width, rounded up, and the full height.
     Yuv422,
+    /// Planar 4:4:0. Chroma is the full width and half the height, rounded up.
+    Yuv440,
     /// Planar 4:4:4. Chroma matches the luma grid.
     Yuv444,
     /// Interleaved chroma, semi-planar 4:2:0. Not converted.
     Nv12,
 }
 
-/// Stored sample width. Ten-bit samples are little-endian `u16` in `0..=1023`.
+/// Stored sample width. Ten-bit samples are little-endian `u16` in
+/// `0..=1023`, and twelve-bit samples in `0..=4095`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Depth {
     Eight,
     Ten,
+    Twelve,
 }
 
 /// Y′CbCr matrix. Unspecified codec tags become [`Matrix::Bt709`].
@@ -62,6 +67,8 @@ pub enum Matrix {
     Bt709,
     Bt601,
     Bt2020,
+    /// No matrix: the planes are G, B, and R, in that order.
+    Identity,
 }
 
 impl Matrix {
@@ -72,6 +79,28 @@ impl Matrix {
             MatrixCoefficients::Bt601 => Ok(Self::Bt601),
             MatrixCoefficients::Bt2020 => Ok(Self::Bt2020),
             MatrixCoefficients::Rgb => Err(Error::Matrix),
+        }
+    }
+
+    /// The matrix a decoded picture names. An unnamed one is BT.709, and
+    /// identity is GBR planes. A matrix this crate has no weights for (FCC,
+    /// SMPTE 240M, YCgCo, and the later ones) is [`Error::Matrix`].
+    pub fn from_matrix(value: ColorMatrix) -> Result<Self, Error> {
+        match value {
+            ColorMatrix::Unspecified | ColorMatrix::Bt709 => Ok(Self::Bt709),
+            ColorMatrix::Bt601 => Ok(Self::Bt601),
+            ColorMatrix::Bt2020 => Ok(Self::Bt2020),
+            ColorMatrix::Identity => Ok(Self::Identity),
+            ColorMatrix::Fcc
+            | ColorMatrix::Smpte240m
+            | ColorMatrix::Ycgco
+            | ColorMatrix::Smpte2085
+            | ColorMatrix::ChromaDerived
+            | ColorMatrix::ChromaDerivedConstant
+            | ColorMatrix::Ictcp
+            | ColorMatrix::IptC2
+            | ColorMatrix::YcgcoRe
+            | ColorMatrix::YcgcoRo => Err(Error::Matrix),
         }
     }
 }
@@ -235,17 +264,19 @@ pub enum Outcome {
 pub enum Error {
     /// Width or height is zero.
     Empty,
-    /// 4:2:0 needs even edges. 4:2:2 needs an even width.
+    /// 4:2:0 needs even edges.
     Odd,
     /// A plane is shorter than its width, height, and stride.
     Length,
     /// An edge, a LUT, or a byte length is past the limit.
     Limit,
-    /// A 10-bit sample is above 1023, or a LUT value is not usable.
+    /// A 10-bit sample is above 1023, a 12-bit sample is above 4095, or a
+    /// LUT value is not usable.
     Range,
     /// This layout is not converted. [`Layout::Nv12`] is the named case.
     Layout(Layout),
-    /// The codec matrix is RGB, which is not Y′CbCr.
+    /// The codec matrix is RGB, which is not Y′CbCr, or one this crate has
+    /// no weights for.
     Matrix,
     /// The draft integer is not one of -1, 0, 2, 67, or 2084.
     Draft(i32),
@@ -292,7 +323,7 @@ impl fmt::Display for Error {
             Self::Range => "sample is outside the stored range",
             Self::Layout(Layout::Nv12) => "nv12 is not converted",
             Self::Layout(_) => "layout is not converted",
-            Self::Matrix => "rgb is not a ycbcr matrix",
+            Self::Matrix => "the matrix is not one this crate converts",
             Self::Draft(_) => "draft color space is not a known code",
             Self::Segment(_) => "segment hdr mode is outside 0 through 11",
             Self::Intensity => "segment hdr intensity is not in 0 through 1",

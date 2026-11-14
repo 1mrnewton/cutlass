@@ -613,6 +613,10 @@ pub struct MeScratch<P: Pixel> {
     pub pred_cache: Vec<(super::rdo::PredKey, Vec<P>)>,
     /// The transform cost of the chosen inter prediction and transform size.
     pub tx_memo: Option<(super::rdo::PredKey, u8, f64)>,
+    /// The luma prediction of the block being decided (stride = block
+    /// width) when a compound mask, the distance weights or inter-intra
+    /// was chosen for it; `None` for the plain prediction.
+    pub alt_pred: Option<Vec<P>>,
     /// Intermediate of the estimate transform.
     pub tx_tmp: Vec<i16>,
     /// Horizontal-pass rows the sub-sample search shares.
@@ -674,6 +678,7 @@ impl<P: Pixel> MeScratch<P> {
             win: Vec::new(),
             pred_cache: Vec::new(),
             tx_memo: None,
+            alt_pred: None,
             tx_tmp: vec![0; 64 * 32],
             seen: Vec::new(),
             stamp: 0,
@@ -693,6 +698,7 @@ impl<P: Pixel> MeScratch<P> {
             win: Vec::new(),
             pred_cache: Vec::new(),
             tx_memo: None,
+            alt_pred: None,
             tx_tmp: Vec::new(),
             seen: Vec::new(),
             stamp: 0,

@@ -3439,6 +3439,56 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         }
     }
 
+    /// The context of `comp_group_idx` for the block in `self.b`.
+    pub(crate) fn comp_group_idx_ctx(&self) -> usize {
+        let (above, left) = self.neighbor_refs();
+        let (r, c) = (self.b.mi_row, self.b.mi_col);
+        let mut ctx = 0;
+        if self.b.avail_u {
+            if above[1] > INTRA_FRAME {
+                ctx += self.mi(r - 1, c).comp_group_idx() as usize;
+            } else if above[0] == ALTREF_FRAME {
+                ctx += 3;
+            }
+        }
+        if self.b.avail_l {
+            if left[1] > INTRA_FRAME {
+                ctx += self.mi(r, c - 1).comp_group_idx() as usize;
+            } else if left[0] == ALTREF_FRAME {
+                ctx += 3;
+            }
+        }
+        ctx.min(5)
+    }
+
+    /// The context of `compound_idx` for the block in `self.b` predicted
+    /// from `refs`.
+    pub(crate) fn compound_idx_ctx(&self, refs: [i8; 2]) -> usize {
+        let (above, left) = self.neighbor_refs();
+        let (r, c) = (self.b.mi_row, self.b.mi_col);
+        let h = self.hdr;
+        let dist = |f: i8| {
+            h.get_relative_dist(self.seq, h.order_hints[f as usize], h.order_hint)
+                .abs()
+        };
+        let mut ctx = if dist(refs[0]) == dist(refs[1]) { 3 } else { 0 };
+        if self.b.avail_u {
+            if above[1] > INTRA_FRAME {
+                ctx += self.mi(r - 1, c).compound_idx() as usize;
+            } else if above[0] == ALTREF_FRAME {
+                ctx += 1;
+            }
+        }
+        if self.b.avail_l {
+            if left[1] > INTRA_FRAME {
+                ctx += self.mi(r, c - 1).compound_idx() as usize;
+            } else if left[0] == ALTREF_FRAME {
+                ctx += 1;
+            }
+        }
+        ctx
+    }
+
     fn read_compound_type(&mut self, is_compound: bool) {
         self.b.comp_group_idx = 0;
         self.b.compound_idx = 1;
@@ -3449,62 +3499,16 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         if is_compound {
             let bs = self.b.bsize;
             let n = WEDGE_BITS[bs as usize];
-            let (above, left) = self.neighbor_refs();
-            let (au, al) = (self.b.avail_u, self.b.avail_l);
-            let (r, c) = (self.b.mi_row, self.b.mi_col);
             if self.seq.enable_masked_compound {
-                let mut ctx = 0;
-                if au {
-                    if above[1] > INTRA_FRAME {
-                        ctx += self.mi(r - 1, c).comp_group_idx() as usize;
-                    } else if above[0] == ALTREF_FRAME {
-                        ctx += 3;
-                    }
-                }
-                if al {
-                    if left[1] > INTRA_FRAME {
-                        ctx += self.mi(r, c - 1).comp_group_idx() as usize;
-                    } else if left[0] == ALTREF_FRAME {
-                        ctx += 3;
-                    }
-                }
+                let ctx = self.comp_group_idx_ctx();
                 self.b.comp_group_idx = u8::from(self.msac.bool_adapt(
-                    &mut self.cdf.comp_group_idx[ctx.min(5)],
+                    &mut self.cdf.comp_group_idx[ctx],
                     self.pb.comp_group_idx != 0,
                 ));
             }
             if self.b.comp_group_idx == 0 {
                 if self.seq.enable_jnt_comp {
-                    let h = self.hdr;
-                    let fwd = h
-                        .get_relative_dist(
-                            self.seq,
-                            h.order_hints[self.b.ref_frame[0] as usize],
-                            h.order_hint,
-                        )
-                        .abs();
-                    let bck = h
-                        .get_relative_dist(
-                            self.seq,
-                            h.order_hints[self.b.ref_frame[1] as usize],
-                            h.order_hint,
-                        )
-                        .abs();
-                    let mut ctx = if fwd == bck { 3 } else { 0 };
-                    if au {
-                        if above[1] > INTRA_FRAME {
-                            ctx += self.mi(r - 1, c).compound_idx() as usize;
-                        } else if above[0] == ALTREF_FRAME {
-                            ctx += 1;
-                        }
-                    }
-                    if al {
-                        if left[1] > INTRA_FRAME {
-                            ctx += self.mi(r, c - 1).compound_idx() as usize;
-                        } else if left[0] == ALTREF_FRAME {
-                            ctx += 1;
-                        }
-                    }
+                    let ctx = self.compound_idx_ctx(self.b.ref_frame);
                     self.b.compound_idx = u8::from(
                         self.msac
                             .bool_adapt(&mut self.cdf.compound_idx[ctx], self.pb.compound_idx != 0),

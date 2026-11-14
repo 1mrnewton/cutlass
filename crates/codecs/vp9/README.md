@@ -232,33 +232,42 @@ change at equal PSNR-Y: negative is smaller files than libvpx-vp9. Times
 are the mean per run.
 
 A detailed picture panning 7 pixels a frame, with film grain, 60 frames
-(times are the mean of the four runs; Cutlass at q 90 to 150, libvpx at
-1 to 8 Mb/s):
+(times are the mean of the four runs; Cutlass at q 80 to 140, libvpx at
+1 to 4 Mb/s). BD-rate on PSNR-Y and on the PSNR averaged over the planes
+(FFmpeg's `psnr` "average"):
 
-| Cutlass | libvpx-vp9 | BD-rate | Time (Cutlass / libvpx) |
-| --- | --- | ---: | --- |
-| speed 6 | good, cpu-used 1 | −1.5% | 2.76 s / 3.25 s |
-| speed 7 | good, cpu-used 2 | −0.5% | 1.48 s / 2.55 s |
-| speed 7 | good, cpu-used 3 | −7% | 1.48 s / 1.95 s |
-| speed 7 | good, cpu-used 5 | −14% | 1.48 s / 2.30 s |
-| speed 6 | good, cpu-used 5 | −17% | 2.76 s / 2.30 s |
-| speed 5 | good, cpu-used 5 | −28% | 4.32 s / 2.30 s |
-| speed 9 | realtime, cpu-used 6 | −51% | 0.44 s / 0.51 s |
-| speed 9 | realtime, cpu-used 8 | −74% | 0.44 s / 0.42 s |
-| speed 10 | realtime, cpu-used 8 | −69% | 0.41 s / 0.42 s |
+| Cutlass | libvpx-vp9 | BD-rate Y | BD-rate avg | Time (Cutlass / libvpx) |
+| --- | --- | ---: | ---: | --- |
+| speed 6 | good, cpu-used 1 | −10% | +0.6% | 2.21 s / 2.51 s |
+| speed 6 | good, cpu-used 2 | −13% | +2.8% | 2.21 s / 2.13 s |
+| speed 7 | good, cpu-used 3 | −27% | −4.8% | 1.48 s / 1.75 s |
+| speed 7 | good, cpu-used 5 | −32% | −13% | 1.48 s / 1.76 s |
+| speed 9 | realtime, cpu-used 6 | −43% | −25% | 0.43 s / 0.51 s |
+| speed 10 | realtime, cpu-used 8 | | −59% | 0.38 s / 0.47 s |
 
-Point by point against good, cpu-used 5, speed 7 is ahead at every rate:
-at 41.4 dB about 800 kb/s against 1082 kb/s in 1.24 s against 1.63 s, at
-43.2 dB the same 2 Mb/s in about 1.65 s against 1.90 s. Against
-cpu-used 1 speed 6 is ahead below 43 dB and behind above it (at 43.5 dB
-about 2.2 Mb/s against 2.0 Mb/s, in 3.3 s against 2.1 s).
+Point by point against good, cpu-used 1 at 2 Mb/s, interleaved runs:
+libvpx 1981 kb/s at 42.31 dB (averaged PSNR) in 2.09 to 2.22 s, speed 6
+2047 kb/s at 42.34 dB in 2.08 to 2.26 s.
 
-On a clean 720p clip (no grain, 60 frames) speed 7 is −18% against good,
-cpu-used 5 in its time (1.29 s against 1.33 s), and level with cpu-used
-1 (+2.4% on PSNR-Y, +0.4% averaged over the planes) in three quarters
-of its time.
+On a clean 720p clip (no grain, 60 frames) speed 7 is ahead of good,
+cpu-used 1 on both measures (−15% on PSNR-Y, −3.2% averaged) in three
+quarters of its time (1.27 s against 1.74 s), and −33% / −19% against
+cpu-used 5 in its time; speed 6 is −9% / −11% against cpu-used 1 in its
+time.
 
 What moved the encoder most recently, at speed 6 unless said:
+
+- Candidates are kept for a trial only within a fifth of the best one's
+  score (SAD and vector rate for inter, SATD for intra): −17% and −9% of
+  the time for about 1% of the bits; intra is tried in inter frames past
+  eight levels of error a sample (−5%).
+- The sub-sample refinement tries one diagonal of four, as libvpx's
+  pruned tree does (−11 to −13%, the same BD-rate); RD quantization walks
+  only to the last coefficient of half a step and keeps smaller ones at
+  zero (−9% of the instructions at high quality); a coded whole block
+  under half the quantizer's noise ends the partition search (−6%).
+- Chroma coefficients' bits weigh 1/0.7 of luma's: 3 to 4% fewer bits at
+  the same averaged PSNR, 19 to 22% at the same PSNR-Y.
 
 - Rate weighs twice what libvpx's `rdmult` gives it in the RD decisions:
   8 to 17% fewer bits at the same PSNR (luma, and averaged over the

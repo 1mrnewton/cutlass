@@ -3,6 +3,10 @@
 
     python3 tools/text-oracles/shape_cases.py cases.txt          # Latin, Arabic, Hebrew
     python3 tools/text-oracles/shape_cases.py cases.txt indic    # Devanagari and its sisters
+    python3 tools/text-oracles/shape_cases.py cases.txt khmer
+    python3 tools/text-oracles/shape_cases.py cases.txt myanmar
+    python3 tools/text-oracles/shape_cases.py cases.txt universal          # every script below
+    python3 tools/text-oracles/shape_cases.py cases.txt universal Java     # one of them
     CUTLASS_SHAPE_CASES=cases.txt cargo test -p cutlass-text --lib -- \
         --ignored harfbuzz_agrees
 
@@ -70,6 +74,84 @@ if len(sys.argv)>2 and sys.argv[2]=="myanmar":
     for f,i in [(SYS+"NotoSansMyanmar.ttc",0),(SYS+"NotoSansMyanmar.ttc",4),(SYS+"NotoSerifMyanmar.ttc",0),
                 (SUP+"Myanmar MN.ttc",0),(SUP+"Myanmar Sangam MN.ttc",0)]:
         for t in myanmar: cases.append((f,i,"Mymr","ltr",t))
+if len(sys.argv)>2 and sys.argv[2]=="universal":
+    # The scripts shaped by the shared rules, each over the face this Mac
+    # has for it. The texts are made from the script's own characters:
+    # each letter, each mark on a letter, marks in pairs, letters stacked
+    # with each virama and each stacker, marks and viramas with no letter,
+    # joiners and non-joiners, and the script beside Latin and digits. The
+    # Tibetan and Sinhala faces here shape by their own machines, and the
+    # Tai Tham and Syloti Nagri faces name only a default script, so those
+    # are shaped as before; they are here to show nothing moved.
+    import unicodedata
+    cases=[]
+    N="NotoSans"; R="-Regular.ttf"; O="-Regular.otf"
+    scripts=[("Tibt",SUP+"Kailasa.ttc",[(0xF00,0xFFF)]),("Tibt",SUP+"Kokonor.ttf",[(0xF00,0xFFF)]),
+        ("Sinh",SUP+"Sinhala MN.ttc",[(0xD80,0xDFF)]),("Sinh",SUP+"Sinhala Sangam MN.ttc",[(0xD80,0xDFF)]),
+        ("Batk",SUP+N+"Batak"+R,[(0x1BC0,0x1BFF)]),("Bhks",SUP+N+"Bhaiksuki"+R,[(0x11C00,0x11C6F)]),
+        ("Bugi",SUP+N+"Buginese"+R,[(0x1A00,0x1A1F)]),("Buhd",SUP+N+"Buhid"+R,[(0x1740,0x175F)]),
+        ("Cakm",SUP+N+"Chakma"+R,[(0x11100,0x1114F)]),("Cham",SUP+N+"Cham"+R,[(0xAA00,0xAA5F)]),
+        ("Dupl",SUP+N+"Duployan"+R,[(0x1BC00,0x1BC9F)]),("Egyp",SUP+N+"EgyptianHieroglyphs"+R,[(0x13000,0x1345F)]),
+        ("Gong",SUP+N+"GunjalaGondi"+O,[(0x11D60,0x11DAF)]),("Gonm",SUP+N+"MasaramGondi"+O,[(0x11D00,0x11D5F)]),
+        ("Hano",SUP+N+"Hanunoo"+R,[(0x1720,0x173F)]),("Java",SUP+N+"Javanese"+O,[(0xA980,0xA9DF)]),
+        ("Kthi",SUP+N+"Kaithi"+R,[(0x11080,0x110CF)]),("Kali",SUP+N+"KayahLi"+R,[(0xA900,0xA92F)]),
+        ("Khar",SUP+N+"Kharoshthi"+R,[(0x10A00,0x10A5F)]),("Khoj",SUP+N+"Khojki"+R,[(0x11200,0x1124F)]),
+        ("Sind",SUP+N+"Khudawadi"+R,[(0x112B0,0x112FF)]),("Lepc",SUP+N+"Lepcha"+R,[(0x1C00,0x1C4F)]),
+        ("Limb",SUP+N+"Limbu"+R,[(0x1900,0x194F)]),("Mahj",SUP+N+"Mahajani"+R,[(0x11150,0x1117F)]),
+        ("Marc",SUP+N+"Marchen"+R,[(0x11C70,0x11CBF)]),("Mtei",SUP+N+"MeeteiMayek"+R,[(0xABC0,0xABFF),(0xAAE0,0xAAFF)]),
+        ("Plrd",SUP+N+"Miao"+R,[(0x16F00,0x16F9F)]),("Modi",SUP+N+"Modi"+R,[(0x11600,0x1165F)]),
+        ("Mult",SUP+N+"Multani"+R,[(0x11280,0x112AF)]),("Nagm",SUP+N+"NagMundari"+R,[(0x1E4D0,0x1E4FF)]),
+        ("Newa",SUP+N+"Newa"+R,[(0x11400,0x1147F)]),("Hmng",SUP+N+"PahawhHmong"+R,[(0x16B00,0x16B8F)]),
+        ("Rjng",SUP+N+"Rejang"+R,[(0xA930,0xA95F)]),("Saur",SUP+N+"Saurashtra"+R,[(0xA880,0xA8DF)]),
+        ("Shrd",SUP+N+"Sharada"+R,[(0x11180,0x111DF)]),("Sidd",SUP+N+"Siddham"+O,[(0x11580,0x115FF)]),
+        ("Sund",SUP+N+"Sundanese"+R,[(0x1B80,0x1BBF),(0x1CC0,0x1CCF)]),("Sunu",SUP+N+"Sunuwar"+O,[(0x11BC0,0x11BFF)]),
+        ("Sylo",SUP+N+"SylotiNagri"+R,[(0xA800,0xA82F)]),("Tglg",SUP+N+"Tagalog"+R,[(0x1700,0x171F)]),
+        ("Tagb",SUP+N+"Tagbanwa"+R,[(0x1760,0x177F)]),("Tale",SUP+N+"TaiLe"+R,[(0x1950,0x197F)]),
+        ("Lana",SUP+N+"TaiTham"+R,[(0x1A20,0x1AAF)]),("Tavt",SUP+N+"TaiViet"+R,[(0xAA80,0xAADF)]),
+        ("Takr",SUP+N+"Takri"+R,[(0x11680,0x116CF)]),("Tfng",SUP+N+"Tifinagh"+O,[(0x2D30,0x2D7F)]),
+        ("Tirh",SUP+N+"Tirhuta"+R,[(0x11480,0x114DF)]),("Wcho",SUP+N+"Wancho"+R,[(0x1E2C0,0x1E2FF)]),
+        ("Yezi",SUP+"NotoSerifYezidi"+O,[(0x10E80,0x10EBF)]),("Ahom",SUP+"NotoSerifAhom"+R,[(0x11700,0x1174F)]),
+        ("Bali",SUP+"NotoSerifBalinese"+R,[(0x1B00,0x1B7F)]),
+        ("Hmnp",SUP+"NotoSerifNyiakengPuachueHmong"+R,[(0x1E100,0x1E14F)])]
+    def rows(words,size=6): return [" ".join(words[i:i+size]) for i in range(0,len(words),size)]
+    for code,face,blocks in scripts:
+        if len(sys.argv)>3 and sys.argv[3]!=code: continue
+        every=[chr(u) for a,b in blocks for u in range(a,b+1)]
+        kind={c:unicodedata.category(c) for c in every}
+        marks=[c for c in every if kind[c] in ("Mn","Mc","Me")]
+        # A virama, or a sign that stacks the next letter under this one.
+        stackers=[c for c in marks if unicodedata.combining(c)==9]
+        marks=[c for c in marks if c not in stackers]
+        letters=[c for c in every if kind[c] in ("Lo","Lm")]
+        others=[c for c in every if kind[c] in ("Nd","No","Nl","Po","So")]
+        if not letters: letters=[c for c in every if kind[c]=="Cn"][:24]
+        texts=["".join(letters[i:i+8]) for i in range(0,min(len(letters),64),8)]
+        texts+=["".join(others[i:i+8]) for i in range(0,min(len(others),32),8)]
+        if not letters: continue
+        a=letters[0]; b=letters[min(1,len(letters)-1)]; c=letters[min(4,len(letters)-1)]
+        texts+=rows([a+m for m in marks])+rows([c+m for m in marks])
+        texts+=rows([m for m in marks])+rows([m+a for m in marks])
+        near=[(m,n) for i,m in enumerate(marks) for n in marks[i+1:i+4]]
+        far=[(m,n) for i,m in enumerate(marks) for n in marks[i+7::9]]
+        texts+=rows([a+m+n for m,n in near])+rows([a+n+m for m,n in near])+rows([a+m+n for m,n in far])
+        texts+=rows([a+m+m for m in marks])
+        # A letter before another: some are written as a hook over it.
+        texts+=rows([l+a for l in letters[:48]])+rows([l+a+m for l in letters[:48] for m in marks[:1]])
+        for h in stackers:
+            texts+=rows([a+h+l for l in letters[:48]])+rows([l+h+a for l in letters[:48]])
+            texts+=rows([a+h+b+m for m in marks])+rows([a+m+h for m in marks])
+            texts+=[a+h, h, h+a, a+h+h+b, a+h+b+h+c, a+h+b+h+c+h+a, a+h+" "+b]
+            texts+=[a+h+"\u200D"+b, a+h+"\u200C"+b, a+"\u200D"+h+b, a+"\u200C"+h+b, a+h+"\u200D", a+h+"\u200C"]
+            texts+=rows([a+h+b+m+n for m,n in near[:36]])
+        if marks:
+            m=marks[0]; n=marks[-1]
+            texts+=[a+"\u200C"+m, a+"\u200D"+m, a+m+"\u200C"+n, a+m+"\u200D"+n, "\u200C"+m, "\u25CC"+m+" \u25CC"+n,
+                    "\u00A0"+m+" \u00A0"+n, a+"\uFE00"+m, a+m+"\u034F"+n, "x"+m+" 1"+n]
+        texts+=["\u200C", a+"\u200C", a+"\u200C"+b, a+"\u200D"+b, "abc "+a+b+c+" 12", a+" "+b+"."+c+","+a+"-"+b,
+                (a+b+c)*4]
+        way="rtl" if code in ("Khar","Yezi") else "ltr"
+        for t in texts:
+            if t: cases.append((face,0,code,way,t))
 with open(sys.argv[1],"w") as out:
     for f,i,s,d,t in cases: out.write(f"{f}\t{i}\t{s}\t{d}\t{esc(t)}\n")
 print(len(cases))

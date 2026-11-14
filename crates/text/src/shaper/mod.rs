@@ -22,6 +22,7 @@ mod myanmar;
 mod pattern;
 mod syllables;
 mod thai;
+mod universal;
 
 use cutlass_font::morx::DELETED_GLYPH;
 use cutlass_font::{Font, GlyphClass, KernPass, LayoutTable, Tag, Variant};
@@ -186,7 +187,7 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
         match shaping {
             Shaping::Syllabic => indic::compose(first, second),
             // A vowel sign in two parts stays in two parts.
-            Shaping::Khmer if props(first).is_mark() => None,
+            Shaping::Khmer | Shaping::Universal if props(first).is_mark() => None,
             _ => compose(first, second),
         }
     };
@@ -211,6 +212,7 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
         match shaping {
             Shaping::Khmer => khmer::describe_all(&mut glyphs),
             Shaping::Myanmar => myanmar::describe_all(&mut glyphs),
+            Shaping::Universal => universal::describe_all(&mut glyphs),
             _ => indic::describe_all(&mut glyphs, run.script),
         }
     }
@@ -242,6 +244,9 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
             Shaping::Myanmar => {
                 myanmar::substitute(font, engine, &mut buffer, &scripts, run.ligatures)?;
             }
+            Shaping::Universal => {
+                universal::substitute(font, engine, &mut buffer, &scripts, run.ligatures)?;
+            }
             _ => indic::substitute(font, engine, &mut buffer, &scripts, run.script)?,
         }
     } else if let Some(mut engine) = Engine::new(font, false, backward, count, trusted)
@@ -267,9 +272,10 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
             glyph.x_advance = space_width(font, space, glyph.x_advance);
         }
     }
-    // Myanmar gives its marks no room before they are placed, so a
-    // font's placing of them starts from there.
-    if syllabic && shaping == Shaping::Myanmar {
+    // Myanmar and the scripts shaped by the shared rules give their marks
+    // no room before they are placed, so a font's placing of them starts
+    // from there.
+    if syllabic && matches!(shaping, Shaping::Myanmar | Shaping::Universal) {
         let back = placing.is_none()
             && kerx.is_empty()
             && !font.kern_passes().iter().any(KernPass::cross_stream)
@@ -374,19 +380,20 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
     Ok(glyphs)
 }
 
-/// The shaping a run takes in `font`. A face that names Myanmar by the
-/// tag from before the script's shaping was set down, or that has only
-/// its default script for it, was drawn to be shaped with its lookups
-/// alone.
+/// The shaping a run takes in `font`. A face that has only its default
+/// script for Myanmar or for a script shaped by the shared rules, or
+/// that names Myanmar by the tag from before the script's shaping was
+/// set down, was drawn to be shaped with its lookups alone.
 fn shaping_in(font: &Font<'_>, shaping: Shaping, scripts: &[Tag]) -> Shaping {
-    if shaping != Shaping::Myanmar {
+    if !matches!(shaping, Shaping::Myanmar | Shaping::Universal) {
         return shaping;
     }
     let chosen = font
         .gsub()
         .and_then(|table| table.language(scripts, None).ok()?.script);
     match chosen {
-        Some(tag) if tag == *b"DFLT" || tag == *b"latn" || tag == *b"mymr" => Shaping::Plain,
+        Some(tag) if tag == *b"DFLT" || tag == *b"latn" => Shaping::Plain,
+        Some(tag) if tag == *b"mymr" && shaping == Shaping::Myanmar => Shaping::Plain,
         _ => shaping,
     }
 }
@@ -406,7 +413,13 @@ fn described(character: char, cluster: usize) -> Glyph {
     let props = props(character);
     let mut glyph = Glyph::new(character, cluster);
     glyph.category = props.category();
-    glyph.combining = sorting_class(props.combining());
+    glyph.combining = match character {
+        // The Tai Tham sakot goes after the tone marks, the Tibetan
+        // padma after the vowels, and the tsa -phru before them.
+        '\u{1A60}' | '\u{FC6}' => 254,
+        '\u{F39}' => 127,
+        _ => sorting_class(props.combining()),
+    };
     if props.category() == gc::NONSPACING_MARK {
         glyph.side = fallback::side(character, props.combining());
     }
@@ -543,6 +556,13 @@ fn normalize(
     normal: &Normal<'_>,
 ) -> Result<Vec<Glyph>, TextError> {
     let join = normal.join;
+    // Text with no marks in it is not put back together: a letter taken
+    // apart for its parts' forms stays apart, as HarfBuzz leaves it.
+    let composes = normal.whole_first
+        || glyphs
+            .iter()
+            .skip(1)
+            .any(|glyph| props(glyph.character).is_mark());
     // Take apart what the face cannot draw whole.
     let mut parts: Vec<Glyph> = Vec::with_capacity(glyphs.len());
     for glyph in glyphs {
@@ -566,10 +586,11 @@ fn normalize(
             let mut whole = glyph;
             // A space the face lacks is drawn with its plain space, and a
             // hyphen that does not break as a hyphen.
-            if has(font, ' ') {
+            let lacking = !has(font, whole.character);
+            if lacking && has(font, ' ') {
                 whole.space = Space::of(whole.character);
             }
-            if whole.character == '\u{2011}' && has(font, '\u{2010}') {
+            if lacking && whole.character == '\u{2011}' && has(font, '\u{2010}') {
                 whole.character = '\u{2010}';
             }
             parts.push(whole);
@@ -600,6 +621,7 @@ fn normalize(
             .last()
             .is_some_and(|last| starter + 1 == out.len() || last.combining < glyph.combining);
         if is_mark
+            && composes
             && open
             && let Some(base) = out.get(starter)
             && let Some(whole) = join(base.character, glyph.character)
@@ -850,7 +872,11 @@ fn substitution_stages(shaping: Shaping, backward: bool, ligatures: bool) -> Vec
     }
     let mut stages = vec![vec![Feature::every(b"rvrn")]];
     match shaping {
-        Shaping::Plain | Shaping::Syllabic | Shaping::Khmer | Shaping::Myanmar => {
+        Shaping::Plain
+        | Shaping::Syllabic
+        | Shaping::Khmer
+        | Shaping::Myanmar
+        | Shaping::Universal => {
             let mut stage = direction.to_vec();
             stage.extend(common);
             stages.push(stage);
@@ -1708,6 +1734,280 @@ mod tests {
     }
 
     #[test]
+    fn tibetan_stacks_and_takes_its_vowels_apart() {
+        const FACE: &[u8] = include_bytes!("../../../font/fixtures/universal.ttf");
+        let tibt = |text: &str| shaped_in(FACE, b"Tibt", text);
+        // Each expected string is what HarfBuzz 14.2 prints for the face.
+        assert_eq!(tibt("\u{F40}"), "[1=0+700]");
+        // A letter with one written under it is one glyph, and a vowel
+        // sits on that.
+        assert_eq!(tibt("\u{F40}\u{F92}"), "[9=0+700]");
+        assert_eq!(tibt("\u{F40}\u{F92}\u{F74}"), "[9=0+700|5=0@-200,-30+0]");
+        assert_eq!(tibt("\u{F40}\u{F72}"), "[1=0+700|4=0@-200,50+0]");
+        // Two vowels come out in one order however they are typed.
+        assert_eq!(
+            tibt("\u{F40}\u{F74}\u{F72}"),
+            "[1=0+700|5=0@-200,-30+0|4=0@-200,50+0]"
+        );
+        assert_eq!(
+            tibt("\u{F40}\u{F72}\u{F74}"),
+            "[1=0+700|5=0@-200,-30+0|4=0@-200,50+0]"
+        );
+        // A vowel in two parts is taken apart though the face has it
+        // whole.
+        assert_eq!(tibt("\u{F40}\u{F73}"), "[1=0+700|6=0+0|4=0@-200,50+0]");
+        assert_eq!(
+            tibt("\u{F40}\u{FB2}\u{F7E}"),
+            "[1=0+700|3=0@-200,50+0|7=0@-200,-30+0]"
+        );
+        assert_eq!(
+            tibt("\u{F40}\u{F92}\u{FB2}\u{F74}\u{F7E}"),
+            "[9=0+700|3=0@-200,-150+0|5=0@-200,-30+0|7=0@-200,-30+0]"
+        );
+        assert_eq!(tibt("\u{F40}\u{F0B}\u{F40}"), "[1=0+700|8=3+200|1=6+700]");
+        // A vowel or a letter written under, with no letter, stands on a
+        // dotted circle.
+        assert_eq!(tibt("\u{F73}"), "[30=0+600|6=0+0|4=0+0]");
+        assert_eq!(tibt("\u{F92}"), "[30=0+600|2=0+0]");
+    }
+
+    #[test]
+    fn sinhala_makes_its_joined_forms_and_moves_its_vowels() {
+        const FACE: &[u8] = include_bytes!("../../../font/fixtures/universal.ttf");
+        let sinh = |text: &str| shaped_in(FACE, b"Sinh", text);
+        // Each expected string is what HarfBuzz 14.2 prints for the face.
+        assert_eq!(sinh("\u{D9A}"), "[10=0+800]");
+        assert_eq!(sinh("\u{D9A}\u{DCA}"), "[10=0+800|11=0+0]");
+        // With a joiner, ra after a letter is the stroke under it, ra
+        // before it the hook over it, which goes after the letter, and
+        // ya after it the form beside it.
+        assert_eq!(
+            sinh("\u{D9A}\u{DCA}\u{200D}\u{DBB}"),
+            "[10=0+800|18=0@-200,50+0]"
+        );
+        assert_eq!(
+            sinh("\u{DBB}\u{DCA}\u{200D}\u{D9A}"),
+            "[10=0+800|19=0@-300,-20+0]"
+        );
+        assert_eq!(
+            sinh("\u{DBB}\u{DCA}\u{200D}\u{D9A}\u{DCF}"),
+            "[10=0+800|19=0@-300,-20+0|15=0+0]"
+        );
+        assert_eq!(sinh("\u{D9A}\u{DCA}\u{200D}\u{DBA}"), "[10=0+800|20=0+400]");
+        // Without the joiner, or with a non-joiner, the letters stay as
+        // they are.
+        assert_eq!(sinh("\u{D9A}\u{DCA}\u{DBB}"), "[10=0+800|11=0+0|12=6+600]");
+        assert_eq!(
+            sinh("\u{D9A}\u{DCA}\u{200C}\u{DBB}"),
+            "[10=0+800|11=0+0|12=9+600]"
+        );
+        // A vowel written before its letter, and one in two parts, the
+        // first before and the second after, which the face gives no
+        // room of its own.
+        assert_eq!(sinh("\u{D9A}\u{DD9}"), "[14=0+450|10=0+800]");
+        assert_eq!(sinh("\u{D9A}\u{DDC}"), "[14=0+450|10=0+800|15=0+0]");
+        assert_eq!(sinh("\u{D9A}\u{DCF}"), "[10=0+800|15=0+0]");
+        assert_eq!(
+            sinh("\u{D9A}\u{DCA}\u{200D}\u{DBB}\u{DDC}"),
+            "[14=0+450|10=0+800|18=0@-200,50+0|15=0+0]"
+        );
+        assert_eq!(
+            sinh("\u{DBB}\u{DCA}\u{200D}\u{D9A}\u{DCA}\u{200D}\u{DBA}\u{DDC}\u{D82}"),
+            "[14=0+450|10=0+800|20=0+400|19=0+0|15=0+0|16=0+300]"
+        );
+        assert_eq!(sinh("\u{D9A}\u{D82}"), "[10=0+800|16=0+300]");
+        // A vowel alone stands on a dotted circle.
+        assert_eq!(sinh("\u{DD9}"), "[14=0+450|30=0+600]");
+    }
+
+    #[test]
+    fn javanese_clusters_are_ordered_and_take_their_forms() {
+        const FACE: &[u8] = include_bytes!("../../../font/fixtures/universal.ttf");
+        let java = |text: &str| shaped_in(FACE, b"Java", text);
+        // Each expected string is what HarfBuzz 14.2 prints for the face.
+        // A cluster takes a form from the clusters beside it: alone,
+        // first, between and last. A space is one of the row.
+        assert_eq!(java("\u{A98F}"), "[38=0+940]");
+        assert_eq!(java("\u{A98F}\u{A98F}"), "[35=0+910|37=3+930]");
+        assert_eq!(
+            java("\u{A98F}\u{A98F}\u{A98F}"),
+            "[35=0+910|36=3+920|37=6+930]"
+        );
+        assert_eq!(
+            java("\u{A98F}\u{20}\u{A98F}"),
+            "[35=0+910|32=3+250|37=4+930]"
+        );
+        // A vowel written before its letter is moved there, and the face
+        // then makes one glyph of the two.
+        assert_eq!(java("\u{A98F}\u{A9BA}"), "[34=0+1300]");
+        assert_eq!(
+            java("\u{A98F}\u{A9BA}\u{A98F}\u{A9BA}"),
+            "[24=0+500|35=0+910|24=6+500|37=6+930]"
+        );
+        // A letter after the virama is written below, and a vowel
+        // before the cluster goes before all of it.
+        assert_eq!(
+            java("\u{A98F}\u{A9C0}\u{A9A0}"),
+            "[38=0+940|29=0@-290,90+0]"
+        );
+        assert_eq!(
+            java("\u{A98F}\u{A9C0}\u{A9A0}\u{A9BA}"),
+            "[34=0+1300|29=0@-250,90+0]"
+        );
+        // But not past a virama that still stands.
+        assert_eq!(
+            java("\u{A98F}\u{A9C0}\u{A98F}\u{A9BA}"),
+            "[38=0+940|22=0+300|34=6+1300]"
+        );
+        assert_eq!(java("\u{A98F}\u{A9C0}"), "[38=0+940|22=0+300]");
+        assert_eq!(
+            java("\u{A98F}\u{A9C0}\u{200C}\u{A9A0}"),
+            "[35=0+910|22=0+300|23=9+850]"
+        );
+        // A medial the face gives a form before the letter goes where a
+        // vowel before the letter goes.
+        assert_eq!(java("\u{A98F}\u{A9BF}"), "[33=0+350|38=0+940]");
+        assert_eq!(
+            java("\u{A98F}\u{A9BF}\u{A9BA}"),
+            "[24=0+500|33=0+350|38=0+940]"
+        );
+        // Two marks made one, and a final consonant, set on the letter.
+        assert_eq!(
+            java("\u{A98F}\u{A9B6}\u{A981}"),
+            "[38=0+940|39=0@-340,10+0]"
+        );
+        assert_eq!(java("\u{A98F}\u{A982}"), "[38=0+940|27=0@-340,10+0]");
+        assert_eq!(
+            java("\u{A98F}\u{A9C0}\u{A9A0}\u{A9BF}\u{A9BA}\u{A9B6}\u{A981}\u{A982}"),
+            "[24=0+500|33=0+350|38=0+940|29=0@-290,90+0|39=0@-340,10+0|27=0@-340,10+0]"
+        );
+        // What has no letter stands on a dotted circle, and so does a
+        // non-joiner alone. A mark after a space or a no-break space
+        // goes with that.
+        assert_eq!(java("\u{A9BA}"), "[24=0+500|30=0+600]");
+        assert_eq!(java("\u{A9C0}\u{A9A0}"), "[30=0+600|29=0+0]");
+        assert_eq!(java("\u{200C}"), "[30=0+600]");
+        assert_eq!(java("\u{A0}\u{A9B6}"), "[31=0+250|25=0+0]");
+        assert_eq!(java("\u{20}\u{A9BA}"), "[24=0+500|32=0+250]");
+        // A mark is set on its letter across a non-joiner.
+        assert_eq!(
+            java("\u{A98F}\u{200C}\u{A9B6}"),
+            "[38=0+940|25=3@-840,10+0]"
+        );
+        assert_eq!(java(""), "[]");
+    }
+
+    #[test]
+    fn a_letter_taken_apart_is_put_together_only_beside_a_mark() {
+        const FACE: &[u8] = include_bytes!("../../../font/fixtures/universal.ttf");
+        let bali = |text: &str| shaped_in(FACE, b"Bali", text);
+        // Each expected string is what HarfBuzz 14.2 prints for the face.
+        // Text with no mark in it is left in its parts.
+        assert_eq!(bali("\u{1B06}"), "[41=0+1100|42=0+450]");
+        // With a mark anywhere in it, the parts are one letter again.
+        assert_eq!(bali("\u{1B06}\u{1B36}"), "[43=0+1400|44=0@-550,50+0]");
+        assert_eq!(bali("\u{1B05}\u{1B35}"), "[43=0+1400]");
+        assert_eq!(
+            bali("\u{1B05}\u{1B35}\u{1B36}"),
+            "[43=0+1400|44=0@-550,50+0]"
+        );
+        assert_eq!(bali("\u{1B05}\u{1B36}"), "[41=0+1100|44=0@-400,50+0]");
+        assert_eq!(
+            bali("\u{1B06}\u{20}\u{1B05}\u{1B36}"),
+            "[43=0+1400|32=3+250|41=4+1100|44=4@-400,50+0]"
+        );
+    }
+
+    #[test]
+    fn a_face_with_only_a_default_script_keeps_its_plain_shaping() {
+        // The same glyphs and lookups under no script's own name:
+        // nothing is moved, taken apart or stood on a circle.
+        const PLAIN: &[u8] = include_bytes!("../../../font/fixtures/universal-plain.ttf");
+        let plain = |script: &[u8; 4], text: &str| shaped_in(PLAIN, script, text);
+        // Each expected string is what HarfBuzz 14.2 prints for the face.
+        assert_eq!(plain(b"Tibt", "\u{F40}\u{F92}"), "[1=0+700|2=0+0]");
+        assert_eq!(plain(b"Sinh", "\u{D9A}\u{DDC}"), "[10=0+800|40=0+1200]");
+        assert_eq!(
+            plain(b"Sinh", "\u{DBB}\u{DCA}\u{200D}\u{D9A}"),
+            "[12=0+600|11=0+0|10=9+800]"
+        );
+        assert_eq!(plain(b"Sinh", "\u{D85}\u{DCF}"), "[45=0+750|15=0+0]");
+        assert_eq!(plain(b"Java", "\u{A98F}\u{A9BA}"), "[21=0+900|24=0+500]");
+        assert_eq!(
+            plain(b"Java", "\u{A98F}\u{A9C0}\u{A9A0}"),
+            "[21=0+900|22=0+300|23=6+850]"
+        );
+        assert_eq!(plain(b"Java", "\u{A9BA}"), "[24=0+500]");
+        assert_eq!(plain(b"Java", "\u{A98F}\u{A98F}"), "[21=0+900|21=3+900]");
+        assert_eq!(plain(b"Bali", "\u{1B06}"), "[43=0+1400]");
+        assert_eq!(
+            plain(b"Bali", "\u{1B05}\u{1B35}\u{1B36}"),
+            "[43=0+1400|44=0@-550,50+0]"
+        );
+    }
+
+    #[test]
+    fn huge_clusters_of_the_shared_rules_are_shaped_in_time() {
+        const FACE: &[u8] = include_bytes!("../../../font/fixtures/universal.ttf");
+        let java = |text: &str| shaped_in(FACE, b"Java", text);
+        let started = std::time::Instant::now();
+        // One letter under thousands of letters written below and
+        // thousands of marks.
+        let mut heavy = String::from("\u{A98F}");
+        heavy.push_str(&"\u{A9C0}\u{A9A0}".repeat(2_000));
+        heavy.push_str(&"\u{A981}".repeat(4_000));
+        assert!(java(&heavy).starts_with("[38=0+940|"));
+        // Thousands of vowels, of viramas and of non-joiners that no
+        // letter takes: each stands on a circle of its own.
+        for unit in [
+            "\u{A98F}\u{A9B6}\u{A9BA}",
+            "\u{A98F}\u{A9C0}\u{A9C0}",
+            "\u{A98F}\u{200C}\u{200C}",
+        ] {
+            let broken = unit.repeat(4_000);
+            assert_eq!(java(&broken).matches("|30=").count(), 4_000, "{unit:?}");
+        }
+        // Thousands of clusters in a row, each taking its form.
+        let row = "\u{A98F}\u{A9BA}".repeat(4_000);
+        let shaped = java(&row);
+        assert_eq!(shaped.matches("|36=").count(), 3_998);
+        // Thousands of Sinhala hooks and joined forms.
+        let sinh = |text: &str| shaped_in(FACE, b"Sinh", text);
+        let hooks = "\u{DBB}\u{DCA}\u{200D}\u{D9A}\u{DCA}\u{200D}\u{DBA}\u{DDC}".repeat(2_000);
+        assert_eq!(sinh(&hooks).matches("19=").count(), 2_000);
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn a_face_whose_rules_never_settle_is_stopped_in_every_script_shaped_by_syllable() {
+        const FACE: &[u8] = include_bytes!("../../../font/fixtures/hostile-syllables.ttf");
+        let font = cutlass_font::read(FACE).expect("fixture");
+        let started = std::time::Instant::now();
+        for (script, grows, calls) in [
+            (b"Java", "\u{A98F}", "\u{A990}\u{A990}"),
+            (b"Khmr", "\u{1780}", "\u{1781}\u{1781}"),
+            (b"Mymr", "\u{1000}", "\u{1001}\u{1001}"),
+        ] {
+            let run = |text: &'static str| Run {
+                text,
+                start: 0,
+                end: text.len(),
+                script: Script(*script),
+                backward: false,
+                ligatures: true,
+            };
+            // Eight lookups that each write four glyphs for one.
+            assert!(
+                matches!(shape_run(&font, &run(grows)), Err(crate::TextError::Limit)),
+                "{script:?}"
+            );
+            // Two contextual lookups that call each other.
+            assert_eq!(shape_run(&font, &run(calls)).expect("loop").len(), 2);
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(15));
+    }
+
+    #[test]
     fn a_face_that_shapes_by_state_machines_makes_its_ligatures() {
         const MACHINES: &[u8] = include_bytes!("../../../font/fixtures/machines.ttf");
         let font = cutlass_font::read(MACHINES).expect("fixture");
@@ -1869,7 +2169,8 @@ mod tests {
                 .expect("hb-shape");
             let theirs = String::from_utf8_lossy(&output.stdout).trim().to_owned();
             total += 1;
-            if ours != theirs {
+            // HarfBuzz prints nothing at all for a run with no glyphs.
+            if ours != theirs && !(ours == "[]" && theirs.is_empty()) {
                 let name = file.rsplit('/').next().unwrap_or(file);
                 wrong.push(format!("{name}#{face} {script} {direction} {escaped}\n   ours   {ours}\n   theirs {theirs}"));
             }

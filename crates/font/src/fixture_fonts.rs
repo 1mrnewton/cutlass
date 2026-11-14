@@ -170,10 +170,10 @@ pub(crate) fn shaping() -> Vec<u8> {
     )
 }
 
-/// A face whose rules never settle: eight lookups that each write four
-/// glyphs for one, and two contextual lookups that call each other.
-pub(crate) fn hostile() -> Vec<u8> {
-    let glyphs = vec![boxed(500); 4];
+/// The lookups of a face whose rules never settle: eight that each write
+/// four glyphs for glyph 2, and two contextual ones on glyph 3 that call
+/// each other.
+fn restless() -> Vec<LookupSpec> {
     let mut lookups: Vec<LookupSpec> = (0..8)
         .map(|_| LookupSpec::new(2, vec![sequences(&[(2, &[2, 2, 2, 2])])]))
         .collect();
@@ -185,12 +185,44 @@ pub(crate) fn hostile() -> Vec<u8> {
         6,
         vec![chain(&[], &[&[3]], &[], &[(0, 8)])],
     ));
+    lookups
+}
+
+/// A face whose rules never settle: eight lookups that each write four
+/// glyphs for one, and two contextual lookups that call each other.
+pub(crate) fn hostile() -> Vec<u8> {
+    let glyphs = vec![boxed(500); 4];
     let substitutions = layout_table(
         &[(b"DFLT", &[0, 1])],
         &[(b"calt", &[8]), (b"ccmp", &[0, 1, 2, 3, 4, 5, 6, 7])],
-        lookups,
+        restless(),
     );
     font(&glyphs, &[('A', 2), ('B', 3)], &[(b"GSUB", substitutions)])
+}
+
+/// The same rules under the names of three scripts shaped by syllable,
+/// Javanese, Khmer and Myanmar, in features each of them applies: the
+/// first letter ka of each is the glyph that grows, and the second, kha,
+/// the one whose lookups call each other.
+pub(crate) fn hostile_syllables() -> Vec<u8> {
+    let glyphs = vec![boxed(500); 4];
+    let substitutions = layout_table(
+        &[(b"java", &[0, 1]), (b"khmr", &[0, 1]), (b"mym2", &[0, 1])],
+        &[(b"ccmp", &[0, 1, 2, 3, 4, 5, 6, 7]), (b"pres", &[8])],
+        restless(),
+    );
+    font(
+        &glyphs,
+        &[
+            ('\u{1000}', 2),
+            ('\u{1001}', 3),
+            ('\u{1780}', 2),
+            ('\u{1781}', 3),
+            ('\u{A98F}', 2),
+            ('\u{A990}', 3),
+        ],
+        &[(b"GSUB", substitutions)],
+    )
 }
 
 /// A face that shapes by state machines, as faces made for Apple's
@@ -512,10 +544,242 @@ pub(crate) fn myanmar_old() -> Vec<u8> {
     myanmar_named(b"mymr")
 }
 
+/// A face for four of the scripts shaped by one shared set of rules,
+/// which names them by `scripts`.
+///
+/// Tibetan: ka 1, the subjoined ga 2 and ra 3, the vowels i 4 and u 5,
+/// the a-chung 6, the anusvara 7, the tsheg 8, and the vowel ii whole,
+/// 46. Ka with the subjoined ga is one glyph, 9.
+///
+/// Sinhala: ka 10, the al-lakuna 11, ra 12, ya 13, the kombuva 14, the
+/// aela-pilla 15, the anusvara 16, the joiner 17, the vowel o whole, 40,
+/// and the letter a, 45. The al-lakuna, the joiner and ra are the
+/// rakaransaya 18; ra, the al-lakuna and the joiner are the repaya 19;
+/// the al-lakuna, the joiner and ya are the yansaya 20.
+///
+/// Javanese: ka 21, the pangkon 22, ta 23, the taling 24, the wulu 25,
+/// the cecak 26, the layar 27, the cakra 28, the dotted circle 30, the
+/// no-break space 31 and the space 32. The pangkon and ta are the ta
+/// written below, 29; the cakra is given its form before the letter, 33;
+/// ka is 38 alone, 35 first, 36 between and 37 last in a row of
+/// clusters; the taling before a ka alone is one glyph with it, 34; and
+/// the wulu with the cecak is one mark, 39.
+///
+/// Balinese: the letter a 41, the tedung 42, the two as one letter 43,
+/// and the ulu 44.
+///
+/// The marks sit on anchors under and over each script's ka, and over
+/// the Balinese letters.
+fn universal_named(scripts: &[&[u8; 4]]) -> Vec<u8> {
+    let mut glyphs = vec![boxed(500); 47];
+    for (glyph, advance) in [
+        (1, 700),
+        (8, 200),
+        (9, 700),
+        (10, 800),
+        (12, 600),
+        (13, 650),
+        (14, 450),
+        (15, 350),
+        (16, 300),
+        (20, 400),
+        (21, 900),
+        (22, 300),
+        (23, 850),
+        (24, 500),
+        (30, 600),
+        (31, 250),
+        (32, 250),
+        (33, 350),
+        (34, 1_300),
+        (35, 910),
+        (36, 920),
+        (37, 930),
+        (38, 940),
+        (40, 1_200),
+        (41, 1_100),
+        (42, 450),
+        (43, 1_400),
+        (45, 750),
+    ] {
+        glyphs[glyph] = boxed(advance);
+    }
+    for glyph in [2, 3, 4, 5, 6, 7, 11, 18, 19, 25, 26, 27, 28, 29, 39, 44, 46] {
+        glyphs[glyph] = mark();
+    }
+    // The joiner draws nothing.
+    glyphs[17] = Glyph {
+        advance: 0,
+        outline: None,
+    };
+    let mut map = vec![
+        ('\u{F40}', 1),
+        ('\u{F92}', 2),
+        ('\u{FB2}', 3),
+        ('\u{F72}', 4),
+        ('\u{F74}', 5),
+        ('\u{F71}', 6),
+        ('\u{F7E}', 7),
+        ('\u{F0B}', 8),
+        ('\u{F73}', 46),
+        ('\u{D9A}', 10),
+        ('\u{DCA}', 11),
+        ('\u{DBB}', 12),
+        ('\u{DBA}', 13),
+        ('\u{DD9}', 14),
+        ('\u{DCF}', 15),
+        ('\u{D82}', 16),
+        ('\u{200D}', 17),
+        ('\u{DDC}', 40),
+        ('\u{D85}', 45),
+        ('\u{A98F}', 21),
+        ('\u{A9C0}', 22),
+        ('\u{A9A0}', 23),
+        ('\u{A9BA}', 24),
+        ('\u{A9B6}', 25),
+        ('\u{A981}', 26),
+        ('\u{A982}', 27),
+        ('\u{A9BF}', 28),
+        ('\u{25CC}', 30),
+        ('\u{A0}', 31),
+        (' ', 32),
+        ('\u{1B05}', 41),
+        ('\u{1B35}', 42),
+        ('\u{1B06}', 43),
+        ('\u{1B36}', 44),
+    ];
+    map.sort_unstable();
+    let every: Vec<u16> = (0..12).collect();
+    let listed: Vec<(&[u8; 4], &[u16])> = scripts
+        .iter()
+        .map(|script| (*script, every.as_slice()))
+        .collect();
+    let substitutions = layout_table(
+        &listed,
+        &[
+            (b"abvs", &[10]),
+            (b"blwf", &[3]),
+            (b"blws", &[11]),
+            (b"fina", &[9]),
+            (b"init", &[7]),
+            (b"isol", &[6]),
+            (b"medi", &[8]),
+            (b"pref", &[4]),
+            (b"pres", &[5]),
+            (b"pstf", &[2]),
+            (b"rkrf", &[1]),
+            (b"rphf", &[0]),
+        ],
+        vec![
+            LookupSpec::new(4, vec![ligatures(&[(12, &[(&[11, 17], 19)])])]),
+            LookupSpec::new(4, vec![ligatures(&[(11, &[(&[17, 12], 18)])])]),
+            LookupSpec::new(4, vec![ligatures(&[(11, &[(&[17, 13], 20)])])]),
+            LookupSpec::new(4, vec![ligatures(&[(22, &[(&[23], 29)])])]),
+            LookupSpec::new(1, vec![single(&[(28, 33)])]),
+            LookupSpec::new(4, vec![ligatures(&[(24, &[(&[38], 34)])])]),
+            LookupSpec::new(1, vec![single(&[(21, 38)])]),
+            LookupSpec::new(1, vec![single(&[(21, 35)])]),
+            LookupSpec::new(1, vec![single(&[(21, 36)])]),
+            LookupSpec::new(1, vec![single(&[(21, 37)])]),
+            LookupSpec::new(4, vec![ligatures(&[(25, &[(&[26], 39)])])]),
+            LookupSpec::new(4, vec![ligatures(&[(1, &[(&[2], 9)])])]),
+        ],
+    );
+    let under_over: &[(i16, i16)] = &[(450, -60), (450, 760)];
+    let placed: Vec<(&[u8; 4], &[u16])> = scripts
+        .iter()
+        .map(|script| (*script, [0_u16].as_slice()))
+        .collect();
+    let positioning = layout_table(
+        &placed,
+        &[(b"mark", &[0])],
+        vec![LookupSpec::new(
+            4,
+            vec![mark_attach(
+                &[
+                    (3, 0, (-150, -100)),
+                    (4, 0, (-150, -100)),
+                    (5, 1, (-150, 750)),
+                    (7, 1, (-150, 750)),
+                    (18, 0, (-200, -100)),
+                    (19, 1, (-100, 800)),
+                    (25, 1, (-150, 750)),
+                    (26, 1, (-150, 750)),
+                    (27, 1, (-150, 750)),
+                    (28, 0, (-150, -100)),
+                    (29, 0, (-200, -150)),
+                    (39, 1, (-150, 750)),
+                    (44, 1, (-150, 750)),
+                ],
+                &[
+                    (1, &[(350, -50), (350, 720)]),
+                    (9, &[(350, -250), (350, 720)]),
+                    (10, &[(400, -50), (400, 780)]),
+                    (21, under_over),
+                    (34, &[(850, -60), (850, 760)]),
+                    (35, under_over),
+                    (36, under_over),
+                    (37, under_over),
+                    (38, under_over),
+                    (41, &[(550, -60), (550, 800)]),
+                    (43, &[(700, -60), (700, 800)]),
+                ],
+            )],
+        )],
+    );
+    let kinds = gdef(
+        &[
+            (1, 1, 1),
+            (2, 7, 3),
+            (8, 8, 1),
+            (9, 9, 2),
+            (10, 10, 1),
+            (11, 11, 3),
+            (12, 14, 1),
+            (15, 15, 3),
+            (16, 16, 1),
+            (18, 19, 3),
+            (20, 24, 1),
+            (25, 29, 3),
+            (30, 33, 1),
+            (34, 34, 2),
+            (35, 38, 1),
+            (39, 39, 3),
+            (40, 43, 1),
+            (44, 44, 3),
+            (45, 45, 1),
+            (46, 46, 3),
+        ],
+        &[],
+        &[],
+    );
+    font(
+        &glyphs,
+        &map,
+        &[
+            (b"GDEF", kinds),
+            (b"GPOS", positioning),
+            (b"GSUB", substitutions),
+        ],
+    )
+}
+
+/// The face for the scripts shaped by the shared rules, under their own
+/// names.
+pub(crate) fn universal() -> Vec<u8> {
+    universal_named(&[b"bali", b"java", b"sinh", b"tibt"])
+}
+
+/// The same face with only a default script: one that names no script
+/// of its own was drawn to be shaped with its lookups alone.
+pub(crate) fn universal_plain() -> Vec<u8> {
+    universal_named(&[b"DFLT"])
+}
+
 /// A fixture's file name and what builds it.
 type Built = (&'static str, fn() -> Vec<u8>);
 
-const FILES: [Built; 10] = [
+const FILES: [Built; 13] = [
     ("shaping.ttf", shaping),
     ("hostile.ttf", hostile),
     ("machines.ttf", machines),
@@ -526,6 +790,9 @@ const FILES: [Built; 10] = [
     ("khmer.ttf", khmer),
     ("myanmar.ttf", myanmar),
     ("myanmar-old.ttf", myanmar_old),
+    ("universal.ttf", universal),
+    ("universal-plain.ttf", universal_plain),
+    ("hostile-syllables.ttf", hostile_syllables),
 ];
 
 fn path(name: &str) -> std::path::PathBuf {

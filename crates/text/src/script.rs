@@ -22,6 +22,9 @@ pub(crate) enum Shaping {
     Khmer,
     /// And for the Myanmar script.
     Myanmar,
+    /// And, by one set of rules they share, for Tibetan, Sinhala,
+    /// Javanese and the many scripts like them.
+    Universal,
 }
 
 impl Script {
@@ -90,6 +93,16 @@ impl Script {
             | b"Mlym" => Shaping::Syllabic,
             b"Khmr" => Shaping::Khmer,
             b"Mymr" => Shaping::Myanmar,
+            b"Tibt" | b"Sinh" | b"Buhd" | b"Hano" | b"Tglg" | b"Tagb" | b"Limb" | b"Tale"
+            | b"Bugi" | b"Khar" | b"Sylo" | b"Tfng" | b"Bali" | b"Cham" | b"Kali" | b"Lepc"
+            | b"Rjng" | b"Saur" | b"Sund" | b"Egyp" | b"Java" | b"Kthi" | b"Mtei" | b"Lana"
+            | b"Tavt" | b"Batk" | b"Brah" | b"Cakm" | b"Plrd" | b"Shrd" | b"Takr" | b"Dupl"
+            | b"Gran" | b"Khoj" | b"Sind" | b"Mahj" | b"Modi" | b"Hmng" | b"Sidd" | b"Tirh"
+            | b"Ahom" | b"Mult" | b"Bhks" | b"Marc" | b"Newa" | b"Gonm" | b"Soyo" | b"Zanb"
+            | b"Dogr" | b"Gong" | b"Maka" | b"Medf" | b"Sogo" | b"Elym" | b"Nand" | b"Hmnp"
+            | b"Wcho" | b"Diak" | b"Kits" | b"Yezi" | b"Cpmn" | b"Tnsa" | b"Toto" | b"Vith"
+            | b"Kawi" | b"Nagm" | b"Gara" | b"Gukh" | b"Krai" | b"Onao" | b"Sunu" | b"Todr"
+            | b"Tutg" | b"Berf" | b"Sidt" | b"Tayo" | b"Tols" => Shaping::Universal,
             _ => Shaping::Plain,
         }
     }
@@ -153,6 +166,9 @@ mod tests {
         assert!(!Script::LATIN.right_to_left() && !Script::of('\u{915}').right_to_left());
         assert_eq!(Script::of('\u{628}').shaping(), Shaping::Joined);
         assert_eq!(Script::of('\u{915}').shaping(), Shaping::Syllabic);
+        assert_eq!(Script::of('\u{F40}').shaping(), Shaping::Universal);
+        assert_eq!(Script::of('\u{D9A}').shaping(), Shaping::Universal);
+        assert_eq!(Script::of('\u{A98F}').shaping(), Shaping::Universal);
         assert_eq!(Script::of('\u{5D0}').shaping(), Shaping::Plain);
         assert_eq!(Script::LATIN.tags(), [*b"latn"]);
         assert_eq!(Script::of('\u{915}').tags(), [*b"dev2", *b"deva"]);

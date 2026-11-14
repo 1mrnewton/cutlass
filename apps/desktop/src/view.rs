@@ -193,6 +193,8 @@ pub struct ViewState {
     server_args: std::collections::HashMap<usize, String>,
     /// The assistant's notes as typed, while the settings window is open.
     notes: Option<String>,
+    /// The cloud key being typed, loaded from its own file when the tab opens.
+    cloud_key: Option<String>,
     /// The models the local runner listed when asked, or why it did not.
     local_models: Option<Result<Vec<String>, String>>,
     /// A settings change waiting for the user to allow what it turns on.
@@ -326,6 +328,7 @@ impl Default for ViewState {
             recording: None,
             server_args: std::collections::HashMap::new(),
             notes: None,
+            cloud_key: None,
             local_models: None,
             approval: None,
             linkage_kinds: None,
@@ -1675,14 +1678,30 @@ fn settings_window(
                     }
                     SettingsTab::Assistant => {
                         let notes = view.notes.get_or_insert_with(|| shell.assistant_notes());
-                        let notes_changed = assistant_settings(
+                        let provider = settings.model.cloud_provider.clone();
+                        let key = view.cloud_key.get_or_insert_with(|| {
+                            crate::cloud::key(&crate::cloud::keys_file(), &provider)
+                        });
+                        let (notes_changed, key_changed) = assistant_settings(
                             ui,
                             &mut settings,
                             &mut view.server_args,
                             notes,
+                            key,
                             &mut view.local_models,
                             &mut add_folder,
                         );
+                        if key_changed {
+                            if let Err(error) =
+                                crate::cloud::set_key(&crate::cloud::keys_file(), &provider, key)
+                            {
+                                cutlass_logger::warn!("{error}");
+                            }
+                        }
+                        if settings.model.cloud_provider != provider {
+                            // The other provider's key, if one was kept.
+                            view.cloud_key = None;
+                        }
                         if notes_changed && let Err(error) = shell.set_assistant_notes(notes) {
                             cutlass_logger::warn!("assistant notes: {error}");
                         }
@@ -1747,6 +1766,7 @@ fn settings_window(
         view.recording = None;
         view.server_args.clear();
         view.notes = None;
+        view.cloud_key = None;
         view.local_models = None;
     }
 }
@@ -1910,9 +1930,10 @@ fn assistant_settings(
     settings: &mut cutlass_settings::Settings,
     server_args: &mut std::collections::HashMap<usize, String>,
     notes: &mut String,
+    key: &mut String,
     local_models: &mut Option<Result<Vec<String>, String>>,
     add_folder: &mut bool,
-) -> bool {
+) -> (bool, bool) {
     use cutlass_settings::McpServer;
     settings_heading(ui, "Model");
     ui.add(ui::Check::new(&mut settings.model.local, "Local model"));
@@ -1974,6 +1995,7 @@ fn assistant_settings(
         &mut settings.model.cloud,
         "Cloud model (sends messages off this computer)",
     ));
+    let key_changed = cloud_settings(ui, &mut settings.model, key);
     ui.add(ui::Check::new(
         &mut settings.sandbox.local,
         "Run code on this computer",
@@ -2084,7 +2106,82 @@ fn assistant_settings(
         settings.skill_folders.remove(index);
     }
     *add_folder = ui.add(ui::Button::new("Add folder…")).clicked();
-    notes_changed
+    (notes_changed, key_changed)
+}
+
+/// The cloud model's service, name and key, while it is on. True when the
+/// key changed.
+fn cloud_settings(
+    ui: &mut Ui,
+    model: &mut cutlass_settings::ModelChoice,
+    key: &mut String,
+) -> bool {
+    use cutlass_settings::ModelChoice;
+    if !model.cloud {
+        return false;
+    }
+    choice_row(ui, "Service", |ui| {
+        ui::Segmented::show(ui, |ui| {
+            for (provider, name) in [
+                (ModelChoice::CLAUDE, "Claude"),
+                (ModelChoice::OPENAI, "Chat completions"),
+            ] {
+                if ui
+                    .add(ui::Choice::new(model.cloud_provider == provider, name))
+                    .clicked()
+                    && model.cloud_provider != provider
+                {
+                    provider.clone_into(&mut model.cloud_provider);
+                    if provider == ModelChoice::CLAUDE {
+                        cutlass_settings::DEFAULT_CLOUD_NAME.clone_into(&mut model.cloud_name);
+                    } else {
+                        model.cloud_name.clear();
+                    }
+                }
+            }
+        });
+    });
+    if model.cloud_provider == ModelChoice::OPENAI {
+        choice_row(ui, "Address", |ui| {
+            ui::Field::new(&mut model.cloud_url)
+                .hint(cutlass_settings::OPENAI_CHAT_URL)
+                .width(300.0)
+                .show(ui);
+        });
+    }
+    choice_row(ui, "Model", |ui| {
+        ui::Field::new(&mut model.cloud_name)
+            .hint(if model.cloud_provider == ModelChoice::CLAUDE {
+                cutlass_settings::DEFAULT_CLOUD_NAME
+            } else {
+                "gpt-5"
+            })
+            .width(180.0)
+            .show(ui);
+    });
+    let mut changed = false;
+    choice_row(ui, "Key", |ui| {
+        changed = ui::Field::new(key)
+            .hint("Paste your API key")
+            .name("API key")
+            .secret()
+            .width(240.0)
+            .show(ui)
+            .response
+            .changed();
+        if !key.is_empty() && ui.add(ui::Button::new("Forget").text_size(12.0)).clicked() {
+            key.clear();
+            changed = true;
+        }
+    });
+    ui.label(
+        RichText::new(
+            "Your own key, kept in its own file on this computer and sent only to this service. It is not a setting and the assistant never sees it.",
+        )
+        .size(11.0)
+        .color(tokens::FAINT),
+    );
+    changed
 }
 
 /// The models the chat server at `url` lists, asked with a short wait.

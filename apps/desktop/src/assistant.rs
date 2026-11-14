@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use cutlass_agent::{
-    ApprovalAction, ChatModel, Completion, CompletionRequest, LoopbackHttp, Message, Model,
-    ModelError, ToolCall, ToolOutcome, ToolSink, run_after, tool_definitions,
+    ApprovalAction, ChatModel, CloudModel, Completion, CompletionRequest, LoopbackHttp, Message,
+    Model, ModelError, ToolCall, ToolOutcome, ToolSink, run_after, tool_definitions,
 };
 use cutlass_settings::Settings;
 
@@ -134,9 +134,22 @@ impl Assistant {
         }
         self.draft.clear();
         self.entries.push(Entry::Asked(ask.clone()));
+        let context = cutlass_agent::prompt_context(settings, notes);
+        if settings.model.cloud {
+            let key = crate::cloud::key(&crate::cloud::keys_file(), &settings.model.cloud_provider);
+            match crate::cloud::model(settings, &key, &context) {
+                Ok(model) => self.start(
+                    CloudModel::from_settings(settings, model),
+                    settings.step_cap,
+                    &ask,
+                ),
+                Err(notice) => self.entries.push(Entry::Notice(notice)),
+            }
+            return;
+        }
         if !settings.model.local {
             self.entries.push(Entry::Notice(
-                "The local model is off. Turn it on in Settings → Assistant; the cloud model needs an account, which is not set up yet."
+                "Both models are off. Turn on the local model, or the cloud model with your own key, in Settings → Assistant."
                     .to_owned(),
             ));
             return;
@@ -148,8 +161,7 @@ impl Assistant {
                 return;
             }
         };
-        let model = ChatModel::new(transport, &settings.model.local_name)
-            .with_context(&cutlass_agent::prompt_context(settings, notes));
+        let model = ChatModel::new(transport, &settings.model.local_name).with_context(&context);
         self.start(model, settings.step_cap, &ask);
     }
 
@@ -542,8 +554,18 @@ mod tests {
         assistant.draft = "hi".to_owned();
         assistant.send(&settings, "");
         assert!(
-            matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("local model is off"))
+            matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("Both models are off"))
         );
+        // The cloud model with no name never posts; it says what to fill in.
+        settings.model.cloud = true;
+        settings.model.cloud_name.clear();
+        assistant.draft = "hi".to_owned();
+        assistant.send(&settings, "");
+        assert!(
+            matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("Settings → Assistant"))
+        );
+        assert!(!assistant.busy());
+        settings.model.cloud = false;
         settings.model.local = true;
         settings.model.local_url = "http://example.com/v1/chat/completions".to_owned();
         assistant.draft = "hi".to_owned();

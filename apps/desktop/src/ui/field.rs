@@ -39,6 +39,7 @@ pub struct Field<'t> {
     fill: Color32,
     focus: bool,
     scrub: bool,
+    secret: bool,
     salt: Option<IdSalt>,
 }
 
@@ -73,6 +74,7 @@ impl<'t> Field<'t> {
             fill: tokens::FIELD_FILL,
             focus: false,
             scrub: false,
+            secret: false,
             salt: None,
         }
     }
@@ -151,6 +153,12 @@ impl<'t> Field<'t> {
     /// [`FieldResponse::scrub`]; a field with no lead has nothing to drag.
     pub fn scrub(mut self) -> Self {
         self.scrub = true;
+        self
+    }
+
+    /// Show dots in place of the text, as for a key or a password.
+    pub fn secret(mut self) -> Self {
+        self.secret = true;
         self
     }
 
@@ -307,7 +315,8 @@ impl<'t> Field<'t> {
             .text_color(ink)
             .frame(egui::Frame::NONE)
             .margin(egui::Margin::ZERO)
-            .desired_width(content.available_width());
+            .desired_width(content.available_width())
+            .password(self.secret);
         if let Some(hint) = &self.hint {
             edit = edit.hint_text(RichText::new(hint).color(tokens::FAINT));
         }

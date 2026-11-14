@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod assistant;
+pub mod cloud;
 mod dialogs;
 mod face;
 mod gpu;

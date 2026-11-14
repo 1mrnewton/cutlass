@@ -232,12 +232,17 @@ impl Shared {
         }
     }
 
-    fn give8(&self, left: Leftovers<u8>) {
+    fn give8(&self, mut left: Leftovers<u8>) {
+        // The slices hold the picture's references: let them go now, not
+        // when the picture is filled again, so that a spare picture keeps
+        // no reference frame alive.
+        left.pic.slices.clear();
         put(&self.pics, left.pic);
         put(&self.work8, left.work);
     }
 
-    fn give16(&self, left: Leftovers<u16>) {
+    fn give16(&self, mut left: Leftovers<u16>) {
+        left.pic.slices.clear();
         put(&self.pics, left.pic);
         put(&self.work16, left.work);
     }

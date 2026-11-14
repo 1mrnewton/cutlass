@@ -1271,6 +1271,22 @@ impl Shell {
         self.notes_file = Some(path);
     }
 
+    /// Where the open project's conversation with the assistant is kept,
+    /// beside the notes, while Memory is on; `None` with Memory off, no
+    /// project open, or no notes folder.
+    #[must_use]
+    pub fn assistant_chat_file(&self) -> Option<PathBuf> {
+        if !self.settings.memory {
+            return None;
+        }
+        let project = self.project_folder()?;
+        let notes = self.notes_file.as_ref()?;
+        Some(notes.with_file_name("chats").join(format!(
+            "{:016x}.json",
+            fnv1a(project.to_string_lossy().as_bytes())
+        )))
+    }
+
     /// The assistant's notes; empty when there are none.
     #[must_use]
     pub fn assistant_notes(&self) -> String {
@@ -8681,6 +8697,13 @@ impl ExportOutput {
 }
 
 /// A `.mov` name writes a QuickTime movie.
+/// FNV-1a, 64 bits: a name for a path that stays the same across builds.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
 fn is_mov(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())

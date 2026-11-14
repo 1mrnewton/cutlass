@@ -446,6 +446,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         view.dialogs.studio_clip(parent);
     }
     show_imported(shell, view);
+    view.assistant.follow(shell.assistant_chat_file());
     if view.assistant.poll(shell) {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(50));
@@ -2020,7 +2021,7 @@ fn assistant_settings(
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(
-                    "Kept on this computer. Sent with the chat only while the cloud model is on.",
+                    "Kept on this computer, with each project's chat. Sent to a model only as part of the chat.",
                 )
                 .size(11.0)
                 .color(tokens::FAINT),

@@ -6,6 +6,7 @@
 //! project between frames and sends the result back. Stop lets the turn go
 //! at once: the thread finds out at its next call and ends.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -78,6 +79,8 @@ pub struct Assistant {
     history: Vec<Message>,
     running: Option<Running>,
     pending: Option<Pending>,
+    /// Where this conversation is kept; `None` keeps it nowhere.
+    chat_file: Option<PathBuf>,
 }
 
 impl Assistant {
@@ -261,10 +264,40 @@ impl Assistant {
     }
 
     /// Start over: nothing said, and the model forgets the earlier turns.
+    /// The kept conversation is forgotten too.
     pub fn clear(&mut self) {
         self.stop();
         self.entries.clear();
         self.history.clear();
+        self.keep();
+    }
+
+    /// Keep the conversation in `file` from now on, the open project's,
+    /// picking up what was said there before. `None` keeps it nowhere and
+    /// leaves what is on screen. A turn running holds on to the file it
+    /// started with.
+    pub fn follow(&mut self, file: Option<PathBuf>) {
+        if self.busy() || file == self.chat_file {
+            return;
+        }
+        if file.is_none() {
+            self.chat_file = None;
+            return;
+        }
+        self.pending = None;
+        self.history = file.as_deref().map(load_chat).unwrap_or_default();
+        self.entries = shown(&self.history);
+        self.chat_file = file;
+    }
+
+    /// Write the conversation to its file; an empty one removes the file.
+    fn keep(&self) {
+        let Some(file) = &self.chat_file else {
+            return;
+        };
+        if let Err(error) = save_chat(file, &self.history) {
+            cutlass_logger::warn!("assistant chat: {error}");
+        }
     }
 
     /// Take what the model's thread sent: run its tool calls on `shell`
@@ -322,6 +355,7 @@ impl Assistant {
                                 self.entries.push(Entry::Said(text));
                             }
                             self.history = messages;
+                            self.keep();
                         }
                         Err(error) => self.entries.push(Entry::Notice(explain(error))),
                     }
@@ -330,6 +364,75 @@ impl Assistant {
             }
         }
     }
+}
+
+/// A conversation saved by [`save_chat`]; empty when there is none or it
+/// does not read.
+fn load_chat(file: &Path) -> Vec<Message> {
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|saved| serde_json::from_value(saved.get("messages")?.clone()).ok())
+        .unwrap_or_else(|| {
+            cutlass_logger::warn!("assistant chat {} does not read", file.display());
+            Vec::new()
+        })
+}
+
+/// Write `messages` to `file`, or remove it when there are none.
+fn save_chat(file: &Path, messages: &[Message]) -> std::io::Result<()> {
+    if messages.is_empty() {
+        return match std::fs::remove_file(file) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        };
+    }
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let saved = serde_json::json!({ "version": 1, "messages": messages });
+    let temporary = file.with_extension("json.part");
+    std::fs::write(&temporary, saved.to_string())?;
+    std::fs::rename(&temporary, file)
+}
+
+/// The panel's lines for a conversation read back.
+fn shown(history: &[Message]) -> Vec<Entry> {
+    let mut entries = Vec::new();
+    for message in history {
+        match message {
+            Message::User { text } => entries.push(Entry::Asked(text.clone())),
+            Message::Assistant { text, calls } => {
+                if !text.is_empty() {
+                    entries.push(Entry::Said(text.clone()));
+                }
+                for call in calls {
+                    entries.push(Entry::Step {
+                        tool: call.name.clone(),
+                        input: call.arguments.clone(),
+                        result: None,
+                        failed: false,
+                    });
+                }
+            }
+            Message::Tool {
+                name,
+                content,
+                is_error,
+                ..
+            } => {
+                if let Some(Entry::Step { result, failed, .. }) = entries.iter_mut().rev().find(
+                    |entry| matches!(entry, Entry::Step { tool, result: None, .. } if tool == name),
+                ) {
+                    *result = Some(content.clone());
+                    *failed = *is_error;
+                }
+            }
+        }
+    }
+    entries
 }
 
 /// A turn's error, with what to do when the server lacks the model.
@@ -530,6 +633,47 @@ mod tests {
             assistant.entries.last(),
             Some(&Entry::Said("Still here.".to_owned()))
         );
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_conversation_is_kept_per_file_and_read_back_with_its_steps() {
+        let (mut shell, path) = shell_with_project("kept");
+        let first = path.join("chats").join("a.json");
+        let second = path.join("chats").join("b.json");
+        let mut assistant = Assistant::default();
+        assistant.follow(Some(first.clone()));
+        let model = LocalModel::scripted(vec![
+            completion(
+                "Seeking.",
+                vec![ToolCall {
+                    id: "1".to_owned(),
+                    name: "player.seek".to_owned(),
+                    arguments: "1000000".to_owned(),
+                }],
+            ),
+            completion("Done.", Vec::new()),
+        ]);
+        assistant.start(model, 8, "go to 1s");
+        finish(&mut assistant, &mut shell);
+        let live = assistant.entries.clone();
+        assert!(first.exists());
+        // Another project starts empty; coming back reads it all again.
+        assistant.follow(Some(second.clone()));
+        assert!(assistant.entries.is_empty() && assistant.history.is_empty());
+        assistant.follow(Some(first.clone()));
+        let mut expected = vec![Entry::Asked("go to 1s".to_owned())];
+        expected.extend(live);
+        assert_eq!(assistant.entries, expected);
+        assert_eq!(assistant.history.len(), 4);
+        // Memory off keeps what is shown and writes nothing more.
+        assistant.follow(None);
+        assert_eq!(assistant.entries.len(), expected.len());
+        // Clear forgets the kept file.
+        assistant.follow(Some(first.clone()));
+        assistant.clear();
+        assert!(!first.exists());
+        assert!(!second.exists());
         let _ = std::fs::remove_dir_all(&path);
     }
 

@@ -268,7 +268,10 @@ mod tests {
             let mut text = MaterialText::new(id.as_str());
             text.content = (*line).to_owned();
             text.font_size = 48.0;
-            text.font_path = fonts.name().to_owned();
+            // `CUTLASS_TEXT_FRAME_FACE` sets every line in one face, by
+            // the name the table has for it: `Skia.ttf@Black`.
+            text.font_path = std::env::var("CUTLASS_TEXT_FRAME_FACE")
+                .unwrap_or_else(|_| fonts.name().to_owned());
             text.text_color = "#FFFFFF".to_owned();
             text.line_max_width = 1_150.0;
             text.alignment = 1;

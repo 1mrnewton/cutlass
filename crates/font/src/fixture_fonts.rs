@@ -1085,10 +1085,32 @@ pub(crate) fn direction() -> Vec<u8> {
     )
 }
 
+/// A face with nothing but a `kern` table: `A`, the Javanese ka and the
+/// Thai ko kai are 1, `V`, the Javanese ta and the Thai kho khai 2, and
+/// the table brings 2 closer to 1 by 100.
+pub(crate) fn kern_only() -> Vec<u8> {
+    use crate::fixture::{be, signed};
+    let glyphs = vec![boxed(500), boxed(700), boxed(650)];
+    // One subtable of pairs, read along the line.
+    let kerning = be(&[0, 1, 0, 20, 1, 1, 6, 0, 0, 1, 2, signed(-100)]);
+    font(
+        &glyphs,
+        &[
+            ('A', 1),
+            ('V', 2),
+            ('\u{E01}', 1),
+            ('\u{E02}', 2),
+            ('\u{A98F}', 1),
+            ('\u{A9A0}', 2),
+        ],
+        &[(b"kern", kerning)],
+    )
+}
+
 /// A fixture's file name and what builds it.
 type Built = (&'static str, fn() -> Vec<u8>);
 
-const FILES: [Built; 19] = [
+const FILES: [Built; 20] = [
     ("shaping.ttf", shaping),
     ("hostile.ttf", hostile),
     ("machines.ttf", machines),
@@ -1108,6 +1130,7 @@ const FILES: [Built; 19] = [
     ("devanagari-three.ttf", devanagari_three),
     ("devanagari-plain.ttf", devanagari_plain),
     ("direction.ttf", direction),
+    ("kern-only.ttf", kern_only),
 ];
 
 fn path(name: &str) -> std::path::PathBuf {

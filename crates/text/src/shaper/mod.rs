@@ -303,10 +303,7 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
     // no room before they are placed, so a font's placing of them starts
     // from there.
     if syllabic && matches!(shaping, Shaping::Myanmar | Shaping::Universal) {
-        let back = placing.is_none()
-            && kerx.is_empty()
-            && !font.kern_passes().iter().any(KernPass::cross_stream)
-            && !backward;
+        let back = placing.is_none() && kerx.is_empty() && !backward;
         for glyph in glyphs.iter_mut().filter(|glyph| glyph.is_mark()) {
             if back {
                 glyph.x_offset -= glyph.x_advance;
@@ -353,15 +350,22 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
         (true, false) => false,
         (false, _) => true,
     };
+    // The `kern` table kerns only a script whose marks a face may leave
+    // for the shaper to place. A script shaped by syllable, and Thai and
+    // Lao, are kerned by a positioning or an extended table or not at
+    // all: HarfBuzz leaves the `kern` table of their faces unread.
+    let kern_table = !by_syllable && !thai;
     let passes: &[KernPass<'_>] = if !own_kerning {
         &[]
     } else if placing.is_none() && !kerx.is_empty() {
         kerx
-    } else {
+    } else if kern_table {
         font.kern_passes()
+    } else {
+        &[]
     };
     kern::apply(passes, &mut glyphs, backward);
-    if own_kerning && passes.is_empty() && kerx.is_empty() && font.has_kern_table() {
+    if own_kerning && kern_table && passes.is_empty() && kerx.is_empty() && font.has_kern_table() {
         kern_pairs(font, &mut glyphs, backward);
     }
     // Passes that are machines, or that move glyphs across the line, are
@@ -2182,6 +2186,33 @@ mod tests {
                 "{script:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_kern_table_is_read_only_for_scripts_shaped_plainly() {
+        const FACE: &[u8] = include_bytes!("../../../font/fixtures/kern-only.ttf");
+        // Each expected string is what HarfBuzz 14.2 prints for the face,
+        // which has a `kern` table and no other. Latin is kerned by it.
+        assert_eq!(shaped_in(FACE, b"Latn", "AV"), "[1=0+650|2=1@-50,0+600]");
+        assert_eq!(
+            shaped_in(FACE, b"Latn", "AVAV"),
+            "[1=0+650|2=1@-50,0+600|1=2+650|2=3@-50,0+600]"
+        );
+        assert_eq!(shaped_back(FACE, b"Latn", "AV"), "[2=1+650|1=0+700]");
+        // The same two glyphs as letters of a script shaped by syllable,
+        // or of Thai, are not.
+        assert_eq!(
+            shaped_in(FACE, b"Java", "\u{A98F}\u{A9A0}"),
+            "[1=0+700|2=3+650]"
+        );
+        assert_eq!(
+            shaped_in(FACE, b"Java", "\u{A98F}\u{A9A0}\u{A98F}\u{A9A0}"),
+            "[1=0+700|2=3+650|1=6+700|2=9+650]"
+        );
+        assert_eq!(
+            shaped_in(FACE, b"Thai", "\u{E01}\u{E02}"),
+            "[1=0+700|2=3+650]"
+        );
     }
 
     #[test]

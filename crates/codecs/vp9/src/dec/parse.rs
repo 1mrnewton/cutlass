@@ -166,6 +166,8 @@ const MI_WH: [(usize, usize); 13] = [
 pub struct Shared<'a> {
     pub h: &'a Header,
     pub fc: &'a FrameContext,
+    /// `fc`'s coefficient probabilities for the token reader.
+    pub coef11: &'a Coef11,
     pub prev_mvs: Option<&'a [MvRef]>,
     pub last_seg: &'a [u8],
     pub levels: &'a lpf::Levels,
@@ -1401,16 +1403,20 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
         mut ctx: usize,
         kind: u8,
     ) -> (usize, (usize, usize)) {
-        let (scan, nb) = scan_pair(tx, kind);
+        let (scan, nb, tpos, bound) = scan_pair(tx, kind);
         let max_eob0 = 16usize << (2 * tx);
         // Sliced to the block's size, and cache indices masked to its
         // 1024 entries, so that the loop needs no bounds checks for them.
         let scan = &scan[..max_eob0.min(scan.len())];
-        let nb = &nb[..(2 * max_eob0).min(nb.len())];
-        let log2n = 2 + usize::from(tx);
-        let mask = (1usize << log2n) - 1;
         let max_eob = scan.len();
-        let probs = &self.s.fc.coef[usize::from(tx)][usize::from(uv)][usize::from(inter)];
+        let tpos = &tpos[..max_eob.min(tpos.len())];
+        let bound = &bound[..max_eob.min(bound.len())];
+        let nb = &nb[..(2 * max_eob0).min(nb.len())];
+        let rows = &self.s.coef11[(usize::from(tx) * 2 + usize::from(uv)) * 2 + usize::from(inter)];
+        let nz = |c: usize| -> (usize, usize) {
+            let m = bound.get(c.wrapping_sub(1)).copied().unwrap_or(0);
+            (usize::from(m & 0xff) + 1, usize::from(m >> 8) + 1)
+        };
         let bands: &[u8] = if tx == 0 { &BAND_4X4 } else { &BAND_8X8_PLUS };
         let shift = u32::from(tx == 3);
         let bd = self.s.bd;
@@ -1419,7 +1425,6 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
         let cache = &mut self.cache;
         let mut dqv = i32::from(dq[0]);
         let mut c = 0usize;
-        let (mut max_r, mut max_c) = (0usize, 0usize);
         // The decoder works on a copy in registers, written back at the end.
         let mut local = *self.b;
         let b = &mut local;
@@ -1429,7 +1434,7 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
         let cnt_eob = &mut self.f.counts.eob[ti][pi][ri];
         while c < max_eob {
             let mut band = usize::from(bands[c]);
-            let mut p = &probs[band][ctx];
+            let mut p = &rows[(band * 8 + ctx) & 63];
             if collect {
                 cnt_eob[band][ctx] += 1;
             }
@@ -1448,14 +1453,14 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
                 c += 1;
                 if c >= max_eob {
                     *self.b = local;
-                    return (c, (max_r + 1, max_c + 1));
+                    return (c, nz(c));
                 }
                 ctx = (1
                     + usize::from(cache[usize::from(nb[2 * c]) & 1023])
                     + usize::from(cache[usize::from(nb[2 * c + 1]) & 1023]))
                     >> 1;
                 band = usize::from(bands[c]);
-                p = &probs[band][ctx];
+                p = &rows[(band * 8 + ctx) & 63];
             }
             let v;
             if !b.read(p[2]) {
@@ -1468,7 +1473,7 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
                 if collect {
                     cnt_coef[band][ctx][2] += 1;
                 }
-                let pp = &PARETO8[usize::from(p[2]) - 1];
+                let pp = &p[3..11];
                 let val: i32;
                 if b.read(pp[0]) {
                     if b.read(pp[3]) {
@@ -1510,12 +1515,8 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
                 }
                 v = ((i64::from(val) * i64::from(dqv)) >> shift) as i32;
             }
-            let rc = usize::from(scan[c]);
-            let (r, col) = (rc >> log2n, rc & mask);
-            out_pos.push(((col << log2n) | r) as u16);
+            out_pos.push(tpos[c]);
             out_val.push(if b.bit() { -v } else { v });
-            max_r = max_r.max(r);
-            max_c = max_c.max(col);
             c += 1;
             if c < max_eob {
                 ctx = (1
@@ -1526,7 +1527,7 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
             dqv = i32::from(dq[1]);
         }
         *self.b = local;
-        (c, (max_r + 1, max_c + 1))
+        (c, nz(c))
     }
 }
 
@@ -1634,17 +1635,100 @@ fn count_comp(counts: &mut Counts, comp: usize, value: i32) {
     }
 }
 
-fn scan_pair(tx: u8, kind: u8) -> (&'static [u16], &'static [u16]) {
-    match (tx, kind) {
-        (TX_4X4, 1) => (&SCAN_ROW_4X4, &NEIGHBORS_ROW_4X4),
-        (TX_4X4, 2) => (&SCAN_COL_4X4, &NEIGHBORS_COL_4X4),
-        (TX_4X4, _) => (&SCAN_DEFAULT_4X4, &NEIGHBORS_DEFAULT_4X4),
-        (TX_8X8, 1) => (&SCAN_ROW_8X8, &NEIGHBORS_ROW_8X8),
-        (TX_8X8, 2) => (&SCAN_COL_8X8, &NEIGHBORS_COL_8X8),
-        (TX_8X8, _) => (&SCAN_DEFAULT_8X8, &NEIGHBORS_DEFAULT_8X8),
-        (TX_16X16, 1) => (&SCAN_ROW_16X16, &NEIGHBORS_ROW_16X16),
-        (TX_16X16, 2) => (&SCAN_COL_16X16, &NEIGHBORS_COL_16X16),
-        (TX_16X16, _) => (&SCAN_DEFAULT_16X16, &NEIGHBORS_DEFAULT_16X16),
-        _ => (&SCAN_DEFAULT_32X32, &NEIGHBORS_DEFAULT_32X32),
+/// A scan's positions transposed (as the syntax stores them), and for
+/// each position the largest row and column (low and high byte) of the
+/// positions up to it: from the end of block alone, a bound on where the
+/// coefficients are.
+const fn derive<const N: usize>(s: &[u16; N], log2n: u32) -> ([u16; N], [u16; N]) {
+    let mask = (1u16 << log2n) - 1;
+    let mut t = [0u16; N];
+    let mut m = [0u16; N];
+    let (mut mr, mut mc) = (0u16, 0u16);
+    let mut i = 0;
+    while i < N {
+        let (r, c) = (s[i] >> log2n, s[i] & mask);
+        t[i] = (c << log2n) | r;
+        if r > mr {
+            mr = r;
+        }
+        if c > mc {
+            mc = c;
+        }
+        m[i] = mr | (mc << 8);
+        i += 1;
     }
+    (t, m)
+}
+
+static D4: ([u16; 16], [u16; 16]) = derive(&SCAN_DEFAULT_4X4, 2);
+static R4: ([u16; 16], [u16; 16]) = derive(&SCAN_ROW_4X4, 2);
+static C4: ([u16; 16], [u16; 16]) = derive(&SCAN_COL_4X4, 2);
+static D8: ([u16; 64], [u16; 64]) = derive(&SCAN_DEFAULT_8X8, 3);
+static R8: ([u16; 64], [u16; 64]) = derive(&SCAN_ROW_8X8, 3);
+static C8: ([u16; 64], [u16; 64]) = derive(&SCAN_COL_8X8, 3);
+static D16: ([u16; 256], [u16; 256]) = derive(&SCAN_DEFAULT_16X16, 4);
+static R16: ([u16; 256], [u16; 256]) = derive(&SCAN_ROW_16X16, 4);
+static C16: ([u16; 256], [u16; 256]) = derive(&SCAN_COL_16X16, 4);
+static D32: ([u16; 1024], [u16; 1024]) = derive(&SCAN_DEFAULT_32X32, 5);
+
+/// A size's and kind's scan, neighbours, transposed positions and
+/// row-and-column bounds.
+#[allow(clippy::type_complexity)]
+fn scan_pair(
+    tx: u8,
+    kind: u8,
+) -> (
+    &'static [u16],
+    &'static [u16],
+    &'static [u16],
+    &'static [u16],
+) {
+    match (tx, kind) {
+        (TX_4X4, 1) => (&SCAN_ROW_4X4, &NEIGHBORS_ROW_4X4, &R4.0, &R4.1),
+        (TX_4X4, 2) => (&SCAN_COL_4X4, &NEIGHBORS_COL_4X4, &C4.0, &C4.1),
+        (TX_4X4, _) => (&SCAN_DEFAULT_4X4, &NEIGHBORS_DEFAULT_4X4, &D4.0, &D4.1),
+        (TX_8X8, 1) => (&SCAN_ROW_8X8, &NEIGHBORS_ROW_8X8, &R8.0, &R8.1),
+        (TX_8X8, 2) => (&SCAN_COL_8X8, &NEIGHBORS_COL_8X8, &C8.0, &C8.1),
+        (TX_8X8, _) => (&SCAN_DEFAULT_8X8, &NEIGHBORS_DEFAULT_8X8, &D8.0, &D8.1),
+        (TX_16X16, 1) => (&SCAN_ROW_16X16, &NEIGHBORS_ROW_16X16, &R16.0, &R16.1),
+        (TX_16X16, 2) => (&SCAN_COL_16X16, &NEIGHBORS_COL_16X16, &C16.0, &C16.1),
+        (TX_16X16, _) => (
+            &SCAN_DEFAULT_16X16,
+            &NEIGHBORS_DEFAULT_16X16,
+            &D16.0,
+            &D16.1,
+        ),
+        _ => (
+            &SCAN_DEFAULT_32X32,
+            &NEIGHBORS_DEFAULT_32X32,
+            &D32.0,
+            &D32.1,
+        ),
+    }
+}
+
+/// The coefficient probabilities of a frame as the token reader takes
+/// them: for each size, plane and reference, 64 rows (band × 8 +
+/// context) of the three coded probabilities and the eight Pareto ones of
+/// the third (libvpx's model expanded once a frame, as FFmpeg does).
+pub type Coef11 = [[[u8; 12]; 64]; 16];
+
+pub fn coef11(fc: &FrameContext) -> Box<Coef11> {
+    let mut t = Box::new([[[0u8; 12]; 64]; 16]);
+    for tx in 0..4 {
+        for pl in 0..2 {
+            for r in 0..2 {
+                let rows = &mut t[(tx * 2 + pl) * 2 + r];
+                for band in 0..6 {
+                    for ctx in 0..6 {
+                        let p = fc.coef[tx][pl][r][band][ctx];
+                        let row = &mut rows[band * 8 + ctx];
+                        row[..3].copy_from_slice(&p);
+                        row[3..11].copy_from_slice(&PARETO8[usize::from(p[2].max(1)) - 1]);
+                    }
+                }
+            }
+        }
+    }
+    t
 }

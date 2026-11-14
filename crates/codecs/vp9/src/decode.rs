@@ -546,7 +546,7 @@ impl Vp9Decoder {
     /// Pictures from the front of the queue: those that are done, and
     /// any past the number that may be in flight (waiting for them).
     fn ready(&mut self, all: bool) -> Result<Vec<VideoOutput>, CodecError> {
-        let limit = self.rt.as_ref().map_or(0, |rt| rt.workers.count());
+        let limit = self.rt.as_ref().map_or(0, |rt| 2 * rt.workers.count());
         let mut out = Vec::new();
         let failed = |rt: &Option<Runtime>| rt.as_ref().is_some_and(|rt| rt.workers.take_failure());
         while let Some((held, _, _, _)) = self.pending.front() {

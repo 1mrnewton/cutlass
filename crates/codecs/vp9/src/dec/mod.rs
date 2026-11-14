@@ -83,6 +83,7 @@ struct TileCol<'p> {
 pub struct FrameParse<'p> {
     parsed: &'p Parsed<'p>,
     levels: lpf::Levels,
+    coef11: Box<parse::Coef11>,
     prev_mvs: Option<&'p [MvRef]>,
     last_seg: &'p [u8],
     cols: Vec<TileCol<'p>>,
@@ -196,6 +197,7 @@ impl<'p> FrameParse<'p> {
         Ok(Self {
             parsed,
             levels: lpf::levels(h),
+            coef11: parse::coef11(&parsed.fc),
             prev_mvs: if h.use_prev_mvs { prev_mvs } else { None },
             last_seg,
             cols,
@@ -218,6 +220,7 @@ impl<'p> FrameParse<'p> {
     /// What every tile reads, from the fields it borrows.
     fn shared<'s>(
         parsed: &'s Parsed<'s>,
+        coef11: &'s parse::Coef11,
         levels: &'s lpf::Levels,
         prev_mvs: Option<&'s [MvRef]>,
         last_seg: &'s [u8],
@@ -228,6 +231,7 @@ impl<'p> FrameParse<'p> {
         Shared {
             h,
             fc: &parsed.fc,
+            coef11,
             prev_mvs,
             last_seg,
             levels,
@@ -253,6 +257,7 @@ impl<'p> FrameParse<'p> {
     pub fn row(&mut self, sb_row: usize) -> Result<(), CodecError> {
         let shared = Self::shared(
             self.parsed,
+            &self.coef11,
             &self.levels,
             self.prev_mvs,
             self.last_seg,
@@ -272,6 +277,7 @@ impl<'p> FrameParse<'p> {
     pub fn all(&mut self) -> Result<(), CodecError> {
         let shared = Self::shared(
             self.parsed,
+            &self.coef11,
             &self.levels,
             self.prev_mvs,
             self.last_seg,

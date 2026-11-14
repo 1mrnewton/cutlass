@@ -259,6 +259,11 @@ pub struct TextSource {
     origin_y: f32,
     width: u32,
     height: u32,
+    /// The picture is drawn with its lines across and then turned a
+    /// quarter clockwise: a script written down the page. What is said
+    /// in the picture's own directions, a shadow's or a moving letter's,
+    /// is turned back first, so it comes out as it was said.
+    turned: bool,
 }
 
 impl TextSource {
@@ -406,11 +411,18 @@ impl TextSource {
         }
         let mesh = build_faces(material.id.clone(), &laid, &atlases)?;
         let style = Style::of(material, glow, laid.font_size)?;
-        let looks: Vec<Look> = mesh
+        let mut looks: Vec<Look> = mesh
             .glyphs
             .iter()
             .map(|record| Look::of(&style, runs, record.source, laid.font_size))
             .collect();
+        if laid.turned {
+            // A shadow cast right, once the picture is turned, is one
+            // cast up before it is.
+            for shadow in looks.iter_mut().filter_map(|look| look.shadow.as_mut()) {
+                (shadow.dx, shadow.dy) = (shadow.dy, -shadow.dx);
+            }
+        }
         let mut shadows: Vec<Shadow> = Vec::new();
         for shadow in looks.iter().filter_map(|look| look.shadow.as_ref()) {
             if !shadows.contains(shadow) {
@@ -472,6 +484,7 @@ impl TextSource {
             origin_y,
             width,
             height,
+            turned: laid.turned,
         };
         if source
             .patterns
@@ -584,7 +597,11 @@ impl TextSource {
     /// The picture's width and height: tight around the drawn glyphs.
     #[must_use]
     pub const fn size(&self) -> (u32, u32) {
-        (self.width, self.height)
+        if self.turned {
+            (self.height, self.width)
+        } else {
+            (self.width, self.height)
+        }
     }
 
     #[must_use]
@@ -709,8 +726,14 @@ impl TextSource {
         let mut moved = record.clone();
         moved.width = record.width * scale;
         moved.height = record.height * scale;
-        moved.x = record.x + (record.width - moved.width) / 2.0 + pose.dx as f32 * self.font_size;
-        moved.y = record.y + (record.height - moved.height) / 2.0 + pose.dy as f32 * self.font_size;
+        // A move said in the turned picture's directions, turned back.
+        let (dx, dy) = if self.turned {
+            (pose.dy, -pose.dx)
+        } else {
+            (pose.dx, pose.dy)
+        };
+        moved.x = record.x + (record.width - moved.width) / 2.0 + dx as f32 * self.font_size;
+        moved.y = record.y + (record.height - moved.height) / 2.0 + dy as f32 * self.font_size;
         [moved.x, moved.y, moved.width, moved.height]
             .iter()
             .all(|value| value.is_finite())
@@ -862,7 +885,13 @@ impl TextSource {
                 self.splat(&mut rgba, &record, [ink[0], ink[1], ink[2], shown]);
             }
         }
-        let bytes = CpuBytes::new(self.width, self.height, rgba).map_err(|_| TextError::Limit)?;
+        let (width, height) = self.size();
+        let rgba = if self.turned {
+            turn(&rgba, self.width as usize, self.height as usize)
+        } else {
+            rgba
+        };
+        let bytes = CpuBytes::new(width, height, rgba).map_err(|_| TextError::Limit)?;
         Ok(Picture::Cpu(bytes))
     }
 
@@ -1117,6 +1146,24 @@ impl PictureSource for TextSource {
             Err(_) => Sample::Miss,
         }
     }
+}
+
+/// A picture `width` by `height` turned a quarter clockwise: its top
+/// row is the new right column, read downward.
+fn turn(rgba: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let mut turned = vec![0_u8; rgba.len()];
+    let (rows, _) = rgba.as_chunks::<4>();
+    // Each row of the new picture is a column of the old, read upward.
+    for (place, pixel) in turned.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x, y) = (place % height.max(1), place / height.max(1));
+        if let Some(from) = height
+            .checked_sub(x + 1)
+            .and_then(|row| rows.get(row * width + y))
+        {
+            *pixel = *from;
+        }
+    }
+    turned
 }
 
 /// Which letter and word each glyph is. A letter is a glyph that draws
@@ -2421,6 +2468,123 @@ mod tests {
         let before = picture(&fixed);
         fixed.font_variations = "wght=900".to_owned();
         assert_eq!(picture(&fixed), before);
+    }
+
+    #[test]
+    fn a_title_written_down_the_page_is_its_lines_turned_a_quarter() {
+        const JOINED: &[u8] = include_bytes!("../../font/fixtures/joined.ttf");
+        let open =
+            |text: &MaterialText| TextSource::open(JOINED, None, text, &segment()).expect("open");
+        let drawn = |text: &MaterialText| {
+            let source = open(text);
+            let (width, height) = source.size();
+            (width, height, cpu(source.sample(Micros(1_000))))
+        };
+        // One line of Mongolian in a column is the line laid across,
+        // turned a quarter clockwise: every pixel of it.
+        let mut column = material("\u{1820}\u{1820}\u{1820}");
+        column.typesetting = 1;
+        column.alignment = 3;
+        let mut line = column.clone();
+        line.typesetting = 0;
+        line.alignment = 0;
+        let (line_w, line_h, across) = drawn(&line);
+        let (width, height, turned) = drawn(&column);
+        assert_eq!((width, height), (line_h, line_w));
+        assert!(line_w > line_h, "a line is wider than it is tall");
+        assert_eq!(
+            turned,
+            super::turn(&across, line_w as usize, line_h as usize)
+        );
+        assert!(turned.chunks(4).any(|pixel| pixel[3] > 0));
+        // The top left of the line is the top right of the column.
+        let at = |rgba: &[u8], wide: u32, x: u32, y: u32| {
+            let from = ((y * wide + x) * 4) as usize;
+            [rgba[from], rgba[from + 1], rgba[from + 2], rgba[from + 3]]
+        };
+        for (x, y) in [
+            (0, 0),
+            (line_w - 1, 0),
+            (3, line_h - 1),
+            (line_w / 2, line_h / 2),
+        ] {
+            assert_eq!(
+                at(&turned, width, line_h - 1 - y, x),
+                at(&across, line_w, x, y)
+            );
+        }
+        // A second, shorter line is the column to the right of the first.
+        let mut two = column.clone();
+        two.content = "\u{1820}\u{1820}\u{1820}\n\u{1820}".to_owned();
+        let (two_w, two_h, columns) = drawn(&two);
+        assert!(two_w > width && two_h == height);
+        let inked_rows = |from: u32, to: u32| {
+            (0..two_h)
+                .filter(|y| (from..to).any(|x| at(&columns, two_w, x, *y)[3] > 0))
+                .count()
+        };
+        assert!(inked_rows(0, two_w / 2) > inked_rows(two_w / 2, two_w));
+        // A shadow cast straight down falls below the column: the
+        // picture is taller by it and no wider.
+        let mut shadowed = column.clone();
+        shadowed.has_shadow = true;
+        shadowed.shadow_color = "#000000".to_owned();
+        shadowed.shadow_alpha = 1.0;
+        shadowed.shadow_angle = -90.0;
+        shadowed.shadow_distance = 30.0;
+        shadowed.shadow_smoothing = 0.0;
+        let (shadow_w, shadow_h, cast) = drawn(&shadowed);
+        assert!(shadow_h > height, "{shadow_h} against {height}");
+        let lowest = |rgba: &[u8], wide: u32, tall: u32| {
+            (0..tall)
+                .rev()
+                .find(|y| (0..wide).any(|x| at(rgba, wide, x, *y)[3] > 0))
+                .expect("ink")
+        };
+        let own = lowest(&turned, width, height);
+        assert!(lowest(&cast, shadow_w, shadow_h) > own);
+        // A letter moved down by its pose moves down the column.
+        let mut posed = open(&column);
+        let letters = posed.letters().len();
+        posed.set_poses(vec![
+            LetterPose {
+                dy: 0.5,
+                ..LetterPose::REST
+            };
+            letters
+        ]);
+        let moved = cpu(posed.sample(Micros(1_000)));
+        let (moved_w, moved_h) = posed.size();
+        let first = |rgba: &[u8], wide: u32, tall: u32| {
+            (0..tall)
+                .find(|y| (0..wide).any(|x| at(rgba, wide, x, *y)[3] > 0))
+                .expect("ink")
+        };
+        assert!(first(&moved, moved_w, moved_h) > first(&turned, width, height));
+        // Latin in a column still stands letter under letter, unturned.
+        let mut stood = material("AB");
+        stood.typesetting = 1;
+        stood.alignment = 3;
+        let (stood_w, stood_h, _) = {
+            let source = TextSource::open(TTF, None, &stood, &segment()).expect("open");
+            let (width, height) = source.size();
+            (width, height, ())
+        };
+        assert!(stood_h > stood_w);
+    }
+
+    #[test]
+    fn a_picture_is_turned_a_quarter_clockwise() {
+        // Two across and three down, each pixel its own number.
+        let rgba: Vec<u8> = (0..6_u8).flat_map(|n| [n, n, n, 255]).collect();
+        let turned = super::turn(&rgba, 2, 3);
+        let reds: Vec<u8> = turned.chunks(4).map(|pixel| pixel[0]).collect();
+        // 0 1        4 2 0
+        // 2 3   to   5 3 1
+        // 4 5
+        assert_eq!(reds, [4, 2, 0, 5, 3, 1]);
+        assert!(super::turn(&[], 0, 0).is_empty());
+        assert_eq!(super::turn(&[9, 9, 9, 9], 1, 1), [9, 9, 9, 9]);
     }
 
     #[test]

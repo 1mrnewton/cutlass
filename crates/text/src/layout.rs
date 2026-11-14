@@ -82,6 +82,11 @@ pub struct Layout {
     /// Pixels per design unit of each face, the title's own first.
     pub scales: Vec<f32>,
     pub alignment: Alignment,
+    /// The lines are laid across, to be turned a quarter clockwise when
+    /// drawn: this is how a script written only down the page, with its
+    /// lines from the left, stands in columns. The first line is then
+    /// the lowest, so that it is the leftmost once turned.
+    pub turned: bool,
 }
 
 impl Layout {
@@ -186,6 +191,7 @@ pub(crate) fn layout_faces(
             scale,
             scales,
             alignment,
+            turned: false,
         });
     }
     // Letters spaced apart are not drawn as ligatures.
@@ -218,6 +224,19 @@ pub(crate) fn layout_faces(
         alignment,
         Alignment::Top | Alignment::Middle | Alignment::Bottom
     );
+    // Mongolian and Phags-pa letters join along their line and cannot be
+    // stood one under another: their columns are lines turned.
+    let turned = vertical && crate::script::written_down_the_page(text);
+    let (alignment, vertical) = if turned {
+        let across = match alignment {
+            Alignment::Middle => Alignment::Center,
+            Alignment::Bottom => Alignment::Right,
+            _ => Alignment::Left,
+        };
+        (across, false)
+    } else {
+        (alignment, vertical)
+    };
     let mut laid = if vertical {
         // One em for each character, however many glyphs draw it.
         let em = |glyph: &ShapedGlyph| {
@@ -245,8 +264,9 @@ pub(crate) fn layout_faces(
             boundary: &boundary,
         };
         let rows = wrap(&shaped, &measure)?;
-        place(&shaped, &rows, metrics, alignment, &size, &units)?
+        place(&shaped, &rows, metrics, alignment, turned, &size, &units)?
     };
+    laid.turned = turned;
     laid.scale = scale;
     laid.scales = scales;
     Ok(laid)
@@ -416,11 +436,14 @@ fn rewrap(rows: &mut Vec<Row>, measure: &Measure<'_>) -> Result<(), TextError> {
     }
 }
 
+/// Lay `rows` one under another; with `upward`, the first lowest and
+/// each later one above it, each still as tall as it is.
 fn place(
     shaped: &Shaped,
     rows: &[Row],
     metrics: Metrics,
     alignment: Alignment,
+    upward: bool,
     size: &dyn Fn(&ShapedGlyph) -> f32,
     units: &dyn Fn(&ShapedGlyph) -> f32,
 ) -> Result<Layout, TextError> {
@@ -431,10 +454,25 @@ fn place(
         step,
     } = metrics;
     let mut lines = Vec::with_capacity(rows.len());
+    // Each row's baseline, counted down from the top in the order the
+    // rows stand.
+    let mut baselines = vec![0.0_f32; rows.len()];
     let mut baseline = 0.0_f32;
-    for (index, row) in rows.iter().enumerate() {
-        let tallest = row.glyphs.iter().map(size).fold(1.0_f32, f32::max);
-        baseline += if index == 0 { font_size } else { step } * tallest;
+    let mut stand = |index: usize, first: bool| {
+        let tallest = rows[index].glyphs.iter().map(size).fold(1.0_f32, f32::max);
+        baseline += if first { font_size } else { step } * tallest;
+        baselines[index] = baseline;
+    };
+    if upward {
+        for (place, index) in (0..rows.len()).rev().enumerate() {
+            stand(index, place == 0);
+        }
+    } else {
+        for index in 0..rows.len() {
+            stand(index, index == 0);
+        }
+    }
+    for (row, baseline) in rows.iter().zip(baselines) {
         let levels = shaped
             .paragraphs
             .get(row.paragraph)
@@ -478,6 +516,7 @@ fn place(
         scale: 0.0,
         scales: Vec::new(),
         alignment,
+        turned: false,
     })
 }
 
@@ -593,6 +632,7 @@ fn place_columns(
         scale: 0.0,
         scales: Vec::new(),
         alignment,
+        turned: false,
     })
 }
 
@@ -974,6 +1014,72 @@ mod tests {
         assert_eq!(laid.lines.len(), 2);
         assert_eq!(laid.lines[0].baseline.to_bits(), 1_000.0_f32.to_bits());
         assert_eq!(laid.lines[1].baseline.to_bits(), 2_500.0_f32.to_bits());
+    }
+
+    #[test]
+    fn a_script_written_down_the_page_is_laid_across_to_be_turned() {
+        const JOINED: &[u8] = include_bytes!("../../font/fixtures/joined.ttf");
+        let face = cutlass_font::read(JOINED).expect("face");
+        // Three Mongolian letters, a line end, and one more.
+        let mut text = material("\u{1820}\u{1820}\u{1820}\n\u{1820}");
+        text.typesetting = 1;
+        text.alignment = 3;
+        let laid = layout(&face, &text).expect("columns");
+        // Not letters stood one under another: lines, to be turned.
+        assert!(laid.turned && !laid.vertical());
+        assert_eq!(laid.alignment, super::Alignment::Left);
+        assert_eq!(laid.lines.len(), 2);
+        // The same lines as the text laid across, joined as it joins.
+        let mut across = text.clone();
+        across.typesetting = 0;
+        across.alignment = 0;
+        let flat = layout(&face, &across).expect("lines");
+        assert!(!flat.turned);
+        for (turned, plain) in laid.lines.iter().zip(&flat.lines) {
+            let ids = |line: &super::Line| -> Vec<(u16, u32)> {
+                line.glyphs
+                    .iter()
+                    .map(|glyph| (glyph.glyph_id, glyph.x.to_bits()))
+                    .collect()
+            };
+            assert_eq!(ids(turned), ids(plain));
+        }
+        // But the first line is the lowest, to be the leftmost column
+        // once the picture is turned a quarter clockwise.
+        assert_eq!(flat.lines[0].baseline.to_bits(), 1_000.0_f32.to_bits());
+        assert_eq!(flat.lines[1].baseline.to_bits(), 2_000.0_f32.to_bits());
+        assert_eq!(laid.lines[1].baseline.to_bits(), 1_000.0_f32.to_bits());
+        assert_eq!(laid.lines[0].baseline.to_bits(), 2_000.0_f32.to_bits());
+        assert!(
+            laid.lines[0]
+                .glyphs
+                .iter()
+                .all(|glyph| glyph.y.to_bits() == 2_000.0_f32.to_bits())
+        );
+        // Top, middle and bottom of the column are the line's left,
+        // center and right.
+        text.alignment = 4;
+        assert_eq!(
+            layout(&face, &text).expect("middle").alignment,
+            super::Alignment::Center
+        );
+        text.alignment = 5;
+        assert_eq!(
+            layout(&face, &text).expect("bottom").alignment,
+            super::Alignment::Right
+        );
+        // A sign or a digit before the first letter does not decide, and
+        // Latin letters first do: those stand one under another.
+        text.content = "1. \u{1820}".to_owned();
+        assert!(layout(&face, &text).expect("columns").turned);
+        let latin = font();
+        let mut upright = material("AB");
+        upright.typesetting = 1;
+        upright.alignment = 3;
+        let stood = layout(&latin, &upright).expect("stood");
+        assert!(stood.vertical() && !stood.turned);
+        // Lines across are never turned.
+        assert!(!layout(&face, &across).expect("lines").turned);
     }
 
     #[test]

@@ -27,6 +27,21 @@ pub(crate) enum Shaping {
     Universal,
 }
 
+/// Whether `text` is in a script written only down the page, its lines
+/// from the left: Mongolian or Phags-pa. The first character that is of
+/// a script says; signs every script shares, and marks, do not.
+pub(crate) fn written_down_the_page(text: &str) -> bool {
+    text.chars()
+        .map(Script::of)
+        .find(|script| {
+            !matches!(
+                *script,
+                Script::COMMON | Script::INHERITED | Script::UNKNOWN
+            )
+        })
+        .is_some_and(|script| matches!(&script.0, b"Mong" | b"Phag"))
+}
+
 /// The script `character` is written in, by the four letters ISO 15924
 /// gives it: `Zyyy` for a sign many scripts share, `Zinh` for a mark
 /// that takes its letter's, `Zzzz` for a character with none.

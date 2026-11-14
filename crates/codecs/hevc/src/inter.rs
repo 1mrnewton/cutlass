@@ -418,7 +418,11 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
         let col = &col_ref.frame;
         // The candidates lie in this CTB row.
         let ctb = 1usize << self.sps.log2_ctb;
-        col.wait_motion(((pb.y >> self.sps.log2_ctb) + 1) * ctb);
+        let need = ((pb.y >> self.sps.log2_ctb) + 1) * ctb;
+        if need > self.seen_motion.get() {
+            col.wait_motion(need);
+            self.seen_motion.set(col.motion_published());
+        }
         let log2 = self.sps.log2_ctb;
         let xbr = pb.x + pb.w;
         let ybr = pb.y + pb.h;
@@ -615,7 +619,12 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                 let mv = field.mv[list];
                 let luma = (y + h) as isize + (isize::from(mv.y) >> 2) + 4;
                 let chroma = 2 * ((y / 2 + h / 2) as isize + (isize::from(mv.y) >> 3) + 2);
-                frame.wait_rows(luma.max(chroma).max(1) as usize);
+                let need = luma.max(chroma).max(1) as usize;
+                let k = usize::from(field.ref_idx[list] as u8) & 15;
+                if need > self.seen_rows[list][k] {
+                    frame.wait_rows(need);
+                    self.seen_rows[list][k] = frame.rows_published();
+                }
             }
         }
         let refs = &refs;

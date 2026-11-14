@@ -110,6 +110,11 @@ pub struct SliceDecoder<'a, 'p, P: Pixel> {
     pub merge_2nx2n: bool,
     pub slice_type: SliceType,
     pub mc: crate::mc::Scratch<P>,
+    /// Luma rows of each reference (by list and index) known to be
+    /// published, and of the collocated picture's motion: the waits load
+    /// the counts, which other threads keep writing, only past them.
+    pub seen_rows: [[usize; 16]; 2],
+    pub seen_motion: std::cell::Cell<usize>,
 }
 
 /// The scans of clause 6.5.3 to 6.5.5 as (x, y): up-right diagonal,

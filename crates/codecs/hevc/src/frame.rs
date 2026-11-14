@@ -261,6 +261,18 @@ impl Frame {
         }
     }
 
+    /// Luma rows of samples published so far (`usize::MAX`: all).
+    #[inline]
+    pub fn rows_published(&self) -> usize {
+        self.rows.published()
+    }
+
+    /// Luma rows of motion published so far (`usize::MAX`: all).
+    #[inline]
+    pub fn motion_published(&self) -> usize {
+        self.col.published()
+    }
+
     /// Block until the motion of luma rows `0..rows` is final.
     #[inline]
     pub fn wait_motion(&self, rows: usize) {

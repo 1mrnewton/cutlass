@@ -511,6 +511,8 @@ impl<'a> SliceJob<'a> {
             merge_2nx2n: false,
             slice_type: self.slice_type,
             mc: crate::mc::Scratch::default(),
+            seen_rows: [[0; 16]; 2],
+            seen_motion: std::cell::Cell::new(0),
         }
     }
 }

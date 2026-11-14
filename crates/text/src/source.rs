@@ -338,10 +338,16 @@ impl TextSource {
         {
             return Err(TextError::Measure);
         }
-        let font = match face {
+        let mut font = match face {
             None => cutlass_font::read(bytes).map_err(TextError::Font)?,
             Some(index) => cutlass_font::read_collection(bytes, index).map_err(TextError::Font)?,
         };
+        // A title may set a face that varies along its axes itself; what
+        // is kept for a face is kept for the face as it is set.
+        let axes = material.font_axes();
+        if !axes.is_empty() {
+            font.set_variations(&axes).map_err(TextError::Font)?;
+        }
         let words = crate::richtext::read(material)?;
         let gathered = gather(font, &words.text, &words.runs, Wanted::of(material), faces);
         let chosen = Chosen {
@@ -2355,6 +2361,66 @@ mod tests {
             super::ink_at(&short, 0.5, 0.5, 1.0, [255, 255, 255, 255]),
             Some([200, 50, 0, 255])
         );
+    }
+
+    #[test]
+    fn a_title_sets_a_face_that_varies_along_its_axes() {
+        const VARIABLE: &[u8] = include_bytes!("../../font/fixtures/variable.ttf");
+        let whole = cutlass_font::read(VARIABLE).expect("face");
+        let heavy = whole.varied(&[(*b"wght", 900.0)]).expect("heavy");
+        // A letter that is wider when the face is heavy.
+        let letter = ('A'..='Z')
+            .chain('a'..='z')
+            .find(|letter| {
+                whole
+                    .glyph_id(*letter)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|glyph| heavy.advance(glyph).ok() > whole.advance(glyph).ok())
+            })
+            .expect("a letter that widens");
+        let mut text = material(&letter.to_string().repeat(6));
+        let width = |text: &MaterialText| {
+            TextSource::open(VARIABLE, None, text, &segment())
+                .expect("open")
+                .size()
+                .0
+        };
+        let plain = width(&text);
+        text.font_variations = "wght=900".to_owned();
+        let set = width(&text);
+        assert!(set > plain, "{set} against {plain}");
+        // Through what is kept, each setting is its own title: the plain
+        // one drawn after the heavy one is as narrow as before.
+        let cache = crate::TextCache::new();
+        let kept = |text: &MaterialText| {
+            TextSource::open_cached(
+                VARIABLE,
+                None,
+                text,
+                None,
+                &segment(),
+                &crate::NoFaces,
+                &cache,
+            )
+            .expect("open")
+            .size()
+            .0
+        };
+        assert_eq!(kept(&text), set);
+        text.font_variations.clear();
+        assert_eq!(kept(&text), plain);
+        // An axis the face lacks, and a setting that does not read, leave
+        // the face as it is; one past the end is the end.
+        text.font_variations = "slnt=-10,wght=heavy".to_owned();
+        assert_eq!(width(&text), plain);
+        text.font_variations = "wght=5000".to_owned();
+        assert_eq!(width(&text), set);
+        // A face that does not vary takes no setting and still draws.
+        let mut fixed = material("A");
+        let before = picture(&fixed);
+        fixed.font_variations = "wght=900".to_owned();
+        assert_eq!(picture(&fixed), before);
     }
 
     #[test]

@@ -49,7 +49,10 @@ pub use speed::{
     constant_target_duration, curve_speed_at, curve_speed_factor, curve_target_duration,
     split_curve,
 };
-pub use text::{Bubble, CAPTION_STYLE_KEYS, MaterialText, TEXT_BOLD_WIDTH, TEXT_ITALIC_DEGREE};
+pub use text::{
+    Bubble, CAPTION_STYLE_KEYS, MAX_FONT_AXES, MaterialText, TEXT_BOLD_WIDTH, TEXT_ITALIC_DEGREE,
+    read_font_axes, write_font_axes,
+};
 pub use transition::{MaterialTransition, blend_extents, blend_window};
 pub use video::{
     Algorithm, Crop, FreezeInfo, MaterialVideo, MotionBlur, Reframe, Relight, VideoAlgorithm,

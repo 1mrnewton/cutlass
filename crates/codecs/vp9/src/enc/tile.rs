@@ -348,11 +348,11 @@ const SUB8_SPEED: u8 = 1;
 
 /// From this speed an inter candidate past the first is tried only when
 /// its score is within a fifth of the first's ([`Tile::inter_cands`]).
-const CAND_MARGIN_SPEED: u8 = 6;
+const CAND_MARGIN_SPEED: u8 = 5;
 
 /// From this speed a whole block under the quantizer's noise ends the
 /// partition search whether or not it codes a residual.
-const BREAKOUT_SPEED: u8 = 6;
+const BREAKOUT_SPEED: u8 = 5;
 
 /// How much more a bit of chroma coefficients weighs in RD quantization
 /// than one of luma.
@@ -360,7 +360,7 @@ const CHROMA_RATE: f32 = 1.0 / 0.7;
 
 /// From this speed the sub-sample refinement tries, of the four diagonals,
 /// only the one between the better of up and down and of left and right.
-const PRUNED_SUBPEL_SPEED: u8 = 6;
+const PRUNED_SUBPEL_SPEED: u8 = 5;
 
 /// Up to this speed the fast path also tries its best inter candidate
 /// with the next smaller transform ([`Tile::fast_block`]).
@@ -369,7 +369,7 @@ const FAST_TX_SPEED: u8 = 7;
 /// From this speed the search's trials take each coefficient's dead-zone
 /// level (costed as RD quantization costs it, with its end of block
 /// chosen); the blocks the search chooses are coded with RD quantization.
-const DZ_TRIAL_SPEED: u8 = 6;
+const DZ_TRIAL_SPEED: u8 = 5;
 
 /// The 4×4 steps of a block under 8×8's sub-blocks across and down.
 fn sub_steps(bsize: u8) -> (usize, usize) {

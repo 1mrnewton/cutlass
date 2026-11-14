@@ -63,7 +63,7 @@ pub const COMPOUND_SPEED: u8 = 6;
 
 /// From this speed a reference that predicted almost nothing of the last
 /// inter frame is not searched (see [`FrameEncoder::tiles`]).
-pub const REF_PRUNE_SPEED: u8 = 6;
+pub const REF_PRUNE_SPEED: u8 = 5;
 
 /// One coded frame.
 pub struct Coded {

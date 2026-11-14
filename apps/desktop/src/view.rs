@@ -955,6 +955,13 @@ fn project_bar(
 ) {
     let bar = Rect::from_min_size(full.min, Vec2::new(full.width(), height));
     ui::Surface::bar().paint(ui.painter(), bar);
+    // A line along its foot, end to end, so the inspector's header, the
+    // same grey, does not run into it.
+    ui.painter().hline(
+        bar.x_range(),
+        bar.bottom() - 0.5,
+        egui::Stroke::new(1.0, inspector::TAB_LINE),
+    );
     shell.chrome.project_bar = true;
     #[cfg(not(target_os = "macos"))]
     window_buttons(shell, ui, bar);
@@ -4729,15 +4736,11 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
             band,
             egui::Shape::rect_filled(header_rect, CornerRadius::ZERO, tokens::PROJECT_BAR),
         );
-        // A line above it too, so the band does not run into the top bar,
-        // which is the same grey.
-        for y in [header_rect.top() + 0.5, bottom] {
-            ui.painter().hline(
-                header_rect.x_range(),
-                y,
-                egui::Stroke::new(1.0, inspector::TAB_LINE),
-            );
-        }
+        ui.painter().hline(
+            header_rect.x_range(),
+            bottom,
+            egui::Stroke::new(1.0, inspector::TAB_LINE),
+        );
         Rect::from_min_max(egui::pos2(body.left(), bottom + 1.0), body.max)
     } else {
         body

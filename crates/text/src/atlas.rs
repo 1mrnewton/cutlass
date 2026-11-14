@@ -115,6 +115,31 @@ impl Atlas {
         }
     }
 
+    /// Paint `glyph_id` for a title. A glyph that cannot be painted, because
+    /// its outline or its picture does not read or is past a limit, is
+    /// left blank: one glyph does not take the title with it. A glyph the
+    /// face does not have, and a face with nothing to draw from, are still
+    /// errors.
+    pub(crate) fn drawn(
+        &mut self,
+        font: &Font<'_>,
+        glyph_id: u16,
+    ) -> Result<&GlyphImage, TextError> {
+        if !self.cells.contains_key(&glyph_id) {
+            let image = match paint(font, glyph_id) {
+                Ok(image) => image,
+                Err(
+                    error @ (TextError::Font(cutlass_font::FontError::UnknownGlyph)
+                    | TextError::MissingStrike),
+                ) => return Err(error),
+                Err(_) => blank(f32::from(font.units_per_em()) / ATLAS_EM),
+            };
+            self.paints = self.paints.saturating_add(1);
+            self.cells.insert(glyph_id, image);
+        }
+        self.cells.get(&glyph_id).ok_or(TextError::Limit)
+    }
+
     /// Take an image of `glyph_id` that was painted before, so it is not
     /// painted again. A glyph already here keeps the image it has.
     pub(crate) fn adopt(&mut self, glyph_id: u16, image: &GlyphImage) {
@@ -1140,6 +1165,43 @@ mod tests {
             .iter()
             .filter(|pixel| wanted(**pixel))
             .count()
+    }
+
+    #[test]
+    fn a_glyph_that_cannot_be_painted_is_blank_and_the_title_still_draws() {
+        let font = read(SBIX).expect("sbix");
+        let mut atlas = Atlas::new();
+        // The four hostile pictures, each an error when painted alone.
+        for glyph in [9, 10, 11, 13] {
+            assert!(atlas.glyph(&font, glyph).is_err());
+            let image = atlas.drawn(&font, glyph).expect("blank");
+            assert_eq!((image.width, image.height), (0, 0), "glyph {glyph}");
+        }
+        // Each is settled once, and a good glyph is painted as before.
+        assert_eq!(atlas.paints(), 4);
+        let _again = atlas.drawn(&font, 9).expect("kept");
+        assert_eq!(atlas.paints(), 4);
+        let picture = atlas.drawn(&font, 2).expect("picture");
+        assert_eq!(picture.kind, super::GlyphKind::Color);
+        // A glyph the face does not have is still an error, and so is a
+        // face with nothing to draw from.
+        assert!(matches!(
+            atlas.drawn(&font, 9_999),
+            Err(TextError::Font(FontError::UnknownGlyph))
+        ));
+        let empty = read(include_bytes!("../../font/fixtures/no-outline.otf")).expect("cff2");
+        assert!(matches!(
+            Atlas::new().drawn(&empty, 0),
+            Err(TextError::MissingStrike)
+        ));
+        // A title with a hostile picture in it shows its other glyphs: the
+        // letter in the text's white and the good picture's red.
+        let alone = title(SBIX, None, "A\u{1F600}");
+        let beside = title(SBIX, None, "A\u{E009}\u{1F600}\u{E00B}");
+        let white = |rgba: &[u8]| count(rgba, |pixel| pixel == [255, 255, 255, 255]);
+        let red = |rgba: &[u8]| count(rgba, |pixel| pixel == [255, 0, 0, 255]);
+        assert!(white(&beside) > 100 && red(&beside) > 100);
+        assert_eq!((white(&beside), red(&beside)), (white(&alone), red(&alone)));
     }
 
     #[test]

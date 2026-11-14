@@ -389,12 +389,12 @@ impl TextSource {
                 Some(cache) => {
                     let image = cache.glyph(font.fingerprint(), placed.glyph_id, || {
                         let mut alone = Atlas::new();
-                        alone.glyph(font, placed.glyph_id).cloned()
+                        alone.drawn(font, placed.glyph_id).cloned()
                     })?;
                     atlas.adopt(placed.glyph_id, &image);
                 }
                 None => {
-                    let _image = atlas.glyph(font, placed.glyph_id)?;
+                    let _image = atlas.drawn(font, placed.glyph_id)?;
                 }
             }
         }

@@ -79,7 +79,7 @@ pub fn build_text(bytes: &[u8], material: &MaterialText) -> Result<TextMesh, Tex
 fn cache(font: &Font<'_>, layout: &Layout) -> Result<Atlas, TextError> {
     let mut atlas = Atlas::new();
     for placed in layout.glyphs() {
-        let _image = atlas.glyph(font, placed.glyph_id)?;
+        let _image = atlas.drawn(font, placed.glyph_id)?;
     }
     Ok(atlas)
 }

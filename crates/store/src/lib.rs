@@ -36,7 +36,7 @@ pub use hold::{Hold, held_address, hold};
 pub use json::{parse_draft, write_draft};
 pub use projects::{
     ListedProject, create_project, delete_project, duplicate_project, list_projects,
-    listed_project, rename_project,
+    listed_project, rename_project, saved_at,
 };
 pub use proxies::ProjectProxies;
 pub use reframe::{ReframeKey, SubjectPath, load_subject_path, save_subject_path};

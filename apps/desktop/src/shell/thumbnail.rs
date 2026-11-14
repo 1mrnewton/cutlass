@@ -19,9 +19,6 @@ use super::{Shell, ShellError, export_failure, write_replaced};
 /// The most rows a card's picture keeps: twice the card's height, and some.
 const THUMBNAIL_ROWS: u32 = 360;
 
-/// The draft file whose time says when the project was last saved.
-const DRAFT_FILE: &str = "draft_info.json";
-
 /// The projects home's pictures, drawn one after another on their own
 /// thread.
 pub(crate) struct ProjectPictures {
@@ -50,7 +47,7 @@ impl Shell {
         while thumbnails.landed.try_recv().is_ok() {
             thumbnails.waiting = thumbnails.waiting.saturating_sub(1);
         }
-        if let Some(saved) = modified(&project.join(DRAFT_FILE)) {
+        if let Some(saved) = cutlass_store::saved_at(project) {
             let stale = modified(&file).is_none_or(|drawn| drawn < saved);
             if stale
                 && thumbnails.asked.get(project) != Some(&saved)

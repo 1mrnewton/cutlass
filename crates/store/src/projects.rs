@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use cutlass_model::{Draft, Micros};
 
+use crate::folder::DRAFT_FILE;
 use crate::{Folder, StoreError};
 
 /// One saved project in the launch list.
@@ -21,6 +22,16 @@ pub struct ListedProject {
     pub modified: SystemTime,
 }
 
+/// When the project at `path` was last saved: its draft file's time. Other
+/// files the app keeps in the folder, such as a card picture, leave it be,
+/// where the folder's own time would move.
+#[must_use]
+pub fn saved_at(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path.join(DRAFT_FILE))
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
+
 /// The card for one project folder, or `None` when it holds no draft.
 #[must_use]
 pub fn listed_project(path: &Path) -> Option<ListedProject> {
@@ -28,9 +39,7 @@ pub fn listed_project(path: &Path) -> Option<ListedProject> {
         return None;
     }
     let folder = Folder::read(path).ok()?;
-    let modified = fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .unwrap_or(UNIX_EPOCH);
+    let modified = saved_at(path).unwrap_or(UNIX_EPOCH);
     let name = if folder.draft.name.is_empty() {
         path.file_name()?.to_string_lossy().into_owned()
     } else {
@@ -222,7 +231,10 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime};
 
-    use super::{create_project, delete_project, duplicate_project, list_projects, rename_project};
+    use super::{
+        create_project, delete_project, duplicate_project, list_projects, listed_project,
+        rename_project, saved_at,
+    };
     use crate::Folder;
 
     struct Temp {
@@ -285,6 +297,30 @@ mod tests {
         let made = create_project(&temp.path).unwrap();
         assert!(made.ends_with("Project 3"));
         assert_eq!(list_projects(&temp.path).len(), 1);
+    }
+
+    #[test]
+    fn a_project_dates_from_its_last_save_not_from_other_files_in_its_folder() {
+        let temp = Temp::new();
+        let project = create_project(&temp.path).unwrap();
+        let saved = saved_at(&project).unwrap();
+        assert_eq!(listed_project(&project).unwrap().modified, saved);
+        // A card picture written beside the draft, as the app does through
+        // a file it renames into place, moves the folder's time only.
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(project.join(".picture.jpg.part"), b"picture").unwrap();
+        fs::rename(
+            project.join(".picture.jpg.part"),
+            project.join("picture.jpg"),
+        )
+        .unwrap();
+        assert_ne!(fs::metadata(&project).unwrap().modified().unwrap(), saved);
+        assert_eq!(listed_project(&project).unwrap().modified, saved);
+        // A save moves it.
+        std::thread::sleep(Duration::from_millis(20));
+        rename_project(&project, "Renamed").unwrap();
+        assert!(listed_project(&project).unwrap().modified > saved);
+        assert_eq!(saved_at(&temp.path.join("missing")), None);
     }
 
     #[test]

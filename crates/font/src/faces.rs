@@ -246,7 +246,10 @@ fn one_strike(
 const MAX_STRIKES: usize = 64;
 
 /// A font file of `tables`: each a tag, its checksum, and its bytes.
-fn assemble(version: u32, tables: &[([u8; 4], u32, Vec<u8>)]) -> Result<Vec<u8>, FontError> {
+pub(crate) fn assemble(
+    version: u32,
+    tables: &[([u8; 4], u32, Vec<u8>)],
+) -> Result<Vec<u8>, FontError> {
     let count = tables.len();
     let count_u16 = u16::try_from(count).map_err(|_| FontError::BadTable)?;
     if count == 0 {

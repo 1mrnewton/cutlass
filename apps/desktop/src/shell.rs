@@ -892,6 +892,8 @@ pub struct Shell {
     cover_version: u64,
     /// The cover dialog's strip, while it is drawn.
     cover_strip: Option<cover::CoverStrip>,
+    /// The cover dialog's frame, drawn apart from the preview.
+    cover_frame: Option<cover::CoverFrame>,
     /// What the last import that landed added, until the window looks.
     imported: Option<ImportedKind>,
     /// An autosave writing on its own thread.
@@ -1021,6 +1023,7 @@ impl Shell {
             exported: None,
             cover_version: 0,
             cover_strip: None,
+            cover_frame: None,
             imported: None,
             saving: None,
             holding: false,

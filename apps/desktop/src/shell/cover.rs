@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use cutlass_engine::Thumb;
 use cutlass_model::{COVER_FILE, Cover, Draft, Micros};
@@ -22,6 +22,9 @@ const COVER_ROWS: u32 = 1080;
 /// JPEG quality out of 100 for a cover from disk, as stills are written.
 const COVER_QUALITY: u8 = 92;
 
+/// The most rows the cover dialog's frame is drawn at.
+const FRAME_ROWS: u32 = 720;
+
 /// Small pictures of the whole timeline, drawn on their own thread for the
 /// cover dialog's strip.
 pub(crate) struct CoverStrip {
@@ -30,6 +33,21 @@ pub(crate) struct CoverStrip {
     rows: u32,
     landed: Receiver<(usize, Thumb)>,
     pictures: Vec<Option<Thumb>>,
+    /// Bumped each time a picture lands, so the window uploads it.
+    version: u64,
+}
+
+/// The cover dialog's frame: the picture the cover would be at one time,
+/// drawn on its own thread so the dialog never moves the playhead or the
+/// preview. Asking for a new time while one is drawn skips to the newest.
+pub(crate) struct CoverFrame {
+    revision: u64,
+    ask: Sender<Micros>,
+    landed: Receiver<(Micros, Option<Thumb>)>,
+    /// The last time asked for, and the last one drawn.
+    asked: Option<Micros>,
+    drawn: Option<Micros>,
+    picture: Option<Thumb>,
     /// Bumped each time a picture lands, so the window uploads it.
     version: u64,
 }
@@ -218,9 +236,107 @@ impl Shell {
         (&strip.pictures, strip.version)
     }
 
-    /// Stop drawing the cover dialog's strip.
+    /// Stop drawing the cover dialog's strip and frame.
     pub fn forget_cover_strip(&mut self) {
         self.cover_strip = None;
+        self.cover_frame = None;
+    }
+
+    /// The cover dialog's picture at `time`, as the cover file would show
+    /// it, drawn on its own thread from the draft and never through the
+    /// preview, so the playhead and the preview stay where they are. It
+    /// gives the last picture that landed (perhaps of an earlier time, or
+    /// `None` before the first), a number that changes each time one
+    /// lands, and whether the picture at `time` is still being drawn.
+    pub fn cover_frame(&mut self, time: Micros) -> (Option<&Thumb>, u64, bool) {
+        let end = self.cut_duration().0;
+        let time = Micros(time.0.clamp(0, (end - 1).max(0)));
+        let revision = self.session.as_ref().map_or(0, Session::revision);
+        if self
+            .cover_frame
+            .as_ref()
+            .is_none_or(|frame| frame.revision != revision)
+        {
+            let kept = self.cover_frame.take();
+            self.cover_frame = self.start_cover_frame(revision);
+            // Keep showing the old picture until the new draft's lands.
+            if let (Some(frame), Some(old)) = (self.cover_frame.as_mut(), kept) {
+                frame.picture = old.picture;
+                frame.version = old.version;
+            }
+        }
+        let Some(frame) = self.cover_frame.as_mut() else {
+            return (None, 0, false);
+        };
+        if frame.asked != Some(time) && frame.ask.send(time).is_ok() {
+            frame.asked = Some(time);
+        }
+        while let Ok((drawn, picture)) = frame.landed.try_recv() {
+            frame.drawn = Some(drawn);
+            if let Some(picture) = picture {
+                frame.picture = Some(picture);
+                frame.version = frame.version.wrapping_add(1);
+            }
+        }
+        let pending = frame.asked.is_some() && frame.drawn != frame.asked;
+        (frame.picture.as_ref(), frame.version, pending)
+    }
+
+    fn start_cover_frame(&self, revision: u64) -> Option<CoverFrame> {
+        let draft = self.draft()?.clone();
+        let readers = self.readers.clone();
+        let encoders = self.encoders.clone();
+        let root = self.path.clone();
+        let fonts = Arc::clone(&self.face);
+        let gpu = self.gpu.as_ref().map(|preview| {
+            let renderer = preview.renderer();
+            (renderer.device().clone(), renderer.queue().clone())
+        });
+        let (ask, asks) = mpsc::channel::<Micros>();
+        let (send, landed) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("cover frame".to_owned())
+            .spawn(move || {
+                let renderer =
+                    gpu.map(|(device, queue)| cutlass_render::Renderer::new(device, queue));
+                let sources = cutlass_export::MovieSources {
+                    draft: &draft,
+                    root: root.as_deref(),
+                    readers: &readers,
+                    fonts: &*fonts,
+                    renderer: renderer.as_ref(),
+                    encoders: &encoders,
+                };
+                while let Ok(mut time) = asks.recv() {
+                    // Only the newest ask matters.
+                    while let Ok(newer) = asks.try_recv() {
+                        time = newer;
+                    }
+                    let picture = match cutlass_export::still_picture(&sources, time) {
+                        Ok((width, height, rgba)) => on_black(width, height, rgba),
+                        Err(error) => {
+                            cutlass_logger::warn!("cover frame at {} us: {error}", time.0);
+                            None
+                        }
+                    };
+                    if send.send((time, picture)).is_err() {
+                        return;
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            cutlass_logger::warn!("cover frame did not start: {error}");
+            return None;
+        }
+        Some(CoverFrame {
+            revision,
+            ask,
+            landed,
+            asked: None,
+            drawn: None,
+            picture: None,
+            version: 0,
+        })
     }
 
     fn start_cover_strip(&self, revision: u64, cells: usize, rows: u32) -> Option<CoverStrip> {
@@ -276,7 +392,7 @@ fn draw_strip(
     readers: &cutlass_eval::ReaderFactory,
     root: Option<&Path>,
     fonts: &dyn cutlass_eval::Fonts,
-    send: &mpsc::Sender<(usize, Thumb)>,
+    send: &Sender<(usize, Thumb)>,
 ) {
     let session = Session::open(draft);
     let mut cache = FrameCache::new();
@@ -297,6 +413,19 @@ fn draw_strip(
             return;
         }
     }
+}
+
+/// A straight-alpha still laid on black, as the JPEG cover is, and shrunk
+/// to at most [`FRAME_ROWS`] rows.
+fn on_black(width: u32, height: u32, mut rgba: Vec<u8>) -> Option<Thumb> {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        let alpha = u32::from(pixel[3]);
+        for channel in &mut pixel[..3] {
+            *channel = (u32::from(*channel) * alpha / 255) as u8;
+        }
+        pixel[3] = 255;
+    }
+    shrink(width, height, &rgba, FRAME_ROWS)
 }
 
 /// The picture at `path`, laid on black, cut to `canvas`'s shape from its

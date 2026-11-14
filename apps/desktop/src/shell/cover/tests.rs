@@ -149,6 +149,51 @@ fn the_dialog_strip_draws_the_whole_timeline_on_its_own_thread() {
 }
 
 #[test]
+fn the_dialog_frame_is_drawn_on_its_own_thread_and_the_playhead_stays() {
+    let temp = Temp::new();
+    movie_project(&temp.path);
+    let mut desktop = shell();
+    desktop.open_folder(&temp.path).unwrap();
+    desktop.seek(Micros(250_000));
+    let until = Instant::now() + Duration::from_secs(60);
+    // Ask for several times in a row, as a drag does; the newest is drawn.
+    for time in [100_000, 900_000, 1_500_000] {
+        let _ = desktop.cover_frame(Micros(time));
+    }
+    loop {
+        let (picture, version, pending) = desktop.cover_frame(Micros(1_500_000));
+        if let Some(picture) = picture
+            && !pending
+        {
+            // The canvas size, as the cover file would be, on black.
+            assert_eq!((picture.width, picture.height), (64, 32));
+            assert!(
+                picture
+                    .rgba
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|pixel| is_project_blue(pixel) && pixel[3] == 255)
+            );
+            assert!(version > 0);
+            break;
+        }
+        assert!(Instant::now() < until, "the frame was not drawn");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(desktop.playhead(), Micros(250_000));
+    // A time past the end draws the last picture rather than nothing.
+    let until = Instant::now() + Duration::from_secs(60);
+    while desktop.cover_frame(Micros(60_000_000)).2 {
+        assert!(Instant::now() < until, "the last frame was not drawn");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(desktop.cover_frame(Micros(60_000_000)).0.is_some());
+    desktop.forget_cover_strip();
+    assert_eq!(desktop.playhead(), Micros(250_000));
+}
+
+#[test]
 fn a_cut_keeps_the_middle_in_the_canvas_shape() {
     // 4 by 2, columns 0 to 3 numbered in red, half transparent.
     let rgba: Vec<u8> = (0..2)

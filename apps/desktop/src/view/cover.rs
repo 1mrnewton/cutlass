@@ -2,9 +2,9 @@
 //! picks it, and the picture on a project's card at home.
 //!
 //! The dialog has two tabs. Select from video shows a strip of the whole
-//! timeline with a handle to drag; the preview is the timeline's own
-//! picture at the handle, so the playhead follows it while the dialog is
-//! open and goes back when it closes. Local takes a picture from disk, cut
+//! timeline with a handle to drag; the preview is the cover's picture at
+//! the handle, drawn on its own thread, so picking a cover never moves the
+//! project's playhead or its preview. Local takes a picture from disk, cut
 //! to the canvas.
 
 use std::path::{Path, PathBuf};
@@ -36,14 +36,12 @@ pub(super) struct CoverDialog {
     local: bool,
     /// The frame picked from the video.
     time: Micros,
-    /// Where the playhead was before the dialog moved it.
-    return_to: Micros,
     /// The picture picked from disk, and how it shows.
     image: Option<PathBuf>,
     image_texture: Option<egui::TextureHandle>,
-    /// The frame drawn on the CPU when the preview has no GPU, and the
-    /// time it shows.
-    frame_texture: Option<(Micros, egui::TextureHandle)>,
+    /// The picture at the picked frame, and the shell's number for it.
+    frame_texture: Option<egui::TextureHandle>,
+    frame_version: u64,
     /// The strip's pictures, uploaded once each lands.
     strip: Vec<Option<egui::TextureHandle>>,
     strip_version: u64,
@@ -53,14 +51,13 @@ impl CoverDialog {
     /// Open on the project's cover: its frame or its picture. Without one,
     /// the frame at the playhead.
     pub(super) fn open(shell: &Shell) -> Self {
-        let playhead = shell.playhead();
         let mut dialog = Self {
             local: false,
-            time: playhead,
-            return_to: playhead,
+            time: shell.playhead(),
             image: None,
             image_texture: None,
             frame_texture: None,
+            frame_version: u64::MAX,
             strip: Vec::new(),
             strip_version: u64::MAX,
         };
@@ -151,10 +148,7 @@ pub(super) fn dialog(
 }
 
 fn close(shell: &mut Shell, slot: &mut Option<CoverDialog>) {
-    if let Some(dialog) = slot.take() {
-        shell.set_scrubbing(false);
-        shell.seek(dialog.return_to);
-    }
+    *slot = None;
     shell.forget_cover_strip();
 }
 
@@ -201,28 +195,22 @@ fn body(shell: &mut Shell, ui: &mut Ui, dialog: &mut CoverDialog, pick_image: &m
             *pick_image = true;
         }
     } else {
-        if shell.playhead() != dialog.time {
-            shell.seek(dialog.time);
+        let (picture, version, pending) = shell.cover_frame(dialog.time);
+        if version != dialog.frame_version {
+            dialog.frame_texture = picture.map(|picture| upload(ui.ctx(), "cover frame", picture));
+            dialog.frame_version = version;
         }
-        let texture = match shell.preview_texture() {
-            Ok(Some((texture, _))) => Some(texture),
-            // No GPU: the frame drawn on the CPU, as the preview falls back.
-            Ok(None) => cpu_frame(shell, ui.ctx(), dialog),
-            Err(error) => {
-                shell.note_preview(Some(&error));
-                None
-            }
-        };
-        if let Some(texture) = texture {
+        if let Some(texture) = &dialog.frame_texture {
             ui.painter().image(
-                texture,
+                texture.id(),
                 fit,
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
         }
-        if shell.preview_pending() {
-            ui.ctx().request_repaint();
+        if pending {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(16));
         }
     }
     ui.add_space(16.0);
@@ -332,7 +320,6 @@ fn strip(shell: &mut Shell, ui: &mut Ui, dialog: &mut CoverDialog, aspect: f32) 
         let share = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
         dialog.time = Micros(((f64::from(share) * end as f64) as i64).clamp(0, end - 1));
     }
-    shell.set_scrubbing(response.dragged());
     let x = rect.left() + rect.width() * (dialog.time.0 as f32 / end as f32).clamp(0.0, 1.0);
     let line = egui::Stroke::new(2.0, tokens::PLAYHEAD);
     ui.painter().line_segment(
@@ -353,26 +340,6 @@ fn strip(shell: &mut Shell, ui: &mut Ui, dialog: &mut CoverDialog, aspect: f32) 
         egui::StrokeKind::Inside,
     );
     response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
-}
-
-/// The timeline's picture at the dialog's time drawn on the CPU, drawn
-/// again only when the time moves.
-fn cpu_frame(
-    shell: &mut Shell,
-    ctx: &egui::Context,
-    dialog: &mut CoverDialog,
-) -> Option<egui::TextureId> {
-    if let Some((time, texture)) = &dialog.frame_texture
-        && *time == dialog.time
-    {
-        return Some(texture.id());
-    }
-    let picture = shell.preview_bytes().ok()?;
-    let image = super::raster(&picture)?;
-    let texture = ctx.load_texture("cover frame", image, egui::TextureOptions::LINEAR);
-    let id = texture.id();
-    dialog.frame_texture = Some((dialog.time, texture));
-    Some(id)
 }
 
 /// The largest rect of `aspect` (width over height) centred in `outer`.

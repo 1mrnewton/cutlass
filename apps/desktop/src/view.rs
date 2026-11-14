@@ -17565,16 +17565,43 @@ mod tests {
         assert_eq!(shell.cover(), None);
         assert_eq!(shell.playhead(), Micros(500_000));
 
+        // Dragging the strip's handle picks a later frame and leaves the
+        // project's playhead alone.
         press(&mut shell, &mut view, "Cover");
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let tabs = text_pos(&output, "Select from video").expect("the tabs");
+        let strip_y = tabs.y + 50.0;
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let from = Pos2::new(400.0, strip_y);
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(from), button(from, true)],
+        );
+        for x in [500.0, 700.0, 900.0] {
+            frame(
+                &mut shell,
+                &mut view,
+                vec![egui::Event::PointerMoved(Pos2::new(x, strip_y))],
+            );
+            assert_eq!(shell.playhead(), Micros(500_000));
+        }
+        let to = Pos2::new(900.0, strip_y);
+        frame(&mut shell, &mut view, vec![button(to, false)]);
+        assert_eq!(shell.playhead(), Micros(500_000));
         press(&mut shell, &mut view, "Save");
         assert!(view.cover.is_none());
         land_cover(&mut shell);
-        assert_eq!(
-            shell.cover(),
-            Some(&cutlass_model::Cover::Frame {
-                time: Micros(500_000)
-            })
-        );
+        assert_eq!(shell.playhead(), Micros(500_000));
+        let Some(cutlass_model::Cover::Frame { time }) = shell.cover() else {
+            panic!("no frame cover: {:?}", shell.cover());
+        };
+        assert!(time.0 > 1_000_000, "{time:?}");
         assert!(temp.join(cutlass_model::COVER_FILE).is_file());
         // The box now shows the cover, under the word.
         let output = frame(&mut shell, &mut view, Vec::new());

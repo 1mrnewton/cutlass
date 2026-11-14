@@ -13,9 +13,11 @@ mod apply;
 mod arabic;
 pub(crate) mod buffer;
 mod fallback;
+mod hangul;
 mod indic;
 mod kern;
 mod morx;
+mod thai;
 
 use cutlass_font::morx::DELETED_GLYPH;
 use cutlass_font::{Font, GlyphClass, KernPass, LayoutTable, Tag, Variant};
@@ -90,6 +92,17 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
         .collect();
     if glyphs.is_empty() {
         return Ok(glyphs);
+    }
+    // What a script needs before its face's tables see it. A face that
+    // shapes with its own machines is given the text as it is.
+    let own_machines = font.morx().is_some();
+    let thai = matches!(&run.script.0, b"Thai" | b"Laoo");
+    let korean = run.script == Script(*b"Hang");
+    if thai && !own_machines {
+        glyphs = thai::split(glyphs, described);
+    }
+    if korean && !own_machines {
+        glyphs = hangul::compose(font, glyphs, described);
     }
     mark_continuations(&mut glyphs);
     // A script is shaped in the direction it is written. A run going the
@@ -184,7 +197,11 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
     } else if let Some(mut engine) = Engine::new(font, false, backward, count, trusted)
         && let Some(table) = font.gsub()
     {
-        for stage in substitution_stages(shaping, backward, run.ligatures) {
+        let mut stages = substitution_stages(shaping, backward, run.ligatures);
+        if korean {
+            hangul::stages(&mut stages);
+        }
+        for stage in stages {
             for lookup in lookups(table, &scripts, &stage)? {
                 engine.apply(&mut buffer, &lookup)?;
             }
@@ -264,7 +281,9 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
         // The marks of a script written by syllable keep their advance:
         // its fonts place them by it. So do those of a script with shaping
         // of its own in a face that shapes by its own machines.
-        let kept = by_syllable || (machines && shaping != Shaping::Plain) || by_kerx || machine;
+        let own_shaping =
+            shaping != Shaping::Plain || thai || korean || run.script == Script(*b"Hebr");
+        let kept = by_syllable || (machines && own_shaping) || by_kerx || machine;
         if glyph.is_mark() && !kept {
             if unplaced && !backward {
                 glyph.x_offset -= glyph.x_advance;
@@ -273,7 +292,9 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
         }
     }
     settle(&mut glyphs, backward);
-    if unplaced && !by_syllable {
+    // Thai and Lao faces draw their marks where they go, or move them
+    // with their own tables: those are not set by their boxes.
+    if unplaced && !by_syllable && !thai {
         fallback::place_marks(font, &mut glyphs, backward, !backward);
     }
     // What draws nothing is taken out with the glyphs in the order they
@@ -1137,6 +1158,78 @@ mod tests {
         // Each glyph was read a few times and no more.
         assert!(glyphs.iter().all(|glyph| glyph.x_advance > -200_000));
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    /// `text` of `script` shaped left to right in a fixture face.
+    fn shaped_in(face: &[u8], script: &[u8; 4], text: &str) -> String {
+        let font = cutlass_font::read(face).expect("fixture");
+        let run = Run {
+            text,
+            start: 0,
+            end: text.len(),
+            script: Script(*script),
+            backward: false,
+            ligatures: true,
+        };
+        printed(&font, &run)
+    }
+
+    #[test]
+    fn korean_letters_are_drawn_as_the_syllables_the_face_has() {
+        const SYLLABLES: &[u8] = include_bytes!("../../../font/fixtures/hangul.ttf");
+        const LETTERS: &[u8] = include_bytes!("../../../font/fixtures/hangul-letters.ttf");
+        // Each line is what HarfBuzz 14.2 prints for the face.
+        // Three letters and two letters: two syllables.
+        assert_eq!(
+            shaped_in(
+                SYLLABLES,
+                b"Hang",
+                "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1161}"
+            ),
+            "[3=0+900|1=9+900]"
+        );
+        // A syllable and the consonant that ends it are one glyph.
+        assert_eq!(
+            shaped_in(SYLLABLES, b"Hang", "\u{AC00}\u{11A8}a"),
+            "[2=0+900|10=6+500]"
+        );
+        // A syllable the face lacks is drawn from its letters, and one
+        // with an old final consonant is taken apart to join it.
+        assert_eq!(
+            shaped_in(LETTERS, b"Hang", "\u{AC01}"),
+            "[1=0+300|2=0+300|3=0+300]"
+        );
+        assert_eq!(
+            shaped_in(SYLLABLES, b"Hang", "\u{AC00}\u{11C3}"),
+            "[4=0+300|5=0+300|9=0+300]"
+        );
+        // In another script's run the letters are left as they are.
+        assert_eq!(
+            shaped_in(SYLLABLES, b"Latn", "\u{1100}\u{1161}"),
+            "[4=0+300|5=3+300]"
+        );
+    }
+
+    #[test]
+    fn thai_sara_am_is_split_and_marks_stay_where_the_face_draws_them() {
+        const THAI: &[u8] = include_bytes!("../../../font/fixtures/thai.ttf");
+        // Each line is what HarfBuzz 14.2 prints for the face. Sara am is
+        // its circle and its vowel, with the circle before a tone mark.
+        assert_eq!(
+            shaped_in(THAI, b"Thai", "\u{E01}\u{E33}"),
+            "[1=0+600|3=0+0|4=0+400]"
+        );
+        assert_eq!(
+            shaped_in(THAI, b"Thai", "\u{E01}\u{E48}\u{E33}"),
+            "[1=0+600|3=0+0|2=0+0|4=0+400]"
+        );
+        assert_eq!(shaped_in(THAI, b"Thai", "\u{E33}"), "[3=0+0|4=0+400]");
+        // A Thai mark is not moved over its consonant by its box: the
+        // face draws it where it goes.
+        assert_eq!(
+            shaped_in(THAI, b"Thai", "\u{E01}\u{E48}"),
+            "[1=0+600|2=0+0]"
+        );
     }
 
     #[test]

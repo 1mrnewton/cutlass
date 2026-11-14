@@ -318,6 +318,57 @@ pub(crate) fn misclassed() -> Vec<u8> {
     font(&glyphs(), &MAP, &[(b"GDEF", classes), (b"kern", kern)])
 }
 
+/// A face for Korean: the syllables GA 1, GAG 2 and HAN 3, and the
+/// letters G 4, A 5, final G 6, H 7, final N 8 and an old final 9, with
+/// the Latin `a` 10. Each syllable is 900 wide and each letter 300.
+pub(crate) fn hangul() -> Vec<u8> {
+    let mut glyphs = vec![boxed(500)];
+    glyphs.extend([boxed(900); 3]);
+    glyphs.extend([boxed(300); 6]);
+    glyphs.push(boxed(500));
+    let map = [
+        ('a', 10),
+        ('\u{1100}', 4),
+        ('\u{1112}', 7),
+        ('\u{1161}', 5),
+        ('\u{11A8}', 6),
+        ('\u{11AB}', 8),
+        ('\u{11C3}', 9),
+        ('\u{AC00}', 1),
+        ('\u{AC01}', 2),
+        ('\u{D55C}', 3),
+    ];
+    font(&glyphs, &map, &[])
+}
+
+/// A face with the letters of Hangul and no syllables: G 1, A 2 and
+/// final G 3.
+pub(crate) fn hangul_letters() -> Vec<u8> {
+    let glyphs = [boxed(500), boxed(300), boxed(300), boxed(300)];
+    let map = [('\u{1100}', 1), ('\u{1161}', 2), ('\u{11A8}', 3)];
+    font(&glyphs, &map, &[])
+}
+
+/// A face for Thai with no tables of its own for it: the consonant ko
+/// kai 1, the tone mark mai ek 2, which takes no room and is drawn up and
+/// to the left, the circle nikhahit 3, the same way, the vowel sara aa 4,
+/// and sara am whole 5.
+pub(crate) fn thai() -> Vec<u8> {
+    let above = Glyph {
+        advance: 0,
+        outline: Some([-400, 800, -200, 950]),
+    };
+    let glyphs = [boxed(500), boxed(600), above, above, boxed(400), boxed(700)];
+    let map = [
+        ('\u{E01}', 1),
+        ('\u{E32}', 4),
+        ('\u{E33}', 5),
+        ('\u{E48}', 2),
+        ('\u{E4D}', 3),
+    ];
+    font(&glyphs, &map, &[])
+}
+
 /// A fixture's file name and what builds it.
 type Built = (&'static str, fn() -> Vec<u8>);
 
@@ -328,7 +379,13 @@ const FILES: [Built; 3] = [
 ];
 
 /// Fixtures with no kerning, kept and checked the same way.
-const OTHER_FILES: [Built; 2] = [("wide.ttf", wide), ("misclassed.ttf", misclassed)];
+const OTHER_FILES: [Built; 5] = [
+    ("wide.ttf", wide),
+    ("misclassed.ttf", misclassed),
+    ("hangul.ttf", hangul),
+    ("hangul-letters.ttf", hangul_letters),
+    ("thai.ttf", thai),
+];
 
 fn path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

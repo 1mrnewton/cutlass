@@ -37,13 +37,21 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
 
 - Profile 0, any size up to 65536×65536 (odd sizes too), quantizer index 0
   (lossless, Walsh-Hadamard) to 255.
-- Every partition from 64×64 to 8×8 (square), all ten intra modes,
+- Partitions from 64×64 to 8×8 (rectangles below speed 4), all ten
+  intra modes,
   NEAREST/NEAR/ZERO/NEW inter modes on LAST and GOLDEN, sub-sample motion
   (to eighths where the vector may be), per-block transform size
   (`TX_MODE_SELECT`, 4×4 to 32×32 with the intra ADST types), skip, the loop
   filter (libvpx's level from the quantizer), probability adaptation.
 - A golden frame every 12 frames, key frames every `keyint` (240) frames;
-  key and golden frames take finer quantizers.
+  key and golden frames take finer quantizers. With `Vp9Options::lag`
+  (15 and up) an interval whose end the current picture reaches starts
+  with a hidden alt-ref frame, the temporally filtered (`enc::arf`, after
+  libvpx) picture at its end, sent in a superframe with the next shown
+  frame; the overlay at its position refreshes GOLDEN.
+- Coefficient probability updates in the compressed header, chosen on
+  the frame's own counts (the final pass's symbols are kept and written
+  once the updates are known).
 - Speeds 0–9 (`Vp9Options::speed`, default 5). Up to 6 every superblock is
   searched by trial coding; 7 and up code inter frames in one pass.
 - Threads: tile columns, each on its own thread (`Vp9Options::threads`, 0 =
@@ -152,30 +160,56 @@ FFmpeg 7 with libvpx. Timings are medians of whole-process runs.
 
 | Threads | Cutlass | FFmpeg `vp9` | Ratio |
 | --- | ---: | ---: | ---: |
-| 1 core | 3.44 s | 2.16 s | 1.59 |
+| 1 core | 3.10 s | 2.11 s | 1.47 |
 | 4 | 1.26 s | 0.98 s | 1.29 |
 
 (Started at 38.8 s on one core: 18× faster so far.)
 
-**Encode** (`tools/encbench.sh`, BD-rate with `tools/bdrate.py`): 30 frames
-of 1280×720 (a pan over a detailed picture with film grain), 4 threads on
-both sides (libvpx with `-row-mt 1 -tile-columns 2`). BD-rate is the bitrate
-change at equal PSNR-Y; negative is smaller files.
+**Encode** (`tools/encbench.sh`, BD-rate with `tools/bdrate.py`): 30
+frames of 1280×720, 4 threads on both sides (libvpx with `-row-mt 1
+-tile-columns 2`), bitrates from 0.3 to 8 Mb/s. BD-rate is the bitrate
+change at equal PSNR-Y: negative is smaller files than libvpx-vp9. Times
+are the mean per run.
+
+A detailed picture panning 7 pixels a frame, with film grain:
 
 | Cutlass | libvpx-vp9 | BD-rate | Time (Cutlass / libvpx) |
 | --- | --- | ---: | --- |
-| speed 9 | realtime, cpu-used 8 | −65% | 0.46–0.74 s / 0.27–0.37 s |
-| speed 5 | realtime, cpu-used 8 | −72% | 1.4–4.0 s / 0.27–0.37 s |
-| speed 5 | good, cpu-used 1 | +26% | 1.4–4.0 s / 1.2–1.7 s |
+| speed 9 | realtime, cpu-used 8 | −66% | 0.64 s / 0.32 s |
+| speed 9 | realtime, cpu-used 5 | −22% | 0.64 s / 0.44 s |
+| speed 5 | realtime, cpu-used 5 | −41% | 2.58 s / 0.44 s |
+| speed 5 | good, cpu-used 5 | +8% | 2.58 s / 1.24 s |
+| speed 5 | good, cpu-used 3 | +13% | 2.58 s / 1.31 s |
+| speed 5 | good, cpu-used 1 | +22% | 2.58 s / 1.37 s |
+
+The same picture nearly still, with stronger grain:
+
+| Cutlass | libvpx-vp9 | BD-rate | Time (Cutlass / libvpx) |
+| --- | --- | ---: | --- |
+| speed 5 | good, cpu-used 5 | −35% | 1.78 s / 1.58 s |
+| speed 5, lag 16 (alt-refs) | good, cpu-used 5 | −39% | 2.30 s / 1.58 s |
+
+What moved the encoder (BD-rate on the panning clip, each step against
+the one before): RD partition and mode search and RD quantization
+−28% (and −50% on the key frame's own size), key and golden frames
+finer than inter frames with GOLDEN as a second reference −45% (from
++131% to +28% against libvpx good), the partition breakout −7% (and 2–3×
+faster), coefficient probability updates −2.6%, rectangular partitions
+−0.9% (speed < 4 only: they double the time). Alt-refs gain on still
+content (−1.8% overall, −16% at the highest rates) and are left out where
+the picture moves too far for one picture to stand for the interval.
 
 ## Limits and gaps
 
 - Not registered in the desktop app (the app has no VP9 opener yet). The
   crate registers on the video factories and offers `register_engine_encoders`
   for the engine's `EncodeFactory`.
-- The encoder writes profile 0 only, no alt-ref (hidden) frames, no compound
-  prediction, no 4×4 or rectangular partitions, no segmentation, no
-  probability updates in the compressed header, EIGHTTAP filters only.
+- The encoder writes profile 0 only: no compound prediction, no 4×4
+  partitions, no segmentation, no updates of the mode and vector
+  probabilities in the compressed header, EIGHTTAP filters only.
+- Against libvpx's good presets on moving content the encoder still
+  needs 8–22% more bits and about twice the time; the decoder is 1.3–1.5×
+  FFmpeg's time.
 - The encoder always writes BT.601, studio range.
 
 ## Specifications

@@ -210,42 +210,77 @@ fn any(r: &Run) -> u8 {
     r.wide | r.mid | r.narrow | r.inner
 }
 
-/// Two strips, 8 rows apart, of vertical edges: each column's edges of
-/// both strips at once, then its inner 4×4 edges.
+/// A pair of strips, 8 rows apart, of vertical edges: the first's row,
+/// its edges, and the second's if it is in the picture.
+type Strips = (usize, Run, Option<Run>);
+
+impl Run {
+    const NONE: Run = Run {
+        wide: 0,
+        mid: 0,
+        narrow: 0,
+        inner: 0,
+        lfl: [0; 8],
+    };
+}
+
+trait Empty {
+    const EMPTY: Self;
+}
+
+impl Empty for Strips {
+    const EMPTY: Self = (0, Run::NONE, None);
+}
+
+/// The vertical edges of a superblock's pairs of strips: column by
+/// column, each column's edges down every pair, then its inner 4×4 edges
+/// down every pair. Lines are independent across vertical edges, so this
+/// is libvpx's order along each line; going down before across leaves
+/// the samples an edge wrote time to leave the store buffer before the
+/// edge 4 to its right reads them back.
 #[allow(clippy::too_many_arguments)]
-fn vertical_pair<P: Pixel>(
+fn vertical<P: Pixel>(
     buf: &mut [P],
     base: usize,
     stride: usize,
     x0: usize,
-    y: usize,
     cols: usize,
-    a: &Run,
-    b: Option<&Run>,
+    strips: &[Strips],
     levels: &Levels,
     bd: u32,
 ) {
     let limit = if cols >= 8 { 0xff } else { (1u8 << cols) - 1 };
-    let mut bits = (any(a) | b.map_or(0, any)) & limit;
+    let mut bits = 0;
+    for (_, a, b) in strips {
+        bits |= (any(a) | b.as_ref().map_or(0, any)) & limit;
+    }
     while bits != 0 {
         let col = bits.trailing_zeros() as usize;
         bits &= bits - 1;
         let bit = 1u8 << col;
         let x = x0 + col * 8;
-        let ta = levels.dsp(a.lfl[col]);
-        let tb = b.map_or(ta, |b| levels.dsp(b.lfl[col]));
-        let ka = kind(a, bit);
-        let kb = b.and_then(|b| kind(b, bit));
-        // libvpx filters two 16-wide strips with the first strip's level.
-        let thr = if ka == Some(Wd::W16) && kb == Some(Wd::W16) {
-            [ta, ta]
-        } else {
-            [ta, tb]
-        };
-        pair(buf, base, stride, x, y, true, [ka, kb], thr, bd);
-        let ia = (a.inner & bit != 0).then_some(Wd::W4);
-        let ib = b.and_then(|b| (b.inner & bit != 0).then_some(Wd::W4));
-        pair(buf, base, stride, x + 4, y, true, [ia, ib], [ta, tb], bd);
+        for (y, a, b) in strips {
+            let ta = levels.dsp(a.lfl[col]);
+            let tb = b.as_ref().map_or(ta, |b| levels.dsp(b.lfl[col]));
+            let ka = kind(a, bit);
+            let kb = b.as_ref().and_then(|b| kind(b, bit));
+            // libvpx filters two 16-wide strips with the first strip's level.
+            let thr = if ka == Some(Wd::W16) && kb == Some(Wd::W16) {
+                [ta, ta]
+            } else {
+                [ta, tb]
+            };
+            pair(buf, base, stride, x, *y, true, [ka, kb], thr, bd);
+        }
+        for (y, a, b) in strips {
+            let ta = levels.dsp(a.lfl[col]);
+            let tb = b.as_ref().map_or(ta, |b| levels.dsp(b.lfl[col]));
+            let ia = (a.inner & bit != 0).then_some(Wd::W4);
+            let ib = b
+                .as_ref()
+                .and_then(|b| (b.inner & bit != 0).then_some(Wd::W4));
+            pair(buf, base, stride, x + 4, *y, true, [ia, ib], [ta, tb], bd);
+        }
     }
 }
 
@@ -338,25 +373,25 @@ fn luma<P: Pixel>(
         inner: byte(m.int_y, row),
         lfl: lfl(row),
     };
+    let mut strips = [Strips::EMPTY; 4];
+    let mut n = 0;
     let mut row = 0;
     while row < 8 && mi_row + row < g.mi_rows {
-        let y = (mi_row + row) * 8;
-        let a = vrun(row);
         let b = (row + 1 < 8 && mi_row + row + 1 < g.mi_rows).then(|| vrun(row + 1));
-        vertical_pair(
-            buf,
-            base,
-            stride,
-            mi_col * 8,
-            y,
-            cols,
-            &a,
-            b.as_ref(),
-            levels,
-            g.bd,
-        );
+        strips[n] = ((mi_row + row) * 8, vrun(row), b);
+        n += 1;
         row += 2;
     }
+    vertical(
+        buf,
+        base,
+        stride,
+        mi_col * 8,
+        cols,
+        &strips[..n],
+        levels,
+        g.bd,
+    );
     for row in 0..8 {
         if mi_row + row >= g.mi_rows {
             break;
@@ -406,25 +441,25 @@ fn chroma420<P: Pixel>(
         inner: nibble(m.int_uv, row),
         lfl: lfl(row),
     };
+    let mut strips = [Strips::EMPTY; 2];
+    let mut n = 0;
     let mut row = 0;
     while row < 4 && mi_row + row * 2 < g.mi_rows {
-        let y = mi_row * 4 + row * 8;
-        let a = vrun(row);
         let b = (row + 1 < 4 && mi_row + (row + 1) * 2 < g.mi_rows).then(|| vrun(row + 1));
-        vertical_pair(
-            buf,
-            base,
-            stride,
-            mi_col * 4,
-            y,
-            cols,
-            &a,
-            b.as_ref(),
-            levels,
-            g.bd,
-        );
+        strips[n] = (mi_row * 4 + row * 8, vrun(row), b);
+        n += 1;
         row += 2;
     }
+    vertical(
+        buf,
+        base,
+        stride,
+        mi_col * 4,
+        cols,
+        &strips[..n],
+        levels,
+        g.bd,
+    );
     for row in 0..4 {
         let mi = mi_row + row * 2;
         if mi >= g.mi_rows {

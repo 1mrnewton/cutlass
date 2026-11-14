@@ -23,10 +23,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -198,28 +200,42 @@ fun EditorScreen(project: ProjectSummary, home: () -> Unit) {
                     )
                 },
             )
-            Preview(model) { panel = Panel.Text(it) }
-            Transport(model) { panel = Panel.Graphs }
-            TimelineStrip(
-                model = model,
-                onAdd = {
-                    picker.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
-                    )
-                },
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .background(Palette.strip),
-            )
-            Bottom(
-                model = model,
-                panel = panel,
-                setPanel = { panel = it },
-                openBar = openBar,
-                setOpenBar = { openBar = it },
-                pick = pick,
-            )
+            // The transport, timeline and tool bar under the preview, or
+            // beside it on a phone held sideways, where a preview on top
+            // would leave the timeline one row tall.
+            val controls: @Composable ColumnScope.() -> Unit = {
+                Transport(model) { panel = Panel.Graphs }
+                TimelineStrip(
+                    model = model,
+                    onAdd = {
+                        picker.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
+                        )
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .background(Palette.strip),
+                )
+                Bottom(
+                    model = model,
+                    panel = panel,
+                    setPanel = { panel = it },
+                    openBar = openBar,
+                    setOpenBar = { openBar = it },
+                    pick = pick,
+                )
+            }
+            val configuration = LocalConfiguration.current
+            if (configuration.screenWidthDp > configuration.screenHeightDp) {
+                Row(Modifier.weight(1f).fillMaxWidth()) {
+                    Preview(model, Modifier.weight(0.42f).fillMaxHeight()) { panel = Panel.Text(it) }
+                    Column(Modifier.weight(0.58f).fillMaxHeight(), content = controls)
+                }
+            } else {
+                Preview(model) { panel = Panel.Text(it) }
+                controls()
+            }
         }
         NoticeBanner(model, Modifier.align(Alignment.TopCenter))
     }
@@ -228,17 +244,22 @@ fun EditorScreen(project: ProjectSummary, home: () -> Unit) {
     }
 }
 
+/**
+ * The preview. Given no `area`, it fits 16:10 into the width but never past
+ * this share of the screen's height; given one, as beside the timeline on a
+ * phone held sideways, it fills it. The canvas inside keeps its own ratio
+ * either way.
+ */
 @Composable
-private fun Preview(model: EditorModel, editText: (String) -> Unit) {
-    // Fit 16:10 into the width, but never past this share of the screen's
-    // height, so a phone on its side keeps the transport and the timeline.
-    // The canvas inside keeps its own ratio either way.
+private fun Preview(model: EditorModel, area: Modifier? = null, editText: (String) -> Unit) {
     val tallest = (LocalConfiguration.current.screenHeightDp * 0.45f).dp
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
+    BoxWithConstraints(area ?: Modifier.fillMaxWidth()) {
+        val canvasFirst = area == null && model.canvasAspect < 1.6f ||
+            area != null && model.canvasAspect < maxWidth / maxHeight
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(minOf(maxWidth / 1.6f, tallest))
+                .then(if (area == null) Modifier.height(minOf(maxWidth / 1.6f, tallest)) else Modifier.fillMaxHeight())
                 // A box larger than the preview stays inside it.
                 .clipToBounds()
                 .background(Palette.editor),
@@ -247,7 +268,7 @@ private fun Preview(model: EditorModel, editText: (String) -> Unit) {
             // Lighter than the canvas, so the canvas shows its ratio.
             Box(
                 Modifier
-                    .aspectRatio(model.canvasAspect, matchHeightConstraintsFirst = model.canvasAspect < 1.6f)
+                    .aspectRatio(model.canvasAspect, matchHeightConstraintsFirst = canvasFirst)
                     .background(Color.Black),
             ) {
                 model.picture?.let {

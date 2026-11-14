@@ -84,7 +84,7 @@ cargo test -p cutlass-h264 --release -- --ignored
 - **Decoder against the specification.** Tools FFmpeg does not decode are checked against sample values worked out from the specification on small hand-built streams: slice groups (`src/fmo.rs`), data partitions, SP and SI (`src/part.rs`, `src/sp.rs`), separate color planes (`src/planes.rs`), depths of 11 and 13 bits (`src/depth.rs`, which compares 9, 12, and 14 bits with FFmpeg), picture timing and film grain (`src/sei_pic.rs`), and the scalable, multiview, and 3D cases (`src/annex_g.rs`).
 - **Encoder.** The encoder's output is decoded by this decoder and by FFmpeg, and both must give the same samples (the `*_matches_ffmpeg` tests in `src/enc.rs`). `testsrc2_meets_the_luma_and_rate_gates` requires a luma PSNR of at least 30 dB and a size within 0.75 to 1.25 times `bitrate * duration`. `natural_clip_meets_the_luma_gate` requires 28 dB on a camera clip. `bottom_rows_survive_a_partial_macroblock_row` encodes scrolling pictures at 96×72, 96×80 and 88×72 and requires the bottom 24 rows to reach 35 dB luma and 28 dB chroma in every picture, with FFmpeg decoding the same samples: the encoder codes whole macroblocks, with the picture's last row and column repeated into the padding, and predicts from the uncropped reconstruction, as every decoder does.
 - **Bad input.** Truncated units, bad lengths, bad parameter sets, and 64 random packets must return an error, and a known picture must still decode afterward (`hostile_framing_is_rejected_and_the_decoder_stays_usable`, `hostile_parameter_sets_are_rejected`, `random_packets_fail_closed`).
-- A 600-frame 1080p stream written by libx264 decodes to the same bytes as FFmpeg's decoder (see the speed section).
+- Five films from 576×1024 to 3840×2160 decode to the same bytes as FFmpeg's decoder, on 1 thread and on 18 (see the speed section). The films are not in the repository, so no test repeats this.
 
 What does not run by default:
 
@@ -96,21 +96,39 @@ What does not run by default:
 
 ## Speed against FFmpeg
 
-Measured on 10 November 2026 at commit `ed0743d2`, on an Apple M5 Pro (18 cores, 48 GB) running macOS 27.0.1, against FFmpeg 8.1.1. Built with `cargo build --release` and rustc 1.99.1.
+**Decode, h264.** Measured on 14 November 2026 at commit `3c8dc585`, on an Apple M5 Pro (18 cores, 48 GB) running macOS 27.0.1, against FFmpeg 8.1.1 as Homebrew builds it. Built with rustc 1.100.0 through `scripts/pgo.py`, as a release is, with the AV1 decoder's profile merged in. The input is the video stream of five films that are not in the repository, each as an Annex B file, all High profile, 8-bit 4:2:0.
 
-**Decode, h264.** Input: 600 frames of 1920×1080 at 30 frames a second (22 MB), written by FFmpeg with `-c:v libx264 -preset medium -crf 23`.
+One thread, processor cycles of the whole process (median of 7 runs taken in turn):
 
-|  | Cutlass | FFmpeg (`h264`) |
-| --- | ---: | ---: |
-| Wall time | 9.47 s | 2.48 s |
-| Speed | 63 frames/s | 242 frames/s |
-| CPU time | 9.45 s | 2.46 s |
-| Peak memory | 97 MB | 39 MB |
-| Threads allowed | 1 | 1 |
+| Film | Pictures | Cutlass | FFmpeg (`h264`) | Cutlass ÷ FFmpeg |
+| --- | ---: | ---: | ---: | ---: |
+| 576×1024 | 453 | 0.812G | 0.901G | 0.90 |
+| 720×1280 | 391 | 1.473G | 1.591G | 0.93 |
+| 1920×1080 | 600 | 7.286G | 7.563G | 0.96 |
+| 3840×2160, 24 a second | 351 | 22.127G | 22.486G | 0.98 |
+| 3840×2160, 60 a second | 571 | 21.113G | 21.968G | 0.96 |
 
-Cutlass is **3.8× slower** than FFmpeg here. Both decoders produced exactly the same samples.
+On one thread Cutlass takes 2 to 10% fewer cycles than this FFmpeg on all five. The 1920×1080 film took 1.65 s against 1.70 s, 364 against 353 pictures a second. Cutlass retires as many instructions as FFmpeg on the smallest film and more on the other four (29.0G against 24.2G on the 1920×1080 one), and gets through them in fewer cycles.
 
-**Encode, h264.** Input: 300 raw frames of 1920×1080 at 30 frames a second, asked for 8 Mbit/s.
+Which FFmpeg matters. A static FFmpeg built from its source of 29 October 2026 with only the H.264 decoder in it took 3 to 11% fewer cycles than Homebrew's `ffmpeg` command on three of these films. Against that build, on three runs of each the same day, Cutlass took 0.96 of its cycles on the 576×1024 film, 1.02 on the 1920×1080 one and 1.01 on the 3840×2160 one at 24 a second: level, not ahead.
+
+18 threads (`with_threads(18)`, FFmpeg's `thread_count` 18), wall time and processor time of the whole process (median of 9 runs taken in turn):
+
+| Film | Cutlass wall | FFmpeg wall | Cutlass CPU | FFmpeg CPU |
+| --- | ---: | ---: | ---: | ---: |
+| 576×1024 | 0.03 s | 0.04 s | 0.39 s | 0.31 s |
+| 720×1280 | 0.07 s | 0.10 s | 0.73 s | 0.60 s |
+| 1920×1080 | 0.16 s | 0.19 s | 2.41 s | 2.24 s |
+| 3840×2160, 24 a second | 0.46 s | 0.43 s | 6.65 s | 6.00 s |
+| 3840×2160, 60 a second | 0.55 s | 0.68 s | 7.73 s | 6.91 s |
+
+Read the threaded table with care. `/usr/bin/time` reports hundredths of a second, and the FFmpeg process takes about 16 ms to start where the Cutlass one takes about 2 ms, so the two short films say little. Other work started on the machine during this run (load average 3 at its start, 7 at its end). Cutlass was behind on the 3840×2160 film at 24 a second, and used 8 to 26% more processor time than FFmpeg on every film. The app does not use these threads yet: see the limits below.
+
+How the decode was measured: each side is a whole process timed with `/usr/bin/time -l`, start-up and file reading included, the two run one after the other. The Cutlass side is a small program that reads the file, splits it into access units, pushes each to `H264Decoder` and drops the pictures; it is not in the repository. The FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which reads the same file with libavformat and decodes it with libavcodec, with no filter graph and no output stage. Before the timing, every sample of every picture of all five films was the same from both decoders, with Cutlass on 1 thread and on 18.
+
+On 10 November 2026, at commit `ed0743d2`, the decoder took 9.47 s on one thread for 600 pictures of 1920×1080 written by libx264, where FFmpeg took 2.48 s.
+
+**Encode, h264.** Measured on 10 November 2026 at commit `ed0743d2`, same machine, FFmpeg 8.1.1, `cargo build --release` with rustc 1.99.1, and not measured again since. Input: 300 raw frames of 1920×1080 at 30 frames a second, asked for 8 Mbit/s.
 
 |  | Cutlass | FFmpeg (`libx264 ultrafast`) | FFmpeg (`libx264 medium`) |
 | --- | ---: | ---: | ---: |
@@ -124,7 +142,7 @@ Cutlass is **3.8× slower** than FFmpeg here. Both decoders produced exactly the
 
 Cutlass is **346.9× slower** than `libx264 ultrafast` here. Cutlass is **37.8× slower** than `libx264 medium` here. Quality is the PSNR between the source pictures and what each encoder's output decodes to; higher is closer to the source. The encoders do not make the same choices, so read speed, size and quality together.
 
-How it was measured: both sides get the same input from disk, do all of the work, and throw the result away. Each side is a whole process timed with `/usr/bin/time -l`, start-up included, run five times in turn; the tables show the median run. FFmpeg is given as many threads as the Rust code used. The Rust side is [`tools/media-bench`](../../../tools/media-bench), which registers only the Rust codecs. For decoding and packet reading the FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which calls libavformat and libavcodec directly; for encoding it is the `ffmpeg` command. The pictures come from a 4K street scene scaled to 1920×1080, and the sound from a music recording.
+How the encode was measured: both sides get the same input from disk, do all of the work, and throw the result away. Each side is a whole process timed with `/usr/bin/time -l`, start-up included, run five times in turn; the tables show the median run. FFmpeg is given as many threads as the Rust code used. The Rust side is [`tools/media-bench`](../../../tools/media-bench), which registers only the Rust codecs. For decoding and packet reading the FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which calls libavformat and libavcodec directly; for encoding it is the `ffmpeg` command. The pictures come from a 4K street scene scaled to 1920×1080, and the sound from a music recording.
 
 To run it again: `cargo build --release -p media-bench`, then `python3 scripts/bench_media.py --video <clip> --audio <song> --work <folder>`.
 

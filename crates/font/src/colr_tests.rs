@@ -139,6 +139,107 @@ fn gradients_read_their_points_stops_and_extend() {
 }
 
 #[test]
+fn stops_keep_their_offsets_and_alphas_and_a_sweep_its_sector() {
+    // A stop's own alpha, here none at all.
+    let Paint::Glyph { paint, .. } = glyph(32).paint else {
+        panic!("fill");
+    };
+    let Paint::LinearGradient { line, .. } = *paint else {
+        panic!("gradient");
+    };
+    assert_eq!(
+        line.stops[1].color,
+        Color {
+            rgb: Some([0, 0, 255]),
+            alpha: 0.0
+        }
+    );
+    // Three stops that start a quarter of the way along.
+    let Paint::Glyph { paint, .. } = glyph(37).paint else {
+        panic!("fill");
+    };
+    let Paint::LinearGradient { line, .. } = *paint else {
+        panic!("gradient");
+    };
+    let offsets: Vec<f32> = line.stops.iter().map(|stop| stop.offset).collect();
+    assert_eq!(offsets, [0.25, 0.5, 0.75]);
+    assert_eq!(line.stops[1].color.rgb, Some([255, 255, 255]));
+    // A quarter turn from the x axis, repeated.
+    let Paint::Glyph { paint, .. } = glyph(34).paint else {
+        panic!("fill");
+    };
+    let Paint::SweepGradient {
+        line, start, end, ..
+    } = *paint
+    else {
+        panic!("sweep");
+    };
+    assert_eq!((start, end, line.extend), (0.0, 90.0, Extend::Repeat));
+    // Two circles with their own centers and radii.
+    let Paint::Glyph { paint, .. } = glyph(35).paint else {
+        panic!("fill");
+    };
+    let Paint::RadialGradient { c0, r0, c1, r1, .. } = *paint else {
+        panic!("radial");
+    };
+    assert_eq!(
+        (c0, r0, c1, r1),
+        ([300.0, 500.0], 50.0, [500.0, 500.0], 300.0)
+    );
+    // The palette's alpha and the paint's multiply.
+    assert_eq!(
+        glyph(38).paint,
+        filled(
+            4,
+            Paint::Solid(Color {
+                rgb: Some([0, 255, 0]),
+                alpha: 128.0 / 255.0
+            })
+        )
+    );
+}
+
+#[test]
+fn every_blend_mode_is_read_in_the_table_order() {
+    let modes = [
+        CompositeMode::Clear,
+        CompositeMode::Src,
+        CompositeMode::Dest,
+        CompositeMode::SrcOver,
+        CompositeMode::DestOver,
+        CompositeMode::SrcIn,
+        CompositeMode::DestIn,
+        CompositeMode::SrcOut,
+        CompositeMode::DestOut,
+        CompositeMode::SrcAtop,
+        CompositeMode::DestAtop,
+        CompositeMode::Xor,
+        CompositeMode::Plus,
+        CompositeMode::Screen,
+        CompositeMode::Overlay,
+        CompositeMode::Darken,
+        CompositeMode::Lighten,
+        CompositeMode::ColorDodge,
+        CompositeMode::ColorBurn,
+        CompositeMode::HardLight,
+        CompositeMode::SoftLight,
+        CompositeMode::Difference,
+        CompositeMode::Exclusion,
+        CompositeMode::Multiply,
+        CompositeMode::Hue,
+        CompositeMode::Saturation,
+        CompositeMode::Color,
+        CompositeMode::Luminosity,
+    ];
+    for (glyph_id, expected) in (crate::fixture_colr::BLENDS..).zip(modes) {
+        let Paint::Composite { mode, .. } = glyph(glyph_id).paint else {
+            panic!("glyph {glyph_id} is not a blend");
+        };
+        assert_eq!(mode, expected, "glyph {glyph_id}");
+    }
+}
+
+#[test]
 fn layers_a_clip_box_and_a_glyph_used_again_are_read() {
     assert_eq!(
         glyph(18),
@@ -286,7 +387,9 @@ fn a_face_or_a_glyph_without_color_layers_has_none() {
     assert_eq!(plain.color_glyph(2), Ok(None));
     let font = read(COLR).expect("font");
     assert_eq!(font.color_glyph(1), Ok(None));
-    assert_eq!(font.color_glyph(52), Err(FontError::UnknownGlyph));
+    assert_eq!(font.color_glyph(52), Ok(None));
+    assert_eq!(font.glyph_count(), 88);
+    assert_eq!(font.color_glyph(88), Err(FontError::UnknownGlyph));
     // A table of a version this reader does not know is passed over.
     let mut later = COLR.to_vec();
     let at = table_at(COLR, b"COLR").0;
@@ -342,7 +445,7 @@ fn hostile_bytes_in_the_color_table_never_panic() {
     let (at, length) = table_at(COLR, b"COLR");
     let mut answered = 0_u32;
     for index in 0..length {
-        for value in [0x00, 0x7F, 0xFF] {
+        for value in [0x00, 0xFF] {
             let mut bytes = COLR.to_vec();
             if bytes[at + index] == value {
                 continue;

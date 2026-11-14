@@ -234,8 +234,13 @@ fn block(corners: [i16; 4]) -> Glyph {
 pub(crate) const RED: u16 = 0;
 pub(crate) const BLUE: u16 = 1;
 pub(crate) const HALF_GREEN: u16 = 2;
+const WHITE: u16 = 3;
+const GRAY: u16 = 4;
+const ORANGE: u16 = 5;
 /// The palette index that means the color of the text.
 pub(crate) const TEXT: u16 = 0xFFFF;
+/// The first of the 28 glyphs that blend, one for each mode in order.
+pub(crate) const BLENDS: u16 = 60;
 
 /// The whole em square, as a clip box and as a gradient's frame.
 const EM: [i16; 4] = [0, 0, 1_000, 1_000];
@@ -249,7 +254,7 @@ fn two_stops(extend: u8, variable: bool) -> Vec<u8> {
 /// Its outlines are boxes in an em of 1000 units: 2 the left half, 3 the
 /// right half, 4 the whole em, 5 the lower left quarter, 6 the middle
 /// half. Glyph 1 is `A`, with no color. The palette is red, blue, green
-/// at half alpha, and white.
+/// at half alpha, white, gray, and orange.
 ///
 /// Version 0 glyphs: 10 is red on the left and blue on the right; 11 is
 /// the whole em in the color of the text with the half green middle over
@@ -263,7 +268,14 @@ fn two_stops(extend: u8, variable: bool) -> Vec<u8> {
 /// 17 glyph 12 used again; 18 two layers, red left and blue right; 19 a
 /// gradient 250 units long that repeats; 20 the same, reflected; 21 to 29
 /// the quarter box in red under each kind of transform; 30 and 31 the
-/// variable forms of a translate, a solid, and a linear gradient.
+/// variable forms of a translate, a solid, and a linear gradient; 32 a
+/// gradient from red to clear blue; 33 a sweep over the first quarter
+/// turn, and 34 the same, repeated; 35 a radial gradient between two
+/// circles with different centers, repeated; 36 a linear gradient whose
+/// stripes lean; 37 one with three stops that start a quarter of the way
+/// along; 38 the palette's half green, at the paint's full alpha. Glyphs
+/// 60 to 87 blend the orange middle, at three quarters alpha, onto the
+/// gray left half, one for each blend mode in the table's order.
 ///
 /// Glyphs that are wrong on purpose: 40 names itself; 41 is a layer that
 /// lists itself; 42 nests 40 paints; 43 holds 70 layers of 70 layers; 44
@@ -272,12 +284,20 @@ fn two_stops(extend: u8, variable: bool) -> Vec<u8> {
 /// not; 48 and 49 name each other; 50 names a glyph with no paint; 51
 /// points at itself.
 pub(crate) fn layered() -> Vec<u8> {
+    layered_with(Vec::new())
+}
+
+/// How many glyphs [`layered`] has.
+pub(crate) const GLYPH_COUNT: u16 = 88;
+
+/// [`layered`], with more tables beside its own.
+pub(crate) fn layered_with(mut tables: Vec<(&[u8; 4], Vec<u8>)>) -> Vec<u8> {
     let mut glyphs = vec![
         Glyph {
             advance: 1_000,
             outline: None,
         };
-        52
+        usize::from(GLYPH_COUNT)
     ];
     glyphs[0] = boxed(500);
     glyphs[1] = boxed(600);
@@ -287,7 +307,7 @@ pub(crate) fn layered() -> Vec<u8> {
     glyphs[5] = block([0, 0, 500, 500]);
     glyphs[6] = block([250, 250, 750, 750]);
     let mut map = vec![('A', 1)];
-    map.extend((10..52).map(|glyph| {
+    map.extend((10..BLENDS + 28).map(|glyph| {
         let character = char::from_u32(0xE000 + u32::from(glyph)).expect("private use");
         (character, glyph)
     }));
@@ -296,6 +316,8 @@ pub(crate) fn layered() -> Vec<u8> {
     let quarter = || fill(5, red());
     let frame = || points(&[0, 0, 1_000, 0, 0, 1_000]);
     let short = || points(&[0, 0, 250, 0, 0, 250]);
+    // A sweep about the middle of the em, from the x axis a quarter turn round.
+    let quarter_turn = || vec![I16(500), I16(500), F14(-1.0), F14(-0.5)];
     let mut deep = fill(4, red());
     for _ in 0..40 {
         deep = around(14, deep, points(&[1, 1]));
@@ -397,6 +419,63 @@ pub(crate) fn layered() -> Vec<u8> {
                     gradient(5, two_stops(0, true), rest)
                 }),
             ),
+            (
+                32,
+                fill(
+                    4,
+                    gradient(
+                        4,
+                        color_line(0, &[(0.0, RED, 1.0), (1.0, BLUE, 0.0)], false),
+                        frame(),
+                    ),
+                ),
+            ),
+            (
+                33,
+                fill(4, gradient(8, two_stops(0, false), quarter_turn())),
+            ),
+            (
+                34,
+                fill(4, gradient(8, two_stops(1, false), quarter_turn())),
+            ),
+            (
+                35,
+                fill(
+                    4,
+                    gradient(
+                        6,
+                        two_stops(1, false),
+                        vec![I16(300), I16(500), U16(50), I16(500), I16(500), U16(300)],
+                    ),
+                ),
+            ),
+            (
+                36,
+                fill(
+                    4,
+                    gradient(
+                        4,
+                        two_stops(0, false),
+                        points(&[0, 0, 1_000, 0, 500, 1_000]),
+                    ),
+                ),
+            ),
+            (
+                37,
+                fill(
+                    4,
+                    gradient(
+                        4,
+                        color_line(
+                            0,
+                            &[(0.25, RED, 1.0), (0.5, WHITE, 1.0), (0.75, BLUE, 1.0)],
+                            false,
+                        ),
+                        frame(),
+                    ),
+                ),
+            ),
+            (38, fill(4, solid(HALF_GREEN, 1.0))),
             (40, reuse(40)),
             (41, layers(1, 2)),
             (42, deep),
@@ -419,8 +498,22 @@ pub(crate) fn layered() -> Vec<u8> {
             (51, vec![10, 0, 0, 0, 0, 4]),
         ],
         layers: vec![fill(2, red()), fill(3, solid(BLUE, 1.0)), layers(1, 2)],
-        clips: vec![(15, 16, EM), (21, 30, [-1_000, -1_000, 1_500, 1_500])],
+        clips: vec![
+            (15, 16, EM),
+            (21, 30, [-1_000, -1_000, 1_500, 1_500]),
+            (BLENDS, BLENDS + 27, EM),
+        ],
     };
+    // One glyph for each blend mode: the orange middle onto the gray left.
+    spec.roots.extend((0..28).map(|mode: u8| {
+        let paint = paint_table(vec![
+            U8(32),
+            Child(fill(6, solid(ORANGE, 0.75))),
+            U8(mode),
+            Child(fill(2, solid(GRAY, 1.0))),
+        ]);
+        (BLENDS + u16::from(mode), paint)
+    }));
     // Layers 3 to 72 are solids, and 73 to 142 each list all of those.
     spec.layers.extend((0..70).map(|_| red()));
     spec.layers.extend((0..70).map(|_| layers(70, 3)));
@@ -429,10 +522,35 @@ pub(crate) fn layered() -> Vec<u8> {
         [0, 0, 255, 255],
         [0, 255, 0, 128],
         [255, 255, 255, 255],
+        [128, 128, 128, 255],
+        [255, 128, 64, 255],
     ]);
-    font(
-        &glyphs,
-        &map,
-        &[(b"COLR", colr_table(&spec)), (b"CPAL", palette)],
-    )
+    tables.push((b"COLR", colr_table(&spec)));
+    tables.push((b"CPAL", palette));
+    let mut file = font(&glyphs, &map, &tables);
+    set_bearings(&mut file, &glyphs);
+    file
+}
+
+/// Write each glyph's left side bearing as the left edge of its box. The
+/// builder leaves them zero, and a renderer that trusts the bearing would
+/// slide the boxes that do not start at zero.
+fn set_bearings(file: &mut [u8], glyphs: &[Glyph]) {
+    let tables = usize::from(u16::from_be_bytes([file[4], file[5]]));
+    let record = (0..tables)
+        .map(|index| 12 + index * 16)
+        .find(|at| &file[*at..*at + 4] == b"hmtx")
+        .expect("hmtx");
+    let start = u32::from_be_bytes([
+        file[record + 8],
+        file[record + 9],
+        file[record + 10],
+        file[record + 11],
+    ]);
+    let start = usize::try_from(start).expect("offset");
+    for (index, glyph) in glyphs.iter().enumerate() {
+        let left = glyph.outline.map_or(0, |corners| corners[0]);
+        let at = start + index * 4 + 2;
+        file[at..at + 2].copy_from_slice(&left.to_be_bytes());
+    }
 }

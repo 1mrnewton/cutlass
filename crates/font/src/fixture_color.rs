@@ -353,13 +353,27 @@ pub(crate) fn cbdt() -> Vec<u8> {
     font(&glyphs, &map, &[(b"CBDT", data), (b"CBLC", location)])
 }
 
+/// The layered color face with a color strike beside its layers, to show
+/// which a glyph takes. The strike has the two by two color picture for
+/// glyph 1, the letter `A` with an outline, and for glyph 10, which also
+/// has color layers.
+pub(crate) fn layers_and_strike() -> Vec<u8> {
+    let records: Records = vec![
+        (1, record((0, 0), b"png ", &rgba_picture())),
+        (10, record((0, 0), b"png ", &rgba_picture())),
+    ];
+    let table = sbix_table(crate::fixture_colr::GLYPH_COUNT, &[(2, records)]);
+    crate::fixture_colr::layered_with(vec![(b"sbix", table)])
+}
+
 /// A fixture's file name and what builds it.
 type Built = (&'static str, fn() -> Vec<u8>);
 
-const FILES: [Built; 3] = [
+const FILES: [Built; 4] = [
     ("sbix-png.ttf", sbix),
     ("cbdt-png.ttf", cbdt),
     ("colr.ttf", crate::fixture_colr::layered),
+    ("colr-sbix.ttf", layers_and_strike),
 ];
 
 fn path(name: &str) -> std::path::PathBuf {

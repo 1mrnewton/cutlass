@@ -1228,12 +1228,12 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             _ => 1,
         };
         // From CAND_MARGIN_SPEED, as for inter: within a fifth of the best.
-        let first = self.last_satd as f64
-            * if s.speed >= CAND_MARGIN_SPEED {
-                1.2
-            } else {
-                f64::INFINITY
-            };
+        // (No product with infinity, which a zero SATD would make NaN.)
+        let first = if s.speed >= CAND_MARGIN_SPEED {
+            self.last_satd as f64 * 1.2
+        } else {
+            f64::INFINITY
+        };
         for &(_, m) in scored.iter().take(k).filter(|t| t.0 as f64 <= first) {
             out.push(Blk {
                 mode: m,
@@ -1383,18 +1383,17 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         // when their score is within a fifth of its: their trial seldom
         // wins otherwise (13 to 17% of the time at speed 6, 0.2% of the
         // bits).
-        let m = if s.speed >= CAND_MARGIN_SPEED {
-            1.2
+        let bound = if s.speed >= CAND_MARGIN_SPEED {
+            scored.first().map_or(0, |t| t.0) as f64 * 1.2
         } else {
             f64::INFINITY
         };
-        let first = scored.first().map_or(0, |t| t.0) as f64;
         out.extend(
             scored
                 .iter()
                 .take(k)
                 .enumerate()
-                .filter(|(i, t)| *i == 0 || (t.0 as f64) <= first * m)
+                .filter(|(i, t)| *i == 0 || (t.0 as f64) <= bound)
                 .map(|(_, t)| t.1),
         );
     }

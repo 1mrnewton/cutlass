@@ -51,7 +51,7 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   its own quantizer (flat regions finer); the map is coded per block.
 - A golden frame every 12 frames, key frames every `keyint` (240) frames;
   key and golden frames take finer quantizers. With `Vp9Options::lag`
-  (15 and up) an interval whose end the current picture reaches starts
+  (15 and up; 16 by default below speed 9) an interval whose end the current picture reaches starts
   with a hidden alt-ref frame, the temporally filtered (`enc::arf`, after
   libvpx) picture at its end, sent in a superframe with the next shown
   frame; the overlay at its position refreshes GOLDEN.
@@ -250,31 +250,35 @@ A detailed picture panning 7 pixels a frame, with film grain, 60 frames
 | --- | --- | ---: | ---: | --- |
 | speed 4, lag 16 | good, cpu-used 0 | −24% | −1.6% | 4.56 s / 7.00 s |
 | speed 6, lag 16 | good, cpu-used 0 | −18% | −0.9% | 2.95 s / 7.00 s |
-| speed 4 | good, cpu-used 0 | −15% | +8.4% | 4.24 s / 7.00 s |
-| speed 5 | good, cpu-used 1 | −20% | −4.6% | 2.67 s / 2.35 s |
-| speed 6 | good, cpu-used 1 | −16% | −3.6% | 1.93 s / 2.35 s |
-| speed 6 | good, cpu-used 2 | −19% | −1.2% | 1.93 s / 2.05 s |
-| speed 7 | good, cpu-used 3 | −27% | −4.8% | 1.24 s / 1.61 s |
-| speed 7 | good, cpu-used 5 | −32% | −13% | 1.24 s / 1.62 s |
-| speed 9 | realtime, cpu-used 6 | −43% | −25% | 0.47 s / 0.51 s |
-| speed 10 | realtime, cpu-used 8 | −76% | −65% | 0.40 s / 0.44 s |
+| speed 4, lag 0 | good, cpu-used 0 | −15% | +8.4% | 4.24 s / 7.00 s |
+| speed 5, lag 0 | good, cpu-used 1 | −20% | −4.6% | 2.67 s / 2.35 s |
+| speed 6, lag 0 | good, cpu-used 1 | −16% | −3.6% | 1.93 s / 2.35 s |
+| speed 6, lag 0 | good, cpu-used 2 | −19% | −1.2% | 1.93 s / 2.05 s |
+| speed 7, lag 0 | good, cpu-used 3 | −27% | −4.8% | 1.24 s / 1.61 s |
+| speed 7, lag 0 | good, cpu-used 5 | −32% | −13% | 1.24 s / 1.62 s |
+| speed 9 | realtime, cpu-used 6 | −40% | −35% | 0.45 s / 0.51 s |
+| speed 10 | realtime, cpu-used 8 | −73% | −61% | 0.43 s / 0.49 s |
 
 FFmpeg's `libvpx-vp9` encodes at good, cpu-used 1 with 25 pictures of
 lookahead unless told otherwise: speed 6 is ahead of it on both
 measures in four fifths of its time, and every libvpx preset, from good
 cpu-used 0 to realtime 8, has a Cutlass speed ahead of it on both
-measures in less time. Cutlass's lookahead is off by default
-(`Vp9Options::lag`); with 16 pictures its alt-refs take speed 6 past
-libvpx's slowest, cpu-used 0, in under half its time. Without it,
+measures in less time. Cutlass looks 16 pictures ahead by default
+below speed 9 (`Vp9Options::lag`, `None`), none at the realtime speeds
+9 and 10; its alt-refs take speed 6 past libvpx's slowest, cpu-used 0,
+in under half its time. The lag 0 rows show each speed without them,
+in less time. Without them,
 cpu-used 0 keeps more chroma (0.8 dB more U and V PSNR at 13% fewer
 bits than speed 5's 42.96 dB Y at 1.3 Mb/s): from frame 16 on, its
 temporally filtered alt-refs predict the grain-free picture, which
 counts most in chroma. A lookahead costs about a fifth more time at
 speed 6 (alt-ref frames are coded at a finer quantizer, and at speed 6
 at the fastest); on the clean clip below it takes 10.5% off the bits at
-the same PSNR-Y and 6.4% at the same averaged PSNR. (The lag rows and
-speed 10's are from a later sitting than the others, in which libvpx's
-times were the same within 5%.)
+the same PSNR-Y and 6.4% at the same averaged PSNR. (The lag 16 rows
+and speeds 9 and 10 are from later sittings than the others, in which
+libvpx's times were the same within 5%, but for realtime 8's 0.49 s
+against 0.42 s; the speed 9 and 10 BD-rates are on narrower ranges of
+PSNR, where the curves overlap.)
 
 On a clean 720p clip (no grain, 60 frames) speed 7 is ahead of good,
 cpu-used 1 on both measures (−15% on PSNR-Y, −3.2% averaged) in three
@@ -283,6 +287,13 @@ cpu-used 5 in its time; speed 6 is −9% / −11% against cpu-used 1 in its
 time.
 
 What moved the encoder most recently, at speed 6 unless said:
+
+- Speeds 9 and 10 cap the transform at 8×8 and speed 8 at 16×16: chroma's
+  transform follows luma's and nothing at these speeds tries a smaller
+  one, so large blocks dropped chroma detail (23 to 25% fewer bits at
+  the same averaged PSNR from speed 9, clean and grainy, and 0.7 to 7%
+  at the same PSNR-Y, in the same time; −11 to −13% averaged at speed
+  8). The lookahead is on by default below speed 9.
 
 - The alt-ref's test of whether the interval holds together took a
   match only within 16 samples of where it was, so a steady pan never

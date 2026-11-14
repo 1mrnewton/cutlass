@@ -29,7 +29,7 @@ fn main() -> Result<(), String> {
             "fps" => fps = n,
             "keyint" => opts.keyint = n,
             "threads" => opts.threads = n as usize,
-            "lag" => opts.lag = n,
+            "lag" => opts.lag = Some(n),
             "aq" => opts.aq = n != 0,
             _ => return Err(format!("unknown option {k}")),
         }

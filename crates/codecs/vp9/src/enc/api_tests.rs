@@ -511,8 +511,14 @@ fn thirty_frames_stay_near_250_kbps() {
                 timescale: 30,
             })
             .expect("encode");
-        total += packets[0].data.len();
+        total += packets.iter().map(|p| p.data.len()).sum::<usize>();
     }
+    total += encoder
+        .drain()
+        .expect("drain")
+        .iter()
+        .map(|p| p.data.len())
+        .sum::<usize>();
     let target = 250_000.0 / 8.0;
     let ratio = total as f64 / target;
     assert!(
@@ -714,9 +720,12 @@ fn factories_open_the_profile_0_codec() {
     let mut decoders = VideoDecodeFactory::new();
     register_decoders(&mut decoders);
     let mut decoder = decoders.open(&params).expect("decoder");
-    let packets = encoder
+    // With the default lookahead the picture comes out of the drain.
+    let mut packets = encoder
         .push(&input(solid(16, 16, 40, 90, 140)))
         .expect("push");
+    packets.extend(encoder.drain().expect("drain"));
+    assert_eq!(packets.len(), 1);
     let shown = decoder.push_all(&packets[0]).expect("decode");
     assert_eq!(shown.len(), 1);
     // The default quantizer leaves a flat picture within a step or two.
@@ -1031,7 +1040,7 @@ fn write_tile_bits(bits: &mut BitWriter, width: u32) {
 fn lookahead_codes_alt_refs_and_every_picture_comes_out() {
     let opts = super::Vp9Options {
         qindex: 120,
-        lag: 16,
+        lag: Some(16),
         threads: 2,
         ..super::Vp9Options::default()
     };

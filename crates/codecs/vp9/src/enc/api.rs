@@ -35,18 +35,31 @@ pub struct Vp9Options {
     /// Pictures of lookahead: with 15 and more, each golden interval
     /// starts with a hidden alt-ref frame, the temporally filtered picture
     /// at its end, that the pictures between predict from. Pictures then
-    /// come out that many pushes later (and from `drain`).
-    pub lag: u32,
+    /// come out that many pushes later (and from `drain`). `None`:
+    /// [`DEFAULT_LAG`] below speed 9, none at the realtime speeds 9 and 10
+    /// (as libvpx's good and realtime deadlines).
+    pub lag: Option<u32>,
     /// Adaptive quantization (libvpx's `aq-mode=1`): flat regions finer,
     /// busy ones coarser, by segment. Better looking, a little worse in
     /// PSNR.
     pub aq: bool,
 }
 
+/// The lookahead below speed 9 unless set: with it, alt-refs take 15 to
+/// 18% off the bits at the same averaged PSNR on a grainy pan and 6% on
+/// a clean clip, for about a fifth more time.
+pub const DEFAULT_LAG: u32 = 16;
+
 /// The fastest speed an alt-ref frame is coded at.
 const ARF_SPEED: u8 = 6;
 
 impl Vp9Options {
+    /// The lookahead in pictures.
+    pub fn lag(&self) -> u32 {
+        self.lag
+            .unwrap_or(if self.speed >= 9 { 0 } else { DEFAULT_LAG })
+    }
+
     fn threads(&self) -> usize {
         match self.threads {
             0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
@@ -65,7 +78,7 @@ impl Default for Vp9Options {
             min_q: 1,
             max_q: 236,
             threads: 0,
-            lag: 0,
+            lag: None,
             aq: false,
         }
     }
@@ -97,13 +110,15 @@ struct Queued {
 }
 
 impl Vp9Encoder {
-    /// Every frame at quantizer index `qindex` (0: lossless).
+    /// Every frame at quantizer index `qindex` (0: lossless), each coded
+    /// as it is pushed (no lookahead).
     pub fn with_quantizer(width: u32, height: u32, qindex: u8) -> Result<Self, CodecError> {
         Self::with_options(
             width,
             height,
             Vp9Options {
                 qindex,
+                lag: Some(0),
                 ..Vp9Options::default()
             },
         )
@@ -181,7 +196,7 @@ impl Vp9Encoder {
             return Err(CodecError::Cancelled);
         }
         check_planes(self.width, self.height, &planes)?;
-        if self.opts.lag == 0 {
+        if self.opts.lag() == 0 {
             let (d, k) = self.code(planes, seconds)?;
             return Ok(vec![(d, k, clock)]);
         }
@@ -206,7 +221,7 @@ impl Vp9Encoder {
             timescale: clock.2,
         });
         let mut out = Vec::new();
-        while self.queue.len() > self.opts.lag as usize {
+        while self.queue.len() > self.opts.lag() as usize {
             out.push(self.code_front()?);
         }
         Ok(out)

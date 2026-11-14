@@ -80,28 +80,26 @@ const BUILT_IN_OFFERS: &[TransitionOffer] = &[
 ];
 
 /// Every transition the shelf offers: the built-in ones, then each
-/// bundled recipe, each with its category.
+/// bundled recipe, then each from the studio folder, each with its
+/// category. The studio's change as its files do.
 #[must_use]
-pub fn transition_offers() -> &'static [TransitionOffer] {
-    static OFFERS: std::sync::OnceLock<Vec<TransitionOffer>> = std::sync::OnceLock::new();
-    OFFERS.get_or_init(|| {
-        let built_in = BUILT_IN_OFFERS.iter().map(|offer| TransitionOffer {
-            category: offer.kind.category(),
-            ..*offer
-        });
-        let recipes = TransitionKind::every().into_iter().filter_map(|kind| {
-            let recipe = kind.recipe()?;
-            Some(TransitionOffer {
-                id: recipe.id.as_str(),
-                name: recipe.name.as_str(),
-                duration: recipe.duration().0,
-                overlap: true,
-                kind,
-                category: recipe.category.as_str(),
-            })
-        });
-        built_in.chain(recipes).collect()
-    })
+pub fn transition_offers() -> Vec<TransitionOffer> {
+    let built_in = BUILT_IN_OFFERS.iter().map(|offer| TransitionOffer {
+        category: offer.kind.category(),
+        ..*offer
+    });
+    let recipes = TransitionKind::every().into_iter().filter_map(|kind| {
+        let recipe = kind.recipe()?;
+        Some(TransitionOffer {
+            id: recipe.id.as_str(),
+            name: recipe.name.as_str(),
+            duration: recipe.duration().0,
+            overlap: true,
+            kind,
+            category: recipe.category.as_str(),
+        })
+    });
+    built_in.chain(recipes).collect()
 }
 
 /// The shelf's categories that hold at least one transition, in shelf
@@ -123,8 +121,7 @@ pub fn transition_categories() -> Vec<&'static str> {
 #[must_use]
 pub fn transition_of_card(card_id: &str) -> Option<TransitionOffer> {
     transition_offers()
-        .iter()
-        .copied()
+        .into_iter()
         .find(|offer| offer.card_id() == card_id)
 }
 

@@ -172,6 +172,16 @@ pub enum Layer<'a> {
         outgoing: Rgba<'a>,
         incoming: Rgba<'a>,
     },
+    /// One moment of a transition recipe from `outgoing` to `incoming`,
+    /// both the size of the canvas: each picture through its own steps,
+    /// then the swap. A [`Self::Transition`] whose kind is a recipe draws
+    /// the same; this one takes a recipe that has no kind yet, such as one
+    /// being made.
+    Crossing {
+        crossing: &'a cutlass_effects::Crossing,
+        outgoing: Rgba<'a>,
+        incoming: Rgba<'a>,
+    },
     /// A Lottie frame drawn from its edges onto its own canvas, then that
     /// canvas placed like a picture.
     Vector {

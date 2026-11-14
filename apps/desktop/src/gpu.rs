@@ -42,6 +42,8 @@ pub(crate) struct Preview {
     frame: Option<FrameLayers>,
     /// The effect card playing under the pointer, shown in egui as is.
     effect_live: Option<(Canvas, egui::TextureId)>,
+    /// The effect studio's preview, shown in egui as is.
+    studio_live: Option<(Canvas, egui::TextureId)>,
     /// Where a card's still is drawn before it is read back.
     effect_still: Option<Canvas>,
 }
@@ -55,6 +57,7 @@ impl Preview {
             drawn: None,
             frame: None,
             effect_live: None,
+            studio_live: None,
             effect_still: None,
         }
     }
@@ -69,6 +72,47 @@ impl Preview {
         let size = (scene.width, scene.height);
         let (canvas, id) = live_card(&self.renderer, &self.egui, &mut self.effect_live, size)?;
         draw_effect(&self.renderer, canvas, recipe, scene, time)?;
+        Ok((id, [size.0, size.1]))
+    }
+
+    /// Run `steps` over `picture` on the studio's canvas, which egui
+    /// shows. With no steps the picture shows as it is.
+    pub(crate) fn studio_effect(
+        &mut self,
+        steps: &[cutlass_render::Step],
+        picture: &PreviewScene,
+    ) -> Result<(egui::TextureId, [u32; 2]), RenderError> {
+        let size = (picture.width, picture.height);
+        let (canvas, id) = live_card(&self.renderer, &self.egui, &mut self.studio_live, size)?;
+        let mut layers = vec![Layer::Rgba(
+            scene_picture(picture),
+            Placement::canvas(size.0, size.1),
+        )];
+        if !steps.is_empty() {
+            layers.push(Layer::Effect(steps, None));
+        }
+        self.renderer.draw(canvas, &layers)?;
+        Ok((id, [size.0, size.1]))
+    }
+
+    /// Draw one moment of a transition recipe from `from` to `to`, both
+    /// one size, on the studio's canvas.
+    pub(crate) fn studio_crossing(
+        &mut self,
+        crossing: &cutlass_effects::Crossing,
+        from: &PreviewScene,
+        to: &PreviewScene,
+    ) -> Result<(egui::TextureId, [u32; 2]), RenderError> {
+        let size = (from.width, from.height);
+        let (canvas, id) = live_card(&self.renderer, &self.egui, &mut self.studio_live, size)?;
+        self.renderer.draw(
+            canvas,
+            &[Layer::Crossing {
+                crossing,
+                outgoing: scene_picture(from),
+                incoming: scene_picture(to),
+            }],
+        )?;
         Ok((id, [size.0, size.1]))
     }
 

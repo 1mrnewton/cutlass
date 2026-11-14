@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use cutlass_model::Micros;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::recipe::{Curve, MAX_PASSES, Param, Pass, Recipe, RecipeError, Step, check_passes};
 
@@ -136,7 +136,7 @@ pub const CROSS: &[Param] = &[
 ];
 
 /// A transition as data.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TransitionRecipe {
     pub version: u32,
@@ -144,19 +144,19 @@ pub struct TransitionRecipe {
     pub id: String,
     pub name: String,
     /// One of [`TRANSITION_CATEGORIES`].
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub category: String,
     /// The two scenes its card plays between; none is the default pair.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preview: Vec<String>,
     /// Seconds it is dropped with; none is [`DEFAULT_CROSSING_SECONDS`].
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outgoing: Vec<Pass>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub incoming: Vec<Pass>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub cross: BTreeMap<String, Curve>,
 }
 
@@ -199,8 +199,24 @@ impl TransitionRecipe {
         }
         let recipe: Self =
             serde_json::from_slice(bytes).map_err(|error| RecipeError::Shape(error.to_string()))?;
-        recipe.check()?;
-        Ok(recipe)
+        recipe.checked()
+    }
+
+    /// A transition built in memory, checked as [`Self::read`] checks a
+    /// file.
+    pub fn checked(self) -> Result<Self, RecipeError> {
+        self.check()?;
+        Ok(self)
+    }
+
+    /// The transition as the JSON [`Self::read`] reads back to the same
+    /// one, naming the lowest version that can hold it. One that would not
+    /// read back is refused.
+    pub fn to_json(&self) -> Result<String, RecipeError> {
+        let mut written = self.clone();
+        written.version = self.least_version();
+        written.check()?;
+        crate::recipe::to_json(&written)
     }
 
     fn check(&self) -> Result<(), RecipeError> {
@@ -245,7 +261,19 @@ impl TransitionRecipe {
             };
             crate::recipe::check_curve(crate::Block::Reveal, param, curve)?;
         }
-        Ok(())
+        crate::recipe::check_version(self.version, self.least_version())
+    }
+
+    /// The lowest format version that can hold this recipe.
+    #[must_use]
+    pub fn least_version(&self) -> u32 {
+        crate::recipe::least_version(
+            self.outgoing
+                .iter()
+                .chain(&self.incoming)
+                .flat_map(|pass| pass.params.values())
+                .chain(self.cross.values()),
+        )
     }
 
     /// The `effect_id` a material stores for it.
@@ -566,6 +594,18 @@ mod tests {
 
     fn read(text: &str) -> TransitionRecipe {
         TransitionRecipe::read(text.as_bytes()).expect("reads")
+    }
+
+    #[test]
+    fn every_bundled_transition_writes_and_reads_back_the_same() {
+        for recipe in super::bundled_transitions() {
+            let json = recipe.to_json().expect("writes");
+            assert_eq!(&read(&json), recipe, "{}", recipe.id);
+        }
+        let mut broken = read(r#"{"version":1,"id":"a","name":"A","cross":{"kind":0}}"#);
+        broken.duration = Some(60.0);
+        assert!(broken.to_json().is_err());
+        assert!(broken.checked().is_err());
     }
 
     #[test]

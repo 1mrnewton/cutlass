@@ -2,7 +2,7 @@
 //! card and playing while the pointer rests on it. A transition card's
 //! picture is the same, from one scene to another.
 
-use cutlass_effects::{PreviewScene, bundled_recipe, preview_scene};
+use cutlass_effects::{PreviewScene, preview_scene};
 use cutlass_model::Micros;
 
 use super::Shell;
@@ -10,7 +10,7 @@ use super::Shell;
 /// The recipe and scene an effect card shows.
 fn card_effect(card_id: &str) -> Option<(&'static cutlass_effects::Recipe, &'static PreviewScene)> {
     let effect_id = cutlass_editor::effect_of_card(card_id)?;
-    let recipe = bundled_recipe(&effect_id)?;
+    let recipe = cutlass_effects::recipe(&effect_id)?;
     Some((recipe, preview_scene(recipe.preview_scene())?))
 }
 

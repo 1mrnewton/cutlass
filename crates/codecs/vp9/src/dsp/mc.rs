@@ -36,7 +36,7 @@ pub static FILTERS: [Filter; 4] = [
 /// 3 samples left and 4 right of each row; with one down, 3 rows above and
 /// 4 below. With `avg`, the prediction is averaged into what `dst` holds.
 #[allow(clippy::too_many_arguments)]
-#[inline]
+#[inline(always)]
 pub fn predict<P: Pixel>(
     dst: &mut [P],
     dst_stride: usize,
@@ -65,6 +65,37 @@ pub fn predict<P: Pixel>(
     ) {
         return;
     }
+    scalar(
+        dst,
+        dst_stride,
+        src,
+        at,
+        src_stride,
+        (w, h),
+        (mx, my),
+        filter,
+        max,
+        avg,
+    );
+}
+
+/// [`predict`] without vector instructions: high bit depths, and blocks
+/// the kernels do not take. Apart, so the common path does not carry its
+/// stack frame.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn scalar<P: Pixel>(
+    dst: &mut [P],
+    dst_stride: usize,
+    src: &[P],
+    at: usize,
+    src_stride: usize,
+    (w, h): (usize, usize),
+    (mx, my): (usize, usize),
+    filter: &Filter,
+    max: i32,
+    avg: bool,
+) {
     match (mx != 0, my != 0) {
         (false, false) => {
             for r in 0..h {

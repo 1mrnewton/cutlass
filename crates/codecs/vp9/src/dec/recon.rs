@@ -385,8 +385,17 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
         let (bw, bh) = MI_WH[usize::from(b.bsize)];
         let (row, col) = (usize::from(b.row), usize::from(b.col));
         // Luma alone, then the two chroma planes together: they share
-        // the reference, the vector and the block's place.
-        for planes in [&[0usize][..], &[1, 2][..]] {
+        // the reference, the vector and the block's place. Without
+        // subsampling all three do, so a whole block takes them at once.
+        let all: [&[usize]; 2] = if self.plane_ss(1) == (0, 0) && b.bsize >= BLOCK_8X8 {
+            [&[0, 1, 2], &[]]
+        } else {
+            [&[0], &[1, 2]]
+        };
+        for planes in all {
+            if planes.is_empty() {
+                continue;
+            }
             let (ssx, ssy) = self.plane_ss(planes[0]);
             let x0 = (col * 8) >> ssx;
             let y0 = (row * 8) >> ssy;
@@ -438,7 +447,7 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
     }
 
     /// One prediction of a `w`×`h` block at `(x, y)` of each of `planes`
-    /// (luma alone, or chroma planes of the same size), with the vector
+    /// (luma alone, chroma planes of the same size, or all three of one size), with the vector
     /// `(row, col)` in sixteenths of a sample of those planes. `luma` is
     /// the luma position libvpx scales the vector's offset at.
     #[allow(clippy::too_many_arguments)]
@@ -458,23 +467,29 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
             let ds = v.stride;
             (v.at(y, x), ds)
         }
-        let dsts: [Option<(usize, &mut [P], usize)>; 2] = match planes {
+        let dsts: [Option<(usize, &mut [P], usize)>; 3] = match planes {
             [0] => {
                 let (d, ds) = at(v0, y, x);
-                [Some((0, d, ds)), None]
+                [Some((0, d, ds)), None, None]
+            }
+            [_, _, _] => {
+                let (d0, s0) = at(v0, y, x);
+                let (d1, s1) = at(v1, y, x);
+                let (d2, s2) = at(v2, y, x);
+                [Some((0, d0, s0)), Some((1, d1, s1)), Some((2, d2, s2))]
             }
             [_, _] => {
                 let (d1, s1) = at(v1, y, x);
                 let (d2, s2) = at(v2, y, x);
-                [Some((1, d1, s1)), Some((2, d2, s2))]
+                [Some((1, d1, s1)), Some((2, d2, s2)), None]
             }
             [1] => {
                 let (d, ds) = at(v1, y, x);
-                [Some((1, d, ds)), None]
+                [Some((1, d, ds)), None, None]
             }
             _ => {
                 let (d, ds) = at(v2, y, x);
-                [Some((2, d, ds)), None]
+                [Some((2, d, ds)), None, None]
             }
         };
         mc_into(
@@ -520,7 +535,7 @@ pub(crate) fn mc_into<P: Pixel>(
     s: &mut Scratch<P>,
     max: i32,
     slot: usize,
-    dsts: [Option<(usize, &mut [P], usize)>; 2],
+    dsts: [Option<(usize, &mut [P], usize)>; 3],
     (x, y): (usize, usize),
     (w, h): (usize, usize),
     (mv_row, mv_col): (i32, i32),

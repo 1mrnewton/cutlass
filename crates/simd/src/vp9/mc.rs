@@ -75,7 +75,7 @@ impl Block<'_> {
     /// Whether every load and store stays inside the buffers. The kernels
     /// read 16 samples from 3 before each 8 or 16 of a row, and 3 rows
     /// above and 4 below with a fraction down.
-    #[inline]
+    #[inline(always)]
     fn fits(&self) -> bool {
         if !matches!(self.w, 4 | 8 | 16 | 32 | 64)
             || self.h == 0
@@ -106,7 +106,7 @@ impl Block<'_> {
 /// Predicts `b` with vector instructions. `false`, having written nothing,
 /// when the CPU or the block is not one the kernels take.
 #[must_use]
-#[inline]
+#[inline(always)]
 // The `mut` serves the x86-64 kernels; rebinding it instead moved the
 // whole struct through a `memcpy` call on every one.
 #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]

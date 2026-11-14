@@ -201,7 +201,8 @@ impl FrameEncoder {
         let qindex = fp.qindex;
         let hidden = fp.hidden && !key;
         let lossless = qindex == 0;
-        let compressed = compressed_header(lossless, !key, coef)?;
+        let switchable = !key && fp.speed <= SWITCHABLE_SPEED;
+        let compressed = compressed_header(lossless, !key, switchable, coef)?;
         let mut b = BitWriter::new();
         b.write(2, 2); // frame marker
         b.write(0, 2); // profile 0
@@ -239,8 +240,12 @@ impl FrameEncoder {
             b.write_bit(true); // size from the first reference
             b.write_bit(false); // render size = frame size
             b.write_bit(true); // allow_high_precision_mv
-            b.write_bit(false); // not switchable
-            b.write(1, 2); // EIGHTTAP
+            if switchable {
+                b.write_bit(true); // a filter per block
+            } else {
+                b.write_bit(false);
+                b.write(1, 2); // EIGHTTAP
+            }
         }
         b.write_bit(true); // refresh_frame_context
         b.write_bit(false); // frame_parallel_decoding_mode
@@ -369,6 +374,7 @@ impl FrameEncoder {
             ],
             speed: fp.speed,
             refs_live,
+            switchable: h.interp == geom::SWITCHABLE,
         };
         // Each tile column on its own thread, into its own copy of the
         // picture (intra prediction reads nothing across tile columns).
@@ -531,9 +537,13 @@ pub fn filter_level(qindex: u8, key: bool) -> u8 {
     guess.clamp(0, 63) as u8
 }
 
+/// Speeds at and below which each inter block picks its filter.
+pub const SWITCHABLE_SPEED: u8 = 2;
+
 fn compressed_header(
     lossless: bool,
     inter: bool,
+    switchable: bool,
     coef: Option<(&[u8; 1728], &[u8; 1728])>,
 ) -> Result<Vec<u8>, CodecError> {
     let mut w = BoolWriter::new();
@@ -560,6 +570,9 @@ fn compressed_header(
             }
         };
         none(&mut w, fc.inter_mode.len() * fc.inter_mode[0].len());
+        if switchable {
+            none(&mut w, fc.interp.len() * fc.interp[0].len());
+        }
         none(&mut w, fc.intra_inter.len());
         none(&mut w, fc.single_ref.len() * 2);
         none(&mut w, fc.y_mode.len() * fc.y_mode[0].len());

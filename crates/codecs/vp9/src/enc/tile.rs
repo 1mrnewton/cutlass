@@ -204,6 +204,8 @@ pub struct Shared<'a> {
     pub dq: [[i32; 2]; 2],
     /// Search effort: higher is faster.
     pub speed: u8,
+    /// Whether each inter block codes its filter.
+    pub switchable: bool,
     /// Which references (LAST, GOLDEN, ALTREF) are worth searching: those
     /// that hold a picture none before them holds.
     pub refs_live: [bool; 3],
@@ -268,6 +270,8 @@ struct Blk {
     uv: u8,
     refs: [u8; 2],
     mv: Mv,
+    /// The inter prediction filter (EIGHTTAP, SMOOTH, SHARP).
+    interp: u8,
 }
 
 /// The encoder of one tile.
@@ -704,6 +708,16 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 try_one(self, i, &b, &mut best, &mut last);
             }
         }
+        // The other filters for the best inter candidate.
+        if s.switchable && cands[best.1].refs[0] != INTRA_FRAME {
+            let b0 = cands[best.1];
+            for f in [geom::SMOOTH, geom::SHARP] {
+                let i = cands.len();
+                let b = Blk { interp: f, ..b0 };
+                cands.push(b);
+                try_one(self, i, &b, &mut best, &mut last);
+            }
+        }
         if last != best.1 {
             self.restore(slot + 1);
         }
@@ -729,6 +743,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             uv: geom::DC,
             refs: [INTRA_FRAME, INTRA_FRAME],
             mv: Mv::ZERO,
+            interp: geom::EIGHTTAP,
         }
     }
 
@@ -1407,7 +1422,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             mode: b.mode,
             bmode: [b.mode; 4],
             uv: b.uv,
-            interp: geom::EIGHTTAP,
+            interp: b.interp,
             refs: b.refs,
             bmv: [[b.mv, Mv::ZERO]; 4],
         };
@@ -1471,7 +1486,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             skip: b.skip,
             tx: b.tx,
             seg_pred: false,
-            interp: if inter { geom::EIGHTTAP } else { 3 },
+            interp: if inter { b.interp } else { 3 },
             refs: b.refs,
             bmv: [[b.mv, Mv::ZERO]; 4],
         };
@@ -2142,7 +2157,15 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         if self.collect() {
             self.f.counts.inter_mode[mctx][k] += 1;
         }
-        // The frame's filter is not switchable.
+        if s.switchable {
+            let l = self.left_nb(b).map(|n| n.interp);
+            let a = self.above_nb(b).map(|n| n.interp);
+            let ctx = ctx::interp_ctx(l, a);
+            self.put_tree(&prob::INTERP_TREE, &s.fc.interp[ctx], b.interp);
+            if self.collect() {
+                self.f.counts.interp[ctx][usize::from(b.interp)] += 1;
+            }
+        }
         if b.mode == NEW {
             let best = self.find_mv(b, NEW);
             self.write_mv(b.mv, best);

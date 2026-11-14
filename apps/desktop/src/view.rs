@@ -4729,11 +4729,15 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
             band,
             egui::Shape::rect_filled(header_rect, CornerRadius::ZERO, tokens::PROJECT_BAR),
         );
-        ui.painter().hline(
-            header_rect.x_range(),
-            bottom,
-            egui::Stroke::new(1.0, inspector::TAB_LINE),
-        );
+        // A line above it too, so the band does not run into the top bar,
+        // which is the same grey.
+        for y in [header_rect.top() + 0.5, bottom] {
+            ui.painter().hline(
+                header_rect.x_range(),
+                y,
+                egui::Stroke::new(1.0, inspector::TAB_LINE),
+            );
+        }
         Rect::from_min_max(egui::pos2(body.left(), bottom + 1.0), body.max)
     } else {
         body

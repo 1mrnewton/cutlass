@@ -389,6 +389,8 @@ pub struct Vp9Decoder {
     /// reconstruction may still be running.
     pending: VecDeque<(Held, i64, i64, u32)>,
     cancel: Arc<AtomicBool>,
+    /// The largest picture given out so far, in bytes.
+    warmed: usize,
 }
 
 /// Workers that reconstruct frames while the caller parses, and the
@@ -465,6 +467,7 @@ impl Vp9Decoder {
             rt,
             pending: VecDeque::new(),
             cancel: Arc::new(AtomicBool::new(false)),
+            warmed: 0,
         })
     }
 
@@ -481,6 +484,18 @@ impl Vp9Decoder {
             let Some((held, pts, duration, timescale)) = self.pending.pop_front() else {
                 break;
             };
+            let bytes = held_bytes(&held);
+            if bytes > self.warmed {
+                // Every picture goes out in new buffers that the caller
+                // frees. glibc returns such memory to the system after
+                // each picture (and faults it in again for the next)
+                // unless a block that large was once mapped and freed,
+                // which raises its thresholds: free one, once per size.
+                let block: Vec<u8> = Vec::with_capacity(2 * bytes);
+                std::hint::black_box(&block);
+                drop(block);
+                self.warmed = bytes;
+            }
             let frame = held_frame(&held)?;
             if failed(&self.rt) {
                 // A reconstruction failed: what follows predicts from it.
@@ -551,6 +566,18 @@ impl VideoDecoder for Vp9Decoder {
 impl Vp9Decoder {
     pub(crate) fn temporal_frames(&self) -> u32 {
         self.inner.temporal_frames()
+    }
+}
+
+/// The bytes of a picture's visible samples.
+fn held_bytes(held: &Held) -> usize {
+    fn of<P: Pixel>(f: &Pic<P>) -> usize {
+        let b = if P::HIGH { 2 } else { 1 };
+        (0..3).map(|p| f.dims.w[p] * f.dims.h[p] * b).sum()
+    }
+    match held {
+        Held::Eight(f) => of(f),
+        Held::Deep(f) => of(f),
     }
 }
 

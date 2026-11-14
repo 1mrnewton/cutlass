@@ -1396,9 +1396,14 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
         kind: u8,
     ) -> (usize, (usize, usize)) {
         let (scan, nb) = scan_pair(tx, kind);
+        let max_eob0 = 16usize << (2 * tx);
+        // Sliced to the block's size, and cache indices masked to its
+        // 1024 entries, so that the loop needs no bounds checks for them.
+        let scan = &scan[..max_eob0.min(scan.len())];
+        let nb = &nb[..(2 * max_eob0).min(nb.len())];
         let log2n = 2 + usize::from(tx);
         let mask = (1usize << log2n) - 1;
-        let max_eob = 16usize << (2 * tx);
+        let max_eob = scan.len();
         let probs = &self.s.fc.coef[usize::from(tx)][usize::from(uv)][usize::from(inter)];
         let bands: &[u8] = if tx == 0 { &BAND_4X4 } else { &BAND_8X8_PLUS };
         let shift = u32::from(tx == 3);
@@ -1414,33 +1419,34 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
         let b = &mut local;
         let out_pos = &mut self.out.pos;
         let out_val = &mut self.out.val;
-        let counts = &mut self.f.counts;
+        let cnt_coef = &mut self.f.counts.coef[ti][pi][ri];
+        let cnt_eob = &mut self.f.counts.eob[ti][pi][ri];
         while c < max_eob {
             let mut band = usize::from(bands[c]);
             let mut p = &probs[band][ctx];
             if collect {
-                counts.eob[ti][pi][ri][band][ctx] += 1;
+                cnt_eob[band][ctx] += 1;
             }
             if !b.read(p[0]) {
                 if collect {
-                    counts.coef[ti][pi][ri][band][ctx][3] += 1;
+                    cnt_coef[band][ctx][3] += 1;
                 }
                 break;
             }
             while !b.read(p[1]) {
                 if collect {
-                    counts.coef[ti][pi][ri][band][ctx][0] += 1;
+                    cnt_coef[band][ctx][0] += 1;
                 }
                 dqv = i32::from(dq[1]);
-                cache[usize::from(scan[c])] = 0;
+                cache[usize::from(scan[c]) & 1023] = 0;
                 c += 1;
                 if c >= max_eob {
                     *self.b = local;
                     return (c, (max_r + 1, max_c + 1));
                 }
                 ctx = (1
-                    + usize::from(cache[usize::from(nb[2 * c])])
-                    + usize::from(cache[usize::from(nb[2 * c + 1])]))
+                    + usize::from(cache[usize::from(nb[2 * c]) & 1023])
+                    + usize::from(cache[usize::from(nb[2 * c + 1]) & 1023]))
                     >> 1;
                 band = usize::from(bands[c]);
                 p = &probs[band][ctx];
@@ -1448,19 +1454,19 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
             let v;
             if !b.read(p[2]) {
                 if collect {
-                    counts.coef[ti][pi][ri][band][ctx][1] += 1;
+                    cnt_coef[band][ctx][1] += 1;
                 }
-                cache[usize::from(scan[c])] = 1;
+                cache[usize::from(scan[c]) & 1023] = 1;
                 v = dqv >> shift;
             } else {
                 if collect {
-                    counts.coef[ti][pi][ri][band][ctx][2] += 1;
+                    cnt_coef[band][ctx][2] += 1;
                 }
                 let pp = &PARETO8[usize::from(p[2]) - 1];
                 let val: i32;
                 if b.read(pp[0]) {
                     if b.read(pp[3]) {
-                        cache[usize::from(scan[c])] = 5;
+                        cache[usize::from(scan[c]) & 1023] = 5;
                         if b.read(pp[5]) {
                             if b.read(pp[7]) {
                                 let skip = match bd {
@@ -1482,7 +1488,7 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
                             val = 11 + read_bits(b, &[173, 148, 140]);
                         }
                     } else {
-                        cache[usize::from(scan[c])] = 4;
+                        cache[usize::from(scan[c]) & 1023] = 4;
                         if b.read(pp[4]) {
                             val = 7 + read_bits(b, &[165, 145]);
                         } else {
@@ -1490,10 +1496,10 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
                         }
                     }
                 } else if b.read(pp[1]) {
-                    cache[usize::from(scan[c])] = 3;
+                    cache[usize::from(scan[c]) & 1023] = 3;
                     val = 3 + i32::from(b.read(pp[2]));
                 } else {
-                    cache[usize::from(scan[c])] = 2;
+                    cache[usize::from(scan[c]) & 1023] = 2;
                     val = 2;
                 }
                 v = ((i64::from(val) * i64::from(dqv)) >> shift) as i32;
@@ -1507,8 +1513,8 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
             c += 1;
             if c < max_eob {
                 ctx = (1
-                    + usize::from(cache[usize::from(nb[2 * c])])
-                    + usize::from(cache[usize::from(nb[2 * c + 1])]))
+                    + usize::from(cache[usize::from(nb[2 * c]) & 1023])
+                    + usize::from(cache[usize::from(nb[2 * c + 1]) & 1023]))
                     >> 1;
             }
             dqv = i32::from(dq[1]);

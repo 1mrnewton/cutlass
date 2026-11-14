@@ -302,6 +302,8 @@ pub struct Tile<'s, 't, 'r, 'v> {
     last_sad: u64,
     /// The fast path's search result for each square of the superblock.
     found: [(Mv, u64); 85],
+    /// Scratch of the 8-tap filters across.
+    mctmp: Vec<u8>,
     /// The reference the searches read (0 LAST, 1 GOLDEN, 2 ALTREF).
     cur_ref: usize,
     /// Whether the block coded last skipped its residual; for the best
@@ -352,6 +354,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             toks: Vec::new(),
             last_sad: 0,
             found: [(Mv::ZERO, u64::MAX); 85],
+            mctmp: vec![0; cutlass_simd::vp9::mc::TMP],
             cur_ref: 0,
             coded_skip: false,
             choice_skip: (false, 0.0),
@@ -877,7 +880,11 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 if v == mv || scored.iter().any(|(_, o)| o.refs == b.refs && o.mv == v) {
                     continue;
                 }
-                if let Some(d) = self.sad_sub(x, y, w, h, v) {
+                if let Some(d) = if s.speed <= 5 {
+                    self.sad_sub_exact(x, y, w, h, v)
+                } else {
+                    self.sad_sub(x, y, w, h, v)
+                } {
                     scored.push((
                         d + lam + ref_bits,
                         Blk {
@@ -1049,6 +1056,47 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         )))
     }
 
+    /// As [`Tile::sad_sub`], with the real 8-tap prediction (needs the
+    /// filter's reach inside the reference; else the bilinear proxy).
+    fn sad_sub_exact(&mut self, x: usize, y: usize, w: usize, h: usize, mv: Mv) -> Option<u64> {
+        let s = self.s;
+        let (r, c) = (i32::from(mv.row), i32::from(mv.col));
+        let (bx, by) = (x as i32 + (c >> 3), y as i32 + (r >> 3));
+        let mut pred = std::mem::take(&mut self.pred);
+        let mut tmp = std::mem::take(&mut self.mctmp);
+        let out = (|| {
+            let ((data, stride), (rw, rh)) = self.rec_ref()?;
+            if bx < 3
+                || by < 3
+                || bx + w as i32 + 4 > rw
+                || by + h as i32 + 4 > rh
+                || !matches!(w, 8 | 16 | 32 | 64)
+            {
+                return None;
+            }
+            let filter = &crate::tables::SUBPEL_FILTERS[usize::from(geom::EIGHTTAP)];
+            let at = by as usize * stride + bx as usize;
+            crate::dsp::mc::predict(
+                &mut pred,
+                w,
+                data,
+                at,
+                stride,
+                (w, h),
+                (((c & 7) * 2) as usize, ((r & 7) * 2) as usize),
+                filter,
+                255,
+                false,
+                &mut tmp,
+            );
+            let (src, ss) = (s.src.planes[0], s.src.strides[0]);
+            Some(u64::from(sad::sad(&src[y * ss + x..], ss, &pred, w, w, h)))
+        })();
+        self.pred = pred;
+        self.mctmp = tmp;
+        out.or_else(|| self.sad_sub(x, y, w, h, mv))
+    }
+
     /// Searches LAST for the block's vector: the best of the neighbours'
     /// vectors and zero, a diamond search in whole samples, then halves
     /// and quarters. Returns the vector (eighths) and its SAD.
@@ -1131,6 +1179,24 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             }
             step /= 2;
         }
+        // Every whole sample within two of the diamond's choice.
+        if s.speed <= 5 {
+            let c = best;
+            for dr in -2..=2 {
+                for dc in -2..=2 {
+                    if (dr, dc) == (0, 0) {
+                        continue;
+                    }
+                    let (r, cc) = (c.0 + dr, c.1 + dc);
+                    if let Some(v) = self.sad_int(x, y, w, h, r, cc)
+                        && v < best_sad
+                    {
+                        best_sad = v;
+                        best = (r, cc);
+                    }
+                }
+            }
+        }
         let mv = Mv {
             row: (best.0 * 8) as i16,
             col: (best.1 * 8) as i16,
@@ -1176,7 +1242,13 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                         row: center.row + dr,
                         col: center.col + dc,
                     };
-                    let Some(v) = self.sad_sub(x, y, w, h, m) else {
+                    let exact = s.speed <= 5;
+                    let v = if exact {
+                        self.sad_sub_exact(x, y, w, h, m)
+                    } else {
+                        self.sad_sub(x, y, w, h, m)
+                    };
+                    let Some(v) = v else {
                         continue;
                     };
                     if v < best_sad {

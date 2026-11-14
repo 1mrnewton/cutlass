@@ -32,6 +32,14 @@ pub trait Fonts {
         let _ = (character, emoji);
         None
     }
+
+    /// The face of the family of the face named `path` that is bold,
+    /// italic, or both, with which of the two it is. `None` when the
+    /// family has no such face; the letters are then thickened or leaned.
+    fn styled(&self, path: &str, bold: bool, italic: bool) -> Option<(&[u8], bool, bool)> {
+        let _ = (path, bold, italic);
+        None
+    }
 }
 
 /// No font bytes. Text segments are not drawn.

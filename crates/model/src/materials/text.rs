@@ -263,6 +263,12 @@ impl Default for MaterialText {
 }
 
 /// The keys a caption's style may have, as `cutlass_captions` draws them.
+/// How much a bold letter's edge grows when its face has no bold of its
+/// own, as a share of the text size.
+pub const TEXT_BOLD_WIDTH: f64 = 0.04;
+/// How many degrees an italic letter leans when its face has no italic.
+pub const TEXT_ITALIC_DEGREE: i32 = 12;
+
 pub const CAPTION_STYLE_KEYS: [&str; 10] = [
     "classic",
     "karaoke",

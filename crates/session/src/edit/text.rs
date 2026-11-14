@@ -161,9 +161,9 @@ pub fn set_text_align(
 }
 
 /// How much a bold letter's edge grows, as a share of the text size.
-pub const BOLD_WIDTH: f64 = 0.04;
+pub const BOLD_WIDTH: f64 = cutlass_model::TEXT_BOLD_WIDTH;
 /// How many degrees an italic letter leans.
-pub const ITALIC_DEGREE: i32 = 12;
+pub const ITALIC_DEGREE: i32 = cutlass_model::TEXT_ITALIC_DEGREE;
 
 /// Bold, italic and underline over a whole text.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -972,7 +972,8 @@ mod tests {
                 .iter()
                 .all(|style| style.solid() == Some([1.0, 0.0, 0.0, 1.0]))
         );
-        assert_eq!(rich.styles[0].rest.get("bold"), Some(&true.into()));
+        // The range's bold is kept through both edits.
+        assert_eq!(rich.styles[0].bold, Some(true));
     }
 
     #[test]

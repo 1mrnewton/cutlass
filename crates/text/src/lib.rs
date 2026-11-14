@@ -23,7 +23,7 @@ mod style;
 mod unicode;
 
 pub use atlas::{Atlas, AtlasRoute, GlyphImage, paint_bytes, route};
-pub use faces::{FaceSource, MAX_FALLBACK_FACES, NoFaces};
+pub use faces::{FaceSource, MAX_FALLBACK_FACES, NoFaces, StyledFace};
 pub use layout::{Alignment, Layout, Line, PlacedGlyph, layout, layout_text, layout_with};
 pub use mesh::{GlyphRecord, TextMesh, build, build_text};
 pub use paint::{DrawnGlyph, paint_glyphs};

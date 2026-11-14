@@ -19,7 +19,7 @@ use cutlass_model::{
     SegmentId, TrackAttribute, UniformScale, WordColumns,
 };
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
-use cutlass_text::{FaceSource, GlyphLook, TextSource, text_fill};
+use cutlass_text::{FaceSource, GlyphLook, StyledFace, TextSource, text_fill};
 
 use crate::Fonts;
 use crate::gpu::{GpuLayer, GpuSource};
@@ -409,6 +409,21 @@ impl FaceSource for Faces<'_> {
 
     fn fallback(&self, character: char, emoji: bool) -> Option<&[u8]> {
         self.fonts.fallback(character, emoji)
+    }
+
+    fn styled(&self, path: &str, bold: bool, italic: bool) -> Option<StyledFace<'_>> {
+        // By the whole path, else its file name, else a collection's
+        // first face, as a range's face is found.
+        let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
+        let first = format!("{file}#0");
+        [path, file, first.as_str()]
+            .into_iter()
+            .find_map(|name| self.fonts.styled(name, bold, italic))
+            .map(|(bytes, bold, italic)| StyledFace {
+                bytes,
+                bold,
+                italic,
+            })
     }
 }
 

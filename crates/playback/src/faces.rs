@@ -126,6 +126,43 @@ struct Face {
     name: String,
     label: String,
     bytes: Bytes,
+    style: Style,
+}
+
+/// The family a face belongs to and which of its faces it is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Style {
+    /// The family's name in lower case; empty when the face names none.
+    family: String,
+    bold: bool,
+    italic: bool,
+}
+
+impl Style {
+    fn of(entry: &cutlass_font::FaceEntry) -> Self {
+        Self {
+            family: entry
+                .family
+                .as_deref()
+                .map(str::to_lowercase)
+                .unwrap_or_default(),
+            bold: entry.bold,
+            italic: entry.italic,
+        }
+    }
+
+    /// The style of a face held as bytes.
+    fn of_bytes(bytes: &[u8]) -> Self {
+        cutlass_font::list_faces(|offset, len| {
+            let start = usize::try_from(offset).ok()?;
+            bytes
+                .get(start..start.checked_add(len)?)
+                .map(<[u8]>::to_vec)
+        })
+        .ok()
+        .and_then(|faces| faces.first().map(Self::of))
+        .unwrap_or_default()
+    }
 }
 
 /// A face found by a scan, before the table keeps it.
@@ -134,6 +171,7 @@ struct Found {
     label: String,
     path: PathBuf,
     index: Option<u32>,
+    style: Style,
 }
 
 /// Faces by name. An empty table supplies nothing.
@@ -162,7 +200,8 @@ impl FaceTable {
                 continue;
             }
             if let Some(name) = file_name(path) {
-                table.push(name.clone(), face_label(&name), Bytes::Read(bytes));
+                let style = Style::of_bytes(&bytes);
+                table.push(name.clone(), face_label(&name), Bytes::Read(bytes), style);
             }
         }
         table.fallbacks = (0..table.faces.len().min(MAX_FALLBACKS)).collect();
@@ -176,7 +215,8 @@ impl FaceTable {
         let mut table = Self::default();
         for (name, bytes) in faces {
             if cutlass_font::read(&bytes).is_ok() {
-                table.push(name.clone(), face_label(&name), Bytes::Read(bytes));
+                let style = Style::of_bytes(&bytes);
+                table.push(name.clone(), face_label(&name), Bytes::Read(bytes), style);
             }
         }
         table.fallbacks = (0..table.faces.len().min(MAX_FALLBACKS)).collect();
@@ -219,7 +259,7 @@ impl FaceTable {
                 break;
             }
             let bytes = Bytes::Later(face.path, face.index, OnceLock::new());
-            table.push(face.name, face.label, bytes);
+            table.push(face.name, face.label, bytes, face.style);
         }
         table.rank_fallbacks();
         table
@@ -309,11 +349,16 @@ impl FaceTable {
             .collect()
     }
 
-    fn push(&mut self, name: String, label: String, bytes: Bytes) {
+    fn push(&mut self, name: String, label: String, bytes: Bytes, style: Style) {
         if name.is_empty() || self.faces.iter().any(|face| face.name == name) {
             return;
         }
-        self.faces.push(Face { name, label, bytes });
+        self.faces.push(Face {
+            name,
+            label,
+            bytes,
+            style,
+        });
     }
 }
 
@@ -349,6 +394,33 @@ impl Fonts for FaceTable {
             found.insert(key, hit);
         }
         hit.and_then(|at| self.bytes_at(at))
+    }
+
+    fn styled(&self, path: &str, bold: bool, italic: bool) -> Option<(&[u8], bool, bool)> {
+        let own = &self.faces.iter().find(|face| face.name == path)?.style;
+        if own.family.is_empty() {
+            return None;
+        }
+        // What the letters should be, counting what the face already is.
+        let (bold, italic) = (bold || own.bold, italic || own.italic);
+        let worth = |style: &Style| u8::from(style.bold) + u8::from(style.italic);
+        // The family's face with the most of what is asked and nothing
+        // that is not, when that is more than the face itself has.
+        let (at, best) = self
+            .faces
+            .iter()
+            .enumerate()
+            .filter(|(_, face)| {
+                face.style.family == own.family
+                    && (bold || !face.style.bold)
+                    && (italic || !face.style.italic)
+            })
+            .max_by_key(|(at, face)| (worth(&face.style), std::cmp::Reverse(*at)))?;
+        if worth(&best.style) <= worth(own) {
+            return None;
+        }
+        self.bytes_at(at)
+            .map(|bytes| (bytes, best.style.bold, best.style.italic))
     }
 }
 
@@ -422,6 +494,7 @@ fn faces_in(path: &Path, found: &mut Vec<Found>) {
         {
             continue;
         }
+        let style = Style::of(&face);
         let (name, label) = match face.index {
             None => (name.clone(), face_label(&name)),
             Some(index) => (
@@ -435,6 +508,7 @@ fn faces_in(path: &Path, found: &mut Vec<Found>) {
             label,
             path: path.to_owned(),
             index: face.index,
+            style,
         });
     }
 }
@@ -501,6 +575,101 @@ mod tests {
         assert_eq!(table.fallback('f', false), table.face("Shaping.ttf"));
         assert!(table.fallback('Q', false).is_none());
         assert!(FaceTable::default().fallback('A', false).is_none());
+    }
+
+    /// The sample face made a member of a family: its family name, and
+    /// whether it says it is bold or italic.
+    fn styled_face(family: &str, bold: bool, italic: bool) -> Vec<u8> {
+        // Add a `name` and an `OS/2` table to the sample face.
+        let count = usize::from(u16::from_be_bytes([SAMPLE[4], SAMPLE[5]]));
+        let mut tables: Vec<([u8; 4], Vec<u8>)> = (0..count)
+            .map(|slot| {
+                let at = 12 + slot * 16;
+                let word = |from: usize| {
+                    u32::from_be_bytes([
+                        SAMPLE[from],
+                        SAMPLE[from + 1],
+                        SAMPLE[from + 2],
+                        SAMPLE[from + 3],
+                    ]) as usize
+                };
+                let (start, length) = (word(at + 8), word(at + 12));
+                let mut tag = [0; 4];
+                tag.copy_from_slice(&SAMPLE[at..at + 4]);
+                (tag, SAMPLE[start..start + length].to_vec())
+            })
+            .filter(|(tag, _)| tag != b"name" && tag != b"OS/2")
+            .collect();
+        let encoded: Vec<u8> = family.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        let mut name = Vec::new();
+        for value in [0_u16, 1, 18, 3, 1, 0x0409, 1, encoded.len() as u16, 0] {
+            name.extend(value.to_be_bytes());
+        }
+        name.extend(encoded);
+        let mut os2 = vec![0_u8; 78];
+        os2[62..64].copy_from_slice(&(u16::from(italic) | (u16::from(bold) << 5)).to_be_bytes());
+        tables.push((*b"name", name));
+        tables.push((*b"OS/2", os2));
+        tables.sort_by_key(|table| table.0);
+        let mut file = vec![0, 1, 0, 0];
+        file.extend((tables.len() as u16).to_be_bytes());
+        file.extend([0; 6]);
+        let mut at = 12 + tables.len() * 16;
+        let mut body = Vec::new();
+        for (tag, bytes) in &tables {
+            file.extend(tag);
+            file.extend([0; 4]);
+            file.extend((at as u32).to_be_bytes());
+            file.extend((bytes.len() as u32).to_be_bytes());
+            body.extend(bytes);
+            let padded = bytes.len().next_multiple_of(4);
+            body.resize(body.len() + padded - bytes.len(), 0);
+            at += padded;
+        }
+        file.extend(body);
+        file
+    }
+
+    #[test]
+    fn a_family_gives_its_bold_and_italic_faces() {
+        let table = FaceTable::from_pairs(vec![
+            ("Fam.ttf".to_owned(), styled_face("Fam", false, false)),
+            ("Fam-Bold.ttf".to_owned(), styled_face("Fam", true, false)),
+            (
+                "Fam-BoldItalic.ttf".to_owned(),
+                styled_face("Fam", true, true),
+            ),
+            ("Other.ttf".to_owned(), styled_face("Other", false, true)),
+            ("Plain.ttf".to_owned(), SAMPLE.to_vec()),
+        ]);
+        let named = |name: &str| table.face(name).map(<[u8]>::as_ptr);
+        let styled = |path: &str, bold: bool, italic: bool| {
+            table
+                .styled(path, bold, italic)
+                .map(|(bytes, bold, italic)| (Some(bytes.as_ptr()), bold, italic))
+        };
+        assert_eq!(
+            styled("Fam.ttf", true, false),
+            Some((named("Fam-Bold.ttf"), true, false))
+        );
+        assert_eq!(
+            styled("Fam.ttf", true, true),
+            Some((named("Fam-BoldItalic.ttf"), true, true))
+        );
+        // The family has no plain italic: nothing bolder than asked is
+        // given, and the lean is left to be drawn.
+        assert_eq!(styled("Fam.ttf", false, true), None);
+        // A bold face asked for italic too goes to the bold italic.
+        assert_eq!(
+            styled("Fam-Bold.ttf", false, true),
+            Some((named("Fam-BoldItalic.ttf"), true, true))
+        );
+        // Nothing to add, another family, no family, no such face.
+        assert_eq!(styled("Fam-Bold.ttf", true, false), None);
+        assert_eq!(styled("Fam.ttf", false, false), None);
+        assert_eq!(styled("Other.ttf", true, false), None);
+        assert_eq!(styled("Plain.ttf", true, true), None);
+        assert_eq!(styled("Missing.ttf", true, false), None);
     }
 
     #[test]

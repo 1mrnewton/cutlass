@@ -18,7 +18,7 @@ use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::TextError;
 use crate::atlas::{Atlas, GlyphKind};
-use crate::faces::{FaceSource, NoFaces, gather};
+use crate::faces::{FaceSource, NoFaces, Wanted, gather};
 use crate::layout::layout_faces;
 use crate::mesh::{GlyphRecord, TextMesh, build_faces};
 use crate::richtext::{Run, run_at};
@@ -74,7 +74,18 @@ impl GlyphLook {
 }
 
 /// The bounds a set of rectangles reach.
-/// Bold, italic and underline over the whole title, in picture pixels.
+/// The faces a title's glyphs are set in.
+#[derive(Clone, Copy)]
+struct Chosen<'c, 'f> {
+    /// Its own face first.
+    fonts: &'c [Font<'f>],
+    /// The face of the character at a byte index.
+    pick: &'c dyn Fn(usize) -> usize,
+    /// Whether that face is itself bold, and itself italic.
+    real: &'c dyn Fn(usize) -> (bool, bool),
+}
+
+/// Bold, italic and underline for one glyph, in picture pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Pattern {
     /// How far each letter's edge grows outward.
@@ -118,6 +129,44 @@ impl Pattern {
             bold,
             shear: if shear.is_finite() { shear } else { 0.0 },
             underline,
+        }
+    }
+
+    /// This pattern, the title's, as one glyph takes it: with what its
+    /// range turns on or off, at its letters' size (`size` times the
+    /// title's `font_size`), and without the thickening or the lean its
+    /// face already has (`real`: bold, italic).
+    fn for_glyph(self, run: Option<&Run>, real: (bool, bool), font_size: f32, size: f32) -> Self {
+        let wants = |own: Option<bool>, title: bool| own.unwrap_or(title);
+        let bold = wants(run.and_then(|run| run.bold), self.bold > 0.0);
+        let italic = wants(run.and_then(|run| run.italic), self.shear != 0.0);
+        let underline = wants(run.and_then(|run| run.underline), self.underline.is_some());
+        // A range turned on in a title that is off takes the usual amounts.
+        #[allow(clippy::cast_possible_truncation)]
+        let usual_bold = cutlass_model::TEXT_BOLD_WIDTH as f32 * font_size;
+        #[allow(clippy::cast_precision_loss)]
+        let usual_shear = (cutlass_model::TEXT_ITALIC_DEGREE as f32)
+            .to_radians()
+            .tan();
+        Self {
+            bold: if bold && !real.0 {
+                (if self.bold > 0.0 {
+                    self.bold
+                } else {
+                    usual_bold
+                }) * size
+            } else {
+                0.0
+            },
+            shear: match (italic && !real.1, self.shear != 0.0) {
+                (false, _) => 0.0,
+                (true, true) => self.shear,
+                (true, false) => usual_shear,
+            },
+            underline: underline.then(|| {
+                self.underline
+                    .unwrap_or((UNDERLINE_WIDTH * font_size, UNDERLINE_OFFSET * font_size))
+            }),
         }
     }
 
@@ -191,8 +240,9 @@ pub struct TextSource {
     /// Round boxes behind runs of posed glyphs, in picture pixels.
     boxes: Vec<crate::paint::WordBox>,
     font_size: f32,
-    /// Bold, italic and underline over every letter.
-    pattern: Pattern,
+    /// Bold, italic and underline for each glyph in the mesh, in its
+    /// order.
+    patterns: Vec<Pattern>,
     /// Each glyph record's own baseline, in the glyph records' pixels.
     baselines: Vec<f32>,
     /// For vertical text, each column's right edge, where its underline
@@ -259,19 +309,23 @@ impl TextSource {
             Some(index) => cutlass_font::read_collection(bytes, index).map_err(TextError::Font)?,
         };
         let words = crate::richtext::read(material)?;
-        let gathered = gather(font, &words.text, &words.runs, faces);
-        let pick = |source: usize| gathered.pick(source);
-        Self::from_fonts(&gathered.fonts, &pick, &words.runs, material, glow, segment)
+        let gathered = gather(font, &words.text, &words.runs, Wanted::of(material), faces);
+        let chosen = Chosen {
+            fonts: &gathered.fonts,
+            pick: &|source| gathered.pick(source),
+            real: &|source| gathered.real(source),
+        };
+        Self::from_fonts(&chosen, &words.runs, material, glow, segment)
     }
 
     fn from_fonts(
-        fonts: &[Font<'_>],
-        pick: &dyn Fn(usize) -> usize,
+        chosen: &Chosen<'_, '_>,
         runs: &[Run],
         material: &MaterialText,
         glow: Option<&BloomParams>,
         segment: &Segment,
     ) -> Result<Self, TextError> {
+        let Chosen { fonts, pick, real } = *chosen;
         let fill = fill_rgba(material)?;
         let laid = layout_faces(fonts, material, pick)?;
         let mut atlases: Vec<Atlas> = fonts.iter().map(|_| Atlas::new()).collect();
@@ -298,7 +352,23 @@ impl TextSource {
         let (origin_x, origin_y, width, height, background) =
             picture_bounds(&mesh, &style, laid.font_size, &shadows)?;
         let letters = letters_of(&crate::richtext::read(material)?.text, &mesh.glyphs);
-        let pattern = Pattern::of(material, laid.font_size);
+        let title = Pattern::of(material, laid.font_size);
+        // Each glyph's own bold, lean and underline: its range's, or the
+        // title's; none of a kind its face already is.
+        let sizes: Vec<f32> = laid.glyphs().map(|placed| placed.size).collect();
+        let patterns: Vec<Pattern> = mesh
+            .glyphs
+            .iter()
+            .zip(&sizes)
+            .map(|(record, size)| {
+                title.for_glyph(
+                    run_at(runs, record.source),
+                    real(record.source),
+                    laid.font_size,
+                    *size,
+                )
+            })
+            .collect();
         let baselines = laid.glyphs().map(|placed| placed.y).collect();
         let columns = if laid.vertical() {
             laid.lines
@@ -326,7 +396,7 @@ impl TextSource {
             inks: Vec::new(),
             boxes: Vec::new(),
             font_size: laid.font_size,
-            pattern,
+            patterns,
             baselines,
             columns,
             background,
@@ -335,7 +405,11 @@ impl TextSource {
             width,
             height,
         };
-        if source.pattern != Pattern::default() {
+        if source
+            .patterns
+            .iter()
+            .any(|pattern| *pattern != Pattern::default())
+        {
             let mut reach = Reach::default();
             for (at, record) in source.mesh.glyphs.iter().enumerate() {
                 if let Some((posed, _)) = source.posed(at, record) {
@@ -367,7 +441,7 @@ impl TextSource {
         posed: &GlyphRecord,
         record: &GlyphRecord,
     ) -> Option<[f32; 4]> {
-        let (thick, below) = self.pattern.underline?;
+        let (thick, below) = self.patterns.get(at)?.underline?;
         let baseline = self.baseline(at, posed, record);
         let Some(right) = usize::try_from(record.line)
             .ok()
@@ -390,42 +464,53 @@ impl TextSource {
         record: &GlyphRecord,
     ) {
         let baseline = self.baseline(at, posed, record);
-        self.pattern.hold(reach, posed, baseline);
+        if let Some(pattern) = self.patterns.get(at) {
+            pattern.hold(reach, posed, baseline);
+        }
         if let Some([left, top, right, bottom]) = self.underline_piece(at, posed, record) {
             reach.hold(left, top, right, bottom);
         }
     }
 
-    /// Each line's underline, in picture pixels: left, top, right, bottom.
+    /// The underlines, in picture pixels: left, top, right, bottom. One
+    /// bar runs under each stretch of underlined letters on a line; a
+    /// letter that is not underlined ends it.
     fn underlines(&self) -> Vec<[f32; 4]> {
-        let mut lines: Vec<(u32, [f32; 4])> = Vec::new();
+        let mut bars: Vec<[f32; 4]> = Vec::new();
+        // The line the open bar is on; `None` once a letter has ended it.
+        let mut open: Option<u32> = None;
         for (at, record) in self.mesh.glyphs.iter().enumerate() {
+            let piece = self
+                .posed(at, record)
+                .and_then(|(posed, _)| self.underline_piece(at, &posed, record));
+            let Some([left, top, right, bottom]) = piece else {
+                // A space inside an underlined stretch does not end it.
+                if record.width > 0.0 && record.height > 0.0 {
+                    open = None;
+                }
+                continue;
+            };
             if record.width <= 0.0 || record.height <= 0.0 {
                 continue;
             }
-            let Some((posed, _)) = self.posed(at, record) else {
-                continue;
-            };
-            let Some([left, top, right, bottom]) = self.underline_piece(at, &posed, record) else {
-                continue;
-            };
             let piece = [
                 left - self.origin_x,
                 top - self.origin_y,
                 right - self.origin_x,
                 bottom - self.origin_y,
             ];
-            match lines.iter_mut().find(|(line, _)| *line == record.line) {
-                Some((_, bar)) => {
+            match bars.last_mut().filter(|_| open == Some(record.line)) {
+                Some(bar) => {
                     bar[0] = bar[0].min(piece[0]);
                     bar[1] = bar[1].min(piece[1]);
                     bar[2] = bar[2].max(piece[2]);
                     bar[3] = bar[3].max(piece[3]);
                 }
-                None => lines.push((record.line, piece)),
+                None => bars.push(piece),
             }
+            open = Some(record.line);
         }
-        lines.into_iter().map(|(_, bar)| bar).collect()
+        bars
     }
 
     /// The picture's width and height: tight around the drawn glyphs.
@@ -601,10 +686,10 @@ impl TextSource {
                 origin_x: self.origin_x,
                 origin_y: self.origin_y,
                 alpha,
-                shear: self.pattern.shear,
+                shear: self.patterns.get(at).map_or(0.0, |pattern| pattern.shear),
                 baseline: self.baseline(at, &record, &self.mesh.glyphs[at]),
             };
-            let bold = self.pattern.bold;
+            let bold = self.patterns.get(at).map_or(0.0, |pattern| pattern.bold);
             let reach = look.outline.as_ref().map_or(0.0, |outline| outline.width) + bold;
             if let Some(shadow) = &look.shadow {
                 let at = match shadows.iter().position(|(cast, _)| cast == shadow) {
@@ -1557,7 +1642,8 @@ mod tests {
         rich.content = r#"{"text":"AA","styles":[{"range":[0,1],"fill":{"content":{"solid":{"color":[1,0,0]}}}},{"range":[1,2],"bold":true}]}"#.to_owned();
         let (width, _, rgba) = picture(&rich);
         let plain = material("AA");
-        assert_eq!(width, picture(&plain).0);
+        // The second letter's range is bold, so the picture holds more.
+        assert!(width > picture(&plain).0);
         // The first letter is red; the second keeps the title's white.
         let (red, white) = (
             has(&rgba, [255, 0, 0, 255]),
@@ -1584,6 +1670,104 @@ mod tests {
         text.is_rich_text = true;
         text.content = format!(r#"{{"text":"AA","styles":[{styles}]}}"#);
         text
+    }
+
+    /// The columns holding a pixel of the underline row: the lowest row
+    /// with any ink in a title whose letters end above it.
+    fn underlined_columns(width: u32, height: u32, rgba: &[u8]) -> Vec<u32> {
+        let inked = |x: u32, y: u32| rgba[((y * width + x) * 4 + 3) as usize] > 128;
+        let row = (0..height)
+            .rev()
+            .find(|y| (0..width).any(|x| inked(x, *y)))
+            .expect("ink");
+        (0..width).filter(|x| inked(*x, row)).collect()
+    }
+
+    #[test]
+    fn a_range_is_bold_italic_or_underlined_on_its_own() {
+        let plain = picture(&rich(""));
+        // The first letter bold: more ink, and only in the left half.
+        let bold = picture(&rich(r#"{"range":[0,1],"bold":true}"#));
+        assert!(inked(&bold.2) > inked(&plain.2));
+        // The second letter italic: its top leans right, the first's
+        // stays, so the picture grows on the right only.
+        let italic = picture(&rich(r#"{"range":[1,2],"italic":true}"#));
+        assert!(italic.0 > plain.0);
+        assert_ne!(italic.2, plain.2);
+        // The first letter underlined: a bar under it and not the second.
+        let (width, height, rgba) = picture(&rich(r#"{"range":[0,1],"underline":true}"#));
+        assert!(height > plain.1);
+        let bar = underlined_columns(width, height, &rgba);
+        assert!(!bar.is_empty());
+        assert!(bar.iter().all(|x| *x <= width / 2), "{bar:?} of {width}");
+
+        // A title that is bold and underlined, with a range that is not.
+        let mut title = rich(r#"{"range":[1,2],"bold":false,"underline":false}"#);
+        title.bold_width = 0.04;
+        title.underline = true;
+        let mut whole = rich("");
+        whole.bold_width = 0.04;
+        whole.underline = true;
+        let (width, height, rgba) = picture(&title);
+        assert!(inked(&rgba) < inked(&picture(&whole).2));
+        let bar = underlined_columns(width, height, &rgba);
+        assert!(bar.iter().all(|x| *x <= width / 2), "{bar:?} of {width}");
+    }
+
+    #[test]
+    fn two_underlined_stretches_on_a_line_are_two_bars() {
+        let mut text = material("AAA");
+        text.is_rich_text = true;
+        text.content = r#"{"text":"AAA","styles":[{"range":[0,1],"underline":true},{"range":[2,3],"underline":true}]}"#
+            .to_owned();
+        let (width, height, rgba) = picture(&text);
+        let bar = underlined_columns(width, height, &rgba);
+        // The bar has a gap under the middle letter.
+        let gap = bar.windows(2).any(|pair| pair[1] - pair[0] > 8);
+        assert!(gap, "{bar:?}");
+    }
+
+    #[test]
+    fn a_bold_range_takes_the_family_bold_face_and_is_not_thickened() {
+        const OTHER: &[u8] = include_bytes!("../../font/fixtures/sample.otf");
+        struct Family;
+        impl crate::FaceSource for Family {
+            fn named(&self, _path: &str) -> Option<&[u8]> {
+                None
+            }
+
+            fn fallback(&self, _character: char, _emoji: bool) -> Option<&[u8]> {
+                None
+            }
+
+            fn styled(
+                &self,
+                _path: &str,
+                bold: bool,
+                _italic: bool,
+            ) -> Option<crate::StyledFace<'_>> {
+                bold.then_some(crate::StyledFace {
+                    bytes: OTHER,
+                    bold: true,
+                    italic: false,
+                })
+            }
+        }
+        let text = rich(r#"{"range":[1,2],"bold":true}"#);
+        let real =
+            TextSource::open_with_faces(TTF, None, &text, None, &segment(), &Family).unwrap();
+        let faces: Vec<usize> = real.records().iter().map(|record| record.face).collect();
+        assert_eq!(faces, [0, 1]);
+        // The bold face's letter is as wide as that face draws it: with no
+        // family face, the same letter of the title's face is thickened.
+        let drawn = TextSource::open(TTF, None, &text, &segment()).unwrap();
+        assert_eq!(drawn.records()[1].face, 0);
+        let plain = TextSource::open(OTHER, None, &material("A"), &segment()).unwrap();
+        assert_eq!(real.records()[1].width, plain.records()[0].width);
+        assert_ne!(
+            cpu(real.sample(Micros(1_000))),
+            cpu(drawn.sample(Micros(1_000)))
+        );
     }
 
     /// Whether a pixel of `color` is in the left half, and in the right.

@@ -21,7 +21,7 @@ use cutlass_model::MaterialText;
 
 use crate::TextError;
 use crate::bidi::visual_order;
-use crate::faces::{FaceSource, gather};
+use crate::faces::{FaceSource, Wanted, gather};
 use crate::linebreak::{Boundary, boundaries};
 use crate::shape::{Shaped, ShapedGlyph, shape_faces};
 
@@ -114,7 +114,7 @@ pub fn layout_with<'f>(
 ) -> Result<Layout, TextError> {
     let font = cutlass_font::read(bytes).map_err(TextError::Font)?;
     let words = crate::richtext::read(material)?;
-    let gathered = gather(font, &words.text, &words.runs, faces);
+    let gathered = gather(font, &words.text, &words.runs, Wanted::of(material), faces);
     layout_faces(&gathered.fonts, material, &|source| gathered.pick(source))
 }
 

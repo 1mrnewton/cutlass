@@ -43,6 +43,13 @@ pub struct RichStyle {
     pub strokes: Option<Vec<RichStroke>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadows: Option<Vec<RichShadow>>,
+    /// The range's letters are bold, or not, whatever the title is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline: Option<bool>,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
 }

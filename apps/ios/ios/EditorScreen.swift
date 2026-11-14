@@ -33,6 +33,7 @@ struct EditorScreen: View {
         case crop, opacity, fade
         case filters, adjust, clipEffects
         case stickers, draw, transitions, shapeStyle
+        case assistant
         /// Add text, or change the text clip with this id.
         case text(String?)
     }
@@ -118,6 +119,7 @@ struct EditorScreen: View {
         .onChange(of: model.selectedClip) { _, id in
             let stays: [Panel] = [
                 .text(nil), .effects, .ratio, .background, .filters, .stickers, .draw, .transitions,
+                .assistant,
             ]
             if id == nil, let open = panel, !stays.contains(open) { panel = nil }
             if id != nil, panel == .transitions { panel = nil }
@@ -134,6 +136,24 @@ struct EditorScreen: View {
 
     /// Export, top right as in the reference phone editor.
     private var exportButton: some View {
+        HStack(spacing: 4) {
+            Button {
+                model.selectedClip = nil
+                panel = panel == .assistant ? nil : .assistant
+            } label: {
+                Text("Ask")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Palette.text)
+                    .padding(.horizontal, 12)
+                    .frame(height: 30)
+            }
+            .disabled(model.isOpening)
+            .accessibilityLabel("Assistant")
+            exportPill
+        }
+    }
+
+    private var exportPill: some View {
         Button {
             model.pause()
             exporting = true
@@ -236,7 +256,9 @@ struct EditorScreen: View {
     /// root tools opened. Rust lists every bar.
     @ViewBuilder
     private var bottom: some View {
-        if panel == .effects {
+        if panel == .assistant {
+            AssistantPanel(model: model) { self.panel = nil }
+        } else if panel == .effects {
             EffectsPanel(model: model) { self.panel = nil }
                 .transition(.move(edge: .bottom))
         } else if panel == .ratio {
@@ -291,7 +313,7 @@ struct EditorScreen: View {
                 case .opacity: OpacityPanel(model: model) { self.panel = nil }
                 case .fade: FadePanel(model: model, clip: clip) { self.panel = nil }
                 case .text, .effects, .ratio, .background, .graphs, .animations,
-                     .filters, .adjust, .clipEffects, .stickers, .draw, .transitions, .shapeStyle:
+                     .filters, .adjust, .clipEffects, .stickers, .draw, .transitions, .shapeStyle, .assistant:
                     EmptyView()
                 }
             }

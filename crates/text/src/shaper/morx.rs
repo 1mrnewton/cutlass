@@ -30,6 +30,10 @@ fn word(entry: &[u8], at: usize) -> u16 {
         .map_or(0, |bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
 }
 
+/// A glyph a machine puts in place of another is not marked as put there:
+/// a character that draws nothing still draws nothing whatever glyph its
+/// machines give it, which is how these faces are read elsewhere.
+///
 /// Run every chain of the face's `morx` table over `glyphs`, which are in
 /// the order the text is stored. `backward` is the direction the run is
 /// read in.
@@ -65,7 +69,6 @@ pub(crate) fn apply(
                     for glyph in &mut glyphs {
                         if let Some(other) = lookup.value(glyph.id) {
                             glyph.id = other;
-                            glyph.substituted = true;
                         }
                     }
                 }
@@ -100,7 +103,8 @@ pub(crate) fn apply(
             }
         }
     }
-    glyphs.retain(|glyph| glyph.id != DELETED_GLYPH);
+    // A glyph a machine deleted stays, as the glyph that marks it: the
+    // caller takes those out, and gives their place in the text away.
     Ok(glyphs)
 }
 
@@ -133,15 +137,26 @@ fn walk(
     }
 }
 
+/// Give the glyphs from `start` up to `end` the earliest of their
+/// clusters, and with them the glyphs on either side that share a cluster
+/// with the first or the last of them: a mark that goes with the last
+/// part of a ligature stays with the ligature.
 fn merge(glyphs: &mut [Glyph], start: usize, end: usize) {
-    let end = end.min(glyphs.len());
-    if let Some(first) = glyphs
-        .get(start..end)
-        .and_then(|part| part.iter().map(|glyph| glyph.cluster).min())
-    {
-        for glyph in &mut glyphs[start..end] {
-            glyph.cluster = first;
-        }
+    let (mut start, mut end) = (start, end.min(glyphs.len()));
+    if end.saturating_sub(start) < 2 {
+        return;
+    }
+    let Some(first) = glyphs[start..end].iter().map(|glyph| glyph.cluster).min() else {
+        return;
+    };
+    while start > 0 && glyphs[start - 1].cluster == glyphs[start].cluster {
+        start -= 1;
+    }
+    while end < glyphs.len() && glyphs[end - 1].cluster == glyphs[end].cluster {
+        end += 1;
+    }
+    for glyph in &mut glyphs[start..end] {
+        glyph.cluster = first;
     }
 }
 
@@ -230,7 +245,6 @@ fn contextual(
                 && let Some(other) = substitute(tables, table, glyph.id).map_err(font_error)?
             {
                 glyph.id = other;
-                glyph.substituted = true;
             }
             Ok::<(), TextError>(())
         };
@@ -308,7 +322,6 @@ fn ligate(
                 let end = marked.last().map_or(place, |last| *last) + 1;
                 if let Some(glyph) = glyphs.get_mut(place) {
                     glyph.id = ligature;
-                    glyph.substituted = true;
                     glyph.ligated = true;
                 }
                 // The parts after the first are taken out of the run.
@@ -357,7 +370,6 @@ fn insert(
                 for step in 0..count {
                     let mut glyph = template.clone();
                     glyph.id = word_at(list, usize::from(first) + step).map_err(font_error)?;
-                    glyph.substituted = true;
                     glyphs.insert(from + step, glyph);
                 }
                 Ok(count)

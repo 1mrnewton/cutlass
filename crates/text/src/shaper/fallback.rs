@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+use cutlass_font::morx::DELETED_GLYPH;
 use cutlass_font::{Font, Segment};
 
 use super::buffer::Glyph;
@@ -143,12 +144,17 @@ pub(crate) fn place_marks(font: &Font<'_>, glyphs: &mut [Glyph], backward: bool,
     };
     let mut base = 0;
     while base < glyphs.len() {
-        if is_mark(&glyphs[base]) {
+        // A glyph a state machine deleted is no letter for a mark to
+        // sit on: the marks after it belong to the letter before it.
+        let gone = |glyph: &Glyph| glyph.id == DELETED_GLYPH;
+        if is_mark(&glyphs[base]) || gone(&glyphs[base]) {
             base += 1;
             continue;
         }
         let mut end = base + 1;
-        while end < glyphs.len() && (is_mark(&glyphs[end]) || glyphs[end].steps_over()) {
+        while end < glyphs.len()
+            && (is_mark(&glyphs[end]) || glyphs[end].steps_over() || gone(&glyphs[end]))
+        {
             end += 1;
         }
         if end - base >= 2 {

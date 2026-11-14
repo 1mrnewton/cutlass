@@ -14,15 +14,16 @@ mod arabic;
 pub(crate) mod buffer;
 mod fallback;
 mod indic;
+mod kern;
 mod morx;
 
-use cutlass_font::{Font, GlyphClass, LayoutTable, Tag, Variant};
+use cutlass_font::morx::DELETED_GLYPH;
+use cutlass_font::{Font, GlyphClass, KernPass, LayoutTable, Tag, Variant};
 
 use self::apply::{Engine, LookupRef, settle};
 use self::buffer::{Buffer, Glyph, Space};
 use crate::TextError;
 use crate::script::{Script, Shaping};
-use crate::shape::Pair;
 use crate::unicode::{compose, decompose, gc, mirror, props};
 
 /// The mask bit every glyph has.
@@ -125,7 +126,20 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
     // An old Hebrew face draws a letter with its point as one glyph.
     let pointed = run.script == Script(*b"Hebr")
         && !placing.is_some_and(|table| has_feature(table, &scripts, *b"mark"));
-    let syllabic = shaping == Shaping::Syllabic;
+    // A face made for Apple's layout engine makes its ligatures, forms and
+    // emoji sequences with its own machines, and those are used ahead of
+    // any OpenType substitutions it also has: they are what it was drawn
+    // for.
+    let machines = font.morx().is_some();
+    // Its extended kerning likewise places it, unless the face is shaped
+    // by both OpenType tables.
+    let kerx = font.kerx_passes();
+    let placing = placing.filter(|_| kerx.is_empty() || (font.gsub().is_some() && !machines));
+    // A script written by syllable is put in order and given its forms
+    // here, unless the face does that with its own machines: those are
+    // given the text as it is.
+    let by_syllable = shaping == Shaping::Syllabic;
+    let syllabic = by_syllable && !machines;
     let join = |first: char, second: char| {
         if syllabic {
             return indic::compose(first, second);
@@ -152,13 +166,14 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
         arabic::join(&mut glyphs);
     }
     let count = glyphs.len();
-    // A face made for Apple's layout engine makes its ligatures, forms and
-    // emoji sequences with its own machines, and those are used ahead of
-    // any OpenType substitutions it also has: they are what it was drawn
-    // for.
-    let machines = font.morx().is_some();
     if machines {
         glyphs = morx::apply(font, glyphs, backward)?;
+        // What the machines deleted leaves the run before a positioning
+        // table places it. The face's own kerning still reads those
+        // glyphs: its machines know them, and they go at the end.
+        if placing.is_some() {
+            remove(&mut glyphs, |glyph| glyph.id == DELETED_GLYPH);
+        }
         classify(font, &mut glyphs, true);
     }
     let mut buffer = Buffer::new(glyphs);
@@ -177,6 +192,9 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
     }
     let mut glyphs = buffer.into_glyphs();
     for glyph in &mut glyphs {
+        if glyph.id == DELETED_GLYPH {
+            continue;
+        }
         glyph.x_advance = i32::from(font.advance(glyph.id).map_err(TextError::Font)?);
         if let Some(space) = glyph.space {
             glyph.x_advance = space_width(font, space, glyph.x_advance);
@@ -208,17 +226,34 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
         }
         glyphs = buffer.into_glyphs();
     }
-    if !kerned && font.has_kern_table() {
+    // Kerning the positioning table did not do: the extended table's
+    // passes, or else the `kern` table's, as passes or as pairs.
+    let passes = if kerned && placing.is_some() {
+        &[]
+    } else if kerx.is_empty() {
+        font.kern_passes()
+    } else {
+        kerx
+    };
+    kern::apply(passes, &mut glyphs, backward);
+    if passes.is_empty() && !kerned && font.has_kern_table() {
         kern_pairs(font, &mut glyphs, backward);
     }
+    // Passes that are machines, or that move glyphs across the line, are
+    // how their face places its marks.
+    let by_kerx = !passes.is_empty() && !kerx.is_empty();
+    let machine = passes
+        .iter()
+        .any(|pass| matches!(pass, KernPass::Machine(_)));
+    let across = passes.iter().any(KernPass::cross_stream);
     // A mark takes no room of its own. In a face that places nothing, it
     // is drawn back over the letter before it.
-    let unplaced = placing.is_none();
+    let unplaced = placing.is_none() && !by_kerx && !across;
     for glyph in &mut glyphs {
         // The marks of a script written by syllable keep their advance:
         // its fonts place them by it. So do those of a script with shaping
         // of its own in a face that shapes by its own machines.
-        let kept = syllabic || (machines && shaping != Shaping::Plain);
+        let kept = by_syllable || (machines && shaping != Shaping::Plain) || by_kerx || machine;
         if glyph.is_mark() && !kept {
             if unplaced && !backward {
                 glyph.x_offset -= glyph.x_advance;
@@ -227,7 +262,7 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
         }
     }
     settle(&mut glyphs, backward);
-    if unplaced && !syllabic && !(machines && shaping != Shaping::Plain) {
+    if unplaced && !by_syllable {
         fallback::place_marks(font, &mut glyphs, backward, !backward);
     }
     // What draws nothing is taken out with the glyphs in the order they
@@ -235,7 +270,8 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
     if backward {
         glyphs.reverse();
     }
-    remove_undrawn(&mut glyphs);
+    remove(&mut glyphs, |glyph| glyph.id == DELETED_GLYPH);
+    remove(&mut glyphs, Glyph::steps_over);
     if backward != turned {
         glyphs.reverse();
     }
@@ -774,50 +810,26 @@ pub(super) fn lookups(
 /// does not kern: each pair of glyphs that are not marks, the adjustment
 /// shared between the two.
 fn kern_pairs(font: &Font<'_>, glyphs: &mut [Glyph], backward: bool) {
-    // The table's pairs are the glyphs as they are seen, left to right.
+    // The table's pairs are the glyphs as they are read.
     if backward {
         glyphs.reverse();
     }
-    let mut first = 0;
-    while first < glyphs.len() {
-        if glyphs[first].is_mark() || glyphs[first].steps_over() {
-            first += 1;
-            continue;
-        }
-        let Some(second) = (first + 1..glyphs.len())
-            .find(|index| !glyphs[*index].is_mark() && !glyphs[*index].steps_over())
-        else {
-            break;
-        };
-        let kerning = i32::from(font.kerning(glyphs[first].id, glyphs[second].id));
-        if kerning != 0 {
-            let half = kerning >> 1;
-            glyphs[first].x_advance += half;
-            glyphs[second].x_advance += kerning - half;
-            glyphs[second].x_offset += kerning - half;
-            if !backward {
-                glyphs[second].pair = Pair {
-                    back: second - first,
-                    first_advance: half,
-                    x_offset: kerning - half,
-                    advance: kerning - half,
-                };
-            }
-        }
-        first = second;
-    }
+    kern::pairs(glyphs, false, !backward, true, |left, right| {
+        i32::from(font.kerning(left, right))
+    });
     if backward {
         glyphs.reverse();
     }
 }
 
-/// Take out the characters that draw nothing, unless a lookup gave one a
-/// glyph. Its cluster goes to a neighbour, so no part of the text is left
+/// Take out the glyphs that are `gone`: the ones a machine deleted, and
+/// the characters that draw nothing, unless a lookup gave one a glyph. A
+/// glyph's cluster goes to a neighbour, so no part of the text is left
 /// without a glyph that stands for it.
-fn remove_undrawn(glyphs: &mut Vec<Glyph>) {
+fn remove(glyphs: &mut Vec<Glyph>, gone: impl Fn(&Glyph) -> bool) {
     let mut kept = 0;
     for index in 0..glyphs.len() {
-        if !glyphs[index].steps_over() {
+        if !gone(&glyphs[index]) {
             glyphs.swap(kept, index);
             kept += 1;
             continue;
@@ -892,6 +904,215 @@ mod tests {
             ligatures: true,
         };
         printed(&font, &run)
+    }
+
+    /// Check against Core Text where each glyph is drawn: the glyphs, and
+    /// each one's place from the start of the run. The cases are the file
+    /// `CUTLASS_SHAPE_CASES` names, as for [`harfbuzz_agrees`], and
+    /// `CUTLASS_CORETEXT` is the program built from
+    /// `tools/text-oracles/coretext.swift`. Core Text gives a pair's
+    /// kerning to its first glyph where this shaper shares it between the
+    /// two, so advances are not compared, only where the glyphs land.
+    #[test]
+    #[ignore = "runs the Core Text probe named in CUTLASS_CORETEXT"]
+    fn coretext_agrees() {
+        let (Ok(path), Ok(probe)) = (
+            std::env::var("CUTLASS_SHAPE_CASES"),
+            std::env::var("CUTLASS_CORETEXT"),
+        ) else {
+            return;
+        };
+        let cases = std::fs::read_to_string(path).expect("cases");
+        let mut wrong = Vec::new();
+        let mut total = 0;
+        for case in cases.lines().filter(|line| !line.is_empty()) {
+            let fields: Vec<&str> = case.split('\t').collect();
+            let [file, face, script, direction, escaped] = fields[..] else {
+                panic!("case: {case}");
+            };
+            let text = unescape(escaped);
+            let bytes = std::fs::read(file).expect("font");
+            let index: u32 = face.parse().expect("face");
+            let font = if bytes.starts_with(b"ttcf") {
+                cutlass_font::read_collection(&bytes, index)
+            } else {
+                cutlass_font::read(&bytes)
+            }
+            .expect("face");
+            let mut tag = [0_u8; 4];
+            tag.copy_from_slice(script.as_bytes());
+            let run = Run {
+                text: &text,
+                start: 0,
+                end: text.len(),
+                script: Script(tag),
+                backward: direction == "rtl",
+                ligatures: true,
+            };
+            let mut glyphs = shape_run(&font, &run).expect("shaped");
+            if run.backward {
+                glyphs.reverse();
+            }
+            let mut pen = 0;
+            let mut ours = Vec::new();
+            for glyph in &glyphs {
+                ours.push(format!(
+                    "{}@{},{}",
+                    glyph.id,
+                    pen + glyph.x_offset,
+                    glyph.y_offset
+                ));
+                pen += glyph.x_advance;
+            }
+            let output = std::process::Command::new(&probe)
+                .arg(file)
+                .arg(face)
+                .arg(
+                    text.chars()
+                        .map(|character| format!("U+{:04X}", u32::from(character)))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
+                .output()
+                .expect("probe");
+            let printed = String::from_utf8_lossy(&output.stdout);
+            // Core Text sets what a face lacks in another face. Such a
+            // case says nothing about this face, and is passed over.
+            let faces: std::collections::HashSet<&str> = printed
+                .trim()
+                .split('|')
+                .filter(|item| item.starts_with('{'))
+                .collect();
+            if faces.len() != 1 || glyphs.iter().any(|glyph| glyph.missing) {
+                continue;
+            }
+            // A glyph without its advance; the names of the faces left out.
+            let theirs: Vec<String> = printed
+                .trim()
+                .split('|')
+                .filter(|item| !item.starts_with('{'))
+                .filter_map(|item| item.split_once('+').map(|(place, _)| place.to_owned()))
+                .collect();
+            total += 1;
+            if ours != theirs {
+                let name = file.rsplit('/').next().unwrap_or(file);
+                wrong.push(format!(
+                    "{name}#{face} {script} {direction} {escaped}\n   ours   {}\n   theirs {}",
+                    ours.join("|"),
+                    theirs.join("|")
+                ));
+            }
+        }
+        let limit: usize = std::env::var("CUTLASS_SHAPE_SHOW")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(25);
+        assert!(
+            wrong.is_empty(),
+            "{} of {total} differ:\n{}",
+            wrong.len(),
+            wrong
+                .iter()
+                .take(limit)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    /// `text` shaped left to right in one of the kerning fixture faces.
+    fn kerned(face: &[u8], text: &str) -> String {
+        let font = cutlass_font::read(face).expect("fixture");
+        let run = Run {
+            text,
+            start: 0,
+            end: text.len(),
+            script: Script(*b"Latn"),
+            backward: false,
+            ligatures: true,
+        };
+        printed(&font, &run)
+    }
+
+    #[test]
+    fn a_kern_table_of_state_machines_moves_glyphs_along_and_across_the_line() {
+        const MACHINES: &[u8] = include_bytes!("../../../font/fixtures/kern-machine.ttf");
+        // Each line is what HarfBuzz 14.2 prints for the face.
+        // B after A: the machine remembers both and moves each back.
+        assert_eq!(kerned(MACHINES, "AB"), "[1=0@-50,0+550|2=1@-100,0+500]");
+        // Three glyphs remembered and two values in the table: nothing
+        // is moved, and nothing is read past the table.
+        assert_eq!(
+            kerned(MACHINES, "AABC"),
+            "[1=0+600|1=1+600|2=2+600|4=3+600]"
+        );
+        // An acute after B is lifted, and the letter after it is back on
+        // the line, where the pairs by class then kern it.
+        assert_eq!(kerned(MACHINES, "B\u{301}"), "[2=0+600|3=0@0,300+0]");
+        assert_eq!(
+            kerned(MACHINES, "B\u{301}CA"),
+            "[2=0+600|3=0@0,300+0|4=3+560|1=4@-40,0+560]"
+        );
+        // Pairs by offset and by compact classes, one after the other.
+        assert_eq!(
+            kerned(MACHINES, "CAC"),
+            "[4=0+560|1=1@-40,0+540|4=2@-20,0+580]"
+        );
+        assert_eq!(
+            kerned(MACHINES, "ACAB\u{301}B"),
+            "[1=0+580|4=1@-20,0+540|1=2@-40,0+560|2=3+600|3=3@0,300+0|2=6+600]"
+        );
+    }
+
+    #[test]
+    fn an_extended_kerning_table_kerns_pairs_and_sets_marks_on_anchors() {
+        const EXTENDED: &[u8] = include_bytes!("../../../font/fixtures/kerx.ttf");
+        // Sorted pairs, a machine, and a mark set with its anchor on its
+        // letter's: as HarfBuzz 14.2 prints them.
+        assert_eq!(kerned(EXTENDED, "AB"), "[1=0+570|2=1@-30,0+570]");
+        assert_eq!(kerned(EXTENDED, "BC"), "[2=0+600|4=1@-70,0+530]");
+        assert_eq!(kerned(EXTENDED, "A\u{301}"), "[1=0+600|3=0@-150,100+0]");
+        // Pairs by class, whose values are byte offsets into the array:
+        // A after C is 90 closer, as Core Text reads such a table.
+        // HarfBuzz 14 reads another cell and leaves the pair alone.
+        assert_eq!(kerned(EXTENDED, "CA"), "[4=0+555|1=1@-45,0+555]");
+        assert_eq!(
+            kerned(EXTENDED, "BCA"),
+            "[2=0+600|4=1@-70,0+485|1=2@-45,0+555]"
+        );
+        // These tables know nothing of marks: a pair is two glyphs side
+        // by side, so A and B with an acute between them are not kerned,
+        // as in Core Text. HarfBuzz steps over the mark and kerns them.
+        assert_eq!(
+            kerned(EXTENDED, "A\u{301}B"),
+            "[1=0+600|3=0@-150,100+0|2=3+600]"
+        );
+        // Two marks on one letter each meet its anchor.
+        assert_eq!(
+            kerned(EXTENDED, "A\u{301}\u{301}"),
+            "[1=0+600|3=0@-150,100+0|3=0@-150,100+0]"
+        );
+    }
+
+    #[test]
+    fn a_kerning_machine_that_never_moves_on_is_stopped() {
+        const STUCK: &[u8] = include_bytes!("../../../font/fixtures/kern-stuck.ttf");
+        let started = std::time::Instant::now();
+        let long = "AB".repeat(2_000);
+        let font = cutlass_font::read(STUCK).expect("fixture");
+        let run = Run {
+            text: &long,
+            start: 0,
+            end: long.len(),
+            script: Script(*b"Latn"),
+            backward: false,
+            ligatures: true,
+        };
+        let glyphs = shape_run(&font, &run).expect("shaped");
+        assert_eq!(glyphs.len(), 4_000);
+        // Each glyph was read a few times and no more.
+        assert!(glyphs.iter().all(|glyph| glyph.x_advance > -200_000));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]

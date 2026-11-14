@@ -1,14 +1,16 @@
 # cutlass-vp9
 
-A VP9 decoder and a small profile 0 VP9 encoder. The crate is safe Rust
-(`#![forbid(unsafe_code)]`), depends only on `cutlass-decode` and
-`cutlass-encode`, and links no C library.
+A VP9 decoder and encoder in Rust. The decoder takes every profile (0–3,
+8/10/12-bit, 4:2:0/4:2:2/4:4:0/4:4:4, sRGB) and matches FFmpeg's `vp9`
+decoder sample for sample. The encoder writes profile 0 (8-bit 4:2:0) with
+rate-distortion searched partitions and modes, golden frames, tile columns on
+threads, and one-pass rate control. The crate is safe Rust
+(`#![forbid(unsafe_code)]`); its vector kernels live in `cutlass-simd`
+(`cutlass_simd::vp9`), where each `unsafe` block is one call into a
+`#[target_feature]` kernel with a scalar twin and a test.
 
-**The desktop app does not use this crate.** The app lists it as a dependency
-but never registers it, so Cutlass does not decode or encode VP9 with it today.
-The crate registers on `VideoDecodeFactory` and `VideoEncodeFactory`, and the
-app builds a `DecodeFactory` and an `EncodeFactory`; there is no opener for
-those two yet.
+> Status: work in progress on the `vp9` branch. Numbers below are from this
+> branch and are refreshed as the work goes on.
 
 ## What it supports
 
@@ -21,67 +23,105 @@ Decoder (`Vp9Decoder`, over `Decoder`):
 | 2 | 10-bit and 12-bit 4:2:0 |
 | 3 | 10-bit and 12-bit 4:2:2, 4:4:0, 4:4:4, and sRGB |
 
-- Key, inter and intra-only frames, hidden frames (no picture comes out),
-  `show_existing_frame`, and a superframe as one packet of several frames.
-- Tiles, eight reference slots, scaled references, segmentation, the loop
-  filter, compound prediction, probability adaptation, error resilient and
-  frame parallel modes, lossless frames.
-- Each `VideoOutput` carries a planar `VideoFrame` at the coded width and
-  height with the packet's `pts`, `duration` and `timescale`. Samples above 8
-  bits are little-endian `u16`. The frame carries the range, the render size, and
-  named color for BT.601, BT.709, BT.2020 and sRGB; other color spaces are
-  published as unspecified.
+- Key, inter and intra-only frames, hidden frames, `show_existing_frame`,
+  superframes, tiles, eight reference slots, scaled references (and
+  mid-stream size changes), segmentation, the loop filter with deltas,
+  compound prediction, switchable filters, probability adaptation, error
+  resilient and frame parallel modes, lossless frames.
+- Threads: frame threads (one frame's reconstruction overlaps the next one's
+  parse) and tile-column threads for the parse. `Vp9Decoder::open` uses one
+  thread per core; the frames still being made when `push` returns come out
+  of later pushes or `drain`, as with FFmpeg's frame threads.
 
-Refused by the decoder:
+Encoder (`Vp9Encoder`, `EngineEncoder`):
 
-- A side above 16832 or more than 35,651,584 luma samples: `CodecError::Limit`,
-  at `open` and again for each frame.
-- A reference whose size ratio to the frame is not legal:
-  `CodecError::Unsupported`.
-- RGB in profile 0 or 2, a set reserved bit, a bad frame marker or sync code,
-  a superframe index that does not add up: `CodecError::Malformed`.
-- An empty frame: `CodecError::InvalidApi`.
+- Profile 0, any size up to 65536×65536 (odd sizes too), quantizer index 0
+  (lossless, Walsh-Hadamard) to 255.
+- Every partition from 64×64 to 8×8 (square), all ten intra modes,
+  NEAREST/NEAR/ZERO/NEW inter modes on LAST and GOLDEN, sub-sample motion
+  (to eighths where the vector may be), per-block transform size
+  (`TX_MODE_SELECT`, 4×4 to 32×32 with the intra ADST types), skip, the loop
+  filter (libvpx's level from the quantizer), probability adaptation.
+- A golden frame every 12 frames, key frames every `keyint` (240) frames;
+  key and golden frames take finer quantizers.
+- Speeds 0–9 (`Vp9Options::speed`, default 5). Up to 6 every superblock is
+  searched by trial coding; 7 and up code inter frames in one pass.
+- Threads: tile columns, each on its own thread (`Vp9Options::threads`, 0 =
+  one per core), up to the tile columns the width allows.
+- Rate: a fixed quantizer (`with_quantizer`, or bitrate 0) or a bitrate,
+  per frame type, from a model of bits against quantizer step.
 
-A frame that fails leaves the references and probabilities as they were. When
-one frame of a superframe fails, the whole packet is undone.
+## How it works
 
-Encoder (`Vp9Encoder`):
+### Decoder (`src/dec`, `src/decode.rs`)
 
-- Input is `Yuv420p` only; another format is `Unsupported`. Both sides must be
-  multiples of 8 (`Unsupported` otherwise) and at most 4096 (`Limit`).
-- One packet per picture, no delay. A key frame every 30 pictures, inter
-  frames between them that predict from the previous picture.
-- `CodecParams::bitrate` of 0 keeps quantizer index 32. A positive bitrate
-  moves the quantizer between 8 and 208 to stay near the target, and then each
-  input needs a positive `duration` and a `timescale` (`InvalidApi` if not).
-  `Vp9Encoder::with_quantizer` fixes the index; 0 is lossless.
+- `dec::bool`: the bool decoder, a 64-bit window refilled a word at a time,
+  normalized with `leading_zeros`.
+- `dec::parse`: one superblock row of one tile: modes, motion vectors
+  (libvpx's candidate search with its early exits), coefficient tokens. It
+  writes a compact syntax record (`dec::syntax`) and the loop filter masks,
+  and counts symbols for adaptation.
+- `dec::recon`: prediction and residual from that record: intra edges,
+  8-tap motion compensation (scaled references too), inverse transforms.
+- `dec::lf`: the loop filter of a superblock row, in libvpx's mask order,
+  one row behind reconstruction.
+- `dec::mod`: a frame's parse, all tile columns at once on threads or a row
+  at a time; its reconstruction on a worker that publishes finished rows
+  (`cutlass_simd::vp9::frame::SharedFrame`), so the next frame's motion
+  compensation waits only for the rows it reads.
+- `dsp`: transforms, intra predictors, motion compensation and the loop
+  filter, generic over 8 and 16-bit samples; the 8-bit hot paths call the
+  AVX2 kernels in `cutlass_simd::vp9` (`mc`, `lf`), and the transforms run
+  in lanes compiled for AVX2 (`cutlass_simd::vp9::wide`).
+
+### Encoder (`src/enc`)
+
+- `enc::mod`: a frame. It writes the headers, parses them back with the
+  decoder's own parser, codes the tile columns (on threads), merges them,
+  filters, and commits the frame through `Decoder::commit` — so the encoder
+  predicts from exactly the references, motion and probabilities a decoder
+  holds, and its reconstruction is the decoder's (`dec::recon`, `dec::lf`).
+- `enc::tile`: a tile column. For each superblock, `rd_node` searches the
+  partition: each square is trial-coded whole (`best_block`: its candidate
+  modes coded and costed, the cheapest kept) and split, with snapshots of
+  every context and sample the coding touches, and SSE + λ·bits deciding.
+  The winner is then coded for real. Coefficients are quantized by
+  rate-distortion (`rd_levels`: each level the cheaper of the two nearest
+  in distortion plus λ times its token bits, then the end of block placed by
+  cost); inter blocks drop their residual when it does not pay.
+- `enc::tx`: forward transforms, the exact inverses of the decoder's,
+  measured from it.
+- `enc::api`: the codec traits, rate control, frame types.
+- `dsp::sad`: SAD, SSE and bilinear sub-sample SAD, written over fixed-width
+  rows so they compile to `vpsadbw` under AVX2.
 
 ## Using it
-
-Public items: `Vp9Decoder`, `Vp9Encoder`, `Decoder`, `register_decoders`,
-`register_encoders`. `Vp9Decoder` implements `VideoDecoder` and `Vp9Encoder`
-implements `VideoEncoder`; both have an empty `drain` and a `cancel_flag` that
-`push` checks. `Decoder::decode` takes the bytes of one frame and returns the
-planes of a shown frame, or `None` for a hidden one.
 
 ```rust
 use cutlass_decode::video::VideoDecoder;
 use cutlass_decode::{CodecId, CodecParams, Packet};
 use cutlass_vp9::Vp9Decoder;
 
-let params = CodecParams::video(CodecId::Vp9, 32, 32);
+let params = CodecParams::video(CodecId::Vp9, 1920, 1080);
 let mut decoder = Vp9Decoder::open(&params)?;
-let packet = Packet::video(frame_bytes, 0, 1, 30, true);
-for output in decoder.push(&packet)? {
-    let (width, height) = (output.frame.width, output.frame.height);
+for output in decoder.push(&Packet::video(frame_bytes, 0, 1, 30, true))? {
+    // output.frame: planar picture
+}
+for output in decoder.drain()? {
+    // the frames the threads still held
 }
 ```
 
-`examples/roundtrip.rs` decodes the committed 32x32 key frame this way:
+```rust
+use cutlass_vp9::{Vp9Encoder, Vp9Options};
 
+let mut encoder = Vp9Encoder::with_options(1280, 720, Vp9Options { qindex: 120, speed: 5, ..Default::default() })?;
+let (bytes, key) = encoder.encode_planes([(y, 1280), (u, 640), (v, 640)], 1.0 / 30.0)?;
 ```
-cargo run --release -p cutlass-vp9 --example roundtrip
-```
+
+Examples: `examples/roundtrip.rs` (decode a committed key frame) and
+`examples/vp9enc.rs` (raw 4:2:0 to IVF:
+`vp9enc in.yuv 1280 720 out.ivf q=120 speed=5 threads=4`).
 
 ## How it is tested
 
@@ -89,90 +129,57 @@ cargo run --release -p cutlass-vp9 --example roundtrip
 cargo test -p cutlass-vp9
 ```
 
-Run everywhere, with no outside tool:
+- Decoder: committed streams against stored FFmpeg output, header and bool
+  coder tests, a fuzzer (`decoder_fuzz_does_not_panic`), and `src/prove.rs`,
+  which encodes streams with FFmpeg's libvpx and compares against
+  `ffmpeg -c:v vp9` when those tools are present.
+- `tools/corpus.sh` writes 29 libvpx streams (profiles 0–3, tiles,
+  lossless, odd sizes, AQ, error resilient, frame parallel, realtime, GBR,
+  1080p noise, a mid-stream resize) and `tools/check.sh` compares every
+  frame with FFmpeg: all 29 match, threaded and on one core.
+- Encoder: every test decodes the encoder's output with this decoder and
+  requires the picture to equal the encoder's own reconstruction (key,
+  inter and golden frames, odd sizes, lossless, four tile columns on four
+  threads, two columns past 4096 samples); FFmpeg decodes the same streams
+  to the same pictures.
 
-- Committed profile 0 streams in `fixtures/` (pictures of 32x32 to 64x64),
-  each compared with stored YUV from FFmpeg's `vp9` decoder or libvpx: key
-  frames, error resilient inter frames, inter frames that adapt probabilities,
-  an alt-ref sequence, references scaled by 1/2 and 4/5, segmentation, and a
-  52x52 pair with the loop filter.
-- Encoder round trips through this decoder: lossless output equals the source,
-  lossy output stays above PSNR bounds, and 30 frames at 500 kbps stay within
-  0.70 to 1.25 of the target.
-- Header parsing, the bool coder, the transforms, the scaled motion
-  compensation steps, and the decoder and encoder lifecycle (reset, cancel,
-  a failed frame keeps the references).
-- `decoder_fuzz_does_not_panic` mutates encoded frames for 2 seconds.
-  `VP9_FUZZ_SECS` and `VP9_FUZZ_SEED` change the time and the seed.
+## Speed and size against FFmpeg
 
-Skipped unless tools or files are present (the test prints `skipped` and
-passes):
+Machine: the 4-core x86-64 VM this branch is developed on (AVX2),
+FFmpeg 7 with libvpx. Timings are medians of whole-process runs.
 
-- `independent_decoders_match_our_yuv` gives the encoder's output to FFmpeg's
-  `vp9` and `libvpx-vp9` decoders, and to GStreamer when it is installed.
-  With `VP9_REQUIRE_ORACLES` set, a missing tool fails the test instead.
-- The 24 tests in `src/prove.rs` encode real videos with FFmpeg's libvpx and
-  compare this decoder with `ffmpeg -c:v vp9`. They cover profiles 1 to 3, 10
-  and 12 bits, several tile columns and rows, the interpolation filters,
-  frame parallel mode, loop filter and segment settings, a width above 4096,
-  3840x2160, and the official level 1 streams. They need `ffmpeg` and a local
-  folder of sample videos that is not in the repository, so they do not run in
-  CI. Three of them also compile `tests/roi_map.c` against the system libvpx
-  headers with `cc`.
-- None of these skipped tests were run for this description.
+**Decode** (`tools/bench.py`): 300 frames of 1920×1080 written by libvpx.
 
-`release_320x240_meets_realtime_decode` only measures in a release build and
-fails below 30 frames per second.
+| Threads | Cutlass | FFmpeg `vp9` | Ratio |
+| --- | ---: | ---: | ---: |
+| 1 core | 3.44 s | 2.16 s | 1.59 |
+| 4 | 1.26 s | 0.98 s | 1.29 |
 
-## Speed against FFmpeg
+(Started at 38.8 s on one core: 18× faster so far.)
 
-Measured on 10 November 2026 at commit `ed0743d2`, on an Apple M5 Pro (18 cores, 48 GB) running macOS 27.0.1, against FFmpeg 8.1.1. Built with `cargo build --release` and rustc 1.99.1.
+**Encode** (`tools/encbench.sh`, BD-rate with `tools/bdrate.py`): 30 frames
+of 1280×720 (a pan over a detailed picture with film grain), 4 threads on
+both sides (libvpx with `-row-mt 1 -tile-columns 2`). BD-rate is the bitrate
+change at equal PSNR-Y; negative is smaller files.
 
-**Decode, vp9.** Input: 600 frames of 1920×1080 at 30 frames a second (9.7 MB), written by FFmpeg with `-c:v libvpx-vp9 -b:v 3M -deadline good -cpu-used 4 -row-mt 1`.
-
-|  | Cutlass | FFmpeg (`vp9`) |
-| --- | ---: | ---: |
-| Wall time | 17.91 s | 1.80 s |
-| Speed | 34 frames/s | 333 frames/s |
-| CPU time | 17.87 s | 1.79 s |
-| Peak memory | 57 MB | 27 MB |
-| Threads allowed | 1 | 1 |
-
-Cutlass is **9.9× slower** than FFmpeg here. Both decoders produced exactly the same samples.
-
-The encoder was not measured. The decoder is timed from an IVF file, because the desktop app does not register this crate.
-
-How it was measured: both sides get the same input from disk, do all of the work, and throw the result away. Each side is a whole process timed with `/usr/bin/time -l`, start-up included, run five times in turn; the tables show the median run. FFmpeg is given as many threads as the Rust code used. The Rust side is [`tools/media-bench`](../../../tools/media-bench), which registers only the Rust codecs. For decoding and packet reading the FFmpeg side is [`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c), which calls libavformat and libavcodec directly; for encoding it is the `ffmpeg` command. The pictures come from a 4K street scene scaled to 1920×1080, and the sound from a music recording.
-
-To run it again: `cargo build --release -p media-bench`, then `python3 scripts/bench_media.py --video <clip> --audio <song> --work <folder>`.
+| Cutlass | libvpx-vp9 | BD-rate | Time (Cutlass / libvpx) |
+| --- | --- | ---: | --- |
+| speed 9 | realtime, cpu-used 8 | −65% | 0.46–0.74 s / 0.27–0.37 s |
+| speed 5 | realtime, cpu-used 8 | −72% | 1.4–4.0 s / 0.27–0.37 s |
+| speed 5 | good, cpu-used 1 | +26% | 1.4–4.0 s / 1.2–1.7 s |
 
 ## Limits and gaps
 
-- Not registered in the desktop app, and it has no opener for the app's
-  `DecodeFactory` and `EncodeFactory`.
-- The workspace has no WebM or Matroska reader yet (that crate is a
-  placeholder). The tests read IVF.
-- The decoder uses one thread; tiles are decoded in order.
-- The decoder copies each picture several times: reconstruction to packed
-  bytes, packed bytes back to a reference, and again into the output frame.
-- Everything beyond 8-bit 4:2:0 at small sizes is compared with another
-  decoder only by the skipped tests above. Whether any committed fixture uses
-  compound prediction was not verified.
-- A packet whose last byte looks like a superframe marker but whose index does
-  not match is `Malformed`; it is not retried as a single frame.
-- SMPTE 240 and the reserved color spaces are published as unspecified.
-- The encoder emits profile 0 only: every frame shown and error resilient,
-  one tile, DC intra prediction, integer motion from the previous picture,
-  transforms no larger than 8x8, no loop filter, no segmentation, no compound
-  prediction, no hidden or show-existing frames, no superframes. Quantizer 0
-  uses the 4x4 Walsh-Hadamard transform.
-- The encoder always writes color space 1 (BT.601) and studio range, whatever
-  the input frame says.
+- Not registered in the desktop app (the app has no VP9 opener yet). The
+  crate registers on the video factories and offers `register_engine_encoders`
+  for the engine's `EncodeFactory`.
+- The encoder writes profile 0 only, no alt-ref (hidden) frames, no compound
+  prediction, no 4×4 or rectangular partitions, no segmentation, no
+  probability updates in the compressed header, EIGHTTAP filters only.
+- The encoder always writes BT.601, studio range.
 
 ## Specifications
 
 - VP9 Bitstream & Decoding Process Specification, version 0.7.
-- libvpx was read where the specification text disagrees with the streams
-  libvpx writes: intra frames use the key frame partition probabilities, the
-  partition context uses the libvpx lookup values, and loop filter deltas are
-  ignored when deltas are disabled. No libvpx code is compiled into the crate.
+- libvpx was read where the specification and libvpx's streams disagree;
+  no libvpx code is compiled into the crate.

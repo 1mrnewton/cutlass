@@ -17,6 +17,7 @@ use cutlass_encode::{VideoEncoder, VideoInput};
 
 use crate::dec::H264Decoder;
 use crate::nal;
+use crate::subpel::{MAX_BLOCK, Subpel};
 use crate::tables::{CABAC_MN, RANGE_LPS, TRANS_LPS, TRANS_MPS};
 
 pub struct H264Encoder {
@@ -66,6 +67,8 @@ struct Planes {
     y: Vec<u8>,
     u: Vec<u8>,
     v: Vec<u8>,
+    /// Half-sample luma for the motion search, shared by clones of this picture.
+    sub: Arc<Subpel>,
 }
 
 pub fn register_encoders(factory: &mut cutlass_encode::EncodeFactory) {
@@ -324,7 +327,9 @@ impl H264Encoder {
                     what: "reference picture",
                 });
             };
-            self.anchor = Some(Planes { y, u, v });
+            // The planes are the whole macroblocks, as decoders predict from.
+            let sub = Arc::new(Subpel::new(&y, self.coded_w, self.coded_h));
+            self.anchor = Some(Planes { y, u, v, sub });
         }
         Ok(())
     }
@@ -764,10 +769,8 @@ fn write_b(
             w: 16,
             h: 16,
         };
-        let mv0 = search_area(src, past, area, pred0);
-        let mv1 = search_area(src, future, area, pred1);
-        let cost0 = sad_mv(src, past, area, mv0);
-        let cost1 = sad_mv(src, future, area, mv1);
+        let (mv0, cost0) = search_area(src, past, area, pred0);
+        let (mv1, cost1) = search_area(src, future, area, pred1);
         let cost_bi = sad_bi(src, past, future, area, mv0, mv1);
         let (kind, use0, use1) = if cost_bi <= cost0 && cost_bi <= cost1 {
             (3u8, Some(mv0), Some(mv1))
@@ -778,44 +781,19 @@ fn write_b(
         };
         let blocks0 = [use0.unwrap_or([0, 0]); 16];
         let blocks1 = [use1.unwrap_or([0, 0]); 16];
-        let residual = if kind == 3 {
-            bi_residual(src, past, future, (mx, my), &blocks0, &blocks1, qp)
+        let size = (src.width, src.height);
+        let (pred, residual) = if kind == 3 {
+            let pred = predict_bi(past, future, size, (mx, my), &blocks0, &blocks1);
+            let residual = bi_residual(src, past, future, &pred, (mx, my), &blocks0, &blocks1, qp);
+            (pred, residual)
         } else if kind == 2 {
-            uni_residual(src, future, mx, my, &blocks1, qp)
+            let pred = predict_luma(future, size, (mx, my), &blocks1);
+            (pred, uni_residual(src, future, &pred, mx, my, &blocks1, qp))
         } else {
-            uni_residual(src, past, mx, my, &blocks0, qp)
+            let pred = predict_luma(past, size, (mx, my), &blocks0);
+            (pred, uni_residual(src, past, &pred, mx, my, &blocks0, qp))
         };
-        let picked = if kind == 3 {
-            pick_luma_bi(
-                (&past.y, &future.y),
-                src.y,
-                (src.width, src.height),
-                (mx, my),
-                (&blocks0, &blocks1),
-                &residual.luma,
-                qp,
-            )
-        } else if kind == 2 {
-            pick_luma_uni(
-                &future.y,
-                src.y,
-                (src.width, src.height),
-                (mx, my),
-                &blocks1,
-                &residual.luma,
-                qp,
-            )
-        } else {
-            pick_luma_uni(
-                &past.y,
-                src.y,
-                (src.width, src.height),
-                (mx, my),
-                &blocks0,
-                &residual.luma,
-                qp,
-            )
-        };
+        let picked = pick_luma(&pred, src.y, size, (mx, my), &residual.luma, qp);
         let luma = picked.cbp;
         let chroma = chroma_pattern(&residual);
         cab.decision(24 + skip_context(&skipped, mb_w, mx, my), 0);
@@ -1028,6 +1006,17 @@ fn sad_bi(
     mv0: [i16; 2],
     mv1: [i16; 2],
 ) -> i32 {
+    let mut a = [0u8; MAX_BLOCK * MAX_BLOCK];
+    let mut b = [0u8; MAX_BLOCK * MAX_BLOCK];
+    if inside(src, area)
+        && past.sub.block(bounds(area), mv0, &mut a).is_some()
+        && future.sub.block(bounds(area), mv1, &mut b).is_some()
+    {
+        for (p, &q) in a.iter_mut().zip(&b) {
+            *p = ((u16::from(*p) + u16::from(q) + 1) >> 1) as u8;
+        }
+        return sad_rows(src, area, &a);
+    }
     let mut cost = 0i32;
     for row in 0..area.h {
         for col in 0..area.w {
@@ -1054,32 +1043,19 @@ fn sad_bi(
     cost
 }
 
+#[allow(clippy::too_many_arguments)]
 fn bi_residual(
     src: &Source<'_>,
     past: &Planes,
     future: &Planes,
+    pred: &MbPred,
     at: (u32, u32),
     mv0: &[[i16; 2]; 16],
     mv1: &[[i16; 2]; 16],
     qp: i32,
 ) -> Residual {
     let (mx, my) = at;
-    let mut luma = [[0i32; 16]; 16];
-    let x0 = mx * 16;
-    let y0 = my * 16;
-    for (i, levels) in luma.iter_mut().enumerate() {
-        let bx = blk_x(i);
-        let by = blk_y(i);
-        let x = x0 + bx as u32 * 4;
-        let y = y0 + by as u32 * 4;
-        let a = moved_luma(&past.y, src.width, src.height, x, y, mv0[by * 4 + bx]);
-        let b = moved_luma(&future.y, src.width, src.height, x, y, mv1[by * 4 + bx]);
-        let mut pred = [0u8; 16];
-        for sample in 0..16 {
-            pred[sample] = crate::recon::avg(a[sample], b[sample]);
-        }
-        *levels = quant4(&pred, src.y, src.width, src.height, x, y, qp);
-    }
+    let luma = inter4(pred, src.y, (src.width, src.height), at, qp);
     let (cb, cb_ac) = chroma_bi(
         &past.u,
         &future.u,
@@ -1110,19 +1086,13 @@ fn bi_residual(
 fn uni_residual(
     src: &Source<'_>,
     reference: &Planes,
+    pred: &MbPred,
     mx: u32,
     my: u32,
     mv: &[[i16; 2]; 16],
     qp: i32,
 ) -> Residual {
-    let luma = inter4(
-        &reference.y,
-        src.y,
-        (src.width, src.height),
-        (mx, my),
-        mv,
-        qp,
-    );
+    let luma = inter4(pred, src.y, (src.width, src.height), (mx, my), qp);
     let (cb, cb_ac) = chroma_inter(
         &reference.u,
         src.u,
@@ -1206,14 +1176,8 @@ fn write_p(
             continue;
         }
         let (kind, blocks) = choose_partition(src, reference, &motion, mb_w, mx, my);
-        let luma_blocks = inter4(
-            &reference.y,
-            src.y,
-            (src.width, src.height),
-            (mx, my),
-            &blocks,
-            qp,
-        );
+        let pred = predict_luma(reference, (src.width, src.height), (mx, my), &blocks);
+        let luma_blocks = inter4(&pred, src.y, (src.width, src.height), (mx, my), qp);
         let (cb_levels, cb_ac) = chroma_inter(
             &reference.u,
             src.u,
@@ -1237,12 +1201,11 @@ fn write_p(
             cb_ac,
             cr_ac,
         };
-        let picked = pick_luma_uni(
-            &reference.y,
+        let picked = pick_luma(
+            &pred,
             src.y,
             (src.width, src.height),
             (mx, my),
-            &blocks,
             &residual.luma,
             qp,
         );
@@ -1330,14 +1293,8 @@ fn inter_empty(
     qp: i32,
 ) -> bool {
     let blocks = [mv; 16];
-    let luma = inter4(
-        &reference.y,
-        src.y,
-        (src.width, src.height),
-        (mx, my),
-        &blocks,
-        qp,
-    );
+    let pred = predict_luma(reference, (src.width, src.height), (mx, my), &blocks);
+    let luma = inter4(&pred, src.y, (src.width, src.height), (mx, my), qp);
     let (cb, cb_ac) = chroma_inter(
         &reference.u,
         src.u,
@@ -1484,7 +1441,14 @@ struct Area {
 }
 
 /// Integer diamond of radius 1, for up to 16 steps, then half-pel and quarter-pel.
-fn search_area(src: &Source<'_>, reference: &Planes, area: Area, predicted: [i16; 2]) -> [i16; 2] {
+/// The vector found and its SAD. A step never goes back to where it came
+/// from: that position already cost more than the one it left for.
+fn search_area(
+    src: &Source<'_>,
+    reference: &Planes,
+    area: Area,
+    predicted: [i16; 2],
+) -> ([i16; 2], i32) {
     let mut bx = (i32::from(predicted[0]) >> 2).clamp(-SEARCH, SEARCH);
     let mut by = (i32::from(predicted[1]) >> 2).clamp(-SEARCH, SEARCH);
     let mut best = sad_qpel(src, reference, area, bx * 4, by * 4);
@@ -1494,12 +1458,13 @@ fn search_area(src: &Source<'_>, reference: &Planes, area: Area, predicted: [i16
         bx = 0;
         by = 0;
     }
+    let mut came = (0, 0);
     for _ in 0..SEARCH {
         let mut step = None;
         for (dx, dy) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
             let x = bx + dx;
             let y = by + dy;
-            if x.abs() > SEARCH || y.abs() > SEARCH {
+            if (dx, dy) == came || x.abs() > SEARCH || y.abs() > SEARCH {
                 continue;
             }
             let cost = sad_qpel(src, reference, area, x * 4, y * 4);
@@ -1511,15 +1476,19 @@ fn search_area(src: &Source<'_>, reference: &Planes, area: Area, predicted: [i16
         let Some((x, y)) = step else {
             break;
         };
+        came = (bx - x, by - y);
         bx = x;
         by = y;
     }
-    let (qx, qy) = refine_subpel(src, reference, area, (bx * 4, by * 4), (2, 2));
-    let (qx, qy) = refine_subpel(src, reference, area, (qx, qy), (1, 2));
-    [
-        i16::try_from(qx).unwrap_or(0),
-        i16::try_from(qy).unwrap_or(0),
-    ]
+    let (qx, qy, best) = refine_subpel(src, reference, area, (bx * 4, by * 4, best), (2, 2));
+    let (qx, qy, best) = refine_subpel(src, reference, area, (qx, qy, best), (1, 2));
+    (
+        [
+            i16::try_from(qx).unwrap_or(0),
+            i16::try_from(qy).unwrap_or(0),
+        ],
+        best,
+    )
 }
 
 /// Half-pel steps are 2 quarter-units. Quarter-pel steps are 1. Same four-point diamond.
@@ -1527,18 +1496,18 @@ fn refine_subpel(
     src: &Source<'_>,
     reference: &Planes,
     area: Area,
-    origin: (i32, i32),
+    origin: (i32, i32, i32),
     step_iters: (i32, i32),
-) -> (i32, i32) {
-    let (mut qx, mut qy) = origin;
+) -> (i32, i32, i32) {
+    let (mut qx, mut qy, mut best) = origin;
     let (step, iters) = step_iters;
-    let mut best = sad_qpel(src, reference, area, qx, qy);
+    let mut came = (0, 0);
     for _ in 0..iters {
         let mut step_to = None;
         for (dx, dy) in [(0, -step), (0, step), (-step, 0), (step, 0)] {
             let x = qx + dx;
             let y = qy + dy;
-            if x.abs() > SEARCH * 4 || y.abs() > SEARCH * 4 {
+            if (dx, dy) == came || x.abs() > SEARCH * 4 || y.abs() > SEARCH * 4 {
                 continue;
             }
             let cost = sad_qpel(src, reference, area, x, y);
@@ -1550,10 +1519,11 @@ fn refine_subpel(
         let Some((x, y)) = step_to else {
             break;
         };
+        came = (qx - x, qy - y);
         qx = x;
         qy = y;
     }
-    (qx, qy)
+    (qx, qy, best)
 }
 
 fn sad_qpel(src: &Source<'_>, reference: &Planes, area: Area, qx: i32, qy: i32) -> i32 {
@@ -1561,6 +1531,13 @@ fn sad_qpel(src: &Source<'_>, reference: &Planes, area: Area, qx: i32, qy: i32) 
         i16::try_from(qx).unwrap_or(0),
         i16::try_from(qy).unwrap_or(0),
     ];
+    if inside(src, area)
+        && let Some(cost) = reference
+            .sub
+            .sad(bounds(area), mv, src.y, src.width as usize)
+    {
+        return cost as i32;
+    }
     let mut cost = 0i32;
     for row in 0..area.h {
         for col in 0..area.w {
@@ -1579,6 +1556,34 @@ fn sad_qpel(src: &Source<'_>, reference: &Planes, area: Area, qx: i32, qy: i32) 
     cost
 }
 
+/// The block lies inside the coded picture, so its source samples need no edge value.
+fn inside(src: &Source<'_>, area: Area) -> bool {
+    area.x + area.w <= src.width && area.y + area.h <= src.height
+}
+
+fn bounds(area: Area) -> (u32, u32, u32, u32) {
+    (area.x, area.y, area.w, area.h)
+}
+
+/// Sum of absolute differences between the source block and `pred`, whose
+/// rows are [`MAX_BLOCK`] apart. The block must be [`inside`] the picture.
+fn sad_rows(src: &Source<'_>, area: Area, pred: &[u8; MAX_BLOCK * MAX_BLOCK]) -> i32 {
+    let w = area.w as usize;
+    let stride = src.width as usize;
+    let mut cost = 0u32;
+    for row in 0..area.h as usize {
+        let start = (area.y as usize + row) * stride + area.x as usize;
+        let source = &src.y[start..start + w];
+        let predicted = &pred[row * MAX_BLOCK..row * MAX_BLOCK + w];
+        cost += source
+            .iter()
+            .zip(predicted)
+            .map(|(&s, &p)| u32::from(s.abs_diff(p)))
+            .sum::<u32>();
+    }
+    cost as i32
+}
+
 fn choose_partition(
     src: &Source<'_>,
     reference: &Planes,
@@ -1595,8 +1600,7 @@ fn choose_partition(
         h: 16,
     };
     let pred = predict_part(grid, &none, mb_w, (mx, my), (0, 0, 16, 16));
-    let mv = search_area(src, reference, whole, pred);
-    let mut best_cost = sad_mv(src, reference, whole, mv);
+    let (mv, mut best_cost) = search_area(src, reference, whole, pred);
     let mut best_kind = 0u8;
     let mut best = [mv; 16];
     for kind in [1u8, 2, 3] {
@@ -1614,8 +1618,8 @@ fn choose_partition(
                 w,
                 h,
             };
-            let mv = search_area(src, reference, area, pred);
-            cost += sad_mv(src, reference, area, mv);
+            let (mv, part_cost) = search_area(src, reference, area, pred);
+            cost += part_cost;
             fill_local(&mut here, (x, y, w, h), mv);
             fill_array(&mut blocks, (x, y, w, h), mv);
         }
@@ -1626,10 +1630,6 @@ fn choose_partition(
         }
     }
     (best_kind, best)
-}
-
-fn sad_mv(src: &Source<'_>, reference: &Planes, area: Area, mv: [i16; 2]) -> i32 {
-    sad_qpel(src, reference, area, i32::from(mv[0]), i32::from(mv[1]))
 }
 
 fn pieces(kind: u8) -> [(u32, u32, u32, u32); 4] {
@@ -2155,38 +2155,81 @@ fn predict4(recon: &[u8], stride: u32, x: u32, y: u32) -> [u8; 16] {
     crate::recon::pred4(2, &above, &left, 128, above_ok, left_ok)
 }
 
-fn inter4(
-    reference: &[u8],
-    src: &[u8],
+/// A macroblock's 16×16 luma prediction in raster order.
+type MbPred = [u8; 256];
+
+/// The luma prediction of a macroblock whose 4×4 blocks move by `mv`, in raster order.
+fn predict_luma(
+    reference: &Planes,
     size: (u32, u32),
     at: (u32, u32),
     mv: &[[i16; 2]; 16],
-    qp: i32,
-) -> [[i32; 16]; 16] {
+) -> MbPred {
+    let (width, height) = size;
+    let (mx, my) = at;
+    let mut out = [0u8; 256];
+    let mut block = [0u8; MAX_BLOCK * MAX_BLOCK];
+    for by in 0..4usize {
+        for bx in 0..4usize {
+            let x = mx * 16 + bx as u32 * 4;
+            let y = my * 16 + by as u32 * 4;
+            let mv = mv[by * 4 + bx];
+            let fast = reference.sub.block((x, y, 4, 4), mv, &mut block).is_some();
+            for row in 0..4usize {
+                for col in 0..4usize {
+                    out[(by * 4 + row) * 16 + bx * 4 + col] = if fast {
+                        block[row * MAX_BLOCK + col]
+                    } else {
+                        moved_pel(
+                            &reference.y,
+                            width,
+                            height,
+                            x + col as u32,
+                            y + row as u32,
+                            mv,
+                        )
+                    };
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The average of the two references' predictions, as a bi-predicted block uses.
+fn predict_bi(
+    past: &Planes,
+    future: &Planes,
+    size: (u32, u32),
+    at: (u32, u32),
+    mv0: &[[i16; 2]; 16],
+    mv1: &[[i16; 2]; 16],
+) -> MbPred {
+    let mut out = predict_luma(past, size, at, mv0);
+    let other = predict_luma(future, size, at, mv1);
+    for (a, &b) in out.iter_mut().zip(&other) {
+        *a = crate::recon::avg(*a, b);
+    }
+    out
+}
+
+fn inter4(pred: &MbPred, src: &[u8], size: (u32, u32), at: (u32, u32), qp: i32) -> [[i32; 16]; 16] {
     let (width, height) = size;
     let (mx, my) = at;
     let mut blocks = [[0i32; 16]; 16];
-    let x0 = mx * 16;
-    let y0 = my * 16;
     for (i, levels) in blocks.iter_mut().enumerate() {
         let bx = blk_x(i);
         let by = blk_y(i);
-        let x = x0 + bx as u32 * 4;
-        let y = y0 + by as u32 * 4;
-        let pred = moved_luma(reference, width, height, x, y, mv[by * 4 + bx]);
-        *levels = quant4(&pred, src, width, height, x, y, qp);
+        let mut block = [0u8; 16];
+        for row in 0..4 {
+            let start = (by * 4 + row) * 16 + bx * 4;
+            block[row * 4..row * 4 + 4].copy_from_slice(&pred[start..start + 4]);
+        }
+        let x = mx * 16 + bx as u32 * 4;
+        let y = my * 16 + by as u32 * 4;
+        *levels = quant4(&block, src, width, height, x, y, qp);
     }
     blocks
-}
-
-fn moved_luma(plane: &[u8], width: u32, height: u32, x: u32, y: u32, mv: [i16; 2]) -> [u8; 16] {
-    let mut pred = [128u8; 16];
-    for row in 0..4u32 {
-        for col in 0..4u32 {
-            pred[(row * 4 + col) as usize] = moved_pel(plane, width, height, x + col, y + row, mv);
-        }
-    }
-    pred
 }
 
 fn moved_pel(plane: &[u8], width: u32, height: u32, x: u32, y: u32, mv: [i16; 2]) -> u8 {
@@ -2215,10 +2258,43 @@ fn moved_chroma(
     mv: &[[i16; 2]; 16],
 ) -> [u8; 64] {
     let mut pred = [128u8; 64];
+    let stride = width as usize;
+    let mut done = [false; 16];
+    // Each 4×4 luma block moves a 2×2 chroma block. One whose 3×3 reads are
+    // all inside the plane needs no clamping, the same weights as `chroma_mc`.
+    for (index, vector) in mv.iter().enumerate() {
+        let (bx, by) = ((index % 4) as i32, (index / 4) as i32);
+        let mvx = i32::from(vector[0]);
+        let mvy = i32::from(vector[1]);
+        let x0 = mx as i32 * 8 + bx * 2 + (mvx >> 3);
+        let y0 = my as i32 * 8 + by * 2 + (mvy >> 3);
+        if x0 < 0 || y0 < 0 || x0 + 3 > width as i32 || y0 + 3 > height as i32 {
+            continue;
+        }
+        let (xf, yf) = (mvx & 7, mvy & 7);
+        let weights = [(8 - xf) * (8 - yf), xf * (8 - yf), (8 - xf) * yf, xf * yf];
+        for row in 0..2usize {
+            let top = (y0 as usize + row) * stride + x0 as usize;
+            let a = &plane[top..top + 3];
+            let c = &plane[top + stride..top + stride + 3];
+            for col in 0..2usize {
+                let value = weights[0] * i32::from(a[col])
+                    + weights[1] * i32::from(a[col + 1])
+                    + weights[2] * i32::from(c[col])
+                    + weights[3] * i32::from(c[col + 1]);
+                let out = (by as usize * 2 + row) * 8 + bx as usize * 2 + col;
+                pred[out] = ((value + 32) >> 6).clamp(0, 255) as u8;
+            }
+        }
+        done[index] = true;
+    }
     for row in 0..8i32 {
         for col in 0..8i32 {
             let bx = (col * 2 / 4) as usize;
             let by = (row * 2 / 4) as usize;
+            if done[by * 4 + bx] {
+                continue;
+            }
             let vector = mv[by * 4 + bx];
             let mvx = i32::from(vector[0]);
             let mvy = i32::from(vector[1]);
@@ -2560,87 +2636,19 @@ struct CodedLuma {
     blocks8: [[i32; 64]; 4],
 }
 
-fn pick_luma_uni(
-    reference: &[u8],
+fn pick_luma(
+    pred: &MbPred,
     src: &[u8],
     size: (u32, u32),
     at: (u32, u32),
-    mv: &[[i16; 2]; 16],
     luma4: &[[i32; 16]; 16],
     qp: i32,
 ) -> CodedLuma {
-    let (width, height) = size;
     let (mx, my) = at;
-    let (blocks8, sad8) = code8(
-        src,
-        size,
-        at,
-        |x, y| pel_mv(reference, width, height, (mx, my), (x, y), mv),
-        qp,
-    );
-    let sad4 = sad4_blocks(
-        luma4,
-        src,
-        size,
-        at,
-        |x, y| pel_mv(reference, width, height, (mx, my), (x, y), mv),
-        qp,
-    );
+    let lookup = |x: u32, y: u32| pred[((y - my * 16) * 16 + x - mx * 16) as usize];
+    let (blocks8, sad8) = code8(src, size, at, lookup, qp);
+    let sad4 = sad4_blocks(luma4, src, size, at, lookup, qp);
     choose_luma(luma4, blocks8, sad8, sad4)
-}
-
-fn pick_luma_bi(
-    refs: (&[u8], &[u8]),
-    src: &[u8],
-    size: (u32, u32),
-    at: (u32, u32),
-    mv: (&[[i16; 2]; 16], &[[i16; 2]; 16]),
-    luma4: &[[i32; 16]; 16],
-    qp: i32,
-) -> CodedLuma {
-    let (past, future) = refs;
-    let (width, height) = size;
-    let (mx, my) = at;
-    let (mv0, mv1) = mv;
-    let (blocks8, sad8) = code8(
-        src,
-        size,
-        at,
-        |x, y| {
-            let a = pel_mv(past, width, height, (mx, my), (x, y), mv0);
-            let b = pel_mv(future, width, height, (mx, my), (x, y), mv1);
-            crate::recon::avg(a, b)
-        },
-        qp,
-    );
-    let sad4 = sad4_blocks(
-        luma4,
-        src,
-        size,
-        at,
-        |x, y| {
-            let a = pel_mv(past, width, height, (mx, my), (x, y), mv0);
-            let b = pel_mv(future, width, height, (mx, my), (x, y), mv1);
-            crate::recon::avg(a, b)
-        },
-        qp,
-    );
-    choose_luma(luma4, blocks8, sad8, sad4)
-}
-
-fn pel_mv(
-    plane: &[u8],
-    width: u32,
-    height: u32,
-    mb: (u32, u32),
-    pel: (u32, u32),
-    mv: &[[i16; 2]; 16],
-) -> u8 {
-    let (mx, my) = mb;
-    let (x, y) = pel;
-    let bx = ((x - mx * 16) / 4) as usize;
-    let by = ((y - my * 16) / 4) as usize;
-    moved_pel(plane, width, height, x, y, mv[by * 4 + bx])
 }
 
 fn choose_luma(
@@ -3326,6 +3334,52 @@ mod tests {
         assert!(err < 64 * 6, "8x8 round trip error {err}");
     }
 
+    /// The unclamped 2×2 path and the clamped per-sample path give the same
+    /// chroma prediction, inside the plane and past each edge.
+    #[test]
+    fn moved_chroma_matches_chroma_mc() {
+        let (w, h) = (24u32, 16u32);
+        let plane: Vec<u8> = (0..w * h)
+            .map(|i| ((i * 71 + (i / w) * 13) % 256) as u8)
+            .collect();
+        for (mx, my) in [(0u32, 0u32), (1, 1), (2, 0)] {
+            for step in 0..400i16 {
+                let mut mv = [[0i16; 2]; 16];
+                for (k, vector) in mv.iter_mut().enumerate() {
+                    let k = k as i16;
+                    *vector = [
+                        (step * 7 + k * 13) % 160 - 80,
+                        (step * 11 + k * 5) % 120 - 60,
+                    ];
+                }
+                let got = super::moved_chroma(&plane, w, h, mx, my, &mv);
+                for row in 0..8i32 {
+                    for col in 0..8i32 {
+                        let vector = mv[(row / 2) as usize * 4 + (col / 2) as usize];
+                        let (mvx, mvy) = (i32::from(vector[0]), i32::from(vector[1]));
+                        let want = crate::recon::chroma_mc(
+                            &plane,
+                            w as usize,
+                            w as i32,
+                            h as i32,
+                            crate::recon::Pel {
+                                x: mx as i32 * 8 + col + (mvx >> 3),
+                                y: my as i32 * 8 + row + (mvy >> 3),
+                                x_frac: mvx & 7,
+                                y_frac: mvy & 7,
+                            },
+                        );
+                        assert_eq!(
+                            got[(row * 8 + col) as usize],
+                            want,
+                            "mb {mx},{my} step {step}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn smooth_offset_uses_the_8x8_transform() {
         let reference = vec![100u8; 16 * 16];
@@ -3335,9 +3389,10 @@ mod tests {
                 src[row * 16 + col] = 108 + (col as u8) / 4;
             }
         }
-        let mv = [[0i16; 2]; 16];
-        let luma4 = super::inter4(&reference, &src, (16, 16), (0, 0), &mv, 26);
-        let picked = super::pick_luma_uni(&reference, &src, (16, 16), (0, 0), &mv, &luma4, 26);
+        // A zero vector predicts the reference itself.
+        let pred: super::MbPred = reference.try_into().unwrap();
+        let luma4 = super::inter4(&pred, &src, (16, 16), (0, 0), 26);
+        let picked = super::pick_luma(&pred, &src, (16, 16), (0, 0), &luma4, 26);
         assert!(picked.use8, "4x4 won, cbp {}", picked.cbp);
     }
 

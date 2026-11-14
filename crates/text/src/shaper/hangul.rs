@@ -58,6 +58,21 @@ fn syllable(code: u32) -> bool {
     (SYLLABLES..SYLLABLES + SYLLABLE_COUNT).contains(&code)
 }
 
+/// The two marks of pitch old Korean writes after a syllable and draws at
+/// its left.
+fn tone(code: u32) -> bool {
+    matches!(code, 0x302E | 0x302F)
+}
+
+/// The letters that stand for a missing consonant or vowel. Unicode lets
+/// a renderer leave them out; Korean faces draw them, most as nothing
+/// with no room, and their joins expect them there.
+pub(super) fn filler(character: char) -> bool {
+    matches!(character, '\u{115F}' | '\u{1160}' | '\u{3164}' | '\u{FFA0}')
+}
+
+const DOTTED_CIRCLE: char = '\u{25CC}';
+
 /// The features that join letters standing apart, added to the `stages`
 /// of a Korean run. Contextual alternates are left out: the faces that
 /// hold every one of these joins under that feature would apply them to
@@ -76,8 +91,11 @@ pub(super) fn stages(stages: &mut [Vec<Feature>]) {
 }
 
 /// Put the letters of `glyphs` into syllables the face has, and take
-/// apart the syllables it lacks. `describe` makes the glyph of a
-/// character at a place in the text.
+/// apart the syllables it lacks. A mark of pitch after a syllable goes
+/// before it, where it is drawn, unless the face draws it with no room of
+/// its own; one after no syllable stands by a dotted circle when the face
+/// has one. `describe` makes the glyph of a character at a place in the
+/// text.
 pub(super) fn compose(
     font: &Font<'_>,
     glyphs: Vec<Glyph>,
@@ -85,12 +103,58 @@ pub(super) fn compose(
 ) -> Vec<Glyph> {
     let code = |glyph: &Glyph| u32::from(glyph.character);
     let has_code = |code: u32| char::from_u32(code).is_some_and(|character| has(font, character));
+    // A mark the face lacks is drawn as its missing glyph, which has room.
+    let roomless = |character: char| {
+        font.glyph_id(character)
+            .ok()
+            .flatten()
+            .is_some_and(|id| font.advance(id).is_ok_and(|advance| advance == 0))
+    };
     let mut out: Vec<Glyph> = Vec::with_capacity(glyphs.len());
+    // Where the syllable just written starts in `out`, while nothing
+    // has followed it.
+    let mut syllable_start: Option<usize> = None;
     let mut at = 0;
     while at < glyphs.len() {
         let first = code(&glyphs[at]);
         let cluster = glyphs[at].cluster;
         let next = glyphs.get(at + 1).map(code);
+        if tone(first) {
+            let mut mark = glyphs[at].clone();
+            let in_place = roomless(mark.character);
+            match syllable_start.take() {
+                Some(start) if !in_place => {
+                    // The mark and its syllable are one cluster.
+                    let cluster = out[start..]
+                        .iter()
+                        .map(|glyph| glyph.cluster)
+                        .fold(mark.cluster, usize::min);
+                    for glyph in &mut out[start..] {
+                        glyph.cluster = cluster;
+                        glyph.continues = true;
+                    }
+                    mark.cluster = cluster;
+                    mark.continues = false;
+                    out.insert(start, mark);
+                }
+                Some(_) => out.push(mark),
+                None if has(font, DOTTED_CIRCLE) => {
+                    let mut circle = describe(DOTTED_CIRCLE, cluster);
+                    if in_place {
+                        mark.continues = true;
+                        out.extend([circle, mark]);
+                    } else {
+                        circle.continues = true;
+                        mark.continues = false;
+                        out.extend([mark, circle]);
+                    }
+                }
+                None => out.push(mark),
+            }
+            at += 1;
+            continue;
+        }
+        let before = out.len();
         if leading(first) && next.is_some_and(vowel) {
             let middle = next.unwrap_or(0);
             let last = glyphs.get(at + 2).map(code).filter(|last| trailing(*last));
@@ -106,6 +170,7 @@ pub(super) fn compose(
                 {
                     out.push(describe(character, cluster));
                     at += length;
+                    syllable_start = Some(before);
                     continue;
                 }
             }
@@ -122,6 +187,7 @@ pub(super) fn compose(
                 out.push(letter);
             }
             at += length;
+            syllable_start = Some(before);
             continue;
         }
         if syllable(first) {
@@ -138,6 +204,7 @@ pub(super) fn compose(
             {
                 out.push(describe(character, cluster));
                 at += 2;
+                syllable_start = Some(before);
                 continue;
             }
             // A syllable the face lacks, or one an old trailing consonant
@@ -166,9 +233,13 @@ pub(super) fn compose(
                     out.push(letter);
                     at += 1;
                 }
+                syllable_start = Some(before);
                 continue;
             }
         }
+        // A syllable the face has, with nothing to add to it, is still a
+        // syllable for a mark of pitch to go before.
+        syllable_start = syllable(first).then_some(before);
         out.push(glyphs[at].clone());
         at += 1;
     }
@@ -260,6 +331,53 @@ mod tests {
                 (0x1161, 0, VOWEL),
                 (0x11C3, 0, TRAILING)
             ]
+        );
+    }
+
+    #[test]
+    fn a_mark_of_pitch_goes_before_the_syllable_it_follows() {
+        // The two dots have room in the face: before GA, in its cluster.
+        assert_eq!(
+            composed(FACE, "\u{AC00}\u{302F}"),
+            [(0x302F, 0, 0), (0xAC00, 0, 0)]
+        );
+        // Before the whole of a syllable written in letters.
+        assert_eq!(
+            composed(FACE, "a\u{1102}\u{1161}\u{302F}"),
+            [
+                (0x61, 0, 0),
+                (0x302F, 1, 0),
+                (0x1102, 1, LEADING),
+                (0x1161, 1, VOWEL)
+            ]
+        );
+        // The one dot takes no room: it stays after.
+        assert_eq!(
+            composed(FACE, "\u{AC00}\u{302E}"),
+            [(0xAC00, 0, 0), (0x302E, 3, 0)]
+        );
+        // Only the first mark after a syllable is the syllable's; the
+        // next, and one after a letter that is no syllable, take a
+        // dotted circle.
+        assert_eq!(
+            composed(FACE, "\u{AC00}\u{302F}\u{302F}"),
+            [
+                (0x302F, 0, 0),
+                (0xAC00, 0, 0),
+                (0x302F, 6, 0),
+                (0x25CC, 6, 0)
+            ]
+        );
+        assert_eq!(
+            composed(FACE, "\u{1100}\u{302E}"),
+            [(0x1100, 0, 0), (0x25CC, 3, 0), (0x302E, 3, 0)]
+        );
+        // A face with no circle leaves the mark as it is, and one with
+        // no mark moves it all the same: its missing glyph has room.
+        assert_eq!(composed(LETTERS, "\u{302F}"), [(0x302F, 0, 0)]);
+        assert_eq!(
+            composed(LETTERS, "\u{1100}\u{1161}\u{302E}"),
+            [(0x302E, 0, 0), (0x1100, 0, LEADING), (0x1161, 0, VOWEL)]
         );
     }
 

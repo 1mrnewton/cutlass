@@ -410,7 +410,7 @@ fn described(character: char, cluster: usize) -> Glyph {
     if props.category() == gc::NONSPACING_MARK {
         glyph.side = fallback::side(character, props.combining());
     }
-    glyph.ignorable = props.default_ignorable();
+    glyph.ignorable = props.default_ignorable() && !hangul::filler(character);
     glyph.joiner = character == '\u{200D}';
     glyph.non_joiner = character == '\u{200C}';
     glyph.continues = props.is_mark();
@@ -1293,6 +1293,55 @@ mod tests {
             shaped_in(SYLLABLES, b"Latn", "\u{1100}\u{1161}"),
             "[4=0+300|5=3+300]"
         );
+    }
+
+    #[test]
+    fn korean_marks_of_pitch_go_before_their_syllable_and_fillers_are_drawn() {
+        const SYLLABLES: &[u8] = include_bytes!("../../../font/fixtures/hangul.ttf");
+        const LETTERS: &[u8] = include_bytes!("../../../font/fixtures/hangul-letters.ttf");
+        let shaped = |text: &str| shaped_in(SYLLABLES, b"Hang", text);
+        // Each line but the last two is what HarfBuzz 14.2 prints.
+        // A mark with room of its own goes before the syllable it
+        // follows, whole or in letters.
+        assert_eq!(shaped("\u{AC00}\u{302F}"), "[12=0+200|1=0+900]");
+        assert_eq!(
+            shaped("\u{1100}\u{1161}\u{11A8}\u{302F}"),
+            "[12=0+200|2=0+900]"
+        );
+        assert_eq!(
+            shaped("\u{1102}\u{1161}\u{302F}\u{AC00}"),
+            "[12=0+200|0=0+500|5=0+300|1=9+900]"
+        );
+        // A mark with no syllable stands by a dotted circle: before it
+        // when it has room, after it when it has none.
+        assert_eq!(shaped("\u{302F}\u{AC00}"), "[12=0+200|13=0+600|1=3+900]");
+        assert_eq!(shaped("\u{302E}"), "[13=0+600|11=0+0]");
+        // The letters that stand for a missing consonant or vowel are
+        // drawn as the face has them, not left out.
+        assert_eq!(shaped("\u{115F}\u{1161}"), "[14=0+0|5=0+300]");
+        assert_eq!(shaped("\u{1100}\u{1160}"), "[4=0+300|14=0+0]");
+        // A face with neither mark nor circle draws its missing glyph,
+        // before the syllable or alone.
+        assert_eq!(
+            shaped_in(LETTERS, b"Hang", "\u{AC00}\u{302F}"),
+            "[0=0+500|1=0+300|2=0+300]"
+        );
+        assert_eq!(shaped_in(LETTERS, b"Hang", "\u{302F}"), "[0=0+500]");
+        // A mark with no room stays after its syllable, where the face
+        // draws it. HarfBuzz centers it over the syllable, and sets a
+        // mark and its circle on a letter before them that is no
+        // syllable; here each keeps its place and its room.
+        assert_eq!(shaped("\u{AC00}\u{302E}"), "[1=0+900|11=0+0]");
+        assert_eq!(shaped("a\u{302F}"), "[10=0+500|12=1+200|13=1+600]");
+        // Thousands of marks after one syllable, and thousands of
+        // syllables each with its mark, are shaped in time.
+        let started = std::time::Instant::now();
+        let mut heavy = String::from("\u{AC00}");
+        heavy.push_str(&"\u{302F}".repeat(5_000));
+        assert!(shaped(&heavy).starts_with("[12=0+200|1=0+900|12="));
+        let pairs = shaped(&"\u{AC00}\u{302F}".repeat(5_000));
+        assert_eq!(pairs.matches("12=").count(), 5_000);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]

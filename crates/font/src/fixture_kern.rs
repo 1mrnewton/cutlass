@@ -320,20 +320,37 @@ pub(crate) fn misclassed() -> Vec<u8> {
 
 /// A face for Korean: the syllables GA 1, GAG 2 and HAN 3, and the
 /// letters G 4, A 5, final G 6, H 7, final N 8 and an old final 9, with
-/// the Latin `a` 10. Each syllable is 900 wide and each letter 300.
+/// the Latin `a` 10. Each syllable is 900 wide and each letter 300. Of
+/// the marks of pitch, the one dot 11 takes no room and the two dots 12
+/// are 200 wide; the dotted circle is 13, 600 wide, and the letters that
+/// stand for a missing consonant or vowel are 14, nothing with no room.
 pub(crate) fn hangul() -> Vec<u8> {
     let mut glyphs = vec![boxed(500)];
     glyphs.extend([boxed(900); 3]);
     glyphs.extend([boxed(300); 6]);
     glyphs.push(boxed(500));
+    glyphs.push(Glyph {
+        advance: 0,
+        outline: Some([-300, 300, -200, 400]),
+    });
+    glyphs.extend([boxed(200), boxed(600)]);
+    glyphs.push(Glyph {
+        advance: 0,
+        outline: None,
+    });
     let map = [
         ('a', 10),
         ('\u{1100}', 4),
         ('\u{1112}', 7),
+        ('\u{115F}', 14),
+        ('\u{1160}', 14),
         ('\u{1161}', 5),
         ('\u{11A8}', 6),
         ('\u{11AB}', 8),
         ('\u{11C3}', 9),
+        ('\u{25CC}', 13),
+        ('\u{302E}', 11),
+        ('\u{302F}', 12),
         ('\u{AC00}', 1),
         ('\u{AC01}', 2),
         ('\u{D55C}', 3),

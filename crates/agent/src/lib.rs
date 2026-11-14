@@ -27,6 +27,7 @@ mod settings_tool;
 mod skill;
 mod subagent;
 mod tools;
+mod unavailable;
 
 pub use anthropic::{
     ANTHROPIC_URL, ANTHROPIC_VERSION, ClaudeModel, DEFAULT_CLAUDE_MODEL, FALLBACK_BETA,
@@ -67,6 +68,9 @@ pub use tools::{
     SpeechPoll, TOOL_NAMES, ToolError, TrackAsk, TrackJob, Tracking, pending_approvals,
     tool_definitions,
 };
+#[cfg(feature = "script")]
+pub use unavailable::InProcess;
+pub use unavailable::{Unavailable, tools_for};
 
 #[cfg(test)]
 mod tests {

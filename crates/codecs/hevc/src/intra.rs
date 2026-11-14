@@ -422,8 +422,8 @@ mod tests {
                 for round in 0..20 {
                     let mut refs = Refs::new(n);
                     let max = (1u64 << bit_depth) - 1;
-                    for i in 0..4 * n + 1 {
-                        refs.samples[i] = match round % 4 {
+                    for sample in refs.samples.iter_mut().take(4 * n + 1) {
+                        *sample = match round % 4 {
                             0 => max as i32,
                             1 => (next() % 2 * max) as i32,
                             _ => (next() % (max + 1)) as i32,

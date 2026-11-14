@@ -612,8 +612,8 @@ impl<const T: usize> Kernel<T> {
                         return;
                     };
                     let mut acc = [0i32; W];
-                    for k in 0..T {
-                        let ck = i32::from(self.c[1][k]);
+                    for (k, &c) in self.c[1].iter().enumerate() {
+                        let ck = i32::from(c);
                         let Some(t) = tmp.get(j + k) else {
                             return;
                         };

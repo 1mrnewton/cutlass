@@ -1554,6 +1554,14 @@ fn fill<T: Copy>(s: &mut [T], v: T) {
             Err(_) => false,
         }
     }
+    // Runs of structures fill in a loop, which needs no dispatch on the
+    // length; bytes would call memset.
+    if size_of::<T>() > 1 {
+        for x in s {
+            *x = v;
+        }
+        return;
+    }
     let done = match s.len() {
         1 => fixed::<T, 1>(s, v),
         2 => fixed::<T, 2>(s, v),

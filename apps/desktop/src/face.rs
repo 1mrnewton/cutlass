@@ -249,13 +249,13 @@ mod tests {
             "\u{928}\u{92E}\u{938}\u{94D}\u{924}\u{947} \u{926}\u{941}\u{928}\u{93F}\u{92F}\u{93E} \u{939}\u{93F}\u{928}\u{94D}\u{926}\u{940} \u{915}\u{94D}\u{937}\u{924}\u{94D}\u{930}\u{93F}\u{92F}",
             "\u{5E9}\u{5B8}\u{5C1}\u{5DC}\u{5D5}\u{5B9}\u{5DD} \u{5E2}\u{5D5}\u{5DC}\u{5DD} \u{4E2D}\u{6587}\u{5B57} \u{D55C}\u{AE00} \u{E44}\u{E17}\u{E22}",
             "\u{6771}\u{4EAC}\u{306F}\u{6674}\u{308C}\u{3001}\u{76F4}\u{3059} \u{4E2D}\u{6587}\u{76F4} 1\u{FE0F}\u{20E3} \u{D55C}\u{AD6D}\u{8A9E}",
-            "Plain, bold, italic and underlined words in one line.",
+            "\u{FDFD} bold, italic and underlined.",
         ];
         for (index, line) in lines.iter().enumerate() {
             let id = format!("line{index}");
             let mut text = MaterialText::new(id.as_str());
             text.content = (*line).to_owned();
-            text.font_size = 56.0;
+            text.font_size = 48.0;
             text.font_path = fonts.name().to_owned();
             text.text_color = "#FFFFFF".to_owned();
             text.line_max_width = 1_150.0;
@@ -266,11 +266,11 @@ mod tests {
                 use cutlass_model::PatternChange;
                 let on = Some(true);
                 let none = PatternChange::default();
-                assert!(text.set_range_pattern(7, 11, PatternChange { bold: on, ..none }));
-                assert!(text.set_range_pattern(13, 19, PatternChange { italic: on, ..none }));
+                assert!(text.set_range_pattern(2, 6, PatternChange { bold: on, ..none }));
+                assert!(text.set_range_pattern(8, 14, PatternChange { italic: on, ..none }));
                 assert!(text.set_range_pattern(
-                    24,
-                    34,
+                    19,
+                    29,
                     PatternChange {
                         underline: on,
                         ..none
@@ -282,7 +282,7 @@ mod tests {
             segment.render_index = i32::try_from(index).expect("index") + 1;
             #[allow(clippy::cast_precision_loss)]
             {
-                segment.clip.transform.y = 0.72 - index as f64 * 0.36;
+                segment.clip.transform.y = 0.8 - index as f64 * 0.27;
             }
             draft.tracks[0].segments.push(segment);
         }

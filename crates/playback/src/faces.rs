@@ -71,6 +71,10 @@ pub const FALLBACK_FACES: &[&str] = &[
     "NotoSansHebrew-Regular.ttf",
     "SFHebrew.ttf",
     "ArialHB.ttc",
+    // The Mac's own Arabic face, for what the faces above lack: the
+    // phrases Arabic writes as one glyph, and the letters of its other
+    // languages.
+    "GeezaPro.ttc",
     // The scripts of India.
     "Kohinoor.ttc",
     "KohinoorBangla.ttc",

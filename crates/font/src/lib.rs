@@ -5,7 +5,10 @@
 //! as PNG pictures is handed back still encoded, and a glyph of layered
 //! color (`COLR`) as the paints that fill its outlines. Glyph 0 is the
 //! missing glyph. A face with `CFF2` and no `CFF ` table has no outlines this
-//! reader can draw. The layout tables (`GDEF`, `GSUB`, `GPOS`) are read
+//! reader can draw. A variable face with TrueType outlines is read at any
+//! setting of its axes ([`Font::set_variations`]), and one instance of it
+//! can be written out as a face of its own ([`pin_instance`]) that opens
+//! already set. The layout tables (`GDEF`, `GSUB`, `GPOS`) are read
 //! for a shaper to ask; shaping, atlases, and meshes are not part of this
 //! crate.
 
@@ -34,6 +37,8 @@ mod fixture_var;
 mod gpos;
 mod gsub;
 mod gvar;
+#[cfg(test)]
+mod instance_tests;
 mod kern;
 mod layout;
 #[cfg(test)]
@@ -56,7 +61,10 @@ pub use colr::{
     Affine, ClipBox, Color, ColorGlyph, ColorLine, ColorStop, CompositeMode, Extend, Paint,
 };
 pub use coverage::{CharacterMap, MAX_CHARACTER_MAP, load_character_map};
-pub use faces::{FaceEntry, MAX_COLLECTION_FACES, list_faces, load_face, single_face};
+pub use faces::{
+    FaceEntry, InstanceEntry, MAX_COLLECTION_FACES, list_faces, load_face, load_instance,
+    pin_instance, single_face,
+};
 pub use gpos::{Adjust, Anchor, Cursive, Joins, MarkAttach, PairAdjust, Positioning, SingleAdjust};
 pub use gsub::{Ligature, Ligatures, Sequences, Single, Substitution};
 pub use layout::{
@@ -665,7 +673,7 @@ impl<'a> Font<'a> {
         let fingerprint = directory.fingerprint();
         let colr = colr::Colr::parse(&directory)?;
         let variation = Variation::read(&directory, fingerprint);
-        Ok(Font {
+        let mut font = Font {
             kind: directory.kind,
             units_per_em: head.units_per_em,
             num_glyphs,
@@ -685,7 +693,18 @@ impl<'a> Font<'a> {
             fingerprint,
             colr,
             variation,
-        })
+        };
+        // A face written as one instance of a variable face says where
+        // its axes are set, and is opened set there. A table for that
+        // which does not read is no setting, and a face that cannot be
+        // set stays at its default.
+        if let Ok(pin) = directory.table(b"Cpin") {
+            let settings = faces::pinned(pin);
+            if !settings.is_empty() {
+                let _unset = font.set_variations(&settings);
+            }
+        }
+        Ok(font)
     }
 }
 

@@ -151,18 +151,18 @@ const NAMES: [(u16, &str); 6] = [
     (261, "Fixture-CondensedBold"),
 ];
 
-/// A `name` table of Windows English names.
-fn names() -> Vec<u8> {
-    let entries = count(NAMES.len());
+/// A `name` table of Windows English names, by name id.
+pub(crate) fn names_table(names: &[(u16, &str)]) -> Vec<u8> {
+    let entries = count(names.len());
     let mut table = be(&[0, entries, 6 + entries * 12]);
     let mut strings = Vec::new();
-    for (id, text) in NAMES {
+    for (id, text) in names {
         let encoded: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
         table.extend(be(&[
             3,
             1,
             0x0409,
-            id,
+            *id,
             count(encoded.len()),
             count(strings.len()),
         ]));
@@ -172,31 +172,60 @@ fn names() -> Vec<u8> {
     table
 }
 
-/// `fvar`: the two axes, and three named instances, each with a name of
-/// its own as a font; only the last has one.
-fn axes() -> Vec<u8> {
-    let mut table = be(&[1, 0, 16, 2, 2, 20, 3, 4 + 8 + 2]);
-    for (tag, min, default, max, name) in [
-        (b"wght", 100.0, 400.0, 900.0, 256_u16),
-        (b"wdth", 50.0, 100.0, 150.0, 257),
-    ] {
-        table.extend(tag);
-        table.extend(fixed(min));
-        table.extend(fixed(default));
-        table.extend(fixed(max));
-        table.extend(be(&[0, name]));
+fn names() -> Vec<u8> {
+    names_table(&NAMES)
+}
+
+/// One axis of an `fvar` table: its tag, its least, default and greatest
+/// values, and the id of its name.
+pub(crate) type AxisSpec<'a> = (&'a [u8; 4], f32, f32, f32, u16);
+/// One instance: the id of its name, a value for each axis, and the id
+/// of its name as a font of its own, or 0xFFFF.
+pub(crate) type InstanceSpec<'a> = (u16, &'a [f32], u16);
+
+/// An `fvar` table of `axes` and `instances`.
+pub(crate) fn fvar_table(axes: &[AxisSpec<'_>], instances: &[InstanceSpec<'_>]) -> Vec<u8> {
+    let mut table = be(&[
+        1,
+        0,
+        16,
+        2,
+        count(axes.len()),
+        20,
+        count(instances.len()),
+        count(4 + axes.len() * 4 + 2),
+    ]);
+    for (tag, min, default, max, name) in axes {
+        table.extend(*tag);
+        table.extend(fixed(*min));
+        table.extend(fixed(*default));
+        table.extend(fixed(*max));
+        table.extend(be(&[0, *name]));
     }
-    for (name, weight, width, postscript) in [
-        (258_u16, 400.0, 100.0, 0xFFFF_u16),
-        (259, 700.0, 100.0, 0xFFFF),
-        (260, 700.0, 75.0, 261),
-    ] {
-        table.extend(be(&[name, 0]));
-        table.extend(fixed(weight));
-        table.extend(fixed(width));
+    for (name, values, postscript) in instances {
+        table.extend(be(&[*name, 0]));
+        for value in *values {
+            table.extend(fixed(*value));
+        }
         table.extend(postscript.to_be_bytes());
     }
     table
+}
+
+/// `fvar`: the two axes, and three named instances, each with a name of
+/// its own as a font; only the last has one.
+fn axes() -> Vec<u8> {
+    fvar_table(
+        &[
+            (b"wght", 100.0, 400.0, 900.0, 256),
+            (b"wdth", 50.0, 100.0, 150.0, 257),
+        ],
+        &[
+            (258, &[400.0, 100.0], 0xFFFF),
+            (259, &[700.0, 100.0], 0xFFFF),
+            (260, &[700.0, 75.0], 261),
+        ],
+    )
 }
 
 /// `avar`: halfway along the heavy side of weight is a quarter of the
@@ -656,6 +685,15 @@ pub(crate) fn table_of(name: &[u8; 4]) -> Vec<u8> {
         .find(|(tag, _)| *tag == name)
         .map(|(_, bytes)| bytes)
         .expect("table")
+}
+
+/// The face with `table` in place of its table `name`, or without that
+/// table.
+pub(crate) fn variable_with_tables(replaced: Vec<(&'static [u8; 4], Vec<u8>)>) -> Vec<u8> {
+    let mut tables = tables();
+    tables.retain(|(tag, _)| !replaced.iter().any(|(name, _)| name == tag));
+    tables.extend(replaced);
+    built(&tables)
 }
 
 /// The face with `table` in place of its table `name`, or without that

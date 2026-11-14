@@ -155,38 +155,42 @@ impl<'a> Fvar<'a> {
             .collect()
     }
 
+    /// Each instance as the table stores it: the id of its name, the id
+    /// of its name as a font of its own when it has one, and a value for
+    /// each axis.
+    pub(crate) fn records(&self) -> impl Iterator<Item = (u16, Option<u16>, Vec<f32>)> + '_ {
+        let size = self.instance_size.max(1);
+        let axes = self.axes.len();
+        self.instances.chunks_exact(size).filter_map(move |record| {
+            let name = u16_at(record, 0).ok()?;
+            let coordinates: Vec<f32> = (0..axes)
+                .filter_map(|axis| fixed(record, 4 + axis * 4).ok())
+                .collect();
+            if coordinates.len() != axes {
+                return None;
+            }
+            // 0xFFFF, and for this name 0, is no name.
+            let postscript = (size == 6 + axes * 4)
+                .then(|| u16_at(record, 4 + axes * 4).ok())
+                .flatten()
+                .filter(|id| *id != 0 && *id != 0xFFFF);
+            Some((name, postscript, coordinates))
+        })
+    }
+
     pub(crate) fn instances(&self, names: Option<&[u8]>) -> Vec<Instance> {
         let named = |id: u16| {
-            // 0xFFFF, and for the PostScript name 0, is no name.
             names
                 .filter(|_| id != 0xFFFF)
                 .and_then(|names| crate::faces::name(names, id))
         };
-        let Some(size) = Some(self.instance_size).filter(|size| *size > 0) else {
-            return Vec::new();
-        };
-        let mut instances = Vec::with_capacity(self.instances.len() / size);
-        for record in self.instances.chunks_exact(size) {
-            let Ok(name_id) = u16_at(record, 0) else {
-                continue;
-            };
-            let coordinates: Vec<f32> = (0..self.axes.len())
-                .filter_map(|axis| fixed(record, 4 + axis * 4).ok())
-                .collect();
-            if coordinates.len() != self.axes.len() {
-                continue;
-            }
-            let postscript = (size == 6 + self.axes.len() * 4)
-                .then(|| u16_at(record, 4 + self.axes.len() * 4).ok())
-                .flatten()
-                .filter(|id| *id != 0);
-            instances.push(Instance {
-                name: named(name_id),
+        self.records()
+            .map(|(name, postscript, coordinates)| Instance {
+                name: named(name),
                 postscript_name: postscript.and_then(named),
                 coordinates,
-            });
-        }
-        instances
+            })
+            .collect()
     }
 
     /// The place along each axis of `settings`: an axis and a value in

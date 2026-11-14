@@ -5,7 +5,7 @@
 //! `name` tables, not the outlines. [`single_face`] copies the tables of one
 //! collection face into a standalone font that [`crate::read`] opens.
 
-use crate::{Directory, FontError, bytes_at, collection, u16_at, u32_at};
+use crate::{Directory, FontError, Tag, bytes_at, collection, u16_at, u32_at};
 
 /// The most faces a collection may list.
 pub const MAX_COLLECTION_FACES: u32 = 256;
@@ -30,7 +30,47 @@ pub struct FaceEntry {
     pub bold: bool,
     /// The face is the family's italic, or bold italic.
     pub italic: bool,
+    /// The instances a variable face names, such as Bold: each can be
+    /// loaded as a face of its own with [`load_instance`]. Empty for a
+    /// face that does not vary.
+    pub instances: Vec<InstanceEntry>,
 }
+
+/// One named instance of a variable face.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InstanceEntry {
+    /// The instance's name, such as "Condensed Bold".
+    pub name: String,
+    /// The value of each of the face's axes, in the face's order, to
+    /// hand to [`load_instance`], [`pin_instance`] or
+    /// [`Font::set_variations`](crate::Font::set_variations).
+    pub coordinates: Vec<(Tag, f32)>,
+    /// The instance is the bold of the face's instances that are italic
+    /// as it is: of each kind exactly one is, the one of weight 700 or,
+    /// with none at 700, the nearest above 600. In a face with no axis
+    /// of weight, whether the face itself is bold.
+    pub bold: bool,
+    /// The face is italic, or the instance is set italic or slanted.
+    pub italic: bool,
+    /// Every axis is at its default: the instance is the face as it is
+    /// read with no setting.
+    pub default: bool,
+}
+
+// A value of an axis is a 16.16 fixed-point number read from the file, so
+// it is always a number and equal to itself.
+impl Eq for InstanceEntry {}
+
+/// The tag of the table that says which instance a face's bytes are: not
+/// an OpenType table, but one this crate writes with [`pin_instance`] and
+/// reads when it opens a face.
+const PIN: &[u8; 4] = b"Cpin";
+/// The largest `fvar` table [`list_faces`] reads, in bytes.
+const MAX_FVAR_TABLE: u32 = 256 * 1024;
+/// The most instances listed for one face.
+const MAX_LISTED_INSTANCES: usize = 64;
+/// The most instance records looked through for those.
+const MAX_INSTANCE_RECORDS: usize = 256;
 
 /// The faces in a font file. `read_at(offset, len)` returns exactly `len`
 /// bytes at `offset`, or `None` when the file is shorter.
@@ -313,9 +353,11 @@ fn entry_at(
         family: None,
         bold: false,
         italic: false,
+        instances: Vec::new(),
     };
     // The style a face says it is in `OS/2` wins over the older `head`.
     let mut said = false;
+    let (mut names, mut axes) = (None, None);
     for slot in 0..count {
         let at = slot * 16;
         let start = u64::from(u32_at(&records, at + 8)?);
@@ -325,7 +367,11 @@ fn entry_at(
                 if let Ok(table) = read(start, length as usize) {
                     entry.full_name = name(&table, 4);
                     entry.family = name(&table, 1);
+                    names = Some(table);
                 }
+            }
+            b"fvar" if length <= MAX_FVAR_TABLE => {
+                axes = read(start, length as usize).ok();
             }
             b"OS/2" if length >= 64 => {
                 if let Ok(selection) = read(start + 62, 2).and_then(|bytes| u16_at(&bytes, 0)) {
@@ -343,7 +389,207 @@ fn entry_at(
             _ => {}
         }
     }
+    if let Some(axes) = axes {
+        entry.instances = instances(&axes, names.as_deref(), entry.bold, entry.italic);
+    }
     Ok(entry)
+}
+
+/// The named instances of the `fvar` table `axes`, named from the `name`
+/// table `names`, in a face that is itself `bold` and `italic` or not. A
+/// table that does not read, and an instance with no readable name, is
+/// left out.
+fn instances(axes: &[u8], names: Option<&[u8]>, bold: bool, italic: bool) -> Vec<InstanceEntry> {
+    let (Ok(Some(table)), Some(names)) = (crate::vary::Fvar::read(axes), names) else {
+        return Vec::new();
+    };
+    let axes = table.axes(None);
+    let value = |coordinates: &[(Tag, f32)], tag: &[u8; 4]| {
+        coordinates
+            .iter()
+            .find(|(axis, _)| axis == tag)
+            .map(|(_, value)| *value)
+    };
+    let mut listed = Vec::new();
+    for (name_id, _, values) in table.records().take(MAX_INSTANCE_RECORDS) {
+        if listed.len() >= MAX_LISTED_INSTANCES {
+            break;
+        }
+        let Some(name) = Some(name_id)
+            .filter(|id| *id != 0xFFFF)
+            .and_then(|id| name(names, id))
+        else {
+            continue;
+        };
+        let coordinates: Vec<(Tag, f32)> = axes.iter().map(|axis| axis.tag).zip(values).collect();
+        let slanted = value(&coordinates, b"ital").is_some_and(|ital| ital >= 0.5)
+            || value(&coordinates, b"slnt").is_some_and(|slant| slant <= -1.0);
+        listed.push(InstanceEntry {
+            name,
+            default: axes
+                .iter()
+                .zip(&coordinates)
+                .all(|(axis, (_, value))| value - axis.default == 0.0),
+            italic: italic || slanted,
+            // In a face with no axis of weight every instance is as bold
+            // as the face.
+            bold: bold && value(&coordinates, b"wght").is_none(),
+            coordinates,
+        });
+    }
+    if axes.iter().any(|axis| &axis.tag == b"wght") {
+        // How far an instance is from the weight of bold, and then from
+        // the default of every other axis, as a part of the axis.
+        let distance = |entry: &InstanceEntry| {
+            let mut weight = f32::MAX;
+            let mut others = 0.0;
+            for (axis, (tag, value)) in axes.iter().zip(&entry.coordinates) {
+                if tag == b"wght" {
+                    weight = (value - 700.0).abs();
+                } else if axis.max > axis.min {
+                    others += (value - axis.default).abs() / (axis.max - axis.min);
+                }
+            }
+            (weight, others)
+        };
+        for kind in [false, true] {
+            let chosen = listed
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| {
+                    entry.italic == kind
+                        && value(&entry.coordinates, b"wght").is_some_and(|weight| weight >= 600.0)
+                })
+                .min_by(|(_, one), (_, other)| {
+                    distance(one)
+                        .partial_cmp(&distance(other))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(index, _)| index);
+            if let Some(index) = chosen {
+                listed[index].bold = true;
+            }
+        }
+    }
+    listed
+}
+
+/// The settings a `Cpin` table holds: an axis and a value for each. A
+/// table of another version, or one that says it holds more than it
+/// does, holds nothing.
+pub(crate) fn pinned(table: &[u8]) -> Vec<(Tag, f32)> {
+    let read = || {
+        if u16_at(table, 0).ok()? != 1 {
+            return None;
+        }
+        let count = usize::from(u16_at(table, 2).ok()?);
+        if count > crate::vary::MAX_AXES {
+            return None;
+        }
+        let records = bytes_at(table, 4, count * 8).ok()?;
+        Some(
+            records
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|record| {
+                    let raw = i32::from_be_bytes([record[4], record[5], record[6], record[7]]);
+                    #[allow(clippy::cast_precision_loss)]
+                    let value = raw as f32 / 65_536.0;
+                    ([record[0], record[1], record[2], record[3]], value)
+                })
+                .collect(),
+        )
+    };
+    read().unwrap_or_default()
+}
+
+/// A `Cpin` table of `coordinates`: a version, a count, and for each an
+/// axis and a 16.16 fixed-point value. A value that is no number is left
+/// out, and one too large to store is the largest that can be.
+fn pin_table(coordinates: &[(Tag, f32)]) -> Vec<u8> {
+    let kept: Vec<&(Tag, f32)> = coordinates
+        .iter()
+        .filter(|(_, value)| value.is_finite())
+        .take(crate::vary::MAX_AXES)
+        .collect();
+    let mut table = vec![0, 1];
+    table.extend(u16::try_from(kept.len()).unwrap_or(0).to_be_bytes());
+    for (tag, value) in kept {
+        table.extend(tag);
+        #[allow(clippy::cast_possible_truncation)]
+        let raw = (f64::from(*value) * 65_536.0)
+            .round()
+            .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
+        table.extend(raw.to_be_bytes());
+    }
+    table
+}
+
+/// The sum a table's directory record carries for it: its bytes as
+/// 32-bit numbers, the last padded with zeros.
+fn checksum(table: &[u8]) -> u32 {
+    let (words, rest) = table.as_chunks::<4>();
+    let mut sum = words.iter().fold(0_u32, |sum, word| {
+        sum.wrapping_add(u32::from_be_bytes(*word))
+    });
+    if !rest.is_empty() {
+        let mut last = [0; 4];
+        last[..rest.len()].copy_from_slice(rest);
+        sum = sum.wrapping_add(u32::from_be_bytes(last));
+    }
+    sum
+}
+
+/// The single face `bytes`, a variable one, as the instance at
+/// `coordinates`: the same font with a table added that says where its
+/// axes are set, so that [`crate::read`] opens it already set there, as
+/// [`Font::varied`](crate::Font::varied) would set it. The coordinates
+/// are an axis's tag and a value in the axis's own units, as
+/// [`InstanceEntry::coordinates`] has them; an axis not named is at its
+/// default. A face pinned before is pinned anew. A collection is refused:
+/// take one face of it first, with [`single_face`] or [`load_instance`].
+pub fn pin_instance(bytes: &[u8], coordinates: &[(Tag, f32)]) -> Result<Vec<u8>, FontError> {
+    if bytes.starts_with(b"ttcf") {
+        return Err(FontError::Collection);
+    }
+    let directory = Directory::parse(bytes, 0)?;
+    let version = u32_at(bytes, 0)?;
+    let mut tables = Vec::with_capacity(directory.tables.len() + 1);
+    for (slot, table) in directory.tables.iter().enumerate() {
+        if &table.tag == PIN {
+            continue;
+        }
+        let start = usize::try_from(table.offset).map_err(|_| FontError::BadTable)?;
+        let length = usize::try_from(table.length).map_err(|_| FontError::BadTable)?;
+        tables.push((
+            table.tag,
+            u32_at(bytes, 12 + slot * 16 + 4)?,
+            bytes_at(bytes, start, length)?.to_vec(),
+        ));
+    }
+    let pin = pin_table(coordinates);
+    tables.push((*PIN, checksum(&pin), pin));
+    // A directory lists its tables in the order of their tags.
+    tables.sort_by_key(|table| table.0);
+    let out = assemble(version, &tables)?;
+    crate::read(&out)?;
+    Ok(out)
+}
+
+/// One face of a font file as a standalone font pinned to the instance at
+/// `coordinates`: [`load_face`], then [`pin_instance`]. The face and its
+/// pin together come to at most `max_bytes`.
+pub fn load_instance(
+    read_at: impl FnMut(u64, usize) -> Option<Vec<u8>>,
+    index: Option<u32>,
+    coordinates: &[(Tag, f32)],
+    max_bytes: usize,
+) -> Result<Vec<u8>, FontError> {
+    // The pin's record in the directory, and the pin, padded.
+    let pin = 16 + (4 + coordinates.len().min(crate::vary::MAX_AXES) * 8).next_multiple_of(4);
+    let face = load_face(read_at, index, max_bytes.saturating_sub(pin))?;
+    pin_instance(&face, coordinates)
 }
 
 /// One name from a `name` table: English Windows or Unicode first, then

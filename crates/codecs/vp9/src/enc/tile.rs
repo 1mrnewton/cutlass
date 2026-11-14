@@ -1244,8 +1244,14 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             return true;
         }
         let pixels = (base.x_mis * base.y_mis * 64) as u64;
-        // A mean error of more than a few levels a sample.
-        self.last_sad > pixels * if self.s.speed >= 8 { 12 } else { 5 }
+        // A mean error of more than a few levels a sample (from speed 6,
+        // eight: 5% of the time for 0 to 1% of the bits).
+        let per = match self.s.speed {
+            0..=5 => 5,
+            6..=7 => 8,
+            _ => 12,
+        };
+        self.last_sad > pixels * per
     }
 
     /// Inter candidates: the searched vector and the reference list's,

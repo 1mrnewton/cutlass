@@ -1433,18 +1433,21 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
         let cnt_coef = &mut self.f.counts.coef[ti][pi][ri];
         let cnt_eob = &mut self.f.counts.eob[ti][pi][ri];
         while c < max_eob {
+            // Room for the end of block, zero, one and sign reads: three
+            // checked reads fewer a coefficient.
+            b.ensure(21);
             let mut band = usize::from(bands[c]);
             let mut p = &rows[(band * 8 + ctx) & 63];
             if collect {
                 cnt_eob[band][ctx] += 1;
             }
-            if !b.read(p[0]) {
+            if !b.read_ensured(p[0]) {
                 if collect {
                     cnt_coef[band][ctx][3] += 1;
                 }
                 break;
             }
-            while !b.read(p[1]) {
+            while !b.read_ensured(p[1]) {
                 if collect {
                     cnt_coef[band][ctx][0] += 1;
                 }
@@ -1461,13 +1464,15 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
                     >> 1;
                 band = usize::from(bands[c]);
                 p = &rows[(band * 8 + ctx) & 63];
+                // The next zero read, then one and sign.
+                b.ensure(14);
             }
-            let v = if !b.read(p[2]) {
+            let (v, neg) = if !b.read_ensured(p[2]) {
                 if collect {
                     cnt_coef[band][ctx][1] += 1;
                 }
                 cache[usize::from(scan[c]) & 1023] = 1;
-                dqv >> shift
+                (dqv >> shift, b.read_ensured(128))
             } else {
                 if collect {
                     cnt_coef[band][ctx][2] += 1;
@@ -1512,10 +1517,10 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
                     cache[usize::from(scan[c]) & 1023] = 2;
                     val = 2;
                 }
-                ((i64::from(val) * i64::from(dqv)) >> shift) as i32
+                (((i64::from(val) * i64::from(dqv)) >> shift) as i32, b.bit())
             };
             out_pos.push(tpos[c]);
-            out_val.push(if b.bit() { -v } else { v });
+            out_val.push(if neg { -v } else { v });
             c += 1;
             if c < max_eob {
                 ctx = (1

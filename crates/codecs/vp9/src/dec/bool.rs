@@ -75,12 +75,31 @@ impl<'a> Bool<'a> {
         }
     }
 
+    /// Refills unless at least `bits` bits past the top 8 are there, so
+    /// that the reads that follow can skip the check: a read takes 7 at
+    /// most, and needs none past the top 8 before it. After a fill there
+    /// are 48 or more.
+    #[inline(always)]
+    pub fn ensure(&mut self, bits: i32) {
+        debug_assert!(bits <= 48);
+        if self.count < bits {
+            self.fill();
+        }
+    }
+
     /// One bit whose probability of being 0 is `prob / 256`.
     #[inline(always)]
     pub fn read(&mut self, prob: u8) -> bool {
         if self.count < 0 {
             self.fill();
         }
+        self.read_ensured(prob)
+    }
+
+    /// [`Bool::read`] where an [`Bool::ensure`] has left the bits it needs.
+    #[inline(always)]
+    pub fn read_ensured(&mut self, prob: u8) -> bool {
+        debug_assert!(self.count >= 0);
         let split = 1 + (((self.range - 1) * u32::from(prob)) >> 8);
         let big = u64::from(split) << 56;
         let bit = self.value >= big;

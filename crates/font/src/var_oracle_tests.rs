@@ -218,8 +218,11 @@ fn varied_glyphs_agree_with_harfbuzz() {
                     }
                     advances += 1;
                 }
+                // At its default a face's glyphs have the boxes their
+                // records store, which need not be the boxes of their
+                // points.
                 let ours = extents(&font, glyph);
-                if ours.to_vec() != theirs {
+                if ours.to_vec() != theirs && font.variations().iter().any(|place| *place != 0) {
                     if boxes < show {
                         println!(
                             "  glyph {glyph}: box {ours:?}, theirs {theirs:?}, of corners {:?}",
@@ -239,23 +242,13 @@ fn varied_glyphs_agree_with_harfbuzz() {
     assert_eq!(wrong, 0);
 }
 
-/// Every point of a glyph's outline, in order. The line that closes a
-/// contour is left out when it ends where the contour started, or within
-/// a unit of it: a contour has that line only when its last point is not
-/// its first, which rounding its points can change.
-fn points(font: &Font<'_>, glyph: u16) -> Option<Vec<(f32, f32)>> {
+/// The points of each contour of a glyph's outline, in order.
+fn contours(font: &Font<'_>, glyph: u16) -> Option<Vec<Vec<(f32, f32)>>> {
     let outline = font.outline(glyph).ok()?;
-    let mut points = Vec::new();
+    let mut contours = Vec::new();
     for contour in &outline.contours {
-        points.push((contour.x, contour.y));
-        let mut segments = contour.segments.as_slice();
-        if let Some((Segment::Line { x, y }, rest)) = segments.split_last()
-            && (x - contour.x).abs() <= 1.0
-            && (y - contour.y).abs() <= 1.0
-        {
-            segments = rest;
-        }
-        for segment in segments {
+        let mut points = vec![(contour.x, contour.y)];
+        for segment in &contour.segments {
             match *segment {
                 Segment::Line { x, y } => points.push((x, y)),
                 Segment::Quad { cx, cy, x, y } => points.extend([(cx, cy), (x, y)]),
@@ -269,8 +262,45 @@ fn points(font: &Font<'_>, glyph: u16) -> Option<Vec<(f32, f32)>> {
                 } => points.extend([(c1x, c1y), (c2x, c2y), (x, y)]),
             }
         }
+        contours.push(points);
     }
-    Some(points)
+    Some(contours)
+}
+
+/// How far apart the farthest two matching points of two outlines are,
+/// along either axis; `None` when the outlines are not of the same
+/// points. A contour is closed by a line back to its start only when its
+/// last point is not its first, which rounding its points can change:
+/// where one contour has one point more than the other and that point is
+/// back at its start, it is that line, and is left out.
+fn apart(one: &[Vec<(f32, f32)>], other: &[Vec<(f32, f32)>]) -> Option<f32> {
+    if one.len() != other.len() {
+        return None;
+    }
+    let mut furthest = 0.0_f32;
+    for (one, other) in one.iter().zip(other) {
+        let closes = |points: &[(f32, f32)]| {
+            points
+                .first()
+                .zip(points.last())
+                .is_some_and(|(first, last)| (first.0 - last.0, first.1 - last.1) == (0.0, 0.0))
+        };
+        let (one, other) = if one.len() == other.len() + 1 && closes(one) {
+            (&one[..other.len()], other.as_slice())
+        } else if other.len() == one.len() + 1 && closes(other) {
+            (one.as_slice(), &other[..one.len()])
+        } else if one.len() == other.len() {
+            (one.as_slice(), other.as_slice())
+        } else {
+            return None;
+        };
+        for (one, other) in one.iter().zip(other) {
+            furthest = furthest
+                .max((one.0 - other.0).abs())
+                .max((one.1 - other.1).abs());
+        }
+    }
+    Some(furthest)
 }
 
 /// The advance of `glyph` as the moves of its edges give it, which is
@@ -297,6 +327,10 @@ fn edge_advance(font: &Font<'_>, glyph: u16) -> Option<u16> {
 /// compared as the face's table of advances gives it and, where that
 /// differs, as the moves of the glyph's edges give it: `hb-subset` writes
 /// the second, and a face whose two tables disagree is counted apart.
+/// An advance that is neither is counted as differing; where that has
+/// been seen, in glyphs made of parts in one face, `hb-shape` gave the
+/// advance this reader gives and `hb-subset` had left the glyph's
+/// advance as it is at the default.
 #[test]
 #[ignore = "reads the faces named in CUTLASS_VARIABLE_FACES and runs hb-subset"]
 #[allow(clippy::print_stdout)]
@@ -358,34 +392,26 @@ fn varied_outlines_agree_with_an_instance_harfbuzz_writes() {
                 } else if ours.advance(glyph) != theirs.advance(glyph) {
                     if advances < show {
                         println!(
-                            "  glyph {glyph}: advance {:?}, theirs {:?}",
+                            "  glyph {glyph}: advance {:?}, theirs {:?}; its edges give {:?}",
                             ours.advance(glyph),
-                            theirs.advance(glyph)
+                            theirs.advance(glyph),
+                            edge_advance(&ours, glyph)
                         );
                     }
                     advances += 1;
                 }
-                let (Some(one), Some(other)) = (points(&ours, glyph), points(&theirs, glyph))
+                let (Some(one), Some(other)) = (contours(&ours, glyph), contours(&theirs, glyph))
                 else {
                     far += 1;
                     continue;
                 };
-                if one.len() != other.len() {
+                let Some(apart) = apart(&one, &other) else {
                     if far < show {
-                        println!(
-                            "  glyph {glyph}: {} points, theirs {}",
-                            one.len(),
-                            other.len()
-                        );
+                        println!("  glyph {glyph}: not the same points as theirs");
                     }
                     far += 1;
                     continue;
-                }
-                let apart = one
-                    .iter()
-                    .zip(&other)
-                    .map(|(one, other)| (one.0 - other.0).abs().max((one.1 - other.1).abs()))
-                    .fold(0.0_f32, f32::max);
+                };
                 furthest = furthest.max(apart);
                 if apart > 2.001 {
                     if far < show {

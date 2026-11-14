@@ -37,7 +37,8 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
 
 - Profile 0, any size up to 65536×65536 (odd sizes too), quantizer index 0
   (lossless, Walsh-Hadamard) to 255.
-- Partitions from 64×64 to 8×8 (rectangles below speed 4), all ten
+- Partitions from 64×64 to 8×8 (rectangles below speed 4), and 4×4
+  intra blocks on key frames (each 4×4 with its own mode), all ten
   intra modes,
   NEAREST/NEAR/ZERO/NEW inter modes on LAST and GOLDEN, sub-sample motion
   (to eighths where the vector may be), per-block transform size
@@ -210,9 +211,11 @@ the picture moves too far for one picture to stand for the interval.
 - Not registered in the desktop app (the app has no VP9 opener yet). The
   crate registers on the video factories and offers `register_engine_encoders`
   for the engine's `EncodeFactory`.
+- Interpolation filters switch per block (EIGHTTAP, SMOOTH, SHARP, by
+  trial) at speeds 0–2; faster speeds keep EIGHTTAP.
 - The encoder writes profile 0 only: no compound prediction, no 4×4
-  partitions, no segmentation, no updates of the mode and vector
-  probabilities in the compressed header, EIGHTTAP filters only.
+  inter blocks, no segmentation, no updates of the mode and vector
+  probabilities in the compressed header.
 - At equal time the encoder is within about 8% of libvpx's good presets
   on moving content (ahead with more time, and far ahead on still content
   and against the realtime presets), and its fastest speed is 1.3–1.4×

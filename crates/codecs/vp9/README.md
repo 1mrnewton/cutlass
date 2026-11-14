@@ -218,31 +218,63 @@ runs 426 M instructions on the first 60 frames of the 4:2:0 stream
 against FFmpeg's 394 M, the loop filter's kernel fewer than FFmpeg's but
 with more time on its transposed loads, and the block parse around them.
 
-**Encode** (`tools/encbench.sh`, BD-rate with `tools/bdrate.py`): 30
-frames of 1280×720, 4 threads on both sides (libvpx with `-row-mt 1
+**Encode** (`tools/encbench.sh`, BD-rate with `tools/bdrate.py`):
+1280×720, 4 threads on both sides (libvpx with `-row-mt 1
 -tile-columns 2`), bitrates from 0.3 to 8 Mb/s. BD-rate is the bitrate
 change at equal PSNR-Y: negative is smaller files than libvpx-vp9. Times
 are the mean per run.
 
 A detailed picture panning 7 pixels a frame, with film grain, 60 frames
-(times are the mean of the four runs):
+(times are the mean of the four runs; Cutlass at q 90 to 150, libvpx at
+1 to 8 Mb/s):
 
 | Cutlass | libvpx-vp9 | BD-rate | Time (Cutlass / libvpx) |
 | --- | --- | ---: | --- |
-| speed 5 | good, cpu-used 1 | −4% | 5.4 s / 3.9 s |
-| speed 5 | good, cpu-used 5 | −17% | 5.4 s / 2.4 s |
-| speed 6 | good, cpu-used 5 | −7% | 4.3 s / 2.4 s |
-| speed 7 | good, cpu-used 5 | +8% | 2.5 s / 2.4 s |
-| speed 9 | realtime, cpu-used 6 | −33% | 0.70 s / 0.61 s |
-| speed 9 | realtime, cpu-used 8 | −57% | 0.70 s / 0.52 s |
-| speed 10 | realtime, cpu-used 8 | −62% to −69% | 0.46–0.50 s / 0.49–0.52 s |
+| speed 6 | good, cpu-used 1 | −1.5% | 2.76 s / 3.25 s |
+| speed 7 | good, cpu-used 2 | −0.5% | 1.48 s / 2.55 s |
+| speed 7 | good, cpu-used 3 | −7% | 1.48 s / 1.95 s |
+| speed 7 | good, cpu-used 5 | −14% | 1.48 s / 2.30 s |
+| speed 6 | good, cpu-used 5 | −17% | 2.76 s / 2.30 s |
+| speed 5 | good, cpu-used 5 | −28% | 4.32 s / 2.30 s |
+| speed 9 | realtime, cpu-used 6 | −51% | 0.44 s / 0.51 s |
+| speed 9 | realtime, cpu-used 8 | −74% | 0.44 s / 0.42 s |
+| speed 10 | realtime, cpu-used 8 | −69% | 0.41 s / 0.42 s |
 
-At equal bitrate speed 10 now takes libvpx realtime's time (0.50 s against
-0.49 s at 4.2 Mb/s, 0.49 s against 0.52 s at 2.2–2.5 Mb/s) at 2 to 4.7 dB
-more PSNR-Y. What moved it: the dead-zone quantizer on AVX2
-(`cutlass_simd::vp9::quant`, −19% of the time on one thread) and a tile's
-superblock rows lending each other their scratch instead of making and
-zeroing 240 KB each (−9%).
+Point by point against good, cpu-used 5, speed 7 is ahead at every rate:
+at 41.4 dB about 800 kb/s against 1082 kb/s in 1.24 s against 1.63 s, at
+43.2 dB the same 2 Mb/s in about 1.65 s against 1.90 s. Against
+cpu-used 1 speed 6 is ahead below 43 dB and behind above it (at 43.5 dB
+about 2.2 Mb/s against 2.0 Mb/s, in 3.3 s against 2.1 s).
+
+On a clean 720p clip (no grain, 60 frames) speed 7 is −18% against good,
+cpu-used 5 in its time (1.29 s against 1.33 s), and level with cpu-used
+1 (+2.4% on PSNR-Y, +0.4% averaged over the planes) in three quarters
+of its time.
+
+What moved the encoder most recently, at speed 6 unless said:
+
+- Rate weighs twice what libvpx's `rdmult` gives it in the RD decisions:
+  8 to 17% fewer bits at the same PSNR (luma, and averaged over the
+  planes), in the same time.
+- The search's trials take each coefficient's dead-zone level, costed
+  from the frame's token costs (a table made once a frame, not once a
+  transform block), and stop where the dead zone stops; only the chosen
+  blocks weigh levels against each other. With the transposed and
+  inverse scan tables and a loop of their own: 40% fewer instructions,
+  the same BD-rate.
+- RD quantization's 20 KB of scratch persists instead of being cleared
+  per transform block, and the encoder's snapshots are saved in place
+  instead of allocating three cleared buffers each (−16%).
+- The forward DCT folds its rows (half the multiplies) and uses fused
+  multiply-adds (FMA, checked with AVX2): −14% of the instructions.
+- GOLDEN and ALTREF are not searched while they predicted under 1% of
+  the last inter frame that searched them (−14% of the time, +0.5% of
+  the bits).
+- Speed 7 also tries its best inter candidate with the next smaller
+  transform: 2.4% fewer bits in about the same time.
+- Earlier, at speed 10: the dead-zone quantizer on AVX2
+  (`cutlass_simd::vp9::quant`, −19% of the time on one thread) and a
+  tile's superblock rows lending each other their scratch (−9%).
 
 In bitrate mode (1–4 Mb/s, the same clip) speed 5 is −1.8% against good,
 cpu-used 5 on PSNR-Y and higher on chroma.

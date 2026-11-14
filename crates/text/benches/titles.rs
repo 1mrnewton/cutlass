@@ -13,7 +13,7 @@
 
 use std::time::{Duration, Instant};
 
-use cutlass_model::{MaterialText, Micros, Segment, TimeRange};
+use cutlass_model::{BloomParams, LetterPose, MaterialText, Micros, Segment, TimeRange};
 use cutlass_picture::PictureSource;
 use cutlass_text::{NoFaces, TextCache, TextSource};
 
@@ -75,6 +75,69 @@ fn measure(name: &str, bytes: &[u8], content: &str) {
     );
 }
 
+/// A frame of the heaviest title: large letters with an outline, a
+/// shadow and a glow, each letter in a pose of its own, as a title is
+/// while its letters move. This is what such a title costs at each frame.
+fn measure_moving(name: &str, bytes: &[u8], content: &str) {
+    let mut text = title(content);
+    text.font_size = 144.0;
+    text.line_max_width = 1_800.0;
+    text.border_color = "#000000".to_owned();
+    text.border_alpha = 1.0;
+    text.border_width = 0.08;
+    text.has_shadow = true;
+    text.shadow_color = "#000000".to_owned();
+    text.shadow_alpha = 0.8;
+    text.shadow_angle = -45.0;
+    text.shadow_distance = 8.0;
+    text.shadow_smoothing = 0.5;
+    let glow = BloomParams {
+        color: "#FFCC00".to_owned(),
+        strength: 0.8,
+        range: 0.5,
+        ..BloomParams::default()
+    };
+    let segment = Segment::new("segment", "title", TimeRange::new(0, 1_000_000));
+    let cache = TextCache::new();
+    let open =
+        || TextSource::open_cached(bytes, None, &text, Some(&glow), &segment, &NoFaces, &cache);
+    if open().is_err() {
+        println!("{name}: does not open");
+        return;
+    }
+    let mut size = (0, 0);
+    let mut glyphs = 0;
+    let mut step = 0_u32;
+    // Opened from what is kept, posed and drawn, as each frame is.
+    let frame = median(|| {
+        let Ok(mut source) = open() else {
+            return;
+        };
+        step += 1;
+        let poses = (0..source.letters().len())
+            .map(|letter| {
+                let phase = f64::from(step) * 0.3 + f64::from(u32::try_from(letter).unwrap_or(0));
+                LetterPose {
+                    alpha: 0.5 + 0.5 * phase.sin().abs(),
+                    dx: 0.0,
+                    dy: 12.0 * phase.sin(),
+                    scale: 1.0 + 0.1 * phase.cos(),
+                }
+            })
+            .collect();
+        source.set_poses(poses);
+        size = source.size();
+        glyphs = source.records().len();
+        std::hint::black_box(source.sample(Micros(1_000)));
+    });
+    println!(
+        "{name}: {glyphs} glyphs, {}x{}; a frame with every letter moving {:.0} us",
+        size.0,
+        size.1,
+        frame.as_secs_f64() * 1e6,
+    );
+}
+
 fn main() {
     measure(
         "fixture, 48 letters",
@@ -108,5 +171,19 @@ fn main() {
             Ok(bytes) => measure(name, &bytes, content),
             Err(_) => println!("{name}: {path} is not on this machine"),
         }
+    }
+    measure_moving(
+        "fixture, moving, outline, shadow and glow",
+        FIXTURE,
+        "fie fie AVA eve fife five if a vie",
+    );
+    let arial = "/System/Library/Fonts/Supplemental/Arial.ttf";
+    match std::fs::read(arial) {
+        Ok(bytes) => measure_moving(
+            "Latin, Arial, moving, outline, shadow and glow",
+            &bytes,
+            "The quick brown fox jumps over",
+        ),
+        Err(_) => println!("moving: {arial} is not on this machine"),
     }
 }

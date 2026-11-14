@@ -18,6 +18,11 @@ type V = L<i64, 1>;
 /// major: `f[k * n + j]` multiplies sample `j` into coefficient `k`.
 struct Mats {
     m: [[Vec<f32>; 2]; 4],
+    /// The DCT's rows fold about their middle: even rows are symmetric in
+    /// their input, odd ones antisymmetric. These are the halves (even
+    /// rows, then odd, each `n / 2` wide) the folded pass multiplies by,
+    /// when the matrix folds to within rounding.
+    half: [Option<Vec<f32>>; 4],
 }
 
 fn inverse_1d(n: usize, adst: bool, i: &[V], o: &mut [V]) {
@@ -95,9 +100,26 @@ fn mats() -> &'static Mats {
             }
             invert(&inv, n).iter().map(|&v| v as f32).collect()
         };
-        Mats {
-            m: core::array::from_fn(|l| [build(l, false), build(l, true)]),
-        }
+        let m: [[Vec<f32>; 2]; 4] = core::array::from_fn(|l| [build(l, false), build(l, true)]);
+        let half = core::array::from_fn(|l| {
+            let n = 4usize << l;
+            let h = n / 2;
+            let full = &m[l][0];
+            let mut out = vec![0.0f32; n * h];
+            let mut worst = 0.0f32;
+            let mut peak = 0.0f32;
+            for k in 0..n {
+                let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
+                for j in 0..h {
+                    let (a, b) = (full[k * n + j], full[k * n + n - 1 - j]);
+                    out[((k % 2) * h + k / 2) * h + j] = (a + sign * b) / 2.0;
+                    worst = worst.max((a - sign * b).abs());
+                    peak = peak.max(a.abs());
+                }
+            }
+            (worst <= peak * 1e-3).then_some(out)
+        });
+        Mats { m, half }
     })
 }
 
@@ -126,23 +148,26 @@ pub fn forward(
     let fc = &m.m[log2n][usize::from(col_adst)];
     let fr = &m.m[log2n][usize::from(row_adst)];
     let gain = (1u32 << shift_of(log2n)) as f32;
+    let half = m.half[log2n].as_deref();
+    let hc = if col_adst { None } else { half };
+    let hr = if row_adst { None } else { half };
     cutlass_simd::vp9::wide(|| match log2n {
-        0 => fwd::<4>(res, stride, fc, fr, gain, out),
-        1 => fwd::<8>(res, stride, fc, fr, gain, out),
-        2 => fwd::<16>(res, stride, fc, fr, gain, out),
-        _ => fwd::<32>(res, stride, fc, fr, gain, out),
+        0 => fwd::<4>(res, stride, (fc, hc), (fr, hr), gain, out),
+        1 => fwd::<8>(res, stride, (fc, hc), (fr, hr), gain, out),
+        2 => fwd::<16>(res, stride, (fc, hc), (fr, hr), gain, out),
+        _ => fwd::<32>(res, stride, (fc, hc), (fr, hr), gain, out),
     });
 }
 
 /// `X = Fc · res · Frᵀ`, stored transposed. Both passes are sums of
-/// scaled rows, so that they run in vector lanes without reordering any
-/// sum.
+/// scaled rows, so that they run in vector lanes; a DCT pass folds its
+/// rows first (`half`) and multiplies by half as many weights.
 #[inline(always)]
 fn fwd<const N: usize>(
     res: &[i32],
     stride: usize,
-    fc: &[f32],
-    fr: &[f32],
+    (fc, hc): (&[f32], Option<&[f32]>),
+    (fr, hr): (&[f32], Option<&[f32]>),
     gain: f32,
     out: &mut [f32],
 ) {
@@ -157,32 +182,65 @@ fn fwd<const N: usize>(
     }
     // t[k] = Σj Fc[k][j] · src[j], then its transpose.
     let mut tt = [[0.0f32; N]; N];
-    for k in 0..N {
-        let mut acc = [0.0f32; N];
-        for (j, s) in src.iter().enumerate() {
-            let w = fc[k * N + j];
-            for x in 0..N {
-                acc[x] += w * s[x];
-            }
-        }
+    pass::<N>(&src, fc, hc, |k, acc| {
         for x in 0..N {
             tt[x][k] = acc[x];
         }
-    }
+    });
     // out[c] = gain · Σx Fr[c][x] · tᵀ[x].
-    for c in 0..N {
-        let mut acc = [0.0f32; N];
-        for (x, t) in tt.iter().enumerate() {
-            let w = fr[c * N + x];
+    pass::<N>(&tt, fr, hr, |c, acc| {
+        if let Some(o) = out[c * N..].first_chunk_mut::<N>() {
             for r in 0..N {
-                acc[r] += w * t[r];
+                o[r] = acc[r] * gain;
             }
         }
-        let Some(o) = out[c * N..].first_chunk_mut::<N>() else {
-            return;
-        };
-        for r in 0..N {
-            o[r] = acc[r] * gain;
+    });
+}
+
+/// One pass: `put(k, Σj w[k][j] · v[j])` for each output `k`, with the
+/// rows folded when `half` holds the folded weights.
+#[inline(always)]
+fn pass<const N: usize>(
+    v: &[[f32; N]; N],
+    w: &[f32],
+    half: Option<&[f32]>,
+    mut put: impl FnMut(usize, &[f32; N]),
+) {
+    match half {
+        Some(hw) if N >= 8 => {
+            let h = N / 2;
+            // Sums and differences of the rows about the middle.
+            let mut sd = [[[0.0f32; N]; N]; 2];
+            for j in 0..h {
+                for x in 0..N {
+                    let (a, b) = (v[j][x], v[N - 1 - j][x]);
+                    sd[0][j][x] = a + b;
+                    sd[1][j][x] = a - b;
+                }
+            }
+            for k in 0..N {
+                let (par, row) = (k % 2, k / 2);
+                let ws = &hw[(par * h + row) * h..(par * h + row) * h + h];
+                let mut acc = [0.0f32; N];
+                for (j, &wj) in ws.iter().enumerate() {
+                    for x in 0..N {
+                        acc[x] += wj * sd[par][j][x];
+                    }
+                }
+                put(k, &acc);
+            }
+        }
+        _ => {
+            for k in 0..N {
+                let mut acc = [0.0f32; N];
+                for (j, s) in v.iter().enumerate() {
+                    let wj = w[k * N + j];
+                    for x in 0..N {
+                        acc[x] += wj * s[x];
+                    }
+                }
+                put(k, &acc);
+            }
         }
     }
 }

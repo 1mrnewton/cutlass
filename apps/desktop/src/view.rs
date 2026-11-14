@@ -18841,6 +18841,105 @@ mod tests {
         shell
     }
 
+    /// The font menu has a search: typing leaves the faces whose names
+    /// have what was typed, and Enter takes the first of them.
+    #[test]
+    fn the_font_menu_is_searched_by_name() {
+        use cutlass_model::SegmentId;
+        use egui_kittest::kittest::Queryable;
+        let temp = std::env::temp_dir().join(format!("cutlass-font-search-{}", std::process::id()));
+        let mut shell = text_inspector_shell(&temp);
+        shell.use_faces(vec![
+            (
+                "sample.ttf",
+                include_bytes!("../../../crates/font/fixtures/sample.ttf").to_vec(),
+            ),
+            (
+                "shaping.ttf",
+                include_bytes!("../../../crates/font/fixtures/shaping.ttf").to_vec(),
+            ),
+            (
+                "han-kana.ttf",
+                include_bytes!("../../../crates/font/fixtures/han-kana.ttf").to_vec(),
+            ),
+        ]);
+        shell.select(Some(SegmentId::new("words")));
+        // With `CUTLASS_RENDER_DIR` set the open menu is painted by the
+        // real renderer and kept there to look at.
+        let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
+        let builder = egui_kittest::Harness::builder().with_size(Vec2::new(1280.0, 1600.0));
+        let builder = if keep.is_some() {
+            builder.wgpu()
+        } else {
+            builder
+        };
+        let mut harness = builder.build_ui_state(
+            |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+            (shell, {
+                // The empty media shelf's hint has a glyph the test
+                // fonts lack.
+                let mut view = ViewState::new();
+                view.library_shelf = Shelf::Stickers;
+                view
+            }),
+        );
+        harness.run_steps(4);
+        let listed = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>, label: &str| {
+            harness.query_all_by_label(label).count()
+        };
+        // Shut, the menu lists nothing and has no search.
+        assert_eq!(listed(&harness, "Search fonts"), 0);
+        assert_eq!(listed(&harness, "shaping"), 0);
+        harness.get_by_label("Font").click();
+        harness.run_steps(3);
+        // Open: the search, and every face.
+        assert_eq!(listed(&harness, "Search fonts"), 1);
+        assert_eq!(listed(&harness, "shaping"), 1);
+        assert_eq!(listed(&harness, "han kana"), 1);
+        // Typing a part of a name, in any case, leaves the faces with it.
+        harness.get_by_label("Search fonts").type_text("HAP");
+        harness.run_steps(3);
+        assert_eq!(listed(&harness, "shaping"), 1);
+        assert_eq!(listed(&harness, "han kana"), 0);
+        assert_eq!(listed(&harness, "No font has that name"), 0);
+        if let Some(dir) = &keep {
+            std::fs::create_dir_all(dir).unwrap();
+            let image = harness.render().expect("the renderer draws the window");
+            image.save(dir.join("font-search.png")).unwrap();
+        }
+        // A click in the field kept the menu open; more letters that no
+        // name has leave a line that says so.
+        harness.get_by_label("Search fonts").type_text("zz");
+        harness.run_steps(3);
+        assert_eq!(listed(&harness, "shaping"), 0);
+        assert_eq!(listed(&harness, "No font has that name"), 1);
+        // With a name typed, Enter takes the first face left and shuts
+        // the menu.
+        harness
+            .state_mut()
+            .1
+            .inspector
+            .fields
+            .insert("font search".to_owned(), "kana".to_owned());
+        harness.run_steps(2);
+        assert_eq!(listed(&harness, "han kana"), 1);
+        harness.key_press(egui::Key::Enter);
+        harness.run_steps(3);
+        assert_eq!(harness.state().0.inspection().unwrap().font, "han-kana.ttf");
+        assert_eq!(listed(&harness, "Search fonts"), 0);
+        // Opened again, the search is empty and every face is back.
+        harness.get_by_label("Font").click();
+        harness.run_steps(3);
+        assert_eq!(listed(&harness, "shaping"), 1);
+        assert_eq!(listed(&harness, "sample"), 1);
+        // A click on a face takes it.
+        harness.get_by_label("shaping").click();
+        harness.run_steps(3);
+        assert_eq!(harness.state().0.inspection().unwrap().font, "shaping.ttf");
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
     /// Nothing in the text or caption inspector draws past its content's
     /// right edge, 16 points in from the panel, where the scroll bar runs.
     #[test]

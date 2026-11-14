@@ -1986,7 +1986,7 @@ fn text_basic(
         } else {
             words_box(shell, ui, state);
         }
-        font_row(shell, ui, inspection);
+        font_row(shell, ui, state, inspection);
         let size = inspection.text_size.round();
         let changed = setting_row(
             shell,
@@ -2208,7 +2208,23 @@ fn pattern_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
     }
 }
 
-fn font_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
+/// Where the font menu's search keeps what was typed.
+const FONT_SEARCH: &str = "font search";
+
+/// The faces whose names have every word of `query`, in the order they
+/// were given; all of them for no words. Case does not matter.
+fn matching_faces<'f>(faces: &'f [(String, String)], query: &str) -> Vec<&'f (String, String)> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    faces
+        .iter()
+        .filter(|(_, label)| {
+            let label = label.to_lowercase();
+            words.iter().all(|word| label.contains(word.as_str()))
+        })
+        .collect()
+}
+
+fn font_row(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspection: &Inspection) {
     let faces = shell.text_face_labels();
     let current = if inspection.font.is_empty() {
         "System".to_owned()
@@ -2218,14 +2234,40 @@ fn font_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
             .find(|(name, _)| *name == inspection.font)
             .map_or_else(|| face_label(&inspection.font), |(_, label)| label.clone())
     };
+    let query = state.fields.entry(FONT_SEARCH.to_owned()).or_default();
     let mut picked = None;
     label_row(ui, "Font", |ui| {
         let shown = current.clone();
-        egui::ComboBox::from_id_salt("text-font")
+        let menu = egui::ComboBox::from_id_salt("text-font")
             .selected_text(current)
             .width(ui.available_width())
+            // A click in the search field keeps the menu open; a pick
+            // closes it.
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show_ui(ui, |ui| {
-                for (face, label) in &faces {
+                // A machine has hundreds of faces: typing a part of a
+                // name leaves the ones that have it.
+                let field = ui::Field::new(query)
+                    .hint("Search fonts")
+                    .name("Search fonts")
+                    .icon("search")
+                    .focus()
+                    .show(ui);
+                let matching = matching_faces(&faces, query);
+                // Enter takes the first face left.
+                let entered = field.response.lost_focus()
+                    && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                if entered && let Some((face, _)) = matching.first() {
+                    picked = Some(face.clone());
+                }
+                if matching.is_empty() {
+                    ui.label(
+                        RichText::new("No font has that name")
+                            .size(12.0)
+                            .color(tokens::FAINT),
+                    );
+                }
+                for (face, label) in matching {
                     if ui
                         .add(ui::Choice::new(*face == inspection.font, label.as_str()).wide())
                         .clicked()
@@ -2233,15 +2275,24 @@ fn font_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
                         picked = Some(face.clone());
                     }
                 }
-            })
-            .response
-            .widget_info(|| {
-                let mut info = egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Font");
-                info.current_text_value = Some(shown.clone());
-                info
+                if picked.is_some() {
+                    ui.close();
+                }
             });
+        // The search starts empty each time the menu opens.
+        if menu.inner.is_none() {
+            query.clear();
+        }
+        menu.response.widget_info(|| {
+            let mut info = egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Font");
+            info.current_text_value = Some(shown.clone());
+            info
+        });
     });
     if let Some(face) = picked {
+        if let Some(query) = state.fields.get_mut(FONT_SEARCH) {
+            query.clear();
+        }
         send(shell, |shell| shell.set_text_face(&face));
     }
 }
@@ -3664,7 +3715,40 @@ fn paint_icon(ui: &Ui, rect: Rect, name: &str, color: Color32) {
 
 #[cfg(test)]
 mod tests {
-    use super::leading_number;
+    use super::{leading_number, matching_faces};
+
+    #[test]
+    fn the_font_search_keeps_the_faces_with_every_word() {
+        let faces: Vec<(String, String)> = [
+            ("Arial.ttf", "Arial"),
+            ("Arial Bold.ttf", "Arial Bold"),
+            ("HelveticaNeue.ttc#3", "Helvetica Neue Bold Italic"),
+            ("Kohinoor.ttc#0", "Kohinoor Devanagari"),
+        ]
+        .iter()
+        .map(|(name, label)| ((*name).to_owned(), (*label).to_owned()))
+        .collect();
+        let found = |query: &str| -> Vec<&str> {
+            matching_faces(&faces, query)
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect()
+        };
+        // No words: every face, in the order given.
+        assert_eq!(found("").len(), 4);
+        assert_eq!(found("   ").len(), 4);
+        // A part of a name, in any case.
+        assert_eq!(found("aria"), ["Arial.ttf", "Arial Bold.ttf"]);
+        // Anywhere in the name.
+        assert_eq!(found("ari").len(), 3);
+        assert_eq!(found("NEUE"), ["HelveticaNeue.ttc#3"]);
+        // Every word must be there, in any order.
+        assert_eq!(found("bold arial"), ["Arial Bold.ttf"]);
+        assert_eq!(found("bold"), ["Arial Bold.ttf", "HelveticaNeue.ttc#3"]);
+        // It is the name people see that is searched, not the file's.
+        assert!(found("ttc").is_empty());
+        assert!(found("arial zz").is_empty());
+    }
 
     #[test]
     fn a_value_box_reads_the_number_before_its_suffix() {

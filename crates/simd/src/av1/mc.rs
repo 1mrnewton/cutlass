@@ -340,34 +340,58 @@ entry16!(
     /// `Round2` of the horizontal sums by `InterRound0`, then of the
     /// vertical sums by 7, less 8192, rows of `w` values `dst_stride`
     /// apart.
-    prep_hv_u16, i16, Prep, hv, prep_hv
+    prep_hv_u16,
+    i16,
+    Prep,
+    hv,
+    prep_hv
 );
 entry16!(
     /// The final samples of a block: `Round2` of the horizontal sums by
     /// `InterRound0`, then of the vertical sums by `InterRound1`, clipped
     /// to the bit depth.
-    put_hv_u16, u16, Put, hv, put_hv
+    put_hv_u16,
+    u16,
+    Put,
+    hv,
+    put_hv
 );
 entry16!(
     /// The compound intermediate of a block whose vertical fraction is 0:
     /// `Round2` of the horizontal sums by `InterRound0`, less 8192. `b.fv`
     /// is not read.
-    prep_h_u16, i16, Prep, h, prep_h
+    prep_h_u16,
+    i16,
+    Prep,
+    h,
+    prep_h
 );
 entry16!(
     /// The final samples of a block whose vertical fraction is 0, clipped
     /// to the bit depth. `b.fv` is not read.
-    put_h_u16, u16, Put, h, put_h
+    put_h_u16,
+    u16,
+    Put,
+    h,
+    put_h
 );
 entry16!(
     /// The compound intermediate of a block whose horizontal fraction is
     /// 0: `Round2` of the vertical sums of the samples by `InterRound0`,
     /// less 8192. `b.fh` is not read.
-    prep_v_u16, i16, Prep, v, prep_v
+    prep_v_u16,
+    i16,
+    Prep,
+    v,
+    prep_v
 );
 entry16!(
     /// The final samples of a block whose horizontal fraction is 0:
     /// `Round2` of the vertical sums of the samples by 7, clipped to the
     /// bit depth. `b.fh` is not read.
-    put_v_u16, u16, Put, v, put_v
+    put_v_u16,
+    u16,
+    Put,
+    v,
+    put_v
 );

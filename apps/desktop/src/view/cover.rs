@@ -41,6 +41,9 @@ pub(super) struct CoverDialog {
     /// The picture picked from disk, and how it shows.
     image: Option<PathBuf>,
     image_texture: Option<egui::TextureHandle>,
+    /// The frame drawn on the CPU when the preview has no GPU, and the
+    /// time it shows.
+    frame_texture: Option<(Micros, egui::TextureHandle)>,
     /// The strip's pictures, uploaded once each lands.
     strip: Vec<Option<egui::TextureHandle>>,
     strip_version: u64,
@@ -57,6 +60,7 @@ impl CoverDialog {
             return_to: playhead,
             image: None,
             image_texture: None,
+            frame_texture: None,
             strip: Vec::new(),
             strip_version: u64::MAX,
         };
@@ -200,24 +204,33 @@ fn body(shell: &mut Shell, ui: &mut Ui, dialog: &mut CoverDialog, pick_image: &m
         if shell.playhead() != dialog.time {
             shell.seek(dialog.time);
         }
-        match shell.preview_texture() {
-            Ok(Some((texture, _))) => {
-                ui.painter().image(
-                    texture,
-                    fit,
-                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    Color32::WHITE,
-                );
+        let texture = match shell.preview_texture() {
+            Ok(Some((texture, _))) => Some(texture),
+            // No GPU: the frame drawn on the CPU, as the preview falls back.
+            Ok(None) => cpu_frame(shell, ui.ctx(), dialog),
+            Err(error) => {
+                shell.note_preview(Some(&error));
+                None
             }
-            Ok(None) => {}
-            Err(error) => shell.note_preview(Some(&error)),
+        };
+        if let Some(texture) = texture {
+            ui.painter().image(
+                texture,
+                fit,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
         }
         if shell.preview_pending() {
             ui.ctx().request_repaint();
         }
     }
     ui.add_space(16.0);
-    ui.vertical_centered(|ui| {
+    // Centred by the width the tabs took last frame.
+    let tabs_id = egui::Id::unique("cover tabs width");
+    let tabs_width: f32 = ui.data(|data| data.get_temp(tabs_id)).unwrap_or(0.0);
+    let tabs = ui.horizontal(|ui| {
+        ui.add_space(((width - tabs_width) / 2.0).max(0.0));
         crate::ui::Segmented::show(ui, |ui| {
             for (local, name) in [(false, "Select from video"), (true, "Local")] {
                 if ui
@@ -230,8 +243,15 @@ fn body(shell: &mut Shell, ui: &mut Ui, dialog: &mut CoverDialog, pick_image: &m
                     }
                 }
             }
-        });
+        })
+        .response
+        .rect
+        .width()
     });
+    if (tabs.inner - tabs_width).abs() > 0.5 {
+        ui.data_mut(|data| data.insert_temp(tabs_id, tabs.inner));
+        ui.ctx().request_repaint();
+    }
     ui.add_space(12.0);
     if dialog.local {
         local_row(ui, dialog, pick_image);
@@ -333,6 +353,26 @@ fn strip(shell: &mut Shell, ui: &mut Ui, dialog: &mut CoverDialog, aspect: f32) 
         egui::StrokeKind::Inside,
     );
     response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+}
+
+/// The timeline's picture at the dialog's time drawn on the CPU, drawn
+/// again only when the time moves.
+fn cpu_frame(
+    shell: &mut Shell,
+    ctx: &egui::Context,
+    dialog: &mut CoverDialog,
+) -> Option<egui::TextureId> {
+    if let Some((time, texture)) = &dialog.frame_texture
+        && *time == dialog.time
+    {
+        return Some(texture.id());
+    }
+    let picture = shell.preview_bytes().ok()?;
+    let image = super::raster(&picture)?;
+    let texture = ctx.load_texture("cover frame", image, egui::TextureOptions::LINEAR);
+    let id = texture.id();
+    dialog.frame_texture = Some((dialog.time, texture));
+    Some(id)
 }
 
 /// The largest rect of `aspect` (width over height) centred in `outer`.

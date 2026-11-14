@@ -137,6 +137,7 @@ mod tests {
             "\u{645}\u{631}\u{62D}\u{628}\u{627} \u{628}\u{627}\u{644}\u{639}\u{627}\u{644}\u{645} 123 (abc) \u{628}\u{650}\u{633}\u{652}\u{645}\u{650} \u{627}\u{644}\u{644}\u{651}\u{64E}\u{647}\u{650}",
             "\u{928}\u{92E}\u{938}\u{94D}\u{924}\u{947} \u{926}\u{941}\u{928}\u{93F}\u{92F}\u{93E} \u{939}\u{93F}\u{928}\u{94D}\u{926}\u{940} \u{915}\u{94D}\u{937}\u{924}\u{94D}\u{930}\u{93F}\u{92F}",
             "\u{5E9}\u{5B8}\u{5C1}\u{5DC}\u{5D5}\u{5B9}\u{5DD} \u{5E2}\u{5D5}\u{5DC}\u{5DD} \u{4E2D}\u{6587}\u{5B57} \u{D55C}\u{AE00} \u{E44}\u{E17}\u{E22}",
+            "\u{6771}\u{4EAC}\u{306F}\u{6674}\u{308C}\u{3001}\u{76F4}\u{3059} \u{4E2D}\u{6587}\u{76F4} 1\u{FE0F}\u{20E3} \u{D55C}\u{AD6D}\u{8A9E}",
             "A long line that has to wrap at a word and never in the middle of one, however narrow.",
         ];
         for (index, line) in lines.iter().enumerate() {

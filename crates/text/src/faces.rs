@@ -179,6 +179,12 @@ pub(crate) fn gather<'f>(
     // Fallback faces, each read once: where its bytes are, and its place.
     let mut fallbacks: Vec<(*const u8, usize, usize)> = Vec::new();
     let mut others = Vec::new();
+    // The first kana of the text, or else its first Hangul.
+    let scripts = |wanted: &[&[u8; 4]]| {
+        text.chars()
+            .find(|character| wanted.contains(&&props(*character).script()))
+    };
+    let guide = scripts(&[b"Hira", b"Kana"]).or_else(|| scripts(&[b"Hang"]));
     let mut characters = text.char_indices().peekable();
     while let Some((at, character)) = characters.next() {
         let mut face = of_run(at);
@@ -229,26 +235,39 @@ pub(crate) fn gather<'f>(
             let in_color =
                 chosen.is_some_and(|font| font.has_color_strike() || font.has_color_layers());
             if !able || (emoji && !in_color) {
-                let found = source.fallback(character, emoji).and_then(|bytes| {
+                let mut held = |bytes: &'f [u8]| {
                     let key = (bytes.as_ptr(), bytes.len());
-                    if let Some((_, _, index)) = fallbacks
+                    let known = fallbacks
                         .iter()
                         .find(|(start, len, _)| (*start, *len) == key)
-                    {
-                        return Some(*index);
-                    }
-                    if fallbacks.len() == MAX_FALLBACK_FACES {
-                        return None;
-                    }
-                    let other = cutlass_font::read(bytes).ok()?;
-                    fallbacks.push((key.0, key.1, fonts.len()));
-                    fonts.push(other);
-                    Some(fonts.len() - 1)
-                });
-                // A fallback that cannot draw it either is not used.
-                if let Some(index) = found
-                    .filter(|index| fonts.get(*index).is_some_and(|font| draws(font, character)))
-                {
+                        .map(|(_, _, index)| *index);
+                    let index = match known {
+                        Some(index) => index,
+                        None if fallbacks.len() == MAX_FALLBACK_FACES => return None,
+                        None => {
+                            let other = cutlass_font::read(bytes).ok()?;
+                            fallbacks.push((key.0, key.1, fonts.len()));
+                            fonts.push(other);
+                            fonts.len() - 1
+                        }
+                    };
+                    // A fallback that cannot draw it either is not used.
+                    fonts
+                        .get(index)
+                        .is_some_and(|font| draws(font, character))
+                        .then_some(index)
+                };
+                // A Han character is written differently in Japan, in
+                // Korea and in China, and one face draws one of them: it
+                // takes the face of the kana or the Hangul in the same
+                // text, when there are any and that face has it.
+                let beside = guide
+                    .filter(|_| !emoji && props.script() == *b"Hani")
+                    .and_then(|guide| source.fallback(guide, false))
+                    .and_then(&mut held);
+                let found =
+                    beside.or_else(|| source.fallback(character, emoji).and_then(&mut held));
+                if let Some(index) = found {
                     face = index;
                     real_bold = false;
                     real_italic = false;
@@ -338,6 +357,58 @@ mod tests {
         // With no source, nothing changes.
         let alone = gather(own(), "Af", &[], PLAIN, &NoFaces);
         assert_eq!((alone.fonts.len(), alone.pick(1)), (1, 0));
+    }
+
+    #[test]
+    fn a_han_character_takes_the_face_of_the_kana_or_hangul_beside_it() {
+        const HAN: &[u8] = include_bytes!("../../font/fixtures/han.ttf");
+        const KANA: &[u8] = include_bytes!("../../font/fixtures/han-kana.ttf");
+        const HANGUL: &[u8] = include_bytes!("../../font/fixtures/han-hangul.ttf");
+        // Water is 500 wide in the face of Han alone, 700 in the face
+        // with kana and 900 in the one with Hangul. The source offers the
+        // first for a Han character, as a table that ranks a Chinese face
+        // first does.
+        let source = Table::new(
+            |_| None,
+            |character| match character {
+                '\u{3042}' => Some(KANA),
+                '\u{AC00}' => Some(HANGUL),
+                '\u{6C34}' => Some(HAN),
+                _ => None,
+            },
+        );
+        let width = |text: &str| {
+            let faces = gather(own(), text, &[], PLAIN, &source);
+            let at = text.find('\u{6C34}').expect("water");
+            let font = &faces.fonts[faces.pick(at)];
+            let glyph = font.glyph_id('\u{6C34}').expect("map").expect("water");
+            font.advance(glyph).expect("advance")
+        };
+        assert_eq!(width("\u{6C34}"), 500);
+        assert_eq!(width("A \u{6C34}"), 500);
+        // Kana anywhere in the text, before or after it.
+        assert_eq!(width("\u{6C34}\u{3042}"), 700);
+        assert_eq!(width("\u{3042}A\u{6C34}"), 700);
+        assert_eq!(width("\u{AC00}\u{6C34}"), 900);
+        // Kana before Hangul when a text has both.
+        assert_eq!(width("\u{AC00}\u{6C34}\u{3042}"), 700);
+        // A face beside it that lacks the character is passed over.
+        let lacking = Table::new(
+            |_| None,
+            |character| match character {
+                '\u{3042}' => Some(SHAPING),
+                '\u{6C34}' => Some(HAN),
+                _ => None,
+            },
+        );
+        let faces = gather(own(), "\u{3042}\u{6C34}", &[], PLAIN, &lacking);
+        let font = &faces.fonts[faces.pick(3)];
+        assert_eq!(font.glyph_id('\u{6C34}'), Ok(Some(1)));
+        assert_eq!(font.advance(1), Ok(500));
+        // The title's own face still comes first.
+        let japanese = cutlass_font::read(KANA).expect("kana");
+        let faces = gather(japanese, "\u{AC00}\u{6C34}", &[], PLAIN, &source);
+        assert_eq!(faces.pick(3), 0);
     }
 
     #[test]

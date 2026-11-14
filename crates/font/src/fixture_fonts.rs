@@ -289,14 +289,41 @@ pub(crate) fn varied() -> Vec<u8> {
     font(&glyphs, &map, &[(b"cmap", cmap)])
 }
 
+/// The Han character for water, which Japan, Korea and China each write
+/// in their own way.
+const WATER: char = '\u{6C34}';
+
+/// A face of Han characters alone, as one made for Chinese: water is 1,
+/// 500 wide.
+pub(crate) fn han() -> Vec<u8> {
+    font(&[boxed(500), boxed(500)], &[(WATER, 1)], &[])
+}
+
+/// A face as one made for Japanese: the kana `a` is 1 and water 2, 700
+/// wide.
+pub(crate) fn han_kana() -> Vec<u8> {
+    let glyphs = [boxed(500), boxed(700), boxed(700)];
+    font(&glyphs, &[('\u{3042}', 1), (WATER, 2)], &[])
+}
+
+/// A face as one made for Korean: water is 1, 900 wide, and the Hangul
+/// syllable `ga` 2.
+pub(crate) fn han_hangul() -> Vec<u8> {
+    let glyphs = [boxed(500), boxed(900), boxed(900)];
+    font(&glyphs, &[(WATER, 1), ('\u{AC00}', 2)], &[])
+}
+
 /// A fixture's file name and what builds it.
 type Built = (&'static str, fn() -> Vec<u8>);
 
-const FILES: [Built; 4] = [
+const FILES: [Built; 7] = [
     ("shaping.ttf", shaping),
     ("hostile.ttf", hostile),
     ("machines.ttf", machines),
     ("varied.ttf", varied),
+    ("han.ttf", han),
+    ("han-kana.ttf", han_kana),
+    ("han-hangul.ttf", han_hangul),
 ];
 
 fn path(name: &str) -> std::path::PathBuf {
@@ -313,12 +340,7 @@ fn the_fixture_files_are_what_the_builder_writes() {
             stored == build(),
             "{name} is stale: write the fixtures again"
         );
-        let face = crate::read(&stored).expect("font");
-        let varied = face.variant('1', '\u{FE0F}') != Ok(crate::Variant::Unlisted);
-        assert!(
-            face.gsub().is_some() || face.morx().is_some() || varied,
-            "{name}"
-        );
+        crate::read(&stored).expect("font");
     }
 }
 

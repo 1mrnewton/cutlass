@@ -88,6 +88,7 @@ pub const FALLBACK_FACES: &[&str] = &[
     // Chinese, Japanese and Korean.
     "PingFang.ttc",
     "Hiragino Sans GB.ttc",
+    "ヒラギノ角ゴシック W3.ttc",
     "AppleSDGothicNeo.ttc",
     "msyh.ttc",
     "YuGothR.ttc",
@@ -386,6 +387,38 @@ impl FaceTable {
     }
 }
 
+/// Faces made for Japanese, which come first for kana: a face made for
+/// Chinese has kana too, drawn beside Han characters in the Chinese way.
+const JAPANESE_FACES: &[&str] = &[
+    "ヒラギノ角ゴシック W3.ttc",
+    "YuGothR.ttc",
+    "meiryo.ttc",
+    "msgothic.ttc",
+    "NotoSansCJK-Regular.ttc",
+    "NotoSansCJKjp-Regular.otf",
+    "NotoSansJP-Regular.otf",
+    "NotoSansJP-Regular.ttf",
+];
+
+/// Faces made for Korean, which come first for Hangul.
+const KOREAN_FACES: &[&str] = &[
+    "AppleSDGothicNeo.ttc",
+    "malgun.ttf",
+    "NotoSansCJKkr-Regular.otf",
+    "NotoSansKR-Regular.otf",
+    "NotoSansKR-Regular.ttf",
+];
+
+/// The faces that come first for `character`: those of its language,
+/// where the script says which that is.
+fn leading(character: char) -> &'static [&'static str] {
+    match u32::from(character) {
+        0x3040..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9F => JAPANESE_FACES,
+        0x1100..=0x11FF | 0x3130..=0x318F | 0xA960..=0xA97F | 0xAC00..=0xD7FF => KOREAN_FACES,
+        _ => &[],
+    }
+}
+
 impl Fonts for FaceTable {
     fn face(&self, path: &str) -> Option<&[u8]> {
         let at = self.faces.iter().position(|face| face.name == path)?;
@@ -407,7 +440,20 @@ impl Fonts for FaceTable {
         };
         let (first, second): (Vec<usize>, Vec<usize>) =
             self.fallbacks.iter().partition(|at| is_emoji(at) == emoji);
-        let hit = first.into_iter().chain(second).find(|at| {
+        // And before those, the faces of the character's own language.
+        let leading = leading(character);
+        let leads = |at: &usize| {
+            self.faces.get(*at).is_some_and(|face| {
+                // A collection's first face is named with `#0` after the file.
+                let file = face.name.strip_suffix("#0").unwrap_or(&face.name);
+                leading
+                    .iter()
+                    .any(|name| file.to_lowercase() == name.to_lowercase())
+            })
+        };
+        let (own, rest): (Vec<usize>, Vec<usize>) =
+            first.into_iter().chain(second).partition(|at| leads(at));
+        let hit = own.into_iter().chain(rest).find(|at| {
             self.bytes_at(*at)
                 .and_then(|bytes| cutlass_font::read(bytes).ok())
                 .is_some_and(|font| matches!(font.glyph_id(character), Ok(Some(_))))
@@ -770,6 +816,51 @@ mod tests {
         // that is not an emoji face, an emoji from the emoji face.
         assert_eq!(table.fallback('f', false), table.face("arial.ttf"));
         assert_eq!(table.fallback('f', true), table.face("NotoColorEmoji.ttf"));
+    }
+
+    #[test]
+    fn kana_and_hangul_come_from_a_face_of_their_own_language() {
+        const HAN: &[u8] = include_bytes!("../../font/fixtures/han.ttf");
+        const KANA: &[u8] = include_bytes!("../../font/fixtures/han-kana.ttf");
+        const HANGUL: &[u8] = include_bytes!("../../font/fixtures/han-hangul.ttf");
+        // The same face under another name, told apart by bytes after it.
+        let padded = |bytes: &[u8]| [bytes, &[0; 4]].concat();
+        let folder = Folder::new("languages");
+        // Faces made for Chinese are ranked first, and two of them here
+        // also draw kana and Hangul.
+        for (name, bytes) in [
+            ("PingFang.ttc", HAN.to_vec()),
+            ("Hiragino Sans GB.ttc", padded(KANA)),
+            ("msyh.ttc", padded(HANGUL)),
+            ("ヒラギノ角ゴシック W3.ttc", KANA.to_vec()),
+            ("malgun.ttf", HANGUL.to_vec()),
+        ] {
+            std::fs::write(folder.0.join(name), bytes).expect("face");
+        }
+        let table = FaceTable::scan(&[&folder.0]);
+        assert_eq!(table.fallback_names().len(), 5, "{:?}", table.names());
+        let face = |name: &str| {
+            let found = table
+                .face(name)
+                .or_else(|| table.face(&format!("{name}#0")));
+            assert!(found.is_some(), "{name}");
+            found
+        };
+        // A Han character alone is drawn the Chinese way.
+        assert_eq!(table.fallback('\u{6C34}', false), face("PingFang.ttc"));
+        // Kana and Hangul pass over the Chinese faces that have them.
+        assert_eq!(
+            table.fallback('\u{3042}', false),
+            face("ヒラギノ角ゴシック W3.ttc")
+        );
+        assert_eq!(table.fallback('\u{AC00}', false), face("malgun.ttf"));
+        // Without a face of the language, a Chinese face that has it is used.
+        std::fs::remove_file(folder.0.join("malgun.ttf")).expect("remove");
+        let table = FaceTable::scan(&[&folder.0]);
+        assert_eq!(
+            table.fallback('\u{AC00}', false),
+            table.face("msyh.ttc").or_else(|| table.face("msyh.ttc#0"))
+        );
     }
 
     #[test]

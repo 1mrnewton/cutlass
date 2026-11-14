@@ -248,6 +248,8 @@ A detailed picture panning 7 pixels a frame, with film grain, 60 frames
 
 | Cutlass | libvpx-vp9 | BD-rate Y | BD-rate avg | Time (Cutlass / libvpx) |
 | --- | --- | ---: | ---: | --- |
+| speed 4, lag 16 | good, cpu-used 0 | −24% | −1.6% | 4.56 s / 7.00 s |
+| speed 6, lag 16 | good, cpu-used 0 | −18% | −0.9% | 2.95 s / 7.00 s |
 | speed 4 | good, cpu-used 0 | −15% | +8.4% | 4.24 s / 7.00 s |
 | speed 5 | good, cpu-used 1 | −20% | −4.6% | 2.67 s / 2.35 s |
 | speed 6 | good, cpu-used 1 | −16% | −3.6% | 1.93 s / 2.35 s |
@@ -255,15 +257,24 @@ A detailed picture panning 7 pixels a frame, with film grain, 60 frames
 | speed 7 | good, cpu-used 3 | −27% | −4.8% | 1.24 s / 1.61 s |
 | speed 7 | good, cpu-used 5 | −32% | −13% | 1.24 s / 1.62 s |
 | speed 9 | realtime, cpu-used 6 | −43% | −25% | 0.47 s / 0.51 s |
-| speed 10 | realtime, cpu-used 8 | | −60% | 0.46 s / 0.42 s |
+| speed 10 | realtime, cpu-used 8 | −76% | −65% | 0.40 s / 0.44 s |
 
-(All in one sitting.) FFmpeg's `libvpx-vp9` encodes at good, cpu-used 1
-unless told otherwise: speed 6 is ahead of it on both measures in four
-fifths of its time, and every good preset from cpu-used 1 to 5 has a
-Cutlass speed ahead of it on both measures in less time. libvpx's
-slowest, cpu-used 0, keeps more chroma (0.8 dB more U and V PSNR at
-13% fewer bits than speed 5's 42.96 dB Y at 1.3 Mb/s); Cutlass's slow
-speeds are ahead on PSNR-Y and behind on the average there.
+FFmpeg's `libvpx-vp9` encodes at good, cpu-used 1 with 25 pictures of
+lookahead unless told otherwise: speed 6 is ahead of it on both
+measures in four fifths of its time, and every libvpx preset, from good
+cpu-used 0 to realtime 8, has a Cutlass speed ahead of it on both
+measures in less time. Cutlass's lookahead is off by default
+(`Vp9Options::lag`); with 16 pictures its alt-refs take speed 6 past
+libvpx's slowest, cpu-used 0, in under half its time. Without it,
+cpu-used 0 keeps more chroma (0.8 dB more U and V PSNR at 13% fewer
+bits than speed 5's 42.96 dB Y at 1.3 Mb/s): from frame 16 on, its
+temporally filtered alt-refs predict the grain-free picture, which
+counts most in chroma. A lookahead costs about a fifth more time at
+speed 6 (alt-ref frames are coded at a finer quantizer, and at speed 6
+at the fastest); on the clean clip below it takes 10.5% off the bits at
+the same PSNR-Y and 6.4% at the same averaged PSNR. (The lag rows and
+speed 10's are from a later sitting than the others, in which libvpx's
+times were the same within 5%.)
 
 On a clean 720p clip (no grain, 60 frames) speed 7 is ahead of good,
 cpu-used 1 on both measures (−15% on PSNR-Y, −3.2% averaged) in three
@@ -272,6 +283,18 @@ cpu-used 5 in its time; speed 6 is −9% / −11% against cpu-used 1 in its
 time.
 
 What moved the encoder most recently, at speed 6 unless said:
+
+- The alt-ref's test of whether the interval holds together took a
+  match only within 16 samples of where it was, so a steady pan never
+  made one; it takes one anywhere in the search range now. Alt-refs are
+  coded at speed 6 at the fastest (the one-pass path's short search
+  found nothing a golden interval away and coded them as intra, larger
+  than a key frame), and the temporal filter runs on threads. With lag
+  16: −24% / −1.6% against cpu-used 0, from −15% / +8.4% without.
+- Speed 10: each plane's columns go into the picture and through the
+  loop filter on its own thread while the tiles' symbols are written
+  (they were one after the other), and the diamond's four points are one
+  SAD call (−7% of the time, the same streams).
 
 - With the refinement pruned, speed 6 can afford speed 5's sub-sample
   scoring on the real filters and its check of every whole sample within

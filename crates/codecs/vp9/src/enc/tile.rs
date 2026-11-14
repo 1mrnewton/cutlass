@@ -316,6 +316,19 @@ fn have_left_of(c: usize, b: &Blk, col0: usize) -> bool {
     c > 0 || b.col > col0
 }
 
+/// The scratch a tile's rows lend one another: made once, not for every
+/// superblock row.
+#[derive(Default)]
+pub struct TileBufs {
+    pred: Vec<u8>,
+    res: Vec<i32>,
+    fcoef: Vec<f32>,
+    snaps: Vec<Snap>,
+    toks: Vec<Tok>,
+    pool: Vec<Vec<i32>>,
+    mctmp: Vec<u8>,
+}
+
 /// The encoder of one tile.
 pub struct Tile<'s, 't, 'r, 'v> {
     s: &'s Shared<'s>,
@@ -388,8 +401,23 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         rec: &'t mut Recon<'r, 'v, u8>,
         (col0, col1): (usize, usize),
         mut seeds: Vec<Mv>,
+        bufs: TileBufs,
     ) -> Self {
         seeds.resize(s.mi_cols * s.mi_rows, Mv::ZERO);
+        let TileBufs {
+            mut pred,
+            mut res,
+            mut fcoef,
+            mut snaps,
+            toks,
+            pool,
+            mut mctmp,
+        } = bufs;
+        pred.resize(64 * 64, 0);
+        res.resize(64 * 64, 0);
+        fcoef.resize(32 * 32, 0.0);
+        snaps.resize_with(17, Snap::default);
+        mctmp.resize(cutlass_simd::vp9::mc::TMP, 0);
         Self {
             s,
             f,
@@ -402,22 +430,22 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             left_nz: [[0; 16]; 3],
             cache: [0; 1024],
             seg: 0,
-            pred: vec![0; 64 * 64],
-            res: vec![0; 64 * 64],
-            fcoef: vec![0.0; 32 * 32],
+            pred,
+            res,
+            fcoef,
             seeds,
             choice: [Blk::default(); 85],
             part: [PARTITION_NONE; 21],
             rect: [[[Blk::default(); 2]; 21]; 2],
-            snaps: (0..17).map(|_| Snap::default()).collect(),
-            toks: Vec::new(),
+            snaps,
+            toks,
             last_sad: 0,
             last_satd: u64::MAX,
             found: [(Mv::ZERO, u64::MAX); 85],
-            pool: Vec::new(),
+            pool,
             sub: [geom::DC; 4],
             sub8: [PARTITION_NONE; 64],
-            mctmp: vec![0; cutlass_simd::vp9::mc::TMP],
+            mctmp,
             cur_ref: 0,
             coded_skip: false,
             choice_skip: (false, 0.0),
@@ -428,9 +456,21 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         }
     }
 
-    /// The vectors found, for the next row's tile.
-    pub fn finish(self) -> Vec<Mv> {
-        self.seeds
+    /// The vectors found, for the next row's tile, and the buffers to
+    /// lend it.
+    pub fn finish(self) -> (Vec<Mv>, TileBufs) {
+        (
+            self.seeds,
+            TileBufs {
+                pred: self.pred,
+                res: self.res,
+                fcoef: self.fcoef,
+                snaps: self.snaps,
+                toks: self.toks,
+                pool: self.pool,
+                mctmp: self.mctmp,
+            },
+        )
     }
 
     /// Encodes the superblocks of one row of this tile: each superblock's

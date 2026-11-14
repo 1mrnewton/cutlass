@@ -95,6 +95,7 @@ struct TileWork {
     scratch: Scratch<u8>,
     /// The tile's symbols, written once the frame's probabilities are.
     out: tile::Out,
+    bufs: tile::TileBufs,
 }
 
 impl TileWork {
@@ -105,6 +106,7 @@ impl TileWork {
             state: State::empty(),
             scratch: Scratch::new(),
             out: Vec::new(),
+            bufs: tile::TileBufs::default(),
         }
     }
 }
@@ -566,9 +568,10 @@ impl FrameEncoder {
                     &mut rec,
                     (col0, col1),
                     seeds,
+                    std::mem::take(&mut t.bufs),
                 );
                 tile.sb_row(r * 8);
-                seeds = tile.finish();
+                (seeds, t.bufs) = tile.finish();
             }
             t.seeds = seeds;
             Ok(())

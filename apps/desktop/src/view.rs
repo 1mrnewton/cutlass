@@ -1388,6 +1388,8 @@ fn licenses_window(ui: &mut Ui, view: &mut ViewState) {
                 ui.add_space(8.0);
                 sticker_credits(ui);
                 ui.add_space(8.0);
+                font_credits(ui);
+                ui.add_space(8.0);
                 for krate in &notices.crates {
                     egui::CollapsingHeader::new(format!("{} {}", krate.name, krate.version))
                         .id_salt(("license", &krate.name, &krate.version))
@@ -1424,6 +1426,24 @@ fn sticker_credits(ui: &mut Ui) {
             .id_salt(("sticker license", credit.set))
             .show(ui, |ui| {
                 ui.label(RichText::new(credit.text).monospace().size(10.0));
+            });
+    }
+}
+
+/// The faces that are part of the app: each face, who made it, its
+/// license and its home, and the license text under it.
+fn font_credits(ui: &mut Ui) {
+    ui.label(RichText::new("Fonts").strong());
+    for face in crate::face::BUILT_IN {
+        ui.label(format!(
+            "{} by {}, licensed under the {}.",
+            face.family, face.author, face.license
+        ));
+        ui.label(RichText::new(face.link).color(tokens::FAINT));
+        egui::CollapsingHeader::new(format!("{} license", face.family))
+            .id_salt(("font license", face.name))
+            .show(ui, |ui| {
+                ui.label(RichText::new(face.text).monospace().size(10.0));
             });
     }
 }
@@ -12803,6 +12823,16 @@ mod tests {
             painted.contains("https://googlefonts.github.io/noto-emoji-animation/"),
             "{painted}"
         );
+        // So are the faces that are part of the app, each with its license.
+        assert!(painted.contains("Fonts"), "{painted}");
+        for credit in [
+            "Ubuntu Light by Dalton Maag, for Canonical, licensed under the Ubuntu Font Licence 1.0.",
+            "Hack by Source Foundry, licensed under the MIT, with the Bitstream Vera license.",
+            "Noto Emoji by Google, licensed under the SIL Open Font License 1.1.",
+            "https://design.ubuntu.com/font",
+        ] {
+            assert!(painted.contains(credit), "{credit}: {painted}");
+        }
         run(
             &mut shell,
             &mut view,

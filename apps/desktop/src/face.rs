@@ -4,7 +4,9 @@
 //! desktop keeps its fonts: the system's folders, the person's own, the
 //! `Fonts` folder of the Cutlass home, and a `fonts` folder shipped beside
 //! the app. Only names are read at the start; a face's file is read when a
-//! frame first asks for it.
+//! frame first asks for it. A few open faces are part of the program
+//! itself, so a system with no fonts still has a face to set text in, and
+//! one with no emoji face still draws emoji.
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -21,6 +23,58 @@ const DEFAULT_FACES: &[&str] = &[
     "NewYork.ttf",
     "DejaVuSans.ttf",
     "LiberationSans-Regular.ttf",
+    // The face that is part of the program, where none of those is.
+    "Ubuntu-Light.ttf",
+];
+
+/// A face that is part of the program: its file name, its bytes, and its
+/// credit for the licenses screen.
+#[derive(Clone, Copy, Debug)]
+pub struct BuiltIn {
+    pub name: &'static str,
+    pub bytes: &'static [u8],
+    pub family: &'static str,
+    pub author: &'static str,
+    /// The license's name, as its text gives it.
+    pub license: &'static str,
+    /// The face's home.
+    pub link: &'static str,
+    /// The license text, word for word.
+    pub text: &'static str,
+}
+
+/// The faces that are part of the program. They are the ones the window
+/// itself is drawn with, so offering them for titles adds nothing to the
+/// download. Which further faces to ship is still to be chosen: a face is
+/// added with one entry here and its license text beside the others.
+pub const BUILT_IN: &[BuiltIn] = &[
+    BuiltIn {
+        name: "Ubuntu-Light.ttf",
+        bytes: epaint_default_fonts::UBUNTU_LIGHT,
+        family: "Ubuntu Light",
+        author: "Dalton Maag, for Canonical",
+        license: "Ubuntu Font Licence 1.0",
+        link: "https://design.ubuntu.com/font",
+        text: include_str!("../licenses/fonts/Ubuntu-Light.txt"),
+    },
+    BuiltIn {
+        name: "Hack-Regular.ttf",
+        bytes: epaint_default_fonts::HACK_REGULAR,
+        family: "Hack",
+        author: "Source Foundry",
+        license: "MIT, with the Bitstream Vera license",
+        link: "https://github.com/source-foundry/Hack",
+        text: include_str!("../licenses/fonts/Hack-Regular.txt"),
+    },
+    BuiltIn {
+        name: "NotoEmoji-Regular.ttf",
+        bytes: epaint_default_fonts::NOTO_EMOJI_REGULAR,
+        family: "Noto Emoji",
+        author: "Google",
+        license: "SIL Open Font License 1.1",
+        link: "https://fonts.google.com/noto/specimen/Noto+Emoji",
+        text: include_str!("../licenses/fonts/NotoEmoji-Regular.txt"),
+    },
 ];
 
 /// The folders fonts are looked for in, on this system.
@@ -63,14 +117,71 @@ fn folders() -> Vec<PathBuf> {
 #[must_use]
 pub fn installed() -> Arc<FaceTable> {
     static FACES: OnceLock<Arc<FaceTable>> = OnceLock::new();
-    Arc::clone(
-        FACES.get_or_init(|| Arc::new(FaceTable::scan(&folders()).preferring(DEFAULT_FACES))),
-    )
+    Arc::clone(FACES.get_or_init(|| {
+        let built_in: Vec<(&str, &'static [u8])> = BUILT_IN
+            .iter()
+            .map(|face| (face.name, face.bytes))
+            .collect();
+        Arc::new(
+            FaceTable::scan(&folders())
+                .with_built_in(&built_in)
+                .preferring(DEFAULT_FACES),
+        )
+    }))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{folders, installed};
+    use super::{BUILT_IN, DEFAULT_FACES, FaceTable, folders, installed};
+
+    #[test]
+    fn the_faces_that_are_part_of_the_program_draw_and_carry_their_license() {
+        use cutlass_eval::Fonts;
+        let table = FaceTable::default()
+            .with_built_in(
+                &BUILT_IN
+                    .iter()
+                    .map(|face| (face.name, face.bytes))
+                    .collect::<Vec<_>>(),
+            )
+            .preferring(DEFAULT_FACES);
+        // Every one reads as a face and is offered, and with no other
+        // font on the system new text starts in the sans face.
+        assert_eq!(table.names().len(), BUILT_IN.len());
+        assert_eq!(table.name(), "Ubuntu-Light.ttf");
+        for face in BUILT_IN {
+            let font = cutlass_font::read(face.bytes).expect(face.name);
+            assert!(font.glyph_count() > 100, "{}", face.name);
+            // Its license is named and its text is there to show.
+            assert!(!face.license.is_empty() && !face.author.is_empty());
+            assert!(face.text.len() > 500, "{}", face.name);
+            assert!(face.link.starts_with("https://"));
+            assert!(
+                BUILT_IN
+                    .iter()
+                    .filter(|other| other.name == face.name)
+                    .count()
+                    == 1
+            );
+        }
+        // Letters come from the sans face, and an emoji from the emoji
+        // face even though it has no color.
+        let sans = table.face("Ubuntu-Light.ttf").expect("sans");
+        assert_eq!(table.fallback('A', false), Some(sans));
+        assert_eq!(
+            table.fallback('\u{1F600}', true),
+            table.face("NotoEmoji-Regular.ttf")
+        );
+        // Each has outlines for what it is offered for.
+        let drawn = |name: &str, character: char| {
+            let font = cutlass_font::read(table.face(name).expect(name)).expect(name);
+            let glyph = font.glyph_id(character).expect("map").expect("glyph");
+            !font.outline(glyph).expect("outline").contours.is_empty()
+        };
+        assert!(drawn("Ubuntu-Light.ttf", 'A') && drawn("Ubuntu-Light.ttf", '\u{E9}'));
+        assert!(drawn("Hack-Regular.ttf", 'A'));
+        assert!(drawn("NotoEmoji-Regular.ttf", '\u{1F600}'));
+    }
 
     #[test]
     fn the_folders_hold_the_homes_own_and_the_apps() {
@@ -94,7 +205,7 @@ mod tests {
     #[ignore = "prints what this machine's fonts give"]
     fn what_this_machine_gives() {
         let started = std::time::Instant::now();
-        let table = cutlass_playback::FaceTable::scan(&folders()).preferring(super::DEFAULT_FACES);
+        let table = FaceTable::scan(&folders()).preferring(DEFAULT_FACES);
         let took = started.elapsed();
         let names = table.names();
         let line = format!(

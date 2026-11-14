@@ -78,15 +78,15 @@ struct Dict {
 struct Pen {
     contours: Vec<Contour>,
     segments: Vec<Segment>,
-    x: f32,
-    y: f32,
-    start_x: f32,
-    start_y: f32,
+    x: f64,
+    y: f64,
+    start_x: f64,
+    start_y: f64,
     open: bool,
     width_seen: bool,
     hint_count: usize,
-    stack: Vec<f32>,
-    transient: [f32; TRANSIENT],
+    stack: Vec<f64>,
+    transient: [f64; TRANSIENT],
 }
 
 enum Stop {
@@ -566,21 +566,22 @@ impl Pen {
         if self.segments.is_empty() {
             return;
         }
+        let (start_x, start_y) = (single(self.start_x), single(self.start_y));
         let (end_x, end_y) = segment_end(self.segments.last());
-        if end_x != self.start_x || end_y != self.start_y {
+        if end_x != start_x || end_y != start_y {
             self.segments.push(Segment::Line {
-                x: self.start_x,
-                y: self.start_y,
+                x: start_x,
+                y: start_y,
             });
         }
         self.contours.push(Contour {
-            x: self.start_x,
-            y: self.start_y,
+            x: start_x,
+            y: start_y,
             segments: std::mem::take(&mut self.segments),
         });
     }
 
-    fn move_to(&mut self, dx: f32, dy: f32) -> Result<(), FontError> {
+    fn move_to(&mut self, dx: f64, dy: f64) -> Result<(), FontError> {
         self.close();
         self.x = finite(self.x + dx)?;
         self.y = finite(self.y + dy)?;
@@ -590,27 +591,27 @@ impl Pen {
         Ok(())
     }
 
-    fn line(&mut self, dx: f32, dy: f32) -> Result<(), FontError> {
+    fn line(&mut self, dx: f64, dy: f64) -> Result<(), FontError> {
         if !self.open {
             return Err(FontError::BadTable);
         }
         self.x = finite(self.x + dx)?;
         self.y = finite(self.y + dy)?;
         self.segments.push(Segment::Line {
-            x: self.x,
-            y: self.y,
+            x: single(self.x),
+            y: single(self.y),
         });
         Ok(())
     }
 
     fn curve(
         &mut self,
-        dx1: f32,
-        dy1: f32,
-        dx2: f32,
-        dy2: f32,
-        dx3: f32,
-        dy3: f32,
+        dx1: f64,
+        dy1: f64,
+        dx2: f64,
+        dy2: f64,
+        dx3: f64,
+        dy3: f64,
     ) -> Result<(), FontError> {
         if !self.open {
             return Err(FontError::BadTable);
@@ -622,17 +623,17 @@ impl Pen {
         self.x = finite(c2x + dx3)?;
         self.y = finite(c2y + dy3)?;
         self.segments.push(Segment::Cubic {
-            c1x,
-            c1y,
-            c2x,
-            c2y,
-            x: self.x,
-            y: self.y,
+            c1x: single(c1x),
+            c1y: single(c1y),
+            c2x: single(c2x),
+            c2y: single(c2y),
+            x: single(self.x),
+            y: single(self.y),
         });
         Ok(())
     }
 
-    fn push(&mut self, value: f32) -> Result<(), FontError> {
+    fn push(&mut self, value: f64) -> Result<(), FontError> {
         if !value.is_finite() || self.stack.len() >= STACK_LIMIT {
             return Err(FontError::BadTable);
         }
@@ -640,9 +641,19 @@ impl Pen {
         Ok(())
     }
 
-    fn pop(&mut self) -> Result<f32, FontError> {
+    fn pop(&mut self) -> Result<f64, FontError> {
         self.stack.pop().ok_or(FontError::BadTable)
     }
+}
+
+/// A coordinate as an outline holds it. The pen adds its moves up in
+/// double precision, as other readers do, so that a sum of many small
+/// moves, or of blended ones, comes out the same; an outline's points are
+/// single precision.
+fn single(value: f64) -> f32 {
+    #[allow(clippy::cast_possible_truncation)]
+    let single = value as f32;
+    single
 }
 
 fn segment_end(segment: Option<&Segment>) -> (f32, f32) {
@@ -654,7 +665,7 @@ fn segment_end(segment: Option<&Segment>) -> (f32, f32) {
     }
 }
 
-fn finite(value: f32) -> Result<f32, FontError> {
+fn finite(value: f64) -> Result<f64, FontError> {
     if value.is_finite() {
         Ok(value)
     } else {
@@ -703,7 +714,7 @@ fn interpret(
             26 => vvcurveto(pen)?,
             27 => hhcurveto(pen)?,
             28 => {
-                let value = f32::from(i16_at(bytes, pos + 1)?);
+                let value = f64::from(i16_at(bytes, pos + 1)?);
                 pen.push(value)?;
                 pos += 2;
             }
@@ -718,17 +729,17 @@ fn interpret(
                 pos += 1;
                 escape(pen, operator)?;
             }
-            32..=246 => pen.push(f32::from(i16::from(byte) - 139))?,
+            32..=246 => pen.push(f64::from(i16::from(byte) - 139))?,
             247..=250 => {
                 let second = *bytes.get(pos + 1).ok_or(FontError::Truncated)?;
                 let value = (i32::from(byte) - 247) * 256 + i32::from(second) + 108;
-                pen.push(value as f32)?;
+                pen.push(f64::from(value))?;
                 pos += 1;
             }
             251..=254 => {
                 let second = *bytes.get(pos + 1).ok_or(FontError::Truncated)?;
                 let value = -((i32::from(byte) - 251) * 256) - i32::from(second) - 108;
-                pen.push(value as f32)?;
+                pen.push(f64::from(value))?;
                 pos += 1;
             }
             255 => {
@@ -739,7 +750,7 @@ fn interpret(
                         .try_into()
                         .map_err(|_| FontError::Truncated)?,
                 );
-                pen.push(raw as f32 / 65_536.0)?;
+                pen.push(f64::from(raw) / 65_536.0)?;
                 pos += 4;
             }
             _ => return Err(FontError::BadTable),
@@ -1061,8 +1072,8 @@ fn get(pen: &mut Pen) -> Result<(), FontError> {
     pen.push(pen.transient[index])
 }
 
-fn transient_index(value: f32) -> Result<usize, FontError> {
-    if !(0.0..TRANSIENT as f32).contains(&value) || value.fract() != 0.0 {
+fn transient_index(value: f64) -> Result<usize, FontError> {
+    if !(0.0..TRANSIENT as f64).contains(&value) || value.fract() != 0.0 {
         return Err(FontError::BadTable);
     }
     Ok(usize::from(value as u8))
@@ -1173,14 +1184,14 @@ fn bias(count: usize) -> i32 {
     }
 }
 
-fn path_args(pen: &mut Pen) -> Result<Vec<f32>, FontError> {
+fn path_args(pen: &mut Pen) -> Result<Vec<f64>, FontError> {
     if !pen.width_seen {
         pen.width_seen = true;
     }
     Ok(std::mem::take(&mut pen.stack))
 }
 
-fn take_width(pen: &mut Pen, width_when_even: bool) -> Result<Vec<f32>, FontError> {
+fn take_width(pen: &mut Pen, width_when_even: bool) -> Result<Vec<f64>, FontError> {
     let mut args = std::mem::take(&mut pen.stack);
     if !pen.width_seen {
         pen.width_seen = true;
@@ -1195,15 +1206,15 @@ fn take_width(pen: &mut Pen, width_when_even: bool) -> Result<Vec<f32>, FontErro
     Ok(args)
 }
 
-fn one(args: Vec<f32>) -> Result<[f32; 1], FontError> {
+fn one(args: Vec<f64>) -> Result<[f64; 1], FontError> {
     args.try_into().map_err(|_| FontError::BadTable)
 }
 
-fn two(args: Vec<f32>) -> Result<[f32; 2], FontError> {
+fn two(args: Vec<f64>) -> Result<[f64; 2], FontError> {
     args.try_into().map_err(|_| FontError::BadTable)
 }
 
-fn exactly(args: Vec<f32>, count: usize) -> Result<Vec<f32>, FontError> {
+fn exactly(args: Vec<f64>, count: usize) -> Result<Vec<f64>, FontError> {
     if args.len() == count {
         Ok(args)
     } else {
@@ -1211,10 +1222,10 @@ fn exactly(args: Vec<f32>, count: usize) -> Result<Vec<f32>, FontError> {
     }
 }
 
-fn whole(value: f32) -> Result<i32, FontError> {
+fn whole(value: f64) -> Result<i32, FontError> {
     if !value.is_finite()
         || value.fract() != 0.0
-        || !(f32::from(i16::MIN)..=f32::from(i16::MAX)).contains(&value)
+        || !(f64::from(i16::MIN)..=f64::from(i16::MAX)).contains(&value)
     {
         return Err(FontError::BadTable);
     }

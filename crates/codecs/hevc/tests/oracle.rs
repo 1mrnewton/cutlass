@@ -413,6 +413,17 @@ mod oracle {
         });
     }
 
+    /// Explicit weights on 10-bit samples, which the 16-bit kernels apply.
+    #[test]
+    fn weighted_prediction_ten() {
+        let params = format!("{BASE}:weightp=1:weightb=1:bframes=3");
+        check_threads(&Case {
+            bits: 10,
+            filter: "fade=in:0:8",
+            ..case("weighted main10", &params)
+        });
+    }
+
     #[test]
     fn open_gop_with_leading_pictures() {
         let params = format!("{BASE}:keyint=8:min-keyint=8:open-gop=1:bframes=3:ref=3");

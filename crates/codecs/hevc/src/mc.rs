@@ -73,7 +73,14 @@ pub fn predict_px<P: Pixel>(
     scratch: &mut Scratch<P>,
 ) -> bool {
     if P::bytes(&[]).is_none() {
-        return weights.is_none() && deep(plane, block, (dst, stride), other, bit_depth, scratch);
+        return deep(
+            plane,
+            block,
+            (dst, stride),
+            (other, weights),
+            bit_depth,
+            scratch,
+        );
     }
     let Some(dst) = P::bytes_mut(dst) else {
         return false;
@@ -93,20 +100,20 @@ pub fn predict_px<P: Pixel>(
     }
 }
 
-/// [`predict_px`] for samples of 9 to 12 bits, default weighting only.
+/// [`predict_px`] for samples of 9 to 12 bits.
 #[inline(always)]
 fn deep<P: Pixel>(
     plane: &Plane<'_, P>,
     block: Block,
     (dst, stride): (&mut [P], usize),
-    other: Option<&[i16]>,
+    fuse: (Option<&[i16]>, Option<Weights>),
     bit_depth: u32,
     scratch: &mut Scratch<P>,
 ) -> bool {
     if block.luma {
-        deep_t::<8, P>(plane, block, (dst, stride), other, bit_depth, scratch)
+        deep_t::<8, P>(plane, block, (dst, stride), fuse, bit_depth, scratch)
     } else {
-        deep_t::<4, P>(plane, block, (dst, stride), other, bit_depth, scratch)
+        deep_t::<4, P>(plane, block, (dst, stride), fuse, bit_depth, scratch)
     }
 }
 
@@ -115,7 +122,7 @@ fn deep_t<const T: usize, P: Pixel>(
     plane: &Plane<'_, P>,
     block: Block,
     (dst, stride): (&mut [P], usize),
-    other: Option<&[i16]>,
+    (other, weights): (Option<&[i16]>, Option<Weights>),
     bit_depth: u32,
     scratch: &mut Scratch<P>,
 ) -> bool {
@@ -154,9 +161,11 @@ fn deep_t<const T: usize, P: Pixel>(
         at,
         stride: sstride,
     };
-    let out = match other {
-        Some(o) => cutlass_simd::hevc::mc16::Dst::Bi(px, o),
-        None => cutlass_simd::hevc::mc16::Dst::Uni(px),
+    let out = match (other, weights) {
+        (Some(o), None) => cutlass_simd::hevc::mc16::Dst::Bi(px, o),
+        (None, None) => cutlass_simd::hevc::mc16::Dst::Uni(px),
+        (Some(o), Some(w)) => cutlass_simd::hevc::mc16::Dst::BiW(px, o, w),
+        (None, Some(w)) => cutlass_simd::hevc::mc16::Dst::UniW(px, w),
     };
     cutlass_simd::hevc::mc16::predict(out, stride, &s, (w, h), &taps, bit_depth, deep)
 }

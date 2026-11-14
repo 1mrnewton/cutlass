@@ -60,6 +60,11 @@ pub enum Dst<'a> {
     /// Samples, the default weighting of this list with the other list's
     /// intermediates, rows `w` apart.
     Bi(&'a mut [u16], &'a [i16]),
+    /// Samples, the explicit weighting of this list alone (`w0`, `o0`).
+    UniW(&'a mut [u16], super::mc::Weights),
+    /// Samples, the explicit weighting of the other list's intermediates
+    /// (`w0`, `o0`) with this list's (`w1`, `o1`).
+    BiW(&'a mut [u16], &'a [i16], super::mc::Weights),
 }
 
 /// The intermediates of a `w`×`h` block of samples of `bit_depth` bits
@@ -99,8 +104,8 @@ pub fn predict(
         && dst_stride >= w
         && match &dst {
             Dst::Mid(d) => room(d.len()),
-            Dst::Uni(d) => room(d.len()),
-            Dst::Bi(d, o) => room(d.len()) && o.len() >= w * h,
+            Dst::Uni(d) | Dst::UniW(d, _) => room(d.len()),
+            Dst::Bi(d, o) | Dst::BiW(d, o, _) => room(d.len()) && o.len() >= w * h,
         }
         && src.holds(w, h, taps.len);
     if !fits || !super::mc::accelerated() {
@@ -116,7 +121,9 @@ pub fn predict(
             match mode {
                 0 => avx2::predict::<0>(&mut out, args.0, args.1, args.2, args.3, args.4),
                 1 => avx2::predict::<1>(&mut out, args.0, args.1, args.2, args.3, args.4),
-                _ => avx2::predict::<2>(&mut out, args.0, args.1, args.2, args.3, args.4),
+                2 => avx2::predict::<2>(&mut out, args.0, args.1, args.2, args.3, args.4),
+                3 => avx2::predict::<3>(&mut out, args.0, args.1, args.2, args.3, args.4),
+                _ => avx2::predict::<4>(&mut out, args.0, args.1, args.2, args.3, args.4),
             }
         }
         true

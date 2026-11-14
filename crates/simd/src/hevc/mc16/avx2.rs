@@ -169,7 +169,8 @@ fn down16<const T: usize>(win: &[__m256i; T], p: &[__m256i; 4], shift: __m128i) 
 
 /// Where the filtered values of a block go: kept as intermediates
 /// (mode 0), or made samples alone (1) or averaged with the intermediates
-/// of the other list (2), clipped to the sample range.
+/// of the other list (2), or weighted explicitly alone (3) or with the
+/// other list (4), clipped to the sample range.
 pub(super) struct Sink<'a> {
     mid: &'a mut [i16],
     px: &'a mut [u16],
@@ -181,6 +182,11 @@ pub(super) struct Sink<'a> {
     add: __m256i,
     shift: __m128i,
     max: __m256i,
+    /// Explicit weighting: the pair of 16-bit factors `pmaddwd` takes,
+    /// the 32-bit offset added after it, and the shift.
+    pair: __m256i,
+    offset: __m256i,
+    wshift: __m128i,
 }
 
 impl<'a> Sink<'a> {
@@ -201,12 +207,64 @@ impl<'a> Sink<'a> {
             add: _mm256_set1_epi16(add),
             shift: _mm_cvtsi32_si128(shift as i32),
             max,
+            pair: _mm256_setzero_si256(),
+            offset: _mm256_setzero_si256(),
+            wshift: _mm_setzero_si128(),
         };
         match dst {
             super::Dst::Mid(mid) => (sink(mid, &mut [], &[], (0, 0)), 0),
             super::Dst::Uni(px) => (sink(&mut [], px, &[], (uni_shift, uni_add)), 1),
             super::Dst::Bi(px, other) => (sink(&mut [], px, other, (shift, add)), 2),
+            super::Dst::UniW(px, wt) => {
+                // ((v * w0 + 2^(log2wd - 1)) >> log2wd) + o0: the rounding
+                // rides in the pair, multiplied by a lane of ones.
+                let mut s = sink(&mut [], px, &[], (0, 0));
+                let round = 1i32 << wt.log2wd.max(1).saturating_sub(1);
+                let round = if wt.log2wd >= 1 { round } else { 0 };
+                s.pair = _mm256_set1_epi32((round << 16) | i32::from(wt.w0 as u16));
+                s.offset = _mm256_set1_epi32(wt.o0);
+                s.wshift = _mm_cvtsi32_si128(wt.log2wd as i32);
+                (s, 3)
+            }
+            super::Dst::BiW(px, other, wt) => {
+                // (o * w0 + v * w1 + ((o0 + o1 + 1) << log2wd)) >> (log2wd + 1).
+                let mut s = sink(&mut [], px, other, (0, 0));
+                s.pair = _mm256_set1_epi32((i32::from(wt.w1) << 16) | i32::from(wt.w0 as u16));
+                s.offset = _mm256_set1_epi32((wt.o0 + wt.o1 + 1) << wt.log2wd);
+                s.wshift = _mm_cvtsi32_si128(wt.log2wd as i32 + 1);
+                (s, 4)
+            }
         }
+    }
+
+    /// The explicitly weighted samples of `v` (and, mode 4, `o`).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn weighted<const M: u8>(&self, v: __m256i, o: __m256i) -> __m256i {
+        // Mode 3 pairs each value with 1 (for the rounding); mode 4 pairs
+        // the other list's value with this list's.
+        let (a, b) = if M == 3 {
+            (v, _mm256_set1_epi16(1))
+        } else {
+            (o, v)
+        };
+        let lo = _mm256_madd_epi16(_mm256_unpacklo_epi16(a, b), self.pair);
+        let hi = _mm256_madd_epi16(_mm256_unpackhi_epi16(a, b), self.pair);
+        let (lo, hi) = if M == 3 {
+            (
+                _mm256_add_epi32(_mm256_sra_epi32(lo, self.wshift), self.offset),
+                _mm256_add_epi32(_mm256_sra_epi32(hi, self.wshift), self.offset),
+            )
+        } else {
+            (
+                _mm256_sra_epi32(_mm256_add_epi32(lo, self.offset), self.wshift),
+                _mm256_sra_epi32(_mm256_add_epi32(hi, self.offset), self.wshift),
+            )
+        };
+        _mm256_min_epi16(
+            _mm256_max_epi16(_mm256_packs_epi32(lo, hi), _mm256_setzero_si256()),
+            self.max,
+        )
     }
 
     /// The samples of `v` and, for mode 2, `o`.
@@ -236,12 +294,16 @@ impl<'a> Sink<'a> {
                 }
             }
             _ => {
-                let o = if M == 2 {
+                let o = if M == 2 || M == 4 {
                     ldi16(self.other, j * self.other_stride + self.x0 + x)
                 } else {
                     _mm256_setzero_si256()
                 };
-                let v = self.samples(v, o);
+                let v = if M >= 3 {
+                    self.weighted::<M>(v, o)
+                } else {
+                    self.samples(v, o)
+                };
                 if let Some(d) = self
                     .px
                     .get_mut(at..)
@@ -276,12 +338,17 @@ impl<'a> Sink<'a> {
                 }
             }
             _ => {
-                let o = if M == 2 {
+                let o = if M == 2 || M == 4 {
                     ldi8(self.other, j * self.other_stride + self.x0, W)
                 } else {
                     _mm_setzero_si128()
                 };
-                let v = self.samples(_mm256_castsi128_si256(v), _mm256_castsi128_si256(o));
+                let (v, o) = (_mm256_castsi128_si256(v), _mm256_castsi128_si256(o));
+                let v = if M >= 3 {
+                    self.weighted::<M>(v, o)
+                } else {
+                    self.samples(v, o)
+                };
                 let l = lanes(_mm256_castsi256_si128(v));
                 if let Some(d) = self.px.get_mut(at..).and_then(|d| d.first_chunk_mut::<W>()) {
                     for (d, &s) in d.iter_mut().zip(&l) {

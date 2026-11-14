@@ -284,3 +284,86 @@ fn predict_to_samples_matches_put_then_store() {
         }
     }
 }
+
+#[test]
+fn explicit_weighting_matches_the_clause() {
+    use super::{Dst, predict};
+    use crate::hevc::mc::Weights;
+    if !crate::hevc::mc::accelerated() {
+        return;
+    }
+    let mut seed = 0x77ee_u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut tmp = Tmp::default();
+    for bd in [10u32, 12] {
+        let top = (1i32 << bd) - 1;
+        let (sw, sh) = (64 + 7 + 24, 64 + 7);
+        let src: Vec<u16> = (0..sw * sh).map(|_| (next() as i32 & top) as u16).collect();
+        let s = Src {
+            src: &src,
+            at: 0,
+            stride: sw,
+        };
+        for (w, h) in [
+            (4usize, 4usize),
+            (8, 2),
+            (12, 16),
+            (16, 8),
+            (24, 4),
+            (64, 64),
+        ] {
+            for (fx, fy) in [(0usize, 0usize), (1, 0), (0, 2), (3, 1)] {
+                let taps = Taps {
+                    across: (fx != 0).then(|| LUMA[fx]),
+                    down: (fy != 0).then(|| LUMA[fy]),
+                    len: 8,
+                };
+                let mut mid = vec![0i16; w * h];
+                assert!(put(&mut mid, w, &s, (w, h), &taps, bd, &mut tmp));
+                let other: Vec<i16> = (0..w * h).map(|_| (next() % 20000) as i16 - 4000).collect();
+                for denom in [0u32, 3, 7] {
+                    let scale = 1 << (bd.min(10) - 8);
+                    let wt = Weights {
+                        w0: (next() % 256) as i16 - 128,
+                        w1: (next() % 256) as i16 - 128,
+                        o0: ((next() % 256) as i32 - 128) * scale,
+                        o1: ((next() % 256) as i32 - 128) * scale,
+                        log2wd: denom + 14 - bd,
+                    };
+                    let l = wt.log2wd;
+                    for two in [false, true] {
+                        let mut got = vec![0u16; w * h];
+                        let dst = if two {
+                            Dst::BiW(&mut got, &other, wt)
+                        } else {
+                            Dst::UniW(&mut got, wt)
+                        };
+                        assert!(predict(dst, w, &s, (w, h), &taps, bd, &mut tmp));
+                        for i in 0..w * h {
+                            let p = i32::from(mid[i]);
+                            let want = if two {
+                                let q = i32::from(other[i]);
+                                (q * i32::from(wt.w0)
+                                    + p * i32::from(wt.w1)
+                                    + ((wt.o0 + wt.o1 + 1) << l))
+                                    >> (l + 1)
+                            } else {
+                                ((p * i32::from(wt.w0) + (1 << (l - 1))) >> l) + wt.o0
+                            };
+                            assert_eq!(
+                                i32::from(got[i]),
+                                want.clamp(0, top),
+                                "bd {bd} {w}x{h} f {fx},{fy} denom {denom} two {two} at {i}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

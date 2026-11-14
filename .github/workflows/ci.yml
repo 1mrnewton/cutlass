@@ -75,7 +75,7 @@ jobs:
                   allowed_unsafe.append(member)
               if "[lints]\nworkspace = true" in text:
                   continue
-              # A platform crate, and the H.264 kernels, copy the tables.
+              # A platform crate, and the H.264 and AV1 kernels, copy the tables.
               # Cargo rejects mixing `workspace = true` with the one
               # `unsafe_code` override.
               rust = lint_lines(text, "[lints.rust]")
@@ -84,6 +84,7 @@ jobs:
                   (
                       member.startswith("crates/platform-")
                       or member == "crates/codecs/h264-kernels"
+                      or member == "crates/simd"
                   )
                   and rust == denied_rust
                   and clippy == workspace_clippy

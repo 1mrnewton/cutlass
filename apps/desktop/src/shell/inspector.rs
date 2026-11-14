@@ -1111,6 +1111,13 @@ impl Shell {
         self.face.names()
     }
 
+    /// The same faces, each with the name people know it by: its full
+    /// name for a face of a collection, its file's name otherwise.
+    #[must_use]
+    pub fn text_face_labels(&self) -> Vec<(String, String)> {
+        self.face.labelled()
+    }
+
     /// Set the selected title in `face`. The same face is not an undo step.
     pub fn set_text_face(&mut self, face: &str) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;

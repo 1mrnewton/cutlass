@@ -1039,7 +1039,7 @@ impl Shell {
             waveforms: None,
             wave_asks: Vec::new(),
             card_waves: std::collections::HashMap::new(),
-            face: Arc::new(crate::face::installed()),
+            face: crate::face::installed(),
             gpu: None,
             preview_stale: false,
             shown_revision: std::cell::Cell::new(None),

@@ -2209,11 +2209,14 @@ fn pattern_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
 }
 
 fn font_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
-    let faces = shell.text_faces();
+    let faces = shell.text_face_labels();
     let current = if inspection.font.is_empty() {
         "System".to_owned()
     } else {
-        face_label(&inspection.font)
+        faces
+            .iter()
+            .find(|(name, _)| *name == inspection.font)
+            .map_or_else(|| face_label(&inspection.font), |(_, label)| label.clone())
     };
     let mut picked = None;
     label_row(ui, "Font", |ui| {
@@ -2222,9 +2225,9 @@ fn font_row(shell: &mut Shell, ui: &mut Ui, inspection: &Inspection) {
             .selected_text(current)
             .width(ui.available_width())
             .show_ui(ui, |ui| {
-                for face in &faces {
+                for (face, label) in &faces {
                     if ui
-                        .add(ui::Choice::new(*face == inspection.font, face_label(face)).wide())
+                        .add(ui::Choice::new(*face == inspection.font, label.as_str()).wide())
                         .clicked()
                     {
                         picked = Some(face.clone());

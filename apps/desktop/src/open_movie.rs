@@ -1132,7 +1132,7 @@ fn an_hdr_movie_converts_on_the_gpu_like_the_cpu() {
     // The decoder reads the file's HLG tag, so the shader decodes HLG.
     let draft = movie_draft(&path, 960, 540, false).unwrap();
     let layers = cutlass_eval::layers_in(
-        &Snapshot::with_fonts(&draft, &fonts),
+        &Snapshot::with_fonts(&draft, &*fonts),
         Micros(500_000),
         &mut SoftwareDevice::new(),
         &readers,

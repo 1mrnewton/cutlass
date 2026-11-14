@@ -229,8 +229,14 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
     for glyph in &mut glyphs {
         glyph.mask |= EVERY;
     }
-    if shaping == Shaping::Joined {
+    // Arabic and Syriac, and the scripts of the shared rules that join
+    // as they do.
+    let joined = shaping == Shaping::Universal && universal::joins(run.script);
+    if shaping == Shaping::Joined || joined {
         arabic::join(&mut glyphs);
+        if run.script == Script(*b"Mong") {
+            arabic::lend_to_selectors(&mut glyphs);
+        }
     }
     let count = glyphs.len();
     if machines {
@@ -253,7 +259,7 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
                 myanmar::substitute(font, engine, &mut buffer, &scripts, run.ligatures)?;
             }
             Shaping::Universal => {
-                universal::substitute(font, engine, &mut buffer, &scripts, run.ligatures)?;
+                universal::substitute(font, engine, &mut buffer, &scripts, run.ligatures, joined)?;
             }
             _ => indic::substitute(font, engine, &mut buffer, &scripts, run.script)?,
         }
@@ -2024,6 +2030,159 @@ mod tests {
         );
     }
 
+    /// `text` shaped right to left as `script` in a fixture face.
+    fn shaped_back(face: &[u8], script: &[u8; 4], text: &str) -> String {
+        let font = cutlass_font::read(face).expect("fixture");
+        let run = Run {
+            text,
+            start: 0,
+            end: text.len(),
+            script: Script(*script),
+            backward: true,
+            ligatures: true,
+        };
+        printed(&font, &run)
+    }
+
+    #[test]
+    fn mongolian_joins_its_letters_and_is_cut_into_clusters() {
+        const FACE: &[u8] = include_bytes!("../../../font/fixtures/joined.ttf");
+        let mong = |text: &str| shaped_in(FACE, b"Mong", text);
+        // Each expected string is what HarfBuzz 14.2 prints for the face.
+        // A letter takes its form from the letters it joins, not from
+        // its cluster's place in a row: a space or a non-joiner parts
+        // two letters, and a joiner joins one that stands alone.
+        assert_eq!(mong("\u{1820}"), "[1=0+600]");
+        assert_eq!(mong("\u{1820}\u{1820}"), "[2=0+610|4=3+630]");
+        assert_eq!(
+            mong("\u{1820}\u{1820}\u{1820}"),
+            "[2=0+610|3=3+620|4=6+630]"
+        );
+        assert_eq!(mong("\u{1820}\u{20}\u{1820}"), "[1=0+600|21=3+250|1=4+600]");
+        assert_eq!(mong("\u{1820}\u{200C}\u{1820}"), "[1=0+600|1=6+600]");
+        assert_eq!(mong("\u{1820}\u{200D}"), "[2=0+610]");
+        // A variation selector takes the form of the glyph before it,
+        // and the face draws it by that form: after a last letter, a
+        // first one, and a joiner. After a letter alone it draws
+        // nothing.
+        assert_eq!(mong("\u{1820}\u{180B}"), "[1=0+600]");
+        assert_eq!(
+            mong("\u{1820}\u{1820}\u{180B}"),
+            "[2=0+610|4=3+630|7=3+300]"
+        );
+        assert_eq!(
+            mong("\u{1820}\u{180B}\u{1820}"),
+            "[2=0+610|8=0+310|4=6+630]"
+        );
+        assert_eq!(mong("\u{1820}\u{200D}\u{180B}"), "[2=0+610|7=0+300]");
+        // A mark does not come between two letters, nor give a selector
+        // a form.
+        assert_eq!(mong("\u{1820}\u{18A9}"), "[1=0+600|9=0@-150,-30+0]");
+        assert_eq!(
+            mong("\u{1820}\u{18A9}\u{1820}"),
+            "[2=0+610|9=0@-160,-30+0|4=6+630]"
+        );
+        assert_eq!(
+            mong("\u{1820}\u{1820}\u{18A9}\u{180B}"),
+            "[2=0+610|4=3+630|9=3@-180,-30+0]"
+        );
+        // A mark with no letter stands on a dotted circle, and so does
+        // a non-joiner alone.
+        assert_eq!(mong("\u{18A9}"), "[10=0+600|9=0@-150,-30+0]");
+        assert_eq!(mong("\u{200C}"), "[10=0+600]");
+        assert_eq!(mong("\u{200C}\u{180B}"), "[10=0+600]");
+        assert_eq!(mong(""), "[]");
+    }
+
+    #[test]
+    fn nko_joins_its_letters_and_is_cut_into_clusters() {
+        const FACE: &[u8] = include_bytes!("../../../font/fixtures/joined.ttf");
+        let nkoo = |text: &str| shaped_back(FACE, b"Nkoo", text);
+        // Each expected string is what HarfBuzz 14.2 prints for the face.
+        assert_eq!(nkoo("\u{7CA}"), "[11=0+500]");
+        assert_eq!(nkoo("\u{7CA}\u{7CA}"), "[14=2+530|12=0+510]");
+        assert_eq!(
+            nkoo("\u{7CA}\u{7CA}\u{7CA}"),
+            "[14=4+530|13=2+520|12=0+510]"
+        );
+        // A joiner of marks between two letters does not part them.
+        assert_eq!(nkoo("\u{7CA}\u{34F}\u{7CA}"), "[14=4+530|12=0+510]");
+        // Marks are set on their letter, sorted, and read by the face's
+        // lookups in that order.
+        assert_eq!(nkoo("\u{7CA}\u{7EB}"), "[15=0@450,-30+0|11=0+500]");
+        assert_eq!(
+            nkoo("\u{7CA}\u{7CA}\u{7EB}\u{7CA}"),
+            "[14=6+530|15=2@450,-30+0|13=2+520|12=0+510]"
+        );
+        assert_eq!(
+            nkoo("\u{7CA}\u{7EB}\u{7F2}"),
+            "[19=0@450,-30+0|16=0@450,50+0|11=0+500]"
+        );
+        assert_eq!(
+            nkoo("\u{7CA}\u{7F2}\u{7EB}"),
+            "[19=0@450,-30+0|16=0@450,50+0|11=0+500]"
+        );
+        assert_eq!(
+            nkoo("\u{7CA}\u{7F2}\u{34F}\u{7EB}"),
+            "[19=0@450,-30+0|16=0@450,50+0|11=0+500]"
+        );
+        assert_eq!(nkoo("\u{7CA}\u{7EB}\u{34F}"), "[15=0@450,-30+0|11=0+500]");
+        // A mark with no letter stands on a dotted circle, and so does
+        // a non-joiner alone.
+        assert_eq!(nkoo("\u{7EB}"), "[15=0@450,-30+0|10=0+600]");
+        assert_eq!(nkoo("\u{200C}"), "[10=0+600]");
+    }
+
+    #[test]
+    fn a_joined_script_in_a_face_with_only_a_default_script_is_not_joined() {
+        const PLAIN: &[u8] = include_bytes!("../../../font/fixtures/joined-plain.ttf");
+        let mong = |text: &str| shaped_in(PLAIN, b"Mong", text);
+        let nkoo = |text: &str| shaped_back(PLAIN, b"Nkoo", text);
+        // Each expected string is what HarfBuzz 14.2 prints for the face:
+        // no forms, no circles, and the lookups every script shares.
+        assert_eq!(
+            mong("\u{1820}\u{1820}\u{1820}"),
+            "[1=0+600|1=3+600|1=6+600]"
+        );
+        assert_eq!(mong("\u{1820}\u{1820}\u{180B}"), "[1=0+600|1=3+600]");
+        assert_eq!(mong("\u{18A9}"), "[9=0+0]");
+        assert_eq!(mong("\u{200C}"), "[]");
+        assert_eq!(
+            nkoo("\u{7CA}\u{7CA}\u{7CA}"),
+            "[11=4+500|11=2+500|11=0+500]"
+        );
+        assert_eq!(nkoo("\u{7EB}"), "[15=0+0]");
+        assert_eq!(
+            nkoo("\u{7CA}\u{7EB}\u{7F2}"),
+            "[19=0@450,-30+0|16=0@450,50+0|11=0+500]"
+        );
+    }
+
+    #[test]
+    fn long_words_of_a_joined_script_are_shaped_in_time() {
+        const FACE: &[u8] = include_bytes!("../../../font/fixtures/joined.ttf");
+        let started = std::time::Instant::now();
+        // One word of thousands of letters: first, between and last.
+        let word = "\u{1820}".repeat(8_000);
+        let shaped = shaped_in(FACE, b"Mong", &word);
+        assert!(shaped.starts_with("[2=0+610|3=3+620|"));
+        assert_eq!(shaped.matches("|3=").count(), 7_998);
+        assert!(shaped.ends_with("|4=23997+630]"));
+        // One letter under thousands of marks and selectors, and
+        // thousands of marks with no letter between them and a space.
+        let mut heavy = String::from("\u{1820}");
+        heavy.push_str(&"\u{18A9}\u{180B}".repeat(4_000));
+        assert!(shaped_in(FACE, b"Mong", &heavy).starts_with("[1=0+600|9="));
+        let broken = "\u{20}\u{200C}\u{18A9}\u{200C}".repeat(2_000);
+        assert!(!shaped_in(FACE, b"Mong", &broken).is_empty());
+        let marks = "\u{7CA}\u{7EB}\u{34F}\u{7F2}\u{34F}".repeat(2_000);
+        assert_eq!(
+            shaped_back(FACE, b"Nkoo", &marks).matches("|13=").count(),
+            1_998
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+    }
+
     #[test]
     fn huge_clusters_of_the_shared_rules_are_shaped_in_time() {
         const FACE: &[u8] = include_bytes!("../../../font/fixtures/universal.ttf");
@@ -2063,6 +2222,7 @@ mod tests {
         let started = std::time::Instant::now();
         for (script, grows, calls) in [
             (b"Java", "\u{A98F}", "\u{A990}\u{A990}"),
+            (b"Mong", "\u{1820}", "\u{1821}\u{1821}"),
             (b"Khmr", "\u{1780}", "\u{1781}\u{1781}"),
             (b"Mymr", "\u{1000}", "\u{1001}\u{1001}"),
         ] {

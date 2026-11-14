@@ -115,8 +115,8 @@ if len(sys.argv)>2 and sys.argv[2] in ("universal","joined"):
         ("Bali",SUP+"NotoSerifBalinese"+R,[(0x1B00,0x1B7F)]),
         ("Hmnp",SUP+"NotoSerifNyiakengPuachueHmong"+R,[(0x1E100,0x1E14F)])]
     # The scripts HarfBuzz shapes by the same rules and joins as Arabic
-    # besides. Ours joins them and does not yet cut them into clusters,
-    # so these show how far that is from HarfBuzz.
+    # besides: each letter's form comes from the letters it joins, and
+    # the clusters, the dotted circles and the order are the shared ones.
     if sys.argv[2]=="joined":
         scripts=[("Mong",SUP+N+"Mongolian"+R,[(0x1800,0x18AF)]),("Phag",SUP+N+"PhagsPa"+R,[(0xA840,0xA87F)]),
             ("Nkoo",SUP+N+"NKo"+R,[(0x7C0,0x7FF)]),("Mand",SUP+N+"Mandaic"+R,[(0x840,0x85F)]),

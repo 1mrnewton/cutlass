@@ -146,9 +146,23 @@ pub(crate) fn join(glyphs: &mut [Glyph]) {
     }
 }
 
+/// Give each Mongolian variation selector the form of the glyph before
+/// it: the selector picks a variant of that letter in that form, and a
+/// font's lookup for the form reads the two together.
+pub(crate) fn lend_to_selectors(glyphs: &mut [Glyph]) {
+    for index in 1..glyphs.len() {
+        if matches!(u32::from(glyphs[index].character), 0x180B..=0x180D | 0x180F) {
+            let form = glyphs[index - 1].mask & ANY_FORM;
+            glyphs[index].mask = (glyphs[index].mask & !ANY_FORM) | form;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FINAL, FINAL_2, FINAL_3, INITIAL, ISOLATED, MEDIAL, MEDIAL_2, join};
+    use super::{
+        FINAL, FINAL_2, FINAL_3, INITIAL, ISOLATED, MEDIAL, MEDIAL_2, join, lend_to_selectors,
+    };
     use crate::shaper::buffer::Glyph;
 
     fn forms(text: &str) -> Vec<&'static str> {
@@ -171,6 +185,26 @@ mod tests {
                 _ => "mixed",
             })
             .collect()
+    }
+
+    #[test]
+    fn a_mongolian_selector_takes_the_form_of_the_glyph_before_it() {
+        let mut glyphs: Vec<Glyph> = "\u{1820}\u{180B}\u{1820}\u{1885}\u{180C}\u{180F}"
+            .char_indices()
+            .map(|(at, character)| Glyph::new(character, at))
+            .collect();
+        join(&mut glyphs);
+        lend_to_selectors(&mut glyphs);
+        let forms: Vec<u32> = glyphs.iter().map(|glyph| glyph.mask).collect();
+        // The first selector after the first letter, the second after a
+        // mark that has no form, and the third after that selector.
+        assert_eq!(forms, [INITIAL, INITIAL, FINAL, 0, 0, 0]);
+        // A selector that starts the text has nothing to take.
+        let mut alone = vec![Glyph::new('\u{180B}', 0)];
+        join(&mut alone);
+        lend_to_selectors(&mut alone);
+        assert_eq!(alone[0].mask, 0);
+        lend_to_selectors(&mut []);
     }
 
     #[test]

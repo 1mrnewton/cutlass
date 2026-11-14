@@ -18,8 +18,9 @@ use super::apply::Engine;
 use super::buffer::{Buffer, Glyph};
 use super::pattern::{Pattern, cut, each_syllable, either, maybe, merge, one, repeat, seq};
 use super::syllables::insert_dotted_circles;
-use super::{Feature, lookups};
+use super::{Feature, arabic, lookups};
 use crate::TextError;
+use crate::script::Script;
 use crate::unicode::{gc, joining, props};
 
 /// Categories of character. The numbers are the specification's.
@@ -107,13 +108,36 @@ mod cluster {
     pub(super) const NONE: u8 = 9;
 }
 
-// The feature each mask bit stands for.
-const RPHF: u32 = 1 << 8;
-const ISOL: u32 = 1 << 9;
-const INIT: u32 = 1 << 10;
-const MEDI: u32 = 1 << 11;
-const FINA: u32 = 1 << 12;
+// The feature each mask bit stands for. The four forms are the bits the
+// joining of Arabic sets, so a script that joins as Arabic does brings
+// its forms with it.
+const RPHF: u32 = 1 << 9;
+const ISOL: u32 = arabic::ISOLATED;
+const INIT: u32 = arabic::INITIAL;
+const MEDI: u32 = arabic::MEDIAL;
+const FINA: u32 = arabic::FINAL;
 const FORMS: u32 = ISOL | INIT | MEDI | FINA;
+
+/// Whether `script` joins its letters as Arabic does. Such a script is
+/// cut into clusters and ordered like the others here, but each letter's
+/// form comes from the letters it joins, not from its cluster's place in
+/// a row.
+pub(crate) fn joins(script: Script) -> bool {
+    matches!(
+        &script.0,
+        b"Adlm"
+            | b"Chrs"
+            | b"Rohg"
+            | b"Mand"
+            | b"Mani"
+            | b"Mong"
+            | b"Nkoo"
+            | b"Ougr"
+            | b"Phag"
+            | b"Phlp"
+            | b"Sogd"
+    )
+}
 
 /// Characters whose category is not what their Unicode properties give:
 /// the letters of scripts those properties do not cover, and the cases
@@ -685,8 +709,9 @@ fn find_clusters(glyphs: &mut [Glyph]) -> bool {
 }
 
 /// Say which glyphs a hook may be made of, and which form each cluster
-/// takes from the clusters around it.
-fn set_masks(glyphs: &mut [Glyph]) {
+/// takes from the clusters around it, unless the letters are `joined`
+/// and have their forms already.
+fn set_masks(glyphs: &mut [Glyph], joined: bool) {
     // A hook is made of the first three glyphs of a cluster, or of the
     // one character that is a hook already.
     each_syllable(glyphs, |glyphs, start, end| {
@@ -699,6 +724,9 @@ fn set_masks(glyphs: &mut [Glyph]) {
             glyph.mask |= RPHF;
         }
     });
+    if joined {
+        return;
+    }
     // A cluster alone is isolated; the first of a row is initial, the
     // last final, and the ones between medial.
     let mut last: Option<(usize, usize, u32)> = None;
@@ -733,19 +761,21 @@ fn set_masks(glyphs: &mut [Glyph]) {
 }
 
 /// Run the substitutions for a run of one of these scripts. `ligatures`
-/// makes the ones a reader can do without.
+/// makes the ones a reader can do without; `joined` says the letters
+/// have the forms Arabic joining gave them.
 pub(crate) fn substitute<'a>(
     font: &Font<'a>,
     mut engine: Option<Engine<'_, 'a>>,
     buffer: &mut Buffer,
     scripts: &[Tag],
     ligatures: bool,
+    joined: bool,
 ) -> Result<(), TextError> {
     let table = font.gsub();
     let broken = {
         let glyphs = buffer.glyphs_mut();
         let broken = find_clusters(glyphs);
-        set_masks(glyphs);
+        set_masks(glyphs, joined);
         broken
     };
     let mut stage = |buffer: &mut Buffer, features: &[Feature]| -> Result<(), TextError> {
@@ -830,7 +860,8 @@ pub(crate) fn substitute<'a>(
     let (Some(engine), Some(table)) = (engine.as_mut(), table) else {
         return Ok(());
     };
-    // The forms a cluster takes from its neighbours.
+    // The forms a cluster takes from its neighbours, or a letter from
+    // the letters it joins.
     let forms = [
         Feature::masked(b"isol", ISOL),
         Feature::masked(b"init", INIT),

@@ -87,8 +87,7 @@ impl Script {
 
     pub(crate) fn shaping(self) -> Shaping {
         match &self.0 {
-            b"Arab" | b"Syrc" | b"Nkoo" | b"Mong" | b"Phag" | b"Mand" | b"Mani" | b"Phlp"
-            | b"Adlm" | b"Rohg" | b"Sogd" | b"Chrs" | b"Ougr" => Shaping::Joined,
+            b"Arab" | b"Syrc" => Shaping::Joined,
             b"Deva" | b"Beng" | b"Guru" | b"Gujr" | b"Orya" | b"Taml" | b"Telu" | b"Knda"
             | b"Mlym" => Shaping::Syllabic,
             b"Khmr" => Shaping::Khmer,
@@ -103,6 +102,9 @@ impl Script {
             | b"Wcho" | b"Diak" | b"Kits" | b"Yezi" | b"Cpmn" | b"Tnsa" | b"Toto" | b"Vith"
             | b"Kawi" | b"Nagm" | b"Gara" | b"Gukh" | b"Krai" | b"Onao" | b"Sunu" | b"Todr"
             | b"Tutg" | b"Berf" | b"Sidt" | b"Tayo" | b"Tols" => Shaping::Universal,
+            // These join as Arabic does and are cut into clusters besides.
+            b"Nkoo" | b"Mong" | b"Phag" | b"Mand" | b"Mani" | b"Phlp" | b"Adlm" | b"Rohg"
+            | b"Sogd" | b"Chrs" | b"Ougr" => Shaping::Universal,
             _ => Shaping::Plain,
         }
     }
@@ -169,6 +171,9 @@ mod tests {
         assert_eq!(Script::of('\u{F40}').shaping(), Shaping::Universal);
         assert_eq!(Script::of('\u{D9A}').shaping(), Shaping::Universal);
         assert_eq!(Script::of('\u{A98F}').shaping(), Shaping::Universal);
+        assert_eq!(Script::of('\u{1820}').shaping(), Shaping::Universal);
+        assert_eq!(Script::of('\u{7CA}').shaping(), Shaping::Universal);
+        assert_eq!(Script::of('\u{710}').shaping(), Shaping::Joined);
         assert_eq!(Script::of('\u{5D0}').shaping(), Shaping::Plain);
         assert_eq!(Script::LATIN.tags(), [*b"latn"]);
         assert_eq!(Script::of('\u{915}').tags(), [*b"dev2", *b"deva"]);

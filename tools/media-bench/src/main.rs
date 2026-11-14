@@ -19,7 +19,10 @@
 //! Rust decoder and writes the pictures, to measure what the encoder kept.
 //!
 //! Only the Rust codecs are registered, so a platform codec never takes the
-//! work. The containers are the ones the desktop opens, and ADTS.
+//! work, unless `--platform` is given: then on Android the MediaCodec
+//! decoders and encoders go first, as the phone app has them, to time the
+//! phone's own codecs against the Rust ones on the same file. The
+//! containers are the ones the desktop opens, and ADTS.
 
 #![forbid(unsafe_code)]
 
@@ -27,6 +30,7 @@ use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cutlass_codec::ContainerId;
 use cutlass_codec::access::{ChannelLayout, CodecParams, Pcm, PixelFormat, SideData};
@@ -35,14 +39,28 @@ use cutlass_decode::{CodecId, DecodeFactory, Output};
 use cutlass_encode::{AudioInput, CpuFrame, EncodeFactory, FrameInput, FrameTime};
 use cutlass_engine::{DecodedFrame, ReaderFactory};
 
-const USAGE: &str = "usage: media-bench decode <picture|sound|ivf> <file> [--dump <path>] [--repeat <n>]
+/// `--platform`: the platform codecs go ahead of the Rust ones.
+static PLATFORM: AtomicBool = AtomicBool::new(false);
+
+const USAGE: &str = "usage: media-bench [--platform] decode <picture|sound|ivf> <file> [--dump <path>] [--repeat <n>]
        media-bench demux <file>
        media-bench encode picture <codec> <width> <height> <fps> <bitrate> <raw> [--out <path>] [--decoded <path>] [--rgba]
        media-bench encode sound <codec> <rate> <channels> <bitrate> <raw.f32> [--out <path>]
        media-bench compare <u8|u16|i16|f32> <ours> <theirs> [--channels <n>]";
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|first| first == "--platform") {
+        args.remove(0);
+        if !cfg!(target_os = "android") {
+            let _ = writeln!(
+                std::io::stderr(),
+                "media-bench: --platform runs on Android only"
+            );
+            return ExitCode::FAILURE;
+        }
+        PLATFORM.store(true, Ordering::Relaxed);
+    }
     match run(&args) {
         Ok(line) => {
             let _ = writeln!(std::io::stdout(), "{line}");
@@ -801,6 +819,10 @@ fn encode_sound(
 
 fn rust_encoders() -> EncodeFactory {
     let mut encoders = EncodeFactory::new();
+    #[cfg(target_os = "android")]
+    if PLATFORM.load(Ordering::Relaxed) {
+        cutlass_platform_android::register_encoders(&mut encoders);
+    }
     cutlass_flac::register_encoders(&mut encoders);
     cutlass_alac::register_encoders(&mut encoders);
     cutlass_mp3::register_encoders(&mut encoders);
@@ -839,6 +861,10 @@ fn readers() -> ReaderFactory {
 
 fn rust_decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
+    #[cfg(target_os = "android")]
+    if PLATFORM.load(Ordering::Relaxed) {
+        cutlass_platform_android::register_decoders(&mut decoders);
+    }
     cutlass_flac::register_decoders(&mut decoders);
     cutlass_alac::register_decoders(&mut decoders);
     cutlass_mp3::register_decoders(&mut decoders);

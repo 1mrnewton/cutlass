@@ -13,6 +13,8 @@ mod collection;
 mod faces;
 #[cfg(test)]
 mod fixture;
+#[cfg(test)]
+mod fixture_fonts;
 mod gpos;
 mod gsub;
 mod kern;

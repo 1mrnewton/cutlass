@@ -406,6 +406,8 @@ fn positioning_answers_for_its_glyphs() {
         .expect("anchors");
     assert_eq!(on_second.1, Anchor { x: 400, y: 500 });
     assert!(parts.ligature_anchors(7, 6, 2).expect("no part").is_none());
+    assert_eq!(parts.ligature_parts(6).expect("covered"), Some(2));
+    assert_eq!(parts.ligature_parts(2).expect("uncovered"), None);
 }
 
 #[test]

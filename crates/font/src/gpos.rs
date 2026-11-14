@@ -315,6 +315,23 @@ impl<'a> MarkAttach<'a> {
         Ok(anchor(self.base_array, at)?.map(|on_base| (on_mark, on_base)))
     }
 
+    /// How many parts `ligature` has anchors for, when this subtable
+    /// sets marks on it.
+    pub fn ligature_parts(&self, ligature: u16) -> Result<Option<usize>, FontError> {
+        let Some(index) = self.bases.index(ligature) else {
+            return Ok(None);
+        };
+        if index >= u16_at(self.base_array, 0)? {
+            return Err(FontError::BadTable);
+        }
+        let attach = sub(
+            self.base_array,
+            usize::from(u16_at(self.base_array, 2 + usize::from(index) * 2)?),
+        )?
+        .ok_or(FontError::BadTable)?;
+        Ok(Some(usize::from(u16_at(attach, 0)?)))
+    }
+
     /// The anchors that set `mark` on part `component` of `ligature`.
     pub fn ligature_anchors(
         &self,

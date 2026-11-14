@@ -18922,6 +18922,115 @@ mod tests {
         shell
     }
 
+    /// A title in a face that varies has a slider for each of its axes,
+    /// which moves the title's own setting of the face.
+    #[test]
+    fn a_face_that_varies_has_a_slider_for_each_axis() {
+        use cutlass_model::SegmentId;
+        use egui_kittest::kittest::Queryable;
+        let temp = std::env::temp_dir().join(format!("cutlass-font-axes-{}", std::process::id()));
+        let mut shell = text_inspector_shell(&temp);
+        shell.use_faces(vec![
+            (
+                "sample.ttf",
+                include_bytes!("../../../crates/font/fixtures/sample.ttf").to_vec(),
+            ),
+            (
+                "vary.ttf",
+                include_bytes!("../../../crates/font/fixtures/variable.ttf").to_vec(),
+            ),
+        ]);
+        shell.select(Some(SegmentId::new("words")));
+        let stored = |shell: &Shell| {
+            let draft = shell.draft().unwrap();
+            draft
+                .materials
+                .texts
+                .iter()
+                .find(|text| text.id.as_str() == "title")
+                .unwrap()
+                .font_variations
+                .clone()
+        };
+        // A face that does not vary has no axes, and none can be set.
+        shell.set_text_face("sample.ttf").unwrap();
+        assert!(shell.text_font_axes().is_empty());
+        assert!(shell.set_text_font_axis(*b"wght", 700.0).is_err());
+        // The fixture face varies in weight and in width.
+        shell.set_text_face("vary.ttf").unwrap();
+        let axes = shell.text_font_axes();
+        let shown: Vec<(&str, f32, f32, f32)> = axes
+            .iter()
+            .map(|axis| (axis.name.as_str(), axis.min, axis.max, axis.value))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("Weight", 100.0, 900.0, 400.0),
+                ("Width", 50.0, 150.0, 100.0)
+            ]
+        );
+        // One axis moves and the other stays; every axis is written.
+        shell.set_text_font_axis(*b"wght", 650.0).unwrap();
+        assert_eq!(stored(&shell), "wght=650,wdth=100");
+        shell.set_text_font_axis(*b"wdth", 75.0).unwrap();
+        assert_eq!(stored(&shell), "wght=650,wdth=75");
+        let values: Vec<f32> = shell
+            .text_font_axes()
+            .iter()
+            .map(|axis| axis.value)
+            .collect();
+        assert_eq!(values, [650.0, 75.0]);
+        // Past an end is the end; the same value again is no undo step.
+        shell.set_text_font_axis(*b"wght", 5_000.0).unwrap();
+        assert_eq!(stored(&shell), "wght=900,wdth=75");
+        let before = shell.revision();
+        shell.set_text_font_axis(*b"wght", 900.0).unwrap();
+        assert_eq!(shell.revision(), before);
+        shell.undo().unwrap();
+        assert_eq!(stored(&shell), "wght=650,wdth=75");
+        // An axis the face lacks, and a value that is no number.
+        assert!(shell.set_text_font_axis(*b"slnt", -8.0).is_err());
+        assert!(shell.set_text_font_axis(*b"wght", f64::NAN).is_err());
+        assert_eq!(stored(&shell), "wght=650,wdth=75");
+        // The inspector shows a slider for each, by the axis's name, and
+        // none for a face that does not vary.
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(1280.0, 1600.0))
+            .build_ui_state(
+                |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+                (shell, {
+                    let mut view = ViewState::new();
+                    view.library_shelf = Shelf::Stickers;
+                    view
+                }),
+            );
+        harness.run_steps(4);
+        for name in ["Weight", "Width"] {
+            assert!(
+                harness
+                    .query_all_by_role_and_label(egui::accesskit::Role::Slider, name)
+                    .next()
+                    .is_some(),
+                "{name}"
+            );
+        }
+        // Another face has other axes: the setting goes with the face.
+        harness.state_mut().0.set_text_face("sample.ttf").unwrap();
+        harness.run_steps(3);
+        assert_eq!(stored(&harness.state().0), "");
+        for name in ["Weight", "Width"] {
+            assert!(
+                harness
+                    .query_all_by_role_and_label(egui::accesskit::Role::Slider, name)
+                    .next()
+                    .is_none(),
+                "{name}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
     /// The font menu has a search: typing leaves the faces whose names
     /// have what was typed, and Enter takes the first of them.
     #[test]

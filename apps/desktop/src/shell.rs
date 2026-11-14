@@ -201,6 +201,9 @@ impl std::fmt::Display for ShellError {
                 formatter.write_str("the line width must be from zero through 8192")
             }
             Self::Edit(EditError::TextFont) => formatter.write_str("the face is not a file name"),
+            Self::Edit(EditError::TextFontAxes) => {
+                formatter.write_str("the face's axes are not written as tags and numbers")
+            }
             Self::Edit(EditError::TextEmpty) => formatter.write_str("type something to add text"),
             Self::Edit(EditError::UnknownEffect) => {
                 formatter.write_str("that effect is not in this version")
@@ -8986,6 +8989,20 @@ fn text_style(
             )
         })
         .unwrap_or((0.0, String::new(), 0, 0.0, 0.0, 0.0, String::new()))
+}
+
+/// The text a segment shows, when it is a text clip.
+fn text_material<'d>(
+    draft: &'d Draft,
+    segment_id: &SegmentId,
+) -> Option<&'d cutlass_model::MaterialText> {
+    placed(draft, segment_id).and_then(|(segment, _)| {
+        draft
+            .materials
+            .texts
+            .iter()
+            .find(|text| text.id == segment.material_id)
+    })
 }
 
 fn text_font(draft: &Draft, segment_id: &SegmentId) -> String {

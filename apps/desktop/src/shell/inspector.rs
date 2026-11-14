@@ -1137,6 +1137,101 @@ impl Shell {
         })
     }
 
+    /// The axes the selected title's face varies along, each with where
+    /// the title has it: weight, width, slant and whatever else the face's
+    /// maker gave it. None for a face that does not vary, and an axis the
+    /// maker hid, or one with nowhere to go, is left out.
+    #[must_use]
+    pub fn text_font_axes(&self) -> Vec<FontAxis> {
+        self.text_face_set()
+            .map(|font| {
+                let settings = font.settings();
+                font.axes()
+                    .into_iter()
+                    .zip(settings)
+                    .filter(|(axis, _)| !axis.hidden && axis.max > axis.min)
+                    .map(|(axis, (_, value))| FontAxis {
+                        name: axis.name.unwrap_or_else(|| axis_name(axis.tag)),
+                        tag: axis.tag,
+                        min: axis.min,
+                        default: axis.default,
+                        max: axis.max,
+                        value,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The selected title's face as the title has it set: read from the
+    /// faces the table has, and moved along its axes as the title says.
+    fn text_face_set(&self) -> Option<cutlass_font::Font<'_>> {
+        use cutlass_eval::Fonts;
+        let segment_id = self.text_segment().ok()?;
+        let draft = self.session_draft().ok()?;
+        let text = super::text_material(draft, &segment_id)?;
+        let mut font = cutlass_font::read(self.face.face(&text.font_path)?).ok()?;
+        if !font.is_variable() {
+            return None;
+        }
+        let axes = text.font_axes();
+        if !axes.is_empty() {
+            font.set_variations(&axes).ok()?;
+        }
+        Some(font)
+    }
+
+    /// Move the selected title's face to `value` along the axis `tag`,
+    /// the other axes staying where they are. A value past the axis's
+    /// end is the end. The same value is not an undo step.
+    pub fn set_text_font_axis(&mut self, tag: [u8; 4], value: f64) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let Some(font) = self.text_face_set() else {
+            return Err(ShellError::Unavailable(
+                "this face has no axes to set".to_owned(),
+            ));
+        };
+        let before = font.settings();
+        if !before.iter().any(|(have, _)| *have == tag) {
+            return Err(ShellError::Unavailable(
+                "this face has no such axis".to_owned(),
+            ));
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let wanted = value as f32;
+        if !wanted.is_finite() {
+            return Err(ShellError::Unavailable("that is not a number".to_owned()));
+        }
+        let ends: Vec<(f32, f32)> = font
+            .axes()
+            .iter()
+            .map(|axis| (axis.min, axis.max))
+            .collect();
+        // Every axis is written, so the face is where the title shows it
+        // whatever style it started from.
+        let after: Vec<([u8; 4], f32)> = before
+            .iter()
+            .zip(&ends)
+            .map(|((have, at), (min, max))| {
+                let at = if *have == tag {
+                    wanted.clamp(*min, *max)
+                } else {
+                    *at
+                };
+                (*have, at)
+            })
+            .collect();
+        let written = cutlass_model::write_font_axes(&after);
+        if written == cutlass_model::write_font_axes(&before) {
+            return Ok(());
+        }
+        self.apply(Request::SetTextFontAxes {
+            segment_id,
+            axes: written,
+        })
+    }
+
     /// Align the selected title left (0), center (1), or right (2), or stand
     /// it in vertical columns at the top (3), middle (4), or bottom (5). A
     /// title with no line width takes the canvas width, and a column the
@@ -1630,6 +1725,33 @@ pub fn mask_values(mask: &cutlass_effects::Mask) -> [f64; 7] {
         mask.round,
     ]
     .map(f64::from)
+}
+
+/// One axis the selected title's face varies along, for a slider.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FontAxis {
+    pub tag: [u8; 4],
+    /// The axis's name, from the face or, where it gives none, from its
+    /// tag.
+    pub name: String,
+    pub min: f32,
+    pub default: f32,
+    pub max: f32,
+    /// Where the title has the face along it.
+    pub value: f32,
+}
+
+/// What an axis is called when its face does not say: the names of the
+/// axes every maker uses, and the tag itself for any other.
+fn axis_name(tag: [u8; 4]) -> String {
+    match &tag {
+        b"wght" => "Weight".to_owned(),
+        b"wdth" => "Width".to_owned(),
+        b"slnt" => "Slant".to_owned(),
+        b"ital" => "Italic".to_owned(),
+        b"opsz" => "Optical size".to_owned(),
+        _ => String::from_utf8_lossy(&tag).into_owned(),
+    }
 }
 
 #[cfg(test)]

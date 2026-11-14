@@ -1995,6 +1995,7 @@ fn text_basic(
             words_box(shell, ui, state);
         }
         font_row(shell, ui, state, inspection);
+        font_axis_rows(shell, ui, state);
         let size = inspection.text_size.round();
         let changed = setting_row(
             shell,
@@ -2357,6 +2358,40 @@ fn matching_faces<'f>(faces: &'f [(String, String)], query: &str) -> Vec<&'f (St
             words.iter().all(|word| label.contains(word.as_str()))
         })
         .collect()
+}
+
+/// A slider for each axis the title's face varies along: weight, width
+/// and whatever else its maker gave it. A face that does not vary has
+/// none. The track moves the title's own setting; the styles its maker
+/// named are in the font menu.
+fn font_axis_rows(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    for axis in shell.text_font_axes() {
+        let tag = String::from_utf8_lossy(&axis.tag).into_owned();
+        // An axis a few units long is set to a hundredth, a longer one
+        // to a whole unit.
+        let fine = axis.max - axis.min <= 20.0;
+        let (low, high) = (f64::from(axis.min), f64::from(axis.max));
+        let stored = f64::from(axis.value);
+        let moved = slider(
+            ui,
+            state,
+            &format!("font-axis-{tag}"),
+            &axis.name,
+            stored,
+            low..=high,
+            |value| {
+                if fine {
+                    format!("{value:.2}")
+                } else {
+                    format!("{value:.0}")
+                }
+            },
+        );
+        if let Some(value) = moved {
+            let value = if fine { value } else { value.round() };
+            send(shell, |shell| shell.set_text_font_axis(axis.tag, value));
+        }
+    }
 }
 
 fn font_row(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspection: &Inspection) {

@@ -71,6 +71,14 @@ impl<W: Write + Seek> Mp4Mux<W> {
         }
     }
 
+    /// Sets the file's cover art, a JPEG picture, written as iTunes
+    /// metadata in `moov/udta` at finish. A refused picture (not a JPEG, or
+    /// too large) leaves the file as it was and the muxer building.
+    pub fn set_cover_art(&mut self, jpeg: Vec<u8>) -> Result<(), MuxError> {
+        self.building()?;
+        self.inner.set_cover_art(jpeg).map_err(boxed)
+    }
+
     /// The writer, once the file is finished.
     pub fn into_writer(self) -> Result<W, MuxError> {
         if self.status != MuxStatus::Finished {
@@ -1492,5 +1500,295 @@ mod tests {
         assert_eq!(bare_asc(&es).unwrap(), asc);
         assert!(bare_asc(&[0x03, 0x05]).is_err());
         assert!(bare_asc(&[0x03, 0x02, 0x00, 0x00, 0x00]).is_err());
+    }
+
+    /// The payload of the first `kind` box among the boxes in `bytes`.
+    fn child<'a>(bytes: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
+        let mut at = 0;
+        while at + 8 <= bytes.len() {
+            let mut size = u32::from_be_bytes(bytes[at..at + 4].try_into().ok()?) as usize;
+            let mut header = 8;
+            if size == 1 {
+                let large = bytes.get(at + 8..at + 16)?;
+                size = usize::try_from(u64::from_be_bytes(large.try_into().ok()?)).ok()?;
+                header = 16;
+            }
+            if size < header || at + size > bytes.len() {
+                return None;
+            }
+            if &bytes[at + 4..at + 8] == kind {
+                return Some(&bytes[at + header..at + size]);
+            }
+            at += size;
+        }
+        None
+    }
+
+    /// A short JPEG-looking picture: the start-of-image marker, then bytes.
+    fn fake_jpeg() -> Vec<u8> {
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        jpeg.extend((0..300).map(|i| (i * 7 % 251) as u8));
+        jpeg.extend([0xFF, 0xD9]);
+        jpeg
+    }
+
+    /// A sound-only file of `brand`, with `cover` set when given.
+    fn covered(brand: FileBrand, cover: Option<Vec<u8>>) -> Vec<u8> {
+        let mut mux = Mp4Mux::with_brand(Cursor::new(Vec::new()), brand);
+        let sound = mux
+            .add_stream(NewStream {
+                params: StreamParams::try_audio(StreamCodec::Known(Id::Pcm), 48_000, 2, Vec::new())
+                    .unwrap(),
+                timescale: Timescale::new(48_000),
+                language: None,
+            })
+            .unwrap();
+        if let Some(cover) = cover {
+            mux.set_cover_art(cover).unwrap();
+        }
+        let payload: Vec<u8> = (0..4800 * 4).map(|i| (i % 253) as u8).collect();
+        mux.write_packet(&packet(sound.get(), payload, 0, 4800, 48_000))
+            .unwrap();
+        mux.finish(&[TrackDuration {
+            track: sound,
+            timescale: Timescale::new(48_000),
+            ticks: 4800,
+        }])
+        .unwrap();
+        mux.into_writer().unwrap().into_inner()
+    }
+
+    /// Every packet of a file, as the crate's demuxer reads it.
+    fn packets(bytes: Vec<u8>) -> Vec<(u32, Option<i64>, Vec<u8>)> {
+        let mut file = crate::IsoBmffFile::open(Cursor::new(bytes)).unwrap();
+        let mut out = Vec::new();
+        while let Some(packet) = cutlass_container::Demux::read_packet(&mut file).unwrap() {
+            let time = packet.timestamp().presentation_or_decode();
+            out.push((packet.stream(), time, packet.bytes().to_vec()));
+        }
+        out
+    }
+
+    /// The cover is `moov/udta/meta/ilst/covr/data` as FFmpeg's movenc.c
+    /// writes it: `meta` a full box, an `hdlr` of 33 bytes naming `mdir`
+    /// and `appl`, and a `data` atom of type 13 (JPEG), locale 0, then the
+    /// picture. The demuxer reads the same packets as without it.
+    #[test]
+    fn a_cover_is_itunes_metadata_and_the_movie_reads_the_same() {
+        let jpeg = fake_jpeg();
+        for brand in [FileBrand::Mp4, FileBrand::Mov, FileBrand::M4a] {
+            let plain = covered(brand, None);
+            let bytes = covered(brand, Some(jpeg.clone()));
+            assert!(child(child(&plain, b"moov").unwrap(), b"udta").is_none());
+
+            let moov = child(&bytes, b"moov").unwrap();
+            let udta = child(moov, b"udta").unwrap();
+            let meta = child(udta, b"meta").unwrap();
+            assert_eq!(&meta[..4], &[0, 0, 0, 0], "{brand:?}: version and flags");
+            let mut hdlr = 33u32.to_be_bytes().to_vec();
+            hdlr.extend_from_slice(b"hdlr");
+            hdlr.extend_from_slice(&[0; 8]);
+            hdlr.extend_from_slice(b"mdirappl");
+            hdlr.extend_from_slice(&[0; 9]);
+            assert_eq!(&meta[4..37], hdlr.as_slice(), "{brand:?}");
+            let ilst = child(&meta[4..], b"ilst").unwrap();
+            let covr = child(ilst, b"covr").unwrap();
+            assert_eq!(covr.len(), 8 + 8 + jpeg.len());
+            let data = child(covr, b"data").unwrap();
+            assert_eq!(&data[..8], &[0, 0, 0, 13, 0, 0, 0, 0], "{brand:?}");
+            assert_eq!(&data[8..], jpeg.as_slice(), "{brand:?}");
+            // `udta` is the last child of `moov`, after the tracks.
+            assert!(moov.ends_with(udta));
+
+            assert_eq!(packets(bytes), packets(plain), "{brand:?}");
+        }
+    }
+
+    /// With `moov` written first, and in a fragmented file, the cover is
+    /// in `moov` too and the files open with the same packets.
+    #[test]
+    fn a_cover_goes_in_moov_first_and_fragmented_files() {
+        use crate::legacy;
+        use crate::mux::{IsoBmffMux, MuxOptions};
+
+        let jpeg = fake_jpeg();
+        for (moov_at_end, fragmented) in [(false, false), (true, true)] {
+            let write = |cover: bool| {
+                let mut mux = IsoBmffMux::new(
+                    Cursor::new(Vec::new()),
+                    MuxOptions {
+                        moov_at_end,
+                        fragmented,
+                        samples_per_fragment: 1,
+                        ..MuxOptions::default()
+                    },
+                );
+                let params = legacy::StreamParams::audio(
+                    legacy::CodecId::Pcm,
+                    legacy::Timescale(8_000),
+                    8_000,
+                    1,
+                    16,
+                    legacy::SampleFormat::S16Le,
+                );
+                let track = legacy::Mux::add_stream(&mut mux, &params).unwrap();
+                if cover {
+                    mux.set_cover_art(jpeg.clone()).unwrap();
+                }
+                for index in 0..3 {
+                    legacy::Mux::write_packet(
+                        &mut mux,
+                        &legacy::Packet {
+                            track_id: track,
+                            payload: vec![index; 320],
+                            dts: i64::from(index) * 160,
+                            pts: i64::from(index) * 160,
+                            duration: 160,
+                            timescale: legacy::Timescale(8_000),
+                            keyframe: true,
+                        },
+                    )
+                    .unwrap();
+                }
+                // A fragmented file has its `moov` out already.
+                if fragmented {
+                    assert!(mux.set_cover_art(jpeg.clone()).is_err());
+                }
+                mux.finish_into().unwrap().into_inner()
+            };
+            let bytes = write(true);
+            let data = child(&bytes, b"moov")
+                .and_then(|moov| child(moov, b"udta"))
+                .and_then(|udta| child(udta, b"meta"))
+                .and_then(|meta| child(&meta[4..], b"ilst"))
+                .and_then(|ilst| child(ilst, b"covr"))
+                .and_then(|covr| child(covr, b"data"))
+                .unwrap();
+            assert_eq!(&data[8..], jpeg.as_slice());
+            assert_eq!(packets(bytes), packets(write(false)), "{fragmented}");
+        }
+    }
+
+    /// Bytes that are not a JPEG, a picture past the limit, and a cover
+    /// after finish are refused; a refused cover leaves the file plain and
+    /// the muxer building.
+    #[test]
+    fn a_cover_that_is_not_a_jpeg_is_refused_and_the_file_stays_plain() {
+        let mut mux = Mp4Mux::new(Cursor::new(Vec::new()));
+        assert!(mux.set_cover_art(Vec::new()).is_err());
+        assert!(mux.set_cover_art(b"\x89PNG\r\n\x1a\n".to_vec()).is_err());
+        let mut large = vec![0xFF, 0xD8, 0xFF];
+        large.resize(
+            usize::try_from(crate::limits::MAX_COVER_BYTES).unwrap() + 1,
+            0,
+        );
+        assert!(mux.set_cover_art(large).is_err());
+        assert_eq!(mux.status(), cutlass_container::MuxStatus::Building);
+        let sound = mux
+            .add_stream(NewStream {
+                params: StreamParams::try_audio(StreamCodec::Known(Id::Pcm), 8_000, 1, Vec::new())
+                    .unwrap(),
+                timescale: Timescale::new(8_000),
+                language: None,
+            })
+            .unwrap();
+        mux.write_packet(&packet(sound.get(), vec![0; 320], 0, 160, 8_000))
+            .unwrap();
+        mux.finish(&[TrackDuration {
+            track: sound,
+            timescale: Timescale::new(8_000),
+            ticks: 160,
+        }])
+        .unwrap();
+        assert!(mux.set_cover_art(fake_jpeg()).is_err());
+        let bytes = mux.into_writer().unwrap().into_inner();
+        assert!(child(child(&bytes, b"moov").unwrap(), b"udta").is_none());
+    }
+
+    /// FFmpeg reads the cover of an MP4, a movie and an M4A as an attached
+    /// picture: one more stream, Motion JPEG with `attached_pic` set, whose
+    /// packet is the picture. The sound stream and its packets are the same
+    /// as in the file without a cover.
+    #[test]
+    fn ffmpeg_reads_the_cover_as_an_attached_picture() {
+        let which = |name: &str| {
+            let out = std::process::Command::new("which")
+                .arg(name)
+                .output()
+                .ok()?;
+            let path = String::from_utf8(out.stdout).ok()?;
+            let path = std::path::PathBuf::from(path.trim());
+            path.is_file().then_some(path)
+        };
+        let (Some(ffmpeg), Some(ffprobe)) = (which("ffmpeg"), which("ffprobe")) else {
+            eprintln!("not available: ffmpeg or ffprobe");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("isobmff-cover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let picture = dir.join("cover.jpg");
+        let made = std::process::Command::new(&ffmpeg)
+            .args(["-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i"])
+            .arg("color=c=red:s=16x16")
+            .args(["-frames:v", "1", "-c:v", "mjpeg", "-f", "image2"])
+            .arg(&picture)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        let jpeg = std::fs::read(&picture).unwrap();
+        let streams = |path: &std::path::Path| {
+            let out = std::process::Command::new(&ffprobe)
+                .args(["-v", "error", "-show_entries"])
+                .arg("stream=index,codec_type,codec_name,sample_rate,channels,width,height:stream_disposition=attached_pic")
+                .args(["-of", "csv=p=0"])
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                out.stderr.is_empty(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap()
+        };
+        let stream_bytes = |path: &std::path::Path, map: &str| {
+            let out = std::process::Command::new(&ffmpeg)
+                .args(["-v", "error", "-nostdin", "-i"])
+                .arg(path)
+                .args(["-map", map, "-c", "copy", "-f", "data", "-"])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out.stdout
+        };
+        for (brand, name) in [
+            (FileBrand::Mp4, "cover.mp4"),
+            (FileBrand::Mov, "cover.mov"),
+            (FileBrand::M4a, "cover.m4a"),
+        ] {
+            let plain = dir.join(format!("plain-{name}"));
+            let path = dir.join(name);
+            std::fs::write(&plain, covered(brand, None)).unwrap();
+            std::fs::write(&path, covered(brand, Some(jpeg.clone()))).unwrap();
+            let before = streams(&plain);
+            let after = streams(&path);
+            assert_eq!(before.lines().count(), 1, "{name}: {before}");
+            let lines: Vec<&str> = after.lines().collect();
+            assert_eq!(lines.len(), 2, "{name}: {after}");
+            assert_eq!(lines[0], before.trim(), "{name}");
+            assert_eq!(lines[1], "1,mjpeg,video,16,16,1", "{name}");
+            assert_eq!(stream_bytes(&path, "0:0"), stream_bytes(&plain, "0:0"));
+            assert_eq!(stream_bytes(&path, "0:1"), jpeg, "{name}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

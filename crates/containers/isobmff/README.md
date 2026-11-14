@@ -53,6 +53,8 @@ The default layout is `ftyp`, `mdat`, `moov`. `moov_at_end: false` puts `moov` f
 
 `Mp4Mux` is the export muxer. It accepts H.264, HEVC, MPEG-4 Visual, MPEG-2, ProRes, VP8, AV1, and Motion JPEG pictures, and AAC, ALAC, Opus, AC-3, E-AC-3, and 16-bit PCM sound. Motion JPEG is written only to a QuickTime movie. An AV1 track is an `av01` entry with its `av1C` record in a file that lists the `av01` brand; each sample is the temporal unit without its temporal delimiter, padding and redundant frame headers, every OBU with a size (AV1 Codec ISO Media File Format Binding 2.1 and 2.4).
 
+`set_cover_art` (on `Mp4Mux` and `IsoBmffMux`) gives the file a JPEG cover, written as iTunes metadata the way FFmpeg's movenc.c writes it: `moov/udta/meta` (a full box with an `hdlr` of handler `mdir`, manufacturer `appl`), then `ilst/covr/data`, the `data` atom of type 13 (JPEG). FFmpeg reads it as an attached picture. Bytes that do not start with a JPEG marker, or a picture over 16 MiB (`MAX_COVER_BYTES`), are refused and the file is written without one. The demuxer skips `udta`.
+
 What is refused:
 
 - An unknown major brand with no known compatible brand: `Error::UnsupportedBrand`. A file that is not this family: `Error::NotThisFamily`.

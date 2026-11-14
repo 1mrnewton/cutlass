@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "The assistant's cloud model with the user's own key, for the desktop and the phones."
+description = "The assistant's cloud model with the user's own key."
 
 [dependencies]
 cutlass-agent = { path = "../agent", version = "0.1.0" }

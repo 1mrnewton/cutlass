@@ -1,5 +1,5 @@
-//! A conversation kept on disk between sessions, for the desktop and the
-//! phones alike: the model's messages as JSON, written whole each turn.
+//! A conversation kept on disk between sessions: the model's messages as
+//! JSON, written whole each turn.
 
 use std::path::Path;
 

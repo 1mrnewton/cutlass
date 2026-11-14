@@ -1,5 +1,5 @@
-//! Where the desktop keeps the cloud model's keys; the model itself is
-//! shared with the phones in `cutlass-agent-cloud`.
+//! Where the desktop keeps the cloud model's keys; the model itself is in
+//! `cutlass-agent-cloud`.
 
 use std::path::PathBuf;
 

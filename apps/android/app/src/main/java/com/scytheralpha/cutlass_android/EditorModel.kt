@@ -21,9 +21,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.cutlass_ffi_bindings.AnimationPreset
-import uniffi.cutlass_ffi_bindings.Assistant
-import uniffi.cutlass_ffi_bindings.AssistantLine
-import uniffi.cutlass_ffi_bindings.CloudChoice
 import uniffi.cutlass_ffi_bindings.Background
 import uniffi.cutlass_ffi_bindings.CanvasRatio
 import uniffi.cutlass_ffi_bindings.Clip
@@ -197,9 +194,6 @@ class EditorModel(project: String, private val scope: CoroutineScope) {
             }
             result.onSuccess { editor ->
                 opened = editor
-                assistant = runCatching { Assistant(editor, root) }
-                    .onFailure { Log.w("cutlass", "assistant: ${it.message}") }
-                    .getOrNull()
                 fonts = runCatching { editor.fonts() }.getOrDefault(emptyList())
                 reload()
             }.onFailure { show(it) }
@@ -649,65 +643,6 @@ class EditorModel(project: String, private val scope: CoroutineScope) {
     fun reorder(clip: String, place: Int) = edit { it.reorder(clip, place.coerceAtLeast(0).toUInt()) }
 
     fun undo() = edit { it.undo() }
-
-    // Assistant
-
-    /** The assistant for this project, once the project is open. */
-    private var assistant: Assistant? = null
-
-    /** The conversation, as Rust keeps it. */
-    var assistantLines by mutableStateOf(emptyList<AssistantLine>())
-        private set
-
-    /** A turn is running. */
-    var assistantBusy by mutableStateOf(false)
-        private set
-
-    /** The cloud model's settings; the key itself is never read back. */
-    fun assistantCloud(): CloudChoice? = runCatching { assistant?.cloud() }.getOrNull()
-
-    /** Keep the cloud model's settings, and `key` when one was typed. */
-    fun setAssistantCloud(choice: CloudChoice, key: String?) {
-        val assistant = assistant ?: return
-        runCatching { assistant.setCloud(choice, key) }.onFailure(::show)
-    }
-
-    /** Ask the assistant. Its lines come in while it works; its edits redraw the project. */
-    fun ask(text: String) {
-        val assistant = assistant ?: return
-        assistant.send(text)
-        watchAssistant(assistant)
-    }
-
-    fun stopAssistant() {
-        assistant?.stop()
-    }
-
-    fun clearAssistant() {
-        assistant?.clear()
-        assistantLines = emptyList()
-    }
-
-    private fun watchAssistant(assistant: Assistant) {
-        scope.launch {
-            var seen = -1
-            while (true) {
-                val (lines, busy) = withContext(Dispatchers.Default) {
-                    assistant.lines() to assistant.busy()
-                }
-                assistantLines = lines
-                assistantBusy = busy
-                // A finished step may have changed the project.
-                val finished = lines.count { !it.running }
-                if (finished != seen) {
-                    seen = finished
-                    reload()
-                }
-                if (!busy) break
-                delay(250)
-            }
-        }
-    }
 
     fun redo() = edit { it.redo() }
 

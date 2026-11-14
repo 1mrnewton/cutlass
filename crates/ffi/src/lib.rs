@@ -10,7 +10,6 @@
 
 mod about;
 mod animate;
-mod assistant;
 mod cache;
 mod canvas;
 mod clip;
@@ -35,7 +34,6 @@ mod transition;
 
 pub use about::{PHONE_LICENSE, PhoneNotice, notice_text, phone_notices};
 pub use animate::{PhoneAnimation, PhoneAnimationPreset, PhoneAnimations, animation_presets};
-pub use assistant::{PHONE_TOOLS, phone_tools};
 pub use cache::ResourceCache;
 pub use canvas::{
     BACKGROUND_BLURS, BACKGROUND_COLORS, PhoneBackground, PhoneRatio, phone_background,
@@ -1923,58 +1921,6 @@ mod tests {
                 .contains(TrackAttribute::MUTE)
         );
         assert_eq!(opened.revision(), 0);
-    }
-
-    #[test]
-    fn the_assistant_reads_edits_as_one_undo_step_and_is_refused_desktop_tools() {
-        let temp = Temp::new();
-        let roots = Roots::new(&temp);
-        let mut host = roots.create();
-        let settings = temp.path.join("settings.json");
-        let call = |name: &str, arguments: String| cutlass_agent::ToolCall {
-            id: "1".to_owned(),
-            name: name.to_owned(),
-            arguments,
-        };
-        let read = host.run_agent_tool(&call("draft.query", "project".to_owned()), &settings);
-        assert!(
-            !read.is_error && read.content.contains("revision=0"),
-            "{read:?}"
-        );
-        let canvas = host.run_agent_tool(
-            &call(
-                "draft.apply",
-                r#"{"expected_revision":0,"requests":[{"op":"set_canvas_size","width":1080,"height":1920,"ratio":"9:16"}]}"#
-                    .to_owned(),
-            ),
-            &settings,
-        );
-        assert!(!canvas.is_error, "{canvas:?}");
-        assert_eq!(host.draft().canvas_config.height, 1920);
-        // Saved, and one undo step like any edit.
-        assert_eq!(roots.open().draft().canvas_config.height, 1920);
-        host.undo().unwrap();
-        assert_eq!(host.draft().canvas_config.height, 1080);
-        // A script runs in this process.
-        let script = host.run_agent_tool(
-            &call(
-                "sandbox.run",
-                r#"{"source":"input.a + 1","input":{"a":1}}"#.to_owned(),
-            ),
-            &settings,
-        );
-        assert_eq!(script.content.trim(), "2", "{script:?}");
-        // The desktop's tools are neither offered nor run.
-        assert!(
-            !crate::phone_tools()
-                .iter()
-                .any(|tool| tool.name == "player.seek")
-        );
-        let seek = host.run_agent_tool(&call("player.seek", "0".to_owned()), &settings);
-        assert!(
-            seek.is_error && seek.content.contains("desktop"),
-            "{seek:?}"
-        );
     }
 
     #[test]

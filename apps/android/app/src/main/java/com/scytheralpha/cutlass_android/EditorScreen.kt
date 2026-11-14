@@ -93,7 +93,6 @@ sealed interface Panel {
     data object Animations : Panel
     data object Fade : Panel
     data object Opacity : Panel
-    data object Assistant : Panel
 
     /** Add text, or change the text clip with this id. */
     data class Text(val clip: String?) : Panel
@@ -156,7 +155,7 @@ fun EditorScreen(project: ProjectSummary, home: () -> Unit) {
     }
     LaunchedEffect(model.selectedClip) {
         if (model.selectedClip == null && panel !is Panel.Text && panel != Panel.Effects &&
-            panel != Panel.Ratio && panel != Panel.Background && panel != Panel.Assistant
+            panel != Panel.Ratio && panel != Panel.Background
         ) {
             panel = null
         }
@@ -186,19 +185,6 @@ fun EditorScreen(project: ProjectSummary, home: () -> Unit) {
                 },
                 trailing = {
                     val enabled = model.hasClips && !model.isOpening
-                    Text(
-                        "Ask",
-                        color = Palette.text,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 15.sp,
-                        modifier = Modifier
-                            .clickable(enabled = !model.isOpening) {
-                                model.selectedClip = null
-                                panel = if (panel == Panel.Assistant) null else Panel.Assistant
-                            }
-                            .padding(horizontal = 12.dp, vertical = 5.dp)
-                            .semantics { contentDescription = "Assistant" },
-                    )
                     Text(
                         "Export",
                         color = Palette.exportInk,
@@ -422,7 +408,6 @@ private fun Bottom(
             useTool(tool, model, setPanel, setOpenBar, pick)
         }
         when {
-            panel == Panel.Assistant -> AssistantPanel(model, done)
             panel == Panel.Effects -> EffectsPanel(model, done)
             panel == Panel.Ratio -> RatioPanel(model, done)
             panel == Panel.Background -> BackgroundPanel(model, done)

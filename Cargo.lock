@@ -2757,7 +2757,6 @@ version = "0.1.0"
 dependencies = [
  "cutlass-aac",
  "cutlass-ac3",
- "cutlass-agent",
  "cutlass-aiff",
  "cutlass-alac",
  "cutlass-av1",
@@ -2815,11 +2814,7 @@ dependencies = [
 name = "cutlass-ffi-bindings"
 version = "0.1.0"
 dependencies = [
- "cutlass-agent",
- "cutlass-agent-cloud",
  "cutlass-ffi",
- "cutlass-logger",
- "cutlass-settings",
  "uniffi",
 ]
 

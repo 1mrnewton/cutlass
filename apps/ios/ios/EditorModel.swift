@@ -99,12 +99,6 @@ final class EditorModel {
     private(set) var edits = 0
     private var stripRetry: Task<Void, Never>?
     private var fetching: Set<String> = []
-    /// The assistant for this project, once the project is open.
-    private var assistant: Assistant?
-    /// The conversation, as Rust keeps it.
-    private(set) var assistantLines: [AssistantLine] = []
-    /// A turn is running.
-    private(set) var assistantBusy = false
 
     /// Open the project folder at `project`. Rust reads it off the main
     /// thread; the screen shows a spinner until it is open.
@@ -123,13 +117,6 @@ final class EditorModel {
                 case let .success(editor):
                     self.opened = editor
                     self.fonts = (try? editor.fonts()) ?? []
-                    do {
-                        let assistant = try Assistant(editor: editor, root: root)
-                        self.assistant = assistant
-                        self.assistantLines = assistant.lines()
-                    } catch {
-                        Self.log.error("assistant: \(error.localizedDescription, privacy: .public)")
-                    }
                     self.reload()
                 case let .failure(error):
                     self.show(error)
@@ -846,53 +833,6 @@ final class EditorModel {
     func redo() { edit { try $0.redo() } }
 
     func clearNotice() { notice = nil }
-
-    // MARK: Assistant
-
-    /// The cloud model's settings; the key itself is never read back.
-    func assistantCloud() -> CloudChoice? { assistant?.cloud() }
-
-    /// Keep the cloud model's settings, and `key` when one was typed.
-    func setAssistantCloud(_ choice: CloudChoice, key: String?) {
-        guard let assistant else { return }
-        do { try assistant.setCloud(choice: choice, key: key) } catch { show(error) }
-    }
-
-    /// Ask the assistant. Its lines come in while it works; its edits
-    /// redraw the project.
-    func ask(_ text: String) {
-        guard let assistant else { return }
-        assistant.send(ask: text)
-        watchAssistant(assistant)
-    }
-
-    func stopAssistant() { assistant?.stop() }
-
-    func clearAssistant() {
-        assistant?.clear()
-        assistantLines = []
-    }
-
-    private func watchAssistant(_ assistant: Assistant) {
-        Task { [weak self] in
-            var seen = -1
-            while let self {
-                let (lines, busy) = await Task.detached {
-                    (assistant.lines(), assistant.busy())
-                }.value
-                self.assistantLines = lines
-                self.assistantBusy = busy
-                // A finished step may have changed the project.
-                let finished = lines.filter { !$0.running }.count
-                if finished != seen {
-                    seen = finished
-                    self.reload()
-                }
-                if !busy { break }
-                try? await Task.sleep(for: .milliseconds(250))
-            }
-        }
-    }
 
     func say(_ text: String) {
         Self.log.notice("\(text, privacy: .public)")

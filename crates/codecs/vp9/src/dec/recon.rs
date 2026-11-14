@@ -365,9 +365,10 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
         let by = y as i32 + (mv_row >> 4);
         let (l, r) = if mx != 0 { (3, 4) } else { (0, 0) };
         let (t, bo) = if my != 0 { (3, 4) } else { (0, 0) };
-        // The reference rows this block reads, and one more for the
+        // The reference rows this block reads (the edge copy below reads 4
+        // past the block whatever the fraction), and one more for the
         // kernels' loads past the end of a row, must be final.
-        let last = (by + h as i32 + bo).clamp(1, rh) as usize;
+        let last = (by + h as i32 + 4).clamp(1, rh) as usize;
         rp.buf.wait((last + 1) << shift);
         let (data, stride) = rp.buf.plane(plane);
         if bx - l >= 0 && by - t >= 0 && bx + w as i32 + r <= rw && by + h as i32 + bo <= rh {

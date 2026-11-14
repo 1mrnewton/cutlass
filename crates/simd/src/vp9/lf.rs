@@ -22,30 +22,42 @@ pub enum Wd {
     W16,
 }
 
-/// One edge to filter: `n` (8 or 16) lines of `buf`. Line `i` has its
-/// first sample past the edge at `at + i * stride` for a vertical edge
-/// (`vertical`, samples along the row), or at `at + i` for a horizontal
-/// one (samples down the column, `stride` apart). Lines 0 to 7 take
-/// `thr[0]` and lines 8 to 15 `thr[1]`.
+/// One edge to filter: 16 lines of `buf`, as two halves of 8. Line `i`
+/// has its first sample past the edge at `at + i * stride` for a vertical
+/// edge (`vertical`, samples along the row), or at `at + i` for a
+/// horizontal one (samples down the column, `stride` apart). Lines 0 to 7
+/// take `wd[0]` and `thr[0]`, lines 8 to 15 `wd[1]` and `thr[1]`; a half
+/// whose filter is `None` is left as it is.
 pub struct Edge<'a> {
     pub buf: &'a mut [u8],
     pub at: usize,
     pub stride: usize,
     pub vertical: bool,
-    pub n: usize,
-    pub wd: Wd,
+    pub wd: [Option<Wd>; 2],
     pub thr: [Thresh; 2],
 }
 
 impl Edge<'_> {
+    /// The widest filter of the two halves.
+    fn widest(&self) -> Option<Wd> {
+        let r = |w: Option<Wd>| match w {
+            None => 0,
+            Some(Wd::W4) => 1,
+            Some(Wd::W8) => 2,
+            Some(Wd::W16) => 3,
+        };
+        if r(self.wd[0]) >= r(self.wd[1]) { self.wd[0] } else { self.wd[1] }
+    }
+
     fn fits(&self) -> bool {
-        if !matches!(self.n, 8 | 16) {
+        let Some(wd) = self.widest() else {
             return false;
-        }
-        let taps = if self.wd == Wd::W16 { 8 } else { 4 };
+        };
+        let taps = if wd == Wd::W16 { 8 } else { 4 };
         if self.vertical {
-            // Each line reads 16 samples from 8 before the edge.
-            self.at >= 8 && self.at + (self.n - 1) * self.stride + 8 <= self.buf.len()
+            // Each line reads 16 samples from 8 before the edge, or 8
+            // from 4 before it.
+            self.at >= taps && self.at + 15 * self.stride + taps <= self.buf.len()
         } else {
             self.at >= taps * self.stride && self.at + (taps - 1) * self.stride + 16 <= self.buf.len()
         }
@@ -79,13 +91,13 @@ pub fn filter_scalar(e: Edge<'_>) {
         at,
         stride,
         vertical,
-        n,
-        wd,
+        wd: wds,
         thr,
     } = e;
     let (step, line) = if vertical { (1, stride) } else { (stride, 1) };
-    for i in 0..n {
+    for i in 0..16 {
         let t = thr[i / 8];
+        let Some(wd) = wds[i / 8] else { continue };
         let q0i = at + i * line;
         let px = |buf: &[u8], k: isize| -> i32 { i32::from(buf[(q0i as isize + k * step as isize) as usize]) };
         let set = |buf: &mut [u8], k: isize, v: i32| buf[(q0i as isize + k * step as isize) as usize] = v as u8;

@@ -1142,3 +1142,8 @@ mod tests {
         assert!(err.contains("truncated"), "{err}");
     }
 }
+
+#[cfg(test)]
+pub(crate) fn tests_header() -> Header {
+    empty_header(0, true, true, false)
+}

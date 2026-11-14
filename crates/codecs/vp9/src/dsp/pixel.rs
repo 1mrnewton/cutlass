@@ -25,9 +25,9 @@ pub trait Pixel: Copy + Default + PartialEq + Send + Sync + core::fmt::Debug + '
         false
     }
 
-    /// The loop filter across one edge of `n` (8 or 16) lines with vector
-    /// instructions (thresholds for lines 0 to 7 and 8 to 15); `false`
-    /// when not taken.
+    /// The loop filter across 16 lines, two halves of 8 with their own
+    /// filters and thresholds, with vector instructions; `false` when not
+    /// taken.
     #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     fn lf_fast(
@@ -35,8 +35,7 @@ pub trait Pixel: Copy + Default + PartialEq + Send + Sync + core::fmt::Debug + '
         _at: usize,
         _stride: usize,
         _vertical: bool,
-        _n: usize,
-        _wd: super::lf::Wd,
+        _wd: [Option<super::lf::Wd>; 2],
         _thr: [super::lf::Thresh; 2],
     ) -> bool {
         false
@@ -51,8 +50,7 @@ impl Pixel for u8 {
         at: usize,
         stride: usize,
         vertical: bool,
-        n: usize,
-        wd: super::lf::Wd,
+        wd: [Option<super::lf::Wd>; 2],
         thr: [super::lf::Thresh; 2],
     ) -> bool {
         use cutlass_simd::vp9::lf;
@@ -61,17 +59,19 @@ impl Pixel for u8 {
             limit: t.limit,
             hev: t.hev,
         };
+        let w = |w: Option<super::lf::Wd>| {
+            w.map(|w| match w {
+                super::lf::Wd::W4 => lf::Wd::W4,
+                super::lf::Wd::W8 => lf::Wd::W8,
+                super::lf::Wd::W16 => lf::Wd::W16,
+            })
+        };
         lf::filter(lf::Edge {
             buf,
             at,
             stride,
             vertical,
-            n,
-            wd: match wd {
-                super::lf::Wd::W4 => lf::Wd::W4,
-                super::lf::Wd::W8 => lf::Wd::W8,
-                super::lf::Wd::W16 => lf::Wd::W16,
-            },
+            wd: [w(wd[0]), w(wd[1])],
             thr: [t(thr[0]), t(thr[1])],
         })
     }

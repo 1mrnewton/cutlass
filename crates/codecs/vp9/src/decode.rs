@@ -473,6 +473,7 @@ impl Vp9Decoder {
     fn ready(&mut self, all: bool) -> Result<Vec<VideoOutput>, CodecError> {
         let limit = self.rt.as_ref().map_or(0, |rt| rt.workers.count());
         let mut out = Vec::new();
+        let failed = |rt: &Option<Runtime>| rt.as_ref().is_some_and(|rt| rt.workers.take_failure());
         while let Some((held, _, _, _)) = self.pending.front() {
             if !(all || held.done() || self.pending.len() > limit) {
                 break;
@@ -480,8 +481,18 @@ impl Vp9Decoder {
             let Some((held, pts, duration, timescale)) = self.pending.pop_front() else {
                 break;
             };
+            let frame = held_frame(&held)?;
+            if failed(&self.rt) {
+                // A reconstruction failed: what follows predicts from it.
+                self.pending.clear();
+                self.inner.reset();
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "vp9 reconstruction",
+                });
+            }
             out.push(VideoOutput {
-                frame: held_frame(&held)?,
+                frame,
                 pts,
                 duration,
                 timescale,

@@ -75,35 +75,40 @@ struct Run {
     lfl: [u8; 8],
 }
 
-/// One edge of `n` lines (8 or 16) with thresholds for each 8.
+/// Two halves of 8 lines across one edge: a vertical edge at column `x`
+/// over rows `y..y + 16`, or a horizontal one at row `y` over columns
+/// `x..x + 16`. Each half has its filter (`None`: left alone) and level.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn edge<P: Pixel>(buf: &mut [P], base: usize, stride: usize, x: usize, y: usize, vertical: bool, n: usize, wd: Wd, thr: [Thresh; 2], bd: u32) {
+fn pair<P: Pixel>(buf: &mut [P], base: usize, stride: usize, x: usize, y: usize, vertical: bool, wd: [Option<Wd>; 2], thr: [Thresh; 2], bd: u32) {
+    if wd[0].is_none() && wd[1].is_none() {
+        return;
+    }
     let at = y * stride + x - base;
-    if P::lf_fast(buf, at, stride, vertical, n, wd, thr) {
+    if P::lf_fast(buf, at, stride, vertical, wd, thr) {
         return;
     }
     let (step, line) = if vertical { (1, stride) } else { (stride, 1) };
-    filter(buf, at, step, line, n.min(8), wd, thr[0], bd);
-    if n > 8 {
-        filter(buf, at + 8 * line, step, line, n - 8, wd, thr[1], bd);
+    for (h, w) in wd.iter().enumerate() {
+        if let Some(w) = *w {
+            filter(buf, at + h * 8 * line, step, line, 8, w, thr[h], bd);
+        }
     }
 }
 
+/// One line across an edge, for the per-sample chroma path.
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn vert<P: Pixel>(buf: &mut [P], base: usize, stride: usize, x: usize, y: usize, n: usize, wd: Wd, t: Thresh, bd: u32) {
-    edge(buf, base, stride, x, y, true, n, wd, [t, t], bd);
-}
-
-#[inline(always)]
-fn horiz<P: Pixel>(buf: &mut [P], base: usize, stride: usize, x: usize, y: usize, n: usize, wd: Wd, t: Thresh, bd: u32) {
-    edge(buf, base, stride, x, y, false, n, wd, [t, t], bd);
+fn one<P: Pixel>(buf: &mut [P], base: usize, stride: usize, x: usize, y: usize, vertical: bool, wd: Wd, t: Thresh, bd: u32) {
+    let at = y * stride + x - base;
+    let (step, line) = if vertical { (1, stride) } else { (stride, 1) };
+    filter(buf, at, step, line, 1, wd, t, bd);
 }
 
 /// The filter of an edge from its strip's bits, if any.
 #[inline(always)]
-fn kind(r: &Run, bit: u8, skip_wide: bool) -> Option<Wd> {
-    if !skip_wide && r.wide & bit != 0 {
+fn kind(r: &Run, bit: u8) -> Option<Wd> {
+    if r.wide & bit != 0 {
         Some(Wd::W16)
     } else if r.mid & bit != 0 {
         Some(Wd::W8)
@@ -114,103 +119,73 @@ fn kind(r: &Run, bit: u8, skip_wide: bool) -> Option<Wd> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn column<P: Pixel>(buf: &mut [P], base: usize, stride: usize, x: usize, y: usize, col: usize, r: &Run, levels: &Levels, bd: u32, skip_wide: bool) {
-    let bit = 1u8 << col;
-    let t = levels.dsp(r.lfl[col]);
-    if let Some(k) = kind(r, bit, skip_wide) {
-        vert(buf, base, stride, x, y, 8, k, t, bd);
-    }
-    if r.inner & bit != 0 {
-        vert(buf, base, stride, x + 4, y, 8, Wd::W4, t, bd);
-    }
+fn any(r: &Run) -> u8 {
+    r.wide | r.mid | r.narrow | r.inner
 }
 
-/// Two strips, 8 rows apart, of vertical edges, each pair of edges of
-/// the same kind filtered at once.
+/// Two strips, 8 rows apart, of vertical edges: each column's edges of
+/// both strips at once, then its inner 4×4 edges.
 #[allow(clippy::too_many_arguments)]
 fn vertical_pair<P: Pixel>(buf: &mut [P], base: usize, stride: usize, x0: usize, y: usize, cols: usize, a: &Run, b: Option<&Run>, levels: &Levels, bd: u32) {
-    for col in 0..cols {
-        let x = x0 + col * 8;
+    let limit = if cols >= 8 { 0xff } else { (1u8 << cols) - 1 };
+    let mut bits = (any(a) | b.map_or(0, any)) & limit;
+    while bits != 0 {
+        let col = bits.trailing_zeros() as usize;
+        bits &= bits - 1;
         let bit = 1u8 << col;
+        let x = x0 + col * 8;
         let ta = levels.dsp(a.lfl[col]);
-        let Some(b) = b else {
-            column(buf, base, stride, x, y, col, a, levels, bd, false);
-            continue;
-        };
-        let tb = levels.dsp(b.lfl[col]);
-        let both_wide = a.wide & bit != 0 && b.wide & bit != 0;
-        if both_wide {
-            // libvpx filters both strips with the first strip's level.
-            vert(buf, base, stride, x, y, 16, Wd::W16, ta, bd);
-        }
-        let ka = kind(a, bit, both_wide);
-        let kb = kind(b, bit, both_wide);
-        match (ka, kb) {
-            (Some(p), Some(q)) if p == q => edge(buf, base, stride, x, y, true, 16, p, [ta, tb], bd),
-            _ => {
-                if let Some(p) = ka {
-                    vert(buf, base, stride, x, y, 8, p, ta, bd);
-                }
-                if let Some(q) = kb {
-                    vert(buf, base, stride, x, y + 8, 8, q, tb, bd);
-                }
-            }
-        }
-        let (ia, ib) = (a.inner & bit != 0, b.inner & bit != 0);
-        if ia && ib {
-            edge(buf, base, stride, x + 4, y, true, 16, Wd::W4, [ta, tb], bd);
-        } else if ia {
-            vert(buf, base, stride, x + 4, y, 8, Wd::W4, ta, bd);
-        } else if ib {
-            vert(buf, base, stride, x + 4, y + 8, 8, Wd::W4, tb, bd);
-        }
+        let tb = b.map_or(ta, |b| levels.dsp(b.lfl[col]));
+        let ka = kind(a, bit);
+        let kb = b.and_then(|b| kind(b, bit));
+        // libvpx filters two 16-wide strips with the first strip's level.
+        let thr = if ka == Some(Wd::W16) && kb == Some(Wd::W16) { [ta, ta] } else { [ta, tb] };
+        pair(buf, base, stride, x, y, true, [ka, kb], thr, bd);
+        let ia = (a.inner & bit != 0).then_some(Wd::W4);
+        let ib = b.and_then(|b| (b.inner & bit != 0).then_some(Wd::W4));
+        pair(buf, base, stride, x + 4, y, true, [ia, ib], [ta, tb], bd);
     }
 }
 
-/// Horizontal edges of one strip, each two neighbouring columns of the
-/// same kind filtered at once.
+/// Horizontal edges of one strip, two neighbouring columns at once. Two
+/// 16-wide columns pair as libvpx pairs them, scanning from the left, and
+/// share the first's level.
 #[allow(clippy::too_many_arguments)]
 fn horizontal<P: Pixel>(buf: &mut [P], base: usize, stride: usize, x0: usize, y: usize, cols: usize, r: &Run, levels: &Levels, bd: u32) {
+    let limit = if cols >= 8 { 0xff } else { (1u8 << cols) - 1 };
+    let bits = any(r) & limit;
+    let wide = r.wide & limit;
     let mut col = 0;
     while col < cols {
+        if bits >> col == 0 {
+            break;
+        }
         let bit = 1u8 << col;
+        if bits & bit == 0 {
+            col += 1;
+            continue;
+        }
         let x = x0 + col * 8;
         let t = levels.dsp(r.lfl[col]);
-        let two = col + 1 < cols;
-        if two && r.wide & bit != 0 && r.wide & (bit << 1) != 0 {
-            horiz(buf, base, stride, x, y, 16, Wd::W16, t, bd);
+        if wide & bit != 0 && wide & (bit << 1) != 0 && col + 1 < cols {
+            pair(buf, base, stride, x, y, false, [Some(Wd::W16); 2], [t, t], bd);
             col += 2;
             continue;
         }
-        let k = kind(r, bit, false);
-        let next = if two { kind(r, bit << 1, false) } else { None };
-        if two && k.is_some() && k == next && k != Some(Wd::W16) {
-            let tn = levels.dsp(r.lfl[col + 1]);
-            if let Some(k) = k {
-                edge(buf, base, stride, x, y, false, 16, k, [t, tn], bd);
-            }
-            let (i0, i1) = (r.inner & bit != 0, r.inner & (bit << 1) != 0);
-            if i0 && i1 {
-                edge(buf, base, stride, x, y + 4, false, 16, Wd::W4, [t, tn], bd);
-            } else if i0 {
-                horiz(buf, base, stride, x, y + 4, 8, Wd::W4, t, bd);
-            } else if i1 {
-                horiz(buf, base, stride, x + 8, y + 4, 8, Wd::W4, tn, bd);
-            }
-            col += 2;
-            continue;
-        }
-        if let Some(k) = k {
-            horiz(buf, base, stride, x, y, 8, k, t, bd);
-        }
-        if r.inner & bit != 0 {
-            horiz(buf, base, stride, x, y + 4, 8, Wd::W4, t, bd);
-        }
-        col += 1;
+        // The next column joins unless it starts a 16-wide pair.
+        let next = bit << 1;
+        let merge = col + 1 < cols && !(wide & next != 0 && wide & (next << 1) != 0 && col + 2 < cols);
+        let tn = if merge { levels.dsp(r.lfl[col + 1]) } else { t };
+        let kn = if merge { kind(r, next) } else { None };
+        let i0 = (r.inner & bit != 0).then_some(Wd::W4);
+        let i1 = (merge && r.inner & next != 0).then_some(Wd::W4);
+        pair(buf, base, stride, x, y, false, [kind(r, bit), kn], [t, tn], bd);
+        pair(buf, base, stride, x, y + 4, false, [i0, i1], [t, tn], bd);
+        col += if merge { 2 } else { 1 };
     }
 }
+
 fn luma<P: Pixel>(buf: &mut [P], base: usize, stride: usize, m: &Mask, levels: &Levels, g: &Geo, mi_row: usize, mi_col: usize) {
     let cols = g.mi_cols.saturating_sub(mi_col).min(8);
     let lfl = |row: usize| -> [u8; 8] { core::array::from_fn(|c| m.lfl_y[row * 8 + c]) };
@@ -343,11 +318,64 @@ fn general<P: Pixel>(buf: &mut [P], base: usize, stride: usize, grid: &[LfMi], l
                 let t = levels.dsp(level);
                 let (px, py) = (x >> ssx, y >> ssy);
                 if pass == 0 {
-                    vert(buf, base, stride, px, py, 1, wd, t, g.bd);
+                    one(buf, base, stride, px, py, true, wd, t, g.bd);
                 } else {
-                    horiz(buf, base, stride, px, py, 1, wd, t, g.bd);
+                    one(buf, base, stride, px, py, false, wd, t, g.bd);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::{Run, Wd, horizontal, kind, pair};
+
+    /// The driver against libvpx's `filter_selectively_horiz` order, one
+    /// column at a time.
+    #[test]
+    fn horizontal_matches_one_column_at_a_time() {
+        let mut h = crate::header::tests_header();
+        h.filter_level = 30;
+        let levels = crate::lpf::levels(&h);
+        let stride = 96;
+        let mut seed = 3u32;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            seed >> 8
+        };
+        for case in 0..5000 {
+            let buf: Vec<u8> = (0..stride * 40).map(|i| (100 + (i % 7) as u32 + rnd() % 3) as u8).collect();
+            let wide = (rnd() & 0xff) as u8;
+            let mid = (rnd() & 0xff) as u8 & !wide;
+            let narrow = (rnd() & 0xff) as u8 & !wide & !mid;
+            let r = Run {
+                wide,
+                mid,
+                narrow,
+                inner: (rnd() & 0xff) as u8 & !wide,
+                lfl: core::array::from_fn(|_| (rnd() % 63 + 1) as u8),
+            };
+            let cols = (rnd() % 8 + 1) as usize;
+            let mut a = buf.clone();
+            horizontal(&mut a, 0, stride, 8, 16, cols, &r, &levels, 8);
+            let mut b = buf.clone();
+            let mut col = 0;
+            while col < cols {
+                let bit = 1u8 << col;
+                let x = 8 + 8 * col;
+                let t = levels.dsp(r.lfl[col]);
+                if col + 1 < cols && r.wide & bit != 0 && r.wide & (bit << 1) != 0 {
+                    pair(&mut b, 0, stride, x, 16, false, [Some(Wd::W16); 2], [t, t], 8);
+                    col += 2;
+                    continue;
+                }
+                pair(&mut b, 0, stride, x, 16, false, [kind(&r, bit), None], [t, t], 8);
+                let i = (r.inner & bit != 0).then_some(Wd::W4);
+                pair(&mut b, 0, stride, x, 20, false, [i, None], [t, t], 8);
+                col += 1;
+            }
+            assert_eq!(a, b, "case {case} cols {cols} {wide:08b} {mid:08b} {narrow:08b}");
         }
     }
 }

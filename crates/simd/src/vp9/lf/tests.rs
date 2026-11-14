@@ -22,8 +22,8 @@ fn matches_the_scalar_twin() {
             })
             .collect();
         let vertical = case % 2 == 0;
-        let n = [8, 16][(rnd() % 2) as usize];
-        let wd = [Wd::W4, Wd::W8, Wd::W16][(rnd() % 3) as usize];
+        let pick = |r: u32| [None, Some(Wd::W4), Some(Wd::W8), Some(Wd::W16)][(r % 4) as usize];
+        let wd = [pick(rnd()), pick(rnd())];
         let t = |r: u32| {
             let level = (r % 63 + 1) as u8;
             Thresh { blimit: 2 * (level + 2) + 4, limit: (level >> 1).max(1), hev: level >> 4 }
@@ -31,14 +31,14 @@ fn matches_the_scalar_twin() {
         let thr = [t(rnd()), t(rnd())];
         let at = if vertical { 4 * stride + 24 } else { 20 * stride + 8 };
         let mut want = buf.clone();
-        filter_scalar(Edge { buf: &mut want, at, stride, vertical, n, wd, thr });
+        filter_scalar(Edge { buf: &mut want, at, stride, vertical, wd, thr });
         let mut got = buf.clone();
-        if filter(Edge { buf: &mut got, at, stride, vertical, n, wd, thr }) {
+        if filter(Edge { buf: &mut got, at, stride, vertical, wd, thr }) {
             ran += 1;
-            assert_eq!(got, want, "case {case} vertical {vertical} n {n} {wd:?} {thr:?}");
+            assert_eq!(got, want, "case {case} vertical {vertical} {wd:?} {thr:?}");
         }
     }
     if super::super::avx2() {
-        assert_eq!(ran, 6000);
+        assert!(ran > 4000, "{ran}");
     }
 }

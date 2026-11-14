@@ -1914,16 +1914,16 @@ fn decode_shown(stream: &Ivf, pixel: PixelFormat) -> (Vec<u8>, u32) {
             .push(&packet)
             .unwrap_or_else(|err| panic!("frame {index} {err}"));
         for output in outputs {
-            packed.extend_from_slice(&output.frame.y.samples);
-            packed.extend_from_slice(&output.frame.u.samples);
-            packed.extend_from_slice(&output.frame.v.samples);
+            packed.extend_from_slice(&vis(&output.frame.y));
+            packed.extend_from_slice(&vis(&output.frame.u));
+            packed.extend_from_slice(&vis(&output.frame.v));
         }
     }
     // Frame threads hold the last frames until the drain.
     for output in decoder.drain().expect("drain") {
-        packed.extend_from_slice(&output.frame.y.samples);
-        packed.extend_from_slice(&output.frame.u.samples);
-        packed.extend_from_slice(&output.frame.v.samples);
+        packed.extend_from_slice(&vis(&output.frame.y));
+        packed.extend_from_slice(&vis(&output.frame.u));
+        packed.extend_from_slice(&vis(&output.frame.v));
     }
     (packed, decoder.temporal_frames())
 }
@@ -2343,5 +2343,15 @@ fn parse_ivf(data: &[u8]) -> Ivf {
         width,
         height,
         frames,
+    }
+}
+
+/// A plane's visible rows: a shared (8-bit) plane is packed out of its
+/// padded stride; a copied plane is already tight.
+fn vis(p: &cutlass_decode::Plane) -> Vec<u8> {
+    if p.samples.is_shared() {
+        p.packed(1)
+    } else {
+        p.samples.to_vec()
     }
 }

@@ -41,8 +41,8 @@ pub use cutlass_codec::access::{
     BitDepth, Channel, ChannelLayout, ChromaSamplePosition, CodecError, CodecParams, ColorMatrix,
     ColorPrimaries, ColorRange, ColorType, ContentLight, FrameError, ImageError, ItuT35,
     MasteringDisplay, MatrixCoefficients, Packet, Pcm, PhysicalPixel, PixelFormat, Plane, Rgb8,
-    SampleFormat, SideData, StillImage, TextItem, Transfer, Transparency, VideoFrame, Yuv420High,
-    Yuv420p, Yuv420p10, Yuv422High, Yuv422p, Yuv444High, Yuv444p,
+    SampleFormat, Samples, SharedBytes, SideData, StillImage, TextItem, Transfer, Transparency,
+    VideoFrame, Yuv420High, Yuv420p, Yuv420p10, Yuv422High, Yuv422p, Yuv444High, Yuv444p,
 };
 pub use orient::Orientation;
 pub use video::VideoDecodeFactory;

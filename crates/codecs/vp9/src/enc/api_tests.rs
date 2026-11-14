@@ -54,9 +54,9 @@ fn lossless_constant_matches_the_source() {
         .decode(&packets[0].data)
         .expect("decode")
         .expect("shown");
-    assert_eq!(picture.y, frame.y.samples);
-    assert_eq!(picture.u, frame.u.samples);
-    assert_eq!(picture.v, frame.v.samples);
+    assert_eq!(picture.y, vis(&frame.y));
+    assert_eq!(picture.u, vis(&frame.u));
+    assert_eq!(picture.v, vis(&frame.v));
 }
 
 #[test]
@@ -100,9 +100,9 @@ fn color_and_render_size_are_on_the_picture() {
         .frame;
     assert_eq!(again.width, 16);
     assert_eq!(again.height, 16);
-    assert_eq!(again.y.samples, shown.y.samples);
-    assert_eq!(again.u.samples, shown.u.samples);
-    assert_eq!(again.v.samples, shown.v.samples);
+    assert_eq!(vis(&again.y), vis(&shown.y));
+    assert_eq!(vis(&again.u), vis(&shown.u));
+    assert_eq!(vis(&again.v), vis(&shown.v));
     assert_eq!(again.render_width, 32);
     assert_eq!(again.render_height, 18);
     assert_eq!(again.range, ColorRange::Studio);
@@ -124,12 +124,12 @@ fn color_and_render_size_are_on_the_picture() {
     assert_eq!(colored.transfer, Transfer::Bt709);
     assert_eq!(colored.matrix, MatrixCoefficients::Bt709);
     assert_eq!(colored.range, ColorRange::Full);
-    assert_eq!(colored.y.samples, shown.y.samples);
+    assert_eq!(vis(&colored.y), vis(&shown.y));
 
     assert_color_space(
         &params,
         &packets[0].data,
-        &shown.y.samples,
+        &vis(&shown.y),
         3,
         ColorPrimaries::Bt601,
         Transfer::Bt601,
@@ -138,7 +138,7 @@ fn color_and_render_size_are_on_the_picture() {
     assert_color_space(
         &params,
         &packets[0].data,
-        &shown.y.samples,
+        &vis(&shown.y),
         5,
         ColorPrimaries::Bt2020,
         Transfer::Bt2020,
@@ -148,7 +148,7 @@ fn color_and_render_size_are_on_the_picture() {
         assert_color_space(
             &params,
             &packets[0].data,
-            &shown.y.samples,
+            &vis(&shown.y),
             space,
             ColorPrimaries::Unspecified,
             Transfer::Unspecified,
@@ -207,7 +207,7 @@ fn color_and_render_size_are_on_the_picture() {
         .frame;
     assert_eq!(kept.width, 16);
     assert_eq!(kept.height, 16);
-    assert_eq!(kept.y.samples, shown.y.samples);
+    assert_eq!(vis(&kept.y), vis(&shown.y));
     assert_eq!(kept.range, ColorRange::Studio);
     assert_eq!(kept.primaries, ColorPrimaries::Bt601);
     assert_eq!(kept.transfer, Transfer::Bt601);
@@ -242,7 +242,7 @@ fn assert_color_space(
         cutlass_decode::ColorRange::Studio,
         "space {space}"
     );
-    assert_eq!(shown.y.samples, samples, "space {space}");
+    assert_eq!(vis(&shown.y), samples, "space {space}");
 }
 
 fn bits_of(frame: &[u8]) -> Vec<u8> {
@@ -306,9 +306,9 @@ fn lossless_ramp_and_odd_blocks_match_the_source() {
             .decode(&packets[0].data)
             .expect("decode")
             .expect("shown");
-        assert_eq!(picture.y, frame.y.samples);
-        assert_eq!(picture.u, frame.u.samples);
-        assert_eq!(picture.v, frame.v.samples);
+        assert_eq!(picture.y, vis(&frame.y));
+        assert_eq!(picture.u, vis(&frame.u));
+        assert_eq!(picture.v, vis(&frame.v));
     }
 }
 
@@ -354,7 +354,7 @@ fn assert_psnr(frame: VideoFrame, qindex: u8, floor: f64, name: &str) {
         .decode(&packets[0].data)
         .expect("decode")
         .expect("shown");
-    let score = psnr(&frame.y.samples, &picture.y);
+    let score = psnr(&vis(&frame.y), &picture.y);
     assert!(score >= floor, "{name} psnr {score} floor {floor}");
 }
 
@@ -413,17 +413,17 @@ fn lossless_motion_matches_the_source() {
             .expect("decode")
             .expect("shown");
         assert_eq!(
-            first_mismatch(&picture.y, &frame.y.samples),
+            first_mismatch(&picture.y, &vis(&frame.y)),
             None,
             "y {index}"
         );
         assert_eq!(
-            first_mismatch(&picture.u, &frame.u.samples),
+            first_mismatch(&picture.u, &vis(&frame.u)),
             None,
             "u {index}"
         );
         assert_eq!(
-            first_mismatch(&picture.v, &frame.v.samples),
+            first_mismatch(&picture.v, &vis(&frame.v)),
             None,
             "v {index}"
         );
@@ -442,7 +442,7 @@ fn lossy_motion_meets_the_psnr_gate() {
             .decode(&packets[0].data)
             .expect("decode")
             .expect("shown");
-        scores.push(psnr(&frame.y.samples, &picture.y));
+        scores.push(psnr(&vis(&frame.y), &picture.y));
     }
     let mean = scores.iter().sum::<f64>() / f64::from(u32::try_from(scores.len()).unwrap_or(1));
     assert!(mean >= 32.0, "mean psnr {mean} scores {scores:?}");
@@ -635,9 +635,9 @@ fn show_existing_and_a_superframe_round_trip() {
         .expect("show existing");
     assert_eq!(repeated.len(), 1);
     assert_eq!(repeated[0].pts, 9);
-    assert_eq!(repeated[0].frame.y.samples, shown[0].frame.y.samples);
-    assert_eq!(repeated[0].frame.u.samples, shown[0].frame.u.samples);
-    assert_eq!(repeated[0].frame.v.samples, shown[0].frame.v.samples);
+    assert_eq!(vis(&repeated[0].frame.y), vis(&shown[0].frame.y));
+    assert_eq!(vis(&repeated[0].frame.u), vis(&shown[0].frame.u));
+    assert_eq!(vis(&repeated[0].frame.v), vis(&shown[0].frame.v));
 
     let mut fresh = Vp9Decoder::open(&params).expect("fresh");
     let both = fresh
@@ -650,11 +650,11 @@ fn show_existing_and_a_superframe_round_trip() {
         ))
         .expect("superframe");
     assert_eq!(both.len(), 2);
-    assert_eq!(both[0].frame.y.samples, shown[0].frame.y.samples);
+    assert_eq!(vis(&both[0].frame.y), vis(&shown[0].frame.y));
     let mut separate = Decoder::new();
     separate.decode(&key.data).expect("key").expect("shown");
     let second = separate.decode(&inter.data).expect("inter").expect("shown");
-    assert_eq!(both[1].frame.y.samples, second.y);
+    assert_eq!(vis(&both[1].frame.y), second.y);
 
     let broken = superframe(&[&key.data, &[0x87, 0x00]]);
     let err = fresh.push_all(&Packet::video(broken, 1, 1, 30, true));
@@ -662,7 +662,7 @@ fn show_existing_and_a_superframe_round_trip() {
     let still = fresh
         .push_all(&Packet::video(vec![0x88], 4, 1, 30, false))
         .expect("refs kept");
-    assert_eq!(still[0].frame.y.samples, second.y);
+    assert_eq!(vis(&still[0].frame.y), second.y);
 
     let Some(ffmpeg) = ffmpeg_bin() else {
         require_or_skip("ffmpeg");
@@ -677,9 +677,9 @@ fn show_existing_and_a_superframe_round_trip() {
     let wrapped = wrap_ivf(16, 16, &[packed]);
     let native = ffmpeg_yuv(&ffmpeg, "vp9", &wrapped);
     let mut expect = Vec::new();
-    expect.extend_from_slice(&shown[0].frame.y.samples);
-    expect.extend_from_slice(&shown[0].frame.u.samples);
-    expect.extend_from_slice(&shown[0].frame.v.samples);
+    expect.extend_from_slice(&vis(&shown[0].frame.y));
+    expect.extend_from_slice(&vis(&shown[0].frame.u));
+    expect.extend_from_slice(&vis(&shown[0].frame.v));
     expect.extend_from_slice(&second.y);
     expect.extend_from_slice(&second.u);
     expect.extend_from_slice(&second.v);
@@ -720,14 +720,7 @@ fn factories_open_the_profile_0_codec() {
     let shown = decoder.push_all(&packets[0]).expect("decode");
     assert_eq!(shown.len(), 1);
     // The default quantizer leaves a flat picture within a step or two.
-    assert!(
-        shown[0]
-            .frame
-            .y
-            .samples
-            .iter()
-            .all(|&v| v.abs_diff(40) <= 2)
-    );
+    assert!(vis(&shown[0].frame.y).iter().all(|&v| v.abs_diff(40) <= 2));
     assert_eq!(encoder.codec(), CodecId::Vp9);
     assert_eq!(decoder.codec(), CodecId::Vp9);
 }
@@ -1075,4 +1068,14 @@ fn lookahead_codes_alt_refs_and_every_picture_comes_out() {
         shown += decoder.push_all(p).expect("decode").len();
     }
     assert_eq!(shown, 30);
+}
+
+/// A plane's visible rows: a shared (8-bit) plane is packed out of its
+/// padded stride; a copied plane is already tight.
+fn vis(p: &Plane) -> Vec<u8> {
+    if p.samples.is_shared() {
+        p.packed(1)
+    } else {
+        p.samples.to_vec()
+    }
 }

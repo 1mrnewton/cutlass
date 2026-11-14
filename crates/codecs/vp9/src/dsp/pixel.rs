@@ -9,6 +9,16 @@ pub trait Pixel: Copy + Default + PartialEq + Send + Sync + core::fmt::Debug + '
     /// `v`, which the caller has already held to the sample range.
     fn new(v: i32) -> Self;
 
+    /// Plane `p` of a finished picture as bytes the caller's picture can
+    /// share without a copy (8-bit samples only).
+    #[inline(always)]
+    fn share(
+        _buf: &std::sync::Arc<cutlass_simd::vp9::frame::SharedFrame<Self>>,
+        _p: usize,
+    ) -> Option<std::sync::Arc<dyn cutlass_decode::SharedBytes>> {
+        None
+    }
+
     /// The samples as bytes, for 8-bit samples.
     #[inline(always)]
     fn bytes(_s: &[Self]) -> Option<&[u8]> {
@@ -49,8 +59,32 @@ pub trait Pixel: Copy + Default + PartialEq + Send + Sync + core::fmt::Debug + '
     }
 }
 
+/// A finished 8-bit plane, shared with the caller's picture. The decoder
+/// writes a buffer again only when no one else holds it, so its bytes do
+/// not change while this lives.
+struct SharedPlane {
+    frame: std::sync::Arc<cutlass_simd::vp9::frame::SharedFrame<u8>>,
+    p: usize,
+}
+
+impl cutlass_decode::SharedBytes for SharedPlane {
+    fn bytes(&self) -> &[u8] {
+        self.frame.plane(self.p).0
+    }
+}
+
 impl Pixel for u8 {
     const HIGH: bool = false;
+    #[inline(always)]
+    fn share(
+        buf: &std::sync::Arc<cutlass_simd::vp9::frame::SharedFrame<Self>>,
+        p: usize,
+    ) -> Option<std::sync::Arc<dyn cutlass_decode::SharedBytes>> {
+        Some(std::sync::Arc::new(SharedPlane {
+            frame: std::sync::Arc::clone(buf),
+            p,
+        }))
+    }
     #[inline(always)]
     fn bytes(s: &[Self]) -> Option<&[u8]> {
         Some(s)

@@ -704,6 +704,21 @@ fn video_frame<P: Pixel>(f: &Pic<P>) -> Result<VideoFrame, CodecError> {
     };
     let bytes = if P::HIGH { 2 } else { 1 };
     let plane = |p: usize| {
+        // A finished 8-bit picture goes out as views of its own planes, at
+        // their padded stride, with no copy.
+        if let Some(shared) = P::share(&f.buf, p) {
+            f.buf.wait(usize::MAX);
+            let (_, stride) = f.buf.plane(p);
+            let (w, h) = (f.dims.w[p], f.dims.h[p]);
+            if let Some(samples) = cutlass_decode::Samples::shared(shared, 0, stride * h) {
+                return Ok(Plane {
+                    width: w as u32,
+                    height: h as u32,
+                    stride,
+                    samples,
+                });
+            }
+        }
         let samples = packed(f, p);
         let (w, h) = (f.dims.w[p] as u32, f.dims.h[p] as u32);
         if bytes == 1 {

@@ -6,7 +6,7 @@ use cutlass_decode::CodecError;
 use crate::cabac::{self, Cabac};
 use crate::cavlc;
 use crate::recon::{self, Sample};
-use crate::set::{Sps, ZIGZAG4, ZIGZAG8};
+use crate::set::{Sps, scan4, scan8};
 
 use super::{Entropy, Frame, Header, Mb, Mod, Slice, blk_x, blk_y, put_block};
 
@@ -36,6 +36,8 @@ struct ChromaPaint<'a> {
     cr_dc: &'a [i32],
     cb_ac: &'a [[i32; 16]],
     cr_ac: &'a [[i32; 16]],
+    /// The residual's `used`: which of the arrays hold levels.
+    used: u8,
 }
 
 struct ChromaResidual {
@@ -43,10 +45,168 @@ struct ChromaResidual {
     cr_dc: [i32; 8],
     cb_ac: [[i32; 16]; 8],
     cr_ac: [[i32; 16]; 8],
+    /// Which of the arrays hold levels: `DC_USED`, `AC_USED`. The rest are
+    /// all zero.
+    used: u8,
+}
+
+const DC_USED: u8 = 1;
+const AC_USED: u8 = 2;
+
+impl ChromaResidual {
+    fn zero() -> Self {
+        Self {
+            cb_dc: [0; 8],
+            cr_dc: [0; 8],
+            cb_ac: [[0; 16]; 8],
+            cr_ac: [[0; 16]; 8],
+            used: 0,
+        }
+    }
+
+    /// Back to all zero, clearing only the arrays that were written.
+    fn reset(&mut self) {
+        if self.used & DC_USED != 0 {
+            self.cb_dc = [0; 8];
+            self.cr_dc = [0; 8];
+        }
+        if self.used & AC_USED != 0 {
+            self.cb_ac = [[0; 16]; 8];
+            self.cr_ac = [[0; 16]; 8];
+        }
+        self.used = 0;
+    }
+}
+
+/// The coefficient levels of the macroblock being read. One of these lasts
+/// a whole slice, and each macroblock clears only the blocks the one before
+/// it wrote, so a macroblock does not pay to zero every array.
+pub(crate) struct Coeffs {
+    ac: [[i32; 16]; 16],
+    block8: [[i32; 64]; 4],
+    chroma: ChromaResidual,
+    /// One bit per block of `ac` that holds levels.
+    ac_used: u16,
+    /// One bit per block of `block8` that holds levels.
+    block8_used: u8,
+    /// The inter luma multipliers of the slice at one QP′Y.
+    inter: LevelScale,
+    /// The same for intra macroblocks.
+    intra: LevelScale,
+}
+
+/// The multipliers that scale the luma levels of one kind of macroblock,
+/// intra or inter, under the slice's weights for that kind, made for each
+/// QP′Y the first time it comes up: a QP that changes from one macroblock
+/// to the next does not make them again.
+struct LevelScale {
+    /// The weights' places: the 4×4 luma list, the 8×8 luma list, and the
+    /// 4×4 Cb list, which the Cr one follows.
+    lists: (usize, usize, usize),
+    /// One bit per QP′Y whose entry in `tables` is made.
+    ready: u128,
+    tables: Vec<QpScale>,
+}
+
+/// What scales the levels of one kind of macroblock at one QP′Y.
+#[derive(Clone, Copy)]
+struct QpScale {
+    /// The luma 4×4 and 8×8 multipliers.
+    mul4: [i32; 16],
+    mul8: [i32; 64],
+    /// QP′C of Cb and Cr, their 4×4 multipliers, and the weights of their
+    /// DC levels.
+    chroma_qp: [i32; 2],
+    chroma: [[i32; 16]; 2],
+    chroma_dc: [i32; 2],
+}
+
+/// QP′Y runs to 51 plus 36 for 14-bit samples.
+const QP_TABLES: usize = 88;
+
+impl LevelScale {
+    fn new(lists: (usize, usize, usize)) -> Self {
+        Self {
+            lists,
+            ready: 0,
+            tables: Vec::new(),
+        }
+    }
+
+    /// The multipliers at QPY `qp`, or `None` for a QP the tables do not
+    /// take.
+    fn at<S: Sample>(&mut self, qp: i32, pps: &crate::set::Pps) -> Option<&QpScale> {
+        let index = usize::try_from(qp + S::QP_BD)
+            .ok()
+            .filter(|&index| index < QP_TABLES)?;
+        if self.ready & (1 << index) == 0 {
+            if self.tables.is_empty() {
+                let zero = QpScale {
+                    mul4: [0; 16],
+                    mul8: [0; 64],
+                    chroma_qp: [0; 2],
+                    chroma: [[0; 16]; 2],
+                    chroma_dc: [0; 2],
+                };
+                self.tables = vec![zero; QP_TABLES];
+            }
+            let (luma4, luma8, cb) = self.lists;
+            let chroma_qp = [pps.chroma_qp_offset, pps.second_chroma_qp_offset]
+                .map(|offset| recon::chroma_qps(qp, offset, S::QP_BD).0);
+            let weights = [pps.weight4.get(cb)?, pps.weight4.get(cb + 1)?];
+            self.tables[index] = QpScale {
+                mul4: recon::dequant4(qp + S::QP_BD, pps.weight4.get(luma4)?)?,
+                mul8: recon::dequant8(qp + S::QP_BD, pps.weight8.get(luma8)?)?,
+                chroma_qp,
+                chroma: [
+                    recon::dequant4(chroma_qp[0], weights[0])?,
+                    recon::dequant4(chroma_qp[1], weights[1])?,
+                ],
+                chroma_dc: weights.map(|weight| i32::from(weight[0])),
+            };
+            self.ready |= 1 << index;
+        }
+        self.tables.get(index)
+    }
+}
+
+impl Coeffs {
+    pub(crate) fn new() -> Self {
+        Self {
+            ac: [[0; 16]; 16],
+            block8: [[0; 64]; 4],
+            chroma: ChromaResidual::zero(),
+            ac_used: 0,
+            block8_used: 0,
+            // Table 7-2: intra Y, Cb, Cr are lists 0 to 2 and inter ones
+            // 3 to 5; of the 8×8 lists, intra Y is 0 and inter Y 1.
+            inter: LevelScale::new((3, 1, 4)),
+            intra: LevelScale::new((0, 0, 1)),
+        }
+    }
+
+    /// Luma arrays back to all zero, clearing only the blocks written.
+    fn reset_luma(&mut self) {
+        let mut used = self.ac_used;
+        while used != 0 {
+            self.ac[used.trailing_zeros() as usize] = [0; 16];
+            used &= used - 1;
+        }
+        let mut used = self.block8_used;
+        while used != 0 {
+            self.block8[used.trailing_zeros() as usize] = [0; 64];
+            used &= used - 1;
+        }
+        self.ac_used = 0;
+        self.block8_used = 0;
+    }
 }
 
 /// A list slot the initialisation process left as "no reference picture".
 const NO_PICTURE: usize = usize::MAX;
+
+#[path = "mbaff.rs"]
+mod mbaff;
 
 /// SliceQPY after `mb_qp_delta`. The result stays in `-QpBdOffsetY..=51`.
 fn next_qp<S: Sample>(qp: i32, delta: i32) -> i32 {
@@ -412,6 +572,147 @@ fn same_long<S: Sample>(dpb: &[Frame<S>], slot: usize, long_num: u32) -> bool {
     })
 }
 
+/// Unsets the macroblock records of a picture decoded a row at a time up
+/// to the end of the row holding `addr`, or all of them with `all`, when
+/// they are not yet: see [`super::Writer::set`].
+fn set_through<S: Sample>(pic: &mut Frame<S>, addr: usize, all: bool) {
+    let Some(writer) = pic.writer.as_mut() else {
+        return;
+    };
+    if addr < writer.set {
+        return;
+    }
+    let end = if all || pic.mb_w == 0 {
+        pic.mb.len()
+    } else {
+        (addr / pic.mb_w + 1)
+            .saturating_mul(pic.mb_w)
+            .min(pic.mb.len())
+    };
+    if let Some(records) = pic.mb.get_mut(writer.set..end) {
+        super::unset_records(records);
+    }
+    writer.set = end.max(writer.set);
+}
+
+/// For a picture decoded on its own thread: when decoding has just passed
+/// the end of a macroblock row, deblocks that row and publishes the
+/// samples that makes final.
+/// Called after every macroblock, so only the check that a row has ended
+/// is inline; the work of the end of a row is not.
+#[inline(always)]
+fn rows_decoded<S: Sample>(pic: &mut Frame<S>, addr: usize) {
+    if pic.writer.is_none() || pic.mb_w == 0 || !addr.is_multiple_of(pic.mb_w) {
+        return;
+    }
+    row_decoded(pic, addr);
+}
+
+#[inline(never)]
+fn row_decoded<S: Sample>(pic: &mut Frame<S>, addr: usize) {
+    set_through(pic, addr, false);
+    let decoded = addr / pic.mb_w;
+    let Some(mut writer) = pic.writer.take() else {
+        return;
+    };
+    let ready = if writer.lag {
+        decoded.saturating_sub(1)
+    } else {
+        decoded
+    };
+    while writer.deblocked < ready.min(pic.h / 16) {
+        deblock_next_row(pic, &mut writer);
+    }
+    // Only a picture kept for reference is ever read by another.
+    if pic.referenced
+        && let Some(pending) = pic.pending.clone()
+    {
+        writer.published = pending.publish(pic, writer.published, writer.deblocked, false);
+    }
+    pic.writer = Some(writer);
+}
+
+/// Deblocks the next macroblock row, which is decoded, without waiting for
+/// the row below it, unless the writer lags a row behind.
+///
+/// That row's intra prediction reads this row's last line as it was before
+/// deblocking. So the line is copied first, and after deblocking the copy
+/// goes back into the picture while the filtered line is set aside; the
+/// two are exchanged again before the next row is deblocked. The
+/// unfiltered line is never published: a band ends above it. A writer
+/// that lags is called once the row below is decoded, and sets nothing
+/// aside.
+fn deblock_next_row<S: Sample>(pic: &mut Frame<S>, writer: &mut super::Writer<S>) {
+    let row = writer.deblocked;
+    if writer.lag {
+        // The row below is decoded: nothing reads this one unfiltered.
+        deblock_rows_after(pic, row..row + 1, &mut writer.above);
+        writer.deblocked = row + 1;
+        return;
+    }
+    if row > 0 {
+        swap_last_line(pic, row - 1, &mut writer.edge);
+    }
+    for (kept, (plane, at, len)) in writer.edge.iter_mut().zip(last_lines(pic, row)) {
+        kept.clear();
+        kept.extend_from_slice(&plane[at..at + len]);
+    }
+    deblock_rows_after(pic, row..row + 1, &mut writer.above);
+    swap_last_line(pic, row, &mut writer.edge);
+    writer.deblocked = row + 1;
+}
+
+/// Where the last line of macroblock row `row` lies in each plane of a
+/// 4:2:0 picture: the plane, the line's first sample and its length.
+fn last_lines<S: Sample>(pic: &Frame<S>, row: usize) -> [(&[S], usize, usize); 3] {
+    let (w, cw) = (pic.w, pic.w / 2);
+    [
+        (&pic.y, (row * 16 + 15) * w, w),
+        (&pic.u, (row * 8 + 7) * cw, cw),
+        (&pic.v, (row * 8 + 7) * cw, cw),
+    ]
+}
+
+/// Exchanges the last line of macroblock row `row` with `kept`, plane by
+/// plane.
+fn swap_last_line<S: Sample>(pic: &mut Frame<S>, row: usize, kept: &mut [Vec<S>; 3]) {
+    let (w, cw) = (pic.w, pic.w / 2);
+    let lines = [
+        (&mut pic.y, (row * 16 + 15) * w, w),
+        (&mut pic.u, (row * 8 + 7) * cw, cw),
+        (&mut pic.v, (row * 8 + 7) * cw, cw),
+    ];
+    for ((plane, at, len), kept) in lines.into_iter().zip(kept.iter_mut()) {
+        if kept.len() == len
+            && let Some(line) = plane.get_mut(at..at + len)
+        {
+            line.swap_with_slice(kept);
+        }
+    }
+}
+
+/// Deblocks and publishes whatever [`rows_decoded`] left, once every
+/// macroblock of the picture is decoded.
+pub(crate) fn finish_rows<S: Sample>(pic: &mut Frame<S>) {
+    let Some(mut writer) = pic.writer.take() else {
+        return;
+    };
+    let rows = pic.h / 16;
+    while writer.deblocked < rows {
+        deblock_next_row(pic, &mut writer);
+    }
+    // The last row's filtered line goes back for good.
+    if rows > 0 && !writer.lag {
+        swap_last_line(pic, rows - 1, &mut writer.edge);
+    }
+    if pic.referenced
+        && let Some(pending) = pic.pending.clone()
+    {
+        writer.published = pending.publish(pic, writer.published, rows, true);
+    }
+    pic.writer = Some(writer);
+}
+
 pub(crate) fn decode_mbs<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],
@@ -436,12 +737,27 @@ pub(crate) fn decode_mbs<S: Sample>(
         slice.origin
     };
     let mut decoded = *next_mb;
+    // Macroblocks come in raster order a row at a time unless they come in
+    // pairs or slice groups.
+    set_through(pic, addr, mbaff || !next.is_empty());
     let mut qp = slice.qp;
     let mut rle = Rle {
         run: 0,
         kind: false,
     };
+    // The bottom macroblock's skip flag, read with a skipped top one.
+    let mut ahead = None;
+    let mut coeffs = Coeffs::new();
+    // A B slice's direct prediction reads the co-located macroblock of the
+    // first list-1 picture, which is asked for two macroblocks ahead, as
+    // that picture's motion is far from anything else read here.
+    let colocated = (super::syntax_kind(slice.kind) == 1 && !mbaff)
+        .then(|| slice.ref1.first().and_then(|&index| dpb.get(index)))
+        .flatten();
     while addr < total {
+        if let Some(frame) = colocated {
+            frame.prefetch_col(addr + 2);
+        }
         if !super::intra_slice(slice.kind) {
             match &mut entropy {
                 Entropy::Cavlc(bits) => {
@@ -466,16 +782,24 @@ pub(crate) fn decode_mbs<S: Sample>(
                             skip_mb(pic, dpb, slice, slice_id, addr, qp, flag)?;
                         }
                         addr = step(next, addr, &mut decoded, total)?;
+                        rows_decoded(pic, addr);
                     }
                     if addr >= total || (run > 0 && !bits.more_rbsp()) {
                         break;
                     }
                 }
                 Entropy::Cabac(cab) => {
-                    let skipped = rle_skip(pic, cab, slice, slice_id, addr, mbaff, &mut rle)?;
+                    let skipped = if mbaff {
+                        pair_skip(pic, cab, slice, slice_id, addr, &mut ahead)?
+                    } else {
+                        rle_skip(pic, cab, slice, slice_id, addr, mbaff, &mut rle)?
+                    };
                     if skipped {
                         fresh(pic, addr, mbaff, !next.is_empty())?;
-                        let flag = cabac_skip_field(pic, cab, slice_id, addr, mbaff)?;
+                        // `pair_skip` left the pair's field flag on the macroblock.
+                        let (mx, my) = locate(pic, addr, mbaff);
+                        let flag =
+                            mbaff && pic.mb.get(my * pic.mb_w + mx).is_some_and(|mb| mb.field_mb);
                         skip_mb(pic, dpb, slice, slice_id, addr, qp, flag)?;
                         let end = if !mbaff || pair_bottom(pic, addr, true) {
                             cab.terminate()?
@@ -483,6 +807,7 @@ pub(crate) fn decode_mbs<S: Sample>(
                             false
                         };
                         addr = step(next, addr, &mut decoded, total)?;
+                        rows_decoded(pic, addr);
                         if end {
                             break;
                         }
@@ -525,8 +850,15 @@ pub(crate) fn decode_mbs<S: Sample>(
             }
             qp
         } else {
-            let (qp, residual) =
-                one_mb(pic, dpb, slice, slice_id, addr, (qp, layer), &mut entropy)?;
+            let (qp, residual) = one_mb(
+                pic,
+                dpb,
+                slice,
+                slice_id,
+                addr,
+                (qp, layer, &mut coeffs),
+                &mut entropy,
+            )?;
             if residual {
                 let Some(layer) = layer else {
                     return Err(CodecError::Unsupported {
@@ -553,6 +885,7 @@ pub(crate) fn decode_mbs<S: Sample>(
             }
         };
         addr = step(next, addr, &mut decoded, total)?;
+        rows_decoded(pic, addr);
         if end {
             break;
         }
@@ -662,11 +995,12 @@ fn rle_context<S: Sample>(
         return false;
     }
     let (mx, my) = locate(pic, addr, mbaff);
-    let left = neighbor(pic, mx as i32 - 1, my as i32, slice_id);
+    let left = left_mb(pic, mx, my, slice_id);
     let above = neighbor(pic, mx as i32, above_my(pic, mx, my), slice_id);
     left.is_none_or(|mb| mb.skip) && above.is_none_or(|mb| mb.skip)
 }
 
+#[inline(always)]
 fn cabac_skip<S: Sample>(
     pic: &Frame<S>,
     cab: &mut Cabac<'_>,
@@ -675,8 +1009,23 @@ fn cabac_skip<S: Sample>(
     addr: usize,
     mbaff: bool,
 ) -> Result<bool, CodecError> {
+    if !mbaff && !pic.mbaff {
+        // Frame macroblocks only: the neighbours are the record before
+        // this one and the one a row up, looked at directly rather than
+        // through the general search, which costs more than the bin.
+        let records = &pic.mb[..];
+        let coded = |at: usize| {
+            records
+                .get(at)
+                .is_some_and(|mb| mb.slice == slice_id && !mb.skip)
+        };
+        let left = !addr.is_multiple_of(pic.mb_w) && coded(addr - 1);
+        let above = addr >= pic.mb_w && coded(addr - pic.mb_w);
+        let ctx = usize::from(left) + usize::from(above) + if kind == 1 { 13 } else { 0 };
+        return Ok(cab.decision(11 + ctx)? == 1);
+    }
     let (mx, my) = locate(pic, addr, mbaff);
-    let left = neighbor(pic, mx as i32 - 1, my as i32, slice_id);
+    let left = left_mb(pic, mx, my, slice_id);
     let above = neighbor(pic, mx as i32, above_my(pic, mx, my), slice_id);
     let mut ctx = 0;
     if left.is_some_and(|mb| !mb.skip) {
@@ -702,6 +1051,17 @@ fn skip_mb<S: Sample>(
 ) -> Result<(), CodecError> {
     let mbaff = slice.sps.mbaff && !pic.field;
     let (mx, my) = locate(pic, addr, mbaff);
+    if super::syntax_kind(slice.kind) == 0
+        && !slice.vsp
+        && !slice.dmvp
+        && slice.kind != 3
+        && !field_mb
+    {
+        return p_skip_in_place(pic, dpb, slice, (slice_id, mx, my), qp);
+    }
+    if super::syntax_kind(slice.kind) == 1 && !slice.vsp && !mbaff && !pic.mbaff && !field_mb {
+        return b_skip_in_place(pic, dpb, slice, (slice_id, mx, my), qp);
+    }
     let mut mb = Mb::new(slice_id);
     mb.field_mb = field_mb;
     mb.skip = true;
@@ -717,25 +1077,16 @@ fn skip_mb<S: Sample>(
         }
         let (mv, reference) = if slice.dmvp {
             dmvp_skip_motion(pic, dpb, slice, mx, my)
-                .unwrap_or_else(|| (p_skip_mv(pic, mx, my, slice_id), 0))
+                .unwrap_or_else(|| (p_skip_mv(pic, mx, my, &mb), 0))
         } else {
-            (p_skip_mv(pic, mx, my, slice_id), 0)
+            (p_skip_mv(pic, mx, my, &mb), 0)
         };
-        for part in 0..4 {
-            mb.ref0[part] = reference;
-        }
-        for block in 0..16 {
-            mb.mv0[block] = mv;
-        }
-        predict_inter(pic, dpb, slice, mx, my, &mb)?;
+        mb.ref0[..4].fill(reference);
+        mb.mv0[..16].fill(mv);
+        predict_inter(pic, dpb, slice, (mx, my, true), &mb)?;
         if slice.kind == 3 {
             let luma = [[0i32; 16]; 16];
-            let chroma = ChromaResidual {
-                cb_dc: [0; 8],
-                cr_dc: [0; 8],
-                cb_ac: [[0; 16]; 8],
-                cr_ac: [[0; 16]; 8],
-            };
+            let chroma = ChromaResidual::zero();
             write_sp(
                 pic,
                 slice,
@@ -753,13 +1104,107 @@ fn skip_mb<S: Sample>(
         if slice.vsp {
             return Err(CodecError::Unsupported { what: "3d" });
         }
-        direct_16(pic, dpb, slice, mx, my, &mut mb)?;
-        predict_inter(pic, dpb, slice, mx, my, &mb)?;
+        let whole = direct_16(pic, dpb, slice, mx, my, &mut mb)?;
+        predict_inter(pic, dpb, slice, (mx, my, whole), &mb)?;
     }
     bind_refs(&mut mb, slice);
     let slot = my * pic.mb_w + mx;
-    pic.mb[slot] = mb;
+    // The place first, so the record is copied once, straight into it.
+    let held = &mut pic.mb[slot];
+    *held = mb;
     Ok(())
+}
+
+/// [`skip_mb`] for a frame macroblock of a plain P slice. Its record is
+/// written in its place, not made aside and copied there: what a skipped
+/// macroblock holds is a few fields, and copying a whole record is a good
+/// part of what skipping one costs.
+fn p_skip_in_place<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    (slice_id, mx, my): (u16, usize, usize),
+    qp: i32,
+) -> Result<(), CodecError> {
+    let slot = my * pic.mb_w + mx;
+    let Some(held) = pic.mb.get_mut(slot) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "macroblock address",
+        });
+    };
+    *held = Mb::new(slice_id);
+    held.skip = true;
+    held.qp = qp as i8;
+    held.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
+    held.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
+    held.off_a = slice.off_a as i8;
+    held.off_b = slice.off_b as i8;
+    held.deblock = slice.deblock;
+    let mv = p_skip_mv(pic, mx, my, &pic.mb[slot]);
+    let held = &mut pic.mb[slot];
+    held.ref0 = [0; 4];
+    held.mv0 = [mv; 16];
+    bind_refs(held, slice);
+    // Prediction reads the macroblock's motion and the reference pictures,
+    // never the picture's records, which step aside while it writes the
+    // picture's samples.
+    let records = std::mem::take(&mut pic.mb);
+    let predicted = predict_inter(pic, dpb, slice, (mx, my, true), &records[slot]);
+    restore_records(pic, records);
+    predicted
+}
+
+/// Puts the records [`std::mem::take`] set aside back in `pic`. What
+/// stood in for them is an empty buffer from no store of spares, which
+/// owns nothing, so it is let go without its drop, which would only find
+/// that out: once for every skipped macroblock, that was 0.5% of a TikTok
+/// clip's cycles.
+#[inline]
+fn restore_records<S: Sample>(pic: &mut Frame<S>, records: super::Shared<Mb>) {
+    let stand_in = std::mem::ManuallyDrop::new(std::mem::replace(&mut pic.mb, records));
+    debug_assert!(stand_in.owns_nothing());
+}
+
+/// [`skip_mb`] for a frame macroblock of a B slice in a picture that is not
+/// macroblock-adaptive, written in its place as [`p_skip_in_place`] writes
+/// one. Direct prediction reads the neighbours, which all come before it.
+fn b_skip_in_place<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    (slice_id, mx, my): (u16, usize, usize),
+    qp: i32,
+) -> Result<(), CodecError> {
+    let slot = my * pic.mb_w + mx;
+    if slot >= pic.mb.len() {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "macroblock address",
+        });
+    }
+    // The records step aside while the macroblock is worked out in its
+    // place and its samples are predicted into the picture.
+    let mut records = std::mem::take(&mut pic.mb);
+    let (before, rest) = records.split_at_mut(slot);
+    let held = &mut rest[0];
+    *held = Mb::new(slice_id);
+    held.skip = true;
+    held.qp = qp as i8;
+    held.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
+    held.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
+    held.off_a = slice.off_a as i8;
+    held.off_b = slice.off_b as i8;
+    held.deblock = slice.deblock;
+    let mut blocks = [(0usize, 0usize); 16];
+    for (index, block) in blocks.iter_mut().enumerate() {
+        *block = (index % 4, index / 4);
+    }
+    let whole = apply_direct(pic, before, dpb, slice, (mx, my), held, &blocks);
+    let predicted = predict_inter(pic, dpb, slice, (mx, my, whole), held);
+    bind_refs(held, slice);
+    restore_records(pic, records);
+    predicted
 }
 
 /// J.7.3.4.1. `mb_skip_type_flag` is present when a skip run has an interview reference.
@@ -815,7 +1260,7 @@ fn vsp_skip_mb<S: Sample>(
             l1: false,
         };
         let motion = synthesis_motion(pic, dpb, slice, (mx * 16, my * 16), &part)?;
-        fill_ref(&mut mb.ref0, &mut mb.uses0, &part, reference);
+        fill_ref(&mut mb.col.ref0, &mut mb.uses0, &part, reference);
         store_mv(&mut mb, &part, motion, 0);
         if let Some(reference1) = reference1 {
             let part1 = Part {
@@ -823,11 +1268,11 @@ fn vsp_skip_mb<S: Sample>(
                 l1: true,
                 ..part
             };
-            fill_ref(&mut mb.ref1, &mut mb.uses1, &part1, reference1);
+            fill_ref(&mut mb.col.ref1, &mut mb.uses1, &part1, reference1);
             store_mv(&mut mb, &part1, motion, 1);
         }
     }
-    predict_inter(pic, dpb, slice, mx, my, &mb)?;
+    predict_inter(pic, dpb, slice, (mx, my, false), &mb)?;
     bind_refs(&mut mb, slice);
     let slot = my * pic.mb_w + mx;
     pic.mb[slot] = mb;
@@ -1034,24 +1479,25 @@ fn inverse_raster(index: usize, width: usize, height: usize, span: usize, vertic
     }
 }
 
-fn p_skip_mv<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> [i16; 2] {
-    let left = neighbor(pic, mx as i32 - 1, my as i32, slice);
-    let above = neighbor(pic, mx as i32, above_my(pic, mx, my), slice);
-    let zero = |mb: &Mb, bx: usize, by: usize| {
-        let part = (by / 2) * 2 + (bx / 2);
-        mb.ref0[part] == 0 && mb.mv0[by * 4 + bx] == [0, 0]
-    };
-    if left.is_none_or(|mb| zero(mb, 3, 0)) || above.is_none_or(|mb| zero(mb, 0, 3)) {
+/// Clause 8.4.1.1. `current` is the skipped macroblock so far: its slice and
+/// whether it is a field macroblock, which is what its neighbours' motion is
+/// measured in.
+fn p_skip_mv<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, current: &Mb) -> [i16; 2] {
+    let left = part_motion(pic, mx, my, -1, 0, 0, current);
+    let above = part_motion(pic, mx, my, 0, -1, 0, current);
+    let still = |near: Motion| !near.available || (near.reference == 0 && near.mv == [0, 0]);
+    if still(left) || still(above) {
         [0, 0]
     } else {
-        mvp(
+        // The prediction starts from the same two neighbours.
+        mvp_from(
             pic,
             Place { mx, my },
             Cell { bx: 0, by: 0 },
             (16, 16),
-            0,
-            0,
-            &Mb::new(slice),
+            (0, 0),
+            current,
+            (left, above),
         )
     }
 }
@@ -1123,14 +1569,14 @@ fn intra_base<S: Sample>(
     mb.off_a = slice.off_a as i8;
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
-    pic.mb[slot] = mb.clone();
+    pic.mb[slot] = mb;
     let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, true, slice_id, slice.sps.chroma)?;
     if luma_cbp > 0 && slice.pps.transform_8x8 {
         mb.transform8 = transform8_flag(pic, entropy, mx, my, slice_id)?;
     }
     let mut qp = qp;
     if luma_cbp > 0 || chroma_cbp > 0 {
-        let delta = qp_delta(entropy, prev_qpd(pic, mx, my, slice_id))?;
+        let delta = qp_delta::<S>(entropy, prev_qpd(pic, mx, my, slice_id))?;
         qp = next_qp::<S>(qp, delta);
         mb.qpd = delta as i8;
     }
@@ -1149,7 +1595,7 @@ fn intra_base<S: Sample>(
                 &block,
                 (qp, qp_bypass::<S>(slice, qp)),
                 &slice.pps.weight8[0],
-                8,
+                (8, false),
             );
         }
     } else {
@@ -1178,7 +1624,7 @@ fn intra_base<S: Sample>(
                 &block,
                 (qp, qp_bypass::<S>(slice, qp)),
                 &slice.pps.weight4[0],
-                4,
+                (4, false),
             );
         }
     }
@@ -1194,6 +1640,7 @@ fn intra_base<S: Sample>(
                 cr_dc: &chroma.cr_dc,
                 cb_ac: &chroma.cb_ac,
                 cr_ac: &chroma.cr_ac,
+                used: chroma.used,
             },
             (qp, true, slice_id),
             false,
@@ -1259,19 +1706,19 @@ fn motion_base<S: Sample>(
         });
     }
     bind_refs(&mut mb, slice);
-    pic.mb[slot] = mb.clone();
+    pic.mb[slot] = mb;
     let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, false, slice_id, slice.sps.chroma)?;
     if luma_cbp > 0 && slice.pps.transform_8x8 {
         mb.transform8 = transform8_flag(pic, entropy, mx, my, slice_id)?;
     }
     let mut qp = qp;
     if luma_cbp > 0 || chroma_cbp > 0 {
-        let delta = qp_delta(entropy, prev_qpd(pic, mx, my, slice_id))?;
+        let delta = qp_delta::<S>(entropy, prev_qpd(pic, mx, my, slice_id))?;
         qp = next_qp::<S>(qp, delta);
         mb.qpd = delta as i8;
     }
     mb.cbp = luma_cbp | (chroma_cbp << 4);
-    predict_inter(pic, dpb, slice, mx, my, &mb)?;
+    predict_inter(pic, dpb, slice, (mx, my, false), &mb)?;
     if mb.transform8 {
         for i in 0..4 {
             if luma_cbp & (1 << i) == 0 {
@@ -1286,7 +1733,7 @@ fn motion_base<S: Sample>(
                 &block,
                 (qp, qp_bypass::<S>(slice, qp)),
                 &slice.pps.weight8[1],
-                8,
+                (8, false),
             );
         }
     } else {
@@ -1315,7 +1762,7 @@ fn motion_base<S: Sample>(
                 &block,
                 (qp, qp_bypass::<S>(slice, qp)),
                 &slice.pps.weight4[3],
-                4,
+                (4, false),
             );
         }
     }
@@ -1331,6 +1778,7 @@ fn motion_base<S: Sample>(
                 cr_dc: &chroma.cr_dc,
                 cb_ac: &chroma.cb_ac,
                 cr_ac: &chroma.cr_ac,
+                used: chroma.used,
             },
             (qp, false, slice_id),
             false,
@@ -2492,13 +2940,13 @@ fn layer_chroma<S: Sample>(
     let mut cv = [S::default(); 4];
     if refs.0 >= 0 {
         let frame = dpb_slot(dpb, slots.0)?;
-        predict_chroma((&mut cu, &mut cv), frame, origin, (2, 2), motion.0);
+        predict_chroma((&mut cu, &mut cv), 2, frame, origin, (2, 2), motion.0);
     }
     if refs.1 >= 0 {
         let frame = dpb_slot(dpb, slots.1)?;
         let mut ou = [S::default(); 4];
         let mut ov = [S::default(); 4];
-        predict_chroma((&mut ou, &mut ov), frame, origin, (2, 2), motion.1);
+        predict_chroma((&mut ou, &mut ov), 2, frame, origin, (2, 2), motion.1);
         if refs.0 >= 0 {
             for i in 0..4 {
                 cu[i] = recon::avg(cu[i], ou[i]);
@@ -2658,10 +3106,10 @@ fn one_mb<S: Sample>(
     slice: &Slice<'_>,
     slice_id: u16,
     addr: usize,
-    coded: (i32, Option<&Frame<S>>),
+    coded: (i32, Option<&Frame<S>>, &mut Coeffs),
     entropy: &mut Entropy<'_, '_>,
 ) -> Result<(i32, bool), CodecError> {
-    let (qp, layer) = coded;
+    let (qp, layer, coeffs) = coded;
     let mbaff = slice.sps.mbaff && !pic.field;
     let (mx, my) = locate(pic, addr, mbaff);
     let slot = my * pic.mb_w + mx;
@@ -2670,7 +3118,20 @@ fn one_mb<S: Sample>(
     mb.off_a = slice.off_a as i8;
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
-    pic.mb[slot] = mb.clone();
+    // The macroblock is seen by its own slice from here on. Until it is
+    // stored whole at its end, only these fields of its slot are read, so a
+    // slot not yet decoded needs only them set, sparing a copy of all of it;
+    // the rest may still hold another picture's macroblock.
+    match pic.mb.get_mut(slot) {
+        Some(held) if held.slice == u16::MAX => {
+            held.slice = slice_id;
+            held.field_mb = mb.field_mb;
+            held.off_a = mb.off_a;
+            held.off_b = mb.off_b;
+            held.deblock = mb.deblock;
+        }
+        _ => pic.mb[slot] = mb,
+    }
     let (intra, mut spec) = mb_type(pic, entropy, slice.kind, mx, my, slice_id)?;
     if spec == SI_MB {
         mb.si = true;
@@ -2680,7 +3141,7 @@ fn one_mb<S: Sample>(
     mb.direct16 = !intra && slice.kind == 1 && spec == 0;
     if intra && spec == 25 {
         mb.pcm = true;
-        read_pcm(pic, entropy, mx, my, mb.field_mb, slice)?;
+        read_pcm(pic, entropy, mx, my, mb.field_mb)?;
         mb.nnz_y = [16; 16];
         mb.nnz_c = [16; 32];
         mb.qp = 0;
@@ -2695,8 +3156,7 @@ fn one_mb<S: Sample>(
             slice,
             Place { mx, my },
             spec,
-            &mut mb,
-            &mut qp,
+            (&mut mb, &mut qp, coeffs),
         )?;
         false
     } else {
@@ -2707,7 +3167,7 @@ fn one_mb<S: Sample>(
             slice,
             Place { mx, my },
             spec,
-            (&mut mb, &mut qp, layer),
+            (&mut mb, &mut qp, layer, coeffs),
         )?
     };
     mb.qp = qp as i8;
@@ -2716,10 +3176,12 @@ fn one_mb<S: Sample>(
     if !mb.intra {
         bind_refs(&mut mb, slice);
     }
-    pic.mb[slot] = mb;
+    let held = &mut pic.mb[slot];
+    *held = mb;
     Ok((qp, residual))
 }
 
+#[inline(always)]
 fn field_flag<S: Sample>(
     pic: &Frame<S>,
     entropy: &mut Entropy<'_, '_>,
@@ -2781,24 +3243,59 @@ fn skip_field_flag<S: Sample>(
     Ok(inferred_field(pic, mx, my, slice_id))
 }
 
-fn cabac_skip_field<S: Sample>(
-    pic: &Frame<S>,
+/// `mb_skip_flag` in a macroblock-adaptive frame under CABAC (clause 7.3.4).
+///
+/// A pair's `mb_field_decoding_flag` comes with its first macroblock that is
+/// not skipped. So when the top one is skipped, the bottom one's skip flag is
+/// read ahead and kept in `ahead`, and the field flag follows it unless the
+/// bottom one is skipped too. Until the flag is read the pair counts as the
+/// kind of the pair to its left, or else of the one above (clause 7.4.4),
+/// and both skip flags take their contexts from that. Either way the flag is
+/// left on both macroblocks of the pair.
+fn pair_skip<S: Sample>(
+    pic: &mut Frame<S>,
     cab: &mut Cabac<'_>,
+    slice: &Slice<'_>,
     slice_id: u16,
     addr: usize,
-    mbaff: bool,
+    ahead: &mut Option<bool>,
 ) -> Result<bool, CodecError> {
-    if !mbaff {
+    let kind = super::syntax_kind(slice.kind);
+    let (mx, my) = locate(pic, addr, true);
+    let slot = my * pic.mb_w + mx;
+    let set = |pic: &mut Frame<S>, slot: usize, field: bool| {
+        if let Some(mb) = pic.mb.get_mut(slot) {
+            mb.field_mb = field;
+        }
+    };
+    if my % 2 == 1 {
+        if let Some(skipped) = ahead.take() {
+            return Ok(skipped);
+        }
+        // The top macroblock was coded and carried the pair's flag.
+        let field = pic
+            .mb
+            .get(slot.saturating_sub(pic.mb_w))
+            .is_some_and(|mb| mb.field_mb);
+        set(pic, slot, field);
+        return cabac_skip(pic, cab, kind, slice_id, addr, true);
+    }
+    *ahead = None;
+    let below = slot + pic.mb_w;
+    let inferred = inferred_field(pic, mx, my, slice_id);
+    set(pic, slot, inferred);
+    set(pic, below, inferred);
+    if !cabac_skip(pic, cab, kind, slice_id, addr, true)? {
         return Ok(false);
     }
-    let (mx, my) = locate(pic, addr, true);
-    if my % 2 == 1 {
-        return Ok(pic
-            .mb
-            .get((my - 1) * pic.mb_w + mx)
-            .is_some_and(|mb| mb.field_mb));
+    let bottom = cabac_skip(pic, cab, kind, slice_id, addr + 1, true)?;
+    if !bottom {
+        let field = field_flag(pic, &mut Entropy::Cabac(cab), slice_id, mx, my, true)?;
+        set(pic, slot, field);
+        set(pic, below, field);
     }
-    field_flag(pic, &mut Entropy::Cabac(cab), slice_id, mx, my, true)
+    *ahead = Some(bottom);
+    Ok(true)
 }
 
 fn inferred_field<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> bool {
@@ -2867,9 +3364,63 @@ fn block_span<S: Sample>(pic: &Frame<S>, my: usize, field: bool, plane: u8) -> S
     }
 }
 
+/// Grid row of the macroblock above this one, whose last row of blocks
+/// borders it. A frame macroblock has the row before it. A field macroblock
+/// continues its own field (clause 6.4.12.2): the bottom field always ends in
+/// the bottom macroblock of the pair above, and the top field ends in that
+/// pair's top macroblock when it is a field pair and its bottom one when it
+/// is a frame pair.
+#[inline(always)]
 fn above_my<S: Sample>(pic: &Frame<S>, mx: usize, my: usize) -> i32 {
-    let field = pic.mb.get(my * pic.mb_w + mx).is_some_and(|mb| mb.field_mb);
-    my as i32 - if field { 2 } else { 1 }
+    // Only a macroblock-adaptive frame has field macroblocks among frame
+    // ones.
+    if !pic.mbaff {
+        return my as i32 - 1;
+    }
+    above_my_mbaff(pic, mx, my)
+}
+
+#[inline(never)]
+fn above_my_mbaff<S: Sample>(pic: &Frame<S>, mx: usize, my: usize) -> i32 {
+    let field_at = |row: usize| {
+        pic.mb
+            .get(row * pic.mb_w + mx)
+            .is_some_and(|mb| mb.field_mb)
+    };
+    if !field_at(my) {
+        return my as i32 - 1;
+    }
+    if my % 2 == 1 {
+        return my as i32 - 2;
+    }
+    match my.checked_sub(2) {
+        Some(above) if field_at(above) => above as i32,
+        Some(above) => above as i32 + 1,
+        None => -1,
+    }
+}
+
+/// The macroblock left of luma row `row` of this one, as a grid column and
+/// row, and the luma row there that lies beside it. Only a macroblock-adaptive
+/// frame makes this more than the same row one column back: a frame pair
+/// beside a field pair meets both of its macroblocks.
+#[inline]
+fn left_of<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, row: usize) -> (i32, i32, usize) {
+    if pic.mbaff {
+        let field = pic.mb.get(my * pic.mb_w + mx).is_some_and(|mb| mb.field_mb);
+        if let Some(near) = mbaff::locate((&pic.mb, pic.mb_w), (mx, my), field, -1, row as i32) {
+            return (near.mx as i32, near.my as i32, near.row);
+        }
+    }
+    (mx as i32 - 1, my as i32, row)
+}
+
+/// The macroblock that holds the sample left of this one's first sample,
+/// when it is in the same slice (clause 6.4.8.1, mbAddrA).
+#[inline]
+fn left_mb<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> Option<&Mb> {
+    let (nx, ny, _) = left_of(pic, mx, my, 0);
+    neighbor(pic, nx, ny, slice)
 }
 
 /// CAVLC `mb_type` 0 in an SI slice. It is not an intra spec.
@@ -2965,7 +3516,7 @@ fn cabac_mb_type<S: Sample>(
 fn direct_ctx<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> usize {
     // Clause 9.3.3.1.1.3: a missing neighbor, B_Skip, or B_Direct_16x16 contributes 0.
     let coded = |mb: &Mb| !mb.skip && !mb.direct16;
-    let left = neighbor(pic, mx as i32 - 1, my as i32, slice).is_some_and(coded);
+    let left = left_mb(pic, mx, my, slice).is_some_and(coded);
     let above = neighbor(pic, mx as i32, above_my(pic, mx, my), slice).is_some_and(coded);
     usize::from(left) + usize::from(above)
 }
@@ -2982,7 +3533,7 @@ fn cabac_intra_type<S: Sample>(
     let intra16 = |mb: &Mb| mb.intra16 || mb.pcm;
     if intra_slice {
         let mut ctx = 0;
-        if neighbor(pic, mx as i32 - 1, my as i32, slice).is_some_and(intra16) {
+        if left_mb(pic, mx, my, slice).is_some_and(intra16) {
             ctx += 1;
         }
         if neighbor(pic, mx as i32, above_my(pic, mx, my), slice).is_some_and(intra16) {
@@ -3016,10 +3567,10 @@ fn decode_intra<S: Sample>(
     slice: &Slice<'_>,
     at: Place,
     spec: u32,
-    mb: &mut Mb,
-    qp: &mut i32,
+    work: (&mut Mb, &mut i32, &mut Coeffs),
 ) -> Result<(), CodecError> {
     let Place { mx, my } = at;
+    let (mb, qp, coeffs) = work;
     if spec > 25 {
         return Err(CodecError::Malformed {
             at_bit: 0,
@@ -3071,13 +3622,27 @@ fn decode_intra<S: Sample>(
     }
     let mut delta = 0;
     if luma_cbp > 0 || chroma_cbp > 0 || i16 {
-        delta = qp_delta(entropy, prev_qpd(pic, mx, my, mb.slice))?;
+        delta = qp_delta::<S>(entropy, prev_qpd(pic, mx, my, mb.slice))?;
         *qp = next_qp::<S>(*qp, delta);
     }
     mb.qpd = delta as i8;
+    if let Entropy::Cabac(cab) = entropy
+        && intra_frame_fast(pic, slice, mb, *qp)
+        && let Some(scales) = coeffs.intra.at::<S>(*qp, &slice.pps)
+    {
+        let i16 = i16.then_some(mode16);
+        return intra_frame_scaled(pic, cab, slice, Place { mx, my }, mb, i16, *qp, scales);
+    }
     let mut luma_dc = [0i32; 16];
-    let mut ac = [[0i32; 16]; 16];
-    let mut block8 = [[0i32; 64]; 4];
+    coeffs.reset_luma();
+    let Coeffs {
+        ac,
+        block8,
+        chroma: chroma_res,
+        ac_used,
+        block8_used,
+        ..
+    } = coeffs;
     if i16 {
         luma_dc = read_block(
             pic,
@@ -3089,6 +3654,7 @@ fn decode_intra<S: Sample>(
             0,
         )?;
         if luma_cbp != 0 {
+            *ac_used = u16::MAX;
             for (i, slot) in ac.iter_mut().enumerate() {
                 *slot = read_block(
                     pic,
@@ -3107,6 +3673,7 @@ fn decode_intra<S: Sample>(
     } else if transform8 {
         for (i, slot) in block8.iter_mut().enumerate() {
             if luma_cbp & (1 << i) != 0 {
+                *block8_used |= 1 << i;
                 *slot = read8(pic, entropy, mx, my, i, mb, 0)?;
             }
         }
@@ -3114,6 +3681,7 @@ fn decode_intra<S: Sample>(
         for (i, slot) in ac.iter_mut().enumerate() {
             let bit = 1 << ((blk_y(i) / 2) * 2 + blk_x(i) / 2);
             if luma_cbp & bit != 0 {
+                *ac_used |= 1 << i;
                 *slot = read_block(
                     pic,
                     entropy,
@@ -3129,18 +3697,13 @@ fn decode_intra<S: Sample>(
             }
         }
     }
-    let chroma_res = if slice.sps.chroma == 3 {
-        ChromaResidual {
-            cb_dc: [0; 8],
-            cr_dc: [0; 8],
-            cb_ac: [[0; 16]; 8],
-            cr_ac: [[0; 16]; 8],
-        }
+    if slice.sps.chroma == 3 {
+        chroma_res.reset();
     } else {
-        read_chroma(pic, entropy, mx, my, chroma_cbp, mb)?
-    };
+        read_chroma_into(pic, entropy, (mx, my), chroma_cbp, mb, chroma_res)?;
+    }
     if mb.si {
-        recon_si(pic, slice, Place { mx, my }, mb, &ac, &chroma_res, *qp)?;
+        recon_si(pic, slice, Place { mx, my }, mb, ac, chroma_res, *qp)?;
         return Ok(());
     }
     recon_intra(
@@ -3153,14 +3716,15 @@ fn decode_intra<S: Sample>(
             mode16,
             chroma_mode: chroma,
             dc: luma_dc,
-            ac: &ac,
-            block8: &block8,
+            ac,
+            block8,
         },
         ChromaPaint {
             cb_dc: &chroma_res.cb_dc,
             cr_dc: &chroma_res.cr_dc,
             cb_ac: &chroma_res.cb_ac,
             cr_ac: &chroma_res.cr_ac,
+            used: chroma_res.used,
         },
         *qp,
     );
@@ -3267,19 +3831,15 @@ fn mode_at<S: Sample>(
     current: &Mb,
     constrained: bool,
 ) -> Option<u8> {
-    let (mbx, ox) = if bx < 0 {
-        (mx as i32 - 1, 3)
-    } else if bx > 3 {
-        (mx as i32 + 1, 0)
+    let (mbx, mby, ox, oy) = if bx < 0 {
+        // Clauses 8.3.1.1 and 8.3.2.1: the block beside this row in the
+        // macroblock to the left.
+        let (left_x, left_y, row) = left_of(pic, mx, my, by.max(0) as usize * 4);
+        (left_x, left_y, 3, row / 4)
+    } else if by < 0 {
+        (mx as i32, above_my(pic, mx, my), bx.min(3) as usize, 3)
     } else {
-        (mx as i32, bx as usize)
-    };
-    let (mby, oy) = if by < 0 {
-        (above_my(pic, mx, my), 3)
-    } else if by > 3 {
-        (my as i32 + 1, 0)
-    } else {
-        (my as i32, by as usize)
+        (mx as i32, my as i32, bx.min(3) as usize, by.min(3) as usize)
     };
     if mbx == mx as i32 && mby == my as i32 {
         return Some(current.mode4[oy * 4 + ox]);
@@ -3343,7 +3903,7 @@ fn read_chroma_mode<S: Sample>(
         }
         Entropy::Cabac(cab) => {
             let mut ctx = 0;
-            if neighbor(pic, mx as i32 - 1, my as i32, slice)
+            if left_mb(pic, mx, my, slice)
                 .is_some_and(|mb| mb.intra && !mb.pcm && mb.chroma_mode != 0)
             {
                 ctx += 1;
@@ -3402,6 +3962,34 @@ fn read_cbp<S: Sample>(
             };
             Ok((value & 15, value >> 4))
         }
+        Entropy::Cabac(cab) if !pic.mbaff => {
+            // Outside a macroblock-adaptive frame each 8×8 block's left and
+            // upper neighbours lie in one macroblock each way, so their
+            // patterns are read once, as FFmpeg does. A neighbour that is
+            // not there counts as coded for luma and as not for chroma.
+            let left = neighbor(pic, mx as i32 - 1, my as i32, slice);
+            let above = neighbor(pic, mx as i32, above_my(pic, mx, my), slice);
+            let pattern = |mb: Option<&Mb>| match mb {
+                Some(mb) if mb.pcm => (15, 2),
+                Some(mb) => (mb.cbp & 15, mb.cbp >> 4),
+                None => (15, 0),
+            };
+            let ((left, left_c), (above, above_c)) = (pattern(left), pattern(above));
+            let ctx = |left: u8, above: u8| usize::from(left == 0) + 2 * usize::from(above == 0);
+            let mut luma = cab.decision(73 + ctx(left & 2, above & 4))?;
+            luma |= cab.decision(73 + ctx(luma & 1, above & 8))? << 1;
+            luma |= cab.decision(73 + ctx(left & 8, luma & 1))? << 2;
+            luma |= cab.decision(73 + ctx(luma & 4, luma & 2))? << 3;
+            if chroma == 3 {
+                return Ok((luma, 0));
+            }
+            let ctx = usize::from(left_c > 0) + 2 * usize::from(above_c > 0);
+            if cab.decision(77 + ctx)? == 0 {
+                return Ok((luma, 0));
+            }
+            let ctx = 4 + usize::from(left_c == 2) + 2 * usize::from(above_c == 2);
+            Ok((luma, 1 + cab.decision(77 + ctx)?))
+        }
         Entropy::Cabac(cab) => {
             let mut luma = 0u8;
             for bit in 0..4 {
@@ -3413,7 +4001,8 @@ fn read_cbp<S: Sample>(
             if chroma == 3 {
                 return Ok((luma, 0));
             }
-            let left = cbp_chroma(pic, mx as i32 - 1, my as i32, slice);
+            let (left_x, left_y, _) = left_of(pic, mx, my, 0);
+            let left = cbp_chroma(pic, left_x, left_y, slice);
             let above = cbp_chroma(pic, mx as i32, above_my(pic, mx, my), slice);
             let mut ctx = usize::from(left > 0) + 2 * usize::from(above > 0);
             if cab.decision(77 + ctx)? == 0 {
@@ -3442,7 +4031,10 @@ fn cbp_ctx<S: Sample>(
     let left_coded = if bit == 1 || bit == 3 {
         current & left_bit != 0
     } else {
-        coded_bit(pic, mx as i32 - 1, my as i32, left_bit, slice)
+        // The 8×8 block beside this one, in the right-hand column of the
+        // macroblock to the left: block 1 or 3 by the row it is found at.
+        let (left_x, left_y, row) = left_of(pic, mx, my, bit * 4);
+        coded_bit(pic, left_x, left_y, 0x02 << (row / 8 * 2), slice)
     };
     let above_coded = if bit == 2 || bit == 3 {
         current & above_bit != 0
@@ -3468,10 +4060,17 @@ fn cbp_chroma<S: Sample>(pic: &Frame<S>, mx: i32, my: i32, slice: u16) -> u8 {
 }
 
 /// Clause 9.3.3.1.1.5. The first bin uses context 60 or 61. Later bins use 62, then 63.
-fn qp_delta(entropy: &mut Entropy<'_, '_>, prev_nonzero: bool) -> Result<i32, CodecError> {
+/// Clause 7.4.5 bounds the value to -(26 + QpBdOffsetY / 2)..=25 + QpBdOffsetY / 2,
+/// so a CABAC code runs to 52 + QpBdOffsetY: 52 at 8 bits, 64 at 10.
+#[inline(always)]
+fn qp_delta<S: Sample>(
+    entropy: &mut Entropy<'_, '_>,
+    prev_nonzero: bool,
+) -> Result<i32, CodecError> {
     match entropy {
         Entropy::Cavlc(bits) => bits.se(),
         Entropy::Cabac(cab) => {
+            let mut cab = cab.run();
             let mut ctx = usize::from(prev_nonzero);
             let mut code = 0u32;
             loop {
@@ -3479,7 +4078,7 @@ fn qp_delta(entropy: &mut Entropy<'_, '_>, prev_nonzero: bool) -> Result<i32, Co
                     break;
                 }
                 code += 1;
-                if code > 52 {
+                if code > 52 + S::QP_BD as u32 {
                     return Err(CodecError::Malformed {
                         at_bit: 0,
                         what: "qp delta",
@@ -3522,7 +4121,7 @@ fn transform8_flag<S: Sample>(
     slice: u16,
 ) -> Result<bool, CodecError> {
     let on = |mb: &Mb| mb.transform8;
-    let left = neighbor(pic, mx as i32 - 1, my as i32, slice).is_some_and(on);
+    let left = left_mb(pic, mx, my, slice).is_some_and(on);
     let above = neighbor(pic, mx as i32, above_my(pic, mx, my), slice).is_some_and(on);
     flag(entropy, 399 + usize::from(left) + usize::from(above))
 }
@@ -3673,7 +4272,7 @@ fn read8<S: Sample>(
             // is that flag. 4:4:4 reads it for luma and for both chroma planes.
             // Separate colour planes are monochrome, so that flag stays absent.
             if plane != 0 || (pic.chroma() == 3 && !pic.separate_plane) {
-                let inc = cbf_inc(pic, Place { mx, my }, Cell { bx, by }, mb, plane, false);
+                let inc = cbf8_inc(pic, Place { mx, my }, Cell { bx, by }, mb, plane);
                 let Some(base) = CBF_BASE.get(cat).copied() else {
                     return Err(CodecError::Malformed {
                         at_bit: 0,
@@ -3714,15 +4313,27 @@ fn read_chroma<S: Sample>(
     cbp: u8,
     mb: &mut Mb,
 ) -> Result<ChromaResidual, CodecError> {
-    let mut residual = ChromaResidual {
-        cb_dc: [0; 8],
-        cr_dc: [0; 8],
-        cb_ac: [[0; 16]; 8],
-        cr_ac: [[0; 16]; 8],
-    };
+    let mut residual = ChromaResidual::zero();
+    read_chroma_into(pic, entropy, (mx, my), cbp, mb, &mut residual)?;
+    Ok(residual)
+}
+
+/// Reads the chroma levels of a macroblock into `residual`, which is left
+/// all zero where nothing is coded.
+fn read_chroma_into<S: Sample>(
+    pic: &Frame<S>,
+    entropy: &mut Entropy<'_, '_>,
+    at: (usize, usize),
+    cbp: u8,
+    mb: &mut Mb,
+    residual: &mut ChromaResidual,
+) -> Result<(), CodecError> {
+    let (mx, my) = at;
+    residual.reset();
     if cbp == 0 {
-        return Ok(residual);
+        return Ok(());
     }
+    residual.used = DC_USED;
     let blocks = if pic.chroma() == 2 { 8 } else { 4 };
     let dc0 = read_block(
         pic,
@@ -3745,6 +4356,7 @@ fn read_chroma<S: Sample>(
     )?;
     residual.cr_dc[..blocks].copy_from_slice(&dc1[..blocks]);
     if cbp == 2 {
+        residual.used |= AC_USED;
         for (plane, ac) in [
             (1u8, residual.cb_ac.as_mut_slice()),
             (2, residual.cr_ac.as_mut_slice()),
@@ -3763,7 +4375,7 @@ fn read_chroma<S: Sample>(
             }
         }
     }
-    Ok(residual)
+    Ok(())
 }
 
 fn nc_of<S: Sample>(pic: &Frame<S>, at: Place, cell: Cell, mb: &Mb, plane: u8) -> i32 {
@@ -3797,8 +4409,16 @@ fn nnz_at<S: Sample>(
             _ => (2, 2),
         }
     };
-    let (mbx, ox) = shift(mx, bx, gx);
-    let (mby, oy) = shift_field(my, by, gy, current.field_mb);
+    let (mbx, mby, ox, oy) = if bx < 0 {
+        // Rows of blocks are 16 / gy luma rows apart, in chroma too.
+        let tall = 16 / gy;
+        let (left_x, left_y, row) = left_of(pic, mx, my, by.max(0) as usize * tall);
+        (left_x, left_y, gx - 1, row / tall)
+    } else if by < 0 {
+        (mx as i32, above_my(pic, mx, my), bx as usize, gy - 1)
+    } else {
+        (mx as i32, my as i32, bx as usize, by as usize)
+    };
     let index = if plane == 0 {
         oy * 4 + ox
     } else {
@@ -3823,8 +4443,8 @@ fn nnz_at<S: Sample>(
 }
 
 fn cbf_dc_plane<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb, plane: u8) -> usize {
-    let flag = |dx: i32, dy: i32| -> usize {
-        let Some(side) = neighbor(pic, mx as i32 + dx, my as i32 + dy, mb.slice) else {
+    let flag = |nx: i32, ny: i32| -> usize {
+        let Some(side) = neighbor(pic, nx, ny, mb.slice) else {
             return usize::from(mb.intra);
         };
         if side.pcm {
@@ -3843,8 +4463,8 @@ fn cbf_dc_plane<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb, plane:
                 .unwrap_or(0)
         }
     };
-    let up = if mb.field_mb { -2 } else { -1 };
-    flag(-1, 0) + 2 * flag(0, up)
+    let (left_x, left_y, _) = left_of(pic, mx, my, 0);
+    flag(left_x, left_y) + 2 * flag(mx as i32, above_my(pic, mx, my))
 }
 
 fn shift(mb: usize, block: i32, grid: usize) -> (i32, usize) {
@@ -3858,19 +4478,10 @@ fn shift(mb: usize, block: i32, grid: usize) -> (i32, usize) {
     }
 }
 
-fn shift_field(mb: usize, block: i32, grid: usize, field: bool) -> (i32, usize) {
-    let (row, off) = shift(mb, block, grid);
-    if field && block < 0 {
-        (row - 1, off)
-    } else {
-        (row, off)
-    }
-}
-
 /// Clause 9.3.3.1.1.9 for ctxBlockCat 3. The neighbour contributes its chroma DC flag.
 fn cbf_dc_chroma<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb, which: usize) -> usize {
-    let flag = |dx: i32, dy: i32| -> usize {
-        let Some(side) = neighbor(pic, mx as i32 + dx, my as i32 + dy, mb.slice) else {
+    let flag = |nx: i32, ny: i32| -> usize {
+        let Some(side) = neighbor(pic, nx, ny, mb.slice) else {
             return usize::from(mb.intra);
         };
         if side.pcm {
@@ -3881,8 +4492,8 @@ fn cbf_dc_chroma<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb, which
         }
         side.dc_c.get(which).copied().map(usize::from).unwrap_or(0)
     };
-    let up = if mb.field_mb { -2 } else { -1 };
-    flag(-1, 0) + 2 * flag(0, up)
+    let (left_x, left_y, _) = left_of(pic, mx, my, 0);
+    flag(left_x, left_y) + 2 * flag(mx as i32, above_my(pic, mx, my))
 }
 
 fn cbf_inc<S: Sample>(
@@ -3904,12 +4515,56 @@ fn cbf_inc<S: Sample>(
     usize::from(left > 0) + 2 * usize::from(above > 0)
 }
 
+/// Clause 9.3.3.1.1.9 for an 8×8 block that carries a coded_block_flag,
+/// which is every 8×8 block of a 4:4:4 picture. A neighbouring macroblock
+/// that does not use the 8×8 transform has no 8×8 block to offer, so it
+/// counts as 0 whatever its 4×4 blocks hold, unless it is I_PCM.
+fn cbf8_inc<S: Sample>(pic: &Frame<S>, at: Place, cell: Cell, mb: &Mb, plane: u8) -> usize {
+    let Place { mx, my } = at;
+    let Cell { bx, by } = cell;
+    let coded = |block: (i32, i32)| -> bool {
+        let outside = if block.0 < 0 {
+            let (left_x, left_y, _) = left_of(pic, mx, my, by * 4);
+            Some((left_x, left_y))
+        } else if block.1 < 0 {
+            Some((mx as i32, above_my(pic, mx, my)))
+        } else {
+            None
+        };
+        if let Some((nx, ny)) = outside {
+            match neighbor(pic, nx, ny, mb.slice) {
+                None => return mb.intra,
+                Some(side) if side.pcm => return true,
+                Some(side) if !side.transform8 => return false,
+                Some(_) => {}
+            }
+        }
+        nnz_at(pic, Place { mx, my }, block, mb, plane).is_some_and(|count| count > 0)
+    };
+    usize::from(coded((bx as i32 - 1, by as i32)))
+        + 2 * usize::from(coded((bx as i32, by as i32 - 1)))
+}
+
 fn cabac_residual(
     cab: &mut Cabac<'_>,
     cat: usize,
     coeffs: &mut [i32],
     field: bool,
 ) -> Result<(), CodecError> {
+    let max = coeffs.len();
+    cabac_levels(cab, (cat, max), field, |scan, level| coeffs[scan] = level)?;
+    Ok(())
+}
+
+/// The levels of one block of category `cat` with `max` coefficients, each
+/// handed to `store` with its place in scan order; the count of them.
+#[inline(always)]
+fn cabac_levels(
+    cab: &mut Cabac<'_>,
+    (cat, max): (usize, usize),
+    field: bool,
+    mut store: impl FnMut(usize, i32),
+) -> Result<usize, CodecError> {
     // Table 9-34. A field macroblock uses the second context block.
     const SIG: [[usize; 14]; 2] = [
         [
@@ -3930,12 +4585,13 @@ fn cabac_residual(
     const LEVEL: [usize; 14] = [
         227, 237, 247, 257, 266, 426, 952, 962, 972, 708, 982, 992, 1002, 766,
     ];
+    let mut cab = cab.run();
     let which = cat.min(13);
     let row = usize::from(field);
     let (sig_base, last_base, level_base) = (SIG[row][which], LAST[row][which], LEVEL[which]);
-    let max = coeffs.len();
     let dc422 = cat == 3 && max == 8;
-    let mut index = [0usize; 64];
+    // The places of the significant coefficients; a block has at most 64.
+    let mut index = [0u8; 64];
     let mut count = 0usize;
     let last_coded = max.saturating_sub(1);
     let mut pos = 0;
@@ -3961,7 +4617,7 @@ fn cabac_residual(
                     what: "cabac residual",
                 });
             };
-            *slot = pos;
+            *slot = pos as u8;
             count += 1;
             let last_ctx = last_base
                 + if matches!(cat, 5 | 9 | 13) {
@@ -3987,7 +4643,7 @@ fn cabac_residual(
                 what: "cabac residual",
             });
         };
-        *slot = pos;
+        *slot = pos as u8;
         count += 1;
     }
     if count == 0 {
@@ -4005,11 +4661,11 @@ fn cabac_residual(
     let trans1 = [1usize, 2, 3, 3, 4, 5, 6, 7];
     let trans_gt = [4usize, 4, 4, 4, 5, 6, 7, 7];
     for scan in index[..count].iter().rev() {
-        let scan = *scan;
+        let scan = usize::from(*scan);
         if cab.decision(level_base + level1[node])? == 0 {
             node = trans1[node];
             let sign = cab.bypass()?;
-            coeffs[scan] = if sign == 1 { -1 } else { 1 };
+            store(scan, if sign == 1 { -1 } else { 1 });
         } else {
             let ctx = level_base + gt1[node];
             node = trans_gt[node];
@@ -4029,8 +4685,588 @@ fn cabac_residual(
                 abs = mag + 14;
             }
             let sign = cab.bypass()?;
-            coeffs[scan] = if sign == 1 { -abs } else { abs };
+            store(scan, if sign == 1 { -abs } else { abs });
         }
+    }
+    Ok(count)
+}
+
+/// The luma residual of an inter macroblock of a 4:2:0 or 4:2:2 picture
+/// under CABAC, added to its prediction: what [`read8`] or [`read_block`]
+/// and then `add_scaled` do, with each level scaled by `muls` as it is
+/// read and put in raster order, as FFmpeg does. The transform is not
+/// bypassed. `cbp` is the luma coded block pattern and `field` picks the
+/// scans.
+fn inter_luma_scaled<S: Sample>(
+    pic: &mut Frame<S>,
+    cab: &mut Cabac<'_>,
+    at: Place,
+    mb: &mut Mb,
+    (cbp, field): (u8, bool),
+    (mul4, mul8): (&[i32; 16], &[i32; 64]),
+) -> Result<(), CodecError> {
+    let Place { mx, my } = at;
+    let span = luma_span(my, mb.field_mb);
+    if mb.transform8 {
+        let scan = scan8(field);
+        for i in 0..4 {
+            if cbp & (1 << i) == 0 {
+                continue;
+            }
+            // 4:2:0 and 4:2:2 leave out the luma 8×8 coded_block_flag.
+            let mut block = [0i32; 64];
+            let count = cabac_levels(cab, (5, 64), field, |n, level| {
+                let pos = scan[n];
+                block[pos] = recon::dequantize(level, mul8[pos]);
+            })?;
+            let (bx, by) = ((i & 1) * 2, (i >> 1) * 2);
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    mb.nnz_y[(by + dy) * 4 + bx + dx] = count as u8;
+                }
+            }
+            let (x, y) = (mx * 16 + bx * 4, span.at(by * 4));
+            if count == 1 && block[0] != 0 {
+                recon::add_dc(
+                    &mut pic.y,
+                    pic.w,
+                    (x, y, span.step),
+                    (block[0] + 32) >> 6,
+                    8,
+                );
+            } else {
+                recon::add_idct8_full(&mut pic.y, pic.w, x, y, &mut block, span.step);
+            }
+        }
+        return Ok(());
+    }
+    let scan = scan4(field);
+    // Outside a macroblock-adaptive frame the counts beside the left
+    // column and above the top row come from one macroblock each way.
+    let sides = (!pic.mbaff).then(|| {
+        let missing = u8::from(mb.intra);
+        let side = |near: Option<&Mb>, slots: [usize; 4]| match near {
+            Some(near) if near.pcm => [16; 4],
+            Some(near) => slots.map(|slot| near.nnz_y[slot]),
+            None => [missing; 4],
+        };
+        (
+            side(
+                neighbor(pic, mx as i32 - 1, my as i32, mb.slice),
+                [3, 7, 11, 15],
+            ),
+            side(
+                neighbor(pic, mx as i32, above_my(pic, mx, my), mb.slice),
+                [12, 13, 14, 15],
+            ),
+        )
+    });
+    for i in 0..16 {
+        let cell = Cell {
+            bx: blk_x(i),
+            by: blk_y(i),
+        };
+        if cbp & (1 << ((cell.by / 2) * 2 + cell.bx / 2)) == 0 {
+            continue;
+        }
+        let inc = match sides {
+            Some((left, above)) => {
+                let (bx, by) = (cell.bx, cell.by);
+                let l = if bx > 0 {
+                    mb.nnz_y[by * 4 + bx - 1]
+                } else {
+                    left[by]
+                };
+                let a = if by > 0 {
+                    mb.nnz_y[(by - 1) * 4 + bx]
+                } else {
+                    above[bx]
+                };
+                usize::from(l > 0) + 2 * usize::from(a > 0)
+            }
+            None => cbf_inc(pic, at, cell, mb, 0, false),
+        };
+        if cab.decision(CBF_BASE[2] + inc)? == 0 {
+            continue;
+        }
+        let mut block = [0i32; 16];
+        let count = cabac_levels(cab, (2, 16), field, |n, level| {
+            let pos = scan[n];
+            block[pos] = recon::dequantize(level, mul4[pos]);
+        })?;
+        mb.nnz_y[cell.by * 4 + cell.bx] = count as u8;
+        let (x, y) = (mx * 16 + cell.bx * 4, span.at(cell.by * 4));
+        if count == 1 && block[0] != 0 {
+            recon::add_dc(
+                &mut pic.y,
+                pic.w,
+                (x, y, span.step),
+                (block[0] + 32) >> 6,
+                4,
+            );
+        } else {
+            recon::add_idct4_full(&mut pic.y, pic.w, x, y, &mut block, span.step);
+        }
+    }
+    Ok(())
+}
+
+/// The chroma residual of a macroblock of a 4:2:0 picture that is not
+/// macroblock-adaptive, under CABAC, added to its prediction: what
+/// [`read_chroma_into`] and [`recon_chroma`] do, with the AC levels scaled
+/// by the chroma multipliers of `scales` as they are read and put in
+/// raster order, and each block's left and upper level counts taken from
+/// the neighbours found once, as FFmpeg's caches do. `cbp` is the chroma
+/// coded block pattern, 1 or 2, and `scales` are those of the
+/// macroblock's kind; the transform is not bypassed.
+fn chroma_scaled<S: Sample>(
+    pic: &mut Frame<S>,
+    cab: &mut Cabac<'_>,
+    at: Place,
+    mb: &mut Mb,
+    cbp: u8,
+    scales: &QpScale,
+) -> Result<(), CodecError> {
+    let QpScale {
+        chroma_qp: qps,
+        chroma: muls,
+        chroma_dc: dc_weights,
+        ..
+    } = scales;
+    let Place { mx, my } = at;
+    let field = mb.field_mb || pic.field;
+    // The neighbours, found once for every flag's context. Outside
+    // macroblock-adaptive frames they are the macroblocks to the left and
+    // above.
+    let left_mb = neighbor(pic, mx as i32 - 1, my as i32, mb.slice);
+    let above_mb = neighbor(pic, mx as i32, above_my(pic, mx, my), mb.slice);
+    let missing = u8::from(mb.intra);
+    let dc_flag = |near: Option<&Mb>, which: usize| match near {
+        None => usize::from(missing),
+        Some(near) if near.pcm => 1,
+        Some(near) => usize::from(near.cbp >> 4 != 0 && near.dc_c[which]),
+    };
+    let mut dc = [[0i32; 4]; 2];
+    for (which, levels) in dc.iter_mut().enumerate() {
+        let inc = dc_flag(left_mb, which) + 2 * dc_flag(above_mb, which);
+        if cab.decision(CBF_BASE[3] + inc)? == 1 {
+            mb.dc_c[which] = true;
+            cabac_levels(cab, (3, 4), field, |n, level| levels[n] = level)?;
+        }
+    }
+    // The counts beside the left column and above the top row.
+    let side = |near: Option<&Mb>, base: usize, first: usize, second: usize| match near {
+        Some(near) if near.pcm => [16, 16],
+        Some(near) => [near.nnz_c[base + first], near.nnz_c[base + second]],
+        None => [missing; 2],
+    };
+    let sides = [
+        (side(left_mb, 0, 1, 3), side(above_mb, 0, 2, 3)),
+        (side(left_mb, 16, 1, 3), side(above_mb, 16, 2, 3)),
+    ];
+    // The DC levels come first, so each AC block is finished and added as
+    // soon as it is read; a block with no AC levels gets its DC alone.
+    let span = chroma_span(my, 8, mb.field_mb);
+    let stride = pic.w / 2;
+    let mut scaled = [[0i32; 4]; 2];
+    for which in 0..2 {
+        if dc[which] != [0; 4] {
+            let [c0, c1, c2, c3] = dc[which];
+            scaled[which] = recon::chroma_dc(c0, c1, c2, c3, qps[which], dc_weights[which]);
+        }
+    }
+    let origin = |i: usize| (mx * 8 + (i & 1) * 4, span.at((i >> 1) * 4), span.step);
+    if cbp != 2 {
+        for (which, scaled) in scaled.iter().enumerate() {
+            if dc[which] == [0; 4] {
+                continue;
+            }
+            let plane = if which == 0 { &mut pic.u } else { &mut pic.v };
+            // All four blocks at once, as only their DC levels are there.
+            let dcs = scaled.map(|value| (value + 32) >> 6);
+            let (x, y, step) = origin(0);
+            if S::add_dc_quads_fast(plane, y * stride + x, stride * step, dcs) {
+                continue;
+            }
+            for (i, &dc) in dcs.iter().enumerate() {
+                recon::add_dc(plane, stride, origin(i), dc, 4);
+            }
+        }
+        return Ok(());
+    }
+    let scan = scan4(field);
+    for which in 0..2 {
+        let base = which * 16;
+        let (left, above) = sides[which];
+        let mul = &muls[which];
+        for (i, &dc) in scaled[which].iter().enumerate() {
+            let (bx, by) = (i & 1, i >> 1);
+            let l = if bx > 0 {
+                mb.nnz_c[base + by * 2]
+            } else {
+                left[by]
+            };
+            let a = if by > 0 {
+                mb.nnz_c[base + bx]
+            } else {
+                above[bx]
+            };
+            let plane = if which == 0 { &mut pic.u } else { &mut pic.v };
+            if cab.decision(CBF_BASE[4] + usize::from(l > 0) + 2 * usize::from(a > 0))? == 0 {
+                recon::add_dc(plane, stride, origin(i), (dc + 32) >> 6, 4);
+                continue;
+            }
+            let mut block = [0i32; 16];
+            let count = cabac_levels(cab, (4, 15), field, |n, level| {
+                let pos = scan[n + 1];
+                block[pos] = recon::dequantize(level, mul[pos]);
+            })?;
+            mb.nnz_c[base + by * 2 + bx] = count as u8;
+            block[0] = dc;
+            let (x, y, step) = origin(i);
+            recon::add_idct4_full(plane, stride, x, y, &mut block, step);
+        }
+    }
+    Ok(())
+}
+
+/// Which of the macroblocks an intra macroblock predicts from are there:
+/// in its slice and, under constrained intra prediction, intra.
+#[derive(Clone, Copy)]
+struct IntraNear {
+    left: bool,
+    above: bool,
+    above_right: bool,
+    above_left: bool,
+}
+
+impl IntraNear {
+    /// Outside a macroblock-adaptive frame each is one macroblock away.
+    fn find<S: Sample>(
+        pic: &Frame<S>,
+        (mx, my): (usize, usize),
+        slice: u16,
+        constrained: bool,
+    ) -> Self {
+        let there = |dx: i32, dy: i32| {
+            neighbor(pic, mx as i32 + dx, my as i32 + dy, slice)
+                .is_some_and(|mb| !constrained || mb.intra)
+        };
+        Self {
+            left: there(-1, 0),
+            above: there(0, -1),
+            above_right: there(1, -1),
+            above_left: there(-1, -1),
+        }
+    }
+}
+
+/// Whether [`intra_frame_scaled`] takes an intra macroblock at `qp`.
+fn intra_frame_fast<S: Sample>(pic: &Frame<S>, slice: &Slice<'_>, mb: &Mb, qp: i32) -> bool {
+    !pic.mbaff
+        && !pic.field
+        && !mb.field_mb
+        && pic.chroma() == 1
+        && !pic.separate_plane
+        && pic.levels.is_empty()
+        && !mb.si
+        && !qp_bypass::<S>(slice, qp)
+}
+
+/// The residual of an intra macroblock of a 4:2:0 frame that is not
+/// macroblock-adaptive, under CABAC, read and added with its prediction:
+/// what reading the levels into [`Coeffs`] and [`recon_intra`] do. Each
+/// block is predicted, its levels read already scaled by `muls` into
+/// raster order and added at once, as FFmpeg does; and which neighbouring
+/// macroblocks a prediction may use is found once for the macroblock, not
+/// for each block. The coded block pattern and modes are in `mb`; `i16`
+/// holds an Intra_16x16 prediction mode.
+#[allow(clippy::too_many_arguments)]
+fn intra_frame_scaled<S: Sample>(
+    pic: &mut Frame<S>,
+    cab: &mut Cabac<'_>,
+    slice: &Slice<'_>,
+    at: Place,
+    mb: &mut Mb,
+    i16: Option<u8>,
+    qp: i32,
+    scales: &QpScale,
+) -> Result<(), CodecError> {
+    let (mul4, mul8) = (&scales.mul4, &scales.mul8);
+    let Place { mx, my } = at;
+    let near = IntraNear::find(pic, (mx, my), mb.slice, slice.pps.constrained_intra);
+    let (x0, y0, stride) = (mx * 16, my * 16, pic.w);
+    let luma_cbp = mb.cbp & 15;
+    let chroma_cbp = mb.cbp >> 4;
+    // The level counts beside the left column and above the top row, for
+    // the coded block flags' contexts. A missing neighbour counts as coded
+    // for an intra macroblock.
+    let side = |near: Option<&Mb>, slots: [usize; 4]| match near {
+        Some(near) if near.pcm => [16; 4],
+        Some(near) => slots.map(|slot| near.nnz_y[slot]),
+        None => [1; 4],
+    };
+    let left_counts = side(
+        neighbor(pic, mx as i32 - 1, my as i32, mb.slice),
+        [3, 7, 11, 15],
+    );
+    let above_counts = side(
+        neighbor(pic, mx as i32, my as i32 - 1, mb.slice),
+        [12, 13, 14, 15],
+    );
+    let cbf_inc = |mb: &Mb, bx: usize, by: usize| {
+        let l = if bx > 0 {
+            mb.nnz_y[by * 4 + bx - 1]
+        } else {
+            left_counts[by]
+        };
+        let a = if by > 0 {
+            mb.nnz_y[(by - 1) * 4 + bx]
+        } else {
+            above_counts[bx]
+        };
+        usize::from(l > 0) + 2 * usize::from(a > 0)
+    };
+    let scan = scan4(false);
+    if let Some(mode) = i16 {
+        let edges = (near.above, near.left);
+        if !S::pred16_fast(&mut pic.y, y0 * stride + x0, stride, mode, edges) {
+            let mut above = [S::mid(); 16];
+            let mut left = [S::mid(); 16];
+            if near.above {
+                let at = (y0 - 1) * stride + x0;
+                above.copy_from_slice(&pic.y[at..at + 16]);
+            }
+            if near.left {
+                for (row, sample) in left.iter_mut().enumerate() {
+                    *sample = pic.y[(y0 + row) * stride + x0 - 1];
+                }
+            }
+            let corner = if near.above && near.left {
+                pic.y[(y0 - 1) * stride + x0 - 1]
+            } else {
+                S::mid()
+            };
+            let pred = recon::pred16(mode, &above, &left, near.above, near.left, corner);
+            put_block(&mut pic.y, stride, x0, y0, &pred, 16, 1);
+        }
+        let mut levels = [0i32; 16];
+        let inc = cbf_dc_plane(pic, mx, my, mb, 0);
+        if cab.decision(CBF_BASE[0] + inc)? == 1 {
+            mb.dc_coded = true;
+            cabac_levels(cab, (0, 16), false, |n, level| levels[n] = level)?;
+        }
+        let dc = recon::luma_dc(
+            &luma_dc_raster(&levels, false),
+            qp + S::QP_BD,
+            i32::from(slice.pps.weight4[0][0]),
+        );
+        for i in 0..16 {
+            let (bx, by) = (blk_x(i), blk_y(i));
+            let (x, y) = (x0 + bx * 4, y0 + by * 4);
+            let own = dc[by * 4 + bx];
+            let mut block = [0i32; 16];
+            let mut count = 0;
+            if luma_cbp != 0 && cab.decision(CBF_BASE[1] + cbf_inc(mb, bx, by))? == 1 {
+                count = cabac_levels(cab, (1, 15), false, |n, level| {
+                    let pos = scan[n + 1];
+                    block[pos] = recon::dequantize(level, mul4[pos]);
+                })?;
+                mb.nnz_y[by * 4 + bx] = count as u8;
+            }
+            if count == 0 {
+                // A lone DC is one value for the whole block.
+                recon::add_dc(&mut pic.y, stride, (x, y, 1), (own + 32) >> 6, 4);
+            } else {
+                block[0] = own;
+                recon::add_idct4_full(&mut pic.y, stride, x, y, &mut block, 1);
+            }
+        }
+    } else if mb.transform8 {
+        for i in 0..4 {
+            let (bx, by) = ((i & 1) * 2, (i >> 1) * 2);
+            let (x, y) = (x0 + bx * 4, y0 + by * 4);
+            let above_ok = by > 0 || near.above;
+            let left_ok = bx > 0 || near.left;
+            // The samples above and right: over the macroblock above, the
+            // one above and right, the upper right quarter, or not yet
+            // decoded.
+            let above_right = match i {
+                0 => near.above,
+                1 => near.above_right,
+                2 => true,
+                _ => false,
+            };
+            // The corner: over the macroblock above and left, the one
+            // above, the one left, or inside this one.
+            let corner_ok = match i {
+                0 => near.above_left,
+                1 => near.above,
+                2 => near.left,
+                _ => true,
+            };
+            let mode = mb.mode4[by * 4 + bx];
+            let edges = cutlass_h264_kernels::intra::Near8 {
+                above: above_ok,
+                above_right,
+                left: left_ok,
+                corner: corner_ok,
+            };
+            if !S::pred8_fast(&mut pic.y, y * stride + x, stride, mode, edges) {
+                let mut raw_above = [S::mid(); 16];
+                let mut raw_left = [S::mid(); 8];
+                if above_ok {
+                    let at = (y - 1) * stride + x;
+                    raw_above[..8].copy_from_slice(&pic.y[at..at + 8]);
+                    if above_right {
+                        raw_above[8..].copy_from_slice(&pic.y[at + 8..at + 16]);
+                    } else {
+                        let edge = raw_above[7];
+                        raw_above[8..].fill(edge);
+                    }
+                }
+                if left_ok {
+                    for (row, sample) in raw_left.iter_mut().enumerate() {
+                        *sample = pic.y[(y + row) * stride + x - 1];
+                    }
+                }
+                let corner = if corner_ok {
+                    pic.y[(y - 1) * stride + x - 1]
+                } else {
+                    S::mid()
+                };
+                let pred = pred8_from(
+                    mode,
+                    (&raw_above, &raw_left, corner),
+                    (above_ok, left_ok, corner_ok),
+                );
+                put_block(&mut pic.y, stride, x, y, &pred, 8, 1);
+            }
+            if luma_cbp & (1 << i) == 0 {
+                continue;
+            }
+            // 4:2:0 leaves out the luma 8×8 coded_block_flag.
+            let mut block = [0i32; 64];
+            let scan = scan8(false);
+            let count = cabac_levels(cab, (5, 64), false, |n, level| {
+                let pos = scan[n];
+                block[pos] = recon::dequantize(level, mul8[pos]);
+            })?;
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    mb.nnz_y[(by + dy) * 4 + bx + dx] = count as u8;
+                }
+            }
+            if count == 1 && block[0] != 0 {
+                recon::add_dc(&mut pic.y, stride, (x, y, 1), (block[0] + 32) >> 6, 8);
+            } else {
+                recon::add_idct8_full(&mut pic.y, stride, x, y, &mut block, 1);
+            }
+        }
+    } else {
+        for i in 0..16 {
+            let (bx, by) = (blk_x(i), blk_y(i));
+            let (x, y) = (x0 + bx * 4, y0 + by * 4);
+            let above_ok = by > 0 || near.above;
+            let left_ok = bx > 0 || near.left;
+            let above_right = if by == 0 {
+                if bx == 3 {
+                    near.above_right
+                } else {
+                    near.above
+                }
+            } else {
+                bx < 3 && scan_of(bx + 1, by - 1) < scan_of(bx, by)
+            };
+            let mode = mb.mode4[by * 4 + bx];
+            let edges = cutlass_h264_kernels::intra::Near4 {
+                above: above_ok,
+                above_right,
+                left: left_ok,
+            };
+            if !S::pred4_fast(&mut pic.y, y * stride + x, stride, mode, edges) {
+                let mut above = [S::mid(); 8];
+                let mut left = [S::mid(); 4];
+                if above_ok {
+                    let at = (y - 1) * stride + x;
+                    above[..4].copy_from_slice(&pic.y[at..at + 4]);
+                    if above_right {
+                        above[4..].copy_from_slice(&pic.y[at + 4..at + 8]);
+                    } else {
+                        let edge = above[3];
+                        above[4..].fill(edge);
+                    }
+                }
+                if left_ok {
+                    for (row, sample) in left.iter_mut().enumerate() {
+                        *sample = pic.y[(y + row) * stride + x - 1];
+                    }
+                }
+                let corner = if above_ok && left_ok {
+                    pic.y[(y - 1) * stride + x - 1]
+                } else if above_ok {
+                    above[0]
+                } else if left_ok {
+                    left[0]
+                } else {
+                    S::mid()
+                };
+                let pred = recon::pred4(mode, &above, &left, corner, above_ok, left_ok);
+                put_block(&mut pic.y, stride, x, y, &pred, 4, 1);
+            }
+            if luma_cbp & (1 << ((by / 2) * 2 + bx / 2)) == 0
+                || cab.decision(CBF_BASE[2] + cbf_inc(mb, bx, by))? == 0
+            {
+                continue;
+            }
+            let mut block = [0i32; 16];
+            let count = cabac_levels(cab, (2, 16), false, |n, level| {
+                let pos = scan[n];
+                block[pos] = recon::dequantize(level, mul4[pos]);
+            })?;
+            mb.nnz_y[by * 4 + bx] = count as u8;
+            if count == 1 && block[0] != 0 {
+                recon::add_dc(&mut pic.y, stride, (x, y, 1), (block[0] + 32) >> 6, 4);
+            } else {
+                recon::add_idct4_full(&mut pic.y, stride, x, y, &mut block, 1);
+            }
+        }
+    }
+    // Chroma: both planes predicted, then their levels read and added.
+    let (cx, cy, chroma_stride) = (mx * 8, my * 8, pic.w / 2);
+    for cb in [true, false] {
+        let plane = if cb { &mut pic.u } else { &mut pic.v };
+        let edges = (near.above, near.left);
+        if S::pred_chroma_fast(
+            plane,
+            cy * chroma_stride + cx,
+            chroma_stride,
+            mb.chroma_mode,
+            edges,
+        ) {
+            continue;
+        }
+        let mut above = [S::mid(); 8];
+        let mut left = [S::mid(); 8];
+        if near.above {
+            let at = (cy - 1) * chroma_stride + cx;
+            above.copy_from_slice(&plane[at..at + 8]);
+        }
+        if near.left {
+            for (row, sample) in left.iter_mut().enumerate() {
+                *sample = plane[(cy + row) * chroma_stride + cx - 1];
+            }
+        }
+        let corner = if near.above && near.left {
+            plane[(cy - 1) * chroma_stride + cx - 1]
+        } else {
+            S::mid()
+        };
+        let pred = recon::pred_chroma(mb.chroma_mode, &above, &left, near.above, near.left, corner);
+        put_block(plane, chroma_stride, cx, cy, &pred, 8, 1);
+    }
+    if chroma_cbp != 0 {
+        chroma_scaled(pic, cab, at, mb, chroma_cbp, scales)?;
     }
     Ok(())
 }
@@ -4040,17 +5276,17 @@ fn qp_bypass<S: Sample>(slice: &Slice<'_>, qp: i32) -> bool {
     slice.sps.bypass && qp + S::QP_BD == 0
 }
 
-fn place4(coeffs: &[i32]) -> [i32; 16] {
+fn place4(coeffs: &[i32], field: bool) -> [i32; 16] {
     let mut block = [0i32; 16];
-    for (index, &pos) in ZIGZAG4.iter().enumerate() {
+    for (index, &pos) in scan4(field).iter().enumerate() {
         block[pos] = coeffs.get(index).copied().unwrap_or(0);
     }
     block
 }
 
-fn place8(coeffs: &[i32]) -> [i32; 64] {
+fn place8(coeffs: &[i32], field: bool) -> [i32; 64] {
     let mut block = [0i32; 64];
-    for (index, &pos) in ZIGZAG8.iter().enumerate() {
+    for (index, &pos) in scan8(field).iter().enumerate() {
         block[pos] = coeffs.get(index).copied().unwrap_or(0);
     }
     block
@@ -4079,8 +5315,8 @@ fn prefix_residual(block: &mut [i32], width: usize, height: usize, horizontal: b
     }
 }
 
-fn i16_bypass(dc: &[i32; 16], ac: &[[i32; 16]; 16], coded: bool) -> [i32; 256] {
-    let raster = luma_dc_raster(dc);
+fn i16_bypass(dc: &[i32; 16], ac: &[[i32; 16]; 16], coded: bool, field: bool) -> [i32; 256] {
+    let raster = luma_dc_raster(dc, field);
     let mut out = [0i32; 256];
     for (i, samples) in ac.iter().enumerate() {
         let bx = blk_x(i);
@@ -4090,7 +5326,7 @@ fn i16_bypass(dc: &[i32; 16], ac: &[[i32; 16]; 16], coded: bool) -> [i32; 256] {
         if coded {
             coeffs[1..].copy_from_slice(&samples[..15]);
         }
-        let block = place4(&coeffs);
+        let block = place4(&coeffs, field);
         for y in 0..4 {
             for x in 0..4 {
                 out[(by * 4 + y) * 16 + bx * 4 + x] = block[y * 4 + x];
@@ -4106,11 +5342,11 @@ fn add_i16_bypass<S: Sample>(
     origin: (usize, usize, usize),
     dc: &[i32; 16],
     ac: &[[i32; 16]; 16],
-    flags: (bool, u8),
+    flags: (bool, u8, bool),
 ) {
     let (x0, y0, step) = origin;
-    let (coded, mode) = flags;
-    let mut residual = i16_bypass(dc, ac, coded);
+    let (coded, mode, field) = flags;
+    let mut residual = i16_bypass(dc, ac, coded, field);
     if mode == 0 || mode == 1 {
         prefix_residual(&mut residual, 16, 16, mode == 1);
     }
@@ -4123,7 +5359,8 @@ fn add_chroma_bypass<S: Sample>(
     origin: (usize, usize, usize),
     levels: (&[i32], &[[i32; 16]]),
     shape: (usize, usize, usize),
-    intra_mode: Option<u8>,
+    // The intra chroma mode, and whether the coefficients are in field order.
+    (intra_mode, field): (Option<u8>, bool),
 ) {
     let (dc, ac) = levels;
     let (blocks, width, height) = shape;
@@ -4144,7 +5381,7 @@ fn add_chroma_bypass<S: Sample>(
         if let Some(block) = ac.get(i) {
             coeffs[1..].copy_from_slice(&block[..15]);
         }
-        let levels = place4(&coeffs);
+        let levels = place4(&coeffs, field);
         for y in 0..4 {
             for x in 0..4 {
                 residual[(by * 4 + y) * width + bx * 4 + x] = levels[y * 4 + x];
@@ -4192,14 +5429,18 @@ fn recon_intra<S: Sample>(
         cr_dc,
         cb_ac,
         cr_ac,
+        used,
     } = chroma;
     let x0 = mx * 16;
     let span = luma_span(my, mb.field_mb);
     let y0 = span.y;
     let step = span.step;
+    // A field macroblock's coefficients, and a field picture's, are in field order.
+    let field = mb.field_mb || pic.field;
+    let scan = scan4(field);
     // Neighbours inside this macroblock are already reconstructed. Publish it
     // before those samples are read back, so availability sees this slice.
-    pic.mb[my * pic.mb_w + mx] = mb.clone();
+    pic.mb[my * pic.mb_w + mx] = *mb;
     if i16 {
         let (above, left, above_ok, left_ok) =
             edge16(pic, mx, my, mb.slice, slice.pps.constrained_intra, 0);
@@ -4220,44 +5461,46 @@ fn recon_intra<S: Sample>(
                 (x0, y0, step),
                 &luma_dc,
                 ac,
-                (mb.cbp & 15 != 0, mode16),
+                (mb.cbp & 15 != 0, mode16, field),
             );
         } else {
             let dc = recon::luma_dc(
-                &luma_dc_raster(&luma_dc),
+                &luma_dc_raster(&luma_dc, field),
                 qp + S::QP_BD,
                 i32::from(slice.pps.weight4[0][0]),
             );
             for (i, samples) in ac.iter().enumerate() {
                 let bx = blk_x(i);
                 let by = blk_y(i);
-                let mut coeffs = [0i32; 16];
-                if mb.cbp & 15 != 0 {
-                    coeffs[1..].copy_from_slice(&samples[..15]);
+                // The levels that are not zero; none were read when the
+                // coded block pattern leaves luma out.
+                let set = if mb.cbp & 15 != 0 {
+                    super::level_set(&samples[..15])
+                } else {
+                    0
+                };
+                let own = dc[by * 4 + bx];
+                if set == 0 {
+                    // A lone DC is one value for the whole block.
+                    let origin = (x0 + bx * 4, span.at(by * 4), step);
+                    recon::add_dc(&mut pic.y, pic.w, origin, (own + 32) >> 6, 4);
+                    continue;
                 }
                 let mut block = [0i32; 16];
-                for n in 0..16 {
-                    let pos = ZIGZAG4[n];
+                block[0] = own;
+                // A zero level scales to zero.
+                for n in super::set_places(set) {
+                    let pos = scan[n + 1];
                     let (ry, rx) = (pos / 4, pos % 4);
-                    let level = if n == 0 { dc[by * 4 + bx] } else { coeffs[n] };
                     let weight = i32::from(slice.pps.weight4[0][pos]);
-                    block[ry * 4 + rx] = if n == 0 {
-                        level
-                    } else {
-                        recon::scale4(level, qp + S::QP_BD, rx, ry, weight)
-                    };
+                    block[pos] = recon::scale4(samples[n], qp + S::QP_BD, rx, ry, weight);
                 }
-                if mb.cbp & 15 == 0 {
-                    block[0] = dc[by * 4 + bx];
-                }
-                recon::idct4(&mut block);
-                recon::add_block(
+                recon::add_idct4_full(
                     &mut pic.y,
                     pic.w,
                     x0 + bx * 4,
                     span.at(by * 4),
-                    &block,
-                    4,
+                    &mut block,
                     step,
                 );
             }
@@ -4278,10 +5521,15 @@ fn recon_intra<S: Sample>(
                 0,
             );
             put_block(&mut pic.y, pic.w, x0 + bx, span.at(by), &pred, 8, step);
+            // A block the coded block pattern leaves out was not read and
+            // holds no levels.
+            if mb.cbp & (1 << i) == 0 {
+                continue;
+            }
             let mode = mb.mode4[(by / 4) * 4 + bx / 4];
             let bypass = qp_bypass::<S>(slice, qp);
             if bypass && (mode == 0 || mode == 1) {
-                let mut block = place8(samples);
+                let mut block = place8(samples, field);
                 prefix_residual(&mut block, 8, 8, mode == 1);
                 recon::add_block(&mut pic.y, pic.w, x0 + bx, span.at(by), &block, 8, step);
             } else {
@@ -4292,7 +5540,7 @@ fn recon_intra<S: Sample>(
                     samples,
                     (qp, bypass),
                     &slice.pps.weight8[0],
-                    8,
+                    (8, field),
                 );
             }
         }
@@ -4317,10 +5565,14 @@ fn recon_intra<S: Sample>(
                 4,
                 step,
             );
+            // As for the 8×8 blocks: nothing was read for this quarter.
+            if mb.cbp & (1 << ((by / 2) * 2 + bx / 2)) == 0 {
+                continue;
+            }
             let mode = mb.mode4[by * 4 + bx];
             let bypass = qp_bypass::<S>(slice, qp);
             if bypass && (mode == 0 || mode == 1) {
-                let mut block = place4(samples);
+                let mut block = place4(samples, field);
                 prefix_residual(&mut block, 4, 4, mode == 1);
                 recon::add_block(
                     &mut pic.y,
@@ -4339,7 +5591,7 @@ fn recon_intra<S: Sample>(
                     samples,
                     (qp, bypass),
                     &slice.pps.weight4[0],
-                    4,
+                    (4, field),
                 );
             }
         }
@@ -4355,6 +5607,7 @@ fn recon_intra<S: Sample>(
                 cr_dc,
                 cb_ac,
                 cr_ac,
+                used,
             },
             (qp, true, mb.slice),
             true,
@@ -4362,10 +5615,10 @@ fn recon_intra<S: Sample>(
     }
 }
 
-fn luma_dc_raster(scan: &[i32; 16]) -> [i32; 16] {
+fn luma_dc_raster(levels: &[i32; 16], field: bool) -> [i32; 16] {
     let mut out = [0i32; 16];
-    for i in 0..16 {
-        out[ZIGZAG4[i]] = scan[i];
+    for (&pos, &level) in scan4(field).iter().zip(levels) {
+        out[pos] = level;
     }
     out
 }
@@ -4400,30 +5653,18 @@ fn pred4_block<S: Sample>(
     let above_ok = row_ok(pic, ax, ay as i32 - 1, mb.slice, constrained, here);
     let left_ok = col_ok(pic, ax as i32 - 1, ay, mb.slice, constrained, here);
     if above_ok {
-        for (k, slot) in above[..4].iter_mut().enumerate() {
-            *slot = pix(samples, stride, height, (ax * 4 + k) as i32, row0 - down);
-        }
-        let right_ok = above_right_ok(pic, mx, my, bx, by, mb.slice, constrained);
-        let fill = above[3];
-        for (k, slot) in above[4..].iter_mut().enumerate() {
-            let x = ax * 4 + k + 4;
-            *slot = if right_ok {
-                pix(samples, stride, height, x as i32, row0 - down)
-            } else {
-                fill
-            };
+        let x = ax as i32 * 4;
+        if above_right_ok(pic, mx, my, bx, by, mb.slice, constrained) {
+            read_row(samples, stride, height, x, row0 - down, &mut above);
+        } else {
+            read_row(samples, stride, height, x, row0 - down, &mut above[..4]);
+            let fill = above[3];
+            above[4..].fill(fill);
         }
     }
     if left_ok {
-        for (k, slot) in left.iter_mut().enumerate() {
-            *slot = pix(
-                samples,
-                stride,
-                height,
-                ax as i32 * 4 - 1,
-                row0 + k as i32 * down,
-            );
-        }
+        let from = (ax as i32 * 4 - 1, row0, down);
+        read_col(samples, stride, height, from, &mut left);
     }
     let corner = if above_ok && left_ok {
         pix(samples, stride, height, ax as i32 * 4 - 1, row0 - down)
@@ -4480,19 +5721,7 @@ fn pred8_block<S: Sample>(
         here,
     );
     if above_ok {
-        for (k, slot) in raw_above[..8].iter_mut().enumerate() {
-            *slot = pix(samples, stride, height, x + k as i32, y - down);
-        }
-        // Clause 8.3.2.2: p[8..15, -1] that are not yet constructed take p[7, -1].
-        let fill = raw_above[7];
-        let right = above8_right(pic, x, y, down, mb.slice, constrained);
-        for (k, slot) in raw_above[8..].iter_mut().enumerate() {
-            *slot = if right {
-                pix(samples, stride, height, x + 8 + k as i32, y - down)
-            } else {
-                fill
-            };
-        }
+        read_row(samples, stride, height, x, y - down, &mut raw_above[..8]);
         // Clause 8.3.2.2: when p[8..15, -1] are not available, they take p[7, -1]
         // before the clause 8.3.2.2.1 filter. That block is the one to the upper right.
         let upper_right = |dx: usize| {
@@ -4506,39 +5735,119 @@ fn pred8_block<S: Sample>(
             )
         };
         if upper_right(0) && upper_right(1) {
-            for (k, slot) in raw_above[8..].iter_mut().enumerate() {
-                *slot = pix(&pic.y, pic.w, pic.h, x + 8 + k as i32, y - 1);
-            }
+            read_row(
+                samples,
+                stride,
+                height,
+                x + 8,
+                y - down,
+                &mut raw_above[8..],
+            );
         } else {
             let edge = raw_above[7];
             raw_above[8..].fill(edge);
         }
     }
     if left_ok {
-        for (k, slot) in raw_left.iter_mut().enumerate() {
-            *slot = pix(samples, stride, height, x - 1, y + k as i32 * down);
-        }
+        read_col(samples, stride, height, (x - 1, y, down), &mut raw_left);
     }
-    let corner = if above_ok && left_ok {
+    // The corner is there on its own terms: under constrained intra
+    // prediction, or past the start of a slice, the block above and left
+    // can be missing while those above and left are not.
+    let corner_ok = (mx * 4 + bx).checked_sub(1).is_some_and(|ax| {
+        row_ok(
+            pic,
+            ax,
+            (my * 4 + by) as i32 - 1,
+            mb.slice,
+            constrained,
+            here,
+        )
+    });
+    let corner = if corner_ok {
         pix(samples, stride, height, x - 1, y - down)
     } else {
         S::mid()
     };
-    let above = filter_row(&raw_above, corner, above_ok, left_ok);
-    let left = filter_col(&raw_left, corner, above_ok, left_ok);
-    let corner = if above_ok && left_ok {
-        avg3(raw_above[0], corner, raw_left[0])
-    } else {
-        corner
+    pred8_from(
+        mode,
+        (&raw_above, &raw_left, corner),
+        (above_ok, left_ok, corner_ok),
+    )
+}
+
+/// Clause 8.3.2: an 8×8 block of `mode` from the samples above it (with
+/// those above and to the right), left of it and at its corner, before
+/// the reference sample filter of clause 8.3.2.2.1, and whether those
+/// above, left and at the corner are there.
+fn pred8_from<S: Sample>(
+    mode: u8,
+    (raw_above, raw_left, corner): (&[S; 16], &[S; 8], S),
+    (above_ok, left_ok, corner_ok): (bool, bool, bool),
+) -> [S; 64] {
+    let above = filter_row(raw_above, corner, above_ok, corner_ok);
+    let left = filter_col(raw_left, corner, left_ok, corner_ok);
+    let corner = match (corner_ok, above_ok, left_ok) {
+        (true, true, true) => avg3(raw_above[0], corner, raw_left[0]),
+        (true, true, false) => avg3(corner, corner, raw_above[0]),
+        (true, false, true) => avg3(corner, corner, raw_left[0]),
+        _ => corner,
     };
+    // The three plain modes fill the block from one value or one edge; a
+    // mode whose edge is missing falls to DC, as in `pred8_at`.
     let mut out = [S::default(); 64];
-    for row in 0..8 {
-        for col in 0..8 {
-            out[row * 8 + col] =
-                pred8_at(mode, (col, row), &above, &left, corner, (above_ok, left_ok));
+    match mode {
+        0 if above_ok => {
+            for row in out.as_chunks_mut::<8>().0 {
+                row.copy_from_slice(&above[..8]);
+            }
         }
+        1 if left_ok => {
+            for (row, &sample) in out.as_chunks_mut::<8>().0.iter_mut().zip(&left) {
+                row.fill(sample);
+            }
+        }
+        3 | 7 if above_ok => fill8(&mut out, mode, &above, &left, corner, (above_ok, left_ok)),
+        4..=6 if above_ok && left_ok => {
+            fill8(&mut out, mode, &above, &left, corner, (above_ok, left_ok));
+        }
+        8 if left_ok => fill8(&mut out, mode, &above, &left, corner, (above_ok, left_ok)),
+        _ => out = [dc8(&above, &left, above_ok, left_ok); 64],
     }
     out
+}
+
+/// A directional 8×8 prediction whose edges are present. The mode is
+/// chosen once, so each sample's rule is worked out with its place known.
+fn fill8<S: Sample>(
+    out: &mut [S; 64],
+    mode: u8,
+    above: &[S; 16],
+    left: &[S; 8],
+    corner: S,
+    present: (bool, bool),
+) {
+    match mode {
+        3 => fill8_with(out, |x, y| pred8_down_left(x, y, above)),
+        4 => fill8_with(out, |x, y| pred8_down_right(x, y, above, left, corner)),
+        5 => fill8_with(out, |x, y| pred8_vertical_right(x, y, above, left, corner)),
+        6 => fill8_with(out, |x, y| pred8_horizontal_down(x, y, above, left, corner)),
+        7 => fill8_with(out, |x, y| pred8_vertical_left(x, y, above)),
+        8 => fill8_with(out, |x, y| pred8_horizontal_up(x, y, left)),
+        _ => fill8_with(out, |x, y| {
+            pred8_at(mode, (x, y), above, left, corner, present)
+        }),
+    }
+}
+
+/// Every sample of an 8×8 block from `at`, which takes its column and row.
+#[inline]
+fn fill8_with<S: Sample>(out: &mut [S; 64], at: impl Fn(usize, usize) -> S) {
+    for (row, samples) in out.as_chunks_mut::<8>().0.iter_mut().enumerate() {
+        for (col, sample) in samples.iter_mut().enumerate() {
+            *sample = at(col, row);
+        }
+    }
 }
 
 fn pred8_at<S: Sample>(
@@ -4706,35 +6015,15 @@ fn avg2<S: Sample>(a: S, b: S) -> S {
     S::clip((a + b + 1) >> 1)
 }
 
-/// The eight samples to the right of an Intra_8x8 block's above row.
-///
-/// They belong to one macroblock. A later macroblock in this slice is not
-/// constructed yet, so it is not a neighbour.
-fn above8_right<S: Sample>(
-    pic: &Frame<S>,
-    x: i32,
-    y: i32,
-    step: i32,
-    slice: u16,
-    constrained: bool,
-) -> bool {
-    let sx = x + 8;
-    let sy = y - step;
-    if sx < 0 || sy < 0 {
-        return false;
-    }
-    let Some(side) = neighbor(pic, sx / 16, sy / 16, slice) else {
-        return false;
-    };
-    !constrained || side.intra
-}
-
-fn filter_row<S: Sample>(raw: &[S; 16], corner: S, above_ok: bool, left_ok: bool) -> [S; 16] {
+/// The samples above an 8×8 block after the filter of clause 8.3.2.2.1:
+/// none when they are not there, and the first from `corner` only when
+/// that is there.
+fn filter_row<S: Sample>(raw: &[S; 16], corner: S, above_ok: bool, corner_ok: bool) -> [S; 16] {
     let mut out = *raw;
     if !above_ok {
         return out;
     }
-    let left = if left_ok { corner } else { raw[0] };
+    let left = if corner_ok { corner } else { raw[0] };
     out[0] = avg3(left, raw[0], raw[1]);
     for i in 1..15 {
         out[i] = avg3(raw[i - 1], raw[i], raw[i + 1]);
@@ -4743,12 +6032,14 @@ fn filter_row<S: Sample>(raw: &[S; 16], corner: S, above_ok: bool, left_ok: bool
     out
 }
 
-fn filter_col<S: Sample>(raw: &[S; 8], corner: S, above_ok: bool, left_ok: bool) -> [S; 8] {
+/// The samples left of an 8×8 block after that filter, as for
+/// [`filter_row`].
+fn filter_col<S: Sample>(raw: &[S; 8], corner: S, left_ok: bool, corner_ok: bool) -> [S; 8] {
     let mut out = *raw;
     if !left_ok {
         return out;
     }
-    let up = if above_ok { corner } else { raw[0] };
+    let up = if corner_ok { corner } else { raw[0] };
     out[0] = avg3(up, raw[0], raw[1]);
     for i in 1..7 {
         out[i] = avg3(raw[i - 1], raw[i], raw[i + 1]);
@@ -4798,6 +6089,7 @@ fn recon_chroma<S: Sample>(
         cr_dc,
         cb_ac,
         cr_ac,
+        used,
     } = paint;
     let (qp, intra, slice_id) = flags;
     let x0 = mx * 8;
@@ -4805,6 +6097,7 @@ fn recon_chroma<S: Sample>(
     let span = chroma_span(my, 8, field);
     let y0 = span.y;
     let step = span.step;
+    let scan = scan4(field || pic.field);
     let (qp_cb, _) = recon::chroma_qps(qp, slice.pps.chroma_qp_offset, S::QP_BD);
     let (qp_cr, _) = recon::chroma_qps(qp, slice.pps.second_chroma_qp_offset, S::QP_BD);
     // Intra chroma uses lists 1 and 2. Inter chroma uses lists 4 and 5.
@@ -4843,8 +6136,16 @@ fn recon_chroma<S: Sample>(
                 (x0, y0, step),
                 (dc, ac),
                 (4, 8, 8),
-                intra.then_some(mode),
+                (intra.then_some(mode), field || pic.field),
             );
+            continue;
+        }
+        // No coefficients in this plane: every block below would add zero.
+        // An array nothing was read into is known to be zero.
+        if used & DC_USED == 0
+            || (dc.iter().take(4).all(|&level| level == 0)
+                && (used & AC_USED == 0 || ac.iter().take(4).all(|block| block[..15] == [0; 15])))
+        {
             continue;
         }
         let weight = i32::from(slice.pps.weight4[list][0]);
@@ -4852,22 +6153,36 @@ fn recon_chroma<S: Sample>(
         for i in 0..4 {
             let bx = i & 1;
             let by = i >> 1;
-            let mut coeffs = [0i32; 16];
-            coeffs[1..].copy_from_slice(&ac[i][..15]);
-            let mut block = [0i32; 16];
-            for n in 0..16 {
-                let pos = ZIGZAG4[n];
-                let (ry, rx) = (pos / 4, pos % 4);
-                let level = if n == 0 { scaled[i] } else { coeffs[n] };
-                let w = i32::from(slice.pps.weight4[list][pos]);
-                block[ry * 4 + rx] = if n == 0 {
-                    level
-                } else {
-                    recon::scale4(level, qp_c, rx, ry, w)
-                };
+            // The levels that are not zero; none were read into an array
+            // that is not in use.
+            let set = if used & AC_USED != 0 {
+                super::level_set(&ac[i][..15])
+            } else {
+                0
+            };
+            if set == 0 {
+                // A lone DC is one value for the whole block.
+                let origin = (x0 + bx * 4, span.at(by * 4), step);
+                recon::add_dc(plane, stride, origin, (scaled[i] + 32) >> 6, 4);
+                continue;
             }
-            recon::idct4(&mut block);
-            recon::add_block(plane, stride, x0 + bx * 4, span.at(by * 4), &block, 4, step);
+            let mut block = [0i32; 16];
+            block[0] = scaled[i];
+            // A zero level scales to zero.
+            for n in super::set_places(set) {
+                let pos = scan[n + 1];
+                let (ry, rx) = (pos / 4, pos % 4);
+                let w = i32::from(slice.pps.weight4[list][pos]);
+                block[pos] = recon::scale4(ac[i][n], qp_c, rx, ry, w);
+            }
+            recon::add_idct4_full(
+                plane,
+                stride,
+                x0 + bx * 4,
+                span.at(by * 4),
+                &mut block,
+                step,
+            );
         }
     }
 }
@@ -4887,6 +6202,7 @@ fn recon_chroma422<S: Sample>(
         cr_dc,
         cb_ac,
         cr_ac,
+        ..
     } = paint;
     let (qp, intra, slice_id) = flags;
     let x0 = mx * 8;
@@ -4894,6 +6210,7 @@ fn recon_chroma422<S: Sample>(
     let span = chroma_span(my, 16, field);
     let y0 = span.y;
     let step = span.step;
+    let scan = scan4(field || pic.field);
     let (qp_cb, _) = recon::chroma_qps(qp, slice.pps.chroma_qp_offset, S::QP_BD);
     let (qp_cr, _) = recon::chroma_qps(qp, slice.pps.second_chroma_qp_offset, S::QP_BD);
     let base = if intra { 1 } else { 4 };
@@ -4937,7 +6254,7 @@ fn recon_chroma422<S: Sample>(
                 (x0, y0, step),
                 (dc, ac),
                 (8, 8, 16),
-                intra.then_some(mode),
+                (intra.then_some(mode), field || pic.field),
             );
             continue;
         }
@@ -4953,7 +6270,7 @@ fn recon_chroma422<S: Sample>(
             }
             let mut samples = [0i32; 16];
             for n in 0..16 {
-                let pos = ZIGZAG4[n];
+                let pos = scan[n];
                 let (ry, rx) = (pos / 4, pos % 4);
                 let level = if n == 0 {
                     scaled[by * 2 + bx]
@@ -5048,6 +6365,8 @@ fn paint_444<S: Sample>(
     let span = luma_span(my, mb.field_mb);
     let y0 = span.y;
     let step = span.step;
+    let field = mb.field_mb || pic.field;
+    let scan = scan4(field);
     if mb.intra16 {
         let mode = mode16.unwrap_or(2);
         let (above, left, above_ok, left_ok) =
@@ -5098,12 +6417,12 @@ fn paint_444<S: Sample>(
                 (x0, y0, step),
                 &dc,
                 &ac,
-                (mb.cbp & 15 != 0, mode),
+                (mb.cbp & 15 != 0, mode, field),
             );
             return Ok(());
         }
         let scaled = recon::luma_dc(
-            &luma_dc_raster(&dc),
+            &luma_dc_raster(&dc, field),
             qp_c,
             i32::from(slice.pps.weight4[list][0]),
         );
@@ -5116,7 +6435,7 @@ fn paint_444<S: Sample>(
             }
             let mut block = [0i32; 16];
             for n in 0..16 {
-                let pos = ZIGZAG4[n];
+                let pos = scan[n];
                 let (ry, rx) = (pos / 4, pos % 4);
                 let level = if n == 0 {
                     scaled[by * 4 + bx]
@@ -5176,7 +6495,7 @@ fn paint_444<S: Sample>(
                 let mode = mb.mode4[(by / 4) * 4 + bx / 4];
                 let (dest, dest_stride) = mutable_plane(pic, plane);
                 if bypass && intra && (mode == 0 || mode == 1) {
-                    let mut block = place8(samples);
+                    let mut block = place8(samples, field);
                     prefix_residual(&mut block, 8, 8, mode == 1);
                     recon::add_block(dest, dest_stride, x0 + bx, span.at(by), &block, 8, step);
                 } else {
@@ -5187,7 +6506,7 @@ fn paint_444<S: Sample>(
                         samples,
                         (qp_base, bypass),
                         &slice.pps.weight8[list],
-                        8,
+                        (8, field),
                     );
                 }
             }
@@ -5240,7 +6559,7 @@ fn paint_444<S: Sample>(
             let mode = mb.mode4[by * 4 + bx];
             let (dest, dest_stride) = mutable_plane(pic, plane);
             if bypass && intra && (mode == 0 || mode == 1) {
-                let mut block = place4(samples);
+                let mut block = place4(samples, field);
                 prefix_residual(&mut block, 4, 4, mode == 1);
                 recon::add_block(
                     dest,
@@ -5259,7 +6578,7 @@ fn paint_444<S: Sample>(
                     samples,
                     (qp_base, bypass),
                     &slice.pps.weight4[list],
-                    4,
+                    (4, field),
                 );
             }
         }
@@ -5291,14 +6610,15 @@ mod intra8 {
         let mb_w = width / 16;
         let mb_h = height / 16;
         Frame {
-            y: vec![0; width * height],
-            u: vec![128; (width / 2) * (height / 2)],
-            v: vec![128; (width / 2) * (height / 2)],
-            mb: vec![Mb::new(u16::MAX); mb_w * mb_h],
+            y: vec![0; width * height].into(),
+            u: vec![128; (width / 2) * (height / 2)].into(),
+            v: vec![128; (width / 2) * (height / 2)].into(),
+            mb: vec![Mb::new(u16::MAX); mb_w * mb_h].into(),
             w: width,
             h: height,
             mb_w,
             poc: 0,
+            field_poc: [0; 2],
             frame_num: 0,
             referenced: true,
             long_term: false,
@@ -5339,7 +6659,9 @@ mod intra8 {
             svc_top: 0,
             svc_right: 0,
             svc_bottom: 0,
-            levels: Vec::new(),
+            levels: Vec::new().into(),
+            pending: None,
+            writer: None,
         }
     }
 
@@ -5429,6 +6751,64 @@ mod intra8 {
             &current,
         );
         assert_eq!(pred, [0, 0]);
+    }
+
+    /// Clause 9.3.3.1.1.9. An 8×8 block's coded_block_flag looks at 8×8
+    /// blocks only: a neighbouring macroblock on the 4×4 transform counts as
+    /// 0 however many coefficients it holds, I_PCM counts as 1, and a missing
+    /// neighbour counts as 1 for an intra macroblock and 0 for an inter one.
+    #[test]
+    fn an_8x8_coded_block_flag_ignores_4x4_neighbours() {
+        let at = super::Place { mx: 1, my: 1 };
+        let corner = super::Cell { bx: 0, by: 0 };
+        let mut pic = frame(32, 32);
+        let mut current = Mb::new(3);
+        let inc = |pic: &Frame, current: &Mb, cell| super::cbf8_inc(pic, at, cell, current, 0);
+        assert_eq!(inc(&pic, &current, corner), 0, "inter, no neighbours");
+        current.intra = true;
+        assert_eq!(inc(&pic, &current, corner), 3, "intra, no neighbours");
+
+        let mut left = Mb::new(3);
+        left.nnz_y = [5; 16];
+        pic.mb[2] = left;
+        let mut above = Mb::new(3);
+        above.nnz_y = [5; 16];
+        pic.mb[1] = above;
+        assert_eq!(inc(&pic, &current, corner), 0, "4x4 neighbours");
+        pic.mb[2].transform8 = true;
+        assert_eq!(inc(&pic, &current, corner), 1, "8x8 block to the left");
+        pic.mb[1].transform8 = true;
+        assert_eq!(inc(&pic, &current, corner), 3, "8x8 blocks on both sides");
+        pic.mb[1].nnz_y = [0; 16];
+        assert_eq!(inc(&pic, &current, corner), 1, "empty 8x8 block above");
+        pic.mb[1].transform8 = false;
+        pic.mb[1].pcm = true;
+        assert_eq!(inc(&pic, &current, corner), 3, "I_PCM above");
+
+        // Inside the macroblock the neighbours are its own 8×8 blocks.
+        current.nnz_y[1] = 2;
+        current.nnz_y[4] = 0;
+        let inner = super::Cell { bx: 2, by: 2 };
+        assert_eq!(inc(&pic, &current, inner), 0);
+        current.nnz_y[2 * 4 + 1] = 1;
+        current.nnz_y[4 + 2] = 1;
+        assert_eq!(inc(&pic, &current, inner), 3);
+    }
+}
+
+#[cfg(test)]
+mod corner {
+    use super::corner_block;
+
+    #[test]
+    fn each_quarter_reads_its_own_corner() {
+        // Blocks are numbered `y * 4 + x`; the corners are 0, 3, 12 and 15.
+        let want = [0, 0, 3, 3, 0, 0, 3, 3, 12, 12, 15, 15, 12, 12, 15, 15];
+        for by in 0..4 {
+            for bx in 0..4 {
+                assert_eq!(corner_block(bx, by), want[by * 4 + bx], "block {bx},{by}");
+            }
+        }
     }
 }
 
@@ -5784,6 +7164,341 @@ mod oracle {
         if count != 0 {
             panic!("temporal mismatches {count} max {max} first {first:?}");
         }
+    }
+
+    /// B pictures whose direct blocks read a co-located macroblock split
+    /// smaller than 8×8. With `direct_8x8_inference_flag` the block read is
+    /// the corner one of each quarter, which differs from the quarter's
+    /// first block only for such macroblocks.
+    #[test]
+    fn direct_blocks_over_small_partitions_match_ffmpeg() {
+        let Some(ffmpeg) = ffmpeg() else {
+            eprintln!("skip: ffmpeg is not installed");
+            return;
+        };
+        for direct in ["spatial", "temporal"] {
+            let dir = std::env::temp_dir().join(format!("cutlass-h264-corner-{direct}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let coded = dir.join("corner.h264");
+            let yuv = dir.join("corner.yuv");
+            let tools = format!(
+                "partitions=all:bframes=3:direct={direct}:8x8dct=0:b-pyramid=none:scenecut=0:threads=1"
+            );
+            let encoded = Command::new(&ffmpeg)
+                .args([
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=320x240:rate=30",
+                    "-vf",
+                    "noise=alls=20:allf=t",
+                    "-frames:v",
+                    "12",
+                    "-c:v",
+                    "libx264",
+                    "-profile:v",
+                    "high",
+                    "-preset",
+                    "slow",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-b:v",
+                    "1500k",
+                    "-x264-params",
+                    &tools,
+                    "-f",
+                    "h264",
+                ])
+                .arg(&coded)
+                .status()
+                .unwrap();
+            assert!(encoded.success(), "ffmpeg encode failed");
+            let decoded = Command::new(&ffmpeg)
+                .args(["-y", "-i"])
+                .arg(&coded)
+                .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+                .arg(&yuv)
+                .status()
+                .unwrap();
+            assert!(decoded.success(), "ffmpeg decode failed");
+            let bytes = std::fs::read(&coded).unwrap();
+            let expected = std::fs::read(&yuv).unwrap();
+            let params = CodecParams::video(CodecId::H264, 320, 240);
+            let mut decoder = H264Decoder::open(&params).unwrap();
+            let mut got = Vec::new();
+            for unit in access_units(&bytes) {
+                let packet = Packet::video(unit, 0, 1, 30, false);
+                got.extend(pictures(&decoder.push(&packet).unwrap()));
+            }
+            got.extend(pictures(&decoder.drain().unwrap()));
+            assert_eq!(got.len(), expected.len(), "{direct}: picture bytes");
+            let wrong = got.iter().zip(&expected).filter(|(a, b)| a != b).count();
+            assert_eq!(wrong, 0, "{direct} direct: samples differ from ffmpeg");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// libx264 settings that between them reach most of what a frame
+    /// picture can hold. Each is encoded, decoded by ffmpeg and by this
+    /// decoder on one thread and on four, and every sample must agree.
+    ///
+    /// Interlaced settings are not here yet: this decoder rejects
+    /// libx264's interlaced streams, which is being fixed separately.
+    #[test]
+    fn many_encoder_settings_match_ffmpeg() {
+        let Some(ffmpeg) = ffmpeg() else {
+            eprintln!("skip: ffmpeg is not installed");
+            return;
+        };
+        const NOISE: &str = "noise=alls=14:allf=t";
+        const CLEAN: &str = "null";
+        // Name, picture size, filter over the test pattern, encoder options.
+        let settings: &[(&str, &str, &str, &[&str])] = &[
+            (
+                "ultrafast",
+                "320x240",
+                NOISE,
+                &["-preset", "ultrafast", "-b:v", "700k"],
+            ),
+            (
+                "veryfast",
+                "320x240",
+                NOISE,
+                &["-preset", "veryfast", "-b:v", "700k"],
+            ),
+            (
+                "medium",
+                "320x240",
+                NOISE,
+                &["-preset", "medium", "-b:v", "700k"],
+            ),
+            (
+                "slow",
+                "320x240",
+                NOISE,
+                &["-preset", "slow", "-b:v", "700k"],
+            ),
+            (
+                "veryslow",
+                "320x240",
+                NOISE,
+                &["-preset", "veryslow", "-b:v", "700k"],
+            ),
+            (
+                "baseline",
+                "320x240",
+                NOISE,
+                &["-profile:v", "baseline", "-b:v", "700k"],
+            ),
+            (
+                "main",
+                "320x240",
+                NOISE,
+                &["-profile:v", "main", "-b:v", "700k"],
+            ),
+            (
+                "cavlc",
+                "320x240",
+                NOISE,
+                &["-b:v", "700k", "-x264-params", "cabac=0"],
+            ),
+            (
+                "slices",
+                "320x240",
+                NOISE,
+                &["-b:v", "700k", "-x264-params", "slices=4"],
+            ),
+            (
+                "slices-cavlc",
+                "320x240",
+                NOISE,
+                &["-b:v", "700k", "-x264-params", "slices=3:cabac=0"],
+            ),
+            (
+                "many-refs",
+                "320x240",
+                NOISE,
+                &[
+                    "-preset",
+                    "slow",
+                    "-b:v",
+                    "700k",
+                    "-x264-params",
+                    "ref=8:bframes=5",
+                ],
+            ),
+            (
+                "strict-pyramid",
+                "320x240",
+                NOISE,
+                &[
+                    "-preset",
+                    "slow",
+                    "-b:v",
+                    "700k",
+                    "-x264-params",
+                    "b-pyramid=strict:bframes=4",
+                ],
+            ),
+            (
+                "no-weights",
+                "320x240",
+                NOISE,
+                &["-b:v", "700k", "-x264-params", "weightp=0:weightb=0"],
+            ),
+            (
+                "fade",
+                "320x240",
+                "fade=in:0:10,noise=alls=14:allf=t",
+                &[
+                    "-preset",
+                    "slow",
+                    "-b:v",
+                    "700k",
+                    "-x264-params",
+                    "weightp=2",
+                ],
+            ),
+            (
+                "temporal-direct",
+                "320x240",
+                NOISE,
+                &[
+                    "-preset",
+                    "slow",
+                    "-b:v",
+                    "700k",
+                    "-x264-params",
+                    "direct=temporal",
+                ],
+            ),
+            (
+                "small-partitions",
+                "320x240",
+                NOISE,
+                &[
+                    "-preset",
+                    "slow",
+                    "-b:v",
+                    "700k",
+                    "-x264-params",
+                    "partitions=all:8x8dct=0:direct=auto",
+                ],
+            ),
+            (
+                "no-deblock",
+                "320x240",
+                NOISE,
+                &["-b:v", "700k", "-x264-params", "no-deblock=1"],
+            ),
+            (
+                "deblock-offsets",
+                "320x240",
+                NOISE,
+                &["-b:v", "700k", "-x264-params", "deblock=-3,3"],
+            ),
+            ("low-qp", "320x240", NOISE, &["-qp", "8"]),
+            // Lossless noise can cost more bits than raw samples, so libx264
+            // writes a few macroblocks of the I picture as I_PCM, under CABAC.
+            ("lossless-pcm", "320x240", NOISE, &["-qp", "0"]),
+            ("high-qp", "320x240", NOISE, &["-qp", "44"]),
+            (
+                "intra-only",
+                "320x240",
+                NOISE,
+                &["-b:v", "1500k", "-x264-params", "keyint=1"],
+            ),
+            (
+                "clean",
+                "320x240",
+                CLEAN,
+                &["-preset", "slow", "-b:v", "300k"],
+            ),
+            ("cropped", "358x202", NOISE, &["-b:v", "700k"]),
+            ("tiny", "64x48", NOISE, &["-preset", "slow", "-b:v", "200k"]),
+            (
+                "wide",
+                "640x32",
+                NOISE,
+                &["-preset", "slow", "-b:v", "400k"],
+            ),
+            (
+                "tall",
+                "32x480",
+                NOISE,
+                &["-preset", "slow", "-b:v", "400k"],
+            ),
+            (
+                "constrained-intra",
+                "320x240",
+                NOISE,
+                &["-b:v", "700k", "-x264-params", "constrained-intra=1"],
+            ),
+            (
+                "open-gop",
+                "320x240",
+                NOISE,
+                &["-b:v", "700k", "-x264-params", "open-gop=1:keyint=8"],
+            ),
+        ];
+        let dir = std::env::temp_dir().join("cutlass-h264-settings");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, size, filter, options) in settings {
+            let coded = dir.join(format!("{name}.h264"));
+            let yuv = dir.join(format!("{name}.yuv"));
+            let source = format!("testsrc2=size={size}:rate=30");
+            let encoded = Command::new(&ffmpeg)
+                .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i", &source])
+                .args(["-vf", filter, "-frames:v", "14", "-c:v", "libx264"])
+                .args(["-pix_fmt", "yuv420p", "-threads", "1"])
+                .args(*options)
+                .args(["-f", "h264"])
+                .arg(&coded)
+                .status()
+                .unwrap();
+            assert!(encoded.success(), "{name}: ffmpeg encode failed");
+            let decoded = Command::new(&ffmpeg)
+                .args(["-y", "-loglevel", "error", "-i"])
+                .arg(&coded)
+                .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+                .arg(&yuv)
+                .status()
+                .unwrap();
+            assert!(decoded.success(), "{name}: ffmpeg decode failed");
+            let bytes = std::fs::read(&coded).unwrap();
+            let expected = std::fs::read(&yuv).unwrap();
+            let (width, height) = size.split_once('x').unwrap();
+            let params = CodecParams::video(
+                CodecId::H264,
+                width.parse().unwrap(),
+                height.parse().unwrap(),
+            );
+            for threads in [1, 4] {
+                let mut decoder = H264Decoder::open(&params).unwrap().with_threads(threads);
+                let mut got = Vec::new();
+                for unit in access_units(&bytes) {
+                    let packet = Packet::video(unit, 0, 1, 30, false);
+                    match decoder.push(&packet) {
+                        Ok(frames) => got.extend(pictures(&frames)),
+                        Err(error) => panic!("{name}, {threads} threads: {error:?}"),
+                    }
+                }
+                match decoder.drain() {
+                    Ok(frames) => got.extend(pictures(&frames)),
+                    Err(error) => panic!("{name}, {threads} threads: drain: {error:?}"),
+                }
+                assert_eq!(got.len(), expected.len(), "{name}, {threads} threads: size");
+                let wrong = got.iter().zip(&expected).filter(|(a, b)| a != b).count();
+                assert_eq!(
+                    wrong, 0,
+                    "{name}, {threads} threads: samples differ from ffmpeg"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -6480,6 +8195,37 @@ fn corner_sample<S: Sample>(
     pix(plane, stride, height, x, y)
 }
 
+/// The samples along one edge of a macroblock, at most 17 of them, held in
+/// place: an edge is gathered for every intra macroblock.
+struct Edge<S> {
+    samples: [S; 17],
+    len: usize,
+}
+
+impl<S: Sample> Edge<S> {
+    /// `len` samples of the mid value.
+    fn new(len: usize) -> Self {
+        Self {
+            samples: [S::mid(); 17],
+            len: len.min(17),
+        }
+    }
+}
+
+impl<S> std::ops::Deref for Edge<S> {
+    type Target = [S];
+
+    fn deref(&self) -> &[S] {
+        &self.samples[..self.len]
+    }
+}
+
+impl<S> std::ops::DerefMut for Edge<S> {
+    fn deref_mut(&mut self) -> &mut [S] {
+        &mut self.samples[..self.len]
+    }
+}
+
 fn edge16<S: Sample>(
     pic: &Frame<S>,
     mx: usize,
@@ -6487,7 +8233,7 @@ fn edge16<S: Sample>(
     slice: u16,
     constrained: bool,
     plane: u8,
-) -> (Vec<S>, Vec<S>, bool, bool) {
+) -> (Edge<S>, Edge<S>, bool, bool) {
     let (samples, stride, height) = plane_samples(pic, plane);
     let field = pic.mb.get(my * pic.mb_w + mx).is_some_and(|mb| mb.field_mb);
     let span = luma_span(my, field);
@@ -6496,25 +8242,23 @@ fn edge16<S: Sample>(
     let left_ok = mx > 0
         && neighbor(pic, mx as i32 - 1, my as i32, slice)
             .is_some_and(|mb| !constrained || mb.intra);
-    let mut above = vec![S::mid(); 17];
-    let mut left = vec![S::mid(); 17];
+    let mut above = Edge::new(17);
+    let mut left = Edge::new(17);
     let above_y = span.y as i32 - span.step as i32;
     if above_ok {
-        for (k, slot) in above[..16].iter_mut().enumerate() {
-            *slot = pix(samples, stride, height, (mx * 16 + k) as i32, above_y);
-        }
+        read_row(
+            samples,
+            stride,
+            height,
+            mx as i32 * 16,
+            above_y,
+            &mut above[..16],
+        );
         above[16] = pix(samples, stride, height, (mx * 16 + 16) as i32, above_y);
     }
     if left_ok {
-        for (k, slot) in left[..16].iter_mut().enumerate() {
-            *slot = pix(
-                samples,
-                stride,
-                height,
-                mx as i32 * 16 - 1,
-                span.at(k) as i32,
-            );
-        }
+        let from = (mx as i32 * 16 - 1, span.y as i32, span.step as i32);
+        read_col(samples, stride, height, from, &mut left[..16]);
         left[16] = pix(
             samples,
             stride,
@@ -6534,7 +8278,7 @@ fn edge_chroma<S: Sample>(
     slice_id: u16,
     constrained: bool,
     rows: usize,
-) -> (Vec<S>, Vec<S>, bool, bool) {
+) -> (Edge<S>, Edge<S>, bool, bool) {
     let plane = if cb { &pic.u } else { &pic.v };
     let stride = pic.chroma_stride();
     let height = pic.chroma_height();
@@ -6545,19 +8289,23 @@ fn edge_chroma<S: Sample>(
     let left_ok = mx > 0
         && neighbor(pic, mx as i32 - 1, my as i32, slice_id)
             .is_some_and(|mb| !constrained || mb.intra);
-    let mut above = vec![S::mid(); 9];
-    let mut left = vec![S::mid(); rows + 1];
+    let mut above = Edge::new(9);
+    let mut left = Edge::new(rows + 1);
     let above_y = span.y as i32 - span.step as i32;
     if above_ok {
-        for (k, slot) in above[..8].iter_mut().enumerate() {
-            *slot = pix(plane, stride, height, (mx * 8 + k) as i32, above_y);
-        }
+        read_row(
+            plane,
+            stride,
+            height,
+            mx as i32 * 8,
+            above_y,
+            &mut above[..8],
+        );
         above[8] = pix(plane, stride, height, (mx * 8 + 8) as i32, above_y);
     }
     if left_ok {
-        for (k, slot) in left[..rows].iter_mut().enumerate() {
-            *slot = pix(plane, stride, height, mx as i32 * 8 - 1, span.at(k) as i32);
-        }
+        let from = (mx as i32 * 8 - 1, span.y as i32, span.step as i32);
+        read_col(plane, stride, height, from, &mut left[..rows]);
         left[rows] = pix(
             plane,
             stride,
@@ -6977,6 +8725,53 @@ fn pix<S: Sample>(plane: &[S], stride: usize, height: usize, x: i32, y: i32) -> 
     plane.get(y * stride + x).copied().unwrap_or(S::mid())
 }
 
+/// Fills `out` with the samples of row `y` from column `x` on, as `pix`
+/// reads them. A run that lies inside the plane is copied in one piece.
+fn read_row<S: Sample>(plane: &[S], stride: usize, height: usize, x: i32, y: i32, out: &mut [S]) {
+    if x >= 0 && y >= 0 && (y as usize) < height && x as usize + out.len() <= stride {
+        let at = y as usize * stride + x as usize;
+        if let Some(run) = plane.get(at..at + out.len()) {
+            out.copy_from_slice(run);
+            return;
+        }
+    }
+    for (k, slot) in out.iter_mut().enumerate() {
+        *slot = pix(plane, stride, height, x + k as i32, y);
+    }
+}
+
+/// Fills `out` with the samples of column `x` from row `y` on, `down` rows
+/// apart, as `pix` reads them.
+fn read_col<S: Sample>(
+    plane: &[S],
+    stride: usize,
+    height: usize,
+    at: (i32, i32, i32),
+    out: &mut [S],
+) {
+    let (x, y, down) = at;
+    let last = y + (out.len() as i32 - 1) * down;
+    if x >= 0
+        && (x as usize) < stride
+        && y >= 0
+        && down > 0
+        && last >= y
+        && (last as usize) < height
+    {
+        let first = y as usize * stride + x as usize;
+        let step = down as usize * stride;
+        if first + (out.len() - 1) * step < plane.len() {
+            for (k, slot) in out.iter_mut().enumerate() {
+                *slot = plane[first + k * step];
+            }
+            return;
+        }
+    }
+    for (k, slot) in out.iter_mut().enumerate() {
+        *slot = pix(plane, stride, height, x, y + k as i32 * down);
+    }
+}
+
 fn decode_inter<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],
@@ -6984,10 +8779,10 @@ fn decode_inter<S: Sample>(
     slice: &Slice<'_>,
     at: Place,
     spec: u32,
-    work: (&mut Mb, &mut i32, Option<&Frame<S>>),
+    work: (&mut Mb, &mut i32, Option<&Frame<S>>, &mut Coeffs),
 ) -> Result<bool, CodecError> {
     let Place { mx, my } = at;
-    let (mb, qp, layer) = work;
+    let (mb, qp, layer, coeffs) = work;
     let sub = if slice.kind == 1 {
         spec == 22
     } else {
@@ -7008,8 +8803,14 @@ fn decode_inter<S: Sample>(
             what: "inter-layer prediction",
         });
     }
+    // A single 16×16 partition has one motion throughout.
+    let mut whole = if super::syntax_kind(slice.kind) == 0 {
+        spec == 0
+    } else {
+        matches!(spec, 1..=3)
+    };
     if slice.kind == 1 && spec == 0 {
-        direct_16(pic, dpb, slice, mx, my, mb)?;
+        whole = direct_16(pic, dpb, slice, mx, my, mb)?;
     } else if sub {
         read_sub(pic, dpb, entropy, slice, Place { mx, my }, spec, mb)?;
     } else {
@@ -7029,11 +8830,12 @@ fn decode_inter<S: Sample>(
     }
     let mut delta = 0;
     if luma_cbp > 0 || chroma_cbp > 0 {
-        delta = qp_delta(entropy, prev_qpd(pic, mx, my, mb.slice))?;
+        delta = qp_delta::<S>(entropy, prev_qpd(pic, mx, my, mb.slice))?;
         *qp = next_qp::<S>(*qp, delta);
     }
     mb.qpd = delta as i8;
-    predict_inter(pic, dpb, slice, mx, my, mb)?;
+    predict_inter(pic, dpb, slice, (mx, my, whole), mb)?;
+    let field = mb.field_mb || pic.field;
     let merge = residual && slice.tcoeff;
     if merge && (mb.field_mb || slice.sps.chroma != 1) {
         return Err(CodecError::Unsupported {
@@ -7055,7 +8857,18 @@ fn decode_inter<S: Sample>(
         )?;
         return Ok(residual);
     }
-    if mb.transform8 {
+    // The common case reads the levels already scaled, into raster order.
+    let scaled = luma_cbp != 0
+        && !merge
+        && pic.levels.is_empty()
+        && pic.chroma() != 3
+        && !qp_bypass::<S>(slice, *qp);
+    if let (true, Entropy::Cabac(cab)) = (scaled, &mut *entropy)
+        && let Some(scales) = coeffs.inter.at::<S>(*qp, &slice.pps)
+    {
+        let muls = (&scales.mul4, &scales.mul8);
+        inter_luma_scaled(pic, cab, Place { mx, my }, mb, (luma_cbp, field), muls)?;
+    } else if mb.transform8 {
         for i in 0..4 {
             if luma_cbp & (1 << i) != 0 {
                 let block = read8(pic, entropy, mx, my, i, mb, 0)?;
@@ -7073,12 +8886,13 @@ fn decode_inter<S: Sample>(
                         &block,
                         (*qp, qp_bypass::<S>(slice, *qp)),
                         &slice.pps.weight8[1],
-                        8,
+                        (8, field),
                     );
                 }
             }
         }
-    } else {
+    } else if luma_cbp != 0 {
+        // Nothing to read or add when the coded block pattern has no luma.
         for i in 0..16 {
             let bit = 1 << ((blk_y(i) / 2) * 2 + blk_x(i) / 2);
             if luma_cbp & bit != 0 {
@@ -7106,7 +8920,7 @@ fn decode_inter<S: Sample>(
                         &block,
                         (*qp, qp_bypass::<S>(slice, *qp)),
                         &slice.pps.weight4[3],
-                        4,
+                        (4, field),
                     );
                 }
             }
@@ -7114,14 +8928,28 @@ fn decode_inter<S: Sample>(
     }
     if slice.sps.chroma == 3 && !slice.sps.separate {
         recon_444(pic, entropy, slice, Place { mx, my }, mb, *qp, None)?;
+    } else if chroma_cbp == 0 && pic.levels.is_empty() {
+        // No chroma levels: nothing to read, keep or add.
+    } else if let (true, Entropy::Cabac(cab)) = (
+        !merge
+            && !pic.mbaff
+            && pic.chroma() == 1
+            && pic.levels.is_empty()
+            && !qp_bypass::<S>(slice, *qp),
+        &mut *entropy,
+    ) && let Some(scales) = coeffs.inter.at::<S>(*qp, &slice.pps)
+    {
+        chroma_scaled(pic, cab, Place { mx, my }, mb, chroma_cbp, scales)?;
     } else {
-        let chroma_res = read_chroma(pic, entropy, mx, my, chroma_cbp, mb)?;
+        let chroma_res = &mut coeffs.chroma;
+        read_chroma_into(pic, entropy, (mx, my), chroma_cbp, mb, chroma_res)?;
         if !pic.levels.is_empty() {
             let slot = my * pic.mb_w + mx;
             pic.note_chroma(slot, 0, &chroma_res.cb_dc, &chroma_res.cb_ac);
             pic.note_chroma(slot, 1, &chroma_res.cr_dc, &chroma_res.cr_ac);
         }
-        if !merge {
+        // With no chroma levels read there is nothing to add.
+        if !merge && chroma_res.used != 0 {
             recon_chroma(
                 pic,
                 slice,
@@ -7132,6 +8960,7 @@ fn decode_inter<S: Sample>(
                     cr_dc: &chroma_res.cr_dc,
                     cb_ac: &chroma_res.cb_ac,
                     cr_ac: &chroma_res.cr_ac,
+                    used: chroma_res.used,
                 },
                 (*qp, false, mb.slice),
                 false,
@@ -7152,10 +8981,11 @@ fn read_parts<S: Sample>(
 ) -> Result<(), CodecError> {
     let (mx, my, spec) = at;
     let parts = partitions(super::syntax_kind(slice.kind), spec);
-    let mut from_layer0 = vec![false; parts.len()];
-    let mut from_layer1 = vec![false; parts.len()];
-    let mut synthesis0 = vec![false; parts.len()];
-    let mut synthesis1 = vec![false; parts.len()];
+    // One flag per partition; there are at most two.
+    let mut from_layer0 = [false; 2];
+    let mut from_layer1 = [false; 2];
+    let mut synthesis0 = [false; 2];
+    let mut synthesis1 = [false; 2];
     if slice.adaptive_motion || slice.motion_pred {
         for (index, part) in parts.iter().enumerate() {
             if part.l0 {
@@ -7176,26 +9006,26 @@ fn read_parts<S: Sample>(
         }
         if from_layer0[index] {
             let (_, reference) = layer_motion(layer, mx, my, part, 0)?;
-            fill_ref(&mut mb.ref0, &mut mb.uses0, part, reference);
+            fill_ref(&mut mb.col.ref0, &mut mb.uses0, part, reference);
         } else if mb.alc {
             fill_ref(
-                &mut mb.ref0,
+                &mut mb.col.ref0,
                 &mut mb.uses0,
                 part,
                 list0_interview(pic, dpb, slice)?,
             );
-        } else if slice.num_ref_l0 > 1 {
+        } else if ref_count(slice, 0, mb) > 1 {
             let r = read_te(
                 entropy,
-                slice.num_ref_l0,
+                ref_count(slice, 0, mb),
                 ref_ctx(pic, mx, my, part.x / 4, part.y / 4, 0, mb),
             )?;
-            fill_ref(&mut mb.ref0, &mut mb.uses0, part, r as i8);
+            fill_ref(&mut mb.col.ref0, &mut mb.uses0, part, r as i8);
             if slice.vsp && interview_reference(pic, dpb, slice, mb, part, 0) {
                 synthesis0[index] = read_flag(entropy)?;
             }
         } else {
-            fill_ref(&mut mb.ref0, &mut mb.uses0, part, 0);
+            fill_ref(&mut mb.col.ref0, &mut mb.uses0, part, 0);
         }
     }
     for (index, part) in parts.iter().enumerate() {
@@ -7204,24 +9034,24 @@ fn read_parts<S: Sample>(
         }
         if from_layer1[index] {
             let (_, reference) = layer_motion(layer, mx, my, part, 1)?;
-            fill_ref(&mut mb.ref1, &mut mb.uses1, part, reference);
-        } else if slice.num_ref_l1 > 1 {
+            fill_ref(&mut mb.col.ref1, &mut mb.uses1, part, reference);
+        } else if ref_count(slice, 1, mb) > 1 {
             let r = read_te(
                 entropy,
-                slice.num_ref_l1,
+                ref_count(slice, 1, mb),
                 ref_ctx(pic, mx, my, part.x / 4, part.y / 4, 1, mb),
             )?;
-            fill_ref(&mut mb.ref1, &mut mb.uses1, part, r as i8);
+            fill_ref(&mut mb.col.ref1, &mut mb.uses1, part, r as i8);
             if slice.vsp && interview_reference(pic, dpb, slice, mb, part, 1) {
                 synthesis1[index] = read_flag(entropy)?;
             }
         } else {
-            fill_ref(&mut mb.ref1, &mut mb.uses1, part, 0);
+            fill_ref(&mut mb.col.ref1, &mut mb.uses1, part, 0);
         }
     }
     // A partition that does not use list 0 is still decoded. Its blocks stay
     // available so the next partition does not replace C with D.
-    for part in &parts {
+    for part in parts.iter() {
         if !part.l0 {
             mark_decoded(mb, part.x, part.y, part.w, part.h);
         }
@@ -7295,6 +9125,18 @@ fn read_parts<S: Sample>(
     Ok(())
 }
 
+/// How many reference indices `list` offers this macroblock (clause 7.4.5.1).
+/// A field macroblock of a frame picks among the fields of the listed
+/// frames, twice as many.
+fn ref_count(slice: &Slice<'_>, list: usize, mb: &Mb) -> usize {
+    let frames = if list == 0 {
+        slice.num_ref_l0
+    } else {
+        slice.num_ref_l1
+    };
+    frames << usize::from(mb.field_mb)
+}
+
 fn read_flag(entropy: &mut Entropy<'_, '_>) -> Result<bool, CodecError> {
     match entropy {
         Entropy::Cavlc(bits) => bits.bit(),
@@ -7325,21 +9167,8 @@ fn interview_reference<S: Sample>(
 }
 
 fn store_mv(mb: &mut Mb, part: &Part, mv: [i16; 2], list: usize) {
-    let x = part.x / 4;
-    let y = part.y / 4;
-    for by in 0..(part.h / 4) {
-        for bx in 0..(part.w / 4) {
-            let index = (y + by) * 4 + x + bx;
-            if list == 0 {
-                mb.mv0[index] = mv;
-                mb.mvd0[index] = [0, 0];
-            } else {
-                mb.mv1[index] = mv;
-                mb.mvd1[index] = [0, 0];
-            }
-            mb.ready |= 1 << index;
-        }
-    }
+    let blocks = cover(part.x / 4, part.y / 4, part.w / 4, part.h / 4);
+    fill_motion(mb, list, blocks, mv, [0, 0]);
 }
 
 /// J.8.2.1 with `bvsp_flag` 1 and `TextureFirstFlag` 1. The disparity is the
@@ -7531,6 +9360,7 @@ fn layer_motion<S: Sample>(
     Ok((mv, index))
 }
 
+#[derive(Clone, Copy)]
 struct Part {
     x: usize,
     y: usize,
@@ -7540,19 +9370,43 @@ struct Part {
     l1: bool,
 }
 
-fn partitions(kind: u8, spec: u32) -> Vec<Part> {
+/// A macroblock's partitions: none, one or two. Held in place, since this
+/// is made for every inter macroblock.
+struct Parts {
+    items: [Part; 2],
+    len: usize,
+}
+
+impl Parts {
+    fn new(parts: &[Part]) -> Self {
+        let mut items = [part(0, 0, 16, 16, false, false); 2];
+        let len = parts.len().min(2);
+        items[..len].copy_from_slice(&parts[..len]);
+        Self { items, len }
+    }
+}
+
+impl std::ops::Deref for Parts {
+    type Target = [Part];
+
+    fn deref(&self) -> &[Part] {
+        &self.items[..self.len]
+    }
+}
+
+fn partitions(kind: u8, spec: u32) -> Parts {
     if kind == 0 {
         return match spec {
-            0 => vec![part(0, 0, 16, 16, true, false)],
-            1 => vec![
+            0 => Parts::new(&[part(0, 0, 16, 16, true, false)]),
+            1 => Parts::new(&[
                 part(0, 0, 16, 8, true, false),
                 part(0, 8, 16, 8, true, false),
-            ],
-            2 => vec![
+            ]),
+            2 => Parts::new(&[
                 part(0, 0, 8, 16, true, false),
                 part(8, 0, 8, 16, true, false),
-            ],
-            _ => Vec::new(),
+            ]),
+            _ => Parts::new(&[]),
         };
     }
     let (a, b, wide) = match spec {
@@ -7577,22 +9431,22 @@ fn partitions(kind: u8, spec: u32) -> Vec<Part> {
         19 => (1, 0, false),
         20 => (1, 1, true),
         21 => (1, 1, false),
-        _ => return vec![part(0, 0, 16, 16, true, false)],
+        _ => return Parts::new(&[part(0, 0, 16, 16, true, false)]),
     };
     let _ = (a, b);
     let lists = b_lists(spec);
     if wide && matches!(spec, 4 | 6 | 8 | 10 | 12 | 14 | 16 | 18 | 20) {
-        vec![
+        Parts::new(&[
             part(0, 0, 16, 8, lists.0.0, lists.0.1),
             part(0, 8, 16, 8, lists.1.0, lists.1.1),
-        ]
+        ])
     } else if matches!(spec, 5 | 7 | 9 | 11 | 13 | 15 | 17 | 19 | 21) {
-        vec![
+        Parts::new(&[
             part(0, 0, 8, 16, lists.0.0, lists.0.1),
             part(8, 0, 8, 16, lists.1.0, lists.1.1),
-        ]
+        ])
     } else {
-        vec![part(0, 0, 16, 16, lists.0.0, lists.0.1)]
+        Parts::new(&[part(0, 0, 16, 16, lists.0.0, lists.0.1)])
     }
 }
 
@@ -7627,6 +9481,7 @@ fn fill_ref(refs: &mut [i8; 4], uses: &mut u8, part: &Part, value: i8) {
     }
 }
 
+#[inline(always)]
 fn read_te(entropy: &mut Entropy<'_, '_>, range: usize, ctx: usize) -> Result<u32, CodecError> {
     if range <= 1 {
         return Ok(0);
@@ -7666,12 +9521,17 @@ fn ref_ctx<S: Sample>(
     list: usize,
     mb: &Mb,
 ) -> usize {
-    let left = ref_at(pic, mx, my, bx as i32 - 1, by as i32, list, mb);
-    let above = ref_at(pic, mx, my, bx as i32, by as i32 - 1, list, mb);
-    usize::from(left > 0) + 2 * usize::from(above > 0)
+    let left = ref_above_zero(pic, mx, my, bx as i32 - 1, by as i32, list, mb);
+    let above = ref_above_zero(pic, mx, my, bx as i32, by as i32 - 1, list, mb);
+    usize::from(left) + 2 * usize::from(above)
 }
 
-fn ref_at<S: Sample>(
+/// Clause 9.3.3.1.1.6: whether the partition holding the block (`bx`, `by`),
+/// which may lie just outside this macroblock, raises the `ref_idx` context.
+/// It does when its reference index is above 0, or above 1 for a field
+/// macroblock beside a frame macroblock, whose indices count fields.
+#[inline(always)]
+fn ref_above_zero<S: Sample>(
     pic: &Frame<S>,
     mx: usize,
     my: usize,
@@ -7679,24 +9539,71 @@ fn ref_at<S: Sample>(
     by: i32,
     list: usize,
     current: &Mb,
-) -> i8 {
-    let (mbx, ox) = if bx < 0 {
-        (mx as i32 - 1, 1)
-    } else {
-        (mx as i32, (bx as usize) / 2)
+) -> bool {
+    let Some((mbx, mby, index)) = near_block(pic, (mx, my), current.field_mb, (bx, by, false))
+    else {
+        return false;
     };
-    let (mby, oy) = if by < 0 {
-        (above_my(pic, mx, my), 1)
-    } else {
-        (my as i32, (by as usize) / 2)
-    };
-    let index = oy * 2 + ox.min(1);
+    let part = index / 8 * 2 + index % 4 / 2;
     if mbx == mx as i32 && mby == my as i32 {
-        return listed_ref(current, index, list);
+        return listed_ref(current, part, list) > 0;
     }
-    neighbor(pic, mbx, mby, current.slice)
-        .map(|mb| listed_ref(mb, index, list))
-        .unwrap_or(-1)
+    neighbor(pic, mbx, mby, current.slice).is_some_and(|mb| {
+        let floor = i8::from(mb.field_mb && !current.field_mb);
+        listed_ref(mb, part, list) > floor
+    })
+}
+
+/// The 4×4 block (`bx`, `by`) of the macroblock at grid position `at`, where
+/// either may be one step outside the macroblock's own four by four: the
+/// macroblock that holds it, by grid column and row, and the block's index
+/// there. `field` is whether the macroblock at `at` is a field macroblock.
+/// `None` is a block the picture's layout rules out; one in a macroblock not
+/// decoded yet is still returned.
+///
+/// In a macroblock-adaptive frame the lines of a block left of the
+/// macroblock may lie in two macroblocks. `low` asks for the one holding the
+/// block's last line, which is what borders a partition from above and to
+/// the left; otherwise it is the one holding its first line.
+#[inline(always)]
+fn near_block<S: Sample>(
+    pic: &Frame<S>,
+    at: (usize, usize),
+    field: bool,
+    (bx, by, low): (i32, i32, bool),
+) -> Option<(i32, i32, usize)> {
+    let (mx, my) = at;
+    if (0..4).contains(&bx) && (0..4).contains(&by) {
+        return Some((mx as i32, my as i32, (by * 4 + bx) as usize));
+    }
+    if pic.mbaff {
+        return near_block_mbaff(pic, at, field, (bx, by, low));
+    }
+    let (mbx, ox) = shift(mx, bx, 4);
+    let (mby, oy) = shift(my, by, 4);
+    Some((mbx, mby, oy * 4 + ox))
+}
+
+/// [`near_block`] outside this macroblock in a macroblock-adaptive frame.
+#[inline(never)]
+fn near_block_mbaff<S: Sample>(
+    pic: &Frame<S>,
+    at: (usize, usize),
+    field: bool,
+    (bx, by, low): (i32, i32, bool),
+) -> Option<(i32, i32, usize)> {
+    let (xn, ox) = match bx {
+        ..0 => (-1, 3),
+        4.. => (16, 0),
+        _ => (bx * 4, bx as usize),
+    };
+    let yn = if by < 0 {
+        -1
+    } else {
+        by * 4 + 3 * i32::from(low)
+    };
+    let near = mbaff::locate((&pic.mb, pic.mb_w), at, field, xn, yn)?;
+    Some((near.mx as i32, near.my as i32, near.row / 4 * 4 + ox))
 }
 
 /// Clause 9.3.3.1.1.6. Direct, skip, intra, and the other list contribute no reference.
@@ -7738,38 +9645,58 @@ fn read_mvd_part<S: Sample>(
             mb,
         )
     };
-    let dx = read_mvd(
-        entropy,
-        mvd_sum(pic, Place { mx, my }, Cell { bx: x, by: y }, (list, 0), mb),
-        40,
-    )?;
-    let dy = read_mvd(
-        entropy,
-        mvd_sum(pic, Place { mx, my }, Cell { bx: x, by: y }, (list, 1), mb),
-        47,
-    )?;
+    let sums = mvd_sums(pic, Place { mx, my }, Cell { bx: x, by: y }, list, mb);
+    let dx = read_mvd(entropy, sums[0], 40)?;
+    let dy = read_mvd(entropy, sums[1], 47)?;
     let mv = [
         super::clip_ref(i32::from(pred[0]) + dx),
         super::clip_ref(i32::from(pred[1]) + dy),
     ];
-    let mvd = [super::clip_ref(dx), super::clip_ref(dy)];
-    let bw = part.w / 4;
-    let bh = part.h / 4;
-    for by in 0..bh {
-        for bx in 0..bw {
-            let index = (y + by) * 4 + x + bx;
-            if list == 0 {
-                mb.mv0[index] = mv;
-                mb.mvd0[index] = mvd;
-            } else {
-                mb.mv1[index] = mv;
-                mb.mvd1[index] = mvd;
-            }
-            mb.ready |= 1 << index;
-        }
-    }
+    let mvd = [mvd_size(dx), mvd_size(dy)];
+    fill_motion(mb, list, cover(x, y, part.w / 4, part.h / 4), mv, mvd);
     let _ = slice;
     Ok(())
+}
+
+/// The 4×4 blocks, one bit each in raster order, of the `w` by `h` blocks
+/// from block (`x`, `y`) of a macroblock.
+#[inline(always)]
+fn cover(x: usize, y: usize, w: usize, h: usize) -> u16 {
+    let row = ((1u32 << w) - 1) << x;
+    let rows = row * (0x1111 & ((1u32 << (4 * h)) - 1));
+    (rows << (4 * y)) as u16
+}
+
+/// Sets the motion vector and difference of list `list` in the blocks of
+/// `cover`. Every block is written or kept by a mask rather than looped
+/// over, as how many there are changes from one partition to the next.
+#[inline(always)]
+fn fill_motion(mb: &mut Mb, list: usize, cover: u16, mv: [i16; 2], mvd: [u8; 2]) {
+    // Each block's mask is all ones where it is kept: arithmetic rather than
+    // a select, which the compiler would otherwise make a branch per block.
+    let keep = |index: usize| (i32::from(cover >> index & 1) - 1) as i16;
+    let mvs = if list == 0 { &mut mb.mv0 } else { &mut mb.mv1 };
+    for (index, held) in mvs.iter_mut().enumerate() {
+        let keep = keep(index);
+        held[0] = held[0] & keep | mv[0] & !keep;
+        held[1] = held[1] & keep | mv[1] & !keep;
+    }
+    let mvds = if list == 0 {
+        &mut mb.mvd0
+    } else {
+        &mut mb.mvd1
+    };
+    for (index, size) in mvds.iter_mut().enumerate() {
+        let keep = keep(index) as u8;
+        size[0] = size[0] & keep | mvd[0] & !keep;
+        size[1] = size[1] & keep | mvd[1] & !keep;
+    }
+    mb.ready |= cover;
+}
+
+/// A motion vector difference as kept for the contexts of later ones.
+fn mvd_size(mvd: i32) -> u8 {
+    mvd.unsigned_abs().min(127) as u8
 }
 
 fn ref_of(mb: &Mb, bx: usize, by: usize, list: usize) -> i8 {
@@ -7781,10 +9708,12 @@ fn ref_of(mb: &Mb, bx: usize, by: usize, list: usize) -> i8 {
     }
 }
 
+#[inline(always)]
 fn read_mvd(entropy: &mut Entropy<'_, '_>, sum: i32, base: usize) -> Result<i32, CodecError> {
     match entropy {
         Entropy::Cavlc(bits) => bits.se(),
         Entropy::Cabac(cab) => {
+            let mut cab = cab.run();
             let ctx = usize::from(sum > 2) + usize::from(sum > 32);
             if cab.decision(base + ctx)? == 0 {
                 return Ok(0);
@@ -7819,63 +9748,57 @@ fn read_mvd(entropy: &mut Entropy<'_, '_>, sum: i32, base: usize) -> Result<i32,
     }
 }
 
-fn mvd_sum<S: Sample>(
-    pic: &Frame<S>,
-    at: Place,
-    cell: Cell,
-    which: (usize, usize),
-    mb: &Mb,
-) -> i32 {
-    let Place { mx, my } = at;
+/// The sums of the left and upper blocks' motion vector difference sizes
+/// for list `list`, horizontal and vertical: each neighbour is found once
+/// for both.
+fn mvd_sums<S: Sample>(pic: &Frame<S>, at: Place, cell: Cell, list: usize, mb: &Mb) -> [i32; 2] {
     let Cell { bx, by } = cell;
-    let (list, comp) = which;
-    let left = mvd_at(
-        pic,
-        Place { mx, my },
-        (bx as i32 - 1, by as i32),
-        (list, comp),
-        mb,
-    );
-    let above = mvd_at(
-        pic,
-        Place { mx, my },
-        (bx as i32, by as i32 - 1),
-        (list, comp),
-        mb,
-    );
-    left.abs() + above.abs()
+    let left = mvd_at(pic, at, (bx as i32 - 1, by as i32), list, mb);
+    let above = mvd_at(pic, at, (bx as i32, by as i32 - 1), list, mb);
+    [left[0] + above[0], left[1] + above[1]]
 }
 
+/// The sizes of the motion vector difference of list `list` at block
+/// `cell`, which may be in a neighbouring macroblock, horizontal and
+/// vertical; 0 where there is none.
+#[inline(always)]
 fn mvd_at<S: Sample>(
     pic: &Frame<S>,
     at: Place,
     cell: (i32, i32),
-    which: (usize, usize),
+    list: usize,
     current: &Mb,
-) -> i32 {
+) -> [i32; 2] {
     let Place { mx, my } = at;
     let (bx, by) = cell;
-    let (list, comp) = which;
-    let (mbx, ox) = shift(mx, bx, 4);
-    let (mby, oy) = shift_field(my, by, 4, current.field_mb);
-    let index = oy * 4 + ox;
-    if mbx == mx as i32 && mby == my as i32 {
-        let mv = if list == 0 {
-            current.mvd0[index]
+    let Some((mbx, mby, index)) = near_block(pic, (mx, my), current.field_mb, (bx, by, false))
+    else {
+        return [0; 2];
+    };
+    let of = |mb: &Mb| {
+        let [x, y] = if list == 0 {
+            mb.mvd0[index]
         } else {
-            current.mvd1[index]
+            mb.mvd1[index]
         };
-        return i32::from(mv[comp]);
+        [i32::from(x), i32::from(y)]
+    };
+    if mbx == mx as i32 && mby == my as i32 {
+        return of(current);
     }
     neighbor(pic, mbx, mby, current.slice)
         .map(|mb| {
-            i32::from(if list == 0 {
-                mb.mvd0[index][comp]
-            } else {
-                mb.mvd1[index][comp]
-            })
+            let [x, y] = of(mb);
+            // Clause 9.3.3.1.1.7: a vertical difference is counted in this
+            // macroblock's lines, a field's being twice a frame's.
+            let y = match (current.field_mb, mb.field_mb) {
+                (true, false) => y / 2,
+                (false, true) => y * 2,
+                _ => y,
+            };
+            [x, y]
         })
-        .unwrap_or(0)
+        .unwrap_or([0; 2])
 }
 
 #[derive(Clone, Copy)]
@@ -7885,6 +9808,7 @@ struct Motion {
     reference: i8,
 }
 
+#[inline(always)]
 fn mvp<S: Sample>(
     pic: &Frame<S>,
     at: Place,
@@ -7896,9 +9820,28 @@ fn mvp<S: Sample>(
 ) -> [i16; 2] {
     let Place { mx, my } = at;
     let Cell { bx, by } = cell;
-    let (w, h) = size;
     let a = part_motion(pic, mx, my, bx as i32 - 1, by as i32, list, current);
-    let mut b = part_motion(pic, mx, my, bx as i32, by as i32 - 1, list, current);
+    let b = part_motion(pic, mx, my, bx as i32, by as i32 - 1, list, current);
+    mvp_from(pic, at, cell, size, (list, reference), current, (a, b))
+}
+
+/// [`mvp`] with the motion to the left of the partition and above it already
+/// found: `near` is those two, and `wanted` the list and reference index.
+#[inline(always)]
+fn mvp_from<S: Sample>(
+    pic: &Frame<S>,
+    at: Place,
+    cell: Cell,
+    size: (usize, usize),
+    wanted: (usize, i8),
+    current: &Mb,
+    near: (Motion, Motion),
+) -> [i16; 2] {
+    let Place { mx, my } = at;
+    let Cell { bx, by } = cell;
+    let w = size.0;
+    let (list, reference) = wanted;
+    let (a, b) = near;
     let above_right = part_motion(
         pic,
         mx,
@@ -7908,11 +9851,77 @@ fn mvp<S: Sample>(
         list,
         current,
     );
-    let mut c = if above_right.available {
+    let c = if above_right.available {
         above_right
     } else {
-        part_motion(pic, mx, my, bx as i32 - 1, by as i32 - 1, list, current)
+        corner_motion(pic, mx, my, bx as i32, by as i32, list, current)
     };
+    mvp_pick(size, cell, reference, (a, b, c))
+}
+
+/// Clause 8.4.1.3 once the motion left of the partition, above it, and
+/// above and right of it (or above and left when that is missing) are
+/// found: the predictor for reference index `reference`. Which neighbours
+/// use that reference is as good as random to the CPU, so every answer the
+/// clause may give is worked out and one picked by selects, not branches.
+#[inline]
+fn mvp_pick(
+    size: (usize, usize),
+    cell: Cell,
+    reference: i8,
+    near: (Motion, Motion, Motion),
+) -> [i16; 2] {
+    let Cell { bx, by } = cell;
+    let (a, b, c) = near;
+    // A 16×8 or 8×16 partition first looks at one neighbour of its own.
+    let (shaped, own) = match size {
+        (16, 8) => (true, if by == 0 { b } else { a }),
+        (8, 16) => (true, if bx == 0 { a } else { c }),
+        _ => (false, a),
+    };
+    // With only the left neighbour there, it stands in for the other two.
+    let alone = !b.available & !c.available & a.available;
+    let (b, c) = if alone { (a, a) } else { (b, c) };
+    let (in_a, in_b, in_c) = (
+        a.reference == reference,
+        b.reference == reference,
+        c.reference == reference,
+    );
+    let median = [
+        median(a.mv[0], b.mv[0], c.mv[0]),
+        median(a.mv[1], b.mv[1], c.mv[1]),
+    ];
+    let single = if in_a {
+        a.mv
+    } else if in_b {
+        b.mv
+    } else {
+        c.mv
+    };
+    let general = if u8::from(in_a) + u8::from(in_b) + u8::from(in_c) == 1 {
+        single
+    } else {
+        median
+    };
+    if shaped & (own.reference == reference) {
+        own.mv
+    } else {
+        general
+    }
+}
+
+/// [`mvp_pick`] as clause 8.4.1.3 reads, one rule after another; the
+/// tests hold the two to the same answers.
+#[cfg(test)]
+fn mvp_pick_by_rules(
+    size: (usize, usize),
+    cell: Cell,
+    reference: i8,
+    near: (Motion, Motion, Motion),
+) -> [i16; 2] {
+    let Cell { bx, by } = cell;
+    let (w, h) = size;
+    let (a, mut b, mut c) = near;
     if w == 16 && h == 8 && by == 0 && b.reference == reference {
         return b.mv;
     }
@@ -7929,12 +9938,9 @@ fn mvp<S: Sample>(
         b = a;
         c = a;
     }
-    let same = [a, b, c]
-        .into_iter()
-        .filter(|n| n.reference == reference)
-        .collect::<Vec<_>>();
-    if same.len() == 1 {
-        return same[0].mv;
+    let mut same = [a, b, c].into_iter().filter(|n| n.reference == reference);
+    if let (Some(only), None) = (same.next(), same.next()) {
+        return only.mv;
     }
     [
         median(a.mv[0], b.mv[0], c.mv[0]),
@@ -7948,18 +9954,10 @@ fn median(a: i16, b: i16, c: i16) -> i16 {
 
 /// The partition is decoded, so later motion-vector prediction may see it.
 fn mark_decoded(mb: &mut Mb, x: usize, y: usize, w: usize, h: usize) {
-    let mut py = y;
-    while py < y + h {
-        let mut px = x;
-        while px < x + w {
-            let index = (py / 4) * 4 + (px / 4);
-            mb.ready |= 1 << index;
-            px += 4;
-        }
-        py += 4;
-    }
+    mb.ready |= cover(x / 4, y / 4, w / 4, h / 4);
 }
 
+#[inline]
 fn part_motion<S: Sample>(
     pic: &Frame<S>,
     mx: usize,
@@ -7969,59 +9967,114 @@ fn part_motion<S: Sample>(
     list: usize,
     current: &Mb,
 ) -> Motion {
+    motion_near(pic, (mx, my), (bx, by, false), list, current)
+}
+
+/// The motion above and to the left of the partition whose first block is
+/// (`bx`, `by`): that of the block holding the sample one up and one left of
+/// the partition's first sample.
+fn corner_motion<S: Sample>(
+    pic: &Frame<S>,
+    mx: usize,
+    my: usize,
+    bx: i32,
+    by: i32,
+    list: usize,
+    current: &Mb,
+) -> Motion {
+    motion_near(pic, (mx, my), (bx - 1, by - 1, true), list, current)
+}
+
+/// The motion of a block of this macroblock or beside it, as [`near_block`]
+/// finds it, in this macroblock's terms.
+#[inline(always)]
+fn motion_near<S: Sample>(
+    pic: &Frame<S>,
+    (mx, my): (usize, usize),
+    (bx, by, low): (i32, i32, bool),
+    list: usize,
+    current: &Mb,
+) -> Motion {
+    if pic.mbaff {
+        return motion_near_mbaff(pic, (mx, my), (bx, by, low), list, current);
+    }
+    // Every macroblock is of one kind, so a neighbour's motion is read as
+    // it stands.
     let (mbx, ox) = shift(mx, bx, 4);
-    let (mby, oy) = shift_field(my, by, 4, current.field_mb);
+    let (mby, oy) = shift(my, by, 4);
     let index = oy * 4 + ox;
     if mbx == mx as i32 && mby == my as i32 {
         if current.ready & (1 << index) == 0 {
-            return Motion {
-                available: false,
-                mv: [0, 0],
-                reference: -1,
-            };
+            return ABSENT;
+        }
+        return motion_of(current, index, list);
+    }
+    match neighbor(pic, mbx, mby, current.slice) {
+        Some(mb) => motion_of(mb, index, list),
+        None => ABSENT,
+    }
+}
+
+/// A neighbour's motion that is not there.
+const ABSENT: Motion = Motion {
+    available: false,
+    mv: [0, 0],
+    reference: -1,
+};
+
+/// [`motion_near`] in a macroblock-adaptive frame.
+#[inline(never)]
+fn motion_near_mbaff<S: Sample>(
+    pic: &Frame<S>,
+    (mx, my): (usize, usize),
+    (bx, by, low): (i32, i32, bool),
+    list: usize,
+    current: &Mb,
+) -> Motion {
+    let Some((mbx, mby, index)) = near_block(pic, (mx, my), current.field_mb, (bx, by, low)) else {
+        return ABSENT;
+    };
+    if mbx == mx as i32 && mby == my as i32 {
+        if current.ready & (1 << index) == 0 {
+            return ABSENT;
         }
         return motion_of(current, index, list);
     }
     let Some(mb) = neighbor(pic, mbx, mby, current.slice) else {
-        return Motion {
-            available: false,
-            mv: [0, 0],
-            reference: -1,
-        };
+        return ABSENT;
     };
-    motion_of(mb, index, list)
+    let mut motion = motion_of(mb, index, list);
+    // Clause 8.4.1.3.1: a neighbour of the other kind is read in this
+    // macroblock's terms. A field's lines are twice as far apart as a
+    // frame's, and a field macroblock's index counts two fields a frame.
+    if motion.reference >= 0 && mb.field_mb != current.field_mb {
+        if current.field_mb {
+            motion.mv[1] /= 2;
+            motion.reference = motion.reference.saturating_mul(2);
+        } else {
+            motion.mv[1] = motion.mv[1].saturating_mul(2);
+            motion.reference >>= 1;
+        }
+    }
+    motion
 }
 
+#[inline(always)]
 fn motion_of(mb: &Mb, index: usize, list: usize) -> Motion {
-    if mb.intra {
-        return Motion {
-            available: true,
-            mv: [0, 0],
-            reference: -1,
-        };
-    }
     let part = (index / 4 / 2) * 2 + ((index % 4) / 2);
-    let reference = if list == 0 {
-        mb.ref0[part]
+    let (reference, mv) = if list == 0 {
+        (mb.ref0[part], mb.mv0[index])
     } else {
-        mb.ref1[part]
+        (mb.ref1[part], mb.mv1[index])
     };
-    if reference < 0 {
-        return Motion {
-            available: true,
-            mv: [0, 0],
-            reference: -1,
-        };
-    }
-    let mv = if list == 0 {
-        mb.mv0[index]
-    } else {
-        mb.mv1[index]
-    };
+    // An intra block, or a list the block does not use, reads as no
+    // reference and a zero vector. Masks, not branches: which it is
+    // changes from one neighbour to the next.
+    let keep = -i16::from(!mb.intra && reference >= 0);
     Motion {
         available: true,
-        mv,
-        reference,
+        mv: [mv[0] & keep, mv[1] & keep],
+        reference: reference | !(keep as i8),
     }
 }
 
@@ -8106,10 +10159,11 @@ fn read_sub<S: Sample>(
         }
         let x = (i & 1) * 2;
         let y = (i >> 1) * 2;
-        let r = if ref0_forced || slice.num_ref_l0 <= 1 {
+        let count = ref_count(slice, 0, mb);
+        let r = if ref0_forced || count <= 1 {
             0
         } else {
-            read_te(entropy, slice.num_ref_l0, ref_ctx(pic, mx, my, x, y, 0, mb))? as i8
+            read_te(entropy, count, ref_ctx(pic, mx, my, x, y, 0, mb))? as i8
         };
         let index = (y / 2) * 2 + (x / 2);
         mb.ref0[index] = r;
@@ -8135,10 +10189,11 @@ fn read_sub<S: Sample>(
         }
         let x = (i & 1) * 2;
         let y = (i >> 1) * 2;
-        let r = if slice.num_ref_l1 <= 1 {
+        let count = ref_count(slice, 1, mb);
+        let r = if count <= 1 {
             0
         } else {
-            read_te(entropy, slice.num_ref_l1, ref_ctx(pic, mx, my, x, y, 1, mb))? as i8
+            read_te(entropy, count, ref_ctx(pic, mx, my, x, y, 1, mb))? as i8
         };
         let index = (y / 2) * 2 + (x / 2);
         mb.ref1[index] = r;
@@ -8154,24 +10209,21 @@ fn read_sub<S: Sample>(
             }
         }
     }
+    // Every direct quarter takes its motion from the same neighbours and
+    // co-located macroblock, so they are worked out once for all of them.
+    let mut blocks = [(0usize, 0usize); 16];
+    let mut n = 0;
     for (i, kind) in kinds.iter().copied().enumerate() {
         if direct(kind) {
-            let x0 = (i & 1) * 8;
-            let y0 = (i >> 1) * 8;
-            direct_8(pic, dpb, slice, Place { mx, my }, (x0, y0), mb);
+            let (x, y) = ((i & 1) * 2, (i >> 1) * 2);
+            for (bx, by) in [(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)] {
+                blocks[n] = (bx, by);
+                n += 1;
+            }
         }
     }
-    for (i, kind) in kinds.iter().copied().enumerate() {
-        if direct(kind) {
-            continue;
-        }
-        let (l0, _, _, _) = sub_shape(super::syntax_kind(slice.kind), kind);
-        if l0 {
-            continue;
-        }
-        let x0 = (i & 1) * 8;
-        let y0 = (i >> 1) * 8;
-        mark_decoded(mb, x0, y0, 8, 8);
+    if n > 0 {
+        apply_direct(pic, &pic.mb, dpb, slice, (mx, my), mb, &blocks[..n]);
     }
     for list in 0..2 {
         for (i, kind) in kinds.iter().copied().enumerate() {
@@ -8182,6 +10234,12 @@ fn read_sub<S: Sample>(
             if (list == 0 && !l0) || (list == 1 && !l1) {
                 continue;
             }
+            // Clause 6.4.11.7: a neighbouring partition is available by its
+            // place in the macroblock, not by what has been parsed. The
+            // vectors come one list at a time, so a later 8×8 block may
+            // already hold list 0 motion, direct motion, or no use of this
+            // list at all, and it is still not there for this block.
+            mb.ready = earlier_blocks(i);
             let x0 = (i & 1) * 8;
             let y0 = (i >> 1) * 8;
             for (px, py) in sub_origins(x0, y0, w, h) {
@@ -8237,21 +10295,27 @@ fn read_sub<S: Sample>(
             }
         }
     }
+    mb.ready = u16::MAX;
     Ok(())
 }
 
-fn sub_origins(x0: usize, y0: usize, w: usize, h: usize) -> Vec<(usize, usize)> {
-    let mut origins = Vec::new();
-    let mut y = y0;
-    while y < y0 + 8 {
-        let mut x = x0;
-        while x < x0 + 8 {
-            origins.push((x, y));
-            x += w;
-        }
-        y += h;
-    }
-    origins
+/// The 4×4 blocks of the 8×8 blocks that come before 8×8 block `index` in
+/// decoding order, as a mask over the macroblock's sixteen.
+fn earlier_blocks(index: usize) -> u16 {
+    const BLOCKS: [u16; 4] = [0x0033, 0x00cc, 0x3300, 0xcc00];
+    BLOCKS
+        .iter()
+        .take(index)
+        .fold(0, |mask, block| mask | block)
+}
+
+/// The origins of an 8×8 block's sub-partitions of `w`×`h`, in decoding
+/// order.
+fn sub_origins(x0: usize, y0: usize, w: usize, h: usize) -> impl Iterator<Item = (usize, usize)> {
+    let (w, h) = (w.max(1), h.max(1));
+    (y0..y0 + 8)
+        .step_by(h)
+        .flat_map(move |y| (x0..x0 + 8).step_by(w).map(move |x| (x, y)))
 }
 
 fn sub_lists(kind: u8, spec: u32) -> (bool, bool) {
@@ -8285,27 +10349,8 @@ fn sub_shape(kind: u8, spec: u32) -> (bool, bool, usize, usize) {
     (l0, l1, w, h)
 }
 
-fn direct_8<S: Sample>(
-    pic: &Frame<S>,
-    dpb: &[Frame<S>],
-    slice: &Slice<'_>,
-    at: Place,
-    origin: (usize, usize),
-    mb: &mut Mb,
-) {
-    let Place { mx, my } = at;
-    let (x, y) = origin;
-    let mut blocks = [(0usize, 0usize); 4];
-    let mut n = 0;
-    for by in 0..2 {
-        for bx in 0..2 {
-            blocks[n] = (x / 4 + bx, y / 4 + by);
-            n += 1;
-        }
-    }
-    apply_direct(pic, dpb, slice, mx, my, mb, &blocks);
-}
-
+/// Direct prediction of a whole macroblock. `true` means every block came
+/// out with the same motion, as [`apply_direct`] says.
 fn direct_16<S: Sample>(
     pic: &Frame<S>,
     dpb: &[Frame<S>],
@@ -8313,13 +10358,20 @@ fn direct_16<S: Sample>(
     mx: usize,
     my: usize,
     mb: &mut Mb,
-) -> Result<(), CodecError> {
+) -> Result<bool, CodecError> {
     let mut blocks = [(0usize, 0usize); 16];
     for (index, slot) in blocks.iter_mut().enumerate() {
         *slot = (index % 4, index / 4);
     }
-    apply_direct(pic, dpb, slice, mx, my, mb, &blocks);
-    Ok(())
+    Ok(apply_direct(
+        pic,
+        &pic.mb,
+        dpb,
+        slice,
+        (mx, my),
+        mb,
+        &blocks,
+    ))
 }
 
 /// Clause 8.4.1.2.3. Scale the co-located motion vector by the picture-order distance.
@@ -8331,13 +10383,60 @@ fn temporal_direct<S: Sample>(
     my: usize,
     mb: &mut Mb,
     blocks: &[(usize, usize)],
-) {
+) -> bool {
+    if pic.mbaff {
+        let col = slice.ref1.first().and_then(|&index| dpb.get(index));
+        for &(bx, by) in blocks {
+            let (ref0, mv0, mv1) = col.map_or((0, [0, 0], [0, 0]), |col| {
+                temporal_quarter(
+                    pic,
+                    dpb,
+                    slice,
+                    col,
+                    (mx, my, mb.field_mb),
+                    (bx / 2, by / 2),
+                )
+            });
+            let index = by * 4 + bx;
+            mb.mv0[index] = mv0;
+            mb.mv1[index] = mv1;
+            mb.ref0[(by / 2) * 2 + (bx / 2)] = ref0;
+            mb.ref1[(by / 2) * 2 + (bx / 2)] = 0;
+            mb.ready |= 1 << index;
+        }
+        return false;
+    }
     let addr = my * pic.mb_w + mx;
     let col = slice
         .ref1
         .first()
         .and_then(|&index| dpb.get(index))
-        .and_then(|frame| frame.mb.get(addr).map(|col| (frame.poc, col)));
+        .and_then(|frame| frame.mb_at(addr).map(|col| (frame.poc, col)));
+    // With 8×8 inference every block of a quarter reads the same
+    // co-located block, so a whole macroblock is worked out once a
+    // quarter, and filled at once when the four agree.
+    if blocks.len() == 16 && slice.sps.direct_8x8_inference {
+        let quarter = |part: usize| temporal_block(slice, col, (part % 2) * 2, (part / 2) * 2);
+        let found = [quarter(0), quarter(1), quarter(2), quarter(3)];
+        mb.ready = u16::MAX;
+        mb.ref1 = [0; 4];
+        if found[1..].iter().all(|other| *other == found[0]) {
+            let (ref0, mv0, mv1) = found[0];
+            mb.ref0 = [ref0; 4];
+            mb.mv0 = [mv0; 16];
+            mb.mv1 = [mv1; 16];
+            return true;
+        }
+        for (part, &(ref0, mv0, mv1)) in found.iter().enumerate() {
+            mb.ref0[part] = ref0;
+            let corner = (part / 2) * 8 + (part % 2) * 2;
+            for index in [corner, corner + 1, corner + 4, corner + 5] {
+                mb.mv0[index] = mv0;
+                mb.mv1[index] = mv1;
+            }
+        }
+        return false;
+    }
     for &(bx, by) in blocks {
         let index = by * 4 + bx;
         let part = (by / 2) * 2 + (bx / 2);
@@ -8348,11 +10447,12 @@ fn temporal_direct<S: Sample>(
         mb.ref1[part] = 0;
         mb.ready |= 1 << index;
     }
+    false
 }
 
 fn temporal_block(
     slice: &Slice<'_>,
-    col: Option<(i32, &Mb)>,
+    col: Option<(i32, &super::Colocated)>,
     bx: usize,
     by: usize,
 ) -> (i8, [i16; 2], [i16; 2]) {
@@ -8364,7 +10464,7 @@ fn temporal_block(
     }
     let part = (by / 2) * 2 + (bx / 2);
     let index = if slice.sps.direct_8x8_inference {
-        (by & !1) * 4 + (bx & !1)
+        corner_block(bx, by)
     } else {
         by * 4 + bx
     };
@@ -8404,6 +10504,97 @@ fn temporal_block(
     (ref0, mv0, mv1)
 }
 
+/// Clause 8.4.1.2.3 for one 8×8 quarter of a macroblock in a
+/// macroblock-adaptive frame. `at` is the macroblock's grid position and
+/// whether it is a field macroblock; `col` is the first list-1 picture.
+///
+/// The co-located block may be of the other kind. Its vertical vector is
+/// then doubled, for a frame macroblock over a field one, or halved. A frame
+/// macroblock predicts from the frame the co-located block's reference
+/// belongs to. A field macroblock predicts from the very field a co-located
+/// field block used, or from the field of its own parity of a frame block's
+/// reference, and its distances are measured between fields.
+fn temporal_quarter<S: Sample>(
+    pic: &Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    col: &Frame<S>,
+    at: (usize, usize, bool),
+    quarter: (usize, usize),
+) -> (i8, [i16; 2], [i16; 2]) {
+    let still = (0, [0, 0], [0, 0]);
+    let (mx, my, field) = at;
+    let place = mbaff::col_block(col, slice.poc, (mx, my), field, quarter);
+    let Some(block) = col.mb_at(place.slot) else {
+        return still;
+    };
+    if block.intra || block.pcm {
+        return still;
+    }
+    let part = place.block / 8 * 2 + place.block % 4 / 2;
+    let (mv_col, ref_poc, ref_col) = if block.ref0[part] >= 0 {
+        (
+            block.mv0[place.block],
+            block.ref_poc0[part],
+            block.ref0[part],
+        )
+    } else if block.ref1[part] >= 0 {
+        (
+            block.mv1[place.block],
+            block.ref_poc1[part],
+            block.ref1[part],
+        )
+    } else {
+        return still;
+    };
+    // The frame that reference belongs to, by its place in this slice's list 0.
+    let frame0 = slice
+        .poc0
+        .iter()
+        .position(|&poc| poc == ref_poc)
+        .unwrap_or(0);
+    let (Some(&frame_poc), Some(&slot)) = (slice.poc0.get(frame0), slice.ref0.get(frame0)) else {
+        return still;
+    };
+    let (index, vertical) = match (field, block.field_mb) {
+        (false, false) => (frame0, mv_col[1]),
+        (true, true) => (2 * frame0 + usize::from(ref_col & 1 == 1), mv_col[1]),
+        (false, true) => (frame0, mv_col[1].saturating_mul(2)),
+        (true, false) => (2 * frame0, mv_col[1] / 2),
+    };
+    let Ok(ref0) = i8::try_from(index) else {
+        return still;
+    };
+    let mv_col = [mv_col[0], vertical];
+    let (current, pic0, pic1) = if field {
+        let parity = my & 1;
+        let Some(first) = dpb.get(slot) else {
+            return still;
+        };
+        (
+            pic.field_poc[parity],
+            first.field_poc[parity ^ (index & 1)],
+            col.field_poc[parity],
+        )
+    } else {
+        (slice.poc, frame_poc, col.poc)
+    };
+    let long = slice.long0.get(frame0).copied().unwrap_or(false);
+    let td = (pic1 - pic0).clamp(-128, 127);
+    if long || td == 0 {
+        return (ref0, mv_col, [0, 0]);
+    }
+    let tb = (current - pic0).clamp(-128, 127);
+    let tx = (16_384 + (td.abs() / 2)) / td;
+    let factor = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
+    let mv0 = [scale_mv(factor, mv_col[0]), scale_mv(factor, mv_col[1])];
+    let mv1 = [
+        clip_mv(i32::from(mv0[0]) - i32::from(mv_col[0])),
+        clip_mv(i32::from(mv0[1]) - i32::from(mv_col[1])),
+    ];
+    (ref0, mv0, mv1)
+}
+
 fn scale_mv(factor: i32, component: i16) -> i16 {
     clip_mv((factor * i32::from(component) + 128) >> 8)
 }
@@ -8413,55 +10604,113 @@ fn clip_mv(value: i32) -> i16 {
 }
 
 /// Clause 8.4.1.2.2. One reference pair for the macroblock; each 4×4 may be forced to a zero vector.
+/// `true` means the whole macroblock was filled with one motion at once.
+/// `records` are the picture's macroblock records that a frame
+/// macroblock's neighbours are read from, at least those before it.
 fn apply_direct<S: Sample>(
     pic: &Frame<S>,
+    records: &[Mb],
     dpb: &[Frame<S>],
     slice: &Slice<'_>,
-    mx: usize,
-    my: usize,
+    (mx, my): (usize, usize),
     mb: &mut Mb,
     blocks: &[(usize, usize)],
-) {
+) -> bool {
     if !slice.spatial_direct {
-        temporal_direct(pic, dpb, slice, mx, my, mb, blocks);
-        return;
+        return temporal_direct(pic, dpb, slice, mx, my, mb, blocks);
     }
-    let (ref0, ref1, zero) = direct_refs(pic, mx, my, mb);
-    let pred0 = if zero || ref0 < 0 {
-        [0, 0]
-    } else {
-        mvp(
-            pic,
-            Place { mx, my },
-            Cell { bx: 0, by: 0 },
-            (16, 16),
-            0,
-            ref0,
-            mb,
-        )
+    let (ref0, ref1, zero, near) = direct_refs(pic, records, mx, my, mb);
+    // The predictors of a 16×16 partition, from the same neighbours.
+    let pred = |reference: i8, near| {
+        if zero || reference < 0 {
+            [0, 0]
+        } else {
+            mvp_pick((16, 16), Cell { bx: 0, by: 0 }, reference, near)
+        }
     };
-    let pred1 = if zero || ref1 < 0 {
-        [0, 0]
-    } else {
-        mvp(
-            pic,
-            Place { mx, my },
-            Cell { bx: 0, by: 0 },
-            (16, 16),
-            1,
-            ref1,
-            mb,
-        )
-    };
+    let (pred0, pred1) = (pred(ref0, near[0]), pred(ref1, near[1]));
     let addr = my * pic.mb_w + mx;
+    // The co-located block is asked about only for a reference index of 0,
+    // and its macroblock is the same for every block here.
+    let col_matters = !zero && (ref0 == 0 || ref1 == 0);
+    let col_mb = if col_matters && !pic.mbaff {
+        col_macroblock(dpb, slice, addr)
+    } else {
+        None
+    };
+    // In a macroblock-adaptive frame the co-located block depends on how
+    // each of the two pictures coded the pair, quarter by quarter.
+    let col_frame = if col_matters && pic.mbaff {
+        slice
+            .ref1
+            .first()
+            .and_then(|&index| dpb.get(index))
+            .filter(|frame| !frame.long_term)
+    } else {
+        None
+    };
+    // A whole macroblock whose blocks all get the same answer from the
+    // co-located one is filled at once: no co-located macroblock to ask,
+    // or, with 8×8 inference, four corner blocks that agree.
+    if blocks.len() == 16 && col_frame.is_none() {
+        // With 8×8 inference each quarter asks its corner block, so a
+        // quarter is filled at once too.
+        let corners = match col_mb {
+            None => Some([false; 4]),
+            Some(col) if slice.sps.direct_8x8_inference => {
+                Some([0, 3, 12, 15].map(|corner| corner_col_zero(col, corner)))
+            }
+            Some(_) => None,
+        };
+        if let Some(corners) = corners {
+            let still = |reference: i8, col_zero: bool| {
+                zero || reference < 0 || (reference == 0 && col_zero)
+            };
+            mb.ref0 = [if zero { 0 } else { ref0 }; 4];
+            mb.ref1 = [if zero { 0 } else { ref1 }; 4];
+            mb.ready = u16::MAX;
+            if corners[1..].iter().all(|&other| other == corners[0]) {
+                mb.mv0 = [if still(ref0, corners[0]) {
+                    [0, 0]
+                } else {
+                    pred0
+                }; 16];
+                mb.mv1 = [if still(ref1, corners[0]) {
+                    [0, 0]
+                } else {
+                    pred1
+                }; 16];
+                return true;
+            }
+            for (part, &col_zero) in corners.iter().enumerate() {
+                let mv0 = if still(ref0, col_zero) { [0, 0] } else { pred0 };
+                let mv1 = if still(ref1, col_zero) { [0, 0] } else { pred1 };
+                let corner = (part / 2) * 8 + (part % 2) * 2;
+                for index in [corner, corner + 1, corner + 4, corner + 5] {
+                    mb.mv0[index] = mv0;
+                    mb.mv1[index] = mv1;
+                }
+            }
+            return false;
+        }
+    }
     for &(bx, by) in blocks {
         let index = by * 4 + bx;
-        let col = if slice.sps.direct_8x8_inference {
-            (by & !1) * 4 + (bx & !1)
+        let col_zero = if let Some(frame) = col_frame {
+            let place = mbaff::col_block(frame, slice.poc, (mx, my), mb.field_mb, (bx / 2, by / 2));
+            frame
+                .mb_at(place.slot)
+                .is_some_and(|col| !col.intra && !col.pcm && col_zero(col, place.block))
         } else {
-            index
+            col_matters
+                && col_mb.is_some_and(|mb| {
+                    if slice.sps.direct_8x8_inference {
+                        corner_col_zero(mb, corner_block(bx, by))
+                    } else {
+                        col_zero(mb, index)
+                    }
+                })
         };
-        let col_zero = col_zero(dpb, slice, addr, col);
         mb.mv0[index] = if zero || ref0 < 0 || (ref0 == 0 && col_zero) {
             [0, 0]
         } else {
@@ -8477,28 +10726,75 @@ fn apply_direct<S: Sample>(
         mb.ref1[part] = if zero { 0 } else { ref1 };
         mb.ready |= 1 << index;
     }
+    false
 }
 
-fn direct_refs<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb) -> (i8, i8, bool) {
-    let reference = |list: usize| {
+/// The reference indices of spatial direct prediction, clause 8.4.1.2.2,
+/// whether both came out unused (and so are 0), and each list's motion
+/// left of, above, and above and right of the macroblock that they came
+/// from, which its motion vector predictors are made from too.
+#[allow(clippy::type_complexity)]
+fn direct_refs<S: Sample>(
+    pic: &Frame<S>,
+    records: &[Mb],
+    mx: usize,
+    my: usize,
+    mb: &Mb,
+) -> (i8, i8, bool, [(Motion, Motion, Motion); 2]) {
+    let motions = if pic.mbaff {
+        direct_near_mbaff(pic, mx, my, mb)
+    } else {
+        // Every neighbour is a frame macroblock, so each is found once and
+        // read for both lists: block 3 of the one to the left, block 12 of
+        // the one above and of the one above and right, and when that is
+        // missing, block 15 of the one above and left.
+        let (x, y) = (mx as i32, my as i32);
+        let grid = (pic.mb_w, pic.h / 16);
+        let near = |x, y| neighbor_in(records, grid, x, y, mb.slice);
+        let left = near(x - 1, y);
+        let above = near(x, y - 1);
+        let (diagonal, index) = match near(x + 1, y - 1) {
+            Some(right) => (Some(right), 12),
+            None => (near(x - 1, y - 1), 15),
+        };
+        let near = |list: usize| {
+            let at = |side: Option<&Mb>, index: usize| {
+                side.map_or(ABSENT, |side| motion_of(side, index, list))
+            };
+            (at(left, 3), at(above, 12), at(diagonal, index))
+        };
+        [near(0), near(1)]
+    };
+    let reference = |(a, b, c): (Motion, Motion, Motion)| {
+        min_positive(a.reference, min_positive(b.reference, c.reference))
+    };
+    let (ref0, ref1) = (reference(motions[0]), reference(motions[1]));
+    if ref0 < 0 && ref1 < 0 {
+        return (0, 0, true, motions);
+    }
+    (ref0, ref1, false, motions)
+}
+
+/// [`direct_refs`]'s neighbouring motion in a macroblock-adaptive frame.
+#[inline(never)]
+fn direct_near_mbaff<S: Sample>(
+    pic: &Frame<S>,
+    mx: usize,
+    my: usize,
+    mb: &Mb,
+) -> [(Motion, Motion, Motion); 2] {
+    let near = |list: usize| {
         let a = part_motion(pic, mx, my, -1, 0, list, mb);
         let b = part_motion(pic, mx, my, 0, -1, list, mb);
         let right = part_motion(pic, mx, my, 4, -1, list, mb);
         let c = if right.available {
             right
         } else {
-            part_motion(pic, mx, my, -1, -1, list, mb)
+            corner_motion(pic, mx, my, 0, 0, list, mb)
         };
-        min_positive(a.reference, min_positive(b.reference, c.reference))
+        (a, b, c)
     };
-    let mut ref0 = reference(0);
-    let mut ref1 = reference(1);
-    if ref0 < 0 && ref1 < 0 {
-        ref0 = 0;
-        ref1 = 0;
-        return (ref0, ref1, true);
-    }
-    (ref0, ref1, false)
+    [near(0), near(1)]
 }
 
 fn min_positive(left: i8, right: i8) -> i8 {
@@ -8509,22 +10805,43 @@ fn min_positive(left: i8, right: i8) -> i8 {
     }
 }
 
-fn col_zero<S: Sample>(dpb: &[Frame<S>], slice: &Slice<'_>, addr: usize, index: usize) -> bool {
-    let Some(&frame_index) = slice.ref1.first() else {
-        return false;
-    };
-    let Some(frame) = dpb.get(frame_index) else {
-        return false;
-    };
+/// The co-located macroblock, when it is one whose motion can make a
+/// direct block's vector zero: an inter macroblock of a short-term first
+/// list-1 picture.
+fn col_macroblock<'a, S: Sample>(
+    dpb: &'a [Frame<S>],
+    slice: &Slice<'_>,
+    addr: usize,
+) -> Option<&'a super::Colocated> {
+    let frame = dpb.get(*slice.ref1.first()?)?;
     if frame.long_term {
-        return false;
+        return None;
     }
-    let Some(col) = frame.mb.get(addr) else {
-        return false;
-    };
-    if col.intra || col.pcm {
-        return false;
-    }
+    let col = frame.mb_at(addr)?;
+    (!col.intra && !col.pcm).then_some(col)
+}
+
+/// The co-located 4×4 block for block (`bx`, `by`) under
+/// `direct_8x8_inference_flag`, clause 8.4.1.2.1: the block in the
+/// macroblock's own corner of the 8×8 quarter that holds it
+/// (luma4x4BlkIdx 5 × mbPartIdx: 0, 5, 10, 15), not that quarter's first
+/// block. The two differ when the co-located macroblock has partitions
+/// smaller than 8×8.
+fn corner_block(bx: usize, by: usize) -> usize {
+    let corner = |at: usize| if at < 2 { 0 } else { 3 };
+    corner(by) * 4 + corner(bx)
+}
+
+/// colZeroFlag of clause 8.4.1.2.2 for block `index` of that macroblock.
+/// [`col_zero`] for corner block `index` (0, 3, 12 or 15) of a frame
+/// macroblock of a picture with 8×8 inference, as worked out with its
+/// motion.
+fn corner_col_zero(col: &super::Colocated, index: usize) -> bool {
+    debug_assert_eq!(col.zero >> index & 1 == 1, col_zero(col, index));
+    col.zero >> index & 1 == 1
+}
+
+fn col_zero(col: &super::Colocated, index: usize) -> bool {
     let part = (index / 4 / 2) * 2 + ((index % 4) / 2);
     let (mv, reference) = if col.ref0[part] >= 0 {
         (col.mv0[index], col.ref0[part])
@@ -8676,16 +10993,21 @@ fn ref_luma<S: Sample>(frame: &Frame<S>, x: i32, y: i32, frac: (i32, i32)) -> i3
     sample[0].into()
 }
 
+/// The inter prediction of macroblock (`mx`, `my`). `whole` says the
+/// caller knows one motion covers it, as in a 16×16 partition.
+#[inline(always)]
 fn predict_inter<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],
     slice: &Slice<'_>,
-    mx: usize,
-    my: usize,
+    (mx, my, whole): (usize, usize, bool),
     mb: &Mb,
 ) -> Result<(), CodecError> {
+    if mb.field_mb {
+        return mbaff::predict_field(pic, dpb, slice, (mx, my), mb);
+    }
     if mb.alc && slice.weighted {
-        for part in partitions(super::syntax_kind(slice.kind), mb.alc_spec) {
+        for part in partitions(super::syntax_kind(slice.kind), mb.alc_spec).iter() {
             if !part.l0 {
                 continue;
             }
@@ -8715,6 +11037,115 @@ fn predict_inter<S: Sample>(
             )?;
         }
         return Ok(());
+    }
+    // References of a smaller picture stay in the cache, and asking for
+    // their samples only costs: without it 720×1280 decoded 1.4% faster,
+    // and 1920×1080 2.6% slower.
+    let prefetch = pic.w.saturating_mul(pic.h) >= PREFETCH_FROM;
+    if prefetch {
+        prefetch_motion(pic, dpb, slice, (mx, my), mb, 0);
+    }
+    predict_parts(pic, dpb, slice, (mx, my, whole), mb)?;
+    if prefetch {
+        prefetch_motion(pic, dpb, slice, (mx, my), mb, 1);
+    }
+    Ok(())
+}
+
+/// Luma samples from which [`prefetch_motion`] asks for reference samples.
+const PREFETCH_FROM: usize = 1_500_000;
+
+/// Asks the cache for reference samples a macroblock four further along
+/// the row is likely to read, from where this one's first block points in
+/// list `list`, as FFmpeg's `prefetch_motion` does: 64 luma samples to the
+/// right, eight rows, and in each chroma plane four, the rows taking turns
+/// over two macroblocks so that all of them come. Eight rows at a time
+/// beat FFmpeg's four on a 4K film; sixteen did no better. A reference
+/// another thread is decoding, or has decoded, is read from the rows it
+/// has published, and only those are asked for.
+fn prefetch_motion<S: Sample>(
+    pic: &Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    (mx, my): (usize, usize),
+    mb: &Mb,
+    list: usize,
+) {
+    let (reference, mv) = if list == 0 {
+        (mb.ref0[0], mb.mv0[0])
+    } else {
+        (mb.ref1[0], mb.mv1[0])
+    };
+    if reference < 0 || pic.chroma() != 1 {
+        return;
+    }
+    let Ok(frame) = reference_frame(dpb, slice, list, reference) else {
+        return;
+    };
+    let (y_plane, u_plane, v_plane) = match &frame.pending {
+        Some(published) => published.filled_planes(),
+        None => (&frame.y[..], &frame.u[..], &frame.v[..]),
+    };
+    let (Ok(mx), Ok(my)) = (i64::try_from(mx), i64::try_from(my)) else {
+        return;
+    };
+    let x = i64::from(mv[0] >> 2) + 16 * mx + 8;
+    let y = i64::from(mv[1] >> 2) + 16 * my;
+    let stride = frame.w;
+    let Ok(down) = i64::try_from(stride) else {
+        return;
+    };
+    let at = x + 64 + (y + (mx & 1) * 8) * down;
+    if let Ok(at) = usize::try_from(at) {
+        S::prefetch(y_plane, at, stride, 8);
+    }
+    let at = (x >> 1) + 64 + ((y >> 1) + (mx & 1) * 4) * (down / 2);
+    if let Ok(at) = usize::try_from(at) {
+        S::prefetch(u_plane, at, stride / 2, 4);
+        S::prefetch(v_plane, at, stride / 2, 4);
+    }
+}
+
+/// The partitions of a frame macroblock that is not ALC-weighted, each
+/// predicted in turn. `whole` as for [`predict_inter`].
+fn predict_parts<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    (mx, my, whole): (usize, usize, bool),
+    mb: &Mb,
+) -> Result<(), CodecError> {
+    // One motion for the whole macroblock, as in a skipped or 16×16 one:
+    // the search for equal neighbours below would find just this. When the
+    // caller knows, the vectors are not compared: whether they all match
+    // is hard to guess ahead.
+    if whole
+        || (mb.mv0 == [mb.mv0[0]; 16]
+            && mb.mv1 == [mb.mv1[0]; 16]
+            && mb.ref0 == [mb.ref0[0]; 4]
+            && mb.ref1 == [mb.ref1[0]; 4])
+    {
+        return mc_block(
+            pic,
+            dpb,
+            slice,
+            Block {
+                x: mx * 16,
+                y: my * 16,
+                w: 16,
+                h: 16,
+            },
+            McMotion {
+                r0: mb.ref0[0],
+                r1: mb.ref1[0],
+                mv0: mb.mv0[0],
+                mv1: mb.mv1[0],
+            },
+            None,
+        );
+    }
+    if let Some(quarters) = quarter_motions(mb) {
+        return predict_quarters(pic, dpb, slice, (mx, my), quarters);
     }
     let mut done = [false; 16];
     for by in 0..4 {
@@ -8765,6 +11196,67 @@ fn predict_inter<S: Sample>(
     Ok(())
 }
 
+/// The motion of each 8×8 quarter of `mb`, in raster order, when each
+/// has one throughout, as with 16×8, 8×16 and 8×8 partitions; `None` when
+/// any is split further. The blocks are compared all together rather
+/// than one by one, as which match is hard to guess ahead.
+#[inline]
+fn quarter_motions(mb: &Mb) -> Option<[McMotion; 4]> {
+    let flat = |mvs: &[[i16; 2]; 16]| {
+        let mut same = true;
+        for first in [0, 2, 8, 10] {
+            let mv = mvs[first];
+            same &= (mvs[first + 1] == mv) & (mvs[first + 4] == mv) & (mvs[first + 5] == mv);
+        }
+        same
+    };
+    if !(flat(&mb.mv0) & flat(&mb.mv1)) {
+        return None;
+    }
+    Some([0, 2, 8, 10].map(|first| {
+        let quarter = first / 8 * 2 + first % 4 / 2;
+        McMotion {
+            r0: mb.ref0[quarter],
+            r1: mb.ref1[quarter],
+            mv0: mb.mv0[first],
+            mv1: mb.mv1[first],
+        }
+    }))
+}
+
+/// [`predict_parts`] for a macroblock whose quarters each have one
+/// motion: a half is predicted at once where its two quarters match.
+fn predict_quarters<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    (mx, my): (usize, usize),
+    quarters: [McMotion; 4],
+) -> Result<(), CodecError> {
+    let same = |a: McMotion, b: McMotion| (a.r0, a.r1, a.mv0, a.mv1) == (b.r0, b.r1, b.mv0, b.mv1);
+    let [q0, q1, q2, q3] = quarters;
+    let (x, y) = (mx * 16, my * 16);
+    let block = |bx: usize, by: usize, w: usize, h: usize| Block {
+        x: x + bx,
+        y: y + by,
+        w,
+        h,
+    };
+    if same(q0, q2) && same(q1, q3) && !(same(q0, q1) && same(q2, q3)) {
+        mc_block(pic, dpb, slice, block(0, 0, 8, 16), q0, None)?;
+        return mc_block(pic, dpb, slice, block(8, 0, 8, 16), q1, None);
+    }
+    for (row, (left, right)) in [(0, (q0, q1)), (8, (q2, q3))] {
+        if same(left, right) {
+            mc_block(pic, dpb, slice, block(0, row, 16, 8), left, None)?;
+        } else {
+            mc_block(pic, dpb, slice, block(0, row, 8, 8), left, None)?;
+            mc_block(pic, dpb, slice, block(8, row, 8, 8), right, None)?;
+        }
+    }
+    Ok(())
+}
+
 fn same_motion(
     mb: &Mb,
     bx: usize,
@@ -8788,6 +11280,7 @@ struct Block {
     h: usize,
 }
 
+#[derive(Clone, Copy)]
 struct McMotion {
     r0: i8,
     r1: i8,
@@ -8800,6 +11293,11 @@ struct AlcWeight {
     denom: i32,
 }
 
+/// One partition predicted into the picture. The common one, copied or
+/// averaged from inside its references, is written here; anything else
+/// goes to [`mc_general`], kept out of line so this stays small. Inlined
+/// at each of its callers: with a call, a TikTok clip took 1.1% more cycles.
+#[inline(always)]
 fn mc_block<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],
@@ -8808,18 +11306,52 @@ fn mc_block<S: Sample>(
     motion: McMotion,
     alc: Option<AlcWeight>,
 ) -> Result<(), CodecError> {
+    let McMotion { r0, r1, .. } = motion;
+    // Neither explicit weights other than the default ones, nor implicit
+    // weights other than equal ones, nor ALC's: one prediction is copied
+    // and two are averaged.
+    let default = |list: usize, reference: i8| {
+        reference < 0
+            || !slice.weighted
+            || (reference < 32 && slice.unweighted[list] >> reference & 1 == 1)
+    };
+    let plain = alc.is_none()
+        && default(0, r0)
+        && default(1, r1)
+        && (r0 < 0
+            || r1 < 0
+            || slice.pps.weighted_bipred != 2
+            || slice.kind != 1
+            || implicit_weights(slice, r0, r1) == (32, 32));
+    let done = if pic.separate_plane || pic.chroma() != 1 {
+        (false, false)
+    } else if plain {
+        mc_plain(pic, dpb, slice, &block, motion)?
+    } else if alc.is_none() {
+        mc_weighted(pic, dpb, slice, &block, motion)?
+    } else {
+        (false, false)
+    };
+    if done == (true, true) {
+        return Ok(());
+    }
+    mc_general(pic, dpb, slice, block, motion, alc, done)
+}
+
+/// [`mc_block`] for what [`mc_plain`] did not write: the luma block, the
+/// chroma one, or both, as `done` says.
+#[inline(never)]
+fn mc_general<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    block: Block,
+    motion: McMotion,
+    alc: Option<AlcWeight>,
+    (luma_done, chroma_done): (bool, bool),
+) -> Result<(), CodecError> {
     let Block { x, y, w, h } = block;
     let McMotion { r0, r1, mv0, mv1 } = motion;
-    let mut luma0 = [S::default(); 256];
-    let mut luma1 = [S::default(); 256];
-    if r0 >= 0 {
-        let frame = reference_frame(dpb, slice, 0, r0)?;
-        predict_luma(&mut luma0, frame, x, y, w, h, mv0);
-    }
-    if r1 >= 0 {
-        let frame = reference_frame(dpb, slice, 1, r1)?;
-        predict_luma(&mut luma1, frame, x, y, w, h, mv1);
-    }
     let chroma = pic.chroma();
     let separate = pic.separate_plane;
     let (cw, ch) = match chroma {
@@ -8827,58 +11359,90 @@ fn mc_block<S: Sample>(
         2 => (w / 2, h),
         _ => (w / 2, h / 2),
     };
-    let mut u0 = [S::default(); 256];
-    let mut v0 = [S::default(); 256];
-    let mut u1 = [S::default(); 256];
-    let mut v1 = [S::default(); 256];
-    if !separate && r0 >= 0 && cw > 0 && ch > 0 {
-        let frame = reference_frame(dpb, slice, 0, r0)?;
-        predict_chroma((&mut u0, &mut v0), frame, (x, y), (cw, ch), mv0);
-    }
-    if !separate && r1 >= 0 && cw > 0 && ch > 0 {
-        let frame = reference_frame(dpb, slice, 1, r1)?;
-        predict_chroma((&mut u1, &mut v1), frame, (x, y), (cw, ch), mv1);
-    }
-    let luma_mix = if let Some(AlcWeight { weight, denom }) = alc {
-        Mix::Uni {
+    let (luma_mix, chroma_mix, chroma_v) = if let Some(AlcWeight { weight, denom }) = alc {
+        let chroma = Mix::Uni {
+            weight: 1,
+            offset: 0,
+            denom: 0,
+            from: 0,
+        };
+        let luma = Mix::Uni {
             weight,
             offset: 0,
             denom,
             from: 0,
-        }
+        };
+        (luma, chroma, chroma)
+    } else if slice.weighted {
+        (
+            mix(slice, r0, r1, -1),
+            mix(slice, r0, r1, 0),
+            mix(slice, r0, r1, 1),
+        )
     } else {
-        mix(slice, r0, r1, -1)
+        // Only explicit weights differ from one plane to the next.
+        let same = mix(slice, r0, r1, -1);
+        (same, same, same)
     };
-    let chroma_mix = if alc.is_some() {
-        Mix::Uni {
-            weight: 1,
-            offset: 0,
-            denom: 0,
-            from: 0,
-        }
+    // One reference: predict straight into the picture, and weight it
+    // there when it is weighted.
+    if luma_done {
+    } else if let Mix::Copy(list) | Mix::Uni { from: list, .. } = luma_mix {
+        let (reference, mv) = if list == 0 { (r0, mv0) } else { (r1, mv1) };
+        let frame = reference_frame(dpb, slice, list, reference)?;
+        let stride = pic.w;
+        let dst = &mut pic.y[y * stride + x..];
+        predict_block(dst, stride, frame, (x, y, w, h), mv);
+        scale_in_place(dst, stride, (w, h), luma_mix);
+    } else if luma_mix.averages() && avg_luma(pic, dpb, slice, (x, y, w, h), motion)? {
+    } else if let Mix::Weighted(weight) = luma_mix
+        && r0 >= 0
+        && r1 >= 0
+    {
+        // Two references weighted: the first predicted straight into the
+        // picture, and the second mixed into it there.
+        let stride = pic.w;
+        let dst = &mut pic.y[y * stride + x..];
+        predict_block(
+            dst,
+            stride,
+            reference_frame(dpb, slice, 0, r0)?,
+            (x, y, w, h),
+            mv0,
+        );
+        let mut second = [S::default(); 256];
+        predict_luma(
+            &mut second,
+            reference_frame(dpb, slice, 1, r1)?,
+            x,
+            y,
+            w,
+            h,
+            mv1,
+        );
+        weight_onto(dst, stride, &second, (w, h), weight);
     } else {
-        mix(slice, r0, r1, 0)
-    };
-    let chroma_v = if alc.is_some() {
-        Mix::Uni {
-            weight: 1,
-            offset: 0,
-            denom: 0,
-            from: 0,
+        let mut luma0 = [S::default(); 256];
+        let mut luma1 = [S::default(); 256];
+        if r0 >= 0 {
+            let frame = reference_frame(dpb, slice, 0, r0)?;
+            predict_luma(&mut luma0, frame, x, y, w, h, mv0);
         }
-    } else {
-        mix(slice, r0, r1, 1)
-    };
-    store_block(
-        &mut pic.y,
-        pic.w,
-        (x, y),
-        (w, h),
-        (&luma0, &luma1),
-        luma_mix,
-        S::default(),
-    );
-    if !separate && cw > 0 && ch > 0 {
+        if r1 >= 0 {
+            let frame = reference_frame(dpb, slice, 1, r1)?;
+            predict_luma(&mut luma1, frame, x, y, w, h, mv1);
+        }
+        store_block(
+            &mut pic.y,
+            pic.w,
+            (x, y),
+            (w, h),
+            (&luma0, &luma1),
+            luma_mix,
+            S::default(),
+        );
+    }
+    if !separate && cw > 0 && ch > 0 && !chroma_done {
         let stride = if chroma == 3 { pic.w } else { pic.w / 2 };
         let origin = match chroma {
             3 => (x, y),
@@ -8886,6 +11450,74 @@ fn mc_block<S: Sample>(
             _ => (x / 2, y / 2),
         };
         let size = (cw, ch);
+        if let (Mix::Copy(list) | Mix::Uni { from: list, .. }, Mix::Copy(_) | Mix::Uni { .. }) =
+            (chroma_mix, chroma_v)
+        {
+            let (reference, mv) = if list == 0 { (r0, mv0) } else { (r1, mv1) };
+            let frame = reference_frame(dpb, slice, list, reference)?;
+            let at = origin.1 * stride + origin.0;
+            let planes = (&mut pic.u[at..], &mut pic.v[at..]);
+            // Both planes in one go when the block's reach is inside the
+            // reference, each on its own otherwise.
+            let fast = chroma == 1
+                && chroma_sources(frame, (origin, size), mv).is_some_and(|source| {
+                    S::chroma_planes_fast((planes.0, planes.1, stride), size, source, None)
+                });
+            if !fast {
+                predict_chroma(
+                    (&mut pic.u[at..], &mut pic.v[at..]),
+                    stride,
+                    frame,
+                    (x, y),
+                    size,
+                    mv,
+                );
+            }
+            scale_in_place(&mut pic.u[at..], stride, size, chroma_mix);
+            scale_in_place(&mut pic.v[at..], stride, size, chroma_v);
+            return Ok(());
+        }
+        if chroma == 1
+            && chroma_mix.averages()
+            && chroma_v.averages()
+            && avg_chroma(pic, dpb, slice, (origin, size), motion)?
+        {
+            return Ok(());
+        }
+        if let (Mix::Weighted(weight_u), Mix::Weighted(weight_v)) = (chroma_mix, chroma_v)
+            && r0 >= 0
+            && r1 >= 0
+        {
+            let at = origin.1 * stride + origin.0;
+            let first = reference_frame(dpb, slice, 0, r0)?;
+            predict_chroma(
+                (&mut pic.u[at..], &mut pic.v[at..]),
+                stride,
+                first,
+                (x, y),
+                size,
+                mv0,
+            );
+            let mut u1 = [S::default(); 256];
+            let mut v1 = [S::default(); 256];
+            let second = reference_frame(dpb, slice, 1, r1)?;
+            predict_chroma((&mut u1, &mut v1), cw, second, (x, y), size, mv1);
+            weight_onto(&mut pic.u[at..], stride, &u1, size, weight_u);
+            weight_onto(&mut pic.v[at..], stride, &v1, size, weight_v);
+            return Ok(());
+        }
+        let mut u0 = [S::default(); 256];
+        let mut v0 = [S::default(); 256];
+        let mut u1 = [S::default(); 256];
+        let mut v1 = [S::default(); 256];
+        if r0 >= 0 {
+            let frame = reference_frame(dpb, slice, 0, r0)?;
+            predict_chroma((&mut u0, &mut v0), cw, frame, (x, y), size, mv0);
+        }
+        if r1 >= 0 {
+            let frame = reference_frame(dpb, slice, 1, r1)?;
+            predict_chroma((&mut u1, &mut v1), cw, frame, (x, y), size, mv1);
+        }
         store_block(
             &mut pic.u,
             stride,
@@ -8908,6 +11540,391 @@ fn mc_block<S: Sample>(
     Ok(())
 }
 
+/// A partition of a 4:2:0 picture whose one prediction is copied or whose
+/// two are averaged, written straight into the picture by the kernels
+/// when every sample their taps read is inside the references: the
+/// common case, without the steps weights and edges need. Whether the
+/// luma and the chroma block were written; what was not is left alone.
+#[inline]
+fn mc_plain<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    block: &Block,
+    motion: McMotion,
+) -> Result<(bool, bool), CodecError> {
+    let Block { x, y, w, h } = *block;
+    let first = if motion.r0 >= 0 {
+        Some((reference_frame(dpb, slice, 0, motion.r0)?, motion.mv0))
+    } else {
+        None
+    };
+    let second = if motion.r1 >= 0 {
+        Some((reference_frame(dpb, slice, 1, motion.r1)?, motion.mv1))
+    } else {
+        None
+    };
+    let (one, two) = match (first, second) {
+        (Some(one), two) => (one, two),
+        (None, Some(two)) => (two, None),
+        (None, None) => return Ok((false, false)),
+    };
+    let (Some(one), two) = (
+        ref_planes(one.0, block, one.1),
+        two.map(|(frame, mv)| ref_planes(frame, block, mv)),
+    ) else {
+        return Ok((false, false));
+    };
+    let two = match two {
+        Some(None) => return Ok((false, false)),
+        Some(Some(two)) => Some(two),
+        None => None,
+    };
+    let (stride, size) = (pic.w, (pic.w, pic.h));
+    Ok(S::plain_fast(
+        (&mut pic.y, &mut pic.u, &mut pic.v, stride, size),
+        (x, y, w, h),
+        one,
+        two,
+    ))
+}
+
+/// The planes of `frame` that a 4:2:0 partition `block` moved by `mv`
+/// reads, for [`Sample::plain_fast`]: all of them, or of a picture another
+/// thread is decoding, the rows the block reads once they are in. `None`
+/// when that picture failed.
+#[inline(always)]
+fn ref_planes<'a, S: Sample>(
+    frame: &'a Frame<S>,
+    block: &Block,
+    mv: [i16; 2],
+) -> Option<recon::RefPlanes<'a, S>> {
+    let (y, u, v) = match &frame.pending {
+        None => (&frame.y[..], &frame.u[..], &frame.v[..]),
+        Some(published) => published_planes(published, block, mv)?,
+    };
+    Some(recon::RefPlanes {
+        y,
+        u,
+        v,
+        stride: frame.w,
+        pic: (frame.w, frame.h),
+        mv,
+    })
+}
+
+/// [`ref_planes`] of a picture another thread is decoding.
+#[inline(never)]
+fn published_planes<'a, S: Sample>(
+    published: &'a super::progress::Published<S>,
+    block: &Block,
+    mv: [i16; 2],
+) -> Option<(&'a [S], &'a [S], &'a [S])> {
+    let (x, y) = (i32::try_from(block.x).ok()?, i32::try_from(block.y).ok()?);
+    let (mvx, mvy) = (i32::from(mv[0]), i32::from(mv[1]));
+    let luma = published
+        .luma(x + (mvx >> 2), y + (mvy >> 2), block.h)
+        .ok()?;
+    let (cx, cy) = (x / 2 + (mvx >> 3), y / 2 + (mvy >> 3));
+    let cb = published.chroma(true, cx, cy, block.h / 2).ok()?;
+    let cr = published.chroma(false, cx, cy, block.h / 2).ok()?;
+    // Each plane holds every row the block reads; one may hold more.
+    let len = cb.samples.len().min(cr.samples.len());
+    Some((luma.samples, cb.samples.get(..len)?, cr.samples.get(..len)?))
+}
+
+/// [`mc_plain`] for a partition of a 4:2:0 picture that is weighted: one
+/// prediction written straight into the picture and weighted there (each
+/// plane only when its weights are not the default ones), or
+/// two weighted together, the first written into the picture and the
+/// second beside it, as FFmpeg's `mc_part_weighted` does. Each plane is
+/// written only when every sample its taps read is inside the references;
+/// whether the luma and the chroma block were.
+#[inline(never)]
+fn mc_weighted<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    block: &Block,
+    motion: McMotion,
+) -> Result<(bool, bool), CodecError> {
+    let Block { x, y, w, h } = *block;
+    let McMotion { r0, r1, mv0, mv1 } = motion;
+    let (luma_mix, cb_mix, cr_mix) = (
+        mix(slice, r0, r1, -1),
+        mix(slice, r0, r1, 0),
+        mix(slice, r0, r1, 1),
+    );
+    let area = (x, y, w, h);
+    let stride = pic.w;
+    let place = ((x / 2, y / 2), (w / 2, h / 2));
+    let half = stride / 2;
+    let at = place.0.1 * half + place.0.0;
+    match (luma_mix, cb_mix, cr_mix) {
+        (
+            Mix::Copy(from) | Mix::Uni { from, .. },
+            Mix::Copy(_) | Mix::Uni { .. },
+            Mix::Copy(_) | Mix::Uni { .. },
+        ) => {
+            let (reference, mv) = if from == 0 { (r0, mv0) } else { (r1, mv1) };
+            let frame = reference_frame(dpb, slice, from, reference)?;
+            let Some(source) = ref_planes(frame, block, mv) else {
+                return Ok((false, false));
+            };
+            let size = (pic.w, pic.h);
+            let (luma, chroma) = S::plain_fast(
+                (&mut pic.y, &mut pic.u, &mut pic.v, stride, size),
+                area,
+                source,
+                None,
+            );
+            if luma && let Some(dst) = pic.y.get_mut(y * stride + x..) {
+                scale_in_place(dst, stride, (w, h), luma_mix);
+            }
+            if chroma && let (Some(u), Some(v)) = (pic.u.get_mut(at..), pic.v.get_mut(at..)) {
+                scale_in_place(u, half, place.1, cb_mix);
+                scale_in_place(v, half, place.1, cr_mix);
+            }
+            Ok((luma, chroma))
+        }
+        (Mix::Weighted(luma_weight), Mix::Weighted(cb_weight), Mix::Weighted(cr_weight)) => {
+            let first = reference_frame(dpb, slice, 0, r0)?;
+            let second = reference_frame(dpb, slice, 1, r1)?;
+            let luma = match (
+                luma_source(first, area, mv0),
+                luma_source(second, area, mv1),
+            ) {
+                (Some(a), Some(b)) => {
+                    let mut beside = [S::default(); 256];
+                    if let Some(dst) = pic.y.get_mut(y * stride + x..)
+                        && S::pair_fast((&mut beside[..], w), (w, h), b, None)
+                        && S::pair_fast((&mut *dst, stride), (w, h), a, None)
+                    {
+                        weight_onto(dst, stride, &beside, (w, h), luma_weight);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+            let chroma = match (
+                chroma_sources(first, place, mv0),
+                chroma_sources(second, place, mv1),
+            ) {
+                (Some(a), Some(b)) => {
+                    let (cw, ch) = place.1;
+                    let mut beside_u = [S::default(); 64];
+                    let mut beside_v = [S::default(); 64];
+                    if let (Some(u), Some(v)) = (pic.u.get_mut(at..), pic.v.get_mut(at..))
+                        && S::chroma_planes_fast(
+                            (&mut beside_u[..], &mut beside_v[..], cw),
+                            (cw, ch),
+                            b,
+                            None,
+                        )
+                        && S::chroma_planes_fast((&mut *u, &mut *v, half), (cw, ch), a, None)
+                    {
+                        weight_onto(u, half, &beside_u, (cw, ch), cb_weight);
+                        weight_onto(v, half, &beside_v, (cw, ch), cr_weight);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+            Ok((luma, chroma))
+        }
+        _ => Ok((false, false)),
+    }
+}
+
+/// The block of `size` at `dst`, rows `stride` apart, mixed in place by
+/// `weight` with the one in `second`, rows `size.0` apart; the block at
+/// `dst` takes the list 0 weight. At most 16 wide.
+fn weight_onto<S: Sample>(
+    dst: &mut [S],
+    stride: usize,
+    second: &[S],
+    size: (usize, usize),
+    weight: recon::BiWeight,
+) {
+    if S::weight_onto_fast((dst, stride), second, size, weight) {
+        return;
+    }
+    let (w, h) = size;
+    let mut first = [S::default(); 16];
+    for row in 0..h {
+        let out = &mut dst[row * stride..row * stride + w];
+        first[..w].copy_from_slice(out);
+        recon::weight_row(out, &first[..w], &second[row * w..row * w + w], weight);
+    }
+}
+
+/// A block of `size` predicted into `dst`, rows `stride` apart, weighted
+/// in place when `mix` weights one prediction; left as it is otherwise.
+fn scale_in_place<S: Sample>(dst: &mut [S], stride: usize, size: (usize, usize), mix: Mix) {
+    let Mix::Uni {
+        weight,
+        offset,
+        denom,
+        ..
+    } = mix
+    else {
+        return;
+    };
+    if S::scale_fast((&mut *dst, stride), size, (weight, offset, denom)) {
+        return;
+    }
+    let (w, h) = size;
+    for row in 0..h {
+        for sample in &mut dst[row * stride..row * stride + w] {
+            *sample = recon::weight_uni(*sample, weight, offset, denom);
+        }
+    }
+}
+
+/// The default average of two luma predictions written straight into the
+/// picture, when both blocks and the reach of their taps are inside their
+/// references. `false` means nothing was written.
+fn avg_luma<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    block: (usize, usize, usize, usize),
+    motion: McMotion,
+) -> Result<bool, CodecError> {
+    let (x, y, w, h) = block;
+    let first = reference_frame(dpb, slice, 0, motion.r0)?;
+    let second = reference_frame(dpb, slice, 1, motion.r1)?;
+    let (Some(one), Some(two)) = (
+        luma_source(first, block, motion.mv0),
+        luma_source(second, block, motion.mv1),
+    ) else {
+        return Ok(false);
+    };
+    let stride = pic.w;
+    let Some(dst) = pic.y.get_mut(y * stride + x..) else {
+        return Ok(false);
+    };
+    Ok(S::pair_fast((dst, stride), (w, h), one, Some(two)))
+}
+
+/// `block`'s luma source in `frame` for [`Sample::pair_fast`], read through
+/// its published rows while another thread decodes it.
+fn luma_source<S: Sample>(
+    frame: &Frame<S>,
+    block: (usize, usize, usize, usize),
+    mv: [i16; 2],
+) -> Option<recon::McSource<'_, S>> {
+    let (x, y, w, h) = block;
+    let (mvx, mvy) = (i32::from(mv[0]), i32::from(mv[1]));
+    let at = (
+        i32::try_from(x).ok()? + (mvx >> 2),
+        i32::try_from(y).ok()? + (mvy >> 2),
+    );
+    let (src, stride, pic, at) = match &frame.pending {
+        Some(published) => {
+            let window = published.luma(at.0, at.1, h).ok()?;
+            let pic = (
+                i32::try_from(window.stride).ok()?,
+                i32::try_from(window.rows).ok()?,
+            );
+            (window.samples, window.stride, pic, (window.x, window.y))
+        }
+        None => {
+            let pic = (i32::try_from(frame.w).ok()?, i32::try_from(frame.h).ok()?);
+            (&frame.y[..], frame.w, pic, at)
+        }
+    };
+    let block = recon::BlockMc {
+        x: at.0,
+        y: at.1,
+        w,
+        h,
+        x_frac: mvx & 3,
+        y_frac: mvy & 3,
+    };
+    recon::luma_source(src, stride, pic, block)
+}
+
+/// [`avg_luma`] for both chroma planes of a 4:2:0 picture; `place` is the
+/// block's origin and size in them.
+fn avg_chroma<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    place: ((usize, usize), (usize, usize)),
+    motion: McMotion,
+) -> Result<bool, CodecError> {
+    let ((x, y), size) = place;
+    let first = reference_frame(dpb, slice, 0, motion.r0)?;
+    let second = reference_frame(dpb, slice, 1, motion.r1)?;
+    let (Some(one), Some(two)) = (
+        chroma_sources(first, place, motion.mv0),
+        chroma_sources(second, place, motion.mv1),
+    ) else {
+        return Ok(false);
+    };
+    let stride = pic.w / 2;
+    let at = y * stride + x;
+    let (Some(u), Some(v)) = (pic.u.get_mut(at..), pic.v.get_mut(at..)) else {
+        return Ok(false);
+    };
+    Ok(S::chroma_planes_fast((u, v, stride), size, one, Some(two)))
+}
+
+/// Both chroma planes' source of a 4:2:0 block at `place` in `frame`, as
+/// [`recon::chroma_source`] finds the source in one.
+fn chroma_sources<S: Sample>(
+    frame: &Frame<S>,
+    place: ((usize, usize), (usize, usize)),
+    mv: [i16; 2],
+) -> Option<recon::ChromaSources<'_, S>> {
+    let ((x, y), (w, h)) = place;
+    let (mvx, mvy) = (i32::from(mv[0]), i32::from(mv[1]));
+    let at = (
+        i32::try_from(x).ok()? + (mvx >> 3),
+        i32::try_from(y).ok()? + (mvy >> 3),
+    );
+    let (cb, cr, stride, pic, at) = match &frame.pending {
+        Some(published) => {
+            let cb = published.chroma(true, at.0, at.1, h).ok()?;
+            let cr = published.chroma(false, at.0, at.1, h).ok()?;
+            // Each plane holds every row the block reads; one may hold more.
+            let len = cb.samples.len().min(cr.samples.len());
+            let pic = (i32::try_from(cb.stride).ok()?, i32::try_from(cb.rows).ok()?);
+            let samples = (cb.samples.get(..len)?, cr.samples.get(..len)?);
+            (samples.0, samples.1, cb.stride, pic, (cb.x, cb.y))
+        }
+        None => {
+            let stride = frame.w / 2;
+            let pic = (
+                i32::try_from(stride).ok()?,
+                i32::try_from(frame.h / 2).ok()?,
+            );
+            (&frame.u[..], &frame.v[..], stride, pic, at)
+        }
+    };
+    let block = recon::BlockMc {
+        x: at.0,
+        y: at.1,
+        w,
+        h,
+        x_frac: mvx & 7,
+        y_frac: mvy & 7,
+    };
+    let source = recon::chroma_source(cb, stride, pic, block)?;
+    Some(recon::ChromaSources {
+        cb,
+        cr,
+        stride,
+        at: source.at,
+        frac: source.frac,
+    })
+}
+
 #[derive(Clone, Copy)]
 enum Mix {
     Fill,
@@ -8920,6 +11937,20 @@ enum Mix {
     },
     Avg,
     Weighted(recon::BiWeight),
+}
+
+impl Mix {
+    /// Whether two predictions are mixed by their rounded average, which
+    /// equal weights with no offsets also give.
+    fn averages(self) -> bool {
+        match self {
+            Mix::Avg => true,
+            Mix::Weighted(weight) => {
+                (weight.w0, weight.w1, weight.o0, weight.o1, weight.denom) == (32, 32, 0, 0, 5)
+            }
+            _ => false,
+        }
+    }
 }
 
 fn mix(slice: &Slice<'_>, r0: i8, r1: i8, plane: i8) -> Mix {
@@ -8975,21 +12006,29 @@ fn uni_mix(slice: &Slice<'_>, list: usize, reference: i8, plane: i8) -> Mix {
         return Mix::Copy(list);
     }
     let index = usize::try_from(reference).unwrap_or(0);
-    if plane < 0 {
-        Mix::Uni {
-            weight: slice.yw[list][index],
-            offset: slice.yo[list][index],
-            denom: slice.luma_denom,
-            from: list,
-        }
+    let (weight, offset, denom) = if plane < 0 {
+        (
+            slice.yw[list][index],
+            slice.yo[list][index],
+            slice.luma_denom,
+        )
     } else {
         let plane = usize::try_from(plane).unwrap_or(0);
-        Mix::Uni {
-            weight: slice.cw[list][index][plane],
-            offset: slice.co[list][index][plane],
-            denom: slice.chroma_denom,
-            from: list,
-        }
+        (
+            slice.cw[list][index][plane],
+            slice.co[list][index][plane],
+            slice.chroma_denom,
+        )
+    };
+    // The default weight, 2^denom with no offset, gives the sample back.
+    if offset == 0 && (0..15).contains(&denom) && weight == 1 << denom {
+        return Mix::Copy(list);
+    }
+    Mix::Uni {
+        weight,
+        offset,
+        denom,
+        from: list,
     }
 }
 
@@ -9005,6 +12044,23 @@ fn store_block<S: Sample>(
     let (x, y) = origin;
     let (w, h) = size;
     let (left, right) = pred;
+    // Two predictions mixed: the whole block at once where there is a
+    // kernel for it.
+    let whole = match mix {
+        Mix::Avg => Some(None),
+        Mix::Weighted(weight) => {
+            let plain =
+                (weight.w0, weight.w1, weight.o0, weight.o1, weight.denom) == (32, 32, 0, 0, 5);
+            Some((!plain).then_some(weight))
+        }
+        _ => None,
+    };
+    if let Some(weight) = whole
+        && let Some(target) = dst.get_mut(y * stride + x..)
+        && S::mix_fast(target, stride, (left, right), size, weight)
+    {
+        return;
+    }
     match mix {
         Mix::Fill => {
             for row in 0..h {
@@ -9028,19 +12084,20 @@ fn store_block<S: Sample>(
             let src = if from == 0 { left } else { right };
             for row in 0..h {
                 let at = (y + row) * stride + x;
-                for col in 0..w {
-                    dst[at + col] = recon::weight_uni(src[row * w + col], weight, offset, denom);
+                let out = &mut dst[at..at + w];
+                for (sample, &pred) in out.iter_mut().zip(&src[row * w..row * w + w]) {
+                    *sample = recon::weight_uni(pred, weight, offset, denom);
                 }
             }
         }
         Mix::Avg => {
             for row in 0..h {
                 let at = (y + row) * stride + x;
-                let a = &left[row * w..row * w + w];
-                let b = &right[row * w..row * w + w];
-                for col in 0..w {
-                    dst[at + col] = recon::avg(a[col], b[col]);
-                }
+                recon::avg_row(
+                    &mut dst[at..at + w],
+                    &left[row * w..row * w + w],
+                    &right[row * w..row * w + w],
+                );
             }
         }
         Mix::Weighted(weight)
@@ -9052,11 +12109,11 @@ fn store_block<S: Sample>(
         {
             for row in 0..h {
                 let at = (y + row) * stride + x;
-                let a = &left[row * w..row * w + w];
-                let b = &right[row * w..row * w + w];
-                for col in 0..w {
-                    dst[at + col] = recon::avg(a[col], b[col]);
-                }
+                recon::avg_row(
+                    &mut dst[at..at + w],
+                    &left[row * w..row * w + w],
+                    &right[row * w..row * w + w],
+                );
             }
         }
         Mix::Weighted(weight) => {
@@ -9120,11 +12177,57 @@ fn predict_luma<S: Sample>(
     h: usize,
     mv: [i16; 2],
 ) {
-    predict_qpel(dst, &frame.y, (frame.w, frame.h), (x, y, w, h), mv);
+    predict_block(dst, w, frame, (x, y, w, h), mv);
 }
 
+/// A luma block of `frame` moved by `mv`, into `dst` with rows `stride`
+/// apart. A picture another thread is decoding is read through the rows it
+/// has published, waiting for them if need be; if that picture failed,
+/// `dst` is left alone and the picture reading it fails when it ends.
+fn predict_block<S: Sample>(
+    dst: &mut [S],
+    stride: usize,
+    frame: &Frame<S>,
+    block: (usize, usize, usize, usize),
+    mv: [i16; 2],
+) {
+    let Some(published) = &frame.pending else {
+        predict_qpel(dst, stride, &frame.y, (frame.w, frame.h), block, mv);
+        return;
+    };
+    let (x, y, w, h) = block;
+    let (mvx, mvy) = (i32::from(mv[0]), i32::from(mv[1]));
+    let at = (
+        i32::try_from(x).unwrap_or(0) + (mvx >> 2),
+        i32::try_from(y).unwrap_or(0) + (mvy >> 2),
+    );
+    let Ok(window) = published.luma(at.0, at.1, h) else {
+        return;
+    };
+    recon::put_luma_block(
+        dst,
+        stride,
+        window.samples,
+        window.stride,
+        (
+            i32::try_from(window.stride).unwrap_or(0),
+            i32::try_from(window.rows).unwrap_or(0),
+        ),
+        recon::BlockMc {
+            x: window.x,
+            y: window.y,
+            w,
+            h,
+            x_frac: mvx & 3,
+            y_frac: mvy & 3,
+        },
+    );
+}
+
+/// `dst` starts at the block's first sample and its rows are `stride` apart.
 fn predict_qpel<S: Sample>(
     dst: &mut [S],
+    stride: usize,
     src: &[S],
     pic: (usize, usize),
     block: (usize, usize, usize, usize),
@@ -9136,7 +12239,7 @@ fn predict_qpel<S: Sample>(
     let mvy = i32::from(mv[1]);
     recon::put_luma_block(
         dst,
-        w,
+        stride,
         src,
         pic_w,
         (
@@ -9154,8 +12257,11 @@ fn predict_qpel<S: Sample>(
     );
 }
 
+/// Each of `planes` starts at the block's first sample and its rows are
+/// `dst_stride` apart.
 fn predict_chroma<S: Sample>(
     planes: (&mut [S], &mut [S]),
+    dst_stride: usize,
     frame: &Frame<S>,
     at: (usize, usize),
     size: (usize, usize),
@@ -9164,9 +12270,56 @@ fn predict_chroma<S: Sample>(
     let (u, v) = planes;
     let (x, y) = at;
     let (w, h) = size;
+    // A picture another thread is decoding is 4:2:0 and is read through
+    // its published rows, as in `predict_block`.
+    if let Some(published) = &frame.pending {
+        let (mvx, mvy) = (i32::from(mv[0]), i32::from(mv[1]));
+        let at = (
+            i32::try_from(x / 2).unwrap_or(0) + (mvx >> 3),
+            i32::try_from(y / 2).unwrap_or(0) + (mvy >> 3),
+        );
+        for (cb, dst) in [(true, u), (false, v)] {
+            let Ok(window) = published.chroma(cb, at.0, at.1, h) else {
+                return;
+            };
+            recon::put_chroma_block(
+                dst,
+                dst_stride,
+                window.samples,
+                window.stride,
+                (
+                    i32::try_from(window.stride).unwrap_or(0),
+                    i32::try_from(window.rows).unwrap_or(0),
+                ),
+                recon::BlockMc {
+                    x: window.x,
+                    y: window.y,
+                    w,
+                    h,
+                    x_frac: mvx & 7,
+                    y_frac: mvy & 7,
+                },
+            );
+        }
+        return;
+    }
     if frame.chroma() == 3 {
-        predict_qpel(u, &frame.u, (frame.w, frame.h), (x, y, w, h), mv);
-        predict_qpel(v, &frame.v, (frame.w, frame.h), (x, y, w, h), mv);
+        predict_qpel(
+            u,
+            dst_stride,
+            &frame.u,
+            (frame.w, frame.h),
+            (x, y, w, h),
+            mv,
+        );
+        predict_qpel(
+            v,
+            dst_stride,
+            &frame.v,
+            (frame.w, frame.h),
+            (x, y, w, h),
+            mv,
+        );
         return;
     }
     let mvx = i32::from(mv[0]);
@@ -9190,24 +12343,52 @@ fn predict_chroma<S: Sample>(
         i32::try_from(pic_h).unwrap_or(0),
     );
     let stride = frame.w / 2;
-    recon::put_chroma_block(u, w, &frame.u, stride, pic, block);
-    recon::put_chroma_block(v, w, &frame.v, stride, pic, block);
+    recon::put_chroma_block(u, dst_stride, &frame.u, stride, pic, block);
+    recon::put_chroma_block(v, dst_stride, &frame.v, stride, pic, block);
 }
 
-/// Clause 8.4.3.2. Implicit bipred weights from the picture-order distance.
+/// Clause 8.4.3.2. Implicit bipred weights from the picture-order distance,
+/// as [`implicit_table`] worked them out for the slice.
 fn implicit_weights(slice: &Slice<'_>, r0: i8, r1: i8) -> (i32, i32) {
-    let Some(poc0) = listed(&slice.poc0, r0) else {
+    let (Ok(left), Ok(right)) = (usize::try_from(r0), usize::try_from(r1)) else {
         return (32, 32);
     };
-    let Some(poc1) = listed(&slice.poc1, r1) else {
+    if right >= slice.poc1.len() {
         return (32, 32);
-    };
-    let long = listed(&slice.long0, r0).unwrap_or(true) || listed(&slice.long1, r1).unwrap_or(true);
+    }
+    match slice.implicit.get(left * slice.poc1.len() + right) {
+        Some(&w1) => (64 - i32::from(w1), i32::from(w1)),
+        None => (32, 32),
+    }
+}
+
+/// The second implicit weight for each pair of a list 0 and a list 1
+/// reference of a frame with order count `current`, given each list's
+/// order counts and long-term marks: list 0's index times the length of
+/// list 1 plus list 1's.
+pub(crate) fn implicit_table(
+    current: i32,
+    list0: (&[i32], &[bool]),
+    list1: (&[i32], &[bool]),
+) -> Vec<i16> {
+    let mut table = Vec::with_capacity(list0.0.len() * list1.0.len());
+    for (&poc0, &long0) in list0.0.iter().zip(list0.1) {
+        for (&poc1, &long1) in list1.0.iter().zip(list1.1) {
+            let (_, w1) = implicit_pair(current, poc0, poc1, long0 || long1);
+            table.push(i16::try_from(w1).unwrap_or(32));
+        }
+    }
+    table
+}
+
+/// The weights for a picture, or field, with order count `current` that
+/// predicts from two with order counts `poc0` and `poc1`.
+fn implicit_pair(current: i32, poc0: i32, poc1: i32, long: bool) -> (i32, i32) {
     let td = (poc1 - poc0).clamp(-128, 127);
     if td == 0 || long {
         return (32, 32);
     }
-    let tb = (slice.poc - poc0).clamp(-128, 127);
+    let tb = (current - poc0).clamp(-128, 127);
     let tx = (16_384 + (td / 2).abs()) / td;
     let dist = ((tb * tx + 32) >> 6).clamp(-1024, 1023);
     let w1 = dist >> 2;
@@ -9215,11 +12396,6 @@ fn implicit_weights(slice: &Slice<'_>, r0: i8, r1: i8) -> (i32, i32) {
         return (32, 32);
     }
     (64 - w1, w1)
-}
-
-fn listed<T: Copy>(values: &[T], index: i8) -> Option<T> {
-    let index = usize::try_from(index).ok()?;
-    values.get(index).copied()
 }
 
 fn pcm_code<S: Sample>(bytes: &[u8], bit: &mut usize) -> Result<S, CodecError> {
@@ -9244,7 +12420,6 @@ fn read_pcm<S: Sample>(
     mx: usize,
     my: usize,
     field: bool,
-    slice: &Slice<'_>,
 ) -> Result<(), CodecError> {
     let x0 = mx * 16;
     let span = luma_span(my, field);
@@ -9299,11 +12474,7 @@ fn read_pcm<S: Sample>(
                 at_bit: 0,
                 what: "pcm",
             })?;
-            **cab = Cabac::open(
-                rest,
-                slice.qp,
-                if super::intra_slice(slice.kind) { 0 } else { 1 },
-            )?;
+            cab.restart(rest)?;
         }
     }
     Ok(())
@@ -9332,10 +12503,16 @@ fn pcm_chroma<S: Sample>(
 }
 
 fn neighbor<S: Sample>(pic: &Frame<S>, mx: i32, my: i32, slice: u16) -> Option<&Mb> {
-    if mx < 0 || my < 0 || mx as usize >= pic.mb_w || my as usize >= pic.h / 16 {
+    neighbor_in(&pic.mb, (pic.mb_w, pic.h / 16), mx, my, slice)
+}
+
+/// [`neighbor`] among `records`, a picture's macroblock records on a
+/// grid `grid` wide and high, or the first of them.
+fn neighbor_in(records: &[Mb], grid: (usize, usize), mx: i32, my: i32, slice: u16) -> Option<&Mb> {
+    if mx < 0 || my < 0 || mx as usize >= grid.0 || my as usize >= grid.1 {
         return None;
     }
-    let mb = pic.mb.get(my as usize * pic.mb_w + mx as usize)?;
+    let mb = records.get(my as usize * grid.0 + mx as usize)?;
     if mb.slice != slice {
         return None;
     }
@@ -9347,84 +12524,548 @@ fn xy<S: Sample>(pic: &Frame<S>, addr: usize) -> (usize, usize) {
 }
 
 pub(crate) fn deblock<S: Sample>(pic: &mut Frame<S>) {
+    let rows = pic.h / 16;
+    deblock_rows(pic, 0..rows);
+}
+
+/// Deblocks the macroblock rows `rows` of a picture. The filter goes
+/// through macroblocks in raster order, and a row reads only itself and
+/// the row above, so the rows of a picture can be filtered in turn as they
+/// are decoded, each once the row below it is decoded too: intra prediction
+/// of that row reads this one unfiltered.
+pub(crate) fn deblock_rows<S: Sample>(pic: &mut Frame<S>, rows: std::ops::Range<usize>) {
+    deblock_rows_after(pic, rows, &mut Vec::new());
+}
+
+/// [`deblock_rows`] given what the row above them left in `above` about
+/// each of its macroblocks, which they leave there in turn: empty, or
+/// all `None`, when nothing above was deblocked.
+fn deblock_rows_after<S: Sample>(
+    pic: &mut Frame<S>,
+    rows: std::ops::Range<usize>,
+    above: &mut Vec<Option<(u16, bool)>>,
+) {
+    let chroma = pic.chroma();
+    // The planes leave the picture for the pass, so each is borrowed for
+    // writing once and the macroblocks stay readable beside them.
+    let mut y = std::mem::take(&mut pic.y);
+    let mut u = std::mem::take(&mut pic.u);
+    let mut v = std::mem::take(&mut pic.v);
+    deblock_planes(pic, chroma, (&mut y, &mut u, &mut v), rows, above);
+    pic.y = y;
+    pic.u = u;
+    pic.v = v;
+}
+
+/// A macroblock with no luma coefficients and one motion for all of it. No
+/// edge inside it is filtered: each side of one predicts the same way and
+/// neither holds coefficients, so its strength is 0.
+fn inner_edges_flat(mb: &Mb) -> bool {
+    !mb.intra && mb.nnz_y == [0; 16] && single_motion(mb)
+}
+
+/// Whether no edge of the frame macroblock `mb`, at slot `index` and
+/// place `at`, can change a sample: alpha or beta is 0 at every QP its
+/// edges are filtered at, its own inside and the average with the
+/// macroblock to its left and the one above on its boundary, in each
+/// plane. That is so when each such QP plus the smaller of the two
+/// offsets is below 16. FFmpeg passes over such macroblocks the same way;
+/// here the highest QP of the three planes stands for them all, which
+/// never says nothing is filtered when something is.
+#[inline(never)]
+fn filters_nothing<S: Sample>(pic: &Frame<S>, mb: &Mb, index: usize, at: (usize, usize)) -> bool {
+    let highest = |mb: &Mb| i32::from(mb.qp.max(mb.qp_c).max(mb.qp_cr));
+    let limit = 15 - i32::from(mb.off_a.min(mb.off_b));
+    let own = highest(mb);
+    if own > limit {
+        return false;
+    }
+    let (mx, my) = at;
+    let low = |near: Option<&Mb>| near.is_none_or(|near| (own + highest(near) + 1) >> 1 <= limit);
+    let left = if mx > 0 { pic.mb.get(index - 1) } else { None };
+    let above = if my > 0 {
+        pic.mb.get(index - pic.mb_w)
+    } else {
+        None
+    };
+    low(left) && low(above)
+}
+
+fn deblock_planes<S: Sample>(
+    pic: &Frame<S>,
+    chroma: u8,
+    planes: (&mut [S], &mut [S], &mut [S]),
+    rows: std::ops::Range<usize>,
+    above: &mut Vec<Option<(u16, bool)>>,
+) {
+    if pic.mbaff {
+        // Pairs of two kinds meet along edges this loop does not know.
+        mbaff::deblock(pic, chroma, planes, rows);
+        return;
+    }
+    let (luma, cb, cr) = planes;
     let mb_w = pic.mb_w;
     let mb_h = pic.h / 16;
-    let mbaff = pic.mbaff;
-    let count = mb_w.saturating_mul(mb_h);
-    for addr in 0..count {
-        let (mx, my) = if mbaff {
-            let pair = addr / 2;
-            (pair % mb_w, (pair / mb_w) * 2 + (addr % 2))
-        } else {
-            (addr % mb_w, addr / mb_w)
-        };
-        let index = my * mb_w + mx;
-        if pic
-            .mb
-            .get(index)
-            .is_some_and(|mb| mb.deblock == 1 || mb.pcm)
-        {
-            continue;
-        }
-        let transform8 = pic.mb.get(index).is_some_and(|mb| mb.transform8);
-        let field = pic.mb.get(index).is_some_and(|mb| mb.field_mb);
-        let span = luma_span(my, field);
-        let off = offsets(pic, index);
-        for edge in 0..4 {
-            if edge == 0 && (mx == 0 || !filter_boundary(pic, mx, my, true)) {
+    // What each macroblock's edges need to know about it, kept for the
+    // macroblock to its right and the one below, so it is worked out once.
+    above.resize(mb_w, None);
+    let mut left: Option<(u16, bool)> = None;
+    for my in rows.start.min(mb_h)..rows.end.min(mb_h) {
+        for mx in 0..mb_w {
+            let index = my * mb_w + mx;
+            // Taken even at the start of a row, where it is the last row's
+            // and not this one's neighbour, so that a macroblock passed over
+            // leaves nothing for the next.
+            let beside = left.take().filter(|_| mx > 0);
+            let over = above.get_mut(mx).and_then(|kept| kept.take());
+            let Some(mb) = pic.mb.get(index) else {
+                continue;
+            };
+            // Luma's QP alone rules most macroblocks out of the test below.
+            let low = i32::from(mb.qp) + i32::from(mb.off_a.min(mb.off_b)) < 16;
+            if mb.deblock == 1 || mb.pcm || (low && filters_nothing(pic, mb, index, (mx, my))) {
                 continue;
             }
-            let x = mx * 16 + edge * 4;
-            let bs = edge_strength(pic, mx, my, edge, true);
-            // An 8×8 transform has no luma edge at 4 or 12.
-            if x >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
-                let qpav = edge_qp(pic, mx, my, true, true, true, edge == 0);
-                filter_groups(
-                    &mut pic.y,
-                    pic.w,
-                    (x, span.y),
-                    (true, false, 4, span.step),
-                    bs,
-                    qpav,
+            let transform8 = mb.transform8;
+            // Worked out once here, not again for each of the eight edges. An
+            // intra macroblock's edges take their strength from that alone, on
+            // its own edges and its neighbours', so its summary is never read.
+            let known = if mb.intra {
+                (0, false)
+            } else {
+                (coded_mask(mb), single_motion(mb))
+            };
+            // No luma coefficients and one motion: no inner edge is filtered.
+            let flat = known == (0, true);
+            left = Some(known);
+            if let Some(kept) = above.get_mut(mx) {
+                *kept = Some(known);
+            }
+            let span = luma_span(my, mb.field_mb);
+            let off = (i32::from(mb.off_a), i32::from(mb.off_b));
+            // A frame macroblock of an 8-bit 4:2:0 picture has every edge
+            // worked out first, then filtered in one go for each plane.
+            if S::BITS == 8
+                && chroma == 1
+                && span.step == 1
+                && !pic.separate_plane
+                && deblock_whole(
+                    pic,
+                    (&mut *luma, &mut *cb, &mut *cr),
+                    (mx, my),
+                    (transform8, flat),
+                    (known, beside, over),
                     off,
-                );
-            }
-            if !pic.separate_plane {
-                filter_chroma(pic, (mx, my), edge, true, transform8, bs, off);
-            }
-        }
-        for edge in 0..4 {
-            if edge == 0 && (above_my(pic, mx, my) < 0 || !filter_boundary(pic, mx, my, false)) {
+                )
+            {
                 continue;
             }
-            let y = span.at(edge * 4);
-            let bs = edge_strength(pic, mx, my, edge, false);
-            if y >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
-                let qpav = edge_qp(pic, mx, my, true, true, false, edge == 0);
-                filter_groups(
-                    &mut pic.y,
-                    pic.w,
-                    (mx * 16, y),
-                    (false, false, 4, span.step),
-                    bs,
-                    qpav,
-                    off,
-                );
+            for edge in 0..4 {
+                if edge == 0 && (mx == 0 || !filter_boundary(pic, mx, my, true)) {
+                    continue;
+                }
+                if edge != 0 && flat {
+                    break;
+                }
+                let x = mx * 16 + edge * 4;
+                let bs = edge_strength(pic, (mx, my), edge, true, (known, beside));
+                // An 8×8 transform has no luma edge at 4 or 12.
+                if x >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
+                    let qpav = edge_qp(pic, mx, my, true, true, true, edge == 0);
+                    filter_groups(
+                        luma,
+                        pic.w,
+                        (x, span.y),
+                        (true, false, 4, span.step),
+                        bs,
+                        qpav,
+                        off,
+                    );
+                }
+                if !pic.separate_plane && bs != [0; 4] {
+                    let at = ChromaEdge {
+                        mx,
+                        my,
+                        edge,
+                        vertical: true,
+                        transform8,
+                        format: chroma,
+                    };
+                    filter_chroma(pic, (cb, cr), at, bs, off);
+                }
             }
-            if !pic.separate_plane {
-                filter_chroma(pic, (mx, my), edge, false, transform8, bs, off);
+            for edge in 0..4 {
+                if edge == 0 && (above_my(pic, mx, my) < 0 || !filter_boundary(pic, mx, my, false))
+                {
+                    continue;
+                }
+                if edge != 0 && flat {
+                    break;
+                }
+                let y = span.at(edge * 4);
+                let bs = edge_strength(pic, (mx, my), edge, false, (known, over));
+                if y >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
+                    let qpav = edge_qp(pic, mx, my, true, true, false, edge == 0);
+                    filter_groups(
+                        luma,
+                        pic.w,
+                        (mx * 16, y),
+                        (false, false, 4, span.step),
+                        bs,
+                        qpav,
+                        off,
+                    );
+                }
+                if !pic.separate_plane && bs != [0; 4] {
+                    let at = ChromaEdge {
+                        mx,
+                        my,
+                        edge,
+                        vertical: false,
+                        transform8,
+                        format: chroma,
+                    };
+                    filter_chroma(pic, (cb, cr), at, bs, off);
+                }
             }
         }
     }
 }
 
-fn edge_strength<S: Sample>(
+/// What [`edge_strength`] is told about a macroblock: its [`coded_mask`] and
+/// whether it has a [`single_motion`].
+type Known = (u16, bool);
+
+/// Every edge of the frame macroblock at `at` in a 4:2:0 picture, worked
+/// out as the loop in [`deblock_planes`] does and filtered for each plane
+/// at once. `shape` is whether the macroblock has the 8×8 transform and
+/// whether its inner edges are flat; `known` is this macroblock's, the one
+/// to its left's and the one above's. `false` means nothing was filtered:
+/// an edge mixes strength 4 with less, or the samples have no such kernel.
+fn deblock_whole<S: Sample>(
     pic: &Frame<S>,
+    planes: (&mut [S], &mut [S], &mut [S]),
+    at: (usize, usize),
+    shape: (bool, bool),
+    known: (Known, Option<Known>, Option<Known>),
+    off: (i32, i32),
+) -> bool {
+    let (mx, my) = at;
+    let (transform8, flat) = shape;
+    let (own, beside, over) = known;
+    let index = my * pic.mb_w + mx;
+    let Some(current) = pic.mb.get(index) else {
+        return false;
+    };
+    // The QP an edge is filtered at in luma, Cb and Cr: this macroblock's
+    // inside it, and the average with its neighbour's on its boundary.
+    let inside = [
+        i32::from(current.qp),
+        i32::from(current.qp_c),
+        i32::from(current.qp_cr),
+    ];
+    // The thresholds of the edges inside the macroblock, the same for all,
+    // worked out when the first of them is filtered.
+    let mut inner = None;
+    // For each plane, the edges that run down the picture and then those
+    // that run along it.
+    let mut luma = [[None; 4]; 2];
+    let mut cb = [[None; 4]; 2];
+    let mut cr = [[None; 4]; 2];
+    let mut some = [false; 3];
+    // Edge 0, the macroblock's boundary: the macroblock to the left, or
+    // the one above. This picture has neither MBAFF pairs nor field
+    // macroblocks, so that is one column or one row back. The outer
+    // `None` is no macroblock there, the inner one a macroblock not decoded.
+    let neighbors = [
+        (mx > 0).then(|| index - 1),
+        (my > 0).then(|| index - pic.mb_w),
+    ]
+    .map(|near| near.map(|near| pic.mb.get(near).filter(|mb| mb.slice != u16::MAX)));
+    // When Cb and Cr have the same QP in this macroblock and those beside
+    // it, as they do unless the picture gives them different offsets,
+    // their edges are the same: Cr's are not worked out, and the two
+    // planes are filtered side by side at Cb's.
+    let even = |mb: &Mb| mb.qp_c == mb.qp_cr;
+    let twin = even(current)
+        && neighbors
+            .iter()
+            .all(|&near| near.flatten().is_none_or(even));
+    for (way, &near) in neighbors.iter().enumerate() {
+        let vertical = way == 0;
+        if let Some(neighbor) = near {
+            // A slice may ask for its boundaries with other slices to stay.
+            let open = current.deblock != 2 || neighbor.is_some_and(|mb| mb.slice == current.slice);
+            if open {
+                let bs = if current.intra || neighbor.is_some_and(|mb| mb.intra) {
+                    [4; 4]
+                } else {
+                    let across = if vertical { beside } else { over };
+                    boundary_strength(current, neighbor, own, across, vertical)
+                };
+                if bs != [0; 4] {
+                    let qp = neighbor.map_or(inside, |mb| {
+                        [
+                            (inside[0] + i32::from(mb.qp) + 1) >> 1,
+                            (inside[1] + i32::from(mb.qp_c) + 1) >> 1,
+                            (inside[2] + i32::from(mb.qp_cr) + 1) >> 1,
+                        ]
+                    });
+                    // Worked out each time rather than kept from the last
+                    // macroblock: whether the QPs match is as good as
+                    // random to the CPU, and the tables are few loads.
+                    let qp = [
+                        recon::EdgeQp::new(qp[0], off),
+                        recon::EdgeQp::new(qp[1], off),
+                        if twin {
+                            None
+                        } else {
+                            recon::EdgeQp::new(qp[2], off)
+                        },
+                    ];
+                    let slot = (&mut luma[way][0], &mut cb[way][0], &mut cr[way][0]);
+                    set_edge(slot, bs, &qp, (true, true, twin), &mut some);
+                }
+            }
+        }
+        if flat || current.intra {
+            continue;
+        }
+        // The inner edges. Chroma has an edge under every other luma one,
+        // and an 8×8 transform has no luma edge at 4 or 12.
+        for edge in 1..4 {
+            let luma_edge = !(transform8 && edge != 2);
+            let chroma_edge = edge == 2;
+            if !luma_edge && !chroma_edge {
+                continue;
+            }
+            let bs = inner_strength(current, own, edge, vertical);
+            if bs == [0; 4] {
+                continue;
+            }
+            let qp = inner.get_or_insert_with(|| {
+                [
+                    recon::EdgeQp::new(inside[0], off),
+                    recon::EdgeQp::new(inside[1], off),
+                    if twin {
+                        None
+                    } else {
+                        recon::EdgeQp::new(inside[2], off)
+                    },
+                ]
+            });
+            let slot = (&mut luma[way][edge], &mut cb[way][edge], &mut cr[way][edge]);
+            set_edge(slot, bs, qp, (luma_edge, chroma_edge, twin), &mut some);
+        }
+    }
+    // An intra macroblock's inner edges are all strength 3, so which it has
+    // is decided once for it rather than at each edge: the one at 8 in
+    // luma and chroma, and with the 4×4 transform those at 4 and 12 in luma.
+    if current.intra {
+        let qp = [
+            recon::EdgeQp::new(inside[0], off),
+            recon::EdgeQp::new(inside[1], off),
+            if twin {
+                None
+            } else {
+                recon::EdgeQp::new(inside[2], off)
+            },
+        ];
+        for way in 0..2 {
+            let slot = (&mut luma[way][2], &mut cb[way][2], &mut cr[way][2]);
+            set_edge(slot, [3; 4], &qp, (true, true, twin), &mut some);
+        }
+        if !transform8 {
+            let [luma_qp, ..] = qp;
+            if let Some(luma_qp) = luma_qp {
+                let filter = Some(luma_qp.filter([3; 4], false));
+                for way in &mut luma {
+                    way[1] = filter;
+                    way[3] = filter;
+                }
+            }
+        }
+    }
+    // No edge of any plane changes a sample, as for most flat macroblocks
+    // of a still scene: done, without the kernels' checks of the edges.
+    if some == [false; 3] {
+        return true;
+    }
+    let stride = pic.w;
+    let chroma_stride = pic.w / 2;
+    let chroma_at = my * 8 * chroma_stride + mx * 8;
+    let luma = recon::MbEdges {
+        at: my * 16 * stride + mx * 16,
+        down: stride,
+        vertical: luma[0],
+        horizontal: luma[1],
+    };
+    let cb = recon::MbEdges {
+        at: chroma_at,
+        down: chroma_stride,
+        vertical: cb[0],
+        horizontal: cb[1],
+    };
+    if twin {
+        return S::deblock_mb_twin(planes, &luma, &cb, [some[0], some[1]]);
+    }
+    let all = [
+        luma,
+        cb,
+        recon::MbEdges {
+            at: chroma_at,
+            down: chroma_stride,
+            vertical: cr[0],
+            horizontal: cr[1],
+        },
+    ];
+    S::deblock_mb(planes, &all, some)
+}
+
+/// The filters of one edge from its strengths, in luma (when it has a luma
+/// edge there), Cb and Cr (on edges 0 and 2), at each plane's thresholds.
+/// A strength of 0 throughout leaves the edge out, as does a plane whose
+/// thresholds change no sample. With `twin`, Cr is filtered as Cb is and
+/// its slot is left alone.
+/// Which planes, luma, Cb and Cr, have an edge set: kept as each is set,
+/// so the kernels need not look through every edge again for one.
+#[inline(always)]
+fn set_edge(
+    slot: (
+        &mut Option<recon::EdgeFilter>,
+        &mut Option<recon::EdgeFilter>,
+        &mut Option<recon::EdgeFilter>,
+    ),
+    bs: [u8; 4],
+    qp: &[Option<recon::EdgeQp>; 3],
+    (luma, chroma, twin): (bool, bool, bool),
+    some: &mut [bool; 3],
+) {
+    if bs == [0; 4] {
+        return;
+    }
+    // Intra edges are 4 or 3 throughout; inter ones stay below 4.
+    let strong = bs[0] == 4;
+    let (for_luma, for_cb, for_cr) = slot;
+    if luma {
+        *for_luma = qp[0].map(|qp| qp.filter(bs, strong));
+        some[0] |= qp[0].is_some();
+    }
+    if chroma {
+        *for_cb = qp[1].map(|qp| qp.filter(bs, strong));
+        some[1] |= qp[1].is_some();
+        if !twin {
+            *for_cr = qp[2].map(|qp| qp.filter(bs, strong));
+            some[2] |= qp[2].is_some();
+        }
+    }
+}
+
+/// The strengths of a non-intra macroblock's boundary with the macroblock
+/// left of it (`vertical`) or above it, which is not intra either. `own`
+/// is this macroblock's [`Known`], `across` the neighbour's when the caller
+/// has it. As [`edge_strength`] works out for edge 0.
+#[inline]
+fn boundary_strength(
+    current: &Mb,
+    neighbor: Option<&Mb>,
+    own: Known,
+    across: Option<Known>,
+    vertical: bool,
+) -> [u8; 4] {
+    let (q_mask, single) = own;
+    let far = neighbor.map(|mb| across.unwrap_or_else(|| (coded_mask(mb), single_motion(mb))));
+    let p_mask = far.map_or(0, |(mask, _)| mask);
+    // The blocks on each side, line by line: column 0 of this macroblock
+    // and column 3 of the one to its left, or row 0 and row 3 above.
+    let (q_coded, p_coded) = if vertical {
+        (q_mask & 0x1111, (p_mask >> 3) & 0x1111)
+    } else {
+        (q_mask & 0x000f, (p_mask >> 12) & 0x000f)
+    };
+    let coded = q_coded | p_coded;
+    let step = if vertical { 4 } else { 1 };
+    // Both sides with one motion each: one answer for every line.
+    let apart = match (neighbor, far) {
+        (Some(mb), Some((_, true))) if single => {
+            Some(motion_strength(preds_at(mb, 3, 3), preds_at(current, 0, 0)))
+        }
+        _ => None,
+    };
+    let none = [(-1, [0, 0]), (-1, [0, 0])];
+    let mut out = [0u8; 4];
+    for (line, sample) in out.iter_mut().enumerate() {
+        *sample = if (coded >> (line * step)) & 1 == 1 {
+            2
+        } else if let Some(apart) = apart {
+            apart
+        } else {
+            let (qx, qy, px, py) = if vertical {
+                (0, line, 3, line)
+            } else {
+                (line, 0, line, 3)
+            };
+            let p = neighbor.map_or(none, |mb| preds_at(mb, px, py));
+            motion_strength(p, preds_at(current, qx, qy))
+        };
+    }
+    out
+}
+
+/// The strengths of inner edge `edge` (1, 2 or 3) of a non-intra
+/// macroblock, as [`edge_strength`] works them out.
+#[inline]
+fn inner_strength(current: &Mb, own: Known, edge: usize, vertical: bool) -> [u8; 4] {
+    let (mask, single) = own;
+    // Each block with the one before it along the way across the edge.
+    let (coded, step) = if vertical {
+        (((mask | (mask << 1)) >> edge) & 0x1111, 4)
+    } else {
+        (((mask | (mask << 4)) >> (edge * 4)) & 0x000f, 1)
+    };
+    if single {
+        return [0, 1, 2, 3].map(|line| 2 * ((coded >> (line * step)) & 1) as u8);
+    }
+    let mut out = [0u8; 4];
+    for (line, sample) in out.iter_mut().enumerate() {
+        *sample = if (coded >> (line * step)) & 1 == 1 {
+            2
+        } else {
+            let (qx, qy, px, py) = if vertical {
+                (edge, line, edge - 1, line)
+            } else {
+                (line, edge, line, edge - 1)
+            };
+            motion_strength(preds_at(current, px, py), preds_at(current, qx, qy))
+        };
+    }
+    out
+}
+
+/// One edge of a macroblock, for its chroma. `format` is the picture's
+/// chroma format: 1 is 4:2:0, 2 is 4:2:2, 3 is 4:4:4.
+#[derive(Clone, Copy)]
+struct ChromaEdge {
     mx: usize,
     my: usize,
     edge: usize,
     vertical: bool,
+    transform8: bool,
+    format: u8,
+}
+
+/// `known` is the current macroblock's [`coded_mask`] and whether it has a
+/// [`single_motion`], then the same for the macroblock across edge 0 when
+/// the caller has it.
+fn edge_strength<S: Sample>(
+    pic: &Frame<S>,
+    at: (usize, usize),
+    edge: usize,
+    vertical: bool,
+    known: ((u16, bool), Option<(u16, bool)>),
 ) -> [u8; 4] {
+    let (mx, my) = at;
+    let ((q_mask, single), across_known) = known;
     let Some(current) = pic.mb.get(my * pic.mb_w + mx) else {
         return [0; 4];
     };
@@ -9446,11 +13087,97 @@ fn edge_strength<S: Sample>(
     } else if current.intra {
         return [3; 4];
     }
+    // The blocks on the far side: the neighbour's last row or column across
+    // the macroblock edge, this macroblock's previous one inside it.
+    let far =
+        neighbor.map(|mb| across_known.unwrap_or_else(|| (coded_mask(mb), single_motion(mb))));
+    let (p_mask, across) = if edge == 0 {
+        (far.map_or(0, |(mask, _)| mask), 3)
+    } else {
+        (q_mask, edge - 1)
+    };
+    // One motion for the whole macroblock: the two sides of an edge inside
+    // it predict alike. Across the macroblock edge the motion answer is the
+    // same for all four parts when the neighbour has one motion too.
+    let apart = if !single {
+        None
+    } else if edge != 0 {
+        Some(0)
+    } else {
+        neighbor
+            .filter(|_| far.is_some_and(|(_, single)| single))
+            .map(|mb| motion_strength(preds_at(mb, 3, 3), preds_at(current, 0, 0)))
+    };
     let mut out = [0u8; 4];
     for (line, sample) in out.iter_mut().enumerate() {
-        *sample = inter_strength(current, neighbor, edge, line, vertical);
+        let (q_bit, p_bit) = if vertical {
+            (line * 4 + edge, line * 4 + across)
+        } else {
+            (edge * 4 + line, across * 4 + line)
+        };
+        // Coefficients on either side settle it before any motion is read.
+        *sample = if (q_mask >> q_bit | p_mask >> p_bit) & 1 == 1 {
+            2
+        } else if let Some(apart) = apart {
+            apart
+        } else {
+            inter_strength(current, neighbor, edge, line, vertical)
+        };
     }
     out
+}
+
+/// A bit per 4×4 luma block that counts as holding coefficients for the
+/// deblocking strength, bit `y * 4 + x`. See [`luma_coded`].
+fn coded_mask(mb: &Mb) -> u16 {
+    if mb.pcm {
+        return u16::MAX;
+    }
+    let mut mask = nonzero_bits(&mb.nnz_y);
+    if mb.transform8 {
+        // The four blocks of an 8×8 block hold coefficients together: fold
+        // each 2×2 group onto its top-left bit, then spread that back.
+        let pairs = mask | (mask >> 1);
+        let corners = (pairs | (pairs >> 4)) & 0x0505;
+        mask = corners * 0x33;
+    }
+    mask
+}
+
+/// Bit `i` set for each nonzero `counts[i]`, without a branch per count.
+#[inline]
+fn nonzero_bits(counts: &[u8; 16]) -> u16 {
+    // Each half's bytes as one word: the top bit of every byte that is not
+    // zero, moved down to the byte's lowest bit and then gathered, byte
+    // `k` to bit `k`, into the top byte by one multiply.
+    let half = |bytes: [u8; 8]| {
+        let word = u64::from_le_bytes(bytes);
+        const LOW: u64 = 0x7f7f_7f7f_7f7f_7f7f;
+        let set = (((word & LOW) + LOW) | word) & !LOW;
+        ((set >> 7).wrapping_mul(0x0102_0408_1020_4080) >> 56) as u16
+    };
+    let (low, high) = counts.split_at(8);
+    let low: [u8; 8] = low.try_into().unwrap_or_default();
+    let high: [u8; 8] = high.try_into().unwrap_or_default();
+    half(low) | (half(high) << 8)
+}
+
+/// Every block of the macroblock predicts from the same pictures with the
+/// same vectors.
+#[inline(always)]
+fn single_motion(mb: &Mb) -> bool {
+    // Every difference from the first block gathered without a branch, so
+    // the compares run side by side.
+    let word = |[x, y]: [i16; 2]| u32::from(x as u16) | u32::from(y as u16) << 16;
+    let differ = |vectors: &[[i16; 2]; 16]| {
+        let first = word(vectors[0]);
+        vectors.iter().fold(0, |any, &mv| any | (word(mv) ^ first))
+    };
+    let slots = |slot: [i8; 4]| {
+        let all = u32::from_le_bytes(slot.map(|s| s as u8));
+        all ^ ((all & 0xff) * 0x0101_0101)
+    };
+    (slots(mb.slot0) | slots(mb.slot1) | differ(&mb.mv0) | differ(&mb.mv1)) == 0
 }
 
 /// The coefficients the 4×4 luma block at `(x, y)` counts for the
@@ -9508,6 +13235,22 @@ fn filter_groups<S: Sample>(
     let (x, y) = at;
     let (vertical, chroma, step, row_step) = kind;
     let (offset_a, offset_b) = off;
+    // A whole luma edge of 16 samples, or a whole chroma edge of 8.
+    if (!chroma && step == 4) || (chroma && step == 2) {
+        let whole = recon::Edge {
+            vertical,
+            bs: 0,
+            qpav,
+            offset_a,
+            offset_b,
+            chroma,
+            len: step * 4,
+            row_step,
+        };
+        if recon::filter_luma16(plane, stride, x, y, whole, bs) {
+            return;
+        }
+    }
     if bs[0] != 0 && bs[1] == bs[0] && bs[2] == bs[0] && bs[3] == bs[0] {
         recon::filter_edge(
             plane,
@@ -9531,11 +13274,12 @@ fn filter_groups<S: Sample>(
         if group_bs == 0 {
             continue;
         }
-        let shift = group * step * row_step;
+        // Groups follow each other along the edge: down the picture's rows
+        // for a vertical edge, across its columns for a horizontal one.
         let (gx, gy) = if vertical {
-            (x, y + shift)
+            (x, y + group * step * row_step)
         } else {
-            (x + shift, y)
+            (x + group * step, y)
         };
         recon::filter_edge(
             plane,
@@ -9556,24 +13300,22 @@ fn filter_groups<S: Sample>(
     }
 }
 
-fn offsets<S: Sample>(pic: &Frame<S>, index: usize) -> (i32, i32) {
-    pic.mb
-        .get(index)
-        .map(|mb| (i32::from(mb.off_a), i32::from(mb.off_b)))
-        .unwrap_or((0, 0))
-}
-
 fn filter_chroma<S: Sample>(
-    pic: &mut Frame<S>,
-    at: (usize, usize),
-    edge: usize,
-    vertical: bool,
-    transform8: bool,
+    pic: &Frame<S>,
+    planes: (&mut [S], &mut [S]),
+    at: ChromaEdge,
     bs: [u8; 4],
     off: (i32, i32),
 ) {
-    let (mx, my) = at;
-    let chroma = pic.chroma();
+    let ChromaEdge {
+        mx,
+        my,
+        edge,
+        vertical,
+        transform8,
+        format: chroma,
+    } = at;
+    let (plane_cb, plane_cr) = planes;
     let field = pic.mb.get(my * pic.mb_w + mx).is_some_and(|mb| mb.field_mb);
     if chroma == 3 {
         if transform8 && (edge == 1 || edge == 3) {
@@ -9596,11 +13338,7 @@ fn filter_chroma<S: Sample>(
         let stride = pic.w;
         for cb in [true, false] {
             let qpc = edge_qp(pic, mx, my, false, cb, vertical, edge == 0);
-            let plane = if cb {
-                pic.u.as_mut_slice()
-            } else {
-                pic.v.as_mut_slice()
-            };
+            let plane = if cb { &mut *plane_cb } else { &mut *plane_cr };
             filter_groups(
                 plane,
                 stride,
@@ -9641,11 +13379,7 @@ fn filter_chroma<S: Sample>(
     let stride = pic.w / 2;
     for cb in [true, false] {
         let qpc = edge_qp(pic, mx, my, false, cb, vertical, edge == 0);
-        let plane = if cb {
-            pic.u.as_mut_slice()
-        } else {
-            pic.v.as_mut_slice()
-        };
+        let plane = if cb { &mut *plane_cb } else { &mut *plane_cr };
         filter_groups(
             plane,
             stride,
@@ -9703,7 +13437,33 @@ fn edge_qp<S: Sample>(
 }
 
 /// Clause 8.7.2.1. Compares the pictures actually referenced, on either list.
+#[inline(always)]
 fn motion_strength(p: [(i8, [i16; 2]); 2], q: [(i8, [i16; 2]); 2]) -> u8 {
+    // Whether two blocks share their motion varies from one block to the
+    // next, so a branch on it is often guessed wrong: both pairings of the
+    // lists are worked out in full instead. A list a block does not use
+    // counts as a zero vector, so it matches only another unused list.
+    let [(p0, a0), (p1, a1)] = p;
+    let [(q0, b0), (q1, b1)] = q;
+    let used = |slot: i8, mv: [i16; 2]| if slot >= 0 { mv } else { [0, 0] };
+    let (a0, a1, b0, b1) = (used(p0, a0), used(p1, a1), used(q0, b0), used(q1, b1));
+    let straight = (p0 != q0) | (p1 != q1) | mv_apart(a0, b0) | mv_apart(a1, b1);
+    let crossed = (p0 != q1) | (p1 != q0) | mv_apart(a0, b1) | mv_apart(a1, b0);
+    u8::from(straight & crossed)
+}
+
+/// [`motion_strength`] with the test for two vectors being far enough apart
+/// passed in: a field macroblock's vertical threshold is half a frame's.
+#[inline]
+fn motion_strength_by(
+    p: [(i8, [i16; 2]); 2],
+    q: [(i8, [i16; 2]); 2],
+    apart: impl Fn([i16; 2], [i16; 2]) -> bool,
+) -> u8 {
+    // The same pictures with the same vectors, as inside most partitions.
+    if p == q {
+        return 0;
+    }
     let p_used = u8::from(p[0].0 >= 0) + u8::from(p[1].0 >= 0);
     let q_used = u8::from(q[0].0 >= 0) + u8::from(q[1].0 >= 0);
     if p_used != q_used {
@@ -9715,7 +13475,7 @@ fn motion_strength(p: [(i8, [i16; 2]); 2], q: [(i8, [i16; 2]); 2]) -> u8 {
     if p_used == 1 {
         let p = if p[0].0 >= 0 { p[0] } else { p[1] };
         let q = if q[0].0 >= 0 { q[0] } else { q[1] };
-        return u8::from(p.0 != q.0 || mv_apart(p.1, q.1));
+        return u8::from(p.0 != q.0 || apart(p.1, q.1));
     }
     if !same_pictures(p[0].0, p[1].0, q[0].0, q[1].0) {
         return 1;
@@ -9724,10 +13484,10 @@ fn motion_strength(p: [(i8, [i16; 2]); 2], q: [(i8, [i16; 2]); 2]) -> u8 {
         let q_mv = |slot: i8| {
             if q[0].0 == slot { q[0].1 } else { q[1].1 }
         };
-        return u8::from(mv_apart(p[0].1, q_mv(p[0].0)) || mv_apart(p[1].1, q_mv(p[1].0)));
+        return u8::from(apart(p[0].1, q_mv(p[0].0)) || apart(p[1].1, q_mv(p[1].0)));
     }
-    let same_list = mv_apart(p[0].1, q[0].1) || mv_apart(p[1].1, q[1].1);
-    let crossed = mv_apart(p[0].1, q[1].1) || mv_apart(p[1].1, q[0].1);
+    let same_list = apart(p[0].1, q[0].1) || apart(p[1].1, q[1].1);
+    let crossed = apart(p[0].1, q[1].1) || apart(p[1].1, q[0].1);
     u8::from(same_list && crossed)
 }
 
@@ -9749,29 +13509,39 @@ fn preds_at(mb: &Mb, bx: usize, by: usize) -> [(i8, [i16; 2]); 2] {
 }
 
 fn bind_refs(mb: &mut Mb, slice: &Slice<'_>) {
+    // A field macroblock's index counts fields, two to a listed frame.
+    let halve = u32::from(mb.field_mb);
+    // Index −1 lands on the first entry and any other negative one past
+    // the list, as a byte after the one added.
+    let bound = |list: usize, index: i8| {
+        let at = ((index >> halve) as u8).wrapping_add(1);
+        slice.bound[list][usize::from(at)]
+    };
     for i in 0..4 {
-        mb.slot0[i] = ref_slot(&slice.ref0, mb.ref0[i]);
-        mb.slot1[i] = ref_slot(&slice.ref1, mb.ref1[i]);
-        mb.ref_poc0[i] = listed_poc(&slice.poc0, mb.ref0[i]);
-        mb.ref_poc1[i] = listed_poc(&slice.poc1, mb.ref1[i]);
+        (mb.slot0[i], mb.ref_poc0[i]) = bound(0, mb.ref0[i]);
+        (mb.slot1[i], mb.ref_poc1[i]) = bound(1, mb.ref1[i]);
+    }
+    if slice.corner_zero {
+        mb.zero = corner_zero(mb);
     }
 }
 
-fn listed_poc(pocs: &[i32], index: i8) -> i32 {
-    let Ok(index) = usize::try_from(index) else {
-        return 0;
-    };
-    pocs.get(index).copied().unwrap_or(0)
-}
-
-fn ref_slot(list: &[usize], index: i8) -> i8 {
-    let Ok(index) = usize::try_from(index) else {
-        return -1;
-    };
-    let Some(slot) = list.get(index) else {
-        return -1;
-    };
-    i8::try_from(*slot).unwrap_or(-1)
+/// [`super::Colocated`]'s `zero` for a macroblock whose motion is final:
+/// its four corner blocks, the only ones direct prediction asks about
+/// with 8×8 inference. Without a branch.
+fn corner_zero(mb: &Mb) -> u16 {
+    let near = |[x, y]: [i16; 2]| (x as u16).wrapping_add(1).max((y as u16).wrapping_add(1)) <= 2;
+    let mut zero = 0;
+    for (part, corner) in [0, 3, 12, 15].into_iter().enumerate() {
+        let (ref0, ref1) = (mb.ref0[part], mb.ref1[part]);
+        let (reference, mv) = if ref0 >= 0 {
+            (ref0, mb.mv0[corner])
+        } else {
+            (ref1, mb.mv1[corner])
+        };
+        zero |= u16::from(reference == 0 && near(mv)) << corner;
+    }
+    zero
 }
 
 /// A macroblock edge is filtered across slices unless this slice asked not to.
@@ -9899,13 +13669,13 @@ pub(crate) fn resample_intra<S: Sample>(
     let mut intra = Mb::new(0);
     intra.intra = true;
     let mut frame = base.clone();
-    frame.y = y;
-    frame.u = u;
-    frame.v = v;
+    frame.y = y.into();
+    frame.u = u.into();
+    frame.v = v.into();
     frame.w = out_w;
     frame.h = out_h;
     frame.mb_w = mb_w;
-    frame.mb = vec![intra; mb_w.saturating_mul(mb_h)];
+    frame.mb = vec![intra; mb_w.saturating_mul(mb_h)].into();
     Ok(frame)
 }
 
@@ -10163,6 +13933,102 @@ fn coded_mb<S: Sample>(pic: &Frame<S>, mx: i32, my: i32) -> Option<&Mb> {
     }
     let mb = pic.mb.get(my as usize * pic.mb_w + mx as usize)?;
     if mb.slice == u16::MAX { None } else { Some(mb) }
+}
+
+#[cfg(test)]
+mod covers {
+    use super::cover;
+
+    #[test]
+    fn cover_marks_the_blocks_of_every_partition_shape() {
+        for (w, h) in [(4, 4), (4, 2), (2, 4), (2, 2), (2, 1), (1, 2), (1, 1)] {
+            for y in 0..=4 - h {
+                for x in 0..=4 - w {
+                    let mut want = 0u16;
+                    for by in y..y + h {
+                        for bx in x..x + w {
+                            want |= 1 << (by * 4 + bx);
+                        }
+                    }
+                    assert_eq!(cover(x, y, w, h), want, "{x} {y} {w} {h}");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod motion_predictors {
+    use super::{Cell, Motion, mvp_pick, mvp_pick_by_rules};
+
+    #[test]
+    fn picked_predictors_match_the_rules() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |range: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % range
+        };
+        let shapes = [(16, 16), (16, 8), (8, 16), (8, 8), (8, 4), (4, 8), (4, 4)];
+        for _ in 0..2_000_000 {
+            let mut motion = || {
+                let available = next(4) != 0;
+                let reference = if available { next(4) as i8 - 1 } else { -1 };
+                Motion {
+                    available,
+                    mv: [next(9) as i16 - 4, next(9) as i16 - 4],
+                    reference,
+                }
+            };
+            let near = (motion(), motion(), motion());
+            let size = shapes[next(shapes.len() as u64) as usize];
+            let cell = Cell {
+                bx: next(2) as usize * 2,
+                by: next(2) as usize * 2,
+            };
+            let reference = next(3) as i8;
+            assert_eq!(
+                mvp_pick(size, cell, reference, near),
+                mvp_pick_by_rules(size, cell, reference, near),
+                "{size:?} {} {} {reference}",
+                cell.bx,
+                cell.by
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod motion_strengths {
+    use super::{motion_strength, motion_strength_by, mv_apart};
+
+    #[test]
+    fn branch_free_strength_matches_the_rules() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = |range: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % range
+        };
+        for _ in 0..2_000_000 {
+            let mut side = || {
+                let mut list = || {
+                    let slot = next(4) as i8 - 1;
+                    let mv = [next(9) as i16 - 4, next(9) as i16 - 4];
+                    (slot, mv)
+                };
+                [list(), list()]
+            };
+            let (p, q) = (side(), side());
+            assert_eq!(
+                motion_strength(p, q),
+                motion_strength_by(p, q, mv_apart),
+                "{p:?} {q:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

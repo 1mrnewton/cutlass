@@ -18,7 +18,7 @@ use cutlass_eval::{Fonts, ReaderFactory};
 use cutlass_flac_container::FlacMux;
 use cutlass_isobmff::{FileBrand, Mp4Mux};
 use cutlass_matroska::MatroskaMux;
-use cutlass_model::Draft;
+use cutlass_model::{COVER_FILE, Draft};
 use cutlass_mp3_container::Mp3Mux;
 use cutlass_mpegts::packet::PacketSize;
 use cutlass_mpegts::{MuxOptions, TsMux};
@@ -81,7 +81,9 @@ pub fn part_path(destination: &Path) -> Option<PathBuf> {
 /// is [`ContainerId::Avi`]; as Matroska for [`ContainerId::Matroska`], WebM
 /// when the destination ends in `.webm`; or as an MPEG transport stream for
 /// [`ContainerId::MpegTs`], M2TS when the destination ends in `.m2ts` or
-/// `.mts`. A caption sidecar the request asks for
+/// `.mts`. A draft with a cover gives an MP4, MOV or Matroska file its
+/// [`COVER_FILE`] as cover art; WebM, AVI and transport streams have none.
+/// A caption sidecar the request asks for
 /// is written in the same folder. `progress` hears the frames done and the
 /// frames in all after each picture, and stops the export by returning
 /// false. Clip sound is each clip's file, mixed as in playback.
@@ -143,9 +145,15 @@ fn write_part(
         }
         ContainerId::Matroska => {
             let mut mux = if has_extension(part, &["webm"]) {
+                // WebM has no attachments, so no cover.
                 MatroskaMux::webm(out)
             } else {
-                MatroskaMux::new(out)
+                let mut mux = MatroskaMux::new(out);
+                if let Some(jpeg) = cover(sources) {
+                    // A cover the muxer refuses is left out.
+                    let _ = mux.set_cover_art(jpeg);
+                }
+                mux
             };
             let result = run_movie(sources, request, part, progress, &mut mux)?;
             (result, mux.into_writer().map_err(ExportError::Mux)?)
@@ -157,6 +165,10 @@ fn write_part(
                 FileBrand::Mp4
             };
             let mut mux = Mp4Mux::with_brand(out, brand);
+            if let Some(jpeg) = cover(sources) {
+                // A cover the muxer refuses is left out.
+                let _ = mux.set_cover_art(jpeg);
+            }
             let result = run_movie(sources, request, part, progress, &mut mux)?;
             (result, mux.into_writer().map_err(ExportError::Mux)?)
         }
@@ -170,6 +182,7 @@ fn write_part(
 /// FLAC file, MP3 in an MP3 file, Opus in an Ogg (`.opus`) file, or Vorbis
 /// in an Ogg (`.ogg`) file, as `request.audio` names. Any of them but
 /// Vorbis also goes in a CAF file when `request.container` asks for one.
+/// An M4A carries the draft's cover as cover art, as a movie does.
 /// The file is written beside its destination and moved there when done.
 pub fn write_sound(
     sources: &MovieSources<'_>,
@@ -189,6 +202,10 @@ pub fn write_sound(
         let out = match (codec, request.container) {
             (CodecId::Aac | CodecId::Alac | CodecId::Ac3 | CodecId::Eac3, ContainerId::Isobmff) => {
                 let mut mux = Mp4Mux::with_brand(out, FileBrand::M4a);
+                if let Some(jpeg) = cover(sources) {
+                    // A cover the muxer refuses is left out.
+                    let _ = mux.set_cover_art(jpeg);
+                }
                 export_sound(
                     sources.draft,
                     request,
@@ -368,6 +385,15 @@ fn run_movie<M: Mux>(
         },
         file_audio(sources.readers, sources.draft, sources.root),
     )
+}
+
+/// The project's cover picture, for an MP4, MOV, M4A or Matroska file to
+/// carry: [`COVER_FILE`] in the project folder, when the draft has a cover.
+/// A file that is missing or cannot be read gives none, and the export goes
+/// on without it.
+fn cover(sources: &MovieSources<'_>) -> Option<Vec<u8>> {
+    sources.draft.cover.as_ref()?;
+    fs::read(sources.root?.join(COVER_FILE)).ok()
 }
 
 /// Whether the part file's movie name ends in one of `extensions`.
@@ -887,6 +913,179 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A 16 by 16 red JPEG, as the project's cover picture.
+    fn red_jpeg() -> Vec<u8> {
+        let pixels: Vec<u8> = [255, 0, 0].repeat(16 * 16);
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode(&pixels, 16, 16, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        jpeg
+    }
+
+    /// `ffprobe`'s streams of `path`: codec name, type and the
+    /// `attached_pic` disposition, one line each.
+    fn probed_kinds(ffprobe: &str, path: &Path) -> Vec<String> {
+        let out = std::process::Command::new(ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_name,codec_type:stream_disposition=attached_pic",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// A draft with a cover gives an MP4, a movie, a Matroska file and a
+    /// sound-only M4A its `draft_cover.jpg` as cover art, which FFmpeg
+    /// reads as an attached Motion JPEG picture after the movie's own
+    /// streams. WebM goes without. A draft without a cover, a missing
+    /// picture, or one that is not a JPEG gives a file without one, and the
+    /// export still succeeds.
+    #[test]
+    fn a_draft_cover_is_the_files_cover_art() {
+        use cutlass_container::Demux;
+        use cutlass_model::{COVER_FILE, Cover, Micros};
+
+        let dir = std::env::temp_dir().join(format!("cutlass-cover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let jpeg = red_jpeg();
+        std::fs::write(dir.join(COVER_FILE), &jpeg).unwrap();
+        let mut draft = two_colours();
+        draft.cover = Some(Cover::Frame { time: Micros(0) });
+        let readers = ReaderFactory::new();
+        let mut encoders = EncodeFactory::new();
+        cutlass_mpeg4::register_engine_encoders(&mut encoders);
+        cutlass_vp8::register_engine_encoders(&mut encoders);
+        cutlass_aac::register_encoders(&mut encoders);
+        cutlass_opus::register_encoders(&mut encoders);
+        let ffprobe = oracle("ffprobe");
+        // A fifth of a second at the smallest size, to keep the exports quick.
+        let request = |picture, sound, container| ExportRequest {
+            range: TimeRange::new(0, 200_000),
+            short_side: 480,
+            codec: picture,
+            bitrate: 400_000,
+            frame_rate: FrameRate::FPS_30,
+            container,
+            audio: Some(AudioExport {
+                codec: sound,
+                bitrate: 128_000,
+                sample_rate: 48_000,
+                channels: 2,
+                limiter: 0,
+            }),
+            sidecar: None,
+            late_by: 0,
+            constant_rate: false,
+            prores: crate::ProresProfile::Standard,
+        };
+        let export = |draft: &Draft, name: &str| {
+            let sources = MovieSources {
+                draft,
+                root: Some(&dir),
+                readers: &readers,
+                fonts: &NoFonts,
+                renderer: None,
+                encoders: &encoders,
+            };
+            let path = dir.join(name);
+            if name.ends_with(".m4a") {
+                write_sound(
+                    &sources,
+                    &request(CodecId::Aac, CodecId::Aac, ContainerId::Isobmff),
+                    &path,
+                    &mut |_, _| true,
+                )
+                .unwrap();
+            } else {
+                let (picture, sound, container) = match name.rsplit_once('.').unwrap().1 {
+                    "webm" => (CodecId::Vp8, CodecId::Opus, ContainerId::Matroska),
+                    "mkv" => (CodecId::Mpeg4, CodecId::Aac, ContainerId::Matroska),
+                    _ => (CodecId::Mpeg4, CodecId::Aac, ContainerId::Isobmff),
+                };
+                super::write_movie(
+                    &sources,
+                    &request(picture, sound, container),
+                    &path,
+                    &mut |_, _| true,
+                )
+                .unwrap();
+            }
+            (path.clone(), std::fs::read(&path).unwrap())
+        };
+        let has_cover = |bytes: &[u8]| bytes.windows(jpeg.len()).any(|w| w == jpeg.as_slice());
+
+        for (name, own) in [
+            ("cut.mp4", &["mpeg4,video,0", "aac,audio,0"][..]),
+            ("cut.mov", &["mpeg4,video,0", "aac,audio,0"][..]),
+            ("cut.mkv", &["mpeg4,video,0", "aac,audio,0"][..]),
+            ("cut.m4a", &["aac,audio,0"][..]),
+        ] {
+            let (path, bytes) = export(&draft, name);
+            assert!(has_cover(&bytes), "{name}");
+            // The crate's own demuxers read the movie's streams only.
+            let streams = if name.ends_with(".mkv") {
+                let length = bytes.len() as u64;
+                cutlass_matroska::MatroskaDemux::open(std::io::Cursor::new(bytes), length)
+                    .unwrap()
+                    .streams()
+                    .len()
+            } else {
+                assert!(bytes.windows(4).any(|w| w == b"covr"), "{name}");
+                cutlass_isobmff::IsoBmffFile::open(std::io::Cursor::new(bytes))
+                    .unwrap()
+                    .streams()
+                    .len()
+            };
+            assert_eq!(streams, own.len(), "{name}");
+            if let Some(ffprobe) = &ffprobe {
+                let mut wanted: Vec<&str> = own.to_vec();
+                wanted.push("mjpeg,video,1");
+                assert_eq!(probed_kinds(ffprobe, &path), wanted, "{name}");
+            }
+        }
+
+        let (path, bytes) = export(&draft, "cut.webm");
+        assert!(!has_cover(&bytes));
+        if let Some(ffprobe) = &ffprobe {
+            assert_eq!(
+                probed_kinds(ffprobe, &path),
+                ["vp8,video,0", "opus,audio,0"]
+            );
+        }
+
+        // No cover on the draft: the picture on disk is not used.
+        let mut plain = draft.clone();
+        plain.cover = None;
+        let (_, bytes) = export(&plain, "plain.mp4");
+        assert!(!has_cover(&bytes) && !bytes.windows(4).any(|w| w == b"covr"));
+        // A picture that is not a JPEG, and then none at all.
+        std::fs::write(dir.join(COVER_FILE), b"not a picture").unwrap();
+        let (_, bytes) = export(&draft, "garbage.mkv");
+        assert!(!bytes.windows(9).any(|w| w == b"cover.jpg"));
+        std::fs::remove_file(dir.join(COVER_FILE)).unwrap();
+        let (_, bytes) = export(&draft, "missing.mp4");
+        assert!(!bytes.windows(4).any(|w| w == b"covr"));
+        let (_, bytes) = export(&draft, "missing.m4a");
+        assert!(!bytes.windows(4).any(|w| w == b"covr"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -9,6 +9,7 @@ description = "The h264 codec."
 [dependencies]
 cutlass-decode = { path = "../../decode", version = "0.1.0" }
 cutlass-encode = { path = "../../encode", version = "0.1.0" }
+cutlass-h264-kernels = { path = "../h264-kernels", version = "0.1.0" }
 
 [[bench]]
 name = "against_ffmpeg"

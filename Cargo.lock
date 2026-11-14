@@ -2753,6 +2753,7 @@ dependencies = [
  "cutlass-editor",
  "cutlass-effects",
  "cutlass-encode",
+ "cutlass-engine",
  "cutlass-eval",
  "cutlass-export",
  "cutlass-flac",
@@ -2762,6 +2763,7 @@ dependencies = [
  "cutlass-hevc",
  "cutlass-isobmff",
  "cutlass-jpeg",
+ "cutlass-licenses",
  "cutlass-logger",
  "cutlass-mjpeg",
  "cutlass-model",
@@ -2782,6 +2784,7 @@ dependencies = [
  "cutlass-renderer-software",
  "cutlass-riff",
  "cutlass-session",
+ "cutlass-stickers",
  "cutlass-still",
  "cutlass-storage",
  "cutlass-store",
@@ -2847,6 +2850,20 @@ version = "0.1.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-h264-kernels",
+]
+
+[[package]]
+name = "cutlass-h264-kernels"
+version = "0.1.0"
+
+[[package]]
+name = "cutlass-h264-pgo"
+version = "0.1.0"
+dependencies = [
+ "cutlass-decode",
+ "cutlass-encode",
+ "cutlass-h264",
 ]
 
 [[package]]

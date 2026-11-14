@@ -60,14 +60,14 @@ impl SideInfo {
             side.main_data_begin = reader.read(9, "main_data_begin")? as u16;
             let private = if channels == 1 { 5 } else { 3 };
             side.private_bits = reader.read(private, "private_bits")? as u8;
-            for ch in 0..channels {
-                for group in 0..4 {
-                    side.scfsi[ch][group] = reader.bit("scfsi")?;
+            for row in &mut side.scfsi[..channels] {
+                for bit in &mut row[..4] {
+                    *bit = reader.bit("scfsi")?;
                 }
             }
         }
-        for gr in 0..header.granules() {
-            for ch in 0..channels {
+        for granule in &mut side.granules[..header.granules()] {
+            for entry in &mut granule[..channels] {
                 let at = reader.pos() as u64;
                 let mut g = GranuleInfo {
                     part2_3_length: reader.read(12, "part2_3_length")? as u16,
@@ -93,15 +93,15 @@ impl SideInfo {
                         });
                     }
                     g.mixed = reader.bit("mixed_block_flag")?;
-                    for slot in 0..2 {
-                        g.table_select[slot] = reader.read(5, "table_select")? as u8;
+                    for select in &mut g.table_select[..2] {
+                        *select = reader.read(5, "table_select")? as u8;
                     }
-                    for slot in 0..3 {
-                        g.subblock_gain[slot] = reader.read(3, "subblock_gain")? as u8;
+                    for gain in &mut g.subblock_gain[..3] {
+                        *gain = reader.read(3, "subblock_gain")? as u8;
                     }
                 } else {
-                    for slot in 0..3 {
-                        g.table_select[slot] = reader.read(5, "table_select")? as u8;
+                    for select in &mut g.table_select[..3] {
+                        *select = reader.read(5, "table_select")? as u8;
                     }
                     g.region0_count = reader.read(4, "region0_count")? as u8;
                     g.region1_count = reader.read(3, "region1_count")? as u8;
@@ -111,7 +111,7 @@ impl SideInfo {
                 }
                 g.scalefac_scale = reader.bit("scalefac_scale")?;
                 g.count1_table_b = reader.bit("count1table_select")?;
-                side.granules[gr][ch] = g;
+                *entry = g;
             }
         }
         Ok(side)
@@ -130,15 +130,14 @@ impl SideInfo {
                 u32::from(self.private_bits),
                 if channels == 1 { 5 } else { 3 },
             );
-            for ch in 0..channels {
-                for group in 0..4 {
-                    writer.put(u32::from(self.scfsi[ch][group]), 1);
+            for row in &self.scfsi[..channels] {
+                for &bit in &row[..4] {
+                    writer.put(u32::from(bit), 1);
                 }
             }
         }
-        for gr in 0..header.granules() {
-            for ch in 0..channels {
-                let g = &self.granules[gr][ch];
+        for granule in &self.granules[..header.granules()] {
+            for g in &granule[..channels] {
                 writer.put(u32::from(g.part2_3_length), 12);
                 writer.put(u32::from(g.big_values), 9);
                 writer.put(u32::from(g.global_gain), 8);
@@ -147,15 +146,15 @@ impl SideInfo {
                 if g.window_switching {
                     writer.put(u32::from(g.block_type), 2);
                     writer.put(u32::from(g.mixed), 1);
-                    for slot in 0..2 {
-                        writer.put(u32::from(g.table_select[slot]), 5);
+                    for &select in &g.table_select[..2] {
+                        writer.put(u32::from(select), 5);
                     }
-                    for slot in 0..3 {
-                        writer.put(u32::from(g.subblock_gain[slot]), 3);
+                    for &gain in &g.subblock_gain[..3] {
+                        writer.put(u32::from(gain), 3);
                     }
                 } else {
-                    for slot in 0..3 {
-                        writer.put(u32::from(g.table_select[slot]), 5);
+                    for &select in &g.table_select[..3] {
+                        writer.put(u32::from(select), 5);
                     }
                     writer.put(u32::from(g.region0_count), 4);
                     writer.put(u32::from(g.region1_count), 3);

@@ -13,6 +13,8 @@ import SwiftUI
 struct TimelineStrip: View {
     @Bindable var model: EditorModel
     @Binding var picked: [PhotosPickerItem]
+    /// A tap on the button between two main clips, with the clip before it.
+    var openCut: (String) -> Void = { _ in }
     @State private var dragStart: Int64?
     @State private var pinchStart: Double?
     /// A clip off main being moved, and how far the finger has gone.
@@ -21,6 +23,10 @@ struct TimelineStrip: View {
     @State private var trimming: (id: String, startEdge: Bool, dx: CGFloat)?
     /// A main clip being reordered: where the finger went down and where it is.
     @State private var reordering: (id: String, pressX: CGFloat, fingerX: CGFloat)?
+    /// How far the rows are scrolled up, in points: 0 or less.
+    @State private var scrollY: CGFloat = 0
+    /// Where `scrollY` was when a mostly upright drag began.
+    @State private var scrollStart: CGFloat?
 
     private let rulerHeight: CGFloat = 26
     private let laneGap: CGFloat = 8
@@ -30,6 +36,7 @@ struct TimelineStrip: View {
         GeometryReader { geometry in
             let middle = geometry.size.width / 2
             let origin = middle - x(model.playheadUs)
+            let shown = geometry.size.height - rulerHeight - 6
             ZStack(alignment: .topLeading) {
                 Color.clear.contentShape(Rectangle())
                 ruler(origin: origin, width: geometry.size.width)
@@ -49,6 +56,11 @@ struct TimelineStrip: View {
                             .zIndex(movingIn(lane) ? 1 : 0)
                     }
                 }
+                // The rows scroll up and down under the ruler, which stays.
+                .offset(y: scrollY)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .clipped()
+                .contentShape(Rectangle())
                 .padding(.top, rulerHeight + 6)
                 Rectangle()
                     .fill(.white)
@@ -60,16 +72,25 @@ struct TimelineStrip: View {
             }
             .coordinateSpace(.named("strip"))
             .clipped()
-            .gesture(scrub)
+            .gesture(scrub(shown: shown))
             .simultaneousGesture(zoom(width: geometry.size.width))
             .onTapGesture {
                 model.stopCoast()
                 model.selectedClip = nil
             }
-            .onAppear { model.refreshStrip(halfWidth: middle) }
+            .onAppear {
+                model.refreshStrip(halfWidth: middle)
+                showMain(shown: shown)
+            }
             .onChange(of: model.playheadUs) { model.refreshStrip(halfWidth: middle) }
             .onChange(of: model.pixelSize) { model.refreshStrip(halfWidth: middle) }
-            .onChange(of: model.lanes) { model.refreshStrip(halfWidth: middle) }
+            .onChange(of: model.lanes) { before, _ in
+                model.refreshStrip(halfWidth: middle)
+                scrollY = clamped(scrollY, shown: shown)
+                // A project's rows come after the strip shows.
+                if before.isEmpty { showMain(shown: shown) }
+            }
+            .onChange(of: shown) { scrollY = clamped(scrollY, shown: shown) }
             .onChange(of: geometry.size.width) { model.refreshStrip(halfWidth: middle) }
         }
     }
@@ -88,6 +109,24 @@ struct TimelineStrip: View {
     private var snapUs: Int64 { micros(10) }
 
     private func rowHeight(_ lane: Lane) -> CGFloat { lane.main ? 56 : 40 }
+
+    /// The rows' whole height, with a gap below the last.
+    private var rowsHeight: CGFloat {
+        model.lanes.reduce(0) { $0 + rowHeight($1) + laneGap }
+    }
+
+    /// `offset` kept between the top row at the top and the last row at
+    /// the bottom of `shown` points.
+    private func clamped(_ offset: CGFloat, shown: CGFloat) -> CGFloat {
+        min(0, max(offset, min(0, shown - rowsHeight)))
+    }
+
+    /// Scroll just far enough that the main row is in full view.
+    private func showMain(shown: CGFloat) {
+        guard let index = model.lanes.firstIndex(where: \.main) else { return }
+        let bottom = model.lanes[...index].reduce(0) { $0 + rowHeight($1) + laneGap }
+        if bottom + scrollY > shown { scrollY = clamped(shown - bottom, shown: shown) }
+    }
 
     private func movingIn(_ lane: Lane) -> Bool {
         guard let id = moving?.id else { return false }
@@ -138,6 +177,16 @@ struct TimelineStrip: View {
             ForEach(lane.clips, id: \.id) { clip in
                 clipView(clip, lane: lane, index: index, origin: origin, height: height)
             }
+            if lane.main {
+                ForEach(model.cuts, id: \.outgoingId) { cut in
+                    junction(cut)
+                        .offset(x: origin + x(cut.atUs) - 11, y: (height - 22) / 2)
+                }
+            }
+            if lane.main && !lane.clips.isEmpty {
+                muteButton(lane)
+                    .offset(x: origin - 50, y: (height - 40) / 2)
+            }
             if lane.main && lane.clips.isEmpty {
                 Text("Tap + to add a photo or video")
                     .font(.footnote)
@@ -174,7 +223,8 @@ struct TimelineStrip: View {
                 ? min(trimming?.dx ?? 0, x(clip.durationUs) - 4) : 0
         )
         .frame(width: max(width - 2, 2), height: height)
-        .overlay(alignment: .topLeading) {
+        // A clip that shows its name keeps the length below it.
+        .overlay(alignment: model.films[clip.id]?.isEmpty == false ? .topLeading : .bottomLeading) {
             if selected {
                 Text(String(format: "%.1fs", Double(shown) / 1_000_000))
                     .font(.system(size: 10, weight: .semibold).monospacedDigit())
@@ -183,7 +233,7 @@ struct TimelineStrip: View {
                     .padding(.vertical, 1)
                     .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 3))
                     .padding(.leading, lane.locked ? 4 : 16)
-                    .padding(.top, 4)
+                    .padding(.vertical, 4)
             }
         }
         .overlay {
@@ -193,6 +243,19 @@ struct TimelineStrip: View {
                     Spacer(minLength: 0)
                     grip(clip, startEdge: false)
                 }
+            }
+        }
+        .overlay(alignment: .bottomLeading) {
+            if !clip.beatsUs.isEmpty {
+                ZStack(alignment: .bottomLeading) {
+                    ForEach(clip.beatsUs, id: \.self) { time in
+                        Circle()
+                            .fill(Color(red: 1, green: 0.82, blue: 0.2))
+                            .frame(width: 6, height: 6)
+                            .offset(x: x(time - clip.startUs) - 3, y: -3)
+                    }
+                }
+                .allowsHitTesting(false)
             }
         }
         .overlay(alignment: .leading) {
@@ -215,6 +278,49 @@ struct TimelineStrip: View {
         }
         .gesture(lane.locked ? nil : (lane.main ? reorder(clip) : nil))
         .gesture(lane.locked || lane.main ? nil : move(clip, row: index))
+    }
+
+    /// The button on a cut between two main clips: white, marked when the
+    /// cut has a transition. A tap opens the transitions.
+    private func junction(_ cut: Cut) -> some View {
+        let chosen = model.selectedCut == cut.outgoingId
+        return Button {
+            model.stopCoast()
+            model.pause()
+            model.selectedClip = nil
+            model.selectedCut = cut.outgoingId
+            openCut(cut.outgoingId)
+        } label: {
+            Group {
+                if cut.transition != nil || !cut.name.isEmpty {
+                    Image(systemName: "arrow.left.and.right")
+                        .font(.system(size: 9, weight: .bold))
+                } else {
+                    Rectangle().frame(width: 2, height: 10)
+                }
+            }
+            .foregroundStyle(.black)
+            .frame(width: 22, height: 22)
+            .background(chosen ? Color.cyan : .white, in: RoundedRectangle(cornerRadius: 5))
+            .shadow(color: .black.opacity(0.4), radius: 2)
+            .contentShape(Rectangle().inset(by: -6))
+        }
+        .accessibilityLabel(cut.name.isEmpty ? "Add transition" : "Transition \(cut.name)")
+    }
+
+    /// The main row's sound switch, left of time zero; it scrolls away with
+    /// the rows.
+    private func muteButton(_ lane: Lane) -> some View {
+        Button { model.setMuted(lane, !lane.muted) } label: {
+            VStack(spacing: 2) {
+                HugeIcon(lane.muted ? "volumeOff" : "volume", size: 18)
+                Text(lane.muted ? "Muted" : "Sound").font(.system(size: 9))
+            }
+            .foregroundStyle(.white.opacity(0.85))
+            .frame(width: 40, height: 40)
+            .background(Color(white: 0.17), in: RoundedRectangle(cornerRadius: 6))
+        }
+        .accessibilityLabel(lane.muted ? "Unmute clip audio" : "Mute clip audio")
     }
 
     /// A white tab on one end of the selected clip. Dragging it trims that end.
@@ -377,19 +483,34 @@ struct TimelineStrip: View {
 
     // MARK: Scrub and zoom
 
-    private var scrub: some Gesture {
+    /// A sideways drag moves time; a mostly upright one scrolls the rows
+    /// when they are taller than the `shown` points.
+    private func scrub(shown: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 4)
             .onChanged { drag in
                 guard reordering == nil else { return }
-                if dragStart == nil {
-                    model.stopCoast()
-                    model.pause()
-                    dragStart = model.playheadUs
+                if dragStart == nil, scrollStart == nil {
+                    let upright = abs(drag.translation.height) > abs(drag.translation.width)
+                    if upright, rowsHeight > shown {
+                        scrollStart = scrollY
+                    } else {
+                        model.stopCoast()
+                        model.pause()
+                        dragStart = model.playheadUs
+                    }
+                }
+                if let scrollStart {
+                    scrollY = clamped(scrollStart + drag.translation.height, shown: shown)
+                    return
                 }
                 let start = dragStart ?? model.playheadUs
                 model.seek(start - micros(drag.translation.width))
             }
             .onEnded { drag in
+                if scrollStart != nil {
+                    scrollStart = nil
+                    return
+                }
                 guard dragStart != nil else { return }
                 dragStart = nil
                 model.coast(from: drag.velocity.width)
@@ -432,7 +553,9 @@ struct ClipBlock: View {
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(.white.opacity(0.9))
                         .lineLimit(1)
-                        .padding(.horizontal, 6)
+                        // Clear of the trim grip while selected.
+                        .padding(.leading, selected ? 16 : 6)
+                        .padding(.trailing, 6)
                         .padding(.top, 4)
                 } else {
                     film

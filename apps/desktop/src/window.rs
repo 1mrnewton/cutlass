@@ -4,7 +4,18 @@ use crate::shell::Shell;
 use crate::tokens;
 use crate::view::{ViewState, show};
 
+/// Open the window on the projects, or on what the command line names.
 pub fn run() -> eframe::Result {
+    run_on(false)
+}
+
+/// Open the window on the effect studio, as `cutlass studio` does. A word
+/// after it is the id of an effect or a transition to open there.
+pub fn run_studio() -> eframe::Result {
+    run_on(true)
+}
+
+fn run_on(studio: bool) -> eframe::Result {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Cutlass")
         .with_inner_size([1280.0, 800.0])
@@ -39,21 +50,32 @@ pub fn run() -> eframe::Result {
             viewport,
             ..Default::default()
         },
-        Box::new(|creation| {
+        Box::new(move |creation| {
             let file = Shell::settings_path();
             let loaded = crate::load_settings_file(&file);
             let (decoders, encoders) = crate::register_codecs_with(&loaded.settings.hardware);
             let mut shell = Shell::new(decoders, encoders, loaded.settings);
             shell.keep_settings_file(file, loaded.generation);
             shell.keep_presets_file(Shell::home().text_presets_file());
+            shell.keep_studio_folder(Shell::home().studio());
             // At most once a day, and never with the switch off.
             shell.check_updates_at_launch();
             // A project folder or files named on the command line, as a
             // file association passes them.
+            // After `cutlass studio` there are none: what follows is the
+            // command and the recipe to open, not files.
             let named: Vec<std::path::PathBuf> = std::env::args_os()
                 .skip(1)
+                .filter(|_| !studio)
                 .map(std::path::PathBuf::from)
                 .collect();
+            if studio
+                && let Some(id) = std::env::args().nth(2)
+                && !shell.studio_mut().open_effect(&id)
+                && !shell.studio_mut().open_transition(&id)
+            {
+                cutlass_logger::warn!("cutlass studio: no effect or transition {id}");
+            }
             if let Err(error) = shell.drop_files(&named) {
                 shell.notice_error(&error);
             }
@@ -73,9 +95,11 @@ pub fn run() -> eframe::Result {
                 let ctx = creation.egui_ctx.clone();
                 cutlass_platform_apple::wake_on_opened_files(move || ctx.request_repaint());
             }
+            let mut view = ViewState::new();
+            view.studio.open = studio;
             Ok(Box::new(DesktopWindow {
                 shell,
-                view: ViewState::new(),
+                view,
                 last_time: None,
                 #[cfg(target_os = "macos")]
                 menu_bar: None,
@@ -150,6 +174,12 @@ impl eframe::App for DesktopWindow {
     /// window shows only its panel and shadow.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0; 4]
+    }
+
+    /// Runs before every pass, the window shown or not, so the close
+    /// button is caught even while the window is minimised.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        crate::view::close_to_projects(&mut self.shell, &mut self.view, ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {

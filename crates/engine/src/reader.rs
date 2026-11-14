@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cutlass_codec::access::{
-    ChannelLayout, CodecParams, ColorPrimaries, PixelFormat, SampleFormat, StandardLayout, Transfer,
+    ChannelLayout, CodecParams, ColorMatrix, ColorPrimaries, ColorRange, PixelFormat, SampleFormat,
+    StandardLayout, Transfer,
 };
 use cutlass_codec::{CodecId, ContainerId, FrameSize, StreamCodec, Timescale};
 use cutlass_container::{Demux, DisplayQuarter, OpenError, ProbeResult, ReadError, SeekTo};
@@ -92,6 +93,10 @@ pub enum DecodedFrame {
         pixel: PixelFormat,
         primaries: ColorPrimaries,
         transfer: Transfer,
+        /// The Y′CbCr matrix the stream names. Unspecified is BT.709.
+        matrix: ColorMatrix,
+        /// The sample range the stream names. Unspecified is studio swing.
+        range: ColorRange,
         /// Shared, so a cache, the read-ahead, and a GPU layer hold one
         /// picture without copying it.
         bytes: Arc<Vec<u8>>,
@@ -126,6 +131,8 @@ impl DecodedFrame {
                 pixel: PixelFormat::Yuv420p,
                 primaries: *primaries,
                 transfer: *transfer,
+                matrix: ColorMatrix::Unspecified,
+                range: ColorRange::Unspecified,
                 bytes: surface.yuv420p()?,
             })),
             Self::Platform { .. } | Self::Still(_) | Self::Coded { .. } => {
@@ -1206,6 +1213,8 @@ fn frame_from_picture(picture: PictureOutput) -> DecodedFrame {
         pixel: info.pixel,
         primaries: info.primaries,
         transfer: info.transfer,
+        matrix: info.matrix,
+        range: info.range,
         bytes: picture.into_shared().unwrap_or_default(),
     }
 }
@@ -1788,6 +1797,8 @@ mod tests {
             pixel: PixelFormat::Yuv420p,
             primaries: ColorPrimaries::Bt709,
             transfer: Transfer::Bt709,
+            matrix: ColorMatrix::Unspecified,
+            range: ColorRange::Unspecified,
             bytes: vec![0; 12].into(),
         };
         assert_eq!(coded.byte_size(), 12);

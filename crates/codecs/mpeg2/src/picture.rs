@@ -510,7 +510,7 @@ impl MacroblockWriter<'_> {
         let dir = plan.mode.dir();
         let s = &mut *self.scratch;
         // Prediction, as a decoder forms it (7.6.4, 7.6.7).
-        for c in 0..3 {
+        for (c, pred) in s.pred.iter_mut().enumerate() {
             let (bw, bh) = geo.mb_size(c);
             let mut first = true;
             for ((reference, used), mv) in job.refs.iter().zip(dir).zip(plan.mv) {
@@ -519,7 +519,7 @@ impl MacroblockWriter<'_> {
                 };
                 let mv = if c == 0 { mv } else { [mv[0] / 2, mv[1] / 2] };
                 let mut dst = Target {
-                    buf: &mut s.pred[c],
+                    buf: &mut pred[..],
                     offset: 0,
                     stride: bw,
                 };

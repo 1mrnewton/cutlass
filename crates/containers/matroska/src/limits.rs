@@ -59,3 +59,6 @@ pub const CLUSTER_BYTES: usize = 5 * 1024 * 1024;
 /// Payload bytes the muxer holds before it writes the Tracks element when a
 /// track has not delivered its first packet (and its configuration) yet.
 pub const MAX_HELD_BEFORE_HEADER: u64 = 64 * 1024 * 1024;
+
+/// Largest cover picture the muxer attaches.
+pub const MAX_COVER_BYTES: usize = 16 * 1024 * 1024;

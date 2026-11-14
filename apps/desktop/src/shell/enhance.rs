@@ -1,17 +1,18 @@
-//! Enhance quality, Reduce image noise and Optical flow on the selected
-//! clip, and Optical flow on every clip at once: store the level, and make
-//! the clip's copy as a job when the project has none for it yet. A clip
-//! with more than one on has one copy, denoised, filled, then enhanced.
-//! The copy goes into the project's `Resources/video_enhance`,
-//! `Resources/video_denoise` when it is denoised but not enhanced, or
-//! `Resources/video_interpolate` when it is only filled, and the preview
+//! Enhance quality, Reduce image noise, Remove flicker and Optical flow on
+//! the selected clip, and Optical flow on every clip at once: store the
+//! level, and make the clip's copy as a job when the project has none for
+//! it yet. A clip with more than one on has one copy, evened, denoised,
+//! filled, then enhanced. The copy goes into the project's
+//! `Resources/video_enhance`, `Resources/video_denoise` when it is
+//! denoised but not enhanced, `Resources/video_deflicker` when it is only
+//! evened, or `Resources/video_interpolate` when it is only filled, and the preview
 //! and export draw the clip from it as soon as the job lands. Trimming or
 //! splitting the clip keeps its copy; a wider trim, another level or, with
 //! Optical flow, another speed makes a new one.
 
 use std::path::PathBuf;
 
-use cutlass_eval::{EnhanceAsk, copy_ask};
+use cutlass_eval::{CopyLevels, EnhanceAsk, clip_copy_ask};
 use cutlass_model::{Algorithm, Draft, MaterialRef, MotionBlur, SegmentId, TrackAttribute};
 use cutlass_session::Request;
 use cutlass_store::find_enhanced;
@@ -28,6 +29,7 @@ use super::{KeyedSetting, Landing, Shell, ShellError};
 /// third.
 pub(crate) const ENHANCE_JOB: &str = "Enhance quality";
 pub(crate) const DENOISE_JOB: &str = "Reduce image noise";
+pub(crate) const DEFLICKER_JOB: &str = "Remove flicker";
 pub(crate) const INTERPOLATE_JOB: &str = "Optical flow";
 pub(crate) const MOTION_BLUR_JOB: &str = "Motion blur";
 
@@ -60,23 +62,35 @@ pub(super) fn model_dir(folder: &str, weights: &str) -> PathBuf {
 enum Copied {
     Enhance,
     Denoise,
+    Deflicker,
     Interpolate,
     MotionBlur(Option<MotionBlur>),
 }
 
-/// A clip's levels: Enhance quality, Reduce image noise, the Optical flow
-/// frame rate and Motion blur.
+/// A clip's levels: Enhance quality, Reduce image noise, Remove flicker,
+/// the Optical flow frame rate and Motion blur.
 #[derive(Clone, Default, PartialEq)]
 struct Levels {
     enhance: i64,
     denoise: i64,
+    deflicker: i64,
     interpolate: i64,
     motion_blur: Option<MotionBlur>,
 }
 
 impl Levels {
+    fn copy(&self) -> CopyLevels<'_> {
+        CopyLevels {
+            level: self.enhance,
+            denoise: self.denoise,
+            deflicker: self.deflicker,
+            interpolate: self.interpolate,
+            motion_blur: self.motion_blur.as_ref(),
+        }
+    }
+
     fn any(&self) -> bool {
-        self.enhance > 0 || self.denoise > 0 || self.interpolate > 0 || self.motion_blur.is_some()
+        self.copy().any()
     }
 }
 
@@ -92,6 +106,7 @@ fn levels_of(draft: &Draft, segment_id: &SegmentId) -> Levels {
     Levels {
         enhance: level(video.enhance()),
         denoise: level(video.denoise()),
+        deflicker: level(video.deflicker()),
         interpolate: level(video.interpolate()),
         motion_blur: video.motion_blur(),
     }
@@ -144,6 +159,13 @@ impl Shell {
     /// stop at 0, as [`Self::set_enhance`] does.
     pub fn set_denoise(&mut self, level: i64) -> Result<(), ShellError> {
         self.set_copied(Copied::Denoise, level)
+    }
+
+    /// Even out the selected clip's brightness from frame to frame at
+    /// `level` (1), or stop at 0, as [`Self::set_enhance`] does. It needs
+    /// no model and no GPU.
+    pub fn set_deflicker(&mut self, level: i64) -> Result<(), ShellError> {
+        self.set_copied(Copied::Deflicker, level)
     }
 
     /// Fill the selected clip with frames made between its own to `fps`
@@ -275,6 +297,7 @@ impl Shell {
         match &which {
             Copied::Enhance => levels.enhance = level,
             Copied::Denoise => levels.denoise = level,
+            Copied::Deflicker => levels.deflicker = level,
             Copied::Interpolate => levels.interpolate = level,
             Copied::MotionBlur(blur) => levels.motion_blur = blur.clone(),
         }
@@ -291,6 +314,7 @@ impl Shell {
         self.apply(match which {
             Copied::Enhance => Request::SetEnhance { segment_id, level },
             Copied::Denoise => Request::SetDenoise { segment_id, level },
+            Copied::Deflicker => Request::SetDeflicker { segment_id, level },
             Copied::Interpolate => Request::SetInterpolate {
                 segment_id,
                 fps: level,
@@ -328,15 +352,7 @@ impl Shell {
         let mut asks: Vec<EnhanceAsk> = Vec::new();
         let (mut asked, mut refused) = (0, None);
         for (segment_id, levels) in &wanted {
-            let ask = copy_ask(
-                draft,
-                Some(&root),
-                segment_id,
-                levels.enhance,
-                levels.denoise,
-                levels.interpolate,
-                levels.motion_blur.as_ref(),
-            );
+            let ask = clip_copy_ask(draft, Some(&root), segment_id, &levels.copy());
             match ask {
                 Ok(ask) => {
                     asked += 1;
@@ -369,6 +385,9 @@ impl Shell {
         let label = match asks.as_slice() {
             [ask] if ask.level > 0 => ENHANCE_JOB,
             [ask] if ask.denoise > 0 => DENOISE_JOB,
+            [ask] if ask.deflicker > 0 && ask.interpolate <= 0 && ask.motion_blur.is_none() => {
+                DEFLICKER_JOB
+            }
             [ask] if ask.interpolate <= 0 && ask.motion_blur.is_some() => MOTION_BLUR_JOB,
             _ => INTERPOLATE_JOB,
         };
@@ -377,7 +396,9 @@ impl Shell {
         let interpolate = asks
             .iter()
             .any(|ask| ask.interpolate > 0 || ask.motion_blur.is_some());
-        if Compute::best() != Compute::Gpu {
+        // Remove flicker alone loads no model and runs anywhere.
+        let models = enhance || denoise || interpolate;
+        if models && Compute::best() != Compute::Gpu {
             return Err(ShellError::Unavailable(format!(
                 "{label} needs a GPU this build can use"
             )));
@@ -401,9 +422,11 @@ impl Shell {
         let encoders = self.encoders.clone();
         let kernels = Shell::home().cache().join("kernels");
         self.start_job(label, move |progress| {
-            progress.stage("Loading the model");
-            if let Err(error) = cutlass_vision::keep_kernels_in(&kernels) {
-                cutlass_logger::warn!("kernel cache: {error}");
+            if models {
+                progress.stage("Loading the model");
+                if let Err(error) = cutlass_vision::keep_kernels_in(&kernels) {
+                    cutlass_logger::warn!("kernel cache: {error}");
+                }
             }
             let loaded = (|| {
                 let enhancer = enhance
@@ -502,6 +525,12 @@ impl Shell {
         self.copied_level(Algorithm::NOISE_REDUCTION)
     }
 
+    /// The selected clip's Remove flicker level, 0 when it is off.
+    #[must_use]
+    pub fn deflicker_level(&self) -> i64 {
+        self.copied_level(Algorithm::DEFLICKER)
+    }
+
     /// The selected clip's Optical flow frame rate, 0 when it is off.
     #[must_use]
     pub fn interpolate_level(&self) -> i64 {
@@ -525,6 +554,12 @@ impl Shell {
     #[must_use]
     pub fn denoise_progress(&self) -> Option<f32> {
         self.copy_progress(DENOISE_JOB)
+    }
+
+    /// How far a job making a copy that is only evened is, 0 to 1.
+    #[must_use]
+    pub fn deflicker_progress(&self) -> Option<f32> {
+        self.copy_progress(DEFLICKER_JOB)
     }
 
     /// The selected clip's Motion blur, `None` when it is off.

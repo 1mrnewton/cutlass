@@ -5,12 +5,13 @@
 use crate::dec::coder::Coder;
 use crate::dec::tile::TileDec;
 use crate::dec::types::{
-    ALTREF_FRAME, ALTREF2_FRAME, BWDREF_FRAME, GLOBALMV, GOLDEN_FRAME, INTRA_FRAME, LAST_FRAME,
-    LAST2_FRAME, LAST3_FRAME, NEAR_NEARMV, NEAR_NEWMV, NEAREST_NEARESTMV, NEARMV, NEW_NEARMV,
-    NEW_NEWMV, NEWMV, NONE, bh4, block_height, block_width, bw4, is_directional,
+    ALTREF_FRAME, ALTREF2_FRAME, BWDREF_FRAME, COMPOUND_DIFFWTD, COMPOUND_DISTANCE, COMPOUND_WEDGE,
+    GLOBALMV, GOLDEN_FRAME, INTRA_FRAME, LAST_FRAME, LAST2_FRAME, LAST3_FRAME, NEAR_NEARMV,
+    NEAR_NEWMV, NEAREST_NEARESTMV, NEARMV, NEW_NEARMV, NEW_NEWMV, NEWMV, NONE, bh4, block_height,
+    block_width, bw4, is_directional,
 };
 use crate::dsp::Pixel;
-use crate::spec::tables::{COMPOUND_MODE_CTX_MAP, INTRA_MODE_CONTEXT, SIZE_GROUP};
+use crate::spec::tables::{COMPOUND_MODE_CTX_MAP, INTRA_MODE_CONTEXT, SIZE_GROUP, WEDGE_BITS};
 
 use super::msac_enc::{bool_cost, symbol_cost};
 
@@ -73,6 +74,52 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             0
         };
         bb(&self.cdf.is_inter[ctx], inter)
+    }
+
+    /// Bits of the inter-intra syntax of the single-reference block of 8x8
+    /// to 32x32 in `self.b`: `None` for a block without it, else its mode
+    /// and the wedge when it has one.
+    pub(crate) fn interintra_bits(&self, choice: Option<(u8, Option<u8>)>) -> f64 {
+        let bs = self.b.bsize as usize;
+        let ctx = SIZE_GROUP[bs] as usize - 1;
+        let c = &self.cdf;
+        match choice {
+            None => bb(&c.inter_intra[ctx], false),
+            Some((mode, wedge)) => {
+                bb(&c.inter_intra[ctx], true)
+                    + sb(&c.inter_intra_mode[ctx], usize::from(mode))
+                    + bb(&c.wedge_inter_intra[bs], wedge.is_some())
+                    + wedge.map_or(0.0, |i| sb(&c.wedge_index[bs], usize::from(i)))
+            }
+        }
+    }
+
+    /// Bits of the compound type syntax of the compound block in `self.b`
+    /// predicted from `refs`: `comp_group_idx`, then `compound_idx`, or
+    /// the kind of mask with its wedge or its one bit.
+    pub(crate) fn compound_type_bits(&self, refs: [i8; 2], kind: u8, wedge: u8) -> f64 {
+        let bs = self.b.bsize as usize;
+        let c = &self.cdf;
+        let masked = kind == COMPOUND_WEDGE || kind == COMPOUND_DIFFWTD;
+        let mut bits = 0.0;
+        if self.seq.enable_masked_compound {
+            bits += bb(&c.comp_group_idx[self.comp_group_idx_ctx()], masked);
+        }
+        if !masked {
+            if self.seq.enable_jnt_comp {
+                let ctx = self.compound_idx_ctx(refs);
+                bits += bb(&c.compound_idx[ctx], kind != COMPOUND_DISTANCE);
+            }
+            return bits;
+        }
+        if WEDGE_BITS[bs] > 0 {
+            bits += bb(&c.compound_type[bs], kind == COMPOUND_DIFFWTD);
+        }
+        if kind == COMPOUND_WEDGE {
+            bits += sb(&c.wedge_index[bs], usize::from(wedge));
+        }
+        // The sign of the wedge or the type of the difference mask.
+        bits + 1.0
     }
 
     /// Bits of the reference frame syntax for `refs` (single or compound).

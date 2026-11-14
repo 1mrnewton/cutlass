@@ -1893,6 +1893,34 @@ mod recipe_tests {
         assert_eq!(draft, before);
     }
 
+    // The one test here that loads a studio folder: the studio's recipes
+    // are shared by every test in this process.
+    #[test]
+    fn a_studio_recipe_is_a_gpu_layer_like_a_bundled_one() {
+        let studio =
+            std::env::temp_dir().join(format!("cutlass-eval-studio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&studio);
+        let draft = with_effect("recipe/studio-soft");
+        // Before the studio holds it, the id names nothing a frame draws.
+        assert_eq!(effects(&layers(&draft, 600_000)), Vec::<usize>::new());
+        let recipe = cutlass_effects::Recipe::read(
+            br#"{"version":2,"id":"studio-soft","name":"Soft","passes":[{"block":"blur","params":{"radius":{"keys":[[0,0],[1,0.05]],"ease":["out"]}}}]}"#,
+        )
+        .expect("a recipe");
+        cutlass_effects::write_studio_recipe(&studio, &recipe).expect("saved");
+        cutlass_effects::load_studio(&studio);
+        let frame = layers(&draft, 600_000);
+        assert_eq!(effects(&frame), vec![frame.layers.len() - 1]);
+        let Some(GpuSource::Effect(steps, _)) = frame.layers.last().map(|layer| &layer.source)
+        else {
+            panic!("no effect layer");
+        };
+        assert_eq!(steps, &recipe.steps_at(Micros(100_000)));
+        cutlass_effects::clear_studio();
+        assert_eq!(effects(&layers(&draft, 600_000)), Vec::<usize>::new());
+        let _ = std::fs::remove_dir_all(studio);
+    }
+
     #[test]
     fn an_effect_runs_with_the_controls_stored_on_its_clip() {
         let mut draft = with_effect("recipe/photo-drop");

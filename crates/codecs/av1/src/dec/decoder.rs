@@ -5,7 +5,7 @@ use std::ops::Range;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use cutlass_decode::CodecError;
+use cutlass_decode::{CodecError, ContentLight, ItuT35, MasteringDisplay};
 use cutlass_simd::shared_rows::{PlaneBuf, RowsWriter, SharedRows};
 
 use crate::dsp::Pixel;
@@ -17,10 +17,10 @@ use super::frame::{FrameState, LrUnitParams, MF_BAND_ROWS, MfBand, Picture, Plan
 use super::msac::Msac;
 use super::mvpred::{MfPlan, MfShared, motion_field_plan};
 use super::obu::{
-    FrameHeader, GrainParams, HeaderContext, KEY_FRAME, OBU_FRAME, OBU_FRAME_HEADER,
-    OBU_REDUNDANT_FRAME_HEADER, OBU_SEQUENCE_HEADER, OBU_TEMPORAL_DELIMITER, OBU_TILE_GROUP,
-    OBU_TILE_LIST, PRIMARY_REF_NONE, RESTORE_NONE, RefHeaderState, SequenceHeader,
-    parse_frame_header, parse_sequence_header, relative_dist, split_obus,
+    FrameHeader, GrainParams, HeaderContext, KEY_FRAME, Metadata, OBU_FRAME, OBU_FRAME_HEADER,
+    OBU_METADATA, OBU_REDUNDANT_FRAME_HEADER, OBU_SEQUENCE_HEADER, OBU_TEMPORAL_DELIMITER,
+    OBU_TILE_GROUP, OBU_TILE_LIST, PRIMARY_REF_NONE, RESTORE_NONE, RefHeaderState, SequenceHeader,
+    parse_frame_header, parse_metadata, parse_sequence_header, relative_dist, split_obus,
 };
 use super::postfilter;
 use super::recon::Scratch;
@@ -122,6 +122,15 @@ pub struct DecodedFrame {
     pub num_units_in_decoding_tick: u32,
     /// `seq_level_idx` of the operating point decoded.
     pub seq_level_idx: u8,
+    /// The content light level of the coded video sequence, when a
+    /// metadata OBU gave one.
+    pub content_light: Option<ContentLight>,
+    /// The mastering display colour volume of the coded video sequence,
+    /// when a metadata OBU gave one.
+    pub mastering_display: Option<MasteringDisplay>,
+    /// The ITU-T T.35 messages of this frame's temporal unit that came
+    /// before it, in stream order.
+    pub t35: Arc<[ItuT35]>,
 }
 
 /// What a frame's parse leaves for later frames (its CDFs, its motion
@@ -174,6 +183,9 @@ struct Slot {
     pic: Arc<FrameJob>,
     data: DataPromise,
     cdf: CdfPromise,
+    /// The ITU-T T.35 messages that came with the frame, for when it is
+    /// shown later.
+    t35: Arc<[ItuT35]>,
 }
 
 mod parse;
@@ -692,6 +704,17 @@ struct Queued {
     rh: RefHeaderState,
     grain: GrainParams,
     tag: u64,
+    /// The high dynamic range metadata in force when the frame was shown.
+    hdr: HdrMetadata,
+    t35: Arc<[ItuT35]>,
+}
+
+/// The metadata that holds from where its OBU appears to the end of the
+/// coded video sequence (6.7.1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HdrMetadata {
+    content_light: Option<ContentLight>,
+    mastering_display: Option<MasteringDisplay>,
 }
 
 type Job = Box<dyn FnOnce() + Send>;
@@ -928,6 +951,10 @@ pub struct Av1Core {
     /// Operating point to decode (`choose_operating_point()`); 0 by default.
     /// Set it with [`Self::select_operating_point`].
     operating_point: usize,
+    /// The light level and mastering display of the coded video sequence.
+    hdr: HdrMetadata,
+    /// ITU-T T.35 messages of the unit being decoded, waiting for a frame.
+    unit_t35: Vec<ItuT35>,
     workers: Arc<Workers>,
 }
 
@@ -969,6 +996,8 @@ impl Av1Core {
             frames_at_once: true,
             frame_delay: None,
             operating_point: 0,
+            hdr: HdrMetadata::default(),
+            unit_t35: Vec::new(),
             workers: Arc::default(),
         }
     }
@@ -996,6 +1025,8 @@ impl Av1Core {
     /// still decoding finish on their threads and are discarded).
     pub fn reset(&mut self) {
         let seq = self.seq.take();
+        // The metadata of the sequence stays with its header.
+        let hdr = self.hdr;
         let (grain, max, threads, at_once, delay, op) = (
             self.apply_grain,
             self.max_pixels,
@@ -1006,6 +1037,7 @@ impl Av1Core {
         );
         *self = Self::new();
         self.seq = seq;
+        self.hdr = hdr;
         self.apply_grain = grain;
         self.max_pixels = max;
         self.threads = threads;
@@ -1080,9 +1112,13 @@ impl Av1Core {
     /// `wait`, also after waiting for the frames it started).
     fn decode_checked(&mut self, data: &[u8], tag: u64, wait: bool) -> R<()> {
         let saved = (self.seq.clone(), self.ref_hdr.clone(), self.slots.clone());
+        let saved_hdr = self.hdr;
         let q0 = self.queue.len();
         self.unit_jobs.clear();
+        self.unit_t35.clear();
         let mut r = self.decode_unit(data, tag);
+        // A message with no frame after it in its unit belongs to none.
+        self.unit_t35.clear();
         if r.is_ok() && wait {
             for j in &self.unit_jobs {
                 if let Err(e) = j.wait() {
@@ -1096,6 +1132,7 @@ impl Av1Core {
             self.seq = saved.0;
             self.ref_hdr = saved.1;
             self.slots = saved.2;
+            self.hdr = saved_hdr;
             self.pending = None;
             self.queue.truncate(q0);
         }
@@ -1115,7 +1152,7 @@ impl Av1Core {
             match r {
                 None => break,
                 Some(Ok(pic)) => {
-                    let f = self.output(&q.seq, &pic, &q.rh, &q.grain);
+                    let f = self.output(q, &pic);
                     out.push((q.tag, f));
                     self.queue.pop_front();
                 }
@@ -1155,8 +1192,22 @@ impl Av1Core {
                         return Err(CodecError::Limit { what: "frame size" });
                     }
                     s.choose_operating_point(self.operating_point)?;
+                    // A different header starts another coded video
+                    // sequence, which the metadata of the last does not
+                    // describe (6.7.1). A repeated header changes nothing.
+                    if self.seq.as_ref() != Some(&s) {
+                        self.hdr = HdrMetadata::default();
+                    }
                     self.seq = Some(s);
                 }
+                OBU_METADATA => match parse_metadata(obu.payload)? {
+                    Metadata::ContentLight(light) => self.hdr.content_light = Some(light),
+                    Metadata::MasteringDisplay(display) => {
+                        self.hdr.mastering_display = Some(display);
+                    }
+                    Metadata::ItuT35(message) => self.unit_t35.push(message),
+                    Metadata::Other(_) => {}
+                },
                 OBU_FRAME_HEADER | OBU_REDUNDANT_FRAME_HEADER | OBU_FRAME => {
                     if obu.obu_type == OBU_REDUNDANT_FRAME_HEADER && self.pending.is_some() {
                         continue;
@@ -1303,12 +1354,18 @@ impl Av1Core {
         if seq.film_grain_params_present {
             grain = hdr.grain.clone();
         }
+        // The messages that came with the frame, then those before this
+        // header.
+        let mut t35 = slot.t35.to_vec();
+        t35.append(&mut self.unit_t35);
         self.queue.push_back(Queued {
             job: slot.pic.clone(),
             seq: Arc::new(seq.clone()),
             rh: rh.clone(),
             grain,
             tag,
+            hdr: self.hdr,
+            t35: Arc::from(t35),
         });
         if rh.frame_type == KEY_FRAME {
             // Reference frame loading process (7.21) then update all slots.
@@ -1322,13 +1379,8 @@ impl Av1Core {
         Ok(())
     }
 
-    fn output(
-        &self,
-        seq: &SequenceHeader,
-        pic: &Arc<AnyPicture>,
-        rh: &RefHeaderState,
-        grain: &GrainParams,
-    ) -> DecodedFrame {
+    fn output(&self, q: &Queued, pic: &Arc<AnyPicture>) -> DecodedFrame {
+        let (seq, rh, grain) = (&*q.seq, &q.rh, &q.grain);
         let w = rh.upscaled_width as usize;
         let h = rh.frame_height as usize;
         let mono = seq.mono_chrome;
@@ -1368,6 +1420,9 @@ impl Av1Core {
                 .then_some(seq.num_ticks_per_picture_minus_1),
             num_units_in_decoding_tick: seq.num_units_in_decoding_tick,
             seq_level_idx: seq.seq_level_idx(),
+            content_light: q.hdr.content_light,
+            mastering_display: q.hdr.mastering_display,
+            t35: Arc::clone(&q.t35),
         }
     }
 
@@ -1531,6 +1586,7 @@ impl Av1Core {
             subsampling_y: seq.subsampling_y,
             showable: hdr.showable_frame,
         };
+        let t35: Arc<[ItuT35]> = Arc::from(std::mem::take(&mut self.unit_t35));
         if hdr.show_frame {
             self.queue.push_back(Queued {
                 job: job.clone(),
@@ -1538,6 +1594,8 @@ impl Av1Core {
                 rh: rh.clone(),
                 grain: hdr.grain.clone(),
                 tag,
+                hdr: self.hdr,
+                t35: Arc::clone(&t35),
             });
         }
         if hdr.refresh_frame_flags != 0 {
@@ -1545,6 +1603,7 @@ impl Av1Core {
                 pic: job,
                 data,
                 cdf,
+                t35,
             };
             let mut old = Vec::new();
             for i in 0..8 {

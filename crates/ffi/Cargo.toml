@@ -17,8 +17,11 @@ cutlass-playback = { path = "../playback", version = "0.1.0" }
 cutlass-logger = { path = "../logger", version = "0.1.0" }
 cutlass-model = { path = "../model", version = "0.1.0" }
 cutlass-editor = { path = "../editor", version = "0.1.0" }
+cutlass-stickers = { path = "../stickers", version = "0.1.0" }
+cutlass-licenses = { path = "../licenses", version = "0.1.0" }
 cutlass-effects = { path = "../effects", version = "0.1.0" }
 cutlass-eval = { path = "../eval", version = "0.1.0" }
+cutlass-engine = { path = "../engine", version = "0.1.0" }
 cutlass-render = { path = "../render", version = "0.1.0" }
 cutlass-renderer-software = { path = "../renderer-software", version = "0.1.0" }
 cutlass-codec = { path = "../codec", version = "0.1.0" }

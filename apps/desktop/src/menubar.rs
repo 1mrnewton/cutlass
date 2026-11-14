@@ -33,6 +33,7 @@ pub const SETTINGS: &str = "settings";
 pub const LICENSES: &str = "licenses";
 pub const EXPORT_LOG: &str = "export_log";
 pub const CHECK_UPDATES: &str = "check_updates";
+pub const STUDIO: &str = "effect_studio";
 
 /// The menus, in order. The app menu of macOS (About, Hide, Quit) comes
 /// before them there.
@@ -46,6 +47,8 @@ pub const MENUS: &[Menu] = &[
             item(SAVE, "Save"),
             item(IMPORT, "Import…"),
             item(EXPORT, "Export…"),
+            None,
+            item(STUDIO, "Effect studio"),
             None,
             item(SETTINGS, "Settings…"),
         ],
@@ -131,6 +134,7 @@ pub fn is_window_command(id: &str) -> bool {
         LICENSES,
         EXPORT_LOG,
         CHECK_UPDATES,
+        STUDIO,
     ]
     .contains(&id)
 }

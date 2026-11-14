@@ -1864,6 +1864,31 @@ pub const ZIGZAG8: [usize; 64] = [
     52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
+/// Clause 8.5.6, the field scan: where each coefficient of a 4×4 block goes in
+/// a field macroblock or a field picture, as `row * 4 + column`. Coefficients
+/// run down the columns first, because a field's rows are twice as far apart.
+pub const FIELD4: [usize; 16] = [0, 4, 1, 8, 12, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15];
+
+/// Clause 8.5.7, the 8×8 field scan, as `row * 8 + column`.
+pub const FIELD8: [usize; 64] = [
+    0, 8, 16, 1, 9, 24, 32, 17, 2, 25, 40, 48, 56, 33, 10, 3, 18, 41, 49, 57, 26, 11, 4, 19, 34,
+    42, 50, 58, 27, 12, 5, 20, 35, 43, 51, 59, 28, 13, 6, 21, 36, 44, 52, 60, 29, 14, 22, 37, 45,
+    53, 61, 30, 7, 15, 38, 46, 54, 62, 23, 31, 39, 47, 55, 63,
+];
+
+/// The 4×4 scan of a block: zig-zag for a frame macroblock, the field scan
+/// for a field macroblock or a macroblock of a field picture.
+#[inline]
+pub fn scan4(field: bool) -> &'static [usize; 16] {
+    if field { &FIELD4 } else { &ZIGZAG4 }
+}
+
+/// The 8×8 scan of a block, chosen as in [`scan4`].
+#[inline]
+pub fn scan8(field: bool) -> &'static [usize; 64] {
+    if field { &FIELD8 } else { &ZIGZAG8 }
+}
+
 const DEFAULT4_INTRA: [u8; 16] = [
     6, 13, 13, 20, 20, 20, 28, 28, 28, 28, 32, 32, 32, 37, 37, 42,
 ];
@@ -1880,3 +1905,30 @@ const DEFAULT8_INTER: [u8; 64] = [
     22, 22, 22, 22, 24, 24, 24, 24, 24, 24, 24, 24, 25, 25, 25, 25, 25, 25, 25, 27, 27, 27, 27, 27,
     27, 28, 28, 28, 28, 28, 30, 30, 30, 30, 32, 32, 32, 33, 33, 35,
 ];
+
+#[cfg(test)]
+mod scans {
+    use super::{FIELD4, FIELD8, ZIGZAG4, scan4, scan8};
+
+    #[test]
+    fn a_field_scan_visits_every_coefficient_once() {
+        let mut seen4 = FIELD4;
+        seen4.sort_unstable();
+        assert!(seen4.iter().copied().eq(0..16));
+        let mut seen8 = FIELD8;
+        seen8.sort_unstable();
+        assert!(seen8.iter().copied().eq(0..64));
+    }
+
+    /// Clause 8.5.6: after the first coefficient a field scan goes down the
+    /// first column, where the zig-zag goes across the first row.
+    #[test]
+    fn a_field_scan_goes_down_the_column_first() {
+        assert_eq!(FIELD4[..5], [0, 4, 1, 8, 12]);
+        assert_eq!(FIELD8[..5], [0, 8, 16, 1, 9]);
+        assert_eq!(ZIGZAG4[..3], [0, 1, 4]);
+        assert_eq!(scan4(true), &FIELD4);
+        assert_eq!(scan4(false), &ZIGZAG4);
+        assert_eq!(scan8(true), &FIELD8);
+    }
+}

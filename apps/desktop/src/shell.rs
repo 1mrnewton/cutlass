@@ -17,12 +17,12 @@ use std::time::{Duration, Instant};
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
     Append, AppendLane, ClipMove, ClipboardMiss, CopiedClip, DropGesture, DropOutcome,
-    EFFECT_LENGTH, EffectPlace, GestureError, MediaPlace, MoveGesture, MovePlan, Pointer,
-    TITLE_LENGTH, TimelineScale, TitlePlace, TrimGesture, TrimPlan, Zoom, ZoomBounds,
-    append_placement, copy_clips, drop_gesture, effect_of_card, effect_requests, effect_row_for,
-    effect_target, fit_pixel_size, free_row, hit_test, last_accuracy_step, material_span,
-    media_requests, minimum_pixel_size, move_requests, paste_requests, plan_move,
-    plan_move_between, title_requests, title_style, trim_gesture,
+    EFFECT_LENGTH, EffectPlace, FreshIds, GestureError, MediaPlace, MoveGesture, MovePlan, Pointer,
+    STICKER_LENGTH, TITLE_LENGTH, TimelineScale, TitlePlace, TrimGesture, TrimPlan, Zoom,
+    ZoomBounds, append_placement, copy_clips, drop_gesture, effect_of_card, effect_requests,
+    effect_row_for, effect_target, fit_pixel_size, free_row, highest_suffix, hit_test,
+    last_accuracy_step, material_span, media_requests, minimum_pixel_size, move_requests,
+    paste_requests, plan_move, plan_move_between, title_requests, title_style, trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
@@ -49,9 +49,11 @@ use cutlass_transcription::{
 
 mod assistant;
 mod compound;
+mod cover;
 mod effect_preview;
 mod follow;
 mod group;
+pub mod studio;
 pub(crate) use follow::clip_path;
 mod enhance;
 mod hear;
@@ -69,6 +71,7 @@ mod shape;
 mod speech_model;
 mod stable;
 mod sync;
+mod thumbnail;
 mod update;
 
 pub use assistant::AgentRun;
@@ -600,15 +603,15 @@ pub enum ExportQuality {
 
 impl ExportQuality {
     /// The bitrate for a picture `short_side` pixels on its short side.
-    /// HEVC gets the same picture from fewer bits; MPEG-2 needs twice what
-    /// H.264 spends. Motion JPEG codes every frame alone: a 1080p frame of
+    /// HEVC and AV1 get the same picture from fewer bits; MPEG-2 needs twice
+    /// what H.264 spends. Motion JPEG codes every frame alone: a 1080p frame of
     /// footage at quality 75 is about 240 KB, near five times H.264's rate at
     /// 30 frames a second. The other picture codecs spend what H.264 does.
     #[must_use]
     pub fn bitrate(self, short_side: u32, codec: CodecId) -> u32 {
         let base = cutlass_export::video_bitrate(short_side);
         let base = match codec {
-            CodecId::Hevc => base / 10 * 6,
+            CodecId::Hevc | CodecId::Av1 => base / 10 * 6,
             CodecId::Mjpeg => base.saturating_mul(5),
             CodecId::Mpeg2 => base.saturating_mul(2),
             _ => base,
@@ -729,9 +732,6 @@ const PREROLL: Micros = Micros(1_000_000);
 /// Card ids on the sticker shelf: this prefix, then the sticker's id.
 pub const STICKER_CARD_PREFIX: &str = "sticker:";
 
-/// How long a sticker lasts when it is placed.
-const STICKER_LENGTH: Micros = Micros(3_000_000);
-
 /// The sticker shelf's `card_id`.
 fn shelf_sticker(card_id: &str) -> Result<&'static cutlass_stickers::Sticker, ShellError> {
     card_id
@@ -742,20 +742,11 @@ fn shelf_sticker(card_id: &str) -> Result<&'static cutlass_stickers::Sticker, Sh
         })
 }
 
-/// How long `sticker` lasts when it is placed: an animation plays as many
-/// whole rounds as fit in [`STICKER_LENGTH`], at least one, so its clip
-/// ends where a round ends; a still lasts [`STICKER_LENGTH`].
+/// How long `sticker` lasts when it is placed, as
+/// [`cutlass_editor::sticker_length`] says.
 pub fn sticker_length(sticker: &cutlass_stickers::Sticker) -> Micros {
-    let Some(seconds) = sticker.seconds().filter(|seconds| *seconds > 0.0) else {
-        return STICKER_LENGTH;
-    };
-    let round = (seconds * 1_000_000.0).round();
-    let rounds = (STICKER_LENGTH.0 as f64 / round).floor().max(1.0);
-    Micros((round * rounds) as i64)
+    cutlass_editor::sticker_length(sticker.seconds())
 }
-
-/// A placed sticker's size against the canvas it would fill.
-const STICKER_SCALE: f64 = 0.4;
 
 pub struct Shell {
     decoders: DecodeFactory,
@@ -776,6 +767,8 @@ pub struct Shell {
     settings_file: Option<(PathBuf, u64)>,
     /// Where the looks saved with "Save as preset" are kept, and the looks.
     presets_file: Option<PathBuf>,
+    /// The effect studio: its document, folder and preview pictures.
+    studio: studio::StudioState,
     saved_looks: Vec<cutlass_editor::SavedLook>,
     /// Files dropped on the window, imported one job after another.
     waiting_imports: std::collections::VecDeque<PathBuf>,
@@ -896,6 +889,14 @@ pub struct Shell {
     job: Option<RunningJob>,
     /// The movie the last export wrote.
     exported: Option<PathBuf>,
+    /// Bumped when the cover file is written or removed.
+    cover_version: u64,
+    /// The cover dialog's strip, while it is drawn.
+    cover_strip: Option<cover::CoverStrip>,
+    /// The cover dialog's frame, drawn apart from the preview.
+    cover_frame: Option<cover::CoverFrame>,
+    /// The projects home's first-frame pictures, drawn on their own thread.
+    project_pictures: Option<thumbnail::ProjectPictures>,
     /// What the last import that landed added, until the window looks.
     imported: Option<ImportedKind>,
     /// An autosave writing on its own thread.
@@ -956,6 +957,7 @@ impl Shell {
             settings,
             settings_file: None,
             presets_file: None,
+            studio: studio::StudioState::new(),
             saved_looks: Vec::new(),
             waiting_imports: std::collections::VecDeque::new(),
             session: None,
@@ -1022,6 +1024,10 @@ impl Shell {
             agent_tracks: follow::AgentTracks::default(),
             job: None,
             exported: None,
+            cover_version: 0,
+            cover_strip: None,
+            cover_frame: None,
+            project_pictures: None,
             imported: None,
             saving: None,
             holding: false,
@@ -2737,10 +2743,12 @@ impl Shell {
     }
 
     pub fn undo(&mut self) -> Result<(), ShellError> {
+        let before = self.cover().cloned();
         let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
         match session.undo() {
             Ok(revision) => {
                 cutlass_logger::info!("undo: revision {revision}");
+                self.follow_cover(before);
                 Ok(())
             }
             Err(error) => {
@@ -2752,10 +2760,12 @@ impl Shell {
     }
 
     pub fn redo(&mut self) -> Result<(), ShellError> {
+        let before = self.cover().cloned();
         let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
         match session.redo() {
             Ok(revision) => {
                 cutlass_logger::info!("redo: revision {revision}");
+                self.follow_cover(before);
                 Ok(())
             }
             Err(error) => {
@@ -3955,62 +3965,27 @@ impl Shell {
         start: Micros,
     ) -> Result<(), ShellError> {
         let project = self.path.clone().ok_or(ShellError::NoProject)?;
-        let stored = format!("Resources/{}", sticker.file_name());
-        let mut requests = Vec::new();
-        let known = self
-            .session_draft()?
-            .materials
-            .videos
-            .iter()
-            .find(|video| video.path == stored)
-            .map(|video| video.id.as_str().to_owned());
-        let material_id = match known {
-            Some(id) => id,
-            None => {
-                let file = project.join(&stored);
-                if !file.is_file() {
-                    let bytes = sticker.bytes().map_err(ShellError::Io)?;
-                    if let Some(folder) = file.parent() {
-                        std::fs::create_dir_all(folder)
-                            .map_err(|error| ShellError::Io(error.to_string()))?;
-                    }
-                    std::fs::write(&file, bytes)
-                        .map_err(|error| ShellError::Io(error.to_string()))?;
-                }
-                let material_id = self.fresh("mat");
-                let mut material = MaterialVideo::new(material_id.as_str());
-                material.kind = MetaType::Sticker.as_str().to_owned();
-                material.path = stored;
-                // A picture has no length of its own; an animation plays
-                // round for as long as its clip lasts.
-                material.duration = MaterialVideo::MAPPING_DURATION.max(length);
-                let (width, height) = sticker.size().map_err(ShellError::Io)?;
-                material.width = i32::try_from(width).unwrap_or(0);
-                material.height = i32::try_from(height).unwrap_or(0);
-                requests.push(Request::Import {
-                    medium: ImportedMedium::Video(Box::new(material)),
-                });
-                material_id
-            }
-        };
-        let new_lane = track_id.is_none().then_some(TrackType::Sticker);
-        let place = MediaPlace {
+        let stored = sticker.write_into(&project).map_err(ShellError::Io)?;
+        let (width, height) = sticker.size().map_err(ShellError::Io)?;
+        let place = cutlass_editor::StickerPlace {
+            new_lane: track_id.is_none(),
             track_id: track_id.unwrap_or_else(|| TrackId::new(self.fresh("track"))),
             segment_id: SegmentId::new(self.fresh("seg")),
-            material_id,
+            material_id: MaterialId::new(self.fresh("mat")),
             start,
-            duration: length,
-            new_lane,
+            length,
         };
-        requests.extend(media_requests(
+        let file = cutlass_editor::StickerFile {
+            stored: &stored,
+            width,
+            height,
+        };
+        let requests = cutlass_editor::sticker_requests(
             self.session_draft()?,
+            file,
             &place,
             self.linkage_enabled(),
-        ));
-        requests.push(Request::SetScale {
-            segment_id: place.segment_id.clone(),
-            scale: STICKER_SCALE,
-        });
+        );
         self.apply_requests(&requests)?;
         self.select(Some(place.segment_id));
         Ok(())
@@ -7773,6 +7748,11 @@ impl Shell {
                 "VP8 is written in an MP4".to_owned(),
             ));
         }
+        if request.codec == CodecId::Av1 && mov {
+            return Err(ShellError::Unavailable(
+                "AV1 is written in an MP4".to_owned(),
+            ));
+        }
         if request.codec == CodecId::Mpeg2 && mov {
             return Err(ShellError::Unavailable(
                 "MPEG-2 is written in an MP4".to_owned(),
@@ -7839,6 +7819,7 @@ impl Shell {
                 | CodecId::Prores
                 | CodecId::Mjpeg
                 | CodecId::Vp8
+                | CodecId::Av1
                 | CodecId::Mpeg2
         ) {
             return Err(ShellError::ExportUnavailable);
@@ -8726,70 +8707,6 @@ pub const EMPTY_SPAN: Micros = Micros(10_000_000);
 
 /// [`EMPTY_SPAN`] across a third of `lane_width`, no closer than the
 /// finest ruler step.
-/// New ids `prefix-N` for several requests planned at once, each past
-/// every `prefix-N` the draft already holds. The counter starts at zero
-/// each launch, so a reopened project would otherwise be handed ids it
-/// already uses and the edit would be refused as a duplicate.
-struct FreshIds<'a> {
-    draft: &'a Draft,
-    /// The last number handed out.
-    next: u64,
-    /// The prefixes the draft has been searched for, once each.
-    looked: Vec<String>,
-}
-
-impl<'a> FreshIds<'a> {
-    fn new(draft: &'a Draft, next: u64) -> Self {
-        Self {
-            draft,
-            next,
-            looked: Vec::new(),
-        }
-    }
-
-    fn make(&mut self, prefix: &str) -> String {
-        if !self.looked.iter().any(|looked| looked == prefix) {
-            self.next = self.next.max(highest_suffix(self.draft, prefix));
-            self.looked.push(prefix.to_owned());
-        }
-        self.next = self.next.saturating_add(1);
-        format!("{prefix}-{}", self.next)
-    }
-}
-
-/// The largest `N` of any string `prefix-N` in `draft`, or zero.
-fn highest_suffix(draft: &Draft, prefix: &str) -> u64 {
-    fn walk(value: &serde_json::Value, prefix: &str, best: &mut u64) {
-        match value {
-            serde_json::Value::String(text) => {
-                let number = text
-                    .strip_prefix(prefix)
-                    .and_then(|rest| rest.strip_prefix('-'))
-                    .and_then(|digits| digits.parse::<u64>().ok());
-                if let Some(number) = number {
-                    *best = (*best).max(number);
-                }
-            }
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    walk(item, prefix, best);
-                }
-            }
-            serde_json::Value::Object(map) => {
-                for item in map.values() {
-                    walk(item, prefix, best);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut best = 0;
-    if let Ok(value) = serde_json::to_value(draft) {
-        walk(&value, prefix, &mut best);
-    }
-    best
-}
-
 fn empty_pixel_size(lane_width: f64, rate: FrameRate) -> Option<f64> {
     let size = lane_width / 3.0 / EMPTY_SPAN.0 as f64;
     if !size.is_finite() || size <= 0.0 {
@@ -17347,6 +17264,98 @@ mod tests {
         let (u, v) = chroma.split_at(chroma.len() / 2);
         let near = |plane: &[u8], value: u8| plane.iter().all(|&s| s.abs_diff(value) <= 4);
         assert!(near(y, 97) && near(u, 156) && near(v, 104));
+    }
+
+    /// AV1 exports through the Rust encoder into an MP4 `av01` track with
+    /// its `av1C` record and the `av01` brand, which the desktop's readers
+    /// decode back to the clip's colour with the Rust decoder; a MOV is
+    /// refused.
+    #[test]
+    fn an_av1_export_lands_an_mp4_that_plays_back() {
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        // Hardware off: the Rust encoder and decoder are the ones asked.
+        let software = cutlass_settings::Hardware {
+            decode: false,
+            encode: false,
+            ..cutlass_settings::Hardware::default()
+        };
+        let (decoders, encoders) = crate::register_codecs_with(&software);
+        let mut desktop = Shell::new(decoders, encoders, Settings::default());
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.encodes(CodecId::Av1));
+        let mov = desktop.export(ExportRequest {
+            path: temp.path.join("av1.mov"),
+            short_side: 480,
+            codec: CodecId::Av1,
+            ..ExportRequest::default()
+        });
+        assert_eq!(mov.unwrap_err().to_string(), "AV1 is written in an MP4");
+
+        let destination = temp.path.join("av1.mp4");
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                short_side: 480,
+                codec: CodecId::Av1,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        land_job(&mut desktop);
+        assert_eq!(desktop.notice(), "Exported av1.mp4");
+        let bytes = std::fs::read(&destination).unwrap();
+        assert!(bytes.windows(4).any(|w| w == b"av1C"));
+        let ftyp = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+        assert!(bytes[16..ftyp].chunks(4).any(|brand| brand == b"av01"));
+
+        let readers = crate::readers::readers_with(crate::register_codecs_with(&software).0);
+        let mut media = readers.open(&destination).unwrap();
+        assert_eq!(
+            (media.info().width, media.info().height),
+            (Some(960), Some(480))
+        );
+        let held = media
+            .decode_at(Micros(1_500_000), &TimeRange::new(0, 2_000_000))
+            .unwrap();
+        let cutlass_engine::DecodedFrame::Coded {
+            width,
+            height,
+            pixel,
+            primaries,
+            matrix,
+            range,
+            bytes,
+            ..
+        } = held.frame
+        else {
+            panic!("a coded picture");
+        };
+        assert_eq!((width, height), (960, 480));
+        assert_eq!(pixel, PixelFormat::Yuv420p);
+        assert_eq!(primaries, ColorPrimaries::Bt709);
+        assert_eq!(matrix, cutlass_decode::ColorMatrix::Bt709);
+        assert_eq!(range, cutlass_decode::ColorRange::Limited);
+        // 0x336699 in BT.709 limited range, as export converts it: Y 97,
+        // Cb 156, Cr 104.
+        let (y, chroma) = bytes.split_at(960 * 480);
+        let (u, v) = chroma.split_at(chroma.len() / 2);
+        let near = |plane: &[u8], value: u8| plane.iter().all(|&s| s.abs_diff(value) <= 4);
+        assert!(near(y, 97) && near(u, 156) && near(v, 104));
+    }
+
+    #[test]
+    fn av1_spends_what_hevc_does() {
+        for quality in [
+            super::ExportQuality::Lower,
+            super::ExportQuality::Recommended,
+            super::ExportQuality::Higher,
+        ] {
+            assert_eq!(
+                quality.bitrate(1080, CodecId::Av1),
+                quality.bitrate(1080, CodecId::Hevc)
+            );
+            assert!(quality.bitrate(1080, CodecId::Av1) < quality.bitrate(1080, CodecId::H264));
+        }
     }
 
     /// MPEG-2 exports through the Rust encoder at twice H.264's rate into

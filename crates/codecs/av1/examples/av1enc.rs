@@ -3,6 +3,12 @@
 //! Usage: av1enc <in.y4m> <out.ivf> [--q N | --kbps N] [--speed N] [--keyint N] [--frames N]
 //!        [--tiles COLSLOG2xROWSLOG2] [--recon out.yuv] [--gop N] [--loop-restoration]
 //!        [--global-motion] [--temporal-filter] [--threads N]
+//!        [--force-key N[,N...]] [--color PRIMARIES:TRANSFER:MATRIX[:full]] [--av1c out.bin]
+//!        [--no-scene-cut]
+//!
+//! `--force-key` makes the pictures at those display indices key frames,
+//! `--color` writes those ISO/IEC 23091-2 codes into the sequence header, and
+//! `--av1c` writes the stream's `av1C` record.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -138,6 +144,7 @@ fn main() -> Result<(), String> {
     cfg.sub_x = y.sub_x;
     cfg.sub_y = y.sub_y;
     cfg.mono = y.mono;
+    cfg.fps = y.fps;
     if let Some(q) = arg(&args, "--q") {
         cfg.rc = RateControl::Qindex(q.parse().map_err(|_| "q")?);
     }
@@ -150,6 +157,9 @@ fn main() -> Result<(), String> {
     }
     if let Some(s) = arg(&args, "--speed") {
         cfg.speed = s.parse().map_err(|_| "speed")?;
+    }
+    if args.iter().any(|a| a == "--no-scene-cut") {
+        cfg.scene_cut = false;
     }
     if args.iter().any(|a| a == "--global-motion") {
         cfg.global_motion = true;
@@ -174,10 +184,24 @@ fn main() -> Result<(), String> {
         cfg.tile_cols_log2 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
         cfg.tile_rows_log2 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     }
+    if let Some(c) = arg(&args, "--color") {
+        let mut it = c.split(':');
+        let mut code = || it.next().and_then(|s| s.parse::<u8>().ok()).ok_or("color");
+        cfg.color_primaries = code()?;
+        cfg.transfer = code()?;
+        cfg.matrix = code()?;
+        cfg.full_range = it.next() == Some("full");
+    }
+    let forced: Vec<u64> = arg(&args, "--force-key")
+        .map(|s| s.split(',').filter_map(|v| v.parse().ok()).collect())
+        .unwrap_or_default();
     let max_frames: usize = arg(&args, "--frames")
         .and_then(|s| s.parse().ok())
         .unwrap_or(usize::MAX);
     let mut enc = Av1Enc::new(cfg).map_err(|e| e.to_string())?;
+    if let Some(path) = arg(&args, "--av1c") {
+        std::fs::write(path, enc.config_record()).map_err(|e| e.to_string())?;
+    }
     let (cw, ch) = if y.mono {
         (0, 0)
     } else {
@@ -217,6 +241,9 @@ fn main() -> Result<(), String> {
         }
         let buf = &y.data[fstart..fstart + frame_bytes];
         y.pos = fstart + frame_bytes;
+        if forced.contains(&n) {
+            enc.force_keyframe();
+        }
         let pkt = if y.bd > 8 {
             let s: Vec<u16> = buf
                 .as_chunks::<2>()

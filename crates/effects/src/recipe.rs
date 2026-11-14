@@ -16,11 +16,13 @@ use std::fmt;
 use std::sync::OnceLock;
 
 use cutlass_model::Micros;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The recipe format this app reads. A recipe with a higher version needs
-/// blocks or fields this app does not have.
-pub const RECIPE_VERSION: u32 = 1;
+/// blocks or fields this app does not have. Version 2 added eased keys.
+pub const RECIPE_VERSION: u32 = 2;
+/// The first version whose keys may name an [`Ease`].
+pub const EASE_VERSION: u32 = 2;
 /// The most passes one recipe may run.
 pub const MAX_PASSES: usize = 8;
 /// The most keyframes one curve may hold.
@@ -37,7 +39,7 @@ pub const RECIPE_PREFIX: &str = "recipe/";
 pub const MAX_CONTROLS: usize = 6;
 
 /// One building block the GPU runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Block {
     /// Scale, move and turn the frame about its centre.
@@ -525,16 +527,21 @@ impl Block {
 }
 
 /// A value over the effect's time, in seconds from the effect's start.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum Curve {
     Constant(f32),
-    /// Straight lines between `[seconds, value]` keys, held before the first
-    /// and after the last. With `repeat`, time wraps every that many seconds.
+    /// `[seconds, value]` keys, held before the first and after the last.
+    /// With `repeat`, time wraps every that many seconds. `ease` names how
+    /// the value moves across each gap between two keys, the first gap
+    /// first; a gap past the end of the list moves as the last one named,
+    /// and with none named every gap is a straight line.
     Keys {
         keys: Vec<[f32; 2]>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         repeat: Option<f32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ease: Vec<Ease>,
     },
     /// A sine from `from` to `to` and back every `period` seconds.
     Wave {
@@ -546,7 +553,149 @@ pub enum Curve {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+/// How a value moves from one key to the next.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ease {
+    /// A straight line.
+    #[default]
+    Linear,
+    /// Slow at the start.
+    In,
+    /// Slow at the end.
+    Out,
+    /// Slow at both ends.
+    InOut,
+    /// The first key's value until the second key.
+    Hold,
+    /// Past the second key's value, then back to it.
+    Overshoot,
+    /// To the second key's value, then three smaller bounces off it.
+    Bounce,
+    /// Swings past the second key's value both ways and settles on it.
+    Spring,
+}
+
+impl Ease {
+    /// Every ease, in the order a picker lists them.
+    pub const ALL: [Self; 8] = [
+        Self::Linear,
+        Self::In,
+        Self::Out,
+        Self::InOut,
+        Self::Hold,
+        Self::Overshoot,
+        Self::Bounce,
+        Self::Spring,
+    ];
+
+    /// The name a recipe writes.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::In => "in",
+            Self::Out => "out",
+            Self::InOut => "in_out",
+            Self::Hold => "hold",
+            Self::Overshoot => "overshoot",
+            Self::Bounce => "bounce",
+            Self::Spring => "spring",
+        }
+    }
+
+    /// How far along the value is, 0 at the first key and 1 at the second,
+    /// when the time is `t` of the way across the gap. An overshoot or a
+    /// spring passes 1 on the way, and a spring dips under it again.
+    #[must_use]
+    pub fn at(self, t: f32) -> f32 {
+        let t = if t.is_finite() {
+            t.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        match self {
+            Self::Linear => t,
+            Self::In => t * t * t,
+            Self::Out => 1.0 - (1.0 - t).powi(3),
+            Self::InOut => {
+                if t < 0.5 {
+                    4.0 * t * t * t
+                } else {
+                    1.0 - (2.0 - 2.0 * t).powi(3) / 2.0
+                }
+            }
+            Self::Hold => {
+                if t < 1.0 {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
+            Self::Overshoot => {
+                const BACK: f32 = 1.701_58;
+                let back = t - 1.0;
+                1.0 + (BACK + 1.0) * back.powi(3) + BACK * back.powi(2)
+            }
+            Self::Bounce => bounce(t),
+            Self::Spring => {
+                if t <= 0.0 {
+                    0.0
+                } else if t >= 1.0 {
+                    1.0
+                } else {
+                    let swing = (t * 10.0 - 0.75) * (std::f32::consts::TAU / 3.0);
+                    2.0_f32.powf(-10.0 * t) * swing.sin() + 1.0
+                }
+            }
+        }
+    }
+
+    /// The least and the most [`Self::at`] reaches. A value between two
+    /// keys can leave the span between them by this much.
+    #[must_use]
+    pub fn reach(self) -> (f32, f32) {
+        match self {
+            Self::Overshoot | Self::Spring => {
+                let mut reach = (0.0_f32, 1.0_f32);
+                for step in 0..=REACH_STEPS {
+                    #[allow(clippy::cast_precision_loss)]
+                    let at = self.at(step as f32 / REACH_STEPS as f32);
+                    reach = (reach.0.min(at), reach.1.max(at));
+                }
+                // Between two samples the curve can pass a little further.
+                (reach.0 - REACH_SLACK, reach.1 + REACH_SLACK)
+            }
+            _ => (0.0, 1.0),
+        }
+    }
+}
+
+/// How finely [`Ease::reach`] samples an ease that leaves 0 to 1.
+const REACH_STEPS: u32 = 512;
+/// What [`Ease::reach`] adds for the part of a peak between two samples.
+const REACH_SLACK: f32 = 0.001;
+
+/// A ball dropped onto the second key's value: there at 4/11 of the way,
+/// then three bounces, each a quarter as high as the one before.
+fn bounce(t: f32) -> f32 {
+    const RATE: f32 = 7.5625;
+    const SPAN: f32 = 2.75;
+    if t < 1.0 / SPAN {
+        RATE * t * t
+    } else if t < 2.0 / SPAN {
+        let t = t - 1.5 / SPAN;
+        RATE * t * t + 0.75
+    } else if t < 2.5 / SPAN {
+        let t = t - 2.25 / SPAN;
+        RATE * t * t + 0.9375
+    } else {
+        let t = t - 2.625 / SPAN;
+        RATE * t * t + 0.984_375
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Wave {
     pub period: f32,
@@ -554,18 +703,18 @@ pub struct Wave {
     pub to: f32,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Jitter {
     pub rate: f32,
     pub from: f32,
     pub to: f32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub seed: u32,
 }
 
 /// How a control's value reads in the inspector.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlUnit {
     /// A plain number.
@@ -581,14 +730,14 @@ pub enum ControlUnit {
 
 /// A pass's parameter a control acts on: the pass's place in the recipe
 /// and the parameter's name.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Target(pub usize, pub String);
 
 /// One setting a recipe shows in the inspector, such as Speed or
 /// Intensity. Its value plays the effect faster (`speed`), multiplies
 /// parameters as the recipe writes them (`scale`), or replaces them
 /// (`set`). A value is kept to the parameter's range.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Control {
     /// Lowercase letters, digits and underscores; the name it is stored by.
@@ -598,14 +747,14 @@ pub struct Control {
     pub default: f32,
     pub min: f32,
     pub max: f32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_plain")]
     pub unit: ControlUnit,
     /// The value multiplies the effect's own time.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub speed: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scale: Vec<Target>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub set: Vec<Target>,
     /// The keyframe property it keys under, named when the recipe is read.
     #[serde(skip)]
@@ -634,16 +783,29 @@ impl Control {
 }
 
 /// One pass of a recipe as written.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pass {
     pub block: Block,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, Curve>,
 }
 
+// What a written recipe leaves out: a field at the value a reader gives it.
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_plain(unit: &ControlUnit) -> bool {
+    *unit == ControlUnit::Plain
+}
+
 /// An effect as data.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Recipe {
     /// The format version, at most [`RECIPE_VERSION`].
@@ -654,18 +816,18 @@ pub struct Recipe {
     pub name: String,
     /// The shelf category it is listed under, one of
     /// [`EFFECT_CATEGORIES`]; a recipe without one is listed under All only.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub category: String,
     /// The scene its card shows it over, one of
     /// [`crate::preview_scenes`]; empty is [`crate::DEFAULT_PREVIEW_SCENE`].
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub preview: String,
     /// The second of the effect its card's still is taken from; none is
     /// [`crate::DEFAULT_POSTER`]. A flash names the moment it is brightest.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poster: Option<f32>,
     /// The settings the inspector shows for it, at most [`MAX_CONTROLS`].
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controls: Vec<Control>,
     pub passes: Vec<Pass>,
 }
@@ -756,13 +918,30 @@ impl Recipe {
         if version > RECIPE_VERSION {
             return Err(RecipeError::Newer(version));
         }
-        let mut recipe: Self =
+        let recipe: Self =
             serde_json::from_slice(bytes).map_err(|error| RecipeError::Shape(error.to_string()))?;
-        recipe.check()?;
-        for control in &mut recipe.controls {
+        recipe.checked()
+    }
+
+    /// A recipe built in memory, checked as [`Self::read`] checks a file,
+    /// with each control's keyframe property named.
+    pub fn checked(mut self) -> Result<Self, RecipeError> {
+        self.check()?;
+        for control in &mut self.controls {
             control.keyframe = cutlass_model::effect_control_key(&control.id);
         }
-        Ok(recipe)
+        Ok(self)
+    }
+
+    /// The recipe as the JSON [`Self::read`] reads back to the same recipe.
+    /// It names the lowest version that can hold it, and leaves out every
+    /// field at the value a reader gives it. A recipe that would not read
+    /// back is refused and nothing is written.
+    pub fn to_json(&self) -> Result<String, RecipeError> {
+        let mut written = self.clone();
+        written.version = self.least_version();
+        written.check()?;
+        to_json(&written)
     }
 
     fn check(&self) -> Result<(), RecipeError> {
@@ -797,7 +976,16 @@ impl Recipe {
             return Err(RecipeError::Passes);
         }
         self.check_controls()?;
-        check_passes(&self.passes)
+        check_passes(&self.passes)?;
+        check_version(self.version, self.least_version())
+    }
+
+    /// The lowest format version that can hold this recipe: what a file of
+    /// it names, so an app from before a field reads "update" and not a
+    /// broken file.
+    #[must_use]
+    pub fn least_version(&self) -> u32 {
+        least_version(self.passes.iter().flat_map(|pass| pass.params.values()))
     }
 
     fn check_controls(&self) -> Result<(), RecipeError> {
@@ -949,11 +1137,16 @@ pub(crate) fn check_curve(block: Block, param: &Param, curve: &Curve) -> Result<
     let positive = |value: f32| value.is_finite() && value > 0.0;
     match curve {
         Curve::Constant(value) => range(*value),
-        Curve::Keys { keys, repeat } => {
+        Curve::Keys { keys, repeat, ease } => {
             if keys.is_empty() || keys.len() > MAX_KEYS {
                 return Err(broken());
             }
             if repeat.is_some_and(|repeat| !positive(repeat)) {
+                return Err(broken());
+            }
+            // One ease for each gap at most; a longer list names an ease
+            // for a gap that is not there.
+            if ease.len() > keys.len().saturating_sub(1) {
                 return Err(broken());
             }
             let mut last = 0.0;
@@ -963,6 +1156,14 @@ pub(crate) fn check_curve(block: Block, param: &Param, curve: &Curve) -> Result<
                 }
                 last = *time;
                 range(*value)?;
+            }
+            // An overshoot or a spring leaves the span between its two
+            // keys, so the furthest it goes is checked as well.
+            for (gap, pair) in keys.windows(2).enumerate() {
+                let (from, to) = (pair[0][1], pair[1][1]);
+                let (least, most) = gap_ease(ease, gap).reach();
+                range(from + (to - from) * least)?;
+                range(from + (to - from) * most)?;
             }
             Ok(())
         }
@@ -983,6 +1184,36 @@ pub(crate) fn check_curve(block: Block, param: &Param, curve: &Curve) -> Result<
     }
 }
 
+/// `recipe` as indented JSON with a newline at the end, no larger than a
+/// reader takes.
+pub(crate) fn to_json<T: Serialize>(recipe: &T) -> Result<String, RecipeError> {
+    let mut json = serde_json::to_string_pretty(recipe)
+        .map_err(|error| RecipeError::Shape(error.to_string()))?;
+    json.push('\n');
+    if json.len() > MAX_RECIPE_BYTES {
+        return Err(RecipeError::TooLarge);
+    }
+    Ok(json)
+}
+
+/// The lowest format version that can hold `curves`.
+pub(crate) fn least_version<'a>(curves: impl IntoIterator<Item = &'a Curve>) -> u32 {
+    let eased = curves
+        .into_iter()
+        .any(|curve| matches!(curve, Curve::Keys { ease, .. } if !ease.is_empty()));
+    if eased { EASE_VERSION } else { 1 }
+}
+
+/// A recipe that names `version` may use what `least` first had.
+pub(crate) fn check_version(version: u32, least: u32) -> Result<(), RecipeError> {
+    if version < least {
+        return Err(RecipeError::Shape(format!(
+            "version {version} names what version {least} added"
+        )));
+    }
+    Ok(())
+}
+
 /// Every parameter of `passes` is one its block has, inside its range.
 pub(crate) fn check_passes(passes: &[Pass]) -> Result<(), RecipeError> {
     for pass in passes {
@@ -1000,13 +1231,15 @@ pub(crate) fn check_passes(passes: &[Pass]) -> Result<(), RecipeError> {
 }
 
 impl Curve {
-    /// The value at `seconds`, never negative.
-    pub(crate) fn at(&self, seconds: f32) -> f32 {
+    /// The value at `seconds` from the effect's start. A transition's
+    /// curve takes its progress, 0 to 1, in place of seconds.
+    #[must_use]
+    pub fn at(&self, seconds: f32) -> f32 {
         match self {
             Self::Constant(value) => *value,
-            Self::Keys { keys, repeat } => {
+            Self::Keys { keys, repeat, ease } => {
                 let time = repeat.map_or(seconds, |repeat| seconds.rem_euclid(repeat));
-                along(keys, time)
+                along(keys, ease, time)
             }
             Self::Wave { wave } => {
                 let turn = (seconds / wave.period).fract();
@@ -1022,20 +1255,31 @@ impl Curve {
     }
 }
 
-fn along(keys: &[[f32; 2]], time: f32) -> f32 {
+/// The ease of the gap after key `gap`: the one named for it, or the last
+/// one named, or a straight line when none is.
+#[must_use]
+pub fn gap_ease(ease: &[Ease], gap: usize) -> Ease {
+    ease.get(gap)
+        .or_else(|| ease.last())
+        .copied()
+        .unwrap_or_default()
+}
+
+fn along(keys: &[[f32; 2]], ease: &[Ease], time: f32) -> f32 {
     let Some(first) = keys.first() else {
         return 0.0;
     };
     if time <= first[0] {
         return first[1];
     }
-    for pair in keys.windows(2) {
+    for (gap, pair) in keys.windows(2).enumerate() {
         let ([t0, v0], [t1, v1]) = (pair[0], pair[1]);
         if time <= t1 {
             if t1 <= t0 {
                 return v1;
             }
-            return v0 + (v1 - v0) * (time - t0) / (t1 - t0);
+            let across = gap_ease(ease, gap).at((time - t0) / (t1 - t0));
+            return v0 + (v1 - v0) * across;
         }
     }
     keys.last().map_or(0.0, |last| last[1])
@@ -1488,11 +1732,138 @@ mod tests {
         assert_eq!(read(&padded), Err(RecipeError::TooLarge));
     }
 
+    fn eased(version: u32, keys: &str, ease: &str) -> Result<Recipe, RecipeError> {
+        read(&format!(
+            r#"{{"version":{version},"id":"a","name":"A","passes":[{{"block":"transform","params":{{"scale":{{"keys":{keys},"ease":{ease}}}}}}}]}}"#
+        ))
+    }
+
+    fn scale_at(recipe: &Recipe, seconds: f64) -> f32 {
+        #[allow(clippy::cast_possible_truncation)]
+        let time = Micros((seconds * 1_000_000.0).round() as i64);
+        recipe.steps_at(time)[0].values[0]
+    }
+
+    #[test]
+    fn an_ease_bends_the_gap_it_is_named_for_and_the_gaps_after_it() {
+        let plain = eased(1, "[[0,1],[1,2],[2,1]]", "[]").unwrap();
+        assert!((scale_at(&plain, 0.25) - 1.25).abs() < 1e-6);
+        // Slow at the end: further along than a straight line early on.
+        let out = eased(2, "[[0,1],[1,2],[2,1]]", r#"["out"]"#).unwrap();
+        assert!(scale_at(&out, 0.25) > 1.5);
+        // The second gap has no ease of its own, so it moves as the first.
+        assert!(scale_at(&out, 1.25) < 1.5);
+        // Each gap takes the ease named for it.
+        let mixed = eased(2, "[[0,1],[1,2],[2,1]]", r#"["hold","linear"]"#).unwrap();
+        assert!((scale_at(&mixed, 0.99) - 1.0).abs() < 1e-6);
+        assert!((scale_at(&mixed, 1.5) - 1.5).abs() < 1e-6);
+        // Every ease starts on the first key and ends on the second.
+        for ease in super::Ease::ALL {
+            assert!(ease.at(0.0).abs() < 1e-6, "{ease:?}");
+            assert!((ease.at(1.0) - 1.0).abs() < 1e-6, "{ease:?}");
+            assert!((ease.at(f32::NAN)).abs() < 1e-6, "{ease:?}");
+            let recipe = eased(2, "[[0,1],[1,1.5]]", &format!(r#"["{}"]"#, ease.key()));
+            assert!(recipe.is_ok(), "{ease:?} reads by its key");
+        }
+    }
+
+    #[test]
+    fn an_ease_that_passes_its_key_is_checked_against_the_range() {
+        // Scale tops out at 4: a spring to 4 would pass it, so it is refused.
+        assert!(matches!(
+            eased(2, "[[0,1],[1,4]]", r#"["spring"]"#),
+            Err(RecipeError::Range { .. })
+        ));
+        assert!(matches!(
+            eased(2, "[[0,1],[1,4]]", r#"["overshoot"]"#),
+            Err(RecipeError::Range { .. })
+        ));
+        // The same keys in a straight line stay inside it.
+        assert!(eased(2, "[[0,1],[1,4]]", r#"["out"]"#).is_ok());
+        // With room above the second key, the overshoot is drawn.
+        let over = eased(2, "[[0,1],[1,2]]", r#"["overshoot"]"#).unwrap();
+        let peak = (0..=100)
+            .map(|step| scale_at(&over, f64::from(step) / 100.0))
+            .fold(0.0_f32, f32::max);
+        assert!(peak > 2.05 && peak < 2.2, "{peak}");
+        let (least, most) = super::Ease::Spring.reach();
+        assert!(least < 1.0 && most > 1.3, "{least} {most}");
+        assert_eq!(super::Ease::Bounce.reach(), (0.0, 1.0));
+    }
+
+    #[test]
+    fn an_ease_needs_version_two_and_a_gap_to_bend() {
+        assert!(matches!(
+            eased(1, "[[0,1],[1,2]]", r#"["out"]"#),
+            Err(RecipeError::Shape(_))
+        ));
+        assert_eq!(eased(1, "[[0,1],[1,2]]", "[]").unwrap().least_version(), 1);
+        assert_eq!(
+            eased(2, "[[0,1],[1,2]]", r#"["out"]"#)
+                .unwrap()
+                .least_version(),
+            2
+        );
+        // More eases than gaps, or a name the app does not have.
+        assert!(matches!(
+            eased(2, "[[0,1],[1,2]]", r#"["out","in"]"#),
+            Err(RecipeError::Curve { .. })
+        ));
+        assert!(matches!(
+            eased(2, "[[0,1],[1,2]]", r#"["wobble"]"#),
+            Err(RecipeError::Shape(_))
+        ));
+    }
+
+    #[test]
+    fn every_bundled_recipe_writes_and_reads_back_the_same() {
+        for recipe in bundled() {
+            let json = recipe.to_json().expect("writes");
+            assert!(json.len() <= MAX_RECIPE_BYTES);
+            assert_eq!(&read(&json).expect("reads back"), recipe, "{}", recipe.id);
+        }
+    }
+
+    #[test]
+    fn a_written_recipe_names_its_least_version_and_skips_defaults() {
+        let plain = read(
+            r#"{"version":2,"id":"a","name":"A","passes":[{"block":"blur","params":{"radius":{"jitter":{"rate":4,"from":0,"to":0.05}}}}]}"#,
+        )
+        .unwrap();
+        let json = plain.to_json().unwrap();
+        // No ease, so an app from before eases can read it.
+        assert!(json.contains("\"version\": 1"), "{json}");
+        for absent in ["category", "preview", "poster", "controls", "seed", "ease"] {
+            assert!(!json.contains(absent), "{absent} in {json}");
+        }
+        let eased = eased(2, "[[0,1],[1,2]]", r#"["out"]"#).unwrap();
+        let json = eased.to_json().unwrap();
+        assert!(json.contains("\"version\": 2"), "{json}");
+        assert_eq!(read(&json).unwrap(), eased);
+    }
+
+    #[test]
+    fn a_recipe_that_would_not_read_back_is_not_written() {
+        let mut recipe =
+            read(r#"{"version":1,"id":"a","name":"A","passes":[{"block":"blur"}]}"#).unwrap();
+        recipe.passes.clear();
+        assert_eq!(recipe.to_json(), Err(RecipeError::Passes));
+        assert_eq!(recipe.clone().checked(), Err(RecipeError::Passes));
+        let mut recipe =
+            read(r#"{"version":1,"id":"a","name":"A","passes":[{"block":"blur"}]}"#).unwrap();
+        recipe.passes[0]
+            .params
+            .insert("radius".to_owned(), super::Curve::Constant(9.0));
+        assert!(matches!(recipe.to_json(), Err(RecipeError::Range { .. })));
+        recipe.id = "Not An Id".to_owned();
+        assert_eq!(recipe.to_json(), Err(RecipeError::Name));
+    }
+
     #[test]
     fn a_newer_recipe_asks_for_an_update_even_with_blocks_this_app_lacks() {
         assert_eq!(
-            read(r#"{"version":2,"id":"a","name":"A","passes":[{"block":"bloom"}]}"#),
-            Err(RecipeError::Newer(2))
+            read(r#"{"version":3,"id":"a","name":"A","passes":[{"block":"bloom"}]}"#),
+            Err(RecipeError::Newer(3))
         );
         assert!(matches!(
             read(r#"{"id":"a","name":"A","passes":[{"block":"blur"}]}"#),

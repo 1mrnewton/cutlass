@@ -20,6 +20,7 @@ mod effect_shelf;
 mod filmstrip;
 mod fling;
 mod freeze;
+mod fresh_ids;
 mod gesture;
 mod group_move;
 mod hit;
@@ -37,6 +38,7 @@ mod saved_look;
 mod shape_shelf;
 mod snap;
 mod stage;
+mod sticker_place;
 mod subtitles;
 mod sync;
 mod template;
@@ -79,6 +81,7 @@ pub use fling::{
     FLING_DECAY, FLING_LIMIT, FLING_REST, FLING_START, FlingStep, fling_start, fling_step,
 };
 pub use freeze::{FreezeImage, freeze_requests};
+pub use fresh_ids::{FreshIds, highest_suffix};
 pub use gesture::{
     DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture, Placement, TrimGesture,
     TrimPlan, drop_gesture, move_gesture, placement, trim_gesture,
@@ -102,7 +105,7 @@ pub use library::{
     next_folder_name, parent_of, picked_files, place, rename_folder,
 };
 pub use media_place::{MediaPlace, extract_request, media_requests, sound_row};
-pub use pen::{PEN_DRAG_MIN, PenPath, PenPress};
+pub use pen::{FREEHAND_TOLERANCE, PEN_DRAG_MIN, PenPath, PenPress, freehand};
 pub use project_choices::{
     COLOR_SPACES, PROJECT_RATES, PROJECT_RATIOS, PROJECT_RESOLUTIONS, ProjectSettings,
     color_space_name, is_drop_rate, next_canvas, next_color_space, next_rate, project_canvas,
@@ -118,6 +121,9 @@ pub use stage::{
     MAX_SCALE, MIN_SCALE, NoText, Pose, SCALE_REACH, SNAP_REACH, StageAlign, StageBox,
     StageGesture, StageGuides, StageStep, TURN_REACH, TextSizes, canvas_size, keyed_pose,
     stage_align, stage_box, stage_gesture, stage_pick,
+};
+pub use sticker_place::{
+    STICKER_LENGTH, STICKER_SCALE, StickerFile, StickerPlace, sticker_length, sticker_requests,
 };
 pub use subtitles::{SubtitleFormat, SubtitleMiss, subtitle_request};
 pub use sync::{SyncMiss, SyncPlan, sync_plan, sync_requests};
@@ -141,9 +147,9 @@ pub use tools::{Bar, Tool, ToolId, clip_bar, tools};
 pub use transition_shelf::{
     BarEdge, MainCut, TRANSITION_CARD_PREFIX, TRANSITION_LONGEST, TRANSITION_SHORTEST,
     TransitionBar, TransitionMiss, TransitionOffer, bar_length, blend_of, drop_cut, fit_transition,
-    main_cut, transition_bars, transition_categories, transition_everywhere,
+    main_cut, offer_of, transition_bars, transition_categories, transition_everywhere,
     transition_length_request, transition_limits, transition_of_card, transition_offers,
-    transition_request,
+    transition_on_cut, transition_request,
 };
 pub use transport::{Marks, SHUTTLE_TOP, Shuttle, shuttle_rate};
 pub use view_zoom::{

@@ -101,6 +101,26 @@ const fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// The cover picture's file name in the project folder, as the reference
+/// editor's `draft_meta_info.json` names it under `draft_cover`.
+pub const COVER_FILE: &str = "draft_cover.jpg";
+
+/// The project card's picture at home: the timeline's first frame as the
+/// compositor draws it, kept apart from the cover the user picks.
+pub const THUMBNAIL_FILE: &str = "cutlass_thumbnail.jpg";
+
+/// Where the project's cover came from. The picture itself is
+/// [`COVER_FILE`] in the project folder, drawn when the cover was picked, so
+/// it does not follow later edits. The app's own; stored as `cutlass_cover`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Cover {
+    /// The timeline's picture at `time`.
+    Frame { time: Micros },
+    /// A picture from disk, cut to the canvas.
+    Image { path: String },
+}
+
 /// One cut. `draft_info.json` is this object.
 ///
 /// Time is microseconds. Ids are UUID strings. A segment points at materials by id.
@@ -150,6 +170,13 @@ pub struct Draft {
     /// The easing curves keys point at through `graphID`.
     #[serde(default, deserialize_with = "crate::serde_util::null_as_default")]
     pub keyframe_graph_list: Vec<KeyframeGraph>,
+    /// The project's cover, when one was picked.
+    #[serde(
+        default,
+        rename = "cutlass_cover",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cover: Option<Cover>,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
 }
@@ -184,6 +211,7 @@ impl Draft {
             draft_type: video_draft(),
             source: "default".to_owned(),
             keyframe_graph_list: Vec::new(),
+            cover: None,
             rest: Map::new(),
         }
     }
@@ -272,5 +300,33 @@ mod tests {
         drop.is_drop_frame_timecode = true;
         assert_eq!(drop.frame_rate(), Some(FrameRate::FPS_29_97));
         assert_eq!(drop.timecode(Micros(0)).unwrap().format(), "00:00:00;00");
+    }
+
+    #[test]
+    fn the_cover_is_stored_as_the_apps_own_and_the_reference_key_is_kept() {
+        let mut draft = Draft::empty("d");
+        let bare = serde_json::to_value(&draft).unwrap();
+        assert!(bare.get("cutlass_cover").is_none());
+        draft.cover = Some(Cover::Frame {
+            time: Micros(1_500_000),
+        });
+        draft.rest.insert("cover".to_owned(), Value::Null);
+        let json = serde_json::to_value(&draft).unwrap();
+        assert_eq!(
+            json["cutlass_cover"],
+            serde_json::json!({ "kind": "frame", "time": 1_500_000 })
+        );
+        assert!(json["cover"].is_null());
+        let back: Draft = serde_json::from_value(json).unwrap();
+        assert_eq!(back, draft);
+        let image: Cover =
+            serde_json::from_value(serde_json::json!({ "kind": "image", "path": "/a.png" }))
+                .unwrap();
+        assert_eq!(
+            image,
+            Cover::Image {
+                path: "/a.png".to_owned()
+            }
+        );
     }
 }

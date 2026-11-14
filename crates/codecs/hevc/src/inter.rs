@@ -593,6 +593,11 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                 offset: 0,
                 log2_denom: 0,
             }; 2]; 3];
+            // Weights of 1 (`1 << log2_denom`) with no offset, in every
+            // component of every list the block uses, make the default
+            // weighting's samples exactly (clause 8.5.3.3.4.3 reduces to
+            // 8.5.3.3.4.2), which its cheaper kernels compute.
+            let mut plain = true;
             for list in 0..2 {
                 if !field.uses(list) {
                     continue;
@@ -601,14 +606,16 @@ impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
                     return Err(malformed("weight index"));
                 };
                 for (c, slot) in out.iter_mut().enumerate() {
+                    let log2_denom = table.log2_denom[usize::from(c > 0)];
                     slot[list] = Wp {
                         weight: entry.weight[c],
                         offset: entry.offset[c],
-                        log2_denom: table.log2_denom[usize::from(c > 0)],
+                        log2_denom,
                     };
+                    plain &= entry.weight[c] == 1 << log2_denom && entry.offset[c] == 0;
                 }
             }
-            Some(out)
+            (!plain).then_some(out)
         } else {
             None
         };

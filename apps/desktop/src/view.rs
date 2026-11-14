@@ -10453,6 +10453,7 @@ mod tests {
                     "Rotate",
                     "Blend",
                     "Stabilize",
+                    "Remove flicker",
                     "Motion blur",
                     "Canvas",
                     "Later",
@@ -10475,6 +10476,7 @@ mod tests {
                     "AI movement",
                     "Video translator",
                     "AI stylize",
+                    "Removing video flickers",
                 ]
                 .as_slice(),
             ),

@@ -46,8 +46,8 @@ pub use cutlass_engine::{
 pub use cutlass_gpu::{ToneCurve, YuvTone};
 pub use cutlass_model::Micros;
 pub use enhance::{
-    Blend, DENOISE_MODEL, ENHANCE_MODEL, EnhanceAsk, EnhanceError, EnhanceFrames,
-    INTERPOLATE_MODEL, MOTION_BLUR_MODEL, copy_ask, enhance_ask,
+    Blend, CopyLevels, DEFLICKER_MODEL, DENOISE_MODEL, ENHANCE_MODEL, EnhanceAsk, EnhanceError,
+    EnhanceFrames, INTERPOLATE_MODEL, MOTION_BLUR_MODEL, clip_copy_ask, copy_ask, enhance_ask,
 };
 pub use frame::{
     EvalError, Fonts, NoFonts, Snapshot, frame, frame_in, layers_in, wait_export_frame,

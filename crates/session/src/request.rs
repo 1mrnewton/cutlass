@@ -252,6 +252,10 @@ pub enum Request {
     /// Reduce a video clip's noise at `level` (1 Weak, 2 Strong), or stop
     /// at 0 or below. The denoised copy is made apart from the draft.
     SetDenoise { segment_id: SegmentId, level: i64 },
+    /// Even out a video clip's brightness from frame to frame at `level`
+    /// (1), or stop at 0 or below. The evened copy is made apart from the
+    /// draft.
+    SetDeflicker { segment_id: SegmentId, level: i64 },
     /// Fill a video clip with frames made between its own, to `fps` frames
     /// a second (30, 50 or 60) however slow it plays, or stop at 0 or
     /// below. The filled copy is made apart from the draft.

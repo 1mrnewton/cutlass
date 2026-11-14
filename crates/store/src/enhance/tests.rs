@@ -31,6 +31,7 @@ fn project() -> (Temp, EnhanceKey) {
         source,
         level: 1,
         denoise: 0,
+        deflicker: 0,
         interpolate: 0,
         motion_blur: String::new(),
         model: "realesr-general-x4v3".into(),
@@ -188,6 +189,45 @@ fn a_copy_that_is_only_denoised_keeps_its_own_folder() {
     assert_ne!(
         find_enhanced(&temp.0, &both, &range),
         find_enhanced(&temp.0, &denoised, &range)
+    );
+}
+
+#[test]
+fn a_copy_that_is_only_deflickered_keeps_its_own_folder_and_name() {
+    let (temp, key) = project();
+    let evened = EnhanceKey {
+        level: 0,
+        deflicker: 1,
+        model: "cutlass-deflicker-1".into(),
+        ..key.clone()
+    };
+    let range = TimeRange::new(0, 1_000_000);
+    let file = keep(&temp, &evened, &range);
+    assert!(
+        file.parent()
+            .unwrap()
+            .ends_with("Resources/video_deflicker")
+    );
+    assert_eq!(
+        find_enhanced(&temp.0, &evened, &range).map(|f| f.0),
+        Some(file)
+    );
+    // Deflickered on top of another level, the copy is named apart.
+    let plain = EnhanceKey {
+        level: 0,
+        denoise: 1,
+        ..key.clone()
+    };
+    let both = EnhanceKey {
+        deflicker: 1,
+        ..plain.clone()
+    };
+    assert_ne!(plain.stem().unwrap(), both.stem().unwrap());
+    assert!(
+        keep(&temp, &both, &range)
+            .parent()
+            .unwrap()
+            .ends_with("Resources/video_denoise")
     );
 }
 

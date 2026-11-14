@@ -246,15 +246,14 @@ fn video_panel(
             stabilize(shell, ui, state);
             enhance_quality(shell, ui, state);
             reduce_noise(shell, ui, state);
+            remove_flicker(shell, ui, state);
             optical_flow(shell, ui, state);
             super::relight::relight(shell, ui, state);
             super::reframe::auto_reframe(shell, ui, state);
             super::motion_blur::motion_blur(shell, ui, state);
             // The generative AI rows (AI remove, AI expand, AI remix, Lip
             // sync, AI movement) wait for the next version.
-            for label in ["Removing video flickers", "Camera tracking"] {
-                later_row(ui, label);
-            }
+            later_row(ui, "Camera tracking");
             canvas(shell, ui, state, inspection);
         }
         1 => {
@@ -1037,6 +1036,44 @@ fn reduce_noise(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
         if let Some(value) = picked.filter(|value| *value != level) {
             send(shell, move |shell| shell.set_denoise(value));
         }
+    });
+}
+
+/// Remove flicker: on, it makes the clip's copy with its brightness evened
+/// out from frame to frame as a job, unless the project has one. It needs
+/// no model. With another copy level on as well, the one copy is made
+/// under that section and shows its progress there.
+fn remove_flicker(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
+    let level = shell.deflicker_level();
+    let header = section(
+        ui,
+        state,
+        "deflicker",
+        "Remove flicker",
+        Some((level > 0, true)),
+        false,
+    );
+    if header.toggled {
+        let next = if level > 0 {
+            0
+        } else {
+            cutlass_model::Algorithm::DEFLICKER_ON
+        };
+        send(shell, move |shell| shell.set_deflicker(next));
+    }
+    if !header.open || level <= 0 {
+        return;
+    }
+    let progress = shell.deflicker_progress();
+    body(ui, |ui| {
+        if let Some(done) = progress {
+            note(ui, &format!("Processing {:.1}%", done * 100.0));
+        }
+        note(
+            ui,
+            "Evens out brightness that pulses from frame to frame. Bands that roll \
+             across the picture stay.",
+        );
     });
 }
 

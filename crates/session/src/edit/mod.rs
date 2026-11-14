@@ -359,6 +359,9 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::SetDenoise { segment_id, level } => {
             enhance::set_denoise(draft, segment_id, *level)
         }
+        Request::SetDeflicker { segment_id, level } => {
+            enhance::set_deflicker(draft, segment_id, *level)
+        }
         Request::SetInterpolate { segment_id, fps } => {
             enhance::set_interpolate(draft, segment_id, *fps)
         }

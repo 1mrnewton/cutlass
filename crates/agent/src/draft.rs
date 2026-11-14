@@ -477,6 +477,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetStable { .. } => "set_stable",
         Request::SetEnhance { .. } => "set_enhance",
         Request::SetDenoise { .. } => "set_denoise",
+        Request::SetDeflicker { .. } => "set_deflicker",
         Request::SetInterpolate { .. } => "set_interpolate",
         Request::SetRelight { .. } => "set_relight",
         Request::SetReframe { .. } => "set_reframe",

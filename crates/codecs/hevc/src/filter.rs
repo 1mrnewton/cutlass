@@ -334,8 +334,9 @@ impl Picture {
         let cw = width / 2;
         let offsets = [self.pps.cb_qp_offset, self.pps.cr_qp_offset];
         let memo = Cell::new((usize::MAX, 0, 0));
-        // Eight-bit luma: two segments of four lines at a time.
-        let fast = P::bytes(&band[0]).is_some() && deblock::accelerated();
+        // Luma of 8 to 11 bits: two segments of four lines at a time.
+        let bit_depth = u32::from(self.sps.bit_depth);
+        let fast = deblock::accelerated() && (P::bytes(&band[0]).is_some() || bit_depth <= 11);
         if fast {
             for y in (top..bottom).step_by(8) {
                 for x in (8..width).step_by(8) {
@@ -356,26 +357,13 @@ impl Picture {
                     if segs.iter().all(|s| s.beta == 0) {
                         continue;
                     }
-                    let Some(luma) = P::bytes_mut(&mut band[0]) else {
-                        continue;
-                    };
-                    let line = |l: usize| (y - top + l) * width + x - 4;
-                    let mut lines = [[0u8; 8]; 8];
-                    for (l, d) in lines.iter_mut().enumerate() {
-                        if let Some(r) = luma.get(line(l)..).and_then(|r| r.first_chunk::<8>()) {
-                            *d = *r;
-                        }
-                    }
-                    if !deblock::luma8_lines(&mut lines, segs) {
-                        continue;
-                    }
-                    for (l, r) in lines.iter().enumerate() {
-                        if let Some(d) = luma
-                            .get_mut(line(l)..)
-                            .and_then(|d| d.first_chunk_mut::<8>())
-                        {
-                            *d = *r;
-                        }
+                    let at = (y - top, x);
+                    if let Some(luma) = P::bytes_mut(&mut band[0]) {
+                        lines_across(luma, width, at, segs, deblock::luma8_lines);
+                    } else if let Some(luma) = P::words_mut(&mut band[0]) {
+                        lines_across(luma, width, at, segs, |l, s| {
+                            deblock::luma16_lines(l, s, bit_depth)
+                        });
                     }
                 }
             }
@@ -429,7 +417,8 @@ impl Picture {
         let cw = width / 2;
         let offsets = [self.pps.cb_qp_offset, self.pps.cr_qp_offset];
         let memo = Cell::new((usize::MAX, 0, 0));
-        let fast = P::bytes(&band[0]).is_some() && deblock::accelerated();
+        let bit_depth = u32::from(self.sps.bit_depth);
+        let fast = deblock::accelerated() && (P::bytes(&band[0]).is_some() || bit_depth <= 11);
         if fast {
             for y in (top.max(8)..bottom).step_by(8) {
                 for x in (0..width).step_by(8) {
@@ -452,34 +441,12 @@ impl Picture {
                     } else {
                         continue;
                     };
-                    let (Some(p), Some(q)) = (P::bytes_mut(p), P::bytes_mut(q)) else {
-                        continue;
-                    };
-                    let plen = p.len();
-                    let at = |i: usize| {
-                        if i >= 4 {
-                            (i - 4) * width + x
-                        } else {
-                            (plen + x).wrapping_sub((4 - i) * width)
-                        }
-                    };
-                    let mut rows = [[0u8; 8]; 8];
-                    for (i, r) in rows.iter_mut().enumerate() {
-                        let side: &[u8] = if i >= 4 { q } else { p };
-                        if let Some(s) = side.get(at(i)..).and_then(|s| s.first_chunk::<8>()) {
-                            *r = *s;
-                        }
-                    }
-                    if !deblock::luma8(&mut rows, segs) {
-                        continue;
-                    }
-                    for (i, r) in rows.iter().enumerate().take(7).skip(1) {
-                        let side: &mut [u8] = if i >= 4 { &mut *q } else { &mut *p };
-                        if let Some(s) =
-                            side.get_mut(at(i)..).and_then(|s| s.first_chunk_mut::<8>())
-                        {
-                            *s = *r;
-                        }
+                    if let (Some(p), Some(q)) = (P::bytes_mut(&mut *p), P::bytes_mut(&mut *q)) {
+                        rows_across(p, q, width, x, segs, deblock::luma8);
+                    } else if let (Some(p), Some(q)) = (P::words_mut(p), P::words_mut(q)) {
+                        rows_across(p, q, width, x, segs, |r, s| {
+                            deblock::luma16(r, s, bit_depth)
+                        });
                     }
                 }
             }
@@ -928,4 +895,73 @@ struct Region {
     keep_possible: bool,
     /// First component row of the band written.
     top: usize,
+}
+
+/// The luma kernel on eight lines across a vertical edge at column `x` of
+/// band row `row` of `luma` (rows `width` apart): the samples `x - 4` to
+/// `x + 3` of each line, filtered by `kernel` and put back.
+#[inline(always)]
+fn lines_across<T: Copy + Default>(
+    luma: &mut [T],
+    width: usize,
+    (row, x): (usize, usize),
+    segs: [deblock::Segment; 2],
+    kernel: impl Fn(&mut [[T; 8]; 8], [deblock::Segment; 2]) -> bool,
+) {
+    let line = |l: usize| (row + l) * width + x - 4;
+    let mut lines = [[T::default(); 8]; 8];
+    for (l, d) in lines.iter_mut().enumerate() {
+        if let Some(r) = luma.get(line(l)..).and_then(|r| r.first_chunk::<8>()) {
+            *d = *r;
+        }
+    }
+    if !kernel(&mut lines, segs) {
+        return;
+    }
+    for (l, r) in lines.iter().enumerate() {
+        if let Some(d) = luma
+            .get_mut(line(l)..)
+            .and_then(|d| d.first_chunk_mut::<8>())
+        {
+            *d = *r;
+        }
+    }
+}
+
+/// The luma kernel on eight columns `x..x + 8` across a horizontal edge:
+/// the last four rows of `p` and the first four of `q` (rows `width`
+/// apart), filtered by `kernel`; the six rows it may change are put back.
+#[inline(always)]
+fn rows_across<T: Copy + Default>(
+    p: &mut [T],
+    q: &mut [T],
+    width: usize,
+    x: usize,
+    segs: [deblock::Segment; 2],
+    kernel: impl Fn(&mut [[T; 8]; 8], [deblock::Segment; 2]) -> bool,
+) {
+    let plen = p.len();
+    let at = |i: usize| {
+        if i >= 4 {
+            (i - 4) * width + x
+        } else {
+            (plen + x).wrapping_sub((4 - i) * width)
+        }
+    };
+    let mut rows = [[T::default(); 8]; 8];
+    for (i, r) in rows.iter_mut().enumerate() {
+        let side: &[T] = if i >= 4 { q } else { p };
+        if let Some(s) = side.get(at(i)..).and_then(|s| s.first_chunk::<8>()) {
+            *r = *s;
+        }
+    }
+    if !kernel(&mut rows, segs) {
+        return;
+    }
+    for (i, r) in rows.iter().enumerate().take(7).skip(1) {
+        let side: &mut [T] = if i >= 4 { &mut *q } else { &mut *p };
+        if let Some(s) = side.get_mut(at(i)..).and_then(|s| s.first_chunk_mut::<8>()) {
+            *s = *r;
+        }
+    }
 }

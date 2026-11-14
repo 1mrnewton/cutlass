@@ -8,7 +8,7 @@
 //! - [`idct`]: the inverse DCT of 4×4 to 32×32 blocks and the 4×4 DST
 //!   (clause 8.6.4.2), alone or added to the prediction.
 //! - [`deblock`]: the luma deblocking filter of two edge segments
-//!   (clause 8.7.2.5.3 and on).
+//!   (clause 8.7.2.5.3 and on), of 8 bits and of 9 to 11.
 //! - [`sao`]: edge and band offsets of a row (clause 8.7.3), of 8 bits
 //!   and of 9 to 12.
 //!

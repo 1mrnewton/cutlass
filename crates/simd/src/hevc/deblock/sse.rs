@@ -7,8 +7,8 @@ use core::arch::x86_64::{
     __m128i, _mm_abs_epi16, _mm_add_epi16, _mm_and_si128, _mm_blendv_epi8, _mm_cmpgt_epi16,
     _mm_cvtepu8_epi16, _mm_cvtsi128_si64, _mm_extract_epi64, _mm_max_epi16, _mm_min_epi16,
     _mm_packus_epi16, _mm_set_epi64x, _mm_set1_epi16, _mm_slli_epi16, _mm_srai_epi16,
-    _mm_srli_si128, _mm_sub_epi16, _mm_unpackhi_epi16, _mm_unpackhi_epi32, _mm_unpacklo_epi8,
-    _mm_unpacklo_epi16, _mm_unpacklo_epi32,
+    _mm_srli_si128, _mm_sub_epi16, _mm_unpackhi_epi16, _mm_unpackhi_epi32, _mm_unpackhi_epi64,
+    _mm_unpacklo_epi8, _mm_unpacklo_epi16, _mm_unpacklo_epi32, _mm_unpacklo_epi64,
 };
 
 use super::Segment;
@@ -116,7 +116,117 @@ pub(super) fn luma8_lines(lines: &mut [[u8; 8]; 8], seg: [Segment; 2]) {
 /// The kernel; `false` when no line changed.
 #[target_feature(enable = "avx2")]
 pub(super) fn luma8(rows: &mut [[u8; 8]; 8], seg: [Segment; 2]) -> bool {
-    let [p3, p2, p1, p0, q0, q1, q2, q3] = rows.each_ref().map(|r| widen(r));
+    let Some(out) = filter(rows.each_ref().map(|r| widen(r)), seg) else {
+        return false;
+    };
+    for (row, v) in rows[1..7].iter_mut().zip(out) {
+        *row = narrow(v);
+    }
+    true
+}
+
+/// Eight 16-bit samples as lanes.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn ld16(r: &[u16; 8]) -> __m128i {
+    let q = |s: &[u16]| {
+        let mut v = 0u64;
+        for (k, &x) in s.iter().enumerate() {
+            v |= u64::from(x) << (16 * k);
+        }
+        v as i64
+    };
+    _mm_set_epi64x(q(&r[4..]), q(&r[..4]))
+}
+
+/// The lanes of `v` as samples.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn st16(d: &mut [u16; 8], v: __m128i) {
+    let (lo, hi) = (
+        _mm_cvtsi128_si64(v) as u64,
+        _mm_extract_epi64::<1>(v) as u64,
+    );
+    for k in 0..4 {
+        d[k] = (lo >> (16 * k)) as u16;
+        d[k + 4] = (hi >> (16 * k)) as u16;
+    }
+}
+
+/// The kernel on samples of 9 to 11 bits, `max` the largest sample.
+#[target_feature(enable = "avx2")]
+pub(super) fn luma16(rows: &mut [[u16; 8]; 8], seg: [Segment; 2], max: i16) -> bool {
+    let Some(out) = filter(rows.each_ref().map(|r| ld16(r)), seg) else {
+        return false;
+    };
+    let (lo, hi) = (_mm_set1_epi16(0), _mm_set1_epi16(max));
+    for (row, v) in rows[1..7].iter_mut().zip(out) {
+        st16(row, clamp(v, lo, hi));
+    }
+    true
+}
+
+/// [`luma16`] on eight lines along a vertical edge: transposed in
+/// registers, filtered, and transposed back.
+#[target_feature(enable = "avx2")]
+pub(super) fn luma16_lines(lines: &mut [[u16; 8]; 8], seg: [Segment; 2], max: i16) -> bool {
+    let mut t = transpose16(lines.each_ref().map(|l| ld16(l)));
+    let Some(out) = filter(t, seg) else {
+        return false;
+    };
+    let (lo, hi) = (_mm_set1_epi16(0), _mm_set1_epi16(max));
+    for (r, v) in t[1..7].iter_mut().zip(out) {
+        *r = clamp(v, lo, hi);
+    }
+    for (l, v) in lines.iter_mut().zip(transpose16(t)) {
+        st16(l, v);
+    }
+    true
+}
+
+/// Eight vectors of eight 16-bit values transposed.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn transpose16(a: [__m128i; 8]) -> [__m128i; 8] {
+    let t = [
+        _mm_unpacklo_epi16(a[0], a[1]),
+        _mm_unpackhi_epi16(a[0], a[1]),
+        _mm_unpacklo_epi16(a[2], a[3]),
+        _mm_unpackhi_epi16(a[2], a[3]),
+        _mm_unpacklo_epi16(a[4], a[5]),
+        _mm_unpackhi_epi16(a[4], a[5]),
+        _mm_unpacklo_epi16(a[6], a[7]),
+        _mm_unpackhi_epi16(a[6], a[7]),
+    ];
+    let u = [
+        _mm_unpacklo_epi32(t[0], t[2]),
+        _mm_unpackhi_epi32(t[0], t[2]),
+        _mm_unpacklo_epi32(t[1], t[3]),
+        _mm_unpackhi_epi32(t[1], t[3]),
+        _mm_unpacklo_epi32(t[4], t[6]),
+        _mm_unpackhi_epi32(t[4], t[6]),
+        _mm_unpacklo_epi32(t[5], t[7]),
+        _mm_unpackhi_epi32(t[5], t[7]),
+    ];
+    [
+        _mm_unpacklo_epi64(u[0], u[4]),
+        _mm_unpackhi_epi64(u[0], u[4]),
+        _mm_unpacklo_epi64(u[1], u[5]),
+        _mm_unpackhi_epi64(u[1], u[5]),
+        _mm_unpacklo_epi64(u[2], u[6]),
+        _mm_unpackhi_epi64(u[2], u[6]),
+        _mm_unpacklo_epi64(u[3], u[7]),
+        _mm_unpackhi_epi64(u[3], u[7]),
+    ]
+}
+
+/// Both filters on eight lines `[p3, p2, p1, p0, q0, q1, q2, q3]`, picked
+/// by the decisions of each segment: the new `p2` to `q2`, not clipped to
+/// the sample range; `None` when no line changes.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn filter(v: [__m128i; 8], seg: [Segment; 2]) -> Option<[__m128i; 6]> {
+    let [p3, p2, p1, p0, q0, q1, q2, q3] = v;
     let two = |v: __m128i| _mm_slli_epi16::<1>(v);
     // Decisions of each segment, from its lines 0 and 3.
     let dp = lanes(_mm_abs_epi16(_mm_add_epi16(_mm_sub_epi16(p2, two(p1)), p0)));
@@ -163,7 +273,7 @@ pub(super) fn luma8(rows: &mut [[u8; 8]; 8], seg: [Segment; 2]) -> bool {
         }
     }
     if strong.iter().chain(&weak).all(|&m| m == 0) {
-        return false;
+        return None;
     }
     let (strong, weak, fp1, fq1) = (vector(strong), vector(weak), vector(fp1), vector(fq1));
     let (keep_p, keep_q, tc) = (vector(keep_p), vector(keep_q), vector(tc));
@@ -280,16 +390,12 @@ pub(super) fn luma8(rows: &mut [[u8; 8]; 8], seg: [Segment; 2]) -> bool {
         }
         _mm_blendv_epi8(v, x, keep)
     };
-    let out = [
+    Some([
         pick(p2, s_p2, None, keep_p),
         pick(p1, s_p1, Some((w_p1, _mm_and_si128(apply, fp1))), keep_p),
         pick(p0, s_p0, Some((w_p0, apply)), keep_p),
         pick(q0, s_q0, Some((w_q0, apply)), keep_q),
         pick(q1, s_q1, Some((w_q1, _mm_and_si128(apply, fq1))), keep_q),
         pick(q2, s_q2, None, keep_q),
-    ];
-    for (row, v) in rows[1..7].iter_mut().zip(out) {
-        *row = narrow(v);
-    }
-    true
+    ])
 }

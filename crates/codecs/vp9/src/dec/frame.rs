@@ -84,6 +84,8 @@ pub struct Pic<P> {
     /// finished a shown frame.
     pub out:
         std::sync::Mutex<Option<Result<cutlass_decode::VideoFrame, cutlass_decode::CodecError>>>,
+    /// Signalled when a worker has filled `out`.
+    pub made_cv: std::sync::Condvar,
     /// Whether a worker is still to fill `out`.
     pub made: std::sync::atomic::AtomicBool,
 }

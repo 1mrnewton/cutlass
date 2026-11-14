@@ -499,6 +499,7 @@ impl FrameEncoder {
             render_width: h.render_width,
             render_height: h.render_height,
             out: Mutex::new(None),
+            made_cv: std::sync::Condvar::new(),
             made: AtomicBool::new(false),
         });
         let segmap = vec![0u8; mi_cols * mi_rows];

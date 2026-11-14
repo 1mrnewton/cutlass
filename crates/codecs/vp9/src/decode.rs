@@ -658,14 +658,21 @@ fn held_frame(held: &Held) -> Result<VideoFrame, CodecError> {
         // The worker that finished a shown frame has made its picture,
         // unless it is being shown again.
         f.buf.wait(usize::MAX);
+        let Ok(mut slot) = f.out.lock() else {
+            return video_frame(f);
+        };
         loop {
-            if let Some(v) = f.out.lock().ok().and_then(|mut slot| slot.take()) {
+            if let Some(v) = slot.take() {
                 return v;
             }
             if !f.made.load(Ordering::Acquire) {
+                drop(slot);
                 return video_frame(f);
             }
-            std::thread::yield_now();
+            slot = match f.made_cv.wait(slot) {
+                Ok(g) => g,
+                Err(_) => return video_frame(f),
+            };
         }
     }
     match held {

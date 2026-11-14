@@ -576,6 +576,7 @@ pub fn decode_frame<P: Pixel + Send + Sync>(
             render_width: h.render_width,
             render_height: h.render_height,
             out: std::sync::Mutex::new(None),
+            made_cv: std::sync::Condvar::new(),
             made: std::sync::atomic::AtomicBool::new(workers.is_some() && present.is_some()),
         })
     };
@@ -602,8 +603,9 @@ pub fn decode_frame<P: Pixel + Send + Sync>(
                 let v = f(&pic);
                 if let Ok(mut slot) = pic.out.lock() {
                     *slot = Some(v);
+                    pic.made.store(false, std::sync::atomic::Ordering::Release);
                 }
-                pic.made.store(false, std::sync::atomic::Ordering::Release);
+                pic.made_cv.notify_all();
             }
         });
         return Ok((pic, out));

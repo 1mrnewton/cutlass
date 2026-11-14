@@ -53,10 +53,13 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
 - Coefficient probability updates in the compressed header, chosen on
   the frame's own counts (the final pass's symbols are kept and written
   once the updates are known).
-- Speeds 0–9 (`Vp9Options::speed`, default 5). Up to 6 every superblock is
+- Speeds 0–10 (`Vp9Options::speed`, default 5). Up to 6 every superblock is
   searched by trial coding; 7 and up code inter frames in one pass.
 - Threads: tile columns, each on its own thread (`Vp9Options::threads`, 0 =
-  one per core), up to the tile columns the width allows.
+  one per core), up to the tile columns the width allows; at speed 7 and
+  up the motion search runs first over the whole frame, its superblock
+  rows shared evenly among the threads, and luma and chroma are filtered
+  on separate threads.
 - Rate: a fixed quantizer (`with_quantizer`, or bitrate 0) or a bitrate,
   per frame type, from a model of bits against quantizer step.
 
@@ -183,6 +186,7 @@ A detailed picture panning 7 pixels a frame, with film grain, 60 frames
 | speed 7 | good, cpu-used 5 | +8% | 2.5 s / 2.4 s |
 | speed 9 | realtime, cpu-used 6 | −33% | 0.70 s / 0.61 s |
 | speed 9 | realtime, cpu-used 8 | −57% | 0.70 s / 0.52 s |
+| speed 10 | realtime, cpu-used 8 | −56% to −67% | 0.63 s / 0.53–0.56 s |
 
 In bitrate mode (1–4 Mb/s, the same clip) speed 5 is −1.8% against good,
 cpu-used 5 on PSNR-Y and higher on chroma.

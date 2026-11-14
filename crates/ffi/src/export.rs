@@ -83,6 +83,9 @@ pub fn encoders() -> EncodeFactory {
     cutlass_mjpeg::register_encoders(&mut encoders);
     #[cfg(target_vendor = "apple")]
     cutlass_platform_apple::register_encoders(&mut encoders);
+    // After the platform's, as on the desktop: a freeze frame's still is a
+    // PNG, and Android and Linux have only this one.
+    cutlass_png::register_encoders(&mut encoders);
     cutlass_h264::register_encoders(&mut encoders);
     cutlass_mpeg4::register_engine_encoders(&mut encoders);
     cutlass_aac::register_encoders(&mut encoders);

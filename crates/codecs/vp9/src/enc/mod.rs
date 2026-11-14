@@ -155,12 +155,32 @@ impl FrameEncoder {
         let new = coef_updates(&old, &counts, if lossless { 0 } else { 3 });
         let head = self.headers(key, fp, Some((&old, &new)))?;
         let mut data = head;
-        for (i, t) in self.work[..ntiles].iter().enumerate() {
+        // Each tile's symbols into its own coder, on threads.
+        let write = |t: &TileWork| -> Result<Vec<u8>, CodecError> {
             let mut w = BoolWriter::new();
             for &(bit, id) in &t.out {
                 w.write(u32::from(bit), tile::prob_of(id, &new));
             }
-            let d = w.finish()?;
+            w.finish()
+        };
+        let work = &self.work[..ntiles];
+        let tiles: Vec<Result<Vec<u8>, CodecError>> = if ntiles == 1 {
+            vec![write(&work[0])]
+        } else {
+            std::thread::scope(|sc| {
+                let hs: Vec<_> = work.iter().map(|t| sc.spawn(|| write(t))).collect();
+                hs.into_iter()
+                    .map(|h| {
+                        h.join().unwrap_or(Err(CodecError::Malformed {
+                            at_bit: 0,
+                            what: "vp9 encoder thread",
+                        }))
+                    })
+                    .collect()
+            })
+        };
+        for (i, d) in tiles.into_iter().enumerate() {
+            let d = d?;
             if i + 1 < ntiles {
                 data.extend_from_slice(&(d.len() as u32).to_be_bytes());
             }

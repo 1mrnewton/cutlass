@@ -401,9 +401,9 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     // Partition decision --------------------------------------------------
 
     /// Whether this frame takes the one-pass path: inter frames at speed
-    /// 7 and up.
+    /// 7 and up, every frame at 9.
     fn fast(&self) -> bool {
-        self.s.speed >= 7 && !self.s.intra_frame
+        self.s.speed >= 7 && (!self.s.intra_frame || self.s.speed >= 9)
     }
 
     /// Fast partition: each square's cost is its motion search's SAD plus
@@ -449,6 +449,21 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let s = self.s;
         let (bw, _) = MI_WH[usize::from(bsize)];
         let lam = u64::from(s.lambda);
+        if s.intra_frame {
+            // Key frames: the texture the block's mean leaves, by SATD.
+            let n = bw * 8;
+            let (x, y) = (col * 8, row * 8);
+            let (src, ss) = (s.src.planes[0], s.src.strides[0]);
+            let mut sum = 0u32;
+            for r in 0..n {
+                for c in 0..n {
+                    sum += u32::from(src[(y + r) * ss + x + c]);
+                }
+            }
+            let dc = ((sum + (n * n / 2) as u32) / (n * n) as u32) as u8;
+            self.pred[..n * n].fill(dc);
+            return satd(&src[y * ss + x..], ss, &self.pred, n, n) + lam * 4;
+        }
         self.cur_ref = 0;
         let (mv, sad) = self.search(row, col, bsize);
         self.found[Self::slot(row, col, bsize)] = (mv, sad);
@@ -795,6 +810,9 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             }
             let (mv, sad) = if r == 0 && self.fast() {
                 self.found[Self::slot(row, col, bsize)]
+            } else if r > 0 && s.speed >= 9 {
+                // Other references: only their candidate vectors, below.
+                (Mv::ZERO, u64::MAX / 4)
             } else {
                 self.search(row, col, bsize)
             };
@@ -806,7 +824,11 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                     }
                 }
             }
-            let (mv, sad) = self.refine(row, col, bsize, mv, sad);
+            let (mv, sad) = if sad < u64::MAX / 4 {
+                self.refine(row, col, bsize, mv, sad)
+            } else {
+                (mv, sad)
+            };
             let mut b = Blk {
                 refs: [r as u8 + 1, INTRA_FRAME],
                 ..*base
@@ -1553,6 +1575,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         }
         let mut levels = vec![0i32; n * n];
         self.rd = TxRd::default();
+        let mut rd_eob = None;
         let dqi = usize::from(plane > 0);
         let (dc_q, ac_q) = (s.dq[dqi][0], s.dq[dqi][1]);
         let shift = u32::from(tx == 3);
@@ -1563,6 +1586,30 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 let q = if i == 0 { dc_q } else { ac_q };
                 levels[i] = *v / q.max(1);
             }
+        } else if {
+            // No coefficient can reach 0.3 of a step when the residual's
+            // energy (by Parseval, through the transform's gain) is below
+            // that: every level is zero, as quantizing would find.
+            let ss: i64 = self.res[..n * n]
+                .iter()
+                .map(|&r| i64::from(r) * i64::from(r))
+                .sum();
+            let step = (dc_q.min(ac_q) as f32) / (1 << shift) as f32;
+            let g = super::tx::gain(usize::from(tx));
+            let floor = 0.3 * step;
+            (ss as f32) * g < floor * floor
+        } {
+            // Dropped and coded cost the same: the samples' error and an end
+            // of block.
+            let ss: i64 = self.res[..n * n]
+                .iter()
+                .map(|&r| i64::from(r) * i64::from(r))
+                .sum();
+            self.rd = TxRd {
+                coded: ss as f32,
+                dropped: ss as f32,
+            };
+            rd_eob = Some(0);
         } else {
             forward(
                 &self.res,
@@ -1574,18 +1621,21 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             );
             let (eob, rd) = self.rd_levels(plane, tx, kind, x, y, intra, &mut levels);
             self.rd = rd;
-            let _ = eob;
+            rd_eob = Some(eob);
         }
         // End of block in the decoder's scan; drop what lies past it.
         let (scan, _) = scan_pair(tx, kind);
-        let mut eob = 0;
-        for (k, &rc) in scan.iter().enumerate() {
-            let rc = usize::from(rc);
-            let t = ((rc & (n - 1)) << log2n) | (rc >> log2n);
-            if levels[t] != 0 {
-                eob = k + 1;
+        let eob = rd_eob.unwrap_or_else(|| {
+            let mut eob = 0;
+            for (k, &rc) in scan.iter().enumerate() {
+                let rc = usize::from(rc);
+                let t = ((rc & (n - 1)) << log2n) | (rc >> log2n);
+                if levels[t] != 0 {
+                    eob = k + 1;
+                }
             }
-        }
+            eob
+        });
         // Dequantize as the decoder does, and reconstruct.
         if eob > 0 {
             let mut max_r = 0;
@@ -1660,18 +1710,34 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let mut steps = [0.0f32; 2];
         steps[0] = dc_q as f32 / (1 << shift) as f32;
         steps[1] = ac_q as f32 / (1 << shift) as f32;
-        let mut last_sig = 0usize;
+        // In steps, in natural order (one pass the compiler vectorizes),
+        // then the last that could round to a level, from the end of the
+        // scan back.
+        let inv_ac = 1.0 / steps[1];
+        let mut a_nat = [0.0f32; 1024];
         let mut d_all = 0.0f32;
-        for k in 0..max {
-            let rc = usize::from(scan[k]);
-            let t = ((rc & (n - 1)) << log2n) | (rc >> log2n);
-            let v = self.fcoef[t];
-            let st = steps[usize::from(k > 0)];
-            av[k] = v.abs() / st;
+        let mut peak = 0.0f32;
+        for (a, &v) in a_nat[..max].iter_mut().zip(&self.fcoef[..max]) {
+            *a = v.abs() * inv_ac;
             d_all += v * v;
-            if av[k] >= 0.3 {
-                last_sig = k + 1;
+            peak = peak.max(*a);
+        }
+        a_nat[0] = self.fcoef[0].abs() / steps[0];
+        peak = peak.max(a_nat[0]);
+        let tr = |k: usize| {
+            let rc = usize::from(scan[k]);
+            ((rc & (n - 1)) << log2n) | (rc >> log2n)
+        };
+        let mut last_sig = 0usize;
+        if peak >= 0.3 {
+            let mut k = max;
+            while k > 0 && a_nat[tr(k - 1)] < 0.3 {
+                k -= 1;
             }
+            last_sig = k;
+        }
+        for (k, a) in av[..last_sig].iter_mut().enumerate() {
+            *a = a_nat[tr(k)];
         }
         if last_sig == 0 {
             let e0 = lam * bit_cost(false, probs[0][ctx0][0]) as f32;

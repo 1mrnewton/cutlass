@@ -128,6 +128,8 @@ const MAX_DEPTH: usize = 3;
 
 enum Bytes {
     Read(Vec<u8>),
+    /// A face that is part of the program.
+    Fixed(&'static [u8]),
     /// Read on the first ask, face `index` copied out of a collection. `None`
     /// once it failed to read as one face.
     Later(PathBuf, Option<u32>, OnceLock<Option<Vec<u8>>>),
@@ -232,6 +234,32 @@ impl FaceTable {
         }
         table.fallbacks = (0..table.faces.len().min(MAX_FALLBACKS)).collect();
         table
+    }
+
+    /// This table with the faces that are part of the program, each a
+    /// file name and its bytes, after the faces it has. A name the table
+    /// already has is the table's: a person's own file of that name is
+    /// the one used. They are the last faces a character is looked for
+    /// in, so a system with no face for it still has one, and a system
+    /// with no fonts at all still has a face to set text in.
+    #[must_use]
+    pub fn with_built_in(mut self, faces: &[(&str, &'static [u8])]) -> Self {
+        for (name, bytes) in faces {
+            if self.faces.iter().any(|face| face.name == *name)
+                || cutlass_font::read(bytes).is_err()
+            {
+                continue;
+            }
+            let style = Style::of_bytes(bytes);
+            self.push(
+                (*name).to_owned(),
+                face_label(name),
+                Bytes::Fixed(bytes),
+                style,
+            );
+            self.fallbacks.push(self.faces.len() - 1);
+        }
+        self
     }
 
     /// One face given as bytes.
@@ -352,6 +380,7 @@ impl FaceTable {
     fn bytes_at(&self, at: usize) -> Option<&[u8]> {
         match &self.faces.get(at)?.bytes {
             Bytes::Read(bytes) => Some(bytes),
+            Bytes::Fixed(bytes) => Some(bytes),
             Bytes::Later(path, index, cell) => {
                 cell.get_or_init(|| read_face(path, *index)).as_deref()
             }
@@ -843,6 +872,44 @@ mod tests {
         // that is not an emoji face, an emoji from the emoji face.
         assert_eq!(table.fallback('f', false), table.face("arial.ttf"));
         assert_eq!(table.fallback('f', true), table.face("NotoColorEmoji.ttf"));
+    }
+
+    #[test]
+    fn faces_that_are_part_of_the_program_come_after_the_systems_own() {
+        const BUILT_IN: &[(&str, &[u8])] = &[
+            ("Shaping.ttf", SHAPING),
+            ("Sample.ttf", SAMPLE),
+            ("Junk.ttf", b"not a font"),
+        ];
+        // A system with no fonts at all: the built-in faces are the table,
+        // in their order, and new text starts in the first.
+        let bare = FaceTable::default().with_built_in(BUILT_IN);
+        assert_eq!(bare.names(), ["Shaping.ttf", "Sample.ttf"]);
+        assert_eq!(bare.name(), "Shaping.ttf");
+        assert_eq!(bare.face("Shaping.ttf"), Some(SHAPING));
+        assert_eq!(bare.fallback('f', false), Some(SHAPING));
+        assert_eq!(bare.fallback('B', false), Some(SAMPLE));
+        // After a system's faces, and the last looked in for a character:
+        // the system's own face that draws it comes first.
+        let folder = Folder::new("built-in");
+        std::fs::write(folder.0.join("arial.ttf"), SAMPLE).expect("face");
+        let table = FaceTable::scan(&[&folder.0]).with_built_in(BUILT_IN);
+        assert_eq!(table.names(), ["arial.ttf", "Shaping.ttf", "Sample.ttf"]);
+        assert_eq!(
+            table.fallback_names(),
+            ["arial.ttf", "Shaping.ttf", "Sample.ttf"]
+        );
+        assert_eq!(table.fallback('B', false), table.face("arial.ttf"));
+        assert_eq!(table.fallback('f', false), Some(SHAPING));
+        // A person's own file of a built-in face's name is the one used.
+        std::fs::write(folder.0.join("Shaping.ttf"), SAMPLE).expect("face");
+        let table = FaceTable::scan(&[&folder.0]).with_built_in(BUILT_IN);
+        assert_eq!(table.names().len(), 3);
+        assert_eq!(table.face("Shaping.ttf"), Some(SAMPLE));
+        // A default named for the table still moves to the front.
+        let table = table.preferring(&["Sample.ttf"]);
+        assert_eq!(table.name(), "Sample.ttf");
+        assert_eq!(table.face("Sample.ttf"), Some(SAMPLE));
     }
 
     #[test]

@@ -16,7 +16,9 @@ use cutlass_font::Font;
 use crate::TextError;
 use crate::bidi::{Levels, resolve};
 use crate::linebreak::ends_line;
-use crate::unicode::{mirror, props};
+use crate::script::Script;
+use crate::shaper::{Run, shape_run};
+use crate::unicode::props;
 
 /// Characters in one `shape` call. A longer string is refused.
 pub const MAX_CHARS: usize = 65_536;
@@ -145,15 +147,18 @@ pub fn shape_text(bytes: &[u8], text: &str) -> Result<Shaped, TextError> {
 
 /// Shape `text` with a face that has already been read.
 pub fn shape(font: &Font<'_>, text: &str) -> Result<Shaped, TextError> {
-    shape_faces(std::slice::from_ref(font), text, &|_| 0)
+    shape_faces(std::slice::from_ref(font), text, &|_| 0, true)
 }
 
 /// Shape `text`, each character in the face `pick` names for its byte
-/// index; a face that is not in `fonts` is the first.
+/// index; a face that is not in `fonts` is the first. `ligatures` makes
+/// the ligatures a reader can do without; text that is letter-spaced
+/// leaves them out.
 pub(crate) fn shape_faces(
     fonts: &[Font<'_>],
     text: &str,
     pick: &dyn Fn(usize) -> usize,
+    ligatures: bool,
 ) -> Result<Shaped, TextError> {
     if text.chars().count() > MAX_CHARS {
         return Err(TextError::Limit);
@@ -162,95 +167,103 @@ pub(crate) fn shape_faces(
     if text.is_empty() {
         return Ok(Shaped { paragraphs });
     }
+    let faces = Faces {
+        fonts,
+        pick,
+        ligatures,
+    };
     let mut start = 0;
     let mut characters = text.char_indices().peekable();
     while let Some((at, character)) = characters.next() {
         if !ends_line(character) {
             continue;
         }
-        paragraphs.push(paragraph(fonts, text, start, at, pick)?);
+        paragraphs.push(paragraph(&faces, text, start, at)?);
         if character == '\r' {
             let _line_feed = characters.next_if(|(_, next)| *next == '\n');
         }
         start = characters.peek().map_or(text.len(), |(next, _)| *next);
     }
-    paragraphs.push(paragraph(fonts, text, start, text.len(), pick)?);
+    paragraphs.push(paragraph(&faces, text, start, text.len())?);
     Ok(Shaped { paragraphs })
 }
 
-/// Shape bytes `start..end` of `text`, which hold no break.
+/// The faces a string is shaped in.
+struct Faces<'f, 'a> {
+    fonts: &'f [Font<'a>],
+    pick: &'f dyn Fn(usize) -> usize,
+    ligatures: bool,
+}
+
+/// Shape bytes `start..end` of `text`, which hold no break: cut them into
+/// runs of one face, one direction and one script, and shape each.
 fn paragraph(
-    fonts: &[Font<'_>],
+    faces: &Faces<'_, '_>,
     text: &str,
     start: usize,
     end: usize,
-    pick: &dyn Fn(usize) -> usize,
 ) -> Result<Paragraph, TextError> {
     let part = text.get(start..end).ok_or(TextError::Limit)?;
     let levels = resolve(part);
+    let scripts = crate::script::resolve(part);
     let mut starts: Vec<usize> = part.char_indices().map(|(at, _)| start + at).collect();
-    starts.push(end);
-    let mut glyphs: Vec<ShapedGlyph> = Vec::with_capacity(starts.len());
+    // What each character is shaped with: its face, level and script.
+    let mut keys = Vec::with_capacity(starts.len());
     for (index, (at, character)) in part.char_indices().enumerate() {
-        let source = start + at;
         let level = levels.levels.get(index).copied().unwrap_or(levels.base);
-        let face = Some(pick(source))
-            .filter(|face| *face < fonts.len())
-            .unwrap_or(0);
-        let Some(font) = fonts.get(face) else {
+        let script = scripts.get(index).copied().unwrap_or(Script::LATIN);
+        // A mark or a joiner is set in the face of the letter it is on.
+        let props = props(character);
+        let joined = props.is_mark() || props.default_ignorable();
+        let face = match keys.last() {
+            Some((face, _, _)) if joined => *face,
+            _ => Some((faces.pick)(start + at))
+                .filter(|face| *face < faces.fonts.len())
+                .unwrap_or(0),
+        };
+        keys.push((face, level, script));
+    }
+    starts.push(end);
+    let mut glyphs: Vec<ShapedGlyph> = Vec::with_capacity(keys.len());
+    let mut from = 0;
+    for index in 1..=keys.len() {
+        if index < keys.len() && keys[index] == keys[from] {
+            continue;
+        }
+        let (face, level, script) = keys[from];
+        let Some(font) = faces.fonts.get(face) else {
             return Err(TextError::Limit);
         };
-        // A character that runs right to left is drawn as its mirror
-        // image, when it has one the face can draw.
-        let mirrored = (level % 2 == 1)
-            .then(|| mirror(character))
-            .flatten()
-            .and_then(|other| font.glyph_id(other).ok().flatten());
-        let found = match mirrored {
-            Some(glyph_id) => Some(glyph_id),
-            None => font.glyph_id(character).map_err(TextError::Font)?,
+        let run = Run {
+            text,
+            start: starts[from],
+            end: starts[index],
+            script,
+            backward: level % 2 == 1,
+            ligatures: faces.ligatures,
         };
-        let (glyph_id, missing) = match found {
-            Some(glyph_id) => (glyph_id, false),
-            None if props(character).default_ignorable() => continue,
-            None => (font.missing_glyph(), true),
-        };
-        let mut advance = i32::from(font.advance(glyph_id).map_err(TextError::Font)?);
-        let mut x_offset = 0;
-        let mut pair = Pair::default();
-        // Kerning is shared between the pair: half off the first glyph's
-        // advance, and the rest moves the second.
-        if let Some(before) = glyphs
-            .last_mut()
-            .filter(|before| before.face == face && before.level == level && level % 2 == 0)
-        {
-            let kerning = i32::from(font.kerning(before.glyph_id, glyph_id));
-            let first = kerning >> 1;
-            before.advance += first;
-            advance += kerning - first;
-            x_offset = kerning - first;
-            if kerning != 0 {
-                pair = Pair {
-                    back: 1,
-                    first_advance: first,
-                    x_offset,
-                    advance: kerning - first,
-                };
-            }
+        let mut before = None;
+        for glyph in shape_run(font, &run)? {
+            let character = text
+                .get(glyph.cluster..)
+                .and_then(|rest| rest.chars().next())
+                .unwrap_or(glyph.character);
+            glyphs.push(ShapedGlyph {
+                source: glyph.cluster,
+                character,
+                glyph_id: glyph.id,
+                missing: glyph.missing,
+                advance: glyph.x_advance,
+                x_offset: glyph.x_offset,
+                y_offset: glyph.y_offset,
+                face,
+                level,
+                first: before != Some(glyph.cluster),
+                pair: glyph.pair,
+            });
+            before = Some(glyph.cluster);
         }
-        glyphs.push(ShapedGlyph {
-            source,
-            character,
-            glyph_id,
-            missing,
-            advance,
-            x_offset,
-            y_offset: 0,
-            face,
-            level,
-            first: true,
-            pair,
-        });
+        from = index;
     }
     Ok(Paragraph {
         base: levels.base,
@@ -400,8 +413,9 @@ mod tests {
         let glyphs = &turned.paragraphs[0].glyphs;
         assert_eq!(glyphs.len(), 2);
         assert_eq!((glyphs[0].source, glyphs[0].level), (3, 1));
-        // Kerning is not applied to a pair read right to left.
-        assert_eq!((glyphs[0].advance, glyphs[1].advance), (600, 700));
+        // The pair is kerned as it is seen, B then A.
+        assert_eq!((glyphs[0].advance, glyphs[1].advance), (620, 720));
+        assert_eq!((glyphs[0].x_offset, glyphs[1].x_offset), (20, 0));
         assert!(
             shape(&font, "\u{200D}\u{FE0F}")
                 .expect("joiners")

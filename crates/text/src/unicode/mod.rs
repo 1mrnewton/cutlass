@@ -66,8 +66,14 @@ pub(crate) mod lb {
 /// General categories, as `UCharCategory` numbers them.
 pub(crate) mod gc {
     pub(crate) const UNASSIGNED: u8 = 0;
+    pub(crate) const OTHER_LETTER: u8 = 5;
     pub(crate) const NONSPACING_MARK: u8 = 6;
+    pub(crate) const ENCLOSING_MARK: u8 = 7;
     pub(crate) const SPACING_MARK: u8 = 8;
+    pub(crate) const DECIMAL_NUMBER: u8 = 9;
+    pub(crate) const FORMAT: u8 = 16;
+    pub(crate) const SURROGATE: u8 = 18;
+    pub(crate) const MODIFIER_SYMBOL: u8 = 26;
     pub(crate) const INITIAL_PUNCTUATION: u8 = 28;
     pub(crate) const FINAL_PUNCTUATION: u8 = 29;
 }
@@ -99,6 +105,16 @@ pub(crate) mod bidi {
     pub(crate) const PDI: u8 = 22;
 }
 
+/// How a character joins its neighbours in a cursive script, as
+/// `UJoiningType` numbers them.
+pub(crate) mod joining {
+    pub(crate) const CAUSING: u8 = 1;
+    pub(crate) const DUAL: u8 = 2;
+    pub(crate) const LEFT: u8 = 3;
+    pub(crate) const RIGHT: u8 = 4;
+    pub(crate) const TRANSPARENT: u8 = 5;
+}
+
 /// East Asian widths, as `UEastAsianWidth` numbers them.
 pub(crate) mod ea {
     pub(crate) const HALFWIDTH: u8 = 2;
@@ -124,6 +140,48 @@ impl Props {
     /// One of [`bidi`].
     pub(crate) fn bidi(self) -> u8 {
         self.bits(5, 5)
+    }
+
+    /// One of [`joining`].
+    pub(crate) fn joining(self) -> u8 {
+        self.bits(10, 3)
+    }
+
+    /// The canonical combining class.
+    pub(crate) fn combining(self) -> u8 {
+        self.bits(23, 8)
+    }
+
+    /// The script, as an ISO 15924 tag such as `Latn`.
+    pub(crate) fn script(self) -> [u8; 4] {
+        let index = usize::from(self.bits(31, 8));
+        tables()
+            .and_then(|tables| tables.scripts.get(index * 4..index * 4 + 4))
+            .map_or(*b"Zzzz", |tag| [tag[0], tag[1], tag[2], tag[3]])
+    }
+
+    /// The kind of letter in a script written by syllable, as
+    /// `UIndicSyllabicCategory` numbers them.
+    pub(crate) fn syllabic(self) -> u8 {
+        self.bits(39, 6)
+    }
+
+    /// Where a sign goes around its consonant, as
+    /// `UIndicPositionalCategory` numbers them.
+    pub(crate) fn positional(self) -> u8 {
+        self.bits(45, 4)
+    }
+
+    /// One half of a flag.
+    pub(crate) fn regional_indicator(self) -> bool {
+        self.bits(60, 1) == 1
+    }
+
+    pub(crate) fn is_mark(self) -> bool {
+        matches!(
+            self.category(),
+            gc::NONSPACING_MARK | gc::ENCLOSING_MARK | gc::SPACING_MARK
+        )
     }
 
     /// Whether the character opens a bracket pair, closes one, or neither.
@@ -170,10 +228,16 @@ struct Tables {
     stage_one: &'static [u8],
     stage_two: &'static [u8],
     records: &'static [u8],
+    /// ISO 15924 tags, four bytes each.
+    scripts: &'static [u8],
     /// Pairs of a character and its mirror image, in character order.
     mirrors: &'static [u8],
     /// Pairs of an opening bracket and its closing one, in character order.
     brackets: &'static [u8],
+    /// A character and its one or two canonical parts, in character order.
+    parts: &'static [u8],
+    /// Two parts and the character they compose, in order of the parts.
+    pairs: &'static [u8],
     version: [u8; 3],
 }
 
@@ -204,16 +268,21 @@ impl Tables {
         let stage_one = take(counts[0].checked_mul(2)?)?;
         let stage_two = take(counts[1].checked_mul(2)?)?;
         let records = take(counts[2].checked_mul(8)?)?;
-        let _scripts = take(counts[3].checked_mul(4)?)?;
+        let scripts = take(counts[3].checked_mul(4)?)?;
         let mirrors = take(counts[4].checked_mul(8)?)?;
         let brackets = take(counts[5].checked_mul(8)?)?;
+        let parts = take(counts[6].checked_mul(12)?)?;
+        let pairs = take(counts[7].checked_mul(12)?)?;
         Some(Self {
             block_bits,
             stage_one,
             stage_two,
             records,
+            scripts,
             mirrors,
             brackets,
+            parts,
+            pairs,
             version,
         })
     }
@@ -287,6 +356,85 @@ pub(crate) fn closing(open: char) -> Option<char> {
     paired(tables()?.brackets, u32::from(open))
 }
 
+// Korean syllables are composed and taken apart by arithmetic.
+const HANGUL_FIRST: u32 = 0xAC00;
+const HANGUL_LEADS: u32 = 0x1100;
+const HANGUL_VOWELS: u32 = 0x1161;
+const HANGUL_TAILS: u32 = 0x11A7;
+const HANGUL_TAIL_COUNT: u32 = 28;
+const HANGUL_PER_LEAD: u32 = 21 * 28;
+const HANGUL_COUNT: u32 = 19 * HANGUL_PER_LEAD;
+
+/// The one or two characters `character` is canonically written as, one
+/// step: an accented letter is its letter and its accent.
+pub(crate) fn decompose(character: char) -> Option<(char, Option<char>)> {
+    let code = u32::from(character);
+    if let Some(index) = code
+        .checked_sub(HANGUL_FIRST)
+        .filter(|index| *index < HANGUL_COUNT)
+    {
+        let tail = index % HANGUL_TAIL_COUNT;
+        let (first, second) = if tail == 0 {
+            (
+                HANGUL_LEADS + index / HANGUL_PER_LEAD,
+                HANGUL_VOWELS + (index % HANGUL_PER_LEAD) / HANGUL_TAIL_COUNT,
+            )
+        } else {
+            (code - tail, HANGUL_TAILS + tail)
+        };
+        return Some((char::from_u32(first)?, char::from_u32(second)));
+    }
+    let table = tables()?.parts;
+    let (mut low, mut high) = (0, table.len() / 12);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        let key = u32_at(table, mid * 12)?;
+        if key < code {
+            low = mid + 1;
+        } else if key > code {
+            high = mid;
+        } else {
+            let first = char::from_u32(u32_at(table, mid * 12 + 4)?)?;
+            let second = u32_at(table, mid * 12 + 8)?;
+            return Some((first, char::from_u32(second).filter(|_| second != 0)));
+        }
+    }
+    None
+}
+
+/// The character `first` and `second` compose, when they do.
+pub(crate) fn compose(first: char, second: char) -> Option<char> {
+    let (a, b) = (u32::from(first), u32::from(second));
+    if let (Some(lead), Some(vowel)) = (
+        a.checked_sub(HANGUL_LEADS).filter(|lead| *lead < 19),
+        b.checked_sub(HANGUL_VOWELS).filter(|vowel| *vowel < 21),
+    ) {
+        return char::from_u32(HANGUL_FIRST + lead * HANGUL_PER_LEAD + vowel * HANGUL_TAIL_COUNT);
+    }
+    if let (Some(index), Some(tail)) = (
+        a.checked_sub(HANGUL_FIRST)
+            .filter(|index| *index < HANGUL_COUNT && index % HANGUL_TAIL_COUNT == 0),
+        b.checked_sub(HANGUL_TAILS)
+            .filter(|tail| (1..HANGUL_TAIL_COUNT).contains(tail)),
+    ) {
+        return char::from_u32(HANGUL_FIRST + index + tail);
+    }
+    let table = tables()?.pairs;
+    let (mut low, mut high) = (0, table.len() / 12);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        let key = (u32_at(table, mid * 12)?, u32_at(table, mid * 12 + 4)?);
+        if key < (a, b) {
+            low = mid + 1;
+        } else if key > (a, b) {
+            high = mid;
+        } else {
+            return char::from_u32(u32_at(table, mid * 12 + 8)?);
+        }
+    }
+    None
+}
+
 /// The Unicode version the table was written from: major, minor, patch.
 #[must_use]
 pub fn unicode_version() -> [u8; 3] {
@@ -295,7 +443,10 @@ pub fn unicode_version() -> [u8; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{Bracket, Tables, bidi, closing, ea, gc, lb, mirror, props, unicode_version};
+    use super::{
+        Bracket, Tables, bidi, closing, compose, decompose, ea, gc, joining, lb, mirror, props,
+        unicode_version,
+    };
 
     #[test]
     fn the_table_reads_and_names_its_unicode_version() {
@@ -324,6 +475,35 @@ mod tests {
         assert!(props('\u{1F600}').pictographic());
         assert!(!props('A').pictographic());
         assert_eq!(props('\u{10FFFF}').category(), gc::UNASSIGNED);
+        assert_eq!(props('\u{628}').joining(), joining::DUAL);
+        assert_eq!(props('\u{627}').joining(), joining::RIGHT);
+        assert_eq!(props('\u{640}').joining(), joining::CAUSING);
+        assert_eq!(props('\u{64B}').joining(), joining::TRANSPARENT);
+        assert_eq!(props('\u{A872}').joining(), joining::LEFT);
+        assert_eq!(props('\u{301}').combining(), 230);
+        assert_eq!(props('\u{94D}').combining(), 9);
+        assert_eq!(props('A').combining(), 0);
+        assert_eq!(&props('A').script(), b"Latn");
+        assert_eq!(&props('\u{628}').script(), b"Arab");
+        assert_eq!(&props('\u{915}').script(), b"Deva");
+        assert_eq!(&props(' ').script(), b"Zyyy");
+        assert_eq!(&props('\u{301}').script(), b"Zinh");
+        assert!(props('\u{301}').is_mark() && props('\u{93E}').is_mark());
+        assert!(!props('A').is_mark());
+        assert_eq!(props('\u{1F3FB}').category(), gc::MODIFIER_SYMBOL);
+        assert_eq!(props('\u{4E2D}').category(), gc::OTHER_LETTER);
+        assert_eq!(props('\u{20DD}').category(), gc::ENCLOSING_MARK);
+        // Devanagari: ka is a consonant, the virama a virama, and the
+        // short i sign goes on the left.
+        assert_eq!(
+            (props('\u{915}').syllabic(), props('\u{94D}').syllabic()),
+            (5, 31)
+        );
+        assert_eq!(
+            (props('\u{93F}').syllabic(), props('\u{93F}').positional()),
+            (34, 4)
+        );
+        assert!(props('\u{1F1EC}').regional_indicator() && !props('G').regional_indicator());
         assert!(props('\u{200D}').default_ignorable());
         assert!(props('\u{202E}').default_ignorable());
         assert!(props('\u{FE0F}').default_ignorable());
@@ -344,6 +524,27 @@ mod tests {
         assert_eq!(closing('['), Some(']'));
         assert_eq!(closing('\u{300C}'), Some('\u{300D}'));
         assert_eq!(closing(']'), None);
+    }
+
+    #[test]
+    fn characters_come_apart_and_compose() {
+        assert_eq!(decompose('\u{E9}'), Some(('e', Some('\u{301}'))));
+        assert_eq!(compose('e', '\u{301}'), Some('\u{E9}'));
+        // One step at a time: a letter with two accents.
+        assert_eq!(decompose('\u{1EA5}'), Some(('\u{E2}', Some('\u{301}'))));
+        // A character that is another, alone.
+        assert_eq!(decompose('\u{212B}'), Some(('\u{C5}', None)));
+        assert_eq!(decompose('e'), None);
+        assert_eq!(compose('e', 'e'), None);
+        // A composition Unicode leaves out is not made.
+        assert_eq!(decompose('\u{958}'), Some(('\u{915}', Some('\u{93C}'))));
+        assert_eq!(compose('\u{915}', '\u{93C}'), None);
+        // Korean syllables, by arithmetic.
+        assert_eq!(decompose('\u{AC00}'), Some(('\u{1100}', Some('\u{1161}'))));
+        assert_eq!(decompose('\u{AC01}'), Some(('\u{AC00}', Some('\u{11A8}'))));
+        assert_eq!(compose('\u{1100}', '\u{1161}'), Some('\u{AC00}'));
+        assert_eq!(compose('\u{AC00}', '\u{11A8}'), Some('\u{AC01}'));
+        assert_eq!(compose('\u{AC01}', '\u{11A8}'), None);
     }
 
     #[test]

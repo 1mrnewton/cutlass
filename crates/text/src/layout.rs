@@ -156,7 +156,8 @@ pub(crate) fn layout_faces(
             alignment,
         });
     }
-    let shaped = shape_faces(fonts, text, pick)?;
+    // Letters spaced apart are not drawn as ligatures.
+    let shaped = shape_faces(fonts, text, pick, letter_px == 0.0)?;
     let breaks = boundaries(text);
     // A line is cut only before the first glyph of a character.
     let boundary = |glyph: &ShapedGlyph| {
@@ -770,10 +771,13 @@ mod tests {
         // A letter keeps its accent: the cut falls before the letter.
         text.content = "AA\u{301}".to_owned();
         text.line_max_width = 1_000.0;
-        assert_eq!(
-            words(&layout(&face, &text).expect("accent")),
-            ["A", "A\u{301}"]
-        );
+        let accented = layout(&face, &text).expect("accent");
+        let sources: Vec<Vec<usize>> = accented
+            .lines
+            .iter()
+            .map(|line| line.glyphs.iter().map(|glyph| glyph.source).collect())
+            .collect();
+        assert_eq!(sources, [vec![0], vec![1, 1]]);
         // A flag is not cut between its halves, however narrow the line.
         text.content = "\u{1F1EC}\u{1F1ED}".to_owned();
         text.line_max_width = 600.0;
@@ -811,8 +815,9 @@ mod tests {
 
         // A direction override turns Latin around, and draws nothing itself.
         let turned = layout(&face, &material("\u{202E}AB")).expect("override");
+        // The pair is kerned as it is seen: B then A.
         assert_eq!(words(&turned), ["BA"]);
-        assert_eq!(turned.lines[0].glyphs[1].x.to_bits(), 700.0_f32.to_bits());
+        assert_eq!(turned.lines[0].glyphs[1].x.to_bits(), 740.0_f32.to_bits());
     }
 
     #[test]
@@ -832,6 +837,82 @@ mod tests {
         let right = layout(&face, &text).expect("right");
         assert_eq!(right.lines[0].glyphs[2].x.to_bits(), 700.0_f32.to_bits());
         assert_eq!(right.lines[1].glyphs[0].x.to_bits(), 700.0_f32.to_bits());
+    }
+
+    const SHAPING: &[u8] = include_bytes!("../../font/fixtures/shaping.ttf");
+
+    fn shaping() -> cutlass_font::Font<'static> {
+        cutlass_font::read(SHAPING).expect("fixture")
+    }
+
+    fn ids(laid: &super::Layout) -> Vec<Vec<u16>> {
+        laid.lines
+            .iter()
+            .map(|line| line.glyphs.iter().map(|glyph| glyph.glyph_id).collect())
+            .collect()
+    }
+
+    #[test]
+    fn shaped_glyphs_are_placed_with_their_offsets() {
+        let face = shaping();
+        // Three Arabic letters, joined, seen from the last to the first.
+        let arabic = layout(&face, &material("\u{628}\u{628}\u{628}")).expect("arabic");
+        assert_eq!(ids(&arabic), [[13, 12, 11]]);
+        let line = &arabic.lines[0];
+        let xs: Vec<f32> = line.glyphs.iter().map(|glyph| glyph.x).collect();
+        assert_eq!(xs, [0.0, 800.0, 1_200.0]);
+        let sources: Vec<usize> = line.glyphs.iter().map(|glyph| glyph.source).collect();
+        assert_eq!(sources, [4, 2, 0]);
+        assert_eq!(line.width.to_bits(), 1_600.0_f32.to_bits());
+
+        // An accent sits on its letter: back over it, and 50 lower than
+        // the face draws it alone.
+        let accent = layout(&face, &material("A\u{301}V")).expect("accent");
+        let glyphs = &accent.lines[0].glyphs;
+        assert_eq!(ids(&accent), [[2, 7, 3]]);
+        assert_eq!((glyphs[1].x, glyphs[1].lift), (450.0, -50.0));
+        assert_eq!((glyphs[1].source, glyphs[1].advance), (0, 0.0));
+        assert_eq!((glyphs[0].lift, glyphs[2].x), (0.0, 600.0));
+        // The accent's letter and the next are still a kerned pair.
+        assert_eq!(
+            layout(&face, &material("AV")).expect("pair").lines[0].width,
+            1_100.0
+        );
+
+        // A vowel sign written before its consonant is drawn before it,
+        // and both are the one character.
+        let sign = layout(&face, &material("\u{915}\u{93F}")).expect("sign");
+        assert_eq!(ids(&sign), [[27, 22]]);
+        assert!(sign.lines[0].glyphs.iter().all(|glyph| glyph.source == 0));
+    }
+
+    #[test]
+    fn ligatures_stay_whole_and_spacing_undoes_them() {
+        let face = shaping();
+        // Each ligature is one glyph, and a line is not cut inside one.
+        let mut text = material("fifi");
+        text.line_max_width = 600.0;
+        let laid = layout(&face, &text).expect("ligatures");
+        assert_eq!(ids(&laid), [[6], [6]]);
+        // Letters spaced apart are drawn one by one, the space between.
+        let mut spaced = material("fi");
+        spaced.letter_spacing = 0.1;
+        let laid = layout(&face, &spaced).expect("spaced");
+        assert_eq!(ids(&laid), [[4, 5]]);
+        assert_eq!(laid.lines[0].glyphs[1].x.to_bits(), 400.0_f32.to_bits());
+        // A sign and its consonant stay on one line however narrow it is,
+        // and stand in one place down a column.
+        let mut narrow = material("\u{915}\u{93F}\u{915}\u{93F}");
+        narrow.line_max_width = 100.0;
+        assert_eq!(
+            ids(&layout(&face, &narrow).expect("narrow")),
+            [[27, 22], [27, 22]]
+        );
+        narrow.typesetting = 1;
+        narrow.line_max_width = 0.0;
+        let column = layout(&face, &narrow).expect("column");
+        let ys: Vec<f32> = column.lines[0].glyphs.iter().map(|glyph| glyph.y).collect();
+        assert_eq!(ys, [800.0, 800.0, 1_800.0, 1_800.0]);
     }
 
     #[test]

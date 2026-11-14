@@ -8,8 +8,10 @@ use crate::cabac;
 use crate::ctu::{
     PART_2NXN, PART_2NXND, PART_2NXNU, PART_NLX2N, PART_NRX2N, PART_NX2N, SliceDecoder,
 };
+use crate::frame::Frame;
 use crate::mc::{self, Block, Plane, Wp};
 use crate::picture::{ColMv, MODE_INTER, Mv, MvField};
+use crate::pixel::Pixel;
 use crate::slice::SliceType;
 
 fn malformed(what: &'static str) -> CodecError {
@@ -50,7 +52,7 @@ struct Pb {
     part: usize,
 }
 
-impl<'a> SliceDecoder<'a, '_> {
+impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
     pub fn prediction_unit(
         &mut self,
         x: usize,
@@ -153,9 +155,8 @@ impl<'a> SliceDecoder<'a, '_> {
             }
             field
         };
-        let w4 = self.pic.w4;
         for row in (y >> 2)..((y + h) >> 2) {
-            let start = row * w4 + (x >> 2);
+            let start = self.pic.row4(row) + (x >> 2);
             self.pic.mvf.fill(start, w >> 2, field);
         }
         self.motion_compensate(x, y, w, h, field)
@@ -203,7 +204,13 @@ impl<'a> SliceDecoder<'a, '_> {
     }
 
     /// Availability of a neighbouring prediction block (clause 6.4.2).
-    fn pb_available(&self, pb: Pb, nx: isize, ny: isize) -> bool {
+    /// `near`: the position is left of or above the block within its
+    /// extent, or at its top-left corner (see [`Self::near`]).
+    fn pb_available(&self, pb: Pb, nx: isize, ny: isize, near: bool) -> bool {
+        if near {
+            return self.near(nx, ny)
+                && self.pic.info.get(self.pic.at4(nx as usize, ny as usize)) & 3 == MODE_INTER;
+        }
         let same_cb = nx >= pb.xcb as isize
             && ny >= pb.ycb as isize
             && (nx as usize) < pb.xcb + pb.ncb
@@ -243,58 +250,67 @@ impl<'a> SliceDecoder<'a, '_> {
         let same_region = |nx: isize, ny: isize| -> bool {
             (x >> level) == (nx >> level) && (y >> level) == (ny >> level)
         };
-        let mut list: Vec<MvField> = Vec::with_capacity(5);
-        let get = |nx: isize, ny: isize| -> Option<MvField> {
-            if same_region(nx, ny) || !self.pb_available(pb, nx, ny) {
+        let mut list: Short<MvField, 5> = Short::default();
+        let get = |nx: isize, ny: isize, near: bool| -> Option<MvField> {
+            if same_region(nx, ny) || !self.pb_available(pb, nx, ny, near) {
                 None
             } else {
                 Some(self.neighbour(nx, ny))
             }
         };
         // Exclusions apply before the pruning comparisons, as in clause
-        // 8.5.3.2.3: a pruned B1 still prunes B0 and B2.
+        // 8.5.3.2.3: a pruned B1 still prunes B0 and B2. A candidate depends
+        // only on those before it, so the list stops at the one chosen.
         let excluded_a1 = pb.part == 1 && matches!(part_mode, PART_NX2N | PART_NLX2N | PART_NRX2N);
         let excluded_b1 = pb.part == 1 && matches!(part_mode, PART_2NXN | PART_2NXNU | PART_2NXND);
+        macro_rules! take {
+            ($field:expr) => {
+                list.push($field);
+                if list.len() > merge_idx {
+                    return Ok(self.restrict($field, orig));
+                }
+            };
+        }
         let a1 = if excluded_a1 {
             None
         } else {
-            get(x - 1, y + h - 1)
+            get(x - 1, y + h - 1, true)
         };
         if let Some(a) = a1 {
-            list.push(a);
+            take!(a);
         }
         let b1 = if excluded_b1 {
             None
         } else {
-            get(x + w - 1, y - 1)
+            get(x + w - 1, y - 1, true)
         };
         if let Some(b) = b1
             && a1 != Some(b)
         {
-            list.push(b);
+            take!(b);
         }
-        if let Some(b) = get(x + w, y - 1)
+        if let Some(b) = get(x + w, y - 1, false)
             && b1 != Some(b)
         {
-            list.push(b);
+            take!(b);
         }
-        if let Some(a) = get(x - 1, y + h)
+        if let Some(a) = get(x - 1, y + h, false)
             && a1 != Some(a)
         {
-            list.push(a);
+            take!(a);
         }
         if list.len() != 4
-            && let Some(b) = get(x - 1, y - 1)
+            && let Some(b) = get(x - 1, y - 1, true)
             && a1 != Some(b)
             && b1 != Some(b)
         {
-            list.push(b);
+            take!(b);
         }
         let header = &self.pic.slices[self.slice].header;
         let max = usize::from(header.max_merge_cand);
         let is_b = header.slice_type == SliceType::B;
-        if merge_idx < list.len() {
-            return Ok(self.restrict(list[merge_idx], orig));
+        if let Some(field) = list.get(merge_idx) {
+            return Ok(self.restrict(field, orig));
         }
         if list.len() < max && header.temporal_mvp {
             let l0 = self.temporal(pb, 0, 0);
@@ -339,8 +355,9 @@ impl<'a> SliceDecoder<'a, '_> {
                 if list.len() >= max {
                     break;
                 }
-                let c0 = list[i0];
-                let c1 = list[i1];
+                let (Some(c0), Some(c1)) = (list.get(i0), list.get(i1)) else {
+                    break;
+                };
                 if c0.uses(0) && c1.uses(1) {
                     let p0 = slice.refs[0].get(c0.ref_idx[0] as usize).map(|r| r.uid);
                     let p1 = slice.refs[1].get(c1.ref_idx[1] as usize).map(|r| r.uid);
@@ -369,7 +386,7 @@ impl<'a> SliceDecoder<'a, '_> {
             });
             zero += 1;
         }
-        let Some(&chosen) = list.get(merge_idx) else {
+        let Some(chosen) = list.get(merge_idx) else {
             return Err(malformed("merge_idx"));
         };
         Ok(self.restrict(chosen, orig))
@@ -398,7 +415,14 @@ impl<'a> SliceDecoder<'a, '_> {
             0
         };
         let col_ref = slice.refs[col_list].get(header.collocated_ref_idx)?;
-        let col = &col_ref.pic;
+        let col = &col_ref.frame;
+        // The candidates lie in this CTB row.
+        let ctb = 1usize << self.sps.log2_ctb;
+        let need = ((pb.y >> self.sps.log2_ctb) + 1) * ctb;
+        if need > self.seen_motion.get() {
+            col.wait_motion(need);
+            self.seen_motion.set(col.motion_published());
+        }
         let log2 = self.sps.log2_ctb;
         let xbr = pb.x + pb.w;
         let ybr = pb.y + pb.h;
@@ -451,8 +475,8 @@ impl<'a> SliceDecoder<'a, '_> {
         let other = 1 - list;
         let (x, y, w, h) = (pb.x as isize, pb.y as isize, pb.w as isize, pb.h as isize);
         let cur_poc = self.pic.poc;
-        let fetch = |nx: isize, ny: isize| -> Option<MvField> {
-            if self.pb_available(pb, nx, ny) {
+        let fetch = |nx: isize, ny: isize, near: bool| -> Option<MvField> {
+            if self.pb_available(pb, nx, ny, near) {
                 Some(self.neighbour(nx, ny))
             } else {
                 None
@@ -487,16 +511,22 @@ impl<'a> SliceDecoder<'a, '_> {
             }
             None
         };
-        let a = [fetch(x - 1, y + h), fetch(x - 1, y + h - 1)];
+        let a = [fetch(x - 1, y + h, false), fetch(x - 1, y + h - 1, true)];
         let is_scaled = a[0].is_some() || a[1].is_some();
         let mut mv_a = a.iter().flatten().find_map(&same);
         if mv_a.is_none() {
             mv_a = a.iter().flatten().find_map(&scaled);
         }
+        // A found is the first candidate whatever B holds.
+        if mvp_flag == 0
+            && let Some(a) = mv_a
+        {
+            return Ok(a);
+        }
         let b = [
-            fetch(x + w, y - 1),
-            fetch(x + w - 1, y - 1),
-            fetch(x - 1, y - 1),
+            fetch(x + w, y - 1, false),
+            fetch(x + w - 1, y - 1, true),
+            fetch(x - 1, y - 1, true),
         ];
         let mut mv_b = b.iter().flatten().find_map(&same);
         if !is_scaled && mv_b.is_some() && mv_a.is_none() {
@@ -505,7 +535,7 @@ impl<'a> SliceDecoder<'a, '_> {
         if !is_scaled {
             mv_b = b.iter().flatten().find_map(&scaled);
         }
-        let mut candidates: Vec<Mv> = Vec::with_capacity(3);
+        let mut candidates: Short<Mv, 3> = Short::default();
         if let Some(a) = mv_a {
             candidates.push(a);
         }
@@ -522,7 +552,7 @@ impl<'a> SliceDecoder<'a, '_> {
         while candidates.len() < 2 {
             candidates.push(Mv::default());
         }
-        Ok(candidates[mvp_flag])
+        Ok(candidates.get(mvp_flag).unwrap_or_default())
     }
 
     /// Predict one block from its references into the picture.
@@ -534,7 +564,10 @@ impl<'a> SliceDecoder<'a, '_> {
         h: usize,
         field: MvField,
     ) -> Result<(), CodecError> {
-        let slice = &self.pic.slices[self.slice];
+        // The picture outlives this call: its references are borrowed for
+        // `'p`, without touching their reference counts.
+        let pic: &'p crate::picture::Picture = self.pic;
+        let slice = &pic.slices[self.slice];
         let header = &slice.header;
         let explicit = match header.slice_type {
             SliceType::P => self.pps.weighted_pred,
@@ -542,13 +575,13 @@ impl<'a> SliceDecoder<'a, '_> {
             SliceType::I => false,
         };
         let bit_depth = u32::from(self.sps.bit_depth);
-        let mut refs = [None, None];
+        let mut refs: [Option<&'p Frame>; 2] = [None, None];
         for (list, slot) in refs.iter_mut().enumerate() {
             if field.uses(list) {
                 let Some(r) = slice.refs[list].get(field.ref_idx[list] as usize) else {
                     return Err(malformed("reference index"));
                 };
-                *slot = Some(r.pic.clone());
+                *slot = Some(&*r.frame);
             }
         }
         let weights = if explicit {
@@ -560,6 +593,11 @@ impl<'a> SliceDecoder<'a, '_> {
                 offset: 0,
                 log2_denom: 0,
             }; 2]; 3];
+            // Weights of 1 (`1 << log2_denom`) with no offset, in every
+            // component of every list the block uses, make the default
+            // weighting's samples exactly (clause 8.5.3.3.4.3 reduces to
+            // 8.5.3.3.4.2), which its cheaper kernels compute.
+            let mut plain = true;
             for list in 0..2 {
                 if !field.uses(list) {
                     continue;
@@ -568,28 +606,61 @@ impl<'a> SliceDecoder<'a, '_> {
                     return Err(malformed("weight index"));
                 };
                 for (c, slot) in out.iter_mut().enumerate() {
+                    let log2_denom = table.log2_denom[usize::from(c > 0)];
                     slot[list] = Wp {
                         weight: entry.weight[c],
                         offset: entry.offset[c],
-                        log2_denom: table.log2_denom[usize::from(c > 0)],
+                        log2_denom,
                     };
+                    plain &= entry.weight[c] == 1 << log2_denom && entry.offset[c] == 0;
                 }
             }
-            Some(out)
+            (!plain).then_some(out)
         } else {
             None
         };
+        // Wait for the reference rows the block reads: the luma filter
+        // reaches 4 rows below, the chroma one 2 chroma rows.
+        for (list, slot) in refs.iter().enumerate() {
+            if let Some(frame) = slot {
+                let mv = field.mv[list];
+                let luma = (y + h) as isize + (isize::from(mv.y) >> 2) + 4;
+                let chroma = 2 * ((y / 2 + h / 2) as isize + (isize::from(mv.y) >> 3) + 2);
+                let need = luma.max(chroma).max(1) as usize;
+                let k = usize::from(field.ref_idx[list] as u8) & 15;
+                if need > self.seen_rows[list][k] {
+                    frame.wait_rows(need);
+                    self.seen_rows[list][k] = frame.rows_published();
+                }
+            }
+        }
+        let refs = &refs;
+        // The vector kernels pick their own instructions, for 8-bit samples
+        // and deeper ones alike.
+        self.predict_planes((x, y, w, h), field, refs, weights, bit_depth);
+        Ok(())
+    }
+
+    /// The prediction of each plane of one block from `refs`, stored.
+    /// Inline, so that deeper samples compile it for AVX2 under `wide`.
+    #[inline(always)]
+    fn predict_planes(
+        &mut self,
+        (x, y, w, h): (usize, usize, usize, usize),
+        field: MvField,
+        refs: &[Option<&Frame>; 2],
+        weights: Option<[[Wp; 2]; 3]>,
+        bit_depth: u32,
+    ) {
         for c in 0..3 {
             let (cx, cy, cw, ch) = if c == 0 {
                 (x, y, w, h)
             } else {
                 (x / 2, y / 2, w / 2, h / 2)
             };
-            let mut used = [false; 2];
-            for list in 0..2 {
-                let Some(pic) = &refs[list] else {
-                    continue;
-                };
+            let n = cw * ch;
+            let source = |list: usize| -> Option<(Plane<'_, P>, Block)> {
+                let frame = refs[list].as_ref()?;
                 let mv = field.mv[list];
                 let block = if c == 0 {
                     Block {
@@ -615,29 +686,116 @@ impl<'a> SliceDecoder<'a, '_> {
                 // The reference's own size: a damaged stream may name a
                 // picture of another size.
                 let sub = usize::from(c > 0);
+                let (samples, rows) = match P::rows(&frame.rows).and_then(|r| r.rows_from(c, 0)) {
+                    Some((s, _, end)) => (s, end),
+                    None => (&[][..], 0),
+                };
                 let plane = Plane {
-                    samples: &pic.planes[c],
-                    width: pic.width >> sub,
-                    height: pic.height >> sub,
+                    samples,
+                    width: frame.width >> sub,
+                    height: frame.height >> sub,
+                    rows,
+                };
+                Some((plane, block))
+            };
+            let sources = [source(0), source(1)];
+            // 8-bit samples: the last list goes straight to the picture,
+            // weighted there.
+            let shift1 = 14 - bit_depth;
+            let wt = |list: usize| {
+                weights.map(|w| {
+                    let (a, b) = (w[c][0], w[c][1]);
+                    let lead = if list == 1 && sources[0].is_none() {
+                        b
+                    } else {
+                        a
+                    };
+                    mc::Weights {
+                        w0: lead.weight as i16,
+                        w1: b.weight as i16,
+                        o0: lead.offset,
+                        o1: b.offset,
+                        log2wd: lead.log2_denom + shift1,
+                    }
+                })
+            };
+            match &sources {
+                [Some((p0, b0)), Some((p1, b1))] => {
+                    mc::interpolate(p0, *b0, bit_depth, &mut self.pred[0][..n], &mut self.mc);
+                    let (dst, stride) = self.out.from(c, cx, cy);
+                    let fuse = (Some(&self.pred[0][..n]), wt(0));
+                    if mc::predict_px(p1, *b1, (dst, stride), fuse, bit_depth, &mut self.mc) {
+                        continue;
+                    }
+                }
+                [Some((p, b)), None] => {
+                    let (dst, stride) = self.out.from(c, cx, cy);
+                    if mc::predict_px(p, *b, (dst, stride), (None, wt(0)), bit_depth, &mut self.mc)
+                    {
+                        continue;
+                    }
+                }
+                [None, Some((p, b))] => {
+                    let (dst, stride) = self.out.from(c, cx, cy);
+                    if mc::predict_px(p, *b, (dst, stride), (None, wt(1)), bit_depth, &mut self.mc)
+                    {
+                        continue;
+                    }
+                }
+                [None, None] => {}
+            }
+            let mut used = [false; 2];
+            for (list, source) in sources.iter().enumerate() {
+                let Some((plane, block)) = source else {
+                    continue;
                 };
                 mc::interpolate(
-                    &plane,
-                    block,
+                    plane,
+                    *block,
                     bit_depth,
-                    &mut self.pred[list][..cw * ch],
+                    &mut self.pred[list][..n],
                     &mut self.mc,
                 );
                 used[list] = true;
             }
             let (p0, p1) = self.pred.split_at(1);
-            let pred = [
-                used[0].then(|| &p0[0][..cw * ch]),
-                used[1].then(|| &p1[0][..cw * ch]),
-            ];
+            let pred = [used[0].then(|| &p0[0][..n]), used[1].then(|| &p1[0][..n])];
             let (dst, stride) = self.out.from(c, cx, cy);
             mc::store(dst, stride, cw, ch, bit_depth, pred, weights.map(|w| w[c]));
         }
-        Ok(())
+    }
+}
+
+/// A list of at most `N` values, kept on the stack.
+struct Short<T, const N: usize> {
+    items: [T; N],
+    len: usize,
+}
+
+impl<T: Copy + Default, const N: usize> Default for Short<T, N> {
+    fn default() -> Self {
+        Self {
+            items: [T::default(); N],
+            len: 0,
+        }
+    }
+}
+
+impl<T: Copy, const N: usize> Short<T, N> {
+    /// Add `value`; past `N` values it is dropped.
+    fn push(&mut self, value: T) {
+        if let Some(slot) = self.items.get_mut(self.len) {
+            *slot = value;
+            self.len += 1;
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn get(&self, i: usize) -> Option<T> {
+        self.items.get(..self.len)?.get(i).copied()
     }
 }
 

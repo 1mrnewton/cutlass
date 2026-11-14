@@ -44,53 +44,30 @@ const DST: [[i32; 4]; 4] = [
     [55, -84, 74, -29],
 ];
 
-const LEVEL_SCALE: [i64; 6] = [40, 45, 51, 57, 64, 72];
+pub const LEVEL_SCALE: [i64; 6] = [40, 45, 51, 57, 64, 72];
 
-/// Dequantize `coeffs` in place (raster order, `n`×`n`). `scale` is the
-/// scaling factor `m` of each position, or `None` for a flat 16.
-pub fn dequantize(coeffs: &mut [i32], log2: u32, qp: i32, bit_depth: u32, scale: Option<&[u8]>) {
-    let shift = bit_depth + log2 - 5;
-    let add = 1i64 << (shift - 1);
-    let factor = LEVEL_SCALE[(qp % 6) as usize] << (qp / 6);
-    match scale {
-        None => {
-            let f = factor * 16;
-            for c in coeffs.iter_mut() {
-                if *c != 0 {
-                    *c = ((i64::from(*c) * f + add) >> shift).clamp(-32768, 32767) as i32;
-                }
-            }
-        }
-        Some(m) => {
-            for (c, &m) in coeffs.iter_mut().zip(m) {
-                if *c != 0 {
-                    let value = (i64::from(*c) * i64::from(m) * factor + add) >> shift;
-                    *c = value.clamp(-32768, 32767) as i32;
-                }
-            }
-        }
-    }
-}
-
-/// Inverse transform of an `n`×`n` block in place. Coefficients beyond
-/// `max_x` and `max_y` are zero. `dst` selects the 4×4 DST.
+/// Inverse transform of the `n`×`n` scaled coefficients `coeffs` into the
+/// residual `out`. Coefficients beyond `max_x` and `max_y` are zero.
+/// `dst` selects the 4×4 DST. A block whose only coefficient is its DC is
+/// flat: then nothing is written and the value is returned.
 pub fn inverse(
-    coeffs: &mut [i32],
+    coeffs: &[i32],
+    out: &mut [i32],
     log2: u32,
     dst: bool,
     bit_depth: u32,
     max_x: usize,
     max_y: usize,
-) {
+) -> Option<i32> {
     let n = 1usize << log2;
     let shift2 = 20 - bit_depth;
     let add2 = 1i32 << (shift2 - 1);
     if !dst && max_x == 0 && max_y == 0 {
-        // A DC-only block is flat.
         let first = ((64 * coeffs[0] + 64) >> 7).clamp(-32768, 32767);
-        let value = (64 * first + add2) >> shift2;
-        coeffs[..n * n].fill(value);
-        return;
+        return Some((64 * first + add2) >> shift2);
+    }
+    if n == 4 && cutlass_simd::hevc::idct::inverse4(coeffs, out, dst, bit_depth) {
+        return None;
     }
     if dst {
         let mut tmp = [0i32; 16];
@@ -103,26 +80,52 @@ pub fn inverse(
         for y in 0..4 {
             for x in 0..4 {
                 let sum: i32 = (0..4).map(|k| DST[k][x] * tmp[y * 4 + k]).sum();
-                coeffs[y * 4 + x] = (sum + add2) >> shift2;
+                out[y * 4 + x] = (sum + add2) >> shift2;
             }
         }
-        return;
+        return None;
     }
-    let block = (coeffs, max_x + 1, max_y + 1, add2, shift2);
-    match n {
-        4 => dct::<4>(block),
-        8 => dct::<8>(block),
-        16 => dct::<16>(block),
-        _ => dct::<32>(block),
+    if n >= 8
+        && cutlass_simd::hevc::idct::inverse(coeffs, out, n, (max_x + 1, max_y + 1), bit_depth)
+    {
+        return None;
     }
+    let block = (coeffs, out, max_x + 1, max_y + 1, add2, shift2);
+    if n == 4 {
+        cutlass_simd::wide::wide(
+            #[inline(always)]
+            || dct::<4>(block),
+        );
+    } else {
+        wide_dct(n, block);
+    }
+    None
+}
+
+/// The inverse DCT of 8×8 to 32×32 blocks without the vector kernel: out
+/// of line, so the common path stays small.
+#[cold]
+#[inline(never)]
+fn wide_dct(n: usize, block: (&[i32], &mut [i32], usize, usize, i32, u32)) {
+    cutlass_simd::wide::wide(
+        #[inline(always)]
+        || match n {
+            8 => dct::<8>(block),
+            16 => dct::<16>(block),
+            _ => dct::<32>(block),
+        },
+    );
 }
 
 /// The two passes of an `N`-point inverse DCT. Each adds one basis row of
 /// the matrix per nonzero input, scaled by it: runs of `N` multiply-adds.
 /// The sums are the same integers as the matrix products of clause 8.6.4.2.
-fn dct<const N: usize>((coeffs, cols, rows, add2, shift2): (&mut [i32], usize, usize, i32, u32)) {
+#[inline(always)]
+fn dct<const N: usize>(
+    (coeffs, out, cols, rows, add2, shift2): (&[i32], &mut [i32], usize, usize, i32, u32),
+) {
     let m32 = dct32();
-    let basis = |k: usize| -> &[i32] { &m32[k * (32 / N)][..N] };
+    let basis = |k: usize| -> &[i32; N] { m32[k * (32 / N)].first_chunk::<N>().unwrap_or(&[0; N]) };
     // Vertical: input column x to intermediate row x.
     let mut columns = [[0i32; N]; N];
     for (x, column) in columns.iter_mut().enumerate().take(cols) {
@@ -130,38 +133,40 @@ fn dct<const N: usize>((coeffs, cols, rows, add2, shift2): (&mut [i32], usize, u
         for k in 0..rows {
             let c = coeffs[k * N + x];
             if c != 0 {
-                for (a, &m) in acc.iter_mut().zip(basis(k)) {
-                    *a += c * m;
+                let b = basis(k);
+                for i in 0..N {
+                    acc[i] += c * b[i];
                 }
             }
         }
-        for (t, &a) in column.iter_mut().zip(&acc) {
-            *t = ((a + 64) >> 7).clamp(-32768, 32767);
+        for i in 0..N {
+            column[i] = ((acc[i] + 64) >> 7).clamp(-32768, 32767);
         }
     }
     // Horizontal: output row y from the first `cols` intermediate values.
-    for (y, out) in coeffs.as_chunks_mut::<N>().0.iter_mut().take(N).enumerate() {
+    for (y, o) in out.as_chunks_mut::<N>().0.iter_mut().take(N).enumerate() {
         let mut acc = [0i32; N];
         for (k, column) in columns.iter().enumerate().take(cols) {
             let t = column[y];
             if t != 0 {
-                for (a, &m) in acc.iter_mut().zip(basis(k)) {
-                    *a += t * m;
+                let b = basis(k);
+                for i in 0..N {
+                    acc[i] += t * b[i];
                 }
             }
         }
-        for (dst, &a) in out.iter_mut().zip(&acc) {
-            *dst = (a + add2) >> shift2;
+        for i in 0..N {
+            o[i] = (acc[i] + add2) >> shift2;
         }
     }
 }
 
 /// Transform skip residual of a 4×4 block (equation 8-307 with `tsShift` 7).
-pub fn skip(coeffs: &mut [i32], bit_depth: u32) {
+pub fn skip(coeffs: &[i32], out: &mut [i32], bit_depth: u32) {
     let shift = 20 - bit_depth;
     let add = 1i32 << (shift - 1);
-    for c in coeffs.iter_mut().take(16) {
-        *c = ((*c << 7) + add) >> shift;
+    for (o, &c) in out.iter_mut().zip(coeffs).take(16) {
+        *o = ((c << 7) + add) >> shift;
     }
 }
 
@@ -186,13 +191,13 @@ mod tests {
     fn dc_only_and_full_paths_agree() {
         for log2 in 2..=5u32 {
             let n = 1usize << log2;
-            let mut fast = vec![0i32; n * n];
-            fast[0] = 300;
-            let mut slow = fast.clone();
-            inverse(&mut fast, log2, false, 8, 0, 0);
+            let mut coeffs = vec![0i32; n * n];
+            coeffs[0] = 300;
+            let mut slow = vec![0i32; n * n];
+            let flat = inverse(&coeffs, &mut slow, log2, false, 8, 0, 0);
             // Force the general path with a wider bound on zero coefficients.
-            inverse(&mut slow, log2, false, 8, 1, 1);
-            assert_eq!(fast, slow, "log2 {log2}");
+            assert_eq!(inverse(&coeffs, &mut slow, log2, false, 8, 1, 1), None);
+            assert!(slow.iter().all(|&v| Some(v) == flat), "log2 {log2}");
         }
     }
 }

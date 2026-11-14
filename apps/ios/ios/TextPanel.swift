@@ -16,7 +16,11 @@ struct TextPanel: View {
     @State private var words: String
     @State private var face: String
     @State private var tab: Tab = .fonts
+    @State private var query = ""
+    /// The faces Rust matched to the search.
+    @State private var found: [Font]
     @FocusState private var typing: Bool
+    @FocusState private var searching: Bool
 
     enum Tab: String, CaseIterable {
         case fonts = "Fonts"
@@ -31,6 +35,7 @@ struct TextPanel: View {
         let text = clip.flatMap { model.text(of: $0) }
         _words = State(initialValue: text?.content ?? "")
         _face = State(initialValue: text?.face ?? model.fonts.first?.name ?? "")
+        _found = State(initialValue: model.fonts)
     }
 
     var body: some View {
@@ -76,20 +81,62 @@ struct TextPanel: View {
             typed = model.typeText(into: typed, words, face: face)
         }
         .onChange(of: tab) { _, tab in
-            if tab == .styles { typing = false }
+            if tab == .styles {
+                typing = false
+                searching = false
+            }
+        }
+        .onChange(of: query) { _, query in found = model.fontsMatching(query) }
+    }
+
+    private var fonts: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            search
+            if found.isEmpty {
+                Text(model.fonts.isEmpty ? "No fonts were found on this device." : "No fonts match.")
+                    .lineLimit(1)
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.6))
+                    .frame(height: 34)
+            } else {
+                faces
+            }
         }
     }
 
-    @ViewBuilder
-    private var fonts: some View {
-        if model.fonts.isEmpty {
-            Text("No fonts were found on this device.")
-                .font(.footnote)
+    /// The search over the faces. Rust matches the words.
+    private var search: some View {
+        HStack(spacing: 8) {
+            HugeIcon("search", size: 16)
                 .foregroundStyle(.white.opacity(0.6))
-        } else {
+            TextField("Search fonts", text: $query)
+                .font(.footnote)
+                .focused($searching)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .submitLabel(.search)
+            if !query.isEmpty {
+                Button { query = "" } label: {
+                    HugeIcon("close", size: 14)
+                        .foregroundStyle(.white.opacity(0.6))
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 36)
+        .background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// The faces in a row. Only the ones on screen are built, so a long
+    /// list stays quick.
+    private var faces: some View {
+        ScrollViewReader { row in
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(model.fonts, id: \.name) { font in
+                LazyHStack(spacing: 8) {
+                    ForEach(found, id: \.name) { font in
                         Button { pick(font.name) } label: {
                             Text(font.label)
                                 .font(.footnote)
@@ -105,6 +152,17 @@ struct TextPanel: View {
                     }
                 }
             }
+            .frame(height: 34)
+            .onAppear { row.scrollTo(face, anchor: .center) }
+            .onChange(of: found) { _, found in
+                // A search shows its faces from the first; the whole list
+                // shows the chosen face again.
+                if query.isEmpty {
+                    row.scrollTo(face, anchor: .center)
+                } else if let first = found.first {
+                    row.scrollTo(first.name, anchor: .leading)
+                }
+            }
         }
     }
 
@@ -117,6 +175,7 @@ struct TextPanel: View {
     /// and leave a clip's words as they were.
     private func done() {
         typing = false
+        searching = false
         close()
     }
 }

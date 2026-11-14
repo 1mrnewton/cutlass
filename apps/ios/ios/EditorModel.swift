@@ -399,6 +399,12 @@ final class EditorModel {
         edit { try $0.setTextFont(clipId: clip, face: face) }
     }
 
+    /// The faces whose names have every word of `query`, as Rust matches
+    /// them; all of them for no words.
+    func fontsMatching(_ query: String) -> [Font] {
+        (try? editor?.fontsMatching(query: query)) ?? fonts
+    }
+
     /// Change how `clip` looks. Changes while `live` join one undo step and
     /// are saved when the last one, not live, arrives.
     func styleText(_ clip: String, _ change: TextStyleChange, live: Bool) {

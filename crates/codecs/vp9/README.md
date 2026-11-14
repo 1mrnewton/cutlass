@@ -225,8 +225,10 @@ the picture moves too far for one picture to stand for the interval.
   and against the realtime presets), and its fastest speed is 1.3–1.4×
   libvpx realtime's time; tile columns limit how well 4 threads share a
   720p frame. The decoder is 1.24× FFmpeg's time on 4 threads and 1.5× on
-  one core; about a tenth of the single-core time is copying each picture
-  out, since a `VideoFrame` owns its planes (FFmpeg hands out references).
+  one core. Its 8-bit pictures go out without a copy, as shared views of
+  the decoder's own planes at their padded stride (`Plane::samples` is a
+  `Samples`, copied only on a first write; `Plane::packed` gives the
+  visible rows); high-bit-depth pictures are still packed into new buffers.
 - The encoder always writes BT.601, studio range.
 
 ## Specifications

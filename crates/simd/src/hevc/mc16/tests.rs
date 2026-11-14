@@ -120,6 +120,7 @@ fn put_matches_the_specification() {
                                 src: plane,
                                 at,
                                 stride: sw,
+                                clamp: None,
                             };
                             let stride = w + 3;
                             let mut got = vec![7i16; (h - 1) * stride + w];
@@ -234,6 +235,7 @@ fn predict_to_samples_matches_put_then_store() {
             src: &src,
             at: 0,
             stride: sw,
+            clamp: None,
         };
         for t in [8usize, 4] {
             for w in [4usize, 8, 12, 16, 24, 32, 48, 64] {
@@ -308,6 +310,7 @@ fn explicit_weighting_matches_the_clause() {
             src: &src,
             at: 0,
             stride: sw,
+            clamp: None,
         };
         for (w, h) in [
             (4usize, 4usize),
@@ -364,6 +367,57 @@ fn explicit_weighting_matches_the_clause() {
                     }
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn rows_held_within_the_plane_match_a_padded_copy() {
+    if !crate::hevc::mc::accelerated() {
+        return;
+    }
+    let mut seed = 0xc1a4_u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let (pw, ph) = (120usize, 20usize);
+    let plane: Vec<u16> = (0..pw * ph).map(|_| (next() & 1023) as u16).collect();
+    let mut tmp = Tmp::default();
+    for (w, h) in [(8usize, 8usize), (16, 16), (32, 4), (64, 24)] {
+        for top in [-10isize, -3, 0, 5, 12] {
+            let (x0, sh) = (3usize, h + 7);
+            let taps = Taps {
+                across: Some(LUMA[1]),
+                down: Some(LUMA[2]),
+                len: 8,
+            };
+            // The window with its rows repeated past the plane's edges.
+            let sw = w + 7 + 24;
+            let padded: Vec<u16> = (0..sh)
+                .flat_map(|j| {
+                    let r = (top + j as isize).clamp(0, ph as isize - 1) as usize;
+                    plane[r * pw + x0..r * pw + x0 + sw].to_vec()
+                })
+                .collect();
+            let flat = Src {
+                src: &padded,
+                at: 0,
+                stride: sw,
+                clamp: None,
+            };
+            let held = Src {
+                src: &plane,
+                at: x0,
+                stride: pw,
+                clamp: Some((top, ph)),
+            };
+            let (mut want, mut got) = (vec![0i16; w * h], vec![0i16; w * h]);
+            assert!(put(&mut want, w, &flat, (w, h), &taps, 10, &mut tmp));
+            assert!(put(&mut got, w, &held, (w, h), &taps, 10, &mut tmp));
+            assert_eq!(got, want, "{w}x{h} top {top}");
         }
     }
 }

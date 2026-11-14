@@ -16,12 +16,16 @@ pub use super::mc::Taps;
 
 /// The reference samples of one block, as [`super::mc::Src`] for 8 bits:
 /// `src[at]` is the first sample of the window the filters read, `T / 2 -
-/// 1` rows above and columns left of the block's first sample.
+/// 1` rows above and columns left of the block's first sample. Row `j` of
+/// the window is row `j` from `at`, or, with `clamp`, the row `top + j`
+/// held within `0..rows`, from column `at`.
 #[derive(Clone, Copy, Debug)]
 pub struct Src<'a> {
     pub src: &'a [u16],
     pub at: usize,
     pub stride: usize,
+    /// `(top, rows)`.
+    pub clamp: Option<(isize, usize)>,
 }
 
 impl Src<'_> {
@@ -29,15 +33,26 @@ impl Src<'_> {
     #[inline]
     #[must_use]
     pub fn row(&self, j: usize) -> usize {
-        self.at + j * self.stride
+        match self.clamp {
+            None => self.at + j * self.stride,
+            Some((top, rows)) => {
+                let r = (top + j as isize).clamp(0, rows.max(1) as isize - 1) as usize;
+                self.at + r * self.stride
+            }
+        }
     }
 
     /// Whether every load of a `w`×`h` block stays inside `src`: the
     /// kernel reads `w + 24` samples of each of `h + taps - 1` rows.
     #[inline]
     fn holds(&self, w: usize, h: usize, taps: usize) -> bool {
-        (h + taps - 2)
-            .checked_mul(self.stride)
+        let last = match self.clamp {
+            None => h + taps - 2,
+            Some((top, rows)) => {
+                (top + (h + taps - 2) as isize).clamp(0, rows.max(1) as isize - 1) as usize
+            }
+        };
+        last.checked_mul(self.stride)
             .and_then(|r| r.checked_add(self.at))
             .and_then(|r| r.checked_add(w + 24))
             .is_some_and(|end| end <= self.src.len())

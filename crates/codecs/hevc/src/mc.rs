@@ -136,16 +136,19 @@ fn deep_t<const T: usize, P: Pixel>(
     let half = (T / 2 - 1) as isize;
     let (sw, sh) = (w + T - 1, h + T - 1);
     let Scratch { win, deep, .. } = scratch;
-    let (src, at, sstride): (&[P], usize, usize) = match spot {
-        Place::Inside(at) => (plane.samples, at, plane.width),
-        _ => {
+    // The kernel reads the reference itself, rows held within those of
+    // the plane, unless the block reaches out on the left or the right.
+    let (src, at, sstride, clamp): (&[P], usize, usize, _) = match spot {
+        Place::Inside(at) => (plane.samples, at, plane.width, None),
+        Place::Rows(at, top, rows) => (plane.samples, at, plane.width, Some((top, rows))),
+        Place::Pad => {
             pad(
                 plane,
                 (block.x - half, block.y - half),
                 sw,
                 &mut win[..sw * sh],
             );
-            (&*win, 0, sw)
+            (&*win, 0, sw, None)
         }
     };
     let Some(words) = P::words(src) else {
@@ -160,6 +163,7 @@ fn deep_t<const T: usize, P: Pixel>(
         src: words,
         at,
         stride: sstride,
+        clamp,
     };
     let out = match (other, weights) {
         (Some(o), None) => cutlass_simd::hevc::mc16::Dst::Bi(px, o),
@@ -434,6 +438,7 @@ fn filter<const T: usize, P: Pixel>(
             src: words,
             at: base,
             stride,
+            clamp: None,
         };
         if cutlass_simd::hevc::mc16::put(out, w, &s, (w, h), &taps, bit_depth, deep) {
             return;

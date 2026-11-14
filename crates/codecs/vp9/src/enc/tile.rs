@@ -2240,20 +2240,20 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             ac_q as f32 / (1 << shift) as f32,
         ];
         let round = if intra { 0.42 } else { 0.33 };
-        let (mut d_coded, mut d_all, mut bits) = (0.0f32, 0.0f32, 0.0f32);
-        let mut any = false;
-        for (i, (l, &v)) in levels[..max].iter_mut().zip(&self.fcoef[..max]).enumerate() {
-            let k = usize::from(i > 0);
-            let a = v.abs() * inv[k];
-            let q = (a + if k == 0 { 0.5 } else { round }) as i32;
-            *l = if v < 0.0 { -q } else { q };
-            any |= q != 0;
-            let e = (a - q as f32) * steps[k];
-            d_coded += e * e;
-            d_all += v * v;
-            // About 6 bits a level, and more for a larger one.
-            bits += (q.min(1) * 6 + q.min(16) - q.min(1)) as f32;
-        }
+        // The DC at its own step, rounded to nearest; then the rest.
+        use cutlass_simd::vp9::quant;
+        let dc = quant::dz(&self.fcoef[..1], &mut levels[..1], inv[0], steps[0], 0.5);
+        let ac = quant::dz(
+            &self.fcoef[1..max],
+            &mut levels[1..max],
+            inv[1],
+            steps[1],
+            round,
+        );
+        let d_coded = dc.err + ac.err;
+        let d_all = dc.energy + ac.energy;
+        let bits = (dc.bits + ac.bits) as f32;
+        let any = dc.nonzero || ac.nonzero;
         let lam = s.rd_lambda;
         (
             TxRd {

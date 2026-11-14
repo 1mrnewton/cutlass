@@ -3,6 +3,8 @@
 //!
 //! - [`mc`]: the 8-tap sub-sample filters of inter prediction for 8-bit
 //!   samples, and the average of two predictions.
+//! - [`lf`]: the loop filter, sixteen lines of an edge at a time.
+//! - [`quant`]: the encoder's dead-zone quantizer and its sums.
 //!
 //! Each entry returns `false`, having written nothing, when it does not
 //! run on this CPU or does not take its input; the codec then does the
@@ -11,6 +13,7 @@
 pub mod frame;
 pub mod lf;
 pub mod mc;
+pub mod quant;
 
 /// Whether the CPU has AVX2. Checked once.
 #[must_use]

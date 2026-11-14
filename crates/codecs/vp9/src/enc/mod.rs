@@ -59,13 +59,45 @@ pub struct FrameEncoder {
     /// The source, padded to whole superblocks by repeating its edges.
     src: [Vec<u8>; 3],
     strides: [usize; 3],
+    /// Tile column threads' buffers.
+    work: Vec<TileWork>,
+    /// Tile columns: at most this many threads (log2 of the count).
+    log2_tiles: u8,
+}
+
+/// What one tile column's encoder keeps from frame to frame.
+struct TileWork {
+    /// Its own copy of the picture; only its columns are meaningful.
+    pix: [Vec<u8>; 3],
     seeds: Vec<Mv>,
     state: State,
     scratch: Scratch<u8>,
+    data: Vec<u8>,
+}
+
+impl TileWork {
+    fn new(dims: &Dims) -> Self {
+        Self {
+            pix: std::array::from_fn(|p| vec![0u8; dims.stride[p] * dims.rows[p]]),
+            seeds: Vec::new(),
+            state: State::empty(),
+            scratch: Scratch::new(),
+            data: Vec::new(),
+        }
+    }
+}
+
+/// The first 8×8 column of tile `i` of `1 << log2` (libvpx
+/// `get_tile_offsets`).
+fn tile_edge(i: usize, mi_cols: usize, log2: u8) -> usize {
+    let sb_cols = mi_cols.div_ceil(8);
+    (((i * sb_cols) >> log2) * 8).min(mi_cols)
 }
 
 impl FrameEncoder {
-    pub fn new(width: u32, height: u32) -> Self {
+    /// An encoder of `width`×`height` pictures on up to `threads` tile
+    /// columns (rounded down to a power of two the width allows).
+    pub fn new(width: u32, height: u32, threads: usize) -> Self {
         let dims = Dims::new(width as usize, height as usize, 1, 1, 8);
         let src = std::array::from_fn(|p| vec![0u8; dims.stride[p] * dims.rows[p]]);
         Self {
@@ -74,9 +106,8 @@ impl FrameEncoder {
             dec: Decoder::new(),
             src,
             strides: dims.stride,
-            seeds: Vec::new(),
-            state: State::empty(),
-            scratch: Scratch::new(),
+            work: Vec::new(),
+            log2_tiles: threads.max(1).ilog2().min(6) as u8,
         }
     }
 
@@ -166,9 +197,12 @@ impl FrameEncoder {
         b.write(0, 3); // no dc / uv deltas
         b.write_bit(false); // no segmentation
         let (min_log2, max_log2) = header::tile_limits(geom::mi_count(self.width));
-        let _ = min_log2;
-        if max_log2 > min_log2 {
-            b.write_bit(false); // tile columns: the minimum
+        let log2 = u32::from(self.log2_tiles).clamp(min_log2, max_log2);
+        for _ in min_log2..log2 {
+            b.write_bit(true);
+        }
+        if log2 < max_log2 {
+            b.write_bit(false);
         }
         b.write_bit(false); // one tile row
         let len = u32::try_from(compressed.len()).unwrap_or(u32::MAX);
@@ -190,9 +224,6 @@ impl FrameEncoder {
         fp: FrameParams,
     ) -> Result<(Vec<u8>, prob::Counts, Vec<frame::MvRef>, Vec<u8>, Arc<Pic<u8>>), CodecError> {
         let h = &parsed.header;
-        if h.log2_tile_cols != 0 {
-            return Err(CodecError::Unsupported { what: "vp9 encode width" });
-        }
         let dims = Dims::new(h.width as usize, h.height as usize, 1, 1, 8);
         let mi_cols = dims.width.div_ceil(8);
         let mi_rows = dims.height.div_ceil(8);
@@ -241,7 +272,7 @@ impl FrameEncoder {
             intra_frame: h.is_intra(),
             part_probs: if h.is_intra() { prob::kf_partition() } else { parsed.fc.partition },
             filter_on,
-            lambda: (f64::from(sad_per_bit(ac)) * std::env::var("LX").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.0)).round() as u32,
+            lambda: sad_per_bit(ac),
             rd_lambda: rd_lambda(i32::from(h.y_dq[0][0])),
             src: Source {
                 planes: [&self.src[0], &self.src[1], &self.src[2]],
@@ -254,31 +285,104 @@ impl FrameEncoder {
             speed: fp.speed,
             refs_live,
         };
-        self.state.reset(0, mi_cols, mi_rows, sb_rows * sb_cols, false);
-        let mut w = BoolWriter::new();
+        // Each tile column on its own thread, into its own copy of the
+        // picture (intra prediction reads nothing across tile columns).
+        let ntiles = 1usize << h.log2_tile_cols;
+        let edges: Vec<usize> = (0..=ntiles).map(|i| tile_edge(i, mi_cols, h.log2_tile_cols)).collect();
+        while self.work.len() < ntiles {
+            self.work.push(TileWork::new(&dims));
+        }
+        let plane_len: [usize; 3] = std::array::from_fn(|p| dims.stride[p] * dims.rows[p]);
+        let run = |t: &mut TileWork, col0: usize, col1: usize| -> Result<(), CodecError> {
+            for (p, buf) in t.pix.iter_mut().enumerate() {
+                buf.resize(plane_len[p], 0);
+            }
+            let tsb = (col1 - col0).div_ceil(8);
+            t.state.reset(col0, col1 - col0, mi_rows, sb_rows * tsb, false);
+            let mut w = BoolWriter::new();
+            let [y, u, v] = &mut t.pix;
+            let mut views = [
+                View { data: &mut y[..], base: 0, stride: dims.stride[0] },
+                View { data: &mut u[..], base: 0, stride: dims.stride[1] },
+                View { data: &mut v[..], base: 0, stride: dims.stride[2] },
+            ];
+            let mut seeds = std::mem::take(&mut t.seeds);
+            for r in 0..sb_rows {
+                let mut rec = Recon::new(&ctx, &mut views, &mut t.scratch);
+                let mut tile = Tile::new(&shared, &mut t.state, &mut w, &mut rec, (col0, col1), seeds);
+                tile.sb_row(r * 8);
+                seeds = tile.finish();
+            }
+            t.seeds = seeds;
+            t.data = w.finish()?;
+            Ok(())
+        };
+        let work = &mut self.work[..ntiles];
+        if ntiles == 1 {
+            run(&mut work[0], 0, mi_cols)?;
+        } else {
+            let results: Vec<Result<(), CodecError>> = std::thread::scope(|sc| {
+                let handles: Vec<_> = work
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        let (c0, c1) = (edges[i], edges[i + 1]);
+                        let run = &run;
+                        sc.spawn(move || run(t, c0, c1))
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap_or(Err(CodecError::Malformed { at_bit: 0, what: "vp9 encoder thread" })))
+                    .collect()
+            });
+            for r in results {
+                r?;
+            }
+        }
+        // The tiles' columns into the picture, their state into the
+        // frame's; then the loop filter, row by row.
         let buf = Arc::clone(writer.shared());
-        let mut seeds = std::mem::take(&mut self.seeds);
+        let mut masks = vec![lpf::Mask::default(); sb_rows * sb_cols];
+        let mut mvs = vec![frame::MvRef::default(); mi_cols * mi_rows];
+        let mut counts = prob::Counts::new();
+        let mut data = Vec::new();
         {
             let mut views = writer.tails().map(View::of);
-            for r in 0..sb_rows {
-                {
-                    let mut rec = Recon::new(&ctx, &mut views, &mut self.scratch);
-                    let mut t = Tile::new(&shared, &mut self.state, &mut w, &mut rec, (0, mi_cols), seeds);
-                    t.sb_row(r * 8);
-                    seeds = t.finish();
+            for (i, t) in work.iter().enumerate() {
+                let (c0, c1) = (edges[i], edges[i + 1]);
+                for (p, v) in views.iter_mut().enumerate() {
+                    let ss = usize::from(p > 0);
+                    let (x0, x1) = ((c0 * 8) >> ss, ((c1 * 8) >> ss).min(dims.stride[p]));
+                    let stride = v.stride;
+                    for row in 0..dims.rows[p] {
+                        v.data[row * stride + x0..row * stride + x1].copy_from_slice(&t.pix[p][row * stride + x0..row * stride + x1]);
+                    }
                 }
-                if filter_on && r > 0 {
-                    lf::sb_row(&mut views, &self.state.masks, &self.state.grid, &levels, &geo, r - 1);
+                let st = &t.state;
+                let w = c1 - c0;
+                let tsb = w.div_ceil(8);
+                for r in 0..sb_rows {
+                    masks[r * sb_cols + c0 / 8..r * sb_cols + c0 / 8 + tsb].copy_from_slice(&st.masks[r * tsb..r * tsb + tsb]);
                 }
+                for r in 0..mi_rows {
+                    mvs[r * mi_cols + c0..r * mi_cols + c1].copy_from_slice(&st.mvs[r * w..r * w + w]);
+                }
+                counts.add(&st.counts);
+                let d = &t.data;
+                if i + 1 < ntiles {
+                    data.extend_from_slice(&(d.len() as u32).to_be_bytes());
+                }
+                data.extend_from_slice(d);
             }
             if filter_on {
-                lf::sb_row(&mut views, &self.state.masks, &self.state.grid, &levels, &geo, sb_rows - 1);
+                for r in 0..sb_rows {
+                    lf::sb_row(&mut views, &masks, &[], &levels, &geo, r);
+                }
             }
         }
         writer.publish(usize::MAX);
         drop(writer);
-        self.seeds = seeds;
-        let data = w.finish()?;
         let pic = Arc::new(Pic {
             buf,
             dims,
@@ -289,9 +393,7 @@ impl FrameEncoder {
             out: Mutex::new(None),
             made: AtomicBool::new(false),
         });
-        let counts = std::mem::replace(&mut self.state.counts, prob::Counts::new());
-        let mvs = std::mem::take(&mut self.state.mvs);
-        let segmap = std::mem::take(&mut self.state.segmap);
+        let segmap = vec![0u8; mi_cols * mi_rows];
         Ok((data, counts, mvs, segmap, pic))
     }
 }

@@ -570,7 +570,7 @@ fn open_rejects_the_sizes_and_formats_outside_profile_0() {
     assert!(Vp9Encoder::with_quantizer(12, 8, 0).is_ok());
     assert!(Vp9Encoder::with_quantizer(13, 7, 0).is_ok());
     assert!(matches!(
-        Vp9Encoder::with_quantizer(4097, 8, 0),
+        Vp9Encoder::with_quantizer(65537, 8, 0),
         Err(CodecError::Limit { .. })
     ));
     let rgba = CodecParams::with_format(CodecId::Vp9, 16, 16, PixelFormat::Rgba8);

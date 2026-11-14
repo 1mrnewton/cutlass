@@ -1,5 +1,5 @@
 //! Encodes raw 4:2:0 video to an IVF file:
-//! `vp9enc <in.yuv> <width> <height> <out.ivf> [q=N | rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N]`.
+//! `vp9enc <in.yuv> <width> <height> <out.ivf> [q=N | rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N]`.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -11,7 +11,7 @@ use cutlass_vp9::{Vp9Encoder, Vp9Options};
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 5 {
-        return Err("usage: vp9enc <in.yuv> <width> <height> <out.ivf> [q=N|rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N]".into());
+        return Err("usage: vp9enc <in.yuv> <width> <height> <out.ivf> [q=N|rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N]".into());
     }
     let w: usize = args[2].parse().map_err(|_| "width")?;
     let h: usize = args[3].parse().map_err(|_| "height")?;
@@ -28,6 +28,7 @@ fn main() -> Result<(), String> {
             "frames" => frames = n as usize,
             "fps" => fps = n,
             "keyint" => opts.keyint = n,
+            "threads" => opts.threads = n as usize,
             _ => return Err(format!("unknown option {k}")),
         }
     }

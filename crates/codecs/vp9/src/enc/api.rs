@@ -28,6 +28,17 @@ pub struct Vp9Options {
     /// The fewest and most quantizer indices the rate control may use.
     pub min_q: u8,
     pub max_q: u8,
+    /// Threads (tile columns) to code with; 0: one per core.
+    pub threads: usize,
+}
+
+impl Vp9Options {
+    fn threads(&self) -> usize {
+        match self.threads {
+            0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
+            n => n,
+        }
+    }
 }
 
 impl Default for Vp9Options {
@@ -39,6 +50,7 @@ impl Default for Vp9Options {
             speed: 5,
             min_q: 4,
             max_q: 236,
+            threads: 0,
         }
     }
 }
@@ -67,7 +79,7 @@ impl Vp9Encoder {
             width,
             height,
             opts,
-            enc: FrameEncoder::new(width, height),
+            enc: FrameEncoder::new(width, height, opts.threads()),
             since_key: 0,
             force_key: true,
             rc: Rate::new(opts),
@@ -165,7 +177,7 @@ impl VideoEncoder for Vp9Encoder {
     }
 
     fn reset(&mut self) {
-        self.enc = FrameEncoder::new(self.width, self.height);
+        self.enc = FrameEncoder::new(self.width, self.height, self.opts.threads());
         self.force_key = true;
         self.since_key = 0;
         self.rc = Rate::new(self.opts);
@@ -259,8 +271,7 @@ fn check_size(width: u32, height: u32) -> Result<(), CodecError> {
     if width == 0 || height == 0 {
         return Err(CodecError::InvalidApi { what: "empty picture" });
     }
-    // Wider pictures need more than one tile column.
-    if width > 4096 || height > 16384 {
+    if width > 65536 || height > 65536 {
         return Err(CodecError::Limit { what: "vp9 frame edge" });
     }
     Ok(())

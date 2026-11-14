@@ -30,14 +30,18 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
 }
 
 fn round_trip(w: usize, h: usize, frames: usize, qindex: u8) {
-    let mut enc = FrameEncoder::new(w as u32, h as u32);
+    round_trip_threads(w, h, frames, qindex, 4, 5);
+}
+
+fn round_trip_threads(w: usize, h: usize, frames: usize, qindex: u8, threads: usize, speed: u8) {
+    let mut enc = FrameEncoder::new(w as u32, h as u32, threads);
     let mut dec = Decoder::new();
     let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
     let mut bytes = 0;
     for t in 0..frames {
         let src = source(w, h, t);
         enc.load([(&src[0], w), (&src[1], cw), (&src[2], cw)]);
-        let coded = enc.encode(FrameParams { key: t == 0, golden: t % 3 == 2, qindex, speed: 5 }).expect("encode");
+        let coded = enc.encode(FrameParams { key: t == 0, golden: t % 3 == 2, qindex, speed }).expect("encode");
         bytes += coded.data.len();
         let pic = dec.decode(&coded.data).expect("decode").expect("shown");
         // The decoder's picture is the encoder's reconstruction.
@@ -83,4 +87,13 @@ fn transform_gains() {
     for l in 0..4 {
         eprintln!("gain {l}: {}", super::tx::gain(l));
     }
+}
+
+#[test]
+fn round_trips_tile_columns() {
+    // Four tile columns, on four threads, at both search paths.
+    round_trip_threads(1100, 40, 3, 90, 4, 5);
+    round_trip_threads(1100, 40, 3, 90, 4, 9);
+    // Past 4096 samples two columns are the least, on one thread too.
+    round_trip_threads(4200, 16, 2, 120, 1, 9);
 }

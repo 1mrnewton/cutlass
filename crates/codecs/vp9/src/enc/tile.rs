@@ -346,6 +346,10 @@ const SUBBLOCK: [[u8; 2]; 4] = [[1, 2], [1, 3], [3, 2], [3, 3]];
 /// Speeds at and below which inter frames try blocks under 8×8.
 const SUB8_SPEED: u8 = 1;
 
+/// From this speed the sub-sample refinement tries, of the four diagonals,
+/// only the one between the better of up and down and of left and right.
+const PRUNED_SUBPEL_SPEED: u8 = 6;
+
 /// Up to this speed the fast path also tries its best inter candidate
 /// with the next smaller transform ([`Tile::fast_block`]).
 const FAST_TX_SPEED: u8 = 7;
@@ -1693,36 +1697,42 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             } else {
                 &[4, 2]
             };
+            let exact = s.speed <= 5;
             for &step in steps {
                 let center = mv;
-                for (dr, dc) in [
-                    (-step, 0),
-                    (step, 0),
-                    (0, -step),
-                    (0, step),
-                    (-step, -step),
-                    (-step, step),
-                    (step, -step),
-                    (step, step),
-                ] {
+                let try_at = |t: &mut Self, dr: i16, dc: i16, best: &mut (u64, Mv)| -> u64 {
                     let m = Mv {
                         row: center.row + dr,
                         col: center.col + dc,
                     };
-                    let exact = s.speed <= 5;
                     let v = if exact {
-                        self.sad_sub_exact(x, y, w, h, m)
+                        t.sad_sub_exact(x, y, w, h, m)
                     } else {
-                        self.sad_sub(x, y, w, h, m)
+                        t.sad_sub(x, y, w, h, m)
                     };
-                    let Some(v) = v else {
-                        continue;
-                    };
-                    if v < best_sad {
-                        best_sad = v;
-                        mv = m;
+                    let v = v.unwrap_or(u64::MAX);
+                    if v < best.0 {
+                        *best = (v, m);
+                    }
+                    v
+                };
+                let mut best = (best_sad, mv);
+                let up = try_at(self, -step, 0, &mut best);
+                let down = try_at(self, step, 0, &mut best);
+                let left = try_at(self, 0, -step, &mut best);
+                let right = try_at(self, 0, step, &mut best);
+                if s.speed >= PRUNED_SUBPEL_SPEED {
+                    // libvpx's pruned tree: of the diagonals, only the one
+                    // between the better of each pair.
+                    let dr = if up <= down { -step } else { step };
+                    let dc = if left <= right { -step } else { step };
+                    try_at(self, dr, dc, &mut best);
+                } else {
+                    for (dr, dc) in [(-step, -step), (-step, step), (step, -step), (step, step)] {
+                        try_at(self, dr, dc, &mut best);
                     }
                 }
+                (best_sad, mv) = best;
             }
         }
         (mv, best_sad)

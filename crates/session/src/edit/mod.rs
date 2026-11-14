@@ -829,6 +829,10 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             name::set_project_name(draft, name);
             Ok(())
         }
+        Request::SetCover { cover } => {
+            name::set_cover(draft, cover.clone());
+            Ok(())
+        }
         Request::SetFreeLayer { on } => {
             layer::set_free_layer(draft, *on);
             Ok(())

@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use cutlass_model::{
-    AnimType, CommonKeyframeGroup, Crop, FreezeInfo, MaterialAudio, MaterialId, MaterialTransition,
-    MaterialVideo, Micros, Segment, SegmentId, ShapeKind, ShapePoint, SpeedPoint, TimeRange,
-    TrackId, TrackType, WordColumns,
+    AnimType, CommonKeyframeGroup, Cover, Crop, FreezeInfo, MaterialAudio, MaterialId,
+    MaterialTransition, MaterialVideo, Micros, Segment, SegmentId, ShapeKind, ShapePoint,
+    SpeedPoint, TimeRange, TrackId, TrackType, WordColumns,
 };
 
 /// A media record stored in the library. A segment places it later.
@@ -828,6 +828,9 @@ pub enum Request {
     SetColorSpace { space: i32 },
     /// Store the project name. Surrounding whitespace is dropped.
     SetProjectName { name: String },
+    /// Store the project's cover, or take it away with `None`. The cover's
+    /// picture file is the caller's to write.
+    SetCover { cover: Option<Cover> },
     /// Stack picture clips by their own layer (on) or by their tracks
     /// (off, which puts every clip back on its track's layer).
     SetFreeLayer { on: bool },

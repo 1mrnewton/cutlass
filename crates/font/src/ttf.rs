@@ -423,12 +423,14 @@ fn point_at(contours: &[Vec<Point>], index: u16) -> Option<Point> {
 }
 
 fn transform(point: Point, component: &Component, dx: f32, dy: f32) -> Point {
-    let x = component.xx * point.x + component.xy * point.y;
-    let y = component.yx * point.x + component.yy * point.y;
+    // The four numbers of a part's matrix are stored a column at a time:
+    // what x gives to x and to y, then what y gives to x and to y.
+    let x = component.xx * point.x + component.yx * point.y;
+    let y = component.xy * point.x + component.yy * point.y;
     let (x, y) = if component.scaled_offset {
         (
-            x + component.xx * dx + component.xy * dy,
-            y + component.yx * dx + component.yy * dy,
+            x + component.xx * dx + component.yx * dy,
+            y + component.xy * dx + component.yy * dy,
         )
     } else {
         (x + dx, y + dy)
@@ -799,7 +801,7 @@ fn midpoint(left: Point, right: Point) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
-    use crate::fixture::{boxed, font};
+    use crate::fixture::{be, boxed, font, signed};
     use crate::{FontError, read};
 
     /// A face whose glyph 1 is one contour of `points` points, each one
@@ -895,5 +897,90 @@ mod tests {
         let face = read(&bytes).expect("face");
         assert_eq!(face.outline(1), Err(FontError::BadTable));
         assert!(face.outline(0).is_ok());
+    }
+
+    /// A face whose glyph 2 is glyph 1, a box from 50 to 450 across and 0
+    /// to 700 up, through the matrix `matrix` and moved 1000 right and
+    /// 2000 up.
+    pub(crate) fn turned(matrix: [i16; 4]) -> Vec<u8> {
+        let boxes = font(&[boxed(500), boxed(500)], &[('A', 1)], &[]);
+        // The two boxes' records, as the builder writes them.
+        let mut record = be(&[1, 50, 0, 450, 700, 3, 0]);
+        record.extend([1, 1, 1, 1]);
+        record.extend(be(&[50, 400, 0, signed(-400), 0, 0, 700, 0]));
+        assert!(boxes.windows(record.len()).any(|window| window == record));
+        let mut glyf = record.clone();
+        glyf.extend(&record);
+        let mut loca = Vec::new();
+        for at in [0, record.len(), record.len() * 2] {
+            loca.extend(u32::try_from(at).expect("loca").to_be_bytes());
+        }
+        // One part, with its place in words and a matrix of four numbers.
+        glyf.extend(be(&[signed(-1), 0, 0, 0, 0, 0x0083, 1, 1000, 2000]));
+        glyf.extend(be(&matrix.map(signed)));
+        loca.extend(u32::try_from(glyf.len()).expect("loca").to_be_bytes());
+        let third = crate::fixture::Glyph {
+            advance: 500,
+            outline: Some([0, 0, 0, 0]),
+        };
+        font(
+            &[boxed(500), boxed(500), third],
+            &[('A', 1), ('B', 2)],
+            &[(b"glyf", glyf), (b"loca", loca)],
+        )
+    }
+
+    /// The corners of a glyph's outline: left, bottom, right, top.
+    fn corners(bytes: &[u8], glyph: u16) -> [f32; 4] {
+        let face = read(bytes).expect("face");
+        let outline = face.outline(glyph).expect("outline");
+        let mut corners = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        let mut add = |x: f32, y: f32| {
+            corners = [
+                corners[0].min(x),
+                corners[1].min(y),
+                corners[2].max(x),
+                corners[3].max(y),
+            ];
+        };
+        for contour in &outline.contours {
+            add(contour.x, contour.y);
+            for segment in &contour.segments {
+                if let crate::Segment::Line { x, y } = *segment {
+                    add(x, y);
+                }
+            }
+        }
+        corners
+    }
+
+    #[test]
+    fn a_part_is_turned_by_its_matrix_a_column_at_a_time() {
+        // Each box is what `hb-vector` draws for the face.
+        // A quarter turn: x goes to y, and y to x backwards.
+        let one = f2dot14_one();
+        assert_eq!(
+            corners(&turned([0, one, -one, 0]), 2),
+            [300.0, 2050.0, 1000.0, 2450.0]
+        );
+        // The other way round.
+        assert_eq!(
+            corners(&turned([0, -one, one, 0]), 2),
+            [1000.0, 1550.0, 1700.0, 1950.0]
+        );
+        // Sheared: each unit up moves half a unit right.
+        assert_eq!(
+            corners(&turned([one, 0, one / 2, one]), 2),
+            [1050.0, 2000.0, 1800.0, 2700.0]
+        );
+        // No turn at all.
+        assert_eq!(
+            corners(&turned([one, 0, 0, one]), 2),
+            [1050.0, 2000.0, 1450.0, 2700.0]
+        );
+    }
+
+    fn f2dot14_one() -> i16 {
+        16_384
     }
 }

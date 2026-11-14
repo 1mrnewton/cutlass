@@ -23,6 +23,13 @@ pub struct FaceEntry {
     pub index: Option<u32>,
     /// The face's full name from its `name` table, when it has a readable one.
     pub full_name: Option<String>,
+    /// The family the face belongs to: a regular face and its bold and
+    /// italic share one.
+    pub family: Option<String>,
+    /// The face is the family's bold, or bold italic.
+    pub bold: bool,
+    /// The face is the family's italic, or bold italic.
+    pub italic: bool,
 }
 
 /// The faces in a font file. `read_at(offset, len)` returns exactly `len`
@@ -38,10 +45,7 @@ pub fn list_faces(
     let header = read(0, 12)?;
     if &header[..4] != b"ttcf" {
         sfnt_version(&header)?;
-        return Ok(vec![FaceEntry {
-            index: None,
-            full_name: full_name_at(&mut read, 0, &header)?,
-        }]);
+        return Ok(vec![entry_at(&mut read, 0, &header, None)?]);
     }
     let count = u32_at(&header, 8)?;
     if count == 0 {
@@ -56,10 +60,7 @@ pub fn list_faces(
         let offset = u64::from(u32_at(&offsets, index as usize * 4)?);
         let header = read(offset, 12)?;
         sfnt_version(&header)?;
-        faces.push(FaceEntry {
-            index: Some(index),
-            full_name: full_name_at(&mut read, offset, &header)?,
-        });
+        faces.push(entry_at(&mut read, offset, &header, Some(index))?);
     }
     Ok(faces)
 }
@@ -111,13 +112,16 @@ fn sfnt_version(header: &[u8]) -> Result<(), FontError> {
     }
 }
 
-/// The full name of the face whose directory starts at `offset`. A missing
-/// or unreadable `name` table gives `None`; a broken directory is an error.
-fn full_name_at(
+/// The names and style of the face whose directory starts at `offset`. A
+/// missing or unreadable `name` table gives no names, and a face that
+/// does not say is neither bold nor italic; a broken directory is an
+/// error.
+fn entry_at(
     read: &mut impl FnMut(u64, usize) -> Result<Vec<u8>, FontError>,
     offset: u64,
     header: &[u8],
-) -> Result<Option<String>, FontError> {
+    index: Option<u32>,
+) -> Result<FaceEntry, FontError> {
     let count = usize::from(u16_at(header, 4)?);
     if count == 0 {
         return Err(FontError::EmptyTable);
@@ -126,27 +130,48 @@ fn full_name_at(
         return Err(FontError::BadTable);
     }
     let records = read(offset + 12, count * 16)?;
+    let mut entry = FaceEntry {
+        index,
+        full_name: None,
+        family: None,
+        bold: false,
+        italic: false,
+    };
+    // The style a face says it is in `OS/2` wins over the older `head`.
+    let mut said = false;
     for slot in 0..count {
         let at = slot * 16;
-        if &records[at..at + 4] != b"name" {
-            continue;
-        }
-        let start = u32_at(&records, at + 8)?;
+        let start = u64::from(u32_at(&records, at + 8)?);
         let length = u32_at(&records, at + 12)?;
-        if length > MAX_NAME_TABLE {
-            return Ok(None);
+        match &records[at..at + 4] {
+            b"name" if length <= MAX_NAME_TABLE => {
+                if let Ok(table) = read(start, length as usize) {
+                    entry.full_name = name(&table, 4);
+                    entry.family = name(&table, 1);
+                }
+            }
+            b"OS/2" if length >= 64 => {
+                if let Ok(selection) = read(start + 62, 2).and_then(|bytes| u16_at(&bytes, 0)) {
+                    entry.italic = selection & 0x01 != 0;
+                    entry.bold = selection & 0x20 != 0;
+                    said = true;
+                }
+            }
+            b"head" if length >= 46 && !said => {
+                if let Ok(style) = read(start + 44, 2).and_then(|bytes| u16_at(&bytes, 0)) {
+                    entry.bold = style & 0x01 != 0;
+                    entry.italic = style & 0x02 != 0;
+                }
+            }
+            _ => {}
         }
-        let Ok(table) = read(u64::from(start), length as usize) else {
-            return Ok(None);
-        };
-        return Ok(full_name(&table));
     }
-    Ok(None)
+    Ok(entry)
 }
 
-/// Name id 4 from a `name` table: English Windows or Unicode first, then any
-/// Windows or Unicode entry, then a plain-ASCII Macintosh one.
-pub(crate) fn full_name(table: &[u8]) -> Option<String> {
+/// One name from a `name` table: English Windows or Unicode first, then
+/// any Windows or Unicode entry, then a plain-ASCII Macintosh one.
+fn name(table: &[u8], id: u16) -> Option<String> {
     let count = usize::from(u16_at(table, 2).ok()?);
     let storage = usize::from(u16_at(table, 4).ok()?);
     let mut best: Option<(u8, String)> = None;
@@ -155,7 +180,7 @@ pub(crate) fn full_name(table: &[u8]) -> Option<String> {
         let platform = u16_at(record, 0).ok()?;
         let encoding = u16_at(record, 2).ok()?;
         let language = u16_at(record, 4).ok()?;
-        if u16_at(record, 6).ok()? != 4 {
+        if u16_at(record, 6).ok()? != id {
             continue;
         }
         let length = usize::from(u16_at(record, 8).ok()?);
@@ -232,6 +257,69 @@ mod tests {
                 .as_deref()
                 .is_some_and(|name| !name.is_empty())
         );
+    }
+
+    /// A `name` table of Windows English names.
+    fn names(entries: &[(u16, &str)]) -> Vec<u8> {
+        let count = u16::try_from(entries.len()).expect("count");
+        let mut table = crate::fixture::be(&[0, count, 6 + count * 12]);
+        let mut strings = Vec::new();
+        for (id, text) in entries {
+            let encoded: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
+            table.extend(crate::fixture::be(&[
+                3,
+                1,
+                0x0409,
+                *id,
+                u16::try_from(encoded.len()).expect("length"),
+                u16::try_from(strings.len()).expect("offset"),
+            ]));
+            strings.extend(encoded);
+        }
+        table.extend(strings);
+        table
+    }
+
+    #[test]
+    fn a_face_names_its_family_and_says_when_it_is_bold_or_italic() {
+        let glyphs = [crate::fixture::boxed(500); 3];
+        let build = |selection: Option<u16>, mac_style: u16| {
+            let mut extra = vec![(b"name", names(&[(1, "Fam"), (4, "Fam Bold Italic")]))];
+            if let Some(selection) = selection {
+                let mut os2 = vec![0_u8; 78];
+                os2[62..64].copy_from_slice(&selection.to_be_bytes());
+                extra.push((b"OS/2", os2));
+            }
+            let mut bytes = crate::fixture::font(&glyphs, &[('A', 2)], &extra);
+            // The style in `head` is at byte 44 of that table.
+            let head = (0..usize::from(u16::from_be_bytes([bytes[4], bytes[5]])))
+                .map(|slot| 12 + slot * 16)
+                .find(|at| &bytes[*at..*at + 4] == b"head")
+                .expect("head");
+            let start = u32::from_be_bytes([
+                bytes[head + 8],
+                bytes[head + 9],
+                bytes[head + 10],
+                bytes[head + 11],
+            ]) as usize;
+            bytes[start + 44..start + 46].copy_from_slice(&mac_style.to_be_bytes());
+            bytes
+        };
+        let face = |bytes: &[u8]| list_faces(from(bytes)).expect("faces").remove(0);
+        let both = face(&build(Some(0x21), 0));
+        assert_eq!(both.family.as_deref(), Some("Fam"));
+        assert_eq!(both.full_name.as_deref(), Some("Fam Bold Italic"));
+        assert!(both.bold && both.italic);
+        let bold = face(&build(Some(0x20), 0));
+        assert!(bold.bold && !bold.italic);
+        // `OS/2` is believed over `head`; without it `head` says.
+        let plain = face(&build(Some(0x40), 3));
+        assert!(!plain.bold && !plain.italic);
+        let old = face(&build(None, 2));
+        assert!(!old.bold && old.italic);
+        // The sample face has no family name and no style.
+        let sample = face(SAMPLE_TTF);
+        assert!(!sample.bold && !sample.italic);
     }
 
     #[test]
@@ -313,13 +401,13 @@ mod tests {
         table.extend_from_slice(&[0, 3, 0, 1, 4, 9, 0, 4, 0, 4, 0, 3]);
         table.extend_from_slice(b"Mac");
         table.extend_from_slice(&[0, b'W', 0, b'n']);
-        assert_eq!(full_name(&table).as_deref(), Some("Wn"));
+        assert_eq!(name(&table, 4).as_deref(), Some("Wn"));
         // Only the Macintosh one: it is used.
         table[2..4].copy_from_slice(&1_u16.to_be_bytes());
-        assert_eq!(full_name(&table).as_deref(), Some("Mac"));
+        assert_eq!(name(&table, 4).as_deref(), Some("Mac"));
         // A record pointing past the table is skipped, not read.
         table[16..18].copy_from_slice(&900_u16.to_be_bytes());
-        assert_eq!(full_name(&table), None);
-        assert_eq!(full_name(&[0, 0]), None);
+        assert_eq!(name(&table, 4), None);
+        assert_eq!(name(&[0, 0], 4), None);
     }
 }

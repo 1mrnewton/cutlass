@@ -43,6 +43,14 @@ impl Commands {
         self.session.set_linkage(linkage);
     }
 
+    /// Take `session` in place of the open one: an edit made on a copy,
+    /// as the assistant's tools make, with its undo steps.
+    pub fn adopt(&mut self, session: Session) {
+        let linkage = self.session.linkage();
+        self.session = session;
+        self.session.set_linkage(linkage);
+    }
+
     /// The session these calls forward to.
     #[must_use]
     pub fn session(&self) -> &Session {

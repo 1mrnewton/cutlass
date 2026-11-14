@@ -11,6 +11,7 @@ public-release = ["cutlass-logger/public-release"]
 
 [dependencies]
 cutlass-session = { path = "../session", version = "0.1.0" }
+cutlass-agent = { path = "../agent", version = "0.1.0", features = ["script"] }
 cutlass-store = { path = "../store", version = "0.1.0" }
 cutlass-storage = { path = "../storage", version = "0.1.0" }
 cutlass-playback = { path = "../playback", version = "0.1.0" }

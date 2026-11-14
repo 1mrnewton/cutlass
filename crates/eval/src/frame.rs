@@ -24,6 +24,14 @@ use crate::text::{TextLayer, text_layers};
 pub trait Fonts {
     /// The font file named by `path`, or `None` when this table does not have it.
     fn face(&self, path: &str) -> Option<&[u8]>;
+
+    /// A face that draws `character`, for a title whose own face cannot:
+    /// with `emoji`, one that draws it in color. `None` when this table
+    /// has no such face; the character is then drawn as missing.
+    fn fallback(&self, character: char, emoji: bool) -> Option<&[u8]> {
+        let _ = (character, emoji);
+        None
+    }
 }
 
 /// No font bytes. Text segments are not drawn.

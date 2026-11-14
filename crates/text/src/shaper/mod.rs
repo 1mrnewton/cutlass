@@ -233,6 +233,12 @@ fn has(font: &Font<'_>, character: char) -> bool {
     matches!(font.glyph_id(character), Ok(Some(_)))
 }
 
+/// Whether a face that lacks `character` draws it with its plain space,
+/// at a width of its own.
+pub(crate) fn has_space_for(font: &Font<'_>, character: char) -> bool {
+    Space::of(character).is_some() && has(font, ' ')
+}
+
 /// A glyph for `character` with what Unicode says of it.
 fn described(character: char, cluster: usize) -> Glyph {
     let props = props(character);

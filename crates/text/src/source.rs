@@ -18,6 +18,7 @@ use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::TextError;
 use crate::atlas::{Atlas, GlyphKind};
+use crate::faces::{FaceSource, NoFaces, gather};
 use crate::layout::layout_faces;
 use crate::mesh::{GlyphRecord, TextMesh, build_faces};
 use crate::richtext::{Run, run_at};
@@ -227,20 +228,21 @@ impl TextSource {
         glow: Option<&BloomParams>,
         segment: &Segment,
     ) -> Result<Self, TextError> {
-        Self::open_with_faces(bytes, face, material, glow, segment, &|_| None)
+        Self::open_with_faces(bytes, face, material, glow, segment, &NoFaces)
     }
 
-    /// [`Self::open_with_glow`], with a rich title's ranges set in the
-    /// faces they name. `faces` gives the bytes of one face for a range's
-    /// font path; a range whose face it does not give, or that does not
-    /// read, keeps the title's own.
+    /// [`Self::open_with_glow`], with the title's other faces. `faces`
+    /// gives the bytes of the face a rich title's range names, and of a
+    /// fallback face for a character the title's own cannot draw. A range
+    /// whose face it does not give, or that does not read, keeps the
+    /// title's own, and a character with no fallback is drawn as missing.
     pub fn open_with_faces<'f>(
-        bytes: &[u8],
+        bytes: &'f [u8],
         face: Option<u32>,
         material: &MaterialText,
         glow: Option<&BloomParams>,
         segment: &Segment,
-        faces: &dyn Fn(&str) -> Option<&'f [u8]>,
+        faces: &'f dyn FaceSource,
     ) -> Result<Self, TextError> {
         if segment.target.duration.0 > 0
             && segment
@@ -256,27 +258,10 @@ impl TextSource {
             None => cutlass_font::read(bytes).map_err(TextError::Font)?,
             Some(index) => cutlass_font::read_collection(bytes, index).map_err(TextError::Font)?,
         };
-        let runs = crate::richtext::read(material)?.runs;
-        let mut fonts = vec![font];
-        let mut named: Vec<(&str, usize)> = Vec::new();
-        for path in runs.iter().filter_map(|run| run.font.as_deref()) {
-            if named.iter().any(|(seen, _)| *seen == path) {
-                continue;
-            }
-            let Some(other) = faces(path).and_then(|bytes| cutlass_font::read(bytes).ok()) else {
-                named.push((path, 0));
-                continue;
-            };
-            named.push((path, fonts.len()));
-            fonts.push(other);
-        }
-        let pick = |source: usize| {
-            run_at(&runs, source)
-                .and_then(|run| run.font.as_deref())
-                .and_then(|path| named.iter().find(|(seen, _)| *seen == path))
-                .map_or(0, |(_, index)| *index)
-        };
-        Self::from_fonts(&fonts, &pick, &runs, material, glow, segment)
+        let words = crate::richtext::read(material)?;
+        let gathered = gather(font, &words.text, &words.runs, faces);
+        let pick = |source: usize| gathered.pick(source);
+        Self::from_fonts(&gathered.fonts, &pick, &words.runs, material, glow, segment)
     }
 
     fn from_fonts(
@@ -1620,7 +1605,17 @@ mod tests {
     fn a_range_sets_its_letters_in_the_face_it_names() {
         const OTHER: &[u8] = include_bytes!("../../font/fixtures/sample.otf");
         let text = rich(r#"{"range":[1,2],"font":{"path":"/fonts/Other.otf"}}"#);
-        let faces = |path: &str| (path == "/fonts/Other.otf").then_some(OTHER);
+        struct Other;
+        impl crate::FaceSource for Other {
+            fn named(&self, path: &str) -> Option<&[u8]> {
+                (path == "/fonts/Other.otf").then_some(OTHER)
+            }
+
+            fn fallback(&self, _character: char, _emoji: bool) -> Option<&[u8]> {
+                None
+            }
+        }
+        let faces = Other;
         let source =
             TextSource::open_with_faces(TTF, None, &text, None, &segment(), &faces).expect("open");
         let faces_of: Vec<usize> = source.records().iter().map(|record| record.face).collect();
@@ -1631,9 +1626,9 @@ mod tests {
         assert!(has(&drawn, [255, 255, 255, 255]));
 
         // A face the shell does not have keeps the title's.
-        let none = |_: &str| None;
         let source =
-            TextSource::open_with_faces(TTF, None, &text, None, &segment(), &none).expect("open");
+            TextSource::open_with_faces(TTF, None, &text, None, &segment(), &crate::NoFaces)
+                .expect("open");
         assert!(source.records().iter().all(|record| record.face == 0));
         let (plain_w, plain_h, _) = picture(&material("AA"));
         assert_eq!(source.size(), (plain_w, plain_h));
@@ -1820,6 +1815,44 @@ mod tests {
         assert_ne!(up, rest);
         source.set_poses(Vec::new());
         assert_eq!(cpu(source.sample(Micros(1_000))), rest);
+    }
+
+    #[test]
+    fn a_character_the_face_lacks_is_drawn_in_a_fallback_face() {
+        const SHAPING: &[u8] = include_bytes!("../../font/fixtures/shaping.ttf");
+        struct Shaping;
+        impl crate::FaceSource for Shaping {
+            fn named(&self, _path: &str) -> Option<&[u8]> {
+                None
+            }
+
+            fn fallback(&self, _character: char, _emoji: bool) -> Option<&[u8]> {
+                Some(SHAPING)
+            }
+        }
+        // The title's face has A; f comes from the fallback.
+        let text = material("AfA");
+        let source =
+            TextSource::open_with_faces(TTF, None, &text, None, &segment(), &Shaping).unwrap();
+        let faces: Vec<usize> = source.records().iter().map(|record| record.face).collect();
+        assert_eq!(faces, [0, 1, 0]);
+        let drawn = &source.records()[1];
+        assert!(!drawn.missing && drawn.width > 0.0);
+        // Its advance is the fallback face's own, 300 of 1000 at size 64:
+        // the A after it starts that far on. (The ink of f starts 50 in
+        // from its origin and the ink of A 100 in.)
+        let step = source.records()[2].x - source.records()[1].x;
+        assert!(
+            (step - (300.0 + 100.0 - 50.0) * 64.0 / 1_000.0).abs() < 0.01,
+            "{step}"
+        );
+        // Without the fallback it is the missing glyph, which draws nothing.
+        let alone = TextSource::open(TTF, None, &text, &segment()).unwrap();
+        assert!(alone.records()[1].missing);
+        assert_ne!(
+            cpu(source.sample(Micros(1_000))),
+            cpu(alone.sample(Micros(1_000)))
+        );
     }
 
     #[test]

@@ -21,6 +21,7 @@ use cutlass_model::MaterialText;
 
 use crate::TextError;
 use crate::bidi::visual_order;
+use crate::faces::{FaceSource, gather};
 use crate::linebreak::{Boundary, boundaries};
 use crate::shape::{Shaped, ShapedGlyph, shape_faces};
 
@@ -101,6 +102,20 @@ impl Layout {
 pub fn layout_text(bytes: &[u8], material: &MaterialText) -> Result<Layout, TextError> {
     let font = cutlass_font::read(bytes).map_err(TextError::Font)?;
     layout(&font, material)
+}
+
+/// Read `bytes` as the title's own face and lay out `material`, with the
+/// other faces `faces` supplies: those a rich title's ranges name, and a
+/// fallback for a character its own face cannot draw.
+pub fn layout_with<'f>(
+    bytes: &'f [u8],
+    material: &MaterialText,
+    faces: &'f dyn FaceSource,
+) -> Result<Layout, TextError> {
+    let font = cutlass_font::read(bytes).map_err(TextError::Font)?;
+    let words = crate::richtext::read(material)?;
+    let gathered = gather(font, &words.text, &words.runs, faces);
+    layout_faces(&gathered.fonts, material, &|source| gathered.pick(source))
 }
 
 /// Lay out `material` with a face that has already been read.

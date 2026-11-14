@@ -19,7 +19,7 @@ use cutlass_model::{
     SegmentId, TrackAttribute, UniformScale, WordColumns,
 };
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
-use cutlass_text::{GlyphLook, TextSource, text_fill};
+use cutlass_text::{FaceSource, GlyphLook, TextSource, text_fill};
 
 use crate::Fonts;
 use crate::gpu::{GpuLayer, GpuSource};
@@ -236,9 +236,7 @@ fn title_picture(
         let mut source = logged(
             "title",
             segment,
-            TextSource::open_with_faces(faces.face, None, &larger, glow, segment, &|path| {
-                faces.named(path)
-            }),
+            TextSource::open_with_faces(faces.face, None, &larger, glow, segment, &faces),
         )?;
         if !steps.is_empty() {
             let poses = source
@@ -351,9 +349,7 @@ fn title_size(
     let source = logged(
         "title",
         segment,
-        TextSource::open_with_faces(face, None, material, glow.as_ref(), segment, &|path| {
-            faces.named(path)
-        }),
+        TextSource::open_with_faces(face, None, material, glow.as_ref(), segment, &faces),
     )?;
     Some(source.size())
 }
@@ -406,6 +402,16 @@ impl<'a> Faces<'a> {
     }
 }
 
+impl FaceSource for Faces<'_> {
+    fn named(&self, path: &str) -> Option<&[u8]> {
+        Faces::named(self, path)
+    }
+
+    fn fallback(&self, character: char, emoji: bool) -> Option<&[u8]> {
+        self.fonts.fallback(character, emoji)
+    }
+}
+
 /// The glow a title's clip points at, when it reads as one, keyed as it
 /// is at `time`.
 fn glow(draft: &Draft, segment: &Segment, time: Micros) -> Option<BloomParams> {
@@ -448,6 +454,7 @@ fn caption_picture(
     let frame = sample_caption(&CaptionQuery {
         material,
         font: faces.face,
+        faces: &faces,
         timeline: time,
         placed_at: segment.target.start,
         limits,
@@ -477,9 +484,7 @@ fn caption_picture(
         let mut source = logged(
             "caption",
             segment,
-            TextSource::open_with_faces(faces.face, None, &page, glow, segment, &|path| {
-                faces.named(path)
-            }),
+            TextSource::open_with_faces(faces.face, None, &page, glow, segment, &faces),
         )?;
         let each: Vec<GlyphLook> = source
             .records()
@@ -696,6 +701,43 @@ mod tests {
 
     fn ink(rgba: &[u8]) -> bool {
         rgba.chunks(4).any(|pixel| pixel == [255, 255, 255, 255])
+    }
+
+    #[test]
+    fn a_letter_the_face_lacks_is_drawn_from_a_fallback_face() {
+        const OTHER: &[u8] = include_bytes!("../../font/fixtures/shaping.ttf");
+        struct WithFallback;
+        impl Fonts for WithFallback {
+            fn face(&self, path: &str) -> Option<&[u8]> {
+                (path == "sample.ttf").then_some(FONT)
+            }
+
+            fn fallback(&self, _character: char, _emoji: bool) -> Option<&[u8]> {
+                Some(OTHER)
+            }
+        }
+        let draw = |fonts: &dyn Fonts| {
+            // x is not in the title's face.
+            let draft = text_segment("x", false);
+            let mut device = SoftwareDevice::new();
+            let media = ReaderFactory::new();
+            let mut clips = OpenClips::new();
+            frame(
+                &Snapshot::with_fonts(&draft, fonts),
+                Micros(0),
+                &mut device,
+                &media,
+                &mut clips,
+                0,
+            )
+            .expect("frame")
+            .rgba
+        };
+        assert!(!ink(&draw(&OneFont)), "the missing glyph draws nothing");
+        assert!(
+            ink(&draw(&WithFallback)),
+            "the fallback face draws the letter"
+        );
     }
 
     #[test]

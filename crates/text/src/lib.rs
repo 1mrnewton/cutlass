@@ -9,6 +9,7 @@
 
 mod atlas;
 mod bidi;
+mod faces;
 mod layout;
 mod linebreak;
 mod mesh;
@@ -22,7 +23,8 @@ mod style;
 mod unicode;
 
 pub use atlas::{Atlas, AtlasRoute, GlyphImage, paint_bytes, route};
-pub use layout::{Alignment, Layout, Line, PlacedGlyph, layout, layout_text};
+pub use faces::{FaceSource, MAX_FALLBACK_FACES, NoFaces};
+pub use layout::{Alignment, Layout, Line, PlacedGlyph, layout, layout_text, layout_with};
 pub use mesh::{GlyphRecord, TextMesh, build, build_text};
 pub use paint::{DrawnGlyph, paint_glyphs};
 pub use shape::{MAX_CHARS, Paragraph, Shaped, ShapedGlyph, shape, shape_text};

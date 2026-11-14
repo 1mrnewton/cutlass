@@ -8,11 +8,17 @@
 //!
 //! A face of a collection is named `File.ttc#n`, face `n` of that file, and
 //! labelled with its full name. Frames get it copied out as its own font.
+//!
+//! A character a title's own face cannot draw is looked for in the
+//! table's fallback faces: the faces each system keeps for other scripts,
+//! symbols and emoji, best first. What is found is remembered, so a
+//! character is looked for once.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use cutlass_eval::Fonts;
 
@@ -29,6 +35,82 @@ pub const PREFERRED_FACES: &[&str] = &[
     "HelveticaNeue.ttc#0",
     "Arial.ttf",
     "SFNS.ttf",
+];
+/// The most faces looked in for a character a title's face cannot draw.
+pub const MAX_FALLBACKS: usize = 64;
+/// The most characters whose fallback face is remembered.
+const MAX_REMEMBERED: usize = 4_096;
+/// The files a scan takes fallback faces from, best first: emoji, then
+/// the faces macOS, Windows, Linux and Android keep for scripts their
+/// usual text face lacks, a face with OpenType shaping ahead of one
+/// without. Names are matched without regard to case; of a collection the
+/// first face is taken.
+pub const FALLBACK_FACES: &[&str] = &[
+    "Apple Color Emoji.ttc",
+    "seguiemj.ttf",
+    "NotoColorEmoji.ttf",
+    "NotoColorEmoji-Regular.ttf",
+    // Arabic and Hebrew.
+    "SFArabic.ttf",
+    "Arial.ttf",
+    "Times New Roman.ttf",
+    "segoeui.ttf",
+    "tahoma.ttf",
+    "NotoNaskhArabic-Regular.ttf",
+    "NotoSansArabic-Regular.ttf",
+    "NotoSansHebrew-Regular.ttf",
+    "SFHebrew.ttf",
+    "ArialHB.ttc",
+    // The scripts of India.
+    "Kohinoor.ttc",
+    "KohinoorBangla.ttc",
+    "KohinoorGujarati.ttc",
+    "KohinoorTelugu.ttc",
+    "Tamil Sangam MN.ttc",
+    "NotoSansKannada.ttc",
+    "NotoSansOriya.ttc",
+    "Gurmukhi MN.ttc",
+    "Nirmala.ttc",
+    "Nirmala.ttf",
+    "NotoSansDevanagari-Regular.ttf",
+    "NotoSansBengali-Regular.ttf",
+    "NotoSansGujarati-Regular.ttf",
+    "NotoSansGurmukhi-Regular.ttf",
+    "NotoSansTamil-Regular.ttf",
+    "NotoSansTelugu-Regular.ttf",
+    "NotoSansKannada-Regular.ttf",
+    "NotoSansMalayalam-Regular.ttf",
+    "NotoSansOriya-Regular.ttf",
+    // Chinese, Japanese and Korean.
+    "PingFang.ttc",
+    "Hiragino Sans GB.ttc",
+    "AppleSDGothicNeo.ttc",
+    "msyh.ttc",
+    "YuGothR.ttc",
+    "meiryo.ttc",
+    "malgun.ttf",
+    "msjh.ttc",
+    "simsun.ttc",
+    "NotoSansCJK-Regular.ttc",
+    "NotoSansCJKsc-Regular.otf",
+    "NotoSansCJKjp-Regular.otf",
+    "NotoSansCJKkr-Regular.otf",
+    "DroidSansFallback.ttf",
+    // Thai and the rest.
+    "Thonburi.ttc",
+    "LeelawUI.ttf",
+    "NotoSansThai-Regular.ttf",
+    "Arial Unicode.ttf",
+    "NotoSans-Regular.ttf",
+    "Roboto-Regular.ttf",
+    "DejaVuSans.ttf",
+    "LiberationSans-Regular.ttf",
+    "Helvetica.ttc",
+    "Apple Symbols.ttf",
+    "seguisym.ttf",
+    "NotoSansSymbols-Regular.ttf",
+    "NotoSansSymbols2-Regular.ttf",
+    "Menlo.ttc",
 ];
 /// How many folders deep a scan looks below each folder it is given.
 const MAX_DEPTH: usize = 3;
@@ -58,6 +140,11 @@ struct Found {
 #[derive(Default)]
 pub struct FaceTable {
     faces: Vec<Face>,
+    /// The faces looked in for a character a title's face lacks, by their
+    /// place in `faces`, best first.
+    fallbacks: Vec<usize>,
+    /// The fallback face found for a character, or that there is none.
+    found: Mutex<HashMap<(char, bool), Option<usize>>>,
 }
 
 impl FaceTable {
@@ -78,6 +165,7 @@ impl FaceTable {
                 table.push(name.clone(), face_label(&name), Bytes::Read(bytes));
             }
         }
+        table.fallbacks = (0..table.faces.len().min(MAX_FALLBACKS)).collect();
         table
     }
 
@@ -91,6 +179,7 @@ impl FaceTable {
                 table.push(name.clone(), face_label(&name), Bytes::Read(bytes));
             }
         }
+        table.fallbacks = (0..table.faces.len().min(MAX_FALLBACKS)).collect();
         table
     }
 
@@ -132,7 +221,70 @@ impl FaceTable {
             let bytes = Bytes::Later(face.path, face.index, OnceLock::new());
             table.push(face.name, face.label, bytes);
         }
+        table.rank_fallbacks();
         table
+    }
+
+    /// Choose a scanned table's fallback faces: the ones [`FALLBACK_FACES`]
+    /// names, in its order, then any other Noto face, which between them
+    /// cover most scripts on a system that has them.
+    fn rank_fallbacks(&mut self) {
+        // The file a face is from, when it is the file's only or first face.
+        let file = |name: &str| match name.split_once('#') {
+            None => Some(name.to_lowercase()),
+            Some((file, "0")) => Some(file.to_lowercase()),
+            Some(_) => None,
+        };
+        let files: Vec<Option<String>> = self.faces.iter().map(|face| file(&face.name)).collect();
+        let mut ranked: Vec<usize> = Vec::new();
+        for wanted in FALLBACK_FACES {
+            let wanted = wanted.to_lowercase();
+            if let Some(at) = files
+                .iter()
+                .position(|file| file.as_deref() == Some(&wanted))
+            {
+                ranked.push(at);
+            }
+        }
+        for (at, file) in files.iter().enumerate() {
+            let noto = file
+                .as_deref()
+                .is_some_and(|file| file.starts_with("noto") && file.contains("regular"));
+            if noto && !ranked.contains(&at) {
+                ranked.push(at);
+            }
+        }
+        ranked.truncate(MAX_FALLBACKS);
+        self.fallbacks = ranked;
+    }
+
+    /// The names of the fallback faces, best first.
+    #[must_use]
+    pub fn fallback_names(&self) -> Vec<String> {
+        self.fallbacks
+            .iter()
+            .filter_map(|at| self.faces.get(*at))
+            .map(|face| face.name.clone())
+            .collect()
+    }
+
+    /// The bytes of the face at `at`, read on the first ask.
+    fn bytes_at(&self, at: usize) -> Option<&[u8]> {
+        match &self.faces.get(at)?.bytes {
+            Bytes::Read(bytes) => Some(bytes),
+            Bytes::Later(path, index, cell) => cell
+                .get_or_init(|| {
+                    let bytes = read_capped(path)?;
+                    match index {
+                        None => {
+                            cutlass_font::read(&bytes).ok()?;
+                            Some(bytes)
+                        }
+                        Some(index) => cutlass_font::single_face(&bytes, *index).ok(),
+                    }
+                })
+                .as_deref(),
+        }
     }
 
     /// The first face, which new text starts in. An empty table has an
@@ -167,22 +319,36 @@ impl FaceTable {
 
 impl Fonts for FaceTable {
     fn face(&self, path: &str) -> Option<&[u8]> {
-        let face = self.faces.iter().find(|face| face.name == path)?;
-        match &face.bytes {
-            Bytes::Read(bytes) => Some(bytes),
-            Bytes::Later(path, index, cell) => cell
-                .get_or_init(|| {
-                    let bytes = read_capped(path)?;
-                    match index {
-                        None => {
-                            cutlass_font::read(&bytes).ok()?;
-                            Some(bytes)
-                        }
-                        Some(index) => cutlass_font::single_face(&bytes, *index).ok(),
-                    }
-                })
-                .as_deref(),
+        let at = self.faces.iter().position(|face| face.name == path)?;
+        self.bytes_at(at)
+    }
+
+    fn fallback(&self, character: char, emoji: bool) -> Option<&[u8]> {
+        let key = (character, emoji);
+        if let Ok(found) = self.found.lock()
+            && let Some(known) = found.get(&key)
+        {
+            return known.and_then(|at| self.bytes_at(at));
         }
+        // Emoji faces first for an emoji, and last for anything else.
+        let is_emoji = |at: &usize| {
+            self.faces
+                .get(*at)
+                .is_some_and(|face| face.name.to_lowercase().contains("emoji"))
+        };
+        let (first, second): (Vec<usize>, Vec<usize>) =
+            self.fallbacks.iter().partition(|at| is_emoji(at) == emoji);
+        let hit = first.into_iter().chain(second).find(|at| {
+            self.bytes_at(*at)
+                .and_then(|bytes| cutlass_font::read(bytes).ok())
+                .is_some_and(|font| matches!(font.glyph_id(character), Ok(Some(_))))
+        });
+        if let Ok(mut found) = self.found.lock()
+            && found.len() < MAX_REMEMBERED
+        {
+            found.insert(key, hit);
+        }
+        hit.and_then(|at| self.bytes_at(at))
     }
 }
 
@@ -316,6 +482,56 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    const SHAPING: &[u8] = include_bytes!("../../font/fixtures/shaping.ttf");
+
+    #[test]
+    fn a_character_is_found_in_the_first_fallback_face_that_draws_it() {
+        // The sample face has A and B; the shaping face has f and more.
+        let table = FaceTable::from_pairs(vec![
+            ("Sample.ttf".to_owned(), SAMPLE.to_vec()),
+            ("Shaping.ttf".to_owned(), SHAPING.to_vec()),
+        ]);
+        assert_eq!(table.fallback_names(), ["Sample.ttf", "Shaping.ttf"]);
+        assert_eq!(table.fallback('A', false), table.face("Sample.ttf"));
+        assert_eq!(table.fallback('f', false), table.face("Shaping.ttf"));
+        assert!(table.fallback('Q', false).is_none());
+        // Asked again, the answer is the one remembered.
+        assert_eq!(table.fallback('f', false), table.face("Shaping.ttf"));
+        assert!(table.fallback('Q', false).is_none());
+        assert!(FaceTable::default().fallback('A', false).is_none());
+    }
+
+    #[test]
+    fn a_scan_ranks_the_fallback_faces_it_knows_and_emoji_come_first_for_emoji() {
+        let folder = Folder::new("fallback");
+        for name in [
+            "Zeta.ttf",
+            "NotoSansFoo-Regular.ttf",
+            "NotoSansFoo-Bold.ttf",
+            "arial.ttf",
+            "NotoColorEmoji.ttf",
+        ] {
+            std::fs::write(folder.0.join(name), SHAPING).expect("face");
+        }
+        std::fs::write(folder.0.join("Kohinoor.ttc"), SAMPLE_TTC).expect("collection");
+        let table = FaceTable::scan(&[&folder.0]);
+        // The listed faces in the list's order, a collection's first face
+        // only, then other regular Noto faces; the rest are not fallbacks.
+        assert_eq!(
+            table.fallback_names(),
+            [
+                "NotoColorEmoji.ttf",
+                "arial.ttf",
+                "Kohinoor.ttc#0",
+                "NotoSansFoo-Regular.ttf"
+            ]
+        );
+        // Every face here draws f: a letter comes from the first face
+        // that is not an emoji face, an emoji from the emoji face.
+        assert_eq!(table.fallback('f', false), table.face("arial.ttf"));
+        assert_eq!(table.fallback('f', true), table.face("NotoColorEmoji.ttf"));
     }
 
     #[test]

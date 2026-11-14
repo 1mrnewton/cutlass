@@ -17,7 +17,7 @@ use std::error::Error;
 use std::fmt;
 
 use cutlass_model::{MaterialText, Micros, WordColumns};
-use cutlass_text::TextError;
+use cutlass_text::{FaceSource, TextError};
 
 pub use animate::{
     Channel, GlyphBatch, Key, PlacedSample, RangeStyles, Rgba, SampledStyle, ShakeAxis,
@@ -113,6 +113,9 @@ pub struct CaptionQuery<'a> {
     pub material: &'a MaterialText,
     /// Font bytes for [`map_letters`].
     pub font: &'a [u8],
+    /// The other faces the caption is set in: those its ranges name and a
+    /// fallback for a character `font` cannot draw.
+    pub faces: &'a dyn FaceSource,
     /// Timeline position, in microseconds.
     pub timeline: Micros,
     /// Segment target start, in microseconds.
@@ -140,7 +143,14 @@ pub fn sample_caption(query: &CaptionQuery<'_>) -> Result<CaptionFrame, CaptionE
     let paged = query.limits.words_per_line > 0 || query.limits.lines_per_page > 0;
     let (letters, shown) = match page_at(&pages, clock.millis).filter(|_| paged) {
         Some(page) => {
-            let letters = map_page(query.font, query.material, &spans, &pages, page)?;
+            let letters = map_page(
+                query.font,
+                query.faces,
+                query.material,
+                &spans,
+                &pages,
+                page,
+            )?;
             let shown: Vec<WordSpan<'_>> = spans
                 .iter()
                 .filter(|word| {
@@ -154,7 +164,7 @@ pub fn sample_caption(query: &CaptionQuery<'_>) -> Result<CaptionFrame, CaptionE
             (letters, shown)
         }
         None => (
-            map_letters(query.font, query.material, &spans)?,
+            map_letters(query.font, query.faces, query.material, &spans)?,
             spans.clone(),
         ),
     };
@@ -230,6 +240,7 @@ mod tests {
         CaptionQuery {
             material,
             font: SAMPLE_FONT,
+            faces: &cutlass_text::NoFaces,
             timeline: Micros(timeline),
             placed_at: Micros(0),
             limits: PageLimits {

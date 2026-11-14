@@ -172,6 +172,16 @@ impl Props {
         self.bits(45, 4)
     }
 
+    /// The character is drawn as an emoji unless a selector says not.
+    pub(crate) fn emoji_presentation(self) -> bool {
+        self.bits(57, 1) == 1
+    }
+
+    /// The character can be drawn as an emoji.
+    pub(crate) fn emoji(self) -> bool {
+        self.bits(58, 1) == 1
+    }
+
     /// One half of a flag.
     pub(crate) fn regional_indicator(self) -> bool {
         self.bits(60, 1) == 1
@@ -504,6 +514,9 @@ mod tests {
             (34, 4)
         );
         assert!(props('\u{1F1EC}').regional_indicator() && !props('G').regional_indicator());
+        assert!(props('\u{1F600}').emoji_presentation() && props('\u{1F600}').emoji());
+        assert!(props('\u{2764}').emoji() && !props('\u{2764}').emoji_presentation());
+        assert!(props('1').emoji() && !props('A').emoji());
         assert!(props('\u{200D}').default_ignorable());
         assert!(props('\u{202E}').default_ignorable());
         assert!(props('\u{FE0F}').default_ignorable());

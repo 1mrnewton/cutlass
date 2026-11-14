@@ -235,6 +235,24 @@ impl Taps {
         _mm_packus_epi16(r, r)
     }
 
+    /// Eight outputs across of two rows at once, `s[o..]` and
+    /// `s[o + ss..]`: one in each lane, each in its lane's low 8 bytes.
+    ///
+    /// # Safety
+    /// `o + ss + 16 <= s.len()`.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    #[allow(unsafe_code)]
+    unsafe fn h8x2(&self, s: &[u8], o: usize, ss: usize) -> (__m128i, __m128i) {
+        // SAFETY: as the caller proves.
+        let v = unsafe {
+            _mm256_inserti128_si256::<1>(_mm256_castsi128_si256(l128(s, o)), l128(s, o + ss))
+        };
+        let r = self.across(v);
+        let p = _mm256_packus_epi16(r, r);
+        (_mm256_castsi256_si128(p), _mm256_extracti128_si256::<1>(p))
+    }
+
     /// Sixteen outputs across from `s[o..]`.
     ///
     /// # Safety
@@ -271,60 +289,225 @@ impl Taps {
         };
         _mm256_packus_epi16(self.across(a), self.across(b))
     }
+}
 
-    /// Eight outputs down (the low 8 bytes) from rows `s[o..]`, `ss`
-    /// apart.
-    ///
-    /// # Safety
-    /// `o + 7 * ss + 8 <= s.len()`.
-    #[inline]
-    #[target_feature(enable = "avx2")]
-    #[allow(unsafe_code)]
-    unsafe fn v8(&self, s: &[u8], o: usize, ss: usize) -> __m128i {
-        // SAFETY: as the caller proves.
-        let x: [__m128i; 8] = core::array::from_fn(|k| unsafe { l64(s, o + k * ss) });
-        let r = Self::sum1(core::array::from_fn(|k| {
-            _mm_maddubs_epi16(_mm_unpacklo_epi8(x[2 * k], x[2 * k + 1]), self.pairs1[k])
-        }));
-        _mm_packus_epi16(r, r)
+/// The filter down over `h` rows of one column strip, rows of `s` from
+/// `o` (3 above the first output) `ss` apart, into `dst` from `d` (rows
+/// `ds` apart), averaged with `avg`. Output row `r` takes the interleaved
+/// row pairs `r`, `r + 2`, `r + 4` and `r + 6`; row `r + 2` shares three
+/// of them, so the even rows go first and then the odd ones, each taking
+/// one new pair: two loads and two interleaves a row.
+///
+/// # Safety
+/// Rows `0..h + 7` of `s` from `o` hold 32 samples (16, 8 for the narrow
+/// forms); `dst` holds `h` rows of the strip from `d`.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+#[target_feature(enable = "avx2")]
+#[allow(unsafe_code)]
+unsafe fn down32(
+    t: &Taps,
+    s: &[u8],
+    o: usize,
+    ss: usize,
+    h: usize,
+    dst: &mut [u8],
+    d: usize,
+    ds: usize,
+    avg: bool,
+) {
+    // SAFETY: rows `k < h + 7` and output rows `r < h`, as the caller
+    // proves.
+    unsafe {
+        let x = |k: usize| l256(s, o + k * ss);
+        for parity in 0..2 {
+            if parity >= h {
+                break;
+            }
+            let pr =
+                |a: __m256i, b: __m256i| (_mm256_unpacklo_epi8(a, b), _mm256_unpackhi_epi8(a, b));
+            let mut p0 = pr(x(parity), x(parity + 1));
+            let mut p1 = pr(x(parity + 2), x(parity + 3));
+            let mut p2 = pr(x(parity + 4), x(parity + 5));
+            let mut xa = x(parity + 6);
+            let mut r = parity;
+            while r < h {
+                let xb = x(r + 7);
+                let p3 = pr(xa, xb);
+                let lo = Taps::sum([
+                    _mm256_maddubs_epi16(p0.0, t.pairs[0]),
+                    _mm256_maddubs_epi16(p1.0, t.pairs[1]),
+                    _mm256_maddubs_epi16(p2.0, t.pairs[2]),
+                    _mm256_maddubs_epi16(p3.0, t.pairs[3]),
+                ]);
+                let hi = Taps::sum([
+                    _mm256_maddubs_epi16(p0.1, t.pairs[0]),
+                    _mm256_maddubs_epi16(p1.1, t.pairs[1]),
+                    _mm256_maddubs_epi16(p2.1, t.pairs[2]),
+                    _mm256_maddubs_epi16(p3.1, t.pairs[3]),
+                ]);
+                let v = _mm256_packus_epi16(lo, hi);
+                let at = d + r * ds;
+                let v = if avg {
+                    _mm256_avg_epu8(v, l256(dst, at))
+                } else {
+                    v
+                };
+                s256(dst, at, v);
+                r += 2;
+                if r < h {
+                    // The pair after `p3` starts two rows on.
+                    xa = x(r + 6);
+                    p0 = p1;
+                    p1 = p2;
+                    p2 = p3;
+                }
+            }
+        }
     }
+}
 
-    /// Sixteen outputs down.
-    ///
-    /// # Safety
-    /// `o + 7 * ss + 16 <= s.len()`.
-    #[inline]
-    #[target_feature(enable = "avx2")]
-    #[allow(unsafe_code)]
-    unsafe fn v16(&self, s: &[u8], o: usize, ss: usize) -> __m128i {
-        // SAFETY: as the caller proves.
-        let x: [__m128i; 8] = core::array::from_fn(|k| unsafe { l128(s, o + k * ss) });
-        let lo = Self::sum1(core::array::from_fn(|k| {
-            _mm_maddubs_epi16(_mm_unpacklo_epi8(x[2 * k], x[2 * k + 1]), self.pairs1[k])
-        }));
-        let hi = Self::sum1(core::array::from_fn(|k| {
-            _mm_maddubs_epi16(_mm_unpackhi_epi8(x[2 * k], x[2 * k + 1]), self.pairs1[k])
-        }));
-        _mm_packus_epi16(lo, hi)
+/// [`down32`] for a strip of 16.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+#[target_feature(enable = "avx2")]
+#[allow(unsafe_code)]
+unsafe fn down16(
+    t: &Taps,
+    s: &[u8],
+    o: usize,
+    ss: usize,
+    h: usize,
+    dst: &mut [u8],
+    d: usize,
+    ds: usize,
+    avg: bool,
+) {
+    // SAFETY: as for `down32`, 16 samples a row.
+    unsafe {
+        let x = |k: usize| l128(s, o + k * ss);
+        for parity in 0..2 {
+            if parity >= h {
+                break;
+            }
+            let pr = |a: __m128i, b: __m128i| (_mm_unpacklo_epi8(a, b), _mm_unpackhi_epi8(a, b));
+            let mut p0 = pr(x(parity), x(parity + 1));
+            let mut p1 = pr(x(parity + 2), x(parity + 3));
+            let mut p2 = pr(x(parity + 4), x(parity + 5));
+            let mut xa = x(parity + 6);
+            let mut r = parity;
+            while r < h {
+                let xb = x(r + 7);
+                let p3 = pr(xa, xb);
+                let lo = Taps::sum1([
+                    _mm_maddubs_epi16(p0.0, t.pairs1[0]),
+                    _mm_maddubs_epi16(p1.0, t.pairs1[1]),
+                    _mm_maddubs_epi16(p2.0, t.pairs1[2]),
+                    _mm_maddubs_epi16(p3.0, t.pairs1[3]),
+                ]);
+                let hi = Taps::sum1([
+                    _mm_maddubs_epi16(p0.1, t.pairs1[0]),
+                    _mm_maddubs_epi16(p1.1, t.pairs1[1]),
+                    _mm_maddubs_epi16(p2.1, t.pairs1[2]),
+                    _mm_maddubs_epi16(p3.1, t.pairs1[3]),
+                ]);
+                let v = _mm_packus_epi16(lo, hi);
+                let at = d + r * ds;
+                let v = if avg {
+                    _mm_avg_epu8(v, l128(dst, at))
+                } else {
+                    v
+                };
+                s128(dst, at, v);
+                r += 2;
+                if r < h {
+                    xa = x(r + 6);
+                    p0 = p1;
+                    p1 = p2;
+                    p2 = p3;
+                }
+            }
+        }
     }
+}
 
-    /// Thirty-two outputs down.
-    ///
-    /// # Safety
-    /// `o + 7 * ss + 32 <= s.len()`.
-    #[inline]
-    #[target_feature(enable = "avx2")]
-    #[allow(unsafe_code)]
-    unsafe fn v32(&self, s: &[u8], o: usize, ss: usize) -> __m256i {
-        // SAFETY: as the caller proves.
-        let x: [__m256i; 8] = core::array::from_fn(|k| unsafe { l256(s, o + k * ss) });
-        let lo = Self::sum(core::array::from_fn(|k| {
-            _mm256_maddubs_epi16(_mm256_unpacklo_epi8(x[2 * k], x[2 * k + 1]), self.pairs[k])
-        }));
-        let hi = Self::sum(core::array::from_fn(|k| {
-            _mm256_maddubs_epi16(_mm256_unpackhi_epi8(x[2 * k], x[2 * k + 1]), self.pairs[k])
-        }));
-        _mm256_packus_epi16(lo, hi)
+/// The filter down for a strip of 8 or 4 (`W`), each output row from
+/// its eight rows afresh: with so few rows to a block, keeping pairs
+/// across rows costs more than it saves.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+#[target_feature(enable = "avx2")]
+#[allow(unsafe_code)]
+unsafe fn down8<const W: usize>(
+    t: &Taps,
+    s: &[u8],
+    o: usize,
+    ss: usize,
+    h: usize,
+    dst: &mut [u8],
+    d: usize,
+    ds: usize,
+    avg: bool,
+) {
+    // SAFETY: as for `down32`, 8 samples a row read and `W` written.
+    unsafe {
+        for r in 0..h {
+            let x: [__m128i; 8] = core::array::from_fn(|k| l64(s, o + (r + k) * ss));
+            let lo = Taps::sum1(core::array::from_fn(|k| {
+                _mm_maddubs_epi16(_mm_unpacklo_epi8(x[2 * k], x[2 * k + 1]), t.pairs1[k])
+            }));
+            let v = _mm_packus_epi16(lo, lo);
+            let at = d + r * ds;
+            if W == 4 {
+                let v = if avg {
+                    _mm_avg_epu8(v, l32(dst, at))
+                } else {
+                    v
+                };
+                s32(dst, at, v);
+            } else {
+                let v = if avg {
+                    _mm_avg_epu8(v, l64(dst, at))
+                } else {
+                    v
+                };
+                s64(dst, at, v);
+            }
+        }
+    }
+}
+
+/// The filter down for a block of width `W`, from rows of `s` at `o`.
+///
+/// # Safety
+/// As for [`down32`], across the block's width.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+#[target_feature(enable = "avx2")]
+#[allow(unsafe_code)]
+unsafe fn down<const W: usize>(
+    t: &Taps,
+    s: &[u8],
+    o: usize,
+    ss: usize,
+    h: usize,
+    dst: &mut [u8],
+    ds: usize,
+    avg: bool,
+) {
+    // SAFETY: each strip lies inside the block's width.
+    unsafe {
+        match W {
+            4 | 8 => down8::<W>(t, s, o, ss, h, dst, 0, ds, avg),
+            16 => down16(t, s, o, ss, h, dst, 0, ds, avg),
+            _ => {
+                let mut c = 0;
+                while c < W {
+                    down32(t, s, o + c, ss, h, dst, c, ds, avg);
+                    c += 32;
+                }
+            }
+        }
     }
 }
 
@@ -437,6 +620,43 @@ fn sized<const W: usize>(b: &mut Block<'_>) {
                     );
                 }
             }
+            (Some(fx), None) if W <= 8 => {
+                let t = Taps::new(&fx);
+                let mut r = 0;
+                while r + 1 < h {
+                    let (a, b) = t.h8x2(src, at + r * ss - 3, ss);
+                    let (da, db) = (r * ds, (r + 1) * ds);
+                    if W == 4 {
+                        let (a, b) = if avg {
+                            (_mm_avg_epu8(a, l32(dst, da)), _mm_avg_epu8(b, l32(dst, db)))
+                        } else {
+                            (a, b)
+                        };
+                        s32(dst, da, a);
+                        s32(dst, db, b);
+                    } else {
+                        let (a, b) = if avg {
+                            (_mm_avg_epu8(a, l64(dst, da)), _mm_avg_epu8(b, l64(dst, db)))
+                        } else {
+                            (a, b)
+                        };
+                        s64(dst, da, a);
+                        s64(dst, db, b);
+                    }
+                    r += 2;
+                }
+                if r < h {
+                    let o = at + r * ss - 3;
+                    put::<W>(
+                        dst,
+                        r * ds,
+                        avg,
+                        || t.h8(src, o),
+                        || t.h16(src, o),
+                        |c| t.h32(src, o + c),
+                    );
+                }
+            }
             (Some(fx), None) => {
                 let t = Taps::new(&fx);
                 for r in 0..h {
@@ -453,23 +673,22 @@ fn sized<const W: usize>(b: &mut Block<'_>) {
             }
             (None, Some(fy)) => {
                 let t = Taps::new(&fy);
-                let top = at - 3 * ss;
-                for r in 0..h {
-                    let o = top + r * ss;
-                    put::<W>(
-                        dst,
-                        r * ds,
-                        avg,
-                        || t.v8(src, o, ss),
-                        || t.v16(src, o, ss),
-                        |c| t.v32(src, o + c, ss),
-                    );
-                }
+                down::<W>(&t, src, at - 3 * ss, ss, h, dst, ds, avg);
             }
             (Some(fx), Some(fy)) => {
                 let (tx, ty) = (Taps::new(&fx), Taps::new(&fy));
                 let top = at - 3 * ss - 3;
-                for r in 0..h + 7 {
+                let mut r0 = 0;
+                if W <= 8 {
+                    // Two rows a vector; the odd one left goes below.
+                    while r0 + 1 < h + 7 {
+                        let (a, b) = tx.h8x2(src, top + r0 * ss, ss);
+                        s64(tmp, r0 * TS, a);
+                        s64(tmp, (r0 + 1) * TS, b);
+                        r0 += 2;
+                    }
+                }
+                for r in r0..h + 7 {
                     let (o, t) = (top + r * ss, r * TS);
                     match W {
                         4 | 8 => s64(tmp, t, tx.h8(src, o)),
@@ -483,18 +702,7 @@ fn sized<const W: usize>(b: &mut Block<'_>) {
                         }
                     }
                 }
-                let tmp = &*tmp;
-                for r in 0..h {
-                    let o = r * TS;
-                    put::<W>(
-                        dst,
-                        r * ds,
-                        avg,
-                        || ty.v8(tmp, o, TS),
-                        || ty.v16(tmp, o, TS),
-                        |c| ty.v32(tmp, o + c, TS),
-                    );
-                }
+                down::<W>(&ty, tmp, 0, TS, h, dst, ds, avg);
             }
         }
     }

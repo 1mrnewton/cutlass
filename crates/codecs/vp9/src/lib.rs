@@ -7,9 +7,11 @@
 
 mod bits;
 mod coef;
+mod dec;
 mod decode;
 mod encode;
 mod fwd;
+mod dsp;
 mod geom;
 mod header;
 mod intra;

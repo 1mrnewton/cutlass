@@ -112,15 +112,27 @@ pub struct Levels {
     lvl: [[[u8; 2]; 4]; 8],
 }
 
+impl Levels {
+    /// The thresholds of filter level `level`.
+    pub(crate) fn dsp(&self, level: u8) -> crate::dsp::lf::Thresh {
+        let t = self.thr[usize::from(level & 63)];
+        crate::dsp::lf::Thresh {
+            blimit: t.blimit,
+            limit: t.lim,
+            hev: t.hev,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Mask {
-    left_y: [u64; 4],
-    above_y: [u64; 4],
-    int_y: u64,
-    left_uv: [u16; 4],
-    above_uv: [u16; 4],
-    int_uv: u16,
-    lfl_y: [u8; 64],
+    pub(crate) left_y: [u64; 4],
+    pub(crate) above_y: [u64; 4],
+    pub(crate) int_y: u64,
+    pub(crate) left_uv: [u16; 4],
+    pub(crate) above_uv: [u16; 4],
+    pub(crate) int_uv: u16,
+    pub(crate) lfl_y: [u8; 64],
 }
 
 impl Default for Mask {
@@ -347,7 +359,7 @@ fn paint_level(mask: &mut Mask, level: u8, shift_y: usize, bw: usize, bh: usize)
 }
 
 impl Mask {
-    fn adjust(&mut self, mi_row: usize, mi_col: usize, mi_rows: usize, mi_cols: usize) {
+    pub(crate) fn adjust(&mut self, mi_row: usize, mi_col: usize, mi_rows: usize, mi_cols: usize) {
         self.left_y[2] |= self.left_y[3];
         self.above_y[2] |= self.above_y[3];
         self.left_uv[2] |= self.left_uv[3];

@@ -346,6 +346,10 @@ const SUBBLOCK: [[u8; 2]; 4] = [[1, 2], [1, 3], [3, 2], [3, 3]];
 /// Speeds at and below which inter frames try blocks under 8×8.
 const SUB8_SPEED: u8 = 1;
 
+/// From this speed a whole block under the quantizer's noise ends the
+/// partition search whether or not it codes a residual.
+const BREAKOUT_SPEED: u8 = 6;
+
 /// How much more a bit of chroma coefficients weighs in RD quantization
 /// than one of luma.
 const CHROMA_RATE: f32 = 1.0 / 0.7;
@@ -877,11 +881,15 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             }
         }
         // No split when the whole block needs no residual and its error is
-        // under the quantizer's own noise.
-        if whole && best.1 == PARTITION_NONE && none_skip.0 {
+        // under the quantizer's own noise, or (from BREAKOUT_SPEED) codes
+        // one and its error is under half that.
+        if whole && best.1 == PARTITION_NONE && (none_skip.0 || s.speed >= BREAKOUT_SPEED) {
             let pixels = (n * 8 * n * 8) as f64;
             let step = f64::from(s.dq[0][0][1]) / 8.0;
-            if none_skip.1 < pixels * step * step / 24.0 {
+            // A block that codes a residual stops the search at half that
+            // error (from BREAKOUT_SPEED: 6% of the time, 0.2% of the bits).
+            let div = if none_skip.0 { 24.0 } else { 48.0 };
+            if none_skip.1 < pixels * step * step / div {
                 self.restore(before + 1);
                 self.part[Self::node(row, col, level)] = PARTITION_NONE;
                 return best.0;

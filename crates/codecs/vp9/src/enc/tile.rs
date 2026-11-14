@@ -275,6 +275,8 @@ struct Blk {
     uv: u8,
     refs: [u8; 2],
     mv: Mv,
+    /// The vector of the second reference, in compound prediction.
+    mv2: Mv,
     /// The inter prediction filter (EIGHTTAP, SMOOTH, SHARP).
     interp: u8,
     /// The four 4×4 luma modes of a block under 8×8 (`AUTO`: chosen as the
@@ -817,6 +819,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             uv: geom::DC,
             refs: [INTRA_FRAME, INTRA_FRAME],
             mv: Mv::ZERO,
+            mv2: Mv::ZERO,
             interp: geom::EIGHTTAP,
             bmode: [geom::DC; 4],
         }
@@ -898,6 +901,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let h = (base.bh * 8).min((s.mi_rows - row) * 8);
         let lam = u64::from(s.lambda);
         let mut scored: Vec<(u64, Blk)> = Vec::with_capacity(8);
+        let mut searched = [None; 3];
         for r in 0..3 {
             if !s.refs_live[r] {
                 continue;
@@ -961,6 +965,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             };
             b.mv = mv;
             b.mode = mode_of(mv, NEW);
+            searched[r] = Some(mv);
             let new_bits = if b.mode == NEW {
                 lam * u64::from(mv_bits(Mv {
                     row: mv.row - nearest.row,
@@ -992,6 +997,9 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             }
         }
         self.cur_ref = 0;
+        if s.h.reference_mode == geom::REFERENCE_SELECT {
+            self.compound_cands(base, (x, y, w, h), &searched, &mut scored);
+        }
         scored.sort_by_key(|t| t.0);
         self.last_sad = scored.first().map_or(u64::MAX, |t| t.0);
         let k = match s.speed {
@@ -1000,6 +1008,146 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             _ => 1,
         };
         out.extend(scored.iter().take(k).map(|t| t.1));
+    }
+
+    /// Compound candidates: the fixed reference with each variable one,
+    /// both at their NEAREST, NEAR or zero vectors, or at the vectors
+    /// their own searches found (NEW), by the SAD of the averaged
+    /// prediction and their vectors' rate.
+    fn compound_cands(
+        &mut self,
+        base: &Blk,
+        (x, y, w, h): (usize, usize, usize, usize),
+        searched: &[Option<Mv>; 3],
+        scored: &mut Vec<(u64, Blk)>,
+    ) {
+        let s = self.s;
+        let lam = u64::from(s.lambda);
+        let fixed = s.h.comp_fixed;
+        let at = usize::from(s.h.sign_bias[usize::from(fixed)]);
+        for var in s.h.comp_var {
+            let mut refs = [INTRA_FRAME; 2];
+            refs[at] = fixed;
+            refs[at ^ 1] = var;
+            if refs.iter().any(|&r| {
+                !s.refs_live
+                    .get(usize::from(r) - 1)
+                    .copied()
+                    .unwrap_or(false)
+            }) {
+                continue;
+            }
+            let b = Blk { refs, ..*base };
+            let of = |t: &Self, m: u8| [t.find_mv_of(&b, m, refs[0]), t.find_mv_of(&b, m, refs[1])];
+            let (nearest, near, best) = (of(self, NEAREST), of(self, NEAR), of(self, NEW));
+            let found = [
+                searched[usize::from(refs[0]) - 1],
+                searched[usize::from(refs[1]) - 1],
+            ];
+            let mut cands = vec![(NEAREST, nearest), (NEAR, near), (ZERO, [Mv::ZERO; 2])];
+            if let [Some(a), Some(c)] = found {
+                cands.push((NEW, [a, c]));
+            }
+            for (m, mvs) in cands {
+                let mode = if mvs == nearest {
+                    NEAREST
+                } else if mvs == near {
+                    NEAR
+                } else if mvs == [Mv::ZERO; 2] {
+                    ZERO
+                } else {
+                    m
+                };
+                if scored
+                    .iter()
+                    .any(|(_, o)| o.refs == refs && o.mv == mvs[0] && o.mv2 == mvs[1])
+                {
+                    continue;
+                }
+                let Some(d) = self.comp_sad(x, y, w, h, refs, mvs) else {
+                    continue;
+                };
+                let bits = if mode == NEW {
+                    let rate = |v: Mv, b: Mv| {
+                        u64::from(mv_bits(Mv {
+                            row: v.row - b.row,
+                            col: v.col - b.col,
+                        }))
+                    };
+                    lam * (rate(mvs[0], best[0]) + rate(mvs[1], best[1])) / 256 + lam * 4
+                } else {
+                    lam * 2
+                };
+                scored.push((
+                    d + bits + lam * 3,
+                    Blk {
+                        mode,
+                        mv: mvs[0],
+                        mv2: mvs[1],
+                        ..b
+                    },
+                ));
+            }
+        }
+    }
+
+    /// The luma SAD of the compound prediction from `refs` at `mvs`
+    /// (eighths), with the real filters: the first reference's prediction
+    /// averaged with the second's, as the decoder makes it. `None` when a
+    /// window leaves its reference or the block is not one the kernels
+    /// take.
+    fn comp_sad(
+        &mut self,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        refs: [u8; 2],
+        mvs: [Mv; 2],
+    ) -> Option<u64> {
+        let s = self.s;
+        if !matches!(w, 8 | 16 | 32 | 64) {
+            return None;
+        }
+        let mut pred = std::mem::take(&mut self.pred);
+        let mut tmp = std::mem::take(&mut self.mctmp);
+        let filter = &crate::tables::SUBPEL_FILTERS[usize::from(geom::EIGHTTAP)];
+        let mut ok = true;
+        for (k, (&r, mv)) in refs.iter().zip(mvs).enumerate() {
+            let c = self.rec.ctx();
+            let Some(rp) = c.refs[usize::from(r) - 1].as_ref() else {
+                ok = false;
+                break;
+            };
+            let ((data, stride), (rw, rh)) =
+                (rp.buf.plane(0), (rp.dims.w[0] as i32, rp.dims.h[0] as i32));
+            let (mr, mc) = (i32::from(mv.row), i32::from(mv.col));
+            let (bx, by) = (x as i32 + (mc >> 3), y as i32 + (mr >> 3));
+            if bx < 3 || by < 3 || bx + w as i32 + 4 > rw || by + h as i32 + 4 > rh {
+                ok = false;
+                break;
+            }
+            crate::dsp::mc::predict(
+                &mut pred,
+                w,
+                data,
+                by as usize * stride + bx as usize,
+                stride,
+                (w, h),
+                (((mc & 7) * 2) as usize, ((mr & 7) * 2) as usize),
+                filter,
+                255,
+                k == 1,
+                &mut tmp,
+            );
+        }
+        let out = ok.then(|| {
+            let (src, ss) = (s.src.planes[0], s.src.strides[0]);
+            u64::from(sad::sad(&src[y * ss + x..], ss, &pred, w, w, h))
+        });
+        self.pred = pred;
+        self.mctmp = tmp;
+        out
     }
 
     // State snapshots ------------------------------------------------------
@@ -1442,7 +1590,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             uv: b.uv,
             interp: b.interp,
             refs: b.refs,
-            bmv: [[b.mv, Mv::ZERO]; 4],
+            bmv: [[b.mv, b.mv2]; 4],
         };
         if inter {
             self.rec.predict_inter(&rec);
@@ -1486,7 +1634,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         }
         {
             let r = MvRef {
-                mv: [b.mv, Mv::ZERO],
+                mv: [b.mv, b.mv2],
                 refs: b.refs,
             };
             let tw = self.f.width;
@@ -1516,7 +1664,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             seg_pred: false,
             interp: if inter { b.interp } else { 3 },
             refs: b.refs,
-            bmv: [[b.mv, Mv::ZERO]; 4],
+            bmv: [[b.mv, b.mv2]; 4],
         };
         let a = col - self.col0;
         let end = (a + bw).min(self.f.above.len());
@@ -2258,14 +2406,39 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             }
             return;
         }
+        let compound = b.refs[1] > INTRA_FRAME;
+        if s.h.reference_mode == geom::REFERENCE_SELECT {
+            let ctx = ctx::reference_mode_ctx(self.above_nb(b), self.left_nb(b), s.h.comp_fixed);
+            self.put_nc(
+                u32::from(compound),
+                s.fc.comp_inter[ctx],
+                probs::COMP_INTER + ctx,
+            );
+            if self.collect() {
+                self.f.counts.comp_inter[ctx][usize::from(compound)] += 1;
+            }
+        }
+        if compound {
+            // The fixed reference takes its sign bias's place; the other
+            // is one of the two variable ones.
+            let ctx = ctx::comp_ref_ctx(self.above_nb(b), self.left_nb(b), s.h);
+            let fixed = usize::from(s.h.sign_bias[usize::from(s.h.comp_fixed)]);
+            let bit = u32::from(b.refs[fixed ^ 1] == s.h.comp_var[1]);
+            self.put_nc(bit, s.fc.comp_ref[ctx], probs::COMP_REF + ctx);
+            if self.collect() {
+                self.f.counts.comp_ref[ctx][bit as usize] += 1;
+            }
+        }
         // Single reference: LAST, or GOLDEN / ALTREF.
         let c0 = ctx::single_p1(self.above_nb(b), self.left_nb(b));
         let bit0 = u32::from(b.refs[0] != LAST_FRAME);
-        self.put_nc(bit0, s.fc.single_ref[c0][0], probs::SINGLE_REF + 2 * c0);
-        if self.collect() {
-            self.f.counts.single_ref[c0][0][bit0 as usize] += 1;
+        if !compound {
+            self.put_nc(bit0, s.fc.single_ref[c0][0], probs::SINGLE_REF + 2 * c0);
+            if self.collect() {
+                self.f.counts.single_ref[c0][0][bit0 as usize] += 1;
+            }
         }
-        if bit0 == 1 {
+        if !compound && bit0 == 1 {
             let c1 = ctx::single_p2(self.above_nb(b), self.left_nb(b));
             let bit1 = u32::from(b.refs[0] == geom::ALTREF_FRAME);
             self.put_nc(bit1, s.fc.single_ref[c1][1], probs::SINGLE_REF + 2 * c1 + 1);
@@ -2304,6 +2477,10 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         if b.mode == NEW {
             let best = self.find_mv(b, NEW);
             self.write_mv(b.mv, best);
+            if compound {
+                let best = self.find_mv_of(b, NEW, b.refs[1]);
+                self.write_mv(b.mv2, best);
+            }
         }
     }
 
@@ -2404,8 +2581,12 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     /// list of `dec::parse::find_mv` for blocks of 8×8 and up, reference
     /// LAST, its last entry, with the precision lowered.
     fn find_mv(&self, b: &Blk, mode: u8) -> Mv {
+        self.find_mv_of(b, mode, b.refs[0])
+    }
+
+    /// [`Tile::find_mv`] for reference `frame` of the block.
+    fn find_mv_of(&self, b: &Blk, mode: u8, frame: u8) -> Mv {
         let s = self.s;
-        let frame = b.refs[0];
         let bias = &s.h.sign_bias;
         let early = mode != NEAR;
         let mut list = [Mv::ZERO; 2];

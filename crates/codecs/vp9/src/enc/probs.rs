@@ -43,6 +43,9 @@ pub struct Coded {
     pub inter: bool,
     pub switchable: bool,
     pub allow_hp: bool,
+    /// Whether the references' sign biases allow compound prediction (the
+    /// header then codes the reference mode).
+    pub compound_allowed: bool,
     /// Compound prediction: `None` single only, `Some(true)` chosen per
     /// block, `Some(false)` every block.
     pub compound: Option<bool>,
@@ -291,6 +294,18 @@ pub fn updates(old: &Flat, counts: &Counts, coded: &Coded) -> Flat {
     new
 }
 
+/// The header's reference mode, when the sign biases allow compound
+/// prediction (single, compound for every block, or chosen per block).
+fn ref_mode(w: &mut BoolWriter, coded: &Coded) {
+    if !coded.compound_allowed {
+        return;
+    }
+    w.write(u32::from(coded.compound.is_some()), 128);
+    if let Some(select) = coded.compound {
+        w.write(u32::from(select), 128);
+    }
+}
+
 /// Writes the updates of the ranges before the coefficients (the tx
 /// probabilities) when `before`, else those after.
 pub fn write(w: &mut BoolWriter, old: &Flat, new: &Flat, coded: &Coded, before: bool) {
@@ -298,6 +313,10 @@ pub fn write(w: &mut BoolWriter, old: &Flat, new: &Flat, coded: &Coded, before: 
         let is_tx = matches!(at, TX8 | TX16 | TX32);
         if is_tx != before {
             continue;
+        }
+        if at == COMP_INTER || (at == SINGLE_REF && coded.compound != Some(true)) {
+            // The reference mode comes before its probabilities.
+            ref_mode(w, coded);
         }
         for i in at..at + len {
             if new[i] == old[i] {

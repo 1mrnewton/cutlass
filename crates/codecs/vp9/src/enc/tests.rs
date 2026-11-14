@@ -57,6 +57,7 @@ fn round_trip_threads(w: usize, h: usize, frames: usize, qindex: u8, threads: us
                 hidden: false,
                 qindex,
                 speed,
+                altref_future: false,
             })
             .expect("encode");
         bytes += coded.data.len();

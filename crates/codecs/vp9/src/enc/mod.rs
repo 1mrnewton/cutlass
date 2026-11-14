@@ -48,7 +48,15 @@ pub struct FrameParams {
     pub qindex: u8,
     /// Motion search effort: higher is faster.
     pub speed: u8,
+    /// Whether ALTREF holds a picture still to come (an alt-ref before its
+    /// overlay): its sign bias is set, and blocks may predict from it and
+    /// a past picture at once.
+    pub altref_future: bool,
 }
+
+/// Speeds at and below which a frame with a future ALTREF lets each block
+/// choose compound prediction.
+pub const COMPOUND_SPEED: u8 = 6;
 
 /// One coded frame.
 pub struct Coded {
@@ -200,12 +208,16 @@ impl FrameEncoder {
     /// What the headers of a frame code (and so which probabilities it
     /// can update).
     fn coded(key: bool, fp: FrameParams) -> probs::Coded {
+        // The sign bias goes with compound prediction: alone it only makes
+        // the vectors of neighbours on the other side worse candidates.
+        let future = !key && !fp.hidden && fp.altref_future && fp.speed <= COMPOUND_SPEED;
         probs::Coded {
             tx_select: fp.qindex != 0,
             inter: !key,
             switchable: !key && fp.speed <= SWITCHABLE_SPEED,
             allow_hp: true,
-            compound: None,
+            compound_allowed: future,
+            compound: future.then_some(true),
         }
     }
 
@@ -252,9 +264,10 @@ impl FrameEncoder {
                 0x01
             };
             b.write(refresh, 8);
+            let future = Self::coded(key, fp).compound_allowed;
             for slot in 0..3 {
                 b.write(slot, 3); // LAST 0, GOLDEN 1, ALTREF 2
-                b.write_bit(false); // sign bias
+                b.write_bit(slot == 2 && future); // sign bias
             }
             b.write_bit(true); // size from the first reference
             b.write_bit(false); // render size = frame size

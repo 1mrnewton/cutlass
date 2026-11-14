@@ -271,6 +271,7 @@ impl Vp9Encoder {
                 hidden: true,
                 qindex,
                 speed: self.opts.speed,
+                altref_future: false,
             })?;
             self.rc.account(coded.data.len(), 0.0, 1, qindex);
             self.overlay_at = Some(target);
@@ -312,12 +313,15 @@ impl Vp9Encoder {
         }
         self.enc.load(planes);
         let qindex = self.rc.qindex(kind, seconds);
+        // Between an alt-ref and its overlay, ALTREF is ahead.
+        let altref_future = !key && !overlay && self.overlay_at.is_some();
         let coded = self.enc.encode(FrameParams {
             key,
             golden,
             hidden: false,
             qindex,
             speed: self.opts.speed,
+            altref_future,
         })?;
         let kind = if coded.key { 0 } else { kind };
         self.rc.account(coded.data.len(), seconds, kind, qindex);

@@ -5,7 +5,8 @@ import SwiftUI
 /// on the preview as they are typed: the first letter adds the clip at the
 /// playhead, and the whole typing is one undo step. Picking a face or a
 /// color applies it at once, as an undo step of its own, and each slider
-/// drag is one step.
+/// drag is one step. Bold, italic and underline go on the letters selected
+/// in the words, or on the whole title when none are.
 struct TextPanel: View {
     let model: EditorModel
     /// The clip being changed, or nil to add one.
@@ -16,6 +17,12 @@ struct TextPanel: View {
     @State private var words: String
     @State private var face: String
     @State private var tab: Tab = .fonts
+    /// The letters selected in the words, counted in characters as Rust
+    /// counts them; nil when none are.
+    @State private var marked: Range<Int>?
+    /// What every selected letter has, or the title's own pattern when
+    /// none are selected.
+    @State private var pattern: TextPattern?
     @State private var query = ""
     /// The faces Rust matched to the search.
     @State private var found: [Font]
@@ -41,13 +48,19 @@ struct TextPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
-                TextField("Enter text", text: $words, axis: .vertical)
-                    .lineLimit(1...3)
-                    .focused($typing)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 9)
-                    .background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 8))
-                    .submitLabel(.done)
+                Group {
+                    if #available(iOS 18.0, *) {
+                        SelectingField(words: $words, marked: $marked)
+                    } else {
+                        TextField("Enter text", text: $words, axis: .vertical)
+                    }
+                }
+                .lineLimit(1...3)
+                .focused($typing)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 8))
+                .submitLabel(.done)
                 Button(action: done) {
                     HugeIcon("done", size: 20)
                         .frame(width: 40, height: 36)
@@ -76,7 +89,10 @@ struct TextPanel: View {
         .padding(.top, 12)
         .padding(.bottom, 16)
         .background(Color(white: 0.11))
-        .onAppear { typing = clip == nil }
+        .onAppear {
+            typing = clip == nil
+            read()
+        }
         .onChange(of: words) { _, words in
             typed = model.typeText(into: typed, words, face: face)
         }
@@ -87,11 +103,40 @@ struct TextPanel: View {
             }
         }
         .onChange(of: query) { _, query in found = model.fontsMatching(query) }
+        .onChange(of: marked) { _, _ in read() }
+        .onChange(of: typing) { _, _ in read() }
+        .onChange(of: model.edits) { _, _ in read() }
+    }
+
+    /// The letters the buttons act on. The field keeps its selection after
+    /// the keyboard leaves it, where nothing shows it, so it counts only
+    /// while the words are being typed.
+    private var selected: Range<Int>? { typing ? marked : nil }
+
+    /// Read what the buttons show from the clip.
+    private func read() {
+        guard let typed, let style = model.text(of: typed)?.style else {
+            pattern = nil
+            return
+        }
+        pattern = selected.flatMap { model.textPattern(of: typed, letters: $0) }
+            ?? TextPattern(bold: style.bold, italic: style.italic, underline: style.underline)
     }
 
     private var fonts: some View {
         VStack(alignment: .leading, spacing: 10) {
-            search
+            HStack(spacing: 8) {
+                letterToggle("bold", on: pattern?.bold, label: "Bold") {
+                    setPattern(bold: $0)
+                }
+                letterToggle("italic", on: pattern?.italic, label: "Italic") {
+                    setPattern(italic: $0)
+                }
+                letterToggle("underline", on: pattern?.underline, label: "Underline") {
+                    setPattern(underline: $0)
+                }
+                search
+            }
             if found.isEmpty {
                 Text(model.fonts.isEmpty ? "No fonts were found on this device." : "No fonts match.")
                     .lineLimit(1)
@@ -166,6 +211,42 @@ struct TextPanel: View {
         }
     }
 
+    /// A button for one of bold, italic and underline. `on` is nil while
+    /// there are no letters to act on.
+    private func letterToggle(
+        _ icon: String, on: Bool?, label: String, set: @escaping (Bool) -> Void
+    ) -> some View {
+        let lit = on == true
+        return Button { set(!lit) } label: {
+            HugeIcon(icon, size: 18)
+                .frame(width: 36, height: 36)
+                .foregroundStyle(lit ? .black : .white)
+                .background(
+                    lit ? Color.white : Color(white: 0.2), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .disabled(on == nil)
+        .opacity(on == nil ? 0.4 : 1)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(lit ? .isSelected : [])
+    }
+
+    /// Change the selected letters, or the title's own pattern when none
+    /// are selected, as the desktop's buttons do.
+    private func setPattern(bold: Bool? = nil, italic: Bool? = nil, underline: Bool? = nil) {
+        guard let typed else { return }
+        if let selected {
+            model.setTextPattern(
+                typed, letters: selected, bold: bold, italic: italic, underline: underline)
+        } else if let pattern {
+            model.styleText(
+                typed,
+                .pattern(
+                    bold: bold ?? pattern.bold, italic: italic ?? pattern.italic,
+                    underline: underline ?? pattern.underline),
+                live: false)
+        }
+    }
+
     private func pick(_ name: String) {
         face = name
         if let typed { model.setTextFont(typed, face: name) }
@@ -177,6 +258,30 @@ struct TextPanel: View {
         typing = false
         searching = false
         close()
+    }
+}
+
+/// The words, in a field that also tells which letters are selected. The
+/// selection is counted in characters, as Rust counts a title's letters.
+@available(iOS 18.0, *)
+private struct SelectingField: View {
+    @Binding var words: String
+    @Binding var marked: Range<Int>?
+    @State private var selection: TextSelection?
+
+    var body: some View {
+        TextField("Enter text", text: $words, selection: $selection, axis: .vertical)
+            .onChange(of: selection) { _, _ in marked = letters() }
+            .onChange(of: words) { _, _ in marked = letters() }
+    }
+
+    private func letters() -> Range<Int>? {
+        guard case let .selection(range) = selection?.indices, !range.isEmpty,
+              range.upperBound <= words.endIndex
+        else { return nil }
+        let scalars = words.unicodeScalars
+        let start = scalars.distance(from: scalars.startIndex, to: range.lowerBound)
+        return start..<start + scalars.distance(from: range.lowerBound, to: range.upperBound)
     }
 }
 

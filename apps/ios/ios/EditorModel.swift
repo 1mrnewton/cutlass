@@ -405,6 +405,31 @@ final class EditorModel {
         (try? editor?.fontsMatching(query: query)) ?? fonts
     }
 
+    /// Which of bold, italic and underline every letter of `clip` in
+    /// `letters` has, counting characters; nil when it has no such letters.
+    func textPattern(of clip: String, letters: Range<Int>) -> TextPattern? {
+        guard let start = UInt32(exactly: letters.lowerBound),
+              let end = UInt32(exactly: letters.upperBound)
+        else { return nil }
+        return try? editor?.textRangePattern(clipId: clip, start: start, end: end)
+    }
+
+    /// Turn bold, italic or underline on or off for `letters` of `clip`; a
+    /// part left nil stays as it is.
+    func setTextPattern(
+        _ clip: String, letters: Range<Int>,
+        bold: Bool? = nil, italic: Bool? = nil, underline: Bool? = nil
+    ) {
+        guard let start = UInt32(exactly: letters.lowerBound),
+              let end = UInt32(exactly: letters.upperBound)
+        else { return }
+        edit {
+            try $0.setTextRangePattern(
+                clipId: clip, start: start, end: end,
+                bold: bold, italic: italic, underline: underline)
+        }
+    }
+
     /// Change how `clip` looks. Changes while `live` join one undo step and
     /// are saved when the last one, not live, arrives.
     func styleText(_ clip: String, _ change: TextStyleChange, live: Bool) {

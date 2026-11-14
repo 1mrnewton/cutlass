@@ -100,6 +100,16 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
     let korean = run.script == Script(*b"Hang");
     if thai && !own_machines {
         glyphs = thai::split(glyphs, described);
+        // A Thai face with no tables for the script keeps shifted marks
+        // in its private use area, to be picked by where each lands.
+        let own_tables = font.gsub().is_some_and(|table| {
+            table
+                .language(&run.script.tags(), None)
+                .is_ok_and(|language| language.script == Some(*b"thai"))
+        });
+        if run.script == Script(*b"Thai") && !own_tables {
+            thai::shift_marks(&mut glyphs, |character| has(font, character));
+        }
     }
     if korean && !own_machines {
         glyphs = hangul::compose(font, glyphs, described);

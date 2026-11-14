@@ -68,6 +68,141 @@ pub(super) fn split(glyphs: Vec<Glyph>, describe: impl Fn(char, usize) -> Glyph)
     out
 }
 
+/// What is done to a mark, or to the consonant under it, in a face that
+/// has no tables of its own for Thai.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shift {
+    None,
+    /// A tone mark set lower, straight on the consonant.
+    Down,
+    /// A mark set to the left, clear of a consonant's tall stroke.
+    Left,
+    /// Both.
+    DownLeft,
+    /// A vowel below set lower, under a consonant's tail.
+    Below,
+    /// The consonant drawn without the part a vowel below would hit.
+    Trim,
+}
+
+/// The glyph a face keeps in its private use area for `code` shifted,
+/// as the Thai fonts made for Windows number them.
+fn shifted(code: u32, shift: Shift) -> Option<u32> {
+    Some(match (shift, code) {
+        (Shift::Down, 0x0E48..=0x0E4C) => code - 0x0E48 + 0xF70A,
+        (Shift::Below, 0x0E38..=0x0E3A) => code - 0x0E38 + 0xF718,
+        (Shift::DownLeft, 0x0E48..=0x0E4C) => code - 0x0E48 + 0xF705,
+        (Shift::Left, 0x0E48..=0x0E4C) => code - 0x0E48 + 0xF713,
+        (Shift::Left, 0x0E34..=0x0E37) => code - 0x0E34 + 0xF701,
+        (Shift::Left, 0x0E31) => 0xF710,
+        (Shift::Left, 0x0E4D) => 0xF711,
+        (Shift::Left, 0x0E47) => 0xF712,
+        (Shift::Trim, 0x0E0D) => 0xF70F,
+        (Shift::Trim, 0x0E10) => 0xF700,
+        _ => return None,
+    })
+}
+
+/// A consonant by its shape: plain, with a tall stroke on the right, with
+/// a part below that can be left off, or with a tail below.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    Plain,
+    Tall,
+    Trimmed,
+    Tailed,
+}
+
+fn shape(code: u32) -> Option<Shape> {
+    Some(match code {
+        0x0E1B | 0x0E1D | 0x0E1F => Shape::Tall,
+        0x0E0D | 0x0E10 => Shape::Trimmed,
+        0x0E0E | 0x0E0F => Shape::Tailed,
+        0x0E01..=0x0E2E => Shape::Plain,
+        _ => return None,
+    })
+}
+
+/// A mark by where it goes: a vowel above, a vowel below, or a tone mark.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    Above,
+    Below,
+    Tone,
+}
+
+fn mark(code: u32) -> Option<Mark> {
+    Some(match code {
+        0x0E31 | 0x0E34..=0x0E37 | 0x0E47 | 0x0E4D..=0x0E4E => Mark::Above,
+        0x0E38..=0x0E3A => Mark::Below,
+        0x0E48..=0x0E4C => Mark::Tone,
+        _ => return None,
+    })
+}
+
+/// For a Thai face with no tables of its own for the script: give each
+/// mark the shifted glyph the face keeps for where it lands, by the
+/// consonant it is on and the marks already there, as such faces were
+/// made to be drawn. `has` says whether the face has a character.
+pub(super) fn shift_marks(glyphs: &mut [Glyph], has: impl Fn(char) -> bool) {
+    // What is above the consonant so far: nothing (0), nothing on a tall
+    // consonant (1), one mark set left (2), a mark at full height (3).
+    // What is below: nothing (0), nothing under a consonant whose lower
+    // part can go (1), something, or a tail (2).
+    let (mut above, mut below, mut base) = (0_u8, 0_u8, None::<usize>);
+    for index in 0..glyphs.len() {
+        let code = u32::from(glyphs[index].character);
+        let Some(kind) = mark(code) else {
+            let shape = shape(code);
+            // After anything but a consonant, marks above are not moved.
+            above = match shape {
+                Some(Shape::Tall) => 1,
+                Some(_) => 0,
+                None => 3,
+            };
+            below = match shape {
+                Some(Shape::Trimmed) => 1,
+                Some(Shape::Tailed) => 2,
+                _ => 0,
+            };
+            base = shape.map(|_| index);
+            continue;
+        };
+        let (shift, next) = match (above, kind) {
+            (0, Mark::Above) => (Shift::None, 3),
+            (0, Mark::Tone) => (Shift::Down, 0),
+            (1, Mark::Above) => (Shift::Left, 2),
+            (1, Mark::Tone) => (Shift::DownLeft, 1),
+            (2, Mark::Above) => (Shift::None, 3),
+            (2, Mark::Tone) => (Shift::Left, 3),
+            (state, _) => (Shift::None, state),
+        };
+        above = next;
+        let (under, next) = match (below, kind) {
+            (0, Mark::Below) => (Shift::None, 2),
+            (1, Mark::Below) => (Shift::Trim, 2),
+            (2, Mark::Below) => (Shift::Below, 2),
+            (state, _) => (Shift::None, state),
+        };
+        below = next;
+        // The consonant loses its lower part; the mark takes its shift.
+        let (target, shift) = if under == Shift::Trim {
+            (base, under)
+        } else if under != Shift::None {
+            (Some(index), under)
+        } else {
+            (Some(index), shift)
+        };
+        if let Some(target) = target
+            && let Some(other) = shifted(u32::from(glyphs[target].character), shift)
+                .and_then(char::from_u32)
+                .filter(|other| has(*other))
+        {
+            glyphs[target].character = other;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::split;
@@ -106,6 +241,45 @@ mod tests {
             parts("\u{E01}\u{E19}\u{E33}"),
             [(0xE01, 0), (0xE19, 3), (0xE4D, 3), (0xE32, 3)]
         );
+    }
+
+    /// The characters after the marks are shifted, in a face that has
+    /// every shifted glyph.
+    fn shifts(text: &str) -> Vec<u32> {
+        let mut glyphs: Vec<Glyph> = text
+            .char_indices()
+            .map(|(at, character)| Glyph::new(character, at))
+            .collect();
+        super::shift_marks(&mut glyphs, |_| true);
+        glyphs
+            .iter()
+            .map(|glyph| u32::from(glyph.character))
+            .collect()
+    }
+
+    #[test]
+    fn a_face_without_thai_tables_gets_its_shifted_marks() {
+        // These are what HarfBuzz 14.2 picks in such a face.
+        // A tone mark straight on a consonant is the low one.
+        assert_eq!(shifts("\u{E01}\u{E48}"), [0xE01, 0xF70A]);
+        // Over a vowel above, it is left at full height.
+        assert_eq!(shifts("\u{E01}\u{E34}\u{E48}"), [0xE01, 0xE34, 0xE48]);
+        // On a consonant with a tall stroke: the vowel goes left, and the
+        // tone mark over it goes left; a tone mark alone goes low and left.
+        assert_eq!(shifts("\u{E1B}\u{E34}\u{E48}"), [0xE1B, 0xF701, 0xF713]);
+        assert_eq!(shifts("\u{E1B}\u{E49}"), [0xE1B, 0xF706]);
+        assert_eq!(shifts("\u{E1B}\u{E31}\u{E49}"), [0xE1B, 0xF710, 0xF714]);
+        // A vowel below a consonant with a tail is set lower, and one
+        // below a consonant whose lower part can go takes that part off.
+        assert_eq!(shifts("\u{E0E}\u{E38}"), [0xE0E, 0xF718]);
+        assert_eq!(shifts("\u{E0D}\u{E39}"), [0xF70F, 0xE39]);
+        assert_eq!(shifts("\u{E10}\u{E38}"), [0xF700, 0xE38]);
+        // After a vowel that follows the consonant nothing is moved.
+        assert_eq!(shifts("\u{E01}\u{E32}\u{E48}"), [0xE01, 0xE32, 0xE48]);
+        // A face that lacks the shifted glyph keeps the mark as typed.
+        let mut glyphs = vec![Glyph::new('\u{E01}', 0), Glyph::new('\u{E48}', 3)];
+        super::shift_marks(&mut glyphs, |_| false);
+        assert_eq!(u32::from(glyphs[1].character), 0xE48);
     }
 
     #[test]

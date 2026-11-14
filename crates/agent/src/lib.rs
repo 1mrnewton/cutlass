@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+mod anthropic;
 mod approval;
 mod chat;
 mod draft;
@@ -26,6 +27,10 @@ mod skill;
 mod subagent;
 mod tools;
 
+pub use anthropic::{
+    ANTHROPIC_URL, ANTHROPIC_VERSION, ClaudeModel, DEFAULT_CLAUDE_MODEL, FALLBACK_BETA,
+    parse_claude_reply, wants_fallback,
+};
 pub use approval::{ApprovalAction, ApprovalError, Approver, authorize, authorize_then};
 pub use chat::{
     ChatModel, ChatTransport, LoopbackHttp, SYSTEM_PROMPT, parse_reply, prompt_context,

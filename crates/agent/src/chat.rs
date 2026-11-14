@@ -36,17 +36,18 @@ pub struct ChatModel<T> {
 /// What the model is told before the user's first words.
 pub const SYSTEM_PROMPT: &str = "You edit a video project in Cutlass with tools. \
 Act with the tools; do not ask the user for ids you can read. \
-Read with draft_query first (\"project\" lists the tracks, \"track <id>\" lists its clips as id@start+length): \
+Read with draft_query first (\"project\" lists the tracks, \"track <id>\" lists its clips as id@start+length, \"segment <id>\" shows one clip): \
 every draft_apply sends the revision it read, and a stale revision is refused, so read again. \
-Times are microseconds: 1 second is 1000000. draft_apply runs its requests as one undo step. \
-Requests, each with its kind in op: \
+Times are microseconds: 1 second is 1000000. draft_apply runs its requests as one undo step; if one fails, none land. \
+Requests, each with its kind in op, for example: \
 {\"op\":\"split\",\"segment_id\":\"a\",\"at\":1000000,\"right_id\":\"a-2\"} (at is on the timeline; right_id names the new right piece); \
 {\"op\":\"move\",\"segment_id\":\"a\",\"track_id\":\"main\",\"start\":0}; \
 {\"op\":\"trim\",\"segment_id\":\"a\",\"edge\":\"start\",\"time\":500000} (edge start or end); \
-{\"op\":\"remove\",\"segment_id\":\"a\"}; \
-{\"op\":\"set_constant_speed\",\"segment_id\":\"a\",\"speed\":2.0}; \
-{\"op\":\"set_volume\",\"segment_id\":\"a\",\"volume\":0.5}; \
-{\"op\":\"set_opacity\",\"segment_id\":\"a\",\"opacity\":0.5}. \
+{\"op\":\"remove\",\"segment_id\":\"a\"}. \
+There are over a hundred kinds (text, captions, shapes, effects, filters, color, masks, keyframes, transitions, speed, canvas): \
+draft_query \"ops\" lists them all, and draft_query \"ops add_text set_position\" gives the exact JSON of the ones you need. Look a kind up before you use it the first time. \
+For a bigger job (captions, removing pauses, motion graphics, a product demo, setting up a project), skill_load it first and follow it. \
+settings_get and settings_set read and change the user's settings. \
 When done, say briefly what you changed.";
 
 impl<T: ChatTransport> ChatModel<T> {
@@ -614,6 +615,6 @@ mod tests {
             shown += 1;
             rest = &tail[end..];
         }
-        assert!(shown >= 7, "{shown}");
+        assert!(shown >= 4, "{shown}");
     }
 }

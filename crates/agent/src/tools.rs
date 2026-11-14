@@ -185,6 +185,12 @@ pub trait Export {
 pub enum Invocation {
     /// Read a compact draft view.
     DraftQuery(DraftQuery),
+    /// List the request kinds `draft.apply` takes, or show the named ones
+    /// with an example each.
+    DraftOps {
+        /// The kinds to show; empty lists them all.
+        names: Vec<String>,
+    },
     /// Apply one combo, or preview it.
     DraftApply(ApplyInput),
     /// Undo the last committed combo.
@@ -422,10 +428,11 @@ where
             Trk,
         ),
     ) -> Self {
+        let skills = SkillLibrary::bundled().with_folders(&settings.settings().skill_folders);
         Self {
             draft,
             settings,
-            skills: SkillLibrary::bundled(),
+            skills,
             player,
             media,
             speech,
@@ -472,6 +479,10 @@ where
                 .query(&query)
                 .map(|view| view.to_string())
                 .map_err(ToolError::Draft),
+            Invocation::DraftOps { names } => {
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                crate::ops::describe(&names).map_err(ToolError::BadArguments)
+            }
             Invocation::DraftApply(input) => self
                 .draft
                 .apply(input)
@@ -555,6 +566,9 @@ where
                 .sandbox
                 .run(&source, &input_json)
                 .map_err(ToolError::Sandbox),
+            Invocation::SkillLoad { ask } if ask.is_empty() || ask == "list" => {
+                Ok(self.skills.listing())
+            }
             Invocation::SkillLoad { ask } => self
                 .skills
                 .load(&ask)
@@ -578,8 +592,9 @@ where
         }
     }
 
-    /// Parses a model tool call. `draft.apply` takes JSON; `settings.set` is
-    /// rejected, as settings change only through the host.
+    /// Parses a model tool call. `draft.apply` takes JSON; `settings.set`
+    /// takes the generation it read and the changes to merge, and any
+    /// change that needs the user's allow still asks the host.
     pub fn parse(&self, name: &str, arguments: &str) -> Result<Invocation, ToolError> {
         let arguments = arguments.trim();
         match name {
@@ -588,7 +603,7 @@ where
             "draft.undo" => bare(arguments, "draft.undo", Invocation::DraftUndo),
             "draft.redo" => bare(arguments, "draft.redo", Invocation::DraftRedo),
             "settings.get" => bare(arguments, "settings.get", Invocation::SettingsGet),
-            "settings.set" => Err(bad("settings.set")),
+            "settings.set" => parse_settings_set(self.settings.settings(), arguments),
             "player.seek" => {
                 one_i64(arguments, "player.seek").map(|time_us| Invocation::PlayerSeek { time_us })
             }
@@ -721,15 +736,23 @@ where
 
 fn description(name: &str) -> &'static str {
     match name {
-        "draft.query" => "Compact view of the open draft plus its revision.",
+        "draft.query" => {
+            "Compact view of the open draft plus its revision. \"ops\" lists every request kind \
+             draft.apply takes; \"ops add_text set_position\" shows their JSON."
+        }
         "draft.apply" => {
             "Session requests as one combo, or a dry run. JSON: {\"expected_revision\":N, \
              \"requests\":[{\"op\":\"move\",...}], \"dry_run\":false, \"request_id\":\"...\"}."
         }
         "draft.undo" => "Restore the draft from before the last committed combo.",
         "draft.redo" => "Reapply the combo that undo removed.",
-        "settings.get" => "Read the settings generation and the switches that leave the machine.",
-        "settings.set" => "Write user settings when the generation matches.",
+        "settings.get" => "The user's settings as JSON, with the generation to send back.",
+        "settings.set" => {
+            "Change the user's settings: {\"expected_generation\":N, \"changes\":{...}}, the \
+             changes merged into the settings settings.get shows (null removes a key). Turning on \
+             the cloud model, the online sandbox, a remote MCP server or a skill folder asks \
+             the user first."
+        }
         "player.seek" => "Move the open player to a time in microseconds.",
         "player.play" => "Start the open player.",
         "player.pause" => "Pause the open player.",
@@ -760,21 +783,96 @@ fn description(name: &str) -> &'static str {
             The script sees `input`, has no files or network, and cannot edit the project: \
             apply what it computes with draft.apply."
         }
-        "skill.load" => "Return the one skill whose description matches the ask.",
-        "mcp.call" => "Call a tool on a server the user enabled.",
+        "skill.load" => {
+            "Return the one skill whose description matches the ask; \"list\" names every skill, \
+             the bundled ones and the user's own."
+        }
+        "mcp.call" => {
+            "Call a tool on an MCP server the user enabled: {\"server\":\"<name>\", \
+             \"tool\":\"<tool>\", \"arguments\":{...}}. The tool tools/list lists that \
+             server's tools and their arguments."
+        }
         _ => "",
     }
 }
 
+/// Settings keys the model does not see: recent projects name the user's
+/// folders and say nothing about how Cutlass behaves.
+const HIDDEN_SETTINGS: &[&str] = &["recent_projects"];
+
 fn show_settings(tool: &SettingsTool) -> String {
     let view = tool.get();
-    format!(
-        "generation={} cloud={} online={} step_cap={}",
-        view.generation,
-        view.settings.model.cloud,
-        view.settings.sandbox.online,
-        view.settings.step_cap
-    )
+    let mut settings = serde_json::to_value(&view.settings).unwrap_or_default();
+    if let Some(map) = settings.as_object_mut() {
+        for key in HIDDEN_SETTINGS {
+            map.remove(*key);
+        }
+    }
+    serde_json::json!({ "generation": view.generation, "settings": settings }).to_string()
+}
+
+/// `settings.set` as JSON: the generation read and a merge patch
+/// (RFC 7386) over the settings as `settings.get` shows them.
+fn parse_settings_set(current: &Settings, arguments: &str) -> Result<Invocation, ToolError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Set {
+        expected_generation: u64,
+        changes: serde_json::Value,
+    }
+    let set: Set = serde_json::from_str(arguments).map_err(|error| {
+        ToolError::BadArguments(format!(
+            "settings.set takes {{\"expected_generation\":N,\"changes\":{{...}}}}: {error}"
+        ))
+    })?;
+    if !set.changes.is_object() {
+        return Err(ToolError::BadArguments(
+            "settings.set changes must be a JSON object".to_owned(),
+        ));
+    }
+    if let Some(key) = HIDDEN_SETTINGS
+        .iter()
+        .find(|key| set.changes.get(**key).is_some())
+    {
+        return Err(ToolError::BadArguments(format!(
+            "{key} is not changed through settings.set"
+        )));
+    }
+    let mut value = serde_json::to_value(current)
+        .map_err(|error| ToolError::BadArguments(error.to_string()))?;
+    merge_patch(&mut value, &set.changes);
+    let settings: Settings = serde_json::from_value(value).map_err(|error| {
+        ToolError::BadArguments(format!("those settings do not read back: {error}"))
+    })?;
+    Ok(Invocation::SettingsSet {
+        expected: set.expected_generation,
+        settings: Box::new(settings),
+    })
+}
+
+/// RFC 7386: objects merge key by key, `null` removes a key, anything else
+/// replaces.
+fn merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    let serde_json::Value::Object(changes) = patch else {
+        *target = patch.clone();
+        return;
+    };
+    if !target.is_object() {
+        *target = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let Some(map) = target.as_object_mut() else {
+        return;
+    };
+    for (key, change) in changes {
+        if change.is_null() {
+            map.remove(key);
+        } else {
+            merge_patch(
+                map.entry(key.clone()).or_insert(serde_json::Value::Null),
+                change,
+            );
+        }
+    }
 }
 
 fn set_settings(
@@ -967,6 +1065,18 @@ fn format_skill(skill: &Skill) -> String {
 }
 
 fn parse_query(arguments: &str) -> Result<Invocation, ToolError> {
+    if arguments == "ops" {
+        return Ok(Invocation::DraftOps { names: Vec::new() });
+    }
+    if let Some(rest) = headed(arguments, "ops") {
+        return Ok(Invocation::DraftOps {
+            names: rest
+                .split(|c: char| c.is_whitespace() || c == ',')
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        });
+    }
     if arguments == "project" {
         return Ok(Invocation::DraftQuery(DraftQuery::Project));
     }
@@ -1128,6 +1238,32 @@ fn parse_track(arguments: &str) -> Result<Invocation, ToolError> {
 }
 
 fn parse_mcp(arguments: &str) -> Result<Invocation, ToolError> {
+    // The object form: `{"server":"s","tool":"t","arguments":{...}}`.
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(arguments) {
+        let text = |key: &str| {
+            map.get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
+        let (Some(server), Some(tool)) = (text("server"), text("tool")) else {
+            return Err(ToolError::BadArguments(
+                "mcp.call takes {\"server\":\"<name>\",\"tool\":\"<tool or tools/list>\",\"arguments\":{...}}"
+                    .to_owned(),
+            ));
+        };
+        let arguments = match map.get("arguments") {
+            None | Some(serde_json::Value::Null) => String::new(),
+            Some(serde_json::Value::String(text)) => text.clone(),
+            Some(other) => other.to_string(),
+        };
+        return Ok(Invocation::McpCall {
+            server,
+            tool,
+            arguments,
+        });
+    }
     let Some((server, rest)) = arguments.split_once('\n') else {
         return Err(bad("mcp.call"));
     };
@@ -1973,13 +2109,15 @@ mod tests {
         let temp = Temp::new();
         let mut registry = open(&temp, Gate::refuse());
         let before = registry.invoke(Invocation::SettingsGet).unwrap();
+        let shown: serde_json::Value = serde_json::from_str(&before).unwrap();
+        assert_eq!(shown["generation"], 0);
+        assert_eq!(shown["settings"]["model"]["cloud"], false);
+        assert_eq!(shown["settings"]["sandbox"]["online"], false);
         assert_eq!(
-            before,
-            format!(
-                "generation=0 cloud=false online=false step_cap={}",
-                cutlass_settings::DEFAULT_STEP_CAP
-            )
+            shown["settings"]["step_cap"],
+            cutlass_settings::DEFAULT_STEP_CAP
         );
+        assert!(shown["settings"].get("recent_projects").is_none());
         let mut settings = registry.settings.settings().clone();
         settings.model.cloud = true;
         let error = registry
@@ -2552,5 +2690,80 @@ mod tests {
                 .video_trackings
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn the_model_changes_settings_by_merging_json() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        let call = |registry: &mut _, arguments: &str| {
+            ToolSink::run_tool(
+                registry,
+                &ToolCall {
+                    id: "s".to_owned(),
+                    name: "settings.set".to_owned(),
+                    arguments: arguments.to_owned(),
+                },
+            )
+        };
+        let set = call(
+            &mut registry,
+            r#"{"expected_generation":0,"changes":{"step_cap":48,"playback":{"loop_playback":true}}}"#,
+        );
+        assert!(!set.is_error, "{}", set.content);
+        assert_eq!(registry.settings.settings().step_cap, 48);
+        assert!(registry.settings.settings().playback.loop_playback);
+        let stale = call(
+            &mut registry,
+            r#"{"expected_generation":0,"changes":{"step_cap":12}}"#,
+        );
+        assert!(stale.is_error, "a stale generation is refused");
+        assert_eq!(registry.settings.settings().step_cap, 48);
+        // Turning the cloud model on asks; refused, nothing is written.
+        let generation = registry.settings.generation();
+        let cloud = call(
+            &mut registry,
+            &format!(
+                r#"{{"expected_generation":{generation},"changes":{{"model":{{"cloud":true}}}}}}"#
+            ),
+        );
+        assert!(cloud.is_error);
+        assert!(cloud.content.contains("refused"), "{}", cloud.content);
+        assert!(!registry.settings.settings().model.cloud);
+        let hidden = call(
+            &mut registry,
+            &format!(
+                r#"{{"expected_generation":{generation},"changes":{{"recent_projects":[]}}}}"#
+            ),
+        );
+        assert!(hidden.is_error);
+        let broken = call(&mut registry, r#"{"changes":{}}"#);
+        assert!(broken.is_error);
+        assert!(
+            broken.content.contains("expected_generation"),
+            "{}",
+            broken.content
+        );
+    }
+
+    #[test]
+    fn draft_query_ops_lists_and_shows_request_kinds() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        let all = registry
+            .invoke(registry.parse("draft.query", "ops").unwrap())
+            .unwrap();
+        assert!(all.contains("split: "), "{all}");
+        let some = registry
+            .invoke(
+                registry
+                    .parse("draft.query", "ops split, set_opacity")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(some.contains(r#"{"op":"split""#), "{some}");
+        assert!(some.contains(r#"{"op":"set_opacity""#), "{some}");
+        let unknown = registry.invoke(registry.parse("draft.query", "ops nope").unwrap());
+        assert!(unknown.is_err());
     }
 }

@@ -14,8 +14,10 @@ mod draft;
 mod forward;
 mod r#loop;
 mod mcp;
+mod mcp_connection;
 mod mcp_server;
 mod model;
+mod ops;
 mod sandbox;
 #[cfg(feature = "script")]
 mod script;
@@ -33,11 +35,13 @@ pub use draft::{
 pub use forward::{Forward, Forwarded, ProjectSocket, Wake};
 pub use r#loop::{LoopError, ToolOutcome, ToolSink, Turn, cap_from_settings, run, run_after};
 pub use mcp::{McpClient, McpError, McpTransport};
+pub use mcp_connection::{LIST_TOOLS, McpConnection, McpWire};
 pub use mcp_server::{MCP_PROTOCOL_VERSION, McpServer};
 pub use model::{
     CloudModel, Completion, CompletionRequest, LocalModel, Message, Model, ModelError, ToolCall,
     ToolDefinition,
 };
+pub use ops::{Op, describe as describe_ops, ops};
 pub use sandbox::{
     LocalSandbox, OnlineSandbox, ProcessExecutor, Sandbox, SandboxError, SandboxExecutor,
     SandboxPolicy, SandboxRoute, route_for,

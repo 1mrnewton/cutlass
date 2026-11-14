@@ -1,4 +1,10 @@
-//! Bundled skills and one external skill the host has allowed.
+//! Bundled skills, the skill folders the user added in settings, and one
+//! external skill the host has allowed.
+//!
+//! A skill folder holds a `SKILL.md`, or folders that each hold one. The
+//! file is the bundled form (`title:`, `description:`, `tools:` lines, a
+//! blank line, then the body) or a front matter block between `---` lines
+//! naming `name` and `description`, where `tools` may be left out.
 
 use std::fmt;
 use std::path::Path;
@@ -61,6 +67,8 @@ impl std::error::Error for SkillError {}
 #[derive(Debug)]
 pub struct SkillLibrary {
     skills: Vec<Skill>,
+    /// Skill files in the user's folders that could not be read, with why.
+    problems: Vec<String>,
 }
 
 impl Skill {
@@ -90,7 +98,94 @@ impl SkillLibrary {
                 skills.push(skill);
             }
         }
-        Self { skills }
+        Self {
+            skills,
+            problems: Vec::new(),
+        }
+    }
+
+    /// The bundled skills, then each skill in `folders`, which the user
+    /// already allowed when adding them in settings. A user skill comes
+    /// first, so it wins over a bundled one that matches as well. A file
+    /// that does not read is kept as a problem, not a failure.
+    #[must_use]
+    pub fn with_folders(mut self, folders: &[cutlass_settings::SkillFolder]) -> Self {
+        let mut found = Vec::new();
+        for folder in folders {
+            if folder.path.trim().is_empty() {
+                continue;
+            }
+            let root = Path::new(&folder.path);
+            let direct = root.join("SKILL.md");
+            if direct.is_file() {
+                found.push(direct);
+                continue;
+            }
+            if root.is_file() {
+                found.push(root.to_path_buf());
+                continue;
+            }
+            match std::fs::read_dir(root) {
+                Ok(entries) => {
+                    let mut inner: Vec<_> = entries
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.path().join("SKILL.md"))
+                        .filter(|path| path.is_file())
+                        .collect();
+                    inner.sort();
+                    if inner.is_empty() {
+                        self.problems
+                            .push(format!("{}: no SKILL.md in it", root.display()));
+                    }
+                    found.extend(inner);
+                }
+                Err(error) => self.problems.push(format!("{}: {error}", root.display())),
+            }
+        }
+        let mut user = Vec::new();
+        for path in found {
+            match std::fs::read_to_string(&path).map_err(|error| error.to_string()) {
+                Ok(text) => match parse_skill_md(&text) {
+                    Ok(skill) => user.push(skill),
+                    Err(error) => self.problems.push(format!("{}: {error}", path.display())),
+                },
+                Err(error) => self.problems.push(format!("{}: {error}", path.display())),
+            }
+        }
+        user.append(&mut self.skills);
+        self.skills = user;
+        self
+    }
+
+    /// Every skill, in the order `load` prefers them.
+    #[must_use]
+    pub fn skills(&self) -> &[Skill] {
+        &self.skills
+    }
+
+    /// Skill files in the user's folders that did not read.
+    #[must_use]
+    pub fn problems(&self) -> &[String] {
+        &self.problems
+    }
+
+    /// One line a skill: its title and what it is for, then any skill file
+    /// that did not read.
+    #[must_use]
+    pub fn listing(&self) -> String {
+        let mut out = String::new();
+        for skill in &self.skills {
+            out.push_str(&skill.title);
+            out.push_str(": ");
+            out.push_str(&skill.description);
+            out.push('\n');
+        }
+        for problem in &self.problems {
+            out.push_str("did not load: ");
+            out.push_str(problem);
+            out.push('\n');
+        }
+        out.trim_end().to_owned()
     }
 
     /// The one skill that matches the ask, if any.
@@ -142,7 +237,13 @@ impl SkillLibrary {
 
 /// Parse a skill file's title, description, tools, and body.
 pub fn parse_skill_md(text: &str) -> Result<Skill, SkillError> {
-    let (header, body) = split_header(text);
+    let (header, body, front_matter) = match front_matter(text) {
+        Some((header, body)) => (header, body, true),
+        None => {
+            let (header, body) = split_header(text);
+            (header, body, false)
+        }
+    };
     let mut title = None;
     let mut description = None;
     let mut tools = None;
@@ -151,11 +252,13 @@ pub fn parse_skill_md(text: &str) -> Result<Skill, SkillError> {
         if line.is_empty() {
             continue;
         }
-        if let Some(value) = value_after(line, "title") {
+        if let Some(value) = value_after(line, "title").or_else(|| value_after(line, "name")) {
             title = Some(value.to_owned());
         } else if let Some(value) = value_after(line, "description") {
             description = Some(value.to_owned());
-        } else if let Some(value) = value_after(line, "tools") {
+        } else if let Some(value) =
+            value_after(line, "tools").or_else(|| value_after(line, "allowed-tools"))
+        {
             tools = Some(split_tools(value));
         }
     }
@@ -165,8 +268,11 @@ pub fn parse_skill_md(text: &str) -> Result<Skill, SkillError> {
     let Some(description) = description.filter(|value| !value.is_empty()) else {
         return Err(invalid("missing description"));
     };
-    let Some(allowed_tools) = tools.filter(|names| !names.is_empty()) else {
-        return Err(invalid("missing tools"));
+    // A front matter skill may leave its tools out; it may then call any.
+    let allowed_tools = match tools.filter(|names| !names.is_empty()) {
+        Some(names) => names,
+        None if front_matter => Vec::new(),
+        None => return Err(invalid("missing tools")),
     };
     Ok(Skill {
         title,
@@ -180,6 +286,22 @@ fn invalid(reason: &str) -> SkillError {
     SkillError::Invalid {
         reason: reason.to_owned(),
     }
+}
+
+/// The header between a first `---` line and the next, and the body after.
+fn front_matter(text: &str) -> Option<(&str, &str)> {
+    let rest = text.trim_start_matches('\u{feff}');
+    let rest = rest
+        .strip_prefix("---\n")
+        .or_else(|| rest.strip_prefix("---\r\n"))?;
+    let mut offset = 0;
+    for line in rest.split_inclusive('\n') {
+        if line.trim() == "---" {
+            return Some((&rest[..offset], &rest[offset + line.len()..]));
+        }
+        offset += line.len();
+    }
+    None
 }
 
 fn split_header(text: &str) -> (&str, &str) {
@@ -196,13 +318,15 @@ fn split_header(text: &str) -> (&str, &str) {
 fn value_after<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     let rest = line.strip_prefix(key)?;
     let rest = rest.strip_prefix(':')?;
-    Some(rest.trim())
+    Some(rest.trim().trim_matches(|c| c == '"' || c == '\''))
 }
 
 fn split_tools(value: &str) -> Vec<String> {
     value
+        .trim_start_matches('[')
+        .trim_end_matches(']')
         .split(',')
-        .map(str::trim)
+        .map(|name| name.trim().trim_matches(|c| c == '"' || c == '\''))
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
         .collect()
@@ -534,5 +658,60 @@ mod tests {
         assert!(matches!(error, SkillError::Invalid { .. }));
         assert_eq!(library.skills.len(), 5);
         assert!(library.load("Broken").is_none());
+    }
+
+    #[test]
+    fn skills_in_the_users_folders_load_first_and_bad_ones_are_listed() {
+        let root =
+            std::env::temp_dir().join(format!("cutlass-skill-folders-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let one = root.join("shop").join("intro");
+        let two = root.join("shop").join("broken");
+        fs::create_dir_all(&one).unwrap();
+        fs::create_dir_all(&two).unwrap();
+        fs::write(
+            one.join("SKILL.md"),
+            "---\nname: Shop intro\ndescription: \"Open a shop video with the logo and a title\"\n---\n\nPlace the logo, then a title.\n",
+        )
+        .unwrap();
+        fs::write(two.join("SKILL.md"), "no header at all").unwrap();
+        let single = root.join("single");
+        fs::create_dir_all(&single).unwrap();
+        fs::write(
+            single.join("SKILL.md"),
+            "title: Captions\ndescription: Write captions from speech recognition, my way.\ntools: speech.start, draft.apply\n\nMine.\n",
+        )
+        .unwrap();
+        let folders = [
+            cutlass_settings::SkillFolder {
+                path: root.join("shop").display().to_string(),
+                ..Default::default()
+            },
+            cutlass_settings::SkillFolder {
+                path: single.display().to_string(),
+                ..Default::default()
+            },
+            cutlass_settings::SkillFolder {
+                path: root.join("gone").display().to_string(),
+                ..Default::default()
+            },
+        ];
+        let library = SkillLibrary::bundled().with_folders(&folders);
+        assert_eq!(library.skills().len(), 7);
+        let intro = library.load("open my shop video with the logo").unwrap();
+        assert_eq!(intro.title, "Shop intro");
+        assert!(intro.allowed_tools.is_empty());
+        assert_eq!(intro.body, "Place the logo, then a title.");
+        // The user's Captions wins over the bundled one.
+        let captions = library.load("write captions from speech").unwrap();
+        assert_eq!(captions.body, "Mine.");
+        assert_eq!(library.problems().len(), 2, "{:?}", library.problems());
+        let listing = library.listing();
+        assert!(
+            listing.contains("Shop intro: Open a shop video"),
+            "{listing}"
+        );
+        assert!(listing.contains("did not load:"), "{listing}");
+        let _ = fs::remove_dir_all(&root);
     }
 }

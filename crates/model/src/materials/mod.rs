@@ -37,7 +37,8 @@ pub use mark::{
     segment_time_mark, set_time_mark_items, time_mark_items, visible_marks,
 };
 pub use rich::{
-    RichFill, RichFont, RichPaint, RichShadow, RichSolid, RichStroke, RichStyle, RichText,
+    PatternChange, RichFill, RichFont, RichPaint, RichPattern, RichShadow, RichSolid, RichStroke,
+    RichStyle, RichText,
 };
 pub use shape::{
     MaterialShape, SHAPE_ARROW, SHAPE_CONTOUR, SHAPE_FILL, SHAPE_LINE, SHAPE_LINE_WIDTH, SHAPE_PEN,

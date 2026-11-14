@@ -65,8 +65,9 @@ pub fn list_faces(
     Ok(faces)
 }
 
-/// The largest emoji strike a loaded face keeps, in pixels per em.
-const MAX_STRIKE_PPEM: u16 = 128;
+/// The largest emoji strike a loaded face keeps, in pixels per em: the
+/// largest picture a glyph atlas holds.
+const MAX_STRIKE_PPEM: u16 = 256;
 /// An `sbix` table under this many bytes is kept whole.
 const SMALL_SBIX: usize = 8 * 1024 * 1024;
 
@@ -76,9 +77,9 @@ const SMALL_SBIX: usize = 8 * 1024 * 1024;
 /// is the face of a collection, and `None` for a file that is one face.
 /// Only that face's tables are read, so one face of a large collection
 /// costs what it holds and not the whole file. A large `sbix` table, which
-/// holds every emoji at many sizes, is cut to one size: the largest up to
-/// 128 pixels per em. A face that still comes to more than `max_bytes` is
-/// refused as unsupported.
+/// holds every emoji at many sizes, is cut to one size: the largest, up to
+/// 256 pixels per em, that `max_bytes` has room for. A face that still
+/// comes to more than `max_bytes` is refused as unsupported.
 pub fn load_face(
     mut read_at: impl FnMut(u64, usize) -> Option<Vec<u8>>,
     index: Option<u32>,
@@ -143,7 +144,8 @@ pub fn load_face(
 }
 
 /// An `sbix` table holding one strike of the table at `offset`: the
-/// largest up to [`MAX_STRIKE_PPEM`], or the smallest when all are larger.
+/// largest up to [`MAX_STRIKE_PPEM`] that fits in `room`, or the smallest
+/// of all when every strike is larger than that.
 fn one_strike(
     read: &mut impl FnMut(u64, usize) -> Result<Vec<u8>, FontError>,
     offset: u64,
@@ -167,23 +169,31 @@ fn one_strike(
         let ppem = u16_at(&read(offset + at as u64, 2)?, 0)?;
         found.push((ppem, at));
     }
+    // Where each strike ends: where the next one starts.
+    let size_of = |at: usize| {
+        let end = found
+            .iter()
+            .map(|(_, other)| *other)
+            .filter(|other| *other > at)
+            .min()
+            .unwrap_or(length);
+        end - at
+    };
+    let fits = |at: usize| size_of(at) + 12 <= room;
     let (_, at) = found
         .iter()
         .copied()
-        .filter(|(ppem, _)| *ppem <= MAX_STRIKE_PPEM)
+        .filter(|(ppem, at)| *ppem <= MAX_STRIKE_PPEM && fits(*at))
         .max_by_key(|(ppem, _)| *ppem)
-        .or_else(|| found.iter().copied().min_by_key(|(ppem, _)| *ppem))
-        .ok_or(FontError::BadTable)?;
-    let end = found
-        .iter()
-        .map(|(_, other)| *other)
-        .filter(|other| *other > at)
-        .min()
-        .unwrap_or(length);
-    let size = end - at;
-    if size + 12 > room {
-        return Err(FontError::Unsupported);
-    }
+        .or_else(|| {
+            found
+                .iter()
+                .copied()
+                .min_by_key(|(ppem, _)| *ppem)
+                .filter(|(_, at)| fits(*at))
+        })
+        .ok_or(FontError::Unsupported)?;
+    let size = size_of(at);
     let mut table = Vec::with_capacity(size + 12);
     table.extend_from_slice(&header[..4]);
     table.extend_from_slice(&1_u32.to_be_bytes());
@@ -493,16 +503,22 @@ mod tests {
 
     #[test]
     fn a_large_emoji_table_is_cut_to_one_size() {
-        // An `sbix` table of three strikes, each padded past the size
-        // under which a table is kept whole.
-        let strike = |ppem: u16, fill: u8| {
+        // An `sbix` table of four strikes, larger as their pictures are,
+        // and together past the size under which a table is kept whole.
+        const UNIT: usize = SMALL_SBIX / 8;
+        let strike = |ppem: u16, units: usize, fill: u8| {
             let mut bytes = crate::fixture::be(&[ppem, 72]);
-            bytes.resize(SMALL_SBIX / 2, fill);
+            bytes.resize(units * UNIT, fill);
             bytes
         };
-        let strikes = [strike(64, 1), strike(96, 2), strike(160, 3)];
-        let mut sbix = crate::fixture::be(&[1, 1, 0, 3]);
-        let mut at = 8 + 12;
+        let strikes = [
+            strike(64, 1, 1),
+            strike(96, 2, 2),
+            strike(160, 4, 3),
+            strike(300, 6, 4),
+        ];
+        let mut sbix = crate::fixture::be(&[1, 1, 0, 4]);
+        let mut at = 8 + 16;
         for bytes in &strikes {
             sbix.extend(u32::try_from(at).expect("offset").to_be_bytes());
             at += bytes.len();
@@ -510,21 +526,52 @@ mod tests {
         for bytes in &strikes {
             sbix.extend(bytes);
         }
+        assert!(sbix.len() > SMALL_SBIX);
+        let glyphs = [crate::fixture::boxed(500); 3];
+        let file = crate::fixture::font(&glyphs, &[('A', 2)], &[(b"sbix", sbix)]);
+        // The strike kept with `room` bytes for the face: its size in
+        // pixels, and the table is that strike alone.
+        let kept = |room: usize| {
+            let loaded = load_face(from(&file), None, room)?;
+            let table = table_of(&loaded, b"sbix");
+            assert_eq!(&table[4..12], &[0, 0, 0, 1, 0, 0, 0, 12]);
+            let ppem = u16::from_be_bytes([table[12], table[13]]);
+            let (units, fill) = match ppem {
+                64 => (1, 1),
+                96 => (2, 2),
+                160 => (4, 3),
+                _ => panic!("a strike of {ppem}"),
+            };
+            assert_eq!(table.len(), 12 + units * UNIT);
+            assert!(table[16..].iter().all(|byte| *byte == fill));
+            Ok::<u16, FontError>(ppem)
+        };
+        // With room for all of them the sharpest an atlas holds is kept:
+        // the strike of 300 is past that.
+        assert_eq!(kept(64 << 20), Ok(160));
+        // With less room, the sharpest that fits.
+        assert_eq!(kept(3 * UNIT), Ok(96));
+        assert_eq!(kept(3 * UNIT / 2), Ok(64));
+        // With no room for even one strike the face is refused.
+        assert_eq!(kept(UNIT / 2), Err(FontError::Unsupported));
+    }
+
+    #[test]
+    fn strikes_all_past_the_atlas_keep_the_smallest() {
+        const UNIT: usize = SMALL_SBIX;
+        let mut sbix = crate::fixture::be(&[1, 1, 0, 2]);
+        sbix.extend(16_u32.to_be_bytes());
+        sbix.extend(u32::try_from(16 + UNIT).expect("offset").to_be_bytes());
+        for ppem in [400_u16, 300] {
+            let mut strike = crate::fixture::be(&[ppem, 72]);
+            strike.resize(UNIT, 7);
+            sbix.extend(strike);
+        }
         let glyphs = [crate::fixture::boxed(500); 3];
         let file = crate::fixture::font(&glyphs, &[('A', 2)], &[(b"sbix", sbix)]);
         let loaded = load_face(from(&file), None, 64 << 20).expect("loaded");
-        assert!(loaded.len() < SMALL_SBIX, "{}", loaded.len());
-        // The 96 strike is the one kept: its bytes are the table's body.
         let table = table_of(&loaded, b"sbix");
-        assert_eq!(&table[4..12], &[0, 0, 0, 1, 0, 0, 0, 12]);
-        assert_eq!(&table[12..16], &[0, 96, 0, 72]);
-        assert_eq!(table.len(), 12 + SMALL_SBIX / 2);
-        assert!(table[16..].iter().all(|byte| *byte == 2));
-        // With no room for even one strike the face is refused.
-        assert_eq!(
-            load_face(from(&file), None, 1 << 20),
-            Err(FontError::Unsupported)
-        );
+        assert_eq!(&table[12..14], &300_u16.to_be_bytes());
     }
 
     fn table_of<'a>(font: &'a [u8], tag: &[u8; 4]) -> &'a [u8] {

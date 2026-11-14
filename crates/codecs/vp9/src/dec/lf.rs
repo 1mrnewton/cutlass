@@ -308,7 +308,13 @@ fn vertical<P: Pixel>(
         bits &= bits - 1;
         let bit = 1u8 << col;
         let x = x0 + col * 8;
+        // Strips with nothing in this column are passed over before their
+        // levels are looked up.
+        let edge = |r: &Run| (r.wide | r.mid | r.narrow) & bit != 0;
         for (y, a, b) in strips {
+            if !edge(a) && !b.as_ref().is_some_and(edge) {
+                continue;
+            }
             let ta = levels.dsp(a.lfl[col]);
             let tb = b.as_ref().map_or(ta, |b| levels.dsp(b.lfl[col]));
             let ka = kind(a, bit);
@@ -322,6 +328,9 @@ fn vertical<P: Pixel>(
             pairs(tg, x, *y, true, [ka, kb], thr, bd);
         }
         for (y, a, b) in strips {
+            if a.inner & bit == 0 && !b.as_ref().is_some_and(|b| b.inner & bit != 0) {
+                continue;
+            }
             let ta = levels.dsp(a.lfl[col]);
             let tb = b.as_ref().map_or(ta, |b| levels.dsp(b.lfl[col]));
             let ia = (a.inner & bit != 0).then_some(Wd::W4);
@@ -348,6 +357,9 @@ fn horizontal<P: Pixel>(
 ) {
     let limit = if cols >= 8 { 0xff } else { (1u8 << cols) - 1 };
     let bits = any(r) & limit;
+    if bits == 0 {
+        return;
+    }
     let wide = r.wide & limit;
     // The strip's pairs of 8-column edges, at row `y` and the inner ones
     // at `y + 4`: each inner edge reads what the edge above it in its own
@@ -385,12 +397,18 @@ fn horizontal<P: Pixel>(
         let i1 = (merge && r.inner & next != 0).then_some(Wd::W4);
         edges[ne] = (x, [kind(r, bit), kn], [t, tn]);
         ne += 1;
-        inner[ni] = (x, [i0, i1], [t, tn]);
-        ni += 1;
+        if i0.is_some() || i1.is_some() {
+            inner[ni] = (x, [i0, i1], [t, tn]);
+            ni += 1;
+        }
         col += if merge { 2 } else { 1 };
     }
-    row_pairs(tg, &edges[..ne], y, bd);
-    row_pairs(tg, &inner[..ni], y + 4, bd);
+    if ne > 0 {
+        row_pairs(tg, &edges[..ne], y, bd);
+    }
+    if ni > 0 {
+        row_pairs(tg, &inner[..ni], y + 4, bd);
+    }
 }
 
 /// One pair of 8-column horizontal edges: its first column, and each

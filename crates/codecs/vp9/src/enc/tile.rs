@@ -217,6 +217,46 @@ pub struct Shared<'a> {
     /// Which references (LAST, GOLDEN, ALTREF) are worth searching: those
     /// that hold a picture none before them holds.
     pub refs_live: [bool; 3],
+    /// Token costs (1/256 bit) by tx size, plane type, inter, band and
+    /// context, from the frame's probabilities: see [`token_costs`].
+    pub tok: &'a TokCosts,
+}
+
+/// [`Shared::tok`]: more, end of block, zero, one, two or more (signs
+/// added for the last two).
+pub type TokCosts = [[[[[[u32; 5]; 6]; 6]; 2]; 2]; 4];
+
+/// The token costs of a frame's coefficient probabilities, made once a
+/// frame rather than once a transform block.
+pub fn token_costs(fc: &FrameContext) -> Box<TokCosts> {
+    let cost = &*COST;
+    let bc = |bit: bool, p: u8| {
+        u32::from(if bit {
+            cost[256 - usize::from(p.max(1))]
+        } else {
+            cost[usize::from(p.max(1))]
+        })
+    };
+    let mut t: Box<TokCosts> = Box::new([[[[[[0; 5]; 6]; 6]; 2]; 2]; 4]);
+    for (tx, a) in t.iter_mut().enumerate() {
+        for (pl, b) in a.iter_mut().enumerate() {
+            for (inter, c) in b.iter_mut().enumerate() {
+                for (band, d) in c.iter_mut().enumerate() {
+                    for (ctx, e) in d.iter_mut().enumerate() {
+                        let p = &fc.coef[tx][pl][inter][band][ctx];
+                        *e = [
+                            bc(true, p[0]),
+                            bc(false, p[0]),
+                            bc(false, p[1]),
+                            bc(true, p[1]) + bc(false, p[2]) + 256,
+                            bc(true, p[1]) + bc(true, p[2]) + 256,
+                        ];
+                    }
+                }
+            }
+        }
+    }
+    t
 }
 
 /// The rate-distortion costs of one tx block (sample SSE plus lambda
@@ -301,6 +341,11 @@ const SUBBLOCK: [[u8; 2]; 4] = [[1, 2], [1, 3], [3, 2], [3, 3]];
 
 /// Speeds at and below which inter frames try blocks under 8×8.
 const SUB8_SPEED: u8 = 1;
+
+/// From this speed the search's trials take each coefficient's dead-zone
+/// level (costed as RD quantization costs it, with its end of block
+/// chosen); the blocks the search chooses are coded with RD quantization.
+const DZ_TRIAL_SPEED: u8 = 6;
 
 /// The 4×4 steps of a block under 8×8's sub-blocks across and down.
 fn sub_steps(bsize: u8) -> (usize, usize) {
@@ -2240,7 +2285,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 }
                 rd_eob = Some(e);
             } else {
-                let (eob, rd) = self.rd_levels(plane, tx, kind, x, y, intra, &mut levels);
+                let one = self.trial && s.speed >= DZ_TRIAL_SPEED;
+                let (eob, rd) = self.rd_levels(plane, tx, kind, x, y, intra, one, &mut levels);
                 self.rd = rd;
                 rd_eob = Some(eob);
             }
@@ -2336,7 +2382,9 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     /// zero), with the least distortion plus `lambda` times its token's
     /// bits, in scan order (so each token's context is known); then the
     /// end of block goes where the cost is least. Returns the end of
-    /// block and the costs of coding and of dropping the block.
+    /// block and the costs of coding and of dropping the block. With
+    /// `one`, each coefficient takes its dead-zone level instead (the
+    /// search's trials, from `DZ_TRIAL_SPEED`).
     #[allow(clippy::too_many_arguments)]
     fn rd_levels(
         &mut self,
@@ -2346,10 +2394,11 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         x: usize,
         y: usize,
         intra: bool,
+        one: bool,
         levels: &mut [i32],
     ) -> (usize, TxRd) {
         let mut q = std::mem::take(&mut self.rdq);
-        let out = self.rd_levels_in(&mut q, plane, tx, kind, x, y, intra, levels);
+        let out = self.rd_levels_in(&mut q, plane, tx, kind, x, y, intra, one, levels);
         self.rdq = q;
         out
     }
@@ -2365,9 +2414,12 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         x: usize,
         y: usize,
         intra: bool,
+        one: bool,
         levels: &mut [i32],
     ) -> (usize, TxRd) {
         let s = self.s;
+        // With `one`, each coefficient takes its dead-zone level alone.
+        let rnd = if intra { 0.42f32 } else { 0.33 };
         let n = 4usize << tx;
         let log2n = 2 + usize::from(tx);
         let shift = u32::from(tx == 3);
@@ -2455,27 +2507,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             );
         }
         // Token costs by band and context.
-        let cost = &*COST;
-        let bc = |bit: bool, p: u8| {
-            u32::from(if bit {
-                cost[256 - usize::from(p.max(1))]
-            } else {
-                cost[usize::from(p.max(1))]
-            })
-        };
-        let mut tc = [[[0u32; 5]; 6]; 6];
-        for (band, row) in probs.iter().enumerate() {
-            for (c, p) in row.iter().enumerate() {
-                // more, eob, zero, one, two-or-more (signs added below)
-                tc[band][c] = [
-                    bc(true, p[0]),
-                    bc(false, p[0]),
-                    bc(false, p[1]),
-                    bc(true, p[1]) + bc(false, p[2]) + 256,
-                    bc(true, p[1]) + bc(true, p[2]) + 256,
-                ];
-            }
-        }
+        let tc = &s.tok[usize::from(tx)][dqi][usize::from(!intra)];
         let energy = &mut q.energy[..1024];
         let mut ctx = ctx0;
         let mut prev_zero = false;
@@ -2517,7 +2549,11 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 }
             };
             let mut best = (f32::MAX, 0u32);
-            let cands: &[u32] = if lo == 0 {
+            let only;
+            let cands: &[u32] = if one {
+                only = [(a + if k == 0 { 0.5 } else { rnd }) as u32];
+                &only
+            } else if lo == 0 {
                 &[0, 1]
             } else if lo == 1 {
                 &[0, 1, 2]

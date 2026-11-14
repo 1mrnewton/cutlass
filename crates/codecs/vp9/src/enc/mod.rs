@@ -448,6 +448,7 @@ impl FrameEncoder {
             None
         };
         let ac = i32::from(h.y_dq[0][1]);
+        let tok = tile::token_costs(&parsed.fc);
         let shared = Shared {
             h,
             fc: &parsed.fc,
@@ -479,6 +480,7 @@ impl FrameEncoder {
             refs_live,
             switchable: h.interp == geom::SWITCHABLE,
             prepass: None,
+            tok: &tok,
         };
         // Fast inter frames: the motion search of every superblock first,
         // its rows shared out evenly among the threads (tile columns carry

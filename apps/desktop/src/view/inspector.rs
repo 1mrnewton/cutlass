@@ -2347,19 +2347,6 @@ fn pattern_row(
 /// Where the font menu's search keeps what was typed.
 const FONT_SEARCH: &str = "font search";
 
-/// The faces whose names have every word of `query`, in the order they
-/// were given; all of them for no words. Case does not matter.
-fn matching_faces<'f>(faces: &'f [(String, String)], query: &str) -> Vec<&'f (String, String)> {
-    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
-    faces
-        .iter()
-        .filter(|(_, label)| {
-            let label = label.to_lowercase();
-            words.iter().all(|word| label.contains(word.as_str()))
-        })
-        .collect()
-}
-
 /// A slider for each axis the title's face varies along: weight, width
 /// and whatever else its maker gave it. A face that does not vary has
 /// none. The track moves the title's own setting; the styles its maker
@@ -2423,7 +2410,7 @@ fn font_row(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspecti
                     .icon("search")
                     .focus()
                     .show(ui);
-                let matching = matching_faces(&faces, query);
+                let matching = cutlass_playback::matching_faces(&faces, query);
                 // Enter takes the first face left.
                 let entered = field.response.lost_focus()
                     && ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -3885,40 +3872,7 @@ fn paint_icon(ui: &Ui, rect: Rect, name: &str, color: Color32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{leading_number, matching_faces};
-
-    #[test]
-    fn the_font_search_keeps_the_faces_with_every_word() {
-        let faces: Vec<(String, String)> = [
-            ("Arial.ttf", "Arial"),
-            ("Arial Bold.ttf", "Arial Bold"),
-            ("HelveticaNeue.ttc#3", "Helvetica Neue Bold Italic"),
-            ("Kohinoor.ttc#0", "Kohinoor Devanagari"),
-        ]
-        .iter()
-        .map(|(name, label)| ((*name).to_owned(), (*label).to_owned()))
-        .collect();
-        let found = |query: &str| -> Vec<&str> {
-            matching_faces(&faces, query)
-                .iter()
-                .map(|(name, _)| name.as_str())
-                .collect()
-        };
-        // No words: every face, in the order given.
-        assert_eq!(found("").len(), 4);
-        assert_eq!(found("   ").len(), 4);
-        // A part of a name, in any case.
-        assert_eq!(found("aria"), ["Arial.ttf", "Arial Bold.ttf"]);
-        // Anywhere in the name.
-        assert_eq!(found("ari").len(), 3);
-        assert_eq!(found("NEUE"), ["HelveticaNeue.ttc#3"]);
-        // Every word must be there, in any order.
-        assert_eq!(found("bold arial"), ["Arial Bold.ttf"]);
-        assert_eq!(found("bold"), ["Arial Bold.ttf", "HelveticaNeue.ttc#3"]);
-        // It is the name people see that is searched, not the file's.
-        assert!(found("ttc").is_empty());
-        assert!(found("arial zz").is_empty());
-    }
+    use super::leading_number;
 
     #[test]
     fn a_value_box_reads_the_number_before_its_suffix() {

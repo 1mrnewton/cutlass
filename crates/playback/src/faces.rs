@@ -579,6 +579,82 @@ impl FaceTable {
         others
     }
 
+    /// The axes the face `text` is set in varies along, each with where
+    /// `text` has it: weight, width, slant and whatever else the face's
+    /// maker gave it. None for a face that does not vary or that the
+    /// table does not have; an axis the maker hid, or one with nowhere to
+    /// go, is left out.
+    #[must_use]
+    pub fn font_axes(&self, text: &cutlass_model::MaterialText) -> Vec<FontAxis> {
+        let Some(font) = self.set_as(text) else {
+            return Vec::new();
+        };
+        font.axes()
+            .into_iter()
+            .zip(font.settings())
+            .filter(|(axis, _)| !axis.hidden && axis.max > axis.min)
+            .map(|(axis, (_, value))| FontAxis {
+                name: axis.name.unwrap_or_else(|| axis_name(axis.tag)),
+                tag: axis.tag,
+                min: axis.min,
+                default: axis.default,
+                max: axis.max,
+                value,
+            })
+            .collect()
+    }
+
+    /// What `text`'s setting of its face becomes with the axis `tag` at
+    /// `value` and every other axis where it is, written as the text
+    /// keeps it; `None` when that is what it already has. Every axis is
+    /// written, so the face is where the title shows it whatever style
+    /// it started from, and a value past the axis's end is the end.
+    pub fn moved_font_axis(
+        &self,
+        text: &cutlass_model::MaterialText,
+        tag: [u8; 4],
+        value: f64,
+    ) -> Result<Option<String>, AxisError> {
+        let font = self.set_as(text).ok_or(AxisError::NoAxes)?;
+        let before = font.settings();
+        if !before.iter().any(|(have, _)| *have == tag) {
+            return Err(AxisError::NoSuchAxis);
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let wanted = value as f32;
+        if !wanted.is_finite() {
+            return Err(AxisError::NotANumber);
+        }
+        let after: Vec<([u8; 4], f32)> = before
+            .iter()
+            .zip(font.axes())
+            .map(|((have, at), axis)| {
+                let at = if *have == tag {
+                    wanted.clamp(axis.min, axis.max)
+                } else {
+                    *at
+                };
+                (*have, at)
+            })
+            .collect();
+        let written = cutlass_model::write_font_axes(&after);
+        Ok((written != cutlass_model::write_font_axes(&before)).then_some(written))
+    }
+
+    /// The face `text` is set in, as `text` has it set along its axes;
+    /// `None` for a face that does not vary.
+    fn set_as(&self, text: &cutlass_model::MaterialText) -> Option<cutlass_font::Font<'_>> {
+        let mut font = cutlass_font::read(self.face(&text.font_path)?).ok()?;
+        if !font.is_variable() {
+            return None;
+        }
+        let axes = text.font_axes();
+        if !axes.is_empty() {
+            font.set_variations(&axes).ok()?;
+        }
+        Some(font)
+    }
+
     /// The names of the fallback faces, best first.
     #[must_use]
     pub fn fallback_names(&self) -> Vec<String> {
@@ -786,6 +862,71 @@ impl Fonts for FaceTable {
         self.bytes_at(at)
             .map(|bytes| (bytes, best.style.bold, best.style.italic))
     }
+}
+
+/// One axis a title's face varies along, for a slider.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FontAxis {
+    pub tag: [u8; 4],
+    /// The axis's name, from the face or, where it gives none, from its
+    /// tag.
+    pub name: String,
+    pub min: f32,
+    pub default: f32,
+    pub max: f32,
+    /// Where the title has the face along it.
+    pub value: f32,
+}
+
+/// Why a title's face was not moved along an axis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AxisError {
+    /// The face does not vary, or the table does not have it.
+    NoAxes,
+    /// The face has no axis by that tag.
+    NoSuchAxis,
+    /// The value is no number.
+    NotANumber,
+}
+
+impl std::fmt::Display for AxisError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::NoAxes => "this face has no axes to set",
+            Self::NoSuchAxis => "this face has no such axis",
+            Self::NotANumber => "that is not a number",
+        })
+    }
+}
+
+impl std::error::Error for AxisError {}
+
+/// What an axis is called when its face does not say: the names of the
+/// axes every maker uses, and the tag itself for any other.
+fn axis_name(tag: [u8; 4]) -> String {
+    match &tag {
+        b"wght" => "Weight".to_owned(),
+        b"wdth" => "Width".to_owned(),
+        b"slnt" => "Slant".to_owned(),
+        b"ital" => "Italic".to_owned(),
+        b"opsz" => "Optical size".to_owned(),
+        _ => String::from_utf8_lossy(&tag).into_owned(),
+    }
+}
+
+/// The faces of `faces`, each a name and its label, whose labels have
+/// every word of `query`, in the order they were given; all of them for
+/// no words. Case does not matter.
+#[must_use]
+pub fn matching_faces<'f>(faces: &'f [(String, String)], query: &str) -> Vec<&'f (String, String)> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    faces
+        .iter()
+        .filter(|(_, label)| {
+            let label = label.to_lowercase();
+            words.iter().all(|word| label.contains(word.as_str()))
+        })
+        .collect()
 }
 
 /// Whether a scanned face's file is one of [`FALLBACK_FACES`], as its only
@@ -1478,6 +1619,99 @@ mod tests {
         assert!(!again.names().iter().any(|name| name.starts_with("Other")));
         // Nothing to add, to nothing.
         assert!(FaceTable::default().with_bundled(&[]).names().is_empty());
+    }
+
+    #[test]
+    fn a_titles_face_is_moved_along_one_axis_and_kept_on_the_others() {
+        use cutlass_model::MaterialText;
+        let table = FaceTable::from_pairs(vec![
+            ("Sample.ttf".to_owned(), SAMPLE.to_vec()),
+            ("Vary.ttf".to_owned(), VARIABLE.to_vec()),
+        ])
+        .with_bundled(&[("Pinned.ttf", VARIABLE)]);
+        let mut text = MaterialText::new("title");
+        // A face that does not vary, and one the table lacks: no axes.
+        text.font_path = "Sample.ttf".to_owned();
+        assert!(table.font_axes(&text).is_empty());
+        assert_eq!(
+            table.moved_font_axis(&text, *b"wght", 700.0),
+            Err(AxisError::NoAxes)
+        );
+        text.font_path = "Gone.ttf".to_owned();
+        assert!(table.font_axes(&text).is_empty());
+        // The fixture varies in weight and width, each named by the face.
+        text.font_path = "Vary.ttf".to_owned();
+        let shown = |text: &MaterialText| -> Vec<(String, f32, f32, f32, f32)> {
+            table
+                .font_axes(text)
+                .into_iter()
+                .map(|axis| (axis.name, axis.min, axis.default, axis.max, axis.value))
+                .collect()
+        };
+        assert_eq!(
+            shown(&text),
+            [
+                ("Weight".to_owned(), 100.0, 400.0, 900.0, 400.0),
+                ("Width".to_owned(), 50.0, 100.0, 150.0, 100.0)
+            ]
+        );
+        // One axis moves; every axis is written; past an end is the end.
+        let moved = table.moved_font_axis(&text, *b"wght", 650.0);
+        assert_eq!(moved, Ok(Some("wght=650,wdth=100".to_owned())));
+        text.font_variations = "wght=650,wdth=100".to_owned();
+        assert_eq!(
+            table.moved_font_axis(&text, *b"wdth", 10.0),
+            Ok(Some("wght=650,wdth=50".to_owned()))
+        );
+        assert_eq!(shown(&text)[0].4, 650.0);
+        // Where it already is, nothing; an axis it lacks, and a value
+        // that is no number.
+        assert_eq!(table.moved_font_axis(&text, *b"wght", 650.0), Ok(None));
+        assert_eq!(
+            table.moved_font_axis(&text, *b"slnt", -8.0),
+            Err(AxisError::NoSuchAxis)
+        );
+        assert_eq!(
+            table.moved_font_axis(&text, *b"wght", f64::NAN),
+            Err(AxisError::NotANumber)
+        );
+        // A named style starts from where its maker set it: the bold one
+        // moved in width alone is still bold.
+        let mut bold = MaterialText::new("bold");
+        bold.font_path = "Pinned.ttf@Bold".to_owned();
+        assert_eq!(shown(&bold)[0].4, 700.0);
+        assert_eq!(
+            table.moved_font_axis(&bold, *b"wdth", 80.0),
+            Ok(Some("wght=700,wdth=80".to_owned()))
+        );
+        assert_eq!(
+            AxisError::NoAxes.to_string(),
+            "this face has no axes to set"
+        );
+    }
+
+    #[test]
+    fn faces_are_searched_by_every_word_typed() {
+        let faces = vec![
+            ("a.ttf".to_owned(), "Noto Sans Devanagari".to_owned()),
+            ("b.ttf".to_owned(), "Noto Serif".to_owned()),
+            ("c.ttf".to_owned(), "Inter Bold".to_owned()),
+        ];
+        let found = |query: &str| -> Vec<&str> {
+            matching_faces(&faces, query)
+                .into_iter()
+                .map(|(name, _)| name.as_str())
+                .collect()
+        };
+        assert_eq!(found(""), ["a.ttf", "b.ttf", "c.ttf"]);
+        assert_eq!(found("  noto "), ["a.ttf", "b.ttf"]);
+        assert_eq!(found("SANS noto"), ["a.ttf"]);
+        assert_eq!(found("ari"), ["a.ttf"]);
+        assert_eq!(found("bold inter"), ["c.ttf"]);
+        assert!(found("comic").is_empty());
+        assert!(found("noto comic").is_empty());
+        assert_eq!(found("   ").len(), 3);
+        assert!(matching_faces(&[], "noto").is_empty());
     }
 
     #[test]

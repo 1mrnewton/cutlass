@@ -2465,8 +2465,10 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         // single float sum must keep its order; every block has a
         // multiple of 16 coefficients).
         // And the scan's last that could round to a level (0.3 of a step
-        // or more), as one past the largest scan index among them.
+        // or more; with `one`, what the dead zone rounds up), as one past
+        // the largest scan index among them.
         let iscan = crate::dec::parse::iscan(tx, kind);
+        let (th, th_dc) = if one { (1.0 - rnd, 0.5) } else { (0.3, 0.3) };
         let mut sums = [0.0f32; 8];
         let mut lasts = [0u32; 8];
         for ((a8, v8), i8) in a_nat[..max]
@@ -2481,7 +2483,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 let a = v.abs() * inv_ac;
                 a8[i] = a;
                 sums[i] += v * v;
-                let e = if a >= 0.3 { u32::from(i8[i]) + 1 } else { 0 };
+                let e = if a >= th { u32::from(i8[i]) + 1 } else { 0 };
                 lasts[i] = lasts[i].max(e);
             }
         }
@@ -2491,7 +2493,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         // Only the DC is at scan index 0, and it has its own step.
         let mut last_sig = lasts.iter().copied().max().unwrap_or(0) as usize;
         if last_sig <= 1 {
-            last_sig = usize::from(a_nat[0] >= 0.3);
+            last_sig = usize::from(a_nat[0] >= th_dc);
         }
         for (k, a) in av[..last_sig].iter_mut().enumerate() {
             *a = a_nat[tr(k)];

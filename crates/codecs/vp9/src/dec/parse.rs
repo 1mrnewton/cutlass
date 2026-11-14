@@ -430,9 +430,9 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
             let (above, left) = geom::partition_context_byte(sub);
             let a = col - self.col0;
             let end = (a + n).min(self.f.above_part.len());
-            self.f.above_part[a..end].fill(above);
+            fill(&mut self.f.above_part[a..end], above);
             let l = row & 7;
-            self.left_part[l..(l + n).min(8)].fill(left);
+            fill(&mut self.left_part[l..(l + n).min(8)], left);
         }
     }
 
@@ -483,7 +483,7 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
             let tw = self.f.width;
             for y in 0..b.y_mis {
                 let at = (row + y) * tw + col - self.col0;
-                self.f.mvs[at..at + b.x_mis].fill(r);
+                fill(&mut self.f.mvs[at..at + b.x_mis], r);
             }
         }
         let coded = !b.skip;
@@ -523,9 +523,9 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
         };
         let a = col - self.col0;
         let end = (a + bw).min(self.f.above.len());
-        self.f.above[a..end].fill(nb);
+        fill(&mut self.f.above[a..end], nb);
         let l = row & 7;
-        self.left[l..(l + bh).min(8)].fill(nb);
+        fill(&mut self.left[l..(l + bh).min(8)], nb);
         if s.filter_on {
             let index = (row >> 3) * self.f.width.div_ceil(8) + ((col - self.col0) >> 3);
             lpf::build(
@@ -556,7 +556,7 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
                 };
                 for y in 0..b.y_mis {
                     let at = (row + y) * self.f.width + col - self.col0;
-                    self.f.grid[at..at + b.x_mis].fill(g);
+                    fill(&mut self.f.grid[at..at + b.x_mis], g);
                 }
             }
         }
@@ -745,7 +745,7 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
     fn write_seg(&mut self, b: &Blk, id: u8) {
         for y in 0..b.y_mis {
             let at = (b.row + y) * self.f.width + b.col - self.col0;
-            self.f.segmap[at..at + b.x_mis].fill(id);
+            fill(&mut self.f.segmap[at..at + b.x_mis], id);
         }
     }
 
@@ -1275,9 +1275,9 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
             let l = ((b.row * 2) & 15) >> ssy;
             let above = &mut self.f.above_nz[plane];
             let end = (a + w).min(above.len());
-            above[a..end].fill(0);
+            fill(&mut above[a..end], 0);
             let left = &mut self.left_nz[plane];
-            left[l..(l + hh).min(16)].fill(0);
+            fill(&mut left[l..(l + hh).min(16)], 0);
         }
     }
 
@@ -1533,6 +1533,33 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
         }
         *self.b = local;
         (c, nz(c))
+    }
+}
+
+/// `s.fill(v)` for the short runs the parse writes (a block's span in
+/// 4×4 or 8×8 units: 1 to 16), as fixed stores where `fill` would call
+/// `memset`.
+#[inline(always)]
+fn fill<T: Copy>(s: &mut [T], v: T) {
+    fn fixed<T: Copy, const N: usize>(s: &mut [T], v: T) -> bool {
+        match <&mut [T; N]>::try_from(s) {
+            Ok(a) => {
+                *a = [v; N];
+                true
+            }
+            Err(_) => false,
+        }
+    }
+    let done = match s.len() {
+        1 => fixed::<T, 1>(s, v),
+        2 => fixed::<T, 2>(s, v),
+        4 => fixed::<T, 4>(s, v),
+        8 => fixed::<T, 8>(s, v),
+        16 => fixed::<T, 16>(s, v),
+        _ => false,
+    };
+    if !done {
+        s.fill(v);
     }
 }
 

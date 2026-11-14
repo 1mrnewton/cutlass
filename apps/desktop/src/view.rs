@@ -819,8 +819,9 @@ fn new_project_button(ui: &mut Ui) -> bool {
     .clicked()
 }
 
-/// A project at home: its first frame over its name, length and date. A
-/// project with an empty timeline shows a quiet field there instead.
+/// A project at home: its first frame over its name, length and date,
+/// black when nothing is at the timeline's start. Until the picture is
+/// drawn, a quiet field shows there instead.
 fn project_card(ui: &mut Ui, shell: &mut Shell, project: &ListedProject) -> bool {
     const WIDTH: f32 = 220.0;
     const PICTURE: f32 = 124.0;

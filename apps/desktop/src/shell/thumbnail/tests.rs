@@ -72,10 +72,33 @@ fn a_projects_card_shows_its_first_frame_drawn_again_after_each_save() {
 }
 
 #[test]
-fn a_project_with_an_empty_timeline_has_no_card_picture() {
+fn a_project_with_an_empty_timeline_has_a_black_card_picture() {
     let temp = Temp::new();
-    Folder::new(Draft::empty("draft")).save(&temp.path).unwrap();
+    let mut draft = Draft::empty("draft");
+    draft.canvas_config.width = 64;
+    draft.canvas_config.height = 32;
+    Folder::new(draft).save(&temp.path).unwrap();
     let mut desktop = shell();
-    assert_eq!(settled(&mut desktop, &temp.path), None);
-    assert!(!temp.path.join(THUMBNAIL_FILE).exists());
+    let file = settled(&mut desktop, &temp.path).expect("a card picture");
+    let (size, middle) = read(&file);
+    assert_eq!(size, (64, 32));
+    assert!(near(middle, [0, 0, 0]), "{middle:?}");
+}
+
+#[test]
+fn a_timeline_that_starts_with_a_gap_has_a_black_card_picture() {
+    let temp = Temp::new();
+    movie_project(&temp.path);
+    // Move both clips a second later: nothing is at the start.
+    let mut folder = Folder::read(&temp.path).unwrap();
+    for segment in &mut folder.draft.tracks[0].segments {
+        segment.target.start.0 += 1_000_000;
+    }
+    folder.draft.duration = cutlass_model::Micros(3_000_000);
+    folder.save(&temp.path).unwrap();
+    let mut desktop = shell();
+    let file = settled(&mut desktop, &temp.path).expect("a card picture");
+    let (size, middle) = read(&file);
+    assert_eq!(size, (64, 32));
+    assert!(near(middle, [0, 0, 0]), "{middle:?}");
 }

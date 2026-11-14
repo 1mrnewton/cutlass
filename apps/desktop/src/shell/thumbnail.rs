@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::SystemTime;
 
+use cutlass_engine::Thumb;
 use cutlass_model::{Micros, THUMBNAIL_FILE};
 
 use super::cover::{jpeg, on_black};
@@ -102,7 +103,8 @@ impl Shell {
 }
 
 /// Draw the first frame of the project at `project` and write it as its
-/// card picture. A project with nothing on its timeline has no picture.
+/// card picture. A timeline with nothing at its start draws black there, as
+/// the compositor does; a timeline with nothing on it at all is black too.
 fn draw_thumbnail(
     project: &Path,
     readers: &cutlass_eval::ReaderFactory,
@@ -115,12 +117,9 @@ fn draw_thumbnail(
         .map_err(ShellError::Store)?
         .draft;
     if draft.duration.0 <= 0 {
-        return match std::fs::remove_file(&file) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                Err(ShellError::Io(error.to_string()))
-            }
-            _ => Ok(()),
-        };
+        let picture = black(&draft)
+            .ok_or_else(|| ShellError::Unavailable("the canvas has no size".to_owned()))?;
+        return write_replaced(&file, &jpeg(&picture)?);
     }
     let (width, height, rgba) = cutlass_export::still_picture(
         &cutlass_export::MovieSources {
@@ -137,6 +136,22 @@ fn draw_thumbnail(
     let picture = on_black(width, height, rgba, THUMBNAIL_ROWS)
         .ok_or_else(|| ShellError::Unavailable("the first frame is empty".to_owned()))?;
     write_replaced(&file, &jpeg(&picture)?)
+}
+
+/// A black picture in the canvas's shape, at most [`THUMBNAIL_ROWS`] rows.
+fn black(draft: &cutlass_model::Draft) -> Option<Thumb> {
+    let width = u64::try_from(draft.canvas_config.width).ok()?;
+    let height = u64::try_from(draft.canvas_config.height).ok()?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let rows = height.min(u64::from(THUMBNAIL_ROWS));
+    let columns = (width * rows).div_ceil(height).max(1);
+    Some(Thumb {
+        width: u32::try_from(columns).ok()?,
+        height: u32::try_from(rows).ok()?,
+        rgba: [0, 0, 0, 255].repeat(usize::try_from(columns * rows).ok()?),
+    })
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {

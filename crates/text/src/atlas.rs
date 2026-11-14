@@ -22,6 +22,9 @@ use crate::TextError;
 
 /// Atlas pixels across one em.
 pub(crate) const ATLAS_EM: f32 = 64.0;
+/// The coarsest grid a glyph too large for the usual one is painted on:
+/// at this a cell holds a glyph thirty ems across.
+const COARSEST_EM: f32 = 8.0;
 /// Texels of distance stored on each side of the outline.
 pub(crate) const SPREAD: f32 = 8.0;
 const MAX_CELL: u16 = 256;
@@ -189,8 +192,22 @@ fn paint_outline(font: &Font<'_>, glyph_id: u16) -> Result<GlyphImage, TextError
         return Ok(blank(unit));
     }
     let bounds = bounds(&outline)?;
-    let width = cell_span(bounds.min_x, bounds.max_x, unit)?;
-    let height = cell_span(bounds.min_y, bounds.max_y, unit)?;
+    // A glyph too large for a cell at the usual grid is painted on a
+    // coarser one, each half as fine as the last: a phrase drawn as one
+    // glyph, a long swash, a tall bracket. It has the texels to spare.
+    let mut em = ATLAS_EM;
+    let (unit, width, height) = loop {
+        let unit = f32::from(font.units_per_em()) / em;
+        let spans = (
+            cell_span(bounds.min_x, bounds.max_x, unit),
+            cell_span(bounds.min_y, bounds.max_y, unit),
+        );
+        match spans {
+            (Ok(width), Ok(height)) => break (unit, width, height),
+            _ if em > COARSEST_EM => em /= 2.0,
+            (Err(error), _) | (_, Err(error)) => return Err(error),
+        }
+    };
     if width == 0 || height == 0 {
         return Ok(blank(unit));
     }
@@ -205,7 +222,7 @@ fn paint_outline(font: &Font<'_>, glyph_id: u16) -> Result<GlyphImage, TextError
         left,
         top,
         unit,
-        pixels_per_em: ATLAS_EM,
+        pixels_per_em: em,
         kind: GlyphKind::Distance,
         sdf,
         color: Vec::new(),
@@ -963,6 +980,37 @@ mod tests {
         let pad = super::SPREAD * unit;
         let edges = super::flatten(&outline, bounds.min_x - pad, bounds.max_y + pad, unit).ok()?;
         Some(super::raster_whole(width, height, &edges))
+    }
+
+    #[test]
+    fn a_glyph_too_large_for_the_usual_grid_is_painted_on_a_coarser_one() {
+        let font = read(include_bytes!("../../font/fixtures/wide.ttf")).expect("wide");
+        let mut atlas = Atlas::new();
+        // Six ems across: 32 texels to the em, and its box is inside.
+        let image = atlas.glyph(&font, 1).expect("six ems").clone();
+        assert_eq!(image.kind, super::GlyphKind::Distance);
+        assert_eq!(image.pixels_per_em, 32.0);
+        assert_eq!(image.unit, 1_000.0 / 32.0);
+        assert!(image.width <= 256 && image.height <= 256);
+        assert_eq!((image.width, image.height), (6 * 32 + 16, 32 + 16));
+        // The field's own reach is the same number of texels, so the
+        // box starts that far in from the left and the top.
+        assert_eq!(image.left, -8.0 * image.unit);
+        assert_eq!(image.top, 1_000.0 + 8.0 * image.unit);
+        assert!(texel(&image, 3_000.0, 500.0) >= 250);
+        assert!(texel(&image, -200.0, 500.0) < 100);
+        assert_eq!(image.sdf[0], 0);
+        // Twenty ems across: 8 to the em.
+        let wider = atlas.glyph(&font, 2).expect("twenty ems");
+        assert_eq!(wider.pixels_per_em, 8.0);
+        assert!(wider.width <= 256);
+        // Past the coarsest grid a glyph is refused, and a title leaves
+        // it blank.
+        assert!(matches!(atlas.glyph(&font, 3), Err(TextError::Limit)));
+        assert_eq!(atlas.drawn(&font, 3).expect("blank").width, 0);
+        // A title of the wide glyph draws it as wide as its advance.
+        let wide = title(include_bytes!("../../font/fixtures/wide.ttf"), None, "A");
+        assert!(count(&wide, |pixel| pixel == [255, 255, 255, 255]) > 6 * 64 * 64 / 2);
     }
 
     #[test]

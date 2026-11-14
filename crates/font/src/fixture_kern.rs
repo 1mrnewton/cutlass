@@ -285,6 +285,26 @@ pub(crate) fn extended() -> Vec<u8> {
     font(&glyphs(), &MAP, &[(b"kerx", kerx), (b"ankr", anchors())])
 }
 
+/// A face with glyphs far wider than an em, as a phrase drawn as one
+/// glyph is: `A` is six ems across and one tall, `B` twenty ems across,
+/// and `C` thirty-two, which is past any grid a glyph is painted on.
+pub(crate) fn wide() -> Vec<u8> {
+    let across = |ems: i16| Glyph {
+        advance: u16::try_from(ems).expect("ems") * 1_000,
+        outline: Some([0, 0, ems * 1_000, 1_000]),
+    };
+    let glyphs = [
+        boxed(500),
+        across(6),
+        across(20),
+        Glyph {
+            advance: 500,
+            outline: Some([-16_000, 0, 16_000, 1_000]),
+        },
+    ];
+    font(&glyphs, &[('A', 1), ('B', 2), ('C', 3)], &[])
+}
+
 /// A fixture's file name and what builds it.
 type Built = (&'static str, fn() -> Vec<u8>);
 
@@ -293,6 +313,9 @@ const FILES: [Built; 3] = [
     ("kerx.ttf", extended),
     ("kern-stuck.ttf", stuck),
 ];
+
+/// Fixtures with no kerning, kept and checked the same way.
+const OTHER_FILES: [Built; 1] = [("wide.ttf", wide)];
 
 fn path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -311,12 +334,20 @@ fn the_kern_fixture_files_are_what_the_builder_writes() {
         let face = crate::read(&stored).expect("font");
         assert!(!face.kern_passes().is_empty() || !face.kerx_passes().is_empty());
     }
+    for (name, build) in OTHER_FILES {
+        let stored = std::fs::read(path(name)).expect("fixture");
+        assert!(
+            stored == build(),
+            "{name} is stale: write the fixtures again"
+        );
+        crate::read(&stored).expect("font");
+    }
 }
 
 #[test]
 #[ignore = "writes the kern fixture fonts"]
 fn write_the_kern_fixture_fonts() {
-    for (name, build) in FILES {
+    for (name, build) in FILES.iter().chain(&OTHER_FILES) {
         std::fs::write(path(name), build()).expect("write");
     }
 }

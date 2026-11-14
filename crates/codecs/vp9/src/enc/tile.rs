@@ -371,6 +371,22 @@ const FAST_TX_SPEED: u8 = 7;
 /// chosen); the blocks the search chooses are coded with RD quantization.
 const DZ_TRIAL_SPEED: u8 = 5;
 
+/// The largest transform of the one-pass speeds. A chroma transform is
+/// as large as luma's (one size smaller in 4:2:0) and at these speeds
+/// nothing tries a smaller one: capped, chroma keeps the detail a large
+/// transform's few levels drop. At 8×8 from speed 9: 23 to 25% fewer
+/// bits at the same averaged PSNR on clean and grainy 720p, and 0.7 to
+/// 7% at the same PSNR-Y, in the same time; 16×16 at speed 8: −11 to
+/// −13% averaged, +0.6 to +4.6% on PSNR-Y (speed 7, which tries the next
+/// smaller transform, loses more on PSNR-Y than it gains).
+fn fast_tx_cap(speed: u8) -> u8 {
+    match speed {
+        9.. => geom::TX_8X8,
+        8 => geom::TX_16X16,
+        _ => TX_32X32,
+    }
+}
+
 /// The 4×4 steps of a block under 8×8's sub-blocks across and down.
 fn sub_steps(bsize: u8) -> (usize, usize) {
     match bsize {
@@ -1026,11 +1042,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             skip: false,
             tx: geom::max_tx(bsize)
                 .min(geom::tx_mode_biggest(s.h.tx_mode))
-                .min(if s.speed >= 10 {
-                    geom::TX_16X16
-                } else {
-                    TX_32X32
-                }),
+                .min(fast_tx_cap(s.speed)),
             mode: geom::DC,
             uv: geom::DC,
             refs: [INTRA_FRAME, INTRA_FRAME],

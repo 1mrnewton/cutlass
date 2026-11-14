@@ -37,6 +37,27 @@ use self::parse::{LfMi, Shared, State, Tile};
 use self::recon::{Ctx, Recon, RefPic, Scale, View};
 use self::syntax::TileSyntax;
 
+/// Parses running now, on any thread: reconstruction gives way to them
+/// between superblock rows (a later frame waits on every parse before it,
+/// on none of the reconstruction).
+static PARSING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts a parse while it lives.
+struct Parsing;
+
+impl Parsing {
+    fn start() -> Self {
+        PARSING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for Parsing {
+    fn drop(&mut self) {
+        PARSING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 fn bad(what: &'static str) -> CodecError {
     CodecError::Malformed { at_bit: 0, what }
 }
@@ -600,7 +621,10 @@ pub fn decode_frame<P: Pixel + Send + Sync>(
         })
     };
     if let Some((w, ret)) = workers {
-        fp.all()?;
+        {
+            let _parsing = Parsing::start();
+            fp.all()?;
+        }
         let mut out = fp.finish();
         let writer = frame::writer(&dims, spare);
         let pic = pic_of(Arc::clone(writer.shared()));
@@ -614,6 +638,9 @@ pub fn decode_frame<P: Pixel + Send + Sync>(
         let shown = present.map(|f| (f, Arc::clone(&pic)));
         w.run(move || {
             for r in 0..rows {
+                if PARSING.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                    std::thread::yield_now();
+                }
                 fr.row(&reuse.tiles, &reuse.masks, &reuse.grid, r);
             }
             drop(fr);

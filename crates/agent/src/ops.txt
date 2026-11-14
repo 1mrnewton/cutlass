@@ -1,70 +1,70 @@
-place: Insert a whole segment on a track, ordered by its start; its material must already be in the draft (see import). The segment needs id, material_id and target_timerange {start, duration} in microseconds on the timeline; source_timerange {start, duration} is the part of the media used, also microseconds; speed and volume default to 1.
-{"op":"place","track_id":"main","segment":{"id":"b","material_id":"m-b","target_timerange":{"start":5000000,"duration":3000000},"source_timerange":{"start":0,"duration":3000000}}}
+place: Insert a whole segment on a track; its material must already be in the library (see import) and suit the lane (a picture on a video lane, a sound on an audio lane). The segment needs id, material_id and target_timerange {start, duration} in microseconds on the timeline; source_timerange {start, duration} (optional, microseconds) is the part of the media used; speed and volume default to 1. On main with the magnet on, clips pack from 0 in start order with no gaps; another lane refuses an overlap.
+{"op":"place","track_id":"main","segment":{"id":"c","material_id":"m-c","target_timerange":{"start":8000000,"duration":3000000},"source_timerange":{"start":0,"duration":3000000}}}
 
-move: Move a clip to a start time on a track, keeping its length.
-{"op":"move","segment_id":"a","track_id":"main","start":0}
+move: Move a clip to a timeline start (microseconds) on a lane of its kind, the same lane or another, keeping its length; on main with the magnet on the lane packs again, another lane refuses an overlap.
+{"op":"move","segment_id":"music-1","track_id":"music","start":1000000}
 
-trim: Move one edge (start or end) of a clip to a timeline time.
+trim: Move one edge (start or end) of a clip to a timeline time in microseconds; the other edge stays, and the media must reach that far.
 {"op":"trim","segment_id":"a","edge":"start","time":500000}
 
-set_words: Replace the words of a caption's text material (its material_id from draft.query). words is three parallel arrays; start_time and end_time are milliseconds from the caption's start, text the words; the caption reads the words joined by spaces.
-{"op":"set_words","material_id":"cap-1-text","words":{"start_time":[0,400],"end_time":[400,900],"text":["Hello","there"]}}
+set_words: Replace the words of a caption's text material (its material_id from draft.query). words is three parallel arrays; start_time and end_time are milliseconds from the caption's start, text the words; the caption reads the words joined by spaces, and a word "\n" breaks the line.
+{"op":"set_words","material_id":"cap-1-text","words":{"start_time":[0,400],"end_time":[400,900],"text":["Hello","again"]}}
 
-add_caption: Place one caption for the clip source_id on the text lane track_id (made when missing), with new ids segment_id and material_id. It spans the source clip, or the optional span {start, duration} in microseconds of timeline time inside it; word times are milliseconds from the caption's own start; face is a font file name with no folder, empty for the default.
-{"op":"add_caption","source_id":"a","track_id":"captions","segment_id":"cap-1","material_id":"cap-1-text","words":{"start_time":[0,400],"end_time":[400,900],"text":["Hello","there"]},"span":{"start":0,"duration":900000},"face":""}
+add_caption: Place one caption for the clip source_id on the text lane track_id (made when missing), with new ids segment_id and material_id, linked to the source so it follows it. It spans the source clip, or the optional span {start, duration} in microseconds of timeline time inside it; word times are milliseconds from the caption's own start; face is a font file name with no folder, such as Inter[opsz,wght].ttf (empty stores no font and the caption draws nothing).
+{"op":"add_caption","source_id":"a","track_id":"captions","segment_id":"cap-2","material_id":"cap-2-text","words":{"start_time":[0,400],"end_time":[400,900],"text":["Hello","there"]},"span":{"start":1000000,"duration":900000},"face":"Inter[opsz,wght].ttf"}
 
-add_subtitles: Place subtitle cues as captions on a new text lane track_id (refused if it exists, if cues is empty, or if cues overlap). Each cue has new segment_id and material_id, target {start, duration} in microseconds on the timeline, and words with times in milliseconds from the cue's start; face is a font file name, empty for the default.
-{"op":"add_subtitles","track_id":"subs","cues":[{"segment_id":"sub-1","material_id":"sub-1-text","target":{"start":0,"duration":1500000},"words":{"start_time":[0,600],"end_time":[600,1500],"text":["Welcome","back"]}},{"segment_id":"sub-2","material_id":"sub-2-text","target":{"start":1500000,"duration":1000000},"words":{"start_time":[0],"end_time":[1000],"text":["everyone"]}}],"face":""}
+add_subtitles: Place subtitle cues as captions on a new text lane track_id (refused if the lane exists, if cues is empty, if a cue has no words, or if cues overlap). Each cue has new segment_id and material_id, target {start, duration} in microseconds on the timeline, and words with times in milliseconds from the cue's start; face as in add_caption.
+{"op":"add_subtitles","track_id":"subs","cues":[{"segment_id":"sub-1","material_id":"sub-1-text","target":{"start":0,"duration":1500000},"words":{"start_time":[0,600],"end_time":[600,1500],"text":["Welcome","back"]}},{"segment_id":"sub-2","material_id":"sub-2-text","target":{"start":1500000,"duration":1000000},"words":{"start_time":[0],"end_time":[1000],"text":["everyone"]}}],"face":"Inter[opsz,wght].ttf"}
 
-insert_caption: Place one caption on the lane of the existing caption like, copying its look and place, taking the words of cue (new segment_id and material_id, target in microseconds, word times in milliseconds from the cue's start). The cue must fit beside the lane's clips.
-{"op":"insert_caption","like":"cap-1","cue":{"segment_id":"cap-2","material_id":"cap-2-text","target":{"start":2000000,"duration":1000000},"words":{"start_time":[0,500],"end_time":[500,1000],"text":["See","you"]}}}
+insert_caption: Place one caption on the lane of the text clip like, copying its look and place on the canvas, taking the words of cue (new segment_id and material_id, target in microseconds, word times in milliseconds from the cue's start). The cue must not overlap the lane's clips; it is not linked to any clip.
+{"op":"insert_caption","like":"cap-1","cue":{"segment_id":"cap-3","material_id":"cap-3-text","target":{"start":2000000,"duration":1000000},"words":{"start_time":[0,500],"end_time":[500,1000],"text":["See","you"]}}}
 
-recaption_clip: Replace every caption linked to clip source_id on the lane of caption like (one of those captions) with new lines, each a cue as in add_subtitles, styled like like; face is used only when like has none.
-{"op":"recaption_clip","source_id":"a","like":"cap-1","lines":[{"segment_id":"cap-3","material_id":"cap-3-text","target":{"start":0,"duration":1200000},"words":{"start_time":[0,500],"end_time":[500,1200],"text":["New","line"]}}],"face":""}
+recaption_clip: Replace every caption linked to clip source_id on the lane of caption like (which must be one of them) with new lines, each a cue as in add_subtitles, styled and placed like like and linked to source_id; face is used only when like has no font.
+{"op":"recaption_clip","source_id":"a","like":"cap-1","lines":[{"segment_id":"cap-4","material_id":"cap-4-text","target":{"start":0,"duration":1200000},"words":{"start_time":[0,500],"end_time":[500,1200],"text":["New","line"]}}],"face":""}
 
-extract_audio: Copy a picture clip's sound onto a new audio clip (new ids segment_id and material_id) on audio lane track_id, made when missing, linked to source_id; the picture clip goes silent and stays where it is.
+extract_audio: Copy a picture clip's sound onto a new audio clip (new ids segment_id and material_id) on audio lane track_id, made when missing, with the picture's range, speed and volume, linked to source_id; the picture goes silent and stays where it is. Refused when the picture's file path is empty or its sound is already extracted.
 {"op":"extract_audio","source_id":"a","track_id":"audio-1","segment_id":"a-sound","material_id":"a-sound-audio"}
 
-recover_audio: Give a picture clip whose sound was extracted its sound back, and remove the extracted audio clip if it is still linked.
+recover_audio: Give a picture clip whose sound was extracted its sound back, and remove the extracted audio clip if it is still linked; refused when the picture still has its own sound.
 {"op":"recover_audio","segment_id":"a"}
 
-set_track_attribute: Turn one lane flag on or off; bit is 1 mute, 2 hide, 4 lock, 8 solo.
-{"op":"set_track_attribute","track_id":"main","bit":1,"on":true}
+set_track_attribute: Turn one lane flag on or off; bit is 1 mute, 2 hide, 4 lock, 8 solo (16 muted-by-solo is kept by solo itself); a locked lane refuses edits to its clips.
+{"op":"set_track_attribute","track_id":"music","bit":1,"on":true}
 
-set_constant_speed: Play a clip at one speed; 2.0 is twice as fast and halves its length.
+set_constant_speed: Play a clip at one speed above 0; 2.0 is twice as fast and halves its length (length is the source length divided by speed); a speed curve on it stops.
 {"op":"set_constant_speed","segment_id":"a","speed":2.0}
 
-set_curve_speed: Give a clip a speed curve; points have x from 0 to 1 across the clip and y the speed there (1 normal), straight between points, first x 0 and last x 1; speed_id names the new speed material; the clip's length follows.
+set_curve_speed: Give a clip a speed curve; points have x from 0 to 1 across the clip's source and y the speed there (above 0, 1 normal), straight between points and held before the first and after the last; fewer than two points keeps the constant speed; speed_id names the new speed material when the clip has none; the clip's length follows.
 {"op":"set_curve_speed","segment_id":"a","speed_id":"a-speed","points":[{"x":0.0,"y":1.0},{"x":0.5,"y":3.0},{"x":1.0,"y":1.0}]}
 
 set_change_pitch: on true lets the pitch rise and fall with the speed; false keeps the pitch as the speed changes.
-{"op":"set_change_pitch","segment_id":"a","on":false}
+{"op":"set_change_pitch","segment_id":"a","on":true}
 
-set_transition: Put a transition on the cut after segment_id (the outgoing clip on the main track; the next clip must touch it). Important transition fields are id (new material id), type "transition", name, effect_id "cutlass-<key>" with key one of dissolve, dip, dip-white, wipe-left, wipe-right, wipe-up, wipe-down, slide-left, slide-right, slide-up, slide-down, push-left, push-right, push-up, push-down, zoom-in, zoom-out, spin, blur, glitch, duration in microseconds, and is_overlap (true centers it on the cut).
+set_transition: Put a transition on the cut after segment_id (the outgoing clip), replacing one it has; it is stored without checking that a clip starts where segment_id ends. Important transition fields are id (new material id), type "transition", name, effect_id "cutlass-<key>" with key one of dissolve, dip, dip-white, wipe-left, wipe-right, wipe-up, wipe-down, slide-left, slide-right, slide-up, slide-down, push-left, push-right, push-up, push-down, zoom-in, zoom-out, spin, blur, glitch, duration in microseconds (0 a hard cut), and is_overlap (true centers it on the cut, false ends it at the cut).
 {"op":"set_transition","segment_id":"a","transition":{"id":"tr-1","type":"transition","name":"Dissolve","effect_id":"cutlass-dissolve","duration":500000,"is_overlap":true}}
 
 set_group: Put clips in one group so they move together (group_id any new name), or take them out of their groups with an empty group_id.
 {"op":"set_group","segment_ids":["a","title-1"],"group_id":"group-1"}
 
-paste_attributes: Paste copied attributes onto clips; attributes has clip (position, scale, rotation, opacity and flips, as draft.query shows a segment's clip), uniform_scale and volume (1 as recorded), each optional; the placement goes to clips that draw, the volume to clips that sound.
+paste_attributes: Paste copied attributes onto clips; attributes has clip (the whole clip record, as draft.query shows a segment's clip: position, scale, rotation, opacity and flips; it replaces the clip's), uniform_scale (pasted only with clip) and volume (1 as recorded), each optional or null; the placement goes to clips on video, sticker, text or mixed lanes, the volume to clips on video, audio or mixed lanes; refused when no clip takes anything.
 {"op":"paste_attributes","segment_ids":["a"],"attributes":{"clip":null,"uniform_scale":null,"volume":0.8}}
 
 remove_transition: Take the transition off the cut after segment_id; refused when there is none.
 {"op":"remove_transition","segment_id":"a"}
 
-split: Cut a clip in two at a timeline time; right_id names the new right piece.
+split: Cut a clip in two at a timeline time in microseconds strictly inside it; right_id names the new right piece; refused inside a transition's window.
 {"op":"split","segment_id":"a","at":1000000,"right_id":"a-2"}
 
-link: Link dependent to owner, so the dependent follows the owner (e.g. a caption or extracted sound to its clip).
-{"op":"link","owner":"a","dependent":"title-1"}
+link: Link dependent to owner, so the dependent follows the owner when it moves, is cut or is removed (e.g. a caption or extracted sound to its clip); a dependent has one owner, and an owner cannot itself be a dependent.
+{"op":"link","owner":"b","dependent":"title-1"}
 
-remove: Take a clip off the timeline.
+remove: Take a clip off the timeline; its linked dependents go with it, and on main with the magnet on the clips after it close the gap.
 {"op":"remove","segment_id":"a"}
 
-set_reverse: Play a video clip backwards (reverse true) or forwards; path is the reversed copy's file, empty when none has been made.
+set_reverse: Play a clip backwards (reverse true) or forwards; path is a reversed copy's file to play instead, empty to play the clip's own file backwards.
 {"op":"set_reverse","segment_id":"a","reverse":true,"path":""}
 
-set_freeze: Hold one source frame across a video clip, or null to stop; freeze has source_material_id (the clip's material id from draft.query) and timestamp, the source time in microseconds; the paths may be empty.
+set_freeze: Hold one source frame across a video clip, or null to stop; freeze.timestamp is the source time in microseconds that is held; source_material_id (the clip's material id from draft.query) and the paths are records and may be left out.
 {"op":"set_freeze","segment_id":"a","freeze":{"source_material_id":"m-a","timestamp":1000000}}
 
 set_active: Turn a clip off (false) or on; an off clip keeps its place and edits but is not drawn or heard.
@@ -76,25 +76,25 @@ set_mirror: Mirror a clip left to right (true) or not.
 set_vertical_flip: Flip a clip top to bottom (true) or not.
 {"op":"set_vertical_flip","segment_id":"a","vertical":true}
 
-set_rotation: Turn a clip by degrees.
+set_rotation: Turn a clip's picture by degrees counter-clockwise (negative turns clockwise; 90 puts its right edge on top).
 {"op":"set_rotation","segment_id":"a","degrees":15.0}
 
-set_position: Place a clip's picture; x and y are fractions of half the canvas, 0 0 the middle, 1 the right or top edge, y up.
+set_position: Place a clip's picture; x and y are fractions of half the canvas from the middle, so 0 0 is centered and 1 puts the picture's middle on the right or top edge, y up.
 {"op":"set_position","segment_id":"a","x":0.5,"y":-0.25}
 
-set_scale: Size a clip's picture; 1 is its fitted size, 0.5 half.
+set_scale: Size a clip's picture, above 0; 1 is its fitted size, 0.5 half.
 {"op":"set_scale","segment_id":"a","scale":0.5}
 
-set_opacity: Set how solid a clip is drawn; 1 is solid, 0 is clear.
+set_opacity: Set how solid a clip is drawn, 0 to 1; 1 is solid, 0 is clear.
 {"op":"set_opacity","segment_id":"a","opacity":0.5}
 
-set_volume: Set a clip's gain; 1 is as recorded, 0 is silent.
+set_volume: Set a clip's gain, 0 or more; 1 is as recorded, 0 is silent, above 1 louder.
 {"op":"set_volume","segment_id":"a","volume":0.5}
 
-set_fade: Fade a clip's sound in and out over fade_in and fade_out microseconds (0 for none); fade_id names the new fade material.
+set_fade: Fade a clip's sound in and out over fade_in and fade_out microseconds (0 for none, negative refused); fade_id names the new fade material when the clip has none.
 {"op":"set_fade","segment_id":"a","fade_id":"a-fade","fade_in":500000,"fade_out":1000000}
 
-set_crop: Crop a video clip to a quad; each corner (upper_left, upper_right, lower_left, lower_right) has _x and _y as fractions 0 to 1 of the source frame, 0 0 the top left; all zero is no crop.
+set_crop: Crop a clip's picture to a quad; each corner (upper_left, upper_right, lower_left, lower_right) has _x and _y as fractions 0 to 1 of the picture as the file shows it upright, 0 0 the top left, y down; all zero is no crop.
 {"op":"set_crop","segment_id":"a","crop":{"upper_left_x":0.1,"upper_left_y":0.1,"upper_right_x":0.9,"upper_right_y":0.1,"lower_left_x":0.1,"lower_left_y":0.9,"lower_right_x":0.9,"lower_right_y":0.9}}
 
 set_stable: Steady a shaky video clip; level 1 crops least, 2 recommended, 3 most stable, 0 stops.
@@ -109,64 +109,64 @@ set_denoise: Reduce a video clip's noise; level 1 weak, 2 strong, 0 stops.
 set_deflicker: Even out a video clip's brightness flicker; level 1 on, 0 stops.
 {"op":"set_deflicker","segment_id":"a","level":1}
 
-set_interpolate: Fill a video clip with in-between frames to fps 30, 50 or 60 so slow motion stays smooth, or 0 to stop.
+set_interpolate: Fill a video clip with in-between frames to fps 30, 50 or 60 so slow motion stays smooth, or 0 to stop; another rate is refused.
 {"op":"set_interpolate","segment_id":"a","fps":60}
 
-set_relight: Relight a video clip with preset (such as warm_key, soft_front, window_side, morning_sun, rim_glow, neon_two_tone, teal_back, or custom) at strength 0 to 1, or an empty preset to stop; custom takes color "#rrggbb" (empty for its default) and angle in degrees, 0 from the right, 90 from above.
+set_relight: Relight a video clip with preset warm_key, soft_front, window_side, morning_sun, rim_glow, neon_two_tone, amber_and_blue, teal_back, blue_back, green_edge, red_and_pink, violet_haze, night_green, rainbow_spots, color_sweep, color_switch, laser, color_orbit, flicker or custom, at strength 0 to 1, or an empty preset to stop; custom takes color "#rrggbb" (empty for a soft warm white) and angle in degrees, 0 from the right, 90 from above.
 {"op":"set_relight","segment_id":"a","preset":"warm_key","strength":0.7,"color":"","angle":0.0}
 
 set_reframe: Cut a video clip to ratio following its subject; ratio one of original, 16:9, 4:3, 2.35:1, 2:1, 1.85:1, 9:16, 3:4, 5.8-inch, 1:1, or empty to stop; stability 1 flexible, 2 default, 3 stable; speed 1 fast, 2 default, 3 slow.
 {"op":"set_reframe","segment_id":"a","ratio":"9:16","stability":2,"speed":2}
 
-set_motion_blur: Blur a video clip along its motion (on true) or stop (false); blur is the length as a share of a frame's time and blend the share of the sharp frame mixed back, both 0 to 1; direction 0 both ways, 1 forward, 2 backward; times 1, 2, 4 or 6.
+set_motion_blur: Blur a video clip along its motion (on true) or stop (false); blur is the length as a share of a frame's time and blend the share of the sharp frame mixed back, both 0 to 1; direction 0 both ways, 1 trailing after each frame, 2 leading before it; times (frames made across each blur) 1, 2, 4 or 6.
 {"op":"set_motion_blur","segment_id":"a","on":true,"blur":0.5,"blend":0.2,"direction":0,"times":4}
 
-set_text_content: Replace what a text clip says.
-{"op":"set_text_content","segment_id":"title-1","content":"Summer trip"}
+set_text_content: Replace what a text clip says; a caption's word timings stay as stored.
+{"op":"set_text_content","segment_id":"title-1","content":"Summer trip 2026"}
 
-set_text_size: Set a text clip's size, above 0 up to 512; face is a font file name used only when the text has none, may be empty.
+set_text_size: Set a text clip's size in canvas pixels, above 0 up to 512 (new text is 80); face is a font file name used only when the text has none, may be empty.
 {"op":"set_text_size","segment_id":"title-1","size":48.0,"face":""}
 
 set_text_color: Set a text clip's color as "#rrggbb", empty for white; face as in set_text_size.
 {"op":"set_text_color","segment_id":"title-1","color":"#ffcc00","face":""}
 
-set_text_align: Align a text clip; alignment 0 left, 1 center, 2 right, or for vertical text 3 top, 4 middle, 5 bottom; line_width is the wrap width in pixels taken when the text has none or turns vertical; face as in set_text_size.
+set_text_align: Align a text clip; alignment 0 left, 1 center, 2 right, or for vertical text 3 top, 4 middle, 5 bottom; line_width (pixels, above 0) is taken as the wrap width when the text has none or turns vertical or back; face as in set_text_size.
 {"op":"set_text_align","segment_id":"title-1","alignment":1,"face":"","line_width":800.0}
 
 set_text_pattern: Turn bold, italic and underline on or off over the whole text clip; face as in set_text_size.
 {"op":"set_text_pattern","segment_id":"title-1","bold":true,"italic":false,"underline":false,"face":""}
 
-set_text_range_pattern: Turn bold, italic or underline on or off for characters start up to end (counting characters of the text); null leaves that part as it is; face as in set_text_size.
+set_text_range_pattern: Turn bold, italic or underline on or off for characters start up to (not including) end, counting characters of the text; null leaves that part as it is; a caption is refused; face as in set_text_size.
 {"op":"set_text_range_pattern","segment_id":"title-1","start":0,"end":6,"bold":true,"italic":null,"underline":null,"face":""}
 
-set_letter_spacing: Add space between letters, as a fraction of the text size (0 none, 0.1 a little).
+set_letter_spacing: Add space between letters, as a fraction of the text size from -1 to 4 (0 normal, 0.1 a little); face as in set_text_size.
 {"op":"set_letter_spacing","segment_id":"title-1","spacing":0.1,"face":""}
 
-set_line_spacing: Add space between lines, as a fraction of the text size.
+set_line_spacing: Add space between lines, as a fraction of the text size above -1 up to 4 (0 normal); face as in set_text_size.
 {"op":"set_line_spacing","segment_id":"title-1","spacing":0.2,"face":""}
 
-set_line_width: Set the wrap width in pixels, up to 8192; 0 keeps the text on one line.
+set_line_width: Set the wrap width in pixels, 0 to 8192; 0 keeps the text on one line unless it has line breaks; face as in set_text_size.
 {"op":"set_line_width","segment_id":"title-1","width":800.0,"face":""}
 
-set_text_font: Set a text clip's font file name, with no folder.
-{"op":"set_text_font","segment_id":"title-1","face":"Inter[opsz,wght].ttf"}
+set_text_font: Set a text clip's font file name, with no folder (such as Inter[opsz,wght].ttf); a new font drops the axes set for the old one.
+{"op":"set_text_font","segment_id":"title-1","face":"Montserrat[wght].ttf"}
 
-set_text_font_axes: Set a variable font's axes as "tag=value" pairs joined by commas, such as wght=650,wdth=80, in each axis's own units; empty leaves the font as its file has it.
+set_text_font_axes: Set a variable font's axes as "tag=value" pairs joined by commas, each tag four letters, such as wght=650,wdth=80, in each axis's own units; empty leaves the font as its file has it.
 {"op":"set_text_font_axes","segment_id":"title-1","axes":"wght=650"}
 
-set_text_outline: Outline the letters in color "#rrggbb", width in ems (such as 0.05); an empty color removes the outline.
+set_text_outline: Outline the letters in color "#rrggbb", width in ems from 0 to 0.25 (such as 0.05); an empty color removes the outline.
 {"op":"set_text_outline","segment_id":"title-1","color":"#000000","width":0.05}
 
-set_text_shadow: Cast a text shadow in color "#rrggbb", distance in hundredths of an em, toward angle degrees, blur 0 to 1; an empty color removes it.
+set_text_shadow: Cast a text shadow in color "#rrggbb", distance 0 to 100 hundredths of an em, toward angle degrees counter-clockwise from the right (0 right, 90 up, -90 straight down, -45 down and right), blur 0 to 1; an empty color removes it.
 {"op":"set_text_shadow","segment_id":"title-1","color":"#000000","distance":8.0,"angle":-45.0,"blur":0.3}
 
-set_text_glow: Make the letters glow in color "#rrggbb", strength and range 0 to 1; glow_id names a new glow effect material when the clip has none; an empty color removes it.
+set_text_glow: Make the letters glow in color "#rrggbb", strength and range 0 to 1; glow_id names a new glow effect material when the clip has none of its own; an empty color removes it.
 {"op":"set_text_glow","segment_id":"title-1","glow_id":"title-1-glow","color":"#00ccff","strength":0.6,"range":0.4}
 
 set_text_background: Fill a box behind the letters in color "#rrggbb" at alpha 0 to 1, corners rounded by round 0 to 1; an empty color removes it.
 {"op":"set_text_background","segment_id":"title-1","color":"#000000","alpha":0.6,"round":0.3}
 
-set_text_bubble: Shape a title's background as bubble pill, speech, thought, burst or banner, or empty for a plain box.
+set_text_bubble: Shape a title's background as bubble pill, speech, thought, burst or banner, or empty for a plain box; a title with no background gets a white one and white letters turn black.
 {"op":"set_text_bubble","segment_id":"title-1","bubble":"speech"}
 
 set_caption_style: Draw a caption in style classic, karaoke, highlight, pop, word-by-word, one-word, neon, bold-box, fade or rise, or empty for plain.
@@ -175,50 +175,50 @@ set_caption_style: Draw a caption in style classic, karaoke, highlight, pop, wor
 set_caption_template: Record which caption template a caption uses, by resource_id (such as cutlass-caption-karaoke) and name, or empty resource_id to clear the record; it does not change the look by itself.
 {"op":"set_caption_template","segment_id":"cap-1","resource_id":"cutlass-caption-karaoke","name":"Karaoke"}
 
-set_caption_keyword: Mark word number word (from 0) of a caption as a keyword drawn in the style's spoken look (on true), or unmark it.
+set_caption_keyword: Mark word number word (from 0) of a caption as a keyword drawn in the style's spoken look (on true), or unmark it; a word the caption does not have is refused.
 {"op":"set_caption_keyword","segment_id":"cap-1","word":1,"on":true}
 
 set_caption_stagger: Start each letter of a caption word millis milliseconds after the one before, 0 to 500.
 {"op":"set_caption_stagger","segment_id":"cap-1","millis":40}
 
-add_text: Place a new text clip saying content from start for duration (microseconds) on text lane track_id, made when missing, with new ids segment_id and material_id; face is a font file name with no folder and must not be empty.
-{"op":"add_text","track_id":"text-1","segment_id":"title-1","material_id":"title-1-text","start":0,"duration":3000000,"content":"Summer trip","face":"Inter[opsz,wght].ttf"}
+add_text: Place a new white text clip at size 80 saying content (not blank) from start for duration (microseconds) on text lane track_id, made when missing, with new ids segment_id and material_id; face is a font file name with no folder, such as Inter[opsz,wght].ttf, and must not be empty.
+{"op":"add_text","track_id":"text-1","segment_id":"title-2","material_id":"title-2-text","start":3000000,"duration":3000000,"content":"Day two","face":"Inter[opsz,wght].ttf"}
 
-add_shape: Place a new shape from start for duration (microseconds) on sticker lane track_id, made when missing; kind is rectangle, circle, triangle, parallelogram, trapezoid, line or arrow.
-{"op":"add_shape","track_id":"shapes","segment_id":"shape-1","material_id":"shape-1-shape","start":0,"duration":3000000,"kind":"circle"}
+add_shape: Place a new 320 by 320 pixel shape from start for duration (microseconds) on sticker lane track_id, made when missing, with new ids segment_id and material_id; kind is rectangle, circle, triangle, parallelogram, trapezoid, line or arrow.
+{"op":"add_shape","track_id":"shapes","segment_id":"shape-2","material_id":"shape-2-shape","start":3000000,"duration":3000000,"kind":"circle"}
 
-draw_shape: Place a pen-drawn shape through points from start for duration (microseconds) on sticker lane track_id; each point has at [x, y] in canvas pixels from the canvas middle with y up, handle_in and handle_out as offsets from it ([0,0] for a corner), and round; closed true fills it, false is a line.
-{"op":"draw_shape","track_id":"shapes","segment_id":"pen-1","material_id":"pen-1-shape","start":0,"duration":3000000,"points":[{"at":[-100.0,-100.0],"handle_in":[0.0,0.0],"handle_out":[0.0,0.0],"round":0.0},{"at":[100.0,-100.0],"handle_in":[0.0,0.0],"handle_out":[0.0,0.0],"round":0.0},{"at":[0.0,100.0],"handle_in":[0.0,0.0],"handle_out":[0.0,0.0],"round":0.0}],"closed":true}
+draw_shape: Place a pen-drawn shape through 2 to 1024 points from start for duration (microseconds) on sticker lane track_id; each point has at [x, y] in canvas pixels from the canvas middle with y up, handle_in and handle_out as offsets from it ([0,0] for a corner), and round (ignored, stored as 0); closed true fills it, false is a line; the clip sits where the drawing is.
+{"op":"draw_shape","track_id":"shapes","segment_id":"pen-1","material_id":"pen-1-shape","start":3000000,"duration":3000000,"points":[{"at":[-100.0,-100.0],"handle_in":[0.0,0.0],"handle_out":[0.0,0.0],"round":0.0},{"at":[100.0,-100.0],"handle_in":[0.0,0.0],"handle_out":[0.0,0.0],"round":0.0},{"at":[0.0,100.0],"handle_in":[0.0,0.0],"handle_out":[0.0,0.0],"round":0.0}],"closed":true}
 
-set_shape_size: Make a shape width by height canvas pixels; its points stretch, its scale stays.
+set_shape_size: Make a shape width by height canvas pixels, each 1 to 8192 (a line keeps no height); its points stretch, its scale stays.
 {"op":"set_shape_size","segment_id":"shape-1","width":400.0,"height":300.0}
 
 set_shape_fill: Fill a shape with color "#rrggbb" at opacity 0 to 1; an empty color removes the fill.
 {"op":"set_shape_fill","segment_id":"shape-1","color":"#ff3366","opacity":1.0}
 
-set_shape_stroke: Outline a shape width canvas pixels wide in color "#rrggbb" at opacity 0 to 1; style 0 solid, 1 dashed, 2 dotted; width 0 removes it.
+set_shape_stroke: Outline a shape width canvas pixels wide (0 to 256) in color "#rrggbb" (empty keeps its color) at opacity 0 to 1; style 0 solid, 1 dashed, 2 dotted; width 0 removes it.
 {"op":"set_shape_stroke","segment_id":"shape-1","color":"#ffffff","width":6.0,"opacity":1.0,"style":0}
 
-set_shape_corners: Round a shape's corners by radius in canvas pixels, one value for all corners or one per corner; zeros remove it.
+set_shape_corners: Round a shape's corners by radius in canvas pixels, one value for all corners or one per corner, each held to half the shorter side; zeros remove it.
 {"op":"set_shape_corners","segment_id":"shape-1","radius":[24.0]}
 
-set_shape_shadow: Cast a shape shadow in color "#rrggbb", distance canvas pixels away at angle degrees, at opacity 0 to 1; opacity 0 removes it.
+set_shape_shadow: Cast a shape shadow in color "#rrggbb" (empty keeps its color), distance 0 to 1024 canvas pixels away at angle degrees clockwise from the right (0 right, 90 down, 45 down and right), at opacity 0 to 1; opacity 0 removes it.
 {"op":"set_shape_shadow","segment_id":"shape-1","color":"#000000","distance":10.0,"angle":45.0,"opacity":0.5}
 
-add_effect: Place the bundled effect effect_id, "recipe/<name>" such as recipe/shake, recipe/vhs or recipe/zoom-pulse, from start for duration (microseconds) on effect lane track_id, made when missing; it runs over every picture below it.
-{"op":"add_effect","track_id":"fx","segment_id":"fx-1","material_id":"fx-1-effect","start":0,"duration":2000000,"effect_id":"recipe/shake"}
+add_effect: Place the bundled effect effect_id, "recipe/<name>" such as recipe/shake, recipe/vhs or recipe/zoom-pulse, from start for duration (microseconds) on effect lane track_id, made when missing, with new ids segment_id and material_id; it runs over every picture below it.
+{"op":"add_effect","track_id":"fx","segment_id":"fx-2","material_id":"fx-2-effect","start":2000000,"duration":2000000,"effect_id":"recipe/vhs"}
 
-bind_effect: Make the effect clip segment_id run only over the picture clip clip, or null to run over every picture below again.
+bind_effect: Make the effect clip segment_id run only over clip, a clip on a video lane (main or an overlay), or null to run over every picture below again.
 {"op":"bind_effect","segment_id":"fx-1","clip":"a"}
 
-set_blend: Blend a clip with the picture below by mode blend-multiply, blend-screen, blend-overlay, blend-add, blend-darken, blend-lighten, blend-color-burn, blend-color-dodge, blend-hard-light, blend-soft-light, blend-difference or blend-exclusion; empty removes it; material_id names the new blend material.
+set_blend: Blend a clip with the picture below by mode blend-multiply, blend-screen, blend-overlay, blend-add, blend-darken, blend-lighten, blend-color-burn, blend-color-dodge, blend-hard-light, blend-soft-light, blend-difference or blend-exclusion; empty or blend-source-over removes it; material_id names the new blend material; refused on audio, effect and filter lanes.
 {"op":"set_blend","segment_id":"a","material_id":"a-blend","mode":"blend-screen"}
 
-add_adjustment: Place an adjustment layer from start for duration (microseconds) on adjust lane track_id, made when missing; set its sliders with set_adjust; it acts on every picture below.
-{"op":"add_adjustment","track_id":"adjust-1","segment_id":"adj-1","material_id":"adj-1-adjust","start":0,"duration":5000000}
+add_adjustment: Place an adjustment layer from start for duration (microseconds) on adjust lane track_id, made when missing, with new ids segment_id and material_id; set its sliders with set_adjust; it acts on every picture below.
+{"op":"add_adjustment","track_id":"adjust-1","segment_id":"adj-2","material_id":"adj-2-adjust","start":5000000,"duration":3000000}
 
-add_filter: Place the bundled filter filter_id, "look/<name>" such as look/warm, from start for duration (microseconds) on filter lane track_id, made when missing; it acts on every picture below; strength via set_effect_strength.
-{"op":"add_filter","track_id":"filters","segment_id":"filter-1","material_id":"filter-1-look","start":0,"duration":5000000,"filter_id":"look/warm"}
+add_filter: Place the bundled filter filter_id, "look/<name>" such as look/warm or look/cinema, at full strength from start for duration (microseconds) on filter lane track_id, made when missing, with new ids segment_id and material_id; it acts on every picture below; strength via set_effect_strength.
+{"op":"add_filter","track_id":"filters","segment_id":"filter-2","material_id":"filter-2-look","start":5000000,"duration":3000000,"filter_id":"look/cinema"}
 
 set_hsl: Shift one color range of a clip; color 0 red, 1 orange, 2 yellow, 3 green, 4 cyan, 5 blue, 6 purple, 7 magenta; hue, saturation and lightness from -1 to 1, all 0 removes it; material_id names a new HSL material.
 {"op":"set_hsl","segment_id":"a","material_id":"a-hsl","color":5,"hue":0.0,"saturation":0.3,"lightness":-0.1}
@@ -229,134 +229,134 @@ set_curve: Set a clip's color curve channel rgb, red, green or blue to points [x
 set_wheel: Set a clip's color wheel lift, gamma or gain; x and y place the puck inside the unit circle, luma is the ring from -1 to 1; material_id names a new wheels material.
 {"op":"set_wheel","segment_id":"a","material_id":"a-wheels","wheel":"gain","x":0.1,"y":0.05,"luma":0.0}
 
-set_lut: Put a LUT on a clip; cube is the text of a .cube file, kept under name; cube null keeps the clip's table and only sets strength 0 to 1; an empty cube removes it.
-{"op":"set_lut","segment_id":"a","material_id":"a-lut","name":"film","cube":null,"strength":0.8}
+set_lut: Put a LUT on a clip at strength 0 to 1; cube is the text of a 3D .cube file, kept under name; cube null keeps the clip's table and only sets strength (refused when it has none); an empty cube removes it. Except when removing, the LUT is stored anew under material_id, which must not name another material still in the draft.
+{"op":"set_lut","segment_id":"a","material_id":"a-lut","name":"film","cube":"LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n","strength":0.8}
 
-set_chroma: Key a color "#rrggbb" out of a clip with strength and shadow 0 to 1; an empty color removes it.
+set_chroma: Key a color "#rrggbb" out of a clip on a video or sticker lane with strength and shadow 0 to 1; an empty color removes it.
 {"op":"set_chroma","segment_id":"a","material_id":"a-chroma","color":"#00ff00","strength":0.5,"shadow":0.2}
 
-set_mask: Mask a clip, or null to remove; shape linear, mirror, circle, rectangle, heart or star; x and y -1 to 1 across the clip with y up, width and height as parts of the clip's size, rotation degrees, feather and round 0 to 1, invert.
+set_mask: Mask a clip on a video or sticker lane, or null to remove; shape linear, mirror, circle, rectangle, heart or star; x and y -1 to 1 across the clip with y up (-2 to 2 allowed), width and height as parts of the clip's size (0 to 4), rotation -360 to 360 degrees counter-clockwise, feather and round 0 to 1, invert.
 {"op":"set_mask","segment_id":"a","material_id":"a-mask","mask":{"shape":"circle","x":0.0,"y":0.0,"width":0.5,"height":0.5,"rotation":0.0,"feather":0.2,"round":0.0,"invert":false}}
 
-set_selection: Cut a video clip down to an object selection, or null to remove; width and height of the frame, runs alternating counts of unselected and selected pixels row by row starting unselected, frame the source time in microseconds, invert. Normally made by the select tool, not by hand.
-{"op":"set_selection","segment_id":"a","material_id":"a-selection","selection":null}
+set_selection: Cut a video clip down to an object selection, or null to remove; width and height of the frame in pixels, runs alternating counts of unselected and selected pixels row by row starting unselected (summing to width times height), frame the source time in microseconds, invert. Normally made by the select tool, not by hand.
+{"op":"set_selection","segment_id":"a","material_id":"a-selection","selection":{"width":4,"height":2,"runs":[1,2,2,2,1],"frame":0,"invert":false}}
 
-track: Make followers (video, sticker or text clips) follow the video clip target along path; path mode object or plane, samples each a timeline time in microseconds and the target's four corners [x, y] in canvas units (0 the middle, 1 half the canvas, y up); anchor is the time the box was drawn; tracking_id names the record; masks (optional) lists clips whose mask follows instead. Normally made by the tracking tool.
+track: Make followers (video, sticker or text clips) follow the video clip target along path; path mode object or plane, samples (two or more, times rising) each a timeline time in microseconds inside the target and the target's four corners [x, y] top-left, top-right, bottom-right, bottom-left in canvas units (0 the middle, 1 half the canvas, y up); anchor is the time the box was drawn, between the first and last sample; tracking_id names the record; masks (optional) lists [clip, path] pairs whose mask follows instead, the path in that clip's own frame. Normally made by the tracking tool.
 {"op":"track","target":"a","followers":["title-1"],"tracking_id":"a-tracking","anchor":0,"path":{"mode":"object","samples":[{"time":0,"corners":[[-0.2,0.2],[0.2,0.2],[0.2,-0.2],[-0.2,-0.2]]},{"time":40000,"corners":[[-0.18,0.2],[0.22,0.2],[0.22,-0.2],[-0.18,-0.2]]}]}}
 
-untrack: Stop a clip following its track and remove the keys the track wrote.
+untrack: Stop a clip following its track and remove the keys the track wrote; refused when the clip follows no track.
 {"op":"untrack","segment_id":"title-1"}
 
-set_color_mask: Limit a clip's color work, or an adjustment layer, to a mask (fields as in set_mask), or null to remove the limit.
+set_color_mask: Limit a clip's color work, or an adjustment layer or effect clip, to a mask (fields as in set_mask), or null to remove the limit.
 {"op":"set_color_mask","segment_id":"adj-1","material_id":"adj-1-color-mask","mask":{"shape":"rectangle","x":0.0,"y":0.0,"width":0.6,"height":0.6,"rotation":0.0,"feather":0.3,"round":0.1,"invert":false}}
 
-set_adjust: Set adjust slider key to value -1 to 1 (fade, sharpen and particle 0 to 1); keys exposure, brightness, contrast, saturation, light_sensation, highlight, shadow, white, black, temperature, tone, hue, fade, clear, sharpen, vignetting, particle; 0 removes it; material_id names a new slider material.
+set_adjust: Set adjust slider key to value -1 to 1 (fade, sharpen and particle 0 to 1); keys exposure, brightness, contrast, saturation, light_sensation, highlight, shadow, white, black, temperature, tone, hue, fade, clear, sharpen, vignetting, particle; 0 removes it; material_id names a new slider material; refused on audio and effect lanes.
 {"op":"set_adjust","segment_id":"a","material_id":"a-temperature","key":"temperature","value":0.3}
 
-set_effect_strength: Set the strength 0 to 1 of the effect, filter or adjustment clip; material_id names a copy if the material is shared.
+set_effect_strength: Set the strength 0 to 1 of the effect, filter or adjustment clip; material_id names a copy only if another clip shares the material.
 {"op":"set_effect_strength","segment_id":"filter-1","material_id":"filter-1-look-2","value":0.6}
 
-set_effect_control: Set a recipe effect's control (such as speed or intensity) to value inside that control's range; material_id names a copy if the material is shared.
+set_effect_control: Set a recipe effect clip's control (such as speed or intensity) to value inside that control's range; material_id names a copy only if another clip shares the material.
 {"op":"set_effect_control","segment_id":"fx-1","material_id":"fx-1-effect-2","control":"intensity","value":1.5}
 
-set_keyframes: Replace all of a clip's keyframe groups; each has property_type (such as KFTypeAlpha), material_id (may be empty) and keyframe_list of keys with id, curveType (Line), time_offset in microseconds from the clip start, and values. An empty list removes all keys. Prefer add_keyframe, key_values or key_pose.
+set_keyframes: Replace all of a clip's keyframe groups; each has property_type (such as KFTypeAlpha), material_id (may be empty) and keyframe_list of keys with id, curveType (Line), time_offset in microseconds from the clip start, and values. An empty list removes all keys. Nothing is checked; prefer add_keyframe, key_values or key_pose.
 {"op":"set_keyframes","segment_id":"a","keyframes":[{"property_type":"KFTypeAlpha","keyframe_list":[{"id":"k1","curveType":"Line","time_offset":0,"values":[0.0]},{"id":"k2","curveType":"Line","time_offset":1000000,"values":[1.0]}]}]}
 
-add_keyframe: Key a clip's pose (position, scale, rotation, opacity) as it is now at offset microseconds from the clip's start; properties (optional) keys only those, from KFTypePositionX, KFTypePositionY, KFTypeScaleX, KFTypeScaleY, KFTypeRotation, KFTypeAlpha.
+add_keyframe: Key a clip's pose (position, scale, rotation, opacity) as it is now at offset microseconds from the clip's start (0 to its length); properties (optional) keys only those, from KFTypePositionX, KFTypePositionY, KFTypeScaleX, KFTypeScaleY, KFTypeRotation, KFTypeAlpha.
 {"op":"add_keyframe","segment_id":"a","offset":0,"properties":["KFTypeAlpha"]}
 
-key_values: Key named settings at offset microseconds from the clip's start, each as [name, value] in the setting's own units, such as KFTypeVolume (1 as recorded) or KFTypeCommonMaskFeather.
+key_values: Key named settings at offset microseconds from the clip's start, each as [name, value] in the setting's own units, such as KFTypeVolume (1 as recorded) or KFTypeCommonMaskFeather (0 to 1).
 {"op":"key_values","segment_id":"a","offset":2000000,"values":[["KFTypeVolume",0.2]]}
 
-unkey_values: Remove the keys on the named settings at offset microseconds from the clip's start.
+unkey_values: Remove the keys on the named settings at offset microseconds from the clip's start; refused when none is there.
 {"op":"unkey_values","segment_id":"a","offset":2000000,"properties":["KFTypeVolume"]}
 
-remove_keyframe: Remove the pose keys at offset microseconds from the clip's start.
+remove_keyframe: Remove the pose keys at offset microseconds from the clip's start; refused when none is there.
 {"op":"remove_keyframe","segment_id":"a","offset":0}
 
-set_keyframe_graph: Ease the span ending at the key at offset (microseconds from the clip's start) along graph, a curve name such as Ease In, Ease Out, Ease, Quad Ease, Cubic Ease, Bounce 1, or null for straight; properties (optional) limits it to those keys.
+set_keyframe_graph: Ease the span ending at the key at offset (microseconds from the clip's start; there must be an earlier key) along graph, a curve name such as Ease In, Ease Out, Ease, Quad Ease, Cubic Ease, Bounce 1, or null for straight; properties (optional) limits it to those keys, else every pose key.
 {"op":"set_keyframe_graph","segment_id":"a","offset":1000000,"graph":"Ease Out"}
 
-set_animation: Give a clip an in, out or loop animation (kind in, out or loop) by resource id such as cutlass-anim-in-pop, cutlass-anim-out-slide-down or cutlass-anim-loop-float, lasting duration microseconds; null clears that side.
+set_animation: Give a clip an in, out or loop animation (kind in, out, loop, or caption for a text clip) by resource id such as cutlass-anim-in-pop, cutlass-anim-out-slide-down or cutlass-anim-loop-float, lasting duration microseconds (held to at least 100000 and what the clip has room for), or null to clear that side.
 {"op":"set_animation","segment_id":"title-1","kind":"in","animation":"cutlass-anim-in-pop","duration":500000}
 
-key_pose: Change a clip's pose at offset microseconds from its start; x and y as in set_position, scale as in set_scale, rotation in degrees; parts that already have keys are keyed, others are stored, unchanged parts are left alone.
+key_pose: Change a clip's pose at offset microseconds from its start; x and y as in set_position, scale as in set_scale, rotation in degrees counter-clockwise; parts that already have keys are keyed, others are stored, unchanged parts are left alone.
 {"op":"key_pose","segment_id":"a","offset":1000000,"x":0.2,"y":0.0,"scale":1.2,"rotation":0.0}
 
-import: Add a media file to the draft's library without placing it (then use place). medium is video (also pictures, type "video" or "photo") with id, type, path, width, height, duration in microseconds, or audio with id, type "music", path, duration.
-{"op":"import","medium":{"video":{"id":"m-b","type":"video","path":"/Users/me/Movies/beach.mp4","width":1920,"height":1080,"duration":8000000,"has_audio":true}}}
+import: Add a media file to the draft's library without placing it (then use place); the id must be new. medium is video (also pictures, type "video" or "photo") with id, type, path, width, height, duration in microseconds and has_audio, or audio with id, type such as "music", path, duration.
+{"op":"import","medium":{"video":{"id":"m-d","type":"video","path":"/Users/me/Movies/beach.mp4","width":1920,"height":1080,"duration":8000000,"has_audio":true}}}
 
-create_compound: Make clips one compound clip segment_id playing a draft of its own, stored as material material_id.
-{"op":"create_compound","segment_ids":["a","title-1"],"segment_id":"compound-1","material_id":"compound-1-draft"}
+create_compound: Make clips one compound clip segment_id playing a draft of its own, stored as material material_id; it goes on the top-most lane of those clips (the first in draft.query's track order), from the first clip's start to the last one's end.
+{"op":"create_compound","segment_ids":["a","b"],"segment_id":"compound-1","material_id":"compound-1-draft"}
 
-ungroup: Put the clips inside the compound clip segment_id back on the timeline in its place.
+ungroup: Put the clips inside the compound clip segment_id back on the timeline in its place; refused when the compound plays at another speed.
 {"op":"ungroup","segment_id":"compound-1"}
 
-set_inside: Replace the draft a compound material plays (a whole draft with id, version and tracks); normally from draft.query, not by hand.
-{"op":"set_inside","material_id":"compound-1-draft","inside":{"id":"inner-1","version":360000}}
+set_inside: Replace the draft a compound material plays (a whole draft with id, version, tracks and materials); a compound clip that showed all of the old one takes the new one's length. Normally from draft.query, not by hand.
+{"op":"set_inside","material_id":"compound-1-draft","inside":{"id":"compound-1-draft","version":360000,"tracks":[{"id":"main","type":"video","segments":[{"id":"a","material_id":"m-a","target_timerange":{"start":0,"duration":4000000},"source_timerange":{"start":0,"duration":4000000}}]}],"materials":{"videos":[{"id":"m-a","type":"video","path":"/media/a.mp4","width":1920,"height":1080,"duration":10000000,"has_audio":true}]}}}
 
-replace_media: Play material_id (already in the library) in clip segment_id in place of its media, keeping the clip's edits; picture for picture, sound for sound.
-{"op":"replace_media","segment_id":"a","material_id":"m-b"}
+replace_media: Play material_id (already in the library) in clip segment_id in place of its media, keeping the clip's edits; picture for picture, sound for sound; the new media must be at least as long as the part the clip plays.
+{"op":"replace_media","segment_id":"a","material_id":"m-c"}
 
-link_media: Point a material at its file at path after the media moved; width and height in pixels, duration in microseconds, long enough for its clips.
+link_media: Point a material at its file at path after the media moved; width and height in pixels, duration in microseconds, long enough for its clips; a reversed copy is forgotten.
 {"op":"link_media","material_id":"m-a","path":"/Users/me/Movies/beach.mp4","width":1920,"height":1080,"duration":8000000}
 
-insert_track: Add an empty lane; kind video, audio, text, sticker, effect, filter, adjust or mixed; video lanes go above the main track, audio below.
+insert_track: Add an empty lane with a new id; kind video, audio, text, sticker, effect, filter, adjust or mixed; video and mixed lanes go just above the main track, audio just below it, the rest above the top video lane.
 {"op":"insert_track","track_id":"overlay-1","kind":"video"}
 
-insert_track_at: Add an empty lane of kind at index in the row order; audio goes under the main track, the rest above; an index outside the kind's block is refused.
+insert_track_at: Add an empty lane of kind at index in the track order (0 is the top row); audio must go under the main track, the rest above it; an index outside the kind's block is refused.
 {"op":"insert_track_at","track_id":"text-2","kind":"text","index":0}
 
-remove_track: Remove a lane and its clips; the main track and locked lanes are refused.
-{"op":"remove_track","track_id":"overlay-1"}
+remove_track: Remove a lane and its clips, and their linked clips on other lanes; the main track and locked lanes are refused.
+{"op":"remove_track","track_id":"music"}
 
 rename_track: Name a lane; empty goes back to the default name.
-{"op":"rename_track","track_id":"audio-1","name":"Music"}
+{"op":"rename_track","track_id":"music","name":"Music"}
 
-add_time_mark: Add a marker with color "#rrggbb"; segment_id null puts it on the ruler at timeline time at, a clip id puts it on that clip at offset at from its start, microseconds; material_id names the marker.
+add_time_mark: Add a marker with color "#rrggbb"; segment_id null puts it on the ruler at timeline time at, a clip id puts it on that clip at timeline time at, which must be inside the clip, stored as its offset from the clip's start; microseconds; material_id names the markers material when the ruler or clip has none yet; a second marker at the same time is refused.
 {"op":"add_time_mark","segment_id":null,"at":2000000,"color":"#ff0000","material_id":"mark-1"}
 
-remove_time_mark: Remove a marker at start, the ruler time with segment_id null, or the offset on that clip, microseconds.
+remove_time_mark: Remove a marker at start: the ruler time with segment_id null, or with a clip id the marker's offset from that clip's start (not the timeline time); microseconds.
 {"op":"remove_time_mark","segment_id":null,"start":2000000}
 
-add_beat: Add a beat to an audio clip at source, its time in the audio file in microseconds; material_id names the beats material.
+add_beat: Add a beat to a clip on an audio lane at source, its time in the audio file in microseconds, inside the part the clip plays; material_id names the beats material when the clip has none.
 {"op":"add_beat","segment_id":"music-1","source":1500000,"material_id":"music-1-beats"}
 
 remove_beat: Remove the beat at source microseconds in the audio file.
 {"op":"remove_beat","segment_id":"music-1","source":1500000}
 
-set_magnet: Turn main-track packing on (closes gaps) or off.
-{"op":"set_magnet","on":true}
+set_magnet: Turn main-track packing on (closes gaps) or off; refused while the main track is locked.
+{"op":"set_magnet","on":false}
 
 set_canvas_background: Set the project's canvas color "#rrggbb"; empty clears it.
 {"op":"set_canvas_background","color":"#101010"}
 
-set_canvas_size: Set the canvas width and height in pixels (1 to 7680) and its ratio name, one of original, 16:9, 9:16, 1:1, 4:3, 3:4, 4:5, 2:1, 21:9, 2.35:1, 1.85:1, 1:2, matching the size (9:16 is 1080 by 1920).
+set_canvas_size: Set the canvas width and height in pixels (1 to 7680) and its ratio name, one of original, custom, 16:9, 9:16, 1:1, 4:3, 3:4, 4:5, 2:1, 21:9, 2.35:1, 1.85:1, 1:2, 128:27, 1.125:2.436; the name is not checked against the size, so give a matching one (9:16 is 1080 by 1920).
 {"op":"set_canvas_size","width":1080,"height":1920,"ratio":"9:16"}
 
-set_letterbox: Fill the canvas around a fitted picture with color "#rrggbb"; empty clears it; canvas_id names the new canvas material.
+set_letterbox: Fill the canvas around a fitted video or compound clip with color "#rrggbb"; empty clears it; canvas_id names the new canvas material when the clip has none.
 {"op":"set_letterbox","segment_id":"a","color":"#000000","canvas_id":"a-canvas"}
 
-set_letterbox_blur: Fill the canvas behind a picture with a blurred copy of it, blur 0 to 1 as a fraction of the short side, or null to remove the backdrop; canvas_id names the new canvas material.
+set_letterbox_blur: Fill the canvas behind a video or compound clip with a blurred copy of it, blur 0 to 1 as a fraction of the short side, or null to remove the backdrop; canvas_id names the new canvas material when the clip has none.
 {"op":"set_letterbox_blur","segment_id":"a","blur":0.5,"canvas_id":"a-canvas"}
 
-set_frame_rate: Set the project frame rate, such as 24, 25, 29.97, 30 or 60; drop_frame is only the timecode label.
-{"op":"set_frame_rate","fps":30.0,"drop_frame":false}
+set_frame_rate: Set the project frame rate, a whole number such as 24, 25, 30 or 60, or 23.976, 29.97 or 59.94; drop_frame is only the timecode label.
+{"op":"set_frame_rate","fps":29.97,"drop_frame":true}
 
 set_drop_frame: Turn the drop-frame timecode label on or off; the frame rate stays.
-{"op":"set_drop_frame","on":false}
+{"op":"set_drop_frame","on":true}
 
-set_color_space: Set the project color space; space -1 unknown, 0 none (SDR), 2 SDR Rec. 2020, 67 HLG, 2084 PQ.
-{"op":"set_color_space","space":0}
+set_color_space: Set the project color space; space -1 unknown, 0 none (SDR), 2 SDR Rec. 2020, 67 HLG, 2084 PQ; any other number is refused.
+{"op":"set_color_space","space":67}
 
-set_project_name: Set the project name.
+set_project_name: Set the project name; surrounding spaces are dropped.
 {"op":"set_project_name","name":"Summer trip"}
 
-set_cover: Set the project cover, kind frame with time in microseconds on the timeline, or kind image with a path; null removes it.
+set_cover: Record the project cover, kind frame with time in microseconds on the timeline, or kind image with a path; null removes it. It only records where the cover came from; the cover picture itself is written by the app, not by this request.
 {"op":"set_cover","cover":{"kind":"frame","time":1000000}}
 
-set_free_layer: Stack picture clips by their own layer (on) or by their lanes (off).
+set_free_layer: Stack picture clips by their own layer (on) or by their lanes (off, which puts every clip back on its lane's layer).
 {"op":"set_free_layer","on":true}
 
-arrange: Move a picture clip among those it overlaps; step forward, backward, front or back; needs set_free_layer on.
+arrange: Move a picture clip (video, sticker or text lane) among the picture clips it overlaps in time; step forward, backward, front or back; needs set_free_layer on.
 {"op":"arrange","segment_id":"title-1","step":"front"}

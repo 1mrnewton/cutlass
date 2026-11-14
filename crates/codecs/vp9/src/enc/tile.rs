@@ -346,6 +346,10 @@ const SUBBLOCK: [[u8; 2]; 4] = [[1, 2], [1, 3], [3, 2], [3, 3]];
 /// Speeds at and below which inter frames try blocks under 8×8.
 const SUB8_SPEED: u8 = 1;
 
+/// From this speed an inter candidate past the first is tried only when
+/// its score is within a fifth of the first's ([`Tile::inter_cands`]).
+const CAND_MARGIN_SPEED: u8 = 6;
+
 /// From this speed a whole block under the quantizer's noise ends the
 /// partition search whether or not it codes a residual.
 const BREAKOUT_SPEED: u8 = 6;
@@ -1362,7 +1366,24 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             4..=7 => 2,
             _ => 1,
         };
-        out.extend(scored.iter().take(k).map(|t| t.1));
+        // From CAND_MARGIN_SPEED the candidates after the first stay only
+        // when their score is within a fifth of its: their trial seldom
+        // wins otherwise (13 to 17% of the time at speed 6, 0.2% of the
+        // bits).
+        let m = if s.speed >= CAND_MARGIN_SPEED {
+            1.2
+        } else {
+            f64::INFINITY
+        };
+        let first = scored.first().map_or(0, |t| t.0) as f64;
+        out.extend(
+            scored
+                .iter()
+                .take(k)
+                .enumerate()
+                .filter(|(i, t)| *i == 0 || (t.0 as f64) <= first * m)
+                .map(|(_, t)| t.1),
+        );
     }
 
     /// Compound candidates: the fixed reference with each variable one,

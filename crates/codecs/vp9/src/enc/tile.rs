@@ -2831,8 +2831,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 self.put_nc(e, c.class0_hp, hp);
             }
         } else {
-            for i in 0..class {
-                self.put_nc((d >> i) & 1, c.bits[i], at + 12 + i);
+            for (i, &p) in c.bits.iter().enumerate().take(class) {
+                self.put_nc((d >> i) & 1, p, at + 12 + i);
             }
             self.put_tree_nc(&prob::FP_TREE, &c.fp, f as u8, fp + 6);
             if use_hp {

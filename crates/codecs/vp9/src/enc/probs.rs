@@ -200,8 +200,8 @@ fn branches(counts: &Counts) -> [[u32; 2]; LEN] {
         tree(at, &[0, -1], &counts.mv_sign[k]);
         tree(at + 1, &prob::CLASS_TREE, &counts.mv_class[k]);
         tree(at + 11, &[0, -1], &counts.mv_class0[k]);
-        for i in 0..10 {
-            tree(at + 12 + i, &[0, -1], &counts.mv_bits[k][i]);
+        for (i, n) in counts.mv_bits[k].iter().enumerate() {
+            tree(at + 12 + i, &[0, -1], n);
         }
         let at = MV_FP + k * MV_FP_LEN;
         tree(at, &prob::FP_TREE, &counts.mv_class0_fp[k][0]);

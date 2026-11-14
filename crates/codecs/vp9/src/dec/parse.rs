@@ -1020,8 +1020,8 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
             (0, i32::from(self.b.read(c.class0)))
         } else {
             let mut v = 0i32;
-            for i in 0..class {
-                v |= i32::from(self.b.read(c.bits[i])) << i;
+            for (i, &p) in c.bits.iter().enumerate().take(class) {
+                v |= i32::from(self.b.read(p)) << i;
             }
             (2i32 << (class + 2), v)
         };
@@ -1462,13 +1462,12 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
                 band = usize::from(bands[c]);
                 p = &rows[(band * 8 + ctx) & 63];
             }
-            let v;
-            if !b.read(p[2]) {
+            let v = if !b.read(p[2]) {
                 if collect {
                     cnt_coef[band][ctx][1] += 1;
                 }
                 cache[usize::from(scan[c]) & 1023] = 1;
-                v = dqv >> shift;
+                dqv >> shift
             } else {
                 if collect {
                     cnt_coef[band][ctx][2] += 1;
@@ -1513,8 +1512,8 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
                     cache[usize::from(scan[c]) & 1023] = 2;
                     val = 2;
                 }
-                v = ((i64::from(val) * i64::from(dqv)) >> shift) as i32;
-            }
+                ((i64::from(val) * i64::from(dqv)) >> shift) as i32
+            };
             out_pos.push(tpos[c]);
             out_val.push(if b.bit() { -v } else { v });
             c += 1;

@@ -359,16 +359,16 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
         let px = |i: usize| data[i - off];
         if have_left {
             let count = n.min(fh.saturating_sub(y)).max(1);
-            for i in 0..n {
-                e.left[i] = px((y + i.min(count - 1)) * stride + x - 1);
+            for (i, l) in e.left.iter_mut().enumerate().take(n) {
+                *l = px((y + i.min(count - 1)) * stride + x - 1);
             }
         }
         if have_above {
             let avail = if tx == 0 && have_right { 2 * n } else { n };
             let count = avail.min(fw.saturating_sub(x)).max(1);
             let row = (y - 1) * stride + x;
-            for i in 0..2 * n {
-                e.above[i] = px(row + i.min(count - 1));
+            for (i, a) in e.above.iter_mut().enumerate().take(2 * n) {
+                *a = px(row + i.min(count - 1));
             }
             e.tl = if have_left {
                 px(row - 1)
@@ -648,9 +648,9 @@ fn split_mv(b: &BlockRec, plane: usize, i: usize, r: usize, ssx: usize, ssy: usi
         (i32::from(m.row), i32::from(m.col))
     } else if ssx == 1 && ssy == 1 {
         let (mut row, mut col) = (0, 0);
-        for k in 0..4 {
-            row += i32::from(b.bmv[k][r].row);
-            col += i32::from(b.bmv[k][r].col);
+        for m in &b.bmv {
+            row += i32::from(m[r].row);
+            col += i32::from(m[r].col);
         }
         (q4(row), q4(col))
     } else {

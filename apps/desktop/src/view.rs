@@ -815,9 +815,9 @@ fn new_project_button(ui: &mut Ui) -> bool {
     .clicked()
 }
 
-/// A project at home: its cover over its name, length and date. A project
-/// without a cover shows a quiet field where the cover would be.
-fn project_card(ui: &mut Ui, shell: &Shell, project: &ListedProject) -> bool {
+/// A project at home: its first frame over its name, length and date. A
+/// project with an empty timeline shows a quiet field there instead.
+fn project_card(ui: &mut Ui, shell: &mut Shell, project: &ListedProject) -> bool {
     const WIDTH: f32 = 220.0;
     const PICTURE: f32 = 124.0;
     let (rect, response) = ui.allocate_exact_size(Vec2::new(WIDTH, PICTURE + 60.0), Sense::click());
@@ -17606,6 +17606,48 @@ mod tests {
         // The box now shows the cover, under the word.
         let output = frame(&mut shell, &mut view, Vec::new());
         assert!(text_pos(&output, "Cover").is_some());
+    }
+
+    #[test]
+    fn a_home_card_shows_the_first_frame_and_not_the_picked_cover() {
+        let root = std::env::temp_dir().join(format!("cutlass-cards-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (_, project) = blue_project("card");
+        let folder = root.join("Blue");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::rename(&project, &folder).unwrap();
+        // A picked cover, 10 by 10 and red, which the card does not show.
+        image::RgbImage::from_pixel(10, 10, image::Rgb([255, 0, 0]))
+            .save(folder.join(cutlass_model::COVER_FILE))
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        let mut view = ViewState::new();
+        view.projects_root = Some(root.clone());
+        let ctx = egui::Context::default();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut uploaded = Vec::new();
+        while !uploaded.contains(&[64, 32]) {
+            assert!(std::time::Instant::now() < until, "no card picture");
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, &mut view, None),
+            );
+            uploaded.extend(
+                output
+                    .textures_delta
+                    .set
+                    .values()
+                    .flat_map(|deltas| deltas.iter().map(|delta| delta.image.size())),
+            );
+            output.textures_delta.clear();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!uploaded.contains(&[10, 10]));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

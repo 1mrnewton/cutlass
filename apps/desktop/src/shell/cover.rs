@@ -313,7 +313,7 @@ impl Shell {
                         time = newer;
                     }
                     let picture = match cutlass_export::still_picture(&sources, time) {
-                        Ok((width, height, rgba)) => on_black(width, height, rgba),
+                        Ok((width, height, rgba)) => on_black(width, height, rgba, FRAME_ROWS),
                         Err(error) => {
                             cutlass_logger::warn!("cover frame at {} us: {error}", time.0);
                             None
@@ -416,8 +416,8 @@ fn draw_strip(
 }
 
 /// A straight-alpha still laid on black, as the JPEG cover is, and shrunk
-/// to at most [`FRAME_ROWS`] rows.
-fn on_black(width: u32, height: u32, mut rgba: Vec<u8>) -> Option<Thumb> {
+/// to at most `rows` rows.
+pub(super) fn on_black(width: u32, height: u32, mut rgba: Vec<u8>, rows: u32) -> Option<Thumb> {
     for pixel in rgba.as_chunks_mut::<4>().0 {
         let alpha = u32::from(pixel[3]);
         for channel in &mut pixel[..3] {
@@ -425,7 +425,7 @@ fn on_black(width: u32, height: u32, mut rgba: Vec<u8>) -> Option<Thumb> {
         }
         pixel[3] = 255;
     }
-    shrink(width, height, &rgba, FRAME_ROWS)
+    shrink(width, height, &rgba, rows)
 }
 
 /// The picture at `path`, laid on black, cut to `canvas`'s shape from its
@@ -486,7 +486,7 @@ fn cut_to(picture: &Thumb, (canvas_w, canvas_h): (u32, u32)) -> Option<Thumb> {
 
 /// `rgba`, `width` by `height`, averaged down to `rows` rows with its
 /// shape kept. A picture no taller is copied.
-fn shrink(width: u32, height: u32, rgba: &[u8], rows: u32) -> Option<Thumb> {
+pub(super) fn shrink(width: u32, height: u32, rgba: &[u8], rows: u32) -> Option<Thumb> {
     if width == 0 || height == 0 || rgba.len() != width as usize * height as usize * 4 {
         return None;
     }
@@ -535,7 +535,7 @@ fn shrink(width: u32, height: u32, rgba: &[u8], rows: u32) -> Option<Thumb> {
 }
 
 /// `picture` as a baseline JPEG file.
-fn jpeg(picture: &Thumb) -> Result<Vec<u8>, ShellError> {
+pub(super) fn jpeg(picture: &Thumb) -> Result<Vec<u8>, ShellError> {
     let failed = |error: cutlass_decode::CodecError| {
         ShellError::Unavailable(format!("the cover was not written: {error}"))
     };

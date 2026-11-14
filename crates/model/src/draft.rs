@@ -105,6 +105,10 @@ const fn is_false(value: &bool) -> bool {
 /// editor's `draft_meta_info.json` names it under `draft_cover`.
 pub const COVER_FILE: &str = "draft_cover.jpg";
 
+/// The project card's picture at home: the timeline's first frame as the
+/// compositor draws it, kept apart from the cover the user picks.
+pub const THUMBNAIL_FILE: &str = "cutlass_thumbnail.jpg";
+
 /// Where the project's cover came from. The picture itself is
 /// [`COVER_FILE`] in the project folder, drawn when the cover was picked, so
 /// it does not follow later edits. The app's own; stored as `cutlass_cover`.

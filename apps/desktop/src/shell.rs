@@ -71,6 +71,7 @@ mod shape;
 mod speech_model;
 mod stable;
 mod sync;
+mod thumbnail;
 mod update;
 
 pub use assistant::AgentRun;
@@ -894,6 +895,8 @@ pub struct Shell {
     cover_strip: Option<cover::CoverStrip>,
     /// The cover dialog's frame, drawn apart from the preview.
     cover_frame: Option<cover::CoverFrame>,
+    /// The projects home's first-frame pictures, drawn on their own thread.
+    project_pictures: Option<thumbnail::ProjectPictures>,
     /// What the last import that landed added, until the window looks.
     imported: Option<ImportedKind>,
     /// An autosave writing on its own thread.
@@ -1024,6 +1027,7 @@ impl Shell {
             cover_version: 0,
             cover_strip: None,
             cover_frame: None,
+            project_pictures: None,
             imported: None,
             saving: None,
             holding: false,

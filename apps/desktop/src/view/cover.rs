@@ -1,5 +1,6 @@
-//! The project's cover: the box beside the main lane, the dialog that
-//! picks it, and the picture on a project's card at home.
+//! The project's cover: the box beside the main lane and the dialog that
+//! picks it. Also the picture on a project's card at home, which is not
+//! the cover but the timeline's first frame.
 //!
 //! The dialog has two tabs. Select from video shows a strip of the whole
 //! timeline with a handle to drag; the preview is the cover's picture at
@@ -10,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use cutlass_engine::Thumb;
-use cutlass_model::{COVER_FILE, Cover, Micros};
+use cutlass_model::{Cover, Micros};
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Ui, Vec2};
 
 use crate::shell::Shell;
@@ -488,15 +489,20 @@ pub(super) fn paint_box(shell: &Shell, ui: &Ui, column: Rect) {
     });
 }
 
-/// A project card's picture: its cover, read once for each time the file
-/// changes. At most one cover is read each frame, so a long list of
-/// projects fills in over a few frames rather than holding one up.
+/// A project card's picture: the timeline's first frame, as the shell
+/// keeps it in the project folder, read once for each time the file
+/// changes. At most one is read each frame, so a long list of projects
+/// fills in over a few frames rather than holding one up.
 pub(super) fn card_picture(
-    shell: &Shell,
+    shell: &mut Shell,
     ctx: &egui::Context,
     project: &Path,
 ) -> Option<egui::TextureHandle> {
-    let file = project.join(COVER_FILE);
+    let (file, pending) = shell.project_thumbnail(project);
+    if pending {
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+    let file = file?;
     let modified = std::fs::metadata(&file)
         .and_then(|metadata| metadata.modified())
         .ok()?

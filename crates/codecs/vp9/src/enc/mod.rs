@@ -67,6 +67,8 @@ pub struct FrameEncoder {
     work: Vec<TileWork>,
     /// Tile columns: at most this many threads (log2 of the count).
     log2_tiles: u8,
+    /// The fast search's vectors of the last frame, by 8×8 block.
+    pre_seeds: Vec<Mv>,
 }
 
 /// What one tile column's encoder keeps from frame to frame.
@@ -113,6 +115,7 @@ impl FrameEncoder {
             strides: dims.stride,
             work: Vec::new(),
             log2_tiles: threads.max(1).ilog2().min(6) as u8,
+            pre_seeds: Vec::new(),
         }
     }
 
@@ -375,6 +378,72 @@ impl FrameEncoder {
             speed: fp.speed,
             refs_live,
             switchable: h.interp == geom::SWITCHABLE,
+            prepass: None,
+        };
+        // Fast inter frames: the motion search of every superblock first,
+        // its rows shared out evenly among the threads (tile columns carry
+        // uneven work), each thread with its own copy of the seed vectors.
+        let pre_buf: Vec<tile::Pre>;
+        let shared = if fp.speed >= 7 && !h.is_intra() {
+            let rp = ctx.refs[0]
+                .as_ref()
+                .map(|r| (r.buf.plane(0), (r.dims.w[0] as i32, r.dims.h[0] as i32)));
+            match rp {
+                Some(rp) => {
+                    let threads = (1usize << self.log2_tiles).max(1);
+                    self.pre_seeds.resize(mi_cols * mi_rows, Mv::ZERO);
+                    let base = &self.pre_seeds;
+                    let sh = &shared;
+                    let parts: Vec<(usize, Vec<tile::Pre>, Vec<Mv>)> = std::thread::scope(|sc| {
+                        let hs: Vec<_> = (0..threads)
+                            .map(|t| {
+                                sc.spawn(move || {
+                                    let mut seeds = base.clone();
+                                    let mut out = Vec::new();
+                                    let mut r = t;
+                                    while r < sb_rows {
+                                        for c in 0..sb_cols {
+                                            out.push(tile::prepass_sb(
+                                                sh,
+                                                rp,
+                                                &mut seeds,
+                                                r * 8,
+                                                c * 8,
+                                            ));
+                                        }
+                                        r += threads;
+                                    }
+                                    (t, out, seeds)
+                                })
+                            })
+                            .collect();
+                        hs.into_iter().filter_map(|h| h.join().ok()).collect()
+                    });
+                    let mut pre = vec![tile::Pre::default(); sb_rows * sb_cols];
+                    for (t, out, seeds) in parts {
+                        let mut it = out.into_iter();
+                        let mut r = t;
+                        while r < sb_rows {
+                            for c in 0..sb_cols {
+                                if let Some(p) = it.next() {
+                                    pre[r * sb_cols + c] = p;
+                                }
+                            }
+                            let (lo, hi) = (r * 8 * mi_cols, ((r * 8 + 8).min(mi_rows)) * mi_cols);
+                            self.pre_seeds[lo..hi].copy_from_slice(&seeds[lo..hi]);
+                            r += threads;
+                        }
+                    }
+                    pre_buf = pre;
+                    Shared {
+                        prepass: Some(&pre_buf),
+                        ..shared
+                    }
+                }
+                None => shared,
+            }
+        } else {
+            shared
         };
         // Each tile column on its own thread, into its own copy of the
         // picture (intra prediction reads nothing across tile columns).
@@ -490,9 +559,20 @@ impl FrameEncoder {
                 counts.add(&st.counts);
             }
             if filter_on {
-                for r in 0..sb_rows {
-                    lf::sb_row(&mut views, &masks, &[], &levels, &geo, r);
-                }
+                // Luma on one thread, the chroma planes on another.
+                let [vy, vu, vv] = &mut views;
+                let (m, l, g) = (&masks, &levels, &geo);
+                std::thread::scope(|sc| {
+                    sc.spawn(move || {
+                        for r in 0..sb_rows {
+                            lf::sb_row_plane(vy, 0, m, &[], l, g, r);
+                        }
+                    });
+                    for r in 0..sb_rows {
+                        lf::sb_row_plane(vu, 1, m, &[], l, g, r);
+                        lf::sb_row_plane(vv, 2, m, &[], l, g, r);
+                    }
+                });
             }
         }
         writer.publish(usize::MAX);

@@ -55,6 +55,56 @@ pub fn sb_row<P: Pixel>(
     }
 }
 
+/// [`sb_row`] for one plane alone (`plane` 0 luma, 1 or 2 chroma); planes
+/// filter independently, so they can on different threads.
+pub fn sb_row_plane<P: Pixel>(
+    view: &mut View<'_, P>,
+    plane: usize,
+    masks: &[Mask],
+    grid: &[LfMi],
+    levels: &Levels,
+    g: &Geo,
+    sb_row: usize,
+) {
+    for sb_col in 0..g.sb_cols {
+        let mut m = masks[sb_row * g.sb_cols + sb_col];
+        let (mi_row, mi_col) = (sb_row * 8, sb_col * 8);
+        m.adjust(mi_row, mi_col, g.mi_rows, g.mi_cols);
+        match (plane, g.ss_x, g.ss_y) {
+            (0, _, _) | (_, 0, 0) => luma(
+                view.data,
+                view.base,
+                view.stride,
+                &m,
+                levels,
+                g,
+                mi_row,
+                mi_col,
+            ),
+            (_, 1, 1) => chroma420(
+                view.data,
+                view.base,
+                view.stride,
+                &m,
+                levels,
+                g,
+                mi_row,
+                mi_col,
+            ),
+            _ => general(
+                view.data,
+                view.base,
+                view.stride,
+                grid,
+                levels,
+                g,
+                mi_row,
+                mi_col,
+            ),
+        }
+    }
+}
+
 #[inline(always)]
 fn byte(mask: u64, row: usize) -> u8 {
     (mask >> (row * 8)) as u8

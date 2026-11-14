@@ -25,7 +25,7 @@ pub struct Vp9Options {
     pub qindex: u8,
     /// The most frames from one key frame to the next.
     pub keyint: u32,
-    /// Search effort, 0 (most) to 9 (least).
+    /// Search effort, 0 (most) to 10 (least).
     pub speed: u8,
     /// The fewest and most quantizer indices the rate control may use.
     pub min_q: u8,

@@ -206,6 +206,9 @@ pub struct Shared<'a> {
     pub speed: u8,
     /// Whether each inter block codes its filter.
     pub switchable: bool,
+    /// The fast path's search, made ahead for the whole frame (inter
+    /// frames at speed 7 and up), by superblock in raster order.
+    pub prepass: Option<&'a [Pre]>,
     /// Which references (LAST, GOLDEN, ALTREF) are worth searching: those
     /// that hold a picture none before them holds.
     pub refs_live: [bool; 3],
@@ -315,8 +318,12 @@ pub struct Tile<'s, 't, 'r, 'v> {
     toks: Vec<Tok>,
     /// The cost of the best inter candidate last ranked (SAD units).
     last_sad: u64,
+    /// The SATD (and mode rate) of the best intra mode last ranked.
+    last_satd: u64,
     /// The fast path's search result for each square of the superblock.
     found: [(Mv, u64); 85],
+    /// Spent level buffers, to use again.
+    pool: Vec<Vec<i32>>,
     /// The 4×4 modes the block coded last chose.
     sub: [u8; 4],
     /// Which 8×8 squares of the superblock code as four 4×4 blocks.
@@ -372,7 +379,9 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             snaps: (0..17).map(|_| Snap::default()).collect(),
             toks: Vec::new(),
             last_sad: 0,
+            last_satd: u64::MAX,
             found: [(Mv::ZERO, u64::MAX); 85],
+            pool: Vec::new(),
             sub: [geom::DC; 4],
             sub8: [false; 64],
             mctmp: vec![0; cutlass_simd::vp9::mc::TMP],
@@ -404,7 +413,16 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             if fast {
                 // Partition from the motion search's SAD, one pass.
                 let mut split = [false; 21];
-                self.choose_into(mi_row, mi_col, 3, &mut split);
+                match self.s.prepass {
+                    Some(pre) => {
+                        let p = pre[(mi_row / 8) * self.s.mi_cols.div_ceil(8) + mi_col / 8];
+                        split = p.split;
+                        self.found = p.found;
+                    }
+                    None => {
+                        self.choose_into(mi_row, mi_col, 3, &mut split);
+                    }
+                }
                 let part = split.map(|s| if s { PARTITION_SPLIT } else { PARTITION_NONE });
                 self.partition(mi_row, mi_col, BLOCK_64X64, 4, &part);
                 mi_col += 8;
@@ -510,6 +528,10 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         }
         let pick = if cands.len() <= 1 {
             0
+        } else if self.s.speed >= 10 {
+            // Fastest: intra only when its SATD is clearly under the inter
+            // prediction's SAD.
+            usize::from(self.last_satd.saturating_mul(5) < self.last_sad.saturating_mul(4))
         } else {
             let lam = f64::from(self.s.rd_lambda) / 256.0;
             let n = MI_WH[usize::from(bsize)].0;
@@ -782,7 +804,13 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             x_mis: bw.min(s.mi_cols - col),
             y_mis: bh.min(s.mi_rows - row),
             skip: false,
-            tx: geom::max_tx(bsize).min(geom::tx_mode_biggest(s.h.tx_mode)),
+            tx: geom::max_tx(bsize)
+                .min(geom::tx_mode_biggest(s.h.tx_mode))
+                .min(if s.speed >= 10 {
+                    geom::TX_16X16
+                } else {
+                    TX_32X32
+                }),
             mode: geom::DC,
             uv: geom::DC,
             refs: [INTRA_FRAME, INTRA_FRAME],
@@ -830,6 +858,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             scored.push((cost, m));
         }
         scored.sort_unstable();
+        self.last_satd = scored.first().map_or(u64::MAX, |t| t.0);
         let k = match s.speed {
             0..=3 => 4,
             4..=5 => 3,
@@ -1147,114 +1176,10 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     /// vectors and zero, a diamond search in whole samples, then halves
     /// and quarters. Returns the vector (eighths) and its SAD.
     fn search(&mut self, row: usize, col: usize, bsize: u8) -> (Mv, u64) {
-        let s = self.s;
-        // The reference and source planes, fetched once for the search.
         let Some(rp) = self.rec_ref() else {
             return (Mv::ZERO, u64::MAX / 4);
         };
-        let src = (s.src.planes[0], s.src.strides[0]);
-        let (bw, bh) = MI_WH[usize::from(bsize)];
-        let (w, h) = (bw * 8, bh * 8);
-        let (x, y) = (col * 8, row * 8);
-        let w = w.min(s.mi_cols * 8 - x).max(8);
-        let h = h.min(s.mi_rows * 8 - y).max(8);
-        let w = w.min((s.mi_cols - col) * 8);
-        let h = h.min((s.mi_rows - row) * 8);
-        // Starting points.
-        let mut cands = [Mv::ZERO; 6];
-        let mut nc = 1;
-        let seed = |r: isize, c: isize| -> Option<Mv> {
-            if r < 0 || c < 0 || r as usize >= s.mi_rows || c as usize >= s.mi_cols {
-                None
-            } else {
-                Some(self.seeds[r as usize * s.mi_cols + c as usize])
-            }
-        };
-        for (dr, dc) in [(-1isize, 0isize), (0, -1), (-1, bw as isize), (0, 0)] {
-            if let Some(m) = seed(row as isize + dr, col as isize + dc) {
-                cands[nc] = m;
-                nc += 1;
-            }
-        }
-        if let Some(p) = s.prev_mvs
-            && let Some(m) = p.get(row * s.mi_cols + col)
-            && usize::from(m.refs[0]) == self.cur_ref + 1
-        {
-            cands[nc] = m.mv[0];
-            nc += 1;
-        }
-        let mut best = (0i32, 0i32);
-        let mut best_sad = u64::MAX;
-        for m in &cands[..nc] {
-            let (r, c) = ((i32::from(m.row) + 4) >> 3, (i32::from(m.col) + 4) >> 3);
-            if let Some(v) = sad_ref(src, rp, (x, y, w, h), r, c) {
-                let v = v + mvcost_px(r, c, best);
-                if v < best_sad {
-                    best_sad = v;
-                    best = (r, c);
-                }
-            }
-        }
-        if best_sad == u64::MAX {
-            return (Mv::ZERO, u64::MAX / 4);
-        }
-        // Diamond search in whole samples; below 64×64 the search starts
-        // from the square around it, whose vector is a seed, with a smaller
-        // step.
-        let range = 64;
-        let mut step = match (bsize, s.speed) {
-            (BLOCK_64X64, 9..) => 4,
-            (_, 9..) => 1,
-            (BLOCK_64X64, _) | (_, 0..=2) => 8,
-            (_, 3..=6) => 4,
-            _ => 2,
-        };
-        while step >= 1 {
-            let mut moved = true;
-            let mut iters = 0;
-            while moved && iters < 16 {
-                moved = false;
-                iters += 1;
-                let center = best;
-                for (dr, dc) in [(-step, 0), (step, 0), (0, -step), (0, step)] {
-                    let (r, c) = (center.0 + dr, center.1 + dc);
-                    if r.abs() > range || c.abs() > range {
-                        continue;
-                    }
-                    if let Some(v) = sad_ref(src, rp, (x, y, w, h), r, c)
-                        && v < best_sad
-                    {
-                        best_sad = v;
-                        best = (r, c);
-                        moved = true;
-                    }
-                }
-            }
-            step /= 2;
-        }
-        // Every whole sample within two of the diamond's choice.
-        if s.speed <= 5 {
-            let c = best;
-            for dr in -2..=2 {
-                for dc in -2..=2 {
-                    if (dr, dc) == (0, 0) {
-                        continue;
-                    }
-                    let (r, cc) = (c.0 + dr, c.1 + dc);
-                    if let Some(v) = sad_ref(src, rp, (x, y, w, h), r, cc)
-                        && v < best_sad
-                    {
-                        best_sad = v;
-                        best = (r, cc);
-                    }
-                }
-            }
-        }
-        let mv = Mv {
-            row: (best.0 * 8) as i16,
-            col: (best.1 * 8) as i16,
-        };
-        (mv, best_sad)
+        search_in(self.s, rp, &self.seeds, self.cur_ref, row, col, bsize)
     }
 
     /// Refines a whole-sample vector of a block to halves and quarters (and
@@ -1487,7 +1412,9 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         // written (intra predicts tx block by tx block from the ones
         // before, so it is reconstructed as it goes).
         let mut toks = std::mem::take(&mut self.toks);
-        toks.clear();
+        for t in toks.drain(..) {
+            self.pool.push(t.4);
+        }
         let mut eobs = 0;
         let (coded, dropped) = self.residual(&b, &rec, &mut toks, &mut eobs);
         if bsize < BLOCK_8X8 && !inter {
@@ -1772,7 +1699,9 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 }
             }
         }
-        let mut levels = vec![0i32; n * n];
+        let mut levels = self.pool.pop().unwrap_or_default();
+        levels.clear();
+        levels.resize(n * n, 0);
         self.rd = TxRd::default();
         let mut rd_eob = None;
         let dqi = usize::from(plane > 0);
@@ -1821,7 +1750,19 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             );
             if s.speed >= 9 {
                 // Fastest: a dead zone, and costs from a bit model.
-                self.rd = self.dz_levels(tx, dc_q, ac_q, intra, &mut levels);
+                let (rd, any) = self.dz_levels(tx, dc_q, ac_q, intra, &mut levels);
+                self.rd = rd;
+                // The end of block: none, or from the end of the scan back.
+                let (scan, _) = scan_pair(tx, kind);
+                let mut e = if any { scan.len() } else { 0 };
+                while e > 0 {
+                    let rc = usize::from(scan[e - 1]);
+                    if levels[((rc & (n - 1)) << log2n) | (rc >> log2n)] != 0 {
+                        break;
+                    }
+                    e -= 1;
+                }
+                rd_eob = Some(e);
             } else {
                 let (eob, rd) = self.rd_levels(plane, tx, kind, x, y, intra, &mut levels);
                 self.rd = rd;
@@ -1868,7 +1809,14 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
 
     /// Dead-zone quantization of `self.fcoef` into `levels`, with the
     /// costs of coding and dropping the block from a rough bit model.
-    fn dz_levels(&self, tx: u8, dc_q: i32, ac_q: i32, intra: bool, levels: &mut [i32]) -> TxRd {
+    fn dz_levels(
+        &self,
+        tx: u8,
+        dc_q: i32,
+        ac_q: i32,
+        intra: bool,
+        levels: &mut [i32],
+    ) -> (TxRd, bool) {
         let s = self.s;
         let n = 4usize << tx;
         let max = n * n;
@@ -1884,23 +1832,27 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         ];
         let round = if intra { 0.42 } else { 0.33 };
         let (mut d_coded, mut d_all, mut bits) = (0.0f32, 0.0f32, 0.0f32);
+        let mut any = false;
         for (i, (l, &v)) in levels[..max].iter_mut().zip(&self.fcoef[..max]).enumerate() {
             let k = usize::from(i > 0);
             let a = v.abs() * inv[k];
             let q = (a + if k == 0 { 0.5 } else { round }) as i32;
             *l = if v < 0.0 { -q } else { q };
+            any |= q != 0;
             let e = (a - q as f32) * steps[k];
             d_coded += e * e;
             d_all += v * v;
-            if q != 0 {
-                bits += 5.0 + 2.0 * (q as f32).log2();
-            }
+            // About 6 bits a level, and more for a larger one.
+            bits += (q.min(1) * 6 + q.min(16) - q.min(1)) as f32;
         }
         let lam = s.rd_lambda;
-        TxRd {
-            coded: (d_coded + lam * (bits + 1.0) * g) / g,
-            dropped: (d_all + lam * g) / g,
-        }
+        (
+            TxRd {
+                coded: (d_coded + lam * (bits + 1.0) * g) / g,
+                dropped: (d_all + lam * g) / g,
+            },
+            any,
+        )
     }
 
     /// Rate-distortion quantization of `self.fcoef` into `levels`: each
@@ -3007,4 +2959,210 @@ fn sad_ref(
     let a = &src[y * ss + x..];
     let b = &data[by as usize * stride + bx as usize..];
     Some(u64::from(sad::sad(a, ss, b, stride, w, h)))
+}
+
+/// A superblock's whole-sample search on LAST, made ahead of coding.
+#[allow(clippy::type_complexity)]
+fn search_in(
+    s: &Shared<'_>,
+    rp: ((&[u8], usize), (i32, i32)),
+    seeds: &[Mv],
+    cur_ref: usize,
+    row: usize,
+    col: usize,
+    bsize: u8,
+) -> (Mv, u64) {
+    let src = (s.src.planes[0], s.src.strides[0]);
+    let (bw, bh) = MI_WH[usize::from(bsize)];
+    let (w, h) = (bw * 8, bh * 8);
+    let (x, y) = (col * 8, row * 8);
+    let w = w.min(s.mi_cols * 8 - x).max(8);
+    let h = h.min(s.mi_rows * 8 - y).max(8);
+    let w = w.min((s.mi_cols - col) * 8);
+    let h = h.min((s.mi_rows - row) * 8);
+    // Starting points.
+    let mut cands = [Mv::ZERO; 6];
+    let mut nc = 1;
+    let seed = |r: isize, c: isize| -> Option<Mv> {
+        if r < 0 || c < 0 || r as usize >= s.mi_rows || c as usize >= s.mi_cols {
+            None
+        } else {
+            seeds.get(r as usize * s.mi_cols + c as usize).copied()
+        }
+    };
+    for (dr, dc) in [(-1isize, 0isize), (0, -1), (-1, bw as isize), (0, 0)] {
+        if let Some(m) = seed(row as isize + dr, col as isize + dc) {
+            cands[nc] = m;
+            nc += 1;
+        }
+    }
+    if let Some(p) = s.prev_mvs
+        && let Some(m) = p.get(row * s.mi_cols + col)
+        && usize::from(m.refs[0]) == cur_ref + 1
+    {
+        cands[nc] = m.mv[0];
+        nc += 1;
+    }
+    let mut best = (0i32, 0i32);
+    let mut best_sad = u64::MAX;
+    for m in &cands[..nc] {
+        let (r, c) = ((i32::from(m.row) + 4) >> 3, (i32::from(m.col) + 4) >> 3);
+        if let Some(v) = sad_ref(src, rp, (x, y, w, h), r, c) {
+            let v = v + mvcost_px(r, c, best);
+            if v < best_sad {
+                best_sad = v;
+                best = (r, c);
+            }
+        }
+    }
+    if best_sad == u64::MAX {
+        return (Mv::ZERO, u64::MAX / 4);
+    }
+    // Diamond search in whole samples; below 64×64 the search starts
+    // from the square around it, whose vector is a seed, with a smaller
+    // step.
+    let range = 64;
+    let mut step = match (bsize, s.speed) {
+        (BLOCK_64X64, 9..) => 4,
+        (geom::BLOCK_32X32, 9..) => 1,
+        // Speed 10 checks only the candidates below 32×32 (its square's
+        // vector among them).
+        (_, 10..) => 0,
+        (_, 9) => 1,
+        (BLOCK_64X64, _) | (_, 0..=2) => 8,
+        (_, 3..=6) => 4,
+        _ => 2,
+    };
+    while step >= 1 {
+        let mut moved = true;
+        let mut iters = 0;
+        while moved && iters < 16 {
+            moved = false;
+            iters += 1;
+            let center = best;
+            for (dr, dc) in [(-step, 0), (step, 0), (0, -step), (0, step)] {
+                let (r, c) = (center.0 + dr, center.1 + dc);
+                if r.abs() > range || c.abs() > range {
+                    continue;
+                }
+                if let Some(v) = sad_ref(src, rp, (x, y, w, h), r, c)
+                    && v < best_sad
+                {
+                    best_sad = v;
+                    best = (r, c);
+                    moved = true;
+                }
+            }
+        }
+        step /= 2;
+    }
+    // Every whole sample within two of the diamond's choice.
+    if s.speed <= 5 {
+        let c = best;
+        for dr in -2..=2 {
+            for dc in -2..=2 {
+                if (dr, dc) == (0, 0) {
+                    continue;
+                }
+                let (r, cc) = (c.0 + dr, c.1 + dc);
+                if let Some(v) = sad_ref(src, rp, (x, y, w, h), r, cc)
+                    && v < best_sad
+                {
+                    best_sad = v;
+                    best = (r, cc);
+                }
+            }
+        }
+    }
+    let mv = Mv {
+        row: (best.0 * 8) as i16,
+        col: (best.1 * 8) as i16,
+    };
+    (mv, best_sad)
+}
+
+/// The fast path's partition and vectors of one superblock, searched
+/// ahead of coding (frame-wide, on threads, by superblock rows).
+#[derive(Clone, Copy)]
+pub struct Pre {
+    pub split: [bool; 21],
+    pub found: [(Mv, u64); 85],
+}
+
+impl Default for Pre {
+    fn default() -> Self {
+        Self {
+            split: [false; 21],
+            found: [(Mv::ZERO, u64::MAX); 85],
+        }
+    }
+}
+
+/// [`Tile::choose_into`] for an inter frame, outside a tile: the split
+/// flags and each square's best whole-sample vector on LAST.
+#[allow(clippy::type_complexity)]
+pub fn prepass_sb(
+    s: &Shared<'_>,
+    rp: ((&[u8], usize), (i32, i32)),
+    seeds: &mut [Mv],
+    mi_row: usize,
+    mi_col: usize,
+) -> Pre {
+    let mut pre = Pre::default();
+    pre_choose(s, rp, seeds, &mut pre, mi_row, mi_col, 3);
+    pre
+}
+
+#[allow(clippy::type_complexity)]
+fn pre_choose(
+    s: &Shared<'_>,
+    rp: ((&[u8], usize), (i32, i32)),
+    seeds: &mut [Mv],
+    pre: &mut Pre,
+    row: usize,
+    col: usize,
+    level: usize,
+) -> u64 {
+    if row >= s.mi_rows || col >= s.mi_cols {
+        return 0;
+    }
+    let lam = u64::from(s.lambda);
+    let estimate = |seeds: &mut [Mv], pre: &mut Pre, bsize: u8| -> u64 {
+        let (mv, sad) = search_in(s, rp, seeds, 0, row, col, bsize);
+        pre.found[Tile::slot(row, col, bsize)] = (mv, sad);
+        let bw = MI_WH[usize::from(bsize)].0;
+        for r in 0..bw.min(s.mi_rows - row) {
+            for c in 0..bw.min(s.mi_cols - col) {
+                if let Some(v) = seeds.get_mut((row + r) * s.mi_cols + col + c) {
+                    *v = mv;
+                }
+            }
+        }
+        sad.saturating_add(lam * u64::from(mv_bits(mv)) / 256 + lam * 3)
+    };
+    if level == 0 {
+        return estimate(seeds, pre, SQUARE[0]);
+    }
+    let n = 1usize << level;
+    let hbs = n / 2;
+    let whole = row + n <= s.mi_rows && col + n <= s.mi_cols;
+    let own = if whole {
+        estimate(seeds, pre, SQUARE[level])
+    } else {
+        u64::MAX
+    };
+    let mut quarters = lam * 12;
+    for (dr, dc) in [(0, 0), (0, hbs), (hbs, 0), (hbs, hbs)] {
+        quarters =
+            quarters.saturating_add(pre_choose(s, rp, seeds, pre, row + dr, col + dc, level - 1));
+        if quarters >= own {
+            break;
+        }
+    }
+    if quarters < own {
+        pre.split[Tile::node(row, col, level)] = true;
+        quarters
+    } else {
+        own
+    }
 }

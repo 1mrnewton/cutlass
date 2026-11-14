@@ -226,7 +226,8 @@ pub(crate) fn gather<'f>(
                 || (props.emoji() && next == Some('\u{FE0F}'));
             let chosen = fonts.get(face);
             let able = chosen.is_some_and(|font| draws(font, character));
-            let in_color = chosen.is_some_and(Font::has_bitmap_strike);
+            let in_color =
+                chosen.is_some_and(|font| font.has_color_strike() || font.has_color_layers());
             if !able || (emoji && !in_color) {
                 let found = source.fallback(character, emoji).and_then(|bytes| {
                     let key = (bytes.as_ptr(), bytes.len());

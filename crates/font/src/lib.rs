@@ -11,6 +11,8 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+mod cid_tests;
 mod collection;
 mod colr;
 #[cfg(test)]
@@ -32,6 +34,8 @@ mod layout;
 mod layout_tests;
 pub mod morx;
 mod otf;
+#[cfg(test)]
+mod outline_tests;
 mod strike;
 mod ttf;
 mod variants;

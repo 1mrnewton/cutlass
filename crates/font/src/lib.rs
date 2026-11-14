@@ -15,6 +15,8 @@
 #![forbid(unsafe_code)]
 
 #[cfg(test)]
+mod cff2_tests;
+#[cfg(test)]
 mod cid_tests;
 mod collection;
 mod colr;
@@ -24,6 +26,8 @@ mod coverage;
 mod faces;
 #[cfg(test)]
 mod fixture;
+#[cfg(test)]
+mod fixture_cff2;
 #[cfg(test)]
 mod fixture_color;
 #[cfg(test)]

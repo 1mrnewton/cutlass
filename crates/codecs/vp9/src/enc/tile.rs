@@ -2482,11 +2482,13 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         // Eight running sums and peaks, so that the pass vectorizes (a
         // single float sum must keep its order; every block has a
         // multiple of 16 coefficients).
-        // And the scan's last that could round to a level (0.3 of a step
-        // or more; with `one`, what the dead zone rounds up), as one past
-        // the largest scan index among them.
+        // And the scan's last that could take a level, as one past the
+        // largest scan index among them: half a step or more (RD
+        // quantization rounds nothing smaller up; from 0.3, as it was,
+        // the walk cost 9% more instructions at high quality for no gain), or
+        // with `one`, what the dead zone rounds up.
         let iscan = crate::dec::parse::iscan(tx, kind);
-        let (th, th_dc) = if one { (1.0 - rnd, 0.5) } else { (0.3, 0.3) };
+        let (th, th_dc) = if one { (1.0 - rnd, 0.5) } else { (0.5, 0.5) };
         let mut sums = [0.0f32; 8];
         let mut lasts = [0u32; 8];
         for ((a8, v8), i8) in a_nat[..max]

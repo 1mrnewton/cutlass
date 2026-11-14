@@ -24,11 +24,10 @@ import uniffi.cutlass_ffi_bindings.AnimationPreset
 import uniffi.cutlass_ffi_bindings.Background
 import uniffi.cutlass_ffi_bindings.CanvasRatio
 import uniffi.cutlass_ffi_bindings.Clip
-import uniffi.cutlass_ffi_bindings.ClipAbilities
 import uniffi.cutlass_ffi_bindings.ClipAnimations
+import uniffi.cutlass_ffi_bindings.ClipState
 import uniffi.cutlass_ffi_bindings.EffectChoice
 import uniffi.cutlass_ffi_bindings.Editor
-import uniffi.cutlass_ffi_bindings.Fade
 import uniffi.cutlass_ffi_bindings.Frame
 import uniffi.cutlass_ffi_bindings.Keyframes
 import uniffi.cutlass_ffi_bindings.Lane
@@ -41,6 +40,7 @@ import uniffi.cutlass_ffi_bindings.Tile
 import uniffi.cutlass_ffi_bindings.ToolBar
 import uniffi.cutlass_ffi_bindings.Wave
 import uniffi.cutlass_ffi_bindings.animationPresets
+import uniffi.cutlass_ffi_bindings.cropRatios
 import uniffi.cutlass_ffi_bindings.effectChoices
 import uniffi.cutlass_ffi_bindings.flingStart
 import uniffi.cutlass_ffi_bindings.flingStep
@@ -442,8 +442,8 @@ class EditorModel(project: String, private val scope: CoroutineScope) {
     // Clip bar edits. Each is one undo step; a clip it does not suit shows
     // Rust's reason as a notice.
 
-    /** What the clip bar can do to `clip`, or null when it is gone. */
-    fun abilities(clip: String): ClipAbilities? = runCatching { editor?.clipAbilities(clip) }.getOrNull()
+    /** How `clip` stands at the playhead, for its clip tools, or null when it is gone. */
+    fun clipState(clip: String): ClipState? = runCatching { editor?.clipState(clip, playheadUs) }.getOrNull()
 
     fun toggleMirror(clip: String) = edit { it.toggleMirror(clip) }
 
@@ -451,7 +451,12 @@ class EditorModel(project: String, private val scope: CoroutineScope) {
 
     fun toggleReverse(clip: String) = edit { it.toggleReverse(clip) }
 
-    fun toggleCrop(clip: String) = edit { it.toggleCrop(clip) }
+    /** Crop to the first ratio Rust offers, or show the whole frame again. */
+    fun toggleCrop(clip: String) {
+        val cropped = clipState(clip)?.crop?.isNotEmpty() ?: return
+        val ratio = if (cropped) "" else cropRatios().firstOrNull() ?: return
+        edit { it.setCrop(clip, ratio) }
+    }
 
     /** Hold the frame under the playhead as a still, and select the still. */
     fun freeze(clip: String) {
@@ -465,23 +470,33 @@ class EditorModel(project: String, private val scope: CoroutineScope) {
 
     /** Put the video's sound on its own clip on an audio row, and select that. */
     fun extractAudio(clip: String) {
-        var sound: String? = null
-        edit { sound = it.extractAudio(clip) }
-        sound?.let {
-            selectedClip = it
-            say("Sound extracted")
+        val before = soundClips()
+        var done = false
+        edit {
+            it.extractAudio(clip)
+            done = true
         }
+        if (!done) return
+        (soundClips() - before).firstOrNull()?.let { selectedClip = it }
+        say("Sound extracted")
     }
+
+    private fun soundClips(): Set<String> =
+        lanes.filter { it.kind == LaneKind.AUDIO }.flatMap { lane -> lane.clips.map { it.id } }.toSet()
 
     /** Drop a beat on the sound at the playhead, or take away the one there. */
     fun toggleBeat(clip: String) {
-        var there: Boolean? = null
-        edit { there = it.toggleBeat(clip, playheadUs) }
-        there?.let { say(if (it) "Beat added" else "Beat removed") }
+        var done = false
+        edit {
+            it.toggleBeat(clip, playheadUs)
+            done = true
+        }
+        if (!done) return
+        clipState(clip)?.let { say(if (it.beatHere) "Beat added" else "Beat removed") }
     }
 
     /** The clip's fade in and fade out, or none. */
-    fun fade(clip: String): Fade = runCatching { editor?.fade(clip) }.getOrNull() ?: Fade(0, 0)
+    fun fade(clip: String): Fade = clipState(clip)?.let { Fade(it.fadeInUs, it.fadeOutUs) } ?: Fade(0, 0)
 
     fun setFade(clip: String, inUs: Long, outUs: Long) = edit { it.setFade(clip, inUs, outUs) }
 
@@ -617,7 +632,7 @@ class EditorModel(project: String, private val scope: CoroutineScope) {
             background = editor.background()
             beats = lanes.filter { it.kind == LaneKind.AUDIO }
                 .flatMap { lane -> lane.clips }
-                .associate { clip -> clip.id to editor.beats(clip.id) }
+                .associate { clip -> clip.id to clip.beatsUs }
                 .filterValues { it.isNotEmpty() }
         } catch (error: Exception) {
             show(error)
@@ -731,6 +746,9 @@ class EditorModel(project: String, private val scope: CoroutineScope) {
         const val FILM_HEIGHT = 52.0
     }
 }
+
+/** A clip's fade in and fade out. Zero is no fade. */
+data class Fade(val inUs: Long, val outUs: Long)
 
 val Clip.endUs: Long get() = startUs + durationUs
 

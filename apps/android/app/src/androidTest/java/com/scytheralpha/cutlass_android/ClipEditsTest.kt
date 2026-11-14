@@ -63,21 +63,21 @@ class ClipEditsTest {
                 val picture = model.selectedClip
                 assertNotNull(model.notice?.text ?: "", picture)
                 picture!!
-                val can = model.abilities(picture)!!
-                assertTrue(can.turn && can.crop && can.reverse)
-                assertFalse("a still is not moving", can.moving)
+                val can = model.clipState(picture)!!
+                assertTrue(can.picture && can.canCrop && can.plays)
+                assertFalse("a still is not moving", can.canFreeze || can.canExtract)
 
                 model.toggleMirror(picture)
-                assertTrue(model.abilities(picture)!!.mirrored)
+                assertTrue(model.clipState(picture)!!.mirrored)
                 model.turn(picture)
                 model.toggleCrop(picture)
-                assertTrue(model.abilities(picture)!!.cropped)
+                assertTrue(model.clipState(picture)!!.crop.isNotEmpty())
                 model.setFade(picture, 300_000, 500_000)
                 assertEquals(300_000L, model.fade(picture).inUs)
                 assertEquals(500_000L, model.fade(picture).outUs)
                 repeat(4) { model.undo() }
-                assertFalse(model.abilities(picture)!!.mirrored)
-                assertFalse(model.abilities(picture)!!.cropped)
+                assertFalse(model.clipState(picture)!!.mirrored)
+                assertFalse(model.clipState(picture)!!.crop.isNotEmpty())
                 assertEquals(0L, model.fade(picture).inUs)
 
                 model.clearNotice()
@@ -101,13 +101,13 @@ class ClipEditsTest {
                 val again = opened(scope)
                 again.importFile(movie.path)
                 val video = again.selectedClip!!
-                assertTrue(again.abilities(video)!!.moving)
+                assertTrue(again.clipState(video)!!.canFreeze)
 
                 again.extractAudio(video)
                 val sound = again.clipsOn(LaneKind.AUDIO, main = false).singleOrNull()
                 assertNotNull(again.notice?.text ?: "", sound)
                 assertEquals(sound!!.id, again.selectedClip)
-                assertTrue(again.abilities(sound.id)!!.beats)
+                assertTrue(again.clipState(sound.id)!!.canBeat)
 
                 again.seek(again.durationUs / 2)
                 again.toggleBeat(sound.id)

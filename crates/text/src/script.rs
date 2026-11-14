@@ -112,15 +112,15 @@ impl Script {
     /// The names a font may know the script by, the newest first.
     pub(crate) fn tags(self) -> Vec<Tag> {
         match &self.0 {
-            b"Deva" => vec![*b"dev2", *b"deva"],
-            b"Beng" => vec![*b"bng2", *b"beng"],
-            b"Guru" => vec![*b"gur2", *b"guru"],
-            b"Gujr" => vec![*b"gjr2", *b"gujr"],
-            b"Orya" => vec![*b"ory2", *b"orya"],
-            b"Taml" => vec![*b"tml2", *b"taml"],
-            b"Telu" => vec![*b"tel2", *b"telu"],
-            b"Knda" => vec![*b"knd2", *b"knda"],
-            b"Mlym" => vec![*b"mlm2", *b"mlym"],
+            b"Deva" => vec![*b"dev3", *b"dev2", *b"deva"],
+            b"Beng" => vec![*b"bng3", *b"bng2", *b"beng"],
+            b"Guru" => vec![*b"gur3", *b"gur2", *b"guru"],
+            b"Gujr" => vec![*b"gjr3", *b"gjr2", *b"gujr"],
+            b"Orya" => vec![*b"ory3", *b"ory2", *b"orya"],
+            b"Taml" => vec![*b"tml3", *b"tml2", *b"taml"],
+            b"Telu" => vec![*b"tel3", *b"tel2", *b"telu"],
+            b"Knda" => vec![*b"knd3", *b"knd2", *b"knda"],
+            b"Mlym" => vec![*b"mlm3", *b"mlm2", *b"mlym"],
             b"Mymr" => vec![*b"mym2", *b"mymr"],
             b"Hira" | b"Kana" => vec![*b"kana"],
             b"Laoo" => vec![*b"lao "],
@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(Script::of('\u{710}').shaping(), Shaping::Joined);
         assert_eq!(Script::of('\u{5D0}').shaping(), Shaping::Plain);
         assert_eq!(Script::LATIN.tags(), [*b"latn"]);
-        assert_eq!(Script::of('\u{915}').tags(), [*b"dev2", *b"deva"]);
+        assert_eq!(Script::of('\u{915}').tags(), [*b"dev3", *b"dev2", *b"deva"]);
         assert_eq!(Script::of('\u{E01}').tags(), [*b"thai"]);
         assert_eq!(Script::of('\u{E81}').tags(), [*b"lao "]);
         assert!(Script::COMMON.tags().is_empty());

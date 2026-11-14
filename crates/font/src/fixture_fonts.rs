@@ -926,10 +926,105 @@ pub(crate) fn joined_plain() -> Vec<u8> {
     joined_named(&[b"DFLT"])
 }
 
+/// A small Devanagari face that names the script by `script`: ka 1,
+/// the virama 2, ssa 3, the vowel sign i 4, ra 5, the dotted circle 8,
+/// the vowel sign aa 10 and the letter a 11.
+///
+/// Ka, the virama and ssa are the conjunct 9; ka and the virama are the
+/// half ka 7; ra and the virama are the hook 6, which sits on an anchor
+/// over ka, the conjunct and the sign aa.
+fn devanagari_named(script: &[u8; 4]) -> Vec<u8> {
+    let mut glyphs = vec![boxed(500); 12];
+    for (glyph, advance) in [
+        (1, 700),
+        (3, 650),
+        (4, 300),
+        (7, 400),
+        (8, 600),
+        (9, 900),
+        (10, 350),
+        (11, 750),
+    ] {
+        glyphs[glyph] = boxed(advance);
+    }
+    for glyph in [2, 6] {
+        glyphs[glyph] = mark();
+    }
+    let mut map = vec![
+        ('\u{915}', 1),
+        ('\u{94D}', 2),
+        ('\u{937}', 3),
+        ('\u{93F}', 4),
+        ('\u{930}', 5),
+        ('\u{25CC}', 8),
+        ('\u{93E}', 10),
+        ('\u{905}', 11),
+    ];
+    map.sort_unstable();
+    let substitutions = layout_table(
+        &[(script, &[0, 1, 2])],
+        &[(b"akhn", &[0]), (b"half", &[1]), (b"rphf", &[2])],
+        vec![
+            LookupSpec::new(4, vec![ligatures(&[(1, &[(&[2, 3], 9)])])]),
+            LookupSpec::new(4, vec![ligatures(&[(1, &[(&[2], 7)])])]),
+            LookupSpec::new(4, vec![ligatures(&[(5, &[(&[2], 6)])])]),
+        ],
+    );
+    let positioning = layout_table(
+        &[(script, &[0])],
+        &[(b"abvm", &[0])],
+        vec![LookupSpec::new(
+            4,
+            vec![mark_attach(
+                &[(6, 0, (-150, 750))],
+                &[(1, &[(350, 720)]), (9, &[(450, 720)]), (10, &[(175, 720)])],
+            )],
+        )],
+    );
+    let kinds = gdef(
+        &[
+            (1, 1, 1),
+            (2, 2, 3),
+            (3, 5, 1),
+            (6, 6, 3),
+            (7, 8, 1),
+            (9, 9, 2),
+            (10, 11, 1),
+        ],
+        &[],
+        &[],
+    );
+    font(
+        &glyphs,
+        &map,
+        &[
+            (b"GDEF", kinds),
+            (b"GPOS", positioning),
+            (b"GSUB", substitutions),
+        ],
+    )
+}
+
+/// The Devanagari face under the script's second tag: shaped by the
+/// script's own rules.
+pub(crate) fn devanagari_two() -> Vec<u8> {
+    devanagari_named(b"dev2")
+}
+
+/// The same under the third tag: shaped by the shared rules.
+pub(crate) fn devanagari_three() -> Vec<u8> {
+    devanagari_named(b"dev3")
+}
+
+/// And with only a default script: shaped by its lookups alone.
+pub(crate) fn devanagari_plain() -> Vec<u8> {
+    devanagari_named(b"DFLT")
+}
+
 /// A fixture's file name and what builds it.
 type Built = (&'static str, fn() -> Vec<u8>);
 
-const FILES: [Built; 15] = [
+const FILES: [Built; 18] = [
     ("shaping.ttf", shaping),
     ("hostile.ttf", hostile),
     ("machines.ttf", machines),
@@ -945,6 +1040,9 @@ const FILES: [Built; 15] = [
     ("hostile-syllables.ttf", hostile_syllables),
     ("joined.ttf", joined),
     ("joined-plain.ttf", joined_plain),
+    ("devanagari-two.ttf", devanagari_two),
+    ("devanagari-three.ttf", devanagari_three),
+    ("devanagari-plain.ttf", devanagari_plain),
 ];
 
 fn path(name: &str) -> std::path::PathBuf {

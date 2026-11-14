@@ -397,11 +397,15 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
 }
 
 /// The shaping a run takes in `font`. A face that has only its default
-/// script for Myanmar or for a script shaped by the shared rules, or
-/// that names Myanmar by the tag from before the script's shaping was
-/// set down, was drawn to be shaped with its lookups alone.
+/// script for a script written by syllable, or that names Myanmar by the
+/// tag from before the script's shaping was set down, was drawn to be
+/// shaped with its lookups alone. A face that names Devanagari or one of
+/// its sisters by the script's third tag was drawn for the shared rules.
 fn shaping_in(font: &Font<'_>, shaping: Shaping, scripts: &[Tag]) -> Shaping {
-    if !matches!(shaping, Shaping::Myanmar | Shaping::Universal) {
+    if !matches!(
+        shaping,
+        Shaping::Syllabic | Shaping::Myanmar | Shaping::Universal
+    ) {
         return shaping;
     }
     let chosen = font
@@ -410,6 +414,7 @@ fn shaping_in(font: &Font<'_>, shaping: Shaping, scripts: &[Tag]) -> Shaping {
     match chosen {
         Some(tag) if tag == *b"DFLT" || tag == *b"latn" => Shaping::Plain,
         Some(tag) if tag == *b"mymr" && shaping == Shaping::Myanmar => Shaping::Plain,
+        Some(tag) if tag[3] == b'3' && shaping == Shaping::Syllabic => Shaping::Universal,
         _ => shaping,
     }
 }
@@ -2042,6 +2047,73 @@ mod tests {
         assert_eq!(
             plain(b"Bali", "\u{1B05}\u{1B35}\u{1B36}"),
             "[43=0+1400|44=0@-550,50+0]"
+        );
+    }
+
+    #[test]
+    fn a_devanagari_face_is_shaped_by_the_rules_its_script_tag_names() {
+        const TWO: &[u8] = include_bytes!("../../../font/fixtures/devanagari-two.ttf");
+        const THREE: &[u8] = include_bytes!("../../../font/fixtures/devanagari-three.ttf");
+        const PLAIN: &[u8] = include_bytes!("../../../font/fixtures/devanagari-plain.ttf");
+        // The same glyphs and lookups under three names. Each expected
+        // string is what HarfBuzz 14.2 prints for the face.
+        let two = |text: &str| shaped_in(TWO, b"Deva", text);
+        let three = |text: &str| shaped_in(THREE, b"Deva", text);
+        let plain = |text: &str| shaped_in(PLAIN, b"Deva", text);
+        // All but the plain one move a vowel written first, make the
+        // conjunct and the half form, and turn ra into its hook.
+        let both: [&dyn Fn(&str) -> String; 2] = [&two, &three];
+        for shaped in both {
+            assert_eq!(shaped("\u{915}\u{93F}"), "[4=0+300|1=0+700]");
+            assert_eq!(shaped("\u{915}\u{94D}\u{937}"), "[9=0+900]");
+            assert_eq!(shaped("\u{915}\u{94D}\u{915}"), "[7=0+400|1=6+700]");
+            assert_eq!(shaped("\u{930}\u{94D}\u{915}"), "[1=0+700|6=0@-200,-30+0]");
+            assert_eq!(shaped("\u{93F}"), "[4=0+300|8=0+600]");
+            assert_eq!(shaped("\u{905}\u{93E}"), "[11=0+750|8=0+600|10=0+350]");
+        }
+        // The script's own rules put the hook after a vowel sign that
+        // follows the letter; the shared rules put it before the sign.
+        assert_eq!(
+            two("\u{930}\u{94D}\u{915}\u{93E}"),
+            "[1=0+700|10=0+350|6=0@-25,-30+0]"
+        );
+        assert_eq!(
+            three("\u{930}\u{94D}\u{915}\u{93E}"),
+            "[1=0+700|6=0@-200,-30+0|10=0+350]"
+        );
+        assert_eq!(
+            two("\u{930}\u{94D}\u{915}\u{94D}\u{937}\u{93E}"),
+            "[9=0+900|10=0+350|6=0@-25,-30+0]"
+        );
+        assert_eq!(
+            three("\u{930}\u{94D}\u{915}\u{94D}\u{937}\u{93E}"),
+            "[9=0+900|6=0@-300,-30+0|10=0+350]"
+        );
+        // The script's own rules keep a last virama and a virama before
+        // a non-joiner; the shared rules let the face make its half form
+        // of both.
+        assert_eq!(two("\u{915}\u{94D}"), "[1=0+700|2=0+0]");
+        assert_eq!(three("\u{915}\u{94D}"), "[7=0+400]");
+        assert_eq!(
+            two("\u{915}\u{94D}\u{200C}\u{915}"),
+            "[1=0+700|2=0+0|1=9+700]"
+        );
+        assert_eq!(three("\u{915}\u{94D}\u{200C}\u{915}"), "[7=0+400|1=9+700]");
+        assert_eq!(two("\u{915}\u{94D}\u{200D}\u{915}"), "[7=0+400|1=9+700]");
+        assert_eq!(three("\u{915}\u{94D}\u{200D}\u{915}"), "[7=0+400|1=9+700]");
+        // A face with only a default script is shaped by its lookups
+        // alone: nothing is moved, joined or stood on a circle.
+        assert_eq!(plain("\u{915}\u{93F}"), "[1=0+700|4=0+300]");
+        assert_eq!(plain("\u{915}\u{94D}\u{937}"), "[1=0+700|2=0+0|3=6+650]");
+        assert_eq!(
+            plain("\u{930}\u{94D}\u{915}\u{93E}"),
+            "[5=0+500|2=0+0|1=6+700|10=6+350]"
+        );
+        assert_eq!(plain("\u{93F}"), "[4=0+300]");
+        assert_eq!(plain("\u{905}\u{93E}"), "[11=0+750|10=0+350]");
+        assert_eq!(
+            plain("\u{915}\u{94D}\u{200D}\u{915}"),
+            "[1=0+700|2=0+0|1=9+700]"
         );
     }
 

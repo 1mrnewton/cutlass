@@ -374,7 +374,7 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
             let count = avail.min(fw.saturating_sub(x)).max(1);
             let sb = 64 >> if plane == 0 { 0 } else { self.c.dims.ss_y };
             let saved = &self.s.above[plane];
-            if y % sb == 0 && !saved.is_empty() {
+            if y.is_multiple_of(sb) && !saved.is_empty() {
                 // The top of a superblock: the row above as it was before
                 // its filter.
                 for (i, a) in e.above.iter_mut().enumerate().take(2 * n) {

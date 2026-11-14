@@ -12,6 +12,7 @@ cutlass-picture = { path = "../picture", version = "0.1.0" }
 cutlass-font = { path = "../font", version = "0.1.0" }
 cutlass-decode = { path = "../decode", version = "0.1.0" }
 cutlass-png = { path = "../codecs/png", version = "0.1.0" }
+cutlass-jpeg = { path = "../codecs/jpeg", version = "0.1.0" }
 
 [[bench]]
 name = "titles"

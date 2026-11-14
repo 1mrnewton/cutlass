@@ -181,6 +181,24 @@ fn header_only(edge: u32) -> Vec<u8> {
     out
 }
 
+/// A two by two picture FFmpeg wrote as a baseline JPEG with every color
+/// sample kept: red, green, blue and white, across from the top left and
+/// then down.
+const JPEG_PICTURE: &[u8] = include_bytes!("../fixtures/picture.jpg");
+
+/// [`JPEG_PICTURE`] with a frame header that declares 60,000 pixels each way.
+fn jpeg_bomb() -> Vec<u8> {
+    let mut out = JPEG_PICTURE.to_vec();
+    let frame = out
+        .windows(2)
+        .position(|pair| pair == [0xFF, 0xC0])
+        .expect("frame header");
+    for at in [frame + 5, frame + 7] {
+        out[at..at + 2].copy_from_slice(&60_000_u16.to_be_bytes());
+    }
+    out
+}
+
 fn truncated_picture() -> Vec<u8> {
     let mut out = rgba_picture();
     out.truncate(out.len() - 20);
@@ -242,22 +260,24 @@ fn private(glyph: u16) -> char {
 /// A face with `glyf` and `sbix`, as a color emoji face has: every picture
 /// glyph has an empty outline.
 ///
-/// Glyph 1 is `A`, a box with no picture. Glyphs 2 to 15 have a two by two
+/// Glyph 1 is `A`, a box with no picture. Glyphs 2 to 19 have a two by two
 /// picture in the strike of 2 pixels to the em: 2 color with alpha (it is
 /// also U+1F600), 3 a palette with alpha, 4 gray with a clear value, 5
 /// 16-bit color with alpha, 6 gray with alpha, 7 glyph 2 flipped, 8 glyph
 /// 2 again, 9 a header that declares a huge picture, 10 a picture cut
 /// short, 11 a picture with a bad check value, 12 color with no alpha, 13 a
-/// JPEG record, 14 glyph 2's picture set 3 right and 1 down, 15 one-bit
-/// gray. Glyph 2 also has a one-pixel picture in a strike of 1 pixel to
-/// the em, and a header for a 600-pixel picture in a strike of 600, where
-/// glyph 15 has a JPEG record.
+/// TIFF record, 14 glyph 2's picture set 3 right and 1 down, 15 one-bit
+/// gray, 16 a JPEG picture, 17 a JPEG picture whose frame header declares
+/// a huge one, 18 a JPEG picture cut short, 19 glyph 16 flipped. Glyph 2
+/// also has a one-pixel picture in a strike of 1 pixel to the em, and a
+/// header for a 600-pixel picture in a strike of 600, where glyph 15 has a
+/// TIFF record.
 pub(crate) fn sbix() -> Vec<u8> {
-    let mut glyphs = vec![blank(); 16];
+    let mut glyphs = vec![blank(); 20];
     glyphs[0] = boxed(500);
     glyphs[1] = boxed(600);
     let mut map = vec![('A', 1)];
-    map.extend((3..16).map(|glyph| (private(glyph), glyph)));
+    map.extend((3..20).map(|glyph| (private(glyph), glyph)));
     map.push(('\u{1F600}', 2));
     let main: Records = vec![
         (2, record((0, 0), b"png ", &rgba_picture())),
@@ -271,9 +291,13 @@ pub(crate) fn sbix() -> Vec<u8> {
         (10, record((0, 0), b"png ", &truncated_picture())),
         (11, record((0, 0), b"png ", &bad_crc_picture())),
         (12, record((0, 0), b"png ", &opaque_picture())),
-        (13, record((0, 0), b"jpg ", &[0xFF, 0xD8, 0xFF, 0xD9])),
+        (13, record((0, 0), b"tiff", b"II*\0")),
         (14, record((3, -1), b"png ", &rgba_picture())),
         (15, record((0, 0), b"png ", &mono_picture())),
+        (16, record((0, 0), b"jpg ", JPEG_PICTURE)),
+        (17, record((0, 0), b"jpg ", &jpeg_bomb())),
+        (18, record((0, 0), b"jpg ", &JPEG_PICTURE[..200])),
+        (19, record((0, 0), b"flip", &[0, 16])),
     ];
     let small: Records = vec![(
         2,
@@ -285,9 +309,9 @@ pub(crate) fn sbix() -> Vec<u8> {
     )];
     let large: Records = vec![
         (2, record((0, 0), b"png ", &header_only(600))),
-        (15, record((0, 0), b"jpg ", &[0xFF, 0xD8, 0xFF, 0xD9])),
+        (15, record((0, 0), b"tiff", b"II*\0")),
     ];
-    let table = sbix_table(16, &[(1, small), (2, main), (600, large)]);
+    let table = sbix_table(20, &[(1, small), (2, main), (600, large)]);
     font(&glyphs, &map, &[(b"sbix", table)])
 }
 

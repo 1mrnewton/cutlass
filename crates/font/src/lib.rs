@@ -2,7 +2,7 @@
 //!
 //! The file yields a glyph id, an advance width, an outline, horizontal
 //! kerning pairs, and a bitmap strike when the file has one. A strike stored
-//! as PNG pictures is handed back still encoded, and a glyph of layered
+//! as PNG or JPEG pictures is handed back still encoded, and a glyph of layered
 //! color (`COLR`) as the paints that fill its outlines. Glyph 0 is the
 //! missing glyph. A variable face, of TrueType outlines or of `CFF2`, is
 //! read at any
@@ -441,8 +441,8 @@ impl<'a> Font<'a> {
     ///
     /// `Ok(None)` means the face has no strike, or this glyph has no bitmap in it.
     /// The largest strike that holds the glyph answers, a color strike before a
-    /// gray one. A color strike is premultiplied RGBA or a PNG picture that is
-    /// still encoded. A gray or mono strike is coverage.
+    /// gray one. A color strike is premultiplied RGBA or a PNG or JPEG picture
+    /// that is still encoded. A gray or mono strike is coverage.
     pub fn bitmap(&self, glyph_id: u16) -> Result<Option<BitmapGlyph>, FontError> {
         self.strikes.glyph(glyph_id, self.num_glyphs)
     }

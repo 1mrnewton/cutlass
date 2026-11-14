@@ -3256,6 +3256,7 @@ version = "0.1.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-font",
+ "cutlass-jpeg",
  "cutlass-model",
  "cutlass-picture",
  "cutlass-png",

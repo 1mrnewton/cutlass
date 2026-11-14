@@ -273,8 +273,8 @@ fn paint_bitmap(font: &Font<'_>, glyph_id: u16) -> Result<GlyphImage, TextError>
     bitmap_image(font, bitmap)
 }
 
-/// One strike bitmap as an atlas image. A PNG picture is decoded here; one
-/// larger than the atlas cell is refused before it is.
+/// One strike bitmap as an atlas image. A PNG or JPEG picture is decoded
+/// here; one larger than the atlas cell is refused before it is.
 fn bitmap_image(font: &Font<'_>, bitmap: BitmapGlyph) -> Result<GlyphImage, TextError> {
     let ppem = f32::from(bitmap.ppem);
     let unit = f32::from(font.units_per_em()) / ppem;
@@ -293,6 +293,10 @@ fn bitmap_image(font: &Font<'_>, bitmap: BitmapGlyph) -> Result<GlyphImage, Text
         .ok()
         .and_then(|pixels| pixels.checked_mul(4))
         .ok_or(TextError::Limit)?;
+    let stored = match bitmap.pixels {
+        BitmapPixels::Jpeg(_) => strike::Stored::Jpeg,
+        _ => strike::Stored::Png,
+    };
     let (kind, sdf, mut color) = match bitmap.pixels {
         BitmapPixels::Coverage(bytes) => {
             if bytes.len() != rgba / 4 {
@@ -306,8 +310,8 @@ fn bitmap_image(font: &Font<'_>, bitmap: BitmapGlyph) -> Result<GlyphImage, Text
             }
             (GlyphKind::Color, Vec::new(), bytes)
         }
-        BitmapPixels::Png(bytes) => {
-            let decoded = strike::decode(bytes, bitmap.width, bitmap.height, edge)?;
+        BitmapPixels::Png(bytes) | BitmapPixels::Jpeg(bytes) => {
+            let decoded = strike::decode(stored, bytes, bitmap.width, bitmap.height, edge)?;
             if decoded.len() != rgba {
                 return Err(TextError::Limit);
             }
@@ -1308,6 +1312,82 @@ mod tests {
     }
 
     #[test]
+    fn a_jpeg_picture_becomes_color_that_covers_its_square() {
+        let font = read(SBIX).expect("sbix");
+        let mut atlas = Atlas::new();
+        // Red, green, blue and white as FFmpeg reads the picture back,
+        // across from the top left and then down, and as Core Text draws
+        // this glyph but for two samples of the white that are 2 and 1
+        // away. Decoders of JPEG differ by a step or two in each sample.
+        const FFMPEG: [u8; 16] = [
+            209, 40, 37, 255, 45, 207, 59, 255, 41, 64, 206, 255, 223, 236, 244, 255,
+        ];
+        let near = |ours: &[u8], theirs: &[u8]| {
+            ours.len() == theirs.len()
+                && ours
+                    .iter()
+                    .zip(theirs)
+                    .all(|(ours, theirs)| ours.abs_diff(*theirs) <= 2)
+        };
+        let upright = color_of(&mut atlas, &font, 16);
+        assert!(near(&upright, &FFMPEG), "{upright:?}");
+        // Every pixel is opaque: the format has no alpha.
+        assert!(
+            upright
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[3] == 255)
+        );
+        // The flipped copy has each row turned left to right.
+        let flipped = color_of(&mut atlas, &font, 19);
+        let mirrored: Vec<u8> = upright
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .flat_map(|row| [&row[4..], &row[..4]].concat())
+            .collect();
+        assert_eq!(flipped, mirrored);
+        assert_eq!(atlas.paints(), 2);
+        // A frame header that declares a huge picture is refused before
+        // anything is decoded, and a picture cut short is an error.
+        let started = std::time::Instant::now();
+        assert!(matches!(atlas.glyph(&font, 17), Err(TextError::Limit)));
+        assert!(matches!(
+            atlas.glyph(&font, 18),
+            Err(TextError::Font(FontError::Truncated))
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        assert_eq!(atlas.paints(), 2);
+        for glyph in [17, 18] {
+            assert!(atlas.image(glyph).is_none());
+        }
+        // A picture whose frame header disagrees with the size it was
+        // announced with, and one that is not a JPEG picture at all.
+        let picture = match font
+            .color_bitmap(16, 256)
+            .expect("glyph")
+            .expect("jpeg")
+            .pixels
+        {
+            cutlass_font::BitmapPixels::Jpeg(bytes) => bytes,
+            other => panic!("not a jpeg: {other:?}"),
+        };
+        let jpeg = super::strike::Stored::Jpeg;
+        assert!(super::strike::decode(jpeg, picture.clone(), 2, 2, 2).is_ok());
+        assert!(matches!(
+            super::strike::decode(jpeg, picture.clone(), 2, 2, 1),
+            Err(TextError::Limit)
+        ));
+        assert!(matches!(
+            super::strike::decode(jpeg, picture.clone(), 2, 1, 256),
+            Err(TextError::Font(FontError::BadTable))
+        ));
+        assert!(super::strike::decode(jpeg, b"II*\0".to_vec(), 2, 2, 256).is_err());
+        assert!(super::strike::decode(super::strike::Stored::Png, picture, 2, 2, 256).is_err());
+    }
+
+    #[test]
     fn every_png_color_type_becomes_premultiplied_color() {
         let font = read(SBIX).expect("sbix");
         let mut atlas = Atlas::new();
@@ -1402,7 +1482,7 @@ mod tests {
             atlas.glyph(&font, 11),
             Err(TextError::Font(FontError::BadTable))
         ));
-        // A graphic that is not a PNG picture.
+        // A graphic that is neither a PNG nor a JPEG picture.
         assert!(matches!(
             atlas.glyph(&font, 13),
             Err(TextError::Font(FontError::Unsupported))
@@ -1422,17 +1502,19 @@ mod tests {
             cutlass_font::BitmapPixels::Png(bytes) => bytes,
             other => panic!("not a png: {other:?}"),
         };
-        assert!(super::strike::decode(picture.clone(), 2, 2, 2).is_ok());
+        assert!(
+            super::strike::decode(super::strike::Stored::Png, picture.clone(), 2, 2, 2).is_ok()
+        );
         assert!(matches!(
-            super::strike::decode(picture.clone(), 2, 2, 1),
+            super::strike::decode(super::strike::Stored::Png, picture.clone(), 2, 2, 1),
             Err(TextError::Limit)
         ));
         assert!(matches!(
-            super::strike::decode(picture.clone(), 2, 1, 256),
+            super::strike::decode(super::strike::Stored::Png, picture.clone(), 2, 1, 256),
             Err(TextError::Font(FontError::BadTable))
         ));
         assert!(matches!(
-            super::strike::decode(Vec::new(), 2, 2, 256),
+            super::strike::decode(super::strike::Stored::Png, Vec::new(), 2, 2, 256),
             Err(TextError::Font(_))
         ));
     }

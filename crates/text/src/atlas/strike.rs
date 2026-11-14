@@ -1,4 +1,4 @@
-//! A PNG picture from a color strike, decoded to premultiplied RGBA.
+//! A PNG or JPEG picture from a color strike, decoded to premultiplied RGBA.
 //!
 //! The samples are read as sRGB whatever gamma or profile the picture
 //! names: the fonts that store pictures store them in sRGB. A picture is
@@ -10,18 +10,29 @@ use cutlass_decode::{
     Transparency,
 };
 use cutlass_font::FontError;
+use cutlass_jpeg::JpegDecoder;
 use cutlass_png::PngDecoder;
 
 use crate::TextError;
 
 /// Most bytes one encoded picture may have. A picture as large as the
 /// atlas holds, stored with no compression at 16 bits, is an eighth of this.
-const MAX_PNG_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PICTURE_BYTES: usize = 4 * 1024 * 1024;
 
-/// Decode `png`, whose header declares `width` by `height`, to premultiplied
-/// RGBA with row 0 at the top. Each edge is at most `max_edge`.
+/// How a strike stores a picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Stored {
+    Png,
+    /// No alpha: every pixel covers its square.
+    Jpeg,
+}
+
+/// Decode `picture`, whose header declares `width` by `height`, to
+/// premultiplied RGBA with row 0 at the top. Each edge is at most
+/// `max_edge`.
 pub(super) fn decode(
-    png: Vec<u8>,
+    stored: Stored,
+    picture: Vec<u8>,
     width: u32,
     height: u32,
     max_edge: u32,
@@ -29,14 +40,19 @@ pub(super) fn decode(
     if width == 0 || height == 0 || width > max_edge || height > max_edge {
         return Err(TextError::Limit);
     }
-    if png.len() > MAX_PNG_BYTES {
+    if picture.len() > MAX_PICTURE_BYTES {
         return Err(TextError::Limit);
     }
-    let mut decoder =
-        PngDecoder::open(&CodecParams::video(CodecId::Png, width, height)).map_err(refusal)?;
-    let pictures = decoder
-        .decode_picture(&Packet::video(png, 0, 0, 0, true))
-        .map_err(refusal)?;
+    let packet = Packet::video(picture, 0, 0, 0, true);
+    let pictures = match stored {
+        Stored::Png => PngDecoder::open(&CodecParams::video(CodecId::Png, width, height))
+            .map_err(refusal)?
+            .decode_picture(&packet),
+        Stored::Jpeg => JpegDecoder::open(&CodecParams::video(CodecId::Jpeg, width, height))
+            .map_err(refusal)?
+            .decode_picture(&packet),
+    }
+    .map_err(refusal)?;
     let Some(picture) = pictures.into_iter().next() else {
         return Err(TextError::Font(FontError::BadTable));
     };
@@ -59,7 +75,8 @@ fn refusal(error: CodecError) -> TextError {
     }
 }
 
-/// Every color type and bit depth a PNG has, as 8-bit premultiplied RGBA.
+/// Every color type and bit depth a PNG or a JPEG has, as 8-bit
+/// premultiplied RGBA.
 fn premultiplied(image: &StillImage) -> Result<Vec<u8>, TextError> {
     let pixels = usize::try_from(u64::from(image.width) * u64::from(image.height))
         .map_err(|_| TextError::Limit)?;

@@ -12,6 +12,9 @@ const MAX_STRIKES: usize = 64;
 const MAX_RANGES: usize = 256;
 const MAX_DUPE: u8 = 4;
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+/// Most segments read before a JPEG picture's frame header: tables,
+/// application data and comments come first, a few of each.
+const MAX_JPEG_SEGMENTS: usize = 64;
 
 /// Pixels for one glyph in one strike.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,6 +42,10 @@ pub enum BitmapPixels {
     /// `height` are the size its header declares; the bytes after the
     /// header are not checked.
     Png(Vec<u8>),
+    /// One JPEG picture as the font stores it, which `sbix` allows. The
+    /// glyph's `width` and `height` are the size its frame header declares;
+    /// the bytes after that header are not checked. It has no alpha.
+    Jpeg(Vec<u8>),
 }
 
 #[derive(Clone)]
@@ -151,6 +158,7 @@ enum Data<'a> {
         color_table: bool,
     },
     Png(&'a [u8]),
+    Jpeg(&'a [u8]),
 }
 
 impl Found<'_> {
@@ -175,6 +183,7 @@ impl Found<'_> {
                 color_table,
             )?,
             Data::Png(bytes) => BitmapPixels::Png(bytes.to_vec()),
+            Data::Jpeg(bytes) => BitmapPixels::Jpeg(bytes.to_vec()),
         };
         Ok(BitmapGlyph {
             width: self.width,
@@ -642,6 +651,52 @@ fn png_size(picture: &[u8]) -> Result<(u32, u32), FontError> {
     Ok((width, height))
 }
 
+/// The size the frame header of a JPEG picture declares.
+///
+/// The header is the first of its kind after the tables, application data
+/// and comments that open the picture. A picture coded losslessly, in
+/// layers or arithmetically is not read by the decoder and is refused here.
+fn jpeg_size(picture: &[u8]) -> Result<(u32, u32), FontError> {
+    if bytes_at(picture, 0, 2)? != [0xFF, 0xD8] {
+        return Err(FontError::BadTable);
+    }
+    let mut at = 2_usize;
+    for _ in 0..MAX_JPEG_SEGMENTS {
+        let marker = bytes_at(picture, at, 2)?;
+        if marker[0] != 0xFF {
+            return Err(FontError::BadTable);
+        }
+        match marker[1] {
+            // The baseline, extended and progressive frames.
+            0xC0..=0xC2 => {
+                let frame = bytes_at(picture, at + 2, 7)?;
+                let height = u32::from(u16::from_be_bytes([frame[3], frame[4]]));
+                let width = u32::from(u16::from_be_bytes([frame[5], frame[6]]));
+                if width == 0 || height == 0 {
+                    return Err(FontError::BadTable);
+                }
+                return Ok((width, height));
+            }
+            // Every other frame; 0xC4, 0xC8 and 0xCC are not frames.
+            0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => {
+                return Err(FontError::Unsupported);
+            }
+            // The picture ends, or its samples start, with no frame named.
+            0xD0..=0xDA | 0x00 | 0x01 | 0xFF => return Err(FontError::BadTable),
+            _ => {}
+        }
+        let length = usize::from(u16_at(picture, at + 2)?);
+        if length < 2 {
+            return Err(FontError::BadTable);
+        }
+        at = at
+            .checked_add(2)
+            .and_then(|at| at.checked_add(length))
+            .ok_or(FontError::BadTable)?;
+    }
+    Err(FontError::BadTable)
+}
+
 fn metrics_at(data: &[u8], offset: usize, big: bool) -> Result<(Metrics, usize), FontError> {
     let need = if big { 8 } else { 5 };
     let bytes = bytes_at(data, offset, need)?;
@@ -822,11 +877,14 @@ impl<'a> SbixStrike<'a> {
             let mirrored = mirrored != (kind == b"flip");
             return self.glyph(next, mirrored, depth + 1);
         }
-        if kind != b"png " {
-            return Err(FontError::Unsupported);
-        }
         let picture = &record[8..];
-        let (width, height) = png_size(picture)?;
+        // A picture stored as TIFF or PDF, which the table also allows and
+        // no face found holds, is not read.
+        let ((width, height), data) = match kind {
+            b"png " => (png_size(picture)?, Data::Png(picture)),
+            b"jpg " => (jpeg_size(picture)?, Data::Jpeg(picture)),
+            _ => return Err(FontError::Unsupported),
+        };
         // The origin offsets place the picture's left and bottom edges.
         let origin_x = i16::from_be_bytes([record[0], record[1]]);
         let origin_y = i16::from_be_bytes([record[2], record[3]]);
@@ -840,7 +898,7 @@ impl<'a> SbixStrike<'a> {
                 .ok_or(FontError::BadTable)?,
             ppem: self.ppem,
             mirrored,
-            data: Data::Png(picture),
+            data,
         }))
     }
 }
@@ -962,7 +1020,7 @@ mod tests {
         // The letter has an outline and no picture.
         assert!(font.color_bitmap(1, 256).expect("letter").is_none());
         assert!(font.bitmap(1).expect("letter").is_none());
-        assert_eq!(font.color_bitmap(16, 256), Err(FontError::UnknownGlyph));
+        assert_eq!(font.color_bitmap(20, 256), Err(FontError::UnknownGlyph));
     }
 
     #[test]
@@ -985,7 +1043,75 @@ mod tests {
     }
 
     #[test]
-    fn a_graphic_that_is_not_png_is_refused() {
+    fn an_sbix_jpeg_picture_is_handed_back_encoded_with_its_size() {
+        let font = read(SBIX).expect("sbix");
+        let glyph = font.color_bitmap(16, 256).expect("glyph").expect("picture");
+        assert_eq!((glyph.width, glyph.height, glyph.ppem), (2, 2, 2));
+        assert_eq!((glyph.bearing_x, glyph.bearing_y), (0, 2));
+        assert!(!glyph.mirrored);
+        let BitmapPixels::Jpeg(bytes) = &glyph.pixels else {
+            panic!("not a jpeg: {:?}", glyph.pixels);
+        };
+        assert_eq!(bytes[..2], [0xFF, 0xD8]);
+        assert_eq!(bytes[bytes.len() - 2..], [0xFF, 0xD9]);
+        // The flipped copy is the same bytes, to be mirrored once decoded.
+        let flipped = font.color_bitmap(19, 256).expect("glyph").expect("flip");
+        assert!(flipped.mirrored);
+        assert_eq!(flipped.pixels, glyph.pixels);
+        // The size a frame header declares is reported and not believed here.
+        let bomb = font.color_bitmap(17, 256).expect("glyph").expect("bomb");
+        assert_eq!((bomb.width, bomb.height), (60_000, 60_000));
+        // Cut short after its frame header, a picture still has its size.
+        let short = font.color_bitmap(18, 256).expect("glyph").expect("short");
+        assert_eq!((short.width, short.height), (2, 2));
+    }
+
+    #[test]
+    fn the_size_of_a_jpeg_picture_is_read_from_its_frame_header_or_refused() {
+        use super::jpeg_size;
+        const PICTURE: &[u8] = include_bytes!("../fixtures/picture.jpg");
+        assert_eq!(jpeg_size(PICTURE), Ok((2, 2)));
+        let frame = PICTURE
+            .windows(2)
+            .position(|pair| pair == [0xFF, 0xC0])
+            .expect("frame");
+        // Every cut of the bytes before the size is an error and no panic.
+        for end in 0..frame + 9 {
+            assert!(jpeg_size(&PICTURE[..end]).is_err(), "{end}");
+        }
+        assert_eq!(jpeg_size(&PICTURE[..frame + 9]), Ok((2, 2)));
+        // Not a JPEG picture, and one that ends with no frame.
+        assert_eq!(jpeg_size(b"II*\0abcdefgh"), Err(FontError::BadTable));
+        assert_eq!(
+            jpeg_size(&[0xFF, 0xD8, 0xFF, 0xD9]),
+            Err(FontError::BadTable)
+        );
+        // A frame with no pixels.
+        let mut empty = PICTURE.to_vec();
+        empty[frame + 5..frame + 7].copy_from_slice(&[0, 0]);
+        assert_eq!(jpeg_size(&empty), Err(FontError::BadTable));
+        // Lossless, layered and arithmetic frames are not decoded.
+        for kind in [0xC3, 0xC5, 0xC9, 0xCA, 0xCF] {
+            let mut other = PICTURE.to_vec();
+            other[frame + 1] = kind;
+            assert_eq!(jpeg_size(&other), Err(FontError::Unsupported), "{kind:x}");
+        }
+        // A segment whose length does not cover itself, and segments
+        // without end, stop the read.
+        let mut stuck = PICTURE.to_vec();
+        stuck[4..6].copy_from_slice(&[0, 1]);
+        assert_eq!(jpeg_size(&stuck), Err(FontError::BadTable));
+        let mut endless = vec![0xFF, 0xD8];
+        for _ in 0..100_000 {
+            endless.extend([0xFF, 0xFE, 0, 2]);
+        }
+        let started = std::time::Instant::now();
+        assert_eq!(jpeg_size(&endless), Err(FontError::BadTable));
+        assert!(started.elapsed() < std::time::Duration::from_millis(50));
+    }
+
+    #[test]
+    fn a_graphic_that_is_not_png_or_jpeg_is_refused() {
         let font = read(SBIX).expect("sbix");
         assert_eq!(font.color_bitmap(13, 256), Err(FontError::Unsupported));
         assert_eq!(font.bitmap(13), Err(FontError::Unsupported));

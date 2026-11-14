@@ -109,6 +109,9 @@ pub struct OpenClips {
     /// Title rasters by segment, with the density each was drawn at. A
     /// title does not change within a revision unless its scale is keyed.
     texts: HashMap<SegmentId, (f64, CpuBytes)>,
+    /// Caption rasters by segment: the page last drawn, with a key for
+    /// everything that went into it and the density it was drawn at.
+    captions: HashMap<SegmentId, (u64, f64, CpuBytes)>,
     /// Shape rasters by segment. A move or another clip's edit leaves a
     /// shape as it was, so these outlive a revision; each is checked
     /// against its shape before it is shown.
@@ -136,6 +139,7 @@ impl OpenClips {
             nests: HashMap::new(),
             images: HashMap::new(),
             texts: HashMap::new(),
+            captions: HashMap::new(),
             shapes: HashMap::new(),
             patient: true,
             lotties: HashMap::new(),
@@ -184,6 +188,7 @@ impl OpenClips {
         self.nests.clear();
         self.images.clear();
         self.texts.clear();
+        self.captions.clear();
         self.shapes.clear();
         self.lotties.clear();
         self.steadies.clear();
@@ -269,9 +274,12 @@ impl OpenClips {
         &mut self.shapes
     }
 
-    /// Title rasters kept for this revision.
-    pub(crate) fn texts(&mut self) -> &mut HashMap<SegmentId, (f64, CpuBytes)> {
-        &mut self.texts
+    /// Title and caption rasters kept for this revision.
+    pub(crate) fn texts(&mut self) -> crate::text::KeptText<'_> {
+        crate::text::KeptText {
+            titles: &mut self.texts,
+            captions: &mut self.captions,
+        }
     }
 
     /// Open files for the compound segment `id`.
@@ -354,6 +362,7 @@ impl OpenClips {
         self.nests.clear();
         self.images.clear();
         self.texts.clear();
+        self.captions.clear();
         self.lotties.clear();
         self.draft = Some(draft.id.clone());
         self.revision = revision;

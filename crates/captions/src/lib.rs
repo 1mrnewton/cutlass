@@ -17,7 +17,7 @@ use std::error::Error;
 use std::fmt;
 
 use cutlass_model::{MaterialText, Micros, WordColumns};
-use cutlass_text::{FaceSource, TextError};
+use cutlass_text::TextError;
 
 pub use animate::{
     Channel, GlyphBatch, Key, PlacedSample, RangeStyles, Rgba, SampledStyle, ShakeAxis,
@@ -25,8 +25,8 @@ pub use animate::{
 };
 pub use clock::{ClockPlace, WordClock, WordSpan, held_end, sample, word_millis, words};
 pub use page::{
-    CaptionLine, CaptionPage, LetterMap, MappedLetter, PageLimits, Pages, WordBytes, map_letters,
-    map_page, page_at, paginate,
+    CaptionLine, CaptionPage, Faces, LetterMap, MappedLetter, PageLimits, Pages, WordBytes,
+    map_letters, map_page, page_at, paginate,
 };
 pub use select::{
     KeywordRange, REMATCH_LIMIT, RangeKind, Selection, SplitPiece, TextRange, rematch, select,
@@ -115,7 +115,7 @@ pub struct CaptionQuery<'a> {
     pub font: &'a [u8],
     /// The other faces the caption is set in: those its ranges name and a
     /// fallback for a character `font` cannot draw.
-    pub faces: &'a dyn FaceSource,
+    pub faces: Faces<'a, 'a>,
     /// Timeline position, in microseconds.
     pub timeline: Micros,
     /// Segment target start, in microseconds.
@@ -240,7 +240,7 @@ mod tests {
         CaptionQuery {
             material,
             font: SAMPLE_FONT,
-            faces: &cutlass_text::NoFaces,
+            faces: crate::Faces::NONE,
             timeline: Micros(timeline),
             placed_at: Micros(0),
             limits: PageLimits {

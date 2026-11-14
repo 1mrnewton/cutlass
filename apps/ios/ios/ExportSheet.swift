@@ -13,6 +13,9 @@ struct ExportSheet: View {
     let name: String
     @Environment(\.dismiss) private var dismiss
     @State private var side: UInt32 = 1080
+    /// Frames a second; 0 keeps the project's own.
+    @State private var rate: UInt32 = 0
+    @State private var quality: ExportQuality = .recommended
     @State private var phase: Phase = .choosing
     @State private var listener: ExportListener?
 
@@ -27,6 +30,7 @@ struct ExportSheet: View {
     }
 
     private static let sides = exportSides()
+    private static let rates = exportRates()
 
     var body: some View {
         VStack(spacing: 20) {
@@ -45,7 +49,7 @@ struct ExportSheet: View {
         .padding(.bottom, 24)
         .frame(maxHeight: .infinity, alignment: .top)
         .background(Palette.panel)
-        .presentationDetents([.height(280)])
+        .presentationDetents([.height(phase == .choosing ? 400 : 280)])
         .presentationDragIndicator(busy ? .hidden : .visible)
         .interactiveDismissDisabled(busy)
         .onDisappear { removeFile() }
@@ -77,16 +81,44 @@ struct ExportSheet: View {
 
     private var choosing: some View {
         VStack(spacing: 20) {
-            Picker("Resolution", selection: $side) {
-                ForEach(Self.sides, id: \.self) { side in
-                    Text(Self.label(side)).tag(side)
+            option("Resolution") {
+                Picker("Resolution", selection: $side) {
+                    ForEach(Self.sides, id: \.self) { side in
+                        Text(Self.label(side)).tag(side)
+                    }
                 }
             }
-            .pickerStyle(.segmented)
+            option("Frame rate") {
+                Picker("Frame rate", selection: $rate) {
+                    Text("Auto").tag(UInt32(0))
+                    ForEach(Self.rates, id: \.self) { rate in
+                        Text("\(rate)").tag(rate)
+                    }
+                }
+            }
+            option("Quality") {
+                Picker("Quality", selection: $quality) {
+                    Text("Lower").tag(ExportQuality.lower)
+                    Text("Recommended").tag(ExportQuality.recommended)
+                    Text("Higher").tag(ExportQuality.higher)
+                }
+            }
             Text("H.264 and AAC, saved to Photos")
                 .font(.footnote)
                 .foregroundStyle(Palette.muted)
             wideButton("Export", action: start)
+        }
+    }
+
+    /// A labelled segmented picker.
+    private func option<Choice: View>(
+        _ title: String, @ViewBuilder picker: () -> Choice
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.footnote)
+                .foregroundStyle(Palette.muted)
+            picker().pickerStyle(.segmented)
         }
     }
 
@@ -161,7 +193,7 @@ struct ExportSheet: View {
         }
         removeFile()
         let file = Self.file(named: name)
-        let side = side
+        let options = ExportOptions(shortSide: side, frameRate: rate, quality: quality)
         phase = .writing(0)
         let listener = ExportListener { share in
             Task { @MainActor in
@@ -172,9 +204,9 @@ struct ExportSheet: View {
         Task {
             let written = await Task.detached(priority: .userInitiated) {
                 Result {
-                    try editor.export(
+                    try editor.exportWith(
                         path: file.path(percentEncoded: false),
-                        shortSide: side,
+                        options: options,
                         progress: listener
                     )
                 }

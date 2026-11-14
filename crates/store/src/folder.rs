@@ -25,7 +25,7 @@ use crate::json::{parse_draft, parse_value, write_draft, write_value};
 use crate::repair::{RepairNote, repair};
 use crate::upgrade::upgrade;
 
-const DRAFT_FILE: &str = "draft_info.json";
+pub(crate) const DRAFT_FILE: &str = "draft_info.json";
 const PROJECT_FILE: &str = "project.json";
 const LAYOUT_FILE: &str = "timeline_layout.json";
 const META_FILE: &str = "draft_meta_info.json";

@@ -1413,17 +1413,47 @@ fn a_seven_one_wav_reads_in_its_mask_order_and_its_waveform_sees_every_channel()
 }
 
 #[test]
-fn an_eight_bit_wav_is_not_a_pcm_layout_this_decoder_opens() {
+fn an_eight_bit_wav_plays_as_unsigned_samples() {
     let path = std::env::temp_dir().join(format!("cutlass-pcm-eight-{}", std::process::id()));
-    write_pcm_wav(&path, 8_000, 8, &[0x80]);
+    // Wave 8-bit PCM is unsigned: 0x80 is silence, 0x00 the most negative.
+    write_pcm_wav(&path, 8_000, 8, &[0x80, 0xFF, 0x00, 0xC0]);
     let mut readers = ReaderFactory::new();
     readers.register_container(cutlass_riff::probe, open_wav);
     cutlass_pcm::register_decoders(readers.decoders_mut());
-    let Err(error) = readers.open(&path) else {
-        panic!("8-bit opened");
-    };
-    assert_eq!(error, EngineError::Layout);
+    let mut media = readers.open(&path).expect("open");
+    let pcm = media.audio_from(Micros(0), 4).expect("samples");
+    let expected: Vec<f32> = [0_i16, 32_512, -32_768, 16_384]
+        .iter()
+        .map(|sample| f32::from(*sample) / 32_767.0)
+        .collect();
+    assert_eq!(pcm.as_f32(), Some(expected.as_slice()));
     std::fs::remove_file(&path).expect("remove");
+}
+
+#[test]
+fn a_law_and_mu_law_wavs_play_through_the_g711_expansion() {
+    for (tag, bytes, expected) in [
+        (0x0006_u16, [0xD5_u8, 0x55, 0xAA], [8_i16, -8, 32_256]),
+        (0x0007, [0x80, 0x00, 0xFF], [32_124, -32_124, 0]),
+    ] {
+        let path =
+            std::env::temp_dir().join(format!("cutlass-pcm-g711-{tag}-{}", std::process::id()));
+        write_pcm_wav(&path, 8_000, 8, &bytes);
+        let mut file = std::fs::read(&path).expect("read");
+        file[20..22].copy_from_slice(&tag.to_le_bytes());
+        std::fs::write(&path, file).expect("tag");
+        let mut readers = ReaderFactory::new();
+        readers.register_container(cutlass_riff::probe, open_wav);
+        cutlass_pcm::register_decoders(readers.decoders_mut());
+        let mut media = readers.open(&path).expect("open");
+        let pcm = media.audio_from(Micros(0), 3).expect("samples");
+        std::fs::remove_file(&path).expect("remove");
+        let expected: Vec<f32> = expected
+            .iter()
+            .map(|sample| f32::from(*sample) / 32_767.0)
+            .collect();
+        assert_eq!(pcm.as_f32(), Some(expected.as_slice()), "{tag:#06x}");
+    }
 }
 
 #[test]

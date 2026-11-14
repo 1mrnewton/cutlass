@@ -10,8 +10,9 @@ use super::obu::TRANSLATION;
 use super::tile::{R, TileDec, ref_rows};
 use super::types::{
     COMPOUND_AVERAGE, COMPOUND_DIFFWTD, COMPOUND_DISTANCE, COMPOUND_INTRA, COMPOUND_WEDGE, DC_PRED,
-    GLOBAL_GLOBALMV, GLOBALMV, H_PRED, INTRA_FRAME, LOCALWARP, Mv, OBMC, SMOOTH_PRED, V_PRED, bh4,
-    block_height, block_width, bw4, mi_height_log2, mi_width_log2, plane_residual_size,
+    GLOBAL_GLOBALMV, GLOBALMV, H_PRED, INTRA_FRAME, LOCALWARP, Mv, OBMC, SIMPLE, SMOOTH_PRED,
+    V_PRED, bh4, block_height, block_width, bw4, mi_height_log2, mi_width_log2,
+    plane_residual_size,
 };
 
 /// Where a block prediction goes.
@@ -53,9 +54,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                     2 => H_PRED,
                     _ => SMOOTH_PRED,
                 };
-                let bdf = &self.block_decoded[plane];
-                let ar = bdf[sub_row >> sy][(sub_col >> sx) + n4w + 1];
-                let bl = bdf[(sub_row >> sy) + n4h + 1][sub_col >> sx];
+                let bdf = &self.block_decoded;
+                let ar = bdf.get(plane, sub_row >> sy, (sub_col >> sx) + n4w + 1);
+                let bl = bdf.get(plane, (sub_row >> sy) + n4h + 1, sub_col >> sx);
                 let (al, au) = if plane == 0 {
                     (self.b.avail_l, self.b.avail_u)
                 } else {
@@ -79,15 +80,25 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                     }
                 }
             }
+            let mut rows = n4h * 4;
             if some_use_intra {
                 pred_w = n4w * 4;
                 pred_h = n4h * 4;
                 cand_row = self.b.mi_row;
                 cand_col = self.b.mi_col;
+            } else if base_y + pred_h > (self.fs.mi_rows * 4) >> sy && self.height_free() {
+                // Nothing reads the rows below the decoded area: predict
+                // the block down to it, in whole 8-row groups, where the
+                // height changes nothing else of the prediction.
+                let end = (self.fs.mi_rows * 4) >> sy;
+                let h = end.saturating_sub(base_y).next_multiple_of(8).max(8);
+                if h < pred_h && pred_h == rows {
+                    (pred_h, rows) = (h, h);
+                }
             }
             let mut r = 0;
             let mut y = 0;
-            while y < n4h * 4 {
+            while y < rows {
                 let mut c = 0;
                 let mut x = 0;
                 while x < n4w * 4 {
@@ -108,6 +119,18 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             }
         }
         Ok(())
+    }
+
+    /// Whether the rows of the block's inter prediction are independent
+    /// of its height: no overlapped or warped motion, no inter-intra, and
+    /// not a copy of the frame itself.
+    fn height_free(&self) -> bool {
+        let b = &self.b;
+        let global = (b.y_mode == GLOBALMV || b.y_mode == GLOBAL_GLOBALMV)
+            && b.ref_frame
+                .iter()
+                .any(|&rf| rf > INTRA_FRAME && self.hdr.gm_type[rf as usize] > TRANSLATION);
+        b.motion_mode == SIMPLE && !global && !b.use_intrabc && b.ref_frame[1] != INTRA_FRAME
     }
 
     fn predict_inter(
@@ -141,11 +164,12 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let is_ii = self.b.is_inter && self.b.ref_frame[1] == INTRA_FRAME;
         if is_ii {
             // Save the intra prediction; the inter prediction goes to the frame.
+            let cy = y - self.row0(plane);
             let pl = &self.cur.planes[plane];
             let st = pl.stride;
             for i in 0..h {
                 self.scratch.obmc[i * w..i * w + w]
-                    .copy_from_slice(&pl.data[(y + i) * st + x..][..w]);
+                    .copy_from_slice(&pl.data[(cy + i) * st + x..][..w]);
             }
         }
         for ref_list in 0..1 + usize::from(is_compound) {
@@ -179,7 +203,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 self.warp_block(plane, ref_frame, &mat, x, y, w, h, &dst)?;
             } else {
                 let mv = cand.mv[ref_list];
-                self.block_pred(plane, ref_frame, x, y, w, h, mv, cand.interp_filter, &dst)?;
+                self.block_pred(plane, ref_frame, x, y, w, h, mv, cand.interp_filter(), &dst)?;
             }
         }
         // Combine.
@@ -190,9 +214,10 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         } else {
             (0, 0)
         };
+        let cy = y - self.row0(plane);
         let pl = &mut self.cur.planes[plane];
         let st = pl.stride;
-        let dstp = &mut pl.data[y * st + x..];
+        let dstp = &mut pl.data[cy * st + x..];
         if is_compound {
             let t0 = &self.scratch.tmp0[..w * h];
             let t1 = &self.scratch.tmp1[..w * h];
@@ -348,10 +373,11 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         ) else {
             return false;
         };
+        let cy = y - self.row0(plane);
         let pl = &mut self.cur.planes[plane];
         let st = pl.stride;
         mc::avg_copy(
-            &mut pl.data[y * st + x..],
+            &mut pl.data[cy * st + x..],
             st,
             (&s0[offs[0].0..], st0),
             (&s1[offs[1].0..], st1),
@@ -377,7 +403,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         self.block_pred(plane, ref_frame, x, y, w, h, mv, filters, &Dst::Obmc)
     }
 
-    fn distance_weights(&self, refs: [i8; 2]) -> (i32, i32) {
+    pub(crate) fn distance_weights(&self, refs: [i8; 2]) -> (i32, i32) {
         let mut dist = [0i32; 2];
         for l in 0..2 {
             let hnt = self.hdr.order_hints[refs[l] as usize];
@@ -453,7 +479,14 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let (sx, sy) = self.plane_sub(plane);
         let fw = i64::from(self.hdr.frame_width);
         let fh = i64::from(self.hdr.frame_height);
-        // Unscaled references (the common case) need no division.
+        if ref_up_w as i64 == fw && ref_h as i64 == fh {
+            // Unscaled (the common case): the scale is 1 << 14, the base
+            // `(orig - 8) << 14`, and the rounding shift by 8 exact.
+            let ox = ((x as i64) << 4) + ((2 * i64::from(mv.col)) >> sx);
+            let oy = ((y as i64) << 4) + ((2 * i64::from(mv.row)) >> sy);
+            return ((ox << 6) + 32, (oy << 6) + 32, 1024, 1024);
+        }
+        // Scaled ones need a division.
         let scale = |r: i64, f: i64| {
             if r == f {
                 1 << 14
@@ -564,17 +597,21 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         // The rows read, in place (in one band of a reference still being
         // decoded).
         let direct = match rv {
-            Some(rv) if inside => ref_rows(
-                rv,
-                mirrors,
-                plane,
-                (iy - top) as usize,
-                (iy + bottom) as usize,
-            ),
+            Some(rv) if inside => {
+                let (y0, y1) = ((iy - top) as usize, (iy + bottom) as usize);
+                // Without a vertical fraction the filters read no rows
+                // above the block, but the vector kernels address their
+                // source from 3 rows above it: the rows start there when
+                // the picture (or the band) has them.
+                let up = if top == 0 { y0.min(3) } else { 0 };
+                ref_rows(rv, mirrors, plane, y0 - up, y1)
+                    .map(|(s, st)| (s, st, up))
+                    .or_else(|| ref_rows(rv, mirrors, plane, y0, y1).map(|(s, st)| (s, st, 0)))
+            }
             _ => None,
         };
         let (src, sstride, soff): (&[P], usize, usize) = match direct {
-            Some((s, st)) => (s, st, top as usize * st + ix as usize),
+            Some((s, st, up)) => (s, st, (top as usize + up) * st + ix as usize),
             None => {
                 if self.scratch.emu.len() < fw * fh {
                     self.scratch.emu.resize(fw * fh, P::default());
@@ -592,10 +629,22 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                         true
                     }
                     (None, Some(k)) => mirrors.get(k).is_some_and(|m| {
+                        // The band of the last row read, while it holds
+                        // the next: its first row, the row past its last,
+                        // the samples from its first and their stride.
+                        let at = core::cell::Cell::new((0, 0, &[][..], 0));
                         mc::emu_edge_rows(
                             emu,
                             fw,
-                            |r| m.rows(plane, r, r + 1).map(|s| s.0),
+                            |r| {
+                                let (a, b, s, st) = at.get();
+                                if (a..b).contains(&r) {
+                                    return s.get((r - a) * st..);
+                                }
+                                let (s, st, end) = m.rows_from(plane, r)?;
+                                at.set((r, end, s, st));
+                                Some(s)
+                            },
                             pw,
                             ph,
                             ex,
@@ -607,6 +656,14 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                     (None, None) => false,
                 };
                 if !ok {
+                    // Rows of a reference still being decoded that are
+                    // not published yet: the caller waits for them and
+                    // predicts the block again.
+                    if let Some(k) = rv.and_then(|rv| rv.mirror) {
+                        let last = (ey + fh as isize - 1).clamp(0, ph as isize - 1) as usize;
+                        let sy = self.plane_sub(plane).1;
+                        self.scratch.want_rows = Some((k, (last + 1) << sy));
+                    }
                     return Err(super::tile::malformed("reference rows"));
                 }
                 (&self.scratch.emu[..], fw, 3 * fw + 3)
@@ -617,9 +674,10 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         match dst {
             Dst::Frame | Dst::Obmc => {
                 let (out, ostride): (&mut [P], usize) = if matches!(dst, Dst::Frame) {
+                    let cy = y - self.row0(plane);
                     let pl = &mut self.cur.planes[plane];
                     let st = pl.stride;
-                    (&mut pl.data[y * st + x..], st)
+                    (&mut pl.data[cy * st + x..], st)
                 } else {
                     (&mut self.scratch.obmc[..], w)
                 };
@@ -694,18 +752,33 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let Some(rv) = self.refs[ref_frame as usize].as_ref() else {
             return Err(super::tile::malformed("missing reference"));
         };
-        // Warped blocks are reconstructed once their references are done
-        // (`recon_worker`), so the reference is never read from bands.
-        if rv.mirror.is_some() {
-            return Err(super::tile::malformed(
-                "warp from a reference still decoding",
-            ));
-        }
-        let rp = &rv.pic.planes[plane];
         for i8 in 0..h.div_ceil(8) {
             for j8 in 0..w.div_ceil(8) {
                 let bx = x + j8 * 8;
                 let by = y + i8 * 8;
+                // The whole plane of a reference that is done, or the
+                // rows this 8x8 reads of one still being decoded, from the
+                // band that holds them.
+                let (refp, ref_stride, row0): (&[P], usize, usize) = match rv.mirror {
+                    None => {
+                        let rp = &rv.pic.planes[plane];
+                        (&rp.data, rp.stride, 0)
+                    }
+                    Some(k) => {
+                        let (first, last) = mc::warp_rows(mat, bx, by, sx != 0, sy != 0, ph);
+                        let rows = self
+                            .mirrors
+                            .get(k)
+                            .and_then(|m| m.rows(plane, first, last + 1));
+                        let Some((rows, stride)) = rows else {
+                            // Not published yet: the caller waits for
+                            // them and predicts the block again.
+                            self.scratch.want_rows = Some((k, (last + 1) << sy));
+                            return Err(super::tile::malformed("reference rows"));
+                        };
+                        (rows, stride, first)
+                    }
+                };
                 match dst {
                     Dst::Tmp(l) => {
                         let tmp = if *l == 0 {
@@ -713,11 +786,12 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                         } else {
                             &mut self.scratch.tmp1[..]
                         };
-                        mc::warp_8x8_prep(
+                        mc::warp_8x8_prep_rows(
                             &mut tmp[i8 * 8 * w + j8 * 8..],
                             w,
-                            &rp.data,
-                            rp.stride,
+                            refp,
+                            ref_stride,
+                            row0,
                             pw,
                             ph,
                             mat,
@@ -730,13 +804,15 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                         );
                     }
                     _ => {
+                        let cy = by - self.row0(plane);
                         let pl = &mut self.cur.planes[plane];
                         let st = pl.stride;
-                        mc::warp_8x8_put(
-                            &mut pl.data[by * st + bx..],
+                        mc::warp_8x8_put_rows(
+                            &mut pl.data[cy * st + bx..],
                             st,
-                            &rp.data,
-                            rp.stride,
+                            refp,
+                            ref_stride,
+                            row0,
                             pw,
                             ph,
                             mat,
@@ -781,13 +857,14 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                         pred_w,
                         pred_h,
                         cand.mv[0],
-                        cand.interp_filter,
+                        cand.interp_filter(),
                         &Dst::Obmc,
                     )?;
+                    let cy = py - self.row0(plane);
                     let pl = &mut self.cur.planes[plane];
                     let st = pl.stride;
                     mc::obmc_blend_above(
-                        &mut pl.data[py * st + px..],
+                        &mut pl.data[cy * st + px..],
                         st,
                         &self.scratch.obmc,
                         pred_w,
@@ -822,13 +899,14 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                         pred_w,
                         pred_h,
                         cand.mv[0],
-                        cand.interp_filter,
+                        cand.interp_filter(),
                         &Dst::Obmc,
                     )?;
+                    let cy = py - self.row0(plane);
                     let pl = &mut self.cur.planes[plane];
                     let st = pl.stride;
                     mc::obmc_blend_left(
-                        &mut pl.data[py * st + px..],
+                        &mut pl.data[cy * st + px..],
                         st,
                         &self.scratch.obmc,
                         pred_w,
@@ -876,7 +954,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         }
         self.b.motion_mode = LOCALWARP;
         self.warp_estimation();
-        self.b.motion_mode = super::types::SIMPLE;
+        self.b.motion_mode = SIMPLE;
         if !self.b.local_valid || mc::setup_shear(&self.b.local_warp).is_none() {
             return false;
         }
@@ -921,7 +999,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         }
         self.b.motion_mode = OBMC;
         let ok = self.overlapped_mc(0, w, h).is_ok();
-        self.b.motion_mode = super::types::SIMPLE;
+        self.b.motion_mode = SIMPLE;
         if !ok {
             return false;
         }

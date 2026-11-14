@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use cutlass_model::Micros;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::recipe::{Curve, MAX_PASSES, Param, Pass, Recipe, RecipeError, Step, check_passes};
 
@@ -71,11 +71,19 @@ pub enum CrossKind {
     /// `count` stripes along `angle`, each wiping the other way from the
     /// last.
     Zip,
+    /// `count` cards across, each turned edge-on about its upright middle
+    /// and back with the incoming picture on its other face, in a wave
+    /// along `angle`. A card is 1⅔ times as tall as it is wide, so the
+    /// rows follow from the frame's shape. `soft` is how long one card
+    /// takes, as a share of the run; `edge`, a fraction of the shorter
+    /// side, opens a gap of the `red`, `green`, `blue` colour between the
+    /// cards, which also shows behind a turning card.
+    Cards,
 }
 
 impl CrossKind {
     /// Every kind, in the order of its number.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::Wipe,
         Self::Circle,
         Self::Blinds,
@@ -93,6 +101,7 @@ impl CrossKind {
         Self::Heart,
         Self::Squares,
         Self::Zip,
+        Self::Cards,
     ];
 }
 
@@ -113,7 +122,7 @@ const fn param(name: &'static str, default: f32, min: f32, max: f32) -> Param {
 /// outgoing picture instead of opening out of it.
 pub const CROSS: &[Param] = &[
     param("progress", 0.0, 0.0, 1.0),
-    param("kind", 8.0, 0.0, 16.0),
+    param("kind", 8.0, 0.0, 17.0),
     param("angle", 0.0, -360.0, 360.0),
     param("soft", 0.02, 0.0, 1.0),
     param("count", 8.0, 1.0, 64.0),
@@ -127,7 +136,7 @@ pub const CROSS: &[Param] = &[
 ];
 
 /// A transition as data.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TransitionRecipe {
     pub version: u32,
@@ -135,19 +144,19 @@ pub struct TransitionRecipe {
     pub id: String,
     pub name: String,
     /// One of [`TRANSITION_CATEGORIES`].
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub category: String,
     /// The two scenes its card plays between; none is the default pair.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preview: Vec<String>,
     /// Seconds it is dropped with; none is [`DEFAULT_CROSSING_SECONDS`].
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outgoing: Vec<Pass>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub incoming: Vec<Pass>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub cross: BTreeMap<String, Curve>,
 }
 
@@ -190,8 +199,24 @@ impl TransitionRecipe {
         }
         let recipe: Self =
             serde_json::from_slice(bytes).map_err(|error| RecipeError::Shape(error.to_string()))?;
-        recipe.check()?;
-        Ok(recipe)
+        recipe.checked()
+    }
+
+    /// A transition built in memory, checked as [`Self::read`] checks a
+    /// file.
+    pub fn checked(self) -> Result<Self, RecipeError> {
+        self.check()?;
+        Ok(self)
+    }
+
+    /// The transition as the JSON [`Self::read`] reads back to the same
+    /// one, naming the lowest version that can hold it. One that would not
+    /// read back is refused.
+    pub fn to_json(&self) -> Result<String, RecipeError> {
+        let mut written = self.clone();
+        written.version = self.least_version();
+        written.check()?;
+        crate::recipe::to_json(&written)
     }
 
     fn check(&self) -> Result<(), RecipeError> {
@@ -236,7 +261,19 @@ impl TransitionRecipe {
             };
             crate::recipe::check_curve(crate::Block::Reveal, param, curve)?;
         }
-        Ok(())
+        crate::recipe::check_version(self.version, self.least_version())
+    }
+
+    /// The lowest format version that can hold this recipe.
+    #[must_use]
+    pub fn least_version(&self) -> u32 {
+        crate::recipe::least_version(
+            self.outgoing
+                .iter()
+                .chain(&self.incoming)
+                .flat_map(|pass| pass.params.values())
+                .chain(self.cross.values()),
+        )
     }
 
     /// The `effect_id` a material stores for it.
@@ -353,7 +390,7 @@ pub fn transition_preview_t(elapsed: Micros) -> f32 {
 }
 
 /// The transition recipes the app ships, in shelf order.
-const BUNDLED_FILES: [&str; 180] = [
+const BUNDLED_FILES: [&str; 182] = [
     include_str!("../transitions/flash.json"),
     include_str!("../transitions/quick-flash.json"),
     include_str!("../transitions/red-flash.json"),
@@ -392,6 +429,7 @@ const BUNDLED_FILES: [&str; 180] = [
     include_str!("../transitions/reveal-up.json"),
     include_str!("../transitions/reveal-down.json"),
     include_str!("../transitions/card-stack.json"),
+    include_str!("../transitions/photo-slide.json"),
     include_str!("../transitions/swipe-left.json"),
     include_str!("../transitions/swipe-right.json"),
     include_str!("../transitions/swipe-up.json"),
@@ -509,6 +547,7 @@ const BUNDLED_FILES: [&str; 180] = [
     include_str!("../transitions/heart-pop.json"),
     include_str!("../transitions/star-burst.json"),
     include_str!("../transitions/tiles.json"),
+    include_str!("../transitions/flip-cards.json"),
     include_str!("../transitions/doors-close.json"),
     include_str!("../transitions/doors-close-down.json"),
     include_str!("../transitions/soft-circle.json"),
@@ -558,6 +597,18 @@ mod tests {
     }
 
     #[test]
+    fn every_bundled_transition_writes_and_reads_back_the_same() {
+        for recipe in super::bundled_transitions() {
+            let json = recipe.to_json().expect("writes");
+            assert_eq!(&read(&json), recipe, "{}", recipe.id);
+        }
+        let mut broken = read(r#"{"version":1,"id":"a","name":"A","cross":{"kind":0}}"#);
+        broken.duration = Some(60.0);
+        assert!(broken.to_json().is_err());
+        assert!(broken.checked().is_err());
+    }
+
+    #[test]
     fn every_bundled_transition_reads_and_names_its_category() {
         let mut ids = std::collections::HashSet::new();
         for file in BUNDLED_FILES {
@@ -599,6 +650,58 @@ mod tests {
         assert!((at.outgoing[0].values[0] - 0.05).abs() < 1e-6);
         assert_eq!(late.at(f32::NAN).cross[0], 0.0);
         assert_eq!(CROSS.len(), 12);
+    }
+
+    #[test]
+    fn photo_slide_rests_each_picture_full_frame_at_its_end() {
+        let recipe = super::bundled_transitions()
+            .iter()
+            .find(|recipe| recipe.id == "photo-slide")
+            .expect("photo slide ships");
+        assert_eq!(recipe.category, "Slide");
+        // scale, x, y, rotate, then border and foot.
+        let start = recipe.at(0.0);
+        assert_eq!(start.kind(), CrossKind::Over);
+        assert_eq!(start.outgoing[0].block, Block::Place);
+        assert_eq!(&start.outgoing[0].values[..4], &[1.0, 0.0, 0.0, 0.0]);
+        assert!(start.outgoing[0].values[7] > 0.0 && start.outgoing[0].values[8] > 0.0);
+        // The incoming print waits past the left edge.
+        let incoming = &start.incoming[0].values;
+        assert!(incoming[1] + incoming[0] / 2.0 < -0.5, "{incoming:?}");
+        // The outgoing print has left past the right edge by the end.
+        let end = recipe.at(1.0);
+        let outgoing = &end.outgoing[0].values;
+        assert!(outgoing[1] - outgoing[0] / 2.0 > 0.5, "{outgoing:?}");
+        assert_eq!(&end.incoming[0].values[..4], &[1.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn flip_cards_runs_a_card_wave_left_to_right() {
+        let recipe = super::bundled_transitions()
+            .iter()
+            .find(|recipe| recipe.id == "flip-cards")
+            .expect("flip cards ships");
+        assert_eq!(recipe.category, "Shape");
+        let half = recipe.at(0.5);
+        assert_eq!(half.kind(), CrossKind::Cards);
+        // progress, kind, angle, soft, count, x, y, edge, then black.
+        assert_eq!(half.cross[0], 0.5);
+        assert_eq!(half.cross[4], 5.0);
+        assert!(half.cross[2] > -90.0 && half.cross[2] < 0.0);
+        assert!(half.cross[7] > 0.0);
+        assert_eq!(&half.cross[8..11], &[0.0, 0.0, 0.0]);
+        assert!(half.outgoing.is_empty() && half.incoming.is_empty());
+        // The last kind reads; one past it does not.
+        assert_eq!(
+            read(r#"{"version":1,"id":"a","name":"A","cross":{"kind":17}}"#)
+                .at(0.5)
+                .kind(),
+            CrossKind::Cards
+        );
+        assert!(
+            TransitionRecipe::read(br#"{"version":1,"id":"a","name":"A","cross":{"kind":18}}"#)
+                .is_err()
+        );
     }
 
     #[test]

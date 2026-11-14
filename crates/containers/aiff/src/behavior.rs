@@ -500,25 +500,35 @@ fn aifc_pcm_widths_keep_their_layout_bytes() {
 }
 
 #[test]
-fn ulaw_and_ima4_are_packetized_without_being_decoded() {
-    let ulaw = form(
+fn alaw_and_ulaw_are_pcm_codings_in_either_case() {
+    for (tag, coding) in [(*b"alaw", 7), (*b"ulaw", 8), (*b"ALAW", 7), (*b"ULAW", 8)] {
+        let file = form(
+            b"AIFC",
+            &[
+                comm(2, 2, 8, 8_000, Some(tag)),
+                ssnd(0, 0, &[0x11, 0x22, 0x33, 0x44]),
+            ],
+        );
+        let mut demux = open(&file);
+        let params = demux.streams()[0].params();
+        assert_eq!(params.codec(), &StreamCodec::Known(CodecId::Pcm));
+        assert_eq!(params.extradata(), &[coding, 1, 0]);
+        let packets = read_packets(&mut demux);
+        assert_eq!(packets.len(), 2);
+        assert_eq!(packets[0].bytes(), &[0x11, 0x22]);
+        assert_eq!(packets[1].bytes(), &[0x33, 0x44]);
+        assert_eq!(packets[1].timestamp().presentation(), Some(1));
+        assert_eq!(packets[0].timestamp().duration(), Some(1));
+    }
+    let wide = form(
         b"AIFC",
-        &[
-            comm(1, 2, 8, 8_000, Some(*b"ulaw")),
-            ssnd(0, 0, &[0x11, 0x22]),
-        ],
+        &[comm(1, 1, 16, 8_000, Some(*b"alaw")), ssnd(0, 0, &[0, 0])],
     );
-    let mut demux = open(&ulaw);
-    assert_eq!(
-        demux.streams()[0].params().codec(),
-        &StreamCodec::Unknown(UnknownCodec::new(b"ulaw").expect("tag"))
-    );
-    let packets = read_packets(&mut demux);
-    assert_eq!(packets[0].bytes(), &[0x11]);
-    assert_eq!(packets[1].bytes(), &[0x22]);
-    assert_eq!(packets[1].timestamp().presentation(), Some(1));
-    assert_eq!(packets[0].timestamp().duration(), Some(1));
+    assert!(matches!(open_err(&wide), OpenError::Source { .. }));
+}
 
+#[test]
+fn ima4_is_packetized_without_being_decoded() {
     let block = vec![0x3c; 34];
     let ima = form(
         b"AIFC",

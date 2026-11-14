@@ -15,14 +15,19 @@ Every coding below is accepted little-endian or big-endian, interleaved or plana
 | Signed 32-bit | `SampleFormat::F32`, divided by 2147483647 | refused |
 | 32-bit float | `SampleFormat::F32`, the same bits | `F32`, the same bits |
 | 64-bit float | `SampleFormat::F32`, narrowed with `as f32` | `F32`, widened with `f64::from` |
+| Signed 64-bit | `SampleFormat::F32`, rounded once to `f32` and scaled by 2^-63 | refused |
+| Signed 8-bit (AIFF, CAF) | `SampleFormat::I16`, shifted up 8 bits | refused |
+| Unsigned 8-bit, 128 is silence (WAV, AVI, Matroska, QuickTime `raw `) | `SampleFormat::I16`, less 128, shifted up 8 bits | refused |
+| G.711 A-law | `SampleFormat::I16`, the G.711 expansion, 8 to 32256 | refused |
+| G.711 mu-law | `SampleFormat::I16`, the G.711 expansion, 0 to 32124 | refused |
 
-Integer full scale is the largest positive value of the width, so the most negative 24-bit code decodes slightly below -1. Finite floats outside ±1 are kept.
+Integer full scale is the largest positive value of the width, so the most negative 24-bit code decodes slightly below -1. For 64-bit integers that value is 2^63, since `i64::MAX` rounds to 2^63 in a double, so `i64::MIN` decodes to exactly -1. Byte order is ignored for the one-byte codings. Finite floats outside ±1 are kept.
 
 The layout is three bytes in `CodecParams.extra`, which the container writes:
 
 | Byte | Values |
 | --- | --- |
-| 0, coding | 1 s16, 2 s24, 3 s32, 4 f32, 5 f64 |
+| 0, coding | 1 s16, 2 s24, 3 s32, 4 f32, 5 f64, 6 s8, 7 A-law, 8 mu-law, 9 s64, 11 u8 |
 | 1, byte order | 0 little, 1 big |
 | 2, arrangement | 0 interleaved, 1 planar |
 
@@ -32,8 +37,9 @@ What is refused:
 
 | Input | Error |
 | --- | --- |
-| Coding 6 (8-bit), 7 (A-law), 8 (mu-law), 9 (s64), 10 (24-bit in a 32-bit word), or any other coding byte | `Unsupported` naming it |
-| Encoding s24 or s32 | `Unsupported { what: "s24 encode" }`, `"s32 encode"` |
+| Coding 10 (24-bit in a 32-bit word; no container writes it) | `Unsupported { what: "s24 in 32" }` |
+| Any other coding byte | `Unsupported { what: "pcm coding" }` |
+| Encoding s24, s32, s8, u8, A-law, mu-law or s64 | `Unsupported { what: "s24 encode" }`, `"s32 encode"`, `"s8 encode"`, `"u8 encode"`, `"a-law encode"`, `"mu-law encode"`, `"s64 encode"` |
 | `extra` that is not empty and not three bytes; a bad byte-order or arrangement byte | `Malformed` |
 | Empty `extra` and no `sample_format` | `Unsupported { what: "pcm layout" }` |
 | A `sample_format` that is not what the coding decodes to | `InvalidApi { what: "pcm sample format" }` |
@@ -77,14 +83,15 @@ let packets = encoder.push(&AudioInput { pcm })?;
 
 All tests are unit tests inside `src/`; run them with `cargo test -p cutlass-pcm`.
 
-- Known byte patterns for each coding, both byte orders and planar input, including full scale, the most negative code, negative zero and loud finite floats.
+- Known byte patterns for each coding, both byte orders and planar input, including full scale, the most negative code, negative zero and loud finite floats; the G.711 zeros and full-scale codes; `i64::MAX` and `i64::MIN`.
 - Round trips: s16, f32 and f64 encode and decode back to the same samples, and random s16 buffers keep every sample.
 - Errors: partial frames, short buffers, overflowing lengths, non-finite floats, refused codings, and that a failed push changes nothing for the next push.
 - Against FFmpeg (`ffmpeg_reads_an_independent_bitstream`): FFmpeg reads encoded s16 and f32 packets back unchanged, and FFmpeg's widening of 24-bit samples matches the decoder's scale. Skipped with a line on stderr when `ffmpeg` is not installed; set `PCM_REQUIRE_ORACLES` to make that a failure.
+- Against FFmpeg, bit-exact (`ffmpeg_decodes_every_byte_code_the_same`, `ffmpeg_decodes_s64_to_the_same_floats`): all 256 codes of A-law, mu-law, s8 and u8 decode to the same s16 values as FFmpeg's `alaw`, `mulaw`, `s8` and `u8` decoders widened by libswresample, and 4,006 random 64-bit integers (a 64-bit WAV, which FFmpeg reads as `pcm_s64le`) give the same `f32` bits as FFmpeg's float output.
 - A separate measurement found that a 16-bit WAV file decodes to the same bytes as FFmpeg's output.
 - `local_files_match_an_independent_pcm_dump` decodes FFmpeg's 16-bit dump of two named files from a local media folder that is not in the repository. It is skipped when the folder is missing.
 
-Not run by default: `thirty_minute_decoder_campaign` and `bounded_encoder_campaign` (seeded random input; `PCM_FUZZ_SECS` and `PCM_ENCODER_FUZZ_SECS` set the run lengths) and `release_decode_and_encode_throughput` are `#[ignore]`. No result of them is recorded here.
+Not run by default: `thirty_minute_decoder_campaign` and `bounded_encoder_campaign` (seeded random input; `PCM_FUZZ_SECS` and `PCM_ENCODER_FUZZ_SECS` set the run lengths, `PCM_FUZZ_SEED` the decoder seed in hex) and `release_decode_and_encode_throughput` are `#[ignore]`. The decoder campaign, with the s8, u8, A-law, mu-law and s64 layouts added, ran 1800 s from seed `0x711d3c0` on 12 November 2026 (release build at `f2d59632`): 15,627,983,193 inputs, 10,755,512,978 refused with an error, no panic and no failed check, at most 2.9 MB resident. The encoder campaign and the throughput test have no recorded result.
 
 ## Speed against FFmpeg
 
@@ -115,8 +122,8 @@ To run it again: `cargo build --release -p media-bench`, then `python3 scripts/b
 | Sample rate | 1 to 384000 Hz | `InvalidApi` at 0, `Limit` above |
 | Channels | 1 to 8, the bound of `ChannelLayout` | `InvalidApi` when the layout is missing |
 
-- 8-bit PCM, A-law, mu-law, 64-bit integers and 24-bit samples stored in 32-bit words are not decoded.
-- 24-bit and 32-bit integer PCM cannot be encoded. They decode to `f32`, and writing them back would have to quantize.
+- Coding 10, 24-bit samples in 32-bit words, is not decoded: no container in the workspace writes it. CAF's unpacked integer samples are high-aligned and AudioToolbox reads every bit of the word, so `cutlass-caf` maps them to the coding of the word width instead.
+- Only s16, f32 and f64 can be encoded. Every other coding decodes to a wider mix sample, and writing it back would have to quantize or compand.
 - 32-bit integers decode to `f32`, which has a 24-bit mantissa, so their low bits are rounded. The most negative 32-bit code decodes to exactly -1.
 - Resampling, dither and channel remixing are outside the crate.
 - Samples are converted one at a time through a checked closure; there is no bulk copy path for layouts that already match the machine's byte order.

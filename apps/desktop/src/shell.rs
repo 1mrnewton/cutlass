@@ -17,12 +17,12 @@ use std::time::{Duration, Instant};
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
     Append, AppendLane, ClipMove, ClipboardMiss, CopiedClip, DropGesture, DropOutcome,
-    EFFECT_LENGTH, EffectPlace, GestureError, MediaPlace, MoveGesture, MovePlan, Pointer,
-    TITLE_LENGTH, TimelineScale, TitlePlace, TrimGesture, TrimPlan, Zoom, ZoomBounds,
-    append_placement, copy_clips, drop_gesture, effect_of_card, effect_requests, effect_row_for,
-    effect_target, fit_pixel_size, free_row, hit_test, last_accuracy_step, material_span,
-    media_requests, minimum_pixel_size, move_requests, paste_requests, plan_move,
-    plan_move_between, title_requests, title_style, trim_gesture,
+    EFFECT_LENGTH, EffectPlace, FreshIds, GestureError, MediaPlace, MoveGesture, MovePlan, Pointer,
+    STICKER_LENGTH, TITLE_LENGTH, TimelineScale, TitlePlace, TrimGesture, TrimPlan, Zoom,
+    ZoomBounds, append_placement, copy_clips, drop_gesture, effect_of_card, effect_requests,
+    effect_row_for, effect_target, fit_pixel_size, free_row, highest_suffix, hit_test,
+    last_accuracy_step, material_span, media_requests, minimum_pixel_size, move_requests,
+    paste_requests, plan_move, plan_move_between, title_requests, title_style, trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
@@ -49,9 +49,11 @@ use cutlass_transcription::{
 
 mod assistant;
 mod compound;
+mod cover;
 mod effect_preview;
 mod follow;
 mod group;
+pub mod studio;
 pub(crate) use follow::clip_path;
 mod enhance;
 mod hear;
@@ -69,6 +71,7 @@ mod shape;
 mod speech_model;
 mod stable;
 mod sync;
+mod thumbnail;
 mod update;
 
 pub use assistant::AgentRun;
@@ -600,15 +603,15 @@ pub enum ExportQuality {
 
 impl ExportQuality {
     /// The bitrate for a picture `short_side` pixels on its short side.
-    /// HEVC gets the same picture from fewer bits; MPEG-2 needs twice what
-    /// H.264 spends. Motion JPEG codes every frame alone: a 1080p frame of
+    /// HEVC and AV1 get the same picture from fewer bits; MPEG-2 needs twice
+    /// what H.264 spends. Motion JPEG codes every frame alone: a 1080p frame of
     /// footage at quality 75 is about 240 KB, near five times H.264's rate at
     /// 30 frames a second. The other picture codecs spend what H.264 does.
     #[must_use]
     pub fn bitrate(self, short_side: u32, codec: CodecId) -> u32 {
         let base = cutlass_export::video_bitrate(short_side);
         let base = match codec {
-            CodecId::Hevc => base / 10 * 6,
+            CodecId::Hevc | CodecId::Av1 => base / 10 * 6,
             CodecId::Mjpeg => base.saturating_mul(5),
             CodecId::Mpeg2 => base.saturating_mul(2),
             _ => base,
@@ -729,9 +732,6 @@ const PREROLL: Micros = Micros(1_000_000);
 /// Card ids on the sticker shelf: this prefix, then the sticker's id.
 pub const STICKER_CARD_PREFIX: &str = "sticker:";
 
-/// How long a sticker lasts when it is placed.
-const STICKER_LENGTH: Micros = Micros(3_000_000);
-
 /// The sticker shelf's `card_id`.
 fn shelf_sticker(card_id: &str) -> Result<&'static cutlass_stickers::Sticker, ShellError> {
     card_id
@@ -742,20 +742,11 @@ fn shelf_sticker(card_id: &str) -> Result<&'static cutlass_stickers::Sticker, Sh
         })
 }
 
-/// How long `sticker` lasts when it is placed: an animation plays as many
-/// whole rounds as fit in [`STICKER_LENGTH`], at least one, so its clip
-/// ends where a round ends; a still lasts [`STICKER_LENGTH`].
+/// How long `sticker` lasts when it is placed, as
+/// [`cutlass_editor::sticker_length`] says.
 pub fn sticker_length(sticker: &cutlass_stickers::Sticker) -> Micros {
-    let Some(seconds) = sticker.seconds().filter(|seconds| *seconds > 0.0) else {
-        return STICKER_LENGTH;
-    };
-    let round = (seconds * 1_000_000.0).round();
-    let rounds = (STICKER_LENGTH.0 as f64 / round).floor().max(1.0);
-    Micros((round * rounds) as i64)
+    cutlass_editor::sticker_length(sticker.seconds())
 }
-
-/// A placed sticker's size against the canvas it would fill.
-const STICKER_SCALE: f64 = 0.4;
 
 pub struct Shell {
     decoders: DecodeFactory,
@@ -776,6 +767,8 @@ pub struct Shell {
     settings_file: Option<(PathBuf, u64)>,
     /// Where the looks saved with "Save as preset" are kept, and the looks.
     presets_file: Option<PathBuf>,
+    /// The effect studio: its document, folder and preview pictures.
+    studio: studio::StudioState,
     saved_looks: Vec<cutlass_editor::SavedLook>,
     /// Files dropped on the window, imported one job after another.
     waiting_imports: std::collections::VecDeque<PathBuf>,
@@ -871,6 +864,8 @@ pub struct Shell {
     speech: RefCell<Option<ParakeetUnified>>,
     /// The selection model, loaded on the first click-to-select.
     vision: Option<select::VisionModel>,
+    /// The face, body and hand detectors loaded so far.
+    detectors: Vec<cutlass_vision::Detector>,
     /// The object click-to-select is picking, while the preview takes clicks.
     picking: Option<select::Picking>,
     /// A track being set up on the selected clip.
@@ -894,6 +889,14 @@ pub struct Shell {
     job: Option<RunningJob>,
     /// The movie the last export wrote.
     exported: Option<PathBuf>,
+    /// Bumped when the cover file is written or removed.
+    cover_version: u64,
+    /// The cover dialog's strip, while it is drawn.
+    cover_strip: Option<cover::CoverStrip>,
+    /// The cover dialog's frame, drawn apart from the preview.
+    cover_frame: Option<cover::CoverFrame>,
+    /// The projects home's first-frame pictures, drawn on their own thread.
+    project_pictures: Option<thumbnail::ProjectPictures>,
     /// What the last import that landed added, until the window looks.
     imported: Option<ImportedKind>,
     /// An autosave writing on its own thread.
@@ -954,6 +957,7 @@ impl Shell {
             settings,
             settings_file: None,
             presets_file: None,
+            studio: studio::StudioState::new(),
             saved_looks: Vec::new(),
             waiting_imports: std::collections::VecDeque::new(),
             session: None,
@@ -1007,6 +1011,7 @@ impl Shell {
             next_id: 0,
             speech: RefCell::new(None),
             vision: None,
+            detectors: Vec::new(),
             picking: None,
             tracking: None,
             pen: None,
@@ -1019,6 +1024,10 @@ impl Shell {
             agent_tracks: follow::AgentTracks::default(),
             job: None,
             exported: None,
+            cover_version: 0,
+            cover_strip: None,
+            cover_frame: None,
+            project_pictures: None,
             imported: None,
             saving: None,
             holding: false,
@@ -2734,10 +2743,12 @@ impl Shell {
     }
 
     pub fn undo(&mut self) -> Result<(), ShellError> {
+        let before = self.cover().cloned();
         let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
         match session.undo() {
             Ok(revision) => {
                 cutlass_logger::info!("undo: revision {revision}");
+                self.follow_cover(before);
                 Ok(())
             }
             Err(error) => {
@@ -2749,10 +2760,12 @@ impl Shell {
     }
 
     pub fn redo(&mut self) -> Result<(), ShellError> {
+        let before = self.cover().cloned();
         let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
         match session.redo() {
             Ok(revision) => {
                 cutlass_logger::info!("redo: revision {revision}");
+                self.follow_cover(before);
                 Ok(())
             }
             Err(error) => {
@@ -3952,62 +3965,27 @@ impl Shell {
         start: Micros,
     ) -> Result<(), ShellError> {
         let project = self.path.clone().ok_or(ShellError::NoProject)?;
-        let stored = format!("Resources/{}", sticker.file_name());
-        let mut requests = Vec::new();
-        let known = self
-            .session_draft()?
-            .materials
-            .videos
-            .iter()
-            .find(|video| video.path == stored)
-            .map(|video| video.id.as_str().to_owned());
-        let material_id = match known {
-            Some(id) => id,
-            None => {
-                let file = project.join(&stored);
-                if !file.is_file() {
-                    let bytes = sticker.bytes().map_err(ShellError::Io)?;
-                    if let Some(folder) = file.parent() {
-                        std::fs::create_dir_all(folder)
-                            .map_err(|error| ShellError::Io(error.to_string()))?;
-                    }
-                    std::fs::write(&file, bytes)
-                        .map_err(|error| ShellError::Io(error.to_string()))?;
-                }
-                let material_id = self.fresh("mat");
-                let mut material = MaterialVideo::new(material_id.as_str());
-                material.kind = MetaType::Sticker.as_str().to_owned();
-                material.path = stored;
-                // A picture has no length of its own; an animation plays
-                // round for as long as its clip lasts.
-                material.duration = MaterialVideo::MAPPING_DURATION.max(length);
-                let (width, height) = sticker.size().map_err(ShellError::Io)?;
-                material.width = i32::try_from(width).unwrap_or(0);
-                material.height = i32::try_from(height).unwrap_or(0);
-                requests.push(Request::Import {
-                    medium: ImportedMedium::Video(Box::new(material)),
-                });
-                material_id
-            }
-        };
-        let new_lane = track_id.is_none().then_some(TrackType::Sticker);
-        let place = MediaPlace {
+        let stored = sticker.write_into(&project).map_err(ShellError::Io)?;
+        let (width, height) = sticker.size().map_err(ShellError::Io)?;
+        let place = cutlass_editor::StickerPlace {
+            new_lane: track_id.is_none(),
             track_id: track_id.unwrap_or_else(|| TrackId::new(self.fresh("track"))),
             segment_id: SegmentId::new(self.fresh("seg")),
-            material_id,
+            material_id: MaterialId::new(self.fresh("mat")),
             start,
-            duration: length,
-            new_lane,
+            length,
         };
-        requests.extend(media_requests(
+        let file = cutlass_editor::StickerFile {
+            stored: &stored,
+            width,
+            height,
+        };
+        let requests = cutlass_editor::sticker_requests(
             self.session_draft()?,
+            file,
             &place,
             self.linkage_enabled(),
-        ));
-        requests.push(Request::SetScale {
-            segment_id: place.segment_id.clone(),
-            scale: STICKER_SCALE,
-        });
+        );
         self.apply_requests(&requests)?;
         self.select(Some(place.segment_id));
         Ok(())
@@ -7770,6 +7748,11 @@ impl Shell {
                 "VP8 is written in an MP4".to_owned(),
             ));
         }
+        if request.codec == CodecId::Av1 && mov {
+            return Err(ShellError::Unavailable(
+                "AV1 is written in an MP4".to_owned(),
+            ));
+        }
         if request.codec == CodecId::Mpeg2 && mov {
             return Err(ShellError::Unavailable(
                 "MPEG-2 is written in an MP4".to_owned(),
@@ -7836,6 +7819,7 @@ impl Shell {
                 | CodecId::Prores
                 | CodecId::Mjpeg
                 | CodecId::Vp8
+                | CodecId::Av1
                 | CodecId::Mpeg2
         ) {
             return Err(ShellError::ExportUnavailable);
@@ -8232,7 +8216,7 @@ impl Shell {
         }
     }
 
-    fn apply(&mut self, request: Request) -> Result<(), ShellError> {
+    pub(crate) fn apply(&mut self, request: Request) -> Result<(), ShellError> {
         if self.all_captions
             && let Some(draft) = self.draft()
         {
@@ -8723,70 +8707,6 @@ pub const EMPTY_SPAN: Micros = Micros(10_000_000);
 
 /// [`EMPTY_SPAN`] across a third of `lane_width`, no closer than the
 /// finest ruler step.
-/// New ids `prefix-N` for several requests planned at once, each past
-/// every `prefix-N` the draft already holds. The counter starts at zero
-/// each launch, so a reopened project would otherwise be handed ids it
-/// already uses and the edit would be refused as a duplicate.
-struct FreshIds<'a> {
-    draft: &'a Draft,
-    /// The last number handed out.
-    next: u64,
-    /// The prefixes the draft has been searched for, once each.
-    looked: Vec<String>,
-}
-
-impl<'a> FreshIds<'a> {
-    fn new(draft: &'a Draft, next: u64) -> Self {
-        Self {
-            draft,
-            next,
-            looked: Vec::new(),
-        }
-    }
-
-    fn make(&mut self, prefix: &str) -> String {
-        if !self.looked.iter().any(|looked| looked == prefix) {
-            self.next = self.next.max(highest_suffix(self.draft, prefix));
-            self.looked.push(prefix.to_owned());
-        }
-        self.next = self.next.saturating_add(1);
-        format!("{prefix}-{}", self.next)
-    }
-}
-
-/// The largest `N` of any string `prefix-N` in `draft`, or zero.
-fn highest_suffix(draft: &Draft, prefix: &str) -> u64 {
-    fn walk(value: &serde_json::Value, prefix: &str, best: &mut u64) {
-        match value {
-            serde_json::Value::String(text) => {
-                let number = text
-                    .strip_prefix(prefix)
-                    .and_then(|rest| rest.strip_prefix('-'))
-                    .and_then(|digits| digits.parse::<u64>().ok());
-                if let Some(number) = number {
-                    *best = (*best).max(number);
-                }
-            }
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    walk(item, prefix, best);
-                }
-            }
-            serde_json::Value::Object(map) => {
-                for item in map.values() {
-                    walk(item, prefix, best);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut best = 0;
-    if let Ok(value) = serde_json::to_value(draft) {
-        walk(&value, prefix, &mut best);
-    }
-    best
-}
-
 fn empty_pixel_size(lane_width: f64, rate: FrameRate) -> Option<f64> {
     let size = lane_width / 3.0 / EMPTY_SPAN.0 as f64;
     if !size.is_finite() || size <= 0.0 {
@@ -10023,6 +9943,310 @@ mod tests {
         let draft = desktop.draft().unwrap();
         assert!(draft.materials.video_trackings.is_empty());
         assert!(mask_at(draft, 1_000_000).is_none(), "the box mask goes too");
+    }
+
+    #[test]
+    #[ignore = "decodes seconds of a real movie; slow in a debug build"]
+    fn a_sticker_and_a_mask_follow_a_shirt_set_up_from_the_follower_on_a_real_movie() {
+        let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/16929689_1920_1080_30fps.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: the movie is missing");
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 4_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 4_000_000));
+        draft.materials.videos[0].duration = Micros(4_000_000);
+        draft.duration = Micros(4_000_000);
+        let id = draft.tracks[0].segments[0].id.clone();
+        let material = draft.tracks[0].segments[0].material_id.clone();
+        let mut sticker = Segment::new("follower", material.as_str(), TimeRange::new(0, 4_000_000));
+        sticker.clip.transform.y = 0.3;
+        sticker.uniform_scale.value = 0.25;
+        // Drawn over the movie, as an added sticker is.
+        sticker.render_index = TrackType::Sticker.render_floor().unwrap_or(0);
+        let mut lane = Track::main("stickers");
+        lane.kind = TrackType::Sticker;
+        lane.segments.push(sticker);
+        draft.tracks.push(lane);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let wait = |desktop: &mut Shell, what: &str| {
+            let started = std::time::Instant::now();
+            let until = started + std::time::Duration::from_secs(600);
+            while desktop.poll_job() && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            eprintln!(
+                "{what} in {:.1}s; notice {:?}",
+                started.elapsed().as_secs_f64(),
+                desktop.notice()
+            );
+        };
+        // The sticker picks the shirt under it at one second, as the
+        // Tracking tab's Custom does: a box in canvas pixels.
+        desktop.select(Some("follower".into()));
+        desktop.seek(Micros(1_000_000));
+        desktop.start_following().unwrap();
+        assert_eq!(desktop.tracking().unwrap().segment_id, id);
+        desktop
+            .set_track_box((915.0, 435.0), (1080.0, 600.0))
+            .unwrap();
+        desktop.run_tracking().unwrap();
+        wait(&mut desktop, "tracked");
+        let following = desktop.following().expect("the sticker follows");
+        assert_eq!(following.target, id);
+        assert!(!following.by_mask);
+        let draft = desktop.draft().unwrap();
+        let follower = &draft.tracks[1].segments[0];
+        let pose = |draft: &Draft, t: i64| {
+            let follower = &draft.tracks[1].segments[0];
+            let (clip, uniform) =
+                cutlass_model::clip_at(follower, &draft.keyframe_graph_list, Micros(t)).unwrap();
+            (clip.transform.x, clip.transform.y, uniform.value)
+        };
+        let (start, later) = (pose(draft, 1_000_000), pose(draft, 3_900_000));
+        eprintln!(
+            "{} keys; at 1s {start:?}, at 3.9s {later:?}",
+            cutlass_model::key_offsets(follower).len()
+        );
+        assert!((start.2 - 0.25).abs() < 0.01);
+        assert!(later.2 < start.2 * 0.9, "the shirt walks away: {later:?}");
+        assert!(later.1 < start.1, "{later:?}");
+
+        // Fix a frame from the sticker, then stop following.
+        desktop.seek(Micros(2_500_000));
+        desktop.start_fixing_following().unwrap();
+        let ((a, b), (c, d)) = desktop.tracking().unwrap().canvas_box.unwrap();
+        desktop.set_track_box((a, b), (c, d)).unwrap();
+        desktop.run_tracking().unwrap();
+        wait(&mut desktop, "fixed");
+        let draft = desktop.draft().unwrap();
+        assert_eq!(draft.materials.video_trackings.len(), 1);
+        let fixed = pose(draft, 1_000_000);
+        assert!((fixed.2 - start.2).abs() < 1e-9, "the anchor pose stays");
+        desktop.stop_following().unwrap();
+        assert!(desktop.following().is_none());
+        let draft = desktop.draft().unwrap();
+        assert!(draft.materials.video_trackings.is_empty());
+        let after = pose(draft, 3_900_000);
+        assert!(
+            (after.2 - 0.25).abs() < 1e-9,
+            "back to its own size: {after:?}"
+        );
+
+        // The movie's mask follows the shirt from the Mask page's Track.
+        desktop.select(Some(id.clone()));
+        desktop.seek(Micros(1_000_000));
+        desktop.start_mask_following().unwrap();
+        desktop
+            .set_track_box((915.0, 435.0), (1080.0, 600.0))
+            .unwrap();
+        desktop.run_tracking().unwrap();
+        wait(&mut desktop, "mask tracked");
+        assert!(desktop.following().is_some_and(|f| f.by_mask));
+        let draft = desktop.draft().unwrap();
+        let clip = &draft.tracks[0].segments[0];
+        let mask = cutlass_effects::segment_mask(draft, clip).expect("a box mask");
+        let (m0, m1) = (
+            mask.at(clip, &draft.keyframe_graph_list, Micros(1_000_000)),
+            mask.at(clip, &draft.keyframe_graph_list, Micros(3_900_000)),
+        );
+        eprintln!(
+            "mask at 1s {:?}, at 3.9s {:?}",
+            (m0.x, m0.y, m0.width),
+            (m1.x, m1.y, m1.width)
+        );
+        assert!(m1.width < m0.width * 0.9, "the mask shrinks with the shirt");
+    }
+
+    #[test]
+    #[ignore = "runs the selection model and the tracker on a real movie"]
+    fn a_click_on_the_walking_man_boxes_him_and_a_sticker_follows() {
+        let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/16929689_1920_1080_30fps.mp4");
+        if !movie.is_file() || !super::select::vision_model_here() {
+            eprintln!("skipped: the movie or the selection model is missing");
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 4_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 4_000_000));
+        draft.materials.videos[0].duration = Micros(4_000_000);
+        draft.duration = Micros(4_000_000);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.seek(Micros(1_000_000));
+        desktop.add_sticker("sticker:heart").unwrap();
+        desktop.start_following().unwrap();
+        assert!(desktop.track_subject_enabled());
+        let started = std::time::Instant::now();
+        // The shirt's middle.
+        desktop.pick_track_subject(997.0, 517.0).unwrap();
+        let until = started + std::time::Duration::from_secs(600);
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let ((x0, y0), (x1, y1)) = desktop
+            .tracking()
+            .and_then(|t| t.canvas_box)
+            .unwrap_or_else(|| panic!("a box; notice {:?}", desktop.notice()));
+        eprintln!(
+            "found in {:.1}s: box ({x0:.0}, {y0:.0}) to ({x1:.0}, {y1:.0})",
+            started.elapsed().as_secs_f64()
+        );
+        // Around the click, and smaller than the frame.
+        assert!(x0 < 997.0 && 997.0 < x1 && y0 < 517.0 && 517.0 < y1);
+        assert!(x1 - x0 < 960.0 && y1 - y0 < 900.0);
+        desktop.run_tracking().unwrap();
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            desktop.following().is_some(),
+            "notice {:?}",
+            desktop.notice()
+        );
+    }
+
+    /// A movie from `local-files` trimmed to `seconds`, opened, or `None`
+    /// with a note when it or the detectors are missing.
+    fn detect_movie(
+        temp: &Temp,
+        file: &str,
+        size: (u32, u32),
+        seconds: i64,
+    ) -> Option<(Shell, SegmentId)> {
+        let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files")
+            .join(file);
+        let here = [
+            cutlass_vision::Part::Face,
+            cutlass_vision::Part::Body,
+            cutlass_vision::Part::Hand,
+        ]
+        .into_iter()
+        .all(super::select::detector_here);
+        if !movie.is_file() || !here {
+            eprintln!("skipped: {file} or the detectors are missing");
+            return None;
+        }
+        let mut draft = crate::open_movie::movie_draft(&movie, size.0, size.1, false).unwrap();
+        let length = seconds * 1_000_000;
+        draft.tracks[0].segments[0].target = TimeRange::new(0, length);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, length));
+        draft.materials.videos[0].duration = Micros(length);
+        draft.duration = Micros(length);
+        let id = draft.tracks[0].segments[0].id.clone();
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        Some((desktop, id))
+    }
+
+    fn finish(desktop: &mut Shell, what: &str) {
+        let started = std::time::Instant::now();
+        let until = started + std::time::Duration::from_secs(600);
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        eprintln!(
+            "{what} in {:.1}s; notice {:?}",
+            started.elapsed().as_secs_f64(),
+            desktop.notice()
+        );
+    }
+
+    #[test]
+    #[ignore = "runs the body detector and the tracker on a real movie"]
+    fn body_finds_the_walking_man_and_a_sticker_and_a_mask_follow_him() {
+        let temp = Temp::new();
+        let Some((mut desktop, movie)) =
+            detect_movie(&temp, "16929689_1920_1080_30fps.mp4", (1920, 1080), 4)
+        else {
+            return;
+        };
+        desktop.seek(Micros(1_000_000));
+        desktop.add_sticker("sticker:heart").unwrap();
+        desktop.start_following().unwrap();
+        desktop.find_track_part(cutlass_vision::Part::Body).unwrap();
+        finish(&mut desktop, "body found");
+        let tracking = desktop.tracking().unwrap();
+        assert_eq!(tracking.found, Some(cutlass_vision::Part::Body));
+        let ((x0, y0), (x1, y1)) = tracking.canvas_box.unwrap();
+        eprintln!("body box ({x0:.0}, {y0:.0}) to ({x1:.0}, {y1:.0})");
+        // Head to foot around the shirt, about (997, 517).
+        assert!(x0 < 997.0 && 997.0 < x1 && y0 < 450.0 && y1 > 900.0);
+        desktop.run_tracking().unwrap();
+        finish(&mut desktop, "tracked");
+        assert!(desktop.following().is_some());
+        // The mask on the movie, from the Mask page's Find.
+        desktop.select(Some(movie.clone()));
+        desktop.seek(Micros(1_000_000));
+        desktop.start_mask_following().unwrap();
+        desktop.find_track_part(cutlass_vision::Part::Body).unwrap();
+        finish(&mut desktop, "body found for the mask");
+        desktop.run_tracking().unwrap();
+        finish(&mut desktop, "mask tracked");
+        assert!(desktop.following().is_some_and(|f| f.by_mask));
+    }
+
+    #[test]
+    #[ignore = "runs the face and hand detectors and the tracker on real movies"]
+    fn face_and_hand_find_their_subject_and_a_text_follows_the_face() {
+        let temp = Temp::new();
+        let Some((mut desktop, _)) =
+            detect_movie(&temp, "9489379-uhd_4096_2160_25fps.mp4", (4096, 2160), 3)
+        else {
+            return;
+        };
+        desktop.seek(Micros(0));
+        let card = cutlass_editor::title_style("title:default")
+            .unwrap()
+            .card_id();
+        desktop.add_title(&card).unwrap();
+        desktop.seek(Micros(2_000_000));
+        desktop.start_following().unwrap();
+        desktop.find_track_part(cutlass_vision::Part::Face).unwrap();
+        finish(&mut desktop, "face found");
+        let ((x0, y0), (x1, y1)) = desktop.tracking().unwrap().canvas_box.unwrap();
+        eprintln!("face box ({x0:.0}, {y0:.0}) to ({x1:.0}, {y1:.0})");
+        // The canvas is the movie's 4096 by 2160; at 1280 wide the face was
+        // about (549, 140) to (728, 378).
+        let k = 4096.0 / 1280.0;
+        assert!((x0 - 549.0 * k).abs() < 60.0 && (y1 - 378.0 * k).abs() < 60.0);
+        desktop.run_tracking().unwrap();
+        finish(&mut desktop, "face tracked");
+        assert!(desktop.following().is_some());
+
+        let temp = Temp::new();
+        let Some((mut desktop, _)) =
+            detect_movie(&temp, "6905095-hd_1920_1080_25fps.mp4", (1920, 1080), 3)
+        else {
+            return;
+        };
+        desktop.seek(Micros(0));
+        desktop.add_sticker("sticker:heart").unwrap();
+        desktop.seek(Micros(2_000_000));
+        desktop.start_following().unwrap();
+        desktop.find_track_part(cutlass_vision::Part::Hand).unwrap();
+        finish(&mut desktop, "hand found");
+        let ((x0, y0), (x1, y1)) = desktop.tracking().unwrap().canvas_box.unwrap();
+        eprintln!("hand box ({x0:.0}, {y0:.0}) to ({x1:.0}, {y1:.0})");
+        // At 1280 wide her palms were near (632, 277) and (496, 229).
+        let k = 1920.0 / 1280.0;
+        let (cx, cy) = ((x0 + x1) / 2.0 / k, (y0 + y1) / 2.0 / k);
+        assert!(
+            [(632.0, 277.0), (496.0, 229.0)]
+                .iter()
+                .any(|(x, y)| (cx - x).abs() < 25.0 && (cy - y).abs() < 25.0),
+            "({cx}, {cy})"
+        );
     }
 
     #[test]
@@ -17040,6 +17264,98 @@ mod tests {
         let (u, v) = chroma.split_at(chroma.len() / 2);
         let near = |plane: &[u8], value: u8| plane.iter().all(|&s| s.abs_diff(value) <= 4);
         assert!(near(y, 97) && near(u, 156) && near(v, 104));
+    }
+
+    /// AV1 exports through the Rust encoder into an MP4 `av01` track with
+    /// its `av1C` record and the `av01` brand, which the desktop's readers
+    /// decode back to the clip's colour with the Rust decoder; a MOV is
+    /// refused.
+    #[test]
+    fn an_av1_export_lands_an_mp4_that_plays_back() {
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        // Hardware off: the Rust encoder and decoder are the ones asked.
+        let software = cutlass_settings::Hardware {
+            decode: false,
+            encode: false,
+            ..cutlass_settings::Hardware::default()
+        };
+        let (decoders, encoders) = crate::register_codecs_with(&software);
+        let mut desktop = Shell::new(decoders, encoders, Settings::default());
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.encodes(CodecId::Av1));
+        let mov = desktop.export(ExportRequest {
+            path: temp.path.join("av1.mov"),
+            short_side: 480,
+            codec: CodecId::Av1,
+            ..ExportRequest::default()
+        });
+        assert_eq!(mov.unwrap_err().to_string(), "AV1 is written in an MP4");
+
+        let destination = temp.path.join("av1.mp4");
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                short_side: 480,
+                codec: CodecId::Av1,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        land_job(&mut desktop);
+        assert_eq!(desktop.notice(), "Exported av1.mp4");
+        let bytes = std::fs::read(&destination).unwrap();
+        assert!(bytes.windows(4).any(|w| w == b"av1C"));
+        let ftyp = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+        assert!(bytes[16..ftyp].chunks(4).any(|brand| brand == b"av01"));
+
+        let readers = crate::readers::readers_with(crate::register_codecs_with(&software).0);
+        let mut media = readers.open(&destination).unwrap();
+        assert_eq!(
+            (media.info().width, media.info().height),
+            (Some(960), Some(480))
+        );
+        let held = media
+            .decode_at(Micros(1_500_000), &TimeRange::new(0, 2_000_000))
+            .unwrap();
+        let cutlass_engine::DecodedFrame::Coded {
+            width,
+            height,
+            pixel,
+            primaries,
+            matrix,
+            range,
+            bytes,
+            ..
+        } = held.frame
+        else {
+            panic!("a coded picture");
+        };
+        assert_eq!((width, height), (960, 480));
+        assert_eq!(pixel, PixelFormat::Yuv420p);
+        assert_eq!(primaries, ColorPrimaries::Bt709);
+        assert_eq!(matrix, cutlass_decode::ColorMatrix::Bt709);
+        assert_eq!(range, cutlass_decode::ColorRange::Limited);
+        // 0x336699 in BT.709 limited range, as export converts it: Y 97,
+        // Cb 156, Cr 104.
+        let (y, chroma) = bytes.split_at(960 * 480);
+        let (u, v) = chroma.split_at(chroma.len() / 2);
+        let near = |plane: &[u8], value: u8| plane.iter().all(|&s| s.abs_diff(value) <= 4);
+        assert!(near(y, 97) && near(u, 156) && near(v, 104));
+    }
+
+    #[test]
+    fn av1_spends_what_hevc_does() {
+        for quality in [
+            super::ExportQuality::Lower,
+            super::ExportQuality::Recommended,
+            super::ExportQuality::Higher,
+        ] {
+            assert_eq!(
+                quality.bitrate(1080, CodecId::Av1),
+                quality.bitrate(1080, CodecId::Hevc)
+            );
+            assert!(quality.bitrate(1080, CodecId::Av1) < quality.bitrate(1080, CodecId::H264));
+        }
     }
 
     /// MPEG-2 exports through the Rust encoder at twice H.264's rate into

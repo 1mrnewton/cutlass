@@ -1,11 +1,11 @@
-//! Enhance quality, Reduce image noise and Optical flow, as eval sees
-//! them: what a clip's copy is made from, the clip's frames upright for
-//! the models, and which copy draws a clip.
+//! Enhance quality, Reduce image noise, Remove flicker and Optical flow,
+//! as eval sees them: what a clip's copy is made from, the clip's frames
+//! upright for the models, and which copy draws a clip.
 //!
 //! [`enhance_ask`] names the copy: the stretch of the clip's file its
-//! timeline shows, at a frame rate, and the three levels. A clip with more
-//! than one on has one copy, denoised, then filled with frames made
-//! between its own, then enhanced. The copy's rate is the project's, or
+//! timeline shows, at a frame rate, and the levels. A clip with more than
+//! one on has one copy, its brightness evened, denoised, then filled with
+//! frames made between its own, then enhanced. The copy's rate is the project's, or
 //! with Optical flow on its frame rate over the clip's slowest speed, so a
 //! slowed clip still plays that many different frames a second. The job
 //! reads that stretch through [`EnhanceFrames`] and writes the copy where
@@ -30,6 +30,10 @@ pub const ENHANCE_MODEL: &str = "realesr-general-x4v3";
 
 /// The model denoised copies are made with.
 pub const DENOISE_MODEL: &str = "fastdvdnet-clipped";
+
+/// What evens out a deflickered copy's brightness: no model, the version
+/// of Cutlass's own method, so a better one makes new copies.
+pub const DEFLICKER_MODEL: &str = "cutlass-deflicker-1";
 
 /// The model that makes the frames between a clip's own for Optical flow.
 pub const INTERPOLATE_MODEL: &str = "rife-v4.26";
@@ -86,6 +90,9 @@ pub struct EnhanceAsk {
     pub level: i64,
     /// The Reduce image noise level; 0 makes a copy that is not denoised.
     pub denoise: i64,
+    /// The Remove flicker level; 0 makes a copy whose brightness is the
+    /// clip's own.
+    pub deflicker: i64,
     /// The Optical flow frame rate; 0 makes a copy with only the clip's
     /// own frames.
     pub interpolate: i64,
@@ -112,6 +119,7 @@ impl EnhanceAsk {
     pub fn key(&self) -> EnhanceKey {
         // In the order the job runs them.
         let model = [
+            (self.deflicker > 0, DEFLICKER_MODEL),
             (self.denoise > 0, DENOISE_MODEL),
             (self.interpolate > 0, INTERPOLATE_MODEL),
             (self.motion_blur.is_some(), MOTION_BLUR_MODEL),
@@ -126,6 +134,7 @@ impl EnhanceAsk {
             source: self.source.clone(),
             level: self.level.max(0),
             denoise: self.denoise.max(0),
+            deflicker: self.deflicker.max(0),
             interpolate: self.interpolate.max(0),
             motion_blur: self.motion_blur.as_ref().map_or_else(String::new, |blur| {
                 let settings = format!(
@@ -170,12 +179,69 @@ pub fn copy_ask(
     interpolate: i64,
     motion_blur: Option<&MotionBlur>,
 ) -> Result<EnhanceAsk, EnhanceError> {
+    clip_copy_ask(
+        draft,
+        root,
+        segment_id,
+        &CopyLevels {
+            level,
+            denoise,
+            deflicker: 0,
+            interpolate,
+            motion_blur,
+        },
+    )
+}
+
+/// Every level a clip's copy is made at.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CopyLevels<'a> {
+    /// Enhance quality.
+    pub level: i64,
+    /// Reduce image noise.
+    pub denoise: i64,
+    /// Remove flicker.
+    pub deflicker: i64,
+    /// The Optical flow frame rate.
+    pub interpolate: i64,
+    /// Motion blur.
+    pub motion_blur: Option<&'a MotionBlur>,
+}
+
+impl CopyLevels<'_> {
+    /// Whether any of them makes a copy.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.level > 0
+            || self.denoise > 0
+            || self.deflicker > 0
+            || self.interpolate > 0
+            || self.motion_blur.is_some()
+    }
+}
+
+/// What making clip `segment_id`'s copy at `levels` makes. A relative
+/// file stays inside `root`.
+pub fn clip_copy_ask(
+    draft: &Draft,
+    root: Option<&Path>,
+    segment_id: &SegmentId,
+    levels: &CopyLevels<'_>,
+) -> Result<EnhanceAsk, EnhanceError> {
     let clip = |reason: &str| EnhanceError::Clip {
         reason: reason.into(),
     };
-    if level <= 0 && denoise <= 0 && interpolate <= 0 && motion_blur.is_none() {
+    let CopyLevels {
+        level,
+        denoise,
+        deflicker,
+        interpolate,
+        motion_blur,
+    } = *levels;
+    if !levels.any() {
         return Err(clip(
-            "Enhance quality, Reduce image noise, Optical flow and Motion blur are off for this clip",
+            "Enhance quality, Reduce image noise, Remove flicker, Optical flow and Motion blur \
+             are off for this clip",
         ));
     }
     let (source, range, own_rate, segment) = clip_stretch(draft, root, segment_id, "enhanced")?;
@@ -213,6 +279,7 @@ pub fn copy_ask(
         rate,
         level: level.max(0),
         denoise: denoise.max(0),
+        deflicker: deflicker.max(0),
         interpolate: interpolate.max(0),
         motion_blur: motion_blur.cloned(),
         keyed_blur,
@@ -290,8 +357,8 @@ fn slowest_speed(draft: &Draft, segment: &cutlass_model::Segment) -> f64 {
 }
 
 /// The copy that draws `segment_id` and where in the file it starts, when
-/// the clip asks for Enhance quality or Reduce image noise and its copy is
-/// in the project.
+/// the clip asks for a level that makes a copy and its copy is in the
+/// project.
 pub(crate) fn enhanced_copy(
     draft: &Draft,
     root: Option<&Path>,
@@ -307,14 +374,18 @@ pub(crate) fn enhanced_copy(
         return None;
     };
     let level = |algorithm: Option<&cutlass_model::Algorithm>| algorithm.map_or(0, |a| a.level);
-    let ask = copy_ask(
+    let blur = video.motion_blur();
+    let ask = clip_copy_ask(
         draft,
         Some(root),
         segment_id,
-        level(video.enhance()),
-        level(video.denoise()),
-        level(video.interpolate()),
-        video.motion_blur().as_ref(),
+        &CopyLevels {
+            level: level(video.enhance()),
+            denoise: level(video.denoise()),
+            deflicker: level(video.deflicker()),
+            interpolate: level(video.interpolate()),
+            motion_blur: blur.as_ref(),
+        },
     )
     .ok()?;
     let (path, held) = find_enhanced(root, &ask.key(), &ask.range)?;

@@ -105,6 +105,7 @@ mod recon;
 mod sei;
 mod set;
 mod sp;
+mod subpel;
 mod tables;
 
 pub use dec::{H264Decoder, register_decoders};
@@ -132,5 +133,7 @@ mod part;
 mod planes;
 #[cfg(test)]
 mod sei_pic;
+#[cfg(test)]
+mod subpart;
 #[cfg(test)]
 mod uhd420;

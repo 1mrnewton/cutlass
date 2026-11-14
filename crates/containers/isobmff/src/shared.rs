@@ -122,6 +122,14 @@ fn map_stream(movie_timescale: u32, stream: &LegacyStream) -> Result<Stream, Ope
         trim = Trim::new(crate::opus::pre_skip(&head).map(u64::from), None);
         extradata = head;
     }
+    // PCM has no configuration box: its layout is the entry's sample format,
+    // handed to the decoder as the three layout bytes `cutlass-pcm` reads.
+    if params.codec == LegacyCodec::Pcm
+        && let MediaKind::Audio(audio) = params.kind
+        && let Some(layout) = pcm_layout(audio.format)
+    {
+        extradata = layout.to_vec();
+    }
     let described = match params.kind {
         MediaKind::Video(video) => {
             let size =
@@ -228,4 +236,25 @@ fn packet_error(error: PacketError) -> ReadError {
     ReadError::Source {
         message: error.to_string(),
     }
+}
+
+/// The `cutlass-pcm` layout bytes (coding, byte order, interleaved) for an
+/// entry's sample format, or `None` when the entry did not say.
+pub(crate) const fn pcm_layout(format: crate::legacy::SampleFormat) -> Option<[u8; 3]> {
+    use crate::legacy::SampleFormat as F;
+    Some(match format {
+        F::U8 => [11, 0, 0],
+        F::S8 => [6, 0, 0],
+        F::S16Le => [1, 0, 0],
+        F::S16Be => [1, 1, 0],
+        F::S24Le => [2, 0, 0],
+        F::S24Be => [2, 1, 0],
+        F::S32Le => [3, 0, 0],
+        F::S32Be => [3, 1, 0],
+        F::F32Le => [4, 0, 0],
+        F::F32Be => [4, 1, 0],
+        F::F64Le => [5, 0, 0],
+        F::F64Be => [5, 1, 0],
+        F::Unknown => return None,
+    })
 }

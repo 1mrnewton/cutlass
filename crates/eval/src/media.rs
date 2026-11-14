@@ -24,13 +24,13 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use cutlass_codec::access::{ColorPrimaries, PixelFormat, Transfer};
+use cutlass_codec::access::{ColorPrimaries, ColorRange, PixelFormat, Transfer};
 use cutlass_color::{Matrix, Signal, SignalCurve};
 use cutlass_engine::{
     ClockKind, DecodedFrame, DisplayQuarter, ReaderFactory, VideoSource, decoded_picture,
     open_segment_from, open_segment_in,
 };
-use cutlass_gpu::{Affine, Placement, ToneCurve, YuvTone};
+use cutlass_gpu::{Affine, Placement, ToneCurve, YuvMatrix, YuvTone};
 use cutlass_model::{
     Clip, Crop, Draft, DraftId, MaterialCanvas, MaterialRef, Micros, Segment, SegmentId, TimeRange,
     TrackAttribute, UniformScale,
@@ -814,7 +814,8 @@ impl Placed<'_> {
     /// picture with the maps that place it.
     ///
     /// `None` when the GPU path does not reproduce the CPU path: a picture
-    /// that is not 4:2:0 or whose tags the color crate does not map, a crop
+    /// that is not 8-bit 4:2:0, one whose matrix is not BT.709, BT.601 or
+    /// BT.2020, one whose tags the color crate does not map, a crop
     /// quad that is not a parallelogram, or a blur or image backdrop (a
     /// relit clip's blur too). The caller then uses the CPU picture. A
     /// relit clip whose depth is decoded is drawn upright on its own
@@ -829,34 +830,9 @@ impl Placed<'_> {
             Backdrop::Blur(radius) => (None, Some(*radius)),
             Backdrop::Image(_) => return None,
         };
-        let (width, height, primaries, transfer, samples) =
-            match self.source.decoded_at(time).ok()? {
-                DecodedFrame::Coded {
-                    width,
-                    height,
-                    pixel: PixelFormat::Yuv420p,
-                    primaries,
-                    transfer,
-                    bytes,
-                } => (width, height, primaries, transfer, YuvSamples::Bytes(bytes)),
-                DecodedFrame::Surface {
-                    width,
-                    height,
-                    primaries,
-                    transfer,
-                    surface,
-                } => (
-                    width,
-                    height,
-                    primaries,
-                    transfer,
-                    YuvSamples::Surface(surface),
-                ),
-                DecodedFrame::Coded { .. }
-                | DecodedFrame::Platform { .. }
-                | DecodedFrame::Still(_) => return None,
-            };
-        let tone = yuv_tone(primaries, transfer)?;
+        let gpu = gpu_samples(self.source.decoded_at(time).ok()?)?;
+        let tone = yuv_tone(gpu.primaries, gpu.transfer, gpu.matrix, gpu.full_range)?;
+        let (width, height, samples) = (gpu.width, gpu.height, gpu.samples);
         if width % 2 != 0 || height % 2 != 0 {
             return None;
         }
@@ -975,17 +951,90 @@ fn relit_layer(
     }
 }
 
-/// The step the engine's CPU conversion applies after the BT.709 matrix,
-/// for the draft working space it converts to, or `None` when the color
-/// crate does not map these tags.
-fn yuv_tone(primaries: ColorPrimaries, transfer: Transfer) -> Option<YuvTone> {
-    let signal = Signal::for_tags(primaries, transfer, Matrix::Bt709, 0).ok()?;
+/// The 4:2:0 samples the GPU converts, with their size and tags.
+struct GpuSamples {
+    width: u32,
+    height: u32,
+    primaries: ColorPrimaries,
+    transfer: Transfer,
+    matrix: Matrix,
+    full_range: bool,
+    samples: YuvSamples,
+}
+
+/// The samples of a picture the GPU converts as the CPU does: 8-bit 4:2:0
+/// whose matrix is BT.709 (or unnamed), BT.601 or BT.2020, in either
+/// range, or a platform surface, which is studio swing BT.709. `None` for
+/// every other picture: the CPU conversion reads its depth, chroma layout
+/// and matrix.
+fn gpu_samples(frame: DecodedFrame) -> Option<GpuSamples> {
+    match frame {
+        DecodedFrame::Coded {
+            width,
+            height,
+            pixel: PixelFormat::Yuv420p,
+            primaries,
+            transfer,
+            matrix,
+            range,
+            bytes,
+        } => {
+            let matrix = match Matrix::from_matrix(matrix).ok()? {
+                Matrix::Identity => return None,
+                named => named,
+            };
+            Some(GpuSamples {
+                width,
+                height,
+                primaries,
+                transfer,
+                matrix,
+                full_range: range == ColorRange::Full,
+                samples: YuvSamples::Bytes(bytes),
+            })
+        }
+        DecodedFrame::Surface {
+            width,
+            height,
+            primaries,
+            transfer,
+            surface,
+        } => Some(GpuSamples {
+            width,
+            height,
+            primaries,
+            transfer,
+            matrix: Matrix::Bt709,
+            full_range: false,
+            samples: YuvSamples::Surface(surface),
+        }),
+        DecodedFrame::Coded { .. } | DecodedFrame::Platform { .. } | DecodedFrame::Still(_) => None,
+    }
+}
+
+/// The range and matrix of a picture and the step the engine's CPU
+/// conversion applies after that matrix, for the draft working space it
+/// converts to, or `None` when the color crate does not map these tags.
+fn yuv_tone(
+    primaries: ColorPrimaries,
+    transfer: Transfer,
+    matrix: Matrix,
+    full_range: bool,
+) -> Option<YuvTone> {
+    let signal = Signal::for_tags(primaries, transfer, matrix, 0).ok()?;
     let curve = |curve| match curve {
         SignalCurve::Rec709 => ToneCurve::Rec709,
         SignalCurve::Hlg => ToneCurve::Hlg,
         SignalCurve::Pq => ToneCurve::Pq,
     };
     Some(YuvTone {
+        matrix: match matrix {
+            Matrix::Bt709 => YuvMatrix::Bt709,
+            Matrix::Bt601 => YuvMatrix::Bt601,
+            Matrix::Bt2020 => YuvMatrix::Bt2020,
+            Matrix::Identity => return None,
+        },
+        full_range,
         source: curve(signal.source),
         dest: curve(signal.dest),
         adapt: signal.adapt,
@@ -1799,6 +1848,94 @@ fn stamp(canvas_w: u32, canvas_h: u32, draw_w: u32, draw_h: u32, pixels: &[u8]) 
 
 #[cfg(test)]
 mod tests {
+    use cutlass_codec::access::{ColorMatrix, ColorPrimaries, ColorRange, PixelFormat, Transfer};
+    use cutlass_engine::DecodedFrame;
+
+    fn coded(pixel: PixelFormat, matrix: ColorMatrix, range: ColorRange) -> DecodedFrame {
+        DecodedFrame::Coded {
+            width: 2,
+            height: 2,
+            pixel,
+            primaries: ColorPrimaries::Bt709,
+            transfer: Transfer::Bt709,
+            matrix,
+            range,
+            bytes: vec![0; 6].into(),
+        }
+    }
+
+    #[test]
+    fn the_gpu_takes_the_pictures_it_converts_as_the_cpu_does() {
+        use cutlass_color::Matrix;
+        // 8-bit 4:2:0 in the three matrices the shader has, either range.
+        for (matrix, range, want, full) in [
+            (
+                ColorMatrix::Unspecified,
+                ColorRange::Unspecified,
+                Matrix::Bt709,
+                false,
+            ),
+            (
+                ColorMatrix::Bt709,
+                ColorRange::Limited,
+                Matrix::Bt709,
+                false,
+            ),
+            (ColorMatrix::Bt709, ColorRange::Studio, Matrix::Bt709, false),
+            (ColorMatrix::Bt709, ColorRange::Full, Matrix::Bt709, true),
+            (
+                ColorMatrix::Bt601,
+                ColorRange::Limited,
+                Matrix::Bt601,
+                false,
+            ),
+            (ColorMatrix::Bt2020, ColorRange::Full, Matrix::Bt2020, true),
+        ] {
+            let gpu = gpu_samples(coded(PixelFormat::Yuv420p, matrix, range)).expect("taken");
+            assert_eq!((gpu.matrix, gpu.full_range), (want, full));
+            // The tone carries both to the shader.
+            let tone =
+                yuv_tone(gpu.primaries, gpu.transfer, gpu.matrix, gpu.full_range).expect("tone");
+            assert_eq!(tone.full_range, full);
+            let shader = match want {
+                Matrix::Bt601 => YuvMatrix::Bt601,
+                Matrix::Bt2020 => YuvMatrix::Bt2020,
+                _ => YuvMatrix::Bt709,
+            };
+            assert_eq!(tone.matrix, shader);
+        }
+        // A matrix the shader has no weights for, another depth or chroma
+        // layout, and GBR planes: the CPU conversion draws those.
+        for (pixel, matrix, range) in [
+            (
+                PixelFormat::Yuv420p,
+                ColorMatrix::Ycgco,
+                ColorRange::Limited,
+            ),
+            (
+                PixelFormat::Yuv420p,
+                ColorMatrix::Identity,
+                ColorRange::Full,
+            ),
+            (
+                PixelFormat::Yuv420p10,
+                ColorMatrix::Bt709,
+                ColorRange::Limited,
+            ),
+            (
+                PixelFormat::Yuv444p,
+                ColorMatrix::Bt709,
+                ColorRange::Limited,
+            ),
+            (PixelFormat::Gbrp, ColorMatrix::Identity, ColorRange::Full),
+        ] {
+            assert!(
+                gpu_samples(coded(pixel, matrix, range)).is_none(),
+                "{pixel:?}"
+            );
+        }
+    }
+
     use cutlass_model::{
         CommonKeyframe, CommonKeyframeGroup, Crop, Flip, Point, Segment, TimeRange,
     };

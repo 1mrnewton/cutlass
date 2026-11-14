@@ -71,6 +71,14 @@ impl<W: Write + Seek> Mp4Mux<W> {
         }
     }
 
+    /// Sets the file's cover art, a JPEG picture, written as iTunes
+    /// metadata in `moov/udta` at finish. A refused picture (not a JPEG, or
+    /// too large) leaves the file as it was and the muxer building.
+    pub fn set_cover_art(&mut self, jpeg: Vec<u8>) -> Result<(), MuxError> {
+        self.building()?;
+        self.inner.set_cover_art(jpeg).map_err(boxed)
+    }
+
     /// The writer, once the file is finished.
     pub fn into_writer(self) -> Result<W, MuxError> {
         if self.status != MuxStatus::Finished {
@@ -139,14 +147,15 @@ fn prores_color(frame: &[u8]) -> Option<ColorTags> {
 const PRORES_ENTRIES: [[u8; 4]; 6] = [*b"apco", *b"apcs", *b"apcn", *b"apch", *b"ap4h", *b"ap4x"];
 
 /// The box writer's parameters for `stream`: H.264, HEVC, MPEG-4 Visual,
-/// ProRes, Motion JPEG, VP8 or MPEG-2 pictures, or AAC, Opus, or 16-bit PCM
-/// sound. A VP8 track's extradata is its `vpcC` payload. A ProRes track whose extradata is
+/// ProRes, Motion JPEG, VP8, AV1 or MPEG-2 pictures, or AAC, Opus, or PCM sound.
+/// PCM keeps the layout its three layout bytes name (empty is s16le). A VP8 track's extradata is its `vpcC` payload,
+/// and an AV1 track's is its `av1C` record. A ProRes track whose extradata is
 /// a profile's four-character code is written with that sample entry.
 /// Motion JPEG is a QuickTime `jpeg` entry, so only a movie takes it.
 fn box_params(stream: &NewStream, brand: FileBrand) -> Result<StreamParams, MuxError> {
     let StreamCodec::Known(codec) = stream.params.codec() else {
         return Err(rejected(
-            "mp4 export writes H.264, HEVC, MPEG-4 Visual, ProRes, Motion JPEG, VP8, MPEG-2, AAC, ALAC, Opus, AC-3, E-AC-3, and PCM",
+            "mp4 export writes H.264, HEVC, MPEG-4 Visual, ProRes, Motion JPEG, VP8, AV1, MPEG-2, AAC, ALAC, Opus, AC-3, E-AC-3, and PCM",
         ));
     };
     let scale = BoxScale(stream.timescale.ticks_per_second());
@@ -154,7 +163,14 @@ fn box_params(stream: &NewStream, brand: FileBrand) -> Result<StreamParams, MuxE
         Id::Mjpeg if brand != FileBrand::Mov => {
             return Err(rejected("Motion JPEG is written to a .mov movie"));
         }
-        Id::H264 | Id::Hevc | Id::Mpeg4 | Id::Prores | Id::Mjpeg | Id::Vp8 | Id::Mpeg2 => {
+        Id::H264
+        | Id::Hevc
+        | Id::Mpeg4
+        | Id::Prores
+        | Id::Mjpeg
+        | Id::Vp8
+        | Id::Av1
+        | Id::Mpeg2 => {
             let size = stream
                 .params
                 .size()
@@ -164,13 +180,34 @@ fn box_params(stream: &NewStream, brand: FileBrand) -> Result<StreamParams, MuxE
                 Id::Hevc => CodecId::Hevc,
                 Id::Mpeg4 => CodecId::Mpeg4,
                 Id::Vp8 => CodecId::Vp8,
+                Id::Av1 => CodecId::Av1,
                 Id::Mjpeg => CodecId::Mjpeg,
                 Id::Mpeg2 => CodecId::Mpeg2,
                 _ => CodecId::ProRes,
             };
             StreamParams::video(codec, scale, size.width(), size.height())
         }
-        Id::Aac | Id::Opus | Id::Pcm | Id::Ac3 | Id::Eac3 => {
+        Id::Pcm => {
+            let rate = stream
+                .params
+                .sample_rate()
+                .ok_or_else(|| rejected("a sound track needs a rate"))?;
+            let channels = stream
+                .params
+                .channels()
+                .ok_or_else(|| rejected("a sound track needs channels"))?;
+            let (bits, format) = pcm_entry(stream.params.extradata())?;
+            // The entry states the layout; the PCM track carries no extradata.
+            return Ok(StreamParams::audio(
+                CodecId::Pcm,
+                scale,
+                rate,
+                channels,
+                bits,
+                format,
+            ));
+        }
+        Id::Aac | Id::Opus | Id::Ac3 | Id::Eac3 => {
             let rate = stream
                 .params
                 .sample_rate()
@@ -183,8 +220,7 @@ fn box_params(stream: &NewStream, brand: FileBrand) -> Result<StreamParams, MuxE
                 Id::Aac => CodecId::Aac,
                 Id::Opus => CodecId::Opus,
                 Id::Ac3 => CodecId::Ac3,
-                Id::Eac3 => CodecId::Eac3,
-                _ => CodecId::Pcm,
+                _ => CodecId::Eac3,
             };
             StreamParams::audio(codec, scale, rate, channels, 16, SampleFormat::S16Le)
         }
@@ -210,7 +246,7 @@ fn box_params(stream: &NewStream, brand: FileBrand) -> Result<StreamParams, MuxE
         }
         _ => {
             return Err(rejected(
-                "mp4 export writes H.264, HEVC, MPEG-4 Visual, ProRes, Motion JPEG, VP8, MPEG-2, AAC, ALAC, Opus, AC-3, E-AC-3, and PCM",
+                "mp4 export writes H.264, HEVC, MPEG-4 Visual, ProRes, Motion JPEG, VP8, AV1, MPEG-2, AAC, ALAC, Opus, AC-3, E-AC-3, and PCM",
             ));
         }
     };
@@ -231,6 +267,38 @@ fn box_params(stream: &NewStream, brand: FileBrand) -> Result<StreamParams, MuxE
         params.extradata = extradata.to_vec();
     }
     Ok(params)
+}
+
+/// The bit depth and sample format for PCM layout bytes (coding, byte order,
+/// arrangement), as `cutlass-pcm` names them. Empty is interleaved s16le.
+/// A-law, mu-law, s64, planar samples and any other extradata are refused
+/// rather than written under a label that would misread them.
+fn pcm_entry(extradata: &[u8]) -> Result<(u16, SampleFormat), MuxError> {
+    let (coding, big) = match extradata {
+        [] => (1, false),
+        [coding, order @ (0 | 1), 0] => (*coding, *order == 1),
+        _ => {
+            return Err(rejected(
+                "PCM extradata other than three interleaved layout bytes",
+            ));
+        }
+    };
+    let pick =
+        |little: SampleFormat, big_endian: SampleFormat| if big { big_endian } else { little };
+    Ok(match coding {
+        1 => (16, pick(SampleFormat::S16Le, SampleFormat::S16Be)),
+        2 => (24, pick(SampleFormat::S24Le, SampleFormat::S24Be)),
+        3 => (32, pick(SampleFormat::S32Le, SampleFormat::S32Be)),
+        4 => (32, pick(SampleFormat::F32Le, SampleFormat::F32Be)),
+        5 => (64, pick(SampleFormat::F64Le, SampleFormat::F64Be)),
+        6 => (8, SampleFormat::S8),
+        11 => (8, SampleFormat::U8),
+        _ => {
+            return Err(rejected(
+                "PCM coding without an MP4 sample entry (A-law, mu-law or s64)",
+            ));
+        }
+    })
 }
 
 /// The AudioSpecificConfig inside an MPEG-4 ES descriptor, or `config` as
@@ -528,6 +596,301 @@ mod tests {
         assert_eq!(last_end, 2400);
         assert_eq!(sound_bytes.len(), 2400 * 4);
         assert_eq!(sound_bytes[1600 * 4], 7);
+    }
+
+    /// Layout, bytes per sample, rate, channels, sample entry, read-back layout.
+    type WriteCase<'a> = (&'a [u8], usize, u32, u16, &'a [u8; 4], [u8; 3]);
+
+    /// Layout, bytes per sample, rate, channels, FFmpeg codec, afinfo format.
+    type OracleCase<'a> = (&'a [u8], usize, u32, u16, &'a str, &'a str);
+
+    /// A PCM track with these layout bytes, `frames` frames long, written to
+    /// a movie: the file's bytes, or the muxer's refusal.
+    pub(crate) fn pcm_movie(
+        layout: &[u8],
+        rate: u32,
+        channels: u16,
+        payload: &[u8],
+        frames: i64,
+    ) -> Result<Vec<u8>, String> {
+        let mut mux = Mp4Mux::with_brand(Cursor::new(Vec::new()), FileBrand::Mov);
+        let sound = mux
+            .add_stream(NewStream {
+                params: StreamParams::try_audio(
+                    StreamCodec::Known(Id::Pcm),
+                    rate,
+                    channels,
+                    layout.to_vec(),
+                )
+                .unwrap(),
+                timescale: Timescale::new(rate),
+                language: None,
+            })
+            .map_err(|error| format!("{error:?}"))?;
+        mux.write_packet(&packet(sound.get(), payload.to_vec(), 0, frames, rate))
+            .map_err(|error| format!("{error:?}"))?;
+        mux.finish(&[TrackDuration {
+            track: sound,
+            timescale: Timescale::new(rate),
+            ticks: frames,
+        }])
+        .map_err(|error| format!("{error:?}"))?;
+        Ok(mux
+            .into_writer()
+            .map_err(|error| format!("{error:?}"))?
+            .into_inner())
+    }
+
+    /// Every PCM layout the muxer takes is written under an entry that says
+    /// it, and reads back with the same layout bytes, rate, channels and
+    /// samples. Before, every track was declared 16-bit little-endian.
+    #[test]
+    fn every_pcm_layout_reads_back_as_written() {
+        // (layout, bytes per sample, rate, channels, entry, read-back layout)
+        let cases: [WriteCase<'_>; 15] = [
+            (&[], 2, 48_000, 2, b"sowt", [1, 0, 0]),
+            (&[1, 0, 0], 2, 48_000, 2, b"sowt", [1, 0, 0]),
+            (&[1, 1, 0], 2, 44_100, 1, b"twos", [1, 1, 0]),
+            (&[11, 0, 0], 1, 8_000, 1, b"raw ", [11, 0, 0]),
+            (&[6, 0, 0], 1, 8_000, 2, b"twos", [6, 0, 0]),
+            (&[2, 0, 0], 3, 48_000, 2, b"lpcm", [2, 0, 0]),
+            (&[2, 1, 0], 3, 48_000, 2, b"lpcm", [2, 1, 0]),
+            (&[3, 0, 0], 4, 48_000, 2, b"lpcm", [3, 0, 0]),
+            (&[3, 1, 0], 4, 48_000, 1, b"lpcm", [3, 1, 0]),
+            (&[4, 0, 0], 4, 48_000, 2, b"lpcm", [4, 0, 0]),
+            (&[4, 1, 0], 4, 48_000, 2, b"lpcm", [4, 1, 0]),
+            (&[5, 0, 0], 8, 48_000, 1, b"lpcm", [5, 0, 0]),
+            (&[5, 1, 0], 8, 48_000, 1, b"lpcm", [5, 1, 0]),
+            // 16-bit past the version 0 limits: 96 kHz, and six channels.
+            (&[1, 0, 0], 2, 96_000, 2, b"lpcm", [1, 0, 0]),
+            (&[1, 0, 0], 2, 48_000, 6, b"lpcm", [1, 0, 0]),
+        ];
+        for (layout, width, rate, channels, entry, read) in cases {
+            let frames = 300_i64;
+            let size = usize::try_from(frames).unwrap() * width * usize::from(channels);
+            let payload: Vec<u8> = (0..size).map(|i| (i * 7 % 251) as u8).collect();
+            let bytes = pcm_movie(layout, rate, channels, &payload, frames).unwrap();
+            assert!(
+                bytes.windows(4).any(|w| w == entry),
+                "{layout:?}: no {entry:?}"
+            );
+            let mut file = crate::IsoBmffFile::open(Cursor::new(bytes)).unwrap();
+            let stream = &cutlass_container::Demux::streams(&file)[0];
+            assert_eq!(stream.params().extradata(), read, "{layout:?}");
+            assert_eq!(stream.params().sample_rate(), Some(rate), "{layout:?}");
+            assert_eq!(stream.params().channels(), Some(channels), "{layout:?}");
+            let mut back = Vec::new();
+            while let Some(packet) = cutlass_container::Demux::read_packet(&mut file).unwrap() {
+                back.extend_from_slice(packet.bytes());
+            }
+            assert_eq!(back, payload, "{layout:?}");
+        }
+    }
+
+    /// FFmpeg and, where present, Apple's `afinfo` read each layout the
+    /// muxer writes as the format it is: FFmpeg names the codec and gives
+    /// back every byte; `afinfo` states the channels, rate and format.
+    #[test]
+    fn ffmpeg_and_afinfo_read_each_pcm_layout_as_written() {
+        let which = |name: &str| {
+            let out = std::process::Command::new("which")
+                .arg(name)
+                .output()
+                .ok()?;
+            let path = String::from_utf8(out.stdout).ok()?;
+            let path = std::path::PathBuf::from(path.trim());
+            path.is_file().then_some(path)
+        };
+        let (Some(ffmpeg), Some(ffprobe)) = (which("ffmpeg"), which("ffprobe")) else {
+            eprintln!("not available: ffmpeg or ffprobe");
+            return;
+        };
+        let afinfo = which("afinfo");
+        if afinfo.is_none() {
+            eprintln!("not available: afinfo");
+        }
+        let dir = std::env::temp_dir().join(format!("isobmff-pcm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // (layout, bytes per sample, rate, channels, FFmpeg codec, afinfo text)
+        // afinfo's short names (Int16, Float32) are native little-endian.
+        let cases: [OracleCase<'_>; 14] = [
+            (&[1, 0, 0], 2, 48_000, 2, "pcm_s16le", "Int16"),
+            (
+                &[1, 1, 0],
+                2,
+                44_100,
+                1,
+                "pcm_s16be",
+                "16-bit big-endian signed",
+            ),
+            (&[11, 0, 0], 1, 8_000, 1, "pcm_u8", "8-bit unsigned integer"),
+            (&[6, 0, 0], 1, 8_000, 2, "pcm_s8", "8-bit signed integer"),
+            (
+                &[2, 0, 0],
+                3,
+                48_000,
+                2,
+                "pcm_s24le",
+                "24-bit little-endian signed",
+            ),
+            (
+                &[2, 1, 0],
+                3,
+                48_000,
+                2,
+                "pcm_s24be",
+                "24-bit big-endian signed",
+            ),
+            (&[3, 0, 0], 4, 48_000, 2, "pcm_s32le", "Int32"),
+            (
+                &[3, 1, 0],
+                4,
+                48_000,
+                1,
+                "pcm_s32be",
+                "32-bit big-endian signed",
+            ),
+            (&[4, 0, 0], 4, 48_000, 2, "pcm_f32le", "Float32"),
+            (
+                &[4, 1, 0],
+                4,
+                48_000,
+                2,
+                "pcm_f32be",
+                "32-bit big-endian float",
+            ),
+            (&[5, 0, 0], 8, 48_000, 1, "pcm_f64le", "Float64"),
+            (
+                &[5, 1, 0],
+                8,
+                48_000,
+                1,
+                "pcm_f64be",
+                "64-bit big-endian float",
+            ),
+            (&[1, 0, 0], 2, 96_000, 2, "pcm_s16le", "Int16"),
+            (&[1, 0, 0], 2, 48_000, 6, "pcm_s16le", "Int16"),
+        ];
+        for (index, (layout, width, rate, channels, codec, apple)) in cases.into_iter().enumerate()
+        {
+            let frames = 480_i64;
+            let size = usize::try_from(frames).unwrap() * width * usize::from(channels);
+            let payload: Vec<u8> = (0..size).map(|i| (i * 13 % 241) as u8).collect();
+            let path = dir.join(format!("pcm-{index}.mov"));
+            std::fs::write(
+                &path,
+                pcm_movie(layout, rate, channels, &payload, frames).unwrap(),
+            )
+            .unwrap();
+            let probe = std::process::Command::new(&ffprobe)
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_name,sample_rate,channels",
+                ])
+                .args(["-of", "csv=p=0"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            let probed = String::from_utf8_lossy(&probe.stdout).trim().to_owned();
+            assert_eq!(probed, format!("{codec},{rate},{channels}"), "{layout:?}");
+            let copy = std::process::Command::new(&ffmpeg)
+                .args(["-v", "error", "-nostdin", "-i"])
+                .arg(&path)
+                .args(["-map", "0:a", "-c", "copy", "-f", "data", "-"])
+                .output()
+                .unwrap();
+            assert!(copy.status.success(), "{layout:?}");
+            assert_eq!(copy.stdout, payload, "{layout:?}: FFmpeg's packets");
+            if let Some(afinfo) = &afinfo {
+                let out = std::process::Command::new(afinfo)
+                    .arg(&path)
+                    .output()
+                    .unwrap();
+                let text = String::from_utf8_lossy(&out.stdout);
+                assert!(out.status.success(), "{layout:?}: {text}");
+                let line = text
+                    .lines()
+                    .find(|line| line.contains("Data format"))
+                    .unwrap_or("");
+                assert!(
+                    line.contains(&format!("{channels} ch")),
+                    "{layout:?}: {line}"
+                );
+                assert!(line.contains(&format!("{rate} Hz")), "{layout:?}: {line}");
+                assert!(line.contains(apple), "{layout:?} wants {apple}: {line}");
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// PCM movies FFmpeg writes read with the layout they hold: `in24` and
+    /// `fl32` with an `enda` atom are little-endian, 8-bit `twos`/`sowt` is
+    /// signed and `raw ` unsigned. Before, every one handed the decoder no
+    /// layout and only float decoded.
+    #[test]
+    fn ffmpeg_pcm_movies_read_with_their_layout() {
+        let Some(ffmpeg) = std::process::Command::new("which")
+            .arg("ffmpeg")
+            .output()
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .map(|path| std::path::PathBuf::from(path.trim()))
+            .filter(|path| path.is_file())
+        else {
+            eprintln!("not available: ffmpeg");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("isobmff-ffpcm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cases: [(&str, [u8; 3]); 11] = [
+            ("pcm_s16le", [1, 0, 0]),
+            ("pcm_s16be", [1, 1, 0]),
+            ("pcm_u8", [11, 0, 0]),
+            ("pcm_s8", [6, 0, 0]),
+            ("pcm_s24le", [2, 0, 0]),
+            ("pcm_s24be", [2, 1, 0]),
+            ("pcm_s32le", [3, 0, 0]),
+            ("pcm_s32be", [3, 1, 0]),
+            ("pcm_f32le", [4, 0, 0]),
+            ("pcm_f32be", [4, 1, 0]),
+            ("pcm_f64le", [5, 0, 0]),
+        ];
+        for (codec, layout) in cases {
+            let path = dir.join(format!("{codec}.mov"));
+            let made = std::process::Command::new(&ffmpeg)
+                .args(["-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i"])
+                .arg("sine=frequency=440:sample_rate=8000:duration=0.1")
+                .args(["-c:a", codec])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "{codec}");
+            let file = crate::IsoBmffFile::open(std::fs::File::open(&path).unwrap()).unwrap();
+            let stream = &cutlass_container::Demux::streams(&file)[0];
+            assert_eq!(stream.params().extradata(), layout, "{codec}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A-law, mu-law, s64, planar samples and foreign extradata have no
+    /// entry here; they are refused rather than written under a wrong one.
+    #[test]
+    fn pcm_without_an_entry_is_refused() {
+        for layout in [
+            &[7, 0, 0][..],
+            &[8, 0, 0],
+            &[9, 0, 0],
+            &[1, 0, 1],
+            &[1, 2, 0],
+            &[0; 18],
+        ] {
+            assert!(
+                pcm_movie(layout, 8_000, 1, &[0; 64], 8).is_err(),
+                "{layout:?} was written"
+            );
+        }
     }
 
     fn opus_track(mux: &mut Mp4Mux<Cursor<Vec<u8>>>) -> cutlass_container::TrackId {
@@ -948,6 +1311,115 @@ mod tests {
         assert_eq!(samples, 3);
     }
 
+    /// An AV1 track is an `av01` sample entry whose `av1C` box holds the
+    /// record the first packet carries, in a file that lists the `av01`
+    /// brand. Each sample is its temporal unit without the delimiter and
+    /// padding, every OBU with a size, and reads back as that.
+    #[test]
+    fn an_av1_track_is_av01_with_its_av1c_brand_and_bare_samples() {
+        // The record of a 64x32 8-bit 4:2:0 stream: marker and version,
+        // profile and level, the chroma bits, no delay, a sequence header.
+        let av1c = vec![0x81, 0x00, 0x0c, 0x00, 0x0a, 0x03, 1, 2, 3];
+        let obu = |obu_type: u8, payload: &[u8]| {
+            let mut out = vec![(obu_type << 3) | 2, payload.len() as u8];
+            out.extend_from_slice(payload);
+            out
+        };
+        // A delimiter, then a frame; the second unit also pads.
+        let unit = |index: u8| {
+            let mut out = obu(2, &[]);
+            if index == 1 {
+                out.extend(obu(15, &[0, 0]));
+            }
+            out.extend(obu(6, &[index; 30]));
+            out
+        };
+        let mut mux = Mp4Mux::new(Cursor::new(Vec::new()));
+        let picture = mux
+            .add_stream(NewStream {
+                params: StreamParams::video(
+                    StreamCodec::Known(Id::Av1),
+                    FrameSize::try_new(64, 32).unwrap(),
+                    Vec::new(),
+                ),
+                timescale: Timescale::new(30),
+                language: None,
+            })
+            .unwrap();
+        mux.set_config(picture, &av1c).unwrap();
+        for index in 0..3u8 {
+            mux.write_packet(&packet(picture.get(), unit(index), i64::from(index), 1, 30))
+                .unwrap();
+        }
+        mux.finish(&[TrackDuration {
+            track: picture,
+            timescale: Timescale::new(30),
+            ticks: 3,
+        }])
+        .unwrap();
+        let bytes = mux.into_writer().unwrap().into_inner();
+        assert!(bytes.windows(4).any(|w| w == b"av01"));
+        let at = bytes.windows(4).position(|w| w == b"av1C").unwrap();
+        assert_eq!(&bytes[at + 4..at + 4 + av1c.len()], av1c.as_slice());
+        // The file type box lists the brand.
+        assert_eq!(&bytes[4..8], b"ftyp");
+        let ftyp = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+        assert!(bytes[16..ftyp].chunks(4).any(|brand| brand == b"av01"));
+
+        let mut file = crate::IsoBmffFile::open(Cursor::new(bytes)).unwrap();
+        let stream = &cutlass_container::Demux::streams(&file)[0];
+        assert_eq!(stream.params().codec(), &StreamCodec::Known(Id::Av1));
+        assert_eq!(stream.params().extradata(), av1c.as_slice());
+        let mut samples = 0u8;
+        while let Some(packet) = cutlass_container::Demux::read_packet(&mut file).unwrap() {
+            assert_eq!(packet.bytes(), obu(6, &[samples; 30]).as_slice());
+            samples += 1;
+        }
+        assert_eq!(samples, 3);
+
+        // A packet that is not whole OBUs is refused, and a movie without
+        // an AV1 track does not list the brand.
+        let mut mux = Mp4Mux::new(Cursor::new(Vec::new()));
+        let picture = mux
+            .add_stream(NewStream {
+                params: StreamParams::video(
+                    StreamCodec::Known(Id::Av1),
+                    FrameSize::try_new(64, 32).unwrap(),
+                    Vec::new(),
+                ),
+                timescale: Timescale::new(30),
+                language: None,
+            })
+            .unwrap();
+        assert!(
+            mux.write_packet(&packet(picture.get(), vec![0x32, 9, 1], 0, 1, 30))
+                .is_err()
+        );
+        let mut mux = Mp4Mux::new(Cursor::new(Vec::new()));
+        let picture = mux
+            .add_stream(NewStream {
+                params: StreamParams::video(
+                    StreamCodec::Known(Id::Vp8),
+                    FrameSize::try_new(64, 32).unwrap(),
+                    Vec::new(),
+                ),
+                timescale: Timescale::new(30),
+                language: None,
+            })
+            .unwrap();
+        mux.write_packet(&packet(picture.get(), vec![0; 8], 0, 1, 30))
+            .unwrap();
+        mux.finish(&[TrackDuration {
+            track: picture,
+            timescale: Timescale::new(30),
+            ticks: 1,
+        }])
+        .unwrap();
+        let bytes = mux.into_writer().unwrap().into_inner();
+        let ftyp = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+        assert!(!bytes[16..ftyp].chunks(4).any(|brand| brand == b"av01"));
+    }
+
     /// An MPEG-2 track is an `mp4v` entry whose ES descriptor names Main
     /// profile and carries the sequence headers. It reads back as MPEG-2
     /// with those headers, every sample in decode order, and the reordered
@@ -1028,5 +1500,295 @@ mod tests {
         assert_eq!(bare_asc(&es).unwrap(), asc);
         assert!(bare_asc(&[0x03, 0x05]).is_err());
         assert!(bare_asc(&[0x03, 0x02, 0x00, 0x00, 0x00]).is_err());
+    }
+
+    /// The payload of the first `kind` box among the boxes in `bytes`.
+    fn child<'a>(bytes: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
+        let mut at = 0;
+        while at + 8 <= bytes.len() {
+            let mut size = u32::from_be_bytes(bytes[at..at + 4].try_into().ok()?) as usize;
+            let mut header = 8;
+            if size == 1 {
+                let large = bytes.get(at + 8..at + 16)?;
+                size = usize::try_from(u64::from_be_bytes(large.try_into().ok()?)).ok()?;
+                header = 16;
+            }
+            if size < header || at + size > bytes.len() {
+                return None;
+            }
+            if &bytes[at + 4..at + 8] == kind {
+                return Some(&bytes[at + header..at + size]);
+            }
+            at += size;
+        }
+        None
+    }
+
+    /// A short JPEG-looking picture: the start-of-image marker, then bytes.
+    fn fake_jpeg() -> Vec<u8> {
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        jpeg.extend((0..300).map(|i| (i * 7 % 251) as u8));
+        jpeg.extend([0xFF, 0xD9]);
+        jpeg
+    }
+
+    /// A sound-only file of `brand`, with `cover` set when given.
+    fn covered(brand: FileBrand, cover: Option<Vec<u8>>) -> Vec<u8> {
+        let mut mux = Mp4Mux::with_brand(Cursor::new(Vec::new()), brand);
+        let sound = mux
+            .add_stream(NewStream {
+                params: StreamParams::try_audio(StreamCodec::Known(Id::Pcm), 48_000, 2, Vec::new())
+                    .unwrap(),
+                timescale: Timescale::new(48_000),
+                language: None,
+            })
+            .unwrap();
+        if let Some(cover) = cover {
+            mux.set_cover_art(cover).unwrap();
+        }
+        let payload: Vec<u8> = (0..4800 * 4).map(|i| (i % 253) as u8).collect();
+        mux.write_packet(&packet(sound.get(), payload, 0, 4800, 48_000))
+            .unwrap();
+        mux.finish(&[TrackDuration {
+            track: sound,
+            timescale: Timescale::new(48_000),
+            ticks: 4800,
+        }])
+        .unwrap();
+        mux.into_writer().unwrap().into_inner()
+    }
+
+    /// Every packet of a file, as the crate's demuxer reads it.
+    fn packets(bytes: Vec<u8>) -> Vec<(u32, Option<i64>, Vec<u8>)> {
+        let mut file = crate::IsoBmffFile::open(Cursor::new(bytes)).unwrap();
+        let mut out = Vec::new();
+        while let Some(packet) = cutlass_container::Demux::read_packet(&mut file).unwrap() {
+            let time = packet.timestamp().presentation_or_decode();
+            out.push((packet.stream(), time, packet.bytes().to_vec()));
+        }
+        out
+    }
+
+    /// The cover is `moov/udta/meta/ilst/covr/data` as FFmpeg's movenc.c
+    /// writes it: `meta` a full box, an `hdlr` of 33 bytes naming `mdir`
+    /// and `appl`, and a `data` atom of type 13 (JPEG), locale 0, then the
+    /// picture. The demuxer reads the same packets as without it.
+    #[test]
+    fn a_cover_is_itunes_metadata_and_the_movie_reads_the_same() {
+        let jpeg = fake_jpeg();
+        for brand in [FileBrand::Mp4, FileBrand::Mov, FileBrand::M4a] {
+            let plain = covered(brand, None);
+            let bytes = covered(brand, Some(jpeg.clone()));
+            assert!(child(child(&plain, b"moov").unwrap(), b"udta").is_none());
+
+            let moov = child(&bytes, b"moov").unwrap();
+            let udta = child(moov, b"udta").unwrap();
+            let meta = child(udta, b"meta").unwrap();
+            assert_eq!(&meta[..4], &[0, 0, 0, 0], "{brand:?}: version and flags");
+            let mut hdlr = 33u32.to_be_bytes().to_vec();
+            hdlr.extend_from_slice(b"hdlr");
+            hdlr.extend_from_slice(&[0; 8]);
+            hdlr.extend_from_slice(b"mdirappl");
+            hdlr.extend_from_slice(&[0; 9]);
+            assert_eq!(&meta[4..37], hdlr.as_slice(), "{brand:?}");
+            let ilst = child(&meta[4..], b"ilst").unwrap();
+            let covr = child(ilst, b"covr").unwrap();
+            assert_eq!(covr.len(), 8 + 8 + jpeg.len());
+            let data = child(covr, b"data").unwrap();
+            assert_eq!(&data[..8], &[0, 0, 0, 13, 0, 0, 0, 0], "{brand:?}");
+            assert_eq!(&data[8..], jpeg.as_slice(), "{brand:?}");
+            // `udta` is the last child of `moov`, after the tracks.
+            assert!(moov.ends_with(udta));
+
+            assert_eq!(packets(bytes), packets(plain), "{brand:?}");
+        }
+    }
+
+    /// With `moov` written first, and in a fragmented file, the cover is
+    /// in `moov` too and the files open with the same packets.
+    #[test]
+    fn a_cover_goes_in_moov_first_and_fragmented_files() {
+        use crate::legacy;
+        use crate::mux::{IsoBmffMux, MuxOptions};
+
+        let jpeg = fake_jpeg();
+        for (moov_at_end, fragmented) in [(false, false), (true, true)] {
+            let write = |cover: bool| {
+                let mut mux = IsoBmffMux::new(
+                    Cursor::new(Vec::new()),
+                    MuxOptions {
+                        moov_at_end,
+                        fragmented,
+                        samples_per_fragment: 1,
+                        ..MuxOptions::default()
+                    },
+                );
+                let params = legacy::StreamParams::audio(
+                    legacy::CodecId::Pcm,
+                    legacy::Timescale(8_000),
+                    8_000,
+                    1,
+                    16,
+                    legacy::SampleFormat::S16Le,
+                );
+                let track = legacy::Mux::add_stream(&mut mux, &params).unwrap();
+                if cover {
+                    mux.set_cover_art(jpeg.clone()).unwrap();
+                }
+                for index in 0..3 {
+                    legacy::Mux::write_packet(
+                        &mut mux,
+                        &legacy::Packet {
+                            track_id: track,
+                            payload: vec![index; 320],
+                            dts: i64::from(index) * 160,
+                            pts: i64::from(index) * 160,
+                            duration: 160,
+                            timescale: legacy::Timescale(8_000),
+                            keyframe: true,
+                        },
+                    )
+                    .unwrap();
+                }
+                // A fragmented file has its `moov` out already.
+                if fragmented {
+                    assert!(mux.set_cover_art(jpeg.clone()).is_err());
+                }
+                mux.finish_into().unwrap().into_inner()
+            };
+            let bytes = write(true);
+            let data = child(&bytes, b"moov")
+                .and_then(|moov| child(moov, b"udta"))
+                .and_then(|udta| child(udta, b"meta"))
+                .and_then(|meta| child(&meta[4..], b"ilst"))
+                .and_then(|ilst| child(ilst, b"covr"))
+                .and_then(|covr| child(covr, b"data"))
+                .unwrap();
+            assert_eq!(&data[8..], jpeg.as_slice());
+            assert_eq!(packets(bytes), packets(write(false)), "{fragmented}");
+        }
+    }
+
+    /// Bytes that are not a JPEG, a picture past the limit, and a cover
+    /// after finish are refused; a refused cover leaves the file plain and
+    /// the muxer building.
+    #[test]
+    fn a_cover_that_is_not_a_jpeg_is_refused_and_the_file_stays_plain() {
+        let mut mux = Mp4Mux::new(Cursor::new(Vec::new()));
+        assert!(mux.set_cover_art(Vec::new()).is_err());
+        assert!(mux.set_cover_art(b"\x89PNG\r\n\x1a\n".to_vec()).is_err());
+        let mut large = vec![0xFF, 0xD8, 0xFF];
+        large.resize(
+            usize::try_from(crate::limits::MAX_COVER_BYTES).unwrap() + 1,
+            0,
+        );
+        assert!(mux.set_cover_art(large).is_err());
+        assert_eq!(mux.status(), cutlass_container::MuxStatus::Building);
+        let sound = mux
+            .add_stream(NewStream {
+                params: StreamParams::try_audio(StreamCodec::Known(Id::Pcm), 8_000, 1, Vec::new())
+                    .unwrap(),
+                timescale: Timescale::new(8_000),
+                language: None,
+            })
+            .unwrap();
+        mux.write_packet(&packet(sound.get(), vec![0; 320], 0, 160, 8_000))
+            .unwrap();
+        mux.finish(&[TrackDuration {
+            track: sound,
+            timescale: Timescale::new(8_000),
+            ticks: 160,
+        }])
+        .unwrap();
+        assert!(mux.set_cover_art(fake_jpeg()).is_err());
+        let bytes = mux.into_writer().unwrap().into_inner();
+        assert!(child(child(&bytes, b"moov").unwrap(), b"udta").is_none());
+    }
+
+    /// FFmpeg reads the cover of an MP4, a movie and an M4A as an attached
+    /// picture: one more stream, Motion JPEG with `attached_pic` set, whose
+    /// packet is the picture. The sound stream and its packets are the same
+    /// as in the file without a cover.
+    #[test]
+    fn ffmpeg_reads_the_cover_as_an_attached_picture() {
+        let which = |name: &str| {
+            let out = std::process::Command::new("which")
+                .arg(name)
+                .output()
+                .ok()?;
+            let path = String::from_utf8(out.stdout).ok()?;
+            let path = std::path::PathBuf::from(path.trim());
+            path.is_file().then_some(path)
+        };
+        let (Some(ffmpeg), Some(ffprobe)) = (which("ffmpeg"), which("ffprobe")) else {
+            eprintln!("not available: ffmpeg or ffprobe");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("isobmff-cover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let picture = dir.join("cover.jpg");
+        let made = std::process::Command::new(&ffmpeg)
+            .args(["-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i"])
+            .arg("color=c=red:s=16x16")
+            .args(["-frames:v", "1", "-c:v", "mjpeg", "-f", "image2"])
+            .arg(&picture)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        let jpeg = std::fs::read(&picture).unwrap();
+        let streams = |path: &std::path::Path| {
+            let out = std::process::Command::new(&ffprobe)
+                .args(["-v", "error", "-show_entries"])
+                .arg("stream=index,codec_type,codec_name,sample_rate,channels,width,height:stream_disposition=attached_pic")
+                .args(["-of", "csv=p=0"])
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                out.stderr.is_empty(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap()
+        };
+        let stream_bytes = |path: &std::path::Path, map: &str| {
+            let out = std::process::Command::new(&ffmpeg)
+                .args(["-v", "error", "-nostdin", "-i"])
+                .arg(path)
+                .args(["-map", map, "-c", "copy", "-f", "data", "-"])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out.stdout
+        };
+        for (brand, name) in [
+            (FileBrand::Mp4, "cover.mp4"),
+            (FileBrand::Mov, "cover.mov"),
+            (FileBrand::M4a, "cover.m4a"),
+        ] {
+            let plain = dir.join(format!("plain-{name}"));
+            let path = dir.join(name);
+            std::fs::write(&plain, covered(brand, None)).unwrap();
+            std::fs::write(&path, covered(brand, Some(jpeg.clone()))).unwrap();
+            let before = streams(&plain);
+            let after = streams(&path);
+            assert_eq!(before.lines().count(), 1, "{name}: {before}");
+            let lines: Vec<&str> = after.lines().collect();
+            assert_eq!(lines.len(), 2, "{name}: {after}");
+            assert_eq!(lines[0], before.trim(), "{name}");
+            assert_eq!(lines[1], "1,mjpeg,video,16,16,1", "{name}");
+            assert_eq!(stream_bytes(&path, "0:0"), stream_bytes(&plain, "0:0"));
+            assert_eq!(stream_bytes(&path, "0:1"), jpeg, "{name}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

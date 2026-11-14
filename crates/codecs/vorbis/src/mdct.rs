@@ -46,8 +46,8 @@ impl Fft {
     /// The forward transform, in place.
     fn forward(&self, re: &mut [f32], im: &mut [f32]) {
         let n = self.size;
-        for i in 0..n {
-            let j = self.reversed[i] as usize;
+        for (i, &reversed) in self.reversed[..n].iter().enumerate() {
+            let j = reversed as usize;
             if j > i {
                 re.swap(i, j);
                 im.swap(i, j);

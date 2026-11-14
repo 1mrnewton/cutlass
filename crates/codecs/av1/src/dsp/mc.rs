@@ -24,6 +24,9 @@
 //!
 //! Block widths and heights are at most 128 (the largest AV1 block).
 
+use cutlass_simd::av1::blend;
+use cutlass_simd::av1::mc as kernel;
+use cutlass_simd::av1::warp;
 use std::sync::OnceLock;
 
 use super::{Pixel, clip_px, round2};
@@ -397,6 +400,137 @@ fn rnd_of(sh: u32) -> i32 {
     (1 << sh) >> 1
 }
 
+/// A block of 8-bit samples for the two-pass kernel of `cutlass-simd`,
+/// with the filter rows as the kernel takes them.
+struct KernelBlock<'a> {
+    src: &'a [u8],
+    start: usize,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fh: [i8; 8],
+    fv: [i8; 8],
+}
+
+impl KernelBlock<'_> {
+    fn with<R>(&self, f: impl FnOnce(&kernel::Block<'_>) -> R) -> R {
+        f(&kernel::Block {
+            src: self.src,
+            start: self.start,
+            src_stride: self.src_stride,
+            w: self.w,
+            h: self.h,
+            fh: &self.fh,
+            fv: &self.fv,
+        })
+    }
+}
+
+/// The block for the kernels, when the build has them and the samples are
+/// 8-bit: `(filter, fraction)` choose each filter row (zeros for a
+/// fraction of 0, which the one-pass kernels do not read), and `src_off`
+/// indexes the block's first sample.
+#[inline(always)]
+fn kernel_block<P: Pixel>(
+    src: &[P],
+    src_off: usize,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    (fx, mx): (usize, usize),
+    (fy, my): (usize, usize),
+    bd: u32,
+) -> Option<KernelBlock<'_>> {
+    if !kernel::ACCELERATED || P::HBD || bd != 8 {
+        return None;
+    }
+    // Every tap of a row with a fraction fits a signed byte.
+    let row = |f: &[i16; 8], frac: usize| -> Option<[i8; 8]> {
+        let mut out = [0i8; 8];
+        if frac == 0 {
+            return Some(out);
+        }
+        for (o, &t) in out.iter_mut().zip(f) {
+            *o = i8::try_from(t).ok()?;
+        }
+        Some(out)
+    };
+    Some(KernelBlock {
+        src: P::bytes(src)?,
+        start: src_off.checked_sub(3 * src_stride + 3)?,
+        src_stride,
+        w,
+        h,
+        fh: row(&SUBPEL_FILTERS[fx][mx], mx)?,
+        fv: row(&SUBPEL_FILTERS[fy][my], my)?,
+    })
+}
+
+/// A block of 10-bit or 12-bit samples for the two-pass kernel of
+/// `cutlass-simd`.
+struct KernelBlock16<'a> {
+    src: &'a [u16],
+    start: usize,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    fh: [i8; 8],
+    fv: [i8; 8],
+    bd: u32,
+}
+
+impl KernelBlock16<'_> {
+    fn with<R>(&self, f: impl FnOnce(&kernel::Block16<'_>) -> R) -> R {
+        f(&kernel::Block16 {
+            src: self.src,
+            start: self.start,
+            src_stride: self.src_stride,
+            w: self.w,
+            h: self.h,
+            fh: &self.fh,
+            fv: &self.fv,
+            bd: self.bd,
+        })
+    }
+}
+
+/// [`kernel_block`] for samples past 8 bits.
+#[inline(always)]
+fn kernel_block16<P: Pixel>(
+    src: &[P],
+    src_off: usize,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+    (fx, mx): (usize, usize),
+    (fy, my): (usize, usize),
+    bd: u32,
+) -> Option<KernelBlock16<'_>> {
+    if !kernel::ACCELERATED || !P::HBD {
+        return None;
+    }
+    let row = |f: &[i16; 8], frac: usize| -> Option<[i8; 8]> {
+        let mut out = [0i8; 8];
+        if frac == 0 {
+            return Some(out);
+        }
+        for (o, &t) in out.iter_mut().zip(f) {
+            *o = i8::try_from(t).ok()?;
+        }
+        Some(out)
+    };
+    Some(KernelBlock16 {
+        src: P::words(src)?,
+        start: src_off.checked_sub(3 * src_stride + 3)?,
+        src_stride,
+        w,
+        h,
+        fh: row(&SUBPEL_FILTERS[fx][mx], mx)?,
+        fv: row(&SUBPEL_FILTERS[fy][my], my)?,
+        bd,
+    })
+}
+
 /// Horizontal then vertical filtering through an `i16` intermediate.
 /// `wr(A, B)` receives the split vertical sums.
 #[inline]
@@ -606,9 +740,22 @@ pub fn put<P: Pixel>(
             16 => copy_w::<P, 16>(dst, dst_stride, src, src_off, src_stride, w, h),
             32 => copy_w::<P, 32>(dst, dst_stride, src, src_off, src_stride, w, h),
             64 => copy_w::<P, 64>(dst, dst_stride, src, src_off, src_stride, w, h),
+            128 => copy_w::<P, 128>(dst, dst_stride, src, src_off, src_stride, w, h),
             _ => copy_w::<P, 0>(dst, dst_stride, src, src_off, src_stride, w, h),
         },
         (true, false) => {
+            if let Some(b) = kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                && let Some(out) = P::bytes_mut(dst)
+                && b.with(|b| kernel::put_h_u8(out, dst_stride, b))
+            {
+                return;
+            }
+            if let Some(b) = kernel_block16(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                && let Some(out) = P::words_mut(dst)
+                && b.with(|b| kernel::put_h_u16(out, dst_stride, b))
+            {
+                return;
+            }
             // The vertical filter is the identity: Round2(i * 128, r1).
             let sh = r1 - 7;
             let rnd = 1i16 << (sh - 1);
@@ -628,6 +775,18 @@ pub fn put<P: Pixel>(
         (false, true) => {
             // The horizontal filter is exact (intermediate = px << (7 - r0)),
             // so pred = Round2(sum(f * px), r1 + r0 - 7) = Round2(2 * S, 7).
+            if let Some(b) = kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                && let Some(out) = P::bytes_mut(dst)
+                && b.with(|b| kernel::put_v_u8(out, dst_stride, b))
+            {
+                return;
+            }
+            if let Some(b) = kernel_block16(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                && let Some(out) = P::words_mut(dst)
+                && b.with(|b| kernel::put_v_u16(out, dst_stride, b))
+            {
+                return;
+            }
             let top = src_off - 3 * src_stride;
             if P::HBD {
                 v_pass_dyn::<P, P, V_SPLIT>(
@@ -660,6 +819,18 @@ pub fn put<P: Pixel>(
             }
         }
         (true, true) => {
+            if let Some(b) = kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                && let Some(out) = P::bytes_mut(dst)
+                && b.with(|b| kernel::put_hv_u8(out, dst_stride, b))
+            {
+                return;
+            }
+            if let Some(b) = kernel_block16(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                && let Some(out) = P::words_mut(dst)
+                && b.with(|b| kernel::put_hv_u16(out, dst_stride, b))
+            {
+                return;
+            }
             // Round2(2 * (256 * A + B), r1) with n = r1 - 1 >= 8.
             let n = r1 - 1;
             let rnd = 1i16 << (n - 1);
@@ -781,8 +952,21 @@ pub fn prep<P: Pixel>(
             16 => prep_copy::<P, 16>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
             32 => prep_copy::<P, 32>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
             64 => prep_copy::<P, 64>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
+            128 => prep_copy::<P, 128>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
             _ => prep_copy::<P, 0>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
         },
+        (true, false)
+            if kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                .is_some_and(|b| b.with(|b| kernel::prep_h_u8(tmp, w, b))) => {}
+        (false, true)
+            if kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                .is_some_and(|b| b.with(|b| kernel::prep_v_u8(tmp, w, b))) => {}
+        (true, false)
+            if kernel_block16(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                .is_some_and(|b| b.with(|b| kernel::prep_h_u16(tmp, w, b))) => {}
+        (false, true)
+            if kernel_block16(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                .is_some_and(|b| b.with(|b| kernel::prep_v_u16(tmp, w, b))) => {}
         (true, false) => h_pass_dyn::<P, i16>(
             tmp,
             w,
@@ -831,6 +1015,12 @@ pub fn prep<P: Pixel>(
                 );
             }
         }
+        (true, true)
+            if kernel_block(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                .is_some_and(|b| b.with(|b| kernel::prep_hv_u8(tmp, w, b))) => {}
+        (true, true)
+            if kernel_block16(src, src_off, src_stride, w, h, (fx, mx), (fy, my), bd)
+                .is_some_and(|b| b.with(|b| kernel::prep_hv_u16(tmp, w, b))) => {}
         // pred = Round2(2 * (256 * A + B), 7) = 4 * A + Round2(B, 6).
         (true, true) => hv::<P, i16>(
             tmp,
@@ -1080,6 +1270,7 @@ pub fn avg<P: Pixel>(
         16 => avg_w::<P, 16>(dst, dst_stride, t0, t1, w, h, bd),
         32 => avg_w::<P, 32>(dst, dst_stride, t0, t1, w, h, bd),
         64 => avg_w::<P, 64>(dst, dst_stride, t0, t1, w, h, bd),
+        128 => avg_w::<P, 128>(dst, dst_stride, t0, t1, w, h, bd),
         _ => avg_w::<P, 0>(dst, dst_stride, t0, t1, w, h, bd),
     }
 }
@@ -1100,6 +1291,7 @@ pub fn avg_copy<P: Pixel>(
         16 => avg_copy_w::<P, 16>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
         32 => avg_copy_w::<P, 32>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
         64 => avg_copy_w::<P, 64>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
+        128 => avg_copy_w::<P, 128>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
         _ => avg_copy_w::<P, 0>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
     }
 }
@@ -1240,6 +1432,22 @@ pub fn mask_blend<P: Pixel>(
 ) {
     let sh = 6 + inter_post_round(bd, true);
     let off = (1 << (sh - 1)) + 64 * prep_bias(bd);
+    if let Some(dst) = P::bytes_mut(dst)
+        && w <= 128
+    {
+        return mask_blend_u8(
+            dst,
+            dst_stride,
+            t0,
+            t1,
+            w,
+            h,
+            mask,
+            mask_stride,
+            sub_x,
+            sub_y,
+        );
+    }
     for r in 0..h {
         let d = &mut dst[r * dst_stride..][..w];
         let a = &t0[r * w..][..w];
@@ -1265,6 +1473,83 @@ pub fn mask_blend<P: Pixel>(
     }
 }
 
+/// [`mask_blend`] for 8-bit samples (`6 + InterPostRound` is 10 and there
+/// is no bias). A row's weights are worked out first, then blended on
+/// the kernel of `cutlass-simd`.
+#[inline(never)]
+fn mask_blend_u8(
+    dst: &mut [u8],
+    dst_stride: usize,
+    t0: &[i16],
+    t1: &[i16],
+    w: usize,
+    h: usize,
+    mask: &[u8],
+    mask_stride: usize,
+    sub_x: bool,
+    sub_y: bool,
+) {
+    let mut weights = [0u8; 128];
+    for r in 0..h {
+        let m: &[u8] = match (sub_x, sub_y) {
+            (false, false) => &mask[r * mask_stride..][..w],
+            (true, false) => {
+                let a = &mask[r * mask_stride..][..2 * w];
+                // Eight weights at a time on the kernel, the rest here.
+                let (m8, m_rest) = weights[..w].as_chunks_mut::<8>();
+                let (a16, a_rest) = a.as_chunks::<16>();
+                for (m, a) in m8.iter_mut().zip(a16) {
+                    *m = blend::weights_pairs8(a);
+                }
+                for (m, a) in m_rest.iter_mut().zip(a_rest.as_chunks::<2>().0) {
+                    *m = ((u16::from(a[0]) + u16::from(a[1]) + 1) >> 1) as u8;
+                }
+                &weights[..w]
+            }
+            // The specification averages the 2x2 quad also when only
+            // `subY` is set.
+            _ => {
+                let a = &mask[2 * r * mask_stride..][..2 * w];
+                let b = &mask[(2 * r + 1) * mask_stride..][..2 * w];
+                let (m8, m_rest) = weights[..w].as_chunks_mut::<8>();
+                let (a16, a_rest) = a.as_chunks::<16>();
+                let (b16, b_rest) = b.as_chunks::<16>();
+                for ((m, a), b) in m8.iter_mut().zip(a16).zip(b16) {
+                    *m = blend::weights_quads8(a, b);
+                }
+                let pairs = a_rest
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .zip(b_rest.as_chunks::<2>().0);
+                for (m, (a, b)) in m_rest.iter_mut().zip(pairs) {
+                    let s = u16::from(a[0]) + u16::from(a[1]) + u16::from(b[0]) + u16::from(b[1]);
+                    *m = ((s + 2) >> 2) as u8;
+                }
+                &weights[..w]
+            }
+        };
+        let d = &mut dst[r * dst_stride..][..w];
+        let a = &t0[r * w..][..w];
+        let b = &t1[r * w..][..w];
+        // Eight samples at a time on the kernel, the rest of a row 4 wide
+        // here.
+        let (d8, d_rest) = d.as_chunks_mut::<8>();
+        let (a8, a_rest) = a.as_chunks::<8>();
+        let (b8, b_rest) = b.as_chunks::<8>();
+        let (m8, m_rest) = m.as_chunks::<8>();
+        for (((d, a), b), m) in d8.iter_mut().zip(a8).zip(b8).zip(m8) {
+            *d = blend::mask_blend8(a, b, m);
+        }
+        for (((d, &a), &b), &m) in d_rest.iter_mut().zip(a_rest).zip(b_rest).zip(m_rest) {
+            // `m a + (64 - m) b` is `m (a - b) + 64 b`.
+            let (a, b) = (i32::from(a), i32::from(b));
+            let v = (i32::from(m) * (a - b) + 64 * b + 512) >> 10;
+            *d = v.clamp(0, 255) as u8;
+        }
+    }
+}
+
 /// Difference weight mask process (7.11.3.12) on the luma compound
 /// intermediates `t0`, `t1` (stride `w`). Writes `mask` with stride `w`.
 /// `inverse` is `mask_type`.
@@ -1281,6 +1566,17 @@ pub fn diffwtd_mask(
     let rnd = 1i32 << (sh - 1);
     let n = w * h;
     let (m, a, b) = (&mut mask[..n], &t0[..n], &t1[..n]);
+    if sh == 4 {
+        // 8 bits: 38 + ((diff + 8) >> 4) / 16 is 38 + ((diff + 8) >> 8),
+        // on 16-bit lanes (a sum that saturates is past 26 either way).
+        let base = if inverse { 64 - 38 } else { 38 };
+        for ((m, &a), &b) in m.iter_mut().zip(a).zip(b) {
+            let diff = a.abs_diff(b);
+            let v = (diff.saturating_add(8) >> 8).min(26) as u8;
+            *m = if inverse { base - v } else { base + v };
+        }
+        return;
+    }
     for i in 0..n {
         let diff = (i32::from(a[i]) - i32::from(b[i])).abs();
         let diff = (diff + rnd) >> sh;
@@ -1600,6 +1896,7 @@ pub fn setup_shear(mat: &[i32; 6]) -> Option<[i32; 4]> {
 fn warp_core<P: Pixel>(
     refp: &[P],
     ref_stride: usize,
+    row0: usize,
     plane_w: usize,
     plane_h: usize,
     mat: &[i32; 6],
@@ -1639,7 +1936,7 @@ fn warp_core<P: Pixel>(
     for (k1, irow) in inter.iter_mut().enumerate() {
         let i1 = k1 as i32 - 7;
         let ry = (iy4 + i64::from(i1)).clamp(0, last_y) as usize;
-        let row = &refp[ry * ref_stride..];
+        let row = &refp[(ry - row0) * ref_stride..];
         let mut px = [0i32; 15];
         for k in 0..15 {
             px[k] = row[cols[k]].to_i32();
@@ -1672,6 +1969,29 @@ fn warp_core<P: Pixel>(
     }
 }
 
+/// The rows of the reference plane the block warp process reads for the
+/// 8x8 block at `(x, y)` of the current plane: the first and the last,
+/// after the clamp to the plane's `plane_h` rows.
+pub fn warp_rows(
+    mat: &[i32; 6],
+    x: usize,
+    y: usize,
+    sub_x: bool,
+    sub_y: bool,
+    plane_h: usize,
+) -> (usize, usize) {
+    let (sx_sh, sy_sh) = (u32::from(sub_x), u32::from(sub_y));
+    let src_x = (x as i64 + 4) << sx_sh;
+    let src_y = (y as i64 + 4) << sy_sh;
+    let dst_y = i64::from(mat[4]) * src_x + i64::from(mat[5]) * src_y + i64::from(mat[1]);
+    let iy4 = (dst_y >> sy_sh) >> WARPEDMODEL_PREC_BITS;
+    let last_y = plane_h as i64 - 1;
+    (
+        (iy4 - 7).clamp(0, last_y) as usize,
+        (iy4 + 7).clamp(0, last_y) as usize,
+    )
+}
+
 /// Block warp process (7.11.3.5) for one 8x8 block, written as final pixels
 /// (`isCompound = 0`) to the 8x8 area of `dst`.
 ///
@@ -1697,9 +2017,113 @@ pub fn warp_8x8_put<P: Pixel>(
     sub_y: bool,
     bd: u32,
 ) {
+    warp_8x8_put_rows(
+        dst, dst_stride, refp, ref_stride, 0, plane_w, plane_h, mat, shear, x, y, sub_x, sub_y, bd,
+    );
+}
+
+/// The block warp of an 8x8 block of 8-bit samples on the kernel: `run`
+/// takes the fifteen rows of sixteen samples the filters read and where
+/// they read the table. Rows near the plane's sides are copied with the
+/// clamp of the specification first.
+#[inline(always)]
+fn warp_u8<T>(
+    refp: &[u8],
+    ref_stride: usize,
+    row0: usize,
+    plane_w: usize,
+    plane_h: usize,
+    mat: &[i32; 6],
+    shear: &[i32; 4],
+    x: usize,
+    y: usize,
+    sub_x: bool,
+    sub_y: bool,
+    run: impl FnOnce([&[u8; 16]; 15], &warp::Filters<'_>) -> T,
+) -> T {
+    let [alpha, beta, gamma, delta] = *shear;
+    let (sx_sh, sy_sh) = (u32::from(sub_x), u32::from(sub_y));
+    let src_x = (x as i64 + 4) << sx_sh;
+    let src_y = (y as i64 + 4) << sy_sh;
+    let dst_x = i64::from(mat[2]) * src_x + i64::from(mat[3]) * src_y + i64::from(mat[0]);
+    let dst_y = i64::from(mat[4]) * src_x + i64::from(mat[5]) * src_y + i64::from(mat[1]);
+    let x4 = dst_x >> sx_sh;
+    let y4 = dst_y >> sy_sh;
+    let prec = WARPEDMODEL_PREC_BITS as u32;
+    let mask = (1i64 << prec) - 1;
+    let ix4 = x4 >> prec;
+    let iy4 = y4 >> prec;
+    let f = warp::Filters {
+        table: &WARPED_FILTERS,
+        h: [(x4 & mask) as i32, alpha, beta],
+        v: [(y4 & mask) as i32, gamma, delta],
+    };
+    let last_x = plane_w as i64 - 1;
+    let last_y = plane_h as i64 - 1;
+    let row = |k: usize| {
+        let ry = (iy4 + k as i64 - 7).clamp(0, last_y) as usize;
+        &refp[(ry - row0) * ref_stride..]
+    };
+    if ix4 >= 7 && ix4 + 8 <= last_x {
+        let x0 = (ix4 - 7) as usize;
+        let rows = core::array::from_fn(|k| {
+            row(k)[x0..]
+                .first_chunk::<16>()
+                .unwrap_or_else(|| unreachable!("column {} lies in the plane", ix4 + 8))
+        });
+        run(rows, &f)
+    } else {
+        let copies: [[u8; 16]; 15] = core::array::from_fn(|k| {
+            let row = row(k);
+            core::array::from_fn(|c| row[(ix4 - 7 + c as i64).clamp(0, last_x) as usize])
+        });
+        run(core::array::from_fn(|k| &copies[k]), &f)
+    }
+}
+
+/// [`warp_8x8_put`] reading rows of the reference plane from row `row0`
+/// on: `refp` starts at that row, and holds the rows [`warp_rows`] names
+/// for the block.
+pub fn warp_8x8_put_rows<P: Pixel>(
+    dst: &mut [P],
+    dst_stride: usize,
+    refp: &[P],
+    ref_stride: usize,
+    row0: usize,
+    plane_w: usize,
+    plane_h: usize,
+    mat: &[i32; 6],
+    shear: &[i32; 4],
+    x: usize,
+    y: usize,
+    sub_x: bool,
+    sub_y: bool,
+    bd: u32,
+) {
+    if let (Some(dst), Some(refp)) = (P::bytes_mut(dst), P::bytes(refp)) {
+        let block = warp_u8(
+            refp,
+            ref_stride,
+            row0,
+            plane_w,
+            plane_h,
+            mat,
+            shear,
+            x,
+            y,
+            sub_x,
+            sub_y,
+            warp::put8x8,
+        );
+        for (d, b) in dst.chunks_mut(dst_stride).zip(&block) {
+            d[..8].copy_from_slice(b);
+        }
+        return;
+    }
     warp_core(
         refp,
         ref_stride,
+        row0,
         plane_w,
         plane_h,
         mat,
@@ -1732,10 +2156,55 @@ pub fn warp_8x8_prep<P: Pixel>(
     sub_y: bool,
     bd: u32,
 ) {
+    warp_8x8_prep_rows(
+        tmp, tmp_stride, refp, ref_stride, 0, plane_w, plane_h, mat, shear, x, y, sub_x, sub_y, bd,
+    );
+}
+
+/// [`warp_8x8_prep`] reading rows of the reference plane from row `row0`
+/// on, as [`warp_8x8_put_rows`] does.
+pub fn warp_8x8_prep_rows<P: Pixel>(
+    tmp: &mut [i16],
+    tmp_stride: usize,
+    refp: &[P],
+    ref_stride: usize,
+    row0: usize,
+    plane_w: usize,
+    plane_h: usize,
+    mat: &[i32; 6],
+    shear: &[i32; 4],
+    x: usize,
+    y: usize,
+    sub_x: bool,
+    sub_y: bool,
+    bd: u32,
+) {
+    if let Some(refp) = P::bytes(refp) {
+        // The bias is 0 for 8-bit samples.
+        let block = warp_u8(
+            refp,
+            ref_stride,
+            row0,
+            plane_w,
+            plane_h,
+            mat,
+            shear,
+            x,
+            y,
+            sub_x,
+            sub_y,
+            warp::prep8x8,
+        );
+        for (t, b) in tmp.chunks_mut(tmp_stride).zip(&block) {
+            t[..8].copy_from_slice(b);
+        }
+        return;
+    }
     let bias = prep_bias(bd);
     warp_core(
         refp,
         ref_stride,
+        row0,
         plane_w,
         plane_h,
         mat,
@@ -1807,14 +2276,78 @@ pub fn emu_edge_rows<'a, P: Pixel + 'a>(
             return false;
         };
         let d = &mut dst[r * dst_stride..][..bw];
-        d[..left].fill(srow[0]);
+        fill_short(&mut d[..left], srow[0]);
         if right > left {
             let sx = (x + left as isize) as usize;
-            d[left..right].copy_from_slice(&srow[sx..sx + right - left]);
+            copy_short(&mut d[left..right], &srow[sx..sx + right - left]);
         }
-        d[right..].fill(srow[plane_w - 1]);
+        fill_short(&mut d[right..], srow[plane_w - 1]);
     }
     true
+}
+
+/// `d.copy_from_slice(s)` for the short rows of a block, without a
+/// library call: sixteen samples at a time and the last sixteen again,
+/// or two overlapping copies of eight or four.
+#[inline(always)]
+fn copy_short<T: Copy>(d: &mut [T], s: &[T]) {
+    let n = d.len().min(s.len());
+    let (d, s) = (&mut d[..n], &s[..n]);
+    match n {
+        16.. => {
+            let (d16, _) = d.as_chunks_mut::<16>();
+            let (s16, _) = s.as_chunks::<16>();
+            for (d, s) in d16.iter_mut().zip(s16) {
+                *d = *s;
+            }
+            if !n.is_multiple_of(16) {
+                d[n - 16..].copy_from_slice(&s[n - 16..]);
+            }
+        }
+        8.. => {
+            d[..8].copy_from_slice(&s[..8]);
+            d[n - 8..].copy_from_slice(&s[n - 8..]);
+        }
+        4.. => {
+            d[..4].copy_from_slice(&s[..4]);
+            d[n - 4..].copy_from_slice(&s[n - 4..]);
+        }
+        _ => {
+            for (d, s) in d.iter_mut().zip(s) {
+                *d = *s;
+            }
+        }
+    }
+}
+
+/// `d.fill(v)` for the short runs beside a block, as [`copy_short`].
+#[inline(always)]
+fn fill_short<T: Copy>(d: &mut [T], v: T) {
+    let n = d.len();
+    match n {
+        16.. => {
+            let (d16, _) = d.as_chunks_mut::<16>();
+            for d in d16 {
+                *d = [v; 16];
+            }
+            if !n.is_multiple_of(16) {
+                d[n - 16..].copy_from_slice(&[v; 16]);
+            }
+        }
+        8.. => {
+            d[..8].copy_from_slice(&[v; 8]);
+            d[n - 8..].copy_from_slice(&[v; 8]);
+        }
+        4.. => {
+            d[..4].copy_from_slice(&[v; 4]);
+            d[n - 4..].copy_from_slice(&[v; 4]);
+        }
+        _ => {
+            for d in d {
+                *d = v;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1823,7 +2356,7 @@ mod tests {
         Pixel, avg, diffwtd_mask, emu_edge, ii_smooth_mask, interintra_blend, mask_blend,
         obmc_blend_above, obmc_blend_left, obmc_mask, prep, prep_bias, prep_scaled, put,
         put_h_rows, put_scaled, put_v_rows, scaled_footprint, setup_shear, w_avg, warp_8x8_prep,
-        warp_8x8_put, wedge_mask,
+        warp_8x8_prep_rows, warp_8x8_put, warp_8x8_put_rows, warp_rows, wedge_mask,
     };
     use crate::spec::tables::{
         DIV_LUT, II_WEIGHTS_1D, NUM_4X4_BLOCKS_HIGH, NUM_4X4_BLOCKS_WIDE, SUBPEL_FILTERS,
@@ -2784,6 +3317,28 @@ mod tests {
                 );
             }
         }
+        // The rows the block reads are all it needs of the plane.
+        let (first, last) = warp_rows(&m, x as usize, y as usize, sx == 1, sy == 1, plane.h);
+        assert!(first <= last && last < plane.h && last - first <= 14);
+        let rows = &pp[first * plane.w..(last + 1) * plane.w];
+        let mut d2 = vec![P::default(); 10 * 8];
+        warp_8x8_put_rows(
+            &mut d2,
+            10,
+            rows,
+            plane.w,
+            first,
+            plane.w,
+            plane.h,
+            &m,
+            &shear,
+            x as usize,
+            y as usize,
+            sx == 1,
+            sy == 1,
+            bd,
+        );
+        assert!(d == d2, "warp put from its rows {m:?}");
         let pred = ref_warp(&plane, &m, x, y, sx, sy, bd, true);
         let mut t = vec![0i16; 16 * 8];
         warp_8x8_prep(
@@ -2801,6 +3356,24 @@ mod tests {
             sy == 1,
             bd,
         );
+        let mut t2 = vec![0i16; 16 * 8];
+        warp_8x8_prep_rows(
+            &mut t2,
+            16,
+            rows,
+            plane.w,
+            first,
+            plane.w,
+            plane.h,
+            &m,
+            &shear,
+            x as usize,
+            y as usize,
+            sx == 1,
+            sy == 1,
+            bd,
+        );
+        assert_eq!(t, t2, "warp prep from its rows");
         let bias = i64::from(prep_bias(bd));
         for r in 0..8 {
             for c in 0..8 {

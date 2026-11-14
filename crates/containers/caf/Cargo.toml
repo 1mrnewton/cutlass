@@ -4,10 +4,19 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "Demux and mux for caf."
+description = "Demux and mux for Core Audio Format (.caf) files."
 
 [dependencies]
+cutlass-codec = { path = "../../codec", version = "0.1.0" }
 cutlass-container = { path = "../../container", version = "0.1.0" }
+
+[dev-dependencies]
+cutlass-decode = { path = "../../decode", version = "0.1.0" }
+cutlass-pcm = { path = "../../codecs/pcm", version = "0.1.0" }
+
+[[bench]]
+name = "against_ffmpeg"
+harness = false
 
 [lints]
 workspace = true

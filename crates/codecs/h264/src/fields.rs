@@ -88,6 +88,106 @@ fn x264_mbaff_matches_ffmpeg() {
     }
 }
 
+/// One interlaced stream for libx264 to make: a test source through a
+/// filter, the encoder's options, and x264's own parameters.
+struct Interlaced {
+    name: &'static str,
+    source: &'static str,
+    filter: &'static str,
+    size: (usize, usize),
+    encoder: &'static [&'static str],
+    params: &'static str,
+}
+
+/// Interlaced video as libx264 codes it: macroblock-adaptive frames whose
+/// pairs change kind from one to the next, in I, P and B pictures.
+///
+/// Where a field pair meets a frame pair every neighbour rule changes
+/// (clause 6.4.12.2), a field macroblock predicts from fields and scans its
+/// coefficients down the columns, and the edge between the two kinds is
+/// deblocked in its own way. The first two streams are the ones that first
+/// showed the decoder losing the bitstream; the rest each caught a case the
+/// first two do not reach.
+#[test]
+fn x264_interlaced_streams_match_ffmpeg() {
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg is not installed");
+        return;
+    };
+    // Noise makes the encoder mix field pairs and frame pairs. `interlace`
+    // weaves two moments into each frame, so its fields really differ.
+    const STILL: &str = "noise=alls=14:allf=t";
+    const MOVING: &str = "noise=alls=8:allf=t,interlace=scan=tff";
+    let streams = [
+        Interlaced {
+            name: "bottom field first",
+            source: "testsrc2=size=640x360:rate=30",
+            filter: STILL,
+            size: (640, 360),
+            encoder: &["-frames:v", "24", "-b:v", "1500k", "-flags", "+ildct+ilme"],
+            params: "interlaced=1",
+        },
+        Interlaced {
+            name: "top field first",
+            source: "testsrc2=size=640x360:rate=30",
+            filter: STILL,
+            size: (720, 576),
+            encoder: &["-frames:v", "24", "-b:v", "1500k", "-s", "720x576"],
+            params: "tff=1",
+        },
+        Interlaced {
+            name: "moving fields",
+            source: "testsrc2=size=352x288:rate=60",
+            filter: MOVING,
+            size: (352, 288),
+            encoder: &["-frames:v", "16", "-b:v", "800k"],
+            params: "tff=1",
+        },
+        Interlaced {
+            name: "cavlc, slices and temporal direct",
+            source: "testsrc2=size=352x288:rate=60",
+            filter: MOVING,
+            size: (352, 288),
+            encoder: &["-frames:v", "16", "-b:v", "600k"],
+            params: "tff=1:cabac=0:slices=3:direct=temporal",
+        },
+        Interlaced {
+            name: "scaling matrices",
+            source: "testsrc2=size=352x288:rate=30",
+            filter: STILL,
+            size: (352, 288),
+            encoder: &["-frames:v", "12", "-b:v", "700k"],
+            params: "tff=1:cqm=jvt",
+        },
+        Interlaced {
+            name: "bars",
+            source: "testsrc=size=352x288:rate=60",
+            filter: MOVING,
+            size: (352, 288),
+            encoder: &["-frames:v", "24", "-b:v", "400k"],
+            params: "tff=1",
+        },
+    ];
+    for stream in streams {
+        let name = stream.name;
+        let (width, height) = stream.size;
+        let annex = x264_interlaced(&ffmpeg, &stream)
+            .unwrap_or_else(|| panic!("x264 did not encode {name}"));
+        let raw = ffmpeg_raw_size(&ffmpeg, &annex, width, height)
+            .unwrap_or_else(|err| panic!("ffmpeg did not decode {name}: {err}"));
+        let decoded = decode_units(&annex, width as u32, height as u32);
+        let frame = width * height * 3 / 2;
+        assert_eq!(decoded.len(), raw.len() / frame, "{name} picture count");
+        for (index, picture) in decoded.iter().enumerate() {
+            let start = index * frame;
+            let (y, u, v) = split_420_at(&raw[start..start + frame], width, height);
+            same(&format!("{name} {index} y"), &picture.0, &y);
+            same(&format!("{name} {index} u"), &picture.1, &u);
+            same(&format!("{name} {index} v"), &picture.2, &v);
+        }
+    }
+}
+
 #[test]
 fn mbaff_pairs_match_ffmpeg() {
     let Some(ffmpeg) = ffmpeg_bin() else {
@@ -383,6 +483,37 @@ fn x264_mbaff(ffmpeg: &std::path::Path, source: &str, params: &str) -> Option<Ve
             "-f",
             "h264",
         ])
+        .arg(&path)
+        .status()
+        .ok()?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    let annex = std::fs::read(&path).ok();
+    let _ = std::fs::remove_file(&path);
+    annex
+}
+
+/// The stream libx264 makes of `stream`, on one thread so it is the same
+/// each time.
+fn x264_interlaced(ffmpeg: &std::path::Path, stream: &Interlaced) -> Option<Vec<u8>> {
+    let path = std::env::temp_dir().join(format!("cutlass-ilace-{}.h264", std::process::id()));
+    let status = Command::new(ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            stream.source,
+            "-vf",
+            stream.filter,
+            "-an",
+        ])
+        .args(["-c:v", "libx264", "-preset", "medium", "-threads", "1"])
+        .args(["-pix_fmt", "yuv420p"])
+        .args(stream.encoder)
+        .args(["-x264-params", stream.params, "-f", "h264"])
         .arg(&path)
         .status()
         .ok()?;

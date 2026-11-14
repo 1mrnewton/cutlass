@@ -6,8 +6,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::dsp::Pixel;
 use crate::dsp::cdef::{
-    CDEF_BORDER, CDEF_PAD_STRIDE, CDEF_UNAVAILABLE, adjust_luma_pri_strength, cdef_damping,
-    cdef_direction, cdef_filter, cdef_uv_dir,
+    CDEF_BORDER, CDEF_PAD_STRIDE, CDEF_UNAVAILABLE, CdefTaps, adjust_luma_pri_strength,
+    cdef_damping, cdef_direction, cdef_filter, cdef_filter_inner, cdef_filter_taps,
+    cdef_filter_taps_bytes, cdef_uv_dir,
 };
 use crate::dsp::lf::{filter_horizontal_edge, filter_vertical_edge};
 use crate::dsp::lr::{LrPlane, LrScratch, LrUnit, lr_planes, lr_planes_stripes, lr_save_bounds};
@@ -15,30 +16,18 @@ use crate::dsp::superres::upscale_plane;
 
 use super::frame::{FrameState, Picture};
 use super::obu::{FrameHeader, SequenceHeader};
-use super::types::{
-    GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, MiInfo, NEARESTMV, NONE, block_height, block_width,
-    plane_residual_size, tx_h, tx_w,
-};
-
-/// Filter level (7.14.5) of the block `m` for loop filter index `i`
-/// (0, 1: luma vertical / horizontal edges, 2, 3: U, V), with the block's
-/// `delta_lf` value `delta_lf`.
-fn filter_level_of(hdr: &FrameHeader, m: &MiInfo, i: usize, delta_lf: i32) -> u8 {
-    level_for(
-        hdr,
-        i,
-        delta_lf,
-        m.segment_id as usize,
-        m.ref_frame[0],
-        mode_type(m),
-    )
-}
+use super::types::{GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, NEARESTMV, NONE, bh4, bw4};
+use cutlass_simd::av1::lfmask::{self, EdgeUnits, Edges, edge_codes};
 
 #[inline]
-fn mode_type(m: &MiInfo) -> usize {
-    usize::from(m.y_mode >= NEARESTMV && m.y_mode != GLOBALMV && m.y_mode != GLOBAL_GLOBALMV)
+fn mode_type(y_mode: u8) -> usize {
+    usize::from(y_mode >= NEARESTMV && y_mode != GLOBALMV && y_mode != GLOBAL_GLOBALMV)
 }
 
+/// Filter level (7.14.5) for loop filter index `i` (0, 1: luma vertical /
+/// horizontal edges, 2, 3: U, V) of a block with the `delta_lf` value
+/// `delta_lf`, the segment `seg`, the first reference frame `rf` and the
+/// mode type `mode_type`.
 fn level_for(
     hdr: &FrameHeader,
     i: usize,
@@ -66,15 +55,246 @@ fn level_for(
     lvl as u8
 }
 
-/// Number of `ref_frame[0]` classes in [`LfPlane::lut`]: 0..=7, and one for
+/// Number of `ref_frame[0]` classes in [`LfLevels`]: 0..=7, and one for
 /// every negative value.
 const LF_REFS: usize = 9;
+
+/// [`LfInfo::flags`]: the block is skipped (CDEF leaves an 8x8 of
+/// skipped blocks alone).
+pub const LF_SKIP: u8 = 1;
+/// [`LfInfo::flags`]: the block is skipped and inter, so only its own
+/// edges are filtered, not those of its transform blocks (7.14.2).
+pub const LF_BLOCK_EDGES: u8 = 2;
+/// The bit of the first byte of [`LfInfo::bytes`] that says the block
+/// is skipped, above the 6 bits of the level.
+pub const UNIT_SKIP: u8 = 0x80;
+
+/// What the loop filter and CDEF read of a block, kept for each of its
+/// 4x4 units: its filter level for each loop filter index (7.14.5), its
+/// size and its flags. Under a third the size of the mode info, and the
+/// levels are worked out once for a block, not for each of its units in
+/// each pass.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LfInfo {
+    pub lvl: [u8; 4],
+    pub flags: u8,
+    pub bsize: u8,
+}
+
+/// The filter levels of a frame's blocks.
+pub struct LfLevels {
+    multi: bool,
+    /// Levels for `delta_lf == 0`, by `[index][segment][ref class][mode type]`.
+    lut: [[[[u8; 2]; LF_REFS]; 8]; 4],
+}
+
+impl LfLevels {
+    pub fn new(hdr: &FrameHeader) -> Self {
+        let mut lut = [[[[0u8; 2]; LF_REFS]; 8]; 4];
+        for (li, t) in lut.iter_mut().enumerate() {
+            for (seg, t) in t.iter_mut().enumerate() {
+                for (rc, t) in t.iter_mut().enumerate() {
+                    let rf = if rc < 8 { rc as i8 } else { NONE };
+                    for (mt, t) in t.iter_mut().enumerate() {
+                        *t = level_for(hdr, li, 0, seg, rf, mt);
+                    }
+                }
+            }
+        }
+        Self {
+            multi: hdr.delta_lf_multi,
+            lut,
+        }
+    }
+
+    /// What the filters read of a block with these fields.
+    #[inline]
+    pub fn info(
+        &self,
+        hdr: &FrameHeader,
+        ref_frame: i8,
+        segment_id: u8,
+        y_mode: u8,
+        skip: bool,
+        bsize: u8,
+        delta_lf: [i8; 4],
+    ) -> LfInfo {
+        let seg = usize::from(segment_id & 7);
+        let rc = if ref_frame >= 0 {
+            (ref_frame as usize).min(8)
+        } else {
+            8
+        };
+        let mt = mode_type(y_mode);
+        let lvl = core::array::from_fn(|li| {
+            let d = delta_lf[if self.multi { li } else { 0 }];
+            if d == 0 {
+                self.lut[li][seg][rc][mt]
+            } else {
+                level_for(hdr, li, i32::from(d), seg, ref_frame, mt)
+            }
+        });
+        LfInfo {
+            lvl,
+            flags: u8::from(skip) * LF_SKIP
+                + u8::from(skip && ref_frame > INTRA_FRAME) * LF_BLOCK_EDGES,
+            bsize,
+        }
+    }
+}
+
+impl LfInfo {
+    /// What [`FilterInfo`] keeps of the info: the levels (6 bits each),
+    /// with [`UNIT_SKIP`] in the first byte for a skipped block. A
+    /// word, so a frame's units take half the memory of eight bytes.
+    #[inline(always)]
+    pub fn bytes(self) -> [u8; 4] {
+        let [a, b, c, d] = self.lvl;
+        let skip = if self.flags & LF_SKIP != 0 {
+            UNIT_SKIP
+        } else {
+            0
+        };
+        [a | skip, b, c, d]
+    }
+}
+
+/// The [`LfInfo`] of every 4x4 unit of a frame as its
+/// [`bytes`](LfInfo::bytes), laid out like [`FrameState::mi`].
+#[derive(Default)]
+pub struct FilterInfo {
+    pub units: Vec<[u8; 4]>,
+    pub stride: usize,
+    /// The rows of the frame go round [`FrameState::mi_ring`] rows.
+    ring: usize,
+}
+
+/// `d.fill(v)` in 16-byte stores: the plain fill stores one unit at a
+/// time.
+#[inline(always)]
+fn fill_units(d: &mut [[u8; 4]], v: [u8; 4]) {
+    let (quads, rest) = d.as_chunks_mut::<4>();
+    quads.fill([v; 4]);
+    rest.fill(v);
+}
+
+impl FilterInfo {
+    /// Sizes the array for the frame of `fs`. Units keep stale values
+    /// until their blocks are stored.
+    pub fn size_for(&mut self, fs: &FrameState) {
+        self.stride = fs.mi_stride;
+        self.ring = fs.mi_ring;
+        self.units.resize(fs.lf_tx[0].len(), [0; 4]);
+    }
+
+    /// Where the units of luma 4x4 row `r` start.
+    #[inline(always)]
+    fn row(&self, r: usize) -> usize {
+        (r & self.ring) * self.stride
+    }
+
+    /// Stores the info of a block at luma 4x4 position `(row, col)`, in
+    /// its units inside the `mi_rows` x `mi_cols` frame.
+    #[inline]
+    pub fn store(
+        &mut self,
+        (row, col): (usize, usize),
+        (mi_rows, mi_cols): (usize, usize),
+        info: LfInfo,
+    ) {
+        let w4 = bw4(info.bsize).min(mi_cols.saturating_sub(col));
+        let h4 = bh4(info.bsize).min(mi_rows.saturating_sub(row));
+        for y in 0..h4 {
+            let at = self.row(row + y) + col;
+            if let Some(d) = self.units.get_mut(at..at + w4) {
+                fill_units(d, info.bytes());
+            }
+        }
+    }
+
+    /// Fills luma 4x4 rows `rows` from the mode info of `fs`.
+    pub fn fill_rows(
+        &mut self,
+        hdr: &FrameHeader,
+        levels: &LfLevels,
+        fs: &FrameState,
+        rows: core::ops::Range<usize>,
+    ) {
+        let cols = fs.mi_cols;
+        let rows = rows.start..rows.end.min(fs.mi_rows);
+        // For the column a block starts at: the row it ends at and its
+        // width. A row then steps over the blocks that began above it
+        // without reading their mode info again (a block starts at a
+        // multiple of its width and of its height).
+        let mut ends = vec![(0u16, 0u8); cols];
+        for r in rows.clone() {
+            let Some(mi) = fs.mi.get(fs.mi_row(r)..fs.mi_row(r) + cols) else {
+                return;
+            };
+            let mut c = 0;
+            while c < cols {
+                let (until, width) = ends[c];
+                if usize::from(until) > r {
+                    c += usize::from(width);
+                    continue;
+                }
+                let mut m = &mi[c];
+                // The first row may cross a block whose even rows hold
+                // only its edges (parsing's mode info, see
+                // `MiFill::OddRows`): the odd row below is in the block
+                // too when it is taller than a unit, and otherwise this
+                // row is the block's last.
+                if r == rows.start
+                    && r % 2 == 0
+                    && let Some(below) = fs.mi.get(fs.mi_row(r + 1) + c)
+                    && r + 1 < fs.mi_rows
+                    && bh4(below.bsize) > 1
+                {
+                    m = below;
+                }
+                let (w, h) = (bw4(m.bsize).max(1), bh4(m.bsize).max(1));
+                let end = ((c / w + 1) * w).min(cols);
+                let bottom = (r - r % h + h).min(rows.end);
+                let info = levels.info(
+                    hdr,
+                    m.ref_frame[0],
+                    m.segment_id(),
+                    m.y_mode,
+                    m.skip(),
+                    m.bsize,
+                    if hdr.delta_lf_present {
+                        fs.delta_lf
+                            .get(fs.mi_row(r) + c)
+                            .copied()
+                            .unwrap_or_default()
+                    } else {
+                        [0; 4]
+                    },
+                );
+                for rr in r..bottom {
+                    let o = self.row(rr);
+                    if let Some(out) = self.units.get_mut(o + c..o + end) {
+                        fill_units(out, info.bytes());
+                    }
+                }
+                ends[c] = (bottom as u16, (end - c) as u8);
+                c = end;
+            }
+        }
+    }
+
+    /// Whether the block at luma 4x4 position `(row, col)` is skipped.
+    #[inline(always)]
+    pub fn skip(&self, row: usize, col: usize) -> bool {
+        self.units[self.row(row) + col][0] & UNIT_SKIP != 0
+    }
+}
 
 /// Edge decisions for one plane and pass of the loop filter (7.14.2 -
 /// 7.14.5).
 struct LfPlane<'a> {
-    hdr: &'a FrameHeader,
     fs: &'a FrameState,
+    info: &'a FilterInfo,
     tx: &'a [u8],
     plane: usize,
     pass: usize,
@@ -87,34 +307,24 @@ struct LfPlane<'a> {
     nr_vis: usize,
     /// Loop filter index `i` of 7.14.5.
     li: usize,
-    /// Levels for `delta_lf == 0`, by `[segment][ref class][mode type]`.
-    lut: [[[u8; 2]; LF_REFS]; 8],
 }
 
 impl<'a> LfPlane<'a> {
     fn new(
         hdr: &'a FrameHeader,
         fs: &'a FrameState,
+        info: &'a FilterInfo,
         plane: usize,
         pass: usize,
         sx: usize,
         sy: usize,
     ) -> Self {
         let li = if plane == 0 { pass } else { plane + 1 };
-        let mut lut = [[[0u8; 2]; LF_REFS]; 8];
-        for (seg, t) in lut.iter_mut().enumerate() {
-            for (rc, t) in t.iter_mut().enumerate() {
-                let rf = if rc < 8 { rc as i8 } else { NONE };
-                for (mt, t) in t.iter_mut().enumerate() {
-                    *t = level_for(hdr, li, 0, seg, rf, mt);
-                }
-            }
-        }
         let nc = fs.mi_cols.div_ceil(1 << sx);
         let nr = fs.mi_rows.div_ceil(1 << sy);
         Self {
-            hdr,
             fs,
+            info,
             tx: &fs.lf_tx[plane],
             plane,
             pass,
@@ -124,113 +334,273 @@ impl<'a> LfPlane<'a> {
             nc_vis: (hdr.frame_width as usize).div_ceil(4 << sx).min(nc),
             nr_vis: (hdr.frame_height as usize).div_ceil(4 << sy).min(nr),
             li,
-            lut,
         }
     }
 
-    #[inline]
-    fn level(&self, m: &MiInfo) -> u8 {
-        let d = if self.hdr.delta_lf_multi {
-            m.delta_lf[self.li]
-        } else {
-            m.delta_lf[0]
-        };
-        if d == 0 {
-            let rf = m.ref_frame[0];
-            let rc = if rf >= 0 { rf as usize } else { 8 };
-            self.lut[m.segment_id as usize & 7][rc.min(8)][mode_type(m)]
-        } else {
-            filter_level_of(self.hdr, m, self.li, i32::from(d))
-        }
-    }
-
-    /// `(filter_size, lvl)` of the edges of the unit row `ur` (plane 4x4
-    /// units) into `out[..nc]`; `lvl == 0` where the edge is not filtered.
-    /// `filter_size` follows [`crate::dsp::lf`].
-    fn row_edges(&self, ur: usize, out: &mut [(u8, u8)]) {
-        let out = &mut out[..self.nc];
-        out.fill((0, 0));
+    /// Writes the edges of the unit row `ur` (plane 4x4 units) to
+    /// `row.codes`: for a unit whose left side (pass 0) or top side
+    /// (pass 1) is an edge with a level, its filter size (following
+    /// [`crate::dsp::lf`]) times 256 plus the level; 0 for the other
+    /// units. Returns how many units the row has, 0 for a row without
+    /// edges.
+    ///
+    /// Branch free, so the compiler works on many units at once: a unit
+    /// starts a vertical edge when its column is a multiple of its
+    /// transform's width, and a horizontal one when its row is a
+    /// multiple of the transform's height. The filter size follows from
+    /// the smaller of the transform sizes on the two sides.
+    fn row_codes(&self, ur: usize, row: &mut LfRow) -> usize {
         let pass0 = self.pass == 0;
-        if ur >= self.nr_vis || (!pass0 && ur == 0) {
-            return;
+        let n = self.nc_vis;
+        if ur >= self.nr_vis || (!pass0 && ur == 0) || n == 0 {
+            return 0;
         }
-        let (sx, sy) = (self.sx, self.sy);
-        let fs = self.fs;
-        let st = fs.mi_stride;
-        let tx_row = &self.tx[ur * st..ur * st + self.nc];
-        let prev_row = if pass0 {
-            tx_row
-        } else {
-            &self.tx[(ur - 1) * st..(ur - 1) * st + self.nc]
-        };
-        // MiInfo row holding the unit's bottom-right 4x4 for chroma, and the
-        // row above it for the horizontal edges.
+        let sy = self.sy;
+        let st = self.fs.mi_stride;
+        let units = &self.info.units;
+        // The row of block info holding the unit's bottom-right 4x4 for
+        // chroma, and the row above it for the horizontal edges.
         let r = (ur << sy) | sy;
-        let mi_row = &fs.mi[r * st..(r + 1) * st];
-        let mi_prev = if pass0 {
-            mi_row
+        let at = self.fs.mi_row(ur);
+        let cur = &self.tx[at..at + n];
+        let key = (self.plane, self.pass, ur);
+        let (across, edges) = if pass0 {
+            (cur, None)
         } else {
-            let pr = r - (1 << sy);
-            &fs.mi[pr * st..(pr + 1) * st]
+            // The row above's levels, if they are the last ones made.
+            if row.lvl_of == Some((self.plane, 1, ur - 1)) {
+                core::mem::swap(&mut row.lvl, &mut row.lvl_prev);
+            } else {
+                let pr = r - (1 << sy);
+                let at = self.info.row(pr);
+                self.levels(&units[at..at + st], &mut row.lvl_prev[..n]);
+            }
+            let zeros = ur.trailing_zeros().min(7) as u8;
+            (
+                &self.tx[self.fs.mi_row(ur - 1)..self.fs.mi_row(ur - 1) + n],
+                Some(Edges::Top { zeros }),
+            )
         };
-        let yp = ur * 4;
-        for uc in usize::from(pass0)..self.nc_vis {
-            let tx = tx_row[uc];
-            let (t, pos) = if pass0 {
-                (tx_w(tx), uc * 4)
-            } else {
-                (tx_h(tx), yp)
-            };
-            if pos & (t - 1) != 0 {
-                continue;
-            }
-            let c = (uc << sx) | sx;
-            let m = &mi_row[c];
-            if m.skip && m.ref_frame[0] > INTRA_FRAME {
-                let psz = plane_residual_size(m.bsize, sx != 0, sy != 0);
-                let bs = if pass0 {
-                    block_width(psz)
-                } else {
-                    block_height(psz)
-                };
-                if pos & (bs - 1) != 0 {
-                    continue;
+        let at = self.info.row(r);
+        self.levels(&units[at..at + st], &mut row.lvl[..n]);
+        row.lvl_of = Some(key);
+        let luma = self.plane == 0;
+        row.n = n;
+        let codes = &mut row.codes[..n];
+        let masks = &mut row.masks[..n.div_ceil(16)];
+        let (out, _) = codes.as_chunks_mut::<16>();
+        let whole = out.len() * 16;
+        let dims = cur.as_chunks::<16>().0;
+        let lvl = row.lvl.as_chunks::<16>().0;
+        // For vertical edges, the sixteen units before: none at first.
+        let before = |c: &[[u8; 16]], k: usize| if k == 0 { [0; 16] } else { c[k - 1] };
+        let (across_c, lvl_prev) = (across.as_chunks::<16>().0, row.lvl_prev.as_chunks::<16>().0);
+        for (k, (o, mask)) in out.iter_mut().zip(masks.iter_mut()).enumerate() {
+            let u = if pass0 {
+                EdgeUnits {
+                    dims: dims[k],
+                    across: before(dims, k),
+                    lvl: lvl[k],
+                    lvl_across: before(lvl, k),
                 }
-            }
-            let (base, pm) = if pass0 {
-                (tx_w(tx_row[uc - 1]).min(t), &mi_row[c - (1 << sx)])
             } else {
-                (tx_h(prev_row[uc]).min(t), &mi_prev[c])
+                EdgeUnits {
+                    dims: dims[k],
+                    across: across_c[k],
+                    lvl: lvl[k],
+                    lvl_across: lvl_prev[k],
+                }
             };
-            let filter_size = if self.plane == 0 {
-                base.min(16)
-            } else if base >= 8 {
-                6
+            (*o, *mask) = edge_codes(
+                &u,
+                edges.unwrap_or(Edges::Left {
+                    first: (16 * k) as u8,
+                }),
+                luma,
+            );
+        }
+        if whole < n {
+            // The last units, with idle lanes after them.
+            let rest = n - whole;
+            let pad = |s: &[u8]| {
+                let mut a = [0u8; 16];
+                a[..rest].copy_from_slice(&s[whole..n]);
+                a
+            };
+            let k = whole / 16;
+            let u = if pass0 {
+                EdgeUnits {
+                    dims: pad(cur),
+                    across: before(dims, k),
+                    lvl: pad(&row.lvl),
+                    lvl_across: before(lvl, k),
+                }
             } else {
-                4
+                EdgeUnits {
+                    dims: pad(cur),
+                    across: pad(across),
+                    lvl: pad(&row.lvl),
+                    lvl_across: pad(&row.lvl_prev),
+                }
             };
-            let mut lvl = self.level(m);
-            if lvl == 0 {
-                lvl = self.level(pm);
+            let first = Edges::Left { first: whole as u8 };
+            let (c, mask) = edge_codes(&u, edges.unwrap_or(first), luma);
+            codes[whole..].copy_from_slice(&c[..rest]);
+            masks[k] = mask & ((1 << rest) - 1);
+        }
+        if pass0 {
+            // Nothing to the left of the frame.
+            codes[0] = 0;
+            masks[0] &= !1;
+        }
+        n
+    }
+
+    /// The level (of this plane and pass) of each unit of a row whose
+    /// blocks' info is `mi`.
+    fn levels(&self, mi: &[[u8; 4]], out: &mut [u8]) {
+        let li = self.li;
+        let mut done = 0;
+        if self.sx == 0 {
+            for (o, m) in out
+                .as_chunks_mut::<16>()
+                .0
+                .iter_mut()
+                .zip(mi.as_chunks::<16>().0)
+            {
+                *o = lfmask::levels(m, li);
+                done += 16;
             }
-            out[uc] = (filter_size as u8, lvl);
+        } else {
+            for (o, m) in out
+                .as_chunks_mut::<16>()
+                .0
+                .iter_mut()
+                .zip(mi.as_chunks::<32>().0)
+            {
+                *o = lfmask::levels_odd(m, li);
+                done += 16;
+            }
+        }
+        let sx = self.sx;
+        for (i, o) in out.iter_mut().enumerate().skip(done) {
+            *o = mi[(i << sx) | sx][li] & 63;
         }
     }
 }
 
-/// Calls `f(start, len, filter_size, lvl)` for every maximal run of equal
-/// filtered edges in `edges`.
-#[inline]
-fn edge_runs(edges: &[(u8, u8)], mut f: impl FnMut(usize, usize, u8, u8)) {
-    let mut run = (0u8, 0u8);
-    let mut start = 0;
-    for (i, &e) in edges.iter().chain(core::iter::once(&(0, 0))).enumerate() {
-        if e != run {
-            if run.1 != 0 {
-                f(start, i - start, run.0, run.1);
+/// Scratch for [`LfPlane::row_codes`], as long as a plane row of units.
+struct LfRow {
+    codes: Vec<u16>,
+    /// The units whose code is not 0, sixteen to an entry.
+    masks: Vec<u16>,
+    /// The units of the last row.
+    n: usize,
+    /// The plane, pass and row `lvl` holds the levels of.
+    lvl_of: Option<(usize, usize, usize)>,
+    lvl: Vec<u8>,
+    lvl_prev: Vec<u8>,
+}
+
+impl LfRow {
+    fn new(nc: usize) -> Self {
+        Self {
+            codes: vec![0; nc.div_ceil(16) * 16],
+            masks: vec![0; nc.div_ceil(16)],
+            n: 0,
+            lvl_of: None,
+            lvl: vec![0; nc],
+            lvl_prev: vec![0; nc],
+        }
+    }
+}
+
+/// For sixteen units, a bit for each whose code differs from `before`'s
+/// at the same place.
+#[inline(always)]
+fn changes(now: &[u16; 16], before: &[u16; 16]) -> u32 {
+    let mut m = 0;
+    for l in 0..16 {
+        m |= u32::from(now[l] != before[l]) << l;
+    }
+    m
+}
+
+impl LfRow {
+    /// Calls `run(start, len, code)` for the runs of units of one code
+    /// (not 0), from left to right. Only the units where the code changes
+    /// are visited one by one.
+    #[inline]
+    fn runs(&self, mut run: impl FnMut(usize, usize, u16)) {
+        let chunks = self.n.div_ceil(16);
+        let (whole, _) = self.codes.as_chunks::<16>();
+        // The code of the last unit seen, and where its run began.
+        let (mut code, mut start) = (0, 0);
+        for (k, (now, &m)) in whole.iter().zip(&self.masks).take(chunks).enumerate() {
+            if m == 0 && code == 0 {
+                continue;
             }
-            run = e;
-            start = i;
+            let before: [u16; 16] =
+                core::array::from_fn(|l| if l == 0 { code } else { now[l - 1] });
+            let mut c = changes(now, &before);
+            while c != 0 {
+                let l = c.trailing_zeros() as usize;
+                c &= c - 1;
+                let i = 16 * k + l;
+                if code != 0 {
+                    run(start, i - start, code);
+                }
+                (code, start) = (now[l], i);
+            }
+        }
+        // The units past the row are 0: a run still open ends with the
+        // last whole chunk.
+        if code != 0 {
+            run(start, 16 * chunks - start, code);
+        }
+    }
+}
+
+/// The runs of vertical edges down each column of a strip of unit rows
+/// (see [`lf_chunk`]): the code of each column's open run (0: none),
+/// sixteen columns to an entry, and the row it began at.
+struct ColumnRuns {
+    code: Vec<[u16; 16]>,
+    start: Vec<u16>,
+}
+
+impl ColumnRuns {
+    fn new(nc: usize) -> Self {
+        Self {
+            code: vec![[0; 16]; nc.div_ceil(16)],
+            start: vec![0; nc.div_ceil(16) * 16],
+        }
+    }
+
+    /// Takes row `i`'s codes (`None`: no edges), calling
+    /// `ended(column, start, len, code)` for each run it ends.
+    #[inline]
+    fn row(
+        &mut self,
+        i: usize,
+        codes: Option<&[[u16; 16]]>,
+        mut ended: impl FnMut(usize, usize, usize, u16),
+    ) {
+        const NONE: [u16; 16] = [0; 16];
+        for (k, cur) in self.code.iter_mut().enumerate() {
+            let now = codes.and_then(|c| c.get(k)).unwrap_or(&NONE);
+            let mut c = changes(now, cur);
+            while c != 0 {
+                let l = c.trailing_zeros() as usize;
+                c &= c - 1;
+                let uc = 16 * k + l;
+                if cur[l] != 0 {
+                    let s = usize::from(self.start[uc]);
+                    ended(uc, s, i - s, cur[l]);
+                }
+                cur[l] = now[l];
+                self.start[uc] = i as u16;
+            }
         }
     }
 }
@@ -302,66 +672,142 @@ fn lf_own_rows(u0: usize, u1: usize, first: bool, last: bool) -> core::ops::Rang
     lo..hi.max(lo)
 }
 
+/// Unit rows of the strips of [`lf_chunk`] when it copies its rows in
+/// as it goes: a strip's samples are still in the cache when its vertical
+/// edges are filtered.
+const LF_FILL_STRIP_UNITS: usize = 4;
+
 /// Filters `job`'s rows; `data` starts at plane sample row `row0`.
-fn lf_chunk<P: Pixel>(job: &LfJob<'_, '_>, data: &mut [P], row0: usize, sharp: u8, bd: u32) {
+///
+/// With `fill`, the plane's sample rows from `fill.1` on (relative to
+/// `row0`, `job.stride` wide) are copied in from `fill.0` first, a strip
+/// at a time just before the strip's vertical edges.
+fn lf_chunk<P: Pixel>(
+    job: &LfJob<'_, '_>,
+    data: &mut [P],
+    row0: usize,
+    sharp: u8,
+    bd: u32,
+    fill: Option<(&[P], usize)>,
+) {
     let (u0, u1, stride) = (job.u0, job.u1, job.stride);
     let nc = job.vert.nc;
-    // Vertical edges: decisions for a strip of unit rows, then runs down
-    // each column.
-    let mut grid = vec![(0u8, 0u8); LF_STRIP_UNITS * nc];
-    let mut col = [(0u8, 0u8); LF_STRIP_UNITS];
-    for strip in (u0..u1).step_by(LF_STRIP_UNITS) {
-        let rows = (u1 - strip).min(LF_STRIP_UNITS);
-        for i in 0..rows {
-            job.vert
-                .row_edges(strip + i, &mut grid[i * nc..(i + 1) * nc]);
-        }
-        for uc in 1..nc {
-            for i in 0..rows {
-                col[i] = grid[i * nc + uc];
+    let key = (nc, job.vert.nc_vis);
+    let (mut row, mut cols) = lf_scratch(key);
+    // Sample rows copied in so far.
+    let mut filled = fill.map_or(0, |(_, y)| y);
+    let mut fill_to = |y: usize, data: &mut [P]| {
+        if let Some((src, y0)) = fill
+            && y > filled
+        {
+            let a = ((filled - y0) * stride).min(src.len());
+            let b = ((y - y0) * stride).min(src.len());
+            let at = filled * stride;
+            if a < b && at + (b - a) <= data.len() {
+                data[at..at + (b - a)].copy_from_slice(&src[a..b]);
             }
-            edge_runs(&col[..rows], |start, len, size, lvl| {
-                filter_vertical_edge(
-                    data,
-                    stride,
-                    uc * 4,
-                    (strip + start) * 4 - row0,
-                    len * 4,
-                    usize::from(size),
-                    lvl,
-                    sharp,
-                    bd,
-                );
+            filled = y;
+        }
+    };
+    let step = if fill.is_some() {
+        LF_FILL_STRIP_UNITS
+    } else {
+        LF_STRIP_UNITS
+    };
+    // Vertical edges: the edges of a strip of unit rows, gathered into
+    // runs down each column. A column's run is filtered when an edge
+    // does not continue it, and at the end of the strip.
+    for strip in (u0..u1).step_by(step) {
+        let rows = (u1 - strip).min(step);
+        fill_to((strip + rows) * 4 - row0, data);
+        let down = |uc: usize, start: usize, len: usize, code: u16, data: &mut [P]| {
+            filter_vertical_edge(
+                data,
+                stride,
+                uc * 4,
+                (strip + start) * 4 - row0,
+                len * 4,
+                usize::from(code >> 8),
+                code as u8,
+                sharp,
+                bd,
+            );
+        };
+        for i in 0..=rows {
+            // One row past the strip ends every run.
+            let has = i < rows && job.vert.row_codes(strip + i, &mut row) != 0;
+            let codes = has.then(|| row.codes.as_chunks::<16>().0);
+            cols.row(i, codes, |uc, start, len, code| {
+                down(uc, start, len, code, data)
             });
         }
     }
-    // Horizontal edges whose samples stay inside the chunk.
-    let mut row = vec![(0u8, 0u8); nc];
-    for ur in lf_own_rows(u0, u1, job.first, job.last) {
-        lf_horz_row(job.horz, ur, &mut row, data, stride, row0, sharp, bd);
+    if let Some((src, y0)) = fill {
+        fill_to(y0 + src.len().div_ceil(stride.max(1)), data);
     }
+    // Horizontal edges whose samples stay inside the chunk.
+    for ur in lf_own_rows(u0, u1, job.first, job.last) {
+        lf_horz_row(job.horz, ur, data, stride, row0, sharp, bd, &mut row);
+    }
+    LF_SCRATCH.with_borrow_mut(|s| {
+        // A few sizes at most: a stream that changes size often keeps
+        // the latest.
+        if s.len() >= 4 {
+            s.remove(0);
+        }
+        s.push((key, row, cols));
+    });
+}
+
+/// Buffers an [`lf_chunk`] kept: their width in units and visible width,
+/// the row and the columns.
+type LfKept = ((usize, usize), LfRow, ColumnRuns);
+
+thread_local! {
+    /// The row and column buffers of [`lf_chunk`]s this thread ran, by
+    /// their width in units and the visible width (the codes past it
+    /// stay as they are): a chunk takes them rather than new ones.
+    static LF_SCRATCH: core::cell::RefCell<Vec<LfKept>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+/// The buffers of an [`lf_chunk`] `nc` units wide, `nc_vis` of them
+/// visible, from the ones the thread kept when it has them. Every run of
+/// the columns ended at the end of the chunk that kept them, so they
+/// start with none as new ones do; the row holds no levels yet.
+fn lf_scratch((nc, nc_vis): (usize, usize)) -> (LfRow, ColumnRuns) {
+    let kept = LF_SCRATCH.with_borrow_mut(|s| {
+        let i = s.iter().position(|e| e.0 == (nc, nc_vis))?;
+        let (_, mut row, cols) = s.swap_remove(i);
+        row.n = 0;
+        row.lvl_of = None;
+        Some((row, cols))
+    });
+    kept.unwrap_or_else(|| (LfRow::new(nc), ColumnRuns::new(nc)))
 }
 
 fn lf_horz_row<P: Pixel>(
     lp: &LfPlane<'_>,
     ur: usize,
-    row: &mut [(u8, u8)],
     data: &mut [P],
     stride: usize,
     row0: usize,
     sharp: u8,
     bd: u32,
+    row: &mut LfRow,
 ) {
-    lp.row_edges(ur, row);
-    edge_runs(row, |start, len, size, lvl| {
+    if lp.row_codes(ur, row) == 0 {
+        return;
+    }
+    row.runs(|start, len, code| {
         filter_horizontal_edge(
             data,
             stride,
             start * 4,
             ur * 4 - row0,
             len * 4,
-            usize::from(size),
-            lvl,
+            usize::from(code >> 8),
+            code as u8,
             sharp,
             bd,
         );
@@ -387,11 +833,27 @@ pub fn loop_filter<P: Pixel>(
     pic: &mut Picture<P>,
     threads: usize,
 ) {
+    loop_filter_scratch(seq, hdr, fs, pic, threads, &mut FilterInfo::default());
+}
+
+/// [`loop_filter`] with the block info worked out in `info`, scratch a
+/// caller keeps from frame to frame.
+pub fn loop_filter_scratch<P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &FrameState,
+    pic: &mut Picture<P>,
+    threads: usize,
+    info: &mut FilterInfo,
+) {
     if hdr.loop_filter.level[0] == 0 && hdr.loop_filter.level[1] == 0 {
         return;
     }
     let bd = pic.bd;
     let sharp = hdr.loop_filter.sharpness;
+    info.size_for(fs);
+    info.fill_rows(hdr, &LfLevels::new(hdr), fs, 0..fs.mi_rows);
+    let info = &*info;
     let mut lps = Vec::new();
     for plane in 0..seq.num_planes() {
         if plane > 0 && hdr.loop_filter.level[1 + plane] == 0 {
@@ -407,8 +869,8 @@ pub fn loop_filter<P: Pixel>(
         };
         lps.push((
             plane,
-            LfPlane::new(hdr, fs, plane, 0, sx, sy),
-            LfPlane::new(hdr, fs, plane, 1, sx, sy),
+            LfPlane::new(hdr, fs, info, plane, 0, sx, sy),
+            LfPlane::new(hdr, fs, info, plane, 1, sx, sy),
             fs.mi_rows.div_ceil(1 << sy),
         ));
     }
@@ -442,7 +904,7 @@ pub fn loop_filter<P: Pixel>(
                     first: g == 0,
                     last: g + 1 == t,
                 };
-                lf_chunk(&job, data, job.u0 * 4, sharp, bd);
+                lf_chunk(&job, data, job.u0 * 4, sharp, bd, None);
             }
         };
         std::thread::scope(|s| {
@@ -466,11 +928,11 @@ pub fn loop_filter<P: Pixel>(
                     own[ur] = true;
                 }
             }
-            let mut row = vec![(0u8, 0u8); l.2.nc];
             let data = &mut pic.planes[l.0].data[..];
+            let mut row = LfRow::new(l.2.nc);
             for ur in 1..nr {
                 if !own[ur] {
-                    lf_horz_row(&l.2, ur, &mut row, data, strides[i], 0, sharp, bd);
+                    lf_horz_row(&l.2, ur, data, strides[i], 0, sharp, bd, &mut row);
                 }
             }
         }
@@ -495,10 +957,45 @@ pub fn loop_filter_rows<P: Pixel>(
     if hdr.loop_filter.level[0] == 0 && hdr.loop_filter.level[1] == 0 {
         return;
     }
+    // The horizontal edges at the top of these rows read the row above.
+    let mut info = FilterInfo::default();
+    info.size_for(fs);
+    let end = if last { fs.mi_rows } else { mi_r1 };
+    info.fill_rows(hdr, &LfLevels::new(hdr), fs, mi_r0.saturating_sub(2)..end);
+    loop_filter_rows_with(seq, hdr, fs, &info, pic, mi_r0, mi_r1, last, None);
+}
+
+/// [`loop_filter_rows`] with the block info of the rows (and of the two
+/// rows of 4x4 units above them) in `info`: `fs` gives the frame's size
+/// and its transform sizes, not its mode info.
+pub fn loop_filter_rows_with<P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &FrameState,
+    info: &FilterInfo,
+    pic: &mut Picture<P>,
+    mi_r0: usize,
+    mi_r1: usize,
+    last: bool,
+    src: Option<&Picture<P>>,
+) {
+    // The planes the filters leave as they are take their rows at once.
+    let copy = |pic: &mut Picture<P>, p: usize| {
+        if let Some(s) = src {
+            copy_plane_rows(pic, p, mi_r0, s);
+        }
+    };
+    if hdr.loop_filter.level[0] == 0 && hdr.loop_filter.level[1] == 0 {
+        for p in 0..pic.planes.len() {
+            copy(pic, p);
+        }
+        return;
+    }
     let bd = pic.bd;
     let sharp = hdr.loop_filter.sharpness;
     for plane in 0..seq.num_planes() {
         if plane > 0 && hdr.loop_filter.level[1 + plane] == 0 {
+            copy(pic, plane);
             continue;
         }
         let (sx, sy) = if plane > 0 {
@@ -509,12 +1006,14 @@ pub fn loop_filter_rows<P: Pixel>(
         } else {
             (0, 0)
         };
-        let vert = LfPlane::new(hdr, fs, plane, 0, sx, sy);
-        let horz = LfPlane::new(hdr, fs, plane, 1, sx, sy);
+        let vert = LfPlane::new(hdr, fs, info, plane, 0, sx, sy);
+        let horz = LfPlane::new(hdr, fs, info, plane, 1, sx, sy);
         let nr = fs.mi_rows.div_ceil(1 << sy);
         let u0 = mi_r0 >> sy;
         let u1 = if last { nr } else { (mi_r1 >> sy).min(nr) };
-        if u0 >= u1 {
+        let fill = src.and_then(|s| s.planes.get(plane));
+        if u0 >= u1 || fill.is_some_and(|f| f.stride != pic.planes[plane].stride) {
+            copy(pic, plane);
             continue;
         }
         let pl = &mut pic.planes[plane];
@@ -527,9 +1026,41 @@ pub fn loop_filter_rows<P: Pixel>(
             first: true,
             last: true,
         };
-        lf_chunk(&job, &mut pl.data, 0, sharp, bd);
+        let y0 = (4 * mi_r0) >> sy;
+        lf_chunk(
+            &job,
+            &mut pl.data,
+            0,
+            sharp,
+            bd,
+            fill.map(|f| (&f.data[..], y0)),
+        );
+    }
+    for p in seq.num_planes()..pic.planes.len() {
+        copy(pic, p);
     }
 }
+
+/// Copies plane `p` of `src`, the rows of a superblock row from luma 4x4
+/// row `r0` on, into `pic` (when their strides agree).
+pub fn copy_plane_rows<P: Pixel>(pic: &mut Picture<P>, p: usize, r0: usize, src: &Picture<P>) {
+    let sub_y = pic.sub_y;
+    let (Some(d), Some(s)) = (pic.planes.get_mut(p), src.planes.get(p)) else {
+        return;
+    };
+    let at = ((4 * r0) >> usize::from(p > 0 && sub_y)) * d.stride;
+    let n = s.data.len().min(d.data.len().saturating_sub(at));
+    if d.stride == s.stride {
+        d.data[at..at + n].copy_from_slice(&s.data[..n]);
+    }
+}
+
+/// How far, in luma 4x4 rows, [`cdef_sb_rows_in_place`] moves its 64-row
+/// areas up: deblocking the superblock row below changes none of the rows
+/// these areas and the 2 rows past them hold, so a superblock row's areas
+/// are filtered as soon as it is deblocked (the loop restoration stripes
+/// lie the same way).
+pub const CDEF_ROW_OFFSET: usize = 2;
 
 /// The pre-CDEF samples CDEF reads across the boundaries between rows of
 /// 64x64 areas, saved before the areas are filtered in place: boundary
@@ -549,8 +1080,9 @@ pub fn cdef_save_lines<P: Pixel>(
     src: &Picture<P>,
     lines: &mut CdefLines<P>,
     ks: core::ops::Range<usize>,
+    off: usize,
 ) {
-    let n = fs.mi_rows.div_ceil(16) + 1;
+    let n = (fs.mi_rows + off).div_ceil(16) + 1;
     for p in 0..seq.num_planes() {
         let (sx, sy) = plane_sub(seq, p);
         let pl = &src.planes[p];
@@ -561,7 +1093,7 @@ pub fn cdef_save_lines<P: Pixel>(
             rows.resize(4 * n * w, P::default());
         }
         for k in ks.start.max(1)..ks.end.min(n) {
-            let y = (64 * k) >> sy;
+            let y = (64 * k - 4 * off) >> sy;
             for i in 0..4 {
                 let yy = (y + i - 2).min(pl.alloc_h - 1);
                 let o = (4 * k + i) * w;
@@ -585,15 +1117,45 @@ fn plane_sub(seq: &SequenceHeader, p: usize) -> (u32, u32) {
 /// columns are the pre-CDEF left columns of the next area).
 struct CdefWork<P> {
     pads: [[Vec<u16>; 2]; 3],
+    /// The same for 8-bit pictures, as bytes: only blocks whose taps all
+    /// lie in the picture read them as they are; the others take a copy
+    /// marking the samples outside it (see [`cdef_plane_block`]).
+    pads8: [[Vec<u8>; 2]; 3],
+    /// The taps of the 8-bit blocks filtered last, by [`taps_slot`]:
+    /// blocks share a few strengths and eight directions.
+    taps: Vec<Option<CdefTaps>>,
     _p: core::marker::PhantomData<P>,
+}
+
+/// Where [`CdefWork::taps`] keeps the taps for a plane's block with these
+/// strengths and this direction.
+#[inline(always)]
+fn taps_slot(chroma: bool, pri: i32, dir: u8) -> usize {
+    usize::from(dir & 7) | ((pri as usize & 15) << 3) | (usize::from(chroma) << 7)
 }
 
 impl<P: Pixel> CdefWork<P> {
     fn new() -> Self {
         Self {
             pads: core::array::from_fn(|_| {
-                core::array::from_fn(|_| vec![0u16; CDEF_PAD_STRIDE * CDEF_PAD_STRIDE])
+                core::array::from_fn(|_| {
+                    if P::HBD {
+                        vec![0u16; CDEF_PAD_STRIDE * CDEF_PAD_STRIDE]
+                    } else {
+                        Vec::new()
+                    }
+                })
             }),
+            pads8: core::array::from_fn(|_| {
+                core::array::from_fn(|_| {
+                    if P::HBD {
+                        Vec::new()
+                    } else {
+                        vec![0u8; CDEF_PAD_STRIDE * CDEF_PAD_STRIDE]
+                    }
+                })
+            }),
+            taps: vec![None; 256],
             _p: core::marker::PhantomData,
         }
     }
@@ -628,27 +1190,33 @@ pub fn cdef_sb_rows<P: Pixel>(
     pads: &mut CdefScratch<P>,
 ) {
     let ks = mi_r0 / 16..mi_r1.div_ceil(16) + 1;
-    cdef_save_lines(seq, fs, src, &mut pads.lines, ks);
-    cdef_areas(seq, hdr, fs, dst, mi_r0, mi_r1, pads);
+    cdef_save_lines(seq, fs, src, &mut pads.lines, ks, 0);
+    cdef_areas(seq, hdr, fs, None, dst, mi_r0, mi_r1, 0, pads);
 }
 
-/// CDEF (7.15) in place of the deblocked 64x64 areas whose first luma 4x4
-/// row is in `mi_r0..mi_r1`, on the calling thread. Calls go down the
-/// frame in order, each with the same `sc`, and the rows below these areas
-/// that CDEF reads must be deblocked: their pre-CDEF rows next to the
-/// boundaries are saved in `sc` for the next call.
+/// CDEF (7.15) in place of the deblocked luma 4x4 rows `mi_r0..mi_r1`, on
+/// the calling thread, in areas of 64 rows moved up [`CDEF_ROW_OFFSET`]
+/// rows (both ends lie on area boundaries, or end the frame). Calls go
+/// down the frame in order, each with the same `sc`, and the rows below
+/// these areas that CDEF reads must be deblocked: their pre-CDEF rows next
+/// to the boundaries are saved in `sc` for the next call.
+///
+/// With `info`, the skipped blocks are read from it and `fs` gives the
+/// frame's size and its CDEF indices, not its mode info.
 pub fn cdef_sb_rows_in_place<P: Pixel>(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
     fs: &FrameState,
+    info: Option<&FilterInfo>,
     pic: &mut Picture<P>,
     mi_r0: usize,
     mi_r1: usize,
     sc: &mut CdefScratch<P>,
 ) {
-    let ks = mi_r0 / 16 + 1..mi_r1.div_ceil(16) + 1;
-    cdef_save_lines(seq, fs, pic, &mut sc.lines, ks);
-    cdef_areas(seq, hdr, fs, pic, mi_r0, mi_r1, sc);
+    let off = CDEF_ROW_OFFSET;
+    let ks = (mi_r0 + off) / 16 + 1..(mi_r1 + off).div_ceil(16) + 1;
+    cdef_save_lines(seq, fs, pic, &mut sc.lines, ks, off);
+    cdef_areas(seq, hdr, fs, info, pic, mi_r0, mi_r1, off, sc);
 }
 
 /// CDEF in place of the areas of `mi_r0..mi_r1` with the boundaries in `sc`.
@@ -656,9 +1224,11 @@ fn cdef_areas<P: Pixel>(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
     fs: &FrameState,
+    info: Option<&FilterInfo>,
     pic: &mut Picture<P>,
     mi_r0: usize,
     mi_r1: usize,
+    off: usize,
     sc: &mut CdefScratch<P>,
 ) {
     let num_planes = seq.num_planes();
@@ -677,11 +1247,13 @@ fn cdef_areas<P: Pixel>(
         seq,
         hdr,
         fs,
+        info,
         bd,
         &mut chunks,
         &out,
         &sc.lines,
         mi_r0..mi_r1,
+        off,
         &mut sc.work,
     );
 }
@@ -707,7 +1279,7 @@ pub fn cdef<P: Pixel>(
         }
     }
     let mut lines = CdefLines::default();
-    cdef_save_lines(seq, fs, src, &mut lines, 0..usize::MAX);
+    cdef_save_lines(seq, fs, src, &mut lines, 0..usize::MAX, 0);
     cdef_threads(seq, hdr, fs, dst, &lines, threads);
 }
 
@@ -721,7 +1293,7 @@ pub fn cdef_in_place<P: Pixel>(
     threads: usize,
     sc: &mut CdefScratch<P>,
 ) {
-    cdef_save_lines(seq, fs, pic, &mut sc.lines, 0..usize::MAX);
+    cdef_save_lines(seq, fs, pic, &mut sc.lines, 0..usize::MAX, 0);
     cdef_threads(seq, hdr, fs, pic, &sc.lines, threads);
 }
 
@@ -775,11 +1347,13 @@ fn cdef_threads<P: Pixel>(
                 seq,
                 hdr,
                 fs,
+                None,
                 bd,
                 &mut chunks,
                 &out,
                 lines,
                 i * 16..(i + 1) * 16,
+                0,
                 &mut sc,
             );
         }
@@ -805,11 +1379,13 @@ fn cdef_rows<P: Pixel>(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
     fs: &FrameState,
+    info: Option<&FilterInfo>,
     bd: u32,
     dst: &mut [&mut [P]],
     out: &CdefOut,
     lines: &CdefLines<P>,
     mi_rows: core::ops::Range<usize>,
+    off: usize,
     sc: &mut CdefWork<P>,
 ) {
     let coeff_shift = bd - 8;
@@ -818,55 +1394,91 @@ fn cdef_rows<P: Pixel>(
     let y_damping = cdef_damping(i32::from(hdr.cdef.damping), bd, false);
     let uv_damping = cdef_damping(i32::from(hdr.cdef.damping), bd, true);
     let ls = out.stride[0];
-    for sbr in mi_rows.step_by(16) {
+    for seg in (mi_rows.start + off) / 16..(mi_rows.end + off).div_ceil(16) {
+        // The area's rows: those of 64x64 area `seg` moved up `off` 4x4
+        // rows, which take the strengths of the area above.
+        let top = (16 * seg).saturating_sub(off);
+        let end = (16 * seg + 16 - off).min(fs.mi_rows);
         // Whether the area to the left was filtered (its padded copy, with
         // the pre-CDEF columns, is then in `sc.pads[p][1]`).
         let mut left_saved = [false; 3];
         for sbc in (0..fs.mi_cols).step_by(16) {
             let mut padded = [false; 3];
-            let idx = fs.cdef_idx[(sbr >> 4) * fs.cdef_stride + (sbc >> 4)];
-            let strengths = (idx >= 0).then(|| {
-                let idx = idx as usize;
-                (
-                    i32::from(hdr.cdef.y_pri[idx]) << coeff_shift,
-                    i32::from(hdr.cdef.y_sec[idx]) << coeff_shift,
-                    i32::from(hdr.cdef.uv_pri[idx]) << coeff_shift,
-                    i32::from(hdr.cdef.uv_sec[idx]) << coeff_shift,
-                )
-            });
-            if let Some((y_pri0, y_sec, uv_pri, uv_sec)) = strengths {
-                let luma_on = y_pri0 != 0 || y_sec != 0;
-                let chroma_on = num_planes > 1 && (uv_pri != 0 || uv_sec != 0);
-                let need_dir = y_pri0 != 0 || (chroma_on && uv_pri != 0);
-                let r_end = (sbr + 16).min(fs.mi_rows);
-                let c_end = (sbc + 16).min(fs.mi_cols);
-                let area = CdefArea {
-                    sbr,
-                    sbc,
-                    bd,
-                    left_saved,
-                };
-                for r in (sbr..r_end).step_by(2) {
+            let area = CdefArea {
+                seg,
+                top,
+                rows: 16 * seg + 16 - off - top,
+                sbc,
+                bd,
+                left_saved,
+            };
+            for (sbr, r0, r1) in [
+                (16 * seg).checked_sub(16).map(|a| (a, top, 16 * seg)),
+                Some((16 * seg, 16 * seg, end)),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if r0 >= r1 {
+                    continue;
+                }
+                let idx = fs.cdef_idx[(sbr >> 4) * fs.cdef_stride + (sbc >> 4)];
+                let strengths = (idx >= 0).then(|| {
+                    let idx = idx as usize;
+                    (
+                        i32::from(hdr.cdef.y_pri[idx]) << coeff_shift,
+                        i32::from(hdr.cdef.y_sec[idx]) << coeff_shift,
+                        i32::from(hdr.cdef.uv_pri[idx]) << coeff_shift,
+                        i32::from(hdr.cdef.uv_sec[idx]) << coeff_shift,
+                    )
+                });
+                if let Some((y_pri0, y_sec, uv_pri, uv_sec)) = strengths {
+                    let luma_on = y_pri0 != 0 || y_sec != 0;
+                    let chroma_on = num_planes > 1 && (uv_pri != 0 || uv_sec != 0);
+                    let need_dir = y_pri0 != 0 || (chroma_on && uv_pri != 0);
+                    let c_end = (sbc + 16).min(fs.mi_cols);
                     if !luma_on && !chroma_on {
-                        break;
+                        continue;
                     }
-                    for c in (sbc..c_end).step_by(2) {
-                        let rr = (r + 1).min(fs.mi_rows - 1);
-                        let cc = (c + 1).min(fs.mi_cols - 1);
-                        let skip = fs.mi_at(r, c).skip
-                            && fs.mi_at(rr, c).skip
-                            && fs.mi_at(r, cc).skip
-                            && fs.mi_at(rr, cc).skip;
-                        if skip {
-                            continue;
+                    // The 8x8 blocks to filter and their luma direction and
+                    // variance, then each plane's blocks in a loop of their
+                    // own: one loop for all of it kept too much live and
+                    // spilled.
+                    let mut todo = [(0u16, 0u16, 0u8, 0i32); 64];
+                    let mut n = 0;
+                    for r in (r0..r1).step_by(2) {
+                        for c in (sbc..c_end).step_by(2) {
+                            let rr = (r + 1).min(fs.mi_rows - 1);
+                            let cc = (c + 1).min(fs.mi_cols - 1);
+                            let skip = match info {
+                                Some(i) => {
+                                    i.skip(r, c) && i.skip(rr, c) && i.skip(r, cc) && i.skip(rr, cc)
+                                }
+                                None => {
+                                    fs.mi_at(r, c).skip()
+                                        && fs.mi_at(rr, c).skip()
+                                        && fs.mi_at(r, cc).skip()
+                                        && fs.mi_at(rr, cc).skip()
+                                }
+                            };
+                            if skip {
+                                continue;
+                            }
+                            let (ydir, var) = if need_dir {
+                                let o = (r * 4 - out.row0[0]) * ls + c * 4;
+                                cdef_direction(&dst[0][o..], ls, bd)
+                            } else {
+                                (0, 0)
+                            };
+                            if let Some(t) = todo.get_mut(n) {
+                                *t = (r as u16, c as u16, ydir, var);
+                                n += 1;
+                            }
                         }
-                        let (ydir, var) = if need_dir {
-                            let o = (r * 4 - out.row0[0]) * ls + c * 4;
-                            cdef_direction(&dst[0][o..], ls, bd)
-                        } else {
-                            (0, 0)
-                        };
-                        if luma_on {
+                    }
+                    let todo = &todo[..n];
+                    if luma_on {
+                        for &(r, c, ydir, var) in todo {
                             let pri = adjust_luma_pri_strength(y_pri0, var);
                             let dir = if y_pri0 == 0 { 0 } else { ydir };
                             if pri != 0 || y_sec != 0 {
@@ -876,7 +1488,7 @@ fn cdef_rows<P: Pixel>(
                                     lines,
                                     0,
                                     &area,
-                                    (r, c),
+                                    (usize::from(r), usize::from(c)),
                                     (0, 0),
                                     sc,
                                     &mut padded[0],
@@ -885,20 +1497,22 @@ fn cdef_rows<P: Pixel>(
                                 );
                             }
                         }
-                        if chroma_on {
-                            let dir = if uv_pri == 0 {
-                                0
-                            } else {
-                                cdef_uv_dir(ssx, ssy, ydir)
-                            };
-                            for plane in 1..3 {
+                    }
+                    if chroma_on {
+                        for plane in 1..3 {
+                            for &(r, c, ydir, _) in todo {
+                                let dir = if uv_pri == 0 {
+                                    0
+                                } else {
+                                    cdef_uv_dir(ssx, ssy, ydir)
+                                };
                                 cdef_plane_block(
                                     dst,
                                     out,
                                     lines,
                                     plane,
                                     &area,
-                                    (r, c),
+                                    (usize::from(r), usize::from(c)),
                                     (u32::from(ssx), u32::from(ssy)),
                                     sc,
                                     &mut padded[plane],
@@ -915,6 +1529,7 @@ fn cdef_rows<P: Pixel>(
             for p in 0..3 {
                 if padded[p] {
                     sc.pads[p].swap(0, 1);
+                    sc.pads8[p].swap(0, 1);
                 }
                 left_saved[p] = padded[p];
             }
@@ -925,7 +1540,12 @@ fn cdef_rows<P: Pixel>(
 /// One 64x64 area of [`cdef_rows`]: its position in luma 4x4 units, and
 /// per plane whether the area to its left was filtered (see [`CdefWork`]).
 struct CdefArea {
-    sbr: usize,
+    /// The index of the area (and of its upper boundary in [`CdefLines`]).
+    seg: usize,
+    /// The first luma 4x4 row, and the luma 4x4 rows the area spans when
+    /// inside the picture.
+    top: usize,
+    rows: usize,
     sbc: usize,
     bd: u32,
     left_saved: [bool; 3],
@@ -952,14 +1572,30 @@ fn cdef_plane_block<P: Pixel>(
     let ds = out.stride[plane];
     let row0 = out.row0[plane];
     let sb_x = (area.sbc * 4) >> sx;
-    let sb_y = (area.sbr * 4) >> sy;
-    let (aw, ah) = (64 >> sx, 64 >> sy);
-    let [pad, prev] = &mut sc.pads[plane];
+    let sb_y = (area.top * 4) >> sy;
+    let (aw, ah) = (64 >> sx, (4 * area.rows) >> sy);
+    if !P::HBD {
+        return cdef_plane_block_8(
+            dst,
+            out,
+            lines,
+            plane,
+            area,
+            (r, c),
+            (sx, sy),
+            sc,
+            padded,
+            fs,
+            (pri, sec, dir, damping),
+        );
+    }
+    let CdefWork { pads, taps, .. } = sc;
+    let [pad, prev] = &mut pads[plane];
     if !*padded {
         let avail_w = (fs.mi_cols * 4) >> sx;
         let avail_h = (fs.mi_rows * 4) >> sy;
         let chunk = &dst[plane][..];
-        let k = area.sbr >> 4;
+        let k = area.seg;
         let lw = lines.w[plane];
         let lr = &lines.rows[plane];
         let left = (area.left_saved[plane] && sb_x > 0).then_some(&prev[..]);
@@ -980,10 +1616,43 @@ fn cdef_plane_block<P: Pixel>(
     let h = 8 >> sy;
     let x0 = (c * 4) >> sx;
     let y0 = (r * 4) >> sy;
-    cdef_filter(
-        &mut dst[plane][(y0 - row0) * ds + x0..],
+    // A block with the border CDEF reads inside the picture has every
+    // tap available.
+    let b = CDEF_BORDER;
+    let avail_w = (fs.mi_cols * 4) >> sx;
+    let avail_h = (fs.mi_rows * 4) >> sy;
+    let inner = x0 >= b && y0 >= b && x0 + w + b <= avail_w && y0 + h + b <= avail_h;
+    let at = (y0 - row0) * ds + x0;
+    let src = &pad[(y0 - sb_y) * ps + (x0 - sb_x)..];
+    if inner
+        && area.bd == 8
+        && let Some(bytes) = P::bytes_mut(&mut dst[plane][at..])
+    {
+        // 8-bit and inside the picture: the byte kernel, with the taps
+        // of the last block that had these strengths and direction.
+        let slot = &mut taps[taps_slot(plane > 0, pri, dir)];
+        // The taps in place, not a copy of them.
+        if !slot
+            .as_ref()
+            .is_some_and(|t| t.is_for(pri, sec, dir, damping))
+        {
+            *slot = Some(CdefTaps::new(pri, sec, dir, damping));
+        }
+        if let Some(ready) = slot.as_ref()
+            && cdef_filter_taps(bytes, ds, src, w, h, ready)
+        {
+            return;
+        }
+    }
+    let filter = if inner {
+        cdef_filter_inner::<P>
+    } else {
+        cdef_filter::<P>
+    };
+    filter(
+        &mut dst[plane][at..],
         ds,
-        &pad[(y0 - sb_y) * ps + (x0 - sb_x)..],
+        src,
         ps,
         w,
         h,
@@ -995,6 +1664,165 @@ fn cdef_plane_block<P: Pixel>(
     );
 }
 
+/// [`cdef_plane_block`] for 8-bit pictures: the area is padded as bytes.
+/// A block whose taps all lie in the picture is filtered from them; any
+/// other gets a 16-bit copy of its window with the samples outside the
+/// picture marked [`CDEF_UNAVAILABLE`].
+#[inline(always)]
+fn cdef_plane_block_8<P: Pixel>(
+    dst: &mut [&mut [P]],
+    out: &CdefOut,
+    lines: &CdefLines<P>,
+    plane: usize,
+    area: &CdefArea,
+    (r, c): (usize, usize),
+    (sx, sy): (u32, u32),
+    sc: &mut CdefWork<P>,
+    padded: &mut bool,
+    fs: &FrameState,
+    (pri, sec, dir, damping): (i32, i32, u8, i32),
+) {
+    let ps = CDEF_PAD_STRIDE;
+    let ds = out.stride[plane];
+    let row0 = out.row0[plane];
+    let sb_x = (area.sbc * 4) >> sx;
+    let sb_y = (area.top * 4) >> sy;
+    let (aw, ah) = (64 >> sx, (4 * area.rows) >> sy);
+    let avail_w = (fs.mi_cols * 4) >> sx;
+    let avail_h = (fs.mi_rows * 4) >> sy;
+    let CdefWork { pads8, taps, .. } = sc;
+    let [pad, prev] = &mut pads8[plane];
+    if !*padded {
+        let chunk = &dst[plane][..];
+        let k = area.seg;
+        let lw = lines.w[plane];
+        let lr = &lines.rows[plane];
+        let left = (area.left_saved[plane] && sb_x > 0).then_some(&prev[..]);
+        pad_area(
+            pad,
+            chunk,
+            ds,
+            row0,
+            |i| &lr[(4 * k + i) * lw..(4 * k + i + 1) * lw],
+            |i| &lr[(4 * k + 6 + i) * lw..(4 * k + 7 + i) * lw],
+            left,
+            (sb_x, sb_y, aw, ah),
+            (avail_w, avail_h),
+        );
+        *padded = true;
+    }
+    let w = 8 >> sx;
+    let h = 8 >> sy;
+    let x0 = (c * 4) >> sx;
+    let y0 = (r * 4) >> sy;
+    let b = CDEF_BORDER;
+    let inner = x0 >= b && y0 >= b && x0 + w + b <= avail_w && y0 + h + b <= avail_h;
+    let at = (y0 - row0) * ds + x0;
+    let src = &pad[(y0 - sb_y) * ps + (x0 - sb_x)..];
+    if inner && let Some(bytes) = P::bytes_mut(&mut dst[plane][at..]) {
+        let slot = &mut taps[taps_slot(plane > 0, pri, dir)];
+        // The taps in place, not a copy of them.
+        if !slot
+            .as_ref()
+            .is_some_and(|t| t.is_for(pri, sec, dir, damping))
+        {
+            *slot = Some(CdefTaps::new(pri, sec, dir, damping));
+        }
+        if let Some(ready) = slot.as_ref()
+            && cdef_filter_taps_bytes(bytes, ds, src, w, h, ready)
+        {
+            return;
+        }
+    }
+    // The window of the block, rows y0 - 2 .. y0 + h + 2 and columns
+    // x0 - 2 .. x0 + w + 2, with what lies outside the picture marked.
+    let mut win = [CDEF_UNAVAILABLE; CDEF_PAD_STRIDE * 12];
+    for i in 0..h + 2 * b {
+        let y = (y0 + i).wrapping_sub(b);
+        if y >= avail_h {
+            continue;
+        }
+        for j in 0..w + 2 * b {
+            let x = (x0 + j).wrapping_sub(b);
+            if x < avail_w
+                && let Some(&v) = src.get(i * ps + j)
+            {
+                win[i * ps + j] = u16::from(v);
+            }
+        }
+    }
+    let filter = if inner {
+        cdef_filter_inner::<P>
+    } else {
+        cdef_filter::<P>
+    };
+    filter(
+        &mut dst[plane][at..],
+        ds,
+        &win,
+        ps,
+        w,
+        h,
+        pri,
+        sec,
+        dir,
+        damping,
+        area.bd,
+    );
+}
+
+/// A sample of a padded CDEF source: 16-bit, or a byte for 8-bit pictures
+/// (whose samples outside the picture are then not marked).
+trait PadSample: Copy {
+    /// Whether samples outside the picture are marked.
+    const MARKS: bool;
+    const UNAVAILABLE: Self;
+    fn of<P: Pixel>(p: P) -> Self;
+}
+
+impl PadSample for u16 {
+    const MARKS: bool = true;
+    const UNAVAILABLE: Self = CDEF_UNAVAILABLE;
+    #[inline(always)]
+    fn of<P: Pixel>(p: P) -> Self {
+        p.to_i32() as u16
+    }
+}
+
+impl PadSample for u8 {
+    const MARKS: bool = false;
+    const UNAVAILABLE: Self = 0;
+    #[inline(always)]
+    fn of<P: Pixel>(p: P) -> Self {
+        p.to_i32() as u8
+    }
+}
+
+/// Converts `src` into `out` (as long as the shorter): the widths of a
+/// padded row inside the picture take fixed-size loops, with no call.
+#[inline(always)]
+fn convert_row<P: Pixel, T: PadSample>(out: &mut [T], src: &[P]) {
+    macro_rules! fixed {
+        ($($n:literal)*) => {
+            match out.len().min(src.len()) {
+                $($n => {
+                    if let (Some(o), Some(s)) = (out.first_chunk_mut::<$n>(), src.first_chunk::<$n>()) {
+                        for (o, s) in o.iter_mut().zip(s) {
+                            *o = T::of(*s);
+                        }
+                    }
+                })*
+                _ => {
+                    for (o, s) in out.iter_mut().zip(src) {
+                        *o = T::of(*s);
+                    }
+                }
+            }
+        };
+    }
+    fixed!(68 66 64 36 34 32);
+}
+
 /// Builds the padded source of [`cdef_filter`] for the `w x h` area at
 /// `(x0, y0)` of a plane being filtered in place: rows `y0 - 2 ..= y0 + h + 1`
 /// and columns `x0 - 2 ..= x0 + w + 1`, [`CDEF_UNAVAILABLE`] outside
@@ -1003,14 +1831,14 @@ fn cdef_plane_block<P: Pixel>(
 /// (stride `stride`, first row `row0`). When the area to the left was
 /// filtered, its padded copy `left` gives the two columns left of the area.
 #[inline(never)]
-fn pad_area<'a, P: Pixel>(
-    pad: &mut [u16],
+fn pad_area<'a, P: Pixel, T: PadSample>(
+    pad: &mut [T],
     chunk: &'a [P],
     stride: usize,
     row0: usize,
     top: impl Fn(usize) -> &'a [P],
     bottom: impl Fn(usize) -> &'a [P],
-    left: Option<&[u16]>,
+    left: Option<&[T]>,
     (x0, y0, w, h): (usize, usize, usize, usize),
     (avail_w, avail_h): (usize, usize),
 ) {
@@ -1024,7 +1852,9 @@ fn pad_area<'a, P: Pixel>(
         let out = &mut pad[r * ps..r * ps + w + 2 * b];
         let y = (y0 + r).wrapping_sub(b);
         if y0 + r < b || y >= avail_h {
-            out.fill(CDEF_UNAVAILABLE);
+            if T::MARKS {
+                out.fill(T::UNAVAILABLE);
+            }
             continue;
         }
         let row = if r < b {
@@ -1036,7 +1866,9 @@ fn pad_area<'a, P: Pixel>(
             &chunk[o..o + xe]
         };
         let (lpad, rest) = out.split_at_mut(lead);
-        lpad.fill(CDEF_UNAVAILABLE);
+        if T::MARKS {
+            lpad.fill(T::UNAVAILABLE);
+        }
         let (mid, right) = rest.split_at_mut(n);
         let (mid, rx) = match left {
             Some(l) if xs < x0 => {
@@ -1047,10 +1879,10 @@ fn pad_area<'a, P: Pixel>(
             }
             _ => (mid, xs),
         };
-        for (o, s) in mid.iter_mut().zip(&row[rx..xe]) {
-            *o = s.to_i32() as u16;
+        convert_row(mid, &row[rx..xe]);
+        if T::MARKS {
+            right.fill(T::UNAVAILABLE);
         }
-        right.fill(CDEF_UNAVAILABLE);
     }
 }
 
@@ -1253,3 +2085,6 @@ pub fn loop_restoration_stripes<P: Pixel>(
     let planes = lr_plane_args(seq, hdr, fs, pic, bounds, units);
     lr_planes_stripes(planes, scratch, stripes);
 }
+
+#[cfg(test)]
+mod tests;

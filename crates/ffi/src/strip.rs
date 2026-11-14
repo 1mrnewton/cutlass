@@ -153,7 +153,10 @@ impl Strip {
                     .into_iter()
                     .map(|cell| {
                         let name = format!("{}#{}", cell.key.path.display(), cell.key.time.0);
-                        if cell.thumb.is_none() {
+                        // A nearby picture stands in on the desktop, but the
+                        // phone keeps each picture by name, so a tile is
+                        // ready only once its own is stored.
+                        if cell.waiting {
                             asks.push(cell.key.clone());
                         }
                         self.keys.insert(name.clone(), cell.key);
@@ -161,7 +164,7 @@ impl Strip {
                             left: cell.tile.left,
                             width: cell.tile.width,
                             key: name,
-                            ready: cell.thumb.is_some(),
+                            ready: !cell.waiting,
                         }
                     })
                     .collect();

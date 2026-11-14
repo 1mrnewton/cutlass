@@ -359,6 +359,9 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::SetDenoise { segment_id, level } => {
             enhance::set_denoise(draft, segment_id, *level)
         }
+        Request::SetDeflicker { segment_id, level } => {
+            enhance::set_deflicker(draft, segment_id, *level)
+        }
         Request::SetInterpolate { segment_id, fps } => {
             enhance::set_interpolate(draft, segment_id, *fps)
         }
@@ -682,6 +685,7 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             path,
             masks,
         } => follow::track(draft, target, followers, masks, tracking_id, *anchor, path),
+        Request::Untrack { segment_id } => follow::untrack(draft, segment_id),
         Request::SetColorMask {
             segment_id,
             material_id,
@@ -823,6 +827,10 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::SetColorSpace { space } => color::set_color_space(draft, *space),
         Request::SetProjectName { name } => {
             name::set_project_name(draft, name);
+            Ok(())
+        }
+        Request::SetCover { cover } => {
+            name::set_cover(draft, cover.clone());
             Ok(())
         }
         Request::SetFreeLayer { on } => {

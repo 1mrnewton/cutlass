@@ -475,12 +475,16 @@ fn sound(path: &Path, mut sink: Option<&mut BufWriter<File>>) -> Result<String, 
 fn demux(path: &Path) -> Result<String, String> {
     type Probe = fn(&[u8]) -> ProbeResult;
     type Open = fn(&Path) -> Result<Box<dyn Demux>, OpenError>;
-    let families: [(Probe, Open); 8] = [
+    let families: &[(Probe, Open)] = &[
         (probe_isobmff, open_isobmff),
+        (cutlass_avi::probe, open_avi),
         (cutlass_riff::probe, open_wav),
         (cutlass_aiff::probe, open_aiff),
+        (cutlass_caf::probe, open_caf),
         (cutlass_flac_container::probe, open_flac),
         (cutlass_ogg::probe, open_ogg),
+        (cutlass_mpegts::probe, open_ts),
+        (cutlass_matroska::probe, open_matroska),
         (cutlass_still::probe, open_still),
         (probe_adts, open_adts),
         (probe_mp3, open_mp3),
@@ -819,10 +823,14 @@ fn rust_encoders() -> EncodeFactory {
 fn readers() -> ReaderFactory {
     let mut readers = ReaderFactory::new();
     readers.register_container(probe_isobmff, open_isobmff);
+    readers.register_container(cutlass_avi::probe, open_avi);
     readers.register_container(cutlass_riff::probe, open_wav);
     readers.register_container(cutlass_aiff::probe, open_aiff);
+    readers.register_container(cutlass_caf::probe, open_caf);
     readers.register_container(cutlass_flac_container::probe, open_flac);
     readers.register_container(cutlass_ogg::probe, open_ogg);
+    readers.register_container(cutlass_mpegts::probe, open_ts);
+    readers.register_container(cutlass_matroska::probe, open_matroska);
     readers.register_container(cutlass_still::probe, open_still);
     readers.register_container(probe_mp3, open_mp3);
     *readers.decoders_mut() = rust_decoders();
@@ -924,6 +932,11 @@ fn open_isobmff(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
     Ok(Box::new(cutlass_isobmff::IsoBmffFile::open(file)?))
 }
 
+fn open_avi(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let (file, length) = sized(path)?;
+    Ok(Box::new(cutlass_avi::AviDemux::open(file, length)?))
+}
+
 fn open_wav(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
     let (file, length) = sized(path)?;
     Ok(Box::new(cutlass_riff::WavDemux::open(file, length)?))
@@ -932,6 +945,11 @@ fn open_wav(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
 fn open_aiff(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
     let (file, length) = sized(path)?;
     Ok(Box::new(cutlass_aiff::AiffDemux::open(file, length)?))
+}
+
+fn open_caf(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let (file, length) = sized(path)?;
+    Ok(Box::new(cutlass_caf::CafDemux::open(file, length)?))
 }
 
 fn open_flac(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
@@ -947,6 +965,22 @@ fn open_ogg(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
     Ok(Box::new(cutlass_ogg::OggDemux::open(
         std::io::BufReader::new(file),
         length,
+    )?))
+}
+
+fn open_ts(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let (file, length) = sized(path)?;
+    Ok(Box::new(cutlass_mpegts::TsDemux::open(
+        std::io::BufReader::new(file),
+        length,
+    )?))
+}
+
+fn open_matroska(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let (file, length) = sized(path)?;
+    // The demuxer reads ahead itself, so the file goes in unbuffered.
+    Ok(Box::new(cutlass_matroska::MatroskaDemux::open(
+        file, length,
     )?))
 }
 

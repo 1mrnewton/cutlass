@@ -23,6 +23,9 @@ pub(crate) const S24_FULL: f64 = 8_388_607.0;
 /// Positive full scale for 32-bit integer PCM.
 pub(crate) const S32_FULL: f64 = 2_147_483_647.0;
 
+/// One over 2^63, the full scale for 64-bit integer PCM. Exact in `f32`.
+pub(crate) const S64_SCALE: f32 = 1.0 / 9_223_372_036_854_775_808.0;
+
 pub(crate) fn packet_len(len: usize) -> Result<(), CodecError> {
     if len == 0 {
         return Err(CodecError::InvalidApi {

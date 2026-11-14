@@ -139,6 +139,8 @@ DEMUXES = [
     dict(name="mp4", crate="containers/isobmff", file="long.mp4",
          make=["-stream_loop", "89", "-i", "h264.mp4", "-i", "aac.m4a", "-map", "0:v", "-map", "1:a",
                "-c", "copy", "-shortest"]),
+    dict(name="avi", crate="containers/avi", file="long.avi",
+         make=["-i", "long.mp4", "-c", "copy"]),
     dict(name="wav", crate="containers/riff", file="pcm.wav", make=None),
     dict(name="aiff", crate="containers/aiff", file="pcm.aiff",
          make=["-i", "pcm.wav", "-c:a", "pcm_s16be"]),

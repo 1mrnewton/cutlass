@@ -1,7 +1,7 @@
 //! Place a bundled effect on an effect row, bind it to one clip, and set
 //! an effect's strength.
 
-use cutlass_effects::bundled_recipe;
+use cutlass_effects::recipe as find_recipe;
 use cutlass_model::{
     Draft, MaterialEffect, MaterialId, MaterialRef, MaterialVideoEffect, Segment, SegmentId,
     TimeRange, TrackId, TrackType,
@@ -20,7 +20,7 @@ pub fn add_effect(
     target: TimeRange,
     effect_id: &str,
 ) -> Result<(), EditError> {
-    let Some(recipe) = bundled_recipe(effect_id) else {
+    let Some(recipe) = find_recipe(effect_id) else {
         return Err(EditError::UnknownEffect);
     };
     if draft.materials.get(material_id.as_str()).is_some() {
@@ -172,7 +172,7 @@ pub fn set_effect_control(
     let Some(MaterialRef::VideoEffect(effect)) = draft.materials.get(current.as_str()) else {
         return Err(EditError::NotEffect);
     };
-    let recipe = bundled_recipe(&effect.effect_id).ok_or(EditError::NotEffect)?;
+    let recipe = find_recipe(&effect.effect_id).ok_or(EditError::NotEffect)?;
     let found = recipe
         .controls
         .iter()
@@ -565,5 +565,48 @@ mod tests {
             session.apply(0, &[strength("left", "x", 0.5)]).unwrap_err(),
             EditError::LockedTrack
         );
+    }
+
+    // The one test here that loads a studio folder: the studio's recipes
+    // are shared by every test in this process.
+    #[test]
+    fn a_studio_effect_is_placed_and_set_like_a_bundled_one() {
+        let studio =
+            std::env::temp_dir().join(format!("cutlass-session-studio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&studio);
+        let recipe = cutlass_effects::Recipe::read(
+            br#"{"version":1,"id":"studio-soft","name":"Soft","controls":[{"id":"amount","name":"Amount","default":1,"min":0,"max":2,"scale":[[0,"radius"]]}],"passes":[{"block":"blur","params":{"radius":0.02}}]}"#,
+        )
+        .unwrap();
+        let mut session = open();
+        // Before the studio holds it, the effect is unknown.
+        assert_eq!(
+            session
+                .apply(0, &[add("fx", "soft", 0, "recipe/studio-soft")])
+                .unwrap_err(),
+            EditError::UnknownEffect
+        );
+        cutlass_effects::write_studio_recipe(&studio, &recipe).unwrap();
+        cutlass_effects::load_studio(&studio);
+        session
+            .apply(0, &[add("fx", "soft", 0, "recipe/studio-soft")])
+            .unwrap();
+        let Some(MaterialRef::VideoEffect(effect)) = session.draft().materials.get("m-soft") else {
+            panic!("no effect material");
+        };
+        assert_eq!(effect.effect_id, "recipe/studio-soft");
+        assert_eq!(effect.name, "Soft");
+        let revision = session.revision();
+        session
+            .apply(revision, &[control("soft", "", "amount", 1.5)])
+            .unwrap();
+        assert_eq!(
+            session
+                .apply(session.revision(), &[control("soft", "", "amount", 9.0)])
+                .unwrap_err(),
+            EditError::EffectControl
+        );
+        cutlass_effects::clear_studio();
+        let _ = std::fs::remove_dir_all(studio);
     }
 }

@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cutlass_codec::access::{
-    ChannelLayout, CodecParams, ColorPrimaries, PixelFormat, SampleFormat, StandardLayout, Transfer,
+    ChannelLayout, CodecParams, ColorMatrix, ColorPrimaries, ColorRange, PixelFormat, SampleFormat,
+    StandardLayout, Transfer,
 };
 use cutlass_codec::{CodecId, ContainerId, FrameSize, StreamCodec, Timescale};
 use cutlass_container::{Demux, DisplayQuarter, OpenError, ProbeResult, ReadError, SeekTo};
@@ -92,6 +93,10 @@ pub enum DecodedFrame {
         pixel: PixelFormat,
         primaries: ColorPrimaries,
         transfer: Transfer,
+        /// The Y′CbCr matrix the stream names. Unspecified is BT.709.
+        matrix: ColorMatrix,
+        /// The sample range the stream names. Unspecified is studio swing.
+        range: ColorRange,
         /// Shared, so a cache, the read-ahead, and a GPU layer hold one
         /// picture without copying it.
         bytes: Arc<Vec<u8>>,
@@ -126,6 +131,8 @@ impl DecodedFrame {
                 pixel: PixelFormat::Yuv420p,
                 primaries: *primaries,
                 transfer: *transfer,
+                matrix: ColorMatrix::Unspecified,
+                range: ColorRange::Unspecified,
                 bytes: surface.yuv420p()?,
             })),
             Self::Platform { .. } | Self::Still(_) | Self::Coded { .. } => {
@@ -211,6 +218,9 @@ struct Pipe {
     lead: i64,
     /// The container's encoder delay and padding, as decoder side data.
     gapless: Option<SideData>,
+    /// `lead` exactly, as (sample rate, samples), when the edit holds the
+    /// container's encoder delay rounded to a tick it cannot state.
+    lead_samples: Option<(u32, i64)>,
     /// No packet has been pushed since open or the last reset.
     fresh: bool,
 }
@@ -227,6 +237,7 @@ impl Pipe {
             heard: VecDeque::new(),
             lead,
             gapless: None,
+            lead_samples: None,
             fresh: true,
         }
     }
@@ -247,6 +258,29 @@ impl Pipe {
     /// `lead` in `timescale` ticks per second.
     fn lead_in(&self, timescale: u32) -> i64 {
         rescale(self.lead, self.timescale.ticks_per_second(), timescale)
+    }
+
+    /// The sample on the stream's own time line where `output` starts, before
+    /// any samples the decoder marked to skip.
+    fn first_sample(&self, output: &AudioOutput) -> i64 {
+        let rate = i64::from(output.pcm.rate);
+        let per_second = i64::from(output.timescale.max(1));
+        if let Some((exact_rate, samples)) = self.lead_samples
+            && exact_rate == output.pcm.rate
+        {
+            return output
+                .pts
+                .checked_mul(rate)
+                .and_then(|value| value.checked_div(per_second))
+                .unwrap_or(0)
+                .saturating_sub(samples);
+        }
+        output
+            .pts
+            .saturating_sub(self.lead_in(output.timescale))
+            .checked_mul(rate)
+            .and_then(|value| value.checked_div(per_second))
+            .unwrap_or(0)
     }
 
     /// Drop references, held pictures, and the end of stream before a seek.
@@ -798,16 +832,10 @@ impl Media {
             let Some(output) = self.next_audio()? else {
                 break;
             };
-            let lead = self
+            let start = self
                 .audio
                 .as_ref()
-                .map_or(0, |pipe| pipe.lead_in(output.timescale));
-            let start = output
-                .pts
-                .saturating_sub(lead)
-                .checked_mul(i64::from(output.pcm.rate))
-                .and_then(|value| value.checked_div(i64::from(output.timescale.max(1))))
-                .unwrap_or(0)
+                .map_or(0, |pipe| pipe.first_sample(&output))
                 .saturating_add(i64::from(output.skip_leading));
             // Sample ticks one stream tick may round away.
             let slack = i64::from(output.pcm.rate.div_ceil(output.timescale.max(1))) + 1;
@@ -1185,6 +1213,8 @@ fn frame_from_picture(picture: PictureOutput) -> DecodedFrame {
         pixel: info.pixel,
         primaries: info.primaries,
         transfer: info.transfer,
+        matrix: info.matrix,
+        range: info.range,
         bytes: Arc::new(picture.into_cpu().unwrap_or_default()),
     }
 }
@@ -1276,7 +1306,28 @@ fn open_pipe(
         edit_lead(stream.edits()),
     );
     pipe.gapless = gapless_of(stream);
+    pipe.lead_samples = exact_lead(stream, pipe.lead);
     Ok(pipe)
+}
+
+/// The encoder delay in samples, with the sample rate, when the stream's
+/// edit `lead` is that delay rounded to a tick that cannot hold it, as a
+/// 2.5 ms Opus pre-skip is on a 1 ms Matroska tick. A lead that states the
+/// delay exactly, or is not within a tick of it, is kept as it is.
+fn exact_lead(stream: &cutlass_container::Stream, lead: i64) -> Option<(u32, i64)> {
+    let delay = i128::from(stream.trim().encoder_delay()?);
+    let rate = stream.params().sample_rate().filter(|rate| *rate > 0)?;
+    let per_second = i128::from(stream.timescale().ticks_per_second());
+    if per_second == 0 || delay == 0 {
+        return None;
+    }
+    // Both sides in samples times ticks per second.
+    let held = i128::from(lead) * i128::from(rate);
+    let stated = delay * per_second;
+    if held == stated || (held - stated).abs() >= i128::from(rate) {
+        return None;
+    }
+    Some((rate, i64::try_from(delay).ok()?))
 }
 
 /// The stream's encoder delay and padding as [`SideData::Gapless`], when the
@@ -1437,23 +1488,31 @@ fn codec_extra(id: CodecId, extra: &[u8]) -> Result<(Vec<u8>, Option<SampleForma
     let tag = u16::from_le_bytes([extra[0], extra[1]]);
     let bits = u16::from_le_bytes([extra[2], extra[3]]);
     let kind = u16::from_le_bytes([extra[12], extra[13]]);
-    // Coding byte: 1 s16, 2 s24, 3 s32, 4 f32, 5 f64. Then little-endian
-    // interleaved. The container already refused a big-endian WAV.
+    // Coding byte: 1 s16, 2 s24, 3 s32, 4 f32, 5 f64, 7 A-law, 8 mu-law,
+    // 11 unsigned 8-bit. Then little-endian interleaved. The container
+    // already refused a big-endian WAV. 8-bit wave PCM is unsigned, unlike
+    // AIFF's and CAF's. The container marks A-law and mu-law compressed.
     let coding = match (tag, bits, kind) {
-        (0x0001, 16, 0) => 1_u8,
+        (0x0001, 8, 0) => 11_u8,
+        (0x0001, 16, 0) => 1,
         (0x0001, 24, 0) => 2,
         (0x0001, 32, 0) => 3,
         (0x0003, 32, 1) => 4,
         (0x0003, 64, 1) => 5,
+        (0x0006, 8, 2) => 7,
+        (0x0007, 8, 2) => 8,
         _ => return Err(EngineError::Layout),
     };
     Ok((vec![coding, 0, 0], Some(pcm_format(coding)?)))
 }
 
+/// The mix format `cutlass-pcm` decodes a coding byte into: i16 for s16 and
+/// the one-byte codings (6 s8, 7 A-law, 8 mu-law, 11 u8), f32 for s24, s32,
+/// f32, f64 and 9 s64.
 fn pcm_format(coding: u8) -> Result<SampleFormat, EngineError> {
     match coding {
-        1 => Ok(SampleFormat::I16),
-        2..=5 => Ok(SampleFormat::F32),
+        1 | 6 | 7 | 8 | 11 => Ok(SampleFormat::I16),
+        2..=5 | 9 => Ok(SampleFormat::F32),
         _ => Err(EngineError::Layout),
     }
 }
@@ -1519,6 +1578,13 @@ fn stream_info(demux: &dyn Demux, byte_size: u64) -> MediaInfo {
 }
 
 fn duration_of(demux: &mut dyn Demux) -> Result<Option<Micros>, EngineError> {
+    // Each stream's time zero, as playback places it: a transport stream's
+    // first picture shows at its edit's media time, not at tick zero.
+    let leads: Vec<(u32, i64)> = demux
+        .streams()
+        .iter()
+        .map(|stream| (stream.id().get(), edit_lead(stream.edits())))
+        .collect();
     let mut end = None;
     while let Some(packet) = demux.read_packet().map_err(from_read)? {
         let timescale = packet.timescale();
@@ -1528,8 +1594,12 @@ fn duration_of(demux: &mut dyn Demux) -> Result<Option<Micros>, EngineError> {
         let Some(start) = packet.timestamp().presentation_or_decode() else {
             continue;
         };
+        let lead = leads
+            .iter()
+            .find(|(id, _)| *id == packet.stream())
+            .map_or(0, |(_, lead)| *lead);
         let duration = packet.timestamp().duration().unwrap_or(0);
-        let ticks = start.saturating_add(duration);
+        let ticks = start.saturating_add(duration).saturating_sub(lead);
         let micros = ticks_to_micros(ticks, timescale)?;
         end = Some(end.map_or(micros.0, |current: i64| current.max(micros.0)));
     }
@@ -1674,6 +1744,43 @@ mod tests {
     }
 
     #[test]
+    fn a_delay_its_edit_rounds_is_taken_in_samples() {
+        let stream = |timescale: u32, delay: Option<u64>| {
+            cutlass_container::Stream::new(
+                cutlass_container::TrackId::new(1),
+                cutlass_codec::StreamParams::try_audio(
+                    StreamCodec::Known(CodecId::Opus),
+                    48_000,
+                    2,
+                    Vec::new(),
+                )
+                .unwrap(),
+                Timescale::new(timescale),
+                None,
+                Vec::new(),
+                cutlass_container::Trim::new(delay, None),
+            )
+        };
+        // A 120-sample pre-skip on a 1 ms tick: the edit says 3 ms.
+        assert_eq!(
+            exact_lead(&stream(1_000, Some(120)), 3),
+            Some((48_000, 120))
+        );
+        assert_eq!(
+            exact_lead(&stream(1_000, Some(120)), 2),
+            Some((48_000, 120))
+        );
+        // An edit that states the delay exactly, as Ogg's and MP4's do, is
+        // kept as it is.
+        assert_eq!(exact_lead(&stream(48_000, Some(312)), 312), None);
+        assert_eq!(exact_lead(&stream(1_000, Some(96)), 2), None);
+        // An edit more than a tick away from the delay means something else.
+        assert_eq!(exact_lead(&stream(1_000, Some(120)), 5), None);
+        assert_eq!(exact_lead(&stream(1_000, None), 3), None);
+        assert_eq!(exact_lead(&stream(1_000, Some(0)), 0), None);
+    }
+
+    #[test]
     fn a_lead_moves_between_timescales() {
         assert_eq!(rescale(4_800, 48_000, 48_000), 4_800);
         assert_eq!(rescale(4_800, 48_000, 1_000), 100);
@@ -1690,6 +1797,8 @@ mod tests {
             pixel: PixelFormat::Yuv420p,
             primaries: ColorPrimaries::Bt709,
             transfer: Transfer::Bt709,
+            matrix: ColorMatrix::Unspecified,
+            range: ColorRange::Unspecified,
             bytes: vec![0; 12].into(),
         };
         assert_eq!(coded.byte_size(), 12);

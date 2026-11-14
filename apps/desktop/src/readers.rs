@@ -10,22 +10,28 @@ use cutlass_eval::ReaderFactory;
 use cutlass_isobmff::IsoBmffFile;
 use cutlass_still::{StillDemux, still_limits};
 
-/// The codecs [`crate::register_codecs`] installs, plus ISOBMFF, WAV, AIFF,
-/// FLAC, Ogg (Opus and Vorbis), MP3, and stills.
+/// The codecs [`crate::register_codecs`] installs, plus ISOBMFF, AVI, WAV,
+/// AIFF, CAF, FLAC, Ogg (Opus and Vorbis), Matroska and WebM, MPEG-TS, MP3,
+/// and stills.
 #[cfg(test)]
 pub(crate) fn installed_readers() -> ReaderFactory {
     readers_with(crate::register_codecs().0)
 }
 
-/// ISOBMFF, WAV, AIFF, FLAC, Ogg (Opus and Vorbis), MP3, and stills,
-/// decoded with `decoders`.
+/// ISOBMFF, AVI, WAV, AIFF, CAF, FLAC, Ogg (Opus and Vorbis), Matroska and
+/// WebM, MPEG-TS, MP3,
+/// and stills, decoded with `decoders`.
 pub(crate) fn readers_with(decoders: DecodeFactory) -> ReaderFactory {
     let mut readers = ReaderFactory::new();
     readers.register_container(probe_isobmff, open_isobmff);
+    readers.register_container(cutlass_avi::probe, open_avi);
     readers.register_container(cutlass_riff::probe, open_wav);
     readers.register_container(cutlass_aiff::probe, open_aiff);
+    readers.register_container(cutlass_caf::probe, open_caf);
     readers.register_container(cutlass_flac_container::probe, open_flac);
     readers.register_container(cutlass_ogg::probe, open_ogg);
+    readers.register_container(cutlass_mpegts::probe, open_ts);
+    readers.register_container(cutlass_matroska::probe, open_matroska);
     readers.register_container(cutlass_still::probe, open_still);
     readers.register_container(probe_mp3, open_mp3);
     *readers.decoders_mut() = decoders;
@@ -91,6 +97,19 @@ fn open_isobmff(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
     Ok(Box::new(IsoBmffFile::open(file)?))
 }
 
+fn open_avi(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let file = File::open(path).map_err(|error| OpenError::Source {
+        message: error.to_string(),
+    })?;
+    let length = file
+        .metadata()
+        .map_err(|error| OpenError::Source {
+            message: error.to_string(),
+        })?
+        .len();
+    Ok(Box::new(cutlass_avi::AviDemux::open(file, length)?))
+}
+
 fn open_wav(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
     let file = File::open(path).map_err(|error| OpenError::Source {
         message: error.to_string(),
@@ -115,6 +134,19 @@ fn open_aiff(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
         })?
         .len();
     Ok(Box::new(cutlass_aiff::AiffDemux::open(file, length)?))
+}
+
+fn open_caf(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let file = File::open(path).map_err(|error| OpenError::Source {
+        message: error.to_string(),
+    })?;
+    let length = file
+        .metadata()
+        .map_err(|error| OpenError::Source {
+            message: error.to_string(),
+        })?
+        .len();
+    Ok(Box::new(cutlass_caf::CafDemux::open(file, length)?))
 }
 
 fn open_flac(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
@@ -146,6 +178,38 @@ fn open_ogg(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
     Ok(Box::new(cutlass_ogg::OggDemux::open(
         std::io::BufReader::new(file),
         length,
+    )?))
+}
+
+fn open_ts(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let file = File::open(path).map_err(|error| OpenError::Source {
+        message: error.to_string(),
+    })?;
+    let length = file
+        .metadata()
+        .map_err(|error| OpenError::Source {
+            message: error.to_string(),
+        })?
+        .len();
+    Ok(Box::new(cutlass_mpegts::TsDemux::open(
+        std::io::BufReader::new(file),
+        length,
+    )?))
+}
+
+fn open_matroska(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let file = File::open(path).map_err(|error| OpenError::Source {
+        message: error.to_string(),
+    })?;
+    let length = file
+        .metadata()
+        .map_err(|error| OpenError::Source {
+            message: error.to_string(),
+        })?
+        .len();
+    // The demuxer reads ahead itself, so the file goes in unbuffered.
+    Ok(Box::new(cutlass_matroska::MatroskaDemux::open(
+        file, length,
     )?))
 }
 
@@ -182,6 +246,410 @@ mod tests {
         std::fs::remove_file(&path).expect("remove");
         let samples = ready.pcm.as_i16().expect("i16");
         assert_eq!(samples, &[0x4000]);
+    }
+
+    #[test]
+    fn a_caf_frame_decodes_as_big_endian_s16() {
+        let path = std::env::temp_dir().join(format!("cutlass-readers-caf-{}", std::process::id()));
+        write_caf_pcm(&path, [1, 1, 0], &[0x40, 0x00]);
+        let mut media = installed_readers().open(&path).expect("open");
+        let ready = media.pull_audio().expect("pull").expect("pcm");
+        std::fs::remove_file(&path).expect("remove");
+        assert_eq!(ready.pcm.as_i16().expect("i16"), &[0x4000]);
+    }
+
+    /// CAF's one-byte codings play: signed 8-bit, A-law and mu-law.
+    #[test]
+    fn caf_eight_bit_and_g711_frames_play() {
+        for (coding, byte, expected) in [(6, 0x40, 0x4000), (7, 0xD5, 8), (8, 0x80, 32_124)] {
+            let path = std::env::temp_dir().join(format!(
+                "cutlass-readers-caf-{coding}-{}",
+                std::process::id()
+            ));
+            write_caf_pcm(&path, [coding, 1, 0], &[byte]);
+            let mut media = installed_readers().open(&path).expect("open");
+            let ready = media.pull_audio().expect("pull").expect("pcm");
+            std::fs::remove_file(&path).expect("remove");
+            assert_eq!(ready.pcm.as_i16().expect("i16"), &[expected], "{coding}");
+        }
+    }
+
+    /// G.711 WAV (tags 6 and 7, extensible, RF64) and AIFC (`alaw`, `ulaw`,
+    /// upper case) files from afconvert and ffmpeg play sample for sample as
+    /// AudioToolbox and FFmpeg decode them to s16. So do the WAV files
+    /// `WavMux` writes back from them. Skips, and says so, without the tools.
+    #[test]
+    fn g711_wav_and_aiff_files_play_like_afconvert_and_ffmpeg() {
+        let apple = tool_exists("afconvert");
+        let ffmpeg = tool_exists("ffmpeg");
+        if !apple && !ffmpeg {
+            eprintln!("skipped: neither afconvert nor ffmpeg is on PATH");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("cutlass-readers-g711-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let source = dir.join("source.wav");
+        std::fs::write(&source, s16_wav(8_000, 2, &test_signal(6_000))).expect("source");
+        let mut files = Vec::new();
+        if apple {
+            for (kind, ext, format) in [
+                ("WAVE", "wav", "alaw"),
+                ("WAVE", "wav", "ulaw"),
+                ("AIFC", "aifc", "alaw"),
+                ("AIFC", "aifc", "ulaw"),
+            ] {
+                let out = dir.join(format!("apple-{format}.{ext}"));
+                run_tool(
+                    "afconvert",
+                    &["-f", kind, "-d", format, path_str(&source), path_str(&out)],
+                );
+                files.push(out);
+            }
+        }
+        if ffmpeg {
+            for (codec, ext, extra) in [
+                ("pcm_alaw", "wav", &[][..]),
+                ("pcm_mulaw", "wav", &[][..]),
+                ("pcm_alaw", "aiff", &[][..]),
+                ("pcm_mulaw", "aiff", &[][..]),
+                ("pcm_alaw", "wav", &["-rf64", "always"][..]),
+                ("pcm_mulaw", "wav", &["-ac", "3"][..]),
+                ("pcm_alaw", "wav", &["-ac", "3"][..]),
+            ] {
+                let out = dir.join(format!("ffmpeg-{}-{codec}.{ext}", files.len()));
+                let mut args = vec!["-v", "error", "-y", "-i", path_str(&source)];
+                args.extend_from_slice(extra);
+                args.extend_from_slice(&["-c:a", codec, path_str(&out)]);
+                run_tool("ffmpeg", &args);
+                files.push(out);
+            }
+        }
+        // AudioToolbox does not open the upper-case tags; FFmpeg does.
+        let mut upper = Vec::new();
+        for (index, path) in files.clone().iter().enumerate() {
+            let mut bytes = std::fs::read(path).expect("read");
+            if &bytes[8..12] != b"AIFC" || !ffmpeg {
+                continue;
+            }
+            let at = bytes.windows(4).position(|w| w == b"COMM").expect("COMM") + 8 + 18;
+            bytes[at..at + 4].make_ascii_uppercase();
+            let out = dir.join(format!("upper-{index}.aifc"));
+            std::fs::write(&out, bytes).expect("upper");
+            upper.push(out);
+        }
+        let mut checked = 0;
+        for path in files.iter().chain(&upper) {
+            let ours = play_i16(path);
+            assert!(ours.len() >= 12_000, "{}", path.display());
+            if ffmpeg {
+                assert_eq!(ours, ffmpeg_s16(path, &dir), "ffmpeg {}", path.display());
+                checked += 1;
+            }
+            if apple && !upper.contains(path) {
+                assert_eq!(
+                    ours,
+                    afconvert_s16(path, &dir),
+                    "afconvert {}",
+                    path.display()
+                );
+                checked += 1;
+            }
+            if path.extension().is_some_and(|ext| ext == "wav") {
+                let again = dir.join("remux.wav");
+                std::fs::write(&again, remux_wav(path)).expect("remux");
+                assert_eq!(play_i16(&again), ours, "remux {}", path.display());
+                if ffmpeg {
+                    assert_eq!(
+                        ffmpeg_s16(&again, &dir),
+                        ours,
+                        "remux ffmpeg {}",
+                        path.display()
+                    );
+                }
+                if apple {
+                    assert_eq!(
+                        afconvert_s16(&again, &dir),
+                        ours,
+                        "remux afconvert {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+        std::fs::remove_dir_all(&dir).expect("clean");
+        eprintln!(
+            "g711: {} files, {checked} oracle decodes",
+            files.len() + upper.len()
+        );
+    }
+
+    fn tool_exists(name: &str) -> bool {
+        std::process::Command::new(name)
+            .arg("-h")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+    }
+
+    fn run_tool(name: &str, args: &[&str]) {
+        let status = std::process::Command::new(name)
+            .args(args)
+            .status()
+            .expect(name);
+        assert!(status.success(), "{name} {args:?}");
+    }
+
+    fn path_str(path: &std::path::Path) -> &str {
+        path.to_str().expect("utf-8 path")
+    }
+
+    /// Full-scale ramps and a pseudo-random walk, so every A-law and mu-law
+    /// code shows up.
+    fn test_signal(frames: usize) -> Vec<i16> {
+        let mut state = 0x2545_F491_u32;
+        (0..frames * 2)
+            .map(|index| {
+                if index < 2 * 1024 {
+                    let step = i32::try_from(index / 2).expect("step");
+                    i16::try_from(step * 64 - 32_768).expect("ramp")
+                } else {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    i16::from_le_bytes(state.to_le_bytes()[..2].try_into().expect("two"))
+                }
+            })
+            .collect()
+    }
+
+    fn s16_wav(rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {
+        let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let size = u32::try_from(data.len()).expect("size");
+        let mut out = b"RIFF".to_vec();
+        out.extend_from_slice(&(36 + size).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16_u32.to_le_bytes());
+        out.extend_from_slice(&1_u16.to_le_bytes());
+        out.extend_from_slice(&channels.to_le_bytes());
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&(rate * 2 * u32::from(channels)).to_le_bytes());
+        out.extend_from_slice(&(2 * channels).to_le_bytes());
+        out.extend_from_slice(&16_u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&data);
+        out
+    }
+
+    /// Every sample the desktop readers play from `path`, interleaved.
+    fn play_i16(path: &std::path::Path) -> Vec<i16> {
+        let mut media = installed_readers().open(path).expect("open");
+        let mut out = Vec::new();
+        while let Some(ready) = media.pull_audio().expect("pull") {
+            out.extend_from_slice(ready.pcm.as_i16().expect("i16"));
+        }
+        out
+    }
+
+    fn ffmpeg_s16(path: &std::path::Path, dir: &std::path::Path) -> Vec<i16> {
+        let out = dir.join("oracle.raw");
+        run_tool(
+            "ffmpeg",
+            &[
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                path_str(path),
+                "-f",
+                "s16le",
+                "-c:a",
+                "pcm_s16le",
+                path_str(&out),
+            ],
+        );
+        let bytes = std::fs::read(&out).expect("raw");
+        bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| i16::from_le_bytes(*pair))
+            .collect()
+    }
+
+    fn afconvert_s16(path: &std::path::Path, dir: &std::path::Path) -> Vec<i16> {
+        let out = dir.join("oracle.wav");
+        run_tool(
+            "afconvert",
+            &["-f", "WAVE", "-d", "LEI16", path_str(path), path_str(&out)],
+        );
+        let bytes = std::fs::read(&out).expect("wav");
+        let mut at = 12;
+        loop {
+            let id = &bytes[at..at + 4];
+            let size = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().expect("size"));
+            let size = usize::try_from(size).expect("size");
+            if id == b"data" {
+                return bytes[at + 8..at + 8 + size]
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| i16::from_le_bytes(*pair))
+                    .collect();
+            }
+            at += 8 + size + size % 2;
+        }
+    }
+
+    /// `path` through `WavDemux` and back out of `WavMux`.
+    fn remux_wav(path: &std::path::Path) -> Vec<u8> {
+        use cutlass_container::Demux;
+        let bytes = std::fs::read(path).expect("read");
+        let length = u64::try_from(bytes.len()).expect("length");
+        let mut demux =
+            cutlass_riff::WavDemux::open(std::io::Cursor::new(bytes), length).expect("open");
+        let params = demux.streams()[0].params().clone();
+        let rate = params.sample_rate().expect("rate");
+        let mut mux = cutlass_riff::WavMux::new(std::io::Cursor::new(Vec::new()));
+        mux.add_stream(NewStream {
+            params,
+            timescale: Timescale::new(rate),
+            language: None,
+        })
+        .expect("stream");
+        let mut ticks = 0;
+        while let Some(packet) = demux.read_packet().expect("packet") {
+            ticks += packet.timestamp().duration().expect("duration");
+            mux.write_packet(&packet).expect("write");
+        }
+        mux.finish(&[TrackDuration {
+            track: TrackId::new(0),
+            timescale: Timescale::new(rate),
+            ticks,
+        }])
+        .expect("finish");
+        mux.into_inner().into_inner()
+    }
+
+    fn write_caf_pcm(path: &std::path::Path, extra: [u8; 3], frame: &[u8]) {
+        let mut mux = cutlass_caf::CafMux::new(std::io::Cursor::new(Vec::new()));
+        let params =
+            StreamParams::try_audio(StreamCodec::Known(CodecId::Pcm), 8_000, 1, extra.to_vec())
+                .expect("params");
+        mux.add_stream(NewStream {
+            params,
+            timescale: Timescale::new(8_000),
+            language: None,
+        })
+        .expect("stream");
+        let packet = Packet::try_new(
+            0,
+            frame.to_vec(),
+            Timestamp::try_new(Some(0), Some(0), Some(1)).expect("time"),
+            Timescale::new(8_000),
+            true,
+        )
+        .expect("packet");
+        mux.write_packet(&packet).expect("write");
+        mux.finish(&[TrackDuration {
+            track: TrackId::new(0),
+            timescale: Timescale::new(8_000),
+            ticks: 1,
+        }])
+        .expect("finish");
+        std::fs::write(path, mux.into_inner().into_inner()).expect("write");
+    }
+
+    /// Opus in CAF, as the Opus encoder hands it over: the pre-skip becomes
+    /// the file's priming, and the reader plays from the start exactly what
+    /// the decoder gives after it.
+    #[test]
+    fn a_caf_opus_file_plays_after_the_priming() {
+        use cutlass_encode::{AudioInput, ChannelLayout, CodecParams, Encoder, Pcm, SideData};
+
+        let path =
+            std::env::temp_dir().join(format!("cutlass-readers-opus-{}.caf", std::process::id()));
+        let samples: Vec<f32> = (0..2 * 48_000)
+            .map(|i| ((i as f32) * 0.013).sin() * 0.4)
+            .collect();
+        let spec = CodecParams::audio(CodecId::Opus, 48_000, ChannelLayout::stereo());
+        let mut encoder = cutlass_opus::OpusEncoder::open(&spec).expect("encoder");
+        let pcm = Pcm::from_f32(48_000, ChannelLayout::stereo(), samples).expect("pcm");
+        let mut packets = encoder.push(&AudioInput { pcm }).expect("push");
+        packets.extend(encoder.drain().expect("drain"));
+        let mut mux = cutlass_caf::CafMux::new(std::fs::File::create(&path).expect("create"));
+        let params =
+            StreamParams::try_audio(StreamCodec::Known(CodecId::Opus), 48_000, 2, Vec::new())
+                .expect("params");
+        let track = mux
+            .add_stream(NewStream {
+                params,
+                timescale: Timescale::new(48_000),
+                language: None,
+            })
+            .expect("stream");
+        let mut ticks = 0;
+        for packet in &packets {
+            for side in &packet.side {
+                match side {
+                    SideData::Config(head) => mux.set_config(track, head).expect("head"),
+                    SideData::Gapless {
+                        encoder_delay,
+                        trailing_padding,
+                        ..
+                    } => mux
+                        .set_trim(
+                            track,
+                            cutlass_container::Trim::new(
+                                Some(u64::from(*encoder_delay)),
+                                Some(u64::from(*trailing_padding)),
+                            ),
+                        )
+                        .expect("trim"),
+                    _ => {}
+                }
+            }
+            let timestamp =
+                Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
+                    .expect("timestamp");
+            let out = Packet::try_new(
+                0,
+                packet.data.clone(),
+                timestamp,
+                Timescale::new(48_000),
+                true,
+            )
+            .expect("packet");
+            mux.write_packet(&out).expect("write");
+            ticks += packet.duration;
+        }
+        mux.finish(&[TrackDuration {
+            track,
+            timescale: Timescale::new(48_000),
+            ticks,
+        }])
+        .expect("finish");
+        drop(mux);
+
+        let mut decoder = cutlass_opus::OpusDecoder::open(&spec).expect("decoder");
+        let mut expected = Vec::new();
+        for packet in &packets {
+            expected.extend(decoder.decode(&packet.data).expect("decode"));
+        }
+        let mut media = installed_readers().open(&path).expect("open");
+        let first = media
+            .audio_from(cutlass_model::Micros(0), 4800)
+            .expect("audio");
+        std::fs::remove_file(&path).expect("remove");
+        let first = first.as_f32().expect("f32");
+        assert_eq!(first.len(), 2 * 4800);
+        for (index, value) in first.iter().enumerate() {
+            assert!(
+                (value - expected[2 * 120 + index]).abs() < 1e-6,
+                "sample {index}"
+            );
+        }
     }
 
     /// An `.opus` file opens, plays from the start exactly what the Rust
@@ -248,9 +716,9 @@ mod tests {
         }
         let readers = installed_readers();
         let info = readers.probe(&path).expect("probe");
-        // The probe takes the last packet's end, which counts the 2.5 ms
-        // pre-skip, as it counts AAC priming in an MP4.
-        assert_eq!(info.duration.map(|d| d.0), Some(1_502_500));
+        // The probe measures from the stream's time zero, as playback places
+        // it, so the 2.5 ms pre-skip is not counted: 1.5 s plays.
+        assert_eq!(info.duration.map(|d| d.0), Some(1_500_000));
         let mut media = readers.open(&path).expect("open");
         // From the start, the reader plays exactly the samples after the
         // pre-skip.
@@ -267,6 +735,156 @@ mod tests {
         }
         // A seek decodes from 80 ms early with a fresh decoder, so the
         // samples converge on the continuous decode rather than equal it.
+        let later = media
+            .audio_from(cutlass_model::Micros(1_000_000), 4800)
+            .expect("audio");
+        std::fs::remove_file(&path).expect("remove");
+        let later = later.as_f32().expect("f32");
+        assert_eq!(later.len(), 2 * 4800);
+        let start = 2 * (120 + 48_000);
+        let (mut signal, mut noise) = (0.0f64, 0.0f64);
+        for (index, value) in later.iter().enumerate() {
+            let want = f64::from(expected[start + index]);
+            signal += want * want;
+            noise += (f64::from(*value) - want).powi(2);
+        }
+        let snr = 10.0 * (signal / noise.max(1e-30)).log10();
+        assert!(snr > 30.0, "SNR {snr:.1} dB after a seek");
+    }
+
+    /// Opus at 48 kHz, two seconds of a sine, written to a WebM file whose
+    /// Segment tick is `scale` nanoseconds. Returns what the Rust decoder
+    /// gives for every packet in a row, pre-skip included.
+    fn opus_webm(path: &std::path::Path, scale: u64) -> Vec<f32> {
+        use cutlass_encode::{AudioInput, ChannelLayout, CodecParams, Encoder, Pcm, SideData};
+
+        let samples: Vec<f32> = (0..2 * 96_000)
+            .map(|i| ((i as f32) * 0.011).sin() * 0.4)
+            .collect();
+        let mut spec = CodecParams::audio(CodecId::Opus, 48_000, ChannelLayout::stereo());
+        spec.bitrate = 128_000;
+        let mut encoder = cutlass_opus::OpusEncoder::open(&spec).expect("encoder");
+        let pcm = Pcm::from_f32(48_000, ChannelLayout::stereo(), samples).expect("pcm");
+        let mut packets = encoder.push(&AudioInput { pcm }).expect("push");
+        packets.extend(encoder.drain().expect("drain"));
+        let mut mux =
+            cutlass_matroska::MatroskaMux::webm(std::fs::File::create(path).expect("create"))
+                .with_timestamp_scale(scale);
+        let params =
+            StreamParams::try_audio(StreamCodec::Known(CodecId::Opus), 48_000, 2, Vec::new())
+                .expect("params");
+        let track = mux
+            .add_stream(NewStream {
+                params,
+                timescale: Timescale::new(48_000),
+                language: None,
+            })
+            .expect("stream");
+        let mut ticks = 0;
+        for packet in &packets {
+            for side in &packet.side {
+                if let SideData::Config(head) = side {
+                    mux.set_config(track, head).expect("head");
+                }
+            }
+            let timestamp =
+                Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
+                    .expect("timestamp");
+            let out = Packet::try_new(
+                track.get(),
+                packet.data.clone(),
+                timestamp,
+                Timescale::new(48_000),
+                true,
+            )
+            .expect("packet");
+            mux.write_packet(&out).expect("write");
+            ticks += packet.duration;
+        }
+        mux.finish(&[TrackDuration {
+            track,
+            timescale: Timescale::new(48_000),
+            ticks,
+        }])
+        .expect("finish");
+        drop(mux);
+        let mut decoder = cutlass_opus::OpusDecoder::open(&spec).expect("decoder");
+        let mut expected = Vec::new();
+        for packet in &packets {
+            expected.extend(decoder.decode(&packet.data).expect("decode"));
+        }
+        expected
+    }
+
+    /// A `.webm` file with Opus opens, plays from the start exactly what the
+    /// Rust decoder gives after the pre-skip, and converges on it after a
+    /// seek. The Segment tick here is 0.5 ms, so the 2.5 ms pre-skip is a
+    /// whole number of ticks.
+    #[test]
+    fn a_webm_opus_file_opens_seeks_and_decodes_after_the_pre_skip() {
+        let path =
+            std::env::temp_dir().join(format!("cutlass-readers-opus-{}.webm", std::process::id()));
+        let expected = opus_webm(&path, 500_000);
+        let readers = installed_readers();
+        let info = readers.probe(&path).expect("probe");
+        // As for an `.opus` file, the duration is what plays: the 2.5 ms
+        // pre-skip is not counted.
+        assert_eq!(info.duration.map(|d| d.0), Some(2_000_000));
+        let mut media = readers.open(&path).expect("open");
+        let first = media
+            .audio_from(cutlass_model::Micros(0), 4800)
+            .expect("audio");
+        let first = first.as_f32().expect("f32");
+        assert_eq!(first.len(), 2 * 4800);
+        for (index, value) in first.iter().enumerate() {
+            assert!(
+                (value - expected[2 * 120 + index]).abs() < 1e-6,
+                "sample {index}"
+            );
+        }
+        let later = media
+            .audio_from(cutlass_model::Micros(1_000_000), 4800)
+            .expect("audio");
+        std::fs::remove_file(&path).expect("remove");
+        let later = later.as_f32().expect("f32");
+        assert_eq!(later.len(), 2 * 4800);
+        let start = 2 * (120 + 48_000);
+        let (mut signal, mut noise) = (0.0f64, 0.0f64);
+        for (index, value) in later.iter().enumerate() {
+            let want = f64::from(expected[start + index]);
+            signal += want * want;
+            noise += (f64::from(*value) - want).powi(2);
+        }
+        let snr = 10.0 * (signal / noise.max(1e-30)).log10();
+        assert!(snr > 30.0, "SNR {snr:.1} dB after a seek");
+    }
+
+    /// At the usual 1 ms Segment tick, the 2.5 ms pre-skip is stored as the
+    /// CodecDelay in nanoseconds and the stream's edit counts whole ticks
+    /// (3 ms), but the reader takes the pre-skip in samples from the trim and
+    /// starts on exactly the sample after it, from the start and after a
+    /// seek.
+    #[test]
+    fn a_millisecond_webm_starts_after_the_exact_opus_pre_skip() {
+        let path = std::env::temp_dir().join(format!(
+            "cutlass-readers-opus-ms-{}.webm",
+            std::process::id()
+        ));
+        let expected = opus_webm(&path, 1_000_000);
+        let mut media = installed_readers().open(&path).expect("open");
+        let first = media
+            .audio_from(cutlass_model::Micros(0), 480)
+            .expect("audio");
+        let first = first.as_f32().expect("f32");
+        assert_eq!(first.len(), 2 * 480);
+        for (index, value) in first.iter().enumerate() {
+            assert!(
+                (value - expected[2 * 120 + index]).abs() < 1e-6,
+                "sample {index}"
+            );
+        }
+        // Mid-stream, after a seek, the decoder converges on the same
+        // samples: a 24-sample slip would show as noise here.
         let later = media
             .audio_from(cutlass_model::Micros(1_000_000), 4800)
             .expect("audio");
@@ -459,6 +1077,358 @@ mod tests {
         assert_eq!(sound.pcm.rate, 48_000);
     }
 
+    /// The first picture of an AV1 file from `crates/codecs/av1/tests/mp4`,
+    /// decoded by the Rust decoder: its coded format and its RGBA.
+    fn av1_software_picture(name: &str) -> (cutlass_decode::PixelFormat, (u32, u32), Vec<u8>) {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/codecs/av1/tests/mp4")
+            .join(name);
+        let software = cutlass_settings::Hardware {
+            decode: false,
+            encode: false,
+            ..cutlass_settings::Hardware::default()
+        };
+        let readers = super::readers_with(crate::register_codecs_with(&software).0);
+        let mut media = readers.open(&path).expect(name);
+        let held = media
+            .decode_at(
+                cutlass_model::Micros(0),
+                &cutlass_model::TimeRange::new(0, 1_000_000),
+            )
+            .expect(name);
+        let cutlass_engine::DecodedFrame::Coded { pixel, .. } = &held.frame else {
+            panic!("{name}: not a coded picture");
+        };
+        let size = (held.frame.width(), held.frame.height());
+        let cutlass_picture::Picture::Cpu(bytes) =
+            cutlass_engine::decoded_picture(&held.frame).expect(name)
+        else {
+            panic!("{name}: not on the CPU");
+        };
+        (*pixel, size, bytes.into_rgba())
+    }
+
+    #[test]
+    fn av1_of_every_depth_and_chroma_layout_becomes_a_picture() {
+        use cutlass_decode::PixelFormat as P;
+        // aomenc and SVT-AV1 streams that FFmpeg copied into MP4: HDR10
+        // 10-bit, 4:4:4, 4:2:2 at 10 bits, 12-bit 4:2:0 and 4:4:4, and GBR.
+        for (name, pixel, size) in [
+            ("hdr10.mp4", P::Yuv420p10, (64, 64)),
+            ("yuv444.mp4", P::Yuv444p, (64, 64)),
+            ("yuv422-10.mp4", P::Yuv422p10, (64, 64)),
+            ("yuv420-12.mp4", P::Yuv420p12, (64, 64)),
+            ("yuv444-12.mp4", P::Yuv444p12, (64, 64)),
+            ("gbr.mp4", P::Gbrp, (128, 128)),
+        ] {
+            let (got, got_size, rgba) = av1_software_picture(name);
+            assert_eq!(got, pixel, "{name}");
+            assert_eq!(got_size, size, "{name}");
+            assert_eq!(rgba.len(), (size.0 * size.1 * 4) as usize, "{name}");
+            assert!(rgba.chunks(4).all(|p| p[3] == 255), "{name}");
+            // A picture, not one flat value.
+            assert!(rgba.chunks(4).any(|p| p[..3] != rgba[..3]), "{name}");
+        }
+    }
+
+    #[test]
+    fn an_avif_still_decodes_with_the_rust_decoder() {
+        // SVT-AV1 stills FFmpeg wrote as AVIF: a flat 0x4080C0, full range
+        // with the BT.709 matrix, and FFmpeg's test pattern.
+        let (pixel, size, rgba) = av1_software_picture("flat.avif");
+        assert_eq!(pixel, cutlass_decode::PixelFormat::Yuv420p);
+        assert_eq!(size, (128, 96));
+        for (channel, want) in [64i32, 128, 192].into_iter().enumerate() {
+            let got = i32::from(rgba[4 * (48 * 128 + 64) + channel]);
+            assert!((got - want).abs() <= 3, "channel {channel}: {got}");
+        }
+        let (pixel, size, rgba) = av1_software_picture("pattern.avif");
+        assert_eq!(pixel, cutlass_decode::PixelFormat::Yuv420p);
+        assert_eq!(size, (320, 180));
+        assert!(rgba.chunks(4).any(|p| p[..3] != rgba[..3]));
+    }
+
+    #[test]
+    fn av1_full_range_and_a_bt601_matrix_come_out_in_the_color_that_went_in() {
+        // SVT-AV1, a flat 0x4080C0: once full range with the BT.709 matrix
+        // (libdav1d decodes Y 119, U 167, V 92), once studio swing with the
+        // BT.601 matrix (Y 116, U 166, V 95). Read as studio swing BT.709,
+        // the first would come out near (55, 120, 197) and the second near
+        // (53, 123, 197).
+        for name in ["full709.mp4", "limited601.mp4"] {
+            let (pixel, size, rgba) = av1_software_picture(name);
+            assert_eq!(pixel, cutlass_decode::PixelFormat::Yuv420p);
+            assert_eq!(size, (64, 64));
+            for (channel, want) in [64i32, 128, 192].into_iter().enumerate() {
+                let got = i32::from(rgba[4 * (32 * 64 + 32) + channel]);
+                assert!((got - want).abs() <= 3, "{name} channel {channel}: {got}");
+            }
+        }
+    }
+
+    const AV1_SIZE: (u32, u32) = (96, 64);
+    const AV1_FRAMES: u32 = 10;
+
+    /// The RGBA picture `index` of the AV1 movie: a gradient that moves.
+    fn av1_rgba(index: u32) -> Vec<u8> {
+        let (w, h) = AV1_SIZE;
+        (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = (i % w, i / w);
+                [
+                    (40 + (x * 2 + index * 6) % 160) as u8,
+                    (60 + (y * 2) % 120) as u8,
+                    (200 - (x + y) % 100) as u8,
+                    255,
+                ]
+            })
+            .collect()
+    }
+
+    /// What export does with the Rust AV1 encoder: RGBA frames through the
+    /// installed encode factory, the packets and the `av1C` record into
+    /// `mux`. Returns the record.
+    fn av1_into<M: Mux>(mux: &mut M) -> Vec<u8> {
+        use cutlass_decode::{CodecParams, PixelFormat, SideData};
+        use cutlass_encode::{CpuFrame, FrameInput, FrameTime};
+
+        let software = cutlass_settings::Hardware {
+            decode: false,
+            encode: false,
+            ..cutlass_settings::Hardware::default()
+        };
+        let (_, encoders) = crate::register_codecs_with(&software);
+        let (w, h) = AV1_SIZE;
+        let mut params = CodecParams::with_format(CodecId::Av1, w, h, PixelFormat::Rgba8);
+        params.bitrate = 400_000;
+        let mut encoder = encoders
+            .open(&params)
+            .expect("the Rust AV1 encoder takes RGBA");
+        assert_eq!(encoder.codec(), CodecId::Av1);
+        let mut packets = Vec::new();
+        for index in 0..AV1_FRAMES {
+            let time = FrameTime::new(i64::from(index), 1, 30).expect("time");
+            let frame =
+                CpuFrame::new(w, h, PixelFormat::Rgba8, av1_rgba(index), time).expect("frame");
+            packets.extend(encoder.push_frame(&FrameInput::Cpu(frame)).expect("push"));
+        }
+        packets.extend(encoder.drain().expect("drain"));
+        assert_eq!(packets.len(), AV1_FRAMES as usize);
+        let configs: Vec<&Vec<u8>> = packets
+            .iter()
+            .flat_map(|packet| &packet.side)
+            .filter_map(|side| match side {
+                SideData::Config(bytes) => Some(bytes),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(configs.len(), 1, "one av1C record");
+        assert!(matches!(packets[0].side.first(), Some(SideData::Config(_))));
+        let config = configs[0].clone();
+        assert_eq!(config[0], 0x81);
+
+        let size = cutlass_codec::FrameSize::try_new(w, h).expect("size");
+        let track = mux
+            .add_stream(NewStream {
+                params: StreamParams::video(StreamCodec::Known(CodecId::Av1), size, Vec::new()),
+                timescale: Timescale::new(30),
+                language: None,
+            })
+            .expect("track");
+        mux.set_config(track, &config).expect("config");
+        for packet in &packets {
+            let time =
+                Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
+                    .expect("time");
+            let out = Packet::try_new(
+                track.get(),
+                packet.data.clone(),
+                time,
+                Timescale::new(30),
+                packet.keyframe,
+            )
+            .expect("packet");
+            mux.write_packet(&out).expect("write");
+        }
+        mux.finish(&[TrackDuration {
+            track,
+            timescale: Timescale::new(30),
+            ticks: i64::from(AV1_FRAMES),
+        }])
+        .expect("finish");
+        config
+    }
+
+    /// Every picture of the AV1 movie at `path` through the installed
+    /// readers with the Rust decoder: the packed 4:2:0 bytes, and the first
+    /// picture's RGBA.
+    fn av1_read_back(path: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
+        let software = cutlass_settings::Hardware {
+            decode: false,
+            encode: false,
+            ..cutlass_settings::Hardware::default()
+        };
+        let readers = super::readers_with(crate::register_codecs_with(&software).0);
+        let info = readers.probe(path).expect("probe");
+        assert_eq!(
+            (info.width, info.height),
+            (Some(AV1_SIZE.0), Some(AV1_SIZE.1))
+        );
+        let length = info.duration.expect("duration").0;
+        let want = i64::from(AV1_FRAMES) * 1_000_000 / 30;
+        assert!((length - want).abs() <= 34_000, "{length} against {want}");
+        let mut media = readers.open(path).expect("open");
+        let mut yuv = Vec::new();
+        let mut first = Vec::new();
+        for index in 0..AV1_FRAMES {
+            // The middle of each picture's time.
+            let at = cutlass_model::Micros((i64::from(index) * 2 + 1) * 1_000_000 / 60);
+            let held = media
+                .decode_at(at, &cutlass_model::TimeRange::new(0, 10_000_000))
+                .expect("picture");
+            let cutlass_engine::DecodedFrame::Coded { pixel, bytes, .. } = &held.frame else {
+                panic!("not a coded picture");
+            };
+            assert_eq!(*pixel, cutlass_decode::PixelFormat::Yuv420p);
+            assert_eq!((held.frame.width(), held.frame.height()), AV1_SIZE);
+            yuv.extend_from_slice(bytes);
+            if index == 0 {
+                let cutlass_picture::Picture::Cpu(rgba) =
+                    cutlass_engine::decoded_picture(&held.frame).expect("picture")
+                else {
+                    panic!("not on the CPU");
+                };
+                first = rgba.into_rgba();
+            }
+        }
+        (yuv, first)
+    }
+
+    /// Peak signal to noise of the red, green and blue of two RGBA pictures.
+    fn rgb_psnr(a: &[u8], b: &[u8]) -> f64 {
+        assert_eq!(a.len(), b.len());
+        let mut sum = 0.0f64;
+        let mut count = 0.0f64;
+        for (pa, pb) in a.chunks(4).zip(b.chunks(4)) {
+            for channel in 0..3 {
+                let d = f64::from(pa[channel]) - f64::from(pb[channel]);
+                sum += d * d;
+                count += 1.0;
+            }
+        }
+        10.0 * (255.0 * 255.0 / (sum / count).max(1e-9)).log10()
+    }
+
+    /// FFmpeg's libdav1d decodes `path` to `ours`, and ffprobe reads AV1
+    /// tagged BT.709. Skipped without FFmpeg.
+    fn av1_matches_ffmpeg(path: &std::path::Path, ours: &[u8]) {
+        use std::process::Command;
+        let Ok(probe) = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name,pix_fmt,width,height,color_range,color_space,color_primaries,color_transfer,nb_read_frames",
+                "-count_frames",
+                "-of",
+                "default=noprint_wrappers=1",
+            ])
+            .arg(path)
+            .output()
+        else {
+            eprintln!("skipped: ffprobe is missing");
+            return;
+        };
+        assert!(
+            probe.status.success(),
+            "ffprobe: {}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        let text = String::from_utf8_lossy(&probe.stdout);
+        for line in [
+            "codec_name=av1",
+            "pix_fmt=yuv420p",
+            "width=96",
+            "height=64",
+            "color_range=tv",
+            "color_space=bt709",
+            "color_primaries=bt709",
+            "color_transfer=bt709",
+            "nb_read_frames=10",
+        ] {
+            assert!(text.contains(line), "ffprobe has no {line}: {text}");
+        }
+        let decoded = Command::new("ffmpeg")
+            .args(["-v", "error", "-c:v", "libdav1d", "-i"])
+            .arg(path)
+            .args([
+                "-fps_mode",
+                "passthrough",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
+                "-",
+            ])
+            .output()
+            .expect("ffmpeg");
+        if !decoded.status.success() {
+            let message = String::from_utf8_lossy(&decoded.stderr);
+            if message.contains("libdav1d") && message.contains("Unknown decoder") {
+                eprintln!("skipped: this ffmpeg has no libdav1d");
+                return;
+            }
+            panic!("ffmpeg: {message}");
+        }
+        assert!(
+            decoded.stdout == ours,
+            "libdav1d decodes the file differently"
+        );
+    }
+
+    #[test]
+    fn an_av1_export_to_mp4_opens_here_and_in_ffmpeg() {
+        let path =
+            std::env::temp_dir().join(format!("cutlass-readers-av1-{}.mp4", std::process::id()));
+        let mut mux = cutlass_isobmff::Mp4Mux::new(std::fs::File::create(&path).expect("create"));
+        let config = av1_into(&mut mux);
+        drop(mux);
+        // The sample entry holds the record.
+        let file = std::fs::read(&path).expect("read");
+        let at = file
+            .windows(4)
+            .position(|bytes| bytes == b"av1C")
+            .expect("an av1C box");
+        let size = u32::from_be_bytes(file[at - 4..at].try_into().expect("size")) as usize;
+        assert_eq!(&file[at + 4..at - 4 + size], config.as_slice());
+        let (yuv, first) = av1_read_back(&path);
+        assert_eq!(yuv.len(), (96 * 64 * 3 / 2 * AV1_FRAMES) as usize);
+        // The picture that went in comes back, through the coding and the
+        // BT.709 studio swing both ends agree on.
+        let psnr = rgb_psnr(&first, &av1_rgba(0));
+        assert!(psnr > 30.0, "first picture {psnr:.1} dB");
+        av1_matches_ffmpeg(&path, &yuv);
+        std::fs::remove_file(&path).expect("remove");
+    }
+
+    #[test]
+    fn an_av1_export_to_webm_opens_here_and_in_ffmpeg() {
+        let path =
+            std::env::temp_dir().join(format!("cutlass-readers-av1-{}.webm", std::process::id()));
+        let mut mux =
+            cutlass_matroska::MatroskaMux::webm(std::fs::File::create(&path).expect("create"));
+        av1_into(&mut mux);
+        drop(mux);
+        let (yuv, first) = av1_read_back(&path);
+        assert_eq!(yuv.len(), (96 * 64 * 3 / 2 * AV1_FRAMES) as usize);
+        let psnr = rgb_psnr(&first, &av1_rgba(0));
+        assert!(psnr > 30.0, "first picture {psnr:.1} dB");
+        av1_matches_ffmpeg(&path, &yuv);
+        std::fs::remove_file(&path).expect("remove");
+    }
+
     #[test]
     fn a_fragmented_movie_without_sidx_or_mfra_decodes_the_picture_at_two_seconds() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -475,6 +1445,43 @@ mod tests {
         assert!(held.start.0 <= at.0 && at.0 < held.end.0);
         assert_eq!(held.frame.width(), 1920);
         assert_eq!(held.frame.height(), 1080);
+    }
+
+    /// Transport streams from FFmpeg open through the installed readers,
+    /// decode a picture half a second in, and play their sound.
+    #[test]
+    fn transport_streams_play_their_picture_and_sound() {
+        let fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/containers/mpegts/tests/fixtures");
+        for name in [
+            "h264_aac.ts",
+            "hevc_ac3.ts",
+            "h264_eac3.m2ts",
+            "h264_opus.ts",
+        ] {
+            let path = fixtures.join(name);
+            // The length counts from the first picture, which a transport
+            // stream shows about 1.4 s into its clock.
+            let length = installed_readers().probe(&path).expect(name).duration;
+            let length = length.expect(name).0;
+            assert!(
+                (1_150_000..=1_300_000).contains(&length),
+                "{name}: {length}"
+            );
+            let mut media = installed_readers().open(&path).expect(name);
+            let at = cutlass_model::Micros(500_000);
+            let held = media
+                .decode_at(at, &cutlass_model::TimeRange::new(0, 1_200_000))
+                .expect(name);
+            assert!(held.start.0 <= at.0 && at.0 < held.end.0, "{name}");
+            assert_eq!(
+                (held.frame.width(), held.frame.height()),
+                (96, 64),
+                "{name}"
+            );
+            let sound = media.pull_audio().expect(name).expect(name);
+            assert_eq!(sound.pcm.rate, 48_000, "{name}");
+        }
     }
 
     fn mp3_fixture() -> std::path::PathBuf {

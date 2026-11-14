@@ -75,12 +75,17 @@ jobs:
                   allowed_unsafe.append(member)
               if "[lints]\nworkspace = true" in text:
                   continue
-              # A platform crate copies the tables. Cargo rejects mixing
-              # `workspace = true` with the one `unsafe_code` override.
+              # A platform crate, and the H.264 and AV1 kernels, copy the tables.
+              # Cargo rejects mixing `workspace = true` with the one
+              # `unsafe_code` override.
               rust = lint_lines(text, "[lints.rust]")
               clippy = lint_lines(text, "[lints.clippy]")
               if (
-                  member.startswith("crates/platform-")
+                  (
+                      member.startswith("crates/platform-")
+                      or member == "crates/codecs/h264-kernels"
+                      or member == "crates/simd"
+                  )
                   and rust == denied_rust
                   and clippy == workspace_clippy
               ):
@@ -196,11 +201,14 @@ jobs:
       - name: GTK and ALSA headers
         run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libasound2-dev
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build
-        run: cargo build --release -p cutlass
+        # As release.yml builds: the H.264 codec optimised from a profile.
+        run: python3 scripts/pgo.py -p cutlass
       - name: appimagetool 1.9.1
         run: |
           curl -sSL -o "$RUNNER_TEMP/appimagetool" https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
@@ -229,11 +237,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build
-        run: cargo build --release -p cutlass
+        # As release.yml builds: the H.264 codec optimised from a profile.
+        run: python3 scripts/pgo.py -p cutlass
       - name: Bundle
         run: python3 scripts/macos_bundle.py target/release/cutlass dist
       - name: Smoke test the bundle
@@ -255,11 +266,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build
-        run: cargo build --release -p cutlass
+        # As release.yml builds: the H.264 codec optimised from a profile.
+        run: python scripts/pgo.py -p cutlass
       - name: NSIS
         shell: bash
         run: |

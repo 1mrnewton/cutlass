@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "On-device image models on burn: click-to-select with MobileSAM, Enhance quality with Real-ESRGAN's compact model, and Reduce image noise with FastDVDnet."
+description = "On-device image models on burn: click-to-select with MobileSAM, Enhance quality with Real-ESRGAN's compact model, Reduce image noise with FastDVDnet, and face, body and hand detectors for tracking."
 
 [dependencies]
 cutlass-effects = { path = "../effects", version = "0.1.0" }

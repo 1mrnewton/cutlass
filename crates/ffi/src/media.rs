@@ -104,6 +104,41 @@ pub(crate) fn copy_in(root: &Path, source: &Path) -> Result<(String, PathBuf), F
     Ok((format!("Resources/{candidate}"), destination))
 }
 
+/// Write `bytes` into `root/Resources` as `name`, or a name beside it not
+/// already taken. Returns the stored relative path and the file.
+pub(crate) fn write_in(
+    root: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(String, PathBuf), FfiError> {
+    let io = |error: std::io::Error| FfiError::Refused {
+        reason: error.to_string(),
+    };
+    if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
+        return Err(FfiError::Refused {
+            reason: "the file has no name".to_owned(),
+        });
+    }
+    let resources = root.join("Resources");
+    std::fs::create_dir_all(&resources).map_err(io)?;
+    let (stem, extension) = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => (stem, Some(extension)),
+        _ => (name, None),
+    };
+    let mut candidate = name.to_owned();
+    let mut n = 1_u32;
+    while resources.join(&candidate).exists() {
+        n = n.saturating_add(1);
+        candidate = match extension {
+            Some(extension) => format!("{stem} {n}.{extension}"),
+            None => format!("{stem} {n}"),
+        };
+    }
+    let destination = resources.join(&candidate);
+    std::fs::write(&destination, bytes).map_err(io)?;
+    Ok((format!("Resources/{candidate}"), destination))
+}
+
 /// The requests that add the whole of `material_id` at the end of its lane.
 pub(crate) fn append_requests(
     draft: &Draft,

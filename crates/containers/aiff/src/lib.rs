@@ -12,8 +12,8 @@
 //! unnamed fourcc are refused.
 //!
 //! PCM extradata is the three-byte layout the PCM decoder reads: coding,
-//! endian, then interleaved. Coding byte 6 is 8-bit, which that decoder
-//! refuses. Float and little-endian integer are written as AIFF-C.
+//! endian, then interleaved. Coding byte 6 is signed 8-bit. Float and
+//! little-endian integer are written as AIFF-C.
 //! Big-endian integer is written as AIFF.
 
 #![forbid(unsafe_code)]

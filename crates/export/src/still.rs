@@ -54,16 +54,7 @@ pub fn write_still(
     format: StillFormat,
     destination: &Path,
 ) -> Result<(u32, u32), ExportError> {
-    let mut device = SoftwareDevice::new();
-    let (width, height, rgba) = still_rgba(
-        sources.draft,
-        &mut device,
-        time,
-        sources.readers,
-        sources.root,
-        sources.fonts,
-        sources.renderer,
-    )?;
+    let (width, height, rgba) = still_picture(sources, time)?;
     let bytes = encoded(width, height, &rgba, format, sources.encoders)?;
     let part = part_path(destination).ok_or(ExportError::Path)?;
     let written = write_synced(&part, &bytes).and_then(|()| fs::rename(&part, destination));
@@ -72,6 +63,24 @@ pub fn write_still(
         return Err(ExportError::File(error.to_string()));
     }
     Ok((width, height))
+}
+
+/// The picture at `time` that [`write_still`] would write, before it is
+/// encoded: canvas-sized, straight RGBA, with its width and height.
+pub fn still_picture(
+    sources: &MovieSources<'_>,
+    time: Micros,
+) -> Result<(u32, u32, Vec<u8>), ExportError> {
+    let mut device = SoftwareDevice::new();
+    still_rgba(
+        sources.draft,
+        &mut device,
+        time,
+        sources.readers,
+        sources.root,
+        sources.fonts,
+        sources.renderer,
+    )
 }
 
 /// `rgba` as the bytes of a `format` file. WebP comes from `encoders`.

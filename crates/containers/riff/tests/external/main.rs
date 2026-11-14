@@ -10,6 +10,7 @@
 )]
 
 mod fuzz;
+mod layouts;
 mod local;
 mod measure;
 mod oracle;

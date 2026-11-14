@@ -477,6 +477,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetStable { .. } => "set_stable",
         Request::SetEnhance { .. } => "set_enhance",
         Request::SetDenoise { .. } => "set_denoise",
+        Request::SetDeflicker { .. } => "set_deflicker",
         Request::SetInterpolate { .. } => "set_interpolate",
         Request::SetRelight { .. } => "set_relight",
         Request::SetReframe { .. } => "set_reframe",
@@ -520,6 +521,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetMask { .. } => "set_mask",
         Request::SetSelection { .. } => "set_selection",
         Request::Track { .. } => "track",
+        Request::Untrack { .. } => "untrack",
         Request::SetColorMask { .. } => "set_color_mask",
         Request::SetEffectStrength { .. } => "set_effect_strength",
         Request::SetEffectControl { .. } => "set_effect_control",
@@ -554,6 +556,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetDropFrame { .. } => "set_drop_frame",
         Request::SetColorSpace { .. } => "set_color_space",
         Request::SetProjectName { .. } => "set_project_name",
+        Request::SetCover { .. } => "set_cover",
         Request::SetFreeLayer { .. } => "set_free_layer",
         Request::Arrange { .. } => "arrange",
     }

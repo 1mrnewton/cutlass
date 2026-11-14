@@ -13,7 +13,7 @@ use cutlass_engine::{DecodedFrame, DisplayQuarter, ReaderFactory};
 use cutlass_model::{MaterialId, MaterialRef, Micros, SegmentId, TimeRange};
 use cutlass_picture::Picture;
 use cutlass_session::Request;
-use cutlass_vision::{Click, Compute, Image, MobileSam, SelectJob, Selector};
+use cutlass_vision::{Click, Compute, Image, MobileSam, Part, SelectJob, Selector};
 
 use super::{Landing, Shell, ShellError};
 
@@ -168,6 +168,11 @@ impl Shell {
     fn pick_target(&self) -> Result<Picking, ShellError> {
         let segment_id = self.picture_segment("a selection belongs on a video clip")?;
         self.refuse_locked(&segment_id)?;
+        self.picking_of(segment_id, self.playhead())
+    }
+
+    /// `segment_id`'s frame at timeline `time`, with no clicks yet.
+    fn picking_of(&self, segment_id: SegmentId, time: Micros) -> Result<Picking, ShellError> {
         let draft = self.session_draft()?;
         let Some(segment) = super::placed(draft, &segment_id).map(|(segment, _)| segment) else {
             return Err(ShellError::Unavailable(
@@ -182,7 +187,6 @@ impl Shell {
                 "a selection belongs on a video clip".to_owned(),
             ));
         }
-        let time = self.playhead();
         let source = cutlass_engine::placement_of(draft, segment)
             .ok()
             .and_then(|map| cutlass_engine::map_timeline(&map, time).ok())
@@ -251,6 +255,396 @@ impl Shell {
         }
         started
     }
+}
+
+impl Shell {
+    /// Whether a click on the preview can find the subject of the track
+    /// being set up: the selection model is on this machine.
+    pub fn track_subject_enabled(&self) -> bool {
+        self.tracking.is_some() && vision_model_here()
+    }
+
+    /// Find the object under canvas pixel `x`, `y` in the video being
+    /// tracked, at the playhead, and draw the track's box around it. The
+    /// selection model runs as a job; the box lands when it is done.
+    pub fn pick_track_subject(&mut self, x: f64, y: f64) -> Result<(), ShellError> {
+        let Some(segment_id) = self.tracking.as_ref().map(|t| t.segment_id.clone()) else {
+            return Err(ShellError::Unavailable("not setting up a track".to_owned()));
+        };
+        if !vision_model_here() {
+            return Err(ShellError::Unavailable(
+                "the selection model is not on this machine; drag a box instead".to_owned(),
+            ));
+        }
+        self.refuse_busy()?;
+        let time = self.playhead();
+        let mut picking = self.picking_of(segment_id.clone(), time)?;
+        let draft = self.session_draft()?;
+        let canvas = (
+            u32::try_from(draft.canvas_config.width.max(1)).unwrap_or(1),
+            u32::try_from(draft.canvas_config.height.max(1)).unwrap_or(1),
+        );
+        let segment = super::placed(draft, &segment_id)
+            .map(|(segment, _)| segment)
+            .ok_or_else(|| ShellError::Unavailable("the clip is not on the timeline".to_owned()))?;
+        let clip = cutlass_eval::clip_point(draft, segment, time, canvas, x, y)
+            .filter(|(u, v)| (-1.0..=1.0).contains(u) && (-1.0..=1.0).contains(v))
+            .ok_or_else(|| ShellError::Unavailable("click on the video".to_owned()))?;
+        // Three points of the clip's picture on the canvas, to take the
+        // found object's corners back to the canvas.
+        let back = canvas_of_clip(draft, segment, time, canvas)
+            .ok_or_else(|| ShellError::Unavailable("the video is not drawn here".to_owned()))?;
+        picking.clicks.push(PickClick {
+            canvas: (x, y),
+            clip,
+            keep: true,
+        });
+        let loaded = self.vision.take();
+        let readers = self.readers.clone();
+        let kernels = Shell::home().cache().join("kernels");
+        self.start_job("Find the subject", move |progress| {
+            let model = match loaded {
+                Some(model) => Ok(model),
+                None => {
+                    progress.stage("Loading the selection model");
+                    load_vision(&kernels)
+                }
+            };
+            let (model, found) = match model {
+                Ok(mut model) => {
+                    progress.stage("Finding the subject");
+                    let found = subject_bounds(&mut model, &readers, &picking);
+                    (Some(model), found)
+                }
+                Err(error) => (None, Err(error)),
+            };
+            let landing: Landing = Box::new(move |shell: &mut Shell| {
+                if model.is_some() {
+                    shell.vision = model;
+                }
+                let (low, high) = found?;
+                let still = shell
+                    .tracking
+                    .as_ref()
+                    .is_some_and(|t| t.segment_id == segment_id);
+                if !still || shell.playhead() != time {
+                    return Err(ShellError::Unavailable(
+                        "the track changed while the subject was found".to_owned(),
+                    ));
+                }
+                let corners = [low, (high.0, low.1), high, (low.0, high.1)].map(back);
+                let xs = corners.map(|p| p.0);
+                let ys = corners.map(|p| p.1);
+                let min = |v: [f64; 4]| v.into_iter().fold(f64::INFINITY, f64::min);
+                let max = |v: [f64; 4]| v.into_iter().fold(f64::NEG_INFINITY, f64::max);
+                shell.set_track_box((min(xs), min(ys)), (max(xs), max(ys)))
+            });
+            landing
+        })
+    }
+}
+
+/// The folder inside `Models` that holds the face, body and hand detectors.
+pub(crate) const DETECT_FOLDER: &str = "detect";
+
+/// The folder holding the detectors: the one in `Models`, or in a debug
+/// build the checkout's `local-files` copy when `Models` has none.
+pub(super) fn detect_model_dir() -> PathBuf {
+    let installed = Shell::home().models().join(DETECT_FOLDER);
+    if installed.join(cutlass_vision::FACE_WEIGHTS).is_file() {
+        return installed;
+    }
+    #[cfg(debug_assertions)]
+    {
+        let checkout =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files/models/detect");
+        if checkout.join(cutlass_vision::FACE_WEIGHTS).is_file() {
+            return checkout;
+        }
+    }
+    installed
+}
+
+/// Whether `part`'s detector is on this machine.
+pub(super) fn detector_here(part: Part) -> bool {
+    detect_model_dir().join(part.weights()).is_file()
+}
+
+/// What to call `part` in a sentence.
+fn part_name(part: Part) -> &'static str {
+    match part {
+        Part::Face => "face",
+        Part::Body => "body",
+        Part::Hand => "hand",
+    }
+}
+
+impl Shell {
+    /// Whether `part` can be found for the track being set up: a track is
+    /// being set up and `part`'s detector is on this machine.
+    pub fn track_part_enabled(&self, part: Part) -> bool {
+        self.tracking.is_some() && detector_here(part)
+    }
+
+    /// Whether `part`'s detector is on this machine.
+    pub fn detector_ready(&self, part: Part) -> bool {
+        detector_here(part)
+    }
+
+    /// Find a face, a body or a hand in the video being tracked, at the
+    /// playhead, and draw the track's box around it: of several, the one
+    /// nearest the item that follows, else the surest. The detector runs
+    /// as a job; the box lands when it is done.
+    pub fn find_track_part(&mut self, part: Part) -> Result<(), ShellError> {
+        let Some(tracking) = self.tracking.clone() else {
+            return Err(ShellError::Unavailable("not setting up a track".to_owned()));
+        };
+        let name = part_name(part);
+        if !detector_here(part) {
+            return Err(ShellError::Unavailable(format!(
+                "the {name} detector is not on this machine; draw a box instead"
+            )));
+        }
+        self.refuse_busy()?;
+        let segment_id = tracking.segment_id.clone();
+        let time = self.playhead();
+        let picking = self.picking_of(segment_id.clone(), time)?;
+        let hint = tracking
+            .followers
+            .first()
+            .and_then(|id| self.stage_box(id))
+            .map(|stage| (stage.center_x, stage.center_y));
+        let draft = self.session_draft()?;
+        let canvas = (
+            u32::try_from(draft.canvas_config.width.max(1)).unwrap_or(1),
+            u32::try_from(draft.canvas_config.height.max(1)).unwrap_or(1),
+        );
+        let segment = super::placed(draft, &segment_id)
+            .map(|(segment, _)| segment)
+            .ok_or_else(|| ShellError::Unavailable("the clip is not on the timeline".to_owned()))?;
+        let back = canvas_of_clip(draft, segment, time, canvas)
+            .ok_or_else(|| ShellError::Unavailable("the video is not drawn here".to_owned()))?;
+        let at = self
+            .detectors
+            .iter()
+            .position(|detector| detector.part() == part);
+        let loaded = at.map(|at| self.detectors.swap_remove(at));
+        let readers = self.readers.clone();
+        let kernels = Shell::home().cache().join("kernels");
+        let key = FrameKey {
+            path: picking.path.clone(),
+            source: picking.source,
+        };
+        self.start_job(&format!("Find the {name}"), move |progress| {
+            let detector = match loaded {
+                Some(detector) => Ok(detector),
+                None => {
+                    progress.stage(&format!("Loading the {name} detector"));
+                    load_detector(&kernels, part)
+                }
+            };
+            let (detector, found) = match detector {
+                Ok(detector) => {
+                    progress.stage(&format!("Finding the {name}"));
+                    let found = frame_rgb(&readers, &key).and_then(|(width, height, rgb)| {
+                        let image = Image {
+                            width,
+                            height,
+                            rgb: &rgb,
+                        };
+                        detector
+                            .find(&image)
+                            .map(|found| (found, width, height))
+                            .map_err(|error| {
+                                cutlass_logger::error!("find the {name}: {error:?}");
+                                ShellError::Unavailable(format!("the {name} could not be found"))
+                            })
+                    });
+                    (Some(detector), found)
+                }
+                Err(error) => (None, Err(error)),
+            };
+            let landing: Landing = Box::new(move |shell: &mut Shell| {
+                if let Some(detector) = detector {
+                    shell.detectors.push(detector);
+                }
+                let (found, width, height) = found?;
+                let still = shell
+                    .tracking
+                    .as_ref()
+                    .is_some_and(|t| t.segment_id == segment_id);
+                if !still || shell.playhead() != time {
+                    return Err(ShellError::Unavailable(format!(
+                        "the track changed while the {name} was found"
+                    )));
+                }
+                let boxes: Vec<CanvasBox> = found
+                    .iter()
+                    .map(|f| canvas_box(&back, f, width, height))
+                    .collect();
+                let Some(chosen) = nearest(&boxes, hint) else {
+                    return Err(ShellError::Unavailable(format!(
+                        "no {name} was found at the playhead; draw a box instead"
+                    )));
+                };
+                shell.set_track_box(chosen.0, chosen.1)?;
+                if let Some(tracking) = shell.tracking.as_mut() {
+                    tracking.found = Some(part);
+                }
+                Ok(())
+            });
+            landing
+        })
+    }
+}
+
+/// Load `part`'s detector; a job does it.
+fn load_detector(
+    kernels: &std::path::Path,
+    part: Part,
+) -> Result<cutlass_vision::Detector, ShellError> {
+    let compute = Compute::best();
+    if compute == Compute::Gpu
+        && let Err(error) = cutlass_vision::keep_kernels_in(kernels)
+    {
+        cutlass_logger::warn!("kernel cache: {error}");
+    }
+    cutlass_vision::Detector::load(&detect_model_dir(), part, compute).map_err(|error| {
+        cutlass_logger::error!("{} detector: {error}", part_name(part));
+        ShellError::Unavailable(format!(
+            "the {} detector could not be loaded",
+            part_name(part)
+        ))
+    })
+}
+
+/// A box on the canvas: its top left and bottom right, in canvas pixels.
+type CanvasBox = ((f64, f64), (f64, f64));
+
+/// A found box in a `width` by `height` frame, as a box on the canvas
+/// around where that frame is drawn.
+fn canvas_box(
+    back: &impl Fn((f64, f64)) -> (f64, f64),
+    found: &cutlass_vision::Found,
+    width: u32,
+    height: u32,
+) -> CanvasBox {
+    let (w, h) = (f64::from(width.max(1)), f64::from(height.max(1)));
+    let clip = |x: f32, y: f32| (f64::from(x) / w * 2.0 - 1.0, 1.0 - f64::from(y) / h * 2.0);
+    let corners = [
+        clip(found.x0, found.y0),
+        clip(found.x1, found.y0),
+        clip(found.x1, found.y1),
+        clip(found.x0, found.y1),
+    ]
+    .map(back);
+    let min = |v: [f64; 4]| v.into_iter().fold(f64::INFINITY, f64::min);
+    let max = |v: [f64; 4]| v.into_iter().fold(f64::NEG_INFINITY, f64::max);
+    let (xs, ys) = (corners.map(|p| p.0), corners.map(|p| p.1));
+    ((min(xs), min(ys)), (max(xs), max(ys)))
+}
+
+/// Of `boxes`, surest first, the one whose middle is nearest `hint`, or the
+/// surest with no hint.
+fn nearest(boxes: &[CanvasBox], hint: Option<(f64, f64)>) -> Option<CanvasBox> {
+    let Some((hx, hy)) = hint else {
+        return boxes.first().copied();
+    };
+    boxes.iter().copied().min_by(|a, b| {
+        let distance = |((x0, y0), (x1, y1)): CanvasBox| {
+            ((x0 + x1) / 2.0 - hx).powi(2) + ((y0 + y1) / 2.0 - hy).powi(2)
+        };
+        distance(*a).total_cmp(&distance(*b))
+    })
+}
+
+/// The map from `segment`'s own picture (-1 to 1, y up) to canvas pixels
+/// at `time`: the inverse of [`cutlass_eval::clip_point`], which is affine.
+fn canvas_of_clip(
+    draft: &cutlass_model::Draft,
+    segment: &cutlass_model::Segment,
+    time: Micros,
+    canvas: (u32, u32),
+) -> Option<impl Fn((f64, f64)) -> (f64, f64) + Send + 'static> {
+    let at = |x, y| cutlass_eval::clip_point(draft, segment, time, canvas, x, y);
+    let o = at(0.0, 0.0)?;
+    let ex = at(1.0, 0.0)?;
+    let ey = at(0.0, 1.0)?;
+    // clip = o + x * a + y * b, with a and b the columns.
+    let (a, b) = ((ex.0 - o.0, ex.1 - o.1), (ey.0 - o.0, ey.1 - o.1));
+    let det = a.0 * b.1 - b.0 * a.1;
+    if !det.is_finite() || det.abs() < 1e-12 {
+        return None;
+    }
+    Some(move |(u, v): (f64, f64)| {
+        let (du, dv) = (u - o.0, v - o.1);
+        ((du * b.1 - b.0 * dv) / det, (a.0 * dv - du * a.1) / det)
+    })
+}
+
+/// The box around the object `picking`'s click lands on, in the clip's
+/// own picture (-1 to 1, y up): the low corner then the high one.
+#[allow(clippy::type_complexity)]
+fn subject_bounds(
+    model: &mut VisionModel,
+    readers: &ReaderFactory,
+    picking: &Picking,
+) -> Result<((f64, f64), (f64, f64)), ShellError> {
+    let key = FrameKey {
+        path: picking.path.clone(),
+        source: picking.source,
+    };
+    let refused = |error: cutlass_vision::VisionError| {
+        cutlass_logger::error!("find the subject: {error:?}");
+        ShellError::Unavailable("the subject could not be found".to_owned())
+    };
+    if model.read.as_ref() != Some(&key) {
+        let (width, height, rgb) = frame_rgb(readers, &key)?;
+        model.read = None;
+        model
+            .sam
+            .encode(&Image {
+                width,
+                height,
+                rgb: &rgb,
+            })
+            .map_err(refused)?;
+        model.read = Some(key);
+        model.size = (width, height);
+    }
+    let (width, height) = model.size;
+    let clicks = source_clicks(picking, width, height);
+    let mask = model.sam.select(&clicks).map_err(refused)?;
+    mask_bounds(&mask).ok_or_else(|| {
+        ShellError::Unavailable("nothing was found there; drag a box instead".to_owned())
+    })
+}
+
+/// The selected pixels' bounds in the picture's own -1 to 1, y up, as the
+/// low corner (left, top) then the high one (right, bottom).
+fn mask_bounds(mask: &cutlass_vision::Mask) -> Option<((f64, f64), (f64, f64))> {
+    let (w, h) = (mask.width as usize, mask.height as usize);
+    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+    for (i, &a) in mask.alpha.iter().enumerate().take(w * h) {
+        if a != 0 {
+            let (x, y) = (i % w, i / w);
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x + 1);
+            y1 = y1.max(y + 1);
+        }
+    }
+    if x0 == usize::MAX {
+        return None;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let to = |x: usize, y: usize| {
+        (
+            x as f64 / w as f64 * 2.0 - 1.0,
+            1.0 - y as f64 / h as f64 * 2.0,
+        )
+    };
+    Some((to(x0, y0), to(x1, y1)))
 }
 
 /// Load the selection model; slow, so a job does it.
@@ -425,6 +819,77 @@ mod tests {
         assert!(shell.pick_target().is_err());
         assert!(shell.picking().is_none());
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_mask_is_boxed_in_the_pictures_own_terms() {
+        // A 4 by 2 frame with its right top pixel and the one under it set.
+        let mut alpha = vec![0; 8];
+        alpha[3] = 255;
+        alpha[7] = 255;
+        let mask = cutlass_vision::Mask {
+            width: 4,
+            height: 2,
+            alpha,
+            score: 1.0,
+        };
+        assert_eq!(mask_bounds(&mask), Some(((0.5, 1.0), (1.0, -1.0))));
+        let empty = cutlass_vision::Mask {
+            alpha: vec![0; 8],
+            ..mask
+        };
+        assert_eq!(mask_bounds(&empty), None);
+    }
+
+    #[test]
+    fn the_canvas_of_a_clip_point_is_where_that_point_is_drawn() {
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 1920;
+        draft.canvas_config.height = 1080;
+        draft.materials.videos.push(cutlass_model::MaterialVideo {
+            id: "m".into(),
+            width: 1920,
+            height: 1080,
+            ..cutlass_model::MaterialVideo::default()
+        });
+        let mut segment = cutlass_model::Segment::new("v", "m", TimeRange::new(0, 1_000_000));
+        segment.clip.transform.x = 0.25;
+        segment.clip.transform.y = -0.1;
+        segment.clip.rotation = 20.0;
+        segment.uniform_scale.value = 0.5;
+        draft.tracks[0].segments.push(segment.clone());
+        let canvas = (1920, 1080);
+        let back = canvas_of_clip(&draft, &segment, Micros(0), canvas).expect("a map");
+        for point in [(0.0, 0.0), (1.0, 1.0), (-1.0, 0.5), (0.3, -0.7)] {
+            let (x, y) = back(point);
+            let again =
+                cutlass_eval::clip_point(&draft, &segment, Micros(0), canvas, x, y).unwrap();
+            assert!(
+                (again.0 - point.0).abs() < 1e-9 && (again.1 - point.1).abs() < 1e-9,
+                "{point:?} -> ({x}, {y}) -> {again:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn of_several_found_the_one_nearest_the_follower_is_boxed() {
+        let boxes = [((0.0, 0.0), (10.0, 10.0)), ((100.0, 100.0), (120.0, 120.0))];
+        assert_eq!(nearest(&boxes, None), Some(boxes[0]));
+        assert_eq!(nearest(&boxes, Some((105.0, 90.0))), Some(boxes[1]));
+        assert_eq!(nearest(&[], Some((1.0, 1.0))), None);
+        // A frame drawn as it is: its pixels are canvas pixels.
+        let same = |(u, v): (f64, f64)| ((u + 1.0) * 960.0, (1.0 - v) * 540.0);
+        let found = cutlass_vision::Found {
+            x0: 100.0,
+            y0: 50.0,
+            x1: 300.0,
+            y1: 250.0,
+            score: 0.9,
+        };
+        let ((x0, y0), (x1, y1)) = canvas_box(&same, &found, 1920, 1080);
+        for (got, want) in [(x0, 100.0), (y0, 50.0), (x1, 300.0), (y1, 250.0)] {
+            assert!((got - want).abs() < 1e-9, "{got} for {want}");
+        }
     }
 
     #[test]

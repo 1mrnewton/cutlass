@@ -164,8 +164,8 @@ pub(crate) fn decode_indices(
         // LTP filters.
         ix.per_index = rd.dec_icdf(&LTP_PER_INDEX_ICDF, 8);
         let gain_icdf = LTP_GAIN_ICDF.get(ix.per_index).copied().unwrap_or(&[0]);
-        for k in 0..layout.nb_subfr {
-            ix.ltp_index[k] = rd.dec_icdf(gain_icdf, 8);
+        for index in &mut ix.ltp_index[..layout.nb_subfr] {
+            *index = rd.dec_icdf(gain_icdf, 8);
         }
         ix.ltp_scale_index = if cond == CondCoding::Independently {
             rd.dec_icdf(&LTP_SCALE_ICDF, 8)

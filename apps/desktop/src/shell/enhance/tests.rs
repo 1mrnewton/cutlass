@@ -397,3 +397,67 @@ fn a_keyed_blend_keys_without_the_blur_and_shows_at_the_playhead() {
     assert_eq!(shell.stored_motion_blur().unwrap().blend, 0.1);
     let _ = std::fs::remove_dir_all(&temp);
 }
+
+#[test]
+fn remove_flicker_takes_its_copy_at_once_and_undo_returns() {
+    let (mut shell, temp) = open("deflicker-copied", Some(b"a movie"));
+    let ask = clip_copy_ask(
+        shell.draft().unwrap(),
+        Some(&temp),
+        &"v".into(),
+        &CopyLevels {
+            deflicker: Algorithm::DEFLICKER_ON,
+            ..CopyLevels::default()
+        },
+    )
+    .unwrap();
+    let file = enhanced_file(&temp, &ask.key(), &ask.range).unwrap();
+    assert!(
+        file.parent()
+            .unwrap()
+            .ends_with("Resources/video_deflicker")
+    );
+    std::fs::write(file, b"an evened movie").unwrap();
+    shell.select(Some("v".into()));
+    assert_eq!(shell.deflicker_level(), 0);
+    shell.set_deflicker(Algorithm::DEFLICKER_ON).unwrap();
+    assert!(shell.job().is_none(), "nothing to make");
+    assert_eq!(shell.deflicker_level(), Algorithm::DEFLICKER_ON);
+    assert!(shell.deflicker_progress().is_none());
+    shell.set_deflicker(0).unwrap();
+    assert_eq!(shell.deflicker_level(), 0);
+    shell.undo().unwrap();
+    assert_eq!(shell.deflicker_level(), Algorithm::DEFLICKER_ON);
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn remove_flicker_with_no_copy_starts_its_own_job_without_a_gpu_check() {
+    let (mut shell, temp) = open("deflicker-job", Some(b"a movie"));
+    shell.select(Some("v".into()));
+    shell.set_deflicker(Algorithm::DEFLICKER_ON).unwrap();
+    assert_eq!(shell.deflicker_level(), Algorithm::DEFLICKER_ON);
+    assert_eq!(
+        shell.job().map(|job| job.label),
+        Some(DEFLICKER_JOB.to_owned())
+    );
+    // The movie is not one, so the job fails, and the level stays.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while shell.poll_job() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(shell.job().is_none());
+    assert_eq!(shell.deflicker_level(), Algorithm::DEFLICKER_ON);
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn remove_flicker_refuses_a_photo_a_sound_and_nothing_selected() {
+    let (mut shell, temp) = open("deflicker-refused", Some(b"a movie"));
+    assert!(shell.set_deflicker(1).is_err(), "nothing selected");
+    for id in ["p", "a"] {
+        shell.select(Some(id.into()));
+        assert!(shell.set_deflicker(1).is_err(), "{id}");
+    }
+    let _ = std::fs::remove_dir_all(&temp);
+}

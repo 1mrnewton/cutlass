@@ -292,3 +292,162 @@ fn a_mask_follower_lands_keyed_and_is_kept_when_fixing() {
     assert!(tracking.followers.is_empty());
     let _ = std::fs::remove_dir_all(&temp);
 }
+
+/// A ten-frame path from half a second, a box sliding right.
+fn slide() -> TrackPath {
+    TrackPath {
+        mode: TrackMode::Object,
+        samples: (0..10)
+            .map(|i| {
+                let x = 0.01 * i as f64;
+                TrackSample {
+                    time: Micros(500_000 + i * 33_333),
+                    corners: [
+                        (x - 0.1, 0.1),
+                        (x + 0.1, 0.1),
+                        (x + 0.1, -0.1),
+                        (x - 0.1, -0.1),
+                    ],
+                }
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn a_sticker_sets_up_a_track_on_the_video_drawn_under_it() {
+    let (mut shell, temp) = open("follower-setup");
+    assert!(shell.start_following().is_err(), "nothing selected");
+    shell.select(Some("s".into()));
+    shell.seek(Micros(1_800_000));
+    assert!(
+        shell.follow_target().is_err(),
+        "the playhead is off the sticker"
+    );
+    shell.seek(Micros(700_000));
+    assert_eq!(shell.follow_target().unwrap(), SegmentId::from("v"));
+    shell.start_following().unwrap();
+    let tracking = shell.tracking().unwrap();
+    assert_eq!(tracking.segment_id, SegmentId::from("v"));
+    assert_eq!(tracking.followers, vec![SegmentId::from("s")]);
+    assert!(tracking.masks.is_empty());
+    assert_eq!(tracking.time, Micros(700_000));
+    shell.set_track_box((200.0, 100.0), (400.0, 300.0)).unwrap();
+    assert!(shell.track_ready(), "the item itself follows");
+    shell.select(Some("x".into()));
+    assert!(
+        shell.start_following().is_err(),
+        "a locked row cannot follow"
+    );
+    shell.select(Some("v".into()));
+    assert!(
+        shell.follow_target().is_err(),
+        "nothing is drawn under the bottom video"
+    );
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn the_video_followed_is_the_nearest_one_drawn_below() {
+    let (mut shell, temp) = open("follower-below");
+    let mut draft = shell.session_draft().unwrap().clone();
+    // A second video row above the sticker's, and a photo row below it.
+    let mut over = Track::main("over");
+    over.segments
+        .push(Segment::new("w", "m", TimeRange::new(0, 2_000_000)));
+    draft.tracks.push(over);
+    draft.materials.videos.push(MaterialVideo {
+        id: "p".into(),
+        kind: "photo".into(),
+        ..MaterialVideo::default()
+    });
+    let mut photo = Track::main("photo");
+    photo
+        .segments
+        .push(Segment::new("still", "p", TimeRange::new(0, 2_000_000)));
+    draft.tracks.insert(1, photo);
+    let stacked = temp.with_extension("stacked");
+    let _ = std::fs::remove_dir_all(&stacked);
+    cutlass_store::Folder::new(draft).save(&stacked).unwrap();
+    shell.open_folder(&stacked).unwrap();
+    shell.select(Some("s".into()));
+    shell.seek(Micros(700_000));
+    assert_eq!(
+        shell.follow_target().unwrap(),
+        SegmentId::from("v"),
+        "not the video above it, not a photo"
+    );
+    let _ = std::fs::remove_dir_all(&temp);
+    let _ = std::fs::remove_dir_all(&stacked);
+}
+
+#[test]
+fn a_follower_reads_its_track_fixes_a_frame_and_stops_following() {
+    let (mut shell, temp) = open("follower-stop");
+    shell
+        .apply(Request::Track {
+            target: "v".into(),
+            followers: vec!["s".into()],
+            tracking_id: "t".into(),
+            anchor: Micros(500_000),
+            path: slide(),
+            masks: Vec::new(),
+        })
+        .unwrap();
+    shell.select(Some("s".into()));
+    let following = shell.following().unwrap();
+    assert_eq!(following.target, SegmentId::from("v"));
+    assert!(!following.by_mask);
+    shell.seek(Micros(600_000));
+    shell.start_fixing_following().unwrap();
+    let tracking = shell.tracking().unwrap();
+    assert_eq!(tracking.segment_id, SegmentId::from("v"));
+    assert_eq!(tracking.followers, vec![SegmentId::from("s")]);
+    assert!(tracking.fixing.is_some());
+    assert!(
+        tracking.canvas_box.is_some(),
+        "the tracked box at the playhead"
+    );
+    shell.stop_following().unwrap();
+    assert!(shell.tracking().is_none(), "the fix it was setting up goes");
+    assert!(shell.following().is_none());
+    let draft = shell.session_draft().unwrap();
+    assert!(draft.materials.video_trackings.is_empty());
+    shell.undo().unwrap();
+    assert!(shell.following().is_some(), "one undo step");
+    shell.select(Some("v".into()));
+    assert!(shell.following().is_none(), "the target follows nothing");
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn a_video_clips_mask_sets_up_a_track_on_the_clip_itself() {
+    let (mut shell, temp) = open("mask-follow");
+    shell.select(Some("s".into()));
+    assert!(
+        shell.start_mask_following().is_err(),
+        "a sticker's mask has no video of its own to track"
+    );
+    shell.select(Some("v".into()));
+    shell.seek(Micros(700_000));
+    shell.start_mask_following().unwrap();
+    let tracking = shell.tracking().unwrap();
+    assert_eq!(tracking.segment_id, SegmentId::from("v"));
+    assert_eq!(tracking.masks, vec![SegmentId::from("v")]);
+    assert!(tracking.followers.is_empty());
+    let own = clip_path(shell.session_draft().unwrap(), &"v".into(), &slide()).unwrap();
+    shell
+        .apply(Request::Track {
+            target: "v".into(),
+            followers: Vec::new(),
+            tracking_id: "t".into(),
+            anchor: Micros(500_000),
+            path: slide(),
+            masks: vec![("v".into(), own)],
+        })
+        .unwrap();
+    let following = shell.following().unwrap();
+    assert!(following.by_mask);
+    assert_eq!(following.target, SegmentId::from("v"));
+    let _ = std::fs::remove_dir_all(&temp);
+}

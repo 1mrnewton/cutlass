@@ -279,6 +279,224 @@ mod tests {
     }
 
     #[test]
+    fn a_crossing_draws_what_its_recipes_kind_draws_and_refuses_a_wrong_size() {
+        let Some(renderer) = Renderer::for_test().expect("a GPU is required") else {
+            eprintln!("skipped: no GPU");
+            return;
+        };
+        let kind = TransitionKind::every()
+            .into_iter()
+            .find(|kind| kind.key() == "photo-slide")
+            .expect("photo slide ships");
+        let recipe = kind.recipe().expect("a recipe");
+        let (w, h) = (96u32, 64u32);
+        let red: Vec<u8> = [240, 20, 20, 255].repeat((w * h) as usize);
+        let blue: Vec<u8> = [20, 20, 240, 255].repeat((w * h) as usize);
+        let canvas = renderer.canvas(w, h).expect("canvas");
+        let picture = |bytes| Rgba {
+            width: w,
+            height: h,
+            bytes,
+        };
+        for t in [0.0, 0.3, 0.5, 1.0] {
+            renderer
+                .draw(
+                    &canvas,
+                    &[Layer::Transition {
+                        kind,
+                        t,
+                        outgoing: picture(&red),
+                        incoming: picture(&blue),
+                    }],
+                )
+                .expect("draw");
+            let by_kind = renderer.read(&canvas).expect("read");
+            let crossing = recipe.at(t);
+            renderer
+                .draw(
+                    &canvas,
+                    &[Layer::Crossing {
+                        crossing: &crossing,
+                        outgoing: picture(&red),
+                        incoming: picture(&blue),
+                    }],
+                )
+                .expect("draw");
+            assert_eq!(renderer.read(&canvas).expect("read"), by_kind, "at {t}");
+        }
+        // A side that is not the canvas's size is refused, not stretched.
+        let small: Vec<u8> = [0, 0, 0, 255].repeat(4);
+        let crossing = recipe.at(0.5);
+        let refused = renderer.draw(
+            &canvas,
+            &[Layer::Crossing {
+                crossing: &crossing,
+                outgoing: picture(&red),
+                incoming: Rgba {
+                    width: 2,
+                    height: 2,
+                    bytes: &small,
+                },
+            }],
+        );
+        assert!(matches!(refused, Err(crate::RenderError::Size { .. })));
+    }
+
+    #[test]
+    fn photo_slide_swaps_the_pictures_as_white_prints_over_a_dim_copy() {
+        let Some(renderer) = Renderer::for_test().expect("a GPU is required") else {
+            eprintln!("skipped: no GPU");
+            return;
+        };
+        let kind = TransitionKind::every()
+            .into_iter()
+            .find(|kind| kind.key() == "photo-slide")
+            .expect("photo slide ships");
+        let (w, h) = (96u32, 64u32);
+        let red: Vec<u8> = [240, 20, 20, 255].repeat((w * h) as usize);
+        let blue: Vec<u8> = [20, 20, 240, 255].repeat((w * h) as usize);
+        let canvas = renderer.canvas(w, h).expect("canvas");
+        let draw = |t| {
+            let picture = |bytes| Rgba {
+                width: w,
+                height: h,
+                bytes,
+            };
+            renderer
+                .draw(
+                    &canvas,
+                    &[Layer::Transition {
+                        kind,
+                        t,
+                        outgoing: picture(&red),
+                        incoming: picture(&blue),
+                    }],
+                )
+                .expect("draw");
+            renderer.read(&canvas).expect("read")
+        };
+        let at = |frame: &[u8], x: u32, y: u32| {
+            let i = 4 * (y * w + x) as usize;
+            [frame[i], frame[i + 1], frame[i + 2]]
+        };
+        let white = |c: [u8; 3]| c.iter().all(|v| *v > 220);
+        // Early on, the outgoing picture has shrunk onto its print and is
+        // sliding right: the left edge shows the dim copy, the middle the
+        // picture, the paper between.
+        let early = draw(0.15);
+        let left = at(&early, 1, 32);
+        assert!((150..220).contains(&left[0]) && left[2] < 40, "{left:?}");
+        assert!(at(&early, 60, 32)[0] > 220);
+        assert!(
+            (0..w).any(|x| white(at(&early, x, 32))),
+            "no paper across the middle"
+        );
+        // Then the incoming print settles in the middle, over the dim copy
+        // of the outgoing picture, its paper round it.
+        let settled = draw(0.6);
+        assert!(at(&settled, 48, 30)[2] > 220);
+        let corner = at(&settled, 1, 1);
+        assert!(
+            (150..220).contains(&corner[0]) && corner[2] < 40,
+            "{corner:?}"
+        );
+        assert!((0..w / 2).any(|x| white(at(&settled, x, 32))));
+        // Its bottom paper is deeper than its top.
+        let paper_rows = |from: u32, step: i32| {
+            let mut y = from;
+            let mut rows = 0;
+            while white(at(&settled, 48, y)) {
+                rows += 1;
+                y = y.wrapping_add_signed(step);
+            }
+            rows
+        };
+        let top = (0..32)
+            .rev()
+            .find(|y| white(at(&settled, 48, *y)))
+            .expect("top paper");
+        let bottom = (32..h)
+            .find(|y| white(at(&settled, 48, *y)))
+            .expect("bottom paper");
+        assert!(
+            paper_rows(bottom, 1) > paper_rows(top, -1),
+            "the foot is deeper"
+        );
+    }
+
+    #[test]
+    fn flip_cards_turns_each_card_over_in_a_wave_from_the_left() {
+        let Some(renderer) = Renderer::for_test().expect("a GPU is required") else {
+            eprintln!("skipped: no GPU");
+            return;
+        };
+        let kind = TransitionKind::every()
+            .into_iter()
+            .find(|kind| kind.key() == "flip-cards")
+            .expect("flip cards ships");
+        // Five cards across; on a 5:3 frame, cards 1⅔ times as tall as
+        // wide make two rows of 80 by 120.
+        let (w, h) = (400u32, 240u32);
+        let red: Vec<u8> = [240, 20, 20, 255].repeat((w * h) as usize);
+        let blue: Vec<u8> = [20, 20, 240, 255].repeat((w * h) as usize);
+        let canvas = renderer.canvas(w, h).expect("canvas");
+        let draw = |t| {
+            let picture = |bytes| Rgba {
+                width: w,
+                height: h,
+                bytes,
+            };
+            renderer
+                .draw(
+                    &canvas,
+                    &[Layer::Transition {
+                        kind,
+                        t,
+                        outgoing: picture(&red),
+                        incoming: picture(&blue),
+                    }],
+                )
+                .expect("draw");
+            renderer.read(&canvas).expect("read")
+        };
+        let at = |frame: &[u8], x: u32, y: u32| {
+            let i = 4 * (y * w + x) as usize;
+            [frame[i], frame[i + 1], frame[i + 2]]
+        };
+        let is_red = |c: [u8; 3]| c[0] > 200 && c[2] < 40;
+        let is_blue = |c: [u8; 3]| c[2] > 200 && c[0] < 40;
+        let dark = |c: [u8; 3]| c.iter().all(|v| *v < 10);
+        // Halfway, the top-left card has turned over and the bottom-right
+        // one has not begun.
+        let half = draw(0.5);
+        assert!(is_blue(at(&half, 40, 60)), "{:?}", at(&half, 40, 60));
+        assert!(is_red(at(&half, 360, 180)), "{:?}", at(&half, 360, 180));
+        // A dark gap runs between the cards.
+        assert!(dark(at(&half, 79, 60)), "{:?}", at(&half, 79, 60));
+        assert!(!dark(at(&half, 77, 60)));
+        // Early, the first card is edge-on: dark behind it, its middle
+        // squeezed to a sliver, while a card further along is still whole.
+        let early = draw(0.225);
+        assert!(dark(at(&early, 20, 60)), "{:?}", at(&early, 20, 60));
+        assert!(is_red(at(&early, 280, 180)));
+        // On its way, a turning card is narrower: the card's sides go dark
+        // before its middle does.
+        let turning = draw(0.17);
+        assert!(dark(at(&turning, 3, 60)), "{:?}", at(&turning, 3, 60));
+        assert!(!dark(at(&turning, 40, 60)), "{:?}", at(&turning, 40, 60));
+        // The wave runs left to right: a card in the middle column turns
+        // after the first and before the last.
+        let order = |x: u32, y: u32| {
+            (0..=40)
+                .map(|step| f32::from(u8::try_from(step).expect("step")) / 40.0)
+                .find(|t| is_blue(at(&draw(*t), x, y)))
+                .expect("turns over")
+        };
+        let (first, middle, last) = (order(40, 60), order(200, 60), order(360, 180));
+        assert!(first < middle && middle < last, "{first} {middle} {last}");
+    }
+
+    #[test]
     fn every_transition_on_the_gpu_matches_the_cpu() {
         let Some(renderer) = Renderer::for_test().expect("a GPU is required") else {
             eprintln!("skipped: no GPU");

@@ -1,7 +1,8 @@
 //! `COMM` fields and the PCM layout bytes handed to the decoder.
 //!
-//! Linear packets are one sample frame. The compressed rows below are one
-//! codec block, still compressed. Anything else is refused by name.
+//! Linear, A-law and mu-law packets are one sample frame. The compressed
+//! rows below are one codec block, still compressed. Anything else is
+//! refused by name.
 
 use cutlass_codec::{CodecId, StreamCodec, UnknownCodec};
 use cutlass_container::{MuxError, NewStream, OpenError};
@@ -161,6 +162,13 @@ fn rate_error(error: RateError) -> OpenError {
 }
 
 fn classify(tag: [u8; 4], bits: u16, channels: u16) -> Result<Layout, OpenError> {
+    // A-law and mu-law are PCM codings 7 and 8. FFmpeg also takes these two
+    // tags in upper case; AudioToolbox does not open such a file.
+    match &tag.map(|byte| byte.to_ascii_lowercase()) {
+        b"alaw" => return law(7, bits, channels),
+        b"ulaw" => return law(8, bits, channels),
+        _ => {}
+    }
     match &tag {
         b"NONE" | b"twos" => linear(bits, true, channels),
         b"sowt" => linear(bits, false, channels),
@@ -169,7 +177,6 @@ fn classify(tag: [u8; 4], bits: u16, channels: u16) -> Result<Layout, OpenError>
         b"raw " => sized(bits, 8, true, channels),
         b"fl32" => float_layout(bits, 32, channels),
         b"fl64" => float_layout(bits, 64, channels),
-        b"alaw" | b"ulaw" => law(tag, bits, channels),
         b"ima4" => blocks(tag, channels, 34, 64),
         b"MAC3" => blocks(tag, channels, 2, 6),
         b"MAC6" => blocks(tag, channels, 1, 6),
@@ -224,11 +231,11 @@ fn pcm_layout(coding: u8, width: u16, big: bool, channels: u16) -> Result<Layout
     })
 }
 
-fn law(tag: [u8; 4], bits: u16, channels: u16) -> Result<Layout, OpenError> {
+fn law(coding: u8, bits: u16, channels: u16) -> Result<Layout, OpenError> {
     if bits != 0 && bits != 8 {
         return Err(open_source(format!("sample size {bits} is not 8-bit")));
     }
-    blocks(tag, channels, 1, 1)
+    pcm_layout(coding, 1, true, channels)
 }
 
 fn gsm(channels: u16) -> Result<Layout, OpenError> {

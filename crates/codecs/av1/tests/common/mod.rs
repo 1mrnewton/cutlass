@@ -131,7 +131,20 @@ pub fn decode(
     width: u32,
     height: u32,
 ) -> Result<Vec<PictureOutput>, CodecError> {
+    decode_on(packets, width, height, None)
+}
+
+/// [`decode`] on `threads` threads (`None`: the decoder's default).
+pub fn decode_on(
+    packets: &[Vec<u8>],
+    width: u32,
+    height: u32,
+    threads: Option<usize>,
+) -> Result<Vec<PictureOutput>, CodecError> {
     let params = CodecParams::video(CodecId::Av1, width, height);
     let mut decoder = Av1Decoder::open(&params)?;
+    if let Some(t) = threads {
+        decoder.set_threads(t);
+    }
     decode_with(&mut decoder, packets)
 }

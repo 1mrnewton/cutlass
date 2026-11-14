@@ -81,6 +81,43 @@ fn luma(rgb: vec3<f32>) -> f32 {
     return dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
+// Cards that turn over one by one, the outgoing picture on their front
+// and the incoming one on their back.
+fn cards(position: vec2<f32>) -> vec4<f32> {
+    let size = cx.size.xy;
+    let short = min(size.x, size.y);
+    let progress = cx.a.x;
+    let columns = max(floor(cx.b.x + 0.5), 1.0);
+    let rows = max(floor(columns * 0.6 * size.y / size.x + 0.5), 1.0);
+    let cell = size / vec2<f32>(columns, rows);
+    let index = clamp(floor(position / cell), vec2<f32>(0.0), vec2<f32>(columns, rows) - vec2<f32>(1.0));
+    let middle = (index + vec2<f32>(0.5)) * cell;
+    let local = position - middle;
+    // Where along the wave this card sits, 0 first to 1 last.
+    let turn = radians(cx.a.z);
+    let along = vec2<f32>(cos(turn), -sin(turn));
+    let spread = (abs(along.x) + abs(along.y)) * 0.5;
+    let run = clamp(dot(middle / size - vec2<f32>(0.5), along) / spread * 0.5 + 0.5, 0.0, 1.0);
+    let share = clamp(cx.a.w, 0.01, 1.0);
+    let own = clamp((progress - run * (1.0 - share)) / share, 0.0, 1.0);
+    let angle = own * own * (3.0 - 2.0 * own) * 3.14159265;
+    let squeeze = abs(cos(angle));
+    // The gap opens at the start and closes at the end.
+    let opening = clamp(min(progress, 1.0 - progress) / 0.1, 0.0, 1.0);
+    let half = cell * 0.5 - vec2<f32>(cx.b.w * short * opening * 0.5);
+    if (abs(local.x) > half.x * squeeze || abs(local.y) > half.y) {
+        return vec4<f32>(cx.c.rgb, 1.0);
+    }
+    let source = middle + vec2<f32>(local.x / max(squeeze, 0.0001), local.y);
+    let texel = clamp(vec2<i32>(floor(source)), vec2<i32>(0), vec2<i32>(size) - vec2<i32>(1));
+    var face = textureLoad(outgoing_picture, texel, 0);
+    if (angle > 1.5707963) {
+        face = textureLoad(incoming_picture, texel, 0);
+    }
+    // A card turned away from the light is darker.
+    return vec4<f32>(face.rgb * (1.0 - 0.35 * sin(angle)), face.a);
+}
+
 @fragment
 fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let texel = vec2<i32>(position.xy);
@@ -92,6 +129,9 @@ fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     }
     if (kind == 11u) {
         return a + b * (1.0 - a.a);
+    }
+    if (kind == 17u) {
+        return cards(position.xy);
     }
     let size = cx.size.xy;
     let short = min(size.x, size.y);

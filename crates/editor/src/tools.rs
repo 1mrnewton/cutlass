@@ -20,8 +20,14 @@ pub enum Bar {
     AudioClip,
     /// A text clip.
     TextClip,
-    /// Any other clip: an effect, filter, adjustment or sticker.
+    /// A filter layer.
+    FilterClip,
+    /// An adjustment layer.
+    AdjustClip,
+    /// Any other clip: an effect or a sticker.
     OtherClip,
+    /// A shape or a pen drawing on a sticker row.
+    ShapeClip,
     Audio,
     Text,
     Effects,
@@ -56,6 +62,7 @@ pub enum ToolId {
     Freeze,
     ExtractAudio,
     Fade,
+    Opacity,
     Beats,
     Unlink,
     Splice,
@@ -66,6 +73,7 @@ pub enum ToolId {
     EditText,
     Draw,
     VideoEffects,
+    ShapeStyle,
 }
 
 /// A tool as a bar shows it.
@@ -88,15 +96,6 @@ const fn ready(id: ToolId, label: &'static str) -> Tool {
     }
 }
 
-const fn later(id: ToolId, label: &'static str) -> Tool {
-    Tool {
-        id,
-        label,
-        ready: false,
-        opens: None,
-    }
-}
-
 const fn opens(id: ToolId, label: &'static str, bar: Bar) -> Tool {
     Tool {
         id,
@@ -114,10 +113,10 @@ const ROOT: &[Tool] = &[
     opens(T::Text, "Text", Bar::Text),
     opens(T::Effects, "Effects", Bar::Effects),
     opens(T::Overlay, "Overlay", Bar::Overlay),
-    later(T::Captions, "Captions"),
-    later(T::Filters, "Filters"),
-    later(T::Adjust, "Adjust"),
-    later(T::Stickers, "Stickers"),
+    ready(T::Captions, "Captions"),
+    ready(T::Filters, "Filters"),
+    ready(T::Adjust, "Adjust"),
+    ready(T::Stickers, "Stickers"),
     ready(T::AspectRatio, "Ratio"),
     ready(T::Background, "Background"),
 ];
@@ -127,46 +126,52 @@ const MAIN_CLIP: &[Tool] = &[
     ready(T::Volume, "Volume"),
     ready(T::Speed, "Speed"),
     ready(T::Animations, "Animations"),
-    later(T::Effects, "Effects"),
+    ready(T::Effects, "Effects"),
     ready(T::Delete, "Delete"),
-    later(T::Duplicate, "Duplicate"),
-    later(T::Crop, "Crop"),
-    later(T::Mirror, "Mirror"),
-    later(T::Rotate, "Rotate"),
-    later(T::Reverse, "Reverse"),
-    later(T::Freeze, "Freeze"),
-    later(T::ExtractAudio, "Extract audio"),
-    later(T::Filters, "Filters"),
-    later(T::Adjust, "Adjust"),
-    later(T::Replace, "Replace"),
-    later(T::Beats, "Beats"),
-    later(T::Unlink, "Unlink"),
+    ready(T::Duplicate, "Duplicate"),
+    ready(T::Crop, "Crop"),
+    ready(T::Mirror, "Mirror"),
+    ready(T::Rotate, "Rotate"),
+    ready(T::Opacity, "Opacity"),
+    ready(T::Fade, "Fade"),
+    ready(T::Reverse, "Reverse"),
+    ready(T::Freeze, "Freeze"),
+    ready(T::ExtractAudio, "Extract audio"),
+    ready(T::Filters, "Filters"),
+    ready(T::Adjust, "Adjust"),
+    ready(T::Replace, "Replace"),
 ];
 
 const OVERLAY_CLIP: &[Tool] = &[
     ready(T::Split, "Split"),
     ready(T::Volume, "Volume"),
     ready(T::Speed, "Speed"),
-    later(T::Splice, "To main"),
+    ready(T::Splice, "To main"),
     ready(T::Animations, "Animations"),
+    ready(T::Effects, "Effects"),
     ready(T::Delete, "Delete"),
-    later(T::Duplicate, "Duplicate"),
-    later(T::Crop, "Crop"),
-    later(T::Mirror, "Mirror"),
-    later(T::Rotate, "Rotate"),
-    later(T::Reverse, "Reverse"),
-    later(T::Filters, "Filters"),
-    later(T::Adjust, "Adjust"),
+    ready(T::Duplicate, "Duplicate"),
+    ready(T::Crop, "Crop"),
+    ready(T::Mirror, "Mirror"),
+    ready(T::Rotate, "Rotate"),
+    ready(T::Opacity, "Opacity"),
+    ready(T::Fade, "Fade"),
+    ready(T::Reverse, "Reverse"),
+    ready(T::Filters, "Filters"),
+    ready(T::Adjust, "Adjust"),
+    ready(T::Replace, "Replace"),
 ];
 
 const AUDIO_CLIP: &[Tool] = &[
     ready(T::Split, "Split"),
     ready(T::Volume, "Volume"),
     ready(T::Speed, "Speed"),
-    later(T::Fade, "Fade"),
+    ready(T::Fade, "Fade"),
     ready(T::Delete, "Delete"),
-    later(T::Duplicate, "Duplicate"),
-    later(T::Beats, "Beats"),
+    ready(T::Duplicate, "Duplicate"),
+    ready(T::Beats, "Beats"),
+    ready(T::Reverse, "Reverse"),
+    ready(T::Replace, "Replace"),
 ];
 
 const TEXT_CLIP: &[Tool] = &[
@@ -174,31 +179,51 @@ const TEXT_CLIP: &[Tool] = &[
     ready(T::Split, "Split"),
     ready(T::Animations, "Animations"),
     ready(T::Delete, "Delete"),
-    later(T::Duplicate, "Duplicate"),
+    ready(T::Duplicate, "Duplicate"),
+];
+
+const FILTER_CLIP: &[Tool] = &[
+    ready(T::Filters, "Filter"),
+    ready(T::Split, "Split"),
+    ready(T::Delete, "Delete"),
+    ready(T::Duplicate, "Duplicate"),
+];
+
+const ADJUST_CLIP: &[Tool] = &[
+    ready(T::Adjust, "Adjust"),
+    ready(T::Split, "Split"),
+    ready(T::Delete, "Delete"),
+    ready(T::Duplicate, "Duplicate"),
 ];
 
 const OTHER_CLIP: &[Tool] = &[
     ready(T::Split, "Split"),
     ready(T::Delete, "Delete"),
-    later(T::Duplicate, "Duplicate"),
+    ready(T::Duplicate, "Duplicate"),
+];
+
+const SHAPE_CLIP: &[Tool] = &[
+    ready(T::ShapeStyle, "Style"),
+    ready(T::Split, "Split"),
+    ready(T::Delete, "Delete"),
+    ready(T::Duplicate, "Duplicate"),
 ];
 
 const AUDIO: &[Tool] = &[
-    later(T::ImportSound, "Sounds"),
-    later(T::ExtractAudio, "Extract"),
-    later(T::Record, "Record"),
+    ready(T::ImportSound, "Sounds"),
+    ready(T::ExtractAudio, "Extract"),
 ];
 
 const TEXT: &[Tool] = &[
     ready(T::AddText, "Add text"),
-    later(T::Captions, "Captions"),
-    later(T::Stickers, "Stickers"),
-    later(T::Draw, "Draw"),
+    ready(T::Captions, "Captions"),
+    ready(T::Stickers, "Stickers"),
+    ready(T::Draw, "Draw"),
 ];
 
 const EFFECTS: &[Tool] = &[ready(T::VideoEffects, "Video effects")];
 
-const OVERLAY: &[Tool] = &[later(T::AddOverlay, "Add overlay")];
+const OVERLAY: &[Tool] = &[ready(T::AddOverlay, "Add overlay")];
 
 /// The tools on `bar`, in order.
 #[must_use]
@@ -209,7 +234,10 @@ pub fn tools(bar: Bar) -> &'static [Tool] {
         Bar::OverlayClip => OVERLAY_CLIP,
         Bar::AudioClip => AUDIO_CLIP,
         Bar::TextClip => TEXT_CLIP,
+        Bar::FilterClip => FILTER_CLIP,
+        Bar::AdjustClip => ADJUST_CLIP,
         Bar::OtherClip => OTHER_CLIP,
+        Bar::ShapeClip => SHAPE_CLIP,
         Bar::Audio => AUDIO,
         Bar::Text => TEXT,
         Bar::Effects => EFFECTS,
@@ -217,7 +245,8 @@ pub fn tools(bar: Bar) -> &'static [Tool] {
     }
 }
 
-/// The bar for a clip selected on a row of `kind`.
+/// The bar for a clip selected on a row of `kind`. A shape on a sticker
+/// row takes [`Bar::ShapeClip`] instead; the row alone cannot say so.
 #[must_use]
 pub fn clip_bar(kind: TrackType, main: bool) -> Bar {
     match kind {
@@ -225,6 +254,8 @@ pub fn clip_bar(kind: TrackType, main: bool) -> Bar {
         TrackType::Video => Bar::OverlayClip,
         TrackType::Audio => Bar::AudioClip,
         TrackType::Text => Bar::TextClip,
+        TrackType::Filter => Bar::FilterClip,
+        TrackType::Adjust => Bar::AdjustClip,
         _ => Bar::OtherClip,
     }
 }
@@ -235,13 +266,16 @@ mod tests {
 
     use super::*;
 
-    const BARS: [Bar; 10] = [
+    const BARS: [Bar; 13] = [
         Bar::Root,
         Bar::MainClip,
         Bar::OverlayClip,
         Bar::AudioClip,
         Bar::TextClip,
+        Bar::FilterClip,
+        Bar::AdjustClip,
         Bar::OtherClip,
+        Bar::ShapeClip,
         Bar::Audio,
         Bar::Text,
         Bar::Effects,
@@ -279,7 +313,10 @@ mod tests {
             Bar::OverlayClip,
             Bar::AudioClip,
             Bar::TextClip,
+            Bar::FilterClip,
+            Bar::AdjustClip,
             Bar::OtherClip,
+            Bar::ShapeClip,
         ] {
             for id in [ToolId::Split, ToolId::Delete] {
                 assert!(
@@ -296,6 +333,8 @@ mod tests {
         assert_eq!(clip_bar(TrackType::Video, false), Bar::OverlayClip);
         assert_eq!(clip_bar(TrackType::Audio, false), Bar::AudioClip);
         assert_eq!(clip_bar(TrackType::Text, false), Bar::TextClip);
+        assert_eq!(clip_bar(TrackType::Filter, false), Bar::FilterClip);
+        assert_eq!(clip_bar(TrackType::Adjust, false), Bar::AdjustClip);
         assert_eq!(clip_bar(TrackType::Effect, false), Bar::OtherClip);
     }
 }

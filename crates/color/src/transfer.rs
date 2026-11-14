@@ -170,7 +170,8 @@ fn primaries_of(primaries: ColorPrimaries, matrix: crate::Matrix) -> Primaries {
         | ColorPrimaries::Ebu3213 => match matrix {
             crate::Matrix::Bt601 => Primaries::Smpte170,
             crate::Matrix::Bt2020 => Primaries::Bt2020,
-            crate::Matrix::Bt709 => Primaries::Bt709,
+            // Unnamed GBR is BT.709 primaries, as sRGB is.
+            crate::Matrix::Bt709 | crate::Matrix::Identity => Primaries::Bt709,
         },
     }
 }

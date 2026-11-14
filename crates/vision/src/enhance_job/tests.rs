@@ -611,3 +611,91 @@ fn a_trained_forward_blur_lies_between_a_frame_and_the_next() {
         assert!(reds[k] > own + 4 && reds[k] < own + 16, "{k}: {reds:?}");
     }
 }
+
+#[test]
+fn a_flickering_clip_is_evened_into_a_copy_at_its_own_size_with_no_model() {
+    // Twenty grey frames at 10 a second, pulsing brighter and darker.
+    let temp = Temp::new();
+    let grey = |k: u64| if k.is_multiple_of(2) { 140_u8 } else { 100 };
+    let movie = PictureMovie {
+        width: W,
+        height: H,
+        frame_rate: FrameRate {
+            numerator: 10,
+            denominator: 1,
+        },
+        bitrate: 2_000_000,
+        frames: 20,
+    };
+    write_pictures(
+        &encoders(),
+        &movie,
+        &temp.0.join("pulse.mp4"),
+        &mut |k| {
+            let v = grey(k);
+            Ok([v, v, v, 255].repeat((W * H) as usize))
+        },
+        &mut |_, _| true,
+    )
+    .unwrap();
+    let mut draft = Draft::empty("D");
+    draft.fps = 10.0;
+    draft.materials.videos.push(MaterialVideo {
+        id: "m".into(),
+        kind: "video".into(),
+        path: "pulse.mp4".into(),
+        width: W as i32,
+        height: H as i32,
+        duration: Micros(2_000_000),
+        ..MaterialVideo::default()
+    });
+    let mut segment = Segment::new("v", "m", TimeRange::new(0, 2_000_000));
+    segment.source_range = Some(TimeRange::new(0, 2_000_000));
+    draft.tracks[0].segments.push(segment);
+    let ask = cutlass_eval::clip_copy_ask(
+        &draft,
+        Some(&temp.0),
+        &"v".into(),
+        &cutlass_eval::CopyLevels {
+            deflicker: Algorithm::DEFLICKER_ON,
+            ..cutlass_eval::CopyLevels::default()
+        },
+    )
+    .unwrap();
+    let file = enhance_clip(
+        &readers(),
+        &encoders(),
+        CopyModels::default(),
+        &ask,
+        &temp.0,
+        &mut |_| true,
+    )
+    .unwrap();
+    assert!(
+        file.parent()
+            .unwrap()
+            .ends_with("Resources/video_deflicker")
+    );
+    assert_eq!(
+        find_enhanced(&temp.0, &ask.key(), &ask.range),
+        Some((file.clone(), ask.range.clone()))
+    );
+    let mut media = readers().open(&file).unwrap();
+    let whole = TimeRange::new(0, 2_000_000);
+    let mut means = Vec::new();
+    for k in 0..20_i64 {
+        let held = media.decode_at(Micros(k * 100_000), &whole).unwrap();
+        let Ok(cutlass_picture::Picture::Cpu(picture)) = decoded_picture(&held.frame) else {
+            panic!("not in memory");
+        };
+        assert_eq!((picture.width(), picture.height()), (W, H));
+        means.push(crate::mean_brightness(&rgb_of(picture.rgba())));
+    }
+    // Away from the ends, a swing of 40 is down to a few steps.
+    let middle = &means[crate::DEFLICKER_REACH..20 - crate::DEFLICKER_REACH];
+    let step = middle
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).abs())
+        .fold(0.0, f32::max);
+    assert!(step < 8.0, "{means:?}");
+}

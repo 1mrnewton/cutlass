@@ -373,7 +373,45 @@ fn thumb_for(
         .map_or(i64::MAX / 2, |end| end.0.max(1));
     let display = media.info().display;
     let held = media.decode_at(key.time, &TimeRange::new(0, length))?;
-    shrink(&held.frame, display)
+    shrink(&held.frame, display, THUMB_HEIGHT)
+}
+
+/// The most rows [`frames_of`] gives a picture.
+pub const MAX_FRAME_ROWS: u32 = 1080;
+/// The most pictures one [`frames_of`] call decodes.
+pub const MAX_FRAMES: usize = 120;
+
+/// The pictures of `path` at source times `times`, each turned upright and
+/// shrunk to at most `rows` rows, decoded here before it returns. Times
+/// are taken in order, so rising times decode on without a seek between
+/// them. A time past the end gives the last picture.
+///
+/// This is for a caller that wants a few pictures larger than a thumbnail
+/// and runs it off the thread that draws. More than [`MAX_FRAMES`] times,
+/// or more than [`MAX_FRAME_ROWS`] rows, is refused.
+pub fn frames_of(
+    factory: &ReaderFactory,
+    path: &std::path::Path,
+    times: &[Micros],
+    rows: u32,
+) -> Result<Vec<Thumb>, EngineError> {
+    if times.len() > MAX_FRAMES || rows == 0 || rows > MAX_FRAME_ROWS {
+        return Err(EngineError::Window);
+    }
+    let mut media = factory.open(path)?;
+    let length = media
+        .info()
+        .duration
+        .map_or(i64::MAX / 2, |end| end.0.max(1));
+    let display = media.info().display;
+    let span = TimeRange::new(0, length);
+    times
+        .iter()
+        .map(|time| {
+            let held = media.decode_at(Micros(time.0.max(0)), &span)?;
+            shrink(&held.frame, display, rows)
+        })
+        .collect()
 }
 
 /// `width` by `height` after a display quarter turn.
@@ -384,24 +422,24 @@ fn upright(width: u32, height: u32, display: DisplayQuarter) -> (u32, u32) {
     }
 }
 
-/// The rows a picture `height` tall is shrunk to, and the width that keeps
-/// its shape.
-fn thumb_size(width: u32, height: u32) -> Option<(u32, u32)> {
+/// The rows a picture `height` tall is shrunk to, at most `most`, and the
+/// width that keeps its shape.
+fn thumb_size(width: u32, height: u32, most: u32) -> Option<(u32, u32)> {
     if width == 0 || height == 0 {
         return None;
     }
-    let rows = height.min(THUMB_HEIGHT);
+    let rows = height.min(most);
     let columns = (u64::from(width) * u64::from(rows) + u64::from(height) / 2) / u64::from(height);
     Some((u32::try_from(columns.max(1)).ok()?, rows))
 }
 
-/// `frame` shrunk to a thumbnail and turned upright. The thumbnail height
+/// `frame` shrunk to at most `rows` rows and turned upright. The height
 /// is counted upright. A planar 4:2:0 picture is averaged in YUV and only
 /// the small result is converted.
-fn shrink(frame: &DecodedFrame, display: DisplayQuarter) -> Result<Thumb, EngineError> {
+fn shrink(frame: &DecodedFrame, display: DisplayQuarter, rows: u32) -> Result<Thumb, EngineError> {
     let (coded_w, coded_h) = (frame.width(), frame.height());
     let (up_w, up_h) = upright(coded_w, coded_h, display);
-    let (out_w, out_h) = thumb_size(up_w, up_h).ok_or(EngineError::Window)?;
+    let (out_w, out_h) = thumb_size(up_w, up_h, rows).ok_or(EngineError::Window)?;
     let size = upright(out_w, out_h, display);
     let frame = frame.on_cpu()?;
     let frame = frame.as_ref();
@@ -704,10 +742,33 @@ mod tests {
 
     #[test]
     fn a_tall_picture_shrinks_to_the_thumb_height_and_keeps_its_shape() {
-        assert_eq!(thumb_size(1920, 1080), Some((284, 160)));
-        assert_eq!(thumb_size(720, 1280), Some((90, 160)));
-        assert_eq!(thumb_size(40, 20), Some((40, 20)));
-        assert_eq!(thumb_size(0, 20), None);
+        assert_eq!(thumb_size(1920, 1080, THUMB_HEIGHT), Some((284, 160)));
+        assert_eq!(thumb_size(720, 1280, THUMB_HEIGHT), Some((90, 160)));
+        assert_eq!(thumb_size(40, 20, THUMB_HEIGHT), Some((40, 20)));
+        assert_eq!(thumb_size(0, 20, THUMB_HEIGHT), None);
+    }
+
+    #[test]
+    fn larger_frames_keep_their_shape_and_a_bad_ask_is_refused() {
+        // A frame may be asked for larger than a thumbnail; a picture
+        // smaller than the ask keeps its own size.
+        assert_eq!(thumb_size(1920, 1080, 360), Some((640, 360)));
+        assert_eq!(thumb_size(1080, 1920, 360), Some((203, 360)));
+        assert_eq!(thumb_size(320, 180, 360), Some((320, 180)));
+
+        let factory = ReaderFactory::new();
+        let missing = std::env::temp_dir().join("cutlass-engine-no-such-clip.mov");
+        let times = |count: usize| vec![Micros(0); count];
+        // Too many pictures, no rows, or too many rows: refused before the
+        // file is opened.
+        for (count, rows) in [(MAX_FRAMES + 1, 360), (1, 0), (1, MAX_FRAME_ROWS + 1)] {
+            assert!(matches!(
+                frames_of(&factory, &missing, &times(count), rows),
+                Err(EngineError::Window)
+            ));
+        }
+        // A file that is not there is an error, not an empty list.
+        assert!(frames_of(&factory, &missing, &times(2), 360).is_err());
     }
 
     #[test]
@@ -739,7 +800,7 @@ mod tests {
         assert_eq!(turn(flat.clone(), DisplayQuarter::Zero), flat);
         // A sideways 1280x720 file stands 160 rows tall.
         let (up_w, up_h) = upright(1280, 720, DisplayQuarter::Clockwise90);
-        assert_eq!(thumb_size(up_w, up_h), Some((90, 160)));
+        assert_eq!(thumb_size(up_w, up_h, THUMB_HEIGHT), Some((90, 160)));
     }
 
     #[test]

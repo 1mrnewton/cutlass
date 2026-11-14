@@ -39,6 +39,18 @@ pub fn media_requests(draft: &Draft, place: &MediaPlace, linkage: bool) -> Vec<R
         TimeRange::new(place.start.0, place.duration.0),
     );
     segment.source_range = Some(TimeRange::new(0, place.duration.0));
+    // A sticker starts on its kind's layer, as an added text or shape
+    // does, so it is drawn over the video it is put on.
+    let kind = place.new_lane.clone().or_else(|| {
+        draft
+            .tracks
+            .iter()
+            .find(|track| track.id == place.track_id)
+            .map(|track| track.kind.clone())
+    });
+    if let Some(floor) = kind.and_then(TrackType::render_floor) {
+        segment.render_index = floor;
+    }
     requests.push(Request::Place {
         track_id: place.track_id.clone(),
         segment: Box::new(segment),
@@ -173,6 +185,40 @@ mod tests {
         assert_eq!(segment.target, TimeRange::new(0, 500_000));
         assert_eq!(segment.source_range, Some(TimeRange::new(0, 500_000)));
         assert_eq!(requests.len(), 2);
+    }
+
+    #[test]
+    fn a_sticker_starts_on_its_layer_over_the_video() {
+        let mut sticker = place("s", 0, 500_000);
+        sticker.new_lane = Some(TrackType::Sticker);
+        let requests = media_requests(&draft(), &sticker, false);
+        let Request::Place { segment, .. } = &requests[1] else {
+            panic!("the clip is placed");
+        };
+        assert_eq!(
+            segment.render_index,
+            TrackType::Sticker.render_floor().unwrap()
+        );
+        // On a sticker row that is already there, too.
+        let mut with_row = draft();
+        let mut row = cutlass_model::Track::main("s");
+        row.kind = TrackType::Sticker;
+        with_row.tracks.push(row);
+        sticker.new_lane = None;
+        let requests = media_requests(&with_row, &sticker, false);
+        let Request::Place { segment, .. } = &requests[0] else {
+            panic!("the clip is placed");
+        };
+        assert_eq!(
+            segment.render_index,
+            TrackType::Sticker.render_floor().unwrap()
+        );
+        // A sound keeps the default.
+        let requests = media_requests(&draft(), &place("v", 0, 500_000), false);
+        let Request::Place { segment, .. } = &requests[1] else {
+            panic!("the clip is placed");
+        };
+        assert_eq!(segment.render_index, 0);
     }
 
     #[test]

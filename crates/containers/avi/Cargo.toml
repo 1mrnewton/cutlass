@@ -4,10 +4,12 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "Demux and mux for avi."
+description = "Demux and mux for AVI and OpenDML AVI 2.0."
 
 [dependencies]
+cutlass-codec = { path = "../../codec", version = "0.1.0" }
 cutlass-container = { path = "../../container", version = "0.1.0" }
+cutlass-riff = { path = "../riff", version = "0.1.0" }
 
 [lints]
 workspace = true

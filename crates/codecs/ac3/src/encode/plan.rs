@@ -922,9 +922,9 @@ mod tests {
         let shape = shape(7, 5, Some((6, 15)));
         let mut blocks: Vec<Block> = (0..6).map(|_| Block::default()).collect();
         for block in &mut blocks {
-            for ch in 0..5 {
-                for bin in 0..253 {
-                    block.coefs[ch][bin] = 0.01 * ((bin + ch) % 7) as f32;
+            for (ch, row) in block.coefs[..5].iter_mut().enumerate() {
+                for (bin, coef) in row[..253].iter_mut().enumerate() {
+                    *coef = 0.01 * ((bin + ch) % 7) as f32;
                 }
             }
         }
@@ -946,9 +946,9 @@ mod tests {
         shape.eac3 = true;
         let mut blocks: Vec<Block> = (0..6).map(|_| Block::default()).collect();
         for block in &mut blocks {
-            for ch in 0..2 {
-                for bin in 0..253 {
-                    block.coefs[ch][bin] = 0.01;
+            for row in &mut block.coefs[..2] {
+                for coef in &mut row[..253] {
+                    *coef = 0.01;
                 }
             }
         }
@@ -964,9 +964,9 @@ mod tests {
         shape.eac3 = true;
         let mut blocks: Vec<Block> = (0..6).map(|_| Block::default()).collect();
         for block in &mut blocks {
-            for ch in 0..2 {
-                for bin in 0..253 {
-                    block.coefs[ch][bin] = 0.01;
+            for row in &mut block.coefs[..2] {
+                for coef in &mut row[..253] {
+                    *coef = 0.01;
                 }
             }
         }
@@ -998,8 +998,8 @@ mod tests {
         let shape = shape(1, 1, None);
         let mut blocks: Vec<Block> = (0..6).map(|_| Block::default()).collect();
         for block in &mut blocks {
-            for bin in 0..253 {
-                block.coefs[0][bin] = 0.3 / (1 + bin) as f32;
+            for (bin, coef) in block.coefs[0][..253].iter_mut().enumerate() {
+                *coef = 0.3 / (1 + bin) as f32;
             }
         }
         plan(&shape, &mut blocks, Mode::Adaptive);

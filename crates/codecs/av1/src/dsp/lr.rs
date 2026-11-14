@@ -513,6 +513,9 @@ fn wiener<P: Pixel>(
     let vf = wiener_taps(unit.wiener[0]).map(|t| t as i16);
     let hf = wiener_taps(unit.wiener[1]).map(|t| t as i16);
     if !P::HBD {
+        if cutlass_simd::ACCELERATED && wiener_kernel(dst, stride, s, sw, rc, &hf, &vf) {
+            return;
+        }
         return wiener8(dst, stride, s, sw, rc, &hf, &vf);
     }
     let offset = 1i32 << (bd + 7 - round0 - 1);
@@ -551,6 +554,51 @@ fn wiener<P: Pixel>(
             out[c] = P::from_i32(i32::from((v as i16).clamp(0, maxv)));
         }
     }
+}
+
+/// [`wiener`] for 8-bit samples on the kernels of `cutlass-simd`, a row of
+/// each pass at a time, for a rectangle at least eight samples wide.
+/// Returns whether it filtered the rectangle; when it did not, the stripe
+/// source is as it was.
+fn wiener_kernel<P: Pixel>(
+    dst: &mut [P],
+    stride: usize,
+    s: &mut LrScratch,
+    sw: usize,
+    rc: Rect,
+    hf: &[i16; 7],
+    vf: &[i16; 7],
+) -> bool {
+    use cutlass_simd::av1::lr as kernel;
+    let (w, h) = (rc.w, rc.h);
+    if w < 8 {
+        return false;
+    }
+    let r = kernel::Rounding::of(8);
+    let hf = [hf[0], hf[1], hf[2], hf[3]];
+    let vf = [vf[0], vf[1], vf[2], vf[3]];
+    grow(&mut s.inter, w * (h + 6));
+    for row in 0..h + 6 {
+        // Three samples left of the rectangle, and one past the last read:
+        // the padded stripe row holds both.
+        let base = row * sw + PAD + rc.x0 - 3;
+        let Some(src) = s.src.get(base..base + w + 7) else {
+            return false;
+        };
+        if !kernel::wiener_h(&mut s.inter[row * w..(row + 1) * w], src, &hf, &r) {
+            return false;
+        }
+    }
+    for row in 0..h {
+        let rows: [&[i16]; 7] =
+            core::array::from_fn(|t| &s.inter[(row + t) * w..(row + t + 1) * w]);
+        let o = (rc.y0 - rc.dst_row0 + row) * stride + rc.x0;
+        let out = &mut dst[o..o + w];
+        if !P::bytes_mut(out).is_some_and(|out| kernel::wiener_v_u8(out, &rows, &vf, &r)) {
+            return false;
+        }
+    }
+    true
 }
 
 /// [`wiener`] for 8-bit samples, in 16-bit arithmetic.

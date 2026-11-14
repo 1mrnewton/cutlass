@@ -230,6 +230,15 @@ pub fn sticker(id: &str) -> Option<&'static Sticker> {
     STICKERS.iter().find(|sticker| sticker.id == id)
 }
 
+/// The sticker a project keeps under `file_name`, as
+/// [`Sticker::file_name`] names it.
+#[must_use]
+pub fn sticker_of_file(file_name: &str) -> Option<&'static Sticker> {
+    STICKERS
+        .iter()
+        .find(|sticker| sticker.file_name() == file_name)
+}
+
 /// Stickers whose name or tags hold `query`, ignoring case. An empty
 /// query is every sticker.
 #[must_use]
@@ -274,6 +283,22 @@ impl Sticker {
             Art::Drawn(shape) => drawn_png(shape),
             Art::Png(bytes) | Art::Lottie(bytes) => Ok(bytes.to_vec()),
         }
+    }
+
+    /// Write the sticker's file into the project at `project`, unless it
+    /// is there already, and return where it is kept, relative to the
+    /// project: `Resources/` and [`Self::file_name`].
+    pub fn write_into(&self, project: &std::path::Path) -> Result<String, String> {
+        let stored = format!("Resources/{}", self.file_name());
+        let file = project.join(&stored);
+        if !file.is_file() {
+            let bytes = self.bytes()?;
+            if let Some(folder) = file.parent() {
+                std::fs::create_dir_all(folder).map_err(|error| error.to_string())?;
+            }
+            std::fs::write(&file, bytes).map_err(|error| error.to_string())?;
+        }
+        Ok(stored)
     }
 
     /// The picture's width and height, in its own pixels.
@@ -358,6 +383,15 @@ fn drawn_png(shape: draw::Shape) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_kept_file_names_its_sticker_and_another_file_none() {
+        for item in STICKERS {
+            assert_eq!(sticker_of_file(&item.file_name()), Some(item));
+        }
+        assert_eq!(sticker_of_file("holiday.png"), None);
+        assert_eq!(sticker_of_file("sticker-heart.json"), None);
+    }
 
     #[test]
     fn every_sticker_has_an_id_a_source_and_a_license() {

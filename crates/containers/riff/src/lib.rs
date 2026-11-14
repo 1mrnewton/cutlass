@@ -22,7 +22,7 @@ mod probe;
 mod walk;
 
 pub use demux::WavDemux;
-pub use format::WavFormat;
+pub use format::{WavFormat, parse_wave_format};
 pub use limits::{
     CHANNEL_MASK_OFFSET, EXTRA_HEADER, MAX_CHUNKS, MAX_DEPTH, MAX_DS64_ROWS, MAX_KEPT_CHUNK,
     MAX_MPEG_RESYNC, PROBE_BYTES,
@@ -72,7 +72,7 @@ pub const FEATURES: &[Feature] = &[
     Feature {
         name: "alaw-mulaw",
         demux: true,
-        mux: false,
+        mux: true,
     },
     Feature {
         name: "mpeg-in-wav",
@@ -170,7 +170,7 @@ mod tests {
         assert!(feature("unknown-codec").demux);
         assert!(!feature("unknown-codec").mux);
         assert!(feature("alaw-mulaw").demux);
-        assert!(!feature("alaw-mulaw").mux);
+        assert!(feature("alaw-mulaw").mux);
         assert!(feature("unknown-chunk-kept").mux);
         assert!(!feature("unknown-chunk-dropped").mux);
         for name in [

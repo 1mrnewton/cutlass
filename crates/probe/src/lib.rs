@@ -70,13 +70,25 @@ pub fn probe(path: &Path) -> Result<Probed, ProbeError> {
     if let Some(probed) = aiff(path, &header)? {
         return Ok(probed);
     }
+    if let Some(probed) = caf(path, &header)? {
+        return Ok(probed);
+    }
     if let Some(probed) = flac(path, &header)? {
         return Ok(probed);
     }
     if let Some(probed) = ogg(path, &header)? {
         return Ok(probed);
     }
+    if let Some(probed) = transport_stream(path, &header)? {
+        return Ok(probed);
+    }
+    if let Some(probed) = matroska(path, &header)? {
+        return Ok(probed);
+    }
     if let Some(probed) = movie(path, &header)? {
+        return Ok(probed);
+    }
+    if let Some(probed) = avi(path, &header)? {
         return Ok(probed);
     }
     if let Some(probed) = mpeg_audio(path, &header)? {
@@ -199,6 +211,30 @@ fn aiff(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     Ok(Some(Probed::Audio { duration }))
 }
 
+/// The frames of every packet, priming and remainder included, as the
+/// last packet's end counts AAC priming in an MP4 and the pre-skip in Ogg.
+/// A file whose data runs to its end is measured from the bytes there.
+fn caf(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
+    if !matches!(
+        cutlass_caf::probe(header),
+        cutlass_container::ProbeResult::Accept { .. }
+    ) {
+        return Ok(None);
+    }
+    let file = File::open(path).map_err(|error| io_error(path, error))?;
+    let length = file
+        .metadata()
+        .map_err(|error| io_error(path, error))?
+        .len();
+    let demux = cutlass_caf::CafDemux::open(file, length)
+        .map_err(|error| ProbeError::new(format!("caf refused the file: {error}")))?;
+    let frames = demux
+        .total_frames()
+        .ok_or_else(|| ProbeError::new("caf has no frame count"))?;
+    let duration = samples_to_micros(frames, demux.sample_rate())?;
+    Ok(Some(Probed::Audio { duration }))
+}
+
 /// The STREAMINFO sample count, or the frames counted when it is unknown.
 fn flac(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     if !matches!(
@@ -270,6 +306,109 @@ fn ogg(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     Ok(Some(Probed::Audio { duration }))
 }
 
+/// MPEG-TS (`.ts`, `.m2ts`, `.mts`): the chosen program's first video
+/// size, and its length from the earliest timestamp to the end of the last
+/// frame, found without reading the middle of the file.
+fn transport_stream(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
+    if !matches!(
+        cutlass_mpegts::probe(header),
+        cutlass_container::ProbeResult::Accept { .. }
+    ) {
+        return Ok(None);
+    }
+    let file = File::open(path).map_err(|error| io_error(path, error))?;
+    let length = file
+        .metadata()
+        .map_err(|error| io_error(path, error))?
+        .len();
+    let demux = cutlass_mpegts::TsDemux::open(std::io::BufReader::new(file), length)
+        .map_err(|error| ProbeError::new(format!("mpegts refused the file: {error}")))?;
+    let ticks = demux
+        .end()
+        .map_or(0, |end| u64::try_from(end - demux.start()).unwrap_or(0));
+    let duration = ticks_to_micros(ticks, cutlass_mpegts::TIMESCALE)?;
+    let streams = cutlass_container::Demux::streams(&demux);
+    if let Some(size) = streams.iter().find_map(|stream| stream.params().size()) {
+        let width =
+            i32::try_from(size.width()).map_err(|_| ProbeError::new("the frame is too wide"))?;
+        let height =
+            i32::try_from(size.height()).map_err(|_| ProbeError::new("the frame is too tall"))?;
+        return Ok(Some(Probed::Video {
+            meta: MetaType::Video,
+            width,
+            height,
+            duration,
+        }));
+    }
+    if streams
+        .iter()
+        .any(|stream| stream.params().sample_rate().is_some())
+    {
+        return Ok(Some(Probed::Audio { duration }));
+    }
+    Err(ProbeError::new(
+        "mpegts opened a file with no video or audio",
+    ))
+}
+
+/// A Matroska or WebM file: the first video track's size, or the first
+/// audio track, and the Segment's Duration. A live recording that states
+/// no Duration is read to its last packet.
+fn matroska(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
+    if !matches!(
+        cutlass_matroska::probe(header),
+        cutlass_container::ProbeResult::Accept { .. }
+    ) {
+        return Ok(None);
+    }
+    let file = File::open(path).map_err(|error| io_error(path, error))?;
+    let length = file
+        .metadata()
+        .map_err(|error| io_error(path, error))?
+        .len();
+    let mut demux = cutlass_matroska::MatroskaDemux::open(std::io::BufReader::new(file), length)
+        .map_err(|error| ProbeError::new(format!("matroska refused the file: {error}")))?;
+    let timescale = demux.clock().ticks_per_second;
+    let ticks = match demux.duration_ticks().filter(|ticks| *ticks > 0) {
+        Some(ticks) => ticks,
+        None => {
+            let mut end = 0_i64;
+            while let Some(packet) = cutlass_container::Demux::read_packet(&mut demux)
+                .map_err(|error| ProbeError::new(format!("matroska refused the file: {error}")))?
+            {
+                let time = packet.timestamp();
+                if let Some(pts) = time.presentation() {
+                    end = end.max(pts.saturating_add(time.duration().unwrap_or(0)));
+                }
+            }
+            end
+        }
+    };
+    let duration = ticks_to_micros(u64::try_from(ticks).unwrap_or(0), timescale)?;
+    let streams = cutlass_container::Demux::streams(&demux);
+    if let Some(size) = streams.iter().find_map(|stream| stream.params().size()) {
+        let width =
+            i32::try_from(size.width()).map_err(|_| ProbeError::new("the frame is too wide"))?;
+        let height =
+            i32::try_from(size.height()).map_err(|_| ProbeError::new("the frame is too tall"))?;
+        return Ok(Some(Probed::Video {
+            meta: MetaType::Video,
+            width,
+            height,
+            duration,
+        }));
+    }
+    if streams
+        .iter()
+        .any(|stream| stream.params().sample_rate().is_some())
+    {
+        return Ok(Some(Probed::Audio { duration }));
+    }
+    Err(ProbeError::new(
+        "matroska opened a file with no video or audio",
+    ))
+}
+
 fn movie(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     if header.get(4..8) != Some(b"ftyp") {
         return Ok(None);
@@ -314,6 +453,60 @@ fn movie(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     }
     Err(ProbeError::new(
         "isobmff opened a file with no video or audio",
+    ))
+}
+
+/// An AVI's first video stream, or its first audio stream, and how long
+/// that stream's chunks last.
+fn avi(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
+    if !matches!(
+        cutlass_avi::probe(header),
+        cutlass_container::ProbeResult::Accept { .. }
+    ) {
+        return Ok(None);
+    }
+    let file = File::open(path).map_err(|error| io_error(path, error))?;
+    let length = file
+        .metadata()
+        .map_err(|error| io_error(path, error))?
+        .len();
+    let demux = cutlass_avi::AviDemux::open(file, length)
+        .map_err(|error| ProbeError::new(format!("avi refused the file: {error}")))?;
+    let streams = cutlass_container::Demux::streams(&demux);
+    let length_of = |stream: &cutlass_container::Stream| {
+        let ticks = demux.duration_ticks(stream.id().get()).unwrap_or(0);
+        ticks_to_micros(
+            u64::try_from(ticks).unwrap_or(0),
+            stream.timescale().ticks_per_second(),
+        )
+    };
+    if let Some(stream) = streams
+        .iter()
+        .find(|stream| stream.params().size().is_some() && !stream.params().codec().is_unknown())
+    {
+        let Some(size) = stream.params().size() else {
+            return Err(ProbeError::new("avi video stream has no frame size"));
+        };
+        let width =
+            i32::try_from(size.width()).map_err(|_| ProbeError::new("the frame is too wide"))?;
+        let height =
+            i32::try_from(size.height()).map_err(|_| ProbeError::new("the frame is too tall"))?;
+        return Ok(Some(Probed::Video {
+            meta: MetaType::Video,
+            width,
+            height,
+            duration: length_of(stream)?,
+        }));
+    }
+    if let Some(stream) = streams.iter().find(|stream| {
+        stream.params().sample_rate().is_some() && !stream.params().codec().is_unknown()
+    }) {
+        return Ok(Some(Probed::Audio {
+            duration: length_of(stream)?,
+        }));
+    }
+    Err(ProbeError::new(
+        "avi opened a file with no video or audio Cutlass reads",
     ))
 }
 
@@ -366,21 +559,12 @@ pub const RAW_AAC: &str =
     "raw AAC (.aac) files cannot be played yet; the same sound in an .m4a or .mp4 can";
 
 fn unavailable(header: &[u8]) -> Option<&'static str> {
-    if header.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
-        return Some("matroska is not available");
-    }
     if header.starts_with(b"OggS") {
         // A capture pattern with a version other than 0.
         return Some("ogg is not available");
     }
     if header.starts_with(b"caff") {
         return Some("caf is not available");
-    }
-    if header.starts_with(b"RIFF") && header.get(8..12) == Some(b"AVI ") {
-        return Some("avi is not available");
-    }
-    if header.first() == Some(&0x47) && header.get(188) == Some(&0x47) {
-        return Some("mpegts is not available");
     }
     None
 }
@@ -463,6 +647,47 @@ mod tests {
             } => (meta, width, height, duration),
             Probed::Audio { .. } => panic!("{} opened as audio", path.display()),
         }
+    }
+
+    #[test]
+    fn an_avi_movie_probes_as_video_with_its_length() {
+        use cutlass_codec::{
+            CodecId, FrameSize, Packet, StreamCodec, StreamParams, Timescale, Timestamp,
+        };
+        use cutlass_container::{Mux, NewStream, TrackDuration, TrackId};
+        let mut mux = cutlass_avi::AviMux::new(std::io::Cursor::new(Vec::new()));
+        mux.add_stream(NewStream {
+            params: StreamParams::video(
+                StreamCodec::Known(CodecId::Mjpeg),
+                FrameSize::try_new(64, 36).expect("size"),
+                Vec::new(),
+            ),
+            timescale: Timescale::new(25),
+            language: None,
+        })
+        .expect("stream");
+        for frame in 0..50 {
+            let stamp = Timestamp::try_new(Some(frame), Some(frame), Some(1)).expect("time");
+            let packet = Packet::try_new(
+                0,
+                vec![0xFF, 0xD8, 0xFF, 0xD9],
+                stamp,
+                Timescale::new(25),
+                true,
+            )
+            .expect("packet");
+            mux.write_packet(&packet).expect("write");
+        }
+        mux.finish(&[TrackDuration {
+            track: TrackId::new(0),
+            timescale: Timescale::new(25),
+            ticks: 50,
+        }])
+        .expect("finish");
+        let bytes = mux.into_writer().expect("writer").into_inner();
+        let temp = Temp::new();
+        let path = temp.write("clip.avi", &bytes);
+        assert_eq!(picture(&path), (MetaType::Video, 64, 36, 2_000_000));
     }
 
     /// One second of 20 ms Opus packets after a 312-sample pre-skip, in Ogg.
@@ -559,6 +784,53 @@ mod tests {
         let path = temp.write("damaged.ogg", &damaged);
         let error = probe(&path).expect_err("damaged");
         assert!(error.to_string().contains("ogg"), "{error}");
+    }
+
+    /// A WebM written by the Matroska muxer: two seconds of 320x240 VP9
+    /// and a second of Opus. The Segment's Duration is the later end.
+    #[test]
+    fn a_webm_file_is_video_as_long_as_its_segment() {
+        use cutlass_codec::{
+            CodecId, FrameSize, Packet, StreamCodec, StreamParams, Timescale, Timestamp,
+        };
+        use cutlass_container::{Mux, NewStream, TrackDuration};
+        let mut mux = cutlass_matroska::MatroskaMux::webm(std::io::Cursor::new(Vec::new()));
+        let size = FrameSize::try_new(320, 240).expect("size");
+        let picture = mux
+            .add_stream(NewStream {
+                params: StreamParams::video(StreamCodec::Known(CodecId::Vp9), size, Vec::new()),
+                timescale: Timescale::new(1000),
+                language: None,
+            })
+            .expect("video");
+        for index in 0..50 {
+            let time = Timestamp::try_new(None, Some(index * 40), Some(40)).expect("time");
+            let packet = Packet::try_new(1, vec![1; 8], time, Timescale::new(1000), index == 0)
+                .expect("packet");
+            mux.write_packet(&packet).expect("write");
+        }
+        mux.finish(&[TrackDuration {
+            track: picture,
+            timescale: Timescale::new(1000),
+            ticks: 2000,
+        }])
+        .expect("finish");
+        let bytes = mux.into_writer().expect("writer").into_inner();
+        let temp = Temp::new();
+        let path = temp.write("clip.webm", &bytes);
+        assert_eq!(
+            probe(&path).expect("webm"),
+            Probed::Video {
+                meta: MetaType::Video,
+                width: 320,
+                height: 240,
+                duration: 2_000_000,
+            }
+        );
+        // A cut file still names the family in its error.
+        let cut = temp.write("cut.webm", &bytes[..40]);
+        let error = probe(&cut).expect_err("cut");
+        assert!(error.to_string().contains("matroska"), "{error}");
     }
 
     #[test]
@@ -692,6 +964,44 @@ mod tests {
     }
 
     #[test]
+    fn a_caf_file_is_audio_on_the_sample_clock() {
+        use cutlass_codec::{CodecId, Packet, StreamCodec, StreamParams, Timescale, Timestamp};
+        use cutlass_container::{Mux, NewStream, TrackDuration, TrackId};
+
+        let temp = Temp::new();
+        let mut mux = cutlass_caf::CafMux::new(std::io::Cursor::new(Vec::new()));
+        let params =
+            StreamParams::try_audio(StreamCodec::Known(CodecId::Pcm), 8_000, 1, vec![1, 1, 0])
+                .expect("params");
+        mux.add_stream(NewStream {
+            params,
+            timescale: Timescale::new(8_000),
+            language: None,
+        })
+        .expect("stream");
+        let packet = Packet::try_new(
+            0,
+            vec![0; 8_000],
+            Timestamp::try_new(Some(0), Some(0), Some(4_000)).expect("time"),
+            Timescale::new(8_000),
+            true,
+        )
+        .expect("packet");
+        mux.write_packet(&packet).expect("write");
+        mux.finish(&[TrackDuration {
+            track: TrackId::new(0),
+            timescale: Timescale::new(8_000),
+            ticks: 4_000,
+        }])
+        .expect("finish");
+        let path = temp.write("sound.caf", &mux.into_inner().into_inner());
+        assert_eq!(
+            probe(&path).expect("caf"),
+            Probed::Audio { duration: 500_000 }
+        );
+    }
+
+    #[test]
     fn an_aiff_file_is_audio_on_the_sample_clock() {
         let temp = Temp::new();
         let path = temp.write("sound.aiff", &aiff_s16(&[0x40, 0x00]));
@@ -805,6 +1115,20 @@ mod tests {
         );
         assert!(probe(&temp.0.join("missing.mp4")).is_err());
         assert!(probe(&temp.0).is_err());
+    }
+
+    /// FFmpeg's H.264 and AAC in a transport stream: the picture size, and
+    /// the time from the first AAC frame (PTS 131280) to the end of the last
+    /// (PTS 240720 plus 1920), which is 16 ms past ffprobe's estimate.
+    #[test]
+    fn a_transport_stream_reports_its_picture_and_its_length() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../containers/mpegts/tests/fixtures/h264_aac.ts");
+        assert_eq!(picture(&path), (MetaType::Video, 96, 64, 1_237_333));
+        let temp = Temp::new();
+        let bytes = std::fs::read(&path).expect("fixture");
+        let cut = temp.write("cut.ts", &bytes[..1000]);
+        assert!(probe(&cut).is_err());
     }
 
     #[test]

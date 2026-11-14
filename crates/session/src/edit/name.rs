@@ -1,4 +1,4 @@
-use cutlass_model::Draft;
+use cutlass_model::{Cover, Draft};
 
 /// Store the project name. Surrounding whitespace is dropped.
 ///
@@ -8,9 +8,14 @@ pub fn set_project_name(draft: &mut Draft, name: &str) {
     draft.name = name.trim().to_owned();
 }
 
+/// Store the project's cover, or take it away. Nothing else changes.
+pub fn set_cover(draft: &mut Draft, cover: Option<Cover>) {
+    draft.cover = cover;
+}
+
 #[cfg(test)]
 mod tests {
-    use cutlass_model::Draft;
+    use cutlass_model::{Cover, Draft, Micros};
 
     use crate::request::Request;
     use crate::session::Session;
@@ -46,5 +51,28 @@ mod tests {
         session.undo().unwrap();
         assert_eq!(session.draft().name, "Cut");
         assert_eq!(session.draft().canvas_config.width, width);
+    }
+
+    #[test]
+    fn a_cover_is_stored_taken_away_and_undone() {
+        let mut session = Session::open(Draft::empty("D"));
+        let frame = Cover::Frame {
+            time: Micros(2_000_000),
+        };
+        session
+            .apply(
+                0,
+                &[Request::SetCover {
+                    cover: Some(frame.clone()),
+                }],
+            )
+            .unwrap();
+        assert_eq!(session.draft().cover, Some(frame.clone()));
+        session
+            .apply(1, &[Request::SetCover { cover: None }])
+            .unwrap();
+        assert_eq!(session.draft().cover, None);
+        session.undo().unwrap();
+        assert_eq!(session.draft().cover, Some(frame));
     }
 }

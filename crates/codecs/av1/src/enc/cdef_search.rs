@@ -271,10 +271,10 @@ impl<P: Pixel> RowWork<'_, P> {
                 for c in (sbc..c_end).step_by(2) {
                     let rr = (r + 1).min(fs.mi_rows - 1);
                     let cc = (c + 1).min(fs.mi_cols - 1);
-                    if fs.mi_at(r, c).skip
-                        && fs.mi_at(rr, c).skip
-                        && fs.mi_at(r, cc).skip
-                        && fs.mi_at(rr, cc).skip
+                    if fs.mi_at(r, c).skip()
+                        && fs.mi_at(rr, c).skip()
+                        && fs.mi_at(r, cc).skip()
+                        && fs.mi_at(rr, cc).skip()
                     {
                         continue;
                     }

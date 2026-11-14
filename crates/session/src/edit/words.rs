@@ -80,6 +80,11 @@ pub fn set_words(
 /// Material kind of a caption: a text clip that came from speech.
 pub const CAPTION_KIND: &str = "subtitle";
 
+/// Where a new caption sits: low on the canvas, in fractions of half its
+/// height (up is positive), with room below for a second line. Captions
+/// copied from another keep that one's place.
+pub const CAPTION_Y: f64 = -0.75;
+
 /// True when every clip on the lane is a caption, or the lane is empty.
 fn holds_only_captions(draft: &Draft, track_index: usize) -> bool {
     draft.tracks[track_index].segments.iter().all(|segment| {
@@ -174,6 +179,7 @@ pub fn add_caption(
     draft.materials.texts.push(text);
     let mut segment = Segment::new(segment_id.clone(), material_id.clone(), target);
     segment.render_index = TrackType::Text.render_floor().unwrap_or(0);
+    segment.clip.transform.y = CAPTION_Y;
     super::place::place(draft, track_id, segment)?;
     set_words(draft, material_id, words)?;
     match super::linkage::link(draft, source_id, segment_id) {
@@ -219,6 +225,7 @@ pub fn add_subtitles(
             cue.target.clone(),
         );
         segment.render_index = TrackType::Text.render_floor().unwrap_or(0);
+        segment.clip.transform.y = CAPTION_Y;
         super::place::place(draft, track_id, segment)?;
         set_words(draft, &cue.material_id, cue.words.clone())?;
     }
@@ -476,6 +483,7 @@ mod tests {
         assert_eq!(source, TimeRange::new(0, 2_000_000));
         assert_eq!(track.segments[0].target, source);
         assert_eq!(track.segments[0].render_index, 14_000);
+        assert_eq!(track.segments[0].clip.transform.y, CAPTION_Y);
         let text = &draft.materials.texts[0];
         assert_eq!(text.kind, CAPTION_KIND);
         assert_eq!(text.content, "hello there");
@@ -690,6 +698,12 @@ mod tests {
         assert_eq!(lane.segments.len(), 2);
         assert_eq!(lane.segments[1].target, cues[1].target);
         assert_eq!(lane.segments[1].render_index, 14_000);
+        // Captions sit low, clear of titles in the middle.
+        assert!(
+            lane.segments
+                .iter()
+                .all(|segment| segment.clip.transform.y == CAPTION_Y)
+        );
         let two = draft
             .materials
             .texts

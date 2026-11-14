@@ -776,9 +776,8 @@ fn finish_unpaired(st: &mut State, open: OpenField, done: &mut Vec<Decoded>) {
     };
     let geo = open.info.geo;
     let target = Arc::make_mut(&mut frame);
-    for c in 0..3 {
+    for (c, plane) in target.planes.iter_mut().enumerate() {
         let (stride, height) = geo.plane(c);
-        let plane = &mut target.planes[c];
         for line in (0..height).step_by(2) {
             let (from, to) = if open.parity == 0 {
                 (line, line + 1)

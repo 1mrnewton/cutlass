@@ -298,18 +298,18 @@ fn residuals(
         }
         (1, 0)
     };
-    for row in 0..4 {
-        let mut l = left.y[row];
-        for col in 0..4 {
+    for (row, left_y) in left.y.iter_mut().enumerate() {
+        let mut l = *left_y;
+        for (col, top_y) in top.y.iter_mut().enumerate() {
             let index = row * 4 + col;
-            let context = usize::from(l) + usize::from(top.y[col]);
+            let context = usize::from(l) + usize::from(*top_y);
             let block = &mut coeffs[index];
             let nz = coefficients(br, &probs[luma_type], context, quant.y1, first, block);
             l = nz > first;
-            top.y[col] = l;
+            *top_y = l;
             has[index] = nz > 1 || block[0] != 0;
         }
-        left.y[row] = l;
+        *left_y = l;
     }
     for (plane, offset) in [(0, 16), (1, 20)] {
         let (top_plane, left_plane) = if plane == 0 {

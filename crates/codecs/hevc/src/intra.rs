@@ -53,9 +53,7 @@ impl Refs {
             return;
         };
         let value = self.samples[first];
-        for i in 0..first {
-            self.samples[i] = value;
-        }
+        self.samples[..first].fill(value);
         for i in first + 1..len {
             if !self.available[i] {
                 self.samples[i] = self.samples[i - 1];

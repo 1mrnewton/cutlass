@@ -168,8 +168,42 @@ pub fn predict_clipped<P: Pixel>(
 }
 
 fn fill<P: Pixel>(dst: &mut [P], stride: usize, w: usize, h: usize, v: P) {
-    for i in 0..h {
-        row_mut(dst, stride, i, w).fill(v);
+    by_width(dst, stride, w, h, |row, _| row.fill(v));
+}
+
+/// Runs `f` on each of the `h` rows of `w` samples of a block, with the
+/// width a constant inside the loop for the block sizes, so each row is
+/// a few fixed-size stores in place of a call to `memset` or `memcpy`.
+#[inline(always)]
+fn by_width<P: Pixel>(
+    dst: &mut [P],
+    stride: usize,
+    w: usize,
+    h: usize,
+    f: impl Fn(&mut [P], usize),
+) {
+    #[inline(always)]
+    fn rows<P: Pixel, const N: usize>(
+        dst: &mut [P],
+        stride: usize,
+        h: usize,
+        f: impl Fn(&mut [P], usize),
+    ) {
+        for i in 0..h {
+            f(&mut dst[i * stride..i * stride + N], i);
+        }
+    }
+    match w {
+        4 => rows::<P, 4>(dst, stride, h, f),
+        8 => rows::<P, 8>(dst, stride, h, f),
+        16 => rows::<P, 16>(dst, stride, h, f),
+        32 => rows::<P, 32>(dst, stride, h, f),
+        64 => rows::<P, 64>(dst, stride, h, f),
+        _ => {
+            for i in 0..h {
+                f(row_mut(dst, stride, i, w), i);
+            }
+        }
     }
 }
 
@@ -488,13 +522,9 @@ fn pred_directional<P: Pixel>(
 
     if p_angle == 90 {
         let top = &above[EDGE_OFF..EDGE_OFF + w];
-        for i in 0..h {
-            row_mut(dst, stride, i, w).copy_from_slice(top);
-        }
+        by_width(dst, stride, w, h, |row, _| row.copy_from_slice(top));
     } else if p_angle == 180 {
-        for i in 0..h {
-            row_mut(dst, stride, i, w).fill(left[EDGE_OFF + i]);
-        }
+        by_width(dst, stride, w, h, |row, i| row.fill(left[EDGE_OFF + i]));
     } else if p_angle < 90 {
         let dx = DR_INTRA_DERIVATIVE[p_angle as usize] as usize;
         z1(dst, stride, w, h, dx, above, up_a);
@@ -668,6 +698,17 @@ pub fn filter_intra<P: Pixel>(
     bd: u32,
 ) {
     let taps = &INTRA_FILTER_TAPS[mode as usize];
+    if cutlass_simd::ACCELERATED
+        && w <= 32
+        && h <= 32
+        && let Some(d) = P::bytes_mut(dst)
+        && let (Some(a), Some(l)) = (
+            P::bytes(&above[EDGE_OFF - 1..=EDGE_OFF + w]),
+            P::bytes(&left[EDGE_OFF..EDGE_OFF + h]),
+        )
+    {
+        return cutlass_simd::av1::ipred::filter_intra(d, stride, w, h, taps, a, l);
+    }
     let mut t = [[0i32; 7]; 8];
     for k in 0..8 {
         for m in 0..7 {

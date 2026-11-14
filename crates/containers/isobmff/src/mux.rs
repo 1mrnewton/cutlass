@@ -15,7 +15,8 @@ use crate::legacy::{
     CodecId, ColorTags, Edit, Error, MediaKind, Mux, Packet, SampleFormat, StreamParams,
 };
 use crate::limits::{
-    DEFAULT_SAMPLES_PER_FRAGMENT, MAX_BUFFERED_MUX_BYTES, MAX_PACKET_BYTES, MAX_TRACKS,
+    DEFAULT_SAMPLES_PER_FRAGMENT, MAX_BUFFERED_MUX_BYTES, MAX_COVER_BYTES, MAX_PACKET_BYTES,
+    MAX_TRACKS,
 };
 use crate::movie::pack_language;
 use std::io::{Seek, SeekFrom, Write};
@@ -106,6 +107,8 @@ pub struct IsoBmffMux<W: Write + Seek> {
     finished: bool,
     sequence: u32,
     tfra: Vec<TfraRow>,
+    /// A JPEG written as the movie's cover art in `moov/udta`.
+    cover: Option<Vec<u8>>,
 }
 
 impl<W: Write + Seek> IsoBmffMux<W> {
@@ -124,7 +127,35 @@ impl<W: Write + Seek> IsoBmffMux<W> {
             finished: false,
             sequence: 1,
             tfra: Vec::new(),
+            cover: None,
         }
+    }
+
+    /// Sets the movie's cover art, a JPEG picture. It is written as iTunes
+    /// metadata, `moov/udta/meta/ilst/covr`, with a `data` atom of type 13
+    /// (JPEG), as FFmpeg's movenc.c writes it. A fragmented file
+    /// writes `moov` with its first fragment, so the cover must come
+    /// before that. Bytes that do not start with a JPEG start-of-image
+    /// marker, or more than `MAX_COVER_BYTES`, are refused and the file is
+    /// unchanged.
+    pub fn set_cover_art(&mut self, jpeg: Vec<u8>) -> Result<(), Error> {
+        if self.finished || (self.options.fragmented && self.started) {
+            return Err(Error::Incomplete);
+        }
+        if !jpeg.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            return Err(Error::Unsupported {
+                what: "cover art that is not a JPEG",
+            });
+        }
+        let size = u64::try_from(jpeg.len()).unwrap_or(u64::MAX);
+        if size > MAX_COVER_BYTES {
+            return Err(Error::Limit {
+                what: "cover art",
+                value: size,
+            });
+        }
+        self.cover = Some(jpeg);
+        Ok(())
     }
 
     /// Remember the encoder delay and trailing padding of `track_id`.
@@ -248,10 +279,10 @@ impl<W: Write + Seek> IsoBmffMux<W> {
         if self.started {
             return Ok(());
         }
-        let ftyp = ftyp_bytes(self.options.brand, self.options.fragmented);
+        let ftyp = ftyp_bytes(self.options.brand, self.options.fragmented, &self.tracks);
         self.write_bytes(&ftyp)?;
         if self.options.fragmented {
-            let moov = init_moov(&self.tracks, self.movie_scale()?)?;
+            let moov = init_moov(&self.tracks, self.movie_scale()?, self.cover.as_deref())?;
             self.write_bytes(&moov)?;
         } else if self.options.moov_at_end {
             self.mdat_at = Some(self.cursor);
@@ -314,6 +345,23 @@ impl<W: Write + Seek> Mux for IsoBmffMux<W> {
             .position(|track| track.params.track_id == packet.track_id)
         else {
             return Err(Error::Missing { what: "track" });
+        };
+        // An `av01` sample is the temporal unit without its delimiter,
+        // padding and redundant headers, each OBU with its size (AV1 Codec
+        // ISO Media File Format Binding 2.4).
+        let sample;
+        let packet = if self.tracks[track].params.sample_entry == *b"av01" {
+            let payload =
+                cutlass_container::av1_sample(&packet.payload).ok_or(Error::Unsupported {
+                    what: "AV1 packet that is not whole OBUs",
+                })?;
+            sample = Packet {
+                payload,
+                ..packet.clone()
+            };
+            &sample
+        } else {
+            packet
         };
         let timescale = self.tracks[track].params.timescale;
         if packet.timescale != timescale {
@@ -424,14 +472,16 @@ impl<W: Write + Seek> Mux for IsoBmffMux<W> {
             let size = self.cursor.saturating_sub(mdat_at);
             self.patch(mdat_at + 8, &size.to_be_bytes())?;
             let scale = self.movie_scale()?;
-            let moov = movie_bytes(&self.tracks, &self.held, scale, |offset| offset)?;
+            let cover = self.cover.as_deref();
+            let moov = movie_bytes(&self.tracks, &self.held, scale, cover, |offset| offset)?;
             self.write_bytes(&moov)?;
         } else {
-            let ftyp = ftyp_bytes(self.options.brand, false);
+            let ftyp = ftyp_bytes(self.options.brand, false, &self.tracks);
             let scale = self.movie_scale()?;
-            let probe = movie_bytes(&self.tracks, &self.held, scale, |_| 0)?;
+            let cover = self.cover.as_deref();
+            let probe = movie_bytes(&self.tracks, &self.held, scale, cover, |_| 0)?;
             let payload_at = u64::try_from(ftyp.len() + probe.len()).unwrap_or(0) + 16;
-            let moov = movie_bytes(&self.tracks, &self.held, scale, |relative| {
+            let moov = movie_bytes(&self.tracks, &self.held, scale, cover, |relative| {
                 payload_at.saturating_add(relative)
             })?;
             if moov.len() != probe.len() {
@@ -514,14 +564,7 @@ fn entry_code(params: &StreamParams) -> Result<[u8; 4], Error> {
         CodecId::Alac => *b"alac",
         CodecId::Ac3 => *b"ac-3",
         CodecId::Eac3 => *b"ec-3",
-        CodecId::Pcm => match audio_format(params) {
-            SampleFormat::S16Le | SampleFormat::S24Le | SampleFormat::S32Le | SampleFormat::U8 => {
-                *b"sowt"
-            }
-            SampleFormat::F32Le => *b"fl32",
-            SampleFormat::F64Le => *b"fl64",
-            _ => *b"twos",
-        },
+        CodecId::Pcm => pcm_entry_code(params)?,
         CodecId::Unknown(code) => code,
         _ => {
             return Err(Error::CodecRejected {
@@ -532,14 +575,80 @@ fn entry_code(params: &StreamParams) -> Result<[u8; 4], Error> {
     Ok(code)
 }
 
-fn audio_format(params: &StreamParams) -> SampleFormat {
-    match params.kind {
-        MediaKind::Audio(audio) => audio.format,
-        _ => SampleFormat::Unknown,
+/// The QuickTime entry for a PCM track. Mono or stereo 8- and 16-bit sound
+/// at up to 65535 Hz keeps the classic version 0 codes FFmpeg also writes:
+/// `raw ` (unsigned 8-bit), `twos` (signed 8-bit, s16be) and `sowt`
+/// (s16le). Anything else is `lpcm` with a version 2 description, whose
+/// flags state float, byte order and sign exactly.
+fn pcm_entry_code(params: &StreamParams) -> Result<[u8; 4], Error> {
+    let MediaKind::Audio(audio) = params.kind else {
+        return Err(Error::CodecRejected {
+            sample_entry: [0, 0, 0, 0],
+        });
+    };
+    if lpcm_flags(audio.format).is_none() {
+        return Err(Error::Unsupported {
+            what: "PCM track without a sample format",
+        });
     }
+    let classic = audio.channels <= 2 && audio.sample_rate <= u32::from(u16::MAX);
+    Ok(match audio.format {
+        SampleFormat::U8 if classic => *b"raw ",
+        SampleFormat::S8 | SampleFormat::S16Be if classic => *b"twos",
+        SampleFormat::S16Le if classic => *b"sowt",
+        _ => *b"lpcm",
+    })
 }
 
-fn ftyp_bytes(brand: FileBrand, fragmented: bool) -> Vec<u8> {
+/// `formatSpecificFlags` of a version 2 `lpcm` description, as Apple's
+/// `AudioStreamBasicDescription` defines them: 1 float, 2 big-endian,
+/// 4 signed integer, 8 packed. The values match FFmpeg's movenc.c.
+fn lpcm_flags(format: SampleFormat) -> Option<u32> {
+    Some(match format {
+        SampleFormat::F32Be | SampleFormat::F64Be => 1 | 2 | 8,
+        SampleFormat::F32Le | SampleFormat::F64Le => 1 | 8,
+        SampleFormat::U8 => 2 | 8,
+        SampleFormat::S16Be | SampleFormat::S24Be | SampleFormat::S32Be => 2 | 4 | 8,
+        SampleFormat::S8 | SampleFormat::S16Le | SampleFormat::S24Le | SampleFormat::S32Le => 4 | 8,
+        SampleFormat::Unknown => return None,
+    })
+}
+
+/// A QuickTime sound description version 2 (QTFF, "Sound Sample Description
+/// (Version 2)"): the fields after the eight-byte sample entry header.
+fn lpcm_description(audio: &crate::legacy::AudioParams) -> Result<Vec<u8>, Error> {
+    let flags = lpcm_flags(audio.format).ok_or(Error::Unsupported {
+        what: "PCM track without a sample format",
+    })?;
+    let bits = u32::from(audio.bits_per_sample);
+    let channels = u32::from(audio.channels);
+    let mut entry = Vec::with_capacity(56);
+    entry.extend_from_slice(&2u16.to_be_bytes()); // version
+    entry.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // revision, vendor
+    entry.extend_from_slice(&3u16.to_be_bytes()); // always 3
+    entry.extend_from_slice(&16u16.to_be_bytes()); // always 16
+    entry.extend_from_slice(&(-2i16).to_be_bytes()); // always -2
+    entry.extend_from_slice(&0u16.to_be_bytes()); // always 0
+    entry.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // always 65536
+    entry.extend_from_slice(&72u32.to_be_bytes()); // size of the struct
+    entry.extend_from_slice(&f64::from(audio.sample_rate).to_bits().to_be_bytes());
+    entry.extend_from_slice(&channels.to_be_bytes());
+    entry.extend_from_slice(&0x7F00_0000u32.to_be_bytes()); // always 0x7F000000
+    entry.extend_from_slice(&bits.to_be_bytes());
+    entry.extend_from_slice(&flags.to_be_bytes());
+    entry.extend_from_slice(&(channels * bits / 8).to_be_bytes()); // bytes per packet
+    entry.extend_from_slice(&1u32.to_be_bytes()); // frames per packet
+    Ok(entry)
+}
+
+/// The file type box. A file with an AV1 track that is not a QuickTime
+/// movie lists `av01` among its compatible brands, as the AV1 binding
+/// requires (2.1).
+fn ftyp_bytes(brand: FileBrand, fragmented: bool, tracks: &[TrackOut]) -> Vec<u8> {
+    let av1 = brand != FileBrand::Mov
+        && tracks
+            .iter()
+            .any(|track| track.params.sample_entry == *b"av01");
     let (major, compatible): ([u8; 4], &[&[u8; 4]]) = if fragmented {
         (*b"iso5", &[b"iso5", b"iso6", b"mp41"])
     } else {
@@ -557,6 +666,9 @@ fn ftyp_bytes(brand: FileBrand, fragmented: bool) -> Vec<u8> {
     for brand in compatible {
         payload.extend_from_slice(*brand);
     }
+    if av1 {
+        payload.extend_from_slice(b"av01");
+    }
     box_bytes(b"ftyp", &payload)
 }
 
@@ -564,6 +676,7 @@ fn movie_bytes(
     tracks: &[TrackOut],
     held: &[Held],
     movie_scale: u32,
+    cover: Option<&[u8]>,
     map_offset: impl Fn(u64) -> u64,
 ) -> Result<Vec<u8>, Error> {
     let mut body = Vec::new();
@@ -573,10 +686,17 @@ fn movie_bytes(
         let samples: Vec<&Held> = held.iter().filter(|sample| sample.track == index).collect();
         body.extend(trak(track, &samples, movie_scale, &map_offset)?);
     }
+    if let Some(jpeg) = cover {
+        body.extend(cover_udta(jpeg));
+    }
     Ok(box_bytes(b"moov", &body))
 }
 
-fn init_moov(tracks: &[TrackOut], movie_scale: u32) -> Result<Vec<u8>, Error> {
+fn init_moov(
+    tracks: &[TrackOut],
+    movie_scale: u32,
+    cover: Option<&[u8]>,
+) -> Result<Vec<u8>, Error> {
     let mut body = Vec::new();
     body.extend(mvhd(movie_scale, 0, tracks.len())?);
     for track in tracks {
@@ -587,7 +707,36 @@ fn init_moov(tracks: &[TrackOut], movie_scale: u32) -> Result<Vec<u8>, Error> {
         mvex.extend(trex(track));
     }
     body.extend(box_bytes(b"mvex", &mvex));
+    if let Some(jpeg) = cover {
+        body.extend(cover_udta(jpeg));
+    }
     Ok(box_bytes(b"moov", &body))
+}
+
+/// The `data` atom type of a JPEG picture, from Apple's well-known types.
+const JPEG_DATA_TYPE: u32 = 13;
+
+/// `udta` holding iTunes metadata with one cover picture, laid out as
+/// FFmpeg's movenc.c writes it: `meta` is a full box whose `hdlr` names
+/// handler `mdir` and manufacturer `appl`, and `ilst/covr/data` holds the
+/// type, a zero locale, then the picture.
+fn cover_udta(jpeg: &[u8]) -> Vec<u8> {
+    let mut hdlr = Vec::with_capacity(25);
+    hdlr.extend_from_slice(&[0; 4]); // version, flags
+    hdlr.extend_from_slice(&[0; 4]); // pre_defined
+    hdlr.extend_from_slice(b"mdir");
+    hdlr.extend_from_slice(b"appl");
+    hdlr.extend_from_slice(&[0; 8]); // reserved
+    hdlr.push(0); // empty name
+    let mut data = Vec::with_capacity(jpeg.len() + 8);
+    data.extend_from_slice(&JPEG_DATA_TYPE.to_be_bytes());
+    data.extend_from_slice(&[0; 4]); // locale
+    data.extend_from_slice(jpeg);
+    let covr = box_bytes(b"covr", &box_bytes(b"data", &data));
+    let mut meta = vec![0; 4]; // version, flags
+    meta.extend(box_bytes(b"hdlr", &hdlr));
+    meta.extend(box_bytes(b"ilst", &covr));
+    box_bytes(b"udta", &box_bytes(b"meta", &meta))
 }
 
 impl<W: Write + Seek> IsoBmffMux<W> {
@@ -947,6 +1096,13 @@ fn stsd(track: &TrackOut) -> Result<Vec<u8>, Error> {
                 audio.bits_per_sample = facts.bits;
             }
             entry.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
+            if &code == b"lpcm" {
+                entry.extend(lpcm_description(&audio)?);
+                entry.extend(config_boxes(track)?);
+                let mut payload = vec![0, 0, 0, 0, 0, 0, 0, 1];
+                payload.extend(box_bytes(&code, &entry));
+                return Ok(box_bytes(b"stsd", &payload));
+            }
             entry.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]);
             entry.extend_from_slice(&audio.channels.to_be_bytes());
             entry.extend_from_slice(&audio.bits_per_sample.to_be_bytes());

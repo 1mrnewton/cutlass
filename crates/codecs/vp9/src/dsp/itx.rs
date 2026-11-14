@@ -50,13 +50,18 @@ pub fn add<P: Pixel>(
         dc_only(dst, stride, coef, n, max);
         return;
     }
-    if P::HIGH {
-        run::<P, i64, 4>(dst, stride, coef, n, col_type, row_type, nz, max);
-    } else if n == 4 {
-        run::<P, i32, 4>(dst, stride, coef, n, col_type, row_type, nz, max);
-    } else {
-        run::<P, i32, 8>(dst, stride, coef, n, col_type, row_type, nz, max);
-    }
+    cutlass_simd::vp9::wide(
+        #[inline(always)]
+        || {
+            if P::HIGH {
+                run::<P, i64, 4>(dst, stride, coef, n, col_type, row_type, nz, max);
+            } else if n == 4 {
+                run::<P, i32, 4>(dst, stride, coef, n, col_type, row_type, nz, max);
+            } else {
+                run::<P, i32, 8>(dst, stride, coef, n, col_type, row_type, nz, max);
+            }
+        },
+    );
 }
 
 #[inline(always)]

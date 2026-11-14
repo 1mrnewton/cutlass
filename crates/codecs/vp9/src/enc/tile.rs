@@ -17,8 +17,8 @@ use crate::dec::recon::Recon;
 use crate::dec::syntax::BlockRec;
 use crate::dsp::{ipred, sad};
 use crate::geom::{
-    self, BLOCK_8X8, BLOCK_64X64, INTRA_FRAME, LAST_FRAME, NEAR, NEAREST, NEW, PARTITION_HORZ,
-    PARTITION_NONE, PARTITION_SPLIT, PARTITION_VERT, TX_32X32, ZERO,
+    self, BLOCK_4X4, BLOCK_8X8, BLOCK_64X64, INTRA_FRAME, LAST_FRAME, NEAR, NEAREST, NEW,
+    PARTITION_HORZ, PARTITION_NONE, PARTITION_SPLIT, PARTITION_VERT, TX_32X32, ZERO,
 };
 use crate::header::Header;
 use crate::lpf;
@@ -272,6 +272,17 @@ struct Blk {
     mv: Mv,
     /// The inter prediction filter (EIGHTTAP, SMOOTH, SHARP).
     interp: u8,
+    /// The four 4×4 luma modes of a block under 8×8 (`AUTO`: chosen as the
+    /// block is coded).
+    bmode: [u8; 4],
+}
+
+/// A sub-block mode to choose while coding.
+const AUTO: u8 = 255;
+
+/// Whether the 4×4 column `c` of a block has samples on its left.
+fn have_left_of(c: usize, b: &Blk, col0: usize) -> bool {
+    c > 0 || b.col > col0
 }
 
 /// The encoder of one tile.
@@ -306,6 +317,10 @@ pub struct Tile<'s, 't, 'r, 'v> {
     last_sad: u64,
     /// The fast path's search result for each square of the superblock.
     found: [(Mv, u64); 85],
+    /// The 4×4 modes the block coded last chose.
+    sub: [u8; 4],
+    /// Which 8×8 squares of the superblock code as four 4×4 blocks.
+    sub8: [bool; 64],
     /// Scratch of the 8-tap filters across.
     mctmp: Vec<u8>,
     /// The reference the searches read (0 LAST, 1 GOLDEN, 2 ALTREF).
@@ -358,6 +373,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             toks: Vec::new(),
             last_sad: 0,
             found: [(Mv::ZERO, u64::MAX); 85],
+            sub: [geom::DC; 4],
+            sub8: [false; 64],
             mctmp: vec![0; cutlass_simd::vp9::mc::TMP],
             cur_ref: 0,
             coded_skip: false,
@@ -567,6 +584,33 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             best = (sym + j, PARTITION_NONE);
         }
         if level == 0 {
+            let i8 = (row & 7) * 8 + (col & 7);
+            self.sub8[i8] = false;
+            // Key frames: four 4×4 blocks instead.
+            if s.intra_frame && s.speed <= 6 && whole {
+                self.save(row, col, (1, 1), before + 1);
+                self.restore(before);
+                let c0 = self.cost;
+                self.part_symbol(row, col, bsize, PARTITION_SPLIT);
+                let base = self.blk(row, col, BLOCK_4X4);
+                let b = Blk {
+                    tx: 0,
+                    bmode: [AUTO; 4],
+                    uv: self.choice[Self::slot(row, col, bsize)].uv,
+                    ..base
+                };
+                let d = self.code_block(&b);
+                self.part_after(row, col, bsize, PARTITION_SPLIT);
+                let j = d + (self.cost - c0) as f64 * lam;
+                if j < best.0 {
+                    let mut chosen = b;
+                    chosen.bmode = self.sub;
+                    self.choice[Self::slot(row, col, bsize)] = chosen;
+                    self.sub8[i8] = true;
+                    return j;
+                }
+                self.restore(before + 1);
+            }
             return best.0;
         }
         let none_skip = self.last_skip;
@@ -744,6 +788,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             refs: [INTRA_FRAME, INTRA_FRAME],
             mv: Mv::ZERO,
             interp: geom::EIGHTTAP,
+            bmode: [geom::DC; 4],
         }
     }
 
@@ -1287,7 +1332,11 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             Self::node(row, col, n8 as usize)
         };
         let p = if hbs == 0 {
-            PARTITION_NONE
+            if self.sub8[(row & 7) * 8 + (col & 7)] && !self.fast() {
+                PARTITION_SPLIT
+            } else {
+                PARTITION_NONE
+            }
         } else if !fits {
             PARTITION_SPLIT
         } else {
@@ -1307,6 +1356,11 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             PARTITION_HORZ | PARTITION_VERT => {
                 let [a, b] = self.rect[usize::from(p == PARTITION_VERT)][node];
                 self.code_block(&a);
+                self.code_block(&b);
+            }
+            _ if hbs == 0 => {
+                // Four 4×4 blocks, coded as one.
+                let b = self.choice[Self::slot(row, col, bsize)];
                 self.code_block(&b);
             }
             _ => {
@@ -1436,6 +1490,10 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         toks.clear();
         let mut eobs = 0;
         let (coded, dropped) = self.residual(&b, &rec, &mut toks, &mut eobs);
+        if bsize < BLOCK_8X8 && !inter {
+            b.bmode = self.sub;
+            b.mode = b.bmode[3];
+        }
         if inter && eobs > 0 {
             // Skip when the residual is not worth its bits.
             let ctx = usize::from(self.above_nb(&b).is_some_and(|n| n.skip))
@@ -1482,7 +1540,11 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let nb = Nb {
             bsize,
             mode: b.mode,
-            bmode: [b.mode; 4],
+            bmode: if bsize < BLOCK_8X8 {
+                b.bmode
+            } else {
+                [b.mode; 4]
+            },
             skip: b.skip,
             tx: b.tx,
             seg_pred: false,
@@ -1550,6 +1612,44 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         total as f64
     }
 
+    /// The intra mode of the 4×4 luma block at `(x, y)` whose prediction
+    /// is nearest the source (SATD, with a little for leaving DC).
+    fn pick_4x4(
+        &mut self,
+        x: usize,
+        y: usize,
+        have_left: bool,
+        have_above: bool,
+        have_right: bool,
+    ) -> u8 {
+        let s = self.s;
+        let e = self
+            .rec
+            .intra_edges(0, 0, x, y, have_left, have_above, have_right);
+        let (src, ss) = (s.src.planes[0], s.src.strides[0]);
+        let lam = u64::from(s.lambda);
+        let mut best = (u64::MAX, geom::DC);
+        for m in [
+            geom::DC,
+            geom::V,
+            geom::H,
+            geom::TM,
+            geom::D45,
+            geom::D135,
+            geom::D117,
+            geom::D153,
+            geom::D207,
+            geom::D63,
+        ] {
+            ipred::predict(m, 4, &mut self.pred, 4, &e, 8);
+            let c = satd(&src[y * ss + x..], ss, &self.pred, 4, 4) + lam * u64::from(m != geom::DC);
+            if c < best.0 {
+                best = (c, m);
+            }
+        }
+        best.1
+    }
+
     fn uv_tx(&self, b: &Blk) -> u8 {
         geom::uv_tx_420(b.bsize, b.tx)
     }
@@ -1584,7 +1684,26 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                     let (x, y) = (x0 + c * 4, y0 + r * 4);
                     let mut kind = 0u8;
                     if intra {
-                        let mode = if plane == 0 { b.mode } else { b.uv };
+                        let mode = if plane > 0 {
+                            b.uv
+                        } else if b.bsize < BLOCK_8X8 {
+                            let k = r * 2 + c;
+                            if b.bmode[k] == AUTO {
+                                // The 4×4's mode from its own edges, by SATD.
+                                self.sub[k] = self.pick_4x4(
+                                    x,
+                                    y,
+                                    have_left_of(c, b, self.col0),
+                                    r > 0 || b.row > 0,
+                                    c + step < n4w,
+                                );
+                            } else {
+                                self.sub[k] = b.bmode[k];
+                            }
+                            self.sub[k]
+                        } else {
+                            b.mode
+                        };
                         let have_above = r > 0 || b.row > 0;
                         let have_left = c > 0 || b.col > self.col0;
                         let have_right = c + step < n4w;
@@ -2078,11 +2197,33 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             Some(l) if l.refs[0] == INTRA_FRAME => l.bmode[1],
             _ => geom::DC,
         };
-        self.put_tree(
-            &prob::INTRA_TREE,
-            &KF_Y_MODE_PROB[usize::from(a)][usize::from(l)],
-            b.mode,
-        );
+        if b.bsize < BLOCK_8X8 {
+            // Four modes, each in the context of the ones above and left
+            // of it (parse.rs `intra_frame_info`).
+            let ab = |k: usize| match above {
+                Some(a) if a.refs[0] == INTRA_FRAME => a.bmode[k + 2],
+                _ => geom::DC,
+            };
+            let lb = |k: usize| match left {
+                Some(l) if l.refs[0] == INTRA_FRAME => l.bmode[k + 1],
+                _ => geom::DC,
+            };
+            for k in 0..4 {
+                let a = if k < 2 { ab(k) } else { b.bmode[k - 2] };
+                let l = if k % 2 == 0 { lb(k) } else { b.bmode[k - 1] };
+                self.put_tree(
+                    &prob::INTRA_TREE,
+                    &KF_Y_MODE_PROB[usize::from(a)][usize::from(l)],
+                    b.bmode[k],
+                );
+            }
+        } else {
+            self.put_tree(
+                &prob::INTRA_TREE,
+                &KF_Y_MODE_PROB[usize::from(a)][usize::from(l)],
+                b.mode,
+            );
+        }
         self.put_tree(
             &prob::INTRA_TREE,
             &KF_UV_MODE_PROB[usize::from(b.mode)],
@@ -2417,7 +2558,11 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let mut ctx = usize::from(anz) + usize::from(lnz);
         let intra = b.refs[0] == INTRA_FRAME;
         let kind = if intra && plane == 0 && !s.h.lossless && tx != TX_32X32 {
-            geom::intra_tx_type(b.mode)
+            geom::intra_tx_type(if b.bsize < BLOCK_8X8 {
+                b.bmode[(r4 * 2 + c4) & 3]
+            } else {
+                b.mode
+            })
         } else {
             0
         };

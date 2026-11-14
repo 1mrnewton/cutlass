@@ -1227,7 +1227,14 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             6 => 2,
             _ => 1,
         };
-        for &(_, m) in scored.iter().take(k) {
+        // From CAND_MARGIN_SPEED, as for inter: within a fifth of the best.
+        let first = self.last_satd as f64
+            * if s.speed >= CAND_MARGIN_SPEED {
+                1.2
+            } else {
+                f64::INFINITY
+            };
+        for &(_, m) in scored.iter().take(k).filter(|t| t.0 as f64 <= first) {
             out.push(Blk {
                 mode: m,
                 uv: geom::DC,

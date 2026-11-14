@@ -70,7 +70,9 @@ cutlass-jpeg = { path = "../../crates/codecs/jpeg", version = "0.1.0" }
 cutlass-png = { path = "../../crates/codecs/png", version = "0.1.0" }
 cutlass-webp = { path = "../../crates/codecs/webp", version = "0.1.0" }
 cutlass-gif = { path = "../../crates/codecs/gif", version = "0.1.0" }
+cutlass-fonts = { path = "../../crates/fonts", version = "0.1.0" }
 cutlass-stickers = { path = "../../crates/stickers", version = "0.1.0" }
+cutlass-text = { path = "../../crates/text", version = "0.1.0" }
 cutlass-update = { path = "../../crates/update", version = "0.1.0" }
 # Wayland and the portal dialog build with the banned `cc` crate.
 # Linux uses X11 for the window and GTK for the file dialog.
@@ -82,6 +84,10 @@ eframe = { version = "0.37", default-features = false, features = [
 rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
 cutlass-model = { version = "0.1.0", path = "../../crates/model" }
 egui = "0.37"
+# The faces egui draws the window with, which the app already carries:
+# they are also offered for titles, so every system has a face to set
+# text in.
+epaint_default_fonts = { version = "0.37", features = ["monochrome_emoji_fonts"] }
 cutlass-container = { version = "0.1.0", path = "../../crates/container" }
 cutlass-codec = { path = "../../crates/codec", version = "0.1.0" }
 

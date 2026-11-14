@@ -48,6 +48,7 @@ pub use cutlass_editor::{
 pub use cutlass_effects::{bundled_look, look_poster};
 pub use cutlass_export::video_bitrate;
 pub use cutlass_logger::InitError as LogError;
+pub use cutlass_model::PatternChange;
 pub use cutlass_model::TrackType;
 pub use cutlass_playback::AudioHost;
 pub use cutlass_probe::{ProbeError, Probed};
@@ -74,8 +75,8 @@ pub use shape::{PhoneShapeStyle, SHAPE_STYLE_RANGES, ShapeStyleChange, ShapeStyl
 pub use stage::PhoneStage;
 pub use strip::{PhoneFilm, PhoneTick, PhoneTile, PhoneWave, Strip};
 pub use text::{
-    NEW_TEXT_LENGTH, PhoneFont, PhoneText, PhoneTextStyle, TEXT_COLORS, TEXT_STYLE_RANGES,
-    TextStyleChange, TextStyleRanges,
+    NEW_TEXT_LENGTH, PhoneFont, PhoneFontAxis, PhonePattern, PhoneText, PhoneTextStyle,
+    TEXT_COLORS, TEXT_STYLE_RANGES, TextStyleChange, TextStyleRanges,
 };
 pub use timeline::{Drag, PhoneClip, PhoneLane, phone_lanes};
 pub use transition::{
@@ -96,6 +97,17 @@ pub fn start_log(directory: &Path) -> Result<PathBuf, LogError> {
     let opened = cutlass_logger::init(directory);
     cutlass_logger::install_panic_hook();
     opened
+}
+
+/// `faces` with the title families that ship with the program listed
+/// among them, so a phone has the same set a desktop has.
+fn shipped_faces(faces: FaceTable) -> FaceTable {
+    let shipped: Vec<(&str, &'static [u8])> = cutlass_fonts::files().collect();
+    // New text starts in a common face of the phone's own when it has
+    // one, and in the plainest shipped face when it has none.
+    let mut first: Vec<&str> = cutlass_playback::PREFERRED_FACES.to_vec();
+    first.extend(shipped.first().map(|(name, _)| *name));
+    faces.with_bundled(&shipped).preferring(&first)
 }
 
 /// Give the calling thread the interface's priority.
@@ -166,7 +178,7 @@ impl PhoneHost {
             cache,
             preview: Preview::new(),
             strip: Strip::default(),
-            faces: FaceTable::default(),
+            faces: shipped_faces(FaceTable::default()),
             live: None,
             typing: None,
             styling: None,
@@ -701,7 +713,114 @@ impl PhoneHost {
     /// Look for faces in `folders` and the folders below them, replacing any
     /// found before. Only each file's first bytes are read now.
     pub fn set_font_folders(&mut self, folders: &[PathBuf]) {
-        self.faces = FaceTable::scan(folders);
+        self.faces = shipped_faces(FaceTable::scan(folders));
+    }
+
+    /// The faces whose names have every word of `query`, in the order
+    /// [`Self::fonts`] gives them; all of them for no words. Case does
+    /// not matter.
+    #[must_use]
+    pub fn fonts_matching(&self, query: &str) -> Vec<PhoneFont> {
+        let faces = self.faces.labelled();
+        text::fonts(
+            cutlass_playback::matching_faces(&faces, query)
+                .into_iter()
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// Which of bold, italic and underline every letter of `segment_id`
+    /// from `start` up to `end` has, the two counting characters of its
+    /// words. `None` when it is not a text clip or has no such letters.
+    #[must_use]
+    pub fn text_range_pattern(
+        &self,
+        segment_id: &SegmentId,
+        start: usize,
+        end: usize,
+    ) -> Option<PhonePattern> {
+        cutlass_session::text_range_pattern(self.draft(), segment_id, (start, end))
+            .ok()
+            .map(|pattern| PhonePattern {
+                bold: pattern.bold,
+                italic: pattern.italic,
+                underline: pattern.underline,
+            })
+    }
+
+    /// Turn bold, italic or underline on or off for the letters of
+    /// `segment_id` from `start` up to `end`; a part that is `None` stays
+    /// as it is. One undo step.
+    pub fn set_text_range_pattern(
+        &mut self,
+        segment_id: &SegmentId,
+        range: (usize, usize),
+        change: PatternChange,
+    ) -> Result<(), FfiError> {
+        let face = self.faces.name().to_owned();
+        self.apply(
+            self.revision(),
+            &[Request::SetTextRangePattern {
+                segment_id: segment_id.clone(),
+                start: range.0,
+                end: range.1,
+                bold: change.bold,
+                italic: change.italic,
+                underline: change.underline,
+                face,
+            }],
+        )?;
+        Ok(())
+    }
+
+    /// The axes the face of `segment_id` varies along, each with where
+    /// the clip has it; none for a face that does not vary.
+    #[must_use]
+    pub fn text_font_axes(&self, segment_id: &SegmentId) -> Vec<PhoneFontAxis> {
+        text::material_of(self.draft(), segment_id)
+            .map(|material| self.faces.font_axes(material))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|axis| PhoneFontAxis {
+                tag: String::from_utf8_lossy(&axis.tag).into_owned(),
+                name: axis.name,
+                min: f64::from(axis.min),
+                default: f64::from(axis.default),
+                max: f64::from(axis.max),
+                value: f64::from(axis.value),
+            })
+            .collect()
+    }
+
+    /// Move the face of `segment_id` to `value` along the axis `tag`,
+    /// the other axes staying where they are. Changes made while `live`
+    /// join one undo step, as a slider's do.
+    pub fn set_text_font_axis(
+        &mut self,
+        segment_id: &SegmentId,
+        tag: &str,
+        value: f64,
+        live: bool,
+    ) -> Result<(), FfiError> {
+        let refused = |reason: String| FfiError::Refused { reason };
+        let tag = <[u8; 4]>::try_from(tag.as_bytes())
+            .map_err(|_| refused("an axis is named by four letters".to_owned()))?;
+        let moved = text::material_of(self.draft(), segment_id)
+            .ok_or(cutlass_playback::AxisError::NoAxes)
+            .and_then(|material| self.faces.moved_font_axis(material, tag, value))
+            .map_err(|error| refused(error.to_string()))?;
+        match moved {
+            Some(axes) => self.restyle(
+                segment_id,
+                &[Request::SetTextFontAxes {
+                    segment_id: segment_id.clone(),
+                    axes,
+                }],
+                live,
+            ),
+            None => Ok(()),
+        }
     }
 
     /// The faces text can be set in, by file name.
@@ -2406,18 +2525,44 @@ mod tests {
         two_stills(&mut host);
         let plain = host.frame(Micros(500_000)).unwrap();
 
-        host.set_font_folders(&[font_folder(&temp)]);
+        // Before any folder is looked in, the families that ship with the
+        // program are there, the plainest first.
+        let shipped = host.fonts();
         assert_eq!(
-            host.fonts(),
-            [PhoneFont {
-                name: "Sample.ttf".to_owned(),
-                label: "Sample".to_owned(),
-            }]
+            shipped.first(),
+            Some(&PhoneFont {
+                name: "Inter[opsz,wght].ttf".to_owned(),
+                label: "Inter Regular".to_owned(),
+            })
         );
+        assert!(shipped.len() > 100, "{} faces", shipped.len());
+        // A folder's faces are listed among them, by label.
+        host.set_font_folders(&[font_folder(&temp)]);
+        let fonts = host.fonts();
+        assert_eq!(fonts.len(), shipped.len() + 1);
+        assert!(fonts.contains(&PhoneFont {
+            name: "Sample.ttf".to_owned(),
+            label: "Sample".to_owned(),
+        }));
+        // The search leaves the faces with every word typed.
+        let found = |query: &str| -> Vec<String> {
+            host.fonts_matching(query)
+                .into_iter()
+                .map(|font| font.label)
+                .collect()
+        };
+        assert_eq!(found("sample"), ["Sample"]);
+        assert_eq!(found("black poppins"), ["Poppins Black"]);
+        assert_eq!(found("").len(), fonts.len());
+        assert!(found("no such face").is_empty());
+        // New text starts in the plainest shipped face when the phone
+        // has none of the common ones.
         let first = host.add_text("A", "", Micros(0)).unwrap();
         let PhoneText { content, face, .. } = host.text(&first).unwrap();
-        assert_eq!((content.as_str(), face.as_str()), ("A", "Sample.ttf"));
-        // The sample face has one letter, A.
+        assert_eq!(
+            (content.as_str(), face.as_str()),
+            ("A", "Inter[opsz,wght].ttf")
+        );
         assert!(host.frame(Micros(500_000)).unwrap() != plain);
 
         // Room after the first clip: same row. Overlapping it: a new row.
@@ -2716,16 +2861,83 @@ mod tests {
     }
 
     #[test]
+    fn a_phone_styles_a_stretch_of_letters_and_moves_a_face_along_its_axes() {
+        use crate::{PhonePattern, SegmentId};
+        use cutlass_model::PatternChange;
+
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        two_stills(&mut host);
+        let id = host
+            .add_text("Hello world", "Inter[opsz,wght].ttf", Micros(0))
+            .unwrap();
+        // The first word is made bold, and only it.
+        let plain = PhonePattern::default();
+        assert_eq!(host.text_range_pattern(&id, 0, 11), Some(plain));
+        let bold = PatternChange {
+            bold: Some(true),
+            ..PatternChange::default()
+        };
+        host.set_text_range_pattern(&id, (0, 5), bold).unwrap();
+        assert_eq!(
+            host.text_range_pattern(&id, 0, 5),
+            Some(PhonePattern {
+                bold: true,
+                ..plain
+            })
+        );
+        assert_eq!(host.text_range_pattern(&id, 6, 11), Some(plain));
+        host.undo().unwrap();
+        assert_eq!(host.text_range_pattern(&id, 0, 5), Some(plain));
+        // A stretch that is none, and a clip that is no text.
+        assert!(host.set_text_range_pattern(&id, (5, 5), bold).is_err());
+        let missing = SegmentId::new("missing");
+        assert!(host.text_range_pattern(&missing, 0, 1).is_none());
+        assert!(host.set_text_range_pattern(&missing, (0, 1), bold).is_err());
+
+        // Inter varies in optical size and in weight.
+        let axes = host.text_font_axes(&id);
+        let tags: Vec<&str> = axes.iter().map(|axis| axis.tag.as_str()).collect();
+        assert_eq!(tags, ["opsz", "wght"]);
+        let weight = &axes[1];
+        assert_eq!(
+            (weight.min, weight.default, weight.max, weight.value),
+            (100.0, 400.0, 900.0, 400.0)
+        );
+        // A slider's moves are one undo step; the last one ends it.
+        let before = host.frame(Micros(500_000)).unwrap();
+        host.set_text_font_axis(&id, "wght", 600.0, true).unwrap();
+        host.set_text_font_axis(&id, "wght", 800.0, true).unwrap();
+        host.set_text_font_axis(&id, "wght", 900.0, false).unwrap();
+        assert_eq!(host.text_font_axes(&id)[1].value, 900.0);
+        assert!(host.frame(Micros(500_000)).unwrap() != before);
+        host.undo().unwrap();
+        assert_eq!(host.text_font_axes(&id)[1].value, 400.0);
+        // An axis the face lacks, a tag that is no tag, a value that is
+        // no number, and a face that does not vary.
+        assert!(host.set_text_font_axis(&id, "slnt", -8.0, false).is_err());
+        assert!(
+            host.set_text_font_axis(&id, "weight", 700.0, false)
+                .is_err()
+        );
+        assert!(
+            host.set_text_font_axis(&id, "wght", f64::NAN, false)
+                .is_err()
+        );
+        host.set_text_font(&id, "Anton-Regular.ttf").unwrap();
+        assert!(host.text_font_axes(&id).is_empty());
+        assert!(host.set_text_font_axis(&id, "wght", 700.0, false).is_err());
+        assert!(host.text_font_axes(&missing).is_empty());
+    }
+
+    #[test]
     fn text_without_words_a_face_or_a_text_clip_changes_nothing() {
         let temp = Temp::new();
         let roots = Roots::new(&temp);
         let mut host = roots.create();
         let (still, _) = two_stills(&mut host);
         let before = host.draft().clone();
-        assert!(matches!(
-            host.add_text("Hi", "", Micros(0)),
-            Err(FfiError::Refused { .. })
-        ));
         host.set_font_folders(&[font_folder(&temp)]);
         assert!(host.add_text("   ", "", Micros(0)).is_err());
         assert!(host.add_text("Hi", "../Sample.ttf", Micros(0)).is_err());
@@ -4011,6 +4223,22 @@ mod tests {
 
         let (photo, _) = two_stills(&mut host);
         assert!(host.freeze(&photo, Micros(0)).is_err());
+
+        // A PNG the phone probes for itself is an image, not a photo, and
+        // is as much a still.
+        let image = host.import(&fixture("pattern.png")).unwrap();
+        let image = host.append(&image).unwrap();
+        let start = host.draft().tracks[0]
+            .segments
+            .iter()
+            .find(|segment| segment.id == image)
+            .unwrap()
+            .target
+            .start;
+        let state = host.clip_state(&image, start).unwrap();
+        assert!(!state.can_freeze && !state.can_extract);
+        assert!(host.freeze(&image, start).is_err());
+        assert!(host.extract_audio(&image).is_err());
     }
 
     #[test]

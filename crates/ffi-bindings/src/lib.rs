@@ -563,6 +563,29 @@ pub struct Font {
     pub label: String,
 }
 
+/// Which of bold, italic and underline every letter of a stretch of a
+/// text clip has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct TextPattern {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+}
+
+/// One axis a text clip's face varies along, for a slider: weight, width
+/// and whatever else the face's maker gave it. `tag` names the axis when
+/// it is set; `name` is for people.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct FontAxis {
+    pub tag: String,
+    pub name: String,
+    pub min: f64,
+    pub default: f64,
+    pub max: f64,
+    /// Where the clip has its face along the axis.
+    pub value: f64,
+}
+
 /// A canvas ratio the picker shows. `ratio` is what `set_ratio` takes;
 /// `width` and `height` are the frame it gives this project.
 #[derive(Clone, Debug, uniffi::Record)]
@@ -1503,6 +1526,98 @@ impl Editor {
                 label: font.label,
             })
             .collect())
+    }
+
+    /// The faces whose names have every word of `query`, in the order
+    /// `fonts` gives them; all of them for no words. Case does not
+    /// matter.
+    pub fn fonts_matching(&self, query: String) -> Result<Vec<Font>, EditorError> {
+        let fonts = self.run(move |host| host.fonts_matching(&query))?;
+        Ok(fonts
+            .into_iter()
+            .map(|font| Font {
+                name: font.name,
+                label: font.label,
+            })
+            .collect())
+    }
+
+    /// Which of bold, italic and underline every letter of a text clip
+    /// from `start` up to `end` has, the two counting characters of its
+    /// words. `None` when it is no text clip or has no such letters.
+    pub fn text_range_pattern(
+        &self,
+        clip_id: String,
+        start: u32,
+        end: u32,
+    ) -> Result<Option<TextPattern>, EditorError> {
+        let pattern = self.run(move |host| {
+            host.text_range_pattern(&SegmentId::new(clip_id), start as usize, end as usize)
+        })?;
+        Ok(pattern.map(|pattern| TextPattern {
+            bold: pattern.bold,
+            italic: pattern.italic,
+            underline: pattern.underline,
+        }))
+    }
+
+    /// Turn bold, italic or underline on or off for the letters of a text
+    /// clip from `start` up to `end`; a part that is `None` stays as it
+    /// is. One undo step.
+    pub fn set_text_range_pattern(
+        &self,
+        clip_id: String,
+        start: u32,
+        end: u32,
+        bold: Option<bool>,
+        italic: Option<bool>,
+        underline: Option<bool>,
+    ) -> Result<(), EditorError> {
+        let change = cutlass_ffi::PatternChange {
+            bold,
+            italic,
+            underline,
+        };
+        self.run(move |host| {
+            host.set_text_range_pattern(
+                &SegmentId::new(clip_id),
+                (start as usize, end as usize),
+                change,
+            )
+        })?
+        .map_err(EditorError::from)
+    }
+
+    /// The axes a text clip's face varies along, each with where the
+    /// clip has it; none for a face that does not vary.
+    pub fn text_font_axes(&self, clip_id: String) -> Result<Vec<FontAxis>, EditorError> {
+        let axes = self.run(move |host| host.text_font_axes(&SegmentId::new(clip_id)))?;
+        Ok(axes
+            .into_iter()
+            .map(|axis| FontAxis {
+                tag: axis.tag,
+                name: axis.name,
+                min: axis.min,
+                default: axis.default,
+                max: axis.max,
+                value: axis.value,
+            })
+            .collect())
+    }
+
+    /// Move a text clip's face to `value` along the axis `tag`, the other
+    /// axes staying where they are. Changes made while `live` join one
+    /// undo step, so a slider drag is one step; its last change passes
+    /// `live` false.
+    pub fn set_text_font_axis(
+        &self,
+        clip_id: String,
+        tag: String,
+        value: f64,
+        live: bool,
+    ) -> Result<(), EditorError> {
+        self.run(move |host| host.set_text_font_axis(&SegmentId::new(clip_id), &tag, value, live))?
+            .map_err(EditorError::from)
     }
 
     /// Add `content` at `at_us` in `face`, or in the first face when `face`
@@ -2595,19 +2710,66 @@ mod tests {
         )
         .unwrap();
         let editor = temp.open();
-        assert!(editor.add_text("A".to_owned(), String::new(), 0).is_err());
+        // The families that ship with the program are there before any
+        // folder is looked in; a folder's faces join them.
+        let shipped = editor.fonts().unwrap().len();
+        assert!(shipped > 100, "{shipped} faces");
         editor
             .set_font_folders(vec![fonts.display().to_string()])
             .unwrap();
         let found = editor.fonts().unwrap();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].name, "Sample.ttf");
-        assert_eq!(found[0].label, "Sample");
+        assert_eq!(found.len(), shipped + 1);
+        let sample = editor.fonts_matching("sample".to_owned()).unwrap();
+        assert_eq!(sample.len(), 1);
+        assert_eq!(sample[0].name, "Sample.ttf");
+        assert_eq!(sample[0].label, "Sample");
 
-        let id = editor.add_text("A".to_owned(), String::new(), 0).unwrap();
+        let id = editor
+            .add_text("A".to_owned(), "Sample.ttf".to_owned(), 0)
+            .unwrap();
         let text = editor.text(id.clone()).unwrap().unwrap();
         assert_eq!(text.content, "A");
         assert_eq!(text.face, "Sample.ttf");
+        // A stretch of letters takes a pattern of its own, and a face
+        // that varies is moved along an axis.
+        let plain = super::TextPattern {
+            bold: false,
+            italic: false,
+            underline: false,
+        };
+        assert_eq!(
+            editor.text_range_pattern(id.clone(), 0, 1).unwrap(),
+            Some(plain)
+        );
+        editor
+            .set_text_range_pattern(id.clone(), 0, 1, None, Some(true), None)
+            .unwrap();
+        assert_eq!(
+            editor.text_range_pattern(id.clone(), 0, 1).unwrap(),
+            Some(super::TextPattern {
+                italic: true,
+                ..plain
+            })
+        );
+        assert!(editor.text_font_axes(id.clone()).unwrap().is_empty());
+        editor
+            .set_text_font(id.clone(), "Inter[opsz,wght].ttf".to_owned())
+            .unwrap();
+        let axes = editor.text_font_axes(id.clone()).unwrap();
+        assert_eq!(axes.len(), 2);
+        assert_eq!((axes[1].tag.as_str(), axes[1].value), ("wght", 400.0));
+        editor
+            .set_text_font_axis(id.clone(), "wght".to_owned(), 700.0, false)
+            .unwrap();
+        assert_eq!(editor.text_font_axes(id.clone()).unwrap()[1].value, 700.0);
+        assert!(
+            editor
+                .set_text_font_axis(id.clone(), "nope".to_owned(), 1.0, false)
+                .is_err()
+        );
+        editor
+            .set_text_font(id.clone(), "Sample.ttf".to_owned())
+            .unwrap();
         editor.set_text(id.clone(), "AA".to_owned()).unwrap();
         assert_eq!(editor.text(id.clone()).unwrap().unwrap().content, "AA");
         assert!(editor.set_text(id.clone(), String::new()).is_err());

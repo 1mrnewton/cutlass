@@ -34,6 +34,8 @@ pub mod orient;
 mod surface;
 pub mod video;
 
+use std::sync::Arc;
+
 pub use surface::{PictureSurface, Surface};
 
 pub use cutlass_codec::CodecId;
@@ -188,11 +190,41 @@ pub struct PictureOutput {
     t35: Vec<ItuT35>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 enum PictureStorage {
     Cpu(Vec<u8>),
-    Platform { token: u64 },
+    /// CPU bytes the decoder also holds, to fill again for a later
+    /// picture once every other holder has let them go.
+    Shared(Arc<Vec<u8>>),
+    Platform {
+        token: u64,
+    },
     Surface(Surface),
+}
+
+impl PartialEq for PictureStorage {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Platform { token: a }, Self::Platform { token: b }) => a == b,
+            (Self::Surface(a), Self::Surface(b)) => a == b,
+            (Self::Cpu(_) | Self::Shared(_), Self::Cpu(_) | Self::Shared(_)) => {
+                self.cpu_bytes() == other.cpu_bytes()
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for PictureStorage {}
+
+impl PictureStorage {
+    fn cpu_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Cpu(bytes) => Some(bytes),
+            Self::Shared(bytes) => Some(bytes),
+            Self::Platform { .. } | Self::Surface(_) => None,
+        }
+    }
 }
 
 /// Borrowed view of a [`PictureOutput`].
@@ -357,6 +389,30 @@ impl PictureOutput {
         })
     }
 
+    /// CPU bytes as [`Self::cpu`], shared with the decoder, which may fill
+    /// them again for a later picture once no one else holds them (it
+    /// checks with [`Arc::get_mut`]).
+    pub fn cpu_shared(
+        info: PictureInfo,
+        bytes: Arc<Vec<u8>>,
+        pts: i64,
+        timescale: u32,
+    ) -> Result<Self, CodecError> {
+        let len = picture_byte_len(info.width, info.height, info.pixel)?;
+        if bytes.len() != len {
+            return Err(CodecError::InvalidApi {
+                what: "picture byte length",
+            });
+        }
+        Ok(Self {
+            info,
+            pts,
+            timescale,
+            storage: PictureStorage::Shared(bytes),
+            t35: Vec::new(),
+        })
+    }
+
     /// A platform buffer with the same coded size rules as [`Self::cpu`].
     pub fn platform(
         info: PictureInfo,
@@ -428,10 +484,27 @@ impl PictureOutput {
 
     /// The CPU bytes, moved out without a copy, or `None` for a platform
     /// buffer.
+    ///
+    /// Bytes shared with the decoder are copied unless no one else holds
+    /// them; [`Self::into_shared`] keeps them shared.
     #[must_use]
     pub fn into_cpu(self) -> Option<Vec<u8>> {
         match self.storage {
             PictureStorage::Cpu(bytes) => Some(bytes),
+            PictureStorage::Shared(bytes) => {
+                Some(Arc::try_unwrap(bytes).unwrap_or_else(|bytes| (*bytes).clone()))
+            }
+            PictureStorage::Platform { .. } | PictureStorage::Surface(_) => None,
+        }
+    }
+
+    /// The CPU bytes as shared bytes, without a copy, or `None` for a
+    /// platform buffer.
+    #[must_use]
+    pub fn into_shared(self) -> Option<Arc<Vec<u8>>> {
+        match self.storage {
+            PictureStorage::Cpu(bytes) => Some(Arc::new(bytes)),
+            PictureStorage::Shared(bytes) => Some(bytes),
             PictureStorage::Platform { .. } | PictureStorage::Surface(_) => None,
         }
     }
@@ -440,6 +513,7 @@ impl PictureOutput {
     pub fn samples(&self) -> PictureSamples<'_> {
         match &self.storage {
             PictureStorage::Cpu(bytes) => PictureSamples::Cpu(bytes),
+            PictureStorage::Shared(bytes) => PictureSamples::Cpu(bytes),
             PictureStorage::Platform { token } => PictureSamples::Platform { token: *token },
             PictureStorage::Surface(surface) => PictureSamples::Surface(surface),
         }
@@ -717,6 +791,36 @@ mod tests {
             });
         }
         Ok(Box::new(Silent))
+    }
+
+    #[test]
+    fn shared_bytes_stay_shared_and_compare_by_value() {
+        let info = PictureInfo::new(
+            2,
+            2,
+            PixelFormat::Yuv420p,
+            ColorPrimaries::Unspecified,
+            Transfer::Unspecified,
+        );
+        let bytes = std::sync::Arc::new(vec![1, 2, 3, 4, 5, 6]);
+        assert!(
+            PictureOutput::cpu_shared(info, std::sync::Arc::new(vec![1, 2, 3]), 0, 1).is_err(),
+            "the length is checked"
+        );
+        let shared = PictureOutput::cpu_shared(info, bytes.clone(), 0, 1).expect("yuv");
+        let owned = PictureOutput::cpu(info, vec![1, 2, 3, 4, 5, 6], 0, 1).expect("yuv");
+        assert_eq!(shared, owned);
+        assert_eq!(shared.samples(), PictureSamples::Cpu(&[1, 2, 3, 4, 5, 6]));
+        let back = shared.clone().into_shared().expect("cpu");
+        assert!(std::sync::Arc::ptr_eq(&back, &bytes), "no copy");
+        // Still held by `bytes`: a copy.
+        assert_eq!(shared.into_cpu().expect("cpu"), vec![1, 2, 3, 4, 5, 6]);
+        drop(back);
+        assert_eq!(
+            std::sync::Arc::strong_count(&bytes),
+            1,
+            "every other holder let go"
+        );
     }
 
     fn rgba(width: u32, height: u32) -> PictureInfo {

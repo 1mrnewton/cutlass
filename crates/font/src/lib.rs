@@ -1,25 +1,93 @@
 //! Reads a TrueType or OpenType font, including one face of a collection.
 //!
 //! The file yields a glyph id, an advance width, an outline, horizontal
-//! kerning pairs, and a bitmap strike when the file has one. Glyph 0 is the
-//! missing glyph. A face with `CFF2` and no `CFF ` table has no outlines this
-//! reader can draw. Shaping, atlases, and meshes are not part of this crate.
+//! kerning pairs, and a bitmap strike when the file has one. A strike stored
+//! as PNG, JPEG or TIFF pictures is handed back still encoded, and a glyph of layered
+//! color (`COLR`) as the paints that fill its outlines. Glyph 0 is the
+//! missing glyph. A variable face, of TrueType outlines or of `CFF2`, is
+//! read at any
+//! setting of its axes ([`Font::set_variations`]), and one instance of it
+//! can be written out as a face of its own ([`pin_instance`]) that opens
+//! already set. The layout tables (`GDEF`, `GSUB`, `GPOS`) are read
+//! for a shaper to ask; shaping, atlases, and meshes are not part of this
+//! crate.
 
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+mod cff2_tests;
+#[cfg(test)]
+mod cid_tests;
 mod collection;
+mod colr;
+#[cfg(test)]
+mod colr_tests;
+mod coverage;
 mod faces;
+#[cfg(test)]
+mod fixture;
+#[cfg(test)]
+mod fixture_cff2;
+#[cfg(test)]
+mod fixture_color;
+#[cfg(test)]
+mod fixture_colr;
+#[cfg(test)]
+mod fixture_fonts;
+#[cfg(test)]
+mod fixture_kern;
+#[cfg(test)]
+mod fixture_var;
+mod gpos;
+mod gsub;
+mod gvar;
+#[cfg(test)]
+mod instance_tests;
 mod kern;
+mod layout;
+#[cfg(test)]
+mod layout_tests;
+pub mod morx;
 mod otf;
+#[cfg(test)]
+mod outline_tests;
+mod passes;
 mod strike;
 mod ttf;
+#[cfg(test)]
+mod var_oracle_tests;
+mod variants;
+mod vary;
+#[cfg(test)]
+mod vary_tests;
 
-pub use faces::{FaceEntry, MAX_COLLECTION_FACES, list_faces, single_face};
+pub use colr::{
+    Affine, ClipBox, Color, ColorGlyph, ColorLine, ColorStop, CompositeMode, Extend, Paint,
+};
+pub use coverage::{CharacterMap, MAX_CHARACTER_MAP, load_character_map};
+pub use faces::{
+    FaceEntry, InstanceEntry, MAX_COLLECTION_FACES, list_faces, load_face, load_instance,
+    pin_instance, single_face,
+};
+pub use gpos::{Adjust, Anchor, Cursive, Joins, MarkAttach, PairAdjust, Positioning, SingleAdjust};
+pub use gsub::{Ligature, Ligatures, Sequences, Single, Substitution};
+pub use layout::{
+    ClassDef, Coverage, Gdef, GlyphClass, Language, LayoutTable, Lookup, LookupFlags, ReverseChain,
+    SequenceContext, SequenceRule, Tag, U16s,
+};
+pub use passes::{
+    AttachStep, KERN_CLASS_DELETED, KERN_CLASS_END, KERN_CLASS_OTHER, KernAttach, KernMachine,
+    KernPairs, KernPass, KernStep,
+};
 pub use strike::{BitmapGlyph, BitmapPixels};
+pub use variants::Variant;
+pub use vary::{Axis, Instance};
 
 use std::cmp::Ordering;
+
 use std::error::Error;
 use std::fmt;
+use vary::Variation;
 
 /// Advance width of one character, in font design units.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,15 +192,29 @@ pub enum FontKind {
 }
 
 /// One face read from a `.ttf`, `.otf`, or `.ttc` file.
+#[derive(Clone)]
 pub struct Font<'a> {
     kind: FontKind,
     units_per_em: u16,
     num_glyphs: u16,
     hmtx: Hmtx<'a>,
     cmap: Cmap<'a>,
+    coding: Coding,
     kern: kern::Kerning,
+    /// The passes of a `kern` table that is more than pairs, and of `kerx`.
+    kern_passes: Vec<KernPass<'a>>,
+    kerx: Vec<KernPass<'a>>,
+    gdef: Option<Gdef<'a>>,
+    gsub: Option<LayoutTable<'a>>,
+    gpos: Option<LayoutTable<'a>>,
+    morx: Option<morx::Morx<'a>>,
     outlines: Outlines<'a>,
     strikes: strike::Strikes<'a>,
+    variants: Option<variants::Variants<'a>>,
+    fingerprint: u64,
+    colr: Option<colr::Colr<'a>>,
+    /// What the face varies along, and where along it the face is set.
+    variation: Option<Variation<'a>>,
 }
 
 /// Read one TrueType or OpenType face.
@@ -164,7 +246,46 @@ impl fmt::Debug for Font<'_> {
     }
 }
 
-impl Font<'_> {
+impl<'a> Font<'a> {
+    /// What kind each glyph is, when the face says.
+    #[must_use]
+    pub fn gdef(&self) -> Option<&Gdef<'a>> {
+        self.gdef.as_ref()
+    }
+
+    /// The face's substitutions, when it has any.
+    #[must_use]
+    pub fn gsub(&self) -> Option<&LayoutTable<'a>> {
+        self.gsub.as_ref()
+    }
+
+    /// The substitutions of a face made for Apple's layout engine, when
+    /// it has them.
+    #[must_use]
+    pub fn morx(&self) -> Option<&morx::Morx<'a>> {
+        self.morx.as_ref()
+    }
+
+    /// The face's positioning, when it has any.
+    #[must_use]
+    pub fn gpos(&self) -> Option<&LayoutTable<'a>> {
+        self.gpos.as_ref()
+    }
+
+    /// A number that tells this face from another: the same for the same
+    /// font data wherever it is in memory, and different, in practice,
+    /// for any other. What was made from a face can be kept under it.
+    #[must_use]
+    pub fn fingerprint(&self) -> u64 {
+        self.fingerprint
+    }
+
+    /// Whether the face has kerning pairs in a `kern` table.
+    #[must_use]
+    pub fn has_kern_table(&self) -> bool {
+        !self.kern.is_empty()
+    }
+
     #[must_use]
     pub fn kind(&self) -> FontKind {
         self.kind
@@ -207,13 +328,30 @@ impl Font<'_> {
     /// still [`Self::missing_glyph`]. A map entry past the face's glyph count
     /// is a bad table.
     pub fn glyph_id(&self, character: char) -> Result<Option<u16>, FontError> {
-        let Some(glyph_id) = self.cmap.glyph(u32::from(character))? else {
+        let found = coded_glyph(&self.cmap, self.coding, u32::from(character))?;
+        let Some(glyph_id) = found else {
             return Ok(None);
         };
         if glyph_id >= self.num_glyphs {
             return Err(FontError::BadTable);
         }
         Ok(Some(glyph_id))
+    }
+
+    /// What the face draws for `character` with the variation selector
+    /// `selector` after it. A glyph past the face's glyph count is a bad
+    /// table.
+    pub fn variant(&self, character: char, selector: char) -> Result<Variant, FontError> {
+        let Some(variants) = &self.variants else {
+            return Ok(Variant::Unlisted);
+        };
+        let variant = variants.variant(u32::from(character), u32::from(selector))?;
+        if let Variant::Glyph(glyph) = variant
+            && glyph >= self.num_glyphs
+        {
+            return Err(FontError::BadTable);
+        }
+        Ok(variant)
     }
 
     /// Glyph 0. OpenType requires this to be the face's missing glyph.
@@ -233,18 +371,57 @@ impl Font<'_> {
         if glyph_id >= self.num_glyphs {
             return Err(FontError::UnknownGlyph);
         }
-        self.hmtx.advance(glyph_id)
+        let plain = self.hmtx.advance(glyph_id)?;
+        let Some(variation) = self.variation.as_ref().filter(|variation| variation.set) else {
+            return Ok(plain);
+        };
+        // A face set away from its default says how each advance changes,
+        // or else moves the glyph's edges with its points.
+        let varied = match (&variation.hvar, &self.outlines) {
+            (Some(hvar), _) => {
+                f32::from(plain)
+                    + vary::nearest(hvar.advance_delta(glyph_id, &variation.hvar_weights)?)
+            }
+            (None, Outlines::TrueType(source)) if variation.gvar.is_some() => {
+                ttf::advance(source, glyph_id, &self.reading())?
+            }
+            _ => return Ok(plain),
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let whole = varied.clamp(0.0, f32::from(u16::MAX)) as u16;
+        Ok(whole)
     }
 
-    /// `true` when this face has TrueType or CFF outlines.
+    /// What a TrueType glyph of this face is read with.
+    fn reading(&self) -> ttf::Reading<'_, 'a> {
+        let moves = self
+            .variation
+            .as_ref()
+            .filter(|variation| variation.set)
+            .and_then(|variation| {
+                Some(ttf::Moves {
+                    gvar: variation.gvar.as_ref()?,
+                    places: &variation.places,
+                    weights: &variation.gvar_weights,
+                })
+            });
+        ttf::Reading {
+            num_glyphs: self.num_glyphs,
+            hmtx: &self.hmtx,
+            moves,
+        }
+    }
+
+    /// `true` when this face has TrueType, CFF or `CFF2` outlines.
     ///
-    /// A `CFF2` face is readable and returns `false`. Sampling those outlines
-    /// is [`FontError::Unsupported`].
+    /// A face whose `CFF2` table does not read still opens, and returns
+    /// `false`. Sampling its outlines is [`FontError::Unsupported`].
     #[must_use]
     pub fn has_outlines(&self) -> bool {
         match &self.outlines {
             Outlines::TrueType(_) => true,
             Outlines::OpenType(source) => otf::has_outlines(source),
+            Outlines::Pictures => false,
         }
     }
 
@@ -254,12 +431,69 @@ impl Font<'_> {
         self.strikes.is_some()
     }
 
+    /// `true` when the face has a color strike: `CBLC`/`CBDT` or `sbix`.
+    #[must_use]
+    pub fn has_color_strike(&self) -> bool {
+        self.strikes.has_color()
+    }
+
     /// Bitmap for one glyph, when this face has a strike and this glyph has pixels.
     ///
     /// `Ok(None)` means the face has no strike, or this glyph has no bitmap in it.
-    /// A color strike is premultiplied RGBA. A gray or mono strike is coverage.
+    /// The largest strike that holds the glyph answers, a color strike before a
+    /// gray one. A color strike is premultiplied RGBA or a PNG, JPEG or TIFF
+    /// picture that is still encoded. A gray or mono strike is coverage.
     pub fn bitmap(&self, glyph_id: u16) -> Result<Option<BitmapGlyph>, FontError> {
         self.strikes.glyph(glyph_id, self.num_glyphs)
+    }
+
+    /// `true` when the face has a `COLR` table of layered color glyphs.
+    #[must_use]
+    pub fn has_color_layers(&self) -> bool {
+        self.colr.is_some()
+    }
+
+    /// The paints of one glyph, when the face draws it in layered color.
+    ///
+    /// `Ok(None)` means the face has no `COLR` table, or the table has no
+    /// entry for this glyph. The caller fills the outlines the paints name.
+    pub fn color_glyph(&self, glyph_id: u16) -> Result<Option<ColorGlyph>, FontError> {
+        if glyph_id >= self.num_glyphs {
+            return Err(FontError::UnknownGlyph);
+        }
+        match &self.colr {
+            Some(colr) => colr.glyph(glyph_id, self.num_glyphs),
+            None => Ok(None),
+        }
+    }
+
+    /// Color bitmap for one glyph, from the largest color strike whose picture
+    /// is at most `max_edge` pixels wide and high.
+    ///
+    /// `Ok(None)` means the face has no color strike, or none holds this glyph.
+    /// When every strike's picture is larger than `max_edge`, the smallest is
+    /// returned; the caller compares its size and refuses it.
+    pub fn color_bitmap(
+        &self,
+        glyph_id: u16,
+        max_edge: u32,
+    ) -> Result<Option<BitmapGlyph>, FontError> {
+        self.strikes
+            .color_glyph(glyph_id, self.num_glyphs, max_edge)
+    }
+
+    /// The passes of a `kern` table made for Apple's layout engine that
+    /// is more than a list of pairs, in the order they apply. A face
+    /// with these has no pairs in [`Self::kerning`].
+    #[must_use]
+    pub fn kern_passes(&self) -> &[KernPass<'a>] {
+        &self.kern_passes
+    }
+
+    /// The passes of the face's `kerx` table.
+    #[must_use]
+    pub fn kerx_passes(&self) -> &[KernPass<'a>] {
+        &self.kerx
     }
 
     /// Horizontal kerning for a glyph pair, in font design units.
@@ -277,17 +511,126 @@ impl Font<'_> {
             return Err(FontError::UnknownGlyph);
         }
         match &self.outlines {
-            Outlines::TrueType(source) => ttf::outline(source, glyph_id, self.num_glyphs),
-            Outlines::OpenType(source) => otf::outline(source, glyph_id),
+            Outlines::TrueType(source) => ttf::outline(source, glyph_id, &self.reading()),
+            Outlines::OpenType(source) => {
+                // The blends of a `CFF2` glyph are weighted by where the
+                // face is set; at its default they are their defaults.
+                let places = self
+                    .variation
+                    .as_ref()
+                    .filter(|variation| variation.set)
+                    .map_or(&[][..], |variation| &variation.places);
+                otf::outline(source, glyph_id, places)
+            }
+            Outlines::Pictures => Err(FontError::Unsupported),
         }
     }
 
-    fn from_directory(directory: Directory<'_>) -> Result<Font<'_>, FontError> {
+    /// Where point `number` of a TrueType glyph's outline is, in font
+    /// design units from the glyph's origin: Apple's tables may set one
+    /// glyph on another by a numbered point of each. `None` for a glyph
+    /// without that point, and in a face whose outlines have no numbered
+    /// points.
+    #[must_use]
+    pub fn point(&self, glyph_id: u16, number: u16) -> Option<(i32, i32)> {
+        if glyph_id >= self.num_glyphs {
+            return None;
+        }
+        let Outlines::TrueType(source) = &self.outlines else {
+            return None;
+        };
+        let (x, y) = ttf::point(source, glyph_id, number, &self.reading()).ok()??;
+        #[allow(clippy::cast_possible_truncation)]
+        let whole = |value: f32| value.is_finite().then(|| value.round() as i32);
+        Some((whole(x)?, whole(y)?))
+    }
+
+    /// Whether the face is a variable one: a design that varies along
+    /// axes such as weight and width.
+    #[must_use]
+    pub fn is_variable(&self) -> bool {
+        self.variation.is_some()
+    }
+
+    /// The axes a variable face varies along, in the face's order; none
+    /// for a face that does not vary.
+    #[must_use]
+    pub fn axes(&self) -> Vec<Axis> {
+        self.variation
+            .as_ref()
+            .map_or_else(Vec::new, Variation::axes)
+    }
+
+    /// The instances a variable face names, such as Bold: each a value
+    /// for every axis, to hand to [`Self::set_variations`] with the tags
+    /// of [`Self::axes`].
+    #[must_use]
+    pub fn instances(&self) -> Vec<Instance> {
+        self.variation
+            .as_ref()
+            .map_or_else(Vec::new, Variation::instances)
+    }
+
+    /// Where along each axis the face is set, in the face's order: 0 at
+    /// the default, 16,384 at an axis's far end and -16,384 at its near
+    /// one, after the face's own bending of each axis. Empty for a face
+    /// that does not vary.
+    #[must_use]
+    pub fn variations(&self) -> &[i16] {
+        self.variation
+            .as_ref()
+            .map_or(&[], |variation| &variation.places)
+    }
+
+    /// Each axis's tag and the value the face is set to along it, in the
+    /// axis's own units and the face's order: what [`Self::varied`] would
+    /// be given to set another face the same. Empty for a face that does
+    /// not vary.
+    #[must_use]
+    pub fn settings(&self) -> Vec<(Tag, f32)> {
+        self.variation
+            .as_ref()
+            .map_or_else(Vec::new, Variation::settings)
+    }
+
+    /// Set a variable face to `settings`: an axis's tag and a value in
+    /// the axis's own units, such as `(*b"wght", 700.0)`. A value past an
+    /// axis's ends is taken as the end, an axis not named goes to its
+    /// default, a tag the face has no axis for is passed over, and of two
+    /// settings of one axis the later counts. Outlines, advances, the
+    /// values of the positioning table, and the features that depend on
+    /// the setting all follow, and [`Self::fingerprint`] becomes another
+    /// number for every other setting. A face that does not vary is left
+    /// as it is.
+    pub fn set_variations(&mut self, settings: &[(Tag, f32)]) -> Result<(), FontError> {
+        let Some(variation) = &mut self.variation else {
+            return Ok(());
+        };
+        self.fingerprint = variation.set(settings)?;
+        let places = &variation.places;
+        if let Some(table) = &mut self.gsub {
+            table.vary(places, None);
+        }
+        if let Some(table) = &mut self.gpos {
+            table.vary(places, variation.layout_deltas());
+        }
+        Ok(())
+    }
+
+    /// This face set to `settings`, as [`Self::set_variations`] sets it.
+    pub fn varied(&self, settings: &[(Tag, f32)]) -> Result<Font<'a>, FontError> {
+        let mut face = self.clone();
+        face.set_variations(settings)?;
+        Ok(face)
+    }
+
+    fn from_directory(directory: Directory<'a>) -> Result<Font<'a>, FontError> {
         let head = parse_head(directory.table(b"head")?)?;
         let num_glyphs = parse_maxp(directory.table(b"maxp")?)?;
         let metrics = parse_hhea(directory.table(b"hhea")?, num_glyphs)?;
         let hmtx = Hmtx::parse(directory.table(b"hmtx")?, metrics, num_glyphs)?;
-        let cmap = parse_cmap(directory.table(b"cmap")?)?;
+        let (cmap, coding) = parse_cmap(directory.table(b"cmap")?)?;
+        let variants = variants::Variants::find(directory.table(b"cmap")?)?;
         // A kern table in a form this reader cannot apply, such as Apple's
         // version 1 tables, leaves the face without kerning. A torn one is
         // still an error.
@@ -296,29 +639,106 @@ impl Font<'_> {
             Err(FontError::MissingTable | FontError::Unsupported) => kern::Kerning::empty(),
             Err(error) => return Err(error),
         };
+        // A version 1 table with state machines, classes or moves across
+        // the line is applied pass by pass and not as one list of pairs.
+        // Passes that do not read are no kerning.
+        let kern_passes = match directory.table(b"kern") {
+            Ok(table) if passes::has_passes(table) => {
+                passes::kern_passes(table).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        let kern = if kern_passes.is_empty() {
+            kern
+        } else {
+            kern::Kerning::empty()
+        };
+        let kerx = directory
+            .table(b"kerx")
+            .ok()
+            .and_then(|table| passes::kerx_passes(table, directory.table(b"ankr").ok()).ok())
+            .unwrap_or_default();
+        // A layout table that is absent or empty is no table; a torn one
+        // is still an error.
+        let optional = |tag: &[u8; 4]| match directory.table(tag) {
+            Ok([]) => Ok(None),
+            Ok(table) => Ok(Some(table)),
+            Err(FontError::MissingTable) => Ok(None),
+            Err(error) => Err(error),
+        };
+        let gdef = optional(b"GDEF")?.map(Gdef::read).transpose()?;
+        let gsub = optional(b"GSUB")?
+            .map(|table| LayoutTable::read(table, 7))
+            .transpose()?;
+        let gpos = optional(b"GPOS")?
+            .map(|table| LayoutTable::read(table, 9))
+            .transpose()?;
+        // A `morx` table of a version this reader does not know is no
+        // table: the face then shapes without it.
+        let morx = match optional(b"morx")?.map(morx::Morx::read).transpose() {
+            Ok(morx) => morx,
+            Err(FontError::Unsupported) => None,
+            Err(error) => return Err(error),
+        };
         let outlines = match directory.kind {
+            // An emoji face of pictures alone carries neither outline table.
+            FontKind::TrueType
+                if directory.table(b"glyf") == Err(FontError::MissingTable)
+                    && directory.table(b"loca") == Err(FontError::MissingTable) =>
+            {
+                Outlines::Pictures
+            }
             FontKind::TrueType => {
                 Outlines::TrueType(ttf::source(&directory, head.loca, num_glyphs)?)
             }
             FontKind::OpenType => Outlines::OpenType(otf::source(&directory)?),
         };
         let strikes = strike::Strikes::parse(&directory)?;
-        Ok(Font {
+        let fingerprint = directory.fingerprint();
+        let colr = colr::Colr::parse(&directory)?;
+        let variation = Variation::read(&directory, fingerprint);
+        let mut font = Font {
             kind: directory.kind,
             units_per_em: head.units_per_em,
             num_glyphs,
             hmtx,
             cmap,
+            coding,
             kern,
+            kern_passes,
+            kerx,
+            gdef,
+            gsub,
+            gpos,
+            morx,
             outlines,
             strikes,
-        })
+            variants,
+            fingerprint,
+            colr,
+            variation,
+        };
+        // A face written as one instance of a variable face says where
+        // its axes are set, and is opened set there. A table for that
+        // which does not read is no setting, and a face that cannot be
+        // set stays at its default.
+        if let Ok(pin) = directory.table(b"Cpin") {
+            let settings = faces::pinned(pin);
+            if !settings.is_empty() {
+                let _unset = font.set_variations(&settings);
+            }
+        }
+        Ok(font)
     }
 }
 
+#[derive(Clone)]
 enum Outlines<'a> {
     TrueType(ttf::Source<'a>),
     OpenType(otf::Source<'a>),
+    /// A TrueType face with no `glyf` and no `loca`: its glyphs are the
+    /// pictures of a strike.
+    Pictures,
 }
 
 impl fmt::Debug for Outlines<'_> {
@@ -326,6 +746,7 @@ impl fmt::Debug for Outlines<'_> {
         match self {
             Self::TrueType(_) => formatter.write_str("TrueType"),
             Self::OpenType(_) => formatter.write_str("OpenType"),
+            Self::Pictures => formatter.write_str("Pictures"),
         }
     }
 }
@@ -386,6 +807,7 @@ fn parse_hhea(table: &[u8], num_glyphs: u16) -> Result<u16, FontError> {
     Ok(metrics)
 }
 
+#[derive(Clone)]
 struct Hmtx<'a> {
     data: &'a [u8],
     metrics: u16,
@@ -409,6 +831,18 @@ impl<'a> Hmtx<'a> {
         })
     }
 
+    /// How far from its origin the left edge of `glyph`'s ink is, as the
+    /// table gives it: beside the advance for the glyphs that have their
+    /// own, and in the list after those for the rest.
+    fn bearing(&self, glyph: u16) -> Option<i16> {
+        let offset = if glyph < self.metrics {
+            usize::from(glyph) * 4 + 2
+        } else {
+            usize::from(self.metrics) * 4 + usize::from(glyph - self.metrics) * 2
+        };
+        i16_at(self.data, offset).ok()
+    }
+
     fn advance(&self, glyph: u16) -> Result<u16, FontError> {
         if self.metrics == 0 {
             return Err(FontError::EmptyTable);
@@ -425,7 +859,10 @@ impl<'a> Hmtx<'a> {
     }
 }
 
+#[derive(Clone)]
 enum Cmap<'a> {
+    /// Format 0: a glyph for each of 256 byte codes.
+    Bytes(&'a [u8]),
     Format4(Format4<'a>),
     Format6(Format6<'a>),
     Groups(Groups<'a>),
@@ -434,6 +871,10 @@ enum Cmap<'a> {
 impl Cmap<'_> {
     fn glyph(&self, codepoint: u32) -> Result<Option<u16>, FontError> {
         match self {
+            Self::Bytes(glyphs) => Ok(usize::try_from(codepoint)
+                .ok()
+                .and_then(|code| glyphs.get(code))
+                .and_then(|glyph| mapped(u16::from(*glyph)))),
             Self::Format4(table) => table.glyph(codepoint),
             Self::Format6(table) => table.glyph(codepoint),
             Self::Groups(table) => table.glyph(codepoint),
@@ -441,6 +882,7 @@ impl Cmap<'_> {
     }
 }
 
+#[derive(Clone)]
 struct Format4<'a> {
     data: &'a [u8],
     seg_count: usize,
@@ -450,11 +892,13 @@ struct Format4<'a> {
     range_at: usize,
 }
 
+#[derive(Clone)]
 struct Format6<'a> {
     glyphs: &'a [u8],
     first: u16,
 }
 
+#[derive(Clone)]
 struct Groups<'a> {
     data: &'a [u8],
     count: usize,
@@ -462,7 +906,62 @@ struct Groups<'a> {
     constant: bool,
 }
 
-fn parse_cmap(table: &[u8]) -> Result<Cmap<'_>, FontError> {
+/// What the codes of a face's character map are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Coding {
+    /// Unicode characters.
+    Unicode,
+    /// A symbol face's: its pictures are at U+F020 to U+F0FF, and are
+    /// also drawn for the keys that type them.
+    Symbols,
+    /// The bytes of the Mac's Roman character set, which an old face may
+    /// have as its only map.
+    Roman,
+}
+
+/// The characters of the Mac's Roman set from byte 0x80 on, in byte order.
+/// Below that the set is ASCII.
+const ROMAN_HIGH: &str = "\u{C4}\u{C5}\u{C7}\u{C9}\u{D1}\u{D6}\u{DC}\u{E1}\u{E0}\u{E2}\u{E4}\u{E3}\u{E5}\u{E7}\u{E9}\u{E8}\
+\u{EA}\u{EB}\u{ED}\u{EC}\u{EE}\u{EF}\u{F1}\u{F3}\u{F2}\u{F4}\u{F6}\u{F5}\u{FA}\u{F9}\u{FB}\u{FC}\
+\u{2020}\u{B0}\u{A2}\u{A3}\u{A7}\u{2022}\u{B6}\u{DF}\u{AE}\u{A9}\u{2122}\u{B4}\u{A8}\u{2260}\u{C6}\u{D8}\
+\u{221E}\u{B1}\u{2264}\u{2265}\u{A5}\u{B5}\u{2202}\u{2211}\u{220F}\u{3C0}\u{222B}\u{AA}\u{BA}\u{3A9}\u{E6}\u{F8}\
+\u{BF}\u{A1}\u{AC}\u{221A}\u{192}\u{2248}\u{2206}\u{AB}\u{BB}\u{2026}\u{A0}\u{C0}\u{C3}\u{D5}\u{152}\u{153}\
+\u{2013}\u{2014}\u{201C}\u{201D}\u{2018}\u{2019}\u{F7}\u{25CA}\u{FF}\u{178}\u{2044}\u{20AC}\u{2039}\u{203A}\u{FB01}\u{FB02}\
+\u{2021}\u{B7}\u{201A}\u{201E}\u{2030}\u{C2}\u{CA}\u{C1}\u{CB}\u{C8}\u{CD}\u{CE}\u{CF}\u{CC}\u{D3}\u{D4}\
+\u{F8FF}\u{D2}\u{DA}\u{DB}\u{D9}\u{131}\u{2C6}\u{2DC}\u{AF}\u{2D8}\u{2D9}\u{2DA}\u{B8}\u{2DD}\u{2DB}\u{2C7}";
+
+/// The glyph `map` has for the character `code`, its codes being what
+/// `coding` says they are.
+fn coded_glyph(map: &Cmap<'_>, coding: Coding, code: u32) -> Result<Option<u16>, FontError> {
+    Ok(match coding {
+        Coding::Unicode => map.glyph(code)?,
+        Coding::Symbols => match map.glyph(code)? {
+            // A symbol face draws the key that types each picture.
+            None if (0x20..=0xFF).contains(&code) => map.glyph(0xF000 + code)?,
+            found => found,
+        },
+        Coding::Roman => match roman_byte(code) {
+            Some(byte) => map.glyph(byte)?,
+            None => None,
+        },
+    })
+}
+
+/// The byte of `code` in the Mac's Roman set, when it has one.
+fn roman_byte(code: u32) -> Option<u32> {
+    if code < 0x80 {
+        return Some(code);
+    }
+    let character = char::from_u32(code)?;
+    let place = ROMAN_HIGH.chars().position(|other| other == character)?;
+    u32::try_from(place).ok().map(|place| place + 0x80)
+}
+
+/// The character map of a face, and what its codes are. A symbol face's
+/// map is taken ahead of any other the face has, as other shapers take
+/// it; then the best map of Unicode characters; and the Mac's Roman map
+/// when it is all there is.
+fn parse_cmap(table: &[u8]) -> Result<(Cmap<'_>, Coding), FontError> {
     if table.len() < 4 {
         return Err(short(table));
     }
@@ -475,38 +974,44 @@ fn parse_cmap(table: &[u8]) -> Result<Cmap<'_>, FontError> {
     }
     let record_bytes = records.checked_mul(8).ok_or(FontError::BadTable)?;
     let header = bytes_at(table, 4, record_bytes)?;
-    let mut chosen: Option<(u8, usize)> = None;
+    let mut chosen: Option<(u8, usize, Coding)> = None;
     for index in 0..records {
         let at = index * 8;
         let platform = u16_at(header, at)?;
         let encoding = u16_at(header, at + 2)?;
-        if !unicode_cmap(platform, encoding) {
-            continue;
-        }
+        let (coding, rank) = match (platform, encoding) {
+            (3, 0) => (Coding::Symbols, 32),
+            (1, 0) => (Coding::Roman, 0),
+            _ if unicode_cmap(platform, encoding) => (Coding::Unicode, 8),
+            _ => continue,
+        };
         let offset = usize::try_from(u32_at(header, at + 4)?).map_err(|_| FontError::BadTable)?;
         let format = u16_at(table.get(offset..).ok_or(FontError::Truncated)?, 0)?;
         let Some(score) = cmap_score(format) else {
             continue;
         };
-        if chosen.as_ref().is_some_and(|(best, _)| *best >= score) {
+        let score = score + rank;
+        if chosen.as_ref().is_some_and(|(best, _, _)| *best >= score) {
             continue;
         }
-        chosen = Some((score, offset));
+        chosen = Some((score, offset, coding));
     }
-    let Some((_, offset)) = chosen else {
+    let Some((_, offset, coding)) = chosen else {
         return Err(FontError::Unsupported);
     };
     let subtable = table.get(offset..).ok_or(FontError::Truncated)?;
     if subtable.len() < 2 {
         return Err(FontError::Truncated);
     }
-    match u16_at(subtable, 0)? {
-        4 => Ok(Cmap::Format4(parse_format4(subtable)?)),
-        6 => Ok(Cmap::Format6(parse_format6(subtable)?)),
-        12 => Ok(Cmap::Groups(parse_groups(subtable, false)?)),
-        13 => Ok(Cmap::Groups(parse_groups(subtable, true)?)),
-        _ => Err(FontError::Unsupported),
-    }
+    let map = match u16_at(subtable, 0)? {
+        0 => Cmap::Bytes(bytes_at(subtable, 6, 256)?),
+        4 => Cmap::Format4(parse_format4(subtable)?),
+        6 => Cmap::Format6(parse_format6(subtable)?),
+        12 => Cmap::Groups(parse_groups(subtable, false)?),
+        13 => Cmap::Groups(parse_groups(subtable, true)?),
+        _ => return Err(FontError::Unsupported),
+    };
+    Ok((map, coding))
 }
 
 fn unicode_cmap(platform: u16, encoding: u16) -> bool {
@@ -518,9 +1023,10 @@ fn unicode_cmap(platform: u16, encoding: u16) -> bool {
 
 fn cmap_score(format: u16) -> Option<u8> {
     match format {
-        12 => Some(4),
-        13 => Some(3),
-        4 => Some(2),
+        12 => Some(5),
+        13 => Some(4),
+        4 => Some(3),
+        0 => Some(1),
         6 => Some(1),
         _ => None,
     }
@@ -738,6 +1244,8 @@ pub(crate) struct Directory<'a> {
     data: &'a [u8],
     kind: FontKind,
     tables: Vec<Table>,
+    /// Where the table records start in `data`.
+    records_at: usize,
 }
 
 impl<'a> Directory<'a> {
@@ -788,11 +1296,56 @@ impl<'a> Directory<'a> {
             data: bytes,
             kind,
             tables,
+            records_at: at + 12,
         })
     }
 
     pub(crate) fn kind(&self) -> FontKind {
         self.kind
+    }
+
+    /// A hash of what the face holds: each table's name, checksum and
+    /// length, and the start and end of its bytes. Where a table sits in
+    /// the file is left out, so a face copied out of a collection has the
+    /// fingerprint of the face inside it.
+    fn fingerprint(&self) -> u64 {
+        /// Bytes hashed from each end of a table.
+        const EDGE: usize = 512;
+        // FNV-1a, 64 bits.
+        let mut hash = 0xCBF2_9CE4_8422_2325_u64;
+        let mut mix = |bytes: &[u8]| {
+            for byte in bytes {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+            }
+        };
+        for (slot, table) in self.tables.iter().enumerate() {
+            mix(&table.tag);
+            mix(&table.length.to_be_bytes());
+            // The checksum is the four bytes after the tag in the record.
+            let record = self.records_at + slot * 16;
+            if let Some(checksum) = self.data.get(record + 4..record + 8) {
+                mix(checksum);
+            }
+            let (Ok(start), Ok(length)) =
+                (usize::try_from(table.offset), usize::try_from(table.length))
+            else {
+                continue;
+            };
+            let Some(bytes) = start
+                .checked_add(length)
+                .and_then(|end| self.data.get(start..end))
+            else {
+                continue;
+            };
+            if bytes.len() <= 2 * EDGE {
+                mix(bytes);
+            } else {
+                mix(&bytes[..EDGE]);
+                mix(&bytes[bytes.len() - EDGE..]);
+            }
+        }
+        hash
     }
 
     pub(crate) fn table(&self, tag: &[u8; 4]) -> Result<&'a [u8], FontError> {
@@ -967,6 +1520,49 @@ mod tests {
             }
         }
         panic!("missing {tag:?}");
+    }
+
+    #[test]
+    fn a_fingerprint_tells_faces_apart_and_knows_a_copy() {
+        let sample = read(SAMPLE_TTF).expect("ttf").fingerprint();
+        // The same data elsewhere in memory is the same face.
+        let moved = SAMPLE_TTF.to_vec();
+        assert_eq!(sample, read(&moved).expect("copy").fingerprint());
+        assert_ne!(sample, read(SAMPLE_OTF).expect("otf").fingerprint());
+        // The two faces of a collection differ, and a face copied out of
+        // it is the face inside it.
+        let first = read_collection(SAMPLE_TTC, 0).expect("first").fingerprint();
+        let second = read_collection(SAMPLE_TTC, 1)
+            .expect("second")
+            .fingerprint();
+        assert_ne!(first, second);
+        let copied = crate::single_face(SAMPLE_TTC, 1).expect("copied");
+        assert_eq!(read(&copied).expect("face").fingerprint(), second);
+        // One changed byte inside a table changes it.
+        let mut edited = SAMPLE_TTF.to_vec();
+        let at = table_offset(&edited, b"hmtx");
+        edited[at + 1] ^= 1;
+        assert_ne!(read(&edited).expect("edited").fingerprint(), sample);
+    }
+
+    #[test]
+    fn a_face_of_pictures_alone_opens_without_its_outline_tables() {
+        let bytes = crate::fixture_color::pictures_only();
+        let font = read(&bytes).expect("pictures");
+        assert_eq!(font.kind(), FontKind::TrueType);
+        assert!(!font.has_outlines());
+        assert!(font.has_color_strike());
+        assert_eq!(font.outline(1), Err(FontError::Unsupported));
+        let picture = font.color_bitmap(1, 256).expect("strike").expect("picture");
+        assert_eq!((picture.width, picture.height), (2, 2));
+        // One outline table without the other is still a broken face.
+        let mut half = crate::fixture_color::cbdt();
+        let at = (0..usize::from(u16::from_be_bytes([half[4], half[5]])))
+            .map(|record| 12 + record * 16)
+            .find(|at| &half[*at..*at + 4] == b"loca")
+            .expect("loca");
+        half[at..at + 4].copy_from_slice(b"lock");
+        assert_eq!(read(&half).err(), Some(FontError::MissingTable));
     }
 
     #[test]

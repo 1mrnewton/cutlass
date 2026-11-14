@@ -1,0 +1,154 @@
+Fonts by others, shipped inside Cutlass
+
+Every file is from the Google Fonts repository,
+https://github.com/google/fonts, at commit
+29b4ec6df2522a8aee279414b78a07910b065874 (13 November 2026), fetched on
+14 November 2026 from the folder named with each family. The files are
+unchanged and keep their names. Each family's folder holds its license
+text as that folder had it.
+
+inter/
+  Inter, by Rasmus Andersson.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is inter/OFL.txt.
+  From ofl/inter: Inter[opsz,wght].ttf.
+
+montserrat/
+  Montserrat, by Julieta Ulanovsky, Sol Matas, Juan Pablo del Peral, Jacques Le Bailly.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is montserrat/OFL.txt.
+  From ofl/montserrat: Montserrat[wght].ttf.
+
+poppins/
+  Poppins, by Indian Type Foundry, Jonny Pinhorn, Ninad Kale.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is poppins/OFL.txt.
+  From ofl/poppins: Poppins-Black.ttf, Poppins-Bold.ttf, Poppins-Regular.ttf, Poppins-SemiBold.ttf, Poppins-BoldItalic.ttf, Poppins-Italic.ttf.
+
+rubik/
+  Rubik, by Hubert and Fischer, Meir Sadan, Cyreal, Daniel Grumer, Omaima Dajani.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is rubik/OFL.txt.
+  From ofl/rubik: Rubik[wght].ttf.
+
+nunito/
+  Nunito, by Vernon Adams, Cyreal, Jacques Le Bailly.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is nunito/OFL.txt.
+  From ofl/nunito: Nunito[wght].ttf.
+
+raleway/
+  Raleway, by Matt McInerney, Pablo Impallari, Rodrigo Fuenzalida.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is raleway/OFL.txt.
+  From ofl/raleway: Raleway[wght].ttf.
+
+spacegrotesk/
+  Space Grotesk, by Florian Karsten.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is spacegrotesk/OFL.txt.
+  From ofl/spacegrotesk: SpaceGrotesk[wght].ttf.
+
+oswald/
+  Oswald, by Vernon Adams, Kalapi Gajjar, Cyreal.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is oswald/OFL.txt.
+  From ofl/oswald: Oswald[wght].ttf.
+
+bebasneue/
+  Bebas Neue, by Ryoichi Tsunekawa.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is bebasneue/OFL.txt.
+  From ofl/bebasneue: BebasNeue-Regular.ttf.
+
+anton/
+  Anton, by Vernon Adams.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is anton/OFL.txt.
+  From ofl/anton: Anton-Regular.ttf.
+
+playfairdisplay/
+  Playfair Display, by Claus Eggers Sørensen.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is playfairdisplay/OFL.txt.
+  From ofl/playfairdisplay: PlayfairDisplay[wght].ttf, PlayfairDisplay-Italic[wght].ttf.
+
+lora/
+  Lora, by Cyreal.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is lora/OFL.txt.
+  From ofl/lora: Lora[wght].ttf, Lora-Italic[wght].ttf.
+
+gentiumbookplus/
+  Gentium Book Plus, by SIL International.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is gentiumbookplus/OFL.txt.
+  From ofl/gentiumbookplus: GentiumBookPlus-Bold.ttf, GentiumBookPlus-Regular.ttf.
+
+dmserifdisplay/
+  DM Serif Display, by Colophon Foundry.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is dmserifdisplay/OFL.txt.
+  From ofl/dmserifdisplay: DMSerifDisplay-Regular.ttf, DMSerifDisplay-Italic.ttf.
+
+abrilfatface/
+  Abril Fatface, by TypeTogether.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is abrilfatface/OFL.txt.
+  From ofl/abrilfatface: AbrilFatface-Regular.ttf.
+
+pacifico/
+  Pacifico, by Vernon Adams, Jacques Le Bailly, Botjo Nikoltchev, Ani Petrova.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is pacifico/OFL.txt.
+  From ofl/pacifico: Pacifico-Regular.ttf.
+
+dancingscript/
+  Dancing Script, by Impallari Type.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is dancingscript/OFL.txt.
+  From ofl/dancingscript: DancingScript[wght].ttf.
+
+caveat/
+  Caveat, by Impallari Type.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is caveat/OFL.txt.
+  From ofl/caveat: Caveat[wght].ttf.
+
+lobster/
+  Lobster, by Impallari Type.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is lobster/OFL.txt.
+  From ofl/lobster: Lobster-Regular.ttf.
+
+permanentmarker/
+  Permanent Marker, by Font Diner.
+  Licensed under the Apache License, Version 2.0. The
+  full license is permanentmarker/LICENSE.txt.
+  From apache/permanentmarker: PermanentMarker-Regular.ttf.
+
+bangers/
+  Bangers, by Vernon Adams.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is bangers/OFL.txt.
+  From ofl/bangers: Bangers-Regular.ttf.
+
+righteous/
+  Righteous, by Astigmatic.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is righteous/OFL.txt.
+  From ofl/righteous: Righteous-Regular.ttf.
+
+fredoka/
+  Fredoka, by Milena Brandão, Hafontia.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is fredoka/OFL.txt.
+  From ofl/fredoka: Fredoka[wdth,wght].ttf.
+
+jetbrainsmono/
+  JetBrains Mono, by JetBrains, Philipp Nurullin, Konstantin Bulenkov.
+  Licensed under the SIL Open Font License, Version 1.1. The
+  full license is jetbrainsmono/OFL.txt.
+  From ofl/jetbrainsmono: JetBrainsMono[wght].ttf.
+
+Cutlass credits every family in its Licenses window.

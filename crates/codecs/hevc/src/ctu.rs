@@ -6,14 +6,18 @@ use std::sync::atomic::Ordering::Relaxed;
 
 use cutlass_decode::CodecError;
 
-use crate::cabac::{self, Cabac};
+use cutlass_simd::hevc::idct;
+
+use crate::cabac::{self, Cabac, Engine};
 use crate::intra::{self, Refs};
 use cutlass_pool::Rows;
 
+use crate::job::Pipeline;
 use crate::picture::{
     FLAG_CBF, FLAG_KEEP, FLAG_PCM, FLAG_SKIP, MODE_INTER, MODE_INTRA, MvField, Picture, Samples,
-    SaoParams, lock,
+    SaoParams, Work, lock,
 };
+use crate::pixel::Pixel;
 use crate::ps::{Pps, Sps};
 use crate::slice::SliceType;
 use crate::transform;
@@ -36,18 +40,6 @@ struct Tb {
     base: (usize, usize),
     log2: u32,
     blk: usize,
-}
-
-/// A coefficient position for the significance context: in the TU, of the
-/// sub-block, and inside the sub-block.
-#[derive(Clone, Copy)]
-struct SigAt {
-    xc: usize,
-    yc: usize,
-    xs: usize,
-    ys: usize,
-    xp: u8,
-    yp: u8,
 }
 
 /// Coding unit state the prediction and transform units read.
@@ -79,9 +71,13 @@ pub struct Wave<'p> {
     pub row_only: bool,
 }
 
-pub struct SliceDecoder<'a, 'p> {
+pub struct SliceDecoder<'a, 'p, P: Pixel> {
     pub pic: &'p Picture,
-    pub out: Samples<'p>,
+    pub work: &'p Work<P>,
+    /// The CTB row being reconstructed.
+    pub out: Samples<'p, P>,
+    /// Told of every CTB reconstructed, to run the loop filters behind.
+    pub pipe: &'p Pipeline<'p, P>,
     /// The first CTB, raster order, when it is not the segment's first.
     pub start_rs: Option<usize>,
     pub wave: Option<Wave<'p>>,
@@ -100,113 +96,38 @@ pub struct SliceDecoder<'a, 'p> {
     pub qp_delta_coded: bool,
     pub qp_delta: i32,
     pub cu: Cu,
+    /// Scaled coefficients: zero outside the block under way.
     pub coeffs: [i32; 32 * 32],
+    /// The residual of the block under way.
+    pub res: [i32; 32 * 32],
     pub pred: [[i16; 64 * 64]; 2],
     pub ctb_x: usize,
     pub ctb_y: usize,
     pub ctb_rs: usize,
+    /// Whether the CTB to the left, above, and above-left of this one may
+    /// be used for prediction (the same slice and tile).
+    pub ctb_near: [bool; 3],
     pub merge_2nx2n: bool,
     pub slice_type: SliceType,
-    pub mc: crate::mc::Scratch,
+    pub mc: crate::mc::Scratch<P>,
+    /// Luma rows of each reference (by list and index) known to be
+    /// published, and of the collocated picture's motion: the waits load
+    /// the counts, which other threads keep writing, only past them.
+    pub seen_rows: [[usize; 16]; 2],
+    pub seen_motion: std::cell::Cell<usize>,
 }
 
-/// Up-right diagonal, horizontal, and vertical scans of a 4×4 and a 2×2
-/// block as (x, y), clause 6.5.3 to 6.5.5.
-fn scan4(scan: usize) -> &'static [(u8, u8); 16] {
-    const DIAG: [(u8, u8); 16] = [
-        (0, 0),
-        (0, 1),
-        (1, 0),
-        (0, 2),
-        (1, 1),
-        (2, 0),
-        (0, 3),
-        (1, 2),
-        (2, 1),
-        (3, 0),
-        (1, 3),
-        (2, 2),
-        (3, 1),
-        (2, 3),
-        (3, 2),
-        (3, 3),
-    ];
-    const HOR: [(u8, u8); 16] = [
-        (0, 0),
-        (1, 0),
-        (2, 0),
-        (3, 0),
-        (0, 1),
-        (1, 1),
-        (2, 1),
-        (3, 1),
-        (0, 2),
-        (1, 2),
-        (2, 2),
-        (3, 2),
-        (0, 3),
-        (1, 3),
-        (2, 3),
-        (3, 3),
-    ];
-    const VER: [(u8, u8); 16] = [
-        (0, 0),
-        (0, 1),
-        (0, 2),
-        (0, 3),
-        (1, 0),
-        (1, 1),
-        (1, 2),
-        (1, 3),
-        (2, 0),
-        (2, 1),
-        (2, 2),
-        (2, 3),
-        (3, 0),
-        (3, 1),
-        (3, 2),
-        (3, 3),
-    ];
-    match scan {
-        1 => &HOR,
-        2 => &VER,
-        _ => &DIAG,
-    }
-}
-
-/// Sub-block scan of a TU with `size` sub-blocks per edge (1, 2, 4, or 8).
-fn sub_scan(size: usize, scan: usize, i: usize) -> (usize, usize) {
-    match size {
-        1 => (0, 0),
-        2 => {
-            const DIAG: [(usize, usize); 4] = [(0, 0), (0, 1), (1, 0), (1, 1)];
-            const HOR: [(usize, usize); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
-            const VER: [(usize, usize); 4] = [(0, 0), (0, 1), (1, 0), (1, 1)];
-            match scan {
-                1 => HOR[i],
-                2 => VER[i],
-                _ => DIAG[i],
-            }
-        }
-        4 => {
-            let (x, y) = scan4(0)[i];
-            (usize::from(x), usize::from(y))
-        }
-        _ => diag8()[i],
-    }
-}
-
-fn diag8() -> &'static [(usize, usize); 64] {
-    use std::sync::OnceLock;
-    static SCAN: OnceLock<[(usize, usize); 64]> = OnceLock::new();
-    SCAN.get_or_init(|| {
-        let mut out = [(0usize, 0usize); 64];
-        let mut i = 0;
+/// The scans of clause 6.5.3 to 6.5.5 as (x, y): up-right diagonal,
+/// horizontal, vertical.
+const fn scan(size: usize, kind: usize) -> [(u8, u8); 64] {
+    let mut out = [(0u8, 0u8); 64];
+    let mut i = 0;
+    if kind == 0 {
         let (mut x, mut y) = (0i32, 0i32);
-        while i < 64 {
+        while i < size * size {
             while y >= 0 {
-                if x < 8 && y < 8 {
-                    out[i] = (x as usize, y as usize);
+                if (x as usize) < size && (y as usize) < size {
+                    out[i] = (x as u8, y as u8);
                     i += 1;
                 }
                 y -= 1;
@@ -215,12 +136,206 @@ fn diag8() -> &'static [(usize, usize); 64] {
             y = x;
             x = 0;
         }
-        out
-    })
+    } else {
+        while i < size * size {
+            let (a, b) = ((i % size) as u8, (i / size) as u8);
+            out[i] = if kind == 1 { (a, b) } else { (b, a) };
+            i += 1;
+        }
+    }
+    out
+}
+
+/// The scans of a 4×4 block, by scan kind.
+const SCAN4: [[(u8, u8); 16]; 3] = {
+    let mut out = [[(0u8, 0u8); 16]; 3];
+    let mut k = 0;
+    while k < 3 {
+        let s = scan(4, k);
+        let mut i = 0;
+        while i < 16 {
+            out[k][i] = s[i];
+            i += 1;
+        }
+        k += 1;
+    }
+    out
+};
+
+/// The sub-block scans of blocks with 1, 2, 4 and 8 sub-blocks per edge,
+/// by scan kind (the horizontal and vertical scans occur for 4×4 and 8×8
+/// blocks only, so larger ones take the diagonal).
+const SUB_SCANS: [[[(u8, u8); 64]; 3]; 4] = {
+    let mut out = [[[(0u8, 0u8); 64]; 3]; 4];
+    let mut l = 0;
+    while l < 4 {
+        let mut k = 0;
+        while k < 3 {
+            out[l][k] = scan(1 << l, if l > 1 { 0 } else { k });
+            k += 1;
+        }
+        l += 1;
+    }
+    out
+};
+
+/// Each position's place in its scan: `INV4[kind][y * 4 + x]`.
+const INV4: [[u8; 16]; 3] = {
+    let mut out = [[0u8; 16]; 3];
+    let mut k = 0;
+    while k < 3 {
+        let mut i = 0;
+        while i < 16 {
+            let (x, y) = SCAN4[k][i];
+            out[k][y as usize * 4 + x as usize] = i as u8;
+            i += 1;
+        }
+        k += 1;
+    }
+    out
+};
+
+/// Each sub-block's place in its scan: `INV_SUB[log2 - 2][kind][ys * 8 + xs]`.
+const INV_SUB: [[[u8; 64]; 3]; 4] = {
+    let mut out = [[[0u8; 64]; 3]; 4];
+    let mut l = 0;
+    while l < 4 {
+        let mut k = 0;
+        while k < 3 {
+            let mut i = 0;
+            while i < (1 << (2 * l)) {
+                let (x, y) = SUB_SCANS[l][k][i];
+                out[l][k][y as usize * 8 + x as usize] = i as u8;
+                i += 1;
+            }
+            k += 1;
+        }
+        l += 1;
+    }
+    out
+};
+
+fn sub_scan(log2s: usize, kind: usize) -> &'static [(u8, u8); 64] {
+    &SUB_SCANS[log2s.min(3)][kind.min(2)]
 }
 
 /// `ctxIdxMap` of equation 9-50 for 4×4 blocks.
 const CTX_IDX_MAP: [u8; 16] = [0, 1, 4, 5, 2, 3, 4, 5, 6, 6, 8, 8, 7, 7, 8, 8];
+
+/// `sigCtx` of a 4×4 block by scan position: `SIG4[kind][p]`.
+const SIG4: [[u8; 16]; 3] = {
+    let mut out = [[0u8; 16]; 3];
+    let mut k = 0;
+    while k < 3 {
+        let mut p = 0;
+        while p < 16 {
+            let (x, y) = SCAN4[k][p];
+            out[k][p] = CTX_IDX_MAP[(y as usize) * 4 + x as usize];
+            p += 1;
+        }
+        k += 1;
+    }
+    out
+};
+
+/// The part of `sigCtx` of larger blocks that depends on the coded flags
+/// of the sub-blocks to the right and below (`prev`) and the position in
+/// the sub-block, by scan position: `SIG_PATTERN[kind][prev][p]`.
+const SIG_PATTERN: [[[u8; 16]; 4]; 3] = {
+    let mut out = [[[0u8; 16]; 4]; 3];
+    let mut k = 0;
+    while k < 3 {
+        let mut prev = 0;
+        while prev < 4 {
+            let mut p = 0;
+            while p < 16 {
+                let (xp, yp) = SCAN4[k][p];
+                let (xp, yp) = (xp as usize, yp as usize);
+                out[k][prev][p] = match prev {
+                    0 => {
+                        if xp + yp == 0 {
+                            2
+                        } else if xp + yp < 3 {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    1 => {
+                        if yp == 0 {
+                            2
+                        } else if yp == 1 {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    2 => {
+                        if xp == 0 {
+                            2
+                        } else if xp == 1 {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    _ => 2,
+                };
+                p += 1;
+            }
+            prev += 1;
+        }
+        k += 1;
+    }
+    out
+};
+
+/// How the coefficients of one block are scaled.
+#[derive(Clone, Copy)]
+enum Scale<'a> {
+    /// Transquant bypass: as decoded.
+    Bypass,
+    /// One factor for every position.
+    Flat { factor: i64, add: i64, shift: u32 },
+    /// A scaling list: its 8×8 base upsampled by `1 << ratio_log2` (`None`:
+    /// a 4×4 list), and its DC value.
+    List {
+        base: &'a [u8; 64],
+        dc: Option<u8>,
+        ratio_log2: Option<u32>,
+        factor: i64,
+        add: i64,
+        shift: u32,
+    },
+}
+
+impl Scale<'_> {
+    #[inline(always)]
+    fn apply(&self, value: i64, x: usize, y: usize) -> i32 {
+        match *self {
+            Self::Bypass => value as i32,
+            Self::Flat { factor, add, shift } => {
+                ((value * factor + add) >> shift).clamp(-32768, 32767) as i32
+            }
+            Self::List {
+                base,
+                dc,
+                ratio_log2,
+                factor,
+                add,
+                shift,
+            } => {
+                let m = match (dc, ratio_log2) {
+                    (Some(dc), _) if x == 0 && y == 0 => dc,
+                    // A 4×4 list is 4×4, in rows of 4.
+                    (_, None) => base[(y & 3) * 4 + (x & 3)],
+                    (_, Some(r)) => base[((y >> r) & 7) * 8 + ((x >> r) & 7)],
+                };
+                ((value * i64::from(m) * factor + add) >> shift).clamp(-32768, 32767) as i32
+            }
+        }
+    }
+}
 
 /// Chroma QP of 4:2:0 (Table 8-10).
 pub fn chroma_qp(qpi: i32) -> i32 {
@@ -242,7 +357,7 @@ fn malformed(what: &'static str) -> CodecError {
     CodecError::Malformed { at_bit: 0, what }
 }
 
-impl<'a, 'p> SliceDecoder<'a, 'p> {
+impl<'a, 'p, P: Pixel> SliceDecoder<'a, 'p, P> {
     /// Decode every CTU of the slice segment.
     pub fn decode(&mut self) -> Result<(), CodecError> {
         let header = self.pic.slices[self.slice].header.clone();
@@ -274,8 +389,15 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
             self.ctb_rs = rs;
             self.ctb_x = col * ctb_size;
             self.ctb_y = (rs / ctb_w) * ctb_size;
+            if self.out.row() != rs / ctb_w {
+                self.out = self.work.band(rs / ctb_w);
+                self.pipe.nudge(Some(rs / ctb_w));
+            }
             self.pic.ctb_slice[rs].store(self.slice as u16, Relaxed);
             self.pic.ctb_slice_addr[rs].store(slice_addr, Relaxed);
+            let (cx, cy) = (self.ctb_x as isize, self.ctb_y as isize);
+            self.ctb_near = [(cx - 1, cy), (cx, cy - 1), (cx - 1, cy - 1)]
+                .map(|(nx, ny)| self.pic.available(self.ctb_x, self.ctb_y, nx, ny));
             let tile_start =
                 ts == 0 || layout.tile_of[rs] != layout.tile_of[layout.ts_to_rs[ts - 1] as usize];
             let row_start =
@@ -308,10 +430,11 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
             {
                 *slot = Some(Box::new(self.cabac.ctx));
             }
+            self.out.publish(self.ctb_x, self.ctb_y, ctb_size, height);
             if let Some(wave) = in_wave {
-                self.out.publish(self.ctb_x, self.ctb_y, ctb_size, height);
                 wave.mine.report_through(col as u32);
             }
+            self.pipe.ctb_done(rs);
             let end = self.cabac.terminate();
             if self.cabac.overrun() {
                 return Err(truncated("slice data"));
@@ -507,14 +630,10 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         let split = if x0 + size <= self.pic.width && y0 + size <= self.pic.height && log2 > min_cb
         {
             let mut inc = 0;
-            if self.pic.available(x0, y0, x0 as isize - 1, y0 as isize)
-                && u32::from(self.pic.depth.get(self.pic.at4(x0 - 1, y0))) > depth
-            {
+            if self.left_ok(x0) && u32::from(self.pic.depth.get(self.pic.at4(x0 - 1, y0))) > depth {
                 inc += 1;
             }
-            if self.pic.available(x0, y0, x0 as isize, y0 as isize - 1)
-                && u32::from(self.pic.depth.get(self.pic.at4(x0, y0 - 1))) > depth
-            {
+            if self.up_ok(y0) && u32::from(self.pic.depth.get(self.pic.at4(x0, y0 - 1))) > depth {
                 inc += 1;
             }
             self.cabac.decide(cabac::SPLIT_CU + inc)
@@ -578,7 +697,6 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         depth: u32,
     ) -> Result<(), CodecError> {
         let size = 1usize << log2;
-        let w4 = self.pic.w4;
         self.cu = Cu {
             x: x0,
             y: y0,
@@ -590,27 +708,26 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         }
         self.pic
             .depth
-            .fill4(w4, (x0, y0), (size, size), depth as u8);
+            .fill4(self.pic.geom4(), (x0, y0), (size, size), depth as u8);
         let mut skip = false;
         if self.slice_type != SliceType::I {
             let mut inc = 0;
-            if self.pic.available(x0, y0, x0 as isize - 1, y0 as isize)
-                && self.pic.info.get(self.pic.at4(x0 - 1, y0)) & FLAG_SKIP != 0
-            {
+            if self.left_ok(x0) && self.pic.info.get(self.pic.at4(x0 - 1, y0)) & FLAG_SKIP != 0 {
                 inc += 1;
             }
-            if self.pic.available(x0, y0, x0 as isize, y0 as isize - 1)
-                && self.pic.info.get(self.pic.at4(x0, y0 - 1)) & FLAG_SKIP != 0
-            {
+            if self.up_ok(y0) && self.pic.info.get(self.pic.at4(x0, y0 - 1)) & FLAG_SKIP != 0 {
                 inc += 1;
             }
             skip = self.cabac.decide(cabac::SKIP + inc);
         }
         let keep = if self.cu.bypass { FLAG_KEEP } else { 0 };
         if skip {
-            self.pic
-                .info
-                .fill4(w4, (x0, y0), (size, size), MODE_INTER | FLAG_SKIP | keep);
+            self.pic.info.fill4(
+                self.pic.geom4(),
+                (x0, y0),
+                (size, size),
+                MODE_INTER | FLAG_SKIP | keep,
+            );
             self.cu.part = PART_2NX2N;
             self.prediction_unit(x0, y0, (size, size), depth, 0, true)?;
             self.merge_2nx2n = true;
@@ -632,7 +749,16 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         };
         self.cu.part = part;
         let mode = if intra { MODE_INTRA } else { MODE_INTER };
-        self.pic.info.fill4(w4, (x0, y0), (size, size), mode | keep);
+        self.pic
+            .info
+            .fill4(self.pic.geom4(), (x0, y0), (size, size), mode | keep);
+        if intra {
+            // No motion: the picture's maps are not cleared between pictures.
+            for row in (y0 >> 2)..((y0 + size).min(self.pic.height) >> 2) {
+                let start = self.pic.row4(row) + (x0 >> 2);
+                self.pic.mvf.fill(start, size >> 2, MvField::default());
+            }
+        }
         let mut pcm = false;
         if intra {
             self.cu.intra_split = part == PART_NXN;
@@ -652,8 +778,12 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
                     } else {
                         0
                     };
-                self.pic.info.fill4(w4, (x0, y0), (size, size), flags);
-                self.pic.intra_mode.fill4(w4, (x0, y0), (size, size), 1);
+                self.pic
+                    .info
+                    .fill4(self.pic.geom4(), (x0, y0), (size, size), flags);
+                self.pic
+                    .intra_mode
+                    .fill4(self.pic.geom4(), (x0, y0), (size, size), 1);
             } else {
                 self.intra_modes(x0, y0, log2)?;
             }
@@ -715,11 +845,10 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
 
     fn finish_cu(&mut self) {
         let size = 1usize << self.cu.log2;
-        let w4 = self.pic.w4;
         let qp = self.qp_y as i8 as u8;
         self.pic
             .qp
-            .fill4(w4, (self.cu.x, self.cu.y), (size, size), qp);
+            .fill4(self.pic.geom4(), (self.cu.x, self.cu.y), (size, size), qp);
         self.last_qp = self.qp_y;
         self.first_qg = false;
     }
@@ -788,7 +917,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         for y in 0..size {
             for x in 0..size {
                 let v = reader.u(luma_bits)?;
-                plane[y * stride + x] = (v << (bit_depth - luma_bits)) as u16;
+                plane[y * stride + x] = P::of((v << (bit_depth - luma_bits)) as i32);
             }
         }
         for c in 1..3 {
@@ -796,7 +925,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
             for y in 0..size / 2 {
                 for x in 0..size / 2 {
                     let v = reader.u(chroma_bits)?;
-                    plane[y * stride + x] = (v << (bit_depth - chroma_bits)) as u16;
+                    plane[y * stride + x] = P::of((v << (bit_depth - chroma_bits)) as i32);
                 }
             }
         }
@@ -811,7 +940,6 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         for flag in prev.iter_mut().take(parts * parts) {
             *flag = self.cabac.decide(cabac::PREV_INTRA);
         }
-        let w4 = self.pic.w4;
         for j in 0..parts {
             for i in 0..parts {
                 let idx = j * parts + i;
@@ -858,7 +986,7 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
                 self.cu.luma_modes[idx] = mode;
                 self.pic
                     .intra_mode
-                    .fill4(w4, (x, y), (pb.max(4), pb.max(4)), mode);
+                    .fill4(self.pic.geom4(), (x, y), (pb.max(4), pb.max(4)), mode);
             }
         }
         // intra_chroma_pred_mode
@@ -1004,15 +1132,12 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         if cbf_luma {
             self.residual(x0, y0, log2, 0)?;
         }
-        let w4 = self.pic.w4;
-        let flag_cbf = if cbf_luma { FLAG_CBF } else { 0 };
-        for row in (y0 >> 2)..((y0 + size) >> 2) {
-            for col in (x0 >> 2)..((x0 + size) >> 2) {
-                let at = row * w4 + col;
-                self.pic
-                    .info
-                    .set(at, (self.pic.info.get(at) & !FLAG_CBF) | flag_cbf);
-            }
+        if cbf_luma {
+            // The coding unit filled its cells without the flag.
+            let flags = self.pic.info.get(self.pic.at4(x0, y0)) | FLAG_CBF;
+            self.pic
+                .info
+                .fill4(self.pic.geom4(), (x0, y0), (size, size), flags);
         }
         self.deblock_tu(x0, y0, size);
         // Chroma.
@@ -1058,70 +1183,114 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         let mut refs = Refs::new(n);
         let constrained = self.pps.constrained_intra_pred;
         let pic: &Picture = self.pic;
-        // Availability is checked per 4 luma samples (2 chroma samples).
-        let unit = 4 / scale;
-        // The row above a band belongs to another worker: copy what this
-        // block may read of it once.
-        let mut line = [0u16; 129];
-        let line_x = px.saturating_sub(1);
-        let from_line = py > 0 && !self.out.holds(c, py - 1);
-        if from_line {
-            let end = (px + 2 * n).min(plane_w);
-            self.out.above(c, line_x, &mut line[..end - line_x]);
-        }
-        let out = &self.out;
-        let above = |sx: usize| -> i32 {
-            if from_line {
-                i32::from(line[sx - line_x])
-            } else {
-                i32::from(out.get(c, sx, py - 1))
-            }
-        };
-        let check = |pic: &Picture, sx: isize, sy: isize| -> bool {
-            // sx, sy in component samples.
-            let lx = sx * scale as isize;
-            let ly = sy * scale as isize;
-            if !pic.available(x, y, lx, ly) {
+        // Availability (clause 6.4.1) of the 4×4 luma block at (lx, ly):
+        // inside this CTB by z-scan order, in another CTB by that CTB alone
+        // (the left, above-left, above and above-right CTBs are decoded
+        // before this one or not at all; those right and below are not).
+        let log2_ctb = pic.layout.log2_ctb;
+        let (cx, cy) = (x >> log2_ctb, y >> log2_ctb);
+        let here = pic.z_in_ctb(x, y);
+        let mut ctbs: [[Option<bool>; 3]; 2] = [[None; 3]; 2];
+        let mut avail = |lx: isize, ly: isize| -> bool {
+            if lx < 0 || ly < 0 || lx as usize >= pic.width || ly as usize >= pic.height {
                 return false;
             }
-            !constrained || pic.info.get(pic.at4(lx as usize, ly as usize)) & 3 == MODE_INTRA
+            let (lx, ly) = (lx as usize, ly as usize);
+            let (nx, ny) = (lx >> log2_ctb, ly >> log2_ctb);
+            let ok = if (nx, ny) == (cx, cy) {
+                pic.z_in_ctb(lx, ly) <= here
+            } else if ny > cy || (ny == cy && nx > cx) || nx + 1 < cx || nx > cx + 1 {
+                false
+            } else {
+                let slot = &mut ctbs[ny + 1 - cy][nx + 1 - cx];
+                *slot.get_or_insert_with(|| pic.available(x, y, lx as isize, ly as isize))
+            };
+            ok && (!constrained || pic.info.get(pic.at4(lx, ly)) & 3 == MODE_INTRA)
         };
-        // Left column, bottom to top, and the corner.
-        let ni = n as isize;
-        let mut yy = 2 * ni - 1;
-        while yy >= 0 {
-            let base = yy - (yy % unit as isize);
-            let ok = check(pic, px as isize - 1, py as isize + base);
-            for k in 0..unit as isize {
-                let sy = base + k;
-                let idx = refs.left(sy as i32);
-                if ok {
-                    refs.samples[idx] = i32::from(out.get(c, px - 1, py + sy as usize));
+        // Availability is checked per 4 luma samples (2 chroma samples).
+        let unit = 4 / scale;
+        // The line above: from this CTB row, or the line the row above saved.
+        let mut line = [P::default(); 129];
+        let line_x = px.saturating_sub(1);
+        if py > 0 {
+            let end = (px + 2 * n).min(plane_w);
+            if self.out.holds(c, py - 1) {
+                let (row, _) = self.out.from(c, line_x, py - 1);
+                line[..end - line_x].copy_from_slice(&row[..end - line_x]);
+            } else {
+                self.out.above(c, line_x, &mut line[..end - line_x]);
+            }
+        }
+        let out = &self.out;
+        // Inside the block's own height and width, the samples left of it
+        // and above it come before it in z-scan order: with the CTB they
+        // lie in, they are there or not all together. Without constrained
+        // intra prediction only the units below and right of those need a
+        // check each.
+        let mask = (1usize << log2_ctb) - 1;
+        let units = 2 * n / unit;
+        let near = |ok: bool| ok && !constrained;
+        let left_near = near(x > 0 && (x & mask != 0 || avail(x as isize - 1, y as isize)));
+        let top_near = near(y > 0 && (y & mask != 0 || avail(x as isize, y as isize - 1)));
+        let mut all = true;
+        let mut column = [0i32; 64];
+        for k in 0..units {
+            let sy = k * unit;
+            let ok = (sy < n && left_near)
+                || ((sy >= n || constrained)
+                    && avail(
+                        (px as isize - 1) * scale as isize,
+                        ((py + sy) * scale) as isize,
+                    ));
+            if ok {
+                let rows = &mut column[sy..sy + unit];
+                out.column(c, px - 1, py + sy, rows);
+                for (j, &v) in rows.iter().enumerate() {
+                    let idx = refs.left((sy + j) as i32);
+                    refs.samples[idx] = v;
                     refs.available[idx] = true;
                 }
+            } else {
+                all = false;
             }
-            yy = base - 1;
         }
-        if check(pic, px as isize - 1, py as isize - 1) {
+        if px > 0
+            && py > 0
+            && avail(
+                (px as isize - 1) * scale as isize,
+                (py as isize - 1) * scale as isize,
+            )
+        {
             let idx = refs.left(-1);
-            refs.samples[idx] = above(px - 1);
+            refs.samples[idx] = line[px - 1 - line_x].i();
             refs.available[idx] = true;
+        } else {
+            all = false;
         }
-        let mut xx = 0isize;
-        while xx < 2 * ni {
-            let ok = check(pic, px as isize + xx, py as isize - 1);
-            for k in 0..unit as isize {
-                let sx = xx + k;
-                let idx = refs.top(sx as i32);
-                if ok {
-                    refs.samples[idx] = above(px + sx as usize);
-                    refs.available[idx] = true;
+        for k in 0..units {
+            let sx = k * unit;
+            let ok = py > 0
+                && ((sx < n && top_near)
+                    || ((sx >= n || constrained)
+                        && avail(
+                            ((px + sx) * scale) as isize,
+                            (py as isize - 1) * scale as isize,
+                        )));
+            if ok {
+                let first = refs.top(sx as i32);
+                let from = px + sx - line_x;
+                for (j, s) in line[from..from + unit].iter().enumerate() {
+                    refs.samples[first + j] = s.i();
+                    refs.available[first + j] = true;
                 }
+            } else {
+                all = false;
             }
-            xx += unit as isize;
         }
         let bit_depth = u32::from(self.sps.bit_depth);
-        refs.substitute(bit_depth);
+        if !all {
+            refs.substitute(bit_depth);
+        }
         if c == 0 {
             intra::filter(&mut refs, mode, self.sps.strong_intra_smoothing, bit_depth);
         }
@@ -1129,16 +1298,58 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         intra::predict(&refs, mode, c == 0, bit_depth, dst, stride);
     }
 
+    /// Whether the block left of column `x0` is available (clause
+    /// 6.4.1). Inside the CTB it always is: a block to the left comes
+    /// earlier in z-scan order.
+    #[inline]
+    fn left_ok(&self, x0: usize) -> bool {
+        let mask = (1usize << self.pic.layout.log2_ctb) - 1;
+        x0 & mask != 0 || self.ctb_near[0]
+    }
+
+    /// Availability (clause 6.4.1) of (`nx`, `ny`) left of or above the
+    /// block under way, within its height or width or at its top-left
+    /// corner: such a position comes before the block in z-scan order, so
+    /// it is there when its CTB is.
+    #[inline]
+    pub fn near(&self, nx: isize, ny: isize) -> bool {
+        if nx < 0 || ny < 0 {
+            return false;
+        }
+        let log2 = self.pic.layout.log2_ctb;
+        let left = (nx as usize >> log2) != (self.ctb_x >> log2);
+        let up = (ny as usize >> log2) != (self.ctb_y >> log2);
+        match (left, up) {
+            (false, false) => true,
+            (true, false) => self.ctb_near[0],
+            (false, true) => self.ctb_near[1],
+            (true, true) => self.ctb_near[2],
+        }
+    }
+
+    /// Whether the block above row `y0` is available; inside the CTB
+    /// it always is.
+    #[inline]
+    fn up_ok(&self, y0: usize) -> bool {
+        let mask = (1usize << self.pic.layout.log2_ctb) - 1;
+        y0 & mask != 0 || self.ctb_near[1]
+    }
+
     /// `residual_coding` (clause 7.3.8.11) and the reconstruction of its
-    /// residual into the picture.
+    /// residual into the picture. The coefficients are scaled (clause
+    /// 8.6.3) as they are read, into `coeffs`, which is zero outside the
+    /// rectangle of the coefficients of the block under way.
     fn residual(&mut self, x0: usize, y0: usize, log2: u32, c: usize) -> Result<(), CodecError> {
         let n = 1usize << log2;
-        self.coeffs[..n * n].fill(0);
+        // The engine in a local for the whole block: its fields stay in
+        // registers.
+        let mut e = self.cabac.e;
         let mut transform_skip = false;
         if self.pps.transform_skip && !self.cu.bypass && log2 == 2 {
-            transform_skip = self
-                .cabac
-                .decide(cabac::TRANSFORM_SKIP + usize::from(c > 0));
+            transform_skip = e.decide(
+                &mut self.cabac.ctx,
+                cabac::TRANSFORM_SKIP + usize::from(c > 0),
+            );
         }
         // last_sig_coeff prefixes.
         let (offset, shift) = if c == 0 {
@@ -1152,30 +1363,32 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         let max = (log2 as usize) * 2 - 1;
         let mut prefix_x = 0;
         while prefix_x < max
-            && self
-                .cabac
-                .decide(cabac::LAST_X + offset + (prefix_x >> shift))
+            && e.decide(
+                &mut self.cabac.ctx,
+                cabac::LAST_X + offset + (prefix_x >> shift),
+            )
         {
             prefix_x += 1;
         }
         let mut prefix_y = 0;
         while prefix_y < max
-            && self
-                .cabac
-                .decide(cabac::LAST_Y + offset + (prefix_y >> shift))
+            && e.decide(
+                &mut self.cabac.ctx,
+                cabac::LAST_Y + offset + (prefix_y >> shift),
+            )
         {
             prefix_y += 1;
         }
         let mut last_x = prefix_x;
         if prefix_x > 3 {
             let bits = (prefix_x >> 1) - 1;
-            let suffix = self.cabac.bypass_bits(bits as u32) as usize;
+            let suffix = e.bypass_bits(bits as u32) as usize;
             last_x = (1 << bits) * (2 + (prefix_x & 1)) + suffix;
         }
         let mut last_y = prefix_y;
         if prefix_y > 3 {
             let bits = (prefix_y >> 1) - 1;
-            let suffix = self.cabac.bypass_bits(bits as u32) as usize;
+            let suffix = e.bypass_bits(bits as u32) as usize;
             last_y = (1 << bits) * (2 + (prefix_y & 1)) + suffix;
         }
         // scanIdx (clause 7.4.9.11).
@@ -1196,44 +1409,63 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
             std::mem::swap(&mut last_x, &mut last_y);
         }
         if last_x >= n || last_y >= n {
+            self.cabac.e = e;
             return Err(malformed("last significant coefficient"));
         }
-        let sub = n >> 2;
+        let log2s = log2 as usize - 2;
+        let sub = 1usize << log2s;
+        let subs = sub_scan(log2s, scan);
         // The scan positions of the last sub-block and of the last
         // coefficient inside it.
-        let last_sub = (0..sub * sub)
-            .find(|&i| sub_scan(sub, scan, i) == (last_x >> 2, last_y >> 2))
-            .unwrap_or(0);
-        let last_pos = scan4(scan)
-            .iter()
-            .position(|&(xp, yp)| (usize::from(xp), usize::from(yp)) == (last_x & 3, last_y & 3))
-            .unwrap_or(0);
-        let mut csbf = [[false; 8]; 8];
+        let last_sub = usize::from(INV_SUB[log2s][scan][(last_y >> 2) * 8 + (last_x >> 2)]);
+        let last_pos = usize::from(INV4[scan][(last_y & 3) * 4 + (last_x & 3)]);
+        let scan4 = &SCAN4[scan];
+        let scale = self.scaling(log2, c, transform_skip);
+        // Coded sub-block flags, bit `ys * 8 + xs`.
+        let mut csbf = 0u64;
         let sign_hiding = self.pps.sign_data_hiding && !self.cu.bypass;
+        let chroma = c > 0;
         let mut greater1_state = 1u32;
         let mut max_x = 0usize;
         let mut max_y = 0usize;
         for i in (0..=last_sub).rev() {
-            let (xs, ys) = sub_scan(sub, scan, i);
-            let right = xs + 1 < sub && csbf[xs + 1][ys];
-            let below = ys + 1 < sub && csbf[xs][ys + 1];
+            let (xs, ys) = subs[i];
+            let (xs, ys) = (usize::from(xs), usize::from(ys));
+            let right = xs + 1 < sub && csbf >> (ys * 8 + xs + 1) & 1 != 0;
+            let below = ys + 1 < sub && csbf >> ((ys + 1) * 8 + xs) & 1 != 0;
             let mut infer_dc = false;
             let coded = if i < last_sub && i > 0 {
-                let inc = usize::from(right || below) + if c > 0 { 2 } else { 0 };
-                let flag = self.cabac.decide(cabac::CODED_SUB_BLOCK + inc);
+                let inc = usize::from(right || below) + if chroma { 2 } else { 0 };
+                let flag = e.decide(&mut self.cabac.ctx, cabac::CODED_SUB_BLOCK + inc);
                 infer_dc = true;
                 flag
             } else {
                 true
             };
-            csbf[xs][ys] = coded;
             if !coded {
                 continue;
             }
+            csbf |= 1 << (ys * 8 + xs);
             // Significant coefficients, high to low scan position.
+            let prev = usize::from(right) | (usize::from(below) << 1);
+            let (table, base): (&[u8; 16], usize) = if log2 == 2 {
+                (&SIG4[scan], cabac::SIG_COEFF + if chroma { 27 } else { 0 })
+            } else {
+                let base = if chroma {
+                    27 + if log2 == 3 { 9 } else { 12 }
+                } else {
+                    (if xs + ys > 0 { 3 } else { 0 })
+                        + if log2 == 3 {
+                            if scan == 0 { 9 } else { 15 }
+                        } else {
+                            21
+                        }
+                };
+                (&SIG_PATTERN[scan][prev], cabac::SIG_COEFF + base)
+            };
+            let dc_ctx = cabac::SIG_COEFF + if chroma { 27 } else { 0 };
             let mut sig = [0u8; 16];
             let mut count = 0usize;
-            let prev = usize::from(right) | (usize::from(below) << 1);
             let start = if i == last_sub {
                 sig[0] = last_pos as u8;
                 count = 1;
@@ -1242,71 +1474,69 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
                 15
             };
             let mut p = start;
-            while p >= 0 {
+            while p > 0 {
                 let pu = p as usize;
-                let (xp, yp) = scan4(scan)[pu];
-                let (xc, yc) = ((xs << 2) + usize::from(xp), (ys << 2) + usize::from(yp));
-                let significant = if pu > 0 || !infer_dc {
-                    let at = SigAt {
-                        xc,
-                        yc,
-                        xs,
-                        ys,
-                        xp,
-                        yp,
-                    };
-                    let ctx = self.sig_ctx(log2, c, at, prev, scan);
-                    let flag = self.cabac.decide(cabac::SIG_COEFF + ctx);
-                    if flag {
-                        infer_dc = false;
-                    }
-                    flag
-                } else {
+                // Without a branch on the flag, which no predictor guesses:
+                // the position is written every time and kept when set.
+                let flag = e.decide(&mut self.cabac.ctx, base + usize::from(table[pu]));
+                sig[count & 15] = pu as u8;
+                count += usize::from(flag);
+                infer_dc &= !flag;
+                p -= 1;
+            }
+            if p == 0 {
+                // Position 0: inferred when the sub-block is coded and no
+                // other coefficient was; the DC of a large block has its
+                // own context.
+                let significant = if infer_dc {
                     true
+                } else {
+                    let ctx = if log2 > 2 && i == 0 {
+                        dc_ctx
+                    } else {
+                        base + usize::from(table[0])
+                    };
+                    e.decide(&mut self.cabac.ctx, ctx)
                 };
                 if significant {
-                    sig[count] = pu as u8;
+                    sig[count] = 0;
                     count += 1;
                 }
-                p -= 1;
             }
             if count == 0 {
                 continue;
             }
             // Greater-than-one flags.
-            let mut ctx_set = if i == 0 || c > 0 { 0 } else { 2 };
+            let mut ctx_set = if i == 0 || chroma { 0 } else { 2 };
             if greater1_state == 0 {
                 ctx_set += 1;
             }
             greater1_state = 1;
             let mut greater1 = [false; 16];
-            let mut first_g1 = None;
+            let g1_base = cabac::GREATER1 + ctx_set * 4 + if chroma { 16 } else { 0 };
+            // `greater1Ctx` after a flag (clause 9.3.4.2.6): 0 once a flag
+            // was set, else counting up to 3.
+            const G1_NEXT: [u32; 8] = [0, 0, 2, 0, 3, 0, 3, 0];
+            let mut first = 8usize;
             for (k, flag) in greater1.iter_mut().enumerate().take(count.min(8)) {
-                let inc = ctx_set * 4 + greater1_state.min(3) as usize + if c > 0 { 16 } else { 0 };
-                *flag = self.cabac.decide(cabac::GREATER1 + inc);
-                if *flag {
-                    greater1_state = 0;
-                    if first_g1.is_none() {
-                        first_g1 = Some(k);
-                    }
-                } else if greater1_state > 0 && greater1_state < 3 {
-                    greater1_state += 1;
-                }
+                let f = e.decide(&mut self.cabac.ctx, g1_base + greater1_state as usize);
+                *flag = f;
+                greater1_state = G1_NEXT[(greater1_state as usize & 3) * 2 + usize::from(f)];
+                first = if f && first == 8 { k } else { first };
             }
+            let first_g1 = (first < 8).then_some(first);
             let mut greater2 = false;
             if first_g1.is_some() {
-                greater2 = self
-                    .cabac
-                    .decide(cabac::GREATER2 + ctx_set + if c > 0 { 4 } else { 0 });
+                greater2 = e.decide(
+                    &mut self.cabac.ctx,
+                    cabac::GREATER2 + ctx_set + if chroma { 4 } else { 0 },
+                );
             }
             let last_sig_pos = usize::from(sig[0]);
             let first_sig_pos = usize::from(sig[count - 1]);
             let hidden = sign_hiding && last_sig_pos - first_sig_pos > 3;
-            let mut signs = [false; 16];
             let coded_signs = if hidden { count - 1 } else { count };
-            for sign in signs.iter_mut().take(coded_signs) {
-                *sign = self.cabac.bypass();
-            }
+            let signs = e.bypass_bits(coded_signs as u32) << (32 - coded_signs as u32);
             // Remaining levels.
             let mut rice = 0u32;
             let mut sum = 0i64;
@@ -1322,121 +1552,110 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
                 };
                 let mut level = i64::from(base);
                 if base == needs {
-                    let rem = self.coeff_abs_level_remaining(rice)?;
+                    let Some(rem) = coeff_abs_level_remaining(&mut e, rice) else {
+                        self.cabac.e = e;
+                        return Err(malformed("coeff_abs_level_remaining"));
+                    };
                     level += i64::from(rem);
                     if i64::from(base) + i64::from(rem) > 3 * (1i64 << rice) {
                         rice = (rice + 1).min(4);
                     }
                 }
-                let pos = usize::from(sig[k]);
-                let (xp, yp) = scan4(scan)[pos];
+                let (xp, yp) = scan4[usize::from(sig[k])];
                 let (xc, yc) = ((xs << 2) + usize::from(xp), (ys << 2) + usize::from(yp));
-                let negative = signs[k];
+                let negative = k < coded_signs && (signs << k) & 0x8000_0000 != 0;
                 sum += level;
                 let mut value = if negative { -level } else { level };
                 if hidden && k == count - 1 && sum % 2 == 1 {
                     value = -value;
                 }
-                self.coeffs[yc * n + xc] = value.clamp(-32768, 32767) as i32;
+                let value = value.clamp(-32768, 32767);
+                self.coeffs[yc * n + xc] = scale.apply(value, xc, yc);
                 max_x = max_x.max(xc);
                 max_y = max_y.max(yc);
             }
         }
+        self.cabac.e = e;
         if self.cabac.overrun() {
+            self.clear_coeffs(n, max_x, max_y);
             return Err(truncated("residual"));
         }
         self.reconstruct(x0, y0, log2, c, transform_skip, (max_x, max_y));
         Ok(())
     }
 
-    fn coeff_abs_level_remaining(&mut self, rice: u32) -> Result<u32, CodecError> {
-        let mut prefix = 0u32;
-        while self.cabac.bypass() {
-            prefix += 1;
-            if prefix > 32 {
-                return Err(malformed("coeff_abs_level_remaining"));
+    /// Zero the coefficients of the block just used: whole rows of a fixed
+    /// width, which the compiler clears with vector stores in place of a
+    /// call to `memset` for each row.
+    fn clear_coeffs(&mut self, n: usize, _max_x: usize, max_y: usize) {
+        fn rows<const N: usize>(c: &mut [i32], rows: usize) {
+            for row in c.as_chunks_mut::<N>().0.iter_mut().take(rows) {
+                *row = [0; N];
             }
         }
-        if prefix <= 3 {
-            Ok((prefix << rice) + self.cabac.bypass_bits(rice))
-        } else {
-            let extra = prefix - 3 + rice;
-            if extra > 31 {
-                return Err(malformed("coeff_abs_level_remaining"));
-            }
-            let base = ((1u64 << (prefix - 3)) + 2) << rice;
-            let value = base + u64::from(self.cabac.bypass_bits(extra));
-            u32::try_from(value.min(u64::from(u32::MAX >> 1)))
-                .map_err(|_| malformed("coeff_abs_level_remaining"))
+        let c = &mut self.coeffs[..];
+        match n {
+            4 => rows::<4>(c, max_y + 1),
+            8 => rows::<8>(c, max_y + 1),
+            16 => rows::<16>(c, max_y + 1),
+            _ => rows::<32>(c, max_y + 1),
         }
     }
 
-    fn sig_ctx(&self, log2: u32, c: usize, at: SigAt, prev: usize, scan: usize) -> usize {
-        let SigAt {
-            xc,
-            yc,
-            xs,
-            ys,
-            xp,
-            yp,
-        } = at;
-        let sig = if log2 == 2 {
-            usize::from(CTX_IDX_MAP[(yc << 2) + xc])
-        } else if xc + yc == 0 {
-            0
+    /// How the coefficients of a block are scaled (clause 8.6.3).
+    fn scaling(&self, log2: u32, c: usize, transform_skip: bool) -> Scale<'a> {
+        let n = 1usize << log2;
+        let bit_depth = u32::from(self.sps.bit_depth);
+        if self.cu.bypass {
+            return Scale::Bypass;
+        }
+        let qp = if c == 0 {
+            self.qp_y + self.sps.qp_bd_offset()
         } else {
-            let (xp, yp) = (usize::from(xp), usize::from(yp));
-            let mut s = match prev {
-                0 => {
-                    if xp + yp == 0 {
-                        2
-                    } else if xp + yp < 3 {
-                        1
-                    } else {
-                        0
-                    }
-                }
-                1 => {
-                    if yp == 0 {
-                        2
-                    } else if yp == 1 {
-                        1
-                    } else {
-                        0
-                    }
-                }
-                2 => {
-                    if xp == 0 {
-                        2
-                    } else if xp == 1 {
-                        1
-                    } else {
-                        0
-                    }
-                }
-                _ => 2,
-            };
-            if c == 0 {
-                if xs + ys > 0 {
-                    s += 3;
-                }
-                if log2 == 3 {
-                    s += if scan == 0 { 9 } else { 15 };
-                } else {
-                    s += 21;
-                }
-            } else if log2 == 3 {
-                s += 9;
+            let slice = &self.pic.slices[self.slice].header;
+            let offset = if c == 1 {
+                self.pps.cb_qp_offset + slice.cb_qp_offset
             } else {
-                s += 12;
-            }
-            s
+                self.pps.cr_qp_offset + slice.cr_qp_offset
+            };
+            let qpi = (self.qp_y + offset).clamp(-self.sps.qp_bd_offset_c(), 57);
+            chroma_qp(qpi) + self.sps.qp_bd_offset_c()
         };
-        if c == 0 { sig } else { 27 + sig }
+        let shift = bit_depth + log2 - 5;
+        let add = 1i64 << (shift - 1);
+        let factor = transform::LEVEL_SCALE[(qp % 6) as usize] << (qp / 6);
+        let list = self
+            .pps
+            .scaling_list
+            .as_ref()
+            .or(self.sps.scaling_list.as_ref());
+        match list {
+            Some(list) if !(transform_skip && n > 4) => {
+                let size_id = log2 as usize - 2;
+                let matrix = if size_id == 3 {
+                    if self.cu.intra { 0 } else { 3 }
+                } else {
+                    c + if self.cu.intra { 0 } else { 3 }
+                };
+                Scale::List {
+                    base: &list.lists[size_id][matrix],
+                    dc: (size_id > 1).then(|| list.dc[size_id - 2][matrix]),
+                    ratio_log2: log2.checked_sub(3),
+                    factor,
+                    add,
+                    shift,
+                }
+            }
+            _ => Scale::Flat {
+                factor: factor * 16,
+                add,
+                shift,
+            },
+        }
     }
 
-    /// Scale, transform, and add a residual block. `max` is the largest
-    /// column and row holding a coefficient.
+    /// Transform, and add a residual block to the prediction. `max` is the
+    /// largest column and row holding a coefficient.
     fn reconstruct(
         &mut self,
         x0: usize,
@@ -1449,76 +1668,44 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         let (max_x, max_y) = max;
         let n = 1usize << log2;
         let bit_depth = u32::from(self.sps.bit_depth);
-        let coeffs = &mut self.coeffs[..n * n];
-        if !self.cu.bypass {
-            let qp = if c == 0 {
-                self.qp_y + self.sps.qp_bd_offset()
-            } else {
-                let slice = &self.pic.slices[self.slice].header;
-                let offset = if c == 1 {
-                    self.pps.cb_qp_offset + slice.cb_qp_offset
-                } else {
-                    self.pps.cr_qp_offset + slice.cr_qp_offset
-                };
-                let qpi = (self.qp_y + offset).clamp(-self.sps.qp_bd_offset_c(), 57);
-                chroma_qp(qpi) + self.sps.qp_bd_offset_c()
-            };
-            let list = self
-                .pps
-                .scaling_list
-                .as_ref()
-                .or(self.sps.scaling_list.as_ref());
-            let scale = match list {
-                Some(list) if !(transform_skip && n > 4) => {
-                    let size_id = log2 as usize - 2;
-                    let matrix = if size_id == 3 {
-                        if self.cu.intra { 0 } else { 3 }
-                    } else {
-                        c + if self.cu.intra { 0 } else { 3 }
-                    };
-                    let mut factors = [0u8; 32 * 32];
-                    let base = &list.lists[size_id][matrix];
-                    if size_id == 0 {
-                        factors[..16].copy_from_slice(&base[..16]);
-                    } else {
-                        let ratio = n / 8;
-                        for y in 0..n {
-                            for x in 0..n {
-                                factors[y * n + x] = base[(y / ratio) * 8 + x / ratio];
-                            }
-                        }
-                        if size_id > 1 {
-                            factors[0] = list.dc[size_id - 2][matrix];
-                        }
-                    }
-                    Some(factors)
-                }
-                _ => None,
-            };
-            transform::dequantize(
-                coeffs,
-                log2,
-                qp,
-                bit_depth,
-                scale.as_ref().map(|f| &f[..n * n]),
-            );
-            if transform_skip {
-                transform::skip(coeffs, bit_depth);
-            } else {
-                let dst = c == 0 && log2 == 2 && self.cu.intra;
-                let (mx, my) = if dst { (n - 1, n - 1) } else { (max_x, max_y) };
-                transform::inverse(coeffs, log2, dst, bit_depth, mx, my);
-            }
-        }
         let scale = if c == 0 { 1 } else { 2 };
-        let max = (1i32 << bit_depth) - 1;
-        let (plane, stride) = self.out.from(c, x0 / scale, y0 / scale);
-        for y in 0..n {
-            let row = &mut plane[y * stride..y * stride + n];
-            for (x, sample) in row.iter_mut().enumerate() {
-                *sample = (i32::from(*sample) + coeffs[y * n + x]).clamp(0, max) as u16;
+        let maxv = (1i32 << bit_depth) - 1;
+        let coeffs = &self.coeffs[..n * n];
+        let dst = c == 0 && log2 == 2 && self.cu.intra;
+        // Eight-bit samples: the transform adds its residual to them, unless
+        // the block is flat (its DC alone, below).
+        if bit_depth == 8 && !self.cu.bypass && !transform_skip && (dst || max_x > 0 || max_y > 0) {
+            let (plane, stride) = self.out.from(c, x0 / scale, y0 / scale);
+            if let Some(px) = P::bytes_mut(plane)
+                && idct::add(coeffs, n, (max_x + 1, max_y + 1), dst, (px, stride))
+            {
+                self.clear_coeffs(n, max_x, max_y);
+                return;
             }
         }
+        let res = &mut self.res[..n * n];
+        let flat = if self.cu.bypass {
+            res.copy_from_slice(coeffs);
+            None
+        } else if transform_skip {
+            transform::skip(coeffs, res, bit_depth);
+            None
+        } else {
+            transform::inverse(coeffs, res, log2, dst, bit_depth, max_x, max_y)
+        };
+        self.clear_coeffs(n, max_x, max_y);
+        let (plane, stride) = self.out.from(c, x0 / scale, y0 / scale);
+        let res = &self.res[..n * n];
+        let block = (plane, stride, res, flat, maxv);
+        cutlass_simd::wide::wide(
+            #[inline(always)]
+            || match n {
+                4 => add_residual::<4, P>(block),
+                8 => add_residual::<8, P>(block),
+                16 => add_residual::<16, P>(block),
+                _ => add_residual::<32, P>(block),
+            },
+        );
     }
 
     /// Boundary strengths of the left and top edges of a transform unit
@@ -1529,14 +1716,8 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
 
     /// The left and top edges of a coding unit with no transform tree.
     fn deblock_cu(&mut self, _tu: bool) -> Result<(), CodecError> {
+        // The coding unit filled its cells without the coded-block flag.
         let size = 1usize << self.cu.log2;
-        let w4 = self.pic.w4;
-        for row in (self.cu.y >> 2)..((self.cu.y + size) >> 2) {
-            for col in (self.cu.x >> 2)..((self.cu.x + size) >> 2) {
-                let at = row * w4 + col;
-                self.pic.info.set(at, self.pic.info.get(at) & !FLAG_CBF);
-            }
-        }
         self.edges(self.cu.x, self.cu.y, size, size, true);
         Ok(())
     }
@@ -1580,6 +1761,10 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
             return false;
         }
         let (px, py) = (px as usize, py as usize);
+        let log2 = self.pic.layout.log2_ctb;
+        if (px >> log2) == (x >> log2) && (py >> log2) == (y >> log2) {
+            return true;
+        }
         let p_ctb = self.pic.ctb_rs(px, py);
         let q_ctb = self.pic.ctb_rs(x, y);
         if p_ctb == q_ctb {
@@ -1598,14 +1783,24 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
     }
 
     fn edge_ver(&mut self, x: usize, y0: usize, len: usize, tu: bool) {
-        if !x.is_multiple_of(8) || x >= self.pic.width {
+        if !x.is_multiple_of(8) || x >= self.pic.width || x == 0 {
+            return;
+        }
+        if self.pic.slices[self.slice].header.deblocking_disabled {
             return;
         }
         let stride = self.pic.width / 8 + 1;
+        // Off a CTB boundary both sides share the CTB: every unit counts.
+        let inside = !x.is_multiple_of(1 << self.pic.layout.log2_ctb);
         let mut y = y0;
         while y < y0 + len && y < self.pic.height {
-            if self.edge_allowed(x, y, x as isize - 1, y as isize) {
-                let bs = self.strength(x - 1, y, x, y, tu);
+            if inside || self.edge_allowed(x, y, x as isize - 1, y as isize) {
+                // The q side is in this coding unit.
+                let bs = if self.cu.intra {
+                    2
+                } else {
+                    self.strength(x - 1, y, x, y, tu)
+                };
                 let at = (y >> 2) * stride + (x >> 3);
                 let bs = if tu {
                     bs
@@ -1619,14 +1814,22 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
     }
 
     fn edge_hor(&mut self, x0: usize, y: usize, len: usize, tu: bool) {
-        if !y.is_multiple_of(8) || y >= self.pic.height {
+        if !y.is_multiple_of(8) || y >= self.pic.height || y == 0 {
+            return;
+        }
+        if self.pic.slices[self.slice].header.deblocking_disabled {
             return;
         }
         let w4 = self.pic.w4;
+        let inside = !y.is_multiple_of(1 << self.pic.layout.log2_ctb);
         let mut x = x0;
         while x < x0 + len && x < self.pic.width {
-            if self.edge_allowed(x, y, x as isize, y as isize - 1) {
-                let bs = self.strength(x, y - 1, x, y, tu);
+            if inside || self.edge_allowed(x, y, x as isize, y as isize - 1) {
+                let bs = if self.cu.intra {
+                    2
+                } else {
+                    self.strength(x, y - 1, x, y, tu)
+                };
                 let at = (y >> 3) * w4 + (x >> 2);
                 let bs = if tu {
                     bs
@@ -1653,6 +1856,12 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
         }
         let pm = self.pic.mvf.get(p);
         let qm = self.pic.mvf.get(q);
+        // The same motion in the same slice: the same pictures and vectors.
+        let log2 = self.pic.layout.log2_ctb;
+        let same_ctb = (px >> log2) == (qx >> log2) && (py >> log2) == (qy >> log2);
+        if pm == qm && same_ctb {
+            return 0;
+        }
         let p_slice = self.pic.slice_of(px, py);
         let q_slice = &self.pic.slices[self.slice];
         let uid =
@@ -1708,6 +1917,59 @@ impl<'a, 'p> SliceDecoder<'a, 'p> {
                 (far(pm.mv[0], qm.mv[0]) || far(pm.mv[1], qm.mv[1]))
                     && (far(pm.mv[0], qm.mv[1]) || far(pm.mv[1], qm.mv[0])),
             )
+        }
+    }
+}
+
+/// `coeff_abs_level_remaining` (clause 9.3.3.11) with Rice parameter
+/// `rice`; `None` when its prefix is longer than a conforming stream's.
+#[inline(always)]
+fn coeff_abs_level_remaining(e: &mut Engine<'_>, rice: u32) -> Option<u32> {
+    let mut prefix = 0u32;
+    while e.bypass() {
+        prefix += 1;
+        if prefix > 32 {
+            return None;
+        }
+    }
+    if prefix <= 3 {
+        Some((prefix << rice) + e.bypass_bits(rice))
+    } else {
+        let extra = prefix - 3 + rice;
+        if extra > 31 {
+            return None;
+        }
+        let base = ((1u64 << (prefix - 3)) + 2) << rice;
+        let value = base + u64::from(e.bypass_bits(extra));
+        u32::try_from(value.min(u64::from(u32::MAX >> 1))).ok()
+    }
+}
+
+/// Add an `N`×`N` residual, or the one value of a flat one, to the
+/// prediction in `plane` (rows `stride` apart), clipped to `0..=maxv`.
+/// Rows of a fixed width, so the loops compile to whole vectors.
+#[inline(always)]
+fn add_residual<const N: usize, P: Pixel>(
+    (plane, stride, res, flat, maxv): (&mut [P], usize, &[i32], Option<i32>, i32),
+) {
+    for (j, row) in plane.chunks_mut(stride).take(N).enumerate() {
+        let Some(row) = row.first_chunk_mut::<N>() else {
+            return;
+        };
+        match flat {
+            Some(v) => {
+                for s in row.iter_mut() {
+                    *s = P::of((s.i() + v).clamp(0, maxv));
+                }
+            }
+            None => {
+                let Some(r) = res.get(j * N..).and_then(|r| r.first_chunk::<N>()) else {
+                    return;
+                };
+                for (s, &r) in row.iter_mut().zip(r) {
+                    *s = P::of((s.i() + r).clamp(0, maxv));
+                }
+            }
         }
     }
 }

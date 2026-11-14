@@ -332,6 +332,19 @@ pub enum Request {
         underline: bool,
         face: String,
     },
+    /// Turn bold, italic or underline on or off for the letters from
+    /// `start` up to `end`, which count characters of the words; a part
+    /// that is `None` stays as it is. A plain title becomes a rich one.
+    /// An empty face path is filled.
+    SetTextRangePattern {
+        segment_id: SegmentId,
+        start: usize,
+        end: usize,
+        bold: Option<bool>,
+        italic: Option<bool>,
+        underline: Option<bool>,
+        face: String,
+    },
     /// Store extra space between letters, as a fraction of the text size.
     SetLetterSpacing {
         segment_id: SegmentId,
@@ -352,6 +365,10 @@ pub enum Request {
     },
     /// Store the face file name on a text clip.
     SetTextFont { segment_id: SegmentId, face: String },
+    /// Set a text clip's face along the axes it varies on, written as
+    /// `wght=650,wdth=80`: each axis by its tag and a value in the axis's
+    /// own units. Empty leaves the face as its file has it.
+    SetTextFontAxes { segment_id: SegmentId, axes: String },
     /// Ring the letters in `color`, `width` ems wide. An empty color
     /// takes the outline off.
     SetTextOutline {

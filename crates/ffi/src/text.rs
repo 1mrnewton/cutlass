@@ -19,6 +19,28 @@ pub struct PhoneFont {
     pub label: String,
 }
 
+/// Which of bold, italic and underline every letter of a stretch of text
+/// has.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PhonePattern {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+}
+
+/// One axis a text clip's face varies along, for a slider. `tag` is the
+/// axis's four letters, which name it when it is set.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PhoneFontAxis {
+    pub tag: String,
+    pub name: String,
+    pub min: f64,
+    pub default: f64,
+    pub max: f64,
+    /// Where the clip has its face along the axis.
+    pub value: f64,
+}
+
 /// What a text clip says, the face it says it in, and its style.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PhoneText {
@@ -261,6 +283,23 @@ fn segment<'a>(draft: &'a Draft, segment_id: &SegmentId) -> Option<&'a Segment> 
         .iter()
         .flat_map(|track| &track.segments)
         .find(|segment| &segment.id == segment_id)
+}
+
+/// The text `segment_id` shows, when it is a text clip.
+pub(crate) fn material_of<'d>(
+    draft: &'d Draft,
+    segment_id: &SegmentId,
+) -> Option<&'d MaterialText> {
+    let segment = draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .find(|segment| segment.id == *segment_id)?;
+    draft
+        .materials
+        .texts
+        .iter()
+        .find(|text| text.id == segment.material_id)
 }
 
 /// The faces in `faces`, each a name and its label for people.

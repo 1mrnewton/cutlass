@@ -127,16 +127,16 @@ unsafe fn start16<const KIND: u8, const X: usize, const Y: usize>(
         match KIND {
             HALF_V => {
                 let mut p = base.sub(2 * stride);
-                for slot in 1..6 {
-                    feed.rows[slot].bytes = vld1q_u8(p);
+                for row in &mut feed.rows[1..6] {
+                    row.bytes = vld1q_u8(p);
                     p = p.add(stride);
                 }
                 feed.p = p;
             }
             CENTRE => {
                 let mut p = base.sub(2 * stride + 2);
-                for slot in 1..6 {
-                    (feed.rows[slot].low, feed.rows[slot].high) = sums16(p);
+                for row in &mut feed.rows[1..6] {
+                    (row.low, row.high) = sums16(p);
                     p = p.add(stride);
                 }
                 feed.p = p;
@@ -217,16 +217,16 @@ unsafe fn start8<const KIND: u8, const X: usize, const Y: usize>(
         match KIND {
             HALF_V => {
                 let mut p = base.sub(2 * stride);
-                for slot in 1..6 {
-                    feed.rows[slot].0 = vld1_u8(p);
+                for row in &mut feed.rows[1..6] {
+                    row.0 = vld1_u8(p);
                     p = p.add(stride);
                 }
                 feed.p = p;
             }
             CENTRE => {
                 let mut p = base.sub(2 * stride + 2);
-                for slot in 1..6 {
-                    feed.rows[slot].1 = taps8(row_taps8(p));
+                for row in &mut feed.rows[1..6] {
+                    row.1 = taps8(row_taps8(p));
                     p = p.add(stride);
                 }
                 feed.p = p;

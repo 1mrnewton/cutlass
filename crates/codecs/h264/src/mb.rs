@@ -1081,12 +1081,8 @@ fn skip_mb<S: Sample>(
         } else {
             (p_skip_mv(pic, mx, my, &mb), 0)
         };
-        for part in 0..4 {
-            mb.ref0[part] = reference;
-        }
-        for block in 0..16 {
-            mb.mv0[block] = mv;
-        }
+        mb.ref0[..4].fill(reference);
+        mb.mv0[..16].fill(mv);
         predict_inter(pic, dpb, slice, (mx, my, true), &mb)?;
         if slice.kind == 3 {
             let luma = [[0i32; 16]; 16];

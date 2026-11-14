@@ -18,6 +18,7 @@ pub mod lf;
 pub mod parse;
 pub mod recon;
 pub mod syntax;
+pub mod threads;
 
 use std::sync::Arc;
 
@@ -400,30 +401,77 @@ impl<P: Pixel> FrameRecon<P> {
     }
 }
 
-/// Decodes a frame on this thread: each superblock row parsed, then
-/// reconstructed.
-pub fn decode_frame<P: Pixel>(
+/// A frame's syntax buffers, back from the worker that reconstructed it.
+pub struct Reuse {
+    pub tiles: Vec<TileSyntax>,
+    pub masks: Vec<lpf::Mask>,
+    pub grid: Vec<LfMi>,
+}
+
+/// Decodes a frame. Without `workers`, on this thread: each superblock
+/// row parsed, then reconstructed. With them, the whole frame is parsed
+/// here and reconstructed on a worker, which sends its syntax buffers
+/// back on the channel; the picture returned is then still being made,
+/// and its readers wait for its rows.
+pub fn decode_frame<P: Pixel + Send + Sync>(
     parsed: &Parsed<'_>,
     refs: [Option<&Pic<P>>; 3],
     prev_mvs: Option<&[MvRef]>,
     last_seg: &[u8],
     bufs: ParseBufs,
     spare: &mut Vec<(Dims, Arc<cutlass_simd::vp9::frame::SharedFrame<P>>)>,
+    workers: Option<(&threads::Workers, &std::sync::mpsc::Sender<Reuse>)>,
 ) -> Result<(Pic<P>, ParseOut), CodecError> {
     let h = &parsed.header;
     let dims = Dims::new(h.width as usize, h.height as usize, h.ss_x as usize, h.ss_y as usize, h.bit_depth);
     let (pics, status) = ref_pics(parsed, refs);
     let mut fp = FrameParse::new(parsed, prev_mvs, last_seg, status, bufs)?;
-    let writer = frame::writer(&dims, spare);
-    let buf = Arc::clone(writer.shared());
-    let mut fr = FrameRecon::new(parsed, dims, pics, writer);
-    for r in 0..fp.sb_rows() {
-        fp.row(r)?;
-        let (tiles, masks, grid) = fp.syntax();
-        fr.row(tiles, masks, grid, r);
-    }
-    drop(fr);
-    let out = fp.finish();
+    let rows = fp.sb_rows();
+    let out = if let Some((w, ret)) = workers {
+        for r in 0..rows {
+            fp.row(r)?;
+        }
+        let mut out = fp.finish();
+        let writer = frame::writer(&dims, spare);
+        let buf = Arc::clone(writer.shared());
+        let mut fr = FrameRecon::new(parsed, dims, pics, writer);
+        let reuse = Reuse {
+            tiles: std::mem::take(&mut out.tiles),
+            masks: std::mem::take(&mut out.masks),
+            grid: std::mem::take(&mut out.grid),
+        };
+        let ret = ret.clone();
+        w.run(move || {
+            for r in 0..rows {
+                fr.row(&reuse.tiles, &reuse.masks, &reuse.grid, r);
+            }
+            drop(fr);
+            let _ = ret.send(reuse);
+        });
+        return Ok((
+            Pic {
+                buf,
+                dims,
+                color_space: h.color_space,
+                color_range: h.color_range,
+                render_width: h.render_width,
+                render_height: h.render_height,
+            },
+            out,
+        ));
+    } else {
+        let writer = frame::writer(&dims, spare);
+        let buf = Arc::clone(writer.shared());
+        let mut fr = FrameRecon::new(parsed, dims, pics, writer);
+        for r in 0..rows {
+            fp.row(r)?;
+            let (tiles, masks, grid) = fp.syntax();
+            fr.row(tiles, masks, grid, r);
+        }
+        drop(fr);
+        (fp.finish(), buf)
+    };
+    let (out, buf) = out;
     Ok((
         Pic {
             buf,

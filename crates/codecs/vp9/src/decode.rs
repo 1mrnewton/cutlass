@@ -4,8 +4,10 @@
 //! slots update only after reconstruction succeeds. `show_existing_frame`
 //! displays a stored picture and does not refresh those slots.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
 
 use cutlass_decode::video::{VideoDecoder, VideoOutput};
 use cutlass_decode::{
@@ -17,7 +19,8 @@ use cutlass_encode::PixelFormat;
 use cutlass_simd::vp9::frame::SharedFrame;
 
 use crate::dec::frame::{Dims, MvRef, Pic};
-use crate::dec::{ParseBufs, decode_frame};
+use crate::dec::threads::Workers;
+use crate::dec::{ParseBufs, Reuse, decode_frame};
 use crate::dsp::pixel::Pixel;
 use crate::geom::{self, SWITCHABLE, TX_MODE_SELECT};
 use crate::header::{Header, Parsed, Persist, parse};
@@ -128,6 +131,12 @@ impl Decoder {
 
     /// Decodes one frame and returns the picture to show, if any.
     pub fn decode_held(&mut self, packet: &[u8]) -> Result<Option<Held>, CodecError> {
+        self.decode_with(packet, None)
+    }
+
+    /// Decodes one frame, reconstructing it on `rt`'s workers when given:
+    /// the picture returned may then still be in the making.
+    fn decode_with(&mut self, packet: &[u8], rt: Option<&Runtime>) -> Result<Option<Held>, CodecError> {
         if packet.is_empty() {
             return Err(CodecError::InvalidApi {
                 what: "empty packet",
@@ -153,9 +162,9 @@ impl Decoder {
             return Ok(Some(held));
         }
         if parsed.header.bit_depth > 8 {
-            self.frame::<u16>(&parsed)
+            self.frame::<u16>(&parsed, rt)
         } else {
-            self.frame::<u8>(&parsed)
+            self.frame::<u8>(&parsed, rt)
         }
     }
 
@@ -170,7 +179,14 @@ impl Decoder {
         }
     }
 
-    fn frame<P: Store>(&mut self, parsed: &Parsed<'_>) -> Result<Option<Held>, CodecError> {
+    fn frame<P: Store>(&mut self, parsed: &Parsed<'_>, rt: Option<&Runtime>) -> Result<Option<Held>, CodecError> {
+        if let Some(rt) = rt {
+            while let Ok(back) = rt.back.try_recv() {
+                self.bufs.tiles = back.tiles;
+                self.bufs.masks = back.masks;
+                self.bufs.grid = back.grid;
+            }
+        }
         let header = &parsed.header;
         if !header.is_intra() && header.use_prev_mvs && self.prev.is_none() {
             return Err(CodecError::Malformed {
@@ -190,15 +206,18 @@ impl Decoder {
             };
             let refs = [view(0), view(1), view(2)];
             let spare = P::spare(self);
-            decode_frame(parsed, refs, prev.as_deref().map(|v| v.as_slice()), &last_seg, bufs, spare)?
+            let workers = rt.map(|rt| (&rt.workers, &rt.send));
+            decode_frame(parsed, refs, prev.as_deref().map(|v| v.as_slice()), &last_seg, bufs, spare, workers)?
         };
         drop(refs_now);
         let after_key = self.persist.key_frame;
         let fc = adapted(parsed, &built.counts, after_key);
         self.bufs = built.spare;
-        self.bufs.tiles = built.tiles;
-        self.bufs.masks = built.masks;
-        self.bufs.grid = built.grid;
+        if rt.is_none() {
+            self.bufs.tiles = built.tiles;
+            self.bufs.masks = built.masks;
+            self.bufs.grid = built.grid;
+        }
         let persist = &mut self.persist;
         persist.width = header.width;
         persist.height = header.height;
@@ -365,11 +384,42 @@ impl Default for Decoder {
 /// leaves those pictures as they were.
 pub struct Vp9Decoder {
     inner: Decoder,
+    rt: Option<Runtime>,
+    /// Pictures to show, in order, with their packet's times; their
+    /// reconstruction may still be running.
+    pending: VecDeque<(Held, i64, i64, u32)>,
     cancel: Arc<AtomicBool>,
 }
 
+/// Workers that reconstruct frames while the caller parses, and the
+/// channel their syntax buffers come back on.
+struct Runtime {
+    workers: Workers,
+    send: Sender<Reuse>,
+    back: Receiver<Reuse>,
+}
+
+impl Held {
+    fn done(&self) -> bool {
+        match self {
+            Held::Eight(p) => p.buf.published() == usize::MAX,
+            Held::Deep(p) => p.buf.published() == usize::MAX,
+        }
+    }
+}
+
 impl Vp9Decoder {
+    /// A decoder with as many threads as the machine runs at once, at
+    /// most 16.
     pub fn open(params: &CodecParams) -> Result<Self, CodecError> {
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(16));
+        Self::open_with_threads(params, threads)
+    }
+
+    /// A decoder that reconstructs frames on `threads` worker threads
+    /// while the caller parses (0 or 1: everything on the caller). Frames
+    /// come out up to `threads` packets late; `drain` gives the rest.
+    pub fn open_with_threads(params: &CodecParams, threads: usize) -> Result<Self, CodecError> {
         if params.codec != CodecId::Vp9 {
             return Err(CodecError::Unsupported {
                 what: "vp9 decoder",
@@ -398,10 +448,46 @@ impl Vp9Decoder {
             });
         }
         check_open_size(params.width, params.height)?;
+        let rt = if threads > 1 {
+            Workers::new(threads.min(16)).map(|workers| {
+                let (send, back) = channel();
+                Runtime {
+                    workers,
+                    send,
+                    back,
+                }
+            })
+        } else {
+            None
+        };
         Ok(Self {
             inner: Decoder::new(),
+            rt,
+            pending: VecDeque::new(),
             cancel: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Pictures from the front of the queue: those that are done, and
+    /// any past the number that may be in flight (waiting for them).
+    fn ready(&mut self, all: bool) -> Result<Vec<VideoOutput>, CodecError> {
+        let limit = self.rt.as_ref().map_or(0, |rt| rt.workers.count());
+        let mut out = Vec::new();
+        while let Some((held, _, _, _)) = self.pending.front() {
+            if !(all || held.done() || self.pending.len() > limit) {
+                break;
+            }
+            let Some((held, pts, duration, timescale)) = self.pending.pop_front() else {
+                break;
+            };
+            out.push(VideoOutput {
+                frame: held_frame(&held)?,
+                pts,
+                duration,
+                timescale,
+            });
+        }
+        Ok(out)
     }
 }
 
@@ -416,32 +502,32 @@ impl VideoDecoder for Vp9Decoder {
         }
         let parts = split_superframe(&packet.data)?;
         let mut checkpoint = (parts.len() > 1).then(|| self.inner.clone());
-        let mut outputs = Vec::new();
+        let queued = self.pending.len();
         for part in parts {
-            match self.inner.decode_held(part) {
-                Ok(Some(held)) => outputs.push(VideoOutput {
-                    frame: held_frame(&held)?,
-                    pts: packet.pts,
-                    duration: packet.duration,
-                    timescale: packet.timescale,
-                }),
+            match self.inner.decode_with(part, self.rt.as_ref()) {
+                Ok(Some(held)) => {
+                    self.pending
+                        .push_back((held, packet.pts, packet.duration, packet.timescale));
+                }
                 Ok(None) => {}
                 Err(err) => {
                     if let Some(saved) = checkpoint.take() {
                         self.inner = saved;
+                        self.pending.truncate(queued);
                     }
                     return Err(err);
                 }
             }
         }
-        Ok(outputs)
+        self.ready(false)
     }
 
     fn drain(&mut self) -> Result<Vec<VideoOutput>, CodecError> {
-        Ok(Vec::new())
+        self.ready(true)
     }
 
     fn reset(&mut self) {
+        self.pending.clear();
         self.inner.reset();
     }
 

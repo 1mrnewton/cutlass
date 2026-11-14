@@ -257,3 +257,59 @@ pub(super) fn band_row16(dst: &mut [u16], cur: &[u16], position: u8, o: [i16; 4]
         dst[x] = (v + add).clamp(0, top) as u16;
     }
 }
+
+/// [`edge_row`] over `rows` rows of `n` samples of one buffer: row `j`'s
+/// samples start at `first + j * stride` in `src`, its neighbours `off_a`
+/// and `off_b` away; row `j` goes to `dst[j * dst_stride..]`. A row not a
+/// multiple of 32 ends with a chunk that overlaps the one before it.
+#[target_feature(enable = "avx2")]
+pub(super) fn edge_strided(
+    (dst, dst_stride): (&mut [u8], usize),
+    (src, stride, first): (&[u8], usize, usize),
+    (rows, n): (usize, usize),
+    (off_a, off_b): (isize, isize),
+    o: [i8; 4],
+) {
+    let flip = _mm256_set1_epi8(i8::MIN);
+    let two = _mm256_set1_epi8(2);
+    let offsets = table([o[0], o[1], 0, o[2], o[3], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let sign = |x: __m256i, y: __m256i| {
+        let (x, y) = (_mm256_xor_si256(x, flip), _mm256_xor_si256(y, flip));
+        _mm256_sub_epi8(_mm256_cmpgt_epi8(y, x), _mm256_cmpgt_epi8(x, y))
+    };
+    for j in 0..rows {
+        let c = first + j * stride;
+        let (a, b) = (c.wrapping_add_signed(off_a), c.wrapping_add_signed(off_b));
+        let (Some(cur), Some(na), Some(nb), Some(d)) = (
+            src.get(c..c + n),
+            src.get(a..a.wrapping_add(n)),
+            src.get(b..b.wrapping_add(n)),
+            dst.get_mut(j * dst_stride..j * dst_stride + n),
+        ) else {
+            return;
+        };
+        if n < 32 {
+            edge_row(d, cur, (na, nb), o);
+            continue;
+        }
+        let mut x = 0;
+        loop {
+            let at = x.min(n - 32);
+            if let (Some(cv), Some(av), Some(bv), Some(dv)) = (
+                cur[at..].first_chunk::<32>(),
+                na[at..].first_chunk::<32>(),
+                nb[at..].first_chunk::<32>(),
+                d[at..].first_chunk_mut::<32>(),
+            ) {
+                let v = ld32(cv);
+                let idx =
+                    _mm256_add_epi8(two, _mm256_add_epi8(sign(v, ld32(av)), sign(v, ld32(bv))));
+                st32(dv, add_clip(v, _mm256_shuffle_epi8(offsets, idx)));
+            }
+            if at + 32 >= n {
+                break;
+            }
+            x += 32;
+        }
+    }
+}

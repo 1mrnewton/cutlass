@@ -632,9 +632,12 @@ impl Picture {
                 }
             }
         }
+        // The rows of CTB row `r` lie end to end in its buffer, from its
+        // first line: the kernels read them by stride.
+        let cur: [&[P]; 3] = [&band[0][..], &band[1][..], &band[2][..]];
         for row in ctb_rows {
             for rx in 0..ctb_w {
-                self.sao_ctb(row * ctb_w + rx, &line, &mut dst, (from, to));
+                self.sao_ctb(row * ctb_w + rx, &line, &mut dst, (from, to), (cur, top));
             }
         }
     }
@@ -647,6 +650,7 @@ impl Picture {
         line: &impl Fn(usize, usize) -> &'l [P],
         dst: &mut [&mut [P]; 3],
         (from, to): (usize, usize),
+        (cur, cur_top): ([&[P]; 3], usize),
     ) {
         let ctb_w = self.layout.ctb_width as usize;
         let ctb_h = self.layout.ctb_height as usize;
@@ -782,12 +786,46 @@ impl Picture {
                         i32::from(offsets[2]),
                         i32::from(offsets[3]),
                     ];
-                    for y in (y0 + top).max(ya)..(y1 - bottom).min(yb) {
+                    let (ra, rb) = ((y0 + top).max(ya), (y1 - bottom).min(yb));
+                    let (xa, xb) = (x0 + left, x1 - right);
+                    // 8-bit rows whose neighbours lie in this CTB row's
+                    // buffer: one kernel call, by stride.
+                    let (tc, held) = (cur_top >> sub, cur[c].len() / pw.max(1));
+                    let (lo, hi) = (ay.min(by).min(0), ay.max(by).max(0));
+                    let ia = ra.max(tc.saturating_add_signed(-lo));
+                    let ib = rb.min((tc + held).saturating_add_signed(-hi));
+                    let strided = ia < ib
+                        && xb > xa
+                        && match (
+                            P::bytes_mut(&mut out[(ia - base) * pw + xa..]),
+                            P::bytes(cur[c]),
+                        ) {
+                            (Some(d), Some(src)) => sao::edge_strided(
+                                (d, pw),
+                                (src, pw, (ia - tc) * pw + xa),
+                                (ib - ia, xb - xa),
+                                (ay * pw as isize + ax, by * pw as isize + bx),
+                                offsets.map(|v| v as i8),
+                            ),
+                            _ => false,
+                        };
+                    for y in ra..rb {
+                        if strided && (ia..ib).contains(&y) {
+                            // At most one sample at each end, which the
+                            // offsets leave as it is.
+                            let (at, lv) = ((y - base) * pw, line(c, y));
+                            if left == 1 {
+                                out[at + x0] = lv[x0];
+                            }
+                            if right == 1 {
+                                out[at + xb] = lv[xb];
+                            }
+                            continue;
+                        }
                         let la = line(c, y.wrapping_add_signed(ay));
                         let lv = line(c, y);
                         let lb = line(c, y.wrapping_add_signed(by));
                         let o = &mut out[(y - base) * pw..(y - base + 1) * pw];
-                        let (xa, xb) = (x0 + left, x1 - right);
                         o[x0..xa].copy_from_slice(&lv[x0..xa]);
                         o[xb..x1].copy_from_slice(&lv[xb..x1]);
                         if let (Some(d), Some(v), Some(a), Some(b)) = (

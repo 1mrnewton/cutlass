@@ -123,3 +123,50 @@ fn deep_edge_and_band_offsets_match_the_specification() {
         }
     }
 }
+
+#[test]
+fn strided_rows_match_edge_row_by_row() {
+    use super::edge_strided;
+    if !crate::wide::has_avx2() {
+        return;
+    }
+    let stride = 80;
+    let raw = noise(stride * 40, 11);
+    for n in [1usize, 31, 32, 33, 63, 64] {
+        // Every class of neighbour: left and right, above and below, and
+        // the two diagonals.
+        for (dy_a, dx_a, dy_b, dx_b) in [
+            (0isize, -1isize, 0isize, 1isize),
+            (-1, 0, 1, 0),
+            (-1, -1, 1, 1),
+            (-1, 1, 1, -1),
+        ] {
+            let (rows, first) = (16usize, 5 * stride + 4);
+            let (off_a, off_b) = (dy_a * stride as isize + dx_a, dy_b * stride as isize + dx_b);
+            let mut got = vec![0u8; rows * 70];
+            assert!(edge_strided(
+                (&mut got, 70),
+                (&raw, stride, first),
+                (rows, n),
+                (off_a, off_b),
+                [6, 2, -3, -6]
+            ));
+            for j in 0..rows {
+                let c = first + j * stride;
+                let (a, b) = (c.wrapping_add_signed(off_a), c.wrapping_add_signed(off_b));
+                let mut want = vec![0u8; n];
+                assert!(edge_row(
+                    &mut want,
+                    &raw[c..c + n],
+                    (&raw[a..a + n], &raw[b..b + n]),
+                    [6, 2, -3, -6]
+                ));
+                assert_eq!(
+                    &got[j * 70..j * 70 + n],
+                    &want[..],
+                    "n {n} row {j} offsets {off_a} {off_b}"
+                );
+            }
+        }
+    }
+}

@@ -35,6 +35,60 @@ pub fn edge_row(dst: &mut [u8], cur: &[u8], (a, b): (&[u8], &[u8]), offsets: [i8
     }
 }
 
+/// [`edge_row`] over `rows` rows of `n` samples of one buffer `src`
+/// (rows `stride` apart): row `j` starts at `first + j * stride`, and its
+/// neighbours `off_a` and `off_b` samples from there; row `j` goes to
+/// `dst[j * dst_stride..j * dst_stride + n]`. `false`, with nothing
+/// written, when a row or a neighbour lies outside `src`.
+#[inline]
+pub fn edge_strided(
+    (dst, dst_stride): (&mut [u8], usize),
+    (src, stride, first): (&[u8], usize, usize),
+    (rows, n): (usize, usize),
+    (off_a, off_b): (isize, isize),
+    offsets: [i8; 4],
+) -> bool {
+    if rows == 0 {
+        return true;
+    }
+    let last = first + (rows - 1) * stride;
+    let reach = |off: isize| {
+        first.checked_add_signed(off).is_some()
+            && last
+                .checked_add_signed(off)
+                .is_some_and(|e| e + n <= src.len())
+    };
+    let fits = n > 0
+        && last + n <= src.len()
+        && reach(off_a)
+        && reach(off_b)
+        && dst_stride >= n
+        && (rows - 1) * dst_stride + n <= dst.len();
+    if !fits || !crate::wide::has_avx2() {
+        return false;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: `has_avx2` checked at run time that the CPU has AVX2.
+        #[allow(unsafe_code)]
+        unsafe {
+            avx2::edge_strided(
+                (dst, dst_stride),
+                (src, stride, first),
+                (rows, n),
+                (off_a, off_b),
+                offsets,
+            );
+        }
+        true
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = offsets;
+        false
+    }
+}
+
 /// Band offset of one row: `dst[x] = Clip1(cur[x] + o)`, where `o` is
 /// `offsets[k]` when `k = ((cur[x] >> 3) - position) & 31` is below 4,
 /// else 0.

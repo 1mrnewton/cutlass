@@ -164,8 +164,8 @@ FFmpeg 7 with libvpx. Timings are medians of whole-process runs.
 
 | Threads | Cutlass | FFmpeg `vp9` | Ratio |
 | --- | ---: | ---: | ---: |
-| 1 core | 3.10 s | 2.11 s | 1.47 |
-| 4 | 1.26 s | 0.98 s | 1.29 |
+| 1 core | 3.10 s | 2.07 s | 1.49 |
+| 4 | 1.15 s | 0.93 s | 1.24 |
 
 (Started at 38.8 s on one core: 18× faster so far.)
 
@@ -224,7 +224,9 @@ the picture moves too far for one picture to stand for the interval.
   on moving content (ahead with more time, and far ahead on still content
   and against the realtime presets), and its fastest speed is 1.3–1.4×
   libvpx realtime's time; tile columns limit how well 4 threads share a
-  720p frame. The decoder is 1.3–1.5× FFmpeg's time.
+  720p frame. The decoder is 1.24× FFmpeg's time on 4 threads and 1.5× on
+  one core; about a tenth of the single-core time is copying each picture
+  out, since a `VideoFrame` owns its planes (FFmpeg hands out references).
 - The encoder always writes BT.601, studio range.
 
 ## Specifications

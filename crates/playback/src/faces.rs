@@ -22,8 +22,9 @@ use std::sync::{Mutex, OnceLock};
 
 use cutlass_eval::Fonts;
 
-/// The most faces a scan keeps.
-pub const MAX_FACES: usize = 400;
+/// The most faces a scan keeps: more than a machine set up for design
+/// work has. Only a face's names are read until it is asked for.
+pub const MAX_FACES: usize = 4_096;
 /// The most bytes one face is read into. A face of a larger file is read
 /// alone, without the file's other faces, and of an emoji face one size
 /// of its pictures is read: the sharpest that fits. A desktop has the
@@ -127,6 +128,23 @@ pub const FALLBACK_FACES: &[&str] = &[
     "NotoSansSymbols2-Regular.ttf",
     "Menlo.ttc",
 ];
+/// The fallback faces that hold a little of very many scripts, and
+/// signs and pictures. For a letter they are looked in after any face
+/// the machine has for the letter's script: they have its glyphs, and
+/// often not what joins and stacks them.
+const GENERAL_FACES: &[&str] = &[
+    "Arial Unicode.ttf",
+    "NotoSans-Regular.ttf",
+    "Roboto-Regular.ttf",
+    "DejaVuSans.ttf",
+    "LiberationSans-Regular.ttf",
+    "Helvetica.ttc",
+    "Apple Symbols.ttf",
+    "seguisym.ttf",
+    "NotoSansSymbols-Regular.ttf",
+    "NotoSansSymbols2-Regular.ttf",
+    "Menlo.ttc",
+];
 /// How many folders deep a scan looks below each folder it is given.
 const MAX_DEPTH: usize = 3;
 
@@ -144,6 +162,60 @@ struct Face {
     label: String,
     bytes: Bytes,
     style: Style,
+    /// Which characters the face has, read alone from its file the first
+    /// time a character no fallback face draws is looked for. `None` once
+    /// it failed to read.
+    map: OnceLock<Option<cutlass_font::CharacterMap>>,
+    /// One of [`GENERAL_FACES`], or another face of such a file: its
+    /// light and its bold hold as much.
+    general: bool,
+    /// Neither bold nor italic, nor any other cut its label names: a
+    /// face's label may say what its tables do not.
+    plain: bool,
+    /// A face of emoji, by its name.
+    emoji: bool,
+}
+
+impl Face {
+    /// Whether the face has a glyph for `character`, by its character
+    /// map alone.
+    fn has(&self, character: char) -> bool {
+        let map = self.map.get_or_init(|| match &self.bytes {
+            Bytes::Read(bytes) => character_map(bytes),
+            Bytes::Fixed(bytes) => character_map(bytes),
+            Bytes::Later(path, index, _) => {
+                let mut file = File::open(path).ok()?;
+                cutlass_font::load_character_map(
+                    |offset, len| {
+                        if len > cutlass_font::MAX_CHARACTER_MAP {
+                            return None;
+                        }
+                        file.seek(SeekFrom::Start(offset)).ok()?;
+                        let mut bytes = vec![0; len];
+                        file.read_exact(&mut bytes).ok()?;
+                        Some(bytes)
+                    },
+                    *index,
+                )
+                .ok()
+            }
+        });
+        map.as_ref().is_some_and(|map| map.has(character))
+    }
+}
+
+/// The character map of a face held as bytes.
+fn character_map(bytes: &[u8]) -> Option<cutlass_font::CharacterMap> {
+    cutlass_font::load_character_map(
+        |offset, len| {
+            let start = usize::try_from(offset).ok()?;
+            bytes
+                .get(start..start.checked_add(len)?)
+                .map(<[u8]>::to_vec)
+        },
+        None,
+    )
+    .ok()
 }
 
 /// The family a face belongs to and which of its faces it is.
@@ -370,6 +442,33 @@ impl FaceTable {
         self.fallbacks = ranked;
     }
 
+    /// Whether the face at `at` is one of [`GENERAL_FACES`].
+    fn general(&self, at: usize) -> bool {
+        self.faces.get(at).is_some_and(|face| face.general)
+    }
+
+    /// Every other face that has `character`, for one no fallback face
+    /// draws: a script the list knows no face for is drawn in whatever
+    /// face the machine has for it. Each face is asked through its
+    /// character map alone, read once; a plain face comes first, and an
+    /// emoji face only for an emoji.
+    fn elsewhere(&self, character: char, emoji: bool) -> Vec<usize> {
+        let mut others: Vec<usize> = self
+            .faces
+            .iter()
+            .enumerate()
+            .filter(|(at, face)| {
+                !face.general
+                    && (emoji || !face.emoji)
+                    && !self.fallbacks.contains(at)
+                    && face.has(character)
+            })
+            .map(|(at, _)| at)
+            .collect();
+        others.sort_by_key(|at| (!self.faces[*at].plain, *at));
+        others
+    }
+
     /// The names of the fallback faces, best first.
     #[must_use]
     pub fn fallback_names(&self) -> Vec<String> {
@@ -417,11 +516,31 @@ impl FaceTable {
         if name.is_empty() || self.faces.iter().any(|face| face.name == name) {
             return;
         }
+        const CUTS: [&str; 12] = [
+            "bold",
+            "italic",
+            "oblique",
+            "black",
+            "heavy",
+            "light",
+            "thin",
+            "medium",
+            "condensed",
+            "narrow",
+            "extended",
+            "outline",
+        ];
+        let file = fold(name.split_once('#').map_or(&name, |(file, _)| file));
+        let said = label.to_lowercase();
         self.faces.push(Face {
+            general: GENERAL_FACES.iter().any(|general| fold(general) == file),
+            plain: !(style.bold || style.italic || CUTS.iter().any(|cut| said.contains(cut))),
+            emoji: file.contains("emoji"),
             name,
             label,
             bytes,
             style,
+            map: OnceLock::new(),
         });
     }
 }
@@ -472,11 +591,7 @@ impl Fonts for FaceTable {
             return known.and_then(|at| self.bytes_at(at));
         }
         // Emoji faces first for an emoji, and last for anything else.
-        let is_emoji = |at: &usize| {
-            self.faces
-                .get(*at)
-                .is_some_and(|face| face.name.to_lowercase().contains("emoji"))
-        };
+        let is_emoji = |at: &usize| self.faces.get(*at).is_some_and(|face| face.emoji);
         let (first, second): (Vec<usize>, Vec<usize>) =
             self.fallbacks.iter().partition(|at| is_emoji(at) == emoji);
         // And before those, the faces of the character's own language.
@@ -490,11 +605,35 @@ impl Fonts for FaceTable {
         };
         let (own, rest): (Vec<usize>, Vec<usize>) =
             first.into_iter().chain(second).partition(|at| leads(at));
-        let hit = own.into_iter().chain(rest).find(|at| {
-            self.bytes_at(*at)
-                .and_then(|bytes| cutlass_font::read(bytes).ok())
-                .is_some_and(|font| matches!(font.glyph_id(character), Ok(Some(_))))
-        });
+        // A face is asked through its character map alone, and only the
+        // one that has the character is read.
+        let draws = |at: &usize| {
+            self.faces.get(*at).is_some_and(|face| face.has(character))
+                && self
+                    .bytes_at(*at)
+                    .and_then(|bytes| cutlass_font::read(bytes).ok())
+                    .is_some_and(|font| matches!(font.glyph_id(character), Ok(Some(_))))
+        };
+        // The faces that hold a little of every script come after a face
+        // the machine has for a letter's own script, which shapes it;
+        // for a sign or a picture they come first, as the plainest.
+        let (general, known): (Vec<usize>, Vec<usize>) = own
+            .into_iter()
+            .chain(rest)
+            .partition(|at| self.general(*at));
+        let hit = if character.is_alphabetic() {
+            known
+                .into_iter()
+                .find(draws)
+                .or_else(|| self.elsewhere(character, emoji).into_iter().find(draws))
+                .or_else(|| general.into_iter().find(draws))
+        } else {
+            known
+                .into_iter()
+                .chain(general)
+                .find(draws)
+                .or_else(|| self.elsewhere(character, emoji).into_iter().find(draws))
+        };
         if let Ok(mut found) = self.found.lock()
             && found.len() < MAX_REMEMBERED
         {
@@ -876,6 +1015,85 @@ mod tests {
         // that is not an emoji face, an emoji from the emoji face.
         assert_eq!(table.fallback('f', false), table.face("arial.ttf"));
         assert_eq!(table.fallback('f', true), table.face("NotoColorEmoji.ttf"));
+    }
+
+    const THAI: &[u8] = include_bytes!("../../font/fixtures/thai.ttf");
+
+    #[test]
+    fn a_character_no_fallback_face_has_is_found_in_any_other_face() {
+        let folder = Folder::new("elsewhere");
+        // No name here is one the fallback list knows, but arial's.
+        std::fs::write(folder.0.join("arial.ttf"), SHAPING).expect("face");
+        std::fs::write(folder.0.join("Alpha.ttf"), SAMPLE).expect("face");
+        std::fs::write(folder.0.join("Siam Bold.ttf"), THAI).expect("face");
+        std::fs::write(folder.0.join("Siam.ttf"), THAI).expect("face");
+        std::fs::write(folder.0.join("Zeta.ttc"), SAMPLE_TTC).expect("collection");
+        std::fs::write(folder.0.join("Junk.ttf"), b"not a font").expect("junk");
+        let table = FaceTable::scan(&[&folder.0]);
+        assert_eq!(table.fallback_names(), ["arial.ttf"]);
+        // Ko kai is in neither arial nor Alpha: the Thai face has it, and
+        // the plain one comes before the bold, whatever their order.
+        assert_eq!(table.fallback('\u{E01}', false), table.face("Siam.ttf"));
+        // A letter the fallback face has still comes from it.
+        assert_eq!(table.fallback('f', false), table.face("arial.ttf"));
+        // One only a face no list names has.
+        assert_eq!(table.fallback('B', false), table.face("Alpha.ttf"));
+        // No face has it: nothing, and nothing again.
+        assert!(table.fallback('\u{1780}', false).is_none());
+        assert!(table.fallback('\u{1780}', false).is_none());
+        // A table of bytes looks through all it holds the same way.
+        let table = FaceTable::from_pairs(vec![
+            ("Sample.ttf".to_owned(), SAMPLE.to_vec()),
+            ("Siam.ttf".to_owned(), THAI.to_vec()),
+        ]);
+        assert_eq!(table.fallback('\u{E01}', false), table.face("Siam.ttf"));
+    }
+
+    #[test]
+    fn a_letter_comes_from_its_scripts_face_before_a_face_of_every_script() {
+        let folder = Folder::new("general");
+        // A face the list keeps for whatever nothing else draws, and a
+        // face no list names, with the same glyphs.
+        std::fs::write(folder.0.join("Arial Unicode.ttf"), THAI).expect("face");
+        std::fs::write(folder.0.join("Siam.ttf"), THAI).expect("face");
+        let table = FaceTable::scan(&[&folder.0]);
+        assert_eq!(table.fallback_names(), ["Arial Unicode.ttf"]);
+        // A letter is set in the face made for its script, which shapes
+        // it; a sign, here a tone mark, in the general face.
+        assert_eq!(table.fallback('\u{E01}', false), table.face("Siam.ttf"));
+        assert_eq!(
+            table.fallback('\u{E48}', false),
+            table.face("Arial Unicode.ttf")
+        );
+        // With no other face for the letter, the general face draws it.
+        std::fs::remove_file(folder.0.join("Siam.ttf")).expect("removed");
+        let table = FaceTable::scan(&[&folder.0]);
+        assert_eq!(
+            table.fallback('\u{E01}', false),
+            table.face("Arial Unicode.ttf")
+        );
+    }
+
+    #[test]
+    fn a_long_folder_keeps_every_face_and_is_looked_through_in_time() {
+        let folder = Folder::new("many");
+        // More faces than a scan once kept, with the one that has the
+        // letter last by name.
+        for at in 0..600 {
+            std::fs::write(folder.0.join(format!("Face {at:03}.ttf")), SAMPLE).expect("face");
+        }
+        std::fs::write(folder.0.join("Zz Siam.ttf"), THAI).expect("face");
+        let started = std::time::Instant::now();
+        let table = FaceTable::scan(&[&folder.0]);
+        assert_eq!(table.names().len(), 601);
+        assert!(table.names().iter().any(|name| name == "Zz Siam.ttf"));
+        assert_eq!(table.fallback('\u{E01}', false), table.face("Zz Siam.ttf"));
+        // Every other character asks each face's map, already read.
+        for code in 0x1780..0x17C0_u32 {
+            let character = char::from_u32(code).expect("character");
+            assert!(table.fallback(character, false).is_none());
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
     }
 
     #[test]

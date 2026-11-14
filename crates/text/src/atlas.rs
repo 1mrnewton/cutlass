@@ -999,4 +999,61 @@ mod tests {
             Err(TextError::Font(_))
         ));
     }
+
+    /// The pixels of `content` set as a title in the face `bytes` hold.
+    fn title(bytes: &[u8], face: Option<u32>, content: &str) -> Vec<u8> {
+        use cutlass_model::{MaterialText, Micros, Segment, TimeRange};
+        use cutlass_picture::{Picture, PictureSource, Sample};
+
+        let mut text = MaterialText::new("text-material");
+        text.content = content.to_owned();
+        text.font_size = 64.0;
+        text.text_color = "#FFFFFF".to_owned();
+        let clip = Segment::new("segment", "text-material", TimeRange::new(1_000, 5_000));
+        let source = crate::TextSource::open(bytes, face, &text, &clip).expect("title");
+        match source.sample(Micros(1_000)) {
+            Sample::Ready(Picture::Cpu(picture)) => picture.rgba().to_vec(),
+            _ => panic!("no picture"),
+        }
+    }
+
+    fn count(rgba: &[u8], wanted: impl Fn([u8; 4]) -> bool) -> usize {
+        rgba.as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|pixel| wanted(**pixel))
+            .count()
+    }
+
+    #[test]
+    fn a_title_in_a_color_face_shows_the_glyphs_own_colors() {
+        // A strike picture: red, half green, and blue, each many pixels now.
+        let strike = title(SBIX, None, "\u{1F600}");
+        assert!(count(&strike, |pixel| pixel == [255, 0, 0, 255]) > 100);
+        assert!(count(&strike, |pixel| pixel == [0, 0, 255, 255]) > 100);
+        assert!(count(&strike, |pixel| pixel == [0, 128, 0, 128]) > 100);
+        // The text is white, and none of the picture is.
+        assert_eq!(count(&strike, |pixel| pixel == [255, 255, 255, 255]), 0);
+        // Layers: red on the left and blue on the right, in equal parts.
+        let colr = include_bytes!("../../font/fixtures/colr.ttf");
+        let layers = title(colr, None, "\u{E00A}");
+        let red = count(&layers, |pixel| pixel == [255, 0, 0, 255]);
+        let blue = count(&layers, |pixel| pixel == [0, 0, 255, 255]);
+        assert!(
+            red > 500 && red.abs_diff(blue) < red / 8,
+            "{red} red, {blue} blue"
+        );
+        // A letter beside a picture keeps the text's color.
+        let mixed = title(SBIX, None, "A\u{1F600}");
+        assert!(count(&mixed, |pixel| pixel == [255, 255, 255, 255]) > 100);
+        assert!(count(&mixed, |pixel| pixel == [255, 0, 0, 255]) > 100);
+        // The system's emoji face, where it is installed: mostly yellow.
+        if let Ok(bytes) = std::fs::read(SYSTEM_EMOJI) {
+            let face = title(&bytes, Some(0), "\u{1F600}");
+            let yellow = count(&face, |[red, green, blue, alpha]| {
+                alpha == 255 && red > 200 && green > 150 && blue < 120
+            });
+            assert!(yellow > 500, "{yellow} yellow pixels");
+        }
+    }
 }

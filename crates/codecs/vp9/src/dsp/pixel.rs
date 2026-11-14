@@ -8,10 +8,97 @@ pub trait Pixel: Copy + Default + PartialEq + Send + Sync + core::fmt::Debug + '
     fn clip(v: i32, max: i32) -> Self;
     /// `v`, which the caller has already held to the sample range.
     fn new(v: i32) -> Self;
+
+    /// Inter prediction with vector instructions; `false` when not taken.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn mc_fast(
+        _dst: &mut [Self],
+        _ds: usize,
+        _src: &[Self],
+        _at: usize,
+        _ss: usize,
+        _wh: (usize, usize),
+        _f: (Option<[i16; 8]>, Option<[i16; 8]>),
+        _avg: bool,
+    ) -> bool {
+        false
+    }
+
+    /// The loop filter across one edge of `n` (8 or 16) lines with vector
+    /// instructions (thresholds for lines 0 to 7 and 8 to 15); `false`
+    /// when not taken.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn lf_fast(
+        _buf: &mut [Self],
+        _at: usize,
+        _stride: usize,
+        _vertical: bool,
+        _n: usize,
+        _wd: super::lf::Wd,
+        _thr: [super::lf::Thresh; 2],
+    ) -> bool {
+        false
+    }
 }
 
 impl Pixel for u8 {
     const HIGH: bool = false;
+    #[inline(always)]
+    fn lf_fast(
+        buf: &mut [Self],
+        at: usize,
+        stride: usize,
+        vertical: bool,
+        n: usize,
+        wd: super::lf::Wd,
+        thr: [super::lf::Thresh; 2],
+    ) -> bool {
+        use cutlass_simd::vp9::lf;
+        let t = |t: super::lf::Thresh| lf::Thresh {
+            blimit: t.blimit,
+            limit: t.limit,
+            hev: t.hev,
+        };
+        lf::filter(lf::Edge {
+            buf,
+            at,
+            stride,
+            vertical,
+            n,
+            wd: match wd {
+                super::lf::Wd::W4 => lf::Wd::W4,
+                super::lf::Wd::W8 => lf::Wd::W8,
+                super::lf::Wd::W16 => lf::Wd::W16,
+            },
+            thr: [t(thr[0]), t(thr[1])],
+        })
+    }
+    #[inline(always)]
+    fn mc_fast(
+        dst: &mut [Self],
+        ds: usize,
+        src: &[Self],
+        at: usize,
+        ss: usize,
+        (w, h): (usize, usize),
+        (fx, fy): (Option<[i16; 8]>, Option<[i16; 8]>),
+        avg: bool,
+    ) -> bool {
+        cutlass_simd::vp9::mc::predict(cutlass_simd::vp9::mc::Block {
+            dst,
+            dst_stride: ds,
+            src,
+            at,
+            src_stride: ss,
+            w,
+            h,
+            fx,
+            fy,
+            avg,
+        })
+    }
     #[inline(always)]
     fn get(self) -> i32 {
         i32::from(self)

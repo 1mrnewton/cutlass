@@ -25,6 +25,11 @@ pub fn predict<P: Pixel>(
     max: i32,
     avg: bool,
 ) {
+    let fx = (mx != 0).then(|| filter[mx]);
+    let fy = (my != 0).then(|| filter[my]);
+    if P::mc_fast(dst, dst_stride, src, at, src_stride, (w, h), (fx, fy), avg) {
+        return;
+    }
     match (mx != 0, my != 0) {
         (false, false) => {
             for r in 0..h {

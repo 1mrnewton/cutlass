@@ -1,0 +1,298 @@
+//! The 8-bit interpolation on AVX2.
+//!
+//! Across, a shuffle puts samples `j + 2k` and `j + 2k + 1` side by side
+//! for each output `j`, and `pmaddubsw` multiplies them by taps `2k` and
+//! `2k + 1`. No pair sum can saturate (each pair of taps sums to at most
+//! 136 in magnitude with signs that differ, or to less than 128). The four
+//! sums are added outer pairs first and the larger inner pair last, with
+//! saturation, so the total saturates only when the result would be held
+//! to 0 or 255 anyway: the same samples as libvpx's C. `pmulhrsw` by 256
+//! is `(x + 64) >> 7`, and `packuswb` holds the result to 0..=255. Down,
+//! two rows are interleaved byte by byte and multiplied the same way.
+//!
+//! Loads and stores go through fixed-size arrays, which the compiler turns
+//! into single vector moves.
+
+use core::arch::x86_64::{
+    __m128i, __m256i, _mm_avg_epu8, _mm_cvtsi32_si128, _mm_cvtsi64_si128, _mm_cvtsi128_si32,
+    _mm_cvtsi128_si64, _mm_extract_epi64, _mm_maddubs_epi16, _mm_set_epi64x, _mm_setr_epi8,
+    _mm_unpackhi_epi8, _mm_unpacklo_epi8, _mm256_adds_epi16, _mm256_add_epi16,
+    _mm256_castsi256_si128, _mm256_maddubs_epi16, _mm256_mulhrs_epi16, _mm256_packus_epi16,
+    _mm256_permute4x64_epi64, _mm256_set_m128i, _mm256_set1_epi16, _mm256_shuffle_epi8,
+    _mm_add_epi16, _mm_adds_epi16, _mm_mulhrs_epi16, _mm_packus_epi16, _mm_set1_epi16,
+    _mm_shuffle_epi8,
+};
+
+use super::Block;
+
+// Loads and stores ---------------------------------------------------------
+
+#[inline]
+#[target_feature(enable = "avx2")]
+fn ld16(s: &[u8], at: usize) -> __m128i {
+    let a = &s[at..at + 16];
+    let lo = i64::from_le_bytes([a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]]);
+    let hi = i64::from_le_bytes([a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]]);
+    _mm_set_epi64x(hi, lo)
+}
+
+#[inline]
+#[target_feature(enable = "avx2")]
+fn ld8(s: &[u8], at: usize) -> __m128i {
+    let a = &s[at..at + 8];
+    _mm_cvtsi64_si128(i64::from_le_bytes([a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]]))
+}
+
+#[inline]
+#[target_feature(enable = "avx2")]
+fn ld4(s: &[u8], at: usize) -> __m128i {
+    let a = &s[at..at + 4];
+    _mm_cvtsi32_si128(i32::from_le_bytes([a[0], a[1], a[2], a[3]]))
+}
+
+/// The first `n` (4, 8 or 16) bytes of `v` to `d[at..]`.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn st(d: &mut [u8], at: usize, v: __m128i, n: usize) {
+    match n {
+        16 => {
+            d[at..at + 8].copy_from_slice(&_mm_cvtsi128_si64(v).to_le_bytes());
+            d[at + 8..at + 16].copy_from_slice(&_mm_extract_epi64::<1>(v).to_le_bytes());
+        }
+        8 => d[at..at + 8].copy_from_slice(&_mm_cvtsi128_si64(v).to_le_bytes()),
+        _ => d[at..at + 4].copy_from_slice(&_mm_cvtsi128_si32(v).to_le_bytes()),
+    }
+}
+
+#[inline]
+#[target_feature(enable = "avx2")]
+fn ld(s: &[u8], at: usize, n: usize) -> __m128i {
+    match n {
+        16 => ld16(s, at),
+        8 => ld8(s, at),
+        _ => ld4(s, at),
+    }
+}
+
+/// Taps `2k` and `2k + 1` as the byte pair `pmaddubsw` multiplies by.
+#[inline]
+fn pair(f: &[i16; 8], k: usize) -> i16 {
+    i16::from_le_bytes([f[2 * k] as i8 as u8, f[2 * k + 1] as i8 as u8])
+}
+
+// Filters ------------------------------------------------------------------
+
+/// For output `j` of eight, samples `j + 2k` and `j + 2k + 1`.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn pair_mask(k: i8) -> __m128i {
+    let b = 2 * k;
+    _mm_setr_epi8(
+        b,
+        b + 1,
+        b + 1,
+        b + 2,
+        b + 2,
+        b + 3,
+        b + 3,
+        b + 4,
+        b + 4,
+        b + 5,
+        b + 5,
+        b + 6,
+        b + 6,
+        b + 7,
+        b + 7,
+        b + 8,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct Taps {
+    masks: [__m256i; 4],
+    pairs: [__m256i; 4],
+    masks1: [__m128i; 4],
+    pairs1: [__m128i; 4],
+}
+
+impl Taps {
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn new(f: &[i16; 8]) -> Self {
+        let m = [pair_mask(0), pair_mask(1), pair_mask(2), pair_mask(3)];
+        let p: [i16; 4] = core::array::from_fn(|k| pair(f, k));
+        Self {
+            masks: m.map(|m| _mm256_set_m128i(m, m)),
+            pairs: p.map(|v| _mm256_set1_epi16(v)),
+            masks1: m,
+            pairs1: p.map(|v| _mm_set1_epi16(v)),
+        }
+    }
+
+    /// Sums of the four pair products, in the order that keeps them exact.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn sum(&self, p: [__m256i; 4]) -> __m256i {
+        let s = _mm256_add_epi16(p[0], p[3]);
+        let s = _mm256_add_epi16(s, p[1]);
+        let s = _mm256_adds_epi16(s, p[2]);
+        _mm256_mulhrs_epi16(s, _mm256_set1_epi16(256))
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn sum1(&self, p: [__m128i; 4]) -> __m128i {
+        let s = _mm_add_epi16(p[0], p[3]);
+        let s = _mm_add_epi16(s, p[1]);
+        let s = _mm_adds_epi16(s, p[2]);
+        _mm_mulhrs_epi16(s, _mm_set1_epi16(256))
+    }
+
+    /// Sixteen outputs across from samples `s[at - 3 ..]`.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn across16(&self, s: &[u8], at: usize) -> __m128i {
+        let v = _mm256_set_m128i(ld16(s, at + 5), ld16(s, at - 3));
+        let p: [__m256i; 4] = core::array::from_fn(|k| {
+            _mm256_maddubs_epi16(_mm256_shuffle_epi8(v, self.masks[k]), self.pairs[k])
+        });
+        let r = self.sum(p);
+        let packed = _mm256_packus_epi16(r, r);
+        _mm256_castsi256_si128(_mm256_permute4x64_epi64::<0b1000>(packed))
+    }
+
+    /// Eight outputs across (the low 8 bytes).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn across8(&self, s: &[u8], at: usize) -> __m128i {
+        let v = ld16(s, at - 3);
+        let p: [__m128i; 4] = core::array::from_fn(|k| {
+            _mm_maddubs_epi16(_mm_shuffle_epi8(v, self.masks1[k]), self.pairs1[k])
+        });
+        let r = self.sum1(p);
+        _mm_packus_epi16(r, r)
+    }
+
+    /// Sixteen outputs down from eight rows of sixteen samples.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn down16(&self, r: &[__m128i; 8]) -> __m128i {
+        let p: [__m256i; 4] = core::array::from_fn(|k| {
+            let (a, b) = (r[2 * k], r[2 * k + 1]);
+            let v = _mm256_set_m128i(_mm_unpackhi_epi8(a, b), _mm_unpacklo_epi8(a, b));
+            _mm256_maddubs_epi16(v, self.pairs[k])
+        });
+        let s = self.sum(p);
+        let packed = _mm256_packus_epi16(s, s);
+        _mm256_castsi256_si128(_mm256_permute4x64_epi64::<0b1000>(packed))
+    }
+
+    /// Eight outputs down (the low 8 bytes) from eight rows.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn down8(&self, r: &[__m128i; 8]) -> __m128i {
+        let p: [__m128i; 4] = core::array::from_fn(|k| {
+            _mm_maddubs_epi16(_mm_unpacklo_epi8(r[2 * k], r[2 * k + 1]), self.pairs1[k])
+        });
+        let s = self.sum1(p);
+        _mm_packus_epi16(s, s)
+    }
+}
+
+#[inline]
+#[target_feature(enable = "avx2")]
+fn put(d: &mut [u8], at: usize, v: __m128i, n: usize, avg: bool) {
+    let v = if avg { _mm_avg_epu8(v, ld(d, at, n)) } else { v };
+    st(d, at, v, n);
+}
+
+/// Every block of [`Block::fits`].
+#[target_feature(enable = "avx2")]
+pub(super) fn predict(b: Block<'_>) {
+    let Block {
+        dst,
+        dst_stride: ds,
+        src,
+        at,
+        src_stride: ss,
+        w,
+        h,
+        fx,
+        fy,
+        avg,
+    } = b;
+    let step = w.min(16);
+    match (fx, fy) {
+        (None, None) => {
+            for r in 0..h {
+                let mut c = 0;
+                while c < w {
+                    let v = ld(src, at + r * ss + c, step);
+                    put(dst, r * ds + c, v, step, avg);
+                    c += step;
+                }
+            }
+        }
+        (Some(fx), None) => {
+            let t = Taps::new(&fx);
+            for r in 0..h {
+                let row = at + r * ss;
+                let mut c = 0;
+                while c < w {
+                    let v = if step == 16 {
+                        t.across16(src, row + c)
+                    } else {
+                        t.across8(src, row + c)
+                    };
+                    put(dst, r * ds + c, v, step, avg);
+                    c += step;
+                }
+            }
+        }
+        (None, Some(fy)) => {
+            let t = Taps::new(&fy);
+            down(&t, dst, ds, src, at - 3 * ss, ss, w, h, avg);
+        }
+        (Some(fx), Some(fy)) => {
+            let tx = Taps::new(&fx);
+            let ty = Taps::new(&fy);
+            let mut tmp = [0u8; 64 * 71 + 16];
+            for r in 0..h + 7 {
+                let row = at + r * ss - 3 * ss;
+                let mut c = 0;
+                while c < w {
+                    let v = if step == 16 {
+                        tx.across16(src, row + c)
+                    } else {
+                        tx.across8(src, row + c)
+                    };
+                    st(&mut tmp, r * 64 + c, v, step.max(8));
+                    c += step;
+                }
+            }
+            down(&ty, dst, ds, &tmp, 0, 64, w, h, avg);
+        }
+    }
+}
+
+/// The filter down, from `src[top..]`, 3 rows above the block's first.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+#[target_feature(enable = "avx2")]
+fn down(t: &Taps, dst: &mut [u8], ds: usize, src: &[u8], top: usize, ss: usize, w: usize, h: usize, avg: bool) {
+    let step = w.min(16);
+    let load = if step == 16 { 16 } else { 8 };
+    let mut c = 0;
+    while c < w {
+        let mut rows: [__m128i; 8] = core::array::from_fn(|k| ld(src, top + k * ss + c, load));
+        for r in 0..h {
+            let v = if step == 16 { t.down16(&rows) } else { t.down8(&rows) };
+            put(dst, r * ds + c, v, step, avg);
+            if r + 1 < h {
+                rows.rotate_left(1);
+                rows[7] = ld(src, top + (r + 8) * ss + c, load);
+            }
+        }
+        c += step;
+    }
+}

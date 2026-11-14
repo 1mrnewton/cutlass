@@ -37,7 +37,7 @@ pub use animation::{
 };
 pub use bin::{BinFolder, BinLink, BinPath, VirtualStore};
 pub use clip::{Clip, Flip, Point, UniformScale};
-pub use draft::{CanvasConfig, Draft, DraftConfig};
+pub use draft::{COVER_FILE, CanvasConfig, Cover, Draft, DraftConfig};
 pub use enums::{
     AnimType, ApplyType, CanvasRatio, CropRatio, HdrDisplayMode, HdrType, KeyframeCurve,
     RenderIndexMode, SegmentSource, SpeedMode, TrackAttribute, TrackFlag, TrackType,

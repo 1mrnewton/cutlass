@@ -189,6 +189,8 @@ pub struct Tile<'s, 't, 'r, 'v> {
     toks: Vec<Tok>,
     /// The cost of the best inter candidate last ranked (SAD units).
     last_sad: u64,
+    /// The fast path's search result for each square of the superblock.
+    found: [(Mv, u64); 85],
     /// The reference the searches read (0 LAST, 1 GOLDEN, 2 ALTREF).
     cur_ref: usize,
     /// Whether the block coded last skipped its residual; for the best
@@ -237,6 +239,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             snaps: (0..17).map(|_| Snap::default()).collect(),
             toks: Vec::new(),
             last_sad: 0,
+            found: [(Mv::ZERO, u64::MAX); 85],
             cur_ref: 0,
             coded_skip: false,
             choice_skip: (false, 0.0),
@@ -260,7 +263,16 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         self.left_part = [0; 8];
         self.left_nz = [[0; 16]; 3];
         let mut mi_col = self.col0;
+        let fast = self.fast();
         while mi_col < self.col1 {
+            if fast {
+                // Partition from the motion search's SAD, one pass.
+                let mut split = [false; 21];
+                self.choose_into(mi_row, mi_col, 3, &mut split);
+                self.partition(mi_row, mi_col, BLOCK_64X64, 4, &split);
+                mi_col += 8;
+                continue;
+            }
             self.save(mi_row, mi_col, 8, 0);
             self.trial = true;
             self.split = [false; 21];
@@ -274,6 +286,97 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     }
 
     // Partition decision --------------------------------------------------
+
+    /// Whether this frame takes the one-pass path: inter frames at speed
+    /// 7 and up.
+    fn fast(&self) -> bool {
+        self.s.speed >= 7 && !self.s.intra_frame
+    }
+
+    /// Fast partition: each square's cost is its motion search's SAD plus
+    /// the rate of its vector (SAD units); it splits when its quarters
+    /// cost less.
+    fn choose_into(&mut self, row: usize, col: usize, level: usize, split: &mut [bool; 21]) -> u64 {
+        let s = self.s;
+        if row >= s.mi_rows || col >= s.mi_cols {
+            return 0;
+        }
+        if level == 0 {
+            return self.estimate(row, col, SQUARE[0]);
+        }
+        let n = 1usize << level;
+        let hbs = n / 2;
+        let whole = row + n <= s.mi_rows && col + n <= s.mi_cols;
+        let own = if whole { self.estimate(row, col, SQUARE[level]) } else { u64::MAX };
+        // Splitting costs the partition symbols and three more blocks'
+        // mode info.
+        let mut quarters = u64::from(s.lambda) * 12;
+        for (dr, dc) in [(0, 0), (0, hbs), (hbs, 0), (hbs, hbs)] {
+            quarters = quarters.saturating_add(self.choose_into(row + dr, col + dc, level - 1, split));
+            if quarters >= own {
+                break;
+            }
+        }
+        if quarters < own {
+            split[Self::node(row, col, level)] = true;
+            quarters
+        } else {
+            own
+        }
+    }
+
+    /// The SAD of a square's best whole-sample vector on LAST plus the
+    /// vector's rate; the vector is kept for the block's coding.
+    fn estimate(&mut self, row: usize, col: usize, bsize: u8) -> u64 {
+        let s = self.s;
+        let (bw, _) = MI_WH[usize::from(bsize)];
+        let lam = u64::from(s.lambda);
+        self.cur_ref = 0;
+        let (mv, sad) = self.search(row, col, bsize);
+        self.found[Self::slot(row, col, bsize)] = (mv, sad);
+        for r in 0..bw.min(s.mi_rows - row) {
+            for c in 0..bw.min(s.mi_cols - col) {
+                self.seeds[(row + r) * s.mi_cols + col + c] = mv;
+            }
+        }
+        sad + lam * u64::from(mv_bits(mv)) / 256 + lam * 3
+    }
+
+    /// Codes a block on the fast path: the best inter candidate, or, when
+    /// its prediction is poor, the better of it and the best intra mode.
+    fn fast_block(&mut self, row: usize, col: usize, bsize: u8) {
+        let base = self.blk(row, col, bsize);
+        let mut cands = Vec::with_capacity(2);
+        self.inter_cands(&base, &mut cands);
+        if self.intra_worth(&base, &cands) {
+            self.intra_cands(&base, &mut cands);
+        }
+        let pick = if cands.len() <= 1 {
+            0
+        } else {
+            let lam = f64::from(self.s.rd_lambda) / 256.0;
+            let n = MI_WH[usize::from(bsize)].0;
+            self.trial = true;
+            self.save(row, col, n, 1);
+            let mut best = (f64::INFINITY, 0);
+            for (i, b) in cands.iter().enumerate() {
+                if i > 0 {
+                    self.restore(1);
+                }
+                let c0 = self.cost;
+                let j = self.code_block(b) + (self.cost - c0) as f64 * lam;
+                if j < best.0 {
+                    best = (j, i);
+                }
+            }
+            self.restore(1);
+            self.trial = false;
+            best.1
+        };
+        if let Some(b) = cands.get(pick).copied() {
+            self.code_block(&b);
+        }
+    }
 
     /// Where the decision for the square block `bsize` at `(row, col)` is
     /// kept, in its superblock.
@@ -517,7 +620,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             if self.rec_ref().is_none() {
                 continue;
             }
-            let (mv, sad) = self.search(row, col, bsize);
+            let (mv, sad) = if r == 0 && self.fast() { self.found[Self::slot(row, col, bsize)] } else { self.search(row, col, bsize) };
             if r == 0 {
                 let (bw, _) = MI_WH[usize::from(bsize)];
                 for rr in 0..bw.min(s.mi_rows - row) {
@@ -751,9 +854,15 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         if best_sad == u64::MAX {
             return (Mv::ZERO, u64::MAX / 4);
         }
-        // Diamond search in whole samples.
+        // Diamond search in whole samples; below 64×64 the search starts
+        // from the square around it, whose vector is a seed, with a smaller
+        // step.
         let range = 64;
-        let mut step = 8;
+        let mut step = match (bsize, s.speed) {
+            (BLOCK_64X64, _) | (_, 0..=2) => 8,
+            (_, 3..=6) => 4,
+            _ => 2,
+        };
         while step >= 1 {
             let mut moved = true;
             let mut iters = 0;
@@ -835,8 +944,12 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         self.part_symbol(row, col, bsize, p);
         let sub = geom::subsize(p, bsize);
         if p == PARTITION_NONE {
-            let b = self.choice[Self::slot(row, col, bsize)];
-            self.code_block(&b);
+            if self.fast() {
+                self.fast_block(row, col, bsize);
+            } else {
+                let b = self.choice[Self::slot(row, col, bsize)];
+                self.code_block(&b);
+            }
         } else {
             for (dr, dc) in [(0, 0), (0, hbs), (hbs, 0), (hbs, hbs)] {
                 self.partition(row + dr, col + dc, sub, n8, split);

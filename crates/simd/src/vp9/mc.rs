@@ -107,10 +107,12 @@ impl Block<'_> {
 /// when the CPU or the block is not one the kernels take.
 #[must_use]
 #[inline]
-pub fn predict(b: Block<'_>) -> bool {
+// The `mut` serves the x86-64 kernels; rebinding it instead moved the
+// whole struct through a `memcpy` call on every one.
+#[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
+pub fn predict(mut b: Block<'_>) -> bool {
     #[cfg(target_arch = "x86_64")]
     {
-        let mut b = b;
         if super::avx2() && b.fits() {
             // SAFETY: `avx2` checked at run time that the CPU has AVX2,
             // the only feature `avx2::predict` enables.

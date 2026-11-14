@@ -77,10 +77,12 @@ impl Edge<'_> {
 /// when the CPU or the edge is not one the kernels take.
 #[must_use]
 #[inline]
-pub fn filter(e: Edge<'_>) -> bool {
+// The `mut` serves the x86-64 kernels; rebinding it instead moved the
+// whole struct through a `memcpy` call on every one.
+#[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
+pub fn filter(mut e: Edge<'_>) -> bool {
     #[cfg(target_arch = "x86_64")]
     {
-        let mut e = e;
         if super::avx2() && e.fits() {
             // SAFETY: `avx2` checked at run time that the CPU has AVX2,
             // the only feature `avx2::filter` enables.

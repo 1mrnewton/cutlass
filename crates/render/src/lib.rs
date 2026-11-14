@@ -156,6 +156,10 @@ impl Renderer {
             ..wgpu::RequestAdapterOptions::default()
         }))
         .map_err(|error| RenderError::NoDevice(error.to_string()))?;
+        able(
+            adapter.get_downlevel_capabilities().flags,
+            &adapter.limits(),
+        )?;
         // Ask for what this adapter has, not wgpu's desktop defaults: the iOS
         // simulator, for one, falls short of them and its device would not open.
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -753,9 +757,34 @@ pub fn preview_size(size: (u32, u32), scale: f64) -> (u32, u32) {
     (side(size.0), side(size.1))
 }
 
+/// Whether an adapter runs what the renderer draws with. The blur, among
+/// others, is a compute pass writing a storage texture; OpenGL ES 3.0, which
+/// some Android emulators give, has neither, and wgpu would refuse the first
+/// pipeline with a panic rather than an error.
+fn able(flags: wgpu::DownlevelFlags, limits: &wgpu::Limits) -> Result<(), RenderError> {
+    if !flags.contains(wgpu::DownlevelFlags::COMPUTE_SHADERS)
+        || limits.max_storage_textures_per_shader_stage == 0
+    {
+        return Err(RenderError::NoDevice(
+            "the GPU runs no compute shaders".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Affine, Layer, Placement, Planes, Renderer, Rgba};
+
+    #[test]
+    fn a_gpu_without_compute_is_refused_before_a_pipeline_is_made() {
+        let full = wgpu::DownlevelFlags::all();
+        assert!(super::able(full, &wgpu::Limits::default()).is_ok());
+        let no_compute = full - wgpu::DownlevelFlags::COMPUTE_SHADERS;
+        assert!(super::able(no_compute, &wgpu::Limits::default()).is_err());
+        let gles3 = wgpu::Limits::downlevel_webgl2_defaults();
+        assert!(super::able(full, &gles3).is_err(), "no storage textures");
+    }
 
     fn renderer() -> Option<Renderer> {
         let renderer = Renderer::for_test().expect("a GPU is required");

@@ -6,9 +6,7 @@ plugins {
 android {
     namespace = "com.scytheralpha.cutlass_android"
     compileSdk {
-        version = release(36) {
-            minorApiLevel = 1
-        }
+        version = release(37)
     }
 
     defaultConfig {
@@ -37,6 +35,8 @@ android {
     buildFeatures {
         compose = true
     }
+    // The device tests read the engine's small test pictures.
+    sourceSets.getByName("androidTest").assets.srcDir("../../../crates/engine/fixtures")
 }
 
 dependencies {
@@ -48,6 +48,9 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    // The uniffi bindings call the Rust library through JNA.
+    implementation(libs.jna) { artifact { type = "aar" } }
+    implementation(libs.kotlinx.coroutines.android)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
@@ -56,3 +59,13 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }
+// The Rust library is built by apps/android/build-rust.sh, as the iOS app's
+// is by apps/ios/build-rust.sh. Without it the app would crash at launch.
+val rustLibrary = layout.projectDirectory.file("src/main/jniLibs/arm64-v8a/libcutlass_ffi_bindings.so")
+val checkRustLibrary by tasks.registering {
+    val library = rustLibrary.asFile
+    doLast {
+        check(library.isFile) { "Run apps/android/build-rust.sh first: ${library.path} is missing" }
+    }
+}
+tasks.named("preBuild") { dependsOn(checkRustLibrary) }

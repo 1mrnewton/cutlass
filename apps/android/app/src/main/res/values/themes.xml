@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-
-    <style name="Theme.Cutlassandroid" parent="android:Theme.Material.Light.NoActionBar" />
+    <!-- Dark before Compose draws, so the window never flashes white. -->
+    <style name="Theme.Cutlassandroid" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF0F0F0F</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
 </resources>

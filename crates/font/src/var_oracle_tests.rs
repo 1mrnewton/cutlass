@@ -432,3 +432,59 @@ fn varied_outlines_agree_with_an_instance_harfbuzz_writes() {
     let _removed = std::fs::remove_dir_all(&folder);
     assert_eq!(wrong, 0);
 }
+
+/// For each named face, how long it takes to set it, and to outline and
+/// to measure every glyph at its default and set to the first of
+/// [`settings`]: the least of five runs of each.
+#[test]
+#[ignore = "reads the faces named in CUTLASS_VARIABLE_FACES"]
+#[allow(clippy::print_stdout)]
+fn varied_glyphs_are_timed() {
+    let Ok(faces) = std::env::var("CUTLASS_VARIABLE_FACES") else {
+        return;
+    };
+    let least = |run: &mut dyn FnMut()| {
+        (0..5)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                run();
+                started.elapsed()
+            })
+            .min()
+            .unwrap_or_default()
+    };
+    for named in faces.split(':') {
+        let (path, index) = named.split_once('#').unwrap_or((named, "0"));
+        let index: u32 = index.parse().expect("index");
+        let bytes = std::fs::read(path).expect("face file");
+        let plain = open(&bytes, index, named);
+        let Some(setting) = settings(&plain).into_iter().next() else {
+            continue;
+        };
+        let set = plain.varied(&setting).expect("varied");
+        let setting_takes = least(&mut || {
+            for _ in 0..100 {
+                std::hint::black_box(plain.varied(&setting).expect("varied"));
+            }
+        }) / 100;
+        let outlines = |font: &Font<'_>| {
+            for glyph in 0..font.glyph_count() {
+                std::hint::black_box(font.outline(glyph).ok());
+            }
+        };
+        let advances = |font: &Font<'_>| {
+            for glyph in 0..font.glyph_count() {
+                std::hint::black_box(font.advance(glyph).ok());
+            }
+        };
+        println!(
+            "{named} at {}: {} glyphs; setting it takes {setting_takes:?}; outlines {:?} at the default and {:?} set; advances {:?} and {:?}",
+            printed(&setting),
+            plain.glyph_count(),
+            least(&mut || outlines(&plain)),
+            least(&mut || outlines(&set)),
+            least(&mut || advances(&plain)),
+            least(&mut || advances(&set)),
+        );
+    }
+}

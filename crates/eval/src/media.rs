@@ -108,7 +108,7 @@ pub struct OpenClips {
     images: HashMap<String, CpuBytes>,
     /// Title rasters by segment, with the density each was drawn at. A
     /// title does not change within a revision unless its scale is keyed.
-    texts: HashMap<SegmentId, (f64, CpuBytes)>,
+    texts: HashMap<SegmentId, crate::text::KeptTitle>,
     /// Caption rasters by segment: the page last drawn, with a key for
     /// everything that went into it and the density it was drawn at.
     captions: HashMap<SegmentId, (u64, f64, CpuBytes)>,

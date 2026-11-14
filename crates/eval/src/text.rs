@@ -73,10 +73,15 @@ impl PlacedText {
     }
 }
 
+/// A still title's picture: the density asked for, the density it was
+/// drawn at, which is lower when the title is too large to draw at what
+/// was asked, and the picture.
+pub(crate) type KeptTitle = (f64, f64, CpuBytes);
+
 /// Text rasters kept from frame to frame within one revision of a draft.
 pub(crate) struct KeptText<'a> {
-    /// A still title's picture, with the density it was drawn at.
-    pub(crate) titles: &'a mut HashMap<SegmentId, (f64, CpuBytes)>,
+    /// A still title's picture, by its clip.
+    pub(crate) titles: &'a mut HashMap<SegmentId, KeptTitle>,
     /// A caption's last picture, with a key for what went into it and the
     /// density it was drawn at.
     pub(crate) captions: &'a mut HashMap<SegmentId, (u64, f64, CpuBytes)>,
@@ -188,26 +193,34 @@ pub(crate) fn text_layers(
                 let glow = glow(draft, segment, time);
                 // Letters on the move are drawn for each frame and not kept.
                 let steps = cutlass_model::letters_at(draft, segment, time);
+                // A title too large to draw at the density asked for was
+                // drawn at a lower one: it is kept for what was asked, so
+                // it is not tried and drawn again at every frame.
+                let still = steps.is_empty() && keyed.is_none();
                 let kept = rasters
                     .get(&segment.id)
-                    .filter(|(drawn, _)| *drawn == wanted && steps.is_empty() && keyed.is_none())
-                    .cloned();
-                let Some((drawn, bytes)) = kept.or_else(|| {
-                    title_picture(
-                        Faces { fonts, face },
-                        material,
-                        glow.as_ref(),
-                        segment,
-                        time,
-                        wanted,
-                        &steps,
-                    )
-                }) else {
-                    continue;
+                    .filter(|(asked, _, _)| *asked == wanted && still)
+                    .map(|(_, drawn, bytes)| (*drawn, bytes.clone()));
+                let (drawn, bytes) = match kept {
+                    Some(kept) => kept,
+                    None => {
+                        let Some((drawn, bytes)) = title_picture(
+                            Faces { fonts, face },
+                            material,
+                            glow.as_ref(),
+                            segment,
+                            time,
+                            wanted,
+                            &steps,
+                        ) else {
+                            continue;
+                        };
+                        if still {
+                            rasters.insert(segment.id.clone(), (wanted, drawn, bytes.clone()));
+                        }
+                        (drawn, bytes)
+                    }
                 };
-                if steps.is_empty() && keyed.is_none() {
-                    rasters.insert(segment.id.clone(), (drawn, bytes.clone()));
-                }
                 (bytes, transform.dense(drawn))
             };
             layers.push(TextLayer {
@@ -927,6 +940,50 @@ mod tests {
         let other = draw(&draft, &[100_000]);
         assert_ne!(other[0].1, frames[0].1);
         assert_ne!(other[0].0.rgba(), frames[0].0.rgba());
+    }
+
+    #[test]
+    fn a_still_title_is_drawn_once_and_its_picture_shared_by_later_frames() {
+        let draw = |draft: &Draft, times: &[i64]| {
+            let mut titles = std::collections::HashMap::new();
+            let mut captions = std::collections::HashMap::new();
+            times
+                .iter()
+                .map(|time| {
+                    let layers = super::text_layers(
+                        draft,
+                        &OneFont,
+                        256,
+                        256,
+                        Micros(*time),
+                        super::KeptText {
+                            titles: &mut titles,
+                            captions: &mut captions,
+                        },
+                    );
+                    layers[0].placed.raster.clone()
+                })
+                .collect::<Vec<_>>()
+        };
+        // Each later frame has the first frame's bytes, not a copy.
+        let draft = text_segment("AB", false);
+        let frames = draw(&draft, &[0, 40_000, 80_000, 900_000]);
+        assert!(frames.iter().all(|frame| frame.shares(&frames[0])));
+        // A title scaled up is drawn at that density, once.
+        let mut scaled = text_segment("AB", false);
+        scaled.tracks[0].segments[0].uniform_scale.value = 2.0;
+        let dense = draw(&scaled, &[0, 40_000]);
+        assert!(dense[1].shares(&dense[0]));
+        assert_eq!(dense[0].width(), frames[0].width() * 2);
+        // A title too wide to draw at the density its scale asks for is
+        // drawn at 1, and that picture is kept too: it is not tried and
+        // drawn again at each frame.
+        let mut wide = text_segment(&"A".repeat(30), false);
+        wide.tracks[0].segments[0].uniform_scale.value = 8.0;
+        let plain = draw(&text_segment(&"A".repeat(30), false), &[0]);
+        let shown = draw(&wide, &[0, 40_000, 80_000]);
+        assert_eq!(shown[0].width(), plain[0].width());
+        assert!(shown.iter().all(|frame| frame.shares(&shown[0])));
     }
 
     #[test]

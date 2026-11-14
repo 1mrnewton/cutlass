@@ -176,6 +176,12 @@ impl eframe::App for DesktopWindow {
         [0.0; 4]
     }
 
+    /// Runs before every pass, the window shown or not, so the close
+    /// button is caught even while the window is minimised.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        crate::view::close_to_projects(&mut self.shell, &mut self.view, ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let now = ui.input(|input| input.time);
         advance_if_playing(&mut self.shell, &mut self.last_time, now);

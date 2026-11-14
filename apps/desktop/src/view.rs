@@ -263,6 +263,9 @@ pub struct ViewState {
     /// A folder being named, and what is typed so far.
     library_renaming: Option<(String, String)>,
     projects_root: Option<std::path::PathBuf>,
+    /// The app itself asked to quit (to restart after an update), so a
+    /// close is not turned back into a return to the projects.
+    quitting: bool,
     listed: Vec<ListedProject>,
     listed_stamp: String,
     /// When the projects folder was last looked at.
@@ -350,6 +353,7 @@ impl Default for ViewState {
             filter_category: String::new(),
             library_renaming: None,
             projects_root: None,
+            quitting: false,
             listed: Vec::new(),
             listed_stamp: String::new(),
             listed_checked: None,
@@ -524,7 +528,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     if shell.update_offer().is_some() {
         update_dialog(shell, ui);
     }
-    restart_for_update(shell, ui);
+    restart_for_update(shell, ui, view);
     dropped_files(shell, ui);
 }
 
@@ -897,6 +901,22 @@ fn utc_date(seconds: u64) -> String {
         year += 1;
     }
     format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// The window's close button with a project open saves it and goes back
+/// to the projects, as leaving the editor does, instead of quitting. At the
+/// projects the button closes the app. Quit from the menu or the Dock ends
+/// the app without asking the window, so it is never held here.
+pub fn close_to_projects(shell: &mut Shell, view: &mut ViewState, ctx: &egui::Context) {
+    if view.quitting
+        || shell.draft().is_none()
+        || !ctx.input(|input| input.viewport().close_requested())
+    {
+        return;
+    }
+    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+    cutlass_logger::info!("window closed with a project open: back to the projects");
+    return_to_projects(shell, view);
 }
 
 fn return_to_projects(shell: &mut Shell, view: &mut ViewState) {
@@ -1721,13 +1741,14 @@ fn update_dialog(shell: &mut Shell, ui: &mut Ui) {
 
 /// An update is in place: start the new version once this one quits, and
 /// close. The project is saved on the way out.
-fn restart_for_update(shell: &mut Shell, ui: &Ui) {
+fn restart_for_update(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
     let Some(relaunch) = shell.take_restart() else {
         return;
     };
     match relaunch.spawn() {
         Ok(()) => {
             cutlass_logger::info!("update installed; restarting");
+            view.quitting = true;
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
         Err(error) => shell.notice_error(&format!(
@@ -17606,6 +17627,62 @@ mod tests {
         // The box now shows the cover, under the word.
         let output = frame(&mut shell, &mut view, Vec::new());
         assert!(text_pos(&output, "Cover").is_some());
+    }
+
+    #[test]
+    fn closing_the_window_in_a_project_goes_back_to_the_projects() {
+        let (mut shell, temp) = blue_project("close");
+        shell.seek(Micros(700_000));
+        shell
+            .apply(cutlass_session::Request::SetProjectName {
+                name: "Kept".to_owned(),
+            })
+            .unwrap();
+        assert!(shell.unsaved());
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        // One pass as eframe runs it: the logic hook, then the window.
+        let pass = |shell: &mut Shell, view: &mut ViewState, close: bool| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            };
+            if close {
+                input.viewports.insert(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportInfo {
+                        events: vec![egui::ViewportEvent::Close],
+                        ..Default::default()
+                    },
+                );
+            }
+            let mut output = ctx.run_ui(input, |ui| {
+                close_to_projects(shell, view, ui.ctx());
+                show(shell, ui, view, None);
+            });
+            output.textures_delta.clear();
+            output.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .contains(&egui::ViewportCommand::CancelClose)
+        };
+        pass(&mut shell, &mut view, false);
+        // The close button in the editor: the app stays, the project is
+        // saved and closed, and the projects show.
+        assert!(pass(&mut shell, &mut view, true));
+        assert!(shell.draft().is_none());
+        let saved = cutlass_store::Folder::read(&temp).unwrap();
+        assert_eq!(saved.draft.name, "Kept");
+        pass(&mut shell, &mut view, false);
+        assert!(shell.chrome.projects);
+        // At the projects the button closes the app.
+        assert!(!pass(&mut shell, &mut view, true));
+
+        // When the app quits by itself, as for an update, nothing holds it.
+        shell.open_folder(&temp).unwrap();
+        view.quitting = true;
+        assert!(!pass(&mut shell, &mut view, true));
+        assert!(shell.draft().is_some());
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]

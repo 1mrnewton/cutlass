@@ -23,6 +23,7 @@ mod pattern;
 mod syllables;
 mod thai;
 mod universal;
+mod vowels;
 
 use cutlass_font::morx::DELETED_GLYPH;
 use cutlass_font::{Font, GlyphClass, KernPass, LayoutTable, Tag, Variant};
@@ -207,6 +208,11 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
         apart: &apart,
         join: &join,
     };
+    // A vowel and a sign that would pass for another vowel are shown
+    // apart.
+    if syllabic {
+        glyphs = vowels::separate(run.script, glyphs);
+    }
     let mut glyphs = normalize(font, glyphs, &normal)?;
     if syllabic {
         match shaping {
@@ -1816,7 +1822,10 @@ mod tests {
             "[14=0+450|10=0+800|20=0+400|19=0+0|15=0+0|16=0+300]"
         );
         assert_eq!(sinh("\u{D9A}\u{D82}"), "[10=0+800|16=0+300]");
-        // A vowel alone stands on a dotted circle.
+        // The letter a with the sign that would make it pass for the
+        // letter aa is shown apart from it, and a vowel alone stands
+        // on a dotted circle.
+        assert_eq!(sinh("\u{D85}\u{DCF}"), "[45=0+750|30=0+600|15=0+0]");
         assert_eq!(sinh("\u{DD9}"), "[14=0+450|30=0+600]");
     }
 

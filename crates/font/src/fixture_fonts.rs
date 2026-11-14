@@ -193,10 +193,85 @@ pub(crate) fn hostile() -> Vec<u8> {
     font(&glyphs, &[('A', 2), ('B', 3)], &[(b"GSUB", substitutions)])
 }
 
+/// A face that shapes by state machines, as faces made for Apple's
+/// layout engine do: `A` 2, `B` 3, the ligature of the two 4, and `D` 5.
+/// Its one chain first swaps `D` for `B`, then makes `A` and `B` one
+/// glyph.
+pub(crate) fn machines() -> Vec<u8> {
+    use crate::fixture::be;
+    let long = |values: &[u32]| -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_be_bytes())
+            .collect()
+    };
+    // A lookup of single glyphs: each a glyph and its value.
+    let singles = |pairs: &[(u16, u16)]| {
+        let mut table = be(&[6, 4, u16::try_from(pairs.len()).expect("count"), 0, 0, 0]);
+        for (glyph, value) in pairs {
+            table.extend(be(&[*glyph, *value]));
+        }
+        table
+    };
+    let subtable = |kind: u32, body: Vec<u8>| {
+        let mut bytes = long(&[u32::try_from(body.len() + 12).expect("length"), kind, 1]);
+        bytes.extend(body);
+        bytes
+    };
+    // The ligature machine. Classes: 4 is A, 5 is B. States 0 and 1 wait
+    // for an A; state 2 has seen one. Entry 1 marks an A; entry 2 marks a
+    // B after it and joins the two.
+    let classes = singles(&[(2, 4), (3, 5)]);
+    let states = be(&[0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 2]);
+    let entries = be(&[0, 0, 0, 2, 0x8000, 0, 0, 0xA000, 0]);
+    // Popped last first: B is component 0 and A component 1; both add
+    // nothing, so the ligature is the first in its list.
+    let actions = long(&[0x3FFF_FFFD, 0xFFFF_FFFF]);
+    let components = be(&[0, 0]);
+    let ligatures = be(&[4]);
+    let mut at = 28;
+    let mut offsets = Vec::new();
+    for part in [
+        &classes,
+        &states,
+        &entries,
+        &actions,
+        &components,
+        &ligatures,
+    ] {
+        offsets.push(u32::try_from(at).expect("offset"));
+        at += part.len();
+    }
+    let mut ligature = long(&[6]);
+    ligature.extend(long(&offsets));
+    for part in [classes, states, entries, actions, components, ligatures] {
+        ligature.extend(part);
+    }
+    let swap = subtable(4, singles(&[(5, 3)]));
+    let join = subtable(2, ligature);
+    let mut chain = long(&[
+        1,
+        u32::try_from(16 + swap.len() + join.len()).expect("length"),
+        0,
+        2,
+    ]);
+    chain.extend(swap);
+    chain.extend(join);
+    let mut morx = be(&[2, 0]);
+    morx.extend(long(&[1]));
+    morx.extend(chain);
+    let glyphs = vec![boxed(500); 6];
+    font(&glyphs, &[('A', 2), ('B', 3), ('D', 5)], &[(b"morx", morx)])
+}
+
 /// A fixture's file name and what builds it.
 type Built = (&'static str, fn() -> Vec<u8>);
 
-const FILES: [Built; 2] = [("shaping.ttf", shaping), ("hostile.ttf", hostile)];
+const FILES: [Built; 3] = [
+    ("shaping.ttf", shaping),
+    ("hostile.ttf", hostile),
+    ("machines.ttf", machines),
+];
 
 fn path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -213,7 +288,7 @@ fn the_fixture_files_are_what_the_builder_writes() {
             "{name} is stale: write the fixtures again"
         );
         let face = crate::read(&stored).expect("font");
-        assert!(face.gsub().is_some(), "{name}");
+        assert!(face.gsub().is_some() || face.morx().is_some(), "{name}");
     }
 }
 
@@ -223,4 +298,72 @@ fn write_the_fixture_fonts() {
     for (name, build) in FILES {
         std::fs::write(path(name), build()).expect("write");
     }
+}
+
+#[test]
+fn the_machines_face_reads_its_chain_and_its_states() {
+    use crate::morx::{CLASS_DELETED, CLASS_END, CLASS_OTHER, DELETED_GLYPH, Metamorphosis};
+    let bytes = machines();
+    let face = crate::read(&bytes).expect("font");
+    let chains = face.morx().expect("morx").chains().expect("chains");
+    assert_eq!(chains.len(), 1);
+    assert_eq!(chains[0].default_flags, 1);
+    assert_eq!(chains[0].subtables.len(), 2);
+    let Metamorphosis::Swap(swap) = chains[0].subtables[0].kind else {
+        panic!("swap");
+    };
+    assert_eq!(
+        (swap.value(5), swap.value(2), swap.value(9)),
+        (Some(3), None, None)
+    );
+    let Metamorphosis::Ligature {
+        machine,
+        actions,
+        components,
+        ligatures,
+    } = chains[0].subtables[1].kind
+    else {
+        panic!("ligature");
+    };
+    assert_eq!((machine.class(2), machine.class(3)), (4, 5));
+    assert_eq!(machine.class(5), CLASS_OTHER);
+    assert_eq!(machine.class(DELETED_GLYPH), CLASS_DELETED);
+    // An A from the start goes to state 2 and is marked; a B there joins.
+    assert_eq!(machine.entry(0, 4).expect("entry"), [0, 2, 0x80, 0, 0, 0]);
+    assert_eq!(machine.entry(2, 5).expect("entry"), [0, 0, 0xA0, 0, 0, 0]);
+    assert_eq!(machine.entry(2, CLASS_END).expect("entry"), [0; 6]);
+    assert!(machine.entry(0, 6).is_err());
+    assert!(machine.entry(9, 0).is_err());
+    assert_eq!(
+        crate::morx::long_at(actions, 1).expect("action"),
+        0xFFFF_FFFF
+    );
+    assert_eq!(crate::morx::word_at(components, 1).expect("component"), 0);
+    assert_eq!(crate::morx::word_at(ligatures, 0).expect("ligature"), 4);
+    assert!(crate::morx::word_at(ligatures, 1).is_err());
+
+    // A torn table is an error; a version this reader does not know is
+    // no table.
+    let count = usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
+    let record = (0..count)
+        .map(|slot| 12 + slot * 16)
+        .find(|at| &bytes[*at..*at + 4] == b"morx")
+        .expect("morx");
+    let at = u32::from_be_bytes([
+        bytes[record + 8],
+        bytes[record + 9],
+        bytes[record + 10],
+        bytes[record + 11],
+    ]) as usize;
+    let mut newer = bytes.clone();
+    newer[at + 1] = 9;
+    assert!(crate::read(&newer).expect("font").morx().is_none());
+    let mut torn = bytes.clone();
+    torn[at + 7] = 200;
+    let chains = crate::read(&torn)
+        .expect("font")
+        .morx()
+        .expect("morx")
+        .chains();
+    assert!(chains.is_err());
 }

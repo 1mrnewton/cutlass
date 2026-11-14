@@ -24,6 +24,7 @@ mod kern;
 mod layout;
 #[cfg(test)]
 mod layout_tests;
+pub mod morx;
 mod otf;
 mod strike;
 mod ttf;
@@ -154,6 +155,7 @@ pub struct Font<'a> {
     gdef: Option<Gdef<'a>>,
     gsub: Option<LayoutTable<'a>>,
     gpos: Option<LayoutTable<'a>>,
+    morx: Option<morx::Morx<'a>>,
     outlines: Outlines<'a>,
     strikes: strike::Strikes<'a>,
     fingerprint: u64,
@@ -199,6 +201,13 @@ impl<'a> Font<'a> {
     #[must_use]
     pub fn gsub(&self) -> Option<&LayoutTable<'a>> {
         self.gsub.as_ref()
+    }
+
+    /// The substitutions of a face made for Apple's layout engine, when
+    /// it has them.
+    #[must_use]
+    pub fn morx(&self) -> Option<&morx::Morx<'a>> {
+        self.morx.as_ref()
     }
 
     /// The face's positioning, when it has any.
@@ -390,6 +399,13 @@ impl<'a> Font<'a> {
         let gpos = optional(b"GPOS")?
             .map(|table| LayoutTable::read(table, 9))
             .transpose()?;
+        // A `morx` table of a version this reader does not know is no
+        // table: the face then shapes without it.
+        let morx = match optional(b"morx")?.map(morx::Morx::read).transpose() {
+            Ok(morx) => morx,
+            Err(FontError::Unsupported) => None,
+            Err(error) => return Err(error),
+        };
         let outlines = match directory.kind {
             FontKind::TrueType => {
                 Outlines::TrueType(ttf::source(&directory, head.loca, num_glyphs)?)
@@ -408,6 +424,7 @@ impl<'a> Font<'a> {
             gdef,
             gsub,
             gpos,
+            morx,
             outlines,
             strikes,
             fingerprint,

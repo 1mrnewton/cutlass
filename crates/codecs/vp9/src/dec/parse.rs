@@ -1710,7 +1710,7 @@ static D32: ([u16; 1024], [u16; 1024]) = derive(&SCAN_DEFAULT_32X32, 5);
 /// A size's and kind's scan, neighbours, transposed positions and
 /// row-and-column bounds.
 #[allow(clippy::type_complexity)]
-fn scan_pair(
+pub(crate) fn scan_pair(
     tx: u8,
     kind: u8,
 ) -> (

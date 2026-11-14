@@ -2421,13 +2421,14 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         // With `one`, each coefficient takes its dead-zone level alone.
         let rnd = if intra { 0.42f32 } else { 0.33 };
         let n = 4usize << tx;
-        let log2n = 2 + usize::from(tx);
         let shift = u32::from(tx == 3);
         let dqi = usize::from(plane > 0);
         let (dc_q, ac_q) = (s.dq[self.seg][dqi][0], s.dq[self.seg][dqi][1]);
         let g = super::tx::gain(usize::from(tx));
         let lam = s.rd_lambda * g / 256.0;
         let (scan, nb) = scan_pair(tx, kind);
+        // Each scan position's place in the transposed block.
+        let tpos = crate::dec::parse::scan_pair(tx, kind).2;
         let probs = &s.fc.coef[usize::from(tx)][dqi][usize::from(!intra)];
         let bands: &[u8] = if tx == 0 { &BAND_4X4 } else { &BAND_8X8_PLUS };
         let max = n * n;
@@ -2479,10 +2480,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let mut peak = peaks.iter().fold(0.0f32, |m, &p| if p > m { p } else { m });
         a_nat[0] = self.fcoef[0].abs() / steps[0];
         peak = peak.max(a_nat[0]);
-        let tr = |k: usize| {
-            let rc = usize::from(scan[k]);
-            ((rc & (n - 1)) << log2n) | (rc >> log2n)
-        };
+        let tr = |k: usize| usize::from(tpos[k]);
         let mut last_sig = 0usize;
         if peak >= 0.3 {
             let mut k = max;
@@ -2521,7 +2519,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let mut d_rest = d_all;
         for k in 0..last_sig {
             let rc = usize::from(scan[k]);
-            let t = ((rc & (n - 1)) << log2n) | (rc >> log2n);
+            let t = usize::from(tpos[k]);
             let st = steps[usize::from(k > 0)];
             let a = av[k];
             let band = usize::from(bands[k]);
@@ -2595,17 +2593,13 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         if last_sig < max {
             eob_cost[last_sig] = lam * tc[usize::from(bands[last_sig])][ctx][1] as f32;
         }
-        for &rc in &scan[last_sig..max] {
-            let rc = usize::from(rc);
-            let t = ((rc & (n - 1)) << log2n) | (rc >> log2n);
-            levels[t] = 0;
+        for &t in &tpos[last_sig..max] {
+            levels[usize::from(t)] = 0;
         }
         // The best end: after a nonzero level, or none.
         let mut best = (d_tail[0] + eob_cost[0], 0usize);
         for e in 1..=last_nz {
-            let rc = usize::from(scan[e - 1]);
-            let t = ((rc & (n - 1)) << log2n) | (rc >> log2n);
-            if levels[t] == 0 {
+            if levels[usize::from(tpos[e - 1])] == 0 {
                 continue;
             }
             let end = if e < max { eob_cost[e] } else { 0.0 };
@@ -2615,10 +2609,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             }
         }
         let eob = best.1;
-        for &rc in &scan[eob..last_sig] {
-            let rc = usize::from(rc);
-            let t = ((rc & (n - 1)) << log2n) | (rc >> log2n);
-            levels[t] = 0;
+        for &t in &tpos[eob..last_sig] {
+            levels[usize::from(t)] = 0;
         }
         let zero = TxRd {
             coded: best.0 / g,

@@ -615,13 +615,19 @@ impl Fonts for FaceTable {
                     .is_some_and(|font| matches!(font.glyph_id(character), Ok(Some(_))))
         };
         // The faces that hold a little of every script come after a face
-        // the machine has for a letter's own script, which shapes it;
-        // for a sign or a picture they come first, as the plainest.
+        // the machine has for the character's own script, which shapes
+        // it and has its signs to match; for a sign or a picture many
+        // scripts share they come first, as the plainest, and so they do
+        // for Latin, Greek and Cyrillic, where plain is what is wanted.
         let (general, known): (Vec<usize>, Vec<usize>) = own
             .into_iter()
             .chain(rest)
             .partition(|at| self.general(*at));
-        let hit = if character.is_alphabetic() {
+        let own_script = !matches!(
+            &cutlass_text::script_tag(character),
+            b"Zyyy" | b"Zinh" | b"Zzzz" | b"Latn" | b"Grek" | b"Cyrl"
+        );
+        let hit = if own_script {
             known
                 .into_iter()
                 .find(draws)
@@ -1058,13 +1064,18 @@ mod tests {
         std::fs::write(folder.0.join("Siam.ttf"), THAI).expect("face");
         let table = FaceTable::scan(&[&folder.0]);
         assert_eq!(table.fallback_names(), ["Arial Unicode.ttf"]);
-        // A letter is set in the face made for its script, which shapes
-        // it; a sign, here a tone mark, in the general face.
+        // A letter and a mark of the script are set in the face made for
+        // it, which shapes them.
         assert_eq!(table.fallback('\u{E01}', false), table.face("Siam.ttf"));
-        assert_eq!(
-            table.fallback('\u{E48}', false),
-            table.face("Arial Unicode.ttf")
-        );
+        assert_eq!(table.fallback('\u{E48}', false), table.face("Siam.ttf"));
+        // A letter of Latin, and a sign every script shares, are set in
+        // the general face though another has them.
+        let latin_folder = Folder::new("general-latin");
+        std::fs::write(latin_folder.0.join("Arial Unicode.ttf"), SHAPING).expect("face");
+        std::fs::write(latin_folder.0.join("Alpha.ttf"), SHAPING).expect("face");
+        let latin = FaceTable::scan(&[&latin_folder.0]);
+        assert_eq!(latin.fallback('f', false), latin.face("Arial Unicode.ttf"));
+        assert_eq!(latin.fallback(' ', false), latin.face("Arial Unicode.ttf"));
         // With no other face for the letter, the general face draws it.
         std::fs::remove_file(folder.0.join("Siam.ttf")).expect("removed");
         let table = FaceTable::scan(&[&folder.0]);

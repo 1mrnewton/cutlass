@@ -3091,6 +3091,7 @@ dependencies = [
  "cutlass-renderer-software",
  "cutlass-riff",
  "cutlass-session",
+ "cutlass-text",
  "image",
 ]
 

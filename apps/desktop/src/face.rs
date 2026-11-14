@@ -251,6 +251,18 @@ mod tests {
             "\u{6771}\u{4EAC}\u{306F}\u{6674}\u{308C}\u{3001}\u{76F4}\u{3059} \u{4E2D}\u{6587}\u{76F4} 1\u{FE0F}\u{20E3} \u{D55C}\u{AD6D}\u{8A9E}",
             "\u{FDFD} bold, italic and underlined.",
         ];
+        // With `CUTLASS_TEXT_FRAME_SET=2`, the scripts written by
+        // syllable instead, each in whatever face the machine has for it.
+        let second = [
+            "\u{1797}\u{17B6}\u{179F}\u{17B6}\u{1781}\u{17D2}\u{1798}\u{17C2}\u{179A} \u{179F}\u{17D2}\u{179A}\u{17A1}\u{17B6}\u{1789}\u{17CB} \u{1780}\u{1798}\u{17D2}\u{1796}\u{17BB}\u{1787}\u{17B6} \u{1780}\u{17D2}\u{179A}\u{17BB}\u{1784}",
+            "\u{1019}\u{103C}\u{1014}\u{103A}\u{1019}\u{102C} \u{1019}\u{1004}\u{103A}\u{1039}\u{1002}\u{101C}\u{102C}\u{1015}\u{102B} \u{1000}\u{103B}\u{103D}\u{1014}\u{103A}\u{1010}\u{1031}\u{102C}\u{103A} \u{1000}\u{103C}\u{1031}\u{102C}\u{1004}\u{103A}",
+            "\u{F56}\u{F7C}\u{F51}\u{F0B}\u{F61}\u{F72}\u{F42}\u{F0B} \u{F56}\u{F40}\u{FB2}\u{F0B}\u{F64}\u{F72}\u{F66}\u{F0B}\u{F56}\u{F51}\u{F7A}\u{F0B}\u{F63}\u{F7A}\u{F42}\u{F66}\u{F0D} \u{F62}\u{F92}\u{FB1}\u{F63}\u{F0B}\u{F54}\u{F7C}",
+            "\u{DC3}\u{DD2}\u{D82}\u{DC4}\u{DBD} \u{DC1}\u{DCA}\u{200D}\u{DBB}\u{DD3} \u{DBD}\u{D82}\u{D9A}\u{DCF} \u{D9A}\u{DCA}\u{200D}\u{DBB}\u{DD2}\u{DBA}\u{DCF}",
+            "\u{A9A7}\u{A9B1}\u{A997}\u{A9AE} \u{A9B2}\u{A98F}\u{A9C0}\u{A9B1}\u{A9AB} \u{A98F}\u{A9BF}\u{A9A0}\u{A9BA}\u{A9B4}\u{A9A4}\u{A9C0}",
+            "\u{E9E}\u{EB2}\u{EAA}\u{EB2}\u{EA5}\u{EB2}\u{EA7} \u{12A0}\u{121B}\u{122D}\u{129B} \u{540}\u{561}\u{575}\u{565}\u{580}\u{565}\u{576} \u{10E5}\u{10D0}\u{10E0}\u{10D7}\u{10E3}\u{10DA}\u{10D8} \u{7D2}\u{7DE}\u{7CF} \u{182E}\u{1823}\u{1829}\u{182D}\u{1823}\u{182F}",
+        ];
+        let styled = std::env::var("CUTLASS_TEXT_FRAME_SET").as_deref() != Ok("2");
+        let lines = if styled { lines } else { second };
         for (index, line) in lines.iter().enumerate() {
             let id = format!("line{index}");
             let mut text = MaterialText::new(id.as_str());
@@ -262,7 +274,7 @@ mod tests {
             text.alignment = 1;
             // The last line has a pattern on three of its words, each in
             // the family's own bold or italic face where it has one.
-            if index + 1 == lines.len() {
+            if styled && index + 1 == lines.len() {
                 use cutlass_model::PatternChange;
                 let on = Some(true);
                 let none = PatternChange::default();

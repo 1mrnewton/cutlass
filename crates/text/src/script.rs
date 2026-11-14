@@ -27,6 +27,14 @@ pub(crate) enum Shaping {
     Universal,
 }
 
+/// The script `character` is written in, by the four letters ISO 15924
+/// gives it: `Zyyy` for a sign many scripts share, `Zinh` for a mark
+/// that takes its letter's, `Zzzz` for a character with none.
+#[must_use]
+pub fn script_tag(character: char) -> [u8; 4] {
+    Script::of(character).0
+}
+
 impl Script {
     pub(crate) const COMMON: Self = Self(*b"Zyyy");
     pub(crate) const INHERITED: Self = Self(*b"Zinh");

@@ -31,6 +31,7 @@ pub use layout::{
 };
 pub use mesh::{GlyphRecord, TextMesh, build, build_text};
 pub use paint::{DrawnGlyph, paint_glyphs};
+pub use script::script_tag;
 pub use shape::{MAX_CHARS, Paragraph, Shaped, ShapedGlyph, shape, shape_text};
 pub use source::{GlyphLook, TextSource, text_fill};
 pub use unicode::unicode_version;

@@ -125,11 +125,36 @@ def value_of(args: list[str], flag: str) -> str | None:
 
 def clean(args: list[str]) -> None:
     """Removes the release build of the two H.264 crates."""
+    tag_target_dir(value_of(args, "--target-dir") or os.environ.get("CARGO_TARGET_DIR"))
     subprocess.run(
         ["cargo", "clean", "--release", "-p", "cutlass-h264", "-p", "cutlass-h264-kernels", *args],
         cwd=ROOT,
         check=True,
     )
+
+
+CACHEDIR_TAG = (
+    "Signature: 8a477f597d28d172789f06886806bc55\n"
+    "# This file is a cache directory tag created by cargo.\n"
+    "# For information about cache directory tags see https://bford.info/cachedir/\n"
+)
+
+
+def tag_target_dir(given: str | None) -> None:
+    """Puts back the tag Cargo writes in a target directory it made.
+
+    Cargo 1.100 refuses to clean a target directory without its
+    CACHEDIR.TAG, and a CI cache restores `target` without it. Only a
+    directory inside this repository's `target` is tagged, so Cargo still
+    refuses to clean anything else.
+    """
+    ours = (ROOT / "target").resolve()
+    path = (ROOT / given).resolve() if given else ours
+    if path != ours and ours not in path.parents:
+        return
+    tag = path / "CACHEDIR.TAG"
+    if path.is_dir() and not tag.exists():
+        tag.write_text(CACHEDIR_TAG)
 
 
 def llvm_profdata() -> str:

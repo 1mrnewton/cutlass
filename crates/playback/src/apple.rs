@@ -246,8 +246,22 @@ impl SampleBuffer {
         if let Some(queue) = &self.live {
             return queue.resume().is_ok();
         }
+        #[cfg(target_os = "android")]
+        if let Some(queue) = &self.live {
+            return queue.resume().is_ok();
+        }
         let _ = self;
         true
+    }
+
+    /// Let the device sleep while nothing plays. Only a phone does: the
+    /// desktop outputs keep running.
+    fn rest(&self) {
+        #[cfg(target_os = "android")]
+        if let Some(queue) = &self.live {
+            queue.pause();
+        }
+        let _ = self;
     }
 
     fn clear_stream(&mut self) {
@@ -419,6 +433,14 @@ impl AudioOutput {
             *self = Self::open(host);
         }
         reopen
+    }
+
+    /// Let the device sleep until the next [`Self::wake`], on a host whose
+    /// idle output costs power. Elsewhere the device keeps running.
+    pub fn rest(&self) {
+        if let OutputKind::Buffer(queue) = &self.kind {
+            queue.rest();
+        }
     }
 
     /// Drop everything streamed and not yet played.

@@ -38,7 +38,6 @@ use std::sync::Arc;
 
 pub use surface::{PictureSurface, Surface};
 
-pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
     BitDepth, Channel, ChannelLayout, ChromaSamplePosition, CodecError, CodecParams, ColorMatrix,
     ColorPrimaries, ColorRange, ColorType, ContentLight, FrameError, ImageError, ItuT35,
@@ -46,6 +45,7 @@ pub use cutlass_codec::access::{
     SampleFormat, Samples, SharedBytes, SideData, StillImage, TextItem, Transfer, Transparency,
     VideoFrame, Yuv420High, Yuv420p, Yuv420p10, Yuv422High, Yuv422p, Yuv444High, Yuv444p,
 };
+pub use cutlass_codec::{CodecId, nal};
 pub use orient::Orientation;
 pub use video::VideoDecodeFactory;
 

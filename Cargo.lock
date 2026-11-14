@@ -2748,6 +2748,7 @@ dependencies = [
  "cutlass-ac3",
  "cutlass-aiff",
  "cutlass-alac",
+ "cutlass-av1",
  "cutlass-avi",
  "cutlass-caf",
  "cutlass-codec",
@@ -2779,6 +2780,7 @@ dependencies = [
  "cutlass-ogg",
  "cutlass-opus",
  "cutlass-pcm",
+ "cutlass-platform-android",
  "cutlass-platform-apple",
  "cutlass-playback",
  "cutlass-png",
@@ -2793,6 +2795,7 @@ dependencies = [
  "cutlass-storage",
  "cutlass-store",
  "cutlass-vorbis",
+ "cutlass-vp8",
  "cutlass-webp",
 ]
 
@@ -3050,8 +3053,12 @@ dependencies = [
 name = "cutlass-platform-android"
 version = "0.1.0"
 dependencies = [
+ "cutlass-av1",
+ "cutlass-color",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-h264",
+ "cutlass-hevc",
 ]
 
 [[package]]
@@ -3076,6 +3083,7 @@ name = "cutlass-platform-windows"
 version = "0.1.0"
 dependencies = [
  "cutlass-aac",
+ "cutlass-color",
  "cutlass-decode",
  "cutlass-encode",
  "cutlass-jpeg",
@@ -5715,6 +5723,7 @@ dependencies = [
  "cutlass-ogg",
  "cutlass-opus",
  "cutlass-pcm",
+ "cutlass-platform-android",
  "cutlass-png",
  "cutlass-prores",
  "cutlass-riff",

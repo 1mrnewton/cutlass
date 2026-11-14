@@ -9,6 +9,12 @@ description = "MediaCodec, and the AAudio preview queue."
 [dependencies]
 cutlass-decode = { path = "../decode", version = "0.1.0" }
 cutlass-encode = { path = "../encode", version = "0.1.0" }
+cutlass-color = { path = "../color", version = "0.1.0" }
+
+[dev-dependencies]
+cutlass-h264 = { path = "../codecs/h264", version = "0.1.0" }
+cutlass-av1 = { path = "../codecs/av1", version = "0.1.0" }
+cutlass-hevc = { path = "../codecs/hevc", version = "0.1.0" }
 
 # Cargo cannot mix `workspace = true` with one overridden lint, and `forbid`
 # cannot be allowed in a module. These are the workspace lints with

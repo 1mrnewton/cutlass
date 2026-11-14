@@ -42,7 +42,7 @@ use super::transform::Transform;
 use crate::format::Guid;
 use crate::limits::{self, even_picture};
 use crate::nal::{self, AvcConfig, Nal};
-use crate::nv12::{self, Layout};
+use cutlass_color::nv12::{self, Layout};
 
 /// Media Foundation time is in 100-nanosecond units.
 const HNS: i128 = 10_000_000;
@@ -561,7 +561,7 @@ impl PictureSlot {
                 stride,
                 rows,
             };
-            layout.len().ok().map(|need| (need, layout))
+            layout.byte_len().ok().map(|need| (need, layout))
         };
         strides
             .iter()

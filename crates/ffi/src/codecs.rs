@@ -38,8 +38,8 @@ pub fn readers() -> ReaderFactory {
 }
 
 /// FLAC, ALAC, MP3, AC-3, E-AC-3, Opus, Vorbis, WebP and Motion JPEG, the
-/// platform decoders for this OS, then PNG, GIF, JPEG, AAC, H.264, HEVC,
-/// MPEG-2, MPEG-4 Visual, PCM and ProRes.
+/// platform decoders for this OS, then PNG, GIF, JPEG, AAC, AV1, H.264, VP8,
+/// HEVC, MPEG-2, MPEG-4 Visual, PCM and ProRes, in the desktop's order.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
@@ -58,11 +58,16 @@ pub fn decoders() -> DecodeFactory {
     cutlass_mjpeg::register_decoders(&mut decoders);
     #[cfg(target_vendor = "apple")]
     cutlass_platform_apple::register_decoders(&mut decoders);
+    // MediaCodec: H.264, HEVC, VP9 and AV1, the phone's hardware first.
+    #[cfg(target_os = "android")]
+    cutlass_platform_android::register_decoders(&mut decoders);
     cutlass_png::register_decoders(&mut decoders);
     cutlass_gif::register_decoders(&mut decoders);
     cutlass_jpeg::register_decoders(&mut decoders);
     cutlass_aac::register_decoders(&mut decoders);
+    cutlass_av1::register_decoders(&mut decoders);
     cutlass_h264::register_decoders(&mut decoders);
+    cutlass_vp8::register_engine_decoders(&mut decoders);
     // HEVC, MPEG-2 and MPEG-4 Visual in Rust, after the platform decoders.
     // On Apple the platform claims MPEG-4 Visual. Its opener here decodes
     // that codec when the platform opener is absent.
@@ -265,8 +270,7 @@ mod tests {
 
     #[test]
     fn a_phone_opens_and_hears_an_mp3() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../codecs/mp3/tests/fixtures/sweep_22050_mono64.mp3");
+        let path = crate::crate_dir().join("../codecs/mp3/tests/fixtures/sweep_22050_mono64.mp3");
         let mut media = super::readers().open(&path).expect("open");
         let ready = media.pull_audio().expect("pull").expect("pcm");
         assert_eq!(ready.pcm.rate, 22_050);
@@ -277,8 +281,7 @@ mod tests {
     fn decode_mp3(decoders: &cutlass_decode::DecodeFactory) -> Vec<f32> {
         use cutlass_mp3_container::{Demux, Mp3Demux};
 
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../codecs/mp3/tests/fixtures/sine_44100_j128_crc.mp3");
+        let path = crate::crate_dir().join("../codecs/mp3/tests/fixtures/sine_44100_j128_crc.mp3");
         let bytes = std::fs::read(path).expect("fixture");
         let mut demux = Mp3Demux::open(std::io::Cursor::new(bytes)).expect("demux");
         let stream = &demux.streams()[0].params;
@@ -648,11 +651,9 @@ mod tests {
     /// for the frames in the next packet.
     #[test]
     fn a_phone_decodes_webp_in_rust_ahead_of_the_platform() {
-        let file = std::fs::read(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../codecs/webp/tests/fixtures/anim-mux.webp"),
-        )
-        .expect("fixture");
+        let file =
+            std::fs::read(crate::crate_dir().join("../codecs/webp/tests/fixtures/anim-mux.webp"))
+                .expect("fixture");
         let second = file
             .windows(4)
             .enumerate()

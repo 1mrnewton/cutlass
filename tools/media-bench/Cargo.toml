@@ -53,5 +53,8 @@ cutlass-png = { path = "../../crates/codecs/png", version = "0.1.0" }
 cutlass-webp = { path = "../../crates/codecs/webp", version = "0.1.0" }
 cutlass-gif = { path = "../../crates/codecs/gif", version = "0.1.0" }
 
+[target.'cfg(target_os = "android")'.dependencies]
+cutlass-platform-android = { path = "../../crates/platform-android", version = "0.1.0" }
+
 [lints]
 workspace = true

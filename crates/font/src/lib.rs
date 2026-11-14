@@ -153,6 +153,7 @@ pub struct Font<'a> {
     gpos: Option<LayoutTable<'a>>,
     outlines: Outlines<'a>,
     strikes: strike::Strikes<'a>,
+    fingerprint: u64,
 }
 
 /// Read one TrueType or OpenType face.
@@ -201,6 +202,14 @@ impl<'a> Font<'a> {
     #[must_use]
     pub fn gpos(&self) -> Option<&LayoutTable<'a>> {
         self.gpos.as_ref()
+    }
+
+    /// A number that tells this face from another: the same for the same
+    /// font data wherever it is in memory, and different, in practice,
+    /// for any other. What was made from a face can be kept under it.
+    #[must_use]
+    pub fn fingerprint(&self) -> u64 {
+        self.fingerprint
     }
 
     /// Whether the face has kerning pairs in a `kern` table.
@@ -362,6 +371,7 @@ impl<'a> Font<'a> {
             FontKind::OpenType => Outlines::OpenType(otf::source(&directory)?),
         };
         let strikes = strike::Strikes::parse(&directory)?;
+        let fingerprint = directory.fingerprint();
         Ok(Font {
             kind: directory.kind,
             units_per_em: head.units_per_em,
@@ -374,6 +384,7 @@ impl<'a> Font<'a> {
             gpos,
             outlines,
             strikes,
+            fingerprint,
         })
     }
 }
@@ -800,6 +811,8 @@ pub(crate) struct Directory<'a> {
     data: &'a [u8],
     kind: FontKind,
     tables: Vec<Table>,
+    /// Where the table records start in `data`.
+    records_at: usize,
 }
 
 impl<'a> Directory<'a> {
@@ -850,11 +863,56 @@ impl<'a> Directory<'a> {
             data: bytes,
             kind,
             tables,
+            records_at: at + 12,
         })
     }
 
     pub(crate) fn kind(&self) -> FontKind {
         self.kind
+    }
+
+    /// A hash of what the face holds: each table's name, checksum and
+    /// length, and the start and end of its bytes. Where a table sits in
+    /// the file is left out, so a face copied out of a collection has the
+    /// fingerprint of the face inside it.
+    fn fingerprint(&self) -> u64 {
+        /// Bytes hashed from each end of a table.
+        const EDGE: usize = 512;
+        // FNV-1a, 64 bits.
+        let mut hash = 0xCBF2_9CE4_8422_2325_u64;
+        let mut mix = |bytes: &[u8]| {
+            for byte in bytes {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+            }
+        };
+        for (slot, table) in self.tables.iter().enumerate() {
+            mix(&table.tag);
+            mix(&table.length.to_be_bytes());
+            // The checksum is the four bytes after the tag in the record.
+            let record = self.records_at + slot * 16;
+            if let Some(checksum) = self.data.get(record + 4..record + 8) {
+                mix(checksum);
+            }
+            let (Ok(start), Ok(length)) =
+                (usize::try_from(table.offset), usize::try_from(table.length))
+            else {
+                continue;
+            };
+            let Some(bytes) = start
+                .checked_add(length)
+                .and_then(|end| self.data.get(start..end))
+            else {
+                continue;
+            };
+            if bytes.len() <= 2 * EDGE {
+                mix(bytes);
+            } else {
+                mix(&bytes[..EDGE]);
+                mix(&bytes[bytes.len() - EDGE..]);
+            }
+        }
+        hash
     }
 
     pub(crate) fn table(&self, tag: &[u8; 4]) -> Result<&'a [u8], FontError> {
@@ -1029,6 +1087,29 @@ mod tests {
             }
         }
         panic!("missing {tag:?}");
+    }
+
+    #[test]
+    fn a_fingerprint_tells_faces_apart_and_knows_a_copy() {
+        let sample = read(SAMPLE_TTF).expect("ttf").fingerprint();
+        // The same data elsewhere in memory is the same face.
+        let moved = SAMPLE_TTF.to_vec();
+        assert_eq!(sample, read(&moved).expect("copy").fingerprint());
+        assert_ne!(sample, read(SAMPLE_OTF).expect("otf").fingerprint());
+        // The two faces of a collection differ, and a face copied out of
+        // it is the face inside it.
+        let first = read_collection(SAMPLE_TTC, 0).expect("first").fingerprint();
+        let second = read_collection(SAMPLE_TTC, 1)
+            .expect("second")
+            .fingerprint();
+        assert_ne!(first, second);
+        let copied = crate::single_face(SAMPLE_TTC, 1).expect("copied");
+        assert_eq!(read(&copied).expect("face").fingerprint(), second);
+        // One changed byte inside a table changes it.
+        let mut edited = SAMPLE_TTF.to_vec();
+        let at = table_offset(&edited, b"hmtx");
+        edited[at + 1] ^= 1;
+        assert_ne!(read(&edited).expect("edited").fingerprint(), sample);
     }
 
     #[test]

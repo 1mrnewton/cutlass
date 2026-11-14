@@ -582,6 +582,17 @@ impl<'a> Font<'a> {
             .map_or(&[], |variation| &variation.places)
     }
 
+    /// Each axis's tag and the value the face is set to along it, in the
+    /// axis's own units and the face's order: what [`Self::varied`] would
+    /// be given to set another face the same. Empty for a face that does
+    /// not vary.
+    #[must_use]
+    pub fn settings(&self) -> Vec<(Tag, f32)> {
+        self.variation
+            .as_ref()
+            .map_or_else(Vec::new, Variation::settings)
+    }
+
     /// Set a variable face to `settings`: an axis's tag and a value in
     /// the axis's own units, such as `(*b"wght", 700.0)`. A value past an
     /// axis's ends is taken as the end, an axis not named goes to its

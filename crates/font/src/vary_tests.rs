@@ -135,6 +135,47 @@ fn a_setting_becomes_a_place_along_each_axis() {
 }
 
 #[test]
+fn a_face_says_what_each_axis_is_set_to() {
+    let at = |settings: &[(Tag, f32)]| set(VARIABLE, settings).settings();
+    // Every axis, in the face's order, at its default until it is set.
+    let plain = read(VARIABLE).expect("face");
+    assert_eq!(plain.settings(), [(WGHT, 400.0), (WDTH, 100.0)]);
+    assert_eq!(at(&[]), [(WGHT, 400.0), (WDTH, 100.0)]);
+    assert_eq!(at(&[(WDTH, 75.0)]), [(WGHT, 400.0), (WDTH, 75.0)]);
+    // Kept within the axis's ends, the later of two, and the default
+    // for a value that is no number or an axis the face lacks.
+    assert_eq!(
+        at(&[(WGHT, 2_000.0), (WDTH, 10.0)]),
+        [(WGHT, 900.0), (WDTH, 50.0)]
+    );
+    assert_eq!(
+        at(&[(WGHT, 900.0), (WGHT, 650.0), (*b"slnt", -10.0)]),
+        [(WGHT, 650.0), (WDTH, 100.0)]
+    );
+    assert_eq!(
+        at(&[(WGHT, f32::NAN), (WDTH, f32::INFINITY)]),
+        [(WGHT, 400.0), (WDTH, 100.0)]
+    );
+    // What it says sets another face the same.
+    let bold = set(VARIABLE, &[(WGHT, 700.0), (WDTH, 80.0)]);
+    let again = set(VARIABLE, &bold.settings());
+    assert_eq!(again.variations(), bold.variations());
+    assert_eq!(again.fingerprint(), bold.fingerprint());
+    // A face pinned to a setting says the pin, and one set back to its
+    // default says the defaults.
+    let pinned = crate::pin_instance(VARIABLE, &[(WGHT, 700.0)]).expect("pinned");
+    assert_eq!(
+        read(&pinned).expect("face").settings(),
+        [(WGHT, 700.0), (WDTH, 100.0)]
+    );
+    let mut back = bold.clone();
+    back.set_variations(&[]).expect("set");
+    assert_eq!(back.settings(), [(WGHT, 400.0), (WDTH, 100.0)]);
+    // A face that does not vary has none.
+    assert!(read(STATIC).expect("face").settings().is_empty());
+}
+
+#[test]
 fn advances_change_by_the_table_of_advances() {
     let at = |settings: &[(Tag, f32)]| advances(&set(VARIABLE, settings));
     assert_eq!(at(&[]), [500, 600, 500, 250, 0, 700]);

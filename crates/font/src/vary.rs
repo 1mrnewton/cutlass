@@ -218,6 +218,24 @@ impl<'a> Fvar<'a> {
         }
         Ok(fine.into_iter().map(cut).collect())
     }
+
+    /// The value each axis has under `settings`, in its own units: the
+    /// last setting that names it, kept within its ends, and its default
+    /// when none does or the value is no number.
+    fn values(&self, settings: &[(Tag, f32)]) -> Vec<f32> {
+        self.axes
+            .iter()
+            .map(|axis| {
+                settings
+                    .iter()
+                    .rev()
+                    .find(|(tag, _)| *tag == axis.tag)
+                    .map(|(_, value)| *value)
+                    .filter(|value| value.is_finite())
+                    .map_or(axis.default, |value| value.clamp(axis.min, axis.max))
+            })
+            .collect()
+    }
 }
 
 /// 1 as a 16.16 fixed-point number.
@@ -744,6 +762,9 @@ pub(crate) struct Variation<'a> {
     pub(crate) layout: Option<Store<'a>>,
     /// The place along each axis: every one 0 as the face is read.
     pub(crate) places: Vec<i16>,
+    /// The value each axis is set to, in the axis's own units; none
+    /// while every axis is at its default.
+    values: Vec<f32>,
     /// Whether any place is not 0.
     pub(crate) set: bool,
     /// How much each shared peak of `gvar`, and each region of `HVAR`,
@@ -774,6 +795,7 @@ impl<'a> Variation<'a> {
                 .and_then(|table| Hvar::read(table).ok()),
             layout: directory.table(b"GDEF").ok().and_then(layout_store),
             places: vec![0; axes],
+            values: Vec::new(),
             set: false,
             gvar_weights: Vec::new(),
             hvar_weights: Vec::new(),
@@ -793,6 +815,7 @@ impl<'a> Variation<'a> {
     /// Set the face to `settings`, and give its fingerprint there.
     pub(crate) fn set(&mut self, settings: &[(Tag, f32)]) -> Result<u64, FontError> {
         let places = self.fvar.normalize(settings, self.avar)?;
+        self.values = self.fvar.values(settings);
         self.set = places.iter().any(|place| *place != 0);
         self.gvar_weights = match (&self.gvar, self.set) {
             (Some(gvar), true) => gvar.weights(&places),
@@ -804,6 +827,24 @@ impl<'a> Variation<'a> {
         };
         self.places = places;
         Ok(self.fingerprint())
+    }
+
+    /// Each axis's tag and the value it is set to, in the axis's own
+    /// units and the face's order.
+    pub(crate) fn settings(&self) -> Vec<(Tag, f32)> {
+        let defaults;
+        let values = if self.values.is_empty() {
+            defaults = self.fvar.values(&[]);
+            &defaults
+        } else {
+            &self.values
+        };
+        self.fvar
+            .axes
+            .iter()
+            .zip(values)
+            .map(|(axis, value)| (axis.tag, *value))
+            .collect()
     }
 
     /// The deltas of the layout tables' values where the face is set;

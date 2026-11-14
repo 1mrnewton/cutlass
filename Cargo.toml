@@ -54,6 +54,7 @@ members = [
     "crates/ffi",
     "crates/ffi-bindings",
     "crates/font",
+    "crates/fonts",
     "crates/generated",
     "crates/gpu",
     "crates/icons",

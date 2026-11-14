@@ -615,7 +615,7 @@ fn sized<const W: usize>(b: &mut Block<'_>) {
                 }
             }
             (Some(fx), None) if W <= 8 => {
-                let t = Taps::new(&fx);
+                let t = Taps::new(fx);
                 let mut r = 0;
                 while r + 1 < h {
                     let (a, b) = t.h8x2(src, at + r * ss - 3, ss);
@@ -652,7 +652,7 @@ fn sized<const W: usize>(b: &mut Block<'_>) {
                 }
             }
             (Some(fx), None) => {
-                let t = Taps::new(&fx);
+                let t = Taps::new(fx);
                 for r in 0..h {
                     let o = at + r * ss - 3;
                     put::<W>(
@@ -666,11 +666,11 @@ fn sized<const W: usize>(b: &mut Block<'_>) {
                 }
             }
             (None, Some(fy)) => {
-                let t = Taps::new(&fy);
+                let t = Taps::new(fy);
                 down::<W>(&t, src, at - 3 * ss, ss, h, dst, ds, avg);
             }
             (Some(fx), Some(fy)) => {
-                let (tx, ty) = (Taps::new(&fx), Taps::new(&fy));
+                let (tx, ty) = (Taps::new(fx), Taps::new(fy));
                 let top = at - 3 * ss - 3;
                 let mut r0 = 0;
                 if W <= 8 {

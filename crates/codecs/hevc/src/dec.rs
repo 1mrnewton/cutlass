@@ -717,12 +717,13 @@ impl HevcDecoder {
         // as any of them is released: done, or down to its last rows with
         // threads to spare.
         let (frames, rows) = self.split(ready.wavefront());
-        // With a picture to each thread, as many threads decode at once,
-        // and up to half as many pictures again wait ready: a picture that
-        // waits for the rows of a reference lets one of them run in its
-        // place (see `Frame::run`). Rows of a picture on several threads
-        // keep one picture to a thread.
-        let slots = if rows == 1 && frames > 1 { frames } else { 0 };
+        // With a picture to each thread, one more thread than that decodes
+        // at once, so that a core is not left idle while a thread that
+        // waited for rows wakes, and up to half as many pictures again wait
+        // ready: a picture that waits for the rows of a reference lets one
+        // of them run in its place (see `Frame::run`). Rows of a picture on
+        // several threads keep one picture to a thread.
+        let slots = if rows == 1 && frames > 1 { frames + 1 } else { 0 };
         self.shared.frames.set_slots(slots);
         let frames = if slots > 0 {
             frames + frames / 2

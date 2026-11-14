@@ -93,20 +93,30 @@ pub struct Pic<P> {
 /// What makes the caller's picture of a finished frame.
 pub type Present<P> = fn(&Pic<P>) -> Result<cutlass_decode::VideoFrame, cutlass_decode::CodecError>;
 
-/// A buffer for a new picture: a picture's whose readers are gone when
-/// one of `spare` fits, else a new one.
+/// The most buffers [`writer`] keeps for later pictures.
+pub const SPARE: usize = 16;
+
+/// A buffer for a new picture: one of `spare` that fits and whose readers
+/// are gone, else a new one. Buffers still read stay in `spare` until
+/// they are free; ones of another size go when the list is full.
 pub fn writer<P: Copy + Default>(
     dims: &Dims,
     spare: &mut Vec<(Dims, Arc<SharedFrame<P>>)>,
 ) -> FrameWriter<P> {
-    while let Some(i) = spare
+    let fits = |d: &Dims| d.stride == dims.stride && d.rows == dims.rows;
+    if let Some(i) = spare
         .iter()
-        .position(|(d, _)| d.stride == dims.stride && d.rows == dims.rows)
+        .position(|(d, b)| fits(d) && Arc::strong_count(b) == 1 && Arc::weak_count(b) == 0)
     {
         let (_, buf) = spare.swap_remove(i);
         if let Ok(w) = FrameWriter::restart(buf) {
             return w;
         }
+    }
+    if spare.len() >= SPARE
+        && let Some(i) = spare.iter().position(|(d, _)| !fits(d))
+    {
+        spare.swap_remove(i);
     }
     FrameWriter::new(dims.stride, dims.rows, dims.shifts())
 }

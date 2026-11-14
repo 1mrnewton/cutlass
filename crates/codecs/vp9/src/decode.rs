@@ -344,23 +344,21 @@ impl Decoder {
         &mut self.spare8
     }
 
-    /// Takes back a picture's buffers when this was its last holder.
+    /// Takes back a picture's buffers for a later picture: one still read
+    /// (by a worker, or the caller's copy of a shown frame) waits in the
+    /// list until its readers are gone, rather than being freed then and
+    /// a new one allocated and cleared.
     pub fn recycle(&mut self, held: Held) {
+        fn keep<P>(spare: &mut Spare<P>, f: &Pic<P>) {
+            if spare.len() < crate::dec::frame::SPARE
+                && !spare.iter().any(|(_, b)| Arc::ptr_eq(b, &f.buf))
+            {
+                spare.push((f.dims, Arc::clone(&f.buf)));
+            }
+        }
         match held {
-            Held::Eight(f) => {
-                if let Ok(f) = Arc::try_unwrap(f)
-                    && self.spare8.len() < 4
-                {
-                    self.spare8.push((f.dims, f.buf));
-                }
-            }
-            Held::Deep(f) => {
-                if let Ok(f) = Arc::try_unwrap(f)
-                    && self.spare16.len() < 4
-                {
-                    self.spare16.push((f.dims, f.buf));
-                }
-            }
+            Held::Eight(f) => keep(&mut self.spare8, &f),
+            Held::Deep(f) => keep(&mut self.spare16, &f),
         }
     }
 }

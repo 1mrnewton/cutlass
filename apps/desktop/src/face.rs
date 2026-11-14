@@ -402,8 +402,24 @@ mod tests {
             "\u{A9A7}\u{A9B1}\u{A997}\u{A9AE} \u{A9B2}\u{A98F}\u{A9C0}\u{A9B1}\u{A9AB} \u{A98F}\u{A9BF}\u{A9A0}\u{A9BA}\u{A9B4}\u{A9A4}\u{A9C0}",
             "\u{E9E}\u{EB2}\u{EAA}\u{EB2}\u{EA5}\u{EB2}\u{EA7} \u{12A0}\u{121B}\u{122D}\u{129B} \u{540}\u{561}\u{575}\u{565}\u{580}\u{565}\u{576} \u{10E5}\u{10D0}\u{10E0}\u{10D7}\u{10E3}\u{10DA}\u{10D8} \u{7D2}\u{7DE}\u{7CF} \u{182E}\u{1823}\u{1829}\u{182D}\u{1823}\u{182F}",
         ];
-        let styled = std::env::var("CUTLASS_TEXT_FRAME_SET").as_deref() != Ok("2");
-        let lines = if styled { lines } else { second };
+        let set = std::env::var("CUTLASS_TEXT_FRAME_SET").unwrap_or_default();
+        // With `CUTLASS_TEXT_FRAME_SET=3`, Mongolian in columns: two
+        // lines down the page, the first on the left.
+        let columns = set == "3";
+        let third = [
+            "\u{182E}\u{1823}\u{1829}\u{182D}\u{1823}\u{182F} \u{182A}\u{1822}\u{1834}\u{1822}\u{182D}\n\u{182E}\u{1823}\u{1829}\u{182D}\u{1823}\u{182F} \u{1824}\u{182F}\u{1824}\u{1830} 123",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ];
+        let styled = set != "2" && !columns;
+        let lines = match set.as_str() {
+            "2" => second,
+            "3" => third,
+            _ => lines,
+        };
         for (index, line) in lines.iter().enumerate() {
             let id = format!("line{index}");
             let mut text = MaterialText::new(id.as_str());
@@ -414,8 +430,9 @@ mod tests {
             text.font_path = std::env::var("CUTLASS_TEXT_FRAME_FACE")
                 .unwrap_or_else(|_| fonts.name().to_owned());
             text.text_color = "#FFFFFF".to_owned();
-            text.line_max_width = 1_150.0;
-            text.alignment = 1;
+            text.line_max_width = if columns { 600.0 } else { 1_150.0 };
+            text.alignment = if columns { 3 } else { 1 };
+            text.typesetting = i32::from(columns);
             // The last line has a pattern on three of its words, each in
             // the family's own bold or italic face where it has one.
             if styled && index + 1 == lines.len() {
@@ -438,7 +455,11 @@ mod tests {
             segment.render_index = i32::try_from(index).expect("index") + 1;
             #[allow(clippy::cast_precision_loss)]
             {
-                segment.clip.transform.y = 0.8 - index as f64 * 0.27;
+                segment.clip.transform.y = if columns {
+                    0.0
+                } else {
+                    0.8 - index as f64 * 0.27
+                };
             }
             draft.tracks[0].segments.push(segment);
         }

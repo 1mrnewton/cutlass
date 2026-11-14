@@ -3776,6 +3776,37 @@ fn sad_ref(
     Some(u64::from(sad::sad(a, ss, b, stride, w, h)))
 }
 
+/// [`sad_ref`] at four vectors at once, each within `range`.
+fn sad4_ref(
+    (src, ss): (&[u8], usize),
+    ((data, stride), (rw, rh)): ((&[u8], usize), (i32, i32)),
+    (x, y, w, h): (usize, usize, usize, usize),
+    pts: [(i32, i32); 4],
+    range: i32,
+) -> [Option<u64>; 4] {
+    let at = |(dr, dc): (i32, i32)| -> Option<usize> {
+        let (bx, by) = (x as i32 + dc, y as i32 + dr);
+        (dr.abs() <= range
+            && dc.abs() <= range
+            && bx >= 0
+            && by >= 0
+            && bx + w as i32 <= rw
+            && by + h as i32 <= rh)
+            .then(|| by as usize * stride + bx as usize)
+    };
+    let offs = pts.map(at);
+    let Some(any) = offs.iter().flatten().next().copied() else {
+        return [None; 4];
+    };
+    let b = offs.map(|o| &data[o.unwrap_or(any)..]);
+    let v = sad::sad4(&src[y * ss + x..], ss, b, stride, w, h);
+    let mut out = [None; 4];
+    for k in 0..4 {
+        out[k] = offs[k].map(|_| u64::from(v[k]));
+    }
+    out
+}
+
 /// A superblock's whole-sample search on LAST, made ahead of coding.
 #[allow(clippy::type_complexity)]
 fn search_in(
@@ -3855,12 +3886,10 @@ fn search_in(
             moved = false;
             iters += 1;
             let center = best;
-            for (dr, dc) in [(-step, 0), (step, 0), (0, -step), (0, step)] {
-                let (r, c) = (center.0 + dr, center.1 + dc);
-                if r.abs() > range || c.abs() > range {
-                    continue;
-                }
-                if let Some(v) = sad_ref(src, rp, (x, y, w, h), r, c)
+            let pts = [(-step, 0), (step, 0), (0, -step), (0, step)]
+                .map(|(dr, dc)| (center.0 + dr, center.1 + dc));
+            for (&(r, c), v) in pts.iter().zip(sad4_ref(src, rp, (x, y, w, h), pts, range)) {
+                if let Some(v) = v
                     && v < best_sad
                 {
                     best_sad = v;

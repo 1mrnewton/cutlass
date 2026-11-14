@@ -190,37 +190,17 @@ impl FrameEncoder {
         // their update are updated, and the symbols written with them.
         let head = self.headers(key, fp, None, None)?;
         let parsed = header::parse(self.dec.persist(), &head)?;
-        let (counts, mvs, segmap, pic, ntiles) = self.tiles(&parsed, fp)?;
-        let old = flat_coef(&parsed.fc);
-        let new = coef_updates(&old, &counts, if lossless { 0 } else { 3 });
-        let old_nc = probs::flatten(&parsed.fc);
-        let new_nc = probs::updates(&old_nc, &counts, &Self::coded(key, fp));
+        let (counts, mvs, segmap, pic, coded) = self.tiles(&parsed, fp, key)?;
+        let Written {
+            old,
+            new,
+            old_nc,
+            new_nc,
+            tiles,
+        } = coded;
+        let ntiles = tiles.len();
         let head = self.headers(key, fp, Some((&old, &new)), Some((&old_nc, &new_nc)))?;
         let mut data = head;
-        // Each tile's symbols into its own coder, on threads.
-        let write = |t: &TileWork| -> Result<Vec<u8>, CodecError> {
-            let mut w = BoolWriter::new();
-            for &(bit, id) in &t.out {
-                w.write(u32::from(bit), tile::prob_of(id, &new, &new_nc));
-            }
-            w.finish()
-        };
-        let work = &self.work[..ntiles];
-        let tiles: Vec<Result<Vec<u8>, CodecError>> = if ntiles == 1 {
-            vec![write(&work[0])]
-        } else {
-            std::thread::scope(|sc| {
-                let hs: Vec<_> = work.iter().map(|t| sc.spawn(|| write(t))).collect();
-                hs.into_iter()
-                    .map(|h| {
-                        h.join().unwrap_or(Err(CodecError::Malformed {
-                            at_bit: 0,
-                            what: "vp9 encoder thread",
-                        }))
-                    })
-                    .collect()
-            })
-        };
         for (i, d) in tiles.into_iter().enumerate() {
             let d = d?;
             if i + 1 < ntiles {
@@ -377,13 +357,14 @@ impl FrameEncoder {
         &mut self,
         parsed: &Parsed<'_>,
         fp: FrameParams,
+        key: bool,
     ) -> Result<
         (
             prob::Counts,
             Vec<frame::MvRef>,
             Vec<u8>,
             Arc<Pic<u8>>,
-            usize,
+            Written,
         ),
         CodecError,
     > {
@@ -629,55 +610,72 @@ impl FrameEncoder {
                 r?;
             }
         }
-        // The tiles' columns into the picture, their state into the
-        // frame's; then the loop filter, row by row.
+        // The tiles' state into the frame's, and the probability updates
+        // it pays for. Then, at once: each plane's columns into the
+        // picture and its loop filter, and each tile's symbols into its
+        // own coder.
         let buf = Arc::clone(writer.shared());
         let mut masks = vec![lpf::Mask::default(); sb_rows * sb_cols];
         let mut mvs = vec![frame::MvRef::default(); mi_cols * mi_rows];
         let mut counts = prob::Counts::new();
-        {
-            let mut views = writer.tails().map(View::of);
-            for (i, t) in work.iter().enumerate() {
-                let (c0, c1) = (edges[i], edges[i + 1]);
-                for (p, v) in views.iter_mut().enumerate() {
-                    let ss = usize::from(p > 0);
-                    let (x0, x1) = ((c0 * 8) >> ss, ((c1 * 8) >> ss).min(dims.stride[p]));
-                    let stride = v.stride;
-                    for row in 0..dims.rows[p] {
-                        v.data[row * stride + x0..row * stride + x1]
-                            .copy_from_slice(&t.pix[p][row * stride + x0..row * stride + x1]);
-                    }
-                }
-                let st = &t.state;
-                let w = c1 - c0;
-                let tsb = w.div_ceil(8);
-                for r in 0..sb_rows {
-                    masks[r * sb_cols + c0 / 8..r * sb_cols + c0 / 8 + tsb]
-                        .copy_from_slice(&st.masks[r * tsb..r * tsb + tsb]);
-                }
-                for r in 0..mi_rows {
-                    mvs[r * mi_cols + c0..r * mi_cols + c1]
-                        .copy_from_slice(&st.mvs[r * w..r * w + w]);
-                }
-                counts.add(&st.counts);
+        for (i, t) in work.iter().enumerate() {
+            let (c0, c1) = (edges[i], edges[i + 1]);
+            let st = &t.state;
+            let w = c1 - c0;
+            let tsb = w.div_ceil(8);
+            for r in 0..sb_rows {
+                masks[r * sb_cols + c0 / 8..r * sb_cols + c0 / 8 + tsb]
+                    .copy_from_slice(&st.masks[r * tsb..r * tsb + tsb]);
             }
-            if filter_on {
-                // Luma on one thread, the chroma planes on another.
-                let [vy, vu, vv] = &mut views;
-                let (m, l, g) = (&masks, &levels, &geo);
-                std::thread::scope(|sc| {
-                    sc.spawn(move || {
-                        for r in 0..sb_rows {
-                            lf::sb_row_plane(vy, 0, m, &[], l, g, r);
+            for r in 0..mi_rows {
+                mvs[r * mi_cols + c0..r * mi_cols + c1].copy_from_slice(&st.mvs[r * w..r * w + w]);
+            }
+            counts.add(&st.counts);
+        }
+        let lossless = h.lossless;
+        let old = flat_coef(&parsed.fc);
+        let new = coef_updates(&old, &counts, if lossless { 0 } else { 3 });
+        let old_nc = probs::flatten(&parsed.fc);
+        let new_nc = probs::updates(&old_nc, &counts, &Self::coded(key, fp));
+        let write = |t: &TileWork| -> Result<Vec<u8>, CodecError> {
+            let mut w = BoolWriter::new();
+            for &(bit, id) in &t.out {
+                w.write(u32::from(bit), tile::prob_of(id, &new, &new_nc));
+            }
+            w.finish()
+        };
+        let work = &*work;
+        let (m, l, g, ed) = (&masks, &levels, &geo, &edges);
+        let tiles = std::thread::scope(|sc| {
+            for (p, mut v) in writer.tails().map(View::of).into_iter().enumerate() {
+                sc.spawn(move || {
+                    let ss = usize::from(p > 0);
+                    let stride = v.stride;
+                    for (i, t) in work.iter().enumerate() {
+                        let (x0, x1) = ((ed[i] * 8) >> ss, ((ed[i + 1] * 8) >> ss).min(stride));
+                        for row in 0..dims.rows[p] {
+                            v.data[row * stride + x0..row * stride + x1]
+                                .copy_from_slice(&t.pix[p][row * stride + x0..row * stride + x1]);
                         }
-                    });
-                    for r in 0..sb_rows {
-                        lf::sb_row_plane(vu, 1, m, &[], l, g, r);
-                        lf::sb_row_plane(vv, 2, m, &[], l, g, r);
+                    }
+                    if filter_on {
+                        for r in 0..sb_rows {
+                            lf::sb_row_plane(&mut v, p, m, &[], l, g, r);
+                        }
                     }
                 });
             }
-        }
+            let write = &write;
+            let hs: Vec<_> = work.iter().map(|t| sc.spawn(move || write(t))).collect();
+            hs.into_iter()
+                .map(|h| {
+                    h.join().unwrap_or(Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "vp9 encoder thread",
+                    }))
+                })
+                .collect::<Vec<_>>()
+        });
         writer.publish(usize::MAX);
         drop(writer);
         let pic = Arc::new(Pic {
@@ -724,8 +722,29 @@ impl FrameEncoder {
                 // Left out: its share stands, and its count goes on.
             }
         }
-        Ok((counts, mvs, segmap, pic, ntiles))
+        Ok((
+            counts,
+            mvs,
+            segmap,
+            pic,
+            Written {
+                old,
+                new,
+                old_nc,
+                new_nc,
+                tiles,
+            },
+        ))
     }
+}
+
+/// A frame's probability updates and its tiles, written with them.
+struct Written {
+    old: [u8; 1728],
+    new: [u8; 1728],
+    old_nc: probs::Flat,
+    new_nc: probs::Flat,
+    tiles: Vec<Result<Vec<u8>, CodecError>>,
 }
 
 /// The SAD one bit of rate is worth: libvpx's `sad_per_bit16` from the

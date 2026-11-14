@@ -48,6 +48,39 @@ pub fn sad(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u32 
 }
 
 #[inline(always)]
+fn sad4_w<const W: usize>(a: &[u8], sa: usize, b: [&[u8]; 4], sb: usize, h: usize) -> [u32; 4] {
+    let mut acc = [0u32; 4];
+    for r in 0..h {
+        let Some(x) = a[r * sa..].first_chunk::<W>() else {
+            continue;
+        };
+        for (k, bk) in b.iter().enumerate() {
+            if let Some(y) = bk[r * sb..].first_chunk::<W>() {
+                let mut s = 0u32;
+                for i in 0..W {
+                    s += u32::from(x[i].abs_diff(y[i]));
+                }
+                acc[k] += s;
+            }
+        }
+    }
+    acc
+}
+
+/// [`sad`] of one block against four (libvpx's `sad4d`): the source rows
+/// are read once.
+#[inline]
+pub fn sad4(a: &[u8], sa: usize, b: [&[u8]; 4], sb: usize, w: usize, h: usize) -> [u32; 4] {
+    wide(|| match w {
+        64 => sad4_w::<64>(a, sa, b, sb, h),
+        32 => sad4_w::<32>(a, sa, b, sb, h),
+        16 => sad4_w::<16>(a, sa, b, sb, h),
+        8 => sad4_w::<8>(a, sa, b, sb, h),
+        _ => b.map(|bk| sad(a, sa, bk, sb, w, h)),
+    })
+}
+
+#[inline(always)]
 fn sse_w<const W: usize>(a: &[u8], sa: usize, b: &[u8], sb: usize, h: usize) -> u64 {
     let mut acc = 0u64;
     for r in 0..h {

@@ -554,6 +554,51 @@ struct Normal<'n> {
     join: &'n dyn Fn(char, char) -> Option<char>,
 }
 
+/// How each character stands among the marks around it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Group {
+    /// On its own: no mark follows it.
+    Alone,
+    /// A letter with marks after it, or one of those marks.
+    Marked,
+    /// The same, with a variation selector among the marks.
+    Selected,
+}
+
+/// Find the groups of a letter and the marks after it. A mark that
+/// starts the text with no mark after it is on its own.
+fn groups(glyphs: &[Glyph]) -> Vec<Group> {
+    let marks: Vec<bool> = glyphs
+        .iter()
+        .map(|glyph| props(glyph.character).is_mark())
+        .collect();
+    let mut found = vec![Group::Alone; glyphs.len()];
+    let mut index = 1;
+    while index < glyphs.len() {
+        if !marks[index] {
+            index += 1;
+            continue;
+        }
+        let start = index - 1;
+        let end = (index..glyphs.len())
+            .find(|at| !marks[*at])
+            .unwrap_or(glyphs.len());
+        let group = if glyphs[start..end]
+            .iter()
+            .any(|glyph| selects(glyph.character))
+        {
+            Group::Selected
+        } else {
+            Group::Marked
+        };
+        for place in &mut found[start..end] {
+            *place = group;
+        }
+        index = end;
+    }
+    found
+}
+
 /// Map characters to the face's glyphs. An accented letter the face
 /// lacks is drawn as its letter and its accent; a letter and accent the
 /// face has as one glyph are drawn as that glyph; and a letter's marks
@@ -564,29 +609,31 @@ fn normalize(
     normal: &Normal<'_>,
 ) -> Result<Vec<Glyph>, TextError> {
     let join = normal.join;
+    let groups = groups(&glyphs);
     // Text with no marks in it is not put back together: a letter taken
     // apart for its parts' forms stays apart, as HarfBuzz leaves it.
-    let composes = normal.whole_first
-        || glyphs
-            .iter()
-            .skip(1)
-            .any(|glyph| props(glyph.character).is_mark());
-    // Take apart what the face cannot draw whole.
+    let composes = groups.iter().any(|group| *group != Group::Alone);
+    // Take apart what the face cannot draw whole. A letter with marks
+    // after it is taken apart even when the face has it whole, and so
+    // are its marks: sorted and put together again below, they may make
+    // another whole, or none. With a selector among the marks, all are
+    // left as they were typed.
     let mut parts: Vec<Glyph> = Vec::with_capacity(glyphs.len());
-    for glyph in glyphs {
-        if normal.whole_first && has(font, glyph.character) {
+    for (glyph, group) in glyphs.into_iter().zip(groups) {
+        if normal.whole_first && group != Group::Marked && has(font, glyph.character) {
             parts.push(glyph);
             continue;
         }
         let from = parts.len();
-        let apart = !(normal.keeps_whole)(glyph.character)
+        let apart = group != Group::Selected
+            && !(normal.keeps_whole)(glyph.character)
             && take_apart(
                 font,
                 normal.apart,
                 &glyph,
                 glyph.character,
                 &mut parts,
-                !normal.whole_first,
+                !normal.whole_first || group == Group::Marked,
                 0,
             );
         if !apart {
@@ -1764,6 +1811,8 @@ mod tests {
         // A vowel in two parts is taken apart though the face has it
         // whole.
         assert_eq!(tibt("\u{F40}\u{F73}"), "[1=0+700|6=0+0|4=0@-200,50+0]");
+        // But not with a selector among the letter's marks.
+        assert_eq!(tibt("\u{F40}\u{F73}\u{FE00}"), "[1=0+700|46=0+0]");
         assert_eq!(
             tibt("\u{F40}\u{FB2}\u{F7E}"),
             "[1=0+700|3=0@-200,50+0|7=0@-200,-30+0]"
@@ -1929,6 +1978,8 @@ mod tests {
             bali("\u{1B06}\u{20}\u{1B05}\u{1B36}"),
             "[43=0+1400|32=3+250|41=4+1100|44=4@-400,50+0]"
         );
+        // A letter with a selector after it is not taken apart at all.
+        assert_eq!(bali("\u{1B06}\u{FE00}"), "[43=0+1400]");
     }
 
     #[test]
@@ -1939,6 +1990,14 @@ mod tests {
         let plain = |script: &[u8; 4], text: &str| shaped_in(PLAIN, script, text);
         // Each expected string is what HarfBuzz 14.2 prints for the face.
         assert_eq!(plain(b"Tibt", "\u{F40}\u{F92}"), "[1=0+700|2=0+0]");
+        // A vowel in two parts after a letter is still taken apart: its
+        // parts are sorted among the letter's other marks, and these two
+        // are never put together again.
+        assert_eq!(
+            plain(b"Tibt", "\u{F40}\u{F73}"),
+            "[1=0+700|6=0+0|4=0@-200,50+0]"
+        );
+        assert_eq!(plain(b"Tibt", "\u{F73}"), "[46=0+0]");
         assert_eq!(plain(b"Sinh", "\u{D9A}\u{DDC}"), "[10=0+800|40=0+1200]");
         assert_eq!(
             plain(b"Sinh", "\u{DBB}\u{DCA}\u{200D}\u{D9A}"),

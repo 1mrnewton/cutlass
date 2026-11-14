@@ -22,6 +22,11 @@ use crate::tables::{CABAC_MN, RANGE_LPS, TRANS_LPS, TRANS_MPS};
 pub struct H264Encoder {
     width: u32,
     height: u32,
+    /// Whole macroblocks: the encoder predicts and codes this size, the
+    /// SPS crops it to `width` × `height`, and every decoder predicts from
+    /// the uncropped reconstruction, so the encoder's planes are this size.
+    coded_w: u32,
+    coded_h: u32,
     mb_w: u32,
     mb_h: u32,
     length_size: u8,
@@ -105,6 +110,8 @@ impl H264Encoder {
         Ok(Self {
             width: params.width,
             height: params.height,
+            coded_w: mb_w * 16,
+            coded_h: mb_h * 16,
             mb_w,
             mb_h,
             length_size,
@@ -129,10 +136,13 @@ impl H264Encoder {
     }
 
     fn hold(&mut self, input: &VideoInput, duration: i64) -> Held {
+        let picture = &input.picture;
+        let (w, h) = (self.width as usize, self.height as usize);
+        let (cw, ch) = (self.coded_w as usize, self.coded_h as usize);
         let frame = Held {
-            y: input.picture.y().to_vec(),
-            u: input.picture.u().to_vec(),
-            v: input.picture.v().to_vec(),
+            y: pad_plane(picture.y(), (w, h), (cw, ch)),
+            u: pad_plane(picture.u(), (w / 2, h / 2), (cw / 2, ch / 2)),
+            v: pad_plane(picture.v(), (w / 2, h / 2), (cw / 2, ch / 2)),
             pts: input.pts,
             duration,
             timescale: input.timescale,
@@ -151,8 +161,8 @@ impl H264Encoder {
                 y: &frame.y,
                 u: &frame.u,
                 v: &frame.v,
-                width: self.width,
-                height: self.height,
+                width: self.coded_w,
+                height: self.coded_h,
             },
             self.qp,
         );
@@ -182,14 +192,14 @@ impl H264Encoder {
             y: &frame.y,
             u: &frame.u,
             v: &frame.v,
-            width: self.width,
-            height: self.height,
+            width: self.coded_w,
+            height: self.coded_h,
         };
         let poc = (frame.index.wrapping_mul(2)) & 15;
         let slice = if self
             .anchor
             .as_ref()
-            .is_some_and(|plane| plane.y == frame.y && plane.u == frame.u && plane.v == frame.v)
+            .is_some_and(|plane| self.shows_the_same(plane, &frame))
         {
             p_skip_slice(self.mb_w, self.mb_h, self.next_fn, poc, self.qp)
         } else {
@@ -226,8 +236,8 @@ impl H264Encoder {
             y: &frame.y,
             u: &frame.u,
             v: &frame.v,
-            width: self.width,
-            height: self.height,
+            width: self.coded_w,
+            height: self.coded_h,
         };
         let poc = (frame.index.wrapping_mul(2)) & 15;
         let slice = b_slice(
@@ -249,6 +259,19 @@ impl H264Encoder {
             frame.timescale,
             false,
         ))
+    }
+
+    /// Whether `frame` matches `plane` everywhere the crop shows. A P_Skip
+    /// copies the reference's padding too, so the padding need not match.
+    fn shows_the_same(&self, plane: &Planes, frame: &Held) -> bool {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let cw = self.coded_w as usize;
+        let same = |a: &[u8], b: &[u8], w: usize, h: usize, stride: usize| {
+            (0..h).all(|row| a[row * stride..row * stride + w] == b[row * stride..row * stride + w])
+        };
+        same(&plane.y, &frame.y, w, h, cw)
+            && same(&plane.u, &frame.u, w / 2, h / 2, cw / 2)
+            && same(&plane.v, &frame.v, w / 2, h / 2, cw / 2)
     }
 
     fn unit(&self, ref_idc: u8, kind: u8, slice: &[u8]) -> Vec<u8> {
@@ -292,7 +315,10 @@ impl H264Encoder {
         let packet = Packet::video(unit.to_vec(), pts, 1, 1, true);
         self.mirror.push(&packet)?;
         if keep {
-            let Some((y, u, v)) = self.mirror.picture_at(pts) else {
+            let coded = self.coded_w as usize * self.coded_h as usize;
+            let Some((y, u, v)) = self.mirror.coded_picture_at(pts).filter(|(y, u, v)| {
+                y.len() == coded && u.len() == coded / 4 && v.len() == coded / 4
+            }) else {
                 return Err(CodecError::Malformed {
                     at_bit: 0,
                     what: "reference picture",
@@ -389,6 +415,26 @@ impl VideoEncoder for H264Encoder {
     fn extradata(&self) -> &[u8] {
         &self.extra
     }
+}
+
+/// `src` at `size`, copied into a `coded` plane with its last column and
+/// row repeated into the padding.
+fn pad_plane(src: &[u8], size: (usize, usize), coded: (usize, usize)) -> Vec<u8> {
+    let ((w, h), (cw, ch)) = (size, coded);
+    if (w, h) == (cw, ch) {
+        return src.to_vec();
+    }
+    let mut out = Vec::with_capacity(cw * ch);
+    for row in src.chunks_exact(w).take(h) {
+        out.extend_from_slice(row);
+        let last = row.last().copied().unwrap_or(128);
+        out.resize(out.len() + (cw - w), last);
+    }
+    let last_row = out.len().saturating_sub(cw);
+    while out.len() < cw * ch {
+        out.extend_from_within(last_row..last_row + cw);
+    }
+    out
 }
 
 fn initial_qp(bitrate: u32, width: u32, height: u32) -> i32 {
@@ -4705,6 +4751,129 @@ mod tests {
             bits: coded.len().saturating_mul(8),
             psnr,
         })
+    }
+
+    /// A scrolling texture, so motion vectors reach below the picture into
+    /// the last macroblock row's padding.
+    fn scrolling_frames(width: u32, height: u32, frames: u32) -> Vec<Yuv420p> {
+        let texture = |x: u32, y: i64, scale: f64| {
+            let (x, y) = (f64::from(x), y as f64);
+            let wave = (x * 0.31 * scale + y * 0.23 * scale).sin() * 50.0
+                + (x * 0.07 * scale - y * 0.11 * scale).cos() * 40.0;
+            (128.0 + wave).round().clamp(16.0, 235.0) as u8
+        };
+        (0..frames)
+            .map(|t| {
+                let shift = i64::from(t) * 3;
+                let y = (0..height)
+                    .flat_map(|row| (0..width).map(move |col| (col, row)))
+                    .map(|(col, row)| texture(col + t, i64::from(row) + shift, 1.0))
+                    .collect();
+                let chroma = |phase: u32| -> Vec<u8> {
+                    (0..height / 2)
+                        .flat_map(|row| (0..width / 2).map(move |col| (col, row)))
+                        .map(|(col, row)| texture(col + phase + t, i64::from(row) + shift / 2, 2.0))
+                        .collect()
+                };
+                Yuv420p::try_new(width, height, y, chroma(0), chroma(17)).unwrap()
+            })
+            .collect()
+    }
+
+    fn psnr(src: &[u8], got: &[u8]) -> f64 {
+        let err: f64 = src
+            .iter()
+            .zip(got)
+            .map(|(a, b)| (f64::from(*a) - f64::from(*b)).powi(2))
+            .sum();
+        if err == 0.0 {
+            return 100.0;
+        }
+        10.0 * (255.0 * 255.0 * src.len() as f64 / err).log10()
+    }
+
+    /// The bottom 24 rows, the last macroblock row and a half when the height
+    /// is not a multiple of 16, decode as cleanly as the rest of the picture,
+    /// in this crate's decoder and in FFmpeg. The encoder once predicted from
+    /// the cropped reconstruction while decoders predict from the whole
+    /// macroblocks, so motion reaching below the crop drifted.
+    #[test]
+    fn bottom_rows_survive_a_partial_macroblock_row() {
+        for (width, height) in [(96u32, 72u32), (96, 80), (88, 72)] {
+            let frames = scrolling_frames(width, height, 24);
+            let mut params = CodecParams::video(CodecId::H264, width, height);
+            params.nal_length_size = 0;
+            params.bitrate = 400_000;
+            let mut encoder = H264Encoder::open(&params).unwrap();
+            let mut decoder = H264Decoder::open(&params).unwrap();
+            let mut packets = Vec::new();
+            for (n, picture) in frames.iter().enumerate() {
+                let input = VideoInput {
+                    picture: picture.clone(),
+                    pts: n as i64,
+                    duration: 1,
+                    timescale: 25,
+                    force_keyframe: n == 0,
+                };
+                packets.extend(encoder.push(&input).unwrap());
+            }
+            packets.extend(encoder.drain().unwrap());
+            let mut shown = Vec::new();
+            for packet in &packets {
+                shown.extend(decoder.push(packet).unwrap());
+            }
+            shown.extend(decoder.drain().unwrap());
+            assert_eq!(shown.len(), frames.len(), "height {height}");
+            let rows = 24usize;
+            let w = width as usize;
+            let h = height as usize;
+            for (n, (src, out)) in frames.iter().zip(&shown).enumerate() {
+                let got = &out.picture;
+                let luma_top = psnr(&src.y()[..w * (h - rows)], &got.y()[..w * (h - rows)]);
+                let luma = psnr(&src.y()[w * (h - rows)..], &got.y()[w * (h - rows)..]);
+                let cut = (w / 2) * (h - rows) / 2;
+                let u = psnr(&src.u()[cut..], &got.u()[cut..]);
+                let v = psnr(&src.v()[cut..], &got.v()[cut..]);
+                // Broken, the bottom fell to 20 dB luma and 18 dB chroma.
+                assert!(
+                    luma >= 35.0 && u >= 28.0 && v >= 28.0 && luma_top >= 35.0,
+                    "{width}x{height} frame {n}: bottom rows luma {luma:.1} dB \
+                     (top {luma_top:.1}), cb {u:.1}, cr {v:.1}"
+                );
+            }
+            let Some(ffmpeg) = ffmpeg() else {
+                continue;
+            };
+            let dir = std::env::temp_dir().join(format!("cutlass-h264-enc-crop-{width}x{height}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let coded = dir.join("crop.h264");
+            let yuv = dir.join("crop.yuv");
+            let bytes: Vec<u8> = packets
+                .iter()
+                .flat_map(|p| p.data.iter().copied())
+                .collect();
+            std::fs::write(&coded, &bytes).unwrap();
+            let decoded = std::process::Command::new(ffmpeg)
+                .args(["-y", "-i"])
+                .arg(&coded)
+                .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+                .arg(&yuv)
+                .output()
+                .unwrap();
+            assert!(decoded.status.success(), "ffmpeg rejected {width}x{height}");
+            let raw = std::fs::read(&yuv).unwrap();
+            let size = w * h * 3 / 2;
+            assert_eq!(raw.len(), size * shown.len());
+            for (n, out) in shown.iter().enumerate() {
+                let picture = &out.picture;
+                let ours = [picture.y(), picture.u(), picture.v()].concat();
+                assert!(
+                    raw[n * size..(n + 1) * size] == ours[..],
+                    "{width}x{height} frame {n}: ffmpeg decodes differently"
+                );
+            }
+        }
     }
 
     #[test]

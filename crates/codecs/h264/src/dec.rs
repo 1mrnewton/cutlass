@@ -540,22 +540,18 @@ impl H264Decoder {
         Ok(())
     }
 
-    /// The reconstructed picture for `pts`, including one still held for reorder.
-    pub(crate) fn picture_at(&self, pts: i64) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-        let output = match &self.dpb {
-            Store::Eight(dpb) => held_picture(dpb, pts)?,
-            Store::Nine(dpb) => held_picture(dpb, pts)?,
-            Store::Ten(dpb) => held_picture(dpb, pts)?,
-            Store::Eleven(dpb) => held_picture(dpb, pts)?,
-            Store::Twelve(dpb) => held_picture(dpb, pts)?,
-            Store::Thirteen(dpb) => held_picture(dpb, pts)?,
-            Store::Fourteen(dpb) => held_picture(dpb, pts)?,
+    /// The 8-bit reconstruction for `pts`, including one still held for
+    /// reorder, at its coded size before cropping: whole macroblocks, as
+    /// later pictures predict from it.
+    pub(crate) fn coded_picture_at(&self, pts: i64) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+        let Store::Eight(dpb) = &self.dpb else {
+            return None;
         };
-        Some((
-            output.picture.y().to_vec(),
-            output.picture.u().to_vec(),
-            output.picture.v().to_vec(),
-        ))
+        let frame = dpb
+            .iter()
+            .rev()
+            .find(|frame| frame.pts == pts && !frame.nonexisting)?;
+        Some((frame.y.clone(), frame.u.clone(), frame.v.clone()))
     }
 }
 
@@ -673,14 +669,6 @@ impl VideoDecoder for H264Decoder {
             let _ = self.apply_extra(&extra);
         }
     }
-}
-
-fn held_picture<S: Sample>(dpb: &[Frame<S>], pts: i64) -> Option<VideoOutput> {
-    let frame = dpb
-        .iter()
-        .rev()
-        .find(|frame| frame.pts == pts && !frame.nonexisting)?;
-    emit(frame)
 }
 
 fn au_depth(sets: &Sets, data: &[u8], length_size: u8, current: u8) -> Result<u8, CodecError> {

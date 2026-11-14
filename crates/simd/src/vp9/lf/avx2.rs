@@ -106,12 +106,27 @@ fn wide16(x: __m128i) -> __m256i {
     _mm256_cvtepu8_epi16(x)
 }
 
+/// What a filter changed: nothing, taps p2 to q2, or p6 to q6.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Changed {
+    None,
+    Inner,
+    Outer,
+}
+
 /// Filters the taps `v` (p7 at 0, q0 at 8; sixteen lines a vector) in
 /// place, each half of the lines with its own filter (libvpx's SSE2
-/// arithmetic, which equals its C).
+/// arithmetic, which equals its C). `v` comes with p3 to q3; `outer`
+/// fills p7 to p4 and q4 to q7 when the 15-tap filter may run.
 #[inline]
 #[target_feature(enable = "avx2")]
-fn lanes(v: &mut [__m128i; 16], wds: [Option<Wd>; 2], wd: Wd, thr: &[Thresh; 2]) -> bool {
+fn lanes(
+    v: &mut [__m128i; 16],
+    wds: [Option<Wd>; 2],
+    wd: Wd,
+    thr: &[Thresh; 2],
+    outer: impl FnOnce(&mut [__m128i; 16]),
+) -> Changed {
     let (p3, p2, p1, p0) = (v[4], v[5], v[6], v[7]);
     let (q0, q1, q2, q3) = (v[8], v[9], v[10], v[11]);
     let limit = split8(thr[0].limit, thr[1].limit);
@@ -132,7 +147,7 @@ fn lanes(v: &mut [__m128i; 16], wds: [Option<Wd>; 2], wd: Wd, thr: &[Thresh; 2])
     let on = halves8([wds[0].is_some(), wds[1].is_some()]);
     let mask = _mm_and_si128(_mm_and_si128(le(m, limit), le(e, blimit)), on);
     if _mm_testz_si128(mask, mask) != 0 {
-        return false;
+        return Changed::None;
     }
     let hev = _mm_xor_si128(le(_mm_max_epu8(ap, aq), hevt), _mm_set1_epi8(-1));
     // filter4, in signed bytes.
@@ -155,7 +170,7 @@ fn lanes(v: &mut [__m128i; 16], wds: [Option<Wd>; 2], wd: Wd, thr: &[Thresh; 2])
     v[8] = nq0;
     v[9] = nq1;
     if wd == Wd::W4 {
-        return true;
+        return Changed::Inner;
     }
     let one = _mm_set1_epi8(1);
     let fm = _mm_max_epu8(
@@ -168,10 +183,11 @@ fn lanes(v: &mut [__m128i; 16], wds: [Option<Wd>; 2], wd: Wd, thr: &[Thresh; 2])
     let w8 = halves8(wds.map(|w| matches!(w, Some(Wd::W8 | Wd::W16))));
     let flat = _mm_and_si128(_mm_and_si128(le(fm, one), mask), w8);
     if _mm_testz_si128(flat, flat) != 0 {
-        return true;
+        return Changed::Inner;
     }
     // Where the 15-tap filter runs it replaces the 7-tap one.
     let flat2 = if wd == Wd::W16 {
+        outer(v);
         let f2m = _mm_max_epu8(
             _mm_max_epu8(
                 _mm_max_epu8(absd(v[3], p0), absd(v[2], p0)),
@@ -227,7 +243,7 @@ fn lanes(v: &mut [__m128i; 16], wds: [Option<Wd>; 2], wd: Wd, thr: &[Thresh; 2])
         v[10] = _mm_blendv_epi8(q2, oq2, flat);
     }
     if _mm_testz_si128(flat2, flat2) != 0 {
-        return true;
+        return Changed::Inner;
     }
     let s: [__m256i; 16] = [
         wide16(v[0]),
@@ -270,7 +286,7 @@ fn lanes(v: &mut [__m128i; 16], wds: [Option<Wd>; 2], wd: Wd, thr: &[Thresh; 2])
     for k in 0..14 {
         v[k + 1] = _mm_blendv_epi8(v[k + 1], out[k], flat2);
     }
-    true
+    Changed::Outer
 }
 
 /// The transpose of 16 rows of 8 bytes (the low half of each): 8
@@ -407,55 +423,73 @@ pub(super) fn filter(e: &mut Edge<'_>) {
     };
     let taps = if wd == Wd::W16 { 8 } else { 4 };
     let mut v = [z; 16];
-    // Load: the taps of every line, one vector each.
     // SAFETY (every load and store below): `reg` holds `span` bytes, and
     // `span` was sized above so that each row's 8 or 16 bytes at
     // `i * stride` (i up to 15, or `2 * taps - 1` for a horizontal edge)
-    // end inside it.
+    // end inside it. Taps p3 to q3 start `taps - 4` samples (or rows) into
+    // the region; p7 to q7 are there when `taps` is 8.
     #[allow(unsafe_code)]
-    if vertical && wd != Wd::W16 {
-        let rows: [__m128i; 16] = core::array::from_fn(|i| unsafe { ld8(reg, i * stride) });
+    if vertical {
+        let rows: [__m128i; 16] =
+            core::array::from_fn(|i| unsafe { ld8(reg, i * stride + taps - 4) });
         let cols = transpose16x8(&rows);
         v[4..12].copy_from_slice(&cols);
-    } else if vertical {
-        let rows: [__m128i; 16] = core::array::from_fn(|i| unsafe { ld16(reg, i * stride) });
-        v = transpose(&rows);
     } else {
-        for k in 0..2 * taps {
-            v[k + 8 - taps] = unsafe { ld16(reg, k * stride) };
+        for k in 0..8 {
+            v[4 + k] = unsafe { ld16(reg, (k + taps - 4) * stride) };
         }
     }
-    if !lanes(&mut v, wds, wd, &thr) {
-        return;
-    }
-    // Store what the filter may have changed.
+    let changed = {
+        let reg = &*reg;
+        #[allow(unsafe_code)]
+        lanes(&mut v, wds, wd, &thr, |v| {
+            if vertical {
+                let rows: [__m128i; 16] =
+                    core::array::from_fn(|i| unsafe { ld16(reg, i * stride) });
+                let t = transpose(&rows);
+                v[..4].copy_from_slice(&t[..4]);
+                v[12..].copy_from_slice(&t[12..]);
+            } else {
+                for k in 0..4 {
+                    v[k] = unsafe { ld16(reg, k * stride) };
+                    v[12 + k] = unsafe { ld16(reg, (12 + k) * stride) };
+                }
+            }
+        })
+    };
+    // Store what the filter changed.
     #[allow(unsafe_code)]
-    if vertical && wd != Wd::W16 {
-        let back: [__m128i; 8] = core::array::from_fn(|k| v[4 + k]);
-        let out = transpose8x16(&back);
-        for (i, o) in out.iter().enumerate() {
-            unsafe {
-                st8(reg, 2 * i * stride, *o);
-                st8(reg, (2 * i + 1) * stride, _mm_unpackhi_epi64(*o, *o));
+    match (changed, vertical) {
+        (Changed::None, _) => {}
+        (Changed::Inner, true) => {
+            let back: [__m128i; 8] = core::array::from_fn(|k| v[4 + k]);
+            let out = transpose8x16(&back);
+            let o = taps - 4;
+            for (i, r) in out.iter().enumerate() {
+                unsafe {
+                    st8(reg, 2 * i * stride + o, *r);
+                    st8(reg, (2 * i + 1) * stride + o, _mm_unpackhi_epi64(*r, *r));
+                }
             }
         }
-    } else if vertical {
-        let rows = transpose(&v);
-        for (i, r) in rows.iter().enumerate() {
-            unsafe { st16(reg, i * stride, *r) };
+        (Changed::Outer, true) => {
+            let rows = transpose(&v);
+            for (i, r) in rows.iter().enumerate() {
+                unsafe { st16(reg, i * stride, *r) };
+            }
         }
-    } else {
-        let (first, last) = match wd {
-            Wd::W4 => (6, 10),
-            Wd::W8 => (5, 11),
-            Wd::W16 => (1, 15),
-        };
-        // An index loop: the iterator chain stays out of line.
-        #[allow(clippy::needless_range_loop)]
-        for k in first..last {
-            #[allow(unsafe_code)]
-            unsafe {
-                st16(reg, (k + taps - 8) * stride, v[k]);
+        (c, false) => {
+            let (first, last) = if c == Changed::Outer {
+                (1, 15)
+            } else {
+                (5, 11)
+            };
+            // An index loop: the iterator chain stays out of line.
+            #[allow(clippy::needless_range_loop)]
+            for k in first..last {
+                unsafe {
+                    st16(reg, (k + taps - 8) * stride, v[k]);
+                }
             }
         }
     }

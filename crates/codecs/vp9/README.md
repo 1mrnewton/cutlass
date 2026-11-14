@@ -210,7 +210,14 @@ A detailed picture panning 7 pixels a frame, with film grain, 60 frames
 | speed 7 | good, cpu-used 5 | +8% | 2.5 s / 2.4 s |
 | speed 9 | realtime, cpu-used 6 | −33% | 0.70 s / 0.61 s |
 | speed 9 | realtime, cpu-used 8 | −57% | 0.70 s / 0.52 s |
-| speed 10 | realtime, cpu-used 8 | −56% to −67% | 0.63 s / 0.53–0.56 s |
+| speed 10 | realtime, cpu-used 8 | −62% to −69% | 0.46–0.50 s / 0.49–0.52 s |
+
+At equal bitrate speed 10 now takes libvpx realtime's time (0.50 s against
+0.49 s at 4.2 Mb/s, 0.49 s against 0.52 s at 2.2–2.5 Mb/s) at 2 to 4.7 dB
+more PSNR-Y. What moved it: the dead-zone quantizer on AVX2
+(`cutlass_simd::vp9::quant`, −19% of the time on one thread) and a tile's
+superblock rows lending each other their scratch instead of making and
+zeroing 240 KB each (−9%).
 
 In bitrate mode (1–4 Mb/s, the same clip) speed 5 is −1.8% against good,
 cpu-used 5 on PSNR-Y and higher on chroma.
@@ -257,9 +264,9 @@ the picture moves too far for one picture to stand for the interval.
   frame-parallel or error-resilient streams are not written.
 - At equal time the encoder is within about 8% of libvpx's good presets
   on moving content (ahead with more time, and far ahead on still content
-  and against the realtime presets), and its fastest speed is 1.2–1.3×
-  libvpx realtime's time; tile columns limit how well 4 threads share a
-  720p frame. The decoder is level with FFmpeg on 4 threads on 4:2:0 and
+  and against the realtime presets), and its fastest speed takes libvpx
+  realtime's time at equal bitrate with much better quality; tile columns
+  limit how well 4 threads share a 720p frame. The decoder is level with FFmpeg on 4 threads on 4:2:0 and
   1.1–1.25× its time on one core. Its 8-bit pictures go out without a
   copy, as shared views of the decoder's own planes at their padded
   stride (`Plane::samples` is a `Samples`, copied only on a first write;

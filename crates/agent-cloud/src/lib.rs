@@ -370,7 +370,10 @@ mod tests {
             .unwrap();
         eprintln!("{completion:?}");
         assert!(
-            completion.calls.iter().any(|call| call.name == "draft.query"),
+            completion
+                .calls
+                .iter()
+                .any(|call| call.name == "draft.query"),
             "{completion:?}"
         );
     }

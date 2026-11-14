@@ -15,7 +15,7 @@ use crate::shell::{Inspection, KeyedSetting, Shell};
 
 use super::inspector::{
     InspectorState, LATER, ROW_GAP, animation_tab, body, color_row, later_badge, opacity_slider,
-    pair_row, placement, row_label, section, send, setting_row, slider, tabs,
+    pair_row, placement, row_label, section, send, setting_row, slider,
 };
 
 /// The stroke's looks, in the order `border_line_style` numbers them.
@@ -35,15 +35,6 @@ pub(super) fn shape_panel(
     state: &mut InspectorState,
     inspection: &Inspection,
 ) {
-    let tab = state.tab;
-    tabs(
-        ui,
-        &["Vector image", "Animation", "Tracking"],
-        &mut state.tab,
-    );
-    if tab != state.tab {
-        state.page = 0;
-    }
     match state.tab {
         1 => {
             animation_tab(

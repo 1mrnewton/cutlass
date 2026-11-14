@@ -90,13 +90,32 @@ impl InspectorState {
     }
 }
 
-pub(super) fn clip_panel(
-    shell: &mut Shell,
-    ui: &mut Ui,
-    view: &mut ViewState,
-    inspection: &Inspection,
-    _width: f32,
-) {
+/// The tabs each kind of clip has, across the inspector's header.
+fn tab_labels(panel: Panel) -> &'static [&'static str] {
+    match panel {
+        // AI stylize, a generative tab, waits for the next version.
+        Panel::Main { .. } | Panel::Overlay { .. } => {
+            &["Video", "Audio", "Speed", "Animation", "Adjust"]
+        }
+        // A caption's tabs lead with its list. Text to speech and AI
+        // avatars, both generative, wait for the next version.
+        Panel::Caption => &["Captions", "Text", "Animation", "Tracking"],
+        Panel::Text => &["Text", "Animation", "Tracking"],
+        Panel::Audio => &["Basic", "Voice changer", "Speed"],
+        Panel::Sticker => &["Sticker", "Animation", "Tracking"],
+        Panel::Shape => &["Vector image", "Animation", "Tracking"],
+        Panel::Effect => &["Effect"],
+        Panel::Filter => &["Filter"],
+        Panel::Adjust => &["Adjust"],
+        Panel::Other => &["Clip"],
+    }
+}
+
+/// The picked clip's tabs, in the inspector's header, which stays put
+/// while the body scrolls. A newly picked clip starts its tabs, pages and
+/// sections afresh, and a tab a menu row asked for opens here; picking
+/// another tab starts it on its first page.
+pub(super) fn clip_tabs(shell: &Shell, ui: &mut Ui, view: &mut ViewState, inspection: &Inspection) {
     let panel = shell.panel().unwrap_or(Panel::Other);
     let state = &mut view.inspector;
     let pending = state.pending.take();
@@ -129,6 +148,24 @@ pub(super) fn clip_panel(
             state.open.insert(section.to_owned());
         }
     }
+    let tab = state.tab;
+    ui.add_enabled_ui(!inspection.locked, |ui| {
+        tabs(ui, tab_labels(panel), &mut state.tab);
+    });
+    if tab != state.tab {
+        state.page = 0;
+    }
+}
+
+/// The picked clip's body: the tab [`clip_tabs`] shows.
+pub(super) fn clip_panel(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    inspection: &Inspection,
+) {
+    let panel = shell.panel().unwrap_or(Panel::Other);
+    let state = &mut view.inspector;
     if inspection.locked {
         note(ui, "This clip's row is locked.");
     }
@@ -142,13 +179,10 @@ pub(super) fn clip_panel(
         Panel::Audio => audio_panel(shell, ui, state, inspection),
         Panel::Sticker => sticker_panel(shell, ui, state, inspection),
         Panel::Shape => super::shape::shape_panel(shell, ui, state, inspection),
-        Panel::Effect => effect_panel(shell, ui, state, inspection, "Effect", false),
-        Panel::Filter => effect_panel(shell, ui, state, inspection, "Filter", true),
+        Panel::Effect => effect_panel(shell, ui, state, inspection, false),
+        Panel::Filter => effect_panel(shell, ui, state, inspection, true),
         Panel::Adjust => adjust_panel(shell, ui, state, inspection),
-        Panel::Other => {
-            tabs(ui, &["Clip"], &mut 0);
-            note(ui, &inspection.material);
-        }
+        Panel::Other => note(ui, &inspection.material),
     });
 }
 
@@ -162,7 +196,6 @@ pub(super) fn transition_panel(
 ) {
     let state = &mut view.inspector;
     let id = bar.segment_id.clone();
-    tabs(ui, &["Transition"], &mut 0);
     ui.horizontal(|ui| {
         row_label(ui, "Name");
         ui.label(RichText::new(&bar.name).size(12.0).color(tokens::TEXT));
@@ -212,16 +245,6 @@ fn video_panel(
     inspection: &Inspection,
     still: bool,
 ) {
-    let tab = state.tab;
-    // AI stylize, a generative tab, waits for the next version.
-    tabs(
-        ui,
-        &["Video", "Audio", "Speed", "Animation", "Adjust"],
-        &mut state.tab,
-    );
-    if tab != state.tab {
-        state.page = 0;
-    }
     match state.tab {
         0 => {
             pages(
@@ -291,18 +314,7 @@ fn text_panel(
     inspection: &Inspection,
     caption: bool,
 ) {
-    // A caption's tabs lead with its list. Text to speech and AI avatars,
-    // both generative, wait for the next version.
-    let labels: &[&str] = if caption {
-        &["Captions", "Text", "Animation", "Tracking"]
-    } else {
-        &["Text", "Animation", "Tracking"]
-    };
-    let tab = state.tab;
-    tabs(ui, labels, &mut state.tab);
-    if tab != state.tab {
-        state.page = 0;
-    }
+    let labels = tab_labels(if caption { Panel::Caption } else { Panel::Text });
     match labels.get(state.tab).copied().unwrap_or_default() {
         "Captions" => caption_list(shell, ui, state),
         "Text" => {
@@ -529,11 +541,6 @@ fn sticker_panel(
     state: &mut InspectorState,
     inspection: &Inspection,
 ) {
-    let tab = state.tab;
-    tabs(ui, &["Sticker", "Animation", "Tracking"], &mut state.tab);
-    if tab != state.tab {
-        state.page = 0;
-    }
     if state.tab == 2 {
         super::follow::follow_tab(shell, ui, state, super::follow::Tiles::Subjects);
         return;
@@ -561,10 +568,8 @@ fn effect_panel(
     ui: &mut Ui,
     state: &mut InspectorState,
     inspection: &Inspection,
-    title: &str,
     filter: bool,
 ) {
-    tabs(ui, &[title], &mut 0);
     if !filter && let Some(controls) = shell.effect_controls() {
         recipe_pages(shell, ui, state, inspection, &controls);
         return;
@@ -679,7 +684,6 @@ fn adjust_panel(
     state: &mut InspectorState,
     inspection: &Inspection,
 ) {
-    tabs(ui, &["Adjust"], &mut 0);
     pages(
         ui,
         &["Basic", "HSL", "Curves", "Color wheel", "Mask"],
@@ -2686,8 +2690,9 @@ pub(super) fn send(shell: &mut Shell, edit: impl FnOnce(&mut Shell) -> Result<()
     }
 }
 
-/// The text tabs across the top. The active one is cyan. Tabs that do not
-/// fit scroll sideways, as the prototype's do.
+/// The text tabs across the inspector's header. The active one is cyan.
+/// Tabs that do not fit scroll sideways, as the prototype's do. The header
+/// draws the line under them.
 pub(super) fn tabs(ui: &mut Ui, labels: &[&str], current: &mut usize) {
     ui.add_space(ROW_GAP);
     // The gap shrinks first, then the names down to 11 points, before the
@@ -2738,11 +2743,10 @@ pub(super) fn tabs(ui: &mut Ui, labels: &[&str], current: &mut usize) {
             });
         });
     ui.add_space(6.0);
-    let line = ui.cursor().min.y;
-    let span = ui.max_rect().x_range();
-    ui.painter()
-        .hline(span, line, Stroke::new(1.0, Color32::from_white_alpha(20)));
 }
+
+/// The line under the inspector's header.
+pub(super) const TAB_LINE: Color32 = Color32::from_rgba_premultiplied(20, 20, 20, 20);
 
 /// The rounded page switch under the tabs.
 pub(super) fn pages(ui: &mut Ui, labels: &[&str], current: &mut usize) {

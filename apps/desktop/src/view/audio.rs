@@ -11,7 +11,7 @@ use crate::{tokens, ui};
 
 use super::inspector::{
     BOX, CATALOG_TILE, InspectorState, LATER, ROW_GAP, ROW_HEIGHT, body, check_box, chevron,
-    divider, later_badge, pages, row_label, sound_section, tabs, tile_frame, value_box,
+    divider, later_badge, pages, row_label, sound_section, tile_frame, value_box,
 };
 
 /// The parts Separate audio can pull out of a clip.
@@ -74,11 +74,6 @@ pub(super) fn audio_panel(
     state: &mut InspectorState,
     inspection: &Inspection,
 ) {
-    let tab = state.tab;
-    tabs(ui, &["Basic", "Voice changer", "Speed"], &mut state.tab);
-    if tab != state.tab {
-        state.page = 0;
-    }
     match state.tab {
         0 => basic_tab(shell, ui, state, inspection),
         1 => voice_tab(ui, state),

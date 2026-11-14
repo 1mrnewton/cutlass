@@ -4701,9 +4701,45 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     } else {
         rect
     };
-    // The whole body scrolls, so the bar sits on the panel edge; the
-    // content keeps 16 points in from each side.
     let content_width = body.width() - 32.0;
+    // A clip's or a transition's tabs sit in a header band that stays put
+    // while the body under it scrolls.
+    let inspection = shell.inspection();
+    let body = if transition.is_some() || inspection.is_some() {
+        let band = ui.painter().add(egui::Shape::Noop);
+        let inner = Rect::from_min_max(
+            body.min + Vec2::new(16.0, 0.0),
+            body.max - Vec2::new(16.0, 0.0),
+        );
+        let mut header = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("inspector-header")
+                .max_rect(inner),
+        );
+        header.set_clip_rect(body);
+        header.add_space(6.0);
+        if transition.is_some() {
+            inspector::tabs(&mut header, &["Transition"], &mut 0);
+        } else if let Some(inspection) = &inspection {
+            inspector::clip_tabs(shell, &mut header, view, inspection);
+        }
+        let bottom = header.min_rect().bottom().clamp(body.top(), body.bottom());
+        let header_rect = Rect::from_min_max(body.min, egui::pos2(body.right(), bottom));
+        ui.painter().set(
+            band,
+            egui::Shape::rect_filled(header_rect, CornerRadius::ZERO, tokens::PROJECT_BAR),
+        );
+        ui.painter().hline(
+            header_rect.x_range(),
+            bottom,
+            egui::Stroke::new(1.0, inspector::TAB_LINE),
+        );
+        Rect::from_min_max(egui::pos2(body.left(), bottom + 1.0), body.max)
+    } else {
+        body
+    };
+    // The body scrolls, so the bar sits on the panel edge; the content
+    // keeps 16 points in from each side.
     let mut details = ui.new_child(egui::UiBuilder::new().max_rect(body));
     details.set_clip_rect(body);
     ui::Scroll::vertical("inspector")
@@ -4713,9 +4749,9 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
             if let Some(bar) = &transition {
                 ui.add_space(6.0);
                 inspector::transition_panel(shell, ui, view, bar);
-            } else if let Some(inspection) = shell.inspection() {
+            } else if let Some(inspection) = &inspection {
                 ui.add_space(6.0);
-                inspector::clip_panel(shell, ui, view, &inspection, content_width);
+                inspector::clip_panel(shell, ui, view, inspection);
             } else {
                 ui.add_space(14.0);
                 section_title(ui, "Details");
@@ -18152,6 +18188,90 @@ mod tests {
         harness.state_mut().1.project_dialog = settings;
         harness.run_steps(4);
         picture(&mut harness, "project-settings");
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// The inspector's tabs sit in a header band that stays put while the
+    /// body under it scrolls, painted by the real renderer. With
+    /// `CUTLASS_RENDER_DIR` set the pictures are kept there to look at.
+    #[test]
+    fn the_inspector_tabs_stay_put_while_its_body_scrolls() {
+        use cutlass_model::{MaterialVideo, Segment, TimeRange};
+        use egui_kittest::kittest::Queryable;
+        let temp = std::env::temp_dir().join(format!("cutlass-render-tabs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.materials.videos.push(MaterialVideo {
+            width: 1920,
+            height: 1080,
+            ..MaterialVideo::new("movie")
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("main", "movie", TimeRange::new(0, 2_000_000)));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(1280.0, 800.0))
+            .wgpu()
+            .build_ui_state(
+                |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+                (shell, ViewState::new()),
+            );
+        harness.run_steps(4);
+        // The rightmost of each name is the inspector's.
+        let at = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>, label: &str| {
+            harness
+                .query_all_by_label(label)
+                .map(|node| node.rect())
+                .max_by(|a, b| a.min.x.total_cmp(&b.min.x))
+                .unwrap_or_else(|| panic!("no {label}"))
+        };
+        let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
+        let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
+            let image = harness.render().expect("the renderer draws the window");
+            if let Some(dir) = &keep {
+                std::fs::create_dir_all(dir).unwrap();
+                image.save(dir.join(format!("{name}.png"))).unwrap();
+            }
+            image
+        };
+        let tab = at(&harness, "Video");
+        let row = at(&harness, "Position & Size");
+        let before = picture(&mut harness, "inspector-top");
+        // The header band, in the gutter left of the tabs, is not the
+        // panel's colour under it.
+        let x = (tab.min.x - 8.0) as u32;
+        let header = before.get_pixel(x, tab.center().y as u32);
+        let panel = before.get_pixel(x, (row.min.y - 6.0) as u32);
+        assert_ne!(header, panel, "the header has no band of its own");
+        harness.hover_at(row.center());
+        for _ in 0..6 {
+            harness.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, -80.0),
+                modifiers: egui::Modifiers::default(),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+            });
+            harness.run_steps(2);
+        }
+        harness.run_steps(4);
+        picture(&mut harness, "inspector-scrolled");
+        assert_eq!(at(&harness, "Video"), tab, "the tabs moved");
+        let scrolled = harness
+            .query_all_by_label("Position & Size")
+            .map(|node| node.rect())
+            .max_by(|a, b| a.min.x.total_cmp(&b.min.x));
+        assert!(
+            scrolled.is_none_or(|moved| moved.min.y < row.min.y - 200.0),
+            "the body did not scroll: {row:?} to {scrolled:?}"
+        );
         drop(harness);
         let _ = std::fs::remove_dir_all(&temp);
     }

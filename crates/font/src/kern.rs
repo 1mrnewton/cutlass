@@ -148,17 +148,18 @@ fn read_pairs(
     if sub.len() < need {
         return Err(FontError::Truncated);
     }
-    let mut previous: Option<(u16, u16)> = None;
+    // Real faces repeat a pair or store one out of its place. The first
+    // of a pair in a subtable is the one that counts, as it is the one a
+    // search of a sorted list meets.
+    let mut own: BTreeMap<(u16, u16), i16> = BTreeMap::new();
     for index in 0..count {
         let offset = first + index * 6;
         let left = u16_at(sub, offset)?;
         let right = u16_at(sub, offset + 2)?;
         let value = i16_at(sub, offset + 4)?;
-        let key = (left, right);
-        if previous.is_some_and(|prior| prior >= key) {
-            return Err(FontError::BadTable);
-        }
-        previous = Some(key);
+        own.entry((left, right)).or_insert(value);
+    }
+    for (key, value) in own {
         if replace {
             pairs.insert(key, value);
         } else {
@@ -269,15 +270,26 @@ mod tests {
     }
 
     #[test]
-    fn a_short_or_unsorted_table_is_an_error() {
+    fn a_repeated_or_misplaced_pair_is_read_and_the_first_counts() {
+        // A widely installed bold face stores one pair twice.
+        let kern = parse(&format0(1, &[(2, 1, 5), (1, 1, 4), (2, 1, 9), (1, 1, 4)])).expect("kern");
+        assert_eq!(kern.get(2, 1), 5);
+        assert_eq!(kern.get(1, 1), 4);
+        assert_eq!(kern.get(1, 2), 0);
+        // A second subtable still adds to the first.
+        let more = with_subs(&[
+            subtable(1, &[(1, 1, 4), (1, 1, 50)]),
+            subtable(1, &[(1, 1, 3)]),
+        ]);
+        assert_eq!(parse(&more).expect("kern").get(1, 1), 7);
+    }
+
+    #[test]
+    fn a_short_table_is_an_error() {
         assert!(matches!(parse(&[]), Err(FontError::EmptyTable)));
         assert!(matches!(parse(&[0, 0]), Err(FontError::Truncated)));
         assert!(matches!(parse(&[0, 1, 0, 0]), Err(FontError::Unsupported)));
         assert!(matches!(parse(&[0, 0, 0, 1]), Err(FontError::Truncated)));
-        assert!(matches!(
-            parse(&format0(1, &[(2, 1, 5), (1, 1, 4)])),
-            Err(FontError::BadTable)
-        ));
         let mut short = format0(1, &[(1, 2, 5)]);
         short[11] = 50;
         assert!(matches!(parse(&short), Err(FontError::Truncated)));

@@ -593,9 +593,9 @@ fn update_coef_tx(
     tx: usize,
     reader: &mut BoolDecoder<'_>,
 ) -> Result<(), CodecError> {
-    for plane in 0..2 {
-        for reference in 0..2 {
-            update_coef_band(&mut fc.coef[tx][plane][reference], reader)?;
+    for plane in &mut fc.coef[tx] {
+        for reference in plane {
+            update_coef_band(reference, reader)?;
         }
     }
     Ok(())

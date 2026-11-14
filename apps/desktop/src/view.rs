@@ -191,6 +191,8 @@ pub struct ViewState {
     recording: Option<&'static str>,
     /// Each server's arguments as typed, by row, while the window is open.
     server_args: std::collections::HashMap<usize, String>,
+    /// The assistant's notes as typed, while the settings window is open.
+    notes: Option<String>,
     /// A settings change waiting for the user to allow what it turns on.
     approval: Option<Approval>,
     /// The Linkage settings dialog is open, with the kinds as ticked so far.
@@ -321,6 +323,7 @@ impl Default for ViewState {
             settings_tab: SettingsTab::General,
             recording: None,
             server_args: std::collections::HashMap::new(),
+            notes: None,
             approval: None,
             linkage_kinds: None,
             export: ExportRequest::default(),
@@ -1668,12 +1671,17 @@ fn settings_window(
                         );
                     }
                     SettingsTab::Assistant => {
-                        assistant_settings(
+                        let notes = view.notes.get_or_insert_with(|| shell.assistant_notes());
+                        let notes_changed = assistant_settings(
                             ui,
                             &mut settings,
                             &mut view.server_args,
+                            notes,
                             &mut add_folder,
                         );
+                        if notes_changed && let Err(error) = shell.set_assistant_notes(notes) {
+                            cutlass_logger::warn!("assistant notes: {error}");
+                        }
                     }
                     SettingsTab::Shortcuts => {
                         ui.add_space(8.0);
@@ -1734,6 +1742,7 @@ fn settings_window(
         view.settings_open = false;
         view.recording = None;
         view.server_args.clear();
+        view.notes = None;
     }
 }
 
@@ -1895,8 +1904,9 @@ fn assistant_settings(
     ui: &mut Ui,
     settings: &mut cutlass_settings::Settings,
     server_args: &mut std::collections::HashMap<usize, String>,
+    notes: &mut String,
     add_folder: &mut bool,
-) {
+) -> bool {
     use cutlass_settings::McpServer;
     settings_heading(ui, "Model");
     ui.add(ui::Check::new(&mut settings.model.local, "Local model"));
@@ -1935,6 +1945,30 @@ fn assistant_settings(
         &mut settings.memory,
         "Remember across conversations",
     ));
+    let mut notes_changed = false;
+    if settings.memory {
+        notes_changed = ui::Field::multiline(notes, 4)
+            .hint(
+                "Notes the assistant reads at the start of every chat, such as how you like titles",
+            )
+            .width(340.0)
+            .show(ui)
+            .response
+            .changed();
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(
+                    "Kept on this computer. Sent with the chat only while the cloud model is on.",
+                )
+                .size(11.0)
+                .color(tokens::FAINT),
+            );
+            if !notes.is_empty() && ui.add(ui::Button::new("Forget").text_size(12.0)).clicked() {
+                notes.clear();
+                notes_changed = true;
+            }
+        });
+    }
     choice_row(ui, "Steps a turn", |ui| {
         ui.add(egui::DragValue::new(&mut settings.step_cap).range(1..=1000));
     });
@@ -2009,6 +2043,7 @@ fn assistant_settings(
         settings.skill_folders.remove(index);
     }
     *add_folder = ui.add(ui::Button::new("Add folder…")).clicked();
+    notes_changed
 }
 
 fn settings_heading(ui: &mut Ui, text: &str) {

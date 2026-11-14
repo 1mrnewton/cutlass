@@ -27,7 +27,9 @@ mod subagent;
 mod tools;
 
 pub use approval::{ApprovalAction, ApprovalError, Approver, authorize, authorize_then};
-pub use chat::{ChatModel, ChatTransport, LoopbackHttp, SYSTEM_PROMPT, parse_reply};
+pub use chat::{
+    ChatModel, ChatTransport, LoopbackHttp, SYSTEM_PROMPT, parse_reply, prompt_context,
+};
 pub use draft::{
     ApplyInput, ApplyMode, ApplyResult, DraftError, DraftQuery, DraftTools, FullSnapshot,
     ProjectSnapshot, QueryView, RangeSnapshot, SegmentSnapshot, TrackSnapshot, request_name,
@@ -44,7 +46,7 @@ pub use model::{
 pub use ops::{Op, describe as describe_ops, ops};
 pub use sandbox::{
     LocalSandbox, OnlineSandbox, ProcessExecutor, Sandbox, SandboxError, SandboxExecutor,
-    SandboxPolicy, SandboxRoute, route_for,
+    SandboxPolicy, SandboxRoute, Switched, route_for,
 };
 #[cfg(feature = "script")]
 pub use script::{run_script, serve_script};

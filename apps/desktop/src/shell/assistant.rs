@@ -217,8 +217,10 @@ impl Shell {
         };
         let mut servers = std::mem::take(&mut self.mcp_servers);
         servers.configure(&self.settings.mcp_servers);
-        let sandbox =
-            crate::sandbox::local_sandbox(crate::sandbox::this_program(), self.project_folder());
+        let sandbox = cutlass_agent::Switched::from_settings(
+            &self.settings,
+            crate::sandbox::local_sandbox(crate::sandbox::this_program(), self.project_folder()),
+        );
         let mut registry = Registry::new(
             DraftTools::new(session),
             settings,

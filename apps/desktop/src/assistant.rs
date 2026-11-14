@@ -125,8 +125,9 @@ impl Assistant {
         let _ = pending.answer.send(outcome);
     }
 
-    /// Send the words in the box with the model `settings` choose.
-    pub fn send(&mut self, settings: &Settings) {
+    /// Send the words in the box with the model `settings` choose, telling
+    /// it the user's `notes` while Memory is on.
+    pub fn send(&mut self, settings: &Settings, notes: &str) {
         let ask = self.draft.trim().to_owned();
         if ask.is_empty() || self.busy() {
             return;
@@ -147,7 +148,8 @@ impl Assistant {
                 return;
             }
         };
-        let model = ChatModel::new(transport, &settings.model.local_name);
+        let model = ChatModel::new(transport, &settings.model.local_name)
+            .with_context(&cutlass_agent::prompt_context(settings, notes));
         self.start(model, settings.step_cap, &ask);
     }
 
@@ -527,14 +529,14 @@ mod tests {
         let mut settings = cutlass_settings::Settings::default();
         settings.model.local = false;
         assistant.draft = "hi".to_owned();
-        assistant.send(&settings);
+        assistant.send(&settings, "");
         assert!(
             matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("local model is off"))
         );
         settings.model.local = true;
         settings.model.local_url = "http://example.com/v1/chat/completions".to_owned();
         assistant.draft = "hi".to_owned();
-        assistant.send(&settings);
+        assistant.send(&settings, "");
         assert!(
             matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("this machine"))
         );
@@ -559,7 +561,7 @@ mod tests {
             draft: "How many clips are on the main track? Read the project first.".to_owned(),
             ..Assistant::default()
         };
-        assistant.send(&settings);
+        assistant.send(&settings, "");
         let deadline = Instant::now() + Duration::from_secs(600);
         while assistant.poll(&mut shell) {
             assert!(Instant::now() < deadline, "the model did not answer");
@@ -583,7 +585,7 @@ mod tests {
         // And an edit: one split, one undo step in the window.
         assistant.entries.clear();
         assistant.draft = "Split clip a at 1 second.".to_owned();
-        assistant.send(&settings);
+        assistant.send(&settings, "");
         let deadline = Instant::now() + Duration::from_secs(600);
         while assistant.poll(&mut shell) {
             assert!(Instant::now() < deadline, "the model did not answer");

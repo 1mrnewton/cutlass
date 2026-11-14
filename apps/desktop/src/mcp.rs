@@ -64,6 +64,10 @@ pub fn serve(path: Option<&Path>, input: impl BufRead, output: impl Write) -> Re
     let settings = SettingsTool::open(&settings_path).map_err(|error| error.to_string())?;
     let mut servers = crate::mcp_servers::McpServers::default();
     servers.configure(&settings.settings().mcp_servers);
+    let sandbox = cutlass_agent::Switched::from_settings(
+        settings.settings(),
+        crate::sandbox::local_sandbox(crate::sandbox::this_program(), Some(path)),
+    );
     let shell = Rc::new(RefCell::new(shell));
     let registry = Registry::new(
         DraftTools::new(session),
@@ -75,7 +79,7 @@ pub fn serve(path: Option<&Path>, input: impl BufRead, output: impl Write) -> Re
         (
             Bundled,
             Headless(Rc::clone(&shell)),
-            crate::sandbox::local_sandbox(crate::sandbox::this_program(), Some(path)),
+            sandbox,
             Refuse,
             McpClient::new(servers),
             Headless(Rc::clone(&shell)),

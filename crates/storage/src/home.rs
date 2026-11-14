@@ -25,6 +25,8 @@ const PRESETS: &str = "Presets";
 const TEXT_PRESETS: &str = "text.json";
 const STUDIO: &str = "Studio";
 const FONTS: &str = "Fonts";
+const ASSISTANT: &str = "Assistant";
+const NOTES: &str = "notes.md";
 
 /// The Cutlass root and the folders under it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,6 +125,13 @@ impl Home {
     #[must_use]
     pub fn settings_file(&self) -> PathBuf {
         self.root.join(SETTINGS)
+    }
+
+    /// The notes the assistant is given at the start of each turn while
+    /// Memory is on. Its folder is made when the notes are first written.
+    #[must_use]
+    pub fn assistant_notes_file(&self) -> PathBuf {
+        self.root.join(ASSISTANT).join(NOTES)
     }
 
     /// The looks saved with a text's "Save as preset". Its folder is made

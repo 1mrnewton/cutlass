@@ -50,7 +50,44 @@ For a bigger job (captions, removing pauses, motion graphics, a product demo, se
 settings_get and settings_set read and change the user's settings. \
 When done, say briefly what you changed.";
 
+/// What the model is told about this user beyond [`SYSTEM_PROMPT`]: the
+/// MCP servers they turned on and, while Memory is on, their notes.
+#[must_use]
+pub fn prompt_context(settings: &cutlass_settings::Settings, notes: &str) -> String {
+    let mut out = String::new();
+    let servers: Vec<&str> = settings
+        .mcp_servers
+        .iter()
+        .filter(|server| server.enabled && !server.name.is_empty())
+        .map(|server| server.name.as_str())
+        .collect();
+    if !servers.is_empty() {
+        out.push_str(&format!(
+            "MCP servers the user turned on, reached with mcp_call (tool tools/list lists a server's tools): {}.",
+            servers.join(", ")
+        ));
+    }
+    if settings.memory && !notes.trim().is_empty() {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str("Notes the user keeps for you:\n");
+        out.push_str(notes.trim());
+    }
+    out
+}
+
 impl<T: ChatTransport> ChatModel<T> {
+    /// Adds `context` after the system prompt, such as [`prompt_context`].
+    #[must_use]
+    pub fn with_context(mut self, context: &str) -> Self {
+        if !context.trim().is_empty() {
+            self.system.push_str("\n\n");
+            self.system.push_str(context.trim());
+        }
+        self
+    }
+
     /// Talks to `model` through `transport`.
     #[must_use]
     pub fn new(transport: T, model: &str) -> Self {
@@ -616,5 +653,35 @@ mod tests {
             rest = &tail[end..];
         }
         assert!(shown >= 4, "{shown}");
+    }
+
+    #[test]
+    fn the_prompt_names_enabled_servers_and_carries_notes_only_with_memory_on() {
+        let mut settings = cutlass_settings::Settings::default();
+        settings.mcp_servers.push(cutlass_settings::McpServer {
+            name: "files".to_owned(),
+            enabled: true,
+            ..Default::default()
+        });
+        settings.mcp_servers.push(cutlass_settings::McpServer {
+            name: "off".to_owned(),
+            ..Default::default()
+        });
+        let context = super::prompt_context(&settings, "Titles in Montserrat.");
+        assert!(context.contains(": files."), "{context}");
+        assert!(!context.contains("off"), "{context}");
+        assert!(context.contains("Titles in Montserrat."), "{context}");
+        settings.memory = false;
+        let context = super::prompt_context(&settings, "Titles in Montserrat.");
+        assert!(!context.contains("Montserrat"), "{context}");
+        let model = ChatModel::new(LoopbackHttp::new("http://127.0.0.1:1/").unwrap(), "m")
+            .with_context("Extra.");
+        let body = model.body(&CompletionRequest {
+            messages: Vec::new(),
+            tools: Vec::new(),
+        });
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.starts_with(super::SYSTEM_PROMPT), "{system}");
+        assert!(system.ends_with("\n\nExtra."), "{system}");
     }
 }

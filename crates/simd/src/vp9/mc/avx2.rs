@@ -17,7 +17,7 @@ use core::arch::x86_64::{
     __m128i, __m256i, _mm_avg_epu8, _mm_cvtsi32_si128, _mm_cvtsi64_si128, _mm_cvtsi128_si32,
     _mm_cvtsi128_si64, _mm_extract_epi64, _mm_maddubs_epi16, _mm_set_epi64x, _mm_setr_epi8,
     _mm_unpackhi_epi8, _mm_unpacklo_epi8, _mm256_adds_epi16, _mm256_add_epi16,
-    _mm256_castsi256_si128, _mm256_maddubs_epi16, _mm256_mulhrs_epi16, _mm256_packus_epi16,
+    _mm256_castsi256_si128, _mm256_extracti128_si256, _mm256_maddubs_epi16, _mm256_unpackhi_epi8, _mm256_unpacklo_epi8, _mm256_mulhrs_epi16, _mm256_packus_epi16,
     _mm256_permute4x64_epi64, _mm256_set_m128i, _mm256_set1_epi16, _mm256_shuffle_epi8,
     _mm_add_epi16, _mm_adds_epi16, _mm_mulhrs_epi16, _mm_packus_epi16, _mm_set1_epi16,
     _mm_shuffle_epi8,
@@ -129,6 +129,24 @@ impl Taps {
         }
     }
 
+    /// The sum of four pair products before rounding, in the order that
+    /// keeps it exact.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn raw(&self, p: [__m256i; 4]) -> __m256i {
+        let s = _mm256_add_epi16(p[0], p[3]);
+        let s = _mm256_add_epi16(s, p[1]);
+        _mm256_adds_epi16(s, p[2])
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn raw1(&self, p: [__m128i; 4]) -> __m128i {
+        let s = _mm_add_epi16(p[0], p[3]);
+        let s = _mm_add_epi16(s, p[1]);
+        _mm_adds_epi16(s, p[2])
+    }
+
     /// Sums of the four pair products, in the order that keeps them exact.
     #[inline]
     #[target_feature(enable = "avx2")]
@@ -173,30 +191,6 @@ impl Taps {
         _mm_packus_epi16(r, r)
     }
 
-    /// Sixteen outputs down from eight rows of sixteen samples.
-    #[inline]
-    #[target_feature(enable = "avx2")]
-    fn down16(&self, r: &[__m128i; 8]) -> __m128i {
-        let p: [__m256i; 4] = core::array::from_fn(|k| {
-            let (a, b) = (r[2 * k], r[2 * k + 1]);
-            let v = _mm256_set_m128i(_mm_unpackhi_epi8(a, b), _mm_unpacklo_epi8(a, b));
-            _mm256_maddubs_epi16(v, self.pairs[k])
-        });
-        let s = self.sum(p);
-        let packed = _mm256_packus_epi16(s, s);
-        _mm256_castsi256_si128(_mm256_permute4x64_epi64::<0b1000>(packed))
-    }
-
-    /// Eight outputs down (the low 8 bytes) from eight rows.
-    #[inline]
-    #[target_feature(enable = "avx2")]
-    fn down8(&self, r: &[__m128i; 8]) -> __m128i {
-        let p: [__m128i; 4] = core::array::from_fn(|k| {
-            _mm_maddubs_epi16(_mm_unpacklo_epi8(r[2 * k], r[2 * k + 1]), self.pairs1[k])
-        });
-        let s = self.sum1(p);
-        _mm_packus_epi16(s, s)
-    }
 }
 
 #[inline]
@@ -276,23 +270,55 @@ pub(super) fn predict(b: Block<'_>) {
 }
 
 /// The filter down, from `src[top..]`, 3 rows above the block's first.
+/// Each output row loads its eight source rows afresh: they are in L1,
+/// and keeping a window of rows in registers costs more in spills.
 #[allow(clippy::too_many_arguments)]
 #[inline]
 #[target_feature(enable = "avx2")]
 fn down(t: &Taps, dst: &mut [u8], ds: usize, src: &[u8], top: usize, ss: usize, w: usize, h: usize, avg: bool) {
-    let step = w.min(16);
-    let load = if step == 16 { 16 } else { 8 };
-    let mut c = 0;
-    while c < w {
-        let mut rows: [__m128i; 8] = core::array::from_fn(|k| ld(src, top + k * ss + c, load));
-        for r in 0..h {
-            let v = if step == 16 { t.down16(&rows) } else { t.down8(&rows) };
-            put(dst, r * ds + c, v, step, avg);
-            if r + 1 < h {
-                rows.rotate_left(1);
-                rows[7] = ld(src, top + (r + 8) * ss + c, load);
+    let r256 = _mm256_set1_epi16(256);
+    let r128 = _mm_set1_epi16(256);
+    for r in 0..h {
+        let base = top + r * ss;
+        let out = r * ds;
+        if w >= 32 {
+            let mut c = 0;
+            while c < w {
+                let row = |k: usize| {
+                    let at = base + k * ss + c;
+                    _mm256_set_m128i(ld16(src, at + 16), ld16(src, at))
+                };
+                let rows: [__m256i; 8] = core::array::from_fn(row);
+                let lo: [__m256i; 4] = core::array::from_fn(|k| {
+                    _mm256_maddubs_epi16(_mm256_unpacklo_epi8(rows[2 * k], rows[2 * k + 1]), t.pairs[k])
+                });
+                let hi: [__m256i; 4] = core::array::from_fn(|k| {
+                    _mm256_maddubs_epi16(_mm256_unpackhi_epi8(rows[2 * k], rows[2 * k + 1]), t.pairs[k])
+                });
+                let lo = _mm256_mulhrs_epi16(t.raw(lo), r256);
+                let hi = _mm256_mulhrs_epi16(t.raw(hi), r256);
+                let v = _mm256_packus_epi16(lo, hi);
+                put(dst, out + c, _mm256_castsi256_si128(v), 16, avg);
+                put(dst, out + c + 16, _mm256_extracti128_si256::<1>(v), 16, avg);
+                c += 32;
             }
+        } else {
+            let load = if w == 16 { 16 } else { 8 };
+            let rows: [__m128i; 8] = core::array::from_fn(|k| ld(src, base + k * ss, load));
+            let lo: [__m128i; 4] = core::array::from_fn(|k| {
+                _mm_maddubs_epi16(_mm_unpacklo_epi8(rows[2 * k], rows[2 * k + 1]), t.pairs1[k])
+            });
+            let lo = _mm_mulhrs_epi16(t.raw1(lo), r128);
+            let v = if w == 16 {
+                let hi: [__m128i; 4] = core::array::from_fn(|k| {
+                    _mm_maddubs_epi16(_mm_unpackhi_epi8(rows[2 * k], rows[2 * k + 1]), t.pairs1[k])
+                });
+                let hi = _mm_mulhrs_epi16(t.raw1(hi), r128);
+                _mm_packus_epi16(lo, hi)
+            } else {
+                _mm_packus_epi16(lo, lo)
+            };
+            put(dst, out, v, w, avg);
         }
-        c += step;
     }
 }

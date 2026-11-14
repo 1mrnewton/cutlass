@@ -6,6 +6,7 @@
 //! more than the padding a valid stream may use.
 
 /// The arithmetic decoder of one tile, or of the compressed header.
+#[derive(Clone, Copy)]
 pub struct Bool<'a> {
     data: &'a [u8],
     pos: usize,
@@ -15,20 +16,6 @@ pub struct Bool<'a> {
     count: i32,
     range: u32,
 }
-
-const NORM: [u8; 256] = {
-    let mut t = [0u8; 256];
-    let mut i = 1;
-    while i < 256 {
-        let mut n = 0;
-        while (i << n) < 128 {
-            n += 1;
-        }
-        t[i] = n;
-        i += 1;
-    }
-    t
-};
 
 impl<'a> Bool<'a> {
     /// Starts on `data` and reads the marker bit, which must be 0.
@@ -103,7 +90,8 @@ impl<'a> Bool<'a> {
         } else {
             self.range = split;
         }
-        let shift = u32::from(NORM[self.range as usize]);
+        // `range` is 1 to 255 here.
+        let shift = self.range.leading_zeros() - 24;
         self.range <<= shift;
         self.value <<= shift;
         self.count -= shift as i32;

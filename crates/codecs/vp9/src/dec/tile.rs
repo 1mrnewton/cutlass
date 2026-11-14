@@ -185,6 +185,9 @@ pub struct Tile<'s, 't, 'd, P> {
     left_part: [u8; 8],
     left_nz: [[u8; 16]; 3],
     coef: [i32; 1024],
+    /// Token energies by position; a position is always written before
+    /// a later one reads it, so it is never cleared.
+    cache: [u8; 1024],
     emu: &'t mut Vec<P>,
     /// Whether a block read past its data or held a bad vector.
     pub corrupt: bool,
@@ -234,6 +237,7 @@ impl<'s, 't, 'd, P: Pixel> Tile<'s, 't, 'd, P> {
             left_part: [0; 8],
             left_nz: [[0; 16]; 3],
             coef: [0; 1024],
+            cache: [0; 1024],
             emu,
             corrupt: false,
         }
@@ -565,7 +569,7 @@ impl<'s, 't, 'd, P: Pixel> Tile<'s, 't, 'd, P> {
     fn intra_block_info(&mut self, b: &mut Blk) {
         let fc = self.s.fc;
         let collect = self.s.collect;
-        let mut y_mode = |t: &mut Self, group: usize| -> u8 {
+        let y_mode = |t: &mut Self, group: usize| -> u8 {
             let m = t.b.tree(&prob::INTRA_TREE, &fc.y_mode[group]);
             if collect {
                 t.f.counts.y_mode[group][usize::from(m)] += 1;
@@ -1220,11 +1224,13 @@ impl<'s, 't, 'd, P: Pixel> Tile<'s, 't, 'd, P> {
         let bd = self.s.bd;
         let collect = self.s.collect;
         let (ti, pi, ri) = (usize::from(tx), usize::from(uv), usize::from(inter));
-        let mut cache = [0u8; 1024];
+        let cache = &mut self.cache;
         let mut dqv = i32::from(dq[0]);
         let mut c = 0usize;
         let (mut max_r, mut max_c) = (0usize, 0usize);
-        let b = &mut self.b;
+        // The decoder works on a copy in registers, written back at the end.
+        let mut local = *self.b;
+        let b = &mut local;
         let coef = &mut self.coef;
         let counts = &mut self.f.counts;
         while c < max_eob {
@@ -1247,6 +1253,7 @@ impl<'s, 't, 'd, P: Pixel> Tile<'s, 't, 'd, P> {
                 cache[usize::from(scan[c])] = 0;
                 c += 1;
                 if c >= max_eob {
+                    *self.b = local;
                     return (c, (max_r + 1, max_c + 1));
                 }
                 ctx = (1 + usize::from(cache[usize::from(nb[2 * c])]) + usize::from(cache[usize::from(nb[2 * c + 1])])) >> 1;
@@ -1317,6 +1324,7 @@ impl<'s, 't, 'd, P: Pixel> Tile<'s, 't, 'd, P> {
             }
             dqv = i32::from(dq[1]);
         }
+        *self.b = local;
         (c, (max_r + 1, max_c + 1))
     }
 

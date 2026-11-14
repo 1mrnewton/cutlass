@@ -696,8 +696,10 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
                         // down into the output.
                         let width = self.pic.width;
                         let sizes = [lines * width, band[1] * (width / 2), band[2] * (width / 2)];
+                        // SAO writes every sample of the band, and the
+                        // buffer stays in cache from band to band: sized,
+                        // not cleared.
                         for (s, n) in st.stage.iter_mut().zip(sizes) {
-                            s.clear();
                             s.resize(n, P::default());
                         }
                         let [a, b, c] = &mut st.stage;

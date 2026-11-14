@@ -8,7 +8,8 @@
 
 mod apple;
 mod limits;
-mod nal;
+#[cfg(target_vendor = "apple")]
+use cutlass_decode::nal;
 #[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
 mod reorder;
 mod status;

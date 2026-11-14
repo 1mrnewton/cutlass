@@ -68,7 +68,8 @@ pub struct PhoneExport {
 }
 
 /// Opus, AC-3, E-AC-3, Vorbis and Motion JPEG in Rust, the platform encoders
-/// for this OS, then H.264, MPEG-4 Visual, AAC and ProRes in Rust. The
+/// for this OS (VideoToolbox and AudioToolbox, or MediaCodec), then H.264,
+/// MPEG-4 Visual, AAC and ProRes in Rust. The
 /// phone's own export still writes H.264; MPEG-4 is there when a caller asks
 /// for it and the platform encoder declines.
 #[must_use]
@@ -81,11 +82,15 @@ pub fn encoders() -> EncodeFactory {
     cutlass_ac3::register_encoders(&mut encoders);
     cutlass_vorbis::register_encoders(&mut encoders);
     cutlass_mjpeg::register_encoders(&mut encoders);
+    // Stills, which a freeze frame writes. Android has no platform encoder
+    // for them; on Apple the Rust ones go first, as for sound.
+    cutlass_png::register_encoders(&mut encoders);
+    cutlass_jpeg::register_encoders(&mut encoders);
     #[cfg(target_vendor = "apple")]
     cutlass_platform_apple::register_encoders(&mut encoders);
-    // After the platform's, as on the desktop: a freeze frame's still is a
-    // PNG, and Android and Linux have only this one.
-    cutlass_png::register_encoders(&mut encoders);
+    // MediaCodec: H.264 and HEVC, the phone's hardware first.
+    #[cfg(target_os = "android")]
+    cutlass_platform_android::register_encoders(&mut encoders);
     cutlass_h264::register_encoders(&mut encoders);
     cutlass_mpeg4::register_engine_encoders(&mut encoders);
     cutlass_aac::register_encoders(&mut encoders);

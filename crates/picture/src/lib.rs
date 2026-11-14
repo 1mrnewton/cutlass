@@ -38,11 +38,13 @@ pub fn rgba_len(width: u32, height: u32) -> Option<usize> {
     Extent { width, height }.rgba_len()
 }
 
-/// RGBA bytes, four per pixel, tightly packed, row by row.
+/// RGBA bytes, four per pixel, tightly packed, row by row. A copy shares
+/// the bytes: a picture kept from one frame to the next, or handed from
+/// one stage to another, is not copied pixel by pixel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CpuBytes {
     extent: Extent,
-    rgba: Vec<u8>,
+    rgba: std::sync::Arc<Vec<u8>>,
 }
 
 impl CpuBytes {
@@ -53,7 +55,10 @@ impl CpuBytes {
         if rgba.len() != len {
             return Err(PictureError::Length);
         }
-        Ok(Self { extent, rgba })
+        Ok(Self {
+            extent,
+            rgba: std::sync::Arc::new(rgba),
+        })
     }
 
     #[must_use]
@@ -76,9 +81,17 @@ impl CpuBytes {
         &self.rgba
     }
 
+    /// The bytes themselves: taken when this is their only holder, and
+    /// copied when another copy of the picture still has them.
     #[must_use]
     pub fn into_rgba(self) -> Vec<u8> {
-        self.rgba
+        std::sync::Arc::try_unwrap(self.rgba).unwrap_or_else(|shared| (*shared).clone())
+    }
+
+    /// Whether `other` holds the very same bytes, and not only equal ones.
+    #[must_use]
+    pub fn shares(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.rgba, &other.rgba)
     }
 }
 
@@ -152,6 +165,33 @@ mod tests {
         assert_eq!(bytes.width(), 2);
         assert_eq!(bytes.height(), 2);
         assert_eq!(bytes.rgba().len(), 16);
+    }
+
+    #[test]
+    fn a_copy_of_a_picture_shares_its_bytes_until_they_are_taken() {
+        let bytes = CpuBytes::new(2, 2, (0..16).collect()).unwrap();
+        let copy = bytes.clone();
+        assert!(copy.shares(&bytes));
+        assert_eq!(copy, bytes);
+        assert_eq!(copy.rgba().as_ptr(), bytes.rgba().as_ptr());
+        // Equal bytes made apart are equal, and not shared.
+        let other = CpuBytes::new(2, 2, (0..16).collect()).unwrap();
+        assert_eq!(other, bytes);
+        assert!(!other.shares(&bytes));
+        // Taken while a copy holds them, the bytes are copied and the
+        // copy keeps its own; taken by the last holder, they are moved.
+        let taken = copy.into_rgba();
+        assert_eq!(taken, bytes.rgba());
+        assert_ne!(taken.as_ptr(), bytes.rgba().as_ptr());
+        let place = bytes.rgba().as_ptr();
+        let moved = bytes.into_rgba();
+        assert_eq!(moved.as_ptr(), place);
+        // A large picture is copied in no time, many times over.
+        let large = CpuBytes::new(2_000, 2_000, vec![7; 16_000_000]).unwrap();
+        let started = std::time::Instant::now();
+        let copies: Vec<CpuBytes> = (0..1_000).map(|_| large.clone()).collect();
+        assert!(copies.iter().all(|copy| copy.shares(&large)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[test]

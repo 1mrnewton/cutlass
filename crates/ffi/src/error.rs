@@ -158,10 +158,12 @@ fn edit_cause(error: EditError) -> String {
         EditError::FlowRate => {
             "Optical flow fills a clip to 30, 50 or 60 frames a second".to_owned()
         }
+        EditError::TextRange => "those letters are not in the text".to_owned(),
         EditError::LetterSpacing => "letter spacing must be from -1 to 4".to_owned(),
         EditError::LineSpacing => "line spacing must be greater than -1 and at most 4".to_owned(),
         EditError::LineWidth => "the line width must be from zero through 8192".to_owned(),
         EditError::TextFont => "the face is not a file name".to_owned(),
+        EditError::TextFontAxes => "the face's axes are not written as tags and numbers".to_owned(),
         EditError::TextStyle => "that outline, shadow, or background is out of range".to_owned(),
         EditError::FreeLayer => {
             "arranging needs a picture clip and Free layer on in the project settings".to_owned()

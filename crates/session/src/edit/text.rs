@@ -161,9 +161,9 @@ pub fn set_text_align(
 }
 
 /// How much a bold letter's edge grows, as a share of the text size.
-pub const BOLD_WIDTH: f64 = 0.04;
+pub const BOLD_WIDTH: f64 = cutlass_model::TEXT_BOLD_WIDTH;
 /// How many degrees an italic letter leans.
-pub const ITALIC_DEGREE: i32 = 12;
+pub const ITALIC_DEGREE: i32 = cutlass_model::TEXT_ITALIC_DEGREE;
 
 /// Bold, italic and underline over a whole text.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -207,6 +207,60 @@ pub fn set_text_pattern(
     text.underline = pattern.underline;
     fill_face(text, face);
     Ok(())
+}
+
+/// Turn bold, italic or underline on or off for the letters of `range`,
+/// a first character and the one after the last. A range of a face's own
+/// bold or italic draws in it; without one the letters are thickened or
+/// leaned as the whole text's are. A caption's words are styled as one,
+/// so a caption is refused.
+pub fn set_text_range_pattern(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    range: (usize, usize),
+    change: cutlass_model::PatternChange,
+    face: &str,
+) -> Result<(), EditError> {
+    let index = text_index(draft, segment_id)?;
+    {
+        // Checked before the text is made the clip's own.
+        let text = &draft.materials.texts[index];
+        let letters = text.words().map_or(0, |words| words.chars().count());
+        if !text.words.text.is_empty() || range.0 >= range.1 || range.1 > letters {
+            return Err(EditError::TextRange);
+        }
+    }
+    let index = own_text(draft, segment_id)?;
+    let text = &mut draft.materials.texts[index];
+    if !text.set_range_pattern(range.0, range.1, change) {
+        return Err(EditError::TextRange);
+    }
+    fill_face(text, face);
+    Ok(())
+}
+
+/// The pattern every letter of `range` has in the clip's text.
+pub fn text_range_pattern(
+    draft: &Draft,
+    segment_id: &SegmentId,
+    range: (usize, usize),
+) -> Result<Pattern, EditError> {
+    let text = &draft.materials.texts[text_index(draft, segment_id)?];
+    let own = Pattern::of(text);
+    let found = text.range_pattern(
+        range.0,
+        range.1,
+        cutlass_model::RichPattern {
+            bold: own.bold,
+            italic: own.italic,
+            underline: own.underline,
+        },
+    );
+    Ok(Pattern {
+        bold: found.bold,
+        italic: found.italic,
+        underline: found.underline,
+    })
 }
 
 /// Extra space between letters, as a fraction of the text size.
@@ -275,7 +329,35 @@ pub fn set_text_font(
     if !face_file(face) {
         return Err(EditError::TextFont);
     }
-    draft.materials.texts[index].font_path = face.to_owned();
+    let text = &mut draft.materials.texts[index];
+    // Another face has other axes: what the last was set to goes.
+    if text.font_path != face {
+        text.font_variations.clear();
+    }
+    text.font_path = face.to_owned();
+    Ok(())
+}
+
+/// Set the clip's face along its axes, `axes` written as `wght=650,wdth=80`.
+/// Every part must be a tag of four letters and a number; the values are
+/// kept to a hundredth. Empty takes the setting off. Whether the face has
+/// each axis is the face's to say when it is drawn: one it lacks is
+/// passed over.
+pub fn set_text_font_axes(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    axes: &str,
+) -> Result<(), EditError> {
+    let index = own_text(draft, segment_id)?;
+    let parts = axes
+        .split(',')
+        .filter(|part| !part.trim().is_empty())
+        .count();
+    let read = cutlass_model::read_font_axes(axes);
+    if axes.len() > 255 || parts > cutlass_model::MAX_FONT_AXES || read.len() != parts {
+        return Err(EditError::TextFontAxes);
+    }
+    draft.materials.texts[index].font_variations = cutlass_model::write_font_axes(&read);
     Ok(())
 }
 
@@ -972,7 +1054,8 @@ mod tests {
                 .iter()
                 .all(|style| style.solid() == Some([1.0, 0.0, 0.0, 1.0]))
         );
-        assert_eq!(rich.styles[0].rest.get("bold"), Some(&true.into()));
+        // The range's bold is kept through both edits.
+        assert_eq!(rich.styles[0].bold, Some(true));
     }
 
     #[test]
@@ -1031,6 +1114,152 @@ mod tests {
             .unwrap();
         let text = &session.draft().materials.texts[0];
         assert_eq!((text.bold_width, text.italic_degree), (0.008, 20));
+    }
+
+    /// A session with a title "Hello world" on clip `a`, and a caption
+    /// on clip `said`.
+    fn titled() -> Session {
+        let mut draft = Draft::empty("D");
+        draft.tracks[0].id = TrackId::new("main");
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("title"),
+            content: "Hello world".to_owned(),
+            ..MaterialText::default()
+        });
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("caption"),
+            content: "A B".to_owned(),
+            words: cutlass_model::WordColumns {
+                text: vec!["A".to_owned(), "B".to_owned()],
+                start_time: vec![0, 50],
+                end_time: vec![50, 100],
+                ..cutlass_model::WordColumns::default()
+            },
+            ..MaterialText::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "title", TimeRange::new(0, 1_000_000)));
+        draft.tracks[0].segments.push(Segment::new(
+            "said",
+            "caption",
+            TimeRange::new(1_000_000, 1_000_000),
+        ));
+        Session::open(draft)
+    }
+
+    fn range(clip: &str, start: usize, end: usize, bold: Option<bool>) -> Request {
+        Request::SetTextRangePattern {
+            segment_id: clip.into(),
+            start,
+            end,
+            bold,
+            italic: None,
+            underline: None,
+            face: "face.ttf".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_range_of_letters_is_made_bold_in_one_step_and_undone_in_one() {
+        let mut session = titled();
+        let plain = session.draft().clone();
+        let clip = cutlass_model::SegmentId::new("a");
+        let seen = |session: &Session, start: usize, end: usize| {
+            super::text_range_pattern(session.draft(), &clip, (start, end)).unwrap()
+        };
+        assert!(!seen(&session, 6, 11).bold);
+        session.apply(0, &[range("a", 6, 11, Some(true))]).unwrap();
+        let text = &session.draft().materials.texts[0];
+        // The title holds its words and the range, and takes the face.
+        assert!(text.is_rich_text);
+        assert_eq!(text.words().unwrap(), "Hello world");
+        assert_eq!(text.font_path, "face.ttf");
+        let rich = text.rich().unwrap();
+        assert_eq!(rich.styles.len(), 1);
+        assert_eq!(
+            (rich.styles[0].range, rich.styles[0].bold),
+            ([6, 11], Some(true))
+        );
+        // The whole title is not bold; its second word is.
+        assert!(!super::Pattern::of(text).bold);
+        assert!(seen(&session, 6, 11).bold);
+        assert!(seen(&session, 7, 9).bold);
+        assert!(!seen(&session, 0, 11).bold);
+        // Italic on a part of it, and bold off again for one letter.
+        session
+            .apply(
+                1,
+                &[Request::SetTextRangePattern {
+                    segment_id: "a".into(),
+                    start: 8,
+                    end: 11,
+                    bold: None,
+                    italic: Some(true),
+                    underline: Some(true),
+                    face: String::new(),
+                }],
+            )
+            .unwrap();
+        session.apply(2, &[range("a", 6, 7, Some(false))]).unwrap();
+        let pattern = seen(&session, 8, 11);
+        assert!(pattern.bold && pattern.italic && pattern.underline);
+        assert!(!seen(&session, 6, 8).bold);
+        assert!(seen(&session, 7, 8).bold && !seen(&session, 7, 8).italic);
+        // Each was one step.
+        session.undo().unwrap();
+        session.undo().unwrap();
+        session.undo().unwrap();
+        assert_eq!(session.draft(), &plain);
+        // Typing keeps a range on its letters.
+        session.apply(6, &[range("a", 6, 11, Some(true))]).unwrap();
+        session
+            .apply(
+                7,
+                &[Request::SetTextContent {
+                    segment_id: "a".into(),
+                    content: "Oh, hello world!".to_owned(),
+                }],
+            )
+            .unwrap();
+        assert!(seen(&session, 10, 15).bold);
+        assert!(!seen(&session, 0, 10).bold);
+        assert!(!seen(&session, 9, 11).bold);
+        // The mark typed straight after the bold word is bold with it.
+        assert!(seen(&session, 15, 16).bold);
+    }
+
+    #[test]
+    fn a_range_that_is_not_in_the_text_or_is_a_captions_is_refused() {
+        let mut session = titled();
+        let before = session.draft().clone();
+        for request in [
+            // Empty, backwards, and past the words.
+            range("a", 3, 3, Some(true)),
+            range("a", 5, 2, Some(true)),
+            range("a", 0, 12, Some(true)),
+            range("a", usize::MAX - 1, usize::MAX, Some(true)),
+            // A caption's words are styled as one.
+            range("said", 0, 1, Some(true)),
+        ] {
+            assert_eq!(
+                session.apply(0, &[request]).unwrap_err(),
+                EditError::TextRange
+            );
+            assert_eq!(session.draft(), &before);
+        }
+        assert!(
+            session
+                .apply(0, &[range("gone", 0, 1, Some(true))])
+                .is_err()
+        );
+        assert_eq!(session.draft(), &before);
+        // A locked row is refused like any other edit of it.
+        let mut locked = before.clone();
+        locked.tracks[0].attribute = TrackAttribute(TrackAttribute::LOCK);
+        let mut session = Session::open(locked.clone());
+        assert!(session.apply(0, &[range("a", 0, 5, Some(true))]).is_err());
+        assert_eq!(session.draft(), &locked);
     }
 
     #[test]
@@ -1418,6 +1647,75 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, EditError::LockedTrack);
         assert_eq!(session.draft().materials.texts[0].font_path, "");
+    }
+
+    #[test]
+    fn a_faces_axes_stay_on_the_text_until_its_face_changes() {
+        let mut session = open();
+        let font = |face: &str| Request::SetTextFont {
+            segment_id: "a".into(),
+            face: face.to_owned(),
+        };
+        let axes = |axes: &str| Request::SetTextFontAxes {
+            segment_id: "a".into(),
+            axes: axes.to_owned(),
+        };
+        let apply = |session: &mut Session, request: Request| {
+            let revision = session.revision();
+            session.apply(revision, &[request])
+        };
+        apply(&mut session, font("vary.ttf")).unwrap();
+        // Written tidily, each value to a hundredth.
+        apply(&mut session, axes(" wght=650 , wdth = 80.004 ")).unwrap();
+        let stored = |session: &Session| session.draft().materials.texts[0].font_variations.clone();
+        assert_eq!(stored(&session), "wght=650,wdth=80");
+        // One undo takes the setting off, and a redo of the face alone
+        // leaves it off.
+        session.undo().unwrap();
+        assert_eq!(stored(&session), "");
+        apply(&mut session, axes("wght=650,wdth=80")).unwrap();
+        // The same face again keeps it; another face has other axes.
+        apply(&mut session, font("vary.ttf")).unwrap();
+        assert_eq!(stored(&session), "wght=650,wdth=80");
+        apply(&mut session, font("other.ttf")).unwrap();
+        assert_eq!(stored(&session), "");
+        // Nothing takes the setting off.
+        apply(&mut session, axes("slnt=-8")).unwrap();
+        apply(&mut session, axes("")).unwrap();
+        assert_eq!(stored(&session), "");
+        // What is not tags and numbers is refused, and so are more axes
+        // than a face is set along, and the draft is left as it was.
+        apply(&mut session, axes("wght=700")).unwrap();
+        let before = session.draft().clone();
+        let many = "wght=1,".repeat(17);
+        let long = format!("wght={}", "1".repeat(300));
+        for bad in [
+            "wght",
+            "wg=4",
+            "wght=heavy",
+            "wght=1,,x",
+            "wght=inf",
+            many.as_str(),
+            long.as_str(),
+        ] {
+            assert_eq!(
+                apply(&mut session, axes(bad)).unwrap_err(),
+                EditError::TextFontAxes,
+                "{bad}"
+            );
+        }
+        assert_eq!(session.draft(), &before);
+        // A clip that is no text has no face to set.
+        assert!(
+            apply(
+                &mut session,
+                Request::SetTextFontAxes {
+                    segment_id: "missing".into(),
+                    axes: "wght=700".to_owned(),
+                }
+            )
+            .is_err()
+        );
     }
 
     fn add(track: &str, segment: &str, start: i64, content: &str, face: &str) -> Request {

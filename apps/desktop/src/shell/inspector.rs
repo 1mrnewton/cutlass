@@ -1111,6 +1111,13 @@ impl Shell {
         self.face.names()
     }
 
+    /// The same faces, each with the name people know it by: its full
+    /// name for a face of a collection, its file's name otherwise.
+    #[must_use]
+    pub fn text_face_labels(&self) -> Vec<(String, String)> {
+        self.face.labelled()
+    }
+
     /// Set the selected title in `face`. The same face is not an undo step.
     pub fn set_text_face(&mut self, face: &str) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
@@ -1128,6 +1135,37 @@ impl Shell {
             segment_id,
             face: face.to_owned(),
         })
+    }
+
+    /// The axes the selected title's face varies along, each with where
+    /// the title has it. None for a face that does not vary.
+    #[must_use]
+    pub fn text_font_axes(&self) -> Vec<cutlass_playback::FontAxis> {
+        let Ok(segment_id) = self.text_segment() else {
+            return Vec::new();
+        };
+        self.session_draft()
+            .ok()
+            .and_then(|draft| super::text_material(draft, &segment_id))
+            .map(|text| self.face.font_axes(text))
+            .unwrap_or_default()
+    }
+
+    /// Move the selected title's face to `value` along the axis `tag`,
+    /// the other axes staying where they are. A value past the axis's
+    /// end is the end. The same value is not an undo step.
+    pub fn set_text_font_axis(&mut self, tag: [u8; 4], value: f64) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let draft = self.session_draft()?;
+        let moved = super::text_material(draft, &segment_id)
+            .ok_or(cutlass_playback::AxisError::NoAxes)
+            .and_then(|text| self.face.moved_font_axis(text, tag, value))
+            .map_err(|error| ShellError::Unavailable(error.to_string()))?;
+        match moved {
+            Some(axes) => self.apply(Request::SetTextFontAxes { segment_id, axes }),
+            None => Ok(()),
+        }
     }
 
     /// Align the selected title left (0), center (1), or right (2), or stand
@@ -1175,6 +1213,54 @@ impl Shell {
             bold: pattern.bold,
             italic: pattern.italic,
             underline: pattern.underline,
+            face,
+        })
+    }
+
+    /// The pattern every letter of the selected title has from `start` up
+    /// to `end`, which count characters of its words. `None` with no title
+    /// picked.
+    #[must_use]
+    pub fn text_range_pattern(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Option<cutlass_session::TextPattern> {
+        let segment_id = self.text_segment().ok()?;
+        let draft = self.session_draft().ok()?;
+        cutlass_session::text_range_pattern(draft, &segment_id, (start, end)).ok()
+    }
+
+    /// Turn bold, italic or underline on or off for the letters of the
+    /// selected title from `start` up to `end`; a part of `change` that is
+    /// `None` stays as it is. One undo step. Letters that already have the
+    /// pattern asked for are not a step.
+    pub fn set_text_range_pattern(
+        &mut self,
+        start: usize,
+        end: usize,
+        change: cutlass_model::PatternChange,
+    ) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        if let Some(now) = self.text_range_pattern(start, end)
+            && change.bold.is_none_or(|bold| bold == now.bold)
+            && change.italic.is_none_or(|italic| italic == now.italic)
+            && change
+                .underline
+                .is_none_or(|underline| underline == now.underline)
+            && start < end
+        {
+            return Ok(());
+        }
+        let face = self.face.name().to_owned();
+        self.apply(Request::SetTextRangePattern {
+            segment_id,
+            start,
+            end,
+            bold: change.bold,
+            italic: change.italic,
+            underline: change.underline,
             face,
         })
     }

@@ -188,6 +188,71 @@ jobs:
           cargo build -p cutlass
           ${{ matrix.python }} scripts/smoke.py ${{ matrix.binary }}
 
+  android:
+    # The phone app: the Rust crates it loads are linted for Android, the
+    # library and its Kotlin bindings are built as apps/android/build-rust.sh
+    # builds them (the committed bindings must match), and Gradle builds the
+    # app and runs its unit tests. On main and on pull requests into main the
+    # device tests then run on an API 30 x86_64 emulator, which needs KVM.
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: 30.0.16248370
+    steps:
+      - uses: actions/checkout@v4
+      - name: ALSA headers for the host build the bindings generator reads
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-linux-android, x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk@4.1.2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+      - name: NDK r30
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+      - name: Clippy for Android
+        run: cargo clippy -p cutlass-platform-android -p cutlass-ffi -p cutlass-ffi-bindings --target aarch64-linux-android --no-deps -- -D warnings
+      - name: Rust library and bindings
+        run: |
+          apps/android/build-rust.sh
+          git diff --exit-code -- apps/android/app/src/main/java/uniffi
+      - name: Build and unit test
+        working-directory: apps/android
+        run: ./gradlew --no-daemon testDebugUnitTest assembleDebug assembleDebugAndroidTest
+      - name: KVM for the emulator
+        if: github.event_name != 'pull_request' || github.base_ref == 'main'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Device tests on an emulator
+        if: github.event_name != 'pull_request' || github.base_ref == 'main'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          # The editor draws with compute shaders, which need guest Vulkan.
+          # The API 30 x86_64 image on emulator 37 offers the guest only
+          # OpenGL ES 3.0 ("update the emulator to one that supports the
+          # feature(s): Vulkan"), and the renderer refuses it.
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          emulator-options: -no-window -gpu swiftshader_indirect -no-boot-anim -camera-back none
+          disable-animations: true
+          working-directory: apps/android
+          script: ./gradlew --no-daemon connectedDebugAndroidTest
+
   appimage:
     # The Linux release build as an AppImage, on the oldest supported
     # Ubuntu so its glibc runs on newer systems. The built AppImage runs the

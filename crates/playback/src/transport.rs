@@ -77,6 +77,8 @@ pub struct Transport {
     mixer: Option<Mixer>,
     /// The peaks of the last slice queued without a stream.
     queued_peak: Option<[f32; 2]>,
+    /// The output was let sleep and wakes before the next sound.
+    resting: bool,
 }
 
 impl Default for Transport {
@@ -96,6 +98,7 @@ impl Transport {
             stream: None,
             mixer: None,
             queued_peak: None,
+            resting: false,
         }
     }
 
@@ -105,6 +108,7 @@ impl Transport {
         self.mixer = None;
         self.host = host;
         self.output = AudioOutput::open(host);
+        self.rest();
     }
 
     #[must_use]
@@ -138,15 +142,29 @@ impl Transport {
         }
         self.output.clear_stream();
         self.output.queue(&[]);
+        self.rest();
+    }
+
+    /// Let the device sleep until the next sound.
+    fn rest(&mut self) {
+        self.output.rest();
+        self.resting = true;
+    }
+
+    /// Wake a resting device before a sound. A device that will not start
+    /// again is opened anew, and the mixer on the old one goes.
+    fn wake(&mut self) {
+        self.resting = false;
+        if self.output.wake(self.host) {
+            self.stream = None;
+            self.mixer = None;
+        }
     }
 
     /// Stream `program` from `at` to `end` on the mixer thread. A host with
     /// no stream clock queues one slice instead, and then one per tick.
     pub fn start(&mut self, program: Program<'_>, at: Micros, end: Micros) {
-        if self.output.wake(self.host) {
-            self.stream = None;
-            self.mixer = None;
-        }
+        self.wake();
         self.output.clear_stream();
         let Some(clock) = self.output.clock() else {
             self.stream = None;
@@ -180,6 +198,9 @@ impl Transport {
     /// Queue `frames` of the mix at `at`, for a scrub or a host with no
     /// stream.
     pub fn queue(&mut self, program: Program<'_>, at: Micros, frames: u32) {
+        if self.resting {
+            self.wake();
+        }
         self.queued_peak = queue_mix_peak(
             &mut self.output,
             PreviewMix {
@@ -442,6 +463,29 @@ mod tests {
         assert_eq!(transport.heard_peak(), Some([0.0, 0.0]));
         transport.silence();
         assert_eq!(transport.heard_peak(), None);
+    }
+
+    #[test]
+    fn the_output_rests_between_sounds_and_wakes_for_the_next() {
+        let session = color_session(1_000_000, 1_000_000);
+        let readers = ReaderFactory::default();
+        let mut transport = Transport::new();
+        transport.open(AudioHost::Software);
+        assert!(transport.resting, "a fresh output waits for a sound");
+        transport.queue(program(&session, &readers), Micros(0), 480);
+        assert!(!transport.resting);
+        transport.silence();
+        assert!(transport.resting);
+        transport.start(program(&session, &readers), Micros(0), Micros(1_000_000));
+        assert!(!transport.resting);
+        transport.tick(
+            program(&session, &readers),
+            Micros(0),
+            2_000_000,
+            Micros(1_000_000),
+            false,
+        );
+        assert!(transport.resting, "play that ends lets the output rest");
     }
 
     #[test]

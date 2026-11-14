@@ -1,8 +1,11 @@
-//! Horizontal kerning pairs from a version-0 `kern` table.
+//! Horizontal kerning pairs from a `kern` table.
 //!
 //! Format 0 stores one adjustment per glyph pair. A missing table means no
-//! pairs. A horizontal subtable in another format is refused, so a pair is
-//! not dropped on the floor. Vertical subtables are skipped.
+//! pairs. In a version-0 table a horizontal subtable in another format is
+//! refused, so a pair is not dropped on the floor, and vertical subtables
+//! are skipped. Apple's version-1 table is read for its format 0 subtables
+//! alone: its other formats are state machines, which also move marks,
+//! and those are left out.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -18,6 +21,7 @@ struct Pair {
     value: i16,
 }
 
+#[derive(Clone)]
 pub(crate) struct Kerning {
     pairs: Vec<Pair>,
 }
@@ -25,6 +29,10 @@ pub(crate) struct Kerning {
 impl Kerning {
     pub(crate) fn empty() -> Self {
         Self { pairs: Vec::new() }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
     }
 
     pub(crate) fn get(&self, left: u16, right: u16) -> i16 {
@@ -49,6 +57,11 @@ pub(crate) fn parse(table: &[u8]) -> Result<Kerning, FontError> {
     }
     if table.len() < 4 {
         return Err(FontError::Truncated);
+    }
+    if u16_at(table, 0)? == 1 && u16_at(table, 2)? == 0 {
+        // A version-1 table that does not read is no kerning, not a face
+        // that does not open.
+        return apple(table).map_err(|_| FontError::Unsupported);
     }
     if u16_at(table, 0)? != 0 {
         return Err(FontError::Unsupported);
@@ -78,7 +91,7 @@ pub(crate) fn parse(table: &[u8]) -> Result<Kerning, FontError> {
             if sub_version != 0 || minimum || cross_stream || format != 0 {
                 return Err(FontError::Unsupported);
             }
-            read_pairs(sub, replace, &mut pairs)?;
+            read_pairs(sub, 6, replace, &mut pairs)?;
         }
         at = end;
     }
@@ -89,31 +102,65 @@ pub(crate) fn parse(table: &[u8]) -> Result<Kerning, FontError> {
     Ok(Kerning { pairs })
 }
 
+/// The pairs of an Apple version-1 table's format 0 subtables.
+fn apple(table: &[u8]) -> Result<Kerning, FontError> {
+    let count = usize::try_from(crate::u32_at(table, 4)?).map_err(|_| FontError::BadTable)?;
+    if count > 256 {
+        return Err(FontError::BadTable);
+    }
+    let mut at = 8;
+    let mut pairs = BTreeMap::new();
+    for _ in 0..count {
+        let length = usize::try_from(crate::u32_at(table, at)?).map_err(|_| FontError::BadTable)?;
+        if length < 8 {
+            return Err(FontError::BadTable);
+        }
+        let end = at.checked_add(length).ok_or(FontError::BadTable)?;
+        let sub = table.get(at..end).ok_or(FontError::Truncated)?;
+        let coverage = u16_at(sub, 4)?;
+        // Not vertical, not across the line, not a variation, format 0.
+        if coverage & 0xE0FF == 0 {
+            read_pairs(sub, 8, false, &mut pairs)?;
+        }
+        at = end;
+    }
+    let pairs = pairs
+        .into_iter()
+        .map(|((left, right), value)| Pair { left, right, value })
+        .collect();
+    Ok(Kerning { pairs })
+}
+
+/// The pairs of one format 0 subtable, whose own header is `header`
+/// bytes long.
 fn read_pairs(
     sub: &[u8],
+    header: usize,
     replace: bool,
     pairs: &mut BTreeMap<(u16, u16), i16>,
 ) -> Result<(), FontError> {
-    if sub.len() < 14 {
+    let first = header + 8;
+    if sub.len() < first {
         return Err(FontError::Truncated);
     }
-    let count = usize::from(u16_at(sub, 6)?);
+    let count = usize::from(u16_at(sub, header)?);
     let bytes = count.checked_mul(6).ok_or(FontError::BadTable)?;
-    let need = bytes.checked_add(14).ok_or(FontError::BadTable)?;
+    let need = bytes.checked_add(first).ok_or(FontError::BadTable)?;
     if sub.len() < need {
         return Err(FontError::Truncated);
     }
-    let mut previous: Option<(u16, u16)> = None;
+    // Real faces repeat a pair or store one out of its place. The first
+    // of a pair in a subtable is the one that counts, as it is the one a
+    // search of a sorted list meets.
+    let mut own: BTreeMap<(u16, u16), i16> = BTreeMap::new();
     for index in 0..count {
-        let offset = 14 + index * 6;
+        let offset = first + index * 6;
         let left = u16_at(sub, offset)?;
         let right = u16_at(sub, offset + 2)?;
         let value = i16_at(sub, offset + 4)?;
-        let key = (left, right);
-        if previous.is_some_and(|prior| prior >= key) {
-            return Err(FontError::BadTable);
-        }
-        previous = Some(key);
+        own.entry((left, right)).or_insert(value);
+    }
+    for (key, value) in own {
         if replace {
             pairs.insert(key, value);
         } else {
@@ -176,6 +223,29 @@ mod tests {
     }
 
     #[test]
+    fn an_apple_table_gives_the_pairs_of_its_pair_subtables() {
+        // One format 0 subtable of two pairs, then a state-machine one.
+        let mut table = vec![0, 1, 0, 0, 0, 0, 0, 2];
+        let mut pairs = vec![0, 0, 0, 28, 0, 0, 0, 0, 0, 2, 0, 12, 0, 1, 0, 0];
+        pairs.extend([0, 2, 0, 3, 0xFF, 0xB0, 0, 3, 0, 2, 0, 40]);
+        table.extend(&pairs);
+        table.extend([0, 0, 0, 12, 0, 1, 0, 0, 9, 9, 9, 9]);
+        let kerning = parse(&table).expect("apple");
+        assert_eq!((kerning.get(2, 3), kerning.get(3, 2)), (-80, 40));
+        assert_eq!(kerning.get(2, 2), 0);
+        assert!(!kerning.is_empty());
+        // A torn one is no kerning at all.
+        assert!(matches!(
+            parse(&table[..table.len() - 14]),
+            Err(FontError::Unsupported)
+        ));
+        assert!(matches!(
+            parse(&[0, 1, 0, 0, 0, 0]),
+            Err(FontError::Unsupported)
+        ));
+    }
+
+    #[test]
     fn pairs_sum_until_an_override_replaces_them() {
         let first = subtable(1, &[(1, 2, 10), (2, 2, 4)]);
         let second = subtable(1, &[(1, 2, -3)]);
@@ -201,15 +271,26 @@ mod tests {
     }
 
     #[test]
-    fn a_short_or_unsorted_table_is_an_error() {
+    fn a_repeated_or_misplaced_pair_is_read_and_the_first_counts() {
+        // A widely installed bold face stores one pair twice.
+        let kern = parse(&format0(1, &[(2, 1, 5), (1, 1, 4), (2, 1, 9), (1, 1, 4)])).expect("kern");
+        assert_eq!(kern.get(2, 1), 5);
+        assert_eq!(kern.get(1, 1), 4);
+        assert_eq!(kern.get(1, 2), 0);
+        // A second subtable still adds to the first.
+        let more = with_subs(&[
+            subtable(1, &[(1, 1, 4), (1, 1, 50)]),
+            subtable(1, &[(1, 1, 3)]),
+        ]);
+        assert_eq!(parse(&more).expect("kern").get(1, 1), 7);
+    }
+
+    #[test]
+    fn a_short_table_is_an_error() {
         assert!(matches!(parse(&[]), Err(FontError::EmptyTable)));
         assert!(matches!(parse(&[0, 0]), Err(FontError::Truncated)));
         assert!(matches!(parse(&[0, 1, 0, 0]), Err(FontError::Unsupported)));
         assert!(matches!(parse(&[0, 0, 0, 1]), Err(FontError::Truncated)));
-        assert!(matches!(
-            parse(&format0(1, &[(2, 1, 5), (1, 1, 4)])),
-            Err(FontError::BadTable)
-        ));
         let mut short = format0(1, &[(1, 2, 5)]);
         short[11] = 50;
         assert!(matches!(parse(&short), Err(FontError::Truncated)));

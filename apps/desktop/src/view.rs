@@ -182,6 +182,9 @@ pub struct ViewState {
     project_proxy_side: Option<u32>,
     /// The third-party notices, read when the Licenses window opens.
     licenses: Option<cutlass_licenses::Notices>,
+    /// The title families the app ships are listed in that window, each
+    /// with its license; folded away until asked for.
+    title_fonts_shown: bool,
     settings_open: bool,
     settings_tab: SettingsTab,
     /// The action whose new keys the settings window waits for.
@@ -313,6 +316,7 @@ impl Default for ViewState {
             project_proxies: None,
             project_proxy_side: None,
             licenses: None,
+            title_fonts_shown: false,
             settings_open: false,
             settings_tab: SettingsTab::General,
             recording: None,
@@ -1388,6 +1392,9 @@ fn licenses_window(ui: &mut Ui, view: &mut ViewState) {
                 ui.add_space(8.0);
                 sticker_credits(ui);
                 ui.add_space(8.0);
+                font_credits(ui, &mut view.title_fonts_shown);
+                word_list_credits(ui);
+                ui.add_space(8.0);
                 for krate in &notices.crates {
                     egui::CollapsingHeader::new(format!("{} {}", krate.name, krate.version))
                         .id_salt(("license", &krate.name, &krate.version))
@@ -1424,6 +1431,70 @@ fn sticker_credits(ui: &mut Ui) {
             .id_salt(("sticker license", credit.set))
             .show(ui, |ui| {
                 ui.label(RichText::new(credit.text).monospace().size(10.0));
+            });
+    }
+}
+
+/// The word lists the app breaks lines of Thai, Lao, Khmer and Burmese
+/// by, on one row that opens: whose they are, their license and their
+/// home, and the notices and license text.
+fn word_list_credits(ui: &mut Ui) {
+    let words = cutlass_text::LINE_BREAK_WORDS;
+    egui::CollapsingHeader::new("Word lists for Thai, Lao, Khmer and Burmese")
+        .id_salt("word lists license")
+        .show(ui, |ui| {
+            ui.label(format!(
+                "{} by {}, licensed under the {}.",
+                words.name, words.author, words.license
+            ));
+            ui.label(RichText::new(words.link).color(tokens::FAINT));
+            ui.label(RichText::new(words.text).monospace().size(10.0));
+        });
+}
+
+/// The faces that are part of the app: each face, who made it, its
+/// license and its home, and the license text under it. The title
+/// families are many, and are listed when `shown`, which a link turns.
+fn font_credits(ui: &mut Ui, shown: &mut bool) {
+    ui.label(RichText::new("Fonts").strong());
+    for face in crate::face::BUILT_IN {
+        ui.label(format!(
+            "{} by {}, licensed under the {}.",
+            face.family, face.author, face.license
+        ));
+        ui.label(RichText::new(face.link).color(tokens::FAINT));
+        egui::CollapsingHeader::new(format!("{} license", face.family))
+            .id_salt(("font license", face.name))
+            .show(ui, |ui| {
+                ui.label(RichText::new(face.text).monospace().size(10.0));
+            });
+    }
+    let families = cutlass_fonts::FAMILIES;
+    ui.label(format!(
+        "{} title families by other makers ship with the app, each under an open license.",
+        families.len()
+    ));
+    let turn = if *shown {
+        "Hide the title families"
+    } else {
+        "Show the title families"
+    };
+    if ui.link(turn).clicked() {
+        *shown = !*shown;
+    }
+    if !*shown {
+        return;
+    }
+    for family in families {
+        ui.label(format!(
+            "{} by {}, licensed under the {}.",
+            family.name, family.author, family.license
+        ));
+        ui.label(RichText::new(family.link).color(tokens::FAINT));
+        egui::CollapsingHeader::new(format!("{} license", family.name))
+            .id_salt(("font family license", family.name))
+            .show(ui, |ui| {
+                ui.label(RichText::new(family.text).monospace().size(10.0));
             });
     }
 }
@@ -12774,7 +12845,8 @@ mod tests {
         let run = |shell: &mut Shell, view: &mut ViewState, events| {
             let mut output = ctx.run_ui(
                 egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    // Tall enough for the credits and the first crates under them.
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 1000.0))),
                     events,
                     ..Default::default()
                 },
@@ -12803,6 +12875,43 @@ mod tests {
             painted.contains("https://googlefonts.github.io/noto-emoji-animation/"),
             "{painted}"
         );
+        // So are the faces that are part of the app, each with its license.
+        assert!(painted.contains("Fonts"), "{painted}");
+        for credit in [
+            "Ubuntu Light by Dalton Maag, for Canonical, licensed under the Ubuntu Font Licence 1.0.",
+            "Hack by Source Foundry, licensed under the MIT, with the Bitstream Vera license.",
+            "Noto Emoji by Google, licensed under the SIL Open Font License 1.1.",
+            "https://design.ubuntu.com/font",
+        ] {
+            assert!(painted.contains(credit), "{credit}: {painted}");
+        }
+        // The word lists lines of Thai and its neighbours are broken by
+        // have a row of their own, which opens on their terms.
+        assert!(
+            painted.contains("Word lists for Thai, Lao, Khmer and Burmese"),
+            "{painted}"
+        );
+        let words = cutlass_text::LINE_BREAK_WORDS;
+        assert!(words.text.contains("UNICODE LICENSE V3"));
+        assert!(words.link.starts_with("https://"));
+        // The title families are counted, and listed when asked for,
+        // each with who made it and its license.
+        assert!(
+            painted.contains("24 title families by other makers ship with the app"),
+            "{painted}"
+        );
+        assert!(painted.contains("Show the title families"), "{painted}");
+        assert!(!painted.contains("Inter by Rasmus Andersson"), "{painted}");
+        view.title_fonts_shown = true;
+        let listed = painted_text(&run(&mut shell, &mut view, Vec::new()));
+        for credit in [
+            "Hide the title families",
+            // The first of them; the rest are further down the list.
+            "Inter by Rasmus Andersson, licensed under the SIL Open Font License 1.1.",
+        ] {
+            assert!(listed.contains(credit), "{credit}: {listed}");
+        }
+        view.title_fonts_shown = false;
         run(
             &mut shell,
             &mut view,
@@ -18839,6 +18948,305 @@ mod tests {
         )]);
         shell.keep_presets_file(temp.join("Presets").join("text.json"));
         shell
+    }
+
+    /// A title in a face that varies has a slider for each of its axes,
+    /// which moves the title's own setting of the face.
+    #[test]
+    fn a_face_that_varies_has_a_slider_for_each_axis() {
+        use cutlass_model::SegmentId;
+        use egui_kittest::kittest::Queryable;
+        let temp = std::env::temp_dir().join(format!("cutlass-font-axes-{}", std::process::id()));
+        let mut shell = text_inspector_shell(&temp);
+        shell.use_faces(vec![
+            (
+                "sample.ttf",
+                include_bytes!("../../../crates/font/fixtures/sample.ttf").to_vec(),
+            ),
+            (
+                "vary.ttf",
+                include_bytes!("../../../crates/font/fixtures/variable.ttf").to_vec(),
+            ),
+        ]);
+        shell.select(Some(SegmentId::new("words")));
+        let stored = |shell: &Shell| {
+            let draft = shell.draft().unwrap();
+            draft
+                .materials
+                .texts
+                .iter()
+                .find(|text| text.id.as_str() == "title")
+                .unwrap()
+                .font_variations
+                .clone()
+        };
+        // A face that does not vary has no axes, and none can be set.
+        shell.set_text_face("sample.ttf").unwrap();
+        assert!(shell.text_font_axes().is_empty());
+        assert!(shell.set_text_font_axis(*b"wght", 700.0).is_err());
+        // The fixture face varies in weight and in width.
+        shell.set_text_face("vary.ttf").unwrap();
+        let axes = shell.text_font_axes();
+        let shown: Vec<(&str, f32, f32, f32)> = axes
+            .iter()
+            .map(|axis| (axis.name.as_str(), axis.min, axis.max, axis.value))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("Weight", 100.0, 900.0, 400.0),
+                ("Width", 50.0, 150.0, 100.0)
+            ]
+        );
+        // One axis moves and the other stays; every axis is written.
+        shell.set_text_font_axis(*b"wght", 650.0).unwrap();
+        assert_eq!(stored(&shell), "wght=650,wdth=100");
+        shell.set_text_font_axis(*b"wdth", 75.0).unwrap();
+        assert_eq!(stored(&shell), "wght=650,wdth=75");
+        let values: Vec<f32> = shell
+            .text_font_axes()
+            .iter()
+            .map(|axis| axis.value)
+            .collect();
+        assert_eq!(values, [650.0, 75.0]);
+        // Past an end is the end; the same value again is no undo step.
+        shell.set_text_font_axis(*b"wght", 5_000.0).unwrap();
+        assert_eq!(stored(&shell), "wght=900,wdth=75");
+        let before = shell.revision();
+        shell.set_text_font_axis(*b"wght", 900.0).unwrap();
+        assert_eq!(shell.revision(), before);
+        shell.undo().unwrap();
+        assert_eq!(stored(&shell), "wght=650,wdth=75");
+        // An axis the face lacks, and a value that is no number.
+        assert!(shell.set_text_font_axis(*b"slnt", -8.0).is_err());
+        assert!(shell.set_text_font_axis(*b"wght", f64::NAN).is_err());
+        assert_eq!(stored(&shell), "wght=650,wdth=75");
+        // The inspector shows a slider for each, by the axis's name, and
+        // none for a face that does not vary.
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(1280.0, 1600.0))
+            .build_ui_state(
+                |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+                (shell, {
+                    let mut view = ViewState::new();
+                    view.library_shelf = Shelf::Stickers;
+                    view
+                }),
+            );
+        harness.run_steps(4);
+        for name in ["Weight", "Width"] {
+            assert!(
+                harness
+                    .query_all_by_role_and_label(egui::accesskit::Role::Slider, name)
+                    .next()
+                    .is_some(),
+                "{name}"
+            );
+        }
+        // Another face has other axes: the setting goes with the face.
+        harness.state_mut().0.set_text_face("sample.ttf").unwrap();
+        harness.run_steps(3);
+        assert_eq!(stored(&harness.state().0), "");
+        for name in ["Weight", "Width"] {
+            assert!(
+                harness
+                    .query_all_by_role_and_label(egui::accesskit::Role::Slider, name)
+                    .next()
+                    .is_none(),
+                "{name}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// The font menu has a search: typing leaves the faces whose names
+    /// have what was typed, and Enter takes the first of them.
+    #[test]
+    fn the_font_menu_is_searched_by_name() {
+        use cutlass_model::SegmentId;
+        use egui_kittest::kittest::Queryable;
+        let temp = std::env::temp_dir().join(format!("cutlass-font-search-{}", std::process::id()));
+        let mut shell = text_inspector_shell(&temp);
+        shell.use_faces(vec![
+            (
+                "sample.ttf",
+                include_bytes!("../../../crates/font/fixtures/sample.ttf").to_vec(),
+            ),
+            (
+                "shaping.ttf",
+                include_bytes!("../../../crates/font/fixtures/shaping.ttf").to_vec(),
+            ),
+            (
+                "han-kana.ttf",
+                include_bytes!("../../../crates/font/fixtures/han-kana.ttf").to_vec(),
+            ),
+        ]);
+        shell.select(Some(SegmentId::new("words")));
+        // With `CUTLASS_RENDER_DIR` set the open menu is painted by the
+        // real renderer and kept there to look at.
+        let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
+        let builder = egui_kittest::Harness::builder().with_size(Vec2::new(1280.0, 1600.0));
+        let builder = if keep.is_some() {
+            builder.wgpu()
+        } else {
+            builder
+        };
+        let mut harness = builder.build_ui_state(
+            |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+            (shell, {
+                // The empty media shelf's hint has a glyph the test
+                // fonts lack.
+                let mut view = ViewState::new();
+                view.library_shelf = Shelf::Stickers;
+                view
+            }),
+        );
+        harness.run_steps(4);
+        let listed = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>, label: &str| {
+            harness.query_all_by_label(label).count()
+        };
+        // Shut, the menu lists nothing and has no search.
+        assert_eq!(listed(&harness, "Search fonts"), 0);
+        assert_eq!(listed(&harness, "shaping"), 0);
+        harness.get_by_label("Font").click();
+        harness.run_steps(3);
+        // Open: the search, and every face.
+        assert_eq!(listed(&harness, "Search fonts"), 1);
+        assert_eq!(listed(&harness, "shaping"), 1);
+        assert_eq!(listed(&harness, "han kana"), 1);
+        // Typing a part of a name, in any case, leaves the faces with it.
+        harness.get_by_label("Search fonts").type_text("HAP");
+        harness.run_steps(3);
+        assert_eq!(listed(&harness, "shaping"), 1);
+        assert_eq!(listed(&harness, "han kana"), 0);
+        assert_eq!(listed(&harness, "No font has that name"), 0);
+        if let Some(dir) = &keep {
+            std::fs::create_dir_all(dir).unwrap();
+            let image = harness.render().expect("the renderer draws the window");
+            image.save(dir.join("font-search.png")).unwrap();
+        }
+        // A click in the field kept the menu open; more letters that no
+        // name has leave a line that says so.
+        harness.get_by_label("Search fonts").type_text("zz");
+        harness.run_steps(3);
+        assert_eq!(listed(&harness, "shaping"), 0);
+        assert_eq!(listed(&harness, "No font has that name"), 1);
+        // With a name typed, Enter takes the first face left and shuts
+        // the menu.
+        harness
+            .state_mut()
+            .1
+            .inspector
+            .fields
+            .insert("font search".to_owned(), "kana".to_owned());
+        harness.run_steps(2);
+        assert_eq!(listed(&harness, "han kana"), 1);
+        harness.key_press(egui::Key::Enter);
+        harness.run_steps(3);
+        assert_eq!(harness.state().0.inspection().unwrap().font, "han-kana.ttf");
+        assert_eq!(listed(&harness, "Search fonts"), 0);
+        // Opened again, the search is empty and every face is back.
+        harness.get_by_label("Font").click();
+        harness.run_steps(3);
+        assert_eq!(listed(&harness, "shaping"), 1);
+        assert_eq!(listed(&harness, "sample"), 1);
+        // A click on a face takes it.
+        harness.get_by_label("shaping").click();
+        harness.run_steps(3);
+        assert_eq!(harness.state().0.inspection().unwrap().font, "shaping.ttf");
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Letters selected in a title's text box are made bold, italic or
+    /// underlined on their own, from the keyboard and from the Pattern
+    /// row; with none selected the row changes the whole text.
+    #[test]
+    fn selected_letters_of_a_title_take_a_pattern_of_their_own() {
+        use cutlass_model::SegmentId;
+        use egui::{Key, Modifiers};
+        use egui_kittest::kittest::Queryable;
+        let temp = std::env::temp_dir().join(format!("cutlass-range-{}", std::process::id()));
+        let mut shell = text_inspector_shell(&temp);
+        shell.select(Some(SegmentId::new("words")));
+        shell.set_text("Hello world".to_owned()).unwrap();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(1280.0, 1600.0))
+            .build_ui_state(
+                |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+                (shell, {
+                    // The empty media shelf's hint has a glyph the test
+                    // fonts lack.
+                    let mut view = ViewState::new();
+                    view.library_shelf = Shelf::Stickers;
+                    view
+                }),
+            );
+        harness.run_steps(4);
+        let range =
+            |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>, start: usize, end: usize| {
+                harness.state().0.text_range_pattern(start, end).unwrap()
+            };
+        let whole = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>| {
+            harness.state().0.inspection().unwrap().text_pattern
+        };
+        // Into the text box, and its first word selected from the keyboard.
+        // The Text tab and the Text shelf have the same name.
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::TextInput, "Text")
+            .click();
+        harness.run_steps(3);
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness.run_steps(2);
+        assert_eq!(harness.state().1.inspector.text_selection, Some((0, 11)));
+        harness.key_press(Key::Home);
+        harness.run_steps(2);
+        assert_eq!(harness.state().1.inspector.text_selection, None);
+        for _ in 0..5 {
+            harness.key_press_modifiers(Modifiers::SHIFT, Key::ArrowRight);
+            harness.run_steps(1);
+        }
+        assert_eq!(harness.state().1.inspector.text_selection, Some((0, 5)));
+        // Command-B makes those letters bold and no others.
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::B);
+        harness.run_steps(3);
+        assert!(range(&harness, 0, 5).bold);
+        assert!(!range(&harness, 5, 11).bold);
+        assert!(!whole(&harness).bold);
+        assert_eq!(harness.state().0.text_words().unwrap(), "Hello world");
+        // The Pattern row shows the selection's pattern and changes it:
+        // a click on Italic leans the same letters, and the text box has
+        // the keyboard and the selection back.
+        harness.get_by_label("Italic the selected letters").click();
+        harness.run_steps(4);
+        let first = range(&harness, 0, 5);
+        assert!(first.bold && first.italic && !first.underline);
+        assert!(!range(&harness, 5, 11).italic);
+        assert_eq!(harness.state().1.inspector.text_selection, Some((0, 5)));
+        // Bold again takes it off those letters.
+        harness.get_by_label("Bold the selected letters").click();
+        harness.run_steps(4);
+        assert!(!range(&harness, 0, 5).bold);
+        assert!(range(&harness, 0, 5).italic);
+        // Each was one step back.
+        harness.state_mut().0.undo().unwrap();
+        harness.run_steps(2);
+        assert!(range(&harness, 0, 5).bold);
+        // A click away from the box and the row lets the selection go,
+        // and the row is the whole text's again.
+        harness
+            .query_all_by_label("Font size")
+            .next()
+            .unwrap()
+            .click();
+        harness.run_steps(3);
+        assert_eq!(harness.state().1.inspector.text_selection, None);
+        harness.get_by_label("Underline").click();
+        harness.run_steps(3);
+        assert!(whole(&harness).underline);
+        assert!(range(&harness, 5, 11).underline);
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     /// Nothing in the text or caption inspector draws past its content's

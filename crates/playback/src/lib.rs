@@ -31,7 +31,10 @@ pub use apple::{
     AudioGap, AudioHost, AudioOutput, AudioSink, CopyOutcome, RATE as PREVIEW_RATE, StreamClock,
 };
 pub use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
-pub use faces::{FaceTable, MAX_FACE_BYTES, MAX_FACES, PREFERRED_FACES, face_label};
+pub use faces::{
+    AxisError, FaceTable, FontAxis, MAX_FACE_BYTES, MAX_FACES, PREFERRED_FACES, face_label,
+    matching_faces,
+};
 pub use film::{FilmCell, film_cells, media_file};
 pub use film_cache::{FILM_CACHE_BYTES, FilmCache};
 pub use meter::{

@@ -806,6 +806,13 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func fonts() throws  -> [Font]
     
     /**
+     * The faces whose names have every word of `query`, in the order
+     * `fonts` gives them; all of them for no words. Case does not
+     * matter.
+     */
+    func fontsMatching(query: String) throws  -> [Font]
+    
+    /**
      * The picture at `time_us`.
      */
     func frame(timeUs: Int64) throws  -> Frame
@@ -1002,6 +1009,21 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func setTextFont(clipId: String, face: String) throws 
     
     /**
+     * Move a text clip's face to `value` along the axis `tag`, the other
+     * axes staying where they are. Changes made while `live` join one
+     * undo step, so a slider drag is one step; its last change passes
+     * `live` false.
+     */
+    func setTextFontAxis(clipId: String, tag: String, value: Double, live: Bool) throws 
+    
+    /**
+     * Turn bold, italic or underline on or off for the letters of a text
+     * clip from `start` up to `end`; a part that is `None` stays as it
+     * is. One undo step.
+     */
+    func setTextRangePattern(clipId: String, start: UInt32, end: UInt32, bold: Bool?, italic: Bool?, underline: Bool?) throws 
+    
+    /**
      * Put transition `transition_id` on the cut after `outgoing_id`,
      * fitted to the clips; one there already is swapped. One undo step.
      */
@@ -1076,6 +1098,19 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * What a text clip says, or `None` when it is not a text clip.
      */
     func text(clipId: String) throws  -> TextInfo?
+    
+    /**
+     * The axes a text clip's face varies along, each with where the
+     * clip has it; none for a face that does not vary.
+     */
+    func textFontAxes(clipId: String) throws  -> [FontAxis]
+    
+    /**
+     * Which of bold, italic and underline every letter of a text clip
+     * from `start` up to `end` has, the two counting characters of its
+     * words. `None` when it is no text clip or has no such letters.
+     */
+    func textRangePattern(clipId: String, start: UInt32, end: UInt32) throws  -> TextPattern?
     
     /**
      * The picture of a tile [`Self::film`] named, once stored.
@@ -1586,6 +1621,21 @@ open func fonts()throws  -> [Font]  {
 }
     
     /**
+     * The faces whose names have every word of `query`, in the order
+     * `fonts` gives them; all of them for no words. Case does not
+     * matter.
+     */
+open func fontsMatching(query: String)throws  -> [Font]  {
+    return try  FfiConverterSequenceTypeFont.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_fonts_matching(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(query),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * The picture at `time_us`.
      */
 open func frame(timeUs: Int64)throws  -> Frame  {
@@ -2071,6 +2121,43 @@ open func setTextFont(clipId: String, face: String)throws   {try rustCallWithErr
 }
     
     /**
+     * Move a text clip's face to `value` along the axis `tag`, the other
+     * axes staying where they are. Changes made while `live` join one
+     * undo step, so a slider drag is one step; its last change passes
+     * `live` false.
+     */
+open func setTextFontAxis(clipId: String, tag: String, value: Double, live: Bool)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_text_font_axis(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterString.lower(tag),
+        FfiConverterDouble.lower(value),
+        FfiConverterBool.lower(live),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Turn bold, italic or underline on or off for the letters of a text
+     * clip from `start` up to `end`; a part that is `None` stays as it
+     * is. One undo step.
+     */
+open func setTextRangePattern(clipId: String, start: UInt32, end: UInt32, bold: Bool?, italic: Bool?, underline: Bool?)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_text_range_pattern(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterUInt32.lower(start),
+        FfiConverterUInt32.lower(end),
+        FfiConverterOptionBool.lower(bold),
+        FfiConverterOptionBool.lower(italic),
+        FfiConverterOptionBool.lower(underline),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Put transition `transition_id` on the cut after `outgoing_id`,
      * fitted to the clips; one there already is swapped. One undo step.
      */
@@ -2253,6 +2340,37 @@ open func text(clipId: String)throws  -> TextInfo?  {
     uniffi_cutlass_ffi_bindings_fn_method_editor_text(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(clipId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The axes a text clip's face varies along, each with where the
+     * clip has it; none for a face that does not vary.
+     */
+open func textFontAxes(clipId: String)throws  -> [FontAxis]  {
+    return try  FfiConverterSequenceTypeFontAxis.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_text_font_axes(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Which of bold, italic and underline every letter of a text clip
+     * from `start` up to `end` has, the two counting characters of its
+     * words. `None` when it is no text clip or has no such letters.
+     */
+open func textRangePattern(clipId: String, start: UInt32, end: UInt32)throws  -> TextPattern?  {
+    return try  FfiConverterOptionTypeTextPattern.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_text_range_pattern(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterUInt32.lower(start),
+        FfiConverterUInt32.lower(end),uniffiCallStatus
     )
 })
 }
@@ -3908,6 +4026,87 @@ public func FfiConverterTypeFont_lower(_ value: Font) -> RustBuffer {
 
 
 /**
+ * One axis a text clip's face varies along, for a slider: weight, width
+ * and whatever else the face's maker gave it. `tag` names the axis when
+ * it is set; `name` is for people.
+ */
+public struct FontAxis: Equatable, Hashable {
+    public var tag: String
+    public var name: String
+    public var min: Double
+    public var `default`: Double
+    public var max: Double
+    /**
+     * Where the clip has its face along the axis.
+     */
+    public var value: Double
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(tag: String, name: String, min: Double, `default`: Double, max: Double, 
+        /**
+         * Where the clip has its face along the axis.
+         */value: Double) {
+        self.tag = tag
+        self.name = name
+        self.min = min
+        self.`default` = `default`
+        self.max = max
+        self.value = value
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FontAxis: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFontAxis: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FontAxis {
+        return
+            try FontAxis(
+                tag: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                min: FfiConverterDouble.read(from: &buf), 
+                default: FfiConverterDouble.read(from: &buf), 
+                max: FfiConverterDouble.read(from: &buf), 
+                value: FfiConverterDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FontAxis, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.tag, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterDouble.write(value.min, into: &buf)
+        FfiConverterDouble.write(value.`default`, into: &buf)
+        FfiConverterDouble.write(value.max, into: &buf)
+        FfiConverterDouble.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFontAxis_lift(_ buf: RustBuffer) throws -> FontAxis {
+    return try FfiConverterTypeFontAxis.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFontAxis_lower(_ value: FontAxis) -> RustBuffer {
+    return FfiConverterTypeFontAxis.lower(value)
+}
+
+
+/**
  * A composited picture, eight-bit RGBA, rows top to bottom.
  */
 public struct Frame: Equatable, Hashable {
@@ -4833,6 +5032,68 @@ public func FfiConverterTypeTextInfo_lift(_ buf: RustBuffer) throws -> TextInfo 
 #endif
 public func FfiConverterTypeTextInfo_lower(_ value: TextInfo) -> RustBuffer {
     return FfiConverterTypeTextInfo.lower(value)
+}
+
+
+/**
+ * Which of bold, italic and underline every letter of a stretch of a
+ * text clip has.
+ */
+public struct TextPattern: Equatable, Hashable {
+    public var bold: Bool
+    public var italic: Bool
+    public var underline: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(bold: Bool, italic: Bool, underline: Bool) {
+        self.bold = bold
+        self.italic = italic
+        self.underline = underline
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TextPattern: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTextPattern: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TextPattern {
+        return
+            try TextPattern(
+                bold: FfiConverterBool.read(from: &buf), 
+                italic: FfiConverterBool.read(from: &buf), 
+                underline: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TextPattern, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.bold, into: &buf)
+        FfiConverterBool.write(value.italic, into: &buf)
+        FfiConverterBool.write(value.underline, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTextPattern_lift(_ buf: RustBuffer) throws -> TextPattern {
+    return try FfiConverterTypeTextPattern.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTextPattern_lower(_ value: TextPattern) -> RustBuffer {
+    return FfiConverterTypeTextPattern.lower(value)
 }
 
 
@@ -6534,6 +6795,30 @@ public func FfiConverterTypeToolKind_lower(_ value: ToolKind) -> RustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionBool: FfiConverterRustBuffer {
+    typealias SwiftType = Bool?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterBool.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterBool.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -6742,6 +7027,30 @@ fileprivate struct FfiConverterOptionTypeTextInfo: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeTextInfo.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeTextPattern: FfiConverterRustBuffer {
+    typealias SwiftType = TextPattern?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTextPattern.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTextPattern.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -7165,6 +7474,31 @@ fileprivate struct FfiConverterSequenceTypeFont: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeFont.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFontAxis: FfiConverterRustBuffer {
+    typealias SwiftType = [FontAxis]
+
+    public static func write(_ value: [FontAxis], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFontAxis.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FontAxis] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FontAxis]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFontAxis.read(from: &buf))
         }
         return seq
     }
@@ -8029,6 +8363,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_fonts() != 7751) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_fonts_matching() != 20572) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_frame() != 13353) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8140,6 +8477,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_text_font() != 34181) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_text_font_axis() != 26173) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_text_range_pattern() != 20616) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_transition() != 5556) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8177,6 +8520,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_text() != 30726) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_text_font_axes() != 28854) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_text_range_pattern() != 22874) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_thumb() != 28776) {

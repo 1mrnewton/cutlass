@@ -28,6 +28,14 @@ impl OutputQueue {
         self.slice.set_sample(sample)
     }
 
+    /// Pause the device. This host has none.
+    pub fn pause(&self) {}
+
+    /// Start the device again. This host has none.
+    pub fn resume(&self) -> Result<(), QueueError> {
+        Err(QueueError::NoDevice)
+    }
+
     /// Copy the next frames into `out`.
     pub fn fill(&self, out: &mut [u8]) -> usize {
         self.slice.pull_now(out)

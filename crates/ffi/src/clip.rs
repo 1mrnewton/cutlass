@@ -117,14 +117,20 @@ pub fn clip_state(draft: &Draft, segment_id: &SegmentId, time: Micros) -> Option
         reversed: plays && segment.reverse,
         fade_in: Micros(fade_in),
         fade_out: Micros(fade_out),
-        can_freeze: video.is_some_and(|video| video.freeze.is_none() && video.kind != "photo"),
-        can_extract: video.is_some_and(|video| video.kind != "photo") && !extracted,
+        can_freeze: video.is_some_and(|video| video.freeze.is_none() && !is_still(&video.kind)),
+        can_extract: video.is_some_and(|video| !is_still(&video.kind)) && !extracted,
         extracted,
         can_beat,
         beat_here,
         on_main: track.is_main(),
         can_splice: !track.is_main() && track.kind == TrackType::Video && video.is_some(),
     })
+}
+
+/// A photo, or a still the phone probed for itself, which it calls an
+/// image: neither has a frame to hold or a sound to take out.
+fn is_still(kind: &str) -> bool {
+    matches!(kind, "photo" | "image")
 }
 
 /// The fade-in and fade-out lengths stored on the clip, in microseconds.

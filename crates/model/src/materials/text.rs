@@ -31,6 +31,12 @@ pub struct MaterialText {
     pub font_name: String,
     #[serde(default)]
     pub font_path: String,
+    /// Where a face that varies is set along its axes, as `wght=650,wdth=80`:
+    /// each axis by its four-letter tag and a value in the axis's own
+    /// units. Empty leaves the face as its file, or its named style, has
+    /// it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub font_variations: String,
     #[serde(default)]
     pub font_title: String,
     #[serde(default)]
@@ -160,7 +166,19 @@ pub struct MaterialText {
     pub rest: Map<String, Value>,
 }
 
+/// The most axes a title sets a face along.
+pub const MAX_FONT_AXES: usize = 16;
+
 impl MaterialText {
+    /// The axes [`Self::font_variations`] names, each with its value, in
+    /// the order written. A part that is not a tag of four printable
+    /// letters and a number is passed over, and so is anything past
+    /// [`MAX_FONT_AXES`].
+    #[must_use]
+    pub fn font_axes(&self) -> Vec<([u8; 4], f32)> {
+        read_font_axes(&self.font_variations)
+    }
+
     /// Resource-mapping fallbacks. An absent key stays at 1, and so does [`Default`].
     pub const MAPPING_TEXT_ALPHA: f64 = 0.0;
     pub const MAPPING_BACKGROUND_ALPHA: f64 = 0.0;
@@ -211,6 +229,7 @@ impl Default for MaterialText {
             font_size: 0.0,
             font_name: String::new(),
             font_path: String::new(),
+            font_variations: String::new(),
             font_title: String::new(),
             alignment: 0,
             typesetting: 0,
@@ -263,6 +282,12 @@ impl Default for MaterialText {
 }
 
 /// The keys a caption's style may have, as `cutlass_captions` draws them.
+/// How much a bold letter's edge grows when its face has no bold of its
+/// own, as a share of the text size.
+pub const TEXT_BOLD_WIDTH: f64 = 0.04;
+/// How many degrees an italic letter leans when its face has no italic.
+pub const TEXT_ITALIC_DEGREE: i32 = 12;
+
 pub const CAPTION_STYLE_KEYS: [&str; 10] = [
     "classic",
     "karaoke",
@@ -330,6 +355,40 @@ impl Bubble {
     pub fn of(key: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|bubble| bubble.key() == key)
     }
+}
+
+/// The axes a string such as `wght=650,wdth=80` names, each with its
+/// value. A part that does not read is passed over.
+#[must_use]
+pub fn read_font_axes(written: &str) -> Vec<([u8; 4], f32)> {
+    written
+        .split(',')
+        .filter_map(|part| {
+            let (tag, value) = part.split_once('=')?;
+            let tag = <[u8; 4]>::try_from(tag.trim().as_bytes()).ok()?;
+            let value: f32 = value.trim().parse().ok()?;
+            (tag.iter().all(|byte| (0x20..0x7F).contains(byte)) && value.is_finite())
+                .then_some((tag, value))
+        })
+        .take(MAX_FONT_AXES)
+        .collect()
+}
+
+/// `axes` written as [`MaterialText::font_variations`] keeps them: each
+/// value to a hundredth, which is finer than any axis is drawn.
+#[must_use]
+pub fn write_font_axes(axes: &[([u8; 4], f32)]) -> String {
+    axes.iter()
+        .filter(|(tag, value)| {
+            tag.iter().all(|byte| (0x20..0x7F).contains(byte)) && value.is_finite()
+        })
+        .take(MAX_FONT_AXES)
+        .map(|(tag, value)| {
+            let rounded = (f64::from(*value) * 100.0).round() / 100.0;
+            format!("{}={rounded}", String::from_utf8_lossy(tag))
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 #[cfg(test)]
@@ -447,5 +506,49 @@ mod tests {
         none.subtitle_keywords = Kept::Null;
         none.adopt_subtitle_keywords();
         assert!(none.caption_keywords.is_empty());
+    }
+
+    #[test]
+    fn a_titles_axes_are_written_and_read_back() {
+        use super::{MAX_FONT_AXES, read_font_axes, write_font_axes};
+        let mut text = MaterialText::new("title");
+        assert!(text.font_axes().is_empty());
+        text.font_variations = "wght=650,wdth=80".to_owned();
+        assert_eq!(text.font_axes(), [(*b"wght", 650.0), (*b"wdth", 80.0)]);
+        // Written to a hundredth, and read back the same.
+        let written = write_font_axes(&[(*b"wght", 650.0), (*b"slnt", -7.456), (*b"GRAD", 0.5)]);
+        assert_eq!(written, "wght=650,slnt=-7.46,GRAD=0.5");
+        assert_eq!(
+            read_font_axes(&written),
+            [(*b"wght", 650.0), (*b"slnt", -7.46), (*b"GRAD", 0.5)]
+        );
+        // What does not read is passed over: a tag of the wrong length, a
+        // value that is no number or no finite one, a part with no sign.
+        assert_eq!(
+            read_font_axes(" wght = 700 ,wd=3,wdth=x,opsz=inf,slnt,=4,ital=1"),
+            [(*b"wght", 700.0), (*b"ital", 1.0)]
+        );
+        assert_eq!(
+            write_font_axes(&[(*b"wght", f32::NAN), ([0, 1, 2, 3], 4.0)]),
+            ""
+        );
+        assert!(read_font_axes("").is_empty());
+        // No more axes than a face is ever set along, and a long string
+        // is read in time.
+        let many = "wght=1,".repeat(100_000);
+        let started = std::time::Instant::now();
+        assert_eq!(read_font_axes(&many).len(), MAX_FONT_AXES);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let axes = vec![(*b"wght", 1.0); 100];
+        assert_eq!(write_font_axes(&axes).matches('=').count(), MAX_FONT_AXES);
+        // The field is left out of a draft that does not use it, and a
+        // draft without it reads.
+        let plain = MaterialText::new("title");
+        let stored = serde_json::to_string(&plain).expect("stored");
+        assert!(!stored.contains("font_variations"));
+        let read: MaterialText = serde_json::from_str(&stored).expect("read");
+        assert!(read.font_variations.is_empty());
+        let stored = serde_json::to_string(&text).expect("stored");
+        assert!(stored.contains(r#""font_variations":"wght=650,wdth=80""#));
     }
 }

@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod access;
+pub mod nal;
 
 mod id;
 mod packet;

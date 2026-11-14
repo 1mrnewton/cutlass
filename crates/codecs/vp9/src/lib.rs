@@ -9,7 +9,7 @@ mod bits;
 mod coef;
 mod dec;
 mod decode;
-mod encode;
+mod enc;
 mod fwd;
 mod dsp;
 mod geom;
@@ -26,7 +26,7 @@ mod txfm;
 mod prove;
 
 pub use decode::{Decoder, Vp9Decoder};
-pub use encode::Vp9Encoder;
+pub use enc::api::{EngineEncoder, Vp9Encoder, Vp9Options, register_engine_encoders};
 
 use cutlass_decode::video::VideoDecoder;
 use cutlass_decode::{CodecError, CodecId, CodecParams, VideoDecodeFactory};

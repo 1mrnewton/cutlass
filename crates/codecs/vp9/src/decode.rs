@@ -212,14 +212,31 @@ impl Decoder {
             decode_frame(parsed, refs, prev.as_deref().map(|v| v.as_slice()), &last_seg, bufs, spare, workers, present)?
         };
         drop(refs_now);
-        let after_key = self.persist.key_frame;
-        let fc = adapted(parsed, &built.counts, after_key);
         self.bufs = built.spare;
         if rt.is_none() {
             self.bufs.tiles = built.tiles;
             self.bufs.masks = built.masks;
             self.bufs.grid = built.grid;
         }
+        Ok(self.commit(parsed, &built.counts, built.mvs, built.segmap, pic))
+    }
+
+    /// The state a finished frame leaves for the next: the adapted
+    /// probabilities, the motion and segmentation maps, the reference
+    /// slots it refreshes. Returns the picture when it is shown. The
+    /// encoder commits its own frames through this too, so that it
+    /// predicts from the state a decoder has.
+    pub(crate) fn commit<P: Store>(
+        &mut self,
+        parsed: &Parsed<'_>,
+        counts: &Counts,
+        mvs: Vec<MvRef>,
+        segmap: Vec<u8>,
+        pic: Arc<Pic<P>>,
+    ) -> Option<Held> {
+        let header = &parsed.header;
+        let after_key = self.persist.key_frame;
+        let fc = adapted(parsed, counts, after_key);
         let persist = &mut self.persist;
         persist.width = header.width;
         persist.height = header.height;
@@ -249,10 +266,10 @@ impl Decoder {
         {
             self.bufs.mvs = v;
         }
-        self.prev = Some(Arc::new(built.mvs));
+        self.prev = Some(Arc::new(mvs));
         let cells = geom::mi_count(header.width).saturating_mul(geom::mi_count(header.height));
         if header.seg.enabled {
-            self.last_seg = built.segmap;
+            self.last_seg = segmap;
         } else if header.is_intra() || header.error_resilient {
             self.last_seg = vec![0u8; cells];
         }
@@ -269,11 +286,29 @@ impl Decoder {
                 self.recycle(old);
             }
         }
-        if header.show_frame {
-            Ok(Some(P::keep(shared)))
-        } else {
-            Ok(None)
+        header.show_frame.then(|| P::keep(shared))
+    }
+
+    /// The state the next frame is coded against.
+    pub(crate) fn persist(&self) -> &Persist {
+        &self.persist
+    }
+
+    /// The pictures in the reference slots, of 8-bit frames.
+    pub(crate) fn ref8(&self, slot: usize) -> Option<&Arc<Pic<u8>>> {
+        match self.refs.get(slot)? {
+            Some(Held::Eight(p)) => Some(p),
+            _ => None,
         }
+    }
+
+    /// The previous frame's motion, and a spare picture buffer list.
+    pub(crate) fn prev_mvs(&self) -> Option<&[MvRef]> {
+        self.prev.as_deref().map(|v| v.as_slice())
+    }
+
+    pub(crate) fn spare8(&mut self) -> &mut Spare<u8> {
+        &mut self.spare8
     }
 
     /// Takes back a picture's buffers when this was its last holder.
@@ -894,7 +929,7 @@ mod tests {
     }
 
     fn fuzz_corpus() -> Vec<Vec<u8>> {
-        let mut encoder = crate::encode::Vp9Encoder::with_quantizer(32, 16, 32).expect("encoder");
+        let mut encoder = crate::Vp9Encoder::with_quantizer(32, 16, 32).expect("encoder");
         let mut frames = Vec::new();
         for index in 0..4 {
             let frame = fuzz_picture(index);

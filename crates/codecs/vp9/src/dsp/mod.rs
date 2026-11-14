@@ -7,3 +7,4 @@ pub mod lanes;
 pub mod lf;
 pub mod mc;
 pub mod pixel;
+pub mod sad;

@@ -185,7 +185,7 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
         (n4w, n4h, vw, vh)
     }
 
-    fn block(&mut self, t: &TileSyntax, b: &BlockRec, tx_at: &mut usize, coef_at: &mut usize) {
+    pub(crate) fn block(&mut self, t: &TileSyntax, b: &BlockRec, tx_at: &mut usize, coef_at: &mut usize) {
         let intra = b.refs[0] == INTRA_FRAME;
         if !intra {
             self.predict_inter(b);
@@ -242,7 +242,7 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
 
     /// Adds the residual of one tx block at sample `(x, y)` of a plane.
     #[allow(clippy::too_many_arguments)]
-    fn add_residual(&mut self, plane: usize, x: usize, y: usize, tx: u8, kind: u8, eob: usize, nz: (usize, usize)) {
+    pub(crate) fn add_residual(&mut self, plane: usize, x: usize, y: usize, tx: u8, kind: u8, eob: usize, nz: (usize, usize)) {
         let max = self.max;
         let v = &mut self.views[plane];
         let stride = v.stride;
@@ -261,7 +261,7 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn predict_intra(
+    pub(crate) fn predict_intra(
         &mut self,
         plane: usize,
         mode: u8,
@@ -272,11 +272,31 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
         have_above: bool,
         have_right: bool,
     ) {
+        let e = self.intra_edges(plane, tx, x, y, have_left, have_above, have_right);
+        let n = 4usize << tx;
+        let bd = self.bd;
+        let v = &mut self.views[plane];
+        let stride = v.stride;
+        ipred::predict(mode, n, v.at(y, x), stride, &e, bd);
+    }
+
+    /// The edges intra prediction of a tx block at `(x, y)` reads.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn intra_edges(
+        &self,
+        plane: usize,
+        tx: u8,
+        x: usize,
+        y: usize,
+        have_left: bool,
+        have_above: bool,
+        have_right: bool,
+    ) -> Edges<P> {
         let bd = self.bd;
         let base = 1i32 << (bd - 1);
         let n = 4usize << tx;
         let (fw, fh) = (self.c.dims.aw[plane], self.c.dims.ah[plane]);
-        let v = &mut self.views[plane];
+        let v = &self.views[plane];
         let stride = v.stride;
         let mut e = Edges {
             above: [P::new(base - 1); 64],
@@ -303,10 +323,10 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
             }
             e.tl = if have_left { px(row - 1) } else { P::new(base + 1) };
         }
-        ipred::predict(mode, n, v.at(y, x), stride, &e, bd);
+        e
     }
 
-    fn predict_inter(&mut self, b: &BlockRec) {
+    pub(crate) fn predict_inter(&mut self, b: &BlockRec) {
         let nref = 1 + usize::from(b.refs[1] > INTRA_FRAME);
         let filter = &SUBPEL_FILTERS[usize::from(b.interp).min(3)];
         let (bw, bh) = MI_WH[usize::from(b.bsize)];
@@ -354,15 +374,59 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
         filter: &mc::Filter,
         avg: bool,
     ) {
-        let Some(rp) = self.c.refs[slot].as_ref() else {
-            return;
-        };
-        let max = self.max;
-        let shift = if plane == 0 { 0 } else { rp.dims.ss_y };
-        let (rw, rh) = (rp.dims.w[plane] as i32, rp.dims.h[plane] as i32);
         let v = &mut self.views[plane];
         let ds = v.stride;
         let dst = v.at(y, x);
+        mc_into(self.c, &mut *self.s, self.max, slot, plane, dst, ds, (x, y), (w, h), (mv_row, mv_col), (lx, ly), filter, avg);
+    }
+
+    /// The frame's views, for the encoder.
+    pub(crate) fn views(&mut self) -> &mut [View<'v, P>; 3] {
+        self.views
+    }
+
+    /// What reconstruction reads.
+    pub(crate) fn ctx(&self) -> &Ctx<P> {
+        self.c
+    }
+
+    /// What reconstruction reads, and its scratch.
+    pub(crate) fn ctx_scratch(&mut self) -> (&Ctx<P>, &mut Scratch<P>) {
+        (self.c, &mut *self.s)
+    }
+
+    /// The coefficient scratch the residual is added from.
+    pub(crate) fn coef(&mut self) -> &mut [i32] {
+        &mut self.s.coef
+    }
+}
+
+/// One prediction of a `w`×`h` block at `(x, y)` of a plane, into `dst`
+/// (rows `ds` apart), with the vector `(row, col)` in sixteenths of a
+/// sample of that plane. `(lx, ly)` is the luma position libvpx scales the
+/// vector's offset at.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mc_into<P: Pixel>(
+    c: &Ctx<P>,
+    s: &mut Scratch<P>,
+    max: i32,
+    slot: usize,
+    plane: usize,
+    dst: &mut [P],
+    ds: usize,
+    (x, y): (usize, usize),
+    (w, h): (usize, usize),
+    (mv_row, mv_col): (i32, i32),
+    (lx, ly): (usize, usize),
+    filter: &mc::Filter,
+    avg: bool,
+) {
+    {
+        let Some(rp) = c.refs[slot].as_ref() else {
+            return;
+        };
+        let shift = if plane == 0 { 0 } else { rp.dims.ss_y };
+        let (rw, rh) = (rp.dims.w[plane] as i32, rp.dims.h[plane] as i32);
         if let Some(sc_) = rp.scale {
             // libvpx `dec_build_inter_predictors` for a scaled reference.
             rp.buf.wait(usize::MAX);
@@ -393,12 +457,12 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
         let (data, stride) = rp.buf.plane(plane);
         if bx - l >= 0 && by - t >= 0 && bx + w as i32 + r <= rw && by + h as i32 + bo <= rh {
             let at = by as usize * stride + bx as usize;
-            mc::predict(dst, ds, data, at, stride, (w, h), (mx, my), filter, max, avg, &mut self.s.mc);
+            mc::predict(dst, ds, data, at, stride, (w, h), (mx, my), filter, max, avg, &mut s.mc);
         } else {
             // Edge emulation: the window held to the reference.
             let ew = w + 7;
             let eh = h + 7;
-            let emu = &mut self.s.emu;
+            let emu = &mut s.emu;
             if emu.len() < ew * eh + 32 {
                 emu.resize(ew * eh + 32, P::default());
             }
@@ -418,7 +482,7 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
                 out[..lo].fill(row[0]);
                 out[hi..].fill(row[rw as usize - 1]);
             }
-            mc::predict(dst, ds, emu, 3 * ew + 3, ew, (w, h), (mx, my), filter, max, avg, &mut self.s.mc);
+            mc::predict(dst, ds, emu, 3 * ew + 3, ew, (w, h), (mx, my), filter, max, avg, &mut s.mc);
         }
     }
 }

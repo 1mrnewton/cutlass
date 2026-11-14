@@ -1919,6 +1919,12 @@ fn decode_shown(stream: &Ivf, pixel: PixelFormat) -> (Vec<u8>, u32) {
             packed.extend_from_slice(&output.frame.v.samples);
         }
     }
+    // Frame threads hold the last frames until the drain.
+    for output in decoder.drain().expect("drain") {
+        packed.extend_from_slice(&output.frame.y.samples);
+        packed.extend_from_slice(&output.frame.u.samples);
+        packed.extend_from_slice(&output.frame.v.samples);
+    }
     (packed, decoder.temporal_frames())
 }
 

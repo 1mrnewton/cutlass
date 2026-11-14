@@ -117,4 +117,55 @@ mod tests {
             std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes()).expect("stderr");
         }
     }
+
+    /// Draw titles in several scripts with this machine's faces and write
+    /// the frame as raw RGBA, to be looked at. Runs when
+    /// `CUTLASS_TEXT_FRAME` names the file to write.
+    #[test]
+    #[ignore = "writes a frame drawn with this machine's fonts"]
+    fn a_frame_of_many_scripts() {
+        use cutlass_model::{Draft, MaterialText, Micros, Segment, TimeRange};
+        let Ok(path) = std::env::var("CUTLASS_TEXT_FRAME") else {
+            return;
+        };
+        let fonts = installed();
+        let mut draft = Draft::empty("scripts");
+        draft.canvas_config.width = 1_280;
+        draft.canvas_config.height = 720;
+        let lines = [
+            "Office waffle AVATAR: fi fl, na\u{EF}ve caf\u{E9} \u{1F600}\u{1F44D}\u{1F3FD}\u{1F1EC}\u{1F1ED}",
+            "\u{645}\u{631}\u{62D}\u{628}\u{627} \u{628}\u{627}\u{644}\u{639}\u{627}\u{644}\u{645} 123 (abc) \u{628}\u{650}\u{633}\u{652}\u{645}\u{650} \u{627}\u{644}\u{644}\u{651}\u{64E}\u{647}\u{650}",
+            "\u{928}\u{92E}\u{938}\u{94D}\u{924}\u{947} \u{926}\u{941}\u{928}\u{93F}\u{92F}\u{93E} \u{939}\u{93F}\u{928}\u{94D}\u{926}\u{940} \u{915}\u{94D}\u{937}\u{924}\u{94D}\u{930}\u{93F}\u{92F}",
+            "\u{5E9}\u{5B8}\u{5C1}\u{5DC}\u{5D5}\u{5B9}\u{5DD} \u{5E2}\u{5D5}\u{5DC}\u{5DD} \u{4E2D}\u{6587}\u{5B57} \u{D55C}\u{AE00} \u{E44}\u{E17}\u{E22}",
+            "A long line that has to wrap at a word and never in the middle of one, however narrow.",
+        ];
+        for (index, line) in lines.iter().enumerate() {
+            let id = format!("line{index}");
+            let mut text = MaterialText::new(id.as_str());
+            text.content = (*line).to_owned();
+            text.font_size = 56.0;
+            text.font_path = fonts.name().to_owned();
+            text.text_color = "#FFFFFF".to_owned();
+            text.line_max_width = 1_150.0;
+            text.alignment = 1;
+            draft.materials.texts.push(text);
+            let mut segment = Segment::new(id.as_str(), id.as_str(), TimeRange::new(0, 1_000_000));
+            segment.render_index = i32::try_from(index).expect("index") + 1;
+            #[allow(clippy::cast_precision_loss)]
+            {
+                segment.clip.transform.y = 0.72 - index as f64 * 0.36;
+            }
+            draft.tracks[0].segments.push(segment);
+        }
+        let frame = cutlass_eval::frame(
+            &cutlass_eval::Snapshot::with_fonts(&draft, &*fonts),
+            Micros(0),
+            &mut cutlass_renderer_software::SoftwareDevice::new(),
+            &cutlass_engine::ReaderFactory::new(),
+            &mut cutlass_eval::OpenClips::new(),
+            0,
+        )
+        .expect("frame");
+        std::fs::write(path, &frame.rgba).expect("write");
+    }
 }

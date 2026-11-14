@@ -40,6 +40,14 @@ pub enum OutForm {
     Planes,
 }
 
+/// Whether a picture of samples above 8 bits is decoded with no samples
+/// in its frame: no later picture references it, and its output is the
+/// packed picture, uncropped, which its final rows are shifted into as
+/// they come. The frame's rows are then published empty, in step.
+pub fn staged(reference: bool, form: Option<OutForm>, sps: &Sps) -> bool {
+    !reference && form == Some(OutForm::Packed) && sps.crop == [0; 4] && sps.bit_depth > 8
+}
+
 /// A picture to decode.
 pub struct Job<P> {
     pub frame: Arc<Frame>,
@@ -87,10 +95,11 @@ impl<P: Pixel> Job<P> {
         } = self;
         // A picture no other references, of 8-bit samples and not cropped,
         // has its final rows written straight to the output.
-        let direct = !reference
-            && out.is_some()
-            && pic.sps.crop == [0; 4]
-            && P::of_bytes_mut(&mut []).is_some();
+        let direct = staged(reference, out.as_ref().map(|o| o.form), &pic.sps)
+            || (!reference
+                && out.is_some()
+                && pic.sps.crop == [0; 4]
+                && P::of_bytes_mut(&mut []).is_some());
         let pipe = Pipeline::new(&pic, &work, &frame, writer, col, (out, direct));
         let mut result = Ok(());
         for (i, slice) in slices.iter().enumerate() {
@@ -246,6 +255,16 @@ impl OutRows {
     /// picture uncropped, its samples 8-bit): the rows a band of final
     /// samples fills.
     fn band_mut<P: Pixel>(&mut self, lines: [usize; 3]) -> Option<[&mut [P]; 3]> {
+        let [y, u, v] = self.band_bytes(lines);
+        Some([
+            P::of_bytes_mut(y)?,
+            P::of_bytes_mut(u)?,
+            P::of_bytes_mut(v)?,
+        ])
+    }
+
+    /// [`Self::band_mut`] as bytes, for samples of any depth shifted down.
+    fn band_bytes(&mut self, lines: [usize; 3]) -> [&mut [u8]; 3] {
         let (crop, next) = (self.crop, self.next);
         let mut taken = [0; 3];
         for c in 0..3 {
@@ -275,11 +294,7 @@ impl OutRows {
                 band.fill(0);
             }
         }
-        Some([
-            P::of_bytes_mut(y)?,
-            P::of_bytes_mut(u)?,
-            P::of_bytes_mut(v)?,
-        ])
+        [y, u, v]
     }
 
     /// The samples; for planes, rows never published are zeros.
@@ -536,6 +551,9 @@ struct PipeState<P> {
     /// SAO writes the final rows to `out` instead of the frame, whose rows
     /// no picture reads (they are published all the same, in step).
     direct: bool,
+    /// For samples above 8 bits written to `out`: a band of them, shifted
+    /// down from here (the frame then holds no samples).
+    stage: [Vec<P>; 3],
 }
 
 impl<'p, P: Pixel> Pipeline<'p, P> {
@@ -562,6 +580,7 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
                 finals: 0,
                 out,
                 direct,
+                stage: Default::default(),
             }),
         }
     }
@@ -664,14 +683,44 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
                 let lines = upto - from;
                 // Packed output takes luma in place and leaves chroma in the
                 // frame's buffers.
+                let band = [lines, lines / 2, lines / 2];
                 let direct = match &mut st.out {
-                    Some(out) if st.direct => out.band_mut::<P>([lines, lines / 2, lines / 2]),
-                    _ => None,
+                    Some(out) if st.direct && P::bytes(&[]).is_some() => {
+                        out.band_mut::<P>(band).is_some_and(|dst| {
+                            self.pic.sao_row(self.work, f, dst);
+                            true
+                        })
+                    }
+                    Some(out) if st.direct => {
+                        // Deeper samples: the band in 16 bits, then shifted
+                        // down into the output.
+                        let width = self.pic.width;
+                        let sizes = [lines * width, band[1] * (width / 2), band[2] * (width / 2)];
+                        for (s, n) in st.stage.iter_mut().zip(sizes) {
+                            s.clear();
+                            s.resize(n, P::default());
+                        }
+                        let [a, b, c] = &mut st.stage;
+                        self.pic
+                            .sao_row(self.work, f, [&mut a[..], &mut b[..], &mut c[..]]);
+                        let shift = out.shift;
+                        let dst = out.band_bytes(band);
+                        cutlass_simd::wide::wide(
+                            #[inline(always)]
+                            || {
+                                for (d, s) in dst.into_iter().zip(&st.stage) {
+                                    if let Some(s) = P::words(s) {
+                                        for (o, &v) in d.iter_mut().zip(s) {
+                                            *o = (v >> shift) as u8;
+                                        }
+                                    }
+                                }
+                            },
+                        );
+                        true
+                    }
+                    _ => false,
                 };
-                let direct = direct.is_some_and(|dst| {
-                    self.pic.sao_row(self.work, f, dst);
-                    true
-                });
                 if !direct {
                     let mut dst = st.writer.pending_mut(upto);
                     // As for the output: clearing the band first brings its
@@ -764,6 +813,7 @@ impl<'p, P: Pixel> Pipeline<'p, P> {
                 finals: 0,
                 out: None,
                 direct: false,
+                stage: Default::default(),
             }),
         };
         this.advance(&mut st, true, None);

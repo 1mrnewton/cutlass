@@ -886,8 +886,10 @@ fn make_job<P: Pixel>(
             None => Work::new(width, height, log2_ctb, slots),
         }
     };
-    let bufs = crate::frame::free(frame_bufs);
-    let (frame, writer, col) = Frame::new((width, height), poc, &shared.frames, wrap, bufs);
+    let staged = crate::job::staged(reference, output, &pic.sps);
+    let bufs = (!staged).then(|| crate::frame::free(frame_bufs)).flatten();
+    let (frame, writer, col) =
+        Frame::new((width, height), poc, &shared.frames, wrap, bufs, !staged);
     // The frame of an 8-bit picture that is not cropped holds its planes
     // as the packed picture does: it is the output itself.
     let share =

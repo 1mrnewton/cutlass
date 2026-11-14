@@ -148,9 +148,13 @@ impl Frame {
         spares: &Arc<Spares>,
         wrap: impl FnOnce(Arc<SharedRows<P>>) -> AnyRows,
         bufs: Option<PlaneBuf<P>>,
+        samples: bool,
     ) -> (Arc<Self>, RowsWriter<P>, RowsWriter<ColMv>) {
         let (cw, ch) = (width / 2, height / 2);
-        let writer = RowsWriter::new([width, cw, cw], [height, ch, ch], [0, 1, 1], bufs);
+        // A frame no picture reads holds no samples; its rows are still
+        // counted as they are published.
+        let widths = if samples { [width, cw, cw] } else { [0; 3] };
+        let writer = RowsWriter::new(widths, [height, ch, ch], [0, 1, 1], bufs);
         let col_stride = width.div_ceil(16);
         let col_rows = height.div_ceil(16);
         let col_bufs = free(&spares.col);
@@ -411,16 +415,19 @@ impl Drop for Frame {
             AnyRows::Eight(r) => {
                 if let Ok(r) = Arc::try_unwrap(r) {
                     let mut s = lock(&spares.eight);
-                    if s.len() < 24 {
-                        s.push(r.into_buffers());
+                    let b = r.into_buffers();
+                    // A frame that held no samples has nothing to lend.
+                    if s.len() < 24 && !b.is_empty() {
+                        s.push(b);
                     }
                 }
             }
             AnyRows::Deep(r) => {
                 if let Ok(r) = Arc::try_unwrap(r) {
                     let mut s = lock(&spares.deep);
-                    if s.len() < 24 {
-                        s.push(r.into_buffers());
+                    let b = r.into_buffers();
+                    if s.len() < 24 && !b.is_empty() {
+                        s.push(b);
                     }
                 }
             }

@@ -1431,6 +1431,10 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
         let b = &mut local;
         let out_pos = &mut self.out.pos;
         let out_val = &mut self.out.val;
+        // Room for every coefficient the block can have, so that the
+        // pushes below never grow the buffers.
+        out_pos.reserve(max_eob);
+        out_val.reserve(max_eob);
         let cnt_coef = &mut self.f.counts.coef[ti][pi][ri];
         let cnt_eob = &mut self.f.counts.eob[ti][pi][ri];
         while c < max_eob {

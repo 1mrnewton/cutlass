@@ -1099,6 +1099,7 @@ mod tests {
                 scale: 1.0,
                 scales: vec![1.0],
                 alignment: Alignment::Left,
+                turned: false,
             },
             letters,
         }

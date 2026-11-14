@@ -2634,6 +2634,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 let cands: &[u32] = if one {
                     only = [(a + if k == 0 { 0.5 } else { rnd }) as u32];
                     &only
+                } else if a < 0.5 {
+                    &[0]
                 } else if lo == 0 {
                     &[0, 1]
                 } else if lo == 1 {

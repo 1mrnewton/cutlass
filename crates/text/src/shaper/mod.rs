@@ -1361,10 +1361,12 @@ mod tests {
         assert_eq!(kerned(INDEXED, "AC"), "[1=0+600|4=1+600]");
         // A mark set on its letter by a numbered point of each outline:
         // the acute's lower left corner on the upper right of A, as
-        // Apple's account of the table has it. No face on a Mac uses
-        // this and neither reference bears it out: HarfBuzz 14.2 leaves
-        // such a mark where it was, and Core Text sets this one at the
-        // letter's origin.
+        // Apple's account of the table has it, and as HarfBuzz 14.2
+        // prints it when FreeType finds the points for it
+        // (`--font-funcs=ft`). Left to its own reading of outlines it has
+        // no numbered points and leaves such a mark where it was, and
+        // Core Text sets this one at the letter's origin. No face on a
+        // Mac uses this.
         const POINTED: &[u8] = include_bytes!("../../../font/fixtures/kerx-points.ttf");
         assert_eq!(kerned(POINTED, "A\u{301}"), "[1=0+600|3=0@150,-50+0]");
         assert_eq!(

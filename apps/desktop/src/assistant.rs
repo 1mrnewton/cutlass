@@ -11,8 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use cutlass_agent::{
-    ApprovalAction, ChatModel, CloudModel, Completion, CompletionRequest, LoopbackHttp, Message,
-    Model, ModelError, ToolCall, ToolOutcome, ToolSink, run_after, tool_definitions,
+    ApprovalAction, ChatModel, CloudModel, Completion, CompletionRequest, Delegating, LoopbackHttp,
+    Message, Model, ModelError, ToolCall, ToolOutcome, ToolSink, definitions_with_delegate,
+    run_after, tool_definitions,
 };
 use cutlass_settings::Settings;
 
@@ -134,39 +135,35 @@ impl Assistant {
         }
         self.draft.clear();
         self.entries.push(Entry::Asked(ask.clone()));
-        let context = cutlass_agent::prompt_context(settings, notes);
-        if settings.model.cloud {
-            let key = crate::cloud::key(&crate::cloud::keys_file(), &settings.model.cloud_provider);
-            match crate::cloud::model(settings, &key, &context) {
-                Ok(model) => self.start(
-                    CloudModel::from_settings(settings, model),
-                    settings.step_cap,
-                    &ask,
-                ),
-                Err(notice) => self.entries.push(Entry::Notice(notice)),
-            }
-            return;
-        }
-        if !settings.model.local {
-            self.entries.push(Entry::Notice(
-                "Both models are off. Turn on the local model, or the cloud model with your own key, in Settings → Assistant."
-                    .to_owned(),
-            ));
-            return;
-        }
-        let transport = match LoopbackHttp::new(&settings.model.local_url) {
-            Ok(transport) => transport,
-            Err(error) => {
-                self.entries.push(Entry::Notice(error.to_string()));
+        let model = match build_model(settings, notes) {
+            Ok(model) => model,
+            Err(notice) => {
+                self.entries.push(Entry::Notice(notice));
                 return;
             }
         };
-        let model = ChatModel::new(transport, &settings.model.local_name).with_context(&context);
-        self.start(model, settings.step_cap, &ask);
+        // A helper the model hands a look-up to runs on a model of its own,
+        // the same kind, made when it is asked for.
+        let cap = settings.step_cap;
+        let (settings, notes) = (settings.clone(), notes.to_owned());
+        let child = move || build_model(&settings, &notes);
+        self.launch(model, Some(child), cap, &ask);
     }
 
-    /// Run `ask` on `model` on its own thread.
+    /// Run `ask` on `model` on its own thread, with no helper to hand
+    /// look-ups to.
     pub fn start<M: Model + Send + 'static>(&mut self, model: M, cap: u32, ask: &str) {
+        self.launch(model, None::<fn() -> Result<M, String>>, cap, ask);
+    }
+
+    /// Run `ask` on `model` on its own thread. With `child`, the model may
+    /// hand a look-up to a helper on a model `child` makes.
+    pub fn launch<M, C, F>(&mut self, model: M, child: Option<F>, cap: u32, ask: &str)
+    where
+        M: Model + Send + 'static,
+        C: Model + 'static,
+        F: FnMut() -> Result<C, String> + Send + 'static,
+    {
         let (events, received) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let history = self.history.clone();
@@ -180,14 +177,44 @@ impl Assistant {
             stop: Arc::clone(&stop),
             events: events.clone(),
         };
+        let halt = Arc::clone(&stop);
         let spawned = std::thread::Builder::new()
             .name("assistant".to_owned())
             .spawn(move || {
-                let (mut watched, mut relay) = (watched, relay);
-                let definitions = tool_definitions();
-                let result = run_after(&mut watched, &mut relay, cap, history, &ask, &definitions)
-                    .map(|turn| (turn.completion.text, turn.messages))
-                    .map_err(|error| error.to_string());
+                let mut watched = watched;
+                let result = match child {
+                    Some(mut child) => {
+                        // A helper stops with the turn, as the parent does.
+                        let made = move || {
+                            child().map(|inner| Halting {
+                                inner,
+                                stop: Arc::clone(&halt),
+                            })
+                        };
+                        let mut sink = Delegating::new(relay, made, cap);
+                        run_after(
+                            &mut watched,
+                            &mut sink,
+                            cap,
+                            history,
+                            &ask,
+                            &definitions_with_delegate(),
+                        )
+                    }
+                    None => {
+                        let mut relay = relay;
+                        run_after(
+                            &mut watched,
+                            &mut relay,
+                            cap,
+                            history,
+                            &ask,
+                            &tool_definitions(),
+                        )
+                    }
+                }
+                .map(|turn| (turn.completion.text, turn.messages))
+                .map_err(|error| error.to_string());
                 let _ = events.send(Event::Finished(result));
             });
         match spawned {
@@ -314,6 +341,58 @@ fn explain(error: String) -> String {
         );
     }
     error
+}
+
+/// The local or the cloud model, whichever `settings` choose, told the
+/// user's `notes` while Memory is on.
+fn build_model(settings: &Settings, notes: &str) -> Result<AnyModel, String> {
+    let context = cutlass_agent::prompt_context(settings, notes);
+    if settings.model.cloud {
+        let key = crate::cloud::key(&crate::cloud::keys_file(), &settings.model.cloud_provider);
+        let model = crate::cloud::model(settings, &key, &context)?;
+        return Ok(AnyModel::Cloud(CloudModel::from_settings(settings, model)));
+    }
+    if !settings.model.local {
+        return Err(
+            "Both models are off. Turn on the local model, or the cloud model with your own key, in Settings → Assistant."
+                .to_owned(),
+        );
+    }
+    let transport =
+        LoopbackHttp::new(&settings.model.local_url).map_err(|error| error.to_string())?;
+    Ok(AnyModel::Local(
+        ChatModel::new(transport, &settings.model.local_name).with_context(&context),
+    ))
+}
+
+/// The model a turn runs on.
+enum AnyModel {
+    Local(ChatModel<LoopbackHttp>),
+    Cloud(CloudModel<crate::cloud::Cloud>),
+}
+
+impl Model for AnyModel {
+    fn complete(&mut self, request: &CompletionRequest) -> Result<Completion, ModelError> {
+        match self {
+            Self::Local(model) => model.complete(request),
+            Self::Cloud(model) => model.complete(request),
+        }
+    }
+}
+
+/// A helper's model, stopped with the turn.
+struct Halting<M> {
+    inner: M,
+    stop: Arc<AtomicBool>,
+}
+
+impl<M: Model> Model for Halting<M> {
+    fn complete(&mut self, request: &CompletionRequest) -> Result<Completion, ModelError> {
+        if self.stop.load(Ordering::Relaxed) {
+            return Err(ModelError::Inner("stopped".to_owned()));
+        }
+        self.inner.complete(request)
+    }
 }
 
 /// The model, stopped when the user stops the turn; its words between tool
@@ -451,6 +530,52 @@ mod tests {
             assistant.entries.last(),
             Some(&Entry::Said("Still here.".to_owned()))
         );
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_helper_reads_on_the_window_cannot_write_and_answers_the_parent() {
+        let (mut shell, path) = shell_with_project("helper");
+        let mut assistant = Assistant::default();
+        let call = |name: &str, arguments: &str| {
+            vec![ToolCall {
+                id: name.to_owned(),
+                name: name.to_owned(),
+                arguments: arguments.to_owned(),
+            }]
+        };
+        let parent = LocalModel::scripted(vec![
+            completion("", call("agent.delegate", "How long is the draft?")),
+            completion("The helper says it is short.", Vec::new()),
+        ]);
+        let mut helper = Some(LocalModel::scripted(vec![
+            completion("", call("draft.query", "project")),
+            completion("", call("player.seek", "2000000")),
+            completion("It is short.", Vec::new()),
+        ]));
+        let child = move || helper.take().ok_or_else(|| "one helper only".to_owned());
+        assistant.launch(parent, Some(child), 8, "how long?");
+        finish(&mut assistant, &mut shell);
+        // The helper's read ran on the window; its seek never did.
+        assert_eq!(shell.playhead(), Micros(0));
+        let steps: Vec<(&str, bool)> = assistant
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Step { tool, failed, .. } => Some((tool.as_str(), *failed)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(steps, [("draft.query", false)]);
+        assert_eq!(
+            assistant.entries.last(),
+            Some(&Entry::Said("The helper says it is short.".to_owned()))
+        );
+        assert!(assistant.history.iter().any(|message| matches!(
+            message,
+            cutlass_agent::Message::Tool { name, content, .. }
+                if name == "agent.delegate" && content == "It is short."
+        )));
         let _ = std::fs::remove_dir_all(&path);
     }
 

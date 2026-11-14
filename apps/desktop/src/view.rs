@@ -1691,12 +1691,11 @@ fn settings_window(
                             &mut view.local_models,
                             &mut add_folder,
                         );
-                        if key_changed {
-                            if let Err(error) =
+                        if key_changed
+                            && let Err(error) =
                                 crate::cloud::set_key(&crate::cloud::keys_file(), &provider, key)
-                            {
-                                cutlass_logger::warn!("{error}");
-                            }
+                        {
+                            cutlass_logger::warn!("{error}");
                         }
                         if settings.model.cloud_provider != provider {
                             // The other provider's key, if one was kept.

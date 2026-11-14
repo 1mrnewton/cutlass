@@ -135,6 +135,7 @@ pub(crate) fn registry_name(name: &str) -> Option<&'static str> {
     TOOL_NAMES
         .iter()
         .copied()
+        .chain([crate::delegate::DELEGATE])
         .find(|tool| tool.replace('.', "_") == name)
 }
 

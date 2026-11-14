@@ -295,7 +295,6 @@ pub struct Switched<L> {
 
 impl<L> Switched<L> {
     /// `local` behind the switches in `settings`.
-    #[must_use]
     pub fn from_settings(settings: &Settings, local: L) -> Self {
         Self {
             local,

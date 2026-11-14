@@ -902,6 +902,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let lam = u64::from(s.lambda);
         let mut scored: Vec<(u64, Blk)> = Vec::with_capacity(8);
         let mut searched = [None; 3];
+        // `r` also names the reference the search reads.
+        #[allow(clippy::needless_range_loop)]
         for r in 0..3 {
             if !s.refs_live[r] {
                 continue;

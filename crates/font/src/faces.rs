@@ -65,6 +65,173 @@ pub fn list_faces(
     Ok(faces)
 }
 
+/// The largest emoji strike a loaded face keeps, in pixels per em.
+const MAX_STRIKE_PPEM: u16 = 128;
+/// An `sbix` table under this many bytes is kept whole.
+const SMALL_SBIX: usize = 8 * 1024 * 1024;
+
+/// One face of a font file as a standalone font, read a table at a time.
+///
+/// `read_at(offset, len)` returns exactly `len` bytes at `offset`. `index`
+/// is the face of a collection, and `None` for a file that is one face.
+/// Only that face's tables are read, so one face of a large collection
+/// costs what it holds and not the whole file. A large `sbix` table, which
+/// holds every emoji at many sizes, is cut to one size: the largest up to
+/// 128 pixels per em. A face that still comes to more than `max_bytes` is
+/// refused as unsupported.
+pub fn load_face(
+    mut read_at: impl FnMut(u64, usize) -> Option<Vec<u8>>,
+    index: Option<u32>,
+    max_bytes: usize,
+) -> Result<Vec<u8>, FontError> {
+    let mut read = |offset: u64, len: usize| {
+        read_at(offset, len)
+            .filter(|bytes| bytes.len() == len)
+            .ok_or(FontError::Truncated)
+    };
+    let header = read(0, 12)?;
+    let start = match (&header[..4] == b"ttcf", index) {
+        (false, None) => 0,
+        (false, Some(_)) => return Err(FontError::BadTable),
+        (true, None) => return Err(FontError::Collection),
+        (true, Some(index)) => {
+            let count = u32_at(&header, 8)?;
+            if index >= count {
+                return Err(FontError::CollectionIndex { index, count });
+            }
+            if count > MAX_COLLECTION_FACES {
+                return Err(FontError::BadTable);
+            }
+            u64::from(u32_at(&read(12 + u64::from(index) * 4, 4)?, 0)?)
+        }
+    };
+    let header = read(start, 12)?;
+    sfnt_version(&header)?;
+    let version = u32_at(&header, 0)?;
+    let count = usize::from(u16_at(&header, 4)?);
+    if count == 0 {
+        return Err(FontError::EmptyTable);
+    }
+    if count > MAX_TABLES {
+        return Err(FontError::BadTable);
+    }
+    let records = read(start + 12, count * 16)?;
+    let mut tables = Vec::with_capacity(count);
+    let mut total = 12 + count * 16;
+    for slot in 0..count {
+        let at = slot * 16;
+        let mut tag = [0; 4];
+        tag.copy_from_slice(&records[at..at + 4]);
+        let checksum = u32_at(&records, at + 4)?;
+        let offset = u64::from(u32_at(&records, at + 8)?);
+        let length =
+            usize::try_from(u32_at(&records, at + 12)?).map_err(|_| FontError::BadTable)?;
+        let room = max_bytes.saturating_sub(total);
+        let data = if &tag == b"sbix" && length > SMALL_SBIX {
+            one_strike(&mut read, offset, length, room)?
+        } else if length > room {
+            return Err(FontError::Unsupported);
+        } else {
+            read(offset, length)?
+        };
+        total += data.len().next_multiple_of(4);
+        tables.push((tag, checksum, data));
+    }
+    let out = assemble(version, &tables)?;
+    crate::read(&out)?;
+    Ok(out)
+}
+
+/// An `sbix` table holding one strike of the table at `offset`: the
+/// largest up to [`MAX_STRIKE_PPEM`], or the smallest when all are larger.
+fn one_strike(
+    read: &mut impl FnMut(u64, usize) -> Result<Vec<u8>, FontError>,
+    offset: u64,
+    length: usize,
+    room: usize,
+) -> Result<Vec<u8>, FontError> {
+    let header = read(offset, 8)?;
+    let strikes = usize::try_from(u32_at(&header, 4)?).map_err(|_| FontError::BadTable)?;
+    if strikes == 0 || strikes > MAX_STRIKES {
+        return Err(FontError::BadTable);
+    }
+    let offsets = read(offset + 8, strikes * 4)?;
+    // Each strike: its pixels per em, where it starts, and where it ends,
+    // which is where the next one starts.
+    let mut found: Vec<(u16, usize)> = Vec::with_capacity(strikes);
+    for slot in 0..strikes {
+        let at = usize::try_from(u32_at(&offsets, slot * 4)?).map_err(|_| FontError::BadTable)?;
+        if at >= length {
+            return Err(FontError::BadTable);
+        }
+        let ppem = u16_at(&read(offset + at as u64, 2)?, 0)?;
+        found.push((ppem, at));
+    }
+    let (_, at) = found
+        .iter()
+        .copied()
+        .filter(|(ppem, _)| *ppem <= MAX_STRIKE_PPEM)
+        .max_by_key(|(ppem, _)| *ppem)
+        .or_else(|| found.iter().copied().min_by_key(|(ppem, _)| *ppem))
+        .ok_or(FontError::BadTable)?;
+    let end = found
+        .iter()
+        .map(|(_, other)| *other)
+        .filter(|other| *other > at)
+        .min()
+        .unwrap_or(length);
+    let size = end - at;
+    if size + 12 > room {
+        return Err(FontError::Unsupported);
+    }
+    let mut table = Vec::with_capacity(size + 12);
+    table.extend_from_slice(&header[..4]);
+    table.extend_from_slice(&1_u32.to_be_bytes());
+    table.extend_from_slice(&12_u32.to_be_bytes());
+    table.extend(read(offset + at as u64, size)?);
+    Ok(table)
+}
+
+/// The most strikes an `sbix` table is searched through.
+const MAX_STRIKES: usize = 64;
+
+/// A font file of `tables`: each a tag, its checksum, and its bytes.
+fn assemble(version: u32, tables: &[([u8; 4], u32, Vec<u8>)]) -> Result<Vec<u8>, FontError> {
+    let count = tables.len();
+    let count_u16 = u16::try_from(count).map_err(|_| FontError::BadTable)?;
+    if count == 0 {
+        return Err(FontError::EmptyTable);
+    }
+    let selector = count.ilog2();
+    let search = 16_u16 << selector;
+    let shift = count_u16 * 16 - search;
+    let mut out = Vec::new();
+    out.extend_from_slice(&version.to_be_bytes());
+    out.extend_from_slice(&count_u16.to_be_bytes());
+    out.extend_from_slice(&search.to_be_bytes());
+    out.extend_from_slice(&u16::try_from(selector).unwrap_or(0).to_be_bytes());
+    out.extend_from_slice(&shift.to_be_bytes());
+    let records = out.len();
+    out.resize(records + count * 16, 0);
+    for (slot, (tag, checksum, data)) in tables.iter().enumerate() {
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+        let offset = u32::try_from(out.len()).map_err(|_| FontError::BadTable)?;
+        let length = u32::try_from(data.len()).map_err(|_| FontError::BadTable)?;
+        out.extend_from_slice(data);
+        let record = records + slot * 16;
+        out[record..record + 4].copy_from_slice(tag);
+        out[record + 4..record + 8].copy_from_slice(&checksum.to_be_bytes());
+        out[record + 8..record + 12].copy_from_slice(&offset.to_be_bytes());
+        out[record + 12..record + 16].copy_from_slice(&length.to_be_bytes());
+    }
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
+    Ok(out)
+}
+
 /// Face `index` of a collection as a standalone font file.
 pub fn single_face(bytes: &[u8], index: u32) -> Result<Vec<u8>, FontError> {
     let at = collection::face_offset(bytes, index)?;
@@ -278,6 +445,99 @@ mod tests {
         }
         table.extend(strings);
         table
+    }
+
+    #[test]
+    fn a_face_is_loaded_a_table_at_a_time() {
+        // A single face reads back as itself, table for table.
+        let whole = load_face(from(SAMPLE_TTF), None, 1 << 20).expect("single");
+        let face = read(&whole).expect("font");
+        assert_eq!(face.advance(2).expect("A"), 600);
+        // A face of a collection is the same font `single_face` copies out.
+        let second = load_face(from(SAMPLE_TTC), Some(1), 1 << 20).expect("second");
+        assert_eq!(second, single_face(SAMPLE_TTC, 1).expect("copied"));
+        // Only that face's tables are read: nothing past them.
+        let mut reads = 0;
+        let _first = load_face(
+            |offset, len| {
+                reads += 1;
+                from(SAMPLE_TTC)(offset, len)
+            },
+            Some(0),
+            1 << 20,
+        )
+        .expect("first");
+        assert!(reads < 40, "{reads}");
+        // The wrong kind of index, a face past the end, a face too large.
+        assert_eq!(
+            load_face(from(SAMPLE_TTC), None, 1 << 20),
+            Err(FontError::Collection)
+        );
+        assert_eq!(
+            load_face(from(SAMPLE_TTF), Some(0), 1 << 20),
+            Err(FontError::BadTable)
+        );
+        assert_eq!(
+            load_face(from(SAMPLE_TTC), Some(2), 1 << 20),
+            Err(FontError::CollectionIndex { index: 2, count: 2 })
+        );
+        assert_eq!(
+            load_face(from(SAMPLE_TTF), None, 64),
+            Err(FontError::Unsupported)
+        );
+        assert_eq!(
+            load_face(from(&[]), None, 1 << 20),
+            Err(FontError::Truncated)
+        );
+    }
+
+    #[test]
+    fn a_large_emoji_table_is_cut_to_one_size() {
+        // An `sbix` table of three strikes, each padded past the size
+        // under which a table is kept whole.
+        let strike = |ppem: u16, fill: u8| {
+            let mut bytes = crate::fixture::be(&[ppem, 72]);
+            bytes.resize(SMALL_SBIX / 2, fill);
+            bytes
+        };
+        let strikes = [strike(64, 1), strike(96, 2), strike(160, 3)];
+        let mut sbix = crate::fixture::be(&[1, 1, 0, 3]);
+        let mut at = 8 + 12;
+        for bytes in &strikes {
+            sbix.extend(u32::try_from(at).expect("offset").to_be_bytes());
+            at += bytes.len();
+        }
+        for bytes in &strikes {
+            sbix.extend(bytes);
+        }
+        let glyphs = [crate::fixture::boxed(500); 3];
+        let file = crate::fixture::font(&glyphs, &[('A', 2)], &[(b"sbix", sbix)]);
+        let loaded = load_face(from(&file), None, 64 << 20).expect("loaded");
+        assert!(loaded.len() < SMALL_SBIX, "{}", loaded.len());
+        // The 96 strike is the one kept: its bytes are the table's body.
+        let table = table_of(&loaded, b"sbix");
+        assert_eq!(&table[4..12], &[0, 0, 0, 1, 0, 0, 0, 12]);
+        assert_eq!(&table[12..16], &[0, 96, 0, 72]);
+        assert_eq!(table.len(), 12 + SMALL_SBIX / 2);
+        assert!(table[16..].iter().all(|byte| *byte == 2));
+        // With no room for even one strike the face is refused.
+        assert_eq!(
+            load_face(from(&file), None, 1 << 20),
+            Err(FontError::Unsupported)
+        );
+    }
+
+    fn table_of<'a>(font: &'a [u8], tag: &[u8; 4]) -> &'a [u8] {
+        let count = usize::from(u16::from_be_bytes([font[4], font[5]]));
+        let at = (0..count)
+            .map(|slot| 12 + slot * 16)
+            .find(|at| &font[*at..*at + 4] == tag)
+            .expect("table");
+        let word = |from: usize| {
+            u32::from_be_bytes([font[from], font[from + 1], font[from + 2], font[from + 3]])
+                as usize
+        };
+        &font[word(at + 8)..word(at + 8) + word(at + 12)]
     }
 
     #[test]

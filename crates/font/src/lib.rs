@@ -25,7 +25,7 @@ mod otf;
 mod strike;
 mod ttf;
 
-pub use faces::{FaceEntry, MAX_COLLECTION_FACES, list_faces, single_face};
+pub use faces::{FaceEntry, MAX_COLLECTION_FACES, list_faces, load_face, single_face};
 pub use gpos::{Adjust, Anchor, Cursive, Joins, MarkAttach, PairAdjust, Positioning, SingleAdjust};
 pub use gsub::{Ligature, Ligatures, Sequences, Single, Substitution};
 pub use layout::{

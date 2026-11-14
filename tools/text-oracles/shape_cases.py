@@ -7,6 +7,7 @@
     python3 tools/text-oracles/shape_cases.py cases.txt myanmar
     python3 tools/text-oracles/shape_cases.py cases.txt universal          # every script below
     python3 tools/text-oracles/shape_cases.py cases.txt universal Java     # one of them
+    python3 tools/text-oracles/shape_cases.py cases.txt joined             # Mongolian, N'Ko and others
     CUTLASS_SHAPE_CASES=cases.txt cargo test -p cutlass-text --lib -- \
         --ignored harfbuzz_agrees
 
@@ -74,7 +75,7 @@ if len(sys.argv)>2 and sys.argv[2]=="myanmar":
     for f,i in [(SYS+"NotoSansMyanmar.ttc",0),(SYS+"NotoSansMyanmar.ttc",4),(SYS+"NotoSerifMyanmar.ttc",0),
                 (SUP+"Myanmar MN.ttc",0),(SUP+"Myanmar Sangam MN.ttc",0)]:
         for t in myanmar: cases.append((f,i,"Mymr","ltr",t))
-if len(sys.argv)>2 and sys.argv[2]=="universal":
+if len(sys.argv)>2 and sys.argv[2] in ("universal","joined"):
     # The scripts shaped by the shared rules, each over the face this Mac
     # has for it. The texts are made from the script's own characters:
     # each letter, each mark on a letter, marks in pairs, letters stacked
@@ -113,6 +114,14 @@ if len(sys.argv)>2 and sys.argv[2]=="universal":
         ("Yezi",SUP+"NotoSerifYezidi"+O,[(0x10E80,0x10EBF)]),("Ahom",SUP+"NotoSerifAhom"+R,[(0x11700,0x1174F)]),
         ("Bali",SUP+"NotoSerifBalinese"+R,[(0x1B00,0x1B7F)]),
         ("Hmnp",SUP+"NotoSerifNyiakengPuachueHmong"+R,[(0x1E100,0x1E14F)])]
+    # The scripts HarfBuzz shapes by the same rules and joins as Arabic
+    # besides. Ours joins them and does not yet cut them into clusters,
+    # so these show how far that is from HarfBuzz.
+    if sys.argv[2]=="joined":
+        scripts=[("Mong",SUP+N+"Mongolian"+R,[(0x1800,0x18AF)]),("Phag",SUP+N+"PhagsPa"+R,[(0xA840,0xA87F)]),
+            ("Nkoo",SUP+N+"NKo"+R,[(0x7C0,0x7FF)]),("Mand",SUP+N+"Mandaic"+R,[(0x840,0x85F)]),
+            ("Mani",SUP+N+"Manichaean"+R,[(0x10AC0,0x10AFF)]),("Phlp",SUP+N+"PsalterPahlavi"+R,[(0x10B80,0x10BAF)]),
+            ("Adlm",SUP+N+"Adlam"+R,[(0x1E900,0x1E95F)]),("Rohg",SUP+N+"HanifiRohingya"+R,[(0x10D00,0x10D3F)])]
     def rows(words,size=6): return [" ".join(words[i:i+size]) for i in range(0,len(words),size)]
     for code,face,blocks in scripts:
         if len(sys.argv)>3 and sys.argv[3]!=code: continue
@@ -149,7 +158,7 @@ if len(sys.argv)>2 and sys.argv[2]=="universal":
                     "\u00A0"+m+" \u00A0"+n, a+"\uFE00"+m, a+m+"\u034F"+n, "x"+m+" 1"+n]
         texts+=["\u200C", a+"\u200C", a+"\u200C"+b, a+"\u200D"+b, "abc "+a+b+c+" 12", a+" "+b+"."+c+","+a+"-"+b,
                 (a+b+c)*4]
-        way="rtl" if code in ("Khar","Yezi") else "ltr"
+        way="rtl" if code in ("Khar","Yezi","Nkoo","Mand","Mani","Phlp","Adlm","Rohg") else "ltr"
         for t in texts:
             if t: cases.append((face,0,code,way,t))
 with open(sys.argv[1],"w") as out:

@@ -61,6 +61,10 @@ pub struct FrameParams {
 /// choose compound prediction.
 pub const COMPOUND_SPEED: u8 = 6;
 
+/// From this speed a reference that predicted almost nothing of the last
+/// inter frame is not searched (see [`FrameEncoder::tiles`]).
+pub const REF_PRUNE_SPEED: u8 = 6;
+
 /// One coded frame.
 pub struct Coded {
     pub data: Vec<u8>,
@@ -84,6 +88,10 @@ pub struct FrameEncoder {
     /// The segmentation of the frame being coded, with adaptive
     /// quantization.
     aq: Option<aq::Plan>,
+    /// Each reference's picture in the last inter frame, the share of its
+    /// area that frame predicted from it (in 1/1024), and how many frames
+    /// in a row it has been left out of the search.
+    ref_use: [(usize, u32, u8); 3],
 }
 
 /// What one tile column's encoder keeps from frame to frame.
@@ -134,6 +142,7 @@ impl FrameEncoder {
             log2_tiles: threads.max(1).ilog2().min(6) as u8,
             pre_seeds: Vec::new(),
             aq: None,
+            ref_use: [(0, 1024, 0); 3],
         }
     }
 
@@ -395,11 +404,25 @@ impl FrameEncoder {
             (Some(a), Some(b)) => std::ptr::eq(a, b),
             _ => false,
         };
-        let refs_live = [
+        let mut refs_live = [
             refs[0].is_some(),
             refs[1].is_some() && !same(refs[1], refs[0]),
             refs[2].is_some() && !same(refs[2], refs[0]) && !same(refs[2], refs[1]),
         ];
+        // From REF_PRUNE_SPEED, GOLDEN and ALTREF are left out of the
+        // search while the same picture predicted under 1% of the last
+        // inter frame that searched it, but tried again every fourth frame.
+        let ids = refs.map(|r| r.map_or(0, |p| std::ptr::from_ref(p) as usize));
+        let searched_before = refs_live;
+        if !h.is_intra() && fp.speed >= REF_PRUNE_SPEED && !fp.altref_future {
+            for r in 1..3 {
+                let (id, share, out) = &mut self.ref_use[r];
+                if refs_live[r] && *id == ids[r] && *share < 10 && *out < 3 {
+                    refs_live[r] = false;
+                    *out += 1;
+                }
+            }
+        }
         let (pics, _) = ref_pics(parsed, refs);
         let ctx = Ctx {
             dims,
@@ -675,6 +698,28 @@ impl FrameEncoder {
                     segmap[r * mi_cols + c0..r * mi_cols + c1]
                         .copy_from_slice(&st.segmap[r * w..r * w + w]);
                 }
+            }
+        }
+        if !h.is_intra() {
+            let mut area = [0u32; 3];
+            for m in &mvs {
+                for &r in &m.refs {
+                    if (1..=3).contains(&r) {
+                        area[usize::from(r) - 1] += 1;
+                    }
+                }
+            }
+            let total = (mvs.len() as u32).max(1);
+            for r in 0..3 {
+                let u = &mut self.ref_use[r];
+                if refs_live[r] {
+                    // Searched: what it won is known.
+                    *u = (ids[r], area[r] * 1024 / total, 0);
+                } else if !searched_before[r] {
+                    // The same picture as another reference: unknown.
+                    *u = (ids[r], 1024, 0);
+                }
+                // Left out: its share stands, and its count goes on.
             }
         }
         Ok((counts, mvs, segmap, pic, ntiles))

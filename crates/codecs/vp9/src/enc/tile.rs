@@ -2517,14 +2517,14 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 }
             };
             let mut best = (f32::MAX, 0u32);
-            let cands = if lo == 0 {
-                [0, 1, 1]
+            let cands: &[u32] = if lo == 0 {
+                &[0, 1]
             } else if lo == 1 {
-                [0, 1, 2]
+                &[0, 1, 2]
             } else {
-                [lo, lo + 1, lo + 1]
+                &[lo, lo + 1]
             };
-            for &l in &cands {
+            for &l in cands {
                 let j = d_of(l) + lam * r_of(l) as f32;
                 if j < best.0 {
                     best = (j, l);

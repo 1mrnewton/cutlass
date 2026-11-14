@@ -250,7 +250,8 @@ fn private(glyph: u16) -> char {
 /// short, 11 a picture with a bad check value, 12 color with no alpha, 13 a
 /// JPEG record, 14 glyph 2's picture set 3 right and 1 down, 15 one-bit
 /// gray. Glyph 2 also has a one-pixel picture in a strike of 1 pixel to
-/// the em, and a header for a 600-pixel picture in a strike of 600.
+/// the em, and a header for a 600-pixel picture in a strike of 600, where
+/// glyph 15 has a JPEG record.
 pub(crate) fn sbix() -> Vec<u8> {
     let mut glyphs = vec![blank(); 16];
     glyphs[0] = boxed(500);
@@ -282,7 +283,10 @@ pub(crate) fn sbix() -> Vec<u8> {
             &png((1, 1), 8, 6, &[&[255, 255, 255, 255]], &[]),
         ),
     )];
-    let large: Records = vec![(2, record((0, 0), b"png ", &header_only(600)))];
+    let large: Records = vec![
+        (2, record((0, 0), b"png ", &header_only(600))),
+        (15, record((0, 0), b"jpg ", &[0xFF, 0xD8, 0xFF, 0xD9])),
+    ];
     let table = sbix_table(16, &[(1, small), (2, main), (600, large)]);
     font(&glyphs, &map, &[(b"sbix", table)])
 }

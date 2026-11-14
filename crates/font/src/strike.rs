@@ -987,6 +987,11 @@ mod tests {
         let font = read(SBIX).expect("sbix");
         assert_eq!(font.color_bitmap(13, 256), Err(FontError::Unsupported));
         assert_eq!(font.bitmap(13), Err(FontError::Unsupported));
+        // A strike with a graphic that is refused is passed over for one
+        // that holds a PNG picture of the glyph.
+        let passed = font.bitmap(15).expect("glyph").expect("picture");
+        assert_eq!((passed.width, passed.ppem), (2, 2));
+        assert!(matches!(passed.pixels, BitmapPixels::Png(_)));
     }
 
     #[test]

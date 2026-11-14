@@ -137,7 +137,13 @@ impl<'f, 'a> Engine<'f, 'a> {
         let mut subtables = Vec::with_capacity(lookup.subtables.len());
         for data in &lookup.subtables {
             subtables.push(if self.positioning {
-                Subtable::Positioning(Positioning::read(lookup.kind, data).map_err(font_error)?)
+                // Through the table, which moves each value with the
+                // setting of a face that varies.
+                Subtable::Positioning(
+                    self.table
+                        .positioning(lookup.kind, data)
+                        .map_err(font_error)?,
+                )
             } else {
                 Subtable::Substitution(Substitution::read(lookup.kind, data).map_err(font_error)?)
             });

@@ -2550,9 +2550,16 @@ mod tests {
         let mut fonts: std::collections::HashMap<String, Vec<u8>> =
             std::collections::HashMap::new();
         for case in cases.lines().filter(|line| !line.is_empty()) {
+            // A sixth field sets a variable face: `wght=700,wdth=80`.
             let fields: Vec<&str> = case.split('\t').collect();
-            let [file, face, script, direction, escaped] = fields[..] else {
-                panic!("case: {case}");
+            let (file, face, script, direction, escaped, settings) = match fields[..] {
+                [file, face, script, direction, escaped] => {
+                    (file, face, script, direction, escaped, "")
+                }
+                [file, face, script, direction, escaped, settings] => {
+                    (file, face, script, direction, escaped, settings)
+                }
+                _ => panic!("case: {case}"),
             };
             let text = unescape(escaped);
             let bytes = fonts
@@ -2564,10 +2571,23 @@ mod tests {
             } else {
                 cutlass_font::read(bytes)
             };
-            let Ok(font) = font else {
+            let Ok(mut font) = font else {
                 wrong.push(format!("{file}#{face}: does not read: {:?}", font.err()));
                 continue;
             };
+            let set: Vec<(cutlass_font::Tag, f32)> = settings
+                .split(',')
+                .filter_map(|setting| setting.split_once('='))
+                .filter_map(|(axis, value)| {
+                    Some((
+                        <[u8; 4]>::try_from(axis.as_bytes()).ok()?,
+                        value.parse().ok()?,
+                    ))
+                })
+                .collect();
+            if !set.is_empty() {
+                font.set_variations(&set).expect("settings");
+            }
             let mut tag = [0_u8; 4];
             tag.copy_from_slice(script.as_bytes());
             let run = Run {
@@ -2584,6 +2604,7 @@ mod tests {
                 .arg(format!("--face-index={face}"))
                 .arg(format!("--direction={direction}"))
                 .arg(format!("--script={script}"))
+                .arg(format!("--variations={settings}"))
                 .args([
                     "--no-glyph-names",
                     "--utf8-clusters",
@@ -2603,7 +2624,7 @@ mod tests {
             // HarfBuzz prints nothing at all for a run with no glyphs.
             if ours != theirs && !(ours == "[]" && theirs.is_empty()) {
                 let name = file.rsplit('/').next().unwrap_or(file);
-                wrong.push(format!("{name}#{face} {script} {direction} {escaped}\n   ours   {ours}\n   theirs {theirs}"));
+                wrong.push(format!("{name}#{face} {script} {direction} {escaped} {settings}\n   ours   {ours}\n   theirs {theirs}"));
             }
         }
         let limit: usize = std::env::var("CUTLASS_SHAPE_SHOW")

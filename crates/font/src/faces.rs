@@ -350,7 +350,7 @@ fn entry_at(
 /// a plain-ASCII Macintosh one in English, then a Windows entry in any
 /// other language. A face may name itself in several, and no English
 /// among its Windows names.
-fn name(table: &[u8], id: u16) -> Option<String> {
+pub(crate) fn name(table: &[u8], id: u16) -> Option<String> {
     let count = usize::from(u16_at(table, 2).ok()?);
     let storage = usize::from(u16_at(table, 4).ok()?);
     let mut best: Option<(u8, String)> = None;

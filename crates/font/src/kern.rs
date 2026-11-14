@@ -21,6 +21,7 @@ struct Pair {
     value: i16,
 }
 
+#[derive(Clone)]
 pub(crate) struct Kerning {
     pairs: Vec<Pair>,
 }

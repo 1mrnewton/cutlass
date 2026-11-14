@@ -22,6 +22,7 @@ const RANGE: usize = 4;
 const MAPPING: usize = 5;
 
 /// The format 14 subtable of a face.
+#[derive(Clone)]
 pub(crate) struct Variants<'a> {
     data: &'a [u8],
     selectors: usize,

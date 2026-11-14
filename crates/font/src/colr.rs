@@ -248,6 +248,7 @@ pub struct ColorGlyph {
 }
 
 /// The `COLR` table of a face and the palette its colors come from.
+#[derive(Clone)]
 pub(crate) struct Colr<'a> {
     table: &'a [u8],
     /// Version 0 base glyph records: where they start, and how many.
@@ -262,6 +263,7 @@ pub(crate) struct Colr<'a> {
 }
 
 /// Palette 0 of `CPAL`: color records of blue, green, red, alpha.
+#[derive(Clone)]
 struct Palette<'a> {
     records: &'a [u8],
 }

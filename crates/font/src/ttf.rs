@@ -3,7 +3,10 @@
 //! Simple glyphs become lines and quadratic segments. A composite glyph is
 //! drawn by placing each component, including its scale and translation.
 
-use crate::{Contour, Directory, FontError, Outline, Segment, bytes_at, i16_at, u16_at, u32_at};
+use crate::gvar::{Gvar, PHANTOMS};
+use crate::{
+    Contour, Directory, FontError, Hmtx, Outline, Segment, bytes_at, i16_at, u16_at, u32_at,
+};
 
 const ON_CURVE: u8 = 0x01;
 const X_SHORT: u8 = 0x02;
@@ -20,6 +23,7 @@ const MORE_COMPONENTS: u16 = 0x0020;
 const WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
 const WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
 const WE_HAVE_INSTRUCTIONS: u16 = 0x0100;
+const USE_MY_METRICS: u16 = 0x0200;
 const SCALED_COMPONENT_OFFSET: u16 = 0x0800;
 const UNSCALED_COMPONENT_OFFSET: u16 = 0x1000;
 
@@ -30,11 +34,41 @@ const MAX_POINTS: usize = 16_384;
 const MAX_COMPONENTS: usize = 64;
 const MAX_DEPTH: usize = 16;
 
+#[derive(Clone)]
 pub(crate) struct Source<'a> {
     glyf: &'a [u8],
     loca: Loca<'a>,
 }
 
+/// What moves the points of a face set away from its default: the table
+/// of moves, the place along each axis, and how much each of the table's
+/// shared peaks counts there.
+#[derive(Clone, Copy)]
+pub(crate) struct Moves<'v, 'a> {
+    pub(crate) gvar: &'v Gvar<'a>,
+    pub(crate) places: &'v [i16],
+    pub(crate) weights: &'v [f32],
+}
+
+/// What a glyph is read with: the face's glyph count and metrics, and
+/// what moves its points.
+#[derive(Clone, Copy)]
+pub(crate) struct Reading<'v, 'a> {
+    pub(crate) num_glyphs: u16,
+    pub(crate) hmtx: &'v Hmtx<'a>,
+    pub(crate) moves: Option<Moves<'v, 'a>>,
+}
+
+/// A glyph's points by contour, and where its left and right edges are:
+/// the left edge is where its origin lies among its points as stored,
+/// and the right edge is its advance past that.
+struct Loaded {
+    contours: Vec<Vec<Point>>,
+    left: f32,
+    right: f32,
+}
+
+#[derive(Clone)]
 enum Loca<'a> {
     Short(&'a [u8]),
     Long(&'a [u8]),
@@ -58,6 +92,8 @@ struct Component {
     scaled_offset: bool,
     round_offset: bool,
     matched: Option<(u16, u16)>,
+    /// The glyph has this part's advance and bearing.
+    metrics: bool,
 }
 
 pub(crate) fn source<'a>(
@@ -79,24 +115,23 @@ pub(crate) fn source<'a>(
 }
 
 /// The outline of `glyph_id`. A TrueType glyph is drawn with the left edge
-/// of its box at `bearing`, the left side bearing its face gives it, and
-/// not where its points happen to be stored: an old face hangs a mark back
-/// over the letter before it this way. Most glyphs are stored where they
-/// are drawn, and are not moved.
+/// of its box at the left side bearing its face gives it, and not where
+/// its points happen to be stored: an old face hangs a mark back over the
+/// letter before it this way. Most glyphs are stored where they are
+/// drawn, and are not moved. In a face set away from its default the
+/// points move first, and the glyph's origin with them.
 pub(crate) fn outline(
     source: &Source<'_>,
     glyph_id: u16,
-    num_glyphs: u16,
-    bearing: Option<i16>,
+    reading: &Reading<'_, '_>,
 ) -> Result<Outline, FontError> {
     let mut stack = Vec::new();
-    let mut contours = flatten(source, glyph_id, num_glyphs, &mut stack)?;
-    if let (Some(bearing), Some(stored)) = (bearing, left_edge(source, glyph_id))
-        && bearing != stored
-    {
-        let shift = f32::from(bearing) - f32::from(stored);
+    let Loaded {
+        mut contours, left, ..
+    } = flatten(source, glyph_id, reading, &mut stack)?;
+    if left != 0.0 {
         for point in contours.iter_mut().flatten() {
-            point.x += shift;
+            point.x -= left;
         }
     }
     let mut outline = Outline {
@@ -110,31 +145,117 @@ pub(crate) fn outline(
     Ok(outline)
 }
 
-/// The left edge of the box a glyph's own record gives it; `None` for a
-/// glyph with no outline.
-fn left_edge(source: &Source<'_>, glyph_id: u16) -> Option<i16> {
-    let (start, end) = source.loca.span(glyph_id).ok()?;
-    if start == end {
-        return None;
+/// How far `glyph_id` advances in a face set away from its default that
+/// has no table of advances for that: the distance between its edges,
+/// which move with its points.
+pub(crate) fn advance(
+    source: &Source<'_>,
+    glyph_id: u16,
+    reading: &Reading<'_, '_>,
+) -> Result<f32, FontError> {
+    let mut stack = Vec::new();
+    let (left, right) = edges(source, glyph_id, reading, &mut stack)?;
+    Ok(crate::vary::nearest(right - left).max(0.0))
+}
+
+/// Where a glyph's edges are before anything moves: its origin among its
+/// stored points, which is the left edge of its box less its bearing,
+/// and its advance past that. A glyph with no points has its origin at 0.
+fn stored_edges(reading: &Reading<'_, '_>, glyph_id: u16, x_min: Option<i16>) -> (f32, f32) {
+    let left = match (x_min, reading.hmtx.bearing(glyph_id)) {
+        (Some(x_min), Some(bearing)) => f32::from(x_min) - f32::from(bearing),
+        _ => 0.0,
+    };
+    let advance = reading.hmtx.advance(glyph_id).map_or(0.0, f32::from);
+    (left, left + advance)
+}
+
+/// `edges` moved as the face's setting moves them: they are the points
+/// after the `own` points of `glyph_id`, and their moves do not depend on
+/// where those points are.
+fn moved_edges(
+    reading: &Reading<'_, '_>,
+    glyph_id: u16,
+    own: usize,
+    edges: (f32, f32),
+) -> Result<(f32, f32), FontError> {
+    let Some(moves) = &reading.moves else {
+        return Ok(edges);
+    };
+    let mut points = vec![(0.0, 0.0); own + PHANTOMS];
+    points[own] = (edges.0, 0.0);
+    points[own + 1] = (edges.1, 0.0);
+    let moved = moves
+        .gvar
+        .moves(glyph_id, moves.places, moves.weights, &points, &[])?;
+    Ok(match moved {
+        Some(moved) => (moved[own].0, moved[own + 1].0),
+        None => edges,
+    })
+}
+
+/// The edges of a glyph alone, without its points.
+fn edges(
+    source: &Source<'_>,
+    glyph_id: u16,
+    reading: &Reading<'_, '_>,
+    stack: &mut Vec<u16>,
+) -> Result<(f32, f32), FontError> {
+    if glyph_id >= reading.num_glyphs {
+        return Err(FontError::BadTable);
     }
-    let data = bytes_at(source.glyf, start, end - start).ok()?;
-    i16_at(data, 2).ok()
+    if stack.len() >= MAX_DEPTH || stack.contains(&glyph_id) {
+        return Err(FontError::BadTable);
+    }
+    let (start, end) = source.loca.span(glyph_id)?;
+    let data = bytes_at(source.glyf, start, end - start)?;
+    if data.is_empty() {
+        return moved_edges(reading, glyph_id, 0, stored_edges(reading, glyph_id, None));
+    }
+    if data.len() < 10 {
+        return Err(FontError::Truncated);
+    }
+    let contours = i16_at(data, 0)?;
+    let stored = stored_edges(reading, glyph_id, Some(i16_at(data, 2)?));
+    if contours == 0 {
+        return moved_edges(reading, glyph_id, 0, stored);
+    }
+    if contours > 0 {
+        let last = 10 + (usize::from(contours.unsigned_abs()) - 1) * 2;
+        let own = usize::from(u16_at(data, last)?) + 1;
+        return moved_edges(reading, glyph_id, own, stored);
+    }
+    let components = parse_composite(data)?;
+    let mut found = moved_edges(reading, glyph_id, components.len(), stored)?;
+    // A part may lend the glyph its edges.
+    stack.push(glyph_id);
+    for component in components.iter().filter(|component| component.metrics) {
+        match edges(source, component.glyph, reading, stack) {
+            Ok(lent) => found = lent,
+            Err(error) => {
+                stack.pop();
+                return Err(error);
+            }
+        }
+    }
+    stack.pop();
+    Ok(found)
 }
 
 fn flatten(
     source: &Source<'_>,
     glyph_id: u16,
-    num_glyphs: u16,
+    reading: &Reading<'_, '_>,
     stack: &mut Vec<u16>,
-) -> Result<Vec<Vec<Point>>, FontError> {
-    if glyph_id >= num_glyphs {
+) -> Result<Loaded, FontError> {
+    if glyph_id >= reading.num_glyphs {
         return Err(FontError::BadTable);
     }
     if stack.len() >= MAX_DEPTH || stack.contains(&glyph_id) {
         return Err(FontError::BadTable);
     }
     stack.push(glyph_id);
-    let loaded = load_glyph(source, glyph_id, num_glyphs, stack);
+    let loaded = load_glyph(source, glyph_id, reading, stack);
     stack.pop();
     loaded
 }
@@ -142,41 +263,116 @@ fn flatten(
 fn load_glyph(
     source: &Source<'_>,
     glyph_id: u16,
-    num_glyphs: u16,
+    reading: &Reading<'_, '_>,
     stack: &mut Vec<u16>,
-) -> Result<Vec<Vec<Point>>, FontError> {
+) -> Result<Loaded, FontError> {
     let (start, end) = source.loca.span(glyph_id)?;
+    // A glyph with no points still has edges, and they may move.
+    let bare = |stored: (f32, f32)| {
+        let (left, right) = moved_edges(reading, glyph_id, 0, stored)?;
+        Ok(Loaded {
+            contours: Vec::new(),
+            left,
+            right,
+        })
+    };
     if start == end {
-        return Ok(Vec::new());
+        return bare(stored_edges(reading, glyph_id, None));
     }
     let data = bytes_at(source.glyf, start, end - start)?;
     if data.len() < 10 {
         return Err(FontError::Truncated);
     }
     let contours = i16_at(data, 0)?;
-    if contours < 0 {
-        let components = parse_composite(data)?;
-        place_components(source, &components, num_glyphs, stack)
-    } else if contours == 0 {
-        Ok(Vec::new())
-    } else {
-        parse_simple(
-            data,
-            usize::from(u16::try_from(contours).map_err(|_| FontError::BadTable)?),
-        )
+    let (mut left, mut right) = stored_edges(reading, glyph_id, Some(i16_at(data, 2)?));
+    if contours == 0 {
+        return bare((left, right));
     }
+    if contours < 0 {
+        let mut components = parse_composite(data)?;
+        if let Some(moves) = &reading.moves {
+            // Each part's place is one point of the glyph; then its edges.
+            let own = components.len();
+            let mut points: Vec<(f32, f32)> = components
+                .iter()
+                .map(|component| (component.dx, component.dy))
+                .collect();
+            points.extend([(left, 0.0), (right, 0.0), (0.0, 0.0), (0.0, 0.0)]);
+            let moved = moves
+                .gvar
+                .moves(glyph_id, moves.places, moves.weights, &points, &[])?;
+            if let Some(moved) = moved {
+                for (component, to) in components.iter_mut().zip(&moved) {
+                    if component.matched.is_none() {
+                        (component.dx, component.dy) = *to;
+                    }
+                }
+                (left, right) = (moved[own].0, moved[own + 1].0);
+            }
+        }
+        let placed = place_components(source, &components, reading, stack)?;
+        // A part may lend the glyph its edges, in a face that moves them.
+        if let (Some(lent), true) = (placed.lent, reading.moves.is_some()) {
+            (left, right) = lent;
+        }
+        return Ok(Loaded {
+            contours: placed.contours,
+            left,
+            right,
+        });
+    }
+    let mut contours = parse_simple(
+        data,
+        usize::from(u16::try_from(contours).map_err(|_| FontError::BadTable)?),
+    )?;
+    if let Some(moves) = &reading.moves {
+        let mut points = Vec::new();
+        let mut ends = Vec::with_capacity(contours.len());
+        for contour in &contours {
+            points.extend(contour.iter().map(|point| (point.x, point.y)));
+            ends.push(points.len().saturating_sub(1));
+        }
+        let own = points.len();
+        points.extend([(left, 0.0), (right, 0.0), (0.0, 0.0), (0.0, 0.0)]);
+        let moved = moves
+            .gvar
+            .moves(glyph_id, moves.places, moves.weights, &points, &ends)?;
+        if let Some(moved) = moved {
+            for (point, to) in contours.iter_mut().flatten().zip(&moved) {
+                (point.x, point.y) = *to;
+            }
+            (left, right) = (moved[own].0, moved[own + 1].0);
+        }
+    }
+    Ok(Loaded {
+        contours,
+        left,
+        right,
+    })
+}
+
+/// The points of a composite's parts, each part placed, and the edges of
+/// the last part that lends the glyph its own.
+struct Placed {
+    contours: Vec<Vec<Point>>,
+    lent: Option<(f32, f32)>,
 }
 
 fn place_components(
     source: &Source<'_>,
     components: &[Component],
-    num_glyphs: u16,
+    reading: &Reading<'_, '_>,
     stack: &mut Vec<u16>,
-) -> Result<Vec<Vec<Point>>, FontError> {
+) -> Result<Placed, FontError> {
     let mut placed = Vec::new();
     let mut total = 0usize;
+    let mut lent = None;
     for component in components {
-        let child = flatten(source, component.glyph, num_glyphs, stack)?;
+        let child = flatten(source, component.glyph, reading, stack)?;
+        if component.metrics {
+            lent = Some((child.left, child.right));
+        }
+        let child = child.contours;
         let (dx, dy) = translation(component, &placed, &child)?;
         for contour in child {
             let mut next = Vec::with_capacity(contour.len());
@@ -190,7 +386,10 @@ fn place_components(
             placed.push(next);
         }
     }
-    Ok(placed)
+    Ok(Placed {
+        contours: placed,
+        lent,
+    })
 }
 
 fn translation(
@@ -381,6 +580,7 @@ fn parse_composite(data: &[u8]) -> Result<Vec<Component>, FontError> {
             scaled_offset,
             round_offset: flags & ROUND_XY != 0,
             matched: args.matched,
+            metrics: flags & USE_MY_METRICS != 0,
         });
         if flags & MORE_COMPONENTS == 0 {
             if flags & WE_HAVE_INSTRUCTIONS != 0 {

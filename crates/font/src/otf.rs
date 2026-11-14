@@ -10,15 +10,18 @@ const HINT_LIMIT: usize = 96;
 const SUBR_DEPTH: u32 = 10;
 const TRANSIENT: usize = 32;
 
+#[derive(Clone)]
 pub(crate) struct Source<'a> {
     kind: Kind<'a>,
 }
 
+#[derive(Clone)]
 enum Kind<'a> {
     Cff(Cff<'a>),
     Unsupported,
 }
 
+#[derive(Clone)]
 struct Cff<'a> {
     charstrings: Index<'a>,
     gsubrs: Index<'a>,
@@ -30,12 +33,14 @@ struct Cff<'a> {
 
 /// The font dictionaries of a face keyed by character ids, and which of
 /// them each glyph belongs to.
+#[derive(Clone)]
 struct Groups<'a> {
     subrs: Vec<Index<'a>>,
     select: Select<'a>,
 }
 
 /// Which font dictionary each glyph uses, as `FDSelect` stores it.
+#[derive(Clone)]
 enum Select<'a> {
     /// Format 0: one byte for each glyph.
     Each(&'a [u8]),
@@ -50,6 +55,7 @@ struct Routines<'c, 'a> {
     local: &'c Index<'a>,
 }
 
+#[derive(Clone)]
 struct Index<'a> {
     data: &'a [u8],
     count: usize,

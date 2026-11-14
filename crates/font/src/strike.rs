@@ -41,6 +41,7 @@ pub enum BitmapPixels {
     Png(Vec<u8>),
 }
 
+#[derive(Clone)]
 pub(crate) struct Strikes<'a> {
     /// `CBLC`/`CBDT`, or `sbix` when the face has no color bitmap tables.
     color: Option<Source<'a>>,
@@ -48,6 +49,7 @@ pub(crate) struct Strikes<'a> {
     gray: Option<Source<'a>>,
 }
 
+#[derive(Clone)]
 enum Source<'a> {
     Embedded {
         color: bool,

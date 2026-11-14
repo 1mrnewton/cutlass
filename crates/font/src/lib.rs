@@ -31,6 +31,7 @@ mod fixture_fonts;
 mod fixture_kern;
 mod gpos;
 mod gsub;
+mod gvar;
 mod kern;
 mod layout;
 #[cfg(test)]
@@ -43,6 +44,7 @@ mod passes;
 mod strike;
 mod ttf;
 mod variants;
+mod vary;
 
 pub use colr::{
     Affine, ClipBox, Color, ColorGlyph, ColorLine, ColorStop, CompositeMode, Extend, Paint,
@@ -61,10 +63,13 @@ pub use passes::{
 };
 pub use strike::{BitmapGlyph, BitmapPixels};
 pub use variants::Variant;
+pub use vary::{Axis, Instance};
 
 use std::cmp::Ordering;
+
 use std::error::Error;
 use std::fmt;
+use vary::Variation;
 
 /// Advance width of one character, in font design units.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,6 +174,7 @@ pub enum FontKind {
 }
 
 /// One face read from a `.ttf`, `.otf`, or `.ttc` file.
+#[derive(Clone)]
 pub struct Font<'a> {
     kind: FontKind,
     units_per_em: u16,
@@ -189,6 +195,8 @@ pub struct Font<'a> {
     variants: Option<variants::Variants<'a>>,
     fingerprint: u64,
     colr: Option<colr::Colr<'a>>,
+    /// What the face varies along, and where along it the face is set.
+    variation: Option<Variation<'a>>,
 }
 
 /// Read one TrueType or OpenType face.
@@ -345,7 +353,45 @@ impl<'a> Font<'a> {
         if glyph_id >= self.num_glyphs {
             return Err(FontError::UnknownGlyph);
         }
-        self.hmtx.advance(glyph_id)
+        let plain = self.hmtx.advance(glyph_id)?;
+        let Some(variation) = self.variation.as_ref().filter(|variation| variation.set) else {
+            return Ok(plain);
+        };
+        // A face set away from its default says how each advance changes,
+        // or else moves the glyph's edges with its points.
+        let varied = match (&variation.hvar, &self.outlines) {
+            (Some(hvar), _) => {
+                f32::from(plain)
+                    + vary::nearest(hvar.advance_delta(glyph_id, &variation.hvar_weights)?)
+            }
+            (None, Outlines::TrueType(source)) if variation.gvar.is_some() => {
+                ttf::advance(source, glyph_id, &self.reading())?
+            }
+            _ => return Ok(plain),
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let whole = varied.clamp(0.0, f32::from(u16::MAX)) as u16;
+        Ok(whole)
+    }
+
+    /// What a TrueType glyph of this face is read with.
+    fn reading(&self) -> ttf::Reading<'_, 'a> {
+        let moves = self
+            .variation
+            .as_ref()
+            .filter(|variation| variation.set)
+            .and_then(|variation| {
+                Some(ttf::Moves {
+                    gvar: variation.gvar.as_ref()?,
+                    places: &variation.places,
+                    weights: &variation.gvar_weights,
+                })
+            });
+        ttf::Reading {
+            num_glyphs: self.num_glyphs,
+            hmtx: &self.hmtx,
+            moves,
+        }
     }
 
     /// `true` when this face has TrueType or CFF outlines.
@@ -447,15 +493,71 @@ impl<'a> Font<'a> {
             return Err(FontError::UnknownGlyph);
         }
         match &self.outlines {
-            Outlines::TrueType(source) => ttf::outline(
-                source,
-                glyph_id,
-                self.num_glyphs,
-                self.hmtx.bearing(glyph_id),
-            ),
+            Outlines::TrueType(source) => ttf::outline(source, glyph_id, &self.reading()),
             Outlines::OpenType(source) => otf::outline(source, glyph_id),
             Outlines::Pictures => Err(FontError::Unsupported),
         }
+    }
+
+    /// Whether the face is a variable one: a design that varies along
+    /// axes such as weight and width.
+    #[must_use]
+    pub fn is_variable(&self) -> bool {
+        self.variation.is_some()
+    }
+
+    /// The axes a variable face varies along, in the face's order; none
+    /// for a face that does not vary.
+    #[must_use]
+    pub fn axes(&self) -> Vec<Axis> {
+        self.variation
+            .as_ref()
+            .map_or_else(Vec::new, Variation::axes)
+    }
+
+    /// The instances a variable face names, such as Bold: each a value
+    /// for every axis, to hand to [`Self::set_variations`] with the tags
+    /// of [`Self::axes`].
+    #[must_use]
+    pub fn instances(&self) -> Vec<Instance> {
+        self.variation
+            .as_ref()
+            .map_or_else(Vec::new, Variation::instances)
+    }
+
+    /// Where along each axis the face is set, in the face's order: 0 at
+    /// the default, 16,384 at an axis's far end and -16,384 at its near
+    /// one, after the face's own bending of each axis. Empty for a face
+    /// that does not vary.
+    #[must_use]
+    pub fn variations(&self) -> &[i16] {
+        self.variation
+            .as_ref()
+            .map_or(&[], |variation| &variation.places)
+    }
+
+    /// Set a variable face to `settings`: an axis's tag and a value in
+    /// the axis's own units, such as `(*b"wght", 700.0)`. A value past an
+    /// axis's ends is taken as the end, an axis not named goes to its
+    /// default, a tag the face has no axis for is passed over, and of two
+    /// settings of one axis the later counts. Outlines, advances, the
+    /// values of the positioning table, and the features that depend on
+    /// the setting all follow, and [`Self::fingerprint`] becomes another
+    /// number for every other setting. A face that does not vary is left
+    /// as it is.
+    pub fn set_variations(&mut self, settings: &[(Tag, f32)]) -> Result<(), FontError> {
+        let Some(variation) = &mut self.variation else {
+            return Ok(());
+        };
+        self.fingerprint = variation.set(settings)?;
+        Ok(())
+    }
+
+    /// This face set to `settings`, as [`Self::set_variations`] sets it.
+    pub fn varied(&self, settings: &[(Tag, f32)]) -> Result<Font<'a>, FontError> {
+        let mut face = self.clone();
+        face.set_variations(settings)?;
+        Ok(face)
     }
 
     fn from_directory(directory: Directory<'a>) -> Result<Font<'a>, FontError> {
@@ -530,6 +632,7 @@ impl<'a> Font<'a> {
         let strikes = strike::Strikes::parse(&directory)?;
         let fingerprint = directory.fingerprint();
         let colr = colr::Colr::parse(&directory)?;
+        let variation = Variation::read(&directory, fingerprint);
         Ok(Font {
             kind: directory.kind,
             units_per_em: head.units_per_em,
@@ -549,10 +652,12 @@ impl<'a> Font<'a> {
             variants,
             fingerprint,
             colr,
+            variation,
         })
     }
 }
 
+#[derive(Clone)]
 enum Outlines<'a> {
     TrueType(ttf::Source<'a>),
     OpenType(otf::Source<'a>),
@@ -627,6 +732,7 @@ fn parse_hhea(table: &[u8], num_glyphs: u16) -> Result<u16, FontError> {
     Ok(metrics)
 }
 
+#[derive(Clone)]
 struct Hmtx<'a> {
     data: &'a [u8],
     metrics: u16,
@@ -678,6 +784,7 @@ impl<'a> Hmtx<'a> {
     }
 }
 
+#[derive(Clone)]
 enum Cmap<'a> {
     /// Format 0: a glyph for each of 256 byte codes.
     Bytes(&'a [u8]),
@@ -700,6 +807,7 @@ impl Cmap<'_> {
     }
 }
 
+#[derive(Clone)]
 struct Format4<'a> {
     data: &'a [u8],
     seg_count: usize,
@@ -709,11 +817,13 @@ struct Format4<'a> {
     range_at: usize,
 }
 
+#[derive(Clone)]
 struct Format6<'a> {
     glyphs: &'a [u8],
     first: u16,
 }
 
+#[derive(Clone)]
 struct Groups<'a> {
     data: &'a [u8],
     count: usize,

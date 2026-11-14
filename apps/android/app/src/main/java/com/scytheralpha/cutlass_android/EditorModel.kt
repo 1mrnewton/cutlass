@@ -28,6 +28,7 @@ import uniffi.cutlass_ffi_bindings.ClipAnimations
 import uniffi.cutlass_ffi_bindings.ClipState
 import uniffi.cutlass_ffi_bindings.EffectChoice
 import uniffi.cutlass_ffi_bindings.Editor
+import uniffi.cutlass_ffi_bindings.FontAxis
 import uniffi.cutlass_ffi_bindings.Frame
 import uniffi.cutlass_ffi_bindings.Keyframes
 import uniffi.cutlass_ffi_bindings.Lane
@@ -429,6 +430,14 @@ class EditorModel(project: String, private val scope: CoroutineScope) {
         italic: Boolean? = null,
         underline: Boolean? = null,
     ) = edit { it.setTextRangePattern(clip, start.toUInt(), end.toUInt(), bold, italic, underline) }
+
+    /** The axes the face of `clip` varies along, each with where the clip has it; none for a face that does not vary. */
+    fun textFontAxes(clip: String): List<FontAxis> =
+        runCatching { editor?.textFontAxes(clip) }.getOrNull() ?: emptyList()
+
+    /** Move the face of `clip` along one axis. Changes while `live` join one undo step and are saved when the last one, not live, arrives. */
+    fun setTextFontAxis(clip: String, tag: String, value: Double, live: Boolean) =
+        edit(save = !live) { it.setTextFontAxis(clip, tag, value, live) }
 
     fun deleteClip() {
         val clip = deleteTarget

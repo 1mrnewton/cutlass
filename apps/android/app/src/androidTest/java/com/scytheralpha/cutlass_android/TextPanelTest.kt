@@ -1,15 +1,18 @@
 package com.scytheralpha.cutlass_android
 
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextInputSelection
 import androidx.compose.ui.text.TextRange
@@ -33,7 +36,8 @@ import uniffi.cutlass_ffi_bindings.createProject
 /**
  * The text panel on the phone, tapped and typed into as a person would:
  * the search narrows the faces to the ones Rust matches, bold, italic and
- * underline go on the letters selected in the words.
+ * underline go on the letters selected in the words, and a face that
+ * varies gets a slider for each of its axes.
  */
 @RunWith(AndroidJUnit4::class)
 class TextPanelTest {
@@ -144,6 +148,39 @@ class TextPanelTest {
             assertFalse(model.textPattern(title, 6, 11)!!.underline)
             assertTrue(model.textPattern(title, 0, 5)!!.bold)
         }
+    }
+
+    @Test
+    fun a_face_that_varies_has_a_slider_for_each_axis_and_another_has_none() {
+        show()
+        val axes = compose.runOnUiThread<List<String>> { model.textFontAxes(title).map { it.name } }
+        assertEquals(listOf("Optical size", "Weight"), axes)
+        compose.onNodeWithContentDescription("Optical size").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Weight").assertIsDisplayed()
+        fun weight() = compose.runOnUiThread<Double> {
+            model.textFontAxes(title).first { it.tag == "wght" }.value
+        }
+        assertEquals(400.0, weight(), 0.0)
+
+        // Moving the thumb and letting go is one undo step.
+        compose.onNodeWithContentDescription("Weight")
+            .performSemanticsAction(SemanticsActions.SetProgress) { it(700f) }
+        compose.waitForIdle()
+        assertEquals(model.notice?.text ?: "", 700.0, weight(), 0.5)
+        compose.runOnUiThread { model.undo() }
+        assertEquals(400.0, weight(), 0.0)
+
+        // A face with one fixed design has no axes, so no sliders.
+        val fixed = compose.runOnUiThread<String?> {
+            model.fonts.map { it.name }.filter { '[' !in it && '@' !in it }.firstOrNull { face ->
+                model.setTextFont(title, face)
+                model.textFontAxes(title).isEmpty()
+            }
+        }
+        assertNotNull("no face without axes was found", fixed)
+        compose.waitForIdle()
+        compose.onAllNodesWithContentDescription("Weight").assertCountEquals(0)
+        compose.onAllNodesWithContentDescription("Optical size").assertCountEquals(0)
     }
 
     private companion object {

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -27,6 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -67,9 +69,13 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.util.Locale
 import kotlin.math.roundToInt
+import uniffi.cutlass_ffi_bindings.FontAxis
 import uniffi.cutlass_ffi_bindings.TextStyleChange
 import uniffi.cutlass_ffi_bindings.TextStyleRanges
 import uniffi.cutlass_ffi_bindings.textColors
@@ -133,6 +139,8 @@ fun TextPanel(model: EditorModel, clip: String?, done: () -> Unit) {
                 .fillMaxWidth()
                 .background(Palette.tools)
                 .imePadding()
+                // The keyboard can leave less room than the panel is tall.
+                .verticalScroll(rememberScrollState())
                 .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -202,7 +210,7 @@ fun TextPanel(model: EditorModel, clip: String?, done: () -> Unit) {
                 PatternToggles(model, typed, words, field.selection)
             }
             when (tab) {
-                TextTab.Fonts -> FontsTab(model, face, ::pick)
+                TextTab.Fonts -> FontsTab(model, typed, face, ::pick)
                 TextTab.Styles -> {
                     val into = typed
                     if (into != null) {
@@ -275,10 +283,11 @@ private fun PatternToggle(icon: String, label: String, lit: Boolean?, set: (Bool
 
 /**
  * A search over the faces and the faces Rust matched in one row, each a
- * capsule with the chosen one in the accent.
+ * capsule with the chosen one in the accent, and under them a slider for
+ * each axis the title's face varies along.
  */
 @Composable
-private fun FontsTab(model: EditorModel, face: String, pick: (String) -> Unit) {
+private fun FontsTab(model: EditorModel, clip: String?, face: String, pick: (String) -> Unit) {
     if (model.fonts.isEmpty()) {
         Text(
             "No fonts were found on this device.",
@@ -328,6 +337,7 @@ private fun FontsTab(model: EditorModel, face: String, pick: (String) -> Unit) {
                 }
             }
         }
+        if (clip != null) AxisSliders(model, clip, face)
     }
 }
 
@@ -389,6 +399,39 @@ private fun FontSearch(query: String, change: (String) -> Unit) {
         },
     )
 }
+
+/**
+ * A slider for each axis the title's face varies along, from Rust, which
+ * names it and gives its ends; nothing for a face that does not vary. More
+ * than two scroll inside the room two take.
+ */
+@Composable
+private fun AxisSliders(model: EditorModel, clip: String, face: String) {
+    val axes = remember(clip, face, model.edits) { model.textFontAxes(clip) }
+    if (axes.isEmpty()) return
+    Column(
+        Modifier
+            .heightIn(max = SLIDERS_HEIGHT)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        for (axis in axes) {
+            key(face, axis.tag) {
+                StyleSlider(
+                    label = axis.name,
+                    current = axis.value,
+                    range = axis.min..axis.max,
+                    shown = { axisValue(axis, it) },
+                    labelWidth = 88.dp,
+                ) { value, live -> model.setTextFontAxis(clip, axis.tag, value, live) }
+            }
+        }
+    }
+}
+
+/** Whole numbers on a long axis such as weight, tenths on a short one such as slant. */
+private fun axisValue(axis: FontAxis, value: Double): String =
+    if (axis.max - axis.min >= 20) value.roundToInt().toString() else String.format(Locale.ROOT, "%.1f", value)
 
 /**
  * A row of choices in one rounded track, the chosen one on a lighter
@@ -673,6 +716,7 @@ private fun StyleSlider(
     current: Double,
     range: ClosedFloatingPointRange<Double>,
     shown: (Double) -> String,
+    labelWidth: Dp = 72.dp,
     change: (Double, Boolean) -> Unit,
 ) {
     fun clamped(value: Double) = value.coerceIn(range.start, range.endInclusive)
@@ -692,7 +736,8 @@ private fun StyleSlider(
             fontSize = 13.sp,
             color = Color.White.copy(alpha = 0.75f),
             maxLines = 1,
-            modifier = Modifier.width(72.dp),
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.width(labelWidth),
         )
         Slider(
             value = value.toFloat(),

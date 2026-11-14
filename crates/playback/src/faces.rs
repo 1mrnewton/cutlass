@@ -823,14 +823,13 @@ fn faces_in(path: &Path, found: &mut Vec<Found>) {
         };
         for instance in instances {
             let bold = instance.bold || (!bold_said(instance.italic) && named_bold(instance));
-            let (name, label) = if instance.default {
-                (name.clone(), label.clone())
-            } else {
-                (
-                    format!("{name}@{}", instance.name),
-                    format!("{family} {}", instance.name),
-                )
-            };
+            let (name, label) = style_names(
+                &name,
+                &label,
+                face.family.as_deref(),
+                &instance.name,
+                instance.default,
+            );
             found.push(Found {
                 name,
                 label,
@@ -865,6 +864,27 @@ fn faces_in(path: &Path, found: &mut Vec<Found>) {
             },
             style,
         });
+    }
+}
+
+/// The name and the label of one named style of a variable face, whose
+/// own are `name` and `label`. The style the file draws with nothing set
+/// keeps the face's name, so a title made before the others were listed
+/// still finds it; each other adds the style's name after an `@`. A
+/// style is labelled by the family and its own name, and with no family
+/// to go by the default keeps the face's label.
+fn style_names(
+    name: &str,
+    label: &str,
+    family: Option<&str>,
+    style: &str,
+    default: bool,
+) -> (String, String) {
+    let styled = format!("{} {style}", family.unwrap_or(label));
+    match (default, family) {
+        (true, Some(_)) => (name.to_owned(), styled),
+        (true, None) => (name.to_owned(), label.to_owned()),
+        (false, _) => (format!("{name}@{style}"), styled),
     }
 }
 
@@ -1240,6 +1260,34 @@ mod tests {
         std::fs::write(folder.0.join("Vary.ttf"), b"gone").expect("rewritten");
         let table = FaceTable::scan(&[&folder.0]);
         assert_eq!(table.names(), ["Plain.ttf"]);
+    }
+
+    #[test]
+    fn a_style_of_a_variable_face_is_named_after_the_face_and_labelled_by_its_family() {
+        let named =
+            |family, style, default| style_names("Skia.ttf", "Skia file", family, style, default);
+        let pair = |name: &str, label: &str| (name.to_owned(), label.to_owned());
+        // The default keeps the face's name, and is labelled as the
+        // others when the face names its family.
+        assert_eq!(
+            named(Some("Skia"), "Regular", true),
+            pair("Skia.ttf", "Skia Regular")
+        );
+        assert_eq!(
+            named(Some("Skia"), "Black Condensed", false),
+            pair("Skia.ttf@Black Condensed", "Skia Black Condensed")
+        );
+        // With no family the file's label stands in for it.
+        assert_eq!(named(None, "Regular", true), pair("Skia.ttf", "Skia file"));
+        assert_eq!(
+            named(None, "Bold", false),
+            pair("Skia.ttf@Bold", "Skia file Bold")
+        );
+        // A face of a collection is named with its place in the file.
+        assert_eq!(
+            style_names("Many.ttc#2", "Many Light", Some("Many"), "Thin", false),
+            pair("Many.ttc#2@Thin", "Many Thin")
+        );
     }
 
     #[test]

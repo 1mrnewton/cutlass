@@ -441,8 +441,10 @@ pub(super) fn filter(e: Edge<'_>) {
             Wd::W8 => (5, 11),
             Wd::W16 => (1, 15),
         };
-        for (k, x) in v.iter().enumerate().take(last).skip(first) {
-            put::<16>(reg, (k + taps - 8) * stride, b16(*x));
+        // An index loop: the iterator chain stays out of line.
+        #[allow(clippy::needless_range_loop)]
+        for k in first..last {
+            put::<16>(reg, (k + taps - 8) * stride, b16(v[k]));
         }
     }
 }

@@ -335,14 +335,22 @@ fn down_sized<const W: usize, const R: usize>(
     h: usize,
     avg: bool,
 ) {
+    // The eight source rows of an output row, slid down one row at a
+    // time: each output row fetches (and checks) one new row.
+    let mut rows: [&[u8; R]; 8] = [&[0u8; R]; 8];
+    for (k, row) in rows.iter_mut().enumerate().take(7) {
+        match src.get(top + k * ss..).and_then(|s| s.first_chunk::<R>()) {
+            Some(s) => *row = s,
+            None => return,
+        }
+    }
     for r in 0..h {
-        let base = top + r * ss;
-        let mut rows: [&[u8; R]; 8] = [&[0u8; R]; 8];
-        for (k, row) in rows.iter_mut().enumerate() {
-            match src.get(base + k * ss..).and_then(|s| s.first_chunk::<R>()) {
-                Some(s) => *row = s,
-                None => return,
-            }
+        match src
+            .get(top + (r + 7) * ss..)
+            .and_then(|s| s.first_chunk::<R>())
+        {
+            Some(s) => rows[7] = s,
+            None => return,
         }
         let Some(d) = dst.get_mut(r * ds..).and_then(|t| t.first_chunk_mut::<W>()) else {
             return;
@@ -395,6 +403,7 @@ fn down_sized<const W: usize, const R: usize>(
             let v = if avg { _mm_avg_epu8(v, la(d, 0, W)) } else { v };
             sa(d, 0, v, W);
         }
+        rows.rotate_left(1);
     }
 }
 

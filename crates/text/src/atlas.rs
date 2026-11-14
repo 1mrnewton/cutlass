@@ -540,6 +540,16 @@ fn flat(start: Point, control: Point, end: Point) -> bool {
     }
 }
 
+/// The distance field of `edges` over a cell of `width` by `height`
+/// texels: for each texel, how far its center is from the outline, inside
+/// or outside.
+///
+/// A texel farther than [`SPREAD`] from every edge stores only which side
+/// it is on, so each edge is measured against the texels within that
+/// reach of it and no others; and a texel is inside by the edges that
+/// cross its row to its right, which are gathered once for the row. The
+/// field is the same, byte for byte, as measuring every texel against
+/// every edge.
 fn raster(width: u32, height: u32, edges: &[Edge]) -> Result<Vec<u8>, TextError> {
     let width_px = usize::try_from(width).map_err(|_| TextError::Limit)?;
     let height_px = usize::try_from(height).map_err(|_| TextError::Limit)?;
@@ -547,7 +557,93 @@ fn raster(width: u32, height: u32, edges: &[Edge]) -> Result<Vec<u8>, TextError>
     if pixels > usize::from(MAX_CELL) * usize::from(MAX_CELL) {
         return Err(TextError::Limit);
     }
+    if pixels == 0 {
+        return Ok(Vec::new());
+    }
+    // The first and last texel, of `count`, whose center may be within
+    // reach of the stretch from `low` to `high`.
+    let reach = |low: f32, high: f32, count: usize| -> Option<(usize, usize)> {
+        if !(low.is_finite() && high.is_finite()) {
+            return Some((0, count - 1));
+        }
+        let first = (low - SPREAD - 1.0).floor().max(0.0);
+        let last = (high + SPREAD + 1.0).ceil();
+        if last < 0.0 {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let (first, last) = (first as usize, last as usize);
+        (first < count).then(|| (first, last.min(count - 1)))
+    };
+    let mut nearest = vec![f32::MAX; pixels];
+    for edge in edges {
+        let across = reach(
+            edge.start.x.min(edge.end.x),
+            edge.start.x.max(edge.end.x),
+            width_px,
+        );
+        let down = reach(
+            edge.start.y.min(edge.end.y),
+            edge.start.y.max(edge.end.y),
+            height_px,
+        );
+        let (Some((left, right)), Some((top, bottom))) = (across, down) else {
+            continue;
+        };
+        for row in top..=bottom {
+            #[allow(clippy::cast_precision_loss)]
+            let y = row as f32 + 0.5;
+            let line = &mut nearest[row * width_px..(row + 1) * width_px];
+            for (col, texel) in line.iter_mut().enumerate().take(right + 1).skip(left) {
+                #[allow(clippy::cast_precision_loss)]
+                let point = Point {
+                    x: col as f32 + 0.5,
+                    y,
+                };
+                let distance = segment_distance(point, edge);
+                if distance < *texel {
+                    *texel = distance;
+                }
+            }
+        }
+    }
     let mut sdf = vec![0_u8; pixels];
+    // The edges that cross a row, each with where it crosses and which
+    // way it goes.
+    let mut crossings: Vec<(f32, i32)> = Vec::new();
+    for row in 0..height_px {
+        #[allow(clippy::cast_precision_loss)]
+        let y = row as f32 + 0.5;
+        crossings.clear();
+        for edge in edges {
+            let (y0, y1) = (edge.start.y, edge.end.y);
+            if y0 <= y && y1 > y {
+                crossings.push((cross_x(edge, y), 1));
+            } else if y1 <= y && y0 > y {
+                crossings.push((cross_x(edge, y), -1));
+            }
+        }
+        for col in 0..width_px {
+            #[allow(clippy::cast_precision_loss)]
+            let x = col as f32 + 0.5;
+            let wind: i32 = crossings
+                .iter()
+                .filter(|(cross, _)| x < *cross)
+                .map(|(_, turn)| *turn)
+                .sum();
+            let distance = nearest[row * width_px + col];
+            let signed = if wind != 0 { -distance } else { distance };
+            sdf[row * width_px + col] = encode(signed);
+        }
+    }
+    Ok(sdf)
+}
+
+/// The distance field as it was first made: every texel against every
+/// edge. Kept to check the quick one against.
+#[cfg(test)]
+fn raster_whole(width: u32, height: u32, edges: &[Edge]) -> Vec<u8> {
+    let mut sdf = Vec::new();
     for row in 0..height {
         for col in 0..width {
             let point = Point {
@@ -559,19 +655,10 @@ fn raster(width: u32, height: u32, edges: &[Edge]) -> Result<Vec<u8>, TextError>
                 .map(|edge| segment_distance(point, edge))
                 .fold(f32::MAX, f32::min);
             let inside = winding(point, edges) != 0;
-            let signed = if inside { -distance } else { distance };
-            let offset = row
-                .checked_mul(width)
-                .and_then(|value| value.checked_add(col))
-                .ok_or(TextError::Limit)?;
-            let offset = usize::try_from(offset).map_err(|_| TextError::Limit)?;
-            let Some(texel) = sdf.get_mut(offset) else {
-                return Err(TextError::Limit);
-            };
-            *texel = encode(signed);
+            sdf.push(encode(if inside { -distance } else { distance }));
         }
     }
-    Ok(sdf)
+    sdf
 }
 
 fn segment_distance(point: Point, edge: &Edge) -> f32 {
@@ -588,6 +675,7 @@ fn segment_distance(point: Point, edge: &Edge) -> f32 {
     (point.x - x).hypot(point.y - y)
 }
 
+#[cfg(test)]
 fn winding(point: Point, edges: &[Edge]) -> i32 {
     let mut wind = 0_i32;
     for edge in edges {
@@ -614,6 +702,7 @@ fn cross_x(edge: &Edge, y: f32) -> f32 {
     edge.start.x + (y - y0) * (edge.end.x - edge.start.x) / span
 }
 
+#[cfg(test)]
 fn pixel(value: u32) -> f32 {
     #[allow(clippy::cast_precision_loss)]
     {
@@ -858,6 +947,145 @@ mod tests {
             assert_eq!(image.kind, super::GlyphKind::Color);
             assert!(image.color.iter().any(|byte| *byte != 0));
         }
+    }
+
+    /// The distance field of a glyph made the slow way, every texel
+    /// against every edge; `None` for a glyph with no outline.
+    fn whole_field(font: &cutlass_font::Font<'_>, glyph: u16) -> Option<Vec<u8>> {
+        let outline = font.outline(glyph).ok()?;
+        if outline.contours.is_empty() {
+            return None;
+        }
+        let unit = f32::from(font.units_per_em()) / super::ATLAS_EM;
+        let bounds = super::bounds(&outline).ok()?;
+        let width = cell_span(bounds.min_x, bounds.max_x, unit).ok()?;
+        let height = cell_span(bounds.min_y, bounds.max_y, unit).ok()?;
+        let pad = super::SPREAD * unit;
+        let edges = super::flatten(&outline, bounds.min_x - pad, bounds.max_y + pad, unit).ok()?;
+        Some(super::raster_whole(width, height, &edges))
+    }
+
+    #[test]
+    fn the_quick_distance_field_is_the_whole_one_byte_for_byte() {
+        // Every glyph of the fixture faces, and a spread of the glyphs of
+        // faces a Mac installs, where they are: Latin, and Han characters
+        // of many strokes drawn with cubic curves.
+        let mut compared = 0;
+        let mut check = |bytes: &[u8], index: Option<u32>, every: usize| {
+            let font = match index {
+                Some(index) => cutlass_font::read_collection(bytes, index),
+                None => read(bytes),
+            }
+            .expect("face");
+            let mut atlas = Atlas::new();
+            for glyph in (0..font.glyph_count()).step_by(every) {
+                let Some(whole) = whole_field(&font, glyph) else {
+                    continue;
+                };
+                let image = atlas.glyph(&font, glyph).expect("glyph");
+                assert!(image.sdf == whole, "glyph {glyph} differs");
+                compared += 1;
+            }
+        };
+        check(include_bytes!("../../font/fixtures/sample.ttf"), None, 1);
+        check(include_bytes!("../../font/fixtures/sample.otf"), None, 1);
+        check(include_bytes!("../../font/fixtures/shaping.ttf"), None, 1);
+        for (path, index, every) in [
+            ("/System/Library/Fonts/Supplemental/Arial.ttf", None, 97),
+            ("/System/Library/Fonts/Hiragino Sans GB.ttc", Some(0), 1_499),
+            ("/System/Library/Fonts/Supplemental/Zapfino.ttf", None, 211),
+        ] {
+            if let Ok(bytes) = std::fs::read(path) {
+                check(&bytes, index, every);
+            }
+        }
+        assert!(compared > 30, "{compared} glyphs");
+    }
+
+    #[test]
+    fn the_quick_distance_field_agrees_on_edges_of_every_kind() {
+        use super::{Edge, Point};
+        // Edges made from a fixed sequence: inside the cell and far
+        // outside it, of no length, level, upright, and through the
+        // centers of texels.
+        let mut seed = 0x2545_F491_u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for round in 0..300 {
+            let (width, height) = (1 + next() % 40, 1 + next() % 40);
+            let count = next() % 24;
+            let mut edges = Vec::new();
+            for _ in 0..count {
+                #[allow(clippy::cast_precision_loss)]
+                let mut place = |limit: u32| match next() % 6 {
+                    0 => (next() % (limit + 1)) as f32,
+                    1 => (next() % (limit + 1)) as f32 + 0.5,
+                    2 => (next() % 400) as f32 - 200.0,
+                    _ => (next() % (limit * 16 + 1)) as f32 / 16.0,
+                };
+                let start = Point {
+                    x: place(width),
+                    y: place(height),
+                };
+                let end = match round % 4 {
+                    0 => Point {
+                        x: start.x,
+                        y: start.y,
+                    },
+                    1 => Point {
+                        x: place(width),
+                        y: start.y,
+                    },
+                    _ => Point {
+                        x: place(width),
+                        y: place(height),
+                    },
+                };
+                edges.push(Edge { start, end });
+            }
+            let quick = super::raster(width, height, &edges).expect("field");
+            assert!(
+                quick == super::raster_whole(width, height, &edges),
+                "round {round}: {width} by {height}, {count} edges"
+            );
+        }
+        // No edges: every texel is outside.
+        assert_eq!(super::raster(3, 2, &[]).expect("field"), [0; 6]);
+        assert!(super::raster(0, 5, &[]).expect("field").is_empty());
+        // A cell past the limit is refused before anything is measured.
+        assert!(matches!(
+            super::raster(4_096, 4_096, &[]),
+            Err(TextError::Limit)
+        ));
+    }
+
+    #[test]
+    fn a_glyph_of_many_edges_is_painted_quickly() {
+        // The glyph of most edges in the shaping fixture, many times; and
+        // where a Mac's Han face is, a hundred characters of many strokes.
+        let started = std::time::Instant::now();
+        if let Ok(bytes) = std::fs::read("/System/Library/Fonts/Hiragino Sans GB.ttc") {
+            let font = cutlass_font::read_collection(&bytes, 0).expect("face");
+            let first = font.glyph_id('\u{9F8D}').expect("map").unwrap_or(1);
+            let mut atlas = Atlas::new();
+            for glyph in first..first.saturating_add(100).min(font.glyph_count()) {
+                let _image = atlas.glyph(&font, glyph).expect("glyph");
+            }
+        }
+        let font = read(include_bytes!("../../font/fixtures/shaping.ttf")).expect("face");
+        for _ in 0..200 {
+            let mut atlas = Atlas::new();
+            for glyph in 0..font.glyph_count() {
+                let _image = atlas.glyph(&font, glyph).expect("glyph");
+            }
+        }
+        // Unoptimized, this is well under a second with each edge
+        // measured against the texels near it alone.
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
     }
 
     /// Paint every glyph of the faces named in `CUTLASS_COLOR_FACES` (paths

@@ -1,6 +1,6 @@
 # cutlass-h264
 
-An H.264 (AVC) decoder and encoder in safe Rust. The crate has `#![forbid(unsafe_code)]`, depends only on `cutlass-decode` and `cutlass-encode`, and runs on the caller's thread. The desktop app registers both: on macOS and Windows the platform codec is asked first when hardware decode or encode is on in Settings, and this crate is used when that opener declines, when hardware is off, and always on Linux.
+An H.264 (AVC) decoder and encoder in safe Rust. The crate has `#![forbid(unsafe_code)]` and depends only on `cutlass-decode`, `cutlass-encode` and `cutlass-h264-kernels`, which holds its sample loops and the `unsafe` their NEON versions need. It runs on the caller's thread unless the decoder is given threads with `with_threads`. The desktop app registers both: on macOS and Windows the platform codec is asked first when hardware decode or encode is on in Settings, and this crate is used when that opener declines, when hardware is off, and always on Linux.
 
 ## What it supports
 
@@ -155,14 +155,14 @@ To run it again: `cargo build --release -p media-bench`, then `python3 scripts/b
 | One NAL unit | 8 MiB | |
 | Parameter set ids | 32 SPS, 256 PPS | One of each |
 | Slice groups | 8 | 1 |
-| Threads | One | One |
+| Threads | One as the app opens it. `H264Decoder::with_threads` decodes pictures on other threads, except interlaced, 4:2:2, 4:4:4, multiview and scalable ones, which stay on the calling thread. Only the bench, the profile trainer and tests call it. | One |
 
 Decoder gaps:
 
 - The refusals listed under "What it supports". The one most likely to meet a real file: an access unit that holds an auxiliary picture (NAL type 19), a sequence parameter set extension (type 13), or a reserved or unspecified NAL type fails as a whole instead of that one unit being skipped.
 - A damaged picture is not repaired. The bad-input tests only check that a later IDR picture still decodes.
 - Film grain follows H.274, whose random source is not fixed, so grained pictures need not match another decoder.
-- No multithreading.
+- The opener `register_decoders` adds does not give the decoder threads, so the app decodes H.264 on one thread.
 
 Encoder gaps:
 

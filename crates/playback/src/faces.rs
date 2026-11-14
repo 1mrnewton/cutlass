@@ -154,7 +154,16 @@ enum Bytes {
     Fixed(&'static [u8]),
     /// Read on the first ask, face `index` copied out of a collection. `None`
     /// once it failed to read as one face.
-    Later(PathBuf, Option<u32>, OnceLock<Option<Vec<u8>>>),
+    Later(Source, OnceLock<Option<Vec<u8>>>),
+}
+
+/// Where a face found by a scan is read from: its file, which face of a
+/// collection it is, and for a named instance of a variable face, the
+/// setting of each axis it is pinned to.
+struct Source {
+    path: PathBuf,
+    index: Option<u32>,
+    pinned: Option<Vec<(cutlass_font::Tag, f32)>>,
 }
 
 struct Face {
@@ -183,7 +192,7 @@ impl Face {
         let map = self.map.get_or_init(|| match &self.bytes {
             Bytes::Read(bytes) => character_map(bytes),
             Bytes::Fixed(bytes) => character_map(bytes),
-            Bytes::Later(path, index, _) => {
+            Bytes::Later(Source { path, index, .. }, _) => {
                 let mut file = File::open(path).ok()?;
                 cutlass_font::load_character_map(
                     |offset, len| {
@@ -258,8 +267,7 @@ impl Style {
 struct Found {
     name: String,
     label: String,
-    path: PathBuf,
-    index: Option<u32>,
+    source: Source,
     style: Style,
 }
 
@@ -376,7 +384,7 @@ impl FaceTable {
             if table.faces.len() >= MAX_FACES && !is_fallback_file(&face.name) {
                 continue;
             }
-            let bytes = Bytes::Later(face.path, face.index, OnceLock::new());
+            let bytes = Bytes::Later(face.source, OnceLock::new());
             table.push(face.name, face.label, bytes, face.style);
         }
         table.rank_fallbacks();
@@ -484,9 +492,7 @@ impl FaceTable {
         match &self.faces.get(at)?.bytes {
             Bytes::Read(bytes) => Some(bytes),
             Bytes::Fixed(bytes) => Some(bytes),
-            Bytes::Later(path, index, cell) => {
-                cell.get_or_init(|| read_face(path, *index)).as_deref()
-            }
+            Bytes::Later(source, cell) => cell.get_or_init(|| read_face(source)).as_deref(),
         }
     }
 
@@ -788,40 +794,102 @@ fn faces_in(path: &Path, found: &mut Vec<Found>) {
             Some(index) => (
                 format!("{name}#{index}"),
                 face.full_name
+                    .clone()
                     .unwrap_or_else(|| format!("{} {}", face_label(&name), index + 1)),
             ),
         };
+        // A variable face is listed once for each style its maker named,
+        // as a family of separate files would be. The style the file
+        // draws when nothing is set keeps the face's plain name, so a
+        // title made before the others were listed still finds it.
+        let family = face.family.clone().unwrap_or_else(|| label.clone());
+        // A family the system keeps for its own interface, named with a
+        // dot, lists no styles; the face stays for what falls back to it.
+        let instances: &[cutlass_font::InstanceEntry] = if family.starts_with('.') {
+            &[]
+        } else {
+            &face.instances
+        };
+        // A face that measures weight on a scale of its own does not say
+        // which style is its bold: the one named so is.
+        let named_bold = |instance: &cutlass_font::InstanceEntry| {
+            let said = instance.name.to_lowercase();
+            matches!(said.as_str(), "bold" | "bold italic" | "bold oblique")
+        };
+        let bold_said = |italic: bool| {
+            instances
+                .iter()
+                .any(|instance| instance.bold && instance.italic == italic)
+        };
+        for instance in instances {
+            let bold = instance.bold || (!bold_said(instance.italic) && named_bold(instance));
+            let (name, label) = if instance.default {
+                (name.clone(), label.clone())
+            } else {
+                (
+                    format!("{name}@{}", instance.name),
+                    format!("{family} {}", instance.name),
+                )
+            };
+            found.push(Found {
+                name,
+                label,
+                source: Source {
+                    path: path.to_owned(),
+                    index: face.index,
+                    pinned: Some(instance.coordinates.clone()),
+                },
+                style: Style {
+                    // The styles of one file are a family, whether or
+                    // not the file names one.
+                    family: if style.family.is_empty() {
+                        family.to_lowercase()
+                    } else {
+                        style.family.clone()
+                    },
+                    bold,
+                    italic: instance.italic,
+                },
+            });
+        }
+        if instances.iter().any(|instance| instance.default) {
+            continue;
+        }
         found.push(Found {
             name,
             label,
-            path: path.to_owned(),
-            index: face.index,
+            source: Source {
+                path: path.to_owned(),
+                index: face.index,
+                pinned: None,
+            },
             style,
         });
     }
 }
 
-/// One face of the file at `path` as its own font, when it reads as one
-/// and is no larger than [`MAX_FACE_BYTES`].
-fn read_face(path: &Path, index: Option<u32>) -> Option<Vec<u8>> {
-    let mut file = File::open(path).ok()?;
+/// One face of a file as its own font, when it reads as one and is no
+/// larger than [`MAX_FACE_BYTES`]; a named instance of a variable face
+/// with the setting it is pinned to written into it.
+fn read_face(source: &Source) -> Option<Vec<u8>> {
+    let mut file = File::open(&source.path).ok()?;
     let length = file.metadata().ok()?.len();
     let most = usize::try_from(MAX_FACE_BYTES).ok()?;
-    cutlass_font::load_face(
-        |offset, len| {
-            // A read past the end, or of more than a face may hold, is
-            // refused before any bytes are asked for.
-            if len > most || offset.checked_add(len as u64)? > length {
-                return None;
-            }
-            file.seek(SeekFrom::Start(offset)).ok()?;
-            let mut bytes = vec![0; len];
-            file.read_exact(&mut bytes).ok()?;
-            Some(bytes)
-        },
-        index,
-        most,
-    )
+    let read_at = |offset: u64, len: usize| {
+        // A read past the end, or of more than a face may hold, is
+        // refused before any bytes are asked for.
+        if len > most || offset.checked_add(len as u64)? > length {
+            return None;
+        }
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        let mut bytes = vec![0; len];
+        file.read_exact(&mut bytes).ok()?;
+        Some(bytes)
+    };
+    match &source.pinned {
+        Some(pinned) => cutlass_font::load_instance(read_at, source.index, pinned, most),
+        None => cutlass_font::load_face(read_at, source.index, most),
+    }
     .ok()
 }
 
@@ -1105,6 +1173,73 @@ mod tests {
             assert!(table.fallback(character, false).is_none());
         }
         assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    }
+
+    const VARIABLE: &[u8] = include_bytes!("../../font/fixtures/variable.ttf");
+
+    #[test]
+    fn a_variable_face_is_listed_once_for_each_style_its_maker_named() {
+        let folder = Folder::new("variable");
+        std::fs::write(folder.0.join("Vary.ttf"), VARIABLE).expect("face");
+        std::fs::write(folder.0.join("Plain.ttf"), SAMPLE).expect("face");
+        let table = FaceTable::scan(&[&folder.0]);
+        // The style the file draws with nothing set keeps the plain name;
+        // each other style is the family and the style's own name.
+        assert_eq!(
+            table.labelled(),
+            [
+                ("Plain.ttf".to_owned(), "Plain".to_owned()),
+                ("Vary.ttf".to_owned(), "Vary".to_owned()),
+                ("Vary.ttf@Bold".to_owned(), "Vary Bold".to_owned()),
+                (
+                    "Vary.ttf@Condensed Bold".to_owned(),
+                    "Vary Condensed Bold".to_owned()
+                ),
+            ]
+        );
+        // Each reads as a font set to its style: the same glyph is as
+        // wide as the whole file says it is there.
+        let whole = cutlass_font::read(VARIABLE).expect("face");
+        let glyph = (1..whole.glyph_count())
+            .find(|glyph| {
+                let bold = whole
+                    .varied(&[(*b"wght", 700.0)])
+                    .and_then(|bold| bold.advance(*glyph));
+                bold.is_ok() && bold != whole.advance(*glyph)
+            })
+            .expect("a glyph that widens");
+        let advance = |name: &str| {
+            let bytes = table.face(name).expect("bytes");
+            cutlass_font::read(bytes)
+                .expect("font")
+                .advance(glyph)
+                .expect("advance")
+        };
+        let set = |settings: &[(cutlass_font::Tag, f32)]| {
+            whole
+                .varied(settings)
+                .expect("set")
+                .advance(glyph)
+                .expect("advance")
+        };
+        assert_eq!(advance("Vary.ttf"), whole.advance(glyph).expect("advance"));
+        assert_eq!(advance("Vary.ttf@Bold"), set(&[(*b"wght", 700.0)]));
+        assert_eq!(
+            advance("Vary.ttf@Condensed Bold"),
+            set(&[(*b"wght", 700.0), (*b"wdth", 75.0)])
+        );
+        assert_ne!(advance("Vary.ttf@Bold"), advance("Vary.ttf"));
+        // The style named bold is the family's bold face.
+        let (bold, is_bold, is_italic) = table.styled("Vary.ttf", true, false).expect("bold");
+        assert_eq!(Some(bold), table.face("Vary.ttf@Bold"));
+        assert!(is_bold && !is_italic);
+        assert!(table.styled("Vary.ttf", false, true).is_none());
+        // A face that does not vary is listed as it was.
+        assert!(table.styled("Plain.ttf", true, false).is_none());
+        // A file that changes after the scan gives nothing.
+        std::fs::write(folder.0.join("Vary.ttf"), b"gone").expect("rewritten");
+        let table = FaceTable::scan(&[&folder.0]);
+        assert_eq!(table.names(), ["Plain.ttf"]);
     }
 
     #[test]

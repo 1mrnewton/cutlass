@@ -33,7 +33,7 @@ pub struct GlyphLookup<'a> {
 }
 
 impl<'a> GlyphLookup<'a> {
-    fn read(data: &'a [u8]) -> Result<Self, FontError> {
+    pub(crate) fn read(data: &'a [u8]) -> Result<Self, FontError> {
         if !matches!(u16_at(data, 0)?, 0 | 2 | 4 | 6 | 8 | 10) {
             return Err(FontError::BadTable);
         }
@@ -113,7 +113,7 @@ pub struct StateTable<'a> {
 impl<'a> StateTable<'a> {
     /// Read the machine at the start of `body`, whose entries are
     /// `entry_size` bytes each.
-    fn read(body: &'a [u8], entry_size: usize) -> Result<Self, FontError> {
+    pub(crate) fn read(body: &'a [u8], entry_size: usize) -> Result<Self, FontError> {
         let offset = |at: usize| {
             let offset = usize::try_from(u32_at(body, at)?).map_err(|_| FontError::BadTable)?;
             body.get(offset..).ok_or(FontError::Truncated)

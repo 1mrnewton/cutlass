@@ -26,6 +26,8 @@ mod fixture_color;
 mod fixture_colr;
 #[cfg(test)]
 mod fixture_fonts;
+#[cfg(test)]
+mod fixture_kern;
 mod gpos;
 mod gsub;
 mod kern;
@@ -36,6 +38,7 @@ pub mod morx;
 mod otf;
 #[cfg(test)]
 mod outline_tests;
+mod passes;
 mod strike;
 mod ttf;
 mod variants;
@@ -49,6 +52,10 @@ pub use gsub::{Ligature, Ligatures, Sequences, Single, Substitution};
 pub use layout::{
     ClassDef, Coverage, Gdef, GlyphClass, Language, LayoutTable, Lookup, LookupFlags, ReverseChain,
     SequenceContext, SequenceRule, Tag, U16s,
+};
+pub use passes::{
+    AttachStep, KERN_CLASS_DELETED, KERN_CLASS_END, KERN_CLASS_OTHER, KernAttach, KernMachine,
+    KernPairs, KernPass, KernStep,
 };
 pub use strike::{BitmapGlyph, BitmapPixels};
 pub use variants::Variant;
@@ -170,6 +177,9 @@ pub struct Font<'a> {
     /// letters are typed.
     symbols: bool,
     kern: kern::Kerning,
+    /// The passes of a `kern` table that is more than pairs, and of `kerx`.
+    kern_passes: Vec<KernPass<'a>>,
+    kerx: Vec<KernPass<'a>>,
     gdef: Option<Gdef<'a>>,
     gsub: Option<LayoutTable<'a>>,
     gpos: Option<LayoutTable<'a>>,
@@ -415,6 +425,20 @@ impl<'a> Font<'a> {
             .color_glyph(glyph_id, self.num_glyphs, max_edge)
     }
 
+    /// The passes of a `kern` table made for Apple's layout engine that
+    /// is more than a list of pairs, in the order they apply. A face
+    /// with these has no pairs in [`Self::kerning`].
+    #[must_use]
+    pub fn kern_passes(&self) -> &[KernPass<'a>] {
+        &self.kern_passes
+    }
+
+    /// The passes of the face's `kerx` table.
+    #[must_use]
+    pub fn kerx_passes(&self) -> &[KernPass<'a>] {
+        &self.kerx
+    }
+
     /// Horizontal kerning for a glyph pair, in font design units.
     ///
     /// The value is added to the advance of `left` before `right` is placed.
@@ -451,6 +475,25 @@ impl<'a> Font<'a> {
             Err(FontError::MissingTable | FontError::Unsupported) => kern::Kerning::empty(),
             Err(error) => return Err(error),
         };
+        // A version 1 table with state machines, classes or moves across
+        // the line is applied pass by pass and not as one list of pairs.
+        // Passes that do not read are no kerning.
+        let kern_passes = match directory.table(b"kern") {
+            Ok(table) if passes::has_passes(table) => {
+                passes::kern_passes(table).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        let kern = if kern_passes.is_empty() {
+            kern
+        } else {
+            kern::Kerning::empty()
+        };
+        let kerx = directory
+            .table(b"kerx")
+            .ok()
+            .and_then(|table| passes::kerx_passes(table, directory.table(b"ankr").ok()).ok())
+            .unwrap_or_default();
         // A layout table that is absent or empty is no table; a torn one
         // is still an error.
         let optional = |tag: &[u8; 4]| match directory.table(tag) {
@@ -497,6 +540,8 @@ impl<'a> Font<'a> {
             cmap,
             symbols,
             kern,
+            kern_passes,
+            kerx,
             gdef,
             gsub,
             gpos,

@@ -1479,8 +1479,14 @@ mod tests {
                 (96, 64),
                 "{name}"
             );
-            let sound = media.pull_audio().expect(name).expect(name);
-            assert_eq!(sound.pcm.rate, 48_000, "{name}");
+            // Asked for by its time: a picture the platform decodes comes
+            // out some packets after it went in, so how much of the file
+            // is left unread after one varies from run to run.
+            let sound = media.audio_from(at, 4_800).expect(name);
+            assert_eq!(sound.rate, 48_000, "{name}");
+            let samples = sound.as_f32().expect(name);
+            assert_eq!(samples.len(), 4_800 * sound.layout.len(), "{name}");
+            assert!(samples.iter().any(|sample| *sample != 0.0), "{name}");
         }
     }
 

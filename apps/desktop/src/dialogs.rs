@@ -23,6 +23,7 @@ pub(crate) enum Picker {
     Replace,
     Link,
     StudioClip,
+    Cover,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -101,6 +102,22 @@ impl Dialogs {
     pub(crate) fn studio_clip(&mut self, parent: Option<&eframe::Frame>) {
         let dialog = dialog(parent);
         self.start(Picker::StudioClip, async move {
+            dialog
+                .pick_file()
+                .await
+                .map(|file| file.path().to_path_buf())
+        });
+    }
+
+    /// A picture to make the project's cover.
+    pub(crate) fn cover(&mut self, parent: Option<&eframe::Frame>) {
+        let dialog = dialog(parent).add_filter(
+            "Pictures",
+            &[
+                "png", "jpg", "jpeg", "webp", "gif", "PNG", "JPG", "JPEG", "WEBP", "GIF",
+            ],
+        );
+        self.start(Picker::Cover, async move {
             dialog
                 .pick_file()
                 .await

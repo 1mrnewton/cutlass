@@ -88,6 +88,16 @@ impl Shell {
         image_cover(&self.readers, path, (width, height), rows)
     }
 
+    /// The picture file at `path` (a project's cover, say) upright and at
+    /// most `rows` rows, or `None` when it does not open.
+    #[must_use]
+    pub fn picture_thumb(&self, path: &Path, rows: u32) -> Option<Thumb> {
+        cutlass_engine::frames_of(&self.readers, path, &[Micros(0)], rows)
+            .ok()?
+            .into_iter()
+            .next()
+    }
+
     /// Write the picture `cover` names to the cover file as a job. With
     /// `set`, the cover is stored once the file is written; without, the
     /// draft already names it (after undo or redo).

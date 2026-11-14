@@ -20,6 +20,7 @@ use crate::widgets;
 
 mod assistant;
 mod audio;
+mod cover;
 mod follow;
 mod grade;
 mod inspector;
@@ -169,6 +170,8 @@ pub struct ViewState {
     export_open: bool,
     /// The project dialog's unsaved choices while it is open.
     project_dialog: Option<cutlass_editor::ProjectSettings>,
+    /// The cover dialog while it is open.
+    cover: Option<cover::CoverDialog>,
     /// "Do not ask again" is ticked in the replace-transition question.
     never_ask_transition: bool,
     /// The project dialog shows its Performance tab, not Details.
@@ -297,6 +300,7 @@ impl Default for ViewState {
             wants_link: false,
             export_open: false,
             project_dialog: None,
+            cover: None,
             never_ask_transition: false,
             project_performance: false,
             project_proxies: None,
@@ -481,6 +485,16 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         }
         if view.project_dialog.is_some() {
             project_dialog(shell, ui, view);
+        }
+        if cover::take_open_request(ui.ctx()) && view.cover.is_none() {
+            view.cover = Some(cover::CoverDialog::open(shell));
+        }
+        if view.cover.is_some() {
+            let mut pick = false;
+            cover::dialog(shell, ui, &mut view.cover, &mut pick);
+            if pick {
+                view.dialogs.cover(parent);
+            }
         }
         job_strip(shell, ui, full);
         shortcuts(shell, ui, view);
@@ -710,7 +724,7 @@ fn projects_home(
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::new(16.0, 16.0);
                     for project in &recent {
-                        if project_card(ui, project)
+                        if project_card(ui, shell, project)
                             && let Err(error) = shell.open_folder(&project.path)
                         {
                             shell.notice_error(&error);
@@ -729,7 +743,7 @@ fn projects_home(
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(16.0, 16.0);
                 for project in &projects {
-                    if project_card(ui, project)
+                    if project_card(ui, shell, project)
                         && let Err(error) = shell.open_folder(&project.path)
                     {
                         shell.notice_error(&error);
@@ -801,19 +815,45 @@ fn new_project_button(ui: &mut Ui) -> bool {
     .clicked()
 }
 
-fn project_card(ui: &mut Ui, project: &ListedProject) -> bool {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(220.0, 88.0), Sense::click());
+/// A project at home: its cover over its name, length and date. A project
+/// without a cover shows a quiet field where the cover would be.
+fn project_card(ui: &mut Ui, shell: &Shell, project: &ListedProject) -> bool {
+    const WIDTH: f32 = 220.0;
+    const PICTURE: f32 = 124.0;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(WIDTH, PICTURE + 60.0), Sense::click());
     let fill = if response.hovered() {
         tokens::ACTIVE
     } else {
         tokens::PROJECT_BAR
     };
     ui.painter().rect_filled(rect, CornerRadius::same(12), fill);
+    let picture = Rect::from_min_size(rect.min, Vec2::new(WIDTH, PICTURE));
+    let top = CornerRadius {
+        nw: 12,
+        ne: 12,
+        sw: 0,
+        se: 0,
+    };
+    match cover::card_picture(shell, ui.ctx(), &project.path) {
+        Some(texture) => {
+            let [w, h] = texture.size();
+            ui.painter().add(
+                egui::epaint::RectShape::filled(picture, top, Color32::WHITE)
+                    .with_texture(texture.id(), cover_uv(picture.size(), w as f32, h as f32)),
+            );
+        }
+        None => {
+            ui.painter().rect_filled(picture, top, tokens::LANE);
+            let icon = Rect::from_center_size(picture.center(), Vec2::splat(22.0));
+            let _ = icons::paint(ui.painter(), icon, "media", tokens::FAINT);
+        }
+    }
+    let text = picture.left_bottom() + Vec2::new(14.0, 12.0);
     ui.painter().text(
-        rect.min + Vec2::new(16.0, 18.0),
+        text,
         Align2::LEFT_TOP,
         &project.name,
-        FontId::proportional(15.0),
+        FontId::proportional(14.0),
         tokens::TEXT,
     );
     let meta = if project.duration.0 > 0 {
@@ -826,7 +866,7 @@ fn project_card(ui: &mut Ui, project: &ListedProject) -> bool {
         modified_label(project.modified)
     };
     ui.painter().text(
-        rect.min + Vec2::new(16.0, 46.0),
+        text + Vec2::new(0.0, 22.0),
         Align2::LEFT_TOP,
         meta,
         FontId::proportional(12.0),
@@ -7176,76 +7216,13 @@ fn paint_lane(
     }
 }
 
-/// The Cover box in the bare column beside the main lane: a pencil and the
-/// word Cover in a dashed square, with the Later badge under it. It picks
-/// no cover yet; a click says so.
-fn paint_cover(shell: &mut Shell, ui: &Ui, row: Rect) {
-    const SIDE: f32 = 52.0;
-    const BADGE_GAP: f32 = 4.0;
-    const BADGE: f32 = 16.0;
+/// The Cover box in the bare column beside the main lane.
+fn paint_cover(shell: &Shell, ui: &Ui, row: Rect) {
     let column = Rect::from_x_y_ranges(
         egui::Rangef::new(head_rect(row).right(), row.left()),
         row.y_range(),
     );
-    let side = SIDE
-        .min(column.height() - BADGE_GAP - BADGE - 8.0)
-        .max(28.0);
-    let block = side + BADGE_GAP + BADGE;
-    let card = Rect::from_center_size(
-        Pos2::new(column.center().x, column.center().y - (block - side) / 2.0),
-        Vec2::splat(side),
-    );
-    let response = ui.interact(card, ui.scope_id().with("cover"), Sense::click());
-    let painter = ui.painter();
-    let fill = if response.hovered() {
-        tokens::DIALOG_HEAD
-    } else {
-        tokens::LANE_LINE
-    };
-    painter.rect_filled(card, CornerRadius::same(6), fill);
-    let dash = egui::Stroke::new(1.0, tokens::FAINT);
-    let inner = card.shrink(6.0);
-    for (from, to) in [
-        (
-            Pos2::new(inner.left(), card.top()),
-            Pos2::new(inner.right(), card.top()),
-        ),
-        (
-            Pos2::new(inner.left(), card.bottom()),
-            Pos2::new(inner.right(), card.bottom()),
-        ),
-        (
-            Pos2::new(card.left(), inner.top()),
-            Pos2::new(card.left(), inner.bottom()),
-        ),
-        (
-            Pos2::new(card.right(), inner.top()),
-            Pos2::new(card.right(), inner.bottom()),
-        ),
-    ] {
-        painter.extend(egui::Shape::dashed_line(&[from, to], dash, 3.0, 2.0));
-    }
-    let icon = Rect::from_center_size(
-        Pos2::new(card.center().x, card.top() + side * 0.36),
-        Vec2::splat(14.0),
-    );
-    let _ = icons::paint(painter, icon, "editText", tokens::TEXT);
-    painter.text(
-        Pos2::new(card.center().x, card.top() + side * 0.72),
-        Align2::CENTER_CENTER,
-        "Cover",
-        FontId::proportional(11.0),
-        tokens::TEXT,
-    );
-    crate::menu::paint_later_badge(
-        ui.ctx(),
-        painter,
-        Pos2::new(card.center().x, card.bottom() + BADGE_GAP + BADGE / 2.0),
-    );
-    if response.clicked() {
-        shell.set_notice("Cover is not built yet".to_owned());
-    }
-    response.on_hover_text("Pick the project's cover");
+    cover::paint_box(shell, ui, column);
 }
 
 /// The lane's kind as an icon at the head's left. Its name is not written
@@ -9685,6 +9662,12 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
         Picker::StudioClip => {
             shell.load_studio_clip(path);
             view.studio.use_clip();
+            Ok(())
+        }
+        Picker::Cover => {
+            if let Some(dialog) = view.cover.as_mut() {
+                dialog.picked(path);
+            }
             Ok(())
         }
         Picker::SaveLog => Shell::export_log(&path).map(|()| {
@@ -16802,8 +16785,7 @@ mod tests {
         assert!(!lane_fill_at(cover), "the cover column takes no lane fill");
         assert!(lane_fill_at(head), "the head keeps its lane fill");
         let cover = text_pos(&output, "Cover").expect("the Cover box");
-        let later = text_pos(&output, "Later").expect("its Later badge");
-        assert!(later.y > cover.y, "the badge sits under the box");
+        assert!(text_pos(&output, "Later").is_none(), "the box is built");
         assert!(
             cover.x < at.x && cover.x > head.x,
             "the box is in the column"
@@ -17483,6 +17465,178 @@ mod tests {
             .rev()
             .find_map(|clipped| shape_pos(&clipped.shape, wanted))
             .map(|pos| pos + Vec2::new(4.0, 4.0))
+    }
+
+    /// Wait for the cover job to land.
+    fn land_cover(shell: &mut Shell) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while shell.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(shell.job().is_none(), "the cover job did not finish");
+    }
+
+    /// A project of one blue clip two seconds long on a 64 by 32 canvas.
+    fn blue_project(name: &str) -> (Shell, std::path::PathBuf) {
+        let temp =
+            std::env::temp_dir().join(format!("cutlass-cover-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 64;
+        draft.canvas_config.height = 32;
+        draft
+            .materials
+            .material_colors
+            .push(cutlass_model::MaterialColorConfig {
+                id: "color".into(),
+                is_color_clip: true,
+                solid_color: "0xFF336699".to_owned(),
+                ..cutlass_model::MaterialColorConfig::default()
+            });
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "blue",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        draft.duration = Micros(2_000_000);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        (shell, temp)
+    }
+
+    #[test]
+    fn the_cover_box_opens_the_dialog_and_save_makes_the_frame_the_cover() {
+        let (mut shell, temp) = blue_project("frame");
+        shell.seek(Micros(500_000));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            let event = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            [
+                vec![egui::Event::PointerMoved(pos), event(true)],
+                vec![event(false)],
+            ]
+        };
+        let press = |shell: &mut Shell, view: &mut ViewState, label: &str| {
+            let output = frame(shell, view, Vec::new());
+            let at = last_text_pos(&output, label).unwrap_or_else(|| panic!("no {label}"));
+            for events in click(at) {
+                frame(shell, view, events);
+            }
+        };
+        // The box beside the main lane says Cover, with no Later badge.
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(text_pos(&output, "Later").is_none());
+        press(&mut shell, &mut view, "Cover");
+        assert!(view.cover.is_some());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        for label in [
+            "Select a cover",
+            "Select from video",
+            "Local",
+            "Save",
+            "Cancel",
+        ] {
+            assert!(text_pos(&output, label).is_some(), "{label}");
+        }
+        // Cancel leaves no cover and the playhead where it was.
+        press(&mut shell, &mut view, "Cancel");
+        assert!(view.cover.is_none());
+        assert_eq!(shell.cover(), None);
+        assert_eq!(shell.playhead(), Micros(500_000));
+
+        press(&mut shell, &mut view, "Cover");
+        press(&mut shell, &mut view, "Save");
+        assert!(view.cover.is_none());
+        land_cover(&mut shell);
+        assert_eq!(
+            shell.cover(),
+            Some(&cutlass_model::Cover::Frame {
+                time: Micros(500_000)
+            })
+        );
+        assert!(temp.join(cutlass_model::COVER_FILE).is_file());
+        // The box now shows the cover, under the word.
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(text_pos(&output, "Cover").is_some());
+    }
+
+    #[test]
+    fn the_local_tab_takes_a_picture_from_the_picker_and_saves_it() {
+        let (mut shell, temp) = blue_project("local");
+        let png = temp.join("poster.png");
+        image::RgbaImage::from_pixel(40, 20, image::Rgba([0x33, 0x66, 0x99, 255]))
+            .save(&png)
+            .unwrap();
+        let mut view = ViewState::new();
+        view.cover = Some(cover::CoverDialog::open(&shell));
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        frame(&mut shell, &mut view);
+        view.dialogs
+            .finish_for_test(Picker::Cover, Some(png.clone()));
+        frame(&mut shell, &mut view);
+        let output = frame(&mut shell, &mut view);
+        assert!(text_pos(&output, "poster.png").is_some());
+        assert!(text_pos(&output, "Choose picture").is_some());
+        let save = last_text_pos(&output, "Save").unwrap();
+        for pressed in [true, false] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events: vec![
+                        egui::Event::PointerMoved(save),
+                        egui::Event::PointerButton {
+                            pos: save,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+        }
+        land_cover(&mut shell);
+        assert_eq!(
+            shell.cover(),
+            Some(&cutlass_model::Cover::Image {
+                path: png.display().to_string()
+            })
+        );
     }
 
     #[test]

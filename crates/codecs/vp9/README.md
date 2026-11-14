@@ -175,16 +175,23 @@ threads; one core is the fastest of five, pinned with `taskset`.
 
 | Stream | Threads | Cutlass | FFmpeg `vp9` | Ratio | Memory (Cutlass / FFmpeg) |
 | --- | --- | ---: | ---: | ---: | --- |
-| 4:2:0 | 1 core | 1.01 s | 0.96 s | 1.05 | |
-| 4:2:0 | 4 | 0.44 s | 0.45 s | 0.99 | 59 MB / 57 MB |
-| 4:4:4 | 1 core | 1.96 s | 1.91 s | 1.03 | |
-| 4:4:4 | 4 | 0.88 s | 0.92 s | 0.95 | 80 MB / 78 MB |
+| 4:2:0 | 1 core | 1.11 s | 1.02 s | 1.09 | |
+| 4:2:0 | 4 | 0.48 s | 0.49 s | 0.99 | 60 MB / 57 MB |
+| 4:4:4 | 1 core | 2.01 s | 1.90 s | 1.06 | |
+| 4:4:4 | 4 | 0.78 s | 0.86 s | 0.91 | 80 MB / 78 MB |
 
-On four threads Cutlass is ahead of FFmpeg on both streams (it won 7 of
-the 9 runs on 4:4:4 and 6 of 9 on 4:2:0); on one core it is within 5%.
-(The 4:4:4 stream started at 38.8 s on one core.) What moved the decoder
-most recently:
+On four threads Cutlass is ahead of FFmpeg on both streams (it won all 9
+runs on 4:4:4 and 5 of 9 on 4:2:0; the run before, 7 and 8 of 9); on
+one core it is 5 to 9% behind, by medians of ten runs. (The 4:4:4
+stream started at 38.8 s on one core.) What moved the decoder most
+recently:
 
+- Horizontal loop filter edges go through the filter two at a time, side
+  by side in 256-bit vectors (the filter's arithmetic written once over
+  the vector width); a strip's edges first, then its inner ones, which is
+  libvpx's order in every column. Vertical edges paired 16 rows apart
+  were slower (one 15-tap group sends all four down the long path) and
+  are left as they were.
 - The coefficient loop tops the bool decoder's window up once a token,
   so its end-of-block, zero, one and sign reads skip their refill check
   (2% fewer instructions), and runs as a function of its own.

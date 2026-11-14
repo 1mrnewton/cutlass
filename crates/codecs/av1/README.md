@@ -240,37 +240,58 @@ same samples. Before the row copy, `Av1Decoder` packed each shown picture one
 sample at a time (1.16 GB on this file): 46.8G instructions against 28.5G
 after, and 0.67 s against FFmpeg's 0.52 s in the same harness.
 
-**Decode, 4K, `Av1Core`.** Two 4K 8-bit clips of 240 frames, `av1bench`
-against `ffmpeg -c:v libdav1d -threads N -f null`, whole-process wall time,
-median of 11 to 21 runs taken in turn (13 November 2026, commit `67cc080d` of
-branch `av1`, release build with a profile from the fixtures, not the clips):
-
-| Clip | Threads | Cutlass | FFmpeg (`libdav1d`) |
-| --- | ---: | ---: | ---: |
-| CDEF on | 1 | 2453.9 ms | 2583.5 ms |
-| Deblocking only | 1 | 1893.8 ms | 1918.3 ms |
-| CDEF on | 18 | 312.3 ms | 321.9 ms |
-| Deblocking only | 18 | 284.1 ms | 333.1 ms |
-
-The decoder is faster than libdav1d, which uses hand-written assembly, on one
-thread and on 18 on both clips, with the same output.
-
-**Decode, one thread, 8 and 10 bits.** 240 frames of 1920×1080 from an iPhone
+**Decode, `Av1Core`, five clips.** Measured on 14 November 2026 at commit
+`3c8dc585`, same machine, rustc 1.100.0, against FFmpeg 8.1.1 as Homebrew
+builds it. `av1bench <clip> <threads>`, built as a release is (the fixtures'
+profile from `scripts/pgo_profile.py`, through `scripts/pgo.py`), against
+[`scripts/ffmpeg_decode.c`](../../../scripts/ffmpeg_decode.c) decoding the
+same IVF file with libdav1d through libavcodec. Each side is a whole process
+under `/usr/bin/time -l`, the two run one after the other. Both decoders
+produced the same bytes on all five clips, with Cutlass on 1 thread and on 18.
+The clips: the two 4K 8-bit clips of 240 frames measured before, an 8-bit
+1920×1080 clip of 373 frames, and 240 frames of 1920×1080 from an iPhone
 HDR clip, written by FFmpeg with `-c:v libsvtav1 -preset 8 -crf 35` once as
-`yuv420p` and once as `yuv420p10le`; `av1bench <clip> 1` against
-`ffmpeg -threads 1 -c:v libdav1d -f null`, whole-process cycle counts from
-`/usr/bin/time -l`, the least of 5 to 9 runs taken in turn (13 November 2026,
-`cargo build --release`, no profile). Both decoders produced the same bytes.
+`yuv420p` and once as `yuv420p10le`.
 
-| Clip | Cutlass | FFmpeg (`libdav1d`) |
-| --- | ---: | ---: |
-| 8-bit | 3.251G cycles | 3.111G cycles |
-| 10-bit | 4.668G cycles | 3.699G cycles |
+One thread, processor cycles (median of 7 runs):
 
-On one thread without a profile the decoder is 4% behind libdav1d at 8 bits
-and 26% behind at 10 bits on these clips. The same day's work took the 10-bit
-clip from 5.063G cycles (a motion compensation kernel for 10 and 12 bits) and
-the 8-bit clip from 3.356G (a Wiener kernel).
+| Clip | Cutlass | FFmpeg (`libdav1d`) | Cutlass ÷ FFmpeg |
+| --- | ---: | ---: | ---: |
+| 4K, CDEF on | 10.694G | 11.064G | 0.97 |
+| 4K, deblocking only | 8.119G | 7.953G | 1.02 |
+| 1080p, 373 frames | 5.075G | 4.754G | 1.07 |
+| 1080p iPhone, 8-bit | 3.018G | 2.886G | 1.05 |
+| 1080p iPhone, 10-bit | 4.821G | 3.558G | 1.35 |
+
+18 threads, wall time and processor time (median of 9 runs):
+
+| Clip | Cutlass wall | FFmpeg wall | Cutlass CPU | FFmpeg CPU |
+| --- | ---: | ---: | ---: | ---: |
+| 4K, CDEF on | 0.32 s | 0.31 s | 4.58 s | 4.54 s |
+| 4K, deblocking only | 0.27 s | 0.31 s | 3.73 s | 4.46 s |
+| 1080p, 373 frames | 0.30 s | 0.48 s | 1.68 s | 1.70 s |
+| 1080p iPhone, 8-bit | 0.11 s | 0.18 s | 1.10 s | 1.05 s |
+| 1080p iPhone, 10-bit | 0.21 s | 0.27 s | 1.84 s | 1.35 s |
+
+On one thread the decoder takes 3% fewer cycles than libdav1d, which uses
+hand-written assembly, on one 4K clip, and is 2% behind on the other, 5 to 7%
+behind on 8-bit 1080p and 35% behind at 10 bits. On 18 threads it finishes
+sooner on four of the five clips and is level on the fifth. The threaded run
+was taken with other work on the machine (load average 7 to 8),
+`/usr/bin/time` reports hundredths of a second, and the FFmpeg process takes
+about 16 ms to start where `av1bench` takes about 2 ms.
+
+On 13 November, at commit `67cc080d` of branch `av1` with rustc 1.99.1 and a
+profile made that day, the decoder was ahead of the `ffmpeg` command on both
+4K clips on one thread (1893.8 ms against 1918.3 ms on the deblocking-only
+clip). It is not ahead on that clip today.
+
+The profile helps 8 bits and costs 10. Built with `cargo build --release` and
+no profile, the 8-bit iPhone clip took 3.154G cycles (3.098G with the
+profile) and the 10-bit one 4.619G (4.836G with it), medians of 5 runs the
+same day, where libdav1d took 2.893G and 3.584G. The fixtures the profile is
+made from decode about 44 million luma samples of 8-bit 4:2:0 and 0.1 million of
+10-bit 4:2:0, which is the likely reason; that has not been tested.
 
 **Decode, x86-64.** Not measured on x86-64 hardware. The same 8-bit clip
 decoded by the `x86_64-apple-darwin` build under Rosetta 2 took 2.1 to 2.4 s
@@ -314,7 +335,8 @@ Decoder:
 - At 10 and 12 bits the motion compensation of blocks eight wide and up has
   a kernel; CDEF runs on the 16-bit kernel or on lanes; the inverse
   transform, loop restoration, film grain and super resolution run on the
-  decoder's loops. One thread is 26% behind libdav1d at 10 bits (see above).
+  decoder's loops. One thread is 29% behind libdav1d at 10 bits without a
+  profile and 35% behind with the release's (see above).
 - Film grain and super resolution have no vector kernel at any depth; the
   Wiener filter has one at 8 bits, the self-guided filter none.
 

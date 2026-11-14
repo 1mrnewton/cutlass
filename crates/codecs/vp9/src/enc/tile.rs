@@ -1352,7 +1352,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 if v == mv || scored.iter().any(|(_, o)| o.refs == b.refs && o.mv == v) {
                     continue;
                 }
-                if let Some(d) = if s.speed <= 5 {
+                if let Some(d) = if s.speed <= 6 {
                     self.sad_sub_exact(x, y, w, h, v)
                 } else {
                     self.sad_sub(x, y, w, h, v)
@@ -1742,7 +1742,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             } else {
                 &[4, 2]
             };
-            let exact = s.speed <= 5;
+            let exact = s.speed <= 6;
             for &step in steps {
                 let center = mv;
                 let try_at = |t: &mut Self, dr: i16, dc: i16, best: &mut (u64, Mv)| -> u64 {
@@ -3872,7 +3872,7 @@ fn search_in(
         step /= 2;
     }
     // Every whole sample within two of the diamond's choice.
-    if s.speed <= 5 {
+    if s.speed <= 6 {
         let c = best;
         for dr in -2..=2 {
             for dc in -2..=2 {

@@ -331,8 +331,9 @@ impl LoopbackHttp {
     }
 }
 
-impl ChatTransport for LoopbackHttp {
-    fn post(&mut self, body: &str) -> Result<String, ModelError> {
+impl LoopbackHttp {
+    /// Send one request for `path` with `body`, if any, and read the answer.
+    fn exchange(&self, method: &str, path: &str, body: &str) -> Result<String, ModelError> {
         let address = (self.host.as_str(), self.port)
             .to_socket_addrs()
             .map_err(|error| self.unreachable(&error))?
@@ -345,8 +346,7 @@ impl ChatTransport for LoopbackHttp {
             .and_then(|()| stream.set_write_timeout(Some(self.timeout)))
             .map_err(|error| self.unreachable(&error))?;
         let head = format!(
-            "POST {} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            self.path,
+            "{method} {path} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             self.host,
             self.port,
             body.len()
@@ -357,6 +357,37 @@ impl ChatTransport for LoopbackHttp {
             .and_then(|()| stream.flush())
             .map_err(|error| self.unreachable(&error))?;
         read_response(BufReader::new(stream))
+    }
+
+    /// The models the runner has, by the names it takes, from its
+    /// `/v1/models` beside the chat address (Ollama, llama.cpp's server and
+    /// LM Studio all answer it).
+    pub fn models(&self) -> Result<Vec<String>, ModelError> {
+        let path = self.path.strip_suffix("/chat/completions").map_or_else(
+            || "/v1/models".to_owned(),
+            |base| format!("{base}/models"),
+        );
+        let reply = self.exchange("GET", &path, "")?;
+        let value: Value = serde_json::from_str(&reply).map_err(|error| {
+            ModelError::Inner(format!("the model list is not JSON: {error}"))
+        })?;
+        let mut names: Vec<String> = value
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|model| model.get("id").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect();
+        names.sort();
+        names.dedup();
+        Ok(names)
+    }
+}
+
+impl ChatTransport for LoopbackHttp {
+    fn post(&mut self, body: &str) -> Result<String, ModelError> {
+        self.exchange("POST", &self.path, body)
     }
 }
 
@@ -683,5 +714,39 @@ mod tests {
         let system = body["messages"][0]["content"].as_str().unwrap();
         assert!(system.starts_with(super::SYSTEM_PROMPT), "{system}");
         assert!(system.ends_with("\n\nExtra."), "{system}");
+    }
+
+    #[test]
+    fn the_runner_lists_its_models() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut first = String::new();
+            reader.read_line(&mut first).unwrap();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+            }
+            let answer = r#"{"object":"list","data":[{"id":"qwen3.8:27b"},{"id":"gemma4:latest"}]}"#;
+            let mut stream = stream;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{answer}",
+                answer.len()
+            )
+            .unwrap();
+            first
+        });
+        let transport =
+            LoopbackHttp::new(&format!("http://127.0.0.1:{port}/v1/chat/completions")).unwrap();
+        let models = transport.models().unwrap();
+        assert_eq!(models, ["gemma4:latest", "qwen3.8:27b"]);
+        let first = server.join().unwrap();
+        assert!(first.starts_with("GET /v1/models HTTP/1.1"), "{first}");
     }
 }

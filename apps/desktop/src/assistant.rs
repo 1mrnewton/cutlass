@@ -284,13 +284,24 @@ impl Assistant {
                             }
                             self.history = messages;
                         }
-                        Err(error) => self.entries.push(Entry::Notice(error)),
+                        Err(error) => self.entries.push(Entry::Notice(explain(error))),
                     }
                     return false;
                 }
             }
         }
     }
+}
+
+/// A turn's error, with what to do when the server lacks the model.
+fn explain(error: String) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("not found") && lower.contains("model") {
+        return format!(
+            "{error}. Pick a model the server has with Find models in Settings → Assistant."
+        );
+    }
+    error
 }
 
 /// The model, stopped when the user stops the turn; its words between tool

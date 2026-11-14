@@ -193,6 +193,8 @@ pub struct ViewState {
     server_args: std::collections::HashMap<usize, String>,
     /// The assistant's notes as typed, while the settings window is open.
     notes: Option<String>,
+    /// The models the local runner listed when asked, or why it did not.
+    local_models: Option<Result<Vec<String>, String>>,
     /// A settings change waiting for the user to allow what it turns on.
     approval: Option<Approval>,
     /// The Linkage settings dialog is open, with the kinds as ticked so far.
@@ -324,6 +326,7 @@ impl Default for ViewState {
             recording: None,
             server_args: std::collections::HashMap::new(),
             notes: None,
+            local_models: None,
             approval: None,
             linkage_kinds: None,
             export: ExportRequest::default(),
@@ -1677,6 +1680,7 @@ fn settings_window(
                             &mut settings,
                             &mut view.server_args,
                             notes,
+                            &mut view.local_models,
                             &mut add_folder,
                         );
                         if notes_changed && let Err(error) = shell.set_assistant_notes(notes) {
@@ -1743,6 +1747,7 @@ fn settings_window(
         view.recording = None;
         view.server_args.clear();
         view.notes = None;
+        view.local_models = None;
     }
 }
 
@@ -1905,6 +1910,7 @@ fn assistant_settings(
     settings: &mut cutlass_settings::Settings,
     server_args: &mut std::collections::HashMap<usize, String>,
     notes: &mut String,
+    local_models: &mut Option<Result<Vec<String>, String>>,
     add_folder: &mut bool,
 ) -> bool {
     use cutlass_settings::McpServer;
@@ -1922,7 +1928,42 @@ fn assistant_settings(
                 .hint(cutlass_settings::DEFAULT_LOCAL_NAME)
                 .width(180.0)
                 .show(ui);
+            if ui
+                .add(ui::Button::new("Find models").text_size(12.0))
+                .clicked()
+            {
+                *local_models = Some(find_local_models(&settings.model.local_url));
+            }
         });
+        match local_models {
+            Some(Ok(models)) if models.is_empty() => {
+                ui.label(
+                    RichText::new(
+                        "The server has no models yet. With Ollama, run: ollama pull qwen3",
+                    )
+                    .size(11.0)
+                    .color(tokens::FAINT),
+                );
+            }
+            Some(Ok(models)) => {
+                ui.horizontal_wrapped(|ui| {
+                    for model in models.iter() {
+                        let chosen = settings.model.local_name == *model;
+                        if ui.add(ui::Choice::new(chosen, model)).clicked() {
+                            settings.model.local_name.clone_from(model);
+                        }
+                    }
+                });
+            }
+            Some(Err(error)) => {
+                ui.label(
+                    RichText::new(error.as_str())
+                        .size(11.0)
+                        .color(tokens::FAINT),
+                );
+            }
+            None => {}
+        }
         ui.label(
             RichText::new("A chat server on this computer, such as Ollama or llama.cpp.")
                 .size(11.0)
@@ -2044,6 +2085,14 @@ fn assistant_settings(
     }
     *add_folder = ui.add(ui::Button::new("Add folder…")).clicked();
     notes_changed
+}
+
+/// The models the chat server at `url` lists, asked with a short wait.
+fn find_local_models(url: &str) -> Result<Vec<String>, String> {
+    cutlass_agent::LoopbackHttp::new(url)
+        .map(|server| server.with_timeout(std::time::Duration::from_secs(3)))
+        .and_then(|server| server.models())
+        .map_err(|error| error.to_string())
 }
 
 fn settings_heading(ui: &mut Ui, text: &str) {

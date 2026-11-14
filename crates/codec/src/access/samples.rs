@@ -150,3 +150,30 @@ impl fmt::Debug for Samples {
         fmt::Debug::fmt(&**self, f)
     }
 }
+
+impl<'a> IntoIterator for &'a Samples {
+    type Item = &'a u8;
+    type IntoIter = core::slice::Iter<'a, u8>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Samples {
+    type Item = &'a mut u8;
+    type IntoIter = core::slice::IterMut<'a, u8>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+impl IntoIterator for Samples {
+    type Item = u8;
+    type IntoIter = std::vec::IntoIter<u8>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_vec().into_iter()
+    }
+}

@@ -458,6 +458,8 @@ enum Points<'a> {
     },
     /// Each is written out as an x and a y.
     Written,
+    /// Each is the number of a point of its glyph's outline.
+    Numbered,
 }
 
 /// What an attaching machine does on reading one glyph in one state.
@@ -525,7 +527,27 @@ impl KernAttach<'_> {
                 let number = |at: usize| i16_at(self.actions, action * 8 + at).ok().map(i32::from);
                 Some((number(0)? - number(4)?, number(2)? - number(6)?))
             }
+            // The points are in the outlines: see `point_numbers`.
+            Points::Numbered => None,
         }
+    }
+
+    /// The points of their outlines that `action` sets one on the other,
+    /// the remembered glyph's and then the glyph's, when the pass goes by
+    /// numbered points: the glyph moves by how far its point is from the
+    /// remembered glyph's. `None` when the pass goes by anchors or by
+    /// places written out, which [`Self::offset`] reads, or does not hold
+    /// the action.
+    #[must_use]
+    pub fn point_numbers(&self, action: u16) -> Option<(u16, u16)> {
+        if !matches!(self.points, Points::Numbered) {
+            return None;
+        }
+        let at = usize::from(action) * 4;
+        Some((
+            u16_at(self.actions, at).ok()?,
+            u16_at(self.actions, at + 2).ok()?,
+        ))
     }
 }
 
@@ -781,7 +803,7 @@ fn attach<'a>(
             }
         }
         2 => Points::Written,
-        // Points of the outline, by number: not read.
+        0 => Points::Numbered,
         _ => return Err(FontError::Unsupported),
     };
     Ok(KernAttach {
@@ -796,7 +818,7 @@ fn attach<'a>(
 mod tests {
     use super::{KERN_CLASS_DELETED, KERN_CLASS_END, KERN_CLASS_OTHER, KernPass, KernStep};
     use crate::fixture::{boxed, font};
-    use crate::fixture_kern::{extended, indexed, kerned};
+    use crate::fixture_kern::{extended, indexed, kerned, pointed};
     use crate::read;
 
     const A: u16 = 1;
@@ -949,6 +971,66 @@ mod tests {
         }
         assert_eq!(sum, -160 * 200_000);
         assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    }
+
+    #[test]
+    fn a_mark_set_by_numbered_points_names_them_and_the_face_says_where_they_are() {
+        let bytes = pointed();
+        let face = read(&bytes).expect("face");
+        let passes = face.kerx_passes();
+        let [KernPass::Attach(attach)] = passes[..] else {
+            panic!("one attaching pass");
+        };
+        let marked = attach.step(0, attach.class(Some(A))).expect("step");
+        let set = attach
+            .step(marked.next, attach.class(Some(ACUTE)))
+            .expect("step");
+        let action = set.action.expect("action");
+        // The third point of the remembered glyph and the first of the
+        // glyph; this pass has no places of its own to give.
+        assert_eq!(attach.point_numbers(action), Some((2, 0)));
+        assert_eq!(attach.offset(action, A, ACUTE), None);
+        assert_eq!(attach.point_numbers(9), None);
+        // The corners of each box, in the order they are stored.
+        assert_eq!(face.point(A, 2), Some((550, 700)));
+        assert_eq!(face.point(ACUTE, 0), Some((-200, 750)));
+        assert_eq!(face.point(A, 4), None);
+        assert_eq!(face.point(900, 0), None);
+        // A pass by anchors or by written places names no points.
+        let extended = extended();
+        let extended = read(&extended).expect("face");
+        let KernPass::Attach(anchored) = extended.kerx_passes()[3] else {
+            panic!("an attaching machine");
+        };
+        assert_eq!(anchored.point_numbers(0), None);
+        // Cut at every length and with every byte turned, the table
+        // opens or does not, and answers or gives nothing.
+        let kerx = table_of(&bytes, b"kerx");
+        let ask = |table: Vec<u8>| {
+            let bytes = face_with(&[(b"kerx", table)]);
+            exercise(&bytes);
+            if let Ok(face) = read(&bytes) {
+                for pass in face.kerx_passes() {
+                    if let KernPass::Attach(attach) = pass {
+                        for action in [0, 1, 7, u16::MAX] {
+                            if let Some((first, second)) = attach.point_numbers(action) {
+                                let _ = (face.point(A, first), face.point(ACUTE, second));
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        for cut in 0..kerx.len() {
+            ask(kerx[..cut].to_vec());
+        }
+        for at in 0..kerx.len() {
+            for value in [0xFF, 0x00, 0x7F] {
+                let mut torn = kerx.clone();
+                torn[at] = value;
+                ask(torn);
+            }
+        }
     }
 
     /// One table of a face.

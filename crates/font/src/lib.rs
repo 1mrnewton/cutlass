@@ -505,6 +505,25 @@ impl<'a> Font<'a> {
         }
     }
 
+    /// Where point `number` of a TrueType glyph's outline is, in font
+    /// design units from the glyph's origin: Apple's tables may set one
+    /// glyph on another by a numbered point of each. `None` for a glyph
+    /// without that point, and in a face whose outlines have no numbered
+    /// points.
+    #[must_use]
+    pub fn point(&self, glyph_id: u16, number: u16) -> Option<(i32, i32)> {
+        if glyph_id >= self.num_glyphs {
+            return None;
+        }
+        let Outlines::TrueType(source) = &self.outlines else {
+            return None;
+        };
+        let (x, y) = ttf::point(source, glyph_id, number, &self.reading()).ok()??;
+        #[allow(clippy::cast_possible_truncation)]
+        let whole = |value: f32| value.is_finite().then(|| value.round() as i32);
+        Some((whole(x)?, whole(y)?))
+    }
+
     /// Whether the face is a variable one: a design that varies along
     /// axes such as weight and width.
     #[must_use]

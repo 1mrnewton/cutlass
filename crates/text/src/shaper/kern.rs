@@ -20,9 +20,19 @@ const STACK: usize = 8;
 /// The value that sets a glyph back on the line.
 const BACK_ON_THE_LINE: i32 = -0x8000;
 
+/// Where a numbered point of a glyph's outline is, in font units: the
+/// glyph, then the number.
+pub(crate) type PointOf<'p> = &'p dyn Fn(u16, u16) -> Option<(i32, i32)>;
+
 /// Apply `passes` in order to `glyphs`, which are in the order they are
-/// seen; `backward` when they read right to left.
-pub(crate) fn apply(passes: &[KernPass<'_>], glyphs: &mut [Glyph], backward: bool) {
+/// seen; `backward` when they read right to left. `point` gives the
+/// points a pass may set one glyph on another by.
+pub(crate) fn apply(
+    passes: &[KernPass<'_>],
+    glyphs: &mut [Glyph],
+    backward: bool,
+    point: PointOf<'_>,
+) {
     let mut chained = false;
     for pass in passes {
         // Before the first pass across the line, every glyph is hung on
@@ -55,7 +65,7 @@ pub(crate) fn apply(passes: &[KernPass<'_>], glyphs: &mut [Glyph], backward: boo
                 }
             }
             KernPass::Machine(machine) => run(machine, glyphs),
-            KernPass::Attach(table) => attach(table, glyphs, reverse),
+            KernPass::Attach(table) => attach(table, glyphs, reverse, point),
         }
         if reverse {
             glyphs.reverse();
@@ -96,7 +106,7 @@ pub(crate) fn apply(passes: &[KernPass<'_>], glyphs: &mut [Glyph], backward: boo
 /// Walk `glyphs` through a machine that sets glyphs on a remembered one.
 /// `reversed` when the glyphs were turned around for the pass, and will
 /// be turned back.
-fn attach(table: &KernAttach<'_>, glyphs: &mut [Glyph], reversed: bool) {
+fn attach(table: &KernAttach<'_>, glyphs: &mut [Glyph], reversed: bool, point: PointOf<'_>) {
     let mut marked: Option<usize> = None;
     let mut state = 0;
     let mut index = 0;
@@ -109,7 +119,13 @@ fn attach(table: &KernAttach<'_>, glyphs: &mut [Glyph], reversed: bool) {
         if let (Some(base), Some(action)) = (marked, step.action)
             && let Some(on) = glyphs.get(base).map(|glyph| glyph.id)
             && let Some(glyph) = glyphs.get_mut(index)
-            && let Some((x, y)) = table.offset(action, on, glyph.id)
+            && let Some((x, y)) = table.offset(action, on, glyph.id).or_else(|| {
+                // By a numbered point of each outline: the glyph's own
+                // goes where the remembered glyph's is.
+                let (of_marked, of_glyph) = table.point_numbers(action)?;
+                let (marked, own) = (point(on, of_marked)?, point(glyph.id, of_glyph)?);
+                Some((marked.0 - own.0, marked.1 - own.1))
+            })
         {
             glyph.x_offset = x;
             glyph.y_offset = y;

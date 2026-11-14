@@ -364,7 +364,9 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
     } else {
         &[]
     };
-    kern::apply(passes, &mut glyphs, backward);
+    kern::apply(passes, &mut glyphs, backward, &|glyph, number| {
+        font.point(glyph, number)
+    });
     if own_kerning && kern_table && passes.is_empty() && kerx.is_empty() && font.has_kern_table() {
         kern_pairs(font, &mut glyphs, backward);
     }
@@ -1357,6 +1359,20 @@ mod tests {
             "[4=0+555|1=1@-45,0+520|2=2@-35,0+565]"
         );
         assert_eq!(kerned(INDEXED, "AC"), "[1=0+600|4=1+600]");
+        // A mark set on its letter by a numbered point of each outline:
+        // the acute's lower left corner on the upper right of A, as
+        // Apple's account of the table has it. No face on a Mac uses
+        // this and neither reference bears it out: HarfBuzz 14.2 leaves
+        // such a mark where it was, and Core Text sets this one at the
+        // letter's origin.
+        const POINTED: &[u8] = include_bytes!("../../../font/fixtures/kerx-points.ttf");
+        assert_eq!(kerned(POINTED, "A\u{301}"), "[1=0+600|3=0@150,-50+0]");
+        assert_eq!(
+            kerned(POINTED, "BA\u{301}B"),
+            "[2=0+600|1=1+600|3=1@150,-50+0|2=4+600]"
+        );
+        // A letter the table does not remember leaves the mark alone.
+        assert_eq!(kerned(POINTED, "B\u{301}"), "[2=0+600|3=0+0]");
         // These tables know nothing of marks: a pair is two glyphs side
         // by side, so A and B with an acute between them are not kerned,
         // as in Core Text. HarfBuzz steps over the mark and kerns them.

@@ -285,6 +285,25 @@ pub(crate) fn extended() -> Vec<u8> {
     font(&glyphs(), &MAP, &[(b"kerx", kerx), (b"ankr", anchors())])
 }
 
+/// A face whose `kerx` table sets the acute on `A` by a numbered point
+/// of each outline: the acute's first point, its lower left corner, on
+/// the third of `A`, its upper right.
+pub(crate) fn pointed() -> Vec<u8> {
+    // Classes: 4 is A, 5 is the acute. State 2 remembers an A.
+    let attach = word_machine(
+        &[(A, 4), (ACUTE, 5)],
+        &[[0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 1, 2]],
+        &[(0, 0, NONE), (2, MARK, NONE), (2, 0, 0)],
+        // Points of the outlines, by number.
+        0,
+        &be(&[2, 0]),
+    );
+    let mut kerx = be(&[2, 0]);
+    kerx.extend(long(&[1]));
+    kerx.extend(kerx_subtable(4, &attach));
+    font(&glyphs(), &MAP, &[(b"kerx", kerx)])
+}
+
 /// A lookup of single glyphs whose values are four bytes each.
 fn wide_lookup(pairs: &[(u16, u32)]) -> Vec<u8> {
     let mut table = be(&[6, 6, u16::try_from(pairs.len()).expect("count"), 0, 0, 0]);
@@ -472,11 +491,12 @@ pub(crate) fn thai_mac() -> Vec<u8> {
 /// A fixture's file name and what builds it.
 type Built = (&'static str, fn() -> Vec<u8>);
 
-const FILES: [Built; 4] = [
+const FILES: [Built; 5] = [
     ("kern-machine.ttf", kerned),
     ("kerx.ttf", extended),
     ("kern-stuck.ttf", stuck),
     ("kerx-indexed.ttf", indexed),
+    ("kerx-points.ttf", pointed),
 ];
 
 /// Fixtures with no kerning, kept and checked the same way.

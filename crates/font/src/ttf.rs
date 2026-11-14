@@ -145,6 +145,21 @@ pub(crate) fn outline(
     Ok(outline)
 }
 
+/// Where point `number` of `glyph_id` is, counting the points of its
+/// contours in the order they are stored and those of a glyph made of
+/// parts part after part, with the glyph placed as [`outline`] places it.
+/// `None` when the glyph has no such point.
+pub(crate) fn point(
+    source: &Source<'_>,
+    glyph_id: u16,
+    number: u16,
+    reading: &Reading<'_, '_>,
+) -> Result<Option<(f32, f32)>, FontError> {
+    let mut stack = Vec::new();
+    let Loaded { contours, left, .. } = flatten(source, glyph_id, reading, &mut stack)?;
+    Ok(point_at(&contours, number).map(|point| (point.x - left, point.y)))
+}
+
 /// How far `glyph_id` advances in a face set away from its default that
 /// has no table of advances for that: the distance between its edges,
 /// which move with its points.

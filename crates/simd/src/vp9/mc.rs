@@ -58,8 +58,8 @@ pub struct Block<'a> {
     pub src_stride: usize,
     pub w: usize,
     pub h: usize,
-    pub fx: Option<Filter>,
-    pub fy: Option<Filter>,
+    pub fx: Option<&'a Filter>,
+    pub fy: Option<&'a Filter>,
     pub avg: bool,
     /// Scratch for the rows filtered across before the filter down:
     /// [`TMP`] samples.

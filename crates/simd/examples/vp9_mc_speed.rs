@@ -32,8 +32,8 @@ fn main() {
                     src_stride: stride,
                     w,
                     h,
-                    fx,
-                    fy,
+                    fx: fx.as_ref(),
+                    fy: fy.as_ref(),
                     avg: false,
                     tmp: &mut tmp,
                 });

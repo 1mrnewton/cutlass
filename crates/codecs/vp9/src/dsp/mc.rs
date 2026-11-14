@@ -50,8 +50,8 @@ pub fn predict<P: Pixel>(
     avg: bool,
     scratch: &mut [u8],
 ) {
-    let fx = (mx != 0).then(|| filter.simd[mx]);
-    let fy = (my != 0).then(|| filter.simd[my]);
+    let fx = (mx != 0).then(|| &filter.simd[mx]);
+    let fy = (my != 0).then(|| &filter.simd[my]);
     if P::mc_fast(
         dst,
         dst_stride,

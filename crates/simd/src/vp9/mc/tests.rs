@@ -45,8 +45,8 @@ fn matches_the_scalar_twin() {
             src_stride: stride,
             w,
             h,
-            fx,
-            fy,
+            fx: fx.as_ref(),
+            fy: fy.as_ref(),
             avg,
             tmp: &mut tmp,
         });
@@ -59,8 +59,8 @@ fn matches_the_scalar_twin() {
             src_stride: stride,
             w,
             h,
-            fx,
-            fy,
+            fx: fx.as_ref(),
+            fy: fy.as_ref(),
             avg,
             tmp: &mut tmp,
         });

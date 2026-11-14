@@ -1,10 +1,10 @@
-//! One tile: the partition walk, mode info, motion vectors, coefficient
-//! tokens and reconstruction of each block, in one pass.
+//! The syntax of one tile: the partition walk, mode info, motion vectors
+//! and coefficient tokens of each block, into a [`TileSyntax`] that
+//! [`super::recon`] turns into samples.
 //!
 //! The order of the syntax follows libvpx `decode_partition`,
 //! `read_intra_frame_mode_info`, `read_inter_frame_mode_info`,
-//! `dec_find_mv_refs` and `decode_coefs`. Each block is predicted and its
-//! residual added straight into the frame as soon as it is read.
+//! `dec_find_mv_refs` and `decode_coefs`.
 
 use crate::geom::{
     self, BLOCK_4X4, BLOCK_4X8, BLOCK_8X4, BLOCK_8X8, BLOCK_64X64, BLOCK_INVALID,
@@ -21,16 +21,13 @@ use crate::tables::{
     NEIGHBORS_DEFAULT_16X16, NEIGHBORS_DEFAULT_32X32, NEIGHBORS_ROW_4X4, NEIGHBORS_ROW_8X8,
     NEIGHBORS_ROW_16X16, PARETO8, SCAN_COL_4X4, SCAN_COL_8X8, SCAN_COL_16X16, SCAN_DEFAULT_4X4,
     SCAN_DEFAULT_8X8, SCAN_DEFAULT_16X16, SCAN_DEFAULT_32X32, SCAN_ROW_4X4, SCAN_ROW_8X8,
-    SCAN_ROW_16X16, SUBPEL_FILTERS,
+    SCAN_ROW_16X16,
 };
 
 use super::bool::Bool;
 use super::ctx::{self, Nb};
-use super::frame::{Frame, Mv, MvRef};
-use crate::dsp::ipred::{self, Edges};
-use crate::dsp::itx::{self, Kind};
-use crate::dsp::mc;
-use crate::dsp::pixel::Pixel;
+use super::frame::{Mv, MvRef};
+use super::syntax::{BlockRec, TileSyntax, TxRec};
 
 const MV_LOW: i32 = -16_384;
 const MV_UPP: i32 = 16_383;
@@ -84,56 +81,10 @@ const MI_WH: [(usize, usize); 13] = [
     (8, 8),
 ];
 
-/// A reference picture with its scale relative to the frame.
-pub struct RefPic<'a, P> {
-    pub frame: &'a Frame<P>,
-    pub scale: Option<Scale>,
-}
-
-/// Fixed-point scale of a reference of another size (libvpx
-/// `scale_factors`).
-#[derive(Clone, Copy, Debug)]
-pub struct Scale {
-    pub x_fp: i32,
-    pub y_fp: i32,
-    pub x_step: i32,
-    pub y_step: i32,
-}
-
-impl Scale {
-    /// `None` for the same size; `Err` for a ratio VP9 does not allow.
-    pub fn between(rw: usize, rh: usize, w: usize, h: usize) -> Result<Option<Scale>, ()> {
-        if rw == 0 || rh == 0 || w == 0 || h == 0 {
-            return Err(());
-        }
-        if !(2 * w >= rw && 2 * h >= rh && w <= 16 * rw && h <= 16 * rh) {
-            return Err(());
-        }
-        let x_fp = ((rw << 14) / w) as i32;
-        let y_fp = ((rh << 14) / h) as i32;
-        if x_fp == 1 << 14 && y_fp == 1 << 14 {
-            return Ok(None);
-        }
-        Ok(Some(Scale {
-            x_fp,
-            y_fp,
-            x_step: sc(16, x_fp),
-            y_step: sc(16, y_fp),
-        }))
-    }
-}
-
-#[inline]
-fn sc(v: i32, fp: i32) -> i32 {
-    ((i64::from(v) * i64::from(fp)) >> 14) as i32
-}
-
 /// What every tile of a frame reads and never changes.
-pub struct Shared<'a, P> {
+pub struct Shared<'a> {
     pub h: &'a Header,
     pub fc: &'a FrameContext,
-    /// LAST, GOLDEN and ALTREF, as the header names them.
-    pub refs: [Option<RefPic<'a, P>>; 3],
     pub prev_mvs: Option<&'a [MvRef]>,
     pub last_seg: &'a [u8],
     pub levels: &'a lpf::Levels,
@@ -144,9 +95,11 @@ pub struct Shared<'a, P> {
     pub intra_frame: bool,
     pub part_probs: [[u8; 3]; 16],
     pub bd: u32,
-    pub max: i32,
     pub filter_on: bool,
     pub needs_grid: bool,
+    /// LAST, GOLDEN and ALTREF: 0 usable, 1 missing, 2 of a size the
+    /// frame cannot predict from.
+    pub ref_status: [u8; 3],
 }
 
 /// The loop filter's view of one 8×8 block, for chroma that is not 4:2:0.
@@ -160,10 +113,9 @@ pub struct LfMi {
     pub mode: u8,
 }
 
-/// What the tiles of a frame write: the picture, the motion and
+/// What the tiles of a frame write besides their syntax: the motion and
 /// segmentation maps, the above contexts and the loop filter masks.
-pub struct State<P> {
-    pub cur: Frame<P>,
+pub struct State {
     pub mvs: Vec<MvRef>,
     pub segmap: Vec<u8>,
     pub above: Vec<Nb>,
@@ -174,23 +126,24 @@ pub struct State<P> {
     pub counts: Counts,
 }
 
-/// The decoder of one tile.
-pub struct Tile<'s, 't, 'd, P> {
-    s: &'s Shared<'s, P>,
-    f: &'t mut State<P>,
+/// The parser of one superblock row of one tile.
+pub struct Tile<'s, 't, 'd> {
+    s: &'s Shared<'s>,
+    f: &'t mut State,
+    out: &'t mut TileSyntax,
     b: &'t mut Bool<'d>,
     col0: usize,
     col1: usize,
     left: [Nb; 8],
     left_part: [u8; 8],
     left_nz: [[u8; 16]; 3],
-    coef: [i32; 1024],
     /// Token energies by position; a position is always written before
     /// a later one reads it, so it is never cleared.
     cache: [u8; 1024],
-    emu: &'t mut Vec<P>,
     /// Whether a block read past its data or held a bad vector.
     pub corrupt: bool,
+    /// Whether a block used a reference of a size it cannot predict from.
+    pub unsupported: bool,
 }
 
 /// The state of the block being decoded.
@@ -216,30 +169,30 @@ struct Blk {
     seg_pred: bool,
 }
 
-impl<'s, 't, 'd, P: Pixel> Tile<'s, 't, 'd, P> {
-    /// The decoder of one superblock row of a tile whose columns are
-    /// `col0..col1`, reading from `b`.
+impl<'s, 't, 'd> Tile<'s, 't, 'd> {
+    /// The parser of one superblock row of a tile whose columns are
+    /// `col0..col1`, reading from `b` into `out`.
     pub fn new(
-        s: &'s Shared<'s, P>,
-        f: &'t mut State<P>,
+        s: &'s Shared<'s>,
+        f: &'t mut State,
+        out: &'t mut TileSyntax,
         b: &'t mut Bool<'d>,
-        emu: &'t mut Vec<P>,
         col0: usize,
         col1: usize,
     ) -> Self {
         Self {
             s,
             f,
+            out,
             b,
             col0,
             col1,
             left: [Nb::default(); 8],
             left_part: [0; 8],
             left_nz: [[0; 16]; 3],
-            coef: [0; 1024],
             cache: [0; 1024],
-            emu,
             corrupt: false,
+            unsupported: false,
         }
     }
 
@@ -256,6 +209,7 @@ impl<'s, 't, 'd, P: Pixel> Tile<'s, 't, 'd, P> {
         if self.b.overrun() {
             self.corrupt = true;
         }
+        self.out.end_row(mi_row >> 3);
     }
 
     // Partitions --------------------------------------------------------
@@ -393,20 +347,29 @@ impl<'s, 't, 'd, P: Pixel> Tile<'s, 't, 'd, P> {
                 self.f.mvs[at..at + b.x_mis].fill(r);
             }
         }
+        let coded = !b.skip;
         if b.skip {
             self.reset_nz(&b);
-        }
-        if b.refs[0] == INTRA_FRAME {
-            self.recon_intra(&b);
         } else {
-            self.predict_inter(&b);
-            if !b.skip {
-                let eobs = self.residual_inter(&b);
-                if eobs == 0 && bsize >= BLOCK_8X8 {
-                    b.skip = true;
-                }
+            let eobs = self.residual(&b);
+            if b.refs[0] != INTRA_FRAME && eobs == 0 && bsize >= BLOCK_8X8 {
+                b.skip = true;
             }
         }
+        self.out.blocks.push(BlockRec {
+            row: row as u16,
+            col: col as u16,
+            bsize,
+            coded,
+            tx: b.tx,
+            uv_tx: self.uv_tx(&b),
+            mode: b.mode,
+            bmode: b.bmode,
+            uv: b.uv,
+            interp: b.interp,
+            refs: b.refs,
+            bmv: b.bmv,
+        });
         // Leave the block for the contexts of the blocks after it.
         let nb = Nb {
             bsize,
@@ -749,6 +712,13 @@ impl<'s, 't, 'd, P: Pixel> Tile<'s, 't, 'd, P> {
             }
         }
         let compound = b.refs[1] > INTRA_FRAME;
+        for r in &b.refs[..1 + usize::from(compound)] {
+            match s.ref_status.get(usize::from(*r).wrapping_sub(1)).copied() {
+                Some(0) => {}
+                Some(2) => self.unsupported = true,
+                _ => self.corrupt = true,
+            }
+        }
         // The mode context from the first two candidates.
         let search = &MV_REF[usize::from(b.bsize)];
         let mut counter = 0i32;
@@ -1146,6 +1116,36 @@ impl<'s, 't, 'd, P: Pixel> Tile<'s, 't, 'd, P> {
         }
     }
 
+    /// Reads the coefficients of every tx block of a block, in the order
+    /// libvpx reads them; returns the sum of their ends of block.
+    fn residual(&mut self, b: &Blk) -> usize {
+        let intra = b.refs[0] == INTRA_FRAME;
+        let lossless = self.s.h.lossless;
+        let mut total = 0;
+        for plane in 0..3 {
+            let tx = if plane == 0 { b.tx } else { self.uv_tx(b) };
+            let (_, _, vw, vh) = self.visible(b, plane);
+            let step = 1usize << tx;
+            let mut r = 0;
+            while r < vh {
+                let mut c = 0;
+                while c < vw {
+                    let kind = if intra && plane == 0 && !lossless && tx != TX_32X32 {
+                        let mode = if b.bsize < BLOCK_8X8 { b.bmode[(r << 1) + c] } else { b.mode };
+                        geom::intra_tx_type(mode)
+                    } else {
+                        0
+                    };
+                    let (eob, _) = self.tx_coefs(b, plane, tx, kind, r, c, (vw, vh));
+                    total += eob;
+                    c += step;
+                }
+                r += step;
+            }
+        }
+        total
+    }
+
     /// The tx blocks of a plane inside the frame: (blocks wide, high).
     fn visible(&self, b: &Blk, plane: usize) -> (usize, usize, usize, usize) {
         let (ssx, ssy) = self.plane_ss(plane);
@@ -1185,7 +1185,14 @@ impl<'s, 't, 'd, P: Pixel> Tile<'s, 't, 'd, P> {
         let seg = usize::from(b.seg);
         let dq = if plane == 0 { h.y_dq[seg] } else { h.uv_dq[seg] };
         let inter = b.refs[0] != INTRA_FRAME;
+        let n_before = self.out.pos.len();
         let (eob, nz) = self.decode_coefs(tx, plane > 0, inter, dq, ctx, kind);
+        self.out.txs.push(TxRec {
+            eob: eob as u16,
+            n: (self.out.pos.len() - n_before) as u16,
+            nzr: nz.0 as u8,
+            nzc: nz.1 as u8,
+        });
         // Contexts, cleared past the edge of the frame.
         let on = u8::from(eob > 0);
         let (vw, vh) = vis;
@@ -1204,7 +1211,8 @@ impl<'s, 't, 'd, P: Pixel> Tile<'s, 't, 'd, P> {
         (eob, nz)
     }
 
-    /// libvpx `decode_coefs`, into `self.coef` transposed.
+    /// libvpx `decode_coefs`, into the syntax's coefficients: positions
+    /// transposed and values dequantized.
     fn decode_coefs(
         &mut self,
         tx: u8,
@@ -1231,7 +1239,8 @@ impl<'s, 't, 'd, P: Pixel> Tile<'s, 't, 'd, P> {
         // The decoder works on a copy in registers, written back at the end.
         let mut local = *self.b;
         let b = &mut local;
-        let coef = &mut self.coef;
+        let out_pos = &mut self.out.pos;
+        let out_val = &mut self.out.val;
         let counts = &mut self.f.counts;
         while c < max_eob {
             let mut band = usize::from(bands[c]);
@@ -1315,7 +1324,8 @@ impl<'s, 't, 'd, P: Pixel> Tile<'s, 't, 'd, P> {
             }
             let rc = usize::from(scan[c]);
             let (r, col) = (rc >> log2n, rc & mask);
-            coef[(col << log2n) | r] = if b.bit() { -v } else { v };
+            out_pos.push(((col << log2n) | r) as u16);
+            out_val.push(if b.bit() { -v } else { v });
             max_r = max_r.max(r);
             max_c = max_c.max(col);
             c += 1;
@@ -1326,242 +1336,6 @@ impl<'s, 't, 'd, P: Pixel> Tile<'s, 't, 'd, P> {
         }
         *self.b = local;
         (c, (max_r + 1, max_c + 1))
-    }
-
-    /// Adds the residual of one tx block at sample `(x, y)` of a plane.
-    #[allow(clippy::too_many_arguments)]
-    fn add_residual(&mut self, plane: usize, x: usize, y: usize, tx: u8, kind: u8, eob: usize, nz: (usize, usize)) {
-        if eob == 0 {
-            return;
-        }
-        let max = self.s.max;
-        let pl = &mut self.f.cur.planes[plane];
-        let stride = pl.stride;
-        let dst = &mut pl.data[y * stride + x..];
-        if self.s.h.lossless {
-            itx::wht_add(dst, stride, &mut self.coef, max);
-            return;
-        }
-        let (col, row) = match kind {
-            1 => (Kind::Adst, Kind::Dct),
-            2 => (Kind::Dct, Kind::Adst),
-            3 => (Kind::Adst, Kind::Adst),
-            _ => (Kind::Dct, Kind::Dct),
-        };
-        itx::add(dst, stride, &mut self.coef, usize::from(tx), col, row, eob, nz, max);
-    }
-
-    fn residual_inter(&mut self, b: &Blk) -> usize {
-        let mut total = 0;
-        for plane in 0..3 {
-            let tx = if plane == 0 { b.tx } else { self.uv_tx(b) };
-            let (ssx, ssy) = self.plane_ss(plane);
-            let (_, _, vw, vh) = self.visible(b, plane);
-            let step = 1usize << tx;
-            let x0 = (b.col * 8) >> ssx;
-            let y0 = (b.row * 8) >> ssy;
-            let mut r = 0;
-            while r < vh {
-                let mut c = 0;
-                while c < vw {
-                    let (eob, nz) = self.tx_coefs(b, plane, tx, 0, r, c, (vw, vh));
-                    total += eob;
-                    self.add_residual(plane, x0 + c * 4, y0 + r * 4, tx, 0, eob, nz);
-                    c += step;
-                }
-                r += step;
-            }
-        }
-        total
-    }
-
-    // Intra ---------------------------------------------------------------
-
-    fn recon_intra(&mut self, b: &Blk) {
-        let lossless = self.s.h.lossless;
-        for plane in 0..3 {
-            let tx = if plane == 0 { b.tx } else { self.uv_tx(b) };
-            let (ssx, ssy) = self.plane_ss(plane);
-            let (n4w, _, vw, vh) = self.visible(b, plane);
-            let step = 1usize << tx;
-            let x0 = (b.col * 8) >> ssx;
-            let y0 = (b.row * 8) >> ssy;
-            let mut r = 0;
-            while r < vh {
-                let mut c = 0;
-                while c < vw {
-                    let mode = if plane == 0 {
-                        if b.bsize < BLOCK_8X8 { b.bmode[(r << 1) + c] } else { b.mode }
-                    } else {
-                        b.uv
-                    };
-                    let have_above = r > 0 || b.row > 0;
-                    let have_left = c > 0 || b.col > self.col0;
-                    let have_right = c + step < n4w;
-                    let (x, y) = (x0 + c * 4, y0 + r * 4);
-                    self.predict_intra(plane, mode, tx, x, y, have_left, have_above, have_right);
-                    if !b.skip {
-                        let kind = if plane > 0 || lossless || tx == TX_32X32 {
-                            0
-                        } else {
-                            geom::intra_tx_type(mode)
-                        };
-                        let (eob, nz) = self.tx_coefs(b, plane, tx, kind, r, c, (vw, vh));
-                        self.add_residual(plane, x, y, tx, kind, eob, nz);
-                    }
-                    c += step;
-                }
-                r += step;
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn predict_intra(
-        &mut self,
-        plane: usize,
-        mode: u8,
-        tx: u8,
-        x: usize,
-        y: usize,
-        have_left: bool,
-        have_above: bool,
-        have_right: bool,
-    ) {
-        let bd = self.s.bd;
-        let base = 1i32 << (bd - 1);
-        let n = 4usize << tx;
-        let pl = &mut self.f.cur.planes[plane];
-        let stride = pl.stride;
-        let (fw, fh) = (pl.aw, pl.ah);
-        let mut e = Edges {
-            above: [P::new(base - 1); 64],
-            left: [P::new(base + 1); 32],
-            tl: P::new(base - 1),
-            have_above,
-            have_left,
-        };
-        let data = &pl.data;
-        if have_left {
-            let count = n.min(fh.saturating_sub(y)).max(1);
-            for i in 0..n {
-                e.left[i] = data[(y + i.min(count - 1)) * stride + x - 1];
-            }
-        }
-        if have_above {
-            let avail = if tx == 0 && have_right { 2 * n } else { n };
-            let count = avail.min(fw.saturating_sub(x)).max(1);
-            let row = (y - 1) * stride + x;
-            for i in 0..2 * n {
-                e.above[i] = data[row + i.min(count - 1)];
-            }
-            e.tl = if have_left { data[row - 1] } else { P::new(base + 1) };
-        }
-        ipred::predict(mode, n, &mut pl.data[y * stride + x..], stride, &e, bd);
-    }
-
-    // Inter ---------------------------------------------------------------
-
-    fn predict_inter(&mut self, b: &Blk) {
-        let nref = 1 + usize::from(b.refs[1] > INTRA_FRAME);
-        let filter = &SUBPEL_FILTERS[usize::from(b.interp).min(3)];
-        for plane in 0..3 {
-            let (ssx, ssy) = self.plane_ss(plane);
-            let x0 = (b.col * 8) >> ssx;
-            let y0 = (b.row * 8) >> ssy;
-            for r in 0..nref {
-                let slot = usize::from(b.refs[r]).saturating_sub(1).min(2);
-                if b.bsize < BLOCK_8X8 {
-                    let n4w = (b.bw * 2) >> ssx;
-                    let n4h = (b.bh * 2) >> ssy;
-                    let mut i = 0;
-                    for y in 0..n4h {
-                        for x in 0..n4w {
-                            let mv = split_mv(b, plane, i, r, ssx, ssy);
-                            i += 1;
-                            self.mc(slot, plane, (x0 + 4 * x, y0 + 4 * y), (4, 4), mv, (b.col * 8 + 4 * x, b.row * 8 + 4 * y), filter, r == 1);
-                        }
-                    }
-                } else {
-                    let mv = b.mv[r];
-                    let q = (i32::from(mv.row) * (2 >> ssy), i32::from(mv.col) * (2 >> ssx));
-                    let w = (b.bw * 8) >> ssx;
-                    let h = (b.bh * 8) >> ssy;
-                    self.mc(slot, plane, (x0, y0), (w, h), q, (b.col * 8, b.row * 8), filter, r == 1);
-                }
-            }
-        }
-    }
-
-    /// One prediction of a `w`×`h` block at `(x, y)` of a plane, with the
-    /// vector `(row, col)` in sixteenths of a sample of that plane. `luma`
-    /// is the luma position libvpx scales the vector's offset at.
-    #[allow(clippy::too_many_arguments)]
-    fn mc(
-        &mut self,
-        slot: usize,
-        plane: usize,
-        (x, y): (usize, usize),
-        (w, h): (usize, usize),
-        (mv_row, mv_col): (i32, i32),
-        (lx, ly): (usize, usize),
-        filter: &mc::Filter,
-        avg: bool,
-    ) {
-        let s = self.s;
-        let Some(rp) = s.refs[slot].as_ref() else {
-            self.corrupt = true;
-            return;
-        };
-        let src = &rp.frame.planes[plane];
-        let max = s.max;
-        let dst_pl = &mut self.f.cur.planes[plane];
-        let ds = dst_pl.stride;
-        let dst = &mut dst_pl.data[y * ds + x..];
-        let (rw, rh) = (src.w as i32, src.h as i32);
-        if let Some(sc_) = rp.scale {
-            // libvpx `dec_build_inter_predictors` for a scaled reference.
-            let col = sc(mv_col, sc_.x_fp) + (((i64::from(lx as i32) << 4) * i64::from(sc_.x_fp) >> 14) as i32 & 15);
-            let row = sc(mv_row, sc_.y_fp) + (((i64::from(ly as i32) << 4) * i64::from(sc_.y_fp) >> 14) as i32 & 15);
-            let x0 = sc(x as i32, sc_.x_fp) + (col >> 4);
-            let y0 = sc(y as i32, sc_.y_fp) + (row >> 4);
-            let data = &src.data;
-            let stride = src.stride;
-            let get = |xx: i32, yy: i32| -> P {
-                let xx = xx.clamp(0, rw - 1) as usize;
-                let yy = yy.clamp(0, rh - 1) as usize;
-                data[yy * stride + xx]
-            };
-            mc::predict_scaled(dst, ds, get, (w, h), (x0, y0), (col & 15, row & 15), (sc_.x_step, sc_.y_step), filter, max, avg);
-            return;
-        }
-        let mx = (mv_col & 15) as usize;
-        let my = (mv_row & 15) as usize;
-        let bx = x as i32 + (mv_col >> 4);
-        let by = y as i32 + (mv_row >> 4);
-        let (l, r) = if mx != 0 { (3, 4) } else { (0, 0) };
-        let (t, bo) = if my != 0 { (3, 4) } else { (0, 0) };
-        if bx - l >= 0 && by - t >= 0 && bx + w as i32 + r <= rw && by + h as i32 + bo <= rh {
-            let at = by as usize * src.stride + bx as usize;
-            mc::predict(dst, ds, &src.data, at, src.stride, (w, h), (mx, my), filter, max, avg);
-        } else {
-            // Edge emulation: the window held to the reference.
-            let ew = w + 7;
-            let eh = h + 7;
-            let emu = &mut *self.emu;
-            if emu.len() < ew * eh {
-                emu.resize(ew * eh, P::default());
-            }
-            for j in 0..eh {
-                let yy = (by - 3 + j as i32).clamp(0, rh - 1) as usize;
-                let row = &src.data[yy * src.stride..];
-                for i in 0..ew {
-                    let xx = (bx - 3 + i as i32).clamp(0, rw - 1) as usize;
-                    emu[j * ew + i] = row[xx];
-                }
-            }
-            mc::predict(dst, ds, emu, 3 * ew + 3, ew, (w, h), (mx, my), filter, max, avg);
-        }
     }
 }
 
@@ -1591,34 +1365,6 @@ fn sub_steps(bsize: u8) -> (usize, usize) {
         BLOCK_4X4 => (1, 1),
         _ => (2, 2),
     }
-}
-
-/// The vector of sub-block `i` of a plane in sixteenths, libvpx
-/// `average_split_mvs` (with its sequential sub-block index for 4:2:2).
-fn split_mv(b: &Blk, plane: usize, i: usize, r: usize, ssx: usize, ssy: usize) -> (i32, i32) {
-    let q2 = |v: i32| (if v < 0 { v - 1 } else { v + 1 }) / 2;
-    let q4 = |v: i32| (if v < 0 { v - 2 } else { v + 2 }) / 4;
-    let get = |k: usize| b.bmv[k.min(3)][r];
-    let (row, col) = if plane == 0 || (ssx == 0 && ssy == 0) {
-        let m = get(i);
-        (i32::from(m.row), i32::from(m.col))
-    } else if ssx == 1 && ssy == 1 {
-        let (mut row, mut col) = (0, 0);
-        for k in 0..4 {
-            row += i32::from(b.bmv[k][r].row);
-            col += i32::from(b.bmv[k][r].col);
-        }
-        (q4(row), q4(col))
-    } else {
-        let other = if ssy == 1 { i + 2 } else { i + 1 };
-        let (a, c) = (get(i), get(other));
-        (
-            q2(i32::from(a.row) + i32::from(c.row)),
-            q2(i32::from(a.col) + i32::from(c.col)),
-        )
-    };
-    let (ssx, ssy) = if plane == 0 { (0, 0) } else { (ssx, ssy) };
-    (row * (2 >> ssy), col * (2 >> ssx))
 }
 
 fn flip(mv: Mv, from: u8, to: u8, bias: &[u8; 4]) -> Mv {

@@ -8,6 +8,7 @@
 //! run on this CPU or does not take its input; the codec then does the
 //! work itself.
 
+pub mod frame;
 pub mod lf;
 pub mod mc;
 

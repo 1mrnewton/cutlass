@@ -1,20 +1,11 @@
-//! Decoded pictures: three planes padded to whole superblocks, and the
-//! motion of every 8×8 block for the next frame's vector prediction.
+//! Decoded pictures: three planes padded to whole superblocks, shared
+//! between the thread that reconstructs them and the frames that predict
+//! from their finished rows, and the motion of every 8×8 block for the
+//! next frame's vector prediction.
 
-use crate::dsp::pixel::Pixel;
+use std::sync::Arc;
 
-/// One plane. Rows are `stride` apart; `w`×`h` is the visible size and
-/// `aw`×`ah` the size aligned to 8 luma samples, which intra edges use.
-/// The buffer covers whole superblocks, so a block never writes past it.
-#[derive(Clone)]
-pub struct Plane<P> {
-    pub data: Vec<P>,
-    pub stride: usize,
-    pub w: usize,
-    pub h: usize,
-    pub aw: usize,
-    pub ah: usize,
-}
+use cutlass_simd::vp9::frame::{FrameWriter, SharedFrame};
 
 /// A motion vector in eighths of a luma sample.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -35,62 +26,70 @@ pub struct MvRef {
     pub refs: [u8; 2],
 }
 
-#[derive(Clone)]
-pub struct Frame<P> {
-    pub planes: [Plane<P>; 3],
+/// The shape of a picture's planes: visible size `w`×`h`, the size
+/// aligned to 8 luma samples that intra edges use (`aw`×`ah`), and the
+/// buffers' stride and rows (whole superblocks).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Dims {
     pub width: usize,
     pub height: usize,
     pub ss_x: usize,
     pub ss_y: usize,
     pub bit_depth: u8,
+    pub w: [usize; 3],
+    pub h: [usize; 3],
+    pub aw: [usize; 3],
+    pub ah: [usize; 3],
+    pub stride: [usize; 3],
+    pub rows: [usize; 3],
+}
+
+impl Dims {
+    pub fn new(width: usize, height: usize, ss_x: usize, ss_y: usize, bit_depth: u8) -> Self {
+        let w64 = width.div_ceil(64) * 64;
+        let h64 = height.div_ceil(64) * 64;
+        let aw = width.div_ceil(8) * 8;
+        let ah = height.div_ceil(8) * 8;
+        let cw = (width + ss_x) >> ss_x;
+        let ch = (height + ss_y) >> ss_y;
+        Self {
+            width,
+            height,
+            ss_x,
+            ss_y,
+            bit_depth,
+            w: [width, cw, cw],
+            h: [height, ch, ch],
+            aw: [aw, aw >> ss_x, aw >> ss_x],
+            ah: [ah, ah >> ss_y, ah >> ss_y],
+            stride: [w64, w64 >> ss_x, w64 >> ss_x],
+            rows: [h64, h64 >> ss_y, h64 >> ss_y],
+        }
+    }
+
+    pub fn shifts(&self) -> [u32; 3] {
+        [0, self.ss_y as u32, self.ss_y as u32]
+    }
+}
+
+/// A picture: its samples, published row by row as they become final.
+pub struct Pic<P> {
+    pub buf: Arc<SharedFrame<P>>,
+    pub dims: Dims,
     pub color_space: u8,
     pub color_range: u8,
     pub render_width: u32,
     pub render_height: u32,
 }
 
-impl<P: Pixel> Frame<P> {
-    pub fn new(width: usize, height: usize, ss_x: usize, ss_y: usize, bit_depth: u8) -> Self {
-        let w64 = width.div_ceil(64) * 64;
-        let h64 = height.div_ceil(64) * 64;
-        let aw = width.div_ceil(8) * 8;
-        let ah = height.div_ceil(8) * 8;
-        let luma = Plane {
-            data: vec![P::default(); w64 * h64],
-            stride: w64,
-            w: width,
-            h: height,
-            aw,
-            ah,
-        };
-        let chroma = Plane {
-            data: vec![P::default(); (w64 >> ss_x) * (h64 >> ss_y)],
-            stride: w64 >> ss_x,
-            w: (width + ss_x) >> ss_x,
-            h: (height + ss_y) >> ss_y,
-            aw: aw >> ss_x,
-            ah: ah >> ss_y,
-        };
-        Self {
-            planes: [luma, chroma.clone(), chroma],
-            width,
-            height,
-            ss_x,
-            ss_y,
-            bit_depth,
-            color_space: 0,
-            color_range: 0,
-            render_width: width as u32,
-            render_height: height as u32,
+/// A buffer for a new picture: a picture's whose readers are gone when
+/// one of `spare` fits, else a new one.
+pub fn writer<P: Copy + Default>(dims: &Dims, spare: &mut Vec<(Dims, Arc<SharedFrame<P>>)>) -> FrameWriter<P> {
+    while let Some(i) = spare.iter().position(|(d, _)| d.stride == dims.stride && d.rows == dims.rows) {
+        let (_, buf) = spare.swap_remove(i);
+        if let Ok(w) = FrameWriter::restart(buf) {
+            return w;
         }
     }
-
-    /// Whether the buffers can be filled again for a frame of this shape.
-    pub fn fits(&self, width: usize, height: usize, ss_x: usize, ss_y: usize, bd: u8) -> bool {
-        self.width == width
-            && self.height == height
-            && self.ss_x == ss_x
-            && self.ss_y == ss_y
-            && self.bit_depth == bd
-    }
+    FrameWriter::new(dims.stride, dims.rows, dims.shifts())
 }

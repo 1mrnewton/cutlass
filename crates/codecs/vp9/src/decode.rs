@@ -14,8 +14,10 @@ use cutlass_decode::{
 };
 use cutlass_encode::PixelFormat;
 
-use crate::dec::frame::{Frame, MvRef};
-use crate::dec::{Spare, decode_frame};
+use cutlass_simd::vp9::frame::SharedFrame;
+
+use crate::dec::frame::{Dims, MvRef, Pic};
+use crate::dec::{ParseBufs, decode_frame};
 use crate::dsp::pixel::Pixel;
 use crate::geom::{self, SWITCHABLE, TX_MODE_SELECT};
 use crate::header::{Header, Parsed, Persist, parse};
@@ -25,24 +27,27 @@ use crate::recon::Picture;
 /// A reference picture of either sample width.
 #[derive(Clone)]
 pub enum Held {
-    Eight(Arc<Frame<u8>>),
-    Deep(Arc<Frame<u16>>),
+    Eight(Arc<Pic<u8>>),
+    Deep(Arc<Pic<u16>>),
 }
 
+/// Picture buffers whose readers are gone, for later pictures.
+type Spare<P> = Vec<(Dims, Arc<SharedFrame<P>>)>;
+
 trait Store: Pixel {
-    fn view(held: &Held) -> Option<&Frame<Self>>;
-    fn keep(frame: Arc<Frame<Self>>) -> Held;
+    fn view(held: &Held) -> Option<&Pic<Self>>;
+    fn keep(frame: Arc<Pic<Self>>) -> Held;
     fn spare(d: &mut Decoder) -> &mut Spare<Self>;
 }
 
 impl Store for u8 {
-    fn view(held: &Held) -> Option<&Frame<Self>> {
+    fn view(held: &Held) -> Option<&Pic<Self>> {
         match held {
             Held::Eight(f) => Some(f),
             Held::Deep(_) => None,
         }
     }
-    fn keep(frame: Arc<Frame<Self>>) -> Held {
+    fn keep(frame: Arc<Pic<Self>>) -> Held {
         Held::Eight(frame)
     }
     fn spare(d: &mut Decoder) -> &mut Spare<Self> {
@@ -51,13 +56,13 @@ impl Store for u8 {
 }
 
 impl Store for u16 {
-    fn view(held: &Held) -> Option<&Frame<Self>> {
+    fn view(held: &Held) -> Option<&Pic<Self>> {
         match held {
             Held::Deep(f) => Some(f),
             Held::Eight(_) => None,
         }
     }
-    fn keep(frame: Arc<Frame<Self>>) -> Held {
+    fn keep(frame: Arc<Pic<Self>>) -> Held {
         Held::Deep(frame)
     }
     fn spare(d: &mut Decoder) -> &mut Spare<Self> {
@@ -72,6 +77,7 @@ pub struct Decoder {
     last_seg: Vec<u8>,
     spare8: Spare<u8>,
     spare16: Spare<u16>,
+    bufs: ParseBufs,
     /// Frames whose segmentation map was coded relative to the previous map.
     #[cfg(test)]
     temporal_frames: u32,
@@ -86,6 +92,7 @@ impl Clone for Decoder {
             last_seg: self.last_seg.clone(),
             spare8: Spare::default(),
             spare16: Spare::default(),
+            bufs: ParseBufs::default(),
             #[cfg(test)]
             temporal_frames: self.temporal_frames,
         }
@@ -101,6 +108,7 @@ impl Decoder {
             last_seg: Vec::new(),
             spare8: Spare::default(),
             spare16: Spare::default(),
+            bufs: ParseBufs::default(),
             #[cfg(test)]
             temporal_frames: 0,
         }
@@ -174,18 +182,23 @@ impl Decoder {
         let prev = self.prev.clone();
         // Pictures that nothing holds any more come back as buffers.
         let refs_now = self.refs.clone();
-        let built = {
-            let view = |i: usize| -> Option<&Frame<P>> {
+        let bufs = std::mem::take(&mut self.bufs);
+        let (pic, built) = {
+            let view = |i: usize| -> Option<&Pic<P>> {
                 let slot = usize::from(header.ref_index[i]);
                 refs_now.get(slot)?.as_ref().and_then(P::view)
             };
             let refs = [view(0), view(1), view(2)];
             let spare = P::spare(self);
-            decode_frame(parsed, refs, prev.as_deref().map(|v| v.as_slice()), &last_seg, spare)?
+            decode_frame(parsed, refs, prev.as_deref().map(|v| v.as_slice()), &last_seg, bufs, spare)?
         };
         drop(refs_now);
         let after_key = self.persist.key_frame;
         let fc = adapted(parsed, &built.counts, after_key);
+        self.bufs = built.spare;
+        self.bufs.tiles = built.tiles;
+        self.bufs.masks = built.masks;
+        self.bufs.grid = built.grid;
         let persist = &mut self.persist;
         persist.width = header.width;
         persist.height = header.height;
@@ -213,7 +226,7 @@ impl Decoder {
         if let Some(old) = self.prev.take()
             && let Ok(v) = Arc::try_unwrap(old)
         {
-            P::spare(self).mvs.push(v);
+            self.bufs.mvs = v;
         }
         self.prev = Some(Arc::new(built.mvs));
         let cells = geom::mi_count(header.width).saturating_mul(geom::mi_count(header.height));
@@ -222,7 +235,7 @@ impl Decoder {
         } else if header.is_intra() || header.error_resilient {
             self.last_seg = vec![0u8; cells];
         }
-        let shared = Arc::new(built.frame);
+        let shared = Arc::new(pic);
         for slot in 0..8 {
             if header.refresh_flags & (1u8 << slot) == 0 {
                 continue;
@@ -247,16 +260,16 @@ impl Decoder {
         match held {
             Held::Eight(f) => {
                 if let Ok(f) = Arc::try_unwrap(f)
-                    && self.spare8.frames.len() < 4
+                    && self.spare8.len() < 4
                 {
-                    self.spare8.frames.push(f);
+                    self.spare8.push((f.dims, f.buf));
                 }
             }
             Held::Deep(f) => {
                 if let Ok(f) = Arc::try_unwrap(f)
-                    && self.spare16.frames.len() < 4
+                    && self.spare16.len() < 4
                 {
-                    self.spare16.frames.push(f);
+                    self.spare16.push((f.dims, f.buf));
                 }
             }
         }
@@ -296,11 +309,15 @@ fn adapted(parsed: &Parsed<'_>, counts: &Counts, after_key: bool) -> FrameContex
     fc
 }
 
-/// The visible samples of a plane, rows packed, little-endian above 8 bits.
-fn packed<P: Pixel>(p: &crate::dec::frame::Plane<P>) -> Vec<u8> {
-    let mut out = Vec::with_capacity(p.w * p.h * if P::HIGH { 2 } else { 1 });
-    for r in 0..p.h {
-        let row = &p.data[r * p.stride..r * p.stride + p.w];
+/// The visible samples of plane `p`, rows packed, little-endian above 8
+/// bits.
+fn packed<P: Pixel>(f: &Pic<P>, p: usize) -> Vec<u8> {
+    let (w, h) = (f.dims.w[p], f.dims.h[p]);
+    f.buf.wait(usize::MAX);
+    let (data, stride) = f.buf.plane(p);
+    let mut out = Vec::with_capacity(w * h * if P::HIGH { 2 } else { 1 });
+    for r in 0..h {
+        let row = &data[r * stride..r * stride + w];
         if P::HIGH {
             for s in row {
                 out.extend_from_slice(&(s.get() as u16).to_le_bytes());
@@ -313,18 +330,18 @@ fn packed<P: Pixel>(p: &crate::dec::frame::Plane<P>) -> Vec<u8> {
 }
 
 fn picture_of(held: &Held) -> Picture {
-    fn of<P: Pixel>(f: &Frame<P>) -> Picture {
+    fn of<P: Pixel>(f: &Pic<P>) -> Picture {
         Picture {
-            y: packed(&f.planes[0]),
-            u: packed(&f.planes[1]),
-            v: packed(&f.planes[2]),
-            width: f.width as u32,
-            height: f.height as u32,
-            ss_x: f.ss_x as u32,
-            ss_y: f.ss_y as u32,
+            y: packed(f, 0),
+            u: packed(f, 1),
+            v: packed(f, 2),
+            width: f.dims.width as u32,
+            height: f.dims.height as u32,
+            ss_x: f.dims.ss_x as u32,
+            ss_y: f.dims.ss_y as u32,
             color_space: f.color_space,
             color_range: f.color_range,
-            bit_depth: f.bit_depth,
+            bit_depth: f.dims.bit_depth,
             render_width: f.render_width,
             render_height: f.render_height,
         }
@@ -447,8 +464,8 @@ fn held_frame(held: &Held) -> Result<VideoFrame, CodecError> {
     }
 }
 
-fn video_frame<P: Pixel>(f: &Frame<P>) -> Result<VideoFrame, CodecError> {
-    let format = match (f.bit_depth, f.ss_x, f.ss_y, f.color_space) {
+fn video_frame<P: Pixel>(f: &Pic<P>) -> Result<VideoFrame, CodecError> {
+    let format = match (f.dims.bit_depth, f.dims.ss_x, f.dims.ss_y, f.color_space) {
         (10, 1, 1, _) => PixelFormat::Yuv420p10,
         (12, 1, 1, _) => PixelFormat::Yuv420p12,
         (10, 1, 0, _) => PixelFormat::Yuv422p10,
@@ -469,21 +486,22 @@ fn video_frame<P: Pixel>(f: &Frame<P>) -> Result<VideoFrame, CodecError> {
         }
     };
     let bytes = if P::HIGH { 2 } else { 1 };
-    let plane = |p: &crate::dec::frame::Plane<P>| {
-        let samples = packed(p);
+    let plane = |p: usize| {
+        let samples = packed(f, p);
+        let (w, h) = (f.dims.w[p] as u32, f.dims.h[p] as u32);
         if bytes == 1 {
-            Plane::tight(p.w as u32, p.h as u32, samples)
+            Plane::tight(w, h, samples)
         } else {
-            Plane::bytes(p.w as u32, p.h as u32, bytes, samples)
+            Plane::bytes(w, h, bytes, samples)
         }
     };
     let mut frame = VideoFrame::planar(
         format,
-        f.width as u32,
-        f.height as u32,
-        plane(&f.planes[0])?,
-        plane(&f.planes[1])?,
-        plane(&f.planes[2])?,
+        f.dims.width as u32,
+        f.dims.height as u32,
+        plane(0)?,
+        plane(1)?,
+        plane(2)?,
     )?;
     let (range, primaries, transfer, matrix) = color_of(f.color_space, f.color_range);
     frame.range = range;

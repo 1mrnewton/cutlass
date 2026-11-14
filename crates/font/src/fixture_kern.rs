@@ -285,6 +285,56 @@ pub(crate) fn extended() -> Vec<u8> {
     font(&glyphs(), &MAP, &[(b"kerx", kerx), (b"ankr", anchors())])
 }
 
+/// A lookup of single glyphs whose values are four bytes each.
+fn wide_lookup(pairs: &[(u16, u32)]) -> Vec<u8> {
+    let mut table = be(&[6, 6, u16::try_from(pairs.len()).expect("count"), 0, 0, 0]);
+    for (glyph, value) in pairs {
+        table.extend(be(&[*glyph]));
+        table.extend(long(&[*value]));
+    }
+    table
+}
+
+/// The body of a `kerx` subtable of format 6: two rows of two values,
+/// with the lookups that pick a row and a column, and the values.
+fn indexed_body(flags: u32, left: &[u8], right: &[u8], values: &[u8]) -> Vec<u8> {
+    let place = |value: usize| u32::try_from(value).expect("offset");
+    let left_at = 12 + 24;
+    let right_at = left_at + left.len();
+    let array_at = right_at + right.len();
+    let mut body = long(&[flags]);
+    body.extend(be(&[2, 2]));
+    body.extend(long(&[place(left_at), place(right_at), place(array_at), 0]));
+    body.extend(left);
+    body.extend(right);
+    body.extend(values);
+    body
+}
+
+/// A face with a `kerx` table of two passes of format 6: one of values
+/// two bytes each, which closes `C` and `A` by 90, and one of values
+/// four bytes each, which closes `A` and `B` by 70. In each the left
+/// glyph's row starts at the third value and the right glyph's column is
+/// the second.
+pub(crate) fn indexed() -> Vec<u8> {
+    let short = indexed_body(
+        0,
+        &lookup(&[(C, 2)]),
+        &lookup(&[(A, 1)]),
+        &signed(&[0, 0, 0, -90]),
+    );
+    let values: Vec<u8> = [0_i32, 0, 0, -70]
+        .iter()
+        .flat_map(|value| value.to_be_bytes())
+        .collect();
+    let wide = indexed_body(1, &wide_lookup(&[(A, 2)]), &wide_lookup(&[(B, 1)]), &values);
+    let mut kerx = be(&[2, 0]);
+    kerx.extend(long(&[2]));
+    kerx.extend(kerx_subtable(6, &short));
+    kerx.extend(kerx_subtable(6, &wide));
+    font(&glyphs(), &MAP, &[(b"kerx", kerx)])
+}
+
 /// A face with glyphs far wider than an em, as a phrase drawn as one
 /// glyph is: `A` is six ems across and one tall, `B` twenty ems across,
 /// and `C` thirty-two, which is past any grid a glyph is painted on.
@@ -422,10 +472,11 @@ pub(crate) fn thai_mac() -> Vec<u8> {
 /// A fixture's file name and what builds it.
 type Built = (&'static str, fn() -> Vec<u8>);
 
-const FILES: [Built; 3] = [
+const FILES: [Built; 4] = [
     ("kern-machine.ttf", kerned),
     ("kerx.ttf", extended),
     ("kern-stuck.ttf", stuck),
+    ("kerx-indexed.ttf", indexed),
 ];
 
 /// Fixtures with no kerning, kept and checked the same way.

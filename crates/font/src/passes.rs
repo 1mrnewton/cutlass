@@ -105,6 +105,42 @@ enum Pairs<'a> {
         right: GlyphLookup<'a>,
         array: &'a [u8],
     },
+    /// `kerx` format 6.
+    Indexed(Indexed<'a>),
+}
+
+/// The pairs of `kerx` format 6: lookups give each glyph a count of
+/// values, the left one to its row and the right one to its column, and
+/// the two added are which value of the array is theirs. The counts and
+/// the values are four bytes each when `long`, and two when not. `lists`
+/// is where a value points to in a face with variations.
+#[derive(Clone, Copy, Debug)]
+struct Indexed<'a> {
+    left: GlyphLookup<'a>,
+    right: GlyphLookup<'a>,
+    array: &'a [u8],
+    long: bool,
+    lists: usize,
+}
+
+impl Indexed<'_> {
+    fn value(&self, left: u16, right: u16) -> Option<i32> {
+        if self.long {
+            let index = self
+                .left
+                .wide(left)
+                .unwrap_or(0)
+                .checked_add(self.right.wide(right).unwrap_or(0))?;
+            let at = usize::try_from(index).ok()?.checked_mul(4)?;
+            // A value of four bytes is a signed one.
+            let bytes = self.array.get(at..at.checked_add(4)?)?;
+            Some(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        } else {
+            let index = usize::from(self.left.value(left).unwrap_or(0))
+                + usize::from(self.right.value(right).unwrap_or(0));
+            i16_at(self.array, index * 2).ok().map(i32::from)
+        }
+    }
 }
 
 impl KernPairs<'_> {
@@ -159,6 +195,19 @@ impl KernPairs<'_> {
                 let at = usize::from(lefts.value(left).unwrap_or(0))
                     + usize::from(rights.value(right).unwrap_or(0));
                 i16_at(array, at).ok()
+            }
+            Pairs::Indexed(indexed) => {
+                let Some(value) = indexed.value(left, right) else {
+                    return 0;
+                };
+                if self.tuples == 0 {
+                    return value;
+                }
+                return usize::try_from(value)
+                    .ok()
+                    .and_then(|at| at.checked_add(indexed.lists))
+                    .and_then(|at| i16_at(self.subtable, at).ok())
+                    .map_or(0, i32::from);
             }
         };
         let Some(value) = value else {
@@ -587,6 +636,7 @@ pub(crate) fn kerx_passes<'a>(
             }),
             2 => lookup_pairs(subtable).map(pairs),
             4 => attach(body, anchors, backwards).map(KernPass::Attach),
+            6 => indexed_pairs(subtable).map(pairs),
             _ => Err(FontError::Unsupported),
         };
         if let Ok(pass) = pass {
@@ -661,6 +711,19 @@ fn lookup_pairs(subtable: &[u8]) -> Result<Pairs<'_>, FontError> {
     })
 }
 
+fn indexed_pairs(subtable: &[u8]) -> Result<Pairs<'_>, FontError> {
+    let offset =
+        |field: usize| usize::try_from(u32_at(subtable, field)?).map_err(|_| FontError::BadTable);
+    let at = |field: usize| subtable.get(offset(field)?..).ok_or(FontError::Truncated);
+    Ok(Pairs::Indexed(Indexed {
+        left: GlyphLookup::read(at(20)?)?,
+        right: GlyphLookup::read(at(24)?)?,
+        array: at(28)?,
+        long: u32_at(subtable, 12)? & 1 != 0,
+        lists: offset(32)?,
+    }))
+}
+
 fn byte_machine(body: &[u8]) -> Result<Machine<'_>, FontError> {
     let classes = usize::from(u16_at(body, 0)?);
     // Four classes are fixed, and a class is one byte.
@@ -733,7 +796,7 @@ fn attach<'a>(
 mod tests {
     use super::{KERN_CLASS_DELETED, KERN_CLASS_END, KERN_CLASS_OTHER, KernPass, KernStep};
     use crate::fixture::{boxed, font};
-    use crate::fixture_kern::{extended, kerned};
+    use crate::fixture_kern::{extended, indexed, kerned};
     use crate::read;
 
     const A: u16 = 1;
@@ -841,6 +904,51 @@ mod tests {
         // A glyph without an anchor meets at its origin.
         assert_eq!(attach.offset(0, B, ACUTE), Some((150, -600)));
         assert_eq!(attach.offset(9, A, ACUTE), None);
+    }
+
+    #[test]
+    fn pairs_by_class_and_index_are_read_at_both_widths() {
+        let bytes = indexed();
+        let face = read(&bytes).expect("face");
+        let passes = face.kerx_passes();
+        assert_eq!(passes.len(), 2);
+        let (KernPass::Pairs(short), KernPass::Pairs(wide)) = (passes[0], passes[1]) else {
+            panic!("pairs");
+        };
+        // The second row and the second column of each: as HarfBuzz 14.2
+        // reads both. Core Text reads the first the same, and takes
+        // nothing from this face's pass of four-byte values.
+        assert_eq!(short.get(C, A), -90);
+        assert_eq!(wide.get(A, B), -70);
+        // A glyph with no row or column is in the first, of nothing.
+        for (left, right) in [(A, A), (C, B), (B, A), (0, 0), (900, C), (0xFFFF, 0xFFFF)] {
+            assert_eq!(short.get(left, right), 0, "{left} {right}");
+        }
+        for (left, right) in [(A, A), (A, C), (B, B), (0, 0), (900, B), (0xFFFF, 0xFFFF)] {
+            assert_eq!(wide.get(left, right), 0, "{left} {right}");
+        }
+        // Cut at every length and with every byte turned, the table
+        // opens or does not, and answers or gives nothing.
+        let kerx = table_of(&bytes, b"kerx");
+        exercise(&face_with(&[(b"kerx", kerx.clone())]));
+        for cut in 0..kerx.len() {
+            exercise(&face_with(&[(b"kerx", kerx[..cut].to_vec())]));
+        }
+        for at in 0..kerx.len() {
+            for value in [0xFF, 0x00, 0x7F] {
+                let mut torn = kerx.clone();
+                torn[at] = value;
+                exercise(&face_with(&[(b"kerx", torn)]));
+            }
+        }
+        // A pair is found at once however often it is asked for.
+        let started = std::time::Instant::now();
+        let mut sum = 0_i64;
+        for _ in 0..200_000 {
+            sum += i64::from(short.get(C, A)) + i64::from(wide.get(A, B));
+        }
+        assert_eq!(sum, -160 * 200_000);
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
     }
 
     /// One table of a face.

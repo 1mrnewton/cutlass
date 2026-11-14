@@ -43,25 +43,47 @@ impl<'a> GlyphLookup<'a> {
     /// The value for `glyph`, when the table has one.
     #[must_use]
     pub fn value(&self, glyph: u16) -> Option<u16> {
+        self.sized(glyph, 2)
+            .and_then(|value| u16::try_from(value).ok())
+    }
+
+    /// The value for `glyph` in a table whose values are four bytes each.
+    #[must_use]
+    pub fn wide(&self, glyph: u16) -> Option<u32> {
+        self.sized(glyph, 4)
+    }
+
+    /// The value for `glyph` in a table of values `width` bytes each, 2
+    /// or 4.
+    fn sized(&self, glyph: u16, width: usize) -> Option<u32> {
         let data = self.data;
         let word = |at: usize| u16_at(data, at).ok();
+        let value = |at: usize| {
+            if width == 4 {
+                u32_at(data, at).ok()
+            } else {
+                word(at).map(u32::from)
+            }
+        };
         match word(0)? {
-            0 => word(2 + usize::from(glyph) * 2),
+            0 => value(2 + usize::from(glyph) * width),
             8 => {
                 let index = glyph.checked_sub(word(2)?)?;
-                (index < word(4)?).then(|| word(6 + usize::from(index) * 2))?
+                (index < word(4)?).then(|| value(6 + usize::from(index) * width))?
             }
             10 => {
+                // This one says how wide its own values are.
                 let size = usize::from(word(2)?);
                 let index = glyph.checked_sub(word(4)?)?;
-                if index >= word(6)? || !(1..=2).contains(&size) {
+                if index >= word(6)? {
                     return None;
                 }
                 let at = 8 + usize::from(index) * size;
-                if size == 1 {
-                    data.get(at).map(|byte| u16::from(*byte))
-                } else {
-                    word(at)
+                match size {
+                    1 => data.get(at).map(|byte| u32::from(*byte)),
+                    2 => word(at).map(u32::from),
+                    4 if width == 4 => u32_at(data, at).ok(),
+                    _ => None,
                 }
             }
             format @ (2 | 4 | 6) => {
@@ -83,11 +105,11 @@ impl<'a> GlyphLookup<'a> {
                         high = mid;
                     } else {
                         return match format {
-                            6 => word(at + 2),
-                            2 => word(at + 4),
+                            6 => value(at + 2),
+                            2 => value(at + 4),
                             _ => {
                                 let list = usize::from(word(at + 4)?);
-                                word(list + usize::from(glyph - first) * 2)
+                                value(list + usize::from(glyph - first) * width)
                             }
                         };
                     }

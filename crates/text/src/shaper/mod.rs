@@ -1210,6 +1210,16 @@ mod tests {
             kerned(EXTENDED, "BCA"),
             "[2=0+600|4=1@-70,0+485|1=2@-45,0+555]"
         );
+        // Pairs by class whose values count places in the array, two
+        // bytes each and four: as HarfBuzz 14.2 prints them.
+        const INDEXED: &[u8] = include_bytes!("../../../font/fixtures/kerx-indexed.ttf");
+        assert_eq!(kerned(INDEXED, "CA"), "[4=0+555|1=1@-45,0+555]");
+        assert_eq!(kerned(INDEXED, "AB"), "[1=0+565|2=1@-35,0+565]");
+        assert_eq!(
+            kerned(INDEXED, "CAB"),
+            "[4=0+555|1=1@-45,0+520|2=2@-35,0+565]"
+        );
+        assert_eq!(kerned(INDEXED, "AC"), "[1=0+600|4=1+600]");
         // These tables know nothing of marks: a pair is two glyphs side
         // by side, so A and B with an acute between them are not kerned,
         // as in Core Text. HarfBuzz steps over the mark and kerns them.

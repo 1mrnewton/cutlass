@@ -175,20 +175,25 @@ threads; one core is the fastest of five, pinned with `taskset`.
 
 | Stream | Threads | Cutlass | FFmpeg `vp9` | Ratio | Memory (Cutlass / FFmpeg) |
 | --- | --- | ---: | ---: | ---: | --- |
-| 4:2:0 | 1 core | 1.00–1.05 s | 0.97–1.00 s | 1.03–1.05 | |
-| 4:2:0 | 4 | 0.49 s | 0.54 s | 0.91 | 59 MB / 57 MB |
-| 4:4:4 | 1 core | 1.93–2.03 s | 1.87–1.89 s | 1.03–1.07 | |
-| 4:4:4 | 4 | 0.90 s | 0.94 s | 0.96 | 80 MB / 78 MB |
+| 4:2:0 | 1 core | 0.98 s | 0.97 s | 1.01 | |
+| 4:2:0 | 4 | 0.41 s | 0.47 s | 0.86 | 58 MB / 57 MB |
+| 4:4:4 | 1 core | 1.88 s | 1.88 s | 1.00 | |
+| 4:4:4 | 4 | 0.70 s | 0.79 s | 0.88 | 80 MB / 78 MB |
 
-On four threads Cutlass is ahead of FFmpeg on both streams (it won all 9
-runs on 4:4:4 and 7 of 9 on 4:2:0); on one core it is 3 to 7% behind,
-by medians of fifteen runs over two sittings. (The 4:4:4 stream started
-at 38.8 s on one core.) By stage on one core (4:2:0), Cutlass's
-coefficient parse is the faster (0.22 s against FFmpeg's 0.24 s) and its
-interpolation kernels take FFmpeg's time; what is left is the calls
-around the kernels, the block parse and the loop filter's drivers, each
-a percent or two. What moved the decoder most recently:
+On four threads Cutlass is ahead of FFmpeg on both streams (it won all 7
+runs on each); on one core the two are level (medians of fifteen runs:
+Cutlass won 7 of 15 on 4:4:4 and 4 of 15 on 4:2:0, within 1%). (The
+4:4:4 stream started at 38.8 s on one core.) What moved the decoder most
+recently:
 
+- Each superblock row is loop filtered as soon as it is made, while it
+  is in the caches, instead of after the next row: the row's last line
+  of each plane is kept as reconstructed for the intra prediction below
+  it (FFmpeg's `intra_pred_data`). 4% on one core for 4:4:4, and 8 to 10%
+  on four threads.
+- The loop filter's drivers pass over strips, rows and columns with
+  nothing to filter before building or looking anything up (2% fewer
+  instructions).
 - The parse fills runs of structures in a loop, and the interpolation
   block takes its filters by reference, not as two 26-byte copies.
 - Horizontal loop filter edges go through the filter two at a time, side

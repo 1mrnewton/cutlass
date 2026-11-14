@@ -36,6 +36,7 @@ impl Block<'_> {
     /// Whether every load and store stays inside the buffers. The kernels
     /// read 16 samples from 3 before each 8 or 16 of a row, and 3 rows
     /// above and 4 below with a fraction down.
+    #[inline]
     fn fits(&self) -> bool {
         if !matches!(self.w, 4 | 8 | 16 | 32 | 64)
             || self.h == 0
@@ -64,6 +65,7 @@ impl Block<'_> {
 }
 
 /// Taps the kernels take: each fits a signed byte.
+#[inline]
 fn ok_taps(f: [i16; 8]) -> bool {
     f.iter().all(|&t| (-128..=127).contains(&t))
 }
@@ -71,7 +73,8 @@ fn ok_taps(f: [i16; 8]) -> bool {
 /// Predicts `b` with vector instructions. `false`, having written nothing,
 /// when the CPU or the block is not one the kernels take.
 #[must_use]
-pub fn predict(b: Block<'_>) -> bool {
+#[inline]
+pub fn predict(mut b: Block<'_>) -> bool {
     #[cfg(target_arch = "x86_64")]
     {
         if super::avx2() && b.fits() {
@@ -79,7 +82,7 @@ pub fn predict(b: Block<'_>) -> bool {
             // the only feature `avx2::predict` enables.
             #[allow(unsafe_code)]
             unsafe {
-                avx2::predict(b);
+                avx2::predict(&mut b);
             }
             return true;
         }

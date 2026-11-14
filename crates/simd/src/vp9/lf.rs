@@ -39,6 +39,7 @@ pub struct Edge<'a> {
 
 impl Edge<'_> {
     /// The widest filter of the two halves.
+    #[inline]
     fn widest(&self) -> Option<Wd> {
         let r = |w: Option<Wd>| match w {
             None => 0,
@@ -53,6 +54,7 @@ impl Edge<'_> {
         }
     }
 
+    #[inline]
     fn fits(&self) -> bool {
         let Some(wd) = self.widest() else {
             return false;
@@ -72,7 +74,8 @@ impl Edge<'_> {
 /// Filters `e` with vector instructions; `false`, having written nothing,
 /// when the CPU or the edge is not one the kernels take.
 #[must_use]
-pub fn filter(e: Edge<'_>) -> bool {
+#[inline]
+pub fn filter(mut e: Edge<'_>) -> bool {
     #[cfg(target_arch = "x86_64")]
     {
         if super::avx2() && e.fits() {
@@ -80,7 +83,7 @@ pub fn filter(e: Edge<'_>) -> bool {
             // the only feature `avx2::filter` enables.
             #[allow(unsafe_code)]
             unsafe {
-                avx2::filter(e);
+                avx2::filter(&mut e);
             }
             return true;
         }

@@ -330,7 +330,7 @@ impl Taps {
 
 /// Every block of [`Block::fits`](super::Block).
 #[target_feature(enable = "avx2")]
-pub(super) fn predict(b: Block<'_>) {
+pub(super) fn predict(b: &mut Block<'_>) {
     match b.w {
         4 => sized::<4>(b),
         8 => sized::<8>(b),
@@ -403,20 +403,20 @@ unsafe fn put<const W: usize>(
 #[inline]
 #[target_feature(enable = "avx2")]
 #[allow(unsafe_code)]
-fn sized<const W: usize>(b: Block<'_>) {
-    let Block {
-        dst,
-        dst_stride: ds,
-        src,
-        at,
-        src_stride: ss,
-        w: _,
-        h,
-        fx,
-        fy,
-        avg,
-        tmp,
-    } = b;
+fn sized<const W: usize>(b: &mut Block<'_>) {
+    // Field by field: the block is read where it was written, without a
+    // wide copy of the whole struct.
+    let (ds, src, at, ss, h, fx, fy, avg) = (
+        b.dst_stride,
+        b.src,
+        b.at,
+        b.src_stride,
+        b.h,
+        b.fx,
+        b.fy,
+        b.avg,
+    );
+    let (dst, tmp) = (&mut *b.dst, &mut *b.tmp);
     // SAFETY: `fits` checked the region (the module's notes): rows of
     // `src` from the first read hold `W + 24` samples, the loads across
     // read 16 from `c + 8` for `c < W - 8` at most and 8 or 16 for `W` of

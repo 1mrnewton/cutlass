@@ -384,16 +384,12 @@ unsafe fn st8(r: &mut [u8], o: usize, v: __m128i) {
 }
 
 #[target_feature(enable = "avx2")]
-pub(super) fn filter(e: Edge<'_>) {
+pub(super) fn filter(e: &mut Edge<'_>) {
     let Some(wd) = e.widest() else { return };
-    let Edge {
-        buf,
-        at,
-        stride,
-        vertical,
-        wd: wds,
-        thr,
-    } = e;
+    // Field by field: the edge is read where it was written, without a
+    // wide copy of the whole struct.
+    let (at, stride, vertical, wds, thr) = (e.at, e.stride, e.vertical, e.wd, e.thr);
+    let buf = &mut *e.buf;
     let z = _mm_setzero_si128();
     // The edge's sixteen lines, as one region checked once.
     let (back, span) = if vertical {

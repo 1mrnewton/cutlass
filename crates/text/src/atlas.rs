@@ -1,12 +1,20 @@
-//! A signed-distance atlas for a font that has outlines, and a bitmap atlas
-//! for a font that does not.
+//! One image for each glyph of a face: a color picture, a signed-distance
+//! field from the outline, or gray coverage from a bitmap strike.
 //!
-//! The route picks the atlas. Each glyph is painted once. A later sample reads
-//! the cached texels. A face with neither outlines nor a strike is an error.
+//! Each glyph chooses for itself. A glyph with a picture in the face's color
+//! strike takes that picture, so an emoji face whose outlines are empty still
+//! draws. Any other glyph takes the face's route: its outline when the face
+//! has outlines, and the gray strike when it does not. A gray strike is never
+//! taken over an outline, because the small strikes old fonts carry are worse
+//! than their outlines at any size but their own. Each glyph is painted once.
+//! A later sample reads the cached texels. A face with neither outlines nor a
+//! strike is an error.
+
+mod strike;
 
 use std::collections::HashMap;
 
-use cutlass_font::{BitmapPixels, Contour, Font, FontError, Outline, Segment};
+use cutlass_font::{BitmapGlyph, BitmapPixels, Contour, Font, Outline, Segment};
 
 use crate::TextError;
 
@@ -19,14 +27,16 @@ const MAX_SEGMENTS: usize = 4_096;
 const MAX_DEPTH: u8 = 8;
 const FLAT: f32 = 0.35;
 
-/// Which atlas a face uses.
+/// Where a face's glyphs are drawn from when they have no color image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AtlasRoute {
     SignedDistance,
     Bitmap,
 }
 
-/// The only choice between the two atlas routes.
+/// The route of a face: its outlines when it has them, and its bitmap
+/// strike when it does not. A glyph with a color image takes that image on
+/// either route.
 #[must_use]
 pub fn route(font: &Font<'_>) -> AtlasRoute {
     if font.has_outlines() {
@@ -94,10 +104,7 @@ impl Atlas {
                 None => Err(TextError::Limit),
             };
         }
-        let image = match route(font) {
-            AtlasRoute::SignedDistance => paint(font, glyph_id)?,
-            AtlasRoute::Bitmap => paint_bitmap(font, glyph_id)?,
-        };
+        let image = paint(font, glyph_id)?;
         self.paints = self.paints.saturating_add(1);
         self.cells.insert(glyph_id, image);
         match self.cells.get(&glyph_id) {
@@ -124,7 +131,24 @@ pub fn paint_bytes(bytes: &[u8], glyph_id: u16) -> Result<usize, TextError> {
     })
 }
 
+/// The glyph's image: its picture in the color strike when it has one, and
+/// otherwise what the face's route draws.
 fn paint(font: &Font<'_>, glyph_id: u16) -> Result<GlyphImage, TextError> {
+    if let Some(bitmap) = font
+        .color_bitmap(glyph_id, u32::from(MAX_CELL))
+        .map_err(TextError::Font)?
+        && bitmap.width > 0
+        && bitmap.height > 0
+    {
+        return bitmap_image(font, bitmap);
+    }
+    match route(font) {
+        AtlasRoute::SignedDistance => paint_outline(font, glyph_id),
+        AtlasRoute::Bitmap => paint_bitmap(font, glyph_id),
+    }
+}
+
+fn paint_outline(font: &Font<'_>, glyph_id: u16) -> Result<GlyphImage, TextError> {
     let outline = font.outline(glyph_id).map_err(TextError::Font)?;
     let unit = f32::from(font.units_per_em()) / ATLAS_EM;
     if !(unit.is_finite() && unit > 0.0) {
@@ -179,31 +203,53 @@ fn paint_bitmap(font: &Font<'_>, glyph_id: u16) -> Result<GlyphImage, TextError>
         let unit = f32::from(font.units_per_em()) / ATLAS_EM;
         return Ok(blank(unit));
     };
+    bitmap_image(font, bitmap)
+}
+
+/// One strike bitmap as an atlas image. A PNG picture is decoded here; one
+/// larger than the atlas cell is refused before it is.
+fn bitmap_image(font: &Font<'_>, bitmap: BitmapGlyph) -> Result<GlyphImage, TextError> {
     let ppem = f32::from(bitmap.ppem);
     let unit = f32::from(font.units_per_em()) / ppem;
     if !(unit.is_finite() && unit > 0.0 && ppem.is_finite() && ppem > 0.0) {
+        return Err(TextError::Limit);
+    }
+    let edge = u32::from(MAX_CELL);
+    if bitmap.width > edge || bitmap.height > edge {
         return Err(TextError::Limit);
     }
     let pixels = bitmap
         .width
         .checked_mul(bitmap.height)
         .ok_or(TextError::Limit)?;
-    let (kind, sdf, color) = match bitmap.pixels {
+    let rgba = usize::try_from(pixels)
+        .ok()
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(TextError::Limit)?;
+    let (kind, sdf, mut color) = match bitmap.pixels {
         BitmapPixels::Coverage(bytes) => {
-            if bytes.len() != usize::try_from(pixels).map_err(|_| TextError::Limit)? {
+            if bytes.len() != rgba / 4 {
                 return Err(TextError::Limit);
             }
             (GlyphKind::Coverage, bytes, Vec::new())
         }
         BitmapPixels::Color(bytes) => {
-            let rgba = pixels.checked_mul(4).ok_or(TextError::Limit)?;
-            if bytes.len() != usize::try_from(rgba).map_err(|_| TextError::Limit)? {
+            if bytes.len() != rgba {
                 return Err(TextError::Limit);
             }
             (GlyphKind::Color, Vec::new(), bytes)
         }
-        BitmapPixels::Png(_) => return Err(TextError::Font(FontError::Unsupported)),
+        BitmapPixels::Png(bytes) => {
+            let decoded = strike::decode(bytes, bitmap.width, bitmap.height, edge)?;
+            if decoded.len() != rgba {
+                return Err(TextError::Limit);
+            }
+            (GlyphKind::Color, Vec::new(), decoded)
+        }
     };
+    if bitmap.mirrored {
+        strike::mirror(&mut color, bitmap.width)?;
+    }
     #[allow(clippy::cast_precision_loss)]
     let bearing_x = bitmap.bearing_x as f32;
     #[allow(clippy::cast_precision_loss)]
@@ -709,6 +755,242 @@ mod tests {
         assert!(matches!(
             cell_span(0.0, 20_000.0, unit),
             Err(TextError::Limit)
+        ));
+    }
+
+    const SBIX: &[u8] = include_bytes!("../../font/fixtures/sbix-png.ttf");
+    const CBDT: &[u8] = include_bytes!("../../font/fixtures/cbdt-png.ttf");
+
+    /// The emoji face a Mac installs. A host without it skips the test.
+    const SYSTEM_EMOJI: &str = "/System/Library/Fonts/Apple Color Emoji.ttc";
+
+    #[test]
+    fn the_system_emoji_face_draws_color_pictures_where_it_is_installed() {
+        let Ok(bytes) = std::fs::read(SYSTEM_EMOJI) else {
+            return;
+        };
+        let font = cutlass_font::read_collection(&bytes, 0).expect("face");
+        let glyph = font
+            .glyph_id('\u{1F600}')
+            .expect("map")
+            .expect("grinning face");
+        let mut atlas = Atlas::new();
+        let image = atlas.glyph(&font, glyph).expect("picture");
+        assert_eq!(image.kind, super::GlyphKind::Color);
+        // The largest strike that fits the cell, standing on the baseline.
+        assert!((64..=256).contains(&image.width) && image.width == image.height);
+        assert_eq!(image.top, super::pixel(image.height) * image.unit);
+        let at = |x: u32, y: u32| {
+            let offset = usize::try_from((y * image.width + x) * 4).expect("offset");
+            [
+                image.color[offset],
+                image.color[offset + 1],
+                image.color[offset + 2],
+                image.color[offset + 3],
+            ]
+        };
+        // The face is yellow a third of the way down and clear in the corner.
+        let [red, green, blue, alpha] = at(image.width / 2, image.height / 3);
+        assert_eq!(alpha, 255);
+        assert!(
+            red > 200 && green > 150 && blue < 120,
+            "{red} {green} {blue}"
+        );
+        assert_eq!(at(0, 0), [0, 0, 0, 0]);
+        // Premultiplied: no channel is above its alpha.
+        assert!(
+            image
+                .color
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|[red, green, blue, alpha]| red <= alpha && green <= alpha && blue <= alpha)
+        );
+        // Glyphs across the face paint: pictures, flipped pictures, the
+        // letters with outlines, and the blank ones.
+        let mut pictures = 0;
+        for glyph in (0..font.glyph_count()).step_by(41) {
+            let image = atlas.glyph(&font, glyph).expect("glyph");
+            if image.kind == super::GlyphKind::Color {
+                pictures += 1;
+            }
+        }
+        assert!(pictures > 40, "{pictures} pictures");
+        let flipped = (0..font.glyph_count()).find(|glyph| {
+            font.color_bitmap(*glyph, 256)
+                .ok()
+                .flatten()
+                .is_some_and(|bitmap| bitmap.mirrored)
+        });
+        if let Some(flipped) = flipped {
+            let image = atlas.glyph(&font, flipped).expect("flipped");
+            assert_eq!(image.kind, super::GlyphKind::Color);
+            assert!(image.color.iter().any(|byte| *byte != 0));
+        }
+    }
+
+    /// The fixture's two by two color picture, premultiplied.
+    const RGBA: [u8; 16] = [255, 0, 0, 255, 0, 128, 0, 128, 0, 0, 255, 255, 0, 0, 0, 0];
+
+    fn color_of(atlas: &mut Atlas, font: &cutlass_font::Font<'_>, glyph: u16) -> Vec<u8> {
+        let image = atlas.glyph(font, glyph).expect("glyph");
+        assert_eq!(image.kind, super::GlyphKind::Color, "glyph {glyph}");
+        assert_eq!((image.width, image.height), (2, 2), "glyph {glyph}");
+        assert!(image.sdf.is_empty());
+        image.color.clone()
+    }
+
+    #[test]
+    fn a_face_with_empty_outlines_and_a_color_strike_draws_its_pictures() {
+        let font = read(SBIX).expect("sbix");
+        // The face has outlines, and the picture glyph's outline is empty.
+        assert_eq!(route(&font), AtlasRoute::SignedDistance);
+        assert!(font.outline(2).expect("outline").contours.is_empty());
+        let mut atlas = Atlas::new();
+        let image = atlas.glyph(&font, 2).expect("picture");
+        assert_eq!(image.kind, super::GlyphKind::Color);
+        assert_eq!(image.color, RGBA);
+        // Two pixels to the em of 1000 units, the bottom edge on the baseline.
+        assert_eq!(image.pixels_per_em, 2.0);
+        assert_eq!(image.unit, 500.0);
+        assert_eq!((image.left, image.top), (0.0, 1_000.0));
+        assert_eq!(atlas.paints(), 1);
+        let _cached = atlas.glyph(&font, 2).expect("cached");
+        assert_eq!(atlas.paints(), 1);
+        // A letter of the same face still draws from its outline.
+        let letter = atlas.glyph(&font, 1).expect("letter");
+        assert_eq!(letter.kind, super::GlyphKind::Distance);
+        assert!(letter.sdf.iter().any(|texel| *texel >= 250));
+        assert!(letter.color.is_empty());
+    }
+
+    #[test]
+    fn every_png_color_type_becomes_premultiplied_color() {
+        let font = read(SBIX).expect("sbix");
+        let mut atlas = Atlas::new();
+        // A palette whose alphas are full, half, none, and absent.
+        assert_eq!(
+            color_of(&mut atlas, &font, 3),
+            [255, 0, 0, 255, 0, 128, 0, 128, 0, 0, 0, 0, 255, 255, 0, 255]
+        );
+        // Gray with one value that is clear.
+        assert_eq!(
+            color_of(&mut atlas, &font, 4),
+            [
+                0, 0, 0, 255, 128, 128, 128, 255, 255, 255, 255, 255, 0, 0, 0, 0
+            ]
+        );
+        // 16 bits a sample.
+        assert_eq!(
+            color_of(&mut atlas, &font, 5),
+            [255, 0, 0, 255, 0, 64, 0, 128, 0, 0, 255, 255, 0, 0, 0, 0]
+        );
+        // Gray with alpha.
+        assert_eq!(
+            color_of(&mut atlas, &font, 6),
+            [
+                255, 255, 255, 255, 50, 50, 50, 128, 0, 0, 0, 255, 0, 0, 0, 0
+            ]
+        );
+        // Color with no alpha is opaque.
+        assert_eq!(
+            color_of(&mut atlas, &font, 12),
+            [
+                10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 255
+            ]
+        );
+        // One bit a pixel.
+        assert_eq!(
+            color_of(&mut atlas, &font, 15),
+            [
+                255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255
+            ]
+        );
+    }
+
+    #[test]
+    fn a_strike_picture_is_placed_flipped_and_sized_as_the_font_says() {
+        let font = read(SBIX).expect("sbix");
+        let mut atlas = Atlas::new();
+        // A flipped record swaps the columns of each row.
+        assert_eq!(
+            color_of(&mut atlas, &font, 7),
+            [0, 128, 0, 128, 255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 255, 255]
+        );
+        assert_eq!(color_of(&mut atlas, &font, 8), RGBA);
+        // Origin offsets of 3 right and 1 down, at 500 units a pixel.
+        let moved = atlas.glyph(&font, 14).expect("moved");
+        assert_eq!((moved.left, moved.top), (1_500.0, 500.0));
+        // The 600-pixel strike does not fit the cell, so the next one is used.
+        let fitting = atlas.glyph(&font, 2).expect("fits");
+        assert_eq!(fitting.pixels_per_em, 2.0);
+
+        let font = read(CBDT).expect("cbdt");
+        assert_eq!(route(&font), AtlasRoute::SignedDistance);
+        let mut atlas = Atlas::new();
+        assert_eq!(color_of(&mut atlas, &font, 1), RGBA);
+        let small = atlas.glyph(&font, 1).expect("small metrics");
+        assert_eq!((small.left, small.top), (0.0, 1_000.0));
+        let big = atlas.glyph(&font, 2).expect("big metrics");
+        assert_eq!((big.left, big.top), (500.0, 1_500.0));
+        assert_eq!(&big.color[..8], &[255, 0, 0, 255, 0, 128, 0, 128]);
+        let shared = atlas.glyph(&font, 3).expect("shared metrics");
+        assert_eq!((shared.left, shared.top), (-500.0, 1_000.0));
+        assert_eq!(&shared.color[..8], &[255, 255, 255, 255, 50, 50, 50, 128]);
+        // A glyph with no picture and an empty outline is blank, not an error.
+        let empty = atlas.glyph(&font, 0).expect("no picture");
+        assert_eq!((empty.width, empty.height), (0, 0));
+    }
+
+    #[test]
+    fn a_hostile_png_picture_is_an_error() {
+        let font = read(SBIX).expect("sbix");
+        let mut atlas = Atlas::new();
+        // A header that declares a hundred thousand pixels each way is
+        // refused before anything is decoded.
+        assert!(matches!(atlas.glyph(&font, 9), Err(TextError::Limit)));
+        // A picture cut short.
+        assert!(matches!(
+            atlas.glyph(&font, 10),
+            Err(TextError::Font(FontError::Truncated))
+        ));
+        // A chunk whose check value is wrong.
+        assert!(matches!(
+            atlas.glyph(&font, 11),
+            Err(TextError::Font(FontError::BadTable))
+        ));
+        // A graphic that is not a PNG picture.
+        assert!(matches!(
+            atlas.glyph(&font, 13),
+            Err(TextError::Font(FontError::Unsupported))
+        ));
+        assert_eq!(atlas.paints(), 0);
+        for glyph in [9, 10, 11, 13] {
+            assert!(atlas.image(glyph).is_none());
+        }
+        // A picture larger than the edge it may have is refused, and so is
+        // one whose header disagrees with the size it was announced with.
+        let picture = match font
+            .color_bitmap(2, 256)
+            .expect("glyph")
+            .expect("png")
+            .pixels
+        {
+            cutlass_font::BitmapPixels::Png(bytes) => bytes,
+            other => panic!("not a png: {other:?}"),
+        };
+        assert!(super::strike::decode(picture.clone(), 2, 2, 2).is_ok());
+        assert!(matches!(
+            super::strike::decode(picture.clone(), 2, 2, 1),
+            Err(TextError::Limit)
+        ));
+        assert!(matches!(
+            super::strike::decode(picture.clone(), 2, 1, 256),
+            Err(TextError::Font(FontError::BadTable))
+        ));
+        assert!(matches!(
+            super::strike::decode(Vec::new(), 2, 2, 256),
+            Err(TextError::Font(_))
         ));
     }
 }

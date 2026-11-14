@@ -3241,9 +3241,11 @@ dependencies = [
 name = "cutlass-text"
 version = "0.1.0"
 dependencies = [
+ "cutlass-decode",
  "cutlass-font",
  "cutlass-model",
  "cutlass-picture",
+ "cutlass-png",
 ]
 
 [[package]]

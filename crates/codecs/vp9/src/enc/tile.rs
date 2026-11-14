@@ -222,6 +222,10 @@ pub struct Shared<'a> {
     pub tok: &'a TokCosts,
 }
 
+/// The context energy of a level (libvpx `vp9_pt_energy_class`): 0, 1, 2,
+/// 3 for 3 and 4, 4 for 5 to 10, and 5 past.
+const ENERGY: [u8; 12] = [0, 1, 2, 3, 3, 4, 4, 4, 4, 4, 4, 5];
+
 /// [`Shared::tok`]: more, end of block, zero, one, two or more (signs
 /// added for the last two).
 pub type TokCosts = [[[[[[u32; 5]; 6]; 6]; 2]; 2]; 4];
@@ -2460,34 +2464,34 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         // Eight running sums and peaks, so that the pass vectorizes (a
         // single float sum must keep its order; every block has a
         // multiple of 16 coefficients).
+        // And the scan's last that could round to a level (0.3 of a step
+        // or more), as one past the largest scan index among them.
+        let iscan = crate::dec::parse::iscan(tx, kind);
         let mut sums = [0.0f32; 8];
-        let mut peaks = [0.0f32; 8];
-        for (a8, v8) in a_nat[..max]
+        let mut lasts = [0u32; 8];
+        for ((a8, v8), i8) in a_nat[..max]
             .as_chunks_mut::<8>()
             .0
             .iter_mut()
             .zip(self.fcoef[..max].as_chunks::<8>().0)
+            .zip(iscan[..max].as_chunks::<8>().0)
         {
             for i in 0..8 {
                 let v = v8[i];
                 let a = v.abs() * inv_ac;
                 a8[i] = a;
                 sums[i] += v * v;
-                peaks[i] = if a > peaks[i] { a } else { peaks[i] };
+                let e = if a >= 0.3 { u32::from(i8[i]) + 1 } else { 0 };
+                lasts[i] = lasts[i].max(e);
             }
         }
         let d_all: f32 = sums.iter().sum();
-        let mut peak = peaks.iter().fold(0.0f32, |m, &p| if p > m { p } else { m });
         a_nat[0] = self.fcoef[0].abs() / steps[0];
-        peak = peak.max(a_nat[0]);
         let tr = |k: usize| usize::from(tpos[k]);
-        let mut last_sig = 0usize;
-        if peak >= 0.3 {
-            let mut k = max;
-            while k > 0 && a_nat[tr(k - 1)] < 0.3 {
-                k -= 1;
-            }
-            last_sig = k;
+        // Only the DC is at scan index 0, and it has its own step.
+        let mut last_sig = lasts.iter().copied().max().unwrap_or(0) as usize;
+        if last_sig <= 1 {
+            last_sig = usize::from(a_nat[0] >= 0.3);
         }
         for (k, a) in av[..last_sig].iter_mut().enumerate() {
             *a = a_nat[tr(k)];
@@ -2573,14 +2577,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             if l != 0 {
                 last_nz = k + 1;
             }
-            energy[rc] = match l {
-                0 => 0,
-                1 => 1,
-                2 => 2,
-                3 | 4 => 3,
-                5..=10 => 4,
-                _ => 5,
-            };
+            energy[rc] = ENERGY[l.min(11) as usize];
             prev_zero = l == 0;
             if k + 1 < max {
                 ctx = (1

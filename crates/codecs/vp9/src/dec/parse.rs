@@ -1707,6 +1707,46 @@ static R16: ([u16; 256], [u16; 256]) = derive(&SCAN_ROW_16X16, 4);
 static C16: ([u16; 256], [u16; 256]) = derive(&SCAN_COL_16X16, 4);
 static D32: ([u16; 1024], [u16; 1024]) = derive(&SCAN_DEFAULT_32X32, 5);
 
+/// The inverse of a transposed scan: each transposed position's index in
+/// the scan.
+const fn inverse<const N: usize>(t: &[u16; N]) -> [u16; N] {
+    let mut v = [0u16; N];
+    let mut i = 0;
+    while i < N {
+        v[t[i] as usize] = i as u16;
+        i += 1;
+    }
+    v
+}
+
+static ID4: [u16; 16] = inverse(&D4.0);
+static IR4: [u16; 16] = inverse(&R4.0);
+static IC4: [u16; 16] = inverse(&C4.0);
+static ID8: [u16; 64] = inverse(&D8.0);
+static IR8: [u16; 64] = inverse(&R8.0);
+static IC8: [u16; 64] = inverse(&C8.0);
+static ID16: [u16; 256] = inverse(&D16.0);
+static IR16: [u16; 256] = inverse(&R16.0);
+static IC16: [u16; 256] = inverse(&C16.0);
+static ID32: [u16; 1024] = inverse(&D32.0);
+
+/// The scan index of each transposed position, of a size and kind (the
+/// encoder's: where a block's last coefficient falls in its scan).
+pub(crate) fn iscan(tx: u8, kind: u8) -> &'static [u16] {
+    match (tx, kind) {
+        (TX_4X4, 1) => &IR4,
+        (TX_4X4, 2) => &IC4,
+        (TX_4X4, _) => &ID4,
+        (TX_8X8, 1) => &IR8,
+        (TX_8X8, 2) => &IC8,
+        (TX_8X8, _) => &ID8,
+        (TX_16X16, 1) => &IR16,
+        (TX_16X16, 2) => &IC16,
+        (TX_16X16, _) => &ID16,
+        _ => &ID32,
+    }
+}
+
 /// A size's and kind's scan, neighbours, transposed positions and
 /// row-and-column bounds.
 #[allow(clippy::type_complexity)]

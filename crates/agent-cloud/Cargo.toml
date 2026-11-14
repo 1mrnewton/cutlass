@@ -1,0 +1,16 @@
+[package]
+name = "cutlass-agent-cloud"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The assistant's cloud model with the user's own key, for the desktop and the phones."
+
+[dependencies]
+cutlass-agent = { path = "../agent", version = "0.1.0" }
+cutlass-download = { path = "../download", version = "0.1.0", features = ["http"] }
+cutlass-settings = { path = "../settings", version = "0.1.0" }
+serde_json = "1.0.154"
+
+[lints]
+workspace = true

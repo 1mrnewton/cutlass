@@ -134,6 +134,13 @@ impl Home {
         self.root.join(ASSISTANT).join(NOTES)
     }
 
+    /// The cloud model's keys, by provider, apart from the settings. Its
+    /// folder is made when the first key is kept.
+    #[must_use]
+    pub fn assistant_keys_file(&self) -> PathBuf {
+        self.root.join(ASSISTANT).join("keys.json")
+    }
+
     /// The looks saved with a text's "Save as preset". Its folder is made
     /// when the first look is saved.
     #[must_use]

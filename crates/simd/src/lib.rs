@@ -12,6 +12,12 @@
 //! present. A mistake there can run an instruction the CPU lacks. It
 //! cannot read or write out of bounds.
 //!
+//! One exception, approved for speed: the VP9 loop filter
+//! (`vp9::lf::avx2`) loads and stores its rows with vector intrinsics on
+//! a region whose bounds it checks once per edge; each such load or store
+//! states the check that proves it in bounds, and the kernel's scalar twin
+//! and its test cover it as before.
+//!
 //! Every kernel has a scalar twin written from the specification, and a
 //! test that compares the two on random and edge inputs. A target without
 //! a vector kernel runs the twin.

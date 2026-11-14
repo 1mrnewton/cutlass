@@ -5,9 +5,9 @@
 
 use core::arch::x86_64::{
     __m128i, __m256i, _mm_adds_epi8, _mm_adds_epu8, _mm_and_si128, _mm_andnot_si128,
-    _mm_blendv_epi8, _mm_cmpeq_epi8, _mm_cmpgt_epi8, _mm_cvtsi64_si128, _mm_cvtsi128_si64,
-    _mm_extract_epi64, _mm_max_epu8, _mm_or_si128, _mm_set_epi64x, _mm_set1_epi8,
-    _mm_setzero_si128, _mm_srli_epi16, _mm_subs_epi8, _mm_subs_epu8, _mm_testz_si128,
+    _mm_blendv_epi8, _mm_cmpeq_epi8, _mm_cmpgt_epi8, _mm_loadl_epi64, _mm_loadu_si128,
+    _mm_max_epu8, _mm_or_si128, _mm_set_epi64x, _mm_set1_epi8, _mm_setzero_si128, _mm_srli_epi16,
+    _mm_storel_epi64, _mm_storeu_si128, _mm_subs_epi8, _mm_subs_epu8, _mm_testz_si128,
     _mm_unpackhi_epi8, _mm_unpackhi_epi16, _mm_unpackhi_epi32, _mm_unpackhi_epi64,
     _mm_unpacklo_epi8, _mm_unpacklo_epi16, _mm_unpacklo_epi32, _mm_unpacklo_epi64, _mm_xor_si128,
     _mm256_add_epi16, _mm256_castsi256_si128, _mm256_cvtepu8_epi16, _mm256_packus_epi16,
@@ -331,45 +331,56 @@ fn transpose8x16(c: &[__m128i; 8]) -> [__m128i; 8] {
     o
 }
 
-/// A row of `N` bytes at `o` of a region checked once to hold them all.
-#[inline(always)]
-fn row<const N: usize>(r: &[u8], o: usize) -> [u8; N] {
-    match r.get(o..o + N) {
-        Some(s) => {
-            let mut t = [0u8; N];
-            t.copy_from_slice(s);
-            t
-        }
-        None => [0u8; N],
-    }
-}
-
-#[inline(always)]
-fn put<const N: usize>(r: &mut [u8], o: usize, v: [u8; N]) {
-    if let Some(s) = r.get_mut(o..o + N) {
-        s.copy_from_slice(&v);
-    }
-}
-
+/// Sixteen bytes at `o` of `r`.
+///
+/// # Safety
+/// `o + 16 <= r.len()`.
 #[inline]
 #[target_feature(enable = "avx2")]
-fn v16(a: [u8; 16]) -> __m128i {
-    let lo = i64::from_le_bytes([a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]]);
-    let hi = i64::from_le_bytes([a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]]);
-    _mm_set_epi64x(hi, lo)
+#[allow(unsafe_code)]
+unsafe fn ld16(r: &[u8], o: usize) -> __m128i {
+    debug_assert!(o + 16 <= r.len());
+    // SAFETY: the caller proves the 16 bytes lie in `r`.
+    unsafe { _mm_loadu_si128(r.as_ptr().add(o).cast()) }
 }
 
+/// Eight bytes at `o` of `r`, in the low half.
+///
+/// # Safety
+/// `o + 8 <= r.len()`.
 #[inline]
 #[target_feature(enable = "avx2")]
-fn b16(v: __m128i) -> [u8; 16] {
-    let (lo, hi) = (
-        _mm_cvtsi128_si64(v).to_le_bytes(),
-        _mm_extract_epi64::<1>(v).to_le_bytes(),
-    );
-    [
-        lo[0], lo[1], lo[2], lo[3], lo[4], lo[5], lo[6], lo[7], hi[0], hi[1], hi[2], hi[3], hi[4],
-        hi[5], hi[6], hi[7],
-    ]
+#[allow(unsafe_code)]
+unsafe fn ld8(r: &[u8], o: usize) -> __m128i {
+    debug_assert!(o + 8 <= r.len());
+    // SAFETY: the caller proves the 8 bytes lie in `r`.
+    unsafe { _mm_loadl_epi64(r.as_ptr().add(o).cast()) }
+}
+
+/// Stores sixteen bytes at `o` of `r`.
+///
+/// # Safety
+/// `o + 16 <= r.len()`.
+#[inline]
+#[target_feature(enable = "avx2")]
+#[allow(unsafe_code)]
+unsafe fn st16(r: &mut [u8], o: usize, v: __m128i) {
+    debug_assert!(o + 16 <= r.len());
+    // SAFETY: the caller proves the 16 bytes lie in `r`.
+    unsafe { _mm_storeu_si128(r.as_mut_ptr().add(o).cast(), v) }
+}
+
+/// Stores the low eight bytes at `o` of `r`.
+///
+/// # Safety
+/// `o + 8 <= r.len()`.
+#[inline]
+#[target_feature(enable = "avx2")]
+#[allow(unsafe_code)]
+unsafe fn st8(r: &mut [u8], o: usize, v: __m128i) {
+    debug_assert!(o + 8 <= r.len());
+    // SAFETY: the caller proves the 8 bytes lie in `r`.
+    unsafe { _mm_storel_epi64(r.as_mut_ptr().add(o).cast(), v) }
 }
 
 #[target_feature(enable = "avx2")]
@@ -401,39 +412,41 @@ pub(super) fn filter(e: Edge<'_>) {
     let taps = if wd == Wd::W16 { 8 } else { 4 };
     let mut v = [z; 16];
     // Load: the taps of every line, one vector each.
+    // SAFETY (every load and store below): `reg` holds `span` bytes, and
+    // `span` was sized above so that each row's 8 or 16 bytes at
+    // `i * stride` (i up to 15, or `2 * taps - 1` for a horizontal edge)
+    // end inside it.
+    #[allow(unsafe_code)]
     if vertical && wd != Wd::W16 {
-        let rows: [__m128i; 16] = core::array::from_fn(|i| {
-            _mm_cvtsi64_si128(i64::from_le_bytes(row::<8>(reg, i * stride)))
-        });
+        let rows: [__m128i; 16] = core::array::from_fn(|i| unsafe { ld8(reg, i * stride) });
         let cols = transpose16x8(&rows);
         v[4..12].copy_from_slice(&cols);
     } else if vertical {
-        let rows: [__m128i; 16] = core::array::from_fn(|i| v16(row::<16>(reg, i * stride)));
+        let rows: [__m128i; 16] = core::array::from_fn(|i| unsafe { ld16(reg, i * stride) });
         v = transpose(&rows);
     } else {
         for k in 0..2 * taps {
-            v[k + 8 - taps] = v16(row::<16>(reg, k * stride));
+            v[k + 8 - taps] = unsafe { ld16(reg, k * stride) };
         }
     }
     if !lanes(&mut v, wds, wd, &thr) {
         return;
     }
     // Store what the filter may have changed.
+    #[allow(unsafe_code)]
     if vertical && wd != Wd::W16 {
         let back: [__m128i; 8] = core::array::from_fn(|k| v[4 + k]);
         let out = transpose8x16(&back);
         for (i, o) in out.iter().enumerate() {
-            put::<8>(reg, 2 * i * stride, _mm_cvtsi128_si64(*o).to_le_bytes());
-            put::<8>(
-                reg,
-                (2 * i + 1) * stride,
-                _mm_extract_epi64::<1>(*o).to_le_bytes(),
-            );
+            unsafe {
+                st8(reg, 2 * i * stride, *o);
+                st8(reg, (2 * i + 1) * stride, _mm_unpackhi_epi64(*o, *o));
+            }
         }
     } else if vertical {
         let rows = transpose(&v);
         for (i, r) in rows.iter().enumerate() {
-            put::<16>(reg, i * stride, b16(*r));
+            unsafe { st16(reg, i * stride, *r) };
         }
     } else {
         let (first, last) = match wd {
@@ -444,7 +457,10 @@ pub(super) fn filter(e: Edge<'_>) {
         // An index loop: the iterator chain stays out of line.
         #[allow(clippy::needless_range_loop)]
         for k in first..last {
-            put::<16>(reg, (k + taps - 8) * stride, b16(v[k]));
+            #[allow(unsafe_code)]
+            unsafe {
+                st16(reg, (k + taps - 8) * stride, v[k]);
+            }
         }
     }
 }

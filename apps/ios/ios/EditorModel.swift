@@ -430,6 +430,20 @@ final class EditorModel {
         }
     }
 
+    /// The axes the face of `clip` varies along, each with where the clip
+    /// has it; none for a face that does not vary.
+    func fontAxes(of clip: String) -> [FontAxis] {
+        (try? editor?.textFontAxes(clipId: clip)) ?? []
+    }
+
+    /// Move the face of `clip` along the axis `tag`. Changes while `live`
+    /// join one undo step and are saved when the last one, not live, arrives.
+    func setTextFontAxis(_ clip: String, tag: String, value: Double, live: Bool) {
+        edit(save: !live) {
+            try $0.setTextFontAxis(clipId: clip, tag: tag, value: value, live: live)
+        }
+    }
+
     /// Change how `clip` looks. Changes while `live` join one undo step and
     /// are saved when the last one, not live, arrives.
     func styleText(_ clip: String, _ change: TextStyleChange, live: Bool) {

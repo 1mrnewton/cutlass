@@ -26,6 +26,8 @@ struct TextPanel: View {
     @State private var query = ""
     /// The faces Rust matched to the search.
     @State private var found: [Font]
+    /// The axes the clip's face varies along.
+    @State private var axes: [FontAxis] = []
     @FocusState private var typing: Bool
     @FocusState private var searching: Bool
 
@@ -113,14 +115,16 @@ struct TextPanel: View {
     /// while the words are being typed.
     private var selected: Range<Int>? { typing ? marked : nil }
 
-    /// Read what the buttons show from the clip.
+    /// Read what the buttons and the sliders show from the clip.
     private func read() {
         guard let typed, let style = model.text(of: typed)?.style else {
             pattern = nil
+            axes = []
             return
         }
         pattern = selected.flatMap { model.textPattern(of: typed, letters: $0) }
             ?? TextPattern(bold: style.bold, italic: style.italic, underline: style.underline)
+        axes = model.fontAxes(of: typed)
     }
 
     private var fonts: some View {
@@ -145,6 +149,17 @@ struct TextPanel: View {
                     .frame(height: 34)
             } else {
                 faces
+            }
+            ForEach(axes.filter { $0.min < $0.max }, id: \.tag) { axis in
+                StyleSlider(
+                    label: axis.name, value: axis.value, range: axis.min...axis.max,
+                    shown: { "\(Int($0.rounded()))" }
+                ) { value, live in
+                    if let typed {
+                        model.setTextFontAxis(typed, tag: axis.tag, value: value, live: live)
+                    }
+                }
+                .id(face + axis.tag)
             }
         }
     }
@@ -596,6 +611,8 @@ struct StyleSlider: View {
         HStack(spacing: 12) {
             Text(label)
                 .font(.footnote)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
                 .foregroundStyle(.white.opacity(0.75))
                 .frame(width: 72, alignment: .leading)
             Slider(

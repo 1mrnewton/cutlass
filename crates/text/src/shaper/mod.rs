@@ -440,6 +440,10 @@ fn described(character: char, cluster: usize) -> Glyph {
         glyph.side = fallback::side(character, props.combining());
     }
     glyph.ignorable = props.default_ignorable() && !hangul::filler(character);
+    glyph.hidden = matches!(
+        u32::from(character),
+        0x034F | 0x180B..=0x180D | 0x180F | 0xE0020..=0xE007F
+    );
     glyph.joiner = character == '\u{200D}';
     glyph.non_joiner = character == '\u{200C}';
     glyph.continues = props.is_mark();
@@ -678,6 +682,17 @@ fn normalize(
             parts[start..end].sort_by_key(|glyph| glyph.combining);
         }
         start = end;
+    }
+    // A joiner of marks that kept no two marks from being sorted is
+    // stepped over like any character that draws nothing. One that did,
+    // or that starts or ends the text, stays in a substitution's way.
+    for index in 1..parts.len().saturating_sub(1) {
+        if parts[index].character == '\u{34F}'
+            && (parts[index + 1].combining == 0
+                || parts[index - 1].combining <= parts[index + 1].combining)
+        {
+            parts[index].hidden = false;
+        }
     }
     // Put together what the face draws as one.
     let mut out: Vec<Glyph> = Vec::with_capacity(parts.len());
@@ -2127,6 +2142,12 @@ mod tests {
             "[19=0@450,-30+0|16=0@450,50+0|11=0+500]"
         );
         assert_eq!(nkoo("\u{7CA}\u{7EB}\u{34F}"), "[15=0@450,-30+0|11=0+500]");
+        // A joiner of marks that keeps two marks in the order typed is
+        // in a lookup's way: the second is not right after the first.
+        assert_eq!(
+            nkoo("\u{7CA}\u{7EB}\u{34F}\u{7F2}"),
+            "[16=0@450,50+0|15=0@450,-30+0|11=0+500]"
+        );
         // A mark with no letter stands on a dotted circle, and so does
         // a non-joiner alone.
         assert_eq!(nkoo("\u{7EB}"), "[15=0@450,-30+0|10=0+600]");

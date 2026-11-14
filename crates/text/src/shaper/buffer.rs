@@ -95,6 +95,11 @@ pub(crate) struct Glyph {
     pub(crate) side: u8,
     /// It draws nothing unless the font gives it a glyph a lookup uses.
     pub(crate) ignorable: bool,
+    /// It draws nothing, but a substitution does not step over it as it
+    /// does over the others that draw nothing: a joiner of marks that
+    /// keeps two marks in the order typed, a Mongolian variation
+    /// selector, a tag character.
+    pub(crate) hidden: bool,
     pub(crate) joiner: bool,
     pub(crate) non_joiner: bool,
     /// It goes with the character before it: a mark, the second half of
@@ -136,6 +141,7 @@ impl Glyph {
             combining: 0,
             side: 0,
             ignorable: false,
+            hidden: false,
             joiner: false,
             non_joiner: false,
             continues: false,

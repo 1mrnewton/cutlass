@@ -199,6 +199,7 @@ impl<'f, 'a> Engine<'f, 'a> {
         if glyph.steps_over()
             && (over_non_joiner || !glyph.non_joiner)
             && (over_joiner || !glyph.joiner)
+            && (self.positioning || !glyph.hidden)
         {
             Skip::Maybe
         } else {

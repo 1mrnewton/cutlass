@@ -29,6 +29,8 @@ mod fixture_colr;
 mod fixture_fonts;
 #[cfg(test)]
 mod fixture_kern;
+#[cfg(test)]
+mod fixture_var;
 mod gpos;
 mod gsub;
 mod gvar;
@@ -45,6 +47,8 @@ mod strike;
 mod ttf;
 mod variants;
 mod vary;
+#[cfg(test)]
+mod vary_tests;
 
 pub use colr::{
     Affine, ClipBox, Color, ColorGlyph, ColorLine, ColorStop, CompositeMode, Extend, Paint,

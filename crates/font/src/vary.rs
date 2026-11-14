@@ -303,9 +303,8 @@ fn bent(pairs: &[u8], place: i32) -> i32 {
         if first + 2 == last {
             return to(first + 1);
         }
-        let takes_first = first == last
-            || place > 0
-            || (place == 0 && to(first).abs() < to(last).abs());
+        let takes_first =
+            first == last || place > 0 || (place == 0 && to(first).abs() < to(last).abs());
         return if takes_first { to(first) } else { to(last) };
     }
     let Some(after) = (start..end).find(|index| place < from(*index)) else {

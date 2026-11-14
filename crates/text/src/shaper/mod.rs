@@ -2605,6 +2605,13 @@ mod tests {
                 .arg(format!("--direction={direction}"))
                 .arg(format!("--script={script}"))
                 .arg(format!("--variations={settings}"))
+                // More for hb-shape, such as `--features=-trak`, which
+                // has it leave out the tracking it adds at 12 points.
+                .args(
+                    std::env::var("CUTLASS_SHAPE_HB")
+                        .unwrap_or_default()
+                        .split_whitespace(),
+                )
                 .args([
                     "--no-glyph-names",
                     "--utf8-clusters",

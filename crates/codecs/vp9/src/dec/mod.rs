@@ -32,7 +32,6 @@ use crate::lpf;
 use crate::prob::{self, Counts};
 
 use self::bool::Bool;
-use self::ctx::Nb;
 use self::frame::{Dims, MvRef, Pic};
 use self::parse::{LfMi, Shared, State, Tile};
 use self::recon::{Ctx, Recon, RefPic, Scale, View};
@@ -54,11 +53,9 @@ fn tile_edge(index: usize, mis: usize, log2: u8) -> usize {
 pub struct ParseBufs {
     pub tiles: Vec<TileSyntax>,
     pub mvs: Vec<MvRef>,
-    pub above: Vec<Nb>,
-    pub above_part: Vec<u8>,
-    pub above_nz: [Vec<u8>; 3],
     pub masks: Vec<lpf::Mask>,
     pub grid: Vec<LfMi>,
+    pub states: Vec<State>,
 }
 
 /// What a frame's parse leaves: its syntax for reconstruction, and what
@@ -73,23 +70,32 @@ pub struct ParseOut {
     pub spare: ParseBufs,
 }
 
-/// The parse of one frame's tiles, a superblock row at a time.
+/// The parse of one tile column, over every tile row.
+struct TileCol<'p> {
+    state: State,
+    coder: Option<Bool<'p>>,
+    tile_row: usize,
+    row_end: usize,
+}
+
+/// The parse of one frame's tiles: a superblock row at a time on this
+/// thread, or each tile column on its own.
 pub struct FrameParse<'p> {
     parsed: &'p Parsed<'p>,
     levels: lpf::Levels,
     prev_mvs: Option<&'p [MvRef]>,
     last_seg: &'p [u8],
-    state: State,
+    cols: Vec<TileCol<'p>>,
     tiles: Vec<TileSyntax>,
     data: Vec<&'p [u8]>,
-    coders: Vec<Bool<'p>>,
-    tile_row: usize,
-    row_end: usize,
     ref_status: [u8; 3],
     mi_cols: usize,
     mi_rows: usize,
     sb_rows: usize,
-    spare: ParseBufs,
+    /// The frame's masks (and per-sample grid), merged row by row.
+    masks: Vec<lpf::Mask>,
+    grid: Vec<LfMi>,
+    mvs: Vec<MvRef>,
 }
 
 impl<'p> FrameParse<'p> {
@@ -116,44 +122,6 @@ impl<'p> FrameParse<'p> {
         }
         let filter_on = h.filter_level != 0;
         let needs_grid = filter_on && h.ss_x != h.ss_y;
-        let fill = |v: &mut Vec<u8>, n: usize| {
-            let mut v = std::mem::take(v);
-            v.clear();
-            v.resize(n, 0);
-            v
-        };
-        let mut mvs = std::mem::take(&mut bufs.mvs);
-        mvs.clear();
-        mvs.resize(cells, MvRef::default());
-        let state = State {
-            mvs,
-            segmap: vec![0u8; cells],
-            above: {
-                let mut v = std::mem::take(&mut bufs.above);
-                v.clear();
-                v.resize(sb_cols * 8, Nb::default());
-                v
-            },
-            above_part: fill(&mut bufs.above_part, sb_cols * 8),
-            above_nz: [
-                fill(&mut bufs.above_nz[0], sb_cols * 16),
-                fill(&mut bufs.above_nz[1], sb_cols * 16),
-                fill(&mut bufs.above_nz[2], sb_cols * 16),
-            ],
-            masks: {
-                let mut v = std::mem::take(&mut bufs.masks);
-                v.clear();
-                v.resize(if filter_on { sb_cols * sb_rows } else { 0 }, lpf::Mask::default());
-                v
-            },
-            grid: {
-                let mut v = std::mem::take(&mut bufs.grid);
-                v.clear();
-                v.resize(if needs_grid { cells } else { 0 }, LfMi::default());
-                v
-            },
-            counts: Counts::new(),
-        };
         // The tile data, in tile order.
         let tile_cols = 1usize << h.log2_tile_cols;
         let tile_rows = 1usize << h.log2_tile_rows;
@@ -184,27 +152,47 @@ impl<'p> FrameParse<'p> {
         let mut tiles = std::mem::take(&mut bufs.tiles);
         tiles.resize_with(tile_cols, TileSyntax::default);
         tiles.truncate(tile_cols);
+        let mut spare_states = std::mem::take(&mut bufs.states);
+        let mut cols = Vec::with_capacity(tile_cols);
         for (tc, t) in tiles.iter_mut().enumerate() {
             let col0 = tile_edge(tc, mi_cols, h.log2_tile_cols);
             let col1 = tile_edge(tc + 1, mi_cols, h.log2_tile_cols);
             t.reset(col0, col1, sb_rows);
+            let width = col1 - col0;
+            let tsb = width.div_ceil(8);
+            let mut st = spare_states.pop().unwrap_or_else(State::empty);
+            st.reset(col0, width, mi_rows, if filter_on { tsb * sb_rows } else { 0 }, needs_grid);
+            cols.push(TileCol {
+                state: st,
+                coder: None,
+                tile_row: 0,
+                row_end: 0,
+            });
         }
+        let mut masks = std::mem::take(&mut bufs.masks);
+        masks.clear();
+        masks.resize(if filter_on { sb_cols * sb_rows } else { 0 }, lpf::Mask::default());
+        let mut grid = std::mem::take(&mut bufs.grid);
+        grid.clear();
+        grid.resize(if needs_grid { cells } else { 0 }, LfMi::default());
+        let mut mvs = std::mem::take(&mut bufs.mvs);
+        mvs.clear();
+        mvs.resize(cells, MvRef::default());
         Ok(Self {
             parsed,
             levels: lpf::levels(h),
             prev_mvs: if h.use_prev_mvs { prev_mvs } else { None },
             last_seg,
-            state,
+            cols,
             tiles,
             data,
-            coders: Vec::new(),
-            tile_row: 0,
-            row_end: 0,
             ref_status,
             mi_cols,
             mi_rows,
             sb_rows,
-            spare: bufs,
+            masks,
+            grid,
+            mvs,
         })
     }
 
@@ -212,99 +200,197 @@ impl<'p> FrameParse<'p> {
         self.sb_rows
     }
 
-    /// Parses superblock row `sb_row` of every tile column; rows go in
-    /// order.
-    pub fn row(&mut self, sb_row: usize) -> Result<(), CodecError> {
-        let h = &self.parsed.header;
-        let mi_row = sb_row * 8;
-        let tile_cols = 1usize << h.log2_tile_cols;
-        while mi_row >= self.row_end {
-            // The next tile row's coders.
-            let tr = if self.coders.is_empty() { 0 } else { self.tile_row + 1 };
-            self.tile_row = tr;
-            self.row_end = tile_edge(tr + 1, self.mi_rows, h.log2_tile_rows);
-            self.coders.clear();
-            for tc in 0..tile_cols {
-                let b = Bool::new(self.data[tr * tile_cols + tc]).ok_or(bad("tile data"))?;
-                self.coders.push(b);
-            }
-            if tr + 1 >= 1usize << h.log2_tile_rows {
-                self.row_end = usize::MAX;
-            }
-        }
-        let shared = Shared {
+    /// What every tile reads, from the fields it borrows.
+    fn shared<'s>(
+        parsed: &'s Parsed<'s>,
+        levels: &'s lpf::Levels,
+        prev_mvs: Option<&'s [MvRef]>,
+        last_seg: &'s [u8],
+        ref_status: [u8; 3],
+        (mi_cols, mi_rows): (usize, usize),
+    ) -> Shared<'s> {
+        let h = &parsed.header;
+        Shared {
             h,
-            fc: &self.parsed.fc,
-            prev_mvs: self.prev_mvs,
-            last_seg: self.last_seg,
-            levels: &self.levels,
-            mi_cols: self.mi_cols,
-            mi_rows: self.mi_rows,
-            sb_cols: self.mi_cols.div_ceil(8),
+            fc: &parsed.fc,
+            prev_mvs,
+            last_seg,
+            levels,
+            mi_cols,
+            mi_rows,
+            sb_cols: mi_cols.div_ceil(8),
             collect: !h.error_resilient && !h.frame_parallel,
             intra_frame: h.is_intra(),
             part_probs: if h.is_intra() {
                 prob::kf_partition()
             } else {
-                self.parsed.fc.partition
+                parsed.fc.partition
             },
             bd: u32::from(h.bit_depth),
             filter_on: h.filter_level != 0,
             needs_grid: h.filter_level != 0 && h.ss_x != h.ss_y,
-            ref_status: self.ref_status,
-        };
-        let mut corrupt = false;
-        let mut unsupported = false;
-        for (t, b) in self.tiles.iter_mut().zip(self.coders.iter_mut()) {
-            if t.col0 >= t.col1 {
-                t.end_row(sb_row);
-                continue;
+            ref_status,
+        }
+    }
+
+    /// Parses superblock row `sb_row` of every tile column, on this
+    /// thread, and merges its loop filter masks; rows go in order.
+    pub fn row(&mut self, sb_row: usize) -> Result<(), CodecError> {
+        let shared = Self::shared(self.parsed, &self.levels, self.prev_mvs, self.last_seg, self.ref_status, (self.mi_cols, self.mi_rows));
+        let tile_cols = self.cols.len();
+        for (tc, (col, syn)) in self.cols.iter_mut().zip(self.tiles.iter_mut()).enumerate() {
+            parse_row(col, syn, &shared, &self.data, tc, tile_cols, sb_row)?;
+        }
+        merge_row(&self.cols, &shared, &mut self.masks, &mut self.grid, sb_row);
+        Ok(())
+    }
+
+    /// Parses every row of every tile column, each column on its own
+    /// thread when there are several.
+    pub fn all(&mut self) -> Result<(), CodecError> {
+        let shared = Self::shared(self.parsed, &self.levels, self.prev_mvs, self.last_seg, self.ref_status, (self.mi_cols, self.mi_rows));
+        let tile_cols = self.cols.len();
+        let rows = self.sb_rows;
+        let data = &self.data;
+        let run = |tc: usize, col: &mut TileCol<'p>, syn: &mut TileSyntax| -> Result<(), CodecError> {
+            for r in 0..rows {
+                parse_row(col, syn, &shared, data, tc, tile_cols, r)?;
             }
-            let (col0, col1) = (t.col0, t.col1);
-            let mut p = Tile::new(&shared, &mut self.state, t, b, col0, col1);
-            p.sb_row(mi_row);
-            corrupt |= p.corrupt;
-            unsupported |= p.unsupported;
-        }
-        if unsupported {
-            return Err(CodecError::Unsupported {
-                what: "vp9 reference scale",
+            Ok(())
+        };
+        if tile_cols == 1 {
+            if let (Some(col), Some(syn)) = (self.cols.first_mut(), self.tiles.first_mut()) {
+                run(0, col, syn)?;
+            }
+        } else {
+            let results: Vec<Result<(), CodecError>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = self
+                    .cols
+                    .iter_mut()
+                    .zip(self.tiles.iter_mut())
+                    .enumerate()
+                    .map(|(tc, (col, syn))| scope.spawn(move || run(tc, col, syn)))
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap_or(Err(bad("tile thread"))))
+                    .collect()
             });
+            for r in results {
+                r?;
+            }
         }
-        if corrupt {
-            return Err(bad("tile data"));
+        for r in 0..rows {
+            merge_row(&self.cols, &shared, &mut self.masks, &mut self.grid, r);
         }
         Ok(())
     }
 
     /// The syntax parsed so far, and the loop filter masks.
     pub fn syntax(&self) -> (&[TileSyntax], &[lpf::Mask], &[LfMi]) {
-        (&self.tiles, &self.state.masks, &self.state.grid)
+        (&self.tiles, &self.masks, &self.grid)
     }
 
     pub fn finish(self) -> ParseOut {
-        let State {
-            mvs,
-            segmap,
-            above,
-            above_part,
-            above_nz,
-            masks,
-            grid,
-            counts,
-        } = self.state;
-        let mut spare = self.spare;
-        spare.above = above;
-        spare.above_part = above_part;
-        spare.above_nz = above_nz;
+        let mi_cols = self.mi_cols;
+        let mut mvs = self.mvs;
+        let mut segmap = vec![0u8; mi_cols * self.mi_rows];
+        let mut counts = Counts::new();
+        let mut states = Vec::with_capacity(self.cols.len());
+        for col in self.cols {
+            let st = col.state;
+            let (c0, w) = (st.col0, st.width);
+            if w > 0 {
+                for r in 0..self.mi_rows {
+                    mvs[r * mi_cols + c0..r * mi_cols + c0 + w].copy_from_slice(&st.mvs[r * w..r * w + w]);
+                    segmap[r * mi_cols + c0..r * mi_cols + c0 + w].copy_from_slice(&st.segmap[r * w..r * w + w]);
+                }
+            }
+            counts.add(&st.counts);
+            states.push(st);
+        }
         ParseOut {
             tiles: self.tiles,
             mvs,
             segmap,
             counts,
-            masks,
-            grid,
-            spare,
+            masks: self.masks,
+            grid: self.grid,
+            spare: ParseBufs {
+                states,
+                ..ParseBufs::default()
+            },
+        }
+    }
+}
+
+/// Parses superblock row `sb_row` of tile column `tc`, starting the next
+/// tile row's coder when the row is its first.
+fn parse_row<'p>(
+    col: &mut TileCol<'p>,
+    syn: &mut TileSyntax,
+    shared: &Shared<'_>,
+    data: &[&'p [u8]],
+    tc: usize,
+    tile_cols: usize,
+    sb_row: usize,
+) -> Result<(), CodecError> {
+    let h = shared.h;
+    let mi_row = sb_row * 8;
+    while mi_row >= col.row_end {
+        let tr = if col.coder.is_none() { 0 } else { col.tile_row + 1 };
+        col.tile_row = tr;
+        col.row_end = if tr + 1 >= 1usize << h.log2_tile_rows {
+            usize::MAX
+        } else {
+            tile_edge(tr + 1, shared.mi_rows, h.log2_tile_rows)
+        };
+        let d = data.get(tr * tile_cols + tc).copied().unwrap_or(&[]);
+        col.coder = Some(Bool::new(d).ok_or(bad("tile data"))?);
+    }
+    if syn.col0 >= syn.col1 {
+        syn.end_row(sb_row);
+        return Ok(());
+    }
+    let (col0, col1) = (syn.col0, syn.col1);
+    let Some(b) = col.coder.as_mut() else {
+        return Err(bad("tile data"));
+    };
+    let mut p = Tile::new(shared, &mut col.state, syn, b, col0, col1);
+    p.sb_row(mi_row);
+    if p.unsupported {
+        return Err(CodecError::Unsupported {
+            what: "vp9 reference scale",
+        });
+    }
+    if p.corrupt {
+        return Err(bad("tile data"));
+    }
+    Ok(())
+}
+
+/// Copies superblock row `sb_row`'s loop filter masks (and per-sample
+/// grid) from the tile columns into the frame's.
+fn merge_row(cols: &[TileCol<'_>], shared: &Shared<'_>, masks: &mut [lpf::Mask], grid: &mut [LfMi], sb_row: usize) {
+    if !shared.filter_on {
+        return;
+    }
+    let sb_cols = shared.sb_cols;
+    for col in cols {
+        let st = &col.state;
+        let tsb = st.width.div_ceil(8);
+        let sb0 = st.col0 / 8;
+        if tsb == 0 {
+            continue;
+        }
+        masks[sb_row * sb_cols + sb0..sb_row * sb_cols + sb0 + tsb]
+            .copy_from_slice(&st.masks[sb_row * tsb..sb_row * tsb + tsb]);
+        if shared.needs_grid {
+            let w = st.width;
+            for r in sb_row * 8..(sb_row * 8 + 8).min(shared.mi_rows) {
+                let at = r * shared.mi_cols + st.col0;
+                grid[at..at + w].copy_from_slice(&st.grid[r * w..r * w + w]);
+            }
         }
     }
 }
@@ -429,13 +515,19 @@ pub fn decode_frame<P: Pixel + Send + Sync>(
     let (pics, status) = ref_pics(parsed, refs);
     let mut fp = FrameParse::new(parsed, prev_mvs, last_seg, status, bufs)?;
     let rows = fp.sb_rows();
-    let out = if let Some((w, ret)) = workers {
-        for r in 0..rows {
-            fp.row(r)?;
-        }
+    let pic_of = |buf| Pic {
+        buf,
+        dims,
+        color_space: h.color_space,
+        color_range: h.color_range,
+        render_width: h.render_width,
+        render_height: h.render_height,
+    };
+    if let Some((w, ret)) = workers {
+        fp.all()?;
         let mut out = fp.finish();
         let writer = frame::writer(&dims, spare);
-        let buf = Arc::clone(writer.shared());
+        let pic = pic_of(Arc::clone(writer.shared()));
         let mut fr = FrameRecon::new(parsed, dims, pics, writer);
         let reuse = Reuse {
             tiles: std::mem::take(&mut out.tiles),
@@ -450,39 +542,16 @@ pub fn decode_frame<P: Pixel + Send + Sync>(
             drop(fr);
             let _ = ret.send(reuse);
         });
-        return Ok((
-            Pic {
-                buf,
-                dims,
-                color_space: h.color_space,
-                color_range: h.color_range,
-                render_width: h.render_width,
-                render_height: h.render_height,
-            },
-            out,
-        ));
-    } else {
-        let writer = frame::writer(&dims, spare);
-        let buf = Arc::clone(writer.shared());
-        let mut fr = FrameRecon::new(parsed, dims, pics, writer);
-        for r in 0..rows {
-            fp.row(r)?;
-            let (tiles, masks, grid) = fp.syntax();
-            fr.row(tiles, masks, grid, r);
-        }
-        drop(fr);
-        (fp.finish(), buf)
-    };
-    let (out, buf) = out;
-    Ok((
-        Pic {
-            buf,
-            dims,
-            color_space: h.color_space,
-            color_range: h.color_range,
-            render_width: h.render_width,
-            render_height: h.render_height,
-        },
-        out,
-    ))
+        return Ok((pic, out));
+    }
+    let writer = frame::writer(&dims, spare);
+    let pic = pic_of(Arc::clone(writer.shared()));
+    let mut fr = FrameRecon::new(parsed, dims, pics, writer);
+    for r in 0..rows {
+        fp.row(r)?;
+        let (tiles, masks, grid) = fp.syntax();
+        fr.row(tiles, masks, grid, r);
+    }
+    drop(fr);
+    Ok((pic, fp.finish()))
 }

@@ -104,7 +104,54 @@ pub struct Counts {
     pub mv_hp: [[u32; 2]; 2],
 }
 
+/// Adds every count of `b` into `a`, for nested arrays of `u32`.
+trait AddInto {
+    fn add_into(&mut self, b: &Self);
+}
+
+impl AddInto for u32 {
+    fn add_into(&mut self, b: &Self) {
+        *self = self.wrapping_add(*b);
+    }
+}
+
+impl<T: AddInto, const N: usize> AddInto for [T; N] {
+    fn add_into(&mut self, b: &Self) {
+        for (x, y) in self.iter_mut().zip(b) {
+            x.add_into(y);
+        }
+    }
+}
+
 impl Counts {
+    /// Adds the counts of another tile.
+    pub fn add(&mut self, b: &Counts) {
+        self.coef.add_into(&b.coef);
+        self.eob.add_into(&b.eob);
+        self.skip.add_into(&b.skip);
+        self.tx8.add_into(&b.tx8);
+        self.tx16.add_into(&b.tx16);
+        self.tx32.add_into(&b.tx32);
+        self.inter_mode.add_into(&b.inter_mode);
+        self.interp.add_into(&b.interp);
+        self.intra_inter.add_into(&b.intra_inter);
+        self.comp_inter.add_into(&b.comp_inter);
+        self.comp_ref.add_into(&b.comp_ref);
+        self.single_ref.add_into(&b.single_ref);
+        self.y_mode.add_into(&b.y_mode);
+        self.uv_mode.add_into(&b.uv_mode);
+        self.partition.add_into(&b.partition);
+        self.joints.add_into(&b.joints);
+        self.mv_sign.add_into(&b.mv_sign);
+        self.mv_class.add_into(&b.mv_class);
+        self.mv_class0.add_into(&b.mv_class0);
+        self.mv_bits.add_into(&b.mv_bits);
+        self.mv_class0_fp.add_into(&b.mv_class0_fp);
+        self.mv_fp.add_into(&b.mv_fp);
+        self.mv_class0_hp.add_into(&b.mv_class0_hp);
+        self.mv_hp.add_into(&b.mv_hp);
+    }
+
     pub fn new() -> Self {
         Self {
             coef: [[[[[[0; 4]; 6]; 6]; 2]; 2]; 4],

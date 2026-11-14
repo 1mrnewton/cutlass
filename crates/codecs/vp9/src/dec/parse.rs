@@ -113,9 +113,13 @@ pub struct LfMi {
     pub mode: u8,
 }
 
-/// What the tiles of a frame write besides their syntax: the motion and
-/// segmentation maps, the above contexts and the loop filter masks.
+/// What one tile column writes besides its syntax, in the tile's own
+/// columns (`col0` on): the motion and segmentation maps, the above
+/// contexts, the loop filter masks and the symbol counts.
 pub struct State {
+    /// The tile's first column and its width, in 8×8 units.
+    pub col0: usize,
+    pub width: usize,
     pub mvs: Vec<MvRef>,
     pub segmap: Vec<u8>,
     pub above: Vec<Nb>,
@@ -124,6 +128,50 @@ pub struct State {
     pub masks: Vec<lpf::Mask>,
     pub grid: Vec<LfMi>,
     pub counts: Counts,
+}
+
+impl State {
+    pub fn empty() -> Self {
+        Self {
+            col0: 0,
+            width: 0,
+            mvs: Vec::new(),
+            segmap: Vec::new(),
+            above: Vec::new(),
+            above_part: Vec::new(),
+            above_nz: [Vec::new(), Vec::new(), Vec::new()],
+            masks: Vec::new(),
+            grid: Vec::new(),
+            counts: Counts::new(),
+        }
+    }
+
+    /// Clears the state for a tile column `width` wide from `col0`, of a
+    /// frame `mi_rows` high, with `masks` superblock masks and, with
+    /// `grid`, the per-sample filter grid.
+    pub fn reset(&mut self, col0: usize, width: usize, mi_rows: usize, masks: usize, grid: bool) {
+        let cells = width * mi_rows;
+        let a8 = width.div_ceil(8) * 8;
+        self.col0 = col0;
+        self.width = width;
+        self.mvs.clear();
+        self.mvs.resize(cells, MvRef::default());
+        self.segmap.clear();
+        self.segmap.resize(cells, 0);
+        self.above.clear();
+        self.above.resize(a8, Nb::default());
+        self.above_part.clear();
+        self.above_part.resize(a8, 0);
+        for nz in &mut self.above_nz {
+            nz.clear();
+            nz.resize(a8 * 2, 0);
+        }
+        self.masks.clear();
+        self.masks.resize(masks, lpf::Mask::default());
+        self.grid.clear();
+        self.grid.resize(if grid { cells } else { 0 }, LfMi::default());
+        self.counts = Counts::new();
+    }
 }
 
 /// The parser of one superblock row of one tile.
@@ -224,7 +272,7 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
         let has_rows = row + hbs < s.mi_rows;
         let has_cols = col + hbs < s.mi_cols;
         let ctx = {
-            let above = usize::from(self.f.above_part[col] >> n8) & 1;
+            let above = usize::from(self.f.above_part[col - self.col0] >> n8) & 1;
             let left = usize::from(self.left_part[row & 7] >> n8) & 1;
             left * 2 + above + n8 as usize * 4
         };
@@ -290,8 +338,9 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
         if bsize == BLOCK_8X8 || p != PARTITION_SPLIT {
             let n = 1usize << geom::mi_width_log2(bsize);
             let (above, left) = geom::partition_context_byte(sub);
-            let end = (col + n).min(self.f.above_part.len());
-            self.f.above_part[col..end].fill(above);
+            let a = col - self.col0;
+            let end = (a + n).min(self.f.above_part.len());
+            self.f.above_part[a..end].fill(above);
             let l = row & 7;
             self.left_part[l..(l + n).min(8)].fill(left);
         }
@@ -300,7 +349,7 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
     // Blocks ------------------------------------------------------------
 
     fn above_nb(&self, b: &Blk) -> Option<&Nb> {
-        (b.row > 0).then(|| &self.f.above[b.col])
+        (b.row > 0).then(|| &self.f.above[b.col - self.col0])
     }
 
     fn left_nb(&self, b: &Blk) -> Option<&Nb> {
@@ -341,9 +390,9 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
                 mv: b.mv,
                 refs: b.refs,
             };
-            let mi_cols = s.mi_cols;
+            let tw = self.f.width;
             for y in 0..b.y_mis {
-                let at = (row + y) * mi_cols + col;
+                let at = (row + y) * tw + col - self.col0;
                 self.f.mvs[at..at + b.x_mis].fill(r);
             }
         }
@@ -382,12 +431,13 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
             refs: b.refs,
             bmv: b.bmv,
         };
-        let end = (col + bw).min(self.f.above.len());
-        self.f.above[col..end].fill(nb);
+        let a = col - self.col0;
+        let end = (a + bw).min(self.f.above.len());
+        self.f.above[a..end].fill(nb);
         let l = row & 7;
         self.left[l..(l + bh).min(8)].fill(nb);
         if s.filter_on {
-            let index = (row >> 3) * s.sb_cols + (col >> 3);
+            let index = (row >> 3) * self.f.width.div_ceil(8) + ((col - self.col0) >> 3);
             lpf::build(
                 &mut self.f.masks[index],
                 s.levels,
@@ -415,7 +465,7 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
                     mode: b.mode,
                 };
                 for y in 0..b.y_mis {
-                    let at = (row + y) * s.mi_cols + col;
+                    let at = (row + y) * self.f.width + col - self.col0;
                     self.f.grid[at..at + b.x_mis].fill(g);
                 }
             }
@@ -593,16 +643,17 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
         let s = self.s;
         for y in 0..b.y_mis {
             let at = (b.row + y) * s.mi_cols + b.col;
+            let local = (b.row + y) * self.f.width + b.col - self.col0;
             for x in 0..b.x_mis {
-                self.f.segmap[at + x] = s.last_seg.get(at + x).copied().unwrap_or(0);
+                self.f.segmap[local + x] = s.last_seg.get(at + x).copied().unwrap_or(0);
             }
         }
     }
 
     fn write_seg(&mut self, b: &Blk, id: u8) {
-        let s = self.s;
+
         for y in 0..b.y_mis {
-            let at = (b.row + y) * s.mi_cols + b.col;
+            let at = (b.row + y) * self.f.width + b.col - self.col0;
             self.f.segmap[at..at + b.x_mis].fill(id);
         }
     }
@@ -897,7 +948,7 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
             return None;
         }
         if pos[0] == -1 {
-            Some(&self.f.above[c as usize])
+            Some(&self.f.above[c as usize - self.col0])
         } else {
             Some(&self.left[(r as usize) & 7])
         }
@@ -909,7 +960,7 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
         if r < 0 || c < self.col0 as isize || r >= self.s.mi_rows as isize || c >= self.col1 as isize {
             return None;
         }
-        Some(self.f.mvs[r as usize * self.s.mi_cols + c as usize])
+        Some(self.f.mvs[r as usize * self.f.width + c as usize - self.col0])
     }
 
     /// libvpx `dec_find_mv_refs`: up to two candidate vectors for `frame`,
@@ -1106,7 +1157,7 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
             let (ssx, ssy) = self.plane_ss(plane);
             let w = (b.bw * 2) >> ssx;
             let hh = (b.bh * 2) >> ssy;
-            let a = (b.col * 2) >> ssx;
+            let a = ((b.col - self.col0) * 2) >> ssx;
             let l = ((b.row * 2) & 15) >> ssy;
             let above = &mut self.f.above_nz[plane];
             let end = (a + w).min(above.len());
@@ -1174,7 +1225,7 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
     ) -> (usize, (usize, usize)) {
         let (ssx, ssy) = self.plane_ss(plane);
         let n = 1usize << tx;
-        let a = ((b.col * 2) >> ssx) + c4;
+        let a = (((b.col - self.col0) * 2) >> ssx) + c4;
         let l = (((b.row * 2) & 15) >> ssy) + r4;
         let above = &self.f.above_nz[plane];
         let left = &self.left_nz[plane];

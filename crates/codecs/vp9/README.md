@@ -248,16 +248,22 @@ A detailed picture panning 7 pixels a frame, with film grain, 60 frames
 
 | Cutlass | libvpx-vp9 | BD-rate Y | BD-rate avg | Time (Cutlass / libvpx) |
 | --- | --- | ---: | ---: | --- |
-| speed 6 | good, cpu-used 1 | −10% | +0.6% | 2.21 s / 2.51 s |
-| speed 6 | good, cpu-used 2 | −13% | +2.8% | 2.21 s / 2.13 s |
-| speed 7 | good, cpu-used 3 | −27% | −4.8% | 1.48 s / 1.75 s |
-| speed 7 | good, cpu-used 5 | −32% | −13% | 1.48 s / 1.76 s |
-| speed 9 | realtime, cpu-used 6 | −43% | −25% | 0.43 s / 0.51 s |
-| speed 10 | realtime, cpu-used 8 | | −59% | 0.38 s / 0.47 s |
+| speed 4 | good, cpu-used 0 | −15% | +8.4% | 4.24 s / 7.00 s |
+| speed 5 | good, cpu-used 1 | −20% | −4.6% | 2.67 s / 2.35 s |
+| speed 6 | good, cpu-used 1 | −16% | −3.6% | 1.93 s / 2.35 s |
+| speed 6 | good, cpu-used 2 | −19% | −1.2% | 1.93 s / 2.05 s |
+| speed 7 | good, cpu-used 3 | −27% | −4.8% | 1.24 s / 1.61 s |
+| speed 7 | good, cpu-used 5 | −32% | −13% | 1.24 s / 1.62 s |
+| speed 9 | realtime, cpu-used 6 | −43% | −25% | 0.47 s / 0.51 s |
+| speed 10 | realtime, cpu-used 8 | | −60% | 0.46 s / 0.42 s |
 
-Point by point against good, cpu-used 1 at 2 Mb/s, interleaved runs:
-libvpx 1981 kb/s at 42.31 dB (averaged PSNR) in 2.09 to 2.22 s, speed 6
-2047 kb/s at 42.34 dB in 2.08 to 2.26 s.
+(All in one sitting.) FFmpeg's `libvpx-vp9` encodes at good, cpu-used 1
+unless told otherwise: speed 6 is ahead of it on both measures in four
+fifths of its time, and every good preset from cpu-used 1 to 5 has a
+Cutlass speed ahead of it on both measures in less time. libvpx's
+slowest, cpu-used 0, keeps more chroma (0.8 dB more U and V PSNR at
+13% fewer bits than speed 5's 42.96 dB Y at 1.3 Mb/s); Cutlass's slow
+speeds are ahead on PSNR-Y and behind on the average there.
 
 On a clean 720p clip (no grain, 60 frames) speed 7 is ahead of good,
 cpu-used 1 on both measures (−15% on PSNR-Y, −3.2% averaged) in three
@@ -266,6 +272,13 @@ cpu-used 5 in its time; speed 6 is −9% / −11% against cpu-used 1 in its
 time.
 
 What moved the encoder most recently, at speed 6 unless said:
+
+- With the refinement pruned, speed 6 can afford speed 5's sub-sample
+  scoring on the real filters and its check of every whole sample within
+  two of the diamond's choice (4% fewer bits at the same averaged PSNR,
+  in the same time); speed 5 takes speed 6's prunes and keeps its own
+  transform and chroma searches (it was 1.75 times libvpx cpu-used 1's
+  time, now its time, with 20% / 4.6% fewer bits).
 
 - Candidates are kept for a trial only within a fifth of the best one's
   score (SAD and vector rate for inter, SATD for intra): −17% and −9% of

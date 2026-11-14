@@ -1186,6 +1186,54 @@ impl Shell {
         })
     }
 
+    /// The pattern every letter of the selected title has from `start` up
+    /// to `end`, which count characters of its words. `None` with no title
+    /// picked.
+    #[must_use]
+    pub fn text_range_pattern(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Option<cutlass_session::TextPattern> {
+        let segment_id = self.text_segment().ok()?;
+        let draft = self.session_draft().ok()?;
+        cutlass_session::text_range_pattern(draft, &segment_id, (start, end)).ok()
+    }
+
+    /// Turn bold, italic or underline on or off for the letters of the
+    /// selected title from `start` up to `end`; a part of `change` that is
+    /// `None` stays as it is. One undo step. Letters that already have the
+    /// pattern asked for are not a step.
+    pub fn set_text_range_pattern(
+        &mut self,
+        start: usize,
+        end: usize,
+        change: cutlass_model::PatternChange,
+    ) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        if let Some(now) = self.text_range_pattern(start, end)
+            && change.bold.is_none_or(|bold| bold == now.bold)
+            && change.italic.is_none_or(|italic| italic == now.italic)
+            && change
+                .underline
+                .is_none_or(|underline| underline == now.underline)
+            && start < end
+        {
+            return Ok(());
+        }
+        let face = self.face.name().to_owned();
+        self.apply(Request::SetTextRangePattern {
+            segment_id,
+            start,
+            end,
+            bold: change.bold,
+            italic: change.italic,
+            underline: change.underline,
+            face,
+        })
+    }
+
     /// Rewrite the selected title's words in `case`. A rich title keeps its
     /// ranges. Words already in that case are not an undo step.
     pub fn set_text_case(&mut self, case: LetterCase) -> Result<(), ShellError> {

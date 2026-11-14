@@ -57,6 +57,7 @@ pub use move_segment::move_segment;
 pub use place::place;
 pub use text::{
     BOLD_WIDTH, ITALIC_DEGREE, MAX_CAPTION_STAGGER_MS, NEW_TEXT_SIZE, Pattern as TextPattern,
+    text_range_pattern,
 };
 pub use track::{lane_fits, new_lane_index};
 pub use trim::trim;
@@ -163,6 +164,9 @@ pub enum EditError {
     TextColor,
     /// Text alignment is not left, center, or right.
     TextAlign,
+    /// The letters to style are not in the text, or the text is a
+    /// caption, whose words are styled as one.
+    TextRange,
     /// Letter spacing is not a fraction from -1 through 4.
     LetterSpacing,
     /// Line spacing is not greater than -1 and at most 4.
@@ -426,6 +430,25 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             draft,
             segment_id,
             text::Pattern {
+                bold: *bold,
+                italic: *italic,
+                underline: *underline,
+            },
+            face,
+        ),
+        Request::SetTextRangePattern {
+            segment_id,
+            start,
+            end,
+            bold,
+            italic,
+            underline,
+            face,
+        } => text::set_text_range_pattern(
+            draft,
+            segment_id,
+            (*start, *end),
+            cutlass_model::PatternChange {
                 bold: *bold,
                 italic: *italic,
                 underline: *underline,

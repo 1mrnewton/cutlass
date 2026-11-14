@@ -188,6 +188,9 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::FlowRate) => {
                 formatter.write_str("Optical flow fills a clip to 30, 50 or 60 frames a second")
             }
+            Self::Edit(EditError::TextRange) => {
+                formatter.write_str("Those letters are not in the text")
+            }
             Self::Edit(EditError::LetterSpacing) => {
                 formatter.write_str("letter spacing must be from -1 to 4")
             }

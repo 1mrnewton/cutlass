@@ -209,6 +209,60 @@ pub fn set_text_pattern(
     Ok(())
 }
 
+/// Turn bold, italic or underline on or off for the letters of `range`,
+/// a first character and the one after the last. A range of a face's own
+/// bold or italic draws in it; without one the letters are thickened or
+/// leaned as the whole text's are. A caption's words are styled as one,
+/// so a caption is refused.
+pub fn set_text_range_pattern(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    range: (usize, usize),
+    change: cutlass_model::PatternChange,
+    face: &str,
+) -> Result<(), EditError> {
+    let index = text_index(draft, segment_id)?;
+    {
+        // Checked before the text is made the clip's own.
+        let text = &draft.materials.texts[index];
+        let letters = text.words().map_or(0, |words| words.chars().count());
+        if !text.words.text.is_empty() || range.0 >= range.1 || range.1 > letters {
+            return Err(EditError::TextRange);
+        }
+    }
+    let index = own_text(draft, segment_id)?;
+    let text = &mut draft.materials.texts[index];
+    if !text.set_range_pattern(range.0, range.1, change) {
+        return Err(EditError::TextRange);
+    }
+    fill_face(text, face);
+    Ok(())
+}
+
+/// The pattern every letter of `range` has in the clip's text.
+pub fn text_range_pattern(
+    draft: &Draft,
+    segment_id: &SegmentId,
+    range: (usize, usize),
+) -> Result<Pattern, EditError> {
+    let text = &draft.materials.texts[text_index(draft, segment_id)?];
+    let own = Pattern::of(text);
+    let found = text.range_pattern(
+        range.0,
+        range.1,
+        cutlass_model::RichPattern {
+            bold: own.bold,
+            italic: own.italic,
+            underline: own.underline,
+        },
+    );
+    Ok(Pattern {
+        bold: found.bold,
+        italic: found.italic,
+        underline: found.underline,
+    })
+}
+
 /// Extra space between letters, as a fraction of the text size.
 /// `-1` removes one size of gap. `0` is the normal gap. `4` is the widest.
 pub fn set_letter_spacing(
@@ -1032,6 +1086,152 @@ mod tests {
             .unwrap();
         let text = &session.draft().materials.texts[0];
         assert_eq!((text.bold_width, text.italic_degree), (0.008, 20));
+    }
+
+    /// A session with a title "Hello world" on clip `a`, and a caption
+    /// on clip `said`.
+    fn titled() -> Session {
+        let mut draft = Draft::empty("D");
+        draft.tracks[0].id = TrackId::new("main");
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("title"),
+            content: "Hello world".to_owned(),
+            ..MaterialText::default()
+        });
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("caption"),
+            content: "A B".to_owned(),
+            words: cutlass_model::WordColumns {
+                text: vec!["A".to_owned(), "B".to_owned()],
+                start_time: vec![0, 50],
+                end_time: vec![50, 100],
+                ..cutlass_model::WordColumns::default()
+            },
+            ..MaterialText::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "title", TimeRange::new(0, 1_000_000)));
+        draft.tracks[0].segments.push(Segment::new(
+            "said",
+            "caption",
+            TimeRange::new(1_000_000, 1_000_000),
+        ));
+        Session::open(draft)
+    }
+
+    fn range(clip: &str, start: usize, end: usize, bold: Option<bool>) -> Request {
+        Request::SetTextRangePattern {
+            segment_id: clip.into(),
+            start,
+            end,
+            bold,
+            italic: None,
+            underline: None,
+            face: "face.ttf".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_range_of_letters_is_made_bold_in_one_step_and_undone_in_one() {
+        let mut session = titled();
+        let plain = session.draft().clone();
+        let clip = cutlass_model::SegmentId::new("a");
+        let seen = |session: &Session, start: usize, end: usize| {
+            super::text_range_pattern(session.draft(), &clip, (start, end)).unwrap()
+        };
+        assert!(!seen(&session, 6, 11).bold);
+        session.apply(0, &[range("a", 6, 11, Some(true))]).unwrap();
+        let text = &session.draft().materials.texts[0];
+        // The title holds its words and the range, and takes the face.
+        assert!(text.is_rich_text);
+        assert_eq!(text.words().unwrap(), "Hello world");
+        assert_eq!(text.font_path, "face.ttf");
+        let rich = text.rich().unwrap();
+        assert_eq!(rich.styles.len(), 1);
+        assert_eq!(
+            (rich.styles[0].range, rich.styles[0].bold),
+            ([6, 11], Some(true))
+        );
+        // The whole title is not bold; its second word is.
+        assert!(!super::Pattern::of(text).bold);
+        assert!(seen(&session, 6, 11).bold);
+        assert!(seen(&session, 7, 9).bold);
+        assert!(!seen(&session, 0, 11).bold);
+        // Italic on a part of it, and bold off again for one letter.
+        session
+            .apply(
+                1,
+                &[Request::SetTextRangePattern {
+                    segment_id: "a".into(),
+                    start: 8,
+                    end: 11,
+                    bold: None,
+                    italic: Some(true),
+                    underline: Some(true),
+                    face: String::new(),
+                }],
+            )
+            .unwrap();
+        session.apply(2, &[range("a", 6, 7, Some(false))]).unwrap();
+        let pattern = seen(&session, 8, 11);
+        assert!(pattern.bold && pattern.italic && pattern.underline);
+        assert!(!seen(&session, 6, 8).bold);
+        assert!(seen(&session, 7, 8).bold && !seen(&session, 7, 8).italic);
+        // Each was one step.
+        session.undo().unwrap();
+        session.undo().unwrap();
+        session.undo().unwrap();
+        assert_eq!(session.draft(), &plain);
+        // Typing keeps a range on its letters.
+        session.apply(6, &[range("a", 6, 11, Some(true))]).unwrap();
+        session
+            .apply(
+                7,
+                &[Request::SetTextContent {
+                    segment_id: "a".into(),
+                    content: "Oh, hello world!".to_owned(),
+                }],
+            )
+            .unwrap();
+        assert!(seen(&session, 10, 15).bold);
+        assert!(!seen(&session, 0, 10).bold);
+        assert!(!seen(&session, 9, 11).bold);
+        // The mark typed straight after the bold word is bold with it.
+        assert!(seen(&session, 15, 16).bold);
+    }
+
+    #[test]
+    fn a_range_that_is_not_in_the_text_or_is_a_captions_is_refused() {
+        let mut session = titled();
+        let before = session.draft().clone();
+        for request in [
+            // Empty, backwards, and past the words.
+            range("a", 3, 3, Some(true)),
+            range("a", 5, 2, Some(true)),
+            range("a", 0, 12, Some(true)),
+            range("a", usize::MAX - 1, usize::MAX, Some(true)),
+            // A caption's words are styled as one.
+            range("said", 0, 1, Some(true)),
+        ] {
+            assert_eq!(
+                session.apply(0, &[request]).unwrap_err(),
+                EditError::TextRange
+            );
+            assert_eq!(session.draft(), &before);
+        }
+        assert!(
+            session
+                .apply(0, &[range("gone", 0, 1, Some(true))])
+                .is_err()
+        );
+        assert_eq!(session.draft(), &before);
+        // A locked row is refused like any other edit of it.
+        let mut locked = before.clone();
+        locked.tracks[0].attribute = TrackAttribute(TrackAttribute::LOCK);
+        let mut session = Session::open(locked.clone());
+        assert!(session.apply(0, &[range("a", 0, 5, Some(true))]).is_err());
+        assert_eq!(session.draft(), &locked);
     }
 
     #[test]

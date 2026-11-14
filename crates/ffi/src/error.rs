@@ -158,6 +158,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::FlowRate => {
             "Optical flow fills a clip to 30, 50 or 60 frames a second".to_owned()
         }
+        EditError::TextRange => "those letters are not in the text".to_owned(),
         EditError::LetterSpacing => "letter spacing must be from -1 to 4".to_owned(),
         EditError::LineSpacing => "line spacing must be greater than -1 and at most 4".to_owned(),
         EditError::LineWidth => "the line width must be from zero through 8192".to_owned(),

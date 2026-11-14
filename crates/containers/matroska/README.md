@@ -35,7 +35,8 @@ Timestamps stay in the file's clock. A stream's timescale is 10⁹ / TimestampSc
 | FLAC STREAMINFO sent again at the end | n/a | Written over the first when it is the same length; a different length is refused | behavior test |
 | TrackTimestampScale other than 1 | Refused at open (`OpenError::Source`): the two mature readers disagree on what it scales (see below) | Never written | `a_track_timestamp_scale_other_than_one_is_refused` |
 | Chained Segments | Only the first Segment is read, forward and random; the reader ends cleanly where it ends (see below) | One Segment | `a_second_segment_after_the_first_is_not_read` |
-| Chapters, Tags, Attachments, BlockAdditions | Skipped | Not written | - |
+| Attachments | Skipped | A JPEG cover from `set_cover_art`: one AttachedFile, `cover.jpg`, `image/jpeg`, with a FileUID hashed from the picture, after Tracks and named in the SeekHead. Never in WebM, which has no Attachments | `a_cover_is_one_attached_file_after_tracks_and_the_packets_read_the_same`; ffprobe reads it as an attached picture |
+| Chapters, Tags, BlockAdditions | Skipped | Not written | - |
 
 `FEATURES` in `src/lib.rs` lists the same rows as data.
 

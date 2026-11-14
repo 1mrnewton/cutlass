@@ -10,7 +10,9 @@ use cutlass_container::{
     Trim,
 };
 use cutlass_matroska::meta::DocType;
-use cutlass_matroska::{MatroskaDemux, MatroskaMux};
+use cutlass_matroska::{MatroskaDemux, MatroskaMux, ids};
+
+use crate::build;
 
 type Out = MatroskaMux<Cursor<Vec<u8>>>;
 
@@ -708,4 +710,167 @@ fn a_file_with_tracks_and_no_packets_still_opens() {
     let mut demux = read_back(bytes);
     assert_eq!(demux.streams().len(), 1);
     assert!(all(&mut demux).is_empty());
+}
+
+/// The top-level elements of a written file's Segment: ID, offset from the
+/// Segment's data, and the element's data.
+fn segment_children(bytes: &[u8]) -> Vec<(u32, u64, Vec<u8>)> {
+    use cutlass_matroska::ebml::{Size, read_id, read_size};
+
+    let element = |at: usize| {
+        let (id, id_len) = read_id(&bytes[at..]).expect("id");
+        let (size, size_len) = read_size(&bytes[at + id_len..]).expect("size");
+        let Size::Known(size) = size else {
+            panic!("unknown size at {at}");
+        };
+        (
+            id,
+            at + id_len + size_len,
+            usize::try_from(size).expect("size"),
+        )
+    };
+    let (_, header_data, header_size) = element(0);
+    let (segment, data, size) = element(header_data + header_size);
+    assert_eq!(segment, ids::SEGMENT);
+    let mut children = Vec::new();
+    let mut at = data;
+    while at < data + size {
+        let (id, body, length) = element(at);
+        children.push((id, (at - data) as u64, bytes[body..body + length].to_vec()));
+        at = body + length;
+    }
+    children
+}
+
+/// A short JPEG-looking picture: the start-of-image marker, then bytes.
+fn fake_jpeg() -> Vec<u8> {
+    let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0];
+    jpeg.extend((0..300_u32).map(|i| u8::try_from(i * 7 % 251).expect("byte")));
+    jpeg.extend([0xFF, 0xD9]);
+    jpeg
+}
+
+/// One second of Opus in Matroska or WebM, with `cover` set when given.
+fn opus_file(mut mux: Out, cover: Option<Vec<u8>>) -> Vec<u8> {
+    let sound = mux
+        .add_stream(audio(CodecId::Opus, &opus_head(), 48_000))
+        .expect("audio");
+    if let Some(cover) = cover {
+        mux.set_cover_art(cover).expect("cover");
+    }
+    for index in 0..50_i64 {
+        let bytes = vec![0xFC, u8::try_from(index).expect("byte")];
+        mux.write_packet(&packet(sound, bytes, index * 960, 960, 48_000, true))
+            .expect("packet");
+    }
+    finish(mux, &[(sound, 48_000, 50 * 960)])
+}
+
+/// The cover is Attachments right after Tracks, holding one AttachedFile:
+/// FileName `cover.jpg`, FileMediaType `image/jpeg`, FileData the picture
+/// and a FileUID that is not zero (RFC 9559, 5.1.6). The SeekHead points at
+/// it, and the demuxer reads the same packets as without it.
+#[test]
+fn a_cover_is_one_attached_file_after_tracks_and_the_packets_read_the_same() {
+    let jpeg = fake_jpeg();
+    let plain = opus_file(MatroskaMux::new(Cursor::new(Vec::new())), None);
+    let bytes = opus_file(
+        MatroskaMux::new(Cursor::new(Vec::new())),
+        Some(jpeg.clone()),
+    );
+    let children = segment_children(&bytes);
+    let order: Vec<u32> = children.iter().map(|child| child.0).collect();
+    assert_eq!(
+        &order[..5],
+        &[
+            ids::SEEK_HEAD,
+            ids::VOID,
+            ids::INFO,
+            ids::TRACKS,
+            ids::ATTACHMENTS
+        ]
+    );
+    assert!(
+        !segment_children(&plain)
+            .iter()
+            .any(|child| child.0 == ids::ATTACHMENTS)
+    );
+    let (_, at, attachments) = &children[4];
+
+    let mut file = Vec::new();
+    file.extend(build::bytes(ids::FILE_NAME, b"cover.jpg"));
+    file.extend(build::bytes(ids::FILE_MEDIA_TYPE, b"image/jpeg"));
+    file.extend(build::bytes(ids::FILE_DATA, &jpeg));
+    // The one AttachedFile fills Attachments, and ends with its FileUID.
+    let (id, id_len) = cutlass_matroska::ebml::read_id(attachments).expect("id");
+    assert_eq!(id, ids::ATTACHED_FILE);
+    let (_, size_len) = cutlass_matroska::ebml::read_size(&attachments[id_len..]).expect("size");
+    let written = &attachments[id_len + size_len..];
+    assert_eq!(&written[..file.len()], file.as_slice());
+    let uid = &written[file.len()..];
+    assert_eq!(&uid[..2], &[0x46, 0xAE]);
+    let width = usize::from(uid[2] & 0x7F);
+    assert_eq!(uid.len(), 3 + width);
+    assert!(uid[3..].iter().any(|&byte| byte != 0), "FileUID is zero");
+
+    let seeks = cutlass_matroska::meta::parse_seek_head(&children[0].2).expect("seek head");
+    let entry = seeks
+        .iter()
+        .find(|entry| entry.id == ids::ATTACHMENTS)
+        .expect("SeekHead names Attachments");
+    assert_eq!(entry.position, *at);
+    assert!(seeks.iter().any(|entry| entry.id == ids::CUES));
+
+    let mut with = read_back(bytes);
+    let mut without = read_back(plain);
+    assert_eq!(with.streams(), without.streams());
+    assert_eq!(all(&mut with), all(&mut without));
+}
+
+/// WebM has no Attachments: a cover given to a WebM file is taken and not
+/// written, and the file is byte for byte the one without it.
+#[test]
+fn a_webm_file_takes_a_cover_and_writes_none() {
+    let plain = opus_file(MatroskaMux::webm(Cursor::new(Vec::new())), None);
+    let bytes = opus_file(
+        MatroskaMux::webm(Cursor::new(Vec::new())),
+        Some(fake_jpeg()),
+    );
+    assert_eq!(bytes, plain);
+    assert!(
+        !segment_children(&bytes)
+            .iter()
+            .any(|child| child.0 == ids::ATTACHMENTS)
+    );
+}
+
+/// A cover that is not a JPEG, one past the limit, and one after the
+/// header went out are refused, and the muxer goes on building a file
+/// without one.
+#[test]
+fn a_late_or_wrong_cover_is_refused_and_the_file_goes_on() {
+    let mut mux = MatroskaMux::new(Cursor::new(Vec::new()));
+    let sound = mux
+        .add_stream(audio(CodecId::Opus, &opus_head(), 48_000))
+        .expect("audio");
+    assert!(mux.set_cover_art(Vec::new()).is_err());
+    assert!(mux.set_cover_art(b"\x89PNG\r\n\x1a\n".to_vec()).is_err());
+    let mut large = vec![0xFF, 0xD8, 0xFF];
+    large.resize(cutlass_matroska::limits::MAX_COVER_BYTES + 1, 0);
+    assert!(mux.set_cover_art(large).is_err());
+    assert_eq!(mux.status(), MuxStatus::Building);
+    mux.write_packet(&packet(sound, vec![0xFC, 0], 0, 960, 48_000, true))
+        .expect("packet");
+    mux.write_packet(&packet(sound, vec![0xFC, 1], 960, 960, 48_000, true))
+        .expect("packet");
+    // The header is out once a packet is written.
+    assert!(mux.set_cover_art(fake_jpeg()).is_err());
+    assert_eq!(mux.status(), MuxStatus::Building);
+    let bytes = finish(mux, &[(sound, 48_000, 2 * 960)]);
+    assert!(
+        !segment_children(&bytes)
+            .iter()
+            .any(|child| child.0 == ids::ATTACHMENTS)
+    );
+    assert_eq!(all(&mut read_back(bytes)).len(), 2);
 }

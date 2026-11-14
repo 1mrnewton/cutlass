@@ -14,7 +14,7 @@ use cutlass_container::{Demux, Landing, SeekTo};
 
 use crate::support::{
     delays, ffmpeg, ffmpeg_payload, ffmpeg_tools, ffprobe_packets, gstreamer_packets, open,
-    paddings, read_all, remux, scratch, tool_on_path,
+    paddings, read_all, remux, remux_with_cover, scratch, tool_on_path,
 };
 
 struct Case {
@@ -429,6 +429,107 @@ fn files_this_crate_writes_read_in_ffprobe_and_gstreamer() {
         if case.codecs.len() > 1 {
             seeks_in_ffprobe(&out);
         }
+    }
+}
+
+/// The streams ffprobe lists in `path`, one line each: index, codec type,
+/// codec name, the `attached_pic` disposition, and the file name and media
+/// type tags.
+fn probed_streams(path: &Path) -> Vec<String> {
+    let out = crate::support::output_timeout(
+        "ffprobe",
+        &[
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=index,codec_type,codec_name:stream_disposition=attached_pic:stream_tags=filename,mimetype",
+            "-of",
+            "csv=p=0",
+            &path.display().to_string(),
+        ],
+        std::time::Duration::from_secs(60),
+    )
+    .expect("ffprobe");
+    assert!(out.status.success(), "ffprobe failed on {}", path.display());
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// libavformat reads a Matroska cover as one more stream: Motion JPEG with
+/// `attached_pic` set, tagged `cover.jpg` and `image/jpeg`, its packet the
+/// picture. The movie's own streams and packets are as in the file without
+/// it. A WebM file has no cover.
+#[test]
+fn ffprobe_reads_the_cover_as_an_attached_picture() {
+    if !ffmpeg_tools() {
+        return;
+    }
+    let dir = scratch("oracle-cover");
+    let picture = dir.join("cover.jpg");
+    let target = picture.display().to_string();
+    assert!(ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=red:s=16x16",
+        "-frames:v",
+        "1",
+        "-c:v",
+        "mjpeg",
+        "-f",
+        "image2",
+        &target,
+    ]));
+    let jpeg = std::fs::read(&picture).expect("cover");
+    let mut checked = 0;
+    for (path, case) in fixtures() {
+        if case.codecs.len() < 2 {
+            continue;
+        }
+        let webm = case.name.ends_with(".webm");
+        let plain = dir.join(format!("plain-{}", case.name));
+        let covered = dir.join(case.name);
+        remux(path, &plain, webm);
+        remux_with_cover(path, &covered, webm, Some(jpeg.clone()));
+        let before = probed_streams(&plain);
+        let after = probed_streams(&covered);
+        if webm {
+            assert_eq!(after, before, "{}", case.name);
+            continue;
+        }
+        assert_eq!(after.len(), before.len() + 1, "{}: {after:?}", case.name);
+        assert_eq!(&after[..before.len()], before.as_slice(), "{}", case.name);
+        assert_eq!(
+            after[before.len()],
+            format!("{},mjpeg,video,1,cover.jpg,image/jpeg", before.len()),
+            "{}",
+            case.name
+        );
+        for index in 0..before.len() {
+            assert_eq!(
+                ffmpeg_payload(&covered, index, &dir),
+                ffmpeg_payload(&plain, index, &dir),
+                "{} stream {index}",
+                case.name
+            );
+        }
+        assert_eq!(
+            ffmpeg_payload(&covered, before.len(), &dir),
+            jpeg,
+            "{}",
+            case.name
+        );
+        checked += 1;
+    }
+    if checked == 0 {
+        eprintln!("skipped: this ffmpeg made no Matroska fixture");
     }
 }
 

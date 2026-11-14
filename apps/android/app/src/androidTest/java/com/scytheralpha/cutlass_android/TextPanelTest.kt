@@ -2,6 +2,8 @@ package com.scytheralpha.cutlass_android
 
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsOff
+import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onFirst
@@ -9,6 +11,8 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextInputSelection
+import androidx.compose.ui.text.TextRange
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.CoroutineScope
@@ -17,6 +21,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -27,7 +32,8 @@ import uniffi.cutlass_ffi_bindings.createProject
 
 /**
  * The text panel on the phone, tapped and typed into as a person would:
- * the search narrows the faces to the ones Rust matches.
+ * the search narrows the faces to the ones Rust matches, bold, italic and
+ * underline go on the letters selected in the words.
  */
 @RunWith(AndroidJUnit4::class)
 class TextPanelTest {
@@ -89,6 +95,55 @@ class TextPanelTest {
         compose.waitForIdle()
         compose.onAllNodesWithText(first.label).onFirst().assertIsDisplayed()
         assertEquals(model.fonts, model.fontsMatching(""))
+    }
+
+    @Test
+    fun bold_italic_and_underline_go_on_the_selected_letters() {
+        show()
+        // Nothing selected is the whole title, which starts plain.
+        compose.onNodeWithContentDescription("Bold").assertIsOff()
+        compose.onNodeWithContentDescription("Words").performTextInputSelection(TextRange(0, 5))
+        compose.waitForIdle()
+        compose.onNodeWithContentDescription("Bold").performClick()
+        compose.waitForIdle()
+
+        compose.runOnUiThread {
+            assertTrue(model.notice?.text ?: "", model.textPattern(title, 0, 5)!!.bold)
+            assertFalse("the second word stays plain", model.textPattern(title, 6, 11)!!.bold)
+            assertFalse("not every letter is bold", model.textPattern(title, 0, 11)!!.bold)
+        }
+        compose.onNodeWithContentDescription("Bold").assertIsOn()
+        compose.onNodeWithContentDescription("Italic").assertIsOff()
+
+        // The other word shows its own pattern, and takes an underline.
+        compose.onNodeWithContentDescription("Words").performTextInputSelection(TextRange(11, 6))
+        compose.waitForIdle()
+        compose.onNodeWithContentDescription("Bold").assertIsOff()
+        compose.onNodeWithContentDescription("Underline").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithContentDescription("Underline").assertIsOn()
+        compose.runOnUiThread {
+            assertTrue(model.textPattern(title, 6, 11)!!.underline)
+            assertFalse(model.textPattern(title, 0, 5)!!.underline)
+        }
+
+        // A caret alone is every letter again: italic goes on them all.
+        compose.onNodeWithContentDescription("Words").performTextInputSelection(TextRange(3))
+        compose.waitForIdle()
+        compose.onNodeWithContentDescription("Bold").assertIsOff()
+        compose.onNodeWithContentDescription("Italic").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithContentDescription("Italic").assertIsOn()
+        compose.runOnUiThread {
+            assertTrue(model.textPattern(title, 0, 11)!!.italic)
+            // Each tap was one undo step.
+            model.undo()
+            assertFalse(model.textPattern(title, 0, 11)!!.italic)
+            assertTrue(model.textPattern(title, 6, 11)!!.underline)
+            model.undo()
+            assertFalse(model.textPattern(title, 6, 11)!!.underline)
+            assertTrue(model.textPattern(title, 0, 5)!!.bold)
+        }
     }
 
     private companion object {

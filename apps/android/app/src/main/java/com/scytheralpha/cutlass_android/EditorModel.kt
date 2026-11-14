@@ -34,6 +34,7 @@ import uniffi.cutlass_ffi_bindings.Lane
 import uniffi.cutlass_ffi_bindings.LaneKind
 import uniffi.cutlass_ffi_bindings.Stage
 import uniffi.cutlass_ffi_bindings.TextInfo
+import uniffi.cutlass_ffi_bindings.TextPattern
 import uniffi.cutlass_ffi_bindings.TextStyleChange
 import uniffi.cutlass_ffi_bindings.Tick
 import uniffi.cutlass_ffi_bindings.Tile
@@ -410,6 +411,24 @@ class EditorModel(project: String, private val scope: CoroutineScope) {
     /** The faces whose names have every word of `query`, as Rust matches them; all of them for no words. */
     fun fontsMatching(query: String): List<FaceInfo> =
         runCatching { editor?.fontsMatching(query) }.getOrNull() ?: fonts
+
+    /**
+     * Which of bold, italic and underline every letter of `clip` from
+     * `start` up to `end` has, the two counting characters. Null when it
+     * has no such letters.
+     */
+    fun textPattern(clip: String, start: Int, end: Int): TextPattern? =
+        runCatching { editor?.textRangePattern(clip, start.toUInt(), end.toUInt()) }.getOrNull()
+
+    /** Turn bold, italic or underline on or off for those letters, as one undo step. A part left null stays as it is. */
+    fun setTextPattern(
+        clip: String,
+        start: Int,
+        end: Int,
+        bold: Boolean? = null,
+        italic: Boolean? = null,
+        underline: Boolean? = null,
+    ) = edit { it.setTextRangePattern(clip, start.toUInt(), end.toUInt(), bold, italic, underline) }
 
     fun deleteClip() {
         val clip = deleteTarget

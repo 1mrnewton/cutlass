@@ -62,8 +62,10 @@ pub(super) fn dz(coef: &[f32], levels: &mut [i32], inv: f32, step: f32, round: f
     let n = coef.len().min(levels.len());
     let whole = n / 8 * 8;
     for (c, l) in coef[..whole]
-        .chunks_exact(8)
-        .zip(levels[..whole].chunks_exact_mut(8))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .zip(levels[..whole].as_chunks_mut::<8>().0)
     {
         let v = _mm256_setr_ps(c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]);
         let a = _mm256_min_ps(_mm256_mul_ps(_mm256_and_ps(v, abs), vinv), vcap);

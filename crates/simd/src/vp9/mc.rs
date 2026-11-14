@@ -69,6 +69,8 @@ pub struct Block<'a> {
 /// The scratch a [`Block`] needs.
 pub const TMP: usize = 71 * 96;
 
+// Its checks guard the x86-64 kernels.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 impl Block<'_> {
     /// Whether every load and store stays inside the buffers. The kernels
     /// read 16 samples from 3 before each 8 or 16 of a row, and 3 rows
@@ -105,9 +107,10 @@ impl Block<'_> {
 /// when the CPU or the block is not one the kernels take.
 #[must_use]
 #[inline]
-pub fn predict(mut b: Block<'_>) -> bool {
+pub fn predict(b: Block<'_>) -> bool {
     #[cfg(target_arch = "x86_64")]
     {
+        let mut b = b;
         if super::avx2() && b.fits() {
             // SAFETY: `avx2` checked at run time that the CPU has AVX2,
             // the only feature `avx2::predict` enables.

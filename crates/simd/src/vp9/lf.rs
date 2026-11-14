@@ -37,6 +37,8 @@ pub struct Edge<'a> {
     pub thr: [Thresh; 2],
 }
 
+// Its checks guard the x86-64 kernels.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 impl Edge<'_> {
     /// The widest filter of the two halves.
     #[inline]
@@ -75,9 +77,10 @@ impl Edge<'_> {
 /// when the CPU or the edge is not one the kernels take.
 #[must_use]
 #[inline]
-pub fn filter(mut e: Edge<'_>) -> bool {
+pub fn filter(e: Edge<'_>) -> bool {
     #[cfg(target_arch = "x86_64")]
     {
+        let mut e = e;
         if super::avx2() && e.fits() {
             // SAFETY: `avx2` checked at run time that the CPU has AVX2,
             // the only feature `avx2::filter` enables.

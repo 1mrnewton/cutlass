@@ -26,6 +26,10 @@ pub enum OutSamples {
     /// The frame's own samples, 8 bits, packed as above: the picture is
     /// not cropped, so its frame is the output.
     Shared(Arc<Vec<u8>>),
+    /// Packed as above, made from the frame's samples, deeper than 8 bits,
+    /// once the picture is taken for output: the frame is kept anyway, as
+    /// later pictures reference it, so no 8-bit copy waits beside it.
+    Later,
     /// Each plane on its own, 8 bits, and above 8 bits the full samples.
     Planes {
         eight: [Vec<u8>; 3],

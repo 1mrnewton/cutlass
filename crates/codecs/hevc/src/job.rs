@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use cutlass_decode::CodecError;
 use cutlass_pool::Rows;
-use cutlass_simd::shared_rows::RowsWriter;
+use cutlass_simd::shared_rows::{RowsWriter, SharedRows};
 
 use crate::cabac::Cabac;
 use crate::ctu::{Cu, SliceDecoder, Wave};
@@ -61,8 +61,9 @@ pub struct Job<P> {
     /// the same memory from picture to picture instead of giving it back
     /// to the system and taking it again, page by page.
     pub out: Option<OutRows>,
-    /// The picture is output as its frame's own samples
-    /// ([`OutSamples::Shared`]), and `out` is `None`.
+    /// The picture is output from its frame's own samples, shared
+    /// ([`OutSamples::Shared`]) or, deeper, shifted down when it is taken
+    /// ([`OutSamples::Later`]), and `out` is `None`.
     pub share: bool,
     /// Threads for the rows of a wavefront slice segment.
     pub row_threads: usize,
@@ -112,6 +113,7 @@ impl<P: Pixel> Job<P> {
         let (writer, out) = pipe.finish();
         let out = match &frame.rows {
             AnyRows::Eight(rows) if share => rows.whole().map(OutSamples::Shared),
+            AnyRows::Deep(_) if share => Some(OutSamples::Later),
             _ => out.map(OutRows::finish),
         };
         drop(writer);
@@ -197,7 +199,11 @@ impl OutRows {
 
     /// Take the cropped rows published since the last call.
     fn take<P: Pixel>(&mut self, writer: &RowsWriter<P>) {
-        let shared = writer.shared();
+        self.take_rows(writer.shared());
+    }
+
+    /// [`Self::take`] from the rows themselves.
+    pub fn take_rows<P: Pixel>(&mut self, shared: &SharedRows<P>) {
         for c in 0..3 {
             let (x0, y0, w, h) = self.crop[c];
             let next = self.next[c];
@@ -298,7 +304,7 @@ impl OutRows {
     }
 
     /// The samples; for planes, rows never published are zeros.
-    fn finish(mut self) -> OutSamples {
+    pub fn finish(mut self) -> OutSamples {
         match self.form {
             OutForm::Packed => {
                 let [bytes, _, _] = self.eight;

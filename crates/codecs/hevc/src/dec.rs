@@ -723,7 +723,11 @@ impl HevcDecoder {
         // ready: a picture that waits for the rows of a reference lets one
         // of them run in its place (see `Frame::run`). Rows of a picture on
         // several threads keep one picture to a thread.
-        let slots = if rows == 1 && frames > 1 { frames + 1 } else { 0 };
+        let slots = if rows == 1 && frames > 1 {
+            frames + 1
+        } else {
+            0
+        };
         self.shared.frames.set_slots(slots);
         let frames = if slots > 0 {
             frames + frames / 2
@@ -777,8 +781,15 @@ impl HevcDecoder {
             };
             let done = frame.take_done();
             done.result?;
-            if let Some(samples) = done.out {
-                out.push((samples, meta));
+            match (done.out, &frame.rows) {
+                (Some(OutSamples::Later), AnyRows::Deep(rows)) => {
+                    let mut o =
+                        OutRows::new(&meta.sps, OutForm::Packed, self.shared.spare_packed());
+                    o.take_rows(rows);
+                    out.push((o.finish(), meta));
+                }
+                (Some(OutSamples::Later), AnyRows::Eight(_)) | (None, _) => {}
+                (Some(samples), _) => out.push((samples, meta)),
             }
         }
         Ok(out)
@@ -893,8 +904,12 @@ fn make_job<P: Pixel>(
         Frame::new((width, height), poc, &shared.frames, wrap, bufs, !staged);
     // The frame of an 8-bit picture that is not cropped holds its planes
     // as the packed picture does: it is the output itself.
-    let share =
-        output == Some(OutForm::Packed) && pic.sps.crop == [0; 4] && P::bytes(&[]).is_some();
+    let share = output == Some(OutForm::Packed)
+        && if P::bytes(&[]).is_some() {
+            pic.sps.crop == [0; 4]
+        } else {
+            !staged
+        };
     let spare = (output == Some(OutForm::Packed) && !share)
         .then(|| shared.spare_packed())
         .flatten();
@@ -1110,7 +1125,7 @@ fn packed_output(
             bytes
         }
         OutSamples::Shared(bytes) => bytes,
-        OutSamples::Planes { .. } => return Ok(None),
+        OutSamples::Planes { .. } | OutSamples::Later => return Ok(None),
     };
     let sps = &meta.sps;
     let [left, right, top, bottom] = sps.crop.map(|v| v as usize);

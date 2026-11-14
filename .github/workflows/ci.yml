@@ -241,7 +241,11 @@ jobs:
         if: github.event_name != 'pull_request' || github.base_ref == 'main'
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 30
+          # The editor draws with compute shaders, which need guest Vulkan.
+          # The API 30 x86_64 image on emulator 37 offers the guest only
+          # OpenGL ES 3.0 ("update the emulator to one that supports the
+          # feature(s): Vulkan"), and the renderer refuses it.
+          api-level: 34
           arch: x86_64
           target: google_apis
           emulator-options: -no-window -gpu swiftshader_indirect -no-boot-anim -camera-back none

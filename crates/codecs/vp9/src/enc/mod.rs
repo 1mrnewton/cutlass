@@ -38,6 +38,8 @@ use self::tile::{Shared, Source, Tile};
 #[derive(Clone, Copy, Debug)]
 pub struct FrameParams {
     pub key: bool,
+    /// Whether the frame also refreshes GOLDEN (slot 1).
+    pub golden: bool,
     pub qindex: u8,
     /// Motion search effort: higher is faster.
     pub speed: u8,
@@ -105,7 +107,7 @@ impl FrameEncoder {
     /// Codes the loaded source.
     pub fn encode(&mut self, fp: FrameParams) -> Result<Coded, CodecError> {
         let key = fp.key || self.dec.ref8(0).is_none();
-        let head = self.headers(key, fp.qindex)?;
+        let head = self.headers(key, fp.golden, fp.qindex)?;
         let parsed = header::parse(self.dec.persist(), &head)?;
         let h = &parsed.header;
         let tile_data = self.tiles(&parsed, fp)?;
@@ -118,7 +120,7 @@ impl FrameEncoder {
     }
 
     /// The uncompressed and compressed headers.
-    fn headers(&self, key: bool, qindex: u8) -> Result<Vec<u8>, CodecError> {
+    fn headers(&self, key: bool, golden: bool, qindex: u8) -> Result<Vec<u8>, CodecError> {
         let lossless = qindex == 0;
         let compressed = compressed_header(lossless, !key)?;
         let mut b = BitWriter::new();
@@ -139,9 +141,10 @@ impl FrameEncoder {
             b.write_bit(false); // render size = frame size
         } else {
             b.write(0, 2); // reset_frame_context
-            b.write(0x01, 8); // refresh LAST
-            for _ in 0..3 {
-                b.write(0, 3); // every reference is slot 0
+            // LAST, and GOLDEN on a golden frame.
+            b.write(if golden { 0x03 } else { 0x01 }, 8);
+            for slot in 0..3 {
+                b.write(slot, 3); // LAST 0, GOLDEN 1, ALTREF 2
                 b.write_bit(false); // sign bias
             }
             b.write_bit(true); // size from the first reference
@@ -154,7 +157,7 @@ impl FrameEncoder {
         b.write_bit(false); // frame_parallel_decoding_mode
         b.write(0, 2); // frame_context_idx
         // Loop filter: libvpx's level from the quantizer.
-        let level = if lossless { 0 } else { filter_level(qindex, key) };
+        let level = if lossless || std::env::var("NOLF").is_ok() { 0 } else { filter_level(qindex, key) };
         b.write(u32::from(level), 6);
         b.write(0, 3); // sharpness
         b.write_bit(true); // mode_ref_delta_enabled (the defaults)
@@ -195,8 +198,18 @@ impl FrameEncoder {
         let mi_rows = dims.height.div_ceil(8);
         let sb_cols = mi_cols.div_ceil(8);
         let sb_rows = mi_rows.div_ceil(8);
-        let refs = [self.dec.ref8(usize::from(h.ref_index[0])).map(|p| &**p), None, None];
-        let refs = if h.is_intra() { [None, None, None] } else { refs };
+        let slot = |i: usize| self.dec.ref8(usize::from(h.ref_index[i])).map(|p| &**p);
+        let refs = if h.is_intra() { [None, None, None] } else { [slot(0), slot(1), slot(2)] };
+        // A reference worth searching holds a picture no earlier one does.
+        let same = |a: Option<&Pic<u8>>, b: Option<&Pic<u8>>| match (a, b) {
+            (Some(a), Some(b)) => std::ptr::eq(a, b),
+            _ => false,
+        };
+        let refs_live = [
+            refs[0].is_some(),
+            refs[1].is_some() && !same(refs[1], refs[0]),
+            refs[2].is_some() && !same(refs[2], refs[0]) && !same(refs[2], refs[1]),
+        ];
         let (pics, _) = ref_pics(parsed, refs);
         let ctx = Ctx {
             dims,
@@ -228,7 +241,8 @@ impl FrameEncoder {
             intra_frame: h.is_intra(),
             part_probs: if h.is_intra() { prob::kf_partition() } else { parsed.fc.partition },
             filter_on,
-            lambda: sad_per_bit(ac),
+            lambda: (f64::from(sad_per_bit(ac)) * std::env::var("LX").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.0)).round() as u32,
+            rd_lambda: rd_lambda(i32::from(h.y_dq[0][0])),
             src: Source {
                 planes: [&self.src[0], &self.src[1], &self.src[2]],
                 strides: self.strides,
@@ -238,6 +252,7 @@ impl FrameEncoder {
                 [i32::from(h.uv_dq[0][0]), i32::from(h.uv_dq[0][1])],
             ],
             speed: fp.speed,
+            refs_live,
         };
         self.state.reset(0, mi_cols, mi_rows, sb_rows * sb_cols, false);
         let mut w = BoolWriter::new();
@@ -288,6 +303,13 @@ fn sad_per_bit(ac: i32) -> u32 {
     (0.0418 * q + 2.4107).round().max(1.0) as u32
 }
 
+/// The sample SSE a bit is worth: libvpx's `rdmult` (88·q²/24, on
+/// distortions 16 times the SSE, rates in 1/512 bits over a 128 scale).
+fn rd_lambda(dc: i32) -> f32 {
+    let k = std::env::var("LK").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
+    0.00179 * (dc * dc) as f32 * k
+}
+
 /// libvpx's loop filter level from the quantizer (`LPF_PICK_FROM_Q`,
 /// 8-bit).
 pub fn filter_level(qindex: u8, key: bool) -> u8 {
@@ -302,8 +324,12 @@ pub fn filter_level(qindex: u8, key: bool) -> u8 {
 fn compressed_header(lossless: bool, inter: bool) -> Result<Vec<u8>, CodecError> {
     let mut w = BoolWriter::new();
     if !lossless {
+        // TX_MODE_SELECT, its probabilities as they are.
         w.write_literal(u32::from(geom::ALLOW_32X32), 2);
-        w.write(0, 128); // not TX_MODE_SELECT
+        w.write(1, 128);
+        for _ in 0..2 * (1 + 2 + 3) {
+            w.write(0, 252);
+        }
     }
     let max_tx = if lossless { 0 } else { 3 };
     for _ in 0..=max_tx {

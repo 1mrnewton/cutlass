@@ -48,6 +48,7 @@ fn main() -> Result<(), String> {
         n += 1;
     }
     let secs = start.elapsed().as_secs_f64();
+    cutlass_vp9::enc_stats();
     let mut hdr = Vec::new();
     hdr.extend_from_slice(b"DKIF");
     hdr.extend_from_slice(&0u16.to_le_bytes());

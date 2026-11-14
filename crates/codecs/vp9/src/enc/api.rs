@@ -108,14 +108,20 @@ impl Vp9Encoder {
         }
         check_planes(self.width, self.height, &planes)?;
         let key = self.force_key || self.since_key >= self.opts.keyint;
+        // A golden frame every `GF_INTERVAL` frames, coded finer: the
+        // frames after it predict from it.
+        let golden = !key && self.since_key % GF_INTERVAL == 0;
+        let kind = if key { 0 } else if golden { 1 } else { 2 };
         self.enc.load(planes);
-        let qindex = self.rc.qindex(key);
+        let qindex = self.rc.qindex(kind);
         let coded = self.enc.encode(FrameParams {
             key,
+            golden,
             qindex,
             speed: self.opts.speed,
         })?;
-        self.rc.account(coded.data.len(), seconds, coded.key, qindex);
+        let kind = if coded.key { 0 } else { kind };
+        self.rc.account(coded.data.len(), seconds, kind, qindex);
         self.force_key = false;
         self.since_key = if coded.key { 1 } else { self.since_key + 1 };
         Ok((coded.data, coded.key))
@@ -272,15 +278,27 @@ fn check_planes(width: u32, height: u32, planes: &[(&[u8], usize); 3]) -> Result
     Ok(())
 }
 
+/// Frames from one golden frame to the next.
+const GF_INTERVAL: u32 = 12;
+
+/// The quantizer step of each frame type (key, golden, inter) over the
+/// inter frames'.
+const STEP_SCALE: [f64; 3] = [0.45, 0.7, 1.0];
+
+/// The share of a frame's budget each frame type takes.
+const SHARE: [f64; 3] = [6.0, 2.5, (GF_INTERVAL as f64 - 2.5) / (GF_INTERVAL as f64 - 1.0)];
+
 /// One-pass rate control: each frame's quantizer from a model of bits
-/// against quantizer step (bits ∝ step^-k), corrected by how far the
-/// coded bits run from the target.
+/// against quantizer step (bits ∝ step^-k) per frame type, corrected by how
+/// far the coded bits run from the target. Without a bitrate, the
+/// quantizer is fixed for inter frames and finer by `STEP_SCALE` for key
+/// and golden frames.
 struct Rate {
     opts: Vp9Options,
     /// Bits over (positive) or under the target so far.
     debt: f64,
     /// Bits a frame at step 1 would take, per frame type.
-    model: [Option<f64>; 2],
+    model: [Option<f64>; 3],
     last_q: u8,
     per_frame: f64,
 }
@@ -288,58 +306,67 @@ struct Rate {
 /// How bits fall with the quantizer step: bits ∝ step^-EXP.
 const EXP: f64 = 1.25;
 
+fn step_of(q: u8) -> f64 {
+    f64::from(crate::tables::AC_QLOOKUP[usize::from(q)])
+}
+
 impl Rate {
     fn new(opts: Vp9Options) -> Self {
         Self {
             opts,
             debt: 0.0,
-            model: [None, None],
+            model: [None; 3],
             last_q: opts.qindex,
             per_frame: 0.0,
         }
     }
 
-    fn qindex(&mut self, key: bool) -> u8 {
-        if self.opts.bitrate == 0 || self.per_frame == 0.0 {
-            return if self.opts.bitrate == 0 { self.opts.qindex } else { self.last_q };
+    fn qindex(&mut self, kind: usize) -> u8 {
+        if self.opts.bitrate == 0 {
+            let q = self.opts.qindex;
+            if q == 0 {
+                return 0;
+            }
+            return q_of_step(step_of(q) * STEP_SCALE[kind]).clamp(self.opts.min_q, q.max(self.opts.min_q));
         }
-        let t = usize::from(!key);
-        let Some(m) = self.model[t] else {
-            return self.last_q;
+        if self.per_frame == 0.0 {
+            return q_of_step(step_of(self.last_q) * STEP_SCALE[kind]);
+        }
+        let m = match (self.model[kind], self.model[0]) {
+            (Some(m), _) => m,
+            (None, Some(k)) => k * [1.0, 0.5, 0.2][kind],
+            (None, None) => return self.last_q,
         };
-        // Key frames get several frames' worth; the debt is paid back over
-        // about a second.
-        let share = if key { 6.0 } else { 1.0 };
-        let target = (self.per_frame * share - self.debt / 30.0).max(self.per_frame * 0.2);
+        // The debt is paid back over about a second.
+        let target = (self.per_frame * SHARE[kind] - self.debt / 30.0).max(self.per_frame * 0.2);
         let step = (m / target).powf(1.0 / EXP);
         let q = q_of_step(step).clamp(self.opts.min_q, self.opts.max_q);
         // Inter frames move the quantizer at most a few steps a frame.
-        let q = if key {
-            q
-        } else {
+        let q = if kind == 2 {
             q.clamp(self.last_q.saturating_sub(24), self.last_q.saturating_add(24))
+        } else {
+            q
         };
-        self.last_q = q;
+        if kind == 2 {
+            self.last_q = q;
+        }
         q
     }
 
-    fn account(&mut self, bytes: usize, seconds: f64, key: bool, qindex: u8) {
+    fn account(&mut self, bytes: usize, seconds: f64, kind: usize, qindex: u8) {
         if self.opts.bitrate == 0 {
             return;
         }
         let bits = bytes as f64 * 8.0;
         self.per_frame = f64::from(self.opts.bitrate) * seconds;
         self.debt += bits - self.per_frame;
-        let step = f64::from(crate::tables::AC_QLOOKUP[usize::from(qindex)]);
-        let m = bits * step.powf(EXP);
-        let t = usize::from(!key);
-        self.model[t] = Some(match self.model[t] {
+        let m = bits * step_of(qindex).powf(EXP);
+        self.model[kind] = Some(match self.model[kind] {
             Some(old) => old * 0.6 + m * 0.4,
             None => m,
         });
-        if key && self.model[1].is_none() {
-            // Inter frames take about a fifth of a key frame's bits.
-            self.model[1] = Some(m / 5.0);
+        if kind == 0 && self.model[2].is_none() {
+            self.last_q = q_of_step(step_of(qindex) / STEP_SCALE[0]);
         }
     }
 }

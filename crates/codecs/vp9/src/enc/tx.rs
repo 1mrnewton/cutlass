@@ -237,3 +237,28 @@ mod tests {
         }
     }
 }
+
+/// How much a forward transform of each size scales energy: the sum of
+/// squared coefficients over the sum of squared residuals, measured once
+/// on a pseudo-random residual. Errors in coefficients over this are
+/// errors in samples (the transforms are near orthogonal).
+pub fn gain(log2n: usize) -> f32 {
+    static G: OnceLock<[f32; 4]> = OnceLock::new();
+    G.get_or_init(|| {
+        core::array::from_fn(|l| {
+            let n = 4usize << l;
+            let mut x = 12_345u32;
+            let res: Vec<i32> = (0..n * n)
+                .map(|_| {
+                    x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                    ((x >> 16) % 61) as i32 - 30
+                })
+                .collect();
+            let mut out = vec![0.0f32; n * n];
+            forward(&res, n, l, false, false, &mut out);
+            let e: f64 = out.iter().map(|&v| f64::from(v) * f64::from(v)).sum();
+            let r: f64 = res.iter().map(|&v| f64::from(v) * f64::from(v)).sum();
+            (e / r) as f32
+        })
+    })[log2n.min(3)]
+}

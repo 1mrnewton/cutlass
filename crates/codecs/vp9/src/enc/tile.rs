@@ -65,6 +65,7 @@ static COST: std::sync::LazyLock<[u16; 257]> = std::sync::LazyLock::new(|| {
 
 #[inline]
 pub fn bit_cost(bit: bool, p: u8) -> u32 {
+    let p = p.max(1);
     let c = &*COST;
     u32::from(if bit { c[256 - usize::from(p)] } else { c[usize::from(p)] })
 }
@@ -88,15 +89,63 @@ pub struct Shared<'a> {
     pub filter_on: bool,
     /// The SAD a bit of rate is worth.
     pub lambda: u32,
+    /// The sample SSE a bit of rate is worth.
+    pub rd_lambda: f32,
     pub src: Source<'a>,
     /// The quantizer steps of luma and chroma, DC and AC.
     pub dq: [[i32; 2]; 2],
-    /// Skip motion search where it cannot gain (realtime speed).
+    /// Search effort: higher is faster.
     pub speed: u8,
+    /// Which references (LAST, GOLDEN, ALTREF) are worth searching: those
+    /// that hold a picture none before them holds.
+    pub refs_live: [bool; 3],
+}
+
+/// The rate-distortion costs of one tx block (sample SSE plus lambda
+/// times bits): as coded, and dropped (no coefficients).
+#[derive(Clone, Copy, Default)]
+struct TxRd {
+    coded: f32,
+    dropped: f32,
+}
+
+/// A tx block's coefficients: plane, size, position (4×4 units in the
+/// block), levels, end of block.
+type Tok = (usize, u8, usize, usize, Vec<i32>, usize);
+
+/// What coding a square changes, kept to try another way.
+struct Snap {
+    at: (usize, usize, usize),
+    cost: u64,
+    above: [Nb; 8],
+    above_part: [u8; 8],
+    above_nz: [[u8; 16]; 3],
+    left: [Nb; 8],
+    left_part: [u8; 8],
+    left_nz: [[u8; 16]; 3],
+    mvs: [MvRef; 64],
+    pix: [Vec<u8>; 3],
+}
+
+impl Default for Snap {
+    fn default() -> Self {
+        Self {
+            at: (0, 0, 0),
+            cost: 0,
+            above: [Nb::default(); 8],
+            above_part: [0; 8],
+            above_nz: [[0; 16]; 3],
+            left: [Nb::default(); 8],
+            left_part: [0; 8],
+            left_nz: [[0; 16]; 3],
+            mvs: [MvRef::default(); 64],
+            pix: [vec![0; 64 * 64], vec![0; 64 * 64], vec![0; 64 * 64]],
+        }
+    }
 }
 
 /// The block being encoded.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct Blk {
     row: usize,
     col: usize,
@@ -131,9 +180,29 @@ pub struct Tile<'s, 't, 'r, 'v> {
     /// Best vectors found per 8×8 position this superblock, for the
     /// next searches' starting points.
     seeds: Vec<Mv>,
-    /// The whole-sample vector and SAD the partition search found for each
-    /// square block of the superblock (see [`Tile::slot`]).
-    found: [(Mv, u64); 85],
+    /// The decision for each square block of the superblock (see
+    /// [`Tile::slot`]) and which squares split.
+    choice: [Blk; 85],
+    split: [bool; 21],
+    /// Snapshots: 0 the superblock, then four per level.
+    snaps: Vec<Snap>,
+    toks: Vec<Tok>,
+    /// The cost of the best inter candidate last ranked (SAD units).
+    last_sad: u64,
+    /// The reference the searches read (0 LAST, 1 GOLDEN, 2 ALTREF).
+    cur_ref: usize,
+    /// Whether the block coded last skipped its residual; for the best
+    /// candidate so far and the block `best_block` chose last, that and
+    /// its SSE.
+    coded_skip: bool,
+    choice_skip: (bool, f64),
+    last_skip: (bool, f64),
+    /// The costs of the tx block quantized last.
+    rd: TxRd,
+    /// In a trial nothing is written or counted: bits add to `cost`
+    /// (1/256 bits).
+    trial: bool,
+    cost: u64,
 }
 
 impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
@@ -163,7 +232,18 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             res: vec![0; 64 * 64],
             fcoef: vec![0.0; 32 * 32],
             seeds,
-            found: [(Mv::ZERO, u64::MAX); 85],
+            choice: [Blk::default(); 85],
+            split: [false; 21],
+            snaps: (0..17).map(|_| Snap::default()).collect(),
+            toks: Vec::new(),
+            last_sad: 0,
+            cur_ref: 0,
+            coded_skip: false,
+            choice_skip: (false, 0.0),
+            last_skip: (false, 0.0),
+            rd: TxRd::default(),
+            trial: false,
+            cost: 0,
         }
     }
 
@@ -172,14 +252,22 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         self.seeds
     }
 
-    /// Encodes the superblocks of one row of this tile.
+    /// Encodes the superblocks of one row of this tile: each superblock's
+    /// partition and modes are searched by trial coding (nothing written,
+    /// rates costed), then it is coded for real with what won.
     pub fn sb_row(&mut self, mi_row: usize) {
         self.left = [Nb::default(); 8];
         self.left_part = [0; 8];
         self.left_nz = [[0; 16]; 3];
         let mut mi_col = self.col0;
         while mi_col < self.col1 {
-            let split = self.choose(mi_row, mi_col, 3);
+            self.save(mi_row, mi_col, 8, 0);
+            self.trial = true;
+            self.split = [false; 21];
+            self.rd_node(mi_row, mi_col, 3);
+            self.restore(0);
+            self.trial = false;
+            let split = self.split;
             self.partition(mi_row, mi_col, BLOCK_64X64, 4, &split);
             mi_col += 8;
         }
@@ -187,8 +275,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
 
     // Partition decision --------------------------------------------------
 
-    /// Where the search result of the square block `bsize` at `(row, col)`
-    /// is kept, in its superblock.
+    /// Where the decision for the square block `bsize` at `(row, col)` is
+    /// kept, in its superblock.
     fn slot(row: usize, col: usize, bsize: u8) -> usize {
         let level = SQUARE.iter().position(|&b| b == bsize).unwrap_or(0);
         let n = 8 >> level;
@@ -207,86 +295,366 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         }
     }
 
-    /// The split flags of the superblock at `(row, col)`. Each block's
-    /// cost is its best prediction's SAD plus the rate of its vector, in
-    /// SAD units; a block splits when its four quarters cost less.
-    fn choose(&mut self, row: usize, col: usize, level: usize) -> [bool; 21] {
-        let mut split = [false; 21];
-        self.choose_into(row, col, level, &mut split);
-        split
-    }
-
-    fn choose_into(&mut self, row: usize, col: usize, level: usize, split: &mut [bool; 21]) -> u64 {
+    /// The least cost (SSE + lambda · bits) of the square node of `level`
+    /// at `(row, col)`: coded whole, or split (recursively). Leaves the
+    /// state as the winner left it, and its decisions in `split` and
+    /// `choice`.
+    fn rd_node(&mut self, row: usize, col: usize, level: usize) -> f64 {
         let s = self.s;
         if row >= s.mi_rows || col >= s.mi_cols {
-            return 0;
+            return 0.0;
         }
-        if level == 0 {
-            return self.estimate(row, col, SQUARE[0]);
-        }
+        let lam = f64::from(s.rd_lambda) / 256.0;
         let n = 1usize << level;
         let hbs = n / 2;
-        let whole = row + n <= s.mi_rows && col + n <= s.mi_cols;
-        let own = if whole { self.estimate(row, col, SQUARE[level]) } else { u64::MAX };
-        // Splitting costs the partition symbols and three more blocks'
-        // mode info.
-        let mut quarters = u64::from(s.lambda) * 12;
-        for (dr, dc) in [(0, 0), (0, hbs), (hbs, 0), (hbs, hbs)] {
-            quarters = quarters.saturating_add(self.choose_into(row + dr, col + dc, level - 1, split));
-            if quarters >= own {
-                break;
+        let bsize = SQUARE[level];
+        let whole = level == 0 || (row + hbs < s.mi_rows && col + hbs < s.mi_cols);
+        let before = 1 + 4 * (3 - level);
+        self.save(row, col, n, before);
+        let mut j_none = f64::INFINITY;
+        if whole {
+            let c0 = self.cost;
+            self.part_symbol(row, col, bsize, PARTITION_NONE);
+            let sym = (self.cost - c0) as f64 * lam;
+            j_none = sym + self.best_block(row, col, bsize, before + 2);
+            self.part_after(row, col, bsize, PARTITION_NONE);
+        }
+        if level == 0 {
+            return j_none;
+        }
+        // No split when the whole block needs no residual and its error is
+        // under the quantizer's own noise.
+        if whole && self.last_skip.0 {
+            let pixels = (n * 8 * n * 8) as f64;
+            let step = f64::from(s.dq[0][1]) / 8.0;
+            if self.last_skip.1 < pixels * step * step / 24.0 {
+                return j_none;
             }
         }
-        if quarters < own {
-            split[Self::node(row, col, level)] = true;
-            quarters
+        if whole {
+            self.save(row, col, n, before + 1);
+            self.restore(before);
+        }
+        let c0 = self.cost;
+        self.part_symbol(row, col, bsize, PARTITION_SPLIT);
+        let mut j = (self.cost - c0) as f64 * lam;
+        for (dr, dc) in [(0, 0), (0, hbs), (hbs, 0), (hbs, hbs)] {
+            if j >= j_none {
+                break;
+            }
+            j += self.rd_node(row + dr, col + dc, level - 1);
+        }
+        if j < j_none {
+            self.split[Self::node(row, col, level)] = true;
+            j
         } else {
-            own
+            self.restore(before + 1);
+            j_none
         }
     }
 
-    /// The cost of the best prediction of a square block, from the
-    /// source, in SAD units: distortion plus `lambda` a bit.
-    fn estimate(&mut self, row: usize, col: usize, bsize: u8) -> u64 {
+    /// Codes the best of the block's candidate modes (leaving the state
+    /// as it leaves it) and returns its cost. `slot` holds the state
+    /// before it.
+    fn best_block(&mut self, row: usize, col: usize, bsize: u8, slot: usize) -> f64 {
         let s = self.s;
-        let (bw, _) = MI_WH[usize::from(bsize)];
-        let n = bw * 8;
-        let (x, y) = (col * 8, row * 8);
+        let lam = f64::from(s.rd_lambda) / 256.0;
+        let n = MI_WH[usize::from(bsize)].0;
+        self.save(row, col, n, slot);
+        let mut cands: Vec<Blk> = Vec::with_capacity(8);
+        let base = self.blk(row, col, bsize);
+        if !s.intra_frame {
+            self.inter_cands(&base, &mut cands);
+        }
+        let intra_first = cands.len();
+        if s.intra_frame || self.intra_worth(&base, &cands) {
+            self.intra_cands(&base, &mut cands);
+        }
+        let mut best = (f64::INFINITY, 0usize);
+        let mut last = usize::MAX;
+        // The state after the best so far is kept in `slot + 1`.
+        let mut try_one = |t: &mut Self, i: usize, b: &Blk, best: &mut (f64, usize), last: &mut usize| {
+            if *last != usize::MAX {
+                t.restore(slot);
+            }
+            let c0 = t.cost;
+            let d = t.code_block(b);
+            let j = d + (t.cost - c0) as f64 * lam;
+            *last = i;
+            if j < best.0 {
+                *best = (j, i);
+                t.choice_skip = (t.coded_skip, d);
+                t.save(row, col, n, slot + 1);
+            }
+        };
+        for (i, b) in cands.clone().iter().enumerate() {
+            try_one(self, i, b, &mut best, &mut last);
+        }
+        // Chroma and transform size for the best intra mode.
+        if best.1 >= intra_first && cands.len() > intra_first && s.speed < 8 {
+            let b0 = cands[best.1];
+            let mut more = Vec::new();
+            for uv in [b0.mode, geom::TM, geom::V, geom::H] {
+                if uv != b0.uv && !more.iter().any(|m: &Blk| m.uv == uv) && more.len() < if s.speed < 4 { 3 } else { 1 } {
+                    more.push(Blk { uv, ..b0 });
+                }
+            }
+            for b in more {
+                let i = cands.len();
+                cands.push(b);
+                try_one(self, i, &b, &mut best, &mut last);
+            }
+        }
+        if s.speed < 8 {
+            let b0 = cands[best.1];
+            let tries = if s.speed < 4 { 2 } else { 1 };
+            let mut tx = b0.tx;
+            for _ in 0..tries {
+                if tx == 0 || b0.bsize < BLOCK_8X8 {
+                    break;
+                }
+                tx -= 1;
+                let i = cands.len();
+                let b = Blk { tx, ..b0 };
+                cands.push(b);
+                try_one(self, i, &b, &mut best, &mut last);
+            }
+        }
+        if last != best.1 {
+            self.restore(slot + 1);
+        }
+        self.last_skip = self.choice_skip;
+        self.choice[Self::slot(row, col, bsize)] = cands[best.1];
+        best.0
+    }
+
+    /// A block at `(row, col)` with the defaults.
+    fn blk(&self, row: usize, col: usize, bsize: u8) -> Blk {
+        let s = self.s;
+        let (bw, bh) = MI_WH[usize::from(bsize)];
+        Blk {
+            row,
+            col,
+            bsize,
+            bw,
+            bh,
+            x_mis: bw.min(s.mi_cols - col),
+            y_mis: bh.min(s.mi_rows - row),
+            skip: false,
+            tx: geom::max_tx(bsize).min(geom::tx_mode_biggest(s.h.tx_mode)),
+            mode: geom::DC,
+            uv: geom::DC,
+            refs: [INTRA_FRAME, INTRA_FRAME],
+            mv: Mv::ZERO,
+        }
+    }
+
+    /// Intra candidates: the luma modes whose predictions are nearest the
+    /// source (by the sum of absolute Hadamard coefficients), chroma DC.
+    fn intra_cands(&mut self, base: &Blk, out: &mut Vec<Blk>) {
+        let s = self.s;
+        let tx = base.tx;
+        let n = 4usize << tx;
+        let (x, y) = (base.col * 8, base.row * 8);
+        let have_above = base.row > 0;
+        let have_left = base.col > self.col0;
+        let e = self.rec.intra_edges(0, tx, x, y, have_left, have_above, false);
+        let (src, ss) = (s.src.planes[0], s.src.strides[0]);
+        let modes: &[u8] = if s.speed >= 8 {
+            &[geom::DC, geom::V, geom::H, geom::TM]
+        } else {
+            &[geom::DC, geom::V, geom::H, geom::TM, geom::D45, geom::D135, geom::D117, geom::D153, geom::D207, geom::D63]
+        };
+        let mut scored: Vec<(u64, u8)> = Vec::with_capacity(10);
         let lam = u64::from(s.lambda);
-        if s.intra_frame {
-            // DC prediction from the source's own edges.
-            let (src, ss) = (s.src.planes[0], s.src.strides[0]);
-            let mut sum = 0u32;
-            let mut cnt = 0u32;
-            if y > 0 {
-                for i in 0..n {
-                    sum += u32::from(src[(y - 1) * ss + x + i]);
-                }
-                cnt += n as u32;
-            }
-            if x > 0 {
-                for i in 0..n {
-                    sum += u32::from(src[(y + i) * ss + x - 1]);
-                }
-                cnt += n as u32;
-            }
-            let dc = if cnt > 0 { ((sum + cnt / 2) / cnt) as i32 } else { 128 };
-            let mut cost = 0u64;
-            for r in 0..n {
-                for c in 0..n {
-                    cost += u64::from((i32::from(src[(y + r) * ss + x + c]) - dc).unsigned_abs());
-                }
-            }
-            return cost + lam * 4;
+        for &m in modes {
+            ipred::predict(m, n, &mut self.pred, n, &e, 8);
+            let cost = satd(&src[y * ss + x..], ss, &self.pred, n, n) + lam * u64::from(m != geom::DC) * 2;
+            scored.push((cost, m));
         }
-        let (mv, sad) = self.search(row, col, bsize);
-        self.found[Self::slot(row, col, bsize)] = (mv, sad);
-        for r in 0..bw.min(s.mi_rows - row) {
-            for c in 0..bw.min(s.mi_cols - col) {
-                self.seeds[(row + r) * s.mi_cols + col + c] = mv;
+        scored.sort_unstable();
+        let k = match s.speed {
+            0..=3 => 4,
+            4..=6 => 3,
+            _ => 1,
+        };
+        for &(_, m) in scored.iter().take(k) {
+            out.push(Blk {
+                mode: m,
+                uv: geom::DC,
+                refs: [INTRA_FRAME; 2],
+                ..*base
+            });
+        }
+    }
+
+    /// Whether intra is worth trying in an inter frame: when the best
+    /// inter prediction is poor.
+    fn intra_worth(&self, base: &Blk, cands: &[Blk]) -> bool {
+        if cands.is_empty() {
+            return true;
+        }
+        let pixels = (base.x_mis * base.y_mis * 64) as u64;
+        // A mean error of more than a few levels a sample.
+        self.last_sad > pixels * if self.s.speed >= 8 { 12 } else { 5 }
+    }
+
+    /// Inter candidates: the searched vector and the reference list's,
+    /// the best two by SAD and vector rate.
+    fn inter_cands(&mut self, base: &Blk, out: &mut Vec<Blk>) {
+        let s = self.s;
+        let (row, col, bsize) = (base.row, base.col, base.bsize);
+        let (x, y) = (col * 8, row * 8);
+        let w = (base.bw * 8).min((s.mi_cols - col) * 8);
+        let h = (base.bh * 8).min((s.mi_rows - row) * 8);
+        let lam = u64::from(s.lambda);
+        let mut scored: Vec<(u64, Blk)> = Vec::with_capacity(8);
+        for r in 0..3 {
+            if !s.refs_live[r] {
+                continue;
+            }
+            self.cur_ref = r;
+            if self.rec_ref().is_none() {
+                continue;
+            }
+            let (mv, sad) = self.search(row, col, bsize);
+            if r == 0 {
+                let (bw, _) = MI_WH[usize::from(bsize)];
+                for rr in 0..bw.min(s.mi_rows - row) {
+                    for c in 0..bw.min(s.mi_cols - col) {
+                        self.seeds[(row + rr) * s.mi_cols + col + c] = mv;
+                    }
+                }
+            }
+            let (mv, sad) = self.refine(row, col, bsize, mv, sad);
+            let mut b = Blk {
+                refs: [r as u8 + 1, INTRA_FRAME],
+                ..*base
+            };
+            let nearest = self.find_mv(&b, NEAREST);
+            let near = self.find_mv(&b, NEAR);
+            // Other references cost their symbol: about a bit or two more.
+            let ref_bits = lam * 2 * r as u64;
+            let mode_of = |v: Mv, m: u8| {
+                if v == nearest {
+                    NEAREST
+                } else if v == near {
+                    NEAR
+                } else if v == Mv::ZERO {
+                    ZERO
+                } else {
+                    m
+                }
+            };
+            b.mv = mv;
+            b.mode = mode_of(mv, NEW);
+            let new_bits = if b.mode == NEW {
+                lam * u64::from(mv_bits(Mv { row: mv.row - nearest.row, col: mv.col - nearest.col })) / 256 + lam * 2
+            } else {
+                lam
+            };
+            scored.push((sad + new_bits + ref_bits, b));
+            for v in [nearest, near, Mv::ZERO] {
+                if v == mv || scored.iter().any(|(_, o)| o.refs == b.refs && o.mv == v) {
+                    continue;
+                }
+                if let Some(d) = self.sad_sub(x, y, w, h, v) {
+                    scored.push((d + lam + ref_bits, Blk { mv: v, mode: mode_of(v, ZERO), ..b }));
+                }
             }
         }
-        sad + lam * u64::from(mv_bits(mv)) / 256 + lam * 3
+        self.cur_ref = 0;
+        scored.sort_by_key(|t| t.0);
+        self.last_sad = scored.first().map_or(u64::MAX, |t| t.0);
+        let k = match s.speed {
+            0..=3 => 3,
+            4..=7 => 2,
+            _ => 1,
+        };
+        out.extend(scored.iter().take(k).map(|t| t.1));
+    }
+
+    // State snapshots ------------------------------------------------------
+
+    /// Keeps in snapshot `k` everything coding the square of `n` 8×8
+    /// blocks at `(row, col)` changes: its contexts, motion and samples.
+    fn save(&mut self, row: usize, col: usize, n: usize, k: usize) {
+        let mut sn = std::mem::take(&mut self.snaps[k]);
+        sn.at = (row, col, n);
+        sn.cost = self.cost;
+        let a = col - self.col0;
+        let aw = n.min(self.f.above.len() - a);
+        sn.above[..aw].copy_from_slice(&self.f.above[a..a + aw]);
+        sn.above_part[..aw].copy_from_slice(&self.f.above_part[a..a + aw]);
+        let l = row & 7;
+        sn.left[..n].copy_from_slice(&self.left[l..l + n]);
+        sn.left_part[..n].copy_from_slice(&self.left_part[l..l + n]);
+        for p in 0..3 {
+            let ss = usize::from(p > 0);
+            let (a4, n4) = ((a * 2) >> ss, (n * 2) >> ss);
+            let w4 = n4.min(self.f.above_nz[p].len() - a4);
+            sn.above_nz[p][..w4].copy_from_slice(&self.f.above_nz[p][a4..a4 + w4]);
+            let l4 = ((row * 2) & 15) >> ss;
+            sn.left_nz[p][..n4].copy_from_slice(&self.left_nz[p][l4..l4 + n4]);
+        }
+        let rows = n.min(self.s.mi_rows - row);
+        let cols = n.min(self.col1 - col);
+        for r in 0..rows {
+            let at = (row + r) * self.f.width + a;
+            sn.mvs[r * 8..r * 8 + cols].copy_from_slice(&self.f.mvs[at..at + cols]);
+        }
+        let views = self.rec.views();
+        for p in 0..3 {
+            let ss = usize::from(p > 0);
+            let (x, y, m) = ((col * 8) >> ss, (row * 8) >> ss, (n * 8) >> ss);
+            let v = &mut views[p];
+            let stride = v.stride;
+            let src = v.at(y, x);
+            for r in 0..m {
+                sn.pix[p][r * 64..r * 64 + m].copy_from_slice(&src[r * stride..r * stride + m]);
+            }
+        }
+        self.snaps[k] = sn;
+    }
+
+    /// Puts back what snapshot `k` kept.
+    fn restore(&mut self, k: usize) {
+        let sn = std::mem::take(&mut self.snaps[k]);
+        let (row, col, n) = sn.at;
+        self.cost = sn.cost;
+        let a = col - self.col0;
+        let aw = n.min(self.f.above.len() - a);
+        self.f.above[a..a + aw].copy_from_slice(&sn.above[..aw]);
+        self.f.above_part[a..a + aw].copy_from_slice(&sn.above_part[..aw]);
+        let l = row & 7;
+        self.left[l..l + n].copy_from_slice(&sn.left[..n]);
+        self.left_part[l..l + n].copy_from_slice(&sn.left_part[..n]);
+        for p in 0..3 {
+            let ss = usize::from(p > 0);
+            let (a4, n4) = ((a * 2) >> ss, (n * 2) >> ss);
+            let w4 = n4.min(self.f.above_nz[p].len() - a4);
+            self.f.above_nz[p][a4..a4 + w4].copy_from_slice(&sn.above_nz[p][..w4]);
+            let l4 = ((row * 2) & 15) >> ss;
+            self.left_nz[p][l4..l4 + n4].copy_from_slice(&sn.left_nz[p][..n4]);
+        }
+        let rows = n.min(self.s.mi_rows - row);
+        let cols = n.min(self.col1 - col);
+        for r in 0..rows {
+            let at = (row + r) * self.f.width + a;
+            self.f.mvs[at..at + cols].copy_from_slice(&sn.mvs[r * 8..r * 8 + cols]);
+        }
+        let views = self.rec.views();
+        for p in 0..3 {
+            let ss = usize::from(p > 0);
+            let (x, y, m) = ((col * 8) >> ss, (row * 8) >> ss, (n * 8) >> ss);
+            let v = &mut views[p];
+            let stride = v.stride;
+            let dst = v.at(y, x);
+            for r in 0..m {
+                dst[r * stride..r * stride + m].copy_from_slice(&sn.pix[p][r * 64..r * 64 + m]);
+            }
+        }
+        self.snaps[k] = sn;
     }
 
     // Motion search -------------------------------------------------------
@@ -311,7 +679,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
 
     fn rec_ref(&self) -> Option<((&[u8], usize), (i32, i32))> {
         let c = self.rec.ctx();
-        let rp = c.refs[0].as_ref()?;
+        let rp = c.refs[self.cur_ref].as_ref()?;
         Some((rp.buf.plane(0), (rp.dims.w[0] as i32, rp.dims.h[0] as i32)))
     }
 
@@ -363,7 +731,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         }
         if let Some(p) = s.prev_mvs
             && let Some(m) = p.get(row * s.mi_cols + col)
-            && m.refs[0] == LAST_FRAME
+            && usize::from(m.refs[0]) == self.cur_ref + 1
         {
             cands[nc] = m.mv[0];
             nc += 1;
@@ -447,6 +815,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
 
     // Partitions -----------------------------------------------------------
 
+    /// Codes the partition of the square at `(row, col)` as `split` and
+    /// `choice` decided.
     fn partition(&mut self, row: usize, col: usize, bsize: u8, n4: u32, split: &[bool; 21]) {
         let s = self.s;
         if row >= s.mi_rows || col >= s.mi_cols {
@@ -454,42 +824,58 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         }
         let n8 = n4 - 1;
         let hbs = (1usize << n8) >> 1;
-        let has_rows = row + hbs < s.mi_rows;
-        let has_cols = col + hbs < s.mi_cols;
-        // A block that does not fit the frame splits.
+        let fits = row + hbs < s.mi_rows && col + hbs < s.mi_cols;
         let p = if hbs == 0 {
             PARTITION_NONE
-        } else if !(has_rows && has_cols) || split[Self::node(row, col, n8 as usize)] {
+        } else if !fits || split[Self::node(row, col, n8 as usize)] {
             PARTITION_SPLIT
         } else {
             PARTITION_NONE
         };
-        let ctx = {
-            let above = usize::from(self.f.above_part[col - self.col0] >> n8) & 1;
-            let left = usize::from(self.left_part[row & 7] >> n8) & 1;
-            left * 2 + above + n8 as usize * 4
-        };
-        let probs = s.part_probs[ctx];
-        if has_rows && has_cols {
-            prob::write_tree(self.w, &prob::PARTITION_TREE, &probs, p);
-        } else if !has_rows && has_cols {
-            self.w.write(u32::from(p == PARTITION_SPLIT), u32::from(probs[1]));
-        } else if has_rows && !has_cols {
-            self.w.write(u32::from(p == PARTITION_SPLIT), u32::from(probs[2]));
-        }
-        if self.collect() {
-            self.f.counts.partition[ctx][usize::from(p)] += 1;
-        }
+        self.part_symbol(row, col, bsize, p);
         let sub = geom::subsize(p, bsize);
         if p == PARTITION_NONE {
-            self.block(row, col, sub);
+            let b = self.choice[Self::slot(row, col, bsize)];
+            self.code_block(&b);
         } else {
             for (dr, dc) in [(0, 0), (0, hbs), (hbs, 0), (hbs, hbs)] {
                 self.partition(row + dr, col + dc, sub, n8, split);
             }
         }
+        self.part_after(row, col, bsize, p);
+        let _ = (PARTITION_HORZ, PARTITION_VERT);
+    }
+
+    /// The partition symbol of the square at `(row, col)`.
+    fn part_symbol(&mut self, row: usize, col: usize, bsize: u8, p: u8) {
+        let s = self.s;
+        let n8 = geom::mi_width_log2(bsize) as usize;
+        let hbs = (1usize << n8) >> 1;
+        let has_rows = row + hbs < s.mi_rows;
+        let has_cols = col + hbs < s.mi_cols;
+        let ctx = {
+            let above = usize::from(self.f.above_part[col - self.col0] >> n8) & 1;
+            let left = usize::from(self.left_part[row & 7] >> n8) & 1;
+            left * 2 + above + n8 * 4
+        };
+        let probs = s.part_probs[ctx];
+        if has_rows && has_cols {
+            self.put_tree(&prob::PARTITION_TREE, &probs, p);
+        } else if !has_rows && has_cols {
+            self.put(u32::from(p == PARTITION_SPLIT), u32::from(probs[1]));
+        } else if has_rows && !has_cols {
+            self.put(u32::from(p == PARTITION_SPLIT), u32::from(probs[2]));
+        }
+        if self.collect() {
+            self.f.counts.partition[ctx][usize::from(p)] += 1;
+        }
+    }
+
+    /// The partition contexts a coded square leaves.
+    fn part_after(&mut self, row: usize, col: usize, bsize: u8, p: u8) {
         if bsize == BLOCK_8X8 || p != PARTITION_SPLIT {
             let n = 1usize << geom::mi_width_log2(bsize);
+            let sub = geom::subsize(p, bsize);
             let (above, left) = geom::partition_context_byte(sub);
             let a = col - self.col0;
             let end = (a + n).min(self.f.above_part.len());
@@ -497,7 +883,6 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             let l = row & 7;
             self.left_part[l..(l + n).min(8)].fill(left);
         }
-        let _ = (PARTITION_HORZ, PARTITION_VERT);
     }
 
     fn above_nb(&self, b: &Blk) -> Option<&Nb> {
@@ -509,35 +894,41 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     }
 
     fn collect(&self) -> bool {
-        !self.s.h.error_resilient && !self.s.h.frame_parallel
+        !self.trial && !self.s.h.error_resilient && !self.s.h.frame_parallel
+    }
+
+    /// Writes a bit, or in a trial adds its cost.
+    #[inline]
+    fn put(&mut self, bit: u32, prob: u32) {
+        if self.trial {
+            self.cost += u64::from(bit_cost(bit != 0, prob as u8));
+        } else {
+            self.w.write(bit, prob);
+        }
+    }
+
+    /// Writes a symbol of a tree, or in a trial adds its cost.
+    fn put_tree(&mut self, tree: &[i8], probs: &[u8], symbol: u8) {
+        if self.trial {
+            let mut c = Cost(0);
+            tree_to(&mut c, tree, probs, symbol);
+            self.cost += u64::from(c.0);
+        } else {
+            prob::write_tree(self.w, tree, probs, symbol);
+        }
     }
 
     // Blocks ----------------------------------------------------------------
 
-    fn block(&mut self, row: usize, col: usize, bsize: u8) {
+    /// Codes one block as `b0` says (in a trial, costed): prediction,
+    /// residual, the skip decision, the syntax, the contexts. Returns the
+    /// SSE of its reconstruction.
+    fn code_block(&mut self, b0: &Blk) -> f64 {
         let s = self.s;
-        let (bw, bh) = MI_WH[usize::from(bsize)];
-        let mut b = Blk {
-            row,
-            col,
-            bsize,
-            bw,
-            bh,
-            x_mis: bw.min(s.mi_cols - col),
-            y_mis: bh.min(s.mi_rows - row),
-            skip: false,
-            tx: geom::max_tx(bsize).min(geom::tx_mode_biggest(s.h.tx_mode)),
-            mode: geom::DC,
-            uv: geom::DC,
-            refs: [INTRA_FRAME, INTRA_FRAME],
-            mv: Mv::ZERO,
-        };
-        if s.intra_frame {
-            self.pick_intra(&mut b);
-        } else {
-            self.pick_inter(&mut b);
-        }
-        // The residual decides skip: code it, and see.
+        let mut b = *b0;
+        let (row, col, bsize) = (b.row, b.col, b.bsize);
+        let (bw, bh) = (b.bw, b.bh);
+        let inter = b.refs[0] != INTRA_FRAME;
         let rec = BlockRec {
             row: row as u16,
             col: col as u16,
@@ -552,17 +943,35 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             refs: b.refs,
             bmv: [[b.mv, Mv::ZERO]; 4],
         };
-        if b.refs[0] != INTRA_FRAME {
+        if inter {
             self.rec.predict_inter(&rec);
         }
         // Coefficients of every tx block, kept until the mode info is
         // written (intra predicts tx block by tx block from the ones
         // before, so it is reconstructed as it goes).
-        let mut toks: Vec<(usize, u8, usize, usize, Vec<i32>, usize)> = Vec::new();
+        let mut toks = std::mem::take(&mut self.toks);
+        toks.clear();
         let mut eobs = 0;
-        self.residual(&b, &rec, &mut toks, &mut eobs);
+        let (coded, dropped) = self.residual(&b, &rec, &mut toks, &mut eobs);
+        if inter && eobs > 0 {
+            // Skip when the residual is not worth its bits.
+            let ctx = usize::from(self.above_nb(&b).is_some_and(|n| n.skip)) + usize::from(self.left_nb(&b).is_some_and(|n| n.skip));
+            let p = s.fc.skip[ctx];
+            let lam = s.rd_lambda / 256.0;
+            let j_skip = dropped + lam * bit_cost(true, p) as f32;
+            let j_coded = coded + lam * bit_cost(false, p) as f32;
+            if j_skip <= j_coded {
+                eobs = 0;
+                self.rec.predict_inter(&rec);
+            }
+        }
         b.skip = eobs == 0;
+        if inter && b.skip {
+            // A skipped inter block takes the largest transform.
+            b.tx = geom::max_tx(bsize).min(geom::tx_mode_biggest(s.h.tx_mode));
+        }
         // Mode info.
+        let pos0 = self.w.bits_written();
         if s.intra_frame {
             self.write_intra_frame_info(&b);
         } else {
@@ -579,12 +988,18 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 self.f.mvs[at..at + b.x_mis].fill(r);
             }
         }
+        let pos1 = self.w.bits_written();
         if b.skip {
             self.reset_nz(&b);
         } else {
-            for (plane, tx, r4, c4, levels, eob) in toks {
-                self.write_coefs(&b, plane, tx, r4, c4, &levels, eob);
+            for (plane, tx, r4, c4, levels, eob) in toks.iter() {
+                self.write_coefs(&b, *plane, *tx, *r4, *c4, levels, *eob);
             }
+        }
+        self.toks = toks;
+        if !self.trial {
+            let pos2 = self.w.bits_written();
+            stats::add(&[(0, pos1 - pos0), (1, pos2 - pos1), (2 + usize::from(b.mode).min(13), 1), (16 + usize::from(b.skip), 1), (18 + usize::from(bsize), 1)]);
         }
         let nb = Nb {
             bsize,
@@ -593,7 +1008,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             skip: b.skip,
             tx: b.tx,
             seg_pred: false,
-            interp: if b.refs[0] == INTRA_FRAME { 3 } else { geom::EIGHTTAP },
+            interp: if inter { geom::EIGHTTAP } else { 3 },
             refs: b.refs,
             bmv: [[b.mv, Mv::ZERO]; 4],
         };
@@ -602,7 +1017,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         self.f.above[a..end].fill(nb);
         let l = row & 7;
         self.left[l..(l + bh).min(8)].fill(nb);
-        if s.filter_on {
+        if s.filter_on && !self.trial {
             let index = (row >> 3) * self.f.width.div_ceil(8) + ((col - self.col0) >> 3);
             lpf::build(
                 &mut self.f.masks[index],
@@ -611,7 +1026,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                     bsize,
                     tx: b.tx,
                     skip: b.skip,
-                    inter: b.refs[0] != INTRA_FRAME,
+                    inter,
                     seg: 0,
                     mode: b.mode,
                     reference: b.refs[0],
@@ -636,76 +1051,39 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 }
             }
         }
+        self.coded_skip = b.skip;
+        if self.trial { self.block_sse(&b) } else { 0.0 }
+    }
+
+    /// The SSE of the block's reconstruction against the source, inside
+    /// the frame.
+    fn block_sse(&mut self, b: &Blk) -> f64 {
+        let s = self.s;
+        let mut total = 0u64;
+        for p in 0..3 {
+            let ss = usize::from(p > 0);
+            let (_, _, vw, vh) = self.visible(b, p);
+            let (x, y) = ((b.col * 8) >> ss, (b.row * 8) >> ss);
+            let (src, sst) = (s.src.planes[p], s.src.strides[p]);
+            let v = &mut self.rec.views()[p];
+            let stride = v.stride;
+            total += sad::sse(&src[y * sst + x..], sst, v.at(y, x), stride, vw * 4, vh * 4);
+        }
+        total as f64
     }
 
     fn uv_tx(&self, b: &Blk) -> u8 {
         geom::uv_tx_420(b.bsize, b.tx)
     }
 
-    // Mode decisions ---------------------------------------------------------
-
-    /// Intra modes of a key frame: the luma mode with the lowest SATD
-    /// over the block's first tx block (from the reconstruction), and DC
-    /// for chroma.
-    fn pick_intra(&mut self, b: &mut Blk) {
-        let tx = b.tx;
-        let n = 4usize << tx;
-        let (x, y) = (b.col * 8, b.row * 8);
-        let have_above = b.row > 0;
-        let have_left = b.col > self.col0;
-        let e = self.rec.intra_edges(0, tx, x, y, have_left, have_above, false);
-        let s = self.s;
-        let (src, ss) = (s.src.planes[0], s.src.strides[0]);
-        let mut best = (u64::MAX, geom::DC);
-        let modes: &[u8] = if s.speed >= 8 {
-            &[geom::DC, geom::V, geom::H, geom::TM]
-        } else {
-            &[geom::DC, geom::V, geom::H, geom::TM, geom::D45, geom::D135, geom::D117, geom::D153, geom::D207, geom::D63]
-        };
-        for &m in modes {
-            ipred::predict(m, n, &mut self.pred, n, &e, 8);
-            let mut cost = 0u64;
-            for r in 0..n {
-                cost += sad_row(&src[(y + r) * ss + x..(y + r) * ss + x + n], &self.pred[r * n..r * n + n]);
-            }
-            let cost = cost + u64::from(s.lambda) / 64 * u64::from(m != geom::DC);
-            if cost < best.0 {
-                best = (cost, m);
-            }
-        }
-        b.mode = best.1;
-        b.uv = geom::DC;
-        b.refs = [INTRA_FRAME; 2];
-    }
-
-    /// The vector of an inter block: the searched one, or a candidate of
-    /// the reference list when it is as good.
-    fn pick_inter(&mut self, b: &mut Blk) {
-        let (mv, sad) = self.found[Self::slot(b.row, b.col, b.bsize)];
-        let (mv, _) = self.refine(b.row, b.col, b.bsize, mv, sad);
-        b.refs = [LAST_FRAME, INTRA_FRAME];
-        b.mv = mv;
-        // NEAREST / NEAR / ZERO when one of them is the vector.
-        let nearest = self.find_mv(b, NEAREST);
-        let near = self.find_mv(b, NEAR);
-        b.mode = if mv == Mv::ZERO {
-            ZERO
-        } else if mv == nearest {
-            NEAREST
-        } else if mv == near {
-            NEAR
-        } else {
-            NEW
-        };
-        b.uv = geom::DC;
-    }
-
     // Residual -----------------------------------------------------------
 
     /// Every tx block's prediction (intra), residual, quantized levels and
     /// reconstruction, in the decoder's order.
-    fn residual(&mut self, b: &Blk, rec: &BlockRec, toks: &mut Vec<(usize, u8, usize, usize, Vec<i32>, usize)>, eobs: &mut usize) {
+    /// Returns the summed costs of the tx blocks as coded and dropped.
+    fn residual(&mut self, b: &Blk, rec: &BlockRec, toks: &mut Vec<Tok>, eobs: &mut usize) -> (f32, f32) {
         let s = self.s;
+        let mut sums = (0.0f32, 0.0f32);
         let intra = b.refs[0] == INTRA_FRAME;
         let lossless = s.h.lossless;
         for plane in 0..3 {
@@ -733,12 +1111,15 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                     }
                     let (levels, eob) = self.quantize(plane, tx, kind, x, y, intra);
                     *eobs += eob;
+                    sums.0 += self.rd.coded;
+                    sums.1 += self.rd.dropped;
                     toks.push((plane, tx, r, c, levels, eob));
                     c += step;
                 }
                 r += step;
             }
         }
+        sums
     }
 
     fn visible(&self, b: &Blk, plane: usize) -> (usize, usize, usize, usize) {
@@ -770,6 +1151,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             }
         }
         let mut levels = vec![0i32; n * n];
+        self.rd = TxRd::default();
         let dqi = usize::from(plane > 0);
         let (dc_q, ac_q) = (s.dq[dqi][0], s.dq[dqi][1]);
         let shift = u32::from(tx == 3);
@@ -782,17 +1164,9 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             }
         } else {
             forward(&self.res, n, usize::from(tx), kind & 1 == 1, kind & 2 == 2, &mut self.fcoef);
-            // A dead zone: less rounding up between, more at DC.
-            let round_ac = if intra { 0.42 } else { 0.30 };
-            for i in 0..n * n {
-                let q = if i == 0 { dc_q } else { ac_q };
-                let step = q as f32 / (1 << shift) as f32;
-                let v = self.fcoef[i];
-                let a = v.abs() / step;
-                let rnd = if i == 0 { 0.5 } else { round_ac };
-                let l = (a + rnd) as i32;
-                levels[i] = if v < 0.0 { -l } else { l };
-            }
+            let (eob, rd) = self.rd_levels(plane, tx, kind, x, y, intra, &mut levels);
+            self.rd = rd;
+            let _ = eob;
         }
         // End of block in the decoder's scan; drop what lies past it.
         let (scan, _) = scan_pair(tx, kind);
@@ -828,19 +1202,229 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         (levels, eob)
     }
 
+    /// Rate-distortion quantization of `self.fcoef` into `levels`: each
+    /// coefficient takes the level, of the two nearest its value (or
+    /// zero), with the least distortion plus `lambda` times its token's
+    /// bits, in scan order (so each token's context is known); then the
+    /// end of block goes where the cost is least. Returns the end of
+    /// block and the costs of coding and of dropping the block.
+    #[allow(clippy::too_many_arguments)]
+    fn rd_levels(&mut self, plane: usize, tx: u8, kind: u8, x: usize, y: usize, intra: bool, levels: &mut [i32]) -> (usize, TxRd) {
+        let s = self.s;
+        let n = 4usize << tx;
+        let log2n = 2 + usize::from(tx);
+        let shift = u32::from(tx == 3);
+        let dqi = usize::from(plane > 0);
+        let (dc_q, ac_q) = (s.dq[dqi][0], s.dq[dqi][1]);
+        let g = super::tx::gain(usize::from(tx));
+        let lam = s.rd_lambda * g / 256.0;
+        let (scan, nb) = scan_pair(tx, kind);
+        let probs = &s.fc.coef[usize::from(tx)][dqi][usize::from(!intra)];
+        let bands: &[u8] = if tx == 0 { &BAND_4X4 } else { &BAND_8X8_PLUS };
+        let max = n * n;
+        // The context of the first token, from the neighbours so far.
+        let ctx0 = {
+            let ss = usize::from(plane > 0);
+            let n4 = 1usize << tx;
+            let a = (x >> 2) - ((self.col0 * 8 >> ss) >> 2);
+            let l = (y >> 2) & (15 >> ss);
+            let anz = self.f.above_nz[plane][a..(a + n4).min(self.f.above_nz[plane].len())].iter().any(|&v| v != 0);
+            let lnz = self.left_nz[plane][l..(l + n4).min(16)].iter().any(|&v| v != 0);
+            usize::from(anz) + usize::from(lnz)
+        };
+        // Values in steps, in scan order; nothing past the last that could
+        // round to a level is worth looking at.
+        let mut av = [0.0f32; 1024];
+        let mut steps = [0.0f32; 2];
+        steps[0] = dc_q as f32 / (1 << shift) as f32;
+        steps[1] = ac_q as f32 / (1 << shift) as f32;
+        let mut last_sig = 0usize;
+        let mut d_all = 0.0f32;
+        for k in 0..max {
+            let rc = usize::from(scan[k]);
+            let t = ((rc & (n - 1)) << log2n) | (rc >> log2n);
+            let v = self.fcoef[t];
+            let st = steps[usize::from(k > 0)];
+            av[k] = v.abs() / st;
+            d_all += v * v;
+            if av[k] >= 0.3 {
+                last_sig = k + 1;
+            }
+        }
+        if last_sig == 0 {
+            let e0 = lam * bit_cost(false, probs[0][ctx0][0]) as f32;
+            levels[..max].fill(0);
+            let d = (d_all + e0) / g;
+            return (0, TxRd { coded: d, dropped: d });
+        }
+        // Token costs by band and context.
+        let cost = &*COST;
+        let bc = |bit: bool, p: u8| u32::from(if bit { cost[256 - usize::from(p.max(1))] } else { cost[usize::from(p.max(1))] });
+        let mut tc = [[[0u32; 5]; 6]; 6];
+        for (band, row) in probs.iter().enumerate() {
+            for (c, p) in row.iter().enumerate() {
+                // more, eob, zero, one, two-or-more (signs added below)
+                tc[band][c] = [bc(true, p[0]), bc(false, p[0]), bc(false, p[1]), bc(true, p[1]) + bc(false, p[2]) + 256, bc(true, p[1]) + bc(true, p[2]) + 256];
+            }
+        }
+        let mut energy = [0u8; 1024];
+        let mut ctx = ctx0;
+        let mut prev_zero = false;
+        // Per position: the chosen cost (distortion + lambda·rate) so far,
+        // the distortion if it were zero, and the end-of-block cost there.
+        let mut j_pref = [0.0f32; 1025];
+        let mut d_tail = [0.0f32; 1025];
+        let mut eob_cost = [0.0f32; 1025];
+        let mut last_nz = 0usize;
+        let mut d_rest = d_all;
+        for k in 0..last_sig {
+            let rc = usize::from(scan[k]);
+            let t = ((rc & (n - 1)) << log2n) | (rc >> log2n);
+            let st = steps[usize::from(k > 0)];
+            let a = av[k];
+            let band = usize::from(bands[k]);
+            let tcs = &tc[band][ctx];
+            eob_cost[k] = lam * tcs[1] as f32;
+            let lo = a as u32;
+            let more = if prev_zero { 0 } else { tcs[0] };
+            let d_of = |l: u32| {
+                let e = (a - l as f32) * st;
+                e * e
+            };
+            let r_of = |l: u32| -> u32 {
+                match l {
+                    0 => more + tcs[2],
+                    1 => more + tcs[3],
+                    _ => {
+                        let mut c = Cost(0);
+                        write_big(&mut c, &PARETO8[usize::from(probs[band][ctx][2].max(1)) - 1], l);
+                        more + tcs[4] + c.0
+                    }
+                }
+            };
+            let mut best = (f32::MAX, 0u32);
+            let cands = if lo == 0 { [0, 1, 1] } else if lo == 1 { [0, 1, 2] } else { [lo, lo + 1, lo + 1] };
+            for &l in &cands {
+                let j = d_of(l) + lam * r_of(l) as f32;
+                if j < best.0 {
+                    best = (j, l);
+                }
+            }
+            let l = best.1;
+            let v = self.fcoef[t];
+            levels[t] = if v < 0.0 { -(l as i32) } else { l as i32 };
+            j_pref[k + 1] = j_pref[k] + best.0;
+            d_tail[k] = d_rest;
+            d_rest -= d_of(0);
+            if l != 0 {
+                last_nz = k + 1;
+            }
+            energy[rc] = match l {
+                0 => 0,
+                1 => 1,
+                2 => 2,
+                3 | 4 => 3,
+                5..=10 => 4,
+                _ => 5,
+            };
+            prev_zero = l == 0;
+            if k + 1 < max {
+                ctx = (1 + usize::from(energy[usize::from(nb[2 * (k + 1)])]) + usize::from(energy[usize::from(nb[2 * (k + 1) + 1])])) >> 1;
+            }
+        }
+        d_tail[last_sig] = d_rest.max(0.0);
+        if last_sig < max {
+            eob_cost[last_sig] = lam * tc[usize::from(bands[last_sig])][ctx][1] as f32;
+        }
+        for k in last_sig..max {
+            let rc = usize::from(scan[k]);
+            let t = ((rc & (n - 1)) << log2n) | (rc >> log2n);
+            levels[t] = 0;
+        }
+        // The best end: after a nonzero level, or none.
+        let mut best = (d_tail[0] + eob_cost[0], 0usize);
+        for e in 1..=last_nz {
+            let rc = usize::from(scan[e - 1]);
+            let t = ((rc & (n - 1)) << log2n) | (rc >> log2n);
+            if levels[t] == 0 {
+                continue;
+            }
+            let end = if e < max { eob_cost[e] } else { 0.0 };
+            let j = j_pref[e] + d_tail[e] + end;
+            if j < best.0 {
+                best = (j, e);
+            }
+        }
+        let eob = best.1;
+        for k in eob..last_sig {
+            let rc = usize::from(scan[k]);
+            let t = ((rc & (n - 1)) << log2n) | (rc >> log2n);
+            levels[t] = 0;
+        }
+        let zero = TxRd {
+            coded: best.0 / g,
+            dropped: (d_tail[0] + eob_cost[0]) / g,
+        };
+        (eob, zero)
+    }
+
     // Syntax ---------------------------------------------------------------
 
     fn write_skip(&mut self, b: &Blk) {
         let ctx = usize::from(self.above_nb(b).is_some_and(|n| n.skip)) + usize::from(self.left_nb(b).is_some_and(|n| n.skip));
-        self.w.write(u32::from(b.skip), u32::from(self.s.fc.skip[ctx]));
+        self.put(u32::from(b.skip), u32::from(self.s.fc.skip[ctx]));
         if self.collect() {
             self.f.counts.skip[ctx][usize::from(b.skip)] += 1;
         }
     }
 
+    /// The tx size, when the frame selects it per block (parse.rs
+    /// `read_tx`).
+    fn write_tx(&mut self, b: &Blk, allow: bool) {
+        let s = self.s;
+        let limit = geom::max_tx(b.bsize);
+        if !(allow && s.h.tx_mode == geom::TX_MODE_SELECT && b.bsize >= BLOCK_8X8) {
+            return;
+        }
+        let above = self.above_nb(b);
+        let left = self.left_nb(b);
+        let ntx = |n: Option<&Nb>| n.map_or(limit, |n| if n.skip { limit } else { n.tx });
+        let mut a = ntx(above);
+        let mut l = ntx(left);
+        if left.is_none() {
+            l = a;
+        }
+        if above.is_none() {
+            a = l;
+        }
+        let ctx = usize::from(a + l > limit);
+        let fc = s.fc;
+        let probs: [u8; 3] = match limit {
+            geom::TX_8X8 => [fc.tx8[ctx][0], 0, 0],
+            geom::TX_16X16 => [fc.tx16[ctx][0], fc.tx16[ctx][1], 0],
+            _ => fc.tx32[ctx],
+        };
+        let tx = b.tx;
+        self.put(u32::from(tx != 0), u32::from(probs[0]));
+        if tx != 0 && limit >= geom::TX_16X16 {
+            self.put(u32::from(tx > 1), u32::from(probs[1]));
+            if tx != 1 && limit >= TX_32X32 {
+                self.put(u32::from(tx > 2), u32::from(probs[2]));
+            }
+        }
+        if self.collect() {
+            let t = usize::from(tx);
+            match limit {
+                geom::TX_8X8 => self.f.counts.tx8[ctx][t] += 1,
+                geom::TX_16X16 => self.f.counts.tx16[ctx][t] += 1,
+                _ => self.f.counts.tx32[ctx][t] += 1,
+            }
+        }
+    }
+
     fn write_intra_frame_info(&mut self, b: &Blk) {
         self.write_skip(b);
-        // tx_mode is not TX_MODE_SELECT: no tx size.
+        self.write_tx(b, true);
         let above = self.above_nb(b).copied();
         let left = self.left_nb(b).copied();
         let a = match above {
@@ -851,8 +1435,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             Some(l) if l.refs[0] == INTRA_FRAME => l.bmode[1],
             _ => geom::DC,
         };
-        prob::write_tree(self.w, &prob::INTRA_TREE, &KF_Y_MODE_PROB[usize::from(a)][usize::from(l)], b.mode);
-        prob::write_tree(self.w, &prob::INTRA_TREE, &KF_UV_MODE_PROB[usize::from(b.mode)], b.uv);
+        self.put_tree(&prob::INTRA_TREE, &KF_Y_MODE_PROB[usize::from(a)][usize::from(l)], b.mode);
+        self.put_tree(&prob::INTRA_TREE, &KF_UV_MODE_PROB[usize::from(b.mode)], b.uv);
     }
 
     fn write_inter_frame_info(&mut self, b: &Blk) {
@@ -860,27 +1444,37 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         self.write_skip(b);
         let inter = b.refs[0] != INTRA_FRAME;
         let ctx = ctx::intra_inter_ctx(self.above_nb(b), self.left_nb(b));
-        self.w.write(u32::from(inter), u32::from(s.fc.intra_inter[ctx]));
+        self.put(u32::from(inter), u32::from(s.fc.intra_inter[ctx]));
         if self.collect() {
             self.f.counts.intra_inter[ctx][usize::from(inter)] += 1;
         }
+        self.write_tx(b, !b.skip || !inter);
         if !inter {
             let group = geom::size_group(b.bsize);
-            prob::write_tree(self.w, &prob::INTRA_TREE, &s.fc.y_mode[group], b.mode);
+            self.put_tree(&prob::INTRA_TREE, &s.fc.y_mode[group], b.mode);
             if self.collect() {
                 self.f.counts.y_mode[group][usize::from(b.mode)] += 1;
             }
-            prob::write_tree(self.w, &prob::INTRA_TREE, &s.fc.uv_mode[usize::from(b.mode)], b.uv);
+            self.put_tree(&prob::INTRA_TREE, &s.fc.uv_mode[usize::from(b.mode)], b.uv);
             if self.collect() {
                 self.f.counts.uv_mode[usize::from(b.mode)][usize::from(b.uv)] += 1;
             }
             return;
         }
-        // Single reference, LAST: bit 0 of the first reference symbol.
+        // Single reference: LAST, or GOLDEN / ALTREF.
         let c0 = ctx::single_p1(self.above_nb(b), self.left_nb(b));
-        self.w.write(0, u32::from(s.fc.single_ref[c0][0]));
+        let bit0 = u32::from(b.refs[0] != LAST_FRAME);
+        self.put(bit0, u32::from(s.fc.single_ref[c0][0]));
         if self.collect() {
-            self.f.counts.single_ref[c0][0][0] += 1;
+            self.f.counts.single_ref[c0][0][bit0 as usize] += 1;
+        }
+        if bit0 == 1 {
+            let c1 = ctx::single_p2(self.above_nb(b), self.left_nb(b));
+            let bit1 = u32::from(b.refs[0] == geom::ALTREF_FRAME);
+            self.put(bit1, u32::from(s.fc.single_ref[c1][1]));
+            if self.collect() {
+                self.f.counts.single_ref[c1][1][bit1 as usize] += 1;
+            }
         }
         let search = &MV_REF[usize::from(b.bsize)];
         let mut counter = 0i32;
@@ -893,20 +1487,20 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let k = (b.mode - NEAREST) as usize;
         let p = s.fc.inter_mode[mctx];
         match k {
-            2 => self.w.write(0, u32::from(p[0])),
+            2 => self.put(0, u32::from(p[0])),
             0 => {
-                self.w.write(1, u32::from(p[0]));
-                self.w.write(0, u32::from(p[1]));
+                self.put(1, u32::from(p[0]));
+                self.put(0, u32::from(p[1]));
             }
             1 => {
-                self.w.write(1, u32::from(p[0]));
-                self.w.write(1, u32::from(p[1]));
-                self.w.write(0, u32::from(p[2]));
+                self.put(1, u32::from(p[0]));
+                self.put(1, u32::from(p[1]));
+                self.put(0, u32::from(p[2]));
             }
             _ => {
-                self.w.write(1, u32::from(p[0]));
-                self.w.write(1, u32::from(p[1]));
-                self.w.write(1, u32::from(p[2]));
+                self.put(1, u32::from(p[0]));
+                self.put(1, u32::from(p[1]));
+                self.put(1, u32::from(p[2]));
             }
         }
         if self.collect() {
@@ -932,7 +1526,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         } else {
             3
         };
-        prob::write_tree(self.w, &prob::JOINT_TREE, &s.fc.mv.joints, joint);
+        self.put_tree(&prob::JOINT_TREE, &s.fc.mv.joints, joint);
         let hp = s.h.allow_hp && best.row.unsigned_abs() < 64 && best.col.unsigned_abs() < 64;
         if joint == 2 || joint == 3 {
             self.write_mv_comp(0, i32::from(d.row), hp);
@@ -955,21 +1549,21 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let d = o >> 3;
         let f = (o >> 1) & 3;
         let e = o & 1;
-        self.w.write(u32::from(sign), u32::from(c.sign));
-        prob::write_tree(self.w, &prob::CLASS_TREE, &c.classes, class as u8);
+        self.put(u32::from(sign), u32::from(c.sign));
+        self.put_tree(&prob::CLASS_TREE, &c.classes, class as u8);
         if class == 0 {
-            self.w.write(d, u32::from(c.class0));
-            prob::write_tree(self.w, &prob::FP_TREE, &c.class0_fp[d as usize], f as u8);
+            self.put(d, u32::from(c.class0));
+            self.put_tree(&prob::FP_TREE, &c.class0_fp[d as usize], f as u8);
             if use_hp {
-                self.w.write(e, u32::from(c.class0_hp));
+                self.put(e, u32::from(c.class0_hp));
             }
         } else {
             for i in 0..class {
-                self.w.write((d >> i) & 1, u32::from(c.bits[i]));
+                self.put((d >> i) & 1, u32::from(c.bits[i]));
             }
-            prob::write_tree(self.w, &prob::FP_TREE, &c.fp, f as u8);
+            self.put_tree(&prob::FP_TREE, &c.fp, f as u8);
             if use_hp {
-                self.w.write(e, u32::from(c.hp));
+                self.put(e, u32::from(c.hp));
             }
         }
     }
@@ -1001,7 +1595,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     /// LAST, its last entry, with the precision lowered.
     fn find_mv(&self, b: &Blk, mode: u8) -> Mv {
         let s = self.s;
-        let frame = LAST_FRAME;
+        let frame = b.refs[0];
         let bias = &s.h.sign_bias;
         let early = mode != NEAR;
         let mut list = [Mv::ZERO; 2];
@@ -1147,33 +1741,40 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 if collect {
                     self.f.counts.eob[ti][pi][ri][band][ctx] += 1;
                 }
-                self.w.write(1, u32::from(p[0]));
+                self.put(1, u32::from(p[0]));
             }
             if v == 0 {
-                self.w.write(0, u32::from(p[1]));
+                self.put(0, u32::from(p[1]));
                 if collect {
                     self.f.counts.coef[ti][pi][ri][band][ctx][0] += 1;
                 }
                 self.cache[rc] = 0;
                 after_zero = true;
             } else {
-                self.w.write(1, u32::from(p[1]));
+                self.put(1, u32::from(p[1]));
                 let a = v.unsigned_abs();
                 if a == 1 {
-                    self.w.write(0, u32::from(p[2]));
+                    self.put(0, u32::from(p[2]));
                     if collect {
                         self.f.counts.coef[ti][pi][ri][band][ctx][1] += 1;
                     }
                     self.cache[rc] = 1;
                 } else {
-                    self.w.write(1, u32::from(p[2]));
+                    self.put(1, u32::from(p[2]));
                     if collect {
                         self.f.counts.coef[ti][pi][ri][band][ctx][2] += 1;
                     }
                     let pp = &PARETO8[usize::from(p[2]) - 1];
-                    self.cache[rc] = write_big(self.w, pp, a);
+                    self.cache[rc] = if self.trial {
+                        let mut c = Cost(0);
+                        let e = write_big(&mut c, pp, a);
+                        self.cost += u64::from(c.0);
+                        e
+                    } else {
+                        write_big(self.w, pp, a)
+                    };
                 }
-                self.w.write(u32::from(v < 0), 128);
+                self.put(u32::from(v < 0), 128);
                 after_zero = false;
             }
             c += 1;
@@ -1188,7 +1789,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 self.f.counts.eob[ti][pi][ri][band][ctx] += 1;
                 self.f.counts.coef[ti][pi][ri][band][ctx][3] += 1;
             }
-            self.w.write(0, u32::from(probs[band][ctx][0]));
+            self.put(0, u32::from(probs[band][ctx][0]));
         }
         let on = u8::from(eob > 0);
         let above = &mut self.f.above_nz[plane];
@@ -1206,9 +1807,71 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     }
 }
 
+/// Where token bits go: the bool coder, or a running cost.
+trait Sink {
+    fn write(&mut self, bit: u32, prob: u32);
+}
+
+impl Sink for BoolWriter {
+    #[inline]
+    fn write(&mut self, bit: u32, prob: u32) {
+        BoolWriter::write(self, bit, prob);
+    }
+}
+
+/// A cost in 1/256 bits.
+struct Cost(u32);
+
+impl Sink for Cost {
+    #[inline]
+    fn write(&mut self, bit: u32, prob: u32) {
+        self.0 += bit_cost(bit != 0, prob as u8);
+    }
+}
+
+/// A symbol of a tree, as `prob::write_tree` writes it.
+fn tree_to<S: Sink>(w: &mut S, tree: &[i8], probs: &[u8], symbol: u8) {
+    let reaches = |mut node: i16| -> bool {
+        // Depth-first: whether the subtree at `node` holds `symbol`.
+        let mut stack = [0i16; 16];
+        let mut n = 0;
+        loop {
+            if node <= 0 {
+                if -node == i16::from(symbol) {
+                    return true;
+                }
+            } else {
+                let at = node as usize;
+                stack[n] = i16::from(tree[at + 1]);
+                n += 1;
+                node = i16::from(tree[at]);
+                continue;
+            }
+            if n == 0 {
+                return false;
+            }
+            n -= 1;
+            node = stack[n];
+        }
+    };
+    let mut index = 0i16;
+    loop {
+        let at = index as usize;
+        let left = i16::from(tree[at]);
+        let right = i16::from(tree[at + 1]);
+        let bit = u32::from(!reaches(left));
+        w.write(bit, u32::from(probs[at >> 1]));
+        let next = if bit == 0 { left } else { right };
+        if next <= 0 {
+            return;
+        }
+        index = next;
+    }
+}
+
 /// Writes a token of magnitude `a` of 2 and more; returns its energy.
-fn write_big(w: &mut BoolWriter, pp: &[u8; 8], a: u32) -> u8 {
-    let bits = |w: &mut BoolWriter, v: u32, probs: &[u8]| {
+fn write_big<S: Sink>(w: &mut S, pp: &[u8; 8], a: u32) -> u8 {
+    let bits = |w: &mut S, v: u32, probs: &[u8]| {
         for (i, &p) in probs.iter().enumerate() {
             w.write((v >> (probs.len() - 1 - i)) & 1, u32::from(p));
         }
@@ -1368,4 +2031,48 @@ fn scan_pair(tx: u8, kind: u8) -> (&'static [u16], &'static [u16]) {
         (2, _) => (&SCAN_DEFAULT_16X16, &NEIGHBORS_DEFAULT_16X16),
         _ => (&SCAN_DEFAULT_32X32, &NEIGHBORS_DEFAULT_32X32),
     }
+}
+
+pub mod stats {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static C: [AtomicU64; 32] = [const { AtomicU64::new(0) }; 32];
+    pub fn add(v: &[(usize, u64)]) {
+        for &(i, n) in v {
+            C[i].fetch_add(n, Ordering::Relaxed);
+        }
+    }
+    pub fn dump() {
+        let g = |i: usize| C[i].load(Ordering::Relaxed);
+        eprintln!("bits mode {} coef {}; modes {:?}; skip {}/{}; sizes {:?}", g(0), g(1), (2..16).map(g).collect::<Vec<_>>(), g(17), g(16) + g(17), (18..31).map(g).collect::<Vec<_>>());
+    }
+}
+
+/// The sum of absolute 4×4 Hadamard coefficients of `src - pred` over an
+/// `w`×`h` block (`pred` rows `w` apart).
+fn satd(src: &[u8], ss: usize, pred: &[u8], w: usize, h: usize) -> u64 {
+    let mut total = 0u64;
+    for by in (0..h).step_by(4) {
+        for bx in (0..w).step_by(4) {
+            let mut d = [0i32; 16];
+            for r in 0..4 {
+                for c in 0..4 {
+                    d[r * 4 + c] = i32::from(src[(by + r) * ss + bx + c]) - i32::from(pred[(by + r) * w + bx + c]);
+                }
+            }
+            for r in 0..4 {
+                let (a, b, c, e) = (d[r * 4], d[r * 4 + 1], d[r * 4 + 2], d[r * 4 + 3]);
+                let (s0, s1, d0, d1) = (a + b, c + e, a - b, c - e);
+                d[r * 4] = s0 + s1;
+                d[r * 4 + 1] = s0 - s1;
+                d[r * 4 + 2] = d0 + d1;
+                d[r * 4 + 3] = d0 - d1;
+            }
+            for c in 0..4 {
+                let (a, b, cc, e) = (d[c], d[4 + c], d[8 + c], d[12 + c]);
+                let (s0, s1, d0, d1) = (a + b, cc + e, a - b, cc - e);
+                total += u64::from((s0 + s1).unsigned_abs() + (s0 - s1).unsigned_abs() + (d0 + d1).unsigned_abs() + (d0 - d1).unsigned_abs());
+            }
+        }
+    }
+    total / 2
 }

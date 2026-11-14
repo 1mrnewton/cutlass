@@ -37,7 +37,7 @@ fn round_trip(w: usize, h: usize, frames: usize, qindex: u8) {
     for t in 0..frames {
         let src = source(w, h, t);
         enc.load([(&src[0], w), (&src[1], cw), (&src[2], cw)]);
-        let coded = enc.encode(FrameParams { key: t == 0, qindex, speed: 5 }).expect("encode");
+        let coded = enc.encode(FrameParams { key: t == 0, golden: t % 3 == 2, qindex, speed: 5 }).expect("encode");
         bytes += coded.data.len();
         let pic = dec.decode(&coded.data).expect("decode").expect("shown");
         // The decoder's picture is the encoder's reconstruction.
@@ -76,4 +76,11 @@ fn round_trips_odd_sizes() {
 #[test]
 fn round_trips_lossless() {
     round_trip(72, 40, 3, 0);
+}
+
+#[test]
+fn transform_gains() {
+    for l in 0..4 {
+        eprintln!("gain {l}: {}", super::tx::gain(l));
+    }
 }

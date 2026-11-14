@@ -60,3 +60,8 @@ mod tests {
         assert_eq!(COEF_PROBS[0][0][0][0][0], [195, 29, 183]);
     }
 }
+
+#[doc(hidden)]
+pub fn enc_stats() {
+    enc::tile::stats::dump();
+}

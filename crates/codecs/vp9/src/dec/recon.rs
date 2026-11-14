@@ -111,24 +111,41 @@ impl<'a, P> View<'a, P> {
     }
 }
 
+/// Buffers reconstruction keeps from row to row.
+pub struct Scratch<P> {
+    /// Coefficients of the transform block being added; the transforms
+    /// clear what they read.
+    pub coef: Vec<i32>,
+    pub emu: Vec<P>,
+    pub mc: Vec<u8>,
+}
+
+impl<P: Pixel> Scratch<P> {
+    pub fn new() -> Self {
+        Self {
+            coef: vec![0; 1024],
+            emu: vec![P::default(); 80 * 80],
+            mc: vec![0; cutlass_simd::vp9::mc::TMP],
+        }
+    }
+}
+
 /// The reconstruction of a frame, row by row.
 pub struct Recon<'c, 'v, P> {
     c: &'c Ctx<P>,
     views: &'c mut [View<'v, P>; 3],
-    coef: [i32; 1024],
-    emu: Vec<P>,
+    s: &'c mut Scratch<P>,
     bd: u32,
     max: i32,
 }
 
 impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
-    pub fn new(c: &'c Ctx<P>, views: &'c mut [View<'v, P>; 3]) -> Self {
+    pub fn new(c: &'c Ctx<P>, views: &'c mut [View<'v, P>; 3], s: &'c mut Scratch<P>) -> Self {
         let bd = u32::from(c.dims.bit_depth);
         Self {
             c,
             views,
-            coef: [0; 1024],
-            emu: vec![P::default(); 80 * 80],
+            s,
             bd,
             max: (1i32 << bd) - 1,
         }
@@ -207,7 +224,7 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
                         let n = usize::from(rec.n);
                         if rec.eob > 0 {
                             for k in *coef_at..*coef_at + n {
-                                self.coef[usize::from(t.pos[k])] = t.val[k];
+                                self.s.coef[usize::from(t.pos[k])] = t.val[k];
                             }
                             self.add_residual(plane, x, y, tx, kind, usize::from(rec.eob), (usize::from(rec.nzr), usize::from(rec.nzc)));
                         }
@@ -228,7 +245,7 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
         let stride = v.stride;
         let dst = v.at(y, x);
         if self.c.lossless {
-            itx::wht_add(dst, stride, &mut self.coef, max);
+            itx::wht_add(dst, stride, &mut self.s.coef, max);
             return;
         }
         let (col, row) = match kind {
@@ -237,7 +254,7 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
             3 => (Kind::Adst, Kind::Adst),
             _ => (Kind::Dct, Kind::Dct),
         };
-        itx::add(dst, stride, &mut self.coef, usize::from(tx), col, row, eob, nz, max);
+        itx::add(dst, stride, &mut self.s.coef, usize::from(tx), col, row, eob, nz, max);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -373,12 +390,12 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
         let (data, stride) = rp.buf.plane(plane);
         if bx - l >= 0 && by - t >= 0 && bx + w as i32 + r <= rw && by + h as i32 + bo <= rh {
             let at = by as usize * stride + bx as usize;
-            mc::predict(dst, ds, data, at, stride, (w, h), (mx, my), filter, max, avg);
+            mc::predict(dst, ds, data, at, stride, (w, h), (mx, my), filter, max, avg, &mut self.s.mc);
         } else {
             // Edge emulation: the window held to the reference.
             let ew = w + 7;
             let eh = h + 7;
-            let emu = &mut self.emu;
+            let emu = &mut self.s.emu;
             if emu.len() < ew * eh + 32 {
                 emu.resize(ew * eh + 32, P::default());
             }
@@ -390,7 +407,7 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
                     emu[j * ew + i] = row[xx];
                 }
             }
-            mc::predict(dst, ds, emu, 3 * ew + 3, ew, (w, h), (mx, my), filter, max, avg);
+            mc::predict(dst, ds, emu, 3 * ew + 3, ew, (w, h), (mx, my), filter, max, avg, &mut self.s.mc);
         }
     }
 }

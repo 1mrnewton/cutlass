@@ -53,12 +53,22 @@ pub fn add<P: Pixel>(
     cutlass_simd::vp9::wide(
         #[inline(always)]
         || {
-            if P::HIGH {
-                run::<P, i64, 4>(dst, stride, coef, n, col_type, row_type, nz, max);
-            } else if n == 4 {
-                run::<P, i32, 4>(dst, stride, coef, n, col_type, row_type, nz, max);
-            } else {
-                run::<P, i32, 8>(dst, stride, coef, n, col_type, row_type, nz, max);
+            // Each size has its own scratch: no more is cleared than used.
+            macro_rules! go {
+                ($t:ty, $ln:literal, $n:literal) => {{
+                    let mut tmp = [<$t as Elem>::ZERO; $n * $n];
+                    run::<P, $t, $ln, $n>(dst, stride, coef, &mut tmp, col_type, row_type, nz, max)
+                }};
+            }
+            match (P::HIGH, n) {
+                (true, 4) => go!(i64, 4, 4),
+                (true, 8) => go!(i64, 4, 8),
+                (true, 16) => go!(i64, 4, 16),
+                (true, _) => go!(i64, 4, 32),
+                (false, 4) => go!(i32, 4, 4),
+                (false, 8) => go!(i32, 8, 8),
+                (false, 16) => go!(i32, 8, 16),
+                (false, _) => go!(i32, 8, 32),
             }
         },
     );
@@ -91,20 +101,20 @@ fn dc_only<P: Pixel>(dst: &mut [P], stride: usize, coef: &mut [i32], n: usize, m
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn run<P: Pixel, T: Elem, const LN: usize>(
+fn run<P: Pixel, T: Elem, const LN: usize, const N: usize>(
     dst: &mut [P],
     stride: usize,
     coef: &mut [i32],
-    n: usize,
+    tmp: &mut [T],
     col_type: Kind,
     row_type: Kind,
     nz: (usize, usize),
     max: i32,
 ) {
     // tmp is transposed like the input: (row r, column c) at c * n + r.
-    let mut tmp = [T::ZERO; 32 * 32];
-    let mut vin = [L::<T, LN>::ZERO; 32];
-    let mut vout = [L::<T, LN>::ZERO; 32];
+    let n = N;
+    let mut vin = [L::<T, LN>::ZERO; N];
+    let mut vout = [L::<T, LN>::ZERO; N];
     let (nz_rows, nz_cols) = nz;
     let rows = nz_rows.min(n).div_ceil(LN) * LN;
     let cols = nz_cols.min(n);
@@ -119,7 +129,7 @@ fn run<P: Pixel, T: Elem, const LN: usize>(
                 vin[k] = L::ZERO;
             }
         }
-        tx1d(n, row_type == Kind::Adst, &vin[..n], &mut vout[..n]);
+        tx1d(N, row_type == Kind::Adst, &vin, &mut vout);
         for k in 0..n {
             tmp[k * n + r0..k * n + r0 + LN].copy_from_slice(&vout[k].0);
         }
@@ -141,7 +151,7 @@ fn run<P: Pixel, T: Elem, const LN: usize>(
                 L::ZERO
             };
         }
-        tx1d(n, col_type == Kind::Adst, &vin[..n], &mut vout[..n]);
+        tx1d(N, col_type == Kind::Adst, &vin, &mut vout);
         for r in 0..n {
             let row = &mut dst[r * stride + c0..r * stride + c0 + LN];
             for l in 0..LN {

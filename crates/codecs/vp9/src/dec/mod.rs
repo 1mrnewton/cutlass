@@ -343,6 +343,7 @@ pub fn ref_pics<P>(parsed: &Parsed<'_>, refs: [Option<&Pic<P>>; 3]) -> ([Option<
 /// The reconstruction of one frame, a superblock row at a time.
 pub struct FrameRecon<P> {
     ctx: Ctx<P>,
+    scratch: recon::Scratch<P>,
     writer: FrameWriter<P>,
     levels: lpf::Levels,
     geo: lf::Geo,
@@ -363,6 +364,7 @@ impl<P: Pixel> FrameRecon<P> {
                 mi_rows,
                 lossless: h.lossless,
             },
+            scratch: recon::Scratch::new(),
             writer,
             levels: lpf::levels(h),
             geo: lf::Geo {
@@ -383,7 +385,7 @@ impl<P: Pixel> FrameRecon<P> {
     pub fn row(&mut self, tiles: &[TileSyntax], masks: &[lpf::Mask], grid: &[LfMi], sb_row: usize) {
         {
             let mut views = self.writer.tails().map(View::of);
-            Recon::new(&self.ctx, &mut views).sb_row(tiles, sb_row);
+            Recon::new(&self.ctx, &mut views, &mut self.scratch).sb_row(tiles, sb_row);
             if self.filter_on && sb_row > 0 {
                 lf::sb_row(&mut views, masks, grid, &self.levels, &self.geo, sb_row - 1);
             }

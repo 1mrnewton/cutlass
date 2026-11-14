@@ -16,6 +16,7 @@ fn matches_the_scalar_twin() {
     };
     let stride = 100;
     let mut ran_count = 0;
+    let mut tmp = vec![0u8; super::TMP];
     for case in 0..2000 {
         let src: Vec<u8> = (0..stride * 90)
             .map(|i| if case % 3 == 0 { [0u8, 255][i % 2] } else { (rnd() & 255) as u8 })
@@ -29,9 +30,9 @@ fn matches_the_scalar_twin() {
         let at = 4 * stride + 4;
         let init: Vec<u8> = (0..64 * 64).map(|_| (rnd() & 255) as u8).collect();
         let mut want = init.clone();
-        predict_scalar(Block { dst: &mut want, dst_stride: 64, src: &src, at, src_stride: stride, w, h, fx, fy, avg });
+        predict_scalar(Block { dst: &mut want, dst_stride: 64, src: &src, at, src_stride: stride, w, h, fx, fy, avg, tmp: &mut tmp });
         let mut got = init.clone();
-        let ran = predict(Block { dst: &mut got, dst_stride: 64, src: &src, at, src_stride: stride, w, h, fx, fy, avg });
+        let ran = predict(Block { dst: &mut got, dst_stride: 64, src: &src, at, src_stride: stride, w, h, fx, fy, avg, tmp: &mut tmp });
         if !ran {
             continue;
         }

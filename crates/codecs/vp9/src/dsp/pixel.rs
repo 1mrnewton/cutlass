@@ -21,6 +21,7 @@ pub trait Pixel: Copy + Default + PartialEq + Send + Sync + core::fmt::Debug + '
         _wh: (usize, usize),
         _f: (Option<[i16; 8]>, Option<[i16; 8]>),
         _avg: bool,
+        _tmp: &mut [u8],
     ) -> bool {
         false
     }
@@ -85,6 +86,7 @@ impl Pixel for u8 {
         (w, h): (usize, usize),
         (fx, fy): (Option<[i16; 8]>, Option<[i16; 8]>),
         avg: bool,
+        tmp: &mut [u8],
     ) -> bool {
         cutlass_simd::vp9::mc::predict(cutlass_simd::vp9::mc::Block {
             dst,
@@ -97,6 +99,7 @@ impl Pixel for u8 {
             fx,
             fy,
             avg,
+            tmp,
         })
     }
     #[inline(always)]

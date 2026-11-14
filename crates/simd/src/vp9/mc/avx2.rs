@@ -229,6 +229,7 @@ fn sized<const W: usize, const R: usize>(b: Block<'_>) {
         fx,
         fy,
         avg,
+        tmp,
     } = b;
     let step = W.min(16);
     let put = |dst: &mut [u8], r: usize, v: [__m128i; 4]| {
@@ -279,8 +280,8 @@ fn sized<const W: usize, const R: usize>(b: Block<'_>) {
         }
         (Some(fx), Some(fy)) => {
             let (tx, ty) = (Taps::new(&fx), Taps::new(&fy));
-            let mut tmp = [[0u8; R]; 71];
-            for (r, out) in tmp.iter_mut().enumerate().take(h + 7) {
+            for (r, out) in tmp.chunks_exact_mut(R).enumerate().take(h + 7) {
+                let Some(out) = out.first_chunk_mut::<R>() else { return };
                 let Some(row) = row_of::<R>(src, at + r * ss - 3 * ss - 3) else { return };
                 let mut c = 0;
                 while c < W {
@@ -289,8 +290,7 @@ fn sized<const W: usize, const R: usize>(b: Block<'_>) {
                     c += 16;
                 }
             }
-            let flat = tmp.as_flattened();
-            down_sized::<W, R>(&ty, dst, ds, flat, 0, R, h, avg);
+            down_sized::<W, R>(&ty, dst, ds, tmp, 0, R, h, avg);
         }
     }
 }

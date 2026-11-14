@@ -24,14 +24,20 @@ pub struct Block<'a> {
     pub fx: Option<[i16; 8]>,
     pub fy: Option<[i16; 8]>,
     pub avg: bool,
+    /// Scratch for the rows filtered across before the filter down:
+    /// [`TMP`] samples.
+    pub tmp: &'a mut [u8],
 }
+
+/// The scratch a [`Block`] needs.
+pub const TMP: usize = 71 * 96;
 
 impl Block<'_> {
     /// Whether every load and store stays inside the buffers. The kernels
     /// read 16 samples from 3 before each 8 or 16 of a row, and 3 rows
     /// above and 4 below with a fraction down.
     fn fits(&self) -> bool {
-        if !matches!(self.w, 4 | 8 | 16 | 32 | 64) || self.h == 0 || self.h > 64 {
+        if !matches!(self.w, 4 | 8 | 16 | 32 | 64) || self.h == 0 || self.h > 64 || self.tmp.len() < TMP {
             return false;
         }
         if self.dst_stride < self.w
@@ -93,6 +99,7 @@ pub fn predict_scalar(b: Block<'_>) {
         fx,
         fy,
         avg,
+        tmp: _,
     } = b;
     let tap = |f: &[i16; 8], s: [u8; 8]| -> u8 {
         let mut sum = 0i32;

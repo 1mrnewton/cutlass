@@ -327,6 +327,19 @@ pub struct TileBufs {
     toks: Vec<Tok>,
     pool: Vec<Vec<i32>>,
     mctmp: Vec<u8>,
+    rdq: Rdq,
+}
+
+/// The per-position scratch of [`Tile::rd_levels`], kept between calls:
+/// a call writes every entry it reads, so it is never cleared.
+#[derive(Default)]
+pub struct Rdq {
+    av: Vec<f32>,
+    a_nat: Vec<f32>,
+    j_pref: Vec<f32>,
+    d_tail: Vec<f32>,
+    eob_cost: Vec<f32>,
+    energy: Vec<u8>,
 }
 
 /// The encoder of one tile.
@@ -375,6 +388,7 @@ pub struct Tile<'s, 't, 'r, 'v> {
     sub8: [u8; 64],
     /// Scratch of the 8-tap filters across.
     mctmp: Vec<u8>,
+    rdq: Rdq,
     /// The reference the searches read (0 LAST, 1 GOLDEN, 2 ALTREF).
     cur_ref: usize,
     /// Whether the block coded last skipped its residual; for the best
@@ -412,12 +426,23 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             toks,
             pool,
             mut mctmp,
+            mut rdq,
         } = bufs;
         pred.resize(64 * 64, 0);
         res.resize(64 * 64, 0);
         fcoef.resize(32 * 32, 0.0);
         snaps.resize_with(17, Snap::default);
         mctmp.resize(cutlass_simd::vp9::mc::TMP, 0);
+        for v in [
+            &mut rdq.av,
+            &mut rdq.a_nat,
+            &mut rdq.j_pref,
+            &mut rdq.d_tail,
+            &mut rdq.eob_cost,
+        ] {
+            v.resize(1025, 0.0);
+        }
+        rdq.energy.resize(1024, 0);
         Self {
             s,
             f,
@@ -446,6 +471,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             sub: [geom::DC; 4],
             sub8: [PARTITION_NONE; 64],
             mctmp,
+            rdq,
             cur_ref: 0,
             coded_skip: false,
             choice_skip: (false, 0.0),
@@ -469,6 +495,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 toks: self.toks,
                 pool: self.pool,
                 mctmp: self.mctmp,
+                rdq: self.rdq,
             },
         )
     }
@@ -2321,6 +2348,25 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         intra: bool,
         levels: &mut [i32],
     ) -> (usize, TxRd) {
+        let mut q = std::mem::take(&mut self.rdq);
+        let out = self.rd_levels_in(&mut q, plane, tx, kind, x, y, intra, levels);
+        self.rdq = q;
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn rd_levels_in(
+        &mut self,
+        q: &mut Rdq,
+        plane: usize,
+        tx: u8,
+        kind: u8,
+        x: usize,
+        y: usize,
+        intra: bool,
+        levels: &mut [i32],
+    ) -> (usize, TxRd) {
         let s = self.s;
         let n = 4usize << tx;
         let log2n = 2 + usize::from(tx);
@@ -2349,7 +2395,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         };
         // Values in steps, in scan order; nothing past the last that could
         // round to a level is worth looking at.
-        let mut av = [0.0f32; 1024];
+        let av = &mut q.av[..1024];
         let mut steps = [0.0f32; 2];
         steps[0] = dc_q as f32 / (1 << shift) as f32;
         steps[1] = ac_q as f32 / (1 << shift) as f32;
@@ -2357,14 +2403,28 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         // then the last that could round to a level, from the end of the
         // scan back.
         let inv_ac = 1.0 / steps[1];
-        let mut a_nat = [0.0f32; 1024];
-        let mut d_all = 0.0f32;
-        let mut peak = 0.0f32;
-        for (a, &v) in a_nat[..max].iter_mut().zip(&self.fcoef[..max]) {
-            *a = v.abs() * inv_ac;
-            d_all += v * v;
-            peak = peak.max(*a);
+        let a_nat = &mut q.a_nat[..1024];
+        // Eight running sums and peaks, so that the pass vectorizes (a
+        // single float sum must keep its order; every block has a
+        // multiple of 16 coefficients).
+        let mut sums = [0.0f32; 8];
+        let mut peaks = [0.0f32; 8];
+        for (a8, v8) in a_nat[..max]
+            .as_chunks_mut::<8>()
+            .0
+            .iter_mut()
+            .zip(self.fcoef[..max].as_chunks::<8>().0)
+        {
+            for i in 0..8 {
+                let v = v8[i];
+                let a = v.abs() * inv_ac;
+                a8[i] = a;
+                sums[i] += v * v;
+                peaks[i] = if a > peaks[i] { a } else { peaks[i] };
+            }
         }
+        let d_all: f32 = sums.iter().sum();
+        let mut peak = peaks.iter().fold(0.0f32, |m, &p| if p > m { p } else { m });
         a_nat[0] = self.fcoef[0].abs() / steps[0];
         peak = peak.max(a_nat[0]);
         let tr = |k: usize| {
@@ -2416,14 +2476,15 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 ];
             }
         }
-        let mut energy = [0u8; 1024];
+        let energy = &mut q.energy[..1024];
         let mut ctx = ctx0;
         let mut prev_zero = false;
         // Per position: the chosen cost (distortion + lambda·rate) so far,
         // the distortion if it were zero, and the end-of-block cost there.
-        let mut j_pref = [0.0f32; 1025];
-        let mut d_tail = [0.0f32; 1025];
-        let mut eob_cost = [0.0f32; 1025];
+        let j_pref = &mut q.j_pref[..1025];
+        let d_tail = &mut q.d_tail[..1025];
+        let eob_cost = &mut q.eob_cost[..1025];
+        j_pref[0] = 0.0;
         let mut last_nz = 0usize;
         let mut d_rest = d_all;
         for k in 0..last_sig {

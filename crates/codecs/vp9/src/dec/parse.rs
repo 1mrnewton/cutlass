@@ -1394,6 +1394,7 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
 
     /// libvpx `decode_coefs`, into the syntax's coefficients: positions
     /// transposed and values dequantized.
+    #[inline(never)]
     fn decode_coefs(
         &mut self,
         tx: u8,

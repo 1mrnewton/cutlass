@@ -365,6 +365,10 @@ pub enum Request {
     },
     /// Store the face file name on a text clip.
     SetTextFont { segment_id: SegmentId, face: String },
+    /// Set a text clip's face along the axes it varies on, written as
+    /// `wght=650,wdth=80`: each axis by its tag and a value in the axis's
+    /// own units. Empty leaves the face as its file has it.
+    SetTextFontAxes { segment_id: SegmentId, axes: String },
     /// Ring the letters in `color`, `width` ems wide. An empty color
     /// takes the outline off.
     SetTextOutline {

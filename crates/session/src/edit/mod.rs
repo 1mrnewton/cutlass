@@ -175,6 +175,8 @@ pub enum EditError {
     LineWidth,
     /// The face is empty or is not a file name.
     TextFont,
+    /// The axes of a text clip's face are not written as tags and numbers.
+    TextFontAxes,
     /// An outline, shadow, or background amount is out of its range.
     TextStyle,
     /// A new text clip needs something to say.
@@ -471,6 +473,9 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             face,
         } => text::set_line_width(draft, segment_id, *width, face),
         Request::SetTextFont { segment_id, face } => text::set_text_font(draft, segment_id, face),
+        Request::SetTextFontAxes { segment_id, axes } => {
+            text::set_text_font_axes(draft, segment_id, axes)
+        }
         Request::SetTextOutline {
             segment_id,
             color,

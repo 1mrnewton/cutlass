@@ -329,7 +329,35 @@ pub fn set_text_font(
     if !face_file(face) {
         return Err(EditError::TextFont);
     }
-    draft.materials.texts[index].font_path = face.to_owned();
+    let text = &mut draft.materials.texts[index];
+    // Another face has other axes: what the last was set to goes.
+    if text.font_path != face {
+        text.font_variations.clear();
+    }
+    text.font_path = face.to_owned();
+    Ok(())
+}
+
+/// Set the clip's face along its axes, `axes` written as `wght=650,wdth=80`.
+/// Every part must be a tag of four letters and a number; the values are
+/// kept to a hundredth. Empty takes the setting off. Whether the face has
+/// each axis is the face's to say when it is drawn: one it lacks is
+/// passed over.
+pub fn set_text_font_axes(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    axes: &str,
+) -> Result<(), EditError> {
+    let index = own_text(draft, segment_id)?;
+    let parts = axes
+        .split(',')
+        .filter(|part| !part.trim().is_empty())
+        .count();
+    let read = cutlass_model::read_font_axes(axes);
+    if axes.len() > 255 || parts > cutlass_model::MAX_FONT_AXES || read.len() != parts {
+        return Err(EditError::TextFontAxes);
+    }
+    draft.materials.texts[index].font_variations = cutlass_model::write_font_axes(&read);
     Ok(())
 }
 
@@ -1619,6 +1647,75 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, EditError::LockedTrack);
         assert_eq!(session.draft().materials.texts[0].font_path, "");
+    }
+
+    #[test]
+    fn a_faces_axes_stay_on_the_text_until_its_face_changes() {
+        let mut session = open();
+        let font = |face: &str| Request::SetTextFont {
+            segment_id: "a".into(),
+            face: face.to_owned(),
+        };
+        let axes = |axes: &str| Request::SetTextFontAxes {
+            segment_id: "a".into(),
+            axes: axes.to_owned(),
+        };
+        let apply = |session: &mut Session, request: Request| {
+            let revision = session.revision();
+            session.apply(revision, &[request])
+        };
+        apply(&mut session, font("vary.ttf")).unwrap();
+        // Written tidily, each value to a hundredth.
+        apply(&mut session, axes(" wght=650 , wdth = 80.004 ")).unwrap();
+        let stored = |session: &Session| session.draft().materials.texts[0].font_variations.clone();
+        assert_eq!(stored(&session), "wght=650,wdth=80");
+        // One undo takes the setting off, and a redo of the face alone
+        // leaves it off.
+        session.undo().unwrap();
+        assert_eq!(stored(&session), "");
+        apply(&mut session, axes("wght=650,wdth=80")).unwrap();
+        // The same face again keeps it; another face has other axes.
+        apply(&mut session, font("vary.ttf")).unwrap();
+        assert_eq!(stored(&session), "wght=650,wdth=80");
+        apply(&mut session, font("other.ttf")).unwrap();
+        assert_eq!(stored(&session), "");
+        // Nothing takes the setting off.
+        apply(&mut session, axes("slnt=-8")).unwrap();
+        apply(&mut session, axes("")).unwrap();
+        assert_eq!(stored(&session), "");
+        // What is not tags and numbers is refused, and so are more axes
+        // than a face is set along, and the draft is left as it was.
+        apply(&mut session, axes("wght=700")).unwrap();
+        let before = session.draft().clone();
+        let many = "wght=1,".repeat(17);
+        let long = format!("wght={}", "1".repeat(300));
+        for bad in [
+            "wght",
+            "wg=4",
+            "wght=heavy",
+            "wght=1,,x",
+            "wght=inf",
+            many.as_str(),
+            long.as_str(),
+        ] {
+            assert_eq!(
+                apply(&mut session, axes(bad)).unwrap_err(),
+                EditError::TextFontAxes,
+                "{bad}"
+            );
+        }
+        assert_eq!(session.draft(), &before);
+        // A clip that is no text has no face to set.
+        assert!(
+            apply(
+                &mut session,
+                Request::SetTextFontAxes {
+                    segment_id: "missing".into(),
+                    axes: "wght=700".to_owned(),
+                }
+            )
+            .is_err()
+        );
     }
 
     fn add(track: &str, segment: &str, start: i64, content: &str, face: &str) -> Request {

@@ -492,6 +492,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetLineSpacing { .. } => "set_line_spacing",
         Request::SetLineWidth { .. } => "set_line_width",
         Request::SetTextFont { .. } => "set_text_font",
+        Request::SetTextFontAxes { .. } => "set_text_font_axes",
         Request::SetTextOutline { .. } => "set_text_outline",
         Request::SetTextShadow { .. } => "set_text_shadow",
         Request::SetTextBackground { .. } => "set_text_background",

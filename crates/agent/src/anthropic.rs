@@ -221,9 +221,9 @@ pub fn parse_claude_reply(reply: &str) -> Result<(Completion, Value), ModelError
             .and_then(Value::as_str)
             .map_or_else(|| error.to_string(), str::to_owned);
         let hint = match kind {
-            "authentication_error" => " Check the key in Settings → Assistant.",
+            "authentication_error" => " Check the key in the assistant's settings.",
             "permission_error" => " The key may not have access to that model.",
-            "not_found_error" => " Check the model name in Settings → Assistant.",
+            "not_found_error" => " Check the model name in the assistant's settings.",
             "rate_limit_error" | "overloaded_error" => " Wait a moment and ask again.",
             _ => "",
         };
@@ -429,7 +429,7 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("invalid x-api-key"), "{error}");
-        assert!(error.contains("Settings → Assistant"), "{error}");
+        assert!(error.contains("assistant's settings"), "{error}");
         let refused = parse_claude_reply(
             r#"{"type":"message","stop_reason":"refusal","content":[],"stop_details":{"type":"refusal","category":null,"explanation":"not this"}}"#,
         )

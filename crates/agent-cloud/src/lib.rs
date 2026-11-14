@@ -349,4 +349,29 @@ mod tests {
         eprintln!("{error}");
         assert!(error.contains("invalid x-api-key"), "{error}");
     }
+
+    /// A real answer from Claude, with the key in `ANTHROPIC_API_KEY`:
+    /// `ANTHROPIC_API_KEY=... cargo test -p cutlass-agent-cloud real_answer -- --ignored`.
+    /// The model is asked to read the project, so the answer comes back
+    /// as a tool call; this checks the request is accepted end to end.
+    #[test]
+    #[ignore = "needs ANTHROPIC_API_KEY and spends a little"]
+    fn a_real_answer_comes_back_as_a_tool_call() {
+        let key = std::env::var("ANTHROPIC_API_KEY").expect("set ANTHROPIC_API_KEY");
+        let settings = cutlass_settings::Settings::default();
+        let mut model = super::model(&settings, &key, "").unwrap();
+        let completion = model
+            .complete(&CompletionRequest {
+                messages: vec![Message::User {
+                    text: "How many clips are in the project? Read it first.".to_owned(),
+                }],
+                tools: cutlass_agent::tool_definitions(),
+            })
+            .unwrap();
+        eprintln!("{completion:?}");
+        assert!(
+            completion.calls.iter().any(|call| call.name == "draft.query"),
+            "{completion:?}"
+        );
+    }
 }

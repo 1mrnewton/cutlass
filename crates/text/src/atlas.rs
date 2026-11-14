@@ -75,7 +75,26 @@ pub struct GlyphImage {
     pub pixels_per_em: f32,
     pub kind: GlyphKind,
     pub sdf: Vec<u8>,
+    /// A color image's pixels, premultiplied RGBA. An image with layers in
+    /// the color of the text holds it twice over: painted with black
+    /// text, and then with white, for [`Self::tint`] to mix.
     pub color: Vec<u8>,
+}
+
+impl GlyphImage {
+    /// The image painted with white text, when some of it takes the color
+    /// of the text: `color` starts with the same painted with black, and
+    /// a pixel in any other color of text lies that far between the two.
+    #[must_use]
+    pub fn tint(&self) -> Option<&[u8]> {
+        let once = usize::try_from(self.width)
+            .ok()?
+            .checked_mul(usize::try_from(self.height).ok()?)?
+            .checked_mul(4)?;
+        (self.kind == GlyphKind::Color && once > 0)
+            .then(|| self.color.get(once..once.checked_mul(2)?))
+            .flatten()
+    }
 }
 
 /// Glyph images for one face. A second request for a glyph does not paint it again.

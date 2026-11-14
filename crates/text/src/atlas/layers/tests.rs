@@ -95,10 +95,45 @@ fn a_two_layer_glyph_has_each_color_in_its_place() {
 }
 
 #[test]
-fn the_color_of_the_text_is_black_and_a_palette_alpha_blends_over_it() {
+fn the_color_of_the_text_is_painted_black_and_white_and_a_palette_alpha_blends_over_it() {
     let image = image(11);
+    // First with black text.
     assert_eq!(at(&image, 100.0, 100.0), [0, 0, 0, 255]);
     assert_eq!(at(&image, 500.0, 500.0), [0, 128, 0, 255]);
+    // And again with white, for a color of text to be mixed between the
+    // two: the half green lies over white there.
+    let once = usize::try_from(image.width * image.height * 4).expect("size");
+    assert_eq!(image.color.len(), once * 2);
+    let white = GlyphImage {
+        color: image.tint().expect("painted twice").to_vec(),
+        ..image.clone()
+    };
+    assert_eq!(at(&white, 100.0, 100.0), [255, 255, 255, 255]);
+    assert_eq!(at(&white, 500.0, 500.0), [127, 255, 127, 255]);
+    assert_eq!(at(&white, -4.0, 500.0), CLEAR);
+    // A glyph with no layer in the color of the text is painted once.
+    let plain = self::image(10);
+    assert_eq!(plain.tint(), None);
+    assert_eq!(
+        plain.color.len(),
+        usize::try_from(plain.width * plain.height * 4).expect("size")
+    );
+    // Nor has a letter, or an image with no pixels, a second painting.
+    let font = read(COLR).expect("font");
+    let mut atlas = Atlas::new();
+    assert_eq!(atlas.glyph(&font, 1).expect("letter").tint(), None);
+    let empty = GlyphImage {
+        width: 0,
+        height: 0,
+        color: Vec::new(),
+        ..image.clone()
+    };
+    assert_eq!(empty.tint(), None);
+    let short = GlyphImage {
+        color: image.color[..once + 3].to_vec(),
+        ..image.clone()
+    };
+    assert_eq!(short.tint(), None);
     // The palette's alpha and the paint's multiply: half green over nothing.
     assert_eq!(at(&self::image(38), 500.0, 500.0), [0, 128, 0, 128]);
     // A paint's own alpha: red at half.

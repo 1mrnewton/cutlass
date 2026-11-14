@@ -843,9 +843,17 @@ impl TextSource {
             if self
                 .image(record)
                 .is_some_and(|image| image.kind == GlyphKind::Color)
-                && let Some((record, _)) = self.posed(at, record)
+                && let Some((record, alpha)) = self.posed(at, record)
             {
-                self.splat(&mut rgba, &record);
+                // A picture takes its letter's opacity, and its layers in
+                // the color of the text take the letter's own ink.
+                let own = self.inks.get(at).copied().flatten();
+                let ink = own
+                    .or_else(|| self.looks.get(at).and_then(|look| look.ink))
+                    .unwrap_or(self.fill);
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let shown = (f32::from(self.fill[3]) * alpha.clamp(0.0, 1.0)).round() as u8;
+                self.splat(&mut rgba, &record, [ink[0], ink[1], ink[2], shown]);
             }
         }
         let bytes = CpuBytes::new(self.width, self.height, rgba).map_err(|_| TextError::Limit)?;
@@ -881,7 +889,7 @@ impl TextSource {
         self.atlases.get(record.face)?.image(record.glyph_id)
     }
 
-    fn splat(&self, rgba: &mut [u8], record: &GlyphRecord) {
+    fn splat(&self, rgba: &mut [u8], record: &GlyphRecord, fill: [u8; 4]) {
         let Some(image) = self.image(record) else {
             return;
         };
@@ -891,7 +899,7 @@ impl TextSource {
             picture_h: self.height,
             record,
             image,
-            fill: self.fill,
+            fill,
             origin_x: self.origin_x,
             origin_y: self.origin_y,
         });
@@ -1308,10 +1316,21 @@ fn ink_at(
             if alpha == 0 || pixel[3] == 0 {
                 return None;
             }
+            // A layer in the color of the text lies between its black
+            // and its white by each channel of that color.
+            let white = image.tint().and_then(|tint| tint.get(offset..offset + 4));
+            let channel = |at: usize| match white {
+                Some(white) => {
+                    let (black, white) = (u16::from(pixel[at]), u16::from(white[at]));
+                    let toward = white.saturating_sub(black) * u16::from(fill[at]) / 255;
+                    u8::try_from(black + toward).unwrap_or(u8::MAX)
+                }
+                None => pixel[at],
+            };
             Some([
-                scale(pixel[0], alpha),
-                scale(pixel[1], alpha),
-                scale(pixel[2], alpha),
+                scale(channel(0), alpha),
+                scale(channel(1), alpha),
+                scale(channel(2), alpha),
                 scale(pixel[3], alpha),
             ])
         }
@@ -2270,6 +2289,36 @@ mod tests {
 
     fn has_color(rgba: &[u8], color: [u8; 4]) -> bool {
         rgba.chunks(4).any(|pixel| pixel == color)
+    }
+
+    #[test]
+    fn a_layer_in_the_color_of_the_text_takes_it_and_fades_with_its_letter() {
+        const LAYERED: &[u8] = include_bytes!("../../font/fixtures/colr.ttf");
+        // The whole em in the color of the text, with a half green
+        // middle over it.
+        let mut text = material("\u{E00B}");
+        text.text_color = "#FF0000".to_owned();
+        let open =
+            |text: &MaterialText| TextSource::open(LAYERED, None, text, &segment()).expect("open");
+        let rgba = cpu(open(&text).sample(Micros(1_000)));
+        assert!(has_color(&rgba, [255, 0, 0, 255]), "the text's red");
+        assert!(has_color(&rgba, [127, 128, 0, 255]), "green over red");
+        assert!(!has_color(&rgba, [0, 0, 0, 255]), "no black");
+        // In white text the same glyph is white, and green over white.
+        text.text_color = "#FFFFFF".to_owned();
+        let rgba = cpu(open(&text).sample(Micros(1_000)));
+        assert!(has_color(&rgba, [255, 255, 255, 255]));
+        assert!(has_color(&rgba, [127, 255, 127, 255]));
+        // A letter half faded by its pose shows its picture half as much.
+        text.text_color = "#FF0000".to_owned();
+        let mut faded = open(&text);
+        faded.set_poses(vec![LetterPose {
+            alpha: 0.5,
+            ..LetterPose::REST
+        }]);
+        let rgba = cpu(faded.sample(Micros(1_000)));
+        assert!(has_color(&rgba, [128, 0, 0, 128]), "half the red");
+        assert!(!has_color(&rgba, [255, 0, 0, 255]));
     }
 
     #[test]

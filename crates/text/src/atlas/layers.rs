@@ -6,9 +6,10 @@
 //! the sRGB values the palette stores, and a gradient changes each channel
 //! and the alpha evenly between two stops before they are premultiplied.
 //!
-//! The image is cached for the glyph and not for a color, so a paint that
-//! asks for the color of the text gets opaque black, whatever color the
-//! text is set in.
+//! The image is cached for the glyph and not for a color. A glyph with a
+//! paint that asks for the color of the text is painted twice, with black
+//! text and with white: every blend here changes evenly with the color
+//! under it, so the glyph in any color of text lies between the two.
 //!
 //! The work is bounded by the font's reader, which hands over at most
 //! 4096 paints nested 32 deep, and by the cell: each paint touches at most
@@ -48,6 +49,7 @@ pub(super) fn paint(font: &Font<'_>, glyph: &ColorGlyph) -> Result<GlyphImage, T
         width: 0,
         height: 0,
         outlines: HashMap::new(),
+        text: TextInk::default(),
     };
     let frame = match glyph.clip {
         Some(clip) => Some(Frame::of_box(&clip, &Affine::IDENTITY)),
@@ -91,18 +93,27 @@ pub(super) fn paint(font: &Font<'_>, glyph: &ColorGlyph) -> Result<GlyphImage, T
     let clip = glyph
         .clip
         .map(|clip| painter.box_mask(&clip, &to_pixels, None));
-    let mut canvas = vec![CLEAR; painter.width * painter.height];
-    painter.draw(&glyph.paint, &to_pixels, clip.as_deref(), &mut canvas)?;
-    let mut color = Vec::with_capacity(canvas.len() * 4);
-    for [red, green, blue, alpha] in canvas {
-        let alpha = byte(alpha);
-        // A premultiplied channel is never above its alpha.
-        color.extend([
-            byte(red).min(alpha),
-            byte(green).min(alpha),
-            byte(blue).min(alpha),
-            alpha,
-        ]);
+    let mut color = Vec::new();
+    // Once with black text; and once more with white, when a paint asked
+    // for the color of the text.
+    for level in [0.0, 1.0] {
+        painter.text.level = level;
+        let mut canvas = vec![CLEAR; painter.width * painter.height];
+        painter.draw(&glyph.paint, &to_pixels, clip.as_deref(), &mut canvas)?;
+        color.reserve(canvas.len() * 4);
+        for [red, green, blue, alpha] in canvas {
+            let alpha = byte(alpha);
+            // A premultiplied channel is never above its alpha.
+            color.extend([
+                byte(red).min(alpha),
+                byte(green).min(alpha),
+                byte(blue).min(alpha),
+                alpha,
+            ]);
+        }
+        if !painter.text.asked.get() {
+            break;
+        }
     }
     Ok(GlyphImage {
         width,
@@ -200,6 +211,16 @@ struct Painter<'f, 'a> {
     height: usize,
     /// The outlines the paints fill, read once each.
     outlines: HashMap<u16, Outline>,
+    text: TextInk,
+}
+
+/// The color the text is taken to be while a glyph is painted: `level`
+/// in each channel, 0 for black and 1 for white. `asked` is set when a
+/// paint took it.
+#[derive(Default)]
+struct TextInk {
+    level: f32,
+    asked: std::cell::Cell<bool>,
 }
 
 impl Painter<'_, '_> {
@@ -282,7 +303,7 @@ impl Painter<'_, '_> {
                 }
             }
             Paint::Solid(color) => {
-                let color = premultiplied(straight(color));
+                let color = premultiplied(straight(color, &self.text));
                 self.fill(canvas, clip, |_, _| Some(color));
             }
             Paint::LinearGradient { line, p0, p1, p2 } => {
@@ -405,7 +426,7 @@ impl Painter<'_, '_> {
         };
         self.fill(canvas, clip, |x, y| {
             let (x, y) = from_pixels.apply(x, y);
-            let color = color_at(line, place(x, y)?)?;
+            let color = color_at(line, place(x, y)?, &self.text)?;
             Some(premultiplied(color))
         });
     }
@@ -612,14 +633,19 @@ fn add_span(row: &mut [f32], from: f32, to: f32, weight: f32) {
     }
 }
 
-/// A color as straight RGBA from 0 to 1. The color of the text is black.
-fn straight(color: &Color) -> Pixel {
-    let [red, green, blue] = color.rgb.unwrap_or([0, 0, 0]);
+/// A color as straight RGBA from 0 to 1. The color of the text is what
+/// `text` says it is for now.
+fn straight(color: &Color, text: &TextInk) -> Pixel {
+    let alpha = color.alpha.clamp(0.0, 1.0);
+    let Some([red, green, blue]) = color.rgb else {
+        text.asked.set(true);
+        return [text.level, text.level, text.level, alpha];
+    };
     [
         f32::from(red) / 255.0,
         f32::from(green) / 255.0,
         f32::from(blue) / 255.0,
-        color.alpha.clamp(0.0, 1.0),
+        alpha,
     ]
 }
 
@@ -639,7 +665,7 @@ fn source_over(over: Pixel, under: Pixel) -> Pixel {
 
 /// The straight color at `place` along a color line. Channels and alpha
 /// change evenly between two stops, before they are premultiplied.
-fn color_at(line: &ColorLine, place: f32) -> Option<Pixel> {
+fn color_at(line: &ColorLine, place: f32, text: &TextInk) -> Option<Pixel> {
     let first = line.stops.first()?;
     let last = line.stops.last()?;
     if place.is_nan() {
@@ -664,10 +690,10 @@ fn color_at(line: &ColorLine, place: f32) -> Option<Pixel> {
         place
     };
     if place <= first.offset {
-        return Some(straight(&first.color));
+        return Some(straight(&first.color, text));
     }
     if place >= last.offset {
-        return Some(straight(&last.color));
+        return Some(straight(&last.color, text));
     }
     for pair in line.stops.windows(2) {
         let [before, after] = pair else {
@@ -680,7 +706,7 @@ fn color_at(line: &ColorLine, place: f32) -> Option<Pixel> {
             } else {
                 1.0
             };
-            let (from, to) = (straight(&before.color), straight(&after.color));
+            let (from, to) = (straight(&before.color, text), straight(&after.color, text));
             return Some([
                 from[0] + (to[0] - from[0]) * along,
                 from[1] + (to[1] - from[1]) * along,
@@ -689,7 +715,7 @@ fn color_at(line: &ColorLine, place: f32) -> Option<Pixel> {
             ]);
         }
     }
-    Some(straight(&last.color))
+    Some(straight(&last.color, text))
 }
 
 /// The two circles of a radial gradient. A point takes its place from the

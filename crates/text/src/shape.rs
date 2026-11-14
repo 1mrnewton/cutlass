@@ -2,7 +2,8 @@
 //!
 //! This step does not draw. Advances and kerning come from the font. A
 //! character with no glyph is recorded as missing and uses glyph 0, whose
-//! outline is the font's missing glyph. A newline is a break, not a glyph.
+//! outline is the font's missing glyph. A newline, or any other character
+//! that ends a line, is a break, not a glyph.
 //! A run may take each character from one of several faces; kerning only
 //! joins letters of the same face.
 
@@ -70,7 +71,7 @@ pub(crate) fn shape_faces(
     let mut previous: Option<(usize, u16)> = None;
     let mut chars = text.char_indices().peekable();
     while let Some((source, character)) = chars.next() {
-        if character == '\n' || character == '\r' {
+        if crate::linebreak::ends_line(character) {
             if character == '\r' {
                 let _line_feed = chars.next_if(|(_, next)| *next == '\n');
             }

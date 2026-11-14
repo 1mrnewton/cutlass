@@ -9,12 +9,14 @@
 
 mod atlas;
 mod layout;
+mod linebreak;
 mod mesh;
 mod paint;
 mod richtext;
 mod shape;
 mod source;
 mod style;
+mod unicode;
 
 pub use atlas::{Atlas, AtlasRoute, GlyphImage, paint_bytes, route};
 pub use layout::{Alignment, Layout, Line, PlacedGlyph, layout, layout_text};
@@ -22,6 +24,7 @@ pub use mesh::{GlyphRecord, TextMesh, build, build_text};
 pub use paint::{DrawnGlyph, paint_glyphs};
 pub use shape::{MAX_CHARS, ShapeItem, Shaped, ShapedGlyph, shape, shape_text};
 pub use source::{GlyphLook, TextSource, text_fill};
+pub use unicode::unicode_version;
 
 use std::error::Error;
 use std::fmt;

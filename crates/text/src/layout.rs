@@ -1,7 +1,12 @@
 //! Lines, alignment, and spacing from a text material.
 //!
 //! `line_max_width` of zero does not wrap: the run stays on one line unless
-//! the string contains a break. A negative width is refused. Alignment is 0
+//! the string contains a break. A negative width is refused. A wider run
+//! wraps where the Unicode line breaking rules let a line end, which is
+//! after a word's spaces for most scripts and between ideographs; a word
+//! is cut only when it alone is wider than the line, and never inside a
+//! letter with its marks or an emoji sequence. The spaces a line wraps
+//! after hang past its end and do not count in its width. Alignment is 0
 //! left, 1 center, and 2 right. `letter_spacing` and `line_spacing` are
 //! fractions of `font_size`. A rich title's range may draw its letters at
 //! another size; a line is as tall as its largest letters.
@@ -15,6 +20,7 @@ use cutlass_font::Font;
 use cutlass_model::MaterialText;
 
 use crate::TextError;
+use crate::linebreak::{Boundary, boundaries};
 use crate::shape::{ShapeItem, ShapedGlyph, shape_faces};
 
 /// Alignment from [`MaterialText::alignment`]: left, center and right
@@ -146,6 +152,13 @@ pub(crate) fn layout_faces(
         });
     }
     let shaped = shape_faces(fonts, text, pick)?;
+    let breaks = boundaries(text);
+    let boundary = |glyph: &ShapedGlyph| {
+        breaks
+            .get(glyph.source)
+            .copied()
+            .unwrap_or(Boundary::Joined)
+    };
     // Pixels per design unit of each glyph: its face's, times its size.
     let units = |glyph: &ShapedGlyph| {
         let face = scales.get(glyph.face).copied().unwrap_or(scale);
@@ -163,13 +176,27 @@ pub(crate) fn layout_faces(
         Alignment::Top | Alignment::Middle | Alignment::Bottom
     ) {
         let em = |glyph: &ShapedGlyph| font_size * size(glyph);
-        let rows = wrap_with(&shaped.items, width, letter_px, &em)?;
-        place_columns(rows, metrics, alignment, &size, &units)?
+        let measure = Measure {
+            width,
+            letter_px,
+            length: &em,
+            kerning: &|_| 0.0,
+            boundary: &boundary,
+        };
+        let rows = wrap(&shaped.items, &measure)?;
+        place_columns(&rows, metrics, alignment, &size, &units)?
     } else {
         let advance = |glyph: &ShapedGlyph| f32::from(glyph.advance) * units(glyph);
         let kern = |glyph: &ShapedGlyph| f32::from(glyph.kerning) * units(glyph);
-        let rows = wrap_kerned(&shaped.items, width, letter_px, &advance, &kern)?;
-        place(rows, metrics, alignment, &size, &units)?
+        let measure = Measure {
+            width,
+            letter_px,
+            length: &advance,
+            kerning: &kern,
+            boundary: &boundary,
+        };
+        let rows = wrap(&shaped.items, &measure)?;
+        place(&rows, metrics, alignment, &size, &units)?
     };
     laid.scale = scale;
     laid.scales = scales;
@@ -198,66 +225,129 @@ struct Metrics {
     step: f32,
 }
 
-/// Wrap upright letters down columns: each is `length` long, with no
-/// kerning between them.
-fn wrap_with(
-    items: &[ShapeItem],
+/// How glyphs are measured along a line, or down a column.
+struct Measure<'a> {
+    /// The most a line holds; zero does not wrap.
     width: f32,
     letter_px: f32,
-    length: &dyn Fn(&ShapedGlyph) -> f32,
-) -> Result<Vec<Vec<ShapedGlyph>>, TextError> {
-    wrap_kerned(items, width, letter_px, length, &|_| 0.0)
+    /// A glyph's own length: its advance, or one em down a column.
+    length: &'a dyn Fn(&ShapedGlyph) -> f32,
+    /// The adjustment before a glyph that is not first on its line.
+    kerning: &'a dyn Fn(&ShapedGlyph) -> f32,
+    /// What may happen to the line before a glyph.
+    boundary: &'a dyn Fn(&ShapedGlyph) -> Boundary,
 }
 
-fn wrap_kerned(
-    items: &[ShapeItem],
-    width: f32,
-    letter_px: f32,
-    length: &dyn Fn(&ShapedGlyph) -> f32,
-    kerning: &dyn Fn(&ShapedGlyph) -> f32,
-) -> Result<Vec<Vec<ShapedGlyph>>, TextError> {
-    let mut lines: Vec<Vec<ShapedGlyph>> = Vec::new();
-    let mut used = 0.0_f32;
+/// One line's glyphs, in order.
+#[derive(Default)]
+struct Row {
+    glyphs: Vec<ShapedGlyph>,
+    /// The line went on to the next for want of room, so the spaces at its
+    /// end hang.
+    wrapped: bool,
+    /// Where the next glyph starts.
+    pen: f32,
+    /// Where the last glyph that is not a space ends.
+    ink: f32,
+    /// Glyphs from the start known to hold no place to cut, so a row that
+    /// cannot be cut is not searched again for each glyph it takes.
+    searched: usize,
+}
+
+impl Row {
+    fn push(&mut self, glyph: ShapedGlyph, measure: &Measure<'_>) -> Result<(), TextError> {
+        let advance = (measure.length)(&glyph);
+        let lead = if self.glyphs.is_empty() {
+            0.0
+        } else {
+            (measure.kerning)(&glyph) + measure.letter_px
+        };
+        let pen = self.pen + lead + advance;
+        if !pen.is_finite() || !advance.is_finite() {
+            return Err(TextError::Limit);
+        }
+        self.pen = pen;
+        if !glyph.character.is_whitespace() {
+            self.ink = pen;
+        }
+        self.glyphs.push(glyph);
+        Ok(())
+    }
+
+    /// Where to cut a row that is too long: before the last glyph a line
+    /// may start at, or, when it is one long word, the last glyph that is
+    /// not joined to the one before it. The first glyph is never the cut.
+    fn cut(&mut self, measure: &Measure<'_>) -> Option<usize> {
+        let mut inside = None;
+        let from = self.searched.max(1);
+        for (index, glyph) in self.glyphs.iter().enumerate().skip(from).rev() {
+            match (measure.boundary)(glyph) {
+                Boundary::Allowed | Boundary::Mandatory => return Some(index),
+                Boundary::Inside if inside.is_none() => inside = Some(index),
+                Boundary::Inside | Boundary::Joined => {}
+            }
+        }
+        if inside.is_none() {
+            self.searched = self.glyphs.len();
+        }
+        inside
+    }
+}
+
+/// Fill rows from `items`, starting a new one at each break and wherever
+/// the row would pass the width.
+fn wrap(items: &[ShapeItem], measure: &Measure<'_>) -> Result<Vec<Row>, TextError> {
+    let mut rows: Vec<Row> = Vec::new();
     for item in items {
         match item {
             ShapeItem::Break => {
-                if lines.is_empty() {
-                    lines.push(Vec::new());
+                if rows.is_empty() {
+                    rows.push(Row::default());
                 }
-                lines.push(Vec::new());
-                used = 0.0;
+                rows.push(Row::default());
             }
             ShapeItem::Glyph(glyph) => {
-                let advance = length(glyph);
-                let starting = lines.last().is_none_or(|line| line.is_empty());
-                let kern = if starting { 0.0 } else { kerning(glyph) };
-                let letter = if starting { 0.0 } else { letter_px };
-                let next = used + kern + letter + advance;
-                if !next.is_finite() || !advance.is_finite() {
-                    return Err(TextError::Limit);
+                if rows.is_empty() {
+                    rows.push(Row::default());
                 }
-                let wrap_here = width > 0.0 && !starting && next > width;
-                if wrap_here {
-                    lines.push(vec![glyph.clone()]);
-                    used = advance;
-                } else {
-                    if lines.is_empty() {
-                        lines.push(Vec::new());
-                    }
-                    let Some(line) = lines.last_mut() else {
-                        return Err(TextError::Limit);
-                    };
-                    line.push(glyph.clone());
-                    used = if starting { advance } else { next };
+                let Some(row) = rows.last_mut() else {
+                    return Err(TextError::Limit);
+                };
+                row.push(glyph.clone(), measure)?;
+                if measure.width > 0.0 {
+                    rewrap(&mut rows, measure)?;
                 }
             }
         }
     }
-    Ok(lines)
+    Ok(rows)
+}
+
+/// Move what the last row cannot hold onto new rows, until the last fits
+/// or cannot be cut.
+fn rewrap(rows: &mut Vec<Row>, measure: &Measure<'_>) -> Result<(), TextError> {
+    loop {
+        let Some(row) = rows.last_mut() else {
+            return Err(TextError::Limit);
+        };
+        if row.ink <= measure.width {
+            return Ok(());
+        }
+        let Some(at) = row.cut(measure) else {
+            return Ok(());
+        };
+        let tail = row.glyphs.split_off(at);
+        row.wrapped = true;
+        let mut next = Row::default();
+        for glyph in tail {
+            next.push(glyph, measure)?;
+        }
+        rows.push(next);
+    }
 }
 
 fn place(
-    rows: Vec<Vec<ShapedGlyph>>,
+    rows: &[Row],
     metrics: Metrics,
     alignment: Alignment,
     size: &dyn Fn(&ShapedGlyph) -> f32,
@@ -272,7 +362,7 @@ fn place(
     let mut lines = Vec::with_capacity(rows.len());
     let mut baseline = 0.0_f32;
     for (index, row) in rows.iter().enumerate() {
-        let tallest = row.iter().map(size).fold(1.0_f32, f32::max);
+        let tallest = row.glyphs.iter().map(size).fold(1.0_f32, f32::max);
         baseline += if index == 0 { font_size } else { step } * tallest;
         let (glyphs, line_width) = place_line(row, letter_px, size, units)?;
         if !baseline.is_finite() {
@@ -318,7 +408,7 @@ fn place(
 /// Stand each column's letters one under the next, centered across the
 /// column, the first column on the right.
 fn place_columns(
-    rows: Vec<Vec<ShapedGlyph>>,
+    rows: &[Row],
     metrics: Metrics,
     alignment: Alignment,
     size: &dyn Fn(&ShapedGlyph) -> f32,
@@ -335,7 +425,7 @@ fn place_columns(
         .iter()
         .enumerate()
         .map(|(index, row)| {
-            let widest = row.iter().map(size).fold(1.0_f32, f32::max);
+            let widest = row.glyphs.iter().map(size).fold(1.0_f32, f32::max);
             let pitch = if index == 0 { font_size } else { step };
             (font_size * widest, pitch * widest)
         })
@@ -346,9 +436,10 @@ fn place_columns(
     for (row, (thick, pitch)) in rows.iter().zip(&pitches) {
         let middle = right - thick / 2.0;
         right -= pitch;
-        let mut glyphs = Vec::with_capacity(row.len());
+        let mut glyphs = Vec::with_capacity(row.glyphs.len());
         let mut pen = 0.0_f32;
-        for (index, glyph) in row.iter().enumerate() {
+        let mut ink = 0.0_f32;
+        for (index, glyph) in row.glyphs.iter().enumerate() {
             let times = size(glyph);
             let em = font_size * times;
             if index > 0 {
@@ -371,13 +462,16 @@ fn place_columns(
                 face: glyph.face,
             });
             pen += em;
+            if !glyph.character.is_whitespace() {
+                ink = pen;
+            }
         }
         let baseline = glyphs
             .first()
             .map_or(font_size * VERTICAL_BASELINE, |glyph| glyph.y);
         lines.push(Line {
             glyphs,
-            width: pen,
+            width: if row.wrapped { ink } else { pen },
             baseline,
         });
     }
@@ -406,15 +500,18 @@ fn place_columns(
     })
 }
 
+/// The row's glyphs along its line, and the line's width: up to its last
+/// glyph, or, for a row that wrapped, up to the last that is not a space.
 fn place_line(
-    row: &[ShapedGlyph],
+    row: &Row,
     letter_px: f32,
     size: &dyn Fn(&ShapedGlyph) -> f32,
     units: &dyn Fn(&ShapedGlyph) -> f32,
 ) -> Result<(Vec<PlacedGlyph>, f32), TextError> {
-    let mut glyphs = Vec::with_capacity(row.len());
+    let mut glyphs = Vec::with_capacity(row.glyphs.len());
     let mut pen = 0.0_f32;
-    for (index, glyph) in row.iter().enumerate() {
+    let mut ink = 0.0_f32;
+    for (index, glyph) in row.glyphs.iter().enumerate() {
         let times = size(glyph);
         let scale = units(glyph);
         let advance = f32::from(glyph.advance) * scale;
@@ -436,11 +533,14 @@ fn place_line(
             face: glyph.face,
         });
         pen += advance;
+        if !glyph.character.is_whitespace() {
+            ink = pen;
+        }
     }
     if !pen.is_finite() {
         return Err(TextError::Limit);
     }
-    Ok((glyphs, pen))
+    Ok((glyphs, if row.wrapped { ink } else { pen }))
 }
 
 fn finite_f32(value: f64) -> Result<f32, TextError> {
@@ -529,6 +629,87 @@ mod tests {
         assert_eq!(right.lines[0].glyphs[0].x.to_bits(), 1_400.0_f32.to_bits());
     }
 
+    fn words(laid: &super::Layout) -> Vec<String> {
+        laid.lines
+            .iter()
+            .map(|line| line.glyphs.iter().map(|glyph| glyph.character).collect())
+            .collect()
+    }
+
+    #[test]
+    fn a_line_wraps_after_a_word_and_its_spaces_hang() {
+        let face = font();
+        // "AA " is 1200 of letters and a space of 250.
+        let mut text = material("AA AA AA");
+        text.line_max_width = 1_500.0;
+        let laid = layout(&face, &text).expect("wrap");
+        assert_eq!(words(&laid), ["AA ", "AA ", "AA"]);
+        assert_eq!(laid.lines[0].width.to_bits(), 1_200.0_f32.to_bits());
+        assert_eq!(laid.lines[1].glyphs[0].x.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(laid.lines[2].width.to_bits(), 1_200.0_f32.to_bits());
+
+        // The hanging space does not push a centered line off its middle.
+        text.content = "AA AA".to_owned();
+        text.line_max_width = 1_300.0;
+        text.alignment = 1;
+        let centered = layout(&face, &text).expect("center");
+        assert_eq!(words(&centered), ["AA ", "AA"]);
+        assert_eq!(centered.lines[0].glyphs[0].x.to_bits(), 50.0_f32.to_bits());
+        assert_eq!(centered.lines[1].glyphs[0].x.to_bits(), 50.0_f32.to_bits());
+
+        // Spaces alone never start a new line, and a width that holds
+        // everything changes nothing.
+        text.content = "AA    ".to_owned();
+        text.alignment = 0;
+        assert_eq!(words(&layout(&face, &text).expect("spaces")), ["AA    "]);
+        text.content = "AA AA".to_owned();
+        text.line_max_width = 2_650.0;
+        let whole = layout(&face, &text).expect("whole");
+        assert_eq!(words(&whole), ["AA AA"]);
+        assert_eq!(whole.lines[0].width.to_bits(), 2_650.0_f32.to_bits());
+    }
+
+    #[test]
+    fn a_word_is_cut_only_when_it_alone_is_too_wide() {
+        let face = font();
+        let mut text = material("A AAAA");
+        text.line_max_width = 1_500.0;
+        let laid = layout(&face, &text).expect("long word");
+        assert_eq!(words(&laid), ["A ", "AA", "AA"]);
+
+        // A letter keeps its accent: the cut falls before the letter.
+        text.content = "AA\u{301}".to_owned();
+        text.line_max_width = 1_000.0;
+        assert_eq!(
+            words(&layout(&face, &text).expect("accent")),
+            ["A", "A\u{301}"]
+        );
+        // A flag is not cut between its halves, however narrow the line.
+        text.content = "\u{1F1EC}\u{1F1ED}".to_owned();
+        text.line_max_width = 600.0;
+        assert_eq!(layout(&face, &text).expect("flag").lines.len(), 1);
+        // A hyphen and a break the string holds both end a line.
+        text.content = "AA-AA\nA".to_owned();
+        text.line_max_width = 1_800.0;
+        assert_eq!(
+            words(&layout(&face, &text).expect("hyphen")),
+            ["AA-", "AA", "A"]
+        );
+    }
+
+    #[test]
+    fn a_row_that_cannot_be_cut_is_searched_once() {
+        let face = font();
+        // One letter and marks that all belong to it: no place to cut.
+        let mut text = material(&format!("A{}", "\u{301}".repeat(30_000)));
+        text.line_max_width = 700.0;
+        let started = std::time::Instant::now();
+        let laid = layout(&face, &text).expect("marks");
+        assert_eq!(laid.lines.len(), 1);
+        assert_eq!(laid.glyphs().count(), 30_001);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
     #[test]
     fn spacing_moves_glyphs_and_baselines() {
         let face = font();
@@ -578,6 +759,13 @@ mod tests {
         let wrapped = layout(&face, &text).expect("wrapped");
         assert_eq!(wrapped.lines.len(), 2);
         assert_eq!(wrapped.lines[1].glyphs[0].character, 'B');
+
+        // A column ends after a word too, and its space hangs below.
+        text.content = "AA AA".to_owned();
+        text.line_max_width = 2_500.0;
+        let columns = layout(&face, &text).expect("columns");
+        assert_eq!(words(&columns), ["AA ", "AA"]);
+        assert_eq!(columns.lines[0].width.to_bits(), 2_000.0_f32.to_bits());
     }
 
     #[test]

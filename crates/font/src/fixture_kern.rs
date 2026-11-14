@@ -386,6 +386,39 @@ pub(crate) fn thai() -> Vec<u8> {
     font(&glyphs, &map, &[])
 }
 
+/// A Thai face numbered as the Mac's were: the consonants ko kai 1, po
+/// pla 2, yo ying 3, tho than 4 and do chada 5; the marks from mai han
+/// akat to nikhahit as Unicode has them, 6 to 20; and the shifted marks
+/// and trimmed consonants of the private use area from F884 to F89E, 21
+/// to 47, in that order.
+pub(crate) fn thai_mac() -> Vec<u8> {
+    let above = Glyph {
+        advance: 0,
+        outline: Some([-400, 800, -200, 950]),
+    };
+    let mut glyphs = vec![boxed(500)];
+    glyphs.extend([boxed(600); 5]);
+    let mut map = vec![
+        ('\u{E01}', 1),
+        ('\u{E1B}', 2),
+        ('\u{E0D}', 3),
+        ('\u{E10}', 4),
+        ('\u{E0E}', 5),
+    ];
+    let marks = [
+        0x0E31, 0x0E34, 0x0E35, 0x0E36, 0x0E37, 0x0E38, 0x0E39, 0x0E3A, 0x0E47, 0x0E48, 0x0E49,
+        0x0E4A, 0x0E4B, 0x0E4C, 0x0E4D,
+    ];
+    for code in marks.into_iter().chain(0xF884..=0xF89E) {
+        if let (Some(character), Ok(id)) = (char::from_u32(code), u16::try_from(glyphs.len())) {
+            map.push((character, id));
+            glyphs.push(above);
+        }
+    }
+    map.sort_unstable();
+    font(&glyphs, &map, &[])
+}
+
 /// A fixture's file name and what builds it.
 type Built = (&'static str, fn() -> Vec<u8>);
 
@@ -396,12 +429,13 @@ const FILES: [Built; 3] = [
 ];
 
 /// Fixtures with no kerning, kept and checked the same way.
-const OTHER_FILES: [Built; 5] = [
+const OTHER_FILES: [Built; 6] = [
     ("wide.ttf", wide),
     ("misclassed.ttf", misclassed),
     ("hangul.ttf", hangul),
     ("hangul-letters.ttf", hangul_letters),
     ("thai.ttf", thai),
+    ("thai-mac.ttf", thai_mac),
 ];
 
 fn path(name: &str) -> std::path::PathBuf {

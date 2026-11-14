@@ -85,20 +85,23 @@ enum Shift {
     Trim,
 }
 
-/// The glyph a face keeps in its private use area for `code` shifted,
-/// as the Thai fonts made for Windows number them.
-fn shifted(code: u32, shift: Shift) -> Option<u32> {
+/// The glyphs a face keeps in its private use area for `code` shifted:
+/// as the Thai fonts made for Windows number them, and as those made for
+/// the Mac do. A face is asked for the first, then the second.
+fn shifted(code: u32, shift: Shift) -> Option<[u32; 2]> {
+    // The Mac's tone marks come in threes: left, down, and both.
+    let tone = |first: u32| first + 3 * (code - 0x0E48);
     Some(match (shift, code) {
-        (Shift::Down, 0x0E48..=0x0E4C) => code - 0x0E48 + 0xF70A,
-        (Shift::Below, 0x0E38..=0x0E3A) => code - 0x0E38 + 0xF718,
-        (Shift::DownLeft, 0x0E48..=0x0E4C) => code - 0x0E48 + 0xF705,
-        (Shift::Left, 0x0E48..=0x0E4C) => code - 0x0E48 + 0xF713,
-        (Shift::Left, 0x0E34..=0x0E37) => code - 0x0E34 + 0xF701,
-        (Shift::Left, 0x0E31) => 0xF710,
-        (Shift::Left, 0x0E4D) => 0xF711,
-        (Shift::Left, 0x0E47) => 0xF712,
-        (Shift::Trim, 0x0E0D) => 0xF70F,
-        (Shift::Trim, 0x0E10) => 0xF700,
+        (Shift::Down, 0x0E48..=0x0E4C) => [code - 0x0E48 + 0xF70A, tone(0xF88B)],
+        (Shift::Below, 0x0E38..=0x0E3A) => [code - 0x0E38 + 0xF718, code - 0x0E38 + 0xF89B],
+        (Shift::DownLeft, 0x0E48..=0x0E4C) => [code - 0x0E48 + 0xF705, tone(0xF88C)],
+        (Shift::Left, 0x0E48..=0x0E4C) => [code - 0x0E48 + 0xF713, tone(0xF88A)],
+        (Shift::Left, 0x0E34..=0x0E37) => [code - 0x0E34 + 0xF701, code - 0x0E34 + 0xF885],
+        (Shift::Left, 0x0E31) => [0xF710, 0xF884],
+        (Shift::Left, 0x0E4D) => [0xF711, 0xF899],
+        (Shift::Left, 0x0E47) => [0xF712, 0xF889],
+        (Shift::Trim, 0x0E0D) => [0xF70F, 0xF89A],
+        (Shift::Trim, 0x0E10) => [0xF700, 0xF89E],
         _ => return None,
     })
 }
@@ -149,7 +152,8 @@ pub(super) fn shift_marks(glyphs: &mut [Glyph], has: impl Fn(char) -> bool) {
     // consonant (1), one mark set left (2), a mark at full height (3).
     // What is below: nothing (0), nothing under a consonant whose lower
     // part can go (1), something, or a tail (2).
-    let (mut above, mut below, mut base) = (0_u8, 0_u8, None::<usize>);
+    // Text starts as it goes on after anything that is no consonant.
+    let (mut above, mut below, mut base) = (3_u8, 0_u8, None::<usize>);
     for index in 0..glyphs.len() {
         let code = u32::from(glyphs[index].character);
         let Some(kind) = mark(code) else {
@@ -194,9 +198,11 @@ pub(super) fn shift_marks(glyphs: &mut [Glyph], has: impl Fn(char) -> bool) {
             (Some(index), shift)
         };
         if let Some(target) = target
-            && let Some(other) = shifted(u32::from(glyphs[target].character), shift)
-                .and_then(char::from_u32)
-                .filter(|other| has(*other))
+            && let Some(numbered) = shifted(u32::from(glyphs[target].character), shift)
+            && let Some(other) = numbered
+                .into_iter()
+                .filter_map(char::from_u32)
+                .find(|other| has(*other))
         {
             glyphs[target].character = other;
         }
@@ -276,10 +282,44 @@ mod tests {
         assert_eq!(shifts("\u{E10}\u{E38}"), [0xF700, 0xE38]);
         // After a vowel that follows the consonant nothing is moved.
         assert_eq!(shifts("\u{E01}\u{E32}\u{E48}"), [0xE01, 0xE32, 0xE48]);
+        // Nor at the start of the text, with no consonant at all.
+        assert_eq!(shifts("\u{E48}"), [0xE48]);
         // A face that lacks the shifted glyph keeps the mark as typed.
         let mut glyphs = vec![Glyph::new('\u{E01}', 0), Glyph::new('\u{E48}', 3)];
         super::shift_marks(&mut glyphs, |_| false);
         assert_eq!(u32::from(glyphs[1].character), 0xE48);
+    }
+
+    #[test]
+    fn a_face_numbered_as_the_mac_did_gets_its_own_shifted_marks() {
+        // A face with the Mac's numbers and not Windows's. HarfBuzz 14.2
+        // picks the same in the fixture face numbered this way, over
+        // every consonant shape and mark.
+        let mac = |text: &str| {
+            let mut glyphs: Vec<Glyph> = text
+                .char_indices()
+                .map(|(at, character)| Glyph::new(character, at))
+                .collect();
+            super::shift_marks(&mut glyphs, |character| {
+                !(0xF700..=0xF71A).contains(&u32::from(character))
+            });
+            glyphs
+                .iter()
+                .map(|glyph| u32::from(glyph.character))
+                .collect::<Vec<u32>>()
+        };
+        assert_eq!(mac("\u{E01}\u{E48}"), [0xE01, 0xF88B]);
+        assert_eq!(mac("\u{E01}\u{E4C}"), [0xE01, 0xF897]);
+        assert_eq!(mac("\u{E1B}\u{E34}\u{E48}"), [0xE1B, 0xF885, 0xF88A]);
+        assert_eq!(mac("\u{E1B}\u{E49}"), [0xE1B, 0xF88F]);
+        assert_eq!(mac("\u{E1B}\u{E31}\u{E4B}"), [0xE1B, 0xF884, 0xF893]);
+        assert_eq!(mac("\u{E1B}\u{E47}"), [0xE1B, 0xF889]);
+        assert_eq!(mac("\u{E1B}\u{E4D}"), [0xE1B, 0xF899]);
+        assert_eq!(mac("\u{E0E}\u{E3A}"), [0xE0E, 0xF89D]);
+        assert_eq!(mac("\u{E0D}\u{E39}"), [0xF89A, 0xE39]);
+        assert_eq!(mac("\u{E10}\u{E38}"), [0xF89E, 0xE38]);
+        // Windows's numbers come first in a face that has both.
+        assert_eq!(shifts("\u{E1B}\u{E49}"), [0xE1B, 0xF706]);
     }
 
     #[test]

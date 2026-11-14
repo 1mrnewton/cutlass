@@ -1364,6 +1364,15 @@ mod tests {
             shaped_in(THAI, b"Thai", "\u{E01}\u{E48}"),
             "[1=0+600|2=0+0]"
         );
+        // A face that keeps shifted marks where the Mac's Thai faces
+        // numbered them has each picked by where it lands.
+        const MAC: &[u8] = include_bytes!("../../../font/fixtures/thai-mac.ttf");
+        let mac = |text: &str| shaped_in(MAC, b"Thai", text);
+        assert_eq!(mac("\u{E1B}\u{E34}\u{E48}"), "[2=0+600|22=0+0|27=0+0]");
+        assert_eq!(mac("\u{E01}\u{E48}"), "[1=0+600|28=0+0]");
+        assert_eq!(mac("\u{E0D}\u{E39}"), "[43=0+0|12=0+0]");
+        assert_eq!(mac("\u{E0E}\u{E38}\u{E49}"), "[5=0+600|44=0+0|31=0+0]");
+        assert_eq!(mac("\u{E48}"), "[15=0+0]");
     }
 
     #[test]

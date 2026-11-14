@@ -928,22 +928,28 @@ fn letters_of(text: &str, glyphs: &[GlyphRecord]) -> Vec<Letter> {
     let drawn = |record: &GlyphRecord| record.width > 0.0 && record.height > 0.0;
     let count = glyphs.iter().filter(|record| drawn(record)).count();
     let words = starts.len();
+    // Letters are counted in the order they are read, which for text that
+    // runs right to left is not the order its glyphs are drawn in.
+    let mut read: Vec<usize> = (0..glyphs.len()).collect();
+    read.sort_by_key(|at| (glyphs[*at].line, glyphs[*at].source));
+    let mut indices = vec![0; glyphs.len()];
     let mut index = 0;
+    for at in read {
+        indices[at] = index;
+        if drawn(&glyphs[at]) {
+            index += 1;
+        }
+    }
     glyphs
         .iter()
-        .map(|record| {
-            let letter = Letter {
-                index,
-                count,
-                word: starts
-                    .partition_point(|start| *start <= record.source)
-                    .saturating_sub(1),
-                words,
-            };
-            if drawn(record) {
-                index += 1;
-            }
-            letter
+        .zip(indices)
+        .map(|(record, index)| Letter {
+            index,
+            count,
+            word: starts
+                .partition_point(|start| *start <= record.source)
+                .saturating_sub(1),
+            words,
         })
         .collect()
 }
@@ -1814,6 +1820,21 @@ mod tests {
         assert_ne!(up, rest);
         source.set_poses(Vec::new());
         assert_eq!(cpu(source.sample(Micros(1_000))), rest);
+    }
+
+    #[test]
+    fn letters_are_counted_in_the_order_they_are_read() {
+        // An override turns the word around: B is drawn first, read second.
+        let text = material("\u{202E}AB");
+        let source = TextSource::open(TTF, None, &text, &segment()).unwrap();
+        let drawn: Vec<(usize, usize)> = source
+            .records()
+            .iter()
+            .zip(source.letters())
+            .map(|(record, letter)| (record.source, letter.index))
+            .collect();
+        assert_eq!(drawn, [(4, 1), (3, 0)]);
+        assert!(source.letters().iter().all(|letter| letter.count == 2));
     }
 
     #[test]

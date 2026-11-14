@@ -103,7 +103,7 @@ pub(crate) fn glyph_quad(
         let width = pixel(image.width) * texel;
         let height = pixel(image.height) * texel;
         let x = placed.x + image.left * scale;
-        let y = baseline - image.top * scale;
+        let y = baseline - placed.lift - image.top * scale;
         (x, y, width, height)
     };
     if ![x, y, width, height].iter().all(|value| value.is_finite()) {

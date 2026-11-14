@@ -72,6 +72,33 @@ pub(crate) mod gc {
     pub(crate) const FINAL_PUNCTUATION: u8 = 29;
 }
 
+/// Bidirectional classes, as `UCharDirection` numbers them.
+pub(crate) mod bidi {
+    pub(crate) const L: u8 = 0;
+    pub(crate) const R: u8 = 1;
+    pub(crate) const EN: u8 = 2;
+    pub(crate) const ES: u8 = 3;
+    pub(crate) const ET: u8 = 4;
+    pub(crate) const AN: u8 = 5;
+    pub(crate) const CS: u8 = 6;
+    pub(crate) const B: u8 = 7;
+    pub(crate) const S: u8 = 8;
+    pub(crate) const WS: u8 = 9;
+    pub(crate) const ON: u8 = 10;
+    pub(crate) const LRE: u8 = 11;
+    pub(crate) const LRO: u8 = 12;
+    pub(crate) const AL: u8 = 13;
+    pub(crate) const RLE: u8 = 14;
+    pub(crate) const RLO: u8 = 15;
+    pub(crate) const PDF: u8 = 16;
+    pub(crate) const NSM: u8 = 17;
+    pub(crate) const BN: u8 = 18;
+    pub(crate) const FSI: u8 = 19;
+    pub(crate) const LRI: u8 = 20;
+    pub(crate) const RLI: u8 = 21;
+    pub(crate) const PDI: u8 = 22;
+}
+
 /// East Asian widths, as `UEastAsianWidth` numbers them.
 pub(crate) mod ea {
     pub(crate) const HALFWIDTH: u8 = 2;
@@ -94,6 +121,20 @@ impl Props {
         self.bits(0, 5)
     }
 
+    /// One of [`bidi`].
+    pub(crate) fn bidi(self) -> u8 {
+        self.bits(5, 5)
+    }
+
+    /// Whether the character opens a bracket pair, closes one, or neither.
+    pub(crate) fn bracket(self) -> Bracket {
+        match self.bits(54, 2) {
+            1 => Bracket::Open,
+            2 => Bracket::Close,
+            _ => Bracket::None,
+        }
+    }
+
     /// One of [`lb`].
     pub(crate) fn line_break(self) -> u8 {
         self.bits(13, 6)
@@ -107,6 +148,20 @@ impl Props {
     pub(crate) fn pictographic(self) -> bool {
         self.bits(22, 1) == 1
     }
+
+    /// A character that is not drawn when the font has no glyph for it:
+    /// a joiner, a direction mark, a variation selector.
+    pub(crate) fn default_ignorable(self) -> bool {
+        self.bits(56, 1) == 1
+    }
+}
+
+/// A character's part in a bracket pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Bracket {
+    None,
+    Open,
+    Close,
 }
 
 /// The tables inside [`DATA`], each a run of its bytes.
@@ -115,6 +170,10 @@ struct Tables {
     stage_one: &'static [u8],
     stage_two: &'static [u8],
     records: &'static [u8],
+    /// Pairs of a character and its mirror image, in character order.
+    mirrors: &'static [u8],
+    /// Pairs of an opening bracket and its closing one, in character order.
+    brackets: &'static [u8],
     version: [u8; 3],
 }
 
@@ -145,11 +204,16 @@ impl Tables {
         let stage_one = take(counts[0].checked_mul(2)?)?;
         let stage_two = take(counts[1].checked_mul(2)?)?;
         let records = take(counts[2].checked_mul(8)?)?;
+        let _scripts = take(counts[3].checked_mul(4)?)?;
+        let mirrors = take(counts[4].checked_mul(8)?)?;
+        let brackets = take(counts[5].checked_mul(8)?)?;
         Some(Self {
             block_bits,
             stage_one,
             stage_two,
             records,
+            mirrors,
+            brackets,
             version,
         })
     }
@@ -194,6 +258,35 @@ pub(crate) fn props(character: char) -> Props {
     tables().map_or(Props(0), |tables| tables.props(u32::from(character)))
 }
 
+/// The second of the pair whose first is `key`, in a table of pairs in
+/// order of their firsts.
+fn paired(table: &[u8], key: u32) -> Option<char> {
+    let (mut low, mut high) = (0, table.len() / 8);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        let first = u32_at(table, mid * 8)?;
+        if first < key {
+            low = mid + 1;
+        } else if first > key {
+            high = mid;
+        } else {
+            return char::from_u32(u32_at(table, mid * 8 + 4)?);
+        }
+    }
+    None
+}
+
+/// The character that is `character` seen in a mirror, such as `)` for
+/// `(`, when it has one.
+pub(crate) fn mirror(character: char) -> Option<char> {
+    paired(tables()?.mirrors, u32::from(character))
+}
+
+/// The bracket that closes `open`.
+pub(crate) fn closing(open: char) -> Option<char> {
+    paired(tables()?.brackets, u32::from(open))
+}
+
 /// The Unicode version the table was written from: major, minor, patch.
 #[must_use]
 pub fn unicode_version() -> [u8; 3] {
@@ -202,7 +295,7 @@ pub fn unicode_version() -> [u8; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{Tables, ea, gc, lb, props, unicode_version};
+    use super::{Bracket, Tables, bidi, closing, ea, gc, lb, mirror, props, unicode_version};
 
     #[test]
     fn the_table_reads_and_names_its_unicode_version() {
@@ -231,6 +324,26 @@ mod tests {
         assert!(props('\u{1F600}').pictographic());
         assert!(!props('A').pictographic());
         assert_eq!(props('\u{10FFFF}').category(), gc::UNASSIGNED);
+        assert!(props('\u{200D}').default_ignorable());
+        assert!(props('\u{202E}').default_ignorable());
+        assert!(props('\u{FE0F}').default_ignorable());
+        assert!(!props('A').default_ignorable());
+        assert_eq!(props('A').bidi(), bidi::L);
+        assert_eq!(props('\u{5D0}').bidi(), bidi::R);
+        assert_eq!(props('\u{627}').bidi(), bidi::AL);
+        assert_eq!(props('\u{661}').bidi(), bidi::AN);
+        assert_eq!(props('1').bidi(), bidi::EN);
+        assert_eq!(props('\u{2067}').bidi(), bidi::RLI);
+        assert_eq!(props('(').bracket(), Bracket::Open);
+        assert_eq!(props(']').bracket(), Bracket::Close);
+        assert_eq!(props('<').bracket(), Bracket::None);
+        assert_eq!(mirror('('), Some(')'));
+        assert_eq!(mirror('<'), Some('>'));
+        assert_eq!(mirror('\u{2264}'), Some('\u{2265}'));
+        assert_eq!(mirror('A'), None);
+        assert_eq!(closing('['), Some(']'));
+        assert_eq!(closing('\u{300C}'), Some('\u{300D}'));
+        assert_eq!(closing(']'), None);
     }
 
     #[test]

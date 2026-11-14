@@ -1112,6 +1112,7 @@ mod tests {
             missing: false,
             x,
             y: 16.0,
+            lift: 0.0,
             advance: 8.0,
             size: 1.0,
             face: 0,

@@ -20,8 +20,9 @@ use cutlass_font::Font;
 use cutlass_model::MaterialText;
 
 use crate::TextError;
+use crate::bidi::visual_order;
 use crate::linebreak::{Boundary, boundaries};
-use crate::shape::{ShapeItem, ShapedGlyph, shape_faces};
+use crate::shape::{Shaped, ShapedGlyph, shape_faces};
 
 /// Alignment from [`MaterialText::alignment`]: left, center and right
 /// across a line, or top, middle and bottom down a vertical column.
@@ -40,6 +41,8 @@ pub enum Alignment {
 pub(crate) const VERTICAL_BASELINE: f32 = 0.8;
 
 /// One glyph on a line, in pixels. Y is the line baseline, top to bottom.
+/// A line's glyphs are in the order they are seen, left to right, which
+/// for text that runs right to left is not the order it is stored in.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlacedGlyph {
     pub source: usize,
@@ -49,6 +52,8 @@ pub struct PlacedGlyph {
     pub x: f32,
     /// This glyph's own baseline: its line's, or its place down a column.
     pub y: f32,
+    /// How far above that baseline it is drawn: a mark set on its letter.
+    pub lift: f32,
     pub advance: f32,
     /// Times the layout's `font_size`.
     pub size: f32,
@@ -153,11 +158,16 @@ pub(crate) fn layout_faces(
     }
     let shaped = shape_faces(fonts, text, pick)?;
     let breaks = boundaries(text);
+    // A line is cut only before the first glyph of a character.
     let boundary = |glyph: &ShapedGlyph| {
-        breaks
-            .get(glyph.source)
-            .copied()
-            .unwrap_or(Boundary::Joined)
+        if glyph.first {
+            breaks
+                .get(glyph.source)
+                .copied()
+                .unwrap_or(Boundary::Joined)
+        } else {
+            Boundary::Joined
+        }
     };
     // Pixels per design unit of each glyph: its face's, times its size.
     let units = |glyph: &ShapedGlyph| {
@@ -171,32 +181,38 @@ pub(crate) fn layout_faces(
         width,
         step,
     };
-    let mut laid = if matches!(
+    let vertical = matches!(
         alignment,
         Alignment::Top | Alignment::Middle | Alignment::Bottom
-    ) {
-        let em = |glyph: &ShapedGlyph| font_size * size(glyph);
+    );
+    let mut laid = if vertical {
+        // One em for each character, however many glyphs draw it.
+        let em = |glyph: &ShapedGlyph| {
+            if glyph.first {
+                font_size * size(glyph)
+            } else {
+                0.0
+            }
+        };
         let measure = Measure {
             width,
             letter_px,
             length: &em,
-            kerning: &|_| 0.0,
             boundary: &boundary,
         };
-        let rows = wrap(&shaped.items, &measure)?;
+        let rows = wrap(&shaped, &measure)?;
         place_columns(&rows, metrics, alignment, &size, &units)?
     } else {
-        let advance = |glyph: &ShapedGlyph| f32::from(glyph.advance) * units(glyph);
-        let kern = |glyph: &ShapedGlyph| f32::from(glyph.kerning) * units(glyph);
+        #[allow(clippy::cast_precision_loss)]
+        let advance = |glyph: &ShapedGlyph| glyph.advance as f32 * units(glyph);
         let measure = Measure {
             width,
             letter_px,
             length: &advance,
-            kerning: &kern,
             boundary: &boundary,
         };
-        let rows = wrap(&shaped.items, &measure)?;
-        place(&rows, metrics, alignment, &size, &units)?
+        let rows = wrap(&shaped, &measure)?;
+        place(&shaped, &rows, metrics, alignment, &size, &units)?
     };
     laid.scale = scale;
     laid.scales = scales;
@@ -229,19 +245,22 @@ struct Metrics {
 struct Measure<'a> {
     /// The most a line holds; zero does not wrap.
     width: f32,
+    /// The space put between two characters.
     letter_px: f32,
     /// A glyph's own length: its advance, or one em down a column.
     length: &'a dyn Fn(&ShapedGlyph) -> f32,
-    /// The adjustment before a glyph that is not first on its line.
-    kerning: &'a dyn Fn(&ShapedGlyph) -> f32,
     /// What may happen to the line before a glyph.
     boundary: &'a dyn Fn(&ShapedGlyph) -> Boundary,
 }
 
-/// One line's glyphs, in order.
+/// One line's glyphs, in the order the text is stored.
 #[derive(Default)]
 struct Row {
+    /// Which paragraph of the shaped text it is a line of.
+    paragraph: usize,
     glyphs: Vec<ShapedGlyph>,
+    /// Byte index where its text ends.
+    end: usize,
     /// The line went on to the next for want of room, so the spaces at its
     /// end hang.
     wrapped: bool,
@@ -257,10 +276,10 @@ struct Row {
 impl Row {
     fn push(&mut self, glyph: ShapedGlyph, measure: &Measure<'_>) -> Result<(), TextError> {
         let advance = (measure.length)(&glyph);
-        let lead = if self.glyphs.is_empty() {
+        let lead = if self.glyphs.is_empty() || !glyph.first {
             0.0
         } else {
-            (measure.kerning)(&glyph) + measure.letter_px
+            measure.letter_px
         };
         let pen = self.pen + lead + advance;
         if !pen.is_finite() || !advance.is_finite() {
@@ -292,31 +311,38 @@ impl Row {
         }
         inside
     }
+
+    /// How many glyphs at its end hang past the line: the spaces a row
+    /// wrapped after.
+    fn hanging(&self) -> usize {
+        if !self.wrapped {
+            return 0;
+        }
+        self.glyphs
+            .iter()
+            .rev()
+            .take_while(|glyph| glyph.character.is_whitespace())
+            .count()
+    }
 }
 
-/// Fill rows from `items`, starting a new one at each break and wherever
-/// the row would pass the width.
-fn wrap(items: &[ShapeItem], measure: &Measure<'_>) -> Result<Vec<Row>, TextError> {
+/// Fill rows from the shaped paragraphs, starting a new one for each
+/// paragraph and wherever the row would pass the width.
+fn wrap(shaped: &Shaped, measure: &Measure<'_>) -> Result<Vec<Row>, TextError> {
     let mut rows: Vec<Row> = Vec::new();
-    for item in items {
-        match item {
-            ShapeItem::Break => {
-                if rows.is_empty() {
-                    rows.push(Row::default());
-                }
-                rows.push(Row::default());
-            }
-            ShapeItem::Glyph(glyph) => {
-                if rows.is_empty() {
-                    rows.push(Row::default());
-                }
-                let Some(row) = rows.last_mut() else {
-                    return Err(TextError::Limit);
-                };
-                row.push(glyph.clone(), measure)?;
-                if measure.width > 0.0 {
-                    rewrap(&mut rows, measure)?;
-                }
+    for (index, paragraph) in shaped.paragraphs.iter().enumerate() {
+        rows.push(Row {
+            paragraph: index,
+            end: paragraph.end(),
+            ..Row::default()
+        });
+        for glyph in &paragraph.glyphs {
+            let Some(row) = rows.last_mut() else {
+                return Err(TextError::Limit);
+            };
+            row.push(glyph.clone(), measure)?;
+            if measure.width > 0.0 {
+                rewrap(&mut rows, measure)?;
             }
         }
     }
@@ -336,9 +362,20 @@ fn rewrap(rows: &mut Vec<Row>, measure: &Measure<'_>) -> Result<(), TextError> {
         let Some(at) = row.cut(measure) else {
             return Ok(());
         };
-        let tail = row.glyphs.split_off(at);
+        let mut tail = row.glyphs.split_off(at);
+        // Kerning does not reach from one line to the next.
+        if let Some(first) = tail.first_mut() {
+            first.unpair(&mut row.glyphs);
+        }
+        let mut next = Row {
+            paragraph: row.paragraph,
+            end: row.end,
+            ..Row::default()
+        };
         row.wrapped = true;
-        let mut next = Row::default();
+        if let Some(first) = tail.first() {
+            row.end = first.source;
+        }
         for glyph in tail {
             next.push(glyph, measure)?;
         }
@@ -347,6 +384,7 @@ fn rewrap(rows: &mut Vec<Row>, measure: &Measure<'_>) -> Result<(), TextError> {
 }
 
 fn place(
+    shaped: &Shaped,
     rows: &[Row],
     metrics: Metrics,
     alignment: Alignment,
@@ -364,7 +402,12 @@ fn place(
     for (index, row) in rows.iter().enumerate() {
         let tallest = row.glyphs.iter().map(size).fold(1.0_f32, f32::max);
         baseline += if index == 0 { font_size } else { step } * tallest;
-        let (glyphs, line_width) = place_line(row, letter_px, size, units)?;
+        let levels = shaped
+            .paragraphs
+            .get(row.paragraph)
+            .map(|paragraph| paragraph.line_levels(&row.glyphs, row.end))
+            .unwrap_or_default();
+        let (glyphs, line_width) = place_line(row, &levels, letter_px, size, units)?;
         if !baseline.is_finite() {
             return Err(TextError::Limit);
         }
@@ -405,8 +448,9 @@ fn place(
     })
 }
 
-/// Stand each column's letters one under the next, centered across the
-/// column, the first column on the right.
+/// Stand each column's characters one under the next, centered across
+/// the column, the first column on the right. A character's glyphs share
+/// its place: a mark stays on its letter.
 fn place_columns(
     rows: &[Row],
     metrics: Metrics,
@@ -436,18 +480,40 @@ fn place_columns(
     for (row, (thick, pitch)) in rows.iter().zip(&pitches) {
         let middle = right - thick / 2.0;
         right -= pitch;
+        let hanging = row.glyphs.len() - row.hanging();
         let mut glyphs = Vec::with_capacity(row.glyphs.len());
         let mut pen = 0.0_f32;
         let mut ink = 0.0_f32;
+        // The character being stood: its left edge and its baseline.
+        let (mut left, mut along, mut down) = (middle, 0.0_f32, 0.0_f32);
         for (index, glyph) in row.glyphs.iter().enumerate() {
             let times = size(glyph);
-            let em = font_size * times;
-            if index > 0 {
-                pen += letter_px;
+            let scale = units(glyph);
+            #[allow(clippy::cast_precision_loss)]
+            let (advance, x_offset, y_offset) = (
+                glyph.advance as f32 * scale,
+                glyph.x_offset as f32 * scale,
+                glyph.y_offset as f32 * scale,
+            );
+            if glyph.first || index == 0 {
+                let em = font_size * times;
+                if index > 0 {
+                    pen += letter_px;
+                }
+                left = middle - advance / 2.0;
+                along = 0.0;
+                down = pen + em * VERTICAL_BASELINE;
+                pen += em;
+                if index < hanging {
+                    ink = pen;
+                }
             }
-            let advance = f32::from(glyph.advance) * units(glyph);
-            let (x, y) = (middle - advance / 2.0, pen + em * VERTICAL_BASELINE);
-            if ![x, y, advance].iter().all(|value| value.is_finite()) {
+            let (x, y) = (left + along + x_offset, down);
+            along += advance;
+            if ![x, y, advance, y_offset]
+                .iter()
+                .all(|value| value.is_finite())
+            {
                 return Err(TextError::Limit);
             }
             glyphs.push(PlacedGlyph {
@@ -457,14 +523,11 @@ fn place_columns(
                 missing: glyph.missing,
                 x,
                 y,
+                lift: y_offset,
                 advance,
                 size: times,
                 face: glyph.face,
             });
-            pen += em;
-            if !glyph.character.is_whitespace() {
-                ink = pen;
-            }
         }
         let baseline = glyphs
             .first()
@@ -500,25 +563,41 @@ fn place_columns(
     })
 }
 
-/// The row's glyphs along its line, and the line's width: up to its last
-/// glyph, or, for a row that wrapped, up to the last that is not a space.
+/// The row's glyphs along its line, in the order they are seen, and the
+/// line's width: up to its last glyph, or, for a row that wrapped, without
+/// the spaces that hang at its end.
 fn place_line(
     row: &Row,
+    levels: &[u8],
     letter_px: f32,
     size: &dyn Fn(&ShapedGlyph) -> f32,
     units: &dyn Fn(&ShapedGlyph) -> f32,
 ) -> Result<(Vec<PlacedGlyph>, f32), TextError> {
+    let hanging = row.glyphs.len() - row.hanging();
     let mut glyphs = Vec::with_capacity(row.glyphs.len());
     let mut pen = 0.0_f32;
-    let mut ink = 0.0_f32;
-    for (index, glyph) in row.glyphs.iter().enumerate() {
+    // Where the glyphs that do not hang start and end.
+    let mut ink: Option<(f32, f32)> = None;
+    let mut before: Option<usize> = None;
+    for index in visual_order(levels) {
+        let Some(glyph) = row.glyphs.get(index) else {
+            return Err(TextError::Limit);
+        };
         let times = size(glyph);
         let scale = units(glyph);
-        let advance = f32::from(glyph.advance) * scale;
-        if index > 0 {
-            pen += f32::from(glyph.kerning) * scale + letter_px;
+        #[allow(clippy::cast_precision_loss)]
+        let (advance, x_offset, y_offset) = (
+            glyph.advance as f32 * scale,
+            glyph.x_offset as f32 * scale,
+            glyph.y_offset as f32 * scale,
+        );
+        // Space goes between characters, not between one's own glyphs.
+        if before.is_some_and(|source| source != glyph.source) {
+            pen += letter_px;
         }
-        if !pen.is_finite() || !advance.is_finite() {
+        before = Some(glyph.source);
+        let x = pen + x_offset;
+        if ![x, advance, y_offset].iter().all(|value| value.is_finite()) {
             return Err(TextError::Limit);
         }
         glyphs.push(PlacedGlyph {
@@ -526,21 +605,32 @@ fn place_line(
             character: glyph.character,
             glyph_id: glyph.glyph_id,
             missing: glyph.missing,
-            x: pen,
+            x,
             y: 0.0,
+            lift: y_offset,
             advance,
             size: times,
             face: glyph.face,
         });
+        let start = pen;
         pen += advance;
-        if !glyph.character.is_whitespace() {
-            ink = pen;
+        if index < hanging {
+            ink = Some(ink.map_or((start, pen), |(from, to)| (from.min(start), to.max(pen))));
         }
     }
     if !pen.is_finite() {
         return Err(TextError::Limit);
     }
-    Ok((glyphs, if row.wrapped { ink } else { pen }))
+    if !row.wrapped {
+        return Ok((glyphs, pen));
+    }
+    // The spaces that hang sit outside the line, on whichever side the
+    // paragraph ends.
+    let (from, to) = ink.unwrap_or((0.0, 0.0));
+    for glyph in &mut glyphs {
+        glyph.x -= from;
+    }
+    Ok((glyphs, to - from))
 }
 
 fn finite_f32(value: f64) -> Result<f32, TextError> {
@@ -695,6 +785,53 @@ mod tests {
             words(&layout(&face, &text).expect("hyphen")),
             ["AA-", "AA", "A"]
         );
+    }
+
+    #[test]
+    fn right_to_left_runs_are_placed_in_the_order_they_are_seen() {
+        let face = font();
+        // Hebrew letters are missing from the fixture: 500 wide each.
+        let laid = layout(&face, &material("AB \u{5D0}\u{5D1}")).expect("mixed");
+        assert_eq!(words(&laid), ["AB \u{5D1}\u{5D0}"]);
+        let xs: Vec<f32> = laid.lines[0].glyphs.iter().map(|glyph| glyph.x).collect();
+        assert_eq!(xs, [0.0, 520.0, 1_220.0, 1_470.0, 1_970.0]);
+        // Each glyph still names the byte its character is stored at.
+        let sources: Vec<usize> = laid.lines[0].glyphs.iter().map(|g| g.source).collect();
+        assert_eq!(sources, [0, 1, 2, 5, 3]);
+
+        // A paragraph that starts right to left runs that way: its Latin
+        // word is seen first, and kept in its own order.
+        let hebrew = layout(&face, &material("\u{5D0} AB")).expect("hebrew");
+        assert_eq!(words(&hebrew), ["AB \u{5D0}"]);
+        assert_eq!(hebrew.lines[0].width.to_bits(), 1_970.0_f32.to_bits());
+
+        // Each paragraph takes its own direction.
+        let two = layout(&face, &material("\u{5D0}\u{5D1}\nAB")).expect("two");
+        assert_eq!(words(&two), ["\u{5D1}\u{5D0}", "AB"]);
+
+        // A direction override turns Latin around, and draws nothing itself.
+        let turned = layout(&face, &material("\u{202E}AB")).expect("override");
+        assert_eq!(words(&turned), ["BA"]);
+        assert_eq!(turned.lines[0].glyphs[1].x.to_bits(), 700.0_f32.to_bits());
+    }
+
+    #[test]
+    fn a_right_to_left_line_wraps_in_reading_order_and_hangs_its_space_left() {
+        let face = font();
+        let mut text = material("\u{5D0}\u{5D1} \u{5D2}");
+        text.line_max_width = 1_200.0;
+        let laid = layout(&face, &text).expect("wrap");
+        // The first two letters read are on the first line.
+        assert_eq!(words(&laid), [" \u{5D1}\u{5D0}", "\u{5D2}"]);
+        let first = &laid.lines[0];
+        assert_eq!(first.width.to_bits(), 1_000.0_f32.to_bits());
+        let xs: Vec<f32> = first.glyphs.iter().map(|glyph| glyph.x).collect();
+        assert_eq!(xs, [-250.0, 0.0, 500.0]);
+        // Aligned right, the letters end at the box's edge.
+        text.alignment = 2;
+        let right = layout(&face, &text).expect("right");
+        assert_eq!(right.lines[0].glyphs[2].x.to_bits(), 700.0_f32.to_bits());
+        assert_eq!(right.lines[1].glyphs[0].x.to_bits(), 700.0_f32.to_bits());
     }
 
     #[test]

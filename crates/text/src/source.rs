@@ -753,36 +753,52 @@ impl TextSource {
             };
             let bold = self.patterns.get(at).map_or(0.0, |pattern| pattern.bold);
             let reach = look.outline.as_ref().map_or(0.0, |outline| outline.width) + bold;
-            if let Some(shadow) = &look.shadow {
-                let at = match shadows.iter().position(|(cast, _)| cast == shadow) {
-                    Some(at) => at,
-                    None => {
-                        shadows.push((shadow.clone(), vec![0.0_f32; pixels]));
-                        shadows.len() - 1
-                    }
-                };
-                draw.cover(&mut shadows[at].1, reach);
-            }
-            draw.cover(&mut shape, reach);
-            if image.kind == GlyphKind::Color {
-                continue;
-            }
+            let mut cast = match &look.shadow {
+                Some(shadow) => {
+                    let at = match shadows.iter().position(|(cast, _)| cast == shadow) {
+                        Some(at) => at,
+                        None => {
+                            shadows.push((shadow.clone(), vec![0.0_f32; pixels]));
+                            shadows.len() - 1
+                        }
+                    };
+                    Some(&mut shadows[at].1)
+                }
+                None => None,
+            };
+            let inked = image.kind != GlyphKind::Color;
             let own = self.inks.get(at).copied().flatten();
             let ink = own.or(look.ink).map_or(base, premultiply);
-            draw.each(bold, |index, cover| {
-                if cover > fill[index] {
-                    fill[index] = cover;
+            let mut ring = match (&look.outline, &mut grown) {
+                (Some(outline), Some(grown)) if inked => Some((outline.color, grown)),
+                _ => None,
+            };
+            // The glyph is read once for each pixel, and gives its cover
+            // at both widths: with its outline, for the shape, the shadow
+            // and the ring, and without, for the letter itself.
+            draw.each_of([reach, bold], |index, [wide, plain]| {
+                if let Some(cast) = &mut cast
+                    && let Some(slot) = cast.get_mut(index)
+                {
+                    *slot = slot.max(wide);
+                }
+                if let Some(slot) = shape.get_mut(index) {
+                    *slot = slot.max(wide);
+                }
+                if !inked {
+                    return;
+                }
+                if plain > fill[index] {
+                    fill[index] = plain;
                     inks[index] = ink;
                 }
+                if let Some((color, grown)) = &mut ring
+                    && wide > grown[index]
+                {
+                    grown[index] = wide;
+                    rings[index] = *color;
+                }
             });
-            if let (Some(outline), Some(grown)) = (&look.outline, &mut grown) {
-                draw.each(outline.width + bold, |index, cover| {
-                    if cover > grown[index] {
-                        grown[index] = cover;
-                        rings[index] = outline.color;
-                    }
-                });
-            }
         }
         let outline = self.looks.iter().find_map(|look| look.outline.as_ref());
         for bar in self.underlines() {
@@ -910,19 +926,11 @@ struct Mask<'a> {
 }
 
 impl Mask<'_> {
-    /// Keep the larger coverage of each pixel, with a distance field glyph
-    /// grown by `grow` pixels.
-    fn cover(&self, mask: &mut [f32], grow: f32) {
-        self.each(grow, |index, cover| {
-            if let Some(slot) = mask.get_mut(index) {
-                *slot = slot.max(cover);
-            }
-        });
-    }
-
     /// Hand each pixel in the picture the glyph covers, by index, to `put`
-    /// with its coverage.
-    fn each(&self, grow: f32, mut put: impl FnMut(usize, f32)) {
+    /// with its coverage when the glyph is grown by each of `grows`
+    /// pixels. The glyph is read once for a pixel however many widths are
+    /// asked for.
+    fn each_of<const N: usize>(&self, grows: [f32; N], mut put: impl FnMut(usize, [f32; N])) {
         let Self {
             width,
             height,
@@ -959,35 +967,49 @@ impl Mask<'_> {
         let texels = pixel(image.width) / record.width;
         for y in y0..y1 {
             let lean = shear * (baseline - (pixel(y) + 0.5));
+            let v = (pixel(y) + 0.5 - top) / record.height;
+            if !(0.0..1.0).contains(&v) {
+                continue;
+            }
             for x in x0..x1 {
                 let u = (pixel(x) + 0.5 - lean - left) / record.width;
-                let v = (pixel(y) + 0.5 - top) / record.height;
-                if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+                if !(0.0..1.0).contains(&u) {
                     continue;
                 }
-                let Some(cover) = cover_at(image, u, v, texels, grow) else {
+                let Some(covers) = covers_at(image, u, v, texels, grows) else {
                     continue;
                 };
                 if let Ok(index) = usize::try_from(y * width + x) {
-                    put(index, cover * alpha);
+                    put(index, covers.map(|cover| cover * alpha));
                 }
             }
         }
     }
 }
 
-/// How much of the pixel at `u`, `v` the glyph covers, from 0 to 1.
-fn cover_at(image: &crate::GlyphImage, u: f32, v: f32, texels: f32, grow: f32) -> Option<f32> {
+/// How much of the pixel at `u`, `v` the glyph covers, from 0 to 1, when
+/// grown by each of `grows` pixels. Only a distance field grows: a picture
+/// covers what it covers.
+fn covers_at<const N: usize>(
+    image: &crate::GlyphImage,
+    u: f32,
+    v: f32,
+    texels: f32,
+    grows: [f32; N],
+) -> Option<[f32; N]> {
     let (col, row) = image_texel(image, u, v)?;
-    let byte = match image.kind {
-        GlyphKind::Distance => coverage(distance_at(image, u, v)?, texels, grow),
-        GlyphKind::Coverage => *image.sdf.get(texel_offset(image, col, row)?)?,
+    let unit = |byte: u8| f32::from(byte) / 255.0;
+    Some(match image.kind {
+        GlyphKind::Distance => {
+            let distance = distance_at(image, u, v)?;
+            grows.map(|grow| unit(coverage(distance, texels, grow)))
+        }
+        GlyphKind::Coverage => [unit(*image.sdf.get(texel_offset(image, col, row)?)?); N],
         GlyphKind::Color => {
             let offset = texel_offset(image, col, row)?.checked_mul(4)?;
-            *image.color.get(offset + 3)?
+            [unit(*image.color.get(offset + 3)?); N]
         }
-    };
-    Some(f32::from(byte) / 255.0)
+    })
 }
 
 pub(crate) fn blit(draw: Blit<'_>) {

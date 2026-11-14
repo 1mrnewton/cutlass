@@ -195,7 +195,7 @@ impl<'f, 'a> Engine<'f, 'a> {
             return Skip::Yes;
         }
         let over_non_joiner = self.positioning || (context && active.auto_non_joiner);
-        let over_joiner = self.positioning || context || active.auto_joiner;
+        let over_joiner = context || active.auto_joiner;
         if glyph.steps_over()
             && (over_non_joiner || !glyph.non_joiner)
             && (over_joiner || !glyph.joiner)
@@ -815,7 +815,8 @@ impl<'f, 'a> Engine<'f, 'a> {
                 if !marks.places(id) {
                     return Ok(None);
                 }
-                let Some(base) = self.base_before(buffer, at, &|glyph| marks.holds(glyph)) else {
+                let Some(base) = self.base_before(buffer, at, active, &|glyph| marks.holds(glyph))
+                else {
                     return Ok(None);
                 };
                 let Some(base_id) = buffer.get(base).map(|glyph| glyph.id) else {
@@ -828,7 +829,7 @@ impl<'f, 'a> Engine<'f, 'a> {
                 if !marks.places(id) {
                     return Ok(None);
                 }
-                let Some(base) = self.base_before(buffer, at, &|_| false) else {
+                let Some(base) = self.base_before(buffer, at, active, &|_| false) else {
                     return Ok(None);
                 };
                 let (Some(mark), Some(ligature)) = (buffer.get(at), buffer.get(base)) else {
@@ -911,18 +912,22 @@ impl<'f, 'a> Engine<'f, 'a> {
 
     /// The glyph a mark at `at` sits on: the nearest before it that is
     /// not a mark. One of several glyphs written for one character is
-    /// passed over unless it is the first of them or `holds` it.
+    /// passed over unless it is the first of them or `holds` it. A joiner
+    /// the lookup's feature reads for itself is not passed over: it
+    /// stands between the mark and the letter, and holds no mark.
     fn base_before(
         &self,
         buffer: &Buffer,
         at: usize,
+        active: &Active,
         holds: &dyn Fn(u16) -> bool,
     ) -> Option<usize> {
         let mut index = at;
         while index > 0 {
             index -= 1;
             let glyph = buffer.get(index)?;
-            if glyph.is_mark() || glyph.steps_over() {
+            let stands = glyph.joiner && !active.auto_joiner;
+            if glyph.is_mark() || (glyph.steps_over() && !stands) {
                 continue;
             }
             let first_of_many = !glyph.multiplied

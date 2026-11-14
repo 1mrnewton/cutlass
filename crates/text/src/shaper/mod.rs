@@ -300,8 +300,10 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
             &[
                 Feature::every(b"abvm"),
                 Feature::every(b"blwm"),
-                Feature::every(b"mark"),
-                Feature::every(b"mkmk"),
+                // A mark is not set on the letter before a joiner: the
+                // joiner stands between them.
+                Feature::every(b"mark").manual(),
+                Feature::every(b"mkmk").manual(),
                 Feature::every(b"curs"),
                 Feature::every(b"dist"),
                 Feature::every(b"kern"),
@@ -1898,11 +1900,13 @@ mod tests {
         assert_eq!(java("\u{200C}"), "[30=0+600]");
         assert_eq!(java("\u{A0}\u{A9B6}"), "[31=0+250|25=0+0]");
         assert_eq!(java("\u{20}\u{A9BA}"), "[24=0+500|32=0+250]");
-        // A mark is set on its letter across a non-joiner.
+        // A mark is set on its letter across a non-joiner, but not
+        // across a joiner.
         assert_eq!(
             java("\u{A98F}\u{200C}\u{A9B6}"),
             "[38=0+940|25=3@-840,10+0]"
         );
+        assert_eq!(java("\u{A98F}\u{200D}\u{A9B6}"), "[38=0+940|25=0+0]");
         assert_eq!(java(""), "[]");
     }
 

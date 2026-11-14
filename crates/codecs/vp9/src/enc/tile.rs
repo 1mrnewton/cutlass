@@ -2217,10 +2217,12 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             let v = &mut self.rec.views()[plane];
             let stride = v.stride;
             let pred = v.at(y, x);
+            // Row slices, so that each row's differences vectorize.
             for r in 0..n {
-                for c in 0..n {
-                    self.res[r * n + c] =
-                        i32::from(src[(y + r) * ss + x + c]) - i32::from(pred[r * stride + c]);
+                let sr = &src[(y + r) * ss + x..][..n];
+                let pr = &pred[r * stride..][..n];
+                for ((d, &a), &b) in self.res[r * n..][..n].iter_mut().zip(sr).zip(pr) {
+                    *d = i32::from(a) - i32::from(b);
                 }
             }
         }

@@ -175,17 +175,22 @@ threads; one core is the fastest of five, pinned with `taskset`.
 
 | Stream | Threads | Cutlass | FFmpeg `vp9` | Ratio | Memory (Cutlass / FFmpeg) |
 | --- | --- | ---: | ---: | ---: | --- |
-| 4:2:0 | 1 core | 1.11 s | 1.02 s | 1.09 | |
-| 4:2:0 | 4 | 0.48 s | 0.49 s | 0.99 | 60 MB / 57 MB |
-| 4:4:4 | 1 core | 2.01 s | 1.90 s | 1.06 | |
-| 4:4:4 | 4 | 0.78 s | 0.86 s | 0.91 | 80 MB / 78 MB |
+| 4:2:0 | 1 core | 1.00–1.05 s | 0.97–1.00 s | 1.03–1.05 | |
+| 4:2:0 | 4 | 0.49 s | 0.54 s | 0.91 | 59 MB / 57 MB |
+| 4:4:4 | 1 core | 1.93–2.03 s | 1.87–1.89 s | 1.03–1.07 | |
+| 4:4:4 | 4 | 0.90 s | 0.94 s | 0.96 | 80 MB / 78 MB |
 
 On four threads Cutlass is ahead of FFmpeg on both streams (it won all 9
-runs on 4:4:4 and 5 of 9 on 4:2:0; the run before, 7 and 8 of 9); on
-one core it is 5 to 9% behind, by medians of ten runs. (The 4:4:4
-stream started at 38.8 s on one core.) What moved the decoder most
-recently:
+runs on 4:4:4 and 7 of 9 on 4:2:0); on one core it is 3 to 7% behind,
+by medians of fifteen runs over two sittings. (The 4:4:4 stream started
+at 38.8 s on one core.) By stage on one core (4:2:0), Cutlass's
+coefficient parse is the faster (0.22 s against FFmpeg's 0.24 s) and its
+interpolation kernels take FFmpeg's time; what is left is the calls
+around the kernels, the block parse and the loop filter's drivers, each
+a percent or two. What moved the decoder most recently:
 
+- The parse fills runs of structures in a loop, and the interpolation
+  block takes its filters by reference, not as two 26-byte copies.
 - Horizontal loop filter edges go through the filter two at a time, side
   by side in 256-bit vectors (the filter's arithmetic written once over
   the vector width); a strip's edges first, then its inner ones, which is

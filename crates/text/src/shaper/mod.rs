@@ -226,22 +226,33 @@ pub(crate) fn shape_run(font: &Font<'_>, run: &Run<'_>) -> Result<Vec<Glyph>, Te
         }
         glyphs = buffer.into_glyphs();
     }
-    // Kerning the positioning table did not do: the extended table's
-    // passes, or else the `kern` table's, as passes or as pairs.
-    let passes = if kerned && placing.is_some() {
+    // Kerning the positioning table did not do. A face placed by its
+    // positioning table is never kerned by the extended table as well; it
+    // is kerned by its `kern` table when the positioning table has no
+    // kerning and the face no extended table. A face with no positioning
+    // table is kerned by the extended table when it has one, and else by
+    // the `kern` table, as passes or as pairs.
+    let own_kerning = match (placing.is_some(), kerx.is_empty()) {
+        (true, true) => !kerned,
+        (true, false) => false,
+        (false, _) => true,
+    };
+    let passes: &[KernPass<'_>] = if !own_kerning {
         &[]
-    } else if kerx.is_empty() {
-        font.kern_passes()
-    } else {
+    } else if placing.is_none() && !kerx.is_empty() {
         kerx
+    } else {
+        font.kern_passes()
     };
     kern::apply(passes, &mut glyphs, backward);
-    if passes.is_empty() && !kerned && font.has_kern_table() {
+    if own_kerning && passes.is_empty() && kerx.is_empty() && font.has_kern_table() {
         kern_pairs(font, &mut glyphs, backward);
     }
     // Passes that are machines, or that move glyphs across the line, are
-    // how their face places its marks.
-    let by_kerx = !passes.is_empty() && !kerx.is_empty();
+    // how their face places its marks. A face with an extended table
+    // keeps its marks' room wherever that table would have kerned it,
+    // even when the positioning table is what places it.
+    let by_kerx = !kerx.is_empty() && (placing.is_none() || !kerned);
     let machine = passes
         .iter()
         .any(|pass| matches!(pass, KernPass::Machine(_)));
@@ -672,7 +683,20 @@ fn classify(font: &Font<'_>, glyphs: &mut [Glyph], syllabic: bool) -> bool {
         });
     for glyph in glyphs.iter_mut() {
         glyph.class = match gdef {
-            Some(gdef) => gdef.class(glyph.id),
+            // A letter, a digit or a sign is no mark, whatever the face
+            // calls its glyph: some widely installed faces class a few
+            // letters and quotes as marks, and those would take no room
+            // and be drawn over the letter before them. The signs of a
+            // script written by syllable are the face's to say, and so is
+            // a glyph a machine has put in place of a character's own.
+            Some(gdef) => match gdef.class(glyph.id) {
+                GlyphClass::Mark
+                    if !syllabic && !glyph.ignorable && !props(glyph.character).is_mark() =>
+                {
+                    GlyphClass::Base
+                }
+                class => class,
+            },
             None => guess(glyph),
         };
     }
@@ -1113,6 +1137,25 @@ mod tests {
         // Each glyph was read a few times and no more.
         assert!(glyphs.iter().all(|glyph| glyph.x_advance > -200_000));
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_letter_a_face_calls_a_mark_keeps_its_room() {
+        // The face's class table calls B a mark, as some widely installed
+        // faces call a few letters and quotes. HarfBuzz takes the table
+        // at its word unless the face is on its list of known ones, and
+        // draws B over the letter before it with no room of its own.
+        // Here a letter is a letter: it has its advance, and kerns.
+        const MISCLASSED: &[u8] = include_bytes!("../../../font/fixtures/misclassed.ttf");
+        assert_eq!(kerned(MISCLASSED, "B"), "[2=0+600]");
+        assert_eq!(kerned(MISCLASSED, "ABC"), "[1=0+550|2=1@-50,0+550|4=2+600]");
+        assert_eq!(kerned(MISCLASSED, "BAB"), "[2=0+600|1=1+550|2=2@-50,0+550]");
+        // A mark that is a mark is still one: it takes no room, sits on
+        // its letter, and the letters either side of it still kern.
+        assert_eq!(
+            kerned(MISCLASSED, "A\u{301}B"),
+            "[1=0+550|3=0@-100,12+0|2=3@-50,0+550]"
+        );
     }
 
     #[test]

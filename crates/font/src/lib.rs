@@ -45,6 +45,8 @@ mod outline_tests;
 mod passes;
 mod strike;
 mod ttf;
+#[cfg(test)]
+mod var_oracle_tests;
 mod variants;
 mod vary;
 #[cfg(test)]

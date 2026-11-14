@@ -38,27 +38,24 @@ pub struct Edge<'a> {
 }
 
 // Its checks guard the x86-64 kernels.
+/// The widest filter of two halves.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+#[inline(always)]
+fn widest(wd: [Option<Wd>; 2]) -> Option<Wd> {
+    let r = |w: Option<Wd>| match w {
+        None => 0,
+        Some(Wd::W4) => 1,
+        Some(Wd::W8) => 2,
+        Some(Wd::W16) => 3,
+    };
+    if r(wd[0]) >= r(wd[1]) { wd[0] } else { wd[1] }
+}
+
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 impl Edge<'_> {
-    /// The widest filter of the two halves.
-    #[inline]
-    fn widest(&self) -> Option<Wd> {
-        let r = |w: Option<Wd>| match w {
-            None => 0,
-            Some(Wd::W4) => 1,
-            Some(Wd::W8) => 2,
-            Some(Wd::W16) => 3,
-        };
-        if r(self.wd[0]) >= r(self.wd[1]) {
-            self.wd[0]
-        } else {
-            self.wd[1]
-        }
-    }
-
-    #[inline]
+    #[inline(always)]
     fn fits(&self) -> bool {
-        let Some(wd) = self.widest() else {
+        let Some(wd) = widest(self.wd) else {
             return false;
         };
         let taps = if wd == Wd::W16 { 8 } else { 4 };
@@ -76,11 +73,8 @@ impl Edge<'_> {
 /// Filters `e` with vector instructions; `false`, having written nothing,
 /// when the CPU or the edge is not one the kernels take.
 #[must_use]
-#[inline]
-// The `mut` serves the x86-64 kernels; rebinding it instead moved the
-// whole struct through a `memcpy` call on every one.
-#[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
-pub fn filter(mut e: Edge<'_>) -> bool {
+#[inline(always)]
+pub fn filter(e: Edge<'_>) -> bool {
     #[cfg(target_arch = "x86_64")]
     {
         if super::avx2() && e.fits() {
@@ -88,7 +82,7 @@ pub fn filter(mut e: Edge<'_>) -> bool {
             // the only feature `avx2::filter` enables.
             #[allow(unsafe_code)]
             unsafe {
-                avx2::filter(&mut e);
+                avx2::filter(e.buf, e.at, e.stride, e.vertical, e.wd, e.thr);
             }
             return true;
         }

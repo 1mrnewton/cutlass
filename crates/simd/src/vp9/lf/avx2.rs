@@ -15,7 +15,7 @@ use core::arch::x86_64::{
     _mm256_sub_epi16,
 };
 
-use super::{Edge, Thresh, Wd};
+use super::{Thresh, Wd};
 
 /// Sixteen 16-bit lanes to sixteen bytes.
 #[inline]
@@ -400,12 +400,19 @@ unsafe fn st8(r: &mut [u8], o: usize, v: __m128i) {
 }
 
 #[target_feature(enable = "avx2")]
-pub(super) fn filter(e: &mut Edge<'_>) {
-    let Some(wd) = e.widest() else { return };
-    // Field by field: the edge is read where it was written, without a
-    // wide copy of the whole struct.
-    let (at, stride, vertical, wds, thr) = (e.at, e.stride, e.vertical, e.wd, e.thr);
-    let buf = &mut *e.buf;
+// The edge comes field by field, in registers: built on the caller's
+// stack, a byte at a time, its fields read back wider stalled each call.
+pub(super) fn filter(
+    buf: &mut [u8],
+    at: usize,
+    stride: usize,
+    vertical: bool,
+    wds: [Option<Wd>; 2],
+    thr: [Thresh; 2],
+) {
+    let Some(wd) = super::widest(wds) else {
+        return;
+    };
     let z = _mm_setzero_si128();
     // The edge's sixteen lines, as one region checked once.
     let (back, span) = if vertical {

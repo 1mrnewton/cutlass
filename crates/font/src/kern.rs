@@ -1,8 +1,11 @@
-//! Horizontal kerning pairs from a version-0 `kern` table.
+//! Horizontal kerning pairs from a `kern` table.
 //!
 //! Format 0 stores one adjustment per glyph pair. A missing table means no
-//! pairs. A horizontal subtable in another format is refused, so a pair is
-//! not dropped on the floor. Vertical subtables are skipped.
+//! pairs. In a version-0 table a horizontal subtable in another format is
+//! refused, so a pair is not dropped on the floor, and vertical subtables
+//! are skipped. Apple's version-1 table is read for its format 0 subtables
+//! alone: its other formats are state machines, which also move marks,
+//! and those are left out.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -54,6 +57,11 @@ pub(crate) fn parse(table: &[u8]) -> Result<Kerning, FontError> {
     if table.len() < 4 {
         return Err(FontError::Truncated);
     }
+    if u16_at(table, 0)? == 1 && u16_at(table, 2)? == 0 {
+        // A version-1 table that does not read is no kerning, not a face
+        // that does not open.
+        return apple(table).map_err(|_| FontError::Unsupported);
+    }
     if u16_at(table, 0)? != 0 {
         return Err(FontError::Unsupported);
     }
@@ -82,7 +90,7 @@ pub(crate) fn parse(table: &[u8]) -> Result<Kerning, FontError> {
             if sub_version != 0 || minimum || cross_stream || format != 0 {
                 return Err(FontError::Unsupported);
             }
-            read_pairs(sub, replace, &mut pairs)?;
+            read_pairs(sub, 6, replace, &mut pairs)?;
         }
         at = end;
     }
@@ -93,23 +101,56 @@ pub(crate) fn parse(table: &[u8]) -> Result<Kerning, FontError> {
     Ok(Kerning { pairs })
 }
 
+/// The pairs of an Apple version-1 table's format 0 subtables.
+fn apple(table: &[u8]) -> Result<Kerning, FontError> {
+    let count = usize::try_from(crate::u32_at(table, 4)?).map_err(|_| FontError::BadTable)?;
+    if count > 256 {
+        return Err(FontError::BadTable);
+    }
+    let mut at = 8;
+    let mut pairs = BTreeMap::new();
+    for _ in 0..count {
+        let length = usize::try_from(crate::u32_at(table, at)?).map_err(|_| FontError::BadTable)?;
+        if length < 8 {
+            return Err(FontError::BadTable);
+        }
+        let end = at.checked_add(length).ok_or(FontError::BadTable)?;
+        let sub = table.get(at..end).ok_or(FontError::Truncated)?;
+        let coverage = u16_at(sub, 4)?;
+        // Not vertical, not across the line, not a variation, format 0.
+        if coverage & 0xE0FF == 0 {
+            read_pairs(sub, 8, false, &mut pairs)?;
+        }
+        at = end;
+    }
+    let pairs = pairs
+        .into_iter()
+        .map(|((left, right), value)| Pair { left, right, value })
+        .collect();
+    Ok(Kerning { pairs })
+}
+
+/// The pairs of one format 0 subtable, whose own header is `header`
+/// bytes long.
 fn read_pairs(
     sub: &[u8],
+    header: usize,
     replace: bool,
     pairs: &mut BTreeMap<(u16, u16), i16>,
 ) -> Result<(), FontError> {
-    if sub.len() < 14 {
+    let first = header + 8;
+    if sub.len() < first {
         return Err(FontError::Truncated);
     }
-    let count = usize::from(u16_at(sub, 6)?);
+    let count = usize::from(u16_at(sub, header)?);
     let bytes = count.checked_mul(6).ok_or(FontError::BadTable)?;
-    let need = bytes.checked_add(14).ok_or(FontError::BadTable)?;
+    let need = bytes.checked_add(first).ok_or(FontError::BadTable)?;
     if sub.len() < need {
         return Err(FontError::Truncated);
     }
     let mut previous: Option<(u16, u16)> = None;
     for index in 0..count {
-        let offset = 14 + index * 6;
+        let offset = first + index * 6;
         let left = u16_at(sub, offset)?;
         let right = u16_at(sub, offset + 2)?;
         let value = i16_at(sub, offset + 4)?;
@@ -177,6 +218,29 @@ mod tests {
     fn subtable(coverage: u16, pairs: &[(u16, u16, i16)]) -> Vec<u8> {
         let table = format0(coverage, pairs);
         table[4..].to_vec()
+    }
+
+    #[test]
+    fn an_apple_table_gives_the_pairs_of_its_pair_subtables() {
+        // One format 0 subtable of two pairs, then a state-machine one.
+        let mut table = vec![0, 1, 0, 0, 0, 0, 0, 2];
+        let mut pairs = vec![0, 0, 0, 28, 0, 0, 0, 0, 0, 2, 0, 12, 0, 1, 0, 0];
+        pairs.extend([0, 2, 0, 3, 0xFF, 0xB0, 0, 3, 0, 2, 0, 40]);
+        table.extend(&pairs);
+        table.extend([0, 0, 0, 12, 0, 1, 0, 0, 9, 9, 9, 9]);
+        let kerning = parse(&table).expect("apple");
+        assert_eq!((kerning.get(2, 3), kerning.get(3, 2)), (-80, 40));
+        assert_eq!(kerning.get(2, 2), 0);
+        assert!(!kerning.is_empty());
+        // A torn one is no kerning at all.
+        assert!(matches!(
+            parse(&table[..table.len() - 14]),
+            Err(FontError::Unsupported)
+        ));
+        assert!(matches!(
+            parse(&[0, 1, 0, 0, 0, 0]),
+            Err(FontError::Unsupported)
+        ));
     }
 
     #[test]

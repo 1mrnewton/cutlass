@@ -32,6 +32,11 @@ pub struct Vp9Options {
     pub max_q: u8,
     /// Threads (tile columns) to code with; 0: one per core.
     pub threads: usize,
+    /// Pictures of lookahead: with 15 and more, each golden interval
+    /// starts with a hidden alt-ref frame, the temporally filtered picture
+    /// at its end, that the pictures between predict from. Pictures then
+    /// come out that many pushes later (and from `drain`).
+    pub lag: u32,
 }
 
 impl Vp9Options {
@@ -53,6 +58,7 @@ impl Default for Vp9Options {
             min_q: 1,
             max_q: 236,
             threads: 0,
+            lag: 0,
         }
     }
 }
@@ -67,6 +73,19 @@ pub struct Vp9Encoder {
     force_key: bool,
     rc: Rate,
     cancel: Arc<AtomicBool>,
+    /// Pictures waiting for the lookahead, oldest first.
+    queue: std::collections::VecDeque<Queued>,
+    /// Where the overlay of the alt-ref coded last goes (`since_key`).
+    overlay_at: Option<u32>,
+}
+
+/// A picture in the lookahead.
+struct Queued {
+    planes: [Vec<u8>; 3],
+    seconds: f64,
+    pts: i64,
+    duration: i64,
+    timescale: u32,
 }
 
 impl Vp9Encoder {
@@ -93,6 +112,8 @@ impl Vp9Encoder {
             force_key: true,
             rc: Rate::new(opts, u64::from(width) * u64::from(height)),
             cancel: Arc::new(AtomicBool::new(false)),
+            queue: std::collections::VecDeque::new(),
+            overlay_at: None,
         })
     }
 
@@ -136,22 +157,165 @@ impl Vp9Encoder {
             return Err(CodecError::Cancelled);
         }
         check_planes(self.width, self.height, &planes)?;
+        self.code(planes, seconds)
+    }
+
+    /// Takes one picture into the lookahead; returns the pictures coded
+    /// (data, key frame, and the picture's `pts`, `duration`, `timescale`).
+    #[allow(clippy::type_complexity)]
+    pub fn push_planes(
+        &mut self,
+        planes: [(&[u8], usize); 3],
+        seconds: f64,
+        clock: (i64, i64, u32),
+    ) -> Result<Vec<(Vec<u8>, bool, (i64, i64, u32))>, CodecError> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(CodecError::Cancelled);
+        }
+        check_planes(self.width, self.height, &planes)?;
+        if self.opts.lag == 0 {
+            let (d, k) = self.code(planes, seconds)?;
+            return Ok(vec![(d, k, clock)]);
+        }
+        let (w, h) = (self.width as usize, self.height as usize);
+        let dims = [
+            (w, h),
+            (w.div_ceil(2), h.div_ceil(2)),
+            (w.div_ceil(2), h.div_ceil(2)),
+        ];
+        let tight: [Vec<u8>; 3] = std::array::from_fn(|p| {
+            let (data, stride) = planes[p];
+            let (pw, ph) = dims[p];
+            (0..ph)
+                .flat_map(|r| data[r * stride..r * stride + pw].iter().copied())
+                .collect()
+        });
+        self.queue.push_back(Queued {
+            planes: tight,
+            seconds,
+            pts: clock.0,
+            duration: clock.1,
+            timescale: clock.2,
+        });
+        let mut out = Vec::new();
+        while self.queue.len() > self.opts.lag as usize {
+            out.push(self.code_front()?);
+        }
+        Ok(out)
+    }
+
+    /// Codes what the lookahead still holds.
+    #[allow(clippy::type_complexity)]
+    pub fn flush(&mut self) -> Result<Vec<(Vec<u8>, bool, (i64, i64, u32))>, CodecError> {
+        let mut out = Vec::new();
+        while !self.queue.is_empty() {
+            out.push(self.code_front()?);
+        }
+        Ok(out)
+    }
+
+    /// Codes the oldest picture of the lookahead, after an alt-ref when one
+    /// starts here.
+    #[allow(clippy::type_complexity)]
+    fn code_front(&mut self) -> Result<(Vec<u8>, bool, (i64, i64, u32)), CodecError> {
+        let Some(f) = self.queue.pop_front() else {
+            return Err(CodecError::InvalidApi {
+                what: "empty lookahead",
+            });
+        };
+        let (w, h) = (self.width as usize, self.height as usize);
+        let cw = w.div_ceil(2);
+        // This picture has index `since_key` (0 for a key frame); the next
+        // golden position is the alt-ref's target.
+        let key_next = self.force_key || self.since_key >= self.opts.keyint;
+        let idx = if key_next { 0 } else { self.since_key };
+        let target = (idx / GF_INTERVAL + 1) * GF_INTERVAL;
+        let k = (target - idx) as usize; // the target is queue[k - 1]
+        let mut arf_source = None;
+        if idx % GF_INTERVAL == 1
+            && self.overlay_at.is_none()
+            && k >= 2
+            && k <= self.queue.len()
+            && target < self.opts.keyint
+            && super::arf::reachable(&f.planes[0], &self.queue[k - 1].planes[0], w, h)
+        {
+            let c = k - 1;
+            let lo = c.saturating_sub(3);
+            let hi = (c + 3).min(self.queue.len() - 1);
+            let pics: Vec<super::arf::Picture<'_>> = (lo..=hi)
+                .map(|i| super::arf::Picture {
+                    planes: [
+                        &self.queue[i].planes[0],
+                        &self.queue[i].planes[1],
+                        &self.queue[i].planes[2],
+                    ],
+                })
+                .collect();
+            let q = self.rc.peek_q();
+            let strength = if q > 100 {
+                5
+            } else if q > 50 {
+                4
+            } else {
+                3
+            };
+            arf_source = Some(super::arf::filter(&pics, c - lo, w, h, strength));
+        }
+        let mut data = Vec::new();
+        if let Some(src) = arf_source {
+            self.enc.load([(&src[0], w), (&src[1], cw), (&src[2], cw)]);
+            let qindex = self.rc.qindex(1, f.seconds);
+            let coded = self.enc.encode(FrameParams {
+                key: false,
+                golden: false,
+                hidden: true,
+                qindex,
+                speed: self.opts.speed,
+            })?;
+            self.rc.account(coded.data.len(), 0.0, 1, qindex);
+            self.overlay_at = Some(target);
+            data = coded.data;
+        }
+        let (frame, key) = self.code(
+            [(&f.planes[0], w), (&f.planes[1], cw), (&f.planes[2], cw)],
+            f.seconds,
+        )?;
+        let data = if data.is_empty() {
+            frame
+        } else {
+            superframe(&[&data, &frame])
+        };
+        Ok((data, key, (f.pts, f.duration, f.timescale)))
+    }
+
+    /// Codes one shown picture.
+    fn code(
+        &mut self,
+        planes: [(&[u8], usize); 3],
+        seconds: f64,
+    ) -> Result<(Vec<u8>, bool), CodecError> {
         let key = self.force_key || self.since_key >= self.opts.keyint;
         // A golden frame every `GF_INTERVAL` frames, coded finer: the
-        // frames after it predict from it.
+        // frames after it predict from it. After an alt-ref, the golden
+        // frame is its overlay, coded as an inter frame.
         let golden = !key && self.since_key.is_multiple_of(GF_INTERVAL);
+        let overlay = golden && self.overlay_at == Some(self.since_key);
         let kind = if key {
             0
-        } else if golden {
+        } else if golden && !overlay {
             1
         } else {
             2
         };
+        if key || overlay {
+            self.overlay_at = None;
+        }
         self.enc.load(planes);
         let qindex = self.rc.qindex(kind, seconds);
         let coded = self.enc.encode(FrameParams {
             key,
             golden,
+            hidden: false,
             qindex,
             speed: self.opts.speed,
         })?;
@@ -214,18 +378,23 @@ impl VideoEncoder for Vp9Encoder {
             (&f.u.samples[..], f.u.stride),
             (&f.v.samples[..], f.v.stride),
         ];
-        let (data, key) = self.encode_planes(planes, seconds)?;
-        Ok(vec![Packet::video(
-            data,
-            input.pts,
-            input.duration,
-            input.timescale,
-            key,
-        )])
+        let coded = self.push_planes(
+            planes,
+            seconds,
+            (input.pts, input.duration, input.timescale),
+        )?;
+        Ok(coded
+            .into_iter()
+            .map(|(d, k, (pts, dur, ts))| Packet::video(d, pts, dur, ts, k))
+            .collect())
     }
 
     fn drain(&mut self) -> Result<Vec<Packet>, CodecError> {
-        Ok(Vec::new())
+        let coded = self.flush()?;
+        Ok(coded
+            .into_iter()
+            .map(|(d, k, (pts, dur, ts))| Packet::video(d, pts, dur, ts, k))
+            .collect())
     }
 
     fn reset(&mut self) {
@@ -233,6 +402,8 @@ impl VideoEncoder for Vp9Encoder {
         self.force_key = true;
         self.since_key = 0;
         self.rc = Rate::new(self.opts, u64::from(self.width) * u64::from(self.height));
+        self.queue.clear();
+        self.overlay_at = None;
     }
 
     fn cancel_flag(&self) -> Arc<AtomicBool> {
@@ -454,14 +625,23 @@ impl Rate {
         q
     }
 
+    /// The inter frames' quantizer now.
+    fn peek_q(&self) -> u8 {
+        self.last_q
+    }
+
     fn account(&mut self, bytes: usize, seconds: f64, kind: usize, qindex: u8) {
         if self.opts.bitrate == 0 {
             return;
         }
         let bits = bytes as f64 * 8.0;
-        self.frames = self.frames.saturating_add(1);
-        self.per_frame = f64::from(self.opts.bitrate) * seconds;
-        self.debt += bits - self.per_frame;
+        if seconds > 0.0 {
+            // A shown picture: its budget; a hidden one only spends.
+            self.frames = self.frames.saturating_add(1);
+            self.per_frame = f64::from(self.opts.bitrate) * seconds;
+            self.debt -= self.per_frame;
+        }
+        self.debt += bits;
         let m = bits * step_of(qindex).powf(EXP);
         self.model[kind] = Some(match self.model[kind] {
             Some(old) => old * 0.6 + m * 0.4,
@@ -491,3 +671,25 @@ fn q_of_step(step: f64) -> u8 {
 #[cfg(test)]
 #[path = "api_tests.rs"]
 mod tests;
+
+/// Frames joined into one packet with a superframe index.
+fn superframe(frames: &[&[u8]]) -> Vec<u8> {
+    let largest = frames.iter().map(|f| f.len()).max().unwrap_or(0);
+    let mag = match largest {
+        0..=0xff => 1,
+        0x100..=0xffff => 2,
+        0x1_0000..=0xff_ffff => 3,
+        _ => 4,
+    };
+    let marker = 0xc0 | ((mag - 1) << 3) as u8 | (frames.len() - 1) as u8;
+    let mut out = Vec::new();
+    for f in frames {
+        out.extend_from_slice(f);
+    }
+    out.push(marker);
+    for f in frames {
+        out.extend_from_slice(&(f.len() as u32).to_le_bytes()[..mag]);
+    }
+    out.push(marker);
+    out
+}

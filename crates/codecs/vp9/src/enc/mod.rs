@@ -11,6 +11,7 @@
 //! loop filter of `dec::lf`).
 
 pub mod api;
+pub mod arf;
 pub mod tile;
 pub mod tx;
 
@@ -40,6 +41,9 @@ pub struct FrameParams {
     pub key: bool,
     /// Whether the frame also refreshes GOLDEN (slot 1).
     pub golden: bool,
+    /// A hidden frame (an alt-ref): not shown, refreshes ALTREF (slot 2)
+    /// only.
+    pub hidden: bool,
     pub qindex: u8,
     /// Motion search effort: higher is faster.
     pub speed: u8,
@@ -144,12 +148,12 @@ impl FrameEncoder {
         // The tiles are coded against the probabilities as they stand; their
         // symbols are kept, the coefficient probabilities that pay for
         // their update are updated, and the symbols written with them.
-        let head = self.headers(key, fp.golden, fp.qindex, None)?;
+        let head = self.headers(key, fp, None)?;
         let parsed = header::parse(self.dec.persist(), &head)?;
         let (counts, mvs, segmap, pic, ntiles) = self.tiles(&parsed, fp)?;
         let old = flat_coef(&parsed.fc);
         let new = coef_updates(&old, &counts, if lossless { 0 } else { 3 });
-        let head = self.headers(key, fp.golden, fp.qindex, Some((&old, &new)))?;
+        let head = self.headers(key, fp, Some((&old, &new)))?;
         let mut data = head;
         for (i, t) in self.work[..ntiles].iter().enumerate() {
             let mut w = BoolWriter::new();
@@ -171,10 +175,11 @@ impl FrameEncoder {
     fn headers(
         &self,
         key: bool,
-        golden: bool,
-        qindex: u8,
+        fp: FrameParams,
         coef: Option<(&[u8; 1728], &[u8; 1728])>,
     ) -> Result<Vec<u8>, CodecError> {
+        let qindex = fp.qindex;
+        let hidden = fp.hidden && !key;
         let lossless = qindex == 0;
         let compressed = compressed_header(lossless, !key, coef)?;
         let mut b = BitWriter::new();
@@ -182,7 +187,7 @@ impl FrameEncoder {
         b.write(0, 2); // profile 0
         b.write_bit(false); // show_existing_frame
         b.write_bit(!key); // frame_type
-        b.write_bit(true); // show_frame
+        b.write_bit(!hidden); // show_frame
         b.write_bit(false); // error_resilient_mode
         if key {
             b.write(0x49, 8);
@@ -194,9 +199,19 @@ impl FrameEncoder {
             b.write(self.height - 1, 16);
             b.write_bit(false); // render size = frame size
         } else {
+            if hidden {
+                b.write_bit(false); // intra_only
+            }
             b.write(0, 2); // reset_frame_context
-            // LAST, and GOLDEN on a golden frame.
-            b.write(if golden { 0x03 } else { 0x01 }, 8);
+            // LAST, and GOLDEN on a golden frame; an alt-ref only ALTREF.
+            let refresh = if hidden {
+                0x04
+            } else if fp.golden {
+                0x03
+            } else {
+                0x01
+            };
+            b.write(refresh, 8);
             for slot in 0..3 {
                 b.write(slot, 3); // LAST 0, GOLDEN 1, ALTREF 2
                 b.write_bit(false); // sign bias

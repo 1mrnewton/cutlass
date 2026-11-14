@@ -15,7 +15,7 @@ psnr() {
 if [ "$who" = ours ]; then
 	for q in "$@"; do
 		t0=$(date +%s.%N)
-		$enc "$in" "$w" "$h" "$tmp/o.ivf" q="$q" frames="$n" ${SPEED:+speed=$SPEED} threads=${THREADS:-1} > /dev/null
+		$enc "$in" "$w" "$h" "$tmp/o.ivf" q="$q" frames="$n" ${SPEED:+speed=$SPEED} threads=${THREADS:-1} ${LAG:+lag=$LAG} > /dev/null
 		t1=$(date +%s.%N)
 		b=$(($(stat -c %s "$tmp/o.ivf") - 32 - 12 * n))
 		echo "ours-q$q $b $((b * 8 * 30 / n / 1000)) $(psnr "$tmp/o.ivf") $(echo "$t1 - $t0" | bc)"

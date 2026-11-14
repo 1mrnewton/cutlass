@@ -54,6 +54,7 @@ fn round_trip_threads(w: usize, h: usize, frames: usize, qindex: u8, threads: us
             .encode(FrameParams {
                 key: t == 0,
                 golden: t % 3 == 2,
+                hidden: false,
                 qindex,
                 speed,
             })

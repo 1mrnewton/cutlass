@@ -1,5 +1,5 @@
 //! Encodes raw 4:2:0 video to an IVF file:
-//! `vp9enc <in.yuv> <width> <height> <out.ivf> [q=N | rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N]`.
+//! `vp9enc <in.yuv> <width> <height> <out.ivf> [q=N | rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N] [lag=N]`.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -11,7 +11,7 @@ use cutlass_vp9::{Vp9Encoder, Vp9Options};
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 5 {
-        return Err("usage: vp9enc <in.yuv> <width> <height> <out.ivf> [q=N|rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N]".into());
+        return Err("usage: vp9enc <in.yuv> <width> <height> <out.ivf> [q=N|rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N] [lag=N]".into());
     }
     let w: usize = args[2].parse().map_err(|_| "width")?;
     let h: usize = args[3].parse().map_err(|_| "height")?;
@@ -29,6 +29,7 @@ fn main() -> Result<(), String> {
             "fps" => fps = n,
             "keyint" => opts.keyint = n,
             "threads" => opts.threads = n as usize,
+            "lag" => opts.lag = n,
             _ => return Err(format!("unknown option {k}")),
         }
     }
@@ -45,11 +46,20 @@ fn main() -> Result<(), String> {
     while n < frames && input.read_exact(&mut buf).is_ok() {
         let (y, rest) = buf.split_at(w * h);
         let (u, v) = rest.split_at(cw * ch);
-        let (data, _) = enc
-            .encode_planes([(y, w), (u, cw), (v, cw)], 1.0 / f64::from(fps))
-            .map_err(|e| e.to_string())?;
-        packets.push(data);
+        for (data, _, _) in enc
+            .push_planes(
+                [(y, w), (u, cw), (v, cw)],
+                1.0 / f64::from(fps),
+                (n as i64, 1, fps),
+            )
+            .map_err(|e| e.to_string())?
+        {
+            packets.push(data);
+        }
         n += 1;
+    }
+    for (data, _, _) in enc.flush().map_err(|e| e.to_string())? {
+        packets.push(data);
     }
     let secs = start.elapsed().as_secs_f64();
     let mut hdr = Vec::new();

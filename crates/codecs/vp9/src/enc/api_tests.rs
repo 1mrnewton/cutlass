@@ -1033,3 +1033,46 @@ fn write_tile_bits(bits: &mut BitWriter, width: u32) {
     }
     bits.write_bit(false);
 }
+
+#[test]
+fn lookahead_codes_alt_refs_and_every_picture_comes_out() {
+    let opts = super::Vp9Options {
+        qindex: 120,
+        lag: 16,
+        threads: 2,
+        ..super::Vp9Options::default()
+    };
+    let mut encoder = Vp9Encoder::with_options(64, 64, opts).expect("encoder");
+    let mut packets = Vec::new();
+    for index in 0..30u32 {
+        // Nearly still: an alt-ref pays.
+        packets.extend(
+            encoder
+                .push(&VideoInput {
+                    frame: moving(64, 64, index / 8),
+                    pts: i64::from(index),
+                    duration: 1,
+                    timescale: 30,
+                })
+                .expect("push"),
+        );
+    }
+    assert!(packets.len() < 30, "the lookahead holds pictures back");
+    packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+    assert_eq!(packets.len(), 30);
+    let pts: Vec<i64> = packets.iter().map(|p| p.pts).collect();
+    assert_eq!(pts, (0..30).collect::<Vec<i64>>());
+    // At least one packet carries a hidden alt-ref in a superframe.
+    assert!(
+        packets
+            .iter()
+            .any(|p| p.data.last().is_some_and(|&m| m & 0xe0 == 0xc0))
+    );
+    let params = CodecParams::with_format(CodecId::Vp9, 64, 64, PixelFormat::Yuv420p);
+    let mut decoder = Vp9Decoder::open(&params).expect("decoder");
+    let mut shown = 0;
+    for p in &packets {
+        shown += decoder.push_all(p).expect("decode").len();
+    }
+    assert_eq!(shown, 30);
+}

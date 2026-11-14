@@ -550,6 +550,13 @@ impl<'a> Font<'a> {
             return Ok(());
         };
         self.fingerprint = variation.set(settings)?;
+        let places = &variation.places;
+        if let Some(table) = &mut self.gsub {
+            table.vary(places, None);
+        }
+        if let Some(table) = &mut self.gpos {
+            table.vary(places, variation.layout_deltas());
+        }
         Ok(())
     }
 

@@ -1,6 +1,7 @@
 //! `GPOS`: where a font moves glyphs, and how far each one advances.
 
 use crate::layout::{ClassDef, Coverage, SequenceContext, sub, sub_at};
+use crate::vary::{Deltas, moved};
 use crate::{FontError, i16_at, u16_at};
 
 /// How one glyph is moved, in font design units. Y grows upward.
@@ -39,15 +40,27 @@ pub enum Positioning<'a> {
 }
 
 impl<'a> Positioning<'a> {
-    /// Read a subtable of lookup type `kind`, 1 to 8.
+    /// Read a subtable of lookup type `kind`, 1 to 8, with the values of
+    /// the face's default instance. A variable face set to another reads
+    /// its subtables through
+    /// [`LayoutTable::positioning`](crate::LayoutTable::positioning).
     pub fn read(kind: u16, data: &'a [u8]) -> Result<Self, FontError> {
+        Self::read_varied(kind, data, None)
+    }
+
+    /// Read a subtable whose values `deltas` change.
+    pub(crate) fn read_varied(
+        kind: u16,
+        data: &'a [u8],
+        deltas: Option<Deltas<'a>>,
+    ) -> Result<Self, FontError> {
         match kind {
-            1 => Ok(Self::Single(SingleAdjust::read(data)?)),
-            2 => Ok(Self::Pair(PairAdjust::read(data)?)),
-            3 => Ok(Self::Cursive(Cursive::read(data)?)),
-            4 => Ok(Self::MarkToBase(MarkAttach::read(data)?)),
-            5 => Ok(Self::MarkToLigature(MarkAttach::read(data)?)),
-            6 => Ok(Self::MarkToMark(MarkAttach::read(data)?)),
+            1 => Ok(Self::Single(SingleAdjust::read(data, deltas)?)),
+            2 => Ok(Self::Pair(PairAdjust::read(data, deltas)?)),
+            3 => Ok(Self::Cursive(Cursive::read(data, deltas)?)),
+            4 => Ok(Self::MarkToBase(MarkAttach::read(data, deltas)?)),
+            5 => Ok(Self::MarkToLigature(MarkAttach::read(data, deltas)?)),
+            6 => Ok(Self::MarkToMark(MarkAttach::read(data, deltas)?)),
             7 => Ok(Self::Context(SequenceContext::read(data, false)?)),
             8 => Ok(Self::Context(SequenceContext::read(data, true)?)),
             _ => Err(FontError::BadTable),
@@ -60,9 +73,15 @@ fn value_size(format: u16) -> usize {
     (format & 0xFF).count_ones() as usize * 2
 }
 
-/// The value record of `format` at `at`. Device and variation tables are
-/// stepped over.
-fn value(data: &[u8], mut at: usize, format: u16) -> Result<Adjust, FontError> {
+/// The value record of `format` at `at`, in the table `data`. Each value
+/// may name, after the values, a table that changes it: one of pixel
+/// sizes is stepped over, and one of `deltas` is added in, rounded.
+fn value(
+    data: &[u8],
+    mut at: usize,
+    format: u16,
+    deltas: Option<&Deltas<'_>>,
+) -> Result<Adjust, FontError> {
     let mut adjust = Adjust::default();
     for (bit, field) in [
         (1, &mut adjust.x),
@@ -75,21 +94,53 @@ fn value(data: &[u8], mut at: usize, format: u16) -> Result<Adjust, FontError> {
             at += 2;
         }
     }
+    let Some(deltas) = deltas else {
+        return Ok(adjust);
+    };
+    for (bit, field) in [
+        (0x10, &mut adjust.x),
+        (0x20, &mut adjust.y),
+        (0x40, &mut adjust.x_advance),
+        (0x80, &mut adjust.y_advance),
+    ] {
+        if format & bit != 0 {
+            if let Some(table) = sub_at(data, at)? {
+                *field = moved(*field, deltas.of(table)?);
+            }
+            at += 2;
+        }
+    }
     Ok(adjust)
 }
 
 /// The anchor a 16-bit offset stored at `at` points to; zero is no anchor.
-fn anchor(data: &[u8], at: usize) -> Result<Option<Anchor>, FontError> {
+/// An anchor of the third form names a table for each of its two values,
+/// and `deltas` moves it by them, each rounded.
+fn anchor(
+    data: &[u8],
+    at: usize,
+    deltas: Option<&Deltas<'_>>,
+) -> Result<Option<Anchor>, FontError> {
     let Some(table) = sub_at(data, at)? else {
         return Ok(None);
     };
-    if !(1..=3).contains(&u16_at(table, 0)?) {
+    let format = u16_at(table, 0)?;
+    if !(1..=3).contains(&format) {
         return Err(FontError::BadTable);
     }
-    Ok(Some(Anchor {
+    let mut anchor = Anchor {
         x: i16_at(table, 2)?,
         y: i16_at(table, 4)?,
-    }))
+    };
+    if let (3, Some(deltas)) = (format, deltas) {
+        if let Some(moves) = sub_at(table, 6)? {
+            anchor.x = moved(anchor.x, deltas.of(moves)?);
+        }
+        if let Some(moves) = sub_at(table, 8)? {
+            anchor.y = moved(anchor.y, deltas.of(moves)?);
+        }
+    }
+    Ok(Some(anchor))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -99,10 +150,11 @@ pub struct SingleAdjust<'a> {
     format: u16,
     /// One value for every covered glyph.
     shared: bool,
+    deltas: Option<Deltas<'a>>,
 }
 
 impl<'a> SingleAdjust<'a> {
-    fn read(data: &'a [u8]) -> Result<Self, FontError> {
+    fn read(data: &'a [u8], deltas: Option<Deltas<'a>>) -> Result<Self, FontError> {
         let shared = match u16_at(data, 0)? {
             1 => true,
             2 => false,
@@ -113,6 +165,7 @@ impl<'a> SingleAdjust<'a> {
             coverage: Coverage::at(data, 2)?,
             format: u16_at(data, 4)?,
             shared,
+            deltas,
         })
     }
 
@@ -122,13 +175,13 @@ impl<'a> SingleAdjust<'a> {
             return Ok(None);
         };
         if self.shared {
-            return value(self.data, 6, self.format).map(Some);
+            return value(self.data, 6, self.format, self.deltas.as_ref()).map(Some);
         }
         if index >= u16_at(self.data, 6)? {
             return Err(FontError::BadTable);
         }
         let at = 8 + usize::from(index) * value_size(self.format);
-        value(self.data, at, self.format).map(Some)
+        value(self.data, at, self.format, self.deltas.as_ref()).map(Some)
     }
 }
 
@@ -139,10 +192,11 @@ pub struct PairAdjust<'a> {
     formats: (u16, u16),
     /// The classes of the first and second glyph, for a table of classes.
     classes: Option<(ClassDef<'a>, ClassDef<'a>)>,
+    deltas: Option<Deltas<'a>>,
 }
 
 impl<'a> PairAdjust<'a> {
-    fn read(data: &'a [u8]) -> Result<Self, FontError> {
+    fn read(data: &'a [u8], deltas: Option<Deltas<'a>>) -> Result<Self, FontError> {
         let classes = match u16_at(data, 0)? {
             1 => None,
             2 => Some((ClassDef::at(data, 8)?, ClassDef::at(data, 10)?)),
@@ -153,6 +207,7 @@ impl<'a> PairAdjust<'a> {
             coverage: Coverage::at(data, 2)?,
             formats: (u16_at(data, 4)?, u16_at(data, 6)?),
             classes,
+            deltas,
         })
     }
 
@@ -171,8 +226,8 @@ impl<'a> PairAdjust<'a> {
         let (one, two) = (value_size(self.formats.0), value_size(self.formats.1));
         let read = |data: &[u8], at: usize| {
             Ok(Some((
-                value(data, at, self.formats.0)?,
-                value(data, at + one, self.formats.1)?,
+                value(data, at, self.formats.0, self.deltas.as_ref())?,
+                value(data, at + one, self.formats.1, self.deltas.as_ref())?,
             )))
         };
         if let Some((first_classes, second_classes)) = &self.classes {
@@ -219,16 +274,18 @@ pub struct Joins {
 pub struct Cursive<'a> {
     data: &'a [u8],
     coverage: Coverage<'a>,
+    deltas: Option<Deltas<'a>>,
 }
 
 impl<'a> Cursive<'a> {
-    fn read(data: &'a [u8]) -> Result<Self, FontError> {
+    fn read(data: &'a [u8], deltas: Option<Deltas<'a>>) -> Result<Self, FontError> {
         if u16_at(data, 0)? != 1 {
             return Err(FontError::BadTable);
         }
         Ok(Self {
             data,
             coverage: Coverage::at(data, 2)?,
+            deltas,
         })
     }
 
@@ -242,8 +299,8 @@ impl<'a> Cursive<'a> {
         }
         let at = 6 + usize::from(index) * 4;
         Ok(Some(Joins {
-            entry: anchor(self.data, at)?,
-            exit: anchor(self.data, at + 2)?,
+            entry: anchor(self.data, at, self.deltas.as_ref())?,
+            exit: anchor(self.data, at + 2, self.deltas.as_ref())?,
         }))
     }
 }
@@ -257,10 +314,11 @@ pub struct MarkAttach<'a> {
     classes: u16,
     mark_array: &'a [u8],
     base_array: &'a [u8],
+    deltas: Option<Deltas<'a>>,
 }
 
 impl<'a> MarkAttach<'a> {
-    fn read(data: &'a [u8]) -> Result<Self, FontError> {
+    fn read(data: &'a [u8], deltas: Option<Deltas<'a>>) -> Result<Self, FontError> {
         if u16_at(data, 0)? != 1 {
             return Err(FontError::BadTable);
         }
@@ -270,6 +328,7 @@ impl<'a> MarkAttach<'a> {
             classes: u16_at(data, 6)?,
             mark_array: sub_at(data, 8)?.ok_or(FontError::BadTable)?,
             base_array: sub_at(data, 10)?.ok_or(FontError::BadTable)?,
+            deltas,
         })
     }
 
@@ -298,7 +357,7 @@ impl<'a> MarkAttach<'a> {
         if class >= self.classes {
             return Err(FontError::BadTable);
         }
-        Ok(anchor(self.mark_array, at + 2)?.map(|anchor| (class, anchor)))
+        Ok(anchor(self.mark_array, at + 2, self.deltas.as_ref())?.map(|anchor| (class, anchor)))
     }
 
     /// The anchors that set `mark` on `base`, a base glyph or another
@@ -312,7 +371,7 @@ impl<'a> MarkAttach<'a> {
             return Err(FontError::BadTable);
         }
         let at = 2 + (usize::from(index) * usize::from(self.classes) + usize::from(class)) * 2;
-        Ok(anchor(self.base_array, at)?.map(|on_base| (on_mark, on_base)))
+        Ok(anchor(self.base_array, at, self.deltas.as_ref())?.map(|on_base| (on_mark, on_base)))
     }
 
     /// How many parts `ligature` has anchors for, when this subtable
@@ -355,6 +414,6 @@ impl<'a> MarkAttach<'a> {
             return Ok(None);
         }
         let at = 2 + (component * usize::from(self.classes) + usize::from(class)) * 2;
-        Ok(anchor(attach, at)?.map(|on_base| (on_mark, on_base)))
+        Ok(anchor(attach, at, self.deltas.as_ref())?.map(|on_base| (on_mark, on_base)))
     }
 }

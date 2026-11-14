@@ -6,7 +6,9 @@
 //! its own glyphs. Offsets and counts are checked where they are read, and
 //! an offset of zero is a table that is not there.
 
-use crate::{FontError, bytes_at, u16_at, u32_at};
+use crate::gpos::Positioning;
+use crate::vary::Deltas;
+use crate::{FontError, bytes_at, i16_at, u16_at, u32_at};
 
 /// A four-letter tag: a script, a language, or a feature.
 pub type Tag = [u8; 4];
@@ -239,6 +241,13 @@ pub struct LayoutTable<'a> {
     lookups: Option<&'a [u8]>,
     /// The lookup type that wraps another: 7 in `GSUB`, 9 in `GPOS`.
     extension: u16,
+    /// The table of a variable face that says which features change with
+    /// its setting.
+    variations: Option<&'a [u8]>,
+    /// The features that take another's place where the face is set.
+    substitutes: Option<&'a [u8]>,
+    /// What changes the table's values where the face is set.
+    deltas: Option<Deltas<'a>>,
 }
 
 impl<'a> LayoutTable<'a> {
@@ -246,12 +255,27 @@ impl<'a> LayoutTable<'a> {
         if u16_at(data, 0)? != 1 {
             return Err(FontError::Unsupported);
         }
-        let table = Self {
+        // From version 1.1 a table may say which features change with
+        // a variable face's setting.
+        let variations = if u16_at(data, 2)? >= 1 {
+            match usize::try_from(u32_at(data, 10)?).map_err(|_| FontError::BadTable)? {
+                0 => None,
+                at => Some(data.get(at..).ok_or(FontError::Truncated)?),
+            }
+        } else {
+            None
+        };
+        let mut table = Self {
             scripts: sub_at(data, 4)?,
             features: sub_at(data, 6)?,
             lookups: sub_at(data, 8)?,
             extension,
+            variations,
+            substitutes: None,
+            deltas: None,
         };
+        // A feature may change at the face's default too.
+        table.vary(&[], None);
         // The lists' own counts are read now, so a torn table fails here.
         for list in [table.scripts, table.features, table.lookups]
             .into_iter()
@@ -315,14 +339,61 @@ impl<'a> LayoutTable<'a> {
         Ok([bytes[0], bytes[1], bytes[2], bytes[3]])
     }
 
-    /// The lookups feature `index` runs.
+    /// Set the table for a variable face at `places` along its axes:
+    /// the features that change there, and the `deltas` of its values.
+    pub(crate) fn vary(&mut self, places: &[i16], deltas: Option<Deltas<'a>>) {
+        self.substitutes = self
+            .variations
+            .and_then(|variations| substitutes(variations, places).ok().flatten());
+        self.deltas = deltas;
+    }
+
+    /// A positioning subtable of lookup type `kind`, 1 to 8, read with
+    /// the values it has where a variable face is set: kerning, anchors
+    /// and the rest move with the face. For a face that does not vary, or
+    /// one at its default, this is [`Positioning::read`].
+    pub fn positioning(&self, kind: u16, data: &'a [u8]) -> Result<Positioning<'a>, FontError> {
+        Positioning::read_varied(kind, data, self.deltas)
+    }
+
+    /// The lookups feature `index` runs. In a variable face a feature may
+    /// run other lookups where the face is set than at its default.
     pub fn feature_lookups(&self, index: u16) -> Result<U16s<'a>, FontError> {
         let list = self.features.ok_or(FontError::BadTable)?;
         if index >= u16_at(list, 0)? {
             return Err(FontError::BadTable);
         }
+        if let Some(feature) = self.substitute(index)? {
+            return U16s::read(feature, 4, usize::from(u16_at(feature, 2)?));
+        }
         let feature = sub_at(list, 2 + usize::from(index) * 6 + 4)?.ok_or(FontError::BadTable)?;
         U16s::read(feature, 4, usize::from(u16_at(feature, 2)?))
+    }
+
+    /// The feature table that takes the place of feature `index` where
+    /// the face is set, when one does.
+    fn substitute(&self, index: u16) -> Result<Option<&'a [u8]>, FontError> {
+        let Some(table) = self.substitutes else {
+            return Ok(None);
+        };
+        // Records of a feature and where its stand-in is, in rising order.
+        let count = usize::from(u16_at(table, 4)?);
+        let (mut low, mut high) = (0, count);
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let at = 6 + mid * 6;
+            let feature = u16_at(table, at)?;
+            if feature < index {
+                low = mid + 1;
+            } else if feature > index {
+                high = mid;
+            } else {
+                let offset =
+                    usize::try_from(u32_at(table, at + 2)?).map_err(|_| FontError::BadTable)?;
+                return sub(table, offset);
+            }
+        }
+        Ok(None)
     }
 
     #[must_use]
@@ -387,6 +458,53 @@ impl<'a> LayoutTable<'a> {
             subtables,
         })
     }
+}
+
+/// The features that take others' places at `places`, from the table
+/// `variations`: those of the first record whose conditions all hold.
+/// Each condition is a range of places along one axis.
+fn substitutes<'a>(variations: &'a [u8], places: &[i16]) -> Result<Option<&'a [u8]>, FontError> {
+    if u16_at(variations, 0)? != 1 {
+        return Ok(None);
+    }
+    let offset = |data: &[u8], at: usize| {
+        usize::try_from(u32_at(data, at)?).map_err(|_| FontError::BadTable)
+    };
+    let count = offset(variations, 4)?.min(MAX_LIST);
+    for record in 0..count {
+        let at = 8 + record * 8;
+        // A record with no conditions always holds.
+        let holds = match sub(variations, offset(variations, at)?)? {
+            None => true,
+            Some(set) => {
+                let conditions = usize::from(u16_at(set, 0)?);
+                let mut holds = true;
+                for index in 0..conditions {
+                    let condition =
+                        sub(set, offset(set, 2 + index * 4)?)?.ok_or(FontError::BadTable)?;
+                    // A condition of a form this reader does not know
+                    // does not hold.
+                    if u16_at(condition, 0)? != 1 {
+                        holds = false;
+                        break;
+                    }
+                    let place = places
+                        .get(usize::from(u16_at(condition, 2)?))
+                        .copied()
+                        .unwrap_or(0);
+                    if place < i16_at(condition, 4)? || place > i16_at(condition, 6)? {
+                        holds = false;
+                        break;
+                    }
+                }
+                holds
+            }
+        };
+        if holds {
+            return sub(variations, offset(variations, at + 4)?);
+        }
+    }
+    Ok(None)
 }
 
 /// The table a list of tagged records at the start of `list` holds for

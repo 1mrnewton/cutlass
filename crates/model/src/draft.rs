@@ -303,7 +303,9 @@ mod tests {
         let mut draft = Draft::empty("d");
         let bare = serde_json::to_value(&draft).unwrap();
         assert!(bare.get("cutlass_cover").is_none());
-        draft.cover = Some(Cover::Frame { time: Micros(1_500_000) });
+        draft.cover = Some(Cover::Frame {
+            time: Micros(1_500_000),
+        });
         draft.rest.insert("cover".to_owned(), Value::Null);
         let json = serde_json::to_value(&draft).unwrap();
         assert_eq!(
@@ -316,6 +318,11 @@ mod tests {
         let image: Cover =
             serde_json::from_value(serde_json::json!({ "kind": "image", "path": "/a.png" }))
                 .unwrap();
-        assert_eq!(image, Cover::Image { path: "/a.png".to_owned() });
+        assert_eq!(
+            image,
+            Cover::Image {
+                path: "/a.png".to_owned()
+            }
+        );
     }
 }

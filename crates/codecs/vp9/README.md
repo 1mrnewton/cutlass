@@ -170,28 +170,48 @@ FFmpeg 7 with libvpx. Timings are medians of whole-process runs.
 
 **Decode** (`tools/bench.py`): 1920×1080 streams written by libvpx, 300
 frames of 4:4:4 (profile 1, `mandel.ivf`) and 200 of 4:2:0 (`m420.ivf`,
-libvpx at 4 Mb/s, four tile columns). Medians of seven runs.
+libvpx at 4 Mb/s, four tile columns). Medians of nine runs on four
+threads; one core is the fastest of five, pinned with `taskset`.
 
-| Stream | Threads | Cutlass | FFmpeg `vp9` | Ratio |
-| --- | --- | ---: | ---: | ---: |
-| 4:2:0 | 1 core | 1.23 s | 1.11 s | 1.11 |
-| 4:2:0 | 4 | 0.56 s | 0.56 s | 1.00 |
-| 4:4:4 | 1 core | 2.53 s | 2.02 s | 1.25 |
-| 4:4:4 | 4 | 1.09 s | 0.94 s | 1.16 |
+| Stream | Threads | Cutlass | FFmpeg `vp9` | Ratio | Memory (Cutlass / FFmpeg) |
+| --- | --- | ---: | ---: | ---: | --- |
+| 4:2:0 | 1 core | 1.03 s | 0.97 s | 1.06 | |
+| 4:2:0 | 4 | 0.42 s | 0.44 s | 0.96 | 54 MB / 57 MB |
+| 4:4:4 | 1 core | 1.93 s | 1.80 s | 1.07 | |
+| 4:4:4 | 4 | 0.81 s | 0.80 s | 1.01 | 78 MB / 78 MB |
 
-(The 4:4:4 stream started at 38.8 s on one core.) What moved the decoder
-most recently: the interpolation kernel with vector loads and stores and
-row pairs kept between output rows (1.56× to 1.30× on one core), the
-loop filter loading its outer taps only when the 15-tap filter can run,
-the kernels taking their block by reference (a store-forwarding stall
-per block), and the calling thread parsing a tile column itself.
+On four threads Cutlass is level with FFmpeg on the 4:4:4 stream (it
+won 6 of the 9 runs) and ahead on the 4:2:0 one (6 of 9). (The 4:4:4
+stream started at 38.8 s on one core.) What moved the decoder most
+recently:
 
-The machine is a shared VM and single runs vary by ±10%; the instruction
-counts (`tools/ir.sh`) are steady: on the first 60 frames of the 4:2:0
-stream Cutlass runs 2.60 G instructions against FFmpeg's 2.06 G, with
-fewer cache misses, so what is left is code: motion compensation
-(1.8× FFmpeg's instructions with its callers), the loop filter's edge
-walk, and the inverse transforms on portable lanes.
+- The kernels' entry points took their block by value and rebound it,
+  which moved all 144 bytes through a `memcpy` call on every prediction
+  and every edge (6% of a 4:4:4 decode).
+- The loop filter's edge, built a byte at a time on the caller's stack
+  and read back wider, stalled each call on a failed store forward; it
+  now comes in registers.
+- Vertical edges are filtered down a superblock before across it, so an
+  inner edge no longer reads back what the edge 4 to its left has just
+  stored (the order along each line is libvpx's).
+- 4:4:4 walks the loop filter's masks once for its three planes, and
+  predicts the three planes of a block in one pass.
+- Pictures still being read wait in the spare list instead of being
+  freed, so threaded decoding no longer allocates and clears most of
+  its pictures; and fewer large pictures are in flight (4:4:4 decodes
+  8% faster in a quarter less memory).
+- Earlier: the interpolation kernel with vector loads and stores and
+  row pairs kept between output rows, the loop filter loading its outer
+  taps only when the 15-tap filter can run, and the calling thread
+  parsing a tile column itself.
+
+The machine is a shared VM and single runs vary by ±10% (FFmpeg's own
+times moved from 0.80 s to 0.98 s on the 4:4:4 stream within a day).
+What is left on one core is the coefficient parse (the bool decoder is
+libvpx's and FFmpeg's, but FFmpeg's whole token loop takes about 0.43 s
+of the 4:4:4 stream against Cutlass's 0.55 s) and the loop filter,
+whose kernel retires fewer instructions than FFmpeg's but waits longer
+on its transposed loads.
 
 **Encode** (`tools/encbench.sh`, BD-rate with `tools/bdrate.py`): 30
 frames of 1280×720, 4 threads on both sides (libvpx with `-row-mt 1

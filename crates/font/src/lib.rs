@@ -17,6 +17,7 @@ mod collection;
 mod colr;
 #[cfg(test)]
 mod colr_tests;
+mod coverage;
 mod faces;
 #[cfg(test)]
 mod fixture;
@@ -46,6 +47,7 @@ mod variants;
 pub use colr::{
     Affine, ClipBox, Color, ColorGlyph, ColorLine, ColorStop, CompositeMode, Extend, Paint,
 };
+pub use coverage::{CharacterMap, MAX_CHARACTER_MAP, load_character_map};
 pub use faces::{FaceEntry, MAX_COLLECTION_FACES, list_faces, load_face, single_face};
 pub use gpos::{Adjust, Anchor, Cursive, Joins, MarkAttach, PairAdjust, Positioning, SingleAdjust};
 pub use gsub::{Ligature, Ligatures, Sequences, Single, Substitution};
@@ -300,19 +302,7 @@ impl<'a> Font<'a> {
     /// still [`Self::missing_glyph`]. A map entry past the face's glyph count
     /// is a bad table.
     pub fn glyph_id(&self, character: char) -> Result<Option<u16>, FontError> {
-        let code = u32::from(character);
-        let found = match self.coding {
-            Coding::Unicode => self.cmap.glyph(code)?,
-            Coding::Symbols => match self.cmap.glyph(code)? {
-                // A symbol face draws the key that types each picture.
-                None if (0x20..=0xFF).contains(&code) => self.cmap.glyph(0xF000 + code)?,
-                found => found,
-            },
-            Coding::Roman => match roman_byte(code) {
-                Some(byte) => self.cmap.glyph(byte)?,
-                None => None,
-            },
-        };
+        let found = coded_glyph(&self.cmap, self.coding, u32::from(character))?;
         let Some(glyph_id) = found else {
             return Ok(None);
         };
@@ -754,6 +744,23 @@ const ROMAN_HIGH: &str = "\u{C4}\u{C5}\u{C7}\u{C9}\u{D1}\u{D6}\u{DC}\u{E1}\u{E0}
 \u{2013}\u{2014}\u{201C}\u{201D}\u{2018}\u{2019}\u{F7}\u{25CA}\u{FF}\u{178}\u{2044}\u{20AC}\u{2039}\u{203A}\u{FB01}\u{FB02}\
 \u{2021}\u{B7}\u{201A}\u{201E}\u{2030}\u{C2}\u{CA}\u{C1}\u{CB}\u{C8}\u{CD}\u{CE}\u{CF}\u{CC}\u{D3}\u{D4}\
 \u{F8FF}\u{D2}\u{DA}\u{DB}\u{D9}\u{131}\u{2C6}\u{2DC}\u{AF}\u{2D8}\u{2D9}\u{2DA}\u{B8}\u{2DD}\u{2DB}\u{2C7}";
+
+/// The glyph `map` has for the character `code`, its codes being what
+/// `coding` says they are.
+fn coded_glyph(map: &Cmap<'_>, coding: Coding, code: u32) -> Result<Option<u16>, FontError> {
+    Ok(match coding {
+        Coding::Unicode => map.glyph(code)?,
+        Coding::Symbols => match map.glyph(code)? {
+            // A symbol face draws the key that types each picture.
+            None if (0x20..=0xFF).contains(&code) => map.glyph(0xF000 + code)?,
+            found => found,
+        },
+        Coding::Roman => match roman_byte(code) {
+            Some(byte) => map.glyph(byte)?,
+            None => None,
+        },
+    })
+}
 
 /// The byte of `code` in the Mac's Roman set, when it has one.
 fn roman_byte(code: u32) -> Option<u32> {

@@ -13,6 +13,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -79,6 +80,19 @@ class ClipEditsTest {
                 assertFalse(model.clipState(picture)!!.mirrored)
                 assertFalse(model.clipState(picture)!!.crop.isNotEmpty())
                 assertEquals(0L, model.fade(picture).inUs)
+
+                model.setOpacity(picture, 0.4)
+                assertEquals(0.4, model.opacity(picture), 1e-6)
+                model.undo()
+                assertEquals(1.0, model.opacity(picture), 1e-6)
+
+                val mainBeforeCopy = model.lanes.first { it.main }.clips.size
+                model.duplicate(picture)
+                val copy = model.selectedClip!!
+                assertNotEquals(picture, copy)
+                assertEquals(mainBeforeCopy + 1, model.lanes.first { it.main }.clips.size)
+                model.undo()
+                model.selectedClip = picture
 
                 model.clearNotice()
                 model.extractAudio(picture)

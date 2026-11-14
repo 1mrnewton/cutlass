@@ -1,5 +1,6 @@
 package com.scytheralpha.cutlass_android
 
+import kotlin.math.roundToInt
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -333,6 +334,45 @@ fun FadePanel(model: EditorModel, clip: Clip, done: () -> Unit) {
                 )
                 Text(tenths(value.toLong()), style = clipPanelDigits(12), color = Color.White.copy(alpha = 0.5f))
             }
+        }
+    }
+}
+
+/**
+ * How solid the picture is, from clear to solid. The slider is one undo
+ * step, set when the finger lifts.
+ */
+@Composable
+fun OpacityPanel(model: EditorModel, clip: Clip, done: () -> Unit) {
+    val stored = remember(clip.id, model.edits) { model.opacity(clip.id) }
+    var opacity by remember { mutableDoubleStateOf(stored) }
+    LaunchedEffect(stored) { opacity = stored }
+    val percent = "${(opacity * 100).roundToInt()}%"
+
+    PanelFrame(title = "Opacity", close = done) {
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Slider(
+                value = opacity.toFloat(),
+                onValueChange = { opacity = it.toDouble() },
+                onValueChangeFinished = { model.setOpacity(clip.id, opacity) },
+                valueRange = 0f..1f,
+                colors = SliderDefaults.colors(
+                    thumbColor = Palette.accent,
+                    activeTrackColor = Palette.accent,
+                    inactiveTrackColor = Palette.white(0.3),
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .semantics {
+                        contentDescription = "Opacity"
+                        stateDescription = percent
+                    },
+            )
+            Text(percent, style = clipPanelDigits(12), color = Color.White.copy(alpha = 0.5f))
         }
     }
 }

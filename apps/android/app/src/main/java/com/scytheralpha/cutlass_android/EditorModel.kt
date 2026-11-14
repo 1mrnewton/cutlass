@@ -532,6 +532,21 @@ class EditorModel(project: String, private val scope: CoroutineScope) {
 
     fun setFade(clip: String, inUs: Long, outUs: Long) = edit { it.setFade(clip, inUs, outUs) }
 
+    /** Put a copy of `clip` right after it, and select the copy. */
+    fun duplicate(clip: String) {
+        var copy: String? = null
+        edit { copy = it.duplicate(clip) }
+        copy?.let {
+            selectedClip = it
+            say("Duplicated")
+        }
+    }
+
+    /** How solid the picture is, 1 solid and 0 clear, or 1 when it is gone. */
+    fun opacity(clip: String): Double = clipState(clip)?.opacity ?: 1.0
+
+    fun setOpacity(clip: String, opacity: Double) = edit { it.setOpacity(clip, opacity) }
+
     /** Move an overlay picture onto the main row where it starts. */
     fun toMain(clip: String) = edit { it.toMain(clip) }
 

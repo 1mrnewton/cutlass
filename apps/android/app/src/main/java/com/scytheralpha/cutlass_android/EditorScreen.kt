@@ -92,6 +92,7 @@ sealed interface Panel {
     data object Graphs : Panel
     data object Animations : Panel
     data object Fade : Panel
+    data object Opacity : Panel
 
     /** Add text, or change the text clip with this id. */
     data class Text(val clip: String?) : Panel
@@ -416,6 +417,7 @@ private fun Bottom(
             panel == Panel.Volume && selection != null -> VolumePanel(model, selection, done)
             panel == Panel.Speed && selection != null -> SpeedPanel(model, selection, done)
             panel == Panel.Fade && selection != null -> FadePanel(model, selection, done)
+            panel == Panel.Opacity && selection != null -> OpacityPanel(model, selection, done)
             selectionBar != null -> ToolBarView(
                 tools = toolBar(selectionBar),
                 back = { model.selectedClip = null },
@@ -464,6 +466,8 @@ private fun useTool(
         ToolKind.BEATS -> model.selectedClip?.let(model::toggleBeat)
         ToolKind.SPLICE -> model.selectedClip?.let(model::toMain)
         ToolKind.FADE -> setPanel(Panel.Fade)
+        ToolKind.OPACITY -> setPanel(Panel.Opacity)
+        ToolKind.DUPLICATE -> model.selectedClip?.let(model::duplicate)
         ToolKind.ADD_OVERLAY -> pick(Pick.OVERLAY)
         ToolKind.IMPORT_SOUND -> pick(Pick.SOUND)
         ToolKind.VIDEO_EFFECTS -> setPanel(Panel.Effects)

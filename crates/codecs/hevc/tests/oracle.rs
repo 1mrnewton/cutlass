@@ -176,9 +176,22 @@ mod oracle {
     /// Every picture of `bytes` decoded with `threads` workers: the 8-bit
     /// planes and, above 8 bits, the full samples.
     fn decode_with_threads(bytes: &[u8], threads: usize) -> Vec<Vec<Vec<u16>>> {
+        decode_with_split(bytes, threads, None)
+    }
+
+    /// Decoded with `threads`, or with `split` pictures at once and threads
+    /// for the rows of each.
+    fn decode_with_split(
+        bytes: &[u8],
+        threads: usize,
+        split: Option<(usize, usize)>,
+    ) -> Vec<Vec<Vec<u16>>> {
         let mut params = CodecParams::video(CodecId::Hevc, 0, 0);
         params.nal_length_size = 0;
         let mut decoder = HevcDecoder::open_with_threads(&params, threads).expect("open");
+        if let Some((frames, rows)) = split {
+            decoder.set_threads(frames, rows);
+        }
         let mut got = Vec::new();
         for (n, unit) in access_units(bytes).iter().enumerate() {
             let pictures = decoder
@@ -224,13 +237,22 @@ mod oracle {
         };
         let one = decode_with_threads(&bytes, 1);
         assert!(!one.is_empty(), "{}: no pictures", case.name);
-        for threads in [2, 5, 16] {
-            let many = decode_with_threads(&bytes, threads);
+        // The default splits, then rows of a picture on several threads.
+        let splits = [
+            (2, None),
+            (5, None),
+            (16, None),
+            (3, Some((1, 3))),
+            (4, Some((2, 2))),
+            (8, Some((2, 4))),
+        ];
+        for (threads, split) in splits {
+            let many = decode_with_split(&bytes, threads, split);
             assert_eq!(many.len(), one.len(), "{}: picture count", case.name);
             for (index, (a, b)) in one.iter().zip(&many).enumerate() {
                 assert!(
                     a == b,
-                    "{}: picture {index} differs with {threads} workers",
+                    "{}: picture {index} differs with {threads} workers ({split:?})",
                     case.name
                 );
             }
@@ -388,6 +410,17 @@ mod oracle {
         check(&Case {
             filter: "fade=in:0:8",
             ..case("weighted", &params)
+        });
+    }
+
+    /// Explicit weights on 10-bit samples, which the 16-bit kernels apply.
+    #[test]
+    fn weighted_prediction_ten() {
+        let params = format!("{BASE}:weightp=1:weightb=1:bframes=3");
+        check_threads(&Case {
+            bits: 10,
+            filter: "fade=in:0:8",
+            ..case("weighted main10", &params)
         });
     }
 

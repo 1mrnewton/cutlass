@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::JoinHandle;
@@ -51,7 +51,13 @@ pub struct Rows {
 
 struct RowGate {
     height: u32,
-    through: Mutex<Option<u32>>,
+    /// One past the last row reported, 0 before the first.
+    through: AtomicU32,
+    /// Workers blocked in [`Rows::wait`] or about to be. A report takes
+    /// the lock and wakes them only when there are some, so the usual
+    /// report and the usual wait touch no lock.
+    waiters: AtomicU32,
+    lock: Mutex<()>,
     ready: Condvar,
 }
 
@@ -216,7 +222,9 @@ impl Rows {
         Self {
             inner: Arc::new(RowGate {
                 height,
-                through: Mutex::new(None),
+                through: AtomicU32::new(0),
+                waiters: AtomicU32::new(0),
+                lock: Mutex::new(()),
                 ready: Condvar::new(),
             }),
         }
@@ -227,17 +235,16 @@ impl Rows {
         let Some(target) = self.inner.target(row) else {
             return;
         };
-        let mut through = lock(&self.inner.through);
-        let advanced = match *through {
-            Some(done) if done >= target => false,
-            _ => {
-                *through = Some(target);
-                true
-            }
-        };
-        drop(through);
-        if advanced {
-            self.inner.ready.notify_all();
+        let gate = &*self.inner;
+        // The mark goes up before the waiters are counted, and a waiter is
+        // counted before it looks at the mark again under the lock: one of
+        // the two sees the other.
+        if gate.through.fetch_max(target + 1, Ordering::SeqCst) > target {
+            return;
+        }
+        if gate.waiters.load(Ordering::SeqCst) > 0 {
+            drop(lock(&gate.lock));
+            gate.ready.notify_all();
         }
     }
 
@@ -249,13 +256,20 @@ impl Rows {
         let Some(target) = self.inner.target(row) else {
             return;
         };
-        let mut through = lock(&self.inner.through);
-        while through.is_none_or(|done| done < target) {
-            through = match self.inner.ready.wait(through) {
+        let gate = &*self.inner;
+        if gate.through.load(Ordering::Acquire) > target {
+            return;
+        }
+        gate.waiters.fetch_add(1, Ordering::SeqCst);
+        let mut held = lock(&gate.lock);
+        while gate.through.load(Ordering::SeqCst) <= target {
+            held = match gate.ready.wait(held) {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
         }
+        drop(held);
+        gate.waiters.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -418,6 +432,31 @@ mod tests {
         rows.wait(1);
         rows.report_through(0);
         rows.wait(1);
+    }
+
+    #[test]
+    fn waiters_wake_for_every_report() {
+        // Rows reported one at a time while three threads wait for each in
+        // turn: a lost wake-up hangs here.
+        for _ in 0..20 {
+            let rows = Rows::new(2000);
+            std::thread::scope(|scope| {
+                for _ in 0..3 {
+                    let rows = rows.clone();
+                    scope.spawn(move || {
+                        for row in 0..2000 {
+                            rows.wait(row);
+                        }
+                    });
+                }
+                for row in 0..2000 {
+                    rows.report_through(row);
+                    if row % 64 == 0 {
+                        std::thread::yield_now();
+                    }
+                }
+            });
+        }
     }
 
     #[test]

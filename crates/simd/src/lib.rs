@@ -24,7 +24,9 @@
 mod neon;
 
 pub mod av1;
+pub mod hevc;
 pub mod shared_rows;
+pub mod wide;
 
 /// Whether this build has vector kernels. Without them every entry runs
 /// its scalar twin, and a caller with its own fast path may prefer that.

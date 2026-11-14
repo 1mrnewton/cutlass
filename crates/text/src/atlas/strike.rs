@@ -1,4 +1,5 @@
-//! A PNG or JPEG picture from a color strike, decoded to premultiplied RGBA.
+//! A PNG, JPEG or TIFF picture from a color strike, decoded to premultiplied
+//! RGBA.
 //!
 //! The samples are read as sRGB whatever gamma or profile the picture
 //! names: the fonts that store pictures store them in sRGB. A picture is
@@ -15,6 +16,8 @@ use cutlass_png::PngDecoder;
 
 use crate::TextError;
 
+mod tiff;
+
 /// Most bytes one encoded picture may have. A picture as large as the
 /// atlas holds, stored with no compression at 16 bits, is an eighth of this.
 const MAX_PICTURE_BYTES: usize = 4 * 1024 * 1024;
@@ -25,6 +28,7 @@ pub(super) enum Stored {
     Png,
     /// No alpha: every pixel covers its square.
     Jpeg,
+    Tiff,
 }
 
 /// Decode `picture`, whose header declares `width` by `height`, to
@@ -43,14 +47,19 @@ pub(super) fn decode(
     if picture.len() > MAX_PICTURE_BYTES {
         return Err(TextError::Limit);
     }
+    if stored == Stored::Tiff {
+        return tiff::decode(&picture, width, height);
+    }
     let packet = Packet::video(picture, 0, 0, 0, true);
     let pictures = match stored {
         Stored::Png => PngDecoder::open(&CodecParams::video(CodecId::Png, width, height))
             .map_err(refusal)?
             .decode_picture(&packet),
-        Stored::Jpeg => JpegDecoder::open(&CodecParams::video(CodecId::Jpeg, width, height))
-            .map_err(refusal)?
-            .decode_picture(&packet),
+        Stored::Jpeg | Stored::Tiff => {
+            JpegDecoder::open(&CodecParams::video(CodecId::Jpeg, width, height))
+                .map_err(refusal)?
+                .decode_picture(&packet)
+        }
     }
     .map_err(refusal)?;
     let Some(picture) = pictures.into_iter().next() else {

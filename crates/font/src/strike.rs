@@ -15,6 +15,8 @@ const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
 /// Most segments read before a JPEG picture's frame header: tables,
 /// application data and comments come first, a few of each.
 const MAX_JPEG_SEGMENTS: usize = 64;
+/// Most fields read from a TIFF picture's directory for its size.
+const MAX_TIFF_FIELDS: usize = 512;
 
 /// Pixels for one glyph in one strike.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,6 +48,10 @@ pub enum BitmapPixels {
     /// glyph's `width` and `height` are the size its frame header declares;
     /// the bytes after that header are not checked. It has no alpha.
     Jpeg(Vec<u8>),
+    /// One TIFF picture as the font stores it, which `sbix` allows. The
+    /// glyph's `width` and `height` are the size its first directory
+    /// declares; nothing else in it is checked.
+    Tiff(Vec<u8>),
 }
 
 #[derive(Clone)]
@@ -159,6 +165,7 @@ enum Data<'a> {
     },
     Png(&'a [u8]),
     Jpeg(&'a [u8]),
+    Tiff(&'a [u8]),
 }
 
 impl Found<'_> {
@@ -184,6 +191,7 @@ impl Found<'_> {
             )?,
             Data::Png(bytes) => BitmapPixels::Png(bytes.to_vec()),
             Data::Jpeg(bytes) => BitmapPixels::Jpeg(bytes.to_vec()),
+            Data::Tiff(bytes) => BitmapPixels::Tiff(bytes.to_vec()),
         };
         Ok(BitmapGlyph {
             width: self.width,
@@ -697,6 +705,65 @@ fn jpeg_size(picture: &[u8]) -> Result<(u32, u32), FontError> {
     Err(FontError::BadTable)
 }
 
+/// The size the first directory of a TIFF picture declares.
+///
+/// The file is read in the byte order it names. The width and the height
+/// are fields 256 and 257, each one number of 16 or 32 bits.
+fn tiff_size(picture: &[u8]) -> Result<(u32, u32), FontError> {
+    let head = bytes_at(picture, 0, 8)?;
+    let big = match &head[..4] {
+        b"MM\0*" => true,
+        b"II*\0" => false,
+        _ => return Err(FontError::BadTable),
+    };
+    let short = |bytes: &[u8]| -> u32 {
+        let pair = [bytes[0], bytes[1]];
+        u32::from(if big {
+            u16::from_be_bytes(pair)
+        } else {
+            u16::from_le_bytes(pair)
+        })
+    };
+    let long = |bytes: &[u8]| -> u32 {
+        let four = [bytes[0], bytes[1], bytes[2], bytes[3]];
+        if big {
+            u32::from_be_bytes(four)
+        } else {
+            u32::from_le_bytes(four)
+        }
+    };
+    let directory = usize::try_from(long(&head[4..])).map_err(|_| FontError::BadTable)?;
+    let fields = usize::try_from(short(bytes_at(picture, directory, 2)?))
+        .map_err(|_| FontError::BadTable)?
+        .min(MAX_TIFF_FIELDS);
+    let (mut width, mut height) = (None, None);
+    for index in 0..fields {
+        let at = directory
+            .checked_add(2 + index * 12)
+            .ok_or(FontError::BadTable)?;
+        let field = bytes_at(picture, at, 12)?;
+        let tag = short(field);
+        if tag != 256 && tag != 257 {
+            continue;
+        }
+        // One number: of 16 bits (kind 3) or of 32 (kind 4).
+        let value = match (short(&field[2..]), long(&field[4..])) {
+            (3, 1) => short(&field[8..]),
+            (4, 1) => long(&field[8..]),
+            _ => return Err(FontError::BadTable),
+        };
+        if tag == 256 {
+            width = Some(value);
+        } else {
+            height = Some(value);
+        }
+    }
+    match (width, height) {
+        (Some(width), Some(height)) if width > 0 && height > 0 => Ok((width, height)),
+        _ => Err(FontError::BadTable),
+    }
+}
+
 fn metrics_at(data: &[u8], offset: usize, big: bool) -> Result<(Metrics, usize), FontError> {
     let need = if big { 8 } else { 5 };
     let bytes = bytes_at(data, offset, need)?;
@@ -878,11 +945,12 @@ impl<'a> SbixStrike<'a> {
             return self.glyph(next, mirrored, depth + 1);
         }
         let picture = &record[8..];
-        // A picture stored as TIFF or PDF, which the table also allows and
-        // no face found holds, is not read.
+        // A picture stored as PDF, which Apple's account of the table
+        // also names, is not read: Core Text draws nothing for one.
         let ((width, height), data) = match kind {
             b"png " => (png_size(picture)?, Data::Png(picture)),
             b"jpg " => (jpeg_size(picture)?, Data::Jpeg(picture)),
+            b"tiff" => (tiff_size(picture)?, Data::Tiff(picture)),
             _ => return Err(FontError::Unsupported),
         };
         // The origin offsets place the picture's left and bottom edges.
@@ -982,7 +1050,7 @@ mod tests {
             read(&dupe).and_then(|font| font.bitmap(1)),
             Err(FontError::BadTable)
         ));
-        let other = sbix_font(b"tiff");
+        let other = sbix_font(b"pdf ");
         assert!(matches!(
             read(&other).and_then(|font| font.bitmap(1)),
             Err(FontError::Unsupported)
@@ -1020,7 +1088,7 @@ mod tests {
         // The letter has an outline and no picture.
         assert!(font.color_bitmap(1, 256).expect("letter").is_none());
         assert!(font.bitmap(1).expect("letter").is_none());
-        assert_eq!(font.color_bitmap(20, 256), Err(FontError::UnknownGlyph));
+        assert_eq!(font.color_bitmap(23, 256), Err(FontError::UnknownGlyph));
     }
 
     #[test]
@@ -1111,7 +1179,67 @@ mod tests {
     }
 
     #[test]
-    fn a_graphic_that_is_not_png_or_jpeg_is_refused() {
+    fn an_sbix_tiff_picture_is_handed_back_encoded_with_its_size() {
+        let font = read(SBIX).expect("sbix");
+        let glyph = font.color_bitmap(20, 256).expect("glyph").expect("picture");
+        assert_eq!((glyph.width, glyph.height, glyph.ppem), (2, 2, 2));
+        assert_eq!((glyph.bearing_x, glyph.bearing_y), (0, 2));
+        let BitmapPixels::Tiff(bytes) = &glyph.pixels else {
+            panic!("not a tiff: {:?}", glyph.pixels);
+        };
+        assert_eq!(bytes[..4], *b"II*\0");
+        // The size a directory declares is reported and not believed here.
+        let bomb = font.color_bitmap(21, 256).expect("glyph").expect("bomb");
+        assert_eq!((bomb.width, bomb.height), (60_000, 60_000));
+        // A picture whose samples lie past its end still has its size.
+        let short = font.color_bitmap(22, 256).expect("glyph").expect("short");
+        assert_eq!((short.width, short.height), (2, 2));
+    }
+
+    #[test]
+    fn the_size_of_a_tiff_picture_is_read_from_its_directory_or_refused() {
+        use super::tiff_size;
+        const PICTURE: &[u8] = include_bytes!("../fixtures/picture.tiff");
+        assert_eq!(tiff_size(PICTURE), Ok((2, 2)));
+        // Every cut of the bytes is the size or an error, and no panic.
+        for end in 0..PICTURE.len() {
+            if let Ok(size) = tiff_size(&PICTURE[..end]) {
+                assert_eq!(size, (2, 2), "{end}");
+            }
+        }
+        assert!(tiff_size(&PICTURE[..40]).is_err());
+        // The same picture with its numbers the other way round.
+        let mut big = b"MM\0*\0\0\0\x08\0\x02".to_vec();
+        big.extend([1, 0, 0, 3, 0, 0, 0, 1, 0, 7, 0, 0]);
+        big.extend([1, 1, 0, 4, 0, 0, 0, 1, 0, 0, 0, 9]);
+        assert_eq!(tiff_size(&big), Ok((7, 9)));
+        // Not a TIFF picture; a directory cut short; one with no height; a
+        // size of nothing; a size that is not one number.
+        assert_eq!(tiff_size(b"%PDF-1.4 abcdef"), Err(FontError::BadTable));
+        assert_eq!(tiff_size(&big[..22]), Err(FontError::Truncated));
+        let mut one = big.clone();
+        one[9] = 1;
+        assert_eq!(tiff_size(&one), Err(FontError::BadTable));
+        let mut empty = big.clone();
+        empty[19] = 0;
+        assert_eq!(tiff_size(&empty), Err(FontError::BadTable));
+        let mut many = big.clone();
+        many[17] = 2;
+        assert_eq!(tiff_size(&many), Err(FontError::BadTable));
+        // A directory that points at itself or past the end.
+        let mut far = big.clone();
+        far[4..8].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(tiff_size(&far).is_err());
+        // A directory of the most fields there can be, none of them a size.
+        let mut long = b"II*\0\x08\0\0\0\xFF\xFF".to_vec();
+        long.resize(10 + 65_535 * 12, 0);
+        let started = std::time::Instant::now();
+        assert_eq!(tiff_size(&long), Err(FontError::BadTable));
+        assert!(started.elapsed() < std::time::Duration::from_millis(50));
+    }
+
+    #[test]
+    fn a_graphic_that_is_not_a_picture_read_here_is_refused() {
         let font = read(SBIX).expect("sbix");
         assert_eq!(font.color_bitmap(13, 256), Err(FontError::Unsupported));
         assert_eq!(font.bitmap(13), Err(FontError::Unsupported));

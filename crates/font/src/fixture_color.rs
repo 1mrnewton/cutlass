@@ -199,6 +199,30 @@ fn jpeg_bomb() -> Vec<u8> {
     out
 }
 
+/// The same four colors FFmpeg wrote as a TIFF picture with nothing
+/// packed: low byte first, its samples before its directory.
+const TIFF_PICTURE: &[u8] = include_bytes!("../fixtures/picture.tiff");
+
+/// [`TIFF_PICTURE`] with two of its directory's fields given new numbers:
+/// 256 and 257 are its width and height, 273 where its samples start.
+fn tiff_with(first: u16, first_value: u32, second: u16, second_value: u32) -> Vec<u8> {
+    let mut out = TIFF_PICTURE.to_vec();
+    let directory = u32::from_le_bytes([out[4], out[5], out[6], out[7]]) as usize;
+    let fields = usize::from(u16::from_le_bytes([out[directory], out[directory + 1]]));
+    for index in 0..fields {
+        let at = directory + 2 + index * 12;
+        let tag = u16::from_le_bytes([out[at], out[at + 1]]);
+        for (wanted, value) in [(first, first_value), (second, second_value)] {
+            if tag == wanted {
+                // Written as one number of 32 bits.
+                out[at + 2..at + 4].copy_from_slice(&4_u16.to_le_bytes());
+                out[at + 8..at + 12].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+    out
+}
+
 fn truncated_picture() -> Vec<u8> {
     let mut out = rgba_picture();
     out.truncate(out.len() - 20);
@@ -260,24 +284,26 @@ fn private(glyph: u16) -> char {
 /// A face with `glyf` and `sbix`, as a color emoji face has: every picture
 /// glyph has an empty outline.
 ///
-/// Glyph 1 is `A`, a box with no picture. Glyphs 2 to 19 have a two by two
+/// Glyph 1 is `A`, a box with no picture. Glyphs 2 to 22 have a two by two
 /// picture in the strike of 2 pixels to the em: 2 color with alpha (it is
 /// also U+1F600), 3 a palette with alpha, 4 gray with a clear value, 5
 /// 16-bit color with alpha, 6 gray with alpha, 7 glyph 2 flipped, 8 glyph
 /// 2 again, 9 a header that declares a huge picture, 10 a picture cut
 /// short, 11 a picture with a bad check value, 12 color with no alpha, 13 a
-/// TIFF record, 14 glyph 2's picture set 3 right and 1 down, 15 one-bit
+/// PDF record, 14 glyph 2's picture set 3 right and 1 down, 15 one-bit
 /// gray, 16 a JPEG picture, 17 a JPEG picture whose frame header declares
-/// a huge one, 18 a JPEG picture cut short, 19 glyph 16 flipped. Glyph 2
-/// also has a one-pixel picture in a strike of 1 pixel to the em, and a
-/// header for a 600-pixel picture in a strike of 600, where glyph 15 has a
-/// TIFF record.
+/// a huge one, 18 a JPEG picture cut short, 19 glyph 16 flipped, 20 a TIFF
+/// picture, 21 a TIFF picture whose directory declares a huge one, 22 a
+/// TIFF picture whose samples are said to lie past its end. Glyph 2 also
+/// has a one-pixel picture in a strike of 1 pixel to the em, and a header
+/// for a 600-pixel picture in a strike of 600, where glyph 15 has a PDF
+/// record.
 pub(crate) fn sbix() -> Vec<u8> {
-    let mut glyphs = vec![blank(); 20];
+    let mut glyphs = vec![blank(); 23];
     glyphs[0] = boxed(500);
     glyphs[1] = boxed(600);
     let mut map = vec![('A', 1)];
-    map.extend((3..20).map(|glyph| (private(glyph), glyph)));
+    map.extend((3..23).map(|glyph| (private(glyph), glyph)));
     map.push(('\u{1F600}', 2));
     let main: Records = vec![
         (2, record((0, 0), b"png ", &rgba_picture())),
@@ -291,13 +317,22 @@ pub(crate) fn sbix() -> Vec<u8> {
         (10, record((0, 0), b"png ", &truncated_picture())),
         (11, record((0, 0), b"png ", &bad_crc_picture())),
         (12, record((0, 0), b"png ", &opaque_picture())),
-        (13, record((0, 0), b"tiff", b"II*\0")),
+        (13, record((0, 0), b"pdf ", b"%PDF")),
         (14, record((3, -1), b"png ", &rgba_picture())),
         (15, record((0, 0), b"png ", &mono_picture())),
         (16, record((0, 0), b"jpg ", JPEG_PICTURE)),
         (17, record((0, 0), b"jpg ", &jpeg_bomb())),
         (18, record((0, 0), b"jpg ", &JPEG_PICTURE[..200])),
         (19, record((0, 0), b"flip", &[0, 16])),
+        (20, record((0, 0), b"tiff", TIFF_PICTURE)),
+        (
+            21,
+            record((0, 0), b"tiff", &tiff_with(256, 60_000, 257, 60_000)),
+        ),
+        (
+            22,
+            record((0, 0), b"tiff", &tiff_with(273, 60_000, 273, 60_000)),
+        ),
     ];
     let small: Records = vec![(
         2,
@@ -309,9 +344,9 @@ pub(crate) fn sbix() -> Vec<u8> {
     )];
     let large: Records = vec![
         (2, record((0, 0), b"png ", &header_only(600))),
-        (15, record((0, 0), b"tiff", b"II*\0")),
+        (15, record((0, 0), b"pdf ", b"%PDF")),
     ];
-    let table = sbix_table(20, &[(1, small), (2, main), (600, large)]);
+    let table = sbix_table(23, &[(1, small), (2, main), (600, large)]);
     font(&glyphs, &map, &[(b"sbix", table)])
 }
 

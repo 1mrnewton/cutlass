@@ -273,7 +273,7 @@ fn paint_bitmap(font: &Font<'_>, glyph_id: u16) -> Result<GlyphImage, TextError>
     bitmap_image(font, bitmap)
 }
 
-/// One strike bitmap as an atlas image. A PNG or JPEG picture is decoded
+/// One strike bitmap as an atlas image. A PNG, JPEG or TIFF picture is decoded
 /// here; one larger than the atlas cell is refused before it is.
 fn bitmap_image(font: &Font<'_>, bitmap: BitmapGlyph) -> Result<GlyphImage, TextError> {
     let ppem = f32::from(bitmap.ppem);
@@ -295,6 +295,7 @@ fn bitmap_image(font: &Font<'_>, bitmap: BitmapGlyph) -> Result<GlyphImage, Text
         .ok_or(TextError::Limit)?;
     let stored = match bitmap.pixels {
         BitmapPixels::Jpeg(_) => strike::Stored::Jpeg,
+        BitmapPixels::Tiff(_) => strike::Stored::Tiff,
         _ => strike::Stored::Png,
     };
     let (kind, sdf, mut color) = match bitmap.pixels {
@@ -310,7 +311,7 @@ fn bitmap_image(font: &Font<'_>, bitmap: BitmapGlyph) -> Result<GlyphImage, Text
             }
             (GlyphKind::Color, Vec::new(), bytes)
         }
-        BitmapPixels::Png(bytes) | BitmapPixels::Jpeg(bytes) => {
+        BitmapPixels::Png(bytes) | BitmapPixels::Jpeg(bytes) | BitmapPixels::Tiff(bytes) => {
             let decoded = strike::decode(stored, bytes, bitmap.width, bitmap.height, edge)?;
             if decoded.len() != rgba {
                 return Err(TextError::Limit);
@@ -1388,6 +1389,36 @@ mod tests {
     }
 
     #[test]
+    fn a_tiff_picture_becomes_color() {
+        let font = read(SBIX).expect("sbix");
+        let mut atlas = Atlas::new();
+        // Red, green, blue and white, across from the top left and then
+        // down, exactly: nothing is lost in a TIFF picture. Core Text
+        // draws this glyph in the same four colors.
+        assert_eq!(
+            color_of(&mut atlas, &font, 20),
+            [
+                220, 40, 30, 255, 40, 200, 60, 255, 30, 60, 210, 255, 240, 240, 240, 255
+            ]
+        );
+        assert_eq!(atlas.paints(), 1);
+        // A directory that declares a huge picture is refused before
+        // anything is read, and samples said to lie past the end of the
+        // picture are an error.
+        let started = std::time::Instant::now();
+        assert!(matches!(atlas.glyph(&font, 21), Err(TextError::Limit)));
+        assert!(matches!(
+            atlas.glyph(&font, 22),
+            Err(TextError::Font(FontError::Truncated))
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        assert_eq!(atlas.paints(), 1);
+        for glyph in [21, 22] {
+            assert!(atlas.image(glyph).is_none());
+        }
+    }
+
+    #[test]
     fn every_png_color_type_becomes_premultiplied_color() {
         let font = read(SBIX).expect("sbix");
         let mut atlas = Atlas::new();
@@ -1482,7 +1513,7 @@ mod tests {
             atlas.glyph(&font, 11),
             Err(TextError::Font(FontError::BadTable))
         ));
-        // A graphic that is neither a PNG nor a JPEG picture.
+        // A graphic that is not a picture read here: a PDF record.
         assert!(matches!(
             atlas.glyph(&font, 13),
             Err(TextError::Font(FontError::Unsupported))

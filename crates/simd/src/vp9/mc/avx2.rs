@@ -249,6 +249,17 @@ fn sized<const W: usize, const R: usize>(b: Block<'_>) {
     };
     let zero = core::arch::x86_64::_mm_setzero_si128();
     match (fx, fy) {
+        (None, None) if !avg => {
+            for r in 0..h {
+                let (Some(row), Some(d)) = (
+                    row_of::<W>(src, at + r * ss),
+                    dst.get_mut(r * ds..).and_then(|t| t.first_chunk_mut::<W>()),
+                ) else {
+                    return;
+                };
+                *d = *row;
+            }
+        }
         (None, None) => {
             for r in 0..h {
                 let Some(row) = row_of::<R>(src, at + r * ss) else { return };

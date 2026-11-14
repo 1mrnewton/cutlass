@@ -189,6 +189,9 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
         let intra = b.refs[0] == INTRA_FRAME;
         if !intra {
             self.predict_inter(b);
+            if !b.coded {
+                return;
+            }
         }
         let lossless = self.c.lossless;
         for plane in 0..3 {
@@ -399,13 +402,21 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
             if emu.len() < ew * eh + 32 {
                 emu.resize(ew * eh + 32, P::default());
             }
+            // Columns of the window inside the picture, copied whole; the
+            // rest repeat the edge samples.
+            let x0 = bx - 3;
+            let lo = (-x0).clamp(0, ew as i32) as usize;
+            let hi = (rw - x0).clamp(lo as i32, ew as i32) as usize;
             for j in 0..eh {
                 let yy = (by - 3 + j as i32).clamp(0, rh - 1) as usize;
-                let row = &data[yy * stride..];
-                for i in 0..ew {
-                    let xx = (bx - 3 + i as i32).clamp(0, rw - 1) as usize;
-                    emu[j * ew + i] = row[xx];
+                let row = &data[yy * stride..yy * stride + rw as usize];
+                let out = &mut emu[j * ew..j * ew + ew];
+                if hi > lo {
+                    let from = (x0 + lo as i32) as usize;
+                    out[lo..hi].copy_from_slice(&row[from..from + hi - lo]);
                 }
+                out[..lo].fill(row[0]);
+                out[hi..].fill(row[rw as usize - 1]);
             }
             mc::predict(dst, ds, emu, 3 * ew + 3, ew, (w, h), (mx, my), filter, max, avg, &mut self.s.mc);
         }

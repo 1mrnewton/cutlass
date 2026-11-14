@@ -44,6 +44,8 @@ TRAINER = "cutlass-h264-pgo"
 # A function is kept when its symbol names either crate, as its own or as
 # the crate that instantiated it.
 KEEP = "cutlass_h264"
+# Terminal colour codes, which Cargo writes when told to colour always.
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def main(args: list[str]) -> int:
@@ -156,8 +158,10 @@ def cargo(args: list[str], rustflags: str) -> str | None:
     meta = None
     assert proc.stderr is not None
     for line in proc.stderr:
-        if line.lstrip().startswith("Running `"):
-            found = re.search(r"--crate-name cutlass_h264 .*?-C metadata=(\w+)", line)
+        # CI sets CARGO_TERM_COLOR=always, which colours the word Running.
+        plain = ANSI.sub("", line)
+        if plain.lstrip().startswith("Running `"):
+            found = re.search(r"--crate-name cutlass_h264 .*?-C metadata=(\w+)", plain)
             if found:
                 meta = found.group(1)
             continue

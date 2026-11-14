@@ -97,6 +97,9 @@ pub struct Decoder {
     spare8: Spare<u8>,
     spare16: Spare<u16>,
     bufs: ParseBufs,
+    /// Syntax buffers the workers gave back, for the frames to come: each
+    /// parse takes one, rather than growing new ones from nothing.
+    reuse: Vec<Reuse>,
     /// Frames whose segmentation map was coded relative to the previous map.
     #[cfg(test)]
     temporal_frames: u32,
@@ -112,6 +115,7 @@ impl Clone for Decoder {
             spare8: Spare::default(),
             spare16: Spare::default(),
             bufs: ParseBufs::default(),
+            reuse: Vec::new(),
             #[cfg(test)]
             temporal_frames: self.temporal_frames,
         }
@@ -128,6 +132,7 @@ impl Decoder {
             spare8: Spare::default(),
             spare16: Spare::default(),
             bufs: ParseBufs::default(),
+            reuse: Vec::new(),
             #[cfg(test)]
             temporal_frames: 0,
         }
@@ -206,6 +211,13 @@ impl Decoder {
     ) -> Result<Option<Held>, CodecError> {
         if let Some(rt) = rt {
             while let Ok(back) = rt.back.try_recv() {
+                if self.reuse.len() < 8 {
+                    self.reuse.push(back);
+                }
+            }
+            if self.bufs.tiles.is_empty()
+                && let Some(back) = self.reuse.pop()
+            {
                 self.bufs.tiles = back.tiles;
                 self.bufs.masks = back.masks;
                 self.bufs.grid = back.grid;

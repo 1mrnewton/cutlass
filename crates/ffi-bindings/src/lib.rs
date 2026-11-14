@@ -62,6 +62,8 @@ pub struct Clip {
     pub volume: f64,
     /// Constant speed: 2 plays twice as fast.
     pub speed: f64,
+    /// Where its beats land on the timeline, earliest first.
+    pub beats_us: Vec<i64>,
 }
 
 /// What a row holds.
@@ -80,10 +82,78 @@ pub enum LaneKind {
 /// One timeline row, top first.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct Lane {
+    pub id: String,
     pub kind: LaneKind,
     pub main: bool,
     pub locked: bool,
+    /// Its clips are not heard.
+    pub muted: bool,
     pub clips: Vec<Clip>,
+}
+
+/// How a selected clip stands, and which clip tools can change it.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct ClipState {
+    /// A picture that mirrors, turns, crops and fades out of sight.
+    pub picture: bool,
+    pub mirrored: bool,
+    /// Degrees, as stored.
+    pub rotation: f64,
+    pub can_crop: bool,
+    /// The crop ratio kept: empty for the whole frame, one of
+    /// [`crop_ratios`], or `custom`.
+    pub crop: String,
+    /// 1 solid, 0 clear.
+    pub opacity: f64,
+    /// A picture or a sound, which plays backward and fades.
+    pub plays: bool,
+    pub reversed: bool,
+    pub fade_in_us: i64,
+    pub fade_out_us: i64,
+    pub can_freeze: bool,
+    pub can_extract: bool,
+    /// Its sound was extracted to a clip of its own.
+    pub extracted: bool,
+    pub can_beat: bool,
+    /// A beat sits on the clip at the time asked about.
+    pub beat_here: bool,
+    pub on_main: bool,
+    /// A picture on another row, which can move to main.
+    pub can_splice: bool,
+}
+
+impl From<cutlass_ffi::PhoneClipState> for ClipState {
+    fn from(state: cutlass_ffi::PhoneClipState) -> Self {
+        Self {
+            picture: state.picture,
+            mirrored: state.mirrored,
+            rotation: state.rotation,
+            can_crop: state.can_crop,
+            crop: state.crop,
+            opacity: state.opacity,
+            plays: state.plays,
+            reversed: state.reversed,
+            fade_in_us: state.fade_in.0,
+            fade_out_us: state.fade_out.0,
+            can_freeze: state.can_freeze,
+            can_extract: state.can_extract,
+            extracted: state.extracted,
+            can_beat: state.can_beat,
+            beat_here: state.beat_here,
+            on_main: state.on_main,
+            can_splice: state.can_splice,
+        }
+    }
+}
+
+/// The ratios the Crop panel offers after the whole frame, as `w:h`.
+#[uniffi::export]
+#[must_use]
+pub fn crop_ratios() -> Vec<String> {
+    cutlass_ffi::CROP_RATIOS
+        .iter()
+        .map(|ratio| (*ratio).to_owned())
+        .collect()
 }
 
 /// One ruler tick. A major tick carries its label.
@@ -146,6 +216,47 @@ pub fn export_sides() -> Vec<u32> {
     cutlass_ffi::PHONE_EXPORT_SIDES.to_vec()
 }
 
+/// The frame rates an export may be, beside 0 for the project's own.
+#[uniffi::export]
+#[must_use]
+pub fn export_rates() -> Vec<u32> {
+    cutlass_ffi::PHONE_EXPORT_RATES.to_vec()
+}
+
+/// How many bits a second an export's picture gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ExportQuality {
+    /// Half the recommended: a smaller file.
+    Lower,
+    /// About what the phone's camera records at that size.
+    Recommended,
+    /// Double the recommended.
+    Higher,
+}
+
+/// How an export is made: `short_side` one of [`export_sides`],
+/// `frame_rate` one of [`export_rates`] or 0 for the project's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ExportOptions {
+    pub short_side: u32,
+    pub frame_rate: u32,
+    pub quality: ExportQuality,
+}
+
+impl From<ExportOptions> for cutlass_ffi::PhoneExportOptions {
+    fn from(options: ExportOptions) -> Self {
+        Self {
+            short_side: options.short_side,
+            frame_rate: options.frame_rate,
+            quality: match options.quality {
+                ExportQuality::Lower => cutlass_ffi::PhoneQuality::Lower,
+                ExportQuality::Recommended => cutlass_ffi::PhoneQuality::Recommended,
+                ExportQuality::Higher => cutlass_ffi::PhoneQuality::Higher,
+            },
+        }
+    }
+}
+
 /// The transport clock at `time_us`: whole seconds as `MM:SS`, or
 /// `HH:MM:SS` from an hour.
 #[uniffi::export]
@@ -166,6 +277,120 @@ pub fn effect_choices() -> Vec<EffectChoice> {
             preview: effect.preview,
         })
         .collect()
+}
+
+/// Every transition the app ships, in shelf order.
+#[uniffi::export]
+#[must_use]
+pub fn transition_choices() -> Vec<TransitionChoice> {
+    cutlass_ffi::phone_transitions()
+        .into_iter()
+        .map(|item| TransitionChoice {
+            id: item.id,
+            name: item.name,
+            category: item.category,
+            preview: item.preview,
+        })
+        .collect()
+}
+
+/// The transition shelf's tabs, in order.
+#[uniffi::export]
+#[must_use]
+pub fn transition_categories() -> Vec<String> {
+    cutlass_ffi::phone_transition_categories()
+}
+
+/// The filters that ship in the app, in picker order.
+#[uniffi::export]
+#[must_use]
+pub fn filter_choices() -> Vec<FilterChoice> {
+    cutlass_ffi::phone_filters()
+        .into_iter()
+        .map(|filter| FilterChoice {
+            id: filter.id,
+            name: filter.name,
+            category: filter.category,
+        })
+        .collect()
+}
+
+/// The filter `filter_id` over its own preview scene, `width` by `height`,
+/// for its picker tile. `None` for a filter the app does not ship.
+#[uniffi::export]
+#[must_use]
+pub fn filter_poster(filter_id: String, width: u32, height: u32) -> Option<Frame> {
+    let look = cutlass_ffi::bundled_look(&filter_id)?;
+    let (width, height) = (width.clamp(1, 512), height.clamp(1, 512));
+    Some(Frame {
+        width,
+        height,
+        rgba: cutlass_ffi::look_poster(look, width, height),
+    })
+}
+
+/// A sticker the shelf shows. `id` is what `add_sticker` takes.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct StickerChoice {
+    pub id: String,
+    pub name: String,
+    /// It plays round as an animation.
+    pub animated: bool,
+}
+
+/// Every sticker the app ships, in shelf order.
+#[uniffi::export]
+#[must_use]
+pub fn sticker_choices() -> Vec<StickerChoice> {
+    cutlass_ffi::phone_stickers()
+        .into_iter()
+        .map(|sticker| StickerChoice {
+            id: sticker.id,
+            name: sticker.name,
+            animated: sticker.animated,
+        })
+        .collect()
+}
+
+/// Sticker `sticker_id` `side` pixels square for its shelf tile; an
+/// animation shows its middle frame. `None` for a sticker not shipped.
+#[uniffi::export]
+#[must_use]
+pub fn sticker_poster(sticker_id: String, side: u32) -> Option<Frame> {
+    let picture = cutlass_ffi::sticker_poster(&sticker_id, side)?;
+    Some(Frame {
+        width: picture.width,
+        height: picture.height,
+        rgba: picture.rgba,
+    })
+}
+
+/// A shape the shelf shows. `id` is what `add_shape` takes; `name` is the
+/// shape's own, such as `Circle`, for the phone to draw its tile.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct ShapeChoice {
+    pub id: String,
+    pub name: String,
+}
+
+/// Every shape, in shelf order.
+#[uniffi::export]
+#[must_use]
+pub fn shape_choices() -> Vec<ShapeChoice> {
+    cutlass_ffi::phone_shapes()
+        .into_iter()
+        .map(|shape| ShapeChoice {
+            id: shape.id,
+            name: shape.name,
+        })
+        .collect()
+}
+
+/// A point on the canvas, in canvas pixels from the top left, y down.
+#[derive(Clone, Copy, Debug, uniffi::Record)]
+pub struct CanvasPoint {
+    pub x: f64,
+    pub y: f64,
 }
 
 /// One step of a timeline coast: points moved, and the speed after.
@@ -244,6 +469,11 @@ pub struct TextStyleRanges {
     pub background_round_start: f64,
     pub glow_strength_start: f64,
     pub glow_range_start: f64,
+    /// Fractions of the size; 0 is the normal gap.
+    pub letter_spacing_min: f64,
+    pub letter_spacing_max: f64,
+    pub line_spacing_min: f64,
+    pub line_spacing_max: f64,
 }
 
 /// See [`TextStyleRanges`].
@@ -263,6 +493,10 @@ pub fn text_style_ranges() -> TextStyleRanges {
         background_round_start: ranges.background_round_start,
         glow_strength_start: ranges.glow_strength_start,
         glow_range_start: ranges.glow_range_start,
+        letter_spacing_min: ranges.letter_spacing.0,
+        letter_spacing_max: ranges.letter_spacing.1,
+        line_spacing_min: ranges.line_spacing.0,
+        line_spacing_max: ranges.line_spacing.1,
     }
 }
 
@@ -488,6 +722,62 @@ pub struct EffectChoice {
     pub preview: String,
 }
 
+/// A transition the shelf shows. `id` is what `set_transition` takes;
+/// `preview` is the file name of its looping preview video in the app.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct TransitionChoice {
+    pub id: String,
+    pub name: String,
+    /// The shelf tab it sits under.
+    pub category: String,
+    pub preview: String,
+}
+
+/// A cut between two touching clips on the main row, and its transition.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Cut {
+    /// The clip before the cut, which the transition calls take.
+    pub outgoing_id: String,
+    pub at_us: i64,
+    /// The shelf id of its transition; none for a plain cut.
+    pub transition: Option<String>,
+    /// The transition's name; empty for a plain cut.
+    pub name: String,
+    /// How long it lasts and the range it can be set to; zero for a
+    /// plain cut.
+    pub duration_us: i64,
+    pub shortest_us: i64,
+    pub longest_us: i64,
+}
+
+/// A filter the picker shows. `id` is what the filter calls take.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct FilterChoice {
+    pub id: String,
+    pub name: String,
+    /// The picker tab it sits under.
+    pub category: String,
+}
+
+/// One adjust slider and where it stands. `key` is what `set_adjust`
+/// takes; `min` is -1, or 0 for a slider that only adds; the top is 1.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct AdjustSlider {
+    pub key: String,
+    pub label: String,
+    pub min: f64,
+    pub value: f64,
+}
+
+/// The filter a clip keeps: its filter layer, the filter, and how strong
+/// it is, 0 to 1.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct ClipFilter {
+    pub layer_id: String,
+    pub filter_id: String,
+    pub strength: f64,
+}
+
 /// What a text clip says, the face it says it in, and how it looks.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct TextInfo {
@@ -513,6 +803,15 @@ pub struct TextStyle {
     pub glow_color: String,
     pub glow_strength: f64,
     pub glow_range: f64,
+    /// Left, center or right (0 to 2), or a vertical column at the top,
+    /// middle or bottom (3 to 5).
+    pub alignment: i32,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    /// Fractions of the size; 0 is the normal gap.
+    pub letter_spacing: f64,
+    pub line_spacing: f64,
 }
 
 impl From<cutlass_ffi::PhoneTextStyle> for TextStyle {
@@ -531,7 +830,150 @@ impl From<cutlass_ffi::PhoneTextStyle> for TextStyle {
             glow_color: style.glow_color,
             glow_strength: style.glow_strength,
             glow_range: style.glow_range,
+            alignment: style.alignment,
+            bold: style.bold,
+            italic: style.italic,
+            underline: style.underline,
+            letter_spacing: style.letter_spacing,
+            line_spacing: style.line_spacing,
         }
+    }
+}
+
+/// How a shape looks. Widths, corners and distances are canvas pixels;
+/// opacities 0 to 1; colors `#RRGGBB`.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct ShapeStyle {
+    /// An open line: it has no fill and no corners.
+    pub line: bool,
+    /// Empty when it has no fill.
+    pub fill: String,
+    pub fill_opacity: f64,
+    /// The outline is off while its width is 0.
+    pub stroke: String,
+    pub stroke_width: f64,
+    pub stroke_opacity: f64,
+    /// Solid (0), dashed (1) or dotted (2).
+    pub stroke_style: i32,
+    pub corners: f64,
+    pub corners_max: f64,
+    /// The shadow is off while its opacity is 0.
+    pub shadow: String,
+    pub shadow_opacity: f64,
+    pub shadow_distance: f64,
+    /// Degrees.
+    pub shadow_angle: f64,
+}
+
+impl From<cutlass_ffi::PhoneShapeStyle> for ShapeStyle {
+    fn from(style: cutlass_ffi::PhoneShapeStyle) -> Self {
+        Self {
+            line: style.line,
+            fill: style.fill,
+            fill_opacity: style.fill_opacity,
+            stroke: style.stroke,
+            stroke_width: style.stroke_width,
+            stroke_opacity: style.stroke_opacity,
+            stroke_style: style.stroke_style,
+            corners: style.corners,
+            corners_max: style.corners_max,
+            shadow: style.shadow,
+            shadow_opacity: style.shadow_opacity,
+            shadow_distance: style.shadow_distance,
+            shadow_angle: style.shadow_angle,
+        }
+    }
+}
+
+/// One change to a shape's look. See [`ShapeStyle`] for the units.
+#[derive(Clone, Debug, PartialEq, uniffi::Enum)]
+pub enum ShapeStyleChange {
+    /// An empty color takes the fill off.
+    Fill {
+        color: String,
+        opacity: f64,
+    },
+    /// A width of 0 takes the outline off.
+    Stroke {
+        color: String,
+        width: f64,
+        opacity: f64,
+        style: i32,
+    },
+    Corners {
+        radius: f64,
+    },
+    /// An opacity of 0 takes the shadow off.
+    Shadow {
+        color: String,
+        distance: f64,
+        angle: f64,
+        opacity: f64,
+    },
+}
+
+impl From<ShapeStyleChange> for cutlass_ffi::ShapeStyleChange {
+    fn from(change: ShapeStyleChange) -> Self {
+        match change {
+            ShapeStyleChange::Fill { color, opacity } => Self::Fill { color, opacity },
+            ShapeStyleChange::Stroke {
+                color,
+                width,
+                opacity,
+                style,
+            } => Self::Stroke {
+                color,
+                width,
+                opacity,
+                style,
+            },
+            ShapeStyleChange::Corners { radius } => Self::Corners(radius),
+            ShapeStyleChange::Shadow {
+                color,
+                distance,
+                angle,
+                opacity,
+            } => Self::Shadow {
+                color,
+                distance,
+                angle,
+                opacity,
+            },
+        }
+    }
+}
+
+/// The shape panel's slider ends and where a part starts when switched on.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct ShapeStyleRanges {
+    pub fill_start: String,
+    pub stroke_max: f64,
+    pub stroke_start: f64,
+    pub shadow_distance_max: f64,
+    pub shadow_distance_start: f64,
+    pub shadow_angle_start: f64,
+    pub shadow_opacity_start: f64,
+    pub pen_min: f64,
+    pub pen_max: f64,
+    pub pen_start: f64,
+}
+
+/// See [`ShapeStyleRanges`].
+#[uniffi::export]
+#[must_use]
+pub fn shape_style_ranges() -> ShapeStyleRanges {
+    let ranges = cutlass_ffi::SHAPE_STYLE_RANGES;
+    ShapeStyleRanges {
+        fill_start: ranges.fill_start.to_owned(),
+        stroke_max: ranges.stroke_max,
+        stroke_start: ranges.stroke_start,
+        shadow_distance_max: ranges.shadow_distance_max,
+        shadow_distance_start: ranges.shadow_start.0,
+        shadow_angle_start: ranges.shadow_start.1,
+        shadow_opacity_start: ranges.shadow_start.2,
+        pen_min: ranges.pen.0,
+        pen_max: ranges.pen.1,
+        pen_start: ranges.pen.2,
     }
 }
 
@@ -562,6 +1004,20 @@ pub enum TextStyleChange {
         color: String,
         strength: f64,
         range: f64,
+    },
+    Align {
+        alignment: i32,
+    },
+    Pattern {
+        bold: bool,
+        italic: bool,
+        underline: bool,
+    },
+    LetterSpacing {
+        spacing: f64,
+    },
+    LineSpacing {
+        spacing: f64,
     },
 }
 
@@ -598,6 +1054,18 @@ impl From<TextStyleChange> for cutlass_ffi::TextStyleChange {
                 strength,
                 range,
             },
+            TextStyleChange::Align { alignment } => Self::Align(alignment),
+            TextStyleChange::Pattern {
+                bold,
+                italic,
+                underline,
+            } => Self::Pattern {
+                bold,
+                italic,
+                underline,
+            },
+            TextStyleChange::LetterSpacing { spacing } => Self::LetterSpacing(spacing),
+            TextStyleChange::LineSpacing { spacing } => Self::LineSpacing(spacing),
         }
     }
 }
@@ -610,7 +1078,10 @@ pub enum ToolBar {
     OverlayClip,
     AudioClip,
     TextClip,
+    FilterClip,
+    AdjustClip,
     OtherClip,
+    ShapeClip,
     Audio,
     Text,
     Effects,
@@ -645,6 +1116,7 @@ pub enum ToolKind {
     Freeze,
     ExtractAudio,
     Fade,
+    Opacity,
     Beats,
     Unlink,
     Splice,
@@ -655,6 +1127,7 @@ pub enum ToolKind {
     EditText,
     Draw,
     VideoEffects,
+    ShapeStyle,
 }
 
 /// A tool as a bar shows it. `ready` says it works on the phone today;
@@ -690,7 +1163,10 @@ fn bar_in(bar: ToolBar) -> cutlass_ffi::Bar {
         ToolBar::OverlayClip => Bar::OverlayClip,
         ToolBar::AudioClip => Bar::AudioClip,
         ToolBar::TextClip => Bar::TextClip,
+        ToolBar::FilterClip => Bar::FilterClip,
+        ToolBar::AdjustClip => Bar::AdjustClip,
         ToolBar::OtherClip => Bar::OtherClip,
+        ToolBar::ShapeClip => Bar::ShapeClip,
         ToolBar::Audio => Bar::Audio,
         ToolBar::Text => Bar::Text,
         ToolBar::Effects => Bar::Effects,
@@ -706,7 +1182,10 @@ fn bar_out(bar: cutlass_ffi::Bar) -> ToolBar {
         Bar::OverlayClip => ToolBar::OverlayClip,
         Bar::AudioClip => ToolBar::AudioClip,
         Bar::TextClip => ToolBar::TextClip,
+        Bar::FilterClip => ToolBar::FilterClip,
+        Bar::AdjustClip => ToolBar::AdjustClip,
         Bar::OtherClip => ToolBar::OtherClip,
+        Bar::ShapeClip => ToolBar::ShapeClip,
         Bar::Audio => ToolBar::Audio,
         Bar::Text => ToolBar::Text,
         Bar::Effects => ToolBar::Effects,
@@ -742,6 +1221,7 @@ fn tool_kind(id: cutlass_ffi::ToolId) -> ToolKind {
         T::Freeze => ToolKind::Freeze,
         T::ExtractAudio => ToolKind::ExtractAudio,
         T::Fade => ToolKind::Fade,
+        T::Opacity => ToolKind::Opacity,
         T::Beats => ToolKind::Beats,
         T::Unlink => ToolKind::Unlink,
         T::Splice => ToolKind::Splice,
@@ -752,6 +1232,7 @@ fn tool_kind(id: cutlass_ffi::ToolId) -> ToolKind {
         T::EditText => ToolKind::EditText,
         T::Draw => ToolKind::Draw,
         T::VideoEffects => ToolKind::VideoEffects,
+        T::ShapeStyle => ToolKind::ShapeStyle,
     }
 }
 
@@ -814,6 +1295,76 @@ pub fn create_project(root: String) -> Result<String, EditorError> {
         .map_err(|error| EditorError::from(FfiError::from(error)))
 }
 
+/// Give project `project` in the Cutlass folder at `root` the name
+/// `name`. Its folder keeps its own name. An empty name is refused.
+#[uniffi::export]
+pub fn rename_project(root: String, project: String, name: String) -> Result<(), EditorError> {
+    let home = open_home(&root)?;
+    let project = PathBuf::from(project);
+    project_in(&home, &project)?;
+    cutlass_ffi::rename_project(&project, &name)
+        .map_err(|error| EditorError::from(FfiError::from(error)))
+}
+
+/// Copy project `project` in the Cutlass folder at `root`, media and all,
+/// as "… copy", and return the copy's folder.
+#[uniffi::export]
+pub fn duplicate_project(root: String, project: String) -> Result<String, EditorError> {
+    let home = open_home(&root)?;
+    let project = PathBuf::from(project);
+    project_in(&home, &project)?;
+    cutlass_ffi::duplicate_project(&project)
+        .map(|path| path.display().to_string())
+        .map_err(|error| EditorError::from(FfiError::from(error)))
+}
+
+/// Delete project `project` in the Cutlass folder at `root` and every file
+/// in it. A folder that holds no project is refused.
+#[uniffi::export]
+pub fn delete_project(root: String, project: String) -> Result<(), EditorError> {
+    let home = open_home(&root)?;
+    let project = PathBuf::from(project);
+    project_in(&home, &project)?;
+    cutlass_ffi::delete_project(&project).map_err(|error| EditorError::from(FfiError::from(error)))
+}
+
+/// One line on the About page: a sticker set or a crate the app is built
+/// from.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Notice {
+    pub title: String,
+    pub license: String,
+    pub link: String,
+}
+
+/// Cutlass's own license, as an SPDX expression.
+#[uniffi::export]
+#[must_use]
+pub fn cutlass_license() -> String {
+    cutlass_ffi::PHONE_LICENSE.to_owned()
+}
+
+/// Every notice on the About page, sticker sets first.
+#[uniffi::export]
+#[must_use]
+pub fn notices() -> Vec<Notice> {
+    cutlass_ffi::phone_notices()
+        .into_iter()
+        .map(|notice| Notice {
+            title: notice.title,
+            license: notice.license,
+            link: notice.link,
+        })
+        .collect()
+}
+
+/// The license text of notice `index`, word for word.
+#[uniffi::export]
+#[must_use]
+pub fn notice_text(index: u32) -> String {
+    cutlass_ffi::notice_text(usize::try_from(index).unwrap_or(usize::MAX))
+}
+
 /// The app hears this device. Tests keep the software buffer, so they need
 /// no speaker.
 fn device_audio() -> cutlass_ffi::AudioHost {
@@ -828,9 +1379,18 @@ fn open_home(root: &str) -> Result<Home, EditorError> {
     Home::open(root).map_err(|error| EditorError::from(FfiError::from(error)))
 }
 
-/// A project folder must sit directly in the root's projects folder.
+/// A project folder must sit directly in the root's projects folder,
+/// named plainly: no `.` or `..` in the path.
 fn project_in(home: &Home, project: &Path) -> Result<(), EditorError> {
-    if project.parent() == Some(home.projects().as_path()) {
+    let plain = project.components().all(|part| {
+        matches!(
+            part,
+            std::path::Component::Normal(_)
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    });
+    if plain && project.parent() == Some(home.projects().as_path()) {
         Ok(())
     } else {
         Err(EditorError::Failed {
@@ -904,6 +1464,21 @@ impl Editor {
             .map_err(EditorError::from)
     }
 
+    /// Play the picked file at `path` in `clip_id` in place of its media,
+    /// keeping the clip's place and edits: one undo step. A picture takes
+    /// a photo or video, a sound a sound.
+    pub fn replace_file(&self, clip_id: String, path: String) -> Result<(), EditorError> {
+        self.run(move |host| host.replace_file(&SegmentId::new(clip_id), &PathBuf::from(path)))?
+            .map_err(EditorError::from)
+    }
+
+    /// Bring in the sound of the picked video at `path` as a sound in the
+    /// library, without its picture. Returns the material id, for `append`.
+    pub fn import_sound_of(&self, path: String) -> Result<String, EditorError> {
+        self.run(move |host| host.import_sound_of(&PathBuf::from(path)))?
+            .map_err(EditorError::from)
+    }
+
     /// Add a library item at the end of its lane. Returns the clip id.
     pub fn append(&self, material_id: String) -> Result<String, EditorError> {
         self.run(move |host| host.append(&material_id))?
@@ -970,6 +1545,190 @@ impl Editor {
             .map_err(EditorError::from)
     }
 
+    /// Run effect `effect_id` over the picture clip `clip_id` alone, for
+    /// its span. One undo step. Returns the effect clip's id.
+    pub fn add_clip_effect(
+        &self,
+        clip_id: String,
+        effect_id: String,
+    ) -> Result<String, EditorError> {
+        self.run(move |host| host.add_clip_effect(&SegmentId::new(clip_id), &effect_id))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Give the picture clip `clip_id` the filter `filter_id`, swapping out
+    /// the one it kept, or take it off with an empty id; a filter layer
+    /// swaps in place. One undo step. Returns the new layer's id.
+    pub fn set_clip_filter(
+        &self,
+        clip_id: String,
+        filter_id: String,
+    ) -> Result<Option<String>, EditorError> {
+        self.run(move |host| host.set_clip_filter(&SegmentId::new(clip_id), &filter_id))?
+            .map(|id| id.map(|id| id.as_str().to_owned()))
+            .map_err(EditorError::from)
+    }
+
+    /// Put the filter layer `filter_id` at `at_us`, over every picture
+    /// below it. One undo step. Returns the layer's id.
+    pub fn add_filter(&self, filter_id: String, at_us: i64) -> Result<String, EditorError> {
+        self.run(move |host| host.add_filter(&filter_id, Micros(at_us)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Set how strongly a filter, effect or adjustment works, 0 to 1. One
+    /// undo step.
+    pub fn set_strength(&self, clip_id: String, value: f64) -> Result<(), EditorError> {
+        self.edit(move |host| host.set_strength(&SegmentId::new(clip_id), value))
+    }
+
+    /// Put an adjustment layer at `at_us`, its sliders at zero. One undo
+    /// step. Returns the layer's id.
+    pub fn add_adjustment(&self, at_us: i64) -> Result<String, EditorError> {
+        self.run(move |host| host.add_adjustment(Micros(at_us)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Put sticker `sticker_id` at `at_us` on the first sticker row with
+    /// room, else a new one. One undo step. Returns the clip's id.
+    pub fn add_sticker(&self, sticker_id: String, at_us: i64) -> Result<String, EditorError> {
+        self.run(move |host| host.add_sticker(&sticker_id, Micros(at_us)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Put shape `shape_id` at `at_us` on the first sticker row with room,
+    /// else a new one. One undo step. Returns the clip's id.
+    pub fn add_shape(&self, shape_id: String, at_us: i64) -> Result<String, EditorError> {
+        self.run(move |host| host.add_shape(&shape_id, Micros(at_us)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Put a freehand stroke through `trace` at `at_us` as a smooth line on
+    /// a sticker row, `color` (`#RRGGBB`) and `width` canvas pixels wide.
+    /// One undo step. Returns the clip's id.
+    pub fn draw_stroke(
+        &self,
+        trace: Vec<CanvasPoint>,
+        at_us: i64,
+        color: String,
+        width: f64,
+    ) -> Result<String, EditorError> {
+        let trace: Vec<[f64; 2]> = trace.into_iter().map(|point| [point.x, point.y]).collect();
+        self.run(move |host| host.draw_stroke(&trace, Micros(at_us), &color, width))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// How a shape clip looks, or `None` when it is not a shape.
+    pub fn shape_style(&self, clip_id: String) -> Result<Option<ShapeStyle>, EditorError> {
+        let style = self.run(move |host| host.shape_style(&SegmentId::new(clip_id)))?;
+        Ok(style.map(ShapeStyle::from))
+    }
+
+    /// Change how a shape looks. Changes made while `live` join one undo
+    /// step, so a slider drag is one step; its last change passes `live`
+    /// false, and so does a single tap.
+    pub fn style_shape(
+        &self,
+        clip_id: String,
+        change: ShapeStyleChange,
+        live: bool,
+    ) -> Result<(), EditorError> {
+        self.run(move |host| host.style_shape(&SegmentId::new(clip_id), change.into(), live))?
+            .map_err(EditorError::from)
+    }
+
+    /// The cuts between touching clips on the main row, earliest first.
+    pub fn cuts(&self) -> Result<Vec<Cut>, EditorError> {
+        let cuts = self.run(|host| host.cuts())?;
+        Ok(cuts
+            .into_iter()
+            .map(|cut| Cut {
+                outgoing_id: cut.outgoing_id.as_str().to_owned(),
+                at_us: cut.at.0,
+                transition: cut.transition,
+                name: cut.name,
+                duration_us: cut.duration.0,
+                shortest_us: cut.shortest.0,
+                longest_us: cut.longest.0,
+            })
+            .collect())
+    }
+
+    /// Put transition `transition_id` on the cut after `outgoing_id`,
+    /// fitted to the clips; one there already is swapped. One undo step.
+    pub fn set_transition(
+        &self,
+        outgoing_id: String,
+        transition_id: String,
+    ) -> Result<(), EditorError> {
+        self.edit(move |host| host.set_transition(&SegmentId::new(outgoing_id), &transition_id))
+    }
+
+    /// Make the transition after `outgoing_id` last `duration_us`, held to
+    /// its range. One undo step.
+    pub fn set_transition_length(
+        &self,
+        outgoing_id: String,
+        duration_us: i64,
+    ) -> Result<(), EditorError> {
+        self.edit(move |host| {
+            host.set_transition_length(&SegmentId::new(outgoing_id), Micros(duration_us))
+        })
+    }
+
+    /// Copy the transition after `outgoing_id` to every other cut of the
+    /// main row, each fitted to its clips. One undo step.
+    pub fn transition_everywhere(&self, outgoing_id: String) -> Result<(), EditorError> {
+        self.edit(move |host| host.transition_everywhere(&SegmentId::new(outgoing_id)))
+    }
+
+    /// Take the transition off the cut after `outgoing_id`. One undo step.
+    pub fn remove_transition(&self, outgoing_id: String) -> Result<(), EditorError> {
+        self.edit(move |host| host.remove_transition(&SegmentId::new(outgoing_id)))
+    }
+
+    /// Set adjust slider `key` of a picture clip or an adjustment layer to
+    /// `value`. One undo step.
+    pub fn set_adjust(&self, clip_id: String, key: String, value: f64) -> Result<(), EditorError> {
+        self.edit(move |host| host.set_adjust(&SegmentId::new(clip_id), &key, value))
+    }
+
+    /// Every adjust slider of `clip_id`, or `None` for a clip that has
+    /// none.
+    pub fn adjust_sliders(
+        &self,
+        clip_id: String,
+    ) -> Result<Option<Vec<AdjustSlider>>, EditorError> {
+        let sliders = self.run(move |host| host.adjust_sliders(&SegmentId::new(clip_id)))?;
+        Ok(sliders.map(|sliders| {
+            sliders
+                .into_iter()
+                .map(|slider| AdjustSlider {
+                    key: slider.key,
+                    label: slider.label,
+                    min: slider.min,
+                    value: slider.value,
+                })
+                .collect()
+        }))
+    }
+
+    /// The filter `clip_id` keeps, or a filter layer's own.
+    pub fn clip_filter(&self, clip_id: String) -> Result<Option<ClipFilter>, EditorError> {
+        let kept = self.run(move |host| host.clip_filter(&SegmentId::new(clip_id)))?;
+        Ok(kept.map(|kept| ClipFilter {
+            layer_id: kept.segment_id.as_str().to_owned(),
+            filter_id: kept.filter_id,
+            strength: kept.strength,
+        }))
+    }
+
     /// Bring in a subtitle file (SRT or LRC, by the extension of
     /// `file_name`) whose `text` the phone read, as captions on a new
     /// subtitle lane: one undo step.
@@ -1019,9 +1778,11 @@ impl Editor {
         Ok(lanes
             .into_iter()
             .map(|lane| Lane {
+                id: lane.track_id.as_str().to_owned(),
                 kind: lane_kind(lane.kind),
                 main: lane.main,
                 locked: lane.locked,
+                muted: lane.muted,
                 clips: lane
                     .clips
                     .into_iter()
@@ -1032,10 +1793,121 @@ impl Editor {
                         duration_us: clip.duration.0,
                         volume: clip.volume,
                         speed: clip.speed,
+                        beats_us: clip.beats.iter().map(|beat| beat.0).collect(),
                     })
                     .collect(),
             })
             .collect())
+    }
+
+    /// How `clip_id` stands at `at_us`, for its clip tools. `None` when no
+    /// row holds it.
+    pub fn clip_state(
+        &self,
+        clip_id: String,
+        at_us: i64,
+    ) -> Result<Option<ClipState>, EditorError> {
+        let state =
+            self.run(move |host| host.clip_state(&SegmentId::new(clip_id), Micros(at_us)))?;
+        Ok(state.map(ClipState::from))
+    }
+
+    /// Flip the picture left to right, or back. One undo step.
+    pub fn toggle_mirror(&self, clip_id: String) -> Result<(), EditorError> {
+        self.edit(move |host| host.toggle_mirror(&SegmentId::new(clip_id)))
+    }
+
+    /// Turn the picture a quarter turn clockwise. One undo step.
+    pub fn turn(&self, clip_id: String) -> Result<(), EditorError> {
+        self.edit(move |host| host.turn(&SegmentId::new(clip_id)))
+    }
+
+    /// Play the clip backward, or forward again. One undo step.
+    pub fn toggle_reverse(&self, clip_id: String) -> Result<(), EditorError> {
+        self.edit(move |host| host.toggle_reverse(&SegmentId::new(clip_id)))
+    }
+
+    /// Crop the video to its middle at `ratio`, or show the whole frame
+    /// for an empty ratio. One undo step.
+    pub fn set_crop(&self, clip_id: String, ratio: String) -> Result<(), EditorError> {
+        self.edit(move |host| host.set_crop(&SegmentId::new(clip_id), &ratio))
+    }
+
+    /// Make the picture `opacity` solid, 0 to 1. One undo step.
+    pub fn set_opacity(&self, clip_id: String, opacity: f64) -> Result<(), EditorError> {
+        self.edit(move |host| host.set_opacity(&SegmentId::new(clip_id), opacity))
+    }
+
+    /// Fade the clip in and out over these lengths. One undo step.
+    pub fn set_fade(
+        &self,
+        clip_id: String,
+        fade_in_us: i64,
+        fade_out_us: i64,
+    ) -> Result<(), EditorError> {
+        self.edit(move |host| {
+            host.set_fade(
+                &SegmentId::new(clip_id),
+                Micros(fade_in_us),
+                Micros(fade_out_us),
+            )
+        })
+    }
+
+    /// Put a copy of the clip right after it. Returns the copy.
+    pub fn duplicate(&self, clip_id: String) -> Result<String, EditorError> {
+        self.run(move |host| host.duplicate(&SegmentId::new(clip_id)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Hold the video's frame at `at_us` as a still there. Returns the still.
+    pub fn freeze(&self, clip_id: String, at_us: i64) -> Result<String, EditorError> {
+        self.run(move |host| host.freeze(&SegmentId::new(clip_id), Micros(at_us)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Put the video's sound on a clip of its own. One undo step.
+    pub fn extract_audio(&self, clip_id: String) -> Result<(), EditorError> {
+        self.edit(move |host| host.extract_audio(&SegmentId::new(clip_id)))
+    }
+
+    /// Give the video its own sound back. One undo step.
+    pub fn recover_audio(&self, clip_id: String) -> Result<(), EditorError> {
+        self.edit(move |host| host.recover_audio(&SegmentId::new(clip_id)))
+    }
+
+    /// Mark a beat at `at_us` on a sound clip, or take that beat off.
+    pub fn toggle_beat(&self, clip_id: String, at_us: i64) -> Result<(), EditorError> {
+        self.edit(move |host| host.toggle_beat(&SegmentId::new(clip_id), Micros(at_us)))
+    }
+
+    /// Move a picture from another row onto main. One undo step.
+    pub fn to_main(&self, clip_id: String) -> Result<(), EditorError> {
+        self.edit(move |host| host.to_main(&SegmentId::new(clip_id)))
+    }
+
+    /// Put a library picture at `at_us` on a row above main. Returns the clip.
+    pub fn add_overlay(&self, material_id: String, at_us: i64) -> Result<String, EditorError> {
+        self.run(move |host| host.add_overlay(&material_id, Micros(at_us)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Whether clips on other rows go with the main clip they sit on.
+    pub fn linkage_enabled(&self) -> Result<bool, EditorError> {
+        self.run(|host| host.linkage_enabled())
+    }
+
+    /// Turn linkage on or off. Not an undo step; kept with the project.
+    pub fn set_linkage_enabled(&self, on: bool) -> Result<(), EditorError> {
+        self.edit(move |host| host.set_linkage_enabled(on))
+    }
+
+    /// Mute or unmute a row. One undo step.
+    pub fn set_row_muted(&self, row_id: String, muted: bool) -> Result<(), EditorError> {
+        self.edit(move |host| host.set_row_muted(&cutlass_ffi::TrackId::new(row_id), muted))
     }
 
     /// The tool bar for `clip_id` while it is selected, or `None` for an id
@@ -1381,8 +2253,27 @@ impl Editor {
         short_side: u32,
         progress: Arc<dyn ExportProgress>,
     ) -> Result<Exported, EditorError> {
+        self.export_with(
+            path,
+            ExportOptions {
+                short_side,
+                frame_rate: 0,
+                quality: ExportQuality::Recommended,
+            },
+            progress,
+        )
+    }
+
+    /// Write the whole cut to `path` as an MP4 at the size, frame rate and
+    /// quality `options` asks for. Otherwise as [`Self::export`].
+    pub fn export_with(
+        &self,
+        path: String,
+        options: ExportOptions,
+        progress: Arc<dyn ExportProgress>,
+    ) -> Result<Exported, EditorError> {
         let exported = self.run(move |host| {
-            host.export(&PathBuf::from(path), short_side, &mut |done, total| {
+            host.export_with(&PathBuf::from(path), options.into(), &mut |done, total| {
                 progress.progress(done, total)
             })
         })??;
@@ -1416,6 +2307,14 @@ impl Editor {
 }
 
 impl Editor {
+    /// Run an edit on the host's thread and turn its failure into a message.
+    fn edit(
+        &self,
+        job: impl FnOnce(&mut PhoneHost) -> Result<(), FfiError> + Send + 'static,
+    ) -> Result<(), EditorError> {
+        self.run(job)?.map_err(EditorError::from)
+    }
+
     /// Run `job` on the host's thread and wait for its answer.
     fn run<T: Send + 'static>(
         &self,
@@ -1457,7 +2356,10 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{Editor, LaneKind, create_project, list_projects, start};
+    use super::{
+        Editor, LaneKind, create_project, delete_project, duplicate_project, list_projects,
+        rename_project, start,
+    };
 
     struct Temp(PathBuf);
 
@@ -1527,6 +2429,49 @@ mod tests {
         let super::EditorError::Failed { message } =
             editor.move_clip(first, 9, 0, 0, 0).unwrap_err();
         assert!(!message.is_empty());
+    }
+
+    #[test]
+    fn the_clip_tools_cross_the_boundary_and_show_in_the_clip_state() {
+        let temp = Temp::new();
+        let editor = temp.open();
+        let material = editor.import(pattern()).unwrap();
+        let clip = editor.append(material.clone()).unwrap();
+        let state = editor.clip_state(clip.clone(), 0).unwrap().unwrap();
+        assert!(state.picture && state.on_main && !state.mirrored);
+        editor.toggle_mirror(clip.clone()).unwrap();
+        editor.turn(clip.clone()).unwrap();
+        editor.set_crop(clip.clone(), "1:1".to_owned()).unwrap();
+        editor.set_opacity(clip.clone(), 0.5).unwrap();
+        let state = editor.clip_state(clip.clone(), 0).unwrap().unwrap();
+        assert!(state.mirrored);
+        assert_eq!((state.rotation, state.crop.as_str()), (270.0, "1:1"));
+        assert_eq!(state.opacity, 0.5);
+        assert!(super::crop_ratios().contains(&"1:1".to_owned()));
+
+        let copy = editor.duplicate(clip.clone()).unwrap();
+        assert_eq!(editor.lanes().unwrap()[0].clips[1].id, copy);
+        let over = editor.add_overlay(material, 0).unwrap();
+        let lanes = editor.lanes().unwrap();
+        assert_eq!(lanes[0].clips[0].id, over);
+        let main = lanes.iter().find(|lane| lane.main).unwrap().id.clone();
+        editor.set_row_muted(main, true).unwrap();
+        assert!(
+            editor
+                .lanes()
+                .unwrap()
+                .iter()
+                .any(|lane| lane.main && lane.muted)
+        );
+        editor.set_linkage_enabled(true).unwrap();
+        assert!(editor.linkage_enabled().unwrap());
+        assert!(
+            editor
+                .clip_state("nothing".to_owned(), 0)
+                .unwrap()
+                .is_none()
+        );
+        assert!(editor.toggle_beat(clip, 0).is_err());
     }
 
     #[test]
@@ -1634,6 +2579,7 @@ mod tests {
         assert_eq!(done.width.min(done.height), 720);
         assert!(std::fs::metadata(&movie).unwrap().len() > 0);
         assert_eq!(super::export_sides(), [720, 1080, 2160]);
+        assert_eq!(super::export_rates(), [24, 25, 30, 50, 60]);
         // The editor still answers afterwards.
         assert_eq!(editor.lanes().unwrap()[0].clips.len(), 1);
     }
@@ -1686,7 +2632,10 @@ mod tests {
             ToolBar::OverlayClip,
             ToolBar::AudioClip,
             ToolBar::TextClip,
+            ToolBar::FilterClip,
+            ToolBar::AdjustClip,
             ToolBar::OtherClip,
+            ToolBar::ShapeClip,
             ToolBar::Audio,
             ToolBar::Text,
             ToolBar::Effects,
@@ -1818,6 +2767,37 @@ mod tests {
         let editor = Editor::open(root, temp.bundle(), made).unwrap();
         assert_eq!(editor.duration_us().unwrap(), 0);
         assert!(temp.0.join("Cutlass/Cache/index.json").is_file());
+    }
+
+    #[test]
+    fn a_project_is_renamed_copied_and_deleted_only_inside_the_root() {
+        let temp = Temp::new();
+        let root = temp.root();
+        let made = create_project(root.clone()).unwrap();
+        rename_project(root.clone(), made.clone(), "Trip".to_owned()).unwrap();
+        assert!(rename_project(root.clone(), made.clone(), " ".to_owned()).is_err());
+        let copy = duplicate_project(root.clone(), made.clone()).unwrap();
+        let mut names: Vec<_> = list_projects(root.clone())
+            .into_iter()
+            .map(|project| project.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, ["Trip", "Trip copy"]);
+        delete_project(root.clone(), copy).unwrap();
+        assert_eq!(list_projects(root.clone()).len(), 1);
+        // Nothing outside the projects folder, or that climbs out of it.
+        let projects = format!("{root}/Projects");
+        for outside in [
+            root.clone(),
+            format!("{projects}/.."),
+            format!("{projects}/./x"),
+        ] {
+            assert!(
+                delete_project(root.clone(), outside.clone()).is_err(),
+                "{outside}"
+            );
+        }
+        assert!(temp.0.join("Cutlass/Projects").is_dir());
     }
 
     #[test]

@@ -20,6 +20,44 @@ use crate::error::FfiError;
 /// The short sides, in pixels, the phone offers.
 pub const PHONE_EXPORT_SIDES: [u32; 3] = [720, 1080, 2160];
 
+/// The frame rates the phone offers, beside the project's own.
+pub const PHONE_EXPORT_RATES: [u32; 5] = [24, 25, 30, 50, 60];
+
+/// How many bits a second the picture gets, against what a phone's own
+/// camera records at that size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PhoneQuality {
+    /// Half: a smaller file.
+    Lower,
+    /// About what the camera records.
+    #[default]
+    Recommended,
+    /// Double: fewer blocks in fast or busy pictures.
+    Higher,
+}
+
+/// How an export is made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PhoneExportOptions {
+    /// One of [`PHONE_EXPORT_SIDES`].
+    pub short_side: u32,
+    /// One of [`PHONE_EXPORT_RATES`], or 0 for the project's own rate.
+    pub frame_rate: u32,
+    pub quality: PhoneQuality,
+}
+
+impl PhoneExportOptions {
+    /// `short_side` at the project's own rate and the recommended quality.
+    #[must_use]
+    pub fn sized(short_side: u32) -> Self {
+        Self {
+            short_side,
+            frame_rate: 0,
+            quality: PhoneQuality::Recommended,
+        }
+    }
+}
+
 /// A finished export.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PhoneExport {
@@ -61,37 +99,71 @@ pub(crate) struct Sources<'a> {
     pub renderer: Option<&'a Renderer>,
 }
 
-/// Write the whole cut to `destination` at `short_side`. `progress` hears
-/// the frames done and the frames in all after each picture, and stops the
-/// export by returning false.
-pub(crate) fn export_movie(
-    sources: &Sources<'_>,
-    destination: &Path,
-    short_side: u32,
-    progress: &mut dyn FnMut(u64, u64) -> bool,
-) -> Result<PhoneExport, FfiError> {
-    if !PHONE_EXPORT_SIDES.contains(&short_side) {
+/// The rate `options` asks for: the project's own when 0.
+fn rate_of(draft: &Draft, frame_rate: u32) -> Result<FrameRate, FfiError> {
+    if frame_rate == 0 {
+        return Ok(draft.frame_rate().unwrap_or(FrameRate::FPS_30));
+    }
+    if !PHONE_EXPORT_RATES.contains(&frame_rate) {
+        return Err(refused("that frame rate is not offered"));
+    }
+    Ok(FrameRate {
+        numerator: frame_rate,
+        denominator: 1,
+    })
+}
+
+/// Bits a second for the picture: the camera's rate for the size, half
+/// again above 30 frames a second, then halved or doubled for `quality`.
+fn bitrate_of(short_side: u32, rate: FrameRate, quality: PhoneQuality) -> u32 {
+    let base = u64::from(cutlass_export::video_bitrate(short_side));
+    let fast = u64::from(rate.numerator) > 30 * u64::from(rate.denominator.max(1));
+    let base = if fast { base * 3 / 2 } else { base };
+    let bits = match quality {
+        PhoneQuality::Lower => base / 2,
+        PhoneQuality::Recommended => base,
+        PhoneQuality::Higher => base * 2,
+    };
+    u32::try_from(bits).unwrap_or(u32::MAX)
+}
+
+/// The request that writes the whole of `draft` as `options` asks.
+fn request_of(draft: &Draft, options: PhoneExportOptions) -> Result<ExportRequest, FfiError> {
+    if !PHONE_EXPORT_SIDES.contains(&options.short_side) {
         return Err(refused("that size is not offered"));
     }
-    if sources.draft.duration.0 <= 0 {
-        return Err(refused("there is nothing to export"));
-    }
-    if cutlass_export::part_path(destination).is_none() {
-        return Err(refused("the export has no file name"));
-    }
-    let request = ExportRequest {
-        range: TimeRange::new(0, sources.draft.duration.0),
-        short_side,
+    let frame_rate = rate_of(draft, options.frame_rate)?;
+    Ok(ExportRequest {
+        range: TimeRange::new(0, draft.duration.0),
+        short_side: options.short_side,
         codec: CodecId::H264,
-        bitrate: cutlass_export::video_bitrate(short_side),
-        frame_rate: sources.draft.frame_rate().unwrap_or(FrameRate::FPS_30),
+        bitrate: bitrate_of(options.short_side, frame_rate, options.quality),
+        frame_rate,
         container: ContainerId::Isobmff,
         audio: Some(cutlass_export::MOVIE_SOUND),
         sidecar: None,
         late_by: 0,
         constant_rate: false,
         prores: cutlass_export::ProresProfile::Standard,
-    };
+    })
+}
+
+/// Write the whole cut to `destination` as `options` asks. `progress`
+/// hears the frames done and the frames in all after each picture, and
+/// stops the export by returning false.
+pub(crate) fn export_movie(
+    sources: &Sources<'_>,
+    destination: &Path,
+    options: PhoneExportOptions,
+    progress: &mut dyn FnMut(u64, u64) -> bool,
+) -> Result<PhoneExport, FfiError> {
+    let request = request_of(sources.draft, options)?;
+    if sources.draft.duration.0 <= 0 {
+        return Err(refused("there is nothing to export"));
+    }
+    if cutlass_export::part_path(destination).is_none() {
+        return Err(refused("the export has no file name"));
+    }
     let encoders = encoders();
     let result = cutlass_export::write_movie(
         &MovieSources {
@@ -126,5 +198,52 @@ fn exported(error: ExportError) -> FfiError {
 fn refused(reason: &str) -> FfiError {
     FfiError::Refused {
         reason: reason.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_export_takes_the_projects_rate_or_an_offered_one_and_scales_its_bits() {
+        let mut draft = Draft::empty("draft");
+        draft.fps = 25.0;
+        let own = request_of(&draft, PhoneExportOptions::sized(1080)).unwrap();
+        assert_eq!(own.frame_rate, FrameRate::FPS_25);
+        assert_eq!(own.bitrate, 12_000_000);
+
+        let fast = request_of(
+            &draft,
+            PhoneExportOptions {
+                short_side: 1080,
+                frame_rate: 60,
+                quality: PhoneQuality::Higher,
+            },
+        )
+        .unwrap();
+        assert_eq!(fast.frame_rate, FrameRate::FPS_60);
+        assert_eq!(fast.bitrate, 36_000_000);
+
+        let small = request_of(
+            &draft,
+            PhoneExportOptions {
+                short_side: 720,
+                frame_rate: 24,
+                quality: PhoneQuality::Lower,
+            },
+        )
+        .unwrap();
+        assert_eq!(small.frame_rate, FrameRate::FPS_24);
+        assert_eq!(small.bitrate, 3_000_000);
+
+        for (side, rate) in [(1080, 48), (900, 30)] {
+            let options = PhoneExportOptions {
+                short_side: side,
+                frame_rate: rate,
+                quality: PhoneQuality::Recommended,
+            };
+            assert!(request_of(&draft, options).is_err());
+        }
     }
 }

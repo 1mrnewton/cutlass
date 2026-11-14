@@ -37,12 +37,28 @@ struct ProjectsScreen: View {
     let onOpen: (ProjectSummary) -> Void
     @State private var projects: [ProjectSummary] = []
     @State private var failure: String?
+    /// The project being renamed, and the name typed so far.
+    @State private var renaming: ProjectSummary?
+    @State private var newName = ""
+    /// The project waiting for its delete to be confirmed.
+    @State private var deleting: ProjectSummary?
+    @State private var showsAbout = false
 
     private let columns = [GridItem(.adaptive(minimum: 160), spacing: 12)]
 
     var body: some View {
         VStack(spacing: 0) {
             TitleBar(title: "Projects")
+                .overlay(alignment: .trailing) {
+                    Button { showsAbout = true } label: {
+                        HugeIcon("settings", size: 20)
+                            .foregroundStyle(Palette.text)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .padding(.trailing, 6)
+                    .accessibilityLabel("About")
+                }
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     Button(action: newProject) {
@@ -65,8 +81,18 @@ struct ProjectsScreen: View {
                     }
                     LazyVGrid(columns: columns, spacing: 12) {
                         ForEach(projects, id: \.path) { project in
-                            Button { onOpen(project) } label: { ProjectCard(project: project) }
-                                .buttonStyle(.plain)
+                            ZStack(alignment: .topTrailing) {
+                                Button { onOpen(project) } label: { ProjectCard(project: project) }
+                                    .buttonStyle(.plain)
+                                    .contextMenu { actions(for: project) }
+                                Menu { actions(for: project) } label: {
+                                    HugeIcon("more", size: 18)
+                                        .foregroundStyle(Palette.muted)
+                                        .frame(width: 40, height: 36)
+                                        .contentShape(Rectangle())
+                                }
+                                .accessibilityLabel("More for \(project.name)")
+                            }
                         }
                     }
                 }
@@ -75,6 +101,68 @@ struct ProjectsScreen: View {
         }
         .background(Palette.panel)
         .onAppear(perform: reload)
+        // The dialogs hand their project to the buttons: the binding is
+        // cleared before a button's action runs.
+        .alert(
+            "Rename project",
+            isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } }),
+            presenting: renaming
+        ) { project in
+            TextField("Name", text: $newName)
+            Button("Cancel", role: .cancel) {}
+            Button("Rename") { rename(project) }
+        }
+        .confirmationDialog(
+            "Delete \(deleting?.name ?? "")?",
+            isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
+            titleVisibility: .visible,
+            presenting: deleting
+        ) { project in
+            Button("Delete", role: .destructive) { delete(project) }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("The project and its imported media are removed from this phone.")
+        }
+        .sheet(isPresented: $showsAbout) { AboutSheet() }
+    }
+
+    @ViewBuilder private func actions(for project: ProjectSummary) -> some View {
+        Button {
+            newName = project.name
+            renaming = project
+        } label: { Label("Rename", image: HugeIcon.asset("rename")) }
+        Button { duplicate(project) } label: {
+            Label("Duplicate", image: HugeIcon.asset("duplicate"))
+        }
+        Button(role: .destructive) { deleting = project } label: {
+            Label("Delete", image: HugeIcon.asset("delete"))
+        }
+    }
+
+    /// Run a project change in Rust, showing its refusal, then read the list again.
+    private func change(_ body: () throws -> Void) {
+        do {
+            try body()
+            failure = nil
+        } catch let EditorError.Failed(message) {
+            failure = message
+        } catch {
+            failure = error.localizedDescription
+        }
+        reload()
+    }
+
+    private func rename(_ project: ProjectSummary) {
+        let name = newName
+        change { try renameProject(root: Places.root, project: project.path, name: name) }
+    }
+
+    private func duplicate(_ project: ProjectSummary) {
+        change { _ = try duplicateProject(root: Places.root, project: project.path) }
+    }
+
+    private func delete(_ project: ProjectSummary) {
+        change { try deleteProject(root: Places.root, project: project.path) }
     }
 
     private func reload() {
@@ -144,6 +232,8 @@ struct ProjectCard: View {
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(Palette.text)
                 .lineLimit(1)
+                // Room for the card's more button.
+                .padding(.trailing, 24)
             Text(meta)
                 .font(.caption)
                 .foregroundStyle(Palette.muted)

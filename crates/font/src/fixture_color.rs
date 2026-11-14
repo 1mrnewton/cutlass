@@ -356,7 +356,11 @@ pub(crate) fn cbdt() -> Vec<u8> {
 /// A fixture's file name and what builds it.
 type Built = (&'static str, fn() -> Vec<u8>);
 
-const FILES: [Built; 2] = [("sbix-png.ttf", sbix), ("cbdt-png.ttf", cbdt)];
+const FILES: [Built; 3] = [
+    ("sbix-png.ttf", sbix),
+    ("cbdt-png.ttf", cbdt),
+    ("colr.ttf", crate::fixture_colr::layered),
+];
 
 fn path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

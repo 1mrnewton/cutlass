@@ -2,7 +2,8 @@
 //!
 //! The file yields a glyph id, an advance width, an outline, horizontal
 //! kerning pairs, and a bitmap strike when the file has one. A strike stored
-//! as PNG pictures is handed back still encoded. Glyph 0 is the
+//! as PNG pictures is handed back still encoded, and a glyph of layered
+//! color (`COLR`) as the paints that fill its outlines. Glyph 0 is the
 //! missing glyph. A face with `CFF2` and no `CFF ` table has no outlines this
 //! reader can draw. The layout tables (`GDEF`, `GSUB`, `GPOS`) are read
 //! for a shaper to ask; shaping, atlases, and meshes are not part of this
@@ -11,11 +12,16 @@
 #![forbid(unsafe_code)]
 
 mod collection;
+mod colr;
+#[cfg(test)]
+mod colr_tests;
 mod faces;
 #[cfg(test)]
 mod fixture;
 #[cfg(test)]
 mod fixture_color;
+#[cfg(test)]
+mod fixture_colr;
 #[cfg(test)]
 mod fixture_fonts;
 mod gpos;
@@ -29,6 +35,9 @@ mod otf;
 mod strike;
 mod ttf;
 
+pub use colr::{
+    Affine, ClipBox, Color, ColorGlyph, ColorLine, ColorStop, CompositeMode, Extend, Paint,
+};
 pub use faces::{FaceEntry, MAX_COLLECTION_FACES, list_faces, load_face, single_face};
 pub use gpos::{Adjust, Anchor, Cursive, Joins, MarkAttach, PairAdjust, Positioning, SingleAdjust};
 pub use gsub::{Ligature, Ligatures, Sequences, Single, Substitution};
@@ -159,6 +168,7 @@ pub struct Font<'a> {
     outlines: Outlines<'a>,
     strikes: strike::Strikes<'a>,
     fingerprint: u64,
+    colr: Option<colr::Colr<'a>>,
 }
 
 /// Read one TrueType or OpenType face.
@@ -335,6 +345,26 @@ impl<'a> Font<'a> {
         self.strikes.glyph(glyph_id, self.num_glyphs)
     }
 
+    /// `true` when the face has a `COLR` table of layered color glyphs.
+    #[must_use]
+    pub fn has_color_layers(&self) -> bool {
+        self.colr.is_some()
+    }
+
+    /// The paints of one glyph, when the face draws it in layered color.
+    ///
+    /// `Ok(None)` means the face has no `COLR` table, or the table has no
+    /// entry for this glyph. The caller fills the outlines the paints name.
+    pub fn color_glyph(&self, glyph_id: u16) -> Result<Option<ColorGlyph>, FontError> {
+        if glyph_id >= self.num_glyphs {
+            return Err(FontError::UnknownGlyph);
+        }
+        match &self.colr {
+            Some(colr) => colr.glyph(glyph_id, self.num_glyphs),
+            None => Ok(None),
+        }
+    }
+
     /// Color bitmap for one glyph, from the largest color strike whose picture
     /// is at most `max_edge` pixels wide and high.
     ///
@@ -414,6 +444,7 @@ impl<'a> Font<'a> {
         };
         let strikes = strike::Strikes::parse(&directory)?;
         let fingerprint = directory.fingerprint();
+        let colr = colr::Colr::parse(&directory)?;
         Ok(Font {
             kind: directory.kind,
             units_per_em: head.units_per_em,
@@ -428,6 +459,7 @@ impl<'a> Font<'a> {
             outlines,
             strikes,
             fingerprint,
+            colr,
         })
     }
 }

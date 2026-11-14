@@ -3682,10 +3682,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         }
         let gradient = 1 + 4 + i32::from(sb_size > 64);
         let wf_offset = gradient * (active_sb_row - src_sb_row);
-        if src_sb_row > active_sb_row || src_sb64_col >= active_sb64_col - 4 + wf_offset {
-            return false;
-        }
-        true
+        !(src_sb_row > active_sb_row || src_sb64_col >= active_sb64_col - 4 + wf_offset)
     }
 
     fn read_mv_component(&mut self, ctx: usize, comp: usize, want: i32) -> i32 {

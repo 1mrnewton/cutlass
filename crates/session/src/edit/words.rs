@@ -699,7 +699,11 @@ mod tests {
         assert_eq!(lane.segments[1].target, cues[1].target);
         assert_eq!(lane.segments[1].render_index, 14_000);
         // Captions sit low, clear of titles in the middle.
-        assert!(lane.segments.iter().all(|segment| segment.clip.transform.y == CAPTION_Y));
+        assert!(
+            lane.segments
+                .iter()
+                .all(|segment| segment.clip.transform.y == CAPTION_Y)
+        );
         let two = draft
             .materials
             .texts

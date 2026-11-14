@@ -1,15 +1,17 @@
 //! One image for each glyph of a face: a color picture, a signed-distance
 //! field from the outline, or gray coverage from a bitmap strike.
 //!
-//! Each glyph chooses for itself. A glyph with a picture in the face's color
-//! strike takes that picture, so an emoji face whose outlines are empty still
-//! draws. Any other glyph takes the face's route: its outline when the face
-//! has outlines, and the gray strike when it does not. A gray strike is never
-//! taken over an outline, because the small strikes old fonts carry are worse
-//! than their outlines at any size but their own. Each glyph is painted once.
-//! A later sample reads the cached texels. A face with neither outlines nor a
-//! strike is an error.
+//! Each glyph chooses for itself. A glyph the face draws in layered color
+//! is painted from those layers. Failing that, a glyph with a picture in the
+//! face's color strike takes that picture, so an emoji face whose outlines
+//! are empty still draws. Any other glyph takes the face's route: its outline
+//! when the face has outlines, and the gray strike when it does not. A gray
+//! strike is never taken over an outline, because the small strikes old fonts
+//! carry are worse than their outlines at any size but their own. Each glyph
+//! is painted once. A later sample reads the cached texels. A face with
+//! neither outlines nor a strike is an error.
 
+mod layers;
 mod strike;
 
 use std::collections::HashMap;
@@ -131,9 +133,13 @@ pub fn paint_bytes(bytes: &[u8], glyph_id: u16) -> Result<usize, TextError> {
     })
 }
 
-/// The glyph's image: its picture in the color strike when it has one, and
-/// otherwise what the face's route draws.
+/// The glyph's image: its color layers when the face has them for it, else
+/// its picture in the color strike, and otherwise what the face's route
+/// draws.
 fn paint(font: &Font<'_>, glyph_id: u16) -> Result<GlyphImage, TextError> {
+    if let Some(glyph) = font.color_glyph(glyph_id).map_err(TextError::Font)? {
+        return layers::paint(font, &glyph);
+    }
     if let Some(bitmap) = font
         .color_bitmap(glyph_id, u32::from(MAX_CELL))
         .map_err(TextError::Font)?

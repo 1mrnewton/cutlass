@@ -30,24 +30,128 @@ use super::tx::{forward, fwht};
 const MODE_COUNTER: [i32; 14] = [9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 0, 0, 3, 1];
 const COUNTER_CTX: [u8; 19] = [2, 3, 4, 1, 3, 9, 0, 9, 9, 5, 5, 9, 5, 9, 9, 9, 9, 9, 6];
 const MV_REF: [[[i8; 2]; 8]; 13] = {
-    const N8: [[i8; 2]; 8] = [[-1, 0], [0, -1], [-1, -1], [-2, 0], [0, -2], [-2, -1], [-1, -2], [-2, -2]];
+    const N8: [[i8; 2]; 8] = [
+        [-1, 0],
+        [0, -1],
+        [-1, -1],
+        [-2, 0],
+        [0, -2],
+        [-2, -1],
+        [-1, -2],
+        [-2, -2],
+    ];
     [
         N8,
         N8,
         N8,
         N8,
-        [[0, -1], [-1, 0], [1, -1], [-1, -1], [0, -2], [-2, 0], [-2, -1], [-1, -2]],
-        [[-1, 0], [0, -1], [-1, 1], [-1, -1], [-2, 0], [0, -2], [-1, -2], [-2, -1]],
-        [[-1, 0], [0, -1], [-1, 1], [1, -1], [-1, -1], [-3, 0], [0, -3], [-3, -3]],
-        [[0, -1], [-1, 0], [2, -1], [-1, -1], [-1, 1], [0, -3], [-3, 0], [-3, -3]],
-        [[-1, 0], [0, -1], [-1, 2], [-1, -1], [1, -1], [-3, 0], [0, -3], [-3, -3]],
-        [[-1, 1], [1, -1], [-1, 2], [2, -1], [-1, -1], [-3, 0], [0, -3], [-3, -3]],
-        [[0, -1], [-1, 0], [4, -1], [-1, 2], [-1, -1], [0, -3], [-3, 0], [2, -1]],
-        [[-1, 0], [0, -1], [-1, 4], [2, -1], [-1, -1], [-3, 0], [0, -3], [-1, 2]],
-        [[-1, 3], [3, -1], [-1, 4], [4, -1], [-1, -1], [-1, 0], [0, -1], [-1, 6]],
+        [
+            [0, -1],
+            [-1, 0],
+            [1, -1],
+            [-1, -1],
+            [0, -2],
+            [-2, 0],
+            [-2, -1],
+            [-1, -2],
+        ],
+        [
+            [-1, 0],
+            [0, -1],
+            [-1, 1],
+            [-1, -1],
+            [-2, 0],
+            [0, -2],
+            [-1, -2],
+            [-2, -1],
+        ],
+        [
+            [-1, 0],
+            [0, -1],
+            [-1, 1],
+            [1, -1],
+            [-1, -1],
+            [-3, 0],
+            [0, -3],
+            [-3, -3],
+        ],
+        [
+            [0, -1],
+            [-1, 0],
+            [2, -1],
+            [-1, -1],
+            [-1, 1],
+            [0, -3],
+            [-3, 0],
+            [-3, -3],
+        ],
+        [
+            [-1, 0],
+            [0, -1],
+            [-1, 2],
+            [-1, -1],
+            [1, -1],
+            [-3, 0],
+            [0, -3],
+            [-3, -3],
+        ],
+        [
+            [-1, 1],
+            [1, -1],
+            [-1, 2],
+            [2, -1],
+            [-1, -1],
+            [-3, 0],
+            [0, -3],
+            [-3, -3],
+        ],
+        [
+            [0, -1],
+            [-1, 0],
+            [4, -1],
+            [-1, 2],
+            [-1, -1],
+            [0, -3],
+            [-3, 0],
+            [2, -1],
+        ],
+        [
+            [-1, 0],
+            [0, -1],
+            [-1, 4],
+            [2, -1],
+            [-1, -1],
+            [-3, 0],
+            [0, -3],
+            [-1, 2],
+        ],
+        [
+            [-1, 3],
+            [3, -1],
+            [-1, 4],
+            [4, -1],
+            [-1, -1],
+            [-1, 0],
+            [0, -1],
+            [-1, 6],
+        ],
     ]
 };
-const MI_WH: [(usize, usize); 13] = [(1, 1), (1, 1), (1, 1), (1, 1), (1, 2), (2, 1), (2, 2), (2, 4), (4, 2), (4, 4), (4, 8), (8, 4), (8, 8)];
+const MI_WH: [(usize, usize); 13] = [
+    (1, 1),
+    (1, 1),
+    (1, 1),
+    (1, 1),
+    (1, 2),
+    (2, 1),
+    (2, 2),
+    (2, 4),
+    (4, 2),
+    (4, 4),
+    (4, 8),
+    (8, 4),
+    (8, 8),
+];
 
 /// Square block sizes by log2 of their width in 8×8 units.
 const SQUARE: [u8; 4] = [BLOCK_8X8, geom::BLOCK_16X16, geom::BLOCK_32X32, BLOCK_64X64];
@@ -67,7 +171,11 @@ static COST: std::sync::LazyLock<[u16; 257]> = std::sync::LazyLock::new(|| {
 pub fn bit_cost(bit: bool, p: u8) -> u32 {
     let p = p.max(1);
     let c = &*COST;
-    u32::from(if bit { c[256 - usize::from(p)] } else { c[usize::from(p)] })
+    u32::from(if bit {
+        c[256 - usize::from(p)]
+    } else {
+        c[usize::from(p)]
+    })
 }
 
 /// A source picture: three planes padded to whole superblocks.
@@ -307,12 +415,17 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let n = 1usize << level;
         let hbs = n / 2;
         let whole = row + n <= s.mi_rows && col + n <= s.mi_cols;
-        let own = if whole { self.estimate(row, col, SQUARE[level]) } else { u64::MAX };
+        let own = if whole {
+            self.estimate(row, col, SQUARE[level])
+        } else {
+            u64::MAX
+        };
         // Splitting costs the partition symbols and three more blocks'
         // mode info.
         let mut quarters = u64::from(s.lambda) * 12;
         for (dr, dc) in [(0, 0), (0, hbs), (hbs, 0), (hbs, hbs)] {
-            quarters = quarters.saturating_add(self.choose_into(row + dr, col + dc, level - 1, split));
+            quarters =
+                quarters.saturating_add(self.choose_into(row + dr, col + dc, level - 1, split));
             if quarters >= own {
                 break;
             }
@@ -476,20 +589,21 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let mut best = (f64::INFINITY, 0usize);
         let mut last = usize::MAX;
         // The state after the best so far is kept in `slot + 1`.
-        let mut try_one = |t: &mut Self, i: usize, b: &Blk, best: &mut (f64, usize), last: &mut usize| {
-            if *last != usize::MAX {
-                t.restore(slot);
-            }
-            let c0 = t.cost;
-            let d = t.code_block(b);
-            let j = d + (t.cost - c0) as f64 * lam;
-            *last = i;
-            if j < best.0 {
-                *best = (j, i);
-                t.choice_skip = (t.coded_skip, d);
-                t.save(row, col, n, slot + 1);
-            }
-        };
+        let try_one =
+            |t: &mut Self, i: usize, b: &Blk, best: &mut (f64, usize), last: &mut usize| {
+                if *last != usize::MAX {
+                    t.restore(slot);
+                }
+                let c0 = t.cost;
+                let d = t.code_block(b);
+                let j = d + (t.cost - c0) as f64 * lam;
+                *last = i;
+                if j < best.0 {
+                    *best = (j, i);
+                    t.choice_skip = (t.coded_skip, d);
+                    t.save(row, col, n, slot + 1);
+                }
+            };
         for (i, b) in cands.clone().iter().enumerate() {
             try_one(self, i, b, &mut best, &mut last);
         }
@@ -498,7 +612,10 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             let b0 = cands[best.1];
             let mut more = Vec::new();
             for uv in [b0.mode, geom::TM, geom::V, geom::H] {
-                if uv != b0.uv && !more.iter().any(|m: &Blk| m.uv == uv) && more.len() < if s.speed < 4 { 3 } else { 1 } {
+                if uv != b0.uv
+                    && !more.iter().any(|m: &Blk| m.uv == uv)
+                    && more.len() < if s.speed < 4 { 3 } else { 1 }
+                {
                     more.push(Blk { uv, ..b0 });
                 }
             }
@@ -561,18 +678,32 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let (x, y) = (base.col * 8, base.row * 8);
         let have_above = base.row > 0;
         let have_left = base.col > self.col0;
-        let e = self.rec.intra_edges(0, tx, x, y, have_left, have_above, false);
+        let e = self
+            .rec
+            .intra_edges(0, tx, x, y, have_left, have_above, false);
         let (src, ss) = (s.src.planes[0], s.src.strides[0]);
         let modes: &[u8] = if s.speed >= 8 {
             &[geom::DC, geom::V, geom::H, geom::TM]
         } else {
-            &[geom::DC, geom::V, geom::H, geom::TM, geom::D45, geom::D135, geom::D117, geom::D153, geom::D207, geom::D63]
+            &[
+                geom::DC,
+                geom::V,
+                geom::H,
+                geom::TM,
+                geom::D45,
+                geom::D135,
+                geom::D117,
+                geom::D153,
+                geom::D207,
+                geom::D63,
+            ]
         };
         let mut scored: Vec<(u64, u8)> = Vec::with_capacity(10);
         let lam = u64::from(s.lambda);
         for &m in modes {
             ipred::predict(m, n, &mut self.pred, n, &e, 8);
-            let cost = satd(&src[y * ss + x..], ss, &self.pred, n, n) + lam * u64::from(m != geom::DC) * 2;
+            let cost =
+                satd(&src[y * ss + x..], ss, &self.pred, n, n) + lam * u64::from(m != geom::DC) * 2;
             scored.push((cost, m));
         }
         scored.sort_unstable();
@@ -620,7 +751,11 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             if self.rec_ref().is_none() {
                 continue;
             }
-            let (mv, sad) = if r == 0 && self.fast() { self.found[Self::slot(row, col, bsize)] } else { self.search(row, col, bsize) };
+            let (mv, sad) = if r == 0 && self.fast() {
+                self.found[Self::slot(row, col, bsize)]
+            } else {
+                self.search(row, col, bsize)
+            };
             if r == 0 {
                 let (bw, _) = MI_WH[usize::from(bsize)];
                 for rr in 0..bw.min(s.mi_rows - row) {
@@ -652,7 +787,11 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             b.mv = mv;
             b.mode = mode_of(mv, NEW);
             let new_bits = if b.mode == NEW {
-                lam * u64::from(mv_bits(Mv { row: mv.row - nearest.row, col: mv.col - nearest.col })) / 256 + lam * 2
+                lam * u64::from(mv_bits(Mv {
+                    row: mv.row - nearest.row,
+                    col: mv.col - nearest.col,
+                })) / 256
+                    + lam * 2
             } else {
                 lam
             };
@@ -662,7 +801,14 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                     continue;
                 }
                 if let Some(d) = self.sad_sub(x, y, w, h, v) {
-                    scored.push((d + lam + ref_bits, Blk { mv: v, mode: mode_of(v, ZERO), ..b }));
+                    scored.push((
+                        d + lam + ref_bits,
+                        Blk {
+                            mv: v,
+                            mode: mode_of(v, ZERO),
+                            ..b
+                        },
+                    ));
                 }
             }
         }
@@ -707,6 +853,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             sn.mvs[r * 8..r * 8 + cols].copy_from_slice(&self.f.mvs[at..at + cols]);
         }
         let views = self.rec.views();
+        #[allow(clippy::needless_range_loop)]
         for p in 0..3 {
             let ss = usize::from(p > 0);
             let (x, y, m) = ((col * 8) >> ss, (row * 8) >> ss, (n * 8) >> ss);
@@ -747,6 +894,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             self.f.mvs[at..at + cols].copy_from_slice(&sn.mvs[r * 8..r * 8 + cols]);
         }
         let views = self.rec.views();
+        #[allow(clippy::needless_range_loop)]
         for p in 0..3 {
             let ss = usize::from(p > 0);
             let (x, y, m) = ((col * 8) >> ss, (row * 8) >> ss, (n * 8) >> ss);
@@ -780,6 +928,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         Some(u64::from(sad::sad(a, ss, b, stride, w, h)))
     }
 
+    #[allow(clippy::type_complexity)]
     fn rec_ref(&self) -> Option<((&[u8], usize), (i32, i32))> {
         let c = self.rec.ctx();
         let rp = c.refs[self.cur_ref].as_ref()?;
@@ -801,7 +950,16 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let (src, ss) = (s.src.planes[0], s.src.strides[0]);
         let a = &src[y * ss + x..];
         let b = &data[by as usize * stride + bx as usize..];
-        Some(u64::from(sad::sad_bilinear(a, ss, b, stride, w, h, ((r & 7) * 2) as u32, ((c & 7) * 2) as u32)))
+        Some(u64::from(sad::sad_bilinear(
+            a,
+            ss,
+            b,
+            stride,
+            w,
+            h,
+            ((r & 7) * 2) as u32,
+            ((c & 7) * 2) as u32,
+        )))
     }
 
     /// Searches LAST for the block's vector: the best of the neighbours'
@@ -895,7 +1053,14 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
 
     /// Refines a whole-sample vector of a block to halves and quarters (and
     /// eighths where they may be coded).
-    fn refine(&mut self, row: usize, col: usize, bsize: u8, mut mv: Mv, mut best_sad: u64) -> (Mv, u64) {
+    fn refine(
+        &mut self,
+        row: usize,
+        col: usize,
+        bsize: u8,
+        mut mv: Mv,
+        mut best_sad: u64,
+    ) -> (Mv, u64) {
         let s = self.s;
         let (bw, bh) = MI_WH[usize::from(bsize)];
         let (x, y) = (col * 8, row * 8);
@@ -903,15 +1068,30 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let h = (bh * 8).min((s.mi_rows - row) * 8);
         if s.speed < 9 {
             let hp = s.h.allow_hp && mv.row.unsigned_abs() < 64 && mv.col.unsigned_abs() < 64;
-            let steps: &[i16] = if hp && s.speed < 4 { &[4, 2, 1] } else { &[4, 2] };
+            let steps: &[i16] = if hp && s.speed < 4 {
+                &[4, 2, 1]
+            } else {
+                &[4, 2]
+            };
             for &step in steps {
                 let center = mv;
-                for (dr, dc) in [(-step, 0), (step, 0), (0, -step), (0, step), (-step, -step), (-step, step), (step, -step), (step, step)] {
+                for (dr, dc) in [
+                    (-step, 0),
+                    (step, 0),
+                    (0, -step),
+                    (0, step),
+                    (-step, -step),
+                    (-step, step),
+                    (step, -step),
+                    (step, step),
+                ] {
                     let m = Mv {
                         row: center.row + dr,
                         col: center.col + dc,
                     };
-                    let Some(v) = self.sad_sub(x, y, w, h, m) else { continue };
+                    let Some(v) = self.sad_sub(x, y, w, h, m) else {
+                        continue;
+                    };
                     if v < best_sad {
                         best_sad = v;
                         mv = m;
@@ -1068,7 +1248,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let (coded, dropped) = self.residual(&b, &rec, &mut toks, &mut eobs);
         if inter && eobs > 0 {
             // Skip when the residual is not worth its bits.
-            let ctx = usize::from(self.above_nb(&b).is_some_and(|n| n.skip)) + usize::from(self.left_nb(&b).is_some_and(|n| n.skip));
+            let ctx = usize::from(self.above_nb(&b).is_some_and(|n| n.skip))
+                + usize::from(self.left_nb(&b).is_some_and(|n| n.skip));
             let p = s.fc.skip[ctx];
             let lam = s.rd_lambda / 256.0;
             let j_skip = dropped + lam * bit_cost(true, p) as f32;
@@ -1084,7 +1265,6 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             b.tx = geom::max_tx(bsize).min(geom::tx_mode_biggest(s.h.tx_mode));
         }
         // Mode info.
-        let pos0 = self.w.bits_written();
         if s.intra_frame {
             self.write_intra_frame_info(&b);
         } else {
@@ -1101,7 +1281,6 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 self.f.mvs[at..at + b.x_mis].fill(r);
             }
         }
-        let pos1 = self.w.bits_written();
         if b.skip {
             self.reset_nz(&b);
         } else {
@@ -1110,10 +1289,6 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             }
         }
         self.toks = toks;
-        if !self.trial {
-            let pos2 = self.w.bits_written();
-            stats::add(&[(0, pos1 - pos0), (1, pos2 - pos1), (2 + usize::from(b.mode).min(13), 1), (16 + usize::from(b.skip), 1), (18 + usize::from(bsize), 1)]);
-        }
         let nb = Nb {
             bsize,
             mode: b.mode,
@@ -1194,7 +1369,13 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     /// Every tx block's prediction (intra), residual, quantized levels and
     /// reconstruction, in the decoder's order.
     /// Returns the summed costs of the tx blocks as coded and dropped.
-    fn residual(&mut self, b: &Blk, rec: &BlockRec, toks: &mut Vec<Tok>, eobs: &mut usize) -> (f32, f32) {
+    fn residual(
+        &mut self,
+        b: &Blk,
+        rec: &BlockRec,
+        toks: &mut Vec<Tok>,
+        eobs: &mut usize,
+    ) -> (f32, f32) {
         let s = self.s;
         let mut sums = (0.0f32, 0.0f32);
         let intra = b.refs[0] == INTRA_FRAME;
@@ -1217,7 +1398,9 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                         let have_above = r > 0 || b.row > 0;
                         let have_left = c > 0 || b.col > self.col0;
                         let have_right = c + step < n4w;
-                        self.rec.predict_intra(plane, mode, tx, x, y, have_left, have_above, have_right);
+                        self.rec.predict_intra(
+                            plane, mode, tx, x, y, have_left, have_above, have_right,
+                        );
                         if plane == 0 && !lossless && tx != TX_32X32 {
                             kind = geom::intra_tx_type(mode);
                         }
@@ -1241,14 +1424,30 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let n4h = (b.bh * 2) >> ss;
         let right = (self.s.mi_cols as i32 - b.bw as i32 - b.col as i32) * 64;
         let bottom = (self.s.mi_rows as i32 - b.bh as i32 - b.row as i32) * 64;
-        let vw = if right >= 0 { n4w } else { (n4w as i32 + (right >> (5 + ss))).max(0) as usize };
-        let vh = if bottom >= 0 { n4h } else { (n4h as i32 + (bottom >> (5 + ss))).max(0) as usize };
+        let vw = if right >= 0 {
+            n4w
+        } else {
+            (n4w as i32 + (right >> (5 + ss))).max(0) as usize
+        };
+        let vh = if bottom >= 0 {
+            n4h
+        } else {
+            (n4h as i32 + (bottom >> (5 + ss))).max(0) as usize
+        };
         (n4w, n4h, vw, vh)
     }
 
     /// The levels of one tx block (transposed positions, the scan's order
     /// of the decoder), and its end of block; the block is reconstructed.
-    fn quantize(&mut self, plane: usize, tx: u8, kind: u8, x: usize, y: usize, intra: bool) -> (Vec<i32>, usize) {
+    fn quantize(
+        &mut self,
+        plane: usize,
+        tx: u8,
+        kind: u8,
+        x: usize,
+        y: usize,
+        intra: bool,
+    ) -> (Vec<i32>, usize) {
         let s = self.s;
         let n = 4usize << tx;
         let log2n = 2 + usize::from(tx);
@@ -1259,7 +1458,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             let pred = v.at(y, x);
             for r in 0..n {
                 for c in 0..n {
-                    self.res[r * n + c] = i32::from(src[(y + r) * ss + x + c]) - i32::from(pred[r * stride + c]);
+                    self.res[r * n + c] =
+                        i32::from(src[(y + r) * ss + x + c]) - i32::from(pred[r * stride + c]);
                 }
             }
         }
@@ -1276,7 +1476,14 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 levels[i] = *v / q.max(1);
             }
         } else {
-            forward(&self.res, n, usize::from(tx), kind & 1 == 1, kind & 2 == 2, &mut self.fcoef);
+            forward(
+                &self.res,
+                n,
+                usize::from(tx),
+                kind & 1 == 1,
+                kind & 2 == 2,
+                &mut self.fcoef,
+            );
             let (eob, rd) = self.rd_levels(plane, tx, kind, x, y, intra, &mut levels);
             self.rd = rd;
             let _ = eob;
@@ -1310,7 +1517,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                     }
                 }
             }
-            self.rec.add_residual(plane, x, y, tx, kind, eob, (max_r + 1, max_c + 1));
+            self.rec
+                .add_residual(plane, x, y, tx, kind, eob, (max_r + 1, max_c + 1));
         }
         (levels, eob)
     }
@@ -1322,7 +1530,16 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     /// end of block goes where the cost is least. Returns the end of
     /// block and the costs of coding and of dropping the block.
     #[allow(clippy::too_many_arguments)]
-    fn rd_levels(&mut self, plane: usize, tx: u8, kind: u8, x: usize, y: usize, intra: bool, levels: &mut [i32]) -> (usize, TxRd) {
+    fn rd_levels(
+        &mut self,
+        plane: usize,
+        tx: u8,
+        kind: u8,
+        x: usize,
+        y: usize,
+        intra: bool,
+        levels: &mut [i32],
+    ) -> (usize, TxRd) {
         let s = self.s;
         let n = 4usize << tx;
         let log2n = 2 + usize::from(tx);
@@ -1339,10 +1556,14 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let ctx0 = {
             let ss = usize::from(plane > 0);
             let n4 = 1usize << tx;
-            let a = (x >> 2) - ((self.col0 * 8 >> ss) >> 2);
+            let a = (x >> 2) - (((self.col0 * 8) >> ss) >> 2);
             let l = (y >> 2) & (15 >> ss);
-            let anz = self.f.above_nz[plane][a..(a + n4).min(self.f.above_nz[plane].len())].iter().any(|&v| v != 0);
-            let lnz = self.left_nz[plane][l..(l + n4).min(16)].iter().any(|&v| v != 0);
+            let anz = self.f.above_nz[plane][a..(a + n4).min(self.f.above_nz[plane].len())]
+                .iter()
+                .any(|&v| v != 0);
+            let lnz = self.left_nz[plane][l..(l + n4).min(16)]
+                .iter()
+                .any(|&v| v != 0);
             usize::from(anz) + usize::from(lnz)
         };
         // Values in steps, in scan order; nothing past the last that could
@@ -1368,16 +1589,34 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             let e0 = lam * bit_cost(false, probs[0][ctx0][0]) as f32;
             levels[..max].fill(0);
             let d = (d_all + e0) / g;
-            return (0, TxRd { coded: d, dropped: d });
+            return (
+                0,
+                TxRd {
+                    coded: d,
+                    dropped: d,
+                },
+            );
         }
         // Token costs by band and context.
         let cost = &*COST;
-        let bc = |bit: bool, p: u8| u32::from(if bit { cost[256 - usize::from(p.max(1))] } else { cost[usize::from(p.max(1))] });
+        let bc = |bit: bool, p: u8| {
+            u32::from(if bit {
+                cost[256 - usize::from(p.max(1))]
+            } else {
+                cost[usize::from(p.max(1))]
+            })
+        };
         let mut tc = [[[0u32; 5]; 6]; 6];
         for (band, row) in probs.iter().enumerate() {
             for (c, p) in row.iter().enumerate() {
                 // more, eob, zero, one, two-or-more (signs added below)
-                tc[band][c] = [bc(true, p[0]), bc(false, p[0]), bc(false, p[1]), bc(true, p[1]) + bc(false, p[2]) + 256, bc(true, p[1]) + bc(true, p[2]) + 256];
+                tc[band][c] = [
+                    bc(true, p[0]),
+                    bc(false, p[0]),
+                    bc(false, p[1]),
+                    bc(true, p[1]) + bc(false, p[2]) + 256,
+                    bc(true, p[1]) + bc(true, p[2]) + 256,
+                ];
             }
         }
         let mut energy = [0u8; 1024];
@@ -1410,13 +1649,23 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                     1 => more + tcs[3],
                     _ => {
                         let mut c = Cost(0);
-                        write_big(&mut c, &PARETO8[usize::from(probs[band][ctx][2].max(1)) - 1], l);
+                        write_big(
+                            &mut c,
+                            &PARETO8[usize::from(probs[band][ctx][2].max(1)) - 1],
+                            l,
+                        );
                         more + tcs[4] + c.0
                     }
                 }
             };
             let mut best = (f32::MAX, 0u32);
-            let cands = if lo == 0 { [0, 1, 1] } else if lo == 1 { [0, 1, 2] } else { [lo, lo + 1, lo + 1] };
+            let cands = if lo == 0 {
+                [0, 1, 1]
+            } else if lo == 1 {
+                [0, 1, 2]
+            } else {
+                [lo, lo + 1, lo + 1]
+            };
             for &l in &cands {
                 let j = d_of(l) + lam * r_of(l) as f32;
                 if j < best.0 {
@@ -1442,15 +1691,18 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             };
             prev_zero = l == 0;
             if k + 1 < max {
-                ctx = (1 + usize::from(energy[usize::from(nb[2 * (k + 1)])]) + usize::from(energy[usize::from(nb[2 * (k + 1) + 1])])) >> 1;
+                ctx = (1
+                    + usize::from(energy[usize::from(nb[2 * (k + 1)])])
+                    + usize::from(energy[usize::from(nb[2 * (k + 1) + 1])]))
+                    >> 1;
             }
         }
         d_tail[last_sig] = d_rest.max(0.0);
         if last_sig < max {
             eob_cost[last_sig] = lam * tc[usize::from(bands[last_sig])][ctx][1] as f32;
         }
-        for k in last_sig..max {
-            let rc = usize::from(scan[k]);
+        for &rc in &scan[last_sig..max] {
+            let rc = usize::from(rc);
             let t = ((rc & (n - 1)) << log2n) | (rc >> log2n);
             levels[t] = 0;
         }
@@ -1469,8 +1721,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             }
         }
         let eob = best.1;
-        for k in eob..last_sig {
-            let rc = usize::from(scan[k]);
+        for &rc in &scan[eob..last_sig] {
+            let rc = usize::from(rc);
             let t = ((rc & (n - 1)) << log2n) | (rc >> log2n);
             levels[t] = 0;
         }
@@ -1484,7 +1736,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     // Syntax ---------------------------------------------------------------
 
     fn write_skip(&mut self, b: &Blk) {
-        let ctx = usize::from(self.above_nb(b).is_some_and(|n| n.skip)) + usize::from(self.left_nb(b).is_some_and(|n| n.skip));
+        let ctx = usize::from(self.above_nb(b).is_some_and(|n| n.skip))
+            + usize::from(self.left_nb(b).is_some_and(|n| n.skip));
         self.put(u32::from(b.skip), u32::from(self.s.fc.skip[ctx]));
         if self.collect() {
             self.f.counts.skip[ctx][usize::from(b.skip)] += 1;
@@ -1548,8 +1801,16 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             Some(l) if l.refs[0] == INTRA_FRAME => l.bmode[1],
             _ => geom::DC,
         };
-        self.put_tree(&prob::INTRA_TREE, &KF_Y_MODE_PROB[usize::from(a)][usize::from(l)], b.mode);
-        self.put_tree(&prob::INTRA_TREE, &KF_UV_MODE_PROB[usize::from(b.mode)], b.uv);
+        self.put_tree(
+            &prob::INTRA_TREE,
+            &KF_Y_MODE_PROB[usize::from(a)][usize::from(l)],
+            b.mode,
+        );
+        self.put_tree(
+            &prob::INTRA_TREE,
+            &KF_UV_MODE_PROB[usize::from(b.mode)],
+            b.uv,
+        );
     }
 
     fn write_inter_frame_info(&mut self, b: &Blk) {
@@ -1684,7 +1945,11 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     fn near(&self, b: &Blk, pos: [i8; 2]) -> Option<&Nb> {
         let r = b.row as isize + isize::from(pos[0]);
         let c = b.col as isize + isize::from(pos[1]);
-        if r < 0 || c < self.col0 as isize || r >= self.s.mi_rows as isize || c >= self.col1 as isize {
+        if r < 0
+            || c < self.col0 as isize
+            || r >= self.s.mi_rows as isize
+            || c >= self.col1 as isize
+        {
             return None;
         }
         if pos[0] == -1 {
@@ -1697,7 +1962,11 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     fn cell(&self, b: &Blk, pos: [i8; 2]) -> Option<MvRef> {
         let r = b.row as isize + isize::from(pos[0]);
         let c = b.col as isize + isize::from(pos[1]);
-        if r < 0 || c < self.col0 as isize || r >= self.s.mi_rows as isize || c >= self.col1 as isize {
+        if r < 0
+            || c < self.col0 as isize
+            || r >= self.s.mi_rows as isize
+            || c >= self.col1 as isize
+        {
             return None;
         }
         Some(self.f.mvs[r as usize * self.f.width + c as usize - self.col0])
@@ -1731,7 +2000,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             }
         };
         let prev = if s.h.use_prev_mvs {
-            s.prev_mvs.and_then(|m| m.get(b.row * s.mi_cols + b.col).copied())
+            s.prev_mvs
+                .and_then(|m| m.get(b.row * s.mi_cols + b.col).copied())
         } else {
             None
         };
@@ -1769,23 +2039,38 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             }
             if different {
                 for pos in search {
-                    let Some(c) = self.cell(b, *pos) else { continue };
+                    let Some(c) = self.cell(b, *pos) else {
+                        continue;
+                    };
                     if c.refs[0] == INTRA_FRAME {
                         continue;
                     }
-                    if c.refs[0] != frame && push(&mut list, &mut count, flip(c.mv[0], c.refs[0], frame, bias)) {
+                    if c.refs[0] != frame
+                        && push(&mut list, &mut count, flip(c.mv[0], c.refs[0], frame, bias))
+                    {
                         break 'search;
                     }
-                    if c.refs[1] > INTRA_FRAME && c.refs[1] != frame && c.mv[1] != c.mv[0] && push(&mut list, &mut count, flip(c.mv[1], c.refs[1], frame, bias)) {
+                    if c.refs[1] > INTRA_FRAME
+                        && c.refs[1] != frame
+                        && c.mv[1] != c.mv[0]
+                        && push(&mut list, &mut count, flip(c.mv[1], c.refs[1], frame, bias))
+                    {
                         break 'search;
                     }
                 }
             }
             if let Some(p) = prev {
-                if p.refs[0] != frame && p.refs[0] > INTRA_FRAME && push(&mut list, &mut count, flip(p.mv[0], p.refs[0], frame, bias)) {
+                if p.refs[0] != frame
+                    && p.refs[0] > INTRA_FRAME
+                    && push(&mut list, &mut count, flip(p.mv[0], p.refs[0], frame, bias))
+                {
                     break 'search;
                 }
-                if p.refs[1] > INTRA_FRAME && p.refs[1] != frame && p.mv[1] != p.mv[0] && push(&mut list, &mut count, flip(p.mv[1], p.refs[1], frame, bias)) {
+                if p.refs[1] > INTRA_FRAME
+                    && p.refs[1] != frame
+                    && p.mv[1] != p.mv[0]
+                    && push(&mut list, &mut count, flip(p.mv[1], p.refs[1], frame, bias))
+                {
                     break 'search;
                 }
             }
@@ -1822,18 +2107,35 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     /// Writes the tokens of one tx block, as `dec::parse::decode_coefs`
     /// reads them, and sets its contexts.
     #[allow(clippy::too_many_arguments)]
-    fn write_coefs(&mut self, b: &Blk, plane: usize, tx: u8, r4: usize, c4: usize, levels: &[i32], eob: usize) {
+    fn write_coefs(
+        &mut self,
+        b: &Blk,
+        plane: usize,
+        tx: u8,
+        r4: usize,
+        c4: usize,
+        levels: &[i32],
+        eob: usize,
+    ) {
         let s = self.s;
         let ss = usize::from(plane > 0);
         let n = 1usize << tx;
         let a = (((b.col - self.col0) * 2) >> ss) + c4;
         let l = (((b.row * 2) & 15) >> ss) + r4;
         let (_, _, vw, vh) = self.visible(b, plane);
-        let anz = self.f.above_nz[plane][a..(a + n).min(self.f.above_nz[plane].len())].iter().any(|&v| v != 0);
-        let lnz = self.left_nz[plane][l..(l + n).min(16)].iter().any(|&v| v != 0);
+        let anz = self.f.above_nz[plane][a..(a + n).min(self.f.above_nz[plane].len())]
+            .iter()
+            .any(|&v| v != 0);
+        let lnz = self.left_nz[plane][l..(l + n).min(16)]
+            .iter()
+            .any(|&v| v != 0);
         let mut ctx = usize::from(anz) + usize::from(lnz);
         let intra = b.refs[0] == INTRA_FRAME;
-        let kind = if intra && plane == 0 && !s.h.lossless && tx != TX_32X32 { geom::intra_tx_type(b.mode) } else { 0 };
+        let kind = if intra && plane == 0 && !s.h.lossless && tx != TX_32X32 {
+            geom::intra_tx_type(b.mode)
+        } else {
+            0
+        };
         let (scan, nb) = scan_pair(tx, kind);
         let log2n = 2 + usize::from(tx);
         let nn = 4usize << tx;
@@ -1892,7 +2194,10 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             }
             c += 1;
             if c < max_eob {
-                ctx = (1 + usize::from(self.cache[usize::from(nb[2 * c])]) + usize::from(self.cache[usize::from(nb[2 * c + 1])])) >> 1;
+                ctx = (1
+                    + usize::from(self.cache[usize::from(nb[2 * c])])
+                    + usize::from(self.cache[usize::from(nb[2 * c + 1])]))
+                    >> 1;
             }
         }
         if eob < max_eob {
@@ -2038,16 +2343,15 @@ fn write_big<S: Sink>(w: &mut S, pp: &[u8; 8], a: u32) -> u8 {
     }
 }
 
-#[inline]
-fn sad_row(a: &[u8], b: &[u8]) -> u64 {
-    a.iter().zip(b).map(|(&x, &y)| u64::from(x.abs_diff(y))).sum()
-}
-
 /// A rough rate of a vector, in 1/256 bits.
 fn mv_bits(mv: Mv) -> u32 {
     let comp = |v: i16| -> u32 {
         let a = u32::from(v.unsigned_abs());
-        if a == 0 { 256 } else { 256 * (2 + 2 * (32 - (a + 1).leading_zeros())) }
+        if a == 0 {
+            256
+        } else {
+            256 * (2 + 2 * (32 - (a + 1).leading_zeros()))
+        }
     };
     comp(mv.row) + comp(mv.col)
 }
@@ -2081,8 +2385,19 @@ fn lower_precision(mv: Mv, allow_hp: bool) -> Mv {
     if allow_hp && mv.row.unsigned_abs() < 64 && mv.col.unsigned_abs() < 64 {
         return mv;
     }
-    let d = |v: i16| if v & 1 == 0 { v } else if v > 0 { v - 1 } else { v + 1 };
-    Mv { row: d(mv.row), col: d(mv.col) }
+    let d = |v: i16| {
+        if v & 1 == 0 {
+            v
+        } else if v > 0 {
+            v - 1
+        } else {
+            v + 1
+        }
+    };
+    Mv {
+        row: d(mv.row),
+        col: d(mv.col),
+    }
 }
 
 fn count_mv(counts: &mut prob::Counts, d: Mv) {
@@ -2125,10 +2440,11 @@ fn count_mv(counts: &mut prob::Counts, d: Mv) {
 }
 
 use crate::tables::{
-    NEIGHBORS_COL_4X4, NEIGHBORS_COL_8X8, NEIGHBORS_COL_16X16, NEIGHBORS_DEFAULT_4X4, NEIGHBORS_DEFAULT_8X8,
-    NEIGHBORS_DEFAULT_16X16, NEIGHBORS_DEFAULT_32X32, NEIGHBORS_ROW_4X4, NEIGHBORS_ROW_8X8, NEIGHBORS_ROW_16X16,
-    SCAN_COL_4X4, SCAN_COL_8X8, SCAN_COL_16X16, SCAN_DEFAULT_4X4, SCAN_DEFAULT_8X8, SCAN_DEFAULT_16X16,
-    SCAN_DEFAULT_32X32, SCAN_ROW_4X4, SCAN_ROW_8X8, SCAN_ROW_16X16,
+    NEIGHBORS_COL_4X4, NEIGHBORS_COL_8X8, NEIGHBORS_COL_16X16, NEIGHBORS_DEFAULT_4X4,
+    NEIGHBORS_DEFAULT_8X8, NEIGHBORS_DEFAULT_16X16, NEIGHBORS_DEFAULT_32X32, NEIGHBORS_ROW_4X4,
+    NEIGHBORS_ROW_8X8, NEIGHBORS_ROW_16X16, SCAN_COL_4X4, SCAN_COL_8X8, SCAN_COL_16X16,
+    SCAN_DEFAULT_4X4, SCAN_DEFAULT_8X8, SCAN_DEFAULT_16X16, SCAN_DEFAULT_32X32, SCAN_ROW_4X4,
+    SCAN_ROW_8X8, SCAN_ROW_16X16,
 };
 
 fn scan_pair(tx: u8, kind: u8) -> (&'static [u16], &'static [u16]) {
@@ -2146,20 +2462,6 @@ fn scan_pair(tx: u8, kind: u8) -> (&'static [u16], &'static [u16]) {
     }
 }
 
-pub mod stats {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static C: [AtomicU64; 32] = [const { AtomicU64::new(0) }; 32];
-    pub fn add(v: &[(usize, u64)]) {
-        for &(i, n) in v {
-            C[i].fetch_add(n, Ordering::Relaxed);
-        }
-    }
-    pub fn dump() {
-        let g = |i: usize| C[i].load(Ordering::Relaxed);
-        eprintln!("bits mode {} coef {}; modes {:?}; skip {}/{}; sizes {:?}", g(0), g(1), (2..16).map(g).collect::<Vec<_>>(), g(17), g(16) + g(17), (18..31).map(g).collect::<Vec<_>>());
-    }
-}
-
 /// The sum of absolute 4×4 Hadamard coefficients of `src - pred` over an
 /// `w`×`h` block (`pred` rows `w` apart).
 fn satd(src: &[u8], ss: usize, pred: &[u8], w: usize, h: usize) -> u64 {
@@ -2169,7 +2471,8 @@ fn satd(src: &[u8], ss: usize, pred: &[u8], w: usize, h: usize) -> u64 {
             let mut d = [0i32; 16];
             for r in 0..4 {
                 for c in 0..4 {
-                    d[r * 4 + c] = i32::from(src[(by + r) * ss + bx + c]) - i32::from(pred[(by + r) * w + bx + c]);
+                    d[r * 4 + c] = i32::from(src[(by + r) * ss + bx + c])
+                        - i32::from(pred[(by + r) * w + bx + c]);
                 }
             }
             for r in 0..4 {
@@ -2183,7 +2486,12 @@ fn satd(src: &[u8], ss: usize, pred: &[u8], w: usize, h: usize) -> u64 {
             for c in 0..4 {
                 let (a, b, cc, e) = (d[c], d[4 + c], d[8 + c], d[12 + c]);
                 let (s0, s1, d0, d1) = (a + b, cc + e, a - b, cc - e);
-                total += u64::from((s0 + s1).unsigned_abs() + (s0 - s1).unsigned_abs() + (d0 + d1).unsigned_abs() + (d0 - d1).unsigned_abs());
+                total += u64::from(
+                    (s0 + s1).unsigned_abs()
+                        + (s0 - s1).unsigned_abs()
+                        + (d0 + d1).unsigned_abs()
+                        + (d0 - d1).unsigned_abs(),
+                );
             }
         }
     }

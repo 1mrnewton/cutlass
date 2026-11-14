@@ -3,7 +3,12 @@
 //! runs a transform over several rows or columns at once and the compiler
 //! keeps the lanes in vector registers. Generated from the scalar
 //! versions in `txfm.rs`, which the tests there check against libvpx.
-#![allow(unused_mut, unused_parens, clippy::double_parens, clippy::needless_range_loop)]
+#![allow(
+    unused_mut,
+    unused_parens,
+    clippy::double_parens,
+    clippy::needless_range_loop
+)]
 
 use super::lanes::{K, Lanes, rs};
 
@@ -42,11 +47,6 @@ const SINPI_1: K = K(5283);
 const SINPI_2: K = K(9929);
 const SINPI_3: K = K(13377);
 const SINPI_4: K = K(15212);
-
-
-
-
-
 
 #[inline(always)]
 pub fn iadst4<V: Lanes>(input: &[V], output: &mut [V]) {
@@ -202,10 +202,10 @@ pub fn idct8<V: Lanes>(input: &[V], output: &mut [V]) {
     let mut step2 = [V::ZERO; 8];
     let mut temp1: V;
     let mut temp2: V;
-    step1[0] = ((input[0]));
-    step1[2] = ((input[4]));
-    step1[1] = ((input[2]));
-    step1[3] = ((input[6]));
+    step1[0] = (input[0]);
+    step1[2] = (input[4]);
+    step1[1] = (input[2]);
+    step1[3] = (input[6]);
     temp1 = (input[1])
         .wrapping_mul(COSPI_28)
         .wrapping_sub((input[7]).wrapping_mul(COSPI_4));
@@ -496,22 +496,22 @@ pub fn idct16<V: Lanes>(input: &[V], output: &mut [V]) {
     let mut step2 = [V::ZERO; 16];
     let mut temp1: V;
     let mut temp2: V;
-    step1[0] = ((input[0]));
-    step1[1] = ((input[8]));
-    step1[2] = ((input[4]));
-    step1[3] = ((input[12]));
-    step1[4] = ((input[2]));
-    step1[5] = ((input[10]));
-    step1[6] = ((input[6]));
-    step1[7] = ((input[14]));
-    step1[8] = ((input[1]));
-    step1[9] = ((input[9]));
-    step1[10] = ((input[5]));
-    step1[11] = ((input[13]));
-    step1[12] = ((input[3]));
-    step1[13] = ((input[11]));
-    step1[14] = ((input[7]));
-    step1[15] = ((input[15]));
+    step1[0] = (input[0]);
+    step1[1] = (input[8]);
+    step1[2] = (input[4]);
+    step1[3] = (input[12]);
+    step1[4] = (input[2]);
+    step1[5] = (input[10]);
+    step1[6] = (input[6]);
+    step1[7] = (input[14]);
+    step1[8] = (input[1]);
+    step1[9] = (input[9]);
+    step1[10] = (input[5]);
+    step1[11] = (input[13]);
+    step1[12] = (input[3]);
+    step1[13] = (input[11]);
+    step1[14] = (input[7]);
+    step1[15] = (input[15]);
     step2[0] = (step1[0]);
     step2[1] = (step1[1]);
     step2[2] = (step1[2]);
@@ -681,22 +681,22 @@ pub fn idct32<V: Lanes>(input: &[V], output: &mut [V]) {
     let mut step2 = [V::ZERO; 32];
     let mut temp1: V;
     let mut temp2: V;
-    step1[0] = ((input[0]));
-    step1[1] = ((input[16]));
-    step1[2] = ((input[8]));
-    step1[3] = ((input[24]));
-    step1[4] = ((input[4]));
-    step1[5] = ((input[20]));
-    step1[6] = ((input[12]));
-    step1[7] = ((input[28]));
-    step1[8] = ((input[2]));
-    step1[9] = ((input[18]));
-    step1[10] = ((input[10]));
-    step1[11] = ((input[26]));
-    step1[12] = ((input[6]));
-    step1[13] = ((input[22]));
-    step1[14] = ((input[14]));
-    step1[15] = ((input[30]));
+    step1[0] = (input[0]);
+    step1[1] = (input[16]);
+    step1[2] = (input[8]);
+    step1[3] = (input[24]);
+    step1[4] = (input[4]);
+    step1[5] = (input[20]);
+    step1[6] = (input[12]);
+    step1[7] = (input[28]);
+    step1[8] = (input[2]);
+    step1[9] = (input[18]);
+    step1[10] = (input[10]);
+    step1[11] = (input[26]);
+    step1[12] = (input[6]);
+    step1[13] = (input[22]);
+    step1[14] = (input[14]);
+    step1[15] = (input[30]);
     temp1 = (input[1])
         .wrapping_mul(COSPI_31)
         .wrapping_sub((input[31]).wrapping_mul(COSPI_1));
@@ -1119,4 +1119,3 @@ pub fn idct32<V: Lanes>(input: &[V], output: &mut [V]) {
     output[30] = (step1[1].wrapping_sub(step1[30]));
     output[31] = (step1[0].wrapping_sub(step1[31]));
 }
-

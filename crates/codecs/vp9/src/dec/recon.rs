@@ -180,12 +180,26 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
         let n4h = (bh * 2) >> ssy;
         let right = (self.c.mi_cols as i32 - bw as i32 - i32::from(b.col)) * 64;
         let bottom = (self.c.mi_rows as i32 - bh as i32 - i32::from(b.row)) * 64;
-        let vw = if right >= 0 { n4w } else { (n4w as i32 + (right >> (5 + ssx))).max(0) as usize };
-        let vh = if bottom >= 0 { n4h } else { (n4h as i32 + (bottom >> (5 + ssy))).max(0) as usize };
+        let vw = if right >= 0 {
+            n4w
+        } else {
+            (n4w as i32 + (right >> (5 + ssx))).max(0) as usize
+        };
+        let vh = if bottom >= 0 {
+            n4h
+        } else {
+            (n4h as i32 + (bottom >> (5 + ssy))).max(0) as usize
+        };
         (n4w, n4h, vw, vh)
     }
 
-    pub(crate) fn block(&mut self, t: &TileSyntax, b: &BlockRec, tx_at: &mut usize, coef_at: &mut usize) {
+    pub(crate) fn block(
+        &mut self,
+        t: &TileSyntax,
+        b: &BlockRec,
+        tx_at: &mut usize,
+        coef_at: &mut usize,
+    ) {
         let intra = b.refs[0] == INTRA_FRAME;
         if !intra {
             self.predict_inter(b);
@@ -209,14 +223,20 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
                     let mut kind = 0;
                     if intra {
                         let mode = if plane == 0 {
-                            if b.bsize < BLOCK_8X8 { b.bmode[(r << 1) + c] } else { b.mode }
+                            if b.bsize < BLOCK_8X8 {
+                                b.bmode[(r << 1) + c]
+                            } else {
+                                b.mode
+                            }
                         } else {
                             b.uv
                         };
                         let have_above = r > 0 || b.row > 0;
                         let have_left = c > 0 || usize::from(b.col) > t.col0;
                         let have_right = c + step < n4w;
-                        self.predict_intra(plane, mode, tx, x, y, have_left, have_above, have_right);
+                        self.predict_intra(
+                            plane, mode, tx, x, y, have_left, have_above, have_right,
+                        );
                         if plane == 0 && !lossless && tx != geom::TX_32X32 {
                             kind = geom::intra_tx_type(mode);
                         }
@@ -229,7 +249,15 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
                             for k in *coef_at..*coef_at + n {
                                 self.s.coef[usize::from(t.pos[k])] = t.val[k];
                             }
-                            self.add_residual(plane, x, y, tx, kind, usize::from(rec.eob), (usize::from(rec.nzr), usize::from(rec.nzc)));
+                            self.add_residual(
+                                plane,
+                                x,
+                                y,
+                                tx,
+                                kind,
+                                usize::from(rec.eob),
+                                (usize::from(rec.nzr), usize::from(rec.nzc)),
+                            );
                         }
                         *coef_at += n;
                     }
@@ -242,7 +270,16 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
 
     /// Adds the residual of one tx block at sample `(x, y)` of a plane.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn add_residual(&mut self, plane: usize, x: usize, y: usize, tx: u8, kind: u8, eob: usize, nz: (usize, usize)) {
+    pub(crate) fn add_residual(
+        &mut self,
+        plane: usize,
+        x: usize,
+        y: usize,
+        tx: u8,
+        kind: u8,
+        eob: usize,
+        nz: (usize, usize),
+    ) {
         let max = self.max;
         let v = &mut self.views[plane];
         let stride = v.stride;
@@ -257,7 +294,17 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
             3 => (Kind::Adst, Kind::Adst),
             _ => (Kind::Dct, Kind::Dct),
         };
-        itx::add(dst, stride, &mut self.s.coef, usize::from(tx), col, row, eob, nz, max);
+        itx::add(
+            dst,
+            stride,
+            &mut self.s.coef,
+            usize::from(tx),
+            col,
+            row,
+            eob,
+            nz,
+            max,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -321,7 +368,11 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
             for i in 0..2 * n {
                 e.above[i] = px(row + i.min(count - 1));
             }
-            e.tl = if have_left { px(row - 1) } else { P::new(base + 1) };
+            e.tl = if have_left {
+                px(row - 1)
+            } else {
+                P::new(base + 1)
+            };
         }
         e
     }
@@ -345,15 +396,36 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
                         for x in 0..n4w {
                             let mv = split_mv(b, plane, i, r, ssx, ssy);
                             i += 1;
-                            self.mc(slot, plane, (x0 + 4 * x, y0 + 4 * y), (4, 4), mv, (col * 8 + 4 * x, row * 8 + 4 * y), filter, r == 1);
+                            self.mc(
+                                slot,
+                                plane,
+                                (x0 + 4 * x, y0 + 4 * y),
+                                (4, 4),
+                                mv,
+                                (col * 8 + 4 * x, row * 8 + 4 * y),
+                                filter,
+                                r == 1,
+                            );
                         }
                     }
                 } else {
                     let mv = b.bmv[0][r];
-                    let q = (i32::from(mv.row) * (2 >> ssy), i32::from(mv.col) * (2 >> ssx));
+                    let q = (
+                        i32::from(mv.row) * (2 >> ssy),
+                        i32::from(mv.col) * (2 >> ssx),
+                    );
                     let w = (bw * 8) >> ssx;
                     let h = (bh * 8) >> ssy;
-                    self.mc(slot, plane, (x0, y0), (w, h), q, (col * 8, row * 8), filter, r == 1);
+                    self.mc(
+                        slot,
+                        plane,
+                        (x0, y0),
+                        (w, h),
+                        q,
+                        (col * 8, row * 8),
+                        filter,
+                        r == 1,
+                    );
                 }
             }
         }
@@ -377,7 +449,21 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
         let v = &mut self.views[plane];
         let ds = v.stride;
         let dst = v.at(y, x);
-        mc_into(self.c, &mut *self.s, self.max, slot, plane, dst, ds, (x, y), (w, h), (mv_row, mv_col), (lx, ly), filter, avg);
+        mc_into(
+            self.c,
+            &mut *self.s,
+            self.max,
+            slot,
+            plane,
+            dst,
+            ds,
+            (x, y),
+            (w, h),
+            (mv_row, mv_col),
+            (lx, ly),
+            filter,
+            avg,
+        );
     }
 
     /// The frame's views, for the encoder.
@@ -388,11 +474,6 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
     /// What reconstruction reads.
     pub(crate) fn ctx(&self) -> &Ctx<P> {
         self.c
-    }
-
-    /// What reconstruction reads, and its scratch.
-    pub(crate) fn ctx_scratch(&mut self) -> (&Ctx<P>, &mut Scratch<P>) {
-        (self.c, &mut *self.s)
     }
 
     /// The coefficient scratch the residual is added from.
@@ -431,8 +512,10 @@ pub(crate) fn mc_into<P: Pixel>(
             // libvpx `dec_build_inter_predictors` for a scaled reference.
             rp.buf.wait(usize::MAX);
             let (data, stride) = rp.buf.plane(plane);
-            let col = sc(mv_col, sc_.x_fp) + (((i64::from(lx as i32) << 4) * i64::from(sc_.x_fp) >> 14) as i32 & 15);
-            let row = sc(mv_row, sc_.y_fp) + (((i64::from(ly as i32) << 4) * i64::from(sc_.y_fp) >> 14) as i32 & 15);
+            let col = sc(mv_col, sc_.x_fp)
+                + ((((i64::from(lx as i32) << 4) * i64::from(sc_.x_fp)) >> 14) as i32 & 15);
+            let row = sc(mv_row, sc_.y_fp)
+                + ((((i64::from(ly as i32) << 4) * i64::from(sc_.y_fp)) >> 14) as i32 & 15);
             let x0 = sc(x as i32, sc_.x_fp) + (col >> 4);
             let y0 = sc(y as i32, sc_.y_fp) + (row >> 4);
             let get = |xx: i32, yy: i32| -> P {
@@ -440,7 +523,18 @@ pub(crate) fn mc_into<P: Pixel>(
                 let yy = yy.clamp(0, rh - 1) as usize;
                 data[yy * stride + xx]
             };
-            mc::predict_scaled(dst, ds, get, (w, h), (x0, y0), (col & 15, row & 15), (sc_.x_step, sc_.y_step), filter, max, avg);
+            mc::predict_scaled(
+                dst,
+                ds,
+                get,
+                (w, h),
+                (x0, y0),
+                (col & 15, row & 15),
+                (sc_.x_step, sc_.y_step),
+                filter,
+                max,
+                avg,
+            );
             return;
         }
         let mx = (mv_col & 15) as usize;
@@ -457,7 +551,19 @@ pub(crate) fn mc_into<P: Pixel>(
         let (data, stride) = rp.buf.plane(plane);
         if bx - l >= 0 && by - t >= 0 && bx + w as i32 + r <= rw && by + h as i32 + bo <= rh {
             let at = by as usize * stride + bx as usize;
-            mc::predict(dst, ds, data, at, stride, (w, h), (mx, my), filter, max, avg, &mut s.mc);
+            mc::predict(
+                dst,
+                ds,
+                data,
+                at,
+                stride,
+                (w, h),
+                (mx, my),
+                filter,
+                max,
+                avg,
+                &mut s.mc,
+            );
         } else {
             // Edge emulation: the window held to the reference.
             let ew = w + 7;
@@ -482,7 +588,19 @@ pub(crate) fn mc_into<P: Pixel>(
                 out[..lo].fill(row[0]);
                 out[hi..].fill(row[rw as usize - 1]);
             }
-            mc::predict(dst, ds, emu, 3 * ew + 3, ew, (w, h), (mx, my), filter, max, avg, &mut s.mc);
+            mc::predict(
+                dst,
+                ds,
+                emu,
+                3 * ew + 3,
+                ew,
+                (w, h),
+                (mx, my),
+                filter,
+                max,
+                avg,
+                &mut s.mc,
+            );
         }
     }
 }

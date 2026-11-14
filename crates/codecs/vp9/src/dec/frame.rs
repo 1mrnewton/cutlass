@@ -82,7 +82,8 @@ pub struct Pic<P> {
     pub render_height: u32,
     /// The picture as the caller gets it, made by the worker that
     /// finished a shown frame.
-    pub out: std::sync::Mutex<Option<Result<cutlass_decode::VideoFrame, cutlass_decode::CodecError>>>,
+    pub out:
+        std::sync::Mutex<Option<Result<cutlass_decode::VideoFrame, cutlass_decode::CodecError>>>,
     /// Whether a worker is still to fill `out`.
     pub made: std::sync::atomic::AtomicBool,
 }
@@ -92,8 +93,14 @@ pub type Present<P> = fn(&Pic<P>) -> Result<cutlass_decode::VideoFrame, cutlass_
 
 /// A buffer for a new picture: a picture's whose readers are gone when
 /// one of `spare` fits, else a new one.
-pub fn writer<P: Copy + Default>(dims: &Dims, spare: &mut Vec<(Dims, Arc<SharedFrame<P>>)>) -> FrameWriter<P> {
-    while let Some(i) = spare.iter().position(|(d, _)| d.stride == dims.stride && d.rows == dims.rows) {
+pub fn writer<P: Copy + Default>(
+    dims: &Dims,
+    spare: &mut Vec<(Dims, Arc<SharedFrame<P>>)>,
+) -> FrameWriter<P> {
+    while let Some(i) = spare
+        .iter()
+        .position(|(d, _)| d.stride == dims.stride && d.rows == dims.rows)
+    {
         let (_, buf) = spare.swap_remove(i);
         if let Ok(w) = FrameWriter::restart(buf) {
             return w;

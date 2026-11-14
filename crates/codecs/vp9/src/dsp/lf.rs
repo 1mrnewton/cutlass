@@ -24,6 +24,7 @@ pub enum Wd {
 /// the edge (`q0`) at `at + i * line`, and its samples step by `step`
 /// (1 for a vertical edge, the stride for a horizontal one).
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 pub fn filter<P: Pixel>(
     buf: &mut [P],
     at: usize,
@@ -79,15 +80,17 @@ pub fn filter<P: Pixel>(
                 && (p7 - p0).abs() <= one
                 && (q7 - q0).abs() <= one;
             if flat2 {
-                let s = [p7, p6, p5, p4, p3, p2, p1, p0, q0, q1, q2, q3, q4, q5, q6, q7];
+                let s = [
+                    p7, p6, p5, p4, p3, p2, p1, p0, q0, q1, q2, q3, q4, q5, q6, q7,
+                ];
                 // Running sum of the 15-tap filter, as libvpx writes it out.
                 let mut sum = p7 * 7 + p6 * 2 + p5 + p4 + p3 + p2 + p1 + p0 + q0;
                 let mut out = [0i32; 14];
                 out[0] = (sum + 8) >> 4;
-                for k in 1..14 {
+                for k in 1usize..14 {
                     // Output k (p6 + ... ) moves the window: drop the
                     // oldest left tap, add the next right tap.
-                    let drop_a = s[if k <= 7 { 0 } else { k - 7 }];
+                    let drop_a = s[k.saturating_sub(7)];
                     let drop_b = s[k];
                     let add_a = s[k + 1];
                     let add_b = s[(k + 8).min(15)];
@@ -135,9 +138,12 @@ mod tests {
     /// The running sum against the 15-tap filter written out term by term.
     #[test]
     fn wide_filter_matches_its_definition() {
-        let s: [i32; 16] = [10, 11, 10, 11, 10, 11, 10, 11, 11, 10, 11, 10, 11, 10, 11, 10];
+        let s: [i32; 16] = [
+            10, 11, 10, 11, 10, 11, 10, 11, 11, 10, 11, 10, 11, 10, 11, 10,
+        ];
         let (p7, p6, p5, p4, p3, p2, p1, p0) = (s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]);
-        let (q0, q1, q2, q3, q4, q5, q6, q7) = (s[8], s[9], s[10], s[11], s[12], s[13], s[14], s[15]);
+        let (q0, q1, q2, q3, q4, q5, q6, q7) =
+            (s[8], s[9], s[10], s[11], s[12], s[13], s[14], s[15]);
         let r = |v: i32| (v + 8) >> 4;
         let want = [
             r(p7 * 7 + p6 * 2 + p5 + p4 + p3 + p2 + p1 + p0 + q0),
@@ -156,7 +162,20 @@ mod tests {
             r(p0 + q0 + q1 + q2 + q3 + q4 + q5 + q6 * 2 + q7 * 7),
         ];
         let mut buf: Vec<u8> = s.iter().map(|&v| v as u8).collect();
-        filter(&mut buf, 8, 1, 16, 1, Wd::W16, Thresh { blimit: 60, limit: 10, hev: 2 }, 8);
+        filter(
+            &mut buf,
+            8,
+            1,
+            16,
+            1,
+            Wd::W16,
+            Thresh {
+                blimit: 60,
+                limit: 10,
+                hev: 2,
+            },
+            8,
+        );
         let got: Vec<i32> = buf[1..15].iter().map(|&v| i32::from(v)).collect();
         assert_eq!(got, want);
     }

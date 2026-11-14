@@ -52,15 +52,96 @@ const MV_REF: [[[i8; 2]; 8]; 13] = {
         N8,
         N8,
         N8,
-        [[0, -1], [-1, 0], [1, -1], [-1, -1], [0, -2], [-2, 0], [-2, -1], [-1, -2]],
-        [[-1, 0], [0, -1], [-1, 1], [-1, -1], [-2, 0], [0, -2], [-1, -2], [-2, -1]],
-        [[-1, 0], [0, -1], [-1, 1], [1, -1], [-1, -1], [-3, 0], [0, -3], [-3, -3]],
-        [[0, -1], [-1, 0], [2, -1], [-1, -1], [-1, 1], [0, -3], [-3, 0], [-3, -3]],
-        [[-1, 0], [0, -1], [-1, 2], [-1, -1], [1, -1], [-3, 0], [0, -3], [-3, -3]],
-        [[-1, 1], [1, -1], [-1, 2], [2, -1], [-1, -1], [-3, 0], [0, -3], [-3, -3]],
-        [[0, -1], [-1, 0], [4, -1], [-1, 2], [-1, -1], [0, -3], [-3, 0], [2, -1]],
-        [[-1, 0], [0, -1], [-1, 4], [2, -1], [-1, -1], [-3, 0], [0, -3], [-1, 2]],
-        [[-1, 3], [3, -1], [-1, 4], [4, -1], [-1, -1], [-1, 0], [0, -1], [-1, 6]],
+        [
+            [0, -1],
+            [-1, 0],
+            [1, -1],
+            [-1, -1],
+            [0, -2],
+            [-2, 0],
+            [-2, -1],
+            [-1, -2],
+        ],
+        [
+            [-1, 0],
+            [0, -1],
+            [-1, 1],
+            [-1, -1],
+            [-2, 0],
+            [0, -2],
+            [-1, -2],
+            [-2, -1],
+        ],
+        [
+            [-1, 0],
+            [0, -1],
+            [-1, 1],
+            [1, -1],
+            [-1, -1],
+            [-3, 0],
+            [0, -3],
+            [-3, -3],
+        ],
+        [
+            [0, -1],
+            [-1, 0],
+            [2, -1],
+            [-1, -1],
+            [-1, 1],
+            [0, -3],
+            [-3, 0],
+            [-3, -3],
+        ],
+        [
+            [-1, 0],
+            [0, -1],
+            [-1, 2],
+            [-1, -1],
+            [1, -1],
+            [-3, 0],
+            [0, -3],
+            [-3, -3],
+        ],
+        [
+            [-1, 1],
+            [1, -1],
+            [-1, 2],
+            [2, -1],
+            [-1, -1],
+            [-3, 0],
+            [0, -3],
+            [-3, -3],
+        ],
+        [
+            [0, -1],
+            [-1, 0],
+            [4, -1],
+            [-1, 2],
+            [-1, -1],
+            [0, -3],
+            [-3, 0],
+            [2, -1],
+        ],
+        [
+            [-1, 0],
+            [0, -1],
+            [-1, 4],
+            [2, -1],
+            [-1, -1],
+            [-3, 0],
+            [0, -3],
+            [-1, 2],
+        ],
+        [
+            [-1, 3],
+            [3, -1],
+            [-1, 4],
+            [4, -1],
+            [-1, -1],
+            [-1, 0],
+            [0, -1],
+            [-1, 6],
+        ],
     ]
 };
 
@@ -169,7 +250,8 @@ impl State {
         self.masks.clear();
         self.masks.resize(masks, lpf::Mask::default());
         self.grid.clear();
-        self.grid.resize(if grid { cells } else { 0 }, LfMi::default());
+        self.grid
+            .resize(if grid { cells } else { 0 }, LfMi::default());
         self.counts = Counts::new();
     }
 }
@@ -622,7 +704,9 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
     }
 
     fn read_seg_id(&mut self) -> u8 {
-        self.b.tree(&prob::SEG_TREE, &self.s.h.seg.tree_probs).min(7)
+        self.b
+            .tree(&prob::SEG_TREE, &self.s.h.seg.tree_probs)
+            .min(7)
     }
 
     fn predicted_seg(&self, b: &Blk) -> u8 {
@@ -651,7 +735,6 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
     }
 
     fn write_seg(&mut self, b: &Blk, id: u8) {
-
         for y in 0..b.y_mis {
             let at = (b.row + y) * self.f.width + b.col - self.col0;
             self.f.segmap[at..at + b.x_mis].fill(id);
@@ -755,7 +838,11 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
                     if s.collect {
                         self.f.counts.single_ref[c1][1][usize::from(bit1)] += 1;
                     }
-                    if bit1 { geom::ALTREF_FRAME } else { geom::GOLDEN_FRAME }
+                    if bit1 {
+                        geom::ALTREF_FRAME
+                    } else {
+                        geom::GOLDEN_FRAME
+                    }
                 } else {
                     geom::LAST_FRAME
                 };
@@ -809,7 +896,11 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
             for idy in (0..2).step_by(step_h) {
                 for idx in (0..2).step_by(step_w) {
                     let j = idy * 2 + idx;
-                    let bm = if seg_skip { ZERO } else { self.read_inter_mode(mctx) };
+                    let bm = if seg_skip {
+                        ZERO
+                    } else {
+                        self.read_inter_mode(mctx)
+                    };
                     let mut near = [Mv::ZERO; 2];
                     if bm == NEAREST || bm == NEAR {
                         for (r, slot) in near.iter_mut().enumerate().take(nref) {
@@ -897,7 +988,9 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
     fn read_mv(&mut self, reference: Mv) -> Mv {
         let fc = self.s.fc;
         let joint = self.b.tree(&prob::JOINT_TREE, &fc.mv.joints);
-        let hp = self.s.h.allow_hp && reference.row.unsigned_abs() < 64 && reference.col.unsigned_abs() < 64;
+        let hp = self.s.h.allow_hp
+            && reference.row.unsigned_abs() < 64
+            && reference.col.unsigned_abs() < 64;
         let mut d = Mv::ZERO;
         if joint == 2 || joint == 3 {
             d.row = self.read_mv_comp(0, hp) as i16;
@@ -944,7 +1037,11 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
     fn near(&self, b: &Blk, pos: [i8; 2]) -> Option<&Nb> {
         let r = b.row as isize + isize::from(pos[0]);
         let c = b.col as isize + isize::from(pos[1]);
-        if r < 0 || c < self.col0 as isize || r >= self.s.mi_rows as isize || c >= self.col1 as isize {
+        if r < 0
+            || c < self.col0 as isize
+            || r >= self.s.mi_rows as isize
+            || c >= self.col1 as isize
+        {
             return None;
         }
         if pos[0] == -1 {
@@ -957,7 +1054,11 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
     fn cell(&self, b: &Blk, pos: [i8; 2]) -> Option<MvRef> {
         let r = b.row as isize + isize::from(pos[0]);
         let c = b.col as isize + isize::from(pos[1]);
-        if r < 0 || c < self.col0 as isize || r >= self.s.mi_rows as isize || c >= self.col1 as isize {
+        if r < 0
+            || c < self.col0 as isize
+            || r >= self.s.mi_rows as isize
+            || c >= self.col1 as isize
+        {
             return None;
         }
         Some(self.f.mvs[r as usize * self.f.width + c as usize - self.col0])
@@ -991,7 +1092,8 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
             }
         };
         let prev = if s.h.use_prev_mvs {
-            s.prev_mvs.and_then(|m| m.get(b.row * s.mi_cols + b.col).copied())
+            s.prev_mvs
+                .and_then(|m| m.get(b.row * s.mi_cols + b.col).copied())
         } else {
             None
         };
@@ -1057,11 +1159,15 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
             }
             if different {
                 for pos in search {
-                    let Some(c) = self.cell(b, *pos) else { continue };
+                    let Some(c) = self.cell(b, *pos) else {
+                        continue;
+                    };
                     if c.refs[0] == INTRA_FRAME {
                         continue;
                     }
-                    if c.refs[0] != frame && push(&mut list, &mut count, flip(c.mv[0], c.refs[0], frame, bias)) {
+                    if c.refs[0] != frame
+                        && push(&mut list, &mut count, flip(c.mv[0], c.refs[0], frame, bias))
+                    {
                         break 'search;
                     }
                     if c.refs[1] > INTRA_FRAME
@@ -1182,7 +1288,11 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
                 let mut c = 0;
                 while c < vw {
                     let kind = if intra && plane == 0 && !lossless && tx != TX_32X32 {
-                        let mode = if b.bsize < BLOCK_8X8 { b.bmode[(r << 1) + c] } else { b.mode };
+                        let mode = if b.bsize < BLOCK_8X8 {
+                            b.bmode[(r << 1) + c]
+                        } else {
+                            b.mode
+                        };
                         geom::intra_tx_type(mode)
                     } else {
                         0
@@ -1204,8 +1314,16 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
         let n4h = (b.bh * 2) >> ssy;
         let right = (self.s.mi_cols as i32 - b.bw as i32 - b.col as i32) * 64;
         let bottom = (self.s.mi_rows as i32 - b.bh as i32 - b.row as i32) * 64;
-        let vw = if right >= 0 { n4w } else { (n4w as i32 + (right >> (5 + ssx))).max(0) as usize };
-        let vh = if bottom >= 0 { n4h } else { (n4h as i32 + (bottom >> (5 + ssy))).max(0) as usize };
+        let vw = if right >= 0 {
+            n4w
+        } else {
+            (n4w as i32 + (right >> (5 + ssx))).max(0) as usize
+        };
+        let vh = if bottom >= 0 {
+            n4h
+        } else {
+            (n4h as i32 + (bottom >> (5 + ssy))).max(0) as usize
+        };
         (n4w, n4h, vw, vh)
     }
 
@@ -1234,7 +1352,11 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
         let ctx = usize::from(anz) + usize::from(lnz);
         let h = self.s.h;
         let seg = usize::from(b.seg);
-        let dq = if plane == 0 { h.y_dq[seg] } else { h.uv_dq[seg] };
+        let dq = if plane == 0 {
+            h.y_dq[seg]
+        } else {
+            h.uv_dq[seg]
+        };
         let inter = b.refs[0] != INTRA_FRAME;
         let n_before = self.out.pos.len();
         let (eob, nz) = self.decode_coefs(tx, plane > 0, inter, dq, ctx, kind);
@@ -1316,7 +1438,10 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
                     *self.b = local;
                     return (c, (max_r + 1, max_c + 1));
                 }
-                ctx = (1 + usize::from(cache[usize::from(nb[2 * c])]) + usize::from(cache[usize::from(nb[2 * c + 1])])) >> 1;
+                ctx = (1
+                    + usize::from(cache[usize::from(nb[2 * c])])
+                    + usize::from(cache[usize::from(nb[2 * c + 1])]))
+                    >> 1;
                 band = usize::from(bands[c]);
                 p = &probs[band][ctx];
             }
@@ -1381,7 +1506,10 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
             max_c = max_c.max(col);
             c += 1;
             if c < max_eob {
-                ctx = (1 + usize::from(cache[usize::from(nb[2 * c])]) + usize::from(cache[usize::from(nb[2 * c + 1])])) >> 1;
+                ctx = (1
+                    + usize::from(cache[usize::from(nb[2 * c])])
+                    + usize::from(cache[usize::from(nb[2 * c + 1])]))
+                    >> 1;
             }
             dqv = i32::from(dq[1]);
         }
@@ -1433,7 +1561,15 @@ fn lower_precision(mv: Mv, allow_hp: bool) -> Mv {
     if allow_hp && mv.row.unsigned_abs() < 64 && mv.col.unsigned_abs() < 64 {
         return mv;
     }
-    let d = |v: i16| if v & 1 == 0 { v } else if v > 0 { v - 1 } else { v + 1 };
+    let d = |v: i16| {
+        if v & 1 == 0 {
+            v
+        } else if v > 0 {
+            v - 1
+        } else {
+            v + 1
+        }
+    };
     Mv {
         row: d(mv.row),
         col: d(mv.col),

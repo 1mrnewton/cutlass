@@ -19,20 +19,50 @@ fn matches_the_scalar_twin() {
     let mut tmp = vec![0u8; super::TMP];
     for case in 0..2000 {
         let src: Vec<u8> = (0..stride * 90)
-            .map(|i| if case % 3 == 0 { [0u8, 255][i % 2] } else { (rnd() & 255) as u8 })
+            .map(|i| {
+                if case % 3 == 0 {
+                    [0u8, 255][i % 2]
+                } else {
+                    (rnd() & 255) as u8
+                }
+            })
             .collect();
         let w = [4, 8, 16, 32, 64][case % 5];
         let h = [4, 8, 16, 32, 64, 2, 1][(rnd() % 7) as usize].min(64);
-        let pick = |r: u32| (r % 5 != 0).then(|| FILTERS[(r % 4) as usize]);
+        let pick = |r: u32| (!r.is_multiple_of(5)).then(|| FILTERS[(r % 4) as usize]);
         let fx = pick(rnd());
         let fy = pick(rnd());
         let avg = rnd() % 2 == 0;
         let at = 4 * stride + 4;
         let init: Vec<u8> = (0..64 * 64).map(|_| (rnd() & 255) as u8).collect();
         let mut want = init.clone();
-        predict_scalar(Block { dst: &mut want, dst_stride: 64, src: &src, at, src_stride: stride, w, h, fx, fy, avg, tmp: &mut tmp });
+        predict_scalar(Block {
+            dst: &mut want,
+            dst_stride: 64,
+            src: &src,
+            at,
+            src_stride: stride,
+            w,
+            h,
+            fx,
+            fy,
+            avg,
+            tmp: &mut tmp,
+        });
         let mut got = init.clone();
-        let ran = predict(Block { dst: &mut got, dst_stride: 64, src: &src, at, src_stride: stride, w, h, fx, fy, avg, tmp: &mut tmp });
+        let ran = predict(Block {
+            dst: &mut got,
+            dst_stride: 64,
+            src: &src,
+            at,
+            src_stride: stride,
+            w,
+            h,
+            fx,
+            fy,
+            avg,
+            tmp: &mut tmp,
+        });
         if !ran {
             continue;
         }

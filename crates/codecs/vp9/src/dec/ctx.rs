@@ -41,7 +41,6 @@ impl Default for Nb {
     }
 }
 
-
 pub(crate) fn has_second(mi: &Nb) -> bool {
     mi.refs[1] > INTRA_FRAME
 }
@@ -242,7 +241,11 @@ pub(crate) fn p2_two_singles(above: &Nb, left: &Nb) -> usize {
     }
 }
 
-pub(crate) fn comp_ref_ctx(above: Option<&Nb>, left: Option<&Nb>, header: &crate::header::Header) -> usize {
+pub(crate) fn comp_ref_ctx(
+    above: Option<&Nb>,
+    left: Option<&Nb>,
+    header: &crate::header::Header,
+) -> usize {
     let fixed = header.comp_fixed;
     let var0 = header.comp_var[0];
     let var1 = header.comp_var[1];
@@ -264,7 +267,14 @@ pub(crate) fn comp_one(edge: &Nb, var: u8, var_at: usize) -> usize {
     }
 }
 
-pub(crate) fn comp_both(above: &Nb, left: &Nb, fixed: u8, var0: u8, var1: u8, var_at: usize) -> usize {
+pub(crate) fn comp_both(
+    above: &Nb,
+    left: &Nb,
+    fixed: u8,
+    var0: u8,
+    var1: u8,
+    var_at: usize,
+) -> usize {
     let above_intra = !is_inter(above);
     let left_intra = !is_inter(left);
     if above_intra && left_intra {
@@ -285,7 +295,14 @@ pub(crate) fn comp_one_edge(edge: &Nb, var: u8, var_at: usize) -> usize {
     1 + 2 * usize::from(seen != var)
 }
 
-pub(crate) fn comp_inter(above: &Nb, left: &Nb, fixed: u8, var0: u8, var1: u8, var_at: usize) -> usize {
+pub(crate) fn comp_inter(
+    above: &Nb,
+    left: &Nb,
+    fixed: u8,
+    var0: u8,
+    var1: u8,
+    var_at: usize,
+) -> usize {
     let above_single = !has_second(above);
     let left_single = !has_second(left);
     let above_ref = if above_single {
@@ -323,7 +340,12 @@ pub(crate) fn comp_two_singles(above_ref: u8, left_ref: u8, fixed: u8, var0: u8)
     }
 }
 
-pub(crate) fn comp_single_and_compound(above_ref: u8, left_ref: u8, left_single: bool, var: u8) -> usize {
+pub(crate) fn comp_single_and_compound(
+    above_ref: u8,
+    left_ref: u8,
+    left_single: bool,
+    var: u8,
+) -> usize {
     let compound = if left_single { above_ref } else { left_ref };
     let single = if left_single { left_ref } else { above_ref };
     if compound == var && single != var {
@@ -338,4 +360,3 @@ pub(crate) fn comp_single_and_compound(above_ref: u8, left_ref: u8, left_single:
 pub(crate) fn mentions(mi: &Nb, frame: u8) -> bool {
     mi.refs[0] == frame || mi.refs[1] == frame
 }
-

@@ -80,7 +80,17 @@ struct Run {
 /// `x..x + 16`. Each half has its filter (`None`: left alone) and level.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn pair<P: Pixel>(buf: &mut [P], base: usize, stride: usize, x: usize, y: usize, vertical: bool, wd: [Option<Wd>; 2], thr: [Thresh; 2], bd: u32) {
+fn pair<P: Pixel>(
+    buf: &mut [P],
+    base: usize,
+    stride: usize,
+    x: usize,
+    y: usize,
+    vertical: bool,
+    wd: [Option<Wd>; 2],
+    thr: [Thresh; 2],
+    bd: u32,
+) {
     if wd[0].is_none() && wd[1].is_none() {
         return;
     }
@@ -95,7 +105,15 @@ fn pair<P: Pixel>(buf: &mut [P], base: usize, stride: usize, x: usize, y: usize,
 /// drivers stay small.
 #[cold]
 #[inline(never)]
-fn pair_scalar<P: Pixel>(buf: &mut [P], at: usize, stride: usize, vertical: bool, wd: [Option<Wd>; 2], thr: [Thresh; 2], bd: u32) {
+fn pair_scalar<P: Pixel>(
+    buf: &mut [P],
+    at: usize,
+    stride: usize,
+    vertical: bool,
+    wd: [Option<Wd>; 2],
+    thr: [Thresh; 2],
+    bd: u32,
+) {
     let (step, line) = if vertical { (1, stride) } else { (stride, 1) };
     for (h, w) in wd.iter().enumerate() {
         if let Some(w) = *w {
@@ -107,7 +125,17 @@ fn pair_scalar<P: Pixel>(buf: &mut [P], at: usize, stride: usize, vertical: bool
 /// One line across an edge, for the per-sample chroma path.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn one<P: Pixel>(buf: &mut [P], base: usize, stride: usize, x: usize, y: usize, vertical: bool, wd: Wd, t: Thresh, bd: u32) {
+fn one<P: Pixel>(
+    buf: &mut [P],
+    base: usize,
+    stride: usize,
+    x: usize,
+    y: usize,
+    vertical: bool,
+    wd: Wd,
+    t: Thresh,
+    bd: u32,
+) {
     let at = y * stride + x - base;
     let (step, line) = if vertical { (1, stride) } else { (stride, 1) };
     filter(buf, at, step, line, 1, wd, t, bd);
@@ -135,7 +163,18 @@ fn any(r: &Run) -> u8 {
 /// Two strips, 8 rows apart, of vertical edges: each column's edges of
 /// both strips at once, then its inner 4×4 edges.
 #[allow(clippy::too_many_arguments)]
-fn vertical_pair<P: Pixel>(buf: &mut [P], base: usize, stride: usize, x0: usize, y: usize, cols: usize, a: &Run, b: Option<&Run>, levels: &Levels, bd: u32) {
+fn vertical_pair<P: Pixel>(
+    buf: &mut [P],
+    base: usize,
+    stride: usize,
+    x0: usize,
+    y: usize,
+    cols: usize,
+    a: &Run,
+    b: Option<&Run>,
+    levels: &Levels,
+    bd: u32,
+) {
     let limit = if cols >= 8 { 0xff } else { (1u8 << cols) - 1 };
     let mut bits = (any(a) | b.map_or(0, any)) & limit;
     while bits != 0 {
@@ -148,7 +187,11 @@ fn vertical_pair<P: Pixel>(buf: &mut [P], base: usize, stride: usize, x0: usize,
         let ka = kind(a, bit);
         let kb = b.and_then(|b| kind(b, bit));
         // libvpx filters two 16-wide strips with the first strip's level.
-        let thr = if ka == Some(Wd::W16) && kb == Some(Wd::W16) { [ta, ta] } else { [ta, tb] };
+        let thr = if ka == Some(Wd::W16) && kb == Some(Wd::W16) {
+            [ta, ta]
+        } else {
+            [ta, tb]
+        };
         pair(buf, base, stride, x, y, true, [ka, kb], thr, bd);
         let ia = (a.inner & bit != 0).then_some(Wd::W4);
         let ib = b.and_then(|b| (b.inner & bit != 0).then_some(Wd::W4));
@@ -160,7 +203,17 @@ fn vertical_pair<P: Pixel>(buf: &mut [P], base: usize, stride: usize, x0: usize,
 /// 16-wide columns pair as libvpx pairs them, scanning from the left, and
 /// share the first's level.
 #[allow(clippy::too_many_arguments)]
-fn horizontal<P: Pixel>(buf: &mut [P], base: usize, stride: usize, x0: usize, y: usize, cols: usize, r: &Run, levels: &Levels, bd: u32) {
+fn horizontal<P: Pixel>(
+    buf: &mut [P],
+    base: usize,
+    stride: usize,
+    x0: usize,
+    y: usize,
+    cols: usize,
+    r: &Run,
+    levels: &Levels,
+    bd: u32,
+) {
     let limit = if cols >= 8 { 0xff } else { (1u8 << cols) - 1 };
     let bits = any(r) & limit;
     let wide = r.wide & limit;
@@ -177,24 +230,55 @@ fn horizontal<P: Pixel>(buf: &mut [P], base: usize, stride: usize, x0: usize, y:
         let x = x0 + col * 8;
         let t = levels.dsp(r.lfl[col]);
         if wide & bit != 0 && wide & (bit << 1) != 0 && col + 1 < cols {
-            pair(buf, base, stride, x, y, false, [Some(Wd::W16); 2], [t, t], bd);
+            pair(
+                buf,
+                base,
+                stride,
+                x,
+                y,
+                false,
+                [Some(Wd::W16); 2],
+                [t, t],
+                bd,
+            );
             col += 2;
             continue;
         }
         // The next column joins unless it starts a 16-wide pair.
         let next = bit << 1;
-        let merge = col + 1 < cols && !(wide & next != 0 && wide & (next << 1) != 0 && col + 2 < cols);
+        let merge =
+            col + 1 < cols && !(wide & next != 0 && wide & (next << 1) != 0 && col + 2 < cols);
         let tn = if merge { levels.dsp(r.lfl[col + 1]) } else { t };
         let kn = if merge { kind(r, next) } else { None };
         let i0 = (r.inner & bit != 0).then_some(Wd::W4);
         let i1 = (merge && r.inner & next != 0).then_some(Wd::W4);
-        pair(buf, base, stride, x, y, false, [kind(r, bit), kn], [t, tn], bd);
+        pair(
+            buf,
+            base,
+            stride,
+            x,
+            y,
+            false,
+            [kind(r, bit), kn],
+            [t, tn],
+            bd,
+        );
         pair(buf, base, stride, x, y + 4, false, [i0, i1], [t, tn], bd);
         col += if merge { 2 } else { 1 };
     }
 }
 
-fn luma<P: Pixel>(buf: &mut [P], base: usize, stride: usize, m: &Mask, levels: &Levels, g: &Geo, mi_row: usize, mi_col: usize) {
+#[allow(clippy::too_many_arguments)]
+fn luma<P: Pixel>(
+    buf: &mut [P],
+    base: usize,
+    stride: usize,
+    m: &Mask,
+    levels: &Levels,
+    g: &Geo,
+    mi_row: usize,
+    mi_col: usize,
+) {
     let cols = g.mi_cols.saturating_sub(mi_col).min(8);
     let lfl = |row: usize| -> [u8; 8] { core::array::from_fn(|c| m.lfl_y[row * 8 + c]) };
     let vrun = |row: usize| Run {
@@ -209,7 +293,18 @@ fn luma<P: Pixel>(buf: &mut [P], base: usize, stride: usize, m: &Mask, levels: &
         let y = (mi_row + row) * 8;
         let a = vrun(row);
         let b = (row + 1 < 8 && mi_row + row + 1 < g.mi_rows).then(|| vrun(row + 1));
-        vertical_pair(buf, base, stride, mi_col * 8, y, cols, &a, b.as_ref(), levels, g.bd);
+        vertical_pair(
+            buf,
+            base,
+            stride,
+            mi_col * 8,
+            y,
+            cols,
+            &a,
+            b.as_ref(),
+            levels,
+            g.bd,
+        );
         row += 2;
     }
     for row in 0..8 {
@@ -225,13 +320,35 @@ fn luma<P: Pixel>(buf: &mut [P], base: usize, stride: usize, m: &Mask, levels: &
             inner: byte(m.int_y, row),
             lfl: lfl(row),
         };
-        horizontal(buf, base, stride, mi_col * 8, (mi_row + row) * 8, cols, &r, levels, g.bd);
+        horizontal(
+            buf,
+            base,
+            stride,
+            mi_col * 8,
+            (mi_row + row) * 8,
+            cols,
+            &r,
+            levels,
+            g.bd,
+        );
     }
 }
 
-fn chroma420<P: Pixel>(buf: &mut [P], base: usize, stride: usize, m: &Mask, levels: &Levels, g: &Geo, mi_row: usize, mi_col: usize) {
+#[allow(clippy::too_many_arguments)]
+fn chroma420<P: Pixel>(
+    buf: &mut [P],
+    base: usize,
+    stride: usize,
+    m: &Mask,
+    levels: &Levels,
+    g: &Geo,
+    mi_row: usize,
+    mi_col: usize,
+) {
     let cols = g.mi_cols.saturating_sub(mi_col).div_ceil(2).min(4);
-    let lfl = |row: usize| -> [u8; 8] { core::array::from_fn(|c| if c < 4 { m.lfl_y[row * 16 + c * 2] } else { 0 }) };
+    let lfl = |row: usize| -> [u8; 8] {
+        core::array::from_fn(|c| if c < 4 { m.lfl_y[row * 16 + c * 2] } else { 0 })
+    };
     let vrun = |row: usize| Run {
         wide: nibble(m.left_uv[2], row),
         mid: nibble(m.left_uv[1], row),
@@ -244,7 +361,18 @@ fn chroma420<P: Pixel>(buf: &mut [P], base: usize, stride: usize, m: &Mask, leve
         let y = mi_row * 4 + row * 8;
         let a = vrun(row);
         let b = (row + 1 < 4 && mi_row + (row + 1) * 2 < g.mi_rows).then(|| vrun(row + 1));
-        vertical_pair(buf, base, stride, mi_col * 4, y, cols, &a, b.as_ref(), levels, g.bd);
+        vertical_pair(
+            buf,
+            base,
+            stride,
+            mi_col * 4,
+            y,
+            cols,
+            &a,
+            b.as_ref(),
+            levels,
+            g.bd,
+        );
         row += 2;
     }
     for row in 0..4 {
@@ -258,19 +386,47 @@ fn chroma420<P: Pixel>(buf: &mut [P], base: usize, stride: usize, m: &Mask, leve
             wide: pick(m.above_uv[2]),
             mid: pick(m.above_uv[1]),
             narrow: pick(m.above_uv[0]),
-            inner: if mi + 1 == g.mi_rows { 0 } else { nibble(m.int_uv, row) },
+            inner: if mi + 1 == g.mi_rows {
+                0
+            } else {
+                nibble(m.int_uv, row)
+            },
             lfl: lfl(row),
         };
-        horizontal(buf, base, stride, mi_col * 4, mi_row * 4 + row * 8, cols, &r, levels, g.bd);
+        horizontal(
+            buf,
+            base,
+            stride,
+            mi_col * 4,
+            mi_row * 4 + row * 8,
+            cols,
+            &r,
+            levels,
+            g.bd,
+        );
     }
 }
 
 /// 4:2:2 and 4:4:0 chroma, one sample of an edge at a time (clause
 /// 8.8.2's edge loop).
-fn general<P: Pixel>(buf: &mut [P], base: usize, stride: usize, grid: &[LfMi], levels: &Levels, g: &Geo, mi_row: usize, mi_col: usize) {
+#[allow(clippy::too_many_arguments)]
+fn general<P: Pixel>(
+    buf: &mut [P],
+    base: usize,
+    stride: usize,
+    grid: &[LfMi],
+    levels: &Levels,
+    g: &Geo,
+    mi_row: usize,
+    mi_col: usize,
+) {
     let (ssx, ssy) = (g.ss_x, g.ss_y);
     for pass in 0..2 {
-        let (sub, edge_len) = if pass == 0 { (ssx, 64 >> ssy) } else { (ssy, 64 >> ssx) };
+        let (sub, edge_len) = if pass == 0 {
+            (ssx, 64 >> ssy)
+        } else {
+            (ssy, 64 >> ssx)
+        };
         let edges = 16 >> sub;
         for edge in 0..edges {
             for along in 0..edge_len {
@@ -289,7 +445,11 @@ fn general<P: Pixel>(buf: &mut [P], base: usize, stride: usize, grid: &[LfMi], l
                 let loop_row = ((y >> 3) >> ssy) << ssy;
                 let mi = grid[loop_row * g.mi_cols + loop_col];
                 let tx = geom::uv_tx(mi.bsize, mi.tx, ssx as u32, ssy as u32);
-                let sb_size = if sub == 0 { mi.bsize } else { mi.bsize.max(geom::BLOCK_16X16) };
+                let sb_size = if sub == 0 {
+                    mi.bsize
+                } else {
+                    mi.bsize.max(geom::BLOCK_16X16)
+                };
                 let (wide, high) = geom::mi_wh(sb_size);
                 let is_block = if pass == 0 {
                     wide > 0 && x % (8 * wide) == 0
@@ -297,7 +457,12 @@ fn general<P: Pixel>(buf: &mut [P], base: usize, stride: usize, grid: &[LfMi], l
                     high > 0 && y % (8 * high) == 0
                 };
                 let step = 1usize << tx;
-                let is_tx = if pass == 1 && ssx == 1 && g.mi_cols % 2 == 1 && edge % 2 == 1 && x + 8 >= g.mi_cols * 8 {
+                let is_tx = if pass == 1
+                    && ssx == 1
+                    && g.mi_cols % 2 == 1
+                    && edge % 2 == 1
+                    && x + 8 >= g.mi_cols * 8
+                {
                     false
                 } else {
                     edge % step == 0
@@ -313,7 +478,11 @@ fn general<P: Pixel>(buf: &mut [P], base: usize, stride: usize, grid: &[LfMi], l
                     continue;
                 }
                 let is32 = edge % 8 == 0;
-                let tbase = if tx == TX_4X4 && is32 { TX_8X8 } else { tx.min(TX_16X16) };
+                let tbase = if tx == TX_4X4 && is32 {
+                    TX_8X8
+                } else {
+                    tx.min(TX_16X16)
+                };
                 let clipped = tbase == TX_16X16
                     && ((pass == 0 && ssx == 1 && (x >> 3) + 1 == g.mi_cols)
                         || (pass == 1 && ssy == 1 && (y >> 3) + 1 == g.mi_rows));
@@ -353,7 +522,9 @@ mod order_tests {
             seed >> 8
         };
         for case in 0..5000 {
-            let buf: Vec<u8> = (0..stride * 40).map(|i| (100 + (i % 7) as u32 + rnd() % 3) as u8).collect();
+            let buf: Vec<u8> = (0..stride * 40)
+                .map(|i| (100 + (i % 7) as u32 + rnd() % 3) as u8)
+                .collect();
             let wide = (rnd() & 0xff) as u8;
             let mid = (rnd() & 0xff) as u8 & !wide;
             let narrow = (rnd() & 0xff) as u8 & !wide & !mid;
@@ -374,16 +545,39 @@ mod order_tests {
                 let x = 8 + 8 * col;
                 let t = levels.dsp(r.lfl[col]);
                 if col + 1 < cols && r.wide & bit != 0 && r.wide & (bit << 1) != 0 {
-                    pair(&mut b, 0, stride, x, 16, false, [Some(Wd::W16); 2], [t, t], 8);
+                    pair(
+                        &mut b,
+                        0,
+                        stride,
+                        x,
+                        16,
+                        false,
+                        [Some(Wd::W16); 2],
+                        [t, t],
+                        8,
+                    );
                     col += 2;
                     continue;
                 }
-                pair(&mut b, 0, stride, x, 16, false, [kind(&r, bit), None], [t, t], 8);
+                pair(
+                    &mut b,
+                    0,
+                    stride,
+                    x,
+                    16,
+                    false,
+                    [kind(&r, bit), None],
+                    [t, t],
+                    8,
+                );
                 let i = (r.inner & bit != 0).then_some(Wd::W4);
                 pair(&mut b, 0, stride, x, 20, false, [i, None], [t, t], 8);
                 col += 1;
             }
-            assert_eq!(a, b, "case {case} cols {cols} {wide:08b} {mid:08b} {narrow:08b}");
+            assert_eq!(
+                a, b,
+                "case {case} cols {cols} {wide:08b} {mid:08b} {narrow:08b}"
+            );
         }
     }
 }

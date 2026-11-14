@@ -86,7 +86,9 @@ impl<P> SharedFrame<P> {
         // `0..n` lies in the buffer, and `UnsafeCell<P>` has the layout of
         // `P`.
         #[allow(unsafe_code)]
-        let s = unsafe { std::slice::from_raw_parts(UnsafeCell::raw_get(buf.as_ptr()).cast_const(), n) };
+        let s = unsafe {
+            std::slice::from_raw_parts(UnsafeCell::raw_get(buf.as_ptr()).cast_const(), n)
+        };
         (s, self.strides[p])
     }
 
@@ -166,7 +168,10 @@ impl<P> FrameWriter<P> {
             // and `UnsafeCell<P>` has the layout of `P`.
             #[allow(unsafe_code)]
             let data = unsafe {
-                std::slice::from_raw_parts_mut(UnsafeCell::raw_get(buf.as_ptr().add(lo)), buf.len() - lo)
+                std::slice::from_raw_parts_mut(
+                    UnsafeCell::raw_get(buf.as_ptr().add(lo)),
+                    buf.len() - lo,
+                )
             };
             *slot = Some(Tail {
                 data,

@@ -15,8 +15,8 @@ pub mod tile;
 pub mod tx;
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 
 use cutlass_decode::CodecError;
 
@@ -112,6 +112,7 @@ impl FrameEncoder {
     }
 
     /// The picture the last frame reconstructed (what a decoder shows).
+    #[cfg(test)]
     pub fn last(&self) -> Option<&Arc<Pic<u8>>> {
         self.dec.ref8(0)
     }
@@ -188,7 +189,11 @@ impl FrameEncoder {
         b.write_bit(false); // frame_parallel_decoding_mode
         b.write(0, 2); // frame_context_idx
         // Loop filter: libvpx's level from the quantizer.
-        let level = if lossless || std::env::var("NOLF").is_ok() { 0 } else { filter_level(qindex, key) };
+        let level = if lossless {
+            0
+        } else {
+            filter_level(qindex, key)
+        };
         b.write(u32::from(level), 6);
         b.write(0, 3); // sharpness
         b.write_bit(true); // mode_ref_delta_enabled (the defaults)
@@ -207,7 +212,9 @@ impl FrameEncoder {
         b.write_bit(false); // one tile row
         let len = u32::try_from(compressed.len()).unwrap_or(u32::MAX);
         if len > u32::from(u16::MAX) {
-            return Err(CodecError::Limit { what: "compressed header" });
+            return Err(CodecError::Limit {
+                what: "compressed header",
+            });
         }
         b.write(len, 16);
         let mut out = b.finish();
@@ -222,7 +229,16 @@ impl FrameEncoder {
         &mut self,
         parsed: &Parsed<'_>,
         fp: FrameParams,
-    ) -> Result<(Vec<u8>, prob::Counts, Vec<frame::MvRef>, Vec<u8>, Arc<Pic<u8>>), CodecError> {
+    ) -> Result<
+        (
+            Vec<u8>,
+            prob::Counts,
+            Vec<frame::MvRef>,
+            Vec<u8>,
+            Arc<Pic<u8>>,
+        ),
+        CodecError,
+    > {
         let h = &parsed.header;
         let dims = Dims::new(h.width as usize, h.height as usize, 1, 1, 8);
         let mi_cols = dims.width.div_ceil(8);
@@ -230,7 +246,11 @@ impl FrameEncoder {
         let sb_cols = mi_cols.div_ceil(8);
         let sb_rows = mi_rows.div_ceil(8);
         let slot = |i: usize| self.dec.ref8(usize::from(h.ref_index[i])).map(|p| &**p);
-        let refs = if h.is_intra() { [None, None, None] } else { [slot(0), slot(1), slot(2)] };
+        let refs = if h.is_intra() {
+            [None, None, None]
+        } else {
+            [slot(0), slot(1), slot(2)]
+        };
         // A reference worth searching holds a picture no earlier one does.
         let same = |a: Option<&Pic<u8>>, b: Option<&Pic<u8>>| match (a, b) {
             (Some(a), Some(b)) => std::ptr::eq(a, b),
@@ -260,7 +280,11 @@ impl FrameEncoder {
         };
         let filter_on = h.filter_level != 0;
         let mut writer = frame::writer(&dims, self.dec.spare8());
-        let prev_mvs = if h.use_prev_mvs { self.dec.prev_mvs() } else { None };
+        let prev_mvs = if h.use_prev_mvs {
+            self.dec.prev_mvs()
+        } else {
+            None
+        };
         let ac = i32::from(h.y_dq[0][1]);
         let shared = Shared {
             h,
@@ -270,7 +294,11 @@ impl FrameEncoder {
             mi_cols,
             mi_rows,
             intra_frame: h.is_intra(),
-            part_probs: if h.is_intra() { prob::kf_partition() } else { parsed.fc.partition },
+            part_probs: if h.is_intra() {
+                prob::kf_partition()
+            } else {
+                parsed.fc.partition
+            },
             filter_on,
             lambda: sad_per_bit(ac),
             rd_lambda: rd_lambda(i32::from(h.y_dq[0][0])),
@@ -288,7 +316,9 @@ impl FrameEncoder {
         // Each tile column on its own thread, into its own copy of the
         // picture (intra prediction reads nothing across tile columns).
         let ntiles = 1usize << h.log2_tile_cols;
-        let edges: Vec<usize> = (0..=ntiles).map(|i| tile_edge(i, mi_cols, h.log2_tile_cols)).collect();
+        let edges: Vec<usize> = (0..=ntiles)
+            .map(|i| tile_edge(i, mi_cols, h.log2_tile_cols))
+            .collect();
         while self.work.len() < ntiles {
             self.work.push(TileWork::new(&dims));
         }
@@ -298,18 +328,32 @@ impl FrameEncoder {
                 buf.resize(plane_len[p], 0);
             }
             let tsb = (col1 - col0).div_ceil(8);
-            t.state.reset(col0, col1 - col0, mi_rows, sb_rows * tsb, false);
+            t.state
+                .reset(col0, col1 - col0, mi_rows, sb_rows * tsb, false);
             let mut w = BoolWriter::new();
             let [y, u, v] = &mut t.pix;
             let mut views = [
-                View { data: &mut y[..], base: 0, stride: dims.stride[0] },
-                View { data: &mut u[..], base: 0, stride: dims.stride[1] },
-                View { data: &mut v[..], base: 0, stride: dims.stride[2] },
+                View {
+                    data: &mut y[..],
+                    base: 0,
+                    stride: dims.stride[0],
+                },
+                View {
+                    data: &mut u[..],
+                    base: 0,
+                    stride: dims.stride[1],
+                },
+                View {
+                    data: &mut v[..],
+                    base: 0,
+                    stride: dims.stride[2],
+                },
             ];
             let mut seeds = std::mem::take(&mut t.seeds);
             for r in 0..sb_rows {
                 let mut rec = Recon::new(&ctx, &mut views, &mut t.scratch);
-                let mut tile = Tile::new(&shared, &mut t.state, &mut w, &mut rec, (col0, col1), seeds);
+                let mut tile =
+                    Tile::new(&shared, &mut t.state, &mut w, &mut rec, (col0, col1), seeds);
                 tile.sb_row(r * 8);
                 seeds = tile.finish();
             }
@@ -333,7 +377,12 @@ impl FrameEncoder {
                     .collect();
                 handles
                     .into_iter()
-                    .map(|h| h.join().unwrap_or(Err(CodecError::Malformed { at_bit: 0, what: "vp9 encoder thread" })))
+                    .map(|h| {
+                        h.join().unwrap_or(Err(CodecError::Malformed {
+                            at_bit: 0,
+                            what: "vp9 encoder thread",
+                        }))
+                    })
                     .collect()
             });
             for r in results {
@@ -356,17 +405,20 @@ impl FrameEncoder {
                     let (x0, x1) = ((c0 * 8) >> ss, ((c1 * 8) >> ss).min(dims.stride[p]));
                     let stride = v.stride;
                     for row in 0..dims.rows[p] {
-                        v.data[row * stride + x0..row * stride + x1].copy_from_slice(&t.pix[p][row * stride + x0..row * stride + x1]);
+                        v.data[row * stride + x0..row * stride + x1]
+                            .copy_from_slice(&t.pix[p][row * stride + x0..row * stride + x1]);
                     }
                 }
                 let st = &t.state;
                 let w = c1 - c0;
                 let tsb = w.div_ceil(8);
                 for r in 0..sb_rows {
-                    masks[r * sb_cols + c0 / 8..r * sb_cols + c0 / 8 + tsb].copy_from_slice(&st.masks[r * tsb..r * tsb + tsb]);
+                    masks[r * sb_cols + c0 / 8..r * sb_cols + c0 / 8 + tsb]
+                        .copy_from_slice(&st.masks[r * tsb..r * tsb + tsb]);
                 }
                 for r in 0..mi_rows {
-                    mvs[r * mi_cols + c0..r * mi_cols + c1].copy_from_slice(&st.mvs[r * w..r * w + w]);
+                    mvs[r * mi_cols + c0..r * mi_cols + c1]
+                        .copy_from_slice(&st.mvs[r * w..r * w + w]);
                 }
                 counts.add(&st.counts);
                 let d = &t.data;
@@ -408,8 +460,7 @@ fn sad_per_bit(ac: i32) -> u32 {
 /// The sample SSE a bit is worth: libvpx's `rdmult` (88·q²/24, on
 /// distortions 16 times the SSE, rates in 1/512 bits over a 128 scale).
 fn rd_lambda(dc: i32) -> f32 {
-    let k = std::env::var("LK").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
-    0.00179 * (dc * dc) as f32 * k
+    0.00179 * (dc * dc) as f32
 }
 
 /// libvpx's loop filter level from the quantizer (`LPF_PICK_FROM_Q`,
@@ -457,7 +508,10 @@ fn compressed_header(lossless: bool, inter: bool) -> Result<Vec<u8>, CodecError>
             none(&mut w, 1 + c.classes.len() + 1 + c.bits.len());
         }
         for c in &fc.mv.comp {
-            none(&mut w, c.class0_fp.len() * c.class0_fp[0].len() + c.fp.len());
+            none(
+                &mut w,
+                c.class0_fp.len() * c.class0_fp[0].len() + c.fp.len(),
+            );
         }
         for _ in &fc.mv.comp {
             none(&mut w, 2); // class0_hp, hp

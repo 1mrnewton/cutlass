@@ -51,7 +51,10 @@ pub fn sad(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u32 
 fn sse_w<const W: usize>(a: &[u8], sa: usize, b: &[u8], sb: usize, h: usize) -> u64 {
     let mut acc = 0u64;
     for r in 0..h {
-        let (Some(x), Some(y)) = (a[r * sa..].first_chunk::<W>(), b[r * sb..].first_chunk::<W>()) else {
+        let (Some(x), Some(y)) = (
+            a[r * sa..].first_chunk::<W>(),
+            b[r * sb..].first_chunk::<W>(),
+        ) else {
             continue;
         };
         let mut s = 0u32;
@@ -88,7 +91,10 @@ pub fn sse(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u64 
 
 #[inline(always)]
 fn across<const W: usize>(b: &[u8], fx: u16, out: &mut [u16; W]) {
-    let (Some(p), Some(q)) = (b.first_chunk::<W>(), b.get(1..).and_then(|t| t.first_chunk::<W>())) else {
+    let (Some(p), Some(q)) = (
+        b.first_chunk::<W>(),
+        b.get(1..).and_then(|t| t.first_chunk::<W>()),
+    ) else {
         return;
     };
     for i in 0..W {
@@ -97,7 +103,15 @@ fn across<const W: usize>(b: &[u8], fx: u16, out: &mut [u16; W]) {
 }
 
 #[inline(always)]
-fn bil_w<const W: usize>(a: &[u8], sa: usize, b: &[u8], sb: usize, h: usize, fx: u32, fy: u32) -> u32 {
+fn bil_w<const W: usize>(
+    a: &[u8],
+    sa: usize,
+    b: &[u8],
+    sb: usize,
+    h: usize,
+    fx: u32,
+    fy: u32,
+) -> u32 {
     let (fx, fy) = (fx as u16, fy as u16);
     let mut acc = 0;
     let mut top = [0u16; W];
@@ -120,7 +134,17 @@ fn bil_w<const W: usize>(a: &[u8], sa: usize, b: &[u8], sb: usize, h: usize, fx:
 /// (libvpx's sub-sample search proxy). `b` must hold a row and a column
 /// past the block.
 #[inline]
-pub fn sad_bilinear(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize, fy: u32, fx: u32) -> u32 {
+#[allow(clippy::too_many_arguments)]
+pub fn sad_bilinear(
+    a: &[u8],
+    sa: usize,
+    b: &[u8],
+    sb: usize,
+    w: usize,
+    h: usize,
+    fy: u32,
+    fx: u32,
+) -> u32 {
     wide(|| match w {
         64 => bil_w::<64>(a, sa, b, sb, h, fx, fy),
         32 => bil_w::<32>(a, sa, b, sb, h, fx, fy),
@@ -184,7 +208,11 @@ mod tests {
                             want += v.abs_diff(u32::from(a[r * 80 + c]));
                         }
                     }
-                    assert_eq!(sad_bilinear(&a, 80, &b, 79, w, h, fy, fx), want, "{w}x{h} {fy} {fx}");
+                    assert_eq!(
+                        sad_bilinear(&a, 80, &b, 79, w, h, fy, fx),
+                        want,
+                        "{w}x{h} {fy} {fx}"
+                    );
                 }
             }
         }

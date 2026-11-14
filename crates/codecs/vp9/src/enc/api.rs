@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cutlass_encode::video::{VideoEncoder, VideoInput};
-use cutlass_encode::{CodecError, CodecId, CodecParams, EncodeFactory, Packet, PixelFormat, Plane, VideoFrame};
+use cutlass_encode::{
+    CodecError, CodecId, CodecParams, EncodeFactory, Packet, PixelFormat, Plane, VideoFrame,
+};
 
 use super::{FrameEncoder, FrameParams};
 
@@ -70,7 +72,14 @@ pub struct Vp9Encoder {
 impl Vp9Encoder {
     /// Every frame at quantizer index `qindex` (0: lossless).
     pub fn with_quantizer(width: u32, height: u32, qindex: u8) -> Result<Self, CodecError> {
-        Self::with_options(width, height, Vp9Options { qindex, ..Vp9Options::default() })
+        Self::with_options(
+            width,
+            height,
+            Vp9Options {
+                qindex,
+                ..Vp9Options::default()
+            },
+        )
     }
 
     pub fn with_options(width: u32, height: u32, opts: Vp9Options) -> Result<Self, CodecError> {
@@ -91,10 +100,14 @@ impl Vp9Encoder {
     /// that rate.
     pub fn open(params: &CodecParams) -> Result<Self, CodecError> {
         if params.codec != CodecId::Vp9 {
-            return Err(CodecError::Unsupported { what: "vp9 encoder" });
+            return Err(CodecError::Unsupported {
+                what: "vp9 encoder",
+            });
         }
         if params.pixel != PixelFormat::Yuv420p {
-            return Err(CodecError::Unsupported { what: "vp9 pixel format" });
+            return Err(CodecError::Unsupported {
+                what: "vp9 pixel format",
+            });
         }
         let opts = Vp9Options {
             bitrate: params.bitrate,
@@ -114,7 +127,11 @@ impl Vp9Encoder {
     }
 
     /// Codes one 4:2:0 picture: `planes` are Y, U, V with their strides.
-    pub fn encode_planes(&mut self, planes: [(&[u8], usize); 3], seconds: f64) -> Result<(Vec<u8>, bool), CodecError> {
+    pub fn encode_planes(
+        &mut self,
+        planes: [(&[u8], usize); 3],
+        seconds: f64,
+    ) -> Result<(Vec<u8>, bool), CodecError> {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(CodecError::Cancelled);
         }
@@ -122,8 +139,14 @@ impl Vp9Encoder {
         let key = self.force_key || self.since_key >= self.opts.keyint;
         // A golden frame every `GF_INTERVAL` frames, coded finer: the
         // frames after it predict from it.
-        let golden = !key && self.since_key % GF_INTERVAL == 0;
-        let kind = if key { 0 } else if golden { 1 } else { 2 };
+        let golden = !key && self.since_key.is_multiple_of(GF_INTERVAL);
+        let kind = if key {
+            0
+        } else if golden {
+            1
+        } else {
+            2
+        };
         self.enc.load(planes);
         let qindex = self.rc.qindex(kind);
         let coded = self.enc.encode(FrameParams {
@@ -142,7 +165,20 @@ impl Vp9Encoder {
     /// The decoder configuration (`vpcC`, version 1) for the given colour
     /// codes: profile 0, level unset, 8-bit 4:2:0, limited range.
     pub fn vpcc_with_colour(&self, [primaries, transfer, matrix]: [u8; 3]) -> Vec<u8> {
-        vec![1, 0, 0, 0, 0, 0, (8 << 4) | (1 << 1), primaries, transfer, matrix, 0, 0]
+        vec![
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            (8 << 4) | (1 << 1),
+            primaries,
+            transfer,
+            matrix,
+            0,
+            0,
+        ]
     }
 }
 
@@ -154,22 +190,38 @@ impl VideoEncoder for Vp9Encoder {
     fn push(&mut self, input: &VideoInput) -> Result<Vec<Packet>, CodecError> {
         let f = &input.frame;
         if f.format != PixelFormat::Yuv420p {
-            return Err(CodecError::Unsupported { what: "vp9 pixel format" });
+            return Err(CodecError::Unsupported {
+                what: "vp9 pixel format",
+            });
         }
         if f.width != self.width || f.height != self.height {
-            return Err(CodecError::InvalidApi { what: "picture size" });
+            return Err(CodecError::InvalidApi {
+                what: "picture size",
+            });
         }
         if self.opts.bitrate > 0 && (input.duration <= 0 || input.timescale == 0) {
-            return Err(CodecError::InvalidApi { what: "frame clock" });
+            return Err(CodecError::InvalidApi {
+                what: "frame clock",
+            });
         }
         let seconds = if input.timescale == 0 {
             0.0
         } else {
             input.duration as f64 / f64::from(input.timescale)
         };
-        let planes = [(&f.y.samples[..], f.y.stride), (&f.u.samples[..], f.u.stride), (&f.v.samples[..], f.v.stride)];
+        let planes = [
+            (&f.y.samples[..], f.y.stride),
+            (&f.u.samples[..], f.u.stride),
+            (&f.v.samples[..], f.v.stride),
+        ];
         let (data, key) = self.encode_planes(planes, seconds)?;
-        Ok(vec![Packet::video(data, input.pts, input.duration, input.timescale, key)])
+        Ok(vec![Packet::video(
+            data,
+            input.pts,
+            input.duration,
+            input.timescale,
+            key,
+        )])
     }
 
     fn drain(&mut self) -> Result<Vec<Packet>, CodecError> {
@@ -193,7 +245,9 @@ pub fn register_engine_encoders(factory: &mut EncodeFactory) {
     factory.register_video(CodecId::Vp9, open_engine_encoder);
 }
 
-fn open_engine_encoder(params: &CodecParams) -> Result<Box<dyn cutlass_encode::VideoEncoder>, CodecError> {
+fn open_engine_encoder(
+    params: &CodecParams,
+) -> Result<Box<dyn cutlass_encode::VideoEncoder>, CodecError> {
     Ok(Box::new(EngineEncoder::open(params)?))
 }
 
@@ -209,7 +263,9 @@ impl EngineEncoder {
     /// converts each frame to 4:2:0 before it reaches this encoder.
     pub fn open(params: &CodecParams) -> Result<Self, CodecError> {
         if !matches!(params.pixel, PixelFormat::Yuv420p | PixelFormat::Rgba8) {
-            return Err(CodecError::Unsupported { what: "vp9 pixel format" });
+            return Err(CodecError::Unsupported {
+                what: "vp9 pixel format",
+            });
         }
         let mut planar = params.clone();
         planar.pixel = PixelFormat::Yuv420p;
@@ -229,7 +285,9 @@ impl cutlass_encode::VideoEncoder for EngineEncoder {
         let (width, height) = (picture.width(), picture.height());
         let (cw, ch) = (width.div_ceil(2), height.div_ceil(2));
         let plane = |w: u32, h: u32, bytes: &[u8]| {
-            Plane::tight(w, h, bytes.to_vec()).map_err(|_| CodecError::InvalidApi { what: "picture size" })
+            Plane::tight(w, h, bytes.to_vec()).map_err(|_| CodecError::InvalidApi {
+                what: "picture size",
+            })
         };
         let frame = VideoFrame::yuv420p(
             width,
@@ -238,7 +296,9 @@ impl cutlass_encode::VideoEncoder for EngineEncoder {
             plane(cw, ch, picture.u())?,
             plane(cw, ch, picture.v())?,
         )
-        .map_err(|_| CodecError::InvalidApi { what: "picture size" })?;
+        .map_err(|_| CodecError::InvalidApi {
+            what: "picture size",
+        })?;
         if input.force_keyframe {
             self.inner.force_keyframe();
         }
@@ -269,10 +329,14 @@ impl cutlass_encode::VideoEncoder for EngineEncoder {
 
 fn check_size(width: u32, height: u32) -> Result<(), CodecError> {
     if width == 0 || height == 0 {
-        return Err(CodecError::InvalidApi { what: "empty picture" });
+        return Err(CodecError::InvalidApi {
+            what: "empty picture",
+        });
     }
     if width > 65536 || height > 65536 {
-        return Err(CodecError::Limit { what: "vp9 frame edge" });
+        return Err(CodecError::Limit {
+            what: "vp9 frame edge",
+        });
     }
     Ok(())
 }
@@ -283,7 +347,9 @@ fn check_planes(width: u32, height: u32, planes: &[(&[u8], usize); 3]) -> Result
     for (p, (data, stride)) in planes.iter().enumerate() {
         let (pw, ph) = if p == 0 { (w, h) } else { (cw, ch) };
         if *stride < pw || data.len() < (ph - 1) * stride + pw {
-            return Err(CodecError::InvalidApi { what: "picture planes" });
+            return Err(CodecError::InvalidApi {
+                what: "picture planes",
+            });
         }
     }
     Ok(())
@@ -297,7 +363,11 @@ const GF_INTERVAL: u32 = 12;
 const STEP_SCALE: [f64; 3] = [0.45, 0.7, 1.0];
 
 /// The share of a frame's budget each frame type takes.
-const SHARE: [f64; 3] = [6.0, 2.5, (GF_INTERVAL as f64 - 2.5) / (GF_INTERVAL as f64 - 1.0)];
+const SHARE: [f64; 3] = [
+    6.0,
+    2.5,
+    (GF_INTERVAL as f64 - 2.5) / (GF_INTERVAL as f64 - 1.0),
+];
 
 /// One-pass rate control: each frame's quantizer from a model of bits
 /// against quantizer step (bits ∝ step^-k) per frame type, corrected by how
@@ -338,7 +408,8 @@ impl Rate {
             if q == 0 {
                 return 0;
             }
-            return q_of_step(step_of(q) * STEP_SCALE[kind]).clamp(self.opts.min_q, q.max(self.opts.min_q));
+            return q_of_step(step_of(q) * STEP_SCALE[kind])
+                .clamp(self.opts.min_q, q.max(self.opts.min_q));
         }
         if self.per_frame == 0.0 {
             return q_of_step(step_of(self.last_q) * STEP_SCALE[kind]);
@@ -354,7 +425,10 @@ impl Rate {
         let q = q_of_step(step).clamp(self.opts.min_q, self.opts.max_q);
         // Inter frames move the quantizer at most a few steps a frame.
         let q = if kind == 2 {
-            q.clamp(self.last_q.saturating_sub(24), self.last_q.saturating_add(24))
+            q.clamp(
+                self.last_q.saturating_sub(24),
+                self.last_q.saturating_add(24),
+            )
         } else {
             q
         };

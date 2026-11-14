@@ -25,7 +25,6 @@ use crate::dsp::pixel::Pixel;
 use crate::geom::{self, SWITCHABLE, TX_MODE_SELECT};
 use crate::header::{Header, Parsed, Persist, parse};
 use crate::prob::{self, Counts, FrameContext};
-use crate::recon::Picture;
 
 /// A reference picture of either sample width.
 #[derive(Clone)]
@@ -37,7 +36,24 @@ pub enum Held {
 /// Picture buffers whose readers are gone, for later pictures.
 type Spare<P> = Vec<(Dims, Arc<SharedFrame<P>>)>;
 
-trait Store: Pixel {
+/// A decoded picture as tightly packed planes (little-endian above 8
+/// bits).
+pub struct Picture {
+    pub y: Vec<u8>,
+    pub u: Vec<u8>,
+    pub v: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub ss_x: u32,
+    pub ss_y: u32,
+    pub color_space: u8,
+    pub color_range: u8,
+    pub bit_depth: u8,
+    pub render_width: u32,
+    pub render_height: u32,
+}
+
+pub(crate) trait Store: Pixel {
     fn view(held: &Held) -> Option<&Pic<Self>>;
     fn keep(frame: Arc<Pic<Self>>) -> Held;
     fn spare(d: &mut Decoder) -> &mut Spare<Self>;
@@ -136,7 +152,11 @@ impl Decoder {
 
     /// Decodes one frame, reconstructing it on `rt`'s workers when given:
     /// the picture returned may then still be in the making.
-    fn decode_with(&mut self, packet: &[u8], rt: Option<&Runtime>) -> Result<Option<Held>, CodecError> {
+    fn decode_with(
+        &mut self,
+        packet: &[u8],
+        rt: Option<&Runtime>,
+    ) -> Result<Option<Held>, CodecError> {
         if packet.is_empty() {
             return Err(CodecError::InvalidApi {
                 what: "empty packet",
@@ -149,14 +169,14 @@ impl Decoder {
         }
         if parsed.header.show_existing {
             let slot = usize::from(parsed.header.frame_to_show);
-            let held = self
-                .refs
-                .get(slot)
-                .and_then(|s| s.clone())
-                .ok_or(CodecError::Malformed {
-                    at_bit: 0,
-                    what: "shown reference",
-                })?;
+            let held =
+                self.refs
+                    .get(slot)
+                    .and_then(|s| s.clone())
+                    .ok_or(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "shown reference",
+                    })?;
             self.persist.last_width = parsed.header.width;
             self.persist.last_height = parsed.header.height;
             return Ok(Some(held));
@@ -179,7 +199,11 @@ impl Decoder {
         }
     }
 
-    fn frame<P: Store>(&mut self, parsed: &Parsed<'_>, rt: Option<&Runtime>) -> Result<Option<Held>, CodecError> {
+    fn frame<P: Store>(
+        &mut self,
+        parsed: &Parsed<'_>,
+        rt: Option<&Runtime>,
+    ) -> Result<Option<Held>, CodecError> {
         if let Some(rt) = rt {
             while let Ok(back) = rt.back.try_recv() {
                 self.bufs.tiles = back.tiles;
@@ -209,7 +233,16 @@ impl Decoder {
             let workers = rt.map(|rt| (&rt.workers, &rt.send));
             let make: crate::dec::frame::Present<P> = video_frame::<P>;
             let present = (rt.is_some() && parsed.header.show_frame).then_some(make);
-            decode_frame(parsed, refs, prev.as_deref().map(|v| v.as_slice()), &last_seg, bufs, spare, workers, present)?
+            decode_frame(
+                parsed,
+                refs,
+                prev.as_deref().map(|v| v.as_slice()),
+                &last_seg,
+                bufs,
+                spare,
+                workers,
+                present,
+            )?
         };
         drop(refs_now);
         self.bufs = built.spare;
@@ -374,7 +407,9 @@ fn packed<P: Pixel>(f: &Pic<P>, p: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(w * h * if P::HIGH { 2 } else { 1 });
     for r in 0..h {
         let row = &data[r * stride..r * stride + w];
-        if P::HIGH {
+        if let Some(b) = P::bytes(row) {
+            out.extend_from_slice(b);
+        } else if P::HIGH {
             for s in row {
                 out.extend_from_slice(&(s.get() as u16).to_le_bytes());
             }
@@ -1010,7 +1045,7 @@ mod tests {
         bytes
     }
 
-    fn sane(picture: &crate::recon::Picture) -> bool {
+    fn sane(picture: &super::Picture) -> bool {
         let width = usize::try_from(picture.width).unwrap_or(usize::MAX);
         let height = usize::try_from(picture.height).unwrap_or(usize::MAX);
         let chroma_w = width.div_ceil(2);

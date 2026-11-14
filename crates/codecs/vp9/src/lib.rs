@@ -6,20 +6,21 @@
 #![forbid(unsafe_code)]
 
 mod bits;
-mod coef;
 mod dec;
 mod decode;
-mod enc;
-mod fwd;
 mod dsp;
+mod enc;
 mod geom;
 mod header;
+#[cfg(test)]
 mod intra;
 mod lpf;
+#[cfg(test)]
+#[allow(dead_code)]
 mod pel;
 mod prob;
-mod recon;
 mod tables;
+#[cfg(test)]
 mod txfm;
 
 #[cfg(test)]
@@ -59,9 +60,4 @@ mod tests {
     fn default_dc_coef_prob_matches_libvpx() {
         assert_eq!(COEF_PROBS[0][0][0][0][0], [195, 29, 183]);
     }
-}
-
-#[doc(hidden)]
-pub fn enc_stats() {
-    enc::tile::stats::dump();
 }

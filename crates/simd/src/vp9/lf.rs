@@ -46,7 +46,11 @@ impl Edge<'_> {
             Some(Wd::W8) => 2,
             Some(Wd::W16) => 3,
         };
-        if r(self.wd[0]) >= r(self.wd[1]) { self.wd[0] } else { self.wd[1] }
+        if r(self.wd[0]) >= r(self.wd[1]) {
+            self.wd[0]
+        } else {
+            self.wd[1]
+        }
     }
 
     fn fits(&self) -> bool {
@@ -59,7 +63,8 @@ impl Edge<'_> {
             // from 4 before it.
             self.at >= taps && self.at + 15 * self.stride + taps <= self.buf.len()
         } else {
-            self.at >= taps * self.stride && self.at + (taps - 1) * self.stride + 16 <= self.buf.len()
+            self.at >= taps * self.stride
+                && self.at + (taps - 1) * self.stride + 16 <= self.buf.len()
         }
     }
 }
@@ -99,8 +104,12 @@ pub fn filter_scalar(e: Edge<'_>) {
         let t = thr[i / 8];
         let Some(wd) = wds[i / 8] else { continue };
         let q0i = at + i * line;
-        let px = |buf: &[u8], k: isize| -> i32 { i32::from(buf[(q0i as isize + k * step as isize) as usize]) };
-        let set = |buf: &mut [u8], k: isize, v: i32| buf[(q0i as isize + k * step as isize) as usize] = v as u8;
+        let px = |buf: &[u8], k: isize| -> i32 {
+            i32::from(buf[(q0i as isize + k * step as isize) as usize])
+        };
+        let set = |buf: &mut [u8], k: isize, v: i32| {
+            buf[(q0i as isize + k * step as isize) as usize] = v as u8
+        };
         let (p3, p2, p1, p0) = (px(buf, -4), px(buf, -3), px(buf, -2), px(buf, -1));
         let (q0, q1, q2, q3) = (px(buf, 0), px(buf, 1), px(buf, 2), px(buf, 3));
         let limit = i32::from(t.limit);
@@ -114,10 +123,15 @@ pub fn filter_scalar(e: Edge<'_>) {
         if !mask {
             continue;
         }
-        let flat = wd != Wd::W4 && [p1, q1, p2, q2, p3, q3].iter().zip([p0, q0, p0, q0, p0, q0]).all(|(a, b)| (a - b).abs() <= 1);
+        let flat = wd != Wd::W4
+            && [p1, q1, p2, q2, p3, q3]
+                .iter()
+                .zip([p0, q0, p0, q0, p0, q0])
+                .all(|(a, b)| (a - b).abs() <= 1);
         if flat && wd == Wd::W16 {
             let s: [i32; 16] = core::array::from_fn(|k| px(buf, k as isize - 8));
-            let flat2 = (1..5).all(|k| (s[7 - 3 - k] - p0).abs() <= 1 && (s[8 + 3 + k] - q0).abs() <= 1);
+            let flat2 =
+                (1..5).all(|k| (s[7 - 3 - k] - p0).abs() <= 1 && (s[8 + 3 + k] - q0).abs() <= 1);
             if flat2 {
                 let mut out = [0i32; 14];
                 for (j, o) in out.iter_mut().enumerate() {

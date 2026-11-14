@@ -4,31 +4,18 @@
 //! transposes them, and back.
 
 use core::arch::x86_64::{
-    _mm_adds_epi8, _mm_adds_epu8, _mm_and_si128, _mm_andnot_si128, _mm_blendv_epi8,
-    _mm_cmpeq_epi8, _mm_cmpgt_epi8, _mm_max_epu8, _mm_or_si128, _mm_set1_epi8, _mm_srli_epi16,
-    _mm_subs_epi8, _mm_subs_epu8, _mm_testz_si128, _mm_xor_si128,
-    __m128i, __m256i, _mm_cvtsi64_si128, _mm_cvtsi128_si64, _mm_extract_epi64, _mm_set_epi64x,
-    _mm_setzero_si128, _mm_unpackhi_epi8, _mm_unpackhi_epi16, _mm_unpackhi_epi32,
-    _mm_unpackhi_epi64, _mm_unpacklo_epi8, _mm_unpacklo_epi16, _mm_unpacklo_epi32,
-    _mm_unpacklo_epi64, _mm256_add_epi16,
-    _mm256_castsi256_si128, 
-    _mm256_cvtepu8_epi16, 
-    _mm256_packus_epi16, _mm256_permute4x64_epi64, _mm256_set1_epi16,
-    _mm256_slli_epi16, _mm256_srli_epi16, _mm256_sub_epi16,
+    __m128i, __m256i, _mm_adds_epi8, _mm_adds_epu8, _mm_and_si128, _mm_andnot_si128,
+    _mm_blendv_epi8, _mm_cmpeq_epi8, _mm_cmpgt_epi8, _mm_cvtsi64_si128, _mm_cvtsi128_si64,
+    _mm_extract_epi64, _mm_max_epu8, _mm_or_si128, _mm_set_epi64x, _mm_set1_epi8,
+    _mm_setzero_si128, _mm_srli_epi16, _mm_subs_epi8, _mm_subs_epu8, _mm_testz_si128,
+    _mm_unpackhi_epi8, _mm_unpackhi_epi16, _mm_unpackhi_epi32, _mm_unpackhi_epi64,
+    _mm_unpacklo_epi8, _mm_unpacklo_epi16, _mm_unpacklo_epi32, _mm_unpacklo_epi64, _mm_xor_si128,
+    _mm256_add_epi16, _mm256_castsi256_si128, _mm256_cvtepu8_epi16, _mm256_packus_epi16,
+    _mm256_permute4x64_epi64, _mm256_set1_epi16, _mm256_slli_epi16, _mm256_srli_epi16,
+    _mm256_sub_epi16,
 };
 
 use super::{Edge, Thresh, Wd};
-
-#[inline]
-#[target_feature(enable = "avx2")]
-fn st16(d: &mut [u8], at: usize, v: __m128i) {
-    if let Some(t) = d.get_mut(at..).and_then(|t| t.first_chunk_mut::<16>()) {
-        let (lo, hi) = (_mm_cvtsi128_si64(v).to_le_bytes(), _mm_extract_epi64::<1>(v).to_le_bytes());
-        *t = [
-            lo[0], lo[1], lo[2], lo[3], lo[4], lo[5], lo[6], lo[7], hi[0], hi[1], hi[2], hi[3], hi[4], hi[5], hi[6], hi[7],
-        ];
-    }
-}
 
 /// Sixteen 16-bit lanes to sixteen bytes.
 #[inline]
@@ -133,7 +120,10 @@ fn lanes(v: &mut [__m128i; 16], wds: [Option<Wd>; 2], wd: Wd, thr: &[Thresh; 2])
     let ap = absd(p1, p0);
     let aq = absd(q1, q0);
     let m = _mm_max_epu8(
-        _mm_max_epu8(_mm_max_epu8(absd(p3, p2), absd(p2, p1)), _mm_max_epu8(ap, aq)),
+        _mm_max_epu8(
+            _mm_max_epu8(absd(p3, p2), absd(p2, p1)),
+            _mm_max_epu8(ap, aq),
+        ),
         _mm_max_epu8(absd(q2, q1), absd(q3, q2)),
     );
     let apq0 = absd(p0, q0);
@@ -169,7 +159,10 @@ fn lanes(v: &mut [__m128i; 16], wds: [Option<Wd>; 2], wd: Wd, thr: &[Thresh; 2])
     }
     let one = _mm_set1_epi8(1);
     let fm = _mm_max_epu8(
-        _mm_max_epu8(_mm_max_epu8(ap, aq), _mm_max_epu8(absd(p2, p0), absd(q2, q0))),
+        _mm_max_epu8(
+            _mm_max_epu8(ap, aq),
+            _mm_max_epu8(absd(p2, p0), absd(q2, q0)),
+        ),
         _mm_max_epu8(absd(p3, p0), absd(q3, q0)),
     );
     let w8 = halves8(wds.map(|w| matches!(w, Some(Wd::W8 | Wd::W16))));
@@ -180,8 +173,14 @@ fn lanes(v: &mut [__m128i; 16], wds: [Option<Wd>; 2], wd: Wd, thr: &[Thresh; 2])
     // Where the 15-tap filter runs it replaces the 7-tap one.
     let flat2 = if wd == Wd::W16 {
         let f2m = _mm_max_epu8(
-            _mm_max_epu8(_mm_max_epu8(absd(v[3], p0), absd(v[2], p0)), _mm_max_epu8(absd(v[1], p0), absd(v[0], p0))),
-            _mm_max_epu8(_mm_max_epu8(absd(v[12], q0), absd(v[13], q0)), _mm_max_epu8(absd(v[14], q0), absd(v[15], q0))),
+            _mm_max_epu8(
+                _mm_max_epu8(absd(v[3], p0), absd(v[2], p0)),
+                _mm_max_epu8(absd(v[1], p0), absd(v[0], p0)),
+            ),
+            _mm_max_epu8(
+                _mm_max_epu8(absd(v[12], q0), absd(v[13], q0)),
+                _mm_max_epu8(absd(v[14], q0), absd(v[15], q0)),
+            ),
         );
         let w16 = halves8(wds.map(|w| w == Some(Wd::W16)));
         _mm_and_si128(_mm_and_si128(le(f2m, one), flat), w16)
@@ -196,12 +195,30 @@ fn lanes(v: &mut [__m128i; 16], wds: [Option<Wd>; 2], wd: Wd, thr: &[Thresh; 2])
         let (x0, x1, x2, x3) = (wide16(q0), wide16(q1), wide16(q2), wide16(q3));
         let add = |a: __m256i, b: __m256i| _mm256_add_epi16(a, b);
         let r3 = |x: __m256i| pack(_mm256_srli_epi16::<3>(add(x, _mm256_set1_epi16(4))));
-        let o2 = r3(add(add(add(w3, w3), add(w3, w2)), add(add(w2, w1), add(w0, x0))));
-        let o1 = r3(add(add(add(w3, w3), add(w2, w1)), add(add(w1, w0), add(x0, x1))));
-        let o0 = r3(add(add(add(w3, w2), add(w1, w0)), add(add(w0, x0), add(x1, x2))));
-        let oq0 = r3(add(add(add(w2, w1), add(w0, x0)), add(add(x0, x1), add(x2, x3))));
-        let oq1 = r3(add(add(add(w1, w0), add(x0, x1)), add(add(x1, x2), add(x3, x3))));
-        let oq2 = r3(add(add(add(w0, x0), add(x1, x2)), add(add(x2, x3), add(x3, x3))));
+        let o2 = r3(add(
+            add(add(w3, w3), add(w3, w2)),
+            add(add(w2, w1), add(w0, x0)),
+        ));
+        let o1 = r3(add(
+            add(add(w3, w3), add(w2, w1)),
+            add(add(w1, w0), add(x0, x1)),
+        ));
+        let o0 = r3(add(
+            add(add(w3, w2), add(w1, w0)),
+            add(add(w0, x0), add(x1, x2)),
+        ));
+        let oq0 = r3(add(
+            add(add(w2, w1), add(w0, x0)),
+            add(add(x0, x1), add(x2, x3)),
+        ));
+        let oq1 = r3(add(
+            add(add(w1, w0), add(x0, x1)),
+            add(add(x1, x2), add(x3, x3)),
+        ));
+        let oq2 = r3(add(
+            add(add(w0, x0), add(x1, x2)),
+            add(add(x2, x3), add(x3, x3)),
+        ));
         v[5] = _mm_blendv_epi8(p2, o2, flat);
         v[6] = _mm_blendv_epi8(np1, o1, flat);
         v[7] = _mm_blendv_epi8(np0, o0, flat);
@@ -234,13 +251,16 @@ fn lanes(v: &mut [__m128i; 16], wds: [Option<Wd>; 2], wd: Wd, thr: &[Thresh; 2])
     // The 15-tap window as a running sum, as libvpx writes it out.
     let mut sum = add(
         add(_mm256_slli_epi16::<3>(s[0]), _mm256_sub_epi16(s[1], s[0])),
-        add(add(s[1], s[2]), add(add(s[3], s[4]), add(add(s[5], s[6]), add(s[7], s[8])))),
+        add(
+            add(s[1], s[2]),
+            add(add(s[3], s[4]), add(add(s[5], s[6]), add(s[7], s[8]))),
+        ),
     );
     let r4 = |x: __m256i| pack(_mm256_srli_epi16::<4>(add(x, _mm256_set1_epi16(8))));
     let mut out = [v[0]; 14];
     out[0] = r4(sum);
-    for k in 1..14 {
-        let drop_a = s[if k <= 7 { 0 } else { k - 7 }];
+    for k in 1usize..14 {
+        let drop_a = s[k.saturating_sub(7)];
         let drop_b = s[k];
         let add_a = s[k + 1];
         let add_b = s[(k + 8).min(15)];
@@ -311,34 +331,45 @@ fn transpose8x16(c: &[__m128i; 8]) -> [__m128i; 8] {
     o
 }
 
-#[inline]
-#[target_feature(enable = "avx2")]
-fn ld8a(s: &[u8], at: usize) -> __m128i {
-    match s.get(at..).and_then(|t| t.first_chunk::<8>()) {
-        Some(a) => _mm_cvtsi64_si128(i64::from_le_bytes(*a)),
-        None => _mm_setzero_si128(),
-    }
-}
-
-#[inline]
-#[target_feature(enable = "avx2")]
-fn ld16a(s: &[u8], at: usize) -> __m128i {
-    match s.get(at..).and_then(|t| t.first_chunk::<16>()) {
-        Some(a) => {
-            let lo = i64::from_le_bytes([a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]]);
-            let hi = i64::from_le_bytes([a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]]);
-            _mm_set_epi64x(hi, lo)
+/// A row of `N` bytes at `o` of a region checked once to hold them all.
+#[inline(always)]
+fn row<const N: usize>(r: &[u8], o: usize) -> [u8; N] {
+    match r.get(o..o + N) {
+        Some(s) => {
+            let mut t = [0u8; N];
+            t.copy_from_slice(s);
+            t
         }
-        None => _mm_setzero_si128(),
+        None => [0u8; N],
+    }
+}
+
+#[inline(always)]
+fn put<const N: usize>(r: &mut [u8], o: usize, v: [u8; N]) {
+    if let Some(s) = r.get_mut(o..o + N) {
+        s.copy_from_slice(&v);
     }
 }
 
 #[inline]
 #[target_feature(enable = "avx2")]
-fn st8a(d: &mut [u8], at: usize, v: i64) {
-    if let Some(t) = d.get_mut(at..).and_then(|t| t.first_chunk_mut::<8>()) {
-        *t = v.to_le_bytes();
-    }
+fn v16(a: [u8; 16]) -> __m128i {
+    let lo = i64::from_le_bytes([a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]]);
+    let hi = i64::from_le_bytes([a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]]);
+    _mm_set_epi64x(hi, lo)
+}
+
+#[inline]
+#[target_feature(enable = "avx2")]
+fn b16(v: __m128i) -> [u8; 16] {
+    let (lo, hi) = (
+        _mm_cvtsi128_si64(v).to_le_bytes(),
+        _mm_extract_epi64::<1>(v).to_le_bytes(),
+    );
+    [
+        lo[0], lo[1], lo[2], lo[3], lo[4], lo[5], lo[6], lo[7], hi[0], hi[1], hi[2], hi[3], hi[4],
+        hi[5], hi[6], hi[7],
+    ]
 }
 
 #[target_feature(enable = "avx2")]
@@ -353,46 +384,65 @@ pub(super) fn filter(e: Edge<'_>) {
         thr,
     } = e;
     let z = _mm_setzero_si128();
+    // The edge's sixteen lines, as one region checked once.
+    let (back, span) = if vertical {
+        let w = if wd == Wd::W16 { 8 } else { 4 };
+        (w, 15 * stride + 2 * w)
+    } else {
+        let taps = if wd == Wd::W16 { 8 } else { 4 };
+        (taps * stride, (2 * taps - 1) * stride + 16)
+    };
+    let Some(first) = at.checked_sub(back) else {
+        return;
+    };
+    let Some(reg) = buf.get_mut(first..first + span) else {
+        return;
+    };
+    let taps = if wd == Wd::W16 { 8 } else { 4 };
+    let mut v = [z; 16];
+    // Load: the taps of every line, one vector each.
     if vertical && wd != Wd::W16 {
-        let rows: [__m128i; 16] = core::array::from_fn(|i| ld8a(buf, at + i * stride - 4));
+        let rows: [__m128i; 16] = core::array::from_fn(|i| {
+            _mm_cvtsi64_si128(i64::from_le_bytes(row::<8>(reg, i * stride)))
+        });
         let cols = transpose16x8(&rows);
-        let mut v = [z; 16];
         v[4..12].copy_from_slice(&cols);
-        if !lanes(&mut v, wds, wd, &thr) {
-            return;
+    } else if vertical {
+        let rows: [__m128i; 16] = core::array::from_fn(|i| v16(row::<16>(reg, i * stride)));
+        v = transpose(&rows);
+    } else {
+        for k in 0..2 * taps {
+            v[k + 8 - taps] = v16(row::<16>(reg, k * stride));
         }
+    }
+    if !lanes(&mut v, wds, wd, &thr) {
+        return;
+    }
+    // Store what the filter may have changed.
+    if vertical && wd != Wd::W16 {
         let back: [__m128i; 8] = core::array::from_fn(|k| v[4 + k]);
         let out = transpose8x16(&back);
         for (i, o) in out.iter().enumerate() {
-            st8a(buf, at + 2 * i * stride - 4, _mm_cvtsi128_si64(*o));
-            st8a(buf, at + (2 * i + 1) * stride - 4, _mm_extract_epi64::<1>(*o));
+            put::<8>(reg, 2 * i * stride, _mm_cvtsi128_si64(*o).to_le_bytes());
+            put::<8>(
+                reg,
+                (2 * i + 1) * stride,
+                _mm_extract_epi64::<1>(*o).to_le_bytes(),
+            );
         }
     } else if vertical {
-        let rows: [__m128i; 16] = core::array::from_fn(|i| ld16a(buf, at + i * stride - 8));
-        let mut v = transpose(&rows);
-        if !lanes(&mut v, wds, wd, &thr) {
-            return;
-        }
         let rows = transpose(&v);
         for (i, r) in rows.iter().enumerate() {
-            st16(buf, at + i * stride - 8, *r);
+            put::<16>(reg, i * stride, b16(*r));
         }
     } else {
-        let taps = if wd == Wd::W16 { 8 } else { 4 };
-        let mut v = [z; 16];
-        for k in 0..2 * taps {
-            v[k + 8 - taps] = ld16a(buf, at + k * stride - taps * stride);
-        }
-        if !lanes(&mut v, wds, wd, &thr) {
-            return;
-        }
         let (first, last) = match wd {
             Wd::W4 => (6, 10),
             Wd::W8 => (5, 11),
             Wd::W16 => (1, 15),
         };
-        for k in first..last {
-            st16(buf, at + (k + taps - 8) * stride - taps * stride, v[k]);
+        for (k, x) in v.iter().enumerate().take(last).skip(first) {
+            put::<16>(reg, (k + taps - 8) * stride, b16(*x));
         }
     }
 }

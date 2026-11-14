@@ -14,13 +14,13 @@
 //! into single vector moves.
 
 use core::arch::x86_64::{
-    __m128i, __m256i, _mm_avg_epu8,
-    _mm_cvtsi128_si64, _mm_extract_epi64, _mm_maddubs_epi16, _mm_set_epi64x, _mm_setr_epi8,
-    _mm_unpackhi_epi8, _mm_unpacklo_epi8, _mm256_adds_epi16, _mm256_add_epi16,
-    _mm256_castsi256_si128, _mm256_extracti128_si256, _mm256_maddubs_epi16, _mm256_unpackhi_epi8, _mm256_unpacklo_epi8, _mm256_mulhrs_epi16, _mm256_packus_epi16,
-    _mm256_permute4x64_epi64, _mm256_set_m128i, _mm256_set1_epi16, _mm256_shuffle_epi8,
-    _mm_add_epi16, _mm_adds_epi16, _mm_mulhrs_epi16, _mm_packus_epi16, _mm_set1_epi16,
-    _mm_shuffle_epi8,
+    __m128i, __m256i, _mm_add_epi16, _mm_adds_epi16, _mm_avg_epu8, _mm_cvtsi128_si64,
+    _mm_extract_epi64, _mm_maddubs_epi16, _mm_mulhrs_epi16, _mm_packus_epi16, _mm_set_epi64x,
+    _mm_set1_epi16, _mm_setr_epi8, _mm_shuffle_epi8, _mm_unpackhi_epi8, _mm_unpacklo_epi8,
+    _mm256_add_epi16, _mm256_adds_epi16, _mm256_castsi256_si128, _mm256_extracti128_si256,
+    _mm256_maddubs_epi16, _mm256_mulhrs_epi16, _mm256_packus_epi16, _mm256_permute4x64_epi64,
+    _mm256_set_m128i, _mm256_set1_epi16, _mm256_shuffle_epi8, _mm256_unpackhi_epi8,
+    _mm256_unpacklo_epi8,
 };
 
 use super::Block;
@@ -118,7 +118,6 @@ impl Taps {
         let s = _mm_adds_epi16(s, p[2]);
         _mm_mulhrs_epi16(s, _mm_set1_epi16(256))
     }
-
 }
 
 /// Sixteen bytes of `a` from `at` (a constant after inlining, so the
@@ -132,9 +131,7 @@ fn la16<const R: usize>(a: &[u8; R], at: usize) -> __m128i {
             let hi = i64::from_le_bytes([t[8], t[9], t[10], t[11], t[12], t[13], t[14], t[15]]);
             _mm_set_epi64x(hi, lo)
         }
-        None => {
-            core::arch::x86_64::_mm_setzero_si128()
-        }
+        None => core::arch::x86_64::_mm_setzero_si128(),
     }
 }
 
@@ -262,7 +259,9 @@ fn sized<const W: usize, const R: usize>(b: Block<'_>) {
         }
         (None, None) => {
             for r in 0..h {
-                let Some(row) = row_of::<R>(src, at + r * ss) else { return };
+                let Some(row) = row_of::<R>(src, at + r * ss) else {
+                    return;
+                };
                 let mut v = [zero; 4];
                 let mut c = 0;
                 while c < W {
@@ -275,11 +274,17 @@ fn sized<const W: usize, const R: usize>(b: Block<'_>) {
         (Some(fx), None) => {
             let t = Taps::new(&fx);
             for r in 0..h {
-                let Some(row) = row_of::<R>(src, at + r * ss - 3) else { return };
+                let Some(row) = row_of::<R>(src, at + r * ss - 3) else {
+                    return;
+                };
                 let mut v = [zero; 4];
                 let mut c = 0;
                 while c < W {
-                    v[c / 16] = if step == 16 { t.across16a(row, c) } else { t.across8a(row, c) };
+                    v[c / 16] = if step == 16 {
+                        t.across16a(row, c)
+                    } else {
+                        t.across8a(row, c)
+                    };
                     c += 16;
                 }
                 put(dst, r, v);
@@ -292,11 +297,19 @@ fn sized<const W: usize, const R: usize>(b: Block<'_>) {
         (Some(fx), Some(fy)) => {
             let (tx, ty) = (Taps::new(&fx), Taps::new(&fy));
             for (r, out) in tmp.chunks_exact_mut(R).enumerate().take(h + 7) {
-                let Some(out) = out.first_chunk_mut::<R>() else { return };
-                let Some(row) = row_of::<R>(src, at + r * ss - 3 * ss - 3) else { return };
+                let Some(out) = out.first_chunk_mut::<R>() else {
+                    return;
+                };
+                let Some(row) = row_of::<R>(src, at + r * ss - 3 * ss - 3) else {
+                    return;
+                };
                 let mut c = 0;
                 while c < W {
-                    let v = if step == 16 { tx.across16a(row, c) } else { tx.across8a(row, c) };
+                    let v = if step == 16 {
+                        tx.across16a(row, c)
+                    } else {
+                        tx.across8a(row, c)
+                    };
                     sa(out, c, v, 16);
                     c += 16;
                 }
@@ -312,7 +325,16 @@ fn sized<const W: usize, const R: usize>(b: Block<'_>) {
 #[allow(clippy::too_many_arguments)]
 #[inline]
 #[target_feature(enable = "avx2")]
-fn down_sized<const W: usize, const R: usize>(t: &Taps, dst: &mut [u8], ds: usize, src: &[u8], top: usize, ss: usize, h: usize, avg: bool) {
+fn down_sized<const W: usize, const R: usize>(
+    t: &Taps,
+    dst: &mut [u8],
+    ds: usize,
+    src: &[u8],
+    top: usize,
+    ss: usize,
+    h: usize,
+    avg: bool,
+) {
     for r in 0..h {
         let base = top + r * ss;
         let mut rows: [&[u8; R]; 8] = [&[0u8; R]; 8];
@@ -328,7 +350,9 @@ fn down_sized<const W: usize, const R: usize>(t: &Taps, dst: &mut [u8], ds: usiz
         if W >= 32 {
             let mut c = 0;
             while c < W {
-                let rv: [__m256i; 8] = core::array::from_fn(|k| _mm256_set_m128i(la16(rows[k], c + 16), la16(rows[k], c)));
+                let rv: [__m256i; 8] = core::array::from_fn(|k| {
+                    _mm256_set_m128i(la16(rows[k], c + 16), la16(rows[k], c))
+                });
                 let lo: [__m256i; 4] = core::array::from_fn(|k| {
                     _mm256_maddubs_epi16(_mm256_unpacklo_epi8(rv[2 * k], rv[2 * k + 1]), t.pairs[k])
                 });
@@ -341,7 +365,10 @@ fn down_sized<const W: usize, const R: usize>(t: &Taps, dst: &mut [u8], ds: usiz
                 let v = _mm256_packus_epi16(lo, hi);
                 let (a, b) = (_mm256_castsi256_si128(v), _mm256_extracti128_si256::<1>(v));
                 let (a, b) = if avg {
-                    (_mm_avg_epu8(a, la(d, c, 16)), _mm_avg_epu8(b, la(d, c + 16, 16)))
+                    (
+                        _mm_avg_epu8(a, la(d, c, 16)),
+                        _mm_avg_epu8(b, la(d, c + 16, 16)),
+                    )
                 } else {
                     (a, b)
                 };

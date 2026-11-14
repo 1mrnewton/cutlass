@@ -247,11 +247,6 @@ impl BoolWriter {
         }
     }
 
-    /// Bits written so far (bytes out plus those pending, roughly).
-    pub fn bits_written(&self) -> u64 {
-        (self.buf.len() as u64) * 8 + (24 + self.count).max(0) as u64
-    }
-
     pub fn finish(mut self) -> Result<Vec<u8>, CodecError> {
         for _ in 0..32 {
             self.write(0, 128);

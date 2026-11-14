@@ -104,16 +104,6 @@ impl<'a> Bool<'a> {
         self.read(128)
     }
 
-    /// `n` bits, most significant first.
-    #[inline]
-    pub fn literal(&mut self, n: u32) -> u32 {
-        let mut v = 0;
-        for _ in 0..n {
-            v = (v << 1) | u32::from(self.bit());
-        }
-        v
-    }
-
     /// A symbol of a tree (libvpx `vpx_read_tree`): `tree[i]` is a leaf
     /// `-symbol` when not positive, else the index of the next pair.
     #[inline]
@@ -121,7 +111,10 @@ impl<'a> Bool<'a> {
         let mut i = 0usize;
         loop {
             let p = probs.get(i >> 1).copied().unwrap_or(128);
-            let next = tree.get(i + usize::from(self.read(p))).copied().unwrap_or(0);
+            let next = tree
+                .get(i + usize::from(self.read(p)))
+                .copied()
+                .unwrap_or(0);
             if next <= 0 {
                 return (-next) as u8;
             }

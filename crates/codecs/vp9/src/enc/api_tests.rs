@@ -1,8 +1,8 @@
 use super::Vp9Encoder;
-use crate::geom;
-use crate::header;
 use crate::bits::BitWriter;
 use crate::decode::{Decoder, Vp9Decoder};
+use crate::geom;
+use crate::header;
 use crate::register_decoders;
 use crate::register_encoders;
 use cutlass_decode::video::VideoDecoder;
@@ -469,13 +469,11 @@ fn moving(width: u32, height: u32, shift: u32) -> VideoFrame {
     let chroma_shift = shift / 2;
     for row in 0..chroma_h {
         for col in 0..chroma_w {
-            let src =
-                i32::try_from(col).unwrap_or(0) - i32::try_from(chroma_shift).unwrap_or(0);
+            let src = i32::try_from(col).unwrap_or(0) - i32::try_from(chroma_shift).unwrap_or(0);
             let sample = if src < 0 {
                 90
             } else {
-                u8::try_from((u32::try_from(src).unwrap_or(0) * 5 + row) % 80 + 80)
-                    .unwrap_or(80)
+                u8::try_from((u32::try_from(src).unwrap_or(0) * 5 + row) % 80 + 80).unwrap_or(80)
             };
             u.push(sample);
             v.push(sample.saturating_add(20));
@@ -720,7 +718,14 @@ fn factories_open_the_profile_0_codec() {
     let shown = decoder.push_all(&packets[0]).expect("decode");
     assert_eq!(shown.len(), 1);
     // The default quantizer leaves a flat picture within a step or two.
-    assert!(shown[0].frame.y.samples.iter().all(|&v| v.abs_diff(40) <= 2));
+    assert!(
+        shown[0]
+            .frame
+            .y
+            .samples
+            .iter()
+            .all(|&v| v.abs_diff(40) <= 2)
+    );
     assert_eq!(encoder.codec(), CodecId::Vp9);
     assert_eq!(decoder.codec(), CodecId::Vp9);
 }
@@ -998,11 +1003,17 @@ fn resident_kib() -> u64 {
 /// Decoding helpers: a push and then a drain, for the frames the frame
 /// threads hold back.
 trait PushAll {
-    fn push_all(&mut self, packet: &Packet) -> Result<Vec<cutlass_decode::video::VideoOutput>, CodecError>;
+    fn push_all(
+        &mut self,
+        packet: &Packet,
+    ) -> Result<Vec<cutlass_decode::video::VideoOutput>, CodecError>;
 }
 
 impl<T: VideoDecoder + ?Sized> PushAll for T {
-    fn push_all(&mut self, packet: &Packet) -> Result<Vec<cutlass_decode::video::VideoOutput>, CodecError> {
+    fn push_all(
+        &mut self,
+        packet: &Packet,
+    ) -> Result<Vec<cutlass_decode::video::VideoOutput>, CodecError> {
         let mut out = self.push(packet)?;
         out.extend(self.drain()?);
         Ok(out)

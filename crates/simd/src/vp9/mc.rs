@@ -37,12 +37,14 @@ impl Block<'_> {
     /// read 16 samples from 3 before each 8 or 16 of a row, and 3 rows
     /// above and 4 below with a fraction down.
     fn fits(&self) -> bool {
-        if !matches!(self.w, 4 | 8 | 16 | 32 | 64) || self.h == 0 || self.h > 64 || self.tmp.len() < TMP {
+        if !matches!(self.w, 4 | 8 | 16 | 32 | 64)
+            || self.h == 0
+            || self.h > 64
+            || self.tmp.len() < TMP
+        {
             return false;
         }
-        if self.dst_stride < self.w
-            || (self.h - 1) * self.dst_stride + self.w > self.dst.len()
-        {
+        if self.dst_stride < self.w || (self.h - 1) * self.dst_stride + self.w > self.dst.len() {
             return false;
         }
         let (above, below) = if self.fy.is_some() { (3, 4) } else { (0, 0) };

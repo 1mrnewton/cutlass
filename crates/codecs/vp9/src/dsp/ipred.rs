@@ -5,7 +5,6 @@
 use super::pixel::Pixel;
 
 /// Mode numbers of the bitstream.
-pub const DC: u8 = 0;
 pub const V: u8 = 1;
 pub const H: u8 = 2;
 pub const D45: u8 = 3;
@@ -132,6 +131,7 @@ pub fn predict<P: Pixel>(mode: u8, n: usize, dst: &mut [P], stride: usize, e: &E
             // bottom-left to top-right; row r column c takes d[n - 1 - r + c].
             let mut d = [P::default(); 64];
             // left part, from the bottom up
+            #[allow(clippy::needless_range_loop)]
             for k in 0..n {
                 // sample at row n - 1 - k of the first column
                 let r = n - 1 - k;
@@ -255,7 +255,11 @@ mod tests {
                         for i in 0..2 * n {
                             e.above[i] = pic[(n - 1) * stride + n + i.min(k - 1)];
                         }
-                        e.tl = if have_left { pic[(n - 1) * stride + n - 1] } else { 129 };
+                        e.tl = if have_left {
+                            pic[(n - 1) * stride + n - 1]
+                        } else {
+                            129
+                        };
                     }
                     let at = n * stride + n;
                     predict(mode, n, &mut pic[at..], stride, &e, 8);

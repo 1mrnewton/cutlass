@@ -8,7 +8,8 @@ fn source(w: usize, h: usize, t: usize) -> [Vec<u8>; 3] {
     for r in 0..h {
         for c in 0..w {
             let (x, yy) = ((c + 2 * t) as f64, (r + t) as f64);
-            let v = 128.0 + 60.0 * (x / 7.0).sin() * (yy / 11.0).cos() + 40.0 * ((x + yy) / 23.0).sin();
+            let v =
+                128.0 + 60.0 * (x / 7.0).sin() * (yy / 11.0).cos() + 40.0 * ((x + yy) / 23.0).sin();
             y[r * w + c] = v.clamp(0.0, 255.0) as u8;
         }
     }
@@ -24,9 +25,17 @@ fn source(w: usize, h: usize, t: usize) -> [Vec<u8>; 3] {
 }
 
 fn psnr(a: &[u8], b: &[u8]) -> f64 {
-    let se: f64 = a.iter().zip(b).map(|(&x, &y)| (f64::from(x) - f64::from(y)).powi(2)).sum();
+    let se: f64 = a
+        .iter()
+        .zip(b)
+        .map(|(&x, &y)| (f64::from(x) - f64::from(y)).powi(2))
+        .sum();
     let mse = se / a.len() as f64;
-    if mse == 0.0 { 99.0 } else { 10.0 * (255.0 * 255.0 / mse).log10() }
+    if mse == 0.0 {
+        99.0
+    } else {
+        10.0 * (255.0 * 255.0 / mse).log10()
+    }
 }
 
 fn round_trip(w: usize, h: usize, frames: usize, qindex: u8) {
@@ -41,7 +50,14 @@ fn round_trip_threads(w: usize, h: usize, frames: usize, qindex: u8, threads: us
     for t in 0..frames {
         let src = source(w, h, t);
         enc.load([(&src[0], w), (&src[1], cw), (&src[2], cw)]);
-        let coded = enc.encode(FrameParams { key: t == 0, golden: t % 3 == 2, qindex, speed }).expect("encode");
+        let coded = enc
+            .encode(FrameParams {
+                key: t == 0,
+                golden: t % 3 == 2,
+                qindex,
+                speed,
+            })
+            .expect("encode");
         bytes += coded.data.len();
         let pic = dec.decode(&coded.data).expect("decode").expect("shown");
         // The decoder's picture is the encoder's reconstruction.
@@ -55,12 +71,19 @@ fn round_trip_threads(w: usize, h: usize, frames: usize, qindex: u8, threads: us
                 _ => &pic.v,
             };
             for r in 0..ph {
-                assert_eq!(&got[r * pw..(r + 1) * pw], &data[r * stride..r * stride + pw], "frame {t} plane {p} row {r}");
+                assert_eq!(
+                    &got[r * pw..(r + 1) * pw],
+                    &data[r * stride..r * stride + pw],
+                    "frame {t} plane {p} row {r}"
+                );
             }
         }
         let q = psnr(&src[0], &pic.y);
         assert!(q > 25.0 || qindex > 200, "frame {t}: psnr {q}");
-        eprintln!("{w}x{h} q{qindex} frame {t}: {} bytes, psnr {q:.2}", coded.data.len());
+        eprintln!(
+            "{w}x{h} q{qindex} frame {t}: {} bytes, psnr {q:.2}",
+            coded.data.len()
+        );
     }
     eprintln!("total {bytes}");
 }

@@ -161,7 +161,13 @@ impl<'p> FrameParse<'p> {
             let width = col1 - col0;
             let tsb = width.div_ceil(8);
             let mut st = spare_states.pop().unwrap_or_else(State::empty);
-            st.reset(col0, width, mi_rows, if filter_on { tsb * sb_rows } else { 0 }, needs_grid);
+            st.reset(
+                col0,
+                width,
+                mi_rows,
+                if filter_on { tsb * sb_rows } else { 0 },
+                needs_grid,
+            );
             cols.push(TileCol {
                 state: st,
                 coder: None,
@@ -171,7 +177,10 @@ impl<'p> FrameParse<'p> {
         }
         let mut masks = std::mem::take(&mut bufs.masks);
         masks.clear();
-        masks.resize(if filter_on { sb_cols * sb_rows } else { 0 }, lpf::Mask::default());
+        masks.resize(
+            if filter_on { sb_cols * sb_rows } else { 0 },
+            lpf::Mask::default(),
+        );
         let mut grid = std::mem::take(&mut bufs.grid);
         grid.clear();
         grid.resize(if needs_grid { cells } else { 0 }, LfMi::default());
@@ -236,7 +245,14 @@ impl<'p> FrameParse<'p> {
     /// Parses superblock row `sb_row` of every tile column, on this
     /// thread, and merges its loop filter masks; rows go in order.
     pub fn row(&mut self, sb_row: usize) -> Result<(), CodecError> {
-        let shared = Self::shared(self.parsed, &self.levels, self.prev_mvs, self.last_seg, self.ref_status, (self.mi_cols, self.mi_rows));
+        let shared = Self::shared(
+            self.parsed,
+            &self.levels,
+            self.prev_mvs,
+            self.last_seg,
+            self.ref_status,
+            (self.mi_cols, self.mi_rows),
+        );
         let tile_cols = self.cols.len();
         for (tc, (col, syn)) in self.cols.iter_mut().zip(self.tiles.iter_mut()).enumerate() {
             parse_row(col, syn, &shared, &self.data, tc, tile_cols, sb_row)?;
@@ -248,16 +264,24 @@ impl<'p> FrameParse<'p> {
     /// Parses every row of every tile column, each column on its own
     /// thread when there are several.
     pub fn all(&mut self) -> Result<(), CodecError> {
-        let shared = Self::shared(self.parsed, &self.levels, self.prev_mvs, self.last_seg, self.ref_status, (self.mi_cols, self.mi_rows));
+        let shared = Self::shared(
+            self.parsed,
+            &self.levels,
+            self.prev_mvs,
+            self.last_seg,
+            self.ref_status,
+            (self.mi_cols, self.mi_rows),
+        );
         let tile_cols = self.cols.len();
         let rows = self.sb_rows;
         let data = &self.data;
-        let run = |tc: usize, col: &mut TileCol<'p>, syn: &mut TileSyntax| -> Result<(), CodecError> {
-            for r in 0..rows {
-                parse_row(col, syn, &shared, data, tc, tile_cols, r)?;
-            }
-            Ok(())
-        };
+        let run =
+            |tc: usize, col: &mut TileCol<'p>, syn: &mut TileSyntax| -> Result<(), CodecError> {
+                for r in 0..rows {
+                    parse_row(col, syn, &shared, data, tc, tile_cols, r)?;
+                }
+                Ok(())
+            };
         if tile_cols == 1 {
             if let (Some(col), Some(syn)) = (self.cols.first_mut(), self.tiles.first_mut()) {
                 run(0, col, syn)?;
@@ -302,8 +326,10 @@ impl<'p> FrameParse<'p> {
             let (c0, w) = (st.col0, st.width);
             if w > 0 {
                 for r in 0..self.mi_rows {
-                    mvs[r * mi_cols + c0..r * mi_cols + c0 + w].copy_from_slice(&st.mvs[r * w..r * w + w]);
-                    segmap[r * mi_cols + c0..r * mi_cols + c0 + w].copy_from_slice(&st.segmap[r * w..r * w + w]);
+                    mvs[r * mi_cols + c0..r * mi_cols + c0 + w]
+                        .copy_from_slice(&st.mvs[r * w..r * w + w]);
+                    segmap[r * mi_cols + c0..r * mi_cols + c0 + w]
+                        .copy_from_slice(&st.segmap[r * w..r * w + w]);
                 }
             }
             counts.add(&st.counts);
@@ -338,7 +364,11 @@ fn parse_row<'p>(
     let h = shared.h;
     let mi_row = sb_row * 8;
     while mi_row >= col.row_end {
-        let tr = if col.coder.is_none() { 0 } else { col.tile_row + 1 };
+        let tr = if col.coder.is_none() {
+            0
+        } else {
+            col.tile_row + 1
+        };
         col.tile_row = tr;
         col.row_end = if tr + 1 >= 1usize << h.log2_tile_rows {
             usize::MAX
@@ -371,7 +401,13 @@ fn parse_row<'p>(
 
 /// Copies superblock row `sb_row`'s loop filter masks (and per-sample
 /// grid) from the tile columns into the frame's.
-fn merge_row(cols: &[TileCol<'_>], shared: &Shared<'_>, masks: &mut [lpf::Mask], grid: &mut [LfMi], sb_row: usize) {
+fn merge_row(
+    cols: &[TileCol<'_>],
+    shared: &Shared<'_>,
+    masks: &mut [lpf::Mask],
+    grid: &mut [LfMi],
+    sb_row: usize,
+) {
     if !shared.filter_on {
         return;
     }
@@ -398,7 +434,10 @@ fn merge_row(cols: &[TileCol<'_>], shared: &Shared<'_>, masks: &mut [lpf::Mask],
 /// The references of a frame, by the header's LAST, GOLDEN and ALTREF,
 /// and their status for the parse (0 usable, 1 missing or of another
 /// format, 2 of a size the frame cannot predict from).
-pub fn ref_pics<P>(parsed: &Parsed<'_>, refs: [Option<&Pic<P>>; 3]) -> ([Option<RefPic<P>>; 3], [u8; 3]) {
+pub fn ref_pics<P>(
+    parsed: &Parsed<'_>,
+    refs: [Option<&Pic<P>>; 3],
+) -> ([Option<RefPic<P>>; 3], [u8; 3]) {
     let h = &parsed.header;
     let mut out: [Option<RefPic<P>>; 3] = [None, None, None];
     let mut status = [1u8; 3];
@@ -438,7 +477,12 @@ pub struct FrameRecon<P> {
 }
 
 impl<P: Pixel> FrameRecon<P> {
-    pub fn new(parsed: &Parsed<'_>, dims: Dims, refs: [Option<RefPic<P>>; 3], writer: FrameWriter<P>) -> Self {
+    pub fn new(
+        parsed: &Parsed<'_>,
+        dims: Dims,
+        refs: [Option<RefPic<P>>; 3],
+        writer: FrameWriter<P>,
+    ) -> Self {
         let h = &parsed.header;
         let mi_cols = dims.width.div_ceil(8);
         let mi_rows = dims.height.div_ceil(8);
@@ -501,6 +545,7 @@ pub struct Reuse {
 /// here and reconstructed on a worker, which sends its syntax buffers
 /// back on the channel; the picture returned is then still being made,
 /// and its readers wait for its rows.
+#[allow(clippy::too_many_arguments)]
 pub fn decode_frame<P: Pixel + Send + Sync>(
     parsed: &Parsed<'_>,
     refs: [Option<&Pic<P>>; 3],
@@ -512,7 +557,13 @@ pub fn decode_frame<P: Pixel + Send + Sync>(
     present: Option<frame::Present<P>>,
 ) -> Result<(Arc<Pic<P>>, ParseOut), CodecError> {
     let h = &parsed.header;
-    let dims = Dims::new(h.width as usize, h.height as usize, h.ss_x as usize, h.ss_y as usize, h.bit_depth);
+    let dims = Dims::new(
+        h.width as usize,
+        h.height as usize,
+        h.ss_x as usize,
+        h.ss_y as usize,
+        h.bit_depth,
+    );
     let (pics, status) = ref_pics(parsed, refs);
     let mut fp = FrameParse::new(parsed, prev_mvs, last_seg, status, bufs)?;
     let rows = fp.sb_rows();

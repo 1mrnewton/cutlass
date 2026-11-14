@@ -154,6 +154,7 @@ fn run<P: Pixel, T: Elem, const LN: usize, const N: usize>(
         tx1d(N, col_type == Kind::Adst, &vin, &mut vout);
         for r in 0..n {
             let row = &mut dst[r * stride + c0..r * stride + c0 + LN];
+            #[allow(clippy::needless_range_loop)]
             for l in 0..LN {
                 let v = vout[r].0[l].wa(round).sr(s).to_i32();
                 row[l] = P::clip(row[l].get() + v, max);
@@ -232,7 +233,17 @@ mod tests {
                     let mut got = vec![128u8; n * n];
                     let col = if t & 1 == 1 { Kind::Adst } else { Kind::Dct };
                     let row = if t & 2 == 2 { Kind::Adst } else { Kind::Dct };
-                    add(&mut got, n, &mut transposed, log2n, col, row, 2, (n, n), 255);
+                    add(
+                        &mut got,
+                        n,
+                        &mut transposed,
+                        log2n,
+                        col,
+                        row,
+                        2,
+                        (n, n),
+                        255,
+                    );
                     assert_eq!(got, want, "n {n} type {t}");
                     assert!(transposed.iter().all(|&v| v == 0));
                 }

@@ -114,7 +114,14 @@ fn shift_of(log2n: usize) -> u32 {
 /// into `out`, transposed as the decoder stores coefficients
 /// (`out[c * n + r]` is row `r`, column `c`). `col_adst` and `row_adst`
 /// pick ADST down the columns and along the rows.
-pub fn forward(res: &[i32], stride: usize, log2n: usize, col_adst: bool, row_adst: bool, out: &mut [f32]) {
+pub fn forward(
+    res: &[i32],
+    stride: usize,
+    log2n: usize,
+    col_adst: bool,
+    row_adst: bool,
+    out: &mut [f32],
+) {
     let m = mats();
     let fc = &m.m[log2n][usize::from(col_adst)];
     let fr = &m.m[log2n][usize::from(row_adst)];
@@ -131,10 +138,19 @@ pub fn forward(res: &[i32], stride: usize, log2n: usize, col_adst: bool, row_ads
 /// scaled rows, so that they run in vector lanes without reordering any
 /// sum.
 #[inline(always)]
-fn fwd<const N: usize>(res: &[i32], stride: usize, fc: &[f32], fr: &[f32], gain: f32, out: &mut [f32]) {
+fn fwd<const N: usize>(
+    res: &[i32],
+    stride: usize,
+    fc: &[f32],
+    fr: &[f32],
+    gain: f32,
+    out: &mut [f32],
+) {
     let mut src = [[0.0f32; N]; N];
     for (j, row) in src.iter_mut().enumerate() {
-        let Some(r) = res[j * stride..].first_chunk::<N>() else { return };
+        let Some(r) = res[j * stride..].first_chunk::<N>() else {
+            return;
+        };
         for x in 0..N {
             row[x] = r[x] as f32;
         }
@@ -162,7 +178,9 @@ fn fwd<const N: usize>(res: &[i32], stride: usize, fc: &[f32], fr: &[f32], gain:
                 acc[r] += w * t[r];
             }
         }
-        let Some(o) = out[c * N..].first_chunk_mut::<N>() else { return };
+        let Some(o) = out[c * N..].first_chunk_mut::<N>() else {
+            return;
+        };
         for r in 0..N {
             o[r] = acc[r] * gain;
         }
@@ -210,34 +228,6 @@ pub fn fwht(res: &[i32], stride: usize, out: &mut [i32]) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::forward;
-    use crate::dsp::itx::{Kind, add};
-
-    /// Forward then the decoder's inverse gives back the residual.
-    #[test]
-    fn forward_inverts_the_decoder() {
-        for log2n in 0..4 {
-            let n = 4usize << log2n;
-            for t in 0..4u8 {
-                if n == 32 && t != 0 {
-                    continue;
-                }
-                let res: Vec<i32> = (0..n * n).map(|i| ((i * 37 + i / n * 11) % 61) as i32 - 30).collect();
-                let mut f = vec![0.0f32; n * n];
-                forward(&res, n, log2n, t & 1 == 1, t & 2 == 2, &mut f);
-                let mut coef: Vec<i32> = f.iter().map(|&v| v.round() as i32).collect();
-                let mut dst = vec![128u8; n * n];
-                let (col, row) = (if t & 1 == 1 { Kind::Adst } else { Kind::Dct }, if t & 2 == 2 { Kind::Adst } else { Kind::Dct });
-                add(&mut dst, n, &mut coef, log2n, col, row, n * n, (n, n), 255);
-                let worst = dst.iter().zip(&res).map(|(&d, &r)| (i32::from(d) - 128 - r).abs()).max().unwrap_or(0);
-                assert!(worst <= 1, "n {n} type {t} worst {worst}");
-            }
-        }
-    }
-}
-
 /// How much a forward transform of each size scales energy: the sum of
 /// squared coefficients over the sum of squared residuals, measured once
 /// on a pseudo-random residual. Errors in coefficients over this are
@@ -261,4 +251,42 @@ pub fn gain(log2n: usize) -> f32 {
             (e / r) as f32
         })
     })[log2n.min(3)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::forward;
+    use crate::dsp::itx::{Kind, add};
+
+    /// Forward then the decoder's inverse gives back the residual.
+    #[test]
+    fn forward_inverts_the_decoder() {
+        for log2n in 0..4 {
+            let n = 4usize << log2n;
+            for t in 0..4u8 {
+                if n == 32 && t != 0 {
+                    continue;
+                }
+                let res: Vec<i32> = (0..n * n)
+                    .map(|i| ((i * 37 + i / n * 11) % 61) as i32 - 30)
+                    .collect();
+                let mut f = vec![0.0f32; n * n];
+                forward(&res, n, log2n, t & 1 == 1, t & 2 == 2, &mut f);
+                let mut coef: Vec<i32> = f.iter().map(|&v| v.round() as i32).collect();
+                let mut dst = vec![128u8; n * n];
+                let (col, row) = (
+                    if t & 1 == 1 { Kind::Adst } else { Kind::Dct },
+                    if t & 2 == 2 { Kind::Adst } else { Kind::Dct },
+                );
+                add(&mut dst, n, &mut coef, log2n, col, row, n * n, (n, n), 255);
+                let worst = dst
+                    .iter()
+                    .zip(&res)
+                    .map(|(&d, &r)| (i32::from(d) - 128 - r).abs())
+                    .max()
+                    .unwrap_or(0);
+                assert!(worst <= 1, "n {n} type {t} worst {worst}");
+            }
+        }
+    }
 }

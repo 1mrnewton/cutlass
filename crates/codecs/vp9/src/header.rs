@@ -1069,6 +1069,11 @@ impl Header {
 }
 
 #[cfg(test)]
+pub(crate) fn tests_header() -> Header {
+    empty_header(0, true, true, false)
+}
+
+#[cfg(test)]
 mod tests {
     use super::{Persist, parse};
     use crate::tables::COEF_PROBS;
@@ -1141,9 +1146,4 @@ mod tests {
         let err = must_fail(&[]);
         assert!(err.contains("truncated"), "{err}");
     }
-}
-
-#[cfg(test)]
-pub(crate) fn tests_header() -> Header {
-    empty_header(0, true, true, false)
 }

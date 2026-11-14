@@ -9,6 +9,12 @@ pub trait Pixel: Copy + Default + PartialEq + Send + Sync + core::fmt::Debug + '
     /// `v`, which the caller has already held to the sample range.
     fn new(v: i32) -> Self;
 
+    /// The samples as bytes, for 8-bit samples.
+    #[inline(always)]
+    fn bytes(_s: &[Self]) -> Option<&[u8]> {
+        None
+    }
+
     /// Inter prediction with vector instructions; `false` when not taken.
     #[allow(clippy::too_many_arguments)]
     #[inline(always)]
@@ -45,6 +51,10 @@ pub trait Pixel: Copy + Default + PartialEq + Send + Sync + core::fmt::Debug + '
 
 impl Pixel for u8 {
     const HIGH: bool = false;
+    #[inline(always)]
+    fn bytes(s: &[Self]) -> Option<&[u8]> {
+        Some(s)
+    }
     #[inline(always)]
     fn lf_fast(
         buf: &mut [Self],

@@ -2000,10 +2000,19 @@ fn assistant_settings(
         &mut settings.sandbox.local,
         "Run code on this computer",
     ));
-    ui.add(ui::Check::new(
-        &mut settings.sandbox.online,
-        "Run code online",
-    ));
+    // No Cutlass service runs code yet, so the switch cannot be turned on
+    // here; one already on can still be turned off.
+    ui.add_enabled(
+        settings.sandbox.online,
+        ui::Check::new(&mut settings.sandbox.online, "Run code online"),
+    );
+    ui.label(
+        RichText::new(
+            "Running code online needs a Cutlass account, which is not available yet. Scripts run on this computer.",
+        )
+        .size(11.0)
+        .color(tokens::FAINT),
+    );
     ui.add(ui::Check::new(
         &mut settings.memory,
         "Remember across conversations",

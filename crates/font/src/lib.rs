@@ -173,9 +173,7 @@ pub struct Font<'a> {
     num_glyphs: u16,
     hmtx: Hmtx<'a>,
     cmap: Cmap<'a>,
-    /// The map is a symbol face's: its pictures are also where the
-    /// letters are typed.
-    symbols: bool,
+    coding: Coding,
     kern: kern::Kerning,
     /// The passes of a `kern` table that is more than pairs, and of `kerx`.
     kern_passes: Vec<KernPass<'a>>,
@@ -303,12 +301,17 @@ impl<'a> Font<'a> {
     /// is a bad table.
     pub fn glyph_id(&self, character: char) -> Result<Option<u16>, FontError> {
         let code = u32::from(character);
-        let found = match self.cmap.glyph(code)? {
-            // A symbol face draws the key that types each picture.
-            None if self.symbols && (0x20..=0xFF).contains(&code) => {
-                self.cmap.glyph(0xF000 + code)?
-            }
-            found => found,
+        let found = match self.coding {
+            Coding::Unicode => self.cmap.glyph(code)?,
+            Coding::Symbols => match self.cmap.glyph(code)? {
+                // A symbol face draws the key that types each picture.
+                None if (0x20..=0xFF).contains(&code) => self.cmap.glyph(0xF000 + code)?,
+                found => found,
+            },
+            Coding::Roman => match roman_byte(code) {
+                Some(byte) => self.cmap.glyph(byte)?,
+                None => None,
+            },
         };
         let Some(glyph_id) = found else {
             return Ok(None);
@@ -465,7 +468,7 @@ impl<'a> Font<'a> {
         let num_glyphs = parse_maxp(directory.table(b"maxp")?)?;
         let metrics = parse_hhea(directory.table(b"hhea")?, num_glyphs)?;
         let hmtx = Hmtx::parse(directory.table(b"hmtx")?, metrics, num_glyphs)?;
-        let (cmap, symbols) = parse_cmap(directory.table(b"cmap")?)?;
+        let (cmap, coding) = parse_cmap(directory.table(b"cmap")?)?;
         let variants = variants::Variants::find(directory.table(b"cmap")?)?;
         // A kern table in a form this reader cannot apply, such as Apple's
         // version 1 tables, leaves the face without kerning. A torn one is
@@ -538,7 +541,7 @@ impl<'a> Font<'a> {
             num_glyphs,
             hmtx,
             cmap,
-            symbols,
+            coding,
             kern,
             kern_passes,
             kerx,
@@ -669,6 +672,8 @@ impl<'a> Hmtx<'a> {
 }
 
 enum Cmap<'a> {
+    /// Format 0: a glyph for each of 256 byte codes.
+    Bytes(&'a [u8]),
     Format4(Format4<'a>),
     Format6(Format6<'a>),
     Groups(Groups<'a>),
@@ -677,6 +682,10 @@ enum Cmap<'a> {
 impl Cmap<'_> {
     fn glyph(&self, codepoint: u32) -> Result<Option<u16>, FontError> {
         match self {
+            Self::Bytes(glyphs) => Ok(usize::try_from(codepoint)
+                .ok()
+                .and_then(|code| glyphs.get(code))
+                .and_then(|glyph| mapped(u16::from(*glyph)))),
             Self::Format4(table) => table.glyph(codepoint),
             Self::Format6(table) => table.glyph(codepoint),
             Self::Groups(table) => table.glyph(codepoint),
@@ -705,9 +714,45 @@ struct Groups<'a> {
     constant: bool,
 }
 
-/// The character map of a face, and whether it is the map of a symbol
-/// face, which keeps its pictures at U+F020 to U+F0FF.
-fn parse_cmap(table: &[u8]) -> Result<(Cmap<'_>, bool), FontError> {
+/// What the codes of a face's character map are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Coding {
+    /// Unicode characters.
+    Unicode,
+    /// A symbol face's: its pictures are at U+F020 to U+F0FF, and are
+    /// also drawn for the keys that type them.
+    Symbols,
+    /// The bytes of the Mac's Roman character set, which an old face may
+    /// have as its only map.
+    Roman,
+}
+
+/// The characters of the Mac's Roman set from byte 0x80 on, in byte order.
+/// Below that the set is ASCII.
+const ROMAN_HIGH: &str = "\u{C4}\u{C5}\u{C7}\u{C9}\u{D1}\u{D6}\u{DC}\u{E1}\u{E0}\u{E2}\u{E4}\u{E3}\u{E5}\u{E7}\u{E9}\u{E8}\
+\u{EA}\u{EB}\u{ED}\u{EC}\u{EE}\u{EF}\u{F1}\u{F3}\u{F2}\u{F4}\u{F6}\u{F5}\u{FA}\u{F9}\u{FB}\u{FC}\
+\u{2020}\u{B0}\u{A2}\u{A3}\u{A7}\u{2022}\u{B6}\u{DF}\u{AE}\u{A9}\u{2122}\u{B4}\u{A8}\u{2260}\u{C6}\u{D8}\
+\u{221E}\u{B1}\u{2264}\u{2265}\u{A5}\u{B5}\u{2202}\u{2211}\u{220F}\u{3C0}\u{222B}\u{AA}\u{BA}\u{3A9}\u{E6}\u{F8}\
+\u{BF}\u{A1}\u{AC}\u{221A}\u{192}\u{2248}\u{2206}\u{AB}\u{BB}\u{2026}\u{A0}\u{C0}\u{C3}\u{D5}\u{152}\u{153}\
+\u{2013}\u{2014}\u{201C}\u{201D}\u{2018}\u{2019}\u{F7}\u{25CA}\u{FF}\u{178}\u{2044}\u{20AC}\u{2039}\u{203A}\u{FB01}\u{FB02}\
+\u{2021}\u{B7}\u{201A}\u{201E}\u{2030}\u{C2}\u{CA}\u{C1}\u{CB}\u{C8}\u{CD}\u{CE}\u{CF}\u{CC}\u{D3}\u{D4}\
+\u{F8FF}\u{D2}\u{DA}\u{DB}\u{D9}\u{131}\u{2C6}\u{2DC}\u{AF}\u{2D8}\u{2D9}\u{2DA}\u{B8}\u{2DD}\u{2DB}\u{2C7}";
+
+/// The byte of `code` in the Mac's Roman set, when it has one.
+fn roman_byte(code: u32) -> Option<u32> {
+    if code < 0x80 {
+        return Some(code);
+    }
+    let character = char::from_u32(code)?;
+    let place = ROMAN_HIGH.chars().position(|other| other == character)?;
+    u32::try_from(place).ok().map(|place| place + 0x80)
+}
+
+/// The character map of a face, and what its codes are. A symbol face's
+/// map is taken ahead of any other the face has, as other shapers take
+/// it; then the best map of Unicode characters; and the Mac's Roman map
+/// when it is all there is.
+fn parse_cmap(table: &[u8]) -> Result<(Cmap<'_>, Coding), FontError> {
     if table.len() < 4 {
         return Err(short(table));
     }
@@ -720,28 +765,29 @@ fn parse_cmap(table: &[u8]) -> Result<(Cmap<'_>, bool), FontError> {
     }
     let record_bytes = records.checked_mul(8).ok_or(FontError::BadTable)?;
     let header = bytes_at(table, 4, record_bytes)?;
-    let mut chosen: Option<(u8, usize, bool)> = None;
+    let mut chosen: Option<(u8, usize, Coding)> = None;
     for index in 0..records {
         let at = index * 8;
         let platform = u16_at(header, at)?;
         let encoding = u16_at(header, at + 2)?;
-        // A symbol face's map counts only when the face has no other.
-        let symbols = (platform, encoding) == (3, 0);
-        if !(symbols || unicode_cmap(platform, encoding)) {
-            continue;
-        }
+        let (coding, rank) = match (platform, encoding) {
+            (3, 0) => (Coding::Symbols, 32),
+            (1, 0) => (Coding::Roman, 0),
+            _ if unicode_cmap(platform, encoding) => (Coding::Unicode, 8),
+            _ => continue,
+        };
         let offset = usize::try_from(u32_at(header, at + 4)?).map_err(|_| FontError::BadTable)?;
         let format = u16_at(table.get(offset..).ok_or(FontError::Truncated)?, 0)?;
         let Some(score) = cmap_score(format) else {
             continue;
         };
-        let score = if symbols { score } else { score + 8 };
+        let score = score + rank;
         if chosen.as_ref().is_some_and(|(best, _, _)| *best >= score) {
             continue;
         }
-        chosen = Some((score, offset, symbols));
+        chosen = Some((score, offset, coding));
     }
-    let Some((_, offset, symbols)) = chosen else {
+    let Some((_, offset, coding)) = chosen else {
         return Err(FontError::Unsupported);
     };
     let subtable = table.get(offset..).ok_or(FontError::Truncated)?;
@@ -749,13 +795,14 @@ fn parse_cmap(table: &[u8]) -> Result<(Cmap<'_>, bool), FontError> {
         return Err(FontError::Truncated);
     }
     let map = match u16_at(subtable, 0)? {
+        0 => Cmap::Bytes(bytes_at(subtable, 6, 256)?),
         4 => Cmap::Format4(parse_format4(subtable)?),
         6 => Cmap::Format6(parse_format6(subtable)?),
         12 => Cmap::Groups(parse_groups(subtable, false)?),
         13 => Cmap::Groups(parse_groups(subtable, true)?),
         _ => return Err(FontError::Unsupported),
     };
-    Ok((map, symbols))
+    Ok((map, coding))
 }
 
 fn unicode_cmap(platform: u16, encoding: u16) -> bool {
@@ -767,9 +814,10 @@ fn unicode_cmap(platform: u16, encoding: u16) -> bool {
 
 fn cmap_score(format: u16) -> Option<u8> {
     match format {
-        12 => Some(4),
-        13 => Some(3),
-        4 => Some(2),
+        12 => Some(5),
+        13 => Some(4),
+        4 => Some(3),
+        0 => Some(1),
         6 => Some(1),
         _ => None,
     }

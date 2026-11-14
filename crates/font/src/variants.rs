@@ -172,7 +172,8 @@ mod tests {
         // Only the keys: a character past them is not moved there.
         assert_eq!(face.glyph_id('B'), Ok(None));
         assert_eq!(face.glyph_id('\u{141}'), Ok(None));
-        // A face that also has a map of characters uses that one alone.
+        // A face that also has a map of characters is still read by its
+        // symbol map, as other shapers read it.
         let letters = character_map(&[('B', 2)], &[]);
         let mut both = vec![0, 0, 0, 2, 0, 3, 0, 0, 0, 0, 0, 20, 0, 3, 0, 10];
         let second = u32::try_from(20 + cmap.len() - 12).expect("offset");
@@ -181,9 +182,45 @@ mod tests {
         both.extend(&letters[12..]);
         let bytes = font(&glyphs, &pictures, &[(b"cmap", both)]);
         let face = read(&bytes).expect("both maps");
-        assert_eq!(face.glyph_id('B'), Ok(Some(2)));
-        assert_eq!(face.glyph_id('A'), Ok(None));
-        assert_eq!(face.glyph_id('\u{F041}'), Ok(None));
+        assert_eq!(face.glyph_id('A'), Ok(Some(1)));
+        assert_eq!(face.glyph_id('B'), Ok(None));
+    }
+
+    #[test]
+    fn an_old_face_with_only_a_mac_roman_map_draws_its_letters() {
+        // One subtable, platform 1, encoding 0, format 0: a glyph for
+        // each of 256 bytes. Byte 0x41 is A, 0x8E is e with an acute, and
+        // 0xDB is the euro sign.
+        let mut cmap = vec![0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 12, 0, 0, 1, 6, 0, 0];
+        let mut bytes = [0_u8; 256];
+        bytes[0x41] = 1;
+        bytes[0x8E] = 2;
+        bytes[0xDB] = 1;
+        cmap.extend(bytes);
+        let glyphs = [boxed(500), boxed(500), boxed(500)];
+        let file = font(&glyphs, &[('A', 1)], &[(b"cmap", cmap.clone())]);
+        let face = read(&file).expect("roman face");
+        assert_eq!(face.glyph_id('A'), Ok(Some(1)));
+        assert_eq!(face.glyph_id('\u{E9}'), Ok(Some(2)));
+        assert_eq!(face.glyph_id('\u{20AC}'), Ok(Some(1)));
+        // A byte with no glyph, a character the set lacks, and the byte
+        // itself read as a character: none has a glyph.
+        assert_eq!(face.glyph_id('B'), Ok(None));
+        assert_eq!(face.glyph_id('\u{4E2D}'), Ok(None));
+        assert_eq!(face.glyph_id('\u{8E}'), Ok(None));
+        assert_eq!(face.glyph_id(char::MAX), Ok(None));
+        // The map cut short does not open.
+        cmap.truncate(100);
+        let file = font(&glyphs, &[('A', 1)], &[(b"cmap", cmap)]);
+        assert!(read(&file).is_err());
+        // Every character of the set has one byte, in order.
+        let high: Vec<char> = crate::ROMAN_HIGH.chars().collect();
+        assert_eq!(high.len(), 128);
+        for (place, character) in high.iter().enumerate() {
+            let byte = u32::try_from(place).expect("place") + 0x80;
+            assert_eq!(crate::roman_byte(u32::from(*character)), Some(byte));
+        }
+        assert_eq!(crate::roman_byte(0x7F), Some(0x7F));
     }
 
     #[test]

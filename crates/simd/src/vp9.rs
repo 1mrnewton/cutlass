@@ -72,7 +72,8 @@ pub fn wide_ok() -> bool {
                 && std::is_x86_feature_detected!("bmi1")
                 && std::is_x86_feature_detected!("bmi2")
                 && std::is_x86_feature_detected!("lzcnt")
-                && std::is_x86_feature_detected!("popcnt");
+                && std::is_x86_feature_detected!("popcnt")
+                && std::is_x86_feature_detected!("fma");
             #[cfg(not(target_arch = "x86_64"))]
             let has = false;
             HAS.store(if has { 2 } else { 1 }, Ordering::Relaxed);
@@ -83,7 +84,7 @@ pub fn wide_ok() -> bool {
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,bmi1,bmi2,lzcnt,popcnt")]
+#[target_feature(enable = "avx2,bmi1,bmi2,fma,lzcnt,popcnt")]
 fn avx2_body<R>(f: impl FnOnce() -> R) -> R {
     f()
 }

@@ -151,19 +151,30 @@ pub fn forward(
     let half = m.half[log2n].as_deref();
     let hc = if col_adst { None } else { half };
     let hr = if row_adst { None } else { half };
-    cutlass_simd::vp9::wide(|| match log2n {
-        0 => fwd::<4>(res, stride, (fc, hc), (fr, hr), gain, out),
-        1 => fwd::<8>(res, stride, (fc, hc), (fr, hr), gain, out),
-        2 => fwd::<16>(res, stride, (fc, hc), (fr, hr), gain, out),
-        _ => fwd::<32>(res, stride, (fc, hc), (fr, hr), gain, out),
-    });
+    // Fused multiply-adds where `wide` runs on AVX2 (with FMA); plain ones
+    // elsewhere, where `mul_add` could be a library call.
+    if cutlass_simd::vp9::wide_ok() {
+        cutlass_simd::vp9::wide(|| match log2n {
+            0 => fwd::<4, true>(res, stride, (fc, hc), (fr, hr), gain, out),
+            1 => fwd::<8, true>(res, stride, (fc, hc), (fr, hr), gain, out),
+            2 => fwd::<16, true>(res, stride, (fc, hc), (fr, hr), gain, out),
+            _ => fwd::<32, true>(res, stride, (fc, hc), (fr, hr), gain, out),
+        });
+    } else {
+        match log2n {
+            0 => fwd::<4, false>(res, stride, (fc, hc), (fr, hr), gain, out),
+            1 => fwd::<8, false>(res, stride, (fc, hc), (fr, hr), gain, out),
+            2 => fwd::<16, false>(res, stride, (fc, hc), (fr, hr), gain, out),
+            _ => fwd::<32, false>(res, stride, (fc, hc), (fr, hr), gain, out),
+        }
+    }
 }
 
 /// `X = Fc · res · Frᵀ`, stored transposed. Both passes are sums of
 /// scaled rows, so that they run in vector lanes; a DCT pass folds its
 /// rows first (`half`) and multiplies by half as many weights.
 #[inline(always)]
-fn fwd<const N: usize>(
+fn fwd<const N: usize, const FMA: bool>(
     res: &[i32],
     stride: usize,
     (fc, hc): (&[f32], Option<&[f32]>),
@@ -182,13 +193,13 @@ fn fwd<const N: usize>(
     }
     // t[k] = Σj Fc[k][j] · src[j], then its transpose.
     let mut tt = [[0.0f32; N]; N];
-    pass::<N>(&src, fc, hc, |k, acc| {
+    pass::<N, FMA>(&src, fc, hc, |k, acc| {
         for x in 0..N {
             tt[x][k] = acc[x];
         }
     });
     // out[c] = gain · Σx Fr[c][x] · tᵀ[x].
-    pass::<N>(&tt, fr, hr, |c, acc| {
+    pass::<N, FMA>(&tt, fr, hr, |c, acc| {
         if let Some(o) = out[c * N..].first_chunk_mut::<N>() {
             for r in 0..N {
                 o[r] = acc[r] * gain;
@@ -200,7 +211,7 @@ fn fwd<const N: usize>(
 /// One pass: `put(k, Σj w[k][j] · v[j])` for each output `k`, with the
 /// rows folded when `half` holds the folded weights.
 #[inline(always)]
-fn pass<const N: usize>(
+fn pass<const N: usize, const FMA: bool>(
     v: &[[f32; N]; N],
     w: &[f32],
     half: Option<&[f32]>,
@@ -224,7 +235,7 @@ fn pass<const N: usize>(
                 let mut acc = [0.0f32; N];
                 for (j, &wj) in ws.iter().enumerate() {
                     for x in 0..N {
-                        acc[x] += wj * sd[par][j][x];
+                        acc[x] = mac::<FMA>(acc[x], wj, sd[par][j][x]);
                     }
                 }
                 put(k, &acc);
@@ -236,13 +247,19 @@ fn pass<const N: usize>(
                 for (j, s) in v.iter().enumerate() {
                     let wj = w[k * N + j];
                     for x in 0..N {
-                        acc[x] += wj * s[x];
+                        acc[x] = mac::<FMA>(acc[x], wj, s[x]);
                     }
                 }
                 put(k, &acc);
             }
         }
     }
+}
+
+/// `acc + w · v`, fused when `FMA`.
+#[inline(always)]
+fn mac<const FMA: bool>(acc: f32, w: f32, v: f32) -> f32 {
+    if FMA { w.mul_add(v, acc) } else { acc + w * v }
 }
 
 /// The Walsh-Hadamard of the lossless mode, libvpx `vp9_fwht4x4`, into

@@ -121,3 +121,10 @@ fn round_trips_tile_columns() {
     // Past 4096 samples two columns are the least, on one thread too.
     round_trip_threads(4200, 16, 2, 120, 1, 9);
 }
+
+#[test]
+fn round_trips_every_speed() {
+    for speed in [0, 3, 6] {
+        round_trip_threads(136, 72, 3, 100, 2, speed);
+    }
+}

@@ -223,7 +223,7 @@ type Tok = (usize, u8, usize, usize, Vec<i32>, usize);
 
 /// What coding a square changes, kept to try another way.
 struct Snap {
-    at: (usize, usize, usize),
+    at: (usize, usize, usize, usize),
     cost: u64,
     above: [Nb; 8],
     above_part: [u8; 8],
@@ -238,7 +238,7 @@ struct Snap {
 impl Default for Snap {
     fn default() -> Self {
         Self {
-            at: (0, 0, 0),
+            at: (0, 0, 0, 0),
             cost: 0,
             above: [Nb::default(); 8],
             above_part: [0; 8],
@@ -291,7 +291,10 @@ pub struct Tile<'s, 't, 'r, 'v> {
     /// The decision for each square block of the superblock (see
     /// [`Tile::slot`]) and which squares split.
     choice: [Blk; 85],
-    split: [bool; 21],
+    /// Each square's partition (by [`Tile::node`]), and the halves of
+    /// those coded across (0) or down (1).
+    part: [u8; 21],
+    rect: [[[Blk; 2]; 21]; 2],
     /// Snapshots: 0 the superblock, then four per level.
     snaps: Vec<Snap>,
     toks: Vec<Tok>,
@@ -343,7 +346,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             fcoef: vec![0.0; 32 * 32],
             seeds,
             choice: [Blk::default(); 85],
-            split: [false; 21],
+            part: [PARTITION_NONE; 21],
+            rect: [[[Blk::default(); 2]; 21]; 2],
             snaps: (0..17).map(|_| Snap::default()).collect(),
             toks: Vec::new(),
             last_sad: 0,
@@ -377,18 +381,19 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 // Partition from the motion search's SAD, one pass.
                 let mut split = [false; 21];
                 self.choose_into(mi_row, mi_col, 3, &mut split);
-                self.partition(mi_row, mi_col, BLOCK_64X64, 4, &split);
+                let part = split.map(|s| if s { PARTITION_SPLIT } else { PARTITION_NONE });
+                self.partition(mi_row, mi_col, BLOCK_64X64, 4, &part);
                 mi_col += 8;
                 continue;
             }
-            self.save(mi_row, mi_col, 8, 0);
+            self.save(mi_row, mi_col, (8, 8), 0);
             self.trial = true;
-            self.split = [false; 21];
+            self.part = [PARTITION_NONE; 21];
             self.rd_node(mi_row, mi_col, 3);
             self.restore(0);
             self.trial = false;
-            let split = self.split;
-            self.partition(mi_row, mi_col, BLOCK_64X64, 4, &split);
+            let part = self.part;
+            self.partition(mi_row, mi_col, BLOCK_64X64, 4, &part);
             mi_col += 8;
         }
     }
@@ -470,7 +475,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             let lam = f64::from(self.s.rd_lambda) / 256.0;
             let n = MI_WH[usize::from(bsize)].0;
             self.trial = true;
-            self.save(row, col, n, 1);
+            self.save(row, col, (n, n), 1);
             let mut best = (f64::INFINITY, 0);
             for (i, b) in cands.iter().enumerate() {
                 if i > 0 {
@@ -525,58 +530,96 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let hbs = n / 2;
         let bsize = SQUARE[level];
         let whole = level == 0 || (row + hbs < s.mi_rows && col + hbs < s.mi_cols);
+        // Slots: the state before, after the best whole shape so far, and
+        // two for the blocks' own trials.
         let before = 1 + 4 * (3 - level);
-        self.save(row, col, n, before);
-        let mut j_none = f64::INFINITY;
+        self.save(row, col, (n, n), before);
+        let mut best = (f64::INFINITY, PARTITION_NONE);
         if whole {
             let c0 = self.cost;
             self.part_symbol(row, col, bsize, PARTITION_NONE);
             let sym = (self.cost - c0) as f64 * lam;
-            j_none = sym + self.best_block(row, col, bsize, before + 2);
+            let (j, b) = self.best_block(row, col, bsize, before + 2);
+            self.choice[Self::slot(row, col, bsize)] = b;
             self.part_after(row, col, bsize, PARTITION_NONE);
+            best = (sym + j, PARTITION_NONE);
         }
         if level == 0 {
-            return j_none;
+            return best.0;
+        }
+        let none_skip = self.last_skip;
+        if whole {
+            self.save(row, col, (n, n), before + 1);
+        }
+        // Halves, across and down.
+        if whole && s.speed < 4 {
+            let node = Self::node(row, col, level);
+            for (p, k, offs) in [
+                (PARTITION_HORZ, 0usize, [(0, 0), (hbs, 0)]),
+                (PARTITION_VERT, 1, [(0, 0), (0, hbs)]),
+            ] {
+                self.restore(before);
+                let sub = geom::subsize(p, bsize);
+                let c0 = self.cost;
+                self.part_symbol(row, col, bsize, p);
+                let mut j = (self.cost - c0) as f64 * lam;
+                let mut picks = [Blk::default(); 2];
+                for (i, (dr, dc)) in offs.into_iter().enumerate() {
+                    if j >= best.0 {
+                        break;
+                    }
+                    let (jb, b) = self.best_block(row + dr, col + dc, sub, before + 2);
+                    j += jb;
+                    picks[i] = b;
+                }
+                if j < best.0 {
+                    self.part_after(row, col, bsize, p);
+                    best = (j, p);
+                    self.rect[k][node] = picks;
+                    self.save(row, col, (n, n), before + 1);
+                }
+            }
         }
         // No split when the whole block needs no residual and its error is
         // under the quantizer's own noise.
-        if whole && self.last_skip.0 {
+        if whole && best.1 == PARTITION_NONE && none_skip.0 {
             let pixels = (n * 8 * n * 8) as f64;
             let step = f64::from(s.dq[0][1]) / 8.0;
-            if self.last_skip.1 < pixels * step * step / 24.0 {
-                return j_none;
+            if none_skip.1 < pixels * step * step / 24.0 {
+                self.restore(before + 1);
+                self.part[Self::node(row, col, level)] = PARTITION_NONE;
+                return best.0;
             }
         }
-        if whole {
-            self.save(row, col, n, before + 1);
-            self.restore(before);
-        }
+        self.restore(before);
         let c0 = self.cost;
         self.part_symbol(row, col, bsize, PARTITION_SPLIT);
         let mut j = (self.cost - c0) as f64 * lam;
         for (dr, dc) in [(0, 0), (0, hbs), (hbs, 0), (hbs, hbs)] {
-            if j >= j_none {
+            if j >= best.0 {
                 break;
             }
             j += self.rd_node(row + dr, col + dc, level - 1);
         }
-        if j < j_none {
-            self.split[Self::node(row, col, level)] = true;
+        let node = Self::node(row, col, level);
+        if j < best.0 {
+            self.part[node] = PARTITION_SPLIT;
             j
         } else {
             self.restore(before + 1);
-            j_none
+            self.part[node] = best.1;
+            best.0
         }
     }
 
     /// Codes the best of the block's candidate modes (leaving the state
     /// as it leaves it) and returns its cost. `slot` holds the state
     /// before it.
-    fn best_block(&mut self, row: usize, col: usize, bsize: u8, slot: usize) -> f64 {
+    fn best_block(&mut self, row: usize, col: usize, bsize: u8, slot: usize) -> (f64, Blk) {
         let s = self.s;
         let lam = f64::from(s.rd_lambda) / 256.0;
-        let n = MI_WH[usize::from(bsize)].0;
-        self.save(row, col, n, slot);
+        let (bw_mi, bh_mi) = MI_WH[usize::from(bsize)];
+        self.save(row, col, (bw_mi, bh_mi), slot);
         let mut cands: Vec<Blk> = Vec::with_capacity(8);
         let base = self.blk(row, col, bsize);
         if !s.intra_frame {
@@ -601,7 +644,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 if j < best.0 {
                     *best = (j, i);
                     t.choice_skip = (t.coded_skip, d);
-                    t.save(row, col, n, slot + 1);
+                    t.save(row, col, (bw_mi, bh_mi), slot + 1);
                 }
             };
         for (i, b) in cands.clone().iter().enumerate() {
@@ -644,8 +687,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             self.restore(slot + 1);
         }
         self.last_skip = self.choice_skip;
-        self.choice[Self::slot(row, col, bsize)] = cands[best.1];
-        best.0
+        (best.0, cands[best.1])
     }
 
     /// A block at `(row, col)` with the defaults.
@@ -771,6 +813,19 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             };
             let nearest = self.find_mv(&b, NEAREST);
             let near = self.find_mv(&b, NEAR);
+            // Eighths code only when the vector a NEW one is coded against
+            // allows them.
+            let hp_ok =
+                s.h.allow_hp && nearest.row.unsigned_abs() < 64 && nearest.col.unsigned_abs() < 64;
+            let even = |v: i16| if v & 1 != 0 { v - v.signum() } else { v };
+            let mv = if hp_ok {
+                mv
+            } else {
+                Mv {
+                    row: even(mv.row),
+                    col: even(mv.col),
+                }
+            };
             // Other references cost their symbol: about a bit or two more.
             let ref_bits = lam * 2 * r as u64;
             let mode_of = |v: Mv, m: u8| {
@@ -827,27 +882,27 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
 
     /// Keeps in snapshot `k` everything coding the square of `n` 8×8
     /// blocks at `(row, col)` changes: its contexts, motion and samples.
-    fn save(&mut self, row: usize, col: usize, n: usize, k: usize) {
+    fn save(&mut self, row: usize, col: usize, (nw, nh): (usize, usize), k: usize) {
         let mut sn = std::mem::take(&mut self.snaps[k]);
-        sn.at = (row, col, n);
+        sn.at = (row, col, nw, nh);
         sn.cost = self.cost;
         let a = col - self.col0;
-        let aw = n.min(self.f.above.len() - a);
+        let aw = nw.min(self.f.above.len() - a);
         sn.above[..aw].copy_from_slice(&self.f.above[a..a + aw]);
         sn.above_part[..aw].copy_from_slice(&self.f.above_part[a..a + aw]);
         let l = row & 7;
-        sn.left[..n].copy_from_slice(&self.left[l..l + n]);
-        sn.left_part[..n].copy_from_slice(&self.left_part[l..l + n]);
+        sn.left[..nh].copy_from_slice(&self.left[l..l + nh]);
+        sn.left_part[..nh].copy_from_slice(&self.left_part[l..l + nh]);
         for p in 0..3 {
             let ss = usize::from(p > 0);
-            let (a4, n4) = ((a * 2) >> ss, (n * 2) >> ss);
+            let (a4, n4, h4) = ((a * 2) >> ss, (nw * 2) >> ss, (nh * 2) >> ss);
             let w4 = n4.min(self.f.above_nz[p].len() - a4);
             sn.above_nz[p][..w4].copy_from_slice(&self.f.above_nz[p][a4..a4 + w4]);
             let l4 = ((row * 2) & 15) >> ss;
-            sn.left_nz[p][..n4].copy_from_slice(&self.left_nz[p][l4..l4 + n4]);
+            sn.left_nz[p][..h4].copy_from_slice(&self.left_nz[p][l4..l4 + h4]);
         }
-        let rows = n.min(self.s.mi_rows - row);
-        let cols = n.min(self.col1 - col);
+        let rows = nh.min(self.s.mi_rows - row);
+        let cols = nw.min(self.col1 - col);
         for r in 0..rows {
             let at = (row + r) * self.f.width + a;
             sn.mvs[r * 8..r * 8 + cols].copy_from_slice(&self.f.mvs[at..at + cols]);
@@ -856,12 +911,17 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         #[allow(clippy::needless_range_loop)]
         for p in 0..3 {
             let ss = usize::from(p > 0);
-            let (x, y, m) = ((col * 8) >> ss, (row * 8) >> ss, (n * 8) >> ss);
+            let (x, y, mw, mh) = (
+                (col * 8) >> ss,
+                (row * 8) >> ss,
+                (nw * 8) >> ss,
+                (nh * 8) >> ss,
+            );
             let v = &mut views[p];
             let stride = v.stride;
             let src = v.at(y, x);
-            for r in 0..m {
-                sn.pix[p][r * 64..r * 64 + m].copy_from_slice(&src[r * stride..r * stride + m]);
+            for r in 0..mh {
+                sn.pix[p][r * 64..r * 64 + mw].copy_from_slice(&src[r * stride..r * stride + mw]);
             }
         }
         self.snaps[k] = sn;
@@ -870,25 +930,25 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     /// Puts back what snapshot `k` kept.
     fn restore(&mut self, k: usize) {
         let sn = std::mem::take(&mut self.snaps[k]);
-        let (row, col, n) = sn.at;
+        let (row, col, nw, nh) = sn.at;
         self.cost = sn.cost;
         let a = col - self.col0;
-        let aw = n.min(self.f.above.len() - a);
+        let aw = nw.min(self.f.above.len() - a);
         self.f.above[a..a + aw].copy_from_slice(&sn.above[..aw]);
         self.f.above_part[a..a + aw].copy_from_slice(&sn.above_part[..aw]);
         let l = row & 7;
-        self.left[l..l + n].copy_from_slice(&sn.left[..n]);
-        self.left_part[l..l + n].copy_from_slice(&sn.left_part[..n]);
+        self.left[l..l + nh].copy_from_slice(&sn.left[..nh]);
+        self.left_part[l..l + nh].copy_from_slice(&sn.left_part[..nh]);
         for p in 0..3 {
             let ss = usize::from(p > 0);
-            let (a4, n4) = ((a * 2) >> ss, (n * 2) >> ss);
+            let (a4, n4, h4) = ((a * 2) >> ss, (nw * 2) >> ss, (nh * 2) >> ss);
             let w4 = n4.min(self.f.above_nz[p].len() - a4);
             self.f.above_nz[p][a4..a4 + w4].copy_from_slice(&sn.above_nz[p][..w4]);
             let l4 = ((row * 2) & 15) >> ss;
-            self.left_nz[p][l4..l4 + n4].copy_from_slice(&sn.left_nz[p][..n4]);
+            self.left_nz[p][l4..l4 + h4].copy_from_slice(&sn.left_nz[p][..h4]);
         }
-        let rows = n.min(self.s.mi_rows - row);
-        let cols = n.min(self.col1 - col);
+        let rows = nh.min(self.s.mi_rows - row);
+        let cols = nw.min(self.col1 - col);
         for r in 0..rows {
             let at = (row + r) * self.f.width + a;
             self.f.mvs[at..at + cols].copy_from_slice(&sn.mvs[r * 8..r * 8 + cols]);
@@ -897,12 +957,17 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         #[allow(clippy::needless_range_loop)]
         for p in 0..3 {
             let ss = usize::from(p > 0);
-            let (x, y, m) = ((col * 8) >> ss, (row * 8) >> ss, (n * 8) >> ss);
+            let (x, y, mw, mh) = (
+                (col * 8) >> ss,
+                (row * 8) >> ss,
+                (nw * 8) >> ss,
+                (nh * 8) >> ss,
+            );
             let v = &mut views[p];
             let stride = v.stride;
             let dst = v.at(y, x);
-            for r in 0..m {
-                dst[r * stride..r * stride + m].copy_from_slice(&sn.pix[p][r * 64..r * 64 + m]);
+            for r in 0..mh {
+                dst[r * stride..r * stride + mw].copy_from_slice(&sn.pix[p][r * 64..r * 64 + mw]);
             }
         }
         self.snaps[k] = sn;
@@ -1106,7 +1171,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
 
     /// Codes the partition of the square at `(row, col)` as `split` and
     /// `choice` decided.
-    fn partition(&mut self, row: usize, col: usize, bsize: u8, n4: u32, split: &[bool; 21]) {
+    fn partition(&mut self, row: usize, col: usize, bsize: u8, n4: u32, part: &[u8; 21]) {
         let s = self.s;
         if row >= s.mi_rows || col >= s.mi_cols {
             return;
@@ -1114,29 +1179,41 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let n8 = n4 - 1;
         let hbs = (1usize << n8) >> 1;
         let fits = row + hbs < s.mi_rows && col + hbs < s.mi_cols;
+        let node = if hbs == 0 {
+            0
+        } else {
+            Self::node(row, col, n8 as usize)
+        };
         let p = if hbs == 0 {
             PARTITION_NONE
-        } else if !fits || split[Self::node(row, col, n8 as usize)] {
+        } else if !fits {
             PARTITION_SPLIT
         } else {
-            PARTITION_NONE
+            part[node]
         };
         self.part_symbol(row, col, bsize, p);
         let sub = geom::subsize(p, bsize);
-        if p == PARTITION_NONE {
-            if self.fast() {
-                self.fast_block(row, col, bsize);
-            } else {
-                let b = self.choice[Self::slot(row, col, bsize)];
+        match p {
+            PARTITION_NONE => {
+                if self.fast() {
+                    self.fast_block(row, col, bsize);
+                } else {
+                    let b = self.choice[Self::slot(row, col, bsize)];
+                    self.code_block(&b);
+                }
+            }
+            PARTITION_HORZ | PARTITION_VERT => {
+                let [a, b] = self.rect[usize::from(p == PARTITION_VERT)][node];
+                self.code_block(&a);
                 self.code_block(&b);
             }
-        } else {
-            for (dr, dc) in [(0, 0), (0, hbs), (hbs, 0), (hbs, hbs)] {
-                self.partition(row + dr, col + dc, sub, n8, split);
+            _ => {
+                for (dr, dc) in [(0, 0), (0, hbs), (hbs, 0), (hbs, hbs)] {
+                    self.partition(row + dr, col + dc, sub, n8, part);
+                }
             }
         }
         self.part_after(row, col, bsize, p);
-        let _ = (PARTITION_HORZ, PARTITION_VERT);
     }
 
     /// The partition symbol of the square at `(row, col)`.

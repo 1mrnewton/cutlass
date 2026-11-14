@@ -24,8 +24,12 @@ use cutlass_eval::Fonts;
 
 /// The most faces a scan keeps.
 pub const MAX_FACES: usize = 400;
-/// The largest face file a scan keeps, in bytes.
+/// The most bytes one face is read into. A face of a larger file is read
+/// alone, without the file's other faces, and of an emoji face one size
+/// of its pictures is read.
 pub const MAX_FACE_BYTES: u64 = 40 * 1024 * 1024;
+/// The largest font file a scan looks in.
+const MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 /// Faces new text should start in, best first. A scan puts the first of
 /// these it finds ahead of the rest.
 pub const PREFERRED_FACES: &[&str] = &[
@@ -231,7 +235,8 @@ impl FaceTable {
 
     /// The TrueType and OpenType faces in `folders` and the folders below
     /// them, each face of a collection on its own, by label. At most
-    /// [`MAX_FACES`] are kept; a file over [`MAX_FACE_BYTES`] is skipped.
+    /// [`MAX_FACES`] are kept, and a face over [`MAX_FACE_BYTES`] gives no
+    /// bytes when it is asked for.
     /// Only headers and names are read now. The first of
     /// [`PREFERRED_FACES`] found comes first.
     #[must_use]
@@ -255,14 +260,42 @@ impl FaceTable {
         }
         let mut table = Self::default();
         for face in found {
-            if table.faces.len() == MAX_FACES {
-                break;
+            // Past the limit only the faces other scripts and emoji fall
+            // back to are kept, so a long font folder does not lose them.
+            if table.faces.len() >= MAX_FACES && !is_fallback_file(&face.name) {
+                continue;
             }
             let bytes = Bytes::Later(face.path, face.index, OnceLock::new());
             table.push(face.name, face.label, bytes, face.style);
         }
         table.rank_fallbacks();
         table
+    }
+
+    /// This table with the first of `names` it holds moved to the front,
+    /// where new text starts.
+    #[must_use]
+    pub fn preferring(mut self, names: &[&str]) -> Self {
+        let Some(at) = names
+            .iter()
+            .find_map(|name| self.faces.iter().position(|face| face.name == *name))
+        else {
+            return self;
+        };
+        let face = self.faces.remove(at);
+        self.faces.insert(0, face);
+        // The faces before it each moved one place down.
+        for fallback in &mut self.fallbacks {
+            *fallback = match (*fallback).cmp(&at) {
+                std::cmp::Ordering::Less => *fallback + 1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => *fallback,
+            };
+        }
+        if let Ok(mut found) = self.found.lock() {
+            found.clear();
+        }
+        self
     }
 
     /// Choose a scanned table's fallback faces: the ones [`FALLBACK_FACES`]
@@ -312,18 +345,9 @@ impl FaceTable {
     fn bytes_at(&self, at: usize) -> Option<&[u8]> {
         match &self.faces.get(at)?.bytes {
             Bytes::Read(bytes) => Some(bytes),
-            Bytes::Later(path, index, cell) => cell
-                .get_or_init(|| {
-                    let bytes = read_capped(path)?;
-                    match index {
-                        None => {
-                            cutlass_font::read(&bytes).ok()?;
-                            Some(bytes)
-                        }
-                        Some(index) => cutlass_font::single_face(&bytes, *index).ok(),
-                    }
-                })
-                .as_deref(),
+            Bytes::Later(path, index, cell) => {
+                cell.get_or_init(|| read_face(path, *index)).as_deref()
+            }
         }
     }
 
@@ -424,6 +448,19 @@ impl Fonts for FaceTable {
     }
 }
 
+/// Whether a scanned face's file is one of [`FALLBACK_FACES`], as its only
+/// or its first face.
+fn is_fallback_file(name: &str) -> bool {
+    let file = match name.split_once('#') {
+        None => name,
+        Some((file, "0")) => file,
+        Some(_) => return false,
+    };
+    FALLBACK_FACES
+        .iter()
+        .any(|wanted| wanted.eq_ignore_ascii_case(file))
+}
+
 /// A face's name for people: the file name without its extension, with
 /// dashes and underscores as spaces.
 #[must_use]
@@ -474,7 +511,7 @@ fn faces_in(path: &Path, found: &mut Vec<Found>) {
     };
     if file
         .metadata()
-        .map_or(true, |meta| meta.len() > MAX_FACE_BYTES)
+        .map_or(true, |meta| meta.len() > MAX_FILE_BYTES)
     {
         return;
     }
@@ -513,16 +550,28 @@ fn faces_in(path: &Path, found: &mut Vec<Found>) {
     }
 }
 
-/// The whole file when it is under the size cap; it may have grown since the
-/// scan.
-fn read_capped(path: &Path) -> Option<Vec<u8>> {
-    let file = File::open(path).ok()?;
-    if file.metadata().ok()?.len() > MAX_FACE_BYTES {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_FACE_BYTES + 1).read_to_end(&mut bytes).ok()?;
-    (bytes.len() as u64 <= MAX_FACE_BYTES).then_some(bytes)
+/// One face of the file at `path` as its own font, when it reads as one
+/// and is no larger than [`MAX_FACE_BYTES`].
+fn read_face(path: &Path, index: Option<u32>) -> Option<Vec<u8>> {
+    let mut file = File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    let most = usize::try_from(MAX_FACE_BYTES).ok()?;
+    cutlass_font::load_face(
+        |offset, len| {
+            // A read past the end, or of more than a face may hold, is
+            // refused before any bytes are asked for.
+            if len > most || offset.checked_add(len as u64)? > length {
+                return None;
+            }
+            file.seek(SeekFrom::Start(offset)).ok()?;
+            let mut bytes = vec![0; len];
+            file.read_exact(&mut bytes).ok()?;
+            Some(bytes)
+        },
+        index,
+        most,
+    )
+    .ok()
 }
 
 fn file_name(path: &Path) -> Option<String> {
@@ -628,6 +677,26 @@ mod tests {
         }
         file.extend(body);
         file
+    }
+
+    #[test]
+    fn a_preferred_face_moves_to_the_front_and_fallbacks_follow_it() {
+        let table = FaceTable::from_pairs(vec![
+            ("Sample.ttf".to_owned(), SAMPLE.to_vec()),
+            ("Other.ttf".to_owned(), SAMPLE.to_vec()),
+            ("Shaping.ttf".to_owned(), SHAPING.to_vec()),
+        ])
+        .preferring(&["Missing.ttf", "Shaping.ttf", "Other.ttf"]);
+        assert_eq!(table.name(), "Shaping.ttf");
+        assert_eq!(table.names(), ["Shaping.ttf", "Sample.ttf", "Other.ttf"]);
+        // The fallback order is the one it had, by name.
+        assert_eq!(
+            table.fallback_names(),
+            ["Sample.ttf", "Other.ttf", "Shaping.ttf"]
+        );
+        assert_eq!(table.fallback('f', false), table.face("Shaping.ttf"));
+        let same = FaceTable::named("Sample.ttf", SAMPLE.to_vec()).preferring(&["Nope.ttf"]);
+        assert_eq!(same.name(), "Sample.ttf");
     }
 
     #[test]

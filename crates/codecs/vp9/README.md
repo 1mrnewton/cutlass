@@ -171,16 +171,20 @@ frames of 1280×720, 4 threads on both sides (libvpx with `-row-mt 1
 change at equal PSNR-Y: negative is smaller files than libvpx-vp9. Times
 are the mean per run.
 
-A detailed picture panning 7 pixels a frame, with film grain:
+A detailed picture panning 7 pixels a frame, with film grain, 60 frames
+(times are the mean of the four runs):
 
 | Cutlass | libvpx-vp9 | BD-rate | Time (Cutlass / libvpx) |
 | --- | --- | ---: | --- |
-| speed 9 | realtime, cpu-used 8 | −66% | 0.64 s / 0.32 s |
-| speed 9 | realtime, cpu-used 5 | −22% | 0.64 s / 0.44 s |
-| speed 5 | realtime, cpu-used 5 | −41% | 2.58 s / 0.44 s |
-| speed 5 | good, cpu-used 5 | +8% | 2.58 s / 1.24 s |
-| speed 5 | good, cpu-used 3 | +13% | 2.58 s / 1.31 s |
-| speed 5 | good, cpu-used 1 | +22% | 2.58 s / 1.37 s |
+| speed 5 | good, cpu-used 1 | −4% | 5.4 s / 3.9 s |
+| speed 5 | good, cpu-used 5 | −17% | 5.4 s / 2.4 s |
+| speed 6 | good, cpu-used 5 | −7% | 4.3 s / 2.4 s |
+| speed 7 | good, cpu-used 5 | +8% | 2.5 s / 2.4 s |
+| speed 9 | realtime, cpu-used 6 | −33% | 0.70 s / 0.61 s |
+| speed 9 | realtime, cpu-used 8 | −57% | 0.70 s / 0.52 s |
+
+In bitrate mode (1–4 Mb/s, the same clip) speed 5 is −1.8% against good,
+cpu-used 5 on PSNR-Y and higher on chroma.
 
 The same picture nearly still, with stronger grain:
 
@@ -190,7 +194,9 @@ The same picture nearly still, with stronger grain:
 | speed 5, lag 16 (alt-refs) | good, cpu-used 5 | −39% | 2.30 s / 1.58 s |
 
 What moved the encoder (BD-rate on the panning clip, each step against
-the one before): RD partition and mode search and RD quantization
+the one before): key and golden frames at 0.35 and 0.55 of the inter
+quantizer step (from 0.45 and 0.7) −17% over 60 frames; sub-sample search
+on the real 8-tap filters and an exhaustive ±2 whole-sample check −2.3%; RD partition and mode search and RD quantization
 −28% (and −50% on the key frame's own size), key and golden frames
 finer than inter frames with GOLDEN as a second reference −45% (from
 +131% to +28% against libvpx good), the partition breakout −7% (and 2–3×
@@ -207,9 +213,11 @@ the picture moves too far for one picture to stand for the interval.
 - The encoder writes profile 0 only: no compound prediction, no 4×4
   partitions, no segmentation, no updates of the mode and vector
   probabilities in the compressed header, EIGHTTAP filters only.
-- Against libvpx's good presets on moving content the encoder still
-  needs 8–22% more bits and about twice the time; the decoder is 1.3–1.5×
-  FFmpeg's time.
+- At equal time the encoder is within about 8% of libvpx's good presets
+  on moving content (ahead with more time, and far ahead on still content
+  and against the realtime presets), and its fastest speed is 1.3–1.4×
+  libvpx realtime's time; tile columns limit how well 4 threads share a
+  720p frame. The decoder is 1.3–1.5× FFmpeg's time.
 - The encoder always writes BT.601, studio range.
 
 ## Specifications

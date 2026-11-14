@@ -6,7 +6,8 @@
 //! the app. Only names are read at the start; a face's file is read when a
 //! frame first asks for it. A few open faces are part of the program
 //! itself, so a system with no fonts still has a face to set text in, and
-//! one with no emoji face still draws emoji.
+//! one with no emoji face still draws emoji; and the title families of
+//! `cutlass_fonts` are listed on every system, among its own.
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -43,10 +44,9 @@ pub struct BuiltIn {
     pub text: &'static str,
 }
 
-/// The faces that are part of the program. They are the ones the window
-/// itself is drawn with, so offering them for titles adds nothing to the
-/// download. Which further faces to ship is still to be chosen: a face is
-/// added with one entry here and its license text beside the others.
+/// The faces the window itself is drawn with, so offering them for titles
+/// adds nothing to the download. They are where a character is looked for
+/// last. The title families the program ships are in `cutlass_fonts`.
 pub const BUILT_IN: &[BuiltIn] = &[
     BuiltIn {
         name: "Ubuntu-Light.ttf",
@@ -122,8 +122,10 @@ pub fn installed() -> Arc<FaceTable> {
             .iter()
             .map(|face| (face.name, face.bytes))
             .collect();
+        let bundled: Vec<(&str, &'static [u8])> = cutlass_fonts::files().collect();
         Arc::new(
             FaceTable::scan(&folders())
+                .with_bundled(&bundled)
                 .with_built_in(&built_in)
                 .preferring(DEFAULT_FACES),
         )
@@ -133,6 +135,73 @@ pub fn installed() -> Arc<FaceTable> {
 #[cfg(test)]
 mod tests {
     use super::{BUILT_IN, DEFAULT_FACES, FaceTable, folders, installed};
+
+    #[test]
+    fn the_title_families_the_program_ships_are_listed_with_every_weight() {
+        use cutlass_eval::Fonts;
+        let bundled: Vec<(&str, &'static [u8])> = cutlass_fonts::files().collect();
+        let table = FaceTable::default().with_bundled(&bundled);
+        let labels: Vec<String> = table
+            .labelled()
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect();
+        // A file to a style is one entry; a family in one file that
+        // varies is an entry for each weight its maker named.
+        for label in [
+            "Bebas Neue Regular",
+            "Poppins SemiBold",
+            "Inter Regular",
+            "Inter Bold",
+            "Inter Black",
+            "Montserrat Thin",
+            "Montserrat Black",
+            "Nunito Regular",
+            "Fredoka Bold",
+            "Playfair Display Italic",
+            "Gentium Book Plus",
+            "Gentium Book Plus Bold",
+            "Permanent Marker Regular",
+        ] {
+            assert!(
+                labels.iter().any(|have| have == label),
+                "{label}: {labels:?}"
+            );
+        }
+        // In the order of their labels, each once.
+        let mut sorted = labels.clone();
+        sorted.sort_by_key(|label| label.to_lowercase());
+        sorted.dedup();
+        assert_eq!(labels, sorted);
+        assert!(labels.len() > 100, "{} entries", labels.len());
+        // Every entry reads as a face, and a weight is the face set to
+        // it: Inter's bold is wider than its regular.
+        for name in table.names() {
+            let bytes = table.face(&name).unwrap_or_else(|| panic!("{name}"));
+            assert!(cutlass_font::read(bytes).is_ok(), "{name}");
+        }
+        let width = |name: &str| {
+            let font = cutlass_font::read(table.face(name).expect("bytes")).expect("font");
+            let glyph = font.glyph_id('m').expect("map").expect("m");
+            font.advance(glyph).expect("advance")
+        };
+        assert!(width("Inter[opsz,wght].ttf@Bold") > width("Inter[opsz,wght].ttf"));
+        // The family's bold is its bold weight, and a family with an
+        // italic file gives it.
+        let (bold, is_bold, _) = table
+            .styled("Inter[opsz,wght].ttf", true, false)
+            .expect("bold");
+        assert!(is_bold);
+        assert_eq!(Some(bold), table.face("Inter[opsz,wght].ttf@Bold"));
+        let (italic, _, is_italic) = table.styled("Lora[wght].ttf", false, true).expect("italic");
+        assert!(is_italic);
+        assert_eq!(Some(italic), table.face("Lora-Italic[wght].ttf"));
+        let (styled, is_bold, is_italic) = table
+            .styled("Poppins-Regular.ttf", true, true)
+            .expect("bold italic");
+        assert!(is_bold && is_italic);
+        assert_eq!(Some(styled), table.face("Poppins-BoldItalic.ttf"));
+    }
 
     #[test]
     fn the_faces_that_are_part_of_the_program_draw_and_carry_their_license() {
@@ -226,6 +295,78 @@ mod tests {
                 started.elapsed()
             );
             std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes()).expect("stderr");
+        }
+    }
+
+    /// Draw a line in each title family the program ships, and in its
+    /// bold where it has one, twelve to a frame, and write the frames as
+    /// raw RGBA to be looked at: `CUTLASS_FONT_SHEET` is the path each
+    /// frame's number and `.rgba` are added to.
+    #[test]
+    #[ignore = "writes frames drawn with the families the program ships"]
+    #[allow(clippy::print_stdout)]
+    fn a_sheet_of_the_shipped_families() {
+        use cutlass_eval::Fonts;
+        use cutlass_model::{Draft, MaterialText, Micros, Segment, TimeRange};
+        let Ok(path) = std::env::var("CUTLASS_FONT_SHEET") else {
+            return;
+        };
+        let bundled: Vec<(&str, &'static [u8])> = cutlass_fonts::files().collect();
+        let fonts = FaceTable::default().with_bundled(&bundled);
+        let labels = fonts.labelled();
+        // Each family's first file as it is, and the bold of its family.
+        let mut names: Vec<String> = Vec::new();
+        for family in cutlass_fonts::FAMILIES {
+            let first = family.files[0].0;
+            names.push(first.to_owned());
+            if let Some((bold, ..)) = fonts.styled(first, true, false)
+                && let Some(name) = fonts
+                    .names()
+                    .into_iter()
+                    .find(|name| fonts.face(name) == Some(bold))
+            {
+                names.push(name);
+            }
+        }
+        for (page, names) in names.chunks(12).enumerate() {
+            let mut draft = Draft::empty("families");
+            draft.canvas_config.width = 1_280;
+            draft.canvas_config.height = 720;
+            for (index, name) in names.iter().enumerate() {
+                let label = labels
+                    .iter()
+                    .find(|(have, _)| have == name)
+                    .map_or(name.as_str(), |(_, label)| label.as_str());
+                let id = format!("line{index}");
+                let mut text = MaterialText::new(id.as_str());
+                text.content = format!("{label}: Quick wafting zephyrs, 123 \u{25B}\u{254}\u{14B}");
+                text.font_size = 34.0;
+                text.font_path.clone_from(name);
+                text.text_color = "#FFFFFF".to_owned();
+                text.line_max_width = 1_240.0;
+                text.alignment = 1;
+                draft.materials.texts.push(text);
+                let mut segment =
+                    Segment::new(id.as_str(), id.as_str(), TimeRange::new(0, 1_000_000));
+                segment.render_index = i32::try_from(index).expect("index") + 1;
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    segment.clip.transform.y = 0.88 - index as f64 * 0.16;
+                }
+                draft.tracks[0].segments.push(segment);
+            }
+            let frame = cutlass_eval::frame(
+                &cutlass_eval::Snapshot::with_fonts(&draft, &fonts),
+                Micros(0),
+                &mut cutlass_renderer_software::SoftwareDevice::new(),
+                &cutlass_engine::ReaderFactory::new(),
+                &mut cutlass_eval::OpenClips::new(),
+                0,
+            )
+            .expect("frame");
+            let file = format!("{path}{page}.rgba");
+            std::fs::write(&file, &frame.rgba).expect("write");
+            println!("{file}");
         }
     }
 

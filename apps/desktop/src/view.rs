@@ -182,6 +182,9 @@ pub struct ViewState {
     project_proxy_side: Option<u32>,
     /// The third-party notices, read when the Licenses window opens.
     licenses: Option<cutlass_licenses::Notices>,
+    /// The title families the app ships are listed in that window, each
+    /// with its license; folded away until asked for.
+    title_fonts_shown: bool,
     settings_open: bool,
     settings_tab: SettingsTab,
     /// The action whose new keys the settings window waits for.
@@ -313,6 +316,7 @@ impl Default for ViewState {
             project_proxies: None,
             project_proxy_side: None,
             licenses: None,
+            title_fonts_shown: false,
             settings_open: false,
             settings_tab: SettingsTab::General,
             recording: None,
@@ -1388,7 +1392,7 @@ fn licenses_window(ui: &mut Ui, view: &mut ViewState) {
                 ui.add_space(8.0);
                 sticker_credits(ui);
                 ui.add_space(8.0);
-                font_credits(ui);
+                font_credits(ui, &mut view.title_fonts_shown);
                 ui.add_space(8.0);
                 for krate in &notices.crates {
                     egui::CollapsingHeader::new(format!("{} {}", krate.name, krate.version))
@@ -1431,8 +1435,9 @@ fn sticker_credits(ui: &mut Ui) {
 }
 
 /// The faces that are part of the app: each face, who made it, its
-/// license and its home, and the license text under it.
-fn font_credits(ui: &mut Ui) {
+/// license and its home, and the license text under it. The title
+/// families are many, and are listed when `shown`, which a link turns.
+fn font_credits(ui: &mut Ui, shown: &mut bool) {
     ui.label(RichText::new("Fonts").strong());
     for face in crate::face::BUILT_IN {
         ui.label(format!(
@@ -1444,6 +1449,34 @@ fn font_credits(ui: &mut Ui) {
             .id_salt(("font license", face.name))
             .show(ui, |ui| {
                 ui.label(RichText::new(face.text).monospace().size(10.0));
+            });
+    }
+    let families = cutlass_fonts::FAMILIES;
+    ui.label(format!(
+        "{} title families by other makers ship with the app, each under an open license.",
+        families.len()
+    ));
+    let turn = if *shown {
+        "Hide the title families"
+    } else {
+        "Show the title families"
+    };
+    if ui.link(turn).clicked() {
+        *shown = !*shown;
+    }
+    if !*shown {
+        return;
+    }
+    for family in families {
+        ui.label(format!(
+            "{} by {}, licensed under the {}.",
+            family.name, family.author, family.license
+        ));
+        ui.label(RichText::new(family.link).color(tokens::FAINT));
+        egui::CollapsingHeader::new(format!("{} license", family.name))
+            .id_salt(("font family license", family.name))
+            .show(ui, |ui| {
+                ui.label(RichText::new(family.text).monospace().size(10.0));
             });
     }
 }
@@ -12833,6 +12866,24 @@ mod tests {
         ] {
             assert!(painted.contains(credit), "{credit}: {painted}");
         }
+        // The title families are counted, and listed when asked for,
+        // each with who made it and its license.
+        assert!(
+            painted.contains("24 title families by other makers ship with the app"),
+            "{painted}"
+        );
+        assert!(painted.contains("Show the title families"), "{painted}");
+        assert!(!painted.contains("Inter by Rasmus Andersson"), "{painted}");
+        view.title_fonts_shown = true;
+        let listed = painted_text(&run(&mut shell, &mut view, Vec::new()));
+        for credit in [
+            "Hide the title families",
+            // The first of them; the rest are further down the list.
+            "Inter by Rasmus Andersson, licensed under the SIL Open Font License 1.1.",
+        ] {
+            assert!(listed.contains(credit), "{credit}: {listed}");
+        }
+        view.title_fonts_shown = false;
         run(
             &mut shell,
             &mut view,

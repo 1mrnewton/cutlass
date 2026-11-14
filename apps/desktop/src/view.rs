@@ -1393,6 +1393,7 @@ fn licenses_window(ui: &mut Ui, view: &mut ViewState) {
                 sticker_credits(ui);
                 ui.add_space(8.0);
                 font_credits(ui, &mut view.title_fonts_shown);
+                word_list_credits(ui);
                 ui.add_space(8.0);
                 for krate in &notices.crates {
                     egui::CollapsingHeader::new(format!("{} {}", krate.name, krate.version))
@@ -1432,6 +1433,23 @@ fn sticker_credits(ui: &mut Ui) {
                 ui.label(RichText::new(credit.text).monospace().size(10.0));
             });
     }
+}
+
+/// The word lists the app breaks lines of Thai, Lao, Khmer and Burmese
+/// by, on one row that opens: whose they are, their license and their
+/// home, and the notices and license text.
+fn word_list_credits(ui: &mut Ui) {
+    let words = cutlass_text::LINE_BREAK_WORDS;
+    egui::CollapsingHeader::new("Word lists for Thai, Lao, Khmer and Burmese")
+        .id_salt("word lists license")
+        .show(ui, |ui| {
+            ui.label(format!(
+                "{} by {}, licensed under the {}.",
+                words.name, words.author, words.license
+            ));
+            ui.label(RichText::new(words.link).color(tokens::FAINT));
+            ui.label(RichText::new(words.text).monospace().size(10.0));
+        });
 }
 
 /// The faces that are part of the app: each face, who made it, its
@@ -12827,7 +12845,8 @@ mod tests {
         let run = |shell: &mut Shell, view: &mut ViewState, events| {
             let mut output = ctx.run_ui(
                 egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    // Tall enough for the credits and the first crates under them.
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 1000.0))),
                     events,
                     ..Default::default()
                 },
@@ -12866,6 +12885,15 @@ mod tests {
         ] {
             assert!(painted.contains(credit), "{credit}: {painted}");
         }
+        // The word lists lines of Thai and its neighbours are broken by
+        // have a row of their own, which opens on their terms.
+        assert!(
+            painted.contains("Word lists for Thai, Lao, Khmer and Burmese"),
+            "{painted}"
+        );
+        let words = cutlass_text::LINE_BREAK_WORDS;
+        assert!(words.text.contains("UNICODE LICENSE V3"));
+        assert!(words.link.starts_with("https://"));
         // The title families are counted, and listed when asked for,
         // each with who made it and its license.
         assert!(

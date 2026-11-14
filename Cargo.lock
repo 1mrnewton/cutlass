@@ -2446,6 +2446,7 @@ dependencies = [
  "cutlass-still",
  "cutlass-storage",
  "cutlass-store",
+ "cutlass-text",
  "cutlass-transcription",
  "cutlass-update",
  "cutlass-vision",

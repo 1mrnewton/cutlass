@@ -90,7 +90,6 @@ struct Component {
     yx: f32,
     yy: f32,
     scaled_offset: bool,
-    round_offset: bool,
     matched: Option<(u16, u16)>,
     /// The glyph has this part's advance and bearing.
     metrics: bool,
@@ -417,13 +416,10 @@ fn translation(
     };
     let parent_point = point_at(parent, parent_index).ok_or(FontError::BadTable)?;
     let child_point = point_at(child, child_index).ok_or(FontError::BadTable)?;
-    let mut dx = parent_point.x - child_point.x;
-    let mut dy = parent_point.y - child_point.y;
-    if component.round_offset {
-        dx = dx.round();
-        dy = dy.round();
-    }
-    Ok((dx, dy))
+    // The part's point is matched where the part's matrix puts it, and
+    // lands on the glyph's point exactly: the distance is not rounded.
+    let turned = transform(child_point, component, 0.0, 0.0);
+    Ok((parent_point.x - turned.x, parent_point.y - turned.y))
 }
 
 fn point_at(contours: &[Vec<Point>], index: u16) -> Option<Point> {
@@ -442,7 +438,9 @@ fn transform(point: Point, component: &Component, dx: f32, dy: f32) -> Point {
     // what x gives to x and to y, then what y gives to x and to y.
     let x = component.xx * point.x + component.yx * point.y;
     let y = component.xy * point.x + component.yy * point.y;
-    let (x, y) = if component.scaled_offset {
+    // A part placed by matching points is moved by the distance between
+    // the points as it is.
+    let (x, y) = if component.scaled_offset && component.matched.is_none() {
         (
             x + component.xx * dx + component.yx * dy,
             y + component.xy * dx + component.yy * dy,
@@ -595,7 +593,6 @@ fn parse_composite(data: &[u8]) -> Result<Vec<Component>, FontError> {
             yx,
             yy,
             scaled_offset,
-            round_offset: flags & ROUND_XY != 0,
             matched: args.matched,
             metrics: flags & USE_MY_METRICS != 0,
         });

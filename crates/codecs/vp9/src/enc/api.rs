@@ -531,13 +531,13 @@ const GF_INTERVAL: u32 = 12;
 
 /// The quantizer step of each frame type (key, golden, inter) over the
 /// inter frames'.
-const STEP_SCALE: [f64; 3] = [0.45, 0.7, 1.0];
+const STEP_SCALE: [f64; 3] = [0.35, 0.55, 1.0];
 
 /// The share of a frame's budget each frame type takes.
 const SHARE: [f64; 3] = [
-    6.0,
-    2.5,
-    (GF_INTERVAL as f64 - 2.5) / (GF_INTERVAL as f64 - 1.0),
+    8.0,
+    3.5,
+    (GF_INTERVAL as f64 - 3.5) / (GF_INTERVAL as f64 - 1.0),
 ];
 
 /// One-pass rate control: each frame's quantizer from a model of bits

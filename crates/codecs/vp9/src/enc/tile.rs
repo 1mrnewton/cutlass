@@ -669,7 +669,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             try_one(self, i, b, &mut best, &mut last);
         }
         // Chroma and transform size for the best intra mode.
-        if best.1 >= intra_first && cands.len() > intra_first && s.speed < 8 {
+        if best.1 >= intra_first && cands.len() > intra_first && s.speed < 6 {
             let b0 = cands[best.1];
             let mut more = Vec::new();
             for uv in [b0.mode, geom::TM, geom::V, geom::H] {
@@ -686,7 +686,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 try_one(self, i, &b, &mut best, &mut last);
             }
         }
-        if s.speed < 8 {
+        if s.speed < 6 {
             let b0 = cands[best.1];
             let tries = if s.speed < 4 { 2 } else { 1 };
             let mut tx = b0.tx;
@@ -769,7 +769,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         scored.sort_unstable();
         let k = match s.speed {
             0..=3 => 4,
-            4..=6 => 3,
+            4..=5 => 3,
+            6 => 2,
             _ => 1,
         };
         for &(_, m) in scored.iter().take(k) {

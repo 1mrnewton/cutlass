@@ -80,7 +80,15 @@ pub struct Pic<P> {
     pub color_range: u8,
     pub render_width: u32,
     pub render_height: u32,
+    /// The picture as the caller gets it, made by the worker that
+    /// finished a shown frame.
+    pub out: std::sync::Mutex<Option<Result<cutlass_decode::VideoFrame, cutlass_decode::CodecError>>>,
+    /// Whether a worker is still to fill `out`.
+    pub made: std::sync::atomic::AtomicBool,
 }
+
+/// What makes the caller's picture of a finished frame.
+pub type Present<P> = fn(&Pic<P>) -> Result<cutlass_decode::VideoFrame, cutlass_decode::CodecError>;
 
 /// A buffer for a new picture: a picture's whose readers are gone when
 /// one of `spare` fits, else a new one.

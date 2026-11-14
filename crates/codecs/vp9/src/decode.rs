@@ -207,7 +207,9 @@ impl Decoder {
             let refs = [view(0), view(1), view(2)];
             let spare = P::spare(self);
             let workers = rt.map(|rt| (&rt.workers, &rt.send));
-            decode_frame(parsed, refs, prev.as_deref().map(|v| v.as_slice()), &last_seg, bufs, spare, workers)?
+            let make: crate::dec::frame::Present<P> = video_frame::<P>;
+            let present = (rt.is_some() && parsed.header.show_frame).then_some(make);
+            decode_frame(parsed, refs, prev.as_deref().map(|v| v.as_slice()), &last_seg, bufs, spare, workers, present)?
         };
         drop(refs_now);
         let after_key = self.persist.key_frame;
@@ -254,7 +256,7 @@ impl Decoder {
         } else if header.is_intra() || header.error_resilient {
             self.last_seg = vec![0u8; cells];
         }
-        let shared = Arc::new(pic);
+        let shared = pic;
         for slot in 0..8 {
             if header.refresh_flags & (1u8 << slot) == 0 {
                 continue;
@@ -404,8 +406,8 @@ struct Runtime {
 impl Held {
     fn done(&self) -> bool {
         match self {
-            Held::Eight(p) => p.buf.published() == usize::MAX,
-            Held::Deep(p) => p.buf.published() == usize::MAX,
+            Held::Eight(p) => !p.made.load(Ordering::Acquire) && p.buf.published() == usize::MAX,
+            Held::Deep(p) => !p.made.load(Ordering::Acquire) && p.buf.published() == usize::MAX,
         }
     }
 }
@@ -582,9 +584,23 @@ fn held_bytes(held: &Held) -> usize {
 }
 
 fn held_frame(held: &Held) -> Result<VideoFrame, CodecError> {
+    fn of<P: Pixel>(f: &Pic<P>) -> Result<VideoFrame, CodecError> {
+        // The worker that finished a shown frame has made its picture,
+        // unless it is being shown again.
+        f.buf.wait(usize::MAX);
+        loop {
+            if let Some(v) = f.out.lock().ok().and_then(|mut slot| slot.take()) {
+                return v;
+            }
+            if !f.made.load(Ordering::Acquire) {
+                return video_frame(f);
+            }
+            std::thread::yield_now();
+        }
+    }
     match held {
-        Held::Eight(f) => video_frame(f),
-        Held::Deep(f) => video_frame(f),
+        Held::Eight(f) => of(f),
+        Held::Deep(f) => of(f),
     }
 }
 

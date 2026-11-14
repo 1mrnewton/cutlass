@@ -509,19 +509,24 @@ pub fn decode_frame<P: Pixel + Send + Sync>(
     bufs: ParseBufs,
     spare: &mut Vec<(Dims, Arc<cutlass_simd::vp9::frame::SharedFrame<P>>)>,
     workers: Option<(&threads::Workers, &std::sync::mpsc::Sender<Reuse>)>,
-) -> Result<(Pic<P>, ParseOut), CodecError> {
+    present: Option<frame::Present<P>>,
+) -> Result<(Arc<Pic<P>>, ParseOut), CodecError> {
     let h = &parsed.header;
     let dims = Dims::new(h.width as usize, h.height as usize, h.ss_x as usize, h.ss_y as usize, h.bit_depth);
     let (pics, status) = ref_pics(parsed, refs);
     let mut fp = FrameParse::new(parsed, prev_mvs, last_seg, status, bufs)?;
     let rows = fp.sb_rows();
-    let pic_of = |buf| Pic {
-        buf,
-        dims,
-        color_space: h.color_space,
-        color_range: h.color_range,
-        render_width: h.render_width,
-        render_height: h.render_height,
+    let pic_of = |buf| {
+        Arc::new(Pic {
+            buf,
+            dims,
+            color_space: h.color_space,
+            color_range: h.color_range,
+            render_width: h.render_width,
+            render_height: h.render_height,
+            out: std::sync::Mutex::new(None),
+            made: std::sync::atomic::AtomicBool::new(workers.is_some() && present.is_some()),
+        })
     };
     if let Some((w, ret)) = workers {
         fp.all()?;
@@ -535,12 +540,20 @@ pub fn decode_frame<P: Pixel + Send + Sync>(
             grid: std::mem::take(&mut out.grid),
         };
         let ret = ret.clone();
+        let shown = present.map(|f| (f, Arc::clone(&pic)));
         w.run(move || {
             for r in 0..rows {
                 fr.row(&reuse.tiles, &reuse.masks, &reuse.grid, r);
             }
             drop(fr);
             let _ = ret.send(reuse);
+            if let Some((f, pic)) = shown {
+                let v = f(&pic);
+                if let Ok(mut slot) = pic.out.lock() {
+                    *slot = Some(v);
+                }
+                pic.made.store(false, std::sync::atomic::Ordering::Release);
+            }
         });
         return Ok((pic, out));
     }

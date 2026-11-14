@@ -552,34 +552,18 @@ pub(crate) fn mc_into<P: Pixel>(
     let shift = if first == 0 { 0 } else { rp.dims.ss_y };
     let (rw, rh) = (rp.dims.w[first] as i32, rp.dims.h[first] as i32);
     if let Some(sc_) = rp.scale {
-        // libvpx `dec_build_inter_predictors` for a scaled reference.
-        rp.buf.wait(usize::MAX);
-        let col = sc(mv_col, sc_.x_fp)
-            + ((((i64::from(lx as i32) << 4) * i64::from(sc_.x_fp)) >> 14) as i32 & 15);
-        let row = sc(mv_row, sc_.y_fp)
-            + ((((i64::from(ly as i32) << 4) * i64::from(sc_.y_fp)) >> 14) as i32 & 15);
-        let x0 = sc(x as i32, sc_.x_fp) + (col >> 4);
-        let y0 = sc(y as i32, sc_.y_fp) + (row >> 4);
-        for (plane, dst, ds) in dsts.into_iter().flatten() {
-            let (data, stride) = rp.buf.plane(plane);
-            let get = |xx: i32, yy: i32| -> P {
-                let xx = xx.clamp(0, rw - 1) as usize;
-                let yy = yy.clamp(0, rh - 1) as usize;
-                data[yy * stride + xx]
-            };
-            mc::predict_scaled(
-                dst,
-                ds,
-                get,
-                (w, h),
-                (x0, y0),
-                (col & 15, row & 15),
-                (sc_.x_step, sc_.y_step),
-                filter,
-                max,
-                avg,
-            );
-        }
+        scaled(
+            rp,
+            sc_,
+            max,
+            dsts,
+            (x, y),
+            (w, h),
+            (mv_row, mv_col),
+            (lx, ly),
+            filter,
+            avg,
+        );
         return;
     }
     let mx = (mv_col & 15) as usize;
@@ -594,7 +578,13 @@ pub(crate) fn mc_into<P: Pixel>(
     let last = (by + h as i32 + 4).clamp(1, rh) as usize;
     rp.buf.wait((last + 1) << shift);
     let inside = bx - l >= 0 && by - t >= 0 && bx + w as i32 + r <= rw && by + h as i32 + bo <= rh;
-    for (plane, dst, ds) in dsts.into_iter().flatten() {
+    // By reference, an index at a time: moving the array into an
+    // iterator copied it on every call.
+    let mut dsts = dsts;
+    for d in &mut dsts {
+        let Some((plane, dst, ds)) = d else { break };
+        let (plane, ds) = (*plane, *ds);
+        let dst = &mut **dst;
         let (data, stride) = rp.buf.plane(plane);
         if inside {
             let at = by as usize * stride + bx as usize;
@@ -612,44 +602,125 @@ pub(crate) fn mc_into<P: Pixel>(
                 &mut s.mc,
             );
         } else {
-            // Edge emulation: the window held to the reference.
-            let ew = w + 7;
-            let eh = h + 7;
-            let emu = &mut s.emu;
-            if emu.len() < ew * eh + 32 {
-                emu.resize(ew * eh + 32, P::default());
-            }
-            // Columns of the window inside the picture, copied whole; the
-            // rest repeat the edge samples.
-            let x0 = bx - 3;
-            let lo = (-x0).clamp(0, ew as i32) as usize;
-            let hi = (rw - x0).clamp(lo as i32, ew as i32) as usize;
-            for j in 0..eh {
-                let yy = (by - 3 + j as i32).clamp(0, rh - 1) as usize;
-                let row = &data[yy * stride..yy * stride + rw as usize];
-                let out = &mut emu[j * ew..j * ew + ew];
-                if hi > lo {
-                    let from = (x0 + lo as i32) as usize;
-                    out[lo..hi].copy_from_slice(&row[from..from + hi - lo]);
-                }
-                out[..lo].fill(row[0]);
-                out[hi..].fill(row[rw as usize - 1]);
-            }
-            mc::predict(
+            emulated(
                 dst,
                 ds,
-                emu,
-                3 * ew + 3,
-                ew,
+                (data, stride),
+                (rw, rh),
+                (bx, by),
                 (w, h),
                 (mx, my),
                 filter,
                 max,
                 avg,
-                &mut s.mc,
+                s,
             );
         }
     }
+}
+
+/// [`mc_into`] from a reference of another size; apart, so that the
+/// common call does not carry its frame.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn scaled<P: Pixel>(
+    rp: &RefPic<P>,
+    sc_: Scale,
+    max: i32,
+    dsts: [Option<(usize, &mut [P], usize)>; 3],
+    (x, y): (usize, usize),
+    (w, h): (usize, usize),
+    (mv_row, mv_col): (i32, i32),
+    (lx, ly): (usize, usize),
+    filter: &mc::Filter,
+    avg: bool,
+) {
+    let first = dsts[0].as_ref().map_or(0, |d| d.0);
+    let (rw, rh) = (rp.dims.w[first] as i32, rp.dims.h[first] as i32);
+    // libvpx `dec_build_inter_predictors` for a scaled reference.
+    rp.buf.wait(usize::MAX);
+    let col = sc(mv_col, sc_.x_fp)
+        + ((((i64::from(lx as i32) << 4) * i64::from(sc_.x_fp)) >> 14) as i32 & 15);
+    let row = sc(mv_row, sc_.y_fp)
+        + ((((i64::from(ly as i32) << 4) * i64::from(sc_.y_fp)) >> 14) as i32 & 15);
+    let x0 = sc(x as i32, sc_.x_fp) + (col >> 4);
+    let y0 = sc(y as i32, sc_.y_fp) + (row >> 4);
+    for (plane, dst, ds) in dsts.into_iter().flatten() {
+        let (data, stride) = rp.buf.plane(plane);
+        let get = |xx: i32, yy: i32| -> P {
+            let xx = xx.clamp(0, rw - 1) as usize;
+            let yy = yy.clamp(0, rh - 1) as usize;
+            data[yy * stride + xx]
+        };
+        mc::predict_scaled(
+            dst,
+            ds,
+            get,
+            (w, h),
+            (x0, y0),
+            (col & 15, row & 15),
+            (sc_.x_step, sc_.y_step),
+            filter,
+            max,
+            avg,
+        );
+    }
+}
+
+/// One plane of [`mc_into`] for a block whose window crosses the edge of
+/// the reference: the window copied with its edge samples repeated, and
+/// predicted from the copy. Apart, as [`scaled`] is.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn emulated<P: Pixel>(
+    dst: &mut [P],
+    ds: usize,
+    (data, stride): (&[P], usize),
+    (rw, rh): (i32, i32),
+    (bx, by): (i32, i32),
+    (w, h): (usize, usize),
+    (mx, my): (usize, usize),
+    filter: &mc::Filter,
+    max: i32,
+    avg: bool,
+    s: &mut Scratch<P>,
+) {
+    // Edge emulation: the window held to the reference.
+    let ew = w + 7;
+    let eh = h + 7;
+    let emu = &mut s.emu;
+    if emu.len() < ew * eh + 32 {
+        emu.resize(ew * eh + 32, P::default());
+    }
+    // Columns of the window inside the picture, copied whole; the
+    // rest repeat the edge samples.
+    let x0 = bx - 3;
+    let lo = (-x0).clamp(0, ew as i32) as usize;
+    let hi = (rw - x0).clamp(lo as i32, ew as i32) as usize;
+    for j in 0..eh {
+        let yy = (by - 3 + j as i32).clamp(0, rh - 1) as usize;
+        let row = &data[yy * stride..yy * stride + rw as usize];
+        let out = &mut emu[j * ew..j * ew + ew];
+        if hi > lo {
+            let from = (x0 + lo as i32) as usize;
+            out[lo..hi].copy_from_slice(&row[from..from + hi - lo]);
+        }
+        out[..lo].fill(row[0]);
+        out[hi..].fill(row[rw as usize - 1]);
+    }
+    mc::predict(
+        dst,
+        ds,
+        emu,
+        3 * ew + 3,
+        ew,
+        (w, h),
+        (mx, my),
+        filter,
+        max,
+        avg,
+        &mut s.mc,
+    );
 }
 
 /// The vector of sub-block `i` of a plane in sixteenths, libvpx

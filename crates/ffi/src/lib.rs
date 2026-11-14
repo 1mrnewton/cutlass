@@ -4227,6 +4227,22 @@ mod tests {
 
         let (photo, _) = two_stills(&mut host);
         assert!(host.freeze(&photo, Micros(0)).is_err());
+
+        // A PNG the phone probes for itself is an image, not a photo, and
+        // is as much a still.
+        let image = host.import(&fixture("pattern.png")).unwrap();
+        let image = host.append(&image).unwrap();
+        let start = host.draft().tracks[0]
+            .segments
+            .iter()
+            .find(|segment| segment.id == image)
+            .unwrap()
+            .target
+            .start;
+        let state = host.clip_state(&image, start).unwrap();
+        assert!(!state.can_freeze && !state.can_extract);
+        assert!(host.freeze(&image, start).is_err());
+        assert!(host.extract_audio(&image).is_err());
     }
 
     #[test]

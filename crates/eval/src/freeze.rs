@@ -66,7 +66,8 @@ pub fn freeze_point(
     if video.freeze.is_some() {
         return Err(FreezeMiss::AlreadyHeld);
     }
-    if video.kind == "photo" {
+    // A photo, or a still a phone probed for itself, which it calls an image.
+    if matches!(video.kind.as_str(), "photo" | "image") {
         return Err(FreezeMiss::NotVideo);
     }
     let start = segment.target.start.0;
@@ -217,6 +218,15 @@ mod tests {
             freeze_point(&bare, &SegmentId::new("a"), Micros(1_500_000)),
             Err(FreezeMiss::NotVideo)
         );
+        for kind in ["photo", "image"] {
+            let mut still = video();
+            still.kind = kind.to_owned();
+            assert_eq!(
+                freeze_point(&draft(Some(still)), &SegmentId::new("a"), Micros(1_500_000)),
+                Err(FreezeMiss::NotVideo),
+                "{kind}"
+            );
+        }
         assert_eq!(
             freeze_point(&bare, &SegmentId::new("z"), Micros(0)),
             Err(FreezeMiss::UnknownSegment)

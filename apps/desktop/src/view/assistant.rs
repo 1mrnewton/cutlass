@@ -15,6 +15,39 @@ const DONE: Color32 = Color32::from_rgb(0x2a, 0xd4, 0xe0);
 /// What the box says before anything is typed.
 pub const HINT: &str = "Ask Cutlass to edit…";
 
+/// How a step stands, which its mark shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StepState {
+    Running,
+    Failed,
+    Done,
+}
+
+/// The mark before a step, drawn in `rect`: three dots while it runs, a
+/// cross when it failed, a check when it is done. It is drawn and not
+/// written, as the window's fonts have no check or cross and a glyph they
+/// lack shows as an empty box.
+fn step_mark(state: StepState, rect: Rect, colour: Color32) -> Vec<egui::Shape> {
+    let side = rect.width().min(rect.height());
+    let square = Rect::from_center_size(rect.center(), Vec2::splat(side));
+    let at = |x: f32, y: f32| square.min + Vec2::new(x * side, y * side);
+    let stroke = egui::Stroke::new((side * 0.16).max(1.2), colour);
+    match state {
+        StepState::Running => [0.2, 0.5, 0.8]
+            .into_iter()
+            .map(|x| egui::Shape::circle_filled(at(x, 0.5), side * 0.09, colour))
+            .collect(),
+        StepState::Failed => vec![
+            egui::Shape::line_segment([at(0.22, 0.22), at(0.78, 0.78)], stroke),
+            egui::Shape::line_segment([at(0.78, 0.22), at(0.22, 0.78)], stroke),
+        ],
+        StepState::Done => vec![egui::Shape::line(
+            vec![at(0.14, 0.54), at(0.4, 0.78), at(0.86, 0.24)],
+            stroke,
+        )],
+    }
+}
+
 /// The button that takes the assistant's last turn back.
 pub const UNDO_TURN: &str = "Undo turn";
 
@@ -170,15 +203,21 @@ fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) -> Option<bool> {
             result,
             failed,
         } => {
-            let (mark, colour) = match (result, failed) {
-                (None, _) => ("…", tokens::MUTED),
-                (Some(_), true) => ("✕", FAILED),
-                (Some(_), false) => ("✓", DONE),
+            let (state, colour) = match (result, failed) {
+                (None, _) => (StepState::Running, tokens::MUTED),
+                (Some(_), true) => (StepState::Failed, FAILED),
+                (Some(_), false) => (StepState::Done, DONE),
             };
-            let title = format!("{mark} {tool} {}", short(input, 40));
+            let title = format!("{tool} {}", short(input, 40));
+            // The step's mark takes the place of the header's arrow; a
+            // click on the row still opens what was sent and what came
+            // back.
             egui::CollapsingHeader::new(RichText::new(title).size(12.0).color(colour))
                 .id_salt(("assistant-step", index))
                 .default_open(false)
+                .icon(move |ui, _openness, response| {
+                    ui.painter().extend(step_mark(state, response.rect, colour));
+                })
                 .show(ui, |ui| {
                     if !input.is_empty() {
                         ui.label(
@@ -262,4 +301,63 @@ fn short(text: &str, most: usize) -> String {
     }
     let cut: String = line.chars().take(most).collect();
     format!("{cut}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Color32, Rect, Shape, pos2, vec2};
+
+    use super::{StepState, step_mark};
+
+    #[test]
+    fn a_step_mark_is_drawn_inside_its_box_and_each_state_has_its_own() {
+        // A box wider than tall: the mark keeps to a square in its middle.
+        let rect = Rect::from_min_size(pos2(10.0, 20.0), vec2(18.0, 12.0));
+        let colour = Color32::from_rgb(1, 2, 3);
+        let running = step_mark(StepState::Running, rect, colour);
+        let failed = step_mark(StepState::Failed, rect, colour);
+        let done = step_mark(StepState::Done, rect, colour);
+        // Three dots, a cross of two strokes, and a check of one.
+        assert_eq!(running.len(), 3);
+        assert!(
+            running
+                .iter()
+                .all(|shape| matches!(shape, Shape::Circle(_)))
+        );
+        assert_eq!(failed.len(), 2);
+        assert!(
+            failed
+                .iter()
+                .all(|shape| matches!(shape, Shape::LineSegment { .. }))
+        );
+        assert_eq!(done.len(), 1);
+        let Shape::Path(check) = &done[0] else {
+            panic!("the check is one line: {:?}", done[0]);
+        };
+        assert_eq!(check.points.len(), 3);
+        assert!(!check.closed);
+        // The check's corner is its lowest point, right of its start.
+        assert!(check.points[1].y > check.points[0].y && check.points[1].y > check.points[2].y);
+        assert!(check.points[0].x < check.points[1].x && check.points[1].x < check.points[2].x);
+        for shape in running.iter().chain(&failed).chain(&done) {
+            let bounds = shape.visual_bounding_rect();
+            assert!(rect.contains_rect(bounds), "{bounds:?} is outside {rect:?}");
+            assert!(bounds.width() > 0.0 && bounds.height() > 0.0);
+        }
+    }
+
+    #[test]
+    fn the_windows_fonts_have_no_check_or_cross_to_write() {
+        // Why the marks are drawn: written, each of these is an empty box.
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        output.textures_delta.clear();
+        let font = egui::FontId::proportional(12.0);
+        for glyph in ['✓', '✕', '✔', '✖'] {
+            assert!(
+                !ctx.fonts_mut(|fonts| fonts.has_glyph(&font, glyph)),
+                "{glyph} can be written now; the mark could be a glyph again"
+            );
+        }
+    }
 }

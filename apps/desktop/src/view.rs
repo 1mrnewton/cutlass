@@ -11811,7 +11811,7 @@ mod tests {
         for label in [
             "go to 1.5 seconds",
             "Moving the playhead.",
-            "✓ player.seek 1500000",
+            "player.seek 1500000",
             "The playhead is at 1.5 s.",
         ] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
@@ -19576,6 +19576,73 @@ mod tests {
             ..cutlass_settings::SkillFolder::default()
         }];
         settings
+    }
+
+    /// The assistant panel with a step of each kind, painted by the real
+    /// renderer when `CUTLASS_RENDER_DIR` is set and kept there to look at:
+    /// a done step's check, a failed one's cross and a running one's dots.
+    #[test]
+    fn the_assistant_panel_shows_a_mark_for_each_steps_state() {
+        use crate::assistant::Entry;
+
+        let temp = std::env::temp_dir().join(format!("cutlass-marks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        view.library_shelf = Shelf::Stickers;
+        view.assistant.open = true;
+        let step = |tool: &str, input: &str, result: Option<&str>, failed: bool| Entry::Step {
+            tool: tool.to_owned(),
+            input: input.to_owned(),
+            result: result.map(str::to_owned),
+            failed,
+        };
+        view.assistant.entries = vec![
+            Entry::Asked("make a title".to_owned()),
+            step("skill.load", "motion graphics", Some("the skill"), false),
+            step(
+                "draft.apply",
+                "{\"expected_revision\":0}",
+                Some("request 3 failed"),
+                true,
+            ),
+            step("player.look", "1000000", None, false),
+        ];
+        let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
+        let builder = egui_kittest::Harness::builder().with_size(Vec2::new(1280.0, 800.0));
+        let builder = if keep.is_some() {
+            builder.wgpu()
+        } else {
+            builder
+        };
+        let mut harness = builder.build_ui_state(
+            |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+            (shell, view),
+        );
+        harness.run_steps(4);
+        // Each step is named by its tool and what it was given, with no
+        // glyph in front for a font to lack.
+        use egui_kittest::kittest::Queryable;
+        for label in [
+            "skill.load motion graphics",
+            "draft.apply {\"expected_revision\":0}",
+            "player.look 1000000",
+        ] {
+            assert_eq!(harness.query_all_by_label(label).count(), 1, "{label}");
+        }
+        if let Some(dir) = &keep {
+            let image = harness.render().expect("the renderer draws the window");
+            std::fs::create_dir_all(dir).unwrap();
+            image.save(dir.join("assistant-steps.png")).unwrap();
+        }
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     /// On every page of Settings, with all a page can hold, each row ends

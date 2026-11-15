@@ -61,6 +61,7 @@ pub fn predict<P: Pixel>(
         (w, h),
         (fx, fy),
         avg,
+        max,
         scratch,
     ) {
         return;

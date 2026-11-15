@@ -40,6 +40,7 @@ pub trait Pixel: Copy + Default + PartialEq + Send + Sync + core::fmt::Debug + '
             Option<&cutlass_simd::vp9::mc::Filter>,
         ),
         _avg: bool,
+        _max: i32,
         _tmp: &mut [u8],
     ) -> bool {
         false
@@ -179,6 +180,7 @@ impl Pixel for u8 {
             Option<&cutlass_simd::vp9::mc::Filter>,
         ),
         avg: bool,
+        _max: i32,
         tmp: &mut [u8],
     ) -> bool {
         cutlass_simd::vp9::mc::predict(cutlass_simd::vp9::mc::Block {
@@ -211,6 +213,39 @@ impl Pixel for u8 {
 
 impl Pixel for u16 {
     const HIGH: bool = true;
+    #[inline(always)]
+    fn mc_fast(
+        dst: &mut [Self],
+        ds: usize,
+        src: &[Self],
+        at: usize,
+        ss: usize,
+        (w, h): (usize, usize),
+        (fx, fy): (
+            Option<&cutlass_simd::vp9::mc::Filter>,
+            Option<&cutlass_simd::vp9::mc::Filter>,
+        ),
+        avg: bool,
+        max: i32,
+        _tmp: &mut [u8],
+    ) -> bool {
+        let Ok(max) = u16::try_from(max) else {
+            return false;
+        };
+        cutlass_simd::vp9::mc16::predict(cutlass_simd::vp9::mc16::Block {
+            dst,
+            dst_stride: ds,
+            src,
+            at,
+            src_stride: ss,
+            w,
+            h,
+            fx,
+            fy,
+            avg,
+            max,
+        })
+    }
     #[inline(always)]
     fn get(self) -> i32 {
         i32::from(self)

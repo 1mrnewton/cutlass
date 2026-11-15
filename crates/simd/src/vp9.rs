@@ -13,6 +13,7 @@
 pub mod frame;
 pub mod lf;
 pub mod mc;
+pub mod mc16;
 pub mod quant;
 
 /// Whether the CPU has AVX2. Checked once.

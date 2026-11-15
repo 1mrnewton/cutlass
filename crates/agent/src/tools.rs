@@ -756,7 +756,9 @@ fn description(name: &str) -> &'static str {
              the cloud model, the online sandbox, a remote MCP server or a skill folder asks \
              the user first."
         }
-        "player.seek" => "Move the open player to a time in microseconds.",
+        "player.seek" => {
+            "Move the open player to a time in microseconds; a .png export draws that frame."
+        }
         "player.play" => "Start the open player.",
         "player.pause" => "Pause the open player.",
         "media.probe" => {
@@ -783,7 +785,12 @@ fn description(name: &str) -> &'static str {
         }
         "catalog.search" => "Search bundled effect and animation ids.",
         "package.ensure" => "Check that a package id from catalog.search is ready to use.",
-        "export.start" => "Start an export. Replacing a file asks the user.",
+        "export.start" => {
+            "Export the project. input: \"new <path>\" for a file that is not there yet, or \
+             \"replace <path>\" to overwrite one, which asks the user. A path ending in .png \
+             writes the one frame at the player's time (move it with player.seek first); any \
+             other path writes the whole project as H.264 video."
+        }
         "sandbox.run" => {
             "Run a Rhai script on the machine and return its last value as JSON. \
             The script sees `input`, has no files or network, and cannot edit the project: \
@@ -1765,6 +1772,30 @@ mod tests {
             assert!(!seen.contains(&definition.description.as_str()));
             seen.push(definition.description.as_str());
         }
+    }
+
+    #[test]
+    fn export_start_says_how_to_name_the_file_and_how_to_get_a_still() {
+        let about = super::description("export.start");
+        for words in [
+            "\"new <path>\"",
+            "\"replace <path>\"",
+            ".png",
+            "player.seek",
+        ] {
+            assert!(about.contains(words), "{words} missing from: {about}");
+        }
+        assert!(super::description("player.seek").contains(".png"));
+        let temp = Temp::new();
+        let registry = open(&temp, Gate::refuse());
+        // The forms the description names are the ones the parser takes.
+        assert!(registry.parse("export.start", "new /tmp/frame.png").is_ok());
+        assert!(
+            registry
+                .parse("export.start", "replace /tmp/cut.mp4")
+                .is_ok()
+        );
+        assert!(registry.parse("export.start", "/tmp/cut.mp4").is_err());
     }
 
     #[test]

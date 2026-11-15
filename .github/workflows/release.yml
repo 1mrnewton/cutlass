@@ -1,6 +1,6 @@
 name: release
 
-# A tag `v<version>` builds the three packages, writes `<package>.sha256`
+# A tag `v<version>` builds the desktop packages and the Android APK, writes `<package>.sha256`
 # beside each, and uploads them as a draft GitHub release. A check job
 # downloads the draft's files and checks each against its checksum; the
 # draft is then published by hand. The desktop's update check reads the
@@ -31,9 +31,10 @@ permissions:
   contents: read
 
 env:
-  # Every package the release carries, each with a `<package>.sha256`
-  # beside it. The update check asks for the first three by these names
-  # (crates/update checks they are here).
+  # The packages every release must carry, each with a `<package>.sha256`
+  # beside it; the update check asks for them by these names (crates/update
+  # checks they are here). Cutlass.apk joins them when the Android upload
+  # key is set, and gets a checksum the same way.
   PACKAGES: Cutlass.dmg Cutlass-setup.exe Cutlass-x86_64.AppImage
 
 jobs:
@@ -159,7 +160,7 @@ jobs:
         run: python3 scripts/smoke.py dist/Cutlass.app/Contents/MacOS/cutlass
       - uses: actions/upload-artifact@v4
         with:
-          name: macos
+          name: release-macos
           path: dist/Cutlass.dmg
           if-no-files-found: error
 
@@ -189,7 +190,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "the smoke test failed" }
       - uses: actions/upload-artifact@v4
         with:
-          name: windows
+          name: release-windows
           path: dist/Cutlass-setup.exe
           if-no-files-found: error
 
@@ -218,14 +219,111 @@ jobs:
         run: python3 scripts/smoke.py dist/Cutlass-x86_64.AppImage
       - uses: actions/upload-artifact@v4
         with:
-          name: appimage
+          name: release-appimage
           path: dist/Cutlass-x86_64.AppImage
+          if-no-files-found: error
+
+  android:
+    # The phone app, built as ci.yml builds it but as a release: the Rust
+    # library and bindings from apps/android/build-rust.sh, then Gradle's
+    # release APK for the GitHub release and AAB for Google Play, signed
+    # with the upload key when the repository has these secrets:
+    #   ANDROID_KEYSTORE           the upload keystore, base64
+    #   ANDROID_KEYSTORE_PASSWORD  its password
+    #   ANDROID_KEY_ALIAS          the key's alias in it
+    #   ANDROID_KEY_PASSWORD       the key's password
+    # Without them nothing is published for Android: an unsigned APK
+    # cannot be installed.
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: 30.0.16248370
+    steps:
+      - uses: actions/checkout@v4
+      - name: ALSA headers for the host build the bindings generator reads
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk@4.1.2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: true
+      - name: NDK r30
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+      - name: Rust library and bindings
+        run: |
+          apps/android/build-rust.sh
+          git diff --exit-code -- apps/android/app/src/main/java/uniffi
+      - name: Is the upload key set
+        id: signing
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+        run: echo "sign=$([ -n "$KEYSTORE" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+      - name: Upload keystore
+        if: steps.signing.outputs.sign == 'yes'
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+        run: |
+          echo "$KEYSTORE" | base64 --decode > "$RUNNER_TEMP/upload.jks"
+          echo "CUTLASS_ANDROID_KEYSTORE=$RUNNER_TEMP/upload.jks" >> "$GITHUB_ENV"
+      - name: Build the release APK and AAB
+        if: steps.signing.outputs.sign == 'yes'
+        working-directory: apps/android
+        env:
+          CUTLASS_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          CUTLASS_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          CUTLASS_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon assembleRelease bundleRelease
+      - name: Remove the keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/upload.jks"
+      - name: Check the signature and the version
+        if: steps.signing.outputs.sign == 'yes'
+        run: |
+          mkdir dist
+          cp apps/android/app/build/outputs/apk/release/app-release.apk dist/Cutlass.apk
+          cp apps/android/app/build/outputs/bundle/release/app-release.aab "$RUNNER_TEMP/Cutlass.aab"
+          tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$tools/apksigner" verify --print-certs dist/Cutlass.apk
+          version=$("$tools/aapt2" dump badging dist/Cutlass.apk | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "the APK says $version, not ${GITHUB_REF_NAME#v}" >&2
+            exit 1
+          fi
+      - name: Say how Android is published
+        run: |
+          if [ "${{ steps.signing.outputs.sign }}" = yes ]; then
+            echo "Android: Cutlass.apk signed with the upload key; the AAB is kept for Google Play."
+          else
+            echo "::warning::Android: no ANDROID_KEYSTORE, so the release carries no APK."
+          fi
+      - uses: actions/upload-artifact@v4
+        if: steps.signing.outputs.sign == 'yes'
+        with:
+          name: release-android
+          path: dist/Cutlass.apk
+          if-no-files-found: error
+      # Not a release file: Play takes the AAB from its own upload.
+      - uses: actions/upload-artifact@v4
+        if: steps.signing.outputs.sign == 'yes'
+        with:
+          name: play-android
+          path: ${{ runner.temp }}/Cutlass.aab
           if-no-files-found: error
 
   publish:
     # The packages go up as a draft, which the update check never sees.
     # Publishing it is done by hand, once the check below has passed.
-    needs: [macos, windows, appimage]
+    needs: [macos, windows, appimage, android]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -233,6 +331,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: release-*
           merge-multiple: true
       - name: Checksums
         # `sha256sum` writes "<hex>  <name>"; the update check reads the
@@ -241,6 +340,8 @@ jobs:
         run: |
           for package in $PACKAGES; do
             test -s "$package"
+          done
+          for package in *; do
             sha256sum "$package" > "$package.sha256"
           done
           cat ./*.sha256
@@ -280,7 +381,9 @@ jobs:
           for package in $PACKAGES; do
             test -s "$package"
             test -s "$package.sha256"
-            sha256sum --check --strict "$package.sha256"
+          done
+          for sum in ./*.sha256; do
+            sha256sum --check --strict "$sum"
           done
       - name: How to publish
         run: |

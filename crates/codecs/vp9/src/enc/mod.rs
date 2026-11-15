@@ -234,6 +234,8 @@ pub struct FrameEncoder<P: EncPixel = u8> {
     /// Threads coding each tile column's rows (see [`tile::Lanes`]); 0:
     /// from the threads.
     row_lanes: usize,
+    /// The next frame's whole-picture motion from LAST, if far.
+    global: Option<Mv>,
 }
 
 /// What one tile column's encoder keeps from frame to frame.
@@ -305,6 +307,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             stream: Stream::default(),
             threads: threads.max(1),
             row_lanes: 0,
+            global: None,
         }
     }
 
@@ -325,6 +328,17 @@ impl<P: EncPixel> FrameEncoder<P> {
     /// What every frame signals from now on.
     pub fn set_stream(&mut self, stream: Stream) {
         self.stream = stream;
+    }
+
+    /// The next frame's picture moved by `(x, y)` whole samples from
+    /// LAST's, as a whole (a jump of the camera that the searches, which
+    /// reach a few dozen samples, would take for a cut): every block's
+    /// search on LAST starts there too.
+    pub fn set_global(&mut self, (x, y): (isize, isize)) {
+        self.global = Some(Mv {
+            row: (y * 8).clamp(-8 * 1023, 8 * 1023) as i16,
+            col: (x * 8).clamp(-8 * 1023, 8 * 1023) as i16,
+        });
     }
 
     /// Codes each tile column's superblock rows on `n` threads at once
@@ -714,6 +728,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             second_pass: fp.second_pass,
             noise: fp.noise,
             static_thresh: self.stream.static_thresh,
+            global: self.global.take(),
         };
         // Fast inter frames: the motion search of every superblock first,
         // its rows shared out evenly among the threads (tile columns carry

@@ -229,6 +229,10 @@ pub struct Shared<'a, P> {
     pub noise: f32,
     /// See [`super::Stream::static_thresh`].
     pub static_thresh: u32,
+    /// A vector the whole picture moved by from LAST, far past where the
+    /// searches reach (see [`super::FrameEncoder::set_global`]): a start
+    /// of every block's search on LAST.
+    pub global: Option<Mv>,
 }
 
 /// The context energy of a level (libvpx `vp9_pt_energy_class`): 0, 1, 2,
@@ -4254,8 +4258,14 @@ fn search_in<P: EncPixel>(
     let w = w.min((s.mi_cols - col) * 8);
     let h = h.min((s.mi_rows - row) * 8);
     // Starting points.
-    let mut cands = [Mv::ZERO; 6];
+    let mut cands = [Mv::ZERO; 7];
     let mut nc = 1;
+    if cur_ref == 0
+        && let Some(g) = s.global
+    {
+        cands[nc] = g;
+        nc += 1;
+    }
     let seed = |r: isize, c: isize| -> Option<Mv> {
         if r < 0 || c < 0 || r as usize >= s.mi_rows || c as usize >= s.mi_cols {
             None

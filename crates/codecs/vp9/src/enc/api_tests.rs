@@ -2214,3 +2214,30 @@ fn tile_columns_follow_their_option() {
     }
     assert_decodes(&packets, (640, 64), 2);
 }
+
+#[test]
+fn the_first_key_frame_is_planned_from_the_lookahead() {
+    // Still pictures: the lookahead's probe finds the inter frames cost
+    // next to nothing, and the key frame takes at most twenty frames'
+    // share of the bitrate (with a guess of an inter frame's cost it
+    // took a fraction of that); the stream stays near its rate.
+    let (w, h) = (320u32, 192u32);
+    let rate = 400_000u32;
+    let opts = super::Vp9Options {
+        bitrate: rate,
+        speed: 6,
+        lag: Some(16),
+        threads: 2,
+        ..super::Vp9Options::default()
+    };
+    let packets = encode_with(opts, (w, h), 60, |i| noisy(w, h, 0, i));
+    assert_decodes(&packets, (w, h), 60);
+    let share = f64::from(rate) / 30.0 / 8.0;
+    let key = packets[0].data.len() as f64;
+    assert!(
+        key > 5.0 * share && key < 30.0 * share,
+        "{key} bytes, {share} a frame"
+    );
+    let total = packet_bytes(&packets) as f64 * 8.0 / 2.0;
+    assert!((total / f64::from(rate) - 1.0).abs() < 0.3, "{total} b/s");
+}

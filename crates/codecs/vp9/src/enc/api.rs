@@ -790,6 +790,9 @@ impl<P: EncPixel> Core<P> {
         };
         let (w, h) = (self.width as usize, self.height as usize);
         let cw = self.opts.chroma_dims(w, h).0;
+        if self.shown == 0 && self.rc.wants_probe() {
+            self.probe(&f)?;
+        }
         // This picture has index `since_key` (0 for a key frame); the next
         // golden position is the alt-ref's target.
         // A cut (which no alt-ref spans: `reachable` fails across it); the
@@ -920,6 +923,13 @@ impl<P: EncPixel> Core<P> {
         // the stream has learnt are kept (a key frame would reset them, and
         // costs more on a cut to another picture of the same subject).
         let cut = !forced && cut.unwrap_or_else(|| self.is_cut(planes[0]));
+        // What looks a cut may be the picture moved far ([`super::arf::jump`]):
+        // then it is an inter frame whose blocks also search there.
+        let jump = if cut { self.jump_of(planes[0]) } else { None };
+        let cut = cut && jump.is_none();
+        if let Some(g) = jump {
+            self.enc.set_global(g);
+        }
         // (With `keyint_min`, a cut far enough from the last key frame is
         // one.)
         let min = self.opts.keyint_min;
@@ -1037,6 +1047,48 @@ impl<P: EncPixel> Core<P> {
         Ok((coded.data, coded.key))
     }
 
+    /// One pass at a variable bitrate, before the first picture: the
+    /// pictures of the lookahead (`first` and the queue) coded fast at a
+    /// fixed quantizer, whose bits start the rate control's model in
+    /// place of a guess (a first pass over the lookahead, see
+    /// [`Rate::probe`]).
+    fn probe(&mut self, first: &Queued<P>) -> Result<(), CodecError> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let cw = self.opts.chroma_dims(w, h).0;
+        let q = self.rc.first_pass_qindex(first.seconds);
+        let mut enc = FrameEncoder::<P>::with_depth(
+            self.width,
+            self.height,
+            self.opts.threads(),
+            self.opts.ss(),
+            self.opts.bit_depth,
+        );
+        let mut bits = Vec::new();
+        for (i, f) in std::iter::once(first)
+            .chain(self.queue.iter())
+            .take(PROBE_FRAMES)
+            .enumerate()
+        {
+            enc.load([(&f.planes[0], w), (&f.planes[1], cw), (&f.planes[2], cw)]);
+            let coded = enc.encode(FrameParams {
+                key: i == 0,
+                golden: false,
+                hidden: false,
+                qindex: q,
+                speed: 10,
+                altref_future: false,
+                aq: false,
+                second_pass: false,
+                golden_slot: 1,
+                also_refresh: 0,
+                noise: 0.0,
+            })?;
+            bits.push(coded.data.len() as f64 * 8.0);
+        }
+        self.rc.probe(&bits, q);
+        Ok(())
+    }
+
     /// Whether the reference pool is kept: two passes ([`POOL`]).
     fn pooled(&self) -> bool {
         self.rc.pass2.is_some()
@@ -1109,6 +1161,19 @@ impl<P: EncPixel> Core<P> {
             )
         };
         super::arf::cut(&self.last_luma, &tight, w, h)
+    }
+
+    /// [`super::arf::jump`] of luma `y` (rows `stride` apart) from the
+    /// picture coded last.
+    fn jump_of(&self, (y, stride): (&[P], usize)) -> Option<(isize, isize)> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        if self.last_luma.len() != w * h {
+            return None;
+        }
+        let tight: Vec<P> = (0..h)
+            .flat_map(|r| y[r * stride..r * stride + w].iter().copied())
+            .collect();
+        super::arf::jump(&self.last_luma, &tight, w, h)
     }
 
     fn reset(&mut self) {
@@ -1377,6 +1442,9 @@ const POOL_FIRST: u8 = 3;
 /// Frames from one golden frame to the next (at most, in two passes).
 const GF_INTERVAL: u32 = 12;
 
+/// The pictures of the lookahead [`Core::probe`] codes.
+const PROBE_FRAMES: usize = 17;
+
 /// In two passes, how far (in samples) the content may move from one
 /// golden frame to the next ([`super::arf::motion`] a picture times the
 /// interval): on the grainy pan, 7 to 8 samples a picture, 8 pictures.
@@ -1601,6 +1669,14 @@ struct Rate {
     pass2: Option<Pass2>,
     /// Bits spent so far.
     spent: f64,
+    /// What the last key frame took past a frame's share, and the frames
+    /// since (see [`KEY_SPREAD`]).
+    key_extra: (f64, f64),
+    /// One pass at a variable bitrate: the key frame and inter frame
+    /// models [`Core::probe`] measured.
+    probed: Option<(f64, f64)>,
+    /// The next golden-type frame is an alt-ref.
+    arf_next: bool,
 }
 
 /// How bits fall with the quantizer step: bits ∝ step^-EXP.
@@ -1617,6 +1693,19 @@ const FIRST_K: f64 = 48.0;
 /// the same PSNR-Y (9% averaged over the planes), 5% on a still scene
 /// with two cuts, 0.5 to 1% on a grainy pan.
 const INTER_MODEL_WEIGHT: f64 = 0.05;
+
+/// One pass at a variable bitrate: the frames over which a key frame's
+/// bits past a frame's share fall due, and over which the first key
+/// frame's quantizer is planned.
+const KEY_SPREAD: f64 = 30.0;
+
+/// The most frames' worth of bits the first key frame is planned to take
+/// (what the lookahead's still pictures would leave it is much more).
+const KEY_MOST: f64 = 20.0;
+
+/// The frames the probe's inter model counts as in the model's running
+/// mean.
+const PROBE_WEIGHT: f64 = 5.0;
 
 /// The range of [`Vp9Encoder::first_pass_qindex`].
 const FIRST_PASS_Q: (u8, u8) = (40, 200);
@@ -1650,6 +1739,9 @@ impl Rate {
             frames: 0,
             pass2: None,
             spent: 0.0,
+            key_extra: (0.0, 0.0),
+            probed: None,
+            arf_next: false,
         }
     }
 
@@ -1772,6 +1864,21 @@ impl Rate {
             }
             return q;
         }
+        if self.per_frame == 0.0
+            && let Some((key, inter)) = self.probed
+        {
+            // The first frame, after the probe: the inter step at which
+            // the key frame and the inter frames after it spend
+            // [`KEY_SPREAD`] frames' bits, the key frame at most
+            // [`KEY_MOST`] frames' worth.
+            let target = (f64::from(self.opts.bitrate) * seconds.max(1e-3)).max(1.0);
+            let n = KEY_SPREAD;
+            let step = ((key + (n - 1.0) * inter) / (n * target)).powf(1.0 / EXP);
+            let bd = self.opts.bit_depth;
+            self.last_q = q_of_step(step, bd).clamp(floor[2], self.opts.max_q);
+            let own = (step * STEP_SCALE[kind]).max((key / (KEY_MOST * target)).powf(1.0 / EXP));
+            return q_of_step(own, bd).clamp(floor[kind], self.opts.max_q);
+        }
         if self.per_frame == 0.0 {
             // The first frame: the inter quantizer that a typical picture
             // would take at this many bits a sample, finer for its type.
@@ -1802,6 +1909,50 @@ impl Rate {
         if cbr && seconds > 0.0 {
             let buffer = f64::from(self.opts.cbr_buffer_ms) / 1000.0 / seconds;
             horizon = horizon.min((buffer / 2.0).max(2.0));
+        }
+        if !cbr {
+            // At a variable bitrate the frame types' steps are the inter
+            // frames' scaled (as with a fixed quantizer and in two passes),
+            // and the inter step is the one at which the frames to come,
+            // golden ones among them, spend the bitrate: frame types
+            // budgeted apart left alt-refs coarser than the frames that
+            // predict from them (on a grainy pan 2 dB of PSNR at 1 Mb/s).
+            let bd = self.opts.bit_depth;
+            if kind != 2 {
+                let arf = std::mem::take(&mut self.arf_next);
+                // A golden frame that is no alt-ref (no lookahead, or none
+                // reached its end) takes a key frame's step: it is what the
+                // frames up to the next one predict from (9% fewer bits on
+                // a grainy pan without lookahead, 19% at speed 10).
+                let class = if cut || (kind == 1 && !arf) { 0 } else { kind };
+                return q_of_step(step_of(self.last_q, bd) * STEP_SCALE[class], bd)
+                    .clamp(floor[class], self.opts.max_q);
+            }
+            let golden = self.model[1]
+                .or(self.model[0].map(|k| k * 0.5))
+                .unwrap_or(m * 3.0);
+            let w = 1.0 / f64::from(GF_INTERVAL);
+            let unit = match (self.model[2], self.probed) {
+                (None, Some((_, inter))) => inter,
+                _ => (1.0 - w) * m + w * golden * STEP_SCALE[1].powf(-EXP),
+            };
+            let mut debt = if banded {
+                band(self.debt, self.per_frame * f64::from(self.frames))
+            } else {
+                self.debt
+            };
+            // What the last key frame took past a frame's share falls due
+            // over the [`KEY_SPREAD`] frames after it, not at once.
+            let (extra, since) = self.key_extra;
+            debt -= extra * (1.0 - since / KEY_SPREAD).max(0.0);
+            let target = (self.per_frame - debt / horizon).max(self.per_frame * 0.2);
+            let step = (unit / target).powf(1.0 / EXP);
+            let q = q_of_step(step, bd).clamp(floor[2], self.opts.max_q).clamp(
+                self.last_q.saturating_sub(24),
+                self.last_q.saturating_add(24),
+            );
+            self.last_q = q;
+            return q;
         }
         let share = if cbr { SHARE_CBR[kind] } else { SHARE[kind] };
         let debt = if banded {
@@ -1834,6 +1985,30 @@ impl Rate {
         q
     }
 
+    /// Whether the first picture waits for [`Core::probe`].
+    fn wants_probe(&self) -> bool {
+        self.opts.bitrate > 0
+            && self.opts.cbr_buffer_ms == 0
+            && self.pass2.is_none()
+            && self.per_frame == 0.0
+    }
+
+    /// The bits of the lookahead's pictures coded fast at quantizer `q`
+    /// (a key frame, then inter frames): the models of the key frame and
+    /// of an inter frame, at the scale between such a pass and the encode
+    /// (as two passes start, [`K_START`]).
+    fn probe(&mut self, bits: &[f64], q: u8) {
+        let Some((&key, inter)) = bits.split_first() else {
+            return;
+        };
+        if inter.is_empty() {
+            return;
+        }
+        let mean = inter.iter().sum::<f64>() / inter.len() as f64;
+        let s = K_START * step_of(q, self.opts.bit_depth).powf(EXP);
+        self.probed = Some((s * key, s * mean));
+    }
+
     /// See [`Vp9Encoder::first_pass_qindex`]: the inter quantizer the
     /// one-pass model guesses for the bitrate.
     fn first_pass_qindex(&self, seconds: f64) -> u8 {
@@ -1857,6 +2032,7 @@ impl Rate {
     /// An alt-ref is coded now for the picture `ahead` after the next
     /// shown one.
     fn alt_ref(&mut self, ahead: usize) {
+        self.arf_next = true;
         let at = self.frames as usize + ahead;
         if let Some(p) = &mut self.pass2 {
             p.alt_ref(at);
@@ -1896,8 +2072,16 @@ impl Rate {
             self.debt -= self.per_frame;
         }
         self.debt += bits;
+        if kind == 0 && seconds > 0.0 {
+            self.key_extra = ((bits - self.per_frame).max(0.0), 0.0);
+        } else if seconds > 0.0 {
+            self.key_extra.1 += 1.0;
+        }
         let m = bits * step_of(qindex, self.opts.bit_depth).powf(EXP);
-        self.model[kind] = Some(match self.model[kind] {
+        // (The probe's inter model counts as [`PROBE_WEIGHT`] frames.)
+        let prior = (kind == 2).then_some(self.probed.map(|p| p.1)).flatten();
+        let first = self.probed.map_or(0.0, |_| PROBE_WEIGHT);
+        self.model[kind] = Some(match self.model[kind].or(prior) {
             Some(old) => {
                 // One pass at a variable bitrate: the inter frames' model
                 // moves slowly once it has settled, so that the quantizer
@@ -1906,7 +2090,7 @@ impl Rate {
                 // picture's share on it; the debt still pays back the
                 // difference.
                 let a = if kind == 2 && self.opts.cbr_buffer_ms == 0 {
-                    INTER_MODEL_WEIGHT.max(1.0 / f64::from(self.frames.max(1)))
+                    INTER_MODEL_WEIGHT.max(1.0 / (f64::from(self.frames.max(1)) + first))
                 } else {
                     0.4
                 };

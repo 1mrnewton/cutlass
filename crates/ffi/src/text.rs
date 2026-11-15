@@ -232,6 +232,8 @@ pub(crate) fn style_request(
             color,
             strength,
             range,
+            rays: None,
+            lean: None,
         },
         // A title with no line width takes the canvas width, and a column
         // the canvas height.

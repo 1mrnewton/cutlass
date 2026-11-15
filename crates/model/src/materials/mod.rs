@@ -29,8 +29,8 @@ pub use caption::{CaptionTemplateInfo, Kept, SubtitleKeywords, TextRange, keywor
 pub use color::{MaterialCanvas, MaterialColorConfig};
 pub use draft::MaterialDraft;
 pub use effect::{
-    BloomParams, MaterialAnimations, MaterialEffect, MaterialPluginEffect, MaterialVideoEffect,
-    StickerAnimation, segment_bloom,
+    BloomParams, MAX_GLOW_LEAN, MaterialAnimations, MaterialEffect, MaterialPluginEffect,
+    MaterialVideoEffect, StickerAnimation, segment_bloom,
 };
 pub use mark::{
     TimeMarkItem, VisibleMark, clip_mark_time, new_time_mark, referenced_time_marks,

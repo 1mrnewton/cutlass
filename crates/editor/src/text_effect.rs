@@ -305,6 +305,8 @@ pub fn text_effect_requests(
         color: color.to_owned(),
         strength,
         range,
+        rays: None,
+        lean: None,
     });
     requests
 }

@@ -543,7 +543,19 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             color,
             strength,
             range,
-        } => text::set_text_glow(draft, segment_id, glow_id, color, [*strength, *range]),
+            rays,
+            lean,
+        } => text::set_text_glow(
+            draft,
+            segment_id,
+            glow_id,
+            color,
+            [*strength, *range],
+            text::GlowDrawn {
+                rays: *rays,
+                lean: *lean,
+            },
+        ),
         Request::AddText {
             track_id,
             segment_id,

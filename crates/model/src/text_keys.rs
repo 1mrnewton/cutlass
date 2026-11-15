@@ -290,9 +290,7 @@ mod tests {
             color: "#ffffff".to_owned(),
             strength: 0.5,
             range: 0.3,
-            dir_x: 0.0,
-            dir_y: 0.0,
-            rest: serde_json::Map::new(),
+            ..BloomParams::default()
         };
         materials.effects.push(MaterialEffect::glow("g", &bloom));
         let mut segment = Segment::new("s", "t", TimeRange::new(1_000, 2_000));

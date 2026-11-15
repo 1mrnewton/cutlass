@@ -2134,6 +2134,63 @@ mod tests {
     }
 
     #[test]
+    fn rays_stream_out_further_than_a_soft_glow_and_lean_as_asked() {
+        let text = material("AA");
+        let glowing = |bloom: &BloomParams| {
+            let source = TextSource::open_with_glow(TTF, None, &text, Some(bloom), &segment())
+                .expect("open");
+            let (width, height) = source.size();
+            (width, height, cpu(source.sample(Micros(1_000))))
+        };
+        let soft = BloomParams {
+            color: "#FF00FF".to_owned(),
+            strength: 1.0,
+            range: 0.5,
+            ..BloomParams::default()
+        };
+        let rays = BloomParams {
+            rays: true,
+            ..soft.clone()
+        };
+        let (soft_w, soft_h, _) = glowing(&soft);
+        let (width, height, rgba) = glowing(&rays);
+        assert!(width > soft_w && height > soft_h, "{width}x{height}");
+        // The picture holds the rays: its edges are close to clear.
+        let alpha = |x: u32, y: u32| rgba[((y * width + x) * 4 + 3) as usize];
+        let edge = (0..height)
+            .flat_map(|y| [alpha(0, y), alpha(width - 1, y)])
+            .chain((0..width).flat_map(|x| [alpha(x, 0), alpha(x, height - 1)]))
+            .max();
+        assert!(edge < Some(40), "{edge:?}");
+
+        // Leaning right, more of the glow lies right of the letters' middle
+        // than left of it.
+        let leaning = BloomParams {
+            lean_x: cutlass_model::MAX_GLOW_LEAN,
+            ..rays
+        };
+        let (width, _, rgba) = glowing(&leaning);
+        let columns: Vec<u32> = rgba
+            .chunks(4)
+            .enumerate()
+            .filter(|(_, pixel)| pixel == &[255, 255, 255, 255])
+            .map(|(at, _)| at as u32 % width)
+            .collect();
+        let middle = (columns.iter().min().unwrap() + columns.iter().max().unwrap()) / 2;
+        let (mut left, mut right) = (0_u64, 0_u64);
+        for (at, pixel) in rgba.chunks(4).enumerate() {
+            if pixel[1] == 0 && pixel[0] == pixel[2] {
+                if at as u32 % width < middle {
+                    left += u64::from(pixel[3]);
+                } else {
+                    right += u64::from(pixel[3]);
+                }
+            }
+        }
+        assert!(right > left * 2, "{left} {right}");
+    }
+
+    #[test]
     fn a_background_fills_a_box_around_the_letters() {
         let mut boxed = material("A");
         boxed.background_style = 1;

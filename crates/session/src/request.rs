@@ -404,12 +404,19 @@ pub enum Request {
     /// Make the letters glow in `color`, `strength` and `range` from 0 to 1.
     /// The glow is a bloom effect the clip points at; `glow_id` names a new
     /// one when the clip has none of its own. An empty color takes it off.
+    /// `rays` streams it out of the letters as rays of light, leaning
+    /// `lean` degrees right and up, at most 45 either way; either left out
+    /// keeps what the glow has.
     SetTextGlow {
         segment_id: SegmentId,
         glow_id: MaterialId,
         color: String,
         strength: f64,
         range: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rays: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lean: Option<[f64; 2]>,
     },
     /// Fill a box behind the letters in `color` at `alpha`, its corners
     /// rounded by `round` from 0 to 1. An empty color takes the box off.

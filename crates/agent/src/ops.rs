@@ -22,19 +22,32 @@ const OPS: &str = include_str!("ops.txt");
 /// Every request kind, in the order `ops.txt` lists them.
 #[must_use]
 pub fn ops() -> Vec<Op> {
-    OPS.split("\n\n")
-        .filter_map(|entry| {
-            let mut lines = entry.trim().lines();
-            let head = lines.next()?;
-            let (name, about) = head.split_once(": ")?;
-            let example = lines.next()?.trim();
-            Some(Op {
+    parse(OPS)
+}
+
+/// The entries of `text`, split at blank lines whatever the line ending: a
+/// Windows checkout writes `ops.txt` with CRLF, where no `\n\n` is found.
+fn parse(text: &'static str) -> Vec<Op> {
+    let mut ops = Vec::new();
+    let mut entry: Vec<&'static str> = Vec::new();
+    for line in text.lines().chain([""]) {
+        let line = line.trim();
+        if !line.is_empty() {
+            entry.push(line);
+            continue;
+        }
+        if let [head, example, ..] = entry[..]
+            && let Some((name, about)) = head.split_once(": ")
+        {
+            ops.push(Op {
                 name: name.trim(),
                 about: about.trim(),
                 example,
-            })
-        })
-        .collect()
+            });
+        }
+        entry.clear();
+    }
+    ops
 }
 
 /// What a request kind does, without its fields' ranges, refusals and
@@ -173,7 +186,7 @@ mod tests {
 
     use cutlass_session::{Draft, Request, Session};
 
-    use super::{describe, ops};
+    use super::{OPS, describe, ops, parse};
 
     /// The kinds `Request` takes, read from serde's own refusal of an
     /// unknown one.
@@ -196,6 +209,14 @@ mod tests {
             })
             .filter(|kind| !kind.is_empty())
             .collect()
+    }
+
+    #[test]
+    fn a_crlf_checkout_reads_every_entry() {
+        let crlf: &'static str = Box::leak(OPS.replace('\n', "\r\n").into_boxed_str());
+        assert!(crlf.contains("\r\n\r\n"));
+        assert!(ops().len() > 100, "{}", ops().len());
+        assert_eq!(parse(crlf), ops());
     }
 
     #[test]

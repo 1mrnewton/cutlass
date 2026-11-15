@@ -58,6 +58,7 @@ pub trait Pixel: Copy + Default + PartialEq + Send + Sync + core::fmt::Debug + '
         _vertical: bool,
         _wd: [Option<super::lf::Wd>; 2],
         _thr: [super::lf::Thresh; 2],
+        _bd: u32,
     ) -> bool {
         false
     }
@@ -115,6 +116,7 @@ impl Pixel for u8 {
         vertical: bool,
         wd: [Option<super::lf::Wd>; 2],
         thr: [super::lf::Thresh; 2],
+        _bd: u32,
     ) -> bool {
         use cutlass_simd::vp9::lf;
         let t = |t: super::lf::Thresh| lf::Thresh {
@@ -213,6 +215,39 @@ impl Pixel for u8 {
 
 impl Pixel for u16 {
     const HIGH: bool = true;
+    #[inline(always)]
+    fn lf_fast(
+        buf: &mut [Self],
+        at: usize,
+        stride: usize,
+        vertical: bool,
+        wd: [Option<super::lf::Wd>; 2],
+        thr: [super::lf::Thresh; 2],
+        bd: u32,
+    ) -> bool {
+        use cutlass_simd::vp9::lf16 as lf;
+        let t = |t: super::lf::Thresh| lf::Thresh {
+            blimit: t.blimit,
+            limit: t.limit,
+            hev: t.hev,
+        };
+        let w = |w: Option<super::lf::Wd>| {
+            w.map(|w| match w {
+                super::lf::Wd::W4 => lf::Wd::W4,
+                super::lf::Wd::W8 => lf::Wd::W8,
+                super::lf::Wd::W16 => lf::Wd::W16,
+            })
+        };
+        lf::filter(lf::Edge {
+            buf,
+            at,
+            stride,
+            vertical,
+            wd: [w(wd[0]), w(wd[1])],
+            thr: [t(thr[0]), t(thr[1])],
+            bd,
+        })
+    }
     #[inline(always)]
     fn mc_fast(
         dst: &mut [Self],

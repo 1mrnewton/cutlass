@@ -196,7 +196,7 @@ fn pair<P: Pixel>(
         return;
     }
     let at = y * stride + x - base;
-    if P::lf_fast(buf, at, stride, vertical, wd, thr) {
+    if P::lf_fast(buf, at, stride, vertical, wd, thr, bd) {
         return;
     }
     pair_scalar(buf, at, stride, vertical, wd, thr, bd);

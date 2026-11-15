@@ -12,6 +12,7 @@
 
 pub mod frame;
 pub mod lf;
+pub mod lf16;
 pub mod mc;
 pub mod mc16;
 pub mod quant;

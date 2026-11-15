@@ -3,6 +3,17 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// The app carries the workspace version, so the APK of a release says the
+// same as its tag. The version code grows with it: 0.8.0 is 8000, 1.2.3 is
+// 1002003, so each release is above the last in the store's order.
+val workspaceVersion: String = run {
+    val cargo = rootProject.file("../../Cargo.toml").readText()
+    Regex("""(?m)^version = "([0-9]+\.[0-9]+\.[0-9]+)"""").find(cargo)?.groupValues?.get(1)
+        ?: error("the workspace Cargo.toml names no version")
+}
+val workspaceVersionCode: Int = workspaceVersion.split('.').map(String::toInt)
+    .let { (major, minor, patch) -> major * 1_000_000 + minor * 1_000 + patch }
+
 android {
     namespace = "com.scytheralpha.cutlass_android"
     compileSdk {
@@ -13,14 +24,30 @@ android {
         applicationId = "com.scytheralpha.cutlass_android"
         minSdk = 28
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = workspaceVersionCode
+        versionName = workspaceVersion
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // The upload key, from the variables the release workflow sets from the
+    // repository's secrets. Without them the release build is unsigned and
+    // cannot be installed; the debug build keeps its own key either way.
+    signingConfigs {
+        val keystore = System.getenv("CUTLASS_ANDROID_KEYSTORE")
+        if (!keystore.isNullOrEmpty()) {
+            create("release") {
+                storeFile = file(keystore)
+                storePassword = System.getenv("CUTLASS_ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("CUTLASS_ANDROID_KEY_ALIAS")
+                keyPassword = System.getenv("CUTLASS_ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

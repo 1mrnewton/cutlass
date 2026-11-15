@@ -2726,7 +2726,7 @@ mod tests {
         ));
         cutlass_settings::save(&temp.file(), 0, &initial).unwrap();
         let mut registry = open(&temp, Gate::refuse());
-        let mut set = |registry: &mut TestRegistry, change: &dyn Fn(&mut Settings)| {
+        let set = |registry: &mut TestRegistry, change: &dyn Fn(&mut Settings)| {
             let mut next = registry.settings.settings().clone();
             change(&mut next);
             registry.invoke(Invocation::SettingsSet {
@@ -2824,7 +2824,7 @@ mod tests {
         });
         cutlass_settings::save(&temp.file(), 0, &initial).unwrap();
         let mut registry = open(&temp, Gate::allow());
-        let mut call = |registry: &mut TestRegistry, changes: &str| {
+        let call = |registry: &mut TestRegistry, changes: &str| {
             let generation = registry.settings.generation();
             ToolSink::run_tool(
                 registry,

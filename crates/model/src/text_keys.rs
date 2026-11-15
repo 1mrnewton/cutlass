@@ -1,5 +1,5 @@
 //! A text's style settings that key on their own: its size, spacing, wrap
-//! width, outline, background and shadow. Each is one number on the text
+//! width, outline, background and shadow, the shadow's opacity among them. Each is one number on the text
 //! material, keyed on the segment under a Cutlass name.
 
 use crate::keyframe::{KeyframeGraph, sample};
@@ -8,7 +8,7 @@ use crate::segment::Segment;
 use crate::time::Micros;
 
 /// The key names, in [`TextStyleKey::ALL`] order.
-pub static TEXT_STYLE_KEYS: [&str; 10] = [
+pub static TEXT_STYLE_KEYS: [&str; 11] = [
     "KFTypeTextSize",
     "KFTypeTextLetterSpacing",
     "KFTypeTextLineSpacing",
@@ -19,6 +19,7 @@ pub static TEXT_STYLE_KEYS: [&str; 10] = [
     "KFTypeTextShadowDistance",
     "KFTypeTextShadowAngle",
     "KFTypeTextShadowBlur",
+    "KFTypeTextShadowAlpha",
 ];
 
 /// A title's glow strength, from 0 to 1. A Cutlass name.
@@ -80,11 +81,13 @@ pub enum TextStyleKey {
     ShadowAngle,
     /// The shadow's blur.
     ShadowBlur,
+    /// The shadow's opacity.
+    ShadowAlpha,
 }
 
 impl TextStyleKey {
     /// Every setting.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Size,
         Self::LetterSpacing,
         Self::LineSpacing,
@@ -95,6 +98,7 @@ impl TextStyleKey {
         Self::ShadowDistance,
         Self::ShadowAngle,
         Self::ShadowBlur,
+        Self::ShadowAlpha,
     ];
 
     fn index(self) -> usize {
@@ -128,9 +132,10 @@ impl TextStyleKey {
             Self::LineSpacing => value > -1.0 && value <= 4.0,
             Self::LineWidth => (0.0..=8_192.0).contains(&value),
             Self::StrokeWidth => (0.0..=0.25).contains(&value),
-            Self::BackgroundAlpha | Self::BackgroundRound | Self::ShadowBlur => {
-                (0.0..=1.0).contains(&value)
-            }
+            Self::BackgroundAlpha
+            | Self::BackgroundRound
+            | Self::ShadowBlur
+            | Self::ShadowAlpha => (0.0..=1.0).contains(&value),
             Self::ShadowDistance => (0.0..=100.0).contains(&value),
             Self::ShadowAngle => true,
         }
@@ -150,6 +155,7 @@ impl TextStyleKey {
             Self::ShadowDistance => text.shadow_distance,
             Self::ShadowAngle => text.shadow_angle,
             Self::ShadowBlur => text.shadow_smoothing,
+            Self::ShadowAlpha => text.shadow_alpha,
         }
     }
 
@@ -162,9 +168,10 @@ impl TextStyleKey {
             Self::LineSpacing => value.clamp(-0.99, 4.0),
             Self::LineWidth => value.clamp(0.0, 8_192.0),
             Self::StrokeWidth => value.clamp(0.0, 0.25),
-            Self::BackgroundAlpha | Self::BackgroundRound | Self::ShadowBlur => {
-                value.clamp(0.0, 1.0)
-            }
+            Self::BackgroundAlpha
+            | Self::BackgroundRound
+            | Self::ShadowBlur
+            | Self::ShadowAlpha => value.clamp(0.0, 1.0),
             Self::ShadowDistance => value.clamp(0.0, 100.0),
             Self::ShadowAngle => value,
         };
@@ -179,6 +186,7 @@ impl TextStyleKey {
             Self::ShadowDistance => &mut text.shadow_distance,
             Self::ShadowAngle => &mut text.shadow_angle,
             Self::ShadowBlur => &mut text.shadow_smoothing,
+            Self::ShadowAlpha => &mut text.shadow_alpha,
         };
         *field = value;
     }

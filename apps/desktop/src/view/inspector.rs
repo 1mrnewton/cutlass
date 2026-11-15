@@ -2854,7 +2854,27 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
                     )
                 });
             }
-            later_slider(ui, "Opacity", 90.0, "90%");
+            let opacity = (look.shadow_alpha * 100.0).round();
+            let changed = setting_row(
+                shell,
+                ui,
+                KeyedSetting::TextStyle(Style::ShadowAlpha),
+                true,
+                |ui| {
+                    slider(
+                        ui,
+                        state,
+                        "shadow-opacity",
+                        "Opacity",
+                        opacity,
+                        0.0..=100.0,
+                        |v| format!("{v:.0}%"),
+                    )
+                },
+            );
+            if let Some(value) = changed {
+                send(shell, |shell| shell.set_text_shadow_opacity(value / 100.0));
+            }
             let blur = (look.shadow_blur * 100.0).round();
             let changed = setting_row(
                 shell,

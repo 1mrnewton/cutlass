@@ -166,6 +166,9 @@ set_text_outline: Outline the letters in color "#rrggbb", width in ems from 0 to
 set_text_shadow: Cast a text shadow in color "#rrggbb", distance 0 to 100 hundredths of an em, toward angle degrees counter-clockwise from the right (0 right, 90 up, -90 straight down, -45 down and right), blur 0 to 1; an empty color removes it.
 {"op":"set_text_shadow","segment_id":"title-1","color":"#000000","distance":8.0,"angle":-45.0,"blur":0.3}
 
+set_text_shadow_opacity: Make a text's shadow opacity 0 to 1, whether the shadow is on or off.
+{"op":"set_text_shadow_opacity","segment_id":"title-1","opacity":0.9}
+
 set_text_glow: Make the letters glow in color "#rrggbb", strength and range 0 to 1; glow_id names a new glow effect material when the clip has none of its own; an empty color removes it.
 {"op":"set_text_glow","segment_id":"title-1","glow_id":"title-1-glow","color":"#00ccff","strength":0.6,"range":0.4}
 

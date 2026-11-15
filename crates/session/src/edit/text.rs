@@ -423,6 +423,21 @@ pub fn set_text_shadow(
     Ok(())
 }
 
+/// Make the shadow `opacity` from 0 to 1, whether it is on or off: an off
+/// shadow comes back at it.
+pub fn set_text_shadow_opacity(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    opacity: f64,
+) -> Result<(), EditError> {
+    let index = own_text(draft, segment_id)?;
+    if !(0.0..=1.0).contains(&opacity) {
+        return Err(EditError::TextStyle);
+    }
+    draft.materials.texts[index].shadow_alpha = opacity;
+    Ok(())
+}
+
 /// Fill a box behind the letters in `color` at `alpha` from 0 to 1, its
 /// corners rounded by `round` from 0 to 1. An empty color takes the box
 /// off. A box with no room around the letters yet gets some.
@@ -838,6 +853,29 @@ mod tests {
         assert!(!text.has_shadow);
         assert_eq!(text.background_style, 0);
         assert!(text.background_color.is_empty());
+
+        // The shadow's opacity is kept while it is off, and refused past 1.
+        let opacity = |opacity: f64| Request::SetTextShadowOpacity {
+            segment_id: "a".into(),
+            opacity,
+        };
+        let revision = session.revision();
+        session.apply(revision, &[opacity(0.35)]).unwrap();
+        assert_eq!(session.draft().materials.texts[0].shadow_alpha, 0.35);
+        let revision = session.revision();
+        session.apply(revision, &[shadow("#000000")]).unwrap();
+        assert_eq!(session.draft().materials.texts[0].shadow_alpha, 0.35);
+        let before = session.draft().clone();
+        for bad in [1.5, -0.1, f64::NAN] {
+            let revision = session.revision();
+            assert_eq!(
+                session.apply(revision, &[opacity(bad)]).unwrap_err(),
+                EditError::TextStyle
+            );
+            assert_eq!(session.draft(), &before);
+        }
+        let revision = session.revision();
+        session.apply(revision, &[shadow("")]).unwrap();
 
         let bubble = |key: &str| Request::SetTextBubble {
             segment_id: "a".into(),

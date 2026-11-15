@@ -494,6 +494,10 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             angle,
             blur,
         } => text::set_text_shadow(draft, segment_id, color, [*distance, *angle, *blur]),
+        Request::SetTextShadowOpacity {
+            segment_id,
+            opacity,
+        } => text::set_text_shadow_opacity(draft, segment_id, *opacity),
         Request::SetTextBackground {
             segment_id,
             color,

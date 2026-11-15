@@ -930,6 +930,19 @@ impl Shell {
         self.apply_requests(&requests)
     }
 
+    /// Make the selected title's shadow `opacity` from 0 to 1, keyed here
+    /// when it keys it. One undo restores it.
+    pub fn set_text_shadow_opacity(&mut self, opacity: f64) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let mut requests = vec![Request::SetTextShadowOpacity {
+            segment_id,
+            opacity,
+        }];
+        requests.extend(self.style_keys(&[(cutlass_model::TextStyleKey::ShadowAlpha, opacity)]));
+        self.apply_requests(&requests)
+    }
+
     /// Fill a box behind the selected title in `color` at `alpha`, its
     /// corners rounded by `round`. An empty color takes it off. One undo
     /// restores it.
@@ -2435,6 +2448,31 @@ mod tests {
         assert_eq!(desktop.draft().unwrap(), &before);
         pick(&mut desktop, "words");
         assert!(desktop.set_fade_in(1.0).is_err());
+    }
+
+    #[test]
+    fn a_title_shadow_opacity_is_set_and_kept_while_off() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "words");
+        desktop
+            .set_text_shadow("#000000", 0.0, cutlass_editor::SHADOW_ANGLE, 0.0)
+            .unwrap();
+        assert_eq!(desktop.text_look().unwrap().shadow_alpha, 0.9);
+        desktop.set_text_shadow_opacity(0.4).unwrap();
+        assert_eq!(desktop.text_look().unwrap().shadow_alpha, 0.4);
+        desktop
+            .set_text_shadow("", 8.0, cutlass_editor::SHADOW_ANGLE, 0.3)
+            .unwrap();
+        desktop
+            .set_text_shadow("#000000", 8.0, cutlass_editor::SHADOW_ANGLE, 0.3)
+            .unwrap();
+        assert_eq!(desktop.text_look().unwrap().shadow_alpha, 0.4);
+        assert!(desktop.set_text_shadow_opacity(1.5).is_err());
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        assert_eq!(desktop.text_look().unwrap().shadow_alpha, 0.9);
     }
 
     #[test]

@@ -69,6 +69,8 @@ pub struct TextLook {
     pub shadow_blur: f64,
     /// Degrees. A title with no shadow reads the angle a first one takes.
     pub shadow_angle: f64,
+    /// 0 to 1.
+    pub shadow_alpha: f64,
     pub background_color: String,
     /// 0 to 1.
     pub background_alpha: f64,
@@ -202,6 +204,7 @@ fn look_of(
         } else {
             SHADOW_ANGLE
         },
+        shadow_alpha: text.shadow_alpha,
         background_color: on(text.background_style != 0, &text.background_color),
         background_alpha: text.background_alpha,
         background_round: text.background_round_radius,

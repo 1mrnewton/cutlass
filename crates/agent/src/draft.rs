@@ -497,6 +497,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetTextFontAxes { .. } => "set_text_font_axes",
         Request::SetTextOutline { .. } => "set_text_outline",
         Request::SetTextShadow { .. } => "set_text_shadow",
+        Request::SetTextShadowOpacity { .. } => "set_text_shadow_opacity",
         Request::SetTextBackground { .. } => "set_text_background",
         Request::SetTextBubble { .. } => "set_text_bubble",
         Request::SetCaptionStyle { .. } => "set_caption_style",

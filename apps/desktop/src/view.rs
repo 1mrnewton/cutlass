@@ -19622,7 +19622,14 @@ mod tests {
                 }),
             );
         harness.run_steps(4);
-        for section in ["position", "blend"] {
+        for section in [
+            "position",
+            "blend",
+            "stroke",
+            "background",
+            "glow",
+            "shadow",
+        ] {
             harness
                 .state_mut()
                 .1
@@ -19660,9 +19667,11 @@ mod tests {
         // The Blend switch unticks and ticks again, keeping the opacity.
         harness.state_mut().0.set_opacity(0.5).unwrap();
         assert!(inspection(&harness).blend_on);
-        // The section's switch comes before its name.
+        // A section's switch is the check box with its name.
         let switch = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
-            harness.query_all_by_label(name).next().unwrap().click();
+            harness
+                .get_by_role_and_label(egui::accesskit::Role::CheckBox, name)
+                .click();
         };
         switch(&harness, "Blend");
         harness.run_steps(4);
@@ -19672,6 +19681,26 @@ mod tests {
         switch(&harness, "Blend");
         harness.run_steps(4);
         assert!(inspection(&harness).blend_on);
+        // Each style part's switch turns it on and off.
+        let look = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>| {
+            harness.state().0.text_look().unwrap()
+        };
+        for part in ["Stroke", "Background", "Glow", "Shadow"] {
+            switch(&harness, part);
+            harness.run_steps(4);
+        }
+        let on = look(&harness);
+        assert!(!on.outline_color.is_empty() && !on.background_color.is_empty());
+        assert!(!on.glow_color.is_empty() && !on.shadow_color.is_empty());
+        assert_eq!(on.shadow_alpha, 0.9);
+        picture(&mut harness, "title-parts-styled");
+        for part in ["Stroke", "Background", "Glow", "Shadow"] {
+            switch(&harness, part);
+            harness.run_steps(4);
+        }
+        let off = look(&harness);
+        assert!(off.outline_color.is_empty() && off.background_color.is_empty());
+        assert!(off.glow_color.is_empty() && off.shadow_color.is_empty());
         drop(harness);
         let _ = std::fs::remove_dir_all(&temp);
     }

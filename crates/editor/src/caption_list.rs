@@ -496,6 +496,7 @@ fn styled_clip(request: &Request) -> Option<&SegmentId> {
         | Request::SetTextFont { segment_id, .. }
         | Request::SetTextOutline { segment_id, .. }
         | Request::SetTextShadow { segment_id, .. }
+        | Request::SetTextShadowOpacity { segment_id, .. }
         | Request::SetTextBackground { segment_id, .. }
         | Request::SetTextBubble { segment_id, .. }
         | Request::SetCaptionStyle { segment_id, .. }
@@ -521,6 +522,7 @@ fn with_clip(request: &Request, clip: &SegmentId) -> Request {
         | Request::SetTextFont { segment_id, .. }
         | Request::SetTextOutline { segment_id, .. }
         | Request::SetTextShadow { segment_id, .. }
+        | Request::SetTextShadowOpacity { segment_id, .. }
         | Request::SetTextBackground { segment_id, .. }
         | Request::SetTextBubble { segment_id, .. }
         | Request::SetCaptionStyle { segment_id, .. }

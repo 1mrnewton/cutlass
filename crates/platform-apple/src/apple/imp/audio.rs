@@ -31,6 +31,21 @@ const NOTHING_YET: sys::OSStatus = 1;
 
 struct Converter {
     raw: *mut std::ffi::c_void,
+    /// The input [`feed_input`] last handed out, from `Box::into_raw`. It is
+    /// a raw pointer, not a `Box`, so moving the converter asserts nothing
+    /// over memory AudioToolbox may still read. Freed in `Drop`, after the
+    /// converter is disposed.
+    held: *mut Held,
+}
+
+/// What the input callback last handed the converter. The header says the
+/// callback must not free or alter that input "until it is called again",
+/// which can be after the fill that asked for it has returned, so it lives
+/// here rather than with the fill. It is replaced only by the next call that
+/// hands out new input, and freed only after the converter is disposed.
+struct Held {
+    bytes: Vec<u8>,
+    desc: AudioStreamPacketDescription,
 }
 
 impl Converter {
@@ -49,7 +64,15 @@ impl Converter {
                 what: "audiotoolbox",
             });
         }
-        Ok(Self { raw })
+        let held = Box::into_raw(Box::new(Held {
+            bytes: Vec::new(),
+            desc: AudioStreamPacketDescription {
+                start: 0,
+                frames: 0,
+                size: 0,
+            },
+        }));
+        Ok(Self { raw, held })
     }
 }
 
@@ -62,12 +85,18 @@ impl Drop for Converter {
                 let _ = sys::AudioConverterDispose(self.raw);
             }
         }
+        if !self.held.is_null() {
+            // SAFETY: `held` came from `Box::into_raw` in `new` and is rebuilt
+            // once, here. The converter that could read it is disposed above.
+            drop(unsafe { Box::from_raw(self.held) });
+        }
     }
 }
 
 // SAFETY: an AudioConverter is not tied to the thread that made it. `Converter`
 // is not `Sync`, and its owner calls it only through `&mut self` paths, so one
-// thread uses it at a time.
+// thread uses it at a time. `held` is plain owned data, only touched by the
+// input callback during a fill on that thread and by `Drop`.
 unsafe impl Send for Converter {}
 
 pub struct AudioDecoder {
@@ -516,15 +545,50 @@ fn prime_leading(converter: *mut std::ffi::c_void) -> u32 {
     if status == 0 { info.leading } else { 0 }
 }
 
+/// One fill's input and how much of it has gone to the converter.
 struct Feed {
-    data: *const u8,
+    /// The bytes this fill hands out. The first call that hands any out
+    /// moves them into the converter's [`Held`].
+    input: Vec<u8>,
+    /// The input has moved into `held`.
+    taken: bool,
+    /// Where the next hand-out starts in the held bytes.
+    offset: usize,
+    /// Bytes not yet handed out.
     size: u32,
     channels: u32,
     frames: u32,
     bytes_per_frame: u32,
     packet: bool,
-    desc: AudioStreamPacketDescription,
     used: bool,
+    /// The converter's `held`, set by [`convert`].
+    held: *mut Held,
+}
+
+impl Feed {
+    fn new(
+        input: Vec<u8>,
+        channels: u32,
+        frames: u32,
+        bytes_per_frame: u32,
+        packet: bool,
+    ) -> Result<Self, CodecError> {
+        let size = u32::try_from(input.len()).map_err(|_| CodecError::Limit {
+            what: "packet bytes",
+        })?;
+        Ok(Self {
+            input,
+            taken: false,
+            offset: 0,
+            size,
+            channels,
+            frames,
+            bytes_per_frame,
+            packet,
+            used: false,
+            held: ptr::null_mut(),
+        })
+    }
 }
 
 unsafe extern "C" fn feed_input(
@@ -537,33 +601,48 @@ unsafe extern "C" fn feed_input(
     // SAFETY: AudioToolbox calls this only from inside the
     // `AudioConverterFillComplexBuffer` in `convert`, on that thread, with
     // `user` the `&mut Feed` that `convert` holds for the call; null pointers
-    // are refused first. `packets` and `data` point to the converter's own
-    // count and one-buffer list, and `descriptions`, when not null, to a slot
-    // for one description pointer. The buffer handed back points into the
-    // feed's bytes (`size` bytes, or `give * bytes_per_frame` of the
-    // remaining frames), and the description points at `feed.desc`.
+    // are refused first. `feed.held` is the converter's live `Held`, which
+    // only this callback touches while `convert` holds `&mut Converter`.
+    // `packets` and `data` point to the converter's own count and one-buffer
+    // list, and `descriptions`, when not null, to a slot for one description
+    // pointer. Being called again ends the converter's claim on what the
+    // last call handed out, so the held bytes may be replaced now. The
+    // buffer handed back points into the held bytes (`size` bytes, or
+    // `give * bytes_per_frame` of the remaining frames) and the description
+    // at the held one; both stay unchanged until the next call or until
+    // `Converter::drop` disposes the converter, as the header requires.
     unsafe {
         if packets.is_null() || data.is_null() || user.is_null() {
             return -50;
         }
         let feed = &mut *user.cast::<Feed>();
-        if feed.used || feed.size == 0 {
+        if feed.used || feed.size == 0 || feed.held.is_null() {
             *packets = 0;
             // A decoder says "nothing yet", not "the stream ended": HE-AAC
             // keeps state from one packet to the next and gives nothing
             // after an end. An encoder's end flushes its last frames.
             return if feed.packet { NOTHING_YET } else { 0 };
         }
+        let held = &mut *feed.held;
+        if !feed.taken {
+            held.bytes = std::mem::take(&mut feed.input);
+            feed.taken = true;
+        }
+        let start = held.bytes.as_mut_ptr().wrapping_add(feed.offset);
         if feed.packet {
             (*data).buffers = 1;
             (*data).buffer = AudioBuffer {
                 channels: feed.channels,
                 size: feed.size,
-                data: feed.data.cast_mut().cast(),
+                data: start.cast(),
             };
-            feed.desc.size = feed.size;
+            held.desc = AudioStreamPacketDescription {
+                start: 0,
+                frames: 0,
+                size: feed.size,
+            };
             if !descriptions.is_null() {
-                *descriptions = &raw mut feed.desc;
+                *descriptions = &raw mut held.desc;
             }
             *packets = 1;
             feed.used = true;
@@ -579,14 +658,15 @@ unsafe extern "C" fn feed_input(
         (*data).buffer = AudioBuffer {
             channels: feed.channels,
             size: bytes,
-            data: feed.data.cast_mut().cast(),
+            data: start.cast(),
         };
         if !descriptions.is_null() {
             *descriptions = ptr::null_mut();
         }
         *packets = give;
-        let advance = usize::try_from(bytes).unwrap_or(0);
-        feed.data = feed.data.wrapping_add(advance);
+        feed.offset = feed
+            .offset
+            .saturating_add(usize::try_from(bytes).unwrap_or(0));
         feed.frames = feed.frames.saturating_sub(give);
         feed.size = feed.size.saturating_sub(bytes);
         if feed.frames == 0 {
@@ -597,7 +677,7 @@ unsafe extern "C" fn feed_input(
 }
 
 fn convert(
-    converter: *mut std::ffi::c_void,
+    converter: &mut Converter,
     feed: &mut Feed,
     out_packets: u32,
     out_bytes: usize,
@@ -620,19 +700,19 @@ fn convert(
         size: 0,
     };
     let desc_ptr = if variable { &mut desc } else { ptr::null_mut() };
+    feed.held = converter.held;
     let feed_ptr: *mut Feed = feed;
-    // SAFETY: `converter` is live. `feed_ptr` is the exclusive borrow `feed`,
-    // used only by `feed_input` during this call. `list` describes `output`,
+    // SAFETY: `converter.raw` is live, and `&mut Converter` means no other
+    // fill runs. `feed_ptr` is the exclusive borrow `feed`, used only by
+    // `feed_input` during this call. Input the callback hands out lives in
+    // the converter's `Held`, not in `feed`, so it outlives this call as the
+    // header requires (see `feed_input`). `list` describes `output`,
     // `out_bytes` bytes long, which outlives the call. `desc_ptr` is null or
     // room for one description, and `count` (the decoder's frames, or 1 for
     // the encoder) does not ask for more than one variable-size packet.
-    // The header says the callback must not free its input until it is
-    // called again, but the feed's bytes and `feed.desc` are freed after
-    // this returns; this relies on AudioToolbox consuming or copying input
-    // before the fill returns.
     let status = unsafe {
         sys::AudioConverterFillComplexBuffer(
-            converter,
+            converter.raw,
             feed_input,
             feed_ptr.cast(),
             &mut count,
@@ -699,22 +779,13 @@ impl Decoder for AudioDecoder {
             SampleFormat::F32 => 4 * channels,
             SampleFormat::I16 => 2 * channels,
         };
-        let mut feed = Feed {
-            data: packet.data.as_ptr(),
-            size: u32::try_from(packet.data.len()).map_err(|_| CodecError::Limit {
-                what: "packet bytes",
-            })?,
+        let mut feed = Feed::new(
+            packet.data.clone(),
             channels,
-            frames: 0,
+            0,
             bytes_per_frame,
-            packet: self.codec != CodecId::Pcm,
-            desc: AudioStreamPacketDescription {
-                start: 0,
-                frames: 0,
-                size: 0,
-            },
-            used: false,
-        };
+            self.codec != CodecId::Pcm,
+        )?;
         let frames = if self.codec == CodecId::Pcm {
             packet.data.len() / usize::try_from(bytes_per_frame).unwrap_or(1)
         } else if self.codec == CodecId::Eac3 {
@@ -724,7 +795,7 @@ impl Decoder for AudioDecoder {
         };
         let out_packets = u32::try_from(frames).unwrap_or(1).max(1);
         let bytes = convert(
-            self.converter.raw,
+            &mut self.converter,
             &mut feed,
             out_packets,
             frames.saturating_mul(usize::try_from(bytes_per_frame).unwrap_or(1)),
@@ -883,24 +954,11 @@ impl AudioEncoder {
             let chunk: Vec<u8> = self.pending.drain(..take).collect();
             let frames = u32::try_from(chunk.len() / usize::try_from(bytes_per_frame).unwrap_or(1))
                 .unwrap_or(0);
-            let mut feed = Feed {
-                data: chunk.as_ptr(),
-                size: u32::try_from(chunk.len()).unwrap_or(0),
-                channels,
-                frames,
-                bytes_per_frame,
-                packet: false,
-                desc: AudioStreamPacketDescription {
-                    start: 0,
-                    frames: 0,
-                    size: 0,
-                },
-                used: false,
-            };
             let encoded = if self.codec == CodecId::Pcm {
                 chunk
             } else {
-                convert(self.converter.raw, &mut feed, 1, 16 * 1024, true)?
+                let mut feed = Feed::new(chunk, channels, frames, bytes_per_frame, false)?;
+                convert(&mut self.converter, &mut feed, 1, 16 * 1024, true)?
             };
             if encoded.is_empty() {
                 break;
@@ -1111,6 +1169,80 @@ mod tests {
         );
         let pcm = Pcm::from_f32(48_000, ChannelLayout::mono(), vec![0.5]).expect("pcm");
         assert!(encoder.push(&AudioInput { pcm }).is_ok());
+    }
+
+    fn tone(rate: u32, frames: usize) -> Vec<f32> {
+        (0..frames)
+            .map(|index| (index as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.5)
+            .collect()
+    }
+
+    fn aac_packets(rate: u32, samples: &[f32]) -> Vec<Packet> {
+        let mut encoder = open_encoder(&audio_params(CodecId::Aac, rate)).expect("encode open");
+        let pcm = Pcm::from_f32(rate, ChannelLayout::mono(), samples.to_vec()).expect("pcm");
+        let mut packets = encoder.push(&AudioInput { pcm }).expect("encode");
+        packets.extend(encoder.drain().expect("drain"));
+        packets
+    }
+
+    /// The bytes and description the input callback handed out stay with
+    /// the converter after the fill returns, as the header requires, and the
+    /// next fill replaces them.
+    #[test]
+    fn the_last_input_handed_out_outlives_the_fill() {
+        let rate = 48_000;
+        let packets = aac_packets(rate, &tone(rate, 1024 * 3));
+        assert!(packets.len() >= 2);
+        let source = compressed_desc(CodecId::Aac, rate, 1).expect("source");
+        let destination = pcm_desc(rate, 1, SampleFormat::F32).expect("destination");
+        let mut converter = Converter::new(&source, &destination).expect("converter");
+        for packet in &packets[..2] {
+            let mut feed = Feed::new(packet.data.clone(), 1, 0, 4, true).expect("feed");
+            convert(&mut converter, &mut feed, 1024, 4096, false).expect("convert");
+            assert!(feed.taken);
+            assert!(feed.input.is_empty());
+            drop(feed);
+            // SAFETY: no fill is running, so nothing else touches `held`.
+            let held = unsafe { &*converter.held };
+            assert_eq!(held.bytes, packet.data);
+            assert_eq!(usize::try_from(held.desc.size), Ok(packet.data.len()));
+        }
+    }
+
+    /// A packet freed as soon as `push` returns, with its memory filled with
+    /// other bytes, decodes the same every round; so does the encoder's
+    /// input.
+    #[test]
+    fn aac_from_inputs_freed_after_each_call_matches_every_round() {
+        let rate = 48_000;
+        let samples = tone(rate, 1024 * 6);
+        let packets = aac_packets(rate, &samples);
+        let decode = |packets: &[Packet], scribble: bool| {
+            let mut decoder = open_decoder(&audio_params(CodecId::Aac, rate)).expect("decode open");
+            let mut got = Vec::new();
+            let mut noise = Vec::new();
+            for packet in packets {
+                let copy = packet.clone();
+                for output in decoder.push(&copy).expect("decode") {
+                    let Output::Audio(audio) = output else {
+                        panic!("audio");
+                    };
+                    got.extend_from_slice(audio.pcm.as_f32().expect("f32"));
+                }
+                let size = copy.data.len();
+                drop(copy);
+                if scribble {
+                    noise.push(vec![0x5Au8; size]);
+                }
+            }
+            got
+        };
+        let expected = decode(&packets, false);
+        assert!(expected.len() >= 1024 * 4);
+        for _ in 0..40 {
+            assert_eq!(aac_packets(rate, &samples), packets);
+            assert_eq!(decode(&packets, true), expected);
+        }
     }
 
     #[test]

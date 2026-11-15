@@ -169,6 +169,25 @@ struct Core<P: EncPixel> {
     gold: (u32, u32),
     /// The luma of the picture coded last, tight, for finding a cut.
     last_luma: Vec<P>,
+    /// Two passes: the pictures in the reference pool's slots (see
+    /// [`POOL`]), and the golden frame's.
+    pool: Vec<Held<P>>,
+    gold_src: Option<Held<P>>,
+    /// Where the content of the picture coded last stands
+    /// ([`super::arf::shift`] summed over the pictures).
+    pos: (isize, isize),
+    /// Pictures shown so far.
+    shown: u64,
+}
+
+/// A picture a reference slot holds, as its source.
+struct Held<P> {
+    slot: u8,
+    /// Its number among the pictures shown.
+    shown: u64,
+    /// Where its content stood (see [`Core::pos`]).
+    pos: (isize, isize),
+    planes: [Vec<P>; 3],
 }
 
 /// A picture in the lookahead.
@@ -180,6 +199,9 @@ struct Queued<P> {
     timescale: u32,
     /// Whether it cuts from the picture before it (see [`Core::is_cut`]).
     cut: bool,
+    /// Two passes: how far its content moved from the picture before it
+    /// ([`super::arf::shift`]).
+    step: (isize, isize),
 }
 
 /// The pictures a push codes: data, key frame, and the picture's `pts`,
@@ -486,6 +508,10 @@ impl<P: EncPixel> Core<P> {
             overlay_at: None,
             gold: (0, GF_INTERVAL),
             last_luma: Vec::new(),
+            pool: Vec::new(),
+            gold_src: None,
+            shown: 0,
+            pos: (0, 0),
         }
     }
 
@@ -551,7 +577,19 @@ impl<P: EncPixel> Core<P> {
             Some(before) => super::arf::cut(&before.planes[0], &tight[0], w, h),
             None => self.is_cut((&tight[0], w)),
         };
+        let step = if self.pooled() {
+            match self.queue.back() {
+                Some(before) => super::arf::shift(&before.planes[0], &tight[0], w, h, before.step),
+                None if self.last_luma.len() == w * h => {
+                    super::arf::shift(&self.last_luma, &tight[0], w, h, (0, 0))
+                }
+                None => (0, 0),
+            }
+        } else {
+            (0, 0)
+        };
         self.queue.push_back(Queued {
+            step,
             cut,
             planes: tight,
             seconds,
@@ -647,6 +685,15 @@ impl<P: EncPixel> Core<P> {
         }
         let mut data = Vec::new();
         if let Some(src) = arf_source {
+            // (Where its target stands: the steps of the pictures to it.)
+            let at = self
+                .queue
+                .iter()
+                .take(k)
+                .fold((self.pos.0 + f.step.0, self.pos.1 + f.step.1), |p, q| {
+                    (p.0 + q.step.0, p.1 + q.step.1)
+                });
+            let golden_slot = self.pick_golden([&src[0], &src[1], &src[2]], at);
             self.enc.load([(&src[0], w), (&src[1], cw), (&src[2], cw)]);
             self.rc.alt_ref(k);
             let qindex = self.rc.qindex(1, f.seconds, false);
@@ -661,6 +708,9 @@ impl<P: EncPixel> Core<P> {
                 altref_future: false,
                 aq: self.opts.aq,
                 second_pass: self.rc.pass2.is_some(),
+                golden_slot: golden_slot.0,
+                also_refresh: 0,
+                noise: golden_slot.1,
             })?;
             self.rc.account(coded.data.len(), 0.0, 1, qindex);
             self.overlay_at = Some(target);
@@ -669,7 +719,7 @@ impl<P: EncPixel> Core<P> {
         let (frame, key) = self.code(
             [(&f.planes[0], w), (&f.planes[1], cw), (&f.planes[2], cw)],
             f.seconds,
-            Some(cut),
+            Some((cut, f.step)),
         )?;
         let data = if data.is_empty() {
             frame
@@ -685,8 +735,9 @@ impl<P: EncPixel> Core<P> {
         &mut self,
         planes: [(&[P], usize); 3],
         seconds: f64,
-        cut: Option<bool>,
+        ahead: Option<(bool, (isize, isize))>,
     ) -> Result<(Vec<u8>, bool), CodecError> {
+        let cut = ahead.map(|a| a.0);
         let key = self.force_key || self.since_key >= self.opts.keyint;
         // A cut starts a golden frame: LAST and GOLDEN take the new scene,
         // each block still chooses intra or inter, and the probabilities
@@ -709,6 +760,45 @@ impl<P: EncPixel> Core<P> {
             // (An alt-ref of the scene before a cut has nothing to show.)
             self.overlay_at = None;
         }
+        // Two passes: the picture's tight planes, for the reference pool.
+        let tight: Option<[Vec<P>; 3]> = self.pooled().then(|| {
+            let (w, h) = (self.width as usize, self.height as usize);
+            let c = self.opts.chroma_dims(w, h);
+            std::array::from_fn(|p| {
+                let (data, stride) = planes[p];
+                let (pw, ph) = if p == 0 { (w, h) } else { c };
+                let mut t = Vec::with_capacity(pw * ph);
+                for r in 0..ph {
+                    t.extend_from_slice(&data[r * stride..r * stride + pw]);
+                }
+                t
+            })
+        });
+        if key {
+            self.pool.clear();
+            self.gold_src = None;
+            self.pos = (0, 0);
+        } else if let Some(t) = &tight {
+            let step = match ahead {
+                Some(a) => a.1,
+                None if self.last_luma.len() == t[0].len() => {
+                    let (w, h) = (self.width as usize, self.height as usize);
+                    super::arf::shift(&self.last_luma, &t[0], w, h, (0, 0))
+                }
+                None => (0, 0),
+            };
+            self.pos = (self.pos.0 + step.0, self.pos.1 + step.1);
+        }
+        let golden_slot = match &tight {
+            Some(t) if !key => self.pick_golden([&t[0], &t[1], &t[2]], self.pos),
+            _ => (1, 0.0),
+        };
+        let pool_slot = POOL_FIRST + (self.shown % u64::from(POOL)) as u8;
+        let also_refresh = if tight.is_some() && !key {
+            1 << pool_slot
+        } else {
+            0
+        };
         self.enc.load(planes);
         let qindex = self.rc.qindex(kind, seconds, cut);
         // Between an alt-ref and its overlay, ALTREF is ahead.
@@ -722,8 +812,31 @@ impl<P: EncPixel> Core<P> {
             altref_future,
             aq: self.opts.aq,
             second_pass: self.rc.pass2.is_some(),
+            golden_slot: golden_slot.0,
+            also_refresh,
+            noise: golden_slot.1,
         })?;
         let kind = if coded.key { 0 } else { kind };
+        if let Some(t) = tight {
+            if coded.key || golden {
+                self.gold_src = Some(Held {
+                    slot: 1,
+                    shown: self.shown,
+                    pos: self.pos,
+                    planes: t.clone(),
+                });
+            }
+            if !coded.key {
+                self.pool.retain(|e| e.slot != pool_slot);
+                self.pool.push(Held {
+                    slot: pool_slot,
+                    shown: self.shown,
+                    pos: self.pos,
+                    planes: t,
+                });
+            }
+        }
+        self.shown += 1;
         if coded.key || golden {
             let at = if coded.key { 0 } else { self.since_key };
             let next = self.next_golden(at, planes[0]);
@@ -741,6 +854,59 @@ impl<P: EncPixel> Core<P> {
                 .extend_from_slice(&y[r * stride..r * stride + w]);
         }
         Ok((coded.data, coded.key))
+    }
+
+    /// Whether the reference pool is kept: two passes ([`POOL`]).
+    fn pooled(&self) -> bool {
+        self.rc.pass2.is_some()
+    }
+
+    /// The slot GOLDEN reads for the picture `to` (tight planes): the
+    /// golden frame's, or, with the reference pool, a picture of it that
+    /// predicts `to` far better in chroma ([`super::arf::phase_error`]):
+    /// content moved by an even number of luma samples, which chroma
+    /// predicts at its whole samples.
+    fn pick_golden(&self, to: [&[P]; 3], at: (isize, isize)) -> (u8, f32) {
+        if !self.pooled() {
+            return (1, 0.0);
+        }
+        let Some(g) = &self.gold_src else {
+            return (1, 0.0);
+        };
+        let (w, h) = (self.width as usize, self.height as usize);
+        let ss = self.opts.ss();
+        // The golden picture and those of the pool (but the one shown last,
+        // LAST's), measured on threads.
+        let last = self.shown.checked_sub(1);
+        let cands: Vec<&Held<P>> = std::iter::once(g)
+            .chain(self.pool.iter().filter(|e| Some(e.shown) != last))
+            .collect();
+        let measure = |c: &&Held<P>| {
+            // The vector from the picture: how far the content moved since.
+            let seed = (at.0 - c.pos.0, at.1 - c.pos.1);
+            let f = &c.planes;
+            super::arf::phase_error([&f[0], &f[1], &f[2]], to, w, h, ss, seed)
+        };
+        let errs: Vec<(f32, u64)> = if self.opts.threads() <= 1 {
+            cands.iter().map(measure).collect()
+        } else {
+            std::thread::scope(|sc| {
+                let hs: Vec<_> = cands.iter().map(|c| sc.spawn(move || measure(c))).collect();
+                hs.into_iter()
+                    .map(|h| h.join().unwrap_or((f32::MAX, u64::MAX)))
+                    .collect()
+            })
+        };
+        let base = errs[0];
+        let mut best = (1u8, base);
+        let mut least = base.0;
+        for (c, e) in cands.iter().zip(&errs).skip(1) {
+            least = least.min(e.0);
+            if e.1 * 10 < base.1 * 7 && e.0 <= base.0 * 1.25 && e.1 < best.1.1 {
+                best = (c.slot, *e);
+            }
+        }
+        (best.0, least)
     }
 
     /// Whether luma `y` (rows `stride` apart) cuts from the picture coded
@@ -779,6 +945,10 @@ impl<P: EncPixel> Core<P> {
         self.queue.clear();
         self.overlay_at = None;
         self.gold = (0, GF_INTERVAL);
+        self.pool.clear();
+        self.gold_src = None;
+        self.shown = 0;
+        self.pos = (0, 0);
     }
 
     /// The place of the golden frame after the one (or the key frame) at
@@ -1021,6 +1191,12 @@ fn check_planes<P>(
     }
     Ok(())
 }
+
+/// Two passes keep the last [`POOL`] shown pictures in the reference
+/// slots from [`POOL_FIRST`], and GOLDEN reads whichever of them, or the
+/// golden frame, predicts the picture's chroma best at whole samples.
+const POOL: u8 = 5;
+const POOL_FIRST: u8 = 3;
 
 /// Frames from one golden frame to the next (at most, in two passes).
 const GF_INTERVAL: u32 = 12;

@@ -225,6 +225,8 @@ pub struct Shared<'a, P> {
     pub tok: &'a TokCosts,
     /// See [`super::FrameParams::second_pass`].
     pub second_pass: bool,
+    /// See [`super::FrameParams::noise`].
+    pub noise: f32,
 }
 
 /// The context energy of a level (libvpx `vp9_pt_energy_class`): 0, 1, 2,
@@ -957,15 +959,21 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             }
         }
         // No split when the whole block needs no residual and its error is
-        // under the quantizer's own noise, or (from BREAKOUT_SPEED) codes
-        // one and its error is under half that.
+        // under the quantizer's own noise (or the picture's, see
+        // `FrameParams::noise`), or (from BREAKOUT_SPEED) codes one and its
+        // error is under half the quantizer's.
         if whole && best.1 == PARTITION_NONE && (none_skip.0 || s.speed >= BREAKOUT_SPEED) {
             let pixels = (n * 8 * n * 8) as f64;
             let step = f64::from(s.dq[0][0][1]) / 8.0;
             // A block that codes a residual stops the search at half that
             // error (from BREAKOUT_SPEED: 6% of the time, 0.2% of the bits).
             let div = if none_skip.0 { 24.0 } else { 48.0 };
-            if none_skip.1 < pixels * step * step / div {
+            let noise = if none_skip.0 {
+                f64::from(s.noise) * pixels
+            } else {
+                0.0
+            };
+            if none_skip.1 < (pixels * step * step / div).max(noise) {
                 self.restore(before + 1);
                 self.part[Self::node(row, col, level)] = PARTITION_NONE;
                 return best.0;

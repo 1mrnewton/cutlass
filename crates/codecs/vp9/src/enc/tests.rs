@@ -72,6 +72,9 @@ fn round_trip_with(
                 altref_future: false,
                 aq,
                 second_pass: false,
+                golden_slot: 1,
+                also_refresh: 0,
+                noise: 0.0,
             })
             .expect("encode");
         bytes += coded.data.len();

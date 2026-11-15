@@ -231,7 +231,7 @@ pub fn stage_pick(
     (x, y): (f64, f64),
     sizes: &dyn TextSizes,
 ) -> Option<SegmentId> {
-    let mut found: Option<((i32, usize, usize), SegmentId)> = None;
+    let mut found: Option<(cutlass_model::PaintOrder, SegmentId)> = None;
     for (track_index, track) in draft.tracks.iter().enumerate() {
         if track.attribute.contains(TrackAttribute::HIDE)
             || track.attribute.contains(TrackAttribute::LOCK)
@@ -251,7 +251,7 @@ pub fn stage_pick(
             if alpha <= 0.0 {
                 continue;
             }
-            let key = (segment.render_index, track_index, segment_index);
+            let key = cutlass_model::paint_order(segment.render_index, track_index, segment_index);
             if found.as_ref().is_some_and(|(top, _)| *top > key) {
                 continue;
             }
@@ -588,10 +588,11 @@ mod tests {
             segment
         };
         draft.tracks[0].segments.push(clip("main", "tall"));
+        // File order is the row order, top first: the overlay row above main.
         let mut over = Track::main("over");
         over.flag = TrackFlag::SubVideo;
         over.segments.push(clip("over", "wide"));
-        draft.tracks.push(over);
+        draft.tracks.insert(0, over);
         draft
     }
 
@@ -604,7 +605,7 @@ mod tests {
         let mut draft = draft();
         let main = SegmentId::new("main");
         assert_eq!(keyed_pose(&draft, &main, Micros(5)), None);
-        let segment = &mut draft.tracks[0].segments[0];
+        let segment = &mut draft.tracks[1].segments[0];
         cutlass_model::put_key(segment, "KFTypePositionX", Micros(0), 0.0);
         cutlass_model::put_key(segment, "KFTypePositionX", Micros(10), 1.0);
         let (offset, pose) = keyed_pose(&draft, &main, Micros(5)).unwrap();
@@ -656,7 +657,7 @@ mod tests {
         let stage = stage_box(&draft, &main, Micros(0), &NoText).unwrap();
         assert!(near(stage.center_x, 960.0) && near(stage.center_y, 540.0));
         assert!(near(stage.width, 607.5) && near(stage.height, 1080.0));
-        let segment = &mut draft.tracks[0].segments[0];
+        let segment = &mut draft.tracks[1].segments[0];
         segment.clip.transform.x = 0.5;
         segment.clip.transform.y = 0.5;
         segment.clip.rotation = 90.0;
@@ -675,7 +676,7 @@ mod tests {
     fn with_uniform_scale_off_the_box_takes_each_axis() {
         let mut draft = draft();
         let main = SegmentId::new("main");
-        let segment = &mut draft.tracks[0].segments[0];
+        let segment = &mut draft.tracks[1].segments[0];
         segment.uniform_scale.on = false;
         segment.clip.scale.x = 0.5;
         segment.clip.scale.y = 1.5;
@@ -686,8 +687,8 @@ mod tests {
         let step = gesture.step(0.0, 0.0, 2.0, 0.0);
         assert!(near(step.stage.width, 607.5) && near(step.stage.height, 3240.0));
         // On, the uniform value drives both.
-        draft.tracks[0].segments[0].uniform_scale.on = true;
-        draft.tracks[0].segments[0].uniform_scale.value = 0.5;
+        draft.tracks[1].segments[0].uniform_scale.on = true;
+        draft.tracks[1].segments[0].uniform_scale.value = 0.5;
         let stage = stage_box(&draft, &main, Micros(0), &NoText).unwrap();
         assert!(near(stage.width, 303.75) && near(stage.height, 540.0));
     }
@@ -708,7 +709,7 @@ mod tests {
         let (_, y) = at(&draft, StageAlign::Top);
         assert!(near(y, 0.0));
         // Half size and moved, its top sits on the top, x kept.
-        let segment = &mut draft.tracks[0].segments[0];
+        let segment = &mut draft.tracks[1].segments[0];
         segment.uniform_scale.value = 0.5;
         segment.clip.transform.x = 0.25;
         let (x, y) = at(&draft, StageAlign::Top);
@@ -718,7 +719,7 @@ mod tests {
         let (x, _) = at(&draft, StageAlign::Center);
         assert!(near(x, 0.0));
         // Turned a quarter, its long side lies along x.
-        draft.tracks[0].segments[0].clip.rotation = 90.0;
+        draft.tracks[1].segments[0].clip.rotation = 90.0;
         let (x, _) = at(&draft, StageAlign::Left);
         assert!(near(x, (540.0 / 2.0 - 960.0) / 960.0));
     }
@@ -744,7 +745,7 @@ mod tests {
         words
             .segments
             .push(Segment::new("title", "words", TimeRange::new(0, 10)));
-        draft.tracks.push(words);
+        draft.tracks.insert(0, words);
         let title = SegmentId::new("title");
         assert_eq!(stage_box(&draft, &title, Micros(0), &NoText), None);
         let stage = stage_box(&draft, &title, Micros(0), &Sized(300.0, 80.0)).unwrap();
@@ -777,10 +778,11 @@ mod tests {
 
     #[test]
     fn the_top_picture_under_a_finger_is_picked() {
+        let mut under = draft();
         let mut draft = draft();
         let at = |draft: &Draft, x, y| stage_pick(draft, Micros(5), (x, y), &NoText);
         assert_eq!(at(&draft, 960.0, 540.0), Some(SegmentId::new("over")));
-        draft.tracks[1].segments[0].uniform_scale.value = 0.25;
+        draft.tracks[0].segments[0].uniform_scale.value = 0.25;
         assert_eq!(at(&draft, 960.0, 540.0), Some(SegmentId::new("over")));
         assert_eq!(at(&draft, 960.0, 100.0), Some(SegmentId::new("main")));
         assert_eq!(at(&draft, 100.0, 100.0), None);
@@ -788,8 +790,15 @@ mod tests {
             stage_pick(&draft, Micros(10), (960.0, 540.0), &NoText),
             None
         );
-        draft.tracks[1].attribute = TrackAttribute(TrackAttribute::LOCK);
+        draft.tracks[0].attribute = TrackAttribute(TrackAttribute::LOCK);
         assert_eq!(at(&draft, 960.0, 540.0), Some(SegmentId::new("main")));
+        // The pick follows the drawing: the overlay row moved under main
+        // is covered there, and a higher layer is on top from any row.
+        let row = under.tracks.remove(0);
+        under.tracks.push(row);
+        assert_eq!(at(&under, 960.0, 540.0), Some(SegmentId::new("main")));
+        under.tracks[1].segments[0].render_index = 1;
+        assert_eq!(at(&under, 960.0, 540.0), Some(SegmentId::new("over")));
     }
 
     #[test]
@@ -822,7 +831,7 @@ mod tests {
     #[test]
     fn a_pinch_scales_and_a_twist_turns_with_snaps() {
         let mut draft = draft();
-        draft.tracks[0].segments[0].clip.rotation = 10.0;
+        draft.tracks[1].segments[0].clip.rotation = 10.0;
         let gesture = stage_gesture(&draft, &SegmentId::new("main"), Micros(0), &NoText).unwrap();
         let step = gesture.step(0.0, 0.0, 2.0, 30.0);
         assert!(near(step.pose.scale, 2.0) && near(step.pose.rotation, 340.0));
@@ -851,7 +860,7 @@ mod tests {
     fn a_keyed_clip_shows_and_keys_its_pose_at_the_playhead() {
         let mut draft = draft();
         let main = SegmentId::new("main");
-        let segment = &mut draft.tracks[0].segments[0];
+        let segment = &mut draft.tracks[1].segments[0];
         cutlass_model::add_keys(segment, &[], Micros(0)).unwrap();
         cutlass_model::put_key(segment, "KFTypePositionX", Micros(10), 1.0);
         let middle = stage_box(&draft, &main, Micros(5), &NoText).unwrap();

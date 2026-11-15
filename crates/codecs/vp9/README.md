@@ -188,7 +188,7 @@ runs on each). On one core, in 31 runs alternating with FFmpeg's
 | --- | ---: | --- | --- |
 | 4:2:0 (`m420.ivf`) | 0.997 | 0.972–1.030 | 14 of 31 |
 | 4:4:4 (`mandel.ivf`) | 1.011 | 0.972–1.032 | 12 of 31 |
-| 4:2:0 at 60 frames, q 60 (`q60.ivf`) | 0.948 | 0.929–0.973 | 25 of 31 |
+| 4:2:0, 60 frames at 3.7 Mb/s (`q60.ivf`) | 0.948 | 0.929–0.973 | 25 of 31 |
 
 On the two main streams the two are level: neither is measurably the
 faster. On the third Cutlass is ahead. (The

@@ -237,6 +237,11 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   coding a cut as a key frame, libvpx's way, did better on the first clip
   and worse on the second; the chroma's RD weight brought luma down with
   it on both.
+  The pan's chroma gap is not the chroma quantizer: a uv delta-q of −4
+  to −12 lifts its PSNR-U at 1 Mb/s by at most 0.2 dB (38.1 to 38.3,
+  against libvpx's 40.1) and costs more than it gains. It narrows with
+  the search instead (PSNR-U 38.9 dB at speed 4, 39.4 at speed 3,
+  mostly from the rectangular partitions and second transform tries).
 - Cuts: a picture whose sampled 16×16 blocks match the last picture
   worse than twice the error of their own means (libvpx compares inter
   and intra errors the same way) starts a golden frame: LAST and GOLDEN

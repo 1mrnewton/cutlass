@@ -425,6 +425,77 @@ mod tests {
         (mixed, heard)
     }
 
+    /// A second of full-scale tone at 48 kHz on a clip that starts at
+    /// `start`, with a 20 ms fade in and a 60 ms fade out, mixed the way
+    /// playback and export mix: one window of `frames` after another.
+    fn faded_second(clock: ClockKind, start: i64, frames: u32) -> Vec<f32> {
+        let (mut draft, _) = draft_with(1.0, TrackAttribute::default());
+        draft.tracks[0].segments[0].target = TimeRange::new(start, 1_000_000);
+        draft.materials.audio_fades.push(MaterialAudioFade {
+            id: "fade".into(),
+            fade_type: 2,
+            fade_in_duration: Micros(20_000),
+            fade_out_duration: Micros(60_000),
+            ..MaterialAudioFade::default()
+        });
+        draft.tracks[0].segments[0]
+            .extra_material_refs
+            .push("fade".into());
+        let window = MixWindow {
+            rate: 48_000,
+            limiter: 0,
+            frames,
+        };
+        let step = i64::from(frames) * 1_000_000 / 48_000;
+        let mut heard = Vec::new();
+        let mut time = start;
+        while time < start + 1_000_000 {
+            let mixed = audio_slice(
+                &Snapshot::new(&draft),
+                Micros(time),
+                window,
+                clock,
+                |_, _, count, rate| {
+                    let tone = vec![1.0; usize::try_from(count).expect("count")];
+                    Ok(ClipPcm::Ready(
+                        Pcm::from_f32(rate, ChannelLayout::mono(), tone).expect("pcm"),
+                    ))
+                },
+            )
+            .expect("mix");
+            heard.extend_from_slice(mixed.pcm.as_f32().expect("f32"));
+            time += step;
+        }
+        heard
+    }
+
+    #[test]
+    fn a_fade_ramps_the_clip_edges_and_leaves_its_middle_at_full_level() {
+        // 10 ms windows are shorter than both fades, 50 ms ones shorter
+        // than the fade out: either used to fade every window end to end.
+        for frames in [480, 2_400] {
+            let heard = faded_second(ClockKind::Export, 0, frames);
+            assert_eq!(heard.len(), 48_000);
+            assert_eq!(heard[0], 0.0);
+            for (index, sample) in heard[..960].iter().enumerate() {
+                assert_eq!(*sample, index as f32 / 960.0, "fade in at {index}");
+            }
+            assert!(
+                heard[960..45_120].iter().all(|sample| *sample == 1.0),
+                "the middle is not at full level with {frames} frame windows"
+            );
+            for (index, sample) in heard[45_120..].iter().enumerate() {
+                let left = (2_879 - index) as f32 / 2_880.0;
+                assert!((sample - left).abs() < 1.0e-6, "fade out at {index}");
+            }
+            assert_eq!(heard[47_999], 0.0);
+            // Playback hears what export writes.
+            assert_eq!(faded_second(ClockKind::Playback, 0, frames), heard);
+            // A clip placed later on the timeline fades the same way.
+            assert_eq!(faded_second(ClockKind::Export, 3_000_000, frames), heard);
+        }
+    }
+
     #[test]
     fn a_nested_draft_is_one_slice_with_the_parent_gain_and_fade() {
         let full = span(0, 1_000_000);
@@ -471,10 +542,16 @@ mod tests {
         faded.tracks[0].segments[0]
             .extra_material_refs
             .push("fade".into());
+        // The fade in runs the parent clip's whole second, so a window is
+        // as far up the ramp as it is into the clip.
         let (mixed, _) = asked(&faded, 0);
         let samples = mixed.pcm.as_f32().expect("f32");
-        assert!(samples[0].abs() < 1.0e-6);
-        assert!((samples[3] - 0.75).abs() < 1.0e-5);
+        assert_eq!(samples[0], 0.0);
+        assert!((samples[3] - 3.0 / 4_000.0).abs() < 1.0e-7);
+        let (mixed, _) = asked(&faded, 500_000);
+        let samples = mixed.pcm.as_f32().expect("f32");
+        assert_eq!(samples[0], 0.5);
+        assert!((samples[3] - 2_003.0 / 4_000.0).abs() < 1.0e-6);
     }
 
     #[test]

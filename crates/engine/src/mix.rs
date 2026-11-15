@@ -4,11 +4,14 @@
 //! that are not left and right, is first folded into stereo by
 //! `cutlass-audio`'s downmix; a mono or stereo clip is passed on as it is.
 //! Each audible clip is then resampled, stretched, gained, and faded through
-//! `cutlass-audio`. A muted track contributes no samples: mute is not a gain
+//! `cutlass-audio`. The mix is asked for one window of the timeline at a
+//! time, so a clip's buffer is a window of that clip: its fades are placed by
+//! where the window sits in the clip, and a window clear of both fades is
+//! not touched by them. A muted track contributes no samples: mute is not a gain
 //! of zero. Text and shapes are refused before any of that runs. The limiter
 //! runs on the sum.
 
-use cutlass_audio::{FadeCurve, downmix, fade, limit, resample, stretch};
+use cutlass_audio::{FadeCurve, FadeSpan, downmix, fade_window, limit, resample, stretch};
 use cutlass_codec::access::{ChannelLayout, Pcm};
 use cutlass_model::{Draft, KeyframeGraph, MaterialRef, Micros, Segment, Track, TrackAttribute};
 
@@ -32,9 +35,17 @@ pub enum ClipPcm {
 }
 
 /// One clip the mix can add.
+///
+/// `pcm` is the clip from the mix time on, for as long as the window being
+/// mixed. `offset_us` and `duration_us` say where that window sits in the
+/// clip, which is what places the fades at the clip's two edges.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MixClip {
     pub pcm: ClipPcm,
+    /// From the clip's start on the timeline to the mix time.
+    pub offset_us: i64,
+    /// The clip's length on the timeline.
+    pub duration_us: i64,
     pub speed: f64,
     pub pitch_follows_speed: bool,
     pub volume: f64,
@@ -184,6 +195,8 @@ fn clip_for(draft: &Draft, track: &Track, segment: &Segment, time: Micros) -> Mi
         .unwrap_or(1.0);
     MixClip {
         pcm: ClipPcm::Missing,
+        offset_us: offset.0,
+        duration_us: segment.target.duration.0,
         speed,
         pitch_follows_speed: segment.is_tone_modify,
         volume,
@@ -246,7 +259,19 @@ fn process(mix: &Mix, clip: &MixClip) -> Result<Pcm, EngineError> {
     let pcm = stretch(&pcm, clip.speed, !clip.pitch_follows_speed)?;
     let pcm = apply_gain(&pcm, clip.volume)?;
     let curve = FadeCurve::from_type(clip.fade_curve)?;
-    Ok(fade(&pcm, clip.fade_in_us, clip.fade_out_us, curve)?)
+    // After the stretch, so the buffer is on the timeline's clock, as the
+    // fade durations and the clip's length are.
+    let span = FadeSpan {
+        start_us: clip.offset_us,
+        clip_us: clip.duration_us,
+    };
+    Ok(fade_window(
+        &pcm,
+        span,
+        clip.fade_in_us,
+        clip.fade_out_us,
+        curve,
+    )?)
 }
 
 fn apply_gain(pcm: &Pcm, volume: f64) -> Result<Pcm, EngineError> {
@@ -397,8 +422,11 @@ mod tests {
         assert_eq!(heard.pcm, stereo);
     }
 
+    /// A clip that is all of `pcm`: the window starts the clip and ends it.
     fn sound(pcm: Pcm) -> MixClip {
         MixClip {
+            offset_us: 0,
+            duration_us: i64::from(pcm.samples) * 1_000_000 / i64::from(pcm.rate),
             pcm: ClipPcm::Ready(pcm),
             speed: 1.0,
             pitch_follows_speed: false,
@@ -511,6 +539,52 @@ mod tests {
         assert_eq!(clips[0].fade_in_us, 10);
         assert_eq!(clips[0].fade_curve, 2);
         assert!(matches!(clips[0].pcm, ClipPcm::Missing));
+    }
+
+    #[test]
+    fn a_fade_is_placed_by_where_the_window_sits_in_the_clip() {
+        let mut draft = Draft::empty("D");
+        let mut segment = Segment::new("a", "audio", TimeRange::new(2_000_000, 1_000_000));
+        segment.extra_material_refs.push(MaterialId::new("fade"));
+        draft.tracks[0].segments.push(segment);
+        draft.materials.audio_fades.push(MaterialAudioFade {
+            id: MaterialId::new("fade"),
+            fade_type: 2,
+            fade_in_duration: Micros(20_000),
+            fade_out_duration: Micros(60_000),
+            ..MaterialAudioFade::default()
+        });
+        let mix = Mix {
+            rate: 8_000,
+            limiter: 0,
+        };
+        // 10 ms of full-scale tone, shorter than either fade.
+        let window = mono(8_000, vec![1.0; 80]);
+        let heard = |time: i64| {
+            let mut clips = mix_inputs(&draft, Micros(time));
+            assert_eq!(clips.len(), 1);
+            assert_eq!(clips[0].offset_us, time - 2_000_000);
+            assert_eq!(clips[0].duration_us, 1_000_000);
+            clips[0].pcm = ClipPcm::Ready(window.clone());
+            render(&mix, &clips, ClockKind::Export).expect("mix").pcm
+        };
+
+        // The clip's first window is the first half of the fade in.
+        let first = heard(2_000_000);
+        let first = first.as_f32().expect("f32");
+        assert_eq!(first[0], 0.0);
+        assert_eq!(first[40], 0.25);
+        assert_eq!(first[79], 79.0 / 160.0);
+        // Its middle is the tone, bit for bit, in every window.
+        for time in [2_020_000, 2_500_000, 2_930_000] {
+            assert_eq!(heard(time), window, "at {time}");
+        }
+        // Its last window is the end of the fade out.
+        let last = heard(2_990_000);
+        let last = last.as_f32().expect("f32");
+        assert_eq!(last[0], 79.0 / 480.0);
+        assert_eq!(last[79], 0.0);
+        assert!(last.windows(2).all(|pair| pair[1] < pair[0]));
     }
 
     #[test]

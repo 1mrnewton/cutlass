@@ -15,6 +15,9 @@ const DONE: Color32 = Color32::from_rgb(0x2a, 0xd4, 0xe0);
 /// What the box says before anything is typed.
 pub const HINT: &str = "Ask Cutlass to edit…";
 
+/// The button that takes the assistant's last turn back.
+pub const UNDO_TURN: &str = "Undo turn";
+
 /// The panel in `rect`.
 pub fn panel(shell: &mut Shell, ui: &mut Ui, assistant: &mut Assistant, rect: Rect) {
     let inner = rect.shrink(12.0);
@@ -55,7 +58,8 @@ pub fn panel(shell: &mut Shell, ui: &mut Ui, assistant: &mut Assistant, rect: Re
     ui.label(RichText::new(source).size(11.0).color(tokens::FAINT));
     ui.add_space(8.0);
 
-    let box_height = 92.0;
+    let can_undo_turn = assistant.can_undo_turn(shell);
+    let box_height = if can_undo_turn { 92.0 + 30.0 } else { 92.0 };
     let list_height = (ui.available_height() - box_height).max(60.0);
     ui::Scroll::vertical("assistant-entries")
         .max_height(list_height)
@@ -66,7 +70,7 @@ pub fn panel(shell: &mut Shell, ui: &mut Ui, assistant: &mut Assistant, rect: Re
             if assistant.entries.is_empty() {
                 ui.label(
                     RichText::new(
-                        "Cutlass reads the project, edits it with its tools, and each edit is one undo step.",
+                        "Cutlass reads the project and edits it with its tools. Each edit is one undo step, and Undo turn takes a whole turn back.",
                     )
                     .size(12.0)
                     .color(tokens::MUTED),
@@ -90,6 +94,20 @@ pub fn panel(shell: &mut Shell, ui: &mut Ui, assistant: &mut Assistant, rect: Re
             }
         });
     ui.add_space(6.0);
+    if can_undo_turn {
+        ui.horizontal(|ui| {
+            if ui
+                .add(ui::Button::new(UNDO_TURN).text_size(12.0))
+                .on_hover_text(
+                    "Put the project back to how the assistant's last turn found it. Undo brings its edits back.",
+                )
+                .clicked()
+            {
+                assistant.undo_turn(shell);
+            }
+        });
+        ui.add_space(6.0);
+    }
     command_box(shell, ui, assistant);
 }
 

@@ -69,7 +69,7 @@ The builds are not signed with a developer certificate yet, so the first launch 
 
 ## The assistant
 
-Say what you want, and the assistant edits the open project with the same requests the timeline sends. Each change it makes is one undo step.
+Say what you want, and the assistant edits the open project with the same requests the timeline sends. Each change it makes is one undo step, and **Undo turn** in its panel takes back everything a turn did in one click.
 
 - **It runs on your machine.** The assistant talks to a model runner on your own computer, such as [Ollama](https://ollama.com), the llama.cpp server or LM Studio. Set the address and the model in Settings › Assistant. The prompt does not leave your computer on this path.
 - **It asks first.** Anything that would send data off the machine waits for you to allow it.

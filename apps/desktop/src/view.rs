@@ -11671,6 +11671,116 @@ mod tests {
     }
 
     #[test]
+    fn the_undo_turn_button_takes_the_assistants_turn_back() {
+        let temp = std::env::temp_dir().join(format!("cutlass-chat-undo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "a",
+            "missing",
+            cutlass_model::TimeRange::new(0, 3_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let split = serde_json::json!({
+            "expected_revision": 0,
+            "requests": [{ "op": "split", "segment_id": "a", "at": 1_000_000, "right_id": "b" }],
+        });
+        let (port, server) = local_model(vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "Splitting.",
+                "tool_calls": [{ "id": "c1", "type": "function",
+                    "function": { "name": "draft_apply", "arguments": split.to_string() } }],
+            }),
+            serde_json::json!({ "role": "assistant", "content": "Split in two." }),
+        ]);
+        let mut settings = Settings::default();
+        settings.model.local_url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+        settings.model.local_name = "test-model".to_owned();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, settings);
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let click = |shell: &mut Shell, view: &mut ViewState, at: Pos2| {
+            let _ = frame(shell, view, vec![egui::Event::PointerMoved(at)]);
+            let _ = frame(shell, view, vec![press(at, true)]);
+            frame(shell, view, vec![press(at, false)])
+        };
+        let clips = |shell: &Shell| shell.draft().unwrap().tracks[0].segments.len();
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let toggle = text_pos(&output, "Assistant").expect("the toggle") + Vec2::new(4.0, 4.0);
+        let _ = click(&mut shell, &mut view, toggle);
+        let output = frame(&mut shell, &mut view, Vec::new());
+        // No turn yet: nothing to take back.
+        assert!(text_pos(&output, assistant::UNDO_TURN).is_none());
+        let hint = text_pos(&output, assistant::HINT).expect("the box") + Vec2::new(4.0, 4.0);
+        let _ = click(&mut shell, &mut view, hint);
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::Text("split it at 1 second".to_owned())],
+        );
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let send = text_pos(&output, "Send").expect("send") + Vec2::new(4.0, 4.0);
+        let _ = click(&mut shell, &mut view, send);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while view.assistant.busy() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the turn did not finish"
+            );
+            let output = frame(&mut shell, &mut view, Vec::new());
+            if view.assistant.busy() {
+                // Not offered while the turn runs.
+                assert!(text_pos(&output, assistant::UNDO_TURN).is_none());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(server.join().unwrap(), 2);
+        assert_eq!(clips(&shell), 2);
+
+        // The turn edited the project: the button is there, and one click
+        // puts the project back.
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let undo =
+            text_pos(&output, assistant::UNDO_TURN).expect("the button") + Vec2::new(4.0, 4.0);
+        let _ = click(&mut shell, &mut view, undo);
+        assert_eq!(clips(&shell), 1);
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(text_pos(&output, assistant::UNDO_TURN).is_none());
+        let lines = galleys(&output);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "Took back the turn's edits. Undo brings them back."),
+            "{lines:?}"
+        );
+        // The window's own undo brings the assistant's edit back.
+        shell.undo().unwrap();
+        assert_eq!(clips(&shell), 2);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
     fn a_menu_bar_item_runs_its_command() {
         use cutlass_model::{Segment, SegmentId, TimeRange};
 

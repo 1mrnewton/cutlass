@@ -993,7 +993,9 @@ impl<P: EncPixel> Core<P> {
         self.enc.load(planes);
         let qindex = self.rc.qindex(kind, seconds, cut);
         // Between an alt-ref and its overlay, ALTREF is ahead.
-        let altref_future = !key && !overlay && self.overlay_at.is_some();
+        // (Error resilient frames take no compound prediction.)
+        let altref_future =
+            !key && !overlay && self.overlay_at.is_some() && !self.opts.error_resilient;
         let coded = self.enc.encode(FrameParams {
             key,
             golden,

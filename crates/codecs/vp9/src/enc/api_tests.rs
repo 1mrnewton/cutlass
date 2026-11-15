@@ -1945,6 +1945,16 @@ fn error_resilient_frames_stand_without_the_one_before() {
         assert!(!h.use_prev_mvs, "frame {i}");
     }
     assert_decodes(&packets, (64, 48), 6);
+    // With alt-refs (and no compound prediction, which error resilient
+    // frames leave out) and at a bitrate.
+    let arf = super::Vp9Options {
+        error_resilient: true,
+        bitrate: 300_000,
+        lag: Some(16),
+        ..lag0(100)
+    };
+    let with_arf = encode_with(arf, (64, 48), 30, |i| noisy(64, 48, i / 8, i));
+    assert_decodes(&with_arf, (64, 48), 30);
     // With frame 2 lost, the frames after it still decode (from the
     // pictures the decoder has).
     let mut dec = Decoder::new();

@@ -65,10 +65,16 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
 - Speeds 0–10 (`Vp9Options::speed`, default 5). Up to 6 every superblock is
   searched by trial coding; 7 and up code inter frames in one pass.
 - Threads: tile columns, each on its own thread (`Vp9Options::threads`, 0 =
-  one per core), up to the tile columns the width allows; at speed 7 and
-  up the motion search runs first over the whole frame, its superblock
-  rows shared evenly among the threads, and luma and chroma are filtered
-  on separate threads.
+  one per core; `Vp9Options::tile_columns` sets them apart), up to the
+  tile columns the width allows, and each tile column's superblock rows
+  on two or more threads at once in a wavefront (libvpx's `row-mt`,
+  `enc::tile::Lanes`): a row codes a superblock once the row above has
+  finished the one above it and the one to the right of that, taking
+  from them the contexts, motion, search seeds and last line of samples
+  it reads; the rows are put together after, and the frames are byte for
+  byte those one thread makes. At speed 7 and up the motion search runs
+  first over the whole frame, its superblock rows shared evenly among
+  the threads, and luma and chroma are filtered on separate threads.
 - Every chroma format of 8-bit VP9 (`Vp9Options::chroma`: 4:2:0 in
   profile 0, and 4:2:2, 4:4:0 and 4:4:4 in profile 1, FFmpeg's `-pix_fmt
   yuv420p` to `yuv444p`; `CodecParams` with those formats opens them).
@@ -185,8 +191,19 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   per frame type, from a model of bits against quantizer step. FFmpeg's
   `libvpx-vp9` modes map onto it: `-b:v` alone is the bitrate on average
   (`end-usage=vbr`); `-crf` with `-b:v` is that with a floor on the
-  quantizer (`min_q`), and `-crf` with `-b:v 0` a fixed quantizer, where
+  quantizer (`Vp9Options::cq_level`, libvpx's constrained quality), and
+  `-crf` with `-b:v 0` a fixed quantizer, where
   `Vp9Encoder::qindex_of_level` turns libvpx's 0–63 levels into indices.
+  At a variable bitrate in one pass, golden frames, alt-refs and key
+  frames take the inter step scaled by their type (as a fixed quantizer
+  and two passes do), and the inter step is the one at which the frames
+  to come spend the bitrate; the inter frames' model moves by a
+  twentieth of each frame once settled; with a lookahead, its pictures
+  are first coded fast at a fixed quantizer (`Core::probe`, a first
+  pass over the lookahead), and their bits plan the first key frame
+  (over 30 frames, at most 20 frames' worth) and start the model; what a
+  key frame takes past its share falls due over the 30 frames after it.
+  See "Against FFmpeg's libvpx-vp9" below.
   A constant bitrate (`-minrate = -maxrate`, `end-usage=cbr`) is
   `Vp9Options::cbr_buffer_ms`: smaller shares for golden and key frames,
   golden and key frames at most 16 indices finer than the inter frames,
@@ -312,6 +329,22 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   one pass, −6.5% / −5.3% at two; on the clip with two cuts between
   related pictures, −4% / −3.6% and −7.1% / −3.6% (before the second
   pass's model above).
+- Jumps: a picture that looks a cut but is the last one moved far (a
+  camera that jumps 200 samples, past the searches' reach of a few dozen)
+  is found on sums of 4×4 samples over a sample of 32×32 blocks of
+  detail, refined to the sample, and taken when most of them agree
+  (`arf::jump`): the frame is an inter frame whose blocks also start
+  their search on LAST at that vector (`FrameEncoder::set_global`). On
+  the clip of a fractal that jumps twice, the frame after each jump
+  went from 40 kB to 0.9 kB, and the clip takes 30% fewer bits at a
+  fixed quantizer (libvpx found the same vectors).
+- libvpx-vp9's other options (see the table in "Against FFmpeg's
+  libvpx-vp9"): colour space and range (`color_space`, `full_range`,
+  sRGB in 4:4:4), render size, loop filter sharpness, error resilient
+  and frame parallel frames, a static threshold, alt-refs off, the
+  alt-ref filter's strength and pictures, undershoot and overshoot
+  bands, `keyint_min`, constrained quality, a key frame size limit and
+  the `vpcC` level, each tested.
 
 ## How it works
 
@@ -385,7 +418,8 @@ let (bytes, key) = encoder.encode_planes([(y, 1280), (u, 640), (v, 640)], 1.0 / 
 
 Examples: `examples/roundtrip.rs` (decode a committed key frame) and
 `examples/vp9enc.rs` (raw 4:2:0 to IVF:
-`vp9enc in.yuv 1280 720 out.ivf q=120 speed=5 threads=4`).
+`vp9enc in.yuv 1280 720 out.ivf q=120 speed=5 threads=4`; its doc
+comment lists the options, libvpx-vp9's among them).
 
 ## How it is tested
 
@@ -690,6 +724,216 @@ first inter frame (within ±0.5% over 30 frames), inter blocks under 8×8
 content (−1.8% overall, −16% at the highest rates) and are left out where
 the picture moves too far for one picture to stand for the interval.
 
+## Against FFmpeg's libvpx-vp9
+
+FFmpeg's `libvpx-vp9` encoder as FFmpeg users run it, against this
+encoder through `examples/vp9enc.rs`, on three 1280×720 4:2:0 clips at
+30 fps:
+
+- three scenes: FFmpeg's `mandelbrot`, a grainy pan of a fractal,
+  `testsrc2`, with two cuts (90 frames, 1–4 Mb/s);
+- a still scene, then a fractal panning, which jumps over 200 samples twice
+  (90 frames, 0.5–3 Mb/s);
+- the grainy pan alone (60 frames, 1–4 Mb/s).
+
+FFmpeg 6.1.1 (Ubuntu's, libvpx 1.14): `ffmpeg -s 1280x720 -pix_fmt yuv420p
+-r 30 -i clip.yuv -c:v libvpx-vp9 -b:v R -threads 4 [options] out.ivf`,
+which is good deadline, cpu-used 1, 25 pictures of lookahead, one pass,
+no alt-refs (libvpx makes them only in two passes), four tile columns.
+Cutlass: `vp9enc clip.yuv 1280 720 out.ivf rate=R threads=4
+[options]`, speed 5 and 16 pictures of lookahead by default. Every
+stream is decoded by `ffmpeg -c:v vp9` and measured with FFmpeg's `psnr`
+filter against the source; the averaged PSNR is (6 Y + U + V) / 8 of its
+per-plane PSNRs. BD-rate is the bitrate change at the same PSNR,
+piecewise linear in log rate over the range both curves cover
+(`tools/bdrate.py`): negative is fewer bits than FFmpeg. Times are
+whole-process wall clock, the mean over the four rates of the median of
+three runs interleaved with FFmpeg's, on the shared 4-core VM (other
+sessions loaded it throughout: single runs moved by ±10%).
+
+At its defaults (BD-rate at the same PSNR-Y / averaged PSNR, time a
+stream, FFmpeg / Cutlass):
+
+| Clip | Speed 5 (default) | Time | Speed 6 | Time | FFmpeg |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| three scenes | −14.0% / −6.6% | 6.76 s | −1.9% / +4.0% | 4.76 s | 6.48 s |
+| still scene, two jumps | −6.3% / −4.5% | 6.27 s | −5.5% / −4.6% | 5.37 s | 4.52 s |
+| grainy pan | −16.2% / −15.5% | 5.02 s | −12.5% / −11.6% | 3.95 s | 2.94 s |
+
+With `-row-mt 1` (and with `-row-mt 1 -tile-columns 2 -frame-parallel 1`,
+which wrote the same streams here, in 5.40, 3.99 and 2.76 s a stream):
+
+| Clip | Speed 5 | Speed 6 | FFmpeg time |
+| --- | ---: | ---: | ---: |
+| three scenes | −13.6% / −6.5% | −1.6% / +4.2% | 4.91 s |
+| still scene, two jumps | −5.6% / −5.3% | −4.7% / −5.1% | 4.17 s |
+| grainy pan | −15.5% / −14.5% | −11.8% / −10.5% | 2.61 s |
+
+Two passes (`-pass 1` then `-pass 2`, cpu-used 1 both; and the recipe
+of Google's VOD guide, `-row-mt 1 -tile-columns 2`, `-speed 4` then
+`-speed 2`) against `twopass=1` (a speed-10 first pass, then speed 5):
+
+| Clip | `-pass 1/2` | Time (FFmpeg / Cutlass) | Guide recipe | Time |
+| --- | ---: | ---: | ---: | ---: |
+| three scenes | −12.5% / −4.3% | 19.73 / 8.53 s | −18.0% / −9.7% | 11.42 / 9.19 s |
+| still scene, two jumps | −42.5% / −38.9% | 19.18 / 7.94 s | −41.2% / −39.1% | 12.91 / 8.07 s |
+| grainy pan | −24.1% / −22.9% | 13.25 / 6.52 s | −25.2% / −24.3% | 8.95 / 6.87 s |
+
+Realtime (`-deadline realtime -cpu-used 8`) against speeds 9 and 10 (no
+lookahead):
+
+| Clip | Speed 10 | Speed 9 | Time (FFmpeg / 10 / 9) |
+| --- | ---: | ---: | ---: |
+| three scenes | −6.0% / −4.1% | −15.2% / −13.1% | 0.60 / 0.74 / 0.90 s |
+| still scene, two jumps | −66.7% / −64.8% | −68.8% / −66.9% | 0.62 / 0.77 / 0.83 s |
+| grainy pan | n/a / −74.3% | n/a | 0.47 / 0.48 / 0.53 s |
+
+On the pan the curves do not meet: speed 9 at 1.1 Mb/s (41.6 dB PSNR-Y)
+is past libvpx's realtime 8 at 4.3 Mb/s (40.6 dB).
+
+Constant quality (`-crf 24, 32, 40, 48 -b:v 0`) against a fixed
+quantizer (`q=60` to `210`, speed 5):
+
+| Clip | BD-rate | Time (FFmpeg / Cutlass) |
+| --- | ---: | ---: |
+| three scenes | −7.3% / −2.9% | 6.73 / 6.11 s |
+| still scene, two jumps | +10.0% / +4.9% | 3.93 / 4.76 s |
+| grainy pan | −1.3% / −0.3% | 2.64 / 3.09 s |
+
+What moved, at speed 5 against FFmpeg's defaults (three scenes, still
+scene, grainy pan), from −2.0% / +2.7%, +6.5% / +14.6% and +32% / +22%
+before:
+
+- Rows on threads (the wavefront above): speed 5 on 720p in four fifths
+  of its time, the same streams.
+- The one-pass inter model moving by a twentieth of each frame (it moved
+  by 0.4): −11% / −9% on three scenes, −5% on the still scene.
+- One pass ties golden frames, alt-refs and key frames to the inter step,
+  plans the first key frame from the lookahead's probe, and spreads a key
+  frame's excess over 30 frames. Before, frame types were budgeted
+  apart: on the pan the alt-refs came out at q 160 while the inter frames
+  predicting from them were at q 125, and the first key frame was planned
+  from a guess (q 112 against libvpx's 85); 2 dB of PSNR at 1 Mb/s.
+  −33% / −27% on the pan, and a golden frame without an alt-ref at a key
+  frame's step: −19% at speed 10 on the pan.
+- Jumps: the still-scene clip's two jumps were coded as cuts (40 kB each,
+  intra) where libvpx's search found them (0.8 kB): −30% at a fixed
+  quantizer, −16% at one pass.
+
+What is left:
+
+- Time. At speed 5 Cutlass takes 1.04 to 1.7 times libvpx's default
+  time (1.4 to 1.9 times with `-row-mt 1`), and at speed 6 0.73 to 1.35
+  times. On one thread speed 6 does 1.4 times libvpx cpu-used 1's work on
+  the pan (9.3 s against 6.7 s); on four, rows on threads keep 2.85 of
+  the cores busy against libvpx's 2.56. No speed is both faster and
+  better on all three clips: speed 6 is faster than libvpx on the three
+  scenes but 4% behind at the averaged PSNR there; speed 7 is faster on
+  all but 27% / 39% behind on the three scenes. Tried and left out: a
+  still block taking LAST at zero without a search (7% faster on the
+  still clip, but at any threshold loose enough to matter it lost the
+  pan), the above-right seed of the search dropped so that a row needs
+  only the superblock above it (8% faster, 5% more bits on the pan),
+  three or four rows on threads per tile column (no faster).
+- Chroma. Speed 6 is behind libvpx on the three scenes only at the
+  averaged PSNR: its chroma is 0.3 to 4 dB under libvpx's at coarse
+  quantizers. Weighing chroma's bits more in RD quantization (2.2 times
+  luma's, from 1/0.7) gains 6–17% at the same PSNR-Y and 1–7% at the
+  6:1:1 average but loses 2–5% at FFmpeg's 4:1:1 average and 9–18% at
+  PSNR-U, so it is left as it was.
+- Constant quality on the still scene: +10% / +4.9%. libvpx's one pass
+  at a fixed level modulates its quantizer by position (finer every
+  second, fourth and eighth frame: 192, 184, 173, 154 at `-crf 48`) and
+  spends most where little moves; a fixed quantizer with that pattern
+  was 3% worse here, and the scene's low rates (0.3–0.6 Mb/s) are where
+  the gap is.
+- Realtime time: speeds 9 and 10 take 1.0 to 1.5 times libvpx's realtime
+  8 at the same bitrate (with 4 to 75% fewer bits at the same PSNR).
+
+Matching libvpx's speeds by these runs and the ones above: good
+cpu-used 0 → speed 4; cpu-used 1 (FFmpeg's default) → 5 or 6; cpu-used
+2–3 → 6; cpu-used 4–5 → 7; realtime 5–6 → 9; realtime 7–8 → 10.
+
+### Options: FFmpeg's `libvpx-vp9` against `Vp9Options`
+
+Every option of `ffmpeg -h encoder=libvpx-vp9` (FFmpeg 6.1), the generic
+options it reads, and what the encoder has for each (`vp9enc` names in
+brackets). "Added" is new in this round; each has a test in
+`enc::api::tests` or `enc::tests`.
+
+| FFmpeg | libvpx | Cutlass |
+| --- | --- | --- |
+| `-b:v` | `rc_target_bitrate`, VBR | `bitrate` (`rate=`) |
+| `-crf N -b:v 0` | `end-usage=q`, `cq-level` | `qindex` = `Vp9Encoder::qindex_of_level(N)` (`crf=`, `q=`) |
+| `-crf N -b:v R` | `end-usage=cq` | `cq_level` (`crf=` with `rate=`, `cq=`): added |
+| `-minrate` = `-maxrate` = `-b:v`, `-bufsize` | `end-usage=cbr`, `rc_buf_sz` | `cbr_buffer_ms` (`cbr=`) |
+| `-qmin`, `-qmax` | `min-q`, `max-q` | `min_q`, `max_q` as indices (`min_q=`, `max_q=`: added to `vp9enc`) |
+| `-undershoot-pct`, `-overshoot-pct` | `undershoot-pct`, `overshoot-pct` | `undershoot_pct`, `overshoot_pct`: dead bands on what is paid back (added) |
+| `-max-intra-rate` | `max-intra-rate` | `max_intra_pct` (added) |
+| `-drop-threshold` | `drop-frame` | missing: no frame is dropped |
+| `-g` | `kf-max-dist` | `keyint` |
+| `-keyint_min` | `kf-min-dist` | `keyint_min`: a cut that far from the last key frame is one (added); intervals are fixed as with `-keyint_min` = `-g` |
+| `-force_key_frames` | `VPX_EFLAG_FORCE_KF` | `Vp9Encoder::force_keyframe` (the engine's `force_keyframe`) |
+| `-pass 1` / `-pass 2` | `g_pass`, stats | `Vp9Encoder::first_pass_qindex`, `set_second_pass` (`twopass=1`) |
+| `-deadline` best / good / realtime, `-cpu-used` (`-speed`, `-quality`) | | `speed` 0–10 (`speed=`); see the speeds below |
+| `-lag-in-frames` (`-rc_lookahead`) | `g_lag_in_frames` | `lag` (`lag=`) |
+| `-auto-alt-ref` 0 / 1 | `enable-auto-alt-ref` | `alt_ref` (`alt_ref=0`, added); libvpx's levels 2–6 (layered alt-refs) are not |
+| `-arnr-maxframes` | `arnr-maxframes` | `arnr_max_frames` (`arnr_frames=`, added) |
+| `-arnr-strength` | `arnr-strength` | `arnr_strength` (`arnr_strength=`, added) |
+| `-arnr-type` | `arnr-type` | n/a: libvpx's VP9 encoder ignores it too (VP8 only) |
+| `-min-gf-interval` | `min-gf-interval` | internal (golden every 12; 6 to 12 by motion in two passes), not an option |
+| `-tune psnr` | `tune` | the default |
+| `-tune ssim` | `tune=ssim` | missing |
+| `-tune-content screen` / `film` | `tune-content` | missing |
+| `-aq-mode 0` / `1` | `aq-mode` | `aq` (`aq=1`: variance AQ) |
+| `-aq-mode 2` / `3` / `4` | complexity, cyclic refresh, equator360 | missing |
+| `-noise-sensitivity` | `noise-sensitivity` | missing (no temporal denoiser) |
+| `-static-thresh` | `static-thresh` | `static_thresh` (`static_thresh=`, added) |
+| `-sharpness` | `sharpness` | `sharpness` (`sharpness=`, added) |
+| `-error-resilient default` | `error-resilient` | `error_resilient` (`error_resilient=1`, added); `partitions` is VP8's |
+| `-frame-parallel` | `frame-parallel` | `frame_parallel` (`frame_parallel=1`, added) |
+| `-lossless 1` | `lossless` | `qindex` 0 (`lossless=1`) |
+| `-tile-columns` | `tile-columns` | `tile_columns` (`tile_columns=`, added; by default one per thread) |
+| `-tile-rows` | `tile-rows` | `tile_rows` (`tile_rows=`) |
+| `-row-mt 1` | `row-mt` | always: rows on threads (`enc::tile::Lanes`, added) |
+| `-threads` | `g_threads` | `threads` (`threads=`) |
+| `-level` | `target-level` | `level`: named in `vpcC` (added), not enforced |
+| `-ts-parameters` | temporal layers | missing (no SVC / temporal layers) |
+| `-corpus-complexity` | corpus VBR | missing |
+| `-enable-tpl` | TPL model | n/a: two passes have their own allocation |
+| `-pix_fmt yuv420p` … `yuv444p12le` | profiles 0–3 | `chroma`, `bit_depth` (`chroma=`, `bits=`) |
+| `-pix_fmt gbrp`, `gbrp10le`, `gbrp12le` | `VPX_CS_SRGB` | `ColorSpace::Srgb` with 4:4:4: planes G, B, R (added) |
+| `-pix_fmt yuva420p` | alpha as a second stream in WebM `BlockAdditional` | missing: a container feature |
+| `-colorspace`, `-color_range` | `color-space`, `color-range` | `color_space`, `full_range` (`colorspace=`, `range=`), and from `CodecParams` (added) |
+| `-aspect` / sample aspect ratio | `VP9E_SET_RENDER_SIZE` | `render_size` (`render=WxH`, added) |
+| regions of interest (side data) | ROI map | missing |
+
+Decoders: FFmpeg's `vp9` and `libvpx-vp9` decoders have no options of
+their own; of the generic ones, frame threads and slice (tile) threads
+are `Vp9Decoder`'s frame threads and tile-column parse threads, and
+hardware decoding is out of scope. Every frame the decoder publishes
+carries the colour space, range and render size.
+
+### Bitstream features
+
+| Feature | Decoder | Encoder |
+| --- | --- | --- |
+| Profiles 0–3, 8/10/12 bits, 4:2:0/4:2:2/4:4:0/4:4:4 | yes | yes |
+| Colour space, range; sRGB | yes | yes (added) |
+| Render size | yes | yes (added) |
+| Key, inter, hidden (alt-ref) frames, superframes | yes | yes |
+| Intra-only frames | yes | no (libvpx writes them for SVC and resilience) |
+| `show_existing_frame` | yes | no |
+| Error resilient, frame parallel | yes | yes (added) |
+| Scaled references (a size change mid-stream) | yes | no |
+| Lossless (WHT) | yes | yes |
+| Tile columns and rows | yes | yes |
+| Segmentation: quantizer | yes | yes (AQ) |
+| Segmentation: loop filter, reference, skip; temporal map | yes | no |
+| Loop filter sharpness | yes | yes (added) |
+| Loop filter deltas (mode, reference) | yes | defaults only |
+| Compound prediction, switchable filters, 8 slots | yes | yes |
+
 ## Limits and gaps
 
 - Not registered in the desktop app (the app has no VP9 opener yet). The
@@ -697,7 +941,8 @@ the picture moves too far for one picture to stand for the interval.
   for the engine's `EncodeFactory`.
 - Interpolation filters switch per block (EIGHTTAP, SMOOTH, SHARP, by
   trial) at speeds 0–2; faster speeds keep EIGHTTAP.
-- The encoder writes BT.601 studio range only, and no sRGB (GBR).
+- The encoder signals any colour space and range, and sRGB in 4:4:4,
+  but does not convert: the planes go in as they are coded.
 - Encoder tools, by speed: compound prediction (a past picture with the
   alt-ref ahead, chosen per block) at 0–6 with `lag`; inter blocks under
   8×8 (4×4, 8×4, 4×8, each sub-block NEAREST, NEAR, ZERO or NEW) at 0–1;
@@ -705,8 +950,15 @@ the picture moves too far for one picture to stand for the interval.
   coefficients and of every other updatable probability (modes, filter,
   references, partition, tx size, skip, vectors) at all speeds;
   segmentation with adaptive quantization (`aq`, off by default).
-  Segment features other than the quantizer, temporal segment maps and
-  frame-parallel or error-resilient streams are not written.
+  Segment features other than the quantizer, temporal segment maps,
+  intra-only frames, scaled references (a size change within the
+  stream) and `show_existing_frame` are not written. Error resilient frames take no
+  compound prediction (with it their compressed headers did not parse
+  back: to look into).
+- Against FFmpeg's `libvpx-vp9` as FFmpeg runs it ("Against FFmpeg's
+  libvpx-vp9" above), the default speed takes fewer bits at the same
+  PSNR on every clip and mode measured but constant quality on the still
+  scene, in 1.04 to 1.9 times libvpx's time.
 - At equal time the encoder is within about 8% of libvpx's good presets
   on moving content (ahead with more time, and far ahead on still content
   and against the realtime presets), and its fastest speed takes libvpx

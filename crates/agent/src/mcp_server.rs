@@ -275,7 +275,7 @@ pub(crate) fn input_schema(tool: &str) -> Value {
 pub(crate) fn input_hint(tool: &str) -> &'static str {
     match tool {
         "draft.query" => {
-            "project | full | track <id> | segment <id> | range <start_us> <end_us> | ops | ops <kind> ..."
+            "project | full | track <id> | segment <id> | range <start_us> <end_us> | materials | material <id> | ops | ops <kind> ..."
         }
         "player.seek" => "<time_us>",
         "media.probe" => "A file path.",

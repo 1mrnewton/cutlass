@@ -7,8 +7,9 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use cutlass_model::{Draft, MaterialId, Micros, Segment, SegmentId, TimeRange, TrackId};
+use cutlass_model::{Draft, MaterialId, Micros, Segment, SegmentId, TimeRange, Track, TrackId};
 use cutlass_session::{EditError, Request, Session};
+use serde_json::Value;
 
 /// A compact read of the open draft.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +35,13 @@ pub enum DraftQuery {
     },
     /// The whole draft.
     Full,
+    /// Every material in the library: the media, texts and the rest.
+    Materials,
+    /// One material's stored record.
+    Material {
+        /// The material to read.
+        material_id: MaterialId,
+    },
 }
 
 /// Canvas, rate, and duration at one revision.
@@ -83,6 +91,48 @@ pub struct SegmentSnapshot {
     /// The blend into the next clip, when the segment carries one: its
     /// effect id (or its material id when it has none) and its length.
     pub transition: Option<(String, Micros)>,
+    /// The track the segment is on.
+    pub track: TrackId,
+    /// That track's kind word.
+    pub kind: String,
+    /// What the segment stores beyond a plain clip, and its materials; only
+    /// a segment query reads it.
+    pub detail: Option<SegmentDetail>,
+}
+
+/// What one segment stores, as JSON text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SegmentDetail {
+    /// The segment's fields that differ from a plain clip's (position,
+    /// scale, volume, speed, keyframes and so on); empty when none do.
+    pub changed: String,
+    /// The material the segment plays and each one it refers to: the pool
+    /// it is in and its record, without its empty, zero and false values.
+    pub materials: Vec<(String, String)>,
+}
+
+/// The materials in the library at one revision, one line each.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MaterialsSnapshot {
+    /// The revision this view was read from.
+    pub revision: u64,
+    /// Each material's pool, id and the fields that name it.
+    pub lines: Vec<String>,
+    /// How many more there are than `lines` shows.
+    pub more: usize,
+}
+
+/// One material's record at one revision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MaterialSnapshot {
+    /// The revision this view was read from.
+    pub revision: u64,
+    /// The pool the material is in.
+    pub pool: String,
+    /// The record as JSON, without its empty, zero and false values.
+    pub record: String,
+    /// The segments that play or refer to it.
+    pub used_by: Vec<SegmentId>,
 }
 
 /// One track and its segments at one revision.
@@ -131,6 +181,10 @@ pub enum QueryView {
     Range(RangeSnapshot),
     /// The whole draft.
     Full(FullSnapshot),
+    /// The library.
+    Materials(MaterialsSnapshot),
+    /// One material.
+    Material(MaterialSnapshot),
 }
 
 impl fmt::Display for QueryView {
@@ -183,9 +237,11 @@ impl fmt::Display for QueryView {
             Self::Segment(segment) => {
                 write!(
                     formatter,
-                    "revision={} segment={} material={} start={} duration={}",
+                    "revision={} segment={} track={} kind={} material={} start={} duration={}",
                     segment.revision,
                     segment.id,
+                    shown_track(&segment.track),
+                    segment.kind,
                     segment.material_id,
                     segment.start.0,
                     segment.duration.0,
@@ -199,12 +255,53 @@ impl fmt::Display for QueryView {
                 if let Some((effect, duration)) = &segment.transition {
                     write!(formatter, " transition={effect}+{}", duration.0)?;
                 }
+                if let Some(detail) = &segment.detail {
+                    if !detail.changed.is_empty() {
+                        write!(formatter, "\nset={}", detail.changed)?;
+                    }
+                    for (pool, record) in &detail.materials {
+                        write!(formatter, "\n{pool}={record}")?;
+                    }
+                }
                 Ok(())
             }
             Self::Range(range) => {
                 write!(formatter, "revision={} range", range.revision)?;
                 for segment in &range.segments {
-                    write!(formatter, " {}", segment.id)?;
+                    write!(
+                        formatter,
+                        " {}@{}+{}:{}",
+                        segment.id,
+                        segment.start.0,
+                        segment.duration.0,
+                        shown_track(&segment.track)
+                    )?;
+                }
+                Ok(())
+            }
+            Self::Materials(materials) => {
+                write!(formatter, "revision={} materials", materials.revision)?;
+                for line in &materials.lines {
+                    write!(formatter, "\n{line}")?;
+                }
+                if materials.more > 0 {
+                    write!(
+                        formatter,
+                        "\nand {} more; \"material <id>\" shows one",
+                        materials.more
+                    )?;
+                }
+                Ok(())
+            }
+            Self::Material(material) => {
+                write!(
+                    formatter,
+                    "revision={} material {}={}\nused_by=",
+                    material.revision, material.pool, material.record
+                )?;
+                for (index, id) in material.used_by.iter().enumerate() {
+                    let comma = if index == 0 { "" } else { "," };
+                    write!(formatter, "{comma}{id}")?;
                 }
                 Ok(())
             }
@@ -255,6 +352,16 @@ impl fmt::Display for QueryView {
                 Ok(())
             }
         }
+    }
+}
+
+/// A track id as a query writes it: one without an id, from an older
+/// project, is `""`.
+fn shown_track(id: &TrackId) -> &str {
+    if id.as_str().is_empty() {
+        "\"\""
+    } else {
+        id.as_str()
     }
 }
 
@@ -322,6 +429,11 @@ pub enum DraftError {
         /// The id that was asked for.
         id: SegmentId,
     },
+    /// The material id is not in the library.
+    MissingMaterial {
+        /// The id that was asked for.
+        id: MaterialId,
+    },
     /// The range ends before it starts, or its duration does not fit.
     InvalidRange,
     /// A failed combo could not be named again from the open draft.
@@ -343,6 +455,10 @@ impl fmt::Display for DraftError {
             Self::EmptyRedo => write!(formatter, "nothing to redo"),
             Self::MissingTrack { id } => write!(formatter, "missing track {id}"),
             Self::MissingSegment { id } => write!(formatter, "missing segment {id}"),
+            Self::MissingMaterial { id } => write!(
+                formatter,
+                "missing material {id}; draft.query \"materials\" lists them"
+            ),
             Self::InvalidRange => write!(formatter, "the range ends before it starts"),
             Self::UnnamedFailure => write!(
                 formatter,
@@ -387,6 +503,8 @@ impl DraftTools {
             DraftQuery::Segment { segment_id } => segment_view(revision, draft, segment_id),
             DraftQuery::Range { start, end } => range_view(revision, draft, *start, *end),
             DraftQuery::Full => Ok(full_view(revision, draft)),
+            DraftQuery::Materials => Ok(materials_view(revision, draft)),
+            DraftQuery::Material { material_id } => material_view(revision, draft, material_id),
         }
     }
 
@@ -637,7 +755,7 @@ fn track_view(revision: u64, draft: &Draft, track_id: &TrackId) -> Result<QueryV
         segments: track
             .segments
             .iter()
-            .map(|segment| segment_snapshot(revision, draft, segment))
+            .map(|segment| segment_snapshot(revision, draft, track, segment))
             .collect(),
     }))
 }
@@ -650,9 +768,9 @@ fn segment_view(
     for track in &draft.tracks {
         for segment in &track.segments {
             if &segment.id == segment_id {
-                return Ok(QueryView::Segment(segment_snapshot(
-                    revision, draft, segment,
-                )));
+                let mut snapshot = segment_snapshot(revision, draft, track, segment);
+                snapshot.detail = Some(segment_detail(draft, segment));
+                return Ok(QueryView::Segment(snapshot));
             }
         }
     }
@@ -681,7 +799,7 @@ fn range_view(
                 continue;
             }
             if matches!(segment.target.overlaps(&span), Ok(true)) {
-                segments.push(segment_snapshot(revision, draft, segment));
+                segments.push(segment_snapshot(revision, draft, track, segment));
             }
         }
     }
@@ -695,7 +813,12 @@ fn full_view(revision: u64, draft: &Draft) -> QueryView {
     })
 }
 
-fn segment_snapshot(revision: u64, draft: &Draft, segment: &Segment) -> SegmentSnapshot {
+fn segment_snapshot(
+    revision: u64,
+    draft: &Draft,
+    track: &Track,
+    segment: &Segment,
+) -> SegmentSnapshot {
     let source = segment.source_range.as_ref();
     SegmentSnapshot {
         revision,
@@ -706,7 +829,201 @@ fn segment_snapshot(revision: u64, draft: &Draft, segment: &Segment) -> SegmentS
         source_start: source.map(|range| range.start),
         source_duration: source.map(|range| range.duration),
         transition: transition_of(draft, segment),
+        track: track.id.clone(),
+        kind: track.kind.as_str().to_owned(),
+        detail: None,
     }
+}
+
+/// The longest JSON text one line of a view carries.
+const RECORD_LIMIT: usize = 4000;
+
+/// The most materials the library view lists.
+const MATERIALS_LIMIT: usize = 300;
+
+/// What `segment` stores beyond a plain clip, and the records of the
+/// materials it plays and refers to.
+fn segment_detail(draft: &Draft, segment: &Segment) -> SegmentDetail {
+    let mut plain = Segment::new(
+        segment.id.as_str(),
+        segment.material_id.as_str(),
+        segment.target.clone(),
+    );
+    plain.source_range.clone_from(&segment.source_range);
+    let changed = match (serde_json::to_value(segment), serde_json::to_value(&plain)) {
+        (Ok(stored), Ok(plain)) => difference(&stored, &plain)
+            .map(|value| cut(&value.to_string()))
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+    let pools = pools(draft);
+    let mut materials = Vec::new();
+    for id in std::iter::once(&segment.material_id).chain(&segment.extra_material_refs) {
+        if let Some((pool, record)) = find_material(&pools, id.as_str()) {
+            materials.push((pool.to_owned(), cut(&trimmed(record).to_string())));
+        }
+    }
+    SegmentDetail { changed, materials }
+}
+
+/// The material pools as JSON: each pool's name and its records.
+fn pools(draft: &Draft) -> Vec<(String, Vec<Value>)> {
+    let Ok(Value::Object(map)) = serde_json::to_value(&draft.materials) else {
+        return Vec::new();
+    };
+    map.into_iter()
+        .filter_map(|(pool, records)| match records {
+            Value::Array(records) if !records.is_empty() => Some((pool, records)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn find_material<'a>(pools: &'a [(String, Vec<Value>)], id: &str) -> Option<(&'a str, &'a Value)> {
+    pools.iter().find_map(|(pool, records)| {
+        records
+            .iter()
+            .find(|record| record.get("id").and_then(Value::as_str) == Some(id))
+            .map(|record| (pool.as_str(), record))
+    })
+}
+
+/// The parts of `stored` that differ from `plain`, keeping the shape.
+fn difference(stored: &Value, plain: &Value) -> Option<Value> {
+    match (stored, plain) {
+        (Value::Object(stored), Value::Object(plain)) => {
+            let mut out = serde_json::Map::new();
+            for (key, value) in stored {
+                match plain.get(key) {
+                    Some(other) => {
+                        if let Some(changed) = difference(value, other) {
+                            out.insert(key.clone(), changed);
+                        }
+                    }
+                    None => {
+                        out.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+            (!out.is_empty()).then_some(Value::Object(out))
+        }
+        _ => (stored != plain).then(|| stored.clone()),
+    }
+}
+
+/// `record` without its empty, zero and false values, which say nothing.
+fn trimmed(record: &Value) -> Value {
+    match record {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), trimmed(value)))
+                .filter(|(_, value)| !says_nothing(value))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(trimmed).collect()),
+        other => other.clone(),
+    }
+}
+
+fn says_nothing(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Bool(on) => !on,
+        Value::Number(number) => number.as_f64() == Some(0.0),
+        Value::String(text) => text.is_empty(),
+        Value::Array(items) => items.is_empty(),
+        Value::Object(map) => map.is_empty(),
+    }
+}
+
+/// `text`, cut to [`RECORD_LIMIT`] with a note when it is longer.
+fn cut(text: &str) -> String {
+    if text.len() <= RECORD_LIMIT {
+        return text.to_owned();
+    }
+    let mut end = RECORD_LIMIT;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{} (cut, {} characters in all)", &text[..end], text.len())
+}
+
+/// The fields that name a material in the library view, in this order.
+const NAMING: &[&str] = &[
+    "type",
+    "name",
+    "path",
+    "content",
+    "effect_id",
+    "resource_id",
+    "duration",
+    "width",
+    "height",
+    "has_audio",
+];
+
+fn materials_view(revision: u64, draft: &Draft) -> QueryView {
+    let mut lines = Vec::new();
+    let mut more = 0;
+    for (pool, records) in pools(draft) {
+        for record in &records {
+            if lines.len() == MATERIALS_LIMIT {
+                more += 1;
+                continue;
+            }
+            let id = record.get("id").and_then(Value::as_str).unwrap_or_default();
+            let mut line = format!("{pool} {id}");
+            for key in NAMING {
+                let Some(value) = record.get(*key).filter(|value| !says_nothing(value)) else {
+                    continue;
+                };
+                let text = match value {
+                    Value::String(text) if text.chars().count() > 80 => {
+                        Value::String(format!("{}...", text.chars().take(80).collect::<String>()))
+                            .to_string()
+                    }
+                    Value::String(text) if text.contains(char::is_whitespace) => value.to_string(),
+                    Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                };
+                line.push_str(&format!(" {key}={text}"));
+            }
+            lines.push(line);
+        }
+    }
+    QueryView::Materials(MaterialsSnapshot {
+        revision,
+        lines,
+        more,
+    })
+}
+
+fn material_view(
+    revision: u64,
+    draft: &Draft,
+    material_id: &MaterialId,
+) -> Result<QueryView, DraftError> {
+    let pools = pools(draft);
+    let Some((pool, record)) = find_material(&pools, material_id.as_str()) else {
+        return Err(DraftError::MissingMaterial {
+            id: material_id.clone(),
+        });
+    };
+    let used_by = draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .filter(|segment| {
+            &segment.material_id == material_id || segment.extra_material_refs.contains(material_id)
+        })
+        .map(|segment| segment.id.clone())
+        .collect();
+    Ok(QueryView::Material(MaterialSnapshot {
+        revision,
+        pool: pool.to_owned(),
+        record: cut(&trimmed(record).to_string()),
+        used_by,
+    }))
 }
 
 /// The blend `segment` carries into the next clip: the transition its
@@ -833,6 +1150,7 @@ mod tests {
         TrackType,
     };
     use cutlass_session::{EditError, ImportedMedium, Request, Session};
+    use serde_json::Value;
 
     use super::{
         ApplyInput, ApplyMode, ApplyResult, DraftError, DraftQuery, DraftTools, QueryView,
@@ -852,6 +1170,182 @@ mod tests {
             track_id: track_id.clone(),
             segment: Box::new(Segment::new(id, "media", TimeRange::new(start, duration))),
         }
+    }
+
+    #[test]
+    fn a_segment_query_shows_what_the_clip_stores_and_its_materials() {
+        let (mut tools, track) = open_tools();
+        tools
+            .apply(apply_input(
+                None,
+                0,
+                vec![
+                    place(&track, "a", 0, 1_000_000),
+                    Request::SetPosition {
+                        segment_id: SegmentId::new("a"),
+                        x: 0.5,
+                        y: -0.25,
+                    },
+                    Request::SetVolume {
+                        segment_id: SegmentId::new("a"),
+                        volume: 0.4,
+                    },
+                    Request::AddText {
+                        track_id: TrackId::new("titles"),
+                        segment_id: SegmentId::new("title"),
+                        material_id: MaterialId::new("title-text"),
+                        start: Micros(0),
+                        duration: Micros(1_000_000),
+                        content: "Summer trip".to_owned(),
+                        face: "Inter.ttf".to_owned(),
+                    },
+                ],
+                ApplyMode::Commit,
+            ))
+            .unwrap();
+        let read = |id: &str| {
+            tools
+                .query(&DraftQuery::Segment {
+                    segment_id: SegmentId::new(id),
+                })
+                .unwrap()
+                .to_string()
+        };
+        let clip = read("a");
+        let mut lines = clip.lines();
+        assert_eq!(
+            lines.next().unwrap(),
+            "revision=1 segment=a track=main kind=video material=media start=0 duration=1000000"
+        );
+        // Only what differs from a plain clip is listed.
+        let set: Value =
+            serde_json::from_str(lines.next().unwrap().strip_prefix("set=").unwrap()).unwrap();
+        assert_eq!(set["volume"], 0.4);
+        assert_eq!(set["clip"]["transform"]["x"], 0.5);
+        assert_eq!(set["clip"]["transform"]["y"], -0.25);
+        assert!(
+            set.get("id").is_none() && set.get("speed").is_none(),
+            "{set}"
+        );
+        assert!(lines.next().unwrap().starts_with("videos={"));
+        // A title's words, size and face are in its text record.
+        let title = read("title");
+        assert!(title.contains("track=titles kind=text"), "{title}");
+        let record = title
+            .lines()
+            .find_map(|line| line.strip_prefix("texts="))
+            .unwrap();
+        let record: Value = serde_json::from_str(record).unwrap();
+        assert_eq!(record["content"], "Summer trip");
+        assert_eq!(record["font_size"], 80.0);
+        assert_eq!(record["font_path"], "Inter.ttf");
+        // A plain clip has nothing set, and a track view stays one line.
+        let (mut tools, track) = open_tools();
+        tools
+            .apply(apply_input(
+                None,
+                0,
+                vec![place(&track, "a", 0, 1_000_000)],
+                ApplyMode::Commit,
+            ))
+            .unwrap();
+        let plain = tools
+            .query(&DraftQuery::Segment {
+                segment_id: SegmentId::new("a"),
+            })
+            .unwrap()
+            .to_string();
+        assert!(!plain.contains("set="), "{plain}");
+        let lane = tools
+            .query(&DraftQuery::Track { track_id: track })
+            .unwrap()
+            .to_string();
+        assert_eq!(lane.lines().count(), 1, "{lane}");
+    }
+
+    #[test]
+    fn the_library_lists_materials_and_one_reads_in_full() {
+        let (mut tools, track) = open_tools();
+        let mut movie = MaterialVideo::new("movie");
+        movie.path = "/media/a b.mp4".into();
+        movie.width = 1920;
+        movie.height = 1080;
+        movie.duration = Micros(8_000_000);
+        tools
+            .apply(apply_input(
+                None,
+                0,
+                vec![
+                    Request::Import {
+                        medium: ImportedMedium::Video(Box::new(movie)),
+                    },
+                    place(&track, "a", 0, 1_000_000),
+                    Request::AddText {
+                        track_id: TrackId::new("titles"),
+                        segment_id: SegmentId::new("title"),
+                        material_id: MaterialId::new("title-text"),
+                        start: Micros(0),
+                        duration: Micros(1_000_000),
+                        content: "Hello there".to_owned(),
+                        face: "Inter.ttf".to_owned(),
+                    },
+                ],
+                ApplyMode::Commit,
+            ))
+            .unwrap();
+        let library = tools.query(&DraftQuery::Materials).unwrap().to_string();
+        let mut lines = library.lines();
+        assert_eq!(lines.next().unwrap(), "revision=1 materials");
+        assert!(
+            library.lines().any(|line| line
+                == "videos movie path=\"/media/a b.mp4\" duration=8000000 width=1920 height=1080"),
+            "{library}"
+        );
+        assert!(
+            library
+                .lines()
+                .any(|line| line.starts_with("texts title-text type=text content=\"Hello there\"")),
+            "{library}"
+        );
+        let one = tools
+            .query(&DraftQuery::Material {
+                material_id: MaterialId::new("media"),
+            })
+            .unwrap()
+            .to_string();
+        assert!(one.starts_with("revision=1 material videos={"), "{one}");
+        assert!(one.ends_with("\nused_by=a"), "{one}");
+        assert_eq!(
+            tools
+                .query(&DraftQuery::Material {
+                    material_id: MaterialId::new("ghost"),
+                })
+                .unwrap_err(),
+            DraftError::MissingMaterial {
+                id: MaterialId::new("ghost")
+            }
+        );
+        // A range names where each clip is, not only its id.
+        let range = tools
+            .query(&DraftQuery::Range {
+                start: Micros(0),
+                end: Micros(500_000),
+            })
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            range,
+            "revision=1 range title@0+1000000:titles a@0+1000000:main"
+        );
+    }
+
+    #[test]
+    fn a_long_record_is_cut_with_its_length() {
+        let long = "x".repeat(super::RECORD_LIMIT + 10);
+        let cut = super::cut(&long);
+        assert!(cut.len() < long.len() + 40);
+        assert!(cut.ends_with(&format!("(cut, {} characters in all)", long.len())));
+        assert_eq!(super::cut("short"), "short");
     }
 
     #[test]
@@ -1129,9 +1623,10 @@ mod tests {
             outgoing.transition,
             Some(("cutlass-dissolve".to_owned(), Micros(500_000)))
         );
+        let first_line = view.to_string();
+        let first_line = first_line.lines().next().unwrap_or_default();
         assert!(
-            view.to_string()
-                .ends_with(" transition=cutlass-dissolve+500000"),
+            first_line.ends_with(" transition=cutlass-dissolve+500000"),
             "{view}"
         );
         let incoming = segment(&tools, "b").to_string();
@@ -1159,6 +1654,9 @@ mod tests {
         assert!(
             segment(&tools, "a")
                 .to_string()
+                .lines()
+                .next()
+                .unwrap_or_default()
                 .ends_with(" transition=tr+500000")
         );
     }

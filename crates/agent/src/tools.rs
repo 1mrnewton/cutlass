@@ -740,8 +740,13 @@ where
 fn description(name: &str) -> &'static str {
     match name {
         "draft.query" => {
-            "Compact view of the open draft plus its revision. \"ops\" lists every request kind \
-             draft.apply takes; \"ops add_text set_position\" shows their JSON."
+            "Read the open draft, with its revision. \"project\" lists the tracks; \"track <id>\" \
+             its clips as id@start+length; \"segment <id>\" one clip: its track, what it stores \
+             beyond a plain clip (position, scale, volume, speed, keys) and the records of its \
+             materials, such as a title's words, size and color; \"range <start_us> <end_us>\" \
+             the clips playing then; \"materials\" the library (media files, texts, effects) and \
+             \"material <id>\" one record. \"ops\" lists every request kind draft.apply takes; \
+             \"ops add_text set_position\" shows their JSON."
         }
         "draft.apply" => {
             "Session requests as one combo, or a dry run. JSON: {\"expected_revision\":N, \
@@ -1101,6 +1106,14 @@ fn parse_query(arguments: &str) -> Result<Invocation, ToolError> {
     if arguments == "full" {
         return Ok(Invocation::DraftQuery(DraftQuery::Full));
     }
+    if arguments == "materials" {
+        return Ok(Invocation::DraftQuery(DraftQuery::Materials));
+    }
+    if let Some(id) = headed(arguments, "material") {
+        return Ok(Invocation::DraftQuery(DraftQuery::Material {
+            material_id: MaterialId::new(unquoted(id)),
+        }));
+    }
     if let Some(id) = headed(arguments, "track") {
         // An older project's main track has no id; it is written `""`.
         let id = if id == "\"\"" { "" } else { id };
@@ -1110,7 +1123,7 @@ fn parse_query(arguments: &str) -> Result<Invocation, ToolError> {
     }
     if let Some(id) = headed(arguments, "segment") {
         return Ok(Invocation::DraftQuery(DraftQuery::Segment {
-            segment_id: SegmentId::new(id),
+            segment_id: SegmentId::new(unquoted(id)),
         }));
     }
     if let Some(rest) = headed(arguments, "range") {
@@ -1944,7 +1957,19 @@ mod tests {
         let range = registry
             .invoke(registry.parse("draft.query", "range 0 1000000").unwrap())
             .unwrap();
-        assert!(range.split_whitespace().any(|word| word == "a"));
+        assert!(
+            range
+                .split_whitespace()
+                .any(|word| word.starts_with("a@0+") && word.ends_with(":main"))
+        );
+        let library = registry
+            .invoke(registry.parse("draft.query", "materials").unwrap())
+            .unwrap();
+        assert!(library.contains("videos media"), "{library}");
+        let one = registry
+            .invoke(registry.parse("draft.query", "material media").unwrap())
+            .unwrap();
+        assert!(one.contains("material videos="), "{one}");
         let full = registry
             .invoke(registry.parse("draft.query", "full").unwrap())
             .unwrap();

@@ -131,12 +131,12 @@ pub fn model(settings: &Settings, key: &str, context: &str) -> Result<Cloud, Str
     let choice = &settings.model;
     if key.trim().is_empty() {
         return Err(
-            "The cloud model has no key yet. Paste yours in Settings → Assistant.".to_owned(),
+            "The cloud model has no key yet. Paste yours in Settings › Assistant.".to_owned(),
         );
     }
     let name = choice.cloud_name.trim();
     if name.is_empty() {
-        return Err("Name the cloud model in Settings → Assistant.".to_owned());
+        return Err("Name the cloud model in Settings › Assistant.".to_owned());
     }
     let http = cutlass_download::Http::patient(ANSWER_WITHIN);
     let json = ("Content-Type".to_owned(), "application/json".to_owned());

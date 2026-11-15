@@ -1,4 +1,4 @@
-//! The MCP servers the user added in Settings → Assistant, reached for
+//! The MCP servers the user added in Settings › Assistant, reached for
 //! `mcp.call`: a local program spoken to on its stdin and stdout, or a
 //! remote URL spoken to with HTTP posts.
 //!
@@ -138,7 +138,7 @@ impl Process {
     fn start(command: &str, args: &[String]) -> Result<Self, McpError> {
         if command.trim().is_empty() {
             return Err(McpError::Transport(
-                "the server has no program to start; name one in Settings → Assistant".to_owned(),
+                "the server has no program to start; name one in Settings › Assistant".to_owned(),
             ));
         }
         let mut child = Command::new(command.trim())

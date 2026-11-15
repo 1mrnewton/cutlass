@@ -682,7 +682,7 @@ fn explain(error: String) -> String {
     let lower = error.to_ascii_lowercase();
     if lower.contains("not found") && lower.contains("model") {
         return format!(
-            "{error}. Pick a model the server has with Find models in Settings → Assistant."
+            "{error}. Pick a model the server has with Find models in Settings › Assistant."
         );
     }
     error
@@ -699,7 +699,7 @@ fn build_model(settings: &Settings, notes: &str) -> Result<AnyModel, String> {
     }
     if !settings.model.local {
         return Err(
-            "Both models are off. Turn on the local model, or the cloud model with your own key, in Settings → Assistant."
+            "Both models are off. Turn on the local model, or the cloud model with your own key, in Settings › Assistant."
                 .to_owned(),
         );
     }
@@ -1519,7 +1519,7 @@ mod tests {
         assistant.draft = "hi".to_owned();
         assistant.send(&settings, "", "");
         assert!(
-            matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("Settings → Assistant"))
+            matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("Settings › Assistant"))
         );
         assert!(!assistant.busy());
         settings.model.cloud = false;

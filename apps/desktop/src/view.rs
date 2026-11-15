@@ -113,8 +113,8 @@ impl Shelf {
 
     fn empty(self) -> &'static str {
         match self {
-            Self::Media => "No media yet. Use File → Import.",
-            Self::Audio => "No audio yet. Use File → Import.",
+            Self::Media => "No media yet. Use File › Import.",
+            Self::Audio => "No audio yet. Use File › Import.",
             Self::Text => "No title matches the search.",
             Self::Stickers => "No stickers.",
             Self::Effects => "No effect matches the search.",
@@ -12356,7 +12356,7 @@ mod tests {
         assert!(!lines.iter().any(|line| line == "Main"), "{lines:?}");
         assert!(painted.contains("Untitled"), "{painted}");
         assert!(
-            painted.contains("No media yet. Use File → Import."),
+            painted.contains("No media yet. Use File › Import."),
             "{painted}"
         );
         assert!(painted.contains("Projects"), "{painted}");

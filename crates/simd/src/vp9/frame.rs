@@ -65,10 +65,16 @@ impl<P> SharedFrame<P> {
     }
 
     /// Blocks until luma rows `0..luma` are published (or every row is).
+    #[inline(always)]
     pub fn wait(&self, luma: usize) {
-        if self.published() >= luma {
-            return;
+        if self.published() < luma {
+            self.wait_slow(luma);
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn wait_slow(&self, luma: usize) {
         let mut guard = match self.lock.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),

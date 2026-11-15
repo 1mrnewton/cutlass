@@ -453,11 +453,12 @@ const PRUNED_SUBPEL_SPEED: u8 = 5;
 const FAST_TX_SPEED: u8 = 7;
 
 /// From this speed an inter frame's block whose best candidate codes no
-/// residual does not try the next smaller transform: at 16×16 and under
-/// it wins 0.2 to 4% of the time there (5 to 17% at 32×32 and 64×64).
-/// A third fewer such trials on the README's clips (three fifths on its
-/// grainy pan); about a point more bits at the same PSNR-Y and averaged
-/// PSNR on its first clip, a point fewer on the second, ±1 on the third.
+/// residual does not try the next smaller transform: it wins 0.4 to 4% of
+/// the time there (far more often after a best that codes some).
+/// A tenth less time at speed 5 (three fifths fewer of these trials on the
+/// README's grainy pan), for 3 to 4 points more bits at the same PSNR-Y (2
+/// to 3 at the averaged PSNR) on its first two clips and under 1 on the
+/// pan. Not in a second pass, where it cost 4 points on the first clip.
 const SKIP_TX_SPEED: u8 = 5;
 
 /// From this speed the trials of inter blocks are measured on their

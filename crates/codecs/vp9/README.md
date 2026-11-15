@@ -240,7 +240,7 @@ the noise. Built from a profile (as the H.264 and AV1 codecs are) trained
 on synthetic video through our encoder and on libvpx streams of FFmpeg's
 `mandelbrot` and `testsrc2` sources, 4:2:0 and 4:4:4, it is the same too
 (1.012 against 1.012 of FFmpeg's time on 4:2:0, medians of fifteen
-interleaved runs). Trained on the measured streams themselves, it was 3%
+interleaved runs). Trained on the measured streams themselves, it was 5%
 faster on 4:2:0, which a release profile cannot be trained on.
 
 **Encode** (`tools/encbench.sh`, BD-rate with `tools/bdrate.py`):

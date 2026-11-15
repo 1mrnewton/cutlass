@@ -2,7 +2,8 @@
 
 A VP9 decoder and encoder in Rust. The decoder takes every profile (0–3,
 8/10/12-bit, 4:2:0/4:2:2/4:4:0/4:4:4, sRGB) and matches FFmpeg's `vp9`
-decoder sample for sample. The encoder writes profile 0 (8-bit 4:2:0) with
+decoder sample for sample. The encoder writes every profile too (0–3,
+8/10/12-bit, 4:2:0/4:2:2/4:4:0/4:4:4) with
 rate-distortion searched partitions and modes, golden frames, tile columns on
 threads, and one-pass rate control. The crate is safe Rust
 (`#![forbid(unsafe_code)]`); its vector kernels live in `cutlass-simd`
@@ -35,8 +36,8 @@ Decoder (`Vp9Decoder`, over `Decoder`):
 
 Encoder (`Vp9Encoder`, `EngineEncoder`):
 
-- Profile 0, any size up to 65536×65536 (odd sizes too), quantizer index 0
-  (lossless, Walsh-Hadamard) to 255.
+- Profiles 0 to 3, any size up to 65536×65536 (odd sizes too), quantizer
+  index 0 (lossless, Walsh-Hadamard) to 255.
 - Partitions from 64×64 to 8×8 (rectangles below speed 4), 4×4 intra
   blocks on key frames (each 4×4 with its own mode), and inter blocks
   under 8×8 (4×4, 8×4, 4×8, each sub-block with its own mode and vector,
@@ -82,8 +83,43 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   pictures, and lossless comes back exact. On the grainy 720p pan in
   4:4:4 (30 frames), against libvpx-vp9 at good, cpu-used 1 in 4:4:4:
   speed 7 is −20% / −23% at the same PSNR-Y / averaged PSNR in 1.76 s
-  against 2.30 s, and speed 6 −32% / −35% in 3.1 s. 10- and 12-bit
-  (profiles 2 and 3) are not coded yet.
+  against 2.30 s, and speed 6 −32% / −35% in 3.1 s.
+- 10 and 12 bits (`Vp9Options::bit_depth`: profile 2 for 4:2:0, 3 for the
+  other formats; `Vp9Encoder::push_planes16` and `encode_planes16` take
+  `u16` samples in the low bits, and `CodecParams` with FFmpeg's
+  `yuv420p10le` to `yuv444p12le` formats opens them; the `vp9enc` example
+  reads them with `bits=10` or `12`). The encoder is generic over its
+  samples as the decoder is: one path for `u8` and `u16`, the 8-bit one
+  with its vector SADs and byte-identical streams, the 16-bit one with
+  plain loops the compiler vectorizes. Distortions stay at the samples'
+  scale, so what weighs against them scales with it: the RD lambda comes
+  from the bit depth's own step (its square grows as the SSE does), the
+  SAD lambda is libvpx's `sad_per_bit16` on the step brought to 8 bits
+  and scaled back up, the loop filter level is libvpx's `LPF_PICK_FROM_Q`
+  for 10 and 12 bits, the temporal filter's thresholds and strength and
+  the intra trial's threshold scale with the samples, the largest token
+  category takes 16 or 18 bits, and rate control models 8-bit-scaled
+  steps. On 8-bit content shifted up two or four bits (a grainy 720p pan,
+  60 frames, speed 6), every quantizer from 100 to 180 spends within 1.3%
+  of the 8-bit stream's bits at 0.02 to 0.06 dB more PSNR; at 60, where
+  the 10- and 12-bit steps are finer than 8-bit's, 10% and 13% more bits
+  for 0.75 and 0.97 dB more. FFmpeg's `vp9`, libvpx and this decoder
+  decode 210 streams (10- and 12-bit, all four chroma formats, 640×360
+  and 333×211, speeds 2 to 10, lag 16 and 0, quantizers 0, 60 and 180)
+  to the same pictures, and the 70 lossless ones come back exact.
+  Against libvpx-vp9 at 10 bits (good, cpu-used 1, 4 threads each) the
+  gap is the 8-bit one: on the grainy pan speed 6 is −38% / −34% at the
+  same PSNR-Y / averaged PSNR (−38.5% / −34.8% on the pan made at 8
+  bits), speed 8
+  −19% / −7.9%; on a clean synthetic pan (`testsrc2`), where we are
+  behind, +19% / +28% (+20% / +29% at 8 bits). The 16-bit path is slower:
+  speed 6 takes 1.8 to 2.9 times its 8-bit time on the same content
+  (23.8 s against 10.7 s on the grainy pan at q 110; libvpx's 10-bit
+  takes 1.3 to 1.5 times its 8-bit time), as its inter prediction, loop
+  filter and SADs have no vector kernels yet. A lossless frame no longer
+  lets an inter block drop its residual (both its costs are zero there,
+  so the skip bit's probability decided): lossless with alt-refs came
+  back inexact before, at 8 bits too.
 - Tile rows (`Vp9Options::tile_rows`, log2 of the count, 0 to 2, as
   libvpx's `tile-rows`): each starts its own arithmetic coder, so a
   decoder can start every row's at once; nothing else changes, and the
@@ -461,7 +497,7 @@ the picture moves too far for one picture to stand for the interval.
   for the engine's `EncodeFactory`.
 - Interpolation filters switch per block (EIGHTTAP, SMOOTH, SHARP, by
   trial) at speeds 0–2; faster speeds keep EIGHTTAP.
-- The encoder writes profile 0 (8-bit 4:2:0) only, BT.601 studio range.
+- The encoder writes BT.601 studio range only, and no sRGB (GBR).
 - Encoder tools, by speed: compound prediction (a past picture with the
   alt-ref ahead, chosen per block) at 0–6 with `lag`; inter blocks under
   8×8 (4×4, 8×4, 4×8, each sub-block NEAREST, NEAR, ZERO or NEW) at 0–1;

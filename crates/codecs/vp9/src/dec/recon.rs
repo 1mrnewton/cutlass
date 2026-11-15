@@ -166,6 +166,13 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
             let mut tx = start.txs;
             let mut coef = start.coefs;
             let blocks = &t.blocks[start.blocks..end.blocks];
+            if !P::HIGH {
+                // 8-bit blocks take no hints: the loop as it was.
+                for b in blocks {
+                    self.block(t, b, &mut tx, &mut coef);
+                }
+                continue;
+            }
             if let Some(b) = blocks.first() {
                 self.prefetch(b);
             }
@@ -189,7 +196,7 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
     fn prefetch(&self, b: &BlockRec) {
         use cutlass_simd::vp9::prefetch::rect;
         let (bw, bh) = MI_WH[usize::from(b.bsize)];
-        if !P::HIGH || b.refs[0] == INTRA_FRAME || bw < 4 {
+        if b.refs[0] == INTRA_FRAME || bw < 4 {
             return;
         }
         let (col, row) = (usize::from(b.col) * 8, usize::from(b.row) * 8);

@@ -16,6 +16,7 @@ use crate::draft::{ApplyInput, ApplyMode, DraftQuery, DraftTools};
 use crate::r#loop::{ToolOutcome, ToolSink};
 use crate::mcp::{McpClient, McpError, McpTransport};
 use crate::model::{ToolCall, ToolDefinition};
+use crate::picture::{PICTURE_LIMIT, Picture};
 use crate::sandbox::Sandbox;
 use crate::settings_tool::{SettingsTool, SettingsToolError};
 use crate::skill::{Skill, SkillLibrary};
@@ -34,6 +35,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "player.seek",
     "player.play",
     "player.pause",
+    "player.look",
     "media.probe",
     "speech.start",
     "speech.poll",
@@ -60,6 +62,23 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         .collect()
 }
 
+/// The frame the player shows at one time, drawn small for a model to
+/// look at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+    /// The time the frame is at, in microseconds.
+    pub time_us: i64,
+    /// The picture's width in pixels.
+    pub width: u32,
+    /// The picture's height in pixels.
+    pub height: u32,
+    /// The encoded picture.
+    pub picture: Picture,
+    /// What the picture lacks next to the player's, such as effect clips
+    /// on a machine with no GPU; empty when it lacks nothing.
+    pub missing: String,
+}
+
 /// The open player. These calls do not push a draft undo step.
 pub trait Player {
     /// Moves the playhead to `time_us` microseconds.
@@ -68,6 +87,11 @@ pub trait Player {
     fn play(&mut self) -> Result<(), String>;
     /// Pauses playback.
     fn pause(&mut self) -> Result<(), String>;
+    /// Draws the frame at `time_us`, or at the playhead for `None`, without
+    /// moving the playhead. A host that cannot draw says so.
+    fn look(&mut self, _time_us: Option<i64>) -> Result<Frame, String> {
+        Err("this host cannot draw a frame".to_owned())
+    }
 }
 
 /// The import type, duration, picture size, and stream names from the host.
@@ -222,6 +246,11 @@ pub enum Invocation {
     PlayerPlay,
     /// Pause playback.
     PlayerPause,
+    /// Look at the frame at a time.
+    PlayerLook {
+        /// The time in microseconds; the playhead when `None`.
+        time_us: Option<i64>,
+    },
     /// Probe one media path through the host.
     MediaProbe {
         /// The path the host probes.
@@ -414,6 +443,8 @@ pub struct Registry<P, Med, Sp, Cat, Pkg, Exp, Sand, Appr, Tr, Trk> {
     pub tracking: Trk,
     speech_jobs: BTreeMap<String, SpeechJob>,
     track_jobs: BTreeMap<String, TrackJob>,
+    /// The picture the call running now made, for its outcome.
+    looked: Option<Picture>,
 }
 
 impl<P, Med, Sp, Cat, Pkg, Exp, Sand, Appr, Tr, Trk>
@@ -465,6 +496,7 @@ where
             tracking,
             speech_jobs: BTreeMap::new(),
             track_jobs: BTreeMap::new(),
+            looked: None,
         }
     }
 
@@ -540,6 +572,33 @@ where
             }
             Invocation::PlayerPlay => host_unit(self.player.play()),
             Invocation::PlayerPause => host_unit(self.player.pause()),
+            Invocation::PlayerLook { time_us } => {
+                let end = timeline_end(self.draft.session().draft());
+                if let Some(time_us) = time_us
+                    && (time_us < 0 || time_us > end)
+                {
+                    return Err(ToolError::BadArguments(format!(
+                        "player.look takes a time from 0 to {end}, where the last clip ends, \
+                         not {time_us}"
+                    )));
+                }
+                let frame = self.player.look(time_us).map_err(ToolError::Host)?;
+                if frame.picture.data.len() > PICTURE_LIMIT {
+                    return Err(ToolError::Host(
+                        "the frame's picture is too large to send".to_owned(),
+                    ));
+                }
+                let mut said = format!(
+                    "frame at {}, {}x{}: the picture is with this result",
+                    frame.time_us, frame.width, frame.height
+                );
+                if !frame.missing.is_empty() {
+                    said.push_str(". ");
+                    said.push_str(&frame.missing);
+                }
+                self.looked = Some(frame.picture);
+                Ok(said)
+            }
             Invocation::MediaProbe { path } => self
                 .media
                 .probe(&path)
@@ -682,6 +741,14 @@ where
             }
             "player.play" => bare(arguments, "player.play", Invocation::PlayerPlay),
             "player.pause" => bare(arguments, "player.pause", Invocation::PlayerPause),
+            "player.look" if arguments.trim().is_empty() => {
+                Ok(Invocation::PlayerLook { time_us: None })
+            }
+            "player.look" => {
+                one_i64(arguments, "player.look").map(|time_us| Invocation::PlayerLook {
+                    time_us: Some(time_us),
+                })
+            }
             "media.probe" => {
                 text_arg(arguments, "media.probe").map(|path| Invocation::MediaProbe { path })
             }
@@ -792,6 +859,7 @@ where
     Trk: Tracking,
 {
     fn run_tool(&mut self, call: &ToolCall) -> ToolOutcome {
+        self.looked = None;
         let parsed = self.parse(&call.name, &call.arguments);
         let result = match parsed {
             Ok(invocation) => self.invoke(invocation),
@@ -801,10 +869,12 @@ where
             Ok(content) => ToolOutcome {
                 content: within_limit(content),
                 is_error: false,
+                picture: self.looked.take(),
             },
             Err(error) => ToolOutcome {
                 content: within_limit(error.to_string()),
                 is_error: true,
+                picture: None,
             },
         }
     }
@@ -865,6 +935,12 @@ fn description(name: &str) -> &'static str {
         }
         "player.play" => "Start the open player.",
         "player.pause" => "Pause the open player.",
+        "player.look" => {
+            "Look at the project: the frame at a time in microseconds, or at the playhead \
+             with no input, comes back as a small picture. It does not move the player. Use \
+             it to check what an edit looks like, such as where a title sits or whether an \
+             effect shows; one look is one moment, so look at a few times for motion."
+        }
         "media.probe" => {
             "The type to import it as, duration, size, and streams (video, audio) reported \
              by the host for one path."
@@ -899,7 +975,10 @@ fn description(name: &str) -> &'static str {
         "catalog.search" => {
             "Search the bundled effects, filters, transitions and animations by a word or \
              two; an empty search lists them all. Each answer is \"<kind> <id> <name>\": the \
-             id is what add_effect, add_filter, set_transition and set_animation take."
+             id is what add_effect, add_filter, set_transition and set_animation take. An \
+             animation's kind is its side: animation-in goes with set_animation kind in, \
+             animation-out with out, animation-loop with loop or caption. One ending \
+             (text only) moves letters and is refused on a shape, sticker or video clip."
         }
         "package.ensure" => {
             "Check that an id from catalog.search (the id alone, such as recipe/shake) is \
@@ -1549,9 +1628,31 @@ fn parse_apply(arguments: &str) -> Result<Invocation, ToolError> {
             "draft.apply needs at least one request in requests".to_owned(),
         ));
     }
+    // Every request that does not read is named, not only the first: a
+    // caller that mends one at a time sends a long combo again for each.
     let mut requests = Vec::with_capacity(apply.requests.len());
+    let mut unread = Vec::new();
     for (index, value) in apply.requests.into_iter().enumerate() {
-        requests.push(read_request(index, value)?);
+        match read_request(index, value) {
+            Ok(request) => requests.push(request),
+            Err(error) => unread.push(error),
+        }
+    }
+    if !unread.is_empty() {
+        let count = unread.len();
+        let mut said: Vec<String> = unread.iter().take(UNREAD_NAMED).cloned().collect();
+        if count > UNREAD_NAMED {
+            said.push(format!("and {} more", count - UNREAD_NAMED));
+        }
+        let head = if count == 1 {
+            String::new()
+        } else {
+            format!("{count} requests do not read, so none was applied:\n")
+        };
+        return Err(ToolError::BadArguments(format!(
+            "{head}{}",
+            said.join("\n")
+        )));
     }
     Ok(Invocation::DraftApply(ApplyInput {
         request_id: apply.request_id.filter(|id| !id.is_empty()),
@@ -1565,27 +1666,34 @@ fn parse_apply(arguments: &str) -> Result<Invocation, ToolError> {
     }))
 }
 
-/// One request of a combo, or which one does not read and why.
-fn read_request(index: usize, value: serde_json::Value) -> Result<Request, ToolError> {
+/// The most requests that do not read a combo's answer names in full.
+const UNREAD_NAMED: usize = 12;
+
+/// One request of a combo, or which one does not read and why. A request
+/// of a known kind is answered with that kind's own JSON, so the caller
+/// can mend it without a look-up.
+fn read_request(index: usize, value: serde_json::Value) -> Result<Request, String> {
     let Some(op) = value
         .get("op")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
     else {
-        return Err(ToolError::BadArguments(format!(
+        return Err(format!(
             "request {index} has no \"op\"; each request names its kind, such as \
              {{\"op\":\"move\",...}}, and draft.query \"ops\" lists the kinds"
-        )));
+        ));
     };
-    if !crate::ops::ops().iter().any(|known| known.name == op) {
-        return Err(ToolError::BadArguments(format!(
-            "request {index}: no request kind {op}; draft.query \"ops\" lists them all"
-        )));
-    }
+    let Some(example) = crate::ops::example_of(&op) else {
+        return Err(format!(
+            "request {index}: {}",
+            crate::ops::no_kind(&op, &op.to_ascii_lowercase().replace('-', "_"))
+        ));
+    };
     let request: Request = serde_json::from_value(value.clone()).map_err(|error| {
-        ToolError::BadArguments(format!(
-            "request {index} {op}: {error}; draft.query \"ops {op}\" shows its fields"
-        ))
+        format!(
+            "request {index} {op}: {error}. It is written {example} \
+             (draft.query \"ops {op}\" says what each field does)"
+        )
     })?;
     // A field the kind does not have is read as nothing, and the caller
     // would take the request to have done what the field asked. It is
@@ -1599,11 +1707,11 @@ fn read_request(index: usize, value: serde_json::Value) -> Result<Request, ToolE
             let ignored = serde_json::from_value::<Request>(serde_json::Value::Object(probe))
                 .is_ok_and(|same| same == request);
             if ignored {
-                return Err(ToolError::BadArguments(format!(
-                    "request {index} {op} has no field {key}, so it would do nothing; \
-                     draft.query \"ops {op}\" shows its fields, and another request may be \
-                     the one that sets it"
-                )));
+                return Err(format!(
+                    "request {index} {op} has no field {key}, so it would do nothing. It is \
+                     written {example} (draft.query \"ops {op}\" says what each field does), \
+                     and another request may be the one that sets {key}"
+                ));
             }
         }
     }
@@ -1907,6 +2015,10 @@ mod tests {
         play: u32,
         pause: u32,
         time_us: i64,
+        /// The frame a look answers with, at the time asked; `None` is a
+        /// host that draws none.
+        frame: Option<super::Frame>,
+        looks: Vec<Option<i64>>,
     }
 
     impl Player for CountPlayer {
@@ -1924,6 +2036,13 @@ mod tests {
         fn pause(&mut self) -> Result<(), String> {
             self.pause += 1;
             Ok(())
+        }
+
+        fn look(&mut self, time_us: Option<i64>) -> Result<super::Frame, String> {
+            self.looks.push(time_us);
+            let mut frame = self.frame.clone().ok_or("no screen")?;
+            frame.time_us = time_us.unwrap_or(self.time_us);
+            Ok(frame)
         }
     }
 
@@ -2247,6 +2366,7 @@ mod tests {
                 "player.seek",
                 "player.play",
                 "player.pause",
+                "player.look",
                 "media.probe",
                 "speech.start",
                 "speech.poll",
@@ -2261,7 +2381,7 @@ mod tests {
                 "mcp.call",
             ]
         );
-        assert_eq!(TOOL_NAMES.len(), 21);
+        assert_eq!(TOOL_NAMES.len(), 22);
     }
 
     #[test]
@@ -2586,6 +2706,48 @@ mod tests {
             "{}",
             made_up.content
         );
+        // Every request that does not read is named at once, each with
+        // its kind's own JSON, and the ones that read are not run.
+        let several = run(r##"{"expected_revision":0,"requests":[
+                {"op":"split","segment_id":"a","at":500000,"right_id":"b"},
+                {"op":"key_pose","segment_id":"a","offset":0,"scale":1.2},
+                {"op":"set_shape_stroke","segment_id":"s","color":"#ffffff","width":4.0,"opacity":1.0},
+                {"op":"set_background","color":"#101010"}
+            ]}"##);
+        assert!(several.is_error);
+        let lines: Vec<&str> = several.content.lines().collect();
+        assert_eq!(lines.len(), 4, "{}", several.content);
+        assert_eq!(lines[0], "3 requests do not read, so none was applied:");
+        assert!(
+            lines[1].starts_with(
+                "request 1 key_pose: missing field `x`. It is written {\"op\":\"key_pose\""
+            ),
+            "{}",
+            lines[1]
+        );
+        assert!(lines[1].contains("\"rotation\""), "{}", lines[1]);
+        assert!(
+            lines[2].starts_with("request 2 set_shape_stroke: missing field `style`. It is written {\"op\":\"set_shape_stroke\""),
+            "{}",
+            lines[2]
+        );
+        // A wrong name is answered with the kinds it may mean.
+        assert!(
+            lines[3].starts_with("request 3: no request kind set_background; it may be one of: "),
+            "{}",
+            lines[3]
+        );
+        assert!(lines[3].contains("set_canvas_background"), "{}", lines[3]);
+        // A long list of them names the first and counts the rest.
+        let many: Vec<String> = (0..super::UNREAD_NAMED + 5)
+            .map(|_| r#"{"op":"key_pose","segment_id":"a","offset":0}"#.to_owned())
+            .collect();
+        let many = run(&format!(
+            r#"{{"expected_revision":0,"requests":[{}]}}"#,
+            many.join(",")
+        ));
+        assert_eq!(many.content.lines().count(), super::UNREAD_NAMED + 2);
+        assert!(many.content.ends_with("and 5 more"), "{}", many.content);
         let nameless = run(r#"{"expected_revision":0,"requests":[{"segment_id":"a"}]}"#);
         assert!(nameless.content.contains("request 0 has no \"op\""));
         let empty = run(r#"{"expected_revision":0,"requests":[]}"#);
@@ -2804,6 +2966,142 @@ mod tests {
             registry.invoke(Invocation::DraftUndo),
             Err(ToolError::Draft(DraftError::EmptyUndo))
         ));
+    }
+
+    #[test]
+    fn a_look_answers_with_the_frames_picture_and_moves_nothing() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        let run = |registry: &mut TestRegistry, name: &str, arguments: &str| {
+            registry.run_tool(&ToolCall {
+                id: "l".to_owned(),
+                name: name.to_owned(),
+                arguments: arguments.to_owned(),
+            })
+        };
+        registry
+            .draft
+            .apply(ApplyInput {
+                expected_revision: 0,
+                requests: vec![place()],
+                mode: ApplyMode::Commit,
+                request_id: None,
+            })
+            .unwrap();
+        let picture = crate::Picture::jpeg(b"frame");
+        registry.player.time_us = 250_000;
+        registry.player.frame = Some(super::Frame {
+            time_us: 0,
+            width: 853,
+            height: 480,
+            picture: picture.clone(),
+            missing: String::new(),
+        });
+        // No input is the playhead; a time is that time.
+        assert!(matches!(
+            registry.parse("player.look", "  ").unwrap(),
+            Invocation::PlayerLook { time_us: None }
+        ));
+        assert!(matches!(
+            registry.parse("player.look", "500000").unwrap(),
+            Invocation::PlayerLook {
+                time_us: Some(500_000)
+            }
+        ));
+        let here = run(&mut registry, "player.look", "");
+        assert!(!here.is_error, "{}", here.content);
+        assert_eq!(
+            here.content,
+            "frame at 250000, 853x480: the picture is with this result"
+        );
+        assert_eq!(here.picture, Some(picture.clone()));
+        // The clip's last moment and its end are both in range.
+        let there = run(&mut registry, "player.look", "1000000");
+        assert_eq!(
+            there.content,
+            "frame at 1000000, 853x480: the picture is with this result"
+        );
+        assert_eq!(there.picture, Some(picture.clone()));
+        assert_eq!(registry.player.looks, [None, Some(1_000_000)]);
+        // Looking is not seeking, and not an edit.
+        assert_eq!(registry.player.seek, 0);
+        assert_eq!(registry.draft.session().revision(), 1);
+
+        // What the picture lacks is said with it.
+        if let Some(frame) = &mut registry.player.frame {
+            frame.missing = "1 effect clip is not in the picture (fx): no GPU".to_owned();
+        }
+        let lacking = run(&mut registry, "player.look", "0");
+        assert_eq!(
+            lacking.content,
+            "frame at 0, 853x480: the picture is with this result. \
+             1 effect clip is not in the picture (fx): no GPU"
+        );
+
+        // A time off the timeline, and words, are refused before the host
+        // draws; the call after a look carries no picture.
+        for bad in ["-1", "1000001", "now", "1 2"] {
+            let refused = run(&mut registry, "player.look", bad);
+            assert!(refused.is_error, "{bad}");
+            assert_eq!(refused.picture, None, "{bad}");
+        }
+        assert_eq!(registry.player.looks.len(), 3);
+        let late = run(&mut registry, "player.look", "1000001");
+        assert!(
+            late.content
+                .contains("player.look takes a time from 0 to 1000000"),
+            "{}",
+            late.content
+        );
+        let plain = run(&mut registry, "draft.query", "project");
+        assert_eq!(plain.picture, None);
+    }
+
+    #[test]
+    fn a_host_that_draws_no_frame_and_a_picture_too_large_are_errors() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        let look = ToolCall {
+            id: "l".to_owned(),
+            name: "player.look".to_owned(),
+            arguments: String::new(),
+        };
+        let none = registry.run_tool(&look);
+        assert!(none.is_error);
+        assert_eq!(none.content, "no screen");
+        assert_eq!(none.picture, None);
+        registry.player.frame = Some(super::Frame {
+            time_us: 0,
+            width: 1,
+            height: 1,
+            picture: crate::Picture {
+                media_type: "image/jpeg".to_owned(),
+                data: "A".repeat(crate::PICTURE_LIMIT + 1),
+            },
+            missing: String::new(),
+        });
+        let large = registry.run_tool(&look);
+        assert!(large.is_error);
+        assert_eq!(large.content, "the frame's picture is too large to send");
+        assert_eq!(large.picture, None);
+
+        // A host that leaves the trait's own answer says it cannot draw.
+        struct Still;
+        impl Player for Still {
+            fn seek(&mut self, _time_us: i64) -> Result<(), String> {
+                Ok(())
+            }
+            fn play(&mut self) -> Result<(), String> {
+                Ok(())
+            }
+            fn pause(&mut self) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        assert_eq!(
+            Still.look(None).unwrap_err(),
+            "this host cannot draw a frame"
+        );
     }
 
     #[test]

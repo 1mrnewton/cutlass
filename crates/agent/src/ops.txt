@@ -79,6 +79,9 @@ set_vertical_flip: Flip a clip top to bottom (true) or not.
 set_rotation: Turn a clip's picture by degrees counter-clockwise (negative turns clockwise; 90 puts its right edge on top).
 {"op":"set_rotation","segment_id":"a","degrees":15.0}
 
+set_pivot: Set the point a clip's picture turns about and is sized about; x and y are shares of the picture's own half size from its middle with y up, each -8 to 8, so 0 0 is its middle, -1 0 the middle of its left edge and 1 1 its upper right corner. A picture that is neither turned nor sized stays where it is: set the pivot, then turn it or key its rotation, and it swings on that point (a door on its hinge, a hand on a clock). The pivot itself is not keyed.
+{"op":"set_pivot","segment_id":"a","x":-1.0,"y":0.0}
+
 set_position: Place a clip's picture; x and y are fractions of half the canvas from the middle, so 0 0 is centered and 1 puts the picture's middle on the right or top edge, y up.
 {"op":"set_position","segment_id":"a","x":0.5,"y":-0.25}
 
@@ -224,7 +227,7 @@ set_shape_shadow: Cast a shape shadow in color "#rrggbb" (empty keeps its color)
 add_effect: Place the bundled effect effect_id, "recipe/<name>" such as recipe/shake, recipe/vhs or recipe/zoom-pulse, from start for duration (microseconds) on effect lane track_id, made when missing, with new ids segment_id and material_id; it runs over every picture below it.
 {"op":"add_effect","track_id":"fx","segment_id":"fx-2","material_id":"fx-2-effect","start":2000000,"duration":2000000,"effect_id":"recipe/vhs"}
 
-bind_effect: Make the effect clip segment_id run only over clip, a clip on a video lane (main or an overlay), or null to run over every picture below again.
+bind_effect: Make the effect clip segment_id run only over clip, a clip on a video, sticker or text lane (a picture, a shape, a title or a compound clip of them), or null to run over every picture below again; an effect that is not bound never reaches text or stickers, which are drawn above it, so bind it to blur or glow a title.
 {"op":"bind_effect","segment_id":"fx-1","clip":"a"}
 
 set_blend: Blend a clip with the picture below by mode blend-multiply, blend-screen, blend-overlay, blend-add, blend-darken, blend-lighten, blend-color-burn, blend-color-dodge, blend-hard-light, blend-soft-light, blend-difference or blend-exclusion; empty or blend-source-over removes it; material_id names the new blend material; refused on audio, effect and filter lanes.
@@ -296,8 +299,8 @@ remove_keyframe: Remove the pose keys at offset microseconds from the clip's sta
 set_keyframe_graph: Ease the span ending at the key at offset (microseconds from the clip's start; there must be an earlier key) along graph, a curve name such as Ease In, Ease Out, Ease, Quad Ease, Cubic Ease, Bounce 1, or null for straight; properties (optional) limits it to those keys, else every pose key.
 {"op":"set_keyframe_graph","segment_id":"a","offset":1000000,"graph":"Ease Out"}
 
-set_animation: Give a clip an in, out or loop animation (kind in, out, loop, or caption for a text clip) by resource id such as cutlass-anim-in-pop, cutlass-anim-out-slide-down or cutlass-anim-loop-float, lasting duration microseconds (held to at least 100000 and what the clip has room for), or null to clear that side.
-{"op":"set_animation","segment_id":"title-1","kind":"in","animation":"cutlass-anim-in-pop","duration":500000}
+set_animation: Give a clip an in, out or loop animation (kind in, out, loop, or caption for a text clip) by resource id such as cutlass-anim-in-zoom-in, cutlass-anim-out-slide-down or cutlass-anim-loop-float, lasting duration microseconds (held to at least 100000 and what the clip has room for), or null to clear that side; catalog.search "animation" lists the ids as animation-in, animation-out or animation-loop, and kind must match the one listed; an id listed (text only), such as cutlass-anim-in-pop or cutlass-anim-in-typewriter, moves letters and is refused on a shape, sticker or video clip.
+{"op":"set_animation","segment_id":"title-1","kind":"in","animation":"cutlass-anim-in-zoom-in","duration":500000}
 
 key_pose: Change a clip's pose at offset microseconds from its start; x and y as in set_position, scale as in set_scale, rotation in degrees counter-clockwise; parts that already have keys are keyed, others are stored, unchanged parts are left alone.
 {"op":"key_pose","segment_id":"a","offset":1000000,"x":0.2,"y":0.0,"scale":1.2,"rotation":0.0}

@@ -3,24 +3,32 @@
 //! assistant makes is one undo step like any other, and the player moves
 //! the window's playhead.
 
+use std::cell::RefCell;
+
 use cutlass_agent::{
-    ApprovalAction, Approver, DraftTools, Export, McpClient, Player, Registry, SettingsTool,
-    Speech, ToolCall, ToolOutcome, ToolSink, TrackAsk, Tracking,
+    ApprovalAction, Approver, DraftTools, Export, Frame, McpClient, Picture, Player, Registry,
+    SettingsTool, Speech, ToolCall, ToolOutcome, ToolSink, TrackAsk, Tracking,
 };
 use cutlass_codec::CodecId;
-use cutlass_model::Micros;
+use cutlass_model::{Micros, TimeRange};
 
 use super::{ExportRequest, Shell};
 use crate::mcp::{Bundled, Probe};
 
-/// Player moves, made on the window once the call is done.
-#[derive(Default)]
-struct Moves {
+/// The window during one call, shared by the hosts that draw and hear on
+/// it. The registry calls one host at a time, so they never hold it at
+/// once.
+type Window<'a> = RefCell<&'a mut Shell>;
+
+/// Player moves, made on the window once the call is done, and looks,
+/// drawn on it at once.
+struct Moves<'a> {
+    window: &'a Window<'a>,
     seek: Option<i64>,
     play: Option<bool>,
 }
 
-impl Player for Moves {
+impl Player for Moves<'_> {
     fn seek(&mut self, time_us: i64) -> Result<(), String> {
         if time_us < 0 {
             return Err("the time is before the start".to_owned());
@@ -37,6 +45,13 @@ impl Player for Moves {
     fn pause(&mut self) -> Result<(), String> {
         self.play = Some(false);
         Ok(())
+    }
+
+    fn look(&mut self, time_us: Option<i64>) -> Result<Frame, String> {
+        self.window
+            .borrow_mut()
+            .look(time_us)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -59,18 +74,20 @@ impl Approver for Asked<'_> {
 
 /// Transcription as a window job; an earlier call's job is polled here.
 struct Hearing<'a> {
-    shell: &'a mut Shell,
+    window: &'a Window<'a>,
 }
 
 impl Speech for Hearing<'_> {
     fn start(&mut self, start_us: i64, duration_us: i64) -> Result<String, String> {
-        self.shell
+        self.window
+            .borrow_mut()
             .start_hearing(start_us, duration_us)
             .map_err(|error| error.to_string())
     }
 
     fn poll(&mut self, job_id: &str) -> Result<Option<String>, String> {
-        self.shell
+        self.window
+            .borrow_mut()
             .hearing(job_id)
             .map_err(|error| error.to_string())
     }
@@ -241,6 +258,44 @@ impl Shell {
         Some((export.id.clone(), state))
     }
 
+    /// The frame at `time_us`, or at the playhead, drawn small for the
+    /// assistant or an MCP client to look at. It is the picture a still
+    /// export writes at that time, so what it lacks on a machine with no
+    /// GPU is said with it. The playhead stays where it is.
+    pub(crate) fn look(&mut self, time_us: Option<i64>) -> Result<Frame, super::ShellError> {
+        let time = time_us.map_or(self.playhead, Micros);
+        self.open_offscreen();
+        let draft = self.session_draft()?;
+        let missing = self
+            .left_out(draft, &[&TimeRange::new(time.0, 1)])
+            .map(|left_out| {
+                format!(
+                    "{left_out}. Effects are drawn on a GPU, and none could be opened on this \
+                     machine."
+                )
+            })
+            .unwrap_or_default();
+        let (width, height, bytes) = cutlass_export::look_picture(
+            &cutlass_export::MovieSources {
+                draft,
+                root: self.path.as_deref(),
+                readers: &self.readers,
+                fonts: &*self.face,
+                renderer: self.export_renderer(),
+                encoders: &self.encoders,
+            },
+            time,
+        )
+        .map_err(super::export_failure)?;
+        Ok(Frame {
+            time_us: time.0,
+            width,
+            height,
+            picture: Picture::jpeg(&bytes),
+            missing,
+        })
+    }
+
     /// Run one tool call from the assistant on the open project. `allowed`
     /// is what the user allowed for this call; a call that needs anything
     /// else does nothing and says what it wants.
@@ -264,6 +319,7 @@ impl Shell {
                 outcome: ToolOutcome {
                     content: "no project is open".to_owned(),
                     is_error: true,
+                    picture: None,
                 },
                 wants: None,
             };
@@ -293,12 +349,17 @@ impl Shell {
         );
         let mut draft = DraftTools::new(session);
         draft.set_remembered(std::mem::take(&mut self.agent_request_ids));
+        let window = RefCell::new(&mut *self);
         let mut registry = Registry::new(
             draft,
             settings,
-            Moves::default(),
+            Moves {
+                window: &window,
+                seek: None,
+                play: None,
+            },
             Probe,
-            Hearing { shell: self },
+            Hearing { window: &window },
             Bundled,
             (
                 Bundled,
@@ -320,7 +381,7 @@ impl Shell {
         let servers = std::mem::take(registry.mcp.transport_mut());
         let session = registry.draft.session().clone();
         let request_ids = registry.draft.take_remembered();
-        let moves = std::mem::take(&mut registry.player);
+        let (seek, play) = (registry.player.seek, registry.player.play);
         let exported = registry.export.path.take();
         let jobs = registry.take_speech_jobs();
         let mut track_jobs = registry.take_track_jobs();
@@ -352,6 +413,7 @@ impl Shell {
             outcome = ToolOutcome {
                 content: error.to_string(),
                 is_error: true,
+                picture: None,
             };
         }
         self.agent_track_jobs = track_jobs;
@@ -360,10 +422,10 @@ impl Shell {
             self.lanes_cache.replace(None);
             self.bars_cache.replace(None);
         }
-        if let Some(time) = moves.seek {
+        if let Some(time) = seek {
             self.seek(Micros(time));
         }
-        match moves.play {
+        match play {
             Some(true) => self.play(),
             Some(false) => self.pause(),
             None => {}
@@ -385,6 +447,7 @@ impl Shell {
                     outcome = ToolOutcome {
                         content: error.to_string(),
                         is_error: true,
+                        picture: None,
                     };
                 }
                 // A still is written by the time `export` returns.
@@ -404,6 +467,7 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use cutlass_agent::ToolCall;
+    use cutlass_codec::CodecId;
     use cutlass_model::{Draft, Micros, Segment, TimeRange, TrackId};
     use cutlass_store::Folder;
     use serde_json::json;
@@ -429,6 +493,7 @@ mod tests {
         let done = cutlass_agent::ToolOutcome {
             content: "the project".to_owned(),
             is_error: false,
+            picture: None,
         };
         super::log_tool_call("assistant", &ok, &done, std::time::Duration::from_millis(3));
         let failed = ToolCall {
@@ -438,6 +503,7 @@ mod tests {
         let long = cutlass_agent::ToolOutcome {
             content: format!("bad-start{}", "é".repeat(400)),
             is_error: true,
+            picture: None,
         };
         super::log_tool_call("mcp", &failed, &long, std::time::Duration::from_millis(3));
         let log = crate::test_log::text();
@@ -475,6 +541,129 @@ mod tests {
         assert!(
             log.contains("assistant tool draft.query (log-call-no-project) failed"),
             "{log}"
+        );
+    }
+
+    /// The bytes of standard base64 text, as a picture holds its file.
+    fn from_base64(text: &str) -> Vec<u8> {
+        let value = |letter: u8| -> u32 {
+            match letter {
+                b'A'..=b'Z' => u32::from(letter - b'A'),
+                b'a'..=b'z' => u32::from(letter - b'a') + 26,
+                b'0'..=b'9' => u32::from(letter - b'0') + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => panic!("not base64: {letter}"),
+            }
+        };
+        let mut bytes = Vec::new();
+        for group in text.as_bytes().chunks(4) {
+            let letters: Vec<u8> = group.iter().copied().filter(|&l| l != b'=').collect();
+            let mut bits = 0;
+            for &letter in &letters {
+                bits = bits << 6 | value(letter);
+            }
+            bits <<= 6 * (4 - letters.len());
+            let whole = [(bits >> 16) as u8, (bits >> 8) as u8, bits as u8];
+            bytes.extend_from_slice(&whole[..letters.len() - 1]);
+        }
+        bytes
+    }
+
+    #[test]
+    fn the_assistant_looks_at_a_frame_without_moving_the_playhead() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.tracks[0].id = TrackId::new("main");
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "missing", TimeRange::new(0, 2_000_000)));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        // No project: there is nothing to draw, and no picture.
+        let none = desktop
+            .run_agent_tool(&call("player.look", ""), &[])
+            .outcome;
+        assert!(none.is_error);
+        assert_eq!(none.picture, None);
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.seek(Micros(500_000));
+        let revision = desktop.session().unwrap().revision();
+
+        // At the playhead: the 1920 by 1080 canvas, 480 on its short side.
+        let here = desktop
+            .run_agent_tool(&call("player.look", ""), &[])
+            .outcome;
+        assert!(!here.is_error, "{}", here.content);
+        assert_eq!(
+            here.content,
+            "frame at 500000, 853x480: the picture is with this result"
+        );
+        let picture = here.picture.unwrap();
+        assert_eq!(picture.media_type, "image/jpeg");
+        let file = from_base64(&picture.data);
+        let info = cutlass_jpeg::read_jpeg_info(&file).unwrap();
+        assert_eq!((info.width, info.height), (853, 480));
+        // A frame for a look is small to send.
+        assert!(file.len() < 200_000, "{} bytes", file.len());
+
+        // At a time: that time is named, and nothing moved or changed.
+        let there = desktop
+            .run_agent_tool(&call("player.look", "1500000"), &[])
+            .outcome;
+        assert!(
+            there.content.starts_with("frame at 1500000, 853x480"),
+            "{}",
+            there.content
+        );
+        assert!(there.picture.is_some());
+        assert_eq!(desktop.playhead(), Micros(500_000));
+        assert_eq!(desktop.session().unwrap().revision(), revision);
+        assert!(!desktop.can_undo());
+
+        // Past the last clip is refused, with no picture.
+        let late = desktop
+            .run_agent_tool(&call("player.look", "2000001"), &[])
+            .outcome;
+        assert!(late.is_error);
+        assert_eq!(late.picture, None);
+
+        // The look shows the project as it is now: a red, tall canvas is
+        // 480 wide and red.
+        let tall = json!({
+            "expected_revision": revision,
+            "requests": [
+                { "op": "set_canvas_background", "color": "#ff0000" },
+                { "op": "set_canvas_size", "width": 1080, "height": 1920, "ratio": "9:16" },
+            ],
+        });
+        let set = desktop
+            .run_agent_tool(&call("draft.apply", &tall.to_string()), &[])
+            .outcome;
+        assert!(!set.is_error, "{}", set.content);
+        let looked = desktop
+            .run_agent_tool(&call("player.look", "0"), &[])
+            .outcome;
+        assert_eq!(
+            looked.content,
+            "frame at 0, 480x853: the picture is with this result"
+        );
+        let file = from_base64(&looked.picture.unwrap().data);
+        let mut decoder = cutlass_jpeg::JpegDecoder::open(&cutlass_decode::CodecParams::video(
+            CodecId::Jpeg,
+            1,
+            1,
+        ))
+        .unwrap();
+        let packet = cutlass_decode::Packet::video(file, 0, 1, 30, true);
+        let pictures = cutlass_decode::Decoder::decode_picture(&mut decoder, &packet).unwrap();
+        let image = &pictures[0].image;
+        assert_eq!((image.width, image.height), (480, 853));
+        let middle = (853 / 2 * 480 + 240) * 3;
+        let pixel = &image.samples[middle..middle + 3];
+        assert!(
+            pixel[0] > 200 && pixel[1] < 60 && pixel[2] < 60,
+            "the middle of the frame is {pixel:?}"
         );
     }
 

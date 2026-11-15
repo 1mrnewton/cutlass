@@ -46,6 +46,18 @@ impl StillFormat {
 /// JPEG quality out of 100.
 const JPEG_QUALITY: u8 = 92;
 
+/// The short side, in pixels, of a picture drawn to be looked at; a
+/// smaller canvas is not made larger.
+pub const LOOK_SHORT_SIDE: u32 = 480;
+
+/// The longest side of a picture drawn to be looked at, which a very wide
+/// or very tall canvas reaches first.
+pub const LOOK_LONG_SIDE: u32 = 1024;
+
+/// JPEG quality of a picture drawn to be looked at: where things are and
+/// how they read, at a small size to send.
+const LOOK_QUALITY: u8 = 80;
+
 /// Write the picture at `time` to `destination`. Answers the picture's
 /// width and height.
 pub fn write_still(
@@ -83,6 +95,82 @@ pub fn still_picture(
     )
 }
 
+/// The picture at `time`, scaled down to be looked at instead of kept: a
+/// JPEG no larger than [`LOOK_SHORT_SIDE`] by [`LOOK_LONG_SIDE`], with its
+/// width and height. It is the picture [`write_still`] writes, smaller.
+pub fn look_picture(
+    sources: &MovieSources<'_>,
+    time: Micros,
+) -> Result<(u32, u32, Vec<u8>), ExportError> {
+    let (width, height, rgba) = still_picture(sources, time)?;
+    let (small_width, small_height) = look_size(width, height);
+    let rgba = if (small_width, small_height) == (width, height) {
+        rgba
+    } else {
+        let full = image::RgbaImage::from_raw(width, height, rgba)
+            .ok_or_else(|| ExportError::Picture("the frame is not its size".to_owned()))?;
+        image::imageops::resize(
+            &full,
+            small_width,
+            small_height,
+            image::imageops::FilterType::Triangle,
+        )
+        .into_raw()
+    };
+    let bytes = jpeg(small_width, small_height, &rgba, LOOK_QUALITY)?;
+    Ok((small_width, small_height, bytes))
+}
+
+/// The size a `width` by `height` canvas is looked at: scaled down, never
+/// up, until its short side is within [`LOOK_SHORT_SIDE`] and its long
+/// side within [`LOOK_LONG_SIDE`], and at least a pixel each way.
+fn look_size(width: u32, height: u32) -> (u32, u32) {
+    let (short, long) = (width.min(height), width.max(height));
+    if short <= LOOK_SHORT_SIDE && long <= LOOK_LONG_SIDE {
+        return (width, height);
+    }
+    // The tighter of the two limits, as a fraction: `over` / `under`.
+    let (over, under) = if u64::from(LOOK_SHORT_SIDE) * u64::from(long)
+        <= u64::from(LOOK_LONG_SIDE) * u64::from(short)
+    {
+        (LOOK_SHORT_SIDE, short)
+    } else {
+        (LOOK_LONG_SIDE, long)
+    };
+    let scaled = |side: u32| {
+        let rounded = (u64::from(side) * u64::from(over) + u64::from(under) / 2) / u64::from(under);
+        u32::try_from(rounded).unwrap_or(u32::MAX).max(1)
+    };
+    (scaled(width), scaled(height))
+}
+
+/// `rgba` as a JPEG file at `quality` out of 100.
+fn jpeg(width: u32, height: u32, rgba: &[u8], quality: u8) -> Result<Vec<u8>, ExportError> {
+    // The encoder panics on a buffer that is not the picture's size.
+    let samples = u64::from(width) * u64::from(height) * 4;
+    if u64::try_from(rgba.len()).ok() != Some(samples) {
+        return Err(ExportError::Picture("the frame is not its size".to_owned()));
+    }
+    // JPEG has no alpha: lay each pixel on black.
+    let rgb: Vec<u8> = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|pixel| {
+            let alpha = u16::from(pixel[3]);
+            [0, 1, 2].map(|channel| {
+                let over = u16::from(pixel[channel]) * alpha / 255;
+                u8::try_from(over).unwrap_or(u8::MAX)
+            })
+        })
+        .collect();
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality)
+        .write_image(&rgb, width, height, ExtendedColorType::Rgb8)
+        .map_err(|error| ExportError::Picture(error.to_string()))?;
+    Ok(bytes)
+}
+
 /// `rgba` as the bytes of a `format` file. WebP comes from `encoders`.
 fn encoded(
     width: u32,
@@ -100,23 +188,7 @@ fn encoded(
             height,
             ExtendedColorType::Rgba8,
         ),
-        StillFormat::Jpeg => {
-            // JPEG has no alpha: lay each pixel on black.
-            let rgb: Vec<u8> = rgba
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .flat_map(|pixel| {
-                    let alpha = u16::from(pixel[3]);
-                    [0, 1, 2].map(|channel| {
-                        let over = u16::from(pixel[channel]) * alpha / 255;
-                        u8::try_from(over).unwrap_or(u8::MAX)
-                    })
-                })
-                .collect();
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, JPEG_QUALITY)
-                .write_image(&rgb, width, height, ExtendedColorType::Rgb8)
-        }
+        StillFormat::Jpeg => return jpeg(width, height, rgba, JPEG_QUALITY),
     };
     result.map_err(|error| ExportError::Picture(error.to_string()))?;
     Ok(bytes)
@@ -160,6 +232,44 @@ fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use cutlass_decode::Decoder;
+
+    #[test]
+    fn a_look_is_scaled_down_to_its_limits_and_never_up() {
+        for (canvas, looked) in [
+            // The short side is the limit for the usual canvases.
+            ((1920, 1080), (853, 480)),
+            ((1080, 1920), (480, 853)),
+            ((3840, 2160), (853, 480)),
+            ((1280, 720), (853, 480)),
+            ((1080, 1080), (480, 480)),
+            // A strip reaches the long side first.
+            ((4000, 480), (1024, 123)),
+            ((480, 4000), (123, 1024)),
+            ((5000, 10), (1024, 2)),
+            // A side never scales away.
+            ((100_000, 1), (1024, 1)),
+            // Within both limits already: as it is.
+            ((640, 360), (640, 360)),
+            ((1024, 480), (1024, 480)),
+            ((1, 1), (1, 1)),
+        ] {
+            assert_eq!(look_size(canvas.0, canvas.1), looked, "{canvas:?}");
+        }
+    }
+
+    #[test]
+    fn a_look_is_a_jpeg_laid_on_black() {
+        // Opaque red, then clear white, which reads as black.
+        let rgba = [255, 0, 0, 255, 255, 255, 255, 0];
+        let bytes = jpeg(2, 1, &rgba, LOOK_QUALITY).unwrap();
+        assert_eq!(&bytes[..2], &[0xff, 0xd8]);
+        let read = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg)
+            .unwrap()
+            .to_rgb8();
+        assert_eq!(read.dimensions(), (2, 1));
+        // A bad size is an error, not a picture.
+        assert!(jpeg(3, 1, &rgba, LOOK_QUALITY).is_err());
+    }
 
     #[test]
     fn each_format_writes_a_file_its_decoder_reads_back() {

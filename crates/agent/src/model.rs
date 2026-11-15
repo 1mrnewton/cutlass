@@ -10,6 +10,8 @@ use cutlass_session::Request;
 use cutlass_settings::Settings;
 use serde::{Deserialize, Serialize};
 
+use crate::picture::Picture;
+
 /// A tool the model is allowed to call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolDefinition {
@@ -56,6 +58,9 @@ pub enum Message {
         content: String,
         /// Whether the tool failed.
         is_error: bool,
+        /// A picture the tool handed the model with its text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        picture: Option<Picture>,
     },
 }
 
@@ -255,6 +260,7 @@ mod tests {
             name: "draft.query".to_owned(),
             content: content.to_owned(),
             is_error: false,
+            picture: None,
         };
         let mut messages = vec![
             Message::User {

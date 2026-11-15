@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use crate::chat::ChatTransport;
 use crate::mcp_server::{input_schema, registry_name, takes_object};
 use crate::model::{Completion, CompletionRequest, Message, Model, ModelError, ToolCall};
+use crate::picture::Picture;
 
 /// The API version this runner speaks.
 pub const ANTHROPIC_VERSION: &str = "2026-10-21";
@@ -119,11 +120,12 @@ impl<T: ChatTransport> ClaudeModel<T> {
                     call_id,
                     content,
                     is_error,
+                    picture,
                     ..
                 } => results.push(json!({
                     "type": "tool_result",
                     "tool_use_id": call_id,
-                    "content": content,
+                    "content": result_content(content, picture.as_ref()),
                     "is_error": is_error,
                 })),
             }
@@ -165,6 +167,28 @@ impl<T: ChatTransport> Model for ClaudeModel<T> {
             .insert(reply_key(&completion.text, &completion.calls), content);
         Ok(completion)
     }
+}
+
+/// A tool result's content: its text, or its text and then its picture as
+/// blocks. A text block may not be empty, so a picture with no text goes
+/// alone.
+fn result_content(text: &str, picture: Option<&Picture>) -> Value {
+    let Some(picture) = picture else {
+        return json!(text);
+    };
+    let mut blocks = Vec::new();
+    if !text.is_empty() {
+        blocks.push(json!({ "type": "text", "text": text }));
+    }
+    blocks.push(json!({
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": picture.media_type,
+            "data": picture.data,
+        },
+    }));
+    Value::Array(blocks)
 }
 
 /// A reply's key: its text and its tool call ids.
@@ -221,9 +245,9 @@ pub fn parse_claude_reply(reply: &str) -> Result<(Completion, Value), ModelError
             .and_then(Value::as_str)
             .map_or_else(|| error.to_string(), str::to_owned);
         let hint = match kind {
-            "authentication_error" => " Check the key in Settings → Assistant.",
+            "authentication_error" => " Check the key in Settings › Assistant.",
             "permission_error" => " The key may not have access to that model.",
-            "not_found_error" => " Check the model name in Settings → Assistant.",
+            "not_found_error" => " Check the model name in Settings › Assistant.",
             "rate_limit_error" | "overloaded_error" => " Wait a moment and ask again.",
             _ => "",
         };
@@ -382,6 +406,7 @@ mod tests {
                 name: name.to_owned(),
                 content: "ok".to_owned(),
                 is_error: id == "t2",
+                picture: None,
             });
         }
         let done = model
@@ -429,7 +454,7 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("invalid x-api-key"), "{error}");
-        assert!(error.contains("Settings → Assistant"), "{error}");
+        assert!(error.contains("Settings › Assistant"), "{error}");
         let refused = parse_claude_reply(
             r#"{"type":"message","stop_reason":"refusal","content":[],"stop_details":{"type":"refusal","category":null,"explanation":"not this"}}"#,
         )
@@ -448,5 +473,62 @@ mod tests {
         assert!(cut.text.contains("cut off"), "{}", cut.text);
         assert!(wants_fallback("claude-opus-5-5"));
         assert!(!wants_fallback("claude-haiku-4-5"));
+    }
+
+    #[test]
+    fn a_tool_result_with_a_picture_is_sent_as_text_and_image_blocks() {
+        let model = ClaudeModel::new(
+            Replies {
+                sent: Vec::new(),
+                replies: Vec::new(),
+            },
+            "claude-opus-5-5",
+        );
+        let picture = crate::Picture::jpeg(b"frame");
+        let result =
+            |call_id: &str, content: &str, picture: Option<crate::Picture>| Message::Tool {
+                call_id: call_id.to_owned(),
+                name: "player.look".to_owned(),
+                content: content.to_owned(),
+                is_error: false,
+                picture,
+            };
+        let body = model.body(&CompletionRequest {
+            messages: vec![
+                Message::User {
+                    text: "look".to_owned(),
+                },
+                Message::Assistant {
+                    text: String::new(),
+                    calls: ["t1", "t2", "t3"]
+                        .iter()
+                        .map(|id| crate::model::ToolCall {
+                            id: (*id).to_owned(),
+                            name: "player.look".to_owned(),
+                            arguments: String::new(),
+                        })
+                        .collect(),
+                },
+                result("t1", "frame at 0", Some(picture.clone())),
+                result("t2", "", Some(picture.clone())),
+                result("t3", "no picture", None),
+            ],
+            tools: Vec::new(),
+        });
+        let results = &body["messages"][2]["content"];
+        let image = json!({
+            "type": "image",
+            "source": { "type": "base64", "media_type": "image/jpeg", "data": picture.data },
+        });
+        // The text, then the picture, inside the result it belongs to.
+        assert_eq!(results[0]["tool_use_id"], "t1");
+        assert_eq!(
+            results[0]["content"],
+            json!([{ "type": "text", "text": "frame at 0" }, image])
+        );
+        // No text: the picture alone, as an empty text block is refused.
+        assert_eq!(results[1]["content"], json!([image]));
+        // No picture: the text as it always went.
+        assert_eq!(results[2]["content"], "no picture");
     }
 }

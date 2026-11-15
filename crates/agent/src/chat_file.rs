@@ -63,6 +63,7 @@ mod tests {
                 name: "draft.query".to_owned(),
                 content: "revision=0".to_owned(),
                 is_error: false,
+                picture: None,
             },
         ];
         save_chat(&file, &messages).unwrap();

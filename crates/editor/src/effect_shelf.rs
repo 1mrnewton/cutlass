@@ -123,14 +123,20 @@ pub struct EffectPlace {
     pub on: Option<SegmentId>,
 }
 
-/// The span of a picture clip an effect can go on: a clip on a video row
-/// with a positive length.
+/// The span of a picture clip an effect can go on: a clip on a video,
+/// sticker or text row with a positive length. A title or a shape takes an
+/// effect as a movie does.
 #[must_use]
 pub fn effect_target(draft: &Draft, clip: &SegmentId) -> Option<(Micros, Micros)> {
     draft
         .tracks
         .iter()
-        .filter(|track| track.kind == TrackType::Video)
+        .filter(|track| {
+            matches!(
+                track.kind,
+                TrackType::Video | TrackType::Sticker | TrackType::Text
+            )
+        })
         .flat_map(|track| &track.segments)
         .find(|segment| &segment.id == clip && segment.target.duration.0 > 0)
         .map(|segment| (segment.target.start, segment.target.duration))
@@ -342,6 +348,49 @@ mod tests {
             "that row is now full there"
         );
         assert_eq!(effect_target(draft, &SegmentId::new("shake")), None);
+    }
+
+    #[test]
+    fn a_title_and_a_shape_take_an_effect_and_a_sound_does_not() {
+        let mut draft = draft();
+        for (row, kind, clip) in [
+            ("titles", TrackType::Text, "title"),
+            ("shapes", TrackType::Sticker, "shape"),
+            ("sounds", TrackType::Audio, "sound"),
+        ] {
+            let mut track = cutlass_model::Track::main(row);
+            track.kind = kind;
+            track
+                .segments
+                .push(Segment::new(clip, "m", TimeRange::new(500_000, 1_500_000)));
+            draft.tracks.push(track);
+        }
+        let span = Some((Micros(500_000), Micros(1_500_000)));
+        assert_eq!(effect_target(&draft, &SegmentId::new("title")), span);
+        assert_eq!(effect_target(&draft, &SegmentId::new("shape")), span);
+        assert_eq!(effect_target(&draft, &SegmentId::new("sound")), None);
+        // Dropped on the title, the effect is bound to it and follows it.
+        let place = EffectPlace {
+            track_id: TrackId::new("fx"),
+            segment_id: SegmentId::new("blur"),
+            material_id: MaterialId::new("m-blur"),
+            start: Micros(500_000),
+            duration: Micros(1_500_000),
+            on: Some(SegmentId::new("title")),
+        };
+        let card = &effect_cards()[0];
+        let mut session = Session::open(draft.clone());
+        session
+            .apply(0, &effect_requests(&draft, &card.effect_id, &place))
+            .unwrap();
+        let bound = session
+            .draft()
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| segment.id.as_str() == "blur")
+            .and_then(Segment::bound_clip);
+        assert_eq!(bound, Some(SegmentId::new("title")));
     }
 
     #[test]

@@ -21,6 +21,7 @@ mod mcp_connection;
 mod mcp_server;
 mod model;
 mod ops;
+mod picture;
 mod sandbox;
 #[cfg(feature = "script")]
 mod script;
@@ -28,6 +29,7 @@ mod settings_tool;
 mod skill;
 mod subagent;
 mod tools;
+mod view;
 
 pub use anthropic::{
     ANTHROPIC_URL, ANTHROPIC_VERSION, ClaudeModel, DEFAULT_CLAUDE_MODEL, FALLBACK_BETA,
@@ -56,6 +58,7 @@ pub use model::{
     ToolDefinition, shorten_results,
 };
 pub use ops::{Op, describe as describe_ops, ops};
+pub use picture::{PICTURE_LIMIT, Picture, forget_pictures};
 pub use sandbox::{
     LocalSandbox, OnlineSandbox, ProcessExecutor, Sandbox, SandboxError, SandboxExecutor,
     SandboxPolicy, SandboxRoute, Switched, route_for,
@@ -66,10 +69,11 @@ pub use settings_tool::{SettingsTool, SettingsToolError, SettingsView};
 pub use skill::{Skill, SkillError, SkillLibrary, SkillPlan, parse_skill_md};
 pub use subagent::{Subagent, SubagentError, SubagentResult, allowed_tools, parent_apply};
 pub use tools::{
-    Catalog, Export, Invocation, Media, MediaInfo, Packages, Player, RESULT_LIMIT, Registry,
+    Catalog, Export, Frame, Invocation, Media, MediaInfo, Packages, Player, RESULT_LIMIT, Registry,
     Speech, SpeechJob, SpeechPoll, TOOL_NAMES, ToolError, TrackAsk, TrackJob, Tracking,
     assistant_approvals, pending_approvals, tool_definitions,
 };
+pub use view::{ask_with_view, typed, view_note};
 
 #[cfg(test)]
 mod tests {

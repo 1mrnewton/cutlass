@@ -69,10 +69,11 @@ The builds are not signed with a developer certificate yet, so the first launch 
 
 ## The assistant
 
-Say what you want, and the assistant edits the open project with the same requests the timeline sends. Each change it makes is one undo step.
+Say what you want, and the assistant edits the open project with the same requests the timeline sends. Each change it makes is one undo step, and **Undo turn** in its panel takes back everything a turn did in one click.
 
 - **It runs on your machine.** The assistant talks to a model runner on your own computer, such as [Ollama](https://ollama.com), the llama.cpp server or LM Studio. Set the address and the model in Settings › Assistant. The prompt does not leave your computer on this path.
 - **It asks first.** Anything that would send data off the machine waits for you to allow it.
+- **It looks at its work.** The assistant can ask for the frame at a time as a small picture, so it checks where a title sits or whether an effect shows instead of guessing. The model needs to take pictures; one that does not is told there was a picture and carries on.
 - **It has skills.** Captions, removing pauses, motion graphics, a product demo and project setup ship with the app, and it can call tools from the MCP servers you add.
 - **Other agents can drive Cutlass too.** `cutlass mcp /path/to/project` serves the same tools over stdio with no window, so Claude or any MCP client can read and edit a project.
 

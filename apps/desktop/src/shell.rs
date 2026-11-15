@@ -161,6 +161,8 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::Angle) => {
                 formatter.write_str("the rotation is not a finite number of degrees")
             }
+            Self::Edit(EditError::Pivot) => formatter
+                .write_str("the pivot is not a finite number, or is too far from the picture"),
             Self::Edit(EditError::Position) => {
                 formatter.write_str("the position is not a finite number")
             }
@@ -1318,6 +1320,16 @@ impl Shell {
         self.notes_file
             .as_ref()
             .and_then(|path| std::fs::read_to_string(path).ok())
+            .unwrap_or_default()
+    }
+
+    /// What the user is looking at now, for the assistant: the playhead,
+    /// the selected clips and the clips playing at the playhead. Empty
+    /// when no project is open.
+    #[must_use]
+    pub fn assistant_view(&self) -> String {
+        self.draft()
+            .map(|draft| cutlass_agent::view_note(draft, self.playhead, &self.selection))
             .unwrap_or_default()
     }
 
@@ -2867,6 +2879,28 @@ impl Shell {
             Err(error) => {
                 let error = ShellError::Edit(error);
                 cutlass_logger::warn!("undo refused: {error}");
+                Err(error)
+            }
+        }
+    }
+
+    /// Put the project back to `earlier`, a draft it held before, as one
+    /// undo step: an undo brings back what it replaced. Refused when the
+    /// project is no longer at `revision`, or a drag is open.
+    pub fn restore(&mut self, revision: u64, earlier: Draft) -> Result<(), ShellError> {
+        let before = self.cover().cloned();
+        let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
+        match session.restore(revision, earlier) {
+            Ok(revision) => {
+                cutlass_logger::info!("restore: revision {revision}");
+                self.lanes_cache.replace(None);
+                self.bars_cache.replace(None);
+                self.follow_cover(before);
+                Ok(())
+            }
+            Err(error) => {
+                let error = ShellError::Edit(error);
+                cutlass_logger::warn!("restore refused: {error}");
                 Err(error)
             }
         }
@@ -16010,7 +16044,14 @@ mod tests {
         assert_eq!((text.typesetting, text.line_max_width), (1, 180.0));
         assert_ne!(digest(&desktop.preview_bytes().unwrap().rgba), across);
         let tall = desktop.stage_box(&title).unwrap();
-        assert!(wide.width > wide.height && tall.height > tall.width);
+        // The column is taller than it is wide, and taller and narrower
+        // than the line was. The line's box is as tall as a line of text,
+        // so two short letters across are not wider than that.
+        assert!(tall.height > tall.width, "{tall:?}");
+        assert!(
+            tall.height > wide.height && tall.width < wide.width,
+            "{wide:?} {tall:?}"
+        );
         for alignment in [4, 5] {
             desktop.set_text_align(alignment).unwrap();
             assert_eq!(desktop.inspection().unwrap().text_align, alignment);

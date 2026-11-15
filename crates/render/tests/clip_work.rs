@@ -25,9 +25,8 @@ fn renderer() -> Option<Renderer> {
 }
 
 /// Two colour clips on a grey canvas: a blue one under the whole frame and
-/// an orange one, shrunk, turned and moved off the middle, over it. Both are
-/// on one layer, so the orange one's row goes above the blue one's: the top
-/// row, first in the track list, is drawn last.
+/// an orange one, shrunk, turned and moved off the middle, over it. The
+/// orange row is first, the top row, so it is drawn over the blue one.
 fn scene() -> Draft {
     let mut draft = Draft::empty("draft");
     draft.canvas_config.width = WIDTH as i32;
@@ -52,6 +51,16 @@ fn scene() -> Draft {
     row.segments.push(over);
     draft.tracks.insert(0, row);
     draft
+}
+
+/// The orange clip.
+fn orange(draft: &mut Draft) -> &mut Segment {
+    draft
+        .tracks
+        .iter_mut()
+        .flat_map(|track| track.segments.iter_mut())
+        .find(|segment| segment.id == clip())
+        .expect("the orange clip")
 }
 
 fn apply(draft: Draft, requests: &[Request]) -> Draft {
@@ -385,9 +394,7 @@ fn on_clip(draft: &mut Draft, id: &str, package: &str) {
     let mut effect = MaterialEffect::new(id);
     effect.effect_id = package.to_owned();
     draft.materials.effects.push(effect);
-    draft.tracks[0].segments[0]
-        .extra_material_refs
-        .push(id.into());
+    orange(draft).extra_material_refs.push(id.into());
 }
 
 /// `draft` on both paths, which must agree, and differ from `draft`
@@ -435,7 +442,7 @@ fn effect_packages_over_the_clips_below_match() {
     }
     // Two, with a clip drawn between them.
     let mut draft = scene();
-    draft.tracks[0].segments[0].render_index = 12_000;
+    orange(&mut draft).render_index = 12_000;
     global(&mut draft, "first", cutlass_effects::PIXELATE, 11_000);
     global(&mut draft, "second", cutlass_effects::INVERT, 13_000);
     packaged(&renderer, &store, "pixelate under, invert over", &draft);

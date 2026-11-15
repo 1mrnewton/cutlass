@@ -2176,6 +2176,40 @@ mod recipe_tests {
     }
 
     #[test]
+    fn a_recipe_bound_to_a_clip_drawn_above_effects_runs_inside_that_clip() {
+        // A title or a sticker is drawn above every effect row. Bound to
+        // one, the effect still runs in it, and leaves the clips below.
+        let mut draft = with_effect("recipe/vignette");
+        let top = draft.tracks.len() - 1;
+        colour(&mut draft, "above", 14_000, top);
+        if let Some(effect) = draft.tracks[top]
+            .segments
+            .iter_mut()
+            .find(|segment| segment.id.as_str() == "fx")
+        {
+            effect.bind_to(Some(&"above".into()));
+        }
+        let frame = layers(&draft, 600_000);
+        assert!(effects(&frame).is_empty(), "no effect over the whole frame");
+        let nested: Vec<usize> = frame
+            .layers
+            .iter()
+            .enumerate()
+            .filter(|(_, layer)| matches!(layer.source, GpuSource::Nested(_)))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            nested,
+            vec![frame.layers.len() - 1],
+            "only the clip on top carries the effect"
+        );
+        let Some(GpuSource::Nested(child)) = frame.layers.last().map(|layer| &layer.source) else {
+            panic!("the top clip is not drawn with its effect");
+        };
+        assert_eq!(effects(child), vec![child.layers.len() - 1]);
+    }
+
+    #[test]
     fn an_unknown_recipe_is_not_run() {
         let mut device = SoftwareDevice::new();
         let media = ReaderFactory::new();

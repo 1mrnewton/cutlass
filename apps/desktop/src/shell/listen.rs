@@ -100,6 +100,7 @@ impl Shell {
                         action.prompt()
                     ),
                     is_error: true,
+                    picture: None,
                 },
                 None => run.outcome,
             };

@@ -104,6 +104,8 @@ pub struct StageGesture {
     /// The picture fitted in the canvas at scale 1.
     fitted: (f64, f64),
     start: Pose,
+    /// The point the clip turns and is sized about.
+    pivot: Pivot,
     /// The offset from the clip's start to key the pose at, when the clip
     /// has keys.
     keyed: Option<Micros>,
@@ -162,6 +164,7 @@ pub fn stage_box(
         canvas,
         fitted,
         pose_of(segment, &draft.keyframe_graph_list, time),
+        pivot_of(segment, &draft.keyframe_graph_list, time),
     ))
 }
 
@@ -291,6 +294,7 @@ pub fn stage_gesture(
             time,
         ),
         start: pose_of(segment, &draft.keyframe_graph_list, time),
+        pivot: pivot_of(segment, &draft.keyframe_graph_list, time),
         keyed: key_at(segment, time),
     })
 }
@@ -357,7 +361,7 @@ impl StageGesture {
             rotation,
         };
         StageStep {
-            stage: box_at(&self.segment_id, self.canvas, self.fitted, pose),
+            stage: box_at(&self.segment_id, self.canvas, self.fitted, pose, self.pivot),
             pose,
             guides,
         }
@@ -473,6 +477,7 @@ fn pose_of(segment: &Segment, graphs: &[KeyframeGraph], time: Micros) -> Pose {
     }
 }
 
+/// Where the clip's middle sits when it is neither turned nor sized.
 fn centre_of(canvas: (f64, f64), pose: Pose) -> (f64, f64) {
     let (width, height) = canvas;
     (
@@ -481,8 +486,59 @@ fn centre_of(canvas: (f64, f64), pose: Pose) -> (f64, f64) {
     )
 }
 
-fn box_at(segment_id: &SegmentId, canvas: (f64, f64), fitted: (f64, f64), pose: Pose) -> StageBox {
-    let (center_x, center_y) = centre_of(canvas, pose);
+/// The point a clip turns and is sized about, for the box drawn round it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Pivot {
+    /// Shares of the picture's half size from its middle, right and up.
+    x: f64,
+    y: f64,
+    /// The height's scale over the width's: 1 with uniform scale on.
+    stretch: f64,
+}
+
+/// The clip's pivot at `time`. One that does not read is the middle.
+fn pivot_of(segment: &Segment, graphs: &[KeyframeGraph], time: Micros) -> Pivot {
+    let (clip, uniform) = clip_at(segment, graphs, time)
+        .unwrap_or_else(|| (segment.clip.clone(), segment.uniform_scale.clone()));
+    let finite = |value: f64| if value.is_finite() { value } else { 0.0 };
+    let stretch = (clip.scale.y / clip.scale.x).abs();
+    Pivot {
+        x: finite(clip.pivot.x),
+        y: finite(clip.pivot.y),
+        stretch: if !uniform.on && stretch.is_finite() && stretch > 0.0 {
+            stretch
+        } else {
+            1.0
+        },
+    }
+}
+
+/// The box round the clip as it is drawn. `fitted` is its size at scale 1
+/// with the stretch of its two scales in the height. The pivot stays where
+/// it is on the canvas, so a clip turned or sized about a pivot off its
+/// middle has its box's middle moved, as its picture is.
+fn box_at(
+    segment_id: &SegmentId,
+    canvas: (f64, f64),
+    fitted: (f64, f64),
+    pose: Pose,
+    pivot: Pivot,
+) -> StageBox {
+    let (rest_x, rest_y) = centre_of(canvas, pose);
+    // The pivot from the middle, right and up: before the clip is sized,
+    // and as sized and turned.
+    let before = (
+        pivot.x * fitted.0 / 2.0,
+        pivot.y * fitted.1 / pivot.stretch / 2.0,
+    );
+    let sized = (
+        pivot.x * fitted.0 / 2.0 * pose.scale,
+        pivot.y * fitted.1 / 2.0 * pose.scale,
+    );
+    let (sin, cos) = pose.rotation.to_radians().sin_cos();
+    let turned = (sized.0 * cos - sized.1 * sin, sized.0 * sin + sized.1 * cos);
+    let center_x = rest_x + before.0 - turned.0;
+    let center_y = rest_y - (before.1 - turned.1);
     StageBox {
         segment_id: segment_id.clone(),
         center_x,
@@ -564,7 +620,7 @@ fn cropped(crop: Crop, width: f64, height: f64) -> (f64, f64) {
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{MaterialVideo, TimeRange, Track, TrackFlag};
+    use cutlass_model::{MaterialVideo, Point, TimeRange, Track, TrackFlag};
 
     use super::*;
 
@@ -670,6 +726,42 @@ mod tests {
         assert!(near(top_left.0, 1440.0 - 270.0) && near(top_left.1, 270.0 + 151.875));
         assert!(stage.contains(1440.0 + 260.0, 270.0));
         assert!(!stage.contains(1440.0, 270.0 + 200.0));
+    }
+
+    #[test]
+    fn the_box_follows_a_clip_sized_and_turned_about_its_pivot() {
+        let mut draft = draft();
+        let main = SegmentId::new("main");
+        // The tall picture is 607.5 by 1080 on the canvas, its lower left
+        // corner at (656.25, 1080). A pivot alone moves nothing.
+        draft.tracks[1].segments[0].clip.pivot = Point::new(-1.0, -1.0);
+        let stage = stage_box(&draft, &main, Micros(0), &NoText).unwrap();
+        assert!(near(stage.center_x, 960.0) && near(stage.center_y, 540.0));
+        // At half its size about that corner, the corner stays and the
+        // box is the lower left quarter of where the picture was.
+        draft.tracks[1].segments[0].uniform_scale.value = 0.5;
+        let stage = stage_box(&draft, &main, Micros(0), &NoText).unwrap();
+        assert!(near(stage.width, 303.75) && near(stage.height, 540.0));
+        assert!(near(stage.center_x, 656.25 + 151.875) && near(stage.center_y, 1080.0 - 270.0));
+        // A quarter turn counter-clockwise swings it to the corner's left.
+        draft.tracks[1].segments[0].clip.rotation = 90.0;
+        let stage = stage_box(&draft, &main, Micros(0), &NoText).unwrap();
+        assert!(near(stage.center_x, 656.25 - 270.0) && near(stage.center_y, 1080.0 - 151.875));
+        assert!(stage.contains(656.25 - 500.0, 1080.0 - 20.0));
+        assert!(!stage.contains(656.25 + 100.0, 1080.0 - 100.0));
+        // With each axis on its own, the foot stays put as the height halves.
+        let segment = &mut draft.tracks[1].segments[0];
+        segment.clip.rotation = 0.0;
+        segment.clip.pivot = Point::new(0.0, -1.0);
+        segment.uniform_scale.on = false;
+        segment.clip.scale = Point::new(1.0, 0.5);
+        let stage = stage_box(&draft, &main, Micros(0), &NoText).unwrap();
+        assert!(near(stage.width, 607.5) && near(stage.height, 540.0));
+        assert!(near(stage.center_x, 960.0) && near(stage.center_y, 1080.0 - 270.0));
+        // A gesture's box moves the same way.
+        let gesture = stage_gesture(&draft, &main, Micros(0), &NoText).unwrap();
+        let step = gesture.step(0.0, 0.0, 1.0, 0.0);
+        assert!(near(step.stage.center_y, 1080.0 - 270.0));
     }
 
     #[test]

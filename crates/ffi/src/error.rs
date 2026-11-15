@@ -134,6 +134,9 @@ fn edit_cause(error: EditError) -> String {
         EditError::AlreadyExtracted => "the sound is already on its own clip".to_owned(),
         EditError::SoundNotSeparate => "the clip still has its sound".to_owned(),
         EditError::Angle => "the rotation is not a finite number of degrees".to_owned(),
+        EditError::Pivot => {
+            "the pivot is not a finite number, or is too far from the picture".to_owned()
+        }
         EditError::Position => "the position is not a finite number".to_owned(),
         EditError::Scale => "the scale must be greater than zero".to_owned(),
         EditError::Fade => "a fade cannot be negative".to_owned(),
@@ -143,7 +146,11 @@ fn edit_cause(error: EditError) -> String {
         EditError::NoKey => "no keyframe is there".to_owned(),
         EditError::KeyValue => "that setting cannot be keyed to that value".to_owned(),
         EditError::Graph => "that curve is not one the app offers".to_owned(),
-        EditError::Animation => "that animation is not one the app offers".to_owned(),
+        EditError::Animation | EditError::AnimationUnknown => {
+            "that animation is not one the app offers".to_owned()
+        }
+        EditError::AnimationSide => "that animation is for the other side of the clip".to_owned(),
+        EditError::AnimationText => "that animation belongs on text".to_owned(),
         EditError::NotText => "a text style belongs on text".to_owned(),
         EditError::NotShape => "a shape style belongs on a shape".to_owned(),
         EditError::ShapeStyle => {

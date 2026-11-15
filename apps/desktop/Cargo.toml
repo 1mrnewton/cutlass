@@ -82,6 +82,15 @@ eframe = { version = "0.37", default-features = false, features = [
     "wgpu",
     "x11",
 ] }
+# The system clipboard, so text copied in another app pastes into a field
+# here and text copied here pastes there. eframe's own `clipboard` feature
+# also brings the Wayland clipboard, which builds with the banned `cc`
+# crate; these two are the part of it that does not. Without them the
+# window keeps a clipboard of its own that no other app sees.
+egui-winit = { version = "0.37", default-features = false, features = [
+    "arboard",
+    "bytemuck",
+] }
 rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
 cutlass-model = { version = "0.1.0", path = "../../crates/model" }
 egui = "0.37"

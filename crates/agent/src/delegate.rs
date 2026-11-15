@@ -122,6 +122,7 @@ where
             Ok(turn) => ToolOutcome {
                 content: turn.completion.text,
                 is_error: false,
+                picture: None,
             },
             Err(error) => failed(format!("the helper stopped: {error}")),
         }
@@ -149,6 +150,7 @@ fn failed(content: String) -> ToolOutcome {
     ToolOutcome {
         content,
         is_error: true,
+        picture: None,
     }
 }
 
@@ -170,6 +172,7 @@ mod tests {
             ToolOutcome {
                 content: format!("ran {}", call.name),
                 is_error: false,
+                picture: None,
             }
         }
 

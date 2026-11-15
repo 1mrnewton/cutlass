@@ -21,6 +21,13 @@ impl Point {
             rest: Map::new(),
         }
     }
+
+    /// Both zero and nothing else stored: a pivot at the middle, which is
+    /// left out of the stored clip.
+    #[must_use]
+    pub fn is_origin(&self) -> bool {
+        self.x == 0.0 && self.y == 0.0 && self.rest.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
@@ -44,6 +51,15 @@ pub struct Clip {
     pub transform: Point,
     pub flip: Flip,
     pub alpha: f64,
+    /// The point of the picture that `rotation` turns it about and `scale`
+    /// sizes it about, as a share of its own half size from its middle with
+    /// y up: (0, 0) is the middle, (-1, -1) the lower left corner, and a
+    /// point past 1 lies outside the picture. `transform` still says where
+    /// the picture's middle sits when it is neither turned nor scaled, so
+    /// moving the pivot does not move such a picture. A pivot at the middle
+    /// is not stored.
+    #[serde(default, skip_serializing_if = "Point::is_origin")]
+    pub pivot: Point,
     /// Keys this model does not name.
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
@@ -57,6 +73,7 @@ impl Default for Clip {
             transform: Point::new(0.0, 0.0),
             flip: Flip::default(),
             alpha: 1.0,
+            pivot: Point::default(),
             rest: Map::new(),
         }
     }
@@ -108,5 +125,26 @@ mod tests {
         let json = serde_json::to_value(&clip).unwrap();
         assert_eq!(json["bounding_box"]["left"], 1);
         assert_eq!(json["scale"]["y"], 2.0);
+    }
+
+    #[test]
+    fn a_pivot_is_stored_only_when_it_is_off_the_middle() {
+        let stored = r#"{"scale":{"x":1.0,"y":1.0},"rotation":0.0,"transform":{"x":0.0,"y":0.0},"flip":{"horizontal":false,"vertical":false},"alpha":1.0}"#;
+        // A clip written before there was a pivot turns about its middle,
+        // and is written back with no pivot.
+        let clip: Clip = serde_json::from_str(stored).unwrap();
+        assert!(clip.pivot.is_origin());
+        let json = serde_json::to_value(&clip).unwrap();
+        assert!(json.get("pivot").is_none());
+        assert_eq!(json, serde_json::from_str::<Value>(stored).unwrap());
+        // A pivot off the middle is kept through the store.
+        let mut hinged = clip;
+        hinged.pivot = Point::new(-1.0, 0.5);
+        let json = serde_json::to_value(&hinged).unwrap();
+        assert_eq!(json["pivot"]["x"], -1.0);
+        assert_eq!(json["pivot"]["y"], 0.5);
+        let back: Clip = serde_json::from_value(json).unwrap();
+        assert_eq!(back, hinged);
+        assert!(!back.pivot.is_origin());
     }
 }

@@ -113,8 +113,8 @@ impl Shelf {
 
     fn empty(self) -> &'static str {
         match self {
-            Self::Media => "No media yet. Use File → Import.",
-            Self::Audio => "No audio yet. Use File → Import.",
+            Self::Media => "No media yet. Use File › Import.",
+            Self::Audio => "No audio yet. Use File › Import.",
             Self::Text => "No title matches the search.",
             Self::Stickers => "No stickers.",
             Self::Effects => "No effect matches the search.",
@@ -1132,7 +1132,10 @@ fn project_bar(
             )
         })
         .inner
-        .on_hover_text("Ask Cutlass to edit (⌘J)");
+        .on_hover_text(format!(
+            "Ask Cutlass to edit ({})",
+            cutlass_settings::keys_words("primary+j", MAC)
+        ));
     if response.clicked() {
         view.assistant.open = !open;
     }
@@ -1310,6 +1313,61 @@ fn menu_items(
     if let Some(id) = chosen {
         run_menu(shell, view, parent, id);
     }
+}
+
+/// Take the menu bar item `id` the user chose, by the mouse or by its keys.
+///
+/// The system menu bar takes a command key before the window sees it, so
+/// while a text field is being typed in, the clipboard, select-all and
+/// undo items are that field's, as in any app: Paste pastes into the field
+/// and not onto the timeline. While Settings or Licenses is up, the other
+/// shortcut actions are left alone, as their keys are. Anything else runs.
+pub fn menu_chosen(
+    shell: &mut Shell,
+    view: &mut ViewState,
+    ctx: &egui::Context,
+    parent: Option<&eframe::Frame>,
+    id: &str,
+) {
+    if ctx.text_edit_focused() && to_text_field(ctx, id) {
+        return;
+    }
+    if (view.settings_open || view.licenses.is_some()) && !crate::menubar::is_window_command(id) {
+        return;
+    }
+    run_menu(shell, view, parent, id);
+}
+
+/// Hand the edit command `id` to the focused text field. False when `id`
+/// is not one a text field has.
+fn to_text_field(ctx: &egui::Context, id: &str) -> bool {
+    use egui::{Key, Modifiers, ViewportCommand};
+
+    let key = |key: Key, modifiers: Modifiers| {
+        ctx.input_mut(|input| {
+            input.events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            });
+        });
+    };
+    match id {
+        // The window reads the clipboard and sends the field what it holds.
+        "paste" => ctx.send_viewport_cmd(ViewportCommand::RequestPaste),
+        "copy" => ctx.send_viewport_cmd(ViewportCommand::RequestCopy),
+        "cut" => ctx.send_viewport_cmd(ViewportCommand::RequestCut),
+        "select_all" => key(Key::A, Modifiers::COMMAND),
+        "undo" => key(Key::Z, Modifiers::COMMAND),
+        "redo" => key(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT),
+        _ => return false,
+    }
+    // The paste arrives with the next frame; draw it without waiting for
+    // the pointer to move.
+    ctx.request_repaint();
+    true
 }
 
 /// Run the menu bar item `id`: a window command, or a shortcut action.
@@ -1529,7 +1587,9 @@ fn settings_keys(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
             shell.set_notice(format!(
                 "{} took {} from {}",
                 cutlass_settings::action_label(action),
-                cutlass_settings::keys_label(&chord, MAC),
+                // In words: a notice is text, and the fonts lack a Mac's
+                // key symbols.
+                cutlass_settings::keys_words(&chord, MAC),
                 cutlass_settings::action_label(&displaced)
             ));
         }
@@ -1546,6 +1606,17 @@ fn settings_keys(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
 
 const MAC: bool = cfg!(target_os = "macos");
 
+/// The Settings dialog: wide enough for a name, a field and a button on
+/// one row, and one height for every page.
+const SETTINGS_WIDTH: f32 = 540.0;
+const SETTINGS_HEIGHT: f32 = 700.0;
+/// The space between the dialog's edge and its rows, on each side.
+const SETTINGS_PAD: f32 = 20.0;
+/// On the Shortcuts page, the width of the button that shows an action's
+/// keys, and of the room kept after it for Clear.
+const SHORTCUT_KEYS: f32 = 120.0;
+const SHORTCUT_CLEAR: f32 = 52.0;
+
 /// Playback, the side panels, the platform codecs and the shortcuts. A
 /// change saves at once.
 fn settings_window(
@@ -1559,11 +1630,24 @@ fn settings_window(
     let mut reset = false;
     let mut record = None;
     let mut clear = None;
-    let ((), closed) = widgets::dialog(ui, "Settings", |ui| {
-        ui.horizontal(|ui| {
-            ui.add_space(16.0);
+    let page = match view.settings_tab {
+        SettingsTab::General => "general",
+        SettingsTab::Assistant => "assistant",
+        SettingsTab::Shortcuts => "shortcuts",
+    };
+    let ((), closed) = widgets::dialog_sized(
+        ui,
+        "Settings",
+        page,
+        SETTINGS_WIDTH,
+        Some(SETTINGS_HEIGHT),
+        |ui| {
+            ui.horizontal(|ui| {
+            ui.add_space(SETTINGS_PAD);
             ui.vertical(|ui| {
-                ui.set_max_width(372.0);
+                // Every row ends at the same edge: a field or a line of
+                // words takes what its row has left and no more.
+                ui.set_width(SETTINGS_WIDTH - 2.0 * SETTINGS_PAD);
                 ui::Segmented::show(ui, |ui| {
                     for (tab, name) in [
                         (SettingsTab::General, "General"),
@@ -1650,10 +1734,7 @@ fn settings_window(
                         {
                             settings.import.link = !copy;
                         }
-                        ui.label(
-                            RichText::new("Off, the project points at each file where it is.")
-                                .color(tokens::FAINT),
-                        );
+                        settings_note(ui, "Off, the project points at each file where it is.");
                         settings_heading(ui, "Hardware codecs");
                         ui.add(ui::Check::new(
                             &mut settings.hardware.decode,
@@ -1663,18 +1744,15 @@ fn settings_window(
                             &mut settings.hardware.encode,
                             "Encode with the system codecs",
                         ));
-                        ui.label(
-                            RichText::new("These take effect when Cutlass opens again.")
-                                .color(tokens::FAINT),
-                        );
+                        settings_note(ui, "These take effect when Cutlass opens again.");
                         settings_heading(ui, "Updates");
                         ui.add(ui::Check::new(&mut settings.updates.check, "Check for updates"));
-                        ui.label(
-                            RichText::new(format!(
+                        settings_note(
+                            ui,
+                            &format!(
                                 "Cutlass {} looks for a new release once a day. Off, it never asks.",
                                 crate::shell::RUNNING_VERSION
-                            ))
-                            .color(tokens::FAINT),
+                            ),
                         );
                     }
                     SettingsTab::Assistant => {
@@ -1711,41 +1789,72 @@ fn settings_window(
                         reset = ui.add(ui::Button::new("Reset shortcuts")).clicked();
                         ui.add_space(4.0);
                         for (action, label) in cutlass_settings::ACTIONS {
-                            ui.horizontal(|ui| {
-                                let (rect, _) =
-                                    ui.allocate_exact_size(Vec2::new(200.0, 20.0), Sense::hover());
-                                ui.painter().text(
-                                    rect.left_center(),
-                                    Align2::LEFT_CENTER,
-                                    *label,
-                                    FontId::proportional(tokens::TYPE_SIZE),
-                                    tokens::MUTED,
-                                );
-                                let keys = settings.keys_for(action);
-                                let shown = if view.recording == Some(*action) {
-                                    "Press keys…".to_owned()
-                                } else if keys.is_empty() {
-                                    "None".to_owned()
-                                } else {
-                                    cutlass_settings::keys_label(keys, MAC)
-                                };
-                                if ui
-                                    .add(ui::Button::new(shown).min_size(Vec2::new(110.0, 20.0)))
-                                    .on_hover_text("Click, then press the new keys")
-                                    .clicked()
-                                {
-                                    record = Some(*action);
-                                }
-                                if !keys.is_empty() && ui.add(ui::Button::new("Clear").text_size(12.0)).clicked() {
-                                    clear = Some(*action);
-                                }
-                            });
+                            let keys = settings.keys_for(action);
+                            // Bound keys are drawn as the menus draw them,
+                            // over a button with no words of its own.
+                            let shown = if view.recording == Some(*action) {
+                                "Press keys…"
+                            } else if keys.is_empty() {
+                                "None"
+                            } else {
+                                ""
+                            };
+                            // The keys line up in a column at the right
+                            // edge, with room kept for Clear on every row.
+                            row_with_trail(
+                                ui,
+                                |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(*label).color(tokens::MUTED),
+                                        )
+                                        .truncate(),
+                                    );
+                                },
+                                |ui| {
+                                    let (slot, _) = ui.allocate_exact_size(
+                                        Vec2::new(SHORTCUT_CLEAR, 20.0),
+                                        Sense::hover(),
+                                    );
+                                    if !keys.is_empty()
+                                        && ui
+                                            .put(slot, ui::Button::new("Clear").text_size(12.0))
+                                            .clicked()
+                                    {
+                                        clear = Some(*action);
+                                    }
+                                    let button = ui
+                                        .add(
+                                            ui::Button::new(shown)
+                                                .min_size(Vec2::new(SHORTCUT_KEYS, 20.0)),
+                                        )
+                                        .on_hover_text("Click, then press the new keys");
+                                    if shown.is_empty() {
+                                        let drawn = crate::menu::shortcut_for(keys);
+                                        let width = crate::menu::keys_width(ui.ctx(), &drawn);
+                                        crate::menu::paint_keys(
+                                            ui.ctx(),
+                                            ui.painter(),
+                                            Pos2::new(
+                                                button.rect.center().x + width * 0.5,
+                                                button.rect.center().y,
+                                            ),
+                                            &drawn,
+                                            tokens::TEXT,
+                                        );
+                                    }
+                                    if button.clicked() {
+                                        record = Some(*action);
+                                    }
+                                },
+                            );
                         }
                     }
                 }
             });
         });
-    });
+        },
+    );
     if let Some(action) = clear {
         settings.bind(action, "");
     }
@@ -1941,61 +2050,61 @@ fn assistant_settings(
         choice_row(ui, "Address", |ui| {
             ui::Field::new(&mut settings.model.local_url)
                 .hint(cutlass_settings::DEFAULT_LOCAL_URL)
-                .width(300.0)
                 .show(ui);
         });
         choice_row(ui, "Model", |ui| {
-            ui::Field::new(&mut settings.model.local_name)
-                .hint(cutlass_settings::DEFAULT_LOCAL_NAME)
-                .width(180.0)
-                .show(ui);
-            if ui
-                .add(ui::Button::new("Find models").text_size(12.0))
-                .clicked()
-            {
-                *local_models = Some(find_local_models(&settings.model.local_url));
-            }
+            row_with_trail(
+                ui,
+                |ui| {
+                    ui::Field::new(&mut settings.model.local_name)
+                        .hint(cutlass_settings::DEFAULT_LOCAL_NAME)
+                        .show(ui);
+                },
+                |ui| {
+                    if ui
+                        .add(ui::Button::new("Find models").text_size(12.0))
+                        .clicked()
+                    {
+                        *local_models = Some(find_local_models(&settings.model.local_url));
+                    }
+                },
+            );
         });
         match local_models {
             Some(Ok(models)) if models.is_empty() => {
-                ui.label(
-                    RichText::new(
-                        "The server has no models yet. With Ollama, run: ollama pull qwen3",
-                    )
-                    .size(11.0)
-                    .color(tokens::FAINT),
+                settings_hint(
+                    ui,
+                    "The server has no models yet. With Ollama, run: ollama pull qwen3",
                 );
             }
             Some(Ok(models)) => {
-                ui.horizontal_wrapped(|ui| {
-                    for model in models.iter() {
-                        let chosen = settings.model.local_name == *model;
-                        if ui.add(ui::Choice::new(chosen, model)).clicked() {
-                            settings.model.local_name.clone_from(model);
+                // Under the field they fill, one line after another.
+                under_fields(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for model in models.iter() {
+                            let chosen = settings.model.local_name == *model;
+                            if ui.add(ui::Choice::new(chosen, model)).clicked() {
+                                settings.model.local_name.clone_from(model);
+                            }
                         }
-                    }
+                    });
                 });
             }
-            Some(Err(error)) => {
-                ui.label(
-                    RichText::new(error.as_str())
-                        .size(11.0)
-                        .color(tokens::FAINT),
-                );
-            }
+            Some(Err(error)) => settings_hint(ui, error.as_str()),
             None => {}
         }
-        ui.label(
-            RichText::new("A chat server on this computer, such as Ollama or llama.cpp.")
-                .size(11.0)
-                .color(tokens::FAINT),
+        settings_hint(
+            ui,
+            "A chat server on this computer, such as Ollama or llama.cpp.",
         );
+        ui.add_space(SETTINGS_GAP);
     }
     ui.add(ui::Check::new(
         &mut settings.model.cloud,
         "Cloud model (sends messages off this computer)",
     ));
     let key_changed = cloud_settings(ui, &mut settings.model, key);
+    settings_heading(ui, "Code");
     ui.add(ui::Check::new(
         &mut settings.sandbox.local,
         "Run code on this computer",
@@ -2006,13 +2115,11 @@ fn assistant_settings(
         settings.sandbox.online,
         ui::Check::new(&mut settings.sandbox.online, "Run code online"),
     );
-    ui.label(
-        RichText::new(
-            "Running code online needs a Cutlass account, which is not available yet. Scripts run on this computer.",
-        )
-        .size(11.0)
-        .color(tokens::FAINT),
+    settings_hint(
+        ui,
+        "Running code online needs a Cutlass account, which is not available yet. Scripts run on this computer.",
     );
+    settings_heading(ui, "Memory");
     ui.add(ui::Check::new(
         &mut settings.memory,
         "Remember across conversations",
@@ -2023,24 +2130,36 @@ fn assistant_settings(
             .hint(
                 "Notes the assistant reads at the start of every chat, such as how you like titles",
             )
-            .width(340.0)
             .show(ui)
             .response
             .changed();
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(
-                    "Kept on this computer, with each project's chat. Sent to a model only as part of the chat.",
-                )
-                .size(11.0)
-                .color(tokens::FAINT),
-            );
-            if !notes.is_empty() && ui.add(ui::Button::new("Forget").text_size(12.0)).clicked() {
-                notes.clear();
-                notes_changed = true;
-            }
-        });
+        // The words wrap in what the button leaves them.
+        let mut forget = false;
+        row_with_trail(
+            ui,
+            |ui| {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "Kept on this computer, with each project's chat. Sent to a model only as part of the chat.",
+                        )
+                        .size(11.0)
+                        .color(tokens::FAINT),
+                    )
+                    .wrap(),
+                );
+            },
+            |ui| {
+                forget = !notes.is_empty()
+                    && ui.add(ui::Button::new("Forget").text_size(12.0)).clicked();
+            },
+        );
+        if forget {
+            notes.clear();
+            notes_changed = true;
+        }
     }
+    settings_heading(ui, "Turns");
     choice_row(ui, "Steps a turn", |ui| {
         ui.add(egui::DragValue::new(&mut settings.step_cap).range(1..=1000));
     });
@@ -2048,41 +2167,45 @@ fn assistant_settings(
     let mut remove = None;
     for (index, server) in settings.mcp_servers.iter_mut().enumerate() {
         ui.push_id(("server", index), |ui| {
-            ui.horizontal(|ui| {
-                ui.add(ui::Check::new(&mut server.enabled, ""));
-                ui::Field::new(&mut server.name)
-                    .hint("Name")
-                    .width(120.0)
-                    .show(ui);
-                ui::Segmented::show(ui, |ui| {
-                    for (kind, name) in [(McpServer::STDIO, "Program"), (McpServer::REMOTE, "URL")]
-                    {
-                        if ui.add(ui::Choice::new(server.kind == kind, name)).clicked() {
-                            kind.clone_into(&mut server.kind);
-                        }
+            // The name takes what the kind and Remove leave it.
+            row_with_trail(
+                ui,
+                |ui| {
+                    ui.add(ui::Check::new(&mut server.enabled, ""));
+                    ui::Field::new(&mut server.name).hint("Name").show(ui);
+                },
+                |ui| {
+                    if ui.add(ui::Button::new("Remove").text_size(12.0)).clicked() {
+                        remove = Some(index);
                     }
-                });
-                if ui.add(ui::Button::new("Remove").text_size(12.0)).clicked() {
-                    remove = Some(index);
-                }
-            });
+                    // This end of the row is laid from the right, so the
+                    // last choice comes first.
+                    ui::Segmented::show(ui, |ui| {
+                        for (kind, name) in
+                            [(McpServer::REMOTE, "URL"), (McpServer::STDIO, "Program")]
+                        {
+                            if ui.add(ui::Choice::new(server.kind == kind, name)).clicked() {
+                                kind.clone_into(&mut server.kind);
+                            }
+                        }
+                    });
+                },
+            );
             if server.kind == McpServer::REMOTE {
-                ui::Field::new(&mut server.url)
-                    .hint("https://…")
-                    .width(340.0)
-                    .show(ui);
+                ui::Field::new(&mut server.url).hint("https://…").show(ui);
             } else {
                 ui.horizontal(|ui| {
+                    // The program and its arguments share the row.
+                    let program = (ui.available_width() - ui.spacing().item_spacing.x) * 0.5;
                     ui::Field::new(&mut server.command)
                         .hint("Program")
-                        .width(140.0)
+                        .width(program)
                         .show(ui);
                     let args = server_args
                         .entry(index)
                         .or_insert_with(|| server.args.join(" "));
                     if ui::Field::new(args)
                         .hint("Arguments")
-                        .width(190.0)
                         .show(ui)
                         .response
                         .changed()
@@ -2091,7 +2214,7 @@ fn assistant_settings(
                     }
                 });
             }
-            ui.add_space(4.0);
+            ui.add_space(SETTINGS_GAP);
         });
     }
     if let Some(index) = remove {
@@ -2104,12 +2227,22 @@ fn assistant_settings(
     settings_heading(ui, "Skill folders");
     let mut remove = None;
     for (index, folder) in settings.skill_folders.iter().enumerate() {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(&folder.path).color(tokens::MUTED));
-            if ui.add(ui::Button::new("Remove").text_size(12.0)).clicked() {
-                remove = Some(index);
-            }
-        });
+        // A long path is cut short, whole under the pointer, so Remove
+        // stays in the dialog.
+        row_with_trail(
+            ui,
+            |ui| {
+                ui.add(
+                    egui::Label::new(RichText::new(&folder.path).color(tokens::MUTED)).truncate(),
+                )
+                .on_hover_text(&folder.path);
+            },
+            |ui| {
+                if ui.add(ui::Button::new("Remove").text_size(12.0)).clicked() {
+                    remove = Some(index);
+                }
+            },
+        );
     }
     if let Some(index) = remove {
         settings.skill_folders.remove(index);
@@ -2154,7 +2287,6 @@ fn cloud_settings(
         choice_row(ui, "Address", |ui| {
             ui::Field::new(&mut model.cloud_url)
                 .hint(cutlass_settings::OPENAI_CHAT_URL)
-                .width(300.0)
                 .show(ui);
         });
     }
@@ -2165,31 +2297,37 @@ fn cloud_settings(
             } else {
                 "gpt-5"
             })
-            .width(180.0)
             .show(ui);
     });
     let mut changed = false;
     choice_row(ui, "Key", |ui| {
-        changed = ui::Field::new(key)
-            .hint("Paste your API key")
-            .name("API key")
-            .secret()
-            .width(240.0)
-            .show(ui)
-            .response
-            .changed();
-        if !key.is_empty() && ui.add(ui::Button::new("Forget").text_size(12.0)).clicked() {
+        let mut forget = false;
+        let has_key = !key.is_empty();
+        row_with_trail(
+            ui,
+            |ui| {
+                changed = ui::Field::new(key)
+                    .hint("Paste your API key")
+                    .name("API key")
+                    .secret()
+                    .show(ui)
+                    .response
+                    .changed();
+            },
+            |ui| {
+                forget = has_key && ui.add(ui::Button::new("Forget").text_size(12.0)).clicked();
+            },
+        );
+        if forget {
             key.clear();
             changed = true;
         }
     });
-    ui.label(
-        RichText::new(
-            "Your own key, kept in its own file on this computer and sent only to this service. It is not a setting and the assistant never sees it.",
-        )
-        .size(11.0)
-        .color(tokens::FAINT),
+    settings_hint(
+        ui,
+        "Your own key, kept in its own file on this computer and sent only to this service. It is not a setting and the assistant never sees it.",
     );
+    ui.add_space(SETTINGS_GAP);
     changed
 }
 
@@ -2201,10 +2339,48 @@ fn find_local_models(url: &str) -> Result<Vec<String>, String> {
         .map_err(|error| error.to_string())
 }
 
+/// The space between two groups of rows on a Settings page.
+const SETTINGS_GAP: f32 = 6.0;
+
+/// The width of the name a [`choice_row`] starts with, and the gap after.
+const ROW_NAME: f32 = 84.0;
+
 fn settings_heading(ui: &mut Ui, text: &str) {
-    ui.add_space(10.0);
+    ui.add_space(14.0);
     ui.label(RichText::new(text).color(tokens::TEXT).strong());
-    ui.add_space(2.0);
+    ui.add_space(4.0);
+}
+
+/// A line of small words about the rows above it, wrapped in the page's
+/// width.
+fn settings_hint(ui: &mut Ui, text: &str) {
+    ui.add(egui::Label::new(RichText::new(text).size(11.0).color(tokens::FAINT)).wrap());
+}
+
+/// A line of words about the switch above it, wrapped in the page's width.
+fn settings_note(ui: &mut Ui, text: &str) {
+    ui.add(egui::Label::new(RichText::new(text).color(tokens::FAINT)).wrap());
+}
+
+/// `add`, indented to start where the fields of the [`choice_row`]s do.
+fn under_fields(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        ui.add_space(ROW_NAME);
+        ui.vertical(add);
+    });
+}
+
+/// One row: `trail` keeps its own width at the row's right end, and `lead`
+/// gets what is left, from the row's left. A field in `lead` fills that
+/// space, and words there wrap or are cut in it, so nothing passes the
+/// row's end.
+fn row_with_trail(ui: &mut Ui, lead: impl FnOnce(&mut Ui), trail: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            trail(ui);
+            ui.with_layout(Layout::left_to_right(Align::Center), lead);
+        });
+    });
 }
 
 fn edit_menu(shell: &mut Shell, ui: &mut Ui) {
@@ -9925,7 +10101,7 @@ fn choice_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
         // As tall as a well of choices, so the name sits on its middle.
         let tall = tokens::CHOICE_HEIGHT + 2.0 * f32::from(tokens::SEGMENT_PAD);
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(84.0, tall), Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(ROW_NAME, tall), Sense::hover());
         ui.painter().text(
             rect.left_center(),
             Align2::LEFT_CENTER,
@@ -11661,13 +11837,369 @@ mod tests {
         for label in [
             "go to 1.5 seconds",
             "Moving the playhead.",
-            "✓ player.seek 1500000",
+            "player.seek 1500000",
             "The playhead is at 1.5 s.",
         ] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }
         assert!(view.assistant.draft.is_empty());
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_undo_turn_button_takes_the_assistants_turn_back() {
+        let temp = std::env::temp_dir().join(format!("cutlass-chat-undo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "a",
+            "missing",
+            cutlass_model::TimeRange::new(0, 3_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let split = serde_json::json!({
+            "expected_revision": 0,
+            "requests": [{ "op": "split", "segment_id": "a", "at": 1_000_000, "right_id": "b" }],
+        });
+        let (port, server) = local_model(vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "Splitting.",
+                "tool_calls": [{ "id": "c1", "type": "function",
+                    "function": { "name": "draft_apply", "arguments": split.to_string() } }],
+            }),
+            serde_json::json!({ "role": "assistant", "content": "Split in two." }),
+        ]);
+        let mut settings = Settings::default();
+        settings.model.local_url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+        settings.model.local_name = "test-model".to_owned();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, settings);
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let click = |shell: &mut Shell, view: &mut ViewState, at: Pos2| {
+            let _ = frame(shell, view, vec![egui::Event::PointerMoved(at)]);
+            let _ = frame(shell, view, vec![press(at, true)]);
+            frame(shell, view, vec![press(at, false)])
+        };
+        let clips = |shell: &Shell| shell.draft().unwrap().tracks[0].segments.len();
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let toggle = text_pos(&output, "Assistant").expect("the toggle") + Vec2::new(4.0, 4.0);
+        let _ = click(&mut shell, &mut view, toggle);
+        let output = frame(&mut shell, &mut view, Vec::new());
+        // No turn yet: nothing to take back.
+        assert!(text_pos(&output, assistant::UNDO_TURN).is_none());
+        let hint = text_pos(&output, assistant::HINT).expect("the box") + Vec2::new(4.0, 4.0);
+        let _ = click(&mut shell, &mut view, hint);
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::Text("split it at 1 second".to_owned())],
+        );
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let send = text_pos(&output, "Send").expect("send") + Vec2::new(4.0, 4.0);
+        let _ = click(&mut shell, &mut view, send);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while view.assistant.busy() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the turn did not finish"
+            );
+            let output = frame(&mut shell, &mut view, Vec::new());
+            if view.assistant.busy() {
+                // Not offered while the turn runs.
+                assert!(text_pos(&output, assistant::UNDO_TURN).is_none());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(server.join().unwrap(), 2);
+        assert_eq!(clips(&shell), 2);
+
+        // The turn edited the project: the button is there, and one click
+        // puts the project back.
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let undo =
+            text_pos(&output, assistant::UNDO_TURN).expect("the button") + Vec2::new(4.0, 4.0);
+        let _ = click(&mut shell, &mut view, undo);
+        assert_eq!(clips(&shell), 1);
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(text_pos(&output, assistant::UNDO_TURN).is_none());
+        let lines = galleys(&output);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "Took back the turn's edits. Undo brings them back."),
+            "{lines:?}"
+        );
+        // The window's own undo brings the assistant's edit back.
+        shell.undo().unwrap();
+        assert_eq!(clips(&shell), 2);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_menu_bar_edit_command_goes_to_the_text_field_being_typed_in() {
+        let temp = std::env::temp_dir().join(format!("cutlass-menu-text-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "a",
+            "missing",
+            cutlass_model::TimeRange::new(0, 3_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        // One edit on the timeline, for an undo to take if it got there.
+        let split = shell.run_agent_tool(
+            &cutlass_agent::ToolCall {
+                id: "s".to_owned(),
+                name: "draft.apply".to_owned(),
+                arguments: serde_json::json!({
+                    "expected_revision": 0,
+                    "requests": [{ "op": "split", "segment_id": "a",
+                                   "at": 1_000_000, "right_id": "b" }],
+                })
+                .to_string(),
+            },
+            &[],
+        );
+        assert!(!split.outcome.is_error, "{}", split.outcome.content);
+        let clips = |shell: &Shell| shell.draft().unwrap().tracks[0].segments.len();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        // One frame: the menu bar's chosen items first, as the window
+        // takes them, then the view.
+        let frame = |shell: &mut Shell,
+                     view: &mut ViewState,
+                     events: Vec<egui::Event>,
+                     chosen: &[&str]| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    for id in chosen {
+                        menu_chosen(shell, view, ui.ctx(), None, id);
+                    }
+                    show(shell, ui, view, None);
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let asked = |output: &egui::FullOutput, wanted: &egui::ViewportCommand| {
+            output
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .is_some_and(|viewport| viewport.commands.contains(wanted))
+        };
+        let output = frame(&mut shell, &mut view, Vec::new(), &[]);
+        let toggle = text_pos(&output, "Assistant").expect("the toggle") + Vec2::new(4.0, 4.0);
+        for events in [
+            vec![egui::Event::PointerMoved(toggle)],
+            vec![press(toggle, true)],
+            vec![press(toggle, false)],
+        ] {
+            let _ = frame(&mut shell, &mut view, events, &[]);
+        }
+        let output = frame(&mut shell, &mut view, Vec::new(), &[]);
+        let hint = text_pos(&output, assistant::HINT).expect("the box") + Vec2::new(4.0, 4.0);
+        for events in [
+            vec![egui::Event::PointerMoved(hint)],
+            vec![press(hint, true)],
+            vec![press(hint, false)],
+            vec![egui::Event::Text("hello".to_owned())],
+        ] {
+            let _ = frame(&mut shell, &mut view, events, &[]);
+        }
+        assert_eq!(view.assistant.draft, "hello");
+        assert!(ctx.text_edit_focused());
+
+        // Paste: the window is asked for the clipboard, and the timeline's
+        // paste does not run (it would say there is nothing to paste).
+        let output = frame(&mut shell, &mut view, Vec::new(), &["paste"]);
+        assert!(asked(&output, &egui::ViewportCommand::RequestPaste));
+        assert_eq!(shell.notice(), "");
+        // What the window then sends lands in the field.
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::Paste(" world".to_owned())],
+            &[],
+        );
+        assert_eq!(view.assistant.draft, "hello world");
+        // Copy and cut are asked of the window too.
+        let output = frame(&mut shell, &mut view, Vec::new(), &["copy", "cut"]);
+        assert!(asked(&output, &egui::ViewportCommand::RequestCopy));
+        assert!(asked(&output, &egui::ViewportCommand::RequestCut));
+        // Select all selects the field's words: typing replaces them.
+        let _ = frame(&mut shell, &mut view, Vec::new(), &["select_all"]);
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::Text("bye".to_owned())],
+            &[],
+        );
+        assert_eq!(view.assistant.draft, "bye");
+        // Undo and redo are the field's: the timeline's edit stays.
+        let _ = frame(&mut shell, &mut view, Vec::new(), &["undo", "redo"]);
+        assert_eq!(clips(&shell), 2);
+        // A command a field does not have still runs.
+        let _ = frame(&mut shell, &mut view, Vec::new(), &[crate::menubar::EXPORT]);
+        assert!(view.export_open);
+        view.export_open = false;
+
+        // With no field being typed in, the same items are the timeline's.
+        if let Some(id) = ctx.memory(|memory| memory.focused()) {
+            ctx.memory_mut(|memory| memory.surrender_focus(id));
+        }
+        let output = frame(&mut shell, &mut view, Vec::new(), &["paste"]);
+        assert!(!asked(&output, &egui::ViewportCommand::RequestPaste));
+        assert_eq!(shell.notice(), "nothing to paste");
+        let _ = frame(&mut shell, &mut view, Vec::new(), &["undo"]);
+        assert_eq!(clips(&shell), 1);
+
+        // With Settings up, a shortcut action is left alone, as its keys
+        // are, and a window command still runs.
+        view.settings_open = true;
+        let _ = frame(&mut shell, &mut view, Vec::new(), &["redo"]);
+        assert_eq!(clips(&shell), 1);
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            Vec::new(),
+            &[crate::menubar::LICENSES],
+        );
+        assert!(view.licenses.is_some());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// The key field in Settings takes the menu bar's Paste: it is a text
+    /// field being typed in once it is clicked, and the window is asked
+    /// for the clipboard. The field next to it takes what the window then
+    /// sends. The key itself is not typed here, as a changed key is
+    /// written to the user's own key file.
+    #[test]
+    fn a_settings_field_takes_the_menu_bars_paste() {
+        let mut settings = Settings::default();
+        settings.model.cloud = true;
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, settings);
+        let mut view = ViewState::new();
+        view.settings_open = true;
+        view.settings_tab = SettingsTab::Assistant;
+        // No key kept, and the user's own is not read.
+        view.cloud_key = Some(String::new());
+        view.notes = Some(String::new());
+        let ctx = egui::Context::default();
+        let frame = |shell: &mut Shell,
+                     view: &mut ViewState,
+                     events: Vec<egui::Event>,
+                     chosen: &[&str]| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    for id in chosen {
+                        menu_chosen(shell, view, ui.ctx(), None, id);
+                    }
+                    show(shell, ui, view, None);
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let asked_paste = |output: &egui::FullOutput| {
+            output
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .is_some_and(|viewport| {
+                    viewport
+                        .commands
+                        .contains(&egui::ViewportCommand::RequestPaste)
+                })
+        };
+        let output = frame(&mut shell, &mut view, Vec::new(), &[]);
+        // Before a field is clicked the paste is nobody's: Settings is up,
+        // so the timeline does not take it either.
+        let output_idle = frame(&mut shell, &mut view, Vec::new(), &["paste"]);
+        assert!(!asked_paste(&output_idle));
+        assert_eq!(shell.notice(), "");
+
+        let key =
+            text_pos(&output, "Paste your API key").expect("the key field") + Vec2::new(4.0, 4.0);
+        for events in [
+            vec![egui::Event::PointerMoved(key)],
+            vec![press(key, true)],
+            vec![press(key, false)],
+        ] {
+            let _ = frame(&mut shell, &mut view, events, &[]);
+        }
+        assert!(ctx.text_edit_focused(), "the key field is being typed in");
+        let output = frame(&mut shell, &mut view, Vec::new(), &["paste"]);
+        assert!(asked_paste(&output));
+        assert_eq!(view.cloud_key.as_deref(), Some(""));
+
+        // The model's name, a field of the same kind beside it, takes the
+        // clipboard's text when the window sends it.
+        let output = frame(&mut shell, &mut view, Vec::new(), &[]);
+        let model = text_pos(&output, cutlass_settings::DEFAULT_CLOUD_NAME).expect("the model")
+            + Vec2::new(4.0, 4.0);
+        for events in [
+            vec![egui::Event::PointerMoved(model)],
+            vec![press(model, true)],
+            vec![press(model, false)],
+        ] {
+            let _ = frame(&mut shell, &mut view, events, &[]);
+        }
+        let output = frame(&mut shell, &mut view, Vec::new(), &["select_all", "paste"]);
+        assert!(asked_paste(&output));
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::Paste("claude-sonnet-5-5".to_owned())],
+            &[],
+        );
+        let _ = frame(&mut shell, &mut view, Vec::new(), &[]);
+        assert_eq!(shell.settings().model.cloud_name, "claude-sonnet-5-5");
     }
 
     #[test]
@@ -11850,7 +12382,7 @@ mod tests {
         assert!(!lines.iter().any(|line| line == "Main"), "{lines:?}");
         assert!(painted.contains("Untitled"), "{painted}");
         assert!(
-            painted.contains("No media yet. Use File → Import."),
+            painted.contains("No media yet. Use File › Import."),
             "{painted}"
         );
         assert!(painted.contains("Projects"), "{painted}");
@@ -12939,7 +13471,28 @@ mod tests {
             };
             vec![egui::Event::PointerMoved(pos), event(true), event(false)]
         };
-        let painted = painted_text(&run(&mut shell, &mut view, Vec::new()));
+        // The page is longer than the dialog: its top, then the rest
+        // scrolled into view.
+        let mut painted = painted_text(&run(&mut shell, &mut view, Vec::new()));
+        let middle = Pos2::new(640.0, 400.0);
+        run(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(middle)],
+        );
+        run(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, -2000.0),
+                modifiers: egui::Modifiers::default(),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+            }],
+        );
+        painted.push('\n');
+        painted.push_str(&painted_text(&run(&mut shell, &mut view, Vec::new())));
         for text in [
             "Model",
             "Address",
@@ -19016,6 +19569,245 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp);
     }
 
+    /// Settings with everything a page can hold turned on: both models, a
+    /// chat completions service, memory, a server of each kind and a skill
+    /// folder with a long path.
+    fn full_settings() -> Settings {
+        let mut settings = Settings::default();
+        settings.model.local = true;
+        settings.model.cloud = true;
+        settings.model.cloud_provider = cutlass_settings::ModelChoice::OPENAI.to_owned();
+        settings.model.cloud_name = "gpt-5".to_owned();
+        settings.memory = true;
+        settings.mcp_servers = vec![
+            cutlass_settings::McpServer {
+                name: "images".to_owned(),
+                kind: cutlass_settings::McpServer::STDIO.to_owned(),
+                command: "/usr/local/bin/imagent".to_owned(),
+                args: vec!["--stdio".to_owned(), "--quiet".to_owned()],
+                enabled: true,
+                ..cutlass_settings::McpServer::default()
+            },
+            cutlass_settings::McpServer {
+                name: "voices".to_owned(),
+                kind: cutlass_settings::McpServer::REMOTE.to_owned(),
+                url: "https://mcp.example.com/a/long/address/for/a/server".to_owned(),
+                enabled: false,
+                ..cutlass_settings::McpServer::default()
+            },
+        ];
+        settings.skill_folders = vec![cutlass_settings::SkillFolder {
+            path: "/Users/someone/Library/Application Support/Cutlass/Skills/My long skill folder"
+                .to_owned(),
+            ..cutlass_settings::SkillFolder::default()
+        }];
+        settings
+    }
+
+    /// The assistant panel with a step of each kind, painted by the real
+    /// renderer when `CUTLASS_RENDER_DIR` is set and kept there to look at:
+    /// a done step's check, a failed one's cross and a running one's dots.
+    #[test]
+    fn the_assistant_panel_shows_a_mark_for_each_steps_state() {
+        use crate::assistant::Entry;
+
+        let temp = std::env::temp_dir().join(format!("cutlass-marks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        view.library_shelf = Shelf::Stickers;
+        view.assistant.open = true;
+        let step = |tool: &str, input: &str, result: Option<&str>, failed: bool| Entry::Step {
+            tool: tool.to_owned(),
+            input: input.to_owned(),
+            result: result.map(str::to_owned),
+            failed,
+        };
+        view.assistant.entries = vec![
+            Entry::Asked("make a title".to_owned()),
+            step("skill.load", "motion graphics", Some("the skill"), false),
+            step(
+                "draft.apply",
+                "{\"expected_revision\":0}",
+                Some("request 3 failed"),
+                true,
+            ),
+            step("player.look", "1000000", None, false),
+        ];
+        let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
+        let builder = egui_kittest::Harness::builder().with_size(Vec2::new(1280.0, 800.0));
+        let builder = if keep.is_some() {
+            builder.wgpu()
+        } else {
+            builder
+        };
+        let mut harness = builder.build_ui_state(
+            |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+            (shell, view),
+        );
+        harness.run_steps(4);
+        // Each step is named by its tool and what it was given, with no
+        // glyph in front for a font to lack.
+        use egui_kittest::kittest::Queryable;
+        for label in [
+            "skill.load motion graphics",
+            "draft.apply {\"expected_revision\":0}",
+            "player.look 1000000",
+        ] {
+            assert_eq!(harness.query_all_by_label(label).count(), 1, "{label}");
+        }
+        if let Some(dir) = &keep {
+            let image = harness.render().expect("the renderer draws the window");
+            std::fs::create_dir_all(dir).unwrap();
+            image.save(dir.join("assistant-steps.png")).unwrap();
+        }
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// On every page of Settings, with all a page can hold, each row ends
+    /// inside the dialog: a button after a field, after a long path or
+    /// after a line of words is not pushed past the edge. With
+    /// `CUTLASS_RENDER_DIR` set the pages are painted by the real renderer
+    /// and kept there to look at, scrolled through.
+    #[test]
+    fn the_settings_rows_end_inside_the_dialog_on_every_page() {
+        use egui_kittest::kittest::Queryable;
+
+        let temp = std::env::temp_dir().join(format!("cutlass-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, full_settings());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        view.settings_open = true;
+        view.notes = Some("Titles in sentence case.".to_owned());
+        view.cloud_key = Some("sk-not-a-real-key".to_owned());
+        view.local_models = Some(Ok(vec![
+            "qwen3.8:27b".to_owned(),
+            "gemma4:latest".to_owned(),
+            "kimi-k2.6:cloud".to_owned(),
+        ]));
+        let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
+        let window = Vec2::new(1280.0, 800.0);
+        // The harness refuses a glyph the fonts lack, so a page that
+        // wrote a key as a symbol they do not have would fail here.
+        let builder = egui_kittest::Harness::builder().with_size(window);
+        let builder = if keep.is_some() {
+            builder.wgpu()
+        } else {
+            builder
+        };
+        let mut harness = builder.build_ui_state(
+            |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+            (shell, view),
+        );
+        let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
+            let Some(dir) = &keep else {
+                return;
+            };
+            let image = harness.render().expect("the renderer draws the window");
+            std::fs::create_dir_all(dir).unwrap();
+            image.save(dir.join(format!("{name}.png"))).unwrap();
+        };
+        // Where the rows start and end: the dialog is in the window's
+        // middle, with its space on each side.
+        let left = (window.x - SETTINGS_WIDTH) * 0.5 + SETTINGS_PAD;
+        let right = (window.x + SETTINGS_WIDTH) * 0.5 - SETTINGS_PAD;
+        let inside =
+            |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>, label: &str, count: usize| {
+                let rects: Vec<Rect> = harness
+                    .query_all_by_label(label)
+                    .map(|node| node.rect())
+                    .collect();
+                assert_eq!(rects.len(), count, "{label}: {rects:?}");
+                for rect in rects {
+                    assert!(
+                        rect.left() >= left - 0.5 && rect.right() <= right + 0.5,
+                        "{label} at {rect:?} is not within {left}..{right}"
+                    );
+                }
+            };
+        for (tab, name, labels) in [
+            (
+                SettingsTab::General,
+                "settings-general",
+                &[("Loop at the end", 1), ("Check for updates", 1)][..],
+            ),
+            (
+                SettingsTab::Assistant,
+                "settings-assistant",
+                // After a field, after a line of words, after a server's
+                // name and after a long path.
+                &[
+                    ("Find models", 1),
+                    ("Forget", 2),
+                    ("API key", 1),
+                    ("Remove", 3),
+                    ("Add server", 1),
+                    ("Add folder…", 1),
+                ][..],
+            ),
+            (
+                SettingsTab::Shortcuts,
+                "settings-shortcuts",
+                &[
+                    ("Reset shortcuts", 1),
+                    ("Clear", cutlass_settings::ACTIONS.len()),
+                ][..],
+            ),
+        ] {
+            harness.state_mut().1.settings_tab = tab;
+            harness.run_steps(4);
+            // Each page opens at its top, though the one before it was
+            // left scrolled down: its tabs are in view.
+            let tabs = harness.get_by_label("General").rect();
+            assert!(
+                tabs.top() > (window.y - SETTINGS_HEIGHT) * 0.5,
+                "{name} opened scrolled: its tabs are at {tabs:?}"
+            );
+            for (label, count) in labels {
+                inside(&harness, label, *count);
+            }
+            picture(&mut harness, name);
+            // The page scrolled down, twice: the rest of a long page.
+            for part in 2..=3 {
+                harness.hover_at(egui::pos2(640.0, 400.0));
+                harness.event(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: Vec2::new(0.0, -420.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::default(),
+                    source: egui::MouseWheelSource::Wheel,
+                });
+                harness.run_steps(4);
+                picture(&mut harness, &format!("{name}-{part}"));
+            }
+        }
+        // A server's kind reads Program then URL, as it is listed.
+        harness.state_mut().1.settings_tab = SettingsTab::Assistant;
+        harness.run_steps(4);
+        let first = |label: &str| {
+            harness
+                .query_all_by_label(label)
+                .map(|node| node.rect().left())
+                .fold(f32::INFINITY, f32::min)
+        };
+        assert!(first("Program") < first("URL"));
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
     /// The inspector's tabs sit in a header band that stays put while the
     /// body under it scrolls, painted by the real renderer. With
     /// `CUTLASS_RENDER_DIR` set the pictures are kept there to look at.
@@ -19602,8 +20394,11 @@ mod tests {
     }
 
     /// The title's Basic page with its placement, blend and style sections
-    /// open: each switch turns its part on and off, and each section
-    /// paints. With `CUTLASS_RENDER_DIR` set the pictures are kept there.
+    /// open: each switch turns its part on and off, and the window paints
+    /// with every part styled. With `CUTLASS_RENDER_DIR` set the steps
+    /// between are painted too and every picture is kept there. A frame
+    /// this tall is slow on a runner with no GPU, which has 10 seconds for
+    /// each, so only the styled one is painted without it.
     #[test]
     fn the_title_style_sections_switch_and_paint() {
         use cutlass_model::SegmentId;
@@ -19644,22 +20439,10 @@ mod tests {
         let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
         let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
             harness.run_steps(8);
-            // egui_kittest waits ten seconds for each frame. A software
-            // renderer, as on the Windows runner, can take longer over this
-            // window; a wait that runs out is not an error on the device,
-            // so it is tried again, and a renderer that never finishes still
-            // fails here.
-            let mut image = harness.render();
-            for _ in 0..2 {
-                match &image {
-                    Err(error) if error.contains("timed out") => {
-                        eprintln!("{name}: {error}; waiting again");
-                        image = harness.render();
-                    }
-                    _ => break,
-                }
+            if keep.is_none() && name != "title-parts-styled" {
+                return;
             }
-            let image = image.expect("the renderer draws the window");
+            let image = harness.render().expect("the renderer draws the window");
             if let Some(dir) = &keep {
                 std::fs::create_dir_all(dir).unwrap();
                 image.save(dir.join(format!("{name}.png"))).unwrap();

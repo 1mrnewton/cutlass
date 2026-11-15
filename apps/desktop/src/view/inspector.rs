@@ -2287,7 +2287,7 @@ fn caption_words(
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let marked = inspection.caption_keywords.contains(&index);
                 if ui
-                    .add(ui::Button::new("★").text_size(11.0).on(marked))
+                    .add(ui::Button::icon("star").icon_size(12.0).on(marked))
                     .on_hover_text(if marked {
                         "Take the keyword mark off"
                     } else {
@@ -2310,7 +2310,8 @@ fn caption_words(
                     .clicked();
                 let broken = cutlass_editor::breaks_before(columns, index);
                 line = ui
-                    .add_enabled(index > 0, ui::Button::new("↵").text_size(11.0).on(broken))
+                    // A pilcrow: the fonts have no return arrow to write.
+                    .add_enabled(index > 0, ui::Button::new("¶").text_size(11.0).on(broken))
                     .on_hover_text(if broken {
                         "Join this line to the one before"
                     } else {

@@ -222,6 +222,15 @@ pub enum Request {
     },
     /// Store the clip rotation in degrees. The clip stays where it is.
     SetRotation { segment_id: SegmentId, degrees: f64 },
+    /// Store the point the picture turns and is sized about. `x` and `y`
+    /// are shares of the picture's own half size from its middle, y up:
+    /// 0 0 is the middle, -1 0 the middle of its left edge. A picture that
+    /// is neither turned nor sized stays where it is.
+    SetPivot {
+        segment_id: SegmentId,
+        x: f64,
+        y: f64,
+    },
     /// Store the picture position. `x` and `y` are fractions of half the canvas.
     SetPosition {
         segment_id: SegmentId,

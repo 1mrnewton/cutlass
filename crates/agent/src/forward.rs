@@ -6,8 +6,9 @@
 //! itself, so the window applies each edit and both see one project.
 //!
 //! The wire is a line of JSON each way: `{"token","id","name","arguments"}`
-//! in, `{"content","is_error"}` out. A call with the wrong token is answered
-//! with an error and nothing runs.
+//! in, `{"content","is_error"}` out, with a `picture` when the tool made
+//! one. A call with the wrong token is answered with an error and nothing
+//! runs.
 
 use std::hash::{BuildHasher, Hasher};
 use std::io::{BufRead, BufReader, Write};
@@ -144,10 +145,14 @@ fn serve_caller(stream: TcpStream, token: &str, calls: &Sender<Forwarded>, wake:
                     .unwrap_or_else(|_| ToolOutcome {
                         content: "the Cutlass window did not answer".to_owned(),
                         is_error: true,
+                        picture: None,
                     })
             }
         };
-        let line = json!({"content": outcome.content, "is_error": outcome.is_error});
+        let mut line = json!({"content": outcome.content, "is_error": outcome.is_error});
+        if let Some(picture) = &outcome.picture {
+            line["picture"] = json!(picture);
+        }
         if writeln!(writer, "{line}")
             .and_then(|()| writer.flush())
             .is_err()
@@ -161,6 +166,7 @@ fn read_call(line: &str, token: &str) -> Result<ToolCall, ToolOutcome> {
     let refuse = |content: &str| ToolOutcome {
         content: content.to_owned(),
         is_error: true,
+        picture: None,
     };
     let message: Value =
         serde_json::from_str(line).map_err(|_| refuse("a forwarded call is not JSON"))?;
@@ -263,6 +269,10 @@ impl Forward {
                 .get("is_error")
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
+            // A picture that does not read is left out; the text stands.
+            picture: answer
+                .get("picture")
+                .and_then(|picture| serde_json::from_value(picture.clone()).ok()),
         })
     }
 }
@@ -272,6 +282,7 @@ impl ToolSink for Forward {
         self.try_call(call).unwrap_or_else(|error| ToolOutcome {
             content: format!("the call did not reach the Cutlass window: {error}"),
             is_error: true,
+            picture: None,
         })
     }
 }
@@ -310,6 +321,8 @@ mod tests {
                 waiting.answer(ToolOutcome {
                     content: format!("answer {answered}"),
                     is_error: false,
+                    // The second answer comes with a picture.
+                    picture: (answered == 2).then(|| crate::Picture::jpeg(b"frame")),
                 });
             }
             thread::sleep(Duration::from_millis(2));
@@ -318,6 +331,8 @@ mod tests {
         assert_eq!(first.content, "answer 1");
         assert_eq!(second.content, "answer 2");
         assert!(!first.is_error);
+        assert_eq!(first.picture, None);
+        assert_eq!(second.picture, Some(crate::Picture::jpeg(b"frame")));
         assert!(woken.load(Ordering::Acquire));
     }
 

@@ -60,7 +60,7 @@ impl fmt::Display for SandboxError {
             Self::PublishPackage => formatter.write_str("a script cannot publish a package"),
             Self::OnlineDisabled => formatter.write_str("online sandbox is off"),
             Self::AllOff => formatter.write_str(
-                "running code is off; the user can turn on Run code on this computer in Settings → Assistant",
+                "running code is off; the user can turn on Run code on this computer in Settings › Assistant",
             ),
             Self::OnlineUnavailable => formatter.write_str(
                 "the online runner needs a Cutlass account, which is not set up yet, and Run code on this computer is off",

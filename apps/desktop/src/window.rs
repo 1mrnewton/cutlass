@@ -65,11 +65,11 @@ fn run_on(studio: bool) -> eframe::Result {
             // file association passes them.
             // After `cutlass studio` there are none: what follows is the
             // command and the recipe to open, not files.
-            let named: Vec<std::path::PathBuf> = std::env::args_os()
-                .skip(1)
-                .filter(|_| !studio)
-                .map(std::path::PathBuf::from)
-                .collect();
+            let named = if studio {
+                Vec::new()
+            } else {
+                crate::cli::named_files(std::env::args_os().skip(1))
+            };
             if studio
                 && let Some(id) = std::env::args().nth(2)
                 && !shell.studio_mut().open_effect(&id)
@@ -216,7 +216,13 @@ impl eframe::App for DesktopWindow {
             let settings = self.shell.settings();
             bar.show_keys(|action| settings.keys_for(action));
             for id in bar.take() {
-                crate::view::run_menu(&mut self.shell, &mut self.view, Some(frame), &id);
+                crate::view::menu_chosen(
+                    &mut self.shell,
+                    &mut self.view,
+                    ui.ctx(),
+                    Some(frame),
+                    &id,
+                );
             }
         }
         show(&mut self.shell, ui, &mut self.view, Some(frame));

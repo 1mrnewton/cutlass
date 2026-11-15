@@ -17,7 +17,7 @@ mod file;
 mod shortcuts;
 
 pub use file::{Loaded, SettingsError, load, save};
-pub use shortcuts::{ACTIONS, Shortcut, action_label, default_keys, keys_label};
+pub use shortcuts::{ACTIONS, Shortcut, action_label, default_keys, keys_label, keys_words};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};

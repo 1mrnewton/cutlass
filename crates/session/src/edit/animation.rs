@@ -40,12 +40,21 @@ pub fn set_animation(
         kind
     };
     let preset = match resource_id {
-        Some(id) => Some(
-            ANIMATION_PRESETS
+        Some(id) => {
+            let mut named = ANIMATION_PRESETS
                 .iter()
-                .find(|preset| preset.resource_id == id && preset.kind == slot)
-                .ok_or(EditError::Animation)?,
-        ),
+                .filter(|preset| preset.resource_id == id)
+                .peekable();
+            // An id nothing has is told apart from one on the wrong side.
+            if named.peek().is_none() {
+                return Err(EditError::AnimationUnknown);
+            }
+            Some(
+                named
+                    .find(|preset| preset.kind == slot)
+                    .ok_or(EditError::AnimationSide)?,
+            )
+        }
         None => None,
     };
     let (track_index, segment_index) = locate(draft, segment_id)?;
@@ -57,7 +66,7 @@ pub fn set_animation(
             draft.materials.get(material_id.as_str()),
             Some(MaterialRef::Text(_))
         ) {
-            return Err(EditError::Animation);
+            return Err(EditError::AnimationText);
         }
     }
     let length = draft.tracks[track_index].segments[segment_index]
@@ -323,7 +332,7 @@ mod tests {
         // A caption names a loop preset; an in preset is refused.
         assert_eq!(
             session.apply(1, &[set(AnimType::Caption, Some(FADE_IN), 500_000)]),
-            Err(EditError::Animation)
+            Err(EditError::AnimationSide)
         );
         session
             .apply(1, &[set(AnimType::Caption, None, 0)])
@@ -339,13 +348,29 @@ mod tests {
     #[test]
     fn an_animation_on_the_wrong_side_or_unknown_is_refused() {
         let mut session = open();
+        // Each refusal says which of the four things is wrong.
+        // An in animation asked for on the way out.
         assert_eq!(
             session.apply(1, &[set(AnimType::Out, Some(FADE_IN), 500_000)]),
+            Err(EditError::AnimationSide)
+        );
+        // An id nothing has.
+        assert_eq!(
+            session.apply(
+                1,
+                &[set(AnimType::In, Some("cutlass-anim-in-nope"), 500_000)]
+            ),
+            Err(EditError::AnimationUnknown)
+        );
+        // A kind that is not a side.
+        assert_eq!(
+            session.apply(1, &[set(AnimType::Group, Some(FADE_IN), 500_000)]),
             Err(EditError::Animation)
         );
+        // A caption's, on a clip that is not text.
         assert_eq!(
             session.apply(1, &[set(AnimType::Caption, None, 500_000)]),
-            Err(EditError::Animation)
+            Err(EditError::AnimationText)
         );
         // A letter animation is a title's; "media" is not one.
         assert_eq!(
@@ -357,8 +382,25 @@ mod tests {
                     500_000
                 )]
             ),
-            Err(EditError::Animation)
+            Err(EditError::AnimationText)
         );
+        // What each says is enough to mend the request.
+        assert!(
+            EditError::AnimationSide
+                .to_string()
+                .contains("animation-in")
+        );
+        assert!(
+            EditError::AnimationUnknown
+                .to_string()
+                .contains("catalog.search")
+        );
+        assert!(
+            EditError::AnimationText
+                .to_string()
+                .contains("text clip only")
+        );
+        assert_eq!(session.revision(), 1);
     }
 
     #[test]

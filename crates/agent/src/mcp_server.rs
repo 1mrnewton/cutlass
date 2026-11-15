@@ -146,10 +146,15 @@ impl<S: ToolSink> McpServer<S> {
             name: tool.to_owned(),
             arguments,
         });
-        Ok(json!({
-            "content": [{ "type": "text", "text": outcome.content }],
-            "isError": outcome.is_error,
-        }))
+        let mut content = vec![json!({ "type": "text", "text": outcome.content })];
+        if let Some(picture) = outcome.picture {
+            content.push(json!({
+                "type": "image",
+                "data": picture.data,
+                "mimeType": picture.media_type,
+            }));
+        }
+        Ok(json!({ "content": content, "isError": outcome.is_error }))
     }
 }
 
@@ -275,6 +280,15 @@ pub(crate) fn input_schema(tool: &str) -> Value {
             "required": ["expected_generation", "changes"],
         });
     }
+    if tool == "player.look" {
+        // The one tool whose text may be left out.
+        return json!({
+            "type": "object",
+            "properties": {
+                "input": { "type": "string", "description": input_hint(tool) },
+            },
+        });
+    }
     if tool == "draft.apply" {
         return json!({
             "type": "object",
@@ -314,6 +328,7 @@ pub(crate) fn input_hint(tool: &str) -> &'static str {
             "project | full | track <id> | segment <id> | range <start_us> <end_us> | materials | material <id> | ops | ops <kind> ..."
         }
         "player.seek" => "<time_us>",
+        "player.look" => "<time_us>, or nothing for the playhead",
         "media.probe" => "A file path.",
         "speech.start" => "<start_us> <duration_us>",
         "speech.poll" => "The job id speech_start returned.",
@@ -348,6 +363,7 @@ mod tests {
             ToolOutcome {
                 content: format!("ran {}", call.name),
                 is_error: call.arguments == "fail",
+                picture: (call.name == "player.look").then(|| crate::Picture::jpeg(b"frame")),
             }
         }
     }
@@ -391,6 +407,50 @@ mod tests {
         );
         assert_eq!(ping["id"], "p");
         assert_eq!(ping["result"], json!({}));
+    }
+
+    #[test]
+    fn a_look_takes_its_time_or_nothing_and_answers_with_an_image() {
+        let mut server = McpServer::new(Echo::default(), "cutlass", "0.1.0");
+        let tools = ask(
+            &mut server,
+            &json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+        );
+        let look = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "player_look")
+            .unwrap();
+        // Its text may be left out, unlike every other tool with one.
+        assert_eq!(look["inputSchema"]["properties"]["input"]["type"], "string");
+        assert!(look["inputSchema"].get("required").is_none());
+        let reply = ask(
+            &mut server,
+            &json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+                "params":{"name":"player_look","arguments":{}}}),
+        );
+        assert_eq!(
+            reply["result"]["content"],
+            json!([
+                { "type": "text", "text": "ran player.look" },
+                { "type": "image", "data": "ZnJhbWU=", "mimeType": "image/jpeg" },
+            ])
+        );
+        assert_eq!(server.sink().calls[0].arguments, "");
+        ask(
+            &mut server,
+            &json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{"name":"player_look","arguments":{"input":"500000"}}}),
+        );
+        assert_eq!(server.sink().calls[1].arguments, "500000");
+        // A tool with no picture answers with its text alone.
+        let plain = ask(
+            &mut server,
+            &json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+                "params":{"name":"draft_query","arguments":{"input":"project"}}}),
+        );
+        assert_eq!(plain["result"]["content"].as_array().unwrap().len(), 1);
     }
 
     #[test]

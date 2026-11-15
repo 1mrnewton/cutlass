@@ -35,6 +35,7 @@ use core::arch::x86_64::{
 };
 
 use super::Block;
+use crate::vp9::pack::{packus128, packus256};
 
 // Loads and stores ---------------------------------------------------------
 //
@@ -132,52 +133,6 @@ unsafe fn s256(s: &mut [u8], o: usize, v: __m256i) {
     debug_assert!(o + 32 <= s.len());
     // SAFETY: the caller proves the 32 bytes lie in `s`.
     unsafe { _mm256_storeu_si256(s.as_mut_ptr().add(o).cast(), v) }
-}
-
-// Packs ---------------------------------------------------------------------
-//
-// `packuswb` as one instruction. The intrinsics are written over generic
-// vector operations, a clamp to 0..=255 and a truncation, and LLVM keeps
-// the clamp in front of the `packuswb` it emits for them: two `pminsw` and
-// two `pmaxsw` more for every 32 outputs.
-
-/// `_mm256_packus_epi16(a, b)`.
-#[inline]
-#[target_feature(enable = "avx2")]
-#[allow(unsafe_code)]
-fn packus256(a: __m256i, b: __m256i) -> __m256i {
-    let r: __m256i;
-    // SAFETY: one AVX2 instruction on registers, which this function's
-    // target feature enables; it reads and writes no memory.
-    unsafe {
-        core::arch::asm!(
-            "vpackuswb {r}, {a}, {b}",
-            r = lateout(ymm_reg) r,
-            a = in(ymm_reg) a,
-            b = in(ymm_reg) b,
-            options(pure, nomem, nostack, preserves_flags),
-        );
-    }
-    r
-}
-
-/// `_mm_packus_epi16(a, b)`.
-#[inline]
-#[target_feature(enable = "avx2")]
-#[allow(unsafe_code)]
-fn packus128(a: __m128i, b: __m128i) -> __m128i {
-    let r: __m128i;
-    // SAFETY: as for `packus256`.
-    unsafe {
-        core::arch::asm!(
-            "vpackuswb {r}, {a}, {b}",
-            r = lateout(xmm_reg) r,
-            a = in(xmm_reg) a,
-            b = in(xmm_reg) b,
-            options(pure, nomem, nostack, preserves_flags),
-        );
-    }
-    r
 }
 
 // Filters ------------------------------------------------------------------

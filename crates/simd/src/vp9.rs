@@ -19,6 +19,8 @@ pub mod lf;
 pub mod lf16;
 pub mod mc;
 pub mod mc16;
+#[cfg(target_arch = "x86_64")]
+mod pack;
 pub mod prefetch;
 pub mod quant;
 pub mod sad16;

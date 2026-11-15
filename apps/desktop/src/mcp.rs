@@ -2,9 +2,11 @@
 //!
 //! The project opens and stays held while the client is connected. Each
 //! change the client makes is saved at once, so a crash loses nothing, and
-//! the lock is let go when stdin closes. The model loop stays in the
-//! client. Approvals need a person, so this host refuses them, and the
-//! client sees the refusal as a tool error.
+//! the lock is let go when stdin closes or the process is told to stop: a
+//! client that quits signals the server it started, and does not always
+//! close stdin first. The model loop stays in the client. Approvals need
+//! a person, so this host refuses them, and the client sees the refusal as
+//! a tool error.
 //!
 //! A project another app holds is not opened: the calls go to that app
 //! instead. This host listens too, so a second `cutlass mcp` on the same
@@ -34,14 +36,37 @@ use cutlass_agent::{
 use crate::mcp_servers::McpServers;
 use crate::shell::{ExportRequest, Shell, ShellError};
 
-/// Serve the project at `path` on stdin and stdout until stdin closes.
+/// Serve the project at `path` on stdin and stdout until stdin closes or
+/// the process is told to stop.
 pub fn run(path: Option<&Path>) -> Result<(), String> {
     let stdout = std::io::stdout();
-    serve(
+    serve_with(
         path,
+        &Shell::settings_path(),
         std::io::BufReader::new(std::io::stdin()),
         stdout.lock(),
+        stop_on_signal,
     )
+}
+
+/// Ends the serving loop from outside it, as a closed stdin ends it from
+/// inside: the project is closed and its lock let go.
+struct Stop(Sender<Event>);
+
+impl Stop {
+    fn stop(&self) {
+        let _ = self.0.send(Event::Stopped);
+    }
+}
+
+/// End the loop when the process is told to stop: SIGINT, SIGTERM or
+/// SIGHUP, and on Windows Ctrl-C, Ctrl-Break or a closed console. Left to
+/// end the process themselves, they would leave the project marked as not
+/// closed, and its next open would say Cutlass did not close.
+fn stop_on_signal(stop: Stop) {
+    if let Err(error) = ctrlc::set_handler(move || stop.stop()) {
+        cutlass_logger::warn!("mcp: a signal will not close the project: {error}");
+    }
 }
 
 /// What the serving loop waits for.
@@ -52,6 +77,8 @@ enum Event {
     Garbled,
     /// The client closed its end.
     Closed,
+    /// The process was told to stop.
+    Stopped,
     /// Another host sent a call to the project socket.
     Socket,
 }
@@ -63,21 +90,24 @@ pub fn serve(
     input: impl BufRead + Send + 'static,
     output: impl Write,
 ) -> Result<(), String> {
-    serve_with(path, &Shell::settings_path(), input, output)
+    serve_with(path, &Shell::settings_path(), input, output, |_| {})
 }
 
 /// [`serve`], with the user's settings read from and written to
-/// `settings`.
+/// `settings`. `stopper` is handed what ends the loop from outside, before
+/// the project opens, so a signal that comes while it opens closes it too.
 fn serve_with(
     path: Option<&Path>,
     settings: &Path,
     input: impl BufRead + Send + 'static,
     mut output: impl Write,
+    stopper: impl FnOnce(Stop),
 ) -> Result<(), String> {
     let Some(path) = path else {
         return Err("name the project folder: cutlass mcp /path/to/project".to_owned());
     };
     let (events, waiting) = channel();
+    stopper(Stop(events.clone()));
     let socket = events.clone();
     let wake: Wake = Arc::new(move || {
         let _ = socket.send(Event::Socket);
@@ -105,7 +135,14 @@ fn serve_with(
                 server.sink_mut().0.serve_socket();
                 None
             }
-            Event::Closed => break,
+            Event::Closed => {
+                cutlass_logger::info!("mcp: the client closed stdin");
+                break;
+            }
+            Event::Stopped => {
+                cutlass_logger::info!("mcp: told to stop; closing the project");
+                break;
+            }
         };
         if let Some(answer) = answer {
             output
@@ -115,7 +152,6 @@ fn serve_with(
                 .map_err(|error| error.to_string())?;
         }
     }
-    cutlass_logger::info!("mcp: the client closed stdin");
     Ok(())
 }
 
@@ -1004,6 +1040,7 @@ mod tests {
                 &settings,
                 std::io::BufReader::new(Typed(typed, Vec::new())),
                 output,
+                |_| {},
             )
         });
         (lines, heard, host)
@@ -1028,6 +1065,46 @@ mod tests {
     fn rename(revision: u64, name: &str) -> Value {
         json!({"expected_revision": revision,
             "requests": [{"op": "set_project_name", "name": name}]})
+    }
+
+    #[test]
+    fn told_to_stop_with_stdin_still_open_the_host_closes_the_project() {
+        let project = Project::new("stopped");
+        let (lines, typed) = std::sync::mpsc::channel();
+        let (stops, stop) = std::sync::mpsc::channel();
+        let heard = Heard::default();
+        let (path, output) = (project.0.clone(), heard.clone());
+        let host = std::thread::spawn(move || {
+            super::serve_with(
+                Some(&path),
+                &crate::shell::Shell::settings_path(),
+                std::io::BufReader::new(Typed(typed, Vec::new())),
+                output,
+                move |stop| stops.send(stop).unwrap(),
+            )
+        });
+        lines
+            .send(call_line(1, "draft_apply", rename(0, "kept")))
+            .unwrap();
+        assert_eq!(said(&heard.answer(1, || {})), "revision=1 committed=true");
+        // What a signal does. The client still holds stdin open: `lines`
+        // is alive until the test ends.
+        stop.recv().unwrap().stop();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !host.is_finished() {
+            assert!(
+                std::time::Instant::now() < until,
+                "the host kept serving after it was told to stop"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        host.join().unwrap().unwrap();
+        let hold = cutlass_store::hold(&project.0).expect("the lock was let go");
+        assert!(!hold.unclean(), "the project was closed, not left");
+        drop(hold);
+        let opened = cutlass_store::open(&project.0).unwrap();
+        assert_eq!(opened.folder.draft.name, "kept");
+        drop(lines);
     }
 
     #[test]

@@ -91,6 +91,7 @@ egui = "0.37"
 epaint_default_fonts = { version = "0.37", features = ["monochrome_emoji_fonts"] }
 cutlass-container = { version = "0.1.0", path = "../../crates/container" }
 cutlass-codec = { path = "../../crates/codec", version = "0.1.0" }
+ctrlc = { version = "3.5.2", features = ["termination"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cutlass-platform-apple = { path = "../../crates/platform-apple", version = "0.1.0" }

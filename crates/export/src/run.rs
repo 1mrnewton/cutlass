@@ -2230,6 +2230,11 @@ mod tests {
         let mut faded = color_draft(240, 135, 1_000_000);
         push_sound(&mut faded, "loud", 1.0, 0, true);
         assert_eq!(audio_bytes(&faded, &request), vec![0.0, 0.25, 0.5, 0.75]);
+        // The fade in ends with the clip's first frame. The frame after it
+        // is a window of the same clip and is not faded again.
+        let mut later = request.clone();
+        later.range = TimeRange::new(1_000, 1_000);
+        assert_eq!(audio_bytes(&faded, &later), vec![1.0; 4]);
 
         let mut solo = color_draft(240, 135, 1_000_000);
         push_sound(&mut solo, "heard", 1.0, TrackAttribute::SOLO, false);

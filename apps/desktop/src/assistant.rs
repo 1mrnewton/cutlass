@@ -356,6 +356,7 @@ impl Assistant {
                 });
             }
         }
+        cutlass_agent::forget_pictures(&mut turn);
         self.history.append(&mut turn);
         self.keep();
     }
@@ -483,6 +484,9 @@ impl Assistant {
                             }
                             self.turn.clear();
                             self.history = messages;
+                            // The model looked during the turn; the frames
+                            // are not kept, or sent with the next one.
+                            cutlass_agent::forget_pictures(&mut self.history);
                             self.keep();
                         }
                         Err(error) => {
@@ -820,45 +824,142 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    /// A local model server that answers one request with "Done." and
-    /// gives back the body it was sent.
-    fn one_answer() -> (String, std::thread::JoinHandle<serde_json::Value>) {
+    /// A local model server that answers each request in turn with the
+    /// next of `messages`, and gives back the bodies it was sent.
+    fn answers(
+        messages: Vec<serde_json::Value>,
+    ) -> (String, std::thread::JoinHandle<Vec<serde_json::Value>>) {
         use std::io::{BufRead, BufReader, Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut length = 0;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if line.trim().is_empty() {
-                    break;
+            let mut bodies = Vec::new();
+            for message in messages {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
                 }
-                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = value.trim().parse().unwrap();
-                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                bodies.push(serde_json::from_slice(&body).unwrap());
+                let answer = serde_json::json!({ "choices": [{ "index": 0, "message": message }] })
+                    .to_string();
+                let mut stream = stream;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{answer}",
+                    answer.len()
+                )
+                .unwrap();
             }
-            let mut body = vec![0; length];
-            reader.read_exact(&mut body).unwrap();
-            let answer = serde_json::json!({
-                "choices": [{ "index": 0, "message": { "role": "assistant", "content": "Done." } }],
-            })
-            .to_string();
-            let mut stream = stream;
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{answer}",
-                answer.len()
-            )
-            .unwrap();
-            serde_json::from_slice(&body).unwrap()
+            bodies
         });
         (
             format!("http://127.0.0.1:{port}/v1/chat/completions"),
             server,
         )
+    }
+
+    #[test]
+    fn a_look_shows_the_model_the_frame_and_the_picture_is_not_kept() {
+        let (mut shell, path) = shell_with_project("look");
+        let (url, server) = answers(vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "Looking.",
+                "tool_calls": [{
+                    "id": "l1",
+                    "type": "function",
+                    "function": { "name": "player_look", "arguments": "{\"input\":\"1000000\"}" },
+                }],
+            }),
+            serde_json::json!({ "role": "assistant", "content": "It is black." }),
+        ]);
+        let mut settings = cutlass_settings::Settings::default();
+        settings.model.local_url = url;
+        let chat = path.join("chats").join("look.json");
+        let mut assistant = Assistant::default();
+        assistant.follow(Some(chat.clone()));
+        assistant.draft = "what does it look like at 1s?".to_owned();
+        assistant.send(&settings, "", "");
+        finish(&mut assistant, &mut shell);
+
+        // The model is offered the look, and its second round has the
+        // frame: the result's text, then the picture in a user message.
+        let bodies = server.join().unwrap();
+        assert!(
+            bodies[0]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["function"]["name"] == "player_look")
+        );
+        let messages = bodies[1]["messages"].as_array().unwrap();
+        let result = &messages[messages.len() - 2];
+        assert_eq!(result["role"], "tool");
+        assert_eq!(
+            result["content"],
+            "frame at 1000000, 853x480: the picture is with this result"
+        );
+        let shown = &messages[messages.len() - 1];
+        assert_eq!(shown["role"], "user");
+        let address = shown["content"][1]["image_url"]["url"].as_str().unwrap();
+        assert!(
+            address.starts_with("data:image/jpeg;base64,/9j/"),
+            "{}",
+            &address[..40]
+        );
+
+        // The panel shows the step's words; the playhead did not move.
+        assert_eq!(
+            assistant.entries,
+            vec![
+                Entry::Asked("what does it look like at 1s?".to_owned()),
+                Entry::Said("Looking.".to_owned()),
+                Entry::Step {
+                    tool: "player.look".to_owned(),
+                    input: "1000000".to_owned(),
+                    result: Some(
+                        "frame at 1000000, 853x480: the picture is with this result".to_owned()
+                    ),
+                    failed: false,
+                },
+                Entry::Said("It is black.".to_owned()),
+            ]
+        );
+        assert_eq!(shell.playhead(), Micros(0));
+
+        // Once the turn is over the picture is gone from what the next
+        // turn sends and from the kept file, with a note in its place.
+        let kept = assistant
+            .history
+            .iter()
+            .find_map(|message| match message {
+                Message::Tool {
+                    content, picture, ..
+                } => Some((content.clone(), picture.clone())),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(kept.1, None);
+        assert!(
+            kept.0.ends_with("look again if it is needed)"),
+            "{}",
+            kept.0
+        );
+        let file = std::fs::read_to_string(&chat).unwrap();
+        assert!(!file.contains("\"picture\""));
+        assert!(!file.contains("/9j/"));
+        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]
@@ -884,7 +985,9 @@ mod tests {
             format!("playhead=3000000; selected: a@0+3000000:{track}; at the playhead: nothing")
         );
 
-        let (url, server) = one_answer();
+        let (url, server) = answers(vec![
+            serde_json::json!({ "role": "assistant", "content": "Done." }),
+        ]);
         let mut settings = cutlass_settings::Settings::default();
         settings.model.local_url = url;
         let chat = path.join("chats").join("seen.json");
@@ -894,8 +997,8 @@ mod tests {
         assistant.send(&settings, "", &seen);
         finish(&mut assistant, &mut shell);
         // The model got the words, then the note.
-        let body = server.join().unwrap();
-        let messages = body["messages"].as_array().unwrap();
+        let bodies = server.join().unwrap();
+        let messages = bodies[0]["messages"].as_array().unwrap();
         let asked = messages.last().unwrap();
         assert_eq!(asked["role"], "user");
         assert_eq!(

@@ -495,6 +495,15 @@ impl Player for Headless {
     fn pause(&mut self) -> Result<(), String> {
         Err(NO_SCREEN.to_owned())
     }
+
+    /// No screen is needed to draw one frame: it is drawn as a still
+    /// export is, on the device opened with no window.
+    fn look(&mut self, time_us: Option<i64>) -> Result<cutlass_agent::Frame, String> {
+        self.0
+            .borrow_mut()
+            .look(time_us)
+            .map_err(|error| error.to_string())
+    }
 }
 
 const NO_SCREEN: &str = "cutlass mcp has no screen to play on; seek moves the playhead that a .png export draws, and the Cutlass window plays";
@@ -702,6 +711,49 @@ mod tests {
             .iter()
             .map(|message| format!("{message}\n"))
             .collect()
+    }
+
+    #[test]
+    fn a_client_looks_at_a_frame_with_no_window() {
+        let project = Project::new("look");
+        let input = lines(&[
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+                "params":{"name":"player_look","arguments":{}}}),
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{"name":"player_look","arguments":{"input":"1"}}}),
+        ]);
+        let mut output = Vec::new();
+        serve(
+            Some(&project.0),
+            std::io::Cursor::new(input.into_bytes()),
+            &mut output,
+        )
+        .unwrap();
+        let answers: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        // The frame at the playhead: its words, then the picture.
+        let looked = &answers[1]["result"];
+        assert_eq!(looked["isError"], false, "{looked}");
+        assert_eq!(
+            looked["content"][0]["text"],
+            "frame at 0, 853x480: the picture is with this result"
+        );
+        assert_eq!(looked["content"][1]["type"], "image");
+        assert_eq!(looked["content"][1]["mimeType"], "image/jpeg");
+        assert!(
+            looked["content"][1]["data"]
+                .as_str()
+                .unwrap()
+                .starts_with("/9j/")
+        );
+        // The project is empty, so a time past its end is refused.
+        let late = &answers[2]["result"];
+        assert_eq!(late["isError"], true);
+        assert_eq!(late["content"].as_array().unwrap().len(), 1);
     }
 
     #[test]

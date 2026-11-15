@@ -55,12 +55,19 @@ pub struct Picture {
 
 pub(crate) trait Store: Pixel {
     fn view(held: &Held) -> Option<&Pic<Self>>;
+    fn arc(held: &Held) -> Option<&Arc<Pic<Self>>>;
     fn keep(frame: Arc<Pic<Self>>) -> Held;
     fn spare(d: &mut Decoder) -> &mut Spare<Self>;
 }
 
 impl Store for u8 {
     fn view(held: &Held) -> Option<&Pic<Self>> {
+        match held {
+            Held::Eight(f) => Some(f),
+            Held::Deep(_) => None,
+        }
+    }
+    fn arc(held: &Held) -> Option<&Arc<Pic<Self>>> {
         match held {
             Held::Eight(f) => Some(f),
             Held::Deep(_) => None,
@@ -76,6 +83,12 @@ impl Store for u8 {
 
 impl Store for u16 {
     fn view(held: &Held) -> Option<&Pic<Self>> {
+        match held {
+            Held::Deep(f) => Some(f),
+            Held::Eight(_) => None,
+        }
+    }
+    fn arc(held: &Held) -> Option<&Arc<Pic<Self>>> {
         match held {
             Held::Deep(f) => Some(f),
             Held::Eight(_) => None,
@@ -339,12 +352,9 @@ impl Decoder {
         &self.persist
     }
 
-    /// The pictures in the reference slots, of 8-bit frames.
-    pub(crate) fn ref8(&self, slot: usize) -> Option<&Arc<Pic<u8>>> {
-        match self.refs.get(slot)? {
-            Some(Held::Eight(p)) => Some(p),
-            _ => None,
-        }
+    /// The pictures in the reference slots, of frames of `P` samples.
+    pub(crate) fn ref_pic<P: Store>(&self, slot: usize) -> Option<&Arc<Pic<P>>> {
+        self.refs.get(slot)?.as_ref().and_then(P::arc)
     }
 
     /// The previous frame's motion, and a spare picture buffer list.
@@ -352,8 +362,8 @@ impl Decoder {
         self.prev.as_deref().map(|v| v.as_slice())
     }
 
-    pub(crate) fn spare8(&mut self) -> &mut Spare<u8> {
-        &mut self.spare8
+    pub(crate) fn spare<P: Store>(&mut self) -> &mut Spare<P> {
+        P::spare(self)
     }
 
     /// Takes back a picture's buffers for a later picture: one still read
@@ -800,7 +810,7 @@ fn color_of(space: u8, range: u8) -> (ColorRange, ColorPrimaries, Transfer, Matr
     (range, primaries, transfer, matrix)
 }
 
-fn split_superframe(data: &[u8]) -> Result<Vec<&[u8]>, CodecError> {
+pub(crate) fn split_superframe(data: &[u8]) -> Result<Vec<&[u8]>, CodecError> {
     let Some(marker) = data.last().copied() else {
         return Ok(vec![data]);
     };

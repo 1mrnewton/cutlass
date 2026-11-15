@@ -1,5 +1,5 @@
-//! The encoder on the codec traits: [`Vp9Encoder`] takes 4:2:0 frames on
-//! the video codec contract, and [`EngineEncoder`] is the encoder export
+//! The encoder on the codec traits: [`Vp9Encoder`] takes 8-, 10- and
+//! 12-bit frames on the video codec contract, and [`EngineEncoder`] is the encoder export
 //! opens through the engine's factory, with its `vpcC` configuration.
 
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use cutlass_encode::{
     CodecError, CodecId, CodecParams, EncodeFactory, Packet, PixelFormat, Plane, VideoFrame,
 };
 
-use super::{FrameEncoder, FrameParams};
+use super::{EncPixel, FrameEncoder, FrameParams};
 
 /// The quantizer index a factory encoder with no bitrate keeps.
 pub const DEFAULT_Q: u8 = 60;
@@ -71,6 +71,11 @@ pub struct Vp9Options {
     /// busy ones coarser, by segment. Better looking, a little worse in
     /// PSNR.
     pub aq: bool,
+    /// Bits a sample: 8 (profiles 0 and 1, the default), or 10 or 12
+    /// (profiles 2 and 3), whose pictures go in as `u16` samples in the
+    /// low bits ([`Vp9Encoder::push_planes16`]; FFmpeg's `yuv420p10le`
+    /// and the like).
+    pub bit_depth: u8,
 }
 
 /// The lookahead below speed 9 unless set: with it, alt-refs take 10 to
@@ -128,37 +133,64 @@ impl Default for Vp9Options {
             chroma: Chroma::Yuv420,
             tile_rows: 0,
             aq: false,
+            bit_depth: 8,
         }
     }
 }
 
-/// VP9 profile 0 (8-bit 4:2:0) on the video codec contract.
+/// VP9 on the video codec contract: profile 0 (8-bit 4:2:0), 1 (8-bit
+/// 4:2:2, 4:4:0, 4:4:4), 2 and 3 (the same at 10 and 12 bits).
 pub struct Vp9Encoder {
+    lane: Lane,
+}
+
+/// The encoder of the stream's sample size.
+enum Lane {
+    Eight(Core<u8>),
+    Deep(Core<u16>),
+}
+
+/// The encoder of pictures of `P` samples.
+struct Core<P: EncPixel> {
     width: u32,
     height: u32,
     opts: Vp9Options,
-    enc: FrameEncoder,
+    enc: FrameEncoder<P>,
     since_key: u32,
     force_key: bool,
     rc: Rate,
     cancel: Arc<AtomicBool>,
     /// Pictures waiting for the lookahead, oldest first.
-    queue: std::collections::VecDeque<Queued>,
+    queue: std::collections::VecDeque<Queued<P>>,
     /// Where the overlay of the alt-ref coded last goes (`since_key`).
     overlay_at: Option<u32>,
     /// The luma of the picture coded last, tight, for finding a cut.
-    last_luma: Vec<u8>,
+    last_luma: Vec<P>,
     /// Whether the lookahead found that the next picture starts a scene.
     cut_next: bool,
 }
 
 /// A picture in the lookahead.
-struct Queued {
-    planes: [Vec<u8>; 3],
+struct Queued<P> {
+    planes: [Vec<P>; 3],
     seconds: f64,
     pts: i64,
     duration: i64,
     timescale: u32,
+}
+
+/// The pictures a push codes: data, key frame, and the picture's `pts`,
+/// `duration`, `timescale`.
+type Coded = Vec<(Vec<u8>, bool, (i64, i64, u32))>;
+
+/// A call on the encoder of the stream's sample size.
+macro_rules! on_lane {
+    ($self:expr, $c:ident => $e:expr) => {
+        match &mut $self.lane {
+            Lane::Eight($c) => $e,
+            Lane::Deep($c) => $e,
+        }
+    };
 }
 
 impl Vp9Encoder {
@@ -178,49 +210,35 @@ impl Vp9Encoder {
 
     pub fn with_options(width: u32, height: u32, opts: Vp9Options) -> Result<Self, CodecError> {
         check_size(width, height)?;
-        Ok(Self {
-            width,
-            height,
-            opts,
-            enc: {
-                let mut enc =
-                    FrameEncoder::with_subsampling(width, height, opts.threads(), opts.ss());
-                enc.set_tile_rows(opts.tile_rows);
-                enc
-            },
-            since_key: 0,
-            force_key: true,
-            rc: Rate::new(opts, u64::from(width) * u64::from(height)),
-            cancel: Arc::new(AtomicBool::new(false)),
-            queue: std::collections::VecDeque::new(),
-            overlay_at: None,
-            last_luma: Vec::new(),
-            cut_next: false,
-        })
+        let lane = match opts.bit_depth {
+            8 => Lane::Eight(Core::new(width, height, opts)),
+            10 | 12 => Lane::Deep(Core::new(width, height, opts)),
+            _ => {
+                return Err(CodecError::Unsupported {
+                    what: "vp9 bit depth",
+                });
+            }
+        };
+        Ok(Self { lane })
     }
 
     /// Bitrate 0 keeps the default quantizer; a positive bitrate aims at
-    /// that rate.
+    /// that rate. The pixel format picks the chroma size and bit depth.
     pub fn open(params: &CodecParams) -> Result<Self, CodecError> {
         if params.codec != CodecId::Vp9 {
             return Err(CodecError::Unsupported {
                 what: "vp9 encoder",
             });
         }
-        let chroma = match params.pixel {
-            PixelFormat::Yuv420p => Chroma::Yuv420,
-            PixelFormat::Yuv422p => Chroma::Yuv422,
-            PixelFormat::Yuv440p => Chroma::Yuv440,
-            PixelFormat::Yuv444p => Chroma::Yuv444,
-            _ => {
-                return Err(CodecError::Unsupported {
-                    what: "vp9 pixel format",
-                });
-            }
+        let Some((chroma, bit_depth)) = format_of(params.pixel) else {
+            return Err(CodecError::Unsupported {
+                what: "vp9 pixel format",
+            });
         };
         let opts = Vp9Options {
             bitrate: params.bitrate,
             chroma,
+            bit_depth,
             ..Vp9Options::default()
         };
         Self::with_options(params.width, params.height, opts)
@@ -239,7 +257,18 @@ impl Vp9Encoder {
 
     /// The quantizer index of the next frame.
     pub fn qindex(&self) -> u8 {
-        self.rc.last_q
+        match &self.lane {
+            Lane::Eight(c) => c.rc.last_q,
+            Lane::Deep(c) => c.rc.last_q,
+        }
+    }
+
+    /// The options the encoder codes with.
+    fn opts(&self) -> &Vp9Options {
+        match &self.lane {
+            Lane::Eight(c) => &c.opts,
+            Lane::Deep(c) => &c.opts,
+        }
     }
 
     /// The second pass of a two-pass encode (FFmpeg's `-pass 2`), from
@@ -251,6 +280,190 @@ impl Vp9Encoder {
     /// step follows how what has been spent compares with the share of the
     /// budget the first pass gives the pictures so far.
     pub fn set_second_pass(&mut self, first_bits: &[u64], first_q: u8) {
+        on_lane!(self, c => c.set_second_pass(first_bits, first_q));
+    }
+
+    /// Makes the next frame a key frame.
+    pub fn force_keyframe(&mut self) {
+        on_lane!(self, c => c.force_key = true);
+    }
+
+    /// Codes one 8-bit picture: `planes` are Y, U, V with their strides
+    /// (chroma of [`Vp9Options::chroma`]'s size).
+    pub fn encode_planes(
+        &mut self,
+        planes: [(&[u8], usize); 3],
+        seconds: f64,
+    ) -> Result<(Vec<u8>, bool), CodecError> {
+        match &mut self.lane {
+            Lane::Eight(c) => c.encode_planes(planes, seconds),
+            Lane::Deep(_) => Err(deep_only()),
+        }
+    }
+
+    /// [`Vp9Encoder::encode_planes`] of a 10- or 12-bit picture: samples
+    /// in the low bits of each `u16`, strides in samples.
+    pub fn encode_planes16(
+        &mut self,
+        planes: [(&[u16], usize); 3],
+        seconds: f64,
+    ) -> Result<(Vec<u8>, bool), CodecError> {
+        match &mut self.lane {
+            Lane::Deep(c) => {
+                c.check_range(&planes)?;
+                c.encode_planes(planes, seconds)
+            }
+            Lane::Eight(_) => Err(eight_only()),
+        }
+    }
+
+    /// Takes one 8-bit picture into the lookahead; returns the pictures
+    /// coded (data, key frame, and the picture's `pts`, `duration`,
+    /// `timescale`).
+    pub fn push_planes(
+        &mut self,
+        planes: [(&[u8], usize); 3],
+        seconds: f64,
+        clock: (i64, i64, u32),
+    ) -> Result<Coded, CodecError> {
+        match &mut self.lane {
+            Lane::Eight(c) => c.push_planes(planes, seconds, clock),
+            Lane::Deep(_) => Err(deep_only()),
+        }
+    }
+
+    /// [`Vp9Encoder::push_planes`] of a 10- or 12-bit picture: samples in
+    /// the low bits of each `u16`, strides in samples.
+    pub fn push_planes16(
+        &mut self,
+        planes: [(&[u16], usize); 3],
+        seconds: f64,
+        clock: (i64, i64, u32),
+    ) -> Result<Coded, CodecError> {
+        match &mut self.lane {
+            Lane::Deep(c) => {
+                c.check_range(&planes)?;
+                c.push_planes(planes, seconds, clock)
+            }
+            Lane::Eight(_) => Err(eight_only()),
+        }
+    }
+
+    /// Codes what the lookahead still holds.
+    pub fn flush(&mut self) -> Result<Coded, CodecError> {
+        on_lane!(self, c => c.flush())
+    }
+
+    /// The decoder configuration (`vpcC`, version 1) for the given colour
+    /// codes: the profile, level unset, the bit depth and chroma, limited
+    /// range.
+    pub fn vpcc_with_colour(&self, [primaries, transfer, matrix]: [u8; 3]) -> Vec<u8> {
+        let o = self.opts();
+        let profile = u8::from(o.chroma != Chroma::Yuv420) | if o.bit_depth > 8 { 2 } else { 0 };
+        // ISO BMFF's chroma codes: 4:2:0 (co-sited with luma's left
+        // column), 4:2:2, 4:4:4; 4:4:0 has none of its own.
+        let chroma = match o.chroma {
+            Chroma::Yuv420 | Chroma::Yuv440 => 1,
+            Chroma::Yuv422 => 2,
+            Chroma::Yuv444 => 3,
+        };
+        vec![
+            1,
+            0,
+            0,
+            0,
+            profile,
+            0,
+            (o.bit_depth << 4) | (chroma << 1),
+            primaries,
+            transfer,
+            matrix,
+            0,
+            0,
+        ]
+    }
+}
+
+/// The chroma and bit depth of a pixel format the encoder takes.
+fn format_of(f: PixelFormat) -> Option<(Chroma, u8)> {
+    Some(match f {
+        PixelFormat::Yuv420p => (Chroma::Yuv420, 8),
+        PixelFormat::Yuv422p => (Chroma::Yuv422, 8),
+        PixelFormat::Yuv440p => (Chroma::Yuv440, 8),
+        PixelFormat::Yuv444p => (Chroma::Yuv444, 8),
+        PixelFormat::Yuv420p10 => (Chroma::Yuv420, 10),
+        PixelFormat::Yuv422p10 => (Chroma::Yuv422, 10),
+        PixelFormat::Yuv440p10 => (Chroma::Yuv440, 10),
+        PixelFormat::Yuv444p10 => (Chroma::Yuv444, 10),
+        PixelFormat::Yuv420p12 => (Chroma::Yuv420, 12),
+        PixelFormat::Yuv422p12 => (Chroma::Yuv422, 12),
+        PixelFormat::Yuv440p12 => (Chroma::Yuv440, 12),
+        PixelFormat::Yuv444p12 => (Chroma::Yuv444, 12),
+        _ => return None,
+    })
+}
+
+fn deep_only() -> CodecError {
+    CodecError::InvalidApi {
+        what: "8-bit planes to a 10- or 12-bit encoder",
+    }
+}
+
+fn eight_only() -> CodecError {
+    CodecError::InvalidApi {
+        what: "16-bit planes to an 8-bit encoder",
+    }
+}
+
+impl Core<u16> {
+    /// Whether the picture's planes hold it, every sample within the bit
+    /// depth.
+    fn check_range(&self, planes: &[(&[u16], usize); 3]) -> Result<(), CodecError> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let c = self.opts.chroma_dims(w, h);
+        check_planes(self.width, self.height, c, planes)?;
+        let max = (1u16 << self.opts.bit_depth) - 1;
+        for (p, (data, stride)) in planes.iter().enumerate() {
+            let (pw, ph) = if p == 0 { (w, h) } else { c };
+            if (0..ph).any(|r| data[r * stride..r * stride + pw].iter().any(|&v| v > max)) {
+                return Err(CodecError::InvalidApi {
+                    what: "sample past the bit depth",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<P: EncPixel> Core<P> {
+    fn new(width: u32, height: u32, opts: Vp9Options) -> Self {
+        Self {
+            width,
+            height,
+            opts,
+            enc: {
+                let mut enc = FrameEncoder::with_depth(
+                    width,
+                    height,
+                    opts.threads(),
+                    opts.ss(),
+                    opts.bit_depth,
+                );
+                enc.set_tile_rows(opts.tile_rows);
+                enc
+            },
+            since_key: 0,
+            force_key: true,
+            rc: Rate::new(opts, u64::from(width) * u64::from(height)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            queue: std::collections::VecDeque::new(),
+            overlay_at: None,
+            last_luma: Vec::new(),
+            cut_next: false,
+        }
+    }
+
+    fn set_second_pass(&mut self, first_bits: &[u64], first_q: u8) {
         let mut cum = Vec::with_capacity(first_bits.len());
         let mut sum = 0.0;
         for &b in first_bits {
@@ -264,15 +477,10 @@ impl Vp9Encoder {
         });
     }
 
-    /// Makes the next frame a key frame.
-    pub fn force_keyframe(&mut self) {
-        self.force_key = true;
-    }
-
-    /// Codes one 4:2:0 picture: `planes` are Y, U, V with their strides.
-    pub fn encode_planes(
+    /// Codes one picture: `planes` are Y, U, V with their strides.
+    fn encode_planes(
         &mut self,
-        planes: [(&[u8], usize); 3],
+        planes: [(&[P], usize); 3],
         seconds: f64,
     ) -> Result<(Vec<u8>, bool), CodecError> {
         if self.cancel.load(Ordering::Relaxed) {
@@ -288,15 +496,13 @@ impl Vp9Encoder {
         self.code(planes, seconds)
     }
 
-    /// Takes one picture into the lookahead; returns the pictures coded
-    /// (data, key frame, and the picture's `pts`, `duration`, `timescale`).
-    #[allow(clippy::type_complexity)]
-    pub fn push_planes(
+    /// Takes one picture into the lookahead; returns the pictures coded.
+    fn push_planes(
         &mut self,
-        planes: [(&[u8], usize); 3],
+        planes: [(&[P], usize); 3],
         seconds: f64,
         clock: (i64, i64, u32),
-    ) -> Result<Vec<(Vec<u8>, bool, (i64, i64, u32))>, CodecError> {
+    ) -> Result<Coded, CodecError> {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(CodecError::Cancelled);
         }
@@ -314,7 +520,7 @@ impl Vp9Encoder {
         let (w, h) = (self.width as usize, self.height as usize);
         let c = self.opts.chroma_dims(w, h);
         let dims = [(w, h), c, c];
-        let tight: [Vec<u8>; 3] = std::array::from_fn(|p| {
+        let tight: [Vec<P>; 3] = std::array::from_fn(|p| {
             let (data, stride) = planes[p];
             let (pw, ph) = dims[p];
             (0..ph)
@@ -336,8 +542,7 @@ impl Vp9Encoder {
     }
 
     /// Codes what the lookahead still holds.
-    #[allow(clippy::type_complexity)]
-    pub fn flush(&mut self) -> Result<Vec<(Vec<u8>, bool, (i64, i64, u32))>, CodecError> {
+    fn flush(&mut self) -> Result<Coded, CodecError> {
         let mut out = Vec::new();
         while !self.queue.is_empty() {
             out.push(self.code_front()?);
@@ -372,12 +577,18 @@ impl Vp9Encoder {
             && k >= 2
             && k <= self.queue.len()
             && target < self.opts.keyint
-            && super::arf::reachable(&f.planes[0], &self.queue[k - 1].planes[0], w, h)
+            && super::arf::reachable(
+                &f.planes[0],
+                &self.queue[k - 1].planes[0],
+                w,
+                h,
+                self.opts.bit_depth,
+            )
         {
             let c = k - 1;
             let lo = c.saturating_sub(3);
             let hi = (c + 3).min(self.queue.len() - 1);
-            let pics: Vec<super::arf::Picture<'_>> = (lo..=hi)
+            let pics: Vec<super::arf::Picture<'_, P>> = (lo..=hi)
                 .map(|i| super::arf::Picture {
                     planes: [
                         &self.queue[i].planes[0],
@@ -402,6 +613,7 @@ impl Vp9Encoder {
                 strength,
                 self.opts.threads(),
                 self.opts.ss(),
+                self.opts.bit_depth,
             ));
         }
         let mut data = Vec::new();
@@ -438,7 +650,7 @@ impl Vp9Encoder {
     /// Codes one shown picture.
     fn code(
         &mut self,
-        planes: [(&[u8], usize); 3],
+        planes: [(&[P], usize); 3],
         seconds: f64,
     ) -> Result<(Vec<u8>, bool), CodecError> {
         let key = self.force_key || self.since_key >= self.opts.keyint;
@@ -495,12 +707,12 @@ impl Vp9Encoder {
     /// last: few of its blocks are anywhere near in that one, so that a
     /// key frame costs little more than an inter frame and starts the
     /// scene's references afresh (libvpx's scene cut detection).
-    fn is_cut(&self, (y, stride): (&[u8], usize)) -> bool {
+    fn is_cut(&self, (y, stride): (&[P], usize)) -> bool {
         let (w, h) = (self.width as usize, self.height as usize);
         if self.last_luma.len() != w * h || self.since_key == 0 {
             return false;
         }
-        let tight: std::borrow::Cow<'_, [u8]> = if stride == w {
+        let tight: std::borrow::Cow<'_, [P]> = if stride == w {
             std::borrow::Cow::Borrowed(&y[..w * h])
         } else {
             std::borrow::Cow::Owned(
@@ -512,23 +724,20 @@ impl Vp9Encoder {
         super::arf::cut(&self.last_luma, &tight, w, h)
     }
 
-    /// The decoder configuration (`vpcC`, version 1) for the given colour
-    /// codes: profile 0, level unset, 8-bit 4:2:0, limited range.
-    pub fn vpcc_with_colour(&self, [primaries, transfer, matrix]: [u8; 3]) -> Vec<u8> {
-        vec![
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            (8 << 4) | (1 << 1),
-            primaries,
-            transfer,
-            matrix,
-            0,
-            0,
-        ]
+    fn reset(&mut self) {
+        self.enc = FrameEncoder::with_depth(
+            self.width,
+            self.height,
+            self.opts.threads(),
+            self.opts.ss(),
+            self.opts.bit_depth,
+        );
+        self.enc.set_tile_rows(self.opts.tile_rows);
+        self.force_key = true;
+        self.since_key = 0;
+        self.rc = Rate::new(self.opts, u64::from(self.width) * u64::from(self.height));
+        self.queue.clear();
+        self.overlay_at = None;
     }
 }
 
@@ -539,23 +748,22 @@ impl VideoEncoder for Vp9Encoder {
 
     fn push(&mut self, input: &VideoInput) -> Result<Vec<Packet>, CodecError> {
         let f = &input.frame;
-        let want = match self.opts.chroma {
-            Chroma::Yuv420 => PixelFormat::Yuv420p,
-            Chroma::Yuv422 => PixelFormat::Yuv422p,
-            Chroma::Yuv440 => PixelFormat::Yuv440p,
-            Chroma::Yuv444 => PixelFormat::Yuv444p,
-        };
-        if f.format != want {
+        let o = *self.opts();
+        if format_of(f.format) != Some((o.chroma, o.bit_depth)) {
             return Err(CodecError::Unsupported {
                 what: "vp9 pixel format",
             });
         }
-        if f.width != self.width || f.height != self.height {
+        let (width, height) = match &self.lane {
+            Lane::Eight(c) => (c.width, c.height),
+            Lane::Deep(c) => (c.width, c.height),
+        };
+        if f.width != width || f.height != height {
             return Err(CodecError::InvalidApi {
                 what: "picture size",
             });
         }
-        if self.opts.bitrate > 0 && (input.duration <= 0 || input.timescale == 0) {
+        if o.bitrate > 0 && (input.duration <= 0 || input.timescale == 0) {
             return Err(CodecError::InvalidApi {
                 what: "frame clock",
             });
@@ -565,16 +773,34 @@ impl VideoEncoder for Vp9Encoder {
         } else {
             input.duration as f64 / f64::from(input.timescale)
         };
-        let planes = [
-            (&f.y.samples[..], f.y.stride),
-            (&f.u.samples[..], f.u.stride),
-            (&f.v.samples[..], f.v.stride),
-        ];
-        let coded = self.push_planes(
-            planes,
-            seconds,
-            (input.pts, input.duration, input.timescale),
-        )?;
+        let clock = (input.pts, input.duration, input.timescale);
+        let coded = if o.bit_depth > 8 {
+            // Little-endian samples, two bytes each, rows `stride` bytes
+            // apart.
+            let samples = |p: &Plane| -> Vec<u16> {
+                p.samples[..]
+                    .chunks_exact(2)
+                    .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                    .collect()
+            };
+            let (y, u, v) = (samples(&f.y), samples(&f.u), samples(&f.v));
+            self.push_planes16(
+                [
+                    (&y[..], f.y.stride / 2),
+                    (&u[..], f.u.stride / 2),
+                    (&v[..], f.v.stride / 2),
+                ],
+                seconds,
+                clock,
+            )?
+        } else {
+            let planes = [
+                (&f.y.samples[..], f.y.stride),
+                (&f.u.samples[..], f.u.stride),
+                (&f.v.samples[..], f.v.stride),
+            ];
+            self.push_planes(planes, seconds, clock)?
+        };
         Ok(coded
             .into_iter()
             .map(|(d, k, (pts, dur, ts))| Packet::video(d, pts, dur, ts, k))
@@ -590,22 +816,14 @@ impl VideoEncoder for Vp9Encoder {
     }
 
     fn reset(&mut self) {
-        self.enc = FrameEncoder::with_subsampling(
-            self.width,
-            self.height,
-            self.opts.threads(),
-            self.opts.ss(),
-        );
-        self.enc.set_tile_rows(self.opts.tile_rows);
-        self.force_key = true;
-        self.since_key = 0;
-        self.rc = Rate::new(self.opts, u64::from(self.width) * u64::from(self.height));
-        self.queue.clear();
-        self.overlay_at = None;
+        on_lane!(self, c => c.reset());
     }
 
     fn cancel_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.cancel)
+        match &self.lane {
+            Lane::Eight(c) => Arc::clone(&c.cancel),
+            Lane::Deep(c) => Arc::clone(&c.cancel),
+        }
     }
 }
 
@@ -710,11 +928,11 @@ fn check_size(width: u32, height: u32) -> Result<(), CodecError> {
     Ok(())
 }
 
-fn check_planes(
+fn check_planes<P>(
     width: u32,
     height: u32,
     (cw, ch): (usize, usize),
-    planes: &[(&[u8], usize); 3],
+    planes: &[(&[P], usize); 3],
 ) -> Result<(), CodecError> {
     let (w, h) = (width as usize, height as usize);
     for (p, (data, stride)) in planes.iter().enumerate() {
@@ -797,8 +1015,21 @@ const EXP: f64 = 1.25;
 /// a start for the model, from a detailed 720p picture moving.
 const FIRST_K: f64 = 48.0;
 
-fn step_of(q: u8) -> f64 {
-    f64::from(crate::tables::AC_QLOOKUP[usize::from(q)])
+/// The AC step of quantizer index `q` at `bd` bits, on the 8-bit scale
+/// (the 10- and 12-bit steps over 4 and 16): the model's constants hold
+/// at every bit depth.
+fn step_of(q: u8, bd: u8) -> f64 {
+    let (t, scale) = ac_table(bd);
+    f64::from(t[usize::from(q)]) / scale
+}
+
+/// The AC steps of a bit depth, and their scale against 8 bits'.
+fn ac_table(bd: u8) -> (&'static [i16; 256], f64) {
+    match bd {
+        10 => (&crate::tables::AC_QLOOKUP_10, 4.0),
+        12 => (&crate::tables::AC_QLOOKUP_12, 16.0),
+        _ => (&crate::tables::AC_QLOOKUP, 1.0),
+    }
 }
 
 impl Rate {
@@ -822,8 +1053,11 @@ impl Rate {
             if q == 0 {
                 return 0;
             }
-            return q_of_step(step_of(q) * STEP_SCALE[kind])
-                .clamp(self.opts.min_q, q.max(self.opts.min_q));
+            return q_of_step(
+                step_of(q, self.opts.bit_depth) * STEP_SCALE[kind],
+                self.opts.bit_depth,
+            )
+            .clamp(self.opts.min_q, q.max(self.opts.min_q));
         }
         if let Some(p) = &mut self.pass2 {
             // Two passes. Frame i's bits are about k·b_i·(s/s1)^-EXP, with
@@ -834,7 +1068,7 @@ impl Rate {
             // left of the first pass; frame types take their steps from it
             // as a fixed quantizer does.
             let frames = p.cum.len().max(1);
-            let s1 = step_of(p.q);
+            let s1 = step_of(p.q, self.opts.bit_depth);
             let first = p.cum.last().copied().unwrap_or(1.0).max(1.0);
             let total = f64::from(self.opts.bitrate) * seconds.max(1e-3) * frames as f64;
             let done = (self.frames as usize).min(frames);
@@ -851,11 +1085,12 @@ impl Rate {
             let left =
                 (total - self.spent).max(total * 0.02 * (frames - done) as f64 / frames as f64);
             let base = s1 * (k * left_first / left.max(1.0)).powf(1.0 / EXP);
-            let q = q_of_step(base * STEP_SCALE[kind]).clamp(self.opts.min_q, self.opts.max_q);
+            let q = q_of_step(base * STEP_SCALE[kind], self.opts.bit_depth)
+                .clamp(self.opts.min_q, self.opts.max_q);
             if p.steps.len() <= done {
                 p.steps.resize(done + 1, s1);
             }
-            p.steps[done] = step_of(q) / STEP_SCALE[kind];
+            p.steps[done] = step_of(q, self.opts.bit_depth) / STEP_SCALE[kind];
             if kind == 2 {
                 self.last_q = q;
             }
@@ -866,7 +1101,8 @@ impl Rate {
             // would take at this many bits a sample, finer for its type.
             let target = f64::from(self.opts.bitrate) * seconds.max(1e-3) * SHARE[2];
             let step = (FIRST_K * self.pixels / target.max(1.0)).powf(1.0 / EXP);
-            self.last_q = q_of_step(step).clamp(self.opts.min_q, self.opts.max_q);
+            self.last_q =
+                q_of_step(step, self.opts.bit_depth).clamp(self.opts.min_q, self.opts.max_q);
             // At a constant bitrate the first key frame takes a coarser
             // step, not a finer one: the buffer cannot hold the ten frames'
             // worth a fine one costs.
@@ -875,7 +1111,8 @@ impl Rate {
             } else {
                 STEP_SCALE[kind]
             };
-            return q_of_step(step * scale).clamp(self.opts.min_q, self.opts.max_q);
+            return q_of_step(step * scale, self.opts.bit_depth)
+                .clamp(self.opts.min_q, self.opts.max_q);
         }
         let m = match (self.model[kind], self.model[0]) {
             (Some(m), _) => m,
@@ -894,7 +1131,7 @@ impl Rate {
         let share = if cbr { SHARE_CBR[kind] } else { SHARE[kind] };
         let target = (self.per_frame * share - self.debt / horizon).max(self.per_frame * 0.2);
         let step = (m / target).powf(1.0 / EXP);
-        let q = q_of_step(step).clamp(self.opts.min_q, self.opts.max_q);
+        let q = q_of_step(step, self.opts.bit_depth).clamp(self.opts.min_q, self.opts.max_q);
         // Inter frames move the quantizer at most a few steps a frame (more
         // at a constant bitrate, which must follow the content).
         let reach = if cbr { 48 } else { 24 };
@@ -935,24 +1172,28 @@ impl Rate {
             self.debt -= self.per_frame;
         }
         self.debt += bits;
-        let m = bits * step_of(qindex).powf(EXP);
+        let m = bits * step_of(qindex, self.opts.bit_depth).powf(EXP);
         self.model[kind] = Some(match self.model[kind] {
             Some(old) => old * 0.6 + m * 0.4,
             None => m,
         });
         if kind == 0 && self.model[2].is_none() {
-            self.last_q = q_of_step(step_of(qindex) / STEP_SCALE[0]);
+            self.last_q = q_of_step(
+                step_of(qindex, self.opts.bit_depth) / STEP_SCALE[0],
+                self.opts.bit_depth,
+            );
         }
     }
 }
 
-/// The quantizer index whose AC step is nearest `step`.
-fn q_of_step(step: f64) -> u8 {
-    let t = &crate::tables::AC_QLOOKUP;
+/// The quantizer index whose AC step (on the 8-bit scale, as
+/// [`step_of`]) is nearest `step`.
+fn q_of_step(step: f64, bd: u8) -> u8 {
+    let (t, scale) = ac_table(bd);
     let mut best = 0u8;
     let mut err = f64::MAX;
     for (i, &s) in t.iter().enumerate() {
-        let e = (f64::from(s) - step).abs();
+        let e = (f64::from(s) / scale - step).abs();
         if e < err {
             err = e;
             best = i as u8;

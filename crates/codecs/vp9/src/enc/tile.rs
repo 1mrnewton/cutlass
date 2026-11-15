@@ -17,7 +17,10 @@ use crate::dec::frame::{Mv, MvRef};
 use crate::dec::parse::{LfMi, State};
 use crate::dec::recon::Recon;
 use crate::dec::syntax::BlockRec;
-use crate::dsp::{ipred, sad};
+use crate::dsp::ipred;
+use crate::dsp::pixel::Pixel;
+
+use super::EncPixel;
 use crate::geom::{
     self, BLOCK_4X4, BLOCK_8X8, BLOCK_64X64, INTRA_FRAME, LAST_FRAME, NEAR, NEAREST, NEW,
     PARTITION_HORZ, PARTITION_NONE, PARTITION_SPLIT, PARTITION_VERT, TX_32X32, ZERO,
@@ -25,7 +28,7 @@ use crate::geom::{
 use crate::header::Header;
 use crate::lpf;
 use crate::prob::{self, FrameContext};
-use crate::tables::{BAND_4X4, BAND_8X8_PLUS, CAT6_PROB, KF_UV_MODE_PROB, KF_Y_MODE_PROB, PARETO8};
+use crate::tables::{BAND_4X4, BAND_8X8_PLUS, KF_UV_MODE_PROB, KF_Y_MODE_PROB, PARETO8};
 
 use super::tx::{forward, fwht};
 
@@ -181,13 +184,13 @@ pub fn bit_cost(bit: bool, p: u8) -> u32 {
 }
 
 /// A source picture: three planes padded to whole superblocks.
-pub struct Source<'a> {
-    pub planes: [&'a [u8]; 3],
+pub struct Source<'a, P> {
+    pub planes: [&'a [P]; 3],
     pub strides: [usize; 3],
 }
 
 /// What a frame's tiles read.
-pub struct Shared<'a> {
+pub struct Shared<'a, P> {
     pub h: &'a Header,
     pub fc: &'a FrameContext,
     pub prev_mvs: Option<&'a [MvRef]>,
@@ -201,7 +204,7 @@ pub struct Shared<'a> {
     pub lambda: u32,
     /// The sample SSE a bit of rate is worth.
     pub rd_lambda: f32,
-    pub src: Source<'a>,
+    pub src: Source<'a, P>,
     /// The quantizer steps of luma and chroma, DC and AC, by segment.
     pub dq: [[[i32; 2]; 2]; 8],
     /// The segment of every 8×8 block of the frame (empty: segmentation
@@ -276,7 +279,7 @@ struct TxRd {
 type Tok = (usize, u8, usize, usize, Vec<i32>, usize);
 
 /// What coding a square changes, kept to try another way.
-struct Snap {
+struct Snap<P> {
     at: (usize, usize, usize, usize),
     cost: u64,
     above: [Nb; 8],
@@ -286,10 +289,10 @@ struct Snap {
     left_part: [u8; 8],
     left_nz: [[u8; 16]; 3],
     mvs: [MvRef; 64],
-    pix: [Vec<u8>; 3],
+    pix: [Vec<P>; 3],
 }
 
-impl Default for Snap {
+impl<P: Pixel> Default for Snap<P> {
     fn default() -> Self {
         Self {
             at: (0, 0, 0, 0),
@@ -301,7 +304,7 @@ impl Default for Snap {
             left_part: [0; 8],
             left_nz: [[0; 16]; 3],
             mvs: [MvRef::default(); 64],
-            pix: [vec![0; 64 * 64], vec![0; 64 * 64], vec![0; 64 * 64]],
+            pix: std::array::from_fn(|_| vec![P::default(); 64 * 64]),
         }
     }
 }
@@ -388,7 +391,7 @@ fn fast_tx_cap(speed: u8) -> u8 {
 }
 
 /// Plane `p`'s subsampling across and down.
-fn plane_ss(s: &Shared<'_>, p: usize) -> (usize, usize) {
+fn plane_ss<P>(s: &Shared<'_, P>, p: usize) -> (usize, usize) {
     if p == 0 {
         (0, 0)
     } else {
@@ -412,16 +415,30 @@ fn have_left_of(c: usize, b: &Blk, col0: usize) -> bool {
 
 /// The scratch a tile's rows lend one another: made once, not for every
 /// superblock row.
-#[derive(Default)]
-pub struct TileBufs {
-    pred: Vec<u8>,
+pub struct TileBufs<P> {
+    pred: Vec<P>,
     res: Vec<i32>,
     fcoef: Vec<f32>,
-    snaps: Vec<Snap>,
+    snaps: Vec<Snap<P>>,
     toks: Vec<Tok>,
     pool: Vec<Vec<i32>>,
     mctmp: Vec<u8>,
     rdq: Rdq,
+}
+
+impl<P> Default for TileBufs<P> {
+    fn default() -> Self {
+        Self {
+            pred: Vec::new(),
+            res: Vec::new(),
+            fcoef: Vec::new(),
+            snaps: Vec::new(),
+            toks: Vec::new(),
+            pool: Vec::new(),
+            mctmp: Vec::new(),
+            rdq: Rdq::default(),
+        }
+    }
 }
 
 /// The per-position scratch of [`Tile::rd_levels`], kept between calls:
@@ -437,11 +454,11 @@ pub struct Rdq {
 }
 
 /// The encoder of one tile.
-pub struct Tile<'s, 't, 'r, 'v> {
-    s: &'s Shared<'s>,
+pub struct Tile<'s, 't, 'r, 'v, P: EncPixel> {
+    s: &'s Shared<'s, P>,
     f: &'t mut State,
     w: &'t mut Out,
-    rec: &'t mut Recon<'r, 'v, u8>,
+    rec: &'t mut Recon<'r, 'v, P>,
     col0: usize,
     col1: usize,
     left: [Nb; 8],
@@ -450,7 +467,7 @@ pub struct Tile<'s, 't, 'r, 'v> {
     cache: [u8; 1024],
     /// The segment of the block being coded (its quantizer).
     seg: usize,
-    pred: Vec<u8>,
+    pred: Vec<P>,
     res: Vec<i32>,
     fcoef: Vec<f32>,
     /// Best vectors found per 8×8 position this superblock, for the
@@ -464,7 +481,7 @@ pub struct Tile<'s, 't, 'r, 'v> {
     part: [u8; 21],
     rect: [[[Blk; 2]; 21]; 2],
     /// Snapshots: 0 the superblock, then four per level.
-    snaps: Vec<Snap>,
+    snaps: Vec<Snap<P>>,
     toks: Vec<Tok>,
     /// The cost of the best inter candidate last ranked (SAD units).
     last_sad: u64,
@@ -499,17 +516,17 @@ pub struct Tile<'s, 't, 'r, 'v> {
     cost: u64,
 }
 
-impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
+impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
     /// `seeds`: the vectors found so far (one per 8×8 block of the frame),
     /// back from [`Tile::finish`] of the row above.
     pub fn new(
-        s: &'s Shared<'s>,
+        s: &'s Shared<'s, P>,
         f: &'t mut State,
         w: &'t mut Out,
-        rec: &'t mut Recon<'r, 'v, u8>,
+        rec: &'t mut Recon<'r, 'v, P>,
         (col0, col1): (usize, usize),
         mut seeds: Vec<Mv>,
-        bufs: TileBufs,
+        bufs: TileBufs<P>,
     ) -> Self {
         seeds.resize(s.mi_cols * s.mi_rows, Mv::ZERO);
         let TileBufs {
@@ -522,7 +539,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             mut mctmp,
             mut rdq,
         } = bufs;
-        pred.resize(64 * 64, 0);
+        pred.resize(64 * 64, P::default());
         res.resize(64 * 64, 0);
         fcoef.resize(32 * 32, 0.0);
         snaps.resize_with(17, Snap::default);
@@ -578,7 +595,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
 
     /// The vectors found, for the next row's tile, and the buffers to
     /// lend it.
-    pub fn finish(self) -> (Vec<Mv>, TileBufs) {
+    pub fn finish(self) -> (Vec<Mv>, TileBufs<P>) {
         (
             self.seeds,
             TileBufs {
@@ -693,10 +710,10 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             let mut sum = 0u32;
             for r in 0..n {
                 for c in 0..n {
-                    sum += u32::from(src[(y + r) * ss + x + c]);
+                    sum += src[(y + r) * ss + x + c].get() as u32;
                 }
             }
-            let dc = ((sum + (n * n / 2) as u32) / (n * n) as u32) as u8;
+            let dc = P::new(((sum + (n * n / 2) as u32) / (n * n) as u32) as i32);
             self.pred[..n * n].fill(dc);
             return satd(&src[y * ss + x..], ss, &self.pred, n, n) + lam * 4;
         }
@@ -1240,7 +1257,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let mut scored: Vec<(u64, u8)> = Vec::with_capacity(10);
         let lam = u64::from(s.lambda);
         for &m in modes {
-            ipred::predict(m, n, &mut self.pred, n, &e, 8);
+            ipred::predict(m, n, &mut self.pred, n, &e, u32::from(s.h.bit_depth));
             let cost =
                 satd(&src[y * ss + x..], ss, &self.pred, n, n) + lam * u64::from(m != geom::DC) * 2;
             scored.push((cost, m));
@@ -1283,7 +1300,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             0..=5 => 5,
             6..=7 => 8,
             _ => 12,
-        };
+        } << (self.s.h.bit_depth - 8);
         self.last_sad > pixels * per
     }
 
@@ -1550,14 +1567,14 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 (w, h),
                 (((mc & 7) * 2) as usize, ((mr & 7) * 2) as usize),
                 filter,
-                255,
+                (1 << s.h.bit_depth) - 1,
                 k == 1,
                 &mut tmp,
             );
         }
         let out = ok.then(|| {
             let (src, ss) = (s.src.planes[0], s.src.strides[0]);
-            u64::from(sad::sad(&src[y * ss + x..], ss, &pred, w, w, h))
+            u64::from(P::sad(&src[y * ss + x..], ss, &pred, w, w, h))
         });
         self.pred = pred;
         self.mctmp = tmp;
@@ -1662,7 +1679,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     // Motion search -------------------------------------------------------
 
     #[allow(clippy::type_complexity)]
-    fn rec_ref(&self) -> Option<((&[u8], usize), (i32, i32))> {
+    fn rec_ref(&self) -> Option<((&[P], usize), (i32, i32))> {
         let c = self.rec.ctx();
         let rp = c.refs[self.cur_ref].as_ref()?;
         Some((rp.buf.plane(0), (rp.dims.w[0] as i32, rp.dims.h[0] as i32)))
@@ -1683,7 +1700,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let (src, ss) = (s.src.planes[0], s.src.strides[0]);
         let a = &src[y * ss + x..];
         let b = &data[by as usize * stride + bx as usize..];
-        Some(u64::from(sad::sad_bilinear(
+        Some(u64::from(P::sad_bilinear(
             a,
             ss,
             b,
@@ -1724,12 +1741,12 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 (w, h),
                 (((c & 7) * 2) as usize, ((r & 7) * 2) as usize),
                 filter,
-                255,
+                (1 << s.h.bit_depth) - 1,
                 false,
                 &mut tmp,
             );
             let (src, ss) = (s.src.planes[0], s.src.strides[0]);
-            Some(u64::from(sad::sad(&src[y * ss + x..], ss, &pred, w, w, h)))
+            Some(u64::from(P::sad(&src[y * ss + x..], ss, &pred, w, w, h)))
         })();
         self.pred = pred;
         self.mctmp = tmp;
@@ -2034,8 +2051,9 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             b.bmode = self.sub;
             b.mode = b.bmode[3];
         }
-        if inter && eobs > 0 {
-            // Skip when the residual is not worth its bits.
+        if inter && eobs > 0 && !s.h.lossless {
+            // Skip when the residual is not worth its bits (never in a
+            // lossless frame, which must come back exact).
             let ctx = usize::from(self.above_nb(&b).is_some_and(|n| n.skip))
                 + usize::from(self.left_nb(&b).is_some_and(|n| n.skip));
             let p = s.fc.skip[ctx];
@@ -2156,7 +2174,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             let (src, sst) = (s.src.planes[p], s.src.strides[p]);
             let v = &mut self.rec.views()[p];
             let stride = v.stride;
-            total += sad::sse(&src[y * sst + x..], sst, v.at(y, x), stride, vw * 4, vh * 4);
+            total += P::sse(&src[y * sst + x..], sst, v.at(y, x), stride, vw * 4, vh * 4);
         }
         total as f64
     }
@@ -2190,7 +2208,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
             geom::D207,
             geom::D63,
         ] {
-            ipred::predict(m, 4, &mut self.pred, 4, &e, 8);
+            ipred::predict(m, 4, &mut self.pred, 4, &e, u32::from(s.h.bit_depth));
             let c = satd(&src[y * ss + x..], ss, &self.pred, 4, 4) + lam * u64::from(m != geom::DC);
             if c < best.0 {
                 best = (c, m);
@@ -2320,7 +2338,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                 let sr = &src[(y + r) * ss + x..][..n];
                 let pr = &pred[r * stride..][..n];
                 for ((d, &a), &b) in self.res[r * n..][..n].iter_mut().zip(sr).zip(pr) {
-                    *d = i32::from(a) - i32::from(b);
+                    *d = a.get() - b.get();
                 }
             }
         }
@@ -2656,6 +2674,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                                 &mut c,
                                 &PARETO8[usize::from(probs[band][ctx][2].max(1)) - 1],
                                 l,
+                                s.h.bit_depth,
                             );
                             tcs[4] + c.0
                         }
@@ -2709,6 +2728,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                                 &mut c,
                                 &PARETO8[usize::from(probs[band][ctx][2].max(1)) - 1],
                                 l,
+                                s.h.bit_depth,
                             );
                             more + tcs[4] + c.0
                         }
@@ -3401,12 +3421,12 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
                     let pp = &PARETO8[usize::from(p[2]) - 1];
                     self.cache[rc] = if self.trial {
                         let mut c = Cost(0);
-                        let e = write_big(&mut c, pp, a);
+                        let e = write_big(&mut c, pp, a, s.h.bit_depth);
                         self.cost += u64::from(c.0);
                         e
                     } else {
                         let p2 = coef_flat(ti, pi, ri, band, ctx, 2);
-                        write_big(&mut BigOut { out: self.w, p2 }, pp, a)
+                        write_big(&mut BigOut { out: self.w, p2 }, pp, a, s.h.bit_depth)
                     };
                 }
                 self.put(u32::from(v < 0), 128);
@@ -3573,8 +3593,9 @@ fn tree_to<S: Sink>(w: &mut S, tree: &[i8], probs: &[u8], symbol: u8) {
     }
 }
 
-/// Writes a token of magnitude `a` of 2 and more; returns its energy.
-fn write_big<S: Sink>(w: &mut S, pp: &[u8; 8], a: u32) -> u8 {
+/// Writes a token of magnitude `a` of 2 and more, of samples of `bd`
+/// bits (whose largest category takes `bd + 6` bits); returns its energy.
+fn write_big<S: Sink>(w: &mut S, pp: &[u8; 8], a: u32, bd: u8) -> u8 {
     let bits = |w: &mut S, v: u32, probs: &[u8]| {
         for (i, &p) in probs.iter().enumerate() {
             w.write((v >> (probs.len() - 1 - i)) & 1, u32::from(p));
@@ -3620,7 +3641,9 @@ fn write_big<S: Sink>(w: &mut S, pp: &[u8; 8], a: u32) -> u8 {
                     bits(w, a - 35, &[180, 157, 141, 134, 130]);
                 } else {
                     w.pareto(1, 7, pp);
-                    bits(w, (a - 67).min((1 << 14) - 1), &CAT6_PROB);
+                    let n = u32::from(bd) + 6;
+                    let probs = &crate::dec::parse::CAT6_HIGH[18 - n as usize..];
+                    bits(w, (a - 67).min((1 << n) - 1), probs);
                 }
             }
             5
@@ -3749,15 +3772,15 @@ fn scan_pair(tx: u8, kind: u8) -> (&'static [u16], &'static [u16]) {
 
 /// The sum of absolute 4×4 Hadamard coefficients of `src - pred` over an
 /// `w`×`h` block (`pred` rows `w` apart).
-fn satd(src: &[u8], ss: usize, pred: &[u8], w: usize, h: usize) -> u64 {
+fn satd<P: Pixel>(src: &[P], ss: usize, pred: &[P], w: usize, h: usize) -> u64 {
     let mut total = 0u64;
     for by in (0..h).step_by(4) {
         for bx in (0..w).step_by(4) {
             let mut d = [0i32; 16];
             for r in 0..4 {
                 for c in 0..4 {
-                    d[r * 4 + c] = i32::from(src[(by + r) * ss + bx + c])
-                        - i32::from(pred[(by + r) * w + bx + c]);
+                    d[r * 4 + c] =
+                        src[(by + r) * ss + bx + c].get() - pred[(by + r) * w + bx + c].get();
                 }
             }
             for r in 0..4 {
@@ -3787,9 +3810,9 @@ fn satd(src: &[u8], ss: usize, pred: &[u8], w: usize, h: usize) -> u64 {
 /// at whole-sample offset `(dr, dc)`, or `None` outside the reference.
 #[inline]
 #[allow(clippy::type_complexity)]
-fn sad_ref(
-    (src, ss): (&[u8], usize),
-    ((data, stride), (rw, rh)): ((&[u8], usize), (i32, i32)),
+fn sad_ref<P: EncPixel>(
+    (src, ss): (&[P], usize),
+    ((data, stride), (rw, rh)): ((&[P], usize), (i32, i32)),
     (x, y, w, h): (usize, usize, usize, usize),
     dr: i32,
     dc: i32,
@@ -3800,13 +3823,13 @@ fn sad_ref(
     }
     let a = &src[y * ss + x..];
     let b = &data[by as usize * stride + bx as usize..];
-    Some(u64::from(sad::sad(a, ss, b, stride, w, h)))
+    Some(u64::from(P::sad(a, ss, b, stride, w, h)))
 }
 
 /// [`sad_ref`] at four vectors at once, each within `range`.
-fn sad4_ref(
-    (src, ss): (&[u8], usize),
-    ((data, stride), (rw, rh)): ((&[u8], usize), (i32, i32)),
+fn sad4_ref<P: EncPixel>(
+    (src, ss): (&[P], usize),
+    ((data, stride), (rw, rh)): ((&[P], usize), (i32, i32)),
     (x, y, w, h): (usize, usize, usize, usize),
     pts: [(i32, i32); 4],
     range: i32,
@@ -3826,7 +3849,7 @@ fn sad4_ref(
         return [None; 4];
     };
     let b = offs.map(|o| &data[o.unwrap_or(any)..]);
-    let v = sad::sad4(&src[y * ss + x..], ss, b, stride, w, h);
+    let v = P::sad4(&src[y * ss + x..], ss, b, stride, w, h);
     let mut out = [None; 4];
     for k in 0..4 {
         out[k] = offs[k].map(|_| u64::from(v[k]));
@@ -3836,9 +3859,9 @@ fn sad4_ref(
 
 /// A superblock's whole-sample search on LAST, made ahead of coding.
 #[allow(clippy::type_complexity)]
-fn search_in(
-    s: &Shared<'_>,
-    rp: ((&[u8], usize), (i32, i32)),
+fn search_in<P: EncPixel>(
+    s: &Shared<'_, P>,
+    rp: ((&[P], usize), (i32, i32)),
     seeds: &[Mv],
     cur_ref: usize,
     row: usize,
@@ -3972,9 +3995,9 @@ impl Default for Pre {
 /// [`Tile::choose_into`] for an inter frame, outside a tile: the split
 /// flags and each square's best whole-sample vector on LAST.
 #[allow(clippy::type_complexity)]
-pub fn prepass_sb(
-    s: &Shared<'_>,
-    rp: ((&[u8], usize), (i32, i32)),
+pub fn prepass_sb<P: EncPixel>(
+    s: &Shared<'_, P>,
+    rp: ((&[P], usize), (i32, i32)),
     seeds: &mut [Mv],
     mi_row: usize,
     mi_col: usize,
@@ -3985,9 +4008,9 @@ pub fn prepass_sb(
 }
 
 #[allow(clippy::type_complexity)]
-fn pre_choose(
-    s: &Shared<'_>,
-    rp: ((&[u8], usize), (i32, i32)),
+fn pre_choose<P: EncPixel>(
+    s: &Shared<'_, P>,
+    rp: ((&[P], usize), (i32, i32)),
     seeds: &mut [Mv],
     pre: &mut Pre,
     row: usize,
@@ -4000,7 +4023,7 @@ fn pre_choose(
     let lam = u64::from(s.lambda);
     let estimate = |seeds: &mut [Mv], pre: &mut Pre, bsize: u8| -> u64 {
         let (mv, sad) = search_in(s, rp, seeds, 0, row, col, bsize);
-        pre.found[Tile::slot(row, col, bsize)] = (mv, sad);
+        pre.found[Tile::<P>::slot(row, col, bsize)] = (mv, sad);
         let bw = MI_WH[usize::from(bsize)].0;
         for r in 0..bw.min(s.mi_rows - row) {
             for c in 0..bw.min(s.mi_cols - col) {
@@ -4031,7 +4054,7 @@ fn pre_choose(
         }
     }
     if quarters < own {
-        pre.split[Tile::node(row, col, level)] = true;
+        pre.split[Tile::<P>::node(row, col, level)] = true;
         quarters
     } else {
         own

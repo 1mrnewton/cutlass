@@ -29,7 +29,7 @@ use crate::dec::lf;
 use crate::dec::parse::{LfMi, State};
 use crate::dec::recon::{Ctx, Recon, Scratch, View};
 use crate::dec::ref_pics;
-use crate::decode::Decoder;
+use crate::decode::{Decoder, Store};
 use crate::geom;
 use crate::header::{self, Parsed};
 use crate::lpf;
@@ -71,16 +71,94 @@ pub struct Coded {
     pub key: bool,
 }
 
-/// The frame-level encoder of 8-bit 4:2:0 pictures.
-pub struct FrameEncoder {
+/// The samples the encoder codes: 8-bit (`u8`) or 10- and 12-bit
+/// (`u16`), with the distortion measures of its searches.
+pub trait EncPixel: Store {
+    fn sad(a: &[Self], sa: usize, b: &[Self], sb: usize, w: usize, h: usize) -> u32;
+    fn sad4(a: &[Self], sa: usize, b: [&[Self]; 4], sb: usize, w: usize, h: usize) -> [u32; 4];
+    fn sse(a: &[Self], sa: usize, b: &[Self], sb: usize, w: usize, h: usize) -> u64;
+    #[allow(clippy::too_many_arguments)]
+    fn sad_bilinear(
+        a: &[Self],
+        sa: usize,
+        b: &[Self],
+        sb: usize,
+        w: usize,
+        h: usize,
+        fy: u32,
+        fx: u32,
+    ) -> u32;
+}
+
+impl EncPixel for u8 {
+    #[inline(always)]
+    fn sad(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u32 {
+        crate::dsp::sad::sad(a, sa, b, sb, w, h)
+    }
+    #[inline(always)]
+    fn sad4(a: &[u8], sa: usize, b: [&[u8]; 4], sb: usize, w: usize, h: usize) -> [u32; 4] {
+        crate::dsp::sad::sad4(a, sa, b, sb, w, h)
+    }
+    #[inline(always)]
+    fn sse(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u64 {
+        crate::dsp::sad::sse(a, sa, b, sb, w, h)
+    }
+    #[inline(always)]
+    fn sad_bilinear(
+        a: &[u8],
+        sa: usize,
+        b: &[u8],
+        sb: usize,
+        w: usize,
+        h: usize,
+        fy: u32,
+        fx: u32,
+    ) -> u32 {
+        crate::dsp::sad::sad_bilinear(a, sa, b, sb, w, h, fy, fx)
+    }
+}
+
+impl EncPixel for u16 {
+    #[inline(always)]
+    fn sad(a: &[u16], sa: usize, b: &[u16], sb: usize, w: usize, h: usize) -> u32 {
+        crate::dsp::sad::high::sad(a, sa, b, sb, w, h)
+    }
+    #[inline(always)]
+    fn sad4(a: &[u16], sa: usize, b: [&[u16]; 4], sb: usize, w: usize, h: usize) -> [u32; 4] {
+        crate::dsp::sad::high::sad4(a, sa, b, sb, w, h)
+    }
+    #[inline(always)]
+    fn sse(a: &[u16], sa: usize, b: &[u16], sb: usize, w: usize, h: usize) -> u64 {
+        crate::dsp::sad::high::sse(a, sa, b, sb, w, h)
+    }
+    #[inline(always)]
+    fn sad_bilinear(
+        a: &[u16],
+        sa: usize,
+        b: &[u16],
+        sb: usize,
+        w: usize,
+        h: usize,
+        fy: u32,
+        fx: u32,
+    ) -> u32 {
+        crate::dsp::sad::high::sad_bilinear(a, sa, b, sb, w, h, fy, fx)
+    }
+}
+
+/// The frame-level encoder of pictures of `P` samples (`u8`: 8-bit,
+/// `u16`: 10- or 12-bit).
+pub struct FrameEncoder<P: EncPixel = u8> {
     width: u32,
     height: u32,
+    /// Bits a sample: 8, 10 or 12.
+    bd: u8,
     dec: Decoder,
     /// The source, padded to whole superblocks by repeating its edges.
-    src: [Vec<u8>; 3],
+    src: [Vec<P>; 3],
     strides: [usize; 3],
     /// Tile column threads' buffers.
-    work: Vec<TileWork>,
+    work: Vec<TileWork<P>>,
     /// Tile columns: at most this many threads (log2 of the count).
     log2_tiles: u8,
     /// Tile rows (log2 of the count, 0 to 2).
@@ -100,23 +178,23 @@ pub struct FrameEncoder {
 }
 
 /// What one tile column's encoder keeps from frame to frame.
-struct TileWork {
+struct TileWork<P: EncPixel> {
     /// Its own copy of the picture; only its columns are meaningful.
-    pix: [Vec<u8>; 3],
+    pix: [Vec<P>; 3],
     seeds: Vec<Mv>,
     state: State,
-    scratch: Scratch<u8>,
+    scratch: Scratch<P>,
     /// The tile's symbols, written once the frame's probabilities are.
     out: tile::Out,
     /// How many of them each superblock row ends at.
     row_ends: Vec<usize>,
-    bufs: tile::TileBufs,
+    bufs: tile::TileBufs<P>,
 }
 
-impl TileWork {
+impl<P: EncPixel> TileWork<P> {
     fn new(dims: &Dims) -> Self {
         Self {
-            pix: std::array::from_fn(|p| vec![0u8; dims.stride[p] * dims.rows[p]]),
+            pix: std::array::from_fn(|p| vec![P::default(); dims.stride[p] * dims.rows[p]]),
             seeds: Vec::new(),
             state: State::empty(),
             scratch: Scratch::new(),
@@ -134,22 +212,27 @@ fn tile_edge(i: usize, mi_cols: usize, log2: u8) -> usize {
     (((i * sb_cols) >> log2) * 8).min(mi_cols)
 }
 
-impl FrameEncoder {
+impl FrameEncoder<u8> {
     /// An encoder of `width`×`height` pictures on up to `threads` tile
     /// columns (rounded down to a power of two the width allows).
     #[cfg(test)]
     pub fn new(width: u32, height: u32, threads: usize) -> Self {
-        Self::with_subsampling(width, height, threads, (1, 1))
+        Self::with_depth(width, height, threads, (1, 1), 8)
     }
+}
 
-    /// [`FrameEncoder::new`] for chroma subsampled `ss` across and down:
-    /// (1, 1) for 4:2:0, (0, 0) for 4:4:4.
-    pub fn with_subsampling(width: u32, height: u32, threads: usize, ss: (usize, usize)) -> Self {
-        let dims = Dims::new(width as usize, height as usize, ss.0, ss.1, 8);
-        let src = std::array::from_fn(|p| vec![0u8; dims.stride[p] * dims.rows[p]]);
+impl<P: EncPixel> FrameEncoder<P> {
+    /// An encoder of `width`×`height` pictures of `bd` bits a sample (8
+    /// for `u8`; 10 or 12 for `u16`), chroma subsampled `ss` across and
+    /// down ((1, 1) for 4:2:0, (0, 0) for 4:4:4), on up to `threads` tile
+    /// columns (rounded down to a power of two the width allows).
+    pub fn with_depth(width: u32, height: u32, threads: usize, ss: (usize, usize), bd: u8) -> Self {
+        let dims = Dims::new(width as usize, height as usize, ss.0, ss.1, bd);
+        let src = std::array::from_fn(|p| vec![P::default(); dims.stride[p] * dims.rows[p]]);
         Self {
             width,
             height,
+            bd,
             dec: Decoder::new(),
             src,
             strides: dims.stride,
@@ -172,19 +255,19 @@ impl FrameEncoder {
 
     /// The picture the last frame reconstructed (what a decoder shows).
     #[cfg(test)]
-    pub fn last(&self) -> Option<&Arc<Pic<u8>>> {
-        self.dec.ref8(0)
+    pub fn last(&self) -> Option<&Arc<Pic<P>>> {
+        self.dec.ref_pic(0)
     }
 
     /// Copies a source picture in, repeating its last column and row out
     /// to whole superblocks.
-    pub fn load(&mut self, planes: [(&[u8], usize); 3]) {
+    pub fn load(&mut self, planes: [(&[P], usize); 3]) {
         let dims = Dims::new(
             self.width as usize,
             self.height as usize,
             self.ss.0,
             self.ss.1,
-            8,
+            self.bd,
         );
         for (p, (data, stride)) in planes.into_iter().enumerate() {
             let (w, h) = (dims.w[p], dims.h[p]);
@@ -203,7 +286,7 @@ impl FrameEncoder {
 
     /// Codes the loaded source.
     pub fn encode(&mut self, fp: FrameParams) -> Result<Coded, CodecError> {
-        let key = fp.key || self.dec.ref8(0).is_none();
+        let key = fp.key || self.dec.ref_pic::<P>(0).is_none();
         let lossless = fp.qindex == 0;
         self.aq = (fp.aq && !lossless).then(|| {
             let (w, h) = (self.width as usize, self.height as usize);
@@ -278,9 +361,15 @@ impl FrameEncoder {
         let compressed = compressed_header(lossless, &Self::coded(key, fp), coef, nc)?;
         let mut b = BitWriter::new();
         b.write(2, 2); // frame marker
-        // Profile 0 for 4:2:0, 1 for 4:4:4 (its low bit goes first).
+        // Profile 0 for 8-bit 4:2:0, 1 for 8-bit 4:2:2, 4:4:0 and 4:4:4;
+        // 2 and 3 for the same at 10 and 12 bits. Its low bit goes first,
+        // and profile 3 has a reserved bit after it.
         let profile1 = self.ss != (1, 1);
-        b.write(if profile1 { 2 } else { 0 }, 2);
+        let profile = u32::from(profile1) | if self.bd > 8 { 2 } else { 0 };
+        b.write(((profile & 1) << 1) | (profile >> 1), 2);
+        if profile == 3 {
+            b.write_bit(false);
+        }
         b.write_bit(false); // show_existing_frame
         b.write_bit(!key); // frame_type
         b.write_bit(!hidden); // show_frame
@@ -289,6 +378,9 @@ impl FrameEncoder {
             b.write(0x49, 8);
             b.write(0x83, 8);
             b.write(0x42, 8);
+            if self.bd > 8 {
+                b.write_bit(self.bd == 12); // ten_or_twelve_bit
+            }
             b.write(1, 3); // BT.601
             b.write_bit(false); // studio range
             if profile1 {
@@ -335,7 +427,7 @@ impl FrameEncoder {
         let level = if lossless {
             0
         } else {
-            filter_level(qindex, key)
+            filter_level(qindex, key, self.bd)
         };
         b.write(u32::from(level), 6);
         b.write(0, 3); // sharpness
@@ -408,7 +500,7 @@ impl FrameEncoder {
             prob::Counts,
             Vec<frame::MvRef>,
             Vec<u8>,
-            Arc<Pic<u8>>,
+            Arc<Pic<P>>,
             Written,
         ),
         CodecError,
@@ -419,20 +511,24 @@ impl FrameEncoder {
             h.height as usize,
             h.ss_x as usize,
             h.ss_y as usize,
-            8,
+            self.bd,
         );
         let mi_cols = dims.width.div_ceil(8);
         let mi_rows = dims.height.div_ceil(8);
         let sb_cols = mi_cols.div_ceil(8);
         let sb_rows = mi_rows.div_ceil(8);
-        let slot = |i: usize| self.dec.ref8(usize::from(h.ref_index[i])).map(|p| &**p);
+        let slot = |i: usize| {
+            self.dec
+                .ref_pic::<P>(usize::from(h.ref_index[i]))
+                .map(|p| &**p)
+        };
         let refs = if h.is_intra() {
             [None, None, None]
         } else {
             [slot(0), slot(1), slot(2)]
         };
         // A reference worth searching holds a picture no earlier one does.
-        let same = |a: Option<&Pic<u8>>, b: Option<&Pic<u8>>| match (a, b) {
+        let same = |a: Option<&Pic<P>>, b: Option<&Pic<P>>| match (a, b) {
             (Some(a), Some(b)) => std::ptr::eq(a, b),
             _ => false,
         };
@@ -470,13 +566,13 @@ impl FrameEncoder {
             sb_cols,
             ss_x: h.ss_x as usize,
             ss_y: h.ss_y as usize,
-            bd: 8,
+            bd: u32::from(self.bd),
         };
         let filter_on = h.filter_level != 0;
         // Chroma subsampled one way only filters from a grid of the
         // blocks' sizes and transforms, as the decoder's.
         let needs_grid = filter_on && h.ss_x != h.ss_y;
-        let mut writer = frame::writer(&dims, self.dec.spare8());
+        let mut writer = frame::writer(&dims, self.dec.spare::<P>());
         let prev_mvs = if h.use_prev_mvs {
             self.dec.prev_mvs()
         } else {
@@ -498,7 +594,7 @@ impl FrameEncoder {
                 parsed.fc.partition
             },
             filter_on,
-            lambda: sad_per_bit(ac),
+            lambda: sad_per_bit(ac, self.bd),
             rd_lambda: rd_lambda(i32::from(h.y_dq[0][0])),
             src: Source {
                 planes: [&self.src[0], &self.src[1], &self.src[2]],
@@ -592,9 +688,9 @@ impl FrameEncoder {
             self.work.push(TileWork::new(&dims));
         }
         let plane_len: [usize; 3] = std::array::from_fn(|p| dims.stride[p] * dims.rows[p]);
-        let run = |t: &mut TileWork, col0: usize, col1: usize| -> Result<(), CodecError> {
+        let run = |t: &mut TileWork<P>, col0: usize, col1: usize| -> Result<(), CodecError> {
             for (p, buf) in t.pix.iter_mut().enumerate() {
-                buf.resize(plane_len[p], 0);
+                buf.resize(plane_len[p], P::default());
             }
             let tsb = (col1 - col0).div_ceil(8);
             t.state
@@ -704,7 +800,7 @@ impl FrameEncoder {
         let new_nc = probs::updates(&old_nc, &counts, &Self::coded(key, fp));
         // A tile column's symbols, one coder for each tile row.
         let log2_rows = h.log2_tile_rows;
-        let write = |t: &TileWork| -> Result<Vec<Vec<u8>>, CodecError> {
+        let write = |t: &TileWork<P>| -> Result<Vec<Vec<u8>>, CodecError> {
             (0..1usize << log2_rows)
                 .map(|tr| {
                     let symbols = |sb_row: usize| {
@@ -833,10 +929,13 @@ struct Written {
 }
 
 /// The SAD one bit of rate is worth: libvpx's `sad_per_bit16` from the
-/// AC quantizer step.
-fn sad_per_bit(ac: i32) -> u32 {
-    let q = f64::from(ac) / 4.0;
-    (0.0418 * q + 2.4107).round().max(1.0) as u32
+/// AC quantizer step. Above 8 bits libvpx takes it from the step scaled
+/// down to 8 bits, and shifts its SADs down to 8 bits too; here SADs stay
+/// at the samples' scale, so the lambda is scaled up as they are.
+fn sad_per_bit(ac: i32, bd: u8) -> u32 {
+    let scale = f64::from(1u32 << (bd - 8));
+    let q = f64::from(ac) / 4.0 / scale;
+    ((0.0418 * q + 2.4107) * scale).round().max(1.0) as u32
 }
 
 /// The sample SSE a bit is worth: libvpx's `rdmult` (88·q²/24, on
@@ -848,11 +947,25 @@ fn rd_lambda(dc: i32) -> f32 {
     0.00358 * (dc * dc) as f32
 }
 
-/// libvpx's loop filter level from the quantizer (`LPF_PICK_FROM_Q`,
-/// 8-bit).
-pub fn filter_level(qindex: u8, key: bool) -> u8 {
-    let q = i64::from(crate::tables::AC_QLOOKUP[usize::from(qindex)]);
-    let mut guess = (q * 20723 + 1_015_158 + (1 << 17)) >> 18;
+/// libvpx's loop filter level from the quantizer (`LPF_PICK_FROM_Q`), on
+/// the AC step of the bit depth: at 10 and 12 bits the step is about 4
+/// and 16 times larger, and so are the offset and the shift.
+pub fn filter_level(qindex: u8, key: bool, bd: u8) -> u8 {
+    let i = usize::from(qindex);
+    let mut guess = match bd {
+        10 => {
+            let q = i64::from(crate::tables::AC_QLOOKUP_10[i]);
+            (q * 20723 + 4_060_632 + (1 << 19)) >> 20
+        }
+        12 => {
+            let q = i64::from(crate::tables::AC_QLOOKUP_12[i]);
+            (q * 20723 + 16_242_526 + (1 << 21)) >> 22
+        }
+        _ => {
+            let q = i64::from(crate::tables::AC_QLOOKUP[i]);
+            (q * 20723 + 1_015_158 + (1 << 17)) >> 18
+        }
+    };
     if key {
         guess -= 4;
     }

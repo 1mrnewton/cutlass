@@ -1575,7 +1575,7 @@ fn fill<T: Copy>(s: &mut [T], v: T) {
     }
 }
 
-const CAT6_HIGH: [u8; 18] = {
+pub(crate) const CAT6_HIGH: [u8; 18] = {
     let mut t = [255u8; 18];
     let mut i = 0;
     while i < 14 {

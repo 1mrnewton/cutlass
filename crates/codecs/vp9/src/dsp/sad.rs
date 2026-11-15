@@ -199,6 +199,179 @@ pub fn sad_bilinear(
     })
 }
 
+/// The 10- and 12-bit forms of the functions above, on `u16` samples:
+/// plain loops over fixed-width rows, which the compiler vectorizes.
+pub mod high {
+    use cutlass_simd::vp9::wide;
+
+    #[inline(always)]
+    fn row<const W: usize>(a: &[u16], b: &[u16]) -> u32 {
+        let (Some(a), Some(b)) = (a.first_chunk::<W>(), b.first_chunk::<W>()) else {
+            return 0;
+        };
+        let mut s = 0u32;
+        for i in 0..W {
+            s += u32::from(a[i].abs_diff(b[i]));
+        }
+        s
+    }
+
+    #[inline(always)]
+    fn sad_w<const W: usize>(a: &[u16], sa: usize, b: &[u16], sb: usize, h: usize) -> u32 {
+        let mut acc = 0;
+        for r in 0..h {
+            acc += row::<W>(&a[r * sa..], &b[r * sb..]);
+        }
+        acc
+    }
+
+    /// [`super::sad`] of `u16` samples.
+    #[inline]
+    pub fn sad(a: &[u16], sa: usize, b: &[u16], sb: usize, w: usize, h: usize) -> u32 {
+        wide(|| match w {
+            64 => sad_w::<64>(a, sa, b, sb, h),
+            32 => sad_w::<32>(a, sa, b, sb, h),
+            16 => sad_w::<16>(a, sa, b, sb, h),
+            8 => sad_w::<8>(a, sa, b, sb, h),
+            _ => {
+                let mut acc = 0;
+                for r in 0..h {
+                    for c in 0..w {
+                        acc += u32::from(a[r * sa + c].abs_diff(b[r * sb + c]));
+                    }
+                }
+                acc
+            }
+        })
+    }
+
+    /// [`super::sad4`] of `u16` samples.
+    #[inline]
+    pub fn sad4(a: &[u16], sa: usize, b: [&[u16]; 4], sb: usize, w: usize, h: usize) -> [u32; 4] {
+        b.map(|bk| sad(a, sa, bk, sb, w, h))
+    }
+
+    #[inline(always)]
+    fn sse_w<const W: usize>(a: &[u16], sa: usize, b: &[u16], sb: usize, h: usize) -> u64 {
+        let mut acc = 0u64;
+        for r in 0..h {
+            let (Some(x), Some(y)) = (
+                a[r * sa..].first_chunk::<W>(),
+                b[r * sb..].first_chunk::<W>(),
+            ) else {
+                continue;
+            };
+            let mut s = 0u64;
+            for i in 0..W {
+                let d = i64::from(x[i]) - i64::from(y[i]);
+                s += (d * d) as u64;
+            }
+            acc += s;
+        }
+        acc
+    }
+
+    /// [`super::sse`] of `u16` samples.
+    #[inline]
+    pub fn sse(a: &[u16], sa: usize, b: &[u16], sb: usize, w: usize, h: usize) -> u64 {
+        wide(|| match w {
+            64 => sse_w::<64>(a, sa, b, sb, h),
+            32 => sse_w::<32>(a, sa, b, sb, h),
+            16 => sse_w::<16>(a, sa, b, sb, h),
+            8 => sse_w::<8>(a, sa, b, sb, h),
+            4 => sse_w::<4>(a, sa, b, sb, h),
+            _ => {
+                let mut acc = 0u64;
+                for r in 0..h {
+                    for c in 0..w {
+                        let d = i64::from(a[r * sa + c]) - i64::from(b[r * sb + c]);
+                        acc += (d * d) as u64;
+                    }
+                }
+                acc
+            }
+        })
+    }
+
+    #[inline(always)]
+    fn across<const W: usize>(b: &[u16], fx: u32, out: &mut [u32; W]) {
+        let (Some(p), Some(q)) = (
+            b.first_chunk::<W>(),
+            b.get(1..).and_then(|t| t.first_chunk::<W>()),
+        ) else {
+            return;
+        };
+        for i in 0..W {
+            out[i] = (u32::from(p[i]) * (16 - fx) + u32::from(q[i]) * fx + 8) >> 4;
+        }
+    }
+
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn bil_w<const W: usize>(
+        a: &[u16],
+        sa: usize,
+        b: &[u16],
+        sb: usize,
+        h: usize,
+        fx: u32,
+        fy: u32,
+    ) -> u32 {
+        let mut acc = 0;
+        let mut top = [0u32; W];
+        let mut bot = [0u32; W];
+        across::<W>(b, fx, &mut top);
+        for r in 0..h {
+            across::<W>(&b[(r + 1) * sb..], fx, &mut bot);
+            let Some(x) = a[r * sa..].first_chunk::<W>() else {
+                continue;
+            };
+            let mut s = 0u32;
+            for i in 0..W {
+                let v = (top[i] * (16 - fy) + bot[i] * fy + 8) >> 4;
+                s += v.abs_diff(u32::from(x[i]));
+            }
+            acc += s;
+            top = bot;
+        }
+        acc
+    }
+
+    /// [`super::sad_bilinear`] of `u16` samples.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    pub fn sad_bilinear(
+        a: &[u16],
+        sa: usize,
+        b: &[u16],
+        sb: usize,
+        w: usize,
+        h: usize,
+        fy: u32,
+        fx: u32,
+    ) -> u32 {
+        wide(|| match w {
+            64 => bil_w::<64>(a, sa, b, sb, h, fx, fy),
+            32 => bil_w::<32>(a, sa, b, sb, h, fx, fy),
+            16 => bil_w::<16>(a, sa, b, sb, h, fx, fy),
+            8 => bil_w::<8>(a, sa, b, sb, h, fx, fy),
+            _ => {
+                let mut acc = 0;
+                for r in 0..h {
+                    for c in 0..w {
+                        let p = |rr: usize, cc: usize| u32::from(b[rr * sb + cc]);
+                        let t = (p(r, c) * (16 - fx) + p(r, c + 1) * fx + 8) >> 4;
+                        let u = (p(r + 1, c) * (16 - fx) + p(r + 1, c + 1) * fx + 8) >> 4;
+                        let v = (t * (16 - fy) + u * fy + 8) >> 4;
+                        acc += v.abs_diff(u32::from(a[r * sa + c]));
+                    }
+                }
+                acc
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,6 +403,12 @@ mod tests {
                 }
                 assert_eq!(sad(&a, 80, &b, 79, w, h), want);
                 assert_eq!(sse(&a, 80, &b, 79, w, h), want_sse);
+                let a16: Vec<u16> = a.iter().map(|&v| u16::from(v) << 4).collect();
+                let b16: Vec<u16> = b.iter().map(|&v| u16::from(v) << 4).collect();
+                assert_eq!(high::sad(&a16, 80, &b16, 79, w, h), want * 16);
+                assert_eq!(high::sse(&a16, 80, &b16, 79, w, h), want_sse * 256);
+                let four = high::sad4(&a16, 80, [&b16, &b16[1..], &b16, &b16], 79, w, h);
+                assert_eq!(four[0], want * 16);
                 for (fy, fx) in [(0, 0), (8, 0), (0, 4), (12, 8)] {
                     let mut want = 0;
                     for r in 0..h {
@@ -246,6 +425,14 @@ mod tests {
                         want,
                         "{w}x{h} {fy} {fx}"
                     );
+                    let (a16, b16): (Vec<u16>, Vec<u16>) = (
+                        a.iter().map(|&v| u16::from(v) << 4).collect(),
+                        b.iter().map(|&v| u16::from(v) << 4).collect(),
+                    );
+                    let hi = high::sad_bilinear(&a16, 80, &b16, 79, w, h, fy, fx);
+                    // The same filter on samples 16 times larger: the
+                    // rounding differs by under a level each.
+                    assert!(hi.abs_diff(want * 16) <= (w * h * 16) as u32, "{hi} {want}");
                 }
             }
         }

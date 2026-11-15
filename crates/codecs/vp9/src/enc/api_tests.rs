@@ -1362,3 +1362,291 @@ fn profile_1_chroma_codes_and_lossless_comes_back_exact() {
         }
     }
 }
+
+/// Planes of `bd`-bit samples, `w`×`h` with chroma `ss` subsampled, a
+/// gradient and a moving texture over the whole range (picture `t`).
+fn deep_planes(w: u32, h: u32, (sx, sy): (u32, u32), bd: u8, t: u32) -> [Vec<u16>; 3] {
+    let max = (1u32 << bd) - 1;
+    let dims = [
+        (w, h),
+        (w.div_ceil(1 << sx), h.div_ceil(1 << sy)),
+        (w.div_ceil(1 << sx), h.div_ceil(1 << sy)),
+    ];
+    std::array::from_fn(|p| {
+        let (pw, ph) = dims[p];
+        let mut x = 0x1234_5678u32 ^ (p as u32 * 977) ^ (t * 7919);
+        (0..pw * ph)
+            .map(|i| {
+                let (r, c) = (i / pw, i % pw + t * 2);
+                x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let wave = (r * 5 + c * (p as u32 + 3) + p as u32 * 300) % 180;
+                (wave * max / 180 + (x >> 28)).min(max) as u16
+            })
+            .collect()
+    })
+}
+
+/// The picture a packet shows, through every frame of a superframe.
+fn shown_of(decoder: &mut Decoder, data: &[u8]) -> Option<crate::decode::Picture> {
+    let mut shown = None;
+    for f in crate::decode::split_superframe(data).expect("superframe") {
+        if let Some(p) = decoder.decode(f).expect("decode") {
+            shown = Some(p);
+        }
+    }
+    shown
+}
+
+/// A decoded picture's little-endian 16-bit plane as samples.
+fn le16(bytes: &[u8]) -> Vec<u16> {
+    bytes
+        .chunks_exact(2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+        .collect()
+}
+
+#[test]
+fn profiles_2_and_3_lossless_come_back_exact() {
+    for (bd, chroma, (sx, sy), profile) in [
+        (10u8, super::Chroma::Yuv420, (1u32, 1u32), 2u8),
+        (12, super::Chroma::Yuv420, (1, 1), 2),
+        (10, super::Chroma::Yuv444, (0, 0), 3),
+        (12, super::Chroma::Yuv422, (1, 0), 3),
+        (12, super::Chroma::Yuv440, (0, 1), 3),
+    ] {
+        // An odd size: partial superblocks and chroma rounded up.
+        let (w, h) = (75u32, 45u32);
+        let opts = super::Vp9Options {
+            qindex: 0,
+            chroma,
+            bit_depth: bd,
+            lag: Some(0),
+            threads: 1,
+            speed: 4,
+            ..super::Vp9Options::default()
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        let mut decoder = Decoder::new();
+        for t in 0..3 {
+            let planes = deep_planes(w, h, (sx, sy), bd, t);
+            let cw = w.div_ceil(1 << sx) as usize;
+            let (data, key) = encoder
+                .encode_planes16(
+                    [(&planes[0], w as usize), (&planes[1], cw), (&planes[2], cw)],
+                    1.0 / 30.0,
+                )
+                .expect("encode");
+            assert_eq!(key, t == 0);
+            if t == 0 {
+                let head = parsed_header(&data).expect("header");
+                assert_eq!(head.profile, profile, "{bd} {chroma:?}");
+                assert_eq!(head.bit_depth, bd);
+                assert_eq!((head.ss_x, head.ss_y), (sx, sy));
+                assert!(head.lossless);
+            }
+            let picture = decoder.decode(&data).expect("decode").expect("shown");
+            assert_eq!(picture.bit_depth, bd);
+            for (p, (got, want)) in [&picture.y, &picture.u, &picture.v]
+                .into_iter()
+                .zip(&planes)
+                .enumerate()
+            {
+                assert_eq!(&le16(got), want, "{bd} {chroma:?} picture {t} plane {p}");
+            }
+        }
+    }
+}
+
+#[test]
+fn high_bit_depth_lossy_decodes_as_the_encoder_reconstructs() {
+    for (bd, speed, lag) in [(10u8, 2u8, 0u32), (12, 6, 0), (10, 8, 16), (12, 10, 0)] {
+        let (w, h) = (96u32, 72u32);
+        let opts = super::Vp9Options {
+            qindex: 80,
+            bit_depth: bd,
+            lag: Some(lag),
+            threads: 2,
+            speed,
+            ..super::Vp9Options::default()
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        let mut decoder = Decoder::new();
+        let pictures: Vec<[Vec<u16>; 3]> =
+            (0..20).map(|t| deep_planes(w, h, (1, 1), bd, t)).collect();
+        let mut shown = Vec::new();
+        let cw = w.div_ceil(2) as usize;
+        for (t, planes) in pictures.iter().enumerate() {
+            let coded = encoder
+                .push_planes16(
+                    [(&planes[0], w as usize), (&planes[1], cw), (&planes[2], cw)],
+                    1.0 / 30.0,
+                    (t as i64, 1, 30),
+                )
+                .expect("encode");
+            for (data, _, _) in coded {
+                let picture = shown_of(&mut decoder, &data).expect("shown");
+                if lag == 0 {
+                    // Each picture decodes as the encoder reconstructed it.
+                    let super::Lane::Deep(core) = &encoder.lane else {
+                        panic!("a 10- or 12-bit encoder");
+                    };
+                    let last = core.enc.last().expect("reconstruction");
+                    last.buf.wait(usize::MAX);
+                    let (rec, stride) = last.buf.plane(0);
+                    let y = le16(&picture.y);
+                    let w = w as usize;
+                    for r in 0..h as usize {
+                        assert_eq!(
+                            &y[r * w..(r + 1) * w],
+                            &rec[r * stride..r * stride + w],
+                            "{bd}-bit speed {speed} row {r}"
+                        );
+                    }
+                }
+                shown.push(picture);
+            }
+        }
+        for (data, _, _) in encoder.flush().expect("flush") {
+            shown.push(shown_of(&mut decoder, &data).expect("shown"));
+        }
+        assert_eq!(shown.len(), pictures.len(), "{bd}-bit speed {speed}");
+        // Close to the source: each picture's luma PSNR against the bit
+        // depth's peak.
+        let peak = f64::from((1u32 << bd) - 1);
+        for (t, (pic, src)) in shown.iter().zip(&pictures).enumerate() {
+            assert_eq!(pic.bit_depth, bd);
+            let y = le16(&pic.y);
+            let sse: f64 = y
+                .iter()
+                .zip(&src[0])
+                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2))
+                .sum();
+            let psnr = 10.0 * (peak * peak / (sse / y.len() as f64).max(1e-9)).log10();
+            assert!(
+                psnr > 30.0,
+                "{bd}-bit speed {speed} picture {t}: {psnr:.1} dB"
+            );
+        }
+    }
+}
+
+#[test]
+fn ten_bit_frames_on_the_codec_contract() {
+    let (w, h) = (48u32, 32u32);
+    let mut params = CodecParams::video(CodecId::Vp9, w, h);
+    params.pixel = PixelFormat::Yuv420p10;
+    let mut encoder = Vp9Encoder::open(&params).expect("encoder");
+    let planes = deep_planes(w, h, (1, 1), 10, 0);
+    let bytes = |v: &[u16]| v.iter().flat_map(|s| s.to_le_bytes()).collect::<Vec<u8>>();
+    let frame = VideoFrame::planar(
+        PixelFormat::Yuv420p10,
+        w,
+        h,
+        Plane::bytes(w, h, 2, bytes(&planes[0])).expect("y"),
+        Plane::bytes(w / 2, h / 2, 2, bytes(&planes[1])).expect("u"),
+        Plane::bytes(w / 2, h / 2, 2, bytes(&planes[2])).expect("v"),
+    )
+    .expect("frame");
+    let mut packets = encoder.push(&input(frame)).expect("encode");
+    packets.extend(encoder.drain().expect("drain"));
+    assert_eq!(packets.len(), 1);
+    let head = parsed_header(&packets[0].data).expect("header");
+    assert_eq!((head.profile, head.bit_depth), (2, 10));
+    let picture = Decoder::new()
+        .decode(&packets[0].data)
+        .expect("decode")
+        .expect("shown");
+    assert_eq!(picture.bit_depth, 10);
+    // An 8-bit frame, or 8-bit planes, are refused.
+    assert!(encoder.push(&input(solid(w, h, 1, 2, 3))).is_err());
+    let y = vec![0u8; (w * h) as usize];
+    let c = vec![0u8; (w * h / 4) as usize];
+    assert!(
+        encoder
+            .encode_planes([(&y, 48), (&c, 24), (&c, 24)], 1.0 / 30.0)
+            .is_err()
+    );
+    // So is a sample past 10 bits.
+    let mut over = planes.clone();
+    over[0][5] = 1024;
+    assert!(
+        encoder
+            .encode_planes16([(&over[0], 48), (&over[1], 24), (&over[2], 24)], 1.0 / 30.0)
+            .is_err()
+    );
+}
+
+#[test]
+fn lossless_with_alt_refs_comes_back_exact() {
+    // An inter block after an alt-ref once dropped its residual where the
+    // prediction was close, which a lossless frame cannot.
+    for bd in [8u8, 10] {
+        let (w, h) = (64u32, 48u32);
+        let opts = super::Vp9Options {
+            qindex: 0,
+            bit_depth: bd,
+            lag: Some(16),
+            threads: 1,
+            speed: 6,
+            ..super::Vp9Options::default()
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        // Nearly still, with a little noise: the alt-ref predicts it
+        // closely.
+        let pictures: Vec<[Vec<u16>; 3]> = (0..20u32)
+            .map(|t| {
+                let mut p = deep_planes(w, h, (1, 1), bd, 0);
+                let mut x = t.wrapping_mul(2_654_435_761);
+                // Still but for a little noise in the top rows: most blocks
+                // skip, which makes skipping cheap for the rest.
+                for v in p[0][..w as usize * 8].iter_mut() {
+                    x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    *v = (*v).saturating_sub((x >> 31) as u16);
+                }
+                p
+            })
+            .collect();
+        let mut packets = Vec::new();
+        let cw = (w / 2) as usize;
+        for (t, p) in pictures.iter().enumerate() {
+            let clock = (t as i64, 1, 30);
+            let coded = if bd == 8 {
+                let b: Vec<Vec<u8>> = p
+                    .iter()
+                    .map(|v| v.iter().map(|&s| s as u8).collect())
+                    .collect();
+                encoder.push_planes(
+                    [(&b[0], w as usize), (&b[1], cw), (&b[2], cw)],
+                    1.0 / 30.0,
+                    clock,
+                )
+            } else {
+                encoder.push_planes16(
+                    [(&p[0], w as usize), (&p[1], cw), (&p[2], cw)],
+                    1.0 / 30.0,
+                    clock,
+                )
+            };
+            packets.extend(coded.expect("encode"));
+        }
+        packets.extend(encoder.flush().expect("flush"));
+        assert!(
+            packets
+                .iter()
+                .any(|(d, _, _)| d.last().is_some_and(|&m| m & 0xe0 == 0xc0)),
+            "{bd}-bit: an alt-ref"
+        );
+        let mut decoder = Decoder::new();
+        for (t, ((data, _, _), src)) in packets.iter().zip(&pictures).enumerate() {
+            let pic = shown_of(&mut decoder, data).expect("shown");
+            for (p, (got, want)) in [&pic.y, &pic.u, &pic.v].into_iter().zip(src).enumerate() {
+                let got: Vec<u16> = if bd == 8 {
+                    got.iter().map(|&s| u16::from(s)).collect()
+                } else {
+                    le16(got)
+                };
+                assert_eq!(&got, want, "{bd}-bit picture {t} plane {p}");
+            }
+        }
+    }
+}

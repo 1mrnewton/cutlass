@@ -1,5 +1,7 @@
-//! Encodes raw 4:2:0 video to an IVF file:
-//! `vp9enc <in.yuv> <width> <height> <out.ivf> [q=N | rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N] [lag=N] [aq=0|1] [tile_rows=0..2] [cbr=BUFFER_MS] [twopass=1] [chroma=420|422|440|444]`.
+//! Encodes raw video to an IVF file:
+//! `vp9enc <in.yuv> <width> <height> <out.ivf> [q=N | rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N] [lag=N] [aq=0|1] [tile_rows=0..2] [cbr=BUFFER_MS] [twopass=1] [chroma=420|422|440|444] [bits=8|10|12]`.
+//! With `bits=10` or `12` the input has little-endian 16-bit samples
+//! (FFmpeg's `yuv420p10le` and the like).
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -11,7 +13,7 @@ use cutlass_vp9::{Chroma, Vp9Encoder, Vp9Options};
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 5 {
-        return Err("usage: vp9enc <in.yuv> <width> <height> <out.ivf> [q=N|rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N] [lag=N] [aq=0|1] [tile_rows=0..2] [cbr=BUFFER_MS] [twopass=1] [chroma=420|422|440|444]".into());
+        return Err("usage: vp9enc <in.yuv> <width> <height> <out.ivf> [q=N|rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N] [lag=N] [aq=0|1] [tile_rows=0..2] [cbr=BUFFER_MS] [twopass=1] [chroma=420|422|440|444] [bits=8|10|12]".into());
     }
     let w: usize = args[2].parse().map_err(|_| "width")?;
     let h: usize = args[3].parse().map_err(|_| "height")?;
@@ -45,6 +47,7 @@ fn main() -> Result<(), String> {
                 }
             }
             "first_speed" => first_speed = n as u8,
+            "bits" => opts.bit_depth = n as u8,
             _ => return Err(format!("unknown option {k}")),
         }
     }
@@ -57,8 +60,10 @@ fn main() -> Result<(), String> {
         Chroma::Yuv440 => (w, h.div_ceil(2)),
         Chroma::Yuv444 => (w, h),
     };
-    let size = w * h + 2 * cw * ch;
+    let bytes = if opts.bit_depth > 8 { 2 } else { 1 };
+    let size = (w * h + 2 * cw * ch) * bytes;
     let mut buf = vec![0u8; size];
+    let mut wide = Vec::new();
     let mut enc = Vp9Encoder::with_options(w as u32, h as u32, opts).map_err(|e| e.to_string())?;
     if twopass {
         // The first pass: the same pictures at a fixed quantizer, fast.
@@ -73,16 +78,8 @@ fn main() -> Result<(), String> {
             Vp9Encoder::with_options(w as u32, h as u32, first_opts).map_err(|e| e.to_string())?;
         let (mut bits, mut n) = (Vec::new(), 0u32);
         while (n as usize) < frames && input.read_exact(&mut buf).is_ok() {
-            let (y, rest) = buf.split_at(w * h);
-            let (u, v) = rest.split_at(cw * ch);
-            for (data, _, _) in first
-                .push_planes(
-                    [(y, w), (u, cw), (v, cw)],
-                    1.0 / f64::from(fps),
-                    (i64::from(n), 1, fps),
-                )
-                .map_err(|e| e.to_string())?
-            {
+            let clock = (i64::from(n), 1, fps);
+            for (data, _, _) in push(&mut first, &buf, &mut wide, (w, h, cw, ch), fps, clock)? {
                 bits.push(data.len() as u64 * 8);
             }
             n += 1;
@@ -97,16 +94,8 @@ fn main() -> Result<(), String> {
     let start = Instant::now();
     let mut n = 0;
     while n < frames && input.read_exact(&mut buf).is_ok() {
-        let (y, rest) = buf.split_at(w * h);
-        let (u, v) = rest.split_at(cw * ch);
-        for (data, _, _) in enc
-            .push_planes(
-                [(y, w), (u, cw), (v, cw)],
-                1.0 / f64::from(fps),
-                (n as i64, 1, fps),
-            )
-            .map_err(|e| e.to_string())?
-        {
+        let clock = (n as i64, 1, fps);
+        for (data, _, _) in push(&mut enc, &buf, &mut wide, (w, h, cw, ch), fps, clock)? {
             packets.push(data);
         }
         n += 1;
@@ -142,4 +131,34 @@ fn main() -> Result<(), String> {
         n as f64 / secs
     );
     Ok(())
+}
+
+/// The pictures coded on pushing one raw picture: 8-bit samples as they
+/// are, 16-bit ones read little-endian into `wide`.
+#[allow(clippy::type_complexity)]
+fn push(
+    enc: &mut Vp9Encoder,
+    buf: &[u8],
+    wide: &mut Vec<u16>,
+    (w, h, cw, ch): (usize, usize, usize, usize),
+    fps: u32,
+    clock: (i64, i64, u32),
+) -> Result<Vec<(Vec<u8>, bool, (i64, i64, u32))>, String> {
+    let seconds = 1.0 / f64::from(fps);
+    if buf.len() == w * h + 2 * cw * ch {
+        let (y, rest) = buf.split_at(w * h);
+        let (u, v) = rest.split_at(cw * ch);
+        return enc
+            .push_planes([(y, w), (u, cw), (v, cw)], seconds, clock)
+            .map_err(|e| e.to_string());
+    }
+    wide.clear();
+    wide.extend(
+        buf.chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]])),
+    );
+    let (y, rest) = wide.split_at(w * h);
+    let (u, v) = rest.split_at(cw * ch);
+    enc.push_planes16([(y, w), (u, cw), (v, cw)], seconds, clock)
+        .map_err(|e| e.to_string())
 }

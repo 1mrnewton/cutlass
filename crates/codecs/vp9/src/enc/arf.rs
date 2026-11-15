@@ -5,54 +5,65 @@
 //! result keeps the picture and drops the noise that no single picture
 //! predicts, so the frames around it predict well from it.
 
-use crate::dsp::sad;
+use crate::dsp::pixel::Pixel;
 
-/// One 4:2:0 picture, planes tightly packed.
-pub struct Picture<'a> {
-    pub planes: [&'a [u8]; 3],
+use super::EncPixel;
+
+/// One picture, planes tightly packed.
+pub struct Picture<'a, P> {
+    pub planes: [&'a [P]; 3],
 }
 
-/// The filtered centre picture of `frames` (index `center`), `w`×`h`,
-/// at `strength` (a larger one filters more).
-pub fn filter(
-    frames: &[Picture<'_>],
+/// The filtered centre picture of `frames` (index `center`), `w`×`h` of
+/// `bd` bits a sample, at `strength` (a larger one filters more).
+#[allow(clippy::too_many_arguments)]
+pub fn filter<P: EncPixel>(
+    frames: &[Picture<'_, P>],
     center: usize,
     w: usize,
     h: usize,
     strength: u32,
     threads: usize,
     ss: (usize, usize),
-) -> [Vec<u8>; 3] {
+    bd: u8,
+) -> [Vec<P>; 3] {
     let bands = h.div_ceil(16);
     let threads = threads.clamp(1, bands.max(1));
-    let parts: Vec<Vec<(usize, [Vec<u8>; 3])>> = std::thread::scope(|sc| {
+    let parts: Vec<Vec<(usize, [Vec<P>; 3])>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..threads)
             .map(|t| {
                 sc.spawn(move || {
                     (t..bands)
                         .step_by(threads)
-                        .map(|b| (b, band(frames, center, w, h, strength, b * 16, ss)))
+                        .map(|b| (b, band(frames, center, w, h, strength, b * 16, ss, bd)))
                         .collect()
                 })
             })
             .collect();
         hs.into_iter().filter_map(|h| h.join().ok()).collect()
     });
-    let mut all: Vec<(usize, [Vec<u8>; 3])> = parts.into_iter().flatten().collect();
+    let mut all: Vec<(usize, [Vec<P>; 3])> = parts.into_iter().flatten().collect();
     all.sort_unstable_by_key(|p| p.0);
     std::array::from_fn(|p| all.iter().flat_map(|b| b.1[p].iter().copied()).collect())
 }
 
 /// The filtered rows of the 16-row band from `by` (and its chroma's).
-fn band(
-    frames: &[Picture<'_>],
+/// Above 8 bits the error thresholds and the filter's strength scale with
+/// the squared errors (libvpx's high bit depth filter adds `2 (bd - 8)`
+/// to the strength).
+#[allow(clippy::too_many_arguments)]
+fn band<P: EncPixel>(
+    frames: &[Picture<'_, P>],
     center: usize,
     w: usize,
     h: usize,
     strength: u32,
     by: usize,
     (sx, sy): (usize, usize),
-) -> [Vec<u8>; 3] {
+    bd: u8,
+) -> [Vec<P>; 3] {
+    let sq = 2 * u32::from(bd - 8);
+    let max = (1u32 << bd) - 1;
     // Chroma subsampled `sx` across and `sy` down.
     let (cw, ch) = (w.div_ceil(1 << sx), h.div_ceil(1 << sy));
     let dims = [(w, h), (cw, ch), (cw, ch)];
@@ -76,7 +87,7 @@ fn band(
                 ((0, 0), 2)
             } else {
                 let (mv, sse) = search(target.planes[0], pic.planes[0], w, h, bx, by, bw, bh);
-                let per = sse / (bw * bh) as u64;
+                let per = (sse / (bw * bh) as u64) >> sq;
                 (
                     mv,
                     if per < 156 {
@@ -103,7 +114,11 @@ fn band(
                     (pw, ph),
                     (x0, y0, n_w, n_h),
                     (dx, dy),
-                    if f == center { None } else { Some(strength) },
+                    if f == center {
+                        None
+                    } else {
+                        Some(strength + sq)
+                    },
                     weight,
                     rows[p].0,
                     &mut acc[p],
@@ -116,7 +131,7 @@ fn band(
         acc[p]
             .iter()
             .zip(&cnt[p])
-            .map(|(&a, &c)| (a + c / 2).checked_div(c).map_or(0, |v| v.min(255) as u8))
+            .map(|(&a, &c)| P::new((a + c / 2).checked_div(c).map_or(0, |v| v.min(max)) as i32))
             .collect()
     })
 }
@@ -130,7 +145,7 @@ const REACH: isize = 64;
 /// Whether `to` predicts well from `from` (luma, `w`×`h`): most of a
 /// sample of 16×16 blocks find a close match within [`REACH`]. An alt-ref
 /// pays only then.
-pub fn reachable(from: &[u8], to: &[u8], w: usize, h: usize) -> bool {
+pub fn reachable<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize, bd: u8) -> bool {
     let (mut good, mut all) = (0u32, 0u32);
     for by in (0..h.saturating_sub(15)).step_by(64) {
         for bx in (0..w.saturating_sub(15)).step_by(64) {
@@ -138,7 +153,8 @@ pub fn reachable(from: &[u8], to: &[u8], w: usize, h: usize) -> bool {
             all += 1;
             // Close: the content holds together over the interval well
             // enough for one picture to stand for it.
-            good += u32::from(sse / 256 < 156 && mv.0.abs() <= REACH && mv.1.abs() <= REACH);
+            let per = (sse / 256) >> (2 * u32::from(bd - 8));
+            good += u32::from(per < 156 && mv.0.abs() <= REACH && mv.1.abs() <= REACH);
         }
     }
     all > 0 && good * 10 >= all * 7
@@ -152,7 +168,7 @@ pub fn reachable(from: &[u8], to: &[u8], w: usize, h: usize) -> bool {
 /// picture of the same subject. (A cut to fine texture everywhere, which
 /// its own mean predicts no better than anything does, is not seen; the
 /// blocks of the frame after it choose intra all the same.)
-pub fn cut(from: &[u8], to: &[u8], w: usize, h: usize) -> bool {
+pub fn cut<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize) -> bool {
     let (mut inter, mut intra) = (0u64, 0u64);
     for by in (0..h.saturating_sub(15)).step_by(64) {
         for bx in (0..w.saturating_sub(15)).step_by(64) {
@@ -161,8 +177,9 @@ pub fn cut(from: &[u8], to: &[u8], w: usize, h: usize) -> bool {
             let (mut s, mut s2) = (0u64, 0u64);
             for r in 0..16 {
                 for &v in &to[(by + r) * w + bx..(by + r) * w + bx + 16] {
-                    s += u64::from(v);
-                    s2 += u64::from(v) * u64::from(v);
+                    let v = v.get() as u64;
+                    s += v;
+                    s2 += v * v;
                 }
             }
             intra += s2 - s * s / 256;
@@ -174,9 +191,9 @@ pub fn cut(from: &[u8], to: &[u8], w: usize, h: usize) -> bool {
 /// Adds one picture's block to the accumulators: `strength` `None` is the
 /// centre picture itself (full weight).
 #[allow(clippy::too_many_arguments)]
-fn apply(
-    target: &[u8],
-    pic: &[u8],
+fn apply<P: Pixel>(
+    target: &[P],
+    pic: &[P],
     (pw, ph): (usize, usize),
     (x0, y0, n_w, n_h): (usize, usize, usize, usize),
     (dx, dy): (isize, isize),
@@ -186,7 +203,7 @@ fn apply(
     acc: &mut [u32],
     cnt: &mut [u32],
 ) {
-    let at = |x: isize, y: isize| -> u8 {
+    let at = |x: isize, y: isize| -> P {
         let x = x.clamp(0, pw as isize - 1) as usize;
         let y = y.clamp(0, ph as isize - 1) as usize;
         pic[y * pw + x]
@@ -200,7 +217,7 @@ fn apply(
                 let y = (y0 + r) as isize - 1;
                 let tx = x.clamp(0, pw as isize - 1) as usize;
                 let ty = y.clamp(0, ph as isize - 1) as usize;
-                let e = i32::from(at(x + dx, y + dy)) - i32::from(target[ty * pw + tx]);
+                let e = at(x + dx, y + dy).get() - target[ty * pw + tx].get();
                 *d = (e * e) as u32;
             }
         }
@@ -208,7 +225,7 @@ fn apply(
     for r in 0..n_h {
         for c in 0..n_w {
             let (x, y) = (x0 + c, y0 + r);
-            let v = u32::from(at(x as isize + dx, y as isize + dy));
+            let v = at(x as isize + dx, y as isize + dy).get() as u32;
             let m = match strength {
                 None => 16 * weight,
                 Some(s) => {
@@ -230,9 +247,9 @@ fn apply(
 /// The whole-sample vector of the best match of the target's block in
 /// `pic` (a diamond search from zero), and its SSE.
 #[allow(clippy::too_many_arguments)]
-fn search(
-    target: &[u8],
-    pic: &[u8],
+fn search<P: EncPixel>(
+    target: &[P],
+    pic: &[P],
     w: usize,
     h: usize,
     bx: usize,
@@ -246,7 +263,7 @@ fn search(
             return None;
         }
         let (x, y) = (x as usize, y as usize);
-        Some(u64::from(sad::sad(
+        Some(u64::from(P::sad(
             &target[by * w + bx..],
             w,
             &pic[y * w + x..],
@@ -285,6 +302,6 @@ fn search(
         (bx as isize + best.0) as usize,
         (by as isize + best.1) as usize,
     );
-    let sse = sad::sse(&target[by * w + bx..], w, &pic[y * w + x..], w, bw, bh);
+    let sse = P::sse(&target[by * w + bx..], w, &pic[y * w + x..], w, bw, bh);
     (best, sse)
 }

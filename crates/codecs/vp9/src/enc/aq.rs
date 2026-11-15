@@ -5,6 +5,7 @@
 //! errors show, finer; busy ones, which mask them, coarser. It spends
 //! bits where they are seen and gives up a little PSNR for it.
 
+use crate::dsp::pixel::Pixel;
 use crate::prob;
 
 /// The segments used, from flattest to busiest.
@@ -23,8 +24,8 @@ pub struct Plan {
 
 /// The plan for luma `y` (rows `stride` apart, `w`×`h` visible) at
 /// quantizer index `qindex`, on a grid of `mi_cols`×`mi_rows` 8×8 blocks.
-pub fn plan(
-    y: &[u8],
+pub fn plan<P: Pixel>(
+    y: &[P],
     stride: usize,
     (w, h): (usize, usize),
     (mi_cols, mi_rows): (usize, usize),
@@ -40,8 +41,9 @@ pub fn plan(
             let (mut sum, mut sq, mut n) = (0u64, 0u64, 0u64);
             for yy in y0..y1 {
                 for &v in &y[yy * stride + x0..yy * stride + x1] {
-                    sum += u64::from(v);
-                    sq += u64::from(v) * u64::from(v);
+                    let v = v.get() as u64;
+                    sum += v;
+                    sq += v * v;
                     n += 1;
                 }
             }

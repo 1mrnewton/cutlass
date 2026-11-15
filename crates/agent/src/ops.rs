@@ -22,7 +22,14 @@ const OPS: &str = include_str!("ops.txt");
 /// Every request kind, in the order `ops.txt` lists them.
 #[must_use]
 pub fn ops() -> Vec<Op> {
-    OPS.split("\n\n")
+    parse(OPS)
+}
+
+/// The entries of an `ops.txt` text. A checkout with CRLF line ends, as
+/// Git gives on Windows, separates them with `\r\n\r\n`.
+fn parse(text: &'static str) -> Vec<Op> {
+    text.split("\r\n\r\n")
+        .flat_map(|chunk| chunk.split("\n\n"))
         .filter_map(|entry| {
             let mut lines = entry.trim().lines();
             let head = lines.next()?;
@@ -109,7 +116,16 @@ mod tests {
 
     use cutlass_session::{Draft, Request, Session};
 
-    use super::{describe, ops};
+    use super::{OPS, describe, ops, parse};
+
+    /// A checkout with CRLF line ends, as Git gives on Windows, reads the
+    /// same kinds as one with LF.
+    #[test]
+    fn crlf_line_ends_read_the_same_kinds() {
+        let crlf: &'static str = Box::leak(OPS.replace('\n', "\r\n").into_boxed_str());
+        assert_eq!(parse(crlf), ops());
+        assert!(ops().len() > 1);
+    }
 
     /// The kinds `Request` takes, read from serde's own refusal of an
     /// unknown one.

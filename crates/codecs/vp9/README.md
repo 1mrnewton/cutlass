@@ -359,29 +359,80 @@ FFmpeg 7 with libvpx. Timings are medians of whole-process runs.
 **Decode** (`tools/bench.py`): 1920×1080 streams written by libvpx, 300
 frames of 4:4:4 (profile 1, `mandel.ivf`) and 200 of 4:2:0 (`m420.ivf`,
 libvpx at 4 Mb/s, four tile columns). Medians of nine runs on four
-threads; one core is the fastest of five, pinned with `taskset`.
+threads; on one core (pinned with `taskset`), the medians of the 31
+runs below.
 
 | Stream | Threads | Cutlass | FFmpeg `vp9` | Ratio | Memory (Cutlass / FFmpeg) |
 | --- | --- | ---: | ---: | ---: | --- |
-| 4:2:0 | 1 core | 0.98 s | 0.97 s | 1.01 | |
+| 4:2:0 | 1 core | 0.98 s | 1.03 s | 0.96 | |
 | 4:2:0 | 4 | 0.41 s | 0.47 s | 0.86 | 58 MB / 57 MB |
-| 4:4:4 | 1 core | 1.88 s | 1.88 s | 1.00 | |
+| 4:4:4 | 1 core | 1.87 s | 2.04 s | 0.91 | |
 | 4:4:4 | 4 | 0.70 s | 0.79 s | 0.88 | 80 MB / 78 MB |
 
 On four threads Cutlass is ahead of FFmpeg on both streams (it won all 7
 runs on each). On one core, in 31 runs alternating with FFmpeg's
-(ratio of the medians, with a 95% bootstrap interval):
+(ratio of the medians, with a 95% bootstrap interval), on 15 November
+2026 at commit `10ec7f50`:
 
 | Stream, 1 core | Cutlass / FFmpeg | 95% interval | Cutlass faster |
 | --- | ---: | --- | --- |
-| 4:2:0 (`m420.ivf`) | 0.997 | 0.972–1.030 | 14 of 31 |
-| 4:4:4 (`mandel.ivf`) | 1.011 | 0.972–1.032 | 12 of 31 |
-| 4:2:0, 60 frames at 3.7 Mb/s (`q60.ivf`) | 0.948 | 0.929–0.973 | 25 of 31 |
+| 4:2:0 (`m420.ivf`) | 0.957 | 0.920–0.993 | 26 of 31 |
+| 4:4:4 (`mandel.ivf`) | 0.914 | 0.869–0.952 | 27 of 31 |
+| 4:2:0, 60 frames at 3.7 Mb/s (`q60.ivf`) | 0.900 | 0.832–0.983 | 24 of 31 |
 
-On the two main streams the two are level: neither is measurably the
-faster. On the third Cutlass is ahead. (The
-4:4:4 stream started at 38.8 s on one core.) What moved the decoder most
-recently:
+Cutlass is faster than FFmpeg on all three streams on one core. A
+second set of 31 runs gave 0.937 (0.906–0.982), 0.896 (0.876–0.983)
+and 0.833 (0.781–0.903). The build before these changes, in the same
+runs, was 1.011, 1.012 and 0.980 of FFmpeg's time. (The 4:4:4 stream
+started at 38.8 s on one core.) What moved the one-core decoder last:
+
+- Every plane started 16 bytes into a cache line: each was an
+  allocation of its own, which the allocator starts 16 bytes into a
+  page, and with strides of 64 samples every row of a superblock did
+  the same. Half of the 32-byte loads and stores of motion
+  compensation, the loop filter and the residual split across two
+  lines, and the whole-sample copies of the 4:4:4 stream (60% of each
+  of its first 40 pictures) took 1.6 times FFmpeg's time. The planes,
+  the interpolation's rows between its passes and the transform's
+  buffers start on a line now: 7 to 10% on 4:4:4, 3% on 4:2:0.
+- The intrinsics `_mm256_packus_epi16` and `_mm_packus_epi16` are
+  written over generic vector operations in this Rust (1.97), and LLVM
+  keeps their clamp in front of the `vpackuswb` it emits: two `pmaxsw`
+  and two `pminsw` (or two `pminuw`) more for every 32 bytes packed. The
+  8-bit interpolation and loop filter pack with the one instruction
+  (inline assembly on registers, `cutlass_simd::vp9::pack`): 10% fewer
+  instructions in the interpolation, 2% in the filter.
+- References repeat their last row into 16 rows below the picture, so
+  the bottom superblock row of a 1080-line stream predicts from the
+  reference in place instead of from a copy of its window with the edge
+  repeated (1.3% fewer instructions on the 4:4:4 stream).
+- Tile columns parsed one after another write the frame's motion map
+  in place, instead of their own maps copied together at the end of the
+  frame (0.9% of a 4:2:0 decode with four tile columns); the previous
+  frame's map is reused rather than made and cleared again (a clone of
+  it outlived the frame); without segmentation the segment maps are
+  neither copied in nor out; the parse state's 13 KB of counts is boxed
+  so that the state moves without them. 2% fewer instructions in all.
+- The coefficient loop runs compiled with BMI2 and LZCNT
+  (`cutlass_simd::vp9::wide`), for the bool decoder's shifts and
+  leading-zero count; 1 to 2% in the shortest runs, within the noise of
+  the medians.
+
+Nothing got slower on four threads or at 10 bits: medians of 21 runs
+on four cores alternating with the build before, 0.80 s against 0.82 s
+for 4:4:4 and 0.47 s against 0.48 s for 4:2:0; and of 15 on one core
+for a 10-bit 4:2:0 stream (1920×1080, 200 frames), 1.30 s against
+1.34 s (FFmpeg 1.38 s).
+
+Tried in this round and left out: software prefetch of the next
+block's reference rows at 8 bits (the same, now that rows are aligned;
+the hardware prefetchers keep up), transparent huge pages for the
+pictures (glibc's `hugetlb` tunable: the same, so TLB misses are not
+what the copies wait on), and the whole block parse compiled with BMI2
+like the coefficient loop (the same within the noise; only what it
+inlines gets the features).
+
+What moved the decoder before that:
 
 - Each superblock row is loop filtered as soon as it is made, while it
   is in the caches, instead of after the next row: the row's last line
@@ -427,11 +478,14 @@ recently:
 
 The machine is a shared VM and single runs vary by ±10% (FFmpeg's own
 times moved from 0.80 s to 0.98 s on the 4:4:4 stream within a day).
-What is left on one core is small and spread out: the coefficient loop
-runs 426 M instructions on the first 60 frames of the 4:2:0 stream
-against FFmpeg's 394 M, the loop filter's kernel fewer than FFmpeg's but
-with more time on its transposed loads, and the block parse around them.
-Neither of the release build's other levers moves it. Built as one
+Against FFmpeg's profile on one core (its symbols from Ubuntu's
+debuginfod), Cutlass now spends less time than FFmpeg in the
+coefficient loop (24% of the 4:2:0 decode against 26%), the loop filter
+(21% against 23%) and about the same in motion compensation (27%). It
+spends more in the inverse transforms (3.4% against 1.5%; 5.6% against
+2.1% on 4:4:4), which run in 32-bit lanes where FFmpeg's run in 16, and
+in the block parse and its bookkeeping around them (about 25% against
+21%). Neither of the release build's other levers moves it. Built as one
 codegen unit (as the H.264 crates are), the decoder is the same within
 the noise. Built from a profile (as the H.264 and AV1 codecs are) trained
 on synthetic video through our encoder and on libvpx streams of FFmpeg's

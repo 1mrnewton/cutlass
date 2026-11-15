@@ -9,17 +9,18 @@ use core::arch::x86_64::{
     _mm_srli_epi16, _mm_storel_epi64, _mm_storeu_si128, _mm_subs_epu8, _mm_unpackhi_epi8,
     _mm_unpackhi_epi16, _mm_unpackhi_epi32, _mm_unpackhi_epi64, _mm_unpacklo_epi8,
     _mm_unpacklo_epi16, _mm_unpacklo_epi32, _mm_unpacklo_epi64, _mm256_castsi256_si128,
-    _mm256_cvtepu8_epi16, _mm256_loadu_si256, _mm256_packus_epi16, _mm256_permute4x64_epi64,
-    _mm256_setzero_si256, _mm256_storeu_si256,
+    _mm256_cvtepu8_epi16, _mm256_loadu_si256, _mm256_permute4x64_epi64, _mm256_setzero_si256,
+    _mm256_storeu_si256,
 };
 
 use super::{Thresh, Wd};
+use crate::vp9::pack::packus256;
 
 /// Sixteen 16-bit lanes to sixteen bytes.
 #[inline]
 #[target_feature(enable = "avx2")]
 fn pack(v: __m256i) -> __m128i {
-    let p = _mm256_packus_epi16(v, v);
+    let p = packus256(v, v);
     _mm256_castsi256_si128(_mm256_permute4x64_epi64::<0b1000>(p))
 }
 
@@ -256,10 +257,10 @@ mod x32 {
     use core::arch::x86_64::{
         __m256i, _mm256_add_epi16, _mm256_adds_epi8, _mm256_adds_epu8, _mm256_and_si256,
         _mm256_andnot_si256, _mm256_blendv_epi8, _mm256_cmpeq_epi8, _mm256_cmpgt_epi8,
-        _mm256_max_epu8, _mm256_or_si256, _mm256_packus_epi16, _mm256_set_epi64x, _mm256_set1_epi8,
-        _mm256_set1_epi16, _mm256_setzero_si256, _mm256_slli_epi16, _mm256_srli_epi16,
-        _mm256_sub_epi16, _mm256_subs_epi8, _mm256_subs_epu8, _mm256_testz_si256,
-        _mm256_unpackhi_epi8, _mm256_unpacklo_epi8, _mm256_xor_si256,
+        _mm256_max_epu8, _mm256_or_si256, _mm256_set_epi64x, _mm256_set1_epi8, _mm256_set1_epi16,
+        _mm256_setzero_si256, _mm256_slli_epi16, _mm256_srli_epi16, _mm256_sub_epi16,
+        _mm256_subs_epi8, _mm256_subs_epu8, _mm256_testz_si256, _mm256_unpackhi_epi8,
+        _mm256_unpacklo_epi8, _mm256_xor_si256,
     };
 
     pub type V = __m256i;
@@ -374,7 +375,7 @@ mod x32 {
     #[inline]
     #[target_feature(enable = "avx2")]
     pub fn pack(w: W) -> V {
-        _mm256_packus_epi16(w.0, w.1)
+        crate::vp9::pack::packus256(w.0, w.1)
     }
     #[inline]
     #[target_feature(enable = "avx2")]

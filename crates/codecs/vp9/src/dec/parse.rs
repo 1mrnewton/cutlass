@@ -203,14 +203,20 @@ pub struct State {
     /// The tile's first column and its width, in 8×8 units.
     pub col0: usize,
     pub width: usize,
+    /// The motion of 8×8 block `(r, c)` is `mvs[r * mv_stride + c -
+    /// mv_base]`: the tile's own columns (`width`, `col0`), or the whole
+    /// frame's (`mi_cols`, 0) while the frame's map is lent to it.
     pub mvs: Vec<MvRef>,
+    pub mv_stride: usize,
+    pub mv_base: usize,
     pub segmap: Vec<u8>,
     pub above: Vec<Nb>,
     pub above_part: Vec<u8>,
     pub above_nz: [Vec<u8>; 3],
     pub masks: Vec<lpf::Mask>,
     pub grid: Vec<LfMi>,
-    pub counts: Counts,
+    /// Boxed: the state moves between the frame and its spares.
+    pub counts: Box<Counts>,
 }
 
 impl State {
@@ -219,13 +225,15 @@ impl State {
             col0: 0,
             width: 0,
             mvs: Vec::new(),
+            mv_stride: 0,
+            mv_base: 0,
             segmap: Vec::new(),
             above: Vec::new(),
             above_part: Vec::new(),
             above_nz: [Vec::new(), Vec::new(), Vec::new()],
             masks: Vec::new(),
             grid: Vec::new(),
-            counts: Counts::new(),
+            counts: Box::new(Counts::new()),
         }
     }
 
@@ -237,6 +245,8 @@ impl State {
         let a8 = width.div_ceil(8) * 8;
         self.col0 = col0;
         self.width = width;
+        self.mv_stride = width;
+        self.mv_base = col0;
         // Every block writes its cells' motion (and grid entries) before
         // anything reads them: only a new size needs the buffers made.
         if self.mvs.len() != cells {
@@ -260,7 +270,7 @@ impl State {
             self.grid.clear();
             self.grid.resize(gn, LfMi::default());
         }
-        self.counts = Counts::new();
+        *self.counts = Counts::new();
     }
 }
 
@@ -480,9 +490,9 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
                 mv: b.mv,
                 refs: b.refs,
             };
-            let tw = self.f.width;
+            let (tw, base) = (self.f.mv_stride, self.f.mv_base);
             for y in 0..b.y_mis {
-                let at = (row + y) * tw + col - self.col0;
+                let at = (row + y) * tw + col - base;
                 fill(&mut self.f.mvs[at..at + b.x_mis], r);
             }
         }
@@ -1069,7 +1079,7 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
         {
             return None;
         }
-        Some(self.f.mvs[r as usize * self.f.width + c as usize - self.col0])
+        Some(self.f.mvs[r as usize * self.f.mv_stride + c as usize - self.f.mv_base])
     }
 
     /// libvpx `dec_find_mv_refs`: up to two candidate vectors for `frame`,
@@ -1393,9 +1403,28 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
     }
 
     /// libvpx `decode_coefs`, into the syntax's coefficients: positions
-    /// transposed and values dequantized.
+    /// transposed and values dequantized. Compiled with BMI2 and LZCNT
+    /// where the CPU has them ([`cutlass_simd::vp9::wide`]): the bool
+    /// decoder's shifts and leading-zero count sit on the chain from one
+    /// symbol to the next.
     #[inline(never)]
     fn decode_coefs(
+        &mut self,
+        tx: u8,
+        uv: bool,
+        inter: bool,
+        dq: [i16; 2],
+        ctx: usize,
+        kind: u8,
+    ) -> (usize, (usize, usize)) {
+        cutlass_simd::vp9::wide(
+            #[inline(always)]
+            || self.coefs(tx, uv, inter, dq, ctx, kind),
+        )
+    }
+
+    #[inline(always)]
+    fn coefs(
         &mut self,
         tx: u8,
         uv: bool,

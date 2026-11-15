@@ -19,6 +19,8 @@ pub mod lf;
 pub mod lf16;
 pub mod mc;
 pub mod mc16;
+#[cfg(target_arch = "x86_64")]
+mod pack;
 pub mod prefetch;
 pub mod quant;
 pub mod sad16;
@@ -89,26 +91,36 @@ pub fn wide<R>(f: impl FnOnce() -> R) -> R {
 
 /// Whether [`wide`] runs its closure compiled for AVX2. Checked once.
 #[must_use]
-#[inline]
+#[inline(always)]
 pub fn wide_ok() -> bool {
-    use std::sync::atomic::{AtomicU8, Ordering};
-    static HAS: AtomicU8 = AtomicU8::new(0);
-    match HAS.load(Ordering::Relaxed) {
-        0 => {
-            #[cfg(target_arch = "x86_64")]
-            let has = std::is_x86_feature_detected!("avx2")
-                && std::is_x86_feature_detected!("bmi1")
-                && std::is_x86_feature_detected!("bmi2")
-                && std::is_x86_feature_detected!("lzcnt")
-                && std::is_x86_feature_detected!("popcnt")
-                && std::is_x86_feature_detected!("fma");
-            #[cfg(not(target_arch = "x86_64"))]
-            let has = false;
-            HAS.store(if has { 2 } else { 1 }, Ordering::Relaxed);
-            has
-        }
+    use std::sync::atomic::Ordering;
+    match WIDE.load(Ordering::Relaxed) {
+        0 => wide_check(),
         v => v == 2,
     }
+}
+
+/// [`wide_ok`]'s answer: 0 not checked yet, 1 no, 2 yes.
+static WIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The first [`wide_ok`], out of the callers' way.
+#[cold]
+#[inline(never)]
+fn wide_check() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    let has = std::is_x86_feature_detected!("avx2")
+        && std::is_x86_feature_detected!("bmi1")
+        && std::is_x86_feature_detected!("bmi2")
+        && std::is_x86_feature_detected!("lzcnt")
+        && std::is_x86_feature_detected!("popcnt")
+        && std::is_x86_feature_detected!("fma");
+    #[cfg(not(target_arch = "x86_64"))]
+    let has = false;
+    WIDE.store(
+        if has { 2 } else { 1 },
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    has
 }
 
 #[cfg(target_arch = "x86_64")]

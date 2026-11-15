@@ -26,12 +26,12 @@
 use core::arch::x86_64::{
     __m128i, __m256i, _mm_add_epi16, _mm_adds_epi16, _mm_avg_epu8, _mm_cvtsi32_si128,
     _mm_cvtsi128_si32, _mm_loadl_epi64, _mm_loadu_si128, _mm_maddubs_epi16, _mm_mulhrs_epi16,
-    _mm_packus_epi16, _mm_set1_epi16, _mm_setr_epi8, _mm_shuffle_epi8, _mm_storel_epi64,
-    _mm_storeu_si128, _mm_unpackhi_epi8, _mm_unpacklo_epi8, _mm256_add_epi16, _mm256_adds_epi16,
-    _mm256_avg_epu8, _mm256_castsi128_si256, _mm256_castsi256_si128, _mm256_extracti128_si256,
+    _mm_set1_epi16, _mm_setr_epi8, _mm_shuffle_epi8, _mm_storel_epi64, _mm_storeu_si128,
+    _mm_unpackhi_epi8, _mm_unpacklo_epi8, _mm256_add_epi16, _mm256_adds_epi16, _mm256_avg_epu8,
+    _mm256_castsi128_si256, _mm256_castsi256_si128, _mm256_extracti128_si256,
     _mm256_inserti128_si256, _mm256_loadu_si256, _mm256_maddubs_epi16, _mm256_mulhrs_epi16,
-    _mm256_packus_epi16, _mm256_set_m128i, _mm256_set1_epi16, _mm256_shuffle_epi8,
-    _mm256_storeu_si256, _mm256_unpackhi_epi8, _mm256_unpacklo_epi8,
+    _mm256_set_m128i, _mm256_set1_epi16, _mm256_shuffle_epi8, _mm256_storeu_si256,
+    _mm256_unpackhi_epi8, _mm256_unpacklo_epi8,
 };
 
 use super::Block;
@@ -134,6 +134,52 @@ unsafe fn s256(s: &mut [u8], o: usize, v: __m256i) {
     unsafe { _mm256_storeu_si256(s.as_mut_ptr().add(o).cast(), v) }
 }
 
+// Packs ---------------------------------------------------------------------
+//
+// `packuswb` as one instruction. The intrinsics are written over generic
+// vector operations, a clamp to 0..=255 and a truncation, and LLVM keeps
+// the clamp in front of the `packuswb` it emits for them: two `pminsw` and
+// two `pmaxsw` more for every 32 outputs.
+
+/// `_mm256_packus_epi16(a, b)`.
+#[inline]
+#[target_feature(enable = "avx2")]
+#[allow(unsafe_code)]
+fn packus256(a: __m256i, b: __m256i) -> __m256i {
+    let r: __m256i;
+    // SAFETY: one AVX2 instruction on registers, which this function's
+    // target feature enables; it reads and writes no memory.
+    unsafe {
+        core::arch::asm!(
+            "vpackuswb {r}, {a}, {b}",
+            r = lateout(ymm_reg) r,
+            a = in(ymm_reg) a,
+            b = in(ymm_reg) b,
+            options(pure, nomem, nostack, preserves_flags),
+        );
+    }
+    r
+}
+
+/// `_mm_packus_epi16(a, b)`.
+#[inline]
+#[target_feature(enable = "avx2")]
+#[allow(unsafe_code)]
+fn packus128(a: __m128i, b: __m128i) -> __m128i {
+    let r: __m128i;
+    // SAFETY: as for `packus256`.
+    unsafe {
+        core::arch::asm!(
+            "vpackuswb {r}, {a}, {b}",
+            r = lateout(xmm_reg) r,
+            a = in(xmm_reg) a,
+            b = in(xmm_reg) b,
+            options(pure, nomem, nostack, preserves_flags),
+        );
+    }
+    r
+}
+
 // Filters ------------------------------------------------------------------
 
 /// For output `j` of eight, samples `j + 2k` and `j + 2k + 1`.
@@ -226,7 +272,7 @@ impl Taps {
         let r = Self::sum1(core::array::from_fn(|k| {
             _mm_maddubs_epi16(_mm_shuffle_epi8(v, self.masks1[k]), self.pairs1[k])
         }));
-        _mm_packus_epi16(r, r)
+        packus128(r, r)
     }
 
     /// Eight outputs across of two rows at once, `s[o..]` and
@@ -243,7 +289,7 @@ impl Taps {
             _mm256_inserti128_si256::<1>(_mm256_castsi128_si256(l128(s, o)), l128(s, o + ss))
         };
         let r = self.across(v);
-        let p = _mm256_packus_epi16(r, r);
+        let p = packus256(r, r);
         (_mm256_castsi256_si128(p), _mm256_extracti128_si256::<1>(p))
     }
 
@@ -260,7 +306,7 @@ impl Taps {
             _mm256_inserti128_si256::<1>(_mm256_castsi128_si256(l128(s, o)), l128(s, o + 8))
         };
         let r = self.across(v);
-        _mm_packus_epi16(_mm256_castsi256_si128(r), _mm256_extracti128_si256::<1>(r))
+        packus128(_mm256_castsi256_si128(r), _mm256_extracti128_si256::<1>(r))
     }
 
     /// Thirty-two outputs across from `s[o..]`.
@@ -281,7 +327,7 @@ impl Taps {
                 ),
             )
         };
-        _mm256_packus_epi16(self.across(a), self.across(b))
+        packus256(self.across(a), self.across(b))
     }
 }
 
@@ -340,7 +386,7 @@ unsafe fn down32(
                     _mm256_maddubs_epi16(p2.1, t.pairs[2]),
                     _mm256_maddubs_epi16(p3.1, t.pairs[3]),
                 ]);
-                let v = _mm256_packus_epi16(lo, hi);
+                let v = packus256(lo, hi);
                 let at = d + r * ds;
                 let v = if avg {
                     _mm256_avg_epu8(v, l256(dst, at))
@@ -405,7 +451,7 @@ unsafe fn down16(
                     _mm_maddubs_epi16(p2.1, t.pairs1[2]),
                     _mm_maddubs_epi16(p3.1, t.pairs1[3]),
                 ]);
-                let v = _mm_packus_epi16(lo, hi);
+                let v = packus128(lo, hi);
                 let at = d + r * ds;
                 let v = if avg {
                     _mm_avg_epu8(v, l128(dst, at))
@@ -450,7 +496,7 @@ unsafe fn down8<const W: usize>(
             let lo = Taps::sum1(core::array::from_fn(|k| {
                 _mm_maddubs_epi16(_mm_unpacklo_epi8(x[2 * k], x[2 * k + 1]), t.pairs1[k])
             }));
-            let v = _mm_packus_epi16(lo, lo);
+            let v = packus128(lo, lo);
             let at = d + r * ds;
             if W == 4 {
                 let v = if avg {

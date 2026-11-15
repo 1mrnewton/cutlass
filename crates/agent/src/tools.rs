@@ -503,16 +503,17 @@ where
                 let names: Vec<&str> = names.iter().map(String::as_str).collect();
                 crate::ops::describe(&names).map_err(ToolError::BadArguments)
             }
-            Invocation::DraftApply(input) => self
-                .draft
-                .apply(input)
-                .map(|result| {
-                    format!(
-                        "revision={} committed={}",
-                        result.revision, result.committed
-                    )
-                })
-                .map_err(ToolError::Draft),
+            Invocation::DraftApply(input) => {
+                check_imports(&mut self.media, &input.requests)?;
+                self.draft.apply(input)
+            }
+            .map(|result| {
+                format!(
+                    "revision={} committed={}",
+                    result.revision, result.committed
+                )
+            })
+            .map_err(ToolError::Draft),
             Invocation::DraftUndo => self
                 .draft
                 .undo()
@@ -527,7 +528,16 @@ where
             Invocation::SettingsSet { expected, settings } => {
                 set_settings(&mut self.settings, &mut self.approver, expected, *settings)
             }
-            Invocation::PlayerSeek { time_us } => host_unit(self.player.seek(time_us)),
+            Invocation::PlayerSeek { time_us } => {
+                let end = timeline_end(self.draft.session().draft());
+                if time_us < 0 || (end > 0 && time_us > end) {
+                    return Err(ToolError::BadArguments(format!(
+                        "player.seek takes a time from 0 to {end}, where the last clip ends, \
+                         not {time_us}"
+                    )));
+                }
+                host_unit(self.player.seek(time_us))
+            }
             Invocation::PlayerPlay => host_unit(self.player.play()),
             Invocation::PlayerPause => host_unit(self.player.pause()),
             Invocation::MediaProbe { path } => self
@@ -553,6 +563,20 @@ where
                 followers,
                 masks,
             } => {
+                // A clip that is not there is said now, not after the
+                // tracking has run.
+                let draft = self.draft.session().draft();
+                for id in std::iter::once(&ask.target).chain(&followers).chain(&masks) {
+                    let there = draft
+                        .tracks
+                        .iter()
+                        .any(|track| track.segments.iter().any(|segment| &segment.id == id));
+                    if !there {
+                        return Err(ToolError::BadArguments(format!(
+                            "track.start: no clip has the id {id}"
+                        )));
+                    }
+                }
                 let id = self.tracking.start(&ask).map_err(ToolError::Host)?;
                 let revision = self.draft.session().revision();
                 self.track_jobs.insert(
@@ -572,7 +596,15 @@ where
             Invocation::CatalogSearch { query } => self
                 .catalog
                 .search(&query)
-                .map(|ids| format!("ids={}", ids.join(",")))
+                .map(|ids| {
+                    if ids.is_empty() {
+                        "ids= (nothing matches; search one word, such as blur or dissolve, \
+                         or nothing at all for the whole catalog)"
+                            .to_owned()
+                    } else {
+                        format!("ids={}", ids.join(","))
+                    }
+                })
                 .map_err(ToolError::Host),
             Invocation::PackageEnsure { package_id } => self
                 .packages
@@ -864,8 +896,15 @@ fn description(name: &str) -> &'static str {
              following, and loses the motion the track gave it, with draft.apply \
              {\"op\":\"untrack\",\"segment_id\":\"<clip id>\"}."
         }
-        "catalog.search" => "Search bundled effect and animation ids.",
-        "package.ensure" => "Check that a package id from catalog.search is ready to use.",
+        "catalog.search" => {
+            "Search the bundled effects, filters, transitions and animations by a word or \
+             two; an empty search lists them all. Each answer is \"<kind> <id> <name>\": the \
+             id is what add_effect, add_filter, set_transition and set_animation take."
+        }
+        "package.ensure" => {
+            "Check that an id from catalog.search (the id alone, such as recipe/shake) is \
+             ready to use."
+        }
         "export.start" => {
             "Export the project. input: \"new <path>\" for a file that is not there yet, or \
              \"replace <path>\" to overwrite one, which asks the user. A path ending in .png \
@@ -1257,6 +1296,62 @@ fn already_enabled_remote(settings: &Settings, name: &str) -> bool {
         .mcp_servers
         .iter()
         .any(|server| server.name == name && server.kind == McpServer::REMOTE && server.enabled)
+}
+
+/// Where the last clip on the timeline ends, in microseconds.
+fn timeline_end(draft: &Draft) -> i64 {
+    draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .map(|segment| {
+            segment
+                .target
+                .start
+                .0
+                .saturating_add(segment.target.duration.0)
+        })
+        .max()
+        .unwrap_or_default()
+}
+
+/// How much longer than the file an import may say its media is: a frame
+/// or two of rounding.
+const IMPORT_SLACK_US: i64 = 100_000;
+
+/// Refuse an import whose file the host cannot read, or that says a movie
+/// or a sound is longer than its file, before the combo runs: the session
+/// stores what it is given, and a clip of media that is not there fails
+/// only later, at the first frame. An import with no path is a material
+/// the caller builds by hand and is left alone.
+fn check_imports(media: &mut impl Media, requests: &[Request]) -> Result<(), ToolError> {
+    for (index, request) in requests.iter().enumerate() {
+        let Request::Import { medium } = request else {
+            continue;
+        };
+        let (path, duration) = match medium {
+            cutlass_session::ImportedMedium::Video(video) => (&video.path, video.duration.0),
+            cutlass_session::ImportedMedium::Audio(audio) => (&audio.path, audio.duration.0),
+        };
+        if path.trim().is_empty() {
+            continue;
+        }
+        let info = media.probe(path).map_err(|error| {
+            ToolError::BadArguments(format!(
+                "request {index} import: the file cannot be read ({error}); give its full \
+                 path, and media.probe it for its type, duration and size"
+            ))
+        })?;
+        let timed = matches!(info.kind.as_str(), "video" | "music");
+        if timed && info.duration_us > 0 && duration > info.duration_us + IMPORT_SLACK_US {
+            return Err(ToolError::BadArguments(format!(
+                "request {index} import: the file is {} long, not {duration}; media.probe \
+                 gives its duration",
+                info.duration_us
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn host_unit(result: Result<(), String>) -> Result<String, ToolError> {
@@ -2501,6 +2596,124 @@ mod tests {
             }
         );
         assert!(registry.parse("export.start", "new \"\"").is_err());
+    }
+
+    /// A host whose files are the ones named here, each this long.
+    struct Files(Vec<(&'static str, i64)>);
+
+    impl Media for Files {
+        fn probe(&mut self, path: &str) -> Result<MediaInfo, String> {
+            self.0
+                .iter()
+                .find(|(known, _)| *known == path)
+                .map(|(_, duration_us)| MediaInfo {
+                    kind: "video".to_owned(),
+                    duration_us: *duration_us,
+                    width: 1920,
+                    height: 1080,
+                    streams: vec!["video".to_owned()],
+                })
+                .ok_or_else(|| format!("{path}: No such file or directory"))
+        }
+    }
+
+    #[test]
+    fn an_import_of_a_file_that_is_not_there_or_is_shorter_is_refused() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("D");
+        draft.tracks[0].id = TrackId::new("main");
+        let mut registry = Registry::new(
+            DraftTools::new(Session::open(draft)),
+            SettingsTool::open(temp.file()).unwrap(),
+            CountPlayer::default(),
+            Files(vec![("/media/real.mp4", 8_000_000)]),
+            Talk::scripted(),
+            Search::fixed(),
+            (
+                Pack::default(),
+                Exporter::default(),
+                Runner::json(),
+                Gate::refuse(),
+                McpClient::new(CountMcp::ready()),
+                Follow::default(),
+            ),
+        );
+        let mut import = |path: &str, duration: i64, dry_run: bool| {
+            registry.run_tool(&ToolCall {
+                id: "i".to_owned(),
+                name: "draft.apply".to_owned(),
+                arguments: serde_json::json!({
+                    "expected_revision": 0,
+                    "dry_run": dry_run,
+                    "requests": [
+                        {"op": "set_project_name", "name": "n"},
+                        {"op": "import", "medium": {"video": {
+                            "id": "m", "type": "video", "path": path,
+                            "width": 1920, "height": 1080, "duration": duration}}},
+                    ],
+                })
+                .to_string(),
+            })
+        };
+        let ghost = import("/media/ghost.mp4", 8_000_000, false);
+        assert!(ghost.is_error);
+        assert!(
+            ghost.content.contains("request 1 import"),
+            "{}",
+            ghost.content
+        );
+        assert!(ghost.content.contains("media.probe"), "{}", ghost.content);
+        // A dry run is checked the same way.
+        assert!(import("/media/ghost.mp4", 8_000_000, true).is_error);
+        let long = import("/media/real.mp4", 60_000_000, false);
+        assert!(long.is_error);
+        assert!(long.content.contains("8000000 long"), "{}", long.content);
+        // The file's own length, a frame of rounding, and a material with
+        // no file at all are taken.
+        assert!(!import("/media/real.mp4", 8_050_000, true).is_error);
+        assert!(!import("", 5_000_000, true).is_error);
+        let real = import("/media/real.mp4", 8_000_000, false);
+        assert_eq!(real.content, "revision=1 committed=true");
+    }
+
+    #[test]
+    fn a_seek_past_the_end_an_unknown_clip_to_track_and_an_empty_search_say_so() {
+        let temp = Temp::new();
+        let mut registry = open_draft(&temp, Gate::refuse(), tracked_draft());
+        let run = |registry: &mut TestRegistry, name: &str, arguments: &str| {
+            registry.run_tool(&ToolCall {
+                id: "1".to_owned(),
+                name: name.to_owned(),
+                arguments: arguments.to_owned(),
+            })
+        };
+        // The clips of this draft end at two seconds.
+        assert!(!run(&mut registry, "player.seek", "2000000").is_error);
+        let past = run(&mut registry, "player.seek", "2000001");
+        assert!(
+            past.is_error && past.content.contains("0 to 2000000"),
+            "{}",
+            past.content
+        );
+        assert!(run(&mut registry, "player.seek", "-1").is_error);
+        assert_eq!(registry.player.seek, 1);
+        // A clip that is not there is said before any tracking runs.
+        let ghost = run(
+            &mut registry,
+            "track.start",
+            r#"{"target":"v","at_us":500000,"box":[-0.2,0.2,0.2,-0.2],"followers":["ghost"]}"#,
+        );
+        assert!(ghost.is_error);
+        assert!(
+            ghost.content.contains("no clip has the id ghost"),
+            "{}",
+            ghost.content
+        );
+        assert!(registry.tracking.asks.is_empty());
+        registry.catalog.ids.clear();
+        let none = run(&mut registry, "catalog.search", "blur filter");
+        assert!(!none.is_error);
+        assert!(none.content.contains("nothing matches"), "{}", none.content);
     }
 
     #[test]

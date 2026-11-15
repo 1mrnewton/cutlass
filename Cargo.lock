@@ -3683,6 +3683,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "editor-bench"
+version = "0.1.0"
+dependencies = [
+ "cutlass-codec",
+ "cutlass-eval",
+ "cutlass-export",
+ "cutlass-ffi",
+ "cutlass-model",
+ "cutlass-render",
+ "cutlass-session",
+ "serde_json",
+]
+
+[[package]]
 name = "eframe"
 version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

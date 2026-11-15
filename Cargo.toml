@@ -87,6 +87,7 @@ members = [
     "tools/icongen",
     "tools/licenses",
     "tools/media-bench",
+    "tools/editor-bench",
 ]
 
 [workspace.package]

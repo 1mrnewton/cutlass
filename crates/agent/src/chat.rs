@@ -136,6 +136,7 @@ impl<T: ChatTransport> ChatModel<T> {
                     name,
                     content,
                     is_error,
+                    ..
                 } => json!({
                     "role": "tool",
                     "tool_call_id": call_id,
@@ -533,6 +534,7 @@ mod tests {
                     name: "player.seek".to_owned(),
                     content: "no player".to_owned(),
                     is_error: true,
+                    picture: None,
                 },
             ],
             tools: vec![ToolDefinition {

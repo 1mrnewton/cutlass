@@ -264,6 +264,7 @@ impl Shell {
                 outcome: ToolOutcome {
                     content: "no project is open".to_owned(),
                     is_error: true,
+                    picture: None,
                 },
                 wants: None,
             };
@@ -352,6 +353,7 @@ impl Shell {
             outcome = ToolOutcome {
                 content: error.to_string(),
                 is_error: true,
+                picture: None,
             };
         }
         self.agent_track_jobs = track_jobs;
@@ -385,6 +387,7 @@ impl Shell {
                     outcome = ToolOutcome {
                         content: error.to_string(),
                         is_error: true,
+                        picture: None,
                     };
                 }
                 // A still is written by the time `export` returns.
@@ -429,6 +432,7 @@ mod tests {
         let done = cutlass_agent::ToolOutcome {
             content: "the project".to_owned(),
             is_error: false,
+            picture: None,
         };
         super::log_tool_call("assistant", &ok, &done, std::time::Duration::from_millis(3));
         let failed = ToolCall {
@@ -438,6 +442,7 @@ mod tests {
         let long = cutlass_agent::ToolOutcome {
             content: format!("bad-start{}", "é".repeat(400)),
             is_error: true,
+            picture: None,
         };
         super::log_tool_call("mcp", &failed, &long, std::time::Duration::from_millis(3));
         let log = crate::test_log::text();

@@ -348,6 +348,7 @@ mod tests {
             ToolOutcome {
                 content: format!("ran {}", call.name),
                 is_error: call.arguments == "fail",
+                picture: None,
             }
         }
     }

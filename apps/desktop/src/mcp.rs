@@ -406,6 +406,7 @@ impl Host {
             forwarded.answer(ToolOutcome {
                 content: "let go".to_owned(),
                 is_error: false,
+                picture: None,
             });
             for late in waiting {
                 late.answer(failed(
@@ -450,6 +451,7 @@ fn failed(content: String) -> ToolOutcome {
     ToolOutcome {
         content,
         is_error: true,
+        picture: None,
     }
 }
 

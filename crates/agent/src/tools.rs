@@ -801,10 +801,12 @@ where
             Ok(content) => ToolOutcome {
                 content: within_limit(content),
                 is_error: false,
+                picture: None,
             },
             Err(error) => ToolOutcome {
                 content: within_limit(error.to_string()),
                 is_error: true,
+                picture: None,
             },
         }
     }

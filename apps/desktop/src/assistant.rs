@@ -148,6 +148,7 @@ impl Assistant {
             ToolOutcome {
                 content: format!("the user said no: {}", pending.refused.content),
                 is_error: true,
+                picture: None,
             }
         };
         self.entries.push(Entry::Step {
@@ -351,6 +352,7 @@ impl Assistant {
                     name: call.name,
                     content: "stopped before it ran".to_owned(),
                     is_error: true,
+                    picture: None,
                 });
             }
         }
@@ -642,6 +644,7 @@ impl ToolSink for Relay {
         let stopped = || ToolOutcome {
             content: "the user stopped the turn".to_owned(),
             is_error: true,
+            picture: None,
         };
         if self.stop.load(Ordering::Relaxed) {
             return stopped();

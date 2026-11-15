@@ -382,6 +382,7 @@ mod tests {
                 name: name.to_owned(),
                 content: "ok".to_owned(),
                 is_error: id == "t2",
+                picture: None,
             });
         }
         let done = model

@@ -21,6 +21,7 @@ mod mcp_connection;
 mod mcp_server;
 mod model;
 mod ops;
+mod picture;
 mod sandbox;
 #[cfg(feature = "script")]
 mod script;
@@ -57,6 +58,7 @@ pub use model::{
     ToolDefinition, shorten_results,
 };
 pub use ops::{Op, describe as describe_ops, ops};
+pub use picture::{PICTURE_LIMIT, Picture, forget_pictures};
 pub use sandbox::{
     LocalSandbox, OnlineSandbox, ProcessExecutor, Sandbox, SandboxError, SandboxExecutor,
     SandboxPolicy, SandboxRoute, Switched, route_for,

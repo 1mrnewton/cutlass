@@ -598,7 +598,7 @@ pub struct Rdq {
     r_pref: Vec<u32>,
     /// The end of block's bits at each scan position.
     eob_bits: Vec<u32>,
-    /// A trial's levels, by scan position.
+    /// A trial's levels, by natural position (as `energy` is then).
     lv: Vec<u32>,
 }
 
@@ -3156,39 +3156,85 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // scan back.
         let inv_ac = 1.0 / steps[1];
         let a_nat = &mut q.a_nat[..1024];
-        // Eight running sums and peaks, so that the pass vectorizes (a
-        // single float sum must keep its order; every block has a
-        // multiple of 16 coefficients).
-        // And the scan's last that could take a level, as one past the
+        // Their squares summed (in vector lanes: every block has a
+        // multiple of 16 coefficients), and the scan's last that could
+        // take a level, as one past the
         // largest scan index among them: half a step or more (RD
         // quantization rounds nothing smaller up; from 0.3, as it was,
         // the walk cost 9% more instructions at high quality for no gain), or
         // with `one`, what the dead zone rounds up.
         let iscan = crate::dec::parse::iscan(tx, kind);
         let (th, th_dc) = if one { (1.0 - rnd, 0.5) } else { (0.5, 0.5) };
-        let mut sums = [0.0f32; 8];
-        let mut lasts = [0u32; 8];
-        for ((a8, v8), i8) in a_nat[..max]
-            .as_chunks_mut::<8>()
-            .0
-            .iter_mut()
-            .zip(self.fcoef[..max].as_chunks::<8>().0)
-            .zip(iscan[..max].as_chunks::<8>().0)
-        {
-            for i in 0..8 {
-                let v = v8[i];
-                let a = v.abs() * inv_ac;
-                a8[i] = a;
-                sums[i] += v * v;
-                let e = if a >= th { u32::from(i8[i]) + 1 } else { 0 };
-                lasts[i] = lasts[i].max(e);
+        let found;
+        // Token costs by band and context.
+        let tc = &s.tok[usize::from(tx)][dqi][usize::from(!intra)];
+        // With `one`: the least a nonzero level's token costs in each band
+        // (in any context, after any token), times lambda.
+        let mut lr = [0.0f32; 6];
+        // And what the nonzero levels could gain at most: each one's error
+        // under its value's, less the least its token costs.
+        let mut gain_left = 0.0f32;
+        if one {
+            for (m, b) in lr.iter_mut().zip(tc.iter()) {
+                let mut r = u32::MAX;
+                for c in b {
+                    r = r.min(c[3]).min(c[4]);
+                }
+                *m = lam * r as f32;
             }
+            // In one pass in natural order: each coefficient's dead-zone
+            // level (in `q.lv`) and its context energy (in `q.energy`, by
+            // natural position too), and the gains.
+            let mut t = cutlass_simd::vp9::quant::Trial {
+                levels: &mut q.lv[..max],
+                energy: &mut q.energy[..max],
+                round: rnd,
+                step: steps[1],
+                last_band: if tx == 0 { 13 } else { 21 },
+                band_cost: lr,
+            };
+            found = cutlass_simd::vp9::quant::scan(
+                &self.fcoef[..max],
+                &iscan[..max],
+                &mut a_nat[..max],
+                inv_ac,
+                th,
+                Some(&mut t),
+            );
+            gain_left = found.gain;
+            // The DC, at its own step and rounded to nearest, in place of
+            // what the pass made of it.
+            let st = steps[1];
+            let a = a_nat[0];
+            let l = (a + rnd) as u32;
+            if l != 0 {
+                let (z, d) = (a * st, (a - l as f32) * st);
+                gain_left -= (z * z - d * d - lr[0]).max(0.0);
+            }
+            let a = self.fcoef[0].abs() / steps[0];
+            let l = (a + 0.5) as u32;
+            q.lv[0] = l;
+            q.energy[0] = ENERGY[l.min(11) as usize];
+            if l != 0 {
+                let (z, d) = (a * steps[0], (a - l as f32) * steps[0]);
+                gain_left += (z * z - d * d - lr[0]).max(0.0);
+            }
+            gain_left = gain_left.max(0.0);
+        } else {
+            found = cutlass_simd::vp9::quant::scan(
+                &self.fcoef[..max],
+                &iscan[..max],
+                &mut a_nat[..max],
+                inv_ac,
+                th,
+                None,
+            );
         }
-        let d_all: f32 = sums.iter().sum();
+        let d_all = found.energy;
         a_nat[0] = self.fcoef[0].abs() / steps[0];
         let tr = |k: usize| usize::from(tpos[k]);
         // Only the DC is at scan index 0, and it has its own step.
-        let mut last_sig = lasts.iter().copied().max().unwrap_or(0) as usize;
+        let mut last_sig = found.last as usize;
         if last_sig <= 1 {
             last_sig = usize::from(a_nat[0] >= th_dc);
         }
@@ -3212,8 +3258,6 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 },
             );
         }
-        // Token costs by band and context.
-        let tc = &s.tok[usize::from(tx)][dqi][usize::from(!intra)];
         let energy = &mut q.energy[..1024];
         let mut ctx = ctx0;
         let mut prev_zero = false;
@@ -3236,31 +3280,14 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // far (in the dead zone's last level, on a still picture's 32×32
         // blocks, it ends at a sixth of the scan where the levels do).
         if one {
-            let lv = &mut q.lv[..1024];
-            // The least a nonzero level's token costs in each band (in any
-            // context, after any token).
-            let mut rmin = [u32::MAX; 6];
-            for (m, b) in rmin.iter_mut().zip(tc.iter()) {
-                for c in b {
-                    *m = (*m).min(c[3]).min(c[4]);
-                }
-            }
-            // What the nonzero levels could still gain at most: each one's
-            // error under its value's, less the least its token costs.
-            let mut gain_left = 0.0f32;
-            for k in 0..last_sig {
-                let r0 = if k == 0 { 0.5 } else { rnd };
-                let a = a_nat[usize::from(tpos[k])];
-                let l = (a + r0) as u32;
-                lv[k] = l;
-                energy[usize::from(scan[k])] = ENERGY[l.min(11) as usize];
-                if l != 0 {
-                    let st = if k == 0 { steps[0] } else { steps[1] };
-                    let (z, e) = (a * st, (a - l as f32) * st);
-                    let g = z * z - e * e - lam * rmin[usize::from(bands[k])] as f32;
-                    gain_left += g.max(0.0);
-                }
-            }
+            let lv = &q.lv[..1024];
+            // A scan position's neighbours in natural order (the energies
+            // are kept by natural position).
+            let log2n = 2 + usize::from(tx);
+            let nat = |rc: u16| {
+                let rc = usize::from(rc);
+                ((rc & (n - 1)) << log2n) | (rc >> log2n)
+            };
             // Float sums differ from exact ones by a little: an end is
             // ruled out only by a margin over that.
             let gain_all = gain_left;
@@ -3280,8 +3307,8 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 let st = if k == 0 { steps[0] } else { steps[1] };
                 if k > 0 {
                     ctx = (1
-                        + usize::from(energy[usize::from(nb[2 * k])])
-                        + usize::from(energy[usize::from(nb[2 * k + 1])]))
+                        + usize::from(energy[nat(nb[2 * k])])
+                        + usize::from(energy[nat(nb[2 * k + 1])]))
                         >> 1;
                 }
                 let a = a_nat[t];
@@ -3301,7 +3328,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                     walked = k;
                     break;
                 }
-                let l = lv[k];
+                let l = lv[t];
                 let more = if prev_zero { 0 } else { tcs[0] };
                 let r = more
                     + match l {
@@ -3329,7 +3356,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                     } else {
                         l as i32
                     };
-                    let g = z * z - e * e - lam * rmin[band] as f32;
+                    let g = z * z - e * e - lr[band];
                     gain_left -= g.max(0.0);
                 }
                 prev_zero = l == 0;
@@ -3339,8 +3366,8 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 let k = last_sig;
                 let end = if k < max {
                     ctx = (1
-                        + usize::from(energy[usize::from(nb[2 * k])])
-                        + usize::from(energy[usize::from(nb[2 * k + 1])]))
+                        + usize::from(energy[nat(nb[2 * k])])
+                        + usize::from(energy[nat(nb[2 * k + 1])]))
                         >> 1;
                     tc[usize::from(bands[k])][ctx][1]
                 } else {

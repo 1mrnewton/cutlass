@@ -883,7 +883,10 @@ fn segment_detail(draft: &Draft, segment: &Segment) -> SegmentDetail {
     let mut materials = Vec::new();
     for id in std::iter::once(&segment.material_id).chain(&segment.extra_material_refs) {
         if let Some((pool, record)) = find_material(&pools, id.as_str()) {
-            materials.push((pool.to_owned(), cut(&trimmed(record).to_string())));
+            materials.push((
+                pool.to_owned(),
+                cut(&shown_record(pool, record).to_string()),
+            ));
         }
     }
     SegmentDetail { changed, materials }
@@ -932,6 +935,24 @@ fn difference(stored: &Value, plain: &Value) -> Option<Value> {
         }
         _ => (stored != plain).then(|| stored.clone()),
     }
+}
+
+/// Values that are stored empty and still say something, by pool and key,
+/// with what they mean: text with no color is drawn white.
+const MEANT: &[(&str, &str, &str)] = &[("texts", "text_color", "#ffffff")];
+
+/// `record` as a view writes it: [`trimmed`], with the [`MEANT`] values
+/// written out, so a reader is not left to guess what a missing one is.
+fn shown_record(pool: &str, record: &Value) -> Value {
+    let mut shown = trimmed(record);
+    if let Some(map) = shown.as_object_mut() {
+        for (in_pool, key, meaning) in MEANT {
+            if *in_pool == pool && !map.contains_key(*key) {
+                map.insert((*key).to_owned(), Value::String((*meaning).to_owned()));
+            }
+        }
+    }
+    shown
 }
 
 /// `record` without its empty, zero and false values, which say nothing.
@@ -1044,7 +1065,7 @@ fn material_view(
     Ok(QueryView::Material(MaterialSnapshot {
         revision,
         pool: pool.to_owned(),
-        record: cut(&trimmed(record).to_string()),
+        record: cut(&shown_record(pool, record).to_string()),
         used_by,
     }))
 }
@@ -1262,6 +1283,27 @@ mod tests {
         assert_eq!(record["content"], "Summer trip");
         assert_eq!(record["font_size"], 80.0);
         assert_eq!(record["font_path"], "Inter.ttf");
+        // New text stores no color and is drawn white: the view says so.
+        assert_eq!(record["text_color"], "#ffffff");
+        tools
+            .apply(apply_input(
+                None,
+                1,
+                vec![Request::SetTextColor {
+                    segment_id: SegmentId::new("title"),
+                    color: "#ffcc00".to_owned(),
+                    face: String::new(),
+                }],
+                ApplyMode::Commit,
+            ))
+            .unwrap();
+        let colored = tools
+            .query(&DraftQuery::Material {
+                material_id: MaterialId::new("title-text"),
+            })
+            .unwrap()
+            .to_string();
+        assert!(colored.contains(r##""text_color":"#ffcc00""##), "{colored}");
         // A plain clip has nothing set, and a track view stays one line.
         let (mut tools, track) = open_tools();
         tools

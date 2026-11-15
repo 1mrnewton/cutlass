@@ -242,6 +242,10 @@ on synthetic video through our encoder and on libvpx streams of FFmpeg's
 (1.012 against 1.012 of FFmpeg's time on 4:2:0, medians of fifteen
 interleaved runs). Trained on the measured streams themselves, it was 5%
 faster on 4:2:0, which a release profile cannot be trained on.
+Nor does reconstructing each superblock as soon as it is parsed, while
+its coefficients are in the caches, instead of a row at a time (FFmpeg's
+order on one thread): every stream the same, and 1.033 against 1.025 of
+FFmpeg's time on 4:2:0 (medians of fifteen interleaved runs).
 
 **Encode** (`tools/encbench.sh`, BD-rate with `tools/bdrate.py`):
 1280×720, 4 threads on both sides (libvpx with `-row-mt 1

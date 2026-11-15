@@ -431,7 +431,8 @@ pub const TX_TRIAL_BITS: f64 = 64.0 * 256.0;
 /// than one of luma.
 const CHROMA_RATE: f32 = 1.0 / 0.7;
 
-/// With [`super::FrameParams::second_pass`], up to speed 6, how many of
+/// With [`super::FrameParams::second_pass`] up to speed 6 (and in one
+/// pass at [`ONE_CAND_SPEED`] and 6 too), how many of
 /// the best inter candidates by luma SAD and vector rate are ranked again
 /// with their chroma's SAD added ([`Tile::uv_sad`]). On a grainy pan of a
 /// fractal whose detail is much of it in chroma, several vectors and
@@ -443,6 +444,43 @@ const CHROMA_RATE: f32 = 1.0 / 0.7;
 /// from a fractal to `testsrc2`, 2% / 1% more on the one from a still
 /// picture; about 5% more time.
 pub const UV_RANK: usize = 4;
+
+/// From [`CHEAP_SPEED`] to 6 in one pass, a whole block that codes a residual in
+/// under this many 1/256 bits a sample (mode info and all), with an error
+/// under [`CHEAP_DIST`] times the step squared a sample, ends the
+/// partition search. Such a block (most of them 64×64 or 32×32 with the largest
+/// transform, coding a few levels) splits into quarters that code the
+/// same again for their own mode info: on the README's grainy pan at
+/// 3 Mb/s, three quarters of the 64×64 blocks whose split was tried came
+/// out within 2% of not splitting either way. Speed 5 at 4 Mb/s on the
+/// pan, one thread, in 0.8 of the time (with the rest of the prunes of
+/// that change, the same BD-rates within a point on the README's clips).
+const CHEAP_RATE: f64 = 8.0;
+
+/// See [`CHEAP_RATE`].
+const CHEAP_DIST: f64 = 0.16;
+
+/// The first speed of [`CHEAP_RATE`]'s stop. (It is left out of the
+/// second pass, which is far ahead of libvpx's time already.)
+const CHEAP_SPEED: u8 = 5;
+
+/// At this speed and 6 in one pass, as in the second pass, the best inter
+/// candidates are ranked again with their chroma's SAD added
+/// ([`UV_RANK`]); at this speed, blocks of 32×32 and larger then try only
+/// the first. The second,
+/// within a tenth of its luma score, won 40% of the 64×64 trials on the
+/// grainy pan, mostly for its chroma, and ranked by both it is seldom
+/// worth its trial. Without the ranking, one candidate cost 8 to 12 points
+/// of BD-rate at the averaged PSNR; with it, a point fewer bits on the
+/// clip from a fractal to `testsrc2` and the same within the noise on the
+/// others. At speed 6 one candidate cost 2 points of chroma against
+/// libvpx's cpu-used 2; the ranking, with [`CHEAP_RATE`]'s stop, puts
+/// speed 6 with its lookahead ahead of libvpx's cpu-used 0 at the averaged
+/// PSNR again (−2.7%, from +6.3%, on the README's pan at fixed
+/// quantizers), and without lookahead ahead of cpu-used 2 by 1.7 points
+/// there (from 0.1), at the price of 4 points at the same PSNR-Y on that
+/// pan at a bitrate (and 0.6 and 1.3 on the README's other two clips).
+const ONE_CAND_SPEED: u8 = 5;
 
 /// From this speed the sub-sample refinement tries, of the four diagonals,
 /// only the one between the better of up and down and of left and right.
@@ -459,6 +497,9 @@ const FAST_TX_SPEED: u8 = 7;
 /// README's grainy pan), for 3 to 4 points more bits at the same PSNR-Y (2
 /// to 3 at the averaged PSNR) on its first two clips and under 1 on the
 /// pan. Not in a second pass, where it cost 4 points on the first clip.
+/// Nor, from this speed in one pass, does an inter frame's 64×64 block (a
+/// twelfth of the time on the pan at 4 Mb/s, the same BD-rates within the
+/// noise).
 const SKIP_TX_SPEED: u8 = 5;
 
 /// From this speed the trials of inter blocks are measured on their
@@ -1337,7 +1378,13 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                     && none_skip.1 < pixels * step * step / STILL_BREAKOUT
             };
             let small_skip = fast && none_skip.0 && level <= SKIP_SPLIT_LEVEL;
-            if still || small_skip || none_skip.1 < (pixels * step * step / div).max(noise) {
+            let cheap = (CHEAP_SPEED..=6).contains(&s.speed)
+                && !s.second_pass
+                && !none_skip.0
+                && (best.0 - none_skip.1) / lam < CHEAP_RATE * pixels
+                && none_skip.1 < CHEAP_DIST * pixels * step * step;
+            if still || small_skip || cheap || none_skip.1 < (pixels * step * step / div).max(noise)
+            {
                 self.restore(before + 1);
                 self.part[Self::node(row, col, level)] = PARTITION_NONE;
                 return best.0;
@@ -1438,6 +1485,9 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // that codes no residual.
         let smaller =
             s.speed < SKIP_TX_SPEED || s.second_pass || s.intra_frame || !self.choice_skip.0;
+        // Nor for an inter frame's 64×64 block.
+        let smaller = smaller
+            && (s.speed < SKIP_TX_SPEED || s.second_pass || s.intra_frame || bsize != BLOCK_64X64);
         if (s.speed < 6 && smaller) || (s.intra_frame && s.speed < 9) || trial {
             let b0 = cands[best.1];
             let tries = if s.speed < 4 { 2 } else { 1 };
@@ -1681,6 +1731,10 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             4 => 3,
             // (Inter frames' intra blocks seldom win: 4 to 15% of the
             // blocks that try them.)
+            // (At speed 5, one: the second's trials took 4% of the time
+            // on the README's grainy pan at 4 Mb/s, for the same BD-rates
+            // within the noise.)
+            5 if !s.intra_frame && !s.second_pass => 1,
             5 if !s.intra_frame => 2,
             5 => 3,
             6 => 2,
@@ -1829,7 +1883,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             self.compound_cands(base, (x, y, w, h), &searched, &mut scored);
         }
         scored.sort_by_key(|t| t.0);
-        if s.second_pass && s.speed <= 6 && scored.len() > 1 {
+        if (s.second_pass || s.speed >= ONE_CAND_SPEED) && s.speed <= 6 && scored.len() > 1 {
             let n = UV_RANK.min(scored.len());
             let mut uv = [0u64; UV_RANK];
             let all = scored[..n].iter().zip(&mut uv).all(|(t, u)| {
@@ -1851,6 +1905,8 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         self.last_sad = scored.first().map_or(u64::MAX, |t| t.0);
         let k = match s.speed {
             0..=3 => 3,
+            // (See ONE_CAND_SPEED.)
+            5 if bsize >= geom::BLOCK_32X32 && !s.second_pass => 1,
             4..=7 => 2,
             _ => 1,
         };

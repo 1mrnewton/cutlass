@@ -89,10 +89,11 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   `u16` samples in the low bits, and `CodecParams` with FFmpeg's
   `yuv420p10le` to `yuv444p12le` formats opens them; the `vp9enc` example
   reads them with `bits=10` or `12`). The encoder is generic over its
-  samples as the decoder is: one path for `u8` and `u16`, the 8-bit one
-  with its vector SADs and byte-identical streams, the 16-bit one with
-  plain loops the compiler vectorizes. Distortions stay at the samples'
-  scale, so what weighs against them scales with it: the RD lambda comes
+  samples as the decoder is: one path for `u8` and `u16`, each with its
+  own AVX2 kernels for interpolation, the loop filter and the SADs
+  (`cutlass_simd::vp9::{mc16, lf16, sad16}` for 16 bits). Distortions
+  stay at the samples' scale, so what weighs against them scales with
+  it: the RD lambda comes
   from the bit depth's own step (its square grows as the SSE does), the
   SAD lambda is libvpx's `sad_per_bit16` on the step brought to 8 bits
   and scaled back up, the loop filter level is libvpx's `LPF_PICK_FROM_Q`
@@ -112,11 +113,31 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   same PSNR-Y / averaged PSNR (−38.5% / −34.8% on the pan made at 8
   bits), speed 8
   −19% / −7.9%; on a clean synthetic pan (`testsrc2`), where we are
-  behind, +19% / +28% (+20% / +29% at 8 bits). The 16-bit path is slower:
-  speed 6 takes 1.8 to 2.9 times its 8-bit time on the same content
-  (23.8 s against 10.7 s on the grainy pan at q 110; libvpx's 10-bit
-  takes 1.3 to 1.5 times its 8-bit time), as its inter prediction, loop
-  filter and SADs have no vector kernels yet. A lossless frame no longer
+  behind, +19% / +28% (+20% / +29% at 8 bits). With its own kernels the
+  16-bit path costs little more than the 8-bit one: on the grainy pan at
+  q 110, speed 6, 4 threads (whole-process medians of seven runs
+  interleaved with libvpx's, libvpx at good, cpu-used 1, 1.4 Mb/s, 4
+  threads, `-row-mt 1 -tile-columns 2`):
+
+  | | 8-bit | 10-bit | 10 / 8 |
+  | --- | ---: | ---: | ---: |
+  | Cutlass, speed 6 | 2.44 s | 2.71 s | 1.11 |
+  | Cutlass before the 16-bit kernels | 2.43 s | 6.46 s | 2.66 |
+  | libvpx-vp9, cpu-used 1 | 1.94 s | 3.02 s | 1.56 |
+
+  The streams are byte for byte those of the scalar 16-bit path (speeds
+  2, 6 and 10, 4:2:0 and 4:4:4, lossy and lossless, 10 and 12 bits). The
+  inverse transforms' 16-bit residual is still the 64-bit lane path
+  (libvpx's `tran_high_t`), 2% of the 10-bit encode and 4% of a decode.
+  Decoding libvpx's 1080p 4:2:0 at 10 bits (200 frames of `mandelbrot`,
+  4 Mb/s, four tile columns), the decoder is within reach of FFmpeg but
+  behind it: 1.44 to 1.58 s on one core against FFmpeg's 1.28 to 1.30 s
+  (5.78 s before the kernels), and 0.55 to 0.58 s on four threads against
+  0.51 to 0.54 s (1.63 to 1.69 s before), medians of five and seven runs
+  on a busy machine; part of the difference is the copy of each picture
+  into the little-endian bytes of `Picture`, which FFmpeg's test program
+  does not make, and the 8-bit decoder is level with FFmpeg on the same
+  stream at 8 bits (1.0 s each on one core). A lossless frame no longer
   lets an inter block drop its residual (both its costs are zero there,
   so the skip bit's probability decided): lossless with alt-refs came
   back inexact before, at 8 bits too.
@@ -188,9 +209,10 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   (`cutlass_simd::vp9::frame::SharedFrame`), so the next frame's motion
   compensation waits only for the rows it reads.
 - `dsp`: transforms, intra predictors, motion compensation and the loop
-  filter, generic over 8 and 16-bit samples; the 8-bit hot paths call the
-  AVX2 kernels in `cutlass_simd::vp9` (`mc`, `lf`), and the transforms run
-  in lanes compiled for AVX2 (`cutlass_simd::vp9::wide`).
+  filter, generic over 8 and 16-bit samples; the hot paths call the
+  AVX2 kernels in `cutlass_simd::vp9` (`mc` and `lf` for 8 bits, `mc16`
+  and `lf16` for 10 and 12), and the transforms run in lanes compiled for
+  AVX2 (`cutlass_simd::vp9::wide`).
 
 ### Encoder (`src/enc`)
 
@@ -211,7 +233,8 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   measured from it.
 - `enc::api`: the codec traits, rate control, frame types.
 - `dsp::sad`: SAD, SSE and bilinear sub-sample SAD, written over fixed-width
-  rows so they compile to `vpsadbw` under AVX2.
+  rows so they compile to `vpsadbw` under AVX2; at 10 and 12 bits the SADs
+  and SSE are the kernels of `cutlass_simd::vp9::sad16`.
 
 ## Using it
 

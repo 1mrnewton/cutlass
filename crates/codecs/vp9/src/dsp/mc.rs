@@ -80,9 +80,9 @@ pub fn predict<P: Pixel>(
     );
 }
 
-/// [`predict`] without vector instructions: high bit depths, and blocks
-/// the kernels do not take. Apart, so the common path does not carry its
-/// stack frame.
+/// [`predict`] without vector instructions: blocks the kernels do not take
+/// (at a picture's edge, or on a CPU without AVX2). Apart, so the common
+/// path does not carry its stack frame.
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
 fn scalar<P: Pixel>(

@@ -24,6 +24,7 @@ mod cover;
 mod follow;
 mod grade;
 mod inspector;
+mod markdown;
 mod mask;
 mod motion_blur;
 mod reframe;

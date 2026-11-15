@@ -136,7 +136,7 @@ fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) -> Option<bool> {
             });
         }
         Entry::Said(text) => {
-            words(ui, RichText::new(text).size(13.0).color(tokens::TEXT));
+            super::markdown::answer(ui, text, ui.scope_id().with(("assistant-answer", index)));
         }
         Entry::Notice(text) => {
             words(

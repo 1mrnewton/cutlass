@@ -10,8 +10,8 @@
 //! clip.
 
 use cutlass_engine::{
-    ClipPcm, ClockKind, Mix, MixResult, contributes_sound, map_timeline, mix_inputs, placement_of,
-    render,
+    ClipPcm, ClockKind, Mix, MixResult, MixSpan, clip_part, contributes_sound, map_timeline,
+    mix_inputs, placement_of, render,
 };
 use cutlass_model::{Draft, DraftId, MaterialRef, Micros, Segment, SegmentId};
 
@@ -57,13 +57,17 @@ pub struct MixWindow {
     pub frames: u32,
 }
 
-/// Mixed PCM for clips that cover `time`.
+/// Mixed PCM for the `window.frames` samples from `time` on: each sample is
+/// the clips that cover that sample's own time.
 ///
-/// `fill` is asked once per media segment the mix will hear, at the time
-/// that mix is using. Inside a compound segment that time is the mapped
+/// `fill` is asked once per media segment the mix will hear, for the part
+/// of the window that clip covers: from `time`, or from the clip's first
+/// sample when it starts inside the window, and for no more frames than
+/// are left of the clip. Inside a compound segment that time is the mapped
 /// child time. A muted track is skipped first, so its source is not read.
 /// A compound segment is filled from the child mix instead. The mix then
-/// applies volume and fades. The draft is not written.
+/// applies volume and fades, and leaves the rest of the window silent. A
+/// window no clip sounds in is an empty buffer. The draft is not written.
 pub fn audio_slice<F>(
     snapshot: &Snapshot<'_>,
     time: Micros,
@@ -92,8 +96,13 @@ where
     F: FnMut(&SegmentId, Micros, u32, u32) -> Result<ClipPcm, AudioError>,
 {
     let draft = snapshot.draft();
-    let mut clips = mix_inputs(draft, time);
-    let segments = audible(draft, time);
+    let span = MixSpan {
+        time,
+        frames: window.frames,
+        rate: window.rate,
+    };
+    let mut clips = mix_inputs(draft, span);
+    let segments = audible(draft, span);
     if clips.len() != segments.len() {
         return Err(AudioError::Mix);
     }
@@ -103,9 +112,16 @@ where
             keep.push(true);
             continue;
         }
-        match compound_pcm(draft, segment, time, window, clock, fill, ancestors)? {
+        // The clip's part of the window: from its first sample in it, for
+        // the frames it covers.
+        let from = Micros(segment.target.start.0.saturating_add(clip.offset_us));
+        let part = MixWindow {
+            frames: clip.frames,
+            ..window
+        };
+        match compound_pcm(draft, segment, from, part, clock, fill, ancestors)? {
             Compound::Media => {
-                clip.pcm = fill(&segment.id, time, window.frames, window.rate)?;
+                clip.pcm = fill(&segment.id, from, part.frames, part.rate)?;
                 keep.push(true);
             }
             Compound::Slice(mixed) => {
@@ -176,19 +192,15 @@ where
     }
 }
 
-fn audible(draft: &Draft, time: Micros) -> Vec<&Segment> {
+/// The segments [`mix_inputs`] lists for `span`, in its order.
+fn audible(draft: &Draft, span: MixSpan) -> Vec<&Segment> {
     let mut segments = Vec::new();
     for track in &draft.tracks {
         for segment in &track.segments {
             if !contributes_sound(draft, segment) {
                 continue;
             }
-            let end = segment
-                .target
-                .start
-                .0
-                .saturating_add(segment.target.duration.0);
-            if time.0 >= segment.target.start.0 && time.0 < end {
+            if clip_part(&segment.target, span).is_some() {
                 segments.push(segment);
             }
         }
@@ -416,13 +428,275 @@ mod tests {
             window(),
             ClockKind::Export,
             |segment, when, frames, rate| {
-                assert_eq!((frames, rate), (4, 4_000));
+                // A clip is asked for the part of the window it covers. The
+                // tone is the whole window either way, so the mix has to cut
+                // it where the clip ends.
+                assert!((1..=4).contains(&frames), "{frames} frames");
+                assert_eq!(rate, 4_000);
                 heard.push((segment.clone(), when));
                 Ok(ClipPcm::Ready(tone(1.0)))
             },
         )
         .expect("mix");
         (mixed, heard)
+    }
+
+    /// A second of full-scale tone at 48 kHz on a clip that starts at
+    /// `start`, with a 20 ms fade in and a 60 ms fade out, mixed the way
+    /// playback and export mix: one window of `frames` after another.
+    fn faded_second(clock: ClockKind, start: i64, frames: u32) -> Vec<f32> {
+        let (mut draft, _) = draft_with(1.0, TrackAttribute::default());
+        draft.tracks[0].segments[0].target = TimeRange::new(start, 1_000_000);
+        draft.materials.audio_fades.push(MaterialAudioFade {
+            id: "fade".into(),
+            fade_type: 2,
+            fade_in_duration: Micros(20_000),
+            fade_out_duration: Micros(60_000),
+            ..MaterialAudioFade::default()
+        });
+        draft.tracks[0].segments[0]
+            .extra_material_refs
+            .push("fade".into());
+        let window = MixWindow {
+            rate: 48_000,
+            limiter: 0,
+            frames,
+        };
+        let step = i64::from(frames) * 1_000_000 / 48_000;
+        let mut heard = Vec::new();
+        let mut time = start;
+        while time < start + 1_000_000 {
+            let mixed = audio_slice(
+                &Snapshot::new(&draft),
+                Micros(time),
+                window,
+                clock,
+                |_, _, count, rate| {
+                    let tone = vec![1.0; usize::try_from(count).expect("count")];
+                    Ok(ClipPcm::Ready(
+                        Pcm::from_f32(rate, ChannelLayout::mono(), tone).expect("pcm"),
+                    ))
+                },
+            )
+            .expect("mix");
+            heard.extend_from_slice(mixed.pcm.as_f32().expect("f32"));
+            time += step;
+        }
+        heard
+    }
+
+    #[test]
+    fn a_fade_ramps_the_clip_edges_and_leaves_its_middle_at_full_level() {
+        // 10 ms windows are shorter than both fades, 50 ms ones shorter
+        // than the fade out: either used to fade every window end to end.
+        for frames in [480, 2_400] {
+            let heard = faded_second(ClockKind::Export, 0, frames);
+            assert_eq!(heard.len(), 48_000);
+            assert_eq!(heard[0], 0.0);
+            for (index, sample) in heard[..960].iter().enumerate() {
+                assert_eq!(*sample, index as f32 / 960.0, "fade in at {index}");
+            }
+            assert!(
+                heard[960..45_120].iter().all(|sample| *sample == 1.0),
+                "the middle is not at full level with {frames} frame windows"
+            );
+            for (index, sample) in heard[45_120..].iter().enumerate() {
+                let left = (2_879 - index) as f32 / 2_880.0;
+                assert!((sample - left).abs() < 1.0e-6, "fade out at {index}");
+            }
+            assert_eq!(heard[47_999], 0.0);
+            // Playback hears what export writes.
+            assert_eq!(faded_second(ClockKind::Playback, 0, frames), heard);
+            // A clip placed later on the timeline fades the same way.
+            assert_eq!(faded_second(ClockKind::Export, 3_000_000, frames), heard);
+        }
+    }
+
+    /// Where the edged clip starts: 12.5 ms, which is 600 samples at 48 kHz
+    /// and on neither a 10 ms nor a 50 ms window boundary. It is a second
+    /// long, so its end is on neither as well.
+    const EDGE_START: i64 = 12_500;
+
+    /// A second of sound from 12.5 ms on, with a 20 ms fade in and a 60 ms
+    /// fade out when `fade` is set.
+    fn edged(fade: bool) -> Draft {
+        let (mut draft, _) = draft_with(1.0, TrackAttribute::default());
+        draft.tracks[0].segments[0].target = TimeRange::new(EDGE_START, 1_000_000);
+        if fade {
+            add_fade(&mut draft);
+        }
+        draft
+    }
+
+    /// A 20 ms fade in and a 60 ms fade out on `draft`'s first clip.
+    fn add_fade(draft: &mut Draft) {
+        draft.materials.audio_fades.push(MaterialAudioFade {
+            id: "fade".into(),
+            fade_type: 2,
+            fade_in_duration: Micros(20_000),
+            fade_out_duration: Micros(60_000),
+            ..MaterialAudioFade::default()
+        });
+        draft.tracks[0].segments[0]
+            .extra_material_refs
+            .push("fade".into());
+    }
+
+    /// The first 1.1 s of `draft` at 48 kHz, mixed the way playback and
+    /// export mix: one window of `frames` after another, a window with no
+    /// sound in it being silence. The one media clip is a file that goes on
+    /// past the clip: its sample `k` is `source(k)`, and the clip starts at
+    /// `clip_start` in its own draft. Returns the mix, and how many frames
+    /// of the file were asked for in all.
+    fn windows(
+        draft: &Draft,
+        clock: ClockKind,
+        frames: u32,
+        clip_start: i64,
+        source: impl Fn(i64) -> f32,
+    ) -> (Vec<f32>, u64) {
+        let window = MixWindow {
+            rate: 48_000,
+            limiter: 0,
+            frames,
+        };
+        let step = i64::from(frames) * 1_000_000 / 48_000;
+        let mut heard = Vec::new();
+        let mut asked = 0;
+        let mut time = 0;
+        while time < 1_100_000 {
+            let mixed = audio_slice(
+                &Snapshot::new(draft),
+                Micros(time),
+                window,
+                clock,
+                |_, when, count, rate| {
+                    assert_eq!(rate, 48_000);
+                    asked += u64::from(count);
+                    let into = (when.0 - clip_start) * 48;
+                    assert_eq!(into % 1_000, 0, "asked between two samples, at {when:?}");
+                    let first = into / 1_000;
+                    let samples = (first..first + i64::from(count)).map(&source).collect();
+                    Ok(ClipPcm::Ready(
+                        Pcm::from_f32(rate, ChannelLayout::mono(), samples).expect("pcm"),
+                    ))
+                },
+            )
+            .expect("mix");
+            let got = mixed.pcm.samples;
+            assert!(
+                got == 0 || got == frames,
+                "the window at {time} is {got} frames, not {frames}"
+            );
+            heard.extend_from_slice(mixed.pcm.as_f32().expect("f32"));
+            time += step;
+            heard.resize(usize::try_from(time * 48 / 1_000).expect("length"), 0.0);
+        }
+        (heard, asked)
+    }
+
+    /// The file's sample `k`: never zero, and different at every `k`.
+    fn ramp(k: i64) -> f32 {
+        (k + 1) as f32 / 48_000.0
+    }
+
+    /// `heard` is silence, then the file from its first sample for a second,
+    /// then silence, and the file was read for that second only.
+    fn assert_edged_ramp(heard: &[f32], asked: u64, case: &str) {
+        assert!(
+            heard[..600].iter().all(|sample| *sample == 0.0),
+            "{case}: sound before the clip starts"
+        );
+        for (k, sample) in heard[600..48_600].iter().enumerate() {
+            assert_eq!(*sample, ramp(k as i64), "{case}: the clip's sample {k}");
+        }
+        assert!(
+            heard[48_600..].iter().all(|sample| *sample == 0.0),
+            "{case}: sound after the clip ends"
+        );
+        assert_eq!(asked, 48_000, "{case}: frames read from the file");
+    }
+
+    /// `heard` is silence, then a full-scale tone that fades in over the
+    /// clip's first 20 ms and out over its last 60 ms, then silence.
+    fn assert_edged_fades(heard: &[f32], case: &str) {
+        assert!(
+            heard[..600].iter().all(|sample| *sample == 0.0),
+            "{case}: sound before the clip starts"
+        );
+        for (index, sample) in heard[600..1_560].iter().enumerate() {
+            assert_eq!(*sample, index as f32 / 960.0, "{case}: fade in at {index}");
+        }
+        assert!(
+            heard[1_560..45_720].iter().all(|sample| *sample == 1.0),
+            "{case}: the middle is not at full level"
+        );
+        for (index, sample) in heard[45_720..48_600].iter().enumerate() {
+            let left = (2_879 - index) as f32 / 2_880.0;
+            assert!(
+                (sample - left).abs() < 1.0e-6,
+                "{case}: fade out at {index}"
+            );
+        }
+        assert!(
+            heard[48_600..].iter().all(|sample| *sample == 0.0),
+            "{case}: sound after the clip ends"
+        );
+    }
+
+    #[test]
+    fn a_clip_that_starts_and_ends_inside_mix_windows_is_heard_from_its_first_sample_to_its_last() {
+        // In 10 ms windows the clip starts 2.5 ms into the second window; in
+        // 50 ms ones, 12.5 ms into the first. A window used to hear a clip
+        // only when the clip covered the window's own start, and then for
+        // the whole window.
+        for frames in [480, 2_400] {
+            for clock in [ClockKind::Export, ClockKind::Playback] {
+                let case = format!("{clock:?} in {frames} frame windows");
+                let (heard, asked) = windows(&edged(false), clock, frames, EDGE_START, ramp);
+                assert_eq!(heard.len(), 52_800);
+                assert_edged_ramp(&heard, asked, &case);
+                let (heard, _) = windows(&edged(true), clock, frames, EDGE_START, |_| 1.0);
+                assert_edged_fades(&heard, &case);
+            }
+        }
+    }
+
+    #[test]
+    fn a_nested_clip_and_a_compound_keep_their_edges_inside_mix_windows() {
+        let whole = span(0, 1_100_000);
+        // The edged clip inside a compound that covers every window, and a
+        // compound placed as the edged clip is, over a child clip that goes
+        // on for a second after the compound ends.
+        let inner = |fade| compound_audio("parent", edged(fade), 1.0, whole.clone(), whole.clone());
+        let outer = |fade| {
+            let mut draft = compound_audio(
+                "parent",
+                child_tone("child", 1.0, 0, 2_000_000),
+                1.0,
+                span(0, 1_000_000),
+                span(EDGE_START, 1_000_000),
+            );
+            if fade {
+                add_fade(&mut draft);
+            }
+            draft
+        };
+        for frames in [480, 2_400] {
+            for clock in [ClockKind::Export, ClockKind::Playback] {
+                let case = format!("a nested clip, {clock:?} in {frames} frame windows");
+                let (heard, asked) = windows(&inner(false), clock, frames, EDGE_START, ramp);
+                assert_edged_ramp(&heard, asked, &case);
+                let (heard, _) = windows(&inner(true), clock, frames, EDGE_START, |_| 1.0);
+                assert_edged_fades(&heard, &case);
+
+                let case = format!("a compound, {clock:?} in {frames} frame windows");
+                let (heard, asked) = windows(&outer(false), clock, frames, 0, ramp);
+                assert_edged_ramp(&heard, asked, &case);
+                let (heard, _) = windows(&outer(true), clock, frames, 0, |_| 1.0);
+                assert_edged_fades(&heard, &case);
+            }
+        }
     }
 
     #[test]
@@ -471,10 +745,16 @@ mod tests {
         faded.tracks[0].segments[0]
             .extra_material_refs
             .push("fade".into());
+        // The fade in runs the parent clip's whole second, so a window is
+        // as far up the ramp as it is into the clip.
         let (mixed, _) = asked(&faded, 0);
         let samples = mixed.pcm.as_f32().expect("f32");
-        assert!(samples[0].abs() < 1.0e-6);
-        assert!((samples[3] - 0.75).abs() < 1.0e-5);
+        assert_eq!(samples[0], 0.0);
+        assert!((samples[3] - 3.0 / 4_000.0).abs() < 1.0e-7);
+        let (mixed, _) = asked(&faded, 500_000);
+        let samples = mixed.pcm.as_f32().expect("f32");
+        assert_eq!(samples[0], 0.5);
+        assert!((samples[3] - 2_003.0 / 4_000.0).abs() < 1.0e-6);
     }
 
     #[test]
@@ -490,9 +770,11 @@ mod tests {
         let (silent, heard) = asked(&reversed, 0);
         assert!(heard.is_empty());
         assert_eq!(silent.contributed, 0);
+        // The compound ends 100 us on, before the window's second sample
+        // 250 us on, so the child is the first sample and the rest is silent.
         let (mixed, heard) = asked(&reversed, 900);
         assert_eq!(heard.len(), 1);
-        assert_eq!(mixed.pcm.as_f32(), Some(&[1.0; 4][..]));
+        assert_eq!(mixed.pcm.as_f32(), Some(&[1.0, 0.0, 0.0, 0.0][..]));
 
         let cycle = compound_audio(
             "parent",

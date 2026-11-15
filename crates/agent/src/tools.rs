@@ -42,6 +42,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "catalog.search",
     "package.ensure",
     "export.start",
+    "export.poll",
     "sandbox.run",
     "skill.load",
     "mcp.call",
@@ -69,9 +70,12 @@ pub trait Player {
     fn pause(&mut self) -> Result<(), String>;
 }
 
-/// Duration, picture size, and stream names from the host.
+/// The import type, duration, picture size, and stream names from the host.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaInfo {
+    /// The type an import names: `video`, `photo`, `image` or `gif` for
+    /// the video lane, `music` for a sound. Empty when the host cannot say.
+    pub kind: String,
     /// Duration in microseconds.
     pub duration_us: i64,
     /// Picture width in pixels.
@@ -174,10 +178,13 @@ pub trait Packages {
     fn ensure(&mut self, package_id: &str) -> Result<(), String>;
 }
 
-/// Starts an export job.
+/// Starts an export job and says what became of it.
 pub trait Export {
     /// Starts an export to `path` and returns the job id.
     fn start(&mut self, path: &str) -> Result<String, String>;
+    /// What became of job `job_id`: `None` while it is still writing, what
+    /// it wrote once it has, or why it failed.
+    fn poll(&mut self, job_id: &str) -> Result<Option<String>, String>;
 }
 
 /// One registry call, after arguments have been parsed or built by the host.
@@ -185,6 +192,12 @@ pub trait Export {
 pub enum Invocation {
     /// Read a compact draft view.
     DraftQuery(DraftQuery),
+    /// List the request kinds `draft.apply` takes, or show the named ones
+    /// with an example each.
+    DraftOps {
+        /// The kinds to show; empty lists them all.
+        names: Vec<String>,
+    },
     /// Apply one combo, or preview it.
     DraftApply(ApplyInput),
     /// Undo the last committed combo.
@@ -257,6 +270,11 @@ pub enum Invocation {
         /// Whether an existing file would be replaced.
         replace: bool,
     },
+    /// Ask what became of an export.
+    ExportPoll {
+        /// The id returned by start.
+        job_id: String,
+    },
     /// Run source in the injected sandbox.
     SandboxRun {
         /// The source text.
@@ -305,7 +323,10 @@ pub enum ToolError {
     /// A host trait returned an error string.
     Host(String),
     /// No skill matched the ask.
-    SkillNotFound,
+    SkillNotFound {
+        /// The titles of the skills there are.
+        titles: Vec<String>,
+    },
     /// `speech.poll` named a job this registry did not start.
     SpeechUnknown {
         /// The id that was asked for.
@@ -331,7 +352,12 @@ impl fmt::Display for ToolError {
             Self::Sandbox(error) => write!(formatter, "{error}"),
             Self::Mcp(error) => write!(formatter, "{error}"),
             Self::Host(message) => write!(formatter, "{message}"),
-            Self::SkillNotFound => write!(formatter, "skill not found"),
+            Self::SkillNotFound { titles } => write!(
+                formatter,
+                "skill not found; the skills are: {}. Ask by one of those names, or go on \
+                 without one",
+                titles.join(", ")
+            ),
             Self::SpeechUnknown { job_id } => write!(formatter, "unknown speech job {job_id}"),
             Self::TrackUnknown { job_id } => write!(formatter, "unknown tracking job {job_id}"),
             Self::BadArguments(message) => write!(formatter, "{message}"),
@@ -350,7 +376,7 @@ impl std::error::Error for ToolError {
             Self::Mcp(error) => Some(error),
             Self::Unknown(_)
             | Self::Host(_)
-            | Self::SkillNotFound
+            | Self::SkillNotFound { .. }
             | Self::SpeechUnknown { .. }
             | Self::TrackUnknown { .. }
             | Self::BadArguments(_) => None,
@@ -422,10 +448,11 @@ where
             Trk,
         ),
     ) -> Self {
+        let skills = SkillLibrary::bundled().with_folders(&settings.settings().skill_folders);
         Self {
             draft,
             settings,
-            skills: SkillLibrary::bundled(),
+            skills,
             player,
             media,
             speech,
@@ -472,16 +499,21 @@ where
                 .query(&query)
                 .map(|view| view.to_string())
                 .map_err(ToolError::Draft),
-            Invocation::DraftApply(input) => self
-                .draft
-                .apply(input)
-                .map(|result| {
-                    format!(
-                        "revision={} committed={}",
-                        result.revision, result.committed
-                    )
-                })
-                .map_err(ToolError::Draft),
+            Invocation::DraftOps { names } => {
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                crate::ops::describe(&names).map_err(ToolError::BadArguments)
+            }
+            Invocation::DraftApply(input) => {
+                check_imports(&mut self.media, &input.requests)?;
+                self.draft.apply(input)
+            }
+            .map(|result| {
+                format!(
+                    "revision={} committed={}",
+                    result.revision, result.committed
+                )
+            })
+            .map_err(ToolError::Draft),
             Invocation::DraftUndo => self
                 .draft
                 .undo()
@@ -496,7 +528,16 @@ where
             Invocation::SettingsSet { expected, settings } => {
                 set_settings(&mut self.settings, &mut self.approver, expected, *settings)
             }
-            Invocation::PlayerSeek { time_us } => host_unit(self.player.seek(time_us)),
+            Invocation::PlayerSeek { time_us } => {
+                let end = timeline_end(self.draft.session().draft());
+                if time_us < 0 || (end > 0 && time_us > end) {
+                    return Err(ToolError::BadArguments(format!(
+                        "player.seek takes a time from 0 to {end}, where the last clip ends, \
+                         not {time_us}"
+                    )));
+                }
+                host_unit(self.player.seek(time_us))
+            }
             Invocation::PlayerPlay => host_unit(self.player.play()),
             Invocation::PlayerPause => host_unit(self.player.pause()),
             Invocation::MediaProbe { path } => self
@@ -522,6 +563,20 @@ where
                 followers,
                 masks,
             } => {
+                // A clip that is not there is said now, not after the
+                // tracking has run.
+                let draft = self.draft.session().draft();
+                for id in std::iter::once(&ask.target).chain(&followers).chain(&masks) {
+                    let there = draft
+                        .tracks
+                        .iter()
+                        .any(|track| track.segments.iter().any(|segment| &segment.id == id));
+                    if !there {
+                        return Err(ToolError::BadArguments(format!(
+                            "track.start: no clip has the id {id}"
+                        )));
+                    }
+                }
                 let id = self.tracking.start(&ask).map_err(ToolError::Host)?;
                 let revision = self.draft.session().revision();
                 self.track_jobs.insert(
@@ -541,7 +596,15 @@ where
             Invocation::CatalogSearch { query } => self
                 .catalog
                 .search(&query)
-                .map(|ids| format!("ids={}", ids.join(",")))
+                .map(|ids| {
+                    if ids.is_empty() {
+                        "ids= (nothing matches; search one word, such as blur or dissolve, \
+                         or nothing at all for the whole catalog)"
+                            .to_owned()
+                    } else {
+                        format!("ids={}", ids.join(","))
+                    }
+                })
                 .map_err(ToolError::Host),
             Invocation::PackageEnsure { package_id } => self
                 .packages
@@ -549,17 +612,41 @@ where
                 .map(|()| "ok".to_owned())
                 .map_err(ToolError::Host),
             Invocation::ExportStart { path, replace } => {
-                start_export(&mut self.export, &mut self.approver, &path, replace)
+                let id = start_export(&mut self.export, &mut self.approver, &path, replace)?;
+                // A host that writes before it answers has the result now.
+                Ok(match self.export.poll(&id) {
+                    Ok(Some(done)) => format!("job={id} finished: {done}"),
+                    _ => format!("job={id}"),
+                })
             }
+            Invocation::ExportPoll { job_id } => self
+                .export
+                .poll(&job_id)
+                .map(|done| match done {
+                    Some(done) => format!("finished: {done}"),
+                    None => "pending".to_owned(),
+                })
+                .map_err(ToolError::Host),
             Invocation::SandboxRun { source, input_json } => self
                 .sandbox
                 .run(&source, &input_json)
                 .map_err(ToolError::Sandbox),
-            Invocation::SkillLoad { ask } => self
-                .skills
-                .load(&ask)
-                .map(format_skill)
-                .ok_or(ToolError::SkillNotFound),
+            Invocation::SkillLoad { ask } if ask.is_empty() || ask == "list" => {
+                Ok(self.skills.listing())
+            }
+            Invocation::SkillLoad { ask } => {
+                self.skills
+                    .load(&ask)
+                    .map(format_skill)
+                    .ok_or_else(|| ToolError::SkillNotFound {
+                        titles: self
+                            .skills
+                            .titles()
+                            .into_iter()
+                            .map(str::to_owned)
+                            .collect(),
+                    })
+            }
             Invocation::AddExternalSkill { path } => {
                 add_skill(&mut self.skills, &mut self.approver, Path::new(&path))
                     .map(|()| "ok".to_owned())
@@ -578,8 +665,9 @@ where
         }
     }
 
-    /// Parses a model tool call. `draft.apply` takes JSON; `settings.set` is
-    /// rejected, as settings change only through the host.
+    /// Parses a model tool call. `draft.apply` takes JSON; `settings.set`
+    /// takes the generation it read and the changes to merge, and any
+    /// change that needs the user's allow still asks the host.
     pub fn parse(&self, name: &str, arguments: &str) -> Result<Invocation, ToolError> {
         let arguments = arguments.trim();
         match name {
@@ -588,7 +676,7 @@ where
             "draft.undo" => bare(arguments, "draft.undo", Invocation::DraftUndo),
             "draft.redo" => bare(arguments, "draft.redo", Invocation::DraftRedo),
             "settings.get" => bare(arguments, "settings.get", Invocation::SettingsGet),
-            "settings.set" => Err(bad("settings.set")),
+            "settings.set" => parse_settings_set(self.settings.settings(), arguments),
             "player.seek" => {
                 one_i64(arguments, "player.seek").map(|time_us| Invocation::PlayerSeek { time_us })
             }
@@ -617,6 +705,9 @@ where
             "package.ensure" => text_arg(arguments, "package.ensure")
                 .map(|package_id| Invocation::PackageEnsure { package_id }),
             "export.start" => parse_export(arguments),
+            "export.poll" => {
+                text_arg(arguments, "export.poll").map(|job_id| Invocation::ExportPoll { job_id })
+            }
             "sandbox.run" => Ok(parse_sandbox(arguments)),
             "skill.load" => Ok(Invocation::SkillLoad {
                 ask: arguments.to_owned(),
@@ -708,34 +799,87 @@ where
         };
         match result {
             Ok(content) => ToolOutcome {
-                content,
+                content: within_limit(content),
                 is_error: false,
             },
             Err(error) => ToolOutcome {
-                content: error.to_string(),
+                content: within_limit(error.to_string()),
                 is_error: true,
             },
         }
     }
 }
 
+/// The longest text one tool call answers with. A longer one would fill a
+/// model's context by itself.
+pub const RESULT_LIMIT: usize = 100_000;
+
+/// `content`, cut to [`RESULT_LIMIT`] with a note saying so.
+fn within_limit(content: String) -> String {
+    if content.len() <= RESULT_LIMIT {
+        return content;
+    }
+    let mut end = RESULT_LIMIT;
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n(cut: {} characters in all; ask for less at a time, such as one track, a shorter \
+         stretch, or fewer kinds)",
+        &content[..end],
+        content.len()
+    )
+}
+
 fn description(name: &str) -> &'static str {
     match name {
-        "draft.query" => "Compact view of the open draft plus its revision.",
+        "draft.query" => {
+            "Read the open draft, with its revision. \"project\" lists the tracks; \"track <id>\" \
+             its clips as id@start+length; \"segment <id>\" one clip: its track, what it stores \
+             beyond a plain clip (position, scale, volume, speed, keys) and the records of its \
+             materials, such as a title's words, size and color; \"range <start_us> <end_us>\" \
+             the clips playing then; \"materials\" the library (media files, texts, effects) and \
+             \"material <id>\" one record. \"ops\" lists every request kind draft.apply takes; \
+             \"ops add_text set_position\" shows their JSON."
+        }
         "draft.apply" => {
             "Session requests as one combo, or a dry run. JSON: {\"expected_revision\":N, \
              \"requests\":[{\"op\":\"move\",...}], \"dry_run\":false, \"request_id\":\"...\"}."
         }
         "draft.undo" => "Restore the draft from before the last committed combo.",
         "draft.redo" => "Reapply the combo that undo removed.",
-        "settings.get" => "Read the settings generation and the switches that leave the machine.",
-        "settings.set" => "Write user settings when the generation matches.",
-        "player.seek" => "Move the open player to a time in microseconds.",
+        "settings.get" => "The user's settings as JSON, with the generation to send back.",
+        "settings.set" => {
+            "Change the user's app settings (not the project: its canvas and clips are \
+             draft.apply): {\"expected_generation\":N, \"changes\":{...}}, the changes merged \
+             into the settings settings.get shows (null removes a key; a key settings.get does \
+             not show is refused). mcp_servers, skill_folders and shortcuts merge by entry: send \
+             only the entries to add or change, each with its name, path or action, and \
+             {\"name\":\"x\",\"remove\":true} to take one out. Turning on the cloud model, the \
+             online sandbox or a remote MCP server, changing a server's address or the cloud \
+             service, adding a program as a local server, or adding a skill folder asks the \
+             user first."
+        }
+        "player.seek" => {
+            "Move the open player to a time in microseconds; a .png export draws that frame."
+        }
         "player.play" => "Start the open player.",
         "player.pause" => "Pause the open player.",
-        "media.probe" => "Duration, size, and streams reported by the host for one path.",
-        "speech.start" => "Start a transcription job and record the draft revision.",
-        "speech.poll" => "Read a transcription job, ignoring it when the revision moved.",
+        "media.probe" => {
+            "The type to import it as, duration, size, and streams (video, audio) reported \
+             by the host for one path."
+        }
+        "speech.start" => {
+            "Start hearing the speech in a stretch of the timeline, \"<start_us> <duration_us>\"; \
+             it answers job=<id> for speech.poll. Any edit before the words are read makes \
+             the job stale."
+        }
+        "speech.poll" => {
+            "Read a transcription job: pending while it listens (poll again; the answer takes \
+             a moment by itself), stale when the draft was edited since it started, or words=, \
+             one line a word as \"<start_us> <end_us> <word>\" on the timeline clock. Poll \
+             before you edit."
+        }
         "track.start" => {
             "Follow a box on a video clip through it, then make clips follow it. JSON: \
              {\"target\":\"<video clip id>\", \"at_us\":N, \"box\":[x0,y0,x1,y1], \
@@ -747,34 +891,282 @@ fn description(name: &str) -> &'static str {
              a number plate; the target itself may be one. Give followers, masks or both."
         }
         "track.poll" => {
-            "Read a tracking job: pending, stale when the draft moved, or the revision after \
+            "Read a tracking job: pending (poll again), stale when the draft moved, or the revision after \
              the followers were made to follow the path, as one undo step. A clip stops \
              following, and loses the motion the track gave it, with draft.apply \
              {\"op\":\"untrack\",\"segment_id\":\"<clip id>\"}."
         }
-        "catalog.search" => "Search bundled effect and animation ids.",
-        "package.ensure" => "Check that a package id from catalog.search is ready to use.",
-        "export.start" => "Start an export. Replacing a file asks the user.",
+        "catalog.search" => {
+            "Search the bundled effects, filters, transitions and animations by a word or \
+             two; an empty search lists them all. Each answer is \"<kind> <id> <name>\": the \
+             id is what add_effect, add_filter, set_transition and set_animation take."
+        }
+        "package.ensure" => {
+            "Check that an id from catalog.search (the id alone, such as recipe/shake) is \
+             ready to use."
+        }
+        "export.start" => {
+            "Export the project. input: \"new <path>\" for a file that is not there yet, or \
+             \"replace <path>\" to overwrite one, which asks the user. A path ending in .png \
+             writes the one frame at the player's time (move it with player.seek first); one \
+             ending in .mp4 or .mov writes the whole project as H.264 video; no other ending \
+             is written. It answers job=<id>, with \"finished\" when the file is already \
+             written; otherwise export.poll says when."
+        }
+        "export.poll" => {
+            "What became of an export: pending while it is still writing (poll again), \
+             finished with the file it wrote, or why it failed."
+        }
         "sandbox.run" => {
             "Run a Rhai script on the machine and return its last value as JSON. \
             The script sees `input`, has no files or network, and cannot edit the project: \
             apply what it computes with draft.apply."
         }
-        "skill.load" => "Return the one skill whose description matches the ask.",
-        "mcp.call" => "Call a tool on a server the user enabled.",
+        "skill.load" => {
+            "Return the one skill whose description matches the ask; \"list\" names every skill, \
+             the bundled ones and the user's own."
+        }
+        "mcp.call" => {
+            "Call a tool on an MCP server the user enabled: {\"server\":\"<name>\", \
+             \"tool\":\"<tool>\", \"arguments\":{...}}. The tool tools/list lists that \
+             server's tools and their arguments."
+        }
         _ => "",
     }
 }
 
+/// Settings keys the model does not see: recent projects name the user's
+/// folders and say nothing about how Cutlass behaves.
+const HIDDEN_SETTINGS: &[&str] = &["recent_projects"];
+
 fn show_settings(tool: &SettingsTool) -> String {
     let view = tool.get();
-    format!(
-        "generation={} cloud={} online={} step_cap={}",
-        view.generation,
-        view.settings.model.cloud,
-        view.settings.sandbox.online,
-        view.settings.step_cap
-    )
+    let mut settings = serde_json::to_value(&view.settings).unwrap_or_default();
+    if let Some(map) = settings.as_object_mut() {
+        for key in HIDDEN_SETTINGS {
+            map.remove(*key);
+        }
+    }
+    serde_json::json!({ "generation": view.generation, "settings": settings }).to_string()
+}
+
+/// `settings.set` as JSON: the generation read and a merge patch
+/// (RFC 7386) over the settings as `settings.get` shows them.
+fn parse_settings_set(current: &Settings, arguments: &str) -> Result<Invocation, ToolError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Set {
+        expected_generation: u64,
+        changes: serde_json::Value,
+    }
+    let set: Set = serde_json::from_str(arguments).map_err(|error| {
+        ToolError::BadArguments(format!(
+            "settings.set takes {{\"expected_generation\":N,\"changes\":{{...}}}}: {error}"
+        ))
+    })?;
+    if !set.changes.is_object() {
+        return Err(ToolError::BadArguments(
+            "settings.set changes must be a JSON object".to_owned(),
+        ));
+    }
+    if let Some(key) = HIDDEN_SETTINGS
+        .iter()
+        .find(|key| set.changes.get(**key).is_some())
+    {
+        return Err(ToolError::BadArguments(format!(
+            "{key} is not changed through settings.set"
+        )));
+    }
+    let mut value = serde_json::to_value(current)
+        .map_err(|error| ToolError::BadArguments(error.to_string()))?;
+    merge_settings(&mut value, &set.changes)?;
+    let settings: Settings = serde_json::from_value(value).map_err(|error| {
+        ToolError::BadArguments(format!("those settings do not read back: {error}"))
+    })?;
+    if let Some(key) = unknown_setting(current, &settings) {
+        return Err(ToolError::BadArguments(format!(
+            "there is no setting {key}; settings.get shows the settings there are, and the \
+             project itself (its canvas, frame rate, clips) is changed with draft.apply"
+        )));
+    }
+    if !STEP_CAP.contains(&settings.step_cap) {
+        return Err(ToolError::BadArguments(format!(
+            "step_cap is {} to {}, not {}",
+            STEP_CAP.start(),
+            STEP_CAP.end(),
+            settings.step_cap
+        )));
+    }
+    Ok(Invocation::SettingsSet {
+        expected: set.expected_generation,
+        settings: Box::new(settings),
+    })
+}
+
+/// The rounds a turn may be given, as the Settings window offers them.
+const STEP_CAP: std::ops::RangeInclusive<u32> = 1..=1000;
+
+/// The lists `settings.set` merges entry by entry, and the field that
+/// names an entry. Sending one server adds or changes that one and leaves
+/// the user's others; `{"name":"x","remove":true}` takes one out.
+const KEYED_LISTS: &[(&str, &str)] = &[
+    ("mcp_servers", "name"),
+    ("skill_folders", "path"),
+    ("shortcuts", "action"),
+];
+
+/// [`merge_patch`] over the settings, with [`KEYED_LISTS`] merged by entry.
+fn merge_settings(
+    target: &mut serde_json::Value,
+    changes: &serde_json::Value,
+) -> Result<(), ToolError> {
+    let mut rest = changes.clone();
+    for (list, key) in KEYED_LISTS {
+        let Some(entries) = rest.as_object_mut().and_then(|map| map.remove(*list)) else {
+            continue;
+        };
+        let serde_json::Value::Array(entries) = entries else {
+            return Err(ToolError::BadArguments(format!(
+                "{list} is a list of entries, each with its {key}"
+            )));
+        };
+        let Some(stored) = target
+            .as_object_mut()
+            .map(|map| {
+                map.entry((*list).to_owned())
+                    .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            })
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for mut entry in entries {
+            let name = entry
+                .get(*key)
+                .cloned()
+                .filter(|name| name.as_str().is_some_and(|name| !name.trim().is_empty()));
+            let Some(name) = name else {
+                return Err(ToolError::BadArguments(format!(
+                    "each entry of {list} needs its {key}"
+                )));
+            };
+            let remove = entry
+                .as_object_mut()
+                .and_then(|map| map.remove("remove"))
+                .is_some_and(|remove| remove == serde_json::Value::Bool(true));
+            let at = stored
+                .iter()
+                .position(|known| known.get(*key) == Some(&name));
+            match (at, remove) {
+                (Some(at), true) => {
+                    stored.remove(at);
+                }
+                (None, true) => {
+                    return Err(ToolError::BadArguments(format!(
+                        "{list} has no entry {name} to remove"
+                    )));
+                }
+                (Some(at), false) => merge_patch(&mut stored[at], &entry),
+                (None, false) => stored.push(entry),
+            }
+        }
+    }
+    merge_patch(target, &rest);
+    Ok(())
+}
+
+/// A key `next` holds that `current` does not and that no setting is
+/// named: one the caller made up, which the file would keep and nothing
+/// would read.
+fn unknown_setting(current: &Settings, next: &Settings) -> Option<String> {
+    type Rest = serde_json::Map<String, serde_json::Value>;
+    fn added(at: &str, now: &Rest, then: Option<&Rest>) -> Option<String> {
+        now.keys()
+            .find(|key| then.is_none_or(|then| !then.contains_key(*key)))
+            .map(|key| format!("{at}{key}"))
+    }
+    added("", &next.rest, Some(&current.rest))
+        .or_else(|| {
+            added(
+                "playback.",
+                &next.playback.rest,
+                Some(&current.playback.rest),
+            )
+        })
+        .or_else(|| {
+            added(
+                "hardware.",
+                &next.hardware.rest,
+                Some(&current.hardware.rest),
+            )
+        })
+        .or_else(|| added("import.", &next.import.rest, Some(&current.import.rest)))
+        .or_else(|| added("confirm.", &next.confirm.rest, Some(&current.confirm.rest)))
+        .or_else(|| added("model.", &next.model.rest, Some(&current.model.rest)))
+        .or_else(|| added("sandbox.", &next.sandbox.rest, Some(&current.sandbox.rest)))
+        .or_else(|| added("updates.", &next.updates.rest, Some(&current.updates.rest)))
+        .or_else(|| {
+            next.mcp_servers.iter().find_map(|server| {
+                let known = current
+                    .mcp_servers
+                    .iter()
+                    .find(|known| known.name == server.name);
+                added("mcp_servers.", &server.rest, known.map(|known| &known.rest))
+            })
+        })
+        .or_else(|| {
+            next.skill_folders.iter().find_map(|folder| {
+                let known = current
+                    .skill_folders
+                    .iter()
+                    .find(|known| known.path == folder.path);
+                added(
+                    "skill_folders.",
+                    &folder.rest,
+                    known.map(|known| &known.rest),
+                )
+            })
+        })
+        .or_else(|| {
+            next.shortcuts.iter().find_map(|shortcut| {
+                let known = current
+                    .shortcuts
+                    .iter()
+                    .find(|known| known.action == shortcut.action);
+                added("shortcuts.", &shortcut.rest, known.map(|known| &known.rest))
+            })
+        })
+        .or_else(|| {
+            next.panels.iter().find_map(|panel| {
+                let known = current.panels.iter().find(|known| known.id == panel.id);
+                added("panels.", &panel.rest, known.map(|known| &known.rest))
+            })
+        })
+}
+
+/// RFC 7386: objects merge key by key, `null` removes a key, anything else
+/// replaces.
+fn merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    let serde_json::Value::Object(changes) = patch else {
+        *target = patch.clone();
+        return;
+    };
+    if !target.is_object() {
+        *target = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let Some(map) = target.as_object_mut() else {
+        return;
+    };
+    for (key, change) in changes {
+        if change.is_null() {
+            map.remove(key);
+        } else {
+            merge_patch(
+                map.entry(key.clone()).or_insert(serde_json::Value::Null),
+                change,
+            );
+        }
+    }
 }
 
 fn set_settings(
@@ -790,7 +1182,7 @@ fn set_settings(
             actual,
         }));
     }
-    let actions = pending_approvals(settings_tool.settings(), &next);
+    let actions = assistant_approvals(settings_tool.settings(), &next);
     for action in actions {
         authorize(approver, action, MODEL_SAYS_APPROVED).map_err(ToolError::Approval)?;
     }
@@ -838,6 +1230,67 @@ pub fn pending_approvals(current: &Settings, next: &Settings) -> Vec<ApprovalAct
     actions
 }
 
+/// The approvals a change the assistant (or another MCP client) asks for
+/// needs: [`pending_approvals`], and three more that the user's own
+/// Settings window does without, since there the user typed them. A new
+/// program to run as a local server, a new address for a remote server
+/// that is on, and a new service for the cloud model's requests and key.
+#[must_use]
+pub fn assistant_approvals(current: &Settings, next: &Settings) -> Vec<ApprovalAction> {
+    let mut actions = pending_approvals(current, next);
+    for server in &next.mcp_servers {
+        if server.kind == McpServer::REMOTE {
+            let moved = server.enabled
+                && current.mcp_servers.iter().any(|known| {
+                    known.name == server.name
+                        && known.kind == McpServer::REMOTE
+                        && known.enabled
+                        && known.url != server.url
+                });
+            if moved {
+                actions.push(ApprovalAction::EnableRemoteMcp {
+                    server: server.name.clone(),
+                });
+            }
+            continue;
+        }
+        // Any other kind is started as a program.
+        if server.command.trim().is_empty() {
+            continue;
+        }
+        let known = current.mcp_servers.iter().any(|known| {
+            known.kind != McpServer::REMOTE
+                && known.command == server.command
+                && known.args == server.args
+        });
+        if !known {
+            let mut command = server.command.clone();
+            for arg in &server.args {
+                command.push(' ');
+                command.push_str(arg);
+            }
+            actions.push(ApprovalAction::RunLocalMcp {
+                server: server.name.clone(),
+                command,
+            });
+        }
+    }
+    let (now, then) = (&next.model, &current.model);
+    if now.cloud_provider != then.cloud_provider || now.cloud_url != then.cloud_url {
+        let address = if now.cloud_provider == cutlass_settings::ModelChoice::OPENAI {
+            if now.cloud_url.trim().is_empty() {
+                cutlass_settings::OPENAI_CHAT_URL.to_owned()
+            } else {
+                now.cloud_url.trim().to_owned()
+            }
+        } else {
+            crate::anthropic::ANTHROPIC_URL.to_owned()
+        };
+        actions.push(ApprovalAction::ChangeCloudAddress { address });
+    }
+    actions
+}
+
 fn already_enabled_remote(settings: &Settings, name: &str) -> bool {
     settings
         .mcp_servers
@@ -845,13 +1298,74 @@ fn already_enabled_remote(settings: &Settings, name: &str) -> bool {
         .any(|server| server.name == name && server.kind == McpServer::REMOTE && server.enabled)
 }
 
+/// Where the last clip on the timeline ends, in microseconds.
+fn timeline_end(draft: &Draft) -> i64 {
+    draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .map(|segment| {
+            segment
+                .target
+                .start
+                .0
+                .saturating_add(segment.target.duration.0)
+        })
+        .max()
+        .unwrap_or_default()
+}
+
+/// How much longer than the file an import may say its media is: a frame
+/// or two of rounding.
+const IMPORT_SLACK_US: i64 = 100_000;
+
+/// Refuse an import whose file the host cannot read, or that says a movie
+/// or a sound is longer than its file, before the combo runs: the session
+/// stores what it is given, and a clip of media that is not there fails
+/// only later, at the first frame. An import with no path is a material
+/// the caller builds by hand and is left alone.
+fn check_imports(media: &mut impl Media, requests: &[Request]) -> Result<(), ToolError> {
+    for (index, request) in requests.iter().enumerate() {
+        let Request::Import { medium } = request else {
+            continue;
+        };
+        let (path, duration) = match medium {
+            cutlass_session::ImportedMedium::Video(video) => (&video.path, video.duration.0),
+            cutlass_session::ImportedMedium::Audio(audio) => (&audio.path, audio.duration.0),
+        };
+        if path.trim().is_empty() {
+            continue;
+        }
+        let info = media.probe(path).map_err(|error| {
+            ToolError::BadArguments(format!(
+                "request {index} import: the file cannot be read ({error}); give its full \
+                 path, and media.probe it for its type, duration and size"
+            ))
+        })?;
+        let timed = matches!(info.kind.as_str(), "video" | "music");
+        if timed && info.duration_us > 0 && duration > info.duration_us + IMPORT_SLACK_US {
+            return Err(ToolError::BadArguments(format!(
+                "request {index} import: the file is {} long, not {duration}; media.probe \
+                 gives its duration",
+                info.duration_us
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn host_unit(result: Result<(), String>) -> Result<String, ToolError> {
     result.map(|()| "ok".to_owned()).map_err(ToolError::Host)
 }
 
 fn format_probe(info: &MediaInfo) -> String {
+    let kind = if info.kind.is_empty() {
+        String::new()
+    } else {
+        format!("type={} ", info.kind)
+    };
     format!(
-        "duration={} width={} height={} streams={}",
+        "{kind}duration={} width={} height={} streams={}",
         info.duration_us,
         info.width,
         info.height,
@@ -924,15 +1438,9 @@ fn start_export(
             || export.start(path),
         )
         .map_err(ToolError::Approval)?;
-        return job_text(started);
+        return started.map_err(ToolError::Host);
     }
-    job_text(export.start(path))
-}
-
-fn job_text(result: Result<String, String>) -> Result<String, ToolError> {
-    result
-        .map(|id| format!("job={id}"))
-        .map_err(ToolError::Host)
+    export.start(path).map_err(ToolError::Host)
 }
 
 fn add_skill(
@@ -967,11 +1475,31 @@ fn format_skill(skill: &Skill) -> String {
 }
 
 fn parse_query(arguments: &str) -> Result<Invocation, ToolError> {
+    if arguments == "ops" {
+        return Ok(Invocation::DraftOps { names: Vec::new() });
+    }
+    if let Some(rest) = headed(arguments, "ops") {
+        return Ok(Invocation::DraftOps {
+            names: rest
+                .split(|c: char| c.is_whitespace() || c == ',')
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        });
+    }
     if arguments == "project" {
         return Ok(Invocation::DraftQuery(DraftQuery::Project));
     }
     if arguments == "full" {
         return Ok(Invocation::DraftQuery(DraftQuery::Full));
+    }
+    if arguments == "materials" {
+        return Ok(Invocation::DraftQuery(DraftQuery::Materials));
+    }
+    if let Some(id) = headed(arguments, "material") {
+        return Ok(Invocation::DraftQuery(DraftQuery::Material {
+            material_id: MaterialId::new(unquoted(id)),
+        }));
     }
     if let Some(id) = headed(arguments, "track") {
         // An older project's main track has no id; it is written `""`.
@@ -982,7 +1510,7 @@ fn parse_query(arguments: &str) -> Result<Invocation, ToolError> {
     }
     if let Some(id) = headed(arguments, "segment") {
         return Ok(Invocation::DraftQuery(DraftQuery::Segment {
-            segment_id: SegmentId::new(id),
+            segment_id: SegmentId::new(unquoted(id)),
         }));
     }
     if let Some(rest) = headed(arguments, "range") {
@@ -996,28 +1524,39 @@ fn parse_query(arguments: &str) -> Result<Invocation, ToolError> {
 }
 
 /// `draft.apply` as JSON. The revision is required, so a combo built on an
-/// old read is refused rather than applied over newer edits.
+/// old read is refused rather than applied over newer edits. A request that
+/// does not read is named by its place in the list and its kind, so the
+/// caller knows which one to mend.
 fn parse_apply(arguments: &str) -> Result<Invocation, ToolError> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Apply {
         expected_revision: u64,
-        requests: Vec<Request>,
+        requests: Vec<serde_json::Value>,
         #[serde(default)]
         dry_run: bool,
         #[serde(default)]
         request_id: Option<String>,
     }
     let apply: Apply = serde_json::from_str(arguments).map_err(|error| {
-        ToolError::BadArguments(format!("bad arguments for draft.apply: {error}"))
+        ToolError::BadArguments(format!(
+            "bad arguments for draft.apply, which takes \
+             {{\"expected_revision\":N,\"requests\":[{{\"op\":...}}]}}: {error}"
+        ))
     })?;
     if apply.requests.is_empty() {
-        return Err(bad("draft.apply"));
+        return Err(ToolError::BadArguments(
+            "draft.apply needs at least one request in requests".to_owned(),
+        ));
+    }
+    let mut requests = Vec::with_capacity(apply.requests.len());
+    for (index, value) in apply.requests.into_iter().enumerate() {
+        requests.push(read_request(index, value)?);
     }
     Ok(Invocation::DraftApply(ApplyInput {
         request_id: apply.request_id.filter(|id| !id.is_empty()),
         expected_revision: apply.expected_revision,
-        requests: apply.requests,
+        requests,
         mode: if apply.dry_run {
             ApplyMode::DryRun
         } else {
@@ -1026,18 +1565,80 @@ fn parse_apply(arguments: &str) -> Result<Invocation, ToolError> {
     }))
 }
 
-fn parse_export(arguments: &str) -> Result<Invocation, ToolError> {
-    if let Some(path) = headed(arguments, "replace") {
-        return Ok(Invocation::ExportStart {
-            path: path.to_owned(),
-            replace: true,
-        });
+/// One request of a combo, or which one does not read and why.
+fn read_request(index: usize, value: serde_json::Value) -> Result<Request, ToolError> {
+    let Some(op) = value
+        .get("op")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+    else {
+        return Err(ToolError::BadArguments(format!(
+            "request {index} has no \"op\"; each request names its kind, such as \
+             {{\"op\":\"move\",...}}, and draft.query \"ops\" lists the kinds"
+        )));
+    };
+    if !crate::ops::ops().iter().any(|known| known.name == op) {
+        return Err(ToolError::BadArguments(format!(
+            "request {index}: no request kind {op}; draft.query \"ops\" lists them all"
+        )));
     }
-    if let Some(path) = headed(arguments, "new") {
-        return Ok(Invocation::ExportStart {
-            path: path.to_owned(),
-            replace: false,
-        });
+    let request: Request = serde_json::from_value(value.clone()).map_err(|error| {
+        ToolError::BadArguments(format!(
+            "request {index} {op}: {error}; draft.query \"ops {op}\" shows its fields"
+        ))
+    })?;
+    // A field the kind does not have is read as nothing, and the caller
+    // would take the request to have done what the field asked. It is
+    // found by giving it a value no field would keep: a field the kind has
+    // then fails to read or reads differently, and one it lacks changes
+    // nothing.
+    if let serde_json::Value::Object(fields) = &value {
+        for key in fields.keys().filter(|key| *key != "op") {
+            let mut probe = fields.clone();
+            probe.insert(key.clone(), serde_json::json!(987_654_321.5));
+            let ignored = serde_json::from_value::<Request>(serde_json::Value::Object(probe))
+                .is_ok_and(|same| same == request);
+            if ignored {
+                return Err(ToolError::BadArguments(format!(
+                    "request {index} {op} has no field {key}, so it would do nothing; \
+                     draft.query \"ops {op}\" shows its fields, and another request may be \
+                     the one that sets it"
+                )));
+            }
+        }
+    }
+    Ok(request)
+}
+
+/// The file endings `export.start` writes: a still, and H.264 movies.
+const EXPORT_ENDINGS: &[&str] = &["png", "mp4", "mov", "m4v"];
+
+fn parse_export(arguments: &str) -> Result<Invocation, ToolError> {
+    for (keyword, replace) in [("replace", true), ("new", false)] {
+        if let Some(path) = headed(arguments, keyword).map(unquoted)
+            && !path.is_empty()
+        {
+            let ending = Path::new(path)
+                .extension()
+                .map(|ending| ending.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            if !EXPORT_ENDINGS.contains(&ending.as_str()) {
+                return Err(ToolError::BadArguments(format!(
+                    "export.start writes a .png (the frame at the player's time) or a .mp4 or \
+                     .mov (the whole project as H.264 video); name the file with one of those \
+                     endings, not {}",
+                    if ending.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        format!(".{ending}")
+                    }
+                )));
+            }
+            return Ok(Invocation::ExportStart {
+                path: path.to_owned(),
+                replace,
+            });
+        }
     }
     Err(bad("export.start"))
 }
@@ -1128,6 +1729,32 @@ fn parse_track(arguments: &str) -> Result<Invocation, ToolError> {
 }
 
 fn parse_mcp(arguments: &str) -> Result<Invocation, ToolError> {
+    // The object form: `{"server":"s","tool":"t","arguments":{...}}`.
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(arguments) {
+        let text = |key: &str| {
+            map.get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
+        let (Some(server), Some(tool)) = (text("server"), text("tool")) else {
+            return Err(ToolError::BadArguments(
+                "mcp.call takes {\"server\":\"<name>\",\"tool\":\"<tool or tools/list>\",\"arguments\":{...}}"
+                    .to_owned(),
+            ));
+        };
+        let arguments = match map.get("arguments") {
+            None | Some(serde_json::Value::Null) => String::new(),
+            Some(serde_json::Value::String(text)) => text.clone(),
+            Some(other) => other.to_string(),
+        };
+        return Ok(Invocation::McpCall {
+            server,
+            tool,
+            arguments,
+        });
+    }
     let Some((server, rest)) = arguments.split_once('\n') else {
         return Err(bad("mcp.call"));
     };
@@ -1164,6 +1791,7 @@ fn bare(arguments: &str, name: &str, call: Invocation) -> Result<Invocation, Too
 }
 
 fn text_arg(arguments: &str, name: &str) -> Result<String, ToolError> {
+    let arguments = unquoted(arguments);
     if arguments.is_empty() {
         Err(bad(name))
     } else {
@@ -1200,8 +1828,27 @@ fn parse_i64(token: &str, name: &str) -> Result<i64, ToolError> {
     token.parse::<i64>().map_err(|_| bad(name))
 }
 
+/// The refusal for arguments that are not the tool's grammar, with the
+/// grammar, so the caller can write them again.
 fn bad(name: &str) -> ToolError {
-    ToolError::BadArguments(format!("bad arguments for {name}"))
+    let hint = crate::mcp_server::input_hint(name);
+    ToolError::BadArguments(if hint.is_empty() {
+        format!("bad arguments for {name}, which takes no input")
+    } else {
+        format!("bad arguments for {name}; its input is: {hint}")
+    })
+}
+
+/// `text` without one pair of quotes around it, as a model may write a
+/// path or an id.
+fn unquoted(text: &str) -> &str {
+    let text = text.trim();
+    for quote in ['"', '\''] {
+        if text.len() >= 2 && text.starts_with(quote) && text.ends_with(quote) {
+            return text[1..text.len() - 1].trim();
+        }
+    }
+    text
 }
 
 #[cfg(test)]
@@ -1292,6 +1939,7 @@ mod tests {
                 calls: 0,
                 path: String::new(),
                 info: MediaInfo {
+                    kind: "video".to_owned(),
                     duration_us: 1_500_000,
                     width: 1280,
                     height: 720,
@@ -1391,6 +2039,8 @@ mod tests {
     struct Exporter {
         calls: u32,
         path: String,
+        /// What a poll answers; `None` is still writing.
+        done: Option<Result<String, String>>,
     }
 
     impl Export for Exporter {
@@ -1398,6 +2048,13 @@ mod tests {
             self.calls += 1;
             self.path = path.to_owned();
             Ok("export-1".to_owned())
+        }
+
+        fn poll(&mut self, job_id: &str) -> Result<Option<String>, String> {
+            if job_id != "export-1" {
+                return Err(format!("no export {job_id}"));
+            }
+            self.done.clone().transpose()
         }
     }
 
@@ -1598,12 +2255,13 @@ mod tests {
                 "catalog.search",
                 "package.ensure",
                 "export.start",
+                "export.poll",
                 "sandbox.run",
                 "skill.load",
                 "mcp.call",
             ]
         );
-        assert_eq!(TOOL_NAMES.len(), 20);
+        assert_eq!(TOOL_NAMES.len(), 21);
     }
 
     #[test]
@@ -1617,6 +2275,94 @@ mod tests {
             assert!(!seen.contains(&definition.description.as_str()));
             seen.push(definition.description.as_str());
         }
+    }
+
+    #[test]
+    fn export_start_says_how_to_name_the_file_and_how_to_get_a_still() {
+        let about = super::description("export.start");
+        for words in [
+            "\"new <path>\"",
+            "\"replace <path>\"",
+            ".png",
+            "player.seek",
+        ] {
+            assert!(about.contains(words), "{words} missing from: {about}");
+        }
+        assert!(super::description("player.seek").contains(".png"));
+        let temp = Temp::new();
+        let registry = open(&temp, Gate::refuse());
+        // The forms the description names are the ones the parser takes.
+        assert!(registry.parse("export.start", "new /tmp/frame.png").is_ok());
+        assert!(
+            registry
+                .parse("export.start", "replace /tmp/cut.mp4")
+                .is_ok()
+        );
+        assert!(registry.parse("export.start", "/tmp/cut.mp4").is_err());
+    }
+
+    #[test]
+    fn an_export_is_polled_and_only_a_still_or_a_movie_ending_is_written() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        let run = |registry: &mut TestRegistry, name: &str, arguments: &str| {
+            registry.run_tool(&ToolCall {
+                id: "e".to_owned(),
+                name: name.to_owned(),
+                arguments: arguments.to_owned(),
+            })
+        };
+        // Still writing: the start names the job, and a poll says pending.
+        let started = run(&mut registry, "export.start", "new /tmp/cut.mp4");
+        assert_eq!(started.content, "job=export-1");
+        assert_eq!(
+            run(&mut registry, "export.poll", "export-1").content,
+            "pending"
+        );
+        registry.export.done = Some(Ok("wrote /tmp/cut.mp4".to_owned()));
+        assert_eq!(
+            run(&mut registry, "export.poll", "export-1").content,
+            "finished: wrote /tmp/cut.mp4"
+        );
+        // A host that writes before it answers says so in the start.
+        let at_once = run(&mut registry, "export.start", "new /tmp/again.mov");
+        assert_eq!(at_once.content, "job=export-1 finished: wrote /tmp/cut.mp4");
+        registry.export.done = Some(Err("the disk is full".to_owned()));
+        let failed = run(&mut registry, "export.poll", "export-1");
+        assert!(failed.is_error && failed.content.contains("disk is full"));
+        assert!(run(&mut registry, "export.poll", "export-9").is_error);
+        assert!(run(&mut registry, "export.poll", "").is_error);
+        // Another ending would be a movie under the wrong name: refused
+        // before anything starts.
+        let calls = registry.export.calls;
+        for path in [
+            "/tmp/still.jpg",
+            "/tmp/clip.gif",
+            "/tmp/noending",
+            "/tmp/a.webm",
+        ] {
+            let refused = run(&mut registry, "export.start", &format!("new {path}"));
+            assert!(refused.is_error, "{path}");
+            assert!(refused.content.contains(".png"), "{}", refused.content);
+        }
+        assert_eq!(registry.export.calls, calls);
+        assert!(
+            run(&mut registry, "export.start", "new /tmp/FRAME.PNG")
+                .content
+                .starts_with("job=")
+        );
+    }
+
+    #[test]
+    fn a_huge_answer_is_cut_with_a_note() {
+        let long = "x".repeat(super::RESULT_LIMIT + 500);
+        let cut = super::within_limit(long.clone());
+        assert!(cut.len() < long.len());
+        assert!(cut.contains(&format!("cut: {} characters in all", long.len())));
+        assert_eq!(super::within_limit("short".to_owned()), "short");
+        // A multi-byte letter on the limit is not split.
+        let wide = "é".repeat(super::RESULT_LIMIT);
+        assert!(super::within_limit(wide).contains("(cut: "));
     }
 
     #[test]
@@ -1712,7 +2458,19 @@ mod tests {
         let range = registry
             .invoke(registry.parse("draft.query", "range 0 1000000").unwrap())
             .unwrap();
-        assert!(range.split_whitespace().any(|word| word == "a"));
+        assert!(
+            range
+                .split_whitespace()
+                .any(|word| word.starts_with("a@0+") && word.ends_with(":main"))
+        );
+        let library = registry
+            .invoke(registry.parse("draft.query", "materials").unwrap())
+            .unwrap();
+        assert!(library.contains("videos media"), "{library}");
+        let one = registry
+            .invoke(registry.parse("draft.query", "material media").unwrap())
+            .unwrap();
+        assert!(one.contains("material videos="), "{one}");
         let full = registry
             .invoke(registry.parse("draft.query", "full").unwrap())
             .unwrap();
@@ -1782,6 +2540,238 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_combo_says_which_request_and_why() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        let mut run = |arguments: &str| {
+            registry.run_tool(&ToolCall {
+                id: "1".to_owned(),
+                name: "draft.apply".to_owned(),
+                arguments: arguments.to_owned(),
+            })
+        };
+        // The second request leaves out a field: it is named by its place
+        // and kind, with where to read its fields.
+        let short = run(r#"{"expected_revision":0,"requests":[
+                {"op":"set_project_name","name":"n"},
+                {"op":"move","segment_id":"a"}]}"#);
+        assert!(short.is_error);
+        assert!(
+            short.content.contains("request 1 move"),
+            "{}",
+            short.content
+        );
+        assert!(short.content.contains("track_id"), "{}", short.content);
+        assert!(short.content.contains("ops move"), "{}", short.content);
+        // An unknown kind is said in a line, not with every kind there is.
+        let unknown = run(r#"{"expected_revision":0,"requests":[{"op":"fly"}]}"#);
+        assert!(
+            unknown.content.contains("request 0: no request kind fly"),
+            "{}",
+            unknown.content
+        );
+        assert!(unknown.content.len() < 200, "{}", unknown.content);
+        // A field the kind does not have is refused, not dropped: the
+        // color of new text is another request's to set.
+        let made_up = run(
+            r##"{"expected_revision":0,"requests":[{"op":"add_text","track_id":"t",
+                "segment_id":"s","material_id":"m","start":0,"duration":1000000,
+                "content":"Hello","face":"Inter.ttf","text_color":"#FFFF00"}]}"##,
+        );
+        assert!(made_up.is_error);
+        assert!(
+            made_up
+                .content
+                .contains("request 0 add_text has no field text_color"),
+            "{}",
+            made_up.content
+        );
+        let nameless = run(r#"{"expected_revision":0,"requests":[{"segment_id":"a"}]}"#);
+        assert!(nameless.content.contains("request 0 has no \"op\""));
+        let empty = run(r#"{"expected_revision":0,"requests":[]}"#);
+        assert!(empty.content.contains("at least one request"));
+        // A request the session refuses carries the session's reason.
+        let missing = run(
+            r#"{"expected_revision":0,"requests":[{"op":"move","segment_id":"ghost","track_id":"main","start":0}]}"#,
+        );
+        assert!(missing.is_error);
+        assert!(
+            missing
+                .content
+                .contains("request 0 move failed: no clip has that id"),
+            "{}",
+            missing.content
+        );
+        assert_eq!(registry.draft.session().revision(), 0);
+    }
+
+    #[test]
+    fn every_documented_request_reads_with_all_its_fields_and_an_empty_face() {
+        // No field of a real request is mistaken for a made-up one.
+        for op in crate::ops::ops() {
+            let value: serde_json::Value = serde_json::from_str(op.example).unwrap();
+            if let Err(error) = super::read_request(0, value) {
+                panic!("{}: {error}", op.name);
+            }
+        }
+        // A field given the value it has by default is still a field.
+        let plain =
+            serde_json::json!({"op":"set_text_color","segment_id":"t","color":"","face":""});
+        assert!(super::read_request(0, plain).is_ok());
+        let nulls = serde_json::json!({"op":"add_caption","source_id":"a","track_id":"c",
+            "segment_id":"s","material_id":"m","span":null,"face":"",
+            "words":{"start_time":[],"end_time":[],"text":[]}});
+        assert!(super::read_request(0, nulls).is_ok());
+    }
+
+    #[test]
+    fn a_refusal_names_the_input_a_tool_takes_and_quotes_come_off() {
+        let temp = Temp::new();
+        let registry = open(&temp, Gate::refuse());
+        let text = |name: &str, arguments: &str| match registry.parse(name, arguments) {
+            Err(error) => error.to_string(),
+            Ok(_) => String::new(),
+        };
+        assert!(text("draft.query", "materials please").contains("project | full"));
+        assert!(text("player.seek", "1.5").contains("<time_us>"));
+        assert!(text("speech.start", "0").contains("<start_us> <duration_us>"));
+        assert!(text("export.start", "/tmp/a.mp4").contains("new <path> | replace <path>"));
+        assert!(text("draft.undo", "now").contains("takes no input"));
+        assert_eq!(
+            registry.parse("media.probe", "\"/a b/c.mp4\"").unwrap(),
+            Invocation::MediaProbe {
+                path: "/a b/c.mp4".to_owned()
+            }
+        );
+        assert_eq!(
+            registry.parse("export.start", "new '/a b/c.mp4'").unwrap(),
+            Invocation::ExportStart {
+                path: "/a b/c.mp4".to_owned(),
+                replace: false
+            }
+        );
+        assert!(registry.parse("export.start", "new \"\"").is_err());
+    }
+
+    /// A host whose files are the ones named here, each this long.
+    struct Files(Vec<(&'static str, i64)>);
+
+    impl Media for Files {
+        fn probe(&mut self, path: &str) -> Result<MediaInfo, String> {
+            self.0
+                .iter()
+                .find(|(known, _)| *known == path)
+                .map(|(_, duration_us)| MediaInfo {
+                    kind: "video".to_owned(),
+                    duration_us: *duration_us,
+                    width: 1920,
+                    height: 1080,
+                    streams: vec!["video".to_owned()],
+                })
+                .ok_or_else(|| format!("{path}: No such file or directory"))
+        }
+    }
+
+    #[test]
+    fn an_import_of_a_file_that_is_not_there_or_is_shorter_is_refused() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("D");
+        draft.tracks[0].id = TrackId::new("main");
+        let mut registry = Registry::new(
+            DraftTools::new(Session::open(draft)),
+            SettingsTool::open(temp.file()).unwrap(),
+            CountPlayer::default(),
+            Files(vec![("/media/real.mp4", 8_000_000)]),
+            Talk::scripted(),
+            Search::fixed(),
+            (
+                Pack::default(),
+                Exporter::default(),
+                Runner::json(),
+                Gate::refuse(),
+                McpClient::new(CountMcp::ready()),
+                Follow::default(),
+            ),
+        );
+        let mut import = |path: &str, duration: i64, dry_run: bool| {
+            registry.run_tool(&ToolCall {
+                id: "i".to_owned(),
+                name: "draft.apply".to_owned(),
+                arguments: serde_json::json!({
+                    "expected_revision": 0,
+                    "dry_run": dry_run,
+                    "requests": [
+                        {"op": "set_project_name", "name": "n"},
+                        {"op": "import", "medium": {"video": {
+                            "id": "m", "type": "video", "path": path,
+                            "width": 1920, "height": 1080, "duration": duration}}},
+                    ],
+                })
+                .to_string(),
+            })
+        };
+        let ghost = import("/media/ghost.mp4", 8_000_000, false);
+        assert!(ghost.is_error);
+        assert!(
+            ghost.content.contains("request 1 import"),
+            "{}",
+            ghost.content
+        );
+        assert!(ghost.content.contains("media.probe"), "{}", ghost.content);
+        // A dry run is checked the same way.
+        assert!(import("/media/ghost.mp4", 8_000_000, true).is_error);
+        let long = import("/media/real.mp4", 60_000_000, false);
+        assert!(long.is_error);
+        assert!(long.content.contains("8000000 long"), "{}", long.content);
+        // The file's own length, a frame of rounding, and a material with
+        // no file at all are taken.
+        assert!(!import("/media/real.mp4", 8_050_000, true).is_error);
+        assert!(!import("", 5_000_000, true).is_error);
+        let real = import("/media/real.mp4", 8_000_000, false);
+        assert_eq!(real.content, "revision=1 committed=true");
+    }
+
+    #[test]
+    fn a_seek_past_the_end_an_unknown_clip_to_track_and_an_empty_search_say_so() {
+        let temp = Temp::new();
+        let mut registry = open_draft(&temp, Gate::refuse(), tracked_draft());
+        let run = |registry: &mut TestRegistry, name: &str, arguments: &str| {
+            registry.run_tool(&ToolCall {
+                id: "1".to_owned(),
+                name: name.to_owned(),
+                arguments: arguments.to_owned(),
+            })
+        };
+        // The clips of this draft end at two seconds.
+        assert!(!run(&mut registry, "player.seek", "2000000").is_error);
+        let past = run(&mut registry, "player.seek", "2000001");
+        assert!(
+            past.is_error && past.content.contains("0 to 2000000"),
+            "{}",
+            past.content
+        );
+        assert!(run(&mut registry, "player.seek", "-1").is_error);
+        assert_eq!(registry.player.seek, 1);
+        // A clip that is not there is said before any tracking runs.
+        let ghost = run(
+            &mut registry,
+            "track.start",
+            r#"{"target":"v","at_us":500000,"box":[-0.2,0.2,0.2,-0.2],"followers":["ghost"]}"#,
+        );
+        assert!(ghost.is_error);
+        assert!(
+            ghost.content.contains("no clip has the id ghost"),
+            "{}",
+            ghost.content
+        );
+        assert!(registry.tracking.asks.is_empty());
+        registry.catalog.ids.clear();
+        let none = run(&mut registry, "catalog.search", "blur filter");
+        assert!(!none.is_error);
+        assert!(none.content.contains("nothing matches"), "{}", none.content);
+    }
+
+    #[test]
     fn player_does_not_push_undo() {
         let temp = Temp::new();
         let mut registry = open(&temp, Gate::refuse());
@@ -1824,11 +2814,23 @@ mod tests {
         let text = registry.invoke(call).unwrap();
         assert_eq!(
             text,
-            "duration=1500000 width=1280 height=720 streams=video,audio"
+            "type=video duration=1500000 width=1280 height=720 streams=video,audio"
         );
         assert_eq!(registry.media.calls, 1);
         assert_eq!(registry.media.path, "my clip.mov");
         assert_eq!(registry.draft.session().revision(), 0);
+    }
+
+    #[test]
+    fn media_probe_leaves_out_a_type_the_host_cannot_name() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        registry.media.info.kind = String::new();
+        let call = registry.parse("media.probe", "clip.mov").unwrap();
+        assert_eq!(
+            registry.invoke(call).unwrap(),
+            "duration=1500000 width=1280 height=720 streams=video,audio"
+        );
     }
 
     #[test]
@@ -1973,13 +2975,15 @@ mod tests {
         let temp = Temp::new();
         let mut registry = open(&temp, Gate::refuse());
         let before = registry.invoke(Invocation::SettingsGet).unwrap();
+        let shown: serde_json::Value = serde_json::from_str(&before).unwrap();
+        assert_eq!(shown["generation"], 0);
+        assert_eq!(shown["settings"]["model"]["cloud"], false);
+        assert_eq!(shown["settings"]["sandbox"]["online"], false);
         assert_eq!(
-            before,
-            format!(
-                "generation=0 cloud=false online=false step_cap={}",
-                cutlass_settings::DEFAULT_STEP_CAP
-            )
+            shown["settings"]["step_cap"],
+            cutlass_settings::DEFAULT_STEP_CAP
         );
+        assert!(shown["settings"].get("recent_projects").is_none());
         let mut settings = registry.settings.settings().clone();
         settings.model.cloud = true;
         let error = registry
@@ -2057,7 +3061,7 @@ mod tests {
     }
 
     #[test]
-    fn enabling_stdio_does_not_ask() {
+    fn a_new_local_program_asks_and_a_known_one_does_not() {
         let temp = Temp::new();
         let mut initial = Settings::default();
         initial.mcp_servers.push(server(
@@ -2067,9 +3071,15 @@ mod tests {
             "",
             "http://127.0.0.1:9/mcp",
         ));
+        // The user added this one, turned off, in the Settings window.
+        initial
+            .mcp_servers
+            .push(server("mine", false, McpServer::STDIO, "tool", ""));
         cutlass_settings::save(&temp.file(), 0, &initial).unwrap();
         let mut registry = open(&temp, Gate::refuse());
         assert_eq!(registry.settings.generation(), 1);
+        // Turning on a program the user already named does not ask, and
+        // neither does a plain setting or a shortcut.
         let mut next = registry.settings.settings().clone();
         next.step_cap = 40;
         next.shortcuts.push(Shortcut {
@@ -2077,8 +3087,7 @@ mod tests {
             keys: "s".to_owned(),
             ..Shortcut::default()
         });
-        next.mcp_servers
-            .push(server("local", true, McpServer::STDIO, "tool", ""));
+        next.mcp_servers[1].enabled = true;
         let text = registry
             .invoke(Invocation::SettingsSet {
                 expected: 1,
@@ -2087,27 +3096,225 @@ mod tests {
             .unwrap();
         assert_eq!(text, "generation=2");
         assert!(registry.approver.actions.is_empty());
-        assert!(!registry.approver.allow);
-        assert_eq!(registry.settings.generation(), 2);
-        assert_eq!(registry.settings.settings().step_cap, 40);
-        assert!(!registry.settings.settings().model.cloud);
-        assert!(!registry.settings.settings().sandbox.online);
         let loaded = SettingsTool::open(registry.settings.path()).unwrap();
-        assert_eq!(loaded.generation(), 2);
         assert_eq!(loaded.settings().step_cap, 40);
-        assert_eq!(loaded.settings().shortcuts.len(), 1);
         assert_eq!(loaded.settings().shortcuts[0].action, "split");
-        assert_eq!(loaded.settings().shortcuts[0].keys, "s");
+        assert!(loaded.settings().mcp_servers[1].enabled);
+        // A program the settings do not hold asks, on or off, and so does
+        // another command or other arguments for a known server.
+        for (name, enabled, command, args) in [
+            ("local", true, "other-tool", vec![]),
+            ("local", false, "other-tool", vec![]),
+            ("mine", true, "tool", vec!["--all".to_owned()]),
+        ] {
+            let mut next = registry.settings.settings().clone();
+            next.mcp_servers.retain(|known| known.name != name);
+            next.mcp_servers.push(McpServer {
+                args,
+                ..server(name, enabled, McpServer::STDIO, command, "")
+            });
+            let error = registry
+                .invoke(Invocation::SettingsSet {
+                    expected: 2,
+                    settings: Box::new(next),
+                })
+                .unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    ToolError::Approval(refused)
+                        if matches!(&refused.action, ApprovalAction::RunLocalMcp { server, .. } if server == name)
+                ),
+                "{error:?}"
+            );
+        }
+        assert_eq!(registry.settings.generation(), 2);
         assert!(
-            loaded.settings().mcp_servers.iter().any(|item| {
-                item.name == "local" && item.enabled && item.kind == McpServer::STDIO
-            })
+            !registry
+                .settings
+                .settings()
+                .mcp_servers
+                .iter()
+                .any(|known| known.command == "other-tool")
         );
-        assert!(
-            loaded.settings().mcp_servers.iter().any(|item| {
-                item.name == "far" && item.enabled && item.kind == McpServer::REMOTE
+        // The user's own Settings window adds a program without asking.
+        let mut typed = registry.settings.settings().clone();
+        typed
+            .mcp_servers
+            .push(server("typed", true, McpServer::STDIO, "typed-tool", ""));
+        assert!(super::pending_approvals(registry.settings.settings(), &typed).is_empty());
+    }
+
+    #[test]
+    fn moving_a_remote_server_or_the_cloud_service_asks() {
+        let temp = Temp::new();
+        let mut initial = Settings::default();
+        initial.mcp_servers.push(server(
+            "far",
+            true,
+            McpServer::REMOTE,
+            "",
+            "https://one.example/mcp",
+        ));
+        cutlass_settings::save(&temp.file(), 0, &initial).unwrap();
+        let mut registry = open(&temp, Gate::refuse());
+        let set = |registry: &mut TestRegistry, change: &dyn Fn(&mut Settings)| {
+            let mut next = registry.settings.settings().clone();
+            change(&mut next);
+            registry.invoke(Invocation::SettingsSet {
+                expected: 1,
+                settings: Box::new(next),
             })
+        };
+        let moved = set(&mut registry, &|next| {
+            next.mcp_servers[0].url = "https://two.example/mcp".to_owned();
+        });
+        assert!(matches!(
+            moved,
+            Err(ToolError::Approval(refused))
+                if refused.action == ApprovalAction::EnableRemoteMcp { server: "far".to_owned() }
+        ));
+        let service = set(&mut registry, &|next| {
+            next.model.cloud_provider = cutlass_settings::ModelChoice::OPENAI.to_owned();
+            next.model.cloud_url = "https://two.example/v1/chat/completions".to_owned();
+        });
+        assert!(matches!(
+            service,
+            Err(ToolError::Approval(refused))
+                if refused.action == ApprovalAction::ChangeCloudAddress {
+                    address: "https://two.example/v1/chat/completions".to_owned()
+                }
+        ));
+        // The model's name on the same service does not ask.
+        let named = set(&mut registry, &|next| {
+            next.model.cloud_name = "another-model".to_owned();
+        });
+        assert_eq!(named.unwrap(), "generation=2");
+        let stored = registry.settings.settings();
+        assert_eq!(stored.mcp_servers[0].url, "https://one.example/mcp");
+        assert_eq!(
+            stored.model.cloud_provider,
+            cutlass_settings::ModelChoice::CLAUDE
         );
+        assert!(stored.model.cloud_url.is_empty());
+    }
+
+    #[test]
+    fn settings_set_refuses_made_up_keys_and_a_step_cap_out_of_range() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::allow());
+        let mut call = |arguments: &str| {
+            ToolSink::run_tool(
+                &mut registry,
+                &ToolCall {
+                    id: "s".to_owned(),
+                    name: "settings.set".to_owned(),
+                    arguments: arguments.to_owned(),
+                },
+            )
+        };
+        for (changes, named) in [
+            (
+                r#"{"settings":{"canvas_size":[1080,1920]}}"#,
+                "no setting settings",
+            ),
+            (r#"{"stepcap":5}"#, "no setting stepcap"),
+            (
+                r#"{"model":{"temperature":1}}"#,
+                "no setting model.temperature",
+            ),
+            (
+                r#"{"mcp_servers":[{"name":"x","command":"t","env":{}}]}"#,
+                "no setting mcp_servers.env",
+            ),
+            (r#"{"step_cap":0}"#, "step_cap is 1 to 1000, not 0"),
+            (r#"{"step_cap":4000000000}"#, "step_cap is 1 to 1000"),
+        ] {
+            let refused = call(&format!(
+                r#"{{"expected_generation":0,"changes":{changes}}}"#
+            ));
+            assert!(refused.is_error, "{changes}");
+            assert!(refused.content.contains(named), "{}", refused.content);
+        }
+        let kept = call(r#"{"expected_generation":0,"changes":{"step_cap":1000}}"#);
+        assert!(!kept.is_error, "{}", kept.content);
+        assert_eq!(registry.settings.generation(), 1);
+        assert!(registry.settings.settings().rest.is_empty());
+    }
+
+    #[test]
+    fn settings_set_adds_changes_and_removes_one_list_entry_at_a_time() {
+        let temp = Temp::new();
+        let mut initial = Settings::default();
+        initial
+            .mcp_servers
+            .push(server("mine", true, McpServer::STDIO, "tool", ""));
+        initial.shortcuts.push(Shortcut {
+            action: "split".to_owned(),
+            keys: "s".to_owned(),
+            ..Shortcut::default()
+        });
+        cutlass_settings::save(&temp.file(), 0, &initial).unwrap();
+        let mut registry = open(&temp, Gate::allow());
+        let call = |registry: &mut TestRegistry, changes: &str| {
+            let generation = registry.settings.generation();
+            ToolSink::run_tool(
+                registry,
+                &ToolCall {
+                    id: "s".to_owned(),
+                    name: "settings.set".to_owned(),
+                    arguments: format!(
+                        r#"{{"expected_generation":{generation},"changes":{changes}}}"#
+                    ),
+                },
+            )
+        };
+        // One new server leaves the user's own in place.
+        let added = call(
+            &mut registry,
+            r#"{"mcp_servers":[{"name":"new","command":"other","enabled":true}]}"#,
+        );
+        assert!(!added.is_error, "{}", added.content);
+        let names = |registry: &TestRegistry| -> Vec<String> {
+            registry
+                .settings
+                .settings()
+                .mcp_servers
+                .iter()
+                .map(|known| known.name.clone())
+                .collect()
+        };
+        assert_eq!(names(&registry), ["mine", "new"]);
+        // Naming one changes only what is sent.
+        let off = call(
+            &mut registry,
+            r#"{"mcp_servers":[{"name":"mine","enabled":false}]}"#,
+        );
+        assert!(!off.is_error, "{}", off.content);
+        let mine = registry.settings.settings().mcp_servers[0].clone();
+        assert!(!mine.enabled);
+        assert_eq!(mine.command, "tool");
+        let gone = call(
+            &mut registry,
+            r#"{"mcp_servers":[{"name":"new","remove":true}]}"#,
+        );
+        assert!(!gone.is_error, "{}", gone.content);
+        assert_eq!(names(&registry), ["mine"]);
+        let keys = call(
+            &mut registry,
+            r#"{"shortcuts":[{"action":"split","keys":"k"},{"action":"undo","keys":"u"}]}"#,
+        );
+        assert!(!keys.is_error, "{}", keys.content);
+        let shortcuts = &registry.settings.settings().shortcuts;
+        assert_eq!(shortcuts.len(), 2);
+        assert_eq!(shortcuts[0].keys, "k");
+        for bad in [
+            r#"{"mcp_servers":[{"command":"nameless"}]}"#,
+            r#"{"mcp_servers":[{"name":"ghost","remove":true}]}"#,
+            r#"{"mcp_servers":{"name":"x"}}"#,
+        ] {
+            assert!(call(&mut registry, bad).is_error, "{bad}");
+        }
     }
 
     #[test]
@@ -2552,5 +3759,80 @@ mod tests {
                 .video_trackings
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn the_model_changes_settings_by_merging_json() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        let call = |registry: &mut _, arguments: &str| {
+            ToolSink::run_tool(
+                registry,
+                &ToolCall {
+                    id: "s".to_owned(),
+                    name: "settings.set".to_owned(),
+                    arguments: arguments.to_owned(),
+                },
+            )
+        };
+        let set = call(
+            &mut registry,
+            r#"{"expected_generation":0,"changes":{"step_cap":48,"playback":{"loop_playback":true}}}"#,
+        );
+        assert!(!set.is_error, "{}", set.content);
+        assert_eq!(registry.settings.settings().step_cap, 48);
+        assert!(registry.settings.settings().playback.loop_playback);
+        let stale = call(
+            &mut registry,
+            r#"{"expected_generation":0,"changes":{"step_cap":12}}"#,
+        );
+        assert!(stale.is_error, "a stale generation is refused");
+        assert_eq!(registry.settings.settings().step_cap, 48);
+        // Turning the cloud model on asks; refused, nothing is written.
+        let generation = registry.settings.generation();
+        let cloud = call(
+            &mut registry,
+            &format!(
+                r#"{{"expected_generation":{generation},"changes":{{"model":{{"cloud":true}}}}}}"#
+            ),
+        );
+        assert!(cloud.is_error);
+        assert!(cloud.content.contains("refused"), "{}", cloud.content);
+        assert!(!registry.settings.settings().model.cloud);
+        let hidden = call(
+            &mut registry,
+            &format!(
+                r#"{{"expected_generation":{generation},"changes":{{"recent_projects":[]}}}}"#
+            ),
+        );
+        assert!(hidden.is_error);
+        let broken = call(&mut registry, r#"{"changes":{}}"#);
+        assert!(broken.is_error);
+        assert!(
+            broken.content.contains("expected_generation"),
+            "{}",
+            broken.content
+        );
+    }
+
+    #[test]
+    fn draft_query_ops_lists_and_shows_request_kinds() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        let all = registry
+            .invoke(registry.parse("draft.query", "ops").unwrap())
+            .unwrap();
+        assert!(all.contains("split: "), "{all}");
+        let some = registry
+            .invoke(
+                registry
+                    .parse("draft.query", "ops split, set_opacity")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(some.contains(r#"{"op":"split""#), "{some}");
+        assert!(some.contains(r#"{"op":"set_opacity""#), "{some}");
+        let unknown = registry.invoke(registry.parse("draft.query", "ops nope").unwrap());
+        assert!(unknown.is_err());
     }
 }

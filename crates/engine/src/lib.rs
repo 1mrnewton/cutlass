@@ -35,8 +35,8 @@ pub use map::{
     timeline_for_source,
 };
 pub use mix::{
-    AudioSample, ClipPcm, ClipRole, Mix, MixClip, MixResult, clip_volume, mix_inputs, render,
-    volume_at,
+    AudioSample, ClipPart, ClipPcm, ClipRole, Mix, MixClip, MixResult, MixSpan, clip_part,
+    clip_volume, mix_inputs, render, volume_at,
 };
 pub use reader::{
     DecodedFrame, HeldFrame, Media, MediaInfo, PcmReady, ReaderFactory, Steer, StreamReport,

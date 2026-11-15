@@ -2,6 +2,7 @@
 //! package's stand-in, as `cutlass_effects::EffectSource` paints its CPU
 //! bytes. The arithmetic is `cutlass_effects`'s WGSL `package_pixel`.
 
+use crate::pool::Bind;
 use cutlass_effects::{PACKAGE_UNIFORM_BYTES, PACKAGE_WGSL, PackagePass};
 
 use crate::CANVAS_FORMAT;
@@ -32,10 +33,11 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
 pub(crate) struct Packages {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
+    pool: std::sync::Arc<crate::pool::Pool>,
 }
 
 impl Packages {
-    pub(crate) fn new(device: &wgpu::Device) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, pool: std::sync::Arc<crate::pool::Pool>) -> Self {
         let source = format!("{PACKAGE_WGSL}\n{SHADER}");
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render package"),
@@ -96,7 +98,11 @@ impl Packages {
             multiview_mask: None,
             cache: None,
         });
-        Self { pipeline, layout }
+        Self {
+            pipeline,
+            layout,
+            pool,
+        }
     }
 
     /// `from` painted by `pass` into `to`, on a target `scale` times the
@@ -114,27 +120,19 @@ impl Packages {
     ) {
         #[allow(clippy::cast_possible_truncation)]
         let uniform = pass.uniform((scale.0 as f32, scale.1 as f32));
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cutlass-render package params"),
-            size: PACKAGE_UNIFORM_BYTES as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buffer, 0, &uniform);
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cutlass-render package"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(from),
-                },
-            ],
-        });
+        let buffer = self.pool.uniform(
+            device,
+            queue,
+            "cutlass-render package params",
+            PACKAGE_UNIFORM_BYTES as u64,
+            &uniform,
+        );
+        let group = self.pool.group(
+            device,
+            "cutlass-render package",
+            &self.layout,
+            &[(0, Bind::Buffer(&buffer)), (1, Bind::View(from))],
+        );
         let mut render = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("cutlass-render package"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {

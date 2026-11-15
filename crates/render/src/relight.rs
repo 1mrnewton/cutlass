@@ -3,6 +3,7 @@
 //! stretches the depth to the picture. The arithmetic is
 //! `cutlass_effects`'s WGSL `relight_pixel`.
 
+use crate::pool::Bind;
 use cutlass_effects::{
     Lighting, MAX_LIGHTS, RELIGHT_UNIFORM_BYTES, RELIGHT_WGSL, relight_uniform, stretch_axis,
 };
@@ -45,10 +46,11 @@ pub struct Relit<'a> {
 pub(crate) struct Relights {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
+    pool: std::sync::Arc<crate::pool::Pool>,
 }
 
 impl Relights {
-    pub(crate) fn new(device: &wgpu::Device) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, pool: std::sync::Arc<crate::pool::Pool>) -> Self {
         let source = format!("{RELIGHT_WGSL}\n{SHADER}");
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render relight"),
@@ -112,7 +114,11 @@ impl Relights {
             multiview_mask: None,
             cache: None,
         });
-        Self { pipeline, layout }
+        Self {
+            pipeline,
+            layout,
+            pool,
+        }
     }
 
     /// `from`, `size`, lit by `relit` into `to`. A depth of no size, or
@@ -135,42 +141,31 @@ impl Relights {
                 actual: relit.lighting.lights.len(),
             });
         }
-        let depth = crate::layer::Pipelines::upload_rgba(device, queue, &relit.depth)?;
+        let depth = crate::layer::Pipelines::upload_rgba(&self.pool, device, queue, &relit.depth)?;
         let axes = axes(device, queue, size, (relit.depth.width, relit.depth.height))?;
         let uniform = relight_uniform(
             relit.lighting,
             size,
             (relit.depth.width, relit.depth.height),
         );
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cutlass-render relight params"),
-            size: RELIGHT_UNIFORM_BYTES as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buffer, 0, &uniform);
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cutlass-render relight"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(from),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&depth.views[0]),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&axes),
-                },
+        let buffer = self.pool.uniform(
+            device,
+            queue,
+            "cutlass-render relight params",
+            RELIGHT_UNIFORM_BYTES as u64,
+            &uniform,
+        );
+        let group = self.pool.group(
+            device,
+            "cutlass-render relight",
+            &self.layout,
+            &[
+                (0, Bind::Buffer(&buffer)),
+                (1, Bind::View(from)),
+                (2, Bind::View(&depth.views[0])),
+                (3, Bind::View(&axes)),
             ],
-        });
+        );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("cutlass-render relight"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {

@@ -2,14 +2,16 @@
 //! the requests that give another text that look. Every shell keeps the
 //! same file, under the Cutlass folder's `Presets`.
 
-use cutlass_model::{Draft, MaterialRef, Segment, SegmentId};
+use cutlass_model::{Draft, MaterialId, MaterialRef, Segment, SegmentId};
 use cutlass_session::{Request, TextPattern};
 use serde_json::{Map, Value, json};
 
 use crate::inspector::text_look;
 
 /// A saved look: the face, size, color, pattern, alignment and spacing,
-/// and the outline, shadow and box. The words are not part of it.
+/// and the outline, shadow, box, glow and curve. The words are not part
+/// of it. A part kept only since presets first were is `None` in a file
+/// saved before it, and a text given that look keeps its own.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SavedLook {
     pub name: String,
@@ -32,6 +34,32 @@ pub struct SavedLook {
     pub background_color: String,
     pub background_alpha: f64,
     pub background_round: f64,
+    pub shadow_alpha: Option<f64>,
+    pub background_box: Option<SavedBox>,
+    pub glow: Option<SavedGlow>,
+    /// Whether the lines bend, and by how many degrees of arc.
+    pub curve: Option<(bool, f64)>,
+}
+
+/// How a saved look lays its box out: one for each line or one for all,
+/// the room around the letters across and down, and how far right and up
+/// it sits, in ems.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SavedBox {
+    pub lines: bool,
+    pub room: [f64; 2],
+    pub offset: [f64; 2],
+}
+
+/// A saved look's glow: its color, empty when off, intensity and range,
+/// and its rays and their lean right and up in degrees.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SavedGlow {
+    pub color: String,
+    pub strength: f64,
+    pub range: f64,
+    pub rays: bool,
+    pub lean: [f64; 2],
 }
 
 /// The look of text clip `segment`, named `name`; `None` when it is not
@@ -65,12 +93,27 @@ pub fn saved_look(draft: &Draft, segment: &Segment, name: &str) -> Option<SavedL
         background_color: look.background_color,
         background_alpha: look.background_alpha,
         background_round: look.background_round,
+        shadow_alpha: Some(look.shadow_alpha),
+        background_box: Some(SavedBox {
+            lines: look.background_lines,
+            room: [look.background_width, look.background_height],
+            offset: [look.background_offset_x, look.background_offset_y],
+        }),
+        glow: Some(SavedGlow {
+            color: look.glow_color,
+            strength: look.glow_strength,
+            range: look.glow_range,
+            rays: look.glow_rays,
+            lean: [look.glow_lean_x, look.glow_lean_y],
+        }),
+        curve: Some((look.curve_on, look.curve)),
     })
 }
 
-/// The requests that give `segment_id` the whole `look`, one undo step
-/// when applied together. A text with no face takes `face`; `line_width`
-/// is the box an alignment moves in when the text has none.
+/// The requests that give `segment_id` the whole `look` but its glow, one
+/// undo step when applied together. A text with no face takes `face`;
+/// `line_width` is the box an alignment moves in when the text has none.
+/// The glow is a material of each clip's own: see [`look_glow_request`].
 #[must_use]
 pub fn look_requests(
     segment_id: &SegmentId,
@@ -144,7 +187,51 @@ pub fn look_requests(
             round: look.background_round,
         },
     ]);
+    if let Some(opacity) = look.shadow_alpha {
+        requests.push(Request::SetTextShadowOpacity {
+            segment_id: id(),
+            opacity,
+        });
+    }
+    if let Some(layout) = look.background_box {
+        requests.push(Request::SetTextBackgroundBox {
+            segment_id: id(),
+            lines: layout.lines,
+            width: layout.room[0],
+            height: layout.room[1],
+            offset_x: layout.offset[0],
+            offset_y: layout.offset[1],
+        });
+    }
+    if let Some((on, degrees)) = look.curve {
+        requests.push(Request::SetTextCurve {
+            segment_id: id(),
+            on,
+            degrees,
+        });
+    }
     requests
+}
+
+/// The request that gives `segment_id` `look`'s glow, a new one named
+/// `glow_id` when the clip has none of its own; `None` for a look saved
+/// before glows were kept.
+#[must_use]
+pub fn look_glow_request(
+    segment_id: &SegmentId,
+    look: &SavedLook,
+    glow_id: MaterialId,
+) -> Option<Request> {
+    let glow = look.glow.as_ref()?;
+    Some(Request::SetTextGlow {
+        segment_id: segment_id.clone(),
+        glow_id,
+        color: glow.color.clone(),
+        strength: glow.strength,
+        range: glow.range,
+        rays: Some(glow.rays),
+        lean: Some(glow.lean),
+    })
 }
 
 /// The looks in a saved file. A file that does not read, or a look in it
@@ -192,13 +279,39 @@ fn write_look(look: &SavedLook) -> Value {
         "background_color": look.background_color,
         "background_alpha": look.background_alpha,
         "background_round": look.background_round,
+        "shadow_alpha": look.shadow_alpha,
+        "background_box": look.background_box.map(|layout| json!({
+            "lines": layout.lines,
+            "room": layout.room,
+            "offset": layout.offset,
+        })),
+        "glow": look.glow.as_ref().map(|glow| json!({
+            "color": glow.color,
+            "strength": glow.strength,
+            "range": glow.range,
+            "rays": glow.rays,
+            "lean": glow.lean,
+        })),
+        "curve": look.curve.map(|(on, degrees)| json!({ "on": on, "degrees": degrees })),
     })
+}
+
+/// Two finite numbers under `key` in `part`.
+fn pair(part: &Map<String, Value>, key: &str) -> Option<[f64; 2]> {
+    match part.get(key)?.as_array()?.as_slice() {
+        [first, second] => Some([
+            first.as_f64().filter(|value| value.is_finite())?,
+            second.as_f64().filter(|value| value.is_finite())?,
+        ]),
+        _ => None,
+    }
 }
 
 fn read_look(look: &Map<String, Value>) -> Option<SavedLook> {
     let text = |key: &str| look.get(key)?.as_str().map(str::to_owned);
     let number = |key: &str| look.get(key)?.as_f64().filter(|value| value.is_finite());
     let flag = |key: &str| look.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let part = |key: &str| look.get(key).and_then(Value::as_object);
     let font_size = number("font_size").filter(|size| *size > 0.0)?;
     let alignment = look
         .get("alignment")
@@ -228,6 +341,32 @@ fn read_look(look: &Map<String, Value>) -> Option<SavedLook> {
         background_color: text("background_color").unwrap_or_default(),
         background_alpha: number("background_alpha").unwrap_or(1.0),
         background_round: number("background_round").unwrap_or(0.0),
+        shadow_alpha: number("shadow_alpha"),
+        background_box: part("background_box").and_then(|part| {
+            Some(SavedBox {
+                lines: part.get("lines").and_then(Value::as_bool).unwrap_or(false),
+                room: pair(part, "room")?,
+                offset: pair(part, "offset")?,
+            })
+        }),
+        glow: part("glow").and_then(|part| {
+            let number = |key: &str| part.get(key)?.as_f64().filter(|value| value.is_finite());
+            Some(SavedGlow {
+                color: part.get("color")?.as_str()?.to_owned(),
+                strength: number("strength")?,
+                range: number("range")?,
+                rays: part.get("rays").and_then(Value::as_bool).unwrap_or(false),
+                lean: pair(part, "lean").unwrap_or([0.0, 0.0]),
+            })
+        }),
+        curve: part("curve").and_then(|part| {
+            Some((
+                part.get("on").and_then(Value::as_bool).unwrap_or(false),
+                part.get("degrees")?
+                    .as_f64()
+                    .filter(|value| value.is_finite())?,
+            ))
+        }),
     })
 }
 
@@ -259,6 +398,20 @@ mod tests {
             background_color: "#FFFFFF".to_owned(),
             background_alpha: 0.5,
             background_round: 0.3,
+            shadow_alpha: Some(0.9),
+            background_box: Some(super::SavedBox {
+                lines: true,
+                room: [0.2, 0.1],
+                offset: [0.3, -0.2],
+            }),
+            glow: Some(super::SavedGlow {
+                color: "#FFCC00".to_owned(),
+                strength: 0.3,
+                range: 0.2,
+                rays: true,
+                lean: [-1.0, 3.0],
+            }),
+            curve: Some((true, 72.0)),
         }
     }
 
@@ -284,5 +437,60 @@ mod tests {
         assert_eq!(read.len(), 1);
         assert_eq!(read[0].name, "Sized");
         assert_eq!(read[0].alignment, 0);
+        // A look saved before the glow, the curve and the rest were kept
+        // has none of them, so a text given it keeps its own.
+        assert_eq!(
+            (
+                read[0].shadow_alpha,
+                read[0].background_box,
+                &read[0].glow,
+                read[0].curve
+            ),
+            (None, None, &None, None)
+        );
+    }
+
+    #[test]
+    fn a_look_gives_its_box_curve_and_glow_and_an_old_one_does_not() {
+        use cutlass_session::Request;
+        let id = cutlass_model::SegmentId::new("t");
+        let has = |requests: &[Request], name: &str| {
+            requests
+                .iter()
+                .any(|request| format!("{request:?}").starts_with(name))
+        };
+        let requests = super::look_requests(&id, &look(), "A.ttf", 1080.0);
+        for name in [
+            "SetTextShadowOpacity",
+            "SetTextBackgroundBox",
+            "SetTextCurve",
+        ] {
+            assert!(has(&requests, name), "{name}");
+        }
+        let glow = super::look_glow_request(&id, &look(), "g".into()).unwrap();
+        assert!(matches!(
+            glow,
+            Request::SetTextGlow {
+                rays: Some(true),
+                ..
+            }
+        ));
+
+        let old = SavedLook {
+            shadow_alpha: None,
+            background_box: None,
+            glow: None,
+            curve: None,
+            ..look()
+        };
+        let requests = super::look_requests(&id, &old, "A.ttf", 1080.0);
+        for name in [
+            "SetTextShadowOpacity",
+            "SetTextBackgroundBox",
+            "SetTextCurve",
+        ] {
+            assert!(!has(&requests, name), "{name}");
+        }
+        assert!(super::look_glow_request(&id, &old, "g".into()).is_none());
     }
 }

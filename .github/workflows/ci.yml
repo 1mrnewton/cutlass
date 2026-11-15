@@ -139,6 +139,39 @@ jobs:
           cargo build -p cutlass
           python3 scripts/smoke.py target/debug/cutlass
 
+  bench:
+    # Playback, scrub and export on a three-layer 1080p cut, against the
+    # `ci` floors in tools/editor-bench/targets.json. Not part of `rust`:
+    # a shared runner's speed varies, so a miss here is a signal to look,
+    # not a merge gate. The numbers are in the job summary and artifact.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ffmpeg for the source movies, and a software GPU
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg mesa-vulkan-drivers libasound2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Bench
+        run: |
+          cargo run --release -p editor-bench -- --sides 1080 --seconds 2 --json bench.json --check ci | tee bench.txt
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '### Editor bench (three layers, 1080p, 2 s)'
+            echo '```'
+            cat bench.txt bench.json 2>/dev/null || echo 'no results'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: editor-bench
+          path: bench.json
+          if-no-files-found: ignore
+
   rust:
     # The check main's branch protection requires: it passes when the lint
     # and test jobs both pass.
@@ -241,7 +274,11 @@ jobs:
         if: github.event_name != 'pull_request' || github.base_ref == 'main'
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 30
+          # The editor draws with compute shaders, which need guest Vulkan.
+          # The API 30 x86_64 image on emulator 37 offers the guest only
+          # OpenGL ES 3.0 ("update the emulator to one that supports the
+          # feature(s): Vulkan"), and the renderer refuses it.
+          api-level: 34
           arch: x86_64
           target: google_apis
           emulator-options: -no-window -gpu swiftshader_indirect -no-boot-anim -camera-back none

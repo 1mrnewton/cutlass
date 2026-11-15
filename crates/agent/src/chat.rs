@@ -36,20 +36,58 @@ pub struct ChatModel<T> {
 /// What the model is told before the user's first words.
 pub const SYSTEM_PROMPT: &str = "You edit a video project in Cutlass with tools. \
 Act with the tools; do not ask the user for ids you can read. \
-Read with draft_query first (\"project\" lists the tracks, \"track <id>\" lists its clips as id@start+length): \
+Read with draft_query first (\"project\" lists the tracks, \"track <id>\" lists its clips as id@start+length, \"segment <id>\" shows one clip with what it stores and its text or media, \"materials\" lists the imported media and the texts): \
 every draft_apply sends the revision it read, and a stale revision is refused, so read again. \
-Times are microseconds: 1 second is 1000000. draft_apply runs its requests as one undo step. \
-Requests, each with its kind in op: \
+Times are microseconds: 1 second is 1000000. draft_apply runs its requests as one undo step; if one fails, none land. \
+Requests, each with its kind in op, for example: \
 {\"op\":\"split\",\"segment_id\":\"a\",\"at\":1000000,\"right_id\":\"a-2\"} (at is on the timeline; right_id names the new right piece); \
 {\"op\":\"move\",\"segment_id\":\"a\",\"track_id\":\"main\",\"start\":0}; \
 {\"op\":\"trim\",\"segment_id\":\"a\",\"edge\":\"start\",\"time\":500000} (edge start or end); \
-{\"op\":\"remove\",\"segment_id\":\"a\"}; \
-{\"op\":\"set_constant_speed\",\"segment_id\":\"a\",\"speed\":2.0}; \
-{\"op\":\"set_volume\",\"segment_id\":\"a\",\"volume\":0.5}; \
-{\"op\":\"set_opacity\",\"segment_id\":\"a\",\"opacity\":0.5}. \
+{\"op\":\"remove\",\"segment_id\":\"a\"}. \
+There are over a hundred kinds (text, captions, shapes, effects, filters, color, masks, keyframes, transitions, speed, canvas): \
+draft_query \"ops\" lists them all, and draft_query \"ops add_text set_position\" gives the exact JSON of the ones you need. Look a kind up before you use it the first time. \
+For a bigger job (captions, removing pauses, motion graphics, a product demo, setting up a project), skill_load it first and follow it. \
+settings_get and settings_set read and change the app's own settings, not the project: its canvas, frame rate and clips are draft_apply requests. \
 When done, say briefly what you changed.";
 
+/// What the model is told about this user beyond [`SYSTEM_PROMPT`]: the
+/// MCP servers they turned on and, while Memory is on, their notes.
+#[must_use]
+pub fn prompt_context(settings: &cutlass_settings::Settings, notes: &str) -> String {
+    let mut out = String::new();
+    let servers: Vec<&str> = settings
+        .mcp_servers
+        .iter()
+        .filter(|server| server.enabled && !server.name.is_empty())
+        .map(|server| server.name.as_str())
+        .collect();
+    if !servers.is_empty() {
+        out.push_str(&format!(
+            "MCP servers the user turned on, reached with mcp_call (tool tools/list lists a server's tools): {}.",
+            servers.join(", ")
+        ));
+    }
+    if settings.memory && !notes.trim().is_empty() {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str("Notes the user keeps for you:\n");
+        out.push_str(notes.trim());
+    }
+    out
+}
+
 impl<T: ChatTransport> ChatModel<T> {
+    /// Adds `context` after the system prompt, such as [`prompt_context`].
+    #[must_use]
+    pub fn with_context(mut self, context: &str) -> Self {
+        if !context.trim().is_empty() {
+            self.system.push_str("\n\n");
+            self.system.push_str(context.trim());
+        }
+        self
+    }
+
     /// Talks to `model` through `transport`.
     #[must_use]
     pub fn new(transport: T, model: &str) -> Self {
@@ -293,8 +331,9 @@ impl LoopbackHttp {
     }
 }
 
-impl ChatTransport for LoopbackHttp {
-    fn post(&mut self, body: &str) -> Result<String, ModelError> {
+impl LoopbackHttp {
+    /// Send one request for `path` with `body`, if any, and read the answer.
+    fn exchange(&self, method: &str, path: &str, body: &str) -> Result<String, ModelError> {
         let address = (self.host.as_str(), self.port)
             .to_socket_addrs()
             .map_err(|error| self.unreachable(&error))?
@@ -307,8 +346,7 @@ impl ChatTransport for LoopbackHttp {
             .and_then(|()| stream.set_write_timeout(Some(self.timeout)))
             .map_err(|error| self.unreachable(&error))?;
         let head = format!(
-            "POST {} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            self.path,
+            "{method} {path} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             self.host,
             self.port,
             body.len()
@@ -319,6 +357,36 @@ impl ChatTransport for LoopbackHttp {
             .and_then(|()| stream.flush())
             .map_err(|error| self.unreachable(&error))?;
         read_response(BufReader::new(stream))
+    }
+
+    /// The models the runner has, by the names it takes, from its
+    /// `/v1/models` beside the chat address (Ollama, llama.cpp's server and
+    /// LM Studio all answer it).
+    pub fn models(&self) -> Result<Vec<String>, ModelError> {
+        let path = self
+            .path
+            .strip_suffix("/chat/completions")
+            .map_or_else(|| "/v1/models".to_owned(), |base| format!("{base}/models"));
+        let reply = self.exchange("GET", &path, "")?;
+        let value: Value = serde_json::from_str(&reply)
+            .map_err(|error| ModelError::Inner(format!("the model list is not JSON: {error}")))?;
+        let mut names: Vec<String> = value
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|model| model.get("id").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect();
+        names.sort();
+        names.dedup();
+        Ok(names)
+    }
+}
+
+impl ChatTransport for LoopbackHttp {
+    fn post(&mut self, body: &str) -> Result<String, ModelError> {
+        self.exchange("POST", &self.path, body)
     }
 }
 
@@ -614,6 +682,71 @@ mod tests {
             shown += 1;
             rest = &tail[end..];
         }
-        assert!(shown >= 7, "{shown}");
+        assert!(shown >= 4, "{shown}");
+    }
+
+    #[test]
+    fn the_prompt_names_enabled_servers_and_carries_notes_only_with_memory_on() {
+        let mut settings = cutlass_settings::Settings::default();
+        settings.mcp_servers.push(cutlass_settings::McpServer {
+            name: "files".to_owned(),
+            enabled: true,
+            ..Default::default()
+        });
+        settings.mcp_servers.push(cutlass_settings::McpServer {
+            name: "off".to_owned(),
+            ..Default::default()
+        });
+        let context = super::prompt_context(&settings, "Titles in Montserrat.");
+        assert!(context.contains(": files."), "{context}");
+        assert!(!context.contains("off"), "{context}");
+        assert!(context.contains("Titles in Montserrat."), "{context}");
+        settings.memory = false;
+        let context = super::prompt_context(&settings, "Titles in Montserrat.");
+        assert!(!context.contains("Montserrat"), "{context}");
+        let model = ChatModel::new(LoopbackHttp::new("http://127.0.0.1:1/").unwrap(), "m")
+            .with_context("Extra.");
+        let body = model.body(&CompletionRequest {
+            messages: Vec::new(),
+            tools: Vec::new(),
+        });
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.starts_with(super::SYSTEM_PROMPT), "{system}");
+        assert!(system.ends_with("\n\nExtra."), "{system}");
+    }
+
+    #[test]
+    fn the_runner_lists_its_models() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut first = String::new();
+            reader.read_line(&mut first).unwrap();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+            }
+            let answer =
+                r#"{"object":"list","data":[{"id":"qwen3.8:27b"},{"id":"gemma4:latest"}]}"#;
+            let mut stream = stream;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{answer}",
+                answer.len()
+            )
+            .unwrap();
+            first
+        });
+        let transport =
+            LoopbackHttp::new(&format!("http://127.0.0.1:{port}/v1/chat/completions")).unwrap();
+        let models = transport.models().unwrap();
+        assert_eq!(models, ["gemma4:latest", "qwen3.8:27b"]);
+        let first = server.join().unwrap();
+        assert!(first.starts_with("GET /v1/models HTTP/1.1"), "{first}");
     }
 }

@@ -6,6 +6,7 @@
 //! is its one-byte-a-pixel picture, read bilinearly at the clip point each
 //! canvas pixel shows, as the CPU reads it.
 
+use crate::pool::Bind;
 use cutlass_effects::{CanvasMask, MASK_WGSL};
 
 use crate::CANVAS_FORMAT;
@@ -95,10 +96,11 @@ pub(crate) struct Cuts {
     layout: wgpu::BindGroupLayout,
     /// Bound in place of a selection by the mask pass.
     none: wgpu::TextureView,
+    pool: std::sync::Arc<crate::pool::Pool>,
 }
 
 impl Cuts {
-    pub(crate) fn new(device: &wgpu::Device) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, pool: std::sync::Arc<crate::pool::Pool>) -> Self {
         let source = format!("{SHADER}\n{MASK_WGSL}");
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render cut"),
@@ -166,6 +168,7 @@ impl Cuts {
         let none =
             selection_texture(device, 1, 1).create_view(&wgpu::TextureViewDescriptor::default());
         Self {
+            pool,
             mask: pipeline("fs_mask"),
             select: pipeline("fs_select"),
             layout,
@@ -288,31 +291,19 @@ impl Cuts {
         to: &wgpu::TextureView,
         uniform: &[u8],
     ) {
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cutlass-render cut params"),
-            size: PARAMS,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buffer, 0, uniform);
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cutlass-render cut"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(from),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(selection),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buffer.as_entire_binding(),
-                },
+        let buffer = self
+            .pool
+            .uniform(device, queue, "cutlass-render cut params", PARAMS, uniform);
+        let group = self.pool.group(
+            device,
+            "cutlass-render cut",
+            &self.layout,
+            &[
+                (0, Bind::View(from)),
+                (1, Bind::View(selection)),
+                (2, Bind::Buffer(&buffer)),
             ],
-        });
+        );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("cutlass-render cut"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {

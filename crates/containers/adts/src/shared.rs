@@ -215,7 +215,7 @@ macro_rules! shared_demux {
 shared_demux!(AdtsFile);
 shared_demux!(LatmFile);
 
-fn map_streams(streams: &[StreamInfo]) -> Result<Vec<Stream>, OpenError> {
+pub(crate) fn map_streams(streams: &[StreamInfo]) -> Result<Vec<Stream>, OpenError> {
     let mut shared = Vec::with_capacity(streams.len());
     for stream in streams {
         let Some(layout) = stream.params.layout.as_ref() else {
@@ -253,7 +253,7 @@ fn map_streams(streams: &[StreamInfo]) -> Result<Vec<Stream>, OpenError> {
     Ok(shared)
 }
 
-fn to_shared(packet: AccessUnit) -> Result<Packet, ReadError> {
+pub(crate) fn to_shared(packet: AccessUnit) -> Result<Packet, ReadError> {
     if packet.duration < 0 {
         return Err(ReadError::Source {
             message: "packet duration is negative".to_owned(),
@@ -287,7 +287,7 @@ fn open_source(error: cutlass_container::SourceError) -> OpenError {
     OpenError::from_header(error)
 }
 
-fn read_codec(error: CodecError) -> ReadError {
+pub(crate) fn read_codec(error: CodecError) -> ReadError {
     if matches!(error, CodecError::Cancelled) {
         ReadError::Cancelled
     } else {
@@ -297,6 +297,6 @@ fn read_codec(error: CodecError) -> ReadError {
     }
 }
 
-fn read_source(error: cutlass_container::SourceError) -> ReadError {
+pub(crate) fn read_source(error: cutlass_container::SourceError) -> ReadError {
     ReadError::from_packet(error)
 }

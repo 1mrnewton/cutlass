@@ -8,6 +8,7 @@ use std::fmt;
 
 use cutlass_session::Request;
 use cutlass_settings::Settings;
+use serde::{Deserialize, Serialize};
 
 /// A tool the model is allowed to call.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,7 +20,7 @@ pub struct ToolDefinition {
 }
 
 /// One call the model asked the harness to run.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     /// Caller-chosen id for this call.
     pub id: String,
@@ -29,8 +30,9 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
-/// One item in a model transcript.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One item in a model transcript. It is saved as JSON with a `role`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "role", rename_all = "snake_case")]
 pub enum Message {
     /// Text from the user.
     User {
@@ -55,6 +57,31 @@ pub enum Message {
         /// Whether the tool failed.
         is_error: bool,
     },
+}
+
+/// Shorten the tool results in `messages` that are longer than `limit`
+/// to their start and a note. A host does this to the turns before the one
+/// it is about to run: what a tool read then has been used, and sending
+/// every old listing and transcript again with each round fills the
+/// model's context.
+pub fn shorten_results(messages: &mut [Message], limit: usize) {
+    for message in messages {
+        let Message::Tool { content, .. } = message else {
+            continue;
+        };
+        if content.len() <= limit {
+            continue;
+        }
+        let mut end = limit;
+        while !content.is_char_boundary(end) {
+            end -= 1;
+        }
+        let whole = content.len();
+        content.truncate(end);
+        content.push_str(&format!(
+            "\n(shortened: {whole} characters when it was read; read it again if it is needed)"
+        ));
+    }
 }
 
 /// Messages and tool definitions sent to a model.
@@ -219,6 +246,32 @@ mod tests {
             calls: Vec::new(),
             proposed: Vec::new(),
         }
+    }
+
+    #[test]
+    fn old_tool_results_are_shortened_and_the_rest_is_left() {
+        let tool = |content: &str| Message::Tool {
+            call_id: "1".to_owned(),
+            name: "draft.query".to_owned(),
+            content: content.to_owned(),
+            is_error: false,
+        };
+        let mut messages = vec![
+            Message::User {
+                text: "y".repeat(500),
+            },
+            tool(&"é".repeat(300)),
+            tool("short"),
+        ];
+        super::shorten_results(&mut messages, 101);
+        assert!(matches!(&messages[0], Message::User { text } if text.len() == 500));
+        let Message::Tool { content, .. } = &messages[1] else {
+            panic!("not a tool result");
+        };
+        assert!(content.starts_with(&"é".repeat(50)), "{content}");
+        assert!(content.contains("(shortened: 600 characters"), "{content}");
+        assert!(content.len() < 250);
+        assert_eq!(messages[2], tool("short"));
     }
 
     #[test]

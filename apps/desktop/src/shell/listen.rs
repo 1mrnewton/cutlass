@@ -5,6 +5,9 @@
 
 use cutlass_agent::{ProjectSocket, ToolOutcome, Wake};
 
+/// How long a window waits for a project's holder to let it go.
+const YIELD_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 use super::Shell;
 
 impl Shell {
@@ -33,6 +36,52 @@ impl Shell {
             return;
         }
         self.socket = Some(socket);
+    }
+
+    /// The calls other hosts sent and that wait to be run, for a host that
+    /// runs them on its own tools instead of [`Self::serve_forwarded`].
+    pub fn take_forwarded(&mut self) -> Vec<cutlass_agent::Forwarded> {
+        self.socket
+            .as_ref()
+            .map(ProjectSocket::take)
+            .unwrap_or_default()
+    }
+
+    /// Whether the project at `path` is the one this shell holds and
+    /// listens on, which it has no one to ask for.
+    pub(super) fn holds(&self, path: &std::path::Path) -> bool {
+        let Some(socket) = &self.socket else {
+            return false;
+        };
+        cutlass_store::held_address(path).is_some_and(|(address, _)| address == socket.address())
+    }
+
+    /// Ask the host that holds the project at `path` to let it go, as a
+    /// window opening it does. True when it did: a `cutlass mcp` with no
+    /// window saves, lets go and sends its later calls to this window.
+    /// Another window answers that it knows no such call, and keeps it.
+    pub(super) fn ask_holder_to_yield(path: &std::path::Path) -> bool {
+        let Some((address, token)) = cutlass_store::held_address(path) else {
+            return false;
+        };
+        let Ok(mut holder) = cutlass_agent::Forward::connect(&address, &token) else {
+            return false;
+        };
+        if holder.set_answer_wait(YIELD_WAIT).is_err() {
+            return false;
+        }
+        let asked = holder.try_call(&cutlass_agent::ToolCall {
+            id: String::new(),
+            name: cutlass_agent::YIELD.to_owned(),
+            arguments: String::new(),
+        });
+        let yielded = asked.is_ok_and(|outcome| !outcome.is_error);
+        cutlass_logger::info!(
+            "asked the holder of {} to let it go: {}",
+            path.display(),
+            if yielded { "it did" } else { "it kept it" }
+        );
+        yielded
     }
 
     /// Run the calls other hosts sent. A call that needs the user's allow
@@ -125,6 +174,13 @@ mod tests {
         assert_eq!(segments.len(), 2, "the window holds the split");
         desktop.undo().unwrap();
         assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 1);
+
+        // The window has no one to ask for the project it holds itself:
+        // opening it again is refused at once, not after a wait.
+        assert!(desktop.holds(&temp.path));
+        let asked = std::time::Instant::now();
+        assert!(desktop.open_folder(&temp.path).is_err());
+        assert!(asked.elapsed() < std::time::Duration::from_secs(2));
 
         // Closing the project stops the socket and clears the address.
         desktop.close_project().unwrap();

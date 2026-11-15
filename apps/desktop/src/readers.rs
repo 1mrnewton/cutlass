@@ -11,16 +11,15 @@ use cutlass_isobmff::IsoBmffFile;
 use cutlass_still::{StillDemux, still_limits};
 
 /// The codecs [`crate::register_codecs`] installs, plus ISOBMFF, AVI, WAV,
-/// AIFF, CAF, FLAC, Ogg (Opus and Vorbis), Matroska and WebM, MPEG-TS, MP3,
-/// and stills.
+/// AIFF, CAF, FLAC, Ogg (Opus and Vorbis), Matroska and WebM, MPEG-TS, raw
+/// AAC, MP3, and stills.
 #[cfg(test)]
 pub(crate) fn installed_readers() -> ReaderFactory {
     readers_with(crate::register_codecs().0)
 }
 
 /// ISOBMFF, AVI, WAV, AIFF, CAF, FLAC, Ogg (Opus and Vorbis), Matroska and
-/// WebM, MPEG-TS, MP3,
-/// and stills, decoded with `decoders`.
+/// WebM, MPEG-TS, raw AAC, MP3, and stills, decoded with `decoders`.
 pub(crate) fn readers_with(decoders: DecodeFactory) -> ReaderFactory {
     let mut readers = ReaderFactory::new();
     readers.register_container(probe_isobmff, open_isobmff);
@@ -33,6 +32,8 @@ pub(crate) fn readers_with(decoders: DecodeFactory) -> ReaderFactory {
     readers.register_container(cutlass_mpegts::probe, open_ts);
     readers.register_container(cutlass_matroska::probe, open_matroska);
     readers.register_container(cutlass_still::probe, open_still);
+    // Before MP3: an ID3v2 tag alone also matches MP3.
+    readers.register_container(cutlass_adts::probe, open_adts);
     readers.register_container(probe_mp3, open_mp3);
     *readers.decoders_mut() = decoders;
     readers
@@ -75,6 +76,20 @@ fn probe_mp3(header: &[u8]) -> ProbeResult {
             examined: header.len(),
         },
     }
+}
+
+/// Raw AAC. The whole file is indexed on open so it can seek.
+fn open_adts(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let file = File::open(path).map_err(|error| OpenError::Source {
+        message: error.to_string(),
+    })?;
+    let length = file
+        .metadata()
+        .map_err(|error| OpenError::Source {
+            message: error.to_string(),
+        })?
+        .len();
+    Ok(Box::new(cutlass_adts::AdtsSeekFile::open(file, length)?))
 }
 
 fn open_mp3(path: &Path) -> Result<Box<dyn Demux>, OpenError> {

@@ -1693,6 +1693,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctrlc"
+version = "3.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0b1fab2ae45819af2d0731d60f2afe17227ebb1a1538a236da84c93e9a60162"
+dependencies = [
+ "dispatch2",
+ "nix",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "cubecl"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2384,10 +2395,12 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 name = "cutlass"
 version = "0.1.0"
 dependencies = [
+ "ctrlc",
  "cutlass-aac",
  "cutlass-ac3",
  "cutlass-adts",
  "cutlass-agent",
+ "cutlass-agent-cloud",
  "cutlass-aiff",
  "cutlass-alac",
  "cutlass-audio",
@@ -2502,6 +2515,16 @@ dependencies = [
  "cutlass-settings",
  "rhai",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "cutlass-agent-cloud"
+version = "0.1.0"
+dependencies = [
+ "cutlass-agent",
+ "cutlass-download",
+ "cutlass-settings",
  "serde_json",
 ]
 
@@ -2746,6 +2769,7 @@ version = "0.1.0"
 dependencies = [
  "cutlass-aac",
  "cutlass-ac3",
+ "cutlass-adts",
  "cutlass-aiff",
  "cutlass-alac",
  "cutlass-av1",
@@ -3680,6 +3704,20 @@ checksum = "31bcbef0d4263a63eb32c4834e5d711613035ce1333468e107d928923e21e6e2"
 dependencies = [
  "bytemuck",
  "emath",
+]
+
+[[package]]
+name = "editor-bench"
+version = "0.1.0"
+dependencies = [
+ "cutlass-codec",
+ "cutlass-eval",
+ "cutlass-export",
+ "cutlass-ffi",
+ "cutlass-model",
+ "cutlass-render",
+ "cutlass-session",
+ "serde_json",
 ]
 
 [[package]]

@@ -503,3 +503,56 @@ fn a_package_the_store_does_not_have_leaves_the_picture() {
         "{sources:?}"
     );
 }
+
+/// The orange clip made a compound, shrunk, with `canvas` behind it.
+fn compound_over(canvas: cutlass_model::MaterialCanvas) -> Draft {
+    let mut draft = apply(
+        scene(),
+        &[Request::CreateCompound {
+            segment_ids: vec![clip()],
+            segment_id: "nest".into(),
+            material_id: "inside".into(),
+        }],
+    );
+    let nest = draft
+        .tracks
+        .iter_mut()
+        .flat_map(|track| track.segments.iter_mut())
+        .find(|segment| segment.id.as_str() == "nest")
+        .expect("the compound");
+    nest.clip.scale = cutlass_model::Point::new(0.5, 0.6);
+    nest.clip.transform = cutlass_model::Point::new(-0.2, 0.1);
+    nest.extra_material_refs.push(canvas.id.clone());
+    draft.materials.canvases.push(canvas);
+    draft
+}
+
+#[test]
+fn a_compound_over_a_blurred_copy_of_itself_matches() {
+    let Some(renderer) = renderer() else {
+        return;
+    };
+    let plain = compound_over(cutlass_model::MaterialCanvas {
+        id: "canvas".into(),
+        kind: "canvas_color".to_owned(),
+        color: "#00000000".to_owned(),
+        ..cutlass_model::MaterialCanvas::default()
+    });
+    let blurred = compound_over(cutlass_model::MaterialCanvas {
+        id: "canvas".into(),
+        kind: "canvas_blur".to_owned(),
+        blur: 0.1,
+        ..cutlass_model::MaterialCanvas::default()
+    });
+    let before = both(&renderer, &plain, 40_000).1;
+    let (gpu, cpu, sources) = both(&renderer, &blurred, 40_000);
+    assert_ne!(cpu, before, "the blur changes the frame");
+    agree("compound blur", &gpu, &cpu);
+    // Drawn as a compound on the GPU, not a picture composed on the CPU.
+    assert!(
+        sources
+            .iter()
+            .any(|source| matches!(source, GpuSource::Nested(_))),
+        "{sources:?}"
+    );
+}

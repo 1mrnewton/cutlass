@@ -113,6 +113,9 @@ impl OutputQueue {
         if self.stream.is_null() || !self.running.swap(false, Ordering::AcqRel) {
             return;
         }
+        // SAFETY: `self.stream` is the non-null stream `open_stream` opened,
+        // and it stays open until Drop. `OutputQueue` holds a raw pointer, so
+        // it is neither Send nor Sync and only its owner's thread gets here.
         let _ = unsafe { AAudioStream_requestPause(self.stream) };
     }
 
@@ -126,6 +129,8 @@ impl OutputQueue {
         if self.running.load(Ordering::Acquire) {
             return Ok(());
         }
+        // SAFETY: as in `pause`: the stream is open until Drop, and only the
+        // owner's thread calls this.
         if unsafe { AAudioStream_requestStart(self.stream) } != OK {
             return Err(QueueError::NoDevice);
         }
@@ -154,10 +159,15 @@ impl Drop for OutputQueue {
 
 fn open_stream(user: *mut c_void) -> Result<*mut c_void, QueueError> {
     let mut builder = ptr::null_mut();
+    // SAFETY: `builder` is a local the call writes; the result and a null
+    // builder are checked below.
     let created = unsafe { AAudio_createStreamBuilder(&mut builder) };
     if created != OK || builder.is_null() {
         return Err(QueueError::NoDevice);
     }
+    // SAFETY: `builder` is the live builder created above. The callbacks
+    // match AAudio's signatures, and `user` points at the `Shared` that the
+    // caller's Arc keeps alive for as long as the stream can call back.
     unsafe {
         AAudioStreamBuilder_setDirection(builder, DIRECTION_OUTPUT);
         AAudioStreamBuilder_setSharingMode(builder, SHARING_SHARED);
@@ -168,7 +178,10 @@ fn open_stream(user: *mut c_void) -> Result<*mut c_void, QueueError> {
         AAudioStreamBuilder_setErrorCallback(builder, error_callback, user);
     }
     let mut stream = ptr::null_mut();
+    // SAFETY: `builder` is live and `stream` is a local the call writes.
     let opened = unsafe { AAudioStreamBuilder_openStream(builder, &mut stream) };
+    // SAFETY: `builder` is deleted once and not used after; an opened stream
+    // does not depend on its builder.
     unsafe {
         let _ = AAudioStreamBuilder_delete(builder);
     }
@@ -179,6 +192,7 @@ fn open_stream(user: *mut c_void) -> Result<*mut c_void, QueueError> {
         shutdown(stream);
         return Err(QueueError::NoDevice);
     }
+    // SAFETY: `stream` is the non-null stream opened above and not yet closed.
     if unsafe { AAudioStream_requestStart(stream) } != OK {
         shutdown(stream);
         return Err(QueueError::NoDevice);
@@ -187,6 +201,8 @@ fn open_stream(user: *mut c_void) -> Result<*mut c_void, QueueError> {
 }
 
 fn preview_format(stream: *mut c_void) -> bool {
+    // SAFETY: the one caller passes the non-null stream it just opened and
+    // has not closed.
     unsafe {
         AAudioStream_getSampleRate(stream) == 48_000
             && AAudioStream_getChannelCount(stream) == 2
@@ -201,6 +217,8 @@ fn shutdown(stream: *mut c_void) -> bool {
     if stream.is_null() {
         return true;
     }
+    // SAFETY: callers pass a stream that is open and not used again after
+    // this, so it is closed exactly once. `next` is a local the wait writes.
     unsafe {
         let _ = AAudioStream_requestStop(stream);
         let mut state = AAudioStream_getState(stream);
@@ -244,6 +262,10 @@ unsafe extern "C" fn data_callback(
     if user.is_null() || audio.is_null() || frames <= 0 {
         return CONTINUE;
     }
+    // SAFETY: `user` is `Arc::as_ptr` of the queue's `Shared`. The queue
+    // holds that Arc until the stream is stopped and closed, and Drop leaks
+    // a clone when the stop was not confirmed or a callback is inside, so
+    // the `Shared` outlives every callback. `Shared` is Sync.
     let shared = unsafe { &*user.cast::<Shared>() };
     shared.inside.fetch_add(1, Ordering::AcqRel);
     let result = write_frames(shared, audio, frames);
@@ -258,6 +280,10 @@ fn write_frames(shared: &Shared, audio: *mut c_void, frames: i32) -> i32 {
     let Some(bytes) = count.checked_mul(shared.slice.stride()) else {
         return STOP;
     };
+    // SAFETY: AAudio passes a non-null buffer of `frames` frames for this
+    // callback. `preview_format` checked the stream is stereo `f32`, 8 bytes
+    // a frame, and `layout` makes `stride` 8, so `bytes` is the buffer's
+    // length. `out` does not outlive the callback.
     let out = unsafe { std::slice::from_raw_parts_mut(audio.cast::<u8>(), bytes) };
     if shared.failed.load(Ordering::Acquire) {
         out.fill(0);
@@ -271,6 +297,8 @@ unsafe extern "C" fn error_callback(_stream: *mut c_void, user: *mut c_void, _er
     if user.is_null() {
         return;
     }
+    // SAFETY: as in `data_callback`: `user` is the queue's `Shared`, kept
+    // alive past the stream's last callback, and `Shared` is Sync.
     let shared = unsafe { &*user.cast::<Shared>() };
     shared.failed.store(true, Ordering::Release);
 }

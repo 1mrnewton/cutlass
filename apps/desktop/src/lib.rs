@@ -3,12 +3,14 @@
 use std::path::{Path, PathBuf};
 
 pub mod assistant;
+pub mod cloud;
 mod dialogs;
 mod face;
 mod gpu;
 pub mod icons;
 pub mod jobs;
 pub mod mcp;
+pub mod mcp_servers;
 mod menu;
 pub mod menubar;
 mod readers;

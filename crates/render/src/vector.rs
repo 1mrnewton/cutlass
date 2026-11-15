@@ -17,6 +17,7 @@ pub(crate) struct Vector {
     group: wgpu::RenderPipeline,
     data_layout: wgpu::BindGroupLayout,
     pictures_layout: wgpu::BindGroupLayout,
+    pool: std::sync::Arc<crate::pool::Pool>,
 }
 
 /// What one scene's draws share.
@@ -41,7 +42,7 @@ fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 }
 
 impl Vector {
-    pub(crate) fn new(device: &wgpu::Device) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, pool: std::sync::Arc<crate::pool::Pool>) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render vector"),
             source: wgpu::ShaderSource::Wgsl(WGSL.into()),
@@ -114,6 +115,7 @@ impl Vector {
             "fs_group",
         );
         Self {
+            pool,
             fill,
             group,
             data_layout,
@@ -203,7 +205,7 @@ impl Vector {
         let shared = Shared {
             data,
             instances,
-            empty: blur::scratch(device, (1, 1)),
+            empty: blur::scratch(&self.pool, device, (1, 1)),
             size: (scene.width, scene.height),
         };
         self.paint(device, encoder, &shared, &packed.items, target);
@@ -223,11 +225,11 @@ impl Vector {
         let mut pictures = Vec::new();
         for item in items {
             if let PackedItem::Group { items, matte, .. } = item {
-                let child = blur::scratch(device, shared.size);
+                let child = blur::scratch(&self.pool, device, shared.size);
                 self.paint(device, encoder, shared, items, &child);
                 let matte = match matte {
                     Some(matte) => {
-                        let view = blur::scratch(device, shared.size);
+                        let view = blur::scratch(&self.pool, device, shared.size);
                         self.paint(device, encoder, shared, matte, &view);
                         view
                     }

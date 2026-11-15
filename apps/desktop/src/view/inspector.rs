@@ -762,16 +762,38 @@ pub(super) fn placement(
         if let Some(shape) = &shape {
             super::shape::size_row(shell, ui, state, shape);
         }
-        let scale = (inspection.scale_x * 100.0).round();
-        let scaled = keyed_row(ui, scale_keys.as_ref(), playhead, &mut scale_step, |ui| {
-            slider(ui, state, "scale", "Scale", scale, 1.0..=500.0, |v| {
-                format!("{v:.0}%")
-            })
-        });
-        if let Some(value) = scaled {
-            send(shell, |shell| shell.set_scale(value / 100.0));
+        let percent = |v: f64| format!("{v:.0}%");
+        if inspection.uniform_scale {
+            let scale = (inspection.scale_x * 100.0).round();
+            let scaled = keyed_row(ui, scale_keys.as_ref(), playhead, &mut scale_step, |ui| {
+                slider(ui, state, "scale", "Scale", scale, 1.0..=500.0, percent)
+            });
+            if let Some(value) = scaled {
+                send(shell, |shell| shell.set_scale(value / 100.0));
+            }
+        } else {
+            // Off, the width and the height scale apart; a flip keeps its
+            // sign.
+            let (x, y) = (inspection.scale_x, inspection.scale_y);
+            let wide = (x.abs() * 100.0).round();
+            let tall = (y.abs() * 100.0).round();
+            let width = keyed_row(ui, scale_keys.as_ref(), playhead, &mut scale_step, |ui| {
+                slider(ui, state, "scale-x", "Scale X", wide, 1.0..=500.0, percent)
+            });
+            let height = keyed_row(ui, scale_keys.as_ref(), playhead, &mut scale_step, |ui| {
+                slider(ui, state, "scale-y", "Scale Y", tall, 1.0..=500.0, percent)
+            });
+            if width.is_some() || height.is_some() {
+                let sign = |axis: f64| if axis < 0.0 { -1.0 } else { 1.0 };
+                let new_x = width.map_or(x, |v| sign(x) * v / 100.0);
+                let new_y = height.map_or(y, |v| sign(y) * v / 100.0);
+                send(shell, |shell| shell.set_scale_axes(new_x, new_y));
+            }
         }
-        switch_row(ui, "Uniform scale", true, false).on_disabled_hover_text(LATER);
+        if switch_row(ui, "Uniform scale", inspection.uniform_scale, true).clicked() {
+            let on = !inspection.uniform_scale;
+            send(shell, |shell| shell.set_uniform_scale(on));
+        }
         // The prototype counts canvas pixels from the middle, with Y down.
         let (x, y) =
             cutlass_editor::canvas_pixels((inspection.transform_x, inspection.transform_y), canvas);
@@ -840,11 +862,28 @@ fn blend(
     inspection: &Inspection,
     mode: bool,
 ) {
-    let header = section(ui, state, "blend", "Blend", Some((true, false)), false);
+    let on = inspection.blend_on;
+    let header = section(ui, state, "blend", "Blend", Some((on, true)), false);
+    if header.toggled {
+        send(shell, |shell| shell.set_blend_on(!on));
+    }
     if !header.open {
         return;
     }
+    // Off, the opacity and mode are kept, dimmed, for when it is on again.
     body(ui, |ui| {
+        ui.add_enabled_ui(on, |ui| blend_rows(shell, ui, state, inspection, mode));
+    });
+}
+
+fn blend_rows(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+    mode: bool,
+) {
+    {
         if mode {
             let mut picked = None;
             label_row(ui, "Mode", |ui| {
@@ -869,7 +908,7 @@ fn blend(
             }
         }
         opacity_slider(shell, ui, state, inspection);
-    });
+    }
 }
 
 /// The steadying levels, as the stored level and the name shown.
@@ -1414,6 +1453,20 @@ pub(super) fn keyed_row<R>(
             *step = Some(pressed);
         }
         inner
+    })
+    .inner
+}
+
+/// `row` as wide as a keyed row's, so a setting that takes no keys lines
+/// up with those that do.
+pub(super) fn unkeyed_row<R>(ui: &mut Ui, row: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.horizontal(|ui| {
+        let width = (ui.available_width() - KEYS_WIDTH - ui.spacing().item_spacing.x).max(80.0);
+        ui.allocate_ui(Vec2::new(width, 30.0), |ui| {
+            ui.set_min_width(width);
+            ui.vertical(row).inner
+        })
+        .inner
     })
     .inner
 }
@@ -2701,46 +2754,7 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
         });
     }
     if header.open {
-        body(ui, |ui| {
-            if let Some(color) = color_row(
-                ui,
-                state,
-                "background-color",
-                "Color",
-                &look.background_color,
-            ) {
-                send(shell, |shell| {
-                    shell.set_text_background(&color, look.background_alpha, look.background_round)
-                });
-            }
-            let alpha = (look.background_alpha * 100.0).round();
-            let changed = setting_row(
-                shell,
-                ui,
-                KeyedSetting::TextStyle(Style::BackgroundAlpha),
-                true,
-                |ui| {
-                    slider(
-                        ui,
-                        state,
-                        "box-opacity",
-                        "Opacity",
-                        alpha,
-                        0.0..=100.0,
-                        |v| format!("{v:.0}%"),
-                    )
-                },
-            );
-            if let Some(value) = changed {
-                send(shell, |shell| {
-                    shell.set_text_background(
-                        &look.background_color,
-                        value / 100.0,
-                        look.background_round,
-                    )
-                });
-            }
-        });
+        body(ui, |ui| background_rows(shell, ui, state, look));
     }
 
     let on = !look.glow_color.is_empty();
@@ -2753,7 +2767,16 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
     }
     if header.open {
         body(ui, |ui| {
-            later_tiles(ui, &["Soft glow", "Halo"]);
+            // Rays first, then soft, as the reference has them.
+            let picked = style_tiles(
+                ui,
+                &["Rays", "Soft"],
+                usize::from(!look.glow_rays),
+                paint_glow_tile,
+            );
+            if let Some(index) = picked {
+                send(shell, |shell| shell.set_text_glow_rays(index == 0));
+            }
             if let Some(color) = color_row(ui, state, "glow-color", "Color", &look.glow_color) {
                 send(shell, |shell| {
                     shell.set_text_glow(&color, look.glow_strength, look.glow_range)
@@ -2785,8 +2808,28 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
                     shell.set_text_glow(&look.glow_color, look.glow_strength, value / 100.0)
                 });
             }
-            later_slider(ui, "Y-offset", 0.0, "0°");
-            later_slider(ui, "X-offset", 0.0, "0°");
+            if look.glow_rays {
+                let lean = [look.glow_lean_x, look.glow_lean_y];
+                let most = cutlass_model::MAX_GLOW_LEAN;
+                for (axis, key, label) in [(1, "glow-y", "Y-offset"), (0, "glow-x", "X-offset")] {
+                    let changed = unkeyed_row(ui, |ui| {
+                        slider(
+                            ui,
+                            state,
+                            key,
+                            label,
+                            lean[axis].round(),
+                            -most..=most,
+                            |v| format!("{v:.0}°"),
+                        )
+                    });
+                    if let Some(value) = changed {
+                        let mut lean = lean;
+                        lean[axis] = value.round().clamp(-most, most);
+                        send(shell, |shell| shell.set_text_glow_lean(lean[0], lean[1]));
+                    }
+                }
+            }
         });
     }
 
@@ -2815,7 +2858,27 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
                     )
                 });
             }
-            later_slider(ui, "Opacity", 90.0, "90%");
+            let opacity = (look.shadow_alpha * 100.0).round();
+            let changed = setting_row(
+                shell,
+                ui,
+                KeyedSetting::TextStyle(Style::ShadowAlpha),
+                true,
+                |ui| {
+                    slider(
+                        ui,
+                        state,
+                        "shadow-opacity",
+                        "Opacity",
+                        opacity,
+                        0.0..=100.0,
+                        |v| format!("{v:.0}%"),
+                    )
+                },
+            );
+            if let Some(value) = changed {
+                send(shell, |shell| shell.set_text_shadow_opacity(value / 100.0));
+            }
             let blur = (look.shadow_blur * 100.0).round();
             let changed = setting_row(
                 shell,
@@ -2890,6 +2953,285 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
             }
         });
     }
+
+    let on = look.curve_on;
+    let header = section(ui, state, "curve", "Curve", Some((on, true)), false);
+    if header.toggled {
+        // A first curve arches gently; a curve turned back on keeps its own.
+        let degrees = if look.curve == 0.0 {
+            cutlass_editor::CURVE_START
+        } else {
+            look.curve
+        };
+        send(shell, |shell| shell.set_text_curve(!on, degrees));
+    }
+    if header.open {
+        body(ui, |ui| {
+            let _ = style_tiles(ui, &["Arc"], 0, paint_curve_tile);
+            let most = cutlass_model::MAX_CURVE;
+            let degrees = look.curve.round();
+            let changed = setting_row(shell, ui, KeyedSetting::TextStyle(Style::Curve), on, |ui| {
+                slider(ui, state, "curve", "Strength", degrees, -most..=most, |v| {
+                    format!("{v:.0}°")
+                })
+            });
+            // Moving the strength bends the lines, on or not.
+            if let Some(value) = changed {
+                send(shell, |shell| {
+                    shell.set_text_curve(true, value.round().clamp(-most, most))
+                });
+            }
+        });
+    }
+}
+
+/// The Background section's body: its two shapes, color, opacity, round
+/// corners, room around the letters, and how far it sits from them. Room
+/// shows in hundredths of an em; an offset shows 50% where it sits on the
+/// letters, from 0% an em left or down to 100% an em right or up.
+fn background_rows(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: &TextLook) {
+    let percent = |v: f64| format!("{v:.0}%");
+    let layout = |lines: bool, pad: [f64; 2], offset: [f64; 2]| {
+        move |shell: &mut Shell| {
+            shell.set_text_background_box(lines, pad[0], pad[1], offset[0], offset[1])
+        }
+    };
+    let pad = [look.background_width, look.background_height];
+    let offset = [look.background_offset_x, look.background_offset_y];
+    let lines = look.background_lines;
+    let picked = style_tiles(
+        ui,
+        &["One box", "A box for each line"],
+        usize::from(lines),
+        paint_background_tile,
+    );
+    if let Some(index) = picked {
+        send(shell, layout(index == 1, pad, offset));
+    }
+    if let Some(color) = color_row(
+        ui,
+        state,
+        "background-color",
+        "Color",
+        &look.background_color,
+    ) {
+        send(shell, |shell| {
+            shell.set_text_background(&color, look.background_alpha, look.background_round)
+        });
+    }
+    let alpha = (look.background_alpha * 100.0).round();
+    let changed = setting_row(
+        shell,
+        ui,
+        KeyedSetting::TextStyle(Style::BackgroundAlpha),
+        true,
+        |ui| {
+            slider(
+                ui,
+                state,
+                "box-opacity",
+                "Opacity",
+                alpha,
+                0.0..=100.0,
+                percent,
+            )
+        },
+    );
+    if let Some(value) = changed {
+        send(shell, |shell| {
+            shell.set_text_background(&look.background_color, value / 100.0, look.background_round)
+        });
+    }
+    let round = (look.background_round * 100.0).round();
+    let changed = setting_row(
+        shell,
+        ui,
+        KeyedSetting::TextStyle(Style::BackgroundRound),
+        true,
+        |ui| {
+            slider(
+                ui,
+                state,
+                "box-round",
+                "Round corners",
+                round,
+                0.0..=100.0,
+                percent,
+            )
+        },
+    );
+    if let Some(value) = changed {
+        send(shell, |shell| {
+            shell.set_text_background(&look.background_color, look.background_alpha, value / 100.0)
+        });
+    }
+    // Height, then width, as the reference lists them.
+    for (axis, key, label, setting) in [
+        (1, "box-height", "Height", Style::BackgroundHeight),
+        (0, "box-width", "Width", Style::BackgroundWidth),
+    ] {
+        let shown = (pad[axis] * 100.0).round();
+        let changed = setting_row(shell, ui, KeyedSetting::TextStyle(setting), true, |ui| {
+            slider(ui, state, key, label, shown, 0.0..=100.0, percent)
+        });
+        if let Some(value) = changed {
+            let mut pad = pad;
+            pad[axis] = value / 100.0;
+            send(shell, layout(lines, pad, offset));
+        }
+    }
+    for (axis, key, label, setting) in [
+        (1, "box-y", "Y-offset", Style::BackgroundOffsetY),
+        (0, "box-x", "X-offset", Style::BackgroundOffsetX),
+    ] {
+        let shown = ((offset[axis] + 1.0) * 50.0).round();
+        let changed = setting_row(shell, ui, KeyedSetting::TextStyle(setting), true, |ui| {
+            slider(ui, state, key, label, shown, 0.0..=100.0, percent)
+        });
+        if let Some(value) = changed {
+            let mut offset = offset;
+            offset[axis] = (value / 50.0 - 1.0).clamp(-1.0, 1.0);
+            send(shell, layout(lines, pad, offset));
+        }
+    }
+}
+
+/// The side of a style tile.
+const STYLE_TILE: f32 = 56.0;
+
+/// A row of style tiles, each painted by `paint` with its index and named
+/// by `names` for its tooltip and a screen reader; `picked` is outlined.
+/// The tile clicked, when it is not the one picked.
+fn style_tiles(
+    ui: &mut Ui,
+    names: &[&str],
+    picked: usize,
+    paint: impl Fn(&egui::Painter, Rect, usize),
+) -> Option<usize> {
+    let mut clicked = None;
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        for (index, name) in names.iter().enumerate() {
+            let (rect, response) = ui.allocate_exact_size(Vec2::splat(STYLE_TILE), Sense::click());
+            let on = index == picked;
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), on, *name)
+            });
+            let fill = if response.hovered() {
+                PAGE_ON
+            } else {
+                Color32::from_rgb(0x30, 0x30, 0x30)
+            };
+            ui.painter().rect_filled(rect, CornerRadius::same(10), fill);
+            paint(ui.painter(), rect, index);
+            if on {
+                ui.painter().rect_stroke(
+                    rect.shrink(0.75),
+                    CornerRadius::same(10),
+                    Stroke::new(1.5, ACCENT),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            if response.on_hover_text(*name).clicked() && !on {
+                clicked = Some(index);
+            }
+        }
+    });
+    ui.add_space(8.0);
+    clicked
+}
+
+/// "ABC" over "AB" on a box: one box around both lines, or one for each.
+fn paint_background_tile(painter: &egui::Painter, rect: Rect, index: usize) {
+    let font = FontId::proportional(12.0);
+    let top = painter.layout_no_wrap("ABC".to_owned(), font.clone(), Color32::WHITE);
+    let low = painter.layout_no_wrap("AB".to_owned(), font, Color32::WHITE);
+    let left = rect.center().x - top.size().x / 2.0;
+    let first = egui::pos2(left, rect.center().y - top.size().y);
+    let second = egui::pos2(left, rect.center().y);
+    let plate = Color32::from_rgb(0x58, 0x58, 0x58);
+    let room = Vec2::new(3.0, 1.0);
+    let around = |at: egui::Pos2, size: Vec2| Rect::from_min_size(at, size).expand2(room);
+    if index == 0 {
+        let whole = around(first, top.size()).union(around(second, top.size()));
+        painter.rect_filled(whole, CornerRadius::same(3), plate);
+    } else {
+        painter.rect_filled(around(first, top.size()), CornerRadius::same(3), plate);
+        painter.rect_filled(around(second, low.size()), CornerRadius::same(3), plate);
+    }
+    painter.galley(first, top, Color32::WHITE);
+    painter.galley(second, low, Color32::WHITE);
+}
+
+/// "ABCDE" standing on an arch, each letter turned to follow it.
+fn paint_curve_tile(painter: &egui::Painter, rect: Rect, _: usize) {
+    let font = FontId::proportional(12.0);
+    let letters = ['A', 'B', 'C', 'D', 'E'];
+    let radius = 20.0_f32;
+    // The arch's middle sits a little below the tile's, its letters above.
+    let centre = rect.center() + Vec2::new(0.0, radius - 4.0);
+    for (at, letter) in letters.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let turn = (at as f32 - 2.0) * 0.38;
+        let foot = centre + Vec2::new(turn.sin(), -turn.cos()) * radius;
+        let galley = painter.layout_no_wrap(letter.to_string(), font.clone(), Color32::WHITE);
+        let size = galley.size();
+        // The letter turns about its foot's middle, where it meets the arch.
+        let corner = Vec2::new(-size.x / 2.0, -size.y);
+        let (sin, cos) = turn.sin_cos();
+        let turned = Vec2::new(
+            corner.x * cos - corner.y * sin,
+            corner.x * sin + corner.y * cos,
+        );
+        painter.add(
+            egui::epaint::TextShape::new(foot + turned, galley, Color32::WHITE).with_angle(turn),
+        );
+    }
+}
+
+/// "Aa" with rays of light streaming out of it, or a soft glow around it.
+fn paint_glow_tile(painter: &egui::Painter, rect: Rect, index: usize) {
+    let middle = rect.center();
+    let font = FontId::proportional(17.0);
+    let letters = painter.layout_no_wrap("Aa".to_owned(), font, Color32::WHITE);
+    let at = middle - letters.size() / 2.0;
+    if index == 0 {
+        // Rays of a few lengths, fading as they leave the letters.
+        for ray in 0..28_u16 {
+            let turn = f32::from(ray) / 28.0 * std::f32::consts::TAU;
+            let (sin, cos) = turn.sin_cos();
+            let long = 12.0 + f32::from(ray * 7 % 5) * 2.5;
+            let pieces = 5_u16;
+            for piece in 0..pieces {
+                let from = 7.0 + long * f32::from(piece) / f32::from(pieces);
+                let to = 7.0 + long * f32::from(piece + 1) / f32::from(pieces);
+                let fade = 1.0 - f32::from(piece) / f32::from(pieces);
+                let ink = Color32::from_white_alpha((70.0 * fade) as u8);
+                painter.line_segment(
+                    [
+                        middle + Vec2::new(cos * from * 1.3, sin * from),
+                        middle + Vec2::new(cos * to * 1.3, sin * to),
+                    ],
+                    Stroke::new(1.5, ink),
+                );
+            }
+        }
+    } else {
+        // A ring of faint copies stands in for the blur.
+        for (reach, alpha) in [(4.0_f32, 10_u8), (2.5, 18), (1.2, 30)] {
+            for step in 0..16_u8 {
+                let turn = f32::from(step) / 16.0 * std::f32::consts::TAU;
+                let shift = Vec2::new(turn.cos(), turn.sin()) * reach;
+                painter.galley_with_override_text_color(
+                    at + shift,
+                    letters.clone(),
+                    Color32::from_white_alpha(alpha),
+                );
+            }
+        }
+    }
+    painter.galley(at, letters, Color32::WHITE);
 }
 
 // Controls.

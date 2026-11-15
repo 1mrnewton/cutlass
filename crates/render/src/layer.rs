@@ -18,6 +18,7 @@ use cutlass_decode::Surface;
 use cutlass_effects::Step;
 use cutlass_gpu::{Affine, Placement, ToneCurve, YuvMatrix, YuvTone};
 
+use crate::pool::{Bind, Pool, TextureKey};
 use crate::{CANVAS_FORMAT, RenderError};
 
 /// Premultiplied RGBA bytes, row by row with no padding.
@@ -128,11 +129,14 @@ pub enum Layer<'a> {
         radius: u32,
     },
     /// Layers drawn onto their own `size` canvas first, then that canvas
-    /// placed like a picture, as a compound clip is.
+    /// placed like a picture, as a compound clip is. `blur`, when set, is
+    /// the `cover` placement and radius of a blurred copy of that canvas
+    /// drawn under it, as [`Layer::YuvOverBlur`] draws one.
     Nested {
         layers: Vec<Layer<'a>>,
         size: (u32, u32),
         placement: Placement,
+        blur: Option<(Placement, u32)>,
     },
     /// An effect over everything drawn before it in the same list.
     Effect(&'a [Step], Option<&'a cutlass_effects::CanvasMask>),
@@ -498,19 +502,22 @@ impl Pipelines {
         Self { pipeline, layout }
     }
 
-    /// Upload one layer's pixels and parameters.
-    /// Upload an RGBA picture.
+    /// Upload an RGBA picture into a texture from `pool`.
     pub(crate) fn upload_rgba(
+        pool: &Pool,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         rgba: &Rgba<'_>,
     ) -> Result<Uploaded, RenderError> {
         let view = upload(
+            pool,
             device,
             queue,
-            rgba.width,
-            rgba.height,
-            rgba.bytes,
+            Plane {
+                width: rgba.width,
+                height: rgba.height,
+                bytes: rgba.bytes,
+            },
             wgpu::TextureFormat::Rgba8Unorm,
             4,
         )?;
@@ -527,6 +534,7 @@ impl Pipelines {
     /// through `import`. A surface that does not import is copied out and
     /// uploaded.
     pub(crate) fn upload_planes(
+        pool: &Pool,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         planes: &Planes<'_>,
@@ -557,19 +565,11 @@ impl Pipelines {
                     actual: 0,
                 })?;
                 let packed = Planes::packed(width, height, &bytes)?.with_tone(planes.tone);
-                return Self::upload_planes(device, queue, &packed, None);
+                return Self::upload_planes(pool, device, queue, &packed, None);
             }
         };
         let plane = |plane: &Plane<'_>| {
-            upload(
-                device,
-                queue,
-                plane.width,
-                plane.height,
-                plane.bytes,
-                wgpu::TextureFormat::R8Unorm,
-                1,
-            )
+            upload(pool, device, queue, *plane, wgpu::TextureFormat::R8Unorm, 1)
         };
         Ok(Uploaded {
             views: [plane(&y)?, plane(&u)?, plane(&v)?],
@@ -583,6 +583,7 @@ impl Pipelines {
     /// Bind uploaded textures with a placement.
     pub(crate) fn bind(
         &self,
+        pool: &Pool,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         uploaded: &Uploaded,
@@ -659,36 +660,19 @@ impl Pipelines {
         for value in values.iter().flatten() {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cutlass-render params"),
-            size: PARAMS,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buffer, 0, &bytes);
+        let buffer = pool.uniform(device, queue, "cutlass-render params", PARAMS, &bytes);
         let [t0, t1, t2] = &uploaded.views;
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cutlass-render layer"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(t0),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(t1),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(t2),
-                },
+        let group = pool.group(
+            device,
+            "cutlass-render layer",
+            &self.layout,
+            &[
+                (0, Bind::Buffer(&buffer)),
+                (1, Bind::View(t0)),
+                (2, Bind::View(t1)),
+                (3, Bind::View(t2)),
             ],
-        });
+        );
         Bound { group }
     }
 
@@ -700,14 +684,18 @@ impl Pipelines {
 }
 
 fn upload(
+    pool: &Pool,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    width: u32,
-    height: u32,
-    bytes: &[u8],
+    pixels: Plane<'_>,
     format: wgpu::TextureFormat,
     texel: u32,
 ) -> Result<wgpu::TextureView, RenderError> {
+    let Plane {
+        width,
+        height,
+        bytes,
+    } = pixels;
     let limit = device.limits().max_texture_dimension_2d;
     if width == 0 || height == 0 || width > limit || height > limit {
         return Err(RenderError::Size { width, height });
@@ -724,16 +712,15 @@ fn upload(
         height,
         depth_or_array_layers: 1,
     };
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("cutlass-render layer"),
-        size,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
+    let (texture, view) = pool.texture(
+        device,
+        "cutlass-render layer",
+        TextureKey {
+            size: (width, height),
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        },
+    );
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture: &texture,
@@ -749,5 +736,5 @@ fn upload(
         },
         size,
     );
-    Ok(texture.create_view(&wgpu::TextureViewDescriptor::default()))
+    Ok(view)
 }

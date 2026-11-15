@@ -4,8 +4,8 @@
 //! the window's playhead.
 
 use cutlass_agent::{
-    ApprovalAction, Approver, DraftTools, Export, McpClient, McpError, McpTransport, Player,
-    Registry, SettingsTool, Speech, ToolCall, ToolOutcome, ToolSink, TrackAsk, Tracking,
+    ApprovalAction, Approver, DraftTools, Export, McpClient, Player, Registry, SettingsTool,
+    Speech, ToolCall, ToolOutcome, ToolSink, TrackAsk, Tracking,
 };
 use cutlass_codec::CodecId;
 use cutlass_model::Micros;
@@ -107,10 +107,23 @@ impl Tracking for Tracks {
     }
 }
 
-/// An export the window starts once the call is done.
-#[derive(Default)]
+/// An export the assistant asked for: its job id, the file, and what
+/// became of it once that is known.
+pub(super) struct AgentExport {
+    id: String,
+    path: std::path::PathBuf,
+    /// `None` while it is still writing.
+    done: Option<Result<String, String>>,
+}
+
+/// An export the window starts once the call is done, and the last one's
+/// state as it stood when the call began.
 struct Exports {
+    /// The id the next export gets.
+    next: String,
     path: Option<String>,
+    /// The last export's id and what a poll of it answers.
+    now: Option<(String, Result<Option<String>, String>)>,
 }
 
 impl Export for Exports {
@@ -119,22 +132,16 @@ impl Export for Exports {
             return Err("name the file to export to".to_owned());
         }
         self.path = Some(path.to_owned());
-        Ok("export".to_owned())
+        Ok(self.next.clone())
     }
-}
 
-struct NoServers;
-
-impl McpTransport for NoServers {
-    fn call(
-        &mut self,
-        server_name: &str,
-        _tool: &str,
-        _arguments: &str,
-    ) -> Result<String, McpError> {
-        Err(McpError::Transport(format!(
-            "the assistant does not call other servers yet, so {server_name} was not reached"
-        )))
+    fn poll(&mut self, job_id: &str) -> Result<Option<String>, String> {
+        match &self.now {
+            Some((id, state)) if id == job_id => state.clone(),
+            // The one this call asked for starts when the call is done.
+            _ if self.path.is_some() && job_id == self.next => Ok(None),
+            _ => Err(format!("no export {job_id}; export.start names its job")),
+        }
     }
 }
 
@@ -191,6 +198,49 @@ fn call_id(call: &ToolCall) -> String {
 }
 
 impl Shell {
+    /// The id the assistant's next export gets.
+    pub(crate) fn agent_export_next(&self) -> String {
+        format!("export-{}", self.agent_exports.saturating_add(1))
+    }
+
+    /// Note that the assistant's export to `path` began, as job `id`.
+    /// `done` is its result when it was written before this returned.
+    pub(crate) fn agent_export_began(
+        &mut self,
+        id: String,
+        path: std::path::PathBuf,
+        done: Option<Result<String, String>>,
+    ) {
+        self.agent_exports = self.agent_exports.saturating_add(1);
+        self.agent_export = Some(AgentExport { id, path, done });
+    }
+
+    /// The assistant's last export and what a poll of it answers: `None`
+    /// while it writes, the file once written, or why it failed.
+    pub(crate) fn agent_export_now(&mut self) -> Option<(String, Result<Option<String>, String>)> {
+        self.poll_job();
+        let writing = self.job().is_some_and(|job| job.label == "Export");
+        let written = self.exported.clone();
+        let notice = self.notice.clone();
+        let left_out = self.export_left_out().cloned();
+        let export = self.agent_export.as_mut()?;
+        if export.done.is_none() && !writing {
+            export.done = Some(if written.as_deref() == Some(export.path.as_path()) {
+                Ok(super::offscreen::wrote(&export.path, left_out.as_ref()))
+            } else if notice.is_empty() {
+                Err("the export stopped before it finished".to_owned())
+            } else {
+                Err(notice)
+            });
+        }
+        let state = match &export.done {
+            None => Ok(None),
+            Some(Ok(wrote)) => Ok(Some(wrote.clone())),
+            Some(Err(why)) => Err(why.clone()),
+        };
+        Some((export.id.clone(), state))
+    }
+
     /// Run one tool call from the assistant on the open project. `allowed`
     /// is what the user allowed for this call; a call that needs anything
     /// else does nothing and says what it wants.
@@ -223,17 +273,28 @@ impl Shell {
             .settings_file
             .clone()
             .unwrap_or_else(|| (Shell::settings_path(), 0));
-        let settings = SettingsTool::held(path, generation, self.settings.clone());
+        let settings = SettingsTool::held(path.clone(), generation, self.settings.clone());
         let jobs = std::mem::take(&mut self.agent_speech_jobs);
         let track_jobs = std::mem::take(&mut self.agent_track_jobs);
         let tracks = Tracks {
             now: self.agent_tracks_now(),
             started: None,
         };
-        let sandbox =
-            crate::sandbox::local_sandbox(crate::sandbox::this_program(), self.project_folder());
+        let exports = Exports {
+            next: self.agent_export_next(),
+            path: None,
+            now: self.agent_export_now(),
+        };
+        let mut servers = std::mem::take(&mut self.mcp_servers);
+        servers.configure(&self.settings.mcp_servers);
+        let sandbox = cutlass_agent::Switched::from_settings(
+            &self.settings,
+            crate::sandbox::local_sandbox(crate::sandbox::this_program(), self.project_folder()),
+        );
+        let mut draft = DraftTools::new(session);
+        draft.set_remembered(std::mem::take(&mut self.agent_request_ids));
         let mut registry = Registry::new(
-            DraftTools::new(session),
+            draft,
             settings,
             Moves::default(),
             Probe,
@@ -241,13 +302,13 @@ impl Shell {
             Bundled,
             (
                 Bundled,
-                Exports::default(),
+                exports,
                 sandbox,
                 Asked {
                     allowed,
                     wanted: None,
                 },
-                McpClient::new(NoServers),
+                McpClient::new(servers),
                 tracks,
             ),
         );
@@ -255,7 +316,10 @@ impl Shell {
         registry.set_track_jobs(track_jobs);
         let mut outcome = registry.run_tool(call);
         let wants = registry.approver.wanted.take();
+        let settings_now = registry.settings.get();
+        let servers = std::mem::take(registry.mcp.transport_mut());
         let session = registry.draft.session().clone();
+        let request_ids = registry.draft.take_remembered();
         let moves = std::mem::take(&mut registry.player);
         let exported = registry.export.path.take();
         let jobs = registry.take_speech_jobs();
@@ -268,6 +332,17 @@ impl Shell {
             },
         );
         drop(registry);
+        self.mcp_servers = servers;
+        self.agent_request_ids = request_ids;
+        if settings_now.generation != generation {
+            // The settings tool already wrote the file at this generation.
+            cutlass_logger::info!(
+                "settings changed by the assistant: {}",
+                super::changed_settings(&self.settings, &settings_now.settings).join(", ")
+            );
+            self.settings = settings_now.settings;
+            self.settings_file = Some((path, settings_now.generation));
+        }
         self.agent_speech_jobs = jobs;
         self.keep_track_ids(&tracks.now);
         if let Some((id, ask)) = tracks.started
@@ -295,22 +370,31 @@ impl Shell {
         }
         if let Some(path) = exported {
             let replace = call.arguments.trim_start().starts_with("replace");
-            let codec = if path.to_ascii_lowercase().ends_with(".png") {
-                CodecId::Png
-            } else {
-                CodecId::H264
-            };
+            let still = path.to_ascii_lowercase().ends_with(".png");
+            let codec = if still { CodecId::Png } else { CodecId::H264 };
+            let id = self.agent_export_next();
+            let file = std::path::PathBuf::from(&path);
             let started = self.export(ExportRequest {
-                path: path.into(),
+                path: file.clone(),
                 codec,
                 replace,
                 ..ExportRequest::default()
             });
-            if let Err(error) = started {
-                outcome = ToolOutcome {
-                    content: error.to_string(),
-                    is_error: true,
-                };
+            match started {
+                Err(error) => {
+                    outcome = ToolOutcome {
+                        content: error.to_string(),
+                        is_error: true,
+                    };
+                }
+                // A still is written by the time `export` returns.
+                Ok(()) if still => {
+                    let wrote = format!("wrote {path}");
+                    outcome.content = format!("job={id} finished: {wrote}");
+                    self.agent_export_began(id, file, Some(Ok(wrote)));
+                }
+                // A movie is a job: `export.poll` says when it lands.
+                Ok(()) => self.agent_export_began(id, file, None),
             }
         }
         AgentRun { outcome, wants }
@@ -445,6 +529,23 @@ mod tests {
             .run_agent_tool(&call("draft.apply", &split.to_string()), &[])
             .outcome;
         assert!(stale.is_error, "a stale revision is refused");
+        // A combo sent again with its request id is answered as the first
+        // time, and runs once.
+        let named = json!({
+            "expected_revision": desktop.session().unwrap().revision(),
+            "request_id": "once",
+            "requests": [{"op": "set_project_name", "name": "named once"}],
+        });
+        let first = desktop
+            .run_agent_tool(&call("draft.apply", &named.to_string()), &[])
+            .outcome;
+        assert!(!first.is_error, "{}", first.content);
+        let revision = desktop.session().unwrap().revision();
+        let again = desktop
+            .run_agent_tool(&call("draft.apply", &named.to_string()), &[])
+            .outcome;
+        assert_eq!(again, first);
+        assert_eq!(desktop.session().unwrap().revision(), revision);
 
         let seek = desktop
             .run_agent_tool(&call("player.seek", "1000000"), &[])
@@ -483,6 +584,113 @@ mod tests {
             .run_agent_tool(&call("settings.get", ""), &[])
             .outcome;
         assert!(!settings.is_error, "{}", settings.content);
+
+        // A settings change lands in the window's settings and its file.
+        let file = temp.path.join("settings-home").join("settings.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        desktop.keep_settings_file(file.clone(), 0);
+        let set = desktop
+            .run_agent_tool(
+                &call(
+                    "settings.set",
+                    r#"{"expected_generation":0,"changes":{"step_cap":40}}"#,
+                ),
+                &[],
+            )
+            .outcome;
+        assert!(!set.is_error, "{}", set.content);
+        assert_eq!(desktop.settings().step_cap, 40);
+        assert_eq!(cutlass_settings::load(&file).unwrap().settings.step_cap, 40);
+        // Turning on the cloud model waits for the user's allow.
+        let cloud = desktop.run_agent_tool(
+            &call(
+                "settings.set",
+                r#"{"expected_generation":1,"changes":{"model":{"cloud":true}}}"#,
+            ),
+            &[],
+        );
+        assert_eq!(
+            cloud.wants,
+            Some(cutlass_agent::ApprovalAction::EnableCloudModel)
+        );
+        assert!(!desktop.settings().model.cloud);
+    }
+
+    #[test]
+    fn the_assistant_follows_a_movie_export_to_its_end() {
+        let temp = Temp::new();
+        // A fifth of a second of blue, 64 by 32.
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 64;
+        draft.canvas_config.height = 32;
+        draft
+            .materials
+            .material_colors
+            .push(cutlass_model::MaterialColorConfig {
+                id: "color".into(),
+                is_color_clip: true,
+                solid_color: "0xFF336699".to_owned(),
+                ..cutlass_model::MaterialColorConfig::default()
+            });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("blue", "color", TimeRange::new(0, 200_000)));
+        draft.duration = Micros(200_000);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        // A still is written at once, and the start says so.
+        let still = temp.path.join("frame.png");
+        let frame = desktop
+            .run_agent_tool(
+                &call("export.start", &format!("new {}", still.display())),
+                &[],
+            )
+            .outcome;
+        assert_eq!(
+            frame.content,
+            format!("job=export-1 finished: wrote {}", still.display())
+        );
+        // A movie is a job: the start names it and a poll follows it.
+        let movie = temp.path.join("cut.mp4");
+        let started = desktop
+            .run_agent_tool(
+                &call("export.start", &format!("new {}", movie.display())),
+                &[],
+            )
+            .outcome;
+        assert_eq!(started.content, "job=export-2", "{}", started.content);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let polled = loop {
+            let polled = desktop
+                .run_agent_tool(&call("export.poll", "export-2"), &[])
+                .outcome;
+            if polled.content != "pending" || std::time::Instant::now() > until {
+                break polled;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(!polled.is_error, "{}", polled.content);
+        assert_eq!(
+            polled.content,
+            format!("finished: wrote {}", movie.display())
+        );
+        assert_eq!(&std::fs::read(&movie).unwrap()[4..8], b"ftyp");
+        // An older job is not this one, and an ending that is neither a
+        // still nor a movie is refused before anything is written.
+        let old = desktop
+            .run_agent_tool(&call("export.poll", "export-1"), &[])
+            .outcome;
+        assert!(old.is_error, "{}", old.content);
+        let photo = temp.path.join("frame.jpg");
+        let refused = desktop
+            .run_agent_tool(
+                &call("export.start", &format!("new {}", photo.display())),
+                &[],
+            )
+            .outcome;
+        assert!(refused.is_error && refused.content.contains(".png"));
+        assert!(!photo.exists());
     }
 
     #[test]

@@ -15,9 +15,19 @@ use cutlass_model::{Draft, MaterialEffect, MaterialRef, Segment};
 use crate::catalog::BlendMode;
 
 /// The blend a clip mixes with, from its `mix_mode` extra material. A clip
-/// with none, or with source over, blends normally and gives `None`.
+/// with none, or with source over, blends normally and gives `None`, and
+/// so does one whose Blend switch is off.
 #[must_use]
 pub fn segment_blend(draft: &Draft, segment: &Segment) -> Option<BlendMode> {
+    if segment.blend_off {
+        return None;
+    }
+    stored_blend(draft, segment)
+}
+
+/// The blend mode a clip keeps, whether or not its Blend switch is on.
+#[must_use]
+pub fn stored_blend(draft: &Draft, segment: &Segment) -> Option<BlendMode> {
     segment
         .extra_material_refs
         .iter()

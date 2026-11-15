@@ -7,6 +7,7 @@
 //! with the radius. Sums of whole byte values stay exact in `f32`.
 
 use crate::CANVAS_FORMAT;
+use crate::pool::Bind;
 
 const SHADER: &str = r"
 struct Blur {
@@ -62,10 +63,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 pub(crate) struct Blurs {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
+    pool: std::sync::Arc<crate::pool::Pool>,
 }
 
 impl Blurs {
-    pub(crate) fn new(device: &wgpu::Device) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, pool: std::sync::Arc<crate::pool::Pool>) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render blur"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -118,7 +120,11 @@ impl Blurs {
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         });
-        Self { pipeline, layout }
+        Self {
+            pipeline,
+            layout,
+            pool,
+        }
     }
 
     /// Blur `first` in place by `radius`, rows then columns, through
@@ -145,31 +151,19 @@ impl Blurs {
             for value in [radius, u32::from(rows), size.0, size.1] {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("cutlass-render blur params"),
-                size: 16,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            queue.write_buffer(&buffer, 0, &bytes);
-            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("cutlass-render blur"),
-                layout: &self.layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(source),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(target),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: buffer.as_entire_binding(),
-                    },
+            let buffer = self
+                .pool
+                .uniform(device, queue, "cutlass-render blur params", 16, &bytes);
+            let group = self.pool.group(
+                device,
+                "cutlass-render blur",
+                &self.layout,
+                &[
+                    (0, Bind::View(source)),
+                    (1, Bind::View(target)),
+                    (2, Bind::Buffer(&buffer)),
                 ],
-            });
+            );
             let lines = if rows { size.1 } else { size.0 };
             let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("cutlass-render blur"),
@@ -186,23 +180,21 @@ impl Blurs {
 
 /// A canvas-sized texture the layer pipeline draws into and the blur reads
 /// and writes.
-pub(crate) fn scratch(device: &wgpu::Device, size: (u32, u32)) -> wgpu::TextureView {
-    device
-        .create_texture(&wgpu::TextureDescriptor {
-            label: Some("cutlass-render blur scratch"),
-            size: wgpu::Extent3d {
-                width: size.0,
-                height: size.1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
+pub(crate) fn scratch(
+    pool: &crate::pool::Pool,
+    device: &wgpu::Device,
+    size: (u32, u32),
+) -> wgpu::TextureView {
+    pool.texture(
+        device,
+        "cutlass-render blur scratch",
+        crate::pool::TextureKey {
+            size,
             format: CANVAS_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::STORAGE_BINDING,
-            view_formats: &[],
-        })
-        .create_view(&wgpu::TextureViewDescriptor::default())
+        },
+    )
+    .1
 }

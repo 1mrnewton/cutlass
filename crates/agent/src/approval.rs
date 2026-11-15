@@ -32,6 +32,20 @@ pub enum ApprovalAction {
         /// The skill folder that would be added.
         path: String,
     },
+    /// Add a program the assistant did not have, to run as a local MCP
+    /// server. The user's own Settings window adds one without asking.
+    RunLocalMcp {
+        /// The server's name.
+        server: String,
+        /// The program and its arguments, as it would be started.
+        command: String,
+    },
+    /// Send the cloud model's requests, and that service's key, somewhere
+    /// else.
+    ChangeCloudAddress {
+        /// The service the requests would go to.
+        address: String,
+    },
 }
 
 impl ApprovalAction {
@@ -57,17 +71,36 @@ impl ApprovalAction {
             Self::AddExternalSkill { path } => {
                 format!("Add the skills in {path}? The assistant will follow what they say.")
             }
+            Self::RunLocalMcp { server, command } => format!(
+                "Let the assistant add the server {server}, which runs this program on your \
+                 computer with your access?\n{command}"
+            ),
+            Self::ChangeCloudAddress { address } => format!(
+                "Send the cloud model's requests to {address}? Your messages and the key \
+                 kept for that service go there."
+            ),
         }
     }
 
+    /// What the action is, to finish "refused: ... needs the user's allow".
     fn name(&self) -> &'static str {
         match self {
-            Self::ExportReplace { .. } => "export",
-            Self::EnableCloudModel => "cloud model",
-            Self::EnableOnlineSandbox => "online sandbox",
-            Self::EnableRemoteMcp { .. } => "remote mcp",
-            Self::DeleteMedia { .. } => "delete media",
-            Self::AddExternalSkill { .. } => "external skill",
+            Self::ExportReplace { .. } => "replacing a file",
+            Self::EnableCloudModel => "turning on the cloud model",
+            Self::EnableOnlineSandbox => "turning on the online sandbox",
+            Self::EnableRemoteMcp { .. } => "enabling a remote MCP server or changing its address",
+            Self::DeleteMedia { .. } => "deleting a media file",
+            Self::AddExternalSkill { .. } => "adding an external skill folder",
+            Self::RunLocalMcp { .. } => "adding a program to run as a local MCP server",
+            Self::ChangeCloudAddress { .. } => "changing where the cloud model's requests go",
+        }
+    }
+
+    /// What the caller can do instead, when there is something.
+    fn instead(&self) -> &'static str {
+        match self {
+            Self::ExportReplace { .. } => "; export to a new file name instead",
+            _ => "",
         }
     }
 }
@@ -87,8 +120,12 @@ pub struct ApprovalError {
 
 impl fmt::Display for ApprovalError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = self.action.name();
-        write!(formatter, "refused {name}")
+        write!(
+            formatter,
+            "refused: {} needs the user's allow, which was not given{}",
+            self.action.name(),
+            self.action.instead()
+        )
     }
 }
 
@@ -204,7 +241,7 @@ mod tests {
             ApprovalAction::EnableRemoteMcp {
                 server: "studio".to_owned(),
             },
-            "remote mcp",
+            "remote MCP server",
         );
     }
 
@@ -214,7 +251,7 @@ mod tests {
             ApprovalAction::DeleteMedia {
                 path: "clip.mov".to_owned(),
             },
-            "delete media",
+            "deleting a media file",
         );
     }
 
@@ -226,6 +263,33 @@ mod tests {
             },
             "external skill",
         );
+    }
+
+    #[test]
+    fn a_new_program_or_cloud_address_refusal_does_not_apply() {
+        let program = refuse(
+            ApprovalAction::RunLocalMcp {
+                server: "tools".to_owned(),
+                command: "/bin/sh -c x".to_owned(),
+            },
+            "program",
+        );
+        assert!(program.action.prompt().contains("/bin/sh -c x"));
+        let moved = refuse(
+            ApprovalAction::ChangeCloudAddress {
+                address: "https://example.com/v1".to_owned(),
+            },
+            "cloud model",
+        );
+        assert!(moved.action.prompt().contains("https://example.com/v1"));
+        // A replace that is refused says what to do instead.
+        let replace = refuse(
+            ApprovalAction::ExportReplace {
+                path: "out.mp4".to_owned(),
+            },
+            "new file name",
+        );
+        assert!(replace.to_string().starts_with("refused: replacing a file"));
     }
 
     #[test]

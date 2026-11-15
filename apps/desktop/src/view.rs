@@ -191,6 +191,12 @@ pub struct ViewState {
     recording: Option<&'static str>,
     /// Each server's arguments as typed, by row, while the window is open.
     server_args: std::collections::HashMap<usize, String>,
+    /// The assistant's notes as typed, while the settings window is open.
+    notes: Option<String>,
+    /// The cloud key being typed, loaded from its own file when the tab opens.
+    cloud_key: Option<String>,
+    /// The models the local runner listed when asked, or why it did not.
+    local_models: Option<Result<Vec<String>, String>>,
     /// A settings change waiting for the user to allow what it turns on.
     approval: Option<Approval>,
     /// The Linkage settings dialog is open, with the kinds as ticked so far.
@@ -321,6 +327,9 @@ impl Default for ViewState {
             settings_tab: SettingsTab::General,
             recording: None,
             server_args: std::collections::HashMap::new(),
+            notes: None,
+            cloud_key: None,
+            local_models: None,
             approval: None,
             linkage_kinds: None,
             export: ExportRequest::default(),
@@ -437,6 +446,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         view.dialogs.studio_clip(parent);
     }
     show_imported(shell, view);
+    view.assistant.follow(shell.assistant_chat_file());
     if view.assistant.poll(shell) {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(50));
@@ -1668,12 +1678,33 @@ fn settings_window(
                         );
                     }
                     SettingsTab::Assistant => {
-                        assistant_settings(
+                        let notes = view.notes.get_or_insert_with(|| shell.assistant_notes());
+                        let provider = settings.model.cloud_provider.clone();
+                        let key = view.cloud_key.get_or_insert_with(|| {
+                            crate::cloud::key(&crate::cloud::keys_file(), &provider)
+                        });
+                        let (notes_changed, key_changed) = assistant_settings(
                             ui,
                             &mut settings,
                             &mut view.server_args,
+                            notes,
+                            key,
+                            &mut view.local_models,
                             &mut add_folder,
                         );
+                        if key_changed
+                            && let Err(error) =
+                                crate::cloud::set_key(&crate::cloud::keys_file(), &provider, key)
+                        {
+                            cutlass_logger::warn!("{error}");
+                        }
+                        if settings.model.cloud_provider != provider {
+                            // The other provider's key, if one was kept.
+                            view.cloud_key = None;
+                        }
+                        if notes_changed && let Err(error) = shell.set_assistant_notes(notes) {
+                            cutlass_logger::warn!("assistant notes: {error}");
+                        }
                     }
                     SettingsTab::Shortcuts => {
                         ui.add_space(8.0);
@@ -1734,6 +1765,9 @@ fn settings_window(
         view.settings_open = false;
         view.recording = None;
         view.server_args.clear();
+        view.notes = None;
+        view.cloud_key = None;
+        view.local_models = None;
     }
 }
 
@@ -1895,8 +1929,11 @@ fn assistant_settings(
     ui: &mut Ui,
     settings: &mut cutlass_settings::Settings,
     server_args: &mut std::collections::HashMap<usize, String>,
+    notes: &mut String,
+    key: &mut String,
+    local_models: &mut Option<Result<Vec<String>, String>>,
     add_folder: &mut bool,
-) {
+) -> (bool, bool) {
     use cutlass_settings::McpServer;
     settings_heading(ui, "Model");
     ui.add(ui::Check::new(&mut settings.model.local, "Local model"));
@@ -1912,7 +1949,42 @@ fn assistant_settings(
                 .hint(cutlass_settings::DEFAULT_LOCAL_NAME)
                 .width(180.0)
                 .show(ui);
+            if ui
+                .add(ui::Button::new("Find models").text_size(12.0))
+                .clicked()
+            {
+                *local_models = Some(find_local_models(&settings.model.local_url));
+            }
         });
+        match local_models {
+            Some(Ok(models)) if models.is_empty() => {
+                ui.label(
+                    RichText::new(
+                        "The server has no models yet. With Ollama, run: ollama pull qwen3",
+                    )
+                    .size(11.0)
+                    .color(tokens::FAINT),
+                );
+            }
+            Some(Ok(models)) => {
+                ui.horizontal_wrapped(|ui| {
+                    for model in models.iter() {
+                        let chosen = settings.model.local_name == *model;
+                        if ui.add(ui::Choice::new(chosen, model)).clicked() {
+                            settings.model.local_name.clone_from(model);
+                        }
+                    }
+                });
+            }
+            Some(Err(error)) => {
+                ui.label(
+                    RichText::new(error.as_str())
+                        .size(11.0)
+                        .color(tokens::FAINT),
+                );
+            }
+            None => {}
+        }
         ui.label(
             RichText::new("A chat server on this computer, such as Ollama or llama.cpp.")
                 .size(11.0)
@@ -1923,18 +1995,52 @@ fn assistant_settings(
         &mut settings.model.cloud,
         "Cloud model (sends messages off this computer)",
     ));
+    let key_changed = cloud_settings(ui, &mut settings.model, key);
     ui.add(ui::Check::new(
         &mut settings.sandbox.local,
         "Run code on this computer",
     ));
-    ui.add(ui::Check::new(
-        &mut settings.sandbox.online,
-        "Run code online",
-    ));
+    // No Cutlass service runs code yet, so the switch cannot be turned on
+    // here; one already on can still be turned off.
+    ui.add_enabled(
+        settings.sandbox.online,
+        ui::Check::new(&mut settings.sandbox.online, "Run code online"),
+    );
+    ui.label(
+        RichText::new(
+            "Running code online needs a Cutlass account, which is not available yet. Scripts run on this computer.",
+        )
+        .size(11.0)
+        .color(tokens::FAINT),
+    );
     ui.add(ui::Check::new(
         &mut settings.memory,
         "Remember across conversations",
     ));
+    let mut notes_changed = false;
+    if settings.memory {
+        notes_changed = ui::Field::multiline(notes, 4)
+            .hint(
+                "Notes the assistant reads at the start of every chat, such as how you like titles",
+            )
+            .width(340.0)
+            .show(ui)
+            .response
+            .changed();
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(
+                    "Kept on this computer, with each project's chat. Sent to a model only as part of the chat.",
+                )
+                .size(11.0)
+                .color(tokens::FAINT),
+            );
+            if !notes.is_empty() && ui.add(ui::Button::new("Forget").text_size(12.0)).clicked() {
+                notes.clear();
+                notes_changed = true;
+            }
+        });
+    }
     choice_row(ui, "Steps a turn", |ui| {
         ui.add(egui::DragValue::new(&mut settings.step_cap).range(1..=1000));
     });
@@ -2009,6 +2115,90 @@ fn assistant_settings(
         settings.skill_folders.remove(index);
     }
     *add_folder = ui.add(ui::Button::new("Add folder…")).clicked();
+    (notes_changed, key_changed)
+}
+
+/// The cloud model's service, name and key, while it is on. True when the
+/// key changed.
+fn cloud_settings(
+    ui: &mut Ui,
+    model: &mut cutlass_settings::ModelChoice,
+    key: &mut String,
+) -> bool {
+    use cutlass_settings::ModelChoice;
+    if !model.cloud {
+        return false;
+    }
+    choice_row(ui, "Service", |ui| {
+        ui::Segmented::show(ui, |ui| {
+            for (provider, name) in [
+                (ModelChoice::CLAUDE, "Claude"),
+                (ModelChoice::OPENAI, "Chat completions"),
+            ] {
+                if ui
+                    .add(ui::Choice::new(model.cloud_provider == provider, name))
+                    .clicked()
+                    && model.cloud_provider != provider
+                {
+                    provider.clone_into(&mut model.cloud_provider);
+                    if provider == ModelChoice::CLAUDE {
+                        cutlass_settings::DEFAULT_CLOUD_NAME.clone_into(&mut model.cloud_name);
+                    } else {
+                        model.cloud_name.clear();
+                    }
+                }
+            }
+        });
+    });
+    if model.cloud_provider == ModelChoice::OPENAI {
+        choice_row(ui, "Address", |ui| {
+            ui::Field::new(&mut model.cloud_url)
+                .hint(cutlass_settings::OPENAI_CHAT_URL)
+                .width(300.0)
+                .show(ui);
+        });
+    }
+    choice_row(ui, "Model", |ui| {
+        ui::Field::new(&mut model.cloud_name)
+            .hint(if model.cloud_provider == ModelChoice::CLAUDE {
+                cutlass_settings::DEFAULT_CLOUD_NAME
+            } else {
+                "gpt-5"
+            })
+            .width(180.0)
+            .show(ui);
+    });
+    let mut changed = false;
+    choice_row(ui, "Key", |ui| {
+        changed = ui::Field::new(key)
+            .hint("Paste your API key")
+            .name("API key")
+            .secret()
+            .width(240.0)
+            .show(ui)
+            .response
+            .changed();
+        if !key.is_empty() && ui.add(ui::Button::new("Forget").text_size(12.0)).clicked() {
+            key.clear();
+            changed = true;
+        }
+    });
+    ui.label(
+        RichText::new(
+            "Your own key, kept in its own file on this computer and sent only to this service. It is not a setting and the assistant never sees it.",
+        )
+        .size(11.0)
+        .color(tokens::FAINT),
+    );
+    changed
+}
+
+/// The models the chat server at `url` lists, asked with a short wait.
+fn find_local_models(url: &str) -> Result<Vec<String>, String> {
+    cutlass_agent::LoopbackHttp::new(url)
+        .map(|server| server.with_timeout(std::time::Duration::from_secs(3)))
+        .and_then(|server| server.models())
+        .map_err(|error| error.to_string())
 }
 
 fn settings_heading(ui: &mut Ui, text: &str) {
@@ -15540,7 +15730,8 @@ mod tests {
             "sticker-art",
             cutlass_model::TimeRange::new(0, 2_000_000),
         ));
-        draft.tracks.push(stickers);
+        // File order is the row order, top first: the sticker row above main.
+        draft.tracks.insert(0, stickers);
         cutlass_store::Folder::new(draft).save(&temp).unwrap();
         let (decoders, encoders) = crate::register_codecs();
         let mut shell = Shell::new(decoders, encoders, Settings::default());
@@ -15663,7 +15854,8 @@ mod tests {
         over.clip.scale = cutlass_model::Point::new(0.5, 0.5);
         over.uniform_scale.value = 0.5;
         overlay.segments.push(over);
-        draft.tracks.push(overlay);
+        // File order is the row order, top first: the overlay above main.
+        draft.tracks.insert(0, overlay);
         cutlass_store::Folder::new(draft).save(&temp).unwrap();
         let (decoders, encoders) = crate::register_codecs();
         let mut shell = Shell::new(decoders, encoders, Settings::default());
@@ -19405,6 +19597,141 @@ mod tests {
             section: None,
         });
         picture(&mut harness, "caption-effects");
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// The title's Basic page with its placement, blend and style sections
+    /// open: each switch turns its part on and off, and each section
+    /// paints. With `CUTLASS_RENDER_DIR` set the pictures are kept there.
+    #[test]
+    fn the_title_style_sections_switch_and_paint() {
+        use cutlass_model::SegmentId;
+        use egui_kittest::kittest::Queryable;
+        let temp = std::env::temp_dir().join(format!("cutlass-text-parts-{}", std::process::id()));
+        let mut shell = text_inspector_shell(&temp);
+        shell.select(Some(SegmentId::new("words")));
+        shell.set_text_face("sample.ttf").unwrap();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(1280.0, 3200.0))
+            .wgpu()
+            .build_ui_state(
+                |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+                (shell, {
+                    let mut view = ViewState::new();
+                    view.library_shelf = Shelf::Stickers;
+                    view
+                }),
+            );
+        harness.run_steps(4);
+        for section in [
+            "position",
+            "blend",
+            "stroke",
+            "background",
+            "glow",
+            "shadow",
+            "curve",
+        ] {
+            harness
+                .state_mut()
+                .1
+                .inspector
+                .open
+                .insert(section.to_owned());
+        }
+        harness.run_steps(4);
+        let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
+        let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
+            harness.run_steps(8);
+            let image = harness.render().expect("the renderer draws the window");
+            if let Some(dir) = &keep {
+                std::fs::create_dir_all(dir).unwrap();
+                image.save(dir.join(format!("{name}.png"))).unwrap();
+            }
+        };
+        let inspection = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>| {
+            harness.state().0.inspection().unwrap()
+        };
+        picture(&mut harness, "title-parts-uniform");
+        // Uniform scale turns off: the width and the height have a slider
+        // each, and on again one Scale drives both.
+        assert!(inspection(&harness).uniform_scale);
+        assert_eq!(harness.query_all_by_label("Scale X").count(), 0);
+        harness.get_by_label("Uniform scale").click();
+        harness.run_steps(4);
+        assert!(!inspection(&harness).uniform_scale);
+        assert!(harness.query_all_by_label("Scale X").count() > 0);
+        assert!(harness.query_all_by_label("Scale Y").count() > 0);
+        picture(&mut harness, "title-parts-stretch");
+        harness.get_by_label("Uniform scale").click();
+        harness.run_steps(4);
+        assert!(inspection(&harness).uniform_scale);
+        // The Blend switch unticks and ticks again, keeping the opacity.
+        harness.state_mut().0.set_opacity(0.5).unwrap();
+        assert!(inspection(&harness).blend_on);
+        // A section's switch is the check box with its name.
+        let switch = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
+            harness
+                .get_by_role_and_label(egui::accesskit::Role::CheckBox, name)
+                .click();
+        };
+        switch(&harness, "Blend");
+        harness.run_steps(4);
+        assert!(!inspection(&harness).blend_on);
+        assert_eq!(inspection(&harness).opacity, 0.5);
+        picture(&mut harness, "title-parts-blend-off");
+        switch(&harness, "Blend");
+        harness.run_steps(4);
+        assert!(inspection(&harness).blend_on);
+        // Each style part's switch turns it on and off.
+        let look = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>| {
+            harness.state().0.text_look().unwrap()
+        };
+        for part in ["Stroke", "Background", "Glow", "Shadow"] {
+            switch(&harness, part);
+            harness.run_steps(4);
+        }
+        let on = look(&harness);
+        assert!(!on.outline_color.is_empty() && !on.background_color.is_empty());
+        assert!(!on.glow_color.is_empty() && !on.shadow_color.is_empty());
+        assert_eq!(on.shadow_alpha, 0.9);
+        // The background takes a box for each line from its tile.
+        harness.get_by_label("A box for each line").click();
+        harness.run_steps(4);
+        assert!(look(&harness).background_lines);
+        harness.get_by_label("One box").click();
+        harness.run_steps(4);
+        assert!(!look(&harness).background_lines);
+        // The glow streams as rays from its tile, and only rays show their
+        // offsets.
+        let offsets = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>| {
+            harness.query_all_by_label("X-offset").count()
+        };
+        let soft = offsets(&harness);
+        harness.get_by_label("Rays").click();
+        harness.run_steps(4);
+        assert!(look(&harness).glow_rays);
+        assert!(offsets(&harness) > soft);
+        // The curve switches on at a gentle arch.
+        switch(&harness, "Curve");
+        harness.run_steps(4);
+        assert!(look(&harness).curve_on);
+        assert_eq!(look(&harness).curve, cutlass_editor::CURVE_START);
+        picture(&mut harness, "title-parts-styled");
+        switch(&harness, "Curve");
+        harness.run_steps(4);
+        assert!(!look(&harness).curve_on);
+        harness.get_by_label("Soft").click();
+        harness.run_steps(4);
+        assert!(!look(&harness).glow_rays);
+        for part in ["Stroke", "Background", "Glow", "Shadow"] {
+            switch(&harness, part);
+            harness.run_steps(4);
+        }
+        let off = look(&harness);
+        assert!(off.outline_color.is_empty() && off.background_color.is_empty());
+        assert!(off.glow_color.is_empty() && off.shadow_color.is_empty());
         drop(harness);
         let _ = std::fs::remove_dir_all(&temp);
     }

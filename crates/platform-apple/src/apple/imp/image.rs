@@ -192,12 +192,15 @@ fn still_packet(data: Vec<u8>) -> Encoded {
 pub fn decode_bytes(bytes: &[u8]) -> Result<Vec<StillImage>, CodecError> {
     packet_ok(bytes.len())?;
     let data = cf::data(bytes)?;
+    // SAFETY: `data` is a live `CFData` the source retains; null options are
+    // allowed. The returned source is owned (Create rule) and goes to `Cf`.
     let source =
         Cf::from_owned(unsafe { sys::CGImageSourceCreateWithData(data.as_ptr(), ptr::null()) })
             .ok_or(CodecError::Malformed {
                 at_bit: 0,
                 what: "imageio",
             })?;
+    // SAFETY: `source` is a live `CGImageSource`.
     let count = unsafe { sys::CGImageSourceGetCount(source.as_ptr()) };
     if count == 0 {
         return Err(CodecError::Malformed {
@@ -207,6 +210,8 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<Vec<StillImage>, CodecError> {
     }
     let mut images = Vec::with_capacity(count);
     for index in 0..count {
+        // SAFETY: `source` is a live `CGImageSource` and `index` is below its
+        // count. The returned image is owned (Create rule) and goes to `Cf`.
         let image = Cf::from_owned(unsafe {
             sys::CGImageSourceCreateImageAtIndex(source.as_ptr(), index, ptr::null())
         })
@@ -233,18 +238,26 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<Vec<StillImage>, CodecError> {
 }
 
 fn orientation_at(source: &Cf, index: usize) -> Orientation {
+    // SAFETY: `source` is a live `CGImageSource` and `index` is below its
+    // count. The returned dictionary is owned (Copy rule) and goes to `Cf`.
     let Some(properties) = Cf::from_owned(unsafe {
         sys::CGImageSourceCopyPropertiesAtIndex(source.as_ptr(), index, ptr::null())
     }) else {
         return Orientation::upright();
     };
+    // SAFETY: `properties` is a live `CFDictionary` and the key is ImageIO's
+    // constant string. The value is borrowed from `properties`, which outlives
+    // its one use below. ImageIO documents the orientation as a `CFNumber`,
+    // which `read_i32` needs.
     let value =
         unsafe { sys::CFDictionaryGetValue(properties.as_ptr(), sys::kCGImagePropertyOrientation) };
     Orientation::from_tag(u32::try_from(cf::read_i32(value).unwrap_or(1)).unwrap_or(1))
 }
 
 fn draw_rgba(image: &Cf) -> Result<(u32, u32, Vec<u8>), CodecError> {
+    // SAFETY: callers pass a live `CGImage`.
     let width = unsafe { sys::CGImageGetWidth(image.as_ptr()) };
+    // SAFETY: as above.
     let height = unsafe { sys::CGImageGetHeight(image.as_ptr()) };
     let width_u = u32::try_from(width).map_err(|_| CodecError::Limit {
         what: "picture edge",
@@ -260,11 +273,18 @@ fn draw_rgba(image: &Cf) -> Result<(u32, u32, Vec<u8>), CodecError> {
         what: "picture bytes",
     })?;
     let mut bytes = vec![0u8; len];
+    // SAFETY: the call takes no arguments and returns an owned color space.
     let space = Cf::from_owned(unsafe { sys::CGColorSpaceCreateDeviceRGB() }).ok_or(
         CodecError::Unsupported {
             what: "imageio color",
         },
     )?;
+    // SAFETY: `bytes` holds `row * height` bytes, with `row` = 4 * `width`, which
+    // is what an 8-bit RGBA context of this size and stride writes. The
+    // context only writes `bytes` while drawing below; it does not free
+    // caller memory, and it is released when this function returns, before
+    // the caller can touch the moved `Vec` (moving it does not move the heap
+    // buffer).
     let context = Cf::from_owned(unsafe {
         sys::CGBitmapContextCreate(
             bytes.as_mut_ptr().cast(),
@@ -286,6 +306,8 @@ fn draw_rgba(image: &Cf) -> Result<(u32, u32, Vec<u8>), CodecError> {
             height: height as f64,
         },
     };
+    // SAFETY: `context` is the live bitmap context over `bytes`, which is still
+    // borrowed here, and `image` is a live `CGImage`.
     unsafe { sys::CGContextDrawImage(context.as_mut(), rect, image.as_ptr()) };
     Ok((width_u, height_u, bytes))
 }
@@ -318,6 +340,9 @@ pub fn encode_bytes(codec: CodecId, frames: &[(u32, u32, Vec<u8>)]) -> Result<Ve
     let uti = uti(codec)?;
     let kind = cf::string(uti)?;
     let dest_data = cf::data_mut()?;
+    // SAFETY: `dest_data` is a live `CFMutableData` and `kind` a live
+    // `CFString`; the destination retains both. The returned destination is
+    // owned (Create rule) and goes to `Cf`.
     let destination = Cf::from_owned(unsafe {
         sys::CGImageDestinationCreateWithData(
             dest_data.as_mut(),
@@ -329,6 +354,7 @@ pub fn encode_bytes(codec: CodecId, frames: &[(u32, u32, Vec<u8>)]) -> Result<Ve
     .ok_or(CodecError::Unsupported {
         what: "imageio encode",
     })?;
+    // SAFETY: the call takes no arguments and returns an owned color space.
     let space = Cf::from_owned(unsafe { sys::CGColorSpaceCreateDeviceRGB() }).ok_or(
         CodecError::Unsupported {
             what: "imageio color",
@@ -342,6 +368,7 @@ pub fn encode_bytes(codec: CodecId, frames: &[(u32, u32, Vec<u8>)]) -> Result<Ve
     let mut keys = Vec::new();
     let mut values = Vec::new();
     if let Some(quality) = &quality {
+        // SAFETY: ImageIO's constant key, set at load and never written.
         keys.push(unsafe { sys::kCGImageDestinationLossyCompressionQuality });
         values.push(quality.as_ptr());
     }
@@ -364,6 +391,11 @@ pub fn encode_bytes(codec: CodecId, frames: &[(u32, u32, Vec<u8>)]) -> Result<Ve
                 what: "picture length",
             });
         }
+        // SAFETY: `rgba` is `width * height * 4` bytes (checked above) and is
+        // borrowed from `frames`, which outlives this function. The provider
+        // has no release callback, so it borrows `rgba` without copying. It
+        // is held by `provider`, by `image`, and by `destination` through the
+        // image, and all three are released before this function returns.
         let provider = Cf::from_owned(unsafe {
             sys::CGDataProviderCreateWithData(
                 ptr::null_mut(),
@@ -376,6 +408,9 @@ pub fn encode_bytes(codec: CodecId, frames: &[(u32, u32, Vec<u8>)]) -> Result<Ve
             what: "imageio provider",
         })?;
         let row = usize::try_from(*width).unwrap_or(0).saturating_mul(4);
+        // SAFETY: the provider holds exactly `row * height` bytes for an 8-bit,
+        // 32-bit-pixel RGBA image of this size; `space` and `provider` are
+        // live and retained by the image; a null decode array is allowed.
         let image = Cf::from_owned(unsafe {
             sys::CGImageCreate(
                 usize::try_from(*width).unwrap_or(0),
@@ -394,6 +429,8 @@ pub fn encode_bytes(codec: CodecId, frames: &[(u32, u32, Vec<u8>)]) -> Result<Ve
         .ok_or(CodecError::Unsupported {
             what: "imageio image",
         })?;
+        // SAFETY: `destination` and `image` are live and the destination
+        // retains the image. `properties` is a live dictionary or null.
         unsafe {
             sys::CGImageDestinationAddImage(
                 destination.as_mut(),
@@ -402,6 +439,8 @@ pub fn encode_bytes(codec: CodecId, frames: &[(u32, u32, Vec<u8>)]) -> Result<Ve
             );
         }
     }
+    // SAFETY: `destination` is live and finalized once. Every image it holds
+    // still reads from `frames`, which is borrowed for this whole function.
     let wrote = unsafe { sys::CGImageDestinationFinalize(destination.as_mut()) };
     if !wrote {
         return Err(CodecError::Malformed {

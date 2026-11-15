@@ -5,6 +5,7 @@
 //! `cutlass_effects`'s WGSL `transition`, the same arithmetic the CPU path
 //! runs; a blur transition gets both pictures already blurred.
 
+use crate::pool::Bind;
 use cutlass_effects::{TRANSITION_WGSL, TransitionKind};
 
 use crate::CANVAS_FORMAT;
@@ -42,10 +43,11 @@ const PARAMS: u64 = 16;
 pub(crate) struct Transition {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
+    pool: std::sync::Arc<crate::pool::Pool>,
 }
 
 impl Transition {
-    pub(crate) fn new(device: &wgpu::Device) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, pool: std::sync::Arc<crate::pool::Pool>) -> Self {
         let source = format!("{SHADER}\n{TRANSITION_WGSL}");
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render transition"),
@@ -108,7 +110,11 @@ impl Transition {
             multiview_mask: None,
             cache: None,
         });
-        Self { pipeline, layout }
+        Self {
+            pipeline,
+            layout,
+            pool,
+        }
     }
 
     /// Write moment `t` of `kind` from `outgoing` to `incoming`, both
@@ -129,31 +135,23 @@ impl Transition {
         bytes[4..8].copy_from_slice(&t.to_bits().to_le_bytes());
         bytes[8..12].copy_from_slice(&size.0.to_le_bytes());
         bytes[12..].copy_from_slice(&size.1.to_le_bytes());
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cutlass-render transition params"),
-            size: PARAMS,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buffer, 0, &bytes);
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cutlass-render transition"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(outgoing),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(incoming),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buffer.as_entire_binding(),
-                },
+        let buffer = self.pool.uniform(
+            device,
+            queue,
+            "cutlass-render transition params",
+            PARAMS,
+            &bytes,
+        );
+        let group = self.pool.group(
+            device,
+            "cutlass-render transition",
+            &self.layout,
+            &[
+                (0, Bind::View(outgoing)),
+                (1, Bind::View(incoming)),
+                (2, Bind::Buffer(&buffer)),
             ],
-        });
+        );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("cutlass-render transition"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {

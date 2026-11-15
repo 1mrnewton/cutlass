@@ -9,6 +9,7 @@
 //! texture: the tone, a box blur across and down, the mix with the blur,
 //! then vignette and grain on the way back to bytes.
 
+use crate::pool::Bind;
 use cutlass_effects::{COLOUR_UNIFORM_BYTES, COLOUR_WGSL, Colour, ColourPass, ColourStage};
 
 use crate::CANVAS_FORMAT;
@@ -127,6 +128,7 @@ pub(crate) struct Colours {
     finish: wgpu::RenderPipeline,
     /// Bound in place of a LUT by every pass but the LUT's own.
     no_lut: wgpu::TextureView,
+    pool: std::sync::Arc<crate::pool::Pool>,
 }
 
 /// Where one pass reads and writes, and with what.
@@ -140,7 +142,7 @@ struct Draw<'a> {
 }
 
 impl Colours {
-    pub(crate) fn new(device: &wgpu::Device) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, pool: std::sync::Arc<crate::pool::Pool>) -> Self {
         let source = format!("{SHADER}\n{COLOUR_WGSL}");
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render colour"),
@@ -208,6 +210,7 @@ impl Colours {
         };
         let no_lut = lut_texture(device, 1).create_view(&wgpu::TextureViewDescriptor::default());
         Self {
+            pool,
             chroma: pipeline("fs_chroma", CANVAS_FORMAT),
             grade: pipeline("fs_grade", CANVAS_FORMAT),
             adjust: pipeline("fs_adjust", CANVAS_FORMAT),
@@ -242,7 +245,7 @@ impl Colours {
         for pass in colour.passes() {
             let to = spare
                 .take()
-                .unwrap_or_else(|| scratch(device, size, CANVAS_FORMAT));
+                .unwrap_or_else(|| scratch(&self.pool, device, size, CANVAS_FORMAT));
             let frame = [size.0, size.1, seed, 0];
             let uniform = pass.uniform(frame);
             match pass.stage {
@@ -324,9 +327,9 @@ impl Colours {
                 },
             );
         };
-        let mut base = scratch(device, size, FLOAT_FORMAT);
-        let mut line = scratch(device, size, FLOAT_FORMAT);
-        let soft = scratch(device, size, FLOAT_FORMAT);
+        let mut base = scratch(&self.pool, device, size, FLOAT_FORMAT);
+        let mut line = scratch(&self.pool, device, size, FLOAT_FORMAT);
+        let soft = scratch(&self.pool, device, size, FLOAT_FORMAT);
         step(&self.tone, from, from, &base, 0);
         for (amount, pipeline, radius) in [
             (
@@ -354,35 +357,24 @@ impl Colours {
         encoder: &mut wgpu::CommandEncoder,
         draw: &Draw<'_>,
     ) {
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cutlass-render colour params"),
-            size: COLOUR_UNIFORM_BYTES as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buffer, 0, draw.uniform);
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cutlass-render colour"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(draw.from),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(draw.other),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(draw.lut),
-                },
+        let buffer = self.pool.uniform(
+            device,
+            queue,
+            "cutlass-render colour params",
+            COLOUR_UNIFORM_BYTES as u64,
+            draw.uniform,
+        );
+        let group = self.pool.group(
+            device,
+            "cutlass-render colour",
+            &self.layout,
+            &[
+                (0, Bind::View(draw.from)),
+                (1, Bind::View(draw.other)),
+                (2, Bind::Buffer(&buffer)),
+                (3, Bind::View(draw.lut)),
             ],
-        });
+        );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("cutlass-render colour"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -406,26 +398,21 @@ impl Colours {
 }
 
 fn scratch(
+    pool: &crate::pool::Pool,
     device: &wgpu::Device,
     size: (u32, u32),
     format: wgpu::TextureFormat,
 ) -> wgpu::TextureView {
-    device
-        .create_texture(&wgpu::TextureDescriptor {
-            label: Some("cutlass-render colour scratch"),
-            size: wgpu::Extent3d {
-                width: size.0,
-                height: size.1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
+    pool.texture(
+        device,
+        "cutlass-render colour scratch",
+        crate::pool::TextureKey {
+            size,
             format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        })
-        .create_view(&wgpu::TextureViewDescriptor::default())
+        },
+    )
+    .1
 }
 
 fn lut_texture(device: &wgpu::Device, side: u32) -> wgpu::Texture {

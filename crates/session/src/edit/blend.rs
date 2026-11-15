@@ -75,12 +75,28 @@ pub fn set_blend(
     Ok(())
 }
 
+/// Turn the clip's Blend switch on or off. Off, it is drawn solid and mixed
+/// normally; its opacity and mode stay for when it is on again.
+pub fn set_blend_on(draft: &mut Draft, segment_id: &SegmentId, on: bool) -> Result<(), EditError> {
+    let (track_index, segment_index) = super::locate(draft, segment_id)?;
+    let track = &draft.tracks[track_index];
+    ensure_unlocked(track.attribute)?;
+    if matches!(
+        track.kind,
+        TrackType::Audio | TrackType::Effect | TrackType::Filter
+    ) {
+        return Err(EditError::EffectTarget);
+    }
+    draft.tracks[track_index].segments[segment_index].blend_off = !on;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use cutlass_effects::{BlendMode, segment_blend};
-    use cutlass_model::{Draft, MaterialId, Segment, SegmentId, TimeRange, TrackAttribute};
+    use cutlass_effects::{BlendMode, segment_blend, stored_blend};
+    use cutlass_model::{Draft, MaterialId, Micros, Segment, SegmentId, TimeRange, TrackAttribute};
 
-    use super::set_blend;
+    use super::{set_blend, set_blend_on};
     use crate::edit::EditError;
 
     fn draft() -> Draft {
@@ -109,6 +125,40 @@ mod tests {
         assert_eq!(blend(&draft), None);
         assert!(draft.materials.effects.is_empty());
         assert!(draft.tracks[0].segments[0].extra_material_refs.is_empty());
+    }
+
+    #[test]
+    fn the_switch_off_draws_solid_and_normal_and_keeps_both() {
+        let mut draft = draft();
+        let a = SegmentId::new("a");
+        set_blend(&mut draft, &a, &MaterialId::new("mix"), "blend-screen").unwrap();
+        draft.tracks[0].segments[0].clip.alpha = 0.4;
+        set_blend_on(&mut draft, &a, false).unwrap();
+        let segment = &draft.tracks[0].segments[0];
+        assert_eq!(blend(&draft), None);
+        assert_eq!(stored_blend(&draft, segment), Some(BlendMode::Screen));
+        assert_eq!(segment.clip.alpha, 0.4);
+        let (clip, _) = cutlass_model::animated_at(&draft, segment, Micros(0)).unwrap();
+        assert_eq!(clip.alpha, 1.0);
+        // The switch is the app's own key, written only while it is off.
+        let json = serde_json::to_value(segment).unwrap();
+        assert_eq!(json["cutlass_blend_off"], true);
+        set_blend_on(&mut draft, &a, true).unwrap();
+        let segment = &draft.tracks[0].segments[0];
+        assert_eq!(blend(&draft), Some(BlendMode::Screen));
+        let (clip, _) = cutlass_model::animated_at(&draft, segment, Micros(0)).unwrap();
+        assert_eq!(clip.alpha, 0.4);
+        let json = serde_json::to_value(segment).unwrap();
+        assert!(json.get("cutlass_blend_off").is_none());
+        draft.tracks[0].attribute = TrackAttribute(TrackAttribute::LOCK);
+        assert_eq!(
+            set_blend_on(&mut draft, &a, false),
+            Err(EditError::LockedTrack)
+        );
+        assert_eq!(
+            set_blend_on(&mut draft, &SegmentId::new("z"), false),
+            Err(EditError::MissingSegment)
+        );
     }
 
     #[test]

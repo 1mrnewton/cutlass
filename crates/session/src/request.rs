@@ -228,8 +228,21 @@ pub enum Request {
         x: f64,
         y: f64,
     },
-    /// Store the picture scale on the uniform value and on both axes.
+    /// Store the picture scale on the uniform value and on the width. With
+    /// uniform scale on the height takes it too; with it off the height
+    /// keeps its share of the width.
     SetScale { segment_id: SegmentId, scale: f64 },
+    /// Turn uniform scale on, one value driving both axes, or off, each
+    /// axis on its own. The picture keeps its size either way.
+    SetUniformScale { segment_id: SegmentId, on: bool },
+    /// Store the picture's width and height scales, each on its own, as
+    /// they are drawn with uniform scale off; a negative one flips that
+    /// axis. The switch stays as it was.
+    SetScaleAxes {
+        segment_id: SegmentId,
+        x: f64,
+        y: f64,
+    },
     /// Store the picture opacity. `1` is solid and `0` is clear.
     SetOpacity { segment_id: SegmentId, opacity: f64 },
     /// Set the segment gain. This is not mute, solo, or a fade.
@@ -306,12 +319,14 @@ pub enum Request {
     SetTextSize {
         segment_id: SegmentId,
         size: f64,
+        #[serde(default)]
         face: String,
     },
     /// Store the text color. An empty string is white. An empty face path is filled.
     SetTextColor {
         segment_id: SegmentId,
         color: String,
+        #[serde(default)]
         face: String,
     },
     /// Store left, center, or right across, or top, middle, or bottom down a
@@ -320,6 +335,7 @@ pub enum Request {
     SetTextAlign {
         segment_id: SegmentId,
         alignment: i32,
+        #[serde(default)]
         face: String,
         line_width: f64,
     },
@@ -330,6 +346,7 @@ pub enum Request {
         bold: bool,
         italic: bool,
         underline: bool,
+        #[serde(default)]
         face: String,
     },
     /// Turn bold, italic or underline on or off for the letters from
@@ -343,24 +360,28 @@ pub enum Request {
         bold: Option<bool>,
         italic: Option<bool>,
         underline: Option<bool>,
+        #[serde(default)]
         face: String,
     },
     /// Store extra space between letters, as a fraction of the text size.
     SetLetterSpacing {
         segment_id: SegmentId,
         spacing: f64,
+        #[serde(default)]
         face: String,
     },
     /// Store extra space between lines, as a fraction of the text size.
     SetLineSpacing {
         segment_id: SegmentId,
         spacing: f64,
+        #[serde(default)]
         face: String,
     },
     /// Store the wrap width in pixels. Zero keeps the run on one line.
     SetLineWidth {
         segment_id: SegmentId,
         width: f64,
+        #[serde(default)]
         face: String,
     },
     /// Store the face file name on a text clip.
@@ -386,15 +407,32 @@ pub enum Request {
         angle: f64,
         blur: f64,
     },
+    /// Make the text's shadow `opacity` from 0 to 1, on or off.
+    SetTextShadowOpacity { segment_id: SegmentId, opacity: f64 },
+    /// Bend the text's lines along an arc `degrees` wide, from -360 to
+    /// 360: above zero they arch up, below zero they dip. Off keeps the
+    /// degrees and draws the lines straight.
+    SetTextCurve {
+        segment_id: SegmentId,
+        on: bool,
+        degrees: f64,
+    },
     /// Make the letters glow in `color`, `strength` and `range` from 0 to 1.
     /// The glow is a bloom effect the clip points at; `glow_id` names a new
     /// one when the clip has none of its own. An empty color takes it off.
+    /// `rays` streams it out of the letters as rays of light, leaning
+    /// `lean` degrees right and up, at most 45 either way; either left out
+    /// keeps what the glow has.
     SetTextGlow {
         segment_id: SegmentId,
         glow_id: MaterialId,
         color: String,
         strength: f64,
         range: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rays: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lean: Option<[f64; 2]>,
     },
     /// Fill a box behind the letters in `color` at `alpha`, its corners
     /// rounded by `round` from 0 to 1. An empty color takes the box off.
@@ -403,6 +441,18 @@ pub enum Request {
         color: String,
         alpha: f64,
         round: f64,
+    },
+    /// Lay the title's background out: a box around each line with
+    /// `lines`, or one around them all; `width` and `height` ems of room
+    /// around the letters, each from 0 to 1; moved `offset_x` ems right and
+    /// `offset_y` up, each from -1 to 1. Kept with the background on or off.
+    SetTextBackgroundBox {
+        segment_id: SegmentId,
+        lines: bool,
+        width: f64,
+        height: f64,
+        offset_x: f64,
+        offset_y: f64,
     },
     /// Shape the title's background as the [`cutlass_model::Bubble`] keyed
     /// `bubble`, or a plain box again when it is empty. A title with no
@@ -533,6 +583,9 @@ pub enum Request {
         material_id: MaterialId,
         mode: String,
     },
+    /// Turn the clip's Blend switch on or off. Off, it is drawn solid and
+    /// mixed normally, its opacity and mode kept for when it is on again.
+    SetBlendOn { segment_id: SegmentId, on: bool },
     /// Put an adjustment layer from `start` for `duration` on `track_id`,
     /// an adjust row made when it is missing. Its sliders, set with
     /// [`Request::SetAdjust`], run over every picture below it.
@@ -891,6 +944,34 @@ mod tests {
         );
         assert!(serde_json::from_str::<Request>(r#"{"op":"fly"}"#).is_err());
         assert!(serde_json::from_str::<Request>(r#"{"op":"move","segment_id":"a"}"#).is_err());
+    }
+
+    #[test]
+    fn a_text_style_reads_without_a_face_and_new_text_does_not() {
+        let color: Request =
+            serde_json::from_str(r##"{"op":"set_text_color","segment_id":"t","color":"#ffcc00"}"##)
+                .unwrap();
+        assert_eq!(
+            color,
+            Request::SetTextColor {
+                segment_id: SegmentId::new("t"),
+                color: "#ffcc00".to_owned(),
+                face: String::new(),
+            }
+        );
+        for style in [
+            r#"{"op":"set_text_size","segment_id":"t","size":48.0}"#,
+            r#"{"op":"set_text_align","segment_id":"t","alignment":1,"line_width":800.0}"#,
+            r#"{"op":"set_text_pattern","segment_id":"t","bold":true,"italic":false,"underline":false}"#,
+            r#"{"op":"set_letter_spacing","segment_id":"t","spacing":0.1}"#,
+            r#"{"op":"set_line_spacing","segment_id":"t","spacing":0.1}"#,
+            r#"{"op":"set_line_width","segment_id":"t","width":800.0}"#,
+        ] {
+            assert!(serde_json::from_str::<Request>(style).is_ok(), "{style}");
+        }
+        // New text draws nothing without a face, so it must name one.
+        let text = r#"{"op":"add_text","track_id":"t","segment_id":"s","material_id":"m","start":0,"duration":1,"content":"Hi"}"#;
+        assert!(serde_json::from_str::<Request>(text).is_err());
     }
 
     #[test]

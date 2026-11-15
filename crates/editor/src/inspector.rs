@@ -69,18 +69,36 @@ pub struct TextLook {
     pub shadow_blur: f64,
     /// Degrees. A title with no shadow reads the angle a first one takes.
     pub shadow_angle: f64,
+    /// 0 to 1.
+    pub shadow_alpha: f64,
     pub background_color: String,
     /// 0 to 1.
     pub background_alpha: f64,
     /// 0 square to 1 round.
     pub background_round: f64,
+    /// A box around each line rather than one around them all.
+    pub background_lines: bool,
+    /// The room around the letters, across and down, in ems.
+    pub background_width: f64,
+    pub background_height: f64,
+    /// How far the box sits from the letters, right and up, in ems.
+    pub background_offset_x: f64,
+    pub background_offset_y: f64,
     pub glow_color: String,
     /// 0 to 1.
     pub glow_strength: f64,
     /// 0 to 1.
     pub glow_range: f64,
+    /// Rays of light rather than a soft glow.
+    pub glow_rays: bool,
+    /// Where the rays lean, right and up, in degrees.
+    pub glow_lean_x: f64,
+    pub glow_lean_y: f64,
     /// The bubble's key; empty for a plain box or none.
     pub bubble: String,
+    /// The lines bend along an arc `curve` degrees wide.
+    pub curve_on: bool,
+    pub curve: f64,
 }
 
 /// What a part takes when its color is first picked and its numbers are
@@ -92,6 +110,12 @@ pub const BACKGROUND_ALPHA_START: f64 = 1.0;
 pub const BACKGROUND_ROUND_START: f64 = 0.3;
 pub const GLOW_STRENGTH_START: f64 = 0.6;
 pub const GLOW_RANGE_START: f64 = 0.5;
+/// What rays take when picked: fainter and shorter than a soft glow, as
+/// they reach further.
+pub const RAYS_STRENGTH_START: f64 = 0.3;
+/// What a first curve bends by, in degrees of arc: a gentle arch.
+pub const CURVE_START: f64 = 72.0;
+pub const RAYS_RANGE_START: f64 = 0.2;
 /// Where a new shadow falls: down and to the right.
 pub const SHADOW_ANGLE: f64 = -45.0;
 
@@ -188,8 +212,9 @@ fn look_of(
         None => segment_bloom(&draft.materials, segment).and_then(MaterialEffect::bloom),
     };
     // No glow reads as no amounts, so a first glow color takes the starts.
-    let (glow_color, glow_strength, glow_range) = glow.map_or((String::new(), 0.0, 0.0), |glow| {
-        (glow.color, glow.strength, glow.range)
+    let glow = glow.unwrap_or_else(|| cutlass_model::BloomParams {
+        range: 0.0,
+        ..cutlass_model::BloomParams::default()
     });
     Some(TextLook {
         outline_color: text.border_color.clone(),
@@ -202,13 +227,24 @@ fn look_of(
         } else {
             SHADOW_ANGLE
         },
+        shadow_alpha: text.shadow_alpha,
         background_color: on(text.background_style != 0, &text.background_color),
         background_alpha: text.background_alpha,
         background_round: text.background_round_radius,
-        glow_color,
-        glow_strength,
-        glow_range,
+        background_lines: text.background_lines,
+        background_width: text.background_width,
+        background_height: text.background_height,
+        background_offset_x: text.background_offset_x,
+        background_offset_y: text.background_offset_y,
+        glow_color: glow.color,
+        glow_strength: glow.strength,
+        glow_range: glow.range,
+        glow_rays: glow.rays,
+        glow_lean_x: glow.lean_x,
+        glow_lean_y: glow.lean_y,
         bubble: text.bubble.clone(),
+        curve_on: text.curve_on,
+        curve: text.curve,
     })
 }
 

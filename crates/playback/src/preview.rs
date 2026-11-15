@@ -136,9 +136,9 @@ mod tests {
     use cutlass_model::{
         Draft, MaterialAudio, MaterialId, Micros, Segment, TimeRange, Track, TrackType,
     };
-    use cutlass_session::Session;
+    use cutlass_session::{Request, Session};
 
-    use super::{PreviewMix, preview_frames, queue_mix};
+    use super::{PreviewMix, preview_frames, queue_mix, window_bytes};
     use crate::apple::{AudioHost, AudioOutput};
     use crate::playhead::Player;
 
@@ -163,7 +163,12 @@ mod tests {
     }
 
     fn write_tone(path: &Path) {
-        let payload = [0xFF_u8, 0x7F, 0xFF, 0x7F, 0xFF, 0x7F, 0xFF, 0x7F];
+        write_tone_of(path, 4);
+    }
+
+    /// `frames` of full-scale mono 16-bit tone at 48 kHz.
+    fn write_tone_of(path: &Path, frames: usize) {
+        let payload = [0xFF_u8, 0x7F].repeat(frames);
         let data_bytes = u32::try_from(payload.len()).expect("wav size");
         let rate = 48_000_u32;
         let mut bytes = Vec::new();
@@ -259,6 +264,78 @@ mod tests {
         assert_eq!(player.output().queued().len(), 4 * 8);
         assert_eq!(preview_frames(1_000_000), 8_192);
         assert_eq!(preview_frames(0), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_faded_clip_plays_at_full_level_between_its_two_ramps() {
+        let path =
+            std::env::temp_dir().join(format!("cutlass-preview-fade-{}", std::process::id()));
+        // Half a second, so 20 ms windows fall on whole microseconds.
+        write_tone_of(&path, 24_000);
+        let mut draft = draft(&path);
+        draft.duration = Micros(500_000);
+        let segment = &mut draft.tracks[0].segments[0];
+        segment.volume = 1.0;
+        segment.target = TimeRange::new(0, 500_000);
+        segment.source_range = Some(TimeRange::new(0, 500_000));
+        let plain = Session::open(draft.clone());
+        let mut faded = Session::open(draft);
+        faded
+            .apply(
+                0,
+                &[Request::SetFade {
+                    segment_id: "clip".into(),
+                    fade_id: MaterialId::new("fade"),
+                    fade_in: Micros(20_000),
+                    fade_out: Micros(60_000),
+                }],
+            )
+            .expect("fade");
+        let readers = readers();
+        // The left side of 20 ms of the mix at `time`.
+        let left = |session: &Session, time: i64| -> Vec<f32> {
+            let mut heard = cutlass_eval::Heard::new();
+            let bytes = window_bytes(
+                PreviewMix {
+                    draft: session.draft(),
+                    revision: session.revision(),
+                    time: Micros(time),
+                    frames: 960,
+                    readers: &readers,
+                    heard: &mut heard,
+                    root: None,
+                },
+                960,
+            );
+            samples(&bytes).chunks(2).map(|pair| pair[0]).collect()
+        };
+        let full = left(&plain, 240_000);
+        assert_eq!(full.len(), 960);
+        assert!(full.iter().all(|sample| *sample > 0.99), "{}", full[0]);
+
+        // The first 20 ms are the fade in, from silence up.
+        let first = left(&faded, 0);
+        assert_eq!(first[0], 0.0);
+        assert!(
+            (first[480] - full[480] / 2.0).abs() < 1.0e-4,
+            "{}",
+            first[480]
+        );
+        assert!(first.windows(2).all(|pair| pair[1] > pair[0]));
+        // Between the ramps the clip is what it is without a fade.
+        for time in [20_000, 240_000, 420_000] {
+            assert_eq!(left(&faded, time), left(&plain, time), "at {time}");
+        }
+        // The last 20 ms are the end of the 60 ms fade out, down to silence.
+        let last = left(&faded, 480_000);
+        assert!(
+            (last[0] - full[0] * 959.0 / 2_880.0).abs() < 1.0e-4,
+            "{}",
+            last[0]
+        );
+        assert!(last.windows(2).all(|pair| pair[1] < pair[0]));
+        assert_eq!(last[959], 0.0);
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -174,6 +174,7 @@ impl<S: Sandbox> ChildSink<'_, S> {
                 return ToolOutcome {
                     content: "unsupported query".to_owned(),
                     is_error: true,
+                    picture: None,
                 };
             }
         };
@@ -181,10 +182,12 @@ impl<S: Sandbox> ChildSink<'_, S> {
             Ok(view) => ToolOutcome {
                 content: view.to_string(),
                 is_error: false,
+                picture: None,
             },
             Err(error) => ToolOutcome {
                 content: error.to_string(),
                 is_error: true,
+                picture: None,
             },
         }
     }
@@ -198,10 +201,12 @@ impl<S: Sandbox> ChildSink<'_, S> {
             Ok(output) => ToolOutcome {
                 content: output,
                 is_error: false,
+                picture: None,
             },
             Err(error) => ToolOutcome {
                 content: error.to_string(),
                 is_error: true,
+                picture: None,
             },
         }
     }
@@ -213,6 +218,7 @@ impl<S: Sandbox> ChildSink<'_, S> {
         ToolOutcome {
             content: format!("tool not allowed: {name}"),
             is_error: true,
+            picture: None,
         }
     }
 }

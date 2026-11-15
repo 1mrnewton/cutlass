@@ -31,6 +31,9 @@ impl VtSurface {
         width: u32,
         height: u32,
     ) -> Result<Self, CodecError> {
+        // SAFETY: callers pass the live `CVPixelBuffer` a decode callback was
+        // handed, or a buffer they hold a retain on. `CFRetain` returns the
+        // same pointer with one more retain, which `Cf` owns.
         let retained = unsafe { sys::CFRetain(image) };
         let buffer = Cf::from_owned(retained.cast_mut()).ok_or(CodecError::Unsupported {
             what: "pixel buffer",
@@ -69,6 +72,8 @@ impl PictureSurface for VtSurface {
             return Ok(Arc::clone(bytes));
         }
         let image = self.buffer();
+        // SAFETY: `image` is the buffer `self` retains. Flag 1 is
+        // `kCVPixelBufferLock_ReadOnly`, which allows other readers at once.
         let locked = unsafe { sys::CVPixelBufferLockBaseAddress(image, 1) };
         if locked != 0 {
             return Err(CodecError::Malformed {
@@ -77,6 +82,8 @@ impl PictureSurface for VtSurface {
             });
         }
         let copied = super::video::copy_nv12(image);
+        // SAFETY: undoes the read-only lock taken above, with the same flag,
+        // after `copy_nv12` has finished with the base addresses.
         unsafe {
             let _ = sys::CVPixelBufferUnlockBaseAddress(image, 1);
         }

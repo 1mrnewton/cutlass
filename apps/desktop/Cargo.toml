@@ -19,6 +19,7 @@ cutlass-export = { path = "../../crates/export", version = "0.1.0" }
 cutlass-effects = { path = "../../crates/effects", version = "0.1.0" }
 cutlass-store = { path = "../../crates/store", version = "0.1.0" }
 cutlass-storage = { path = "../../crates/storage", version = "0.1.0" }
+cutlass-agent-cloud = { path = "../../crates/agent-cloud", version = "0.1.0" }
 cutlass-download = { path = "../../crates/download", version = "0.1.0", features = ["http"] }
 cutlass-session = { path = "../../crates/session", version = "0.1.0" }
 cutlass-eval = { path = "../../crates/eval", version = "0.1.0" }
@@ -81,6 +82,15 @@ eframe = { version = "0.37", default-features = false, features = [
     "wgpu",
     "x11",
 ] }
+# The system clipboard, so text copied in another app pastes into a field
+# here and text copied here pastes there. eframe's own `clipboard` feature
+# also brings the Wayland clipboard, which builds with the banned `cc`
+# crate; these two are the part of it that does not. Without them the
+# window keeps a clipboard of its own that no other app sees.
+egui-winit = { version = "0.37", default-features = false, features = [
+    "arboard",
+    "bytemuck",
+] }
 rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
 cutlass-model = { version = "0.1.0", path = "../../crates/model" }
 egui = "0.37"
@@ -90,6 +100,7 @@ egui = "0.37"
 epaint_default_fonts = { version = "0.37", features = ["monochrome_emoji_fonts"] }
 cutlass-container = { version = "0.1.0", path = "../../crates/container" }
 cutlass-codec = { path = "../../crates/codec", version = "0.1.0" }
+ctrlc = { version = "3.5.2", features = ["termination"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cutlass-platform-apple = { path = "../../crates/platform-apple", version = "0.1.0" }

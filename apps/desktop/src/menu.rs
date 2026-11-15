@@ -651,17 +651,65 @@ pub fn show<'a>(
     shown
 }
 
-/// One key in a shortcut: a modifier drawn as an icon, or text.
+/// One key in a shortcut: a modifier drawn as an icon, a key drawn here,
+/// or text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Key<'a> {
     Icon(&'static str),
+    Drawn(Drawn),
     Text(&'a str),
+}
+
+/// A key drawn as strokes: Control and the arrow keys. The window's fonts
+/// have none of `⌃ ← → ↑ ↓`, and a glyph they lack shows as an empty box.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Drawn {
+    Control,
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl Drawn {
+    /// The key's strokes in `rect`, each a line through its points.
+    fn shapes(self, rect: Rect, color: egui::Color32) -> Vec<egui::Shape> {
+        let side = rect.width().min(rect.height());
+        let square = Rect::from_center_size(rect.center(), Vec2::splat(side));
+        // The icons beside it are stroked 1.5 wide in a 24 box.
+        let stroke = egui::Stroke::new(1.5 * side / cutlass_icons::VIEWBOX, color);
+        // An arrow pointing right; the others are it turned or mirrored.
+        const SHAFT: [(f32, f32); 2] = [(0.16, 0.5), (0.84, 0.5)];
+        const HEAD: [(f32, f32); 3] = [(0.56, 0.22), (0.84, 0.5), (0.56, 0.78)];
+        const CARET: [(f32, f32); 3] = [(0.24, 0.5), (0.5, 0.24), (0.76, 0.5)];
+        let turned = |(x, y): (f32, f32)| match self {
+            Self::Control | Self::Right => (x, y),
+            Self::Left => (1.0 - x, y),
+            Self::Down => (y, x),
+            Self::Up => (y, 1.0 - x),
+        };
+        let line = |points: &[(f32, f32)]| {
+            let points = points
+                .iter()
+                .map(|point| {
+                    let (x, y) = turned(*point);
+                    square.min + Vec2::new(x * side, y * side)
+                })
+                .collect();
+            egui::Shape::line(points, stroke)
+        };
+        match self {
+            Self::Control => vec![line(&CARET)],
+            Self::Left | Self::Right | Self::Up | Self::Down => vec![line(&SHAFT), line(&HEAD)],
+        }
+    }
 }
 
 /// The keys of `shortcut`, such as `⇧⌘C` or `Space`, in the order they are
 /// drawn: the modifiers, then the key. On a Mac the modifiers are the
-/// Command, Shift and Option icons and Control's `⌃`. Elsewhere they read
-/// Ctrl, Alt and the Shift icon, in that order. Backspace is its icon.
+/// Command, Shift and Option icons and Control's caret. Elsewhere they read
+/// Ctrl, Alt and the Shift icon, in that order. Backspace is its icon, and
+/// an arrow key is drawn.
 fn keys(shortcut: &str, mac: bool) -> Vec<Key<'_>> {
     let key = shortcut.trim_start_matches(['⌃', '⌥', '⇧', '⌘']);
     let held = &shortcut[..shortcut.len() - key.len()];
@@ -673,7 +721,7 @@ fn keys(shortcut: &str, mac: bool) -> Vec<Key<'_>> {
                 '⌘' => Key::Icon("keyCommand"),
                 '⌥' => Key::Icon("keyOption"),
                 '⇧' => Key::Icon("keyShift"),
-                _ => Key::Text("⌃"),
+                _ => Key::Drawn(Drawn::Control),
             });
         }
     } else {
@@ -690,6 +738,10 @@ fn keys(shortcut: &str, mac: bool) -> Vec<Key<'_>> {
     match key {
         "" => {}
         "⌫" => out.push(Key::Icon("keyBackspace")),
+        "←" => out.push(Key::Drawn(Drawn::Left)),
+        "→" => out.push(Key::Drawn(Drawn::Right)),
+        "↑" => out.push(Key::Drawn(Drawn::Up)),
+        "↓" => out.push(Key::Drawn(Drawn::Down)),
         key => out.push(Key::Text(key)),
     }
     out
@@ -710,7 +762,7 @@ const KEY_GAP: f32 = 8.0;
 
 fn key_width(ctx: &Context, key: Key<'_>) -> f32 {
     match key {
-        Key::Icon(_) => KEY_ICON,
+        Key::Icon(_) | Key::Drawn(_) => KEY_ICON,
         Key::Text(text) => text_width(ctx, text, KEY_SIZE),
     }
 }
@@ -732,15 +784,15 @@ pub fn paint_keys(
 ) {
     let mut x = end.x - keys_width(ctx, shortcut);
     for key in keys(shortcut, MAC) {
+        let icon = Rect::from_min_size(Pos2::new(x, end.y - KEY_ICON / 2.0), Vec2::splat(KEY_ICON));
         match key {
             Key::Icon(name) => {
-                let rect = Rect::from_min_size(
-                    Pos2::new(x, end.y - KEY_ICON / 2.0),
-                    Vec2::splat(KEY_ICON),
-                );
-                if let Err(error) = crate::icons::paint(painter, rect, name, color) {
+                if let Err(error) = crate::icons::paint(painter, icon, name, color) {
                     cutlass_logger::warn!("{error}");
                 }
+            }
+            Key::Drawn(drawn) => {
+                painter.extend(drawn.shapes(icon, color));
             }
             Key::Text(text) => {
                 painter.text(
@@ -1292,7 +1344,21 @@ mod tests {
             keys("⇧⌘Space", false),
             [Key::Text("Ctrl"), Key::Icon("keyShift"), Key::Text("Space")]
         );
-        assert_eq!(keys("⌃Y", true), [Key::Text("⌃"), Key::Text("Y")]);
+        // Control and the arrow keys are drawn: no font here has them.
+        assert_eq!(
+            keys("⌃Y", true),
+            [Key::Drawn(Drawn::Control), Key::Text("Y")]
+        );
+        for mac in [true, false] {
+            assert_eq!(keys("←", mac), [Key::Drawn(Drawn::Left)]);
+            assert_eq!(keys("→", mac), [Key::Drawn(Drawn::Right)]);
+            assert_eq!(keys("↑", mac), [Key::Drawn(Drawn::Up)]);
+            assert_eq!(keys("↓", mac), [Key::Drawn(Drawn::Down)]);
+        }
+        assert_eq!(
+            keys("⇧←", true),
+            [Key::Icon("keyShift"), Key::Drawn(Drawn::Left)]
+        );
         assert_eq!(shortcut_for("primary+shift+s"), "⇧⌘S");
         assert_eq!(shortcut_for("shift+delete"), "⇧⌫");
         for name in ["keyCommand", "keyShift", "keyOption", "keyBackspace"] {
@@ -1750,6 +1816,49 @@ mod tests {
             modifiers: egui::Modifiers::default(),
         };
         vec![egui::Event::PointerMoved(pos), button(true), button(false)]
+    }
+
+    #[test]
+    fn a_drawn_key_keeps_to_its_box_and_an_arrow_points_its_way() {
+        let rect = Rect::from_min_size(Pos2::new(40.0, 10.0), Vec2::splat(13.0));
+        let color = egui::Color32::WHITE;
+        // Where an arrow's head ends, as a fraction of the box.
+        let tip = |drawn: Drawn| {
+            let shapes = drawn.shapes(rect, color);
+            assert_eq!(shapes.len(), 2, "{drawn:?}: a shaft and a head");
+            let egui::Shape::Path(head) = &shapes[1] else {
+                panic!("{drawn:?}: the head is a line");
+            };
+            assert_eq!(head.points.len(), 3);
+            (head.points[1] - rect.min) / rect.size()
+        };
+        assert!(tip(Drawn::Right).x > 0.8 && (tip(Drawn::Right).y - 0.5).abs() < 0.01);
+        assert!(tip(Drawn::Left).x < 0.2 && (tip(Drawn::Left).y - 0.5).abs() < 0.01);
+        assert!(tip(Drawn::Up).y < 0.2 && (tip(Drawn::Up).x - 0.5).abs() < 0.01);
+        assert!(tip(Drawn::Down).y > 0.8 && (tip(Drawn::Down).x - 0.5).abs() < 0.01);
+        // Control is one caret, its point at the top.
+        let caret = Drawn::Control.shapes(rect, color);
+        assert_eq!(caret.len(), 1);
+        let egui::Shape::Path(caret_line) = &caret[0] else {
+            panic!("the caret is a line");
+        };
+        assert!(caret_line.points[1].y < caret_line.points[0].y);
+        for drawn in [
+            Drawn::Control,
+            Drawn::Left,
+            Drawn::Right,
+            Drawn::Up,
+            Drawn::Down,
+        ] {
+            for shape in drawn.shapes(rect, color) {
+                let bounds = shape.visual_bounding_rect();
+                assert!(rect.contains_rect(bounds), "{drawn:?}: {bounds:?}");
+            }
+        }
+        // A drawn key is as wide as an icon, so the keys of a row line up.
+        let ctx = Context::default();
+        assert_eq!(keys_width(&ctx, "←"), KEY_ICON);
+        assert_eq!(keys_width(&ctx, "⌫"), KEY_ICON);
     }
 
     #[test]

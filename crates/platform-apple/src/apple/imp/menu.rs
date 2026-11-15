@@ -29,10 +29,10 @@ fn keys_shown_only_class() -> Option<&'static AnyClass> {
     static CLASS: OnceLock<Option<&'static AnyClass>> = OnceLock::new();
     *CLASS.get_or_init(|| {
         let mut builder = ClassBuilder::new(c"CutlassKeysShownOnlyMenu", class!(NSMenu))?;
-        // SAFETY: `performKeyEquivalent:` takes one NSEvent and returns a
-        // BOOL, as the function does.
         let method: extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject) -> Bool =
             no_key_equivalent;
+        // SAFETY: `performKeyEquivalent:` takes one NSEvent and returns a
+        // BOOL, as the function does.
         unsafe {
             builder.add_method(sel!(performKeyEquivalent:), method);
         }

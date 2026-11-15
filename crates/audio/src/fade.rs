@@ -3,8 +3,13 @@
 //! Durations are microseconds on the same clock as a segment. Curve 0 skips
 //! the fade. Curve 1 is a quarter sine, 2 is linear, 3 is logarithmic, and
 //! 4 is exponential. Those are the five curves that were traced. A fade
-//! longer than the buffer covers the buffer. Overlapping in and out
-//! multiply. Samples outside a fade are copied.
+//! longer than the clip covers the clip. Overlapping in and out multiply.
+//! Samples outside a fade are copied.
+//!
+//! A fade belongs to the clip's two edges. [`fade`] takes a buffer that is
+//! the whole clip. A mix that works one window at a time passes each window
+//! to [`fade_window`] with where that window sits in the clip, so a window
+//! in the middle of the clip is left as it is.
 
 use cutlass_codec::access::Pcm;
 
@@ -42,7 +47,19 @@ impl FadeCurve {
     }
 }
 
-/// Apply a fade-in and a fade-out.
+/// Where a buffer sits in the clip it was cut from.
+///
+/// Both are microseconds on the clip's own clock, which is the clock the
+/// fade durations use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FadeSpan {
+    /// From the clip's first sample to the buffer's first sample.
+    pub start_us: i64,
+    /// The clip from its first sample to its last.
+    pub clip_us: i64,
+}
+
+/// Apply a fade-in and a fade-out to a buffer that is the whole clip.
 ///
 /// Durations are microseconds. Zero leaves that edge alone. A negative
 /// duration is refused. Curve [`FadeCurve::Skip`] copies the buffer.
@@ -53,25 +70,113 @@ pub fn fade(
     curve: FadeCurve,
 ) -> Result<Pcm, Error> {
     let source = Input::open(input)?;
-    if source.frames == 0 {
+    if skips(&source, curve) {
         return Ok(input.clone());
     }
-    if matches!(curve, FadeCurve::Skip) {
+    let clip = u64::from(input.samples);
+    let fade_in = microseconds_to_frames(fade_in_us, source.rate)?.min(clip);
+    let fade_out = microseconds_to_frames(fade_out_us, source.rate)?.min(clip);
+    apply(
+        input,
+        &source,
+        Ramps {
+            start: 0,
+            clip,
+            fade_in,
+            fade_out,
+        },
+        curve,
+    )
+}
+
+/// Apply a clip's fades to one window of it.
+///
+/// The fade-in covers the clip's first `fade_in_us` and the fade-out its
+/// last `fade_out_us`, wherever `input` sits: a window between the two is
+/// returned as it came. A window that runs past the clip's end stays at the
+/// fade-out's last gain. A negative duration, start, or clip length is
+/// refused. Curve [`FadeCurve::Skip`] copies the buffer.
+pub fn fade_window(
+    input: &Pcm,
+    span: FadeSpan,
+    fade_in_us: i64,
+    fade_out_us: i64,
+    curve: FadeCurve,
+) -> Result<Pcm, Error> {
+    let source = Input::open(input)?;
+    if skips(&source, curve) {
         return Ok(input.clone());
     }
+    let clip = microseconds_to_frames(span.clip_us, source.rate)?;
+    let start = microseconds_to_frames(span.start_us, source.rate)?;
+    let fade_in = microseconds_to_frames(fade_in_us, source.rate)?.min(clip);
+    let fade_out = microseconds_to_frames(fade_out_us, source.rate)?.min(clip);
+    apply(
+        input,
+        &source,
+        Ramps {
+            start,
+            clip,
+            fade_in,
+            fade_out,
+        },
+        curve,
+    )
+}
+
+/// A buffer's first frame, its clip's length, and the two ramps, all in
+/// frames of the clip.
+#[derive(Clone, Copy)]
+struct Ramps {
+    start: u64,
+    clip: u64,
+    fade_in: u64,
+    fade_out: u64,
+}
+
+impl Ramps {
+    /// Whether no frame of a buffer `frames` long is inside either ramp.
+    fn miss(self, frames: u64) -> bool {
+        let end = self.start.saturating_add(frames);
+        let clear_of_in = self.fade_in == 0 || self.start >= self.fade_in;
+        let clear_of_out = self.fade_out == 0 || end <= self.clip - self.fade_out;
+        clear_of_in && clear_of_out
+    }
+
+    fn gain(self, curve: FadeCurve, frame: u64) -> f32 {
+        let at = self.start.saturating_add(frame);
+        let mut gain = 1.0_f64;
+        if self.fade_in > 0 && at < self.fade_in {
+            gain *= curve_gain(curve, at, self.fade_in);
+        }
+        if self.fade_out > 0 {
+            // Past the clip's last frame this stays 0, the end of the ramp.
+            let from_end = self.clip.saturating_sub(1).saturating_sub(at);
+            if from_end < self.fade_out {
+                gain *= curve_gain(curve, from_end, self.fade_out);
+            }
+        }
+        gain as f32
+    }
+}
+
+/// Whether the buffer is copied before any duration is read.
+fn skips(source: &Input<'_>, curve: FadeCurve) -> bool {
+    source.frames == 0 || matches!(curve, FadeCurve::Skip)
+}
+
+fn apply(input: &Pcm, source: &Input<'_>, ramps: Ramps, curve: FadeCurve) -> Result<Pcm, Error> {
     let frames = input.samples;
-    let fade_in = microseconds_to_frames(fade_in_us, source.rate, frames)?;
-    let fade_out = microseconds_to_frames(fade_out_us, source.rate, frames)?;
-    if fade_in == 0 && fade_out == 0 {
+    if ramps.miss(u64::from(frames)) {
         return Ok(input.clone());
     }
     let mut out = Built::new(source.format, frames, source.channels)?;
     for frame in 0..frames {
-        let gain = region_gain(curve, frame, frames, fade_in, fade_out);
+        let gain = ramps.gain(curve, u64::from(frame));
         for channel in 0..source.channels {
             let index = usize::try_from(frame).map_err(|_| Error::TooLong)?;
             if gain == 1.0 {
-                out.push_copied(&source, index, channel);
+                out.push_copied(source, index, channel);
             } else {
                 out.push_unit(source.sample(index, channel) * gain);
             }
@@ -80,44 +185,25 @@ pub fn fade(
     out.pack(source.rate, source.layout.clone())
 }
 
-fn microseconds_to_frames(duration: i64, rate: u32, frames: u32) -> Result<u32, Error> {
+/// How many frames at `rate` fit in `duration`. A negative duration is
+/// refused.
+fn microseconds_to_frames(duration: i64, rate: u32) -> Result<u64, Error> {
     if duration < 0 {
         return Err(Error::Fade);
     }
-    if duration == 0 || frames == 0 {
-        return Ok(0);
-    }
     let count = i128::from(duration) * i128::from(rate) / 1_000_000;
-    if count <= 0 {
-        return Ok(0);
-    }
-    let count = u32::try_from(count).unwrap_or(u32::MAX);
-    Ok(count.min(frames))
-}
-
-fn region_gain(curve: FadeCurve, frame: u32, frames: u32, fade_in: u32, fade_out: u32) -> f32 {
-    let mut gain = 1.0_f64;
-    if fade_in > 0 && frame < fade_in {
-        gain *= curve_gain(curve, frame, fade_in);
-    }
-    if fade_out > 0 {
-        let from_end = frames - 1 - frame;
-        if from_end < fade_out {
-            gain *= curve_gain(curve, from_end, fade_out);
-        }
-    }
-    gain as f32
+    Ok(u64::try_from(count).unwrap_or(u64::MAX))
 }
 
 /// Gain at `index / range`, before silence is scaled to unity.
 ///
 /// `index` runs from 0 at silence toward `range` at unity. The formulas
 /// match the traced quarter-sine, linear, log, and exp fades.
-fn curve_gain(curve: FadeCurve, index: u32, range: u32) -> f64 {
+fn curve_gain(curve: FadeCurve, index: u64, range: u64) -> f64 {
     if range == 0 {
         return 1.0;
     }
-    let gain = (f64::from(index) / f64::from(range)).clamp(0.0, 1.0);
+    let gain = (index as f64 / range as f64).clamp(0.0, 1.0);
     match curve {
         FadeCurve::Skip => 1.0,
         FadeCurve::Linear => gain,
@@ -138,7 +224,7 @@ fn curve_gain(curve: FadeCurve, index: u32, range: u32) -> f64 {
 mod tests {
     use cutlass_codec::access::{ChannelLayout, Pcm};
 
-    use super::{FadeCurve, fade};
+    use super::{FadeCurve, FadeSpan, fade, fade_window};
 
     fn mono(samples: Vec<f32>, rate: u32) -> Pcm {
         match Pcm::from_f32(rate, ChannelLayout::mono(), samples) {
@@ -229,6 +315,126 @@ mod tests {
         let input = mono(Vec::new(), 48_000);
         let output = fade(&input, 1_000, 1_000, FadeCurve::Linear).expect("fade");
         assert_eq!(output.samples, 0);
+    }
+
+    /// A 1 s clip at 1 kHz with a 20 ms fade in and a 60 ms fade out, cut
+    /// into windows of `window` frames and faded one window at a time.
+    fn windowed(clip: &[f32], window: usize) -> Vec<f32> {
+        let mut out = Vec::new();
+        for (index, chunk) in clip.chunks(window).enumerate() {
+            let span = FadeSpan {
+                start_us: i64::try_from(index * window).expect("start") * 1_000,
+                clip_us: i64::try_from(clip.len()).expect("clip") * 1_000,
+            };
+            let faded = fade_window(
+                &mono(chunk.to_vec(), 1_000),
+                span,
+                20_000,
+                60_000,
+                FadeCurve::Linear,
+            )
+            .expect("window");
+            out.extend_from_slice(data(&faded));
+        }
+        out
+    }
+
+    #[test]
+    fn a_window_in_the_middle_of_the_clip_is_left_alone() {
+        let clip: Vec<f32> = (0..1_000_u16)
+            .map(|n| 0.5 + f32::from(n) / 4_000.0)
+            .collect();
+        let whole = fade(
+            &mono(clip.clone(), 1_000),
+            20_000,
+            60_000,
+            FadeCurve::Linear,
+        )
+        .expect("whole");
+        // A window shorter than either fade, the case that used to fade
+        // every window from end to end.
+        let heard = windowed(&clip, 16);
+        assert_eq!(heard, data(&whole));
+        assert_eq!(heard[..20], data(&whole)[..20]);
+        assert_eq!(heard[0], 0.0);
+        assert!(heard[10] < clip[10]);
+        assert_eq!(heard[20..940], clip[20..940]);
+        assert!(heard[941] < clip[941]);
+        assert_eq!(heard[999], 0.0);
+        // Windows of other lengths cut the same clip.
+        assert_eq!(windowed(&clip, 33), data(&whole));
+        assert_eq!(windowed(&clip, 1_000), data(&whole));
+    }
+
+    #[test]
+    fn a_window_clear_of_both_fades_is_the_same_buffer() {
+        let samples = match Pcm::from_i16(1_000, ChannelLayout::mono(), vec![7, -9, 11, 6_000]) {
+            Ok(pcm) => pcm,
+            Err(err) => panic!("{err:?}"),
+        };
+        let span = FadeSpan {
+            start_us: 500_000,
+            clip_us: 1_000_000,
+        };
+        let output = fade_window(&samples, span, 20_000, 60_000, FadeCurve::Sine).expect("fade");
+        assert_eq!(output, samples);
+        // One frame into the fade out and the buffer is rebuilt.
+        let edge = FadeSpan {
+            start_us: 937_000,
+            clip_us: 1_000_000,
+        };
+        let output = fade_window(&samples, edge, 20_000, 60_000, FadeCurve::Linear).expect("fade");
+        assert_eq!(output.as_i16(), Some(&[7, -9, 11, 5_900][..]));
+    }
+
+    #[test]
+    fn a_window_past_the_clip_end_stays_at_the_end_of_the_fade_out() {
+        let input = mono(vec![1.0; 4], 1_000);
+        let span = FadeSpan {
+            start_us: 998_000,
+            clip_us: 1_000_000,
+        };
+        let output = fade_window(&input, span, 0, 4_000, FadeCurve::Linear).expect("fade");
+        assert_eq!(data(&output), &[0.25, 0.0, 0.0, 0.0]);
+        // With no fade out the mix decides what is heard past the end.
+        let output = fade_window(&input, span, 4_000, 0, FadeCurve::Linear).expect("fade");
+        assert_eq!(data(&output), data(&input));
+    }
+
+    #[test]
+    fn a_fade_longer_than_the_clip_covers_the_clip_in_every_window() {
+        let span = FadeSpan {
+            start_us: 2_000,
+            clip_us: 4_000,
+        };
+        let input = mono(vec![1.0; 2], 1_000);
+        let output = fade_window(&input, span, 10_000_000, 0, FadeCurve::Linear).expect("fade");
+        assert_eq!(data(&output), &[0.5, 0.75]);
+    }
+
+    #[test]
+    fn a_window_before_the_clip_or_a_negative_clip_is_refused() {
+        let input = mono(vec![0.2], 48_000);
+        let before = FadeSpan {
+            start_us: -1,
+            clip_us: 1_000,
+        };
+        assert_eq!(
+            fade_window(&input, before, 10, 10, FadeCurve::Linear),
+            Err(crate::Error::Fade)
+        );
+        let negative = FadeSpan {
+            start_us: 0,
+            clip_us: -1,
+        };
+        assert_eq!(
+            fade_window(&input, negative, 10, 10, FadeCurve::Linear),
+            Err(crate::Error::Fade)
+        );
+        assert_eq!(
+            fade_window(&input, before, -1, 0, FadeCurve::Skip).as_ref(),
+            Ok(&input)
+        );
     }
 
     #[test]

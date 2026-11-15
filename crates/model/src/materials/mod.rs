@@ -29,8 +29,8 @@ pub use caption::{CaptionTemplateInfo, Kept, SubtitleKeywords, TextRange, keywor
 pub use color::{MaterialCanvas, MaterialColorConfig};
 pub use draft::MaterialDraft;
 pub use effect::{
-    BloomParams, MaterialAnimations, MaterialEffect, MaterialPluginEffect, MaterialVideoEffect,
-    StickerAnimation, segment_bloom,
+    BloomParams, MAX_GLOW_LEAN, MaterialAnimations, MaterialEffect, MaterialPluginEffect,
+    MaterialVideoEffect, StickerAnimation, segment_bloom,
 };
 pub use mark::{
     TimeMarkItem, VisibleMark, clip_mark_time, new_time_mark, referenced_time_marks,
@@ -50,8 +50,8 @@ pub use speed::{
     split_curve,
 };
 pub use text::{
-    Bubble, CAPTION_STYLE_KEYS, MAX_FONT_AXES, MaterialText, TEXT_BOLD_WIDTH, TEXT_ITALIC_DEGREE,
-    read_font_axes, write_font_axes,
+    Bubble, CAPTION_STYLE_KEYS, MAX_CURVE, MAX_FONT_AXES, MaterialText, TEXT_BOLD_WIDTH,
+    TEXT_ITALIC_DEGREE, read_font_axes, write_font_axes,
 };
 pub use transition::{MaterialTransition, blend_extents, blend_window};
 pub use video::{

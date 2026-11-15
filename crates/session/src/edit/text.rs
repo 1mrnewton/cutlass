@@ -1,6 +1,6 @@
 use cutlass_model::{
-    Draft, MaterialEffect, MaterialId, MaterialText, Segment, SegmentId, TimeRange, TrackId,
-    TrackType, segment_bloom,
+    Draft, MAX_CURVE, MAX_GLOW_LEAN, MaterialEffect, MaterialId, MaterialText, Segment, SegmentId,
+    TimeRange, TrackId, TrackType, segment_bloom,
 };
 
 use super::locate;
@@ -423,6 +423,39 @@ pub fn set_text_shadow(
     Ok(())
 }
 
+/// Make the shadow `opacity` from 0 to 1, whether it is on or off: an off
+/// shadow comes back at it.
+pub fn set_text_shadow_opacity(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    opacity: f64,
+) -> Result<(), EditError> {
+    let index = own_text(draft, segment_id)?;
+    if !(0.0..=1.0).contains(&opacity) {
+        return Err(EditError::TextStyle);
+    }
+    draft.materials.texts[index].shadow_alpha = opacity;
+    Ok(())
+}
+
+/// Bend the lines along an arc `degrees` wide, up to [`MAX_CURVE`] either
+/// way, or draw them straight while keeping the degrees.
+pub fn set_text_curve(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    on: bool,
+    degrees: f64,
+) -> Result<(), EditError> {
+    let index = own_text(draft, segment_id)?;
+    if !(-MAX_CURVE..=MAX_CURVE).contains(&degrees) {
+        return Err(EditError::TextStyle);
+    }
+    let text = &mut draft.materials.texts[index];
+    text.curve_on = on;
+    text.curve = degrees;
+    Ok(())
+}
+
 /// Fill a box behind the letters in `color` at `alpha` from 0 to 1, its
 /// corners rounded by `round` from 0 to 1. An empty color takes the box
 /// off. A box with no room around the letters yet gets some.
@@ -446,6 +479,38 @@ pub fn set_text_background(
     if !color.is_empty() && text.background_width <= 0.0 && text.background_height <= 0.0 {
         (text.background_width, text.background_height) = BACKGROUND_PAD;
     }
+    Ok(())
+}
+
+/// The most room a background leaves around the letters, in ems.
+pub const MAX_BACKGROUND_PAD: f64 = 1.0;
+/// The farthest a background moves from the letters, each way, in ems.
+pub const MAX_BACKGROUND_OFFSET: f64 = 1.0;
+
+/// Lay the background out: a box around each line with `lines`, or one
+/// around them all; `pad` ems of room across and down, each from 0 to
+/// [`MAX_BACKGROUND_PAD`]; moved `offset` ems right and up, each from
+/// -[`MAX_BACKGROUND_OFFSET`] to it. It is kept whether the background is
+/// on or off.
+pub fn set_text_background_box(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    lines: bool,
+    pad: [f64; 2],
+    offset: [f64; 2],
+) -> Result<(), EditError> {
+    let index = own_text(draft, segment_id)?;
+    let pads = (0.0..=MAX_BACKGROUND_PAD).contains(&pad[0])
+        && (0.0..=MAX_BACKGROUND_PAD).contains(&pad[1]);
+    let moves = (-MAX_BACKGROUND_OFFSET..=MAX_BACKGROUND_OFFSET).contains(&offset[0])
+        && (-MAX_BACKGROUND_OFFSET..=MAX_BACKGROUND_OFFSET).contains(&offset[1]);
+    if !pads || !moves {
+        return Err(EditError::TextStyle);
+    }
+    let text = &mut draft.materials.texts[index];
+    text.background_lines = lines;
+    [text.background_width, text.background_height] = pad;
+    [text.background_offset_x, text.background_offset_y] = offset;
     Ok(())
 }
 
@@ -569,8 +634,16 @@ pub fn set_text_bubble(
     Ok(())
 }
 
+/// How a glow is drawn: as rays or soft, and where its rays lean, right
+/// and up in degrees; `None` keeps what the glow has.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GlowDrawn {
+    pub rays: Option<bool>,
+    pub lean: Option<[f64; 2]>,
+}
+
 /// Make the letters glow in `color`. `glow` is the strength and the range,
-/// each from 0 to 1. The glow is a bloom effect among the clip's sidecars:
+/// each from 0 to 1, and `drawn` how it is drawn. The glow is a bloom effect among the clip's sidecars:
 /// one only this clip points at is changed in place, and otherwise a new
 /// one named `glow_id` takes its place, so a split clip's halves glow on
 /// their own. An empty color takes the glow off, and drops the effect when
@@ -581,11 +654,18 @@ pub fn set_text_glow(
     glow_id: &MaterialId,
     color: &str,
     glow: [f64; 2],
+    drawn: GlowDrawn,
 ) -> Result<(), EditError> {
     text_index(draft, segment_id)?;
     let color = style_color(color)?;
     let [strength, range] = glow;
     if !(0.0..=1.0).contains(&strength) || !(0.0..=1.0).contains(&range) {
+        return Err(EditError::TextStyle);
+    }
+    if drawn.lean.is_some_and(|lean| {
+        lean.iter()
+            .any(|lean| !(-MAX_GLOW_LEAN..=MAX_GLOW_LEAN).contains(lean))
+    }) {
         return Err(EditError::TextStyle);
     }
     let (track_index, segment_index) = locate(draft, segment_id)?;
@@ -620,6 +700,13 @@ pub fn set_text_glow(
     bloom.color = color.to_owned();
     bloom.strength = strength;
     bloom.range = range;
+    if let Some(rays) = drawn.rays {
+        bloom.rays = rays;
+    }
+    if let Some([x, y]) = drawn.lean {
+        bloom.lean_x = x;
+        bloom.lean_y = y;
+    }
     if let Some(id) = existing.as_ref().filter(|_| !shared) {
         if let Some(effect) = draft
             .materials
@@ -839,6 +926,69 @@ mod tests {
         assert_eq!(text.background_style, 0);
         assert!(text.background_color.is_empty());
 
+        // The shadow's opacity is kept while it is off, and refused past 1.
+        let opacity = |opacity: f64| Request::SetTextShadowOpacity {
+            segment_id: "a".into(),
+            opacity,
+        };
+        let revision = session.revision();
+        session.apply(revision, &[opacity(0.35)]).unwrap();
+        assert_eq!(session.draft().materials.texts[0].shadow_alpha, 0.35);
+        let revision = session.revision();
+        session.apply(revision, &[shadow("#000000")]).unwrap();
+        assert_eq!(session.draft().materials.texts[0].shadow_alpha, 0.35);
+        let before = session.draft().clone();
+        for bad in [1.5, -0.1, f64::NAN] {
+            let revision = session.revision();
+            assert_eq!(
+                session.apply(revision, &[opacity(bad)]).unwrap_err(),
+                EditError::TextStyle
+            );
+            assert_eq!(session.draft(), &before);
+        }
+        let revision = session.revision();
+        session.apply(revision, &[shadow("")]).unwrap();
+
+        // The box's layout is kept on or off; past its room it is refused.
+        let layout = |lines: bool, pad: [f64; 2], offset: [f64; 2]| Request::SetTextBackgroundBox {
+            segment_id: "a".into(),
+            lines,
+            width: pad[0],
+            height: pad[1],
+            offset_x: offset[0],
+            offset_y: offset[1],
+        };
+        let revision = session.revision();
+        session
+            .apply(revision, &[layout(true, [0.14, 0.25], [-0.25, 0.5])])
+            .unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert!(text.background_lines);
+        assert_eq!(
+            (text.background_width, text.background_height),
+            (0.14, 0.25)
+        );
+        assert_eq!(
+            (text.background_offset_x, text.background_offset_y),
+            (-0.25, 0.5)
+        );
+        let before = session.draft().clone();
+        for (pad, offset) in [
+            ([1.5, 0.1], [0.0, 0.0]),
+            ([0.1, -0.1], [0.0, 0.0]),
+            ([0.1, 0.1], [1.5, 0.0]),
+            ([0.1, 0.1], [0.0, f64::NAN]),
+        ] {
+            let revision = session.revision();
+            assert_eq!(
+                session
+                    .apply(revision, &[layout(false, pad, offset)])
+                    .unwrap_err(),
+                EditError::TextStyle
+            );
+            assert_eq!(session.draft(), &before);
+        }
+
         let bubble = |key: &str| Request::SetTextBubble {
             segment_id: "a".into(),
             bubble: key.to_owned(),
@@ -936,6 +1086,8 @@ mod tests {
             color: color.to_owned(),
             strength,
             range: 0.5,
+            rays: None,
+            lean: None,
         };
         let bloom = |session: &Session, id: &str| {
             session
@@ -1006,6 +1158,77 @@ mod tests {
             ),
         ] {
             assert_eq!(session.apply(6, &[request]).unwrap_err(), error);
+        }
+    }
+
+    #[test]
+    fn a_curve_bends_and_straightens_keeping_its_degrees() {
+        let mut session = open();
+        let curve = |on: bool, degrees: f64| Request::SetTextCurve {
+            segment_id: "a".into(),
+            on,
+            degrees,
+        };
+        let text = |session: &Session| {
+            let text = &session.draft().materials.texts[0];
+            (text.curve_on, text.curve)
+        };
+        session.apply(0, &[curve(true, 72.0)]).unwrap();
+        assert_eq!(text(&session), (true, 72.0));
+        session.apply(1, &[curve(false, 72.0)]).unwrap();
+        assert_eq!(text(&session), (false, 72.0));
+        session.apply(2, &[curve(true, -360.0)]).unwrap();
+        assert_eq!(text(&session), (true, -360.0));
+        for degrees in [361.0, -400.0, f64::NAN] {
+            assert_eq!(
+                session.apply(3, &[curve(true, degrees)]).unwrap_err(),
+                EditError::TextStyle
+            );
+        }
+        assert_eq!(text(&session), (true, -360.0));
+    }
+
+    #[test]
+    fn a_glow_streams_as_rays_that_lean_and_keeps_them_when_left_out() {
+        let mut session = open();
+        let glow = |rays: Option<bool>, lean: Option<[f64; 2]>| Request::SetTextGlow {
+            segment_id: "a".into(),
+            glow_id: MaterialId::new("g1"),
+            color: "#FFFFFF".to_owned(),
+            strength: 0.3,
+            range: 0.2,
+            rays,
+            lean,
+        };
+        let bloom = |session: &Session| {
+            session
+                .draft()
+                .materials
+                .effects
+                .iter()
+                .find(|effect| effect.id.as_str() == "g1")
+                .and_then(cutlass_model::MaterialEffect::bloom)
+                .unwrap()
+        };
+        session.apply(0, &[glow(None, None)]).unwrap();
+        assert!(!bloom(&session).rays);
+        session
+            .apply(1, &[glow(Some(true), Some([-1.0, 3.0]))])
+            .unwrap();
+        let rays = bloom(&session);
+        assert!(rays.rays);
+        assert_eq!((rays.lean_x, rays.lean_y), (-1.0, 3.0));
+        // A change that leaves them out keeps them.
+        session.apply(2, &[glow(None, None)]).unwrap();
+        assert_eq!(bloom(&session), rays);
+        session.apply(3, &[glow(Some(false), None)]).unwrap();
+        assert!(!bloom(&session).rays);
+        assert_eq!(bloom(&session).lean_y, 3.0);
+        for lean in [[46.0, 0.0], [0.0, -46.0], [f64::NAN, 0.0]] {
+            assert_eq!(
+                session.apply(4, &[glow(None, Some(lean))]).unwrap_err(),
+                EditError::TextStyle
+            );
         }
     }
 

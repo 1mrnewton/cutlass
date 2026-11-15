@@ -1,5 +1,17 @@
 title: Motion graphics
 description: Build motion graphics with shapes, text, keyframes, and catalog effects.
-tools: catalog.search, package.ensure, draft.query, draft.apply, sandbox.run
+tools: catalog.search, package.ensure, draft.query, draft.apply, sandbox.run, player.look
+keywords: animate, animation, title card, lower third, logo, intro, outro
 
 Place shapes, text, keyframes, and catalog effects. Call catalog.search, package.ensure, draft.query, and draft.apply for those placements in one combo. Use sandbox.run when a number has to be computed.
+
+- Shapes: add_shape (rectangle, circle, triangle, line, arrow) or draw_shape on a sticker lane, then set_shape_size, set_shape_fill, set_shape_stroke, set_shape_corners.
+- Text: add_text on a text lane (face a font file such as Inter[opsz,wght].ttf, never empty), then set_text_size, set_text_color, set_text_background, set_text_outline.
+- Place: set_position (x and y are fractions of half the canvas from the middle, y up), set_scale, set_rotation, set_opacity. A clip turns and is sized about its middle; set_pivot moves that point (x -1 is its left edge, y -1 its foot), so a hand swings on its end or a bar grows from one side.
+- Move: set_animation gives an in, out or loop animation. catalog.search "animation" lists each as animation-in, animation-out or animation-loop with its id, and kind must be the same; one listed (text only), such as Pop or Typewriter, goes on text and is refused on a shape or sticker. For a move of your own, add_keyframe at the first offset keys the pose as it is, then key_pose at a later offset writes the new pose; key_pose takes all of x, y, scale and rotation, and only keys what already has a key, so add_keyframe comes first. set_keyframe_graph eases the span ending at a key ("Ease Out").
+- Effects: catalog.search finds ids. add_effect takes "recipe/<name>", add_filter "look/<name>", set_transition effect_id "cutlass-<key>" on the outgoing clip. An effect on its lane never reaches text or shapes, which are drawn above it: bind_effect it to the title, shape or compound clip it should blur, glow or shake.
+- Two clips may not overlap on one lane: give each layer its own track_id (a new id makes the lane).
+- New ids for every segment_id and material_id. One draft.apply for each finished idea (a background, a title, one shape with its motion), not the whole piece at once: if one request is refused none of the combo lands, and a long combo has to be written again whole. Look up a kind's JSON with draft.query "ops <kind> ..." before its first use.
+- To see a frame, player.look at its time: the picture comes back with the result. Look after each finished idea, at a time while it is on screen and not mid-fade, and fix what is off before the next one. To keep a frame as a file, player.seek to its time and export.start "new <path>.png".
+
+draft.query "ops <kind> ..." shows the exact JSON of any request.

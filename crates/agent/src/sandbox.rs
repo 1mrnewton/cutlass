@@ -28,6 +28,10 @@ pub enum SandboxError {
     PublishPackage,
     /// The online runner is off.
     OnlineDisabled,
+    /// Both runners are off in settings.
+    AllOff,
+    /// The online runner is on but has no host to run on yet.
+    OnlineUnavailable,
     /// The injected runner failed.
     Executor(String),
 }
@@ -35,14 +39,32 @@ pub enum SandboxError {
 impl fmt::Display for SandboxError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotJson => formatter.write_str("not json"),
-            Self::Network => formatter.write_str("network"),
-            Self::Home => formatter.write_str("home"),
-            Self::ProjectPath => formatter.write_str("project path"),
-            Self::SaveProject => formatter.write_str("save project"),
-            Self::ChangeShortcut => formatter.write_str("change shortcut"),
-            Self::PublishPackage => formatter.write_str("publish package"),
+            Self::NotJson => formatter.write_str(
+                "the script's input and its answer must be JSON; end the script with a value such as #{ ok: true }",
+            ),
+            Self::Network => formatter.write_str(
+                "a script has no network, and its source may not hold an address (\"://\")",
+            ),
+            Self::Home => formatter.write_str(
+                "a script reads no files, so the user's home folder may not be named in its source or input",
+            ),
+            Self::ProjectPath => formatter.write_str(
+                "a script reads no files, so the project folder may not be named in its source or input",
+            ),
+            Self::SaveProject => {
+                formatter.write_str("a script cannot save the project; use draft.apply")
+            }
+            Self::ChangeShortcut => {
+                formatter.write_str("a script cannot change a shortcut; use settings.set")
+            }
+            Self::PublishPackage => formatter.write_str("a script cannot publish a package"),
             Self::OnlineDisabled => formatter.write_str("online sandbox is off"),
+            Self::AllOff => formatter.write_str(
+                "running code is off; the user can turn on Run code on this computer in Settings › Assistant",
+            ),
+            Self::OnlineUnavailable => formatter.write_str(
+                "the online runner needs a Cutlass account, which is not set up yet, and Run code on this computer is off",
+            ),
             Self::Executor(message) => write!(formatter, "executor: {message}"),
         }
     }
@@ -273,6 +295,39 @@ pub enum SandboxRoute {
 
 /// Return the runner the call asked for.
 #[must_use]
+/// The runner the settings choose: the local one while Run code on this
+/// computer is on, else the online one, which has no host until accounts
+/// exist, so its calls are refused; with both off, every call is refused.
+#[derive(Debug)]
+pub struct Switched<L> {
+    local: L,
+    local_on: bool,
+    online_on: bool,
+}
+
+impl<L> Switched<L> {
+    /// `local` behind the switches in `settings`.
+    pub fn from_settings(settings: &Settings, local: L) -> Self {
+        Self {
+            local,
+            local_on: settings.sandbox.local,
+            online_on: settings.sandbox.online,
+        }
+    }
+}
+
+impl<L: Sandbox> Sandbox for Switched<L> {
+    fn run(&mut self, source: &str, input_json: &str) -> Result<String, SandboxError> {
+        if self.local_on {
+            self.local.run(source, input_json)
+        } else if self.online_on {
+            Err(SandboxError::OnlineUnavailable)
+        } else {
+            Err(SandboxError::AllOff)
+        }
+    }
+}
+
 pub fn route_for(settings: &Settings, requested: SandboxRoute) -> SandboxRoute {
     match (requested, settings.model.cloud, settings.sandbox.online) {
         (SandboxRoute::Local, _, _) => SandboxRoute::Local,
@@ -587,7 +642,7 @@ mod tests {
             let mut sandbox = local_sandbox();
             let error = sandbox.run("gaps", input).unwrap_err();
             assert_eq!(error, SandboxError::NotJson);
-            assert_eq!(error.to_string(), "not json");
+            assert!(error.to_string().contains("must be JSON"), "{error}");
             assert_eq!(sandbox.executor().calls, 0);
         }
 
@@ -612,7 +667,7 @@ mod tests {
         let mut sandbox = local_sandbox();
         let error = sandbox.run("fetch https://example.com", "{}").unwrap_err();
         assert_eq!(error, SandboxError::Network);
-        assert_eq!(error.to_string(), "network");
+        assert!(error.to_string().contains("no network"), "{error}");
         assert_eq!(sandbox.executor().calls, 0);
     }
 
@@ -621,7 +676,7 @@ mod tests {
         let mut sandbox = local_sandbox();
         let error = sandbox.run("read /Users/someone/note", "{}").unwrap_err();
         assert_eq!(error, SandboxError::Home);
-        assert_eq!(error.to_string(), "home");
+        assert!(error.to_string().contains("home folder"), "{error}");
         assert_eq!(sandbox.executor().calls, 0);
 
         let error = sandbox
@@ -641,7 +696,7 @@ mod tests {
         let mut sandbox = local_sandbox();
         let error = sandbox.run("read /tmp/project/draft", "{}").unwrap_err();
         assert_eq!(error, SandboxError::ProjectPath);
-        assert_eq!(error.to_string(), "project path");
+        assert!(error.to_string().contains("project folder"), "{error}");
         assert_eq!(sandbox.executor().calls, 0);
 
         let error = sandbox
@@ -661,7 +716,10 @@ mod tests {
         let mut sandbox = local_sandbox();
         let error = sandbox.run("save_project()", "{}").unwrap_err();
         assert_eq!(error, SandboxError::SaveProject);
-        assert_eq!(error.to_string(), "save project");
+        assert!(
+            error.to_string().contains("cannot save the project"),
+            "{error}"
+        );
         assert_eq!(sandbox.executor().calls, 0);
     }
 
@@ -670,7 +728,10 @@ mod tests {
         let mut sandbox = local_sandbox();
         let error = sandbox.run("change_shortcut()", "{}").unwrap_err();
         assert_eq!(error, SandboxError::ChangeShortcut);
-        assert_eq!(error.to_string(), "change shortcut");
+        assert!(
+            error.to_string().contains("cannot change a shortcut"),
+            "{error}"
+        );
         assert_eq!(sandbox.executor().calls, 0);
     }
 
@@ -679,7 +740,10 @@ mod tests {
         let mut sandbox = local_sandbox();
         let error = sandbox.run("publish_package()", "{}").unwrap_err();
         assert_eq!(error, SandboxError::PublishPackage);
-        assert_eq!(error.to_string(), "publish package");
+        assert!(
+            error.to_string().contains("cannot publish a package"),
+            "{error}"
+        );
         assert_eq!(sandbox.executor().calls, 0);
     }
 
@@ -812,5 +876,29 @@ mod path_tests {
         assert!(path_hit(path, &format!("let p = `{path}`;"), "{}"));
         assert!(!path_hit(path, "1", "{}"));
         assert!(!path_hit("", "1", &input));
+    }
+
+    #[test]
+    fn the_switches_choose_the_runner() {
+        struct Echo;
+        impl super::Sandbox for Echo {
+            fn run(&mut self, _source: &str, input: &str) -> Result<String, super::SandboxError> {
+                Ok(input.to_owned())
+            }
+        }
+        let mut settings = cutlass_settings::Settings::default();
+        let mut on = super::Switched::from_settings(&settings, Echo);
+        assert_eq!(super::Sandbox::run(&mut on, "x", "{}").unwrap(), "{}");
+        settings.sandbox.local = false;
+        let mut off = super::Switched::from_settings(&settings, Echo);
+        assert_eq!(
+            super::Sandbox::run(&mut off, "x", "{}"),
+            Err(super::SandboxError::AllOff)
+        );
+        settings.sandbox.online = true;
+        let mut online = super::Switched::from_settings(&settings, Echo);
+        let error = super::Sandbox::run(&mut online, "x", "{}").unwrap_err();
+        assert_eq!(error, super::SandboxError::OnlineUnavailable);
+        assert!(error.to_string().contains("account"));
     }
 }

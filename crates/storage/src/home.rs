@@ -25,6 +25,8 @@ const PRESETS: &str = "Presets";
 const TEXT_PRESETS: &str = "text.json";
 const STUDIO: &str = "Studio";
 const FONTS: &str = "Fonts";
+const ASSISTANT: &str = "Assistant";
+const NOTES: &str = "notes.md";
 
 /// The Cutlass root and the folders under it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,6 +125,37 @@ impl Home {
     #[must_use]
     pub fn settings_file(&self) -> PathBuf {
         self.root.join(SETTINGS)
+    }
+
+    /// The notes the assistant is given at the start of each turn while
+    /// Memory is on. Its folder is made when the notes are first written.
+    #[must_use]
+    pub fn assistant_notes_file(&self) -> PathBuf {
+        self.root.join(ASSISTANT).join(NOTES)
+    }
+
+    /// Where the assistant keeps its conversation about the project at
+    /// `project`, named by the folder's path so it stays the same across
+    /// builds. Its folder is made when the first turn is kept.
+    #[must_use]
+    pub fn assistant_chat_file(&self, project: &Path) -> PathBuf {
+        let hash = project
+            .to_string_lossy()
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+            });
+        self.root
+            .join(ASSISTANT)
+            .join("chats")
+            .join(format!("{hash:016x}.json"))
+    }
+
+    /// The cloud model's keys, by provider, apart from the settings. Its
+    /// folder is made when the first key is kept.
+    #[must_use]
+    pub fn assistant_keys_file(&self) -> PathBuf {
+        self.root.join(ASSISTANT).join("keys.json")
     }
 
     /// The looks saved with a text's "Save as preset". Its folder is made

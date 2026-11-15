@@ -1,8 +1,9 @@
 //! Free layer: picture clips stacked by their own layer instead of by
 //! their tracks.
 //!
-//! A picture is drawn in the order of its `render_index`, then its track,
-//! then its place on the track. With Free layer off every clip keeps its
+//! A picture is drawn in the order of its `render_index`, then its row
+//! with the top row on top, then its place on the row
+//! ([`cutlass_model::paint_order`]). With Free layer off every clip keeps its
 //! track kind's own layer, so the tracks give the order. With it on,
 //! Arrange moves a clip above or below the clips it overlaps in time.
 
@@ -86,7 +87,9 @@ pub fn arrange(draft: &mut Draft, segment_id: &SegmentId, step: Arrange) -> Resu
     // keep their order.
     let mut stack = others;
     stack.push(mine);
-    stack.sort_unstable();
+    stack.sort_unstable_by_key(|&(layer, track, segment)| {
+        cutlass_model::paint_order(layer, track, segment)
+    });
     let base = stack[0].0;
     let at = stack.iter().position(|key| *key == mine).unwrap_or(0);
     let moved = stack.remove(at);
@@ -128,7 +131,8 @@ mod tests {
             track
                 .segments
                 .push(Segment::new(id, "m", TimeRange::new(0, 1_000_000)));
-            draft.tracks.push(track);
+            // File order is the row order, top first: each new row goes on top.
+            draft.tracks.insert(0, track);
         }
         Session::open(draft)
     }
@@ -138,7 +142,10 @@ mod tests {
         let mut keys = Vec::new();
         for (track, row) in session.draft().tracks.iter().enumerate() {
             for (at, segment) in row.segments.iter().enumerate() {
-                keys.push(((segment.render_index, track, at), segment.id.to_string()));
+                keys.push((
+                    cutlass_model::paint_order(segment.render_index, track, at),
+                    segment.id.to_string(),
+                ));
             }
         }
         keys.sort();

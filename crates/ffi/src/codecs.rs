@@ -18,7 +18,7 @@ use cutlass_eval::ReaderFactory;
 use cutlass_isobmff::IsoBmffFile;
 use cutlass_still::{StillDemux, still_limits};
 
-/// ISOBMFF, AVI, WAV, AIFF, CAF, FLAC, Ogg (Opus and Vorbis), MPEG-TS, MP3,
+/// ISOBMFF, AVI, WAV, AIFF, CAF, FLAC, Ogg (Opus and Vorbis), MPEG-TS, raw AAC, MP3,
 /// and stills, decoded with [`decoders`].
 #[must_use]
 pub fn readers() -> ReaderFactory {
@@ -32,6 +32,8 @@ pub fn readers() -> ReaderFactory {
     readers.register_container(cutlass_ogg::probe, open_ogg);
     readers.register_container(cutlass_mpegts::probe, open_ts);
     readers.register_container(cutlass_still::probe, open_still);
+    // Before MP3: an ID3v2 tag alone also matches MP3.
+    readers.register_container(cutlass_adts::probe, open_adts);
     readers.register_container(probe_mp3, open_mp3);
     *readers.decoders_mut() = decoders();
     readers
@@ -99,6 +101,20 @@ fn probe_mp3(header: &[u8]) -> ProbeResult {
             examined: header.len(),
         },
     }
+}
+
+/// Raw AAC. The whole file is indexed on open so it can seek.
+fn open_adts(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let file = File::open(path).map_err(|error| OpenError::Source {
+        message: error.to_string(),
+    })?;
+    let length = file
+        .metadata()
+        .map_err(|error| OpenError::Source {
+            message: error.to_string(),
+        })?
+        .len();
+    Ok(Box::new(cutlass_adts::AdtsSeekFile::open(file, length)?))
 }
 
 fn open_mp3(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
@@ -265,6 +281,62 @@ mod tests {
         for (index, value) in got.iter().enumerate() {
             let expected = source[index] as f32 / 32_767.0;
             assert!((value - expected).abs() < 1e-6, "sample {index}");
+        }
+    }
+
+    /// A raw AAC file opens, has the length of its frames, and a seek into
+    /// the middle hears the same samples as reading from the start.
+    #[test]
+    fn a_raw_aac_file_opens_and_seeks() {
+        use cutlass_adts::Muxer as _;
+
+        let rate = 48_000u32;
+        let spec = CodecParams::audio(CodecId::Aac, rate, ChannelLayout::stereo());
+        let samples: Vec<f32> = (0..2 * rate as usize)
+            .map(|i| ((i / 2) as f32 * 0.031).sin() * 0.4)
+            .collect();
+        let input = AudioInput {
+            pcm: Pcm::from_f32(rate, ChannelLayout::stereo(), samples).expect("pcm"),
+        };
+        let mut encoder = cutlass_aac::AacEncoder::open(&spec).expect("encoder");
+        let mut packets = Encoder::push(&mut encoder, &input).expect("push");
+        packets.extend(Encoder::drain(&mut encoder).expect("drain"));
+        let mut mux = cutlass_adts::AdtsMuxer::new();
+        mux.add_stream(spec).expect("stream");
+        for packet in &packets {
+            mux.write_packet(packet).expect("write");
+        }
+        let path =
+            std::env::temp_dir().join(format!("cutlass-ffi-adts-{}.aac", std::process::id()));
+        std::fs::write(&path, mux.finish().expect("finish")).expect("write");
+
+        let readers = super::readers();
+        let info = readers.probe(&path);
+        let whole = readers
+            .open(&path)
+            .and_then(|mut media| media.audio_from(cutlass_model::Micros(0), 40_000));
+        let middle = readers
+            .open(&path)
+            .and_then(|mut media| media.audio_from(cutlass_model::Micros(500_000), 4_096));
+        std::fs::remove_file(&path).expect("remove");
+
+        let frames = i64::try_from(packets.len()).expect("count");
+        assert_eq!(
+            info.expect("probe").duration.map(|d| d.0),
+            Some(frames * 1024 * 1_000_000 / i64::from(rate))
+        );
+        let whole = whole.expect("whole");
+        let middle = middle.expect("middle");
+        let whole = whole.as_f32().expect("f32");
+        let middle = middle.as_f32().expect("f32");
+        assert_eq!(middle.len(), 2 * 4_096);
+        let from = 2 * 24_000;
+        assert!(middle.iter().any(|value| value.abs() > 0.1), "silent");
+        for (index, (got, want)) in middle.iter().zip(&whole[from..]).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-4,
+                "sample {index}: {got} against {want}"
+            );
         }
     }
 

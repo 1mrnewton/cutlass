@@ -148,7 +148,8 @@ fn canvas_extent(draft: &Draft) -> Option<Extent> {
 /// The composited frame at `time`. The snapshot's draft is not changed.
 ///
 /// Solids, text, nested drafts, video, and effect packages share one paint
-/// order: `render_index`, then track, then segment. A video the factory
+/// order: `render_index`, then row with the top row on top, then segment.
+/// A video the factory
 /// cannot open is skipped. A text segment whose face the snapshot does not
 /// supply is skipped. An effect whose package the snapshot does not supply
 /// is skipped. A transition package fades the pictures that meet at its cut.
@@ -255,7 +256,7 @@ fn gpu_layers(
         .map(|mark| (mark.key, effect(mark)))
         .chain(colours)
         .collect();
-    marks.sort_by_key(|(key, _)| *key);
+    marks.sort_by_key(|(key, _)| crate::effect::drawn_at(*key));
     let mut effects = marks.into_iter().peekable();
     if let Some(pixel) = draft
         .canvas_config
@@ -267,7 +268,9 @@ fn gpu_layers(
         out.push(GpuLayer::fill(pixel));
     }
     for layer in layers {
-        while let Some((_, mark)) = effects.next_if(|(key, _)| *key < layer.key) {
+        while let Some((_, mark)) = effects
+            .next_if(|(key, _)| crate::effect::drawn_at(*key) < crate::effect::drawn_at(layer.key))
+        {
             out.push(mark);
         }
         let gpu = match &layer.paint {
@@ -634,7 +637,7 @@ fn ordered<'a>(
             paint: Paint::Nest(nested.placed),
         });
     }
-    layers.sort_by_key(|layer| layer.key);
+    layers.sort_by_key(|layer| crate::effect::drawn_at(layer.key));
     layers
 }
 
@@ -652,7 +655,7 @@ fn add_lotties(layers: &mut Vec<Ordered<'_>>, lotties: Vec<LottieLayer>) {
             paint: Paint::Lottie(lottie.placed),
         });
     }
-    layers.sort_by_key(|layer| layer.key);
+    layers.sort_by_key(|layer| crate::effect::drawn_at(layer.key));
 }
 
 /// Keeps `frame` for export. A late arrival is still the picture.
@@ -1469,6 +1472,47 @@ mod tests {
         assert_eq!(draft, before);
     }
 
+    /// One pixel: a blue clip on main and a red clip on `over`, a row put
+    /// at `over_at` in the track list, both on layer `render_index`.
+    fn main_and_overlay(over_at: usize, render_index: i32) -> Draft {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 1;
+        draft.canvas_config.height = 1;
+        for (id, packed) in [("blue", "0xFF0000FF"), ("red", "0xFFFF0000")] {
+            draft.materials.material_colors.push(MaterialColorConfig {
+                id: id.into(),
+                is_color_clip: true,
+                solid_color: packed.to_owned(),
+                ..MaterialColorConfig::default()
+            });
+        }
+        let mut main = Segment::new("main", "blue", TimeRange::new(0, 1_000));
+        main.render_index = render_index;
+        draft.tracks[0].segments.push(main);
+        let mut row = cutlass_model::Track::main("over");
+        row.flag = cutlass_model::TrackFlag::SubVideo;
+        let mut over = Segment::new("over", "red", TimeRange::new(0, 1_000));
+        over.render_index = render_index;
+        row.segments.push(over);
+        draft.tracks.insert(over_at, row);
+        draft
+    }
+
+    #[test]
+    fn on_one_layer_the_upper_row_is_drawn_over_the_row_below() {
+        const RED: [u8; 4] = [255, 0, 0, 255];
+        const BLUE: [u8; 4] = [0, 0, 255, 255];
+        // The overlay row above main, as the timeline and an insert put it.
+        assert_eq!(pixels(&main_and_overlay(0, 0), 0), RED);
+        assert_eq!(pixels(&main_and_overlay(0, 14_000), 0), RED);
+        // The same row moved under main is covered by it.
+        assert_eq!(pixels(&main_and_overlay(1, 0), 0), BLUE);
+        // A higher layer still wins whatever its row.
+        let mut draft = main_and_overlay(1, 0);
+        draft.tracks[1].segments[0].render_index = 1;
+        assert_eq!(pixels(&draft, 0), RED);
+    }
+
     #[test]
     fn a_movie_the_factory_cannot_open_leaves_the_solid() {
         let mut draft = color_clip("0xFF336699", false);
@@ -1734,6 +1778,73 @@ mod tests {
         let middle = framed_at(&path, None, red, &keys, 500_000);
         assert_eq!(row(&middle, 16, 0), [128, 0, 128, 255].repeat(16));
         assert_eq!(rows(&middle, 16, 1, 16), picture);
+    }
+
+    #[test]
+    fn a_compound_over_an_image_canvas_stays_layers_for_the_gpu() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine/fixtures/pattern.png");
+        let picture = still_frame(&path, 16, 16, Crop::default(), "free");
+        let covered =
+            crate::canvas::cover(&CpuBytes::new(16, 16, picture).expect("picture"), 16, 18)
+                .expect("cover");
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 16;
+        draft.canvas_config.height = 18;
+        let mut video = MaterialVideo::new("still");
+        video.path = path.display().to_string();
+        draft.materials.videos.push(video);
+        let mut segment = Segment::new("still", "still", TimeRange::new(0, 1_000_000));
+        segment.source_range = Some(TimeRange::new(0, 1_000_000));
+        draft.tracks[0].segments.push(segment);
+        let mut session = cutlass_session::Session::open(draft);
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::CreateCompound {
+                    segment_ids: vec!["still".into()],
+                    segment_id: "nest".into(),
+                    material_id: "inside".into(),
+                }],
+            )
+            .unwrap();
+        let mut draft = session.draft().clone();
+        let image = canvas("canvas_image", "#00FF00", 0.0, path.to_str().expect("path"));
+        let nest = &mut draft.tracks[0].segments[0];
+        assert_eq!(nest.id.as_str(), "nest");
+        nest.extra_material_refs.push(image.id.clone());
+        draft.materials.canvases.push(image);
+
+        let media = stills();
+        let mut device = SoftwareDevice::new();
+        let mut clips = OpenClips::new();
+        let snapshot = Snapshot::new(&draft);
+        let layers = layers_in(
+            &snapshot,
+            Micros(0),
+            &mut device,
+            &media,
+            &mut clips,
+            0,
+            None,
+        )
+        .expect("layers");
+        let sources: Vec<&crate::gpu::GpuSource> =
+            layers.layers.iter().map(|layer| &layer.source).collect();
+        // The image under the compound, then the compound's own layers.
+        let at = sources
+            .iter()
+            .position(|source| matches!(source, crate::gpu::GpuSource::Nested(_)))
+            .expect("a compound layer");
+        assert!(at > 0);
+        let crate::gpu::GpuSource::Rgba(under) = sources[at - 1] else {
+            panic!("no image under the compound: {sources:?}");
+        };
+        assert_eq!(under, &covered);
+        // The CPU draws the same image in the letterbox.
+        let cpu = frame(&snapshot, Micros(0), &mut device, &media, &mut clips, 0)
+            .expect("frame")
+            .rgba;
+        assert_eq!(row(&cpu, 16, 0), row(covered.rgba(), 16, 0));
     }
 
     fn canvas(kind: &str, color: &str, blur: f64, image: &str) -> MaterialCanvas {
@@ -2062,6 +2173,40 @@ mod recipe_tests {
                 .iter()
                 .all(|layer| !matches!(layer.source, GpuSource::Nested(_)))
         );
+    }
+
+    #[test]
+    fn a_recipe_bound_to_a_clip_drawn_above_effects_runs_inside_that_clip() {
+        // A title or a sticker is drawn above every effect row. Bound to
+        // one, the effect still runs in it, and leaves the clips below.
+        let mut draft = with_effect("recipe/vignette");
+        let top = draft.tracks.len() - 1;
+        colour(&mut draft, "above", 14_000, top);
+        if let Some(effect) = draft.tracks[top]
+            .segments
+            .iter_mut()
+            .find(|segment| segment.id.as_str() == "fx")
+        {
+            effect.bind_to(Some(&"above".into()));
+        }
+        let frame = layers(&draft, 600_000);
+        assert!(effects(&frame).is_empty(), "no effect over the whole frame");
+        let nested: Vec<usize> = frame
+            .layers
+            .iter()
+            .enumerate()
+            .filter(|(_, layer)| matches!(layer.source, GpuSource::Nested(_)))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            nested,
+            vec![frame.layers.len() - 1],
+            "only the clip on top carries the effect"
+        );
+        let Some(GpuSource::Nested(child)) = frame.layers.last().map(|layer| &layer.source) else {
+            panic!("the top clip is not drawn with its effect");
+        };
+        assert_eq!(effects(child), vec![child.layers.len() - 1]);
     }
 
     #[test]

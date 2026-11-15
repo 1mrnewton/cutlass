@@ -117,7 +117,10 @@ impl MaterialEffect {
 }
 
 /// A title's glow, as `bloom_params` stores it. `strength` and `range` are
-/// read from 0 to 1; the direction is kept but not drawn.
+/// read from 0 to 1; the direction is kept but not drawn. The app's own
+/// `rays` streams the glow out of the letters as rays of light, leaning
+/// `lean_x` degrees right and `lean_y` degrees up, each up to
+/// [`MAX_GLOW_LEAN`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BloomParams {
     #[serde(default)]
@@ -130,8 +133,27 @@ pub struct BloomParams {
     pub dir_x: f64,
     #[serde(default)]
     pub dir_y: f64,
+    #[serde(default, rename = "cutlass_rays", skip_serializing_if = "is_false")]
+    pub rays: bool,
+    #[serde(default, rename = "cutlass_lean_x", skip_serializing_if = "is_nothing")]
+    pub lean_x: f64,
+    #[serde(default, rename = "cutlass_lean_y", skip_serializing_if = "is_nothing")]
+    pub lean_y: f64,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
+}
+
+/// How far a glow's rays lean, in degrees either way.
+pub const MAX_GLOW_LEAN: f64 = 45.0;
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_nothing(value: &f64) -> bool {
+    *value == 0.0
 }
 
 impl Default for BloomParams {
@@ -142,6 +164,9 @@ impl Default for BloomParams {
             range: full_range(),
             dir_x: 0.0,
             dir_y: 0.0,
+            rays: false,
+            lean_x: 0.0,
+            lean_y: 0.0,
             rest: Map::new(),
         }
     }
@@ -370,6 +395,28 @@ mod tests {
         let mut broken = MaterialEffect::new("b");
         broken.bloom_params = Some(serde_json::json!({"strength":"high"}));
         assert!(broken.bloom().is_none());
+    }
+
+    #[test]
+    fn a_glows_rays_and_lean_are_kept_and_left_out_when_off() {
+        let soft = MaterialEffect::glow("g", &BloomParams::default());
+        let stored = soft.bloom_params.clone().unwrap();
+        for key in ["cutlass_rays", "cutlass_lean_x", "cutlass_lean_y"] {
+            assert!(stored.get(key).is_none(), "{key}");
+        }
+        let rays = BloomParams {
+            rays: true,
+            lean_x: -1.0,
+            lean_y: 3.0,
+            ..BloomParams::default()
+        };
+        let made = MaterialEffect::glow("g", &rays);
+        let stored = made.bloom_params.clone().unwrap();
+        assert_eq!(stored["cutlass_rays"], true);
+        assert_eq!(stored["cutlass_lean_y"], 3.0);
+        let read = made.bloom().unwrap();
+        assert_eq!(read, rays);
+        assert!(read.rest.is_empty());
     }
 
     #[test]

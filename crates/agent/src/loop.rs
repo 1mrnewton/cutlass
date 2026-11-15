@@ -9,23 +9,41 @@ use std::fmt;
 
 use cutlass_settings::Settings;
 
+use crate::picture::Picture;
+
 use crate::model::{
     Completion, CompletionRequest, Message, Model, ModelError, ToolCall, ToolDefinition,
 };
 
-/// The text a tool returned to the model.
+/// What a tool returned to the model.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolOutcome {
     /// The tool's text.
     pub content: String,
     /// Whether the tool failed.
     pub is_error: bool,
+    /// A picture for the model to look at, with the text.
+    pub picture: Option<Picture>,
 }
 
 /// Runs one tool call and returns the text the model should see.
 pub trait ToolSink {
     /// Runs `call` and returns its outcome.
     fn run_tool(&mut self, call: &ToolCall) -> ToolOutcome;
+
+    /// A helper started on `call`, an `agent.delegate`; its own calls come
+    /// next, then [`ToolSink::helper_finished`]. A host that shows each
+    /// step shows the hand-off here.
+    fn helper_started(&mut self, _call: &ToolCall) {}
+
+    /// The helper on `call` finished with `outcome`.
+    fn helper_finished(&mut self, _call: &ToolCall, _outcome: &ToolOutcome) {}
+
+    /// `message` joined the turn's transcript: the ask, a reply, or a tool
+    /// result. A host that keeps the conversation itself hears each one as
+    /// it lands, so a turn that fails or is stopped is not lost. A helper's
+    /// own messages are not heard.
+    fn heard(&mut self, _message: &Message) {}
 }
 
 /// The rounds, transcript, and final completion of one ask.
@@ -97,9 +115,11 @@ pub fn run_after<M: Model, S: ToolSink>(
     definitions: &[ToolDefinition],
 ) -> Result<Turn, LoopError> {
     let mut messages = history;
-    messages.push(Message::User {
+    let asked = Message::User {
         text: ask.to_owned(),
-    });
+    };
+    tools.heard(&asked);
+    messages.push(asked);
     let mut rounds: u32 = 0;
     loop {
         if rounds >= cap {
@@ -111,10 +131,12 @@ pub fn run_after<M: Model, S: ToolSink>(
         };
         let completion = model.complete(&request).map_err(LoopError::Model)?;
         rounds += 1;
-        messages.push(Message::Assistant {
+        let replied = Message::Assistant {
             text: completion.text.clone(),
             calls: completion.calls.clone(),
-        });
+        };
+        tools.heard(&replied);
+        messages.push(replied);
         if completion.calls.is_empty() {
             return Ok(Turn {
                 rounds,
@@ -124,12 +146,15 @@ pub fn run_after<M: Model, S: ToolSink>(
         }
         for call in &completion.calls {
             let outcome = tools.run_tool(call);
-            messages.push(Message::Tool {
+            let result = Message::Tool {
                 call_id: call.id.clone(),
                 name: call.name.clone(),
                 content: outcome.content,
                 is_error: outcome.is_error,
-            });
+                picture: outcome.picture,
+            };
+            tools.heard(&result);
+            messages.push(result);
         }
     }
 }
@@ -167,8 +192,84 @@ mod tests {
                 .unwrap_or_else(|| ToolOutcome {
                     content: "ok".to_owned(),
                     is_error: false,
+                    picture: None,
                 })
         }
+    }
+
+    /// Keeps what it hears, as a host that holds the conversation does.
+    #[derive(Default)]
+    struct Listening(Vec<Message>);
+
+    impl ToolSink for Listening {
+        fn run_tool(&mut self, _call: &ToolCall) -> ToolOutcome {
+            ToolOutcome {
+                content: "ok".to_owned(),
+                is_error: false,
+                picture: None,
+            }
+        }
+
+        fn heard(&mut self, message: &Message) {
+            self.0.push(message.clone());
+        }
+    }
+
+    #[test]
+    fn a_host_hears_a_turn_that_ends_at_the_step_cap() {
+        let call = tool_call("1", "draft.apply", "{}");
+        let mut model = LocalModel::scripted(vec![
+            with_call("first", call.clone()),
+            with_call("second", tool_call("2", "draft.apply", "{}")),
+            done("never reached"),
+        ]);
+        let mut sink = Listening::default();
+        let error = run(&mut model, &mut sink, 2, "edit", &[]).unwrap_err();
+        assert_eq!(error, LoopError::StepCap { cap: 2 });
+        // The ask, both replies and both results: what was done is known
+        // though the turn gave no answer.
+        assert_eq!(sink.0.len(), 5);
+        assert_eq!(
+            sink.0[0],
+            Message::User {
+                text: "edit".to_owned()
+            }
+        );
+        assert!(matches!(&sink.0[1], Message::Assistant { text, .. } if text == "first"));
+        assert!(matches!(&sink.0[4], Message::Tool { call_id, .. } if call_id == "2"));
+        // A turn that finishes is heard in full, the same as it returns.
+        let mut model = LocalModel::scripted(vec![with_call("", call), done("done")]);
+        let mut sink = Listening::default();
+        let turn = run(&mut model, &mut sink, 8, "edit", &[]).unwrap();
+        assert_eq!(sink.0, turn.messages);
+    }
+
+    #[test]
+    fn a_picture_a_tool_made_goes_to_the_model_with_its_text() {
+        let picture = crate::Picture::jpeg(b"frame");
+        let mut model = LocalModel::scripted(vec![
+            with_call("", tool_call("1", "player.look", "")),
+            done("seen"),
+        ]);
+        let mut sink = RecordingSink::scripted(vec![ToolOutcome {
+            content: "frame at 0".to_owned(),
+            is_error: false,
+            picture: Some(picture.clone()),
+        }]);
+        let turn = run(&mut model, &mut sink, 8, "look", &[]).unwrap();
+        assert_eq!(
+            turn.messages[2],
+            Message::Tool {
+                call_id: "1".to_owned(),
+                name: "player.look".to_owned(),
+                content: "frame at 0".to_owned(),
+                is_error: false,
+                picture: Some(picture.clone()),
+            }
+        );
+        // The round after the look was sent the picture.
+        let sent = &model.seen()[1].messages[2];
+        assert!(matches!(sent, Message::Tool { picture: Some(seen), .. } if *seen == picture));
     }
 
     fn tool_call(id: &str, name: &str, arguments: &str) -> ToolCall {
@@ -207,6 +308,7 @@ mod tests {
         let mut sink = RecordingSink::scripted(vec![ToolOutcome {
             content: "revision=0".to_owned(),
             is_error: false,
+            picture: None,
         }]);
         let turn = run(&mut model, &mut sink, 8, ask, &definitions).unwrap();
         assert_eq!(turn.rounds, 2);
@@ -241,6 +343,7 @@ mod tests {
                     name: "draft.query".to_owned(),
                     content: "revision=0".to_owned(),
                     is_error: false,
+                    picture: None,
                 },
             ]
         );
@@ -261,6 +364,7 @@ mod tests {
                     name: "draft.query".to_owned(),
                     content: "revision=0".to_owned(),
                     is_error: false,
+                    picture: None,
                 },
                 Message::Assistant {
                     text: "done".to_owned(),
@@ -305,6 +409,7 @@ mod tests {
         let mut sink = RecordingSink::scripted(vec![ToolOutcome {
             content: "ok".to_owned(),
             is_error: false,
+            picture: None,
         }]);
         let turn = run(&mut model, &mut sink, cap, "go", &[]).unwrap();
         assert_eq!(turn.rounds, 2);
@@ -341,10 +446,12 @@ mod tests {
             ToolOutcome {
                 content: "refused".to_owned(),
                 is_error: true,
+                picture: None,
             },
             ToolOutcome {
                 content: "ok".to_owned(),
                 is_error: false,
+                picture: None,
             },
         ]);
         let turn = run(&mut model, &mut sink, 3, "edit the draft", &[]).unwrap();
@@ -366,6 +473,7 @@ mod tests {
                     name: "draft.apply".to_owned(),
                     content: "refused".to_owned(),
                     is_error: true,
+                    picture: None,
                 },
                 Message::Assistant {
                     text: String::new(),
@@ -376,6 +484,7 @@ mod tests {
                     name: "draft.query".to_owned(),
                     content: "ok".to_owned(),
                     is_error: false,
+                    picture: None,
                 },
                 Message::Assistant {
                     text: "done".to_owned(),

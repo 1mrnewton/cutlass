@@ -40,10 +40,12 @@ fn known(bit: i32) -> bool {
 
 /// Add an empty lane.
 ///
-/// Video and mixed lanes use the overlay flag and sit immediately above the
-/// main track. Audio sits immediately under it. Any other lane sits above
-/// the first video track. An empty id, a type that is not a lane, or an id
-/// already on the draft is refused. The request does not place a segment.
+/// Video and mixed lanes use the overlay flag and open on top of the video
+/// rows, above main and every overlay. Audio sits immediately under main.
+/// Any other lane opens as the top row. The top row is drawn on top, so a
+/// new lane's clips show over the ones already there. An empty id, a type
+/// that is not a lane, or an id already on the draft is refused. The
+/// request does not place a segment.
 pub fn insert_track(
     draft: &mut Draft,
     track_id: &TrackId,
@@ -143,10 +145,9 @@ pub fn rename_track(draft: &mut Draft, track_id: &TrackId, name: &str) -> Result
     Ok(())
 }
 
-/// Video overlays sit just above the main track. Audio sits just under it.
-/// Other lanes sit above the first video track.
-/// Where `InsertTrack` opens a lane of `kind`: an overlay just above the main
-/// track, audio just under it, any other kind above the first video track.
+/// Where `InsertTrack` opens a lane of `kind`: an overlay on top of the video
+/// rows, audio just under the main track, any other kind as the top row, so
+/// what a new lane holds is drawn over what is already there.
 #[must_use]
 pub fn new_lane_index(tracks: &[Track], kind: &TrackType) -> usize {
     match kind {
@@ -157,14 +158,11 @@ pub fn new_lane_index(tracks: &[Track], kind: &TrackType) -> usize {
             .unwrap_or(tracks.len()),
         TrackType::Video | TrackType::Mixed => tracks
             .iter()
-            .position(|track| track.is_main())
-            .unwrap_or(tracks.len()),
-        _ => tracks
-            .iter()
             .position(|track| {
                 matches!(track.kind, TrackType::Video | TrackType::Mixed) || track.is_main()
             })
-            .unwrap_or(0),
+            .unwrap_or(tracks.len()),
+        _ => 0,
     }
 }
 
@@ -412,6 +410,37 @@ mod tests {
         let error = insert_track(&mut draft, &TrackId::new("lane"), &TrackType::None).unwrap_err();
         assert_eq!(error, EditError::TrackKind);
         assert_eq!(draft.tracks.len(), 1);
+    }
+
+    #[test]
+    fn a_new_lane_opens_above_the_lanes_of_its_group_so_it_is_drawn_on_top() {
+        let mut draft = crate::edit::test_draft("D");
+        for (id, kind) in [
+            ("over-1", TrackType::Video),
+            ("words-1", TrackType::Text),
+            ("over-2", TrackType::Video),
+            ("shapes", TrackType::Sticker),
+            ("sound", TrackType::Audio),
+        ] {
+            insert_track(&mut draft, &TrackId::new(id), &kind).unwrap();
+        }
+        let order: Vec<&str> = draft.tracks.iter().map(|track| track.id.as_str()).collect();
+        let main = draft
+            .tracks
+            .iter()
+            .position(cutlass_model::Track::is_main)
+            .unwrap();
+        assert_eq!(
+            order[..main],
+            ["shapes", "words-1", "over-2", "over-1"],
+            "newest first in each group, the text group above the video rows"
+        );
+        assert_eq!(order[main + 1..], ["sound"]);
+        // The newer overlay is drawn over the older one on their layer.
+        assert!(
+            cutlass_model::paint_order(0, 2, 0) > cutlass_model::paint_order(0, 3, 0),
+            "over-2 at row 2 is drawn after over-1 at row 3"
+        );
     }
 
     #[test]

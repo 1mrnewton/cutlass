@@ -162,9 +162,46 @@ pub struct MaterialText {
         skip_serializing_if = "is_zero"
     )]
     pub caption_stagger_ms: i64,
+    /// The background is a box around each line, each as wide as its own
+    /// letters, rather than one box around them all. The app's own.
+    #[serde(
+        default,
+        rename = "cutlass_background_lines",
+        skip_serializing_if = "is_false"
+    )]
+    pub background_lines: bool,
+    /// How far the background box sits from the letters, to the right, in
+    /// ems. The app's own.
+    #[serde(
+        default,
+        rename = "cutlass_background_offset_x",
+        skip_serializing_if = "is_nothing"
+    )]
+    pub background_offset_x: f64,
+    /// How far the background box sits from the letters, up, in ems. The
+    /// app's own.
+    #[serde(
+        default,
+        rename = "cutlass_background_offset_y",
+        skip_serializing_if = "is_nothing"
+    )]
+    pub background_offset_y: f64,
+    /// The lines bend along an arc. The app's own.
+    #[serde(default, rename = "cutlass_curve_on", skip_serializing_if = "is_false")]
+    pub curve_on: bool,
+    /// How far the lines bend: the degrees of arc the title's width takes,
+    /// up to [`MAX_CURVE`] either way. Above zero they arch up in the
+    /// middle, below zero they dip. Kept while the curve is off. The app's
+    /// own.
+    #[serde(default, rename = "cutlass_curve", skip_serializing_if = "is_nothing")]
+    pub curve: f64,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
 }
+
+/// The most a title's lines bend, in degrees of arc either way: a whole
+/// circle.
+pub const MAX_CURVE: f64 = 360.0;
 
 /// The most axes a title sets a face along.
 pub const MAX_FONT_AXES: usize = 16;
@@ -208,6 +245,18 @@ impl MaterialText {
         };
         self.caption_keywords = keywords_in_ranges(&self.content, &self.words, ranges);
     }
+}
+
+/// Serde's skip test for a switch that is off.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Serde's skip test for an amount of nothing.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_nothing(value: &f64) -> bool {
+    *value == 0.0
 }
 
 /// Serde's skip test for a zero stagger.
@@ -276,6 +325,11 @@ impl Default for MaterialText {
             caption_style: String::new(),
             caption_keywords: Vec::new(),
             caption_stagger_ms: 0,
+            background_lines: false,
+            background_offset_x: 0.0,
+            background_offset_y: 0.0,
+            curve_on: false,
+            curve: 0.0,
             rest: Map::new(),
         }
     }

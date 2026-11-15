@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "apps/desktop",
     "crates/agent",
+    "crates/agent-cloud",
     "crates/audio",
     "crates/captions",
     "crates/codec",
@@ -87,6 +88,7 @@ members = [
     "tools/icongen",
     "tools/licenses",
     "tools/media-bench",
+    "tools/editor-bench",
 ]
 
 [workspace.package]

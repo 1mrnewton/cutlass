@@ -135,6 +135,9 @@ pub enum EditError {
     MainTrack,
     /// The rotation is not a finite number of degrees.
     Angle,
+    /// The pivot is not a finite number, or is further from the picture's
+    /// middle than [`rotate::PIVOT_REACH`] half sizes.
+    Pivot,
     /// Position is not a finite number.
     Position,
     /// Scale is not finite and greater than zero.
@@ -154,8 +157,16 @@ pub enum EditError {
     KeyValue,
     /// The curve is not one the Graphs panel offers.
     Graph,
-    /// The animation is not one the Animations panel offers for that side.
+    /// The animation's kind is not in, out, loop or caption.
     Animation,
+    /// No animation has that id.
+    AnimationUnknown,
+    /// The animation is one for another side: an in animation asked for
+    /// on the way out, or one that is not a loop asked for as a caption.
+    AnimationSide,
+    /// The animation moves a title's letters, or is a caption's, and the
+    /// clip is not a text clip.
+    AnimationText,
     /// The segment is not a text clip.
     NotText,
     /// Text size is not finite, or it is outside zero to 512.
@@ -223,6 +234,123 @@ pub enum EditError {
     /// The color space is not one the player keeps.
     ColorSpace,
 }
+
+impl std::fmt::Display for EditError {
+    /// Why the request was refused, in words a person or a model can act on.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            Self::RevisionMismatch { expected, actual } => {
+                return write!(
+                    formatter,
+                    "the draft is at revision {actual}, not {expected}"
+                );
+            }
+            Self::MissingTrack => "no track has that id",
+            Self::MissingSegment => "no clip has that id",
+            Self::DuplicateSegment => "the clip id is empty or already used",
+            Self::LockedTrack => "the track is locked",
+            Self::Overlap => "it would overlap another clip on that track",
+            Self::Speed(_) => "the speed or the length it gives is not usable",
+            Self::WordShape => "the word lists differ in length, or a word ends before it starts",
+            Self::Range(_) => "a time falls outside its clip, or a length is zero or negative",
+            Self::EmptyUndo => "there is nothing to undo",
+            Self::EmptyRedo => "there is nothing to redo",
+            Self::HistoryOpen => "an edit is already open",
+            Self::HistoryClosed => "no edit is open",
+            Self::UnknownAttribute => "the bit is not 1 mute, 2 hide, 4 lock or 8 solo",
+            Self::MissingMaterial => "no material has that id; import it first",
+            Self::SourceBounds => "the media does not reach that far",
+            Self::BeforeZero => "the clip would start before the timeline does",
+            Self::LaneKind => "that track holds another kind of clip",
+            Self::DuplicateMaterial => "the material id is already used",
+            Self::TransitionWindow => "the time falls inside a transition",
+            Self::AlreadyLinked => "the dependent already has an owner, or is an owner itself",
+            Self::DuplicateMark => "a marker is already at that time",
+            Self::DuplicateBeat => "a beat is already at that time",
+            Self::NotAudio => "the clip is not on an audio track",
+            Self::NotVideo => "the clip is not a video clip",
+            Self::FlowRate => "the frame rate is not 30, 50 or 60",
+            Self::Relight => "a relight preset, strength, color or angle is not one it stores",
+            Self::Reframe => "a reframe ratio, stability or speed is not one it offers",
+            Self::MotionBlur => "a motion blur amount is out of its range",
+            Self::NoSound => "the clip has no sound, or its file path is empty",
+            Self::AlreadyExtracted => "the clip's sound is already its own clip",
+            Self::SoundNotSeparate => "the clip still has its own sound",
+            Self::TrackKind => "the track id is already used, or that kind cannot be a track",
+            Self::MainTrack => "the main track cannot be removed",
+            Self::Angle => "the rotation is not a finite number of degrees",
+            Self::Pivot => {
+                "the pivot is not a finite number, or is more than 8 half sizes from the middle"
+            }
+            Self::Position => "the position is not a finite number",
+            Self::Scale => "the scale is not a finite number above zero",
+            Self::Fade => "a fade length is negative",
+            Self::Volume => "the volume is negative or not a number",
+            Self::Opacity => "the opacity is outside 0 to 1",
+            Self::KeyTime => "the key's time is outside its clip",
+            Self::NoKey => "no key is at that time",
+            Self::KeyValue => {
+                "a keyed setting is not one that takes keys, or its value is not a number"
+            }
+            Self::Graph => "the curve name is not one of the graphs",
+            Self::Animation => "the animation kind is not in, out, loop or caption",
+            Self::AnimationUnknown => {
+                "no animation has that id; catalog.search \"animation\" lists them with their ids"
+            }
+            Self::AnimationSide => {
+                "that animation is for another side: catalog.search lists each as animation-in, \
+                 animation-out or animation-loop, and kind must be the same (caption takes a \
+                 loop one)"
+            }
+            Self::AnimationText => {
+                "that animation is for a text clip only: it moves letters, or its kind is caption"
+            }
+            Self::NotText => "the clip is not a text clip",
+            Self::TextSize => "the text size is outside 0 to 512",
+            Self::TextColor => "the color is not written #rrggbb",
+            Self::TextAlign => "the alignment is not one of the numbers it takes",
+            Self::TextRange => "those letters are not in the text, or the text is a caption",
+            Self::LetterSpacing => "the letter spacing is outside -1 to 4",
+            Self::LineSpacing => "the line spacing is outside -1 to 4",
+            Self::LineWidth => "the wrap width is negative or too wide",
+            Self::TextFont => "the face is empty or is not a font file name",
+            Self::TextFontAxes => "the font axes are not written tag=value",
+            Self::TextStyle => "an outline, shadow or background amount is out of its range",
+            Self::TextEmpty => "the text is blank",
+            Self::NotShape => "the clip is not a shape",
+            Self::ShapeStyle => "a shape size, stroke, corner or shadow amount is out of its range",
+            Self::UnknownEffect => "that effect, filter or transition id is not one Cutlass ships",
+            Self::Lut => "the text is not a 3D .cube table, or the clip has no LUT to change",
+            Self::Mask => "a mask number is out of its range",
+            Self::Track => {
+                "the path is empty, out of order or outside its clip, or a follower is not a \
+                 picture clip that plays along the path"
+            }
+            Self::Compound => {
+                "the clip is not a compound clip, or it plays its inside at another speed"
+            }
+            Self::NotEffect => "the clip is not an effect, a filter or an adjustment",
+            Self::EffectTarget => {
+                "an effect binds to a picture clip, and only an effect clip binds"
+            }
+            Self::EffectStrength => "the strength is outside 0 to 1",
+            Self::EffectControl => {
+                "the effect has no control by that name, or the value is out of its range"
+            }
+            Self::CanvasColor => "the canvas color is not written #rrggbb",
+            Self::CanvasSize => "a canvas side is outside 1 to 7680",
+            Self::CanvasRatio => "the ratio is not one of the project shapes",
+            Self::FreeLayer => "arrange moves picture clips, and only with free layer on",
+            Self::Letterbox => "a letterbox belongs on a video or compound clip",
+            Self::LetterboxBlur => "the letterbox blur is outside 0 to 1",
+            Self::FrameRate => "the frame rate is not one the project can use",
+            Self::ColorSpace => "the color space is not one the project keeps",
+        };
+        formatter.write_str(text)
+    }
+}
+
+impl std::error::Error for EditError {}
 
 pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditError> {
     match request {
@@ -342,10 +470,17 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             degrees,
         } => rotate::set_rotation(draft, segment_id, *degrees),
+        Request::SetPivot { segment_id, x, y } => rotate::set_pivot(draft, segment_id, *x, *y),
         Request::SetPosition { segment_id, x, y } => {
             placement::set_position(draft, segment_id, *x, *y)
         }
         Request::SetScale { segment_id, scale } => placement::set_scale(draft, segment_id, *scale),
+        Request::SetUniformScale { segment_id, on } => {
+            placement::set_uniform_scale(draft, segment_id, *on)
+        }
+        Request::SetScaleAxes { segment_id, x, y } => {
+            placement::set_scale_axes(draft, segment_id, *x, *y)
+        }
         Request::SetOpacity {
             segment_id,
             opacity,
@@ -488,12 +623,35 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             angle,
             blur,
         } => text::set_text_shadow(draft, segment_id, color, [*distance, *angle, *blur]),
+        Request::SetTextShadowOpacity {
+            segment_id,
+            opacity,
+        } => text::set_text_shadow_opacity(draft, segment_id, *opacity),
+        Request::SetTextCurve {
+            segment_id,
+            on,
+            degrees,
+        } => text::set_text_curve(draft, segment_id, *on, *degrees),
         Request::SetTextBackground {
             segment_id,
             color,
             alpha,
             round,
         } => text::set_text_background(draft, segment_id, color, *alpha, *round),
+        Request::SetTextBackgroundBox {
+            segment_id,
+            lines,
+            width,
+            height,
+            offset_x,
+            offset_y,
+        } => text::set_text_background_box(
+            draft,
+            segment_id,
+            *lines,
+            [*width, *height],
+            [*offset_x, *offset_y],
+        ),
         Request::SetCaptionKeyword {
             segment_id,
             word,
@@ -519,7 +677,19 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             color,
             strength,
             range,
-        } => text::set_text_glow(draft, segment_id, glow_id, color, [*strength, *range]),
+            rays,
+            lean,
+        } => text::set_text_glow(
+            draft,
+            segment_id,
+            glow_id,
+            color,
+            [*strength, *range],
+            text::GlowDrawn {
+                rays: *rays,
+                lean: *lean,
+            },
+        ),
         Request::AddText {
             track_id,
             segment_id,
@@ -618,6 +788,7 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             material_id,
             mode,
         } => blend::set_blend(draft, segment_id, material_id, mode),
+        Request::SetBlendOn { segment_id, on } => blend::set_blend_on(draft, segment_id, *on),
         Request::AddAdjustment {
             track_id,
             segment_id,
@@ -981,4 +1152,26 @@ pub(super) fn overlaps_except(
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod reason_tests {
+    use super::EditError;
+
+    #[test]
+    fn a_refusal_says_why_in_words() {
+        assert_eq!(
+            EditError::Overlap.to_string(),
+            "it would overlap another clip on that track"
+        );
+        assert_eq!(EditError::MissingSegment.to_string(), "no clip has that id");
+        assert_eq!(
+            EditError::RevisionMismatch {
+                expected: 2,
+                actual: 5
+            }
+            .to_string(),
+            "the draft is at revision 5, not 2"
+        );
+    }
 }

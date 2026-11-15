@@ -106,6 +106,17 @@ pub type VTCompressionOutputCallback = unsafe extern "C" fn(
     sample: *mut c_void,
 );
 
+/// `CMBlockBufferCustomBlockSource`. The header packs it to 4 bytes, so on
+/// 64-bit targets the function pointers sit at offsets 4 and 12.
+#[repr(C, packed(4))]
+pub struct CMBlockBufferCustomBlockSource {
+    /// `kCMBlockBufferCustomBlockSourceVersion`, 0.
+    pub version: u32,
+    pub allocate: Option<unsafe extern "C" fn(refcon: *mut c_void, size: usize) -> *mut c_void>,
+    pub free: Option<unsafe extern "C" fn(refcon: *mut c_void, block: *mut c_void, size: usize)>,
+    pub refcon: *mut c_void,
+}
+
 pub type AudioQueueRef = *mut c_void;
 
 pub type AudioQueueBufferRef = *mut AudioQueueBuffer;
@@ -300,11 +311,33 @@ unsafe extern "C" {
         memory: *mut c_void,
         block_length: usize,
         block_allocator: *const c_void,
-        custom: *const c_void,
+        custom: *const CMBlockBufferCustomBlockSource,
         offset: usize,
         data_length: usize,
         flags: u32,
         out: *mut *mut c_void,
+    ) -> OSStatus;
+
+    pub fn CMBlockBufferCopyDataBytes(
+        buffer: *const c_void,
+        offset: usize,
+        length: usize,
+        destination: *mut c_void,
+    ) -> OSStatus;
+
+    pub fn CMBlockBufferCreateEmpty(
+        structure: *const c_void,
+        capacity: u32,
+        flags: u32,
+        out: *mut *mut c_void,
+    ) -> OSStatus;
+
+    pub fn CMBlockBufferAppendBufferReference(
+        buffer: *mut c_void,
+        target: *mut c_void,
+        offset: usize,
+        length: usize,
+        flags: u32,
     ) -> OSStatus;
 
     pub fn CMBlockBufferGetDataPointer(

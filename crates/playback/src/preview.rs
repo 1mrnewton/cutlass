@@ -52,9 +52,25 @@ pub(crate) fn queue_mix_peak(output: &mut AudioOutput, mix: PreviewMix<'_>) -> O
     if frames == 0 {
         return None;
     }
-    let bytes = mixed_bytes(mix, frames);
+    let mut bytes = mixed_bytes(mix, frames);
+    let peak = crate::meter::window_peak(&bytes);
+    clip_to_full_scale(&mut bytes);
     output.queue(&bytes);
-    Some(crate::meter::window_peak(&bytes))
+    Some(peak)
+}
+
+/// Hold every sample of little-endian f32 `bytes` inside full scale.
+///
+/// Loud clips sum past full scale. Export clips its mix there, so the
+/// preview does too and the two sound alike at any device volume. Take the
+/// meter's peak first: it reads how far over the mix went.
+pub(crate) fn clip_to_full_scale(bytes: &mut [u8]) {
+    for sample in bytes.as_chunks_mut::<4>().0 {
+        let value = f32::from_le_bytes(*sample);
+        if !(-1.0..=1.0).contains(&value) && !value.is_nan() {
+            *sample = value.clamp(-1.0, 1.0).to_le_bytes();
+        }
+    }
 }
 
 /// `frames` of mixed stereo at `mix.time`. A failed mix is silence of the
@@ -136,9 +152,11 @@ mod tests {
     use cutlass_model::{
         Draft, MaterialAudio, MaterialId, Micros, Segment, TimeRange, Track, TrackType,
     };
-    use cutlass_session::Session;
+    use cutlass_session::{Request, Session};
 
-    use super::{PreviewMix, preview_frames, queue_mix};
+    use super::{
+        PreviewMix, clip_to_full_scale, preview_frames, queue_mix, queue_mix_peak, window_bytes,
+    };
     use crate::apple::{AudioHost, AudioOutput};
     use crate::playhead::Player;
 
@@ -163,7 +181,12 @@ mod tests {
     }
 
     fn write_tone(path: &Path) {
-        let payload = [0xFF_u8, 0x7F, 0xFF, 0x7F, 0xFF, 0x7F, 0xFF, 0x7F];
+        write_tone_of(path, 4);
+    }
+
+    /// `frames` of full-scale mono 16-bit tone at 48 kHz.
+    fn write_tone_of(path: &Path, frames: usize) {
+        let payload = [0xFF_u8, 0x7F].repeat(frames);
         let data_bytes = u32::try_from(payload.len()).expect("wav size");
         let rate = 48_000_u32;
         let mut bytes = Vec::new();
@@ -259,6 +282,120 @@ mod tests {
         assert_eq!(player.output().queued().len(), 4 * 8);
         assert_eq!(preview_frames(1_000_000), 8_192);
         assert_eq!(preview_frames(0), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_mix_past_full_scale_is_clipped_for_the_device_and_metered_whole() {
+        let path =
+            std::env::temp_dir().join(format!("cutlass-preview-loud-{}", std::process::id()));
+        write_tone(&path);
+        let mut draft = draft(&path);
+        // A full-scale tone at three times its level.
+        draft.tracks[0].segments[0].volume = 3.0;
+        let session = Session::open(draft);
+        let readers = readers();
+        let mut heard = cutlass_eval::Heard::new();
+        let mut output = AudioOutput::open(AudioHost::Software);
+        let peak = queue_mix_peak(
+            &mut output,
+            PreviewMix {
+                draft: session.draft(),
+                revision: session.revision(),
+                time: Micros(0),
+                frames: 4,
+                readers: &readers,
+                heard: &mut heard,
+                root: None,
+            },
+        )
+        .expect("queued");
+        assert_eq!(samples(output.queued()), vec![1.0; 8]);
+        assert!(peak[0] > 2.9 && peak[1] > 2.9, "{peak:?}");
+        let _ = std::fs::remove_file(&path);
+
+        let mut bytes: Vec<u8> = [2.0_f32, -3.0, 0.5, -1.0, f32::NAN]
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        // An odd tail is left alone.
+        bytes.push(7);
+        clip_to_full_scale(&mut bytes);
+        let clipped = samples(&bytes);
+        assert_eq!(clipped[..4], [1.0, -1.0, 0.5, -1.0]);
+        assert!(clipped[4].is_nan());
+        assert_eq!(bytes.last(), Some(&7));
+    }
+
+    #[test]
+    fn a_faded_clip_plays_at_full_level_between_its_two_ramps() {
+        let path =
+            std::env::temp_dir().join(format!("cutlass-preview-fade-{}", std::process::id()));
+        // Half a second, so 20 ms windows fall on whole microseconds.
+        write_tone_of(&path, 24_000);
+        let mut draft = draft(&path);
+        draft.duration = Micros(500_000);
+        let segment = &mut draft.tracks[0].segments[0];
+        segment.volume = 1.0;
+        segment.target = TimeRange::new(0, 500_000);
+        segment.source_range = Some(TimeRange::new(0, 500_000));
+        let plain = Session::open(draft.clone());
+        let mut faded = Session::open(draft);
+        faded
+            .apply(
+                0,
+                &[Request::SetFade {
+                    segment_id: "clip".into(),
+                    fade_id: MaterialId::new("fade"),
+                    fade_in: Micros(20_000),
+                    fade_out: Micros(60_000),
+                }],
+            )
+            .expect("fade");
+        let readers = readers();
+        // The left side of 20 ms of the mix at `time`.
+        let left = |session: &Session, time: i64| -> Vec<f32> {
+            let mut heard = cutlass_eval::Heard::new();
+            let bytes = window_bytes(
+                PreviewMix {
+                    draft: session.draft(),
+                    revision: session.revision(),
+                    time: Micros(time),
+                    frames: 960,
+                    readers: &readers,
+                    heard: &mut heard,
+                    root: None,
+                },
+                960,
+            );
+            samples(&bytes).chunks(2).map(|pair| pair[0]).collect()
+        };
+        let full = left(&plain, 240_000);
+        assert_eq!(full.len(), 960);
+        assert!(full.iter().all(|sample| *sample > 0.99), "{}", full[0]);
+
+        // The first 20 ms are the fade in, from silence up.
+        let first = left(&faded, 0);
+        assert_eq!(first[0], 0.0);
+        assert!(
+            (first[480] - full[480] / 2.0).abs() < 1.0e-4,
+            "{}",
+            first[480]
+        );
+        assert!(first.windows(2).all(|pair| pair[1] > pair[0]));
+        // Between the ramps the clip is what it is without a fade.
+        for time in [20_000, 240_000, 420_000] {
+            assert_eq!(left(&faded, time), left(&plain, time), "at {time}");
+        }
+        // The last 20 ms are the end of the 60 ms fade out, down to silence.
+        let last = left(&faded, 480_000);
+        assert!(
+            (last[0] - full[0] * 959.0 / 2_880.0).abs() < 1.0e-4,
+            "{}",
+            last[0]
+        );
+        assert!(last.windows(2).all(|pair| pair[1] < pair[0]));
+        assert_eq!(last[959], 0.0);
         let _ = std::fs::remove_file(&path);
     }
 }

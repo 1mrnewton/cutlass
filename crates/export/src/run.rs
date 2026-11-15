@@ -3,8 +3,10 @@
 //! A frame is included when its start is inside the half-open range. With
 //! a renderer the picture is eval's frame layers drawn on the GPU, so
 //! recipe effects are in the file; without one it is `eval::frame` on the
-//! CPU, which has no recipe effects. Then the export clock. Audio is the same mix
-//! playback uses, on the export clock, so a missing clip is an error.
+//! CPU, which has no recipe effects: `cutlass_eval::recipe_effect_clips`
+//! names the clips such a file is missing. Then the export clock. Audio is
+//! the same mix playback uses, on the export clock, so a missing clip is an
+//! error.
 
 use std::path::{Path, PathBuf};
 
@@ -785,29 +787,31 @@ fn integer_sound(codec: cutlass_codec::CodecId) -> bool {
     )
 }
 
-/// `pcm` as 16-bit samples, clipped at full scale.
-/// The mix as `codec` takes it: 16-bit for PCM and FLAC, and for ALAC
-/// floats clipped to full scale, which a lossless encoder cannot do itself.
+/// The mix as `codec` takes it: 16-bit for PCM and FLAC, floats for the
+/// rest, and clipped at full scale either way. Loud clips sum past full
+/// scale, and an encoder refuses such a sample, which failed the export.
+/// A sample that is not a number is left for the encoder to refuse, except
+/// for ALAC, which takes silence there.
 fn coded_pcm(codec: cutlass_codec::CodecId, pcm: Pcm) -> Result<Pcm, ExportError> {
-    match codec {
-        _ if integer_sound(codec) => to_i16(pcm),
-        cutlass_codec::CodecId::Alac => match pcm.as_f32() {
-            Some(samples) if samples.iter().any(|sample| !(-1.0..=1.0).contains(sample)) => {
-                let clipped = samples
-                    .iter()
-                    .map(|sample| {
-                        if sample.is_nan() {
-                            0.0
-                        } else {
-                            sample.clamp(-1.0, 1.0)
-                        }
-                    })
-                    .collect();
-                Pcm::from_f32(pcm.rate, pcm.layout.clone(), clipped)
-                    .map_err(|_| ExportError::AudioLayout)
-            }
-            _ => Ok(pcm),
-        },
+    if integer_sound(codec) {
+        return to_i16(pcm);
+    }
+    let silent_nan = codec == cutlass_codec::CodecId::Alac;
+    match pcm.as_f32() {
+        Some(samples) if samples.iter().any(|sample| !(-1.0..=1.0).contains(sample)) => {
+            let clipped = samples
+                .iter()
+                .map(|sample| {
+                    if sample.is_nan() && silent_nan {
+                        0.0
+                    } else {
+                        sample.clamp(-1.0, 1.0)
+                    }
+                })
+                .collect();
+            Pcm::from_f32(pcm.rate, pcm.layout.clone(), clipped)
+                .map_err(|_| ExportError::AudioLayout)
+        }
         _ => Ok(pcm),
     }
 }
@@ -1956,6 +1960,74 @@ mod tests {
         samples_of(audio)
     }
 
+    #[test]
+    fn a_mix_past_full_scale_is_clipped_and_not_refused() {
+        let mut request = gif_request(TimeRange::new(0, 1_000));
+        request.frame_rate = FrameRate {
+            numerator: 1_000,
+            denominator: 1,
+        };
+        request.audio = Some(audio_settings());
+        // Two full-scale clips sum to 2.0, and a boosted one reaches -3.0.
+        let mut loud = color_draft(240, 135, 1_000_000);
+        push_sound(&mut loud, "loud", 1.0, 0, false);
+        push_sound(&mut loud, "other", 1.0, 0, false);
+        assert_eq!(audio_bytes(&loud, &request), vec![1.0; 4]);
+        let mut boosted = color_draft(240, 135, 1_000_000);
+        push_sound(&mut boosted, "loud", -3.0, 0, false);
+        assert_eq!(audio_bytes(&boosted, &request), vec![-1.0; 4]);
+        // A mix inside full scale is handed over as it is.
+        let mut quiet = color_draft(240, 135, 1_000_000);
+        push_sound(&mut quiet, "loud", 0.75, 0, false);
+        assert_eq!(audio_bytes(&quiet, &request), vec![0.75; 4]);
+    }
+
+    #[test]
+    fn the_aac_encoder_takes_the_clipped_mix_and_refuses_the_raw_sum() {
+        let mut request = gif_request(TimeRange::new(0, 200_000));
+        request.audio = Some(AudioExport {
+            codec: CodecId::Aac,
+            bitrate: 128_000,
+            sample_rate: 48_000,
+            channels: 2,
+            limiter: 0,
+        });
+        let mut factory = EncodeFactory::new();
+        cutlass_aac::register_encoders(&mut factory);
+        // Two full-scale clips, summed.
+        let sum = Pcm::from_f32(48_000, ChannelLayout::stereo(), vec![2.0; 4_096]).expect("pcm");
+        let mut raw = super::open_audio(&factory, &request)
+            .expect("open")
+            .expect("an encoder");
+        assert!(matches!(
+            raw.push(&AudioInput { pcm: sum.clone() }),
+            Err(CodecError::OutOfRange)
+        ));
+        let clipped = super::coded_pcm(CodecId::Aac, sum).expect("clipped");
+        assert!(
+            clipped
+                .as_f32()
+                .expect("floats")
+                .iter()
+                .all(|sample| *sample == 1.0)
+        );
+        let mut encoder = super::open_audio(&factory, &request)
+            .expect("open")
+            .expect("an encoder");
+        encoder
+            .push(&AudioInput { pcm: clipped })
+            .expect("the encoder takes the clipped mix");
+        // A sample that is not a number is still the encoder's to refuse.
+        let broken =
+            Pcm::from_f32(48_000, ChannelLayout::stereo(), vec![f32::NAN, 2.0]).expect("pcm");
+        let kept = super::coded_pcm(CodecId::Aac, broken).expect("kept");
+        assert!(kept.as_f32().expect("floats")[0].is_nan());
+        let silent =
+            Pcm::from_f32(48_000, ChannelLayout::stereo(), vec![f32::NAN, 2.0]).expect("pcm");
+        let alac = super::coded_pcm(CodecId::Alac, silent).expect("alac");
+        assert_eq!(alac.as_f32().expect("floats"), [0.0, 1.0]);
+    }
+
     fn wav_readers() -> ReaderFactory {
         fn open_wav(
             path: &std::path::Path,
@@ -2118,6 +2190,69 @@ mod tests {
         assert_eq!(asked, vec![loud(0), loud(1_000), loud(2_000)]);
     }
 
+    #[test]
+    fn a_clip_that_starts_and_ends_inside_frames_is_written_at_its_own_times() {
+        // Frames of a millisecond, four samples each at 4 kHz. The clip
+        // starts half a frame in and ends half a frame into the third.
+        let mut request = gif_request(TimeRange::new(0, 4_000));
+        request.frame_rate = FrameRate {
+            numerator: 1_000,
+            denominator: 1,
+        };
+        request.audio = Some(audio_settings());
+        let mut draft = color_draft(240, 135, 1_000_000);
+        push_sound(&mut draft, "loud", 1.0, 0, false);
+        draft.tracks.last_mut().expect("audio").segments[0].target = TimeRange::new(500, 2_000);
+        let mut mux = MuxDraft::new(
+            ContainerId::Isobmff,
+            MuxMode::Progressive,
+            IndexPlace::End,
+            Limits::standard(),
+        );
+        let mut device = SoftwareDevice::new();
+        let factory = factory();
+        let mut asked = Vec::new();
+        let result = export(
+            ExportRun {
+                draft: &draft,
+                device: &mut device,
+                request: &request,
+                factory: &factory,
+                readers: readers(),
+                mux: &mut mux,
+                destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
+            },
+            |_, when, frames, _| {
+                asked.push((when, frames));
+                // A whole frame of tone, whatever was asked for.
+                Ok(ClipPcm::Ready(tone(1.0)))
+            },
+        )
+        .expect("audio");
+        // The clip is asked for from its own start, and for no more than is
+        // left of it.
+        assert_eq!(
+            asked,
+            vec![(Micros(500), 2), (Micros(1_000), 4), (Micros(2_000), 2)]
+        );
+        // Every frame is still four samples, so later sound stays in time.
+        let samples: Vec<f32> = result
+            .finished
+            .packets()
+            .iter()
+            .filter(|packet| packet.stream() == 1)
+            .flat_map(samples_of)
+            .collect();
+        let mut want = vec![0.0; 2];
+        want.extend([1.0; 8]);
+        want.extend([0.0; 6]);
+        assert_eq!(samples, want);
+    }
+
     /// A mux that notes which stream each packet arrives on, in order.
     struct Order {
         inner: MuxDraft,
@@ -2230,6 +2365,11 @@ mod tests {
         let mut faded = color_draft(240, 135, 1_000_000);
         push_sound(&mut faded, "loud", 1.0, 0, true);
         assert_eq!(audio_bytes(&faded, &request), vec![0.0, 0.25, 0.5, 0.75]);
+        // The fade in ends with the clip's first frame. The frame after it
+        // is a window of the same clip and is not faded again.
+        let mut later = request.clone();
+        later.range = TimeRange::new(1_000, 1_000);
+        assert_eq!(audio_bytes(&faded, &later), vec![1.0; 4]);
 
         let mut solo = color_draft(240, 135, 1_000_000);
         push_sound(&mut solo, "heard", 1.0, TrackAttribute::SOLO, false);

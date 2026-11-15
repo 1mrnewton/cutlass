@@ -41,4 +41,6 @@ pub use run::{
 };
 pub use sidecars::{sidecar_text, write_sidecar};
 pub use sound::file_audio;
-pub use still::{StillFormat, still_picture, write_still};
+pub use still::{
+    LOOK_LONG_SIDE, LOOK_SHORT_SIDE, StillFormat, look_picture, still_picture, write_still,
+};

@@ -29,6 +29,7 @@ pub use api::{
     Stream, Trim,
 };
 pub use demux::{IndexKind, Mp3Demux};
+pub use id3::id3v2_tag_bytes;
 pub use limits::{MAX_FRAME_BYTES, MAX_ID3_BYTES, MAX_RESYNC_BYTES, SEEK_WINDOW_BYTES};
 pub use mux::Mp3Mux;
 pub use probe::probe;

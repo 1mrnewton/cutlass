@@ -41,7 +41,7 @@ pub use adjust::{
     ADJUSTMENT, AUTO_KEYS, Adjust, AdjustKey, PictureStats, adjust_rgba, auto_adjust, keyed_adjust,
     match_adjust, segment_adjust,
 };
-pub use blend::{BLEND_WGSL, blend_pixel, blend_unit, segment_blend};
+pub use blend::{BLEND_WGSL, blend_pixel, blend_unit, segment_blend, stored_blend};
 pub use catalog::{
     ADD, ANIM_IN, ANIM_LOOP, ANIM_OUT, BlendMode, CONTRAST, CatalogEntry, DIFFERENCE, Distort,
     INVERT, MULTIPLY, PIXELATE, PIXELATE_BLOCK, PackageKind, SCREEN, SOURCE_OVER, TRANSITION_FADE,

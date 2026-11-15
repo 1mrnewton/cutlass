@@ -40,6 +40,7 @@ cutlass-ogg = { path = "../containers/ogg", version = "0.1.0" }
 cutlass-mpegts = { path = "../containers/mpegts", version = "0.1.0" }
 cutlass-still = { path = "../containers/still", version = "0.1.0" }
 cutlass-mp3-container = { path = "../containers/mp3", version = "0.1.0" }
+cutlass-adts = { path = "../containers/adts", version = "0.1.0" }
 cutlass-probe = { path = "../probe", version = "0.1.0" }
 cutlass-png = { path = "../codecs/png", version = "0.1.0" }
 cutlass-gif = { path = "../codecs/gif", version = "0.1.0" }

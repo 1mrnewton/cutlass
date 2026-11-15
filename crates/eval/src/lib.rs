@@ -45,6 +45,7 @@ pub use cutlass_engine::{
 };
 pub use cutlass_gpu::{ToneCurve, YuvMatrix, YuvTone};
 pub use cutlass_model::Micros;
+pub use effect::recipe_effect_clips;
 pub use enhance::{
     Blend, CopyLevels, DEFLICKER_MODEL, DENOISE_MODEL, ENHANCE_MODEL, EnhanceAsk, EnhanceError,
     EnhanceFrames, INTERPOLATE_MODEL, MOTION_BLUR_MODEL, clip_copy_ask, copy_ask, enhance_ask,

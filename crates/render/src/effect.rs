@@ -8,6 +8,7 @@
 //! reflection at its border instead of a hole. A blur runs as two steps,
 //! across and then down.
 
+use crate::pool::Bind;
 use cutlass_effects::{Block, Step};
 
 use crate::CANVAS_FORMAT;
@@ -756,10 +757,11 @@ pub(crate) struct Effects {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    pool: std::sync::Arc<crate::pool::Pool>,
 }
 
 impl Effects {
-    pub(crate) fn new(device: &wgpu::Device) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, pool: std::sync::Arc<crate::pool::Pool>) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render effect"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -834,6 +836,7 @@ impl Effects {
             ..wgpu::SamplerDescriptor::default()
         });
         Self {
+            pool,
             pipeline,
             layout,
             sampler,
@@ -889,31 +892,23 @@ impl Effects {
         for value in step.values {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cutlass-render effect params"),
-            size: PARAMS,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buffer, 0, &bytes);
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cutlass-render effect"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(from),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buffer.as_entire_binding(),
-                },
+        let buffer = self.pool.uniform(
+            device,
+            queue,
+            "cutlass-render effect params",
+            PARAMS,
+            &bytes,
+        );
+        let group = self.pool.group(
+            device,
+            "cutlass-render effect",
+            &self.layout,
+            &[
+                (0, Bind::View(from)),
+                (1, Bind::Sampler(&self.sampler)),
+                (2, Bind::Buffer(&buffer)),
             ],
-        });
+        );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("cutlass-render effect"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {

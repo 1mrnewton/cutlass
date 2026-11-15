@@ -1,0 +1,28 @@
+{
+  "reference": {
+    "machine": "Apple M5 Pro, VideoToolbox decode, Metal. The product bar: a three-layer cut plays in real time at 30 fps, a scrub answers within 100 ms at 1080p, and export is not slower than the cut.",
+    "measured": "15 Nov 2026, three runs while other builds ran (load 4 to 7): 1080p playback 156 to 209 fps, scrub p95 95 to 96 ms, export 1.51x to 2.40x; 2160p playback 46 to 58 fps, scrub p95 344 to 351 ms, export 0.73x to 0.78x.",
+    "sides": {
+      "1080": {
+        "playback_fps": 60,
+        "scrub_p95_ms": 100,
+        "export_realtime": 1.0
+      },
+      "2160": {
+        "playback_fps": 30,
+        "scrub_p95_ms": 150,
+        "export_realtime": 1.0
+      }
+    }
+  },
+  "ci": {
+    "machine": "GitHub ubuntu-latest: the Rust H.264 decoder and encoder, lavapipe on the CPU for the GPU. Provisional: these floors only catch a hang or a collapse. Replace them with the first runs' numbers less a margin.",
+    "sides": {
+      "1080": {
+        "playback_fps": 1,
+        "scrub_p95_ms": 10000,
+        "export_realtime": 0.02
+      }
+    }
+  }
+}

@@ -89,10 +89,11 @@ pub use gesture::{
 pub use group_move::{ClipMove, MovePlan, NewLane, move_requests, plan_move, plan_move_between};
 pub use hit::{BadScale, Hit, Pointer, TimelineScale, hit_test};
 pub use inspector::{
-    BACKGROUND_ALPHA_START, BACKGROUND_ROUND_START, GLOW_RANGE_START, GLOW_STRENGTH_START,
-    LetterCase, OUTLINE_START, Panel, SHADOW_ANGLE, SHADOW_BLUR_START, SHADOW_DISTANCE_START,
-    SILENT_DB, TEXT_PRESETS, TextLook, TextPreset, canvas_pixels, gain_of_db, is_caption, panel_of,
-    preset_requests, starting, stored_position, text_look, text_look_at, volume_db,
+    BACKGROUND_ALPHA_START, BACKGROUND_ROUND_START, CURVE_START, GLOW_RANGE_START,
+    GLOW_STRENGTH_START, LetterCase, OUTLINE_START, Panel, RAYS_RANGE_START, RAYS_STRENGTH_START,
+    SHADOW_ANGLE, SHADOW_BLUR_START, SHADOW_DISTANCE_START, SILENT_DB, TEXT_PRESETS, TextLook,
+    TextPreset, canvas_pixels, gain_of_db, is_caption, panel_of, preset_requests, starting,
+    stored_position, text_look, text_look_at, volume_db,
 };
 pub use keys::{
     ClipKeys, KeyGraph, clip_keys, key_graphs, move_key, move_keys, remove_key, remove_keys,
@@ -114,7 +115,10 @@ pub use project_choices::{
 pub use reorder::{place_of, reorder_start};
 pub use ripple::{close_gap, gap_at, ripple_delete};
 pub use ruler::{RulerStep, Tick, clock, ruler_step, ruler_ticks, zoom_ceiling};
-pub use saved_look::{SavedLook, look_requests, read_looks, saved_look, write_looks};
+pub use saved_look::{
+    SavedBox, SavedGlow, SavedLook, look_glow_request, look_requests, read_looks, saved_look,
+    write_looks,
+};
 pub use shape_shelf::{PEN_CARD, SHAPE_CARD_PREFIX, shape_cards, shape_of_card};
 pub use snap::{SnapKind, SnapTarget, snap, snap_span, transition_middle};
 pub use stage::{

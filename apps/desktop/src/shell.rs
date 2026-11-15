@@ -59,6 +59,12 @@ mod enhance;
 mod hear;
 mod inspector;
 mod listen;
+mod offscreen;
+#[cfg(test)]
+pub(crate) use offscreen::tests::{
+    absent, movie_middle_and_corner, still_middle_and_corner, vignette_draft,
+};
+pub use offscreen::{LeftOut, OpenRenderer};
 mod proxy;
 pub use proxy::ProxyState;
 mod transition;
@@ -155,6 +161,8 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::Angle) => {
                 formatter.write_str("the rotation is not a finite number of degrees")
             }
+            Self::Edit(EditError::Pivot) => formatter
+                .write_str("the pivot is not a finite number, or is too far from the picture"),
             Self::Edit(EditError::Position) => {
                 formatter.write_str("the position is not a finite number")
             }
@@ -364,6 +372,11 @@ pub struct Inspection {
     pub volume: f64,
     pub scale_x: f64,
     pub scale_y: f64,
+    /// One scale drives both axes; off, `scale_x` and `scale_y` are apart.
+    pub uniform_scale: bool,
+    /// The Blend switch: off, the clip is drawn solid and normal, its
+    /// opacity and blend kept.
+    pub blend_on: bool,
     pub rotation: f64,
     pub transform_x: f64,
     pub transform_y: f64,
@@ -773,6 +786,8 @@ pub struct Shell {
     settings_file: Option<(PathBuf, u64)>,
     /// Where the looks saved with "Save as preset" are kept, and the looks.
     presets_file: Option<PathBuf>,
+    /// The assistant's notes, when this shell has a file for them.
+    notes_file: Option<PathBuf>,
     /// The effect studio: its document, folder and preview pictures.
     studio: studio::StudioState,
     saved_looks: Vec<cutlass_editor::SavedLook>,
@@ -885,12 +900,20 @@ pub struct Shell {
     wants_speech_model: bool,
     /// The update check, the offer, and the restart after an install.
     updates: update::Updates,
+    /// The MCP servers the assistant has started, kept for its next calls.
+    mcp_servers: crate::mcp_servers::McpServers,
     /// The assistant's speech jobs, carried from one tool call to the next.
     agent_speech_jobs: std::collections::BTreeMap<String, cutlass_agent::SpeechJob>,
     /// The assistant's tracking jobs, carried from one tool call to the next.
     agent_track_jobs: std::collections::BTreeMap<String, cutlass_agent::TrackJob>,
     /// Each assistant tracking job's path by id: `None` while it runs.
     agent_tracks: follow::AgentTracks,
+    /// The request ids the assistant's combos carried, with their answers.
+    agent_request_ids: cutlass_agent::Remembered,
+    /// How many exports the assistant has asked for, to name the next.
+    agent_exports: u32,
+    /// The last export the assistant asked for, for `export.poll`.
+    agent_export: Option<assistant::AgentExport>,
     /// Work running off the window thread, and the project it was started in.
     job: Option<RunningJob>,
     /// The movie the last export wrote.
@@ -931,6 +954,10 @@ pub struct Shell {
     face: Arc<FaceTable>,
     /// The preview canvas on eframe's GPU device, once the window has one.
     gpu: Option<crate::gpu::Preview>,
+    /// Where exports draw when the preview has no device.
+    offscreen: offscreen::Offscreen,
+    /// The effect clips the last finished export left out of its picture.
+    export_left_out: Option<LeftOut>,
     /// The canvas shows a clip's earlier picture while the asked one decodes.
     preview_stale: bool,
     /// The revision of the open draft the picture on the canvas was drawn
@@ -963,6 +990,7 @@ impl Shell {
             settings,
             settings_file: None,
             presets_file: None,
+            notes_file: None,
             studio: studio::StudioState::new(),
             saved_looks: Vec::new(),
             waiting_imports: std::collections::VecDeque::new(),
@@ -1025,9 +1053,13 @@ impl Shell {
             hearings: 0,
             wants_speech_model: false,
             updates: update::Updates::default(),
+            mcp_servers: crate::mcp_servers::McpServers::default(),
             agent_speech_jobs: std::collections::BTreeMap::new(),
             agent_track_jobs: std::collections::BTreeMap::new(),
             agent_tracks: follow::AgentTracks::default(),
+            agent_request_ids: cutlass_agent::Remembered::default(),
+            agent_exports: 0,
+            agent_export: None,
             job: None,
             exported: None,
             cover_version: 0,
@@ -1047,6 +1079,8 @@ impl Shell {
             card_waves: std::collections::HashMap::new(),
             face: crate::face::installed(),
             gpu: None,
+            offscreen: offscreen::Offscreen::Off,
+            export_left_out: None,
             preview_stale: false,
             shown_revision: std::cell::Cell::new(None),
             scrubbing: false,
@@ -1260,6 +1294,67 @@ impl Shell {
         self.presets_file = Some(path);
     }
 
+    /// Keep the assistant's notes at `path` from now on.
+    pub fn keep_notes_file(&mut self, path: PathBuf) {
+        self.notes_file = Some(path);
+    }
+
+    /// Where the open project's conversation with the assistant is kept,
+    /// beside the notes, while Memory is on; `None` with Memory off, no
+    /// project open, or no notes folder.
+    #[must_use]
+    pub fn assistant_chat_file(&self) -> Option<PathBuf> {
+        if !self.settings.memory {
+            return None;
+        }
+        let project = self.project_folder()?;
+        let notes = self.notes_file.as_ref()?;
+        // The notes sit in the Assistant folder of the Cutlass folder.
+        let root = notes.parent()?.parent()?;
+        Some(Home::at(root).ok()?.assistant_chat_file(project))
+    }
+
+    /// The assistant's notes; empty when there are none.
+    #[must_use]
+    pub fn assistant_notes(&self) -> String {
+        self.notes_file
+            .as_ref()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .unwrap_or_default()
+    }
+
+    /// What the user is looking at now, for the assistant: the playhead,
+    /// the selected clips and the clips playing at the playhead. Empty
+    /// when no project is open.
+    #[must_use]
+    pub fn assistant_view(&self) -> String {
+        self.draft()
+            .map(|draft| cutlass_agent::view_note(draft, self.playhead, &self.selection))
+            .unwrap_or_default()
+    }
+
+    /// Write the assistant's notes; empty notes delete the file.
+    pub fn set_assistant_notes(&mut self, notes: &str) -> Result<(), ShellError> {
+        let Some(path) = &self.notes_file else {
+            return Err(ShellError::Unavailable(
+                "this window keeps no notes".to_owned(),
+            ));
+        };
+        let failed = |error: std::io::Error| {
+            ShellError::Unavailable(format!("the notes were not saved: {error}"))
+        };
+        if notes.trim().is_empty() {
+            return match std::fs::remove_file(path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(failed(error)),
+                _ => Ok(()),
+            };
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(failed)?;
+        }
+        std::fs::write(path, notes).map_err(failed)
+    }
+
     /// The looks saved with "Save as preset", oldest first.
     #[must_use]
     pub fn saved_looks(&self) -> &[cutlass_editor::SavedLook] {
@@ -1309,7 +1404,13 @@ impl Shell {
                 draft.canvas_config.width
             })
         });
-        let requests = cutlass_editor::look_requests(&segment_id, look, &face, line_width);
+        let look = look.clone();
+        let mut requests = cutlass_editor::look_requests(&segment_id, &look, &face, line_width);
+        // Each clip the look reaches glows with a glow of its own.
+        for clip in self.styled_clips(segment_id) {
+            let glow_id = MaterialId::new(self.fresh("glow"));
+            requests.extend(cutlass_editor::look_glow_request(&clip, &look, glow_id));
+        }
         self.apply_text_requests(requests)
     }
 
@@ -1583,11 +1684,29 @@ impl Shell {
     }
 
     fn open_folder_in(&mut self, path: &Path) -> Result<(), ShellError> {
+        self.open_folder_once(path, true)
+    }
+
+    /// Open `path`. With `may_ask`, a window that finds it held asks the
+    /// holder once to let it go.
+    fn open_folder_once(&mut self, path: &Path, may_ask: bool) -> Result<(), ShellError> {
         if self.unsaved() {
             self.save()?;
         }
         let opened = cutlass_store::open(path).map_err(ShellError::Store)?;
-        let hold = cutlass_store::hold(path).map_err(ShellError::Store)?;
+        let hold = match cutlass_store::hold(path) {
+            // A window asks a `cutlass mcp` that holds the project to hand
+            // it over, and reads the folder again as that host saved it.
+            Err(StoreError::Held { .. })
+                if may_ask
+                    && self.wake.is_some()
+                    && !self.holds(path)
+                    && Self::ask_holder_to_yield(path) =>
+            {
+                return self.open_folder_once(path, false);
+            }
+            other => other.map_err(ShellError::Store)?,
+        };
         let rate = opened
             .folder
             .draft
@@ -2760,6 +2879,28 @@ impl Shell {
             Err(error) => {
                 let error = ShellError::Edit(error);
                 cutlass_logger::warn!("undo refused: {error}");
+                Err(error)
+            }
+        }
+    }
+
+    /// Put the project back to `earlier`, a draft it held before, as one
+    /// undo step: an undo brings back what it replaced. Refused when the
+    /// project is no longer at `revision`, or a drag is open.
+    pub fn restore(&mut self, revision: u64, earlier: Draft) -> Result<(), ShellError> {
+        let before = self.cover().cloned();
+        let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
+        match session.restore(revision, earlier) {
+            Ok(revision) => {
+                cutlass_logger::info!("restore: revision {revision}");
+                self.lanes_cache.replace(None);
+                self.bars_cache.replace(None);
+                self.follow_cover(before);
+                Ok(())
+            }
+            Err(error) => {
+                let error = ShellError::Edit(error);
+                cutlass_logger::warn!("restore refused: {error}");
                 Err(error)
             }
         }
@@ -4627,8 +4768,16 @@ impl Shell {
         let line_width = styled(cutlass_model::TextStyleKey::LineWidth, line_width);
         // A keyed clip shows its pose where the playhead is.
         let keyed = cutlass_editor::keyed_pose(draft, id, self.playhead).map(|(_, pose)| pose);
+        // Keyed, each axis shows its keyed value with uniform scale off.
         let (scale_x, scale_y) =
-            keyed.map_or(picture_scale(segment), |pose| (pose.scale, pose.scale));
+            keyed.map_or(picture_scale(segment), |pose| match cutlass_model::clip_at(
+                segment,
+                &draft.keyframe_graph_list,
+                self.playhead,
+            ) {
+                Some((clip, uniform)) if !uniform.on => (clip.scale.x, clip.scale.y),
+                _ => (pose.scale, pose.scale),
+            });
         Some(Inspection {
             segment_id: segment.id.clone(),
             start: segment.target.start,
@@ -4645,6 +4794,8 @@ impl Shell {
             .unwrap_or(segment.volume),
             scale_x,
             scale_y,
+            uniform_scale: segment.uniform_scale.on,
+            blend_on: !segment.blend_off,
             rotation: keyed.map_or(segment.clip.rotation, |pose| pose.rotation),
             transform_x: keyed.map_or(segment.clip.transform.x, |pose| pose.x),
             transform_y: keyed.map_or(segment.clip.transform.y, |pose| pose.y),
@@ -4685,7 +4836,8 @@ impl Shell {
             )
             .filter(|_| !letterbox_color(draft, segment).is_empty())
             .unwrap_or_else(|| letterbox_color(draft, segment)),
-            blend: cutlass_effects::segment_blend(draft, segment)
+            // The mode kept while the Blend switch is off, too.
+            blend: cutlass_effects::stored_blend(draft, segment)
                 .unwrap_or(cutlass_effects::BlendMode::SourceOver),
             // Keyed sliders show their value where the playhead is.
             adjust: cutlass_effects::keyed_adjust(
@@ -6094,6 +6246,36 @@ impl Shell {
         self.apply(request.unwrap_or(Request::SetScale { segment_id, scale }))
     }
 
+    /// Turn the selected picture's uniform scale on or off. It keeps its
+    /// size either way. One undo step.
+    pub fn set_uniform_scale(&mut self, on: bool) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("a placement belongs on a picture")?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetUniformScale { segment_id, on })
+    }
+
+    /// Scale the selected picture's width by `x` and its height by `y`, as
+    /// drawn with uniform scale off; a negative one flips that axis. On a keyed clip with the playhead on
+    /// it, the two axes are keyed there. One undo step.
+    pub fn set_scale_axes(&mut self, x: f64, y: f64) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("a placement belongs on a picture")?;
+        self.refuse_locked(&segment_id)?;
+        if !(x.is_finite() && y.is_finite() && x != 0.0 && y != 0.0) {
+            return Err(ShellError::Unavailable(
+                "a scale is more than nothing".to_owned(),
+            ));
+        }
+        let mut values = vec![x, y];
+        // The name that drives both is keyed too when the clip keys it.
+        if self.selected_segment().is_some_and(|segment| {
+            cutlass_model::has_keys(segment, &cutlass_model::SCALE_KEYS[2..])
+        }) {
+            values.push(x);
+        }
+        let request = self.key_setting_here(KeyedSetting::Scale, values);
+        self.apply(request.unwrap_or(Request::SetScaleAxes { segment_id, x, y }))
+    }
+
     /// On a clip with keys, with the playhead on it, the request that keys
     /// its pose there after `edit`, as a stage drag does. Elsewhere `None`,
     /// and the edit changes the stored pose.
@@ -6130,6 +6312,14 @@ impl Shell {
             material_id,
             mode: mode.package_id().to_owned(),
         })
+    }
+
+    /// Turn the selected picture's Blend switch on or off. Off, it is drawn
+    /// solid and mixed normally; its opacity and mode stay. One undo step.
+    pub fn set_blend_on(&mut self, on: bool) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("a blend belongs on a picture")?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetBlendOn { segment_id, on })
     }
 
     /// Set one adjust slider on the selected picture; zero takes it off.
@@ -7544,6 +7734,8 @@ impl Shell {
     /// encode is refused before anything is written.
     pub fn export(&mut self, request: ExportRequest) -> Result<(), ShellError> {
         cutlass_logger::info!("export asked: {request:?}");
+        self.export_left_out = None;
+        self.open_offscreen();
         if request.codec == CodecId::Png {
             return self.export_png(request);
         }
@@ -7596,6 +7788,7 @@ impl Shell {
         cutlass_png::register_encoders(&mut encoders);
         let mut mux = cutlass_still::StillMux::new();
         let mut device = SoftwareDevice::new();
+        let left_out = self.left_out(draft, &[&export_request.range]);
         cutlass_export::export(
             cutlass_export::ExportRun {
                 draft,
@@ -7607,8 +7800,8 @@ impl Shell {
                 destination: None,
                 root: root.as_deref(),
                 fonts: &*self.face,
-                // The preview's device, so an effect clip is in the file.
-                renderer: self.gpu.as_ref().map(crate::gpu::Preview::renderer),
+                // A GPU device, so an effect clip is in the file.
+                renderer: self.export_renderer(),
                 progress: None,
             },
             |_, _, _, _| Ok(cutlass_eval::ClipPcm::Missing),
@@ -7619,7 +7812,9 @@ impl Shell {
                 "export did not finish a file".to_owned(),
             ));
         };
-        write_replaced(&request.path, bytes)
+        write_replaced(&request.path, bytes)?;
+        self.export_left_out = left_out;
+        Ok(())
     }
 
     /// What a job export writes, checked before it starts.
@@ -7852,11 +8047,19 @@ impl Shell {
         let readers = self.readers.clone();
         let encoders = self.encoders.clone();
         let fonts = Arc::clone(&self.face);
-        // The preview's device, so an effect clip is in the file.
-        let gpu = self.gpu.as_ref().map(|preview| {
-            let renderer = preview.renderer();
-            (renderer.device().clone(), renderer.queue().clone())
-        });
+        // A GPU device, so an effect clip is in the file.
+        let gpu = self.export_gpu();
+        let pictures: Vec<&TimeRange> = plan
+            .outputs
+            .iter()
+            .filter_map(|output| match output {
+                ExportOutput::Movie { request, .. } | ExportOutput::Gif { request, .. } => {
+                    Some(&request.range)
+                }
+                ExportOutput::Sound { .. } => None,
+            })
+            .collect();
+        let left_out = self.left_out(&plan.draft, &pictures);
         let first = plan.paths().into_iter().next().unwrap_or_default();
         let name = first
             .file_name()
@@ -7939,6 +8142,7 @@ impl Shell {
                 written.map_err(export_failure)?;
                 shell.set_notice(format!("Exported {name}"));
                 shell.exported = Some(first);
+                shell.export_left_out = left_out;
                 Ok(())
             })
         })
@@ -8110,10 +8314,10 @@ impl Shell {
         let readers = self.readers.clone();
         let encoders = self.encoders.clone();
         let fonts = Arc::clone(&self.face);
-        let gpu = self.gpu.as_ref().map(|preview| {
-            let renderer = preview.renderer();
-            (renderer.device().clone(), renderer.queue().clone())
-        });
+        self.export_left_out = None;
+        self.open_offscreen();
+        let gpu = self.export_gpu();
+        let left_out = self.left_out(&draft, &[&TimeRange::new(time.0, 1)]);
         let destination = path.to_path_buf();
         self.exported = None;
         self.start_job("Still", move |progress| {
@@ -8136,6 +8340,7 @@ impl Shell {
                 written.map_err(export_failure)?;
                 shell.set_notice(format!("Saved {name}"));
                 shell.exported = Some(destination);
+                shell.export_left_out = left_out;
                 Ok(())
             })
         })
@@ -8194,6 +8399,7 @@ impl Shell {
                 width,
                 height,
                 duration,
+                has_audio,
             } => {
                 let material_id = self.fresh("mat");
                 let mut material = MaterialVideo::new(material_id.as_str());
@@ -8202,6 +8408,7 @@ impl Shell {
                 material.duration = Micros(duration);
                 material.width = width;
                 material.height = height;
+                material.has_audio = has_audio;
                 Request::Import {
                     medium: ImportedMedium::Video(Box::new(material)),
                 }
@@ -8842,6 +9049,7 @@ fn link_requests(draft: &Draft, missing: &str, probed: &Probed, stored: &str) ->
             width,
             height,
             duration,
+            ..
         } => {
             // A photo, an image and a GIF are stills; only a movie is not.
             let movie = *meta == MetaType::Video;
@@ -11667,6 +11875,7 @@ mod tests {
                 .path
                 .starts_with("Resources/")
         );
+        assert!(!desktop.draft().unwrap().materials.videos[0].has_audio);
 
         let sound = temp.path.join("tone.wav");
         write_wav(&sound);
@@ -11857,6 +12066,20 @@ mod tests {
         let log = crate::test_log::text();
         assert!(log.contains(&error.to_string()), "{log}");
         assert!(log.contains("notes.txt"), "{log}");
+    }
+
+    #[test]
+    fn a_movie_with_sound_imports_with_its_sound_noted() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/containers/mpegts/tests/fixtures/h264_aac.ts");
+        desktop.import_file(&movie).unwrap();
+        let video = &desktop.draft().unwrap().materials.videos[0];
+        assert_eq!(video.kind, cutlass_model::MetaType::Video.as_str());
+        assert!(video.has_audio, "the fixture carries AAC beside its H.264");
     }
 
     #[test]
@@ -14717,6 +14940,32 @@ mod tests {
         );
         assert_eq!(desktop.inspection().unwrap().scale_x, 2.0);
 
+        // Uniform scale off, the axes scale apart; on again, the width
+        // drives both. Each is one undo step.
+        assert!(desktop.inspection().unwrap().uniform_scale);
+        desktop.set_uniform_scale(false).unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert!(!inspection.uniform_scale);
+        assert_eq!((inspection.scale_x, inspection.scale_y), (2.0, 2.0));
+        desktop.set_scale_axes(1.5, 0.5).unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!((inspection.scale_x, inspection.scale_y), (1.5, 0.5));
+        // The one Scale of a pinch keeps the stretch.
+        desktop.set_scale(3.0).unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!((inspection.scale_x, inspection.scale_y), (3.0, 1.0));
+        assert!(desktop.set_scale_axes(0.0, 1.0).is_err());
+        desktop.set_uniform_scale(true).unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert!(inspection.uniform_scale);
+        assert_eq!((inspection.scale_x, inspection.scale_y), (3.0, 3.0));
+        for _ in 0..4 {
+            desktop.undo().unwrap();
+        }
+        let inspection = desktop.inspection().unwrap();
+        assert!(inspection.uniform_scale);
+        assert_eq!(inspection.scale_x, 2.0);
+
         let main = desktop.draft().unwrap().tracks[0].id.clone();
         desktop
             .toggle_attribute(main, TrackAttribute::LOCK)
@@ -15795,7 +16044,14 @@ mod tests {
         assert_eq!((text.typesetting, text.line_max_width), (1, 180.0));
         assert_ne!(digest(&desktop.preview_bytes().unwrap().rgba), across);
         let tall = desktop.stage_box(&title).unwrap();
-        assert!(wide.width > wide.height && tall.height > tall.width);
+        // The column is taller than it is wide, and taller and narrower
+        // than the line was. The line's box is as tall as a line of text,
+        // so two short letters across are not wider than that.
+        assert!(tall.height > tall.width, "{tall:?}");
+        assert!(
+            tall.height > wide.height && tall.width < wide.width,
+            "{wide:?} {tall:?}"
+        );
         for alignment in [4, 5] {
             desktop.set_text_align(alignment).unwrap();
             assert_eq!(desktop.inspection().unwrap().text_align, alignment);
@@ -15893,6 +16149,11 @@ mod tests {
             .unwrap();
         desktop.set_text_align(4).unwrap();
         desktop.set_text_outline("#000000", 0.1).unwrap();
+        desktop.set_text_curve(true, -90.0).unwrap();
+        desktop
+            .set_text_background_box(true, 0.2, 0.1, 0.0, 0.3)
+            .unwrap();
+        desktop.set_text_glow_rays(true).unwrap();
         desktop.save_text_preset().unwrap();
         assert_eq!(desktop.saved_looks()[0].name, "Preset 1");
         assert!(file.exists());
@@ -15914,6 +16175,11 @@ mod tests {
             (text.border_color.as_str(), text.border_width),
             ("#000000", 0.1)
         );
+        assert_eq!((text.curve_on, text.curve), (true, -90.0));
+        assert!(text.background_lines);
+        assert_eq!(text.background_offset_y, 0.3);
+        let look = plain.text_look().unwrap();
+        assert!(look.glow_rays && look.glow_color == "#FFFFFF");
         assert_eq!(text.content, before.content);
         plain.undo().unwrap();
         assert_eq!(plain.draft().unwrap().materials.texts[0], before);
@@ -18017,6 +18283,8 @@ mod tests {
         Folder::new(draft).save(&temp.path).unwrap();
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
+        // A shell with a preview device opens no other to export on.
+        desktop.draw_exports_offscreen(|| panic!("the preview has a device"));
         desktop.attach_gpu(&state);
         let destination = temp.path.join("out.png");
         desktop
@@ -18032,6 +18300,7 @@ mod tests {
         let at = |x: u32, y: u32| samples[usize::try_from((y * width + x) * 4).unwrap()];
         let (middle, corner) = (at(width / 2, height / 2), at(0, 0));
         assert!(corner + 40 < middle, "corner {corner}, middle {middle}");
+        assert_eq!(desktop.export_left_out(), None);
     }
 
     fn export_still(dir: &Path, media: &Path) {
@@ -21533,7 +21802,8 @@ mod tests {
         over.clip.scale = cutlass_model::Point::new(0.5, 0.5);
         over.uniform_scale.value = 0.5;
         overlay.segments.push(over);
-        draft.tracks.push(overlay);
+        // File order is the row order, top first: the overlay above main.
+        draft.tracks.insert(0, overlay);
         edit(&mut draft);
         Folder::new(draft).save(&temp.path).unwrap();
         let mut desktop = shell();
@@ -21582,7 +21852,7 @@ mod tests {
     fn a_hidden_or_locked_row_is_passed_over_and_a_locked_clip_does_not_move() {
         let temp = Temp::new();
         let hidden = stage_project_with(&temp, |draft| {
-            draft.tracks[1].attribute = TrackAttribute(TrackAttribute::HIDE);
+            draft.tracks[0].attribute = TrackAttribute(TrackAttribute::HIDE);
         });
         assert_eq!(
             hidden.stage_pick(960.0, 540.0),
@@ -21591,7 +21861,7 @@ mod tests {
         drop(hidden);
         let temp = Temp::new();
         let mut desktop = stage_project_with(&temp, |draft| {
-            draft.tracks[1].attribute = TrackAttribute(TrackAttribute::LOCK);
+            draft.tracks[0].attribute = TrackAttribute(TrackAttribute::LOCK);
         });
         assert_eq!(
             desktop.stage_pick(960.0, 540.0),

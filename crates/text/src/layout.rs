@@ -102,6 +102,43 @@ impl Layout {
     pub fn glyphs(&self) -> impl Iterator<Item = &PlacedGlyph> {
         self.lines.iter().flat_map(|line| line.glyphs.iter())
     }
+
+    /// The middle of the box the lines stand in, which is the point a title
+    /// is placed by: across, the middle of the widest reach of the lines'
+    /// advances; down, halfway from the first line's top to the last line's
+    /// foot, each line an em tall with its baseline [`VERTICAL_BASELINE`]
+    /// of the way down.
+    ///
+    /// The box is the lines' and not the ink's, so a word stays where it is
+    /// when a letter with a tail or a tall stem is typed into it, and two
+    /// titles at one height share a baseline. Lines laid across to be
+    /// turned have the same middle before the turn. `None` for letters
+    /// stood in columns, which are placed by their ink.
+    #[must_use]
+    pub fn middle(&self) -> Option<(f32, f32)> {
+        if self.vertical() && !self.turned {
+            return None;
+        }
+        let (mut left, mut right) = (f32::MAX, f32::MIN);
+        let (mut top, mut foot) = (f32::MAX, f32::MIN);
+        for line in &self.lines {
+            let tallest = line
+                .glyphs
+                .iter()
+                .map(|glyph| glyph.size)
+                .fold(1.0_f32, f32::max);
+            let em = self.font_size * tallest;
+            top = top.min(line.baseline - em * VERTICAL_BASELINE);
+            foot = foot.max(line.baseline + em * (1.0 - VERTICAL_BASELINE));
+            if let Some(start) = line.glyphs.iter().map(|glyph| glyph.x).reduce(f32::min) {
+                left = left.min(start);
+                right = right.max(start + line.width);
+            }
+        }
+        let middle = ((left + right) / 2.0, (top + foot) / 2.0);
+        (left <= right && top <= foot && middle.0.is_finite() && middle.1.is_finite())
+            .then_some(middle)
+    }
 }
 
 /// Read `bytes` as one face and lay out `material`.
@@ -790,6 +827,43 @@ mod tests {
         text.alignment = 2;
         let right = layout(&face, &text).expect("right");
         assert_eq!(right.lines[0].glyphs[0].x.to_bits(), 1_400.0_f32.to_bits());
+    }
+
+    #[test]
+    fn the_middle_is_of_the_lines_box_and_not_of_the_ink() {
+        let face = font();
+        // One line: its advance across, and an em from 0.8 above the
+        // baseline to 0.2 below it.
+        let one = layout(&face, &material("A")).expect("one");
+        assert_eq!(one.lines[0].baseline.to_bits(), 1_000.0_f32.to_bits());
+        assert_eq!(one.middle(), Some((300.0, 700.0)));
+        // Another letter moves the middle across and not down.
+        let two = layout(&face, &material("AB")).expect("two");
+        assert_eq!(two.middle(), Some((two.lines[0].width / 2.0, 700.0)));
+        // Two lines: halfway from the first one's top to the last one's foot.
+        let mut wrapped = material("AB");
+        wrapped.line_max_width = 1_000.0;
+        let lines = layout(&face, &wrapped).expect("lines");
+        let (first, last) = (lines.lines[0].baseline, lines.lines[1].baseline);
+        assert!(last > first);
+        assert_eq!(
+            lines.middle().map(|middle| middle.1),
+            Some((first - 800.0 + last + 200.0) / 2.0)
+        );
+        // A wrap width is room to wrap in and not the box: a short line set
+        // right in it is still placed by its own middle.
+        let mut right = material("A");
+        right.line_max_width = 2_000.0;
+        right.alignment = 2;
+        let set_right = layout(&face, &right).expect("right");
+        assert_eq!(set_right.middle(), Some((1_700.0, 700.0)));
+        // Letters stood in columns are placed by their ink, and no text
+        // has no middle.
+        let mut column = material("AB");
+        column.typesetting = 1;
+        column.alignment = 3;
+        assert_eq!(layout(&face, &column).expect("column").middle(), None);
+        assert_eq!(layout(&face, &material("")).expect("empty").middle(), None);
     }
 
     fn words(laid: &super::Layout) -> Vec<String> {

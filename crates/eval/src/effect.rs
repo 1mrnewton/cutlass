@@ -20,13 +20,21 @@ use cutlass_effects::{
     entry, package_id, plugin_package_id, recipe as find_recipe, segment_package_id,
     video_package_id,
 };
-use cutlass_model::{Draft, MaterialRef, Micros, Segment, SegmentId, TrackAttribute};
+use cutlass_model::{
+    Draft, DraftId, MaterialRef, Micros, Segment, SegmentId, TimeRange, TrackAttribute,
+};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::EvalError;
 use crate::canvas::project_canvas;
 use crate::gpu::{GpuLayer, GpuSource, SelectionCut};
 use crate::media::clip_frame;
+
+/// Where a layer keyed `(render_index, track_index, segment_index)` is
+/// drawn: the order [`cutlass_model::paint_order`] gives, bottom first.
+pub(crate) fn drawn_at(key: (i32, usize, usize)) -> cutlass_model::PaintOrder {
+    cutlass_model::paint_order(key.0, key.1, key.2)
+}
 
 pub(crate) struct StackLayer<'a> {
     pub(crate) render_index: i32,
@@ -130,8 +138,8 @@ pub(crate) fn present<D: Device>(
             (Some(_), None) => true,
             (None, Some(_)) => false,
             (Some(layer), Some(mark)) => {
-                (layer.render_index, layer.track_index, layer.segment_index)
-                    <= (mark.render_index, mark.track_index, mark.segment_index)
+                drawn_at((layer.render_index, layer.track_index, layer.segment_index))
+                    <= drawn_at((mark.render_index, mark.track_index, mark.segment_index))
             }
         };
         if take_visual {
@@ -326,7 +334,7 @@ fn global_marks<'a>(draft: &'a Draft, time: Micros, stack: &[StackLayer<'_>]) ->
         })
         .chain(adjustment_layers(draft, time, stack))
         .collect();
-    marks.sort_by_key(|mark| (mark.render_index, mark.track_index, mark.segment_index));
+    marks.sort_by_key(|mark| drawn_at((mark.render_index, mark.track_index, mark.segment_index)));
     marks
 }
 
@@ -540,8 +548,66 @@ pub(crate) fn recipe_marks(
             })
         })
         .collect();
-    marks.sort_by_key(|mark| mark.key);
+    marks.sort_by_key(|mark| drawn_at(mark.key));
     marks
+}
+
+/// The recipe effect clips of `draft` that cover any of `range`, by id, a
+/// compound's own in its place: what [`crate::layers_in`] draws on the GPU
+/// and [`crate::frame_in`] leaves out, so a caller with no GPU can say
+/// which clips its picture is missing.
+///
+/// A hidden clip, a clip on a hidden row and an effect bound to a clip the
+/// draft no longer has are drawn by neither, and are not named. A compound
+/// that covers any of `range` names every recipe effect clip its child
+/// has, whichever part of the child it plays.
+#[must_use]
+pub fn recipe_effect_clips(draft: &Draft, range: &TimeRange) -> Vec<SegmentId> {
+    let mut clips = Vec::new();
+    recipe_clips_in(draft, Some(range), &[], &mut clips);
+    clips
+}
+
+fn recipe_clips_in(
+    draft: &Draft,
+    range: Option<&TimeRange>,
+    ancestors: &[DraftId],
+    clips: &mut Vec<SegmentId>,
+) {
+    let shown = draft
+        .tracks
+        .iter()
+        .filter(|track| !track.attribute.contains(TrackAttribute::HIDE))
+        .flat_map(|track| &track.segments)
+        .filter(|segment| {
+            segment.visible
+                && range.is_none_or(|range| segment.target.overlaps(range).unwrap_or(false))
+        });
+    for segment in shown {
+        match draft.materials.get(segment.material_id.as_str()) {
+            Some(MaterialRef::Draft(material)) => {
+                let Some(child) = material.draft.as_deref() else {
+                    continue;
+                };
+                if segment.source_range.is_some()
+                    && !crate::nest::skips_child(draft, child, ancestors)
+                {
+                    let chain = crate::nest::descend(ancestors, &draft.id);
+                    recipe_clips_in(child, None, &chain, clips);
+                }
+            }
+            Some(MaterialRef::Effect(_) | MaterialRef::VideoEffect(_) | MaterialRef::Plugin(_)) => {
+                let recipe = segment_package_id(draft, segment).and_then(find_recipe);
+                let bound_to_nothing = segment
+                    .bound_clip()
+                    .is_some_and(|clip| find_segment(draft, &clip).is_none());
+                if recipe.is_some() && !bound_to_nothing {
+                    clips.push(segment.id.clone());
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// `segment`'s colour mask placed on an `extent` canvas at `time`: where
@@ -1209,5 +1275,91 @@ mod tests {
             ..Clip::default()
         };
         assert_eq!(draw(&parent, &store, 0), [0, 0, 0, 0]);
+    }
+
+    /// One row of effect clips over an empty draft: `(id, effect, range)`.
+    fn recipes(clips: &[(&str, &str, (i64, i64))]) -> Draft {
+        let mut draft = Draft::empty("draft");
+        let mut row = Track::main("effects");
+        row.kind = TrackType::Effect;
+        for (id, effect, range) in clips {
+            draft.materials.video_effects.push(MaterialVideoEffect {
+                id: (*id).into(),
+                effect_id: (*effect).to_owned(),
+                ..MaterialVideoEffect::default()
+            });
+            row.segments
+                .push(Segment::new(*id, *id, TimeRange::new(range.0, range.1)));
+        }
+        draft.tracks.push(row);
+        draft
+    }
+
+    fn named(draft: &Draft, range: (i64, i64)) -> Vec<String> {
+        super::recipe_effect_clips(draft, &TimeRange::new(range.0, range.1))
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn the_recipe_clips_in_a_range_are_named_and_no_others() {
+        let draft = recipes(&[
+            ("early", "recipe/vignette", (0, 1_000_000)),
+            ("late", "recipe/invert", (1_000_000, 1_000_000)),
+            ("unknown", "recipe/no-such-effect", (0, 2_000_000)),
+        ]);
+        let before = draft.clone();
+        assert_eq!(named(&draft, (0, 2_000_000)), ["early", "late"]);
+        // A range ends before its end, and a clip before its own.
+        assert_eq!(named(&draft, (0, 1_000_000)), ["early"]);
+        assert_eq!(named(&draft, (999_999, 1)), ["early"]);
+        assert_eq!(named(&draft, (1_000_000, 1)), ["late"]);
+        assert!(named(&draft, (2_000_000, 1_000_000)).is_empty());
+        // An empty range covers nothing, and an empty draft has nothing.
+        assert!(named(&draft, (0, 0)).is_empty());
+        assert!(named(&Draft::empty("none"), (0, 1_000_000)).is_empty());
+        assert_eq!(draft, before);
+    }
+
+    #[test]
+    fn a_recipe_clip_no_frame_draws_is_not_named() {
+        let whole = (0, 1_000_000);
+        let mut draft = recipes(&[("fx", "recipe/vignette", whole)]);
+        assert_eq!(named(&draft, whole), ["fx"]);
+        draft.tracks[1].segments[0].visible = false;
+        assert!(named(&draft, whole).is_empty());
+        draft.tracks[1].segments[0].visible = true;
+        draft.tracks[1].attribute = TrackAttribute(TrackAttribute::HIDE);
+        assert!(named(&draft, whole).is_empty());
+        draft.tracks[1].attribute = TrackAttribute::default();
+        // Bound to a clip the draft has, it is drawn; to one it lost, not.
+        let clip = Segment::new("clip", "missing", TimeRange::new(0, 1_000_000));
+        draft.tracks[1].segments[0].bind_to(Some(&clip.id));
+        assert!(named(&draft, whole).is_empty());
+        draft.tracks[0].segments.push(clip);
+        assert_eq!(named(&draft, whole), ["fx"]);
+    }
+
+    #[test]
+    fn a_compound_in_the_range_names_its_childs_recipe_clips() {
+        let mut child = recipes(&[("inner", "recipe/invert", (5_000_000, 1_000_000))]);
+        child.id = "child".into();
+        let mut parent = recipes(&[("outer", "recipe/vignette", (0, 1_000_000))]);
+        parent.materials.drafts.push(MaterialDraft {
+            id: "nest".into(),
+            draft: Some(Box::new(child)),
+            ..MaterialDraft::default()
+        });
+        let mut compound = Segment::new("compound", "nest", TimeRange::new(1_000_000, 1_000_000));
+        compound.source_range = Some(TimeRange::new(0, 1_000_000));
+        parent.tracks[0].segments.push(compound);
+        assert_eq!(named(&parent, (0, 2_000_000)), ["inner", "outer"]);
+        assert_eq!(named(&parent, (0, 1_000_000)), ["outer"]);
+        assert_eq!(named(&parent, (1_000_000, 1_000_000)), ["inner"]);
+        // A draft nested in itself is not walked for ever.
+        let mut looped = parent.clone();
+        looped.materials.drafts[0].draft = Some(Box::new(parent.clone()));
+        assert_eq!(named(&looped, (0, 1_000_000)), ["outer"]);
     }
 }

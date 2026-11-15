@@ -9,7 +9,7 @@
 #![forbid(unsafe_code)]
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use cutlass_model::MetaType;
@@ -43,12 +43,14 @@ impl std::error::Error for ProbeError {}
 /// photo's EXIF orientation are applied.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Probed {
-    /// A movie, or a still on the video lane's clock.
+    /// A movie, or a still on the video lane's clock. `has_audio` says
+    /// whether a movie also carries a sound track; a still has none.
     Video {
         meta: MetaType,
         width: i32,
         height: i32,
         duration: i64,
+        has_audio: bool,
     },
     Audio {
         duration: i64,
@@ -137,6 +139,7 @@ fn still(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
         width,
         height,
         duration: cutlass_model::MaterialVideo::MAPPING_DURATION.0,
+        has_audio: false,
     }))
 }
 
@@ -328,6 +331,9 @@ fn transport_stream(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeE
         .map_or(0, |end| u64::try_from(end - demux.start()).unwrap_or(0));
     let duration = ticks_to_micros(ticks, cutlass_mpegts::TIMESCALE)?;
     let streams = cutlass_container::Demux::streams(&demux);
+    let sounds = streams
+        .iter()
+        .any(|stream| stream.params().sample_rate().is_some());
     if let Some(size) = streams.iter().find_map(|stream| stream.params().size()) {
         let width =
             i32::try_from(size.width()).map_err(|_| ProbeError::new("the frame is too wide"))?;
@@ -338,12 +344,10 @@ fn transport_stream(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeE
             width,
             height,
             duration,
+            has_audio: sounds,
         }));
     }
-    if streams
-        .iter()
-        .any(|stream| stream.params().sample_rate().is_some())
-    {
+    if sounds {
         return Ok(Some(Probed::Audio { duration }));
     }
     Err(ProbeError::new(
@@ -386,6 +390,9 @@ fn matroska(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     };
     let duration = ticks_to_micros(u64::try_from(ticks).unwrap_or(0), timescale)?;
     let streams = cutlass_container::Demux::streams(&demux);
+    let sounds = streams
+        .iter()
+        .any(|stream| stream.params().sample_rate().is_some());
     if let Some(size) = streams.iter().find_map(|stream| stream.params().size()) {
         let width =
             i32::try_from(size.width()).map_err(|_| ProbeError::new("the frame is too wide"))?;
@@ -396,12 +403,10 @@ fn matroska(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
             width,
             height,
             duration,
+            has_audio: sounds,
         }));
     }
-    if streams
-        .iter()
-        .any(|stream| stream.params().sample_rate().is_some())
-    {
+    if sounds {
         return Ok(Some(Probed::Audio { duration }));
     }
     Err(ProbeError::new(
@@ -444,6 +449,7 @@ fn movie(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
             width,
             height,
             duration,
+            has_audio: audio.is_some(),
         }));
     }
     if let Some(stream) = audio {
@@ -480,6 +486,9 @@ fn avi(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
             stream.timescale().ticks_per_second(),
         )
     };
+    let sound = streams.iter().find(|stream| {
+        stream.params().sample_rate().is_some() && !stream.params().codec().is_unknown()
+    });
     if let Some(stream) = streams
         .iter()
         .find(|stream| stream.params().size().is_some() && !stream.params().codec().is_unknown())
@@ -496,11 +505,10 @@ fn avi(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
             width,
             height,
             duration: length_of(stream)?,
+            has_audio: sound.is_some(),
         }));
     }
-    if let Some(stream) = streams.iter().find(|stream| {
-        stream.params().sample_rate().is_some() && !stream.params().codec().is_unknown()
-    }) {
+    if let Some(stream) = sound {
         return Ok(Some(Probed::Audio {
             duration: length_of(stream)?,
         }));
@@ -511,10 +519,35 @@ fn avi(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
 }
 
 fn mpeg_audio(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
+    // Two ADTS frames, after an ID3v2 tag or not, are raw AAC. An ID3v2 tag
+    // alone also matches MP3, so ADTS is asked first. A tag can end past
+    // the header window, or close enough to its end that two frames do not
+    // fit: a signed download carries 17 kB of tag and cover art carries
+    // more. ADTS is then asked about the bytes that follow the tag.
+    let tag = match cutlass_mp3_container::id3v2_tag_bytes(header) {
+        Ok(Some(tag)) => Some(tag),
+        // Not a tag, or one past the MP3 reader's limit, which that reader
+        // refuses below. Nothing is read for either.
+        Ok(None) | Err(_) => None,
+    };
+    let after_tag = match tag {
+        Some(tag) => Some(read_window(path, tag, header.len())?),
+        None => None,
+    };
+    if matches!(
+        cutlass_adts::probe(after_tag.as_deref().unwrap_or(header)),
+        cutlass_container::ProbeResult::Accept { .. }
+    ) {
+        return adts(path);
+    }
     match cutlass_mp3_container::probe(header) {
         cutlass_mp3_container::Probe::Matched => {}
+        // The tag is longer than the window. It still names this family:
+        // the reader skips it, and refuses a file whose tag runs past the
+        // end or has no Layer III frame behind it.
+        cutlass_mp3_container::Probe::NeedMore { .. } if tag.is_some() => {}
         cutlass_mp3_container::Probe::NeedMore { .. } | cutlass_mp3_container::Probe::Reject => {
-            return adts(path, header);
+            return Ok(None);
         }
     }
     let file = File::open(path).map_err(|error| io_error(path, error))?;
@@ -537,26 +570,25 @@ fn mpeg_audio(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> 
     Ok(Some(Probed::Audio { duration }))
 }
 
-/// A raw AAC stream (ADTS, usually `.aac`) is recognised and refused:
-/// no reader the apps register plays it, since it cannot seek, so an
-/// import would add a clip that never sounds.
-fn adts(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
-    let Some((first, second)) = header.first().zip(header.get(1)) else {
-        return Ok(None);
-    };
-    if *first != 0xFF || second & 0xF0 != 0xF0 {
-        return Ok(None);
-    }
+/// A raw AAC stream (ADTS, usually `.aac`). Its length is every frame's
+/// 1024 samples, counted by walking the frame headers: the file stores none.
+fn adts(path: &Path) -> Result<Option<Probed>, ProbeError> {
     let file = File::open(path).map_err(|error| io_error(path, error))?;
-    if cutlass_adts::AdtsFile::open(file).is_err() {
-        return Ok(None);
-    }
-    Err(ProbeError::new(RAW_AAC))
+    let length = file
+        .metadata()
+        .map_err(|error| io_error(path, error))?
+        .len();
+    let demux = cutlass_adts::AdtsSeekFile::open(file, length)
+        .map_err(|error| ProbeError::new(format!("adts refused the file: {error}")))?;
+    let Some(rate) = cutlass_container::Demux::streams(&demux)
+        .first()
+        .and_then(|stream| stream.params().sample_rate())
+    else {
+        return Err(ProbeError::new("adts opened a file with no sample rate"));
+    };
+    let duration = samples_to_micros(demux.samples(), rate)?;
+    Ok(Some(Probed::Audio { duration }))
 }
-
-/// Why a raw AAC file is refused, and what plays instead.
-pub const RAW_AAC: &str =
-    "raw AAC (.aac) files cannot be played yet; the same sound in an .m4a or .mp4 can";
 
 fn unavailable(header: &[u8]) -> Option<&'static str> {
     if header.starts_with(b"OggS") {
@@ -592,6 +624,19 @@ fn read_prefix(path: &Path, limit: usize) -> Result<Vec<u8>, ProbeError> {
         .read(&mut buffer)
         .map_err(|error| io_error(path, error))?;
     buffer.truncate(read);
+    Ok(buffer)
+}
+
+/// Up to `limit` bytes of the file from `start`. Empty when the file ends
+/// at or before `start`.
+fn read_window(path: &Path, start: u64, limit: usize) -> Result<Vec<u8>, ProbeError> {
+    let mut file = File::open(path).map_err(|error| io_error(path, error))?;
+    file.seek(SeekFrom::Start(start))
+        .map_err(|error| io_error(path, error))?;
+    let mut buffer = Vec::with_capacity(limit);
+    file.take(u64::try_from(limit).unwrap_or(u64::MAX))
+        .read_to_end(&mut buffer)
+        .map_err(|error| io_error(path, error))?;
     Ok(buffer)
 }
 
@@ -644,7 +689,16 @@ mod tests {
                 width,
                 height,
                 duration,
+                ..
             } => (meta, width, height, duration),
+            Probed::Audio { .. } => panic!("{} opened as audio", path.display()),
+        }
+    }
+
+    /// Whether the picture at `path` probed with a sound track.
+    fn sounds(path: &Path) -> bool {
+        match probe(path).expect("probe") {
+            Probed::Video { has_audio, .. } => has_audio,
             Probed::Audio { .. } => panic!("{} opened as audio", path.display()),
         }
     }
@@ -688,6 +742,7 @@ mod tests {
         let temp = Temp::new();
         let path = temp.write("clip.avi", &bytes);
         assert_eq!(picture(&path), (MetaType::Video, 64, 36, 2_000_000));
+        assert!(!sounds(&path), "a picture-only AVI has no sound");
     }
 
     /// One second of 20 ms Opus packets after a 312-sample pre-skip, in Ogg.
@@ -825,6 +880,7 @@ mod tests {
                 width: 320,
                 height: 240,
                 duration: 2_000_000,
+                has_audio: false,
             }
         );
         // A cut file still names the family in its error.
@@ -839,6 +895,7 @@ mod tests {
         assert_eq!(meta, MetaType::Image);
         assert!(width > 0 && height > 0);
         assert_eq!(duration, cutlass_model::MaterialVideo::MAPPING_DURATION.0);
+        assert!(!sounds(&fixture("pattern.png")), "a still has no sound");
     }
 
     /// `jpeg` with an EXIF block carrying `orientation` just after SOI.
@@ -907,8 +964,14 @@ mod tests {
         assert_eq!((w, h), (16, 8));
     }
 
-    /// A one-frame 16x8 movie, its track matrix set to `matrix`.
+    /// A one-second 16x8 movie, its track matrix set to `matrix`.
     fn movie(matrix: [i32; 9]) -> Vec<u8> {
+        movie_with(matrix, false)
+    }
+
+    /// A one-second 16x8 movie, its track matrix set to `matrix`, with a
+    /// second of AAC beside the picture when `sound` is set.
+    fn movie_with(matrix: [i32; 9], sound: bool) -> Vec<u8> {
         use cutlass_isobmff::{CodecId, Mux, MuxOptions, Packet, StreamParams, Timescale};
         let mut params = StreamParams::video(CodecId::H264, Timescale(30), 16, 8);
         params.extradata = vec![1, 66, 0, 10];
@@ -917,6 +980,30 @@ mod tests {
             MuxOptions::default(),
         );
         let track = mux.add_stream(&params).expect("stream");
+        if sound {
+            let mut audio = StreamParams::audio(
+                CodecId::Aac,
+                Timescale(48_000),
+                48_000,
+                2,
+                16,
+                Default::default(),
+            );
+            audio.extradata = vec![0x12, 0x10];
+            let audio_track = mux.add_stream(&audio).expect("audio stream");
+            for frame in 0..47 {
+                mux.write_packet(&Packet {
+                    track_id: audio_track,
+                    payload: vec![0x21, 0x10],
+                    dts: frame * 1024,
+                    pts: frame * 1024,
+                    duration: 1024,
+                    timescale: Timescale(48_000),
+                    keyframe: true,
+                })
+                .expect("audio packet");
+            }
+        }
         for frame in 0..30 {
             mux.write_packet(&Packet {
                 track_id: track,
@@ -960,7 +1047,18 @@ mod tests {
             assert_eq!(meta, MetaType::Video);
             assert_eq!((width, height), size, "{matrix:?}");
             assert_eq!(duration, 1_000_000);
+            assert!(!sounds(&path), "a picture-only movie has no sound");
         }
+    }
+
+    #[test]
+    fn a_movie_with_a_sound_track_says_so() {
+        let temp = Temp::new();
+        let one = 1 << 16;
+        let upright = [one, 0, 0, 0, one, 0, 0, 0, 1 << 30];
+        let path = temp.write("talk.mp4", &movie_with(upright, true));
+        assert_eq!(picture(&path), (MetaType::Video, 16, 8, 1_000_000));
+        assert!(sounds(&path), "the AAC track is the movie's sound");
     }
 
     #[test]
@@ -1125,6 +1223,7 @@ mod tests {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../containers/mpegts/tests/fixtures/h264_aac.ts");
         assert_eq!(picture(&path), (MetaType::Video, 96, 64, 1_237_333));
+        assert!(sounds(&path), "the fixture carries AAC beside its H.264");
         let temp = Temp::new();
         let bytes = std::fs::read(&path).expect("fixture");
         let cut = temp.write("cut.ts", &bytes[..1000]);
@@ -1155,10 +1254,137 @@ mod tests {
     }
 
     #[test]
-    fn a_raw_aac_file_is_refused_with_what_plays_instead() {
+    fn a_raw_aac_file_is_audio_as_long_as_its_frames() {
         let temp = Temp::new();
-        let aac = temp.write("sound.aac", &adts_frames(8));
-        let error = probe(&aac).expect_err("raw aac");
-        assert_eq!(error.message(), super::RAW_AAC);
+        let aac = temp.write("sound.aac", &adts_frames(48));
+        // 48 frames of 1024 samples at 48 kHz.
+        assert_eq!(
+            probe(&aac).expect("raw aac"),
+            Probed::Audio {
+                duration: 1_024_000
+            }
+        );
+    }
+
+    #[test]
+    fn a_raw_aac_file_behind_an_id3_tag_is_still_aac() {
+        let temp = Temp::new();
+        let mut bytes = b"ID3\x04\x00\x00\x00\x00\x00\x10".to_vec();
+        bytes.extend([0u8; 16]);
+        bytes.extend(adts_frames(3));
+        let aac = temp.write("tagged.aac", &bytes);
+        assert_eq!(
+            probe(&aac).expect("tagged aac"),
+            Probed::Audio { duration: 64_000 }
+        );
+    }
+
+    /// An ID3v2.4 tag of `total` bytes, header included, laid out like the
+    /// one FFmpeg's writer puts on a signed download: a short `TSSE` text
+    /// frame, then one `GEOB` object, the C2PA manifest there, that fills
+    /// the rest.
+    fn id3_tag(total: usize) -> Vec<u8> {
+        let synchsafe = |value: usize| {
+            [
+                u8::try_from((value >> 21) & 0x7F).expect("seven bits"),
+                u8::try_from((value >> 14) & 0x7F).expect("seven bits"),
+                u8::try_from((value >> 7) & 0x7F).expect("seven bits"),
+                u8::try_from(value & 0x7F).expect("seven bits"),
+            ]
+        };
+        let encoder = b"\x03Lavf63.1.102";
+        let object = total - 10 - 10 - encoder.len() - 10;
+        let mut tag = b"ID3\x04\x00\x00".to_vec();
+        tag.extend(synchsafe(total - 10));
+        tag.extend(b"TSSE");
+        tag.extend(synchsafe(encoder.len()));
+        tag.extend([0, 0]);
+        tag.extend(encoder);
+        tag.extend(b"GEOB");
+        tag.extend(synchsafe(object));
+        tag.extend([0, 0]);
+        // Bytes that are neither an MPEG sync nor an ADTS one.
+        tag.extend((0..object).map(|index| b'a' + u8::try_from(index % 26).expect("a letter")));
+        assert_eq!(tag.len(), total);
+        tag
+    }
+
+    /// Layer III at 48 kHz stereo with no tag, from the MP3 decoder's tests.
+    fn layer3() -> Vec<u8> {
+        std::fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../codecs/mp3/tests/fixtures/clicks_48000_v2.mp3"),
+        )
+        .expect("mp3 fixture")
+    }
+
+    /// The tag ElevenLabs puts on a download is 17,160 bytes, four times the
+    /// header window. The sound behind it is as long as it is with no tag.
+    #[test]
+    fn an_mp3_behind_a_tag_longer_than_the_header_window_is_audio() {
+        let temp = Temp::new();
+        let bare = probe(&temp.write("bare.mp3", &layer3())).expect("bare mp3");
+        // 22 frames of 1152 samples at 48 kHz.
+        assert_eq!(bare, Probed::Audio { duration: 528_000 });
+        // The window's own length, one byte past it, the real tag, and a
+        // tag the size of cover art.
+        for total in [4_096, 4_097, 17_160, 600_000] {
+            let mut bytes = id3_tag(total);
+            bytes.extend(layer3());
+            let tagged = temp.write("tagged.mp3", &bytes);
+            assert_eq!(
+                probe(&tagged).expect("tagged mp3"),
+                bare,
+                "a {total} byte tag"
+            );
+        }
+    }
+
+    #[test]
+    fn a_raw_aac_file_behind_a_tag_longer_than_the_header_window_is_still_aac() {
+        let temp = Temp::new();
+        // 4,090 leaves the window six bytes of the first frame.
+        for total in [4_090, 4_096, 17_160] {
+            let mut bytes = id3_tag(total);
+            bytes.extend(adts_frames(3));
+            let aac = temp.write("tagged.aac", &bytes);
+            assert_eq!(
+                probe(&aac).expect("tagged aac"),
+                Probed::Audio { duration: 64_000 },
+                "a {total} byte tag"
+            );
+        }
+    }
+
+    /// A tag that says it is longer than the file, a file cut inside its
+    /// tag, a tag with nothing or one frame header after it, a tag over
+    /// text, and a tag past the reader's limit are each the MP3 reader's
+    /// refusal. None of them opens.
+    #[test]
+    fn a_long_tag_that_lies_or_is_cut_is_refused_by_the_mp3_reader() {
+        let temp = Temp::new();
+        let mut whole = id3_tag(17_160);
+        whole.extend(layer3());
+
+        let mut lying = whole.clone();
+        // 0x7F 0x7F 0x7F is 2,097,151 bytes, under the reader's 16 MiB limit.
+        lying[6..10].copy_from_slice(&[0, 0x7F, 0x7F, 0x7F]);
+        let mut huge = whole.clone();
+        // 0x7F four times is 256 MiB, past the limit: nothing is read for it.
+        huge[6..10].copy_from_slice(&[0x7F; 4]);
+        let mut text = id3_tag(17_160);
+        text.extend(b"no sound follows this tag ".repeat(400));
+        let cases: [(&[u8], &str); 6] = [
+            (&lying, "mp3 refused the file: truncated id3"),
+            (&whole[..9_000], "mp3 refused the file: truncated id3"),
+            (&whole[..17_160], "mp3 refused the file: no frames"),
+            (&whole[..17_164], "mp3 refused the file: truncated frame"),
+            (&text, "mp3 refused the file: no frames"),
+            (&huge, "mp3 refused the file: limit exceeded: id3"),
+        ];
+        for (bytes, refusal) in cases {
+            let error = probe(&temp.write("bad.mp3", bytes)).expect_err(refusal);
+            assert_eq!(error.message(), refusal);
+        }
     }
 }

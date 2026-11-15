@@ -1,14 +1,16 @@
 //! A text's style settings that key on their own: its size, spacing, wrap
-//! width, outline, background and shadow. Each is one number on the text
+//! width, outline, background, shadow and curve, the shadow's opacity among them. Each is one number on the text
 //! material, keyed on the segment under a Cutlass name.
 
 use crate::keyframe::{KeyframeGraph, sample};
-use crate::materials::{BloomParams, MaterialEffect, MaterialText, Materials, segment_bloom};
+use crate::materials::{
+    BloomParams, MAX_CURVE, MaterialEffect, MaterialText, Materials, segment_bloom,
+};
 use crate::segment::Segment;
 use crate::time::Micros;
 
 /// The key names, in [`TextStyleKey::ALL`] order.
-pub static TEXT_STYLE_KEYS: [&str; 10] = [
+pub static TEXT_STYLE_KEYS: [&str; 16] = [
     "KFTypeTextSize",
     "KFTypeTextLetterSpacing",
     "KFTypeTextLineSpacing",
@@ -19,6 +21,12 @@ pub static TEXT_STYLE_KEYS: [&str; 10] = [
     "KFTypeTextShadowDistance",
     "KFTypeTextShadowAngle",
     "KFTypeTextShadowBlur",
+    "KFTypeTextShadowAlpha",
+    "KFTypeTextBackgroundWidth",
+    "KFTypeTextBackgroundHeight",
+    "KFTypeTextBackgroundOffsetX",
+    "KFTypeTextBackgroundOffsetY",
+    "KFTypeTextCurve",
 ];
 
 /// A title's glow strength, from 0 to 1. A Cutlass name.
@@ -80,11 +88,23 @@ pub enum TextStyleKey {
     ShadowAngle,
     /// The shadow's blur.
     ShadowBlur,
+    /// The shadow's opacity.
+    ShadowAlpha,
+    /// The room the background leaves each side of the letters, in ems.
+    BackgroundWidth,
+    /// The room the background leaves above and below the letters, in ems.
+    BackgroundHeight,
+    /// How far right the background sits from the letters, in ems.
+    BackgroundOffsetX,
+    /// How far up the background sits from the letters, in ems.
+    BackgroundOffsetY,
+    /// How far the lines bend, in degrees of arc.
+    Curve,
 }
 
 impl TextStyleKey {
     /// Every setting.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 16] = [
         Self::Size,
         Self::LetterSpacing,
         Self::LineSpacing,
@@ -95,6 +115,12 @@ impl TextStyleKey {
         Self::ShadowDistance,
         Self::ShadowAngle,
         Self::ShadowBlur,
+        Self::ShadowAlpha,
+        Self::BackgroundWidth,
+        Self::BackgroundHeight,
+        Self::BackgroundOffsetX,
+        Self::BackgroundOffsetY,
+        Self::Curve,
     ];
 
     fn index(self) -> usize {
@@ -128,9 +154,14 @@ impl TextStyleKey {
             Self::LineSpacing => value > -1.0 && value <= 4.0,
             Self::LineWidth => (0.0..=8_192.0).contains(&value),
             Self::StrokeWidth => (0.0..=0.25).contains(&value),
-            Self::BackgroundAlpha | Self::BackgroundRound | Self::ShadowBlur => {
-                (0.0..=1.0).contains(&value)
-            }
+            Self::BackgroundAlpha
+            | Self::BackgroundRound
+            | Self::ShadowBlur
+            | Self::ShadowAlpha
+            | Self::BackgroundWidth
+            | Self::BackgroundHeight => (0.0..=1.0).contains(&value),
+            Self::BackgroundOffsetX | Self::BackgroundOffsetY => (-1.0..=1.0).contains(&value),
+            Self::Curve => (-MAX_CURVE..=MAX_CURVE).contains(&value),
             Self::ShadowDistance => (0.0..=100.0).contains(&value),
             Self::ShadowAngle => true,
         }
@@ -150,6 +181,12 @@ impl TextStyleKey {
             Self::ShadowDistance => text.shadow_distance,
             Self::ShadowAngle => text.shadow_angle,
             Self::ShadowBlur => text.shadow_smoothing,
+            Self::ShadowAlpha => text.shadow_alpha,
+            Self::BackgroundWidth => text.background_width,
+            Self::BackgroundHeight => text.background_height,
+            Self::BackgroundOffsetX => text.background_offset_x,
+            Self::BackgroundOffsetY => text.background_offset_y,
+            Self::Curve => text.curve,
         }
     }
 
@@ -162,9 +199,14 @@ impl TextStyleKey {
             Self::LineSpacing => value.clamp(-0.99, 4.0),
             Self::LineWidth => value.clamp(0.0, 8_192.0),
             Self::StrokeWidth => value.clamp(0.0, 0.25),
-            Self::BackgroundAlpha | Self::BackgroundRound | Self::ShadowBlur => {
-                value.clamp(0.0, 1.0)
-            }
+            Self::BackgroundAlpha
+            | Self::BackgroundRound
+            | Self::ShadowBlur
+            | Self::ShadowAlpha
+            | Self::BackgroundWidth
+            | Self::BackgroundHeight => value.clamp(0.0, 1.0),
+            Self::BackgroundOffsetX | Self::BackgroundOffsetY => value.clamp(-1.0, 1.0),
+            Self::Curve => value.clamp(-MAX_CURVE, MAX_CURVE),
             Self::ShadowDistance => value.clamp(0.0, 100.0),
             Self::ShadowAngle => value,
         };
@@ -179,6 +221,12 @@ impl TextStyleKey {
             Self::ShadowDistance => &mut text.shadow_distance,
             Self::ShadowAngle => &mut text.shadow_angle,
             Self::ShadowBlur => &mut text.shadow_smoothing,
+            Self::ShadowAlpha => &mut text.shadow_alpha,
+            Self::BackgroundWidth => &mut text.background_width,
+            Self::BackgroundHeight => &mut text.background_height,
+            Self::BackgroundOffsetX => &mut text.background_offset_x,
+            Self::BackgroundOffsetY => &mut text.background_offset_y,
+            Self::Curve => &mut text.curve,
         };
         *field = value;
     }
@@ -252,9 +300,7 @@ mod tests {
             color: "#ffffff".to_owned(),
             strength: 0.5,
             range: 0.3,
-            dir_x: 0.0,
-            dir_y: 0.0,
-            rest: serde_json::Map::new(),
+            ..BloomParams::default()
         };
         materials.effects.push(MaterialEffect::glow("g", &bloom));
         let mut segment = Segment::new("s", "t", TimeRange::new(1_000, 2_000));

@@ -145,6 +145,45 @@ pub fn keys_label(keys: &str, mac: bool) -> String {
     out
 }
 
+/// `keys` in words, for a line of text such as a notice or a tip:
+/// `Cmd+Shift+S` on a Mac, `Ctrl+Shift+S` elsewhere. [`keys_label`] writes
+/// a Mac's keys as symbols, which a font may not have; these words any
+/// font can write. Empty keys read as an empty string.
+#[must_use]
+pub fn keys_words(keys: &str, mac: bool) -> String {
+    if !mac {
+        return keys_label(keys, false);
+    }
+    let parts: Vec<&str> = keys.split('+').filter(|part| !part.is_empty()).collect();
+    let Some((key, modifiers)) = parts.split_last() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for (name, word) in [
+        ("primary", "Cmd+"),
+        ("ctrl", "Ctrl+"),
+        ("alt", "Opt+"),
+        ("shift", "Shift+"),
+    ] {
+        if modifiers.contains(&name) {
+            out.push_str(word);
+        }
+    }
+    let key = match *key {
+        "space" => "Space".to_owned(),
+        "left" => "Left".to_owned(),
+        "right" => "Right".to_owned(),
+        "up" => "Up".to_owned(),
+        "down" => "Down".to_owned(),
+        "delete" => "Delete".to_owned(),
+        "comma" => ",".to_owned(),
+        "period" => ".".to_owned(),
+        other => other.to_uppercase(),
+    };
+    out.push_str(&key);
+    out
+}
+
 impl Settings {
     /// Give every action without a binding its default keys. A binding the
     /// user cleared stays cleared, and a default someone else already holds
@@ -294,6 +333,17 @@ mod tests {
 
     #[test]
     fn keys_read_as_each_system_writes_them() {
+        // In words, for a line of text: no symbol a font may lack.
+        assert_eq!(super::keys_words("primary+shift+s", true), "Cmd+Shift+S");
+        assert_eq!(super::keys_words("ctrl+alt+left", true), "Ctrl+Opt+Left");
+        assert_eq!(super::keys_words("shift+delete", true), "Shift+Delete");
+        assert_eq!(super::keys_words("space", true), "Space");
+        assert_eq!(super::keys_words("", true), "");
+        assert_eq!(super::keys_words("primary+shift+s", false), "Ctrl+Shift+S");
+        for (action, _) in ACTIONS {
+            let keys = default_keys(action).unwrap_or("");
+            assert!(super::keys_words(keys, true).is_ascii(), "{action}");
+        }
         assert_eq!(keys_label("primary+shift+s", true), "⇧⌘S");
         assert_eq!(keys_label("primary+shift+s", false), "Ctrl+Shift+S");
         assert_eq!(keys_label("alt+x", true), "⌥X");

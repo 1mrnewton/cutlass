@@ -83,6 +83,12 @@ fn plane(
 ) -> Option<wgpu::Texture> {
     let (width, height) = plane.size;
     let mut out = ptr::null_mut();
+    // SAFETY: `cache` is a live texture cache and `picture.buffer()` the live,
+    // IOSurface-backed NV12 `CVPixelBuffer` the surface retains. Plane 0 is
+    // `width` by `height` one-byte luma and plane 1 half that in two-byte
+    // chroma (the edges are even), which matches `plane.metal` and
+    // `plane.size`. `out` is a live out pointer, and on success the caller
+    // owns the texture (Create rule).
     let status = unsafe {
         sys::CVMetalTextureCacheCreateTextureFromImage(
             ptr::null(),
@@ -100,6 +106,8 @@ fn plane(
         return None;
     }
     let texture = Cf::from_owned(out)?;
+    // SAFETY: `texture` is a live `CVMetalTexture`. The result is borrowed
+    // (Get rule) and retained below before `texture` can go away.
     let raw = unsafe { sys::CVMetalTextureGetTexture(texture.as_mut()) };
     // SAFETY: `raw` is the `id<MTLTexture>` the CoreVideo texture owns; this
     // takes a retain of our own.
@@ -176,6 +184,9 @@ fn texture_cache(device: &wgpu::Device) -> Option<Cf> {
         .is_none_or(|cache| cache.device != raw as usize)
     {
         let mut out = ptr::null_mut();
+        // SAFETY: `raw` is the live `id<MTLDevice>` wgpu holds for `device`,
+        // which the cache retains. Null attributes are allowed, and on
+        // success the caller owns the cache (Create rule).
         let status = unsafe {
             sys::CVMetalTextureCacheCreate(ptr::null(), ptr::null(), raw, ptr::null(), &mut out)
         };
@@ -189,7 +200,11 @@ fn texture_cache(device: &wgpu::Device) -> Option<Cf> {
     }
     let cache = held.as_ref()?;
     // Recycle the textures wgpu has already dropped.
+    // SAFETY: the cache is live while `held` locks it. CoreVideo allows the
+    // flush from any thread; option 0 is the only defined value.
     unsafe { sys::CVMetalTextureCacheFlush(cache.cache.as_mut(), 0) };
+    // SAFETY: the cache is live while `held` locks it, and the new retain is
+    // handed to the returned `Cf`, which releases it.
     let retained = unsafe { sys::CFRetain(cache.cache.as_ptr()) };
     Cf::from_owned(retained.cast_mut())
 }

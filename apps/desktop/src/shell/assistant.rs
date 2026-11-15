@@ -3,24 +3,32 @@
 //! assistant makes is one undo step like any other, and the player moves
 //! the window's playhead.
 
+use std::cell::RefCell;
+
 use cutlass_agent::{
-    ApprovalAction, Approver, DraftTools, Export, McpClient, McpError, McpTransport, Player,
-    Registry, SettingsTool, Speech, ToolCall, ToolOutcome, ToolSink, TrackAsk, Tracking,
+    ApprovalAction, Approver, DraftTools, Export, Frame, McpClient, Picture, Player, Registry,
+    SettingsTool, Speech, ToolCall, ToolOutcome, ToolSink, TrackAsk, Tracking,
 };
 use cutlass_codec::CodecId;
-use cutlass_model::Micros;
+use cutlass_model::{Micros, TimeRange};
 
 use super::{ExportRequest, Shell};
 use crate::mcp::{Bundled, Probe};
 
-/// Player moves, made on the window once the call is done.
-#[derive(Default)]
-struct Moves {
+/// The window during one call, shared by the hosts that draw and hear on
+/// it. The registry calls one host at a time, so they never hold it at
+/// once.
+type Window<'a> = RefCell<&'a mut Shell>;
+
+/// Player moves, made on the window once the call is done, and looks,
+/// drawn on it at once.
+struct Moves<'a> {
+    window: &'a Window<'a>,
     seek: Option<i64>,
     play: Option<bool>,
 }
 
-impl Player for Moves {
+impl Player for Moves<'_> {
     fn seek(&mut self, time_us: i64) -> Result<(), String> {
         if time_us < 0 {
             return Err("the time is before the start".to_owned());
@@ -37,6 +45,13 @@ impl Player for Moves {
     fn pause(&mut self) -> Result<(), String> {
         self.play = Some(false);
         Ok(())
+    }
+
+    fn look(&mut self, time_us: Option<i64>) -> Result<Frame, String> {
+        self.window
+            .borrow_mut()
+            .look(time_us)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -59,18 +74,20 @@ impl Approver for Asked<'_> {
 
 /// Transcription as a window job; an earlier call's job is polled here.
 struct Hearing<'a> {
-    shell: &'a mut Shell,
+    window: &'a Window<'a>,
 }
 
 impl Speech for Hearing<'_> {
     fn start(&mut self, start_us: i64, duration_us: i64) -> Result<String, String> {
-        self.shell
+        self.window
+            .borrow_mut()
             .start_hearing(start_us, duration_us)
             .map_err(|error| error.to_string())
     }
 
     fn poll(&mut self, job_id: &str) -> Result<Option<String>, String> {
-        self.shell
+        self.window
+            .borrow_mut()
             .hearing(job_id)
             .map_err(|error| error.to_string())
     }
@@ -107,10 +124,23 @@ impl Tracking for Tracks {
     }
 }
 
-/// An export the window starts once the call is done.
-#[derive(Default)]
+/// An export the assistant asked for: its job id, the file, and what
+/// became of it once that is known.
+pub(super) struct AgentExport {
+    id: String,
+    path: std::path::PathBuf,
+    /// `None` while it is still writing.
+    done: Option<Result<String, String>>,
+}
+
+/// An export the window starts once the call is done, and the last one's
+/// state as it stood when the call began.
 struct Exports {
+    /// The id the next export gets.
+    next: String,
     path: Option<String>,
+    /// The last export's id and what a poll of it answers.
+    now: Option<(String, Result<Option<String>, String>)>,
 }
 
 impl Export for Exports {
@@ -119,22 +149,16 @@ impl Export for Exports {
             return Err("name the file to export to".to_owned());
         }
         self.path = Some(path.to_owned());
-        Ok("export".to_owned())
+        Ok(self.next.clone())
     }
-}
 
-struct NoServers;
-
-impl McpTransport for NoServers {
-    fn call(
-        &mut self,
-        server_name: &str,
-        _tool: &str,
-        _arguments: &str,
-    ) -> Result<String, McpError> {
-        Err(McpError::Transport(format!(
-            "the assistant does not call other servers yet, so {server_name} was not reached"
-        )))
+    fn poll(&mut self, job_id: &str) -> Result<Option<String>, String> {
+        match &self.now {
+            Some((id, state)) if id == job_id => state.clone(),
+            // The one this call asked for starts when the call is done.
+            _ if self.path.is_some() && job_id == self.next => Ok(None),
+            _ => Err(format!("no export {job_id}; export.start names its job")),
+        }
     }
 }
 
@@ -191,6 +215,87 @@ fn call_id(call: &ToolCall) -> String {
 }
 
 impl Shell {
+    /// The id the assistant's next export gets.
+    pub(crate) fn agent_export_next(&self) -> String {
+        format!("export-{}", self.agent_exports.saturating_add(1))
+    }
+
+    /// Note that the assistant's export to `path` began, as job `id`.
+    /// `done` is its result when it was written before this returned.
+    pub(crate) fn agent_export_began(
+        &mut self,
+        id: String,
+        path: std::path::PathBuf,
+        done: Option<Result<String, String>>,
+    ) {
+        self.agent_exports = self.agent_exports.saturating_add(1);
+        self.agent_export = Some(AgentExport { id, path, done });
+    }
+
+    /// The assistant's last export and what a poll of it answers: `None`
+    /// while it writes, the file once written, or why it failed.
+    pub(crate) fn agent_export_now(&mut self) -> Option<(String, Result<Option<String>, String>)> {
+        self.poll_job();
+        let writing = self.job().is_some_and(|job| job.label == "Export");
+        let written = self.exported.clone();
+        let notice = self.notice.clone();
+        let left_out = self.export_left_out().cloned();
+        let export = self.agent_export.as_mut()?;
+        if export.done.is_none() && !writing {
+            export.done = Some(if written.as_deref() == Some(export.path.as_path()) {
+                Ok(super::offscreen::wrote(&export.path, left_out.as_ref()))
+            } else if notice.is_empty() {
+                Err("the export stopped before it finished".to_owned())
+            } else {
+                Err(notice)
+            });
+        }
+        let state = match &export.done {
+            None => Ok(None),
+            Some(Ok(wrote)) => Ok(Some(wrote.clone())),
+            Some(Err(why)) => Err(why.clone()),
+        };
+        Some((export.id.clone(), state))
+    }
+
+    /// The frame at `time_us`, or at the playhead, drawn small for the
+    /// assistant or an MCP client to look at. It is the picture a still
+    /// export writes at that time, so what it lacks on a machine with no
+    /// GPU is said with it. The playhead stays where it is.
+    pub(crate) fn look(&mut self, time_us: Option<i64>) -> Result<Frame, super::ShellError> {
+        let time = time_us.map_or(self.playhead, Micros);
+        self.open_offscreen();
+        let draft = self.session_draft()?;
+        let missing = self
+            .left_out(draft, &[&TimeRange::new(time.0, 1)])
+            .map(|left_out| {
+                format!(
+                    "{left_out}. Effects are drawn on a GPU, and none could be opened on this \
+                     machine."
+                )
+            })
+            .unwrap_or_default();
+        let (width, height, bytes) = cutlass_export::look_picture(
+            &cutlass_export::MovieSources {
+                draft,
+                root: self.path.as_deref(),
+                readers: &self.readers,
+                fonts: &*self.face,
+                renderer: self.export_renderer(),
+                encoders: &self.encoders,
+            },
+            time,
+        )
+        .map_err(super::export_failure)?;
+        Ok(Frame {
+            time_us: time.0,
+            width,
+            height,
+            picture: Picture::jpeg(&bytes),
+            missing,
+        })
+    }
+
     /// Run one tool call from the assistant on the open project. `allowed`
     /// is what the user allowed for this call; a call that needs anything
     /// else does nothing and says what it wants.
@@ -214,6 +319,7 @@ impl Shell {
                 outcome: ToolOutcome {
                     content: "no project is open".to_owned(),
                     is_error: true,
+                    picture: None,
                 },
                 wants: None,
             };
@@ -223,31 +329,47 @@ impl Shell {
             .settings_file
             .clone()
             .unwrap_or_else(|| (Shell::settings_path(), 0));
-        let settings = SettingsTool::held(path, generation, self.settings.clone());
+        let settings = SettingsTool::held(path.clone(), generation, self.settings.clone());
         let jobs = std::mem::take(&mut self.agent_speech_jobs);
         let track_jobs = std::mem::take(&mut self.agent_track_jobs);
         let tracks = Tracks {
             now: self.agent_tracks_now(),
             started: None,
         };
-        let sandbox =
-            crate::sandbox::local_sandbox(crate::sandbox::this_program(), self.project_folder());
+        let exports = Exports {
+            next: self.agent_export_next(),
+            path: None,
+            now: self.agent_export_now(),
+        };
+        let mut servers = std::mem::take(&mut self.mcp_servers);
+        servers.configure(&self.settings.mcp_servers);
+        let sandbox = cutlass_agent::Switched::from_settings(
+            &self.settings,
+            crate::sandbox::local_sandbox(crate::sandbox::this_program(), self.project_folder()),
+        );
+        let mut draft = DraftTools::new(session);
+        draft.set_remembered(std::mem::take(&mut self.agent_request_ids));
+        let window = RefCell::new(&mut *self);
         let mut registry = Registry::new(
-            DraftTools::new(session),
+            draft,
             settings,
-            Moves::default(),
+            Moves {
+                window: &window,
+                seek: None,
+                play: None,
+            },
             Probe,
-            Hearing { shell: self },
+            Hearing { window: &window },
             Bundled,
             (
                 Bundled,
-                Exports::default(),
+                exports,
                 sandbox,
                 Asked {
                     allowed,
                     wanted: None,
                 },
-                McpClient::new(NoServers),
+                McpClient::new(servers),
                 tracks,
             ),
         );
@@ -255,8 +377,11 @@ impl Shell {
         registry.set_track_jobs(track_jobs);
         let mut outcome = registry.run_tool(call);
         let wants = registry.approver.wanted.take();
+        let settings_now = registry.settings.get();
+        let servers = std::mem::take(registry.mcp.transport_mut());
         let session = registry.draft.session().clone();
-        let moves = std::mem::take(&mut registry.player);
+        let request_ids = registry.draft.take_remembered();
+        let (seek, play) = (registry.player.seek, registry.player.play);
         let exported = registry.export.path.take();
         let jobs = registry.take_speech_jobs();
         let mut track_jobs = registry.take_track_jobs();
@@ -268,6 +393,17 @@ impl Shell {
             },
         );
         drop(registry);
+        self.mcp_servers = servers;
+        self.agent_request_ids = request_ids;
+        if settings_now.generation != generation {
+            // The settings tool already wrote the file at this generation.
+            cutlass_logger::info!(
+                "settings changed by the assistant: {}",
+                super::changed_settings(&self.settings, &settings_now.settings).join(", ")
+            );
+            self.settings = settings_now.settings;
+            self.settings_file = Some((path, settings_now.generation));
+        }
         self.agent_speech_jobs = jobs;
         self.keep_track_ids(&tracks.now);
         if let Some((id, ask)) = tracks.started
@@ -277,6 +413,7 @@ impl Shell {
             outcome = ToolOutcome {
                 content: error.to_string(),
                 is_error: true,
+                picture: None,
             };
         }
         self.agent_track_jobs = track_jobs;
@@ -285,32 +422,42 @@ impl Shell {
             self.lanes_cache.replace(None);
             self.bars_cache.replace(None);
         }
-        if let Some(time) = moves.seek {
+        if let Some(time) = seek {
             self.seek(Micros(time));
         }
-        match moves.play {
+        match play {
             Some(true) => self.play(),
             Some(false) => self.pause(),
             None => {}
         }
         if let Some(path) = exported {
             let replace = call.arguments.trim_start().starts_with("replace");
-            let codec = if path.to_ascii_lowercase().ends_with(".png") {
-                CodecId::Png
-            } else {
-                CodecId::H264
-            };
+            let still = path.to_ascii_lowercase().ends_with(".png");
+            let codec = if still { CodecId::Png } else { CodecId::H264 };
+            let id = self.agent_export_next();
+            let file = std::path::PathBuf::from(&path);
             let started = self.export(ExportRequest {
-                path: path.into(),
+                path: file.clone(),
                 codec,
                 replace,
                 ..ExportRequest::default()
             });
-            if let Err(error) = started {
-                outcome = ToolOutcome {
-                    content: error.to_string(),
-                    is_error: true,
-                };
+            match started {
+                Err(error) => {
+                    outcome = ToolOutcome {
+                        content: error.to_string(),
+                        is_error: true,
+                        picture: None,
+                    };
+                }
+                // A still is written by the time `export` returns.
+                Ok(()) if still => {
+                    let wrote = format!("wrote {path}");
+                    outcome.content = format!("job={id} finished: {wrote}");
+                    self.agent_export_began(id, file, Some(Ok(wrote)));
+                }
+                // A movie is a job: `export.poll` says when it lands.
+                Ok(()) => self.agent_export_began(id, file, None),
             }
         }
         AgentRun { outcome, wants }
@@ -320,6 +467,7 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use cutlass_agent::ToolCall;
+    use cutlass_codec::CodecId;
     use cutlass_model::{Draft, Micros, Segment, TimeRange, TrackId};
     use cutlass_store::Folder;
     use serde_json::json;
@@ -345,6 +493,7 @@ mod tests {
         let done = cutlass_agent::ToolOutcome {
             content: "the project".to_owned(),
             is_error: false,
+            picture: None,
         };
         super::log_tool_call("assistant", &ok, &done, std::time::Duration::from_millis(3));
         let failed = ToolCall {
@@ -354,6 +503,7 @@ mod tests {
         let long = cutlass_agent::ToolOutcome {
             content: format!("bad-start{}", "é".repeat(400)),
             is_error: true,
+            picture: None,
         };
         super::log_tool_call("mcp", &failed, &long, std::time::Duration::from_millis(3));
         let log = crate::test_log::text();
@@ -391,6 +541,129 @@ mod tests {
         assert!(
             log.contains("assistant tool draft.query (log-call-no-project) failed"),
             "{log}"
+        );
+    }
+
+    /// The bytes of standard base64 text, as a picture holds its file.
+    fn from_base64(text: &str) -> Vec<u8> {
+        let value = |letter: u8| -> u32 {
+            match letter {
+                b'A'..=b'Z' => u32::from(letter - b'A'),
+                b'a'..=b'z' => u32::from(letter - b'a') + 26,
+                b'0'..=b'9' => u32::from(letter - b'0') + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => panic!("not base64: {letter}"),
+            }
+        };
+        let mut bytes = Vec::new();
+        for group in text.as_bytes().chunks(4) {
+            let letters: Vec<u8> = group.iter().copied().filter(|&l| l != b'=').collect();
+            let mut bits = 0;
+            for &letter in &letters {
+                bits = bits << 6 | value(letter);
+            }
+            bits <<= 6 * (4 - letters.len());
+            let whole = [(bits >> 16) as u8, (bits >> 8) as u8, bits as u8];
+            bytes.extend_from_slice(&whole[..letters.len() - 1]);
+        }
+        bytes
+    }
+
+    #[test]
+    fn the_assistant_looks_at_a_frame_without_moving_the_playhead() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.tracks[0].id = TrackId::new("main");
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "missing", TimeRange::new(0, 2_000_000)));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        // No project: there is nothing to draw, and no picture.
+        let none = desktop
+            .run_agent_tool(&call("player.look", ""), &[])
+            .outcome;
+        assert!(none.is_error);
+        assert_eq!(none.picture, None);
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.seek(Micros(500_000));
+        let revision = desktop.session().unwrap().revision();
+
+        // At the playhead: the 1920 by 1080 canvas, 480 on its short side.
+        let here = desktop
+            .run_agent_tool(&call("player.look", ""), &[])
+            .outcome;
+        assert!(!here.is_error, "{}", here.content);
+        assert_eq!(
+            here.content,
+            "frame at 500000, 853x480: the picture is with this result"
+        );
+        let picture = here.picture.unwrap();
+        assert_eq!(picture.media_type, "image/jpeg");
+        let file = from_base64(&picture.data);
+        let info = cutlass_jpeg::read_jpeg_info(&file).unwrap();
+        assert_eq!((info.width, info.height), (853, 480));
+        // A frame for a look is small to send.
+        assert!(file.len() < 200_000, "{} bytes", file.len());
+
+        // At a time: that time is named, and nothing moved or changed.
+        let there = desktop
+            .run_agent_tool(&call("player.look", "1500000"), &[])
+            .outcome;
+        assert!(
+            there.content.starts_with("frame at 1500000, 853x480"),
+            "{}",
+            there.content
+        );
+        assert!(there.picture.is_some());
+        assert_eq!(desktop.playhead(), Micros(500_000));
+        assert_eq!(desktop.session().unwrap().revision(), revision);
+        assert!(!desktop.can_undo());
+
+        // Past the last clip is refused, with no picture.
+        let late = desktop
+            .run_agent_tool(&call("player.look", "2000001"), &[])
+            .outcome;
+        assert!(late.is_error);
+        assert_eq!(late.picture, None);
+
+        // The look shows the project as it is now: a red, tall canvas is
+        // 480 wide and red.
+        let tall = json!({
+            "expected_revision": revision,
+            "requests": [
+                { "op": "set_canvas_background", "color": "#ff0000" },
+                { "op": "set_canvas_size", "width": 1080, "height": 1920, "ratio": "9:16" },
+            ],
+        });
+        let set = desktop
+            .run_agent_tool(&call("draft.apply", &tall.to_string()), &[])
+            .outcome;
+        assert!(!set.is_error, "{}", set.content);
+        let looked = desktop
+            .run_agent_tool(&call("player.look", "0"), &[])
+            .outcome;
+        assert_eq!(
+            looked.content,
+            "frame at 0, 480x853: the picture is with this result"
+        );
+        let file = from_base64(&looked.picture.unwrap().data);
+        let mut decoder = cutlass_jpeg::JpegDecoder::open(&cutlass_decode::CodecParams::video(
+            CodecId::Jpeg,
+            1,
+            1,
+        ))
+        .unwrap();
+        let packet = cutlass_decode::Packet::video(file, 0, 1, 30, true);
+        let pictures = cutlass_decode::Decoder::decode_picture(&mut decoder, &packet).unwrap();
+        let image = &pictures[0].image;
+        assert_eq!((image.width, image.height), (480, 853));
+        let middle = (853 / 2 * 480 + 240) * 3;
+        let pixel = &image.samples[middle..middle + 3];
+        assert!(
+            pixel[0] > 200 && pixel[1] < 60 && pixel[2] < 60,
+            "the middle of the frame is {pixel:?}"
         );
     }
 
@@ -445,6 +718,23 @@ mod tests {
             .run_agent_tool(&call("draft.apply", &split.to_string()), &[])
             .outcome;
         assert!(stale.is_error, "a stale revision is refused");
+        // A combo sent again with its request id is answered as the first
+        // time, and runs once.
+        let named = json!({
+            "expected_revision": desktop.session().unwrap().revision(),
+            "request_id": "once",
+            "requests": [{"op": "set_project_name", "name": "named once"}],
+        });
+        let first = desktop
+            .run_agent_tool(&call("draft.apply", &named.to_string()), &[])
+            .outcome;
+        assert!(!first.is_error, "{}", first.content);
+        let revision = desktop.session().unwrap().revision();
+        let again = desktop
+            .run_agent_tool(&call("draft.apply", &named.to_string()), &[])
+            .outcome;
+        assert_eq!(again, first);
+        assert_eq!(desktop.session().unwrap().revision(), revision);
 
         let seek = desktop
             .run_agent_tool(&call("player.seek", "1000000"), &[])
@@ -483,6 +773,113 @@ mod tests {
             .run_agent_tool(&call("settings.get", ""), &[])
             .outcome;
         assert!(!settings.is_error, "{}", settings.content);
+
+        // A settings change lands in the window's settings and its file.
+        let file = temp.path.join("settings-home").join("settings.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        desktop.keep_settings_file(file.clone(), 0);
+        let set = desktop
+            .run_agent_tool(
+                &call(
+                    "settings.set",
+                    r#"{"expected_generation":0,"changes":{"step_cap":40}}"#,
+                ),
+                &[],
+            )
+            .outcome;
+        assert!(!set.is_error, "{}", set.content);
+        assert_eq!(desktop.settings().step_cap, 40);
+        assert_eq!(cutlass_settings::load(&file).unwrap().settings.step_cap, 40);
+        // Turning on the cloud model waits for the user's allow.
+        let cloud = desktop.run_agent_tool(
+            &call(
+                "settings.set",
+                r#"{"expected_generation":1,"changes":{"model":{"cloud":true}}}"#,
+            ),
+            &[],
+        );
+        assert_eq!(
+            cloud.wants,
+            Some(cutlass_agent::ApprovalAction::EnableCloudModel)
+        );
+        assert!(!desktop.settings().model.cloud);
+    }
+
+    #[test]
+    fn the_assistant_follows_a_movie_export_to_its_end() {
+        let temp = Temp::new();
+        // A fifth of a second of blue, 64 by 32.
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 64;
+        draft.canvas_config.height = 32;
+        draft
+            .materials
+            .material_colors
+            .push(cutlass_model::MaterialColorConfig {
+                id: "color".into(),
+                is_color_clip: true,
+                solid_color: "0xFF336699".to_owned(),
+                ..cutlass_model::MaterialColorConfig::default()
+            });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("blue", "color", TimeRange::new(0, 200_000)));
+        draft.duration = Micros(200_000);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        // A still is written at once, and the start says so.
+        let still = temp.path.join("frame.png");
+        let frame = desktop
+            .run_agent_tool(
+                &call("export.start", &format!("new {}", still.display())),
+                &[],
+            )
+            .outcome;
+        assert_eq!(
+            frame.content,
+            format!("job=export-1 finished: wrote {}", still.display())
+        );
+        // A movie is a job: the start names it and a poll follows it.
+        let movie = temp.path.join("cut.mp4");
+        let started = desktop
+            .run_agent_tool(
+                &call("export.start", &format!("new {}", movie.display())),
+                &[],
+            )
+            .outcome;
+        assert_eq!(started.content, "job=export-2", "{}", started.content);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let polled = loop {
+            let polled = desktop
+                .run_agent_tool(&call("export.poll", "export-2"), &[])
+                .outcome;
+            if polled.content != "pending" || std::time::Instant::now() > until {
+                break polled;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(!polled.is_error, "{}", polled.content);
+        assert_eq!(
+            polled.content,
+            format!("finished: wrote {}", movie.display())
+        );
+        assert_eq!(&std::fs::read(&movie).unwrap()[4..8], b"ftyp");
+        // An older job is not this one, and an ending that is neither a
+        // still nor a movie is refused before anything is written.
+        let old = desktop
+            .run_agent_tool(&call("export.poll", "export-1"), &[])
+            .outcome;
+        assert!(old.is_error, "{}", old.content);
+        let photo = temp.path.join("frame.jpg");
+        let refused = desktop
+            .run_agent_tool(
+                &call("export.start", &format!("new {}", photo.display())),
+                &[],
+            )
+            .outcome;
+        assert!(refused.is_error && refused.content.contains(".png"));
+        assert!(!photo.exists());
     }
 
     #[test]

@@ -22,7 +22,9 @@ pub fn set_position(
     Ok(())
 }
 
-/// Store the picture's scale. Uniform scale and both axes take `scale`.
+/// Store the picture's scale. Uniform scale and the width take `scale`.
+/// With uniform scale on the height takes it too; with it off the height
+/// keeps its share of the width, so a stretched picture stays stretched.
 /// The uniform switch stays as it was.
 pub fn set_scale(draft: &mut Draft, segment_id: &SegmentId, scale: f64) -> Result<(), EditError> {
     if !scale.is_finite() || scale <= 0.0 {
@@ -31,9 +33,84 @@ pub fn set_scale(draft: &mut Draft, segment_id: &SegmentId, scale: f64) -> Resul
     let (track_index, segment_index) = locate(draft, segment_id)?;
     ensure_unlocked(draft.tracks[track_index].attribute)?;
     let segment = &mut draft.tracks[track_index].segments[segment_index];
+    let stretch = if segment.uniform_scale.on {
+        1.0
+    } else {
+        stretch_of(segment.clip.scale.x, segment.clip.scale.y)
+    };
     segment.uniform_scale.value = scale;
     segment.clip.scale.x = scale;
-    segment.clip.scale.y = scale;
+    segment.clip.scale.y = scale * stretch;
+    Ok(())
+}
+
+/// How tall a picture is drawn for its width: its height scale over its
+/// width scale, 1 when that does not read as a size.
+#[must_use]
+pub fn stretch_of(x: f64, y: f64) -> f64 {
+    let stretch = (y / x).abs();
+    if stretch.is_finite() && stretch > 0.0 {
+        stretch
+    } else {
+        1.0
+    }
+}
+
+/// Turn uniform scale on or off. Off, each axis takes the size uniform
+/// scale drew; on, the uniform value and the height take the width, so the
+/// picture keeps its width. Asking for the switch it has changes nothing.
+pub fn set_uniform_scale(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    on: bool,
+) -> Result<(), EditError> {
+    let (track_index, segment_index) = locate(draft, segment_id)?;
+    ensure_unlocked(draft.tracks[track_index].attribute)?;
+    let segment = &mut draft.tracks[track_index].segments[segment_index];
+    if segment.uniform_scale.on == on {
+        return Ok(());
+    }
+    if on {
+        let width = segment.clip.scale.x.abs();
+        let width = if width.is_finite() && width > 0.0 {
+            width
+        } else {
+            1.0
+        };
+        segment.uniform_scale.value = width;
+        segment.clip.scale.x = width;
+        segment.clip.scale.y = width;
+    } else {
+        let size = segment.uniform_scale.value;
+        let size = if size.is_finite() && size > 0.0 {
+            size
+        } else {
+            1.0
+        };
+        segment.clip.scale.x = size;
+        segment.clip.scale.y = size;
+    }
+    segment.uniform_scale.on = on;
+    Ok(())
+}
+
+/// Store the picture's width and height scales, each on its own. They are
+/// what is drawn with uniform scale off; a negative one flips that axis.
+/// The switch stays as it was.
+pub fn set_scale_axes(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    x: f64,
+    y: f64,
+) -> Result<(), EditError> {
+    if !(x.is_finite() && y.is_finite() && x != 0.0 && y != 0.0) {
+        return Err(EditError::Scale);
+    }
+    let (track_index, segment_index) = locate(draft, segment_id)?;
+    ensure_unlocked(draft.tracks[track_index].attribute)?;
+    let segment = &mut draft.tracks[track_index].segments[segment_index];
+    segment.clip.scale.x = x;
+    segment.clip.scale.y = y;
     Ok(())
 }
 
@@ -113,6 +190,136 @@ mod tests {
         session.undo().unwrap();
         assert_eq!(session.draft().tracks[0].segments[0].clip.transform.x, 0.0);
         assert_eq!(session.draft().tracks[0].segments[0].clip.transform.y, 0.0);
+    }
+
+    #[test]
+    fn a_scale_with_uniform_off_keeps_the_stretch() {
+        let mut draft = crate::edit::test_draft("D");
+        draft.tracks[0].id = TrackId::new("main");
+        let mut segment = Segment::new("a", "media", TimeRange::new(0, 1_000_000));
+        segment.uniform_scale.on = false;
+        segment.clip.scale.x = 1.0;
+        segment.clip.scale.y = 2.0;
+        let (mut session, _) = session_with(draft, segment);
+        session
+            .apply(
+                1,
+                &[Request::SetScale {
+                    segment_id: "a".into(),
+                    scale: 1.5,
+                }],
+            )
+            .unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        assert_eq!((segment.clip.scale.x, segment.clip.scale.y), (1.5, 3.0));
+        assert!(!segment.uniform_scale.on);
+    }
+
+    #[test]
+    fn uniform_scale_turns_off_and_on_and_keeps_the_size() {
+        let mut draft = crate::edit::test_draft("D");
+        draft.tracks[0].id = TrackId::new("main");
+        let mut segment = Segment::new("a", "media", TimeRange::new(0, 1_000_000));
+        segment.uniform_scale.on = true;
+        segment.uniform_scale.value = 0.5;
+        // Axes left from an earlier stretch are not what uniform drew.
+        segment.clip.scale.x = 3.0;
+        segment.clip.scale.y = 4.0;
+        let (mut session, _) = session_with(draft, segment);
+        let switch = |session: &mut Session, revision: u64, on: bool| {
+            session
+                .apply(
+                    revision,
+                    &[Request::SetUniformScale {
+                        segment_id: "a".into(),
+                        on,
+                    }],
+                )
+                .unwrap();
+        };
+        switch(&mut session, 1, false);
+        let segment = &session.draft().tracks[0].segments[0];
+        assert!(!segment.uniform_scale.on);
+        assert_eq!((segment.clip.scale.x, segment.clip.scale.y), (0.5, 0.5));
+        session
+            .apply(
+                2,
+                &[Request::SetScaleAxes {
+                    segment_id: "a".into(),
+                    x: 0.75,
+                    y: 1.25,
+                }],
+            )
+            .unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        assert_eq!((segment.clip.scale.x, segment.clip.scale.y), (0.75, 1.25));
+        assert!(!segment.uniform_scale.on);
+        // On again, the width drives both.
+        switch(&mut session, 3, true);
+        let segment = &session.draft().tracks[0].segments[0];
+        assert!(segment.uniform_scale.on);
+        assert_eq!(segment.uniform_scale.value, 0.75);
+        assert_eq!((segment.clip.scale.x, segment.clip.scale.y), (0.75, 0.75));
+        // The switch it has already is no change.
+        let before = session.draft().clone();
+        switch(&mut session, 4, true);
+        assert_eq!(session.draft(), &before);
+        // The switch, the axes, the switch back, and the one that changed
+        // nothing are four steps.
+        for _ in 0..4 {
+            session.undo().unwrap();
+        }
+        let segment = &session.draft().tracks[0].segments[0];
+        assert!(segment.uniform_scale.on);
+        assert_eq!((segment.clip.scale.x, segment.clip.scale.y), (3.0, 4.0));
+    }
+
+    #[test]
+    fn a_bad_axis_scale_or_a_locked_lane_leaves_the_draft() {
+        let (mut session, track) = open();
+        let before = session.draft().clone();
+        // A negative axis flips, so only none or a broken one is refused.
+        for (x, y) in [
+            (0.0, 1.0),
+            (1.0, 0.0),
+            (f64::NAN, 1.0),
+            (1.0, f64::INFINITY),
+        ] {
+            let error = session
+                .apply(
+                    1,
+                    &[Request::SetScaleAxes {
+                        segment_id: "a".into(),
+                        x,
+                        y,
+                    }],
+                )
+                .unwrap_err();
+            assert_eq!(error, EditError::Scale);
+            assert_eq!(session.draft(), &before);
+        }
+        session
+            .apply(
+                1,
+                &[Request::SetTrackAttribute {
+                    track_id: track,
+                    bit: TrackAttribute::LOCK,
+                    on: true,
+                }],
+            )
+            .unwrap();
+        let locked = session.draft().clone();
+        let error = session
+            .apply(
+                2,
+                &[Request::SetUniformScale {
+                    segment_id: "a".into(),
+                    on: false,
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::LockedTrack);
+        assert_eq!(session.draft(), &locked);
     }
 
     #[test]

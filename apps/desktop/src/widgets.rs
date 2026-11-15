@@ -70,15 +70,38 @@ fn scrim(ui: &mut Ui, title: &str) {
     );
 }
 
+/// In a dialog of a set height, the space between the head and the body,
+/// and between the body and the dialog's foot.
+const SIZED_GAP: f32 = 14.0;
+
 pub fn dialog<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> (R, bool) {
+    dialog_sized(ui, title, "", 420.0, None, add)
+}
+
+/// A dialog `width` wide. With no `height` it starts a little above the
+/// window's middle and grows with what it holds, to the window's foot.
+/// With one it is that tall whatever it holds, or as tall as the window
+/// has room for, and sits in the window's middle: a dialog with pages
+/// keeps its size from one page to the next. Either way the body scrolls
+/// past its height, and each `page` keeps its own place: a page opened
+/// from another that was scrolled down starts at its top.
+pub fn dialog_sized<R>(
+    ui: &mut Ui,
+    title: &str,
+    page: &str,
+    width: f32,
+    height: Option<f32>,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> (R, bool) {
     scrim(ui, title);
     let screen = ui.max_rect();
-    let width = 420.0;
-    let top = (screen.center().y - 180.0).max(screen.top() + 16.0);
+    let top = match height {
+        Some(height) => (screen.center().y - height * 0.5).max(screen.top() + 16.0),
+        None => (screen.center().y - 180.0).max(screen.top() + 16.0),
+    };
     let origin = egui::pos2(screen.center().x - width * 0.5, top);
-    // The body grows with what it holds, to the window's foot, and scrolls
-    // past that.
-    let room = (screen.bottom() - 16.0 - top).max(160.0);
+    let to_foot = (screen.bottom() - 16.0 - top).max(160.0);
+    let room = height.map_or(to_foot, |height| height.min(to_foot));
     let body = ui.painter().add(egui::Shape::Noop);
     let mut closed = false;
     let inner = ui
@@ -107,13 +130,25 @@ pub fn dialog<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> (R
                     .circle_filled(close.center(), 6.0, tokens::CLOSE);
                 let close_response = ui.allocate_rect(close, Sense::click());
                 closed = close_response.clicked();
-                ui.add_space(48.0);
-                let inner = ui::Scroll::vertical(("dialog", title))
-                    .max_height(room - 64.0)
+                let body_height = if height.is_some() {
+                    // The pages start close under the head, and stop the
+                    // same space above the dialog's foot.
+                    let from_top = ui.cursor().top() - rect.top();
+                    ui.add_space((40.0 + SIZED_GAP - from_top).max(0.0));
+                    room - (ui.cursor().top() - rect.top()) - SIZED_GAP
+                } else {
+                    ui.add_space(48.0);
+                    room - 64.0
+                };
+                let inner = ui::Scroll::vertical(("dialog", title, page))
+                    .max_height(body_height)
                     .auto_shrink([false, true])
                     .show(ui, add);
                 ui.add_space(16.0);
-                let height = ui.min_rect().height().clamp(360.0_f32.min(room), room);
+                let height = match height {
+                    Some(_) => room,
+                    None => ui.min_rect().height().clamp(360.0_f32.min(room), room),
+                };
                 ui.painter().set(
                     body,
                     ui::Surface::dialog()

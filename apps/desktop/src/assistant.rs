@@ -6,13 +6,15 @@
 //! project between frames and sends the result back. Stop lets the turn go
 //! at once: the thread finds out at its next call and ends.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use cutlass_agent::{
-    ApprovalAction, ChatModel, Completion, CompletionRequest, LoopbackHttp, Message, Model,
-    ModelError, ToolCall, ToolOutcome, ToolSink, run_after, tool_definitions,
+    ApprovalAction, ChatModel, CloudModel, Completion, CompletionRequest, Delegating, LoopbackHttp,
+    Message, Model, ModelError, ToolCall, ToolOutcome, ToolSink, definitions_with_delegate,
+    run_after, tool_definitions,
 };
 use cutlass_settings::Settings;
 
@@ -45,7 +47,11 @@ pub enum Entry {
 /// A tool call waiting for the user's allow.
 struct Pending {
     call: ToolCall,
+    /// What the user is asked now.
     action: ApprovalAction,
+    /// What they already allowed for this call; a call may need more than
+    /// one allow, and asks for each in turn.
+    allowed: Vec<ApprovalAction>,
     refused: ToolOutcome,
     answer: Sender<ToolOutcome>,
 }
@@ -53,9 +59,16 @@ struct Pending {
 /// From the model's thread to the window's.
 enum Event {
     Said(String),
+    /// A message joined the turn's transcript.
+    Heard(Message),
     Tool {
         call: ToolCall,
         answer: Sender<ToolOutcome>,
+    },
+    /// A helper took a look-up, then gave its answer.
+    Helper {
+        call: ToolCall,
+        outcome: Option<ToolOutcome>,
     },
     Finished(Result<(String, Vec<Message>), String>),
 }
@@ -63,6 +76,20 @@ enum Event {
 struct Running {
     events: Receiver<Event>,
     stop: Arc<AtomicBool>,
+}
+
+/// What a turn did to the project, kept so the user can take the whole
+/// turn back at once.
+struct TurnEdits {
+    /// The project's folder, so another project is not taken for it.
+    project: Option<PathBuf>,
+    /// The draft as the turn found it, and its revision then.
+    before: cutlass_model::Draft,
+    start: u64,
+    /// The revision after the turn's last tool call.
+    end: u64,
+    /// The draft the turn left, once the turn is over.
+    after: Option<cutlass_model::Draft>,
 }
 
 /// The conversation and the turn running now.
@@ -75,8 +102,19 @@ pub struct Assistant {
     /// The panel is showing.
     pub open: bool,
     history: Vec<Message>,
+    /// The messages of the turn running now, as the loop adds them, so a
+    /// turn that fails or is stopped is still remembered.
+    turn: Vec<Message>,
     running: Option<Running>,
     pending: Option<Pending>,
+    /// Where this conversation is kept; `None` keeps it nowhere.
+    chat_file: Option<PathBuf>,
+    /// The edits of the turn running now, or of the last one.
+    turn_edits: Option<TurnEdits>,
+    /// A turn started and has not met the project yet.
+    fresh: bool,
+    /// The user took the last turn back; the next ask tells the model.
+    undone: bool,
 }
 
 impl Assistant {
@@ -90,6 +128,97 @@ impl Assistant {
     #[must_use]
     pub fn asking(&self) -> bool {
         self.pending.is_some()
+    }
+
+    /// The last turn changed the project, and the project is still as that
+    /// turn left it, so the turn can be taken back.
+    #[must_use]
+    pub fn can_undo_turn(&self, shell: &Shell) -> bool {
+        !self.busy()
+            && self.turn_edits.as_ref().is_some_and(|edits| {
+                edits.after.is_some()
+                    && shell.project_folder() == edits.project.as_deref()
+                    && shell
+                        .session()
+                        .is_some_and(|session| session.revision() == edits.end)
+            })
+    }
+
+    /// Put the project back to how the last turn found it, as one undo
+    /// step, so an undo brings the turn's edits back. Nothing is changed
+    /// when the project is no longer as the turn left it. Settings the
+    /// turn changed and files it exported stay.
+    pub fn undo_turn(&mut self, shell: &mut Shell) {
+        if self.busy() {
+            return;
+        }
+        let Some(edits) = self.turn_edits.take() else {
+            return;
+        };
+        let unchanged = shell.project_folder() == edits.project.as_deref()
+            && edits.after.is_some()
+            && shell.draft() == edits.after.as_ref();
+        if !unchanged {
+            self.entries.push(Entry::Notice(
+                "The project changed after that turn, so it was not taken back. Undo steps back through the edits."
+                    .to_owned(),
+            ));
+            return;
+        }
+        match shell.restore(edits.end, edits.before) {
+            Ok(()) => {
+                self.undone = true;
+                self.entries.push(Entry::Notice(
+                    "Took back the turn's edits. Undo brings them back.".to_owned(),
+                ));
+            }
+            Err(error) => self.entries.push(Entry::Notice(format!(
+                "The turn was not taken back: {error}"
+            ))),
+        }
+    }
+
+    /// Note the project as a turn that just started finds it.
+    fn meet(&mut self, shell: &Shell) {
+        self.fresh = false;
+        self.turn_edits = shell.session().map(|session| TurnEdits {
+            project: shell.project_folder().map(std::path::Path::to_path_buf),
+            before: session.draft().clone(),
+            start: session.revision(),
+            end: session.revision(),
+            after: None,
+        });
+    }
+
+    /// Note where a tool call of the turn left the project.
+    fn edited(&mut self, shell: &Shell) {
+        if let (Some(edits), Some(session)) = (self.turn_edits.as_mut(), shell.session()) {
+            edits.end = session.revision();
+        }
+    }
+
+    /// The turn is over: keep the draft it left, or forget the turn when
+    /// it changed nothing or the project has moved on since its last call.
+    fn settle(&mut self, shell: &Shell) {
+        let Some(edits) = self.turn_edits.as_mut() else {
+            return;
+        };
+        if edits.after.is_some() {
+            return;
+        }
+        let left = shell
+            .session()
+            .filter(|session| {
+                shell.project_folder() == edits.project.as_deref()
+                    && session.revision() == edits.end
+                    && edits.end != edits.start
+                    && *session.draft() != edits.before
+            })
+            .map(|session| session.draft().clone());
+        match left {
+            Some(draft) => edits.after = Some(draft),
+            None => self.turn_edits = None,
+        }
     }
 
     /// Answer the call waiting for an allow. Allowed, it runs; refused, the
@@ -107,13 +236,31 @@ impl Assistant {
             *allowed = Some(allow);
         }
         let outcome = if allow {
-            shell
-                .run_agent_tool(&pending.call, &[pending.action])
-                .outcome
+            let mut allowed = pending.allowed;
+            allowed.push(pending.action);
+            let run = shell.run_agent_tool(&pending.call, &allowed);
+            self.edited(shell);
+            if let Some(action) = run.wants {
+                // The call needs another allow: ask for that one too.
+                self.entries.push(Entry::Ask {
+                    question: action.prompt(),
+                    allowed: None,
+                });
+                self.pending = Some(Pending {
+                    call: pending.call,
+                    action,
+                    allowed,
+                    refused: run.outcome,
+                    answer: pending.answer,
+                });
+                return;
+            }
+            run.outcome
         } else {
             ToolOutcome {
                 content: format!("the user said no: {}", pending.refused.content),
                 is_error: true,
+                picture: None,
             }
         };
         self.entries.push(Entry::Step {
@@ -125,36 +272,62 @@ impl Assistant {
         let _ = pending.answer.send(outcome);
     }
 
-    /// Send the words in the box with the model `settings` choose.
-    pub fn send(&mut self, settings: &Settings) {
+    /// Send the words in the box with the model `settings` choose, telling
+    /// it the user's `notes` while Memory is on. `seen` is what the user
+    /// is looking at, [`Shell::assistant_view`]: the model gets it after
+    /// the words, and the panel shows the words alone.
+    pub fn send(&mut self, settings: &Settings, notes: &str, seen: &str) {
         let ask = self.draft.trim().to_owned();
         if ask.is_empty() || self.busy() {
             return;
         }
         self.draft.clear();
         self.entries.push(Entry::Asked(ask.clone()));
-        if !settings.model.local {
-            self.entries.push(Entry::Notice(
-                "The local model is off. Turn it on in Settings → Assistant; the cloud model needs an account, which is not set up yet."
-                    .to_owned(),
-            ));
-            return;
-        }
-        let transport = match LoopbackHttp::new(&settings.model.local_url) {
-            Ok(transport) => transport,
-            Err(error) => {
-                self.entries.push(Entry::Notice(error.to_string()));
+        let model = match build_model(settings, notes) {
+            Ok(model) => model,
+            Err(notice) => {
+                self.entries.push(Entry::Notice(notice));
                 return;
             }
         };
-        let model = ChatModel::new(transport, &settings.model.local_name);
-        self.start(model, settings.step_cap, &ask);
+        // A helper the model hands a look-up to runs on a model of its own,
+        // the same kind, made when it is asked for.
+        let cap = settings.step_cap;
+        let (settings, notes) = (settings.clone(), notes.to_owned());
+        let child = move || build_model(&settings, &notes);
+        // The model's own account of its last turn no longer holds.
+        let seen = if std::mem::take(&mut self.undone) {
+            format!("{seen}; the user took back the edits of your last turn")
+        } else {
+            seen.to_owned()
+        };
+        self.launch(
+            model,
+            Some(child),
+            cap,
+            &cutlass_agent::ask_with_view(&ask, &seen),
+        );
     }
 
-    /// Run `ask` on `model` on its own thread.
+    /// Run `ask` on `model` on its own thread, with no helper to hand
+    /// look-ups to.
     pub fn start<M: Model + Send + 'static>(&mut self, model: M, cap: u32, ask: &str) {
+        self.launch(model, None::<fn() -> Result<M, String>>, cap, ask);
+    }
+
+    /// Run `ask` on `model` on its own thread. With `child`, the model may
+    /// hand a look-up to a helper on a model `child` makes.
+    pub fn launch<M, C, F>(&mut self, model: M, child: Option<F>, cap: u32, ask: &str)
+    where
+        M: Model + Send + 'static,
+        C: Model + 'static,
+        F: FnMut() -> Result<C, String> + Send + 'static,
+    {
         let (events, received) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
+        self.turn.clear();
+        // Old listings and transcripts are not sent again in full.
+        cutlass_agent::shorten_results(&mut self.history, OLD_RESULT_LIMIT);
         let history = self.history.clone();
         let ask = ask.to_owned();
         let watched = Watched {
@@ -166,14 +339,44 @@ impl Assistant {
             stop: Arc::clone(&stop),
             events: events.clone(),
         };
+        let halt = Arc::clone(&stop);
         let spawned = std::thread::Builder::new()
             .name("assistant".to_owned())
             .spawn(move || {
-                let (mut watched, mut relay) = (watched, relay);
-                let definitions = tool_definitions();
-                let result = run_after(&mut watched, &mut relay, cap, history, &ask, &definitions)
-                    .map(|turn| (turn.completion.text, turn.messages))
-                    .map_err(|error| error.to_string());
+                let mut watched = watched;
+                let result = match child {
+                    Some(mut child) => {
+                        // A helper stops with the turn, as the parent does.
+                        let made = move || {
+                            child().map(|inner| Halting {
+                                inner,
+                                stop: Arc::clone(&halt),
+                            })
+                        };
+                        let mut sink = Delegating::new(relay, made, cap);
+                        run_after(
+                            &mut watched,
+                            &mut sink,
+                            cap,
+                            history,
+                            &ask,
+                            &definitions_with_delegate(),
+                        )
+                    }
+                    None => {
+                        let mut relay = relay;
+                        run_after(
+                            &mut watched,
+                            &mut relay,
+                            cap,
+                            history,
+                            &ask,
+                            &tool_definitions(),
+                        )
+                    }
+                }
+                .map(|turn| (turn.completion.text, turn.messages))
+                .map_err(|error| error.to_string());
                 let _ = events.send(Event::Finished(result));
             });
         match spawned {
@@ -182,6 +385,9 @@ impl Assistant {
                     events: received,
                     stop,
                 });
+                // The last turn can no longer be taken back on its own.
+                self.turn_edits = None;
+                self.fresh = true;
             }
             Err(error) => self.entries.push(Entry::Notice(format!(
                 "the assistant did not start: {error}"
@@ -204,6 +410,13 @@ impl Assistant {
         }
         if let Some(running) = self.running.take() {
             running.stop.store(true, Ordering::Relaxed);
+            // What the loop already sent is part of the turn.
+            for event in running.events.try_iter() {
+                if let Event::Heard(message) = event {
+                    self.turn.push(message);
+                }
+            }
+            self.keep_turn();
             for entry in &mut self.entries {
                 if let Entry::Step {
                     result: result @ None,
@@ -220,15 +433,106 @@ impl Assistant {
     }
 
     /// Start over: nothing said, and the model forgets the earlier turns.
+    /// The kept conversation is forgotten too.
     pub fn clear(&mut self) {
         self.stop();
         self.entries.clear();
         self.history.clear();
+        self.turn.clear();
+        self.turn_edits = None;
+        self.fresh = false;
+        self.undone = false;
+        self.keep();
+    }
+
+    /// Remember the turn that ended without an answer, failed or stopped:
+    /// what was asked, what the model said and each tool it ran, so the
+    /// next turn knows what was already changed. A call that never ran is
+    /// answered as stopped, since a transcript may not leave one open. A
+    /// turn with only its ask did nothing and is not kept.
+    fn keep_turn(&mut self) {
+        let mut turn = std::mem::take(&mut self.turn);
+        if turn.len() <= 1 {
+            return;
+        }
+        let last_reply = turn
+            .iter()
+            .rposition(|message| matches!(message, Message::Assistant { .. }));
+        if let Some(at) = last_reply
+            && let Message::Assistant { calls, .. } = &turn[at]
+        {
+            let unanswered: Vec<ToolCall> = calls
+                .iter()
+                .filter(|call| {
+                    !turn[at + 1..].iter().any(|message| {
+                        matches!(message, Message::Tool { call_id, .. } if *call_id == call.id)
+                    })
+                })
+                .cloned()
+                .collect();
+            for call in unanswered {
+                turn.push(Message::Tool {
+                    call_id: call.id,
+                    name: call.name,
+                    content: "stopped before it ran".to_owned(),
+                    is_error: true,
+                    picture: None,
+                });
+            }
+        }
+        cutlass_agent::forget_pictures(&mut turn);
+        self.history.append(&mut turn);
+        self.keep();
+    }
+
+    /// Keep the conversation in `file` from now on, the open project's,
+    /// picking up what was said there before. `None` keeps it nowhere and
+    /// leaves what is on screen. A turn running holds on to the file it
+    /// started with.
+    pub fn follow(&mut self, file: Option<PathBuf>) {
+        if self.busy() || file == self.chat_file {
+            return;
+        }
+        if file.is_none() {
+            self.chat_file = None;
+            return;
+        }
+        self.pending = None;
+        self.history = file
+            .as_deref()
+            .map(|file| {
+                cutlass_agent::load_chat(file).unwrap_or_else(|error| {
+                    cutlass_logger::warn!("assistant chat: {error}");
+                    Vec::new()
+                })
+            })
+            .unwrap_or_default();
+        self.entries = shown(&self.history);
+        self.chat_file = file;
+    }
+
+    /// Write the conversation to its file; an empty one removes the file.
+    fn keep(&self) {
+        let Some(file) = &self.chat_file else {
+            return;
+        };
+        if let Err(error) = cutlass_agent::save_chat(file, &self.history) {
+            cutlass_logger::warn!("assistant chat: {error}");
+        }
     }
 
     /// Take what the model's thread sent: run its tool calls on `shell`
     /// and show what it said. True while a turn is still running.
     pub fn poll(&mut self, shell: &mut Shell) -> bool {
+        if self.running.is_none() {
+            // A turn that was stopped ends here.
+            self.fresh = false;
+            self.settle(shell);
+            return false;
+        }
+        if self.fresh {
+            self.meet(shell);
+        }
         loop {
             let Some(running) = self.running.as_ref() else {
                 return false;
@@ -244,13 +548,38 @@ impl Assistant {
                     self.entries.push(Entry::Notice(
                         "the assistant ended without an answer".to_owned(),
                     ));
+                    self.settle(shell);
                     return false;
                 }
             };
             match event {
                 Event::Said(text) => self.entries.push(Entry::Said(text)),
+                Event::Heard(message) => self.turn.push(message),
+                Event::Helper {
+                    call,
+                    outcome: None,
+                } => self.entries.push(Entry::Step {
+                    tool: call.name,
+                    input: call.arguments,
+                    result: None,
+                    failed: false,
+                }),
+                Event::Helper {
+                    call,
+                    outcome: Some(outcome),
+                } => {
+                    if let Some(Entry::Step { result, failed, .. }) =
+                        self.entries.iter_mut().rev().find(|entry| {
+                            matches!(entry, Entry::Step { tool, result: None, .. } if *tool == call.name)
+                        })
+                    {
+                        *result = Some(outcome.content);
+                        *failed = outcome.is_error;
+                    }
+                }
                 Event::Tool { call, answer } => {
                     let run = shell.run_agent_tool(&call, &[]);
+                    self.edited(shell);
                     if let Some(action) = run.wants {
                         self.entries.push(Entry::Ask {
                             question: action.prompt(),
@@ -259,6 +588,7 @@ impl Assistant {
                         self.pending = Some(Pending {
                             call,
                             action,
+                            allowed: Vec::new(),
                             refused: run.outcome,
                             answer,
                         });
@@ -277,17 +607,136 @@ impl Assistant {
                     self.running = None;
                     match result {
                         Ok((text, messages)) => {
-                            if !text.is_empty() {
+                            if text.is_empty() {
+                                // A model that ends on nothing leaves the
+                                // user looking at a turn that just stopped.
+                                self.entries.push(Entry::Notice(
+                                    "The assistant finished without saying anything. Ask again, or try another model."
+                                        .to_owned(),
+                                ));
+                            } else {
                                 self.entries.push(Entry::Said(text));
                             }
+                            self.turn.clear();
                             self.history = messages;
+                            // The model looked during the turn; the frames
+                            // are not kept, or sent with the next one.
+                            cutlass_agent::forget_pictures(&mut self.history);
+                            self.keep();
                         }
-                        Err(error) => self.entries.push(Entry::Notice(error)),
+                        Err(error) => {
+                            self.entries.push(Entry::Notice(explain(error)));
+                            self.keep_turn();
+                        }
                     }
+                    self.settle(shell);
                     return false;
                 }
             }
         }
+    }
+}
+
+/// The panel's lines for a conversation read back.
+fn shown(history: &[Message]) -> Vec<Entry> {
+    let mut entries = Vec::new();
+    for message in history {
+        match message {
+            // The model was also told what the user was looking at.
+            Message::User { text } => {
+                entries.push(Entry::Asked(cutlass_agent::typed(text).to_owned()));
+            }
+            Message::Assistant { text, calls } => {
+                if !text.is_empty() {
+                    entries.push(Entry::Said(text.clone()));
+                }
+                for call in calls {
+                    entries.push(Entry::Step {
+                        tool: call.name.clone(),
+                        input: call.arguments.clone(),
+                        result: None,
+                        failed: false,
+                    });
+                }
+            }
+            Message::Tool {
+                name,
+                content,
+                is_error,
+                ..
+            } => {
+                if let Some(Entry::Step { result, failed, .. }) = entries.iter_mut().rev().find(
+                    |entry| matches!(entry, Entry::Step { tool, result: None, .. } if tool == name),
+                ) {
+                    *result = Some(content.clone());
+                    *failed = *is_error;
+                }
+            }
+        }
+    }
+    entries
+}
+
+/// A turn's error, with what to do when the server lacks the model.
+fn explain(error: String) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("not found") && lower.contains("model") {
+        return format!(
+            "{error}. Pick a model the server has with Find models in Settings › Assistant."
+        );
+    }
+    error
+}
+
+/// The local or the cloud model, whichever `settings` choose, told the
+/// user's `notes` while Memory is on.
+fn build_model(settings: &Settings, notes: &str) -> Result<AnyModel, String> {
+    let context = cutlass_agent::prompt_context(settings, notes);
+    if settings.model.cloud {
+        let key = crate::cloud::key(&crate::cloud::keys_file(), &settings.model.cloud_provider);
+        let model = crate::cloud::model(settings, &key, &context)?;
+        return Ok(AnyModel::Cloud(CloudModel::from_settings(settings, model)));
+    }
+    if !settings.model.local {
+        return Err(
+            "Both models are off. Turn on the local model, or the cloud model with your own key, in Settings › Assistant."
+                .to_owned(),
+        );
+    }
+    let transport =
+        LoopbackHttp::new(&settings.model.local_url).map_err(|error| error.to_string())?;
+    Ok(AnyModel::Local(
+        ChatModel::new(transport, &settings.model.local_name).with_context(&context),
+    ))
+}
+
+/// The model a turn runs on.
+enum AnyModel {
+    Local(ChatModel<LoopbackHttp>),
+    Cloud(CloudModel<crate::cloud::Cloud>),
+}
+
+impl Model for AnyModel {
+    fn complete(&mut self, request: &CompletionRequest) -> Result<Completion, ModelError> {
+        match self {
+            Self::Local(model) => model.complete(request),
+            Self::Cloud(model) => model.complete(request),
+        }
+    }
+}
+
+/// A helper's model, stopped with the turn.
+struct Halting<M> {
+    inner: M,
+    stop: Arc<AtomicBool>,
+}
+
+impl<M: Model> Model for Halting<M> {
+    fn complete(&mut self, request: &CompletionRequest) -> Result<Completion, ModelError> {
+        if self.stop.load(Ordering::Relaxed) {
+            return Err(ModelError::Inner("stopped".to_owned()));
+        }
+        self.inner.complete(request)
     }
 }
 
@@ -312,6 +761,18 @@ impl<M: Model> Model for Watched<M> {
     }
 }
 
+/// How long the model's thread waits after a poll answered pending.
+const PENDING_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The longest tool result an earlier turn keeps; the rest of a longer one
+/// was used when it was read.
+const OLD_RESULT_LIMIT: usize = 2000;
+
+/// Whether `call` polled a job that is still running.
+pub(crate) fn still_pending(call: &ToolCall, outcome: &ToolOutcome) -> bool {
+    !outcome.is_error && call.name.ends_with(".poll") && outcome.content == "pending"
+}
+
 /// Tool calls, sent to the window's thread to run.
 struct Relay {
     stop: Arc<AtomicBool>,
@@ -323,6 +784,7 @@ impl ToolSink for Relay {
         let stopped = || ToolOutcome {
             content: "the user stopped the turn".to_owned(),
             is_error: true,
+            picture: None,
         };
         if self.stop.load(Ordering::Relaxed) {
             return stopped();
@@ -338,7 +800,35 @@ impl ToolSink for Relay {
         {
             return stopped();
         }
-        answered.recv().unwrap_or_else(|_| stopped())
+        let outcome = answered.recv().unwrap_or_else(|_| stopped());
+        // A job still running: wait here, on the model's thread, before
+        // the model hears "pending", so its polls do not use up the
+        // turn's rounds in a few seconds.
+        if still_pending(call, &outcome) {
+            let until = std::time::Instant::now() + PENDING_WAIT;
+            while std::time::Instant::now() < until && !self.stop.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+        outcome
+    }
+
+    fn heard(&mut self, message: &Message) {
+        let _ = self.events.send(Event::Heard(message.clone()));
+    }
+
+    fn helper_started(&mut self, call: &ToolCall) {
+        let _ = self.events.send(Event::Helper {
+            call: call.clone(),
+            outcome: None,
+        });
+    }
+
+    fn helper_finished(&mut self, call: &ToolCall, outcome: &ToolOutcome) {
+        let _ = self.events.send(Event::Helper {
+            call: call.clone(),
+            outcome: Some(outcome.clone()),
+        });
     }
 }
 
@@ -346,7 +836,7 @@ impl ToolSink for Relay {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use cutlass_agent::{Completion, LocalModel, ToolCall};
+    use cutlass_agent::{Completion, LocalModel, Message, ToolCall};
     use cutlass_model::{Draft, Micros, Segment, TimeRange};
     use cutlass_store::Folder;
 
@@ -426,6 +916,498 @@ mod tests {
             assistant.entries.last(),
             Some(&Entry::Said("Still here.".to_owned()))
         );
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_conversation_is_kept_per_file_and_read_back_with_its_steps() {
+        let (mut shell, path) = shell_with_project("kept");
+        let first = path.join("chats").join("a.json");
+        let second = path.join("chats").join("b.json");
+        let mut assistant = Assistant::default();
+        assistant.follow(Some(first.clone()));
+        let model = LocalModel::scripted(vec![
+            completion(
+                "Seeking.",
+                vec![ToolCall {
+                    id: "1".to_owned(),
+                    name: "player.seek".to_owned(),
+                    arguments: "1000000".to_owned(),
+                }],
+            ),
+            completion("Done.", Vec::new()),
+        ]);
+        assistant.start(model, 8, "go to 1s");
+        finish(&mut assistant, &mut shell);
+        let live = assistant.entries.clone();
+        assert!(first.exists());
+        // Another project starts empty; coming back reads it all again.
+        assistant.follow(Some(second.clone()));
+        assert!(assistant.entries.is_empty() && assistant.history.is_empty());
+        assistant.follow(Some(first.clone()));
+        let mut expected = vec![Entry::Asked("go to 1s".to_owned())];
+        expected.extend(live);
+        assert_eq!(assistant.entries, expected);
+        assert_eq!(assistant.history.len(), 4);
+        // Memory off keeps what is shown and writes nothing more.
+        assistant.follow(None);
+        assert_eq!(assistant.entries.len(), expected.len());
+        // Clear forgets the kept file.
+        assistant.follow(Some(first.clone()));
+        assistant.clear();
+        assert!(!first.exists());
+        assert!(!second.exists());
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    fn split(revision: u64, clip: &str, at: i64, right: &str) -> Vec<ToolCall> {
+        vec![ToolCall {
+            id: format!("split-{right}"),
+            name: "draft.apply".to_owned(),
+            arguments: serde_json::json!({
+                "expected_revision": revision,
+                "requests": [{ "op": "split", "segment_id": clip, "at": at, "right_id": right }],
+            })
+            .to_string(),
+        }]
+    }
+
+    fn clips(shell: &Shell) -> usize {
+        shell.draft().unwrap().tracks[0].segments.len()
+    }
+
+    #[test]
+    fn a_whole_turn_is_taken_back_at_once_and_one_undo_brings_it_back() {
+        let (mut shell, path) = shell_with_project("undo-turn");
+        let mut assistant = Assistant::default();
+        // Nothing to take back before any turn.
+        assert!(!assistant.can_undo_turn(&shell));
+        let model = LocalModel::scripted(vec![
+            completion("", split(0, "a", 1_000_000, "b")),
+            completion("", split(1, "b", 2_000_000, "c")),
+            completion("Cut in three.", Vec::new()),
+        ]);
+        assistant.start(model, 8, "cut it in three");
+        assert!(!assistant.can_undo_turn(&shell), "not while it runs");
+        finish(&mut assistant, &mut shell);
+        assert_eq!(clips(&shell), 3);
+        assert!(assistant.can_undo_turn(&shell));
+
+        assistant.undo_turn(&mut shell);
+        assert_eq!(clips(&shell), 1);
+        assert_eq!(
+            assistant.entries.last(),
+            Some(&Entry::Notice(
+                "Took back the turn's edits. Undo brings them back.".to_owned()
+            ))
+        );
+        // Once taken back it is not offered again.
+        assert!(!assistant.can_undo_turn(&shell));
+        // One undo brings the turn's edits back, and the steps of the
+        // turn are still under it.
+        shell.undo().unwrap();
+        assert_eq!(clips(&shell), 3);
+        shell.undo().unwrap();
+        assert_eq!(clips(&shell), 2);
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_turn_is_not_taken_back_once_the_project_has_moved_on() {
+        let (mut shell, path) = shell_with_project("undo-moved");
+        let mut assistant = Assistant::default();
+        let model = LocalModel::scripted(vec![
+            completion("", split(0, "a", 1_000_000, "b")),
+            completion("Split.", Vec::new()),
+        ]);
+        assistant.start(model, 8, "split it");
+        finish(&mut assistant, &mut shell);
+        assert!(assistant.can_undo_turn(&shell));
+        // The user's own edit after the turn: taking the turn back would
+        // take that with it, so it is no longer offered or done.
+        shell.undo().unwrap();
+        assert!(!assistant.can_undo_turn(&shell));
+        assistant.undo_turn(&mut shell);
+        assert_eq!(clips(&shell), 1);
+        assert!(
+            matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("changed after that turn"))
+        );
+        shell.redo().unwrap();
+        assert_eq!(clips(&shell), 2, "the user's redo still works");
+
+        // A turn that only moves the playhead leaves nothing to take back.
+        let model = LocalModel::scripted(vec![
+            completion(
+                "",
+                vec![ToolCall {
+                    id: "1".to_owned(),
+                    name: "player.seek".to_owned(),
+                    arguments: "1000000".to_owned(),
+                }],
+            ),
+            completion("There.", Vec::new()),
+        ]);
+        assistant.start(model, 8, "go to 1s");
+        finish(&mut assistant, &mut shell);
+        assert!(!assistant.can_undo_turn(&shell));
+
+        // A turn stopped partway is taken back as far as it got.
+        let revision = shell.session().unwrap().revision();
+        let model = LocalModel::scripted(vec![
+            completion("", split(revision, "a", 500_000, "d")),
+            completion("", split(revision + 1, "missing", 1, "e")),
+        ]);
+        assistant.start(model, 1, "split again");
+        finish(&mut assistant, &mut shell);
+        assert_eq!(clips(&shell), 3);
+        assert!(assistant.can_undo_turn(&shell), "{:?}", assistant.entries);
+        // A new chat forgets the turn.
+        assistant.clear();
+        assert!(!assistant.can_undo_turn(&shell));
+        assert_eq!(clips(&shell), 3);
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_turn_is_not_taken_back_in_another_project() {
+        let (mut shell, path) = shell_with_project("undo-here");
+        let (mut other, other_path) = shell_with_project("undo-there");
+        let mut assistant = Assistant::default();
+        let model = LocalModel::scripted(vec![
+            completion("", split(0, "a", 1_000_000, "b")),
+            completion("Split.", Vec::new()),
+        ]);
+        assistant.start(model, 8, "split it");
+        finish(&mut assistant, &mut shell);
+        // The other project is at the same revision after one edit of its
+        // own, and is not the one the turn edited.
+        let moved = other.run_agent_tool(&split(0, "a", 2_000_000, "z")[0], &[]);
+        assert!(!moved.outcome.is_error, "{}", moved.outcome.content);
+        assert_eq!(
+            other.session().unwrap().revision(),
+            shell.session().unwrap().revision()
+        );
+        assert!(!assistant.can_undo_turn(&other));
+        assistant.undo_turn(&mut other);
+        assert_eq!(clips(&other), 2);
+        let _ = std::fs::remove_dir_all(&path);
+        let _ = std::fs::remove_dir_all(&other_path);
+    }
+
+    #[test]
+    fn the_model_is_told_once_that_its_last_turn_was_taken_back() {
+        let (mut shell, path) = shell_with_project("undo-told");
+        let (url, server) = answers(vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "s1",
+                    "type": "function",
+                    "function": {
+                        "name": "draft_apply",
+                        "arguments": serde_json::json!({
+                            "expected_revision": 0,
+                            "requests": [{ "op": "split", "segment_id": "a",
+                                           "at": 1_000_000, "right_id": "b" }],
+                        }).to_string(),
+                    },
+                }],
+            }),
+            serde_json::json!({ "role": "assistant", "content": "Split." }),
+            serde_json::json!({ "role": "assistant", "content": "I see." }),
+            serde_json::json!({ "role": "assistant", "content": "Still here." }),
+        ]);
+        let mut settings = cutlass_settings::Settings::default();
+        settings.model.local_url = url;
+        let mut assistant = Assistant::default();
+        let say = |assistant: &mut Assistant, shell: &mut Shell, words: &str| {
+            assistant.draft = words.to_owned();
+            let seen = shell.assistant_view();
+            assistant.send(&settings, "", &seen);
+            finish(assistant, shell);
+        };
+        say(&mut assistant, &mut shell, "split it");
+        assert_eq!(clips(&shell), 2);
+        assistant.undo_turn(&mut shell);
+        assert_eq!(clips(&shell), 1);
+        say(&mut assistant, &mut shell, "what happened?");
+        say(&mut assistant, &mut shell, "and now?");
+        let bodies = server.join().unwrap();
+        let last_ask = |body: &serde_json::Value| {
+            body["messages"].as_array().unwrap().last().unwrap()["content"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let told = "; the user took back the edits of your last turn]";
+        assert!(!last_ask(&bodies[0]).contains("took back"));
+        assert!(
+            last_ask(&bodies[2]).ends_with(told),
+            "{}",
+            last_ask(&bodies[2])
+        );
+        assert!(!last_ask(&bodies[3]).contains("took back"));
+        // The panel shows the words alone.
+        assert!(
+            assistant
+                .entries
+                .contains(&Entry::Asked("what happened?".to_owned()))
+        );
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    /// A local model server that answers each request in turn with the
+    /// next of `messages`, and gives back the bodies it was sent.
+    fn answers(
+        messages: Vec<serde_json::Value>,
+    ) -> (String, std::thread::JoinHandle<Vec<serde_json::Value>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for message in messages {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                bodies.push(serde_json::from_slice(&body).unwrap());
+                let answer = serde_json::json!({ "choices": [{ "index": 0, "message": message }] })
+                    .to_string();
+                let mut stream = stream;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{answer}",
+                    answer.len()
+                )
+                .unwrap();
+            }
+            bodies
+        });
+        (
+            format!("http://127.0.0.1:{port}/v1/chat/completions"),
+            server,
+        )
+    }
+
+    #[test]
+    fn a_look_shows_the_model_the_frame_and_the_picture_is_not_kept() {
+        let (mut shell, path) = shell_with_project("look");
+        let (url, server) = answers(vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "Looking.",
+                "tool_calls": [{
+                    "id": "l1",
+                    "type": "function",
+                    "function": { "name": "player_look", "arguments": "{\"input\":\"1000000\"}" },
+                }],
+            }),
+            serde_json::json!({ "role": "assistant", "content": "It is black." }),
+        ]);
+        let mut settings = cutlass_settings::Settings::default();
+        settings.model.local_url = url;
+        let chat = path.join("chats").join("look.json");
+        let mut assistant = Assistant::default();
+        assistant.follow(Some(chat.clone()));
+        assistant.draft = "what does it look like at 1s?".to_owned();
+        assistant.send(&settings, "", "");
+        finish(&mut assistant, &mut shell);
+
+        // The model is offered the look, and its second round has the
+        // frame: the result's text, then the picture in a user message.
+        let bodies = server.join().unwrap();
+        assert!(
+            bodies[0]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["function"]["name"] == "player_look")
+        );
+        let messages = bodies[1]["messages"].as_array().unwrap();
+        let result = &messages[messages.len() - 2];
+        assert_eq!(result["role"], "tool");
+        assert_eq!(
+            result["content"],
+            "frame at 1000000, 853x480: the picture is with this result"
+        );
+        let shown = &messages[messages.len() - 1];
+        assert_eq!(shown["role"], "user");
+        let address = shown["content"][1]["image_url"]["url"].as_str().unwrap();
+        assert!(
+            address.starts_with("data:image/jpeg;base64,/9j/"),
+            "{}",
+            &address[..40]
+        );
+
+        // The panel shows the step's words; the playhead did not move.
+        assert_eq!(
+            assistant.entries,
+            vec![
+                Entry::Asked("what does it look like at 1s?".to_owned()),
+                Entry::Said("Looking.".to_owned()),
+                Entry::Step {
+                    tool: "player.look".to_owned(),
+                    input: "1000000".to_owned(),
+                    result: Some(
+                        "frame at 1000000, 853x480: the picture is with this result".to_owned()
+                    ),
+                    failed: false,
+                },
+                Entry::Said("It is black.".to_owned()),
+            ]
+        );
+        assert_eq!(shell.playhead(), Micros(0));
+
+        // Once the turn is over the picture is gone from what the next
+        // turn sends and from the kept file, with a note in its place.
+        let kept = assistant
+            .history
+            .iter()
+            .find_map(|message| match message {
+                Message::Tool {
+                    content, picture, ..
+                } => Some((content.clone(), picture.clone())),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(kept.1, None);
+        assert!(
+            kept.0.ends_with("look again if it is needed)"),
+            "{}",
+            kept.0
+        );
+        let file = std::fs::read_to_string(&chat).unwrap();
+        assert!(!file.contains("\"picture\""));
+        assert!(!file.contains("/9j/"));
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn the_model_is_told_what_the_user_looks_at_and_the_panel_shows_the_words() {
+        let (mut shell, path) = shell_with_project("seen");
+        let track = shell.draft().unwrap().tracks[0].id.clone();
+        let track = if track.as_str().is_empty() {
+            "\"\""
+        } else {
+            track.as_str()
+        };
+        // Nothing picked, and the playhead on clip `a`.
+        assert_eq!(
+            shell.assistant_view(),
+            format!("playhead=0; selected: nothing; at the playhead: a@0+3000000:{track}")
+        );
+        // The clip picked, and the playhead past its end.
+        shell.select(Some(cutlass_model::SegmentId::new("a")));
+        shell.seek(Micros(3_000_000));
+        let seen = shell.assistant_view();
+        assert_eq!(
+            seen,
+            format!("playhead=3000000; selected: a@0+3000000:{track}; at the playhead: nothing")
+        );
+
+        let (url, server) = answers(vec![
+            serde_json::json!({ "role": "assistant", "content": "Done." }),
+        ]);
+        let mut settings = cutlass_settings::Settings::default();
+        settings.model.local_url = url;
+        let chat = path.join("chats").join("seen.json");
+        let mut assistant = Assistant::default();
+        assistant.follow(Some(chat.clone()));
+        assistant.draft = "make this bigger".to_owned();
+        assistant.send(&settings, "", &seen);
+        finish(&mut assistant, &mut shell);
+        // The model got the words, then the note.
+        let bodies = server.join().unwrap();
+        let messages = bodies[0]["messages"].as_array().unwrap();
+        let asked = messages.last().unwrap();
+        assert_eq!(asked["role"], "user");
+        assert_eq!(
+            asked["content"],
+            format!("make this bigger\n\n[Editor now: {seen}]")
+        );
+        // The panel shows the words alone, now and when read back.
+        let expected = vec![
+            Entry::Asked("make this bigger".to_owned()),
+            Entry::Said("Done.".to_owned()),
+        ];
+        assert_eq!(assistant.entries, expected);
+        assistant.follow(Some(path.join("chats").join("other.json")));
+        assistant.follow(Some(chat));
+        assert_eq!(assistant.entries, expected);
+        // The kept conversation still holds the note, for the next turn.
+        assert!(
+            matches!(&assistant.history[0], Message::User { text } if text.ends_with(&format!("[Editor now: {seen}]")))
+        );
+
+        // No project: nothing to see, and the ask is the words alone.
+        let (decoders, encoders) = crate::register_codecs();
+        let empty = Shell::new(decoders, encoders, cutlass_settings::Settings::default());
+        assert_eq!(empty.assistant_view(), "");
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_helper_reads_on_the_window_cannot_write_and_answers_the_parent() {
+        let (mut shell, path) = shell_with_project("helper");
+        let mut assistant = Assistant::default();
+        let call = |name: &str, arguments: &str| {
+            vec![ToolCall {
+                id: name.to_owned(),
+                name: name.to_owned(),
+                arguments: arguments.to_owned(),
+            }]
+        };
+        let parent = LocalModel::scripted(vec![
+            completion("", call("agent.delegate", "How long is the draft?")),
+            completion("The helper says it is short.", Vec::new()),
+        ]);
+        let mut helper = Some(LocalModel::scripted(vec![
+            completion("", call("draft.query", "project")),
+            completion("", call("player.seek", "2000000")),
+            completion("It is short.", Vec::new()),
+        ]));
+        let child = move || helper.take().ok_or_else(|| "one helper only".to_owned());
+        assistant.launch(parent, Some(child), 8, "how long?");
+        finish(&mut assistant, &mut shell);
+        // The helper's read ran on the window; its seek never did.
+        assert_eq!(shell.playhead(), Micros(0));
+        let steps: Vec<(&str, bool)> = assistant
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Step { tool, failed, .. } => Some((tool.as_str(), *failed)),
+                _ => None,
+            })
+            .collect();
+        // The hand-off shows first, then the helper's read.
+        assert_eq!(steps, [("agent.delegate", false), ("draft.query", false)]);
+        assert!(assistant.entries.iter().any(|entry| matches!(
+            entry,
+            Entry::Step { tool, result: Some(answer), .. }
+                if tool == "agent.delegate" && answer == "It is short."
+        )));
+        assert_eq!(
+            assistant.entries.last(),
+            Some(&Entry::Said("The helper says it is short.".to_owned()))
+        );
+        assert!(assistant.history.iter().any(|message| matches!(
+            message,
+            Message::Tool { name, content, .. }
+                if name == "agent.delegate" && content == "It is short."
+        )));
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -527,20 +1509,209 @@ mod tests {
         let mut settings = cutlass_settings::Settings::default();
         settings.model.local = false;
         assistant.draft = "hi".to_owned();
-        assistant.send(&settings);
+        assistant.send(&settings, "", "");
         assert!(
-            matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("local model is off"))
+            matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("Both models are off"))
         );
+        // The cloud model with no name never posts; it says what to fill in.
+        settings.model.cloud = true;
+        settings.model.cloud_name.clear();
+        assistant.draft = "hi".to_owned();
+        assistant.send(&settings, "", "");
+        assert!(
+            matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("Settings › Assistant"))
+        );
+        assert!(!assistant.busy());
+        settings.model.cloud = false;
         settings.model.local = true;
         settings.model.local_url = "http://example.com/v1/chat/completions".to_owned();
         assistant.draft = "hi".to_owned();
-        assistant.send(&settings);
+        assistant.send(&settings, "", "");
         assert!(
             matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("this machine"))
         );
         assert!(!assistant.busy());
         assistant.clear();
         assert!(assistant.entries.is_empty());
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_turn_that_hits_the_step_cap_or_is_stopped_is_remembered() {
+        let (mut shell, path) = shell_with_project("remember");
+        let mut assistant = Assistant::default();
+        let seek = |id: &str, time: &str| {
+            completion(
+                "",
+                vec![ToolCall {
+                    id: id.to_owned(),
+                    name: "player.seek".to_owned(),
+                    arguments: time.to_owned(),
+                }],
+            )
+        };
+        // Two rounds allowed, and the model wants a third.
+        let model = LocalModel::scripted(vec![
+            seek("1", "1000000"),
+            seek("2", "2000000"),
+            completion("never said", Vec::new()),
+        ]);
+        assistant.start(model, 2, "move along");
+        finish(&mut assistant, &mut shell);
+        assert!(
+            matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("step cap")),
+            "{:?}",
+            assistant.entries
+        );
+        assert_eq!(shell.playhead(), Micros(2_000_000));
+        // The ask, both replies and both results are kept for the next turn.
+        assert_eq!(assistant.history.len(), 5, "{:?}", assistant.history);
+        assert!(matches!(&assistant.history[0], Message::User { text } if text == "move along"));
+        assert!(matches!(
+            &assistant.history[4],
+            Message::Tool { call_id, is_error: false, .. } if call_id == "2"
+        ));
+        // The next turn's model is sent them.
+        let next = LocalModel::scripted(vec![completion("Carrying on.", Vec::new())]);
+        assistant.start(next, 8, "and now?");
+        finish(&mut assistant, &mut shell);
+        assert_eq!(assistant.history.len(), 7);
+
+        // A turn stopped while a call waits for an allow keeps the call,
+        // answered as stopped, so the transcript has no call left open.
+        let taken = path.join("taken.png");
+        std::fs::write(&taken, b"old").unwrap();
+        let model = LocalModel::scripted(vec![completion(
+            "Replacing it.",
+            vec![ToolCall {
+                id: "r".to_owned(),
+                name: "export.start".to_owned(),
+                arguments: format!("replace {}", taken.display()),
+            }],
+        )]);
+        assistant.start(model, 8, "export over it");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !assistant.asking() {
+            assert!(assistant.poll(&mut shell), "the turn ended without asking");
+            assert!(Instant::now() < deadline, "no question came");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assistant.stop();
+        assert_eq!(assistant.history.len(), 10, "{:?}", assistant.history);
+        assert!(matches!(
+            assistant.history.last(),
+            Some(Message::Tool { call_id, content, is_error: true, .. })
+                if call_id == "r" && content.contains("stopped")
+        ));
+        assert_eq!(std::fs::read(&taken).unwrap(), b"old");
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn an_empty_answer_is_said_and_a_call_asks_for_each_allow_it_needs() {
+        let (mut shell, path) = shell_with_project("allows");
+        let mut assistant = Assistant::default();
+        assistant.start(
+            LocalModel::scripted(vec![completion("", Vec::new())]),
+            8,
+            "hello",
+        );
+        finish(&mut assistant, &mut shell);
+        assert!(
+            matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("without saying anything")),
+            "{:?}",
+            assistant.entries
+        );
+
+        // One settings change that needs two allows asks twice, then lands.
+        let file = path.join("settings-home").join("settings.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        shell.keep_settings_file(file.clone(), 0);
+        let model = LocalModel::scripted(vec![
+            completion(
+                "",
+                vec![ToolCall {
+                    id: "s".to_owned(),
+                    name: "settings.set".to_owned(),
+                    arguments: r#"{"expected_generation":0,"changes":{"model":{"cloud":true},"sandbox":{"online":true}}}"#.to_owned(),
+                }],
+            ),
+            completion("Both on.", Vec::new()),
+        ]);
+        assistant.start(model, 8, "turn both on");
+        let mut asked = 0;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while assistant.poll(&mut shell) {
+            assert!(Instant::now() < deadline, "the turn did not finish");
+            if assistant.asking() {
+                asked += 1;
+                assert!(!shell.settings().model.cloud, "written before every allow");
+                assistant.decide(&mut shell, true);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(asked, 2);
+        assert!(shell.settings().model.cloud && shell.settings().sandbox.online);
+        assert_eq!(
+            assistant.entries.last(),
+            Some(&Entry::Said("Both on.".to_owned()))
+        );
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    /// A real model on this machine that takes pictures, named by
+    /// `CUTLASS_LOCAL_MODEL`, looks at a red frame and says its color. Run
+    /// by hand with Ollama up:
+    /// `CUTLASS_LOCAL_MODEL=gemma4 cargo test -p cutlass real_local_model_looks -- --ignored`.
+    #[test]
+    #[ignore = "needs a model that takes pictures running on this machine"]
+    fn a_real_local_model_looks_at_a_frame_and_says_what_it_sees() {
+        let (mut shell, path) = shell_with_project("real-look");
+        let red = serde_json::json!({
+            "expected_revision": 0,
+            "requests": [{ "op": "set_canvas_background", "color": "#ff0000" }],
+        });
+        let set = shell.run_agent_tool(
+            &ToolCall {
+                id: "bg".to_owned(),
+                name: "draft.apply".to_owned(),
+                arguments: red.to_string(),
+            },
+            &[],
+        );
+        assert!(!set.outcome.is_error, "{}", set.outcome.content);
+        let mut settings = cutlass_settings::Settings::default();
+        if let Ok(name) = std::env::var("CUTLASS_LOCAL_MODEL") {
+            settings.model.local_name = name;
+        }
+        let mut assistant = Assistant {
+            draft: "Look at the frame at the playhead with player_look. Do not read the \
+                    project. Which one color fills the frame? Answer with the color's name."
+                .to_owned(),
+            ..Assistant::default()
+        };
+        let seen = shell.assistant_view();
+        assistant.send(&settings, "", &seen);
+        let deadline = Instant::now() + Duration::from_secs(600);
+        while assistant.poll(&mut shell) {
+            assert!(Instant::now() < deadline, "the model did not answer");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        eprintln!("{:#?}", assistant.entries);
+        assert!(
+            assistant.entries.iter().any(|entry| matches!(
+                entry,
+                Entry::Step { tool, failed: false, .. } if tool == "player.look"
+            )),
+            "{:?}",
+            assistant.entries
+        );
+        // It can only know the color from the picture.
+        assert!(
+            matches!(assistant.entries.last(), Some(Entry::Said(text)) if text.to_lowercase().contains("red")),
+            "{:?}",
+            assistant.entries
+        );
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -559,7 +1730,7 @@ mod tests {
             draft: "How many clips are on the main track? Read the project first.".to_owned(),
             ..Assistant::default()
         };
-        assistant.send(&settings);
+        assistant.send(&settings, "", "");
         let deadline = Instant::now() + Duration::from_secs(600);
         while assistant.poll(&mut shell) {
             assert!(Instant::now() < deadline, "the model did not answer");
@@ -583,7 +1754,7 @@ mod tests {
         // And an edit: one split, one undo step in the window.
         assistant.entries.clear();
         assistant.draft = "Split clip a at 1 second.".to_owned();
-        assistant.send(&settings);
+        assistant.send(&settings, "", "");
         let deadline = Instant::now() + Duration::from_secs(600);
         while assistant.poll(&mut shell) {
             assert!(Instant::now() < deadline, "the model did not answer");
@@ -594,6 +1765,46 @@ mod tests {
         assert_eq!(clips, 2, "{:?}", assistant.entries);
         shell.undo().unwrap();
         assert_eq!(shell.draft().unwrap().tracks[0].segments.len(), 1);
+
+        // And a skill: it looks the bundled ones up before answering.
+        assistant.entries.clear();
+        assistant.draft = "Which skills can you load? Look them up.".to_owned();
+        assistant.send(&settings, "", "");
+        let deadline = Instant::now() + Duration::from_secs(600);
+        while assistant.poll(&mut shell) {
+            assert!(Instant::now() < deadline, "the model did not answer");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        eprintln!("{:#?}", assistant.entries);
+        assert!(
+            assistant.entries.iter().any(|entry| matches!(
+                entry,
+                Entry::Step { tool, failed: false, .. } if tool == "skill.load"
+            )),
+            "{:?}",
+            assistant.entries
+        );
+
+        // And a helper: the look-up is handed off and its answer comes back.
+        assistant.entries.clear();
+        assistant.draft =
+            "Use a helper (agent.delegate) to find how long the main track is, then tell me."
+                .to_owned();
+        assistant.send(&settings, "", "");
+        let deadline = Instant::now() + Duration::from_secs(600);
+        while assistant.poll(&mut shell) {
+            assert!(Instant::now() < deadline, "the model did not answer");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        eprintln!("{:#?}", assistant.entries);
+        assert!(
+            assistant.history.iter().any(|message| matches!(
+                message,
+                Message::Tool { name, is_error: false, .. } if name == "agent.delegate"
+            )),
+            "{:?}",
+            assistant.entries
+        );
         let _ = std::fs::remove_dir_all(&path);
     }
 }

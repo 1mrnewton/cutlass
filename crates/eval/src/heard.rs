@@ -651,6 +651,36 @@ mod tests {
         .expect("mix")
     }
 
+    /// A clip that starts and ends inside mix windows plays its own part of
+    /// the file: nothing before the clip's first source sample, and nothing
+    /// after its last, though the file has sound on both sides.
+    #[test]
+    fn a_file_clip_with_edges_inside_mix_windows_plays_its_source_range_and_no_more() {
+        // 48 samples, a millisecond: sample `k` is `k * 100`.
+        let path = ramp("edges");
+        let mut draft = audio_draft(&path.display().to_string(), 1.0, false);
+        // Half a millisecond of the file from its sample 12, placed 125 us
+        // (six samples) into the timeline.
+        draft.tracks[0].segments[0].target = TimeRange::new(125, 500);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(250, 500));
+        // Four windows of 12 samples, 250 us each: the clip starts halfway
+        // through the first and ends halfway through the third.
+        let mut heard = Vec::new();
+        for window in 0..4 {
+            let mixed = heard_window(&draft, window * 250, 12);
+            let got = mixed.pcm.samples;
+            assert!(got == 0 || got == 12, "window {window} is {got} frames");
+            let pcm = ClipPcm::Ready(mixed.pcm);
+            heard.extend(values(&pcm));
+            heard.resize(usize::try_from(window + 1).expect("index") * 12, 0);
+        }
+        let mut want = vec![0; 6];
+        want.extend((12..36).map(|k| k * 100));
+        want.resize(48, 0);
+        assert_eq!(heard, want);
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// The playback mix of `wav` beside ffmpeg's default stereo downmix of
     /// the same file. `scale` is what one of our samples is in ffmpeg's
     /// units: an s16 file is full scale at 32767 here and 32768 there.

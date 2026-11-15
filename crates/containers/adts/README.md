@@ -2,7 +2,7 @@
 
 `cutlass-adts` frames one AAC-LC stream as raw ADTS, the layout of an `.aac` file. It demuxes a file into raw access units with the ADTS header removed, and muxes access units back into ADTS frames. It does not decode AAC. The crate is safe Rust (`#![forbid(unsafe_code)]`). The same crate also holds a LOAS/LATM reader and writer and a small one-track M4A reader and writer.
 
-The desktop app does not open ADTS files. The probe crate uses `AdtsFile` only to recognize a raw AAC file and refuse it with a message, because the stream cannot seek.
+The desktop and phone readers open raw AAC with `AdtsSeekFile`, which indexes the file so it can seek. The probe crate uses it to give a `.aac` file its length.
 
 ## What it supports
 
@@ -41,7 +41,13 @@ M4A (`Mp4Demuxer`, `Mp4Muxer`): one AAC track in an `M4A ` file with an edit lis
 
 ## Using it
 
-`AdtsFile<R: Read>` owns a reader and implements `cutlass_container::Demux`. `LatmFile` is the same for LOAS. `seek` always returns `ReadError::Seek(SeekError::ForwardOnly)`.
+`AdtsSeekFile<R: Read + Seek>` is the reader the apps register. `AdtsSeekFile::open(reader, length)` walks every frame header once, copying no payload, and keeps one index row per frame (its byte position and first sample). ADTS stores no duration, so `samples()` is the length: 1024 samples per raw block. `seek` binary-searches that index and lands on the frame that holds the asked sample; every frame is a random-access point. The walk accepts and refuses frames as the byte feeder below does, so a file that would fail midway fails at open. Two things differ from the forward reader: an ID3v2 tag at the start is skipped by its declared size, and bytes after the last whole frame (a cut-off frame, an ID3v1 or APE tag) are left out instead of ending the stream with `Truncated`. The index costs 32 bytes a frame, about 5 MB for an hour at 48 kHz, and is capped by `Limits::max_index_entries`.
+
+`probe(header)` accepts two consecutive frames with the same configuration, after an optional ID3v2 tag that ends inside the header. One sync word alone is not enough. Register it before MP3: an ID3v2 tag alone also matches MP3.
+
+`cargo run -p cutlass-adts --example seek -- file.aac 1.5 30` prints the frame count, the length, and where each second lands (`SIZES=1` adds every packet size, to compare with `ffprobe -show_entries packet=size`, whose sizes include the 7-byte header). On a 95-second ffmpeg-made file with an ID3v2 tag, all 4093 packet sizes matched ffprobe.
+
+`AdtsFile<R: Read>` owns a forward reader and implements `cutlass_container::Demux`. `LatmFile` is the same for LOAS. Their `seek` always returns `ReadError::Seek(SeekError::ForwardOnly)`.
 
 ```rust
 use cutlass_adts::AdtsFile;

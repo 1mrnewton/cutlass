@@ -21,4 +21,4 @@ pub use fetch::{Fetcher, piece_map_path};
 pub use http::{Head, Transport};
 pub use job::{Job, JobId, Priority};
 #[cfg(feature = "http")]
-pub use ureq_http::Http;
+pub use ureq_http::{Http, Posted};

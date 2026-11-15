@@ -2,13 +2,16 @@
 //! filters, transitions and animations, each as one line with the id a
 //! request takes.
 
-use cutlass_model::{ANIMATION_PRESETS, AnimType};
+use cutlass_model::{ANIMATION_PRESETS, AnimType, Motion};
 
 use crate::effect_shelf::{effect_cards, filter_cards};
 use crate::transition_shelf::transition_offers;
 
 /// One line per bundled item: its kind, the id a request takes, then its
 /// name. `effect recipe/shake Shake`, `transition cutlass-dissolve Dissolve`.
+/// An animation's kind says its side, `animation-in`, `animation-out` or
+/// `animation-loop`, and one that moves a title's letters ends
+/// `(text only)`, as it is refused on any other clip.
 #[must_use]
 pub fn catalog_entries() -> Vec<String> {
     let mut entries = Vec::new();
@@ -37,8 +40,13 @@ pub fn catalog_entries() -> Vec<String> {
             AnimType::Group => "group",
             AnimType::None => "none",
         };
+        let text_only = if matches!(preset.motion, Motion::Letters(_)) {
+            " (text only)"
+        } else {
+            ""
+        };
         entries.push(format!(
-            "animation-{kind} {} {}",
+            "animation-{kind} {} {}{text_only}",
             preset.resource_id, preset.name
         ));
     }
@@ -92,6 +100,29 @@ mod tests {
         );
         let fades = catalog_search("animation fade");
         assert!(fades.iter().any(|entry| entry.contains("Fade In")));
+        // A letter animation says it is a title's; the others do not.
+        let typewriter = catalog_search("cutlass-anim-in-typewriter");
+        assert_eq!(typewriter.len(), 1, "{typewriter:?}");
+        assert!(typewriter[0].starts_with("animation-in cutlass-anim-in-typewriter "));
+        assert!(typewriter[0].ends_with(" (text only)"), "{typewriter:?}");
+        let text_only = catalog_search("(text only)");
+        assert!(text_only.len() >= 4, "{text_only:?}");
+        assert!(
+            text_only
+                .iter()
+                .all(|entry| entry.starts_with("animation-"))
+        );
+        // Pop is one of them, though its name does not say so.
+        assert_eq!(
+            catalog_search("cutlass-anim-in-pop"),
+            ["animation-in cutlass-anim-in-pop Pop (text only)"]
+        );
+        assert_eq!(
+            catalog_search("cutlass-anim-in-zoom-in").len(),
+            1,
+            "an animation any clip takes"
+        );
+        assert!(!catalog_search("cutlass-anim-in-zoom-in")[0].contains("text only"));
         assert!(catalog_search("no such thing at all").is_empty());
     }
 

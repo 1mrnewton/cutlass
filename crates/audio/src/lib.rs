@@ -2,8 +2,9 @@
 //!
 //! A surround clip is folded into stereo by [`downmix`]. Each clip is resampled to the mix rate the caller chooses. Speed goes
 //! through [`stretch`]: keeping pitch uses overlap-add, and letting the
-//! pitch follow the speed is a resample. Fades are per clip. The limiter
-//! runs on the mixed buffer.
+//! pitch follow the speed is a resample. Fades are per clip: a window of a
+//! clip is faded by where it sits in that clip. The limiter runs on the
+//! mixed buffer.
 //!
 //! [`align`] lines two recordings of the same moment up by their sound.
 //!
@@ -22,7 +23,7 @@ mod stretch;
 
 pub use align::{Alignment, ENVELOPE_RATE, Envelope, align};
 pub use downmix::{downmix, downmix_into};
-pub use fade::{FadeCurve, fade};
+pub use fade::{FadeCurve, FadeSpan, fade, fade_window};
 pub use limit::limit;
 pub use resample::resample;
 pub use stretch::stretch;
@@ -36,7 +37,8 @@ pub enum Error {
     Rate,
     /// Playback speed was not finite and greater than zero.
     Speed,
-    /// A fade duration was negative, or the curve number is not 0 through 4.
+    /// A fade duration, a window's start, or its clip's length was negative,
+    /// or the curve number is not 0 through 4.
     Fade,
     /// The output frame count does not fit in a PCM buffer.
     TooLong,

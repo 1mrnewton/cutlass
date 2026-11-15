@@ -6,8 +6,9 @@
 //! itself, so the window applies each edit and both see one project.
 //!
 //! The wire is a line of JSON each way: `{"token","id","name","arguments"}`
-//! in, `{"content","is_error"}` out. A call with the wrong token is answered
-//! with an error and nothing runs.
+//! in, `{"content","is_error"}` out, with a `picture` when the tool made
+//! one. A call with the wrong token is answered with an error and nothing
+//! runs.
 
 use std::hash::{BuildHasher, Hasher};
 use std::io::{BufRead, BufReader, Write};
@@ -24,6 +25,11 @@ use crate::{ToolCall, ToolOutcome, ToolSink};
 
 /// How long a forwarded call waits for the app before it gives up.
 const ANSWER_WAIT: Duration = Duration::from_secs(600);
+
+/// The call a window sends the holder of a project it wants to open: a
+/// host with no window saves, lets the project go and forwards to the
+/// window from then on. A window never lets go; to it this is no tool.
+pub const YIELD: &str = "host.yield";
 
 /// Wakes the app's loop when a call arrives.
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
@@ -139,10 +145,14 @@ fn serve_caller(stream: TcpStream, token: &str, calls: &Sender<Forwarded>, wake:
                     .unwrap_or_else(|_| ToolOutcome {
                         content: "the Cutlass window did not answer".to_owned(),
                         is_error: true,
+                        picture: None,
                     })
             }
         };
-        let line = json!({"content": outcome.content, "is_error": outcome.is_error});
+        let mut line = json!({"content": outcome.content, "is_error": outcome.is_error});
+        if let Some(picture) = &outcome.picture {
+            line["picture"] = json!(picture);
+        }
         if writeln!(writer, "{line}")
             .and_then(|()| writer.flush())
             .is_err()
@@ -156,6 +166,7 @@ fn read_call(line: &str, token: &str) -> Result<ToolCall, ToolOutcome> {
     let refuse = |content: &str| ToolOutcome {
         content: content.to_owned(),
         is_error: true,
+        picture: None,
     };
     let message: Value =
         serde_json::from_str(line).map_err(|_| refuse("a forwarded call is not JSON"))?;
@@ -220,7 +231,19 @@ impl Forward {
         })
     }
 
-    fn send(&mut self, call: &ToolCall) -> Result<ToolOutcome, String> {
+    /// Give up on an answer after `wait`, for a call that must not hang
+    /// the caller, such as [`YIELD`] from a window that is opening.
+    pub fn set_answer_wait(&mut self, wait: Duration) -> Result<(), String> {
+        self.reader
+            .get_ref()
+            .set_read_timeout(Some(wait))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Run `call` in the app that holds the project. An error is the
+    /// connection's: the app is gone or did not answer, and the caller
+    /// should find the project's holder again.
+    pub fn try_call(&mut self, call: &ToolCall) -> Result<ToolOutcome, String> {
         let line = json!({
             "token": self.token,
             "id": call.id,
@@ -235,7 +258,7 @@ impl Forward {
             .read_line(&mut answer)
             .map_err(|error| error.to_string())?;
         let answer: Value = serde_json::from_str(&answer)
-            .map_err(|_| "the Cutlass window closed the connection".to_owned())?;
+            .map_err(|_| "the app that held the project closed the connection".to_owned())?;
         Ok(ToolOutcome {
             content: answer
                 .get("content")
@@ -246,15 +269,20 @@ impl Forward {
                 .get("is_error")
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
+            // A picture that does not read is left out; the text stands.
+            picture: answer
+                .get("picture")
+                .and_then(|picture| serde_json::from_value(picture.clone()).ok()),
         })
     }
 }
 
 impl ToolSink for Forward {
     fn run_tool(&mut self, call: &ToolCall) -> ToolOutcome {
-        self.send(call).unwrap_or_else(|error| ToolOutcome {
+        self.try_call(call).unwrap_or_else(|error| ToolOutcome {
             content: format!("the call did not reach the Cutlass window: {error}"),
             is_error: true,
+            picture: None,
         })
     }
 }
@@ -293,6 +321,8 @@ mod tests {
                 waiting.answer(ToolOutcome {
                     content: format!("answer {answered}"),
                     is_error: false,
+                    // The second answer comes with a picture.
+                    picture: (answered == 2).then(|| crate::Picture::jpeg(b"frame")),
                 });
             }
             thread::sleep(Duration::from_millis(2));
@@ -301,6 +331,8 @@ mod tests {
         assert_eq!(first.content, "answer 1");
         assert_eq!(second.content, "answer 2");
         assert!(!first.is_error);
+        assert_eq!(first.picture, None);
+        assert_eq!(second.picture, Some(crate::Picture::jpeg(b"frame")));
         assert!(woken.load(Ordering::Acquire));
     }
 

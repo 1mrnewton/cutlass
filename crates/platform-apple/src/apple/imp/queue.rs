@@ -164,6 +164,13 @@ impl OutputQueue {
             reserved: 0,
         };
         let mut queue = ptr::null_mut();
+        // SAFETY: `format` is borrowed for the call and copied. The user
+        // pointer is the `Shared` that `shared` keeps alive; it moves into
+        // the returned `OutputQueue`, whose `Drop` disposes the queue
+        // synchronously before the `Arc` field drops, so `render` never sees
+        // a freed `Shared`. `render` matches `AudioQueueOutputCallback`. A null
+        // run loop runs callbacks on Core Audio's own thread, and `Shared` is
+        // `Sync`. `queue` is a live out pointer.
         let status = unsafe {
             sys::AudioQueueNewOutput(
                 &format,
@@ -180,6 +187,8 @@ impl OutputQueue {
         }
         let output = Self { queue, shared };
         output.prime()?;
+        // SAFETY: `output.queue` is the live queue made above. A null start
+        // time means as soon as possible.
         let started = unsafe { sys::AudioQueueStart(output.queue, ptr::null()) };
         if started != 0 {
             return Err(QueueError::NoDevice);
@@ -251,6 +260,8 @@ impl OutputQueue {
     /// system takes the audio, and it stays silent until started. Starting a
     /// running queue does nothing.
     pub fn resume(&self) -> Result<(), QueueError> {
+        // SAFETY: `self.queue` is live until `Drop`. A null start time means as
+        // soon as possible.
         let started = unsafe { sys::AudioQueueStart(self.queue, ptr::null()) };
         if started == 0 {
             Ok(())
@@ -279,11 +290,18 @@ impl OutputQueue {
     fn prime(&self) -> Result<(), QueueError> {
         for _ in 0..BUFFERS {
             let mut buffer = ptr::null_mut();
+            // SAFETY: `self.queue` is live and `buffer` is a live out pointer.
+            // The queue owns the buffer it allocates and frees it on dispose.
             let status =
                 unsafe { sys::AudioQueueAllocateBuffer(self.queue, BUFFER_BYTES, &mut buffer) };
             if status != 0 || buffer.is_null() {
                 return Err(QueueError::NoDevice);
             }
+            // SAFETY: `buffer` is the non-null buffer just allocated and not yet
+            // enqueued, so this code is its only user. `audio_data` has
+            // `audio_data_bytes_capacity` bytes, and at most that many are
+            // zeroed. Enqueuing hands it back to the queue; constant-rate PCM
+            // needs no packet descriptions.
             unsafe {
                 let header = &mut *buffer;
                 let silence = header
@@ -308,6 +326,10 @@ impl Drop for OutputQueue {
         if self.queue.is_null() {
             return;
         }
+        // SAFETY: `self.queue` is live and non-null, and is nulled after. With
+        // `immediate` set, stop and dispose are synchronous, so no `render`
+        // call runs after dispose returns and the `Shared` it reads is still
+        // held by `self.shared` until then.
         unsafe {
             let _ = sys::AudioQueueStop(self.queue, 1);
             let _ = sys::AudioQueueDispose(self.queue, 1);
@@ -382,10 +404,16 @@ unsafe extern "C" fn render(
     if user.is_null() || buffer.is_null() || queue.is_null() {
         return;
     }
+    // SAFETY: `user` is the `Arc<Shared>` pointer `open` registered, alive
+    // until the queue is disposed (see `Drop`), and `Shared` is `Sync`.
     let shared = unsafe { &*(user.cast::<Shared>()) };
     let frame = shared.frame_bytes;
     let mut block = [0_u8; 4_096];
     let copied = lock(&shared.held).pull(frame, &mut block);
+    // SAFETY: the queue hands this callback the non-null `buffer` until it is
+    // enqueued again, so the header is ours. At most
+    // `audio_data_bytes_capacity` bytes go into `audio_data`, and `block` has
+    // at least `bytes`. `queue` is the live queue that called.
     unsafe {
         let header = &mut *buffer;
         let capacity = usize::try_from(header.audio_data_bytes_capacity).unwrap_or(0);

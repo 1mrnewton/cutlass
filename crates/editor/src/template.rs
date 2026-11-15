@@ -221,8 +221,10 @@ pub struct TemplatePlace {
 }
 
 /// The requests that place `template` as one undo step: each widget on a
-/// row of its own with its size, color, place and animations, then the
-/// widgets grouped into one compound clip and the extra rows taken away.
+/// row of its own with its size, color, place and animations, a later
+/// widget's row opening above an earlier one's so it is drawn on top, then
+/// the widgets grouped into one compound clip, moved onto `track_id`, and
+/// the extra rows taken away.
 #[must_use]
 pub fn template_requests(template: &TitleTemplate, place: &TemplatePlace) -> Vec<Request> {
     let mut requests = Vec::new();
@@ -285,6 +287,15 @@ pub fn template_requests(template: &TitleTemplate, place: &TemplatePlace) -> Vec
         segment_id: place.segment_id.clone(),
         material_id: place.material_id.clone(),
     });
+    // The compound lands on the top row of its clips, the last widget's;
+    // the first widget's row, `track_id`, is empty now and takes it.
+    if place.widgets.len() > 1 {
+        requests.push(Request::Move {
+            segment_id: place.segment_id.clone(),
+            track_id: place.track_id.clone(),
+            start: Micros(start),
+        });
+    }
     for (track_id, _, _) in place.widgets.iter().skip(1) {
         requests.push(Request::RemoveTrack {
             track_id: track_id.clone(),
@@ -317,6 +328,33 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn a_template_lands_on_a_free_row_already_under_another() {
+        let template = title_template("template:headline").unwrap();
+        let mut draft = Draft::empty("D");
+        // A busy text row above the free one the template is given.
+        for id in ["words", "busy"] {
+            let mut row = cutlass_model::Track::main(id);
+            row.kind = TrackType::Text;
+            row.flag = cutlass_model::TrackFlag::None;
+            draft.tracks.insert(0, row);
+        }
+        let mut session = Session::open(draft);
+        session
+            .apply(0, &template_requests(template, &place(template, "words")))
+            .unwrap();
+        let ids: Vec<&str> = session
+            .draft()
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str())
+            .collect();
+        assert_eq!(ids[..2], ["busy", "words"], "no row left behind");
+        let words = &session.draft().tracks[1];
+        assert_eq!(words.segments.len(), 1);
+        assert_eq!(words.segments[0].id.as_str(), "template");
     }
 
     #[test]
@@ -369,6 +407,15 @@ mod tests {
             .flat_map(|track| &track.segments)
             .collect();
         assert_eq!(widgets.len(), 2);
+        // The later widget's row is above the first's, so it is drawn on top.
+        let row_of = |id: &str| {
+            inside
+                .tracks
+                .iter()
+                .position(|track| track.segments.iter().any(|s| s.id.as_str() == id))
+                .unwrap()
+        };
+        assert!(row_of("widget-1") < row_of("widget-0"));
         let line = widgets
             .iter()
             .find(|segment| segment.id.as_str() == "widget-1")

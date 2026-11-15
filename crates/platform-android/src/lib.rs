@@ -11,6 +11,8 @@
 //! [`OutputQueue`] is a shared-mode AAudio stream. Playback calls that safe
 //! queue. This crate does not mix samples.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 mod media;
 mod planes;
 mod slice;

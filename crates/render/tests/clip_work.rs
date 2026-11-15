@@ -25,7 +25,8 @@ fn renderer() -> Option<Renderer> {
 }
 
 /// Two colour clips on a grey canvas: a blue one under the whole frame and
-/// an orange one, shrunk, turned and moved off the middle, over it.
+/// an orange one, shrunk, turned and moved off the middle, over it. The
+/// orange row is first, the top row, so it is drawn over the blue one.
 fn scene() -> Draft {
     let mut draft = Draft::empty("draft");
     draft.canvas_config.width = WIDTH as i32;
@@ -48,8 +49,18 @@ fn scene() -> Draft {
     over.clip.rotation = 12.0;
     let mut row = Track::main("over");
     row.segments.push(over);
-    draft.tracks.push(row);
+    draft.tracks.insert(0, row);
     draft
+}
+
+/// The orange clip.
+fn orange(draft: &mut Draft) -> &mut Segment {
+    draft
+        .tracks
+        .iter_mut()
+        .flat_map(|track| track.segments.iter_mut())
+        .find(|segment| segment.id == clip())
+        .expect("the orange clip")
 }
 
 fn apply(draft: Draft, requests: &[Request]) -> Draft {
@@ -383,9 +394,7 @@ fn on_clip(draft: &mut Draft, id: &str, package: &str) {
     let mut effect = MaterialEffect::new(id);
     effect.effect_id = package.to_owned();
     draft.materials.effects.push(effect);
-    draft.tracks[1].segments[0]
-        .extra_material_refs
-        .push(id.into());
+    orange(draft).extra_material_refs.push(id.into());
 }
 
 /// `draft` on both paths, which must agree, and differ from `draft`
@@ -433,7 +442,7 @@ fn effect_packages_over_the_clips_below_match() {
     }
     // Two, with a clip drawn between them.
     let mut draft = scene();
-    draft.tracks[1].segments[0].render_index = 12_000;
+    orange(&mut draft).render_index = 12_000;
     global(&mut draft, "first", cutlass_effects::PIXELATE, 11_000);
     global(&mut draft, "second", cutlass_effects::INVERT, 13_000);
     packaged(&renderer, &store, "pixelate under, invert over", &draft);
@@ -500,6 +509,59 @@ fn a_package_the_store_does_not_have_leaves_the_picture() {
         !sources
             .iter()
             .any(|source| matches!(source, GpuSource::Package(_) | GpuSource::Blend { .. })),
+        "{sources:?}"
+    );
+}
+
+/// The orange clip made a compound, shrunk, with `canvas` behind it.
+fn compound_over(canvas: cutlass_model::MaterialCanvas) -> Draft {
+    let mut draft = apply(
+        scene(),
+        &[Request::CreateCompound {
+            segment_ids: vec![clip()],
+            segment_id: "nest".into(),
+            material_id: "inside".into(),
+        }],
+    );
+    let nest = draft
+        .tracks
+        .iter_mut()
+        .flat_map(|track| track.segments.iter_mut())
+        .find(|segment| segment.id.as_str() == "nest")
+        .expect("the compound");
+    nest.clip.scale = cutlass_model::Point::new(0.5, 0.6);
+    nest.clip.transform = cutlass_model::Point::new(-0.2, 0.1);
+    nest.extra_material_refs.push(canvas.id.clone());
+    draft.materials.canvases.push(canvas);
+    draft
+}
+
+#[test]
+fn a_compound_over_a_blurred_copy_of_itself_matches() {
+    let Some(renderer) = renderer() else {
+        return;
+    };
+    let plain = compound_over(cutlass_model::MaterialCanvas {
+        id: "canvas".into(),
+        kind: "canvas_color".to_owned(),
+        color: "#00000000".to_owned(),
+        ..cutlass_model::MaterialCanvas::default()
+    });
+    let blurred = compound_over(cutlass_model::MaterialCanvas {
+        id: "canvas".into(),
+        kind: "canvas_blur".to_owned(),
+        blur: 0.1,
+        ..cutlass_model::MaterialCanvas::default()
+    });
+    let before = both(&renderer, &plain, 40_000).1;
+    let (gpu, cpu, sources) = both(&renderer, &blurred, 40_000);
+    assert_ne!(cpu, before, "the blur changes the frame");
+    agree("compound blur", &gpu, &cpu);
+    // Drawn as a compound on the GPU, not a picture composed on the CPU.
+    assert!(
+        sources
+            .iter()
+            .any(|source| matches!(source, GpuSource::Nested(_))),
         "{sources:?}"
     );
 }

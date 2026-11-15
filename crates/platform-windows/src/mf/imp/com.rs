@@ -329,6 +329,11 @@ macro_rules! com {
     ($object:expr, $index:expr, fn($($arg:ty),*), $($value:expr),* $(,)?) => {{
         type Method = unsafe extern "system" fn(*mut c_void, $($arg),*) -> Hresult;
         let object: *mut c_void = $object;
+        // SAFETY: every caller passes the raw pointer of a live `Com`, so its
+        // first word is the vtable of the interface that `Com` holds. The
+        // caller picks `$index` and the argument types as that interface's
+        // slot and signature in the Windows SDK header, and each pointer
+        // argument is a local or a borrow that outlives the call.
         unsafe {
             let method: Method = transmute(vslot(object, $index));
             method(object, $($value),*)
@@ -339,6 +344,8 @@ macro_rules! com {
 pub(super) use com;
 
 pub(super) unsafe fn vslot(object: *mut c_void, index: usize) -> Slot {
+    // SAFETY: the caller passes a live COM interface pointer, whose first
+    // word points at its vtable, and an `index` inside that vtable.
     unsafe {
         let table = *object.cast::<*const Slot>();
         *table.add(index)
@@ -399,6 +406,9 @@ impl Drop for Com {
 /// keeps its apartment; the Microsoft transforms run in either.
 pub fn enter() -> Result<(), CodecError> {
     thread_local! {
+        // SAFETY: the reserved argument must be null, and it is. The
+        // thread-local runs this once on each thread, and CoUninitialize is
+        // never called, so the thread stays in COM until it exits.
         static APARTMENT: Hresult = unsafe { CoInitializeEx(ptr::null_mut(), COINIT_MULTITHREADED) };
     }
     let apartment = APARTMENT.with(|code| *code);
@@ -406,6 +416,8 @@ pub fn enter() -> Result<(), CodecError> {
         return Err(CodecError::Unsupported { what: "com" });
     }
     static STARTED: OnceLock<Hresult> = OnceLock::new();
+    // SAFETY: MFStartup takes two plain values. The OnceLock calls it once
+    // for the process, and MFShutdown is never called.
     let started = *STARTED.get_or_init(|| unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) });
     if started < 0 {
         return Err(CodecError::Unsupported {
@@ -419,6 +431,9 @@ pub fn enter() -> Result<(), CodecError> {
 /// the media feature pack has none, so a failure here is a decline.
 pub fn transform(clsid: &Guid) -> Result<Com, Hresult> {
     let mut out = ptr::null_mut();
+    // SAFETY: both GUIDs are borrows that outlive the call, there is no
+    // outer object, and `out` is a local that receives one `IMFTransform`
+    // reference, which `owned` takes.
     let code = unsafe {
         CoCreateInstance(
             clsid,
@@ -443,6 +458,8 @@ fn owned(code: Hresult, raw: *mut c_void) -> Result<Com, Hresult> {
 
 pub fn media_type() -> Result<Com, Hresult> {
     let mut out = ptr::null_mut();
+    // SAFETY: `out` is a local that receives one new reference, which
+    // `owned` takes.
     let code = unsafe { MFCreateMediaType(&mut out) };
     owned(code, out)
 }
@@ -590,8 +607,12 @@ pub fn sample_from(bytes: &[u8], time: i64, duration: i64) -> Result<Com, Hresul
 pub fn empty_sample(size: usize) -> Result<Com, Hresult> {
     let size = u32::try_from(size.max(1)).map_err(|_| MF_E_NOTACCEPTING)?;
     let mut raw = ptr::null_mut();
+    // SAFETY: `raw` is a local that receives one new sample reference,
+    // which `owned` takes.
     let sample = owned(unsafe { MFCreateSample(&mut raw) }, raw)?;
     let mut raw = ptr::null_mut();
+    // SAFETY: `raw` is a local that receives one new buffer reference of at
+    // least `size` bytes, which `owned` takes.
     let buffer = owned(unsafe { MFCreateMemoryBuffer(size, &mut raw) }, raw)?;
     check(com!(sample.raw(), 42, fn(*mut c_void), buffer.raw()))?;
     Ok(sample)
@@ -759,6 +780,9 @@ pub fn enumerate(category: &Guid, flags: u32, input: &TypePair, output: &TypePai
     };
     let mut array = ptr::null_mut();
     let mut count = 0_u32;
+    // SAFETY: `input` and `output` are locals laid out as
+    // `MFT_REGISTER_TYPE_INFO`, and `array` and `count` are locals that
+    // receive a CoTaskMem array of `count` activate pointers.
     let code = unsafe { MFTEnumEx(*category, flags, &input, &output, &mut array, &mut count) };
     if code < 0 || array.is_null() {
         return Vec::new();
@@ -772,6 +796,8 @@ pub fn enumerate(category: &Guid, flags: u32, input: &TypePair, output: &TypePai
             found.push(activate);
         }
     }
+    // SAFETY: MFTEnumEx allocated `array` with CoTaskMemAlloc. Each entry's
+    // reference now belongs to `found`, so only the array is freed, once.
     unsafe { CoTaskMemFree(array.cast()) };
     found
 }
@@ -927,6 +953,10 @@ impl DeviceManager {
         const VIDEO_SUPPORT: u32 = 0x800;
         const SDK_VERSION: u32 = 7;
         let mut device = ptr::null_mut();
+        // SAFETY: a null adapter, software module, and feature-level list
+        // with a count of 0 ask for the default hardware device. `device` is
+        // a local that receives one reference, which `owned` takes, and the
+        // feature level and context outputs are null, which the call allows.
         let code = unsafe {
             D3D11CreateDevice(
                 ptr::null_mut(),
@@ -947,6 +977,8 @@ impl DeviceManager {
         let _ = com!(multithread.raw(), 5, fn(i32), 1);
         let mut token = 0_u32;
         let mut manager = ptr::null_mut();
+        // SAFETY: `token` and `manager` are locals the call writes; `owned`
+        // takes the manager reference.
         let code = unsafe { MFCreateDXGIDeviceManager(&mut token, &mut manager) };
         let manager = owned(code, manager)?;
         check(com!(

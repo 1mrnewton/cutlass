@@ -12,7 +12,8 @@ pub(crate) struct SolidLayer {
 ///
 /// A hidden track, an invisible segment, a gradient, and a color that is not
 /// a packed `0xAARRGGBB` value contribute nothing. The caller sorts by
-/// `render_index`, then track, then segment. The solid fills the canvas.
+/// `render_index`, then row with the top row on top, then segment. The
+/// solid fills the canvas.
 pub(crate) fn solid_layers(draft: &Draft, width: u32, height: u32) -> Vec<SolidLayer> {
     let mut layers = Vec::new();
     for (track_index, track) in draft.tracks.iter().enumerate() {

@@ -3,8 +3,10 @@
 //! A frame is included when its start is inside the half-open range. With
 //! a renderer the picture is eval's frame layers drawn on the GPU, so
 //! recipe effects are in the file; without one it is `eval::frame` on the
-//! CPU, which has no recipe effects. Then the export clock. Audio is the same mix
-//! playback uses, on the export clock, so a missing clip is an error.
+//! CPU, which has no recipe effects: `cutlass_eval::recipe_effect_clips`
+//! names the clips such a file is missing. Then the export clock. Audio is
+//! the same mix playback uses, on the export clock, so a missing clip is an
+//! error.
 
 use std::path::{Path, PathBuf};
 

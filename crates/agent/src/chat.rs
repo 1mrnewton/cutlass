@@ -48,6 +48,8 @@ There are over a hundred kinds (text, captions, shapes, effects, filters, color,
 draft_query \"ops\" lists them all, and draft_query \"ops add_text set_position\" gives the exact JSON of the ones you need. Look a kind up before you use it the first time. \
 For a bigger job (captions, removing pauses, motion graphics, a product demo, setting up a project), skill_load it first and follow it. \
 settings_get and settings_set read and change the app's own settings, not the project: its canvas, frame rate and clips are draft_apply requests. \
+An ask may end with a note in brackets, [Editor now: ...]: where the playhead is, the clips the user selected and the clips at the playhead, each as id@start+length:track. \
+\"This\", \"here\" and \"the selected clip\" mean those. The note is from when the user asked, so read again once you have edited. \
 When done, say briefly what you changed.";
 
 /// What the model is told about this user beyond [`SYSTEM_PROMPT`]: the

@@ -4,7 +4,8 @@
 
 use cutlass_editor::{
     BACKGROUND_ALPHA_START, BACKGROUND_ROUND_START, GLOW_RANGE_START, GLOW_STRENGTH_START,
-    OUTLINE_START, SHADOW_BLUR_START, SHADOW_DISTANCE_START, panel_of, starting,
+    OUTLINE_START, RAYS_RANGE_START, RAYS_STRENGTH_START, SHADOW_BLUR_START, SHADOW_DISTANCE_START,
+    panel_of, starting,
 };
 pub use cutlass_editor::{LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
 use cutlass_model::{MaterialEffect, MaterialId, MaterialRef, Micros, SegmentId, WordColumns};
@@ -1104,11 +1105,55 @@ impl Shell {
         strength: f64,
         range: f64,
     ) -> Result<(), ShellError> {
+        let strength = starting(color, strength, GLOW_STRENGTH_START);
+        let range = starting(color, range, GLOW_RANGE_START);
+        self.glow(color, [strength, range], None, None)
+    }
+
+    /// Draw the title's glow as rays of light, or soft. Each starts at its
+    /// own intensity and range, rays standing straight; a title with no
+    /// glow takes a white one.
+    pub fn set_text_glow_rays(&mut self, rays: bool) -> Result<(), ShellError> {
+        let now = self.text_look().unwrap_or_default();
+        if !now.glow_color.is_empty() && now.glow_rays == rays {
+            return Ok(());
+        }
+        let color = if now.glow_color.is_empty() {
+            "#FFFFFF"
+        } else {
+            &now.glow_color
+        };
+        let amounts = if rays {
+            [RAYS_STRENGTH_START, RAYS_RANGE_START]
+        } else {
+            [GLOW_STRENGTH_START, GLOW_RANGE_START]
+        };
+        self.glow(color, amounts, Some(rays), Some([0.0, 0.0]))
+    }
+
+    /// Lean the title's rays `x` degrees right and `y` up, each at most
+    /// [`cutlass_model::MAX_GLOW_LEAN`] either way.
+    pub fn set_text_glow_lean(&mut self, x: f64, y: f64) -> Result<(), ShellError> {
+        let now = self.text_look().unwrap_or_default();
+        self.glow(
+            &now.glow_color,
+            [now.glow_strength, now.glow_range],
+            None,
+            Some([x, y]),
+        )
+    }
+
+    /// Set the title's glow, keying a keyed Intensity or Range here.
+    fn glow(
+        &mut self,
+        color: &str,
+        [strength, range]: [f64; 2],
+        rays: Option<bool>,
+        lean: Option<[f64; 2]>,
+    ) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
         let glow_id = MaterialId::new(self.fresh("glow"));
-        let strength = starting(color, strength, GLOW_STRENGTH_START);
-        let range = starting(color, range, GLOW_RANGE_START);
         let now = self.text_look();
         let mut requests = vec![Request::SetTextGlow {
             segment_id,
@@ -1116,6 +1161,8 @@ impl Shell {
             color: color.to_owned(),
             strength,
             range,
+            rays,
+            lean,
         }];
         // A keyed Intensity or Range plays its keys, so a change keys it here.
         for (setting, value, was) in [
@@ -2533,6 +2580,47 @@ mod tests {
         );
         desktop.undo().unwrap();
         assert!(!desktop.text_look().unwrap().background_lines);
+    }
+
+    #[test]
+    fn a_title_glow_streams_as_rays_that_lean_and_goes_back_to_soft() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "words");
+        let before = desktop.draft().unwrap().clone();
+
+        // Picking rays on a title with no glow gives it a white one.
+        desktop.set_text_glow_rays(true).unwrap();
+        let look = desktop.text_look().unwrap();
+        assert_eq!(look.glow_color, "#FFFFFF");
+        assert!(look.glow_rays);
+        assert_eq!(look.glow_strength, super::RAYS_STRENGTH_START);
+        assert_eq!(look.glow_range, super::RAYS_RANGE_START);
+
+        desktop.set_text_glow_lean(-1.0, 3.0).unwrap();
+        desktop.set_text_glow("#FF0000", 0.8, 0.6).unwrap();
+        let look = desktop.text_look().unwrap();
+        assert_eq!((look.glow_lean_x, look.glow_lean_y), (-1.0, 3.0));
+        assert!(look.glow_rays);
+        assert_eq!(look.glow_color, "#FF0000");
+        assert!(desktop.set_text_glow_lean(50.0, 0.0).is_err());
+
+        // Picking rays again changes nothing; soft takes its own starts and
+        // stands the rays straight.
+        let draft = desktop.draft().unwrap().clone();
+        desktop.set_text_glow_rays(true).unwrap();
+        assert_eq!(desktop.draft().unwrap(), &draft);
+        desktop.set_text_glow_rays(false).unwrap();
+        let look = desktop.text_look().unwrap();
+        assert!(!look.glow_rays);
+        assert_eq!(look.glow_color, "#FF0000");
+        assert_eq!(look.glow_strength, super::GLOW_STRENGTH_START);
+        assert_eq!((look.glow_lean_x, look.glow_lean_y), (0.0, 0.0));
+
+        for _ in 0..4 {
+            desktop.undo().unwrap();
+        }
+        assert_eq!(desktop.draft().unwrap(), &before);
     }
 
     #[test]

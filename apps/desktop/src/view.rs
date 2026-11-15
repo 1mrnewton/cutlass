@@ -19700,7 +19700,20 @@ mod tests {
         harness.get_by_label("One box").click();
         harness.run_steps(4);
         assert!(!look(&harness).background_lines);
+        // The glow streams as rays from its tile, and only rays show their
+        // offsets.
+        let offsets = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>| {
+            harness.query_all_by_label("X-offset").count()
+        };
+        let soft = offsets(&harness);
+        harness.get_by_label("Rays").click();
+        harness.run_steps(4);
+        assert!(look(&harness).glow_rays);
+        assert!(offsets(&harness) > soft);
         picture(&mut harness, "title-parts-styled");
+        harness.get_by_label("Soft").click();
+        harness.run_steps(4);
+        assert!(!look(&harness).glow_rays);
         for part in ["Stroke", "Background", "Glow", "Shadow"] {
             switch(&harness, part);
             harness.run_steps(4);

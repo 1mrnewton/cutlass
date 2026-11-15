@@ -90,9 +90,10 @@ pub use group_move::{ClipMove, MovePlan, NewLane, move_requests, plan_move, plan
 pub use hit::{BadScale, Hit, Pointer, TimelineScale, hit_test};
 pub use inspector::{
     BACKGROUND_ALPHA_START, BACKGROUND_ROUND_START, GLOW_RANGE_START, GLOW_STRENGTH_START,
-    LetterCase, OUTLINE_START, Panel, SHADOW_ANGLE, SHADOW_BLUR_START, SHADOW_DISTANCE_START,
-    SILENT_DB, TEXT_PRESETS, TextLook, TextPreset, canvas_pixels, gain_of_db, is_caption, panel_of,
-    preset_requests, starting, stored_position, text_look, text_look_at, volume_db,
+    LetterCase, OUTLINE_START, Panel, RAYS_RANGE_START, RAYS_STRENGTH_START, SHADOW_ANGLE,
+    SHADOW_BLUR_START, SHADOW_DISTANCE_START, SILENT_DB, TEXT_PRESETS, TextLook, TextPreset,
+    canvas_pixels, gain_of_db, is_caption, panel_of, preset_requests, starting, stored_position,
+    text_look, text_look_at, volume_db,
 };
 pub use keys::{
     ClipKeys, KeyGraph, clip_keys, key_graphs, move_key, move_keys, remove_key, remove_keys,

@@ -1457,6 +1457,20 @@ pub(super) fn keyed_row<R>(
     .inner
 }
 
+/// `row` as wide as a keyed row's, so a setting that takes no keys lines
+/// up with those that do.
+pub(super) fn unkeyed_row<R>(ui: &mut Ui, row: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.horizontal(|ui| {
+        let width = (ui.available_width() - KEYS_WIDTH - ui.spacing().item_spacing.x).max(80.0);
+        ui.allocate_ui(Vec2::new(width, 30.0), |ui| {
+            ui.set_min_width(width);
+            ui.vertical(row).inner
+        })
+        .inner
+    })
+    .inner
+}
+
 /// ◀ to the key before the playhead, ◆ to key here or unkey, ▶ to the key
 /// after. The diamond is filled on a key; an arrow is faint with no key
 /// that way.
@@ -2753,7 +2767,16 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
     }
     if header.open {
         body(ui, |ui| {
-            later_tiles(ui, &["Soft glow", "Halo"]);
+            // Rays first, then soft, as the reference has them.
+            let picked = style_tiles(
+                ui,
+                &["Rays", "Soft"],
+                usize::from(!look.glow_rays),
+                paint_glow_tile,
+            );
+            if let Some(index) = picked {
+                send(shell, |shell| shell.set_text_glow_rays(index == 0));
+            }
             if let Some(color) = color_row(ui, state, "glow-color", "Color", &look.glow_color) {
                 send(shell, |shell| {
                     shell.set_text_glow(&color, look.glow_strength, look.glow_range)
@@ -2785,8 +2808,28 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
                     shell.set_text_glow(&look.glow_color, look.glow_strength, value / 100.0)
                 });
             }
-            later_slider(ui, "Y-offset", 0.0, "0°");
-            later_slider(ui, "X-offset", 0.0, "0°");
+            if look.glow_rays {
+                let lean = [look.glow_lean_x, look.glow_lean_y];
+                let most = cutlass_model::MAX_GLOW_LEAN;
+                for (axis, key, label) in [(1, "glow-y", "Y-offset"), (0, "glow-x", "X-offset")] {
+                    let changed = unkeyed_row(ui, |ui| {
+                        slider(
+                            ui,
+                            state,
+                            key,
+                            label,
+                            lean[axis].round(),
+                            -most..=most,
+                            |v| format!("{v:.0}°"),
+                        )
+                    });
+                    if let Some(value) = changed {
+                        let mut lean = lean;
+                        lean[axis] = value.round().clamp(-most, most);
+                        send(shell, |shell| shell.set_text_glow_lean(lean[0], lean[1]));
+                    }
+                }
+            }
         });
     }
 
@@ -3089,6 +3132,50 @@ fn paint_background_tile(painter: &egui::Painter, rect: Rect, index: usize) {
     }
     painter.galley(first, top, Color32::WHITE);
     painter.galley(second, low, Color32::WHITE);
+}
+
+/// "Aa" with rays of light streaming out of it, or a soft glow around it.
+fn paint_glow_tile(painter: &egui::Painter, rect: Rect, index: usize) {
+    let middle = rect.center();
+    let font = FontId::proportional(17.0);
+    let letters = painter.layout_no_wrap("Aa".to_owned(), font, Color32::WHITE);
+    let at = middle - letters.size() / 2.0;
+    if index == 0 {
+        // Rays of a few lengths, fading as they leave the letters.
+        for ray in 0..28_u16 {
+            let turn = f32::from(ray) / 28.0 * std::f32::consts::TAU;
+            let (sin, cos) = turn.sin_cos();
+            let long = 12.0 + f32::from(ray * 7 % 5) * 2.5;
+            let pieces = 5_u16;
+            for piece in 0..pieces {
+                let from = 7.0 + long * f32::from(piece) / f32::from(pieces);
+                let to = 7.0 + long * f32::from(piece + 1) / f32::from(pieces);
+                let fade = 1.0 - f32::from(piece) / f32::from(pieces);
+                let ink = Color32::from_white_alpha((70.0 * fade) as u8);
+                painter.line_segment(
+                    [
+                        middle + Vec2::new(cos * from * 1.3, sin * from),
+                        middle + Vec2::new(cos * to * 1.3, sin * to),
+                    ],
+                    Stroke::new(1.5, ink),
+                );
+            }
+        }
+    } else {
+        // A ring of faint copies stands in for the blur.
+        for (reach, alpha) in [(4.0_f32, 10_u8), (2.5, 18), (1.2, 30)] {
+            for step in 0..16_u8 {
+                let turn = f32::from(step) / 16.0 * std::f32::consts::TAU;
+                let shift = Vec2::new(turn.cos(), turn.sin()) * reach;
+                painter.galley_with_override_text_color(
+                    at + shift,
+                    letters.clone(),
+                    Color32::from_white_alpha(alpha),
+                );
+            }
+        }
+    }
+    painter.galley(at, letters, Color32::WHITE);
 }
 
 // Controls.

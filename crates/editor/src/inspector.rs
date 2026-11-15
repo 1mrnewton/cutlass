@@ -89,6 +89,11 @@ pub struct TextLook {
     pub glow_strength: f64,
     /// 0 to 1.
     pub glow_range: f64,
+    /// Rays of light rather than a soft glow.
+    pub glow_rays: bool,
+    /// Where the rays lean, right and up, in degrees.
+    pub glow_lean_x: f64,
+    pub glow_lean_y: f64,
     /// The bubble's key; empty for a plain box or none.
     pub bubble: String,
 }
@@ -102,6 +107,10 @@ pub const BACKGROUND_ALPHA_START: f64 = 1.0;
 pub const BACKGROUND_ROUND_START: f64 = 0.3;
 pub const GLOW_STRENGTH_START: f64 = 0.6;
 pub const GLOW_RANGE_START: f64 = 0.5;
+/// What rays take when picked: fainter and shorter than a soft glow, as
+/// they reach further.
+pub const RAYS_STRENGTH_START: f64 = 0.3;
+pub const RAYS_RANGE_START: f64 = 0.2;
 /// Where a new shadow falls: down and to the right.
 pub const SHADOW_ANGLE: f64 = -45.0;
 
@@ -198,8 +207,9 @@ fn look_of(
         None => segment_bloom(&draft.materials, segment).and_then(MaterialEffect::bloom),
     };
     // No glow reads as no amounts, so a first glow color takes the starts.
-    let (glow_color, glow_strength, glow_range) = glow.map_or((String::new(), 0.0, 0.0), |glow| {
-        (glow.color, glow.strength, glow.range)
+    let glow = glow.unwrap_or_else(|| cutlass_model::BloomParams {
+        range: 0.0,
+        ..cutlass_model::BloomParams::default()
     });
     Some(TextLook {
         outline_color: text.border_color.clone(),
@@ -221,9 +231,12 @@ fn look_of(
         background_height: text.background_height,
         background_offset_x: text.background_offset_x,
         background_offset_y: text.background_offset_y,
-        glow_color,
-        glow_strength,
-        glow_range,
+        glow_color: glow.color,
+        glow_strength: glow.strength,
+        glow_range: glow.range,
+        glow_rays: glow.rays,
+        glow_lean_x: glow.lean_x,
+        glow_lean_y: glow.lean_y,
         bubble: text.bubble.clone(),
     })
 }

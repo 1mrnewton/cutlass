@@ -198,7 +198,7 @@ fn run(shared: &Shared, readers: &ReaderFactory) {
         }
         let generation = state.generation;
         drop(state);
-        let bytes = window_bytes(
+        let mut bytes = window_bytes(
             PreviewMix {
                 draft: &job.draft,
                 revision: job.revision,
@@ -210,15 +210,16 @@ fn run(shared: &Shared, readers: &ReaderFactory) {
             },
             WINDOW,
         );
+        // The meter reads the mix as summed; the device gets it clipped.
+        let peak = crate::meter::window_peak(&bytes);
+        crate::preview::clip_to_full_scale(&mut bytes);
         state = lock(&shared.state);
         if state.generation == generation {
             let first = state.mixed;
             if state.peaks.len() >= PEAKS_KEPT {
                 state.peaks.pop_front();
             }
-            state
-                .peaks
-                .push_back((first, crate::meter::window_peak(&bytes)));
+            state.peaks.push_back((first, peak));
             shared.sink.append(&bytes);
             state.mixed = state.mixed.saturating_add(u64::from(WINDOW));
         }

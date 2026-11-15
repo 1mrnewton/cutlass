@@ -52,9 +52,25 @@ pub(crate) fn queue_mix_peak(output: &mut AudioOutput, mix: PreviewMix<'_>) -> O
     if frames == 0 {
         return None;
     }
-    let bytes = mixed_bytes(mix, frames);
+    let mut bytes = mixed_bytes(mix, frames);
+    let peak = crate::meter::window_peak(&bytes);
+    clip_to_full_scale(&mut bytes);
     output.queue(&bytes);
-    Some(crate::meter::window_peak(&bytes))
+    Some(peak)
+}
+
+/// Hold every sample of little-endian f32 `bytes` inside full scale.
+///
+/// Loud clips sum past full scale. Export clips its mix there, so the
+/// preview does too and the two sound alike at any device volume. Take the
+/// meter's peak first: it reads how far over the mix went.
+pub(crate) fn clip_to_full_scale(bytes: &mut [u8]) {
+    for sample in bytes.as_chunks_mut::<4>().0 {
+        let value = f32::from_le_bytes(*sample);
+        if !(-1.0..=1.0).contains(&value) && !value.is_nan() {
+            *sample = value.clamp(-1.0, 1.0).to_le_bytes();
+        }
+    }
 }
 
 /// `frames` of mixed stereo at `mix.time`. A failed mix is silence of the
@@ -138,7 +154,9 @@ mod tests {
     };
     use cutlass_session::{Request, Session};
 
-    use super::{PreviewMix, preview_frames, queue_mix, window_bytes};
+    use super::{
+        PreviewMix, clip_to_full_scale, preview_frames, queue_mix, queue_mix_peak, window_bytes,
+    };
     use crate::apple::{AudioHost, AudioOutput};
     use crate::playhead::Player;
 
@@ -265,6 +283,48 @@ mod tests {
         assert_eq!(preview_frames(1_000_000), 8_192);
         assert_eq!(preview_frames(0), 0);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_mix_past_full_scale_is_clipped_for_the_device_and_metered_whole() {
+        let path =
+            std::env::temp_dir().join(format!("cutlass-preview-loud-{}", std::process::id()));
+        write_tone(&path);
+        let mut draft = draft(&path);
+        // A full-scale tone at three times its level.
+        draft.tracks[0].segments[0].volume = 3.0;
+        let session = Session::open(draft);
+        let readers = readers();
+        let mut heard = cutlass_eval::Heard::new();
+        let mut output = AudioOutput::open(AudioHost::Software);
+        let peak = queue_mix_peak(
+            &mut output,
+            PreviewMix {
+                draft: session.draft(),
+                revision: session.revision(),
+                time: Micros(0),
+                frames: 4,
+                readers: &readers,
+                heard: &mut heard,
+                root: None,
+            },
+        )
+        .expect("queued");
+        assert_eq!(samples(output.queued()), vec![1.0; 8]);
+        assert!(peak[0] > 2.9 && peak[1] > 2.9, "{peak:?}");
+        let _ = std::fs::remove_file(&path);
+
+        let mut bytes: Vec<u8> = [2.0_f32, -3.0, 0.5, -1.0, f32::NAN]
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        // An odd tail is left alone.
+        bytes.push(7);
+        clip_to_full_scale(&mut bytes);
+        let clipped = samples(&bytes);
+        assert_eq!(clipped[..4], [1.0, -1.0, 0.5, -1.0]);
+        assert!(clipped[4].is_nan());
+        assert_eq!(bytes.last(), Some(&7));
     }
 
     #[test]

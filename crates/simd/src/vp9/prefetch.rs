@@ -9,21 +9,29 @@
 //! addresses inside the slice.
 
 /// Hints rows `0..rows` of a region of `s`, row `r` being `s[at + r *
-/// stride..][..w]`, into the cache. Rows past the end of `s` are left
-/// out.
+/// stride..][..w]`, into the cache: one hint for each 64-byte line a row
+/// touches. Rows past the end of `s` are left out.
 #[inline]
 pub fn rect<T>(s: &[T], at: usize, stride: usize, w: usize, rows: usize) {
     #[cfg(target_arch = "x86_64")]
     {
-        let size = size_of::<T>().max(1);
-        // One hint per 64-byte line: a row of `w` from anywhere in a line
-        // spans at most this many.
-        let lines = (w * size).div_ceil(64) + 1;
-        let step = 64 / size;
+        let size = size_of::<T>();
+        if size == 0 || w == 0 {
+            return;
+        }
+        let base = s.as_ptr() as usize;
         for r in 0..rows {
             let row = at + r * stride;
+            // The row's first sample's place in its line, and the lines
+            // from it to the row's last.
+            let off = (base + row * size) % 64;
+            let lines = (off + w * size).div_ceil(64);
             for k in 0..lines {
-                let i = row + k * step;
+                let i = if k == 0 {
+                    row
+                } else {
+                    row + (k * 64 - off).div_ceil(size)
+                };
                 if i >= s.len() {
                     return;
                 }

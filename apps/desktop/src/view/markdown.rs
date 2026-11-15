@@ -2,15 +2,20 @@
 //! headings, lists, quotes, code and tables. Every word can be selected
 //! and copied; a web link opens in the browser; a code block has a copy
 //! button.
+//!
+//! Answers are set in Inter and code in JetBrains Mono, two faces the
+//! program already ships for titles. Both vary in weight, so strong words
+//! and headings are truly bold rather than only brighter.
 
 use std::ops::Range;
 use std::sync::Arc;
 
 use cutlass_agent::markdown::{self, Block, Item, Span, Style};
+use egui::epaint::text::VariationCoords;
 use egui::text::{CCursor, LayoutJob, TextFormat};
 use egui::{
-    Align, Color32, CursorIcon, FontId, Frame, Galley, Id, Label, Layout, Margin, OpenUrl, Sense,
-    Stroke, Ui, Vec2, vec2,
+    Align, Color32, Context, CursorIcon, FontData, FontDefinitions, FontFamily, FontId, Frame,
+    Galley, Id, Label, Layout, Margin, OpenUrl, Sense, Stroke, Ui, Vec2, vec2,
 };
 
 use crate::{tokens, ui};
@@ -30,6 +35,66 @@ const STRONG: Color32 = Color32::WHITE;
 const CODE_GROUND: Color32 = tokens::GAP;
 /// Inline code's ground, lighter than the panel.
 const CODE_INLINE: Color32 = tokens::RAISED;
+
+/// The family answers are set in: Inter, then the window's own faces for
+/// what Inter lacks.
+const WORDS_FAMILY: &str = "assistant";
+/// The family code is set in: JetBrains Mono, then the window's monospace.
+const CODE_FAMILY: &str = "assistant-code";
+/// The weights words are drawn at, on the faces' `wght` axis.
+const REGULAR: f32 = 400.0;
+const BOLD: f32 = 620.0;
+const HEADING: f32 = 680.0;
+
+/// Adds the answer and code families to the window's fonts, once. Until
+/// they are in, answers are set in the window's own faces.
+pub fn install_fonts(ctx: &Context) {
+    let wanted = FontFamily::Name(WORDS_FAMILY.into());
+    if ctx.fonts(|fonts| fonts.definitions().families.contains_key(&wanted)) {
+        return;
+    }
+    let mut definitions = FontDefinitions::default();
+    for (family, face, under) in [
+        (WORDS_FAMILY, "Inter", FontFamily::Proportional),
+        (CODE_FAMILY, "JetBrains Mono", FontFamily::Monospace),
+    ] {
+        let Some(bytes) = shipped(face) else { continue };
+        definitions
+            .font_data
+            .insert(face.to_owned(), Arc::new(FontData::from_static(bytes)));
+        let mut faces = vec![face.to_owned()];
+        faces.extend(
+            definitions
+                .families
+                .get(&under)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        definitions
+            .families
+            .insert(FontFamily::Name(family.into()), faces);
+    }
+    ctx.set_fonts(definitions);
+}
+
+/// The bytes of the shipped family `name`, in one file that varies.
+fn shipped(name: &str) -> Option<&'static [u8]> {
+    cutlass_fonts::FAMILIES
+        .iter()
+        .find(|family| family.name == name)
+        .and_then(|family| family.files.first())
+        .map(|(_, bytes)| *bytes)
+}
+
+/// `family` when the window has it, or the window's own `instead`.
+fn family(ctx: &Context, family: &str, instead: FontFamily) -> FontFamily {
+    let named = FontFamily::Name(family.into());
+    if ctx.fonts(|fonts| fonts.definitions().families.contains_key(&named)) {
+        named
+    } else {
+        instead
+    }
+}
 
 /// `text`, the model's markdown, as the panel shows an answer. `id`
 /// tells this answer's tables apart from another's.
@@ -74,7 +139,7 @@ fn stack(ui: &mut Ui, blocks: &[Block], id: Id, color: Color32) {
 
 fn paint(ui: &mut Ui, block: &Block, id: Id, color: Color32) {
     match block {
-        Block::Paragraph(spans) => words(ui, spans, BODY, color, false, true),
+        Block::Paragraph(spans) => words(ui, spans, BODY, color, REGULAR, true),
         Block::Heading { level, spans } => {
             let size = match level {
                 1 => 18.0,
@@ -82,7 +147,7 @@ fn paint(ui: &mut Ui, block: &Block, id: Id, color: Color32) {
                 3 => 14.5,
                 _ => BODY,
             };
-            words(ui, spans, size, STRONG, true, true);
+            words(ui, spans, size, STRONG, HEADING, true);
         }
         Block::Code { language, text } => code_block(ui, language, text),
         Block::Quote(inner) => quote(ui, inner, id),
@@ -94,19 +159,44 @@ fn paint(ui: &mut Ui, block: &Block, id: Id, color: Color32) {
     }
 }
 
+/// The families an answer is set in: its words' and its code's.
+#[derive(Clone)]
+struct Faces {
+    words: FontFamily,
+    code: FontFamily,
+}
+
+impl Faces {
+    fn of(ctx: &Context) -> Self {
+        Self {
+            words: family(ctx, WORDS_FAMILY, FontFamily::Proportional),
+            code: family(ctx, CODE_FAMILY, FontFamily::Monospace),
+        }
+    }
+}
+
+/// The weight `weight` on the `wght` axis.
+fn weight(weight: f32) -> VariationCoords {
+    VariationCoords::new([(b"wght", weight)])
+}
+
 /// How `style` is drawn at `size`, the words otherwise `color`, and all
-/// strong when `strong`.
-fn format(style: &Style, size: f32, color: Color32, strong: bool) -> TextFormat {
+/// at least `least` heavy.
+fn format(style: &Style, faces: &Faces, size: f32, color: Color32, least: f32) -> TextFormat {
     let mut format = TextFormat {
-        font_id: FontId::proportional(size),
+        font_id: FontId::new(size, faces.words.clone()),
         color,
+        coords: weight(least),
         ..TextFormat::default()
     };
     if style.code {
-        format.font_id = FontId::monospace(size - (BODY - CODE));
+        format.font_id = FontId::new(size - (BODY - CODE), faces.code.clone());
         format.background = CODE_INLINE;
     }
-    if strong || style.strong {
+    if style.strong {
+        format.coords = weight(least.max(BOLD));
+    }
+    if style.strong || least > REGULAR {
         format.color = STRONG;
     }
     format.italics = style.emphasis;
@@ -123,9 +213,10 @@ fn format(style: &Style, size: f32, color: Color32, strong: bool) -> TextFormat 
 /// `spans` as one job, and where its links are, by character.
 fn job(
     spans: &[Span],
+    faces: &Faces,
     size: f32,
     color: Color32,
-    strong: bool,
+    least: f32,
 ) -> (LayoutJob, Vec<(Range<usize>, String)>) {
     let mut job = LayoutJob::default();
     let mut links = Vec::new();
@@ -136,15 +227,20 @@ fn job(
             links.push((chars..chars + count, url.clone()));
         }
         chars += count;
-        job.append(&span.text, 0.0, format(&span.style, size, color, strong));
+        job.append(
+            &span.text,
+            0.0,
+            format(&span.style, faces, size, color, least),
+        );
     }
     (job, links)
 }
 
-/// A run of words that can be selected, wrapped to the width there is when
-/// `wrap`, and whose links open when clicked.
-fn words(ui: &mut Ui, spans: &[Span], size: f32, color: Color32, strong: bool, wrap: bool) {
-    let (mut job, links) = job(spans, size, color, strong);
+/// A run of words that can be selected, at least `least` heavy, wrapped to
+/// the width there is when `wrap`, and whose links open when clicked.
+fn words(ui: &mut Ui, spans: &[Span], size: f32, color: Color32, least: f32, wrap: bool) {
+    let faces = Faces::of(ui.ctx());
+    let (mut job, links) = job(spans, &faces, size, color, least);
     job.wrap.max_width = if wrap {
         ui.available_width()
     } else {
@@ -213,10 +309,11 @@ fn code_block(ui: &mut Ui, language: &str, text: &str) {
                     }
                 });
             });
+            let code = Faces::of(ui.ctx()).code;
             ui.add(
                 Label::new(
                     egui::RichText::new(text)
-                        .font(FontId::monospace(CODE))
+                        .font(FontId::new(CODE, code))
                         .color(tokens::TEXT),
                 )
                 .selectable(true),
@@ -252,7 +349,7 @@ fn marker(first: Option<u64>, index: usize) -> String {
 
 fn list(ui: &mut Ui, first: Option<u64>, items: &[Item], id: Id, color: Color32) {
     // Numbers line up on their dots: the widest marker sets the column.
-    let font = FontId::proportional(BODY);
+    let font = FontId::new(BODY, Faces::of(ui.ctx()).words);
     let width = (0..items.len())
         .map(|index| {
             let text = marker(first, index);
@@ -261,7 +358,7 @@ fn list(ui: &mut Ui, first: Option<u64>, items: &[Item], id: Id, color: Color32)
                 .size()
                 .x
         })
-        .fold(INDENT - 4.0, f32::max)
+        .fold(INDENT + 2.0, f32::max)
         + 4.0;
     for (index, item) in items.iter().enumerate() {
         if index > 0 {
@@ -327,12 +424,12 @@ fn table(ui: &mut Ui, head: &[Vec<Span>], rows: &[Vec<Vec<Span>>], id: Id, color
                     .spacing([16.0, 6.0])
                     .show(ui, |ui| {
                         for cell in head {
-                            words(ui, cell, BODY, color, true, false);
+                            words(ui, cell, BODY, color, BOLD, false);
                         }
                         ui.end_row();
                         for row in rows {
                             for cell in row {
-                                words(ui, cell, BODY, color, false, false);
+                                words(ui, cell, BODY, color, REGULAR, false);
                             }
                             ui.end_row();
                         }
@@ -361,7 +458,10 @@ mod tests {
                 events,
                 ..Default::default()
             },
-            |ui| answer(ui, text, ui.scope_id().with("answer")),
+            |ui| {
+                super::install_fonts(ui.ctx());
+                answer(ui, text, ui.scope_id().with("answer"));
+            },
         );
         output.textures_delta.clear();
         output
@@ -526,6 +626,110 @@ mod tests {
         assert_eq!(copied.len(), 1, "{copied:?}");
         assert!(copied[0].starts_with("first part"), "{copied:?}");
         assert!(copied[0].ends_with("second part"), "{copied:?}");
+    }
+
+    /// The format of the drawn `words`' section that starts at `at`.
+    fn section(output: &FullOutput, words: &str, at: usize) -> egui::text::TextFormat {
+        let (_, galley) = texts(output)
+            .into_iter()
+            .find(|(_, galley)| galley.text() == words)
+            .unwrap_or_else(|| panic!("{words} is not drawn"));
+        galley
+            .job
+            .sections
+            .iter()
+            .find(|section| section.byte_range.start.0 == at)
+            .map(|section| section.format.clone())
+            .unwrap_or_else(|| panic!("no section at {at}"))
+    }
+
+    #[test]
+    fn strong_words_and_headings_are_set_heavier_in_the_answer_faces() {
+        use egui::FontFamily;
+
+        let ctx = Context::default();
+        let _ = frame(&ctx, ANSWER, Vec::new());
+        // The faces are in from the second frame of a bare context.
+        let output = frame(&ctx, ANSWER, Vec::new());
+        let words = FontFamily::Name(super::WORDS_FAMILY.into());
+        let code = FontFamily::Name(super::CODE_FAMILY.into());
+        let plain = section(&output, "Cut here and split.", 0);
+        let strong = section(&output, "Cut here and split.", "Cut ".len());
+        let inline = section(&output, "Cut here and split.", "Cut here and ".len());
+        let heading = section(&output, "Plan", 0);
+        assert_eq!(plain.font_id.family, words);
+        assert_eq!(plain.coords, super::weight(super::REGULAR));
+        assert_eq!(strong.font_id.family, words);
+        assert_eq!(strong.coords, super::weight(super::BOLD));
+        assert_eq!(strong.color, super::STRONG);
+        assert_eq!(inline.font_id.family, code);
+        assert_eq!(heading.coords, super::weight(super::HEADING));
+        // Both faces really carry the weight axis the coords name.
+        for face in ["Inter", "JetBrains Mono"] {
+            let data = egui::FontData::from_static(super::shipped(face).expect(face));
+            assert!(
+                data.variation_axes().iter().any(|axis| axis.tag == "wght"),
+                "{face}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_the_faces_an_answer_is_set_in_the_window_faces() {
+        let ctx = Context::default();
+        let mut output = ctx.run_ui(RawInput::default(), |ui| {
+            answer(ui, "**bold** `code`", ui.scope_id().with("answer"))
+        });
+        output.textures_delta.clear();
+        let format = section(&output, "bold code", 0);
+        assert_eq!(format.font_id.family, egui::FontFamily::Proportional);
+        assert_eq!(
+            section(&output, "bold code", "bold ".len()).font_id.family,
+            egui::FontFamily::Monospace
+        );
+    }
+
+    /// `text` as the real renderer paints an answer, in a 360 point column.
+    fn rendered(text: &str, height: f32) -> image::RgbaImage {
+        let text = text.to_owned();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(360.0, height))
+            .wgpu()
+            .build_ui(move |ui| {
+                super::install_fonts(ui.ctx());
+                ui.painter()
+                    .rect_filled(ui.max_rect(), 0.0, crate::tokens::PANEL);
+                answer(ui, &text, ui.scope_id().with("answer"));
+            });
+        harness.run_steps(3);
+        harness.render().expect("the renderer draws the answer")
+    }
+
+    /// How much light the words put on the panel.
+    fn ink(image: &image::RgbaImage) -> u64 {
+        let ground = u64::from(crate::tokens::PANEL.g());
+        image
+            .pixels()
+            .map(|pixel| u64::from(pixel.0[1]).saturating_sub(ground))
+            .sum()
+    }
+
+    /// The answer painted by the real renderer. With `CUTLASS_RENDER_DIR`
+    /// set the picture is kept there to look at.
+    #[test]
+    fn strong_words_are_painted_heavier() {
+        let regular = ink(&rendered("Cut here", 40.0));
+        let bold = ink(&rendered("Cut **here**", 40.0));
+        assert!(regular > 0, "nothing was painted");
+        // The weight, not the brighter white, makes most of the difference.
+        assert!(bold * 10 > regular * 12, "{bold} against {regular}");
+        if let Some(dir) = std::env::var_os("CUTLASS_RENDER_DIR") {
+            let dir = std::path::PathBuf::from(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            rendered(ANSWER, 520.0)
+                .save(dir.join("assistant-answer.png"))
+                .unwrap();
+        }
     }
 
     #[test]

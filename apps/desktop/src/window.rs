@@ -96,6 +96,8 @@ fn run_on(studio: bool) -> eframe::Result {
                 let ctx = creation.egui_ctx.clone();
                 cutlass_platform_apple::wake_on_opened_files(move || ctx.request_repaint());
             }
+            // Before the first frame, so no frame is laid out without them.
+            crate::view::install_fonts(&creation.egui_ctx);
             let mut view = ViewState::new();
             view.studio.open = studio;
             Ok(Box::new(DesktopWindow {

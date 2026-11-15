@@ -165,8 +165,54 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
             let end = t.rows.get(sb_row).copied().unwrap_or(start);
             let mut tx = start.txs;
             let mut coef = start.coefs;
-            for b in &t.blocks[start.blocks..end.blocks] {
+            let blocks = &t.blocks[start.blocks..end.blocks];
+            if let Some(b) = blocks.first() {
+                self.prefetch(b);
+            }
+            for (i, b) in blocks.iter().enumerate() {
+                // The next block's rows, while this one is made: rows a
+                // stride apart, more at once than the hardware prefetchers
+                // follow.
+                if let Some(next) = blocks.get(i + 1) {
+                    self.prefetch(next);
+                }
                 self.block(t, b, &mut tx, &mut coef);
+            }
+        }
+    }
+
+    /// Hints the reference rows a large inter block reads (its first
+    /// vector's) into the cache, at 10 and 12 bits. Smaller blocks, and
+    /// 8-bit ones, lost more to the hints than they gained: the hardware
+    /// prefetchers keep up with them.
+    #[inline]
+    fn prefetch(&self, b: &BlockRec) {
+        use cutlass_simd::vp9::prefetch::rect;
+        let (bw, bh) = MI_WH[usize::from(b.bsize)];
+        if !P::HIGH || b.refs[0] == INTRA_FRAME || bw < 4 {
+            return;
+        }
+        let (col, row) = (usize::from(b.col) * 8, usize::from(b.row) * 8);
+        let nref = 1 + usize::from(b.refs[1] > INTRA_FRAME);
+        for r in 0..nref {
+            let slot = usize::from(b.refs[r]).saturating_sub(1).min(2);
+            let Some(rp) = self.c.refs[slot].as_ref() else {
+                continue;
+            };
+            if rp.scale.is_some() {
+                continue;
+            }
+            let mv = b.bmv[0][r];
+            for plane in 0..3 {
+                let (ssx, ssy) = self.plane_ss(plane);
+                // The block's place moved by the vector's whole samples,
+                // with the 8-tap filter's 3 before and 4 after.
+                let x = (col >> ssx) as i32 + ((i32::from(mv.col) * (2 >> ssx)) >> 4) - 3;
+                let y = (row >> ssy) as i32 + ((i32::from(mv.row) * (2 >> ssy)) >> 4) - 3;
+                let (w, h) = ((bw * 8) >> ssx, (bh * 8) >> ssy);
+                let (data, stride) = rp.buf.plane(plane);
+                let (x, y) = (x.max(0) as usize, y.max(0) as usize);
+                rect(data, y * stride + x, stride, w + 7, h + 7);
             }
         }
     }

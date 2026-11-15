@@ -27,7 +27,10 @@
 //!
 //! The one other `unsafe` is [`shared_rows`]: a picture's final rows that
 //! one writer publishes top to bottom while other threads read the rows
-//! published so far, without copying them per reader.
+//! published so far, without copying them per reader. (`vp9::frame` does
+//! the same for VP9's pictures, and views a 16-bit picture's samples as
+//! their bytes; `vp9::prefetch` hints the cache with addresses inside a
+//! slice, which reads nothing and cannot fault.)
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 mod neon;

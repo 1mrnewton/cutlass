@@ -442,8 +442,14 @@ impl TextSource {
                 shadows.push(shadow.clone());
             }
         }
+        // Bent lines have no one box to stand in, and are placed by their ink.
+        let middle = if bends.is_empty() {
+            laid.middle()
+        } else {
+            None
+        };
         let (origin_x, origin_y, width, height, background) =
-            picture_bounds(&mesh, &bends, &style, laid.font_size, &shadows)?;
+            picture_bounds(&mesh, &bends, &style, laid.font_size, &shadows, middle)?;
         let letters = letters_of(&crate::richtext::read(material)?.text, &mesh.glyphs);
         let title = Pattern::of(material, laid.font_size);
         // Each glyph's own bold, lean and underline: its range's, or the
@@ -1272,12 +1278,18 @@ fn covers(range: &TimeRange, time: Micros) -> bool {
 /// The picture's origin and size around the letters and their style, and
 /// the boxes behind the letters in picture pixels: one around them all, or
 /// one around each line's.
+///
+/// A clip is placed by its picture's middle. With `middle`, the point of
+/// the lines a title is placed by, the picture is grown on one side until
+/// that point is its middle, so the title does not move when its ink
+/// does: a letter with a tail, or a shadow cast to one side.
 fn picture_bounds(
     mesh: &TextMesh,
     bends: &[Bend],
     style: &Style,
     font_size: f32,
     shadows: &[Shadow],
+    middle: Option<(f32, f32)>,
 ) -> Result<(f32, f32, u32, u32, Vec<Area>), TextError> {
     let mut min_x = f32::MAX;
     let mut min_y = f32::MAX;
@@ -1335,6 +1347,10 @@ fn picture_bounds(
     if rgba_len(width, height).is_none() {
         return Err(TextError::Limit);
     }
+    // A picture too large once grown keeps its ink's box.
+    let (left, top, width, height) = middle
+        .and_then(|middle| about(middle, (left, top), (width, height)))
+        .unwrap_or((left, top, width, height));
     let background = style.background.as_ref().map_or_else(Vec::new, |back| {
         let fronts = if back.lines {
             line_cells(mesh)
@@ -1355,6 +1371,24 @@ fn picture_bounds(
             .collect()
     });
     Ok((left, top, width, height, background))
+}
+
+/// The box at `origin` of `size` grown until its middle is the whole pixel
+/// nearest `middle`, or `None` when that is past what a picture may be.
+/// Both sides stay even, as [`picture_bounds`] leaves them.
+fn about(middle: (f32, f32), origin: (f32, f32), size: (u32, u32)) -> Option<(f32, f32, u32, u32)> {
+    let side = |middle: f32, low: f32, size: u32| -> Option<(f32, u32)> {
+        let middle = middle.round();
+        #[allow(clippy::cast_precision_loss)]
+        let high = low + size as f32;
+        let reach = (middle - low).max(high - middle).ceil();
+        let grown = edge(2.0 * reach).ok()?;
+        Some((middle - reach, grown))
+    };
+    let (left, width) = side(middle.0, origin.0, size.0)?;
+    let (top, height) = side(middle.1, origin.1, size.1)?;
+    rgba_len(width, height)?;
+    Some((left, top, width, height))
 }
 
 /// The box each line's drawn glyph cells cover, in the order the lines
@@ -1660,6 +1694,29 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_grows_on_one_side_until_the_lines_middle_is_its_own() {
+        // Ink from 20 to 50 down, the lines' middle at 50: thirty more
+        // rows below put it halfway. Across it is halfway already.
+        assert_eq!(
+            super::about((30.0, 50.0), (10.0, 20.0), (40, 30)),
+            Some((10.0, 20.0, 40, 60))
+        );
+        // A middle between pixels takes the nearest whole one, and both
+        // sides stay even.
+        assert_eq!(
+            super::about((30.4, 34.6), (10.0, 20.0), (40, 30)),
+            Some((10.0, 20.0, 40, 30))
+        );
+        assert_eq!(
+            super::about((33.0, 35.0), (10.0, 20.0), (40, 30)),
+            Some((10.0, 20.0, 46, 30))
+        );
+        // Past what a picture may be, the ink's box is kept.
+        assert_eq!(super::about((9_000.0, 35.0), (10.0, 20.0), (40, 30)), None);
+        assert_eq!(super::about((f32::NAN, 35.0), (10.0, 20.0), (40, 30)), None);
+    }
+
+    #[test]
     fn a_sample_is_ready_inside_the_segment_and_a_miss_outside_it() {
         let text = material("A");
         let clip = segment();
@@ -1809,8 +1866,15 @@ mod tests {
         italic.italic_degree = 15;
         let (plain_w, plain_h, plain_rgba) = picture(&plain);
         let (width, height, rgba) = picture(&italic);
+        // The top third of the ink against its bottom third: the picture
+        // also holds the rest of the line, which is clear.
         let lean = |rgba: &[u8], width: u32, height: u32| {
-            ink_middle(rgba, width, 0..height / 3) - ink_middle(rgba, width, height * 2 / 3..height)
+            let inked: Vec<u32> = (0..height)
+                .filter(|y| (0..width).any(|x| rgba[((y * width + x) * 4 + 3) as usize] > 128))
+                .collect();
+            let (top, foot) = (inked[0], inked[inked.len() - 1] + 1);
+            let third = (foot - top) / 3;
+            ink_middle(rgba, width, top..top + third) - ink_middle(rgba, width, foot - third..foot)
         };
         let upright = lean(&plain_rgba, plain_w, plain_h);
         let leaned = lean(&rgba, width, height);
@@ -1909,18 +1973,34 @@ mod tests {
         shaded.shadow_alpha = 1.0;
         shaded.shadow_distance = 20.0;
         shaded.shadow_angle = -90.0;
-        let (plain_w, plain_h, _) = picture(&plain);
+        let (plain_w, plain_h, plain_rgba) = picture(&plain);
         let (width, height, rgba) = picture(&shaded);
-        assert!(height >= plain_h + 12, "{plain_h} {height}");
+        // The picture grows for what the line's own room does not hold.
+        assert!(height > plain_h, "{plain_h} {height}");
         assert!(width.abs_diff(plain_w) <= 2, "{plain_w} {width}");
-        let row = |y: u32| {
-            rgba[(y * width * 4) as usize..((y + 1) * width * 4) as usize]
-                .chunks(4)
-                .any(|pixel| pixel == [0, 0, 255, 255])
+        let rows_of = |rgba: &[u8], width: u32, height: u32, color: [u8; 4]| -> Vec<u32> {
+            (0..height)
+                .filter(|y| {
+                    rgba[(y * width * 4) as usize..((y + 1) * width * 4) as usize]
+                        .chunks(4)
+                        .any(|pixel| pixel == color)
+                })
+                .collect()
         };
-        // The shadow is straight below, so only the lower rows are blue.
-        assert!((height / 2..height).any(row));
-        assert!(!(0..plain_h / 3).any(row));
+        let blue = rows_of(&rgba, width, height, [0, 0, 255, 255]);
+        let white = rows_of(&rgba, width, height, [255, 255, 255, 255]);
+        // The shadow is straight below: it reaches well under the letter
+        // and stays out of the letter's top third.
+        let (foot, top) = (white[white.len() - 1], white[0]);
+        assert!(blue[blue.len() - 1] >= foot + 10, "{blue:?} {foot}");
+        assert!(blue[0] > top + (foot - top) / 3, "{blue:?} {top} {foot}");
+        // The letter does not move for its shadow: it is as far from the
+        // middle of the picture, which is where a clip is placed, as before.
+        let plain_white = rows_of(&plain_rgba, plain_w, plain_h, [255, 255, 255, 255]);
+        assert_eq!(
+            i64::from(top) - i64::from(height / 2),
+            i64::from(plain_white[0]) - i64::from(plain_h / 2)
+        );
         shaded.has_shadow = false;
         assert_eq!(picture(&shaded).0, plain_w);
     }
@@ -1989,7 +2069,12 @@ mod tests {
         assert!(height > plain.1);
         let bar = underlined_columns(width, height, &rgba);
         assert!(!bar.is_empty());
-        assert!(bar.iter().all(|x| *x <= width / 2), "{bar:?} of {width}");
+        // The bar ends where the second letter begins, which is the middle
+        // of the line and so of the picture, to a pixel.
+        assert!(
+            bar.iter().all(|x| *x <= width / 2 + 1),
+            "{bar:?} of {width}"
+        );
 
         // A title that is bold and underlined, with a range that is not.
         let mut title = rich(r#"{"range":[1,2],"bold":false,"underline":false}"#);
@@ -2001,7 +2086,10 @@ mod tests {
         let (width, height, rgba) = picture(&title);
         assert!(inked(&rgba) < inked(&picture(&whole).2));
         let bar = underlined_columns(width, height, &rgba);
-        assert!(bar.iter().all(|x| *x <= width / 2), "{bar:?} of {width}");
+        assert!(
+            bar.iter().all(|x| *x <= width / 2 + 1),
+            "{bar:?} of {width}"
+        );
     }
 
     #[test]
@@ -2304,13 +2392,20 @@ mod tests {
         let (width, height, rgba) = picture(&boxed);
         let (plain_w, plain_h, _) = picture(&material("A"));
         assert!(width > plain_w && height > plain_h);
-        // Half green, premultiplied, near a corner; the letters stay white.
-        let inside = ((width + 1) * 4) as usize;
+        // Half green, premultiplied, one pixel inside the box's corner; the
+        // letters stay white. The picture is taller than the box: it also
+        // holds the rest of the line the letter stands in.
+        let corner = rgba
+            .chunks(4)
+            .position(|pixel| pixel[3] > 0)
+            .expect("a box") as u32;
+        let inside = ((corner / width + 1) * width + corner % width + 1) as usize * 4;
         assert_eq!(&rgba[inside..inside + 4], &[0, 128, 0, 128]);
         assert!(has(&rgba, [255, 255, 255, 255]));
         // Round ends leave the corner clear.
         boxed.background_round_radius = 1.0;
-        assert_eq!(&picture(&boxed).2[inside..inside + 4], &[0, 0, 0, 0]);
+        let square = corner as usize * 4;
+        assert_eq!(&picture(&boxed).2[square..square + 4], &[0, 0, 0, 0]);
         // Style 0 is no background, whatever its color.
         boxed.background_style = 0;
         assert_eq!(picture(&boxed).0, plain_w);

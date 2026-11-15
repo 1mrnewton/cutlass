@@ -16042,7 +16042,14 @@ mod tests {
         assert_eq!((text.typesetting, text.line_max_width), (1, 180.0));
         assert_ne!(digest(&desktop.preview_bytes().unwrap().rgba), across);
         let tall = desktop.stage_box(&title).unwrap();
-        assert!(wide.width > wide.height && tall.height > tall.width);
+        // The column is taller than it is wide, and taller and narrower
+        // than the line was. The line's box is as tall as a line of text,
+        // so two short letters across are not wider than that.
+        assert!(tall.height > tall.width, "{tall:?}");
+        assert!(
+            tall.height > wide.height && tall.width < wide.width,
+            "{wide:?} {tall:?}"
+        );
         for alignment in [4, 5] {
             desktop.set_text_align(alignment).unwrap();
             assert_eq!(desktop.inspection().unwrap().text_align, alignment);

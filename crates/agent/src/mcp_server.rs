@@ -12,8 +12,13 @@ use crate::r#loop::ToolSink;
 use crate::model::ToolCall;
 use crate::tools::{TOOL_NAMES, tool_definitions};
 
-/// The protocol version this server answers with when the client names none.
+/// The protocol version this server answers with when the client names
+/// none, or one it does not speak.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+
+/// The protocol versions this server speaks; what it does is the same in
+/// each.
+const SPOKEN_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// Answers MCP requests by running tools on `sink`.
 #[derive(Debug)]
@@ -44,7 +49,9 @@ impl<S: ToolSink> McpServer<S> {
         &mut self.sink
     }
 
-    /// One message in, its answer out. A notification has no answer.
+    /// One message in, its answer out. A notification has no answer. A
+    /// batch, which the older protocol versions allow, is answered as one:
+    /// the answers of its requests in a list.
     pub fn handle(&mut self, line: &str) -> Option<String> {
         let message: Value = match serde_json::from_str(line) {
             Ok(message) => message,
@@ -56,11 +63,30 @@ impl<S: ToolSink> McpServer<S> {
                 ));
             }
         };
+        match message {
+            Value::Array(batch) if batch.is_empty() => {
+                Some(failure(&Value::Null, -32600, "an empty batch"))
+            }
+            Value::Array(batch) => {
+                let answers: Vec<Value> = batch
+                    .iter()
+                    .filter_map(|message| self.handle_one(message))
+                    .collect();
+                (!answers.is_empty()).then(|| Value::Array(answers).to_string())
+            }
+            message => self.handle_one(&message).map(|answer| answer.to_string()),
+        }
+    }
+
+    fn handle_one(&mut self, message: &Value) -> Option<Value> {
         let id = message.get("id").cloned();
         let Some(method) = message.get("method").and_then(Value::as_str) else {
             // A response from the client, or nothing we know.
-            return id.map(|id| failure(&id, -32600, "invalid request"));
+            return id.map(|id| failure_value(&id, -32600, "invalid request"));
         };
+        // A message with no id is a notification: nothing runs for one and
+        // nothing is answered, so a tool is never run unseen.
+        let id = id?;
         let params = message.get("params").cloned().unwrap_or(Value::Null);
         let result = match method {
             "initialize" => Ok(self.initialize(&params)),
@@ -70,17 +96,19 @@ impl<S: ToolSink> McpServer<S> {
             other if other.starts_with("notifications/") => return None,
             other => Err((-32601, format!("method not found: {other}"))),
         };
-        let id = id?;
         Some(match result {
-            Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string(),
-            Err((code, message)) => failure(&id, code, &message),
+            Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+            Err((code, message)) => failure_value(&id, code, &message),
         })
     }
 
     fn initialize(&self, params: &Value) -> Value {
+        // The client's version when this server speaks it, else its own,
+        // for the client to take or leave.
         let version = params
             .get("protocolVersion")
             .and_then(Value::as_str)
+            .filter(|asked| SPOKEN_VERSIONS.contains(asked))
             .unwrap_or(MCP_PROTOCOL_VERSION);
         json!({
             "protocolVersion": version,
@@ -96,8 +124,12 @@ impl<S: ToolSink> McpServer<S> {
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| (-32602, "tools/call needs a name".to_owned()))?;
-        let Some(tool) = registry_name(name) else {
-            return Err((-32602, format!("unknown tool {name}")));
+        // The helper is the in-app loop's own; a client has no such tool.
+        let Some(tool) = registry_name(name).filter(|tool| TOOL_NAMES.contains(tool)) else {
+            return Err((
+                -32602,
+                format!("unknown tool {name}; tools/list names the tools"),
+            ));
         };
         let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
         let arguments = if takes_object(tool) {
@@ -122,12 +154,15 @@ impl<S: ToolSink> McpServer<S> {
 }
 
 fn failure(id: &Value, code: i64, message: &str) -> String {
+    failure_value(id, code, message).to_string()
+}
+
+fn failure_value(id: &Value, code: i64, message: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
         "error": { "code": code, "message": message },
     })
-    .to_string()
 }
 
 /// The registry name for an MCP tool name.
@@ -405,6 +440,50 @@ mod tests {
         assert_eq!(tool["error"]["code"], -32602);
         let parse: Value = serde_json::from_str(&server.handle("{").unwrap()).unwrap();
         assert_eq!(parse["error"]["code"], -32700);
+        // The in-app helper is not a tool a client has.
+        let helper = ask(
+            &mut server,
+            &json!({"jsonrpc":"2.0","id":8,"method":"tools/call",
+                "params":{"name":"agent_delegate","arguments":{"input":"look"}}}),
+        );
+        assert_eq!(helper["error"]["code"], -32602);
         assert!(server.sink().calls.is_empty());
+    }
+
+    #[test]
+    fn a_version_it_does_not_speak_a_batch_and_a_call_with_no_id() {
+        let mut server = McpServer::new(Echo::default(), "cutlass", "0.1.0");
+        let old = ask(
+            &mut server,
+            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}),
+        );
+        assert_eq!(
+            old["result"]["protocolVersion"],
+            super::MCP_PROTOCOL_VERSION
+        );
+        // A batch is answered as one list, without its notifications.
+        let batch = json!([
+            {"jsonrpc":"2.0","id":2,"method":"ping"},
+            {"jsonrpc":"2.0","method":"notifications/initialized"},
+            {"jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{"name":"draft_query","arguments":{"input":"project"}}},
+        ]);
+        let answers: Value =
+            serde_json::from_str(&server.handle(&batch.to_string()).unwrap()).unwrap();
+        let answers = answers.as_array().unwrap();
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[0]["id"], 2);
+        assert_eq!(
+            answers[1]["result"]["content"][0]["text"],
+            "ran draft.query"
+        );
+        let empty: Value = serde_json::from_str(&server.handle("[]").unwrap()).unwrap();
+        assert_eq!(empty["error"]["code"], -32600);
+        // A tool call sent with no id is a notification: it does not run.
+        let ran = server.sink().calls.len();
+        let unseen = json!({"jsonrpc":"2.0","method":"tools/call",
+            "params":{"name":"draft_apply","arguments":{"expected_revision":0,"requests":[]}}});
+        assert!(server.handle(&unseen.to_string()).is_none());
+        assert_eq!(server.sink().calls.len(), ran);
     }
 }

@@ -29,7 +29,7 @@ fn matches_the_scalar_twin() {
             })
             .collect();
         let w = [4, 8, 16, 32, 64][case % 5];
-        let h = [4, 8, 16, 32, 64, 2, 1][(rnd() % 7) as usize];
+        let h = [4, 8, 16, 32, 64, 2, 1, 3, 5][(rnd() % 9) as usize];
         let pick = |r: u32| (!r.is_multiple_of(5)).then(|| Filter::new(FILTERS[(r % 4) as usize]));
         let fx = pick(rnd());
         let fy = pick(rnd());

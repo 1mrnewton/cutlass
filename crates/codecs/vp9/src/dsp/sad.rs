@@ -199,8 +199,10 @@ pub fn sad_bilinear(
     })
 }
 
-/// The 10- and 12-bit forms of the functions above, on `u16` samples:
-/// plain loops over fixed-width rows, which the compiler vectorizes.
+/// The 10- and 12-bit forms of the functions above, on `u16` samples of
+/// at most 12 bits: the vector kernels of `cutlass_simd::vp9::sad16`
+/// where they take the block, else plain loops over fixed-width rows,
+/// which the compiler vectorizes.
 pub mod high {
     use cutlass_simd::vp9::wide;
 
@@ -228,6 +230,9 @@ pub mod high {
     /// [`super::sad`] of `u16` samples.
     #[inline]
     pub fn sad(a: &[u16], sa: usize, b: &[u16], sb: usize, w: usize, h: usize) -> u32 {
+        if let Some(v) = cutlass_simd::vp9::sad16::sad(a, sa, b, sb, w, h) {
+            return v;
+        }
         wide(|| match w {
             64 => sad_w::<64>(a, sa, b, sb, h),
             32 => sad_w::<32>(a, sa, b, sb, h),
@@ -248,6 +253,9 @@ pub mod high {
     /// [`super::sad4`] of `u16` samples.
     #[inline]
     pub fn sad4(a: &[u16], sa: usize, b: [&[u16]; 4], sb: usize, w: usize, h: usize) -> [u32; 4] {
+        if let Some(v) = cutlass_simd::vp9::sad16::sad4(a, sa, b, sb, w, h) {
+            return v;
+        }
         b.map(|bk| sad(a, sa, bk, sb, w, h))
     }
 
@@ -274,6 +282,9 @@ pub mod high {
     /// [`super::sse`] of `u16` samples.
     #[inline]
     pub fn sse(a: &[u16], sa: usize, b: &[u16], sb: usize, w: usize, h: usize) -> u64 {
+        if let Some(v) = cutlass_simd::vp9::sad16::sse(a, sa, b, sb, w, h) {
+            return v;
+        }
         wide(|| match w {
             64 => sse_w::<64>(a, sa, b, sb, h),
             32 => sse_w::<32>(a, sa, b, sb, h),

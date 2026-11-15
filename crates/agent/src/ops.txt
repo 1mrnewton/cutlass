@@ -296,8 +296,8 @@ remove_keyframe: Remove the pose keys at offset microseconds from the clip's sta
 set_keyframe_graph: Ease the span ending at the key at offset (microseconds from the clip's start; there must be an earlier key) along graph, a curve name such as Ease In, Ease Out, Ease, Quad Ease, Cubic Ease, Bounce 1, or null for straight; properties (optional) limits it to those keys, else every pose key.
 {"op":"set_keyframe_graph","segment_id":"a","offset":1000000,"graph":"Ease Out"}
 
-set_animation: Give a clip an in, out or loop animation (kind in, out, loop, or caption for a text clip) by resource id such as cutlass-anim-in-pop, cutlass-anim-out-slide-down or cutlass-anim-loop-float, lasting duration microseconds (held to at least 100000 and what the clip has room for), or null to clear that side.
-{"op":"set_animation","segment_id":"title-1","kind":"in","animation":"cutlass-anim-in-pop","duration":500000}
+set_animation: Give a clip an in, out or loop animation (kind in, out, loop, or caption for a text clip) by resource id such as cutlass-anim-in-zoom-in, cutlass-anim-out-slide-down or cutlass-anim-loop-float, lasting duration microseconds (held to at least 100000 and what the clip has room for), or null to clear that side; catalog.search "animation" lists the ids as animation-in, animation-out or animation-loop, and kind must match the one listed; an id listed (text only), such as cutlass-anim-in-pop or cutlass-anim-in-typewriter, moves letters and is refused on a shape, sticker or video clip.
+{"op":"set_animation","segment_id":"title-1","kind":"in","animation":"cutlass-anim-in-zoom-in","duration":500000}
 
 key_pose: Change a clip's pose at offset microseconds from its start; x and y as in set_position, scale as in set_scale, rotation in degrees counter-clockwise; parts that already have keys are keyed, others are stored, unchanged parts are left alone.
 {"op":"key_pose","segment_id":"a","offset":1000000,"x":0.2,"y":0.0,"scale":1.2,"rotation":0.0}

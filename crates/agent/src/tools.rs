@@ -975,7 +975,10 @@ fn description(name: &str) -> &'static str {
         "catalog.search" => {
             "Search the bundled effects, filters, transitions and animations by a word or \
              two; an empty search lists them all. Each answer is \"<kind> <id> <name>\": the \
-             id is what add_effect, add_filter, set_transition and set_animation take."
+             id is what add_effect, add_filter, set_transition and set_animation take. An \
+             animation's kind is its side: animation-in goes with set_animation kind in, \
+             animation-out with out, animation-loop with loop or caption. One ending \
+             (text only) moves letters and is refused on a shape, sticker or video clip."
         }
         "package.ensure" => {
             "Check that an id from catalog.search (the id alone, such as recipe/shake) is \

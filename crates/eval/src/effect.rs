@@ -28,6 +28,12 @@ use crate::canvas::project_canvas;
 use crate::gpu::{GpuLayer, GpuSource, SelectionCut};
 use crate::media::clip_frame;
 
+/// Where a layer keyed `(render_index, track_index, segment_index)` is
+/// drawn: the order [`cutlass_model::paint_order`] gives, bottom first.
+pub(crate) fn drawn_at(key: (i32, usize, usize)) -> cutlass_model::PaintOrder {
+    cutlass_model::paint_order(key.0, key.1, key.2)
+}
+
 pub(crate) struct StackLayer<'a> {
     pub(crate) render_index: i32,
     pub(crate) track_index: usize,
@@ -130,8 +136,8 @@ pub(crate) fn present<D: Device>(
             (Some(_), None) => true,
             (None, Some(_)) => false,
             (Some(layer), Some(mark)) => {
-                (layer.render_index, layer.track_index, layer.segment_index)
-                    <= (mark.render_index, mark.track_index, mark.segment_index)
+                drawn_at((layer.render_index, layer.track_index, layer.segment_index))
+                    <= drawn_at((mark.render_index, mark.track_index, mark.segment_index))
             }
         };
         if take_visual {
@@ -326,7 +332,7 @@ fn global_marks<'a>(draft: &'a Draft, time: Micros, stack: &[StackLayer<'_>]) ->
         })
         .chain(adjustment_layers(draft, time, stack))
         .collect();
-    marks.sort_by_key(|mark| (mark.render_index, mark.track_index, mark.segment_index));
+    marks.sort_by_key(|mark| drawn_at((mark.render_index, mark.track_index, mark.segment_index)));
     marks
 }
 
@@ -540,7 +546,7 @@ pub(crate) fn recipe_marks(
             })
         })
         .collect();
-    marks.sort_by_key(|mark| mark.key);
+    marks.sort_by_key(|mark| drawn_at(mark.key));
     marks
 }
 

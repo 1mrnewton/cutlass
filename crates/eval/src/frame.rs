@@ -148,7 +148,8 @@ fn canvas_extent(draft: &Draft) -> Option<Extent> {
 /// The composited frame at `time`. The snapshot's draft is not changed.
 ///
 /// Solids, text, nested drafts, video, and effect packages share one paint
-/// order: `render_index`, then track, then segment. A video the factory
+/// order: `render_index`, then row with the top row on top, then segment.
+/// A video the factory
 /// cannot open is skipped. A text segment whose face the snapshot does not
 /// supply is skipped. An effect whose package the snapshot does not supply
 /// is skipped. A transition package fades the pictures that meet at its cut.
@@ -255,7 +256,7 @@ fn gpu_layers(
         .map(|mark| (mark.key, effect(mark)))
         .chain(colours)
         .collect();
-    marks.sort_by_key(|(key, _)| *key);
+    marks.sort_by_key(|(key, _)| crate::effect::drawn_at(*key));
     let mut effects = marks.into_iter().peekable();
     if let Some(pixel) = draft
         .canvas_config
@@ -267,7 +268,9 @@ fn gpu_layers(
         out.push(GpuLayer::fill(pixel));
     }
     for layer in layers {
-        while let Some((_, mark)) = effects.next_if(|(key, _)| *key < layer.key) {
+        while let Some((_, mark)) = effects
+            .next_if(|(key, _)| crate::effect::drawn_at(*key) < crate::effect::drawn_at(layer.key))
+        {
             out.push(mark);
         }
         let gpu = match &layer.paint {
@@ -634,7 +637,7 @@ fn ordered<'a>(
             paint: Paint::Nest(nested.placed),
         });
     }
-    layers.sort_by_key(|layer| layer.key);
+    layers.sort_by_key(|layer| crate::effect::drawn_at(layer.key));
     layers
 }
 
@@ -652,7 +655,7 @@ fn add_lotties(layers: &mut Vec<Ordered<'_>>, lotties: Vec<LottieLayer>) {
             paint: Paint::Lottie(lottie.placed),
         });
     }
-    layers.sort_by_key(|layer| layer.key);
+    layers.sort_by_key(|layer| crate::effect::drawn_at(layer.key));
 }
 
 /// Keeps `frame` for export. A late arrival is still the picture.
@@ -1467,6 +1470,47 @@ mod tests {
         let before = draft.clone();
         assert_eq!(pixels(&draft, 0), vec![255, 0, 0, 255]);
         assert_eq!(draft, before);
+    }
+
+    /// One pixel: a blue clip on main and a red clip on `over`, a row put
+    /// at `over_at` in the track list, both on layer `render_index`.
+    fn main_and_overlay(over_at: usize, render_index: i32) -> Draft {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 1;
+        draft.canvas_config.height = 1;
+        for (id, packed) in [("blue", "0xFF0000FF"), ("red", "0xFFFF0000")] {
+            draft.materials.material_colors.push(MaterialColorConfig {
+                id: id.into(),
+                is_color_clip: true,
+                solid_color: packed.to_owned(),
+                ..MaterialColorConfig::default()
+            });
+        }
+        let mut main = Segment::new("main", "blue", TimeRange::new(0, 1_000));
+        main.render_index = render_index;
+        draft.tracks[0].segments.push(main);
+        let mut row = cutlass_model::Track::main("over");
+        row.flag = cutlass_model::TrackFlag::SubVideo;
+        let mut over = Segment::new("over", "red", TimeRange::new(0, 1_000));
+        over.render_index = render_index;
+        row.segments.push(over);
+        draft.tracks.insert(over_at, row);
+        draft
+    }
+
+    #[test]
+    fn on_one_layer_the_upper_row_is_drawn_over_the_row_below() {
+        const RED: [u8; 4] = [255, 0, 0, 255];
+        const BLUE: [u8; 4] = [0, 0, 255, 255];
+        // The overlay row above main, as the timeline and an insert put it.
+        assert_eq!(pixels(&main_and_overlay(0, 0), 0), RED);
+        assert_eq!(pixels(&main_and_overlay(0, 14_000), 0), RED);
+        // The same row moved under main is covered by it.
+        assert_eq!(pixels(&main_and_overlay(1, 0), 0), BLUE);
+        // A higher layer still wins whatever its row.
+        let mut draft = main_and_overlay(1, 0);
+        draft.tracks[1].segments[0].render_index = 1;
+        assert_eq!(pixels(&draft, 0), RED);
     }
 
     #[test]

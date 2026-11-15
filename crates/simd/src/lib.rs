@@ -14,8 +14,9 @@
 //!
 //! One exception, approved for speed: the VP9 loop filter
 //! (`vp9::lf::avx2`, and `vp9::lf16::avx2` for 10 and 12 bits),
-//! interpolation (`vp9::mc::avx2`, `vp9::mc16::avx2`) and 10- and 12-bit
-//! block distortion (`vp9::sad16::avx2`) load and store their rows with
+//! interpolation (`vp9::mc::avx2`, `vp9::mc16::avx2`) and block
+//! distortion (`vp9::sad8::avx2`, and `vp9::sad16::avx2` for 10 and 12
+//! bits) load and store their rows with
 //! vector intrinsics on a region whose bounds they check once per edge or
 //! block; each such load or store
 //! states the check that proves it in bounds, and the kernel's scalar twin

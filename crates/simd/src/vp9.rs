@@ -7,7 +7,8 @@
 //! - [`lf`]: the loop filter, sixteen lines of an edge at a time; [`lf16`]
 //!   the same for 10 and 12 bits.
 //! - [`quant`]: the encoder's dead-zone quantizer and its sums.
-//! - [`sad16`]: the encoder's SADs and SSE for 10 and 12 bits.
+//! - [`sad8`]: the encoder's SADs and SSE for 8 bits; [`sad16`] the
+//!   same for 10 and 12 bits.
 //! - [`prefetch`]: cache hints for the reference rows a block will read.
 //!
 //! Each entry returns `false`, having written nothing, when it does not
@@ -24,6 +25,7 @@ mod pack;
 pub mod prefetch;
 pub mod quant;
 pub mod sad16;
+pub mod sad8;
 
 /// Whether the CPU has AVX2. Checked once.
 #[must_use]

@@ -329,16 +329,24 @@ pub(super) fn filter(
                 let mut s: [__m256i; 8] =
                     core::array::from_fn(|k| l256(buf, at + k * stride - 4 * stride));
                 filt::<8>(&mut s, wd, thr, bd);
-                for (k, v) in s.iter().enumerate().take(7).skip(1) {
-                    s256(buf, at + k * stride - 4 * stride, *v);
+                // Rows 1 to 6, by index: the iterator adapters stayed
+                // out of line.
+                let mut k = 1;
+                while k < 7 {
+                    s256(buf, at + k * stride - 4 * stride, s[k]);
+                    k += 1;
                 }
             }
             (false, true) => {
                 let mut s: [__m256i; 16] =
                     core::array::from_fn(|k| l256(buf, at + k * stride - 8 * stride));
                 filt::<16>(&mut s, wd, thr, bd);
-                for (k, v) in s.iter().enumerate().take(15).skip(1) {
-                    s256(buf, at + k * stride - 8 * stride, *v);
+                // Rows 1 to 14, by index: the iterator adapters stayed
+                // out of line.
+                let mut k = 1;
+                while k < 15 {
+                    s256(buf, at + k * stride - 8 * stride, s[k]);
+                    k += 1;
                 }
             }
             (true, false) => {

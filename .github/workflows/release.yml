@@ -12,9 +12,16 @@ name: release
 # The packages are built as in ci.yml, with `--features public-release`,
 # through scripts/pgo.py: the H.264 codec is optimised from a profile of its
 # own training run, which needs the toolchain's llvm-tools.
-# They are signed ad hoc on macOS and unsigned on Windows until the
-# certificates are set up (see scripts/macos_bundle.py and
-# scripts/windows_installer.py for the variables).
+#
+# macOS is signed with the Developer ID certificate and notarized when the
+# repository has these secrets, and signed ad hoc without them:
+#   MACOS_CERTIFICATE_P12       the certificate and its key, base64
+#   MACOS_CERTIFICATE_PASSWORD  the .p12's password
+#   APPSTORE_API_KEY_P8         an App Store Connect API key (.p8), base64
+#   APPSTORE_API_KEY_ID         that key's id
+#   APPSTORE_API_ISSUER_ID      the issuer id on the same page
+# Windows stays unsigned until a signing service is set up (see
+# docs/planned/release-ci.md and scripts/windows_installer.py).
 
 on:
   push:
@@ -85,8 +92,69 @@ jobs:
         run: python3 scripts/pgo_profile.py "$RUNNER_TEMP/av1.profdata"
       - name: Build
         run: PGO_MERGE="$RUNNER_TEMP/av1.profdata" python3 scripts/pgo.py -p cutlass --features public-release
+      # Signing comes after the build, so no build script runs while the
+      # certificate is in a keychain. Each secret is given only to the step
+      # that needs it. Without the certificate the bundle is signed ad hoc;
+      # without the API key it is signed but not notarized.
+      - name: Which signing secrets are set
+        id: signing
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          API_KEY: ${{ secrets.APPSTORE_API_KEY_P8 }}
+        run: |
+          echo "sign=$([ -n "$CERTIFICATE" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+          echo "notarize=$([ -n "$CERTIFICATE" ] && [ -n "$API_KEY" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+      - name: Developer ID certificate in a keychain of this run
+        if: steps.signing.outputs.sign == 'yes'
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password=$(openssl rand -hex 24)
+          echo "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" \
+            -f pkcs12 -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          # The certificate's SHA-1 names it exactly, whatever else the
+          # runner's keychains hold.
+          identity=$(security find-identity -v -p codesigning "$keychain" \
+            | awk '/"Developer ID Application: / { print $2; exit }')
+          if [ -z "$identity" ]; then
+            echo "the certificate holds no Developer ID Application identity" >&2
+            exit 1
+          fi
+          echo "CODESIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+      - name: App Store Connect API key for notarization
+        if: steps.signing.outputs.notarize == 'yes'
+        env:
+          API_KEY: ${{ secrets.APPSTORE_API_KEY_P8 }}
+        run: |
+          echo "$API_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          echo "NOTARY_KEY=$RUNNER_TEMP/notary.p8" >> "$GITHUB_ENV"
       - name: Bundle
+        env:
+          NOTARY_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.APPSTORE_API_ISSUER_ID }}
         run: python3 scripts/macos_bundle.py target/release/cutlass dist
+      - name: Remove the signing keychain and key
+        if: always()
+        run: |
+          if [ -n "${SIGNING_KEYCHAIN:-}" ]; then security delete-keychain "$SIGNING_KEYCHAIN"; fi
+          rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/certificate.p12"
+      - name: Say how the DMG is signed
+        run: |
+          case "${{ steps.signing.outputs.sign }}/${{ steps.signing.outputs.notarize }}" in
+            yes/yes) echo "macOS: Developer ID signed, notarized and stapled." ;;
+            yes/no) echo "::warning::macOS: Developer ID signed but not notarized (no APPSTORE_API_KEY_P8); Gatekeeper will refuse it." ;;
+            *) echo "::warning::macOS: signed ad hoc (no MACOS_CERTIFICATE_P12); Gatekeeper will refuse it." ;;
+          esac
       - name: Smoke test the bundle
         run: python3 scripts/smoke.py dist/Cutlass.app/Contents/MacOS/cutlass
       - uses: actions/upload-artifact@v4

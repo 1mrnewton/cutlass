@@ -154,8 +154,10 @@ fn push(
     }
     wide.clear();
     wide.extend(
-        buf.chunks_exact(2)
-            .map(|b| u16::from_le_bytes([b[0], b[1]])),
+        buf.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&b| u16::from_le_bytes(b)),
     );
     let (y, rest) = wide.split_at(w * h);
     let (u, v) = rest.split_at(cw * ch);

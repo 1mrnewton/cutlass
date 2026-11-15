@@ -838,8 +838,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let c = (mi_col - self.col0) / 8;
         let need = (c + 2).min(self.sb_cols());
         let ex = l.wait(mi_row / 8 - 1, need);
-        for k in c..need {
-            let e = &ex.edges[k];
+        for (k, e) in ex.edges.iter().enumerate().take(need).skip(c) {
             let a = k * 8;
             let cw = 8.min(self.f.width - a);
             self.f.above[a..a + 8].copy_from_slice(&e.above);

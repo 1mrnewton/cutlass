@@ -3,6 +3,7 @@
 //! The shape is `cutlass_effects`'s WGSL `mask_coverage`, the arithmetic the
 //! CPU path uses for an adjustment layer's mask.
 
+use crate::pool::Bind;
 use cutlass_effects::{CanvasMask, MASK_WGSL};
 
 use crate::CANVAS_FORMAT;
@@ -40,10 +41,11 @@ const PARAMS: u64 = 64;
 pub(crate) struct Keep {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
+    pool: std::sync::Arc<crate::pool::Pool>,
 }
 
 impl Keep {
-    pub(crate) fn new(device: &wgpu::Device) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, pool: std::sync::Arc<crate::pool::Pool>) -> Self {
         let source = format!("{SHADER}\n{MASK_WGSL}");
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render keep"),
@@ -106,7 +108,11 @@ impl Keep {
             multiview_mask: None,
             cache: None,
         });
-        Self { pipeline, layout }
+        Self {
+            pipeline,
+            layout,
+            pool,
+        }
     }
 
     /// Write `after` where `mask` keeps it and `before` elsewhere into `to`.
@@ -126,31 +132,19 @@ impl Keep {
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect();
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cutlass-render keep params"),
-            size: PARAMS,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buffer, 0, &bytes);
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cutlass-render keep"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(before),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(after),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buffer.as_entire_binding(),
-                },
+        let buffer = self
+            .pool
+            .uniform(device, queue, "cutlass-render keep params", PARAMS, &bytes);
+        let group = self.pool.group(
+            device,
+            "cutlass-render keep",
+            &self.layout,
+            &[
+                (0, Bind::View(before)),
+                (1, Bind::View(after)),
+                (2, Bind::Buffer(&buffer)),
             ],
-        });
+        );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("cutlass-render keep"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {

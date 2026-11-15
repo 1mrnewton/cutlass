@@ -29,6 +29,7 @@ mod keep;
 mod layer;
 mod mix;
 mod package;
+mod pool;
 mod relight;
 mod target;
 mod transition;
@@ -98,6 +99,7 @@ pub struct Renderer {
     transition: transition::Transition,
     vector: vector::Vector,
     import: Option<SurfaceImport>,
+    pool: std::sync::Arc<pool::Pool>,
 }
 
 /// Imports a platform surface on `device` as two textures the layer shader
@@ -112,18 +114,19 @@ impl Renderer {
     /// A renderer on a device someone else opened, such as eframe's.
     #[must_use]
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        let pool = std::sync::Arc::new(pool::Pool::new());
         let layers = layer::Pipelines::new(&device);
-        let blurs = blur::Blurs::new(&device);
-        let effects = effect::Effects::new(&device);
-        let colours = colour::Colours::new(&device);
-        let cuts = cut::Cuts::new(&device);
-        let relights = relight::Relights::new(&device);
-        let packages = package::Packages::new(&device);
-        let keep = keep::Keep::new(&device);
-        let cross = cross::Cross::new(&device);
-        let mix = mix::Mix::new(&device);
-        let transition = transition::Transition::new(&device);
-        let vector = vector::Vector::new(&device);
+        let blurs = blur::Blurs::new(&device, std::sync::Arc::clone(&pool));
+        let effects = effect::Effects::new(&device, std::sync::Arc::clone(&pool));
+        let colours = colour::Colours::new(&device, std::sync::Arc::clone(&pool));
+        let cuts = cut::Cuts::new(&device, std::sync::Arc::clone(&pool));
+        let relights = relight::Relights::new(&device, std::sync::Arc::clone(&pool));
+        let packages = package::Packages::new(&device, std::sync::Arc::clone(&pool));
+        let keep = keep::Keep::new(&device, std::sync::Arc::clone(&pool));
+        let cross = cross::Cross::new(&device, std::sync::Arc::clone(&pool));
+        let mix = mix::Mix::new(&device, std::sync::Arc::clone(&pool));
+        let transition = transition::Transition::new(&device, std::sync::Arc::clone(&pool));
+        let vector = vector::Vector::new(&device, std::sync::Arc::clone(&pool));
         Self {
             device,
             queue,
@@ -140,6 +143,7 @@ impl Renderer {
             transition,
             vector,
             import: None,
+            pool,
         }
     }
 
@@ -206,6 +210,7 @@ impl Renderer {
         let size = canvas.size();
         self.draw_into(&mut encoder, canvas.view(), size, layers, size)?;
         self.queue.submit([encoder.finish()]);
+        self.pool.recycle();
         Ok(())
     }
 
@@ -225,6 +230,7 @@ impl Renderer {
             });
         self.draw_into(&mut encoder, canvas.view(), canvas.size(), layers, full)?;
         self.queue.submit([encoder.finish()]);
+        self.pool.recycle();
         Ok(())
     }
 
@@ -250,17 +256,30 @@ impl Renderer {
         for layer in layers {
             match layer {
                 Layer::Rgba(rgba, placement) => {
-                    let uploaded = layer::Pipelines::upload_rgba(device, queue, rgba)?;
-                    bound.push(self.layers.bind(device, queue, &uploaded, fit(*placement)));
+                    let uploaded = layer::Pipelines::upload_rgba(&self.pool, device, queue, rgba)?;
+                    bound.push(self.layers.bind(
+                        &self.pool,
+                        device,
+                        queue,
+                        &uploaded,
+                        fit(*placement),
+                    ));
                 }
                 Layer::Yuv(planes, placement) => {
                     let uploaded = layer::Pipelines::upload_planes(
+                        &self.pool,
                         device,
                         queue,
                         planes,
                         self.import.as_ref(),
                     )?;
-                    bound.push(self.layers.bind(device, queue, &uploaded, fit(*placement)));
+                    bound.push(self.layers.bind(
+                        &self.pool,
+                        device,
+                        queue,
+                        &uploaded,
+                        fit(*placement),
+                    ));
                 }
                 Layer::YuvOverBlur {
                     planes,
@@ -269,6 +288,7 @@ impl Renderer {
                     radius,
                 } => {
                     let uploaded = layer::Pipelines::upload_planes(
+                        &self.pool,
                         device,
                         queue,
                         planes,
@@ -278,12 +298,19 @@ impl Renderer {
                     let radius = scaled_radius(*radius, scale.0.min(scale.1));
                     let backdrop = self.blurred(encoder, &uploaded, fit(*cover), radius, size);
                     bound.push(self.layers.bind(
+                        &self.pool,
                         device,
                         queue,
                         &backdrop,
                         Placement::canvas(size.0, size.1),
                     ));
-                    bound.push(self.layers.bind(device, queue, &uploaded, fit(*placement)));
+                    bound.push(self.layers.bind(
+                        &self.pool,
+                        device,
+                        queue,
+                        &uploaded,
+                        fit(*placement),
+                    ));
                 }
                 Layer::Nested {
                     layers,
@@ -298,7 +325,7 @@ impl Renderer {
                         });
                     }
                     // A compound's own canvas is drawn whole, then shrunk.
-                    let view = blur::scratch(device, *inner);
+                    let view = blur::scratch(&self.pool, device, *inner);
                     self.draw_into(encoder, &view, *inner, layers, *inner)?;
                     let uploaded = layer::Uploaded {
                         views: [view.clone(), view.clone(), view],
@@ -307,7 +334,13 @@ impl Renderer {
                         tone: cutlass_gpu::YuvTone::NONE,
                         interleaved: false,
                     };
-                    bound.push(self.layers.bind(device, queue, &uploaded, fit(*placement)));
+                    bound.push(self.layers.bind(
+                        &self.pool,
+                        device,
+                        queue,
+                        &uploaded,
+                        fit(*placement),
+                    ));
                 }
                 Layer::Blend {
                     mode,
@@ -315,11 +348,11 @@ impl Renderer {
                 } => {
                     // The clip alone, what is below it, then the two mixed;
                     // the mix is the bottom layer from here on.
-                    let top = blur::scratch(device, size);
+                    let top = blur::scratch(&self.pool, device, size);
                     self.draw_into(encoder, &top, size, inner, full)?;
-                    let below = blur::scratch(device, size);
+                    let below = blur::scratch(&self.pool, device, size);
                     Self::paint(&self.layers, encoder, &below, &bound);
-                    let mixed = blur::scratch(device, size);
+                    let mixed = blur::scratch(&self.pool, device, size);
                     self.mix
                         .run(device, queue, encoder, &top, &below, &mixed, *mode);
                     let uploaded = layer::Uploaded {
@@ -331,6 +364,7 @@ impl Renderer {
                     };
                     bound.clear();
                     bound.push(self.layers.bind(
+                        &self.pool,
                         device,
                         queue,
                         &uploaded,
@@ -349,7 +383,13 @@ impl Renderer {
                     if let Some(recipe) = kind.recipe() {
                         let uploaded =
                             self.crossed(encoder, &outgoing, &incoming, &recipe.at(*t), size);
-                        bound.push(self.layers.bind(device, queue, &uploaded, fit(canvas)));
+                        bound.push(self.layers.bind(
+                            &self.pool,
+                            device,
+                            queue,
+                            &uploaded,
+                            fit(canvas),
+                        ));
                         continue;
                     }
                     let radius = cutlass_effects::transition_blur_radius(size.0, size.1, *t);
@@ -357,7 +397,7 @@ impl Renderer {
                         outgoing = self.blurred(encoder, &outgoing, canvas, radius, size);
                         incoming = self.blurred(encoder, &incoming, canvas, radius, size);
                     }
-                    let mixed = blur::scratch(device, size);
+                    let mixed = blur::scratch(&self.pool, device, size);
                     self.transition.run(
                         device,
                         queue,
@@ -374,7 +414,10 @@ impl Renderer {
                         tone: cutlass_gpu::YuvTone::NONE,
                         interleaved: false,
                     };
-                    bound.push(self.layers.bind(device, queue, &uploaded, fit(canvas)));
+                    bound.push(
+                        self.layers
+                            .bind(&self.pool, device, queue, &uploaded, fit(canvas)),
+                    );
                 }
                 Layer::Crossing {
                     crossing,
@@ -384,7 +427,10 @@ impl Renderer {
                     let (outgoing, incoming, size) = self.two_sides(outgoing, incoming, full)?;
                     let canvas = Placement::canvas(size.0, size.1);
                     let uploaded = self.crossed(encoder, &outgoing, &incoming, crossing, size);
-                    bound.push(self.layers.bind(device, queue, &uploaded, fit(canvas)));
+                    bound.push(
+                        self.layers
+                            .bind(&self.pool, device, queue, &uploaded, fit(canvas)),
+                    );
                 }
                 Layer::Vector { scene, placement } => {
                     let inner = (scene.width, scene.height);
@@ -395,7 +441,7 @@ impl Renderer {
                             height: inner.1,
                         });
                     }
-                    let view = blur::scratch(device, inner);
+                    let view = blur::scratch(&self.pool, device, inner);
                     self.vector.draw(device, queue, encoder, scene, &view)?;
                     let uploaded = layer::Uploaded {
                         views: [view.clone(), view.clone(), view],
@@ -404,16 +450,22 @@ impl Renderer {
                         tone: cutlass_gpu::YuvTone::NONE,
                         interleaved: false,
                     };
-                    bound.push(self.layers.bind(device, queue, &uploaded, fit(*placement)));
+                    bound.push(self.layers.bind(
+                        &self.pool,
+                        device,
+                        queue,
+                        &uploaded,
+                        fit(*placement),
+                    ));
                 }
                 Layer::Colour { colour, seed, mask } => {
                     if colour.is_identity() {
                         continue;
                     }
-                    let first = blur::scratch(device, size);
+                    let first = blur::scratch(&self.pool, device, size);
                     Self::paint(&self.layers, encoder, &first, &bound);
                     let before = mask.map(|_| {
-                        let before = blur::scratch(device, size);
+                        let before = blur::scratch(&self.pool, device, size);
                         Self::paint(&self.layers, encoder, &before, &bound);
                         before
                     });
@@ -421,7 +473,7 @@ impl Renderer {
                         .colours
                         .run(device, queue, encoder, &first, size, colour, *seed);
                     if let (Some(mask), Some(before)) = (mask, before) {
-                        let kept = blur::scratch(device, size);
+                        let kept = blur::scratch(&self.pool, device, size);
                         let mask = scaled_mask(mask, scale);
                         self.keep
                             .run(device, queue, encoder, &before, &result, &kept, &mask);
@@ -429,6 +481,7 @@ impl Renderer {
                     }
                     bound.clear();
                     bound.push(self.layers.bind(
+                        &self.pool,
                         device,
                         queue,
                         &canvas_picture(result, size),
@@ -436,13 +489,14 @@ impl Renderer {
                     ));
                 }
                 Layer::Cut(mask) => {
-                    let first = blur::scratch(device, size);
+                    let first = blur::scratch(&self.pool, device, size);
                     Self::paint(&self.layers, encoder, &first, &bound);
-                    let kept = blur::scratch(device, size);
+                    let kept = blur::scratch(&self.pool, device, size);
                     let mask = scaled_mask(mask, scale);
                     self.cuts.mask(device, queue, encoder, &first, &kept, &mask);
                     bound.clear();
                     bound.push(self.layers.bind(
+                        &self.pool,
                         device,
                         queue,
                         &canvas_picture(kept, size),
@@ -450,9 +504,9 @@ impl Renderer {
                     ));
                 }
                 Layer::Select(selected) => {
-                    let first = blur::scratch(device, size);
+                    let first = blur::scratch(&self.pool, device, size);
                     Self::paint(&self.layers, encoder, &first, &bound);
-                    let kept = blur::scratch(device, size);
+                    let kept = blur::scratch(&self.pool, device, size);
                     let frame = scaled_frame(selected.frame, scale);
                     self.cuts.select(
                         device,
@@ -464,6 +518,7 @@ impl Renderer {
                     )?;
                     bound.clear();
                     bound.push(self.layers.bind(
+                        &self.pool,
                         device,
                         queue,
                         &canvas_picture(kept, size),
@@ -471,13 +526,14 @@ impl Renderer {
                     ));
                 }
                 Layer::Package(pass) => {
-                    let first = blur::scratch(device, size);
+                    let first = blur::scratch(&self.pool, device, size);
                     Self::paint(&self.layers, encoder, &first, &bound);
-                    let painted = blur::scratch(device, size);
+                    let painted = blur::scratch(&self.pool, device, size);
                     self.packages
                         .run(device, queue, encoder, &first, &painted, pass, scale);
                     bound.clear();
                     bound.push(self.layers.bind(
+                        &self.pool,
                         device,
                         queue,
                         &canvas_picture(painted, size),
@@ -485,13 +541,14 @@ impl Renderer {
                     ));
                 }
                 Layer::Relight(relit) => {
-                    let first = blur::scratch(device, size);
+                    let first = blur::scratch(&self.pool, device, size);
                     Self::paint(&self.layers, encoder, &first, &bound);
-                    let lit = blur::scratch(device, size);
+                    let lit = blur::scratch(&self.pool, device, size);
                     self.relights
                         .run(device, queue, encoder, &first, &lit, size, relit)?;
                     bound.clear();
                     bound.push(self.layers.bind(
+                        &self.pool,
                         device,
                         queue,
                         &canvas_picture(lit, size),
@@ -504,11 +561,11 @@ impl Renderer {
                     }
                     // What is drawn so far becomes one picture the steps
                     // run over, and that result is the bottom layer again.
-                    let first = blur::scratch(device, size);
-                    let second = blur::scratch(device, size);
+                    let first = blur::scratch(&self.pool, device, size);
+                    let second = blur::scratch(&self.pool, device, size);
                     Self::paint(&self.layers, encoder, &first, &bound);
                     let before = mask.map(|_| {
-                        let before = blur::scratch(device, size);
+                        let before = blur::scratch(&self.pool, device, size);
                         Self::paint(&self.layers, encoder, &before, &bound);
                         before
                     });
@@ -518,7 +575,7 @@ impl Renderer {
                         .clone();
                     // A masked effect shows only inside its shape.
                     if let (Some(mask), Some(before)) = (mask, before) {
-                        let kept = blur::scratch(device, size);
+                        let kept = blur::scratch(&self.pool, device, size);
                         let mask = scaled_mask(mask, scale);
                         self.keep
                             .run(device, queue, encoder, &before, &result, &kept, &mask);
@@ -533,6 +590,7 @@ impl Renderer {
                     };
                     bound.clear();
                     bound.push(self.layers.bind(
+                        &self.pool,
                         device,
                         queue,
                         &uploaded,
@@ -563,8 +621,10 @@ impl Renderer {
                 });
             }
         }
-        let outgoing = layer::Pipelines::upload_rgba(&self.device, &self.queue, outgoing)?;
-        let incoming = layer::Pipelines::upload_rgba(&self.device, &self.queue, incoming)?;
+        let outgoing =
+            layer::Pipelines::upload_rgba(&self.pool, &self.device, &self.queue, outgoing)?;
+        let incoming =
+            layer::Pipelines::upload_rgba(&self.pool, &self.device, &self.queue, incoming)?;
         Ok((outgoing, incoming, whole))
     }
 
@@ -585,9 +645,9 @@ impl Renderer {
             (outgoing, &crossing.outgoing),
             (incoming, &crossing.incoming),
         ] {
-            let first = blur::scratch(device, size);
-            let second = blur::scratch(device, size);
-            let bound = [self.layers.bind(device, queue, side, canvas)];
+            let first = blur::scratch(&self.pool, device, size);
+            let second = blur::scratch(&self.pool, device, size);
+            let bound = [self.layers.bind(&self.pool, device, queue, side, canvas)];
             Self::paint(&self.layers, encoder, &first, &bound);
             let result = self
                 .effects
@@ -595,7 +655,7 @@ impl Renderer {
                 .clone();
             sides.push(result);
         }
-        let mixed = blur::scratch(device, size);
+        let mixed = blur::scratch(&self.pool, device, size);
         self.cross.run(
             device, queue, encoder, &sides[0], &sides[1], &mixed, crossing, size,
         );
@@ -647,9 +707,9 @@ impl Renderer {
         size: (u32, u32),
     ) -> layer::Uploaded {
         let (device, queue) = (&self.device, &self.queue);
-        let first = blur::scratch(device, size);
-        let second = blur::scratch(device, size);
-        let covered = self.layers.bind(device, queue, uploaded, cover);
+        let first = blur::scratch(&self.pool, device, size);
+        let second = blur::scratch(&self.pool, device, size);
+        let covered = self.layers.bind(&self.pool, device, queue, uploaded, cover);
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cutlass-render cover"),
@@ -819,6 +879,56 @@ mod tests {
             .draw(&canvas, &[Layer::Rgba(layer, Placement::canvas(3, 2))])
             .unwrap();
         assert_eq!(renderer.read(&canvas).unwrap(), premultiplied);
+    }
+
+    /// Two YUV layers and one RGBA layer over a 4x2 canvas.
+    fn three_layers<'a>(rgba: &'a [u8], yuv: &'a [u8]) -> Vec<Layer<'a>> {
+        let planes = Planes::packed(4, 2, yuv).unwrap();
+        vec![
+            Layer::Yuv(planes, Placement::canvas(4, 2)),
+            Layer::Yuv(planes, Placement::canvas(4, 2)),
+            Layer::Rgba(
+                Rgba {
+                    width: 4,
+                    height: 2,
+                    bytes: rgba,
+                },
+                Placement::canvas(4, 2),
+            ),
+        ]
+    }
+
+    /// Playing the same layers creates no texture, buffer or bind group
+    /// after the first frame, and each frame still shows its own pixels.
+    #[test]
+    fn a_frame_like_the_last_creates_nothing_and_shows_its_own_pixels() {
+        let Some(renderer) = renderer() else { return };
+        let canvas = renderer.canvas(4, 2).unwrap();
+        let yuv = [16u8; 4 * 2 + 2 * 2];
+        let red: Vec<u8> = [255, 0, 0, 255].repeat(8);
+        let blue: Vec<u8> = [0, 0, 255, 255].repeat(8);
+        renderer.draw(&canvas, &three_layers(&red, &yuv)).unwrap();
+        assert_eq!(renderer.read(&canvas).unwrap(), red);
+        let first = renderer.pool.created();
+        assert!(first > 0);
+        for (frame, colour) in [&blue, &red, &blue].into_iter().enumerate() {
+            renderer.draw(&canvas, &three_layers(colour, &yuv)).unwrap();
+            assert_eq!(renderer.read(&canvas).unwrap(), *colour, "frame {frame}");
+            assert_eq!(renderer.pool.created(), first, "frame {frame} created");
+        }
+        // Another size needs its own texture; the one before is not taken.
+        let small = [0u8, 255, 0, 255];
+        let one = renderer.canvas(1, 1).unwrap();
+        let layer = Rgba {
+            width: 1,
+            height: 1,
+            bytes: &small,
+        };
+        renderer
+            .draw(&one, &[Layer::Rgba(layer, Placement::canvas(1, 1))])
+            .unwrap();
+        assert_eq!(renderer.read(&one).unwrap(), small);
+        assert!(renderer.pool.created() > first);
     }
 
     #[test]

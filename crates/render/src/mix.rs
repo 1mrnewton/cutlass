@@ -4,6 +4,7 @@
 //! with `textureLoad`, not sampled, and mixed by `cutlass_effects`'s WGSL
 //! `blend`, the same arithmetic the CPU path runs.
 
+use crate::pool::Bind;
 use cutlass_effects::{BLEND_WGSL, BlendMode};
 
 use crate::CANVAS_FORMAT;
@@ -35,10 +36,11 @@ const PARAMS: u64 = 16;
 pub(crate) struct Mix {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
+    pool: std::sync::Arc<crate::pool::Pool>,
 }
 
 impl Mix {
-    pub(crate) fn new(device: &wgpu::Device) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, pool: std::sync::Arc<crate::pool::Pool>) -> Self {
         let source = format!("{SHADER}\n{BLEND_WGSL}");
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cutlass-render mix"),
@@ -101,7 +103,11 @@ impl Mix {
             multiview_mask: None,
             cache: None,
         });
-        Self { pipeline, layout }
+        Self {
+            pipeline,
+            layout,
+            pool,
+        }
     }
 
     /// Write `top` mixed over `below` by `mode` into `out`.
@@ -118,31 +124,19 @@ impl Mix {
     ) {
         let mut bytes = [0u8; 16];
         bytes[..4].copy_from_slice(&mode.code().to_le_bytes());
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cutlass-render mix mode"),
-            size: PARAMS,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buffer, 0, &bytes);
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cutlass-render mix"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(top),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(below),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buffer.as_entire_binding(),
-                },
+        let buffer = self
+            .pool
+            .uniform(device, queue, "cutlass-render mix mode", PARAMS, &bytes);
+        let group = self.pool.group(
+            device,
+            "cutlass-render mix",
+            &self.layout,
+            &[
+                (0, Bind::View(top)),
+                (1, Bind::View(below)),
+                (2, Bind::Buffer(&buffer)),
             ],
-        });
+        );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("cutlass-render mix"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {

@@ -43,7 +43,7 @@ mod tests {
 
     #[test]
     fn sorting_gives_the_bottom_first() {
-        let mut keys = vec![
+        let mut keys = [
             ("main", paint_order(0, 2, 0)),
             ("title", paint_order(14_000, 0, 0)),
             ("overlay", paint_order(0, 1, 0)),

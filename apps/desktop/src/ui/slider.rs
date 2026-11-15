@@ -1,4 +1,7 @@
 //! A slider: a thin rail, the part up to the value filled, and a knob.
+//! A rail that runs from below zero to above it fills from zero instead,
+//! with a tick where zero is, so an angle or a bend reads as a turn one
+//! way or the other.
 //!
 //! Press anywhere on the rail to jump there and keep dragging. The knob
 //! keeps one size; hover only brightens the fill. Values land on a step
@@ -52,6 +55,12 @@ fn step_for(span: f64, rail: f32) -> f64 {
         return 0.0;
     }
     10f64.powf(per_point.log10().floor())
+}
+
+/// Where the fill starts, from 0 to 1 along the rail: zero when the rail
+/// runs through it, its low end otherwise.
+fn fill_origin(low: f64, high: f64) -> Option<f32> {
+    (low < 0.0 && high > 0.0).then(|| fraction(0.0, low, high))
 }
 
 /// Where along the rail, from 0 to 1, `value` sits.
@@ -109,7 +118,21 @@ impl Widget for Slider<'_> {
             } else {
                 tokens::EXPORT
             };
-            painter.rect_filled(whole.with_max_x(x), radius, fill);
+            match fill_origin(low, high) {
+                Some(zero) => {
+                    let zero = left + rail * zero;
+                    let filled = Rect::from_x_y_ranges(zero.min(x)..=zero.max(x), whole.y_range());
+                    painter.rect_filled(filled, radius, fill);
+                    let tick = tokens::SLIDER_KNOB * 0.8;
+                    painter.line_segment(
+                        [pos2(zero, mid - tick), pos2(zero, mid + tick)],
+                        egui::Stroke::new(1.0, fill),
+                    );
+                }
+                None => {
+                    painter.rect_filled(whole.with_max_x(x), radius, fill);
+                }
+            }
             let ink = if enabled {
                 Color32::WHITE
             } else {
@@ -140,6 +163,17 @@ mod tests {
         assert_eq!(fraction(-5.0, 0.0, 100.0), 0.0);
         assert_eq!(fraction(500.0, 0.0, 100.0), 1.0);
         assert_eq!(fraction(1.0, 1.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn a_rail_through_zero_fills_from_zero() {
+        assert_eq!(fill_origin(-180.0, 180.0), Some(0.5));
+        assert_eq!(fill_origin(-360.0, 1080.0), Some(0.25));
+        // A rail that starts at zero, or above or below it, fills from its
+        // low end.
+        assert_eq!(fill_origin(0.0, 100.0), None);
+        assert_eq!(fill_origin(1.0, 500.0), None);
+        assert_eq!(fill_origin(-10.0, -1.0), None);
     }
 
     #[test]

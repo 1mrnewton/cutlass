@@ -820,13 +820,14 @@ impl Placed<'_> {
     }
 
     /// This clip as GPU layers: a color backdrop, if any, then the decoded
-    /// picture with the maps that place it.
+    /// picture with the maps that place it, over a blurred copy of it when
+    /// the backdrop is a blur.
     ///
     /// `None` when the GPU path does not reproduce the CPU path: a picture
     /// that is not 8-bit 4:2:0, one whose matrix is not BT.709, BT.601 or
     /// BT.2020, one whose tags the color crate does not map, a crop
-    /// quad that is not a parallelogram, or a blur or image backdrop (a
-    /// relit clip's blur too). The caller then uses the CPU picture. A
+    /// quad that is not a parallelogram, an image backdrop, or a relit
+    /// clip's blur. The caller then uses the CPU picture. A
     /// relit clip whose depth is decoded is drawn upright on its own
     /// canvas and lit there.
     pub(crate) fn gpu(&self, time: Micros) -> Option<Vec<GpuLayer>> {
@@ -1065,7 +1066,7 @@ fn gpu_turn(display: DisplayQuarter, width: u32, height: u32) -> Affine {
 /// Canvas pixel center to picture pixels for a copy that covers the canvas,
 /// as [`crate::canvas::cover`]: scaled with left-edge sampling until both
 /// edges reach the canvas, then centered.
-fn gpu_cover(picture: (u32, u32), canvas: (u32, u32)) -> Option<Affine> {
+pub(crate) fn gpu_cover(picture: (u32, u32), canvas: (u32, u32)) -> Option<Affine> {
     if picture == canvas {
         return Some(Affine::IDENTITY);
     }

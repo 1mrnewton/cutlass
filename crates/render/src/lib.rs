@@ -316,6 +316,7 @@ impl Renderer {
                     layers,
                     size: inner,
                     placement,
+                    blur,
                 } => {
                     let limit = device.limits().max_texture_dimension_2d;
                     if inner.0 == 0 || inner.1 == 0 || inner.0 > limit || inner.1 > limit {
@@ -334,6 +335,17 @@ impl Renderer {
                         tone: cutlass_gpu::YuvTone::NONE,
                         interleaved: false,
                     };
+                    if let Some((cover, radius)) = blur {
+                        let radius = scaled_radius(*radius, scale.0.min(scale.1));
+                        let backdrop = self.blurred(encoder, &uploaded, fit(*cover), radius, size);
+                        bound.push(self.layers.bind(
+                            &self.pool,
+                            device,
+                            queue,
+                            &backdrop,
+                            Placement::canvas(size.0, size.1),
+                        ));
+                    }
                     bound.push(self.layers.bind(
                         &self.pool,
                         device,

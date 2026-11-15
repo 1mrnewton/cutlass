@@ -1736,6 +1736,73 @@ mod tests {
         assert_eq!(rows(&middle, 16, 1, 16), picture);
     }
 
+    #[test]
+    fn a_compound_over_an_image_canvas_stays_layers_for_the_gpu() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine/fixtures/pattern.png");
+        let picture = still_frame(&path, 16, 16, Crop::default(), "free");
+        let covered =
+            crate::canvas::cover(&CpuBytes::new(16, 16, picture).expect("picture"), 16, 18)
+                .expect("cover");
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 16;
+        draft.canvas_config.height = 18;
+        let mut video = MaterialVideo::new("still");
+        video.path = path.display().to_string();
+        draft.materials.videos.push(video);
+        let mut segment = Segment::new("still", "still", TimeRange::new(0, 1_000_000));
+        segment.source_range = Some(TimeRange::new(0, 1_000_000));
+        draft.tracks[0].segments.push(segment);
+        let mut session = cutlass_session::Session::open(draft);
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::CreateCompound {
+                    segment_ids: vec!["still".into()],
+                    segment_id: "nest".into(),
+                    material_id: "inside".into(),
+                }],
+            )
+            .unwrap();
+        let mut draft = session.draft().clone();
+        let image = canvas("canvas_image", "#00FF00", 0.0, path.to_str().expect("path"));
+        let nest = &mut draft.tracks[0].segments[0];
+        assert_eq!(nest.id.as_str(), "nest");
+        nest.extra_material_refs.push(image.id.clone());
+        draft.materials.canvases.push(image);
+
+        let media = stills();
+        let mut device = SoftwareDevice::new();
+        let mut clips = OpenClips::new();
+        let snapshot = Snapshot::new(&draft);
+        let layers = layers_in(
+            &snapshot,
+            Micros(0),
+            &mut device,
+            &media,
+            &mut clips,
+            0,
+            None,
+        )
+        .expect("layers");
+        let sources: Vec<&crate::gpu::GpuSource> =
+            layers.layers.iter().map(|layer| &layer.source).collect();
+        // The image under the compound, then the compound's own layers.
+        let at = sources
+            .iter()
+            .position(|source| matches!(source, crate::gpu::GpuSource::Nested(_)))
+            .expect("a compound layer");
+        assert!(at > 0);
+        let crate::gpu::GpuSource::Rgba(under) = sources[at - 1] else {
+            panic!("no image under the compound: {sources:?}");
+        };
+        assert_eq!(under, &covered);
+        // The CPU draws the same image in the letterbox.
+        let cpu = frame(&snapshot, Micros(0), &mut device, &media, &mut clips, 0)
+            .expect("frame")
+            .rgba;
+        assert_eq!(row(&cpu, 16, 0), row(covered.rgba(), 16, 0));
+    }
+
     fn canvas(kind: &str, color: &str, blur: f64, image: &str) -> MaterialCanvas {
         MaterialCanvas {
             id: "canvas".into(),

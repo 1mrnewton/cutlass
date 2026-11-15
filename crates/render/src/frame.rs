@@ -67,6 +67,9 @@ fn layers_of(frame: &FrameLayers) -> Result<Vec<Layer<'_>>, RenderError> {
                 layers: layers_of(child)?,
                 size: (child.width, child.height),
                 placement: layer.placement,
+                blur: layer
+                    .backdrop
+                    .map(|backdrop| (backdrop.cover, backdrop.radius)),
             },
             GpuSource::Effect(steps, mask) => Layer::Effect(steps, mask.as_ref()),
             GpuSource::Colour { colour, seed, mask } => Layer::Colour {

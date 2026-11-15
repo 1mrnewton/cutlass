@@ -21,10 +21,10 @@ use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
 
 use crate::canvas::over_backdrop;
 use crate::frame::{EvalError, Fonts, Snapshot, compose, compose_layers};
-use crate::gpu::{FrameLayers, GpuLayer, GpuSource};
+use crate::gpu::{FrameLayers, GpuBackdrop, GpuLayer, GpuSource};
 use crate::media::{
-    OpenClips, PictureTransform, apply_crop, backdrop_for, gpu_crop, gpu_place, picture_transform,
-    place_with,
+    OpenClips, PictureTransform, apply_crop, backdrop_for, gpu_cover, gpu_crop, gpu_place,
+    picture_transform, place_with,
 };
 
 /// Compound drafts above this many ancestors are not drawn.
@@ -73,9 +73,10 @@ impl PictureSource for NestedPicture {
 }
 
 impl NestedPicture {
-    /// The compound as GPU layers: a color backdrop, if any, then the child
-    /// frame placed like a picture. `None` for a child composed on the CPU,
-    /// which the caller samples instead.
+    /// The compound as GPU layers: a color or image backdrop, if any, then
+    /// the child frame placed like a picture, over a blurred copy of it when
+    /// the backdrop is a blur. `None` for a child composed on the CPU, which
+    /// the caller samples instead.
     pub(crate) fn gpu(&self) -> Option<Vec<GpuLayer>> {
         let Child::Gpu(layers, crop) = &self.child else {
             return None;
@@ -91,18 +92,35 @@ impl NestedPicture {
             to_texture: Affine::IDENTITY,
             opacity: f64::from(self.transform.opacity()) / 255.0,
         };
+        let canvas = (self.canvas_w, self.canvas_h);
         let mut layers = Vec::new();
+        let mut backdrop = None;
         match &self.backdrop {
             crate::canvas::Backdrop::None => {}
             crate::canvas::Backdrop::Color(pixel) => {
                 layers.push(GpuLayer::fill(CpuBytes::new(1, 1, pixel.to_vec()).ok()?));
             }
-            crate::canvas::Backdrop::Blur(_) | crate::canvas::Backdrop::Image(_) => return None,
+            // The CPU draws an image of another size as no backdrop.
+            crate::canvas::Backdrop::Image(image) => {
+                if (image.width(), image.height()) == canvas {
+                    layers.push(GpuLayer::canvas(image.clone()));
+                }
+            }
+            crate::canvas::Backdrop::Blur(radius) => {
+                backdrop = Some(GpuBackdrop {
+                    cover: Placement {
+                        to_picture: gpu_cover(picture, canvas)?,
+                        opacity: 1.0,
+                        ..placement
+                    },
+                    radius: *radius,
+                });
+            }
         }
         layers.push(GpuLayer {
             source,
             placement,
-            backdrop: None,
+            backdrop,
         });
         Some(layers)
     }
@@ -224,12 +242,7 @@ fn place_child<D: Device>(
         pass.height,
         time,
     );
-    let on_gpu = gpu
-        && matches!(
-            backdrop,
-            crate::canvas::Backdrop::None | crate::canvas::Backdrop::Color(_)
-        );
-    let child = if on_gpu {
+    let child = if gpu {
         let Some(layers) = child_layers(draft, child, &segment.id, mapped, pass)? else {
             return Ok(None);
         };

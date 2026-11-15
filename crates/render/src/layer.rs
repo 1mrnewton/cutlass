@@ -129,11 +129,14 @@ pub enum Layer<'a> {
         radius: u32,
     },
     /// Layers drawn onto their own `size` canvas first, then that canvas
-    /// placed like a picture, as a compound clip is.
+    /// placed like a picture, as a compound clip is. `blur`, when set, is
+    /// the `cover` placement and radius of a blurred copy of that canvas
+    /// drawn under it, as [`Layer::YuvOverBlur`] draws one.
     Nested {
         layers: Vec<Layer<'a>>,
         size: (u32, u32),
         placement: Placement,
+        blur: Option<(Placement, u32)>,
     },
     /// An effect over everything drawn before it in the same list.
     Effect(&'a [Step], Option<&'a cutlass_effects::CanvasMask>),

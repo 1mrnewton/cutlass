@@ -1,7 +1,8 @@
 name: release
 
-# A tag `v<version>` builds the desktop packages and the Android APK, writes `<package>.sha256`
-# beside each, and uploads them as a draft GitHub release. A check job
+# A tag `v<version>` builds the desktop packages and the Android APK,
+# writes `<package>.sha256` beside each, and uploads them as a draft GitHub
+# release. A check job
 # downloads the draft's files and checks each against its checksum; the
 # draft is then published by hand. The desktop's update check reads the
 # published release from the API's `releases/latest`, which leaves drafts

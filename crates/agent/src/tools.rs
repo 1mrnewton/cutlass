@@ -69,9 +69,12 @@ pub trait Player {
     fn pause(&mut self) -> Result<(), String>;
 }
 
-/// Duration, picture size, and stream names from the host.
+/// The import type, duration, picture size, and stream names from the host.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaInfo {
+    /// The type an import names: `video`, `photo`, `image` or `gif` for
+    /// the video lane, `music` for a sound. Empty when the host cannot say.
+    pub kind: String,
     /// Duration in microseconds.
     pub duration_us: i64,
     /// Picture width in pixels.
@@ -756,7 +759,10 @@ fn description(name: &str) -> &'static str {
         "player.seek" => "Move the open player to a time in microseconds.",
         "player.play" => "Start the open player.",
         "player.pause" => "Pause the open player.",
-        "media.probe" => "Duration, size, and streams reported by the host for one path.",
+        "media.probe" => {
+            "The type to import it as, duration, size, and streams (video, audio) reported \
+             by the host for one path."
+        }
         "speech.start" => "Start a transcription job and record the draft revision.",
         "speech.poll" => "Read a transcription job, ignoring it when the revision moved.",
         "track.start" => {
@@ -948,8 +954,13 @@ fn host_unit(result: Result<(), String>) -> Result<String, ToolError> {
 }
 
 fn format_probe(info: &MediaInfo) -> String {
+    let kind = if info.kind.is_empty() {
+        String::new()
+    } else {
+        format!("type={} ", info.kind)
+    };
     format!(
-        "duration={} width={} height={} streams={}",
+        "{kind}duration={} width={} height={} streams={}",
         info.duration_us,
         info.width,
         info.height,
@@ -1428,6 +1439,7 @@ mod tests {
                 calls: 0,
                 path: String::new(),
                 info: MediaInfo {
+                    kind: "video".to_owned(),
                     duration_us: 1_500_000,
                     width: 1280,
                     height: 720,
@@ -1960,11 +1972,23 @@ mod tests {
         let text = registry.invoke(call).unwrap();
         assert_eq!(
             text,
-            "duration=1500000 width=1280 height=720 streams=video,audio"
+            "type=video duration=1500000 width=1280 height=720 streams=video,audio"
         );
         assert_eq!(registry.media.calls, 1);
         assert_eq!(registry.media.path, "my clip.mov");
         assert_eq!(registry.draft.session().revision(), 0);
+    }
+
+    #[test]
+    fn media_probe_leaves_out_a_type_the_host_cannot_name() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        registry.media.info.kind = String::new();
+        let call = registry.parse("media.probe", "clip.mov").unwrap();
+        assert_eq!(
+            registry.invoke(call).unwrap(),
+            "duration=1500000 width=1280 height=720 streams=video,audio"
+        );
     }
 
     #[test]

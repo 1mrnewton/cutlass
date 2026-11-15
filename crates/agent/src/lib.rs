@@ -131,6 +131,7 @@ mod tests {
     impl Media for Host {
         fn probe(&mut self, _path: &str) -> Result<MediaInfo, String> {
             Ok(MediaInfo {
+                kind: String::new(),
                 duration_us: 0,
                 width: 0,
                 height: 0,

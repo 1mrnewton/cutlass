@@ -253,17 +253,26 @@ impl Media for Probe {
     fn probe(&mut self, path: &str) -> Result<MediaInfo, String> {
         match cutlass_probe::probe(Path::new(path)).map_err(|error| error.to_string())? {
             cutlass_probe::Probed::Video {
+                meta,
                 width,
                 height,
                 duration,
-                ..
-            } => Ok(MediaInfo {
-                duration_us: duration,
-                width,
-                height,
-                streams: vec!["video".to_owned()],
-            }),
+                has_audio,
+            } => {
+                let mut streams = vec!["video".to_owned()];
+                if has_audio {
+                    streams.push("audio".to_owned());
+                }
+                Ok(MediaInfo {
+                    kind: meta.as_str().to_owned(),
+                    duration_us: duration,
+                    width,
+                    height,
+                    streams,
+                })
+            }
             cutlass_probe::Probed::Audio { duration } => Ok(MediaInfo {
+                kind: cutlass_model::MetaType::Music.as_str().to_owned(),
                 duration_us: duration,
                 width: 0,
                 height: 0,
@@ -391,6 +400,26 @@ mod tests {
         assert_eq!(opened.folder.draft.tracks[0].segments.len(), 1);
         // The lock was let go when stdin closed.
         assert!(cutlass_store::hold(&project.0).is_ok());
+    }
+
+    #[test]
+    fn the_probe_names_the_import_type_and_a_movies_sound() {
+        use cutlass_agent::Media;
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates");
+        let movie = root.join("containers/mpegts/tests/fixtures/h264_aac.ts");
+        let info = super::Probe.probe(movie.to_str().unwrap()).unwrap();
+        assert_eq!(info.kind, "video");
+        assert_eq!(info.streams, ["video", "audio"]);
+        let still = root.join("engine/fixtures/pattern.png");
+        let info = super::Probe.probe(still.to_str().unwrap()).unwrap();
+        assert_eq!(info.kind, "image");
+        assert_eq!(info.streams, ["video"]);
+        let photo = root.join("engine/fixtures/pattern.jpg");
+        assert_eq!(
+            super::Probe.probe(photo.to_str().unwrap()).unwrap().kind,
+            "photo"
+        );
+        assert!(super::Probe.probe("/no/such/file.mp4").is_err());
     }
 
     fn answers(output: Vec<u8>) -> Vec<Value> {

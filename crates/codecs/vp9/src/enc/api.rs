@@ -663,8 +663,14 @@ impl<P: EncPixel> Core<P> {
                     ],
                 })
                 .collect();
+            // (Two passes: 3 at any quantizer, the pictures predicting
+            // from the pool's unfiltered ones too: on the grainy pan, 1%
+            // fewer bits at the same averaged PSNR, 0.6% on the clip from
+            // a fractal to `testsrc2`.)
             let q = self.rc.peek_q();
-            let strength = if q > 100 {
+            let strength = if self.pooled() {
+                3
+            } else if q > 100 {
                 5
             } else if q > 50 {
                 4

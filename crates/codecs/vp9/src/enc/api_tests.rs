@@ -1088,3 +1088,52 @@ fn vis(p: &Plane) -> Vec<u8> {
         p.samples.to_vec()
     }
 }
+
+#[test]
+fn tile_rows_restart_the_coder_and_change_no_picture() {
+    // 288 rows: five superblock rows over four tile rows.
+    let run = |tile_rows: u8| {
+        let opts = super::Vp9Options {
+            qindex: 100,
+            tile_rows,
+            threads: 2,
+            ..super::Vp9Options::default()
+        };
+        let mut encoder = Vp9Encoder::with_options(160, 288, opts).expect("encoder");
+        let mut packets = Vec::new();
+        for index in 0..6u32 {
+            packets.extend(
+                encoder
+                    .push(&VideoInput {
+                        frame: moving(160, 288, index * 3),
+                        pts: i64::from(index),
+                        duration: 1,
+                        timescale: 30,
+                    })
+                    .expect("push"),
+            );
+        }
+        packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+        let params = CodecParams::with_format(CodecId::Vp9, 160, 288, PixelFormat::Yuv420p);
+        let mut decoder = Vp9Decoder::open(&params).expect("decoder");
+        let mut pictures = Vec::new();
+        for p in &packets {
+            for out in decoder.push_all(p).expect("decode") {
+                let f = &out.frame;
+                pictures.push([vis(&f.y), vis(&f.u), vis(&f.v)]);
+            }
+        }
+        (packets, pictures)
+    };
+    let (one, one_pics) = run(0);
+    let (four, four_pics) = run(2);
+    assert_eq!(one_pics.len(), 6);
+    assert_eq!(one_pics, four_pics, "the same pictures");
+    let key = parsed_header(&four[0].data).expect("header");
+    assert_eq!(key.log2_tile_rows, 2);
+    assert_ne!(
+        one.iter().map(|p| p.data.len()).sum::<usize>(),
+        four.iter().map(|p| p.data.len()).sum::<usize>(),
+        "four coders, four flushes"
+    );
+}

@@ -68,6 +68,10 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   up the motion search runs first over the whole frame, its superblock
   rows shared evenly among the threads, and luma and chroma are filtered
   on separate threads.
+- Tile rows (`Vp9Options::tile_rows`, log2 of the count, 0 to 2, as
+  libvpx's `tile-rows`): each starts its own arithmetic coder, so a
+  decoder can start every row's at once; nothing else changes, and the
+  pictures are the same (four tile rows cost 0.2% more bits at 720p).
 - Rate: a fixed quantizer (`with_quantizer`, or bitrate 0) or a bitrate,
   per frame type, from a model of bits against quantizer step.
 

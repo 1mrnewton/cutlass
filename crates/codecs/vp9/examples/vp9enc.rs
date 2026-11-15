@@ -1,5 +1,5 @@
 //! Encodes raw 4:2:0 video to an IVF file:
-//! `vp9enc <in.yuv> <width> <height> <out.ivf> [q=N | rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N] [lag=N] [aq=0|1]`.
+//! `vp9enc <in.yuv> <width> <height> <out.ivf> [q=N | rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N] [lag=N] [aq=0|1] [tile_rows=0..2]`.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -11,7 +11,7 @@ use cutlass_vp9::{Vp9Encoder, Vp9Options};
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 5 {
-        return Err("usage: vp9enc <in.yuv> <width> <height> <out.ivf> [q=N|rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N] [lag=N] [aq=0|1]".into());
+        return Err("usage: vp9enc <in.yuv> <width> <height> <out.ivf> [q=N|rate=BITS] [speed=N] [frames=N] [fps=N] [keyint=N] [threads=N] [lag=N] [aq=0|1] [tile_rows=0..2]".into());
     }
     let w: usize = args[2].parse().map_err(|_| "width")?;
     let h: usize = args[3].parse().map_err(|_| "height")?;
@@ -31,6 +31,7 @@ fn main() -> Result<(), String> {
             "threads" => opts.threads = n as usize,
             "lag" => opts.lag = Some(n),
             "aq" => opts.aq = n != 0,
+            "tile_rows" => opts.tile_rows = n as u8,
             _ => return Err(format!("unknown option {k}")),
         }
     }

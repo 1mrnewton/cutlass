@@ -39,6 +39,10 @@ pub struct Vp9Options {
     /// [`DEFAULT_LAG`] below speed 9, none at the realtime speeds 9 and 10
     /// (as libvpx's good and realtime deadlines).
     pub lag: Option<u32>,
+    /// Tile rows, log2 of the count (0 to 2; libvpx's `tile-rows`). They
+    /// restart the arithmetic coder at each tile row and change nothing
+    /// else.
+    pub tile_rows: u8,
     /// Adaptive quantization (libvpx's `aq-mode=1`): flat regions finer,
     /// busy ones coarser, by segment. Better looking, a little worse in
     /// PSNR.
@@ -80,6 +84,7 @@ impl Default for Vp9Options {
             max_q: 236,
             threads: 0,
             lag: None,
+            tile_rows: 0,
             aq: false,
         }
     }
@@ -131,7 +136,11 @@ impl Vp9Encoder {
             width,
             height,
             opts,
-            enc: FrameEncoder::new(width, height, opts.threads()),
+            enc: {
+                let mut enc = FrameEncoder::new(width, height, opts.threads());
+                enc.set_tile_rows(opts.tile_rows);
+                enc
+            },
             since_key: 0,
             force_key: true,
             rc: Rate::new(opts, u64::from(width) * u64::from(height)),
@@ -438,6 +447,7 @@ impl VideoEncoder for Vp9Encoder {
 
     fn reset(&mut self) {
         self.enc = FrameEncoder::new(self.width, self.height, self.opts.threads());
+        self.enc.set_tile_rows(self.opts.tile_rows);
         self.force_key = true;
         self.since_key = 0;
         self.rc = Rate::new(self.opts, u64::from(self.width) * u64::from(self.height));

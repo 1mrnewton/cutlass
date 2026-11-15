@@ -83,6 +83,8 @@ pub struct FrameEncoder {
     work: Vec<TileWork>,
     /// Tile columns: at most this many threads (log2 of the count).
     log2_tiles: u8,
+    /// Tile rows (log2 of the count, 0 to 2).
+    log2_tile_rows: u8,
     /// The fast search's vectors of the last frame, by 8×8 block.
     pre_seeds: Vec<Mv>,
     /// The segmentation of the frame being coded, with adaptive
@@ -103,6 +105,8 @@ struct TileWork {
     scratch: Scratch<u8>,
     /// The tile's symbols, written once the frame's probabilities are.
     out: tile::Out,
+    /// How many of them each superblock row ends at.
+    row_ends: Vec<usize>,
     bufs: tile::TileBufs,
 }
 
@@ -114,6 +118,7 @@ impl TileWork {
             state: State::empty(),
             scratch: Scratch::new(),
             out: Vec::new(),
+            row_ends: Vec::new(),
             bufs: tile::TileBufs::default(),
         }
     }
@@ -140,10 +145,18 @@ impl FrameEncoder {
             strides: dims.stride,
             work: Vec::new(),
             log2_tiles: threads.max(1).ilog2().min(6) as u8,
+            log2_tile_rows: 0,
             pre_seeds: Vec::new(),
             aq: None,
             ref_use: [(0, 1024, 0); 3],
         }
+    }
+
+    /// Codes `1 << log2` tile rows (0 to 2; libvpx's `tile-rows`). Tile
+    /// rows only restart the arithmetic coder, so they cost a little
+    /// size and let a decoder start each row's coder at once.
+    pub fn set_tile_rows(&mut self, log2: u8) {
+        self.log2_tile_rows = log2.min(2);
     }
 
     /// The picture the last frame reconstructed (what a decoder shows).
@@ -198,15 +211,19 @@ impl FrameEncoder {
             new_nc,
             tiles,
         } = coded;
-        let ntiles = tiles.len();
         let head = self.headers(key, fp, Some((&old, &new)), Some((&old_nc, &new_nc)))?;
         let mut data = head;
-        for (i, d) in tiles.into_iter().enumerate() {
-            let d = d?;
-            if i + 1 < ntiles {
-                data.extend_from_slice(&(d.len() as u32).to_be_bytes());
+        // Tiles go row by row; every one but the last carries its size.
+        let cols = tiles.into_iter().collect::<Result<Vec<_>, _>>()?;
+        let rows = cols.first().map_or(0, Vec::len);
+        for tr in 0..rows {
+            for (tc, col) in cols.iter().enumerate() {
+                let d = &col[tr];
+                if tr + 1 < rows || tc + 1 < cols.len() {
+                    data.extend_from_slice(&(d.len() as u32).to_be_bytes());
+                }
+                data.extend_from_slice(d);
             }
-            data.extend_from_slice(&d);
         }
         let parsed = header::parse(self.dec.persist(), &data)?;
         let _shown = self.dec.commit(&parsed, &counts, mvs, segmap, pic);
@@ -337,7 +354,11 @@ impl FrameEncoder {
         if log2 < max_log2 {
             b.write_bit(false);
         }
-        b.write_bit(false); // one tile row
+        // Tile rows: each starts its own coder and nothing else.
+        b.write_bit(self.log2_tile_rows > 0);
+        if self.log2_tile_rows > 0 {
+            b.write_bit(self.log2_tile_rows > 1);
+        }
         let len = u32::try_from(compressed.len()).unwrap_or(u32::MAX);
         if len > u32::from(u16::MAX) {
             return Err(CodecError::Limit {
@@ -546,6 +567,7 @@ impl FrameEncoder {
             t.state
                 .reset(col0, col1 - col0, mi_rows, sb_rows * tsb, false);
             t.out.clear();
+            t.row_ends.clear();
             let [y, u, v] = &mut t.pix;
             let mut views = [
                 View {
@@ -578,6 +600,7 @@ impl FrameEncoder {
                 );
                 tile.sb_row(r * 8);
                 (seeds, t.bufs) = tile.finish();
+                t.row_ends.push(t.out.len());
             }
             t.seeds = seeds;
             Ok(())
@@ -637,12 +660,30 @@ impl FrameEncoder {
         let new = coef_updates(&old, &counts, if lossless { 0 } else { 3 });
         let old_nc = probs::flatten(&parsed.fc);
         let new_nc = probs::updates(&old_nc, &counts, &Self::coded(key, fp));
-        let write = |t: &TileWork| -> Result<Vec<u8>, CodecError> {
-            let mut w = BoolWriter::new();
-            for &(bit, id) in &t.out {
-                w.write(u32::from(bit), tile::prob_of(id, &new, &new_nc));
-            }
-            w.finish()
+        // A tile column's symbols, one coder for each tile row.
+        let log2_rows = h.log2_tile_rows;
+        let write = |t: &TileWork| -> Result<Vec<Vec<u8>>, CodecError> {
+            (0..1usize << log2_rows)
+                .map(|tr| {
+                    let symbols = |sb_row: usize| {
+                        sb_row
+                            .checked_sub(1)
+                            .and_then(|r| t.row_ends.get(r))
+                            .copied()
+                            .unwrap_or(0)
+                    };
+                    // In superblock rows, as libvpx's `get_tile_offsets`.
+                    let (r0, r1) = (
+                        (tr * sb_rows) >> log2_rows,
+                        ((tr + 1) * sb_rows) >> log2_rows,
+                    );
+                    let mut w = BoolWriter::new();
+                    for &(bit, id) in &t.out[symbols(r0)..symbols(r1)] {
+                        w.write(u32::from(bit), tile::prob_of(id, &new, &new_nc));
+                    }
+                    w.finish()
+                })
+                .collect()
         };
         let work = &*work;
         let (m, l, g, ed) = (&masks, &levels, &geo, &edges);
@@ -744,7 +785,8 @@ struct Written {
     new: [u8; 1728],
     old_nc: probs::Flat,
     new_nc: probs::Flat,
-    tiles: Vec<Result<Vec<u8>, CodecError>>,
+    /// By tile column, each column's tiles from top to bottom.
+    tiles: Vec<Result<Vec<Vec<u8>>, CodecError>>,
 }
 
 /// The SAD one bit of rate is worth: libvpx's `sad_per_bit16` from the

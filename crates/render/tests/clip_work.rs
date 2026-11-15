@@ -25,7 +25,9 @@ fn renderer() -> Option<Renderer> {
 }
 
 /// Two colour clips on a grey canvas: a blue one under the whole frame and
-/// an orange one, shrunk, turned and moved off the middle, over it.
+/// an orange one, shrunk, turned and moved off the middle, over it. Both are
+/// on one layer, so the orange one's row goes above the blue one's: the top
+/// row, first in the track list, is drawn last.
 fn scene() -> Draft {
     let mut draft = Draft::empty("draft");
     draft.canvas_config.width = WIDTH as i32;
@@ -48,7 +50,7 @@ fn scene() -> Draft {
     over.clip.rotation = 12.0;
     let mut row = Track::main("over");
     row.segments.push(over);
-    draft.tracks.push(row);
+    draft.tracks.insert(0, row);
     draft
 }
 
@@ -383,7 +385,7 @@ fn on_clip(draft: &mut Draft, id: &str, package: &str) {
     let mut effect = MaterialEffect::new(id);
     effect.effect_id = package.to_owned();
     draft.materials.effects.push(effect);
-    draft.tracks[1].segments[0]
+    draft.tracks[0].segments[0]
         .extra_material_refs
         .push(id.into());
 }
@@ -433,7 +435,7 @@ fn effect_packages_over_the_clips_below_match() {
     }
     // Two, with a clip drawn between them.
     let mut draft = scene();
-    draft.tracks[1].segments[0].render_index = 12_000;
+    draft.tracks[0].segments[0].render_index = 12_000;
     global(&mut draft, "first", cutlass_effects::PIXELATE, 11_000);
     global(&mut draft, "second", cutlass_effects::INVERT, 13_000);
     packaged(&renderer, &store, "pixelate under, invert over", &draft);

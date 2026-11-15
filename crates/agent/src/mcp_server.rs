@@ -286,6 +286,7 @@ pub(crate) fn input_hint(tool: &str) -> &'static str {
         "catalog.search" => "Words to search for.",
         "package.ensure" => "A package id.",
         "export.start" => "new <path> | replace <path>",
+        "export.poll" => "The job id export_start returned.",
         "skill.load" => "A skill name, or what the skill is for, or list.",
         "agent.delegate" => "The task in full, as the helper sees nothing of this chat.",
         _ => "",

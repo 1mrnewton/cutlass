@@ -200,6 +200,8 @@ impl Assistant {
         let (events, received) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         self.turn.clear();
+        // Old listings and transcripts are not sent again in full.
+        cutlass_agent::shorten_results(&mut self.history, OLD_RESULT_LIMIT);
         let history = self.history.clone();
         let ask = ask.to_owned();
         let watched = Watched {
@@ -607,6 +609,18 @@ impl<M: Model> Model for Watched<M> {
     }
 }
 
+/// How long the model's thread waits after a poll answered pending.
+const PENDING_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The longest tool result an earlier turn keeps; the rest of a longer one
+/// was used when it was read.
+const OLD_RESULT_LIMIT: usize = 2000;
+
+/// Whether `call` polled a job that is still running.
+pub(crate) fn still_pending(call: &ToolCall, outcome: &ToolOutcome) -> bool {
+    !outcome.is_error && call.name.ends_with(".poll") && outcome.content == "pending"
+}
+
 /// Tool calls, sent to the window's thread to run.
 struct Relay {
     stop: Arc<AtomicBool>,
@@ -633,7 +647,17 @@ impl ToolSink for Relay {
         {
             return stopped();
         }
-        answered.recv().unwrap_or_else(|_| stopped())
+        let outcome = answered.recv().unwrap_or_else(|_| stopped());
+        // A job still running: wait here, on the model's thread, before
+        // the model hears "pending", so its polls do not use up the
+        // turn's rounds in a few seconds.
+        if still_pending(call, &outcome) {
+            let until = std::time::Instant::now() + PENDING_WAIT;
+            while std::time::Instant::now() < until && !self.stop.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+        outcome
     }
 
     fn heard(&mut self, message: &Message) {

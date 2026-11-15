@@ -134,11 +134,20 @@ struct Logged<S>(S);
 impl<S: ToolSink> ToolSink for Logged<S> {
     fn run_tool(&mut self, call: &cutlass_agent::ToolCall) -> cutlass_agent::ToolOutcome {
         let started = std::time::Instant::now();
-        let outcome = self.0.run_tool(call);
+        let mut outcome = self.0.run_tool(call);
+        // A job still running is asked again for a few seconds before the
+        // client hears "pending", so it does not poll in a tight loop.
+        while crate::assistant::still_pending(call, &outcome) && started.elapsed() < PENDING_WAIT {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            outcome = self.0.run_tool(call);
+        }
         crate::shell::log_tool_call("mcp", call, &outcome, started.elapsed());
         outcome
     }
 }
+
+/// How long a poll of a running job waits before it answers pending.
+const PENDING_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The player and export on the project this host holds.
 struct Headless(Rc<RefCell<Shell>>);
@@ -242,7 +251,20 @@ impl Export for Headless {
         if codec != cutlass_codec::CodecId::Png && shell.exported() != Some(path.as_path()) {
             return Err(shell.notice().to_owned());
         }
-        Ok(format!("finished, wrote {}", path.display()))
+        if !path.is_file() {
+            return Err(format!("{} was not written", path.display()));
+        }
+        let id = shell.agent_export_next();
+        let wrote = format!("wrote {}", path.display());
+        shell.agent_export_began(id.clone(), path, Some(Ok(wrote)));
+        Ok(id)
+    }
+
+    fn poll(&mut self, job_id: &str) -> Result<Option<String>, String> {
+        match self.0.borrow_mut().agent_export_now() {
+            Some((id, state)) if id == job_id => state,
+            _ => Err(format!("no export {job_id}; export.start names its job")),
+        }
     }
 }
 
@@ -480,6 +502,12 @@ mod tests {
             call(6, "player_play", json!({})),
             call(7, "catalog_search", json!({"input": "dissolve"})),
             call(8, "speech_start", json!({"input": "0 100000"})),
+            call(9, "export_poll", json!({"input": "export-2"})),
+            call(
+                10,
+                "export_start",
+                json!({"input": format!("new {}", project.0.join("frame.jpg").display())}),
+            ),
         ]);
         let mut output = Vec::new();
         serve(Some(&project.0), input.as_bytes(), &mut output).unwrap();
@@ -490,7 +518,18 @@ mod tests {
                 .unwrap()
                 .to_owned()
         };
-        assert_eq!(answers.len(), 8);
+        assert_eq!(answers.len(), 10);
+        // The export answered when it was written, and a poll says so again.
+        assert!(
+            text(2).starts_with("job=export-1 finished: wrote "),
+            "{}",
+            text(2)
+        );
+        assert!(text(8).starts_with("finished: wrote "), "{}", text(8));
+        assert!(text(8).contains("cut.mp4"), "{}", text(8));
+        // A .jpg would be a movie under a photo's name: refused.
+        assert_eq!(answers[9]["result"]["isError"], true, "{}", text(9));
+        assert!(!project.0.join("frame.jpg").exists());
         // A color clip has no sound to hear.
         assert!(text(7).contains("nothing with sound"), "{}", text(7));
         assert!(text(6).contains("transition cutlass-"), "{}", text(6));

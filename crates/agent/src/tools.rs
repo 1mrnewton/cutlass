@@ -42,6 +42,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "catalog.search",
     "package.ensure",
     "export.start",
+    "export.poll",
     "sandbox.run",
     "skill.load",
     "mcp.call",
@@ -177,10 +178,13 @@ pub trait Packages {
     fn ensure(&mut self, package_id: &str) -> Result<(), String>;
 }
 
-/// Starts an export job.
+/// Starts an export job and says what became of it.
 pub trait Export {
     /// Starts an export to `path` and returns the job id.
     fn start(&mut self, path: &str) -> Result<String, String>;
+    /// What became of job `job_id`: `None` while it is still writing, what
+    /// it wrote once it has, or why it failed.
+    fn poll(&mut self, job_id: &str) -> Result<Option<String>, String>;
 }
 
 /// One registry call, after arguments have been parsed or built by the host.
@@ -265,6 +269,11 @@ pub enum Invocation {
         path: String,
         /// Whether an existing file would be replaced.
         replace: bool,
+    },
+    /// Ask what became of an export.
+    ExportPoll {
+        /// The id returned by start.
+        job_id: String,
     },
     /// Run source in the injected sandbox.
     SandboxRun {
@@ -571,8 +580,21 @@ where
                 .map(|()| "ok".to_owned())
                 .map_err(ToolError::Host),
             Invocation::ExportStart { path, replace } => {
-                start_export(&mut self.export, &mut self.approver, &path, replace)
+                let id = start_export(&mut self.export, &mut self.approver, &path, replace)?;
+                // A host that writes before it answers has the result now.
+                Ok(match self.export.poll(&id) {
+                    Ok(Some(done)) => format!("job={id} finished: {done}"),
+                    _ => format!("job={id}"),
+                })
             }
+            Invocation::ExportPoll { job_id } => self
+                .export
+                .poll(&job_id)
+                .map(|done| match done {
+                    Some(done) => format!("finished: {done}"),
+                    None => "pending".to_owned(),
+                })
+                .map_err(ToolError::Host),
             Invocation::SandboxRun { source, input_json } => self
                 .sandbox
                 .run(&source, &input_json)
@@ -651,6 +673,9 @@ where
             "package.ensure" => text_arg(arguments, "package.ensure")
                 .map(|package_id| Invocation::PackageEnsure { package_id }),
             "export.start" => parse_export(arguments),
+            "export.poll" => {
+                text_arg(arguments, "export.poll").map(|job_id| Invocation::ExportPoll { job_id })
+            }
             "sandbox.run" => Ok(parse_sandbox(arguments)),
             "skill.load" => Ok(Invocation::SkillLoad {
                 ask: arguments.to_owned(),
@@ -742,15 +767,36 @@ where
         };
         match result {
             Ok(content) => ToolOutcome {
-                content,
+                content: within_limit(content),
                 is_error: false,
             },
             Err(error) => ToolOutcome {
-                content: error.to_string(),
+                content: within_limit(error.to_string()),
                 is_error: true,
             },
         }
     }
+}
+
+/// The longest text one tool call answers with. A longer one would fill a
+/// model's context by itself.
+pub const RESULT_LIMIT: usize = 100_000;
+
+/// `content`, cut to [`RESULT_LIMIT`] with a note saying so.
+fn within_limit(content: String) -> String {
+    if content.len() <= RESULT_LIMIT {
+        return content;
+    }
+    let mut end = RESULT_LIMIT;
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n(cut: {} characters in all; ask for less at a time, such as one track, a shorter \
+         stretch, or fewer kinds)",
+        &content[..end],
+        content.len()
+    )
 }
 
 fn description(name: &str) -> &'static str {
@@ -791,8 +837,17 @@ fn description(name: &str) -> &'static str {
             "The type to import it as, duration, size, and streams (video, audio) reported \
              by the host for one path."
         }
-        "speech.start" => "Start a transcription job and record the draft revision.",
-        "speech.poll" => "Read a transcription job, ignoring it when the revision moved.",
+        "speech.start" => {
+            "Start hearing the speech in a stretch of the timeline, \"<start_us> <duration_us>\"; \
+             it answers job=<id> for speech.poll. Any edit before the words are read makes \
+             the job stale."
+        }
+        "speech.poll" => {
+            "Read a transcription job: pending while it listens (poll again; the answer takes \
+             a moment by itself), stale when the draft was edited since it started, or words=, \
+             one line a word as \"<start_us> <end_us> <word>\" on the timeline clock. Poll \
+             before you edit."
+        }
         "track.start" => {
             "Follow a box on a video clip through it, then make clips follow it. JSON: \
              {\"target\":\"<video clip id>\", \"at_us\":N, \"box\":[x0,y0,x1,y1], \
@@ -804,7 +859,7 @@ fn description(name: &str) -> &'static str {
              a number plate; the target itself may be one. Give followers, masks or both."
         }
         "track.poll" => {
-            "Read a tracking job: pending, stale when the draft moved, or the revision after \
+            "Read a tracking job: pending (poll again), stale when the draft moved, or the revision after \
              the followers were made to follow the path, as one undo step. A clip stops \
              following, and loses the motion the track gave it, with draft.apply \
              {\"op\":\"untrack\",\"segment_id\":\"<clip id>\"}."
@@ -814,8 +869,14 @@ fn description(name: &str) -> &'static str {
         "export.start" => {
             "Export the project. input: \"new <path>\" for a file that is not there yet, or \
              \"replace <path>\" to overwrite one, which asks the user. A path ending in .png \
-             writes the one frame at the player's time (move it with player.seek first); any \
-             other path writes the whole project as H.264 video."
+             writes the one frame at the player's time (move it with player.seek first); one \
+             ending in .mp4 or .mov writes the whole project as H.264 video; no other ending \
+             is written. It answers job=<id>, with \"finished\" when the file is already \
+             written; otherwise export.poll says when."
+        }
+        "export.poll" => {
+            "What became of an export: pending while it is still writing (poll again), \
+             finished with the file it wrote, or why it failed."
         }
         "sandbox.run" => {
             "Run a Rhai script on the machine and return its last value as JSON. \
@@ -1282,15 +1343,9 @@ fn start_export(
             || export.start(path),
         )
         .map_err(ToolError::Approval)?;
-        return job_text(started);
+        return started.map_err(ToolError::Host);
     }
-    job_text(export.start(path))
-}
-
-fn job_text(result: Result<String, String>) -> Result<String, ToolError> {
-    result
-        .map(|id| format!("job={id}"))
-        .map_err(ToolError::Host)
+    export.start(path).map_err(ToolError::Host)
 }
 
 fn add_skill(
@@ -1439,11 +1494,30 @@ fn read_request(index: usize, value: serde_json::Value) -> Result<Request, ToolE
     })
 }
 
+/// The file endings `export.start` writes: a still, and H.264 movies.
+const EXPORT_ENDINGS: &[&str] = &["png", "mp4", "mov", "m4v"];
+
 fn parse_export(arguments: &str) -> Result<Invocation, ToolError> {
     for (keyword, replace) in [("replace", true), ("new", false)] {
         if let Some(path) = headed(arguments, keyword).map(unquoted)
             && !path.is_empty()
         {
+            let ending = Path::new(path)
+                .extension()
+                .map(|ending| ending.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            if !EXPORT_ENDINGS.contains(&ending.as_str()) {
+                return Err(ToolError::BadArguments(format!(
+                    "export.start writes a .png (the frame at the player's time) or a .mp4 or \
+                     .mov (the whole project as H.264 video); name the file with one of those \
+                     endings, not {}",
+                    if ending.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        format!(".{ending}")
+                    }
+                )));
+            }
             return Ok(Invocation::ExportStart {
                 path: path.to_owned(),
                 replace,
@@ -1849,6 +1923,8 @@ mod tests {
     struct Exporter {
         calls: u32,
         path: String,
+        /// What a poll answers; `None` is still writing.
+        done: Option<Result<String, String>>,
     }
 
     impl Export for Exporter {
@@ -1856,6 +1932,13 @@ mod tests {
             self.calls += 1;
             self.path = path.to_owned();
             Ok("export-1".to_owned())
+        }
+
+        fn poll(&mut self, job_id: &str) -> Result<Option<String>, String> {
+            if job_id != "export-1" {
+                return Err(format!("no export {job_id}"));
+            }
+            self.done.clone().transpose()
         }
     }
 
@@ -2056,12 +2139,13 @@ mod tests {
                 "catalog.search",
                 "package.ensure",
                 "export.start",
+                "export.poll",
                 "sandbox.run",
                 "skill.load",
                 "mcp.call",
             ]
         );
-        assert_eq!(TOOL_NAMES.len(), 20);
+        assert_eq!(TOOL_NAMES.len(), 21);
     }
 
     #[test]
@@ -2099,6 +2183,70 @@ mod tests {
                 .is_ok()
         );
         assert!(registry.parse("export.start", "/tmp/cut.mp4").is_err());
+    }
+
+    #[test]
+    fn an_export_is_polled_and_only_a_still_or_a_movie_ending_is_written() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        let run = |registry: &mut TestRegistry, name: &str, arguments: &str| {
+            registry.run_tool(&ToolCall {
+                id: "e".to_owned(),
+                name: name.to_owned(),
+                arguments: arguments.to_owned(),
+            })
+        };
+        // Still writing: the start names the job, and a poll says pending.
+        let started = run(&mut registry, "export.start", "new /tmp/cut.mp4");
+        assert_eq!(started.content, "job=export-1");
+        assert_eq!(
+            run(&mut registry, "export.poll", "export-1").content,
+            "pending"
+        );
+        registry.export.done = Some(Ok("wrote /tmp/cut.mp4".to_owned()));
+        assert_eq!(
+            run(&mut registry, "export.poll", "export-1").content,
+            "finished: wrote /tmp/cut.mp4"
+        );
+        // A host that writes before it answers says so in the start.
+        let at_once = run(&mut registry, "export.start", "new /tmp/again.mov");
+        assert_eq!(at_once.content, "job=export-1 finished: wrote /tmp/cut.mp4");
+        registry.export.done = Some(Err("the disk is full".to_owned()));
+        let failed = run(&mut registry, "export.poll", "export-1");
+        assert!(failed.is_error && failed.content.contains("disk is full"));
+        assert!(run(&mut registry, "export.poll", "export-9").is_error);
+        assert!(run(&mut registry, "export.poll", "").is_error);
+        // Another ending would be a movie under the wrong name: refused
+        // before anything starts.
+        let calls = registry.export.calls;
+        for path in [
+            "/tmp/still.jpg",
+            "/tmp/clip.gif",
+            "/tmp/noending",
+            "/tmp/a.webm",
+        ] {
+            let refused = run(&mut registry, "export.start", &format!("new {path}"));
+            assert!(refused.is_error, "{path}");
+            assert!(refused.content.contains(".png"), "{}", refused.content);
+        }
+        assert_eq!(registry.export.calls, calls);
+        assert!(
+            run(&mut registry, "export.start", "new /tmp/FRAME.PNG")
+                .content
+                .starts_with("job=")
+        );
+    }
+
+    #[test]
+    fn a_huge_answer_is_cut_with_a_note() {
+        let long = "x".repeat(super::RESULT_LIMIT + 500);
+        let cut = super::within_limit(long.clone());
+        assert!(cut.len() < long.len());
+        assert!(cut.contains(&format!("cut: {} characters in all", long.len())));
+        assert_eq!(super::within_limit("short".to_owned()), "short");
+        // A multi-byte letter on the limit is not split.
+        let wide = "é".repeat(super::RESULT_LIMIT);
+        assert!(super::within_limit(wide).contains("(cut: "));
     }
 
     #[test]

@@ -53,7 +53,7 @@ pub use mcp_connection::{LIST_TOOLS, McpConnection, McpWire};
 pub use mcp_server::{MCP_PROTOCOL_VERSION, McpServer};
 pub use model::{
     CloudModel, Completion, CompletionRequest, LocalModel, Message, Model, ModelError, ToolCall,
-    ToolDefinition,
+    ToolDefinition, shorten_results,
 };
 pub use ops::{Op, describe as describe_ops, ops};
 pub use sandbox::{
@@ -66,9 +66,9 @@ pub use settings_tool::{SettingsTool, SettingsToolError, SettingsView};
 pub use skill::{Skill, SkillError, SkillLibrary, SkillPlan, parse_skill_md};
 pub use subagent::{Subagent, SubagentError, SubagentResult, allowed_tools, parent_apply};
 pub use tools::{
-    Catalog, Export, Invocation, Media, MediaInfo, Packages, Player, Registry, Speech, SpeechJob,
-    SpeechPoll, TOOL_NAMES, ToolError, TrackAsk, TrackJob, Tracking, assistant_approvals,
-    pending_approvals, tool_definitions,
+    Catalog, Export, Invocation, Media, MediaInfo, Packages, Player, RESULT_LIMIT, Registry,
+    Speech, SpeechJob, SpeechPoll, TOOL_NAMES, ToolError, TrackAsk, TrackJob, Tracking,
+    assistant_approvals, pending_approvals, tool_definitions,
 };
 
 #[cfg(test)]
@@ -185,6 +185,10 @@ mod tests {
     impl Export for Host {
         fn start(&mut self, _path: &str) -> Result<String, String> {
             Ok("export".to_owned())
+        }
+
+        fn poll(&mut self, _job_id: &str) -> Result<Option<String>, String> {
+            Ok(None)
         }
     }
 

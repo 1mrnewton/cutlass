@@ -107,10 +107,23 @@ impl Tracking for Tracks {
     }
 }
 
-/// An export the window starts once the call is done.
-#[derive(Default)]
+/// An export the assistant asked for: its job id, the file, and what
+/// became of it once that is known.
+pub(super) struct AgentExport {
+    id: String,
+    path: std::path::PathBuf,
+    /// `None` while it is still writing.
+    done: Option<Result<String, String>>,
+}
+
+/// An export the window starts once the call is done, and the last one's
+/// state as it stood when the call began.
 struct Exports {
+    /// The id the next export gets.
+    next: String,
     path: Option<String>,
+    /// The last export's id and what a poll of it answers.
+    now: Option<(String, Result<Option<String>, String>)>,
 }
 
 impl Export for Exports {
@@ -119,7 +132,16 @@ impl Export for Exports {
             return Err("name the file to export to".to_owned());
         }
         self.path = Some(path.to_owned());
-        Ok("export".to_owned())
+        Ok(self.next.clone())
+    }
+
+    fn poll(&mut self, job_id: &str) -> Result<Option<String>, String> {
+        match &self.now {
+            Some((id, state)) if id == job_id => state.clone(),
+            // The one this call asked for starts when the call is done.
+            _ if self.path.is_some() && job_id == self.next => Ok(None),
+            _ => Err(format!("no export {job_id}; export.start names its job")),
+        }
     }
 }
 
@@ -176,6 +198,48 @@ fn call_id(call: &ToolCall) -> String {
 }
 
 impl Shell {
+    /// The id the assistant's next export gets.
+    pub(crate) fn agent_export_next(&self) -> String {
+        format!("export-{}", self.agent_exports.saturating_add(1))
+    }
+
+    /// Note that the assistant's export to `path` began, as job `id`.
+    /// `done` is its result when it was written before this returned.
+    pub(crate) fn agent_export_began(
+        &mut self,
+        id: String,
+        path: std::path::PathBuf,
+        done: Option<Result<String, String>>,
+    ) {
+        self.agent_exports = self.agent_exports.saturating_add(1);
+        self.agent_export = Some(AgentExport { id, path, done });
+    }
+
+    /// The assistant's last export and what a poll of it answers: `None`
+    /// while it writes, the file once written, or why it failed.
+    pub(crate) fn agent_export_now(&mut self) -> Option<(String, Result<Option<String>, String>)> {
+        self.poll_job();
+        let writing = self.job().is_some_and(|job| job.label == "Export");
+        let written = self.exported.clone();
+        let notice = self.notice.clone();
+        let export = self.agent_export.as_mut()?;
+        if export.done.is_none() && !writing {
+            export.done = Some(if written.as_deref() == Some(export.path.as_path()) {
+                Ok(format!("wrote {}", export.path.display()))
+            } else if notice.is_empty() {
+                Err("the export stopped before it finished".to_owned())
+            } else {
+                Err(notice)
+            });
+        }
+        let state = match &export.done {
+            None => Ok(None),
+            Some(Ok(wrote)) => Ok(Some(wrote.clone())),
+            Some(Err(why)) => Err(why.clone()),
+        };
+        Some((export.id.clone(), state))
+    }
+
     /// Run one tool call from the assistant on the open project. `allowed`
     /// is what the user allowed for this call; a call that needs anything
     /// else does nothing and says what it wants.
@@ -215,6 +279,11 @@ impl Shell {
             now: self.agent_tracks_now(),
             started: None,
         };
+        let exports = Exports {
+            next: self.agent_export_next(),
+            path: None,
+            now: self.agent_export_now(),
+        };
         let mut servers = std::mem::take(&mut self.mcp_servers);
         servers.configure(&self.settings.mcp_servers);
         let sandbox = cutlass_agent::Switched::from_settings(
@@ -230,7 +299,7 @@ impl Shell {
             Bundled,
             (
                 Bundled,
-                Exports::default(),
+                exports,
                 sandbox,
                 Asked {
                     allowed,
@@ -296,22 +365,31 @@ impl Shell {
         }
         if let Some(path) = exported {
             let replace = call.arguments.trim_start().starts_with("replace");
-            let codec = if path.to_ascii_lowercase().ends_with(".png") {
-                CodecId::Png
-            } else {
-                CodecId::H264
-            };
+            let still = path.to_ascii_lowercase().ends_with(".png");
+            let codec = if still { CodecId::Png } else { CodecId::H264 };
+            let id = self.agent_export_next();
+            let file = std::path::PathBuf::from(&path);
             let started = self.export(ExportRequest {
-                path: path.into(),
+                path: file.clone(),
                 codec,
                 replace,
                 ..ExportRequest::default()
             });
-            if let Err(error) = started {
-                outcome = ToolOutcome {
-                    content: error.to_string(),
-                    is_error: true,
-                };
+            match started {
+                Err(error) => {
+                    outcome = ToolOutcome {
+                        content: error.to_string(),
+                        is_error: true,
+                    };
+                }
+                // A still is written by the time `export` returns.
+                Ok(()) if still => {
+                    let wrote = format!("wrote {path}");
+                    outcome.content = format!("job={id} finished: {wrote}");
+                    self.agent_export_began(id, file, Some(Ok(wrote)));
+                }
+                // A movie is a job: `export.poll` says when it lands.
+                Ok(()) => self.agent_export_began(id, file, None),
             }
         }
         AgentRun { outcome, wants }
@@ -514,6 +592,83 @@ mod tests {
             Some(cutlass_agent::ApprovalAction::EnableCloudModel)
         );
         assert!(!desktop.settings().model.cloud);
+    }
+
+    #[test]
+    fn the_assistant_follows_a_movie_export_to_its_end() {
+        let temp = Temp::new();
+        // A fifth of a second of blue, 64 by 32.
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 64;
+        draft.canvas_config.height = 32;
+        draft
+            .materials
+            .material_colors
+            .push(cutlass_model::MaterialColorConfig {
+                id: "color".into(),
+                is_color_clip: true,
+                solid_color: "0xFF336699".to_owned(),
+                ..cutlass_model::MaterialColorConfig::default()
+            });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("blue", "color", TimeRange::new(0, 200_000)));
+        draft.duration = Micros(200_000);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        // A still is written at once, and the start says so.
+        let still = temp.path.join("frame.png");
+        let frame = desktop
+            .run_agent_tool(
+                &call("export.start", &format!("new {}", still.display())),
+                &[],
+            )
+            .outcome;
+        assert_eq!(
+            frame.content,
+            format!("job=export-1 finished: wrote {}", still.display())
+        );
+        // A movie is a job: the start names it and a poll follows it.
+        let movie = temp.path.join("cut.mp4");
+        let started = desktop
+            .run_agent_tool(
+                &call("export.start", &format!("new {}", movie.display())),
+                &[],
+            )
+            .outcome;
+        assert_eq!(started.content, "job=export-2", "{}", started.content);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let polled = loop {
+            let polled = desktop
+                .run_agent_tool(&call("export.poll", "export-2"), &[])
+                .outcome;
+            if polled.content != "pending" || std::time::Instant::now() > until {
+                break polled;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(!polled.is_error, "{}", polled.content);
+        assert_eq!(
+            polled.content,
+            format!("finished: wrote {}", movie.display())
+        );
+        assert_eq!(&std::fs::read(&movie).unwrap()[4..8], b"ftyp");
+        // An older job is not this one, and an ending that is neither a
+        // still nor a movie is refused before anything is written.
+        let old = desktop
+            .run_agent_tool(&call("export.poll", "export-1"), &[])
+            .outcome;
+        assert!(old.is_error, "{}", old.content);
+        let photo = temp.path.join("frame.jpg");
+        let refused = desktop
+            .run_agent_tool(
+                &call("export.start", &format!("new {}", photo.display())),
+                &[],
+            )
+            .outcome;
+        assert!(refused.is_error && refused.content.contains(".png"));
+        assert!(!photo.exists());
     }
 
     #[test]

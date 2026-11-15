@@ -47,7 +47,11 @@ pub enum Entry {
 /// A tool call waiting for the user's allow.
 struct Pending {
     call: ToolCall,
+    /// What the user is asked now.
     action: ApprovalAction,
+    /// What they already allowed for this call; a call may need more than
+    /// one allow, and asks for each in turn.
+    allowed: Vec<ApprovalAction>,
     refused: ToolOutcome,
     answer: Sender<ToolOutcome>,
 }
@@ -55,6 +59,8 @@ struct Pending {
 /// From the model's thread to the window's.
 enum Event {
     Said(String),
+    /// A message joined the turn's transcript.
+    Heard(Message),
     Tool {
         call: ToolCall,
         answer: Sender<ToolOutcome>,
@@ -82,6 +88,9 @@ pub struct Assistant {
     /// The panel is showing.
     pub open: bool,
     history: Vec<Message>,
+    /// The messages of the turn running now, as the loop adds them, so a
+    /// turn that fails or is stopped is still remembered.
+    turn: Vec<Message>,
     running: Option<Running>,
     pending: Option<Pending>,
     /// Where this conversation is kept; `None` keeps it nowhere.
@@ -116,9 +125,25 @@ impl Assistant {
             *allowed = Some(allow);
         }
         let outcome = if allow {
-            shell
-                .run_agent_tool(&pending.call, &[pending.action])
-                .outcome
+            let mut allowed = pending.allowed;
+            allowed.push(pending.action);
+            let run = shell.run_agent_tool(&pending.call, &allowed);
+            if let Some(action) = run.wants {
+                // The call needs another allow: ask for that one too.
+                self.entries.push(Entry::Ask {
+                    question: action.prompt(),
+                    allowed: None,
+                });
+                self.pending = Some(Pending {
+                    call: pending.call,
+                    action,
+                    allowed,
+                    refused: run.outcome,
+                    answer: pending.answer,
+                });
+                return;
+            }
+            run.outcome
         } else {
             ToolOutcome {
                 content: format!("the user said no: {}", pending.refused.content),
@@ -174,6 +199,7 @@ impl Assistant {
     {
         let (events, received) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
+        self.turn.clear();
         let history = self.history.clone();
         let ask = ask.to_owned();
         let watched = Watched {
@@ -253,6 +279,13 @@ impl Assistant {
         }
         if let Some(running) = self.running.take() {
             running.stop.store(true, Ordering::Relaxed);
+            // What the loop already sent is part of the turn.
+            for event in running.events.try_iter() {
+                if let Event::Heard(message) = event {
+                    self.turn.push(message);
+                }
+            }
+            self.keep_turn();
             for entry in &mut self.entries {
                 if let Entry::Step {
                     result: result @ None,
@@ -274,6 +307,45 @@ impl Assistant {
         self.stop();
         self.entries.clear();
         self.history.clear();
+        self.turn.clear();
+        self.keep();
+    }
+
+    /// Remember the turn that ended without an answer, failed or stopped:
+    /// what was asked, what the model said and each tool it ran, so the
+    /// next turn knows what was already changed. A call that never ran is
+    /// answered as stopped, since a transcript may not leave one open. A
+    /// turn with only its ask did nothing and is not kept.
+    fn keep_turn(&mut self) {
+        let mut turn = std::mem::take(&mut self.turn);
+        if turn.len() <= 1 {
+            return;
+        }
+        let last_reply = turn
+            .iter()
+            .rposition(|message| matches!(message, Message::Assistant { .. }));
+        if let Some(at) = last_reply
+            && let Message::Assistant { calls, .. } = &turn[at]
+        {
+            let unanswered: Vec<ToolCall> = calls
+                .iter()
+                .filter(|call| {
+                    !turn[at + 1..].iter().any(|message| {
+                        matches!(message, Message::Tool { call_id, .. } if *call_id == call.id)
+                    })
+                })
+                .cloned()
+                .collect();
+            for call in unanswered {
+                turn.push(Message::Tool {
+                    call_id: call.id,
+                    name: call.name,
+                    content: "stopped before it ran".to_owned(),
+                    is_error: true,
+                });
+            }
+        }
+        self.history.append(&mut turn);
         self.keep();
     }
 
@@ -336,6 +408,7 @@ impl Assistant {
             };
             match event {
                 Event::Said(text) => self.entries.push(Entry::Said(text)),
+                Event::Heard(message) => self.turn.push(message),
                 Event::Helper {
                     call,
                     outcome: None,
@@ -368,6 +441,7 @@ impl Assistant {
                         self.pending = Some(Pending {
                             call,
                             action,
+                            allowed: Vec::new(),
                             refused: run.outcome,
                             answer,
                         });
@@ -386,13 +460,24 @@ impl Assistant {
                     self.running = None;
                     match result {
                         Ok((text, messages)) => {
-                            if !text.is_empty() {
+                            if text.is_empty() {
+                                // A model that ends on nothing leaves the
+                                // user looking at a turn that just stopped.
+                                self.entries.push(Entry::Notice(
+                                    "The assistant finished without saying anything. Ask again, or try another model."
+                                        .to_owned(),
+                                ));
+                            } else {
                                 self.entries.push(Entry::Said(text));
                             }
+                            self.turn.clear();
                             self.history = messages;
                             self.keep();
                         }
-                        Err(error) => self.entries.push(Entry::Notice(explain(error))),
+                        Err(error) => {
+                            self.entries.push(Entry::Notice(explain(error)));
+                            self.keep_turn();
+                        }
                     }
                     return false;
                 }
@@ -549,6 +634,10 @@ impl ToolSink for Relay {
             return stopped();
         }
         answered.recv().unwrap_or_else(|_| stopped())
+    }
+
+    fn heard(&mut self, message: &Message) {
+        let _ = self.events.send(Event::Heard(message.clone()));
     }
 
     fn helper_started(&mut self, call: &ToolCall) {
@@ -868,6 +957,129 @@ mod tests {
         assert!(!assistant.busy());
         assistant.clear();
         assert!(assistant.entries.is_empty());
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_turn_that_hits_the_step_cap_or_is_stopped_is_remembered() {
+        let (mut shell, path) = shell_with_project("remember");
+        let mut assistant = Assistant::default();
+        let seek = |id: &str, time: &str| {
+            completion(
+                "",
+                vec![ToolCall {
+                    id: id.to_owned(),
+                    name: "player.seek".to_owned(),
+                    arguments: time.to_owned(),
+                }],
+            )
+        };
+        // Two rounds allowed, and the model wants a third.
+        let model = LocalModel::scripted(vec![
+            seek("1", "1000000"),
+            seek("2", "2000000"),
+            completion("never said", Vec::new()),
+        ]);
+        assistant.start(model, 2, "move along");
+        finish(&mut assistant, &mut shell);
+        assert!(
+            matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("step cap")),
+            "{:?}",
+            assistant.entries
+        );
+        assert_eq!(shell.playhead(), Micros(2_000_000));
+        // The ask, both replies and both results are kept for the next turn.
+        assert_eq!(assistant.history.len(), 5, "{:?}", assistant.history);
+        assert!(matches!(&assistant.history[0], Message::User { text } if text == "move along"));
+        assert!(matches!(
+            &assistant.history[4],
+            Message::Tool { call_id, is_error: false, .. } if call_id == "2"
+        ));
+        // The next turn's model is sent them.
+        let next = LocalModel::scripted(vec![completion("Carrying on.", Vec::new())]);
+        assistant.start(next, 8, "and now?");
+        finish(&mut assistant, &mut shell);
+        assert_eq!(assistant.history.len(), 7);
+
+        // A turn stopped while a call waits for an allow keeps the call,
+        // answered as stopped, so the transcript has no call left open.
+        let taken = path.join("taken.png");
+        std::fs::write(&taken, b"old").unwrap();
+        let model = LocalModel::scripted(vec![completion(
+            "Replacing it.",
+            vec![ToolCall {
+                id: "r".to_owned(),
+                name: "export.start".to_owned(),
+                arguments: format!("replace {}", taken.display()),
+            }],
+        )]);
+        assistant.start(model, 8, "export over it");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !assistant.asking() {
+            assert!(assistant.poll(&mut shell), "the turn ended without asking");
+            assert!(Instant::now() < deadline, "no question came");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assistant.stop();
+        assert_eq!(assistant.history.len(), 10, "{:?}", assistant.history);
+        assert!(matches!(
+            assistant.history.last(),
+            Some(Message::Tool { call_id, content, is_error: true, .. })
+                if call_id == "r" && content.contains("stopped")
+        ));
+        assert_eq!(std::fs::read(&taken).unwrap(), b"old");
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn an_empty_answer_is_said_and_a_call_asks_for_each_allow_it_needs() {
+        let (mut shell, path) = shell_with_project("allows");
+        let mut assistant = Assistant::default();
+        assistant.start(
+            LocalModel::scripted(vec![completion("", Vec::new())]),
+            8,
+            "hello",
+        );
+        finish(&mut assistant, &mut shell);
+        assert!(
+            matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("without saying anything")),
+            "{:?}",
+            assistant.entries
+        );
+
+        // One settings change that needs two allows asks twice, then lands.
+        let file = path.join("settings-home").join("settings.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        shell.keep_settings_file(file.clone(), 0);
+        let model = LocalModel::scripted(vec![
+            completion(
+                "",
+                vec![ToolCall {
+                    id: "s".to_owned(),
+                    name: "settings.set".to_owned(),
+                    arguments: r#"{"expected_generation":0,"changes":{"model":{"cloud":true},"sandbox":{"online":true}}}"#.to_owned(),
+                }],
+            ),
+            completion("Both on.", Vec::new()),
+        ]);
+        assistant.start(model, 8, "turn both on");
+        let mut asked = 0;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while assistant.poll(&mut shell) {
+            assert!(Instant::now() < deadline, "the turn did not finish");
+            if assistant.asking() {
+                asked += 1;
+                assert!(!shell.settings().model.cloud, "written before every allow");
+                assistant.decide(&mut shell, true);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(asked, 2);
+        assert!(shell.settings().model.cloud && shell.settings().sandbox.online);
+        assert_eq!(
+            assistant.entries.last(),
+            Some(&Entry::Said("Both on.".to_owned()))
+        );
         let _ = std::fs::remove_dir_all(&path);
     }
 

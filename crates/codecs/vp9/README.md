@@ -245,8 +245,8 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   4.2 s and 7.7 s at 1 Mb/s, 6.9 s, 5.6 s and 8.1 s at 2, 8.8 s, 9.6 s and
   9.6 s at 3), within 3.2% of the bitrate (3.8% under it at 0.5 Mb/s). On
   a pan by a sample and a half a picture (a fractal panned at 2560×1440
-  and scaled down, with grain), 13.8% / 17.3% fewer bits than before at
-  the same PSNR-Y / averaged PSNR, in less time, most of it the noise's
+  and scaled down, with grain), 15.1% / 18.1% fewer bits than before at
+  the same PSNR-Y / averaged PSNR, in a third less time, most of it the noise's
   end of the search. One pass is unchanged, bit for bit, as every
   one-pass stream.
 

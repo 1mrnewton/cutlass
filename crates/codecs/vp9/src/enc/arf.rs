@@ -278,8 +278,7 @@ pub fn phase_error<P: EncPixel>(
 /// The whole-sample vector `to` moved by from `from` (luma, `w`×`h`), each
 /// component the median of those of a sample of 16×16 blocks of detail
 /// that moved (as [`motion`]), searched near `guess` (the vector the
-/// picture before moved by: a pan goes on), or all around when too few
-/// blocks moved so; zero when under eight did.
+/// picture before moved by: a pan goes on); zero when under eight did.
 pub fn shift<P: EncPixel>(
     from: &[P],
     to: &[P],
@@ -289,27 +288,17 @@ pub fn shift<P: EncPixel>(
 ) -> (isize, isize) {
     let (sf, st) = (Small::new(from, w, h), Small::new(to, w, h));
     let (mut xs, mut ys) = (Vec::new(), Vec::new());
-    for (near, range) in [
-        ((guess.0.div_euclid(4), guess.1.div_euclid(4)), SHIFT_RANGE),
-        ((0, 0), COARSE_RANGE),
-    ] {
-        for by in (0..h.saturating_sub(15)).step_by(32) {
-            for bx in (0..w.saturating_sub(15)).step_by(32) {
-                let c = st.find_near(&sf, bx / 4, by / 4, 4, 4, near, range);
-                let (mv, sse) = search(to, from, w, h, bx, by, 16, 16, &[c, guess], 2);
-                let still = P::sse(&to[by * w + bx..], w, &from[by * w + bx..], w, 16, 16);
-                if sse * 4 < still {
-                    xs.push(mv.0);
-                    ys.push(mv.1);
-                }
+    let near = (guess.0.div_euclid(4), guess.1.div_euclid(4));
+    for by in (0..h.saturating_sub(15)).step_by(32) {
+        for bx in (0..w.saturating_sub(15)).step_by(32) {
+            let c = st.find_near(&sf, bx / 4, by / 4, 4, 4, near, SHIFT_RANGE);
+            let (mv, sse) = search(to, from, w, h, bx, by, 16, 16, &[c, guess], 2);
+            let still = P::sse(&to[by * w + bx..], w, &from[by * w + bx..], w, 16, 16);
+            if sse * 4 < still {
+                xs.push(mv.0);
+                ys.push(mv.1);
             }
         }
-        // (Still content searches no further.)
-        if xs.len() >= 8 || guess == (0, 0) {
-            break;
-        }
-        xs.clear();
-        ys.clear();
     }
     if xs.len() < 8 {
         return (0, 0);

@@ -787,29 +787,31 @@ fn integer_sound(codec: cutlass_codec::CodecId) -> bool {
     )
 }
 
-/// `pcm` as 16-bit samples, clipped at full scale.
-/// The mix as `codec` takes it: 16-bit for PCM and FLAC, and for ALAC
-/// floats clipped to full scale, which a lossless encoder cannot do itself.
+/// The mix as `codec` takes it: 16-bit for PCM and FLAC, floats for the
+/// rest, and clipped at full scale either way. Loud clips sum past full
+/// scale, and an encoder refuses such a sample, which failed the export.
+/// A sample that is not a number is left for the encoder to refuse, except
+/// for ALAC, which takes silence there.
 fn coded_pcm(codec: cutlass_codec::CodecId, pcm: Pcm) -> Result<Pcm, ExportError> {
-    match codec {
-        _ if integer_sound(codec) => to_i16(pcm),
-        cutlass_codec::CodecId::Alac => match pcm.as_f32() {
-            Some(samples) if samples.iter().any(|sample| !(-1.0..=1.0).contains(sample)) => {
-                let clipped = samples
-                    .iter()
-                    .map(|sample| {
-                        if sample.is_nan() {
-                            0.0
-                        } else {
-                            sample.clamp(-1.0, 1.0)
-                        }
-                    })
-                    .collect();
-                Pcm::from_f32(pcm.rate, pcm.layout.clone(), clipped)
-                    .map_err(|_| ExportError::AudioLayout)
-            }
-            _ => Ok(pcm),
-        },
+    if integer_sound(codec) {
+        return to_i16(pcm);
+    }
+    let silent_nan = codec == cutlass_codec::CodecId::Alac;
+    match pcm.as_f32() {
+        Some(samples) if samples.iter().any(|sample| !(-1.0..=1.0).contains(sample)) => {
+            let clipped = samples
+                .iter()
+                .map(|sample| {
+                    if sample.is_nan() && silent_nan {
+                        0.0
+                    } else {
+                        sample.clamp(-1.0, 1.0)
+                    }
+                })
+                .collect();
+            Pcm::from_f32(pcm.rate, pcm.layout.clone(), clipped)
+                .map_err(|_| ExportError::AudioLayout)
+        }
         _ => Ok(pcm),
     }
 }
@@ -1956,6 +1958,74 @@ mod tests {
             .expect("audio packet");
         assert_eq!(audio.timescale().ticks_per_second(), 4_000);
         samples_of(audio)
+    }
+
+    #[test]
+    fn a_mix_past_full_scale_is_clipped_and_not_refused() {
+        let mut request = gif_request(TimeRange::new(0, 1_000));
+        request.frame_rate = FrameRate {
+            numerator: 1_000,
+            denominator: 1,
+        };
+        request.audio = Some(audio_settings());
+        // Two full-scale clips sum to 2.0, and a boosted one reaches -3.0.
+        let mut loud = color_draft(240, 135, 1_000_000);
+        push_sound(&mut loud, "loud", 1.0, 0, false);
+        push_sound(&mut loud, "other", 1.0, 0, false);
+        assert_eq!(audio_bytes(&loud, &request), vec![1.0; 4]);
+        let mut boosted = color_draft(240, 135, 1_000_000);
+        push_sound(&mut boosted, "loud", -3.0, 0, false);
+        assert_eq!(audio_bytes(&boosted, &request), vec![-1.0; 4]);
+        // A mix inside full scale is handed over as it is.
+        let mut quiet = color_draft(240, 135, 1_000_000);
+        push_sound(&mut quiet, "loud", 0.75, 0, false);
+        assert_eq!(audio_bytes(&quiet, &request), vec![0.75; 4]);
+    }
+
+    #[test]
+    fn the_aac_encoder_takes_the_clipped_mix_and_refuses_the_raw_sum() {
+        let mut request = gif_request(TimeRange::new(0, 200_000));
+        request.audio = Some(AudioExport {
+            codec: CodecId::Aac,
+            bitrate: 128_000,
+            sample_rate: 48_000,
+            channels: 2,
+            limiter: 0,
+        });
+        let mut factory = EncodeFactory::new();
+        cutlass_aac::register_encoders(&mut factory);
+        // Two full-scale clips, summed.
+        let sum = Pcm::from_f32(48_000, ChannelLayout::stereo(), vec![2.0; 4_096]).expect("pcm");
+        let mut raw = super::open_audio(&factory, &request)
+            .expect("open")
+            .expect("an encoder");
+        assert!(matches!(
+            raw.push(&AudioInput { pcm: sum.clone() }),
+            Err(CodecError::OutOfRange)
+        ));
+        let clipped = super::coded_pcm(CodecId::Aac, sum).expect("clipped");
+        assert!(
+            clipped
+                .as_f32()
+                .expect("floats")
+                .iter()
+                .all(|sample| *sample == 1.0)
+        );
+        let mut encoder = super::open_audio(&factory, &request)
+            .expect("open")
+            .expect("an encoder");
+        encoder
+            .push(&AudioInput { pcm: clipped })
+            .expect("the encoder takes the clipped mix");
+        // A sample that is not a number is still the encoder's to refuse.
+        let broken =
+            Pcm::from_f32(48_000, ChannelLayout::stereo(), vec![f32::NAN, 2.0]).expect("pcm");
+        let kept = super::coded_pcm(CodecId::Aac, broken).expect("kept");
+        assert!(kept.as_f32().expect("floats")[0].is_nan());
+        let silent =
+            Pcm::from_f32(48_000, ChannelLayout::stereo(), vec![f32::NAN, 2.0]).expect("pcm");
+        let alac = super::coded_pcm(CodecId::Alac, silent).expect("alac");
+        assert_eq!(alac.as_f32().expect("floats"), [0.0, 1.0]);
     }
 
     fn wav_readers() -> ReaderFactory {

@@ -10,32 +10,31 @@
 
 /// Hints rows `0..rows` of a region of `s`, row `r` being `s[at + r *
 /// stride..][..w]`, into the cache: one hint for each 64-byte line a row
-/// touches. Rows past the end of `s` are left out.
+/// touches. Rows that do not lie whole in `s` are left out.
 #[inline]
 pub fn rect<T>(s: &[T], at: usize, stride: usize, w: usize, rows: usize) {
     #[cfg(target_arch = "x86_64")]
     {
         let size = size_of::<T>();
-        if size == 0 || w == 0 {
+        if size == 0 || size > 64 || w == 0 || at + w > s.len() {
             return;
         }
+        // Samples a line, and the rows that fit.
+        let step = 64 / size;
+        let fit = match stride {
+            0 => 1,
+            _ => (s.len() - at - w) / stride + 1,
+        };
         let base = s.as_ptr() as usize;
-        for r in 0..rows {
-            let row = at + r * stride;
-            // The row's first sample's place in its line, and the lines
-            // from it to the row's last.
-            let off = (base + row * size) % 64;
-            let lines = (off + w * size).div_ceil(64);
-            for k in 0..lines {
-                let i = if k == 0 {
-                    row
-                } else {
-                    row + (k * 64 - off).div_ceil(size)
-                };
-                if i >= s.len() {
-                    return;
-                }
-                line(&s[i]);
+        for r in 0..rows.min(fit) {
+            let start = at + r * stride;
+            let row = &s[start..start + w];
+            // The first sample, then the first of each line after its.
+            line(&row[0]);
+            let mut i = step - ((base + start * size) % 64) / size;
+            while i < w {
+                line(&row[i]);
+                i += step;
             }
         }
     }

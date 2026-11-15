@@ -292,14 +292,17 @@ fn filt<const N: usize>(
     let out_q1 = pick(q1, Some(n_q1), f8_q1);
     let out_q2 = pick(q2, None, f8_q2);
 
-    let inner = |s: &mut [__m256i; N]| {
-        s[c - 3] = out_p2;
-        s[c - 2] = out_p1;
-        s[c - 1] = out_p0;
-        s[c] = out_q0;
-        s[c + 1] = out_q1;
-        s[c + 2] = out_q2;
-    };
+    // A macro, not a closure: the closure stayed out of line.
+    macro_rules! inner {
+        () => {
+            s[c - 3] = out_p2;
+            s[c - 2] = out_p1;
+            s[c - 1] = out_p0;
+            s[c] = out_q0;
+            s[c + 1] = out_q1;
+            s[c + 2] = out_q2;
+        };
+    }
     if N == 16 {
         // Filter 16: the running sum of the scalar twin, in wrapping
         // 16-bit lanes (its true value is below 65536).
@@ -315,7 +318,7 @@ fn filt<const N: usize>(
             _mm256_and_si256(flat, flat2_ok),
         );
         if none(flat2) {
-            inner(s);
+            inner!();
             return Changed::Inner;
         }
         let mut sum = a(
@@ -337,13 +340,13 @@ fn filt<const N: usize>(
             out16[k] = r16(sum);
         }
         // Positions p6 to q6 are s[1] to s[14].
-        inner(s);
+        inner!();
         for k in 1..15 {
             s[k] = _mm256_blendv_epi8(s[k], out16[k - 1], flat2);
         }
         return Changed::All;
     }
-    inner(s);
+    inner!();
     Changed::Inner
 }
 

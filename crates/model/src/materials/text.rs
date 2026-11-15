@@ -186,9 +186,22 @@ pub struct MaterialText {
         skip_serializing_if = "is_nothing"
     )]
     pub background_offset_y: f64,
+    /// The lines bend along an arc. The app's own.
+    #[serde(default, rename = "cutlass_curve_on", skip_serializing_if = "is_false")]
+    pub curve_on: bool,
+    /// How far the lines bend: the degrees of arc the title's width takes,
+    /// up to [`MAX_CURVE`] either way. Above zero they arch up in the
+    /// middle, below zero they dip. Kept while the curve is off. The app's
+    /// own.
+    #[serde(default, rename = "cutlass_curve", skip_serializing_if = "is_nothing")]
+    pub curve: f64,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
 }
+
+/// The most a title's lines bend, in degrees of arc either way: a whole
+/// circle.
+pub const MAX_CURVE: f64 = 360.0;
 
 /// The most axes a title sets a face along.
 pub const MAX_FONT_AXES: usize = 16;
@@ -315,6 +328,8 @@ impl Default for MaterialText {
             background_lines: false,
             background_offset_x: 0.0,
             background_offset_y: 0.0,
+            curve_on: false,
+            curve: 0.0,
             rest: Map::new(),
         }
     }

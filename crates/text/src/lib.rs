@@ -10,6 +10,7 @@
 mod atlas;
 mod bidi;
 mod cache;
+mod curve;
 mod faces;
 mod layout;
 mod linebreak;

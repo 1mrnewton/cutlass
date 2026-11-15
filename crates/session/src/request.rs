@@ -401,6 +401,14 @@ pub enum Request {
     },
     /// Make the text's shadow `opacity` from 0 to 1, on or off.
     SetTextShadowOpacity { segment_id: SegmentId, opacity: f64 },
+    /// Bend the text's lines along an arc `degrees` wide, from -360 to
+    /// 360: above zero they arch up, below zero they dip. Off keeps the
+    /// degrees and draws the lines straight.
+    SetTextCurve {
+        segment_id: SegmentId,
+        on: bool,
+        degrees: f64,
+    },
     /// Make the letters glow in `color`, `strength` and `range` from 0 to 1.
     /// The glow is a bloom effect the clip points at; `glow_id` names a new
     /// one when the clip has none of its own. An empty color takes it off.

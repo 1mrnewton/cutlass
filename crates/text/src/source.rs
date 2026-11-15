@@ -19,6 +19,7 @@ use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 use crate::TextError;
 use crate::atlas::{Atlas, GlyphKind};
 use crate::cache::{TextCache, layout_key};
+use crate::curve::Bend;
 use crate::faces::{FaceSource, NoFaces, Wanted, gather};
 use crate::layout::layout_faces;
 use crate::mesh::{GlyphRecord, TextMesh, build_faces};
@@ -250,6 +251,9 @@ pub struct TextSource {
     patterns: Vec<Pattern>,
     /// Each glyph record's own baseline, in the glyph records' pixels.
     baselines: Vec<f32>,
+    /// How each glyph is turned on a curved line, in the mesh's order;
+    /// empty for straight lines.
+    bends: Vec<Bend>,
     /// For vertical text, each column's right edge, where its underline
     /// runs; empty for lines across.
     columns: Vec<f32>,
@@ -411,7 +415,14 @@ impl TextSource {
                 }
             }
         }
-        let mesh = build_faces(material.id.clone(), &laid, &atlases)?;
+        let mut mesh = build_faces(material.id.clone(), &laid, &atlases)?;
+        let mut baselines: Vec<f32> = laid.glyphs().map(|placed| placed.y).collect();
+        // Lines down the page do not bend.
+        let bends = if material.curve_on && !laid.turned && !laid.vertical() {
+            crate::curve::bend(&mut mesh.glyphs, &mut baselines, material.curve)
+        } else {
+            Vec::new()
+        };
         let style = Style::of(material, glow, laid.font_size)?;
         let mut looks: Vec<Look> = mesh
             .glyphs
@@ -432,7 +443,7 @@ impl TextSource {
             }
         }
         let (origin_x, origin_y, width, height, background) =
-            picture_bounds(&mesh, &style, laid.font_size, &shadows)?;
+            picture_bounds(&mesh, &bends, &style, laid.font_size, &shadows)?;
         let letters = letters_of(&crate::richtext::read(material)?.text, &mesh.glyphs);
         let title = Pattern::of(material, laid.font_size);
         // Each glyph's own bold, lean and underline: its range's, or the
@@ -451,7 +462,6 @@ impl TextSource {
                 )
             })
             .collect();
-        let baselines = laid.glyphs().map(|placed| placed.y).collect();
         let columns = if laid.vertical() {
             laid.lines
                 .iter()
@@ -480,6 +490,7 @@ impl TextSource {
             font_size: laid.font_size,
             patterns,
             baselines,
+            bends,
             columns,
             background,
             origin_x,
@@ -781,6 +792,7 @@ impl TextSource {
                 alpha,
                 shear: self.patterns.get(at).map_or(0.0, |pattern| pattern.shear),
                 baseline: self.baseline(at, &record, &self.mesh.glyphs[at]),
+                bend: self.bends.get(at).copied().filter(|bend| bend.sin != 0.0),
             };
             let bold = self.patterns.get(at).map_or(0.0, |pattern| pattern.bold);
             let reach = look.outline.as_ref().map_or(0.0, |outline| outline.width) + bold;
@@ -968,6 +980,8 @@ struct Mask<'a> {
     shear: f32,
     /// The letter's baseline, in the records' pixels.
     baseline: f32,
+    /// How the letter is turned on a curved line.
+    bend: Option<Bend>,
 }
 
 impl Mask<'_> {
@@ -1000,6 +1014,7 @@ impl Mask<'_> {
             alpha,
             shear,
             baseline,
+            bend,
         } = *self;
         if record.width <= 0.0 || record.height <= 0.0 {
             return;
@@ -1011,6 +1026,40 @@ impl Mask<'_> {
         let top = record.y - origin_y;
         let baseline = baseline - origin_y;
         let texels = pixel(image.width) / record.width;
+        if let Some(bend) = bend {
+            // A turned letter is read back through its turn, over the box
+            // its turned quad covers, grown by what a lean reaches.
+            let mut quad = record.clone();
+            quad.x = left;
+            quad.y = top;
+            let pivot = bend.pivot(&quad);
+            let room = shear.abs() * record.height + 1.0;
+            let [x0, y0, x1, y1] = bend.extent(&quad, room);
+            let (Some((x0, x1)), Some((y0, y1))) = (span(x0, x1, width), span(y0, y1, height))
+            else {
+                return;
+            };
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let (along, down) = bend.unturn((pixel(x) + 0.5, pixel(y) + 0.5), pivot);
+                    let v = (down - top) / record.height;
+                    if !(0.0..1.0).contains(&v) {
+                        continue;
+                    }
+                    let u = (along - shear * (baseline - down) - left) / record.width;
+                    if !(0.0..1.0).contains(&u) {
+                        continue;
+                    }
+                    let Some(covers) = covers_at(image, u, v, texels, grows) else {
+                        continue;
+                    };
+                    if let Ok(index) = usize::try_from(y * width + x) {
+                        put(index, covers.map(|cover| cover * alpha));
+                    }
+                }
+            }
+            return;
+        }
         let (inset_x, inset_y) = if tight {
             self.empty_room(texels, grows)
         } else {
@@ -1225,6 +1274,7 @@ fn covers(range: &TimeRange, time: Micros) -> bool {
 /// one around each line's.
 fn picture_bounds(
     mesh: &TextMesh,
+    bends: &[Bend],
     style: &Style,
     font_size: f32,
     shadows: &[Shadow],
@@ -1234,7 +1284,7 @@ fn picture_bounds(
     let mut max_x = f32::MIN;
     let mut max_y = f32::MIN;
     let mut any = false;
-    for glyph in &mesh.glyphs {
+    for (at, glyph) in mesh.glyphs.iter().enumerate() {
         if glyph.width <= 0.0 || glyph.height <= 0.0 {
             continue;
         }
@@ -1245,10 +1295,19 @@ fn picture_bounds(
             return Err(TextError::Limit);
         }
         any = true;
-        min_x = min_x.min(glyph.x);
-        min_y = min_y.min(glyph.y);
-        max_x = max_x.max(glyph.x + glyph.width);
-        max_y = max_y.max(glyph.y + glyph.height);
+        let [left, top, right, bottom] = bends.get(at).map_or(
+            [
+                glyph.x,
+                glyph.y,
+                glyph.x + glyph.width,
+                glyph.y + glyph.height,
+            ],
+            |bend| bend.extent(glyph, 0.0),
+        );
+        min_x = min_x.min(left);
+        min_y = min_y.min(top);
+        max_x = max_x.max(right);
+        max_y = max_y.max(bottom);
     }
     if !any {
         return Ok((0.0, 0.0, 1, 1, Vec::new()));
@@ -2134,6 +2193,50 @@ mod tests {
     }
 
     #[test]
+    fn a_curve_arches_the_line_and_off_keeps_it_straight() {
+        let straight = material("AAAAA");
+        let (plain_w, plain_h, plain) = picture(&straight);
+        // The first row with ink in each third of the picture.
+        let tops = |width: u32, rgba: &[u8]| {
+            let mut tops = [u32::MAX; 3];
+            for (at, pixel) in rgba.chunks(4).enumerate() {
+                if pixel[3] > 128 {
+                    let (x, y) = (at as u32 % width, at as u32 / width);
+                    let third = ((x * 3) / width).min(2) as usize;
+                    tops[third] = tops[third].min(y);
+                }
+            }
+            tops
+        };
+        let flat = tops(plain_w, &plain);
+        assert!(flat[0].abs_diff(flat[1]) <= 1, "{flat:?}");
+
+        let mut arched = straight.clone();
+        arched.curve_on = true;
+        arched.curve = 120.0;
+        let (width, height, rgba) = picture(&arched);
+        assert!(height > plain_h, "{height} {plain_h}");
+        let [left, middle, right] = tops(width, &rgba);
+        assert!(
+            left > middle + 5 && right > middle + 5,
+            "{left} {middle} {right}"
+        );
+
+        // Dipping, the ends rise above the middle.
+        arched.curve = -120.0;
+        let (width, _, rgba) = picture(&arched);
+        let [left, middle, right] = tops(width, &rgba);
+        assert!(
+            left + 5 < middle && right + 5 < middle,
+            "{left} {middle} {right}"
+        );
+
+        // Off, the bend is kept but the line is drawn straight.
+        arched.curve_on = false;
+        assert_eq!(picture(&arched), (plain_w, plain_h, plain));
+    }
+
+    #[test]
     fn rays_stream_out_further_than_a_soft_glow_and_lean_as_asked() {
         let text = material("AA");
         let glowing = |bloom: &BloomParams| {
@@ -2862,6 +2965,7 @@ mod tests {
                         alpha: 0.8,
                         shear,
                         baseline: record.y + record.height * 0.7,
+                        bend: None,
                     };
                     for grows in [[0.0_f32, 0.0], [0.4, 0.0], [2.0, 0.3], [9.0, 0.0]] {
                         let whole = covered(&mask, grows, false);

@@ -498,6 +498,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             opacity,
         } => text::set_text_shadow_opacity(draft, segment_id, *opacity),
+        Request::SetTextCurve {
+            segment_id,
+            on,
+            degrees,
+        } => text::set_text_curve(draft, segment_id, *on, *degrees),
         Request::SetTextBackground {
             segment_id,
             color,

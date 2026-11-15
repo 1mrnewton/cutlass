@@ -1,6 +1,6 @@
 use cutlass_model::{
-    Draft, MAX_GLOW_LEAN, MaterialEffect, MaterialId, MaterialText, Segment, SegmentId, TimeRange,
-    TrackId, TrackType, segment_bloom,
+    Draft, MAX_CURVE, MAX_GLOW_LEAN, MaterialEffect, MaterialId, MaterialText, Segment, SegmentId,
+    TimeRange, TrackId, TrackType, segment_bloom,
 };
 
 use super::locate;
@@ -435,6 +435,24 @@ pub fn set_text_shadow_opacity(
         return Err(EditError::TextStyle);
     }
     draft.materials.texts[index].shadow_alpha = opacity;
+    Ok(())
+}
+
+/// Bend the lines along an arc `degrees` wide, up to [`MAX_CURVE`] either
+/// way, or draw them straight while keeping the degrees.
+pub fn set_text_curve(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    on: bool,
+    degrees: f64,
+) -> Result<(), EditError> {
+    let index = own_text(draft, segment_id)?;
+    if !(-MAX_CURVE..=MAX_CURVE).contains(&degrees) {
+        return Err(EditError::TextStyle);
+    }
+    let text = &mut draft.materials.texts[index];
+    text.curve_on = on;
+    text.curve = degrees;
     Ok(())
 }
 
@@ -1141,6 +1159,33 @@ mod tests {
         ] {
             assert_eq!(session.apply(6, &[request]).unwrap_err(), error);
         }
+    }
+
+    #[test]
+    fn a_curve_bends_and_straightens_keeping_its_degrees() {
+        let mut session = open();
+        let curve = |on: bool, degrees: f64| Request::SetTextCurve {
+            segment_id: "a".into(),
+            on,
+            degrees,
+        };
+        let text = |session: &Session| {
+            let text = &session.draft().materials.texts[0];
+            (text.curve_on, text.curve)
+        };
+        session.apply(0, &[curve(true, 72.0)]).unwrap();
+        assert_eq!(text(&session), (true, 72.0));
+        session.apply(1, &[curve(false, 72.0)]).unwrap();
+        assert_eq!(text(&session), (false, 72.0));
+        session.apply(2, &[curve(true, -360.0)]).unwrap();
+        assert_eq!(text(&session), (true, -360.0));
+        for degrees in [361.0, -400.0, f64::NAN] {
+            assert_eq!(
+                session.apply(3, &[curve(true, degrees)]).unwrap_err(),
+                EditError::TextStyle
+            );
+        }
+        assert_eq!(text(&session), (true, -360.0));
     }
 
     #[test]

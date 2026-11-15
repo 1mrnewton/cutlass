@@ -96,6 +96,9 @@ pub struct TextLook {
     pub glow_lean_y: f64,
     /// The bubble's key; empty for a plain box or none.
     pub bubble: String,
+    /// The lines bend along an arc `curve` degrees wide.
+    pub curve_on: bool,
+    pub curve: f64,
 }
 
 /// What a part takes when its color is first picked and its numbers are
@@ -238,6 +241,8 @@ fn look_of(
         glow_lean_x: glow.lean_x,
         glow_lean_y: glow.lean_y,
         bubble: text.bubble.clone(),
+        curve_on: text.curve_on,
+        curve: text.curve,
     })
 }
 

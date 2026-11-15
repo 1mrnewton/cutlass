@@ -59,10 +59,10 @@ pub use keyframe::{
 pub use linkage::{KindSwitches, LinkageSettings, linkage_from_biz};
 pub use materials::{
     Algorithm, BloomParams, Bubble, CAPTION_STYLE_KEYS, CaptionTemplateInfo, ConstantSpeedError,
-    Crop, CurveSpeed, FreezeInfo, Kept, MAX_FONT_AXES, MAX_GLOW_LEAN, MaterialAnimations,
-    MaterialAudio, MaterialAudioFade, MaterialCanvas, MaterialColorConfig, MaterialDraft,
-    MaterialEffect, MaterialHsl, MaterialPictureAdjust, MaterialPluginEffect, MaterialRef,
-    MaterialShape, MaterialSpeed, MaterialText, MaterialTransition, MaterialVideo,
+    Crop, CurveSpeed, FreezeInfo, Kept, MAX_CURVE, MAX_FONT_AXES, MAX_GLOW_LEAN,
+    MaterialAnimations, MaterialAudio, MaterialAudioFade, MaterialCanvas, MaterialColorConfig,
+    MaterialDraft, MaterialEffect, MaterialHsl, MaterialPictureAdjust, MaterialPluginEffect,
+    MaterialRef, MaterialShape, MaterialSpeed, MaterialText, MaterialTransition, MaterialVideo,
     MaterialVideoEffect, Materials, MotionBlur, PatternChange, RawMaterial, Reframe, Relight,
     RichFill, RichFont, RichPaint, RichPattern, RichShadow, RichSolid, RichStroke, RichStyle,
     RichText, SHAPE_ARROW, SHAPE_CONTOUR, SHAPE_FILL, SHAPE_LINE, SHAPE_LINE_WIDTH, SHAPE_PEN,

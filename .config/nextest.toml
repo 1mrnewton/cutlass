@@ -13,6 +13,7 @@ package(cutlass) & (
     test(=view::tests::the_stickers_shelf_licenses_and_project_settings_paint)
     | test(=view::tests::the_inspector_tabs_stay_put_while_its_body_scrolls)
     | test(=view::tests::the_text_and_caption_inspector_paint)
+    | test(=view::tests::the_title_style_sections_switch_and_paint)
 )
 '''
 test-group = 'wgpu-render'

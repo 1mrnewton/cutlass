@@ -31,6 +31,9 @@ pub struct ChatModel<T> {
     transport: T,
     model: String,
     system: String,
+    /// The model refused a request with a picture and took the same one
+    /// without: it is sent no more pictures.
+    blind: bool,
 }
 
 /// What the model is told before the user's first words.
@@ -97,6 +100,7 @@ impl<T: ChatTransport> ChatModel<T> {
             transport,
             model: model.to_owned(),
             system: SYSTEM_PROMPT.to_owned(),
+            blind: false,
         }
     }
 
@@ -106,10 +110,46 @@ impl<T: ChatTransport> ChatModel<T> {
     }
 
     /// The request body for `request`.
+    ///
+    /// A tool message is text only in this protocol, so a tool's picture
+    /// follows the results of its round in a user message, as an
+    /// `image_url` part holding the file. A model that refused pictures
+    /// is told there was one instead.
     #[must_use]
     pub fn body(&self, request: &CompletionRequest) -> Value {
         let mut messages = vec![json!({ "role": "system", "content": self.system })];
+        // The pictures of the tool results since the last other message.
+        let mut shown: Vec<Value> = Vec::new();
         for message in &request.messages {
+            if !matches!(message, Message::Tool { .. }) && !shown.is_empty() {
+                messages.push(json!({ "role": "user", "content": std::mem::take(&mut shown) }));
+            }
+            if let Message::Tool {
+                name,
+                picture: Some(picture),
+                ..
+            } = message
+            {
+                let tool = name.replace('.', "_");
+                if self.blind {
+                    shown.push(json!({
+                        "type": "text",
+                        "text": format!(
+                            "{tool} drew a picture, but this model does not take pictures, so it \
+                             was not sent. Say so if the answer needs it."
+                        ),
+                    }));
+                } else {
+                    shown.push(json!({
+                        "type": "text",
+                        "text": format!("The picture {tool} drew:"),
+                    }));
+                    shown.push(json!({
+                        "type": "image_url",
+                        "image_url": { "url": picture.data_url() },
+                    }));
+                }
+            }
             messages.push(match message {
                 Message::User { text } => json!({ "role": "user", "content": text }),
                 Message::Assistant { text, calls } => {
@@ -145,6 +185,9 @@ impl<T: ChatTransport> ChatModel<T> {
                 }),
             });
         }
+        if !shown.is_empty() {
+            messages.push(json!({ "role": "user", "content": shown }));
+        }
         let tools: Vec<Value> = request
             .tools
             .iter()
@@ -174,8 +217,42 @@ impl<T: ChatTransport> ChatModel<T> {
 impl<T: ChatTransport> Model for ChatModel<T> {
     fn complete(&mut self, request: &CompletionRequest) -> Result<Completion, ModelError> {
         let body = self.body(request).to_string();
-        let reply = self.transport.post(&body)?;
-        parse_reply(&reply)
+        let first = self
+            .transport
+            .post(&body)
+            .and_then(|reply| parse_reply(&reply));
+        let pictures = request.messages.iter().any(|message| {
+            matches!(
+                message,
+                Message::Tool {
+                    picture: Some(_),
+                    ..
+                }
+            )
+        });
+        let Err(refused) = first else {
+            return first;
+        };
+        if self.blind || !pictures {
+            return Err(refused);
+        }
+        // Many models on this protocol take no pictures, and nothing says
+        // which before one is sent. The same request without them tells:
+        // if it is answered, the pictures were the cause.
+        self.blind = true;
+        let body = self.body(request).to_string();
+        let again = self
+            .transport
+            .post(&body)
+            .and_then(|reply| parse_reply(&reply));
+        match again {
+            Ok(completion) => Ok(completion),
+            Err(_) => {
+                // Not the pictures: the first error is the one to show.
+                self.blind = false;
+                Err(refused)
+            }
+        }
     }
 }
 
@@ -608,6 +685,191 @@ mod tests {
         );
         let error = read_response(missing.as_bytes()).unwrap_err();
         assert!(error.to_string().contains("404: model missing"), "{error}");
+    }
+
+    fn looked(call_id: &str, picture: Option<crate::Picture>) -> Message {
+        Message::Tool {
+            call_id: call_id.to_owned(),
+            name: "player.look".to_owned(),
+            content: format!("frame {call_id}"),
+            is_error: false,
+            picture,
+        }
+    }
+
+    fn look_turn(picture: &crate::Picture) -> Vec<Message> {
+        vec![
+            Message::User {
+                text: "look".to_owned(),
+            },
+            Message::Assistant {
+                text: String::new(),
+                calls: ["a", "b"]
+                    .iter()
+                    .map(|id| ToolCall {
+                        id: (*id).to_owned(),
+                        name: "player.look".to_owned(),
+                        arguments: String::new(),
+                    })
+                    .collect(),
+            },
+            looked("a", Some(picture.clone())),
+            looked("b", None),
+            Message::Assistant {
+                text: "Seen.".to_owned(),
+                calls: Vec::new(),
+            },
+        ]
+    }
+
+    #[test]
+    fn a_tools_picture_follows_the_results_of_its_round_in_a_user_message() {
+        let picture = crate::Picture::jpeg(b"frame");
+        let model = ChatModel::new(
+            Canned {
+                replies: Vec::new(),
+                bodies: Vec::new(),
+            },
+            "small",
+        );
+        let body = model.body(&CompletionRequest {
+            messages: look_turn(&picture),
+            tools: Vec::new(),
+        });
+        let messages = body["messages"].as_array().unwrap();
+        let roles: Vec<&str> = messages
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        // Both tool messages stay together, after the call that asked.
+        assert_eq!(
+            roles,
+            [
+                "system",
+                "user",
+                "assistant",
+                "tool",
+                "tool",
+                "user",
+                "assistant"
+            ]
+        );
+        assert_eq!(messages[3]["content"], "frame a");
+        assert_eq!(
+            messages[5]["content"],
+            json!([
+                { "type": "text", "text": "The picture player_look drew:" },
+                { "type": "image_url",
+                  "image_url": { "url": "data:image/jpeg;base64,ZnJhbWU=" } },
+            ])
+        );
+        // A turn that ends on the look still sends the picture.
+        let mut open = look_turn(&picture);
+        open.pop();
+        let body = model.body(&CompletionRequest {
+            messages: open,
+            tools: Vec::new(),
+        });
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 6);
+        assert_eq!(messages[5]["content"][1]["type"], "image_url");
+        // No picture: nothing is added.
+        let body = model.body(&CompletionRequest {
+            messages: vec![looked("a", None)],
+            tools: Vec::new(),
+        });
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_model_that_refuses_pictures_is_asked_again_without_them() {
+        let picture = crate::Picture::jpeg(b"frame");
+        let refusal = json!({ "error": { "message": "this model does not support images" } });
+        let mut model = ChatModel::new(
+            Canned {
+                replies: vec![
+                    refusal.to_string(),
+                    reply(&json!({ "role": "assistant", "content": "I cannot see it." })),
+                    reply(&json!({ "role": "assistant", "content": "Still here." })),
+                ],
+                bodies: Vec::new(),
+            },
+            "small",
+        );
+        let mut open = look_turn(&picture);
+        open.pop();
+        let request = CompletionRequest {
+            messages: open,
+            tools: Vec::new(),
+        };
+        let completion = model.complete(&request).unwrap();
+        assert_eq!(completion.text, "I cannot see it.");
+        let bodies = &model.transport().bodies;
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0]["messages"][5]["content"][1]["type"], "image_url");
+        // The second try says there was a picture and sends none.
+        let told = &bodies[1]["messages"][5]["content"];
+        assert_eq!(told.as_array().unwrap().len(), 1);
+        assert!(
+            told[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("does not take pictures")
+        );
+        assert!(!bodies[1].to_string().contains("image_url"));
+        // The next round goes without pictures at once.
+        model.complete(&request).unwrap();
+        let bodies = &model.transport().bodies;
+        assert_eq!(bodies.len(), 3);
+        assert!(!bodies[2].to_string().contains("image_url"));
+    }
+
+    #[test]
+    fn an_error_that_is_not_the_pictures_is_shown_and_pictures_are_still_sent() {
+        let picture = crate::Picture::jpeg(b"frame");
+        let down = json!({ "error": { "message": "overloaded" } });
+        let mut model = ChatModel::new(
+            Canned {
+                replies: vec![
+                    down.to_string(),
+                    down.to_string(),
+                    reply(&json!({ "role": "assistant", "content": "Seen." })),
+                ],
+                bodies: Vec::new(),
+            },
+            "small",
+        );
+        let mut open = look_turn(&picture);
+        open.pop();
+        let request = CompletionRequest {
+            messages: open,
+            tools: Vec::new(),
+        };
+        let error = model.complete(&request).unwrap_err();
+        assert_eq!(
+            error,
+            ModelError::Inner("the model refused: overloaded".to_owned())
+        );
+        // Both tries failed, so the model is not taken for blind.
+        assert_eq!(model.complete(&request).unwrap().text, "Seen.");
+        let bodies = &model.transport().bodies;
+        assert_eq!(bodies[2]["messages"][5]["content"][1]["type"], "image_url");
+        // A request with no picture fails once and is not sent again.
+        let mut plain = ChatModel::new(
+            Canned {
+                replies: vec![down.to_string()],
+                bodies: Vec::new(),
+            },
+            "small",
+        );
+        let request = CompletionRequest {
+            messages: vec![Message::User {
+                text: "hi".to_owned(),
+            }],
+            tools: Vec::new(),
+        };
+        assert!(plain.complete(&request).is_err());
+        assert_eq!(plain.transport().bodies.len(), 1);
     }
 
     #[test]

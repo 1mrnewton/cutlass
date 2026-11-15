@@ -19612,8 +19612,14 @@ mod tests {
         let mut shell = text_inspector_shell(&temp);
         shell.select(Some(SegmentId::new("words")));
         shell.set_text_face("sample.ttf").unwrap();
+        // Every section open needs a tall window. Windows' software
+        // renderer cannot paint it at one pixel a point inside the
+        // harness's ten seconds a frame, so there it paints at half: the
+        // same layout and widgets, a quarter of the pixels.
+        let pixels_per_point = if cfg!(windows) { 0.5 } else { 1.0 };
         let mut harness = egui_kittest::Harness::builder()
             .with_size(Vec2::new(1280.0, 3200.0))
+            .with_pixels_per_point(pixels_per_point)
             .wgpu()
             .build_ui_state(
                 |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),

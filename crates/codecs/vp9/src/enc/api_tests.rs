@@ -1652,3 +1652,41 @@ fn lossless_with_alt_refs_comes_back_exact() {
         }
     }
 }
+
+#[test]
+fn samples_past_the_bit_depth_are_refused() {
+    for bd in [10u8, 12] {
+        let (w, h) = (64u32, 48u32);
+        let opts = super::Vp9Options {
+            bit_depth: bd,
+            threads: 1,
+            ..super::Vp9Options::default()
+        };
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        let max = (1u16 << bd) - 1;
+        let cw = (w / 2) as usize;
+        let mut y = vec![max; (w * h) as usize];
+        let c = vec![max / 2; cw * (h / 2) as usize];
+        assert!(
+            encoder
+                .push_planes16(
+                    [(&y, w as usize), (&c, cw), (&c, cw)],
+                    1.0 / 30.0,
+                    (0, 1, 30)
+                )
+                .is_ok(),
+            "{bd}-bit: the largest sample"
+        );
+        y[(w * h) as usize - 1] = max + 1;
+        assert!(
+            encoder
+                .push_planes16(
+                    [(&y, w as usize), (&c, cw), (&c, cw)],
+                    1.0 / 30.0,
+                    (1, 1, 30)
+                )
+                .is_err(),
+            "{bd}-bit: one past it"
+        );
+    }
+}

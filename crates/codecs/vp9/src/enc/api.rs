@@ -425,7 +425,15 @@ impl Core<u16> {
         let max = (1u16 << self.opts.bit_depth) - 1;
         for (p, (data, stride)) in planes.iter().enumerate() {
             let (pw, ph) = if p == 0 { (w, h) } else { c };
-            if (0..ph).any(|r| data[r * stride..r * stride + pw].iter().any(|&v| v > max)) {
+            // The largest sample of each row, a loop the compiler
+            // vectorizes (a search for the first sample past `max` did
+            // not).
+            let top = (0..ph).fold(0, |m, r| {
+                data[r * stride..r * stride + pw]
+                    .iter()
+                    .fold(m, |m, &v| m.max(v))
+            });
+            if top > max {
                 return Err(CodecError::InvalidApi {
                     what: "sample past the bit depth",
                 });

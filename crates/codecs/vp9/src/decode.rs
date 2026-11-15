@@ -270,6 +270,10 @@ impl Decoder {
             )?
         };
         drop(refs_now);
+        // The last reader of the previous motion besides `self.prev`: with
+        // it gone, `commit` takes that map back for the next frame instead
+        // of a new one being made and cleared.
+        drop(prev);
         self.bufs = built.spare;
         if rt.is_none() {
             self.bufs.tiles = built.tiles;
@@ -386,6 +390,10 @@ impl Decoder {
 }
 
 fn seg_source(last: &[u8], header: &Header) -> Vec<u8> {
+    // Only segmentation reads the map: no copy of it without.
+    if !header.seg.enabled {
+        return Vec::new();
+    }
     let cells = geom::mi_count(header.width).saturating_mul(geom::mi_count(header.height));
     if header.is_intra() || header.error_resilient || last.len() != cells {
         vec![0u8; cells]

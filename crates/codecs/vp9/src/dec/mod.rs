@@ -384,6 +384,9 @@ impl<'p> FrameParse<'p> {
         let mut mvs = self.mvs;
         let mut segmap = vec![0u8; mi_cols * self.mi_rows];
         let mut counts = Counts::new();
+        // Without segmentation no block writes the map: every tile's is
+        // zero, as `segmap` is.
+        let seg_written = self.parsed.header.seg.enabled;
         let mut states = Vec::with_capacity(self.cols.len());
         for col in self.cols {
             let st = col.state;
@@ -394,8 +397,10 @@ impl<'p> FrameParse<'p> {
                         mvs[r * mi_cols + c0..r * mi_cols + c0 + w]
                             .copy_from_slice(&st.mvs[r * w..r * w + w]);
                     }
-                    segmap[r * mi_cols + c0..r * mi_cols + c0 + w]
-                        .copy_from_slice(&st.segmap[r * w..r * w + w]);
+                    if seg_written {
+                        segmap[r * mi_cols + c0..r * mi_cols + c0 + w]
+                            .copy_from_slice(&st.segmap[r * w..r * w + w]);
+                    }
                 }
             }
             counts.add(&st.counts);

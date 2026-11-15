@@ -215,7 +215,8 @@ pub struct State {
     pub above_nz: [Vec<u8>; 3],
     pub masks: Vec<lpf::Mask>,
     pub grid: Vec<LfMi>,
-    pub counts: Counts,
+    /// Boxed: the state moves between the frame and its spares.
+    pub counts: Box<Counts>,
 }
 
 impl State {
@@ -232,7 +233,7 @@ impl State {
             above_nz: [Vec::new(), Vec::new(), Vec::new()],
             masks: Vec::new(),
             grid: Vec::new(),
-            counts: Counts::new(),
+            counts: Box::new(Counts::new()),
         }
     }
 
@@ -269,7 +270,7 @@ impl State {
             self.grid.clear();
             self.grid.resize(gn, LfMi::default());
         }
-        self.counts = Counts::new();
+        *self.counts = Counts::new();
     }
 }
 
@@ -1402,9 +1403,28 @@ impl<'s, 't, 'd> Tile<'s, 't, 'd> {
     }
 
     /// libvpx `decode_coefs`, into the syntax's coefficients: positions
-    /// transposed and values dequantized.
+    /// transposed and values dequantized. Compiled with BMI2 and LZCNT
+    /// where the CPU has them ([`cutlass_simd::vp9::wide`]): the bool
+    /// decoder's shifts and leading-zero count sit on the chain from one
+    /// symbol to the next.
     #[inline(never)]
     fn decode_coefs(
+        &mut self,
+        tx: u8,
+        uv: bool,
+        inter: bool,
+        dq: [i16; 2],
+        ctx: usize,
+        kind: u8,
+    ) -> (usize, (usize, usize)) {
+        cutlass_simd::vp9::wide(
+            #[inline(always)]
+            || self.coefs(tx, uv, inter, dq, ctx, kind),
+        )
+    }
+
+    #[inline(always)]
+    fn coefs(
         &mut self,
         tx: u8,
         uv: bool,

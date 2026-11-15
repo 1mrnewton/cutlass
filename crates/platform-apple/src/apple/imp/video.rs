@@ -55,6 +55,9 @@ struct Decompress {
 impl Decompress {
     /// Release held pictures and wait until every callback has run.
     fn flush(&self) -> sys::OSStatus {
+        // SAFETY: `raw` is the live session this owner made and has not yet
+        // released. Both calls block until VideoToolbox has emitted every
+        // frame, so no callback runs after they return.
         unsafe {
             let finished = sys::VTDecompressionSessionFinishDelayedFrames(self.raw);
             let waited = sys::VTDecompressionSessionWaitForAsynchronousFrames(self.raw);
@@ -67,6 +70,9 @@ impl Drop for Decompress {
     fn drop(&mut self) {
         if !self.raw.is_null() {
             let _ = self.flush();
+            // SAFETY: `raw` is live and owned by this value (Create rule), so
+            // it is invalidated and released once, here, after the flush has
+            // run every callback.
             unsafe {
                 sys::VTDecompressionSessionInvalidate(self.raw);
                 sys::CFRelease(self.raw);
@@ -75,6 +81,9 @@ impl Drop for Decompress {
     }
 }
 
+// SAFETY: a decompression session is not tied to the thread that made it.
+// `Decompress` is not `Sync`, so its owner calls it from one thread at a time;
+// the output callback only touches the `Sync` `Finished`.
 unsafe impl Send for Decompress {}
 
 struct Queue {
@@ -126,6 +135,10 @@ pub struct VideoEncoder {
     cancel: Arc<AtomicBool>,
 }
 
+// SAFETY: `session` is a compression session, which is not tied to the thread
+// that made it, and the encoder owns it. `VideoEncoder` is not `Sync`, so one
+// thread calls it at a time. The output callback runs on VideoToolbox's
+// thread but only locks `output` and reads `codec`.
 unsafe impl Send for VideoEncoder {}
 
 pub fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
@@ -187,6 +200,9 @@ pub fn open_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError
         cancel: Arc::new(AtomicBool::new(false)),
     });
     let raw = Box::into_raw(encoder);
+    // The heap encoder at `raw` is the session's refcon, so it does not move
+    // when the box does. The session is released in `Drop` before the box
+    // is freed.
     match create_compress(
         params.codec,
         kind,
@@ -196,12 +212,19 @@ pub fn open_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError
         params.constant_rate,
         raw.cast(),
     ) {
+        // SAFETY: `raw` came from `Box::into_raw` above and nothing else holds
+        // it yet; no frame has been submitted, so no callback reads it.
         Ok(session) => unsafe { (*raw).session = session },
         Err(err) => {
+            // SAFETY: `raw` came from `Box::into_raw` and is turned back into
+            // a box once. No session was made, so nothing else refers to it.
             drop(unsafe { Box::from_raw(raw) });
             return Err(err);
         }
     }
+    // SAFETY: `raw` came from `Box::into_raw` and is turned back into a box
+    // once. The session keeps it as its refcon; moving the box does not move
+    // the heap value.
     let boxed: Box<dyn Encoder> = unsafe { Box::from_raw(raw) };
     Ok(boxed)
 }
@@ -465,6 +488,8 @@ impl Encoder for VideoEncoder {
             self.drained = true;
             return Ok(Vec::new());
         }
+        // SAFETY: `session` is live (checked non-null above). An invalid time
+        // completes every pending frame; callbacks finish before it returns.
         let status =
             unsafe { sys::VTCompressionSessionCompleteFrames(self.session, cf::time_invalid()) };
         self.drained = true;
@@ -501,6 +526,8 @@ impl Encoder for VideoEncoder {
 impl VideoEncoder {
     fn encode_token(&mut self, token: u64, time: FrameTime) -> Result<Vec<Packet>, CodecError> {
         with_pixel_buffer(token, |image| {
+            // SAFETY: `with_pixel_buffer` holds a retain on `image`, a
+            // `CVPixelBuffer`, for this closure.
             let format = unsafe { sys::CVPixelBufferGetPixelFormatType(image) };
             if format != sys::BGRA {
                 return Err(CodecError::Unsupported {
@@ -526,6 +553,11 @@ impl VideoEncoder {
             !queue.attached && queue.packets.is_empty()
         };
         let properties = if force { Some(force_keyframe()?) } else { None };
+        // SAFETY: `session` is live (checked by the caller) and `image` is a
+        // live BGRA `CVPixelBuffer` the caller holds; the session retains it.
+        // `properties` is a live dictionary or null. The source refcon points
+        // at `meta` on this stack, which `encode_output` reads; the
+        // `CompleteFrames` below runs every callback before `meta` goes away.
         let status = unsafe {
             sys::VTCompressionSessionEncodeFrame(
                 self.session,
@@ -541,6 +573,8 @@ impl VideoEncoder {
             clear_queue(&self.output);
             return unit_status(status, "videotoolbox").map(|()| Vec::new());
         }
+        // SAFETY: `session` is live. An invalid time completes every pending
+        // frame, so the callback for `meta` has run when this returns.
         let flushed =
             unsafe { sys::VTCompressionSessionCompleteFrames(self.session, cf::time_invalid()) };
         if flushed != 0 {
@@ -552,6 +586,10 @@ impl VideoEncoder {
 
     fn release_session(&mut self) {
         if !self.session.is_null() {
+            // SAFETY: `session` is live and owned by this encoder (Create
+            // rule); it is invalidated and released once, then nulled.
+            // `encode_image` and `drain` complete every frame they submit, so
+            // no callback that reads `self` is pending.
             unsafe {
                 sys::VTCompressionSessionInvalidate(self.session);
                 sys::CFRelease(self.session);
@@ -749,6 +787,10 @@ fn parameter_sets(nals: &[&[u8]], h264: bool) -> Result<Cf, CodecError> {
     let pointers: Vec<*const u8> = nals.iter().map(|nal| nal.as_ptr()).collect();
     let sizes: Vec<usize> = nals.iter().map(|nal| nal.len()).collect();
     let mut out = ptr::null_mut();
+    // SAFETY: `pointers` and `sizes` both hold `nals.len()` entries, and
+    // pointer `i` is valid for `sizes[i]` bytes, borrowed from `nals` for the
+    // call; CoreMedia copies the sets. `out` is a live out pointer, and on
+    // success the caller owns the format (Create rule).
     let status = unsafe {
         if h264 {
             sys::CMVideoFormatDescriptionCreateFromH264ParameterSets(
@@ -779,6 +821,8 @@ fn parameter_sets(nals: &[&[u8]], h264: bool) -> Result<Cf, CodecError> {
 
 fn sized_format(codec: CodecId, width: u32, height: u32) -> Result<Cf, CodecError> {
     let mut out = ptr::null_mut();
+    // SAFETY: the call takes plain values, null extensions, and a live out
+    // pointer. On success the caller owns the format (Create rule).
     let status = unsafe {
         sys::CMVideoFormatDescriptionCreate(
             ptr::null(),
@@ -816,6 +860,10 @@ fn create_decompress(
         refcon,
     };
     let mut raw = ptr::null_mut();
+    // SAFETY: `format` and `attributes` are live and retained by the session.
+    // `callback` is read during the call. Its refcon is the decoder's boxed
+    // `Finished`, which outlives the session (see `VideoDecoder::session`).
+    // `raw` is a live out pointer, owned by the returned `Decompress`.
     let status = unsafe {
         sys::VTDecompressionSessionCreate(
             ptr::null(),
@@ -852,6 +900,9 @@ fn decode_access(
     };
     let size = bytes.len();
     let mut sample = ptr::null_mut();
+    // SAFETY: `block` and `format` are live and retained by the sample.
+    // `timing` and `size` are one entry each, for the one sample, and are
+    // copied. `sample` is a live out pointer (Create rule).
     let status = unsafe {
         sys::CMSampleBufferCreateReady(
             ptr::null(),
@@ -870,6 +921,14 @@ fn decode_access(
         at_bit: 0,
         what: "sample buffer",
     })?;
+    // SAFETY: `session` is the decoder's live session and `sample` a live
+    // sample buffer, which the session retains while it decodes. The source
+    // refcon and info out pointer are null, which is allowed.
+    // The sample's block borrows `bytes` (see `block_from`), and with
+    // asynchronous decode the session may still hold the sample after this
+    // returns and the caller frees `bytes`. This relies on VideoToolbox
+    // having read the data before `VTDecompressionSessionDecodeFrame`
+    // returns, which its documentation does not promise.
     let status = unsafe {
         sys::VTDecompressionSessionDecodeFrame(
             session,
@@ -884,6 +943,10 @@ fn decode_access(
 
 fn block_from(bytes: &[u8]) -> Result<Cf, CodecError> {
     let mut raw = ptr::null_mut();
+    // SAFETY: the block wraps `bytes` (`len` bytes) without copying, and
+    // `kCFAllocatorNull` means it never frees them; CoreMedia only reads the
+    // memory, despite the `*mut` in the signature. The block is valid only
+    // while `bytes` is. `raw` is a live out pointer (Create rule).
     let status = unsafe {
         sys::CMBlockBufferCreateWithMemoryBlock(
             ptr::null(),
@@ -974,6 +1037,8 @@ fn lock_buffers() -> std::sync::MutexGuard<'static, HashMap<u64, HeldBuffer>> {
 
 /// Retain `image` and return the token that names it.
 fn publish_buffer(image: *mut std::ffi::c_void) -> Result<u64, CodecError> {
+    // SAFETY: the caller passes the live `CVPixelBuffer` the decode callback
+    // was handed. The new retain is owned by the map entry.
     let retained = unsafe { sys::CFRetain(image) };
     if retained.is_null() {
         return Err(CodecError::Unsupported {
@@ -1004,6 +1069,9 @@ pub fn with_pixel_buffer<T>(
                 what: "platform frame",
             });
         };
+        // SAFETY: the map entry holds a retain on `buffer.buffer`, and the
+        // map lock is held, so `release_buffer` cannot drop it first. This
+        // retain is released after `body`.
         let retained = unsafe { sys::CFRetain(buffer.buffer) };
         if retained.is_null() {
             return Err(CodecError::Unsupported {
@@ -1013,6 +1081,7 @@ pub fn with_pixel_buffer<T>(
         retained.cast_mut()
     };
     let value = body(retained);
+    // SAFETY: releases the one retain taken above, after `body` is done.
     unsafe { sys::CFRelease(retained) }
     Ok(value)
 }
@@ -1025,6 +1094,8 @@ pub fn release_buffer(token: u64) -> Result<(), CodecError> {
             what: "platform frame",
         });
     };
+    // SAFETY: the entry was removed from the map, so this releases the
+    // map's one retain exactly once.
     unsafe { sys::CFRelease(held.buffer) }
     Ok(())
 }
@@ -1051,17 +1122,21 @@ fn gpu_picture(
     pts: i64,
     timescale: u32,
 ) -> Result<PictureOutput, CodecError> {
+    // SAFETY: `decode_output` passes the live `CVPixelBuffer` VideoToolbox
+    // handed it, valid for the callback.
     let format = unsafe { sys::CVPixelBufferGetPixelFormatType(image) };
     if format != sys::BGRA {
         return Err(CodecError::Unsupported {
             what: "pixel format",
         });
     }
+    // SAFETY: as above.
     let width = u32::try_from(unsafe { sys::CVPixelBufferGetWidth(image) }).map_err(|_| {
         CodecError::Limit {
             what: "picture edge",
         }
     })?;
+    // SAFETY: as above.
     let height = u32::try_from(unsafe { sys::CVPixelBufferGetHeight(image) }).map_err(|_| {
         CodecError::Limit {
             what: "picture edge",
@@ -1094,6 +1169,8 @@ fn rgba_picture(
     pts: i64,
     timescale: u32,
 ) -> Result<PictureOutput, CodecError> {
+    // SAFETY: `with_pixel_buffer` holds a retain on `image` for this call.
+    // Flag 1 is `kCVPixelBufferLock_ReadOnly`.
     let locked = unsafe { sys::CVPixelBufferLockBaseAddress(image, 1) };
     if locked != 0 {
         return Err(CodecError::Malformed {
@@ -1102,6 +1179,8 @@ fn rgba_picture(
         });
     }
     let result = copy_rgba(image, pts, timescale);
+    // SAFETY: undoes the read-only lock above, after `copy_rgba` has dropped
+    // its slice.
     unsafe {
         let _ = sys::CVPixelBufferUnlockBaseAddress(image, 1);
     }
@@ -1113,24 +1192,30 @@ fn copy_rgba(
     pts: i64,
     timescale: u32,
 ) -> Result<PictureOutput, CodecError> {
+    // SAFETY: `rgba_picture` passes a retained `CVPixelBuffer` it has locked
+    // for reading.
     let format = unsafe { sys::CVPixelBufferGetPixelFormatType(image) };
     if format != sys::BGRA {
         return Err(CodecError::Unsupported {
             what: "pixel format",
         });
     }
+    // SAFETY: as above.
     let width = u32::try_from(unsafe { sys::CVPixelBufferGetWidth(image) }).map_err(|_| {
         CodecError::Limit {
             what: "picture edge",
         }
     })?;
+    // SAFETY: as above.
     let height = u32::try_from(unsafe { sys::CVPixelBufferGetHeight(image) }).map_err(|_| {
         CodecError::Limit {
             what: "picture edge",
         }
     })?;
     limits::picture_ok(width, height)?;
+    // SAFETY: as above.
     let stride = unsafe { sys::CVPixelBufferGetBytesPerRow(image) };
+    // SAFETY: as above; the base address is valid while the lock is held.
     let base = unsafe { sys::CVPixelBufferGetBaseAddress(image) };
     if base.is_null() {
         return Err(CodecError::Malformed {
@@ -1146,6 +1231,9 @@ fn copy_rgba(
         });
     }
     let height_usize = usize::try_from(height).unwrap_or(0);
+    // SAFETY: a locked non-planar buffer holds `height` rows of `stride`
+    // bytes from `base`, read-only. The lock and the retain outlast the
+    // slice, which is dropped before `rgba_picture` unlocks.
     let bytes = unsafe { std::slice::from_raw_parts(base.cast::<u8>(), stride * height_usize) };
     let mut rgba = vec![0u8; row * height_usize];
     for y in 0..height_usize {
@@ -1179,6 +1267,8 @@ fn planar_picture(
     pts: i64,
     timescale: u32,
 ) -> Result<PictureOutput, CodecError> {
+    // SAFETY: the decode callback passes the live `CVPixelBuffer` it was
+    // handed. Flag 1 is `kCVPixelBufferLock_ReadOnly`.
     let locked = unsafe { sys::CVPixelBufferLockBaseAddress(image, 1) };
     if locked != 0 {
         return Err(CodecError::Malformed {
@@ -1187,6 +1277,8 @@ fn planar_picture(
         });
     }
     let result = copy_planar(image, pts, timescale);
+    // SAFETY: undoes the read-only lock above, after `copy_planar` has
+    // dropped its plane slices.
     unsafe {
         let _ = sys::CVPixelBufferUnlockBaseAddress(image, 1);
     }
@@ -1200,8 +1292,12 @@ fn plane(
     row: usize,
     rows: usize,
 ) -> Result<&'static [u8], CodecError> {
+    // SAFETY: callers pass a live NV12 `CVPixelBuffer` they have locked, and
+    // `index` is 0 or 1, a plane it has (`nv12_size` checked the count).
     let base = unsafe { sys::CVPixelBufferGetBaseAddressOfPlane(image, index) };
+    // SAFETY: as above.
     let stride = unsafe { sys::CVPixelBufferGetBytesPerRowOfPlane(image, index) };
+    // SAFETY: as above.
     let height = unsafe { sys::CVPixelBufferGetHeightOfPlane(image, index) };
     if base.is_null() || stride < row || height < rows {
         return Err(CodecError::Malformed {
@@ -1220,13 +1316,17 @@ fn plane(
 /// The 4:2:0 size of a video-range NV12 buffer. An odd edge drops its last
 /// column or row, since 4:2:0 needs even edges.
 fn nv12_size(image: *mut std::ffi::c_void) -> Result<(u32, u32), CodecError> {
+    // SAFETY: callers pass a live `CVPixelBuffer` they hold for the call.
     let format = unsafe { sys::CVPixelBufferGetPixelFormatType(image) };
+    // SAFETY: as above.
     if format != sys::NV12 || unsafe { sys::CVPixelBufferGetPlaneCount(image) } != 2 {
         return Err(CodecError::Unsupported {
             what: "pixel format",
         });
     }
+    // SAFETY: as above.
     let width = unsafe { sys::CVPixelBufferGetWidth(image) } & !1;
+    // SAFETY: as above.
     let height = unsafe { sys::CVPixelBufferGetHeight(image) } & !1;
     let edge = |value: usize| {
         u32::try_from(value).map_err(|_| CodecError::Limit {
@@ -1235,6 +1335,7 @@ fn nv12_size(image: *mut std::ffi::c_void) -> Result<(u32, u32), CodecError> {
     };
     let (picture_width, picture_height) = (edge(width)?, edge(height)?);
     limits::picture_ok(picture_width, picture_height)?;
+    // SAFETY: as above; plane 1 exists, since the count is 2.
     if unsafe { sys::CVPixelBufferGetWidthOfPlane(image, 1) } < width / 2 {
         return Err(CodecError::Malformed {
             at_bit: 0,
@@ -1252,7 +1353,10 @@ pub(super) fn copy_nv12(image: *mut std::ffi::c_void) -> Result<Vec<u8>, CodecEr
     let (chroma_width, chroma_height) = (width / 2, height / 2);
     let luma = plane(image, 0, width, height)?;
     let chroma = plane(image, 1, chroma_width * 2, chroma_height)?;
+    // SAFETY: callers pass a live, locked NV12 `CVPixelBuffer` with two
+    // planes (`nv12_size` checked).
     let luma_stride = unsafe { sys::CVPixelBufferGetBytesPerRowOfPlane(image, 0) };
+    // SAFETY: as above.
     let chroma_stride = unsafe { sys::CVPixelBufferGetBytesPerRowOfPlane(image, 1) };
     let chroma_len = chroma_width * chroma_height;
     let mut bytes = vec![0u8; width * height + chroma_len * 2];
@@ -1301,10 +1405,13 @@ fn surface_picture(
     let Ok((width, height)) = nv12_size(image) else {
         return planar_picture(image, pts, timescale);
     };
+    // SAFETY: the decode callback passes the live `CVPixelBuffer` it was
+    // handed, valid for the callback.
     let whole = unsafe {
         sys::CVPixelBufferGetWidth(image) == width as usize
             && sys::CVPixelBufferGetHeight(image) == height as usize
     };
+    // SAFETY: as above. The surface is only tested for null, not kept.
     if !whole || unsafe { sys::CVPixelBufferGetIOSurface(image) }.is_null() {
         return planar_picture(image, pts, timescale);
     }
@@ -1323,6 +1430,8 @@ fn surface_picture(
 /// A missing or unnamed tag is unspecified. CoreVideo has no SMPTE 170M
 /// transfer, so a BT.601 stream reads back as the identical BT.709 curve.
 fn buffer_color(image: *mut std::ffi::c_void) -> (ColorPrimaries, Transfer) {
+    // SAFETY: callers pass a live `CVPixelBuffer`. The key and the names are
+    // CoreVideo's constant strings, set at load and never written.
     let primaries = unsafe {
         match attachment(image, sys::kCVImageBufferColorPrimariesKey) {
             Some(tag) if same(&tag, sys::kCVImageBufferColorPrimaries_ITU_R_709_2) => {
@@ -1340,6 +1449,7 @@ fn buffer_color(image: *mut std::ffi::c_void) -> (ColorPrimaries, Transfer) {
             _ => ColorPrimaries::Unspecified,
         }
     };
+    // SAFETY: as above.
     let transfer = unsafe {
         match attachment(image, sys::kCVImageBufferTransferFunctionKey) {
             Some(tag) if same(&tag, sys::kCVImageBufferTransferFunction_ITU_R_709_2) => {
@@ -1361,10 +1471,14 @@ fn buffer_color(image: *mut std::ffi::c_void) -> (ColorPrimaries, Transfer) {
 }
 
 fn attachment(image: *mut std::ffi::c_void, key: *const std::ffi::c_void) -> Option<Cf> {
+    // SAFETY: callers pass a live `CVPixelBuffer` and a constant key. A null
+    // mode pointer is allowed. The result is owned (Copy rule) and goes to
+    // `Cf`.
     Cf::from_owned(unsafe { sys::CVBufferCopyAttachment(image, key, ptr::null_mut()) })
 }
 
 fn same(tag: &Cf, name: *const std::ffi::c_void) -> bool {
+    // SAFETY: `tag` is a live CF object, and `name` a non-null constant one.
     !name.is_null() && unsafe { sys::CFEqual(tag.as_ptr(), name) } != 0
 }
 
@@ -1379,6 +1493,11 @@ fn create_compress(
 ) -> Result<*mut std::ffi::c_void, CodecError> {
     let attributes = bgra_attributes()?;
     let mut raw = ptr::null_mut();
+    // SAFETY: `attributes` is a live dictionary the session copies; the null
+    // encoder spec and allocators are allowed. `encode_output` matches the
+    // callback type, and `refcon` is the heap `VideoEncoder` that owns the
+    // session and releases it before it is freed. `raw` is a live out pointer
+    // (Create rule).
     let status = unsafe {
         sys::VTCompressionSessionCreate(
             ptr::null(),
@@ -1427,6 +1546,10 @@ fn apply_properties(session: *mut std::ffi::c_void, codec: CodecId, bitrate: i32
     let Ok(fps) = cf::number_i32(30) else {
         return;
     };
+    // SAFETY: `session` is the live session `create_compress` just made. Each
+    // key is a VideoToolbox constant, and each value is a live CF object of
+    // the type that key takes, held across the call; the session retains or
+    // copies what it keeps.
     unsafe {
         let _ = sys::VTSessionSetProperty(
             session,
@@ -1476,6 +1599,7 @@ fn apply_properties(session: *mut std::ffi::c_void, codec: CodecId, bitrate: i32
 }
 
 fn force_keyframe() -> Result<Cf, CodecError> {
+    // SAFETY: a VideoToolbox constant, set at load and never written.
     let key = unsafe { sys::kVTEncodeFrameOptionKey_ForceKeyFrame };
     let value = cf::boolean(true);
     cf::dictionary(&[key], &[value])
@@ -1490,6 +1614,7 @@ fn pixel_attributes(pixel: u32) -> Result<Cf, CodecError> {
     let format = cf::number_i32(i32::try_from(pixel).unwrap_or(0))?;
     let surface = cf::dictionary(&[], &[])?;
     let metal = cf::boolean(true);
+    // SAFETY: CoreVideo constants, set at load and never written.
     let keys = unsafe {
         [
             sys::kCVPixelBufferPixelFormatTypeKey,
@@ -1503,6 +1628,8 @@ fn pixel_attributes(pixel: u32) -> Result<Cf, CodecError> {
 fn bgra_buffer(width: u32, height: u32, rgba: &[u8]) -> Result<Cf, CodecError> {
     let attributes = bgra_attributes()?;
     let mut raw = ptr::null_mut();
+    // SAFETY: plain sizes and format, a live attributes dictionary that is
+    // copied, and a live out pointer. The buffer is owned (Create rule).
     let status = unsafe {
         sys::CVPixelBufferCreate(
             ptr::null(),
@@ -1521,6 +1648,8 @@ fn bgra_buffer(width: u32, height: u32, rgba: &[u8]) -> Result<Cf, CodecError> {
     let buffer = Cf::from_owned(raw).ok_or(CodecError::Unsupported {
         what: "pixel buffer",
     })?;
+    // SAFETY: `buffer` is the live buffer just made and not yet shared. Flag
+    // 0 locks it for writing.
     let locked = unsafe { sys::CVPixelBufferLockBaseAddress(buffer.as_mut(), 0) };
     if locked != 0 {
         return Err(CodecError::Malformed {
@@ -1529,6 +1658,8 @@ fn bgra_buffer(width: u32, height: u32, rgba: &[u8]) -> Result<Cf, CodecError> {
         });
     }
     let copied = write_bgra(buffer.as_mut(), rgba);
+    // SAFETY: undoes the write lock above, after `write_bgra` has dropped its
+    // slice.
     unsafe {
         let _ = sys::CVPixelBufferUnlockBaseAddress(buffer.as_mut(), 0);
     }
@@ -1537,9 +1668,13 @@ fn bgra_buffer(width: u32, height: u32, rgba: &[u8]) -> Result<Cf, CodecError> {
 }
 
 fn write_bgra(buffer: *mut std::ffi::c_void, rgba: &[u8]) -> Result<(), CodecError> {
+    // SAFETY: `bgra_buffer` passes its live, write-locked BGRA buffer.
     let stride = unsafe { sys::CVPixelBufferGetBytesPerRow(buffer) };
+    // SAFETY: as above.
     let height = unsafe { sys::CVPixelBufferGetHeight(buffer) };
+    // SAFETY: as above.
     let width = unsafe { sys::CVPixelBufferGetWidth(buffer) };
+    // SAFETY: as above; the base address is valid while the lock is held.
     let base = unsafe { sys::CVPixelBufferGetBaseAddress(buffer) };
     if base.is_null() {
         return Err(CodecError::Malformed {
@@ -1554,6 +1689,9 @@ fn write_bgra(buffer: *mut std::ffi::c_void, rgba: &[u8]) -> Result<(), CodecErr
             what: "pixel stride",
         });
     }
+    // SAFETY: a locked non-planar buffer holds `height` rows of `stride`
+    // bytes from `base`. Nothing else can see the buffer yet, so this is the
+    // only reference, and it is dropped before `bgra_buffer` unlocks.
     let dest =
         unsafe { std::slice::from_raw_parts_mut(base.cast::<u8>(), stride.saturating_mul(height)) };
     for y in 0..height {
@@ -1589,6 +1727,15 @@ unsafe extern "C" fn encode_output(
     _flags: u32,
     sample: *mut std::ffi::c_void,
 ) {
+    // SAFETY: VideoToolbox calls this on its own thread with the refcon given
+    // to `VTCompressionSessionCreate`: the heap `VideoEncoder`, which
+    // releases the session before it is freed. Only `codec` (never written
+    // after open) and the `output` mutex are read through it. The owner
+    // may hold `&mut VideoEncoder` in `encode_image` while this runs, so
+    // this shared reference aliases a live unique one. `source` is null or
+    // the `FrameMeta` on `encode_image`'s stack, alive until its
+    // `CompleteFrames` returns. `sample` is a live sample buffer for the
+    // call.
     unsafe {
         if refcon.is_null() || status != 0 || sample.is_null() {
             return;
@@ -1629,6 +1776,12 @@ unsafe extern "C" fn encode_output(
 }
 
 fn sample_bytes(sample: *mut std::ffi::c_void) -> Option<Vec<u8>> {
+    // SAFETY: `encode_output` passes the live sample buffer it was handed. The
+    // block buffer is borrowed from it (Get rule). The data pointer is valid
+    // while the sample is, and the bytes are copied before return. This
+    // reads `total` bytes, which is only correct when the block is one
+    // contiguous piece: `CMBlockBufferGetDataPointer` promises only the
+    // length at offset 0, which is not asked for here.
     unsafe {
         let block = sys::CMSampleBufferGetDataBuffer(sample);
         if block.is_null() {
@@ -1646,6 +1799,10 @@ fn sample_bytes(sample: *mut std::ffi::c_void) -> Option<Vec<u8>> {
 }
 
 fn sample_is_sync(sample: *mut std::ffi::c_void) -> bool {
+    // SAFETY: `encode_output` passes the live sample buffer it was handed.
+    // With `create` 0 the attachments array is borrowed or null. Index 0 is
+    // read only when the count is positive, and the dictionary and its value
+    // are borrowed from the sample and only compared, not kept.
     unsafe {
         let array = sys::CMSampleBufferGetSampleAttachmentsArray(sample, 0);
         if array.is_null() {
@@ -1664,6 +1821,8 @@ fn sample_is_sync(sample: *mut std::ffi::c_void) -> bool {
 }
 
 fn sample_config(codec: CodecId, sample: *mut std::ffi::c_void) -> Option<Vec<u8>> {
+    // SAFETY: `encode_output` passes the live sample buffer it was handed. The
+    // format is borrowed from it (Get rule) and used only during the call.
     let format = unsafe { sys::CMSampleBufferGetFormatDescription(sample) };
     if format.is_null() {
         return None;
@@ -1720,6 +1879,8 @@ fn parameter_set(format: *const std::ffi::c_void, index: usize, h264: bool) -> O
     let mut size = 0usize;
     let mut count = 0usize;
     let mut nal_length = 0i32;
+    // SAFETY: `format` is a live format description borrowed from the sample
+    // in `encode_output`. Each out pointer is a live local of its C type.
     let status = unsafe {
         if h264 {
             sys::CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
@@ -1744,6 +1905,8 @@ fn parameter_set(format: *const std::ffi::c_void, index: usize, h264: bool) -> O
     if status != 0 || pointer.is_null() || size == 0 {
         return None;
     }
+    // SAFETY: on success `pointer` is the start of `size` bytes owned by
+    // `format`, which stays alive through this copy.
     Some(unsafe { std::slice::from_raw_parts(pointer, size) }.to_vec())
 }
 
@@ -2144,6 +2307,9 @@ mod tests {
         assert_eq!(decode_all(&mut decoder, &packets).expect("decode").len(), 6);
         // What iOS does to a hardware session when the app leaves the foreground.
         let raw = decoder.session.as_ref().expect("session").raw;
+        // SAFETY: `raw` is the decoder's live session. Invalidating does not
+        // release it, and later calls on it fail with an error code, which is
+        // what this test checks.
         unsafe { sys::VTDecompressionSessionInvalidate(raw) };
         decoder.reset();
         let again = decode_all(&mut decoder, &packets).expect("decode after invalidate");

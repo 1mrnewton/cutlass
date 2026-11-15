@@ -6,6 +6,8 @@
 //! cannot run returns [`cutlass_decode::CodecError::Unsupported`], and the
 //! factory asks the next opener.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 mod apple;
 mod limits;
 #[cfg(target_vendor = "apple")]

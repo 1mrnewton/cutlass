@@ -39,6 +39,9 @@ impl Converter {
         destination: &AudioStreamBasicDescription,
     ) -> Result<Self, CodecError> {
         let mut raw = ptr::null_mut();
+        // SAFETY: both descriptions are borrowed for the call and copied by
+        // the converter; `raw` is a live out pointer. On success the caller
+        // owns the converter and `Drop` disposes it.
         let status = unsafe { sys::AudioConverterNew(source, destination, &mut raw) };
         open_status(status, "audiotoolbox")?;
         if raw.is_null() {
@@ -53,6 +56,8 @@ impl Converter {
 impl Drop for Converter {
     fn drop(&mut self) {
         if !self.raw.is_null() {
+            // SAFETY: `raw` is the converter `AudioConverterNew` gave this
+            // owner, disposed once here and never used after.
             unsafe {
                 let _ = sys::AudioConverterDispose(self.raw);
             }
@@ -60,6 +65,9 @@ impl Drop for Converter {
     }
 }
 
+// SAFETY: an AudioConverter is not tied to the thread that made it. `Converter`
+// is not `Sync`, and its owner calls it only through `&mut self` paths, so one
+// thread uses it at a time.
 unsafe impl Send for Converter {}
 
 pub struct AudioDecoder {
@@ -322,6 +330,8 @@ pub fn open_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError
     let converter = Converter::new(&source, &destination)?;
     if params.bitrate != 0 && params.codec != CodecId::Pcm {
         let rate = params.bitrate;
+        // SAFETY: `converter.raw` is live, and the property data is a live
+        // `u32` of the 4 bytes `kAudioConverterEncodeBitRate` reads.
         unsafe {
             let _ =
                 sys::AudioConverterSetProperty(converter.raw, BITRATE, 4, (&raw const rate).cast());
@@ -459,6 +469,8 @@ fn set_bytes(
     bytes: &[u8],
 ) -> Result<(), CodecError> {
     let size = u32::try_from(bytes.len()).map_err(|_| CodecError::Limit { what: "cookie" })?;
+    // SAFETY: callers pass a live converter. `bytes` is valid for `size` bytes
+    // during the call, and the converter copies a property it keeps.
     let status =
         unsafe { sys::AudioConverterSetProperty(converter, property, size, bytes.as_ptr().cast()) };
     if status != 0 {
@@ -472,6 +484,9 @@ fn set_bytes(
 fn get_bytes(converter: *mut std::ffi::c_void, property: u32) -> Option<Vec<u8>> {
     let mut bytes = vec![0u8; 4096];
     let mut size = u32::try_from(bytes.len()).ok()?;
+    // SAFETY: callers pass a live converter. `size` says `bytes` has room for
+    // 4096 bytes, and the converter writes at most `size` bytes and sets it to
+    // the count written, which is checked below.
     let status = unsafe {
         sys::AudioConverterGetProperty(converter, property, &mut size, bytes.as_mut_ptr().cast())
     };
@@ -492,6 +507,9 @@ fn prime_leading(converter: *mut std::ffi::c_void) -> u32 {
         trailing: 0,
     };
     let mut size = u32::try_from(size_of_val(&info)).unwrap_or(0);
+    // SAFETY: callers pass a live converter. `info` is a live
+    // `AudioConverterPrimeInfo` (two `u32`s, the C layout) and `size` is its
+    // size.
     let status = unsafe {
         sys::AudioConverterGetProperty(converter, PRIME, &mut size, (&raw mut info).cast())
     };
@@ -516,6 +534,14 @@ unsafe extern "C" fn feed_input(
     descriptions: *mut *mut AudioStreamPacketDescription,
     user: *mut std::ffi::c_void,
 ) -> sys::OSStatus {
+    // SAFETY: AudioToolbox calls this only from inside the
+    // `AudioConverterFillComplexBuffer` in `convert`, on that thread, with
+    // `user` the `&mut Feed` that `convert` holds for the call; null pointers
+    // are refused first. `packets` and `data` point to the converter's own
+    // count and one-buffer list, and `descriptions`, when not null, to a slot
+    // for one description pointer. The buffer handed back points into the
+    // feed's bytes (`size` bytes, or `give * bytes_per_frame` of the
+    // remaining frames), and the description points at `feed.desc`.
     unsafe {
         if packets.is_null() || data.is_null() || user.is_null() {
             return -50;
@@ -595,6 +621,15 @@ fn convert(
     };
     let desc_ptr = if variable { &mut desc } else { ptr::null_mut() };
     let feed_ptr: *mut Feed = feed;
+    // SAFETY: `converter` is live. `feed_ptr` is the exclusive borrow `feed`,
+    // used only by `feed_input` during this call. `list` describes `output`,
+    // `out_bytes` bytes long, which outlives the call. `desc_ptr` is null or
+    // room for one description, and `count` (the decoder's frames, or 1 for
+    // the encoder) does not ask for more than one variable-size packet.
+    // The header says the callback must not free its input until it is
+    // called again, but the feed's bytes and `feed.desc` are freed after
+    // this returns; this relies on AudioToolbox consuming or copying input
+    // before the fill returns.
     let status = unsafe {
         sys::AudioConverterFillComplexBuffer(
             converter,
@@ -746,6 +781,8 @@ impl Decoder for AudioDecoder {
     }
 
     fn reset(&mut self) {
+        // SAFETY: the converter is live for the life of `self`, and `&mut
+        // self` means no fill is running.
         unsafe {
             let _ = sys::AudioConverterReset(self.converter.raw);
         }
@@ -809,6 +846,8 @@ impl Encoder for AudioEncoder {
     }
 
     fn reset(&mut self) {
+        // SAFETY: the converter is live for the life of `self`, and `&mut
+        // self` means no fill is running.
         unsafe {
             let _ = sys::AudioConverterReset(self.converter.raw);
         }

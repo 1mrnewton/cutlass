@@ -99,6 +99,28 @@ impl<P> SharedFrame<P> {
     }
 }
 
+impl SharedFrame<u16> {
+    /// The published rows of plane `p` as little-endian bytes, two a
+    /// sample, and the plane's stride in bytes: the samples' own memory,
+    /// which is little-endian on a little-endian target (`None` on any
+    /// other).
+    #[inline]
+    pub fn plane_le_bytes(&self, p: usize) -> Option<(&[u8], usize)> {
+        if cfg!(target_endian = "little") {
+            let (s, stride) = self.plane(p);
+            // SAFETY: `s` is a live `&[u16]` (see `plane`); its memory is
+            // `2 * s.len()` initialized bytes, any byte is a valid `u8`,
+            // `u8` has alignment 1, and the view borrows `self` as `s`
+            // does, so the samples cannot change while it lives.
+            #[allow(unsafe_code)]
+            let b = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<u8>(), 2 * s.len()) };
+            Some((b, 2 * stride))
+        } else {
+            None
+        }
+    }
+}
+
 /// The one writer of a [`SharedFrame`].
 pub struct FrameWriter<P> {
     frame: Arc<SharedFrame<P>>,
@@ -244,5 +266,22 @@ mod tests {
         let all = reader.join().unwrap_or_default();
         assert_eq!(&all[..16], &[7u8; 16][..]);
         assert_eq!(&all[16..], &[1u8; 16][..]);
+    }
+
+    #[test]
+    fn sixteen_bit_planes_read_as_little_endian_bytes() {
+        let mut w = FrameWriter::<u16>::new([3, 2, 2], [2, 1, 1], [0, 1, 1]);
+        let shared = w.shared().clone();
+        {
+            let [y, _, _] = w.tails();
+            for (i, s) in y.data.iter_mut().enumerate() {
+                *s = 0x0300 + i as u16;
+            }
+        }
+        w.publish(usize::MAX);
+        let (b, stride) = shared.plane_le_bytes(0).expect("little-endian");
+        assert_eq!(stride, 6);
+        let want: Vec<u8> = (0..6u16).flat_map(|i| (0x0300 + i).to_le_bytes()).collect();
+        assert_eq!(b, &want[..]);
     }
 }

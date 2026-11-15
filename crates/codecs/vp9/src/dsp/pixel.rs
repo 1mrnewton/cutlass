@@ -10,7 +10,9 @@ pub trait Pixel: Copy + Default + PartialEq + Send + Sync + core::fmt::Debug + '
     fn new(v: i32) -> Self;
 
     /// Plane `p` of a finished picture as bytes the caller's picture can
-    /// share without a copy (8-bit samples only).
+    /// share without a copy (16-bit samples as little-endian bytes, on a
+    /// little-endian target), at its stride of samples times
+    /// `size_of::<Self>()` bytes.
     #[inline(always)]
     fn share(
         _buf: &std::sync::Arc<cutlass_simd::vp9::frame::SharedFrame<Self>>,
@@ -89,6 +91,19 @@ struct SharedPlane {
 impl cutlass_decode::SharedBytes for SharedPlane {
     fn bytes(&self) -> &[u8] {
         self.frame.plane(self.p).0
+    }
+}
+
+/// A finished 16-bit plane, shared as little-endian bytes, as
+/// [`SharedPlane`].
+struct SharedPlane16 {
+    frame: std::sync::Arc<cutlass_simd::vp9::frame::SharedFrame<u16>>,
+    p: usize,
+}
+
+impl cutlass_decode::SharedBytes for SharedPlane16 {
+    fn bytes(&self) -> &[u8] {
+        self.frame.plane_le_bytes(self.p).map_or(&[], |(b, _)| b)
     }
 }
 
@@ -215,6 +230,17 @@ impl Pixel for u8 {
 
 impl Pixel for u16 {
     const HIGH: bool = true;
+    #[inline(always)]
+    fn share(
+        buf: &std::sync::Arc<cutlass_simd::vp9::frame::SharedFrame<Self>>,
+        p: usize,
+    ) -> Option<std::sync::Arc<dyn cutlass_decode::SharedBytes>> {
+        buf.plane_le_bytes(p)?;
+        Some(std::sync::Arc::new(SharedPlane16 {
+            frame: std::sync::Arc::clone(buf),
+            p,
+        }))
+    }
     #[inline(always)]
     fn lf_fast(
         buf: &mut [Self],

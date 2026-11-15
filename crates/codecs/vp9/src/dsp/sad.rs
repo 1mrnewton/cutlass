@@ -30,6 +30,9 @@ fn sad_w<const W: usize>(a: &[u8], sa: usize, b: &[u8], sb: usize, h: usize) -> 
 /// and `sb` apart).
 #[inline]
 pub fn sad(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u32 {
+    if let Some(v) = cutlass_simd::vp9::sad8::sad(a, sa, b, sb, w, h) {
+        return v;
+    }
     wide(|| match w {
         64 => sad_w::<64>(a, sa, b, sb, h),
         32 => sad_w::<32>(a, sa, b, sb, h),
@@ -71,6 +74,9 @@ fn sad4_w<const W: usize>(a: &[u8], sa: usize, b: [&[u8]; 4], sb: usize, h: usiz
 /// are read once.
 #[inline]
 pub fn sad4(a: &[u8], sa: usize, b: [&[u8]; 4], sb: usize, w: usize, h: usize) -> [u32; 4] {
+    if let Some(v) = cutlass_simd::vp9::sad8::sad4(a, sa, b, sb, w, h) {
+        return v;
+    }
     wide(|| match w {
         64 => sad4_w::<64>(a, sa, b, sb, h),
         32 => sad4_w::<32>(a, sa, b, sb, h),
@@ -103,6 +109,9 @@ fn sse_w<const W: usize>(a: &[u8], sa: usize, b: &[u8], sb: usize, h: usize) -> 
 /// The sum of squared differences of two `w`×`h` blocks.
 #[inline]
 pub fn sse(a: &[u8], sa: usize, b: &[u8], sb: usize, w: usize, h: usize) -> u64 {
+    if let Some(v) = cutlass_simd::vp9::sad8::sse(a, sa, b, sb, w, h) {
+        return v;
+    }
     wide(|| match w {
         64 => sse_w::<64>(a, sa, b, sb, h),
         32 => sse_w::<32>(a, sa, b, sb, h),

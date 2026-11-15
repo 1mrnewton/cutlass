@@ -1137,3 +1137,48 @@ fn tile_rows_restart_the_coder_and_change_no_picture() {
         "four coders, four flushes"
     );
 }
+
+#[test]
+fn a_constant_bitrate_holds_every_half_second_near_the_rate() {
+    let window = |cbr_buffer_ms: u32| {
+        let opts = super::Vp9Options {
+            bitrate: 250_000,
+            cbr_buffer_ms,
+            threads: 2,
+            speed: 9,
+            ..super::Vp9Options::default()
+        };
+        let mut encoder = Vp9Encoder::with_options(160, 96, opts).expect("encoder");
+        let mut sizes = Vec::new();
+        for index in 0..60u32 {
+            let packets = encoder
+                .push(&VideoInput {
+                    frame: moving(160, 96, index * 2),
+                    pts: i64::from(index),
+                    duration: 1,
+                    timescale: 30,
+                })
+                .expect("push");
+            sizes.extend(packets.iter().map(|p| p.data.len()));
+        }
+        sizes.extend(
+            VideoEncoder::drain(&mut encoder)
+                .expect("drain")
+                .iter()
+                .map(|p| p.data.len()),
+        );
+        assert_eq!(sizes.len(), 60);
+        // The fullest window of 15 frames, over the rate's share.
+        let per = 250_000.0 / 8.0 / 2.0;
+        sizes
+            .windows(15)
+            .map(|w| w.iter().sum::<usize>() as f64 / per)
+            .fold(0.0, f64::max)
+    };
+    let (average, constant) = (window(0), window(1000));
+    assert!(constant < 1.35, "a window at {constant:.2} of the rate");
+    assert!(constant <= average, "{constant:.2} against {average:.2}");
+    assert_eq!(Vp9Encoder::qindex_of_level(62), 249);
+    assert_eq!(Vp9Encoder::qindex_of_level(63), 255);
+    assert_eq!(Vp9Encoder::qindex_of_level(10), 40);
+}

@@ -39,6 +39,12 @@ pub struct Vp9Options {
     /// [`DEFAULT_LAG`] below speed 9, none at the realtime speeds 9 and 10
     /// (as libvpx's good and realtime deadlines).
     pub lag: Option<u32>,
+    /// With a bitrate: 0 aims at it on average (libvpx's `end-usage=vbr`);
+    /// more holds it constant (`end-usage=cbr`) through a buffer this many
+    /// milliseconds long, as streaming and calls want: frame types take
+    /// smaller shares and a frame over its budget is paid back within
+    /// half the buffer.
+    pub cbr_buffer_ms: u32,
     /// Tile rows, log2 of the count (0 to 2; libvpx's `tile-rows`). They
     /// restart the arithmetic coder at each tile row and change nothing
     /// else.
@@ -84,6 +90,7 @@ impl Default for Vp9Options {
             max_q: 236,
             threads: 0,
             lag: None,
+            cbr_buffer_ms: 0,
             tile_rows: 0,
             aq: false,
         }
@@ -168,6 +175,17 @@ impl Vp9Encoder {
             ..Vp9Options::default()
         };
         Self::with_options(params.width, params.height, opts)
+    }
+
+    /// libvpx's quantizer index for a quality level of 0 to 63 (its
+    /// `quantizer_to_qindex`; FFmpeg's `-crf`, `-qmin` and `-qmax` take
+    /// levels), for [`Vp9Options::qindex`], `min_q` and `max_q`.
+    pub fn qindex_of_level(level: u8) -> u8 {
+        match level.min(63) {
+            63 => 255,
+            62 => 249,
+            l => l * 4,
+        }
     }
 
     /// The quantizer index of the next frame.
@@ -582,6 +600,24 @@ const GF_INTERVAL: u32 = 12;
 /// inter frames'.
 const STEP_SCALE: [f64; 3] = [0.35, 0.55, 1.0];
 
+/// At a constant bitrate, the first key frame's step over the one the
+/// bitrate guesses for inter frames.
+const CBR_FIRST_SCALE: f64 = 1.5;
+
+/// At a constant bitrate, how many quantizer indices a golden or key frame
+/// is at most finer than the inter frames. On a 720p pan at 2 Mb/s, half-
+/// second windows stay within -15% and +15% of the rate at speed 6 (they
+/// were -33% and +38% on average bitrate), -24% and +13% at speed 9.
+const CBR_BOOST: u8 = 16;
+
+/// [`SHARE`] at a constant bitrate: smaller boosts, which the buffer can
+/// hold.
+const SHARE_CBR: [f64; 3] = [
+    4.0,
+    1.5,
+    (GF_INTERVAL as f64 - 1.5) / (GF_INTERVAL as f64 - 1.0),
+];
+
 /// The share of a frame's budget each frame type takes.
 const SHARE: [f64; 3] = [
     8.0,
@@ -646,25 +682,47 @@ impl Rate {
             let target = f64::from(self.opts.bitrate) * seconds.max(1e-3) * SHARE[2];
             let step = (FIRST_K * self.pixels / target.max(1.0)).powf(1.0 / EXP);
             self.last_q = q_of_step(step).clamp(self.opts.min_q, self.opts.max_q);
-            return q_of_step(step * STEP_SCALE[kind]).clamp(self.opts.min_q, self.opts.max_q);
+            // At a constant bitrate the first key frame takes a coarser
+            // step, not a finer one: the buffer cannot hold the ten frames'
+            // worth a fine one costs.
+            let scale = if self.opts.cbr_buffer_ms > 0 {
+                CBR_FIRST_SCALE
+            } else {
+                STEP_SCALE[kind]
+            };
+            return q_of_step(step * scale).clamp(self.opts.min_q, self.opts.max_q);
         }
         let m = match (self.model[kind], self.model[0]) {
             (Some(m), _) => m,
             (None, Some(k)) => k * [1.0, 0.5, 0.2][kind],
             (None, None) => return self.last_q,
         };
+        let cbr = self.opts.cbr_buffer_ms > 0;
         // The debt is paid back over about a second, sooner at the start
-        // while the model is still a guess.
-        let horizon = f64::from(self.frames.saturating_add(4).min(30));
-        let target = (self.per_frame * SHARE[kind] - self.debt / horizon).max(self.per_frame * 0.2);
+        // while the model is still a guess; at a constant bitrate within
+        // half the buffer.
+        let mut horizon = f64::from(self.frames.saturating_add(4).min(30));
+        if cbr && seconds > 0.0 {
+            let buffer = f64::from(self.opts.cbr_buffer_ms) / 1000.0 / seconds;
+            horizon = horizon.min((buffer / 2.0).max(2.0));
+        }
+        let share = if cbr { SHARE_CBR[kind] } else { SHARE[kind] };
+        let target = (self.per_frame * share - self.debt / horizon).max(self.per_frame * 0.2);
         let step = (m / target).powf(1.0 / EXP);
         let q = q_of_step(step).clamp(self.opts.min_q, self.opts.max_q);
-        // Inter frames move the quantizer at most a few steps a frame.
+        // Inter frames move the quantizer at most a few steps a frame (more
+        // at a constant bitrate, which must follow the content).
+        let reach = if cbr { 48 } else { 24 };
         let q = if kind == 2 {
             q.clamp(
-                self.last_q.saturating_sub(24),
-                self.last_q.saturating_add(24),
+                self.last_q.saturating_sub(reach),
+                self.last_q.saturating_add(reach),
             )
+        } else if cbr {
+            // A golden or key frame at a constant bitrate is at most a few
+            // steps finer than the inter frames: a model of one golden
+            // frame, a dozen frames old, can be far off.
+            q.max(self.last_q.saturating_sub(CBR_BOOST))
         } else {
             q
         };

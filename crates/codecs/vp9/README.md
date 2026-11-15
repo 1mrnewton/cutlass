@@ -73,7 +73,19 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   decoder can start every row's at once; nothing else changes, and the
   pictures are the same (four tile rows cost 0.2% more bits at 720p).
 - Rate: a fixed quantizer (`with_quantizer`, or bitrate 0) or a bitrate,
-  per frame type, from a model of bits against quantizer step.
+  per frame type, from a model of bits against quantizer step. FFmpeg's
+  `libvpx-vp9` modes map onto it: `-b:v` alone is the bitrate on average
+  (`end-usage=vbr`); `-crf` with `-b:v` is that with a floor on the
+  quantizer (`min_q`), and `-crf` with `-b:v 0` a fixed quantizer, where
+  `Vp9Encoder::qindex_of_level` turns libvpx's 0–63 levels into indices.
+  A constant bitrate (`-minrate = -maxrate`, `end-usage=cbr`) is
+  `Vp9Options::cbr_buffer_ms`: smaller shares for golden and key frames,
+  golden and key frames at most 16 indices finer than the inter frames,
+  the first key frame coarser, and a frame over its budget paid back
+  within half the buffer. On a grainy 720p pan at 2 Mb/s and speed 9 its
+  half-second windows stay within −24% and +13% of the rate (−49% and
+  +32% on average; libvpx's realtime 6 CBR −45% and +5%) at 39.9 dB
+  averaged PSNR, against libvpx's 38.2 dB.
 
 ## How it works
 

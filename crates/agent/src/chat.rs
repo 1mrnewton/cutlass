@@ -47,7 +47,7 @@ Requests, each with its kind in op, for example: \
 There are over a hundred kinds (text, captions, shapes, effects, filters, color, masks, keyframes, transitions, speed, canvas): \
 draft_query \"ops\" lists them all, and draft_query \"ops add_text set_position\" gives the exact JSON of the ones you need. Look a kind up before you use it the first time. \
 For a bigger job (captions, removing pauses, motion graphics, a product demo, setting up a project), skill_load it first and follow it. \
-settings_get and settings_set read and change the user's settings. \
+settings_get and settings_set read and change the app's own settings, not the project: its canvas, frame rate and clips are draft_apply requests. \
 When done, say briefly what you changed.";
 
 /// What the model is told about this user beyond [`SYSTEM_PROMPT`]: the

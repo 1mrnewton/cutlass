@@ -1,10 +1,13 @@
 name: release
 
 # A tag `v<version>` builds the three packages, writes `<package>.sha256`
-# beside each, and publishes them as a GitHub release. The desktop's update
-# check reads that release from the API's `releases/latest`, so a tag with a
-# `-` (such as v1.0.0-rc.1) is published as a pre-release, which the check
-# ignores.
+# beside each, and uploads them as a draft GitHub release. A check job
+# downloads the draft's files and checks each against its checksum; the
+# draft is then published by hand. The desktop's update check reads the
+# published release from the API's `releases/latest`, which leaves drafts
+# out. A tag with a `-` (such as v1.0.0-rc.1) is marked a pre-release,
+# which the check also ignores. Tags come only from main, on a commit the
+# `rust` check passed.
 #
 # The packages are built as in ci.yml, with `--features public-release`,
 # through scripts/pgo.py: the H.264 codec is optimised from a profile of its
@@ -19,6 +22,12 @@ on:
 
 permissions:
   contents: read
+
+env:
+  # Every package the release carries, each with a `<package>.sha256`
+  # beside it. The update check asks for the first three by these names
+  # (crates/update checks they are here).
+  PACKAGES: Cutlass.dmg Cutlass-setup.exe Cutlass-x86_64.AppImage
 
 jobs:
   version:
@@ -146,6 +155,8 @@ jobs:
           if-no-files-found: error
 
   publish:
+    # The packages go up as a draft, which the update check never sees.
+    # Publishing it is done by hand, once the check below has passed.
     needs: [macos, windows, appimage]
     runs-on: ubuntu-latest
     permissions:
@@ -160,12 +171,12 @@ jobs:
         # first token.
         working-directory: dist
         run: |
-          for package in Cutlass.dmg Cutlass-setup.exe Cutlass-x86_64.AppImage; do
+          for package in $PACKAGES; do
             test -s "$package"
             sha256sum "$package" > "$package.sha256"
           done
           cat ./*.sha256
-      - name: Release
+      - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -176,4 +187,39 @@ jobs:
             --title "Cutlass ${GITHUB_REF_NAME#v}" \
             --generate-notes \
             --verify-tag \
+            --draft \
             $flags
+
+  check:
+    # The draft's files, downloaded from the release as a user's update
+    # would download them: each package is there, and matches its checksum.
+    # A draft is visible only to a token that can write the repository.
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true
+          mkdir draft
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir draft
+      - name: Every package matches its checksum
+        working-directory: draft
+        run: |
+          for package in $PACKAGES; do
+            test -s "$package"
+            test -s "$package.sha256"
+            sha256sum --check --strict "$package.sha256"
+          done
+      - name: How to publish
+        run: |
+          {
+            echo "The draft $GITHUB_REF_NAME passed its checks. Publish it to offer the update:"
+            echo
+            echo '```'
+            echo "gh release edit $GITHUB_REF_NAME --repo $GITHUB_REPOSITORY --draft=false"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

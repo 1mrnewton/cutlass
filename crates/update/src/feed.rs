@@ -194,6 +194,31 @@ mod tests {
         Version::parse("0.1.0").unwrap()
     }
 
+    /// The release workflow publishes, by the same name, every package a
+    /// platform asks for, so renaming one on either side fails here
+    /// instead of leaving that platform without updates.
+    #[test]
+    fn the_release_workflow_publishes_every_package_asked_for() {
+        let workflow = include_str!("../../../.github/workflows/release.yml");
+        let packages: Vec<&str> = workflow
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("PACKAGES: "))
+            .expect("release.yml lists its packages in PACKAGES")
+            .split_whitespace()
+            .collect();
+        for platform in [
+            Platform::MacOs,
+            Platform::Windows,
+            Platform::Linux { arch: "x86_64" },
+        ] {
+            let name = platform.asset_name();
+            assert!(
+                packages.contains(&name.as_str()),
+                "release.yml does not publish {name}: {packages:?}"
+            );
+        }
+    }
+
     #[test]
     fn each_platform_gets_its_package_and_checksum() {
         let json = feed("v0.2.0");

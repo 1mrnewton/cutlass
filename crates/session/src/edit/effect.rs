@@ -50,7 +50,10 @@ pub fn add_effect(
 
 /// Run the effect clip `segment_id` over the picture clip `clip` alone, or
 /// with `None` over every picture below it. Only a clip on an effect row
-/// binds, and only to a clip on a picture row.
+/// binds, and only to a clip that is drawn: one on a video, sticker or text
+/// row, so a title, a shape or a compound clip of them takes an effect too.
+/// Unbound, an effect stops under the titles and stickers, which are drawn
+/// above it on any row.
 pub fn bind_effect(
     draft: &mut Draft,
     segment_id: &SegmentId,
@@ -64,7 +67,10 @@ pub fn bind_effect(
     ensure_unlocked(track.attribute)?;
     if let Some(clip) = clip {
         let (clip_track, _) = super::locate(draft, clip)?;
-        if !matches!(draft.tracks[clip_track].kind, TrackType::Video) {
+        if !matches!(
+            draft.tracks[clip_track].kind,
+            TrackType::Video | TrackType::Sticker | TrackType::Text
+        ) {
             return Err(EditError::EffectTarget);
         }
     }
@@ -320,6 +326,53 @@ mod tests {
         );
         session.apply(1, &[bind(None)]).unwrap();
         assert_eq!(bound(&session), None);
+    }
+
+    #[test]
+    fn an_effect_binds_to_a_title_or_a_shape_and_not_to_a_sound() {
+        let mut draft = Draft::empty("draft");
+        draft.tracks[0].id = TrackId::new("main");
+        for (row, kind, clip) in [
+            ("titles", TrackType::Text, "title"),
+            ("shapes", TrackType::Sticker, "shape"),
+            ("sounds", TrackType::Audio, "sound"),
+        ] {
+            let mut track = cutlass_model::Track::main(row);
+            track.kind = kind;
+            track.segments.push(cutlass_model::Segment::new(
+                clip,
+                "m",
+                TimeRange::new(0, 4_000_000),
+            ));
+            draft.tracks.push(track);
+        }
+        let mut session = Session::open(draft);
+        session
+            .apply(0, &[add("fx", "blur", 0, "recipe/blur")])
+            .unwrap();
+        let bind = |clip: &str| Request::BindEffect {
+            segment_id: SegmentId::new("blur"),
+            clip: Some(SegmentId::new(clip)),
+        };
+        let bound = |session: &Session| {
+            session
+                .draft()
+                .tracks
+                .iter()
+                .flat_map(|track| &track.segments)
+                .find(|segment| segment.id.as_str() == "blur")
+                .and_then(cutlass_model::Segment::bound_clip)
+        };
+        session.apply(1, &[bind("title")]).unwrap();
+        assert_eq!(bound(&session), Some(SegmentId::new("title")));
+        session.apply(2, &[bind("shape")]).unwrap();
+        assert_eq!(bound(&session), Some(SegmentId::new("shape")));
+        let before = session.draft().clone();
+        assert_eq!(
+            session.apply(3, &[bind("sound")]),
+            Err(EditError::EffectTarget)
+        );
+        assert_eq!(session.draft(), &before);
     }
 
     #[test]

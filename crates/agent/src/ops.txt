@@ -224,7 +224,7 @@ set_shape_shadow: Cast a shape shadow in color "#rrggbb" (empty keeps its color)
 add_effect: Place the bundled effect effect_id, "recipe/<name>" such as recipe/shake, recipe/vhs or recipe/zoom-pulse, from start for duration (microseconds) on effect lane track_id, made when missing, with new ids segment_id and material_id; it runs over every picture below it.
 {"op":"add_effect","track_id":"fx","segment_id":"fx-2","material_id":"fx-2-effect","start":2000000,"duration":2000000,"effect_id":"recipe/vhs"}
 
-bind_effect: Make the effect clip segment_id run only over clip, a clip on a video lane (main or an overlay), or null to run over every picture below again.
+bind_effect: Make the effect clip segment_id run only over clip, a clip on a video, sticker or text lane (a picture, a shape, a title or a compound clip of them), or null to run over every picture below again; an effect that is not bound never reaches text or stickers, which are drawn above it, so bind it to blur or glow a title.
 {"op":"bind_effect","segment_id":"fx-1","clip":"a"}
 
 set_blend: Blend a clip with the picture below by mode blend-multiply, blend-screen, blend-overlay, blend-add, blend-darken, blend-lighten, blend-color-burn, blend-color-dodge, blend-hard-light, blend-soft-light, blend-difference or blend-exclusion; empty or blend-source-over removes it; material_id names the new blend material; refused on audio, effect and filter lanes.

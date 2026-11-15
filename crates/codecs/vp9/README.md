@@ -111,7 +111,11 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   other content (FFmpeg's `mandelbrot`, the grainy pan, `testsrc2`), at
   speed 6: −13% / −12% of the bits at the same PSNR-Y / averaged PSNR at
   one pass, −6.5% / −5.3% at two; on the clip with two cuts between
-  related pictures, −4% / −3.6% and −7.1% / −3.6%.
+  related pictures, −4% / −3.6% and −7.1% / −3.6%. Against libvpx's two passes
+  (good, cpu-used 2) on the clip with cuts to other content, speed 6's
+  two passes are +5.5% / +18% at the same PSNR-Y / averaged PSNR, in 6.0
+  s against 10.1 s: behind, most of it on the chroma of the two
+  synthetic scenes.
 
 ## How it works
 

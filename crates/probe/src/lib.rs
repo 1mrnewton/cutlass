@@ -9,7 +9,7 @@
 #![forbid(unsafe_code)]
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use cutlass_model::MetaType;
@@ -520,15 +520,32 @@ fn avi(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
 
 fn mpeg_audio(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     // Two ADTS frames, after an ID3v2 tag or not, are raw AAC. An ID3v2 tag
-    // alone also matches MP3, so ADTS is asked first.
+    // alone also matches MP3, so ADTS is asked first. A tag can end past
+    // the header window, or close enough to its end that two frames do not
+    // fit: a signed download carries 17 kB of tag and cover art carries
+    // more. ADTS is then asked about the bytes that follow the tag.
+    let tag = match cutlass_mp3_container::id3v2_tag_bytes(header) {
+        Ok(Some(tag)) => Some(tag),
+        // Not a tag, or one past the MP3 reader's limit, which that reader
+        // refuses below. Nothing is read for either.
+        Ok(None) | Err(_) => None,
+    };
+    let after_tag = match tag {
+        Some(tag) => Some(read_window(path, tag, header.len())?),
+        None => None,
+    };
     if matches!(
-        cutlass_adts::probe(header),
+        cutlass_adts::probe(after_tag.as_deref().unwrap_or(header)),
         cutlass_container::ProbeResult::Accept { .. }
     ) {
         return adts(path);
     }
     match cutlass_mp3_container::probe(header) {
         cutlass_mp3_container::Probe::Matched => {}
+        // The tag is longer than the window. It still names this family:
+        // the reader skips it, and refuses a file whose tag runs past the
+        // end or has no Layer III frame behind it.
+        cutlass_mp3_container::Probe::NeedMore { .. } if tag.is_some() => {}
         cutlass_mp3_container::Probe::NeedMore { .. } | cutlass_mp3_container::Probe::Reject => {
             return Ok(None);
         }
@@ -607,6 +624,19 @@ fn read_prefix(path: &Path, limit: usize) -> Result<Vec<u8>, ProbeError> {
         .read(&mut buffer)
         .map_err(|error| io_error(path, error))?;
     buffer.truncate(read);
+    Ok(buffer)
+}
+
+/// Up to `limit` bytes of the file from `start`. Empty when the file ends
+/// at or before `start`.
+fn read_window(path: &Path, start: u64, limit: usize) -> Result<Vec<u8>, ProbeError> {
+    let mut file = File::open(path).map_err(|error| io_error(path, error))?;
+    file.seek(SeekFrom::Start(start))
+        .map_err(|error| io_error(path, error))?;
+    let mut buffer = Vec::with_capacity(limit);
+    file.take(u64::try_from(limit).unwrap_or(u64::MAX))
+        .read_to_end(&mut buffer)
+        .map_err(|error| io_error(path, error))?;
     Ok(buffer)
 }
 
@@ -1247,5 +1277,114 @@ mod tests {
             probe(&aac).expect("tagged aac"),
             Probed::Audio { duration: 64_000 }
         );
+    }
+
+    /// An ID3v2.4 tag of `total` bytes, header included, laid out like the
+    /// one FFmpeg's writer puts on a signed download: a short `TSSE` text
+    /// frame, then one `GEOB` object, the C2PA manifest there, that fills
+    /// the rest.
+    fn id3_tag(total: usize) -> Vec<u8> {
+        let synchsafe = |value: usize| {
+            [
+                u8::try_from((value >> 21) & 0x7F).expect("seven bits"),
+                u8::try_from((value >> 14) & 0x7F).expect("seven bits"),
+                u8::try_from((value >> 7) & 0x7F).expect("seven bits"),
+                u8::try_from(value & 0x7F).expect("seven bits"),
+            ]
+        };
+        let encoder = b"\x03Lavf63.1.102";
+        let object = total - 10 - 10 - encoder.len() - 10;
+        let mut tag = b"ID3\x04\x00\x00".to_vec();
+        tag.extend(synchsafe(total - 10));
+        tag.extend(b"TSSE");
+        tag.extend(synchsafe(encoder.len()));
+        tag.extend([0, 0]);
+        tag.extend(encoder);
+        tag.extend(b"GEOB");
+        tag.extend(synchsafe(object));
+        tag.extend([0, 0]);
+        // Bytes that are neither an MPEG sync nor an ADTS one.
+        tag.extend((0..object).map(|index| b'a' + u8::try_from(index % 26).expect("a letter")));
+        assert_eq!(tag.len(), total);
+        tag
+    }
+
+    /// Layer III at 48 kHz stereo with no tag, from the MP3 decoder's tests.
+    fn layer3() -> Vec<u8> {
+        std::fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../codecs/mp3/tests/fixtures/clicks_48000_v2.mp3"),
+        )
+        .expect("mp3 fixture")
+    }
+
+    /// The tag ElevenLabs puts on a download is 17,160 bytes, four times the
+    /// header window. The sound behind it is as long as it is with no tag.
+    #[test]
+    fn an_mp3_behind_a_tag_longer_than_the_header_window_is_audio() {
+        let temp = Temp::new();
+        let bare = probe(&temp.write("bare.mp3", &layer3())).expect("bare mp3");
+        // 22 frames of 1152 samples at 48 kHz.
+        assert_eq!(bare, Probed::Audio { duration: 528_000 });
+        // The window's own length, one byte past it, the real tag, and a
+        // tag the size of cover art.
+        for total in [4_096, 4_097, 17_160, 600_000] {
+            let mut bytes = id3_tag(total);
+            bytes.extend(layer3());
+            let tagged = temp.write("tagged.mp3", &bytes);
+            assert_eq!(
+                probe(&tagged).expect("tagged mp3"),
+                bare,
+                "a {total} byte tag"
+            );
+        }
+    }
+
+    #[test]
+    fn a_raw_aac_file_behind_a_tag_longer_than_the_header_window_is_still_aac() {
+        let temp = Temp::new();
+        // 4,090 leaves the window six bytes of the first frame.
+        for total in [4_090, 4_096, 17_160] {
+            let mut bytes = id3_tag(total);
+            bytes.extend(adts_frames(3));
+            let aac = temp.write("tagged.aac", &bytes);
+            assert_eq!(
+                probe(&aac).expect("tagged aac"),
+                Probed::Audio { duration: 64_000 },
+                "a {total} byte tag"
+            );
+        }
+    }
+
+    /// A tag that says it is longer than the file, a file cut inside its
+    /// tag, a tag with nothing or one frame header after it, a tag over
+    /// text, and a tag past the reader's limit are each the MP3 reader's
+    /// refusal. None of them opens.
+    #[test]
+    fn a_long_tag_that_lies_or_is_cut_is_refused_by_the_mp3_reader() {
+        let temp = Temp::new();
+        let mut whole = id3_tag(17_160);
+        whole.extend(layer3());
+
+        let mut lying = whole.clone();
+        // 0x7F 0x7F 0x7F is 2,097,151 bytes, under the reader's 16 MiB limit.
+        lying[6..10].copy_from_slice(&[0, 0x7F, 0x7F, 0x7F]);
+        let mut huge = whole.clone();
+        // 0x7F four times is 256 MiB, past the limit: nothing is read for it.
+        huge[6..10].copy_from_slice(&[0x7F; 4]);
+        let mut text = id3_tag(17_160);
+        text.extend(b"no sound follows this tag ".repeat(400));
+        let cases: [(&[u8], &str); 6] = [
+            (&lying, "mp3 refused the file: truncated id3"),
+            (&whole[..9_000], "mp3 refused the file: truncated id3"),
+            (&whole[..17_160], "mp3 refused the file: no frames"),
+            (&whole[..17_164], "mp3 refused the file: truncated frame"),
+            (&text, "mp3 refused the file: no frames"),
+            (&huge, "mp3 refused the file: limit exceeded: id3"),
+        ];
+        for (bytes, refusal) in cases {
+            let error = probe(&temp.write("bad.mp3", bytes)).expect_err(refusal);
+            assert_eq!(error.message(), refusal);
+        }
     }
 }

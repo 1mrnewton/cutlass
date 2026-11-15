@@ -290,8 +290,10 @@ impl Shell {
             &self.settings,
             crate::sandbox::local_sandbox(crate::sandbox::this_program(), self.project_folder()),
         );
+        let mut draft = DraftTools::new(session);
+        draft.set_remembered(std::mem::take(&mut self.agent_request_ids));
         let mut registry = Registry::new(
-            DraftTools::new(session),
+            draft,
             settings,
             Moves::default(),
             Probe,
@@ -316,6 +318,7 @@ impl Shell {
         let settings_now = registry.settings.get();
         let servers = std::mem::take(registry.mcp.transport_mut());
         let session = registry.draft.session().clone();
+        let request_ids = registry.draft.take_remembered();
         let moves = std::mem::take(&mut registry.player);
         let exported = registry.export.path.take();
         let jobs = registry.take_speech_jobs();
@@ -329,6 +332,7 @@ impl Shell {
         );
         drop(registry);
         self.mcp_servers = servers;
+        self.agent_request_ids = request_ids;
         if settings_now.generation != generation {
             // The settings tool already wrote the file at this generation.
             cutlass_logger::info!(
@@ -524,6 +528,23 @@ mod tests {
             .run_agent_tool(&call("draft.apply", &split.to_string()), &[])
             .outcome;
         assert!(stale.is_error, "a stale revision is refused");
+        // A combo sent again with its request id is answered as the first
+        // time, and runs once.
+        let named = json!({
+            "expected_revision": desktop.session().unwrap().revision(),
+            "request_id": "once",
+            "requests": [{"op": "set_project_name", "name": "named once"}],
+        });
+        let first = desktop
+            .run_agent_tool(&call("draft.apply", &named.to_string()), &[])
+            .outcome;
+        assert!(!first.is_error, "{}", first.content);
+        let revision = desktop.session().unwrap().revision();
+        let again = desktop
+            .run_agent_tool(&call("draft.apply", &named.to_string()), &[])
+            .outcome;
+        assert_eq!(again, first);
+        assert_eq!(desktop.session().unwrap().revision(), revision);
 
         let seek = desktop
             .run_agent_tool(&call("player.seek", "1000000"), &[])

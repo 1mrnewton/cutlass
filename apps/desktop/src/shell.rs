@@ -900,6 +900,8 @@ pub struct Shell {
     agent_track_jobs: std::collections::BTreeMap<String, cutlass_agent::TrackJob>,
     /// Each assistant tracking job's path by id: `None` while it runs.
     agent_tracks: follow::AgentTracks,
+    /// The request ids the assistant's combos carried, with their answers.
+    agent_request_ids: cutlass_agent::Remembered,
     /// How many exports the assistant has asked for, to name the next.
     agent_exports: u32,
     /// The last export the assistant asked for, for `export.poll`.
@@ -1043,6 +1045,7 @@ impl Shell {
             agent_speech_jobs: std::collections::BTreeMap::new(),
             agent_track_jobs: std::collections::BTreeMap::new(),
             agent_tracks: follow::AgentTracks::default(),
+            agent_request_ids: cutlass_agent::Remembered::default(),
             agent_exports: 0,
             agent_export: None,
             job: None,

@@ -32,14 +32,13 @@
 
 use core::arch::x86_64::{
     __m128i, __m256i, _mm_add_epi32, _mm_avg_epu16, _mm_loadl_epi64, _mm_loadu_si128,
-    _mm_madd_epi16, _mm_max_epi32, _mm_min_epi32, _mm_packus_epi32, _mm_set1_epi32,
-    _mm_setzero_si128, _mm_srai_epi32, _mm_storel_epi64, _mm_storeu_si128, _mm_unpackhi_epi32,
-    _mm_unpacklo_epi32, _mm256_add_epi32, _mm256_avg_epu16, _mm256_castsi128_si256,
-    _mm256_castsi256_si128, _mm256_extracti128_si256, _mm256_loadu_si256, _mm256_madd_epi16,
-    _mm256_max_epi32, _mm256_min_epi32, _mm256_packus_epi32, _mm256_permute2x128_si256,
-    _mm256_set_m128i, _mm256_set1_epi32, _mm256_setzero_si256, _mm256_srai_epi32,
-    _mm256_storeu_si256, _mm256_unpackhi_epi16, _mm256_unpackhi_epi32, _mm256_unpacklo_epi16,
-    _mm256_unpacklo_epi32,
+    _mm_madd_epi16, _mm_max_epi32, _mm_min_epi32, _mm_or_si128, _mm_set1_epi32, _mm_setzero_si128,
+    _mm_slli_epi32, _mm_srai_epi32, _mm_storel_epi64, _mm_storeu_si128, _mm256_add_epi32,
+    _mm256_avg_epu16, _mm256_castsi128_si256, _mm256_castsi256_si128, _mm256_extracti128_si256,
+    _mm256_loadu_si256, _mm256_madd_epi16, _mm256_max_epi32, _mm256_min_epi32, _mm256_or_si256,
+    _mm256_packus_epi32, _mm256_permute2x128_si256, _mm256_set_m128i, _mm256_set1_epi32,
+    _mm256_setzero_si256, _mm256_slli_epi32, _mm256_srai_epi32, _mm256_storeu_si256,
+    _mm256_unpackhi_epi16, _mm256_unpacklo_epi16,
 };
 
 // Loads and stores ---------------------------------------------------------
@@ -196,12 +195,12 @@ macro_rules! kernels {
         fn dot1($d1p:ident, $d1x:ident) $dot1:block
     ) => {
         use super::{
-            __m128i, __m256i, _mm_max_epi32, _mm_min_epi32, _mm_packus_epi32, _mm_set1_epi32,
-            _mm_setzero_si128, _mm_srai_epi32, _mm_unpackhi_epi32, _mm_unpacklo_epi32,
-            _mm256_castsi128_si256, _mm256_max_epi32, _mm256_min_epi32, _mm256_packus_epi32,
+            __m128i, __m256i, _mm_max_epi32, _mm_min_epi32, _mm_or_si128, _mm_set1_epi32,
+            _mm_setzero_si128, _mm_slli_epi32, _mm_srai_epi32, _mm256_castsi128_si256,
+            _mm256_max_epi32, _mm256_min_epi32, _mm256_or_si256, _mm256_packus_epi32,
             _mm256_permute2x128_si256, _mm256_set_m128i, _mm256_set1_epi32, _mm256_setzero_si256,
-            _mm256_srai_epi32, _mm256_unpackhi_epi16, _mm256_unpackhi_epi32, _mm256_unpacklo_epi16,
-            _mm256_unpacklo_epi32, l64, l128, l256, put8, put8x2, put16,
+            _mm256_slli_epi32, _mm256_srai_epi32, _mm256_unpackhi_epi16, _mm256_unpacklo_epi16,
+            l64, l128, l256, put8, put8x2, put16,
         };
 
         // Filters ----------------------------------------------------------
@@ -270,15 +269,18 @@ macro_rules! kernels {
             #[inline]
             #[target_feature(enable = $feat)]
             fn pack(&self, e: __m256i, o: __m256i) -> __m256i {
+                // Lane `m` of `e` is output `2m`, of `o` output `2m + 1`,
+                // both below 65536: the odd one in the high half is the
+                // two in order, with no shuffle.
                 let (e, o) = (Self::round(e), Self::round(o));
-                _mm256_packus_epi32(_mm256_unpacklo_epi32(e, o), _mm256_unpackhi_epi32(e, o))
+                _mm256_or_si256(e, _mm256_slli_epi32::<16>(o))
             }
 
             #[inline]
             #[target_feature(enable = $feat)]
             fn pack1(&self, e: __m128i, o: __m128i) -> __m128i {
                 let (e, o) = (Self::round1(e), Self::round1(o));
-                _mm_packus_epi32(_mm_unpacklo_epi32(e, o), _mm_unpackhi_epi32(e, o))
+                _mm_or_si128(e, _mm_slli_epi32::<16>(o))
             }
 
             /// The same for sums of the low and high halves of each lane (the

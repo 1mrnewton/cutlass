@@ -17,7 +17,10 @@
 //!
 //! With no window there is no screen to play on: seek moves the playhead a
 //! `.png` export draws, and an export or a track runs to the end before it
-//! answers.
+//! answers. An export draws on a GPU device opened with no window, as the
+//! window draws on its own, so an effect clip is in the file. On a machine
+//! that gives none the file is written without its effect clips, and the
+//! answer names them.
 
 use std::cell::RefCell;
 use std::io::{BufRead, Write};
@@ -223,6 +226,8 @@ impl Own {
         }
         // Other hosts on this project send their calls here.
         shell.listen(Arc::clone(wake));
+        // No window gives this host a GPU device, so its first export opens one.
+        shell.draw_exports_offscreen(cutlass_render::Renderer::headless);
         let session = shell
             .session()
             .cloned()
@@ -543,7 +548,8 @@ impl Tracking for Headless {
 impl Export for Headless {
     /// Writes the file before it answers: a `.png` is the frame at the
     /// playhead, anything else the whole project as H.264. An existing
-    /// file is not replaced, as no one is here to allow it.
+    /// file is not replaced, as no one is here to allow it. Effect clips
+    /// the file was written without, for want of a GPU, are named.
     fn start(&mut self, path: &str) -> Result<String, String> {
         if path.trim().is_empty() {
             return Err("name the file to export to".to_owned());
@@ -575,7 +581,7 @@ impl Export for Headless {
             return Err(format!("{} was not written", path.display()));
         }
         let id = shell.agent_export_next();
-        let wrote = format!("wrote {}", path.display());
+        let wrote = shell.export_wrote(&path);
         shell.agent_export_began(id.clone(), path, Some(Ok(wrote)));
         Ok(id)
     }

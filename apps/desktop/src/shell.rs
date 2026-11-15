@@ -59,6 +59,8 @@ mod enhance;
 mod hear;
 mod inspector;
 mod listen;
+mod offscreen;
+pub use offscreen::{LeftOut, OpenRenderer};
 mod proxy;
 pub use proxy::ProxyState;
 mod transition;
@@ -946,6 +948,10 @@ pub struct Shell {
     face: Arc<FaceTable>,
     /// The preview canvas on eframe's GPU device, once the window has one.
     gpu: Option<crate::gpu::Preview>,
+    /// Where exports draw when the preview has no device.
+    offscreen: offscreen::Offscreen,
+    /// The effect clips the last finished export left out of its picture.
+    export_left_out: Option<LeftOut>,
     /// The canvas shows a clip's earlier picture while the asked one decodes.
     preview_stale: bool,
     /// The revision of the open draft the picture on the canvas was drawn
@@ -1067,6 +1073,8 @@ impl Shell {
             card_waves: std::collections::HashMap::new(),
             face: crate::face::installed(),
             gpu: None,
+            offscreen: offscreen::Offscreen::Off,
+            export_left_out: None,
             preview_stale: false,
             shown_revision: std::cell::Cell::new(None),
             scrubbing: false,
@@ -7688,6 +7696,8 @@ impl Shell {
     /// encode is refused before anything is written.
     pub fn export(&mut self, request: ExportRequest) -> Result<(), ShellError> {
         cutlass_logger::info!("export asked: {request:?}");
+        self.export_left_out = None;
+        self.open_offscreen();
         if request.codec == CodecId::Png {
             return self.export_png(request);
         }
@@ -7740,6 +7750,7 @@ impl Shell {
         cutlass_png::register_encoders(&mut encoders);
         let mut mux = cutlass_still::StillMux::new();
         let mut device = SoftwareDevice::new();
+        let left_out = self.left_out(draft, &[&export_request.range]);
         cutlass_export::export(
             cutlass_export::ExportRun {
                 draft,
@@ -7751,8 +7762,8 @@ impl Shell {
                 destination: None,
                 root: root.as_deref(),
                 fonts: &*self.face,
-                // The preview's device, so an effect clip is in the file.
-                renderer: self.gpu.as_ref().map(crate::gpu::Preview::renderer),
+                // A GPU device, so an effect clip is in the file.
+                renderer: self.export_renderer(),
                 progress: None,
             },
             |_, _, _, _| Ok(cutlass_eval::ClipPcm::Missing),
@@ -7763,7 +7774,9 @@ impl Shell {
                 "export did not finish a file".to_owned(),
             ));
         };
-        write_replaced(&request.path, bytes)
+        write_replaced(&request.path, bytes)?;
+        self.export_left_out = left_out;
+        Ok(())
     }
 
     /// What a job export writes, checked before it starts.
@@ -7996,11 +8009,19 @@ impl Shell {
         let readers = self.readers.clone();
         let encoders = self.encoders.clone();
         let fonts = Arc::clone(&self.face);
-        // The preview's device, so an effect clip is in the file.
-        let gpu = self.gpu.as_ref().map(|preview| {
-            let renderer = preview.renderer();
-            (renderer.device().clone(), renderer.queue().clone())
-        });
+        // A GPU device, so an effect clip is in the file.
+        let gpu = self.export_gpu();
+        let pictures: Vec<&TimeRange> = plan
+            .outputs
+            .iter()
+            .filter_map(|output| match output {
+                ExportOutput::Movie { request, .. } | ExportOutput::Gif { request, .. } => {
+                    Some(&request.range)
+                }
+                ExportOutput::Sound { .. } => None,
+            })
+            .collect();
+        let left_out = self.left_out(&plan.draft, &pictures);
         let first = plan.paths().into_iter().next().unwrap_or_default();
         let name = first
             .file_name()
@@ -8083,6 +8104,7 @@ impl Shell {
                 written.map_err(export_failure)?;
                 shell.set_notice(format!("Exported {name}"));
                 shell.exported = Some(first);
+                shell.export_left_out = left_out;
                 Ok(())
             })
         })
@@ -8254,10 +8276,10 @@ impl Shell {
         let readers = self.readers.clone();
         let encoders = self.encoders.clone();
         let fonts = Arc::clone(&self.face);
-        let gpu = self.gpu.as_ref().map(|preview| {
-            let renderer = preview.renderer();
-            (renderer.device().clone(), renderer.queue().clone())
-        });
+        self.export_left_out = None;
+        self.open_offscreen();
+        let gpu = self.export_gpu();
+        let left_out = self.left_out(&draft, &[&TimeRange::new(time.0, 1)]);
         let destination = path.to_path_buf();
         self.exported = None;
         self.start_job("Still", move |progress| {
@@ -8280,6 +8302,7 @@ impl Shell {
                 written.map_err(export_failure)?;
                 shell.set_notice(format!("Saved {name}"));
                 shell.exported = Some(destination);
+                shell.export_left_out = left_out;
                 Ok(())
             })
         })
@@ -18215,6 +18238,8 @@ mod tests {
         Folder::new(draft).save(&temp.path).unwrap();
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
+        // A shell with a preview device opens no other to export on.
+        desktop.draw_exports_offscreen(|| panic!("the preview has a device"));
         desktop.attach_gpu(&state);
         let destination = temp.path.join("out.png");
         desktop
@@ -18230,6 +18255,7 @@ mod tests {
         let at = |x: u32, y: u32| samples[usize::try_from((y * width + x) * 4).unwrap()];
         let (middle, corner) = (at(width / 2, height / 2), at(0, 0));
         assert!(corner + 40 < middle, "corner {corner}, middle {middle}");
+        assert_eq!(desktop.export_left_out(), None);
     }
 
     fn export_still(dir: &Path, media: &Path) {

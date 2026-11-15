@@ -222,10 +222,11 @@ impl Shell {
         let writing = self.job().is_some_and(|job| job.label == "Export");
         let written = self.exported.clone();
         let notice = self.notice.clone();
+        let left_out = self.export_left_out().cloned();
         let export = self.agent_export.as_mut()?;
         if export.done.is_none() && !writing {
             export.done = Some(if written.as_deref() == Some(export.path.as_path()) {
-                Ok(format!("wrote {}", export.path.display()))
+                Ok(super::offscreen::wrote(&export.path, left_out.as_ref()))
             } else if notice.is_empty() {
                 Err("the export stopped before it finished".to_owned())
             } else {

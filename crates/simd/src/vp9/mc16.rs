@@ -23,7 +23,8 @@ pub struct Block<'a> {
     pub fx: Option<&'a Filter>,
     pub fy: Option<&'a Filter>,
     pub avg: bool,
-    /// The largest sample, `(1 << bit_depth) - 1`: at most 4095.
+    /// The largest sample, `(1 << bit_depth) - 1`: the kernels take 1023
+    /// and 4095 (10 and 12 bits).
     pub max: u16,
 }
 
@@ -35,7 +36,10 @@ impl Block<'_> {
     /// rows above and 4 below with a fraction down.
     #[inline(always)]
     fn fits(&self) -> bool {
-        if !matches!(self.w, 4 | 8 | 16 | 32 | 64) || self.h == 0 || self.h > 64 || self.max > 4095
+        if !matches!(self.w, 4 | 8 | 16 | 32 | 64)
+            || self.h == 0
+            || self.h > 64
+            || !matches!(self.max, 1023 | 4095)
         {
             return false;
         }
@@ -61,21 +65,39 @@ impl Block<'_> {
 /// samples below 32768 (each is multiplied as a signed 16-bit value).
 #[must_use]
 #[inline(always)]
+pub fn predict(b: Block<'_>) -> bool {
+    predict_with(b, true)
+}
+
+/// [`predict`], with the AVX-VNNI kernels only if `vnni` (the tests run
+/// both).
+#[must_use]
+#[inline(always)]
 #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
-pub fn predict(mut b: Block<'_>) -> bool {
+fn predict_with(mut b: Block<'_>, vnni: bool) -> bool {
     #[cfg(target_arch = "x86_64")]
     {
         if super::avx2() && b.fits() {
-            // SAFETY: `avx2` checked at run time that the CPU has AVX2,
-            // the only feature `avx2::predict` enables.
-            #[allow(unsafe_code)]
-            unsafe {
-                avx2::predict(&mut b);
+            if vnni && super::avx2_vnni() {
+                // SAFETY: `avx2_vnni` checked at run time that the CPU has
+                // AVX2 and AVX-VNNI, the features `avx2::vnni::predict`
+                // enables.
+                #[allow(unsafe_code)]
+                unsafe {
+                    avx2::vnni::predict(&mut b);
+                }
+            } else {
+                // SAFETY: `avx2` checked at run time that the CPU has
+                // AVX2, the only feature `avx2::plain::predict` enables.
+                #[allow(unsafe_code)]
+                unsafe {
+                    avx2::plain::predict(&mut b);
+                }
             }
             return true;
         }
     }
-    let _ = b;
+    let _ = (b, vnni);
     false
 }
 

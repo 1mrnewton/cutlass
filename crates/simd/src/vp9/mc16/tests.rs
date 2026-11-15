@@ -1,4 +1,4 @@
-use super::{Block, Filter, predict, predict_scalar};
+use super::{Block, Filter, predict, predict_scalar, predict_with};
 
 const FILTERS: [[i16; 8]; 4] = [
     [-1, 6, -19, 78, 78, -19, 6, -1],
@@ -50,25 +50,34 @@ fn matches_the_scalar_twin() {
             avg,
             max,
         });
-        let mut got = init.clone();
-        let ran = predict(Block {
-            dst: &mut got,
-            dst_stride: 64,
-            src: &src,
-            at,
-            src_stride: stride,
-            w,
-            h,
-            fx: fx.as_ref(),
-            fy: fy.as_ref(),
-            avg,
-            max,
-        });
-        if !ran {
-            continue;
+        // The AVX2 kernels, and the AVX-VNNI ones where the CPU has them.
+        for vnni in [false, true] {
+            let mut got = init.clone();
+            let ran = predict_with(
+                Block {
+                    dst: &mut got,
+                    dst_stride: 64,
+                    src: &src,
+                    at,
+                    src_stride: stride,
+                    w,
+                    h,
+                    fx: fx.as_ref(),
+                    fy: fy.as_ref(),
+                    avg,
+                    max,
+                },
+                vnni,
+            );
+            if !ran {
+                continue;
+            }
+            ran_count += usize::from(!vnni);
+            assert_eq!(
+                got, want,
+                "case {case} w {w} h {h} {fx:?} {fy:?} avg {avg} vnni {vnni}"
+            );
         }
-        ran_count += 1;
-        assert_eq!(got, want, "case {case} w {w} h {h} {fx:?} {fy:?} avg {avg}");
     }
     if super::super::avx2() {
         assert_eq!(ran_count, cases);

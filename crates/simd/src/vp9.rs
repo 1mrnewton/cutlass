@@ -3,11 +3,12 @@
 //!
 //! - [`mc`]: the 8-tap sub-sample filters of inter prediction for 8-bit
 //!   samples, and the average of two predictions; [`mc16`] the same for
-//!   10 and 12 bits.
+//!   10 and 12 bits (with AVX-VNNI too, where the CPU has it).
 //! - [`lf`]: the loop filter, sixteen lines of an edge at a time; [`lf16`]
 //!   the same for 10 and 12 bits.
 //! - [`quant`]: the encoder's dead-zone quantizer and its sums.
 //! - [`sad16`]: the encoder's SADs and SSE for 10 and 12 bits.
+//! - [`prefetch`]: cache hints for the reference rows a block will read.
 //!
 //! Each entry returns `false`, having written nothing, when it does not
 //! run on this CPU or does not take its input; the codec then does the
@@ -33,6 +34,26 @@ pub fn avx2() -> bool {
         0 => {
             #[cfg(target_arch = "x86_64")]
             let has = std::is_x86_feature_detected!("avx2");
+            #[cfg(not(target_arch = "x86_64"))]
+            let has = false;
+            HAS.store(if has { 2 } else { 1 }, Ordering::Relaxed);
+            has
+        }
+        v => v == 2,
+    }
+}
+
+/// Whether the CPU has AVX2 and AVX-VNNI. Checked once.
+#[must_use]
+#[inline]
+pub fn avx2_vnni() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    /// 0: not checked yet, 1: no, 2: yes.
+    static HAS: AtomicU8 = AtomicU8::new(0);
+    match HAS.load(Ordering::Relaxed) {
+        0 => {
+            #[cfg(target_arch = "x86_64")]
+            let has = avx2() && std::is_x86_feature_detected!("avxvnni");
             #[cfg(not(target_arch = "x86_64"))]
             let has = false;
             HAS.store(if has { 2 } else { 1 }, Ordering::Relaxed);

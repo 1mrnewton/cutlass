@@ -23,10 +23,16 @@ permissions:
 jobs:
   version:
     # The tag names the version the packages carry, or the update check
-    # would offer the same release again and again.
+    # would offer the same release again and again. A release is built only
+    # from main, and only from a commit main's required `rust` check passed.
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: The tag matches the workspace version
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
@@ -34,6 +40,25 @@ jobs:
             echo "the tag $GITHUB_REF_NAME is not v$version from Cargo.toml" >&2
             exit 1
           fi
+      - name: The tag is on main
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "the tag $GITHUB_REF_NAME points at $GITHUB_SHA, which is not on main" >&2
+            exit 1
+          fi
+      - name: rust passed on the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          conclusions=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?check_name=rust" \
+            --jq '[.check_runs[].conclusion] | join(" ")')
+          case " $conclusions " in
+            *" success "*) echo "rust passed on $GITHUB_SHA" ;;
+            *)
+              echo "rust has not passed on $GITHUB_SHA (runs: ${conclusions:-none}); tag a commit main's checks passed" >&2
+              exit 1
+              ;;
+          esac
 
   macos:
     needs: version

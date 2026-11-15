@@ -1265,6 +1265,121 @@ fn a_second_pass_spends_the_bitrate_where_the_first_found_detail() {
     assert!(moving * 2 > total, "{moving} of {total}");
 }
 
+/// Frame `index` of a pan by 3 luma samples a frame over a picture with
+/// fine detail in its colour: each chroma sample is the picture's at its
+/// place, so a pan by an odd number of luma samples shows chroma that no
+/// sub-sample filter predicts (sampled afresh, as a camera's 4:2:0 is).
+fn colour_pan(width: u32, height: u32, index: u32) -> VideoFrame {
+    let at = |x: u32, y: u32, k: u32| -> u8 {
+        let mut v = (x + index * 3).wrapping_mul(0x9e37_79b1) ^ y.wrapping_mul(0x85eb_ca77) ^ k;
+        v ^= v >> 15;
+        v = v.wrapping_mul(0x2c1b_3c6d);
+        v ^= v >> 12;
+        u8::try_from(48 + (v & 0x7f)).unwrap_or(48)
+    };
+    let (cw, ch) = (width / 2, height / 2);
+    let y: Vec<u8> = (0..height)
+        .flat_map(|r| (0..width).map(move |c| (r, c)))
+        .map(|(r, c)| at(c, r, 0))
+        .collect();
+    let plane = |k: u32| -> Vec<u8> {
+        (0..ch)
+            .flat_map(|r| (0..cw).map(move |c| (r, c)))
+            .map(|(r, c)| at(c * 2, r * 2, k))
+            .collect()
+    };
+    VideoFrame::yuv420p(
+        width,
+        height,
+        Plane::tight(width, height, y).expect("y"),
+        Plane::tight(cw, ch, plane(1)).expect("u"),
+        Plane::tight(cw, ch, plane(2)).expect("v"),
+    )
+    .expect("frame")
+}
+
+#[test]
+fn a_second_pass_predicts_chroma_from_a_picture_moved_by_whole_chroma_samples() {
+    // Two passes keep the last pictures in spare slots, and GOLDEN reads
+    // the one the content moved from by an even number of luma samples:
+    // the stream decodes, and some frames' GOLDEN is such a slot.
+    let (w, h, n) = (192u32, 128u32, 24u32);
+    let run = |opts: super::Vp9Options, first: Option<(&[u64], u8)>| {
+        let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+        if let Some((bits, q)) = first {
+            encoder.set_second_pass(bits, q);
+        }
+        let mut packets = Vec::new();
+        for index in 0..n {
+            packets.extend(
+                encoder
+                    .push(&VideoInput {
+                        frame: colour_pan(w, h, index),
+                        pts: i64::from(index),
+                        duration: 1,
+                        timescale: 30,
+                    })
+                    .expect("push"),
+            );
+        }
+        packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+        packets
+    };
+    let base = super::Vp9Options {
+        threads: 2,
+        speed: 6,
+        ..super::Vp9Options::default()
+    };
+    let first: Vec<u64> = run(
+        super::Vp9Options {
+            qindex: 120,
+            speed: 10,
+            ..base
+        },
+        None,
+    )
+    .iter()
+    .map(|p| p.data.len() as u64 * 8)
+    .collect();
+    let second = run(
+        super::Vp9Options {
+            bitrate: 400_000,
+            ..base
+        },
+        Some((&first, 120)),
+    );
+    assert_eq!(second.len(), n as usize);
+    let mut decoder = Decoder::new();
+    let mut pooled = 0;
+    for (index, packet) in second.iter().enumerate() {
+        let mut picture = None;
+        for frame in crate::decode::split_superframe(&packet.data).expect("frames") {
+            // An inter frame's uncompressed header: marker, profile 0,
+            // show_existing, frame_type, show_frame, error_resilient,
+            // intra_only (hidden frames), reset_frame_context, the refresh
+            // flags, then LAST's slot and sign bias and GOLDEN's slot.
+            let bit = |i: usize| (frame[i / 8] >> (7 - i % 8)) & 1;
+            if bit(5) == 1 {
+                let at = 8 + usize::from(bit(6) == 0) + 2 + 8 + 4;
+                let golden = (bit(at) << 2) | (bit(at + 1) << 1) | bit(at + 2);
+                pooled += usize::from(golden >= 3);
+            }
+            picture = decoder.decode(frame).expect("decode").or(picture);
+        }
+        let picture = picture.expect("shown");
+        let src = colour_pan(w, h, u32::try_from(index).unwrap_or(0));
+        let (y, u) = (
+            psnr(&vis(&src.y), &picture.y),
+            psnr(&vis(&src.u), &picture.u),
+        );
+        assert!(y > 25.0 && u > 15.0, "frame {index}: {y:.1} / {u:.1} dB");
+    }
+    assert!(
+        pooled * 3 > n as usize,
+        "{pooled} frames read GOLDEN from the pool"
+    );
+}
+
 #[test]
 fn a_cut_starts_a_golden_frame_and_keeps_the_stream_going() {
     // Ten frames of a moving ramp, then ten of a smooth gradient: nothing

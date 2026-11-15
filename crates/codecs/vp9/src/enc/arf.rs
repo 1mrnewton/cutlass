@@ -223,6 +223,91 @@ pub fn motion<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize) -> u32 {
     m[m.len() / 2]
 }
 
+/// How closely `from` predicts `to` (planes tightly packed, luma `w`×`h`,
+/// chroma subsampled `sx` across and `sy` down) at whole luma samples: over
+/// a sample of 16×16 blocks, each block's best whole-sample luma match
+/// near `seed` (the vector the content moved by), the SSE a luma sample of
+/// the luma, and the SSE of the chroma there, a chroma sample between two
+/// (a vector odd in luma) as their mean, as the filters blur it.
+pub fn phase_error<P: EncPixel>(
+    from: [&[P]; 3],
+    to: [&[P]; 3],
+    w: usize,
+    h: usize,
+    (sx, sy): (usize, usize),
+    seed: (isize, isize),
+) -> (f32, u64) {
+    let (cw, ch) = (w.div_ceil(1 << sx), h.div_ceil(1 << sy));
+    let (mut luma, mut chroma, mut blocks) = (0u64, 0u64, 0u64);
+    for by in (16..h.saturating_sub(31)).step_by(48) {
+        for bx in (16..w.saturating_sub(31)).step_by(48) {
+            let (mv, sse) = search(to[0], from[0], w, h, bx, by, 16, 16, &[seed], 8);
+            luma += sse;
+            blocks += 1;
+            // The chroma block and where its match starts, in halves of a
+            // chroma sample.
+            let (x0, y0, bw, bh) = (bx >> sx, by >> sy, 16 >> sx, 16 >> sy);
+            let hx = ((bx as isize + mv.0) << 1) >> sx;
+            let hy = ((by as isize + mv.1) << 1) >> sy;
+            let (fx, fy) = (hx >> 1, hy >> 1);
+            if fx < 0 || fy < 0 || fx as usize + bw + 1 > cw || fy as usize + bh + 1 > ch {
+                continue;
+            }
+            let (fx, fy, ox, oy) = (
+                fx as usize,
+                fy as usize,
+                (hx & 1) as usize,
+                (hy & 1) as usize,
+            );
+            for p in 1..3 {
+                let (t, f) = (to[p], from[p]);
+                for r in 0..bh {
+                    for k in 0..bw {
+                        let at = |dy: usize, dx: usize| f[(fy + r + dy) * cw + fx + k + dx].get();
+                        let pred = (at(0, 0) + at(0, ox) + at(oy, 0) + at(oy, ox) + 2) >> 2;
+                        let d = i64::from(t[(y0 + r) * cw + x0 + k].get() - pred);
+                        chroma += (d * d) as u64;
+                    }
+                }
+            }
+        }
+    }
+    (luma as f32 / (blocks.max(1) * 256) as f32, chroma)
+}
+
+/// The whole-sample vector `to` moved by from `from` (luma, `w`×`h`), each
+/// component the median of those of a sample of 16×16 blocks of detail
+/// that moved (as [`motion`]), searched near `guess` (the vector the
+/// picture before moved by: a pan goes on); zero when under eight did.
+pub fn shift<P: EncPixel>(
+    from: &[P],
+    to: &[P],
+    w: usize,
+    h: usize,
+    guess: (isize, isize),
+) -> (isize, isize) {
+    let (sf, st) = (Small::new(from, w, h), Small::new(to, w, h));
+    let (mut xs, mut ys) = (Vec::new(), Vec::new());
+    let near = (guess.0.div_euclid(4), guess.1.div_euclid(4));
+    for by in (0..h.saturating_sub(15)).step_by(32) {
+        for bx in (0..w.saturating_sub(15)).step_by(32) {
+            let c = st.find_near(&sf, bx / 4, by / 4, 4, 4, near, SHIFT_RANGE);
+            let (mv, sse) = search(to, from, w, h, bx, by, 16, 16, &[c, guess], 2);
+            let still = P::sse(&to[by * w + bx..], w, &from[by * w + bx..], w, 16, 16);
+            if sse * 4 < still {
+                xs.push(mv.0);
+                ys.push(mv.1);
+            }
+        }
+    }
+    if xs.len() < 8 {
+        return (0, 0);
+    }
+    xs.sort_unstable();
+    ys.sort_unstable();
+    (xs[xs.len() / 2], ys[ys.len() / 2])
+}
+
 /// Whether `to` cuts from `from` (luma, `w`×`h`): over a sample of 16×16
 /// blocks, the best match each finds in the search range leaves more than
 /// twice the error of its own mean (libvpx compares inter and intra
@@ -421,6 +506,9 @@ const COARSE_PER: u64 = 64;
 /// The coarse search's range, in sums of 4×4 samples (48 samples).
 const COARSE_RANGE: isize = 12;
 
+/// [`shift`]'s coarse range around its guess, in sums (12 samples).
+const SHIFT_RANGE: isize = 3;
+
 /// A picture's luma in sums of 4×4 samples, for the coarse search.
 struct Small {
     s: Vec<u32>,
@@ -448,16 +536,31 @@ impl Small {
     /// `pic` within [`COARSE_RANGE`] of this one's `bw`×`bh` sums at
     /// `(x, y)` (ties to the shorter vector).
     fn find(&self, pic: &Small, x: usize, y: usize, bw: usize, bh: usize) -> (isize, isize) {
+        self.find_near(pic, x, y, bw, bh, (0, 0), COARSE_RANGE)
+    }
+
+    /// [`Small::find`] within `range` of `near` (in sums).
+    #[allow(clippy::too_many_arguments)]
+    fn find_near(
+        &self,
+        pic: &Small,
+        x: usize,
+        y: usize,
+        bw: usize,
+        bh: usize,
+        near: (isize, isize),
+        range: isize,
+    ) -> (isize, isize) {
         if bw == 0 || bh == 0 || x + bw > self.w || y + bh > self.h {
             return (0, 0);
         }
         let mut best = (u64::MAX, (0isize, 0isize));
-        for dy in -COARSE_RANGE..=COARSE_RANGE {
+        for dy in near.1 - range..=near.1 + range {
             let py = y as isize + dy;
             if py < 0 || py as usize + bh > pic.h {
                 continue;
             }
-            for dx in -COARSE_RANGE..=COARSE_RANGE {
+            for dx in near.0 - range..=near.0 + range {
                 let px = x as isize + dx;
                 if px < 0 || px as usize + bw > pic.w {
                     continue;

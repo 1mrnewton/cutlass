@@ -225,6 +225,8 @@ pub struct Shared<'a, P> {
     pub tok: &'a TokCosts,
     /// See [`super::FrameParams::second_pass`].
     pub second_pass: bool,
+    /// See [`super::FrameParams::noise`].
+    pub noise: f32,
 }
 
 /// The context energy of a level (libvpx `vp9_pt_energy_class`): 0, 1, 2,
@@ -358,6 +360,16 @@ const CAND_MARGIN_SPEED: u8 = 5;
 /// From this speed a whole block under the quantizer's noise ends the
 /// partition search whether or not it codes a residual.
 const BREAKOUT_SPEED: u8 = 5;
+
+/// A whole block that needs no residual and keeps under this many times
+/// the picture's noise ([`super::FrameParams::noise`]) a sample ends the
+/// partition search: a split cannot predict noise better. Two passes on
+/// the grainy pan at 2 Mb/s: a third less time (its quantizer runs fine,
+/// and grain is over the quantizer's noise everywhere) at the same BD-rate
+/// against libvpx's; at 1.2 rather than 1, 11% less again, 0.4% more bits
+/// at the same averaged PSNR on the clip from a fractal to `testsrc2`,
+/// 0.4% fewer on the one from a still picture.
+const NOISE_FLOOR: f64 = 1.2;
 
 /// With [`super::FrameParams::second_pass`], the bits (in 1/256) a block's
 /// best mode takes per 8×8 above which it also tries the next smaller
@@ -957,15 +969,21 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             }
         }
         // No split when the whole block needs no residual and its error is
-        // under the quantizer's own noise, or (from BREAKOUT_SPEED) codes
-        // one and its error is under half that.
+        // under the quantizer's own noise (or the picture's, see
+        // `FrameParams::noise`), or (from BREAKOUT_SPEED) codes one and its
+        // error is under half the quantizer's.
         if whole && best.1 == PARTITION_NONE && (none_skip.0 || s.speed >= BREAKOUT_SPEED) {
             let pixels = (n * 8 * n * 8) as f64;
             let step = f64::from(s.dq[0][0][1]) / 8.0;
             // A block that codes a residual stops the search at half that
             // error (from BREAKOUT_SPEED: 6% of the time, 0.2% of the bits).
             let div = if none_skip.0 { 24.0 } else { 48.0 };
-            if none_skip.1 < pixels * step * step / div {
+            let noise = if none_skip.0 {
+                f64::from(s.noise) * pixels * NOISE_FLOOR
+            } else {
+                0.0
+            };
+            if none_skip.1 < (pixels * step * step / div).max(noise) {
                 self.restore(before + 1);
                 self.part[Self::node(row, col, level)] = PARTITION_NONE;
                 return best.0;

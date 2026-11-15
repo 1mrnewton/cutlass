@@ -30,6 +30,7 @@ pub(crate) fn imported(id: &str, path: String, probed: Probed) -> ImportedMedium
             width,
             height,
             duration,
+            has_audio,
         } => {
             let mut material = MaterialVideo::new(id);
             material.kind = meta.as_str().to_owned();
@@ -37,6 +38,7 @@ pub(crate) fn imported(id: &str, path: String, probed: Probed) -> ImportedMedium
             material.duration = Micros(duration);
             material.width = width;
             material.height = height;
+            material.has_audio = has_audio;
             ImportedMedium::Video(Box::new(material))
         }
         Probed::Audio { duration } => ImportedMedium::Audio(Box::new(MaterialAudio {
@@ -234,4 +236,33 @@ pub(crate) fn fresh(taken: &HashSet<String>, prefix: &str) -> String {
         .map(|n| format!("{prefix}-{n}"))
         .find(|id| !taken.contains(id))
         .unwrap_or_else(|| format!("{prefix}-0"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Probed, imported};
+    use cutlass_model::MetaType;
+    use cutlass_session::ImportedMedium;
+
+    fn movie(has_audio: bool) -> Probed {
+        Probed::Video {
+            meta: MetaType::Video,
+            width: 16,
+            height: 9,
+            duration: 1_000_000,
+            has_audio,
+        }
+    }
+
+    #[test]
+    fn an_imported_movie_keeps_whether_it_has_sound() {
+        for sound in [true, false] {
+            let ImportedMedium::Video(material) =
+                imported("m", "Resources/a.mp4".to_owned(), movie(sound))
+            else {
+                panic!("a movie imports as video");
+            };
+            assert_eq!(material.has_audio, sound);
+        }
+    }
 }

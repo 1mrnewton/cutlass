@@ -8311,6 +8311,7 @@ impl Shell {
                 width,
                 height,
                 duration,
+                has_audio,
             } => {
                 let material_id = self.fresh("mat");
                 let mut material = MaterialVideo::new(material_id.as_str());
@@ -8319,6 +8320,7 @@ impl Shell {
                 material.duration = Micros(duration);
                 material.width = width;
                 material.height = height;
+                material.has_audio = has_audio;
                 Request::Import {
                     medium: ImportedMedium::Video(Box::new(material)),
                 }
@@ -8959,6 +8961,7 @@ fn link_requests(draft: &Draft, missing: &str, probed: &Probed, stored: &str) ->
             width,
             height,
             duration,
+            ..
         } => {
             // A photo, an image and a GIF are stills; only a movie is not.
             let movie = *meta == MetaType::Video;
@@ -11784,6 +11787,7 @@ mod tests {
                 .path
                 .starts_with("Resources/")
         );
+        assert!(!desktop.draft().unwrap().materials.videos[0].has_audio);
 
         let sound = temp.path.join("tone.wav");
         write_wav(&sound);
@@ -11974,6 +11978,20 @@ mod tests {
         let log = crate::test_log::text();
         assert!(log.contains(&error.to_string()), "{log}");
         assert!(log.contains("notes.txt"), "{log}");
+    }
+
+    #[test]
+    fn a_movie_with_sound_imports_with_its_sound_noted() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/containers/mpegts/tests/fixtures/h264_aac.ts");
+        desktop.import_file(&movie).unwrap();
+        let video = &desktop.draft().unwrap().materials.videos[0];
+        assert_eq!(video.kind, cutlass_model::MetaType::Video.as_str());
+        assert!(video.has_audio, "the fixture carries AAC beside its H.264");
     }
 
     #[test]

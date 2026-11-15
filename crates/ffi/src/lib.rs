@@ -2050,6 +2050,7 @@ mod tests {
             width: 16,
             height: 16,
             duration,
+            has_audio: false,
         }
     }
 
@@ -2093,6 +2094,7 @@ mod tests {
             width: 1_080,
             height: 1_920,
             duration: 1_000_000,
+            has_audio: false,
         };
         let first = host.import_probed(&fixture("pattern.png"), tall).unwrap();
         host.append(&first).unwrap();
@@ -3681,6 +3683,7 @@ mod tests {
             width: 0,
             height: 9,
             duration: 1,
+            has_audio: false,
         };
         let error = host
             .import_probed(&fixture("pattern.png"), flat)
@@ -4042,6 +4045,7 @@ mod tests {
             width: 16,
             height: 16,
             duration,
+            has_audio: false,
         }
     }
 

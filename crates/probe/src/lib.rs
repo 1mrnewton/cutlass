@@ -43,12 +43,14 @@ impl std::error::Error for ProbeError {}
 /// photo's EXIF orientation are applied.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Probed {
-    /// A movie, or a still on the video lane's clock.
+    /// A movie, or a still on the video lane's clock. `has_audio` says
+    /// whether a movie also carries a sound track; a still has none.
     Video {
         meta: MetaType,
         width: i32,
         height: i32,
         duration: i64,
+        has_audio: bool,
     },
     Audio {
         duration: i64,
@@ -137,6 +139,7 @@ fn still(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
         width,
         height,
         duration: cutlass_model::MaterialVideo::MAPPING_DURATION.0,
+        has_audio: false,
     }))
 }
 
@@ -328,6 +331,9 @@ fn transport_stream(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeE
         .map_or(0, |end| u64::try_from(end - demux.start()).unwrap_or(0));
     let duration = ticks_to_micros(ticks, cutlass_mpegts::TIMESCALE)?;
     let streams = cutlass_container::Demux::streams(&demux);
+    let sounds = streams
+        .iter()
+        .any(|stream| stream.params().sample_rate().is_some());
     if let Some(size) = streams.iter().find_map(|stream| stream.params().size()) {
         let width =
             i32::try_from(size.width()).map_err(|_| ProbeError::new("the frame is too wide"))?;
@@ -338,12 +344,10 @@ fn transport_stream(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeE
             width,
             height,
             duration,
+            has_audio: sounds,
         }));
     }
-    if streams
-        .iter()
-        .any(|stream| stream.params().sample_rate().is_some())
-    {
+    if sounds {
         return Ok(Some(Probed::Audio { duration }));
     }
     Err(ProbeError::new(
@@ -386,6 +390,9 @@ fn matroska(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     };
     let duration = ticks_to_micros(u64::try_from(ticks).unwrap_or(0), timescale)?;
     let streams = cutlass_container::Demux::streams(&demux);
+    let sounds = streams
+        .iter()
+        .any(|stream| stream.params().sample_rate().is_some());
     if let Some(size) = streams.iter().find_map(|stream| stream.params().size()) {
         let width =
             i32::try_from(size.width()).map_err(|_| ProbeError::new("the frame is too wide"))?;
@@ -396,12 +403,10 @@ fn matroska(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
             width,
             height,
             duration,
+            has_audio: sounds,
         }));
     }
-    if streams
-        .iter()
-        .any(|stream| stream.params().sample_rate().is_some())
-    {
+    if sounds {
         return Ok(Some(Probed::Audio { duration }));
     }
     Err(ProbeError::new(
@@ -444,6 +449,7 @@ fn movie(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
             width,
             height,
             duration,
+            has_audio: audio.is_some(),
         }));
     }
     if let Some(stream) = audio {
@@ -480,6 +486,9 @@ fn avi(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
             stream.timescale().ticks_per_second(),
         )
     };
+    let sound = streams.iter().find(|stream| {
+        stream.params().sample_rate().is_some() && !stream.params().codec().is_unknown()
+    });
     if let Some(stream) = streams
         .iter()
         .find(|stream| stream.params().size().is_some() && !stream.params().codec().is_unknown())
@@ -496,11 +505,10 @@ fn avi(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
             width,
             height,
             duration: length_of(stream)?,
+            has_audio: sound.is_some(),
         }));
     }
-    if let Some(stream) = streams.iter().find(|stream| {
-        stream.params().sample_rate().is_some() && !stream.params().codec().is_unknown()
-    }) {
+    if let Some(stream) = sound {
         return Ok(Some(Probed::Audio {
             duration: length_of(stream)?,
         }));
@@ -651,7 +659,16 @@ mod tests {
                 width,
                 height,
                 duration,
+                ..
             } => (meta, width, height, duration),
+            Probed::Audio { .. } => panic!("{} opened as audio", path.display()),
+        }
+    }
+
+    /// Whether the picture at `path` probed with a sound track.
+    fn sounds(path: &Path) -> bool {
+        match probe(path).expect("probe") {
+            Probed::Video { has_audio, .. } => has_audio,
             Probed::Audio { .. } => panic!("{} opened as audio", path.display()),
         }
     }
@@ -695,6 +712,7 @@ mod tests {
         let temp = Temp::new();
         let path = temp.write("clip.avi", &bytes);
         assert_eq!(picture(&path), (MetaType::Video, 64, 36, 2_000_000));
+        assert!(!sounds(&path), "a picture-only AVI has no sound");
     }
 
     /// One second of 20 ms Opus packets after a 312-sample pre-skip, in Ogg.
@@ -832,6 +850,7 @@ mod tests {
                 width: 320,
                 height: 240,
                 duration: 2_000_000,
+                has_audio: false,
             }
         );
         // A cut file still names the family in its error.
@@ -846,6 +865,7 @@ mod tests {
         assert_eq!(meta, MetaType::Image);
         assert!(width > 0 && height > 0);
         assert_eq!(duration, cutlass_model::MaterialVideo::MAPPING_DURATION.0);
+        assert!(!sounds(&fixture("pattern.png")), "a still has no sound");
     }
 
     /// `jpeg` with an EXIF block carrying `orientation` just after SOI.
@@ -914,8 +934,14 @@ mod tests {
         assert_eq!((w, h), (16, 8));
     }
 
-    /// A one-frame 16x8 movie, its track matrix set to `matrix`.
+    /// A one-second 16x8 movie, its track matrix set to `matrix`.
     fn movie(matrix: [i32; 9]) -> Vec<u8> {
+        movie_with(matrix, false)
+    }
+
+    /// A one-second 16x8 movie, its track matrix set to `matrix`, with a
+    /// second of AAC beside the picture when `sound` is set.
+    fn movie_with(matrix: [i32; 9], sound: bool) -> Vec<u8> {
         use cutlass_isobmff::{CodecId, Mux, MuxOptions, Packet, StreamParams, Timescale};
         let mut params = StreamParams::video(CodecId::H264, Timescale(30), 16, 8);
         params.extradata = vec![1, 66, 0, 10];
@@ -924,6 +950,30 @@ mod tests {
             MuxOptions::default(),
         );
         let track = mux.add_stream(&params).expect("stream");
+        if sound {
+            let mut audio = StreamParams::audio(
+                CodecId::Aac,
+                Timescale(48_000),
+                48_000,
+                2,
+                16,
+                Default::default(),
+            );
+            audio.extradata = vec![0x12, 0x10];
+            let audio_track = mux.add_stream(&audio).expect("audio stream");
+            for frame in 0..47 {
+                mux.write_packet(&Packet {
+                    track_id: audio_track,
+                    payload: vec![0x21, 0x10],
+                    dts: frame * 1024,
+                    pts: frame * 1024,
+                    duration: 1024,
+                    timescale: Timescale(48_000),
+                    keyframe: true,
+                })
+                .expect("audio packet");
+            }
+        }
         for frame in 0..30 {
             mux.write_packet(&Packet {
                 track_id: track,
@@ -967,7 +1017,18 @@ mod tests {
             assert_eq!(meta, MetaType::Video);
             assert_eq!((width, height), size, "{matrix:?}");
             assert_eq!(duration, 1_000_000);
+            assert!(!sounds(&path), "a picture-only movie has no sound");
         }
+    }
+
+    #[test]
+    fn a_movie_with_a_sound_track_says_so() {
+        let temp = Temp::new();
+        let one = 1 << 16;
+        let upright = [one, 0, 0, 0, one, 0, 0, 0, 1 << 30];
+        let path = temp.write("talk.mp4", &movie_with(upright, true));
+        assert_eq!(picture(&path), (MetaType::Video, 16, 8, 1_000_000));
+        assert!(sounds(&path), "the AAC track is the movie's sound");
     }
 
     #[test]
@@ -1132,6 +1193,7 @@ mod tests {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../containers/mpegts/tests/fixtures/h264_aac.ts");
         assert_eq!(picture(&path), (MetaType::Video, 96, 64, 1_237_333));
+        assert!(sounds(&path), "the fixture carries AAC beside its H.264");
         let temp = Temp::new();
         let bytes = std::fs::read(&path).expect("fixture");
         let cut = temp.write("cut.ts", &bytes[..1000]);

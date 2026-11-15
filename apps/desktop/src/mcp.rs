@@ -887,6 +887,110 @@ mod tests {
         assert!(text(5).contains("no screen"), "{}", text(5));
     }
 
+    /// A grey frame with a vignette clip over it, exported by a host with
+    /// no window: with a GPU the corners of the still and of the movie are
+    /// darker than the middle, and without one the answers name the clip.
+    #[test]
+    fn with_no_window_an_export_shows_an_effect_clip_or_names_it() {
+        let gpu = cutlass_render::Renderer::for_test()
+            .expect("a GPU is required")
+            .is_some();
+        let project = Project::new("effect");
+        cutlass_store::Folder::new(crate::shell::vignette_draft())
+            .save(&project.0)
+            .unwrap();
+        let still = project.0.join("still.png");
+        let movie = project.0.join("cut.mp4");
+        let call = |id: i64, path: &std::path::Path| {
+            json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":"export_start",
+                    "arguments":{"input": format!("new {}", path.display())}}})
+        };
+        let input = lines(&[
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            call(2, &still),
+            call(3, &movie),
+        ]);
+        let mut output = Vec::new();
+        serve(
+            Some(&project.0),
+            std::io::Cursor::new(input.into_bytes()),
+            &mut output,
+        )
+        .unwrap();
+        let answers = answers(output);
+        let text = |at: usize| {
+            answers[at]["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(answers.len(), 3);
+        assert!(still.is_file(), "{}", text(1));
+        assert!(movie.is_file(), "{}", text(2));
+        if !gpu {
+            eprintln!("no GPU: the answers name the clip");
+            for (at, path) in [(1, &still), (2, &movie)] {
+                let named = format!(
+                    "wrote {}, but 1 effect clip is not in the picture (fx): no GPU device",
+                    path.display()
+                );
+                assert!(text(at).contains(&named), "{}", text(at));
+            }
+            return;
+        }
+        assert_eq!(
+            text(1),
+            format!("job=export-1 finished: wrote {}", still.display())
+        );
+        assert_eq!(
+            text(2),
+            format!("job=export-2 finished: wrote {}", movie.display())
+        );
+        let (middle, corner) = crate::shell::still_middle_and_corner(&still);
+        assert!(corner + 40 < middle, "corner {corner}, middle {middle}");
+        let (middle, corner) = crate::shell::movie_middle_and_corner(&movie);
+        assert!(corner + 40 < middle, "corner {corner}, middle {middle}");
+    }
+
+    #[test]
+    fn with_no_gpu_the_export_answer_names_the_effect_clips_left_out() {
+        use cutlass_agent::Export;
+        let project = Project::new("no-gpu");
+        cutlass_store::Folder::new(crate::shell::vignette_draft())
+            .save(&project.0)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell =
+            crate::shell::Shell::new(decoders, encoders, cutlass_settings::Settings::default());
+        shell.open_folder(&project.0).unwrap();
+        shell.draw_exports_offscreen(crate::shell::absent);
+        let mut host = super::Headless(std::rc::Rc::new(std::cell::RefCell::new(shell)));
+        for name in ["still.png", "cut.mp4"] {
+            let path = project.0.join(name);
+            let id = Export::start(&mut host, path.to_str().unwrap()).unwrap();
+            assert!(path.is_file());
+            // The answer when it was written, and each poll after, say so.
+            assert_eq!(
+                Export::poll(&mut host, &id).unwrap().unwrap(),
+                format!(
+                    "wrote {}, but 1 effect clip is not in the picture (fx): no GPU device: \
+                     none here. Effects are drawn on a GPU, and none could be opened on this \
+                     machine.",
+                    path.display()
+                )
+            );
+        }
+        // Past the effect clip the still is whole, and the answer is plain.
+        host.0.borrow_mut().seek(cutlass_model::Micros(150_000));
+        let late = project.0.join("late.png");
+        let id = Export::start(&mut host, late.to_str().unwrap()).unwrap();
+        assert_eq!(
+            Export::poll(&mut host, &id).unwrap().unwrap(),
+            format!("wrote {}", late.display())
+        );
+    }
+
     #[test]
     fn a_held_project_or_no_path_is_refused() {
         let project = Project::new("held");

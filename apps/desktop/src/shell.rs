@@ -60,6 +60,10 @@ mod hear;
 mod inspector;
 mod listen;
 mod offscreen;
+#[cfg(test)]
+pub(crate) use offscreen::tests::{
+    absent, movie_middle_and_corner, still_middle_and_corner, vignette_draft,
+};
 pub use offscreen::{LeftOut, OpenRenderer};
 mod proxy;
 pub use proxy::ProxyState;

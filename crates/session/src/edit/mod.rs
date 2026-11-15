@@ -154,8 +154,16 @@ pub enum EditError {
     KeyValue,
     /// The curve is not one the Graphs panel offers.
     Graph,
-    /// The animation is not one the Animations panel offers for that side.
+    /// The animation's kind is not in, out, loop or caption.
     Animation,
+    /// No animation has that id.
+    AnimationUnknown,
+    /// The animation is one for another side: an in animation asked for
+    /// on the way out, or one that is not a loop asked for as a caption.
+    AnimationSide,
+    /// The animation moves a title's letters, or is a caption's, and the
+    /// clip is not a text clip.
+    AnimationText,
     /// The segment is not a text clip.
     NotText,
     /// Text size is not finite, or it is outside zero to 512.
@@ -279,7 +287,18 @@ impl std::fmt::Display for EditError {
                 "a keyed setting is not one that takes keys, or its value is not a number"
             }
             Self::Graph => "the curve name is not one of the graphs",
-            Self::Animation => "the animation id is not one for that side",
+            Self::Animation => "the animation kind is not in, out, loop or caption",
+            Self::AnimationUnknown => {
+                "no animation has that id; catalog.search \"animation\" lists them with their ids"
+            }
+            Self::AnimationSide => {
+                "that animation is for another side: catalog.search lists each as animation-in, \
+                 animation-out or animation-loop, and kind must be the same (caption takes a \
+                 loop one)"
+            }
+            Self::AnimationText => {
+                "that animation is for a text clip only: it moves letters, or its kind is caption"
+            }
             Self::NotText => "the clip is not a text clip",
             Self::TextSize => "the text size is outside 0 to 512",
             Self::TextColor => "the color is not written #rrggbb",

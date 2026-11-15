@@ -4,14 +4,17 @@ plugins {
 }
 
 // The app carries the workspace version, so the APK of a release says the
-// same as its tag. The version code grows with it: 0.8.0 is 8000, 1.2.3 is
-// 1002003, so each release is above the last in the store's order.
-val workspaceVersion: String = run {
+// same as its tag, a pre-release such as 0.8.0-rc.1 included. The version
+// code grows with major.minor.patch: 0.8.0 is 8000, 1.2.3 is 1002003, so
+// each release is above the last in the store's order. A pre-release has
+// its release's code; it is a trial of the pipeline and never goes to Play.
+val workspaceVersionParts: MatchResult = run {
     val cargo = rootProject.file("../../Cargo.toml").readText()
-    Regex("""(?m)^version = "([0-9]+\.[0-9]+\.[0-9]+)"""").find(cargo)?.groupValues?.get(1)
+    Regex("""(?m)^version = "([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?"""").find(cargo)
         ?: error("the workspace Cargo.toml names no version")
 }
-val workspaceVersionCode: Int = workspaceVersion.split('.').map(String::toInt)
+val workspaceVersion: String = workspaceVersionParts.value.substringAfter('"').removeSuffix("\"")
+val workspaceVersionCode: Int = workspaceVersionParts.groupValues.subList(1, 4).map(String::toInt)
     .let { (major, minor, patch) -> major * 1_000_000 + minor * 1_000 + patch }
 
 android {

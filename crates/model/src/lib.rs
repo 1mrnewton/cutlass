@@ -22,6 +22,7 @@ mod keyframe;
 mod linkage;
 mod materials;
 mod meta;
+mod paint;
 mod relationship;
 mod segment;
 mod serde_util;
@@ -76,6 +77,7 @@ pub use materials::{
     time_mark_items, track_holds_beats, user_beats, visible_beats, visible_marks, write_font_axes,
 };
 pub use meta::MetaType;
+pub use paint::{PaintOrder, paint_order};
 pub use relationship::{LinkPair, Relationship};
 pub use segment::{APPLY_ONE_CLIP, HdrSettings, ResponsiveLayout, Segment};
 pub use shape_keys::{

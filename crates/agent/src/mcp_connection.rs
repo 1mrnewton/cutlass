@@ -22,6 +22,10 @@ pub trait McpWire {
 /// The tool name `mcp.call` takes to list a server's tools.
 pub const LIST_TOOLS: &str = "tools/list";
 
+/// The most pages of a server's tool list that are read, so a server that
+/// always names a next page does not hold the call forever.
+const LIST_PAGES: usize = 50;
+
 /// One server, connected through `wire`. The handshake runs on first use.
 #[derive(Debug)]
 pub struct McpConnection<W> {
@@ -49,12 +53,34 @@ impl<W: McpWire> McpConnection<W> {
     }
 
     /// `tool` with `arguments`, a JSON object or empty; [`LIST_TOOLS`]
-    /// lists the server's tools instead. The answer is the tool's text.
+    /// lists the server's tools instead, every page of them. The answer is
+    /// the tool's text. Any other name is the server's own tool, one named
+    /// `list` included.
     pub fn call(&mut self, tool: &str, arguments: &str) -> Result<String, McpError> {
         self.ensure_ready()?;
-        if tool == LIST_TOOLS || tool == "list" {
-            let result = self.request("tools/list", &json!({}))?;
-            return Ok(show_tools(&result));
+        if tool == LIST_TOOLS {
+            // A server may list its tools a page at a time.
+            let mut tools: Vec<Value> = Vec::new();
+            let mut cursor: Option<String> = None;
+            for _ in 0..LIST_PAGES {
+                let params = match &cursor {
+                    Some(cursor) => json!({ "cursor": cursor }),
+                    None => json!({}),
+                };
+                let result = self.request("tools/list", &params)?;
+                if let Some(page) = result.get("tools").and_then(Value::as_array) {
+                    tools.extend(page.iter().cloned());
+                }
+                cursor = result
+                    .get("nextCursor")
+                    .and_then(Value::as_str)
+                    .filter(|next| !next.is_empty())
+                    .map(str::to_owned);
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            return Ok(show_tools(&json!({ "tools": tools })));
         }
         let arguments = if arguments.trim().is_empty() {
             json!({})
@@ -267,6 +293,65 @@ mod tests {
                 .pop_front()
                 .ok_or_else(|| McpError::Transport("closed".to_owned()))
         }
+    }
+
+    /// A server whose tool list comes in two pages, and that has a tool of
+    /// its own named `list`.
+    #[derive(Default)]
+    struct Paged {
+        cursors: Vec<Value>,
+        queue: VecDeque<String>,
+    }
+
+    impl McpWire for Paged {
+        fn send(&mut self, message: &str) -> Result<(), McpError> {
+            let value: Value = serde_json::from_str(message).unwrap();
+            let (Some(id), Some(method)) = (
+                value.get("id").and_then(Value::as_u64),
+                value.get("method").and_then(Value::as_str),
+            ) else {
+                return Ok(());
+            };
+            let tool = |name: &str| json!({ "name": name, "inputSchema": { "type": "object" } });
+            let result = match method {
+                "tools/list" => {
+                    let cursor = value["params"]["cursor"].clone();
+                    self.cursors.push(cursor.clone());
+                    if cursor.is_null() {
+                        json!({ "tools": [tool("one"), tool("two")], "nextCursor": "more" })
+                    } else {
+                        json!({ "tools": [tool("three"), tool("list")] })
+                    }
+                }
+                "tools/call" => json!({
+                    "content": [{ "type": "text", "text": format!("ran {}", value["params"]["name"]) }],
+                }),
+                _ => json!({}),
+            };
+            self.queue
+                .push_back(json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string());
+            Ok(())
+        }
+
+        fn receive(&mut self) -> Result<String, McpError> {
+            self.queue
+                .pop_front()
+                .ok_or_else(|| McpError::Transport("closed".to_owned()))
+        }
+    }
+
+    #[test]
+    fn every_page_of_a_tool_list_is_read_and_a_tool_named_list_is_called() {
+        let mut connection = McpConnection::new(Paged::default(), "paged");
+        let listed = connection.call("tools/list", "").unwrap();
+        let names: Vec<&str> = listed
+            .lines()
+            .filter(|line| !line.starts_with(' '))
+            .collect();
+        assert_eq!(names, ["one", "two", "three", "list"]);
+        assert_eq!(connection.wire_mut().cursors, [Value::Null, json!("more")]);
+        // `list` is the server's tool, not another word for the listing.
+        assert_eq!(connection.call("list", "").unwrap(), "ran \"list\"");
     }
 
     #[test]

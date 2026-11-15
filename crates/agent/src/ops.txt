@@ -85,6 +85,12 @@ set_position: Place a clip's picture; x and y are fractions of half the canvas f
 set_scale: Size a clip's picture, above 0; 1 is its fitted size, 0.5 half.
 {"op":"set_scale","segment_id":"a","scale":0.5}
 
+set_uniform_scale: Turn uniform scale on (one scale drives width and height) or off (each axis on its own); the picture keeps its size.
+{"op":"set_uniform_scale","segment_id":"a","on":false}
+
+set_scale_axes: Size a clip's width and height apart, each above 0, as drawn with uniform scale off; the switch stays as it is.
+{"op":"set_scale_axes","segment_id":"a","x":1.2,"y":0.8}
+
 set_opacity: Set how solid a clip is drawn, 0 to 1; 1 is solid, 0 is clear.
 {"op":"set_opacity","segment_id":"a","opacity":0.5}
 

@@ -228,8 +228,20 @@ pub enum Request {
         x: f64,
         y: f64,
     },
-    /// Store the picture scale on the uniform value and on both axes.
+    /// Store the picture scale on the uniform value and on the width. With
+    /// uniform scale on the height takes it too; with it off the height
+    /// keeps its share of the width.
     SetScale { segment_id: SegmentId, scale: f64 },
+    /// Turn uniform scale on, one value driving both axes, or off, each
+    /// axis on its own. The picture keeps its size either way.
+    SetUniformScale { segment_id: SegmentId, on: bool },
+    /// Store the picture's width and height scales, each on its own, as
+    /// they are drawn with uniform scale off. The switch stays as it was.
+    SetScaleAxes {
+        segment_id: SegmentId,
+        x: f64,
+        y: f64,
+    },
     /// Store the picture opacity. `1` is solid and `0` is clear.
     SetOpacity { segment_id: SegmentId, opacity: f64 },
     /// Set the segment gain. This is not mute, solo, or a fade.

@@ -151,7 +151,12 @@ pub fn stage_box(
         .flat_map(|track| &track.segments)
         .find(|segment| segment.id == *segment_id)?;
     let canvas = canvas_size(draft);
-    let fitted = fitted(draft, segment, canvas, time, sizes)?;
+    let fitted = stretched(
+        fitted(draft, segment, canvas, time, sizes)?,
+        segment,
+        &draft.keyframe_graph_list,
+        time,
+    );
     Some(box_at(
         segment_id,
         canvas,
@@ -277,7 +282,12 @@ pub fn stage_gesture(
     Some(StageGesture {
         segment_id: segment_id.clone(),
         canvas,
-        fitted: fitted(draft, segment, canvas, time, sizes)?,
+        fitted: stretched(
+            fitted(draft, segment, canvas, time, sizes)?,
+            segment,
+            &draft.keyframe_graph_list,
+            time,
+        ),
         start: pose_of(segment, &draft.keyframe_graph_list, time),
         keyed: key_at(segment, time),
     })
@@ -419,6 +429,28 @@ fn key_at(segment: &Segment, time: Micros) -> Option<Micros> {
     let on = (0..=segment.target.duration.0).contains(&offset);
     (on && !cutlass_model::key_offsets_where(segment, cutlass_model::is_pose_key).is_empty())
         .then_some(Micros(offset))
+}
+
+/// The size drawn at scale 1, `fitted`, with its height stretched by the
+/// clip's height scale over its width scale when uniform scale is off: a
+/// pose's one scale is the width's.
+fn stretched(
+    fitted: (f64, f64),
+    segment: &Segment,
+    graphs: &[KeyframeGraph],
+    time: Micros,
+) -> (f64, f64) {
+    let (clip, uniform) = clip_at(segment, graphs, time)
+        .unwrap_or_else(|| (segment.clip.clone(), segment.uniform_scale.clone()));
+    if uniform.on {
+        return fitted;
+    }
+    let stretch = (clip.scale.y / clip.scale.x).abs();
+    if stretch.is_finite() && stretch > 0.0 {
+        (fitted.0, fitted.1 * stretch)
+    } else {
+        fitted
+    }
 }
 
 /// The clip's placement at `time`. Keys that do not read leave the stored one.
@@ -635,6 +667,27 @@ mod tests {
         assert!(near(top_left.0, 1440.0 - 270.0) && near(top_left.1, 270.0 + 151.875));
         assert!(stage.contains(1440.0 + 260.0, 270.0));
         assert!(!stage.contains(1440.0, 270.0 + 200.0));
+    }
+
+    #[test]
+    fn with_uniform_scale_off_the_box_takes_each_axis() {
+        let mut draft = draft();
+        let main = SegmentId::new("main");
+        let segment = &mut draft.tracks[0].segments[0];
+        segment.uniform_scale.on = false;
+        segment.clip.scale.x = 0.5;
+        segment.clip.scale.y = 1.5;
+        let stage = stage_box(&draft, &main, Micros(0), &NoText).unwrap();
+        assert!(near(stage.width, 303.75) && near(stage.height, 1620.0));
+        // A pinch scales both axes and keeps the stretch.
+        let gesture = stage_gesture(&draft, &main, Micros(0), &NoText).unwrap();
+        let step = gesture.step(0.0, 0.0, 2.0, 0.0);
+        assert!(near(step.stage.width, 607.5) && near(step.stage.height, 3240.0));
+        // On, the uniform value drives both.
+        draft.tracks[0].segments[0].uniform_scale.on = true;
+        draft.tracks[0].segments[0].uniform_scale.value = 0.5;
+        let stage = stage_box(&draft, &main, Micros(0), &NoText).unwrap();
+        assert!(near(stage.width, 303.75) && near(stage.height, 540.0));
     }
 
     #[test]

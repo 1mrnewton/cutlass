@@ -470,6 +470,8 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetRotation { .. } => "set_rotation",
         Request::SetPosition { .. } => "set_position",
         Request::SetScale { .. } => "set_scale",
+        Request::SetUniformScale { .. } => "set_uniform_scale",
+        Request::SetScaleAxes { .. } => "set_scale_axes",
         Request::SetOpacity { .. } => "set_opacity",
         Request::SetVolume { .. } => "set_volume",
         Request::SetFade { .. } => "set_fade",

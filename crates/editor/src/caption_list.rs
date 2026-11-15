@@ -501,7 +501,9 @@ fn styled_clip(request: &Request) -> Option<&SegmentId> {
         | Request::SetCaptionStyle { segment_id, .. }
         | Request::SetCaptionStagger { segment_id, .. }
         | Request::SetPosition { segment_id, .. }
-        | Request::SetScale { segment_id, .. } => Some(segment_id),
+        | Request::SetScale { segment_id, .. }
+        | Request::SetUniformScale { segment_id, .. }
+        | Request::SetScaleAxes { segment_id, .. } => Some(segment_id),
         _ => None,
     }
 }
@@ -524,7 +526,9 @@ fn with_clip(request: &Request, clip: &SegmentId) -> Request {
         | Request::SetCaptionStyle { segment_id, .. }
         | Request::SetCaptionStagger { segment_id, .. }
         | Request::SetPosition { segment_id, .. }
-        | Request::SetScale { segment_id, .. } => clip.clone_into(segment_id),
+        | Request::SetScale { segment_id, .. }
+        | Request::SetUniformScale { segment_id, .. }
+        | Request::SetScaleAxes { segment_id, .. } => clip.clone_into(segment_id),
         _ => {}
     }
     request

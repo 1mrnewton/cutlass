@@ -204,7 +204,13 @@ pub fn key_pose(
         put_part(segment, Part::Position, offset, pose);
     }
     if sized && keyed_size {
-        put_part(segment, Part::Scale, offset, pose);
+        // With uniform scale off the height keeps its share of the width.
+        let stretch = if uniform.on {
+            1.0
+        } else {
+            placement::stretch_of(clip.scale.x, clip.scale.y)
+        };
+        put_part(segment, Part::Scale(stretch), offset, pose);
     }
     if turned && keyed_turn {
         put_part(segment, Part::Rotation, offset, pose);
@@ -225,7 +231,8 @@ pub fn key_pose(
 #[derive(Clone, Copy)]
 enum Part {
     Position,
-    Scale,
+    /// The height's share of the width.
+    Scale(f64),
     Rotation,
 }
 
@@ -237,9 +244,9 @@ fn put_part(segment: &mut Segment, part: Part, offset: Micros, pose: Pose) {
             cutlass_model::put_key(segment, POSITION_KEYS[0], offset, pose.x);
             cutlass_model::put_key(segment, POSITION_KEYS[1], offset, pose.y);
         }
-        Part::Scale => {
+        Part::Scale(stretch) => {
             cutlass_model::put_key(segment, SCALE_KEYS[0], offset, pose.scale);
-            cutlass_model::put_key(segment, SCALE_KEYS[1], offset, pose.scale);
+            cutlass_model::put_key(segment, SCALE_KEYS[1], offset, pose.scale * stretch);
             if has_keys(segment, &SCALE_KEYS[2..]) {
                 cutlass_model::put_key(segment, SCALE_KEYS[2], offset, pose.scale);
             }
@@ -561,6 +568,40 @@ mod tests {
         let segment = &session.draft().tracks[0].segments[0];
         assert_eq!(key_offsets(segment).len(), 3);
         assert_eq!(segment.uniform_scale.value, 2.0);
+    }
+
+    #[test]
+    fn a_keyed_resize_with_uniform_off_keeps_the_stretch() {
+        let mut session = open();
+        let revision = session
+            .apply(
+                1,
+                &[
+                    Request::SetUniformScale {
+                        segment_id: "a".into(),
+                        on: false,
+                    },
+                    values(0, &[("KFTypeScaleX", 1.0), ("KFTypeScaleY", 2.0)]),
+                ],
+            )
+            .unwrap();
+        session
+            .apply(
+                revision,
+                &[Request::KeyPose {
+                    segment_id: "a".into(),
+                    offset: Micros(0),
+                    x: 0.0,
+                    y: 0.0,
+                    scale: 1.5,
+                    rotation: 0.0,
+                }],
+            )
+            .unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        let (clip, uniform) = cutlass_model::clip_at(segment, &[], Micros(0)).unwrap();
+        assert!(!uniform.on);
+        assert_eq!((clip.scale.x, clip.scale.y), (1.5, 3.0));
     }
 
     #[test]

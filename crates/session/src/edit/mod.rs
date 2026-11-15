@@ -346,6 +346,12 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             placement::set_position(draft, segment_id, *x, *y)
         }
         Request::SetScale { segment_id, scale } => placement::set_scale(draft, segment_id, *scale),
+        Request::SetUniformScale { segment_id, on } => {
+            placement::set_uniform_scale(draft, segment_id, *on)
+        }
+        Request::SetScaleAxes { segment_id, x, y } => {
+            placement::set_scale_axes(draft, segment_id, *x, *y)
+        }
         Request::SetOpacity {
             segment_id,
             opacity,

@@ -143,6 +143,32 @@ impl Session {
         Ok(self.revision)
     }
 
+    /// Put the draft back to `earlier`, a state this session was in before,
+    /// as one undo step: an undo brings back the draft it replaced, however
+    /// many steps lay between the two. Redo is cleared and the revision
+    /// advances, as for [`Self::apply`]. A draft the same as the open one
+    /// changes nothing. Refused on a stale revision, and while a transaction
+    /// is open.
+    pub fn restore(&mut self, expected: u64, earlier: Draft) -> Result<u64, EditError> {
+        if self.history.is_open() {
+            return Err(EditError::HistoryOpen);
+        }
+        if expected != self.revision {
+            return Err(EditError::RevisionMismatch {
+                expected,
+                actual: self.revision,
+            });
+        }
+        if earlier == self.draft {
+            return Ok(self.revision);
+        }
+        self.history
+            .push_undo(std::mem::replace(&mut self.draft, earlier));
+        self.history.clear_redo();
+        self.revision = self.revision.saturating_add(1);
+        Ok(self.revision)
+    }
+
     /// Open a transaction: the applies until [`Self::commit`] are one undo
     /// step.
     pub fn begin(&mut self) -> Result<(), EditError> {
@@ -302,6 +328,74 @@ mod tests {
         assert_eq!(session.draft().duration, Micros(0));
         assert!(session.draft().tracks[0].segments.is_empty());
         assert_eq!(session.revision(), 2);
+    }
+
+    #[test]
+    fn a_restore_takes_back_many_steps_and_is_one_undo_itself() {
+        let (mut session, track) = session();
+        session
+            .apply(0, &[place(&track, "a", 0, 1_000_000)])
+            .unwrap();
+        let earlier = session.draft().clone();
+        session
+            .apply(1, &[place(&track, "b", 1_000_000, 500_000)])
+            .unwrap();
+        session
+            .apply(2, &[place(&track, "c", 1_500_000, 500_000)])
+            .unwrap();
+        // An undone step waits to be redone; the restore clears it, as an
+        // edit does.
+        session
+            .apply(3, &[place(&track, "d", 2_000_000, 500_000)])
+            .unwrap();
+        session.undo().unwrap();
+        assert!(session.can_redo());
+        let later = session.draft().clone();
+        assert_eq!(later.tracks[0].segments.len(), 3);
+
+        let revision = session.restore(5, earlier.clone()).unwrap();
+        assert_eq!(revision, 6);
+        assert_eq!(session.draft(), &earlier);
+        assert!(!session.can_redo());
+        // One undo brings back all that was restored over.
+        session.undo().unwrap();
+        assert_eq!(session.draft(), &later);
+        // And the steps under it are still there.
+        session.undo().unwrap();
+        assert_eq!(session.draft().tracks[0].segments.len(), 2);
+    }
+
+    #[test]
+    fn a_restore_is_refused_when_stale_or_mid_edit_and_the_same_draft_is_no_step() {
+        let (mut session, track) = session();
+        let empty = session.draft().clone();
+        session
+            .apply(0, &[place(&track, "a", 0, 1_000_000)])
+            .unwrap();
+        let placed = session.draft().clone();
+        // The revision moved since the caller read it.
+        assert_eq!(
+            session.restore(0, empty.clone()),
+            Err(EditError::RevisionMismatch {
+                expected: 0,
+                actual: 1
+            })
+        );
+        assert_eq!(session.draft(), &placed);
+        // A drag is open.
+        session.begin().unwrap();
+        assert_eq!(
+            session.restore(1, empty.clone()),
+            Err(EditError::HistoryOpen)
+        );
+        session.rollback().unwrap();
+        assert_eq!(session.draft(), &placed);
+        // The draft it already is: no step and no new revision.
+        let revision = session.revision();
+        assert_eq!(session.restore(revision, placed.clone()), Ok(revision));
+        session.undo().unwrap();
+        assert_eq!(session.draft(), &empty);
+        assert!(!session.can_undo());
     }
 
     #[test]

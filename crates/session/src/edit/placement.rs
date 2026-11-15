@@ -278,9 +278,10 @@ mod tests {
     fn a_bad_axis_scale_or_a_locked_lane_leaves_the_draft() {
         let (mut session, track) = open();
         let before = session.draft().clone();
+        // A negative axis flips, so only none or a broken one is refused.
         for (x, y) in [
             (0.0, 1.0),
-            (1.0, -1.0),
+            (1.0, 0.0),
             (f64::NAN, 1.0),
             (1.0, f64::INFINITY),
         ] {

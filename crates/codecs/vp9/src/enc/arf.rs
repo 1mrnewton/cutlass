@@ -208,36 +208,65 @@ fn apply<P: Pixel>(
         let y = y.clamp(0, ph as isize - 1) as usize;
         pic[y * pw + x]
     };
-    // Squared differences over the block and a sample around it.
-    let mut diff = [[0u32; 18]; 18];
+    // Whether the block, a sample around it, and its match all lie inside
+    // the picture: no sample then needs clamping.
+    let inside = x0 >= 1
+        && y0 >= 1
+        && x0 + n_w < pw
+        && y0 + n_h < ph
+        && x0 as isize + dx >= 1
+        && y0 as isize + dy >= 1
+        && x0 as isize + dx + (n_w as isize) < pw as isize
+        && y0 as isize + dy + (n_h as isize) < ph as isize;
+    // Squared differences over the block and a sample around it, and
+    // their sums over three across.
+    let mut across = [[0u32; 16]; 18];
     if strength.is_some() {
-        for (r, row) in diff.iter_mut().enumerate().take(n_h + 2) {
-            for (c, d) in row.iter_mut().enumerate().take(n_w + 2) {
-                let x = (x0 + c) as isize - 1;
-                let y = (y0 + r) as isize - 1;
-                let tx = x.clamp(0, pw as isize - 1) as usize;
+        let mut diff = [0u32; 18];
+        for (r, row) in across.iter_mut().enumerate().take(n_h + 2) {
+            let y = (y0 + r) as isize - 1;
+            if inside {
+                let (t, m) = (y as usize * pw + x0 - 1, (y + dy) as usize * pw);
+                let m = (m as isize + x0 as isize - 1 + dx) as usize;
+                for (c, d) in diff.iter_mut().enumerate().take(n_w + 2) {
+                    let e = pic[m + c].get() - target[t + c].get();
+                    *d = (e * e) as u32;
+                }
+            } else {
                 let ty = y.clamp(0, ph as isize - 1) as usize;
-                let e = at(x + dx, y + dy).get() - target[ty * pw + tx].get();
-                *d = (e * e) as u32;
+                for (c, d) in diff.iter_mut().enumerate().take(n_w + 2) {
+                    let x = (x0 + c) as isize - 1;
+                    let tx = x.clamp(0, pw as isize - 1) as usize;
+                    let e = at(x + dx, y + dy).get() - target[ty * pw + tx].get();
+                    *d = (e * e) as u32;
+                }
+            }
+            for (c, a) in row.iter_mut().enumerate().take(n_w) {
+                *a = diff[c] + diff[c + 1] + diff[c + 2];
             }
         }
     }
     for r in 0..n_h {
-        for c in 0..n_w {
-            let (x, y) = (x0 + c, y0 + r);
-            let v = at(x as isize + dx, y as isize + dy).get() as u32;
+        let y = y0 + r;
+        let base = (y - row0) * pw;
+        let m0 = (y as isize + dy) * pw as isize + dx;
+        let sums = across[r].iter().zip(&across[r + 1]).zip(&across[r + 2]);
+        for (c, ((s0, s1), s2)) in sums.enumerate().take(n_w) {
+            let x = x0 + c;
+            let v = if inside {
+                pic[(m0 + x as isize) as usize].get() as u32
+            } else {
+                at(x as isize + dx, y as isize + dy).get() as u32
+            };
             let m = match strength {
                 None => 16 * weight,
                 Some(s) => {
-                    let sum: u32 = diff[r..r + 3]
-                        .iter()
-                        .map(|row| row[c..c + 3].iter().sum::<u32>())
-                        .sum();
+                    let sum = s0 + s1 + s2;
                     let modifier = (sum * 3 / 9 + ((1 << s) >> 1)) >> s;
                     (16 - modifier.min(16)) * weight
                 }
             };
-            let i = (y - row0) * pw + x;
+            let i = base + x;
             acc[i] += m * v;
             cnt[i] += m;
         }

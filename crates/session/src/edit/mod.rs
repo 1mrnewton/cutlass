@@ -241,7 +241,7 @@ impl std::fmt::Display for EditError {
             Self::Overlap => "it would overlap another clip on that track",
             Self::Speed(_) => "the speed or the length it gives is not usable",
             Self::WordShape => "the word lists differ in length, or a word ends before it starts",
-            Self::Range(_) => "a duration is zero or negative, or a time is too large",
+            Self::Range(_) => "a time falls outside its clip, or a length is zero or negative",
             Self::EmptyUndo => "there is nothing to undo",
             Self::EmptyRedo => "there is nothing to redo",
             Self::HistoryOpen => "an edit is already open",

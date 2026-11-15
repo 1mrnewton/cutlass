@@ -349,7 +349,7 @@ fn messages_in(body: &str, events: bool) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use cutlass_agent::{McpClient, McpTransport};
+    use cutlass_agent::McpTransport;
     use cutlass_settings::{McpServer, Settings};
 
     use super::{McpServers, messages_in};
@@ -382,6 +382,8 @@ done
     #[cfg(unix)]
     #[test]
     fn a_local_server_is_started_once_listed_and_called() {
+        use cutlass_agent::McpClient;
+
         let settings = settings("/bin/sh");
         let mut servers = McpServers::default();
         servers.configure(&settings.mcp_servers);

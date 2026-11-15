@@ -234,6 +234,14 @@ What is left on one core is small and spread out: the coefficient loop
 runs 426 M instructions on the first 60 frames of the 4:2:0 stream
 against FFmpeg's 394 M, the loop filter's kernel fewer than FFmpeg's but
 with more time on its transposed loads, and the block parse around them.
+Neither of the release build's other levers moves it. Built as one
+codegen unit (as the H.264 crates are), the decoder is the same within
+the noise. Built from a profile (as the H.264 and AV1 codecs are) trained
+on synthetic video through our encoder and on libvpx streams of FFmpeg's
+`mandelbrot` and `testsrc2` sources, 4:2:0 and 4:4:4, it is the same too
+(1.012 against 1.012 of FFmpeg's time on 4:2:0, medians of fifteen
+interleaved runs). Trained on the measured streams themselves, it was 3%
+faster on 4:2:0, which a release profile cannot be trained on.
 
 **Encode** (`tools/encbench.sh`, BD-rate with `tools/bdrate.py`):
 1280×720, 4 threads on both sides (libvpx with `-row-mt 1

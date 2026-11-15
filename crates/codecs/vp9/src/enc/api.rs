@@ -164,6 +164,9 @@ struct Core<P: EncPixel> {
     queue: std::collections::VecDeque<Queued<P>>,
     /// Where the overlay of the alt-ref coded last goes (`since_key`).
     overlay_at: Option<u32>,
+    /// The places (`since_key`) of the last golden (or key) frame and of
+    /// the next.
+    gold: (u32, u32),
     /// The luma of the picture coded last, tight, for finding a cut.
     last_luma: Vec<P>,
 }
@@ -481,6 +484,7 @@ impl<P: EncPixel> Core<P> {
             cancel: Arc::new(AtomicBool::new(false)),
             queue: std::collections::VecDeque::new(),
             overlay_at: None,
+            gold: (0, GF_INTERVAL),
             last_luma: Vec::new(),
         }
     }
@@ -589,10 +593,13 @@ impl<P: EncPixel> Core<P> {
         let cut = f.cut && self.since_key != 0;
         let key_next = self.force_key || self.since_key >= self.opts.keyint;
         let idx = if key_next { 0 } else { self.since_key };
-        let target = (idx / GF_INTERVAL + 1) * GF_INTERVAL;
-        let k = (target - idx) as usize; // the target is queue[k - 1]
+        let target = self.gold.1;
+        let k = target.saturating_sub(idx) as usize; // the target is queue[k - 1]
         let mut arf_source = None;
-        if idx % GF_INTERVAL == 1
+        if !key_next
+            && idx == self.gold.0 + 1
+            // (One pass: only after a golden place, not after a cut.)
+            && (self.rc.pass2.is_some() || idx % GF_INTERVAL == 1)
             && !cut
             && self.overlay_at.is_none()
             && k >= 2
@@ -635,6 +642,7 @@ impl<P: EncPixel> Core<P> {
                 self.opts.threads(),
                 self.opts.ss(),
                 self.opts.bit_depth,
+                self.rc.pass2.is_some(),
             ));
         }
         let mut data = Vec::new();
@@ -652,7 +660,7 @@ impl<P: EncPixel> Core<P> {
                 speed: self.opts.speed.min(ARF_SPEED),
                 altref_future: false,
                 aq: self.opts.aq,
-                tx_trial: self.rc.pass2.is_some(),
+                second_pass: self.rc.pass2.is_some(),
             })?;
             self.rc.account(coded.data.len(), 0.0, 1, qindex);
             self.overlay_at = Some(target);
@@ -688,7 +696,7 @@ impl<P: EncPixel> Core<P> {
         // A golden frame every `GF_INTERVAL` frames, coded finer: the
         // frames after it predict from it. After an alt-ref, the golden
         // frame is its overlay, coded as an inter frame.
-        let golden = !key && (cut || self.since_key.is_multiple_of(GF_INTERVAL));
+        let golden = !key && (cut || self.since_key == self.gold.1);
         let overlay = golden && !cut && self.overlay_at == Some(self.since_key);
         let kind = if key {
             0
@@ -713,9 +721,15 @@ impl<P: EncPixel> Core<P> {
             speed: self.opts.speed,
             altref_future,
             aq: self.opts.aq,
-            tx_trial: self.rc.pass2.is_some(),
+            second_pass: self.rc.pass2.is_some(),
         })?;
         let kind = if coded.key { 0 } else { kind };
+        if coded.key || golden {
+            let at = if coded.key { 0 } else { self.since_key };
+            let next = self.next_golden(at, planes[0]);
+            self.gold = (at, next);
+            self.rc.golden_at((next - at) as usize);
+        }
         self.rc.account(coded.data.len(), seconds, kind, qindex);
         self.force_key = false;
         self.since_key = if coded.key { 1 } else { self.since_key + 1 };
@@ -764,6 +778,40 @@ impl<P: EncPixel> Core<P> {
         self.rc = Rate::new(self.opts, u64::from(self.width) * u64::from(self.height));
         self.queue.clear();
         self.overlay_at = None;
+        self.gold = (0, GF_INTERVAL);
+    }
+
+    /// The place of the golden frame after the one (or the key frame) at
+    /// `at` being coded now, whose luma is `y` (rows `stride` apart). One
+    /// pass: the next multiple of `GF_INTERVAL`. Two passes, with the
+    /// next picture in the lookahead: [`GF_REACH`] samples of motion
+    /// away (at most `GF_INTERVAL`, at least [`GF_MIN_INTERVAL`]), so that
+    /// the alt-ref and golden frames the pictures between predict from
+    /// stay near (libvpx's two passes end a golden group sooner as the
+    /// motion grows, too).
+    fn next_golden(&self, at: u32, (y, stride): (&[P], usize)) -> u32 {
+        let fixed = (at / GF_INTERVAL + 1) * GF_INTERVAL;
+        let Some(next) = self.queue.front() else {
+            return fixed;
+        };
+        if self.rc.pass2.is_none() {
+            return fixed;
+        }
+        let (w, h) = (self.width as usize, self.height as usize);
+        let tight: std::borrow::Cow<'_, [P]> = if stride == w {
+            std::borrow::Cow::Borrowed(&y[..w * h])
+        } else {
+            std::borrow::Cow::Owned(
+                (0..h)
+                    .flat_map(|r| y[r * stride..r * stride + w].iter().copied())
+                    .collect(),
+            )
+        };
+        let m = super::arf::motion(&tight, &next.planes[0], w, h);
+        if m == 0 {
+            return at + GF_INTERVAL;
+        }
+        at + (GF_REACH / m).clamp(GF_MIN_INTERVAL, GF_INTERVAL)
     }
 }
 
@@ -974,8 +1022,22 @@ fn check_planes<P>(
     Ok(())
 }
 
-/// Frames from one golden frame to the next.
+/// Frames from one golden frame to the next (at most, in two passes).
 const GF_INTERVAL: u32 = 12;
+
+/// In two passes, how far (in samples) the content may move from one
+/// golden frame to the next ([`super::arf::motion`] a picture times the
+/// interval): on the grainy pan, 7 to 8 samples a picture, 8 pictures.
+/// On the pan alone (1 to 3 Mb/s), 4% fewer bits at the same PSNR-Y and
+/// at the same averaged PSNR; within a point either way on the clips with
+/// cuts. Fixed intervals swing the pan by where its vectors fall against
+/// chroma's half samples (from +0.4% to +13% averaged against libvpx's
+/// between 4 and 10), and 8 for every scene lost 9 points of PSNR-Y
+/// BD-rate on the clip with a still picture.
+const GF_REACH: u32 = 64;
+
+/// The shortest golden interval of [`GF_REACH`].
+const GF_MIN_INTERVAL: u32 = 6;
 
 /// The quantizer step of each frame type (key, golden, inter) over the
 /// inter frames'.
@@ -1018,6 +1080,10 @@ const SHARE: [f64; 3] = [
 struct Pass2 {
     /// Each picture's first-pass bits and class.
     first: Vec<(f64, usize)>,
+    /// Each picture's first-pass bits as an inter frame's, and a golden
+    /// frame's there over an inter frame's.
+    inter: Vec<f64>,
+    gratio: Vec<f64>,
     q: u8,
     /// First-pass bits of the pictures still to code, by class.
     left: [f64; 3],
@@ -1056,6 +1122,41 @@ impl Pass2 {
     fn new(bits: &[u64], q: u8, keyint: u32) -> Self {
         let keyint = keyint.max(1) as usize;
         let b: Vec<f64> = bits.iter().map(|&b| b as f64).collect();
+        // The first pass codes a golden frame every `GF_INTERVAL` at its
+        // finer step. For when the second pass places its golden frames
+        // elsewhere (`golden_at`): each picture's bits as an inter frame's
+        // (at a first-pass golden place, the median of the six around),
+        // and what a golden frame there would take over that, as the
+        // nearest first-pass golden frame took over its neighbours.
+        let is_gold = |i: usize| {
+            let at = i % keyint;
+            at != 0 && at.is_multiple_of(GF_INTERVAL as usize)
+        };
+        let inter: Vec<f64> = (0..b.len())
+            .map(|i| {
+                if !is_gold(i) {
+                    return b[i];
+                }
+                let mut near: Vec<f64> = (i.saturating_sub(3)..(i + 4).min(b.len()))
+                    .filter(|&j| j != i && !is_gold(j))
+                    .map(|j| b[j])
+                    .collect();
+                near.sort_by(f64::total_cmp);
+                near.get(near.len() / 2).copied().unwrap_or(b[i]).min(b[i])
+            })
+            .collect();
+        let golds: Vec<(usize, f64)> = (0..b.len())
+            .filter(|&i| is_gold(i))
+            .map(|i| (i, (b[i] / inter[i].max(1.0)).max(1.0)))
+            .collect();
+        let gratio: Vec<f64> = (0..b.len())
+            .map(|i| {
+                golds
+                    .iter()
+                    .min_by_key(|g| g.0.abs_diff(i))
+                    .map_or(1.0 / STEP_SCALE[1].powf(EXP), |g| g.1)
+            })
+            .collect();
         let first: Vec<(f64, usize)> = (0..b.len())
             .map(|i| {
                 let at = i % keyint;
@@ -1080,6 +1181,8 @@ impl Pass2 {
         }
         Self {
             first,
+            inter,
+            gratio,
             q: q.max(1),
             left,
             spent: [0.0; 3],
@@ -1087,6 +1190,28 @@ impl Pass2 {
             arf: (0.0, 2),
             base: 0.0,
             mean: b.iter().sum::<f64>() / b.len().max(1) as f64,
+        }
+    }
+
+    /// The next golden place is picture `at`, `n` after the one coded
+    /// now: it and the places every `n` after it (as far as is known) take
+    /// the golden class (an alt-ref will take their bits), and no other
+    /// picture still to code does.
+    fn golden_at(&mut self, at: usize, n: usize) {
+        for i in at.saturating_sub(n) + 1..self.first.len() {
+            let t = &mut self.first[i];
+            if t.1 == 1 {
+                continue;
+            }
+            let c = if i >= at && (i - at).is_multiple_of(n.max(1)) {
+                2
+            } else {
+                0
+            };
+            let b = self.inter[i] * if c == 2 { self.gratio[i] } else { 1.0 };
+            self.left[t.1] -= t.0;
+            self.left[c] += b;
+            *t = (b, c);
         }
     }
 
@@ -1290,6 +1415,15 @@ impl Rate {
         let target = f64::from(self.opts.bitrate) * seconds.max(1e-3);
         let step = (FIRST_K * self.pixels / target.max(1.0)).powf(1.0 / EXP);
         q_of_step(step, self.opts.bit_depth).clamp(FIRST_PASS_Q.0, FIRST_PASS_Q.1)
+    }
+
+    /// The next golden place is `ahead` pictures after the one being
+    /// coded.
+    fn golden_at(&mut self, ahead: usize) {
+        let at = self.frames as usize + ahead;
+        if let Some(p) = &mut self.pass2 {
+            p.golden_at(at, ahead);
+        }
     }
 
     /// An alt-ref is coded now for the picture `ahead` after the next

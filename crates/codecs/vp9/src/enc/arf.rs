@@ -15,7 +15,10 @@ pub struct Picture<'a, P> {
 }
 
 /// The filtered centre picture of `frames` (index `center`), `w`×`h` of
-/// `bd` bits a sample, at `strength` (a larger one filters more).
+/// `bd` bits a sample, at `strength` (a larger one filters more). With
+/// `seeded` (a second pass's effort), each block's search also starts
+/// from the match of the block to its left, and a poor match is searched
+/// again coarsely ([`COARSE_PER`]).
 #[allow(clippy::too_many_arguments)]
 pub fn filter<P: EncPixel>(
     frames: &[Picture<'_, P>],
@@ -26,16 +29,31 @@ pub fn filter<P: EncPixel>(
     threads: usize,
     ss: (usize, usize),
     bd: u8,
+    seeded: bool,
 ) -> [Vec<P>; 3] {
     let bands = h.div_ceil(16);
     let threads = threads.clamp(1, bands.max(1));
+    let small: Vec<Small> = if seeded {
+        frames
+            .iter()
+            .map(|f| Small::new(f.planes[0], w, h))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let small = &small;
     let parts: Vec<Vec<(usize, [Vec<P>; 3])>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..threads)
             .map(|t| {
                 sc.spawn(move || {
                     (t..bands)
                         .step_by(threads)
-                        .map(|b| (b, band(frames, center, w, h, strength, b * 16, ss, bd)))
+                        .map(|b| {
+                            (
+                                b,
+                                band(frames, small, center, w, h, strength, b * 16, ss, bd),
+                            )
+                        })
                         .collect()
                 })
             })
@@ -54,6 +72,7 @@ pub fn filter<P: EncPixel>(
 #[allow(clippy::too_many_arguments)]
 fn band<P: EncPixel>(
     frames: &[Picture<'_, P>],
+    small: &[Small],
     center: usize,
     w: usize,
     h: usize,
@@ -79,6 +98,9 @@ fn band<P: EncPixel>(
     let mut cnt: [Vec<u32>; 3] =
         std::array::from_fn(|p| vec![0; dims[p].0 * (rows[p].1 - rows[p].0)]);
     let target = &frames[center];
+    // Each picture's match of the block to the left, where a seeded
+    // search also starts.
+    let mut left = vec![(0isize, 0isize); frames.len()];
     for bx in (0..w).step_by(16) {
         let bw = 16.min(w - bx);
         for (f, pic) in frames.iter().enumerate() {
@@ -86,7 +108,22 @@ fn band<P: EncPixel>(
             let (mv, weight) = if f == center {
                 ((0, 0), 2)
             } else {
-                let (mv, sse) = search(target.planes[0], pic.planes[0], w, h, bx, by, bw, bh);
+                let (t, p) = (target.planes[0], pic.planes[0]);
+                // (Unseeded: from zero alone.)
+                let seeds: &[_] = if small.is_empty() { &[] } else { &[left[f]] };
+                let (mut mv, mut sse) = search(t, p, w, h, bx, by, bw, bh, seeds, 16);
+                if (sse / (bw * bh) as u64) >> sq >= COARSE_PER
+                    && let (Some(a), Some(b)) = (small.get(center), small.get(f))
+                {
+                    // A poor match: the best on sums of 4×4 samples within
+                    // the search range, refined.
+                    let c = a.find(b, bx / 4, by / 4, bw / 4, bh / 4);
+                    let (m2, s2) = search(t, p, w, h, bx, by, bw, bh, &[c], 2);
+                    if s2 < sse {
+                        (mv, sse) = (m2, s2);
+                    }
+                }
+                left[f] = mv;
                 let per = (sse / (bw * bh) as u64) >> sq;
                 (
                     mv,
@@ -149,7 +186,7 @@ pub fn reachable<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize, bd: u8) 
     let (mut good, mut all) = (0u32, 0u32);
     for by in (0..h.saturating_sub(15)).step_by(64) {
         for bx in (0..w.saturating_sub(15)).step_by(64) {
-            let (mv, sse) = search(to, from, w, h, bx, by, 16, 16);
+            let (mv, sse) = search(to, from, w, h, bx, by, 16, 16, &[], 16);
             all += 1;
             // Close: the content holds together over the interval well
             // enough for one picture to stand for it.
@@ -158,6 +195,32 @@ pub fn reachable<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize, bd: u8) 
         }
     }
     all > 0 && good * 10 >= all * 7
+}
+
+/// How far `to` moved from `from` (luma, `w`×`h`), in whole samples: over
+/// a sample of 16×16 blocks whose best match (on sums of 4×4 samples,
+/// refined) leaves under a quarter of the error of none (detail that
+/// moved: on flat areas, grain and all, any vector matches), the median
+/// of the larger component of their vectors. 0 when under eight blocks
+/// moved so.
+pub fn motion<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize) -> u32 {
+    let (sf, st) = (Small::new(from, w, h), Small::new(to, w, h));
+    let mut m = Vec::new();
+    for by in (0..h.saturating_sub(15)).step_by(32) {
+        for bx in (0..w.saturating_sub(15)).step_by(32) {
+            let c = st.find(&sf, bx / 4, by / 4, 4, 4);
+            let (mv, sse) = search(to, from, w, h, bx, by, 16, 16, &[c], 2);
+            let still = P::sse(&to[by * w + bx..], w, &from[by * w + bx..], w, 16, 16);
+            if sse * 4 < still {
+                m.push(mv.0.unsigned_abs().max(mv.1.unsigned_abs()) as u32);
+            }
+        }
+    }
+    if m.len() < 8 {
+        return 0;
+    }
+    m.sort_unstable();
+    m[m.len() / 2]
 }
 
 /// Whether `to` cuts from `from` (luma, `w`×`h`): over a sample of 16×16
@@ -172,7 +235,7 @@ pub fn cut<P: EncPixel>(from: &[P], to: &[P], w: usize, h: usize) -> bool {
     let (mut inter, mut intra) = (0u64, 0u64);
     for by in (0..h.saturating_sub(15)).step_by(64) {
         for bx in (0..w.saturating_sub(15)).step_by(64) {
-            let (_, sse) = search(to, from, w, h, bx, by, 16, 16);
+            let (_, sse) = search(to, from, w, h, bx, by, 16, 16, &[], 16);
             inter += sse;
             let (mut s, mut s2) = (0u64, 0u64);
             for r in 0..16 {
@@ -274,7 +337,8 @@ fn apply<P: Pixel>(
 }
 
 /// The whole-sample vector of the best match of the target's block in
-/// `pic` (a diamond search from zero), and its SSE.
+/// `pic` (a diamond search from zero or the best of `seeds`, its first
+/// step `step`), and its SSE.
 #[allow(clippy::too_many_arguments)]
 fn search<P: EncPixel>(
     target: &[P],
@@ -285,6 +349,8 @@ fn search<P: EncPixel>(
     by: usize,
     bw: usize,
     bh: usize,
+    seeds: &[(isize, isize)],
+    mut step: isize,
 ) -> ((isize, isize), u64) {
     let cost = |dx: isize, dy: isize| -> Option<u64> {
         let (x, y) = (bx as isize + dx, by as isize + dy);
@@ -303,7 +369,15 @@ fn search<P: EncPixel>(
     };
     let mut best = (0isize, 0isize);
     let mut best_sad = cost(0, 0).unwrap_or(u64::MAX);
-    let mut step = 16isize;
+    for &(x, y) in seeds {
+        if (x, y) != (0, 0)
+            && let Some(v) = cost(x, y)
+            && v < best_sad
+        {
+            best_sad = v;
+            best = (x, y);
+        }
+    }
     while step >= 1 {
         let mut moved = true;
         let mut iters = 0;
@@ -333,4 +407,78 @@ fn search<P: EncPixel>(
     );
     let sse = P::sse(&target[by * w + bx..], w, &pic[y * w + x..], w, bw, bh);
     (best, sse)
+}
+
+/// A match of the filter's seeded diamond search leaving this much error
+/// a sample (or more) is searched again on sums of 4×4 samples
+/// ([`Small`]). From zero alone, the diamond's first steps of 16 settle
+/// on fine detail far from its match: on the grainy pan (a fractal's
+/// edge in fine colour, flat gradients elsewhere) its matches left 151 of
+/// error a sample, and a block of that detail, weighted by its 3×3
+/// errors, still blurs into the alt-ref; seeded and searched again so, 22.
+const COARSE_PER: u64 = 64;
+
+/// The coarse search's range, in sums of 4×4 samples (48 samples).
+const COARSE_RANGE: isize = 12;
+
+/// A picture's luma in sums of 4×4 samples, for the coarse search.
+struct Small {
+    s: Vec<u32>,
+    w: usize,
+    h: usize,
+}
+
+impl Small {
+    fn new<P: Pixel>(y: &[P], w: usize, h: usize) -> Self {
+        let (sw, sh) = (w / 4, h / 4);
+        let mut s = vec![0u32; sw * sh];
+        for r in 0..sh {
+            for (c, v) in s[r * sw..(r + 1) * sw].iter_mut().enumerate() {
+                let mut t = 0u32;
+                for row in y[r * 4 * w + c * 4..].chunks(w).take(4) {
+                    t += row[..4].iter().map(|p| p.get() as u32).sum::<u32>();
+                }
+                *v = t;
+            }
+        }
+        Self { s, w: sw, h: sh }
+    }
+
+    /// The vector, in whole samples of the picture, of the best match in
+    /// `pic` within [`COARSE_RANGE`] of this one's `bw`×`bh` sums at
+    /// `(x, y)` (ties to the shorter vector).
+    fn find(&self, pic: &Small, x: usize, y: usize, bw: usize, bh: usize) -> (isize, isize) {
+        if bw == 0 || bh == 0 || x + bw > self.w || y + bh > self.h {
+            return (0, 0);
+        }
+        let mut best = (u64::MAX, (0isize, 0isize));
+        for dy in -COARSE_RANGE..=COARSE_RANGE {
+            let py = y as isize + dy;
+            if py < 0 || py as usize + bh > pic.h {
+                continue;
+            }
+            for dx in -COARSE_RANGE..=COARSE_RANGE {
+                let px = x as isize + dx;
+                if px < 0 || px as usize + bw > pic.w {
+                    continue;
+                }
+                let (py, px) = (py as usize, px as usize);
+                let mut sad = 0u64;
+                for r in 0..bh {
+                    let a = &self.s[(y + r) * self.w + x..][..bw];
+                    let b = &pic.s[(py + r) * pic.w + px..][..bw];
+                    sad += a
+                        .iter()
+                        .zip(b)
+                        .map(|(&a, &b)| u64::from(a.abs_diff(b)))
+                        .sum::<u64>();
+                }
+                let sad = sad * 64 + (dx.unsigned_abs() + dy.unsigned_abs()) as u64;
+                if sad < best.0 {
+                    best = (sad, (dx * 4, dy * 4));
+                }
+            }
+        }
+        best.1
+    }
 }

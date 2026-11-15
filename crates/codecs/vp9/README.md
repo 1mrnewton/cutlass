@@ -211,37 +211,59 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   are in, and over the last ten frames a miss is spread as if the stream
   went on, not made up on them alone. A cut takes a key frame's
   quantizer, and blocks that code over a bit a sample also try the next
-  smaller transform, as speeds 0–5 do. Against libvpx's two passes (good,
+  smaller transform, as speeds 0–5 do. Golden frames come sooner as the
+  content moves faster: 64 samples of motion apart (the median vector of
+  the sampled blocks of detail that moved, from each golden picture to
+  the next one), 6 to 12 pictures; the first pass's bits are reclassed
+  as each interval is chosen (a golden place's as its neighbours' times
+  what the nearest first-pass golden frame took over its own). The
+  alt-ref filter's search starts from the block to the left's match too,
+  and a match still poor (64 of error a sample) is searched again on sums
+  of 4×4 samples. And the best four inter candidates are ranked again
+  with their chroma's SAD added. Against libvpx's two passes (good,
   cpu-used 2), at the same PSNR-Y / averaged PSNR, speed 6:
 
-  | 90 frames of 720p | Before | Now |
-  |---|---|---|
-  | `mandelbrot`, the grainy pan, `testsrc2` (1–4 Mb/s) | +5.3% / +16.9% | −10.7% / +4.5% |
-  | still picture, grainy pan, clean clip (0.5–3 Mb/s) | +2.9% / +11.8% | −19.7% / −5.8% |
+  | 720p | First pass at q 120 | Before | Now |
+  |---|---|---|---|
+  | `mandelbrot`, the grainy pan, `testsrc2` (90 frames, 1–4 Mb/s) | +5.3% / +16.9% | −10.7% / +4.5% | −12.9% / +1.6% |
+  | still picture, grainy pan, clean clip (90 frames, 0.5–3 Mb/s) | +2.9% / +11.8% | −19.7% / −5.8% | −20.0% / −7.8% |
+  | the grainy pan alone (60 frames, 1–3 Mb/s) | +34% / +49% (1–4 Mb/s) | −2.5% / +20.4% | −10.6% / +7.9% |
 
-  in the same time as before (6.6 s, against libvpx's 10.6 s with four
-  threads each, at 2 Mb/s), within 2.4% of the bitrate (4.3% on the
-  60-frame pan below at 1 Mb/s). What is left is
-  the chroma of the grainy pan (+19% at the same averaged PSNR on that
-  scene alone, −12% at the same PSNR-Y). Of the gain, the first pass at
-  the bitrate's quantizer (a fixed 120 reached too far: grain loses its
-  bits faster with the quantizer than clean pictures do, and the second
-  pass ran out of bits on the last scene) is most on the second clip,
-  the smaller transforms (3 to 4% more time) most on the first, the
-  classes and the cut's quantizer some on both. On the 60 frames of the
-  grainy pan alone (no cut), the second pass takes 30% / 18% off the bits
-  it took before, over the narrow range its PSNR-Y tops out in (43.3 to
-  44.3 dB; +2.4% / +23% against libvpx's, from +34% / +49%); its one pass
-  is unchanged, bit for bit, as every one-pass stream. Golden frames every six
-  frames in the second pass took 1 to 2% more off, at 11% more time;
-  coding a cut as a key frame, libvpx's way, did better on the first clip
-  and worse on the second; the chroma's RD weight brought luma down with
-  it on both.
-  The pan's chroma gap is not the chroma quantizer: a uv delta-q of −4
-  to −12 lifts its PSNR-U at 1 Mb/s by at most 0.2 dB (38.1 to 38.3,
-  against libvpx's 40.1) and costs more than it gains. It narrows with
-  the search instead (PSNR-U 38.9 dB at speed 4, 39.4 at speed 3,
-  mostly from the rectangular partitions and second transform tries).
+  in 5 to 22% more time than before, still well under libvpx's (four
+  threads each, in one sitting: 10.9 s against 9.0 s before and libvpx's
+  18.2 s on the second clip at 2 Mb/s; 9.0 s, 8.5 s and 11.8 s on the
+  first; 3.6 s, 3.2 s and 9.4 s on the pan at 1 Mb/s), within 2.8% of the
+  bitrate (3.8% under it at 0.5 Mb/s). One pass is unchanged, bit for
+  bit, as every one-pass stream.
+
+  What was left of the gap is the chroma of the grainy pan, and where it
+  came from: the pan is of a fractal, flat colour gradients (where any
+  vector predicts the luma to its grain, and the chroma is as close as
+  libvpx's: 2.2 of error a sample against 2.17) and an edge of fine
+  colour detail (21.5 against libvpx's 14.5 before). Its luma moves 7 or
+  8 whole samples a picture, so chroma is at half samples as often as
+  not, and the filters blur it; libvpx predicts 45% of the picture from
+  vectors whole in chroma (from its alt-refs and golden frames, every
+  four pictures), this encoder 21% (76% from LAST, chosen on luma
+  alone), 28% now. The search decides little of it: a finer chroma
+  quantizer (uv delta-q −4 to −12: at most 0.2 dB more PSNR-U at 1 Mb/s),
+  a lower chroma RD weight (bits as luma's, or 0.6 of them: PSNR-U lower
+  still, as the rate control coarsens everything), chroma kept out of
+  the dead-zone trials, no early end of the partition search, every
+  inter candidate tried, a 16×16 transform cap, smaller transforms tried
+  everywhere, SHARP for the whole frame or per block (speed 2's
+  switchable filters), 8 candidates ranked instead of 4: none more than
+  a point or two, or worse. Nor did the alt-ref's chroma at its half
+  samples (the mean of the two around, not the truncated whole sample),
+  a stronger alt-ref filter, or a coarser key frame (0.6 of the inter
+  step: +15% at the same PSNR-Y). Fixed golden intervals swing the pan
+  by where its vectors fall against chroma's half samples (averaged, with
+  the candidates ranked but the filter unseeded: +13% at 4 and 6, +0.4%
+  at 7, +8.7% at 8, +9 to +10% at 9 and 10, +15% at 12), and 8 for every
+  scene lost 9 points of PSNR-Y on the second clip. The motion is measured on blocks of detail only, with the coarse
+  search: the filter's diamond, from zero, settles near its first step
+  of 16 on fine detail and anywhere on flat grain, and measured the pan
+  at twice its motion.
 - Cuts: a picture whose sampled 16×16 blocks match the last picture
   worse than twice the error of their own means (libvpx compares inter
   and intra errors the same way) starts a golden frame: LAST and GOLDEN

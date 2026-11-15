@@ -66,11 +66,12 @@ fn main() -> Result<(), String> {
     let mut wide = Vec::new();
     let mut enc = Vp9Encoder::with_options(w as u32, h as u32, opts).map_err(|e| e.to_string())?;
     if twopass {
-        // The first pass: the same pictures at a fixed quantizer, fast.
-        const FIRST_Q: u8 = 120;
+        // The first pass: the same pictures at a fixed quantizer near the
+        // one the bitrate will take, fast.
+        let first_q = enc.first_pass_qindex(1.0 / f64::from(fps));
         let first_opts = Vp9Options {
             bitrate: 0,
-            qindex: FIRST_Q,
+            qindex: first_q,
             speed: first_speed,
             ..opts
         };
@@ -87,7 +88,7 @@ fn main() -> Result<(), String> {
         for (data, _, _) in first.flush().map_err(|e| e.to_string())? {
             bits.push(data.len() as u64 * 8);
         }
-        enc.set_second_pass(&bits, FIRST_Q);
+        enc.set_second_pass(&bits, first_q);
         input = std::fs::File::open(&args[1]).map_err(|e| e.to_string())?;
     }
     let mut packets = Vec::new();

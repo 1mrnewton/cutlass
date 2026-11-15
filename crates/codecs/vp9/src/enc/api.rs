@@ -166,8 +166,6 @@ struct Core<P: EncPixel> {
     overlay_at: Option<u32>,
     /// The luma of the picture coded last, tight, for finding a cut.
     last_luma: Vec<P>,
-    /// Whether the lookahead found that the next picture starts a scene.
-    cut_next: bool,
 }
 
 /// A picture in the lookahead.
@@ -177,6 +175,8 @@ struct Queued<P> {
     pts: i64,
     duration: i64,
     timescale: u32,
+    /// Whether it cuts from the picture before it (see [`Core::is_cut`]).
+    cut: bool,
 }
 
 /// The pictures a push codes: data, key frame, and the picture's `pts`,
@@ -273,14 +273,29 @@ impl Vp9Encoder {
 
     /// The second pass of a two-pass encode (FFmpeg's `-pass 2`), from
     /// the first: a pass over the same pictures at the fixed quantizer
-    /// `first_q` (no bitrate), whose packets took `first_bits` bits each.
-    /// With a bitrate, every frame is then coded at the one quantizer that
-    /// should spend it (bits fall as the step to the power 1.25), which
-    /// puts the bits where the pictures need them; as the coding goes, the
-    /// step follows how what has been spent compares with the share of the
-    /// budget the first pass gives the pictures so far.
+    /// `first_q` (no bitrate; [`Self::first_pass_qindex`] is a good one),
+    /// whose packets took `first_bits` bits each. With a bitrate, every
+    /// frame is then coded at the one quantizer that should spend it (bits
+    /// fall as the step to the power 1.25), which puts the bits where the
+    /// pictures need them; as the coding goes, the step follows how what
+    /// has been spent compares with what the first pass's bits predicted,
+    /// for inter frames, key and cut frames, and golden frames and alt-refs
+    /// apart. A cut takes a key frame's quantizer, and blocks that code
+    /// much also try a smaller transform.
     pub fn set_second_pass(&mut self, first_bits: &[u64], first_q: u8) {
         on_lane!(self, c => c.set_second_pass(first_bits, first_q));
+    }
+
+    /// The quantizer index a first pass should code at for this encoder's
+    /// bitrate, pictures `seconds` apart: about the one the bitrate will
+    /// take, so that the second pass's model of bits against quantizer
+    /// need not reach far (bits fall faster with the quantizer on grain
+    /// than on clean pictures). Without a bitrate, the encoder's own.
+    pub fn first_pass_qindex(&self, seconds: f64) -> u8 {
+        match &self.lane {
+            Lane::Eight(c) => c.rc.first_pass_qindex(seconds),
+            Lane::Deep(c) => c.rc.first_pass_qindex(seconds),
+        }
     }
 
     /// Makes the next frame a key frame.
@@ -467,22 +482,11 @@ impl<P: EncPixel> Core<P> {
             queue: std::collections::VecDeque::new(),
             overlay_at: None,
             last_luma: Vec::new(),
-            cut_next: false,
         }
     }
 
     fn set_second_pass(&mut self, first_bits: &[u64], first_q: u8) {
-        let mut cum = Vec::with_capacity(first_bits.len());
-        let mut sum = 0.0;
-        for &b in first_bits {
-            sum += b as f64;
-            cum.push(sum);
-        }
-        self.rc.pass2 = Some(Pass2 {
-            cum,
-            q: first_q.max(1),
-            steps: Vec::new(),
-        });
+        self.rc.pass2 = Some(Pass2::new(first_bits, first_q, self.opts.keyint));
     }
 
     /// Codes one picture: `planes` are Y, U, V with their strides.
@@ -501,7 +505,7 @@ impl<P: EncPixel> Core<P> {
                 .chroma_dims(self.width as usize, self.height as usize),
             &planes,
         )?;
-        self.code(planes, seconds)
+        self.code(planes, seconds, None)
     }
 
     /// Takes one picture into the lookahead; returns the pictures coded.
@@ -522,7 +526,7 @@ impl<P: EncPixel> Core<P> {
             &planes,
         )?;
         if self.opts.lag() == 0 {
-            let (d, k) = self.code(planes, seconds)?;
+            let (d, k) = self.code(planes, seconds, None)?;
             return Ok(vec![(d, k, clock)]);
         }
         let (w, h) = (self.width as usize, self.height as usize);
@@ -531,11 +535,20 @@ impl<P: EncPixel> Core<P> {
         let tight: [Vec<P>; 3] = std::array::from_fn(|p| {
             let (data, stride) = planes[p];
             let (pw, ph) = dims[p];
-            (0..ph)
-                .flat_map(|r| data[r * stride..r * stride + pw].iter().copied())
-                .collect()
+            let mut tight = Vec::with_capacity(pw * ph);
+            for r in 0..ph {
+                tight.extend_from_slice(&data[r * stride..r * stride + pw]);
+            }
+            tight
         });
+        // Whether it cuts from the picture before it, found once: from
+        // the one queued last, or with the queue empty the one coded last.
+        let cut = match self.queue.back() {
+            Some(before) => super::arf::cut(&before.planes[0], &tight[0], w, h),
+            None => self.is_cut((&tight[0], w)),
+        };
         self.queue.push_back(Queued {
+            cut,
             planes: tight,
             seconds,
             pts: clock.0,
@@ -571,16 +584,16 @@ impl<P: EncPixel> Core<P> {
         let cw = self.opts.chroma_dims(w, h).0;
         // This picture has index `since_key` (0 for a key frame); the next
         // golden position is the alt-ref's target.
-        // A cut (which no alt-ref spans: `reachable` fails across it).
-        if self.is_cut((&f.planes[0], w)) {
-            self.cut_next = true;
-        }
+        // A cut (which no alt-ref spans: `reachable` fails across it); the
+        // first picture has nothing to cut from.
+        let cut = f.cut && self.since_key != 0;
         let key_next = self.force_key || self.since_key >= self.opts.keyint;
         let idx = if key_next { 0 } else { self.since_key };
         let target = (idx / GF_INTERVAL + 1) * GF_INTERVAL;
         let k = (target - idx) as usize; // the target is queue[k - 1]
         let mut arf_source = None;
         if idx % GF_INTERVAL == 1
+            && !cut
             && self.overlay_at.is_none()
             && k >= 2
             && k <= self.queue.len()
@@ -627,7 +640,8 @@ impl<P: EncPixel> Core<P> {
         let mut data = Vec::new();
         if let Some(src) = arf_source {
             self.enc.load([(&src[0], w), (&src[1], cw), (&src[2], cw)]);
-            let qindex = self.rc.qindex(1, f.seconds);
+            self.rc.alt_ref(k);
+            let qindex = self.rc.qindex(1, f.seconds, false);
             let coded = self.enc.encode(FrameParams {
                 key: false,
                 golden: false,
@@ -638,6 +652,7 @@ impl<P: EncPixel> Core<P> {
                 speed: self.opts.speed.min(ARF_SPEED),
                 altref_future: false,
                 aq: self.opts.aq,
+                tx_trial: self.rc.pass2.is_some(),
             })?;
             self.rc.account(coded.data.len(), 0.0, 1, qindex);
             self.overlay_at = Some(target);
@@ -646,6 +661,7 @@ impl<P: EncPixel> Core<P> {
         let (frame, key) = self.code(
             [(&f.planes[0], w), (&f.planes[1], cw), (&f.planes[2], cw)],
             f.seconds,
+            Some(cut),
         )?;
         let data = if data.is_empty() {
             frame
@@ -655,19 +671,20 @@ impl<P: EncPixel> Core<P> {
         Ok((data, key, (f.pts, f.duration, f.timescale)))
     }
 
-    /// Codes one shown picture.
+    /// Codes one shown picture; `cut` is whether it cuts from the picture
+    /// before it, when the lookahead has found that already.
     fn code(
         &mut self,
         planes: [(&[P], usize); 3],
         seconds: f64,
+        cut: Option<bool>,
     ) -> Result<(Vec<u8>, bool), CodecError> {
         let key = self.force_key || self.since_key >= self.opts.keyint;
         // A cut starts a golden frame: LAST and GOLDEN take the new scene,
         // each block still chooses intra or inter, and the probabilities
         // the stream has learnt are kept (a key frame would reset them, and
         // costs more on a cut to another picture of the same subject).
-        let cut = !key && (self.cut_next || self.is_cut(planes[0]));
-        self.cut_next = false;
+        let cut = !key && cut.unwrap_or_else(|| self.is_cut(planes[0]));
         // A golden frame every `GF_INTERVAL` frames, coded finer: the
         // frames after it predict from it. After an alt-ref, the golden
         // frame is its overlay, coded as an inter frame.
@@ -685,7 +702,7 @@ impl<P: EncPixel> Core<P> {
             self.overlay_at = None;
         }
         self.enc.load(planes);
-        let qindex = self.rc.qindex(kind, seconds);
+        let qindex = self.rc.qindex(kind, seconds, cut);
         // Between an alt-ref and its overlay, ALTREF is ahead.
         let altref_future = !key && !overlay && self.overlay_at.is_some();
         let coded = self.enc.encode(FrameParams {
@@ -696,6 +713,7 @@ impl<P: EncPixel> Core<P> {
             speed: self.opts.speed,
             altref_future,
             aq: self.opts.aq,
+            tx_trial: self.rc.pass2.is_some(),
         })?;
         let kind = if coded.key { 0 } else { kind };
         self.rc.account(coded.data.len(), seconds, kind, qindex);
@@ -988,19 +1006,109 @@ const SHARE: [f64; 3] = [
     (GF_INTERVAL as f64 - 3.5) / (GF_INTERVAL as f64 - 1.0),
 ];
 
+/// A first pass's bits, picture by picture, at its quantizer, and what
+/// the second pass has spent against them. The pictures fall in three
+/// classes, each with its own scale k between the passes: inter frames
+/// (0); key frames and cuts (1: a picture at a key frame's place, or one
+/// that took well over the pictures around it); and the pictures at the
+/// second pass's golden places (2), whose bits its alt-refs take. A
+/// faster first pass spends more on inter frames than on key frames, and
+/// an alt-ref costs nothing like the inter frame the first pass coded
+/// there.
+struct Pass2 {
+    /// Each picture's first-pass bits and class.
+    first: Vec<(f64, usize)>,
+    q: u8,
+    /// First-pass bits of the pictures still to code, by class.
+    left: [f64; 3],
+    /// Bits spent, and the model's bits at k = 1, by class.
+    spent: [f64; 3],
+    pred: [f64; 3],
+    /// The first-pass bits and class an alt-ref about to be coded takes.
+    arf: (f64, usize),
+    /// The inter step chosen last.
+    base: f64,
+    /// First-pass bits a picture, on average.
+    mean: f64,
+}
+
+/// The share of a golden picture's first-pass bits its overlay keeps
+/// when an alt-ref stands for it.
+const OVERLAY_SHARE: f64 = 0.1;
+
+/// A picture outside a golden place whose first-pass bits are over this
+/// many times the median of the six around it is a key frame's class (a
+/// cut).
+const CUT_BITS: f64 = 1.8;
+
+/// The second pass's start, in k (the second pass at speed 6 spends about
+/// half a speed-10 first pass's bits), and how many average pictures'
+/// worth of the overall k each class's own starts with.
+const K_START: f64 = 0.5;
+const K_PRIOR_FRAMES: f64 = 4.0;
+
+/// Over the last pictures the second pass spends as if the stream went
+/// on at its average for this many: a miss near the end is not made up
+/// on the last few frames alone (whose quantizer would swing).
+const END_FRAMES: f64 = 10.0;
+
+impl Pass2 {
+    fn new(bits: &[u64], q: u8, keyint: u32) -> Self {
+        let keyint = keyint.max(1) as usize;
+        let b: Vec<f64> = bits.iter().map(|&b| b as f64).collect();
+        let first: Vec<(f64, usize)> = (0..b.len())
+            .map(|i| {
+                let at = i % keyint;
+                if at == 0 {
+                    return (b[i], 1);
+                }
+                if at.is_multiple_of(GF_INTERVAL as usize) {
+                    return (b[i], 2);
+                }
+                let mut near: Vec<f64> = (i.saturating_sub(3)..(i + 4).min(b.len()))
+                    .filter(|&j| j != i)
+                    .map(|j| b[j])
+                    .collect();
+                near.sort_by(f64::total_cmp);
+                let median = near.get(near.len() / 2).copied().unwrap_or(0.0);
+                (b[i], usize::from(b[i] > CUT_BITS * median))
+            })
+            .collect();
+        let mut left = [0.0; 3];
+        for &(b, c) in &first {
+            left[c] += b;
+        }
+        Self {
+            first,
+            q: q.max(1),
+            left,
+            spent: [0.0; 3],
+            pred: [0.0; 3],
+            arf: (0.0, 2),
+            base: 0.0,
+            mean: b.iter().sum::<f64>() / b.len().max(1) as f64,
+        }
+    }
+
+    /// An alt-ref is coded now for picture `target`: it takes most of that
+    /// picture's first-pass bits, its overlay the rest.
+    fn alt_ref(&mut self, target: usize) {
+        if let Some(t) = self.first.get_mut(target) {
+            // Its bits stay left in their class until it is coded.
+            let keep = t.0 * OVERLAY_SHARE;
+            self.left[t.1] -= keep;
+            self.left[0] += keep;
+            self.arf = (t.0 - keep, t.1);
+            *t = (keep, 0);
+        }
+    }
+}
+
 /// One-pass rate control: each frame's quantizer from a model of bits
 /// against quantizer step (bits ∝ step^-k) per frame type, corrected by how
 /// far the coded bits run from the target. Without a bitrate, the
 /// quantizer is fixed for inter frames and finer by `STEP_SCALE` for key
-/// and golden frames.
-/// A first pass's bits, summed picture by picture, at its quantizer.
-struct Pass2 {
-    cum: Vec<f64>,
-    q: u8,
-    /// The inter step each picture was coded at.
-    steps: Vec<f64>,
-}
-
+/// and golden frames. With a first pass, see [`Pass2`].
 struct Rate {
     opts: Vp9Options,
     /// Bits over (positive) or under the target so far.
@@ -1024,6 +1132,9 @@ const EXP: f64 = 1.25;
 /// Bits a sample of an inter frame at quantizer step 1 (bits ∝ step^-EXP):
 /// a start for the model, from a detailed 720p picture moving.
 const FIRST_K: f64 = 48.0;
+
+/// The range of [`Vp9Encoder::first_pass_qindex`].
+const FIRST_PASS_Q: (u8, u8) = (40, 200);
 
 /// The AC step of quantizer index `q` at `bd` bits, on the 8-bit scale
 /// (the 10- and 12-bit steps over 4 and 16): the model's constants hold
@@ -1057,7 +1168,9 @@ impl Rate {
         }
     }
 
-    fn qindex(&mut self, kind: usize, seconds: f64) -> u8 {
+    /// The quantizer of a frame of type `kind` (key, golden or alt-ref,
+    /// inter); `cut` for a golden frame that starts a scene.
+    fn qindex(&mut self, kind: usize, seconds: f64, cut: bool) -> u8 {
         if self.opts.bitrate == 0 {
             let q = self.opts.qindex;
             if q == 0 {
@@ -1072,35 +1185,39 @@ impl Rate {
         if let Some(p) = &mut self.pass2 {
             // Two passes. Frame i's bits are about k·b_i·(s/s1)^-EXP, with
             // b_i its first-pass bits at step s1 and s the inter step it is
-            // coded at; k, the two passes' scale (a faster first pass
-            // spends more), is measured on the frames coded so far. The
+            // coded at; k, the two passes' scale, is measured on the frames
+            // coded so far, for each class of picture (see [`Pass2`]). The
             // step chosen spends what is left of the budget on what is
             // left of the first pass; frame types take their steps from it
-            // as a fixed quantizer does.
-            let frames = p.cum.len().max(1);
+            // as a fixed quantizer does, and a cut a key frame's.
+            let frames = p.first.len().max(1);
             let s1 = step_of(p.q, self.opts.bit_depth);
-            let first = p.cum.last().copied().unwrap_or(1.0).max(1.0);
             let total = f64::from(self.opts.bitrate) * seconds.max(1e-3) * frames as f64;
             let done = (self.frames as usize).min(frames);
-            let bits_at = |i: usize| p.cum[i] - if i == 0 { 0.0 } else { p.cum[i - 1] };
-            let predicted: f64 = (0..done)
-                .map(|i| bits_at(i) * (p.steps.get(i).copied().unwrap_or(s1) / s1).powf(-EXP))
-                .sum();
-            let k = if done >= 2 && predicted > 0.0 {
-                (self.spent / predicted).clamp(0.1, 10.0)
+            let (spent, pred) = (p.spent.iter().sum::<f64>(), p.pred.iter().sum::<f64>());
+            let prior = K_PRIOR_FRAMES * p.mean;
+            let all = if done >= 2 && pred > 0.0 {
+                ((spent + K_START * prior) / (pred + prior)).clamp(0.1, 10.0)
             } else {
-                1.0
+                K_START
             };
-            let left_first = (first - if done == 0 { 0.0 } else { p.cum[done - 1] }).max(1.0);
-            let left =
-                (total - self.spent).max(total * 0.02 * (frames - done) as f64 / frames as f64);
-            let base = s1 * (k * left_first / left.max(1.0)).powf(1.0 / EXP);
-            let q = q_of_step(base * STEP_SCALE[kind], self.opts.bit_depth)
+            let k: [f64; 3] = std::array::from_fn(|c| {
+                if done >= 2 && p.pred[c] > 0.0 && p.spent[c] > 0.0 {
+                    ((p.spent[c] + all * prior) / (p.pred[c] + prior)).clamp(0.05, 20.0)
+                } else {
+                    all
+                }
+            });
+            let more = (END_FRAMES - (frames - done) as f64).max(0.0);
+            let need = k[0] * p.left[0] + k[1] * p.left[1] + k[2] * p.left[2] + all * p.mean * more;
+            let left = (total - self.spent)
+                .max(total * 0.02 * (frames - done) as f64 / frames as f64)
+                + total / frames as f64 * more;
+            let base = s1 * (need.max(1.0) / left.max(1.0)).powf(1.0 / EXP);
+            p.base = base;
+            let scale = STEP_SCALE[if cut { 0 } else { kind }];
+            let q = q_of_step(base * scale, self.opts.bit_depth)
                 .clamp(self.opts.min_q, self.opts.max_q);
-            if p.steps.len() <= done {
-                p.steps.resize(done + 1, s1);
-            }
-            p.steps[done] = step_of(q, self.opts.bit_depth) / STEP_SCALE[kind];
             if kind == 2 {
                 self.last_q = q;
             }
@@ -1164,6 +1281,26 @@ impl Rate {
         q
     }
 
+    /// See [`Vp9Encoder::first_pass_qindex`]: the inter quantizer the
+    /// one-pass model guesses for the bitrate.
+    fn first_pass_qindex(&self, seconds: f64) -> u8 {
+        if self.opts.bitrate == 0 {
+            return self.opts.qindex;
+        }
+        let target = f64::from(self.opts.bitrate) * seconds.max(1e-3);
+        let step = (FIRST_K * self.pixels / target.max(1.0)).powf(1.0 / EXP);
+        q_of_step(step, self.opts.bit_depth).clamp(FIRST_PASS_Q.0, FIRST_PASS_Q.1)
+    }
+
+    /// An alt-ref is coded now for the picture `ahead` after the next
+    /// shown one.
+    fn alt_ref(&mut self, ahead: usize) {
+        let at = self.frames as usize + ahead;
+        if let Some(p) = &mut self.pass2 {
+            p.alt_ref(at);
+        }
+    }
+
     /// The inter frames' quantizer now.
     fn peek_q(&self) -> u8 {
         self.last_q
@@ -1175,6 +1312,21 @@ impl Rate {
         }
         let bits = bytes as f64 * 8.0;
         self.spent += bits;
+        if let Some(p) = &mut self.pass2 {
+            let at = (p.base.max(1e-3) / step_of(p.q, self.opts.bit_depth)).powf(-EXP);
+            let (b, c) = if seconds == 0.0 {
+                // An alt-ref: the bits it took from its target.
+                std::mem::replace(&mut p.arf, (0.0, 2))
+            } else {
+                p.first
+                    .get(self.frames as usize)
+                    .copied()
+                    .unwrap_or((0.0, 0))
+            };
+            p.spent[c] += bits;
+            p.pred[c] += b * at;
+            p.left[c] -= b;
+        }
         if seconds > 0.0 {
             // A shown picture: its budget; a hidden one only spends.
             self.frames = self.frames.saturating_add(1);

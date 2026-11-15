@@ -197,17 +197,46 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   averaged PSNR, against libvpx's 38.2 dB.
 - Two passes (FFmpeg's `-pass 1` and `-pass 2`): a first pass over the
   pictures at a fixed quantizer, fast (the `vp9enc` example runs it at
-  speed 10 with `twopass=1`), gives each picture's bits to
+  speed 10 with `twopass=1`, at `Vp9Encoder::first_pass_qindex`, about
+  the quantizer the bitrate will take), gives each picture's bits to
   `Vp9Encoder::set_second_pass`. The second pass codes at one quantizer
   for every frame (as a fixed quantizer, which puts the bits where the
   pictures need them), the one that spends the bitrate: frame i takes
   about k·b_i·(s/s₁)^-1.25 bits, with b_i its first-pass bits and k the
-  passes' scale, measured on the frames coded so far. On 90 frames of
-  720p that cut from a still picture to the grainy pan to the clean clip,
-  speed 6 hits 1, 2, 3 and 4 Mb/s within 5% and takes 9% / 19% off
-  one pass's bits at the same PSNR-Y / averaged PSNR, in 6.8 s against
-  5.1 s. libvpx's own two passes (good, cpu-used 2) are 18% / 26% ahead
-  of it there, in 13.0 s (before cuts were found, below).
+  passes' scale, measured on the frames coded so far, apart for inter
+  frames, for key frames and cuts, and for golden frames, whose bits an
+  alt-ref takes from its target when it is coded (the first pass codes
+  none). k starts at 0.5 (a speed-10 first pass spends about twice speed
+  6's), each class's leans on the overall one until a few frames' worth
+  are in, and over the last ten frames a miss is spread as if the stream
+  went on, not made up on them alone. A cut takes a key frame's
+  quantizer, and blocks that code over a bit a sample also try the next
+  smaller transform, as speeds 0–5 do. Against libvpx's two passes (good,
+  cpu-used 2), at the same PSNR-Y / averaged PSNR, speed 6:
+
+  | 90 frames of 720p | Before | Now |
+  |---|---|---|
+  | `mandelbrot`, the grainy pan, `testsrc2` (1–4 Mb/s) | +5.3% / +16.9% | −10.7% / +4.5% |
+  | still picture, grainy pan, clean clip (0.5–3 Mb/s) | +2.9% / +11.8% | −19.7% / −5.8% |
+
+  in the same time as before (6.6 s, against libvpx's 10.6 s with four
+  threads each, at 2 Mb/s), within 2.4% of the bitrate (4.3% on the
+  60-frame pan below at 1 Mb/s). What is left is
+  the chroma of the grainy pan (+19% at the same averaged PSNR on that
+  scene alone, −12% at the same PSNR-Y). Of the gain, the first pass at
+  the bitrate's quantizer (a fixed 120 reached too far: grain loses its
+  bits faster with the quantizer than clean pictures do, and the second
+  pass ran out of bits on the last scene) is most on the second clip,
+  the smaller transforms (3 to 4% more time) most on the first, the
+  classes and the cut's quantizer some on both. On the 60 frames of the
+  grainy pan alone (no cut), the second pass takes 30% / 18% off the bits
+  it took before, over the narrow range its PSNR-Y tops out in (43.3 to
+  44.3 dB; +2.4% / +23% against libvpx's, from +34% / +49%); its one pass
+  is unchanged, bit for bit, as every one-pass stream. Golden frames every six
+  frames in the second pass took 1 to 2% more off, at 11% more time;
+  coding a cut as a key frame, libvpx's way, did better on the first clip
+  and worse on the second; the chroma's RD weight brought luma down with
+  it on both.
 - Cuts: a picture whose sampled 16×16 blocks match the last picture
   worse than twice the error of their own means (libvpx compares inter
   and intra errors the same way) starts a golden frame: LAST and GOLDEN
@@ -220,11 +249,8 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   other content (FFmpeg's `mandelbrot`, the grainy pan, `testsrc2`), at
   speed 6: −13% / −12% of the bits at the same PSNR-Y / averaged PSNR at
   one pass, −6.5% / −5.3% at two; on the clip with two cuts between
-  related pictures, −4% / −3.6% and −7.1% / −3.6%. Against libvpx's two passes
-  (good, cpu-used 2) on the clip with cuts to other content, speed 6's
-  two passes are +5.5% / +18% at the same PSNR-Y / averaged PSNR, in 6.0
-  s against 10.1 s: behind, most of it on the chroma of the two
-  synthetic scenes.
+  related pictures, −4% / −3.6% and −7.1% / −3.6% (before the second
+  pass's model above).
 
 ## How it works
 

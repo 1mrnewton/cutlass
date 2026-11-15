@@ -71,6 +71,7 @@ fn round_trip_with(
                 speed,
                 altref_future: false,
                 aq,
+                tx_trial: false,
             })
             .expect("encode");
         bytes += coded.data.len();

@@ -1184,6 +1184,27 @@ fn a_constant_bitrate_holds_every_half_second_near_the_rate() {
 }
 
 #[test]
+fn a_first_pass_codes_near_the_quantizer_the_bitrate_takes() {
+    let at = |bitrate: u32| {
+        let opts = super::Vp9Options {
+            bitrate,
+            qindex: 77,
+            ..super::Vp9Options::default()
+        };
+        Vp9Encoder::with_options(1280, 720, opts)
+            .expect("encoder")
+            .first_pass_qindex(1.0 / 30.0)
+    };
+    // No bitrate: the encoder's own quantizer.
+    assert_eq!(at(0), 77);
+    // Fewer bits, a coarser quantizer, within the first pass's range.
+    let (low, mid, high) = (at(500_000), at(2_000_000), at(8_000_000));
+    assert!(low > mid && mid > high, "{low} {mid} {high}");
+    assert!((40..=200).contains(&low) && (40..=200).contains(&high));
+    assert!((100..=160).contains(&mid), "{mid}");
+}
+
+#[test]
 fn a_second_pass_spends_the_bitrate_where_the_first_found_detail() {
     // Twenty still pictures, then twenty moving: the second pass gives the
     // moving ones the bits.

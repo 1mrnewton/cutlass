@@ -55,6 +55,10 @@ pub struct FrameParams {
     pub altref_future: bool,
     /// Adaptive quantization by segment ([`aq`]).
     pub aq: bool,
+    /// Whether a block that codes a residual of some size also tries the
+    /// next smaller transform at speed 6, as speeds 0 to 5 do (a second
+    /// pass's effort; see [`tile::TX_TRIAL_BITS`]).
+    pub tx_trial: bool,
 }
 
 /// Speeds at and below which a frame with a future ALTREF lets each block
@@ -612,6 +616,7 @@ impl<P: EncPixel> FrameEncoder<P> {
             switchable: h.interp == geom::SWITCHABLE,
             prepass: None,
             tok: &tok,
+            tx_trial: fp.tx_trial,
         };
         // Fast inter frames: the motion search of every superblock first,
         // its rows shared out evenly among the threads (tile columns carry

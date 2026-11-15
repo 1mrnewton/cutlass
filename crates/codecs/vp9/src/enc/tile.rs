@@ -223,6 +223,8 @@ pub struct Shared<'a, P> {
     /// Token costs (1/256 bit) by tx size, plane type, inter, band and
     /// context, from the frame's probabilities: see [`token_costs`].
     pub tok: &'a TokCosts,
+    /// See [`super::FrameParams::tx_trial`].
+    pub tx_trial: bool,
 }
 
 /// The context energy of a level (libvpx `vp9_pt_energy_class`): 0, 1, 2,
@@ -356,6 +358,16 @@ const CAND_MARGIN_SPEED: u8 = 5;
 /// From this speed a whole block under the quantizer's noise ends the
 /// partition search whether or not it codes a residual.
 const BREAKOUT_SPEED: u8 = 5;
+
+/// With [`super::FrameParams::tx_trial`], the bits (in 1/256) a block's
+/// best mode takes per 8×8 above which it also tries the next smaller
+/// transform: 64 bits, a bit a sample. On 720p with cuts between
+/// synthetic and grainy scenes, a second pass at speed 6 takes 3 to 7% off
+/// its bits at the same PSNR-Y with it, and as much at the same averaged
+/// PSNR, at 3 to 4% more time (at half this, no more overall for half
+/// again the trials; with every block that codes a residual trying, a
+/// point more for twice the time).
+pub const TX_TRIAL_BITS: f64 = 64.0 * 256.0;
 
 /// How much more a bit of chroma coefficients weighs in RD quantization
 /// than one of luma.
@@ -1026,7 +1038,10 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 try_one(self, i, &b, &mut best, &mut last);
             }
         }
-        if s.speed < 6 || (s.intra_frame && s.speed < 9) {
+        let trial = s.tx_trial
+            && !self.choice_skip.0
+            && (best.0 - self.choice_skip.1) / lam > TX_TRIAL_BITS * (bw_mi * bh_mi) as f64;
+        if s.speed < 6 || (s.intra_frame && s.speed < 9) || trial {
             let b0 = cands[best.1];
             let tries = if s.speed < 4 { 2 } else { 1 };
             let mut tx = b0.tx;

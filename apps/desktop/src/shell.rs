@@ -1321,6 +1321,16 @@ impl Shell {
             .unwrap_or_default()
     }
 
+    /// What the user is looking at now, for the assistant: the playhead,
+    /// the selected clips and the clips playing at the playhead. Empty
+    /// when no project is open.
+    #[must_use]
+    pub fn assistant_view(&self) -> String {
+        self.draft()
+            .map(|draft| cutlass_agent::view_note(draft, self.playhead, &self.selection))
+            .unwrap_or_default()
+    }
+
     /// Write the assistant's notes; empty notes delete the file.
     pub fn set_assistant_notes(&mut self, notes: &str) -> Result<(), ShellError> {
         let Some(path) = &self.notes_file else {

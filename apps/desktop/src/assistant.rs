@@ -160,8 +160,10 @@ impl Assistant {
     }
 
     /// Send the words in the box with the model `settings` choose, telling
-    /// it the user's `notes` while Memory is on.
-    pub fn send(&mut self, settings: &Settings, notes: &str) {
+    /// it the user's `notes` while Memory is on. `seen` is what the user
+    /// is looking at, [`Shell::assistant_view`]: the model gets it after
+    /// the words, and the panel shows the words alone.
+    pub fn send(&mut self, settings: &Settings, notes: &str, seen: &str) {
         let ask = self.draft.trim().to_owned();
         if ask.is_empty() || self.busy() {
             return;
@@ -180,7 +182,12 @@ impl Assistant {
         let cap = settings.step_cap;
         let (settings, notes) = (settings.clone(), notes.to_owned());
         let child = move || build_model(&settings, &notes);
-        self.launch(model, Some(child), cap, &ask);
+        self.launch(
+            model,
+            Some(child),
+            cap,
+            &cutlass_agent::ask_with_view(&ask, seen),
+        );
     }
 
     /// Run `ask` on `model` on its own thread, with no helper to hand
@@ -493,7 +500,10 @@ fn shown(history: &[Message]) -> Vec<Entry> {
     let mut entries = Vec::new();
     for message in history {
         match message {
-            Message::User { text } => entries.push(Entry::Asked(text.clone())),
+            // The model was also told what the user was looking at.
+            Message::User { text } => {
+                entries.push(Entry::Asked(cutlass_agent::typed(text).to_owned()));
+            }
             Message::Assistant { text, calls } => {
                 if !text.is_empty() {
                     entries.push(Entry::Said(text.clone()));
@@ -807,6 +817,109 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
+    /// A local model server that answers one request with "Done." and
+    /// gives back the body it was sent.
+    fn one_answer() -> (String, std::thread::JoinHandle<serde_json::Value>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            let answer = serde_json::json!({
+                "choices": [{ "index": 0, "message": { "role": "assistant", "content": "Done." } }],
+            })
+            .to_string();
+            let mut stream = stream;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{answer}",
+                answer.len()
+            )
+            .unwrap();
+            serde_json::from_slice(&body).unwrap()
+        });
+        (
+            format!("http://127.0.0.1:{port}/v1/chat/completions"),
+            server,
+        )
+    }
+
+    #[test]
+    fn the_model_is_told_what_the_user_looks_at_and_the_panel_shows_the_words() {
+        let (mut shell, path) = shell_with_project("seen");
+        let track = shell.draft().unwrap().tracks[0].id.clone();
+        let track = if track.as_str().is_empty() {
+            "\"\""
+        } else {
+            track.as_str()
+        };
+        // Nothing picked, and the playhead on clip `a`.
+        assert_eq!(
+            shell.assistant_view(),
+            format!("playhead=0; selected: nothing; at the playhead: a@0+3000000:{track}")
+        );
+        // The clip picked, and the playhead past its end.
+        shell.select(Some(cutlass_model::SegmentId::new("a")));
+        shell.seek(Micros(3_000_000));
+        let seen = shell.assistant_view();
+        assert_eq!(
+            seen,
+            format!("playhead=3000000; selected: a@0+3000000:{track}; at the playhead: nothing")
+        );
+
+        let (url, server) = one_answer();
+        let mut settings = cutlass_settings::Settings::default();
+        settings.model.local_url = url;
+        let chat = path.join("chats").join("seen.json");
+        let mut assistant = Assistant::default();
+        assistant.follow(Some(chat.clone()));
+        assistant.draft = "make this bigger".to_owned();
+        assistant.send(&settings, "", &seen);
+        finish(&mut assistant, &mut shell);
+        // The model got the words, then the note.
+        let body = server.join().unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let asked = messages.last().unwrap();
+        assert_eq!(asked["role"], "user");
+        assert_eq!(
+            asked["content"],
+            format!("make this bigger\n\n[Editor now: {seen}]")
+        );
+        // The panel shows the words alone, now and when read back.
+        let expected = vec![
+            Entry::Asked("make this bigger".to_owned()),
+            Entry::Said("Done.".to_owned()),
+        ];
+        assert_eq!(assistant.entries, expected);
+        assistant.follow(Some(path.join("chats").join("other.json")));
+        assistant.follow(Some(chat));
+        assert_eq!(assistant.entries, expected);
+        // The kept conversation still holds the note, for the next turn.
+        assert!(
+            matches!(&assistant.history[0], Message::User { text } if text.ends_with(&format!("[Editor now: {seen}]")))
+        );
+
+        // No project: nothing to see, and the ask is the words alone.
+        let (decoders, encoders) = crate::register_codecs();
+        let empty = Shell::new(decoders, encoders, cutlass_settings::Settings::default());
+        assert_eq!(empty.assistant_view(), "");
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
     #[test]
     fn a_helper_reads_on_the_window_cannot_write_and_answers_the_parent() {
         let (mut shell, path) = shell_with_project("helper");
@@ -957,7 +1070,7 @@ mod tests {
         let mut settings = cutlass_settings::Settings::default();
         settings.model.local = false;
         assistant.draft = "hi".to_owned();
-        assistant.send(&settings, "");
+        assistant.send(&settings, "", "");
         assert!(
             matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("Both models are off"))
         );
@@ -965,7 +1078,7 @@ mod tests {
         settings.model.cloud = true;
         settings.model.cloud_name.clear();
         assistant.draft = "hi".to_owned();
-        assistant.send(&settings, "");
+        assistant.send(&settings, "", "");
         assert!(
             matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("Settings → Assistant"))
         );
@@ -974,7 +1087,7 @@ mod tests {
         settings.model.local = true;
         settings.model.local_url = "http://example.com/v1/chat/completions".to_owned();
         assistant.draft = "hi".to_owned();
-        assistant.send(&settings, "");
+        assistant.send(&settings, "", "");
         assert!(
             matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("this machine"))
         );
@@ -1122,7 +1235,7 @@ mod tests {
             draft: "How many clips are on the main track? Read the project first.".to_owned(),
             ..Assistant::default()
         };
-        assistant.send(&settings, "");
+        assistant.send(&settings, "", "");
         let deadline = Instant::now() + Duration::from_secs(600);
         while assistant.poll(&mut shell) {
             assert!(Instant::now() < deadline, "the model did not answer");
@@ -1146,7 +1259,7 @@ mod tests {
         // And an edit: one split, one undo step in the window.
         assistant.entries.clear();
         assistant.draft = "Split clip a at 1 second.".to_owned();
-        assistant.send(&settings, "");
+        assistant.send(&settings, "", "");
         let deadline = Instant::now() + Duration::from_secs(600);
         while assistant.poll(&mut shell) {
             assert!(Instant::now() < deadline, "the model did not answer");
@@ -1161,7 +1274,7 @@ mod tests {
         // And a skill: it looks the bundled ones up before answering.
         assistant.entries.clear();
         assistant.draft = "Which skills can you load? Look them up.".to_owned();
-        assistant.send(&settings, "");
+        assistant.send(&settings, "", "");
         let deadline = Instant::now() + Duration::from_secs(600);
         while assistant.poll(&mut shell) {
             assert!(Instant::now() < deadline, "the model did not answer");
@@ -1182,7 +1295,7 @@ mod tests {
         assistant.draft =
             "Use a helper (agent.delegate) to find how long the main track is, then tell me."
                 .to_owned();
-        assistant.send(&settings, "");
+        assistant.send(&settings, "", "");
         let deadline = Instant::now() + Duration::from_secs(600);
         while assistant.poll(&mut shell) {
             assert!(Instant::now() < deadline, "the model did not answer");

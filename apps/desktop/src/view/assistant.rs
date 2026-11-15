@@ -227,7 +227,8 @@ fn command_box(shell: &Shell, ui: &mut Ui, assistant: &mut Assistant) {
                         .clicked();
                     if (send || enter) && ready {
                         let notes = shell.assistant_notes();
-                        assistant.send(shell.settings(), &notes);
+                        let seen = shell.assistant_view();
+                        assistant.send(shell.settings(), &notes, &seen);
                         response.request_focus();
                     }
                 }

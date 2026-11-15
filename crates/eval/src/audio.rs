@@ -663,6 +663,43 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_clip_and_a_compound_keep_their_edges_inside_mix_windows() {
+        let whole = span(0, 1_100_000);
+        // The edged clip inside a compound that covers every window, and a
+        // compound placed as the edged clip is, over a child clip that goes
+        // on for a second after the compound ends.
+        let inner = |fade| compound_audio("parent", edged(fade), 1.0, whole.clone(), whole.clone());
+        let outer = |fade| {
+            let mut draft = compound_audio(
+                "parent",
+                child_tone("child", 1.0, 0, 2_000_000),
+                1.0,
+                span(0, 1_000_000),
+                span(EDGE_START, 1_000_000),
+            );
+            if fade {
+                add_fade(&mut draft);
+            }
+            draft
+        };
+        for frames in [480, 2_400] {
+            for clock in [ClockKind::Export, ClockKind::Playback] {
+                let case = format!("a nested clip, {clock:?} in {frames} frame windows");
+                let (heard, asked) = windows(&inner(false), clock, frames, EDGE_START, ramp);
+                assert_edged_ramp(&heard, asked, &case);
+                let (heard, _) = windows(&inner(true), clock, frames, EDGE_START, |_| 1.0);
+                assert_edged_fades(&heard, &case);
+
+                let case = format!("a compound, {clock:?} in {frames} frame windows");
+                let (heard, asked) = windows(&outer(false), clock, frames, 0, ramp);
+                assert_edged_ramp(&heard, asked, &case);
+                let (heard, _) = windows(&outer(true), clock, frames, 0, |_| 1.0);
+                assert_edged_fades(&heard, &case);
+            }
+        }
+    }
+
+    #[test]
     fn a_nested_draft_is_one_slice_with_the_parent_gain_and_fade() {
         let full = span(0, 1_000_000);
         let draft = compound_audio(

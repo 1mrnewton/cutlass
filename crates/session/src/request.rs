@@ -319,12 +319,14 @@ pub enum Request {
     SetTextSize {
         segment_id: SegmentId,
         size: f64,
+        #[serde(default)]
         face: String,
     },
     /// Store the text color. An empty string is white. An empty face path is filled.
     SetTextColor {
         segment_id: SegmentId,
         color: String,
+        #[serde(default)]
         face: String,
     },
     /// Store left, center, or right across, or top, middle, or bottom down a
@@ -333,6 +335,7 @@ pub enum Request {
     SetTextAlign {
         segment_id: SegmentId,
         alignment: i32,
+        #[serde(default)]
         face: String,
         line_width: f64,
     },
@@ -343,6 +346,7 @@ pub enum Request {
         bold: bool,
         italic: bool,
         underline: bool,
+        #[serde(default)]
         face: String,
     },
     /// Turn bold, italic or underline on or off for the letters from
@@ -356,24 +360,28 @@ pub enum Request {
         bold: Option<bool>,
         italic: Option<bool>,
         underline: Option<bool>,
+        #[serde(default)]
         face: String,
     },
     /// Store extra space between letters, as a fraction of the text size.
     SetLetterSpacing {
         segment_id: SegmentId,
         spacing: f64,
+        #[serde(default)]
         face: String,
     },
     /// Store extra space between lines, as a fraction of the text size.
     SetLineSpacing {
         segment_id: SegmentId,
         spacing: f64,
+        #[serde(default)]
         face: String,
     },
     /// Store the wrap width in pixels. Zero keeps the run on one line.
     SetLineWidth {
         segment_id: SegmentId,
         width: f64,
+        #[serde(default)]
         face: String,
     },
     /// Store the face file name on a text clip.
@@ -936,6 +944,34 @@ mod tests {
         );
         assert!(serde_json::from_str::<Request>(r#"{"op":"fly"}"#).is_err());
         assert!(serde_json::from_str::<Request>(r#"{"op":"move","segment_id":"a"}"#).is_err());
+    }
+
+    #[test]
+    fn a_text_style_reads_without_a_face_and_new_text_does_not() {
+        let color: Request =
+            serde_json::from_str(r##"{"op":"set_text_color","segment_id":"t","color":"#ffcc00"}"##)
+                .unwrap();
+        assert_eq!(
+            color,
+            Request::SetTextColor {
+                segment_id: SegmentId::new("t"),
+                color: "#ffcc00".to_owned(),
+                face: String::new(),
+            }
+        );
+        for style in [
+            r#"{"op":"set_text_size","segment_id":"t","size":48.0}"#,
+            r#"{"op":"set_text_align","segment_id":"t","alignment":1,"line_width":800.0}"#,
+            r#"{"op":"set_text_pattern","segment_id":"t","bold":true,"italic":false,"underline":false}"#,
+            r#"{"op":"set_letter_spacing","segment_id":"t","spacing":0.1}"#,
+            r#"{"op":"set_line_spacing","segment_id":"t","spacing":0.1}"#,
+            r#"{"op":"set_line_width","segment_id":"t","width":800.0}"#,
+        ] {
+            assert!(serde_json::from_str::<Request>(style).is_ok(), "{style}");
+        }
+        // New text draws nothing without a face, so it must name one.
+        let text = r#"{"op":"add_text","track_id":"t","segment_id":"s","material_id":"m","start":0,"duration":1,"content":"Hi"}"#;
+        assert!(serde_json::from_str::<Request>(text).is_err());
     }
 
     #[test]

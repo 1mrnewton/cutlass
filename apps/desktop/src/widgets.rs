@@ -75,7 +75,7 @@ fn scrim(ui: &mut Ui, title: &str) {
 const SIZED_GAP: f32 = 14.0;
 
 pub fn dialog<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> (R, bool) {
-    dialog_sized(ui, title, 420.0, None, add)
+    dialog_sized(ui, title, "", 420.0, None, add)
 }
 
 /// A dialog `width` wide. With no `height` it starts a little above the
@@ -83,10 +83,12 @@ pub fn dialog<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> (R
 /// With one it is that tall whatever it holds, or as tall as the window
 /// has room for, and sits in the window's middle: a dialog with pages
 /// keeps its size from one page to the next. Either way the body scrolls
-/// past its height.
+/// past its height, and each `page` keeps its own place: a page opened
+/// from another that was scrolled down starts at its top.
 pub fn dialog_sized<R>(
     ui: &mut Ui,
     title: &str,
+    page: &str,
     width: f32,
     height: Option<f32>,
     add: impl FnOnce(&mut Ui) -> R,
@@ -138,7 +140,7 @@ pub fn dialog_sized<R>(
                     ui.add_space(48.0);
                     room - 64.0
                 };
-                let inner = ui::Scroll::vertical(("dialog", title))
+                let inner = ui::Scroll::vertical(("dialog", title, page))
                     .max_height(body_height)
                     .auto_shrink([false, true])
                     .show(ui, add);

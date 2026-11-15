@@ -1630,9 +1630,15 @@ fn settings_window(
     let mut reset = false;
     let mut record = None;
     let mut clear = None;
+    let page = match view.settings_tab {
+        SettingsTab::General => "general",
+        SettingsTab::Assistant => "assistant",
+        SettingsTab::Shortcuts => "shortcuts",
+    };
     let ((), closed) = widgets::dialog_sized(
         ui,
         "Settings",
+        page,
         SETTINGS_WIDTH,
         Some(SETTINGS_HEIGHT),
         |ui| {
@@ -19763,6 +19769,13 @@ mod tests {
         ] {
             harness.state_mut().1.settings_tab = tab;
             harness.run_steps(4);
+            // Each page opens at its top, though the one before it was
+            // left scrolled down: its tabs are in view.
+            let tabs = harness.get_by_label("General").rect();
+            assert!(
+                tabs.top() > (window.y - SETTINGS_HEIGHT) * 0.5,
+                "{name} opened scrolled: its tabs are at {tabs:?}"
+            );
             for (label, count) in labels {
                 inside(&harness, label, *count);
             }

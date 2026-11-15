@@ -969,6 +969,38 @@ impl Shell {
         self.apply_requests(&requests)
     }
 
+    /// Lay the selected title's background out: a box around each line with
+    /// `lines`, `width` and `height` ems of room around the letters, moved
+    /// `offset_x` ems right and `offset_y` up. Each keyed here when it keys
+    /// it. One undo restores it.
+    pub fn set_text_background_box(
+        &mut self,
+        lines: bool,
+        width: f64,
+        height: f64,
+        offset_x: f64,
+        offset_y: f64,
+    ) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let mut requests = vec![Request::SetTextBackgroundBox {
+            segment_id,
+            lines,
+            width,
+            height,
+            offset_x,
+            offset_y,
+        }];
+        use cutlass_model::TextStyleKey as Key;
+        requests.extend(self.style_keys(&[
+            (Key::BackgroundWidth, width),
+            (Key::BackgroundHeight, height),
+            (Key::BackgroundOffsetX, offset_x),
+            (Key::BackgroundOffsetY, offset_y),
+        ]));
+        self.apply_requests(&requests)
+    }
+
     /// Shape the selected title's background as the bubble keyed `bubble`.
     /// An empty key takes the bubble off with the background it stands
     /// on. One undo restores it.
@@ -2473,6 +2505,34 @@ mod tests {
         desktop.undo().unwrap();
         desktop.undo().unwrap();
         assert_eq!(desktop.text_look().unwrap().shadow_alpha, 0.9);
+    }
+
+    #[test]
+    fn a_title_background_is_laid_out_by_line_room_and_offset() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "words");
+        desktop.set_text_background("#000000", 1.0, 0.0).unwrap();
+        desktop
+            .set_text_background_box(true, 0.14, 0.14, -0.5, 0.25)
+            .unwrap();
+        let look = desktop.text_look().unwrap();
+        assert!(look.background_lines);
+        assert_eq!(
+            (look.background_width, look.background_height),
+            (0.14, 0.14)
+        );
+        assert_eq!(
+            (look.background_offset_x, look.background_offset_y),
+            (-0.5, 0.25)
+        );
+        assert!(
+            desktop
+                .set_text_background_box(false, 2.0, 0.1, 0.0, 0.0)
+                .is_err()
+        );
+        desktop.undo().unwrap();
+        assert!(!desktop.text_look().unwrap().background_lines);
     }
 
     #[test]

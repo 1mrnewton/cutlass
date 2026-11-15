@@ -19693,6 +19693,13 @@ mod tests {
         assert!(!on.outline_color.is_empty() && !on.background_color.is_empty());
         assert!(!on.glow_color.is_empty() && !on.shadow_color.is_empty());
         assert_eq!(on.shadow_alpha, 0.9);
+        // The background takes a box for each line from its tile.
+        harness.get_by_label("A box for each line").click();
+        harness.run_steps(4);
+        assert!(look(&harness).background_lines);
+        harness.get_by_label("One box").click();
+        harness.run_steps(4);
+        assert!(!look(&harness).background_lines);
         picture(&mut harness, "title-parts-styled");
         for part in ["Stroke", "Background", "Glow", "Shadow"] {
             switch(&harness, part);

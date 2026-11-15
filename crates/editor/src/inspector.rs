@@ -76,6 +76,14 @@ pub struct TextLook {
     pub background_alpha: f64,
     /// 0 square to 1 round.
     pub background_round: f64,
+    /// A box around each line rather than one around them all.
+    pub background_lines: bool,
+    /// The room around the letters, across and down, in ems.
+    pub background_width: f64,
+    pub background_height: f64,
+    /// How far the box sits from the letters, right and up, in ems.
+    pub background_offset_x: f64,
+    pub background_offset_y: f64,
     pub glow_color: String,
     /// 0 to 1.
     pub glow_strength: f64,
@@ -208,6 +216,11 @@ fn look_of(
         background_color: on(text.background_style != 0, &text.background_color),
         background_alpha: text.background_alpha,
         background_round: text.background_round_radius,
+        background_lines: text.background_lines,
+        background_width: text.background_width,
+        background_height: text.background_height,
+        background_offset_x: text.background_offset_x,
+        background_offset_y: text.background_offset_y,
         glow_color,
         glow_strength,
         glow_range,

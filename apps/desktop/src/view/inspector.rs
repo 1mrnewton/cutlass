@@ -2740,46 +2740,7 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
         });
     }
     if header.open {
-        body(ui, |ui| {
-            if let Some(color) = color_row(
-                ui,
-                state,
-                "background-color",
-                "Color",
-                &look.background_color,
-            ) {
-                send(shell, |shell| {
-                    shell.set_text_background(&color, look.background_alpha, look.background_round)
-                });
-            }
-            let alpha = (look.background_alpha * 100.0).round();
-            let changed = setting_row(
-                shell,
-                ui,
-                KeyedSetting::TextStyle(Style::BackgroundAlpha),
-                true,
-                |ui| {
-                    slider(
-                        ui,
-                        state,
-                        "box-opacity",
-                        "Opacity",
-                        alpha,
-                        0.0..=100.0,
-                        |v| format!("{v:.0}%"),
-                    )
-                },
-            );
-            if let Some(value) = changed {
-                send(shell, |shell| {
-                    shell.set_text_background(
-                        &look.background_color,
-                        value / 100.0,
-                        look.background_round,
-                    )
-                });
-            }
-        });
+        body(ui, |ui| background_rows(shell, ui, state, look));
     }
 
     let on = !look.glow_color.is_empty();
@@ -2949,6 +2910,185 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
             }
         });
     }
+}
+
+/// The Background section's body: its two shapes, color, opacity, round
+/// corners, room around the letters, and how far it sits from them. Room
+/// shows in hundredths of an em; an offset shows 50% where it sits on the
+/// letters, from 0% an em left or down to 100% an em right or up.
+fn background_rows(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: &TextLook) {
+    let percent = |v: f64| format!("{v:.0}%");
+    let layout = |lines: bool, pad: [f64; 2], offset: [f64; 2]| {
+        move |shell: &mut Shell| {
+            shell.set_text_background_box(lines, pad[0], pad[1], offset[0], offset[1])
+        }
+    };
+    let pad = [look.background_width, look.background_height];
+    let offset = [look.background_offset_x, look.background_offset_y];
+    let lines = look.background_lines;
+    let picked = style_tiles(
+        ui,
+        &["One box", "A box for each line"],
+        usize::from(lines),
+        paint_background_tile,
+    );
+    if let Some(index) = picked {
+        send(shell, layout(index == 1, pad, offset));
+    }
+    if let Some(color) = color_row(
+        ui,
+        state,
+        "background-color",
+        "Color",
+        &look.background_color,
+    ) {
+        send(shell, |shell| {
+            shell.set_text_background(&color, look.background_alpha, look.background_round)
+        });
+    }
+    let alpha = (look.background_alpha * 100.0).round();
+    let changed = setting_row(
+        shell,
+        ui,
+        KeyedSetting::TextStyle(Style::BackgroundAlpha),
+        true,
+        |ui| {
+            slider(
+                ui,
+                state,
+                "box-opacity",
+                "Opacity",
+                alpha,
+                0.0..=100.0,
+                percent,
+            )
+        },
+    );
+    if let Some(value) = changed {
+        send(shell, |shell| {
+            shell.set_text_background(&look.background_color, value / 100.0, look.background_round)
+        });
+    }
+    let round = (look.background_round * 100.0).round();
+    let changed = setting_row(
+        shell,
+        ui,
+        KeyedSetting::TextStyle(Style::BackgroundRound),
+        true,
+        |ui| {
+            slider(
+                ui,
+                state,
+                "box-round",
+                "Round corners",
+                round,
+                0.0..=100.0,
+                percent,
+            )
+        },
+    );
+    if let Some(value) = changed {
+        send(shell, |shell| {
+            shell.set_text_background(&look.background_color, look.background_alpha, value / 100.0)
+        });
+    }
+    // Height, then width, as the reference lists them.
+    for (axis, key, label, setting) in [
+        (1, "box-height", "Height", Style::BackgroundHeight),
+        (0, "box-width", "Width", Style::BackgroundWidth),
+    ] {
+        let shown = (pad[axis] * 100.0).round();
+        let changed = setting_row(shell, ui, KeyedSetting::TextStyle(setting), true, |ui| {
+            slider(ui, state, key, label, shown, 0.0..=100.0, percent)
+        });
+        if let Some(value) = changed {
+            let mut pad = pad;
+            pad[axis] = value / 100.0;
+            send(shell, layout(lines, pad, offset));
+        }
+    }
+    for (axis, key, label, setting) in [
+        (1, "box-y", "Y-offset", Style::BackgroundOffsetY),
+        (0, "box-x", "X-offset", Style::BackgroundOffsetX),
+    ] {
+        let shown = ((offset[axis] + 1.0) * 50.0).round();
+        let changed = setting_row(shell, ui, KeyedSetting::TextStyle(setting), true, |ui| {
+            slider(ui, state, key, label, shown, 0.0..=100.0, percent)
+        });
+        if let Some(value) = changed {
+            let mut offset = offset;
+            offset[axis] = (value / 50.0 - 1.0).clamp(-1.0, 1.0);
+            send(shell, layout(lines, pad, offset));
+        }
+    }
+}
+
+/// The side of a style tile.
+const STYLE_TILE: f32 = 56.0;
+
+/// A row of style tiles, each painted by `paint` with its index and named
+/// by `names` for its tooltip and a screen reader; `picked` is outlined.
+/// The tile clicked, when it is not the one picked.
+fn style_tiles(
+    ui: &mut Ui,
+    names: &[&str],
+    picked: usize,
+    paint: impl Fn(&egui::Painter, Rect, usize),
+) -> Option<usize> {
+    let mut clicked = None;
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        for (index, name) in names.iter().enumerate() {
+            let (rect, response) = ui.allocate_exact_size(Vec2::splat(STYLE_TILE), Sense::click());
+            let on = index == picked;
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), on, *name)
+            });
+            let fill = if response.hovered() {
+                PAGE_ON
+            } else {
+                Color32::from_rgb(0x30, 0x30, 0x30)
+            };
+            ui.painter().rect_filled(rect, CornerRadius::same(10), fill);
+            paint(ui.painter(), rect, index);
+            if on {
+                ui.painter().rect_stroke(
+                    rect.shrink(0.75),
+                    CornerRadius::same(10),
+                    Stroke::new(1.5, ACCENT),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            if response.on_hover_text(*name).clicked() && !on {
+                clicked = Some(index);
+            }
+        }
+    });
+    ui.add_space(8.0);
+    clicked
+}
+
+/// "ABC" over "AB" on a box: one box around both lines, or one for each.
+fn paint_background_tile(painter: &egui::Painter, rect: Rect, index: usize) {
+    let font = FontId::proportional(12.0);
+    let top = painter.layout_no_wrap("ABC".to_owned(), font.clone(), Color32::WHITE);
+    let low = painter.layout_no_wrap("AB".to_owned(), font, Color32::WHITE);
+    let left = rect.center().x - top.size().x / 2.0;
+    let first = egui::pos2(left, rect.center().y - top.size().y);
+    let second = egui::pos2(left, rect.center().y);
+    let plate = Color32::from_rgb(0x58, 0x58, 0x58);
+    let room = Vec2::new(3.0, 1.0);
+    let around = |at: egui::Pos2, size: Vec2| Rect::from_min_size(at, size).expand2(room);
+    if index == 0 {
+        let whole = around(first, top.size()).union(around(second, top.size()));
+        painter.rect_filled(whole, CornerRadius::same(3), plate);
+    } else {
+        painter.rect_filled(around(first, top.size()), CornerRadius::same(3), plate);
+        painter.rect_filled(around(second, low.size()), CornerRadius::same(3), plate);
+    }
+    painter.galley(first, top, Color32::WHITE);
+    painter.galley(second, low, Color32::WHITE);
 }
 
 // Controls.

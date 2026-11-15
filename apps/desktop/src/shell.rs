@@ -2882,6 +2882,28 @@ impl Shell {
         }
     }
 
+    /// Put the project back to `earlier`, a draft it held before, as one
+    /// undo step: an undo brings back what it replaced. Refused when the
+    /// project is no longer at `revision`, or a drag is open.
+    pub fn restore(&mut self, revision: u64, earlier: Draft) -> Result<(), ShellError> {
+        let before = self.cover().cloned();
+        let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
+        match session.restore(revision, earlier) {
+            Ok(revision) => {
+                cutlass_logger::info!("restore: revision {revision}");
+                self.lanes_cache.replace(None);
+                self.bars_cache.replace(None);
+                self.follow_cover(before);
+                Ok(())
+            }
+            Err(error) => {
+                let error = ShellError::Edit(error);
+                cutlass_logger::warn!("restore refused: {error}");
+                Err(error)
+            }
+        }
+    }
+
     pub fn redo(&mut self) -> Result<(), ShellError> {
         let before = self.cover().cloned();
         let session = self.session.as_mut().ok_or(ShellError::NoProject)?;

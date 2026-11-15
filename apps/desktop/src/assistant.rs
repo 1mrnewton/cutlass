@@ -78,6 +78,20 @@ struct Running {
     stop: Arc<AtomicBool>,
 }
 
+/// What a turn did to the project, kept so the user can take the whole
+/// turn back at once.
+struct TurnEdits {
+    /// The project's folder, so another project is not taken for it.
+    project: Option<PathBuf>,
+    /// The draft as the turn found it, and its revision then.
+    before: cutlass_model::Draft,
+    start: u64,
+    /// The revision after the turn's last tool call.
+    end: u64,
+    /// The draft the turn left, once the turn is over.
+    after: Option<cutlass_model::Draft>,
+}
+
 /// The conversation and the turn running now.
 #[derive(Default)]
 pub struct Assistant {
@@ -95,6 +109,12 @@ pub struct Assistant {
     pending: Option<Pending>,
     /// Where this conversation is kept; `None` keeps it nowhere.
     chat_file: Option<PathBuf>,
+    /// The edits of the turn running now, or of the last one.
+    turn_edits: Option<TurnEdits>,
+    /// A turn started and has not met the project yet.
+    fresh: bool,
+    /// The user took the last turn back; the next ask tells the model.
+    undone: bool,
 }
 
 impl Assistant {
@@ -108,6 +128,97 @@ impl Assistant {
     #[must_use]
     pub fn asking(&self) -> bool {
         self.pending.is_some()
+    }
+
+    /// The last turn changed the project, and the project is still as that
+    /// turn left it, so the turn can be taken back.
+    #[must_use]
+    pub fn can_undo_turn(&self, shell: &Shell) -> bool {
+        !self.busy()
+            && self.turn_edits.as_ref().is_some_and(|edits| {
+                edits.after.is_some()
+                    && shell.project_folder() == edits.project.as_deref()
+                    && shell
+                        .session()
+                        .is_some_and(|session| session.revision() == edits.end)
+            })
+    }
+
+    /// Put the project back to how the last turn found it, as one undo
+    /// step, so an undo brings the turn's edits back. Nothing is changed
+    /// when the project is no longer as the turn left it. Settings the
+    /// turn changed and files it exported stay.
+    pub fn undo_turn(&mut self, shell: &mut Shell) {
+        if self.busy() {
+            return;
+        }
+        let Some(edits) = self.turn_edits.take() else {
+            return;
+        };
+        let unchanged = shell.project_folder() == edits.project.as_deref()
+            && edits.after.is_some()
+            && shell.draft() == edits.after.as_ref();
+        if !unchanged {
+            self.entries.push(Entry::Notice(
+                "The project changed after that turn, so it was not taken back. Undo steps back through the edits."
+                    .to_owned(),
+            ));
+            return;
+        }
+        match shell.restore(edits.end, edits.before) {
+            Ok(()) => {
+                self.undone = true;
+                self.entries.push(Entry::Notice(
+                    "Took back the turn's edits. Undo brings them back.".to_owned(),
+                ));
+            }
+            Err(error) => self.entries.push(Entry::Notice(format!(
+                "The turn was not taken back: {error}"
+            ))),
+        }
+    }
+
+    /// Note the project as a turn that just started finds it.
+    fn meet(&mut self, shell: &Shell) {
+        self.fresh = false;
+        self.turn_edits = shell.session().map(|session| TurnEdits {
+            project: shell.project_folder().map(std::path::Path::to_path_buf),
+            before: session.draft().clone(),
+            start: session.revision(),
+            end: session.revision(),
+            after: None,
+        });
+    }
+
+    /// Note where a tool call of the turn left the project.
+    fn edited(&mut self, shell: &Shell) {
+        if let (Some(edits), Some(session)) = (self.turn_edits.as_mut(), shell.session()) {
+            edits.end = session.revision();
+        }
+    }
+
+    /// The turn is over: keep the draft it left, or forget the turn when
+    /// it changed nothing or the project has moved on since its last call.
+    fn settle(&mut self, shell: &Shell) {
+        let Some(edits) = self.turn_edits.as_mut() else {
+            return;
+        };
+        if edits.after.is_some() {
+            return;
+        }
+        let left = shell
+            .session()
+            .filter(|session| {
+                shell.project_folder() == edits.project.as_deref()
+                    && session.revision() == edits.end
+                    && edits.end != edits.start
+                    && *session.draft() != edits.before
+            })
+            .map(|session| session.draft().clone());
+        match left {
+            Some(draft) => edits.after = Some(draft),
+            None => self.turn_edits = None,
+        }
     }
 
     /// Answer the call waiting for an allow. Allowed, it runs; refused, the
@@ -128,6 +239,7 @@ impl Assistant {
             let mut allowed = pending.allowed;
             allowed.push(pending.action);
             let run = shell.run_agent_tool(&pending.call, &allowed);
+            self.edited(shell);
             if let Some(action) = run.wants {
                 // The call needs another allow: ask for that one too.
                 self.entries.push(Entry::Ask {
@@ -183,11 +295,17 @@ impl Assistant {
         let cap = settings.step_cap;
         let (settings, notes) = (settings.clone(), notes.to_owned());
         let child = move || build_model(&settings, &notes);
+        // The model's own account of its last turn no longer holds.
+        let seen = if std::mem::take(&mut self.undone) {
+            format!("{seen}; the user took back the edits of your last turn")
+        } else {
+            seen.to_owned()
+        };
         self.launch(
             model,
             Some(child),
             cap,
-            &cutlass_agent::ask_with_view(&ask, seen),
+            &cutlass_agent::ask_with_view(&ask, &seen),
         );
     }
 
@@ -267,6 +385,9 @@ impl Assistant {
                     events: received,
                     stop,
                 });
+                // The last turn can no longer be taken back on its own.
+                self.turn_edits = None;
+                self.fresh = true;
             }
             Err(error) => self.entries.push(Entry::Notice(format!(
                 "the assistant did not start: {error}"
@@ -318,6 +439,9 @@ impl Assistant {
         self.entries.clear();
         self.history.clear();
         self.turn.clear();
+        self.turn_edits = None;
+        self.fresh = false;
+        self.undone = false;
         self.keep();
     }
 
@@ -400,6 +524,15 @@ impl Assistant {
     /// Take what the model's thread sent: run its tool calls on `shell`
     /// and show what it said. True while a turn is still running.
     pub fn poll(&mut self, shell: &mut Shell) -> bool {
+        if self.running.is_none() {
+            // A turn that was stopped ends here.
+            self.fresh = false;
+            self.settle(shell);
+            return false;
+        }
+        if self.fresh {
+            self.meet(shell);
+        }
         loop {
             let Some(running) = self.running.as_ref() else {
                 return false;
@@ -415,6 +548,7 @@ impl Assistant {
                     self.entries.push(Entry::Notice(
                         "the assistant ended without an answer".to_owned(),
                     ));
+                    self.settle(shell);
                     return false;
                 }
             };
@@ -445,6 +579,7 @@ impl Assistant {
                 }
                 Event::Tool { call, answer } => {
                     let run = shell.run_agent_tool(&call, &[]);
+                    self.edited(shell);
                     if let Some(action) = run.wants {
                         self.entries.push(Entry::Ask {
                             question: action.prompt(),
@@ -494,6 +629,7 @@ impl Assistant {
                             self.keep_turn();
                         }
                     }
+                    self.settle(shell);
                     return false;
                 }
             }
@@ -821,6 +957,203 @@ mod tests {
         assistant.clear();
         assert!(!first.exists());
         assert!(!second.exists());
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    fn split(revision: u64, clip: &str, at: i64, right: &str) -> Vec<ToolCall> {
+        vec![ToolCall {
+            id: format!("split-{right}"),
+            name: "draft.apply".to_owned(),
+            arguments: serde_json::json!({
+                "expected_revision": revision,
+                "requests": [{ "op": "split", "segment_id": clip, "at": at, "right_id": right }],
+            })
+            .to_string(),
+        }]
+    }
+
+    fn clips(shell: &Shell) -> usize {
+        shell.draft().unwrap().tracks[0].segments.len()
+    }
+
+    #[test]
+    fn a_whole_turn_is_taken_back_at_once_and_one_undo_brings_it_back() {
+        let (mut shell, path) = shell_with_project("undo-turn");
+        let mut assistant = Assistant::default();
+        // Nothing to take back before any turn.
+        assert!(!assistant.can_undo_turn(&shell));
+        let model = LocalModel::scripted(vec![
+            completion("", split(0, "a", 1_000_000, "b")),
+            completion("", split(1, "b", 2_000_000, "c")),
+            completion("Cut in three.", Vec::new()),
+        ]);
+        assistant.start(model, 8, "cut it in three");
+        assert!(!assistant.can_undo_turn(&shell), "not while it runs");
+        finish(&mut assistant, &mut shell);
+        assert_eq!(clips(&shell), 3);
+        assert!(assistant.can_undo_turn(&shell));
+
+        assistant.undo_turn(&mut shell);
+        assert_eq!(clips(&shell), 1);
+        assert_eq!(
+            assistant.entries.last(),
+            Some(&Entry::Notice(
+                "Took back the turn's edits. Undo brings them back.".to_owned()
+            ))
+        );
+        // Once taken back it is not offered again.
+        assert!(!assistant.can_undo_turn(&shell));
+        // One undo brings the turn's edits back, and the steps of the
+        // turn are still under it.
+        shell.undo().unwrap();
+        assert_eq!(clips(&shell), 3);
+        shell.undo().unwrap();
+        assert_eq!(clips(&shell), 2);
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_turn_is_not_taken_back_once_the_project_has_moved_on() {
+        let (mut shell, path) = shell_with_project("undo-moved");
+        let mut assistant = Assistant::default();
+        let model = LocalModel::scripted(vec![
+            completion("", split(0, "a", 1_000_000, "b")),
+            completion("Split.", Vec::new()),
+        ]);
+        assistant.start(model, 8, "split it");
+        finish(&mut assistant, &mut shell);
+        assert!(assistant.can_undo_turn(&shell));
+        // The user's own edit after the turn: taking the turn back would
+        // take that with it, so it is no longer offered or done.
+        shell.undo().unwrap();
+        assert!(!assistant.can_undo_turn(&shell));
+        assistant.undo_turn(&mut shell);
+        assert_eq!(clips(&shell), 1);
+        assert!(
+            matches!(assistant.entries.last(), Some(Entry::Notice(text)) if text.contains("changed after that turn"))
+        );
+        shell.redo().unwrap();
+        assert_eq!(clips(&shell), 2, "the user's redo still works");
+
+        // A turn that only moves the playhead leaves nothing to take back.
+        let model = LocalModel::scripted(vec![
+            completion(
+                "",
+                vec![ToolCall {
+                    id: "1".to_owned(),
+                    name: "player.seek".to_owned(),
+                    arguments: "1000000".to_owned(),
+                }],
+            ),
+            completion("There.", Vec::new()),
+        ]);
+        assistant.start(model, 8, "go to 1s");
+        finish(&mut assistant, &mut shell);
+        assert!(!assistant.can_undo_turn(&shell));
+
+        // A turn stopped partway is taken back as far as it got.
+        let revision = shell.session().unwrap().revision();
+        let model = LocalModel::scripted(vec![
+            completion("", split(revision, "a", 500_000, "d")),
+            completion("", split(revision + 1, "missing", 1, "e")),
+        ]);
+        assistant.start(model, 1, "split again");
+        finish(&mut assistant, &mut shell);
+        assert_eq!(clips(&shell), 3);
+        assert!(assistant.can_undo_turn(&shell), "{:?}", assistant.entries);
+        // A new chat forgets the turn.
+        assistant.clear();
+        assert!(!assistant.can_undo_turn(&shell));
+        assert_eq!(clips(&shell), 3);
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_turn_is_not_taken_back_in_another_project() {
+        let (mut shell, path) = shell_with_project("undo-here");
+        let (mut other, other_path) = shell_with_project("undo-there");
+        let mut assistant = Assistant::default();
+        let model = LocalModel::scripted(vec![
+            completion("", split(0, "a", 1_000_000, "b")),
+            completion("Split.", Vec::new()),
+        ]);
+        assistant.start(model, 8, "split it");
+        finish(&mut assistant, &mut shell);
+        // The other project is at the same revision after one edit of its
+        // own, and is not the one the turn edited.
+        let moved = other.run_agent_tool(&split(0, "a", 2_000_000, "z")[0], &[]);
+        assert!(!moved.outcome.is_error, "{}", moved.outcome.content);
+        assert_eq!(
+            other.session().unwrap().revision(),
+            shell.session().unwrap().revision()
+        );
+        assert!(!assistant.can_undo_turn(&other));
+        assistant.undo_turn(&mut other);
+        assert_eq!(clips(&other), 2);
+        let _ = std::fs::remove_dir_all(&path);
+        let _ = std::fs::remove_dir_all(&other_path);
+    }
+
+    #[test]
+    fn the_model_is_told_once_that_its_last_turn_was_taken_back() {
+        let (mut shell, path) = shell_with_project("undo-told");
+        let (url, server) = answers(vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "s1",
+                    "type": "function",
+                    "function": {
+                        "name": "draft_apply",
+                        "arguments": serde_json::json!({
+                            "expected_revision": 0,
+                            "requests": [{ "op": "split", "segment_id": "a",
+                                           "at": 1_000_000, "right_id": "b" }],
+                        }).to_string(),
+                    },
+                }],
+            }),
+            serde_json::json!({ "role": "assistant", "content": "Split." }),
+            serde_json::json!({ "role": "assistant", "content": "I see." }),
+            serde_json::json!({ "role": "assistant", "content": "Still here." }),
+        ]);
+        let mut settings = cutlass_settings::Settings::default();
+        settings.model.local_url = url;
+        let mut assistant = Assistant::default();
+        let say = |assistant: &mut Assistant, shell: &mut Shell, words: &str| {
+            assistant.draft = words.to_owned();
+            let seen = shell.assistant_view();
+            assistant.send(&settings, "", &seen);
+            finish(assistant, shell);
+        };
+        say(&mut assistant, &mut shell, "split it");
+        assert_eq!(clips(&shell), 2);
+        assistant.undo_turn(&mut shell);
+        assert_eq!(clips(&shell), 1);
+        say(&mut assistant, &mut shell, "what happened?");
+        say(&mut assistant, &mut shell, "and now?");
+        let bodies = server.join().unwrap();
+        let last_ask = |body: &serde_json::Value| {
+            body["messages"].as_array().unwrap().last().unwrap()["content"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let told = "; the user took back the edits of your last turn]";
+        assert!(!last_ask(&bodies[0]).contains("took back"));
+        assert!(
+            last_ask(&bodies[2]).ends_with(told),
+            "{}",
+            last_ask(&bodies[2])
+        );
+        assert!(!last_ask(&bodies[3]).contains("took back"));
+        // The panel shows the words alone.
+        assert!(
+            assistant
+                .entries
+                .contains(&Entry::Asked("what happened?".to_owned()))
+        );
         let _ = std::fs::remove_dir_all(&path);
     }
 

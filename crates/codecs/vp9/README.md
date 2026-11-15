@@ -248,37 +248,33 @@ A detailed picture panning 7 pixels a frame, with film grain, 60 frames
 
 | Cutlass | libvpx-vp9 | BD-rate Y | BD-rate avg | Time (Cutlass / libvpx) |
 | --- | --- | ---: | ---: | --- |
-| speed 4, lag 16 | good, cpu-used 0 | −24% | −1.6% | 4.56 s / 7.00 s |
-| speed 6, lag 16 | good, cpu-used 0 | −18% | −0.9% | 2.95 s / 7.00 s |
-| speed 4, lag 0 | good, cpu-used 0 | −15% | +8.4% | 4.24 s / 7.00 s |
-| speed 5, lag 0 | good, cpu-used 1 | −20% | −4.6% | 2.67 s / 2.35 s |
-| speed 6, lag 0 | good, cpu-used 1 | −16% | −3.6% | 1.93 s / 2.35 s |
-| speed 6, lag 0 | good, cpu-used 2 | −19% | −1.2% | 1.93 s / 2.05 s |
-| speed 7, lag 0 | good, cpu-used 3 | −27% | −4.8% | 1.24 s / 1.61 s |
-| speed 7, lag 0 | good, cpu-used 5 | −32% | −13% | 1.24 s / 1.62 s |
-| speed 9 | realtime, cpu-used 6 | −40% | −35% | 0.45 s / 0.51 s |
-| speed 10 | realtime, cpu-used 8 | −73% | −61% | 0.43 s / 0.49 s |
+| speed 4 | good, cpu-used 0 | −24% | −1.6% | 4.33 s / 7.50 s |
+| speed 6 | good, cpu-used 0 | −18% | −0.9% | 2.61 s / 7.50 s |
+| speed 6 | good, cpu-used 1 | −24% | −16% | 2.61 s / 2.43 s |
+| speed 6, lag 0 | good, cpu-used 1 | −16% | −3.6% | 2.15 s / 2.43 s |
+| speed 6, lag 0 | good, cpu-used 2 | −19% | −1.2% | 2.15 s / 2.29 s |
+| speed 7, lag 0 | good, cpu-used 3 | −27% | −4.8% | 1.51 s / 1.68 s |
+| speed 7, lag 0 | good, cpu-used 5 | −32% | −13% | 1.51 s / 1.61 s |
+| speed 9 | realtime, cpu-used 6 | −49% | −41% | 0.45 s / 0.51 s |
+| speed 10 | realtime, cpu-used 8 | −68% | −62% | 0.38 s / 0.43 s |
 
-FFmpeg's `libvpx-vp9` encodes at good, cpu-used 1 with 25 pictures of
-lookahead unless told otherwise: speed 6 is ahead of it on both
-measures in four fifths of its time, and every libvpx preset, from good
-cpu-used 0 to realtime 8, has a Cutlass speed ahead of it on both
-measures in less time. Cutlass looks 16 pictures ahead by default
-below speed 9 (`Vp9Options::lag`, `None`), none at the realtime speeds
-9 and 10; its alt-refs take speed 6 past libvpx's slowest, cpu-used 0,
-in under half its time. The lag 0 rows show each speed without them,
-in less time. Without them,
-cpu-used 0 keeps more chroma (0.8 dB more U and V PSNR at 13% fewer
-bits than speed 5's 42.96 dB Y at 1.3 Mb/s): from frame 16 on, its
-temporally filtered alt-refs predict the grain-free picture, which
-counts most in chroma. A lookahead costs about a fifth more time at
-speed 6 (alt-ref frames are coded at a finer quantizer, and at speed 6
-at the fastest); on the clean clip below it takes 10.5% off the bits at
-the same PSNR-Y and 6.4% at the same averaged PSNR. (The lag 16 rows
-and speeds 9 and 10 are from later sittings than the others, in which
-libvpx's times were the same within 5%, but for realtime 8's 0.49 s
-against 0.42 s; the speed 9 and 10 BD-rates are on narrower ranges of
-PSNR, where the curves overlap.)
+All in one sitting, Cutlass at its defaults unless `lag 0` (16 pictures
+of lookahead below speed 9, none at 9 and 10); speed 10's time is the
+median of five runs interleaved with libvpx's (all five faster; the
+sitting's single run was 0.46 s against 0.43 s). FFmpeg's `libvpx-vp9`
+encodes at good, cpu-used 1 with 25 pictures of lookahead unless told
+otherwise: speed 6 without lookahead is ahead of it on both measures in
+less time, and every libvpx preset, from good cpu-used 0 to realtime 8,
+has a Cutlass speed ahead of it on both measures in less time. Speed 6
+with its lookahead is past libvpx's slowest, cpu-used 0, in a third of
+its time. Without alt-refs, cpu-used 0 keeps more chroma (0.8 dB more U
+and V PSNR at 13% fewer bits than speed 5's 42.96 dB Y at 1.3 Mb/s):
+from frame 16 on, its temporally filtered alt-refs predict the
+grain-free picture, which counts most in chroma. The lookahead costs
+about a fifth more time at speed 6 (alt-ref frames are coded at a finer
+quantizer, and at speed 6 at the fastest) and takes 10 to 11% off the
+bits on the pan, 6 to 10% on the clean clip below. (The speed 9 and 10
+BD-rates are on narrower ranges of PSNR, where the curves overlap.)
 
 On a clean 720p clip (no grain, 60 frames) speed 7 is ahead of good,
 cpu-used 1 on both measures (−15% on PSNR-Y, −3.2% averaged) in three

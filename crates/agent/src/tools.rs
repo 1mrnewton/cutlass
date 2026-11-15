@@ -756,10 +756,15 @@ fn description(name: &str) -> &'static str {
         "draft.redo" => "Reapply the combo that undo removed.",
         "settings.get" => "The user's settings as JSON, with the generation to send back.",
         "settings.set" => {
-            "Change the user's settings: {\"expected_generation\":N, \"changes\":{...}}, the \
-             changes merged into the settings settings.get shows (null removes a key). Turning on \
-             the cloud model, the online sandbox, a remote MCP server or a skill folder asks \
-             the user first."
+            "Change the user's app settings (not the project: its canvas and clips are \
+             draft.apply): {\"expected_generation\":N, \"changes\":{...}}, the changes merged \
+             into the settings settings.get shows (null removes a key; a key settings.get does \
+             not show is refused). mcp_servers, skill_folders and shortcuts merge by entry: send \
+             only the entries to add or change, each with its name, path or action, and \
+             {\"name\":\"x\",\"remove\":true} to take one out. Turning on the cloud model, the \
+             online sandbox or a remote MCP server, changing a server's address or the cloud \
+             service, adding a program as a local server, or adding a skill folder asks the \
+             user first."
         }
         "player.seek" => {
             "Move the open player to a time in microseconds; a .png export draws that frame."
@@ -858,14 +863,169 @@ fn parse_settings_set(current: &Settings, arguments: &str) -> Result<Invocation,
     }
     let mut value = serde_json::to_value(current)
         .map_err(|error| ToolError::BadArguments(error.to_string()))?;
-    merge_patch(&mut value, &set.changes);
+    merge_settings(&mut value, &set.changes)?;
     let settings: Settings = serde_json::from_value(value).map_err(|error| {
         ToolError::BadArguments(format!("those settings do not read back: {error}"))
     })?;
+    if let Some(key) = unknown_setting(current, &settings) {
+        return Err(ToolError::BadArguments(format!(
+            "there is no setting {key}; settings.get shows the settings there are, and the \
+             project itself (its canvas, frame rate, clips) is changed with draft.apply"
+        )));
+    }
+    if !STEP_CAP.contains(&settings.step_cap) {
+        return Err(ToolError::BadArguments(format!(
+            "step_cap is {} to {}, not {}",
+            STEP_CAP.start(),
+            STEP_CAP.end(),
+            settings.step_cap
+        )));
+    }
     Ok(Invocation::SettingsSet {
         expected: set.expected_generation,
         settings: Box::new(settings),
     })
+}
+
+/// The rounds a turn may be given, as the Settings window offers them.
+const STEP_CAP: std::ops::RangeInclusive<u32> = 1..=1000;
+
+/// The lists `settings.set` merges entry by entry, and the field that
+/// names an entry. Sending one server adds or changes that one and leaves
+/// the user's others; `{"name":"x","remove":true}` takes one out.
+const KEYED_LISTS: &[(&str, &str)] = &[
+    ("mcp_servers", "name"),
+    ("skill_folders", "path"),
+    ("shortcuts", "action"),
+];
+
+/// [`merge_patch`] over the settings, with [`KEYED_LISTS`] merged by entry.
+fn merge_settings(
+    target: &mut serde_json::Value,
+    changes: &serde_json::Value,
+) -> Result<(), ToolError> {
+    let mut rest = changes.clone();
+    for (list, key) in KEYED_LISTS {
+        let Some(entries) = rest.as_object_mut().and_then(|map| map.remove(*list)) else {
+            continue;
+        };
+        let serde_json::Value::Array(entries) = entries else {
+            return Err(ToolError::BadArguments(format!(
+                "{list} is a list of entries, each with its {key}"
+            )));
+        };
+        let Some(stored) = target
+            .as_object_mut()
+            .map(|map| {
+                map.entry((*list).to_owned())
+                    .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            })
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for mut entry in entries {
+            let name = entry
+                .get(*key)
+                .cloned()
+                .filter(|name| name.as_str().is_some_and(|name| !name.trim().is_empty()));
+            let Some(name) = name else {
+                return Err(ToolError::BadArguments(format!(
+                    "each entry of {list} needs its {key}"
+                )));
+            };
+            let remove = entry
+                .as_object_mut()
+                .and_then(|map| map.remove("remove"))
+                .is_some_and(|remove| remove == serde_json::Value::Bool(true));
+            let at = stored
+                .iter()
+                .position(|known| known.get(*key) == Some(&name));
+            match (at, remove) {
+                (Some(at), true) => {
+                    stored.remove(at);
+                }
+                (None, true) => {
+                    return Err(ToolError::BadArguments(format!(
+                        "{list} has no entry {name} to remove"
+                    )));
+                }
+                (Some(at), false) => merge_patch(&mut stored[at], &entry),
+                (None, false) => stored.push(entry),
+            }
+        }
+    }
+    merge_patch(target, &rest);
+    Ok(())
+}
+
+/// A key `next` holds that `current` does not and that no setting is
+/// named: one the caller made up, which the file would keep and nothing
+/// would read.
+fn unknown_setting(current: &Settings, next: &Settings) -> Option<String> {
+    type Rest = serde_json::Map<String, serde_json::Value>;
+    fn added(at: &str, now: &Rest, then: Option<&Rest>) -> Option<String> {
+        now.keys()
+            .find(|key| then.is_none_or(|then| !then.contains_key(*key)))
+            .map(|key| format!("{at}{key}"))
+    }
+    added("", &next.rest, Some(&current.rest))
+        .or_else(|| {
+            added(
+                "playback.",
+                &next.playback.rest,
+                Some(&current.playback.rest),
+            )
+        })
+        .or_else(|| {
+            added(
+                "hardware.",
+                &next.hardware.rest,
+                Some(&current.hardware.rest),
+            )
+        })
+        .or_else(|| added("import.", &next.import.rest, Some(&current.import.rest)))
+        .or_else(|| added("confirm.", &next.confirm.rest, Some(&current.confirm.rest)))
+        .or_else(|| added("model.", &next.model.rest, Some(&current.model.rest)))
+        .or_else(|| added("sandbox.", &next.sandbox.rest, Some(&current.sandbox.rest)))
+        .or_else(|| added("updates.", &next.updates.rest, Some(&current.updates.rest)))
+        .or_else(|| {
+            next.mcp_servers.iter().find_map(|server| {
+                let known = current
+                    .mcp_servers
+                    .iter()
+                    .find(|known| known.name == server.name);
+                added("mcp_servers.", &server.rest, known.map(|known| &known.rest))
+            })
+        })
+        .or_else(|| {
+            next.skill_folders.iter().find_map(|folder| {
+                let known = current
+                    .skill_folders
+                    .iter()
+                    .find(|known| known.path == folder.path);
+                added(
+                    "skill_folders.",
+                    &folder.rest,
+                    known.map(|known| &known.rest),
+                )
+            })
+        })
+        .or_else(|| {
+            next.shortcuts.iter().find_map(|shortcut| {
+                let known = current
+                    .shortcuts
+                    .iter()
+                    .find(|known| known.action == shortcut.action);
+                added("shortcuts.", &shortcut.rest, known.map(|known| &known.rest))
+            })
+        })
+        .or_else(|| {
+            next.panels.iter().find_map(|panel| {
+                let known = current.panels.iter().find(|known| known.id == panel.id);
+                added("panels.", &panel.rest, known.map(|known| &known.rest))
+            })
+        })
 }
 
 /// RFC 7386: objects merge key by key, `null` removes a key, anything else
@@ -906,7 +1066,7 @@ fn set_settings(
             actual,
         }));
     }
-    let actions = pending_approvals(settings_tool.settings(), &next);
+    let actions = assistant_approvals(settings_tool.settings(), &next);
     for action in actions {
         authorize(approver, action, MODEL_SAYS_APPROVED).map_err(ToolError::Approval)?;
     }
@@ -950,6 +1110,67 @@ pub fn pending_approvals(current: &Settings, next: &Settings) -> Vec<ApprovalAct
                 path: folder.path.clone(),
             });
         }
+    }
+    actions
+}
+
+/// The approvals a change the assistant (or another MCP client) asks for
+/// needs: [`pending_approvals`], and three more that the user's own
+/// Settings window does without, since there the user typed them. A new
+/// program to run as a local server, a new address for a remote server
+/// that is on, and a new service for the cloud model's requests and key.
+#[must_use]
+pub fn assistant_approvals(current: &Settings, next: &Settings) -> Vec<ApprovalAction> {
+    let mut actions = pending_approvals(current, next);
+    for server in &next.mcp_servers {
+        if server.kind == McpServer::REMOTE {
+            let moved = server.enabled
+                && current.mcp_servers.iter().any(|known| {
+                    known.name == server.name
+                        && known.kind == McpServer::REMOTE
+                        && known.enabled
+                        && known.url != server.url
+                });
+            if moved {
+                actions.push(ApprovalAction::EnableRemoteMcp {
+                    server: server.name.clone(),
+                });
+            }
+            continue;
+        }
+        // Any other kind is started as a program.
+        if server.command.trim().is_empty() {
+            continue;
+        }
+        let known = current.mcp_servers.iter().any(|known| {
+            known.kind != McpServer::REMOTE
+                && known.command == server.command
+                && known.args == server.args
+        });
+        if !known {
+            let mut command = server.command.clone();
+            for arg in &server.args {
+                command.push(' ');
+                command.push_str(arg);
+            }
+            actions.push(ApprovalAction::RunLocalMcp {
+                server: server.name.clone(),
+                command,
+            });
+        }
+    }
+    let (now, then) = (&next.model, &current.model);
+    if now.cloud_provider != then.cloud_provider || now.cloud_url != then.cloud_url {
+        let address = if now.cloud_provider == cutlass_settings::ModelChoice::OPENAI {
+            if now.cloud_url.trim().is_empty() {
+                cutlass_settings::OPENAI_CHAT_URL.to_owned()
+            } else {
+                now.cloud_url.trim().to_owned()
+            }
+        } else {
+            crate::anthropic::ANTHROPIC_URL.to_owned()
+        };
+        actions.push(ApprovalAction::ChangeCloudAddress { address });
     }
     actions
 }
@@ -2408,7 +2629,7 @@ mod tests {
     }
 
     #[test]
-    fn enabling_stdio_does_not_ask() {
+    fn a_new_local_program_asks_and_a_known_one_does_not() {
         let temp = Temp::new();
         let mut initial = Settings::default();
         initial.mcp_servers.push(server(
@@ -2418,9 +2639,15 @@ mod tests {
             "",
             "http://127.0.0.1:9/mcp",
         ));
+        // The user added this one, turned off, in the Settings window.
+        initial
+            .mcp_servers
+            .push(server("mine", false, McpServer::STDIO, "tool", ""));
         cutlass_settings::save(&temp.file(), 0, &initial).unwrap();
         let mut registry = open(&temp, Gate::refuse());
         assert_eq!(registry.settings.generation(), 1);
+        // Turning on a program the user already named does not ask, and
+        // neither does a plain setting or a shortcut.
         let mut next = registry.settings.settings().clone();
         next.step_cap = 40;
         next.shortcuts.push(Shortcut {
@@ -2428,8 +2655,7 @@ mod tests {
             keys: "s".to_owned(),
             ..Shortcut::default()
         });
-        next.mcp_servers
-            .push(server("local", true, McpServer::STDIO, "tool", ""));
+        next.mcp_servers[1].enabled = true;
         let text = registry
             .invoke(Invocation::SettingsSet {
                 expected: 1,
@@ -2438,27 +2664,225 @@ mod tests {
             .unwrap();
         assert_eq!(text, "generation=2");
         assert!(registry.approver.actions.is_empty());
-        assert!(!registry.approver.allow);
-        assert_eq!(registry.settings.generation(), 2);
-        assert_eq!(registry.settings.settings().step_cap, 40);
-        assert!(!registry.settings.settings().model.cloud);
-        assert!(!registry.settings.settings().sandbox.online);
         let loaded = SettingsTool::open(registry.settings.path()).unwrap();
-        assert_eq!(loaded.generation(), 2);
         assert_eq!(loaded.settings().step_cap, 40);
-        assert_eq!(loaded.settings().shortcuts.len(), 1);
         assert_eq!(loaded.settings().shortcuts[0].action, "split");
-        assert_eq!(loaded.settings().shortcuts[0].keys, "s");
+        assert!(loaded.settings().mcp_servers[1].enabled);
+        // A program the settings do not hold asks, on or off, and so does
+        // another command or other arguments for a known server.
+        for (name, enabled, command, args) in [
+            ("local", true, "other-tool", vec![]),
+            ("local", false, "other-tool", vec![]),
+            ("mine", true, "tool", vec!["--all".to_owned()]),
+        ] {
+            let mut next = registry.settings.settings().clone();
+            next.mcp_servers.retain(|known| known.name != name);
+            next.mcp_servers.push(McpServer {
+                args,
+                ..server(name, enabled, McpServer::STDIO, command, "")
+            });
+            let error = registry
+                .invoke(Invocation::SettingsSet {
+                    expected: 2,
+                    settings: Box::new(next),
+                })
+                .unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    ToolError::Approval(refused)
+                        if matches!(&refused.action, ApprovalAction::RunLocalMcp { server, .. } if server == name)
+                ),
+                "{error:?}"
+            );
+        }
+        assert_eq!(registry.settings.generation(), 2);
         assert!(
-            loaded.settings().mcp_servers.iter().any(|item| {
-                item.name == "local" && item.enabled && item.kind == McpServer::STDIO
-            })
+            !registry
+                .settings
+                .settings()
+                .mcp_servers
+                .iter()
+                .any(|known| known.command == "other-tool")
         );
-        assert!(
-            loaded.settings().mcp_servers.iter().any(|item| {
-                item.name == "far" && item.enabled && item.kind == McpServer::REMOTE
+        // The user's own Settings window adds a program without asking.
+        let mut typed = registry.settings.settings().clone();
+        typed
+            .mcp_servers
+            .push(server("typed", true, McpServer::STDIO, "typed-tool", ""));
+        assert!(super::pending_approvals(registry.settings.settings(), &typed).is_empty());
+    }
+
+    #[test]
+    fn moving_a_remote_server_or_the_cloud_service_asks() {
+        let temp = Temp::new();
+        let mut initial = Settings::default();
+        initial.mcp_servers.push(server(
+            "far",
+            true,
+            McpServer::REMOTE,
+            "",
+            "https://one.example/mcp",
+        ));
+        cutlass_settings::save(&temp.file(), 0, &initial).unwrap();
+        let mut registry = open(&temp, Gate::refuse());
+        let mut set = |registry: &mut TestRegistry, change: &dyn Fn(&mut Settings)| {
+            let mut next = registry.settings.settings().clone();
+            change(&mut next);
+            registry.invoke(Invocation::SettingsSet {
+                expected: 1,
+                settings: Box::new(next),
             })
+        };
+        let moved = set(&mut registry, &|next| {
+            next.mcp_servers[0].url = "https://two.example/mcp".to_owned();
+        });
+        assert!(matches!(
+            moved,
+            Err(ToolError::Approval(refused))
+                if refused.action == ApprovalAction::EnableRemoteMcp { server: "far".to_owned() }
+        ));
+        let service = set(&mut registry, &|next| {
+            next.model.cloud_provider = cutlass_settings::ModelChoice::OPENAI.to_owned();
+            next.model.cloud_url = "https://two.example/v1/chat/completions".to_owned();
+        });
+        assert!(matches!(
+            service,
+            Err(ToolError::Approval(refused))
+                if refused.action == ApprovalAction::ChangeCloudAddress {
+                    address: "https://two.example/v1/chat/completions".to_owned()
+                }
+        ));
+        // The model's name on the same service does not ask.
+        let named = set(&mut registry, &|next| {
+            next.model.cloud_name = "another-model".to_owned();
+        });
+        assert_eq!(named.unwrap(), "generation=2");
+        let stored = registry.settings.settings();
+        assert_eq!(stored.mcp_servers[0].url, "https://one.example/mcp");
+        assert_eq!(
+            stored.model.cloud_provider,
+            cutlass_settings::ModelChoice::CLAUDE
         );
+        assert!(stored.model.cloud_url.is_empty());
+    }
+
+    #[test]
+    fn settings_set_refuses_made_up_keys_and_a_step_cap_out_of_range() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::allow());
+        let mut call = |arguments: &str| {
+            ToolSink::run_tool(
+                &mut registry,
+                &ToolCall {
+                    id: "s".to_owned(),
+                    name: "settings.set".to_owned(),
+                    arguments: arguments.to_owned(),
+                },
+            )
+        };
+        for (changes, named) in [
+            (
+                r#"{"settings":{"canvas_size":[1080,1920]}}"#,
+                "no setting settings",
+            ),
+            (r#"{"stepcap":5}"#, "no setting stepcap"),
+            (
+                r#"{"model":{"temperature":1}}"#,
+                "no setting model.temperature",
+            ),
+            (
+                r#"{"mcp_servers":[{"name":"x","command":"t","env":{}}]}"#,
+                "no setting mcp_servers.env",
+            ),
+            (r#"{"step_cap":0}"#, "step_cap is 1 to 1000, not 0"),
+            (r#"{"step_cap":4000000000}"#, "step_cap is 1 to 1000"),
+        ] {
+            let refused = call(&format!(
+                r#"{{"expected_generation":0,"changes":{changes}}}"#
+            ));
+            assert!(refused.is_error, "{changes}");
+            assert!(refused.content.contains(named), "{}", refused.content);
+        }
+        let kept = call(r#"{"expected_generation":0,"changes":{"step_cap":1000}}"#);
+        assert!(!kept.is_error, "{}", kept.content);
+        assert_eq!(registry.settings.generation(), 1);
+        assert!(registry.settings.settings().rest.is_empty());
+    }
+
+    #[test]
+    fn settings_set_adds_changes_and_removes_one_list_entry_at_a_time() {
+        let temp = Temp::new();
+        let mut initial = Settings::default();
+        initial
+            .mcp_servers
+            .push(server("mine", true, McpServer::STDIO, "tool", ""));
+        initial.shortcuts.push(Shortcut {
+            action: "split".to_owned(),
+            keys: "s".to_owned(),
+            ..Shortcut::default()
+        });
+        cutlass_settings::save(&temp.file(), 0, &initial).unwrap();
+        let mut registry = open(&temp, Gate::allow());
+        let mut call = |registry: &mut TestRegistry, changes: &str| {
+            let generation = registry.settings.generation();
+            ToolSink::run_tool(
+                registry,
+                &ToolCall {
+                    id: "s".to_owned(),
+                    name: "settings.set".to_owned(),
+                    arguments: format!(
+                        r#"{{"expected_generation":{generation},"changes":{changes}}}"#
+                    ),
+                },
+            )
+        };
+        // One new server leaves the user's own in place.
+        let added = call(
+            &mut registry,
+            r#"{"mcp_servers":[{"name":"new","command":"other","enabled":true}]}"#,
+        );
+        assert!(!added.is_error, "{}", added.content);
+        let names = |registry: &TestRegistry| -> Vec<String> {
+            registry
+                .settings
+                .settings()
+                .mcp_servers
+                .iter()
+                .map(|known| known.name.clone())
+                .collect()
+        };
+        assert_eq!(names(&registry), ["mine", "new"]);
+        // Naming one changes only what is sent.
+        let off = call(
+            &mut registry,
+            r#"{"mcp_servers":[{"name":"mine","enabled":false}]}"#,
+        );
+        assert!(!off.is_error, "{}", off.content);
+        let mine = registry.settings.settings().mcp_servers[0].clone();
+        assert!(!mine.enabled);
+        assert_eq!(mine.command, "tool");
+        let gone = call(
+            &mut registry,
+            r#"{"mcp_servers":[{"name":"new","remove":true}]}"#,
+        );
+        assert!(!gone.is_error, "{}", gone.content);
+        assert_eq!(names(&registry), ["mine"]);
+        let keys = call(
+            &mut registry,
+            r#"{"shortcuts":[{"action":"split","keys":"k"},{"action":"undo","keys":"u"}]}"#,
+        );
+        assert!(!keys.is_error, "{}", keys.content);
+        let shortcuts = &registry.settings.settings().shortcuts;
+        assert_eq!(shortcuts.len(), 2);
+        assert_eq!(shortcuts[0].keys, "k");
+        for bad in [
+            r#"{"mcp_servers":[{"command":"nameless"}]}"#,
+            r#"{"mcp_servers":[{"name":"ghost","remove":true}]}"#,
+            r#"{"mcp_servers":{"name":"x"}}"#,
+        ] {
+            assert!(call(&mut registry, bad).is_error, "{bad}");
+        }
     }
 
     #[test]

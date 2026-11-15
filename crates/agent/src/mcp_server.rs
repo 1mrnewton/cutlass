@@ -233,7 +233,8 @@ pub(crate) fn input_schema(tool: &str) -> Value {
                 },
                 "changes": {
                     "type": "object",
-                    "description": "Merged into the settings settings_get shows; null removes a key.",
+                    "description": "Merged into the settings settings_get shows; null removes a key. \
+                        mcp_servers, skill_folders and shortcuts take only the entries to add or change.",
                 },
             },
             "required": ["expected_generation", "changes"],

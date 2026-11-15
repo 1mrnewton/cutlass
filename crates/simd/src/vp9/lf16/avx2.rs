@@ -28,8 +28,9 @@ use core::arch::x86_64::{
     _mm256_castsi256_si128, _mm256_cmpgt_epi16, _mm256_extracti128_si256, _mm256_loadu_si256,
     _mm256_max_epi16, _mm256_min_epi16, _mm256_or_si256, _mm256_set_m128i, _mm256_set1_epi16,
     _mm256_setzero_si256, _mm256_slli_epi16, _mm256_srai_epi16, _mm256_srli_epi16,
-    _mm256_storeu_si256, _mm256_sub_epi16, _mm256_unpackhi_epi16, _mm256_unpackhi_epi32,
-    _mm256_unpackhi_epi64, _mm256_unpacklo_epi16, _mm256_unpacklo_epi32, _mm256_unpacklo_epi64,
+    _mm256_storeu_si256, _mm256_sub_epi16, _mm256_testz_si256, _mm256_unpackhi_epi16,
+    _mm256_unpackhi_epi32, _mm256_unpackhi_epi64, _mm256_unpacklo_epi16, _mm256_unpacklo_epi32,
+    _mm256_unpacklo_epi64,
 };
 
 use super::{Thresh, Wd};
@@ -157,11 +158,34 @@ fn ad(a: __m256i, b: __m256i) -> __m256i {
     _mm256_abs_epi16(_mm256_sub_epi16(a, b))
 }
 
-/// Filters the samples `s` across the edge: `s[k]` is position
-/// `k - N / 2` (`N` of 8 or 16, `s[N / 2]` is `q0`).
+/// Whether no lane of `v` is set.
 #[inline]
 #[target_feature(enable = "avx2")]
-fn filt<const N: usize>(s: &mut [__m256i; N], wd: [Option<Wd>; 2], thr: [Thresh; 2], bd: u32) {
+fn none(v: __m256i) -> bool {
+    _mm256_testz_si256(v, v) != 0
+}
+
+/// What [`filt`] changed: nothing, positions `p2` to `q2`, or all of
+/// them (the 16-wide filter's `p6` to `q6`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Changed {
+    None,
+    Inner,
+    All,
+}
+
+/// Filters the samples `s` across the edge: `s[k]` is position
+/// `k - N / 2` (`N` of 8 or 16, `s[N / 2]` is `q0`). The filters no line
+/// takes are skipped: lines the mask leaves out keep their samples
+/// whichever filters are worked out, so this changes no result.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn filt<const N: usize>(
+    s: &mut [__m256i; N],
+    wd: [Option<Wd>; 2],
+    thr: [Thresh; 2],
+    bd: u32,
+) -> Changed {
     let c = N / 2;
     let (p3, p2, p1, p0) = (s[c - 4], s[c - 3], s[c - 2], s[c - 1]);
     let (q0, q1, q2, q3) = (s[c], s[c + 1], s[c + 2], s[c + 3]);
@@ -195,6 +219,9 @@ fn filt<const N: usize>(s: &mut [__m256i; N], wd: [Option<Wd>; 2], thr: [Thresh;
         _mm256_cmpgt_epi16(edge, blimit),
     );
     let mask = _mm256_andnot_si256(bad, active);
+    if none(mask) {
+        return Changed::None;
+    }
     let f = _mm256_max_epi16(
         _mm256_max_epi16(_mm256_max_epi16(ad(p1, p0), ad(q1, q0)), ad(p2, p0)),
         _mm256_max_epi16(_mm256_max_epi16(ad(q2, q0), ad(p3, p0)), ad(q3, q0)),
@@ -231,6 +258,14 @@ fn filt<const N: usize>(s: &mut [__m256i; N], wd: [Option<Wd>; 2], thr: [Thresh;
         hev,
     );
 
+    if none(flat) {
+        s[c - 2] = _mm256_blendv_epi8(p1, n_p1, mask);
+        s[c - 1] = _mm256_blendv_epi8(p0, n_p0, mask);
+        s[c] = _mm256_blendv_epi8(q0, n_q0, mask);
+        s[c + 1] = _mm256_blendv_epi8(q1, n_q1, mask);
+        return Changed::Inner;
+    }
+
     // Filter 8: sums of at most 8 × 4095 + 4.
     let a = |x: __m256i, y: __m256i| _mm256_add_epi16(x, y);
     let r8 = |v: __m256i| _mm256_srli_epi16::<3>(_mm256_add_epi16(v, _mm256_set1_epi16(4)));
@@ -257,6 +292,14 @@ fn filt<const N: usize>(s: &mut [__m256i; N], wd: [Option<Wd>; 2], thr: [Thresh;
     let out_q1 = pick(q1, Some(n_q1), f8_q1);
     let out_q2 = pick(q2, None, f8_q2);
 
+    let inner = |s: &mut [__m256i; N]| {
+        s[c - 3] = out_p2;
+        s[c - 2] = out_p1;
+        s[c - 1] = out_p0;
+        s[c] = out_q0;
+        s[c + 1] = out_q1;
+        s[c + 2] = out_q2;
+    };
     if N == 16 {
         // Filter 16: the running sum of the scalar twin, in wrapping
         // 16-bit lanes (its true value is below 65536).
@@ -271,6 +314,10 @@ fn filt<const N: usize>(s: &mut [__m256i; N], wd: [Option<Wd>; 2], thr: [Thresh;
             _mm256_cmpgt_epi16(f2m, one),
             _mm256_and_si256(flat, flat2_ok),
         );
+        if none(flat2) {
+            inner(s);
+            return Changed::Inner;
+        }
         let mut sum = a(
             a(
                 _mm256_sub_epi16(_mm256_slli_epi16::<3>(s[0]), s[0]),
@@ -290,23 +337,14 @@ fn filt<const N: usize>(s: &mut [__m256i; N], wd: [Option<Wd>; 2], thr: [Thresh;
             out16[k] = r16(sum);
         }
         // Positions p6 to q6 are s[1] to s[14].
-        s[c - 3] = out_p2;
-        s[c - 2] = out_p1;
-        s[c - 1] = out_p0;
-        s[c] = out_q0;
-        s[c + 1] = out_q1;
-        s[c + 2] = out_q2;
+        inner(s);
         for k in 1..15 {
             s[k] = _mm256_blendv_epi8(s[k], out16[k - 1], flat2);
         }
-    } else {
-        s[c - 3] = out_p2;
-        s[c - 2] = out_p1;
-        s[c - 1] = out_p0;
-        s[c] = out_q0;
-        s[c + 1] = out_q1;
-        s[c + 2] = out_q2;
+        return Changed::All;
     }
+    inner(s);
+    Changed::Inner
 }
 
 #[inline]
@@ -322,46 +360,59 @@ pub(super) fn filter(
     bd: u32,
 ) {
     let wide = super::widest(wd) == Some(Wd::W16);
-    // SAFETY: `fits` checked the region (the module's notes).
+    // SAFETY: `fits` checked the region (the module's notes); the rows
+    // and columns stored are among those loaded.
     unsafe {
         match (vertical, wide) {
             (false, false) => {
                 let mut s: [__m256i; 8] =
                     core::array::from_fn(|k| l256(buf, at + k * stride - 4 * stride));
-                filt::<8>(&mut s, wd, thr, bd);
-                // Rows 1 to 6, by index: the iterator adapters stayed
-                // out of line.
-                let mut k = 1;
-                while k < 7 {
-                    s256(buf, at + k * stride - 4 * stride, s[k]);
-                    k += 1;
+                if filt::<8>(&mut s, wd, thr, bd) != Changed::None {
+                    // Rows 1 to 6, by index: the iterator adapters
+                    // stayed out of line.
+                    let mut k = 1;
+                    while k < 7 {
+                        s256(buf, at + k * stride - 4 * stride, s[k]);
+                        k += 1;
+                    }
                 }
             }
             (false, true) => {
                 let mut s: [__m256i; 16] =
                     core::array::from_fn(|k| l256(buf, at + k * stride - 8 * stride));
-                filt::<16>(&mut s, wd, thr, bd);
-                // Rows 1 to 14, by index: the iterator adapters stayed
-                // out of line.
-                let mut k = 1;
-                while k < 15 {
+                // Rows 5 to 10 (`p2` to `q2`), or 1 to 14.
+                let (mut k, end) = match filt::<16>(&mut s, wd, thr, bd) {
+                    Changed::None => (0, 0),
+                    Changed::Inner => (5, 11),
+                    Changed::All => (1, 15),
+                };
+                while k < end {
                     s256(buf, at + k * stride - 8 * stride, s[k]);
                     k += 1;
                 }
             }
             (true, false) => {
                 let mut s = load_cols(buf, at - 4, stride);
-                filt::<8>(&mut s, wd, thr, bd);
-                store_cols(buf, at - 4, stride, s);
+                if filt::<8>(&mut s, wd, thr, bd) != Changed::None {
+                    store_cols(buf, at - 4, stride, s);
+                }
             }
             (true, true) => {
                 let l = load_cols(buf, at - 8, stride);
                 let r = load_cols(buf, at, stride);
                 let mut s: [__m256i; 16] =
                     core::array::from_fn(|k| if k < 8 { l[k] } else { r[k - 8] });
-                filt::<16>(&mut s, wd, thr, bd);
-                store_cols(buf, at - 8, stride, core::array::from_fn(|k| s[k]));
-                store_cols(buf, at, stride, core::array::from_fn(|k| s[k + 8]));
+                match filt::<16>(&mut s, wd, thr, bd) {
+                    Changed::None => {}
+                    // Columns `p3` to `q3`: eight, one transpose.
+                    Changed::Inner => {
+                        store_cols(buf, at - 4, stride, core::array::from_fn(|k| s[k + 4]));
+                    }
+                    Changed::All => {
+                        store_cols(buf, at - 8, stride, core::array::from_fn(|k| s[k]));
+                        store_cols(buf, at, stride, core::array::from_fn(|k| s[k + 8]));
+                    }
+                }
             }
         }
     }

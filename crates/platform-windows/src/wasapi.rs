@@ -82,6 +82,8 @@ macro_rules! com {
 }
 
 unsafe fn vslot(object: *mut c_void, index: usize) -> Slot {
+    // SAFETY: the caller passes a live COM interface pointer, whose first
+    // word points at its vtable, and an `index` inside that vtable.
     unsafe {
         let table = *object.cast::<*const Slot>();
         *table.add(index)
@@ -94,11 +96,17 @@ struct Shared {
 
 struct EventHandle(*mut c_void);
 
+// SAFETY: an event handle belongs to the process, not to the thread that
+// made it, and SetEvent and WaitForSingleObject may be called on it from any
+// thread at once. It is closed only in Drop, when the last owner is gone.
 unsafe impl Send for EventHandle {}
+// SAFETY: as for Send; `&EventHandle` only signals the event.
 unsafe impl Sync for EventHandle {}
 
 impl EventHandle {
     fn create() -> Result<Self, QueueError> {
+        // SAFETY: null security attributes and a null name are allowed. The
+        // event is auto-reset and starts unsignaled; a null return is checked.
         let handle = unsafe { CreateEventW(ptr::null_mut(), 0, 0, ptr::null()) };
         if handle.is_null() {
             Err(QueueError::NoDevice)
@@ -108,6 +116,8 @@ impl EventHandle {
     }
 
     fn signal(&self) {
+        // SAFETY: `self.0` is the handle CreateEventW returned, open until
+        // Drop.
         unsafe {
             let _ = SetEvent(self.0);
         }
@@ -119,6 +129,8 @@ impl Drop for EventHandle {
         if self.0.is_null() {
             return;
         }
+        // SAFETY: `self.0` is the non-null handle from CreateEventW. It is
+        // closed once here and nulled after.
         unsafe {
             let _ = CloseHandle(self.0);
         }
@@ -138,6 +150,9 @@ struct Client {
 
 impl Client {
     fn open(event: *mut c_void, format: &WaveFormatExtensible) -> Result<Self, ()> {
+        // SAFETY: the reserved argument is null. This runs on the render
+        // thread, and when it succeeds `com` is set so that Drop, on the
+        // same thread, leaves COM again.
         if unsafe { CoInitializeEx(ptr::null_mut(), 0) } < 0 {
             return Err(());
         }
@@ -171,6 +186,8 @@ impl Client {
 
     fn pump(&self, event: *mut c_void, shared: &Shared, stop: &AtomicBool) {
         while !stop.load(Ordering::Acquire) {
+            // SAFETY: `event` is the handle of the `EventHandle` whose Arc
+            // the render thread holds, so it stays open while this runs.
             let waited = unsafe { WaitForSingleObject(event, WAIT_SLICE) };
             if stop.load(Ordering::Acquire) {
                 break;
@@ -213,6 +230,11 @@ impl Client {
             let _ = render_release(self.render, available, BUFFER_SILENT);
             return Ok(());
         }
+        // SAFETY: GetBuffer returned non-null `data` for `available` frames of
+        // the format given to Initialize, whose block align is 8. `layout`
+        // only lets 48 kHz stereo `f32` through, so `stride` is also 8 and
+        // `bytes` is that buffer's length. The buffer is this thread's until
+        // ReleaseBuffer below, and `out` is not used after it.
         let out = unsafe { std::slice::from_raw_parts_mut(data, bytes) };
         shared.slice.pull(out);
         if render_release(self.render, available, 0) < 0 {
@@ -225,6 +247,10 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
+        // SAFETY: each pointer is null or holds the one reference `bind`
+        // stored, and `release` skips null. Stop (slot 11) runs only after
+        // Start succeeded. This is the thread that entered COM in `open`, and
+        // it leaves COM after the last release.
         unsafe {
             if self.started && !self.audio.is_null() {
                 let _ = invoke_hr(self.audio, 11);
@@ -328,6 +354,9 @@ fn size_of_format(format: &WaveFormatExtensible) -> usize {
 
 fn enumerator() -> Result<*mut c_void, ()> {
     let mut out = ptr::null_mut();
+    // SAFETY: both GUIDs are statics, there is no outer object, and `out` is
+    // a local that receives one `IMMDeviceEnumerator` reference, which the
+    // `Client` owns from here.
     let hr = unsafe {
         CoCreateInstance(
             &CLSID_MM_DEVICE_ENUMERATOR,
@@ -346,6 +375,9 @@ fn enumerator() -> Result<*mut c_void, ()> {
 
 fn default_render(enumerator: *mut c_void) -> Result<*mut c_void, ()> {
     let mut device = ptr::null_mut();
+    // SAFETY: `enumerator` is the live `IMMDeviceEnumerator` the `Client`
+    // holds. Slot 4 is GetDefaultAudioEndpoint(eRender, eConsole, out), and
+    // `device` is a local that receives one reference.
     let hr = unsafe {
         com!(
             enumerator,
@@ -365,6 +397,9 @@ fn default_render(enumerator: *mut c_void) -> Result<*mut c_void, ()> {
 
 fn activate(device: *mut c_void) -> Result<*mut c_void, ()> {
     let mut audio = ptr::null_mut();
+    // SAFETY: `device` is the live `IMMDevice` the `Client` holds. Slot 3 is
+    // Activate(iid, context, params, out); null params are allowed, and
+    // `audio` is a local that receives one `IAudioClient` reference.
     let hr = unsafe {
         com!(
             device,
@@ -384,6 +419,9 @@ fn activate(device: *mut c_void) -> Result<*mut c_void, ()> {
 }
 
 fn initialize(audio: *mut c_void, format: &WaveFormatExtensible) -> Result<(), ()> {
+    // SAFETY: `audio` is the live `IAudioClient` the `Client` holds. Slot 3
+    // is Initialize; `format` is the 40-byte packed `WAVEFORMATEXTENSIBLE`,
+    // borrowed for the call, and a null session GUID is allowed.
     let hr = unsafe {
         com!(
             audio,
@@ -402,6 +440,8 @@ fn initialize(audio: *mut c_void, format: &WaveFormatExtensible) -> Result<(), (
 
 fn buffer_frames(audio: *mut c_void) -> Result<u32, ()> {
     let mut frames = 0_u32;
+    // SAFETY: `audio` is the live `IAudioClient`; slot 4 is
+    // GetBufferSize, which writes the local `frames`.
     let hr = unsafe { com!(audio, 4, fn(*mut u32) -> i32, &mut frames) };
     if hr < 0 || frames == 0 {
         Err(())
@@ -411,12 +451,17 @@ fn buffer_frames(audio: *mut c_void) -> Result<u32, ()> {
 }
 
 fn set_event(audio: *mut c_void, event: *mut c_void) -> Result<(), ()> {
+    // SAFETY: `audio` is the live `IAudioClient`; slot 13 is SetEventHandle.
+    // `event` stays open while the client lives, because the render thread
+    // holds the `EventHandle` Arc until after the client is dropped.
     let hr = unsafe { com!(audio, 13, fn(*mut c_void) -> i32, event) };
     if hr < 0 { Err(()) } else { Ok(()) }
 }
 
 fn render_client(audio: *mut c_void) -> Result<*mut c_void, ()> {
     let mut render = ptr::null_mut();
+    // SAFETY: `audio` is the live `IAudioClient`; slot 14 is GetService, and
+    // `render` is a local that receives one `IAudioRenderClient` reference.
     let hr = unsafe {
         com!(
             audio,
@@ -434,6 +479,8 @@ fn render_client(audio: *mut c_void) -> Result<*mut c_void, ()> {
 }
 
 fn start(audio: *mut c_void) -> Result<(), ()> {
+    // SAFETY: `audio` is the live, initialized `IAudioClient`; slot 10 is
+    // Start, which takes no arguments.
     if unsafe { invoke_hr(audio, 10) } < 0 {
         Err(())
     } else {
@@ -442,18 +489,26 @@ fn start(audio: *mut c_void) -> Result<(), ()> {
 }
 
 fn invoke(object: *mut c_void, index: usize, padding: *mut u32) -> i32 {
+    // SAFETY: the one caller passes the live `IAudioClient`, slot 6
+    // (GetCurrentPadding), and a pointer to a local `u32`.
     unsafe { com!(object, index, fn(*mut u32) -> i32, padding) }
 }
 
 fn render_get(render: *mut c_void, frames: u32, data: *mut *mut u8) -> i32 {
+    // SAFETY: callers pass the live `IAudioRenderClient` and a pointer to a
+    // local; slot 3 is GetBuffer.
     unsafe { com!(render, 3, fn(u32, *mut *mut u8) -> i32, frames, data) }
 }
 
 fn render_release(render: *mut c_void, frames: u32, flags: u32) -> i32 {
+    // SAFETY: callers pass the live `IAudioRenderClient` after a GetBuffer
+    // of `frames`; slot 4 is ReleaseBuffer.
     unsafe { com!(render, 4, fn(u32, u32) -> i32, frames, flags) }
 }
 
 unsafe fn invoke_hr(object: *mut c_void, index: usize) -> i32 {
+    // SAFETY: the caller passes a live `IAudioClient` and a slot that takes
+    // no arguments and returns an HRESULT: Start (10) or Stop (11).
     unsafe { com!(object, index, fn() -> i32,) }
 }
 
@@ -461,6 +516,8 @@ unsafe fn release(object: *mut c_void) {
     if object.is_null() {
         return;
     }
+    // SAFETY: `object` is non-null and holds one reference the caller owns
+    // and gives up here; slot 2 is IUnknown::Release.
     unsafe {
         let method: unsafe extern "system" fn(*mut c_void) -> u32 = transmute(vslot(object, 2));
         let _ = method(object);

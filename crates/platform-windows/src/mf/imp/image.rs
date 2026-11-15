@@ -355,6 +355,9 @@ pub fn encode_image(codec: CodecId, image: &StillImage) -> Result<Vec<u8>, Codec
 fn factory() -> Result<Com, CodecError> {
     com::enter()?;
     let mut raw = ptr::null_mut();
+    // SAFETY: COM was entered on this thread just above. Both GUIDs are
+    // statics, there is no outer object, and `raw` is a local that receives
+    // one `IWICImagingFactory` reference, which `owned` takes.
     let code = unsafe {
         CoCreateInstance(
             &CLSID_WIC_FACTORY,
@@ -427,6 +430,9 @@ fn orientation(frame: &Com) -> Orientation {
         if found {
             tag = (value.value & 0xFFFF) as u32;
         }
+        // SAFETY: `value` started as `VT_EMPTY` and is either still empty or
+        // was filled by GetMetadataByName. Clearing frees what it holds once,
+        // and `value` is not read after this.
         unsafe {
             let _ = PropVariantClear(&mut value);
         }
@@ -454,6 +460,9 @@ fn memory_stream(bytes: &[u8]) -> Result<Com, CodecError> {
     } else {
         bytes.as_ptr()
     };
+    // SAFETY: `data` is null with `size` 0, or points at the `size` bytes of
+    // `bytes`. The stream copies them, so it keeps no borrow of `bytes`, and
+    // the one reference it returns is owned by the `Com`.
     Com::from_raw(unsafe { SHCreateMemStream(data, size) }).ok_or(CodecError::Unsupported {
         what: "memory stream",
     })

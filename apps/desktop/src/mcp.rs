@@ -6,6 +6,13 @@
 //! client. Approvals need a person, so this host refuses them, and the
 //! client sees the refusal as a tool error.
 //!
+//! A project another app holds is not opened: the calls go to that app
+//! instead. This host listens too, so a second `cutlass mcp` on the same
+//! project attaches to it, and when the Cutlass window opens the project
+//! this host saves, lets it go and sends its later calls to the window. A
+//! holder that goes away is found again on the next call: the project's
+//! new holder, or this host itself.
+//!
 //! With no window there is no screen to play on: seek moves the playhead a
 //! `.png` export draws, and an export or a track runs to the end before it
 //! answers.
@@ -14,108 +21,92 @@ use std::cell::RefCell;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::mpsc::{Sender, channel};
+use std::time::{Duration, Instant};
 
 use cutlass_agent::{
-    ApprovalAction, Approver, Catalog, DraftTools, Export, Forward, McpClient, McpServer, Media,
-    MediaInfo, Packages, Player, Registry, SettingsTool, Speech, ToolSink, TrackAsk, Tracking,
+    ApprovalAction, Approver, Catalog, DraftTools, Export, Forward, LocalSandbox, McpClient,
+    McpServer, Media, MediaInfo, Packages, Player, ProcessExecutor, Registry, SettingsTool,
+    SkillLibrary, Speech, Switched, ToolCall, ToolOutcome, ToolSink, TrackAsk, Tracking, Wake,
 };
 
+use crate::mcp_servers::McpServers;
 use crate::shell::{ExportRequest, Shell, ShellError};
 
 /// Serve the project at `path` on stdin and stdout until stdin closes.
 pub fn run(path: Option<&Path>) -> Result<(), String> {
-    let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    serve(path, stdin.lock(), stdout.lock())
+    serve(
+        path,
+        std::io::BufReader::new(std::io::stdin()),
+        stdout.lock(),
+    )
+}
+
+/// What the serving loop waits for.
+enum Event {
+    /// A line from the client.
+    Line(String),
+    /// Bytes from the client that are not text.
+    Garbled,
+    /// The client closed its end.
+    Closed,
+    /// Another host sent a call to the project socket.
+    Socket,
 }
 
 /// Serve `path`, reading messages from `input` and writing answers to
 /// `output`, a line each.
-pub fn serve(path: Option<&Path>, input: impl BufRead, output: impl Write) -> Result<(), String> {
+pub fn serve(
+    path: Option<&Path>,
+    input: impl BufRead + Send + 'static,
+    output: impl Write,
+) -> Result<(), String> {
+    serve_with(path, &Shell::settings_path(), input, output)
+}
+
+/// [`serve`], with the user's settings read from and written to
+/// `settings`.
+fn serve_with(
+    path: Option<&Path>,
+    settings: &Path,
+    input: impl BufRead + Send + 'static,
+    mut output: impl Write,
+) -> Result<(), String> {
     let Some(path) = path else {
         return Err("name the project folder: cutlass mcp /path/to/project".to_owned());
     };
-    let settings_path = Shell::settings_path();
-    let loaded = crate::load_settings_file(&settings_path);
-    let (decoders, encoders) = crate::register_codecs_with(&loaded.settings.hardware);
-    let mut shell = Shell::new(decoders, encoders, loaded.settings);
-    match shell.open_folder(path) {
-        Ok(()) => {}
-        Err(ShellError::Store(cutlass_store::StoreError::Held { .. })) => {
-            // The window holds it: send each call there.
-            let Some((address, token)) = cutlass_store::held_address(path) else {
-                return Err(format!(
-                    "{} is open in another Cutlass that does not take calls; close it there first",
-                    path.display()
-                ));
-            };
-            let forward = Forward::connect(&address, &token)?;
-            cutlass_logger::info!("mcp: forwarding {} to {address}", path.display());
-            let mut server = McpServer::new(forward, "cutlass", env!("CARGO_PKG_VERSION"));
-            return pump(&mut server, input, output, |_| Ok(()));
-        }
-        Err(other) => return Err(other.to_string()),
-    }
-    let session = shell
-        .session()
-        .cloned()
-        .ok_or_else(|| "the project did not open".to_owned())?;
-    let mut saved = session.revision();
-    let settings = SettingsTool::open(&settings_path).map_err(|error| error.to_string())?;
-    let mut servers = crate::mcp_servers::McpServers::default();
-    servers.configure(&settings.settings().mcp_servers);
-    let sandbox = cutlass_agent::Switched::from_settings(
-        settings.settings(),
-        crate::sandbox::local_sandbox(crate::sandbox::this_program(), Some(path)),
-    );
-    let shell = Rc::new(RefCell::new(shell));
-    let registry = Registry::new(
-        DraftTools::new(session),
-        settings,
-        Headless(Rc::clone(&shell)),
-        Probe,
-        Headless(Rc::clone(&shell)),
-        Bundled,
-        (
-            Bundled,
-            Headless(Rc::clone(&shell)),
-            sandbox,
-            Refuse,
-            McpClient::new(servers),
-            Headless(Rc::clone(&shell)),
-        ),
-    );
-    let mut server = McpServer::new(Logged(registry), "cutlass", env!("CARGO_PKG_VERSION"));
-    cutlass_logger::info!("mcp: serving {}", path.display());
-    pump(&mut server, input, output, |server| {
-        let session = server.sink().0.draft.session();
-        if session.revision() != saved {
-            saved = session.revision();
-            let mut shell = shell.borrow_mut();
-            shell
-                .adopt_session(session.clone())
-                .and_then(|()| shell.save())
-                .map_err(|error| format!("the project was not saved: {error}"))?;
-        }
-        Ok(())
-    })
-}
-
-/// Answer each line of `input` on `output` until it closes, calling
-/// `after` once each message is handled.
-fn pump<S: ToolSink>(
-    server: &mut McpServer<S>,
-    input: impl BufRead,
-    mut output: impl Write,
-    mut after: impl FnMut(&McpServer<S>) -> Result<(), String>,
-) -> Result<(), String> {
-    for line in input.lines() {
-        let line = line.map_err(|error| error.to_string())?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let answer = server.handle(&line);
-        after(server)?;
+    let (events, waiting) = channel();
+    let socket = events.clone();
+    let wake: Wake = Arc::new(move || {
+        let _ = socket.send(Event::Socket);
+    });
+    let mut host = Host {
+        path: path.to_path_buf(),
+        settings: settings.to_path_buf(),
+        place: Place::Unset,
+        let_go: None,
+        wake,
+    };
+    host.attach()?;
+    let mut server = McpServer::new(Logged(host), "cutlass", env!("CARGO_PKG_VERSION"));
+    std::thread::Builder::new()
+        .name("mcp client".to_owned())
+        .spawn(move || read_lines(input, &events))
+        .map_err(|error| error.to_string())?;
+    for event in waiting {
+        let answer = match event {
+            Event::Line(line) if line.is_empty() => None,
+            Event::Line(line) => server.handle(&line),
+            // The answer `handle` gives a line that is not JSON.
+            Event::Garbled => server.handle("\u{fffd}"),
+            Event::Socket => {
+                server.sink_mut().0.serve_socket();
+                None
+            }
+            Event::Closed => break,
+        };
         if let Some(answer) = answer {
             output
                 .write_all(answer.as_bytes())
@@ -128,17 +119,310 @@ fn pump<S: ToolSink>(
     Ok(())
 }
 
+/// Send each line of `input` to the serving loop, then that it closed. A
+/// line that is not text is told apart, so one bad byte does not end the
+/// session.
+fn read_lines(mut input: impl BufRead, events: &Sender<Event>) {
+    let mut bytes = Vec::new();
+    loop {
+        bytes.clear();
+        let event = match input.read_until(b'\n', &mut bytes) {
+            Ok(0) | Err(_) => Event::Closed,
+            Ok(_) => match std::str::from_utf8(&bytes) {
+                Ok(line) => Event::Line(line.trim().to_owned()),
+                Err(_) => Event::Garbled,
+            },
+        };
+        let closed = matches!(event, Event::Closed);
+        if events.send(event).is_err() || closed {
+            return;
+        }
+    }
+}
+
+/// The registry on a project this host holds.
+type OwnRegistry = Registry<
+    Headless,
+    Probe,
+    Headless,
+    Bundled,
+    Bundled,
+    Headless,
+    Switched<LocalSandbox<ProcessExecutor>>,
+    Refuse,
+    McpServers,
+    Headless,
+>;
+
+/// A project this host holds, and its tools.
+struct Own {
+    shell: Rc<RefCell<Shell>>,
+    registry: OwnRegistry,
+    /// The draft revision the folder was last saved at.
+    saved: u64,
+    /// The settings generation the servers, sandbox and skills were set up
+    /// from.
+    settings: u64,
+    path: PathBuf,
+}
+
+/// Why this host did not take the project.
+enum OpenError {
+    /// Another app holds it.
+    Held,
+    Other(String),
+}
+
+impl Own {
+    fn open(path: &Path, settings_path: &Path, wake: &Wake) -> Result<Self, OpenError> {
+        let loaded = crate::load_settings_file(settings_path);
+        let (decoders, encoders) = crate::register_codecs_with(&loaded.settings.hardware);
+        let mut shell = Shell::new(decoders, encoders, loaded.settings);
+        match shell.open_folder(path) {
+            Ok(()) => {}
+            Err(ShellError::Store(cutlass_store::StoreError::Held { .. })) => {
+                return Err(OpenError::Held);
+            }
+            Err(other) => return Err(OpenError::Other(other.to_string())),
+        }
+        // Other hosts on this project send their calls here.
+        shell.listen(Arc::clone(wake));
+        let session = shell
+            .session()
+            .cloned()
+            .ok_or_else(|| OpenError::Other("the project did not open".to_owned()))?;
+        let saved = session.revision();
+        let settings = SettingsTool::open(settings_path)
+            .map_err(|error| OpenError::Other(error.to_string()))?;
+        let generation = settings.generation();
+        let mut servers = McpServers::default();
+        servers.configure(&settings.settings().mcp_servers);
+        let sandbox = Switched::from_settings(
+            settings.settings(),
+            crate::sandbox::local_sandbox(crate::sandbox::this_program(), Some(path)),
+        );
+        let shell = Rc::new(RefCell::new(shell));
+        let registry = Registry::new(
+            DraftTools::new(session),
+            settings,
+            Headless(Rc::clone(&shell)),
+            Probe,
+            Headless(Rc::clone(&shell)),
+            Bundled,
+            (
+                Bundled,
+                Headless(Rc::clone(&shell)),
+                sandbox,
+                Refuse,
+                McpClient::new(servers),
+                Headless(Rc::clone(&shell)),
+            ),
+        );
+        Ok(Self {
+            shell,
+            registry,
+            saved,
+            settings: generation,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// Run `call`, then save what it changed and take up a settings change.
+    fn run(&mut self, call: &ToolCall) -> ToolOutcome {
+        let outcome = self.registry.run_tool(call);
+        match self.settle() {
+            Ok(()) => outcome,
+            Err(error) => failed(error),
+        }
+    }
+
+    /// Save the folder when the draft moved, and set the servers, sandbox
+    /// and skills up again when the settings did, so a change made through
+    /// `settings.set` holds from the next call on.
+    fn settle(&mut self) -> Result<(), String> {
+        let generation = self.registry.settings.generation();
+        if generation != self.settings {
+            self.settings = generation;
+            let settings = self.registry.settings.settings().clone();
+            self.registry
+                .mcp
+                .transport_mut()
+                .configure(&settings.mcp_servers);
+            self.registry.sandbox = Switched::from_settings(
+                &settings,
+                crate::sandbox::local_sandbox(crate::sandbox::this_program(), Some(&self.path)),
+            );
+            self.registry.skills = SkillLibrary::bundled().with_folders(&settings.skill_folders);
+        }
+        let session = self.registry.draft.session();
+        if session.revision() != self.saved {
+            let mut shell = self.shell.borrow_mut();
+            shell
+                .adopt_session(session.clone())
+                .and_then(|()| shell.save())
+                .map_err(|error| {
+                    format!("the change was made but the project was not saved: {error}")
+                })?;
+            self.saved = session.revision();
+        }
+        Ok(())
+    }
+}
+
+/// Where this host's calls run.
+enum Place {
+    /// On the project it holds.
+    Own(Box<Own>),
+    /// In the app that holds the project.
+    Forward(Forward),
+    /// Nowhere yet: the next call finds the project's holder.
+    Unset,
+}
+
+/// The tools of one project, wherever it is held now.
+struct Host {
+    path: PathBuf,
+    /// The user's settings file.
+    settings: PathBuf,
+    place: Place,
+    /// When this host let the project go to a window that asked for it.
+    let_go: Option<Instant>,
+    wake: Wake,
+}
+
+/// How long, after letting the project go, this host waits for the window
+/// to take it before it would take it back itself.
+const HANDOVER_WAIT: Duration = Duration::from_secs(5);
+
+impl Host {
+    /// Find where the project is: held by another app, whose address is in
+    /// its lock file, or free for this host to open.
+    fn attach(&mut self) -> Result<(), String> {
+        // Just let go: the window that asked is about to hold it.
+        if let Some(since) = self.let_go.take() {
+            while since.elapsed() < HANDOVER_WAIT {
+                if self.forward().is_ok() {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        match Own::open(&self.path, &self.settings, &self.wake) {
+            Ok(own) => {
+                cutlass_logger::info!("mcp: serving {}", self.path.display());
+                self.place = Place::Own(Box::new(own));
+                Ok(())
+            }
+            Err(OpenError::Held) => self.forward(),
+            Err(OpenError::Other(error)) => Err(error),
+        }
+    }
+
+    /// Send the calls to the app that holds the project.
+    fn forward(&mut self) -> Result<(), String> {
+        let Some((address, token)) = cutlass_store::held_address(&self.path) else {
+            return Err(format!(
+                "{} is open in another Cutlass that does not take calls; close it there first",
+                self.path.display()
+            ));
+        };
+        let forward = Forward::connect(&address, &token)?;
+        cutlass_logger::info!("mcp: forwarding {} to {address}", self.path.display());
+        self.place = Place::Forward(forward);
+        Ok(())
+    }
+
+    /// Run the calls other hosts sent to the project this host holds. A
+    /// window's ask to let the project go is answered by saving it and
+    /// letting go; this host's next call then goes to that window.
+    fn serve_socket(&mut self) {
+        let Place::Own(own) = &self.place else {
+            return;
+        };
+        let mut waiting = own.shell.borrow_mut().take_forwarded().into_iter();
+        while let Some(forwarded) = waiting.next() {
+            let Place::Own(own) = &mut self.place else {
+                return;
+            };
+            if forwarded.call.name != cutlass_agent::YIELD {
+                let started = Instant::now();
+                let outcome = own.run(&forwarded.call);
+                crate::shell::log_tool_call("mcp", &forwarded.call, &outcome, started.elapsed());
+                forwarded.answer(outcome);
+                continue;
+            }
+            if let Err(error) = own.settle() {
+                forwarded.answer(failed(error));
+                continue;
+            }
+            // Dropping the project lets its lock go and closes its socket.
+            self.place = Place::Unset;
+            self.let_go = Some(Instant::now());
+            cutlass_logger::info!(
+                "mcp: let {} go to the Cutlass window that asked for it",
+                self.path.display()
+            );
+            forwarded.answer(ToolOutcome {
+                content: "let go".to_owned(),
+                is_error: false,
+            });
+            for late in waiting {
+                late.answer(failed(
+                    "this host let the project go to the Cutlass window; call again".to_owned(),
+                ));
+            }
+            return;
+        }
+    }
+}
+
+impl ToolSink for Host {
+    fn run_tool(&mut self, call: &ToolCall) -> ToolOutcome {
+        if matches!(self.place, Place::Unset)
+            && let Err(error) = self.attach()
+        {
+            return failed(error);
+        }
+        match &mut self.place {
+            Place::Own(own) => own.run(call),
+            Place::Forward(forward) => match forward.try_call(call) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    // The holder is gone. The next call finds the project
+                    // where it is now; this one is not sent twice, as the
+                    // holder may have run it before it went.
+                    cutlass_logger::warn!("mcp: the project's holder stopped answering: {error}");
+                    self.place = Place::Unset;
+                    failed(format!(
+                        "the app that held the project stopped answering ({error}), so this \
+                         call did not come back. Call again: the project is found where it is \
+                         now. Read it first, as its revision starts again."
+                    ))
+                }
+            },
+            Place::Unset => failed("the project is not open".to_owned()),
+        }
+    }
+}
+
+fn failed(content: String) -> ToolOutcome {
+    ToolOutcome {
+        content,
+        is_error: true,
+    }
+}
+
 /// A tool sink that logs each call it runs, by name and outcome.
 struct Logged<S>(S);
 
 impl<S: ToolSink> ToolSink for Logged<S> {
-    fn run_tool(&mut self, call: &cutlass_agent::ToolCall) -> cutlass_agent::ToolOutcome {
-        let started = std::time::Instant::now();
+    fn run_tool(&mut self, call: &ToolCall) -> ToolOutcome {
+        let started = Instant::now();
         let mut outcome = self.0.run_tool(call);
         // A job still running is asked again for a few seconds before the
         // client hears "pending", so it does not poll in a tight loop.
         while crate::assistant::still_pending(call, &outcome) && started.elapsed() < PENDING_WAIT {
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(200));
             outcome = self.0.run_tool(call);
         }
         crate::shell::log_tool_call("mcp", call, &outcome, started.elapsed());
@@ -147,7 +431,7 @@ impl<S: ToolSink> ToolSink for Logged<S> {
 }
 
 /// How long a poll of a running job waits before it answers pending.
-const PENDING_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+const PENDING_WAIT: Duration = Duration::from_secs(5);
 
 /// The player and export on the project this host holds.
 struct Headless(Rc<RefCell<Shell>>);
@@ -198,7 +482,7 @@ impl Tracking for Headless {
             .start_agent_track(id.clone(), ask)
             .map_err(|error| error.to_string())?;
         while shell.poll_job() {
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(10));
         }
         Ok(id)
     }
@@ -246,7 +530,7 @@ impl Export for Headless {
             })
             .map_err(|error| error.to_string())?;
         while shell.poll_job() {
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(10));
         }
         if codec != cutlass_codec::CodecId::Png && shell.exported() != Some(path.as_path()) {
             return Err(shell.notice().to_owned());
@@ -402,7 +686,12 @@ mod tests {
                 "params":{"name":"player_play","arguments":{}}}),
         ]);
         let mut output = Vec::new();
-        serve(Some(&project.0), input.as_bytes(), &mut output).unwrap();
+        serve(
+            Some(&project.0),
+            std::io::Cursor::new(input.into_bytes()),
+            &mut output,
+        )
+        .unwrap();
         let answers: Vec<Value> = String::from_utf8(output)
             .unwrap()
             .lines()
@@ -510,7 +799,12 @@ mod tests {
             ),
         ]);
         let mut output = Vec::new();
-        serve(Some(&project.0), input.as_bytes(), &mut output).unwrap();
+        serve(
+            Some(&project.0),
+            std::io::Cursor::new(input.into_bytes()),
+            &mut output,
+        )
+        .unwrap();
         let answers = answers(output);
         let text = |at: usize| {
             answers[at]["result"]["content"][0]["text"]
@@ -548,9 +842,9 @@ mod tests {
     fn a_held_project_or_no_path_is_refused() {
         let project = Project::new("held");
         let _hold = cutlass_store::hold(&project.0).unwrap();
-        let error = serve(Some(&project.0), "".as_bytes(), Vec::new()).unwrap_err();
+        let error = serve(Some(&project.0), std::io::empty(), Vec::new()).unwrap_err();
         assert!(error.contains("does not take calls"), "{error}");
-        let error = serve(None, "".as_bytes(), Vec::new()).unwrap_err();
+        let error = serve(None, std::io::empty(), Vec::new()).unwrap_err();
         assert!(error.contains("cutlass mcp /path/to/project"), "{error}");
     }
 
@@ -586,7 +880,12 @@ mod tests {
         let path = project.0.clone();
         let client = std::thread::spawn(move || {
             let mut output = Vec::new();
-            serve(Some(&path), input.as_bytes(), &mut output).map(|()| output)
+            serve(
+                Some(&path),
+                std::io::Cursor::new(input.into_bytes()),
+                &mut output,
+            )
+            .map(|()| output)
         });
         let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !client.is_finished() && std::time::Instant::now() < until {
@@ -608,6 +907,304 @@ mod tests {
         assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 1);
         desktop.undo().unwrap();
         assert!(desktop.draft().unwrap().tracks[0].segments.is_empty());
+    }
+
+    /// A client this test writes to line by line: `cutlass mcp` reads it as
+    /// its stdin until the sender is dropped.
+    struct Typed(std::sync::mpsc::Receiver<Vec<u8>>, Vec<u8>);
+
+    impl std::io::Read for Typed {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            if self.1.is_empty() {
+                match self.0.recv() {
+                    Ok(bytes) => self.1 = bytes,
+                    Err(_) => return Ok(0),
+                }
+            }
+            let count = out.len().min(self.1.len());
+            out[..count].copy_from_slice(&self.1[..count]);
+            self.1.drain(..count);
+            Ok(count)
+        }
+    }
+
+    /// What a client wrote to: the answers so far, read from another thread.
+    #[derive(Clone, Default)]
+    struct Heard(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Heard {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Heard {
+        /// The answer to the message with `id`, waiting for it; `tick` runs
+        /// between looks, for a window that must serve the call meanwhile.
+        fn answer(&self, id: i64, mut tick: impl FnMut()) -> Value {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                let text = String::from_utf8(self.0.lock().unwrap().clone()).unwrap();
+                let found = text
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .find(|answer| answer["id"] == id);
+                if let Some(found) = found {
+                    return found;
+                }
+                assert!(
+                    std::time::Instant::now() < until,
+                    "no answer to {id}: {text}"
+                );
+                tick();
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    }
+
+    /// A `cutlass mcp` on `path` that the test types to; dropping the
+    /// sender closes its stdin.
+    fn typed_host(
+        path: &std::path::Path,
+    ) -> (
+        std::sync::mpsc::Sender<Vec<u8>>,
+        Heard,
+        std::thread::JoinHandle<Result<(), String>>,
+    ) {
+        typed_host_with(path, &crate::shell::Shell::settings_path())
+    }
+
+    /// [`typed_host`], with its settings kept in `settings`.
+    fn typed_host_with(
+        path: &std::path::Path,
+        settings: &std::path::Path,
+    ) -> (
+        std::sync::mpsc::Sender<Vec<u8>>,
+        Heard,
+        std::thread::JoinHandle<Result<(), String>>,
+    ) {
+        let (lines, typed) = std::sync::mpsc::channel();
+        let heard = Heard::default();
+        let (path, settings, output) = (path.to_path_buf(), settings.to_path_buf(), heard.clone());
+        let host = std::thread::spawn(move || {
+            super::serve_with(
+                Some(&path),
+                &settings,
+                std::io::BufReader::new(Typed(typed, Vec::new())),
+                output,
+            )
+        });
+        (lines, heard, host)
+    }
+
+    fn call_line(id: i64, name: &str, arguments: Value) -> Vec<u8> {
+        format!(
+            "{}\n",
+            json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":name,"arguments":arguments}})
+        )
+        .into_bytes()
+    }
+
+    fn said(answer: &Value) -> String {
+        answer["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    fn rename(revision: u64, name: &str) -> Value {
+        json!({"expected_revision": revision,
+            "requests": [{"op": "set_project_name", "name": name}]})
+    }
+
+    #[test]
+    fn a_second_client_attaches_to_the_host_that_holds_the_project() {
+        let project = Project::new("second");
+        let (first, heard, host) = typed_host(&project.0);
+        first
+            .send(call_line(1, "draft_query", json!({"input": "project"})))
+            .unwrap();
+        assert!(said(&heard.answer(1, || {})).contains("revision=0"));
+        // The second finds the project held, and its edit lands on the
+        // first's session: one writer, one undo stack.
+        let input = lines(&[
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+                "params":{"name":"draft_apply","arguments":rename(0, "from the second")}}),
+        ]);
+        let mut output = Vec::new();
+        serve(
+            Some(&project.0),
+            std::io::Cursor::new(input.into_bytes()),
+            &mut output,
+        )
+        .unwrap();
+        let second = answers(output);
+        assert_eq!(said(&second[1]), "revision=1 committed=true");
+        first
+            .send(call_line(2, "draft_query", json!({"input": "project"})))
+            .unwrap();
+        let read = said(&heard.answer(2, || {}));
+        assert!(read.contains("revision=1 name=from the second"), "{read}");
+        first.send(call_line(3, "draft_undo", json!({}))).unwrap();
+        assert_eq!(heard.answer(3, || {})["result"]["isError"], false);
+        drop(first);
+        host.join().unwrap().unwrap();
+        assert!(
+            cutlass_store::hold(&project.0).is_ok(),
+            "the lock was let go"
+        );
+    }
+
+    #[test]
+    fn the_window_takes_the_project_from_a_host_with_no_window_which_then_forwards() {
+        let project = Project::new("handover");
+        let (client, heard, host) = typed_host(&project.0);
+        client
+            .send(call_line(
+                1,
+                "draft_apply",
+                rename(0, "edited with no window"),
+            ))
+            .unwrap();
+        assert_eq!(said(&heard.answer(1, || {})), "revision=1 committed=true");
+        // The window opens the same project: the host saves, lets go, and
+        // the window reads what it saved.
+        let (decoders, encoders) = crate::register_codecs();
+        let mut desktop =
+            crate::shell::Shell::new(decoders, encoders, cutlass_settings::Settings::default());
+        desktop.listen(std::sync::Arc::new(|| {}));
+        desktop.open_folder(&project.0).unwrap();
+        assert_eq!(desktop.draft().unwrap().name, "edited with no window");
+        // The client's next calls run in the window, on its undo stack.
+        client
+            .send(call_line(2, "draft_query", json!({"input": "project"})))
+            .unwrap();
+        let read = said(&heard.answer(2, || {
+            desktop.serve_forwarded();
+        }));
+        assert!(
+            read.contains("revision=0 name=edited with no window"),
+            "{read}"
+        );
+        client
+            .send(call_line(
+                3,
+                "draft_apply",
+                rename(0, "edited in the window"),
+            ))
+            .unwrap();
+        heard.answer(3, || {
+            desktop.serve_forwarded();
+        });
+        assert_eq!(desktop.draft().unwrap().name, "edited in the window");
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().name, "edited with no window");
+        // A second window does not take it from the first.
+        let asked = std::thread::scope(|scope| {
+            let asking = scope.spawn(|| {
+                let (decoders, encoders) = crate::register_codecs();
+                let mut other = crate::shell::Shell::new(
+                    decoders,
+                    encoders,
+                    cutlass_settings::Settings::default(),
+                );
+                other.listen(std::sync::Arc::new(|| {}));
+                other.open_folder(&project.0).is_err()
+            });
+            while !asking.is_finished() {
+                desktop.serve_forwarded();
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            asking.join().unwrap()
+        });
+        assert!(asked, "a window kept its project");
+        drop(client);
+        host.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn a_forwarder_whose_window_closed_finds_the_project_again() {
+        let project = Project::new("gone");
+        let (decoders, encoders) = crate::register_codecs();
+        let mut desktop =
+            crate::shell::Shell::new(decoders, encoders, cutlass_settings::Settings::default());
+        desktop.open_folder(&project.0).unwrap();
+        desktop.listen(std::sync::Arc::new(|| {}));
+        let (client, heard, host) = typed_host(&project.0);
+        client
+            .send(call_line(1, "draft_apply", rename(0, "in the window")))
+            .unwrap();
+        heard.answer(1, || {
+            desktop.serve_forwarded();
+        });
+        desktop.save().unwrap();
+        // The window closes. The call in flight says so; the next one opens
+        // the project here and reads what the window saved.
+        drop(desktop);
+        client
+            .send(call_line(2, "draft_query", json!({"input": "project"})))
+            .unwrap();
+        let lost = heard.answer(2, || {});
+        assert_eq!(lost["result"]["isError"], true);
+        assert!(said(&lost).contains("Call again"), "{}", said(&lost));
+        client
+            .send(call_line(3, "draft_query", json!({"input": "project"})))
+            .unwrap();
+        let read = said(&heard.answer(3, || {}));
+        assert!(read.contains("revision=0 name=in the window"), "{read}");
+        drop(client);
+        host.join().unwrap().unwrap();
+        assert!(cutlass_store::hold(&project.0).is_ok());
+    }
+
+    #[test]
+    fn a_settings_change_holds_from_the_next_call_and_bad_bytes_do_not_end_the_session() {
+        let project = Project::new("settle");
+        // The settings are a file of this test's own, not the user's.
+        let settings = project.0.join("settings-home").join("settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        let (client, heard, host) = typed_host_with(&project.0, &settings);
+        client.send(b"\xff\xfe not text\n".to_vec()).unwrap();
+        client
+            .send(call_line(1, "settings_get", json!({})))
+            .unwrap();
+        let settings: Value = serde_json::from_str(&said(&heard.answer(1, || {}))).unwrap();
+        let generation = settings["generation"].as_u64().unwrap();
+        assert_eq!(settings["settings"]["sandbox"]["local"], true);
+        // The bad line got a parse error, and the session went on.
+        let text = String::from_utf8(heard.0.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("-32700"), "{text}");
+        let set = |on: bool, generation: u64| json!({"expected_generation": generation, "changes": {"sandbox": {"local": on}}});
+        client
+            .send(call_line(2, "settings_set", set(false, generation)))
+            .unwrap();
+        assert_eq!(heard.answer(2, || {})["result"]["isError"], false);
+        client
+            .send(call_line(3, "sandbox_run", json!({"source": "1 + 1"})))
+            .unwrap();
+        let off = heard.answer(3, || {});
+        assert_eq!(off["result"]["isError"], true, "{}", said(&off));
+        assert!(said(&off).contains("running code is off"), "{}", said(&off));
+        client
+            .send(call_line(4, "settings_set", set(true, generation + 1)))
+            .unwrap();
+        assert_eq!(heard.answer(4, || {})["result"]["isError"], false);
+        client
+            .send(call_line(5, "sandbox_run", json!({"source": "1 + 1"})))
+            .unwrap();
+        // On again, the call reaches the runner (which, under test, is this
+        // test program and not `cutlass`, so it has no answer).
+        let on = said(&heard.answer(5, || {}));
+        assert!(!on.contains("running code is off"), "{on}");
+        drop(client);
+        host.join().unwrap().unwrap();
     }
 
     #[test]
@@ -655,7 +1252,12 @@ mod tests {
                 "params":{"name":"track_poll","arguments":{"input":"track-1"}}}),
         ]);
         let mut output = Vec::new();
-        serve(Some(&project.0), input.as_bytes(), &mut output).unwrap();
+        serve(
+            Some(&project.0),
+            std::io::Cursor::new(input.into_bytes()),
+            &mut output,
+        )
+        .unwrap();
         let answers = answers(output);
         let started = answers[1]["result"]["content"][0]["text"].as_str().unwrap();
         assert_eq!(started, "job=track-1 revision=0");

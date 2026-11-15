@@ -130,15 +130,25 @@ pub struct VideoEncoder {
     /// The VideoToolbox codec type; for ProRes, the profile's.
     kind: u32,
     session: *mut std::ffi::c_void,
-    output: Mutex<Queue>,
+    /// The session's refcon. The session is released before this is.
+    output: Arc<EncodeOutput>,
     drained: bool,
     cancel: Arc<AtomicBool>,
+}
+
+/// What the compression callback reads and writes. The session's refcon
+/// points here rather than at the encoder, and nothing ever borrows it
+/// mutably (the queue is behind its mutex), so the callback's shared
+/// reference never aliases the owner's `&mut VideoEncoder`.
+struct EncodeOutput {
+    codec: CodecId,
+    queue: Mutex<Queue>,
 }
 
 // SAFETY: `session` is a compression session, which is not tied to the thread
 // that made it, and the encoder owns it. `VideoEncoder` is not `Sync`, so one
 // thread calls it at a time. The output callback runs on VideoToolbox's
-// thread but only locks `output` and reads `codec`.
+// thread but only touches the `Sync` `EncodeOutput`.
 unsafe impl Send for VideoEncoder {}
 
 pub fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
@@ -184,7 +194,7 @@ pub fn open_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError
         });
     }
     let bitrate = target_bitrate(params);
-    let encoder = Box::new(VideoEncoder {
+    let mut encoder = Box::new(VideoEncoder {
         codec: params.codec,
         width,
         height,
@@ -192,41 +202,26 @@ pub fn open_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError
         constant: params.constant_rate,
         kind,
         session: ptr::null_mut(),
-        output: Mutex::new(Queue {
-            packets: Vec::new(),
-            attached: false,
+        output: Arc::new(EncodeOutput {
+            codec: params.codec,
+            queue: Mutex::new(Queue {
+                packets: Vec::new(),
+                attached: false,
+            }),
         }),
         drained: false,
         cancel: Arc::new(AtomicBool::new(false)),
     });
-    let raw = Box::into_raw(encoder);
-    // The heap encoder at `raw` is the session's refcon, so it does not move
-    // when the box does. The session is released in `Drop` before the box
-    // is freed.
-    match create_compress(
+    encoder.session = create_compress(
         params.codec,
         kind,
         width,
         height,
         bitrate,
         params.constant_rate,
-        raw.cast(),
-    ) {
-        // SAFETY: `raw` came from `Box::into_raw` above and nothing else holds
-        // it yet; no frame has been submitted, so no callback reads it.
-        Ok(session) => unsafe { (*raw).session = session },
-        Err(err) => {
-            // SAFETY: `raw` came from `Box::into_raw` and is turned back into
-            // a box once. No session was made, so nothing else refers to it.
-            drop(unsafe { Box::from_raw(raw) });
-            return Err(err);
-        }
-    }
-    // SAFETY: `raw` came from `Box::into_raw` and is turned back into a box
-    // once. The session keeps it as its refcon; moving the box does not move
-    // the heap value.
-    let boxed: Box<dyn Encoder> = unsafe { Box::from_raw(raw) };
-    Ok(boxed)
+        encoder.refcon(),
+    )?;
+    Ok(encoder)
 }
 
 impl Drop for VideoEncoder {
@@ -496,17 +491,16 @@ impl Encoder for VideoEncoder {
             unsafe { sys::VTCompressionSessionCompleteFrames(self.session, cf::time_invalid()) };
         self.drained = true;
         if status != 0 {
-            clear_queue(&self.output);
+            clear_queue(&self.output.queue);
             return unit_status(status, "videotoolbox").map(|()| Vec::new());
         }
-        Ok(take_packets(&self.output))
+        Ok(take_packets(&self.output.queue))
     }
 
     fn reset(&mut self) {
         self.release_session();
         self.drained = false;
-        clear_queue(&self.output);
-        let raw: *mut VideoEncoder = self;
+        clear_queue(&self.output.queue);
         if let Ok(session) = create_compress(
             self.codec,
             self.kind,
@@ -514,7 +508,7 @@ impl Encoder for VideoEncoder {
             self.height,
             self.bitrate,
             self.constant,
-            raw.cast(),
+            self.refcon(),
         ) {
             self.session = session;
         }
@@ -551,7 +545,7 @@ impl VideoEncoder {
             timescale: time.timescale(),
         };
         let force = {
-            let queue = lock_queue(&self.output);
+            let queue = lock_queue(&self.output.queue);
             !queue.attached && queue.packets.is_empty()
         };
         let properties = if force { Some(force_keyframe()?) } else { None };
@@ -572,7 +566,7 @@ impl VideoEncoder {
             )
         };
         if status != 0 {
-            clear_queue(&self.output);
+            clear_queue(&self.output.queue);
             return unit_status(status, "videotoolbox").map(|()| Vec::new());
         }
         // SAFETY: `session` is live. An invalid time completes every pending
@@ -580,10 +574,15 @@ impl VideoEncoder {
         let flushed =
             unsafe { sys::VTCompressionSessionCompleteFrames(self.session, cf::time_invalid()) };
         if flushed != 0 {
-            clear_queue(&self.output);
+            clear_queue(&self.output.queue);
             return unit_status(flushed, "videotoolbox").map(|()| Vec::new());
         }
-        Ok(take_packets(&self.output))
+        Ok(take_packets(&self.output.queue))
+    }
+
+    /// The session's refcon: the [`EncodeOutput`] its callback writes into.
+    fn refcon(&self) -> *mut std::ffi::c_void {
+        Arc::as_ptr(&self.output).cast_mut().cast()
     }
 
     fn release_session(&mut self) {
@@ -591,7 +590,7 @@ impl VideoEncoder {
             // SAFETY: `session` is live and owned by this encoder (Create
             // rule); it is invalidated and released once, then nulled.
             // `encode_image` and `drain` complete every frame they submit, so
-            // no callback that reads `self` is pending.
+            // no callback that reads `output` is pending.
             unsafe {
                 sys::VTCompressionSessionInvalidate(self.session);
                 sys::CFRelease(self.session);
@@ -1528,9 +1527,9 @@ fn create_compress(
     let mut raw = ptr::null_mut();
     // SAFETY: `attributes` is a live dictionary the session copies; the null
     // encoder spec and allocators are allowed. `encode_output` matches the
-    // callback type, and `refcon` is the heap `VideoEncoder` that owns the
-    // session and releases it before it is freed. `raw` is a live out pointer
-    // (Create rule).
+    // callback type, and `refcon` is the `EncodeOutput` shared by the
+    // `VideoEncoder` that owns the session, which releases the session
+    // before its `Arc` is dropped. `raw` is a live out pointer (Create rule).
     let status = unsafe {
         sys::VTCompressionSessionCreate(
             ptr::null(),
@@ -1761,19 +1760,18 @@ unsafe extern "C" fn encode_output(
     sample: *mut std::ffi::c_void,
 ) {
     // SAFETY: VideoToolbox calls this on its own thread with the refcon given
-    // to `VTCompressionSessionCreate`: the heap `VideoEncoder`, which
-    // releases the session before it is freed. Only `codec` (never written
-    // after open) and the `output` mutex are read through it. The owner
-    // may hold `&mut VideoEncoder` in `encode_image` while this runs, so
-    // this shared reference aliases a live unique one. `source` is null or
-    // the `FrameMeta` on `encode_image`'s stack, alive until its
-    // `CompleteFrames` returns. `sample` is a live sample buffer for the
-    // call.
+    // to `VTCompressionSessionCreate`: the encoder's `EncodeOutput`, kept
+    // alive by its `Arc` until after the session is released. It is only
+    // ever borrowed shared (its queue is behind a mutex), so this reference
+    // aliases no unique one, even while the owner holds `&mut VideoEncoder`.
+    // `source` is null or the `FrameMeta` on `encode_image`'s stack, alive
+    // until its `CompleteFrames` returns. `sample` is a live sample buffer
+    // for the call.
     unsafe {
         if refcon.is_null() || status != 0 || sample.is_null() {
             return;
         }
-        let encoder = &*refcon.cast::<VideoEncoder>();
+        let output = &*refcon.cast::<EncodeOutput>();
         let meta = if source.is_null() {
             FrameMeta {
                 pts: 0,
@@ -1796,10 +1794,10 @@ unsafe extern "C" fn encode_output(
             keyframe,
             side: Vec::new(),
         };
-        let mut queue = lock_queue(&encoder.output);
+        let mut queue = lock_queue(&output.queue);
         if keyframe
             && !queue.attached
-            && let Some(config) = sample_config(encoder.codec, sample)
+            && let Some(config) = sample_config(output.codec, sample)
         {
             packet.side.push(cutlass_decode::SideData::Config(config));
             queue.attached = true;

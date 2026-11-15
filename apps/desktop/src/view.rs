@@ -12077,6 +12077,105 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp);
     }
 
+    /// The key field in Settings takes the menu bar's Paste: it is a text
+    /// field being typed in once it is clicked, and the window is asked
+    /// for the clipboard. The field next to it takes what the window then
+    /// sends. The key itself is not typed here, as a changed key is
+    /// written to the user's own key file.
+    #[test]
+    fn a_settings_field_takes_the_menu_bars_paste() {
+        let mut settings = Settings::default();
+        settings.model.cloud = true;
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, settings);
+        let mut view = ViewState::new();
+        view.settings_open = true;
+        view.settings_tab = SettingsTab::Assistant;
+        // No key kept, and the user's own is not read.
+        view.cloud_key = Some(String::new());
+        view.notes = Some(String::new());
+        let ctx = egui::Context::default();
+        let frame = |shell: &mut Shell,
+                     view: &mut ViewState,
+                     events: Vec<egui::Event>,
+                     chosen: &[&str]| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    for id in chosen {
+                        menu_chosen(shell, view, ui.ctx(), None, id);
+                    }
+                    show(shell, ui, view, None);
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let asked_paste = |output: &egui::FullOutput| {
+            output
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .is_some_and(|viewport| {
+                    viewport
+                        .commands
+                        .contains(&egui::ViewportCommand::RequestPaste)
+                })
+        };
+        let output = frame(&mut shell, &mut view, Vec::new(), &[]);
+        // Before a field is clicked the paste is nobody's: Settings is up,
+        // so the timeline does not take it either.
+        let output_idle = frame(&mut shell, &mut view, Vec::new(), &["paste"]);
+        assert!(!asked_paste(&output_idle));
+        assert_eq!(shell.notice(), "");
+
+        let key =
+            text_pos(&output, "Paste your API key").expect("the key field") + Vec2::new(4.0, 4.0);
+        for events in [
+            vec![egui::Event::PointerMoved(key)],
+            vec![press(key, true)],
+            vec![press(key, false)],
+        ] {
+            let _ = frame(&mut shell, &mut view, events, &[]);
+        }
+        assert!(ctx.text_edit_focused(), "the key field is being typed in");
+        let output = frame(&mut shell, &mut view, Vec::new(), &["paste"]);
+        assert!(asked_paste(&output));
+        assert_eq!(view.cloud_key.as_deref(), Some(""));
+
+        // The model's name, a field of the same kind beside it, takes the
+        // clipboard's text when the window sends it.
+        let output = frame(&mut shell, &mut view, Vec::new(), &[]);
+        let model = text_pos(&output, cutlass_settings::DEFAULT_CLOUD_NAME).expect("the model")
+            + Vec2::new(4.0, 4.0);
+        for events in [
+            vec![egui::Event::PointerMoved(model)],
+            vec![press(model, true)],
+            vec![press(model, false)],
+        ] {
+            let _ = frame(&mut shell, &mut view, events, &[]);
+        }
+        let output = frame(&mut shell, &mut view, Vec::new(), &["select_all", "paste"]);
+        assert!(asked_paste(&output));
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::Paste("claude-sonnet-5-5".to_owned())],
+            &[],
+        );
+        let _ = frame(&mut shell, &mut view, Vec::new(), &[]);
+        assert_eq!(shell.settings().model.cloud_name, "claude-sonnet-5-5");
+    }
+
     #[test]
     fn a_menu_bar_item_runs_its_command() {
         use cutlass_model::{Segment, SegmentId, TimeRange};

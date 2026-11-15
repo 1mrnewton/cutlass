@@ -154,3 +154,43 @@ fn round_trips_every_speed() {
         round_trip_threads(136, 72, 3, 100, 2, speed);
     }
 }
+
+#[test]
+fn row_lanes_code_the_frames_rows_one_after_another_do() {
+    // Two tile columns of five superblocks and six superblock rows (the
+    // last part of one), at speeds with rectangles, with the full search
+    // and on the fast path.
+    let (w, h) = (600usize, 328usize);
+    let cw = w.div_ceil(2);
+    for speed in [2, 5, 8] {
+        let run = |lanes: usize| -> Vec<Vec<u8>> {
+            let mut enc = FrameEncoder::new(w as u32, h as u32, 4);
+            enc.set_row_lanes(lanes);
+            (0..5)
+                .map(|t| {
+                    let src = source(w, h, t);
+                    enc.load([(&src[0], w), (&src[1], cw), (&src[2], cw)]);
+                    enc.encode(FrameParams {
+                        key: t == 0,
+                        golden: t == 3,
+                        hidden: false,
+                        qindex: 100,
+                        speed,
+                        altref_future: false,
+                        aq: false,
+                        second_pass: false,
+                        golden_slot: 1,
+                        also_refresh: 0,
+                        noise: 0.0,
+                    })
+                    .expect("encode")
+                    .data
+                })
+                .collect()
+        };
+        let one = run(1);
+        for lanes in [2, 3] {
+            assert!(run(lanes) == one, "speed {speed}, {lanes} lanes");
+        }
+    }
+}

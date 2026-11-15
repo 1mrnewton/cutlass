@@ -1826,3 +1826,391 @@ fn samples_past_the_bit_depth_are_refused() {
         );
     }
 }
+
+/// Encodes `n` pictures of `frame(index)`; returns the packets.
+fn encode_with(
+    opts: super::Vp9Options,
+    (w, h): (u32, u32),
+    n: u32,
+    frame: impl Fn(u32) -> VideoFrame,
+) -> Vec<Packet> {
+    let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+    let mut packets = Vec::new();
+    for index in 0..n {
+        packets.extend(
+            encoder
+                .push(&VideoInput {
+                    frame: frame(index),
+                    pts: i64::from(index),
+                    duration: 1,
+                    timescale: 30,
+                })
+                .expect("push"),
+        );
+    }
+    packets.extend(VideoEncoder::drain(&mut encoder).expect("drain"));
+    packets
+}
+
+/// The headers of single-frame packets, each read against the state of a
+/// decoder that has decoded the frames before it.
+fn headers_of(packets: &[Packet]) -> Vec<header::Header> {
+    let mut dec = Decoder::new();
+    packets
+        .iter()
+        .map(|p| {
+            let h = header::parse(dec.persist(), &p.data)
+                .expect("header")
+                .header;
+            dec.decode(&p.data).expect("decode");
+            h
+        })
+        .collect()
+}
+
+/// The packets decode, on the codec contract, to `n` pictures.
+fn assert_decodes(packets: &[Packet], (w, h): (u32, u32), n: usize) {
+    let params = CodecParams::with_format(CodecId::Vp9, w, h, PixelFormat::Yuv420p);
+    let mut decoder = Vp9Decoder::open(&params).expect("decoder");
+    let mut shown = 0;
+    for p in packets {
+        shown += decoder.push_all(p).expect("decode").len();
+    }
+    assert_eq!(shown, n);
+}
+
+fn packet_bytes(packets: &[Packet]) -> usize {
+    packets.iter().map(|p| p.data.len()).sum()
+}
+
+fn lag0(qindex: u8) -> super::Vp9Options {
+    super::Vp9Options {
+        qindex,
+        lag: Some(0),
+        threads: 2,
+        ..super::Vp9Options::default()
+    }
+}
+
+#[test]
+fn stream_signals_take_their_options() {
+    use super::ColorSpace;
+    let opts = super::Vp9Options {
+        sharpness: 5,
+        color_space: ColorSpace::Bt709,
+        full_range: true,
+        render_size: Some((96, 40)),
+        frame_parallel: true,
+        ..lag0(100)
+    };
+    let packets = encode_with(opts, (64, 48), 4, |i| moving(64, 48, i));
+    for (i, h) in headers_of(&packets).iter().enumerate() {
+        assert_eq!(h.sharpness, 5, "frame {i}");
+        assert_eq!((h.render_width, h.render_height), (96, 40), "frame {i}");
+        assert!(h.frame_parallel && !h.error_resilient, "frame {i}");
+        assert_eq!((h.color_space, h.color_range), (2, 1), "frame {i}");
+    }
+    assert_decodes(&packets, (64, 48), 4);
+    // The defaults: BT.601 studio range, the picture's own size, sharpness
+    // 0, backward adaptation.
+    let h = &headers_of(&encode_with(lag0(100), (64, 48), 2, |i| moving(64, 48, i)))[1];
+    assert_eq!((h.color_space, h.color_range, h.sharpness), (1, 0, 0));
+    assert_eq!((h.render_width, h.render_height), (64, 48));
+    assert!(!h.frame_parallel && h.refresh_context);
+    // The configuration names the level and the range.
+    let encoder = Vp9Encoder::with_options(
+        64,
+        48,
+        super::Vp9Options {
+            level: 31,
+            full_range: true,
+            ..lag0(100)
+        },
+    )
+    .expect("encoder");
+    let vpcc = encoder.vpcc_with_colour([1, 1, 1]);
+    assert_eq!(vpcc[5], 31);
+    assert_eq!(vpcc[6] & 1, 1);
+}
+
+#[test]
+fn error_resilient_frames_stand_without_the_one_before() {
+    let opts = super::Vp9Options {
+        error_resilient: true,
+        ..lag0(100)
+    };
+    let packets = encode_with(opts, (64, 48), 6, |i| moving(64, 48, i));
+    for (i, h) in headers_of(&packets).iter().enumerate() {
+        assert!(h.error_resilient && h.frame_parallel, "frame {i}");
+        assert!(!h.use_prev_mvs, "frame {i}");
+    }
+    assert_decodes(&packets, (64, 48), 6);
+    // With frame 2 lost, the frames after it still decode (from the
+    // pictures the decoder has).
+    let mut dec = Decoder::new();
+    for (i, p) in packets.iter().enumerate() {
+        if i != 2 {
+            assert!(dec.decode(&p.data).expect("decode").is_some(), "frame {i}");
+        }
+    }
+}
+
+#[test]
+fn srgb_takes_4_4_4_only() {
+    use super::{Chroma, ColorSpace};
+    let rgb = super::Vp9Options {
+        color_space: ColorSpace::Srgb,
+        ..lag0(0)
+    };
+    assert!(Vp9Encoder::with_options(16, 16, rgb).is_err());
+    let mut encoder = Vp9Encoder::with_options(
+        16,
+        16,
+        super::Vp9Options {
+            chroma: Chroma::Yuv444,
+            ..rgb
+        },
+    )
+    .expect("encoder");
+    let (g, b, r) = (vec![30u8; 256], vec![200u8; 256], vec![90u8; 256]);
+    let (data, key) = encoder
+        .encode_planes([(&g, 16), (&b, 16), (&r, 16)], 1.0 / 30.0)
+        .expect("encode");
+    assert!(key);
+    let h = parsed_header(&data).expect("header");
+    assert_eq!((h.profile, h.color_space, h.ss_x, h.ss_y), (1, 7, 0, 0));
+    // Lossless: the planes come back as they went in.
+    let pic = Decoder::new()
+        .decode(&data)
+        .expect("decode")
+        .expect("shown");
+    assert_eq!((pic.y, pic.u, pic.v), (g, b, r));
+}
+
+#[test]
+fn options_outside_their_range_are_refused() {
+    for opts in [
+        super::Vp9Options {
+            sharpness: 8,
+            ..lag0(60)
+        },
+        super::Vp9Options {
+            arnr_strength: Some(7),
+            ..lag0(60)
+        },
+        super::Vp9Options {
+            arnr_max_frames: Some(0),
+            ..lag0(60)
+        },
+        super::Vp9Options {
+            tile_columns: Some(7),
+            ..lag0(60)
+        },
+        super::Vp9Options {
+            render_size: Some((0, 10)),
+            ..lag0(60)
+        },
+    ] {
+        assert!(Vp9Encoder::with_options(64, 64, opts).is_err(), "{opts:?}");
+    }
+}
+
+/// `moving(w, h, shift)` under faint noise of its own in each picture
+/// `i`.
+fn noisy(w: u32, h: u32, shift: u32, i: u32) -> VideoFrame {
+    let mut f = moving(w, h, shift);
+    for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+        let n = ((k as u32) ^ i.wrapping_mul(0x9e37_79b9)).wrapping_mul(2_654_435_761) >> 30;
+        *v = v.saturating_add(n as u8);
+    }
+    f
+}
+
+#[test]
+fn a_static_threshold_skips_the_residual_of_near_blocks() {
+    // A still picture under faint noise: each inter frame's residual is
+    // the noise.
+    let noisy = |i: u32| noisy(128, 64, 0, i);
+    let size = |t: u32| {
+        let opts = super::Vp9Options {
+            static_thresh: t,
+            speed: 6,
+            ..lag0(20)
+        };
+        let packets = encode_with(opts, (128, 64), 6, noisy);
+        assert_decodes(&packets, (128, 64), 6);
+        packet_bytes(&packets[1..])
+    };
+    let (off, on) = (size(0), size(2000));
+    assert!(on * 2 < off, "inter frames: {on} bytes with, {off} without");
+}
+
+#[test]
+fn alt_ref_options_shape_the_alt_ref() {
+    let base = super::Vp9Options {
+        qindex: 120,
+        lag: Some(16),
+        threads: 2,
+        ..super::Vp9Options::default()
+    };
+    let still = |i: u32| noisy(64, 64, i / 8, i);
+    let has_arf = |packets: &[Packet]| {
+        packets
+            .iter()
+            .any(|p| p.data.last().is_some_and(|&m| m & 0xe0 == 0xc0))
+    };
+    let plain = encode_with(base, (64, 64), 30, still);
+    assert!(has_arf(&plain));
+    let none = encode_with(
+        super::Vp9Options {
+            alt_ref: false,
+            ..base
+        },
+        (64, 64),
+        30,
+        still,
+    );
+    assert!(!has_arf(&none));
+    assert_decodes(&none, (64, 64), 30);
+    // Another filter makes another alt-ref.
+    for opts in [
+        super::Vp9Options {
+            arnr_strength: Some(0),
+            ..base
+        },
+        super::Vp9Options {
+            arnr_max_frames: Some(1),
+            ..base
+        },
+        super::Vp9Options {
+            arnr_strength: Some(6),
+            arnr_max_frames: Some(15),
+            ..base
+        },
+    ] {
+        let packets = encode_with(opts, (64, 64), 30, still);
+        assert!(has_arf(&packets));
+        assert!(
+            packets.iter().zip(&plain).any(|(a, b)| a.data != b.data),
+            "{opts:?}"
+        );
+        assert_decodes(&packets, (64, 64), 30);
+    }
+}
+
+#[test]
+fn constrained_quality_holds_the_quantizer_at_its_level() {
+    let opts = super::Vp9Options {
+        bitrate: 4_000_000,
+        speed: 6,
+        ..lag0(60)
+    };
+    let cq = super::Vp9Options {
+        cq_level: Some(140),
+        ..opts
+    };
+    let free = encode_with(opts, (128, 64), 10, |i| moving(128, 64, i));
+    let held = encode_with(cq, (128, 64), 10, |i| moving(128, 64, i));
+    for (i, h) in headers_of(&held).iter().enumerate().skip(1) {
+        assert!(h.base_qindex >= 140, "frame {i}: {}", h.base_qindex);
+    }
+    assert!(packet_bytes(&held) < packet_bytes(&free));
+    assert_decodes(&held, (128, 64), 10);
+}
+
+#[test]
+fn a_limit_on_key_frames_makes_them_smaller() {
+    let opts = super::Vp9Options {
+        bitrate: 200_000,
+        speed: 6,
+        ..lag0(60)
+    };
+    let capped = super::Vp9Options {
+        max_intra_pct: 100,
+        ..opts
+    };
+    let key = |o| {
+        encode_with(o, (128, 64), 3, |i| moving(128, 64, i))[0]
+            .data
+            .len()
+    };
+    assert!(key(capped) < key(opts));
+}
+
+#[test]
+fn dead_bands_leave_what_the_rate_overshot_or_undershot() {
+    // The key frame takes far more than its share; the frames after pay
+    // it back, but those after an overshoot band pay back less, and those
+    // after an undershoot band spend less of a saving.
+    let opts = super::Vp9Options {
+        bitrate: 300_000,
+        speed: 6,
+        ..lag0(60)
+    };
+    let bytes = |o| {
+        let p = encode_with(o, (128, 64), 20, |i| noisy(128, 64, i, i));
+        assert_decodes(&p, (128, 64), 20);
+        packet_bytes(&p[1..])
+    };
+    let plain = bytes(opts);
+    let over = bytes(super::Vp9Options {
+        overshoot_pct: 100,
+        ..opts
+    });
+    assert!(over > plain, "{over} with the band, {plain} without");
+    // A rate far above what still pictures cost leaves a saving.
+    let rich = super::Vp9Options {
+        bitrate: 3_000_000,
+        ..opts
+    };
+    let still = |o| {
+        let p = encode_with(o, (128, 64), 20, |_| moving(128, 64, 3));
+        packet_bytes(&p[1..])
+    };
+    let under = still(super::Vp9Options {
+        undershoot_pct: 100,
+        ..rich
+    });
+    assert!(under <= still(rich));
+}
+
+#[test]
+fn a_cut_past_keyint_min_is_a_key_frame() {
+    let gradient = |i: u32| {
+        if i < 10 {
+            return moving(128, 128, i);
+        }
+        let mut f = moving(128, 128, 0);
+        for (k, v) in f.y.samples.make_mut().iter_mut().enumerate() {
+            let (r, c) = (k / 128, k % 128);
+            *v = (40 + (r + c + i as usize) / 4).min(255) as u8;
+        }
+        f
+    };
+    for (min, key) in [(0, false), (5, true), (11, false)] {
+        let opts = super::Vp9Options {
+            keyint_min: min,
+            speed: 6,
+            ..lag0(100)
+        };
+        let packets = encode_with(opts, (128, 128), 14, gradient);
+        let headers = headers_of(&packets);
+        assert_eq!(headers[10].key_frame, key, "keyint_min {min}");
+        assert_eq!(packets[10].keyframe, key, "keyint_min {min}");
+        assert!(!headers[11].key_frame);
+    }
+}
+
+#[test]
+fn tile_columns_follow_their_option() {
+    let opts = super::Vp9Options {
+        tile_columns: Some(1),
+        threads: 1,
+        ..lag0(100)
+    };
+    let packets = encode_with(opts, (640, 64), 2, |i| moving(640, 64, i));
+    for h in headers_of(&packets) {
+        assert_eq!(h.log2_tile_cols, 1);
+    }
+    assert_decodes(&packets, (640, 64), 2);
+}

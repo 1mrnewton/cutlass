@@ -20442,21 +20442,7 @@ mod tests {
             if keep.is_none() && name != "title-parts-styled" {
                 return;
             }
-            // egui_kittest waits ten seconds for each frame, and the Windows
-            // runner's software renderer sometimes takes longer for this
-            // 3200-tall window. A timed-out wait is tried again; a renderer
-            // that never finishes still fails the test.
-            let mut image = harness.render();
-            for _ in 0..2 {
-                match &image {
-                    Err(error) if error.contains("timed out") => {
-                        eprintln!("{name}: {error}; waiting again");
-                        image = harness.render();
-                    }
-                    _ => break,
-                }
-            }
-            let image = image.expect("the renderer draws the window");
+            let image = harness.render().expect("the renderer draws the window");
             if let Some(dir) = &keep {
                 std::fs::create_dir_all(dir).unwrap();
                 image.save(dir.join(format!("{name}.png"))).unwrap();

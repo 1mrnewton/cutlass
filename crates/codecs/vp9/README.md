@@ -68,6 +68,17 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   up the motion search runs first over the whole frame, its superblock
   rows shared evenly among the threads, and luma and chroma are filtered
   on separate threads.
+- 4:4:4 (`Vp9Options::chroma_444`, profile 1, FFmpeg's `-pix_fmt
+  yuv444p`; `CodecParams` with `Yuv444p` opens it): the chroma planes
+  are coded at full size with the transforms their blocks allow, and
+  every tool works on them (alt-refs, segments, tile rows, lossless, two
+  passes). FFmpeg decodes the streams to this decoder's pictures, and
+  lossless comes back exact. On the grainy 720p pan in 4:4:4 (30
+  frames), against libvpx-vp9 at good, cpu-used 1 in 4:4:4: speed 7 is
+  −20% / −23% at the same PSNR-Y / averaged PSNR in 1.76 s against
+  2.30 s, and speed 6 −32% / −35% in 3.1 s. 4:2:2 and 4:4:0 (the other
+  formats of profiles 1 and 3) and 10- and 12-bit (profiles 2 and 3) are
+  not coded yet.
 - Tile rows (`Vp9Options::tile_rows`, log2 of the count, 0 to 2, as
   libvpx's `tile-rows`): each starts its own arithmetic coder, so a
   decoder can start every row's at once; nothing else changes, and the

@@ -387,6 +387,15 @@ fn fast_tx_cap(speed: u8) -> u8 {
     }
 }
 
+/// Plane `p`'s subsampling across and down.
+fn plane_ss(s: &Shared<'_>, p: usize) -> (usize, usize) {
+    if p == 0 {
+        (0, 0)
+    } else {
+        (s.h.ss_x as usize, s.h.ss_y as usize)
+    }
+}
+
 /// The 4×4 steps of a block under 8×8's sub-blocks across and down.
 fn sub_steps(bsize: u8) -> (usize, usize) {
     match bsize {
@@ -1568,11 +1577,11 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         sn.left[..nh].copy_from_slice(&self.left[l..l + nh]);
         sn.left_part[..nh].copy_from_slice(&self.left_part[l..l + nh]);
         for p in 0..3 {
-            let ss = usize::from(p > 0);
-            let (a4, n4, h4) = ((a * 2) >> ss, (nw * 2) >> ss, (nh * 2) >> ss);
+            let (sx, sy) = plane_ss(self.s, p);
+            let (a4, n4, h4) = ((a * 2) >> sx, (nw * 2) >> sx, (nh * 2) >> sy);
             let w4 = n4.min(self.f.above_nz[p].len() - a4);
             sn.above_nz[p][..w4].copy_from_slice(&self.f.above_nz[p][a4..a4 + w4]);
-            let l4 = ((row * 2) & 15) >> ss;
+            let l4 = ((row * 2) & 15) >> sy;
             sn.left_nz[p][..h4].copy_from_slice(&self.left_nz[p][l4..l4 + h4]);
         }
         let rows = nh.min(self.s.mi_rows - row);
@@ -1584,12 +1593,12 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let views = self.rec.views();
         #[allow(clippy::needless_range_loop)]
         for p in 0..3 {
-            let ss = usize::from(p > 0);
+            let (sx, sy) = plane_ss(self.s, p);
             let (x, y, mw, mh) = (
-                (col * 8) >> ss,
-                (row * 8) >> ss,
-                (nw * 8) >> ss,
-                (nh * 8) >> ss,
+                (col * 8) >> sx,
+                (row * 8) >> sy,
+                (nw * 8) >> sx,
+                (nh * 8) >> sy,
             );
             let v = &mut views[p];
             let stride = v.stride;
@@ -1613,11 +1622,11 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         self.left[l..l + nh].copy_from_slice(&sn.left[..nh]);
         self.left_part[l..l + nh].copy_from_slice(&sn.left_part[..nh]);
         for p in 0..3 {
-            let ss = usize::from(p > 0);
-            let (a4, n4, h4) = ((a * 2) >> ss, (nw * 2) >> ss, (nh * 2) >> ss);
+            let (sx, sy) = plane_ss(self.s, p);
+            let (a4, n4, h4) = ((a * 2) >> sx, (nw * 2) >> sx, (nh * 2) >> sy);
             let w4 = n4.min(self.f.above_nz[p].len() - a4);
             self.f.above_nz[p][a4..a4 + w4].copy_from_slice(&sn.above_nz[p][..w4]);
-            let l4 = ((row * 2) & 15) >> ss;
+            let l4 = ((row * 2) & 15) >> sy;
             self.left_nz[p][l4..l4 + h4].copy_from_slice(&sn.left_nz[p][..h4]);
         }
         let rows = nh.min(self.s.mi_rows - row);
@@ -1629,12 +1638,12 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let views = self.rec.views();
         #[allow(clippy::needless_range_loop)]
         for p in 0..3 {
-            let ss = usize::from(p > 0);
+            let (sx, sy) = plane_ss(self.s, p);
             let (x, y, mw, mh) = (
-                (col * 8) >> ss,
-                (row * 8) >> ss,
-                (nw * 8) >> ss,
-                (nh * 8) >> ss,
+                (col * 8) >> sx,
+                (row * 8) >> sy,
+                (nw * 8) >> sx,
+                (nh * 8) >> sy,
             );
             let v = &mut views[p];
             let stride = v.stride;
@@ -2136,9 +2145,9 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let s = self.s;
         let mut total = 0u64;
         for p in 0..3 {
-            let ss = usize::from(p > 0);
+            let (sx, sy) = plane_ss(self.s, p);
             let (_, _, vw, vh) = self.visible(b, p);
-            let (x, y) = ((b.col * 8) >> ss, (b.row * 8) >> ss);
+            let (x, y) = ((b.col * 8) >> sx, (b.row * 8) >> sy);
             let (src, sst) = (s.src.planes[p], s.src.strides[p]);
             let v = &mut self.rec.views()[p];
             let stride = v.stride;
@@ -2186,7 +2195,8 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     }
 
     fn uv_tx(&self, b: &Blk) -> u8 {
-        geom::uv_tx_420(b.bsize, b.tx)
+        let (sx, sy) = plane_ss(self.s, 1);
+        geom::uv_tx(b.bsize, b.tx, sx as u32, sy as u32)
     }
 
     // Residual -----------------------------------------------------------
@@ -2207,7 +2217,7 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let lossless = s.h.lossless;
         for plane in 0..3 {
             let tx = if plane == 0 { b.tx } else { rec.uv_tx };
-            let (ssx, ssy) = if plane == 0 { (0, 0) } else { (1, 1) };
+            let (ssx, ssy) = plane_ss(self.s, plane);
             let (n4w, _, vw, vh) = self.visible(b, plane);
             let step = 1usize << tx;
             let x0 = (b.col * 8) >> ssx;
@@ -2263,20 +2273,20 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
     }
 
     fn visible(&self, b: &Blk, plane: usize) -> (usize, usize, usize, usize) {
-        let ss = usize::from(plane > 0);
-        let n4w = (b.bw * 2) >> ss;
-        let n4h = (b.bh * 2) >> ss;
+        let (sx, sy) = plane_ss(self.s, plane);
+        let n4w = (b.bw * 2) >> sx;
+        let n4h = (b.bh * 2) >> sy;
         let right = (self.s.mi_cols as i32 - b.bw as i32 - b.col as i32) * 64;
         let bottom = (self.s.mi_rows as i32 - b.bh as i32 - b.row as i32) * 64;
         let vw = if right >= 0 {
             n4w
         } else {
-            (n4w as i32 + (right >> (5 + ss))).max(0) as usize
+            (n4w as i32 + (right >> (5 + sx))).max(0) as usize
         };
         let vh = if bottom >= 0 {
             n4h
         } else {
-            (n4h as i32 + (bottom >> (5 + ss))).max(0) as usize
+            (n4h as i32 + (bottom >> (5 + sy))).max(0) as usize
         };
         (n4w, n4h, vw, vh)
     }
@@ -2526,10 +2536,10 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         let max = n * n;
         // The context of the first token, from the neighbours so far.
         let ctx0 = {
-            let ss = usize::from(plane > 0);
+            let (sx, sy) = plane_ss(self.s, plane);
             let n4 = 1usize << tx;
-            let a = (x >> 2) - (((self.col0 * 8) >> ss) >> 2);
-            let l = (y >> 2) & (15 >> ss);
+            let a = (x >> 2) - (((self.col0 * 8) >> sx) >> 2);
+            let l = (y >> 2) & (15 >> sy);
             let anz = self.f.above_nz[plane][a..(a + n4).min(self.f.above_nz[plane].len())]
                 .iter()
                 .any(|&v| v != 0);
@@ -3291,11 +3301,11 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
 
     fn reset_nz(&mut self, b: &Blk) {
         for plane in 0..3 {
-            let ss = usize::from(plane > 0);
-            let w = (b.bw * 2) >> ss;
-            let hh = (b.bh * 2) >> ss;
-            let a = ((b.col - self.col0) * 2) >> ss;
-            let l = ((b.row * 2) & 15) >> ss;
+            let (sx, sy) = plane_ss(self.s, plane);
+            let w = (b.bw * 2) >> sx;
+            let hh = (b.bh * 2) >> sy;
+            let a = ((b.col - self.col0) * 2) >> sx;
+            let l = ((b.row * 2) & 15) >> sy;
             let above = &mut self.f.above_nz[plane];
             let end = (a + w).min(above.len());
             above[a..end].fill(0);
@@ -3318,10 +3328,10 @@ impl<'s, 't, 'r, 'v> Tile<'s, 't, 'r, 'v> {
         eob: usize,
     ) {
         let s = self.s;
-        let ss = usize::from(plane > 0);
+        let (sx, sy) = plane_ss(self.s, plane);
         let n = 1usize << tx;
-        let a = (((b.col - self.col0) * 2) >> ss) + c4;
-        let l = (((b.row * 2) & 15) >> ss) + r4;
+        let a = (((b.col - self.col0) * 2) >> sx) + c4;
+        let l = (((b.row * 2) & 15) >> sy) + r4;
         let (_, _, vw, vh) = self.visible(b, plane);
         let anz = self.f.above_nz[plane][a..(a + n).min(self.f.above_nz[plane].len())]
             .iter()

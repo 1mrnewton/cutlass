@@ -45,6 +45,10 @@ pub struct Vp9Options {
     /// smaller shares and a frame over its budget is paid back within
     /// half the buffer.
     pub cbr_buffer_ms: u32,
+    /// Full-resolution chroma, 4:4:4 (profile 1, FFmpeg's `-pix_fmt
+    /// yuv444p`), instead of 4:2:0 (profile 0): the chroma planes pushed
+    /// are then as large as luma.
+    pub chroma_444: bool,
     /// Tile rows, log2 of the count (0 to 2; libvpx's `tile-rows`). They
     /// restart the arithmetic coder at each tile row and change nothing
     /// else.
@@ -71,6 +75,17 @@ impl Vp9Options {
             .unwrap_or(if self.speed >= 9 { 0 } else { DEFAULT_LAG })
     }
 
+    /// Chroma subsampling across and down.
+    fn ss(&self) -> (usize, usize) {
+        if self.chroma_444 { (0, 0) } else { (1, 1) }
+    }
+
+    /// The chroma planes' size for a `w`×`h` picture.
+    fn chroma_dims(&self, w: usize, h: usize) -> (usize, usize) {
+        let (sx, sy) = self.ss();
+        (w.div_ceil(1 << sx), h.div_ceil(1 << sy))
+    }
+
     fn threads(&self) -> usize {
         match self.threads {
             0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
@@ -91,6 +106,7 @@ impl Default for Vp9Options {
             threads: 0,
             lag: None,
             cbr_buffer_ms: 0,
+            chroma_444: false,
             tile_rows: 0,
             aq: false,
         }
@@ -148,7 +164,8 @@ impl Vp9Encoder {
             height,
             opts,
             enc: {
-                let mut enc = FrameEncoder::new(width, height, opts.threads());
+                let mut enc =
+                    FrameEncoder::with_subsampling(width, height, opts.threads(), opts.ss());
                 enc.set_tile_rows(opts.tile_rows);
                 enc
             },
@@ -171,13 +188,18 @@ impl Vp9Encoder {
                 what: "vp9 encoder",
             });
         }
-        if params.pixel != PixelFormat::Yuv420p {
-            return Err(CodecError::Unsupported {
-                what: "vp9 pixel format",
-            });
-        }
+        let chroma_444 = match params.pixel {
+            PixelFormat::Yuv420p => false,
+            PixelFormat::Yuv444p => true,
+            _ => {
+                return Err(CodecError::Unsupported {
+                    what: "vp9 pixel format",
+                });
+            }
+        };
         let opts = Vp9Options {
             bitrate: params.bitrate,
+            chroma_444,
             ..Vp9Options::default()
         };
         Self::with_options(params.width, params.height, opts)
@@ -235,7 +257,13 @@ impl Vp9Encoder {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(CodecError::Cancelled);
         }
-        check_planes(self.width, self.height, &planes)?;
+        check_planes(
+            self.width,
+            self.height,
+            self.opts
+                .chroma_dims(self.width as usize, self.height as usize),
+            &planes,
+        )?;
         self.code(planes, seconds)
     }
 
@@ -251,17 +279,20 @@ impl Vp9Encoder {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(CodecError::Cancelled);
         }
-        check_planes(self.width, self.height, &planes)?;
+        check_planes(
+            self.width,
+            self.height,
+            self.opts
+                .chroma_dims(self.width as usize, self.height as usize),
+            &planes,
+        )?;
         if self.opts.lag() == 0 {
             let (d, k) = self.code(planes, seconds)?;
             return Ok(vec![(d, k, clock)]);
         }
         let (w, h) = (self.width as usize, self.height as usize);
-        let dims = [
-            (w, h),
-            (w.div_ceil(2), h.div_ceil(2)),
-            (w.div_ceil(2), h.div_ceil(2)),
-        ];
+        let c = self.opts.chroma_dims(w, h);
+        let dims = [(w, h), c, c];
         let tight: [Vec<u8>; 3] = std::array::from_fn(|p| {
             let (data, stride) = planes[p];
             let (pw, ph) = dims[p];
@@ -303,7 +334,7 @@ impl Vp9Encoder {
             });
         };
         let (w, h) = (self.width as usize, self.height as usize);
-        let cw = w.div_ceil(2);
+        let cw = self.opts.chroma_dims(w, h).0;
         // This picture has index `since_key` (0 for a key frame); the next
         // golden position is the alt-ref's target.
         // A cut (which no alt-ref spans: `reachable` fails across it).
@@ -349,6 +380,7 @@ impl Vp9Encoder {
                 h,
                 strength,
                 self.opts.threads(),
+                self.opts.ss().0,
             ));
         }
         let mut data = Vec::new();
@@ -486,7 +518,12 @@ impl VideoEncoder for Vp9Encoder {
 
     fn push(&mut self, input: &VideoInput) -> Result<Vec<Packet>, CodecError> {
         let f = &input.frame;
-        if f.format != PixelFormat::Yuv420p {
+        let want = if self.opts.chroma_444 {
+            PixelFormat::Yuv444p
+        } else {
+            PixelFormat::Yuv420p
+        };
+        if f.format != want {
             return Err(CodecError::Unsupported {
                 what: "vp9 pixel format",
             });
@@ -531,7 +568,12 @@ impl VideoEncoder for Vp9Encoder {
     }
 
     fn reset(&mut self) {
-        self.enc = FrameEncoder::new(self.width, self.height, self.opts.threads());
+        self.enc = FrameEncoder::with_subsampling(
+            self.width,
+            self.height,
+            self.opts.threads(),
+            self.opts.ss(),
+        );
         self.enc.set_tile_rows(self.opts.tile_rows);
         self.force_key = true;
         self.since_key = 0;
@@ -646,9 +688,13 @@ fn check_size(width: u32, height: u32) -> Result<(), CodecError> {
     Ok(())
 }
 
-fn check_planes(width: u32, height: u32, planes: &[(&[u8], usize); 3]) -> Result<(), CodecError> {
+fn check_planes(
+    width: u32,
+    height: u32,
+    (cw, ch): (usize, usize),
+    planes: &[(&[u8], usize); 3],
+) -> Result<(), CodecError> {
     let (w, h) = (width as usize, height as usize);
-    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
     for (p, (data, stride)) in planes.iter().enumerate() {
         let (pw, ph) = if p == 0 { (w, h) } else { (cw, ch) };
         if *stride < pw || data.len() < (ph - 1) * stride + pw {

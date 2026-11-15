@@ -21,6 +21,7 @@ pub fn filter(
     h: usize,
     strength: u32,
     threads: usize,
+    ss: usize,
 ) -> [Vec<u8>; 3] {
     let bands = h.div_ceil(16);
     let threads = threads.clamp(1, bands.max(1));
@@ -30,7 +31,7 @@ pub fn filter(
                 sc.spawn(move || {
                     (t..bands)
                         .step_by(threads)
-                        .map(|b| (b, band(frames, center, w, h, strength, b * 16)))
+                        .map(|b| (b, band(frames, center, w, h, strength, b * 16, ss)))
                         .collect()
                 })
             })
@@ -50,15 +51,17 @@ fn band(
     h: usize,
     strength: u32,
     by: usize,
+    ss: usize,
 ) -> [Vec<u8>; 3] {
-    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    // Chroma subsampled by `ss` both ways (1: 4:2:0, 0: 4:4:4).
+    let (cw, ch) = (w.div_ceil(1 << ss), h.div_ceil(1 << ss));
     let dims = [(w, h), (cw, ch), (cw, ch)];
     let bh = 16.min(h - by);
     // The band's rows in each plane.
     let rows = [
         (by, by + bh),
-        (by / 2, (by + bh).div_ceil(2)),
-        (by / 2, (by + bh).div_ceil(2)),
+        (by >> ss, (by + bh).div_ceil(1 << ss)),
+        (by >> ss, (by + bh).div_ceil(1 << ss)),
     ];
     let mut acc: [Vec<u32>; 3] =
         std::array::from_fn(|p| vec![0; dims[p].0 * (rows[p].1 - rows[p].0)]);
@@ -89,7 +92,7 @@ fn band(
                 continue;
             }
             for p in 0..3 {
-                let ss = usize::from(p > 0);
+                let ss = if p > 0 { ss } else { 0 };
                 let (pw, ph) = dims[p];
                 let (x0, y0) = (bx >> ss, by >> ss);
                 let (n_w, n_h) = (((bx + bw + ss) >> ss) - x0, ((by + bh + ss) >> ss) - y0);

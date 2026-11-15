@@ -85,6 +85,9 @@ pub struct FrameEncoder {
     log2_tiles: u8,
     /// Tile rows (log2 of the count, 0 to 2).
     log2_tile_rows: u8,
+    /// Chroma subsampling across and down: (1, 1) 4:2:0 (profile 0),
+    /// (0, 0) 4:4:4 (profile 1).
+    ss: (usize, usize),
     /// The fast search's vectors of the last frame, by 8×8 block.
     pre_seeds: Vec<Mv>,
     /// The segmentation of the frame being coded, with adaptive
@@ -134,8 +137,15 @@ fn tile_edge(i: usize, mi_cols: usize, log2: u8) -> usize {
 impl FrameEncoder {
     /// An encoder of `width`×`height` pictures on up to `threads` tile
     /// columns (rounded down to a power of two the width allows).
+    #[cfg(test)]
     pub fn new(width: u32, height: u32, threads: usize) -> Self {
-        let dims = Dims::new(width as usize, height as usize, 1, 1, 8);
+        Self::with_subsampling(width, height, threads, (1, 1))
+    }
+
+    /// [`FrameEncoder::new`] for chroma subsampled `ss` across and down:
+    /// (1, 1) for 4:2:0, (0, 0) for 4:4:4.
+    pub fn with_subsampling(width: u32, height: u32, threads: usize, ss: (usize, usize)) -> Self {
+        let dims = Dims::new(width as usize, height as usize, ss.0, ss.1, 8);
         let src = std::array::from_fn(|p| vec![0u8; dims.stride[p] * dims.rows[p]]);
         Self {
             width,
@@ -146,6 +156,7 @@ impl FrameEncoder {
             work: Vec::new(),
             log2_tiles: threads.max(1).ilog2().min(6) as u8,
             log2_tile_rows: 0,
+            ss,
             pre_seeds: Vec::new(),
             aq: None,
             ref_use: [(0, 1024, 0); 3],
@@ -168,7 +179,13 @@ impl FrameEncoder {
     /// Copies a source picture in, repeating its last column and row out
     /// to whole superblocks.
     pub fn load(&mut self, planes: [(&[u8], usize); 3]) {
-        let dims = Dims::new(self.width as usize, self.height as usize, 1, 1, 8);
+        let dims = Dims::new(
+            self.width as usize,
+            self.height as usize,
+            self.ss.0,
+            self.ss.1,
+            8,
+        );
         for (p, (data, stride)) in planes.into_iter().enumerate() {
             let (w, h) = (dims.w[p], dims.h[p]);
             let ds = self.strides[p];
@@ -261,7 +278,9 @@ impl FrameEncoder {
         let compressed = compressed_header(lossless, &Self::coded(key, fp), coef, nc)?;
         let mut b = BitWriter::new();
         b.write(2, 2); // frame marker
-        b.write(0, 2); // profile 0
+        // Profile 0 for 4:2:0, 1 for 4:4:4 (its low bit goes first).
+        let profile1 = self.ss != (1, 1);
+        b.write(if profile1 { 2 } else { 0 }, 2);
         b.write_bit(false); // show_existing_frame
         b.write_bit(!key); // frame_type
         b.write_bit(!hidden); // show_frame
@@ -272,6 +291,11 @@ impl FrameEncoder {
             b.write(0x42, 8);
             b.write(1, 3); // BT.601
             b.write_bit(false); // studio range
+            if profile1 {
+                b.write_bit(self.ss.0 == 1);
+                b.write_bit(self.ss.1 == 1);
+                b.write_bit(false); // reserved
+            }
             b.write(self.width - 1, 16);
             b.write(self.height - 1, 16);
             b.write_bit(false); // render size = frame size
@@ -390,7 +414,13 @@ impl FrameEncoder {
         CodecError,
     > {
         let h = &parsed.header;
-        let dims = Dims::new(h.width as usize, h.height as usize, 1, 1, 8);
+        let dims = Dims::new(
+            h.width as usize,
+            h.height as usize,
+            h.ss_x as usize,
+            h.ss_y as usize,
+            8,
+        );
         let mi_cols = dims.width.div_ceil(8);
         let mi_rows = dims.height.div_ceil(8);
         let sb_cols = mi_cols.div_ceil(8);
@@ -438,8 +468,8 @@ impl FrameEncoder {
             mi_rows,
             mi_cols,
             sb_cols,
-            ss_x: 1,
-            ss_y: 1,
+            ss_x: h.ss_x as usize,
+            ss_y: h.ss_y as usize,
             bd: 8,
         };
         let filter_on = h.filter_level != 0;
@@ -690,7 +720,7 @@ impl FrameEncoder {
         let tiles = std::thread::scope(|sc| {
             for (p, mut v) in writer.tails().map(View::of).into_iter().enumerate() {
                 sc.spawn(move || {
-                    let ss = usize::from(p > 0);
+                    let ss = if p == 0 { 0 } else { dims.ss_x };
                     let stride = v.stride;
                     for (i, t) in work.iter().enumerate() {
                         let (x0, x1) = ((ed[i] * 8) >> ss, ((ed[i + 1] * 8) >> ss).min(stride));

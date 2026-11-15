@@ -1311,3 +1311,46 @@ fn a_cut_starts_a_golden_frame_and_keeps_the_stream_going() {
     }
     assert_eq!(shown, 20);
 }
+
+#[test]
+fn four_four_four_codes_profile_1_and_lossless_comes_back_exact() {
+    let (w, h) = (96u32, 64u32);
+    let mut planes = Vec::new();
+    for p in 0..3u32 {
+        let mut data = vec![0u8; (w * h) as usize];
+        for (i, v) in data.iter_mut().enumerate() {
+            let (r, c) = (i as u32 / w, i as u32 % w);
+            *v = ((r * 3 + c * (p + 2) + p * 40) % 230 + 10) as u8;
+        }
+        planes.push(data);
+    }
+    let opts = super::Vp9Options {
+        qindex: 0,
+        chroma_444: true,
+        lag: Some(0),
+        threads: 1,
+        ..super::Vp9Options::default()
+    };
+    let mut encoder = Vp9Encoder::with_options(w, h, opts).expect("encoder");
+    let wu = w as usize;
+    let packets = encoder
+        .encode_planes(
+            [(&planes[0], wu), (&planes[1], wu), (&planes[2], wu)],
+            1.0 / 30.0,
+        )
+        .expect("encode");
+    let key = parsed_header(&packets.0).expect("header");
+    assert_eq!(key.profile, 1);
+    assert_eq!((key.ss_x, key.ss_y), (0, 0));
+    assert!(key.lossless);
+    let mut decoder = Decoder::new();
+    let picture = decoder.decode(&packets.0).expect("decode").expect("shown");
+    assert_eq!((picture.ss_x, picture.ss_y), (0, 0));
+    for (p, (got, want)) in [&picture.y, &picture.u, &picture.v]
+        .into_iter()
+        .zip(&planes)
+        .enumerate()
+    {
+        assert_eq!(got, want, "plane {p}");
+    }
+}

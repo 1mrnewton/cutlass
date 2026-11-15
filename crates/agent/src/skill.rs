@@ -530,6 +530,7 @@ mod tests {
                 "draft.query",
                 "draft.apply",
                 "sandbox.run",
+                "player.look",
             ]
         );
         assert_eq!(

@@ -1,6 +1,6 @@
 title: Motion graphics
 description: Build motion graphics with shapes, text, keyframes, and catalog effects.
-tools: catalog.search, package.ensure, draft.query, draft.apply, sandbox.run
+tools: catalog.search, package.ensure, draft.query, draft.apply, sandbox.run, player.look
 keywords: animate, animation, title card, lower third, logo, intro, outro
 
 Place shapes, text, keyframes, and catalog effects. Call catalog.search, package.ensure, draft.query, and draft.apply for those placements in one combo. Use sandbox.run when a number has to be computed.
@@ -12,6 +12,6 @@ Place shapes, text, keyframes, and catalog effects. Call catalog.search, package
 - Effects: catalog.search finds ids. add_effect takes "recipe/<name>", add_filter "look/<name>", set_transition effect_id "cutlass-<key>" on the outgoing clip.
 - Two clips may not overlap on one lane: give each layer its own track_id (a new id makes the lane).
 - New ids for every segment_id and material_id. One draft.apply for each finished idea.
-- To see a frame, player.seek to its time and export.start "new <path>.png".
+- To see a frame, player.look at its time: the picture comes back with the result. Look after each finished idea, at a time while it is on screen and not mid-fade, and fix what is off before the next one. To keep a frame as a file, player.seek to its time and export.start "new <path>.png".
 
 draft.query "ops <kind> ..." shows the exact JSON of any request.

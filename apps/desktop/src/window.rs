@@ -216,7 +216,13 @@ impl eframe::App for DesktopWindow {
             let settings = self.shell.settings();
             bar.show_keys(|action| settings.keys_for(action));
             for id in bar.take() {
-                crate::view::run_menu(&mut self.shell, &mut self.view, Some(frame), &id);
+                crate::view::menu_chosen(
+                    &mut self.shell,
+                    &mut self.view,
+                    ui.ctx(),
+                    Some(frame),
+                    &id,
+                );
             }
         }
         show(&mut self.shell, ui, &mut self.view, Some(frame));

@@ -1312,6 +1312,61 @@ fn menu_items(
     }
 }
 
+/// Take the menu bar item `id` the user chose, by the mouse or by its keys.
+///
+/// The system menu bar takes a command key before the window sees it, so
+/// while a text field is being typed in, the clipboard, select-all and
+/// undo items are that field's, as in any app: Paste pastes into the field
+/// and not onto the timeline. While Settings or Licenses is up, the other
+/// shortcut actions are left alone, as their keys are. Anything else runs.
+pub fn menu_chosen(
+    shell: &mut Shell,
+    view: &mut ViewState,
+    ctx: &egui::Context,
+    parent: Option<&eframe::Frame>,
+    id: &str,
+) {
+    if ctx.text_edit_focused() && to_text_field(ctx, id) {
+        return;
+    }
+    if (view.settings_open || view.licenses.is_some()) && !crate::menubar::is_window_command(id) {
+        return;
+    }
+    run_menu(shell, view, parent, id);
+}
+
+/// Hand the edit command `id` to the focused text field. False when `id`
+/// is not one a text field has.
+fn to_text_field(ctx: &egui::Context, id: &str) -> bool {
+    use egui::{Key, Modifiers, ViewportCommand};
+
+    let key = |key: Key, modifiers: Modifiers| {
+        ctx.input_mut(|input| {
+            input.events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            });
+        });
+    };
+    match id {
+        // The window reads the clipboard and sends the field what it holds.
+        "paste" => ctx.send_viewport_cmd(ViewportCommand::RequestPaste),
+        "copy" => ctx.send_viewport_cmd(ViewportCommand::RequestCopy),
+        "cut" => ctx.send_viewport_cmd(ViewportCommand::RequestCut),
+        "select_all" => key(Key::A, Modifiers::COMMAND),
+        "undo" => key(Key::Z, Modifiers::COMMAND),
+        "redo" => key(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT),
+        _ => return false,
+    }
+    // The paste arrives with the next frame; draw it without waiting for
+    // the pointer to move.
+    ctx.request_repaint();
+    true
+}
+
 /// Run the menu bar item `id`: a window command, or a shortcut action.
 pub fn run_menu(shell: &mut Shell, view: &mut ViewState, parent: Option<&eframe::Frame>, id: &str) {
     use crate::menubar::{
@@ -11777,6 +11832,153 @@ mod tests {
         // The window's own undo brings the assistant's edit back.
         shell.undo().unwrap();
         assert_eq!(clips(&shell), 2);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_menu_bar_edit_command_goes_to_the_text_field_being_typed_in() {
+        let temp = std::env::temp_dir().join(format!("cutlass-menu-text-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "a",
+            "missing",
+            cutlass_model::TimeRange::new(0, 3_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        // One edit on the timeline, for an undo to take if it got there.
+        let split = shell.run_agent_tool(
+            &cutlass_agent::ToolCall {
+                id: "s".to_owned(),
+                name: "draft.apply".to_owned(),
+                arguments: serde_json::json!({
+                    "expected_revision": 0,
+                    "requests": [{ "op": "split", "segment_id": "a",
+                                   "at": 1_000_000, "right_id": "b" }],
+                })
+                .to_string(),
+            },
+            &[],
+        );
+        assert!(!split.outcome.is_error, "{}", split.outcome.content);
+        let clips = |shell: &Shell| shell.draft().unwrap().tracks[0].segments.len();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        // One frame: the menu bar's chosen items first, as the window
+        // takes them, then the view.
+        let frame = |shell: &mut Shell,
+                     view: &mut ViewState,
+                     events: Vec<egui::Event>,
+                     chosen: &[&str]| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    for id in chosen {
+                        menu_chosen(shell, view, ui.ctx(), None, id);
+                    }
+                    show(shell, ui, view, None);
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let asked = |output: &egui::FullOutput, wanted: &egui::ViewportCommand| {
+            output
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .is_some_and(|viewport| viewport.commands.contains(wanted))
+        };
+        let output = frame(&mut shell, &mut view, Vec::new(), &[]);
+        let toggle = text_pos(&output, "Assistant").expect("the toggle") + Vec2::new(4.0, 4.0);
+        for events in [
+            vec![egui::Event::PointerMoved(toggle)],
+            vec![press(toggle, true)],
+            vec![press(toggle, false)],
+        ] {
+            let _ = frame(&mut shell, &mut view, events, &[]);
+        }
+        let output = frame(&mut shell, &mut view, Vec::new(), &[]);
+        let hint = text_pos(&output, assistant::HINT).expect("the box") + Vec2::new(4.0, 4.0);
+        for events in [
+            vec![egui::Event::PointerMoved(hint)],
+            vec![press(hint, true)],
+            vec![press(hint, false)],
+            vec![egui::Event::Text("hello".to_owned())],
+        ] {
+            let _ = frame(&mut shell, &mut view, events, &[]);
+        }
+        assert_eq!(view.assistant.draft, "hello");
+        assert!(ctx.text_edit_focused());
+
+        // Paste: the window is asked for the clipboard, and the timeline's
+        // paste does not run (it would say there is nothing to paste).
+        let output = frame(&mut shell, &mut view, Vec::new(), &["paste"]);
+        assert!(asked(&output, &egui::ViewportCommand::RequestPaste));
+        assert_eq!(shell.notice(), "");
+        // What the window then sends lands in the field.
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::Paste(" world".to_owned())],
+            &[],
+        );
+        assert_eq!(view.assistant.draft, "hello world");
+        // Copy and cut are asked of the window too.
+        let output = frame(&mut shell, &mut view, Vec::new(), &["copy", "cut"]);
+        assert!(asked(&output, &egui::ViewportCommand::RequestCopy));
+        assert!(asked(&output, &egui::ViewportCommand::RequestCut));
+        // Select all selects the field's words: typing replaces them.
+        let _ = frame(&mut shell, &mut view, Vec::new(), &["select_all"]);
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::Text("bye".to_owned())],
+            &[],
+        );
+        assert_eq!(view.assistant.draft, "bye");
+        // Undo and redo are the field's: the timeline's edit stays.
+        let _ = frame(&mut shell, &mut view, Vec::new(), &["undo", "redo"]);
+        assert_eq!(clips(&shell), 2);
+        // A command a field does not have still runs.
+        let _ = frame(&mut shell, &mut view, Vec::new(), &[crate::menubar::EXPORT]);
+        assert!(view.export_open);
+        view.export_open = false;
+
+        // With no field being typed in, the same items are the timeline's.
+        if let Some(id) = ctx.memory(|memory| memory.focused()) {
+            ctx.memory_mut(|memory| memory.surrender_focus(id));
+        }
+        let output = frame(&mut shell, &mut view, Vec::new(), &["paste"]);
+        assert!(!asked(&output, &egui::ViewportCommand::RequestPaste));
+        assert_eq!(shell.notice(), "nothing to paste");
+        let _ = frame(&mut shell, &mut view, Vec::new(), &["undo"]);
+        assert_eq!(clips(&shell), 1);
+
+        // With Settings up, a shortcut action is left alone, as its keys
+        // are, and a window command still runs.
+        view.settings_open = true;
+        let _ = frame(&mut shell, &mut view, Vec::new(), &["redo"]);
+        assert_eq!(clips(&shell), 1);
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            Vec::new(),
+            &[crate::menubar::LICENSES],
+        );
+        assert!(view.licenses.is_some());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

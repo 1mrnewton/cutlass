@@ -19629,6 +19629,7 @@ mod tests {
             "background",
             "glow",
             "shadow",
+            "curve",
         ] {
             harness
                 .state_mut()
@@ -19710,7 +19711,15 @@ mod tests {
         harness.run_steps(4);
         assert!(look(&harness).glow_rays);
         assert!(offsets(&harness) > soft);
+        // The curve switches on at a gentle arch.
+        switch(&harness, "Curve");
+        harness.run_steps(4);
+        assert!(look(&harness).curve_on);
+        assert_eq!(look(&harness).curve, cutlass_editor::CURVE_START);
         picture(&mut harness, "title-parts-styled");
+        switch(&harness, "Curve");
+        harness.run_steps(4);
+        assert!(!look(&harness).curve_on);
         harness.get_by_label("Soft").click();
         harness.run_steps(4);
         assert!(!look(&harness).glow_rays);

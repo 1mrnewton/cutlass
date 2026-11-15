@@ -113,6 +113,8 @@ pub const GLOW_RANGE_START: f64 = 0.5;
 /// What rays take when picked: fainter and shorter than a soft glow, as
 /// they reach further.
 pub const RAYS_STRENGTH_START: f64 = 0.3;
+/// What a first curve bends by, in degrees of arc: a gentle arch.
+pub const CURVE_START: f64 = 72.0;
 pub const RAYS_RANGE_START: f64 = 0.2;
 /// Where a new shadow falls: down and to the right.
 pub const SHADOW_ANGLE: f64 = -45.0;

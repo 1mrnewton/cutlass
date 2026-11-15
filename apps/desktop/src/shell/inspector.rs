@@ -944,6 +944,21 @@ impl Shell {
         self.apply_requests(&requests)
     }
 
+    /// Bend the selected title's lines along an arc `degrees` wide, or
+    /// draw them straight keeping the degrees; keyed here when it keys
+    /// them. One undo restores it.
+    pub fn set_text_curve(&mut self, on: bool, degrees: f64) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let mut requests = vec![Request::SetTextCurve {
+            segment_id,
+            on,
+            degrees,
+        }];
+        requests.extend(self.style_keys(&[(cutlass_model::TextStyleKey::Curve, degrees)]));
+        self.apply_requests(&requests)
+    }
+
     /// Fill a box behind the selected title in `color` at `alpha`, its
     /// corners rounded by `round`. An empty color takes it off. One undo
     /// restores it.
@@ -2580,6 +2595,26 @@ mod tests {
         );
         desktop.undo().unwrap();
         assert!(!desktop.text_look().unwrap().background_lines);
+    }
+
+    #[test]
+    fn a_title_curve_bends_straightens_and_keeps_its_degrees() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "words");
+        let before = desktop.draft().unwrap().clone();
+        desktop.set_text_curve(true, 72.0).unwrap();
+        let look = desktop.text_look().unwrap();
+        assert!(look.curve_on);
+        assert_eq!(look.curve, 72.0);
+        desktop.set_text_curve(false, 72.0).unwrap();
+        let look = desktop.text_look().unwrap();
+        assert!(!look.curve_on);
+        assert_eq!(look.curve, 72.0);
+        assert!(desktop.set_text_curve(true, 400.0).is_err());
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap(), &before);
     }
 
     #[test]

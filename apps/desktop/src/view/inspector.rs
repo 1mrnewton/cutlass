@@ -2953,6 +2953,36 @@ fn text_parts(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, look: 
             }
         });
     }
+
+    let on = look.curve_on;
+    let header = section(ui, state, "curve", "Curve", Some((on, true)), false);
+    if header.toggled {
+        // A first curve arches gently; a curve turned back on keeps its own.
+        let degrees = if look.curve == 0.0 {
+            cutlass_editor::CURVE_START
+        } else {
+            look.curve
+        };
+        send(shell, |shell| shell.set_text_curve(!on, degrees));
+    }
+    if header.open {
+        body(ui, |ui| {
+            let _ = style_tiles(ui, &["Arc"], 0, paint_curve_tile);
+            let most = cutlass_model::MAX_CURVE;
+            let degrees = look.curve.round();
+            let changed = setting_row(shell, ui, KeyedSetting::TextStyle(Style::Curve), on, |ui| {
+                slider(ui, state, "curve", "Strength", degrees, -most..=most, |v| {
+                    format!("{v:.0}°")
+                })
+            });
+            // Moving the strength bends the lines, on or not.
+            if let Some(value) = changed {
+                send(shell, |shell| {
+                    shell.set_text_curve(true, value.round().clamp(-most, most))
+                });
+            }
+        });
+    }
 }
 
 /// The Background section's body: its two shapes, color, opacity, round
@@ -3132,6 +3162,32 @@ fn paint_background_tile(painter: &egui::Painter, rect: Rect, index: usize) {
     }
     painter.galley(first, top, Color32::WHITE);
     painter.galley(second, low, Color32::WHITE);
+}
+
+/// "ABCDE" standing on an arch, each letter turned to follow it.
+fn paint_curve_tile(painter: &egui::Painter, rect: Rect, _: usize) {
+    let font = FontId::proportional(12.0);
+    let letters = ['A', 'B', 'C', 'D', 'E'];
+    let radius = 20.0_f32;
+    // The arch's middle sits a little below the tile's, its letters above.
+    let centre = rect.center() + Vec2::new(0.0, radius - 4.0);
+    for (at, letter) in letters.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let turn = (at as f32 - 2.0) * 0.38;
+        let foot = centre + Vec2::new(turn.sin(), -turn.cos()) * radius;
+        let galley = painter.layout_no_wrap(letter.to_string(), font.clone(), Color32::WHITE);
+        let size = galley.size();
+        // The letter turns about its foot's middle, where it meets the arch.
+        let corner = Vec2::new(-size.x / 2.0, -size.y);
+        let (sin, cos) = turn.sin_cos();
+        let turned = Vec2::new(
+            corner.x * cos - corner.y * sin,
+            corner.x * sin + corner.y * cos,
+        );
+        painter.add(
+            egui::epaint::TextShape::new(foot + turned, galley, Color32::WHITE).with_angle(turn),
+        );
+    }
 }
 
 /// "Aa" with rays of light streaming out of it, or a soft glow around it.

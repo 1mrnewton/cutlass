@@ -18,11 +18,13 @@
 mod api;
 mod latm;
 mod m4a;
+mod seek;
 mod shared;
 
 pub use api::{Demuxer, Muxer, StreamInfo};
 pub use latm::{LatmDemuxer, LatmMuxer};
 pub use m4a::{Mp4Demuxer, Mp4Muxer};
+pub use seek::{AdtsSeekFile, probe};
 pub use shared::{AdtsFile, LatmFile};
 
 use std::collections::VecDeque;

@@ -126,18 +126,54 @@ Encoder (`Vp9Encoder`, `EngineEncoder`):
   | libvpx-vp9, cpu-used 1 | 1.94 s | 3.02 s | 1.56 |
 
   The streams are byte for byte those of the scalar 16-bit path (speeds
-  2, 6 and 10, 4:2:0 and 4:4:4, lossy and lossless, 10 and 12 bits). The
-  inverse transforms' 16-bit residual is still the 64-bit lane path
-  (libvpx's `tran_high_t`), 2% of the 10-bit encode and 4% of a decode.
+  2, 6 and 10, 4:2:0 and 4:4:4, lossy and lossless, 10 and 12 bits).
   Decoding libvpx's 1080p 4:2:0 at 10 bits (200 frames of `mandelbrot`,
-  4 Mb/s, four tile columns), the decoder is within reach of FFmpeg but
-  behind it: 1.44 to 1.58 s on one core against FFmpeg's 1.28 to 1.30 s
-  (5.78 s before the kernels), and 0.55 to 0.58 s on four threads against
-  0.51 to 0.54 s (1.63 to 1.69 s before), medians of five and seven runs
-  on a busy machine; part of the difference is the copy of each picture
-  into the little-endian bytes of `Picture`, which FFmpeg's test program
-  does not make, and the 8-bit decoder is level with FFmpeg on the same
-  stream at 8 bits (1.0 s each on one core). A lossless frame no longer
+  4 Mb/s, four tile columns), the decoder is now slightly ahead of
+  FFmpeg's `vp9` on one core (medians 2 to 4% lower) and ahead on four
+  threads, with the same pictures. Medians of interleaved runs on a
+  shared VM with AVX-VNNI (two sessions, 17 and 19 runs on one core, 15
+  and 15 on four threads; single runs vary by ±10%):
+
+  | 10-bit, 1080p | Cutlass | Before | FFmpeg | Cutlass faster |
+  | --- | ---: | ---: | ---: | --- |
+  | 1 core | 1.23 / 1.30 s | 1.50 / 1.68 s | 1.28 / 1.32 s | 15 of 17, 12 of 19 (1 tie) |
+  | 4 threads | 0.47 / 0.56 s | 0.60 / 0.66 s | 0.56 / 0.61 s | 13 of 15, 13 of 15 (1 tie) |
+
+  The 8-bit decoder is unchanged by this, within the noise (1.03 s
+  before and 0.99 s after on the same stream at 8 bits, 15 interleaved
+  runs; FFmpeg 1.02 s). What moved the 10-bit decode, from 5.78 s on one core before
+  the 16-bit kernels:
+  - The 16-bit kernels for interpolation, the loop filter and the SADs
+    (1.44 to 1.58 s).
+  - Pictures go out as views of the decoder's own planes, as 8-bit ones
+    do (the little-endian bytes of the `u16` samples, on a little-endian
+    target), instead of a copy into tight rows: 6% of a one-core decode.
+  - The inverse transforms run on the 8-bit path's 8-wide `i32` lanes,
+    not libvpx's 64-bit `tran_high_t`, for every block whose
+    coefficients' magnitudes sum to at most a bound per size (39 000 to
+    77 000). A test derives the bound from the transforms themselves, run
+    on bounds of each input's weight in every value they make, so below
+    it no sum, product or rounding leaves `i32` and the two lane widths
+    give the same values; above it the 64-bit lanes run as before.
+  - The reference rows of the next inter block 32 wide or more are hinted
+    into the cache while the current one is predicted
+    (`cutlass_simd::vp9::prefetch`): a 64×64 block reads 71 rows a stride
+    apart, more than the hardware prefetchers follow, and at 10 bits
+    twice the bytes; about 5%. Smaller blocks and 8-bit pictures lost
+    more than they gained and take no hints.
+  - The interpolation kernel holds sums to the range in 32 bits against a
+    constant top (the compiler otherwise added a clamp of its own around
+    each pack), interleaves each pair of source rows once, puts the odd
+    outputs across into the high halves instead of interleaving and
+    packing, and has an AVX-VNNI build (`vpdpwssd`, chosen at run time):
+    a 64×64 2-D prediction in cache from 0.46 to 0.37 ns a sample.
+  - The 16-bit loop filter skips the filters no line of an edge takes,
+    and stores only what can have changed.
+
+  What is left is spread out: on the first 60 frames Cutlass runs 2.83 G
+  instructions (on AVX2 alone) against FFmpeg's 2.39 G, nearly half of
+  them in interpolation and the loop filter, and the interpolation's time is
+  still partly waiting on the reference rows. A lossless frame no longer
   lets an inter block drop its residual (both its costs are zero there,
   so the skip bit's probability decided): lossless with alt-refs came
   back inexact before, at 8 bits too.
@@ -535,11 +571,12 @@ the picture moves too far for one picture to stand for the interval.
   and against the realtime presets), and its fastest speed takes libvpx
   realtime's time at equal bitrate with much better quality; tile columns
   limit how well 4 threads share a 720p frame. The decoder is level with FFmpeg on 4 threads on 4:2:0 and
-  1.1–1.25× its time on one core. Its 8-bit pictures go out without a
-  copy, as shared views of the decoder's own planes at their padded
-  stride (`Plane::samples` is a `Samples`, copied only on a first write;
-  `Plane::packed` gives the visible rows); high-bit-depth pictures are
-  still packed into new buffers.
+  1.1–1.25× its time on one core. Its pictures go out without a copy, as
+  shared views of the decoder's own planes at their padded stride
+  (`Plane::samples` is a `Samples`, copied only on a first write;
+  `Plane::packed` gives the visible rows); 10- and 12-bit samples are
+  their little-endian bytes (copied into new buffers only on a
+  big-endian target).
 
 ## Specifications
 

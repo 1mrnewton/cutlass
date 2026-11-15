@@ -1326,6 +1326,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
+    /// A real model on this machine that takes pictures, named by
+    /// `CUTLASS_LOCAL_MODEL`, looks at a red frame and says its color. Run
+    /// by hand with Ollama up:
+    /// `CUTLASS_LOCAL_MODEL=gemma4 cargo test -p cutlass real_local_model_looks -- --ignored`.
+    #[test]
+    #[ignore = "needs a model that takes pictures running on this machine"]
+    fn a_real_local_model_looks_at_a_frame_and_says_what_it_sees() {
+        let (mut shell, path) = shell_with_project("real-look");
+        let red = serde_json::json!({
+            "expected_revision": 0,
+            "requests": [{ "op": "set_canvas_background", "color": "#ff0000" }],
+        });
+        let set = shell.run_agent_tool(
+            &ToolCall {
+                id: "bg".to_owned(),
+                name: "draft.apply".to_owned(),
+                arguments: red.to_string(),
+            },
+            &[],
+        );
+        assert!(!set.outcome.is_error, "{}", set.outcome.content);
+        let mut settings = cutlass_settings::Settings::default();
+        if let Ok(name) = std::env::var("CUTLASS_LOCAL_MODEL") {
+            settings.model.local_name = name;
+        }
+        let mut assistant = Assistant {
+            draft: "Look at the frame at the playhead with player_look. Do not read the \
+                    project. Which one color fills the frame? Answer with the color's name."
+                .to_owned(),
+            ..Assistant::default()
+        };
+        let seen = shell.assistant_view();
+        assistant.send(&settings, "", &seen);
+        let deadline = Instant::now() + Duration::from_secs(600);
+        while assistant.poll(&mut shell) {
+            assert!(Instant::now() < deadline, "the model did not answer");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        eprintln!("{:#?}", assistant.entries);
+        assert!(
+            assistant.entries.iter().any(|entry| matches!(
+                entry,
+                Entry::Step { tool, failed: false, .. } if tool == "player.look"
+            )),
+            "{:?}",
+            assistant.entries
+        );
+        // It can only know the color from the picture.
+        assert!(
+            matches!(assistant.entries.last(), Some(Entry::Said(text)) if text.to_lowercase().contains("red")),
+            "{:?}",
+            assistant.entries
+        );
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
     /// A real model on this machine, named by `CUTLASS_LOCAL_MODEL`, reads
     /// the project and answers. Run by hand with Ollama up:
     /// `CUTLASS_LOCAL_MODEL=gemma4 cargo test -p cutlass real_local -- --ignored`.

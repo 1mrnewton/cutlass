@@ -287,6 +287,7 @@ pub(crate) fn input_hint(tool: &str) -> &'static str {
         "package.ensure" => "A package id.",
         "export.start" => "new <path> | replace <path>",
         "skill.load" => "A skill name, or what the skill is for, or list.",
+        "agent.delegate" => "The task in full, as the helper sees nothing of this chat.",
         _ => "",
     }
 }

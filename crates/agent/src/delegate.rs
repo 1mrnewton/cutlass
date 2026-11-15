@@ -1,7 +1,8 @@
 //! `agent.delegate`: hand a look-up to a child with its own conversation.
 //!
 //! The child starts fresh, may only read (the draft, settings, media, the
-//! catalog, skills, finished speech and tracking jobs, and sandbox scripts),
+//! catalog, skills, a speech job's words, and sandbox scripts; not
+//! `track.poll`, which writes the path it reads),
 //! and gives back its last answer as the tool's text. Its tool calls run
 //! through the same sink as the parent's, so the host shows them and asks
 //! for any allow the same way. The parent's conversation keeps only the
@@ -20,7 +21,6 @@ pub const CHILD_TOOLS: &[&str] = &[
     "settings.get",
     "media.probe",
     "speech.poll",
-    "track.poll",
     "catalog.search",
     "skill.load",
     "sandbox.run",
@@ -83,6 +83,10 @@ where
         let outcome = self.help(call.arguments.trim());
         self.inner.helper_finished(call, &outcome);
         outcome
+    }
+
+    fn heard(&mut self, message: &crate::model::Message) {
+        self.inner.heard(message);
     }
 }
 
@@ -155,9 +159,10 @@ mod tests {
     use crate::model::{Completion, LocalModel, ToolCall};
     use crate::tools::TOOL_NAMES;
 
-    /// Records each call and answers with its name.
+    /// Records each call and answers with its name, and counts the
+    /// messages it hears.
     #[derive(Default)]
-    struct Seen(Vec<String>);
+    struct Seen(Vec<String>, Vec<crate::model::Message>);
 
     impl ToolSink for Seen {
         fn run_tool(&mut self, call: &ToolCall) -> ToolOutcome {
@@ -166,6 +171,10 @@ mod tests {
                 content: format!("ran {}", call.name),
                 is_error: false,
             }
+        }
+
+        fn heard(&mut self, message: &crate::model::Message) {
+            self.1.push(message.clone());
         }
     }
 
@@ -226,6 +235,35 @@ mod tests {
             })
             .collect();
         assert_eq!(heard, ["c1 and c2 are under a second."]);
+        // The host heard the parent's turn, message by message, and none of
+        // the child's.
+        assert_eq!(sink.inner_mut().1, turn.messages);
+    }
+
+    #[test]
+    fn a_helper_may_not_poll_a_track_which_writes_and_its_task_is_in_the_schema() {
+        assert!(!CHILD_TOOLS.contains(&"track.poll"));
+        let mut parent = LocalModel::scripted(vec![calls(DELEGATE, "follow it"), says("done")]);
+        let child = || {
+            Ok::<_, String>(LocalModel::scripted(vec![
+                calls("track.poll", "track-1"),
+                says("could not"),
+            ]))
+        };
+        let mut sink = Delegating::new(Seen::default(), child, 8);
+        run(
+            &mut parent,
+            &mut sink,
+            8,
+            "go",
+            &definitions_with_delegate(),
+        )
+        .unwrap();
+        assert!(sink.inner_mut().0.is_empty(), "the poll reached the host");
+        // The model is told where the task goes.
+        let schema = crate::mcp_server::input_schema(DELEGATE);
+        assert_eq!(schema["required"], serde_json::json!(["input"]));
+        assert_eq!(schema["properties"]["input"]["type"], "string");
     }
 
     #[test]

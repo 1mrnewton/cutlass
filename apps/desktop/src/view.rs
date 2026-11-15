@@ -20394,8 +20394,11 @@ mod tests {
     }
 
     /// The title's Basic page with its placement, blend and style sections
-    /// open: each switch turns its part on and off, and each section
-    /// paints. With `CUTLASS_RENDER_DIR` set the pictures are kept there.
+    /// open: each switch turns its part on and off, and the window paints
+    /// with every part styled. With `CUTLASS_RENDER_DIR` set the steps
+    /// between are painted too and every picture is kept there. A frame
+    /// this tall is slow on a runner with no GPU, which has 10 seconds for
+    /// each, so only the styled one is painted without it.
     #[test]
     fn the_title_style_sections_switch_and_paint() {
         use cutlass_model::SegmentId;
@@ -20436,6 +20439,9 @@ mod tests {
         let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
         let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
             harness.run_steps(8);
+            if keep.is_none() && name != "title-parts-styled" {
+                return;
+            }
             let image = harness.render().expect("the renderer draws the window");
             if let Some(dir) = &keep {
                 std::fs::create_dir_all(dir).unwrap();

@@ -2120,6 +2120,69 @@ mod tests {
         assert_eq!(asked, vec![loud(0), loud(1_000), loud(2_000)]);
     }
 
+    #[test]
+    fn a_clip_that_starts_and_ends_inside_frames_is_written_at_its_own_times() {
+        // Frames of a millisecond, four samples each at 4 kHz. The clip
+        // starts half a frame in and ends half a frame into the third.
+        let mut request = gif_request(TimeRange::new(0, 4_000));
+        request.frame_rate = FrameRate {
+            numerator: 1_000,
+            denominator: 1,
+        };
+        request.audio = Some(audio_settings());
+        let mut draft = color_draft(240, 135, 1_000_000);
+        push_sound(&mut draft, "loud", 1.0, 0, false);
+        draft.tracks.last_mut().expect("audio").segments[0].target = TimeRange::new(500, 2_000);
+        let mut mux = MuxDraft::new(
+            ContainerId::Isobmff,
+            MuxMode::Progressive,
+            IndexPlace::End,
+            Limits::standard(),
+        );
+        let mut device = SoftwareDevice::new();
+        let factory = factory();
+        let mut asked = Vec::new();
+        let result = export(
+            ExportRun {
+                draft: &draft,
+                device: &mut device,
+                request: &request,
+                factory: &factory,
+                readers: readers(),
+                mux: &mut mux,
+                destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
+            },
+            |_, when, frames, _| {
+                asked.push((when, frames));
+                // A whole frame of tone, whatever was asked for.
+                Ok(ClipPcm::Ready(tone(1.0)))
+            },
+        )
+        .expect("audio");
+        // The clip is asked for from its own start, and for no more than is
+        // left of it.
+        assert_eq!(
+            asked,
+            vec![(Micros(500), 2), (Micros(1_000), 4), (Micros(2_000), 2)]
+        );
+        // Every frame is still four samples, so later sound stays in time.
+        let samples: Vec<f32> = result
+            .finished
+            .packets()
+            .iter()
+            .filter(|packet| packet.stream() == 1)
+            .flat_map(samples_of)
+            .collect();
+        let mut want = vec![0.0; 2];
+        want.extend([1.0; 8]);
+        want.extend([0.0; 6]);
+        assert_eq!(samples, want);
+    }
+
     /// A mux that notes which stream each packet arrives on, in order.
     struct Order {
         inner: MuxDraft,

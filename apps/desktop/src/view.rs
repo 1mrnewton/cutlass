@@ -1132,7 +1132,10 @@ fn project_bar(
             )
         })
         .inner
-        .on_hover_text("Ask Cutlass to edit (⌘J)");
+        .on_hover_text(format!(
+            "Ask Cutlass to edit ({})",
+            cutlass_settings::keys_words("primary+j", MAC)
+        ));
     if response.clicked() {
         view.assistant.open = !open;
     }
@@ -1584,7 +1587,9 @@ fn settings_keys(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
             shell.set_notice(format!(
                 "{} took {} from {}",
                 cutlass_settings::action_label(action),
-                cutlass_settings::keys_label(&chord, MAC),
+                // In words: a notice is text, and the fonts lack a Mac's
+                // key symbols.
+                cutlass_settings::keys_words(&chord, MAC),
                 cutlass_settings::action_label(&displaced)
             ));
         }
@@ -1779,12 +1784,14 @@ fn settings_window(
                         ui.add_space(4.0);
                         for (action, label) in cutlass_settings::ACTIONS {
                             let keys = settings.keys_for(action);
+                            // Bound keys are drawn as the menus draw them,
+                            // over a button with no words of its own.
                             let shown = if view.recording == Some(*action) {
-                                "Press keys…".to_owned()
+                                "Press keys…"
                             } else if keys.is_empty() {
-                                "None".to_owned()
+                                "None"
                             } else {
-                                cutlass_settings::keys_label(keys, MAC)
+                                ""
                             };
                             // The keys line up in a column at the right
                             // edge, with room kept for Clear on every row.
@@ -1810,14 +1817,27 @@ fn settings_window(
                                     {
                                         clear = Some(*action);
                                     }
-                                    if ui
+                                    let button = ui
                                         .add(
                                             ui::Button::new(shown)
                                                 .min_size(Vec2::new(SHORTCUT_KEYS, 20.0)),
                                         )
-                                        .on_hover_text("Click, then press the new keys")
-                                        .clicked()
-                                    {
+                                        .on_hover_text("Click, then press the new keys");
+                                    if shown.is_empty() {
+                                        let drawn = crate::menu::shortcut_for(keys);
+                                        let width = crate::menu::keys_width(ui.ctx(), &drawn);
+                                        crate::menu::paint_keys(
+                                            ui.ctx(),
+                                            ui.painter(),
+                                            Pos2::new(
+                                                button.rect.center().x + width * 0.5,
+                                                button.rect.center().y,
+                                            ),
+                                            &drawn,
+                                            tokens::TEXT,
+                                        );
+                                    }
+                                    if button.clicked() {
                                         record = Some(*action);
                                     }
                                 },
@@ -19674,10 +19694,9 @@ mod tests {
         ]));
         let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
         let window = Vec2::new(1280.0, 800.0);
-        // The Mac key names (the arrows) are not in the test fonts.
-        let builder = egui_kittest::Harness::builder()
-            .with_size(window)
-            .allow_missing_glyphs();
+        // The harness refuses a glyph the fonts lack, so a page that
+        // wrote a key as a symbol they do not have would fail here.
+        let builder = egui_kittest::Harness::builder().with_size(window);
         let builder = if keep.is_some() {
             builder.wgpu()
         } else {

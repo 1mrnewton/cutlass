@@ -85,13 +85,16 @@ pub fn describe(names: &[&str]) -> Result<String, String> {
         }
         return Ok(out);
     }
+    // A name that is not a kind does not cost the ones that are: they are
+    // answered, and the wrong name is named with the kinds it may mean.
     let mut out = String::new();
+    let mut unknown = String::new();
     for name in names {
         let wanted = name.trim().to_ascii_lowercase().replace('-', "_");
         let Some(op) = all.iter().find(|op| op.name == wanted) else {
-            return Err(format!(
-                "no request kind {name}; draft.query \"ops\" lists them all"
-            ));
+            unknown.push_str(&no_kind(name, &wanted));
+            unknown.push('\n');
+            continue;
         };
         out.push_str(op.name);
         out.push_str(": ");
@@ -100,7 +103,68 @@ pub fn describe(names: &[&str]) -> Result<String, String> {
         out.push_str(op.example);
         out.push_str("\n\n");
     }
+    if out.is_empty() {
+        return Err(unknown.trim_end().to_owned());
+    }
+    if !unknown.is_empty() {
+        out.insert_str(0, &format!("{unknown}\n"));
+    }
     Ok(out.trim_end().to_owned())
+}
+
+/// The most kinds a wrong name is answered with.
+const CLOSE_KINDS: usize = 5;
+
+/// What a caller is told about `name`, which is not a kind: the kinds
+/// that share its words, so `set_background` finds `set_canvas_background`.
+pub(crate) fn no_kind(name: &str, wanted: &str) -> String {
+    let close = close_kinds(wanted);
+    if close.is_empty() {
+        format!("no request kind {name}; draft.query \"ops\" lists them all")
+    } else {
+        format!(
+            "no request kind {name}; it may be one of: {}. draft.query \"ops\" lists them all",
+            close.join(", ")
+        )
+    }
+}
+
+/// The kinds whose names share the most words with `wanted`, closest
+/// first. `set`, `add` and `remove` start too many names to count.
+fn close_kinds(wanted: &str) -> Vec<&'static str> {
+    let telling = |word: &&str| !matches!(*word, "" | "set" | "add" | "remove");
+    let words: Vec<&str> = wanted.split('_').filter(telling).collect();
+    let mut scored: Vec<(usize, &'static str)> = ops()
+        .into_iter()
+        .filter_map(|op| {
+            let shared = op
+                .name
+                .split('_')
+                .filter(telling)
+                .filter(|word| words.contains(word))
+                .count();
+            (shared > 0).then_some((shared, op.name))
+        })
+        .collect();
+    // Most shared words first, then the shorter name, then by name.
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then(a.1.len().cmp(&b.1.len()))
+            .then(a.1.cmp(b.1))
+    });
+    scored
+        .into_iter()
+        .take(CLOSE_KINDS)
+        .map(|(_, name)| name)
+        .collect()
+}
+
+/// The example of the kind `name`, when it is one.
+pub(crate) fn example_of(name: &str) -> Option<&'static str> {
+    ops()
+        .into_iter()
+        .find(|op| op.name == name)
+        .map(|op| op.example)
 }
 
 #[cfg(test)]
@@ -313,6 +377,43 @@ mod tests {
         let one = describe(&["remove"]).unwrap();
         let remove = ops().into_iter().find(|op| op.name == "remove").unwrap();
         assert!(one.contains(remove.about), "{one}");
+    }
+
+    #[test]
+    fn a_wrong_name_does_not_cost_the_kinds_that_are_right() {
+        // The look-up a model sent: five kinds, one of them made up.
+        let found = describe(&["add_shape", "set_background", "key_pose"]).unwrap();
+        let first = found.lines().next().unwrap();
+        assert!(
+            first.starts_with("no request kind set_background; it may be one of: "),
+            "{first}"
+        );
+        assert!(first.contains("set_canvas_background"), "{first}");
+        assert!(first.contains("set_text_background"), "{first}");
+        // The right ones are answered in full, with their JSON.
+        assert!(found.contains("\nadd_shape: "), "{found}");
+        assert!(found.contains("{\"op\":\"add_shape\""), "{found}");
+        assert!(found.contains("{\"op\":\"key_pose\""), "{found}");
+        // All of them wrong is an error, still with what each may mean.
+        let none = describe(&["set_background", "frobnicate"]).unwrap_err();
+        let lines: Vec<&str> = none.lines().collect();
+        assert_eq!(lines.len(), 2, "{none}");
+        assert!(lines[0].contains("set_canvas_background"), "{none}");
+        assert_eq!(
+            lines[1],
+            "no request kind frobnicate; draft.query \"ops\" lists them all"
+        );
+        // At most a handful of kinds are offered, the closest first.
+        let close = super::close_kinds("set_text_background_color");
+        assert_eq!(close.len(), super::CLOSE_KINDS);
+        // Two share two of its words; the shorter name comes first.
+        assert_eq!(close[..2], ["set_text_color", "set_text_background"]);
+        assert!(super::close_kinds("set").is_empty());
+        assert_eq!(
+            super::example_of("split").map(|example| example.starts_with("{\"op\":\"split\"")),
+            Some(true)
+        );
+        assert_eq!(super::example_of("fly"), None);
     }
 
     #[test]

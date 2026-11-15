@@ -1625,9 +1625,31 @@ fn parse_apply(arguments: &str) -> Result<Invocation, ToolError> {
             "draft.apply needs at least one request in requests".to_owned(),
         ));
     }
+    // Every request that does not read is named, not only the first: a
+    // caller that mends one at a time sends a long combo again for each.
     let mut requests = Vec::with_capacity(apply.requests.len());
+    let mut unread = Vec::new();
     for (index, value) in apply.requests.into_iter().enumerate() {
-        requests.push(read_request(index, value)?);
+        match read_request(index, value) {
+            Ok(request) => requests.push(request),
+            Err(error) => unread.push(error),
+        }
+    }
+    if !unread.is_empty() {
+        let count = unread.len();
+        let mut said: Vec<String> = unread.iter().take(UNREAD_NAMED).cloned().collect();
+        if count > UNREAD_NAMED {
+            said.push(format!("and {} more", count - UNREAD_NAMED));
+        }
+        let head = if count == 1 {
+            String::new()
+        } else {
+            format!("{count} requests do not read, so none was applied:\n")
+        };
+        return Err(ToolError::BadArguments(format!(
+            "{head}{}",
+            said.join("\n")
+        )));
     }
     Ok(Invocation::DraftApply(ApplyInput {
         request_id: apply.request_id.filter(|id| !id.is_empty()),
@@ -1641,27 +1663,34 @@ fn parse_apply(arguments: &str) -> Result<Invocation, ToolError> {
     }))
 }
 
-/// One request of a combo, or which one does not read and why.
-fn read_request(index: usize, value: serde_json::Value) -> Result<Request, ToolError> {
+/// The most requests that do not read a combo's answer names in full.
+const UNREAD_NAMED: usize = 12;
+
+/// One request of a combo, or which one does not read and why. A request
+/// of a known kind is answered with that kind's own JSON, so the caller
+/// can mend it without a look-up.
+fn read_request(index: usize, value: serde_json::Value) -> Result<Request, String> {
     let Some(op) = value
         .get("op")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
     else {
-        return Err(ToolError::BadArguments(format!(
+        return Err(format!(
             "request {index} has no \"op\"; each request names its kind, such as \
              {{\"op\":\"move\",...}}, and draft.query \"ops\" lists the kinds"
-        )));
+        ));
     };
-    if !crate::ops::ops().iter().any(|known| known.name == op) {
-        return Err(ToolError::BadArguments(format!(
-            "request {index}: no request kind {op}; draft.query \"ops\" lists them all"
-        )));
-    }
+    let Some(example) = crate::ops::example_of(&op) else {
+        return Err(format!(
+            "request {index}: {}",
+            crate::ops::no_kind(&op, &op.to_ascii_lowercase().replace('-', "_"))
+        ));
+    };
     let request: Request = serde_json::from_value(value.clone()).map_err(|error| {
-        ToolError::BadArguments(format!(
-            "request {index} {op}: {error}; draft.query \"ops {op}\" shows its fields"
-        ))
+        format!(
+            "request {index} {op}: {error}. It is written {example} \
+             (draft.query \"ops {op}\" says what each field does)"
+        )
     })?;
     // A field the kind does not have is read as nothing, and the caller
     // would take the request to have done what the field asked. It is
@@ -1675,11 +1704,11 @@ fn read_request(index: usize, value: serde_json::Value) -> Result<Request, ToolE
             let ignored = serde_json::from_value::<Request>(serde_json::Value::Object(probe))
                 .is_ok_and(|same| same == request);
             if ignored {
-                return Err(ToolError::BadArguments(format!(
-                    "request {index} {op} has no field {key}, so it would do nothing; \
-                     draft.query \"ops {op}\" shows its fields, and another request may be \
-                     the one that sets it"
-                )));
+                return Err(format!(
+                    "request {index} {op} has no field {key}, so it would do nothing. It is \
+                     written {example} (draft.query \"ops {op}\" says what each field does), \
+                     and another request may be the one that sets {key}"
+                ));
             }
         }
     }
@@ -2674,6 +2703,48 @@ mod tests {
             "{}",
             made_up.content
         );
+        // Every request that does not read is named at once, each with
+        // its kind's own JSON, and the ones that read are not run.
+        let several = run(r##"{"expected_revision":0,"requests":[
+                {"op":"split","segment_id":"a","at":500000,"right_id":"b"},
+                {"op":"key_pose","segment_id":"a","offset":0,"scale":1.2},
+                {"op":"set_shape_stroke","segment_id":"s","color":"#ffffff","width":4.0,"opacity":1.0},
+                {"op":"set_background","color":"#101010"}
+            ]}"##);
+        assert!(several.is_error);
+        let lines: Vec<&str> = several.content.lines().collect();
+        assert_eq!(lines.len(), 4, "{}", several.content);
+        assert_eq!(lines[0], "3 requests do not read, so none was applied:");
+        assert!(
+            lines[1].starts_with(
+                "request 1 key_pose: missing field `x`. It is written {\"op\":\"key_pose\""
+            ),
+            "{}",
+            lines[1]
+        );
+        assert!(lines[1].contains("\"rotation\""), "{}", lines[1]);
+        assert!(
+            lines[2].starts_with("request 2 set_shape_stroke: missing field `style`. It is written {\"op\":\"set_shape_stroke\""),
+            "{}",
+            lines[2]
+        );
+        // A wrong name is answered with the kinds it may mean.
+        assert!(
+            lines[3].starts_with("request 3: no request kind set_background; it may be one of: "),
+            "{}",
+            lines[3]
+        );
+        assert!(lines[3].contains("set_canvas_background"), "{}", lines[3]);
+        // A long list of them names the first and counts the rest.
+        let many: Vec<String> = (0..super::UNREAD_NAMED + 5)
+            .map(|_| r#"{"op":"key_pose","segment_id":"a","offset":0}"#.to_owned())
+            .collect();
+        let many = run(&format!(
+            r#"{{"expected_revision":0,"requests":[{}]}}"#,
+            many.join(",")
+        ));
+        assert_eq!(many.content.lines().count(), super::UNREAD_NAMED + 2);
+        assert!(many.content.ends_with("and 5 more"), "{}", many.content);
         let nameless = run(r#"{"expected_revision":0,"requests":[{"segment_id":"a"}]}"#);
         assert!(nameless.content.contains("request 0 has no \"op\""));
         let empty = run(r#"{"expected_revision":0,"requests":[]}"#);

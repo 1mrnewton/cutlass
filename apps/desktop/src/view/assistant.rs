@@ -2,7 +2,7 @@
 //! command box, and Stop. It takes the inspector's place while open.
 
 use egui::{
-    Align, Color32, FontId, Frame, Key, Layout, Margin, Rect, RichText, TextEdit, Ui, Vec2,
+    Align, Color32, FontId, Frame, Key, Label, Layout, Margin, Rect, RichText, TextEdit, Ui, Vec2,
 };
 
 use crate::assistant::{Assistant, Entry};
@@ -100,7 +100,7 @@ fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) -> Option<bool> {
         Entry::Ask { question, allowed } => {
             ui::Surface::outline(DONE).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.label(RichText::new(question).size(13.0).color(tokens::TEXT));
+                words(ui, RichText::new(question).size(13.0).color(tokens::TEXT));
                 ui.add_space(4.0);
                 match allowed {
                     None => {
@@ -131,15 +131,16 @@ fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) -> Option<bool> {
                     .padding(Margin::symmetric(10, 6))
                     .show(ui, |ui| {
                         ui.set_max_width(ui.available_width() * 0.85);
-                        ui.label(RichText::new(text).size(13.0).color(tokens::TEXT));
+                        words(ui, RichText::new(text).size(13.0).color(tokens::TEXT));
                     });
             });
         }
         Entry::Said(text) => {
-            ui.label(RichText::new(text).size(13.0).color(tokens::TEXT));
+            words(ui, RichText::new(text).size(13.0).color(tokens::TEXT));
         }
         Entry::Notice(text) => {
-            ui.label(
+            words(
+                ui,
                 RichText::new(text)
                     .size(12.0)
                     .italics()
@@ -163,14 +164,16 @@ fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) -> Option<bool> {
                 .default_open(false)
                 .show(ui, |ui| {
                     if !input.is_empty() {
-                        ui.label(
+                        words(
+                            ui,
                             RichText::new(short(input, 600))
                                 .font(FontId::monospace(11.0))
                                 .color(tokens::MUTED),
                         );
                     }
                     if let Some(result) = result {
-                        ui.label(
+                        words(
+                            ui,
                             RichText::new(short(result, 1200))
                                 .font(FontId::monospace(11.0))
                                 .color(if *failed { FAILED } else { tokens::TEXT }),
@@ -180,6 +183,12 @@ fn entry_row(ui: &mut Ui, index: usize, entry: &Entry) -> Option<bool> {
         }
     }
     decided
+}
+
+/// Words of the conversation. They can be selected and copied, though the
+/// rest of the window's labels cannot.
+fn words(ui: &mut Ui, text: RichText) {
+    ui.add(Label::new(text).selectable(true));
 }
 
 fn command_box(shell: &Shell, ui: &mut Ui, assistant: &mut Assistant) {
@@ -244,4 +253,84 @@ fn short(text: &str, most: usize) -> String {
     }
     let cut: String = line.chars().take(most).collect();
     format!("{cut}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Context, Event, Modifiers, OutputCommand, Pos2, RawInput, Rect, Vec2};
+
+    use super::entry_row;
+    use crate::assistant::Entry;
+
+    /// What one frame of `entries` copies after `events`, and where the
+    /// first entry was drawn.
+    fn frame(ctx: &Context, entries: &[Entry], events: Vec<Event>) -> (Vec<String>, Rect) {
+        let mut first = Rect::NOTHING;
+        let mut output = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0))),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                // The window turns selection off; the chat turns it back on.
+                ui.style_mut().interaction.selectable_labels = false;
+                for (index, entry) in entries.iter().enumerate() {
+                    let top = ui.cursor().min;
+                    let _ = entry_row(ui, index, entry);
+                    if index == 0 {
+                        first = Rect::from_min_max(top, ui.min_rect().max);
+                    }
+                }
+            },
+        );
+        output.textures_delta.clear();
+        let copied = output
+            .platform_output
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                OutputCommand::CopyText(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        (copied, first)
+    }
+
+    fn press(pos: Pos2, pressed: bool) -> Event {
+        Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    #[test]
+    fn an_answer_can_be_selected_and_copied() {
+        let ctx = Context::default();
+        let entries = [
+            Entry::Said("The playhead is at 1.5 s.".to_owned()),
+            Entry::Asked("thanks".to_owned()),
+        ];
+        let (_, said) = frame(&ctx, &entries, Vec::new());
+        let start = Pos2::new(said.left() + 1.0, said.center().y);
+        let end = Pos2::new(said.right() - 1.0, said.center().y);
+        let (copied, _) = frame(&ctx, &entries, vec![Event::PointerMoved(start)]);
+        assert!(copied.is_empty());
+        let _ = frame(&ctx, &entries, vec![press(start, true)]);
+        let _ = frame(&ctx, &entries, vec![Event::PointerMoved(end)]);
+        let _ = frame(&ctx, &entries, vec![press(end, false)]);
+        let (copied, _) = frame(&ctx, &entries, vec![Event::Copy]);
+        assert_eq!(copied, ["The playhead is at 1.5 s."]);
+    }
+
+    #[test]
+    fn copying_with_nothing_selected_copies_nothing() {
+        let ctx = Context::default();
+        let entries = [Entry::Said("Done.".to_owned())];
+        let _ = frame(&ctx, &entries, Vec::new());
+        let (copied, _) = frame(&ctx, &entries, vec![Event::Copy]);
+        assert!(copied.is_empty(), "{copied:?}");
+    }
 }

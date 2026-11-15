@@ -33,6 +33,7 @@ What is refused:
 - `seek` returns a `SeekLanding` with the landing time and `preroll_frames`, the number of earlier frames a decoder needs for the bit reservoir (9 for MPEG-1, 12 for MPEG-2 and MPEG-2.5).
 - `Mp3Mux::new(writer)` takes any `Write + Seek`. It implements this crate's `Mux` trait (`add_stream`, `write_packet`, `finish`, `cancel`) and `cutlass_container::Mux`. `set_trim` sets the encoder delay and padding and may be called until `finish`. `into_inner` returns the writer.
 - `probe(prefix)` returns `Probe::Matched`, `Probe::NeedMore` or `Probe::Reject`. A prefix that holds a whole ID3v2 tag matches; a bare frame matches only when a second compatible header follows it.
+- `id3v2_tag_bytes(header)` is the length of an ID3v2 tag from its first ten bytes, header and footer included, so a caller whose window ends inside the tag knows where the audio starts. It is `Ok(None)` when those bytes are not an ID3v2 header and `Limit` when the tag says it is longer than `MAX_ID3_BYTES`.
 
 ```rust
 use std::io::Cursor;

@@ -278,15 +278,38 @@ pub fn token_costs(fc: &FrameContext) -> Box<TokCosts> {
 
 /// The rate-distortion costs of one tx block (sample SSE plus lambda
 /// times bits): as coded, and dropped (no coefficients).
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct TxRd {
     coded: f32,
     dropped: f32,
+    /// The token bits (1/256) of the levels as coded, when the walk that
+    /// chose them counted them ([`NO_RATE`] otherwise), and above them
+    /// (from [`RATE_CTX`]) the first token's context it counted them at.
+    rate: u32,
+    /// The sample error alone, coded and dropped.
+    dist: (f32, f32),
 }
+
+impl Default for TxRd {
+    fn default() -> Self {
+        Self {
+            coded: 0.0,
+            dropped: 0.0,
+            rate: NO_RATE,
+            dist: (0.0, 0.0),
+        }
+    }
+}
+
+/// [`TxRd::rate`] not counted.
+const NO_RATE: u32 = u32::MAX;
+
+/// The shift of the context in [`TxRd::rate`].
+const RATE_CTX: u32 = 28;
 
 /// A tx block's coefficients: plane, size, position (4×4 units in the
 /// block), levels, end of block.
-type Tok = (usize, u8, usize, usize, Vec<i32>, usize);
+type Tok = (usize, u8, usize, usize, Vec<i32>, usize, u32);
 
 /// What coding a square changes, kept to try another way.
 struct Snap<P> {
@@ -367,6 +390,23 @@ const CAND_MARGIN_SPEED: u8 = 5;
 /// partition search whether or not it codes a residual.
 const BREAKOUT_SPEED: u8 = 5;
 
+/// From [`BREAKOUT_SPEED`], a whole block of this level or under (16×16 at
+/// 1, 32×32 at 2) that needs no residual ends the partition search: its
+/// quarters seldom win (at 16×16, 4% of the time on a grainy pan at
+/// 3 Mb/s, 1 to 3% on a still picture), and there are most of the
+/// partition search's trials under them (half of them on the pan). On the
+/// three clips of "Against FFmpeg's libvpx-vp9" in the README: 0.4 to 1
+/// point more bits at the same PSNR on the first, 1 to 5 fewer on the
+/// other two.
+const SKIP_SPLIT_LEVEL: usize = 2;
+
+/// From [`BREAKOUT_SPEED`], a whole block that keeps LAST's picture where
+/// it is (a zero vector, no residual) with an error under the
+/// quantizer's step squared over this a sample ends the partition search
+/// at any size (a still scene's blocks, which split only to code the same
+/// again in four).
+const STILL_BREAKOUT: f64 = 8.0;
+
 /// A whole block that needs no residual and keeps under this many times
 /// the picture's noise ([`super::FrameParams::noise`]) a sample ends the
 /// partition search: a split cannot predict noise better. Two passes on
@@ -412,6 +452,19 @@ const PRUNED_SUBPEL_SPEED: u8 = 5;
 /// with the next smaller transform ([`Tile::fast_block`]).
 const FAST_TX_SPEED: u8 = 7;
 
+/// From this speed an inter frame's block whose best candidate codes no
+/// residual does not try the next smaller transform: at 16×16 and under
+/// it wins 0.2 to 4% of the time there (5 to 17% at 32×32 and 64×64).
+/// A third fewer such trials on the README's clips (three fifths on its
+/// grainy pan); about a point more bits at the same PSNR-Y and averaged
+/// PSNR on its first clip, a point fewer on the second, ±1 on the third.
+const SKIP_TX_SPEED: u8 = 5;
+
+/// From this speed the trials of inter blocks are measured on their
+/// coefficients ([`TxRd::dist`]), not reconstructed: as many bits at the
+/// same PSNR, a few percent less time.
+const TX_DOMAIN_SPEED: u8 = 5;
+
 /// From this speed the search's trials take each coefficient's dead-zone
 /// level (costed as RD quantization costs it, with its end of block
 /// chosen); the blocks the search chooses are coded with RD quantization.
@@ -431,6 +484,52 @@ fn fast_tx_cap(speed: u8) -> u8 {
         8 => geom::TX_16X16,
         _ => TX_32X32,
     }
+}
+
+/// Copies `h` rows of `w` samples from `src` to `dst` (rows `ss` and `ds`
+/// apart), a fixed width at a time where it can, so that each row is a few
+/// vector moves rather than a call to `memcpy`.
+#[inline]
+fn copy_rows<P: Copy>(dst: &mut [P], ds: usize, src: &[P], ss: usize, w: usize, h: usize) {
+    #[inline(always)]
+    fn rows<P: Copy, const W: usize>(dst: &mut [P], ds: usize, src: &[P], ss: usize, h: usize) {
+        for r in 0..h {
+            if let (Some(d), Some(s)) = (
+                dst[r * ds..].first_chunk_mut::<W>(),
+                src[r * ss..].first_chunk::<W>(),
+            ) {
+                *d = *s;
+            }
+        }
+    }
+    match w {
+        64 => rows::<P, 64>(dst, ds, src, ss, h),
+        32 => rows::<P, 32>(dst, ds, src, ss, h),
+        16 => rows::<P, 16>(dst, ds, src, ss, h),
+        8 => rows::<P, 8>(dst, ds, src, ss, h),
+        4 => rows::<P, 4>(dst, ds, src, ss, h),
+        _ => {
+            for r in 0..h {
+                dst[r * ds..r * ds + w].copy_from_slice(&src[r * ss..r * ss + w]);
+            }
+        }
+    }
+}
+
+/// The sum of the squares of a residual (of samples up to 12 bits, a
+/// length that is a multiple of 16): sixteen squares at a time in 32 bits
+/// (at most 268 million), so that it runs in vector lanes.
+#[inline]
+fn sum_sq(res: &[i32]) -> i64 {
+    let mut total = 0i64;
+    for c in res.as_chunks::<16>().0 {
+        let mut part = 0u32;
+        for &r in c {
+            part += (r * r) as u32;
+        }
+        total += i64::from(part);
+    }
+    total
 }
 
 /// Plane `p`'s subsampling across and down.
@@ -494,6 +593,12 @@ pub struct Rdq {
     d_tail: Vec<f32>,
     eob_cost: Vec<f32>,
     energy: Vec<u8>,
+    /// Token bits (1/256) of the levels chosen so far, by scan position.
+    r_pref: Vec<u32>,
+    /// The end of block's bits at each scan position.
+    eob_bits: Vec<u32>,
+    /// A trial's levels, by scan position.
+    lv: Vec<u32>,
 }
 
 /// The superblock rows of one tile column coded on several threads at
@@ -649,6 +754,11 @@ pub struct Tile<'s, 't, 'r, 'v, P: EncPixel> {
     last_skip: (bool, f64),
     /// The costs of the tx block quantized last.
     rd: TxRd,
+    /// Whether the block being coded is a trial measured on its
+    /// coefficients (not reconstructed).
+    tx_dom: bool,
+    /// The summed [`TxRd::dist`] of the block's tx blocks.
+    dist_sum: (f32, f32),
     /// In a trial nothing is written or counted: bits add to `cost`
     /// (1/256 bits).
     trial: bool,
@@ -695,6 +805,9 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             v.resize(1025, 0.0);
         }
         rdq.energy.resize(1024, 0);
+        rdq.r_pref.resize(1025, 0);
+        rdq.eob_bits.resize(1025, 0);
+        rdq.lv.resize(1024, 0);
         Self {
             s,
             f,
@@ -731,6 +844,8 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             choice_skip: (false, 0.0),
             last_skip: (false, 0.0),
             rd: TxRd::default(),
+            tx_dom: false,
+            dist_sum: (0.0, 0.0),
             trial: false,
             cost: 0,
         }
@@ -1191,19 +1306,37 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // No split when the whole block needs no residual and its error is
         // under the quantizer's own noise (or the picture's, see
         // `FrameParams::noise`), or (from BREAKOUT_SPEED) codes one and its
-        // error is under half the quantizer's.
+        // error is under half the quantizer's. From BREAKOUT_SPEED too, a
+        // 16×16 or 32×32 block that needs no residual ends the search, and
+        // so does a 64×64 one that keeps LAST's picture where it is (see
+        // `SKIP_SPLIT_LEVEL`, `STILL_BREAKOUT`).
         if whole && best.1 == PARTITION_NONE && (none_skip.0 || s.speed >= BREAKOUT_SPEED) {
             let pixels = (n * 8 * n * 8) as f64;
             let step = f64::from(s.dq[0][0][1]) / 8.0;
+            let fast = s.speed >= BREAKOUT_SPEED;
             // A block that codes a residual stops the search at half that
-            // error (from BREAKOUT_SPEED: 6% of the time, 0.2% of the bits).
-            let div = if none_skip.0 { 24.0 } else { 48.0 };
+            // error (from BREAKOUT_SPEED: 6% of the time, 0.2% of the bits),
+            // and from BREAKOUT_SPEED one that codes none at two thirds
+            // more.
+            let div = match (none_skip.0, fast) {
+                (true, false) => 24.0,
+                (true, true) => 16.0,
+                (false, _) => 48.0,
+            };
             let noise = if none_skip.0 {
                 f64::from(s.noise) * pixels * NOISE_FLOOR
             } else {
                 0.0
             };
-            if none_skip.1 < (pixels * step * step / div).max(noise) {
+            let still = fast && none_skip.0 && {
+                let c = self.choice[Self::slot(row, col, bsize)];
+                c.refs[0] != INTRA_FRAME
+                    && c.refs[1] == INTRA_FRAME
+                    && c.mv == Mv::ZERO
+                    && none_skip.1 < pixels * step * step / STILL_BREAKOUT
+            };
+            let small_skip = fast && none_skip.0 && level <= SKIP_SPLIT_LEVEL;
+            if still || small_skip || none_skip.1 < (pixels * step * step / div).max(noise) {
                 self.restore(before + 1);
                 self.part[Self::node(row, col, level)] = PARTITION_NONE;
                 return best.0;
@@ -1250,10 +1383,18 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let mut best = (f64::INFINITY, 0usize);
         let mut last = usize::MAX;
         // The state after the best so far is kept in `slot + 1`.
+        // A block inside the frame is coded whole by each candidate (every
+        // sample predicted, or reconstructed, before it is read), so the
+        // samples the one before left need not be put back.
+        let inside = row + bh_mi <= s.mi_rows && col + bw_mi <= s.mi_cols;
         let try_one =
             |t: &mut Self, i: usize, b: &Blk, best: &mut (f64, usize), last: &mut usize| {
                 if *last != usize::MAX {
-                    t.restore(slot);
+                    if inside {
+                        t.restore_ctx(slot);
+                    } else {
+                        t.restore(slot);
+                    }
                 }
                 let c0 = t.cost;
                 let d = t.code_block(b);
@@ -1292,7 +1433,10 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let trial = s.second_pass
             && !self.choice_skip.0
             && (best.0 - self.choice_skip.1) / lam > TX_TRIAL_BITS * (bw_mi * bh_mi) as f64;
-        if s.speed < 6 || (s.intra_frame && s.speed < 9) || trial {
+        // From SKIP_TX_SPEED, not after an inter frame's best that codes
+        // no residual.
+        let smaller = s.speed < SKIP_TX_SPEED || s.intra_frame || !self.choice_skip.0;
+        if (s.speed < 6 && smaller) || (s.intra_frame && s.speed < 9) || trial {
             let b0 = cands[best.1];
             let tries = if s.speed < 4 { 2 } else { 1 };
             let mut tx = b0.tx;
@@ -1532,7 +1676,11 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         self.last_satd = scored.first().map_or(u64::MAX, |t| t.0);
         let k = match s.speed {
             0..=3 => 4,
-            4..=5 => 3,
+            4 => 3,
+            // (Inter frames' intra blocks seldom win: 4 to 15% of the
+            // blocks that try them.)
+            5 if !s.intra_frame => 2,
+            5 => 3,
             6 => 2,
             _ => 1,
         };
@@ -1561,9 +1709,10 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         }
         let pixels = (base.x_mis * base.y_mis * 64) as u64;
         // A mean error of more than a few levels a sample (from speed 6,
-        // eight: 5% of the time for 0 to 1% of the bits).
+        // eight: 5% of the time for 0 to 1% of the bits; at speed 5, seven).
         let per = match self.s.speed {
-            0..=5 => 5,
+            0..=4 => 5,
+            5 => 7,
             6..=7 => 8,
             _ => 12,
         } << (self.s.h.bit_depth - 8);
@@ -1704,11 +1853,12 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             _ => 1,
         };
         // From CAND_MARGIN_SPEED the candidates after the first stay only
-        // when their score is within a fifth of its: their trial seldom
-        // wins otherwise (13 to 17% of the time at speed 6, 0.2% of the
-        // bits).
+        // when their score is within a tenth of its: their trial seldom
+        // wins otherwise (13 to 17% of the time at speed 6 within a fifth,
+        // 0.2% of the bits; within a tenth, as many bits at the same PSNR
+        // on the README's three clips, a third fewer trials).
         let bound = if s.speed >= CAND_MARGIN_SPEED {
-            scored.first().map_or(0, |t| t.0) as f64 * 1.2
+            scored.first().map_or(0, |t| t.0) as f64 * 1.1
         } else {
             f64::INFINITY
         };
@@ -1971,14 +2121,34 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             let v = &mut views[p];
             let stride = v.stride;
             let src = v.at(y, x);
-            for r in 0..mh {
-                sn.pix[p][r * 64..r * 64 + mw].copy_from_slice(&src[r * stride..r * stride + mw]);
-            }
+            copy_rows(&mut sn.pix[p], 64, src, stride, mw, mh);
         }
     }
 
     /// Puts back what snapshot `k` kept.
     fn restore(&mut self, k: usize) {
+        self.restore_ctx(k);
+        let sn = &self.snaps[k];
+        let (row, col, nw, nh) = sn.at;
+        let views = self.rec.views();
+        #[allow(clippy::needless_range_loop)]
+        for p in 0..3 {
+            let (sx, sy) = plane_ss(self.s, p);
+            let (x, y, mw, mh) = (
+                (col * 8) >> sx,
+                (row * 8) >> sy,
+                (nw * 8) >> sx,
+                (nh * 8) >> sy,
+            );
+            let v = &mut views[p];
+            let stride = v.stride;
+            let dst = v.at(y, x);
+            copy_rows(dst, stride, &sn.pix[p], 64, mw, mh);
+        }
+    }
+
+    /// [`Tile::restore`] but for the samples, which stay as they are.
+    fn restore_ctx(&mut self, k: usize) {
         let sn = &self.snaps[k];
         let (row, col, nw, nh) = sn.at;
         self.cost = sn.cost;
@@ -2002,23 +2172,6 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         for r in 0..rows {
             let at = (row + r) * self.f.width + a;
             self.f.mvs[at..at + cols].copy_from_slice(&sn.mvs[r * 8..r * 8 + cols]);
-        }
-        let views = self.rec.views();
-        #[allow(clippy::needless_range_loop)]
-        for p in 0..3 {
-            let (sx, sy) = plane_ss(self.s, p);
-            let (x, y, mw, mh) = (
-                (col * 8) >> sx,
-                (row * 8) >> sy,
-                (nw * 8) >> sx,
-                (nh * 8) >> sy,
-            );
-            let v = &mut views[p];
-            let stride = v.stride;
-            let dst = v.at(y, x);
-            for r in 0..mh {
-                dst[r * stride..r * stride + mw].copy_from_slice(&sn.pix[p][r * 64..r * 64 + mw]);
-            }
         }
     }
 
@@ -2395,6 +2548,11 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         // (libvpx's static threshold: a prediction near enough codes no
         // residual.)
         let breakout = inter && !s.h.lossless && s.static_thresh > 0 && self.static_skip(&b);
+        // From TX_DOMAIN_SPEED, a trial of an inter block measures its
+        // error on the coefficients (libvpx's transform-domain distortion)
+        // and leaves the prediction unreconstructed.
+        self.tx_dom =
+            self.trial && inter && !s.h.lossless && (TX_DOMAIN_SPEED..9).contains(&s.speed);
         let (coded, dropped) = if breakout {
             (0.0, 0.0)
         } else {
@@ -2415,7 +2573,9 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             let j_coded = coded + lam * bit_cost(false, p) as f32;
             if j_skip <= j_coded {
                 eobs = 0;
-                self.rec.predict_inter(&rec);
+                if !self.tx_dom {
+                    self.rec.predict_inter(&rec);
+                }
             }
         }
         b.skip = eobs == 0;
@@ -2446,8 +2606,19 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         if b.skip {
             self.reset_nz(&b);
         } else {
-            for (plane, tx, r4, c4, levels, eob) in toks.iter() {
-                self.write_coefs(&b, *plane, *tx, *r4, *c4, levels, *eob);
+            for (plane, tx, r4, c4, levels, eob, rate) in toks.iter() {
+                if self.trial
+                    && *rate != NO_RATE
+                    && (*rate >> RATE_CTX) as usize == self.first_ctx(&b, *plane, *tx, *r4, *c4)
+                {
+                    // A trial's bits, as the walk that chose them counted
+                    // (when the tx blocks before it in the block left the
+                    // context it was counted at).
+                    self.cost += u64::from(*rate & ((1 << RATE_CTX) - 1));
+                    self.set_nz(&b, *plane, *tx, *r4, *c4, *eob);
+                } else {
+                    self.write_coefs(&b, *plane, *tx, *r4, *c4, levels, *eob);
+                }
             }
         }
         self.toks = toks;
@@ -2512,7 +2683,19 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             }
         }
         self.coded_skip = b.skip;
-        if self.trial { self.block_sse(&b) } else { 0.0 }
+        if self.tx_dom && !breakout {
+            self.tx_dom = false;
+            f64::from(if b.skip {
+                self.dist_sum.1
+            } else {
+                self.dist_sum.0
+            })
+        } else if self.trial {
+            self.tx_dom = false;
+            self.block_sse(&b)
+        } else {
+            0.0
+        }
     }
 
     /// Whether an inter block's prediction is near enough the source for
@@ -2616,6 +2799,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
     ) -> (f32, f32) {
         let s = self.s;
         let mut sums = (0.0f32, 0.0f32);
+        self.dist_sum = (0.0, 0.0);
         let intra = b.refs[0] == INTRA_FRAME;
         let lossless = s.h.lossless;
         for plane in 0..3 {
@@ -2666,7 +2850,9 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                     *eobs += eob;
                     sums.0 += self.rd.coded;
                     sums.1 += self.rd.dropped;
-                    toks.push((plane, tx, r, c, levels, eob));
+                    self.dist_sum.0 += self.rd.dist.0;
+                    self.dist_sum.1 += self.rd.dist.1;
+                    toks.push((plane, tx, r, c, levels, eob, self.rd.rate));
                     c += step;
                 }
                 r += step;
@@ -2730,14 +2916,12 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let dqi = usize::from(plane > 0);
         let (dc_q, ac_q) = (s.dq[self.seg][dqi][0], s.dq[self.seg][dqi][1]);
         let shift = u32::from(tx == 3);
+        let res_ss = sum_sq(&self.res[..n * n]);
         let quiet = {
             // No coefficient can reach 0.3 of a step when the residual's
             // energy (by Parseval, through the transform's gain) is below
             // that: every level is zero, as quantizing would find.
-            let ss: i64 = self.res[..n * n]
-                .iter()
-                .map(|&r| i64::from(r) * i64::from(r))
-                .sum();
+            let ss = res_ss;
             let step = (dc_q.min(ac_q) as f32) / (1 << shift) as f32;
             let g = super::tx::gain(usize::from(tx));
             let floor = 0.3 * step;
@@ -2753,13 +2937,12 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         } else if quiet {
             // Dropped and coded cost the same: the samples' error and an end
             // of block.
-            let ss: i64 = self.res[..n * n]
-                .iter()
-                .map(|&r| i64::from(r) * i64::from(r))
-                .sum();
+            let ss = res_ss;
             self.rd = TxRd {
                 coded: ss as f32,
                 dropped: ss as f32,
+                rate: NO_RATE,
+                dist: (ss as f32, ss as f32),
             };
             rd_eob = Some(0);
         } else {
@@ -2793,6 +2976,8 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 rd_eob = Some(eob);
             }
         }
+        // Dropped, the error is the residual's own, exactly.
+        self.rd.dist.1 = res_ss as f32;
         // End of block in the decoder's scan; drop what lies past it.
         let (scan, _) = scan_pair(tx, kind);
         let eob = rd_eob.unwrap_or_else(|| {
@@ -2807,7 +2992,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             eob
         });
         // Dequantize as the decoder does, and reconstruct.
-        if eob > 0 {
+        if eob > 0 && !self.tx_dom {
             let mut max_r = 0;
             let mut max_c = 0;
             {
@@ -2874,6 +3059,8 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             TxRd {
                 coded: (d_coded + lam * (bits + 1.0) * g) / g,
                 dropped: (d_all + lam * g) / g,
+                rate: NO_RATE,
+                dist: (d_coded / g, d_all / g),
             },
             any,
         )
@@ -2900,7 +3087,12 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         levels: &mut [i32],
     ) -> (usize, TxRd) {
         let mut q = std::mem::take(&mut self.rdq);
-        let out = self.rd_levels_in(&mut q, plane, tx, kind, x, y, intra, one, levels);
+        // Compiled for AVX2 where the CPU has it: the walk's sums and
+        // compares run in vector lanes.
+        let out = cutlass_simd::vp9::wide(
+            #[inline(always)]
+            || self.rd_levels_in(&mut q, plane, tx, kind, x, y, intra, one, levels),
+        );
         self.rdq = q;
         out
     }
@@ -3004,14 +3196,17 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             }
         }
         if last_sig == 0 {
-            let e0 = lam * bit_cost(false, probs[0][ctx0][0]) as f32;
-            levels[..max].fill(0);
+            // (`levels` comes zeroed.)
+            let r0 = bit_cost(false, probs[0][ctx0][0]);
+            let e0 = lam * r0 as f32;
             let d = (d_all + e0) / g;
             return (
                 0,
                 TxRd {
                     coded: d,
                     dropped: d,
+                    rate: r0 | (ctx0 as u32) << RATE_CTX,
+                    dist: (d_all / g, d_all / g),
                 },
             );
         }
@@ -3025,24 +3220,86 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let j_pref = &mut q.j_pref[..1025];
         let d_tail = &mut q.d_tail[..1025];
         let eob_cost = &mut q.eob_cost[..1025];
+        let r_pref = &mut q.r_pref[..1025];
+        let eob_bits = &mut q.eob_bits[..1025];
         j_pref[0] = 0.0;
+        r_pref[0] = 0;
         let mut last_nz = 0usize;
         let mut d_rest = d_all;
-        // A trial's walk: each level the dead zone's, costed as below.
+        // A trial's walk: each level the dead zone's, costed as below. A
+        // level does not depend on the contexts, so the levels (and their
+        // context energies) come first, and then each position's context
+        // is known without waiting on the one before it. The walk stops
+        // where no end of block past it can cost less than the best so
+        // far (in the dead zone's last level, on a still picture's 32×32
+        // blocks, it ends at a sixth of the scan where the levels do).
         if one {
+            let lv = &mut q.lv[..1024];
+            // The least a nonzero level's token costs in each band (in any
+            // context, after any token).
+            let mut rmin = [u32::MAX; 6];
+            for (m, b) in rmin.iter_mut().zip(tc.iter()) {
+                for c in b {
+                    *m = (*m).min(c[3]).min(c[4]);
+                }
+            }
+            // What the nonzero levels could still gain at most: each one's
+            // error under its value's, less the least its token costs.
+            let mut gain_left = 0.0f32;
             for k in 0..last_sig {
-                let rc = usize::from(scan[k]);
+                let r0 = if k == 0 { 0.5 } else { rnd };
+                let a = a_nat[usize::from(tpos[k])];
+                let l = (a + r0) as u32;
+                lv[k] = l;
+                energy[usize::from(scan[k])] = ENERGY[l.min(11) as usize];
+                if l != 0 {
+                    let st = if k == 0 { steps[0] } else { steps[1] };
+                    let (z, e) = (a * st, (a - l as f32) * st);
+                    let g = z * z - e * e - lam * rmin[usize::from(bands[k])] as f32;
+                    gain_left += g.max(0.0);
+                }
+            }
+            // Float sums differ from exact ones by a little: an end is
+            // ruled out only by a margin over that.
+            let gain_all = gain_left;
+            // The ends of block worth trying, as the walk reaches them: none,
+            // and after each nonzero level. Each is the cost so far, the
+            // error of what follows, and the end's own cost; kept with the
+            // bits up to it.
+            let end0 = tc[usize::from(bands[0])][ctx0][1];
+            let dropped = d_all + lam * end0 as f32;
+            let mut best = (dropped, 0usize, end0);
+            let mut jp = 0.0f32;
+            let mut rp = 0u32;
+            let mut prev_nz = false;
+            let mut walked = last_sig;
+            for k in 0..last_sig {
                 let t = usize::from(tpos[k]);
-                let (st, r0) = if k == 0 {
-                    (steps[0], 0.5)
-                } else {
-                    (steps[1], rnd)
-                };
+                let st = if k == 0 { steps[0] } else { steps[1] };
+                if k > 0 {
+                    ctx = (1
+                        + usize::from(energy[usize::from(nb[2 * k])])
+                        + usize::from(energy[usize::from(nb[2 * k + 1])]))
+                        >> 1;
+                }
                 let a = a_nat[t];
                 let band = usize::from(bands[k]);
                 let tcs = &tc[band][ctx];
-                eob_cost[k] = lam * tcs[1] as f32;
-                let l = (a + r0) as u32;
+                if prev_nz {
+                    let j = jp + d_rest + lam * tcs[1] as f32;
+                    if j < best.0 {
+                        best = (j, k, rp + tcs[1]);
+                    }
+                }
+                // No end past here costs less than this: zeros cost their
+                // tokens, and nonzero levels gain at most `gain_left`.
+                if jp + d_rest - gain_left - best.0
+                    > 1e-3 * (jp + d_rest.abs() + gain_all + best.0.abs()) + 1e-3
+                {
+                    walked = k;
+                    break;
+                }
+                let l = lv[k];
                 let more = if prev_zero { 0 } else { tcs[0] };
                 let r = more
                     + match l {
@@ -3061,29 +3318,59 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                     };
                 let e = (a - l as f32) * st;
                 let z = a * st;
-                j_pref[k + 1] = j_pref[k] + (e * e + lam * r as f32);
-                d_tail[k] = d_rest;
+                jp += e * e + lam * r as f32;
+                rp += r;
                 d_rest -= z * z;
-                levels[t] = if l == 0 {
-                    0
-                } else {
-                    last_nz = k + 1;
-                    if self.fcoef[t] < 0.0 {
+                if l != 0 {
+                    levels[t] = if self.fcoef[t] < 0.0 {
                         -(l as i32)
                     } else {
                         l as i32
-                    }
-                };
-                energy[rc] = ENERGY[l.min(11) as usize];
+                    };
+                    let g = z * z - e * e - lam * rmin[band] as f32;
+                    gain_left -= g.max(0.0);
+                }
                 prev_zero = l == 0;
-                if k + 1 < max {
+                prev_nz = l != 0;
+            }
+            if walked == last_sig && prev_nz {
+                let k = last_sig;
+                let end = if k < max {
                     ctx = (1
-                        + usize::from(energy[usize::from(nb[2 * (k + 1)])])
-                        + usize::from(energy[usize::from(nb[2 * (k + 1) + 1])]))
+                        + usize::from(energy[usize::from(nb[2 * k])])
+                        + usize::from(energy[usize::from(nb[2 * k + 1])]))
                         >> 1;
+                    tc[usize::from(bands[k])][ctx][1]
+                } else {
+                    0
+                };
+                let j = jp + d_rest.max(0.0) + lam * end as f32;
+                if j < best.0 {
+                    best = (j, k, rp + end);
                 }
             }
-        } else {
+            let (jb, eob, rate) = best;
+            let last_sig = walked;
+            for &t in &tpos[eob..last_sig] {
+                levels[usize::from(t)] = 0;
+            }
+            let dist = (((jb - lam * rate as f32) / g).max(0.0), d_all / g);
+            let rate = if rate >> RATE_CTX == 0 {
+                rate | (ctx0 as u32) << RATE_CTX
+            } else {
+                NO_RATE
+            };
+            return (
+                eob,
+                TxRd {
+                    coded: jb / g,
+                    dropped: dropped / g,
+                    rate,
+                    dist,
+                },
+            );
+        }
+        {
             for k in 0..last_sig {
                 let rc = usize::from(scan[k]);
                 let t = usize::from(tpos[k]);
@@ -3092,6 +3379,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 let band = usize::from(bands[k]);
                 let tcs = &tc[band][ctx];
                 eob_cost[k] = lam * tcs[1] as f32;
+                eob_bits[k] = tcs[1];
                 let lo = a as u32;
                 let more = if prev_zero { 0 } else { tcs[0] };
                 let d_of = |l: u32| {
@@ -3115,6 +3403,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                     }
                 };
                 let mut best = (f32::MAX, 0u32);
+                let mut best_r = 0u32;
                 let only;
                 let cands: &[u32] = if one {
                     only = [(a + if k == 0 { 0.5 } else { rnd }) as u32];
@@ -3129,11 +3418,14 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                     &[lo, lo + 1]
                 };
                 for &l in cands {
-                    let j = d_of(l) + lam * r_of(l) as f32;
+                    let r = r_of(l);
+                    let j = d_of(l) + lam * r as f32;
                     if j < best.0 {
                         best = (j, l);
+                        best_r = r;
                     }
                 }
+                r_pref[k + 1] = r_pref[k] + best_r;
                 let l = best.1;
                 let v = self.fcoef[t];
                 levels[t] = if v < 0.0 { -(l as i32) } else { l as i32 };
@@ -3155,11 +3447,10 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         }
         d_tail[last_sig] = d_rest.max(0.0);
         if last_sig < max {
-            eob_cost[last_sig] = lam * tc[usize::from(bands[last_sig])][ctx][1] as f32;
+            eob_bits[last_sig] = tc[usize::from(bands[last_sig])][ctx][1];
+            eob_cost[last_sig] = lam * eob_bits[last_sig] as f32;
         }
-        for &t in &tpos[last_sig..max] {
-            levels[usize::from(t)] = 0;
-        }
+        // (Past `last_sig`, `levels` is still zero as it came.)
         // The best end: after a nonzero level, or none.
         let mut best = (d_tail[0] + eob_cost[0], 0usize);
         for e in 1..=last_nz {
@@ -3176,9 +3467,19 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         for &t in &tpos[eob..last_sig] {
             levels[usize::from(t)] = 0;
         }
+        // With the end of block's own bits where it is coded.
+        let rate = r_pref[eob] + if eob < max { eob_bits[eob] } else { 0 };
+        let dist = (((best.0 - lam * rate as f32) / g).max(0.0), d_tail[0] / g);
+        let rate = if rate >> RATE_CTX == 0 {
+            rate | (ctx0 as u32) << RATE_CTX
+        } else {
+            NO_RATE
+        };
         let zero = TxRd {
             coded: best.0 / g,
             dropped: (d_tail[0] + eob_cost[0]) / g,
+            rate,
+            dist,
         };
         (eob, zero)
     }
@@ -3733,18 +4034,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         eob: usize,
     ) {
         let s = self.s;
-        let (sx, sy) = plane_ss(self.s, plane);
-        let n = 1usize << tx;
-        let a = (((b.col - self.col0) * 2) >> sx) + c4;
-        let l = (((b.row * 2) & 15) >> sy) + r4;
-        let (_, _, vw, vh) = self.visible(b, plane);
-        let anz = self.f.above_nz[plane][a..(a + n).min(self.f.above_nz[plane].len())]
-            .iter()
-            .any(|&v| v != 0);
-        let lnz = self.left_nz[plane][l..(l + n).min(16)]
-            .iter()
-            .any(|&v| v != 0);
-        let mut ctx = usize::from(anz) + usize::from(lnz);
+        let mut ctx = self.first_ctx(b, plane, tx, r4, c4);
         let intra = b.refs[0] == INTRA_FRAME;
         let kind = if intra && plane == 0 && !s.h.lossless && tx != TX_32X32 {
             geom::intra_tx_type(if b.bsize < BLOCK_8X8 {
@@ -3829,6 +4119,33 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             }
             self.put_coef(0, probs[band][ctx][0], coef_flat(ti, pi, ri, band, ctx, 0));
         }
+        self.set_nz(b, plane, tx, r4, c4, eob);
+    }
+
+    /// The context of a tx block's first token, from the nonzero contexts
+    /// of its neighbours.
+    fn first_ctx(&self, b: &Blk, plane: usize, tx: u8, r4: usize, c4: usize) -> usize {
+        let (sx, sy) = plane_ss(self.s, plane);
+        let n = 1usize << tx;
+        let a = (((b.col - self.col0) * 2) >> sx) + c4;
+        let l = (((b.row * 2) & 15) >> sy) + r4;
+        let anz = self.f.above_nz[plane][a..(a + n).min(self.f.above_nz[plane].len())]
+            .iter()
+            .any(|&v| v != 0);
+        let lnz = self.left_nz[plane][l..(l + n).min(16)]
+            .iter()
+            .any(|&v| v != 0);
+        usize::from(anz) + usize::from(lnz)
+    }
+
+    /// The nonzero contexts a tx block leaves (as [`Tile::write_coefs`]
+    /// does).
+    fn set_nz(&mut self, b: &Blk, plane: usize, tx: u8, r4: usize, c4: usize, eob: usize) {
+        let (sx, sy) = plane_ss(self.s, plane);
+        let n = 1usize << tx;
+        let a = (((b.col - self.col0) * 2) >> sx) + c4;
+        let l = (((b.row * 2) & 15) >> sy) + r4;
+        let (_, _, vw, vh) = self.visible(b, plane);
         let on = u8::from(eob > 0);
         let above = &mut self.f.above_nz[plane];
         for i in 0..n {
@@ -4339,13 +4656,25 @@ fn search_in<P: EncPixel>(
     // Every whole sample within two of the diamond's choice.
     if s.speed <= 6 {
         let c = best;
-        for dr in -2..=2 {
-            for dc in -2..=2 {
-                if (dr, dc) == (0, 0) {
-                    continue;
+        let rr = 2;
+        // Four at a time (the source rows read once), taken in the same
+        // order as one at a time.
+        let mut pts = [(0i32, 0i32); 24];
+        let mut np = 0;
+        for dr in -rr..=rr {
+            for dc in -rr..=rr {
+                if (dr, dc) != (0, 0) && np < pts.len() {
+                    pts[np] = (c.0 + dr, c.1 + dc);
+                    np += 1;
                 }
-                let (r, cc) = (c.0 + dr, c.1 + dc);
-                if let Some(v) = sad_ref(src, rp, (x, y, w, h), r, cc)
+            }
+        }
+        for q in pts[..np].chunks(4) {
+            let mut four = [q[0]; 4];
+            four[..q.len()].copy_from_slice(q);
+            let v4 = sad4_ref(src, rp, (x, y, w, h), four, i32::MAX);
+            for (&(r, cc), v) in q.iter().zip(v4) {
+                if let Some(v) = v
                     && v < best_sad
                 {
                     best_sad = v;

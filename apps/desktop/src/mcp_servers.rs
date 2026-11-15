@@ -235,9 +235,12 @@ pub struct Remote {
 impl Remote {
     fn new(url: &str) -> Result<Self, McpError> {
         let url = url.trim();
-        if !(url.starts_with("https://") || url.starts_with("http://")) {
+        // Tool arguments go to this address: over https, or in the clear
+        // only to this machine.
+        if !(url.starts_with("https://") || on_this_machine(url)) {
             return Err(McpError::Transport(format!(
-                "the server's address must start with https://, not {url}"
+                "the server's address must start with https:// (or http:// for one on this \
+                 machine), not {url}"
             )));
         }
         Ok(Self {
@@ -293,6 +296,25 @@ impl Remote {
             .pop_front()
             .ok_or_else(|| McpError::Transport(format!("{} sent no answer", self.url)))
     }
+}
+
+/// Whether `url` is plain http to a loopback address.
+fn on_this_machine(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = match authority.strip_prefix('[') {
+        // An IPv6 address in brackets, with or without a port.
+        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
+        None => authority
+            .rsplit_once(':')
+            .map_or(authority, |(host, _)| host),
+    };
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 /// The JSON-RPC messages in a reply body: one object, a batch, or the
@@ -386,6 +408,39 @@ done
         let error = servers.call("local", "tools/list", "").unwrap_err();
         assert!(error.to_string().contains("did not start"), "{error}");
         assert!(servers.call("other", "tools/list", "").is_err());
+    }
+
+    #[test]
+    fn a_remote_server_is_reached_over_https_or_on_this_machine_only() {
+        let mut settings = Settings::default();
+        for (name, url) in [
+            ("clear", "http://example.com/mcp"),
+            ("spoof", "http://localhost.example.com/mcp"),
+            ("file", "ftp://example.com/mcp"),
+        ] {
+            settings.mcp_servers.push(McpServer {
+                name: name.to_owned(),
+                enabled: true,
+                kind: McpServer::REMOTE.to_owned(),
+                url: url.to_owned(),
+                ..McpServer::default()
+            });
+        }
+        let mut servers = McpServers::default();
+        servers.configure(&settings.mcp_servers);
+        for name in ["clear", "spoof", "file"] {
+            let error = servers.call(name, "tools/list", "").unwrap_err();
+            assert!(error.to_string().contains("https://"), "{name}: {error}");
+        }
+        for (url, local) in [
+            ("http://127.0.0.1:8080/mcp", true),
+            ("http://localhost/mcp", true),
+            ("http://[::1]:9000/mcp", true),
+            ("http://10.0.0.5/mcp", false),
+            ("https://127.0.0.1/mcp", false),
+        ] {
+            assert_eq!(super::on_this_machine(url), local, "{url}");
+        }
     }
 
     #[test]

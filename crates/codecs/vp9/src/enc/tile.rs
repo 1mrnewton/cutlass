@@ -223,8 +223,8 @@ pub struct Shared<'a, P> {
     /// Token costs (1/256 bit) by tx size, plane type, inter, band and
     /// context, from the frame's probabilities: see [`token_costs`].
     pub tok: &'a TokCosts,
-    /// See [`super::FrameParams::tx_trial`].
-    pub tx_trial: bool,
+    /// See [`super::FrameParams::second_pass`].
+    pub second_pass: bool,
 }
 
 /// The context energy of a level (libvpx `vp9_pt_energy_class`): 0, 1, 2,
@@ -359,7 +359,7 @@ const CAND_MARGIN_SPEED: u8 = 5;
 /// partition search whether or not it codes a residual.
 const BREAKOUT_SPEED: u8 = 5;
 
-/// With [`super::FrameParams::tx_trial`], the bits (in 1/256) a block's
+/// With [`super::FrameParams::second_pass`], the bits (in 1/256) a block's
 /// best mode takes per 8×8 above which it also tries the next smaller
 /// transform: 64 bits, a bit a sample. On 720p with cuts between
 /// synthetic and grainy scenes, a second pass at speed 6 takes 3 to 7% off
@@ -372,6 +372,19 @@ pub const TX_TRIAL_BITS: f64 = 64.0 * 256.0;
 /// How much more a bit of chroma coefficients weighs in RD quantization
 /// than one of luma.
 const CHROMA_RATE: f32 = 1.0 / 0.7;
+
+/// With [`super::FrameParams::second_pass`], up to speed 6, how many of
+/// the best inter candidates by luma SAD and vector rate are ranked again
+/// with their chroma's SAD added ([`Tile::uv_sad`]). On a grainy pan of a
+/// fractal whose detail is much of it in chroma, several vectors and
+/// references predict the luma alike while only some predict the chroma
+/// whole (a vector of whole luma samples is at a half chroma sample when
+/// it is odd, which the filters blur). Two passes, against libvpx's: on
+/// the pan, 4% fewer bits at the same averaged PSNR (0.6% more at the
+/// same PSNR-Y); 1.6% / 2% fewer at the same PSNR-Y / averaged on the clip
+/// from a fractal to `testsrc2`, 2% / 1% more on the one from a still
+/// picture; about 5% more time.
+pub const UV_RANK: usize = 4;
 
 /// From this speed the sub-sample refinement tries, of the four diagonals,
 /// only the one between the better of up and down and of left and right.
@@ -1038,7 +1051,7 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
                 try_one(self, i, &b, &mut best, &mut last);
             }
         }
-        let trial = s.tx_trial
+        let trial = s.second_pass
             && !self.choice_skip.0
             && (best.0 - self.choice_skip.1) / lam > TX_TRIAL_BITS * (bw_mi * bh_mi) as f64;
         if s.speed < 6 || (s.intra_frame && s.speed < 9) || trial {
@@ -1431,6 +1444,25 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
             self.compound_cands(base, (x, y, w, h), &searched, &mut scored);
         }
         scored.sort_by_key(|t| t.0);
+        if s.second_pass && s.speed <= 6 && scored.len() > 1 {
+            let n = UV_RANK.min(scored.len());
+            let mut uv = [0u64; UV_RANK];
+            let all = scored[..n].iter().zip(&mut uv).all(|(t, u)| {
+                self.uv_sad(x, y, w, h, t.1.refs, [t.1.mv, t.1.mv2])
+                    .map(|v| *u = v)
+                    .is_some()
+            });
+            // (Near the picture's edges, where a window leaves its
+            // reference, luma alone.)
+            if all {
+                for (t, u) in scored[..n].iter_mut().zip(uv) {
+                    t.0 += u;
+                }
+                scored[..n].sort_by_key(|t| t.0);
+            }
+        }
+        // (With chroma's SAD in it, the best score also asks for intra
+        // more often where chroma predicts poorly.)
         self.last_sad = scored.first().map_or(u64::MAX, |t| t.0);
         let k = match s.speed {
             0..=3 => 3,
@@ -1594,6 +1626,71 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         self.pred = pred;
         self.mctmp = tmp;
         out
+    }
+
+    /// The SAD of both chroma planes' prediction of the luma block at
+    /// `(x, y)`, `w`×`h`, from `refs` (the second `INTRA_FRAME` when
+    /// single) at `mvs` (luma eighths), with the real filters. `None` when
+    /// a window leaves its reference or the chroma is under 4×4.
+    fn uv_sad(
+        &mut self,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        refs: [u8; 2],
+        mvs: [Mv; 2],
+    ) -> Option<u64> {
+        let s = self.s;
+        let (sx, sy) = plane_ss(s, 1);
+        let (cx, cy, cw, ch) = (x >> sx, y >> sy, w >> sx, h >> sy);
+        if cw < 4 || ch < 4 {
+            return None;
+        }
+        let mut pred = std::mem::take(&mut self.pred);
+        let mut tmp = std::mem::take(&mut self.mctmp);
+        let filter = &crate::dsp::mc::FILTERS[usize::from(geom::EIGHTTAP)];
+        let n = if refs[1] == INTRA_FRAME { 1 } else { 2 };
+        let mut total = Some(0u64);
+        'planes: for p in 1..3 {
+            for k in 0..n {
+                let c = self.rec.ctx();
+                let Some(rp) = c.refs[usize::from(refs[k]) - 1].as_ref() else {
+                    total = None;
+                    break 'planes;
+                };
+                let ((data, stride), (rw, rh)) =
+                    (rp.buf.plane(p), (rp.dims.w[p] as i32, rp.dims.h[p] as i32));
+                // Sixteenths of a sample of the plane, as the decoder
+                // scales a luma vector.
+                let mr = (i32::from(mvs[k].row) * 2) >> sy;
+                let mc = (i32::from(mvs[k].col) * 2) >> sx;
+                let (bx, by) = (cx as i32 + (mc >> 4), cy as i32 + (mr >> 4));
+                if bx < 3 || by < 3 || bx + cw as i32 + 4 > rw || by + ch as i32 + 4 > rh {
+                    total = None;
+                    break 'planes;
+                }
+                crate::dsp::mc::predict(
+                    &mut pred,
+                    cw,
+                    data,
+                    by as usize * stride + bx as usize,
+                    stride,
+                    (cw, ch),
+                    ((mc & 15) as usize, (mr & 15) as usize),
+                    filter,
+                    (1 << s.h.bit_depth) - 1,
+                    k == 1,
+                    &mut tmp,
+                );
+            }
+            let (src, ss) = (s.src.planes[p], s.src.strides[p]);
+            total =
+                total.map(|t| t + u64::from(P::sad(&src[cy * ss + cx..], ss, &pred, cw, cw, ch)));
+        }
+        self.pred = pred;
+        self.mctmp = tmp;
+        total
     }
 
     // State snapshots ------------------------------------------------------

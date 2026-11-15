@@ -37,18 +37,50 @@ pub fn ops() -> Vec<Op> {
         .collect()
 }
 
-/// `draft.query ops`: every kind with what it does, one to a line.
-/// `draft.query ops split add_text`: those kinds with an example each.
+/// What a request kind does, without its fields' ranges, refusals and
+/// side notes: `about` up to its first `;`, `: ` or sentence end outside
+/// brackets. The whole listing is read at the start of most conversations,
+/// and at full length it is half of a small model's context.
+fn summary(about: &str) -> &str {
+    let mut depth = 0usize;
+    for (at, letter) in about.char_indices() {
+        match letter {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            ';' if depth == 0 => return &about[..at],
+            ':' | '.' if depth == 0 => {
+                let rest = &about[at + 1..];
+                let ends = if letter == ':' {
+                    rest.starts_with(' ')
+                } else {
+                    rest.is_empty()
+                        || rest
+                            .strip_prefix(' ')
+                            .is_some_and(|next| next.starts_with(char::is_uppercase))
+                };
+                if ends {
+                    return &about[..at];
+                }
+            }
+            _ => {}
+        }
+    }
+    about
+}
+
+/// `draft.query ops`: every kind with what it does in a clause, one to a
+/// line. `draft.query ops split add_text`: those kinds in full, with an
+/// example each.
 pub fn describe(names: &[&str]) -> Result<String, String> {
     let all = ops();
     if names.is_empty() {
         let mut out = String::from(
-            "Request kinds for draft.apply. Ask draft.query \"ops <name> ...\" for the JSON of any of them.\n",
+            "Request kinds for draft.apply, each in a clause. draft.query \"ops <name> ...\" gives a kind's fields, their ranges, what it refuses and its JSON: read it before you send one.\n",
         );
         for op in &all {
             out.push_str(op.name);
             out.push_str(": ");
-            out.push_str(op.about);
+            out.push_str(summary(op.about));
             out.push('\n');
         }
         return Ok(out);
@@ -234,6 +266,53 @@ mod tests {
             all.len(),
             failed.join("\n")
         );
+    }
+
+    #[test]
+    fn the_listing_gives_each_kind_a_clause_and_the_named_ones_in_full() {
+        use super::summary;
+        assert_eq!(
+            summary("Take a clip off the timeline; its dependents go."),
+            "Take a clip off the timeline"
+        );
+        assert_eq!(
+            summary("Turn one lane flag on or off; bit is 1 mute."),
+            "Turn one lane flag on or off"
+        );
+        // A break inside brackets is not the end of the clause.
+        assert_eq!(
+            summary("Turn by degrees (negative turns clockwise; 90 is a quarter). More."),
+            "Turn by degrees (negative turns clockwise; 90 is a quarter)"
+        );
+        assert_eq!(
+            summary("Play at 2.0 times. Its length halves."),
+            "Play at 2.0 times"
+        );
+        assert_eq!(
+            summary("Link it (e.g. a caption) to its clip"),
+            "Link it (e.g. a caption) to its clip"
+        );
+        assert_eq!(summary("Set the mode: one of a, b"), "Set the mode");
+        let all = describe(&[]).unwrap();
+        let whole: usize = ops().iter().map(|op| op.about.len()).sum();
+        assert!(all.len() < whole * 2 / 3, "{} of {whole}", all.len());
+        for op in ops() {
+            let line = all
+                .lines()
+                .find(|line| line.starts_with(&format!("{}: ", op.name)))
+                .unwrap_or_else(|| panic!("{} is not listed", op.name));
+            let clause = &line[op.name.len() + 2..];
+            assert!(clause.len() >= 8, "{line}");
+            assert!(op.about.starts_with(clause), "{line}");
+            // Brackets opened in the clause are closed in it.
+            let open = clause.matches(['(', '[']).count();
+            let close = clause.matches([')', ']']).count();
+            assert_eq!(open, close, "{line}");
+        }
+        // Asked for by name, a kind is told in full.
+        let one = describe(&["remove"]).unwrap();
+        let remove = ops().into_iter().find(|op| op.name == "remove").unwrap();
+        assert!(one.contains(remove.about), "{one}");
     }
 
     #[test]

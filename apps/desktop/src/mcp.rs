@@ -557,6 +557,11 @@ pub(crate) struct Probe;
 
 impl Media for Probe {
     fn probe(&mut self, path: &str) -> Result<MediaInfo, String> {
+        if path.starts_with('~') {
+            return Err(format!(
+                "{path}: give the file's full path, from the root, not one starting with ~"
+            ));
+        }
         match cutlass_probe::probe(Path::new(path)).map_err(|error| error.to_string())? {
             cutlass_probe::Probed::Video {
                 meta,
@@ -731,6 +736,8 @@ mod tests {
             "photo"
         );
         assert!(super::Probe.probe("/no/such/file.mp4").is_err());
+        let home = super::Probe.probe("~/Movies/a.mp4").unwrap_err();
+        assert!(home.contains("full path"), "{home}");
     }
 
     fn answers(output: Vec<u8>) -> Vec<Value> {

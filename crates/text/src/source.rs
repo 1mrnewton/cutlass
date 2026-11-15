@@ -254,7 +254,9 @@ pub struct TextSource {
     /// runs; empty for lines across.
     columns: Vec<f32>,
     /// The box behind the letters, in picture pixels.
-    background: Option<Area>,
+    /// The boxes behind the letters, in picture pixels: one, or one for
+    /// each line.
+    background: Vec<Area>,
     origin_x: f32,
     origin_y: f32,
     width: u32,
@@ -704,7 +706,7 @@ impl TextSource {
         self.origin_y -= more_y;
         self.width = width;
         self.height = height;
-        if let Some(area) = self.background.as_mut() {
+        for area in &mut self.background {
             area.left += more_x;
             area.right += more_x;
             area.top += more_y;
@@ -860,7 +862,7 @@ impl TextSource {
                 rings: &rings,
                 shadows: &shadows,
                 shape: &shape,
-                background: self.background,
+                background: &self.background,
                 boxes: &self.boxes,
                 origin: (self.origin_x, self.origin_y),
                 width: self.width as usize,
@@ -1219,13 +1221,14 @@ fn covers(range: &TimeRange, time: Micros) -> bool {
 }
 
 /// The picture's origin and size around the letters and their style, and
-/// the box behind the letters in picture pixels.
+/// the boxes behind the letters in picture pixels: one around them all, or
+/// one around each line's.
 fn picture_bounds(
     mesh: &TextMesh,
     style: &Style,
     font_size: f32,
     shadows: &[Shadow],
-) -> Result<(f32, f32, u32, u32, Option<Area>), TextError> {
+) -> Result<(f32, f32, u32, u32, Vec<Area>), TextError> {
     let mut min_x = f32::MAX;
     let mut min_y = f32::MAX;
     let mut max_x = f32::MIN;
@@ -1248,7 +1251,7 @@ fn picture_bounds(
         max_y = max_y.max(glyph.y + glyph.height);
     }
     if !any {
-        return Ok((0.0, 0.0, 1, 1, None));
+        return Ok((0.0, 0.0, 1, 1, Vec::new()));
     }
     let cells = Area {
         left: min_x,
@@ -1273,16 +1276,48 @@ fn picture_bounds(
     if rgba_len(width, height).is_none() {
         return Err(TextError::Limit);
     }
-    let background = style.background.as_ref().map(|back| {
-        let behind = back.area(cells, font_size);
-        Area {
-            left: behind.left - left,
-            top: behind.top - top,
-            right: behind.right - left,
-            bottom: behind.bottom - top,
-        }
+    let background = style.background.as_ref().map_or_else(Vec::new, |back| {
+        let fronts = if back.lines {
+            line_cells(mesh)
+        } else {
+            vec![cells]
+        };
+        fronts
+            .into_iter()
+            .map(|front| {
+                let behind = back.area(front, font_size);
+                Area {
+                    left: behind.left - left,
+                    top: behind.top - top,
+                    right: behind.right - left,
+                    bottom: behind.bottom - top,
+                }
+            })
+            .collect()
     });
     Ok((left, top, width, height, background))
+}
+
+/// The box each line's drawn glyph cells cover, in the order the lines
+/// come.
+fn line_cells(mesh: &TextMesh) -> Vec<Area> {
+    let mut lines: Vec<(u32, Area)> = Vec::new();
+    for glyph in &mesh.glyphs {
+        if glyph.width <= 0.0 || glyph.height <= 0.0 {
+            continue;
+        }
+        let cell = Area {
+            left: glyph.x,
+            top: glyph.y,
+            right: glyph.x + glyph.width,
+            bottom: glyph.y + glyph.height,
+        };
+        match lines.iter_mut().find(|(line, _)| *line == glyph.line) {
+            Some((_, area)) => *area = area.union(cell),
+            None => lines.push((glyph.line, cell)),
+        }
+    }
+    lines.into_iter().map(|(_, area)| area).collect()
 }
 
 fn edge(value: f32) -> Result<u32, TextError> {
@@ -2119,6 +2154,88 @@ mod tests {
         // Style 0 is no background, whatever its color.
         boxed.background_style = 0;
         assert_eq!(picture(&boxed).0, plain_w);
+    }
+
+    #[test]
+    fn a_box_for_each_line_hugs_that_lines_letters() {
+        let mut boxed = material("AAAA\nA");
+        boxed.background_style = 1;
+        boxed.background_color = "#00FF00".to_owned();
+        boxed.background_width = 0.2;
+        boxed.background_height = 0.1;
+        let (width, height, whole) = picture(&boxed);
+        let green = |rgba: &[u8], x: u32, y: u32| {
+            let at = ((y * width + x) * 4) as usize;
+            rgba[at..at + 4] == [0, 255, 0, 255]
+        };
+        // The box's own corners, inside the picture's room for the glyph
+        // cells.
+        let (mut right, mut bottom, mut top) = (0, 0, height);
+        for y in 0..height {
+            for x in 0..width {
+                if green(&whole, x, y) {
+                    right = right.max(x);
+                    bottom = bottom.max(y);
+                    top = top.min(y);
+                }
+            }
+        }
+        // Low on the right, beside the short line: one box fills it.
+        let (x, y) = (right - 2, bottom - 2);
+        assert!(green(&whole, x, y));
+        boxed.background_lines = true;
+        let (lined_w, lined_h, lined) = picture(&boxed);
+        // The long line sets the picture's size either way.
+        assert_eq!((lined_w, lined_h), (width, height));
+        assert!(!green(&lined, x, y));
+        // The long line still has its box, high on the right.
+        assert!(green(&lined, right - 2, top + 2));
+        let greens = |rgba: &[u8]| {
+            rgba.chunks(4)
+                .filter(|pixel| *pixel == [0, 255, 0, 255])
+                .count()
+        };
+        assert!(greens(&lined) > 0 && greens(&lined) < greens(&whole));
+        // A translucent box where two lines' boxes meet is one coat.
+        boxed.background_alpha = 0.5;
+        boxed.background_height = 0.6;
+        let (_, _, overlapped) = picture(&boxed);
+        assert!(
+            overlapped
+                .chunks(4)
+                .filter(|pixel| pixel[3] > 0 && pixel[1] > 0 && pixel[0] == 0)
+                .all(|pixel| pixel[3] <= 128),
+            "a meeting of boxes is drawn twice"
+        );
+    }
+
+    #[test]
+    fn an_offset_moves_the_background_and_grows_the_picture() {
+        let mut boxed = material("A");
+        boxed.background_style = 1;
+        boxed.background_color = "#00FF00".to_owned();
+        boxed.background_width = 0.2;
+        boxed.background_height = 0.2;
+        let (width, height, _) = picture(&boxed);
+        // Right and up half an em: the picture grows to hold the box.
+        boxed.background_offset_x = 0.5;
+        boxed.background_offset_y = 0.5;
+        let (moved_w, moved_h, moved) = picture(&boxed);
+        assert!(moved_w > width && moved_h > height);
+        let green_at = |x: u32, y: u32| {
+            let at = ((y * moved_w + x) * 4) as usize;
+            moved[at..at + 4] == [0, 255, 0, 255]
+        };
+        // The top right corner is the box's; the bottom left is clear.
+        assert!(green_at(moved_w - 2, 1));
+        assert!(!green_at(1, moved_h - 2));
+        // Left and down, the other way round.
+        boxed.background_offset_x = -0.5;
+        boxed.background_offset_y = -0.5;
+        let (w, h, rgba) = picture(&boxed);
+        let at = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+        assert_eq!(&rgba[at(1, h - 2)..at(1, h - 2) + 4], &[0, 255, 0, 255]);
+        assert_eq!(rgba[at(w - 2, 1) + 3], 0);
     }
 
     #[test]

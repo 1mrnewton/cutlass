@@ -6,10 +6,14 @@
 //! from 0 to 1 (a quarter of an em at 1), and `background_width` and
 //! `background_height` the room around the letters in ems. The angle is in
 //! degrees, counterclockwise from the right. `background_round_radius` from
-//! 0 to 1 rounds the box's corners up to half its height. A title's
-//! `bubble` shapes the box as a [`Bubble`] instead: a speech bubble's tail,
-//! a thought's puffs and a burst's spikes reach out past the box, and the
-//! picture grows to hold them.
+//! 0 to 1 rounds the box's corners up to half its height. With
+//! `background_lines` each line has a box of its own, as wide as its own
+//! letters, and boxes that meet are one shape. `background_offset_x` and
+//! `background_offset_y` move the box right and up from the letters, in
+//! ems. A title's `bubble` shapes the box as a [`Bubble`] instead, one
+//! around every line: a speech bubble's tail, a thought's puffs and a
+//! burst's spikes reach out past the box, and the picture grows to hold
+//! them.
 //!
 //! A glow is the clip's `bloom` effect: its `strength` from 0 to 1 is how
 //! bright it is, and its `range` from 0 to 1 how far it spreads, up to
@@ -69,6 +73,10 @@ pub(crate) struct Background {
     pub(crate) round: f32,
     /// The shape it takes instead of a box.
     pub(crate) shape: Option<Bubble>,
+    /// A box for each line rather than one around them all.
+    pub(crate) lines: bool,
+    /// How far the box is moved from the letters: right and down.
+    pub(crate) shift: (f32, f32),
 }
 
 /// A box in picture pixels.
@@ -81,7 +89,7 @@ pub(crate) struct Area {
 }
 
 impl Area {
-    fn union(self, other: Self) -> Self {
+    pub(crate) fn union(self, other: Self) -> Self {
         Self {
             left: self.left.min(other.left),
             top: self.top.min(other.top),
@@ -159,12 +167,18 @@ impl Style {
                 )?;
                 #[allow(clippy::cast_possible_truncation)]
                 let round = unit(material.background_round_radius) as f32;
+                let shape = Bubble::of(&material.bubble);
                 (color[3] > 0).then(|| Background {
                     color,
                     pad_x: em(material.background_width, font_size),
                     pad_y: em(material.background_height, font_size),
                     round,
-                    shape: Bubble::of(&material.bubble),
+                    shape,
+                    lines: material.background_lines && shape.is_none(),
+                    shift: (
+                        signed_em(material.background_offset_x, font_size),
+                        -signed_em(material.background_offset_y, font_size),
+                    ),
                 })
             };
         let glow = match bloom {
@@ -189,7 +203,8 @@ impl Style {
     }
 
     /// The picture's box for letters whose cells cover `cells`, cast with
-    /// `shadows`.
+    /// `shadows`. A box for each line lies inside the one around them all,
+    /// so that one holds them.
     pub(crate) fn bounds(&self, cells: Area, font_size: f32, shadows: &[Shadow]) -> Area {
         let mut area = cells;
         for shadow in shadows {
@@ -276,10 +291,13 @@ pub(crate) fn unit_color(rgba: [f64; 4], alpha: f64) -> [u8; 4] {
 }
 
 impl Background {
-    /// The box behind letters whose cells cover `cells`.
+    /// The box behind letters whose cells cover `cells`, moved by its
+    /// shift.
     pub(crate) fn area(&self, cells: Area, font_size: f32) -> Area {
         let pad = cell_pad(font_size);
-        cells.grow(self.pad_x - pad, self.pad_y - pad)
+        cells
+            .grow(self.pad_x - pad, self.pad_y - pad)
+            .shift(self.shift.0, self.shift.1)
     }
 
     /// All a bubble around the box `body` covers, its tail and spikes too.
@@ -311,8 +329,8 @@ impl Background {
 /// What [`compose`] paints into a premultiplied picture `width` pixels
 /// wide. `fill` is how much of each pixel the letters cover, `grown` the
 /// same for their outlines, each shadow's mask what casts it, and `shape`
-/// everything that glows, each from 0 to 1. `background` is the box behind
-/// the letters in picture pixels.
+/// everything that glows, each from 0 to 1. `background` is the boxes
+/// behind the letters in picture pixels: one, or one for each line.
 pub(crate) struct Layers<'a> {
     pub(crate) style: &'a Style,
     /// Premultiplied.
@@ -325,7 +343,7 @@ pub(crate) struct Layers<'a> {
     pub(crate) rings: &'a [[u8; 4]],
     pub(crate) shadows: &'a [(Shadow, Vec<f32>)],
     pub(crate) shape: &'a [f32],
-    pub(crate) background: Option<Area>,
+    pub(crate) background: &'a [Area],
     /// Boxes behind runs of glyphs, before the origin.
     pub(crate) boxes: &'a [crate::paint::WordBox],
     pub(crate) origin: (f32, f32),
@@ -350,10 +368,13 @@ pub(crate) fn compose(layers: &Layers<'_>, rgba: &mut [u8]) {
         width,
         height,
     } = *layers;
-    if let (Some(back), Some(area)) = (&style.background, background) {
-        match back.shape {
-            None => paint_box(rgba, width, height, area, back),
-            Some(shape) => paint_bubble(rgba, width, height, area, back.color, shape),
+    if let Some(back) = &style.background {
+        match (back.shape, background.first()) {
+            (Some(shape), Some(area)) => {
+                paint_bubble(rgba, width, height, *area, back.color, shape);
+            }
+            (None, Some(_)) => paint_boxes(rgba, width, height, background, back),
+            (_, None) => {}
         }
     }
     #[allow(clippy::cast_possible_truncation)]
@@ -441,8 +462,22 @@ fn over_each(
     }
 }
 
-/// A rounded box with one pixel of soft edge.
-fn paint_box(rgba: &mut [u8], width: usize, height: usize, area: Area, back: &Background) {
+/// Rounded boxes with one pixel of soft edge, as one shape: where two
+/// meet, a pixel takes the most either covers it.
+fn paint_boxes(rgba: &mut [u8], width: usize, height: usize, areas: &[Area], back: &Background) {
+    let Some(whole) = width.checked_mul(height) else {
+        return;
+    };
+    let mut covers = vec![0.0_f32; whole];
+    for area in areas {
+        box_cover(&mut covers, width, height, *area, back.round);
+    }
+    over_each(rgba, &covers, |_| back.color, |cover| cover);
+}
+
+/// Raise each pixel of `covers` to how much of it a box over `area`, its
+/// corners rounded by `round` of its shorter half, covers.
+fn box_cover(covers: &mut [f32], width: usize, height: usize, area: Area, round: f32) {
     let half_w = (area.right - area.left) / 2.0;
     let half_h = (area.bottom - area.top) / 2.0;
     if !(half_w > 0.0 && half_h > 0.0) {
@@ -450,16 +485,25 @@ fn paint_box(rgba: &mut [u8], width: usize, height: usize, area: Area, back: &Ba
     }
     let center_x = area.left + half_w;
     let center_y = area.top + half_h;
-    let radius = back.round * half_w.min(half_h);
-    for y in 0..height {
-        for x in 0..width {
+    let radius = round * half_w.min(half_h);
+    // Only the pixels the box can reach, a pixel of soft edge around it.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let reach = |low: f32, high: f32, limit: usize| {
+        let low = (low - 1.0).floor().max(0.0) as usize;
+        let high = ((high + 1.0).ceil().max(0.0) as usize).min(limit);
+        low..high
+    };
+    for y in reach(area.top, area.bottom, height) {
+        for x in reach(area.left, area.right, width) {
             let px = pixel(x) + 0.5 - center_x;
             let py = pixel(y) + 0.5 - center_y;
             let qx = px.abs() - (half_w - radius);
             let qy = py.abs() - (half_h - radius);
             let outside = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - radius;
             let cover = (0.5 - outside).clamp(0.0, 1.0);
-            over(rgba, y * width + x, back.color, cover);
+            if let Some(slot) = covers.get_mut(y * width + x) {
+                *slot = slot.max(cover);
+            }
         }
     }
 }
@@ -897,6 +941,15 @@ fn byte(value: f64) -> u8 {
 }
 
 /// `value` ems in pixels at `font_size`, from 0 to four ems.
+/// `value` ems either way, at most four, in pixels at `font_size`.
+fn signed_em(value: f64, font_size: f32) -> f32 {
+    if value < 0.0 {
+        -em(-value, font_size)
+    } else {
+        em(value, font_size)
+    }
+}
+
 fn em(value: f64, font_size: f32) -> f32 {
     if !value.is_finite() || value <= 0.0 {
         return 0.0;

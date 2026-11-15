@@ -8,7 +8,7 @@ use crate::segment::Segment;
 use crate::time::Micros;
 
 /// The key names, in [`TextStyleKey::ALL`] order.
-pub static TEXT_STYLE_KEYS: [&str; 11] = [
+pub static TEXT_STYLE_KEYS: [&str; 15] = [
     "KFTypeTextSize",
     "KFTypeTextLetterSpacing",
     "KFTypeTextLineSpacing",
@@ -20,6 +20,10 @@ pub static TEXT_STYLE_KEYS: [&str; 11] = [
     "KFTypeTextShadowAngle",
     "KFTypeTextShadowBlur",
     "KFTypeTextShadowAlpha",
+    "KFTypeTextBackgroundWidth",
+    "KFTypeTextBackgroundHeight",
+    "KFTypeTextBackgroundOffsetX",
+    "KFTypeTextBackgroundOffsetY",
 ];
 
 /// A title's glow strength, from 0 to 1. A Cutlass name.
@@ -83,11 +87,19 @@ pub enum TextStyleKey {
     ShadowBlur,
     /// The shadow's opacity.
     ShadowAlpha,
+    /// The room the background leaves each side of the letters, in ems.
+    BackgroundWidth,
+    /// The room the background leaves above and below the letters, in ems.
+    BackgroundHeight,
+    /// How far right the background sits from the letters, in ems.
+    BackgroundOffsetX,
+    /// How far up the background sits from the letters, in ems.
+    BackgroundOffsetY,
 }
 
 impl TextStyleKey {
     /// Every setting.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 15] = [
         Self::Size,
         Self::LetterSpacing,
         Self::LineSpacing,
@@ -99,6 +111,10 @@ impl TextStyleKey {
         Self::ShadowAngle,
         Self::ShadowBlur,
         Self::ShadowAlpha,
+        Self::BackgroundWidth,
+        Self::BackgroundHeight,
+        Self::BackgroundOffsetX,
+        Self::BackgroundOffsetY,
     ];
 
     fn index(self) -> usize {
@@ -135,7 +151,10 @@ impl TextStyleKey {
             Self::BackgroundAlpha
             | Self::BackgroundRound
             | Self::ShadowBlur
-            | Self::ShadowAlpha => (0.0..=1.0).contains(&value),
+            | Self::ShadowAlpha
+            | Self::BackgroundWidth
+            | Self::BackgroundHeight => (0.0..=1.0).contains(&value),
+            Self::BackgroundOffsetX | Self::BackgroundOffsetY => (-1.0..=1.0).contains(&value),
             Self::ShadowDistance => (0.0..=100.0).contains(&value),
             Self::ShadowAngle => true,
         }
@@ -156,6 +175,10 @@ impl TextStyleKey {
             Self::ShadowAngle => text.shadow_angle,
             Self::ShadowBlur => text.shadow_smoothing,
             Self::ShadowAlpha => text.shadow_alpha,
+            Self::BackgroundWidth => text.background_width,
+            Self::BackgroundHeight => text.background_height,
+            Self::BackgroundOffsetX => text.background_offset_x,
+            Self::BackgroundOffsetY => text.background_offset_y,
         }
     }
 
@@ -171,7 +194,10 @@ impl TextStyleKey {
             Self::BackgroundAlpha
             | Self::BackgroundRound
             | Self::ShadowBlur
-            | Self::ShadowAlpha => value.clamp(0.0, 1.0),
+            | Self::ShadowAlpha
+            | Self::BackgroundWidth
+            | Self::BackgroundHeight => value.clamp(0.0, 1.0),
+            Self::BackgroundOffsetX | Self::BackgroundOffsetY => value.clamp(-1.0, 1.0),
             Self::ShadowDistance => value.clamp(0.0, 100.0),
             Self::ShadowAngle => value,
         };
@@ -187,6 +213,10 @@ impl TextStyleKey {
             Self::ShadowAngle => &mut text.shadow_angle,
             Self::ShadowBlur => &mut text.shadow_smoothing,
             Self::ShadowAlpha => &mut text.shadow_alpha,
+            Self::BackgroundWidth => &mut text.background_width,
+            Self::BackgroundHeight => &mut text.background_height,
+            Self::BackgroundOffsetX => &mut text.background_offset_x,
+            Self::BackgroundOffsetY => &mut text.background_offset_y,
         };
         *field = value;
     }

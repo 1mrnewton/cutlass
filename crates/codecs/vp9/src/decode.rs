@@ -430,8 +430,12 @@ fn packed<P: Pixel>(f: &Pic<P>, p: usize) -> Vec<u8> {
         if let Some(b) = P::bytes(row) {
             out.extend_from_slice(b);
         } else if P::HIGH {
-            for s in row {
-                out.extend_from_slice(&(s.get() as u16).to_le_bytes());
+            // Written in place, two bytes a sample: a loop the compiler
+            // vectorizes, where extending by each pair did not.
+            let at = out.len();
+            out.resize(at + 2 * w, 0);
+            for (d, s) in out[at..].as_chunks_mut::<2>().0.iter_mut().zip(row) {
+                *d = (s.get() as u16).to_le_bytes();
             }
         } else {
             out.extend(row.iter().map(|s| s.get() as u8));

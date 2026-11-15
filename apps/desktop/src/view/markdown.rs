@@ -47,12 +47,18 @@ const BOLD: f32 = 620.0;
 const HEADING: f32 = 680.0;
 
 /// Adds the answer and code families to the window's fonts, once. Until
-/// they are in, answers are set in the window's own faces.
+/// they are in, answers are set in the window's own faces. It may be
+/// called before the first frame, when egui cannot yet say which fonts it
+/// has, so it keeps its own mark of having run.
 pub fn install_fonts(ctx: &Context) {
-    let wanted = FontFamily::Name(WORDS_FAMILY.into());
-    if ctx.fonts(|fonts| fonts.definitions().families.contains_key(&wanted)) {
+    let installed = Id::NULL.with("assistant-fonts-installed");
+    if ctx
+        .data(|data| data.get_temp::<bool>(installed))
+        .unwrap_or(false)
+    {
         return;
     }
+    ctx.data_mut(|data| data.insert_temp(installed, true));
     let mut definitions = FontDefinitions::default();
     for (family, face, under) in [
         (WORDS_FAMILY, "Inter", FontFamily::Proportional),
@@ -672,6 +678,29 @@ mod tests {
                 "{face}"
             );
         }
+    }
+
+    #[test]
+    fn the_faces_go_in_before_the_first_frame_and_only_once() {
+        use egui::FontFamily;
+
+        // The window installs them on a context that has drawn nothing.
+        let ctx = Context::default();
+        super::install_fonts(&ctx);
+        super::install_fonts(&ctx);
+        let output = frame(&ctx, "**bold** `code`", Vec::new());
+        assert_eq!(
+            section(&output, "bold code", 0).font_id.family,
+            FontFamily::Name(super::WORDS_FAMILY.into())
+        );
+        assert_eq!(
+            section(&output, "bold code", "bold ".len()).font_id.family,
+            FontFamily::Name(super::CODE_FAMILY.into())
+        );
+        // A later call does not set the fonts again: nothing new to upload.
+        let mut output = ctx.run_ui(RawInput::default(), |ui| super::install_fonts(ui.ctx()));
+        assert!(output.textures_delta.set.is_empty());
+        output.textures_delta.clear();
     }
 
     #[test]

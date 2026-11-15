@@ -16,6 +16,7 @@ mod delegate;
 mod draft;
 mod forward;
 mod r#loop;
+pub mod markdown;
 mod mcp;
 mod mcp_connection;
 mod mcp_server;

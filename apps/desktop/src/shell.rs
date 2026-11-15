@@ -1371,7 +1371,13 @@ impl Shell {
                 draft.canvas_config.width
             })
         });
-        let requests = cutlass_editor::look_requests(&segment_id, look, &face, line_width);
+        let look = look.clone();
+        let mut requests = cutlass_editor::look_requests(&segment_id, &look, &face, line_width);
+        // Each clip the look reaches glows with a glow of its own.
+        for clip in self.styled_clips(segment_id) {
+            let glow_id = MaterialId::new(self.fresh("glow"));
+            requests.extend(cutlass_editor::look_glow_request(&clip, &look, glow_id));
+        }
         self.apply_text_requests(requests)
     }
 
@@ -16030,6 +16036,11 @@ mod tests {
             .unwrap();
         desktop.set_text_align(4).unwrap();
         desktop.set_text_outline("#000000", 0.1).unwrap();
+        desktop.set_text_curve(true, -90.0).unwrap();
+        desktop
+            .set_text_background_box(true, 0.2, 0.1, 0.0, 0.3)
+            .unwrap();
+        desktop.set_text_glow_rays(true).unwrap();
         desktop.save_text_preset().unwrap();
         assert_eq!(desktop.saved_looks()[0].name, "Preset 1");
         assert!(file.exists());
@@ -16051,6 +16062,11 @@ mod tests {
             (text.border_color.as_str(), text.border_width),
             ("#000000", 0.1)
         );
+        assert_eq!((text.curve_on, text.curve), (true, -90.0));
+        assert!(text.background_lines);
+        assert_eq!(text.background_offset_y, 0.3);
+        let look = plain.text_look().unwrap();
+        assert!(look.glow_rays && look.glow_color == "#FFFFFF");
         assert_eq!(text.content, before.content);
         plain.undo().unwrap();
         assert_eq!(plain.draft().unwrap().materials.texts[0], before);

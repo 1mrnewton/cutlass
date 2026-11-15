@@ -43,8 +43,8 @@ pub use delegate::{
 };
 pub use draft::{
     ApplyInput, ApplyMode, ApplyResult, DraftError, DraftQuery, DraftTools, FullSnapshot,
-    MaterialSnapshot, MaterialsSnapshot, ProjectSnapshot, QueryView, RangeSnapshot, SegmentDetail,
-    SegmentSnapshot, TrackSnapshot, request_name,
+    MaterialSnapshot, MaterialsSnapshot, ProjectSnapshot, QueryView, RangeSnapshot, Remembered,
+    SegmentDetail, SegmentSnapshot, TrackSnapshot, request_name,
 };
 pub use forward::{Forward, Forwarded, ProjectSocket, Wake, YIELD};
 pub use r#loop::{LoopError, ToolOutcome, ToolSink, Turn, cap_from_settings, run, run_after};

@@ -470,6 +470,15 @@ impl fmt::Display for DraftError {
 
 impl std::error::Error for DraftError {}
 
+/// The first result of each combo that carried a request id, so the same id
+/// is answered the same way again. A host that builds its tools anew for
+/// each call hands this from one to the next.
+#[derive(Debug, Default)]
+pub struct Remembered(HashMap<String, Result<ApplyResult, DraftError>>);
+
+/// The most request ids kept; past it the oldest are forgotten together.
+const REMEMBERED_LIMIT: usize = 1024;
+
 /// Draft queries and combos for one open session.
 #[derive(Debug)]
 pub struct DraftTools {
@@ -491,6 +500,17 @@ impl DraftTools {
     #[must_use]
     pub fn session(&self) -> &Session {
         &self.session
+    }
+
+    /// The request ids answered so far, for the tools that come next.
+    #[must_use]
+    pub fn take_remembered(&mut self) -> Remembered {
+        Remembered(std::mem::take(&mut self.idempotent))
+    }
+
+    /// Carry on the request ids earlier tools answered.
+    pub fn set_remembered(&mut self, remembered: Remembered) {
+        self.idempotent = remembered.0;
     }
 
     /// Read one view without changing the revision.
@@ -524,6 +544,9 @@ impl DraftTools {
         }
         let result = self.apply_fresh(expected_revision, &requests, mode);
         if let Some(key) = key {
+            if self.idempotent.len() >= REMEMBERED_LIMIT {
+                self.idempotent.clear();
+            }
             self.idempotent.insert(key, result.clone());
         }
         result
@@ -1346,6 +1369,45 @@ mod tests {
         assert!(cut.len() < long.len() + 40);
         assert!(cut.ends_with(&format!("(cut, {} characters in all)", long.len())));
         assert_eq!(super::cut("short"), "short");
+    }
+
+    #[test]
+    fn request_ids_carry_from_one_set_of_tools_to_the_next() {
+        let (mut tools, track) = open_tools();
+        let first = tools
+            .apply(apply_input(
+                Some("once"),
+                0,
+                vec![place(&track, "a", 0, 1_000_000)],
+                ApplyMode::Commit,
+            ))
+            .unwrap();
+        // A host that builds tools for each call hands the ids on.
+        let remembered = tools.take_remembered();
+        let mut next = DraftTools::new(tools.session().clone());
+        next.set_remembered(remembered);
+        let again = next
+            .apply(apply_input(
+                Some("once"),
+                0,
+                vec![place(&track, "a", 0, 1_000_000)],
+                ApplyMode::Commit,
+            ))
+            .unwrap();
+        assert_eq!(again, first);
+        assert_eq!(next.session().revision(), 1, "the combo ran once");
+        // Without them the same call is a stale write, refused.
+        let mut fresh = DraftTools::new(tools.session().clone());
+        assert!(
+            fresh
+                .apply(apply_input(
+                    Some("once"),
+                    0,
+                    vec![place(&track, "a", 0, 1_000_000)],
+                    ApplyMode::Commit,
+                ))
+                .is_err()
+        );
     }
 
     #[test]

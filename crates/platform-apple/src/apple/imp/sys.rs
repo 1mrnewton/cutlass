@@ -318,6 +318,28 @@ unsafe extern "C" {
         out: *mut *mut c_void,
     ) -> OSStatus;
 
+    pub fn CMBlockBufferCopyDataBytes(
+        buffer: *const c_void,
+        offset: usize,
+        length: usize,
+        destination: *mut c_void,
+    ) -> OSStatus;
+
+    pub fn CMBlockBufferCreateEmpty(
+        structure: *const c_void,
+        capacity: u32,
+        flags: u32,
+        out: *mut *mut c_void,
+    ) -> OSStatus;
+
+    pub fn CMBlockBufferAppendBufferReference(
+        buffer: *mut c_void,
+        target: *mut c_void,
+        offset: usize,
+        length: usize,
+        flags: u32,
+    ) -> OSStatus;
+
     pub fn CMBlockBufferGetDataPointer(
         buffer: *const c_void,
         offset: usize,

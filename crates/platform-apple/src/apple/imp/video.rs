@@ -1808,25 +1808,39 @@ unsafe extern "C" fn encode_output(
 
 fn sample_bytes(sample: *mut std::ffi::c_void) -> Option<Vec<u8>> {
     // SAFETY: `encode_output` passes the live sample buffer it was handed. The
-    // block buffer is borrowed from it (Get rule). The data pointer is valid
-    // while the sample is, and the bytes are copied before return. This
-    // reads `total` bytes, which is only correct when the block is one
-    // contiguous piece: `CMBlockBufferGetDataPointer` promises only the
-    // length at offset 0, which is not asked for here.
-    unsafe {
-        let block = sys::CMSampleBufferGetDataBuffer(sample);
-        if block.is_null() {
-            return None;
-        }
-        let mut data = ptr::null_mut();
-        let mut total = 0usize;
-        let status =
-            sys::CMBlockBufferGetDataPointer(block, 0, ptr::null_mut(), &mut total, &mut data);
-        if status != 0 || data.is_null() || total == 0 {
-            return None;
-        }
-        Some(std::slice::from_raw_parts(data, total).to_vec())
+    // block buffer is borrowed from it (Get rule) and alive while it is.
+    let block = unsafe { sys::CMSampleBufferGetDataBuffer(sample) };
+    if block.is_null() {
+        return None;
     }
+    block_bytes(block)
+}
+
+/// Every data byte of `block`, which may be in more than one piece.
+fn block_bytes(block: *const std::ffi::c_void) -> Option<Vec<u8>> {
+    let mut data = ptr::null_mut();
+    let mut length = 0usize;
+    let mut total = 0usize;
+    // SAFETY: callers pass a live block buffer they hold for this call. Each
+    // out pointer is a live local of its C type.
+    let status =
+        unsafe { sys::CMBlockBufferGetDataPointer(block, 0, &mut length, &mut total, &mut data) };
+    if status != 0 || total == 0 {
+        return None;
+    }
+    if length == total && !data.is_null() {
+        // SAFETY: the header says `length` bytes are addressable at `data`
+        // while the block is referenced, which it is for this copy. Here
+        // that is every byte.
+        return Some(unsafe { std::slice::from_raw_parts(data, total) }.to_vec());
+    }
+    let mut bytes = vec![0u8; total];
+    // SAFETY: `block` is live, and `bytes` has room for the `total` bytes
+    // asked for. The header says the copy "deals with the possibility of
+    // the desired range of data being noncontiguous".
+    let status =
+        unsafe { sys::CMBlockBufferCopyDataBytes(block, 0, total, bytes.as_mut_ptr().cast()) };
+    (status == 0).then_some(bytes)
 }
 
 fn sample_is_sync(sample: *mut std::ffi::c_void) -> bool {
@@ -2134,6 +2148,54 @@ mod tests {
         drop(noise);
         drop(block);
         assert!(block_owning(Vec::new()).is_err());
+    }
+
+    /// An encoded sample's block may be in more than one piece; every byte
+    /// is read, not only the first piece's.
+    #[test]
+    fn block_bytes_reads_a_block_in_two_pieces() {
+        let first: Vec<u8> = (0..100u8).collect();
+        let second: Vec<u8> = (0..150u8).map(|byte| byte ^ 0x5A).collect();
+        let whole = [first.as_slice(), second.as_slice()].concat();
+        let one = block_owning(whole.clone()).expect("block");
+        assert_eq!(block_bytes(one.as_ptr()), Some(whole.clone()));
+
+        let mut raw = ptr::null_mut();
+        // SAFETY: a null allocator and no flags are allowed; `raw` is a live
+        // out pointer (Create rule).
+        let status = unsafe { sys::CMBlockBufferCreateEmpty(ptr::null(), 2, 0, &mut raw) };
+        assert_eq!(status, 0);
+        let joined = Cf::from_owned(raw).expect("empty block");
+        for piece in [&first, &second] {
+            let part = block_owning(piece.clone()).expect("piece");
+            // SAFETY: both blocks are live; the joined block retains `part`
+            // and refers to all of its `piece.len()` bytes.
+            let status = unsafe {
+                sys::CMBlockBufferAppendBufferReference(
+                    joined.as_mut(),
+                    part.as_mut(),
+                    0,
+                    piece.len(),
+                    0,
+                )
+            };
+            assert_eq!(status, 0);
+        }
+        let mut length = 0usize;
+        let mut total = 0usize;
+        // SAFETY: `joined` is live; the out pointers are live locals.
+        let status = unsafe {
+            sys::CMBlockBufferGetDataPointer(
+                joined.as_ptr(),
+                0,
+                &mut length,
+                &mut total,
+                ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, 0);
+        assert_eq!((length, total), (first.len(), whole.len()));
+        assert_eq!(block_bytes(joined.as_ptr()), Some(whole));
     }
 
     /// Asynchronous decode may read a unit after `push` returns. Each packet

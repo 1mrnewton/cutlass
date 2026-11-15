@@ -661,13 +661,26 @@ impl PhoneHost {
     }
 
     /// The composited picture at `time`, reading media from the project folder.
+    ///
+    /// Paused, it waits for every clip's picture. Playing, it does not: a
+    /// clip still decoding shows its picture before, the late one is
+    /// dropped, and the next tick asks for the newest time. Ask again after
+    /// [`Self::pause`] while [`Self::frame_pending`] is true.
     pub fn frame(&mut self, time: Micros) -> Result<Picture, FfiError> {
-        self.preview.frame(
-            self.commands.session(),
-            self.project.root(),
-            &self.faces,
-            time,
-        )
+        let session = self.commands.session();
+        let root = self.project.root();
+        if self.player.is_playing() {
+            self.preview.playing_frame(session, root, &self.faces, time)
+        } else {
+            self.preview.frame(session, root, &self.faces, time)
+        }
+    }
+
+    /// Whether the last picture showed a clip at an earlier time than asked
+    /// for, because play did not wait for it.
+    #[must_use]
+    pub fn frame_pending(&self) -> bool {
+        self.preview.pending()
     }
 
     /// Write the whole cut to `destination` as an MP4 at `short_side`, one
@@ -3955,6 +3968,50 @@ mod tests {
         assert_eq!(on[0].segment_id, placed);
         assert!(cutlass_editor::effects_on(host.draft(), &second).is_empty());
         assert!(host.add_clip_effect(&first, "recipe/nope").is_err());
+    }
+
+    #[test]
+    fn play_drops_a_late_picture_and_pause_draws_the_one_asked_for() {
+        // A real H.264 movie: two seconds of the pattern, then one mirrored.
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut maker = roots.create();
+        let (_, second) = two_stills(&mut maker);
+        maker.toggle_mirror(&second).unwrap();
+        let movie = temp.path.join("made.mp4");
+        maker.export(&movie, 720, &mut |_, _| true).unwrap();
+
+        let mut early = 0;
+        for _ in 0..3 {
+            let mut host = roots.create();
+            let id = host.import(&movie).unwrap();
+            host.append(&id).unwrap();
+            let start = host.frame(Micros(0)).unwrap();
+            assert!(!host.frame_pending());
+            let at = Micros(2_500_000);
+
+            host.play().unwrap();
+            assert!(host.is_playing());
+            let playing = host.frame(at).unwrap();
+            let pending = host.frame_pending();
+            host.pause();
+
+            let asked = host.frame(at).unwrap();
+            assert!(!host.frame_pending());
+            assert_ne!(asked, start, "the mirrored half draws");
+            if pending {
+                // Play showed the picture the clip had, not a late one.
+                early += 1;
+                assert_eq!(playing, start);
+            } else {
+                assert_eq!(playing, asked);
+            }
+            // The paused picture is the one asked for, and stays it.
+            assert_eq!(host.frame(at).unwrap(), asked);
+        }
+        // A jump across a long run of pictures does not decode in the
+        // moment between asking and looking.
+        assert!(early > 0, "play waited for every picture");
     }
 
     #[test]

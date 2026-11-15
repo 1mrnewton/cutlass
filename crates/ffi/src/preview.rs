@@ -40,6 +40,8 @@ pub struct Preview {
     renderer: Option<Renderer>,
     canvas: Option<Canvas>,
     last: Option<(Drawn, Picture)>,
+    /// The last picture showed a clip early. See [`Preview::pending`].
+    pending: bool,
 }
 
 impl Preview {
@@ -57,6 +59,7 @@ impl Preview {
             renderer: None,
             canvas: None,
             last: None,
+            pending: false,
         }
     }
 
@@ -85,6 +88,40 @@ impl Preview {
         fonts: &dyn Fonts,
         time: Micros,
     ) -> Result<Picture, FfiError> {
+        self.draw(session, root, fonts, time, true)
+    }
+
+    /// The picture at `time` during play, without waiting for a clip whose
+    /// picture is still decoding: that clip shows the picture before it,
+    /// and its thread moves on to the newest time asked. A late picture is
+    /// never shown after its time has passed; the play goes on at the
+    /// sound's pace. See [`Self::pending`].
+    pub fn playing_frame(
+        &mut self,
+        session: &Session,
+        root: &Path,
+        fonts: &dyn Fonts,
+        time: Micros,
+    ) -> Result<Picture, FfiError> {
+        self.draw(session, root, fonts, time, false)
+    }
+
+    /// Whether the last picture showed a clip at an earlier time than asked,
+    /// because [`Self::playing_frame`] did not wait. It is not kept as the
+    /// picture for that time, so asking again draws it again.
+    #[must_use]
+    pub fn pending(&self) -> bool {
+        self.pending
+    }
+
+    fn draw(
+        &mut self,
+        session: &Session,
+        root: &Path,
+        fonts: &dyn Fonts,
+        time: Micros,
+        patient: bool,
+    ) -> Result<Picture, FfiError> {
         if time.0 < 0 {
             return Err(FfiError::Frame {
                 reason: "the time is before the start".to_owned(),
@@ -98,17 +135,19 @@ impl Preview {
         if let Some((drawn, picture)) = &self.last
             && *drawn == key
         {
+            self.pending = false;
             return Ok(picture.clone());
         }
         // Eval's CPU device draws the layers the GPU does not, such as text.
         let mut device = SoftwareDevice::new();
-        self.cache.set_patient(true);
+        self.cache.set_patient(patient);
         let layers = self
             .cache
             .layers(session, &mut device, time, &self.readers, Some(root), fonts)
             .map_err(|error| FfiError::Frame {
                 reason: error.to_string(),
             })?;
+        let stale = self.cache.take_stale();
         if self.renderer.is_none() {
             self.renderer = Some(Renderer::headless().map_err(drawing)?);
         }
@@ -135,7 +174,8 @@ impl Preview {
             height: size.1,
             rgba: renderer.read(canvas).map_err(drawing)?,
         };
-        self.last = Some((key, picture.clone()));
+        self.pending = stale;
+        self.last = (!stale).then(|| (key, picture.clone()));
         Ok(picture)
     }
 }

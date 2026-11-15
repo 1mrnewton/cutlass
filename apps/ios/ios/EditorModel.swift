@@ -249,6 +249,8 @@ final class EditorModel {
     func pause() {
         try? editor?.pause()
         stopped()
+        // Play does not wait for a late picture; paused, the frame does.
+        draw()
     }
 
     private func stopped() {

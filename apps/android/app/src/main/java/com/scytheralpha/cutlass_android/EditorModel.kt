@@ -310,6 +310,8 @@ class EditorModel(project: String, private val scope: CoroutineScope) {
     fun pause() {
         runCatching { editor?.pause() }
         stopped()
+        // Play does not wait for a late picture; paused, the frame does.
+        draw()
     }
 
     private fun stopped() {

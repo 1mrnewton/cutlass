@@ -419,6 +419,18 @@ pub enum Request {
         alpha: f64,
         round: f64,
     },
+    /// Lay the title's background out: a box around each line with
+    /// `lines`, or one around them all; `width` and `height` ems of room
+    /// around the letters, each from 0 to 1; moved `offset_x` ems right and
+    /// `offset_y` up, each from -1 to 1. Kept with the background on or off.
+    SetTextBackgroundBox {
+        segment_id: SegmentId,
+        lines: bool,
+        width: f64,
+        height: f64,
+        offset_x: f64,
+        offset_y: f64,
+    },
     /// Shape the title's background as the [`cutlass_model::Bubble`] keyed
     /// `bubble`, or a plain box again when it is empty. A title with no
     /// background yet gets a white one, and white letters turn black.

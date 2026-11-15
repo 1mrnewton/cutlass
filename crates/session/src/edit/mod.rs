@@ -504,6 +504,20 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             alpha,
             round,
         } => text::set_text_background(draft, segment_id, color, *alpha, *round),
+        Request::SetTextBackgroundBox {
+            segment_id,
+            lines,
+            width,
+            height,
+            offset_x,
+            offset_y,
+        } => text::set_text_background_box(
+            draft,
+            segment_id,
+            *lines,
+            [*width, *height],
+            [*offset_x, *offset_y],
+        ),
         Request::SetCaptionKeyword {
             segment_id,
             word,

@@ -175,6 +175,9 @@ set_text_glow: Make the letters glow in color "#rrggbb", strength and range 0 to
 set_text_background: Fill a box behind the letters in color "#rrggbb" at alpha 0 to 1, corners rounded by round 0 to 1; an empty color removes it.
 {"op":"set_text_background","segment_id":"title-1","color":"#000000","alpha":0.6,"round":0.3}
 
+set_text_background_box: Lay out a text's background box, on or off: lines true gives each line its own box, false one around them all; width and height are the room around the letters in ems, 0 to 1; offset_x moves it right and offset_y up, in ems, -1 to 1.
+{"op":"set_text_background_box","segment_id":"title-1","lines":true,"width":0.14,"height":0.14,"offset_x":0.0,"offset_y":0.0}
+
 set_text_bubble: Shape a title's background as bubble pill, speech, thought, burst or banner, or empty for a plain box; a title with no background gets a white one and white letters turn black.
 {"op":"set_text_bubble","segment_id":"title-1","bubble":"speech"}
 

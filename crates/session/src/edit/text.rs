@@ -464,6 +464,38 @@ pub fn set_text_background(
     Ok(())
 }
 
+/// The most room a background leaves around the letters, in ems.
+pub const MAX_BACKGROUND_PAD: f64 = 1.0;
+/// The farthest a background moves from the letters, each way, in ems.
+pub const MAX_BACKGROUND_OFFSET: f64 = 1.0;
+
+/// Lay the background out: a box around each line with `lines`, or one
+/// around them all; `pad` ems of room across and down, each from 0 to
+/// [`MAX_BACKGROUND_PAD`]; moved `offset` ems right and up, each from
+/// -[`MAX_BACKGROUND_OFFSET`] to it. It is kept whether the background is
+/// on or off.
+pub fn set_text_background_box(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    lines: bool,
+    pad: [f64; 2],
+    offset: [f64; 2],
+) -> Result<(), EditError> {
+    let index = own_text(draft, segment_id)?;
+    let pads = (0.0..=MAX_BACKGROUND_PAD).contains(&pad[0])
+        && (0.0..=MAX_BACKGROUND_PAD).contains(&pad[1]);
+    let moves = (-MAX_BACKGROUND_OFFSET..=MAX_BACKGROUND_OFFSET).contains(&offset[0])
+        && (-MAX_BACKGROUND_OFFSET..=MAX_BACKGROUND_OFFSET).contains(&offset[1]);
+    if !pads || !moves {
+        return Err(EditError::TextStyle);
+    }
+    let text = &mut draft.materials.texts[index];
+    text.background_lines = lines;
+    [text.background_width, text.background_height] = pad;
+    [text.background_offset_x, text.background_offset_y] = offset;
+    Ok(())
+}
+
 /// Draw the caption in the style keyed `style`, or plain when it is empty.
 pub fn set_caption_style(
     draft: &mut Draft,
@@ -876,6 +908,46 @@ mod tests {
         }
         let revision = session.revision();
         session.apply(revision, &[shadow("")]).unwrap();
+
+        // The box's layout is kept on or off; past its room it is refused.
+        let layout = |lines: bool, pad: [f64; 2], offset: [f64; 2]| Request::SetTextBackgroundBox {
+            segment_id: "a".into(),
+            lines,
+            width: pad[0],
+            height: pad[1],
+            offset_x: offset[0],
+            offset_y: offset[1],
+        };
+        let revision = session.revision();
+        session
+            .apply(revision, &[layout(true, [0.14, 0.25], [-0.25, 0.5])])
+            .unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert!(text.background_lines);
+        assert_eq!(
+            (text.background_width, text.background_height),
+            (0.14, 0.25)
+        );
+        assert_eq!(
+            (text.background_offset_x, text.background_offset_y),
+            (-0.25, 0.5)
+        );
+        let before = session.draft().clone();
+        for (pad, offset) in [
+            ([1.5, 0.1], [0.0, 0.0]),
+            ([0.1, -0.1], [0.0, 0.0]),
+            ([0.1, 0.1], [1.5, 0.0]),
+            ([0.1, 0.1], [0.0, f64::NAN]),
+        ] {
+            let revision = session.revision();
+            assert_eq!(
+                session
+                    .apply(revision, &[layout(false, pad, offset)])
+                    .unwrap_err(),
+                EditError::TextStyle
+            );
+            assert_eq!(session.draft(), &before);
+        }
 
         let bubble = |key: &str| Request::SetTextBubble {
             segment_id: "a".into(),

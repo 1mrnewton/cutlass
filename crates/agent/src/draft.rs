@@ -499,6 +499,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetTextShadow { .. } => "set_text_shadow",
         Request::SetTextShadowOpacity { .. } => "set_text_shadow_opacity",
         Request::SetTextBackground { .. } => "set_text_background",
+        Request::SetTextBackgroundBox { .. } => "set_text_background_box",
         Request::SetTextBubble { .. } => "set_text_bubble",
         Request::SetCaptionStyle { .. } => "set_caption_style",
         Request::SetCaptionKeyword { .. } => "set_caption_keyword",

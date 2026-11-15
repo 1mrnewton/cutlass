@@ -46,7 +46,7 @@ pub use draft::{
     MaterialSnapshot, MaterialsSnapshot, ProjectSnapshot, QueryView, RangeSnapshot, SegmentDetail,
     SegmentSnapshot, TrackSnapshot, request_name,
 };
-pub use forward::{Forward, Forwarded, ProjectSocket, Wake};
+pub use forward::{Forward, Forwarded, ProjectSocket, Wake, YIELD};
 pub use r#loop::{LoopError, ToolOutcome, ToolSink, Turn, cap_from_settings, run, run_after};
 pub use mcp::{McpClient, McpError, McpTransport};
 pub use mcp_connection::{LIST_TOOLS, McpConnection, McpWire};

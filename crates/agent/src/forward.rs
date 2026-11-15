@@ -25,6 +25,11 @@ use crate::{ToolCall, ToolOutcome, ToolSink};
 /// How long a forwarded call waits for the app before it gives up.
 const ANSWER_WAIT: Duration = Duration::from_secs(600);
 
+/// The call a window sends the holder of a project it wants to open: a
+/// host with no window saves, lets the project go and forwards to the
+/// window from then on. A window never lets go; to it this is no tool.
+pub const YIELD: &str = "host.yield";
+
 /// Wakes the app's loop when a call arrives.
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
 
@@ -220,7 +225,19 @@ impl Forward {
         })
     }
 
-    fn send(&mut self, call: &ToolCall) -> Result<ToolOutcome, String> {
+    /// Give up on an answer after `wait`, for a call that must not hang
+    /// the caller, such as [`YIELD`] from a window that is opening.
+    pub fn set_answer_wait(&mut self, wait: Duration) -> Result<(), String> {
+        self.reader
+            .get_ref()
+            .set_read_timeout(Some(wait))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Run `call` in the app that holds the project. An error is the
+    /// connection's: the app is gone or did not answer, and the caller
+    /// should find the project's holder again.
+    pub fn try_call(&mut self, call: &ToolCall) -> Result<ToolOutcome, String> {
         let line = json!({
             "token": self.token,
             "id": call.id,
@@ -235,7 +252,7 @@ impl Forward {
             .read_line(&mut answer)
             .map_err(|error| error.to_string())?;
         let answer: Value = serde_json::from_str(&answer)
-            .map_err(|_| "the Cutlass window closed the connection".to_owned())?;
+            .map_err(|_| "the app that held the project closed the connection".to_owned())?;
         Ok(ToolOutcome {
             content: answer
                 .get("content")
@@ -252,7 +269,7 @@ impl Forward {
 
 impl ToolSink for Forward {
     fn run_tool(&mut self, call: &ToolCall) -> ToolOutcome {
-        self.send(call).unwrap_or_else(|error| ToolOutcome {
+        self.try_call(call).unwrap_or_else(|error| ToolOutcome {
             content: format!("the call did not reach the Cutlass window: {error}"),
             is_error: true,
         })

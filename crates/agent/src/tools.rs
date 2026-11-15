@@ -314,7 +314,10 @@ pub enum ToolError {
     /// A host trait returned an error string.
     Host(String),
     /// No skill matched the ask.
-    SkillNotFound,
+    SkillNotFound {
+        /// The titles of the skills there are.
+        titles: Vec<String>,
+    },
     /// `speech.poll` named a job this registry did not start.
     SpeechUnknown {
         /// The id that was asked for.
@@ -340,7 +343,12 @@ impl fmt::Display for ToolError {
             Self::Sandbox(error) => write!(formatter, "{error}"),
             Self::Mcp(error) => write!(formatter, "{error}"),
             Self::Host(message) => write!(formatter, "{message}"),
-            Self::SkillNotFound => write!(formatter, "skill not found"),
+            Self::SkillNotFound { titles } => write!(
+                formatter,
+                "skill not found; the skills are: {}. Ask by one of those names, or go on \
+                 without one",
+                titles.join(", ")
+            ),
             Self::SpeechUnknown { job_id } => write!(formatter, "unknown speech job {job_id}"),
             Self::TrackUnknown { job_id } => write!(formatter, "unknown tracking job {job_id}"),
             Self::BadArguments(message) => write!(formatter, "{message}"),
@@ -359,7 +367,7 @@ impl std::error::Error for ToolError {
             Self::Mcp(error) => Some(error),
             Self::Unknown(_)
             | Self::Host(_)
-            | Self::SkillNotFound
+            | Self::SkillNotFound { .. }
             | Self::SpeechUnknown { .. }
             | Self::TrackUnknown { .. }
             | Self::BadArguments(_) => None,
@@ -572,11 +580,19 @@ where
             Invocation::SkillLoad { ask } if ask.is_empty() || ask == "list" => {
                 Ok(self.skills.listing())
             }
-            Invocation::SkillLoad { ask } => self
-                .skills
-                .load(&ask)
-                .map(format_skill)
-                .ok_or(ToolError::SkillNotFound),
+            Invocation::SkillLoad { ask } => {
+                self.skills
+                    .load(&ask)
+                    .map(format_skill)
+                    .ok_or_else(|| ToolError::SkillNotFound {
+                        titles: self
+                            .skills
+                            .titles()
+                            .into_iter()
+                            .map(str::to_owned)
+                            .collect(),
+                    })
+            }
             Invocation::AddExternalSkill { path } => {
                 add_skill(&mut self.skills, &mut self.approver, Path::new(&path))
                     .map(|()| "ok".to_owned())

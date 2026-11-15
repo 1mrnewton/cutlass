@@ -22,6 +22,8 @@ pub struct Skill {
     pub allowed_tools: Vec<String>,
     /// Instructions for the model.
     pub body: String,
+    /// Other words an ask may use for this skill, from a `keywords:` line.
+    pub keywords: Vec<String>,
 }
 
 /// The tool names a skill tells the model to call, in order.
@@ -188,14 +190,41 @@ impl SkillLibrary {
         out.trim_end().to_owned()
     }
 
-    /// The one skill that matches the ask, if any.
+    /// The one skill `ask` is for, or none. A skill is found by its title,
+    /// or by the words of its title, description and keywords: an ask word
+    /// counts once, twice when only that skill has it, and a skill needs
+    /// two. Words are compared without their endings, so "removing pauses"
+    /// finds "Remove pauses".
     #[must_use]
     pub fn load(&self, ask: &str) -> Option<&Skill> {
-        let ask_words = words(ask);
+        let ask = plain(ask);
+        let ask_stems = stems(&ask);
+        let skill_stems: Vec<Vec<String>> = self
+            .skills
+            .iter()
+            .map(|skill| {
+                stems(&format!(
+                    "{} {} {}",
+                    skill.title,
+                    skill.description,
+                    skill.keywords.join(" ")
+                ))
+            })
+            .collect();
         let mut best: Option<(u32, &Skill)> = None;
-        for skill in &self.skills {
-            let score = word_score(&skill.description, &ask_words);
-            if score < 2 && !title_in_ask(&skill.title, ask) {
+        for (skill, own) in self.skills.iter().zip(&skill_stems) {
+            let mut score = 0u32;
+            for stem in &ask_stems {
+                if !own.contains(stem) {
+                    continue;
+                }
+                let holders = skill_stems
+                    .iter()
+                    .filter(|stems| stems.contains(stem))
+                    .count();
+                score = score.saturating_add(if holders == 1 { 2 } else { 1 });
+            }
+            if score < 2 && !ask.contains(&plain(&skill.title)) {
                 continue;
             }
             match best {
@@ -204,6 +233,15 @@ impl SkillLibrary {
             }
         }
         best.map(|(_, skill)| skill)
+    }
+
+    /// The skills' titles, for an ask that found none.
+    #[must_use]
+    pub fn titles(&self) -> Vec<&str> {
+        self.skills
+            .iter()
+            .map(|skill| skill.title.as_str())
+            .collect()
     }
 
     /// At most one skill to put in a prompt.
@@ -247,6 +285,7 @@ pub fn parse_skill_md(text: &str) -> Result<Skill, SkillError> {
     let mut title = None;
     let mut description = None;
     let mut tools = None;
+    let mut keywords = Vec::new();
     for line in header.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -260,6 +299,8 @@ pub fn parse_skill_md(text: &str) -> Result<Skill, SkillError> {
             value_after(line, "tools").or_else(|| value_after(line, "allowed-tools"))
         {
             tools = Some(split_tools(value));
+        } else if let Some(value) = value_after(line, "keywords") {
+            keywords = split_tools(value);
         }
     }
     let Some(title) = title.filter(|value| !value.is_empty()) else {
@@ -279,6 +320,7 @@ pub fn parse_skill_md(text: &str) -> Result<Skill, SkillError> {
         description,
         allowed_tools,
         body: body.trim().to_owned(),
+        keywords,
     })
 }
 
@@ -332,25 +374,39 @@ fn split_tools(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn words(text: &str) -> Vec<String> {
-    text.split(|character: char| !character.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(str::to_lowercase)
-        .collect()
+/// `text` in lower case with `-` and `_` as spaces, so a folder name such
+/// as `project-setup` reads as the title does.
+fn plain(text: &str) -> String {
+    text.to_lowercase().replace(['-', '_'], " ")
 }
 
-fn word_score(description: &str, ask_words: &[String]) -> u32 {
-    let mut score = 0u32;
-    for word in words(description) {
-        if word.len() >= 4 && ask_words.iter().any(|ask| ask == &word) {
-            score = score.saturating_add(1);
+/// The words of `text` of four letters or more, each without its ending
+/// and once only.
+fn stems(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for word in plain(text).split(|character: char| !character.is_alphanumeric()) {
+        if word.chars().count() < 4 {
+            continue;
+        }
+        let stem = stem(word);
+        if !out.contains(&stem) {
+            out.push(stem);
         }
     }
-    score
+    out
 }
 
-fn title_in_ask(title: &str, ask: &str) -> bool {
-    !title.is_empty() && ask.to_lowercase().contains(&title.to_lowercase())
+/// `word` without a common English ending, so "removing", "removes" and
+/// "remove" compare equal. It is a match key, not a word.
+fn stem(word: &str) -> String {
+    for ending in ["ing", "es", "ed", "s", "e"] {
+        if let Some(stem) = word.strip_suffix(ending)
+            && stem.chars().count() >= 3
+        {
+            return stem.to_owned();
+        }
+    }
+    word.to_owned()
 }
 
 #[cfg(test)]
@@ -539,6 +595,63 @@ mod tests {
         assert_eq!(prompt[0].title, "Captions");
         assert_eq!(library.for_prompt("hello").len(), 0);
         assert_ne!(library.skills.len(), 1);
+    }
+
+    #[test]
+    fn a_skill_is_found_by_other_wordings_of_its_name_and_by_its_keywords() {
+        let library = SkillLibrary::bundled();
+        let found = |ask: &str| library.load(ask).map(|skill| skill.title.as_str());
+        // The wordings the system prompt itself uses.
+        for (ask, title) in [
+            ("captions", "Captions"),
+            ("removing pauses", "Remove pauses"),
+            ("motion graphics", "Motion graphics"),
+            ("a product demo", "Product demo"),
+            ("setting up a project", "Project setup"),
+        ] {
+            assert_eq!(found(ask), Some(title), "{ask}");
+        }
+        // Folder names, and words only the keywords hold.
+        for (ask, title) in [
+            ("project-setup", "Project setup"),
+            ("remove_pauses", "Remove pauses"),
+            ("subtitles", "Captions"),
+            ("add subtitles to my video", "Captions"),
+            ("cut the silences", "Remove pauses"),
+            ("make it vertical for reels", "Project setup"),
+            ("animate a lower third", "Motion graphics"),
+        ] {
+            assert_eq!(found(ask), Some(title), "{ask}");
+        }
+        for ask in ["hello", "export the video", "what time is it", ""] {
+            assert_eq!(found(ask), None, "{ask}");
+        }
+    }
+
+    #[test]
+    fn each_bundled_skill_names_requests_that_exist() {
+        let library = SkillLibrary::bundled();
+        let known: Vec<&str> = crate::ops::ops().iter().map(|op| op.name).collect();
+        for skill in &library.skills {
+            let words: Vec<&str> = skill
+                .body
+                .split(|character: char| !(character.is_ascii_lowercase() || character == '_'))
+                .collect();
+            let named = words.iter().filter(|word| known.contains(word)).count();
+            assert!(named >= 3, "{} names few requests", skill.title);
+            // Every word written like a request kind is one.
+            for word in words {
+                let written_as_one = ["set_", "add_", "key_"]
+                    .iter()
+                    .any(|start| word.starts_with(start) && word.len() > start.len());
+                assert!(
+                    !written_as_one || known.contains(&word),
+                    "{}: no request {word}",
+                    skill.title
+                );
+            }
+            assert!(skill.body.len() > 600, "{} says little", skill.title);
+        }
     }
 
     #[test]

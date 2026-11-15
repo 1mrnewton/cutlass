@@ -1657,11 +1657,26 @@ impl Shell {
     }
 
     fn open_folder_in(&mut self, path: &Path) -> Result<(), ShellError> {
+        self.open_folder_once(path, true)
+    }
+
+    /// Open `path`. With `may_ask`, a window that finds it held asks the
+    /// holder once to let it go.
+    fn open_folder_once(&mut self, path: &Path, may_ask: bool) -> Result<(), ShellError> {
         if self.unsaved() {
             self.save()?;
         }
         let opened = cutlass_store::open(path).map_err(ShellError::Store)?;
-        let hold = cutlass_store::hold(path).map_err(ShellError::Store)?;
+        let hold = match cutlass_store::hold(path) {
+            // A window asks a `cutlass mcp` that holds the project to hand
+            // it over, and reads the folder again as that host saved it.
+            Err(StoreError::Held { .. })
+                if may_ask && self.wake.is_some() && Self::ask_holder_to_yield(path) =>
+            {
+                return self.open_folder_once(path, false);
+            }
+            other => other.map_err(ShellError::Store)?,
+        };
         let rate = opened
             .folder
             .draft

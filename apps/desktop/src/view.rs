@@ -1601,6 +1601,17 @@ fn settings_keys(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
 
 const MAC: bool = cfg!(target_os = "macos");
 
+/// The Settings dialog: wide enough for a name, a field and a button on
+/// one row, and one height for every page.
+const SETTINGS_WIDTH: f32 = 540.0;
+const SETTINGS_HEIGHT: f32 = 700.0;
+/// The space between the dialog's edge and its rows, on each side.
+const SETTINGS_PAD: f32 = 20.0;
+/// On the Shortcuts page, the width of the button that shows an action's
+/// keys, and of the room kept after it for Clear.
+const SHORTCUT_KEYS: f32 = 120.0;
+const SHORTCUT_CLEAR: f32 = 52.0;
+
 /// Playback, the side panels, the platform codecs and the shortcuts. A
 /// change saves at once.
 fn settings_window(
@@ -1614,11 +1625,18 @@ fn settings_window(
     let mut reset = false;
     let mut record = None;
     let mut clear = None;
-    let ((), closed) = widgets::dialog(ui, "Settings", |ui| {
-        ui.horizontal(|ui| {
-            ui.add_space(16.0);
+    let ((), closed) = widgets::dialog_sized(
+        ui,
+        "Settings",
+        SETTINGS_WIDTH,
+        Some(SETTINGS_HEIGHT),
+        |ui| {
+            ui.horizontal(|ui| {
+            ui.add_space(SETTINGS_PAD);
             ui.vertical(|ui| {
-                ui.set_max_width(372.0);
+                // Every row ends at the same edge: a field or a line of
+                // words takes what its row has left and no more.
+                ui.set_width(SETTINGS_WIDTH - 2.0 * SETTINGS_PAD);
                 ui::Segmented::show(ui, |ui| {
                     for (tab, name) in [
                         (SettingsTab::General, "General"),
@@ -1705,10 +1723,7 @@ fn settings_window(
                         {
                             settings.import.link = !copy;
                         }
-                        ui.label(
-                            RichText::new("Off, the project points at each file where it is.")
-                                .color(tokens::FAINT),
-                        );
+                        settings_note(ui, "Off, the project points at each file where it is.");
                         settings_heading(ui, "Hardware codecs");
                         ui.add(ui::Check::new(
                             &mut settings.hardware.decode,
@@ -1718,18 +1733,15 @@ fn settings_window(
                             &mut settings.hardware.encode,
                             "Encode with the system codecs",
                         ));
-                        ui.label(
-                            RichText::new("These take effect when Cutlass opens again.")
-                                .color(tokens::FAINT),
-                        );
+                        settings_note(ui, "These take effect when Cutlass opens again.");
                         settings_heading(ui, "Updates");
                         ui.add(ui::Check::new(&mut settings.updates.check, "Check for updates"));
-                        ui.label(
-                            RichText::new(format!(
+                        settings_note(
+                            ui,
+                            &format!(
                                 "Cutlass {} looks for a new release once a day. Off, it never asks.",
                                 crate::shell::RUNNING_VERSION
-                            ))
-                            .color(tokens::FAINT),
+                            ),
                         );
                     }
                     SettingsTab::Assistant => {
@@ -1766,41 +1778,57 @@ fn settings_window(
                         reset = ui.add(ui::Button::new("Reset shortcuts")).clicked();
                         ui.add_space(4.0);
                         for (action, label) in cutlass_settings::ACTIONS {
-                            ui.horizontal(|ui| {
-                                let (rect, _) =
-                                    ui.allocate_exact_size(Vec2::new(200.0, 20.0), Sense::hover());
-                                ui.painter().text(
-                                    rect.left_center(),
-                                    Align2::LEFT_CENTER,
-                                    *label,
-                                    FontId::proportional(tokens::TYPE_SIZE),
-                                    tokens::MUTED,
-                                );
-                                let keys = settings.keys_for(action);
-                                let shown = if view.recording == Some(*action) {
-                                    "Press keys…".to_owned()
-                                } else if keys.is_empty() {
-                                    "None".to_owned()
-                                } else {
-                                    cutlass_settings::keys_label(keys, MAC)
-                                };
-                                if ui
-                                    .add(ui::Button::new(shown).min_size(Vec2::new(110.0, 20.0)))
-                                    .on_hover_text("Click, then press the new keys")
-                                    .clicked()
-                                {
-                                    record = Some(*action);
-                                }
-                                if !keys.is_empty() && ui.add(ui::Button::new("Clear").text_size(12.0)).clicked() {
-                                    clear = Some(*action);
-                                }
-                            });
+                            let keys = settings.keys_for(action);
+                            let shown = if view.recording == Some(*action) {
+                                "Press keys…".to_owned()
+                            } else if keys.is_empty() {
+                                "None".to_owned()
+                            } else {
+                                cutlass_settings::keys_label(keys, MAC)
+                            };
+                            // The keys line up in a column at the right
+                            // edge, with room kept for Clear on every row.
+                            row_with_trail(
+                                ui,
+                                |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(*label).color(tokens::MUTED),
+                                        )
+                                        .truncate(),
+                                    );
+                                },
+                                |ui| {
+                                    let (slot, _) = ui.allocate_exact_size(
+                                        Vec2::new(SHORTCUT_CLEAR, 20.0),
+                                        Sense::hover(),
+                                    );
+                                    if !keys.is_empty()
+                                        && ui
+                                            .put(slot, ui::Button::new("Clear").text_size(12.0))
+                                            .clicked()
+                                    {
+                                        clear = Some(*action);
+                                    }
+                                    if ui
+                                        .add(
+                                            ui::Button::new(shown)
+                                                .min_size(Vec2::new(SHORTCUT_KEYS, 20.0)),
+                                        )
+                                        .on_hover_text("Click, then press the new keys")
+                                        .clicked()
+                                    {
+                                        record = Some(*action);
+                                    }
+                                },
+                            );
                         }
                     }
                 }
             });
         });
-    });
+        },
+    );
     if let Some(action) = clear {
         settings.bind(action, "");
     }
@@ -1996,61 +2024,61 @@ fn assistant_settings(
         choice_row(ui, "Address", |ui| {
             ui::Field::new(&mut settings.model.local_url)
                 .hint(cutlass_settings::DEFAULT_LOCAL_URL)
-                .width(300.0)
                 .show(ui);
         });
         choice_row(ui, "Model", |ui| {
-            ui::Field::new(&mut settings.model.local_name)
-                .hint(cutlass_settings::DEFAULT_LOCAL_NAME)
-                .width(180.0)
-                .show(ui);
-            if ui
-                .add(ui::Button::new("Find models").text_size(12.0))
-                .clicked()
-            {
-                *local_models = Some(find_local_models(&settings.model.local_url));
-            }
+            row_with_trail(
+                ui,
+                |ui| {
+                    ui::Field::new(&mut settings.model.local_name)
+                        .hint(cutlass_settings::DEFAULT_LOCAL_NAME)
+                        .show(ui);
+                },
+                |ui| {
+                    if ui
+                        .add(ui::Button::new("Find models").text_size(12.0))
+                        .clicked()
+                    {
+                        *local_models = Some(find_local_models(&settings.model.local_url));
+                    }
+                },
+            );
         });
         match local_models {
             Some(Ok(models)) if models.is_empty() => {
-                ui.label(
-                    RichText::new(
-                        "The server has no models yet. With Ollama, run: ollama pull qwen3",
-                    )
-                    .size(11.0)
-                    .color(tokens::FAINT),
+                settings_hint(
+                    ui,
+                    "The server has no models yet. With Ollama, run: ollama pull qwen3",
                 );
             }
             Some(Ok(models)) => {
-                ui.horizontal_wrapped(|ui| {
-                    for model in models.iter() {
-                        let chosen = settings.model.local_name == *model;
-                        if ui.add(ui::Choice::new(chosen, model)).clicked() {
-                            settings.model.local_name.clone_from(model);
+                // Under the field they fill, one line after another.
+                under_fields(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for model in models.iter() {
+                            let chosen = settings.model.local_name == *model;
+                            if ui.add(ui::Choice::new(chosen, model)).clicked() {
+                                settings.model.local_name.clone_from(model);
+                            }
                         }
-                    }
+                    });
                 });
             }
-            Some(Err(error)) => {
-                ui.label(
-                    RichText::new(error.as_str())
-                        .size(11.0)
-                        .color(tokens::FAINT),
-                );
-            }
+            Some(Err(error)) => settings_hint(ui, error.as_str()),
             None => {}
         }
-        ui.label(
-            RichText::new("A chat server on this computer, such as Ollama or llama.cpp.")
-                .size(11.0)
-                .color(tokens::FAINT),
+        settings_hint(
+            ui,
+            "A chat server on this computer, such as Ollama or llama.cpp.",
         );
+        ui.add_space(SETTINGS_GAP);
     }
     ui.add(ui::Check::new(
         &mut settings.model.cloud,
         "Cloud model (sends messages off this computer)",
     ));
     let key_changed = cloud_settings(ui, &mut settings.model, key);
+    settings_heading(ui, "Code");
     ui.add(ui::Check::new(
         &mut settings.sandbox.local,
         "Run code on this computer",
@@ -2061,13 +2089,11 @@ fn assistant_settings(
         settings.sandbox.online,
         ui::Check::new(&mut settings.sandbox.online, "Run code online"),
     );
-    ui.label(
-        RichText::new(
-            "Running code online needs a Cutlass account, which is not available yet. Scripts run on this computer.",
-        )
-        .size(11.0)
-        .color(tokens::FAINT),
+    settings_hint(
+        ui,
+        "Running code online needs a Cutlass account, which is not available yet. Scripts run on this computer.",
     );
+    settings_heading(ui, "Memory");
     ui.add(ui::Check::new(
         &mut settings.memory,
         "Remember across conversations",
@@ -2078,24 +2104,36 @@ fn assistant_settings(
             .hint(
                 "Notes the assistant reads at the start of every chat, such as how you like titles",
             )
-            .width(340.0)
             .show(ui)
             .response
             .changed();
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(
-                    "Kept on this computer, with each project's chat. Sent to a model only as part of the chat.",
-                )
-                .size(11.0)
-                .color(tokens::FAINT),
-            );
-            if !notes.is_empty() && ui.add(ui::Button::new("Forget").text_size(12.0)).clicked() {
-                notes.clear();
-                notes_changed = true;
-            }
-        });
+        // The words wrap in what the button leaves them.
+        let mut forget = false;
+        row_with_trail(
+            ui,
+            |ui| {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "Kept on this computer, with each project's chat. Sent to a model only as part of the chat.",
+                        )
+                        .size(11.0)
+                        .color(tokens::FAINT),
+                    )
+                    .wrap(),
+                );
+            },
+            |ui| {
+                forget = !notes.is_empty()
+                    && ui.add(ui::Button::new("Forget").text_size(12.0)).clicked();
+            },
+        );
+        if forget {
+            notes.clear();
+            notes_changed = true;
+        }
     }
+    settings_heading(ui, "Turns");
     choice_row(ui, "Steps a turn", |ui| {
         ui.add(egui::DragValue::new(&mut settings.step_cap).range(1..=1000));
     });
@@ -2103,41 +2141,45 @@ fn assistant_settings(
     let mut remove = None;
     for (index, server) in settings.mcp_servers.iter_mut().enumerate() {
         ui.push_id(("server", index), |ui| {
-            ui.horizontal(|ui| {
-                ui.add(ui::Check::new(&mut server.enabled, ""));
-                ui::Field::new(&mut server.name)
-                    .hint("Name")
-                    .width(120.0)
-                    .show(ui);
-                ui::Segmented::show(ui, |ui| {
-                    for (kind, name) in [(McpServer::STDIO, "Program"), (McpServer::REMOTE, "URL")]
-                    {
-                        if ui.add(ui::Choice::new(server.kind == kind, name)).clicked() {
-                            kind.clone_into(&mut server.kind);
-                        }
+            // The name takes what the kind and Remove leave it.
+            row_with_trail(
+                ui,
+                |ui| {
+                    ui.add(ui::Check::new(&mut server.enabled, ""));
+                    ui::Field::new(&mut server.name).hint("Name").show(ui);
+                },
+                |ui| {
+                    if ui.add(ui::Button::new("Remove").text_size(12.0)).clicked() {
+                        remove = Some(index);
                     }
-                });
-                if ui.add(ui::Button::new("Remove").text_size(12.0)).clicked() {
-                    remove = Some(index);
-                }
-            });
+                    // This end of the row is laid from the right, so the
+                    // last choice comes first.
+                    ui::Segmented::show(ui, |ui| {
+                        for (kind, name) in
+                            [(McpServer::REMOTE, "URL"), (McpServer::STDIO, "Program")]
+                        {
+                            if ui.add(ui::Choice::new(server.kind == kind, name)).clicked() {
+                                kind.clone_into(&mut server.kind);
+                            }
+                        }
+                    });
+                },
+            );
             if server.kind == McpServer::REMOTE {
-                ui::Field::new(&mut server.url)
-                    .hint("https://…")
-                    .width(340.0)
-                    .show(ui);
+                ui::Field::new(&mut server.url).hint("https://…").show(ui);
             } else {
                 ui.horizontal(|ui| {
+                    // The program and its arguments share the row.
+                    let program = (ui.available_width() - ui.spacing().item_spacing.x) * 0.5;
                     ui::Field::new(&mut server.command)
                         .hint("Program")
-                        .width(140.0)
+                        .width(program)
                         .show(ui);
                     let args = server_args
                         .entry(index)
                         .or_insert_with(|| server.args.join(" "));
                     if ui::Field::new(args)
                         .hint("Arguments")
-                        .width(190.0)
                         .show(ui)
                         .response
                         .changed()
@@ -2146,7 +2188,7 @@ fn assistant_settings(
                     }
                 });
             }
-            ui.add_space(4.0);
+            ui.add_space(SETTINGS_GAP);
         });
     }
     if let Some(index) = remove {
@@ -2159,12 +2201,22 @@ fn assistant_settings(
     settings_heading(ui, "Skill folders");
     let mut remove = None;
     for (index, folder) in settings.skill_folders.iter().enumerate() {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(&folder.path).color(tokens::MUTED));
-            if ui.add(ui::Button::new("Remove").text_size(12.0)).clicked() {
-                remove = Some(index);
-            }
-        });
+        // A long path is cut short, whole under the pointer, so Remove
+        // stays in the dialog.
+        row_with_trail(
+            ui,
+            |ui| {
+                ui.add(
+                    egui::Label::new(RichText::new(&folder.path).color(tokens::MUTED)).truncate(),
+                )
+                .on_hover_text(&folder.path);
+            },
+            |ui| {
+                if ui.add(ui::Button::new("Remove").text_size(12.0)).clicked() {
+                    remove = Some(index);
+                }
+            },
+        );
     }
     if let Some(index) = remove {
         settings.skill_folders.remove(index);
@@ -2209,7 +2261,6 @@ fn cloud_settings(
         choice_row(ui, "Address", |ui| {
             ui::Field::new(&mut model.cloud_url)
                 .hint(cutlass_settings::OPENAI_CHAT_URL)
-                .width(300.0)
                 .show(ui);
         });
     }
@@ -2220,31 +2271,37 @@ fn cloud_settings(
             } else {
                 "gpt-5"
             })
-            .width(180.0)
             .show(ui);
     });
     let mut changed = false;
     choice_row(ui, "Key", |ui| {
-        changed = ui::Field::new(key)
-            .hint("Paste your API key")
-            .name("API key")
-            .secret()
-            .width(240.0)
-            .show(ui)
-            .response
-            .changed();
-        if !key.is_empty() && ui.add(ui::Button::new("Forget").text_size(12.0)).clicked() {
+        let mut forget = false;
+        let has_key = !key.is_empty();
+        row_with_trail(
+            ui,
+            |ui| {
+                changed = ui::Field::new(key)
+                    .hint("Paste your API key")
+                    .name("API key")
+                    .secret()
+                    .show(ui)
+                    .response
+                    .changed();
+            },
+            |ui| {
+                forget = has_key && ui.add(ui::Button::new("Forget").text_size(12.0)).clicked();
+            },
+        );
+        if forget {
             key.clear();
             changed = true;
         }
     });
-    ui.label(
-        RichText::new(
-            "Your own key, kept in its own file on this computer and sent only to this service. It is not a setting and the assistant never sees it.",
-        )
-        .size(11.0)
-        .color(tokens::FAINT),
+    settings_hint(
+        ui,
+        "Your own key, kept in its own file on this computer and sent only to this service. It is not a setting and the assistant never sees it.",
     );
+    ui.add_space(SETTINGS_GAP);
     changed
 }
 
@@ -2256,10 +2313,48 @@ fn find_local_models(url: &str) -> Result<Vec<String>, String> {
         .map_err(|error| error.to_string())
 }
 
+/// The space between two groups of rows on a Settings page.
+const SETTINGS_GAP: f32 = 6.0;
+
+/// The width of the name a [`choice_row`] starts with, and the gap after.
+const ROW_NAME: f32 = 84.0;
+
 fn settings_heading(ui: &mut Ui, text: &str) {
-    ui.add_space(10.0);
+    ui.add_space(14.0);
     ui.label(RichText::new(text).color(tokens::TEXT).strong());
-    ui.add_space(2.0);
+    ui.add_space(4.0);
+}
+
+/// A line of small words about the rows above it, wrapped in the page's
+/// width.
+fn settings_hint(ui: &mut Ui, text: &str) {
+    ui.add(egui::Label::new(RichText::new(text).size(11.0).color(tokens::FAINT)).wrap());
+}
+
+/// A line of words about the switch above it, wrapped in the page's width.
+fn settings_note(ui: &mut Ui, text: &str) {
+    ui.add(egui::Label::new(RichText::new(text).color(tokens::FAINT)).wrap());
+}
+
+/// `add`, indented to start where the fields of the [`choice_row`]s do.
+fn under_fields(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        ui.add_space(ROW_NAME);
+        ui.vertical(add);
+    });
+}
+
+/// One row: `trail` keeps its own width at the row's right end, and `lead`
+/// gets what is left, from the row's left. A field in `lead` fills that
+/// space, and words there wrap or are cut in it, so nothing passes the
+/// row's end.
+fn row_with_trail(ui: &mut Ui, lead: impl FnOnce(&mut Ui), trail: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            trail(ui);
+            ui.with_layout(Layout::left_to_right(Align::Center), lead);
+        });
+    });
 }
 
 fn edit_menu(shell: &mut Shell, ui: &mut Ui) {
@@ -9980,7 +10075,7 @@ fn choice_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
         // As tall as a well of choices, so the name sits on its middle.
         let tall = tokens::CHOICE_HEIGHT + 2.0 * f32::from(tokens::SEGMENT_PAD);
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(84.0, tall), Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(ROW_NAME, tall), Sense::hover());
         ui.painter().text(
             rect.left_center(),
             Align2::LEFT_CENTER,
@@ -13251,7 +13346,28 @@ mod tests {
             };
             vec![egui::Event::PointerMoved(pos), event(true), event(false)]
         };
-        let painted = painted_text(&run(&mut shell, &mut view, Vec::new()));
+        // The page is longer than the dialog: its top, then the rest
+        // scrolled into view.
+        let mut painted = painted_text(&run(&mut shell, &mut view, Vec::new()));
+        let middle = Pos2::new(640.0, 400.0);
+        run(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(middle)],
+        );
+        run(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, -2000.0),
+                modifiers: egui::Modifiers::default(),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+            }],
+        );
+        painted.push('\n');
+        painted.push_str(&painted_text(&run(&mut shell, &mut view, Vec::new())));
         for text in [
             "Model",
             "Address",
@@ -19324,6 +19440,172 @@ mod tests {
         harness.state_mut().1.project_dialog = settings;
         harness.run_steps(4);
         picture(&mut harness, "project-settings");
+        drop(harness);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Settings with everything a page can hold turned on: both models, a
+    /// chat completions service, memory, a server of each kind and a skill
+    /// folder with a long path.
+    fn full_settings() -> Settings {
+        let mut settings = Settings::default();
+        settings.model.local = true;
+        settings.model.cloud = true;
+        settings.model.cloud_provider = cutlass_settings::ModelChoice::OPENAI.to_owned();
+        settings.model.cloud_name = "gpt-5".to_owned();
+        settings.memory = true;
+        settings.mcp_servers = vec![
+            cutlass_settings::McpServer {
+                name: "images".to_owned(),
+                kind: cutlass_settings::McpServer::STDIO.to_owned(),
+                command: "/usr/local/bin/imagent".to_owned(),
+                args: vec!["--stdio".to_owned(), "--quiet".to_owned()],
+                enabled: true,
+                ..cutlass_settings::McpServer::default()
+            },
+            cutlass_settings::McpServer {
+                name: "voices".to_owned(),
+                kind: cutlass_settings::McpServer::REMOTE.to_owned(),
+                url: "https://mcp.example.com/a/long/address/for/a/server".to_owned(),
+                enabled: false,
+                ..cutlass_settings::McpServer::default()
+            },
+        ];
+        settings.skill_folders = vec![cutlass_settings::SkillFolder {
+            path: "/Users/someone/Library/Application Support/Cutlass/Skills/My long skill folder"
+                .to_owned(),
+            ..cutlass_settings::SkillFolder::default()
+        }];
+        settings
+    }
+
+    /// On every page of Settings, with all a page can hold, each row ends
+    /// inside the dialog: a button after a field, after a long path or
+    /// after a line of words is not pushed past the edge. With
+    /// `CUTLASS_RENDER_DIR` set the pages are painted by the real renderer
+    /// and kept there to look at, scrolled through.
+    #[test]
+    fn the_settings_rows_end_inside_the_dialog_on_every_page() {
+        use egui_kittest::kittest::Queryable;
+
+        let temp = std::env::temp_dir().join(format!("cutlass-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, full_settings());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        view.settings_open = true;
+        view.notes = Some("Titles in sentence case.".to_owned());
+        view.cloud_key = Some("sk-not-a-real-key".to_owned());
+        view.local_models = Some(Ok(vec![
+            "qwen3.8:27b".to_owned(),
+            "gemma4:latest".to_owned(),
+            "kimi-k2.6:cloud".to_owned(),
+        ]));
+        let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
+        let window = Vec2::new(1280.0, 800.0);
+        // The Mac key names (the arrows) are not in the test fonts.
+        let builder = egui_kittest::Harness::builder()
+            .with_size(window)
+            .allow_missing_glyphs();
+        let builder = if keep.is_some() {
+            builder.wgpu()
+        } else {
+            builder
+        };
+        let mut harness = builder.build_ui_state(
+            |ui, (shell, view): &mut (Shell, ViewState)| show(shell, ui, view, None),
+            (shell, view),
+        );
+        let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
+            let Some(dir) = &keep else {
+                return;
+            };
+            let image = harness.render().expect("the renderer draws the window");
+            std::fs::create_dir_all(dir).unwrap();
+            image.save(dir.join(format!("{name}.png"))).unwrap();
+        };
+        // Where the rows start and end: the dialog is in the window's
+        // middle, with its space on each side.
+        let left = (window.x - SETTINGS_WIDTH) * 0.5 + SETTINGS_PAD;
+        let right = (window.x + SETTINGS_WIDTH) * 0.5 - SETTINGS_PAD;
+        let inside =
+            |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>, label: &str, count: usize| {
+                let rects: Vec<Rect> = harness
+                    .query_all_by_label(label)
+                    .map(|node| node.rect())
+                    .collect();
+                assert_eq!(rects.len(), count, "{label}: {rects:?}");
+                for rect in rects {
+                    assert!(
+                        rect.left() >= left - 0.5 && rect.right() <= right + 0.5,
+                        "{label} at {rect:?} is not within {left}..{right}"
+                    );
+                }
+            };
+        for (tab, name, labels) in [
+            (
+                SettingsTab::General,
+                "settings-general",
+                &[("Loop at the end", 1), ("Check for updates", 1)][..],
+            ),
+            (
+                SettingsTab::Assistant,
+                "settings-assistant",
+                // After a field, after a line of words, after a server's
+                // name and after a long path.
+                &[
+                    ("Find models", 1),
+                    ("Forget", 2),
+                    ("API key", 1),
+                    ("Remove", 3),
+                    ("Add server", 1),
+                    ("Add folder…", 1),
+                ][..],
+            ),
+            (
+                SettingsTab::Shortcuts,
+                "settings-shortcuts",
+                &[
+                    ("Reset shortcuts", 1),
+                    ("Clear", cutlass_settings::ACTIONS.len()),
+                ][..],
+            ),
+        ] {
+            harness.state_mut().1.settings_tab = tab;
+            harness.run_steps(4);
+            for (label, count) in labels {
+                inside(&harness, label, *count);
+            }
+            picture(&mut harness, name);
+            // The page scrolled down, twice: the rest of a long page.
+            for part in 2..=3 {
+                harness.hover_at(egui::pos2(640.0, 400.0));
+                harness.event(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: Vec2::new(0.0, -420.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::default(),
+                    source: egui::MouseWheelSource::Wheel,
+                });
+                harness.run_steps(4);
+                picture(&mut harness, &format!("{name}-{part}"));
+            }
+        }
+        // A server's kind reads Program then URL, as it is listed.
+        harness.state_mut().1.settings_tab = SettingsTab::Assistant;
+        harness.run_steps(4);
+        let first = |label: &str| {
+            harness
+                .query_all_by_label(label)
+                .map(|node| node.rect().left())
+                .fold(f32::INFINITY, f32::min)
+        };
+        assert!(first("Program") < first("URL"));
         drop(harness);
         let _ = std::fs::remove_dir_all(&temp);
     }

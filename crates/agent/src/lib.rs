@@ -69,7 +69,7 @@ pub use settings_tool::{SettingsTool, SettingsToolError, SettingsView};
 pub use skill::{Skill, SkillError, SkillLibrary, SkillPlan, parse_skill_md};
 pub use subagent::{Subagent, SubagentError, SubagentResult, allowed_tools, parent_apply};
 pub use tools::{
-    Catalog, Export, Invocation, Media, MediaInfo, Packages, Player, RESULT_LIMIT, Registry,
+    Catalog, Export, Frame, Invocation, Media, MediaInfo, Packages, Player, RESULT_LIMIT, Registry,
     Speech, SpeechJob, SpeechPoll, TOOL_NAMES, ToolError, TrackAsk, TrackJob, Tracking,
     assistant_approvals, pending_approvals, tool_definitions,
 };

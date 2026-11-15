@@ -16,6 +16,7 @@ use crate::draft::{ApplyInput, ApplyMode, DraftQuery, DraftTools};
 use crate::r#loop::{ToolOutcome, ToolSink};
 use crate::mcp::{McpClient, McpError, McpTransport};
 use crate::model::{ToolCall, ToolDefinition};
+use crate::picture::{PICTURE_LIMIT, Picture};
 use crate::sandbox::Sandbox;
 use crate::settings_tool::{SettingsTool, SettingsToolError};
 use crate::skill::{Skill, SkillLibrary};
@@ -34,6 +35,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "player.seek",
     "player.play",
     "player.pause",
+    "player.look",
     "media.probe",
     "speech.start",
     "speech.poll",
@@ -60,6 +62,23 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         .collect()
 }
 
+/// The frame the player shows at one time, drawn small for a model to
+/// look at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+    /// The time the frame is at, in microseconds.
+    pub time_us: i64,
+    /// The picture's width in pixels.
+    pub width: u32,
+    /// The picture's height in pixels.
+    pub height: u32,
+    /// The encoded picture.
+    pub picture: Picture,
+    /// What the picture lacks next to the player's, such as effect clips
+    /// on a machine with no GPU; empty when it lacks nothing.
+    pub missing: String,
+}
+
 /// The open player. These calls do not push a draft undo step.
 pub trait Player {
     /// Moves the playhead to `time_us` microseconds.
@@ -68,6 +87,11 @@ pub trait Player {
     fn play(&mut self) -> Result<(), String>;
     /// Pauses playback.
     fn pause(&mut self) -> Result<(), String>;
+    /// Draws the frame at `time_us`, or at the playhead for `None`, without
+    /// moving the playhead. A host that cannot draw says so.
+    fn look(&mut self, _time_us: Option<i64>) -> Result<Frame, String> {
+        Err("this host cannot draw a frame".to_owned())
+    }
 }
 
 /// The import type, duration, picture size, and stream names from the host.
@@ -222,6 +246,11 @@ pub enum Invocation {
     PlayerPlay,
     /// Pause playback.
     PlayerPause,
+    /// Look at the frame at a time.
+    PlayerLook {
+        /// The time in microseconds; the playhead when `None`.
+        time_us: Option<i64>,
+    },
     /// Probe one media path through the host.
     MediaProbe {
         /// The path the host probes.
@@ -414,6 +443,8 @@ pub struct Registry<P, Med, Sp, Cat, Pkg, Exp, Sand, Appr, Tr, Trk> {
     pub tracking: Trk,
     speech_jobs: BTreeMap<String, SpeechJob>,
     track_jobs: BTreeMap<String, TrackJob>,
+    /// The picture the call running now made, for its outcome.
+    looked: Option<Picture>,
 }
 
 impl<P, Med, Sp, Cat, Pkg, Exp, Sand, Appr, Tr, Trk>
@@ -465,6 +496,7 @@ where
             tracking,
             speech_jobs: BTreeMap::new(),
             track_jobs: BTreeMap::new(),
+            looked: None,
         }
     }
 
@@ -540,6 +572,33 @@ where
             }
             Invocation::PlayerPlay => host_unit(self.player.play()),
             Invocation::PlayerPause => host_unit(self.player.pause()),
+            Invocation::PlayerLook { time_us } => {
+                let end = timeline_end(self.draft.session().draft());
+                if let Some(time_us) = time_us
+                    && (time_us < 0 || time_us > end)
+                {
+                    return Err(ToolError::BadArguments(format!(
+                        "player.look takes a time from 0 to {end}, where the last clip ends, \
+                         not {time_us}"
+                    )));
+                }
+                let frame = self.player.look(time_us).map_err(ToolError::Host)?;
+                if frame.picture.data.len() > PICTURE_LIMIT {
+                    return Err(ToolError::Host(
+                        "the frame's picture is too large to send".to_owned(),
+                    ));
+                }
+                let mut said = format!(
+                    "frame at {}, {}x{}: the picture is with this result",
+                    frame.time_us, frame.width, frame.height
+                );
+                if !frame.missing.is_empty() {
+                    said.push_str(". ");
+                    said.push_str(&frame.missing);
+                }
+                self.looked = Some(frame.picture);
+                Ok(said)
+            }
             Invocation::MediaProbe { path } => self
                 .media
                 .probe(&path)
@@ -682,6 +741,14 @@ where
             }
             "player.play" => bare(arguments, "player.play", Invocation::PlayerPlay),
             "player.pause" => bare(arguments, "player.pause", Invocation::PlayerPause),
+            "player.look" if arguments.trim().is_empty() => {
+                Ok(Invocation::PlayerLook { time_us: None })
+            }
+            "player.look" => {
+                one_i64(arguments, "player.look").map(|time_us| Invocation::PlayerLook {
+                    time_us: Some(time_us),
+                })
+            }
             "media.probe" => {
                 text_arg(arguments, "media.probe").map(|path| Invocation::MediaProbe { path })
             }
@@ -792,6 +859,7 @@ where
     Trk: Tracking,
 {
     fn run_tool(&mut self, call: &ToolCall) -> ToolOutcome {
+        self.looked = None;
         let parsed = self.parse(&call.name, &call.arguments);
         let result = match parsed {
             Ok(invocation) => self.invoke(invocation),
@@ -801,7 +869,7 @@ where
             Ok(content) => ToolOutcome {
                 content: within_limit(content),
                 is_error: false,
-                picture: None,
+                picture: self.looked.take(),
             },
             Err(error) => ToolOutcome {
                 content: within_limit(error.to_string()),
@@ -867,6 +935,12 @@ fn description(name: &str) -> &'static str {
         }
         "player.play" => "Start the open player.",
         "player.pause" => "Pause the open player.",
+        "player.look" => {
+            "Look at the project: the frame at a time in microseconds, or at the playhead \
+             with no input, comes back as a small picture. It does not move the player. Use \
+             it to check what an edit looks like, such as where a title sits or whether an \
+             effect shows; one look is one moment, so look at a few times for motion."
+        }
         "media.probe" => {
             "The type to import it as, duration, size, and streams (video, audio) reported \
              by the host for one path."
@@ -1909,6 +1983,10 @@ mod tests {
         play: u32,
         pause: u32,
         time_us: i64,
+        /// The frame a look answers with, at the time asked; `None` is a
+        /// host that draws none.
+        frame: Option<super::Frame>,
+        looks: Vec<Option<i64>>,
     }
 
     impl Player for CountPlayer {
@@ -1926,6 +2004,13 @@ mod tests {
         fn pause(&mut self) -> Result<(), String> {
             self.pause += 1;
             Ok(())
+        }
+
+        fn look(&mut self, time_us: Option<i64>) -> Result<super::Frame, String> {
+            self.looks.push(time_us);
+            let mut frame = self.frame.clone().ok_or("no screen")?;
+            frame.time_us = time_us.unwrap_or(self.time_us);
+            Ok(frame)
         }
     }
 
@@ -2249,6 +2334,7 @@ mod tests {
                 "player.seek",
                 "player.play",
                 "player.pause",
+                "player.look",
                 "media.probe",
                 "speech.start",
                 "speech.poll",
@@ -2263,7 +2349,7 @@ mod tests {
                 "mcp.call",
             ]
         );
-        assert_eq!(TOOL_NAMES.len(), 21);
+        assert_eq!(TOOL_NAMES.len(), 22);
     }
 
     #[test]
@@ -2806,6 +2892,142 @@ mod tests {
             registry.invoke(Invocation::DraftUndo),
             Err(ToolError::Draft(DraftError::EmptyUndo))
         ));
+    }
+
+    #[test]
+    fn a_look_answers_with_the_frames_picture_and_moves_nothing() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        let run = |registry: &mut TestRegistry, name: &str, arguments: &str| {
+            registry.run_tool(&ToolCall {
+                id: "l".to_owned(),
+                name: name.to_owned(),
+                arguments: arguments.to_owned(),
+            })
+        };
+        registry
+            .draft
+            .apply(ApplyInput {
+                expected_revision: 0,
+                requests: vec![place()],
+                mode: ApplyMode::Commit,
+                request_id: None,
+            })
+            .unwrap();
+        let picture = crate::Picture::jpeg(b"frame");
+        registry.player.time_us = 250_000;
+        registry.player.frame = Some(super::Frame {
+            time_us: 0,
+            width: 853,
+            height: 480,
+            picture: picture.clone(),
+            missing: String::new(),
+        });
+        // No input is the playhead; a time is that time.
+        assert!(matches!(
+            registry.parse("player.look", "  ").unwrap(),
+            Invocation::PlayerLook { time_us: None }
+        ));
+        assert!(matches!(
+            registry.parse("player.look", "500000").unwrap(),
+            Invocation::PlayerLook {
+                time_us: Some(500_000)
+            }
+        ));
+        let here = run(&mut registry, "player.look", "");
+        assert!(!here.is_error, "{}", here.content);
+        assert_eq!(
+            here.content,
+            "frame at 250000, 853x480: the picture is with this result"
+        );
+        assert_eq!(here.picture, Some(picture.clone()));
+        // The clip's last moment and its end are both in range.
+        let there = run(&mut registry, "player.look", "1000000");
+        assert_eq!(
+            there.content,
+            "frame at 1000000, 853x480: the picture is with this result"
+        );
+        assert_eq!(there.picture, Some(picture.clone()));
+        assert_eq!(registry.player.looks, [None, Some(1_000_000)]);
+        // Looking is not seeking, and not an edit.
+        assert_eq!(registry.player.seek, 0);
+        assert_eq!(registry.draft.session().revision(), 1);
+
+        // What the picture lacks is said with it.
+        if let Some(frame) = &mut registry.player.frame {
+            frame.missing = "1 effect clip is not in the picture (fx): no GPU".to_owned();
+        }
+        let lacking = run(&mut registry, "player.look", "0");
+        assert_eq!(
+            lacking.content,
+            "frame at 0, 853x480: the picture is with this result. \
+             1 effect clip is not in the picture (fx): no GPU"
+        );
+
+        // A time off the timeline, and words, are refused before the host
+        // draws; the call after a look carries no picture.
+        for bad in ["-1", "1000001", "now", "1 2"] {
+            let refused = run(&mut registry, "player.look", bad);
+            assert!(refused.is_error, "{bad}");
+            assert_eq!(refused.picture, None, "{bad}");
+        }
+        assert_eq!(registry.player.looks.len(), 3);
+        let late = run(&mut registry, "player.look", "1000001");
+        assert!(
+            late.content
+                .contains("player.look takes a time from 0 to 1000000"),
+            "{}",
+            late.content
+        );
+        let plain = run(&mut registry, "draft.query", "project");
+        assert_eq!(plain.picture, None);
+    }
+
+    #[test]
+    fn a_host_that_draws_no_frame_and_a_picture_too_large_are_errors() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        let look = ToolCall {
+            id: "l".to_owned(),
+            name: "player.look".to_owned(),
+            arguments: String::new(),
+        };
+        let none = registry.run_tool(&look);
+        assert!(none.is_error);
+        assert_eq!(none.content, "no screen");
+        assert_eq!(none.picture, None);
+        registry.player.frame = Some(super::Frame {
+            time_us: 0,
+            width: 1,
+            height: 1,
+            picture: crate::Picture {
+                media_type: "image/jpeg".to_owned(),
+                data: "A".repeat(crate::PICTURE_LIMIT + 1),
+            },
+            missing: String::new(),
+        });
+        let large = registry.run_tool(&look);
+        assert!(large.is_error);
+        assert_eq!(large.content, "the frame's picture is too large to send");
+        assert_eq!(large.picture, None);
+
+        // A host that leaves the trait's own answer says it cannot draw.
+        struct Still;
+        impl Player for Still {
+            fn seek(&mut self, _time_us: i64) -> Result<(), String> {
+                Ok(())
+            }
+            fn play(&mut self) -> Result<(), String> {
+                Ok(())
+            }
+            fn pause(&mut self) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        assert_eq!(
+            Still.look(None).unwrap_err(),
+            "this host cannot draw a frame"
+        );
     }
 
     #[test]

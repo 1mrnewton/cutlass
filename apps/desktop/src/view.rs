@@ -19644,7 +19644,22 @@ mod tests {
         let keep = std::env::var_os("CUTLASS_RENDER_DIR").map(std::path::PathBuf::from);
         let picture = |harness: &mut egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
             harness.run_steps(8);
-            let image = harness.render().expect("the renderer draws the window");
+            // egui_kittest waits ten seconds for each frame. A software
+            // renderer, as on the Windows runner, can take longer over this
+            // window; a wait that runs out is not an error on the device,
+            // so it is tried again, and a renderer that never finishes still
+            // fails here.
+            let mut image = harness.render();
+            for _ in 0..2 {
+                match &image {
+                    Err(error) if error.contains("timed out") => {
+                        eprintln!("{name}: {error}; waiting again");
+                        image = harness.render();
+                    }
+                    _ => break,
+                }
+            }
+            let image = image.expect("the renderer draws the window");
             if let Some(dir) = &keep {
                 std::fs::create_dir_all(dir).unwrap();
                 image.save(dir.join(format!("{name}.png"))).unwrap();

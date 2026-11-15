@@ -898,7 +898,7 @@ impl Shell {
             width,
         }];
         requests.extend(self.style_keys(&[(cutlass_model::TextStyleKey::StrokeWidth, width)]));
-        self.apply_requests(&requests)
+        self.apply_text_requests(requests)
     }
 
     /// Cast the selected title's shadow in `color`, `distance` hundredths of
@@ -928,7 +928,7 @@ impl Shell {
             (Key::ShadowAngle, angle),
             (Key::ShadowBlur, blur),
         ]));
-        self.apply_requests(&requests)
+        self.apply_text_requests(requests)
     }
 
     /// Make the selected title's shadow `opacity` from 0 to 1, keyed here
@@ -941,7 +941,7 @@ impl Shell {
             opacity,
         }];
         requests.extend(self.style_keys(&[(cutlass_model::TextStyleKey::ShadowAlpha, opacity)]));
-        self.apply_requests(&requests)
+        self.apply_text_requests(requests)
     }
 
     /// Bend the selected title's lines along an arc `degrees` wide, or
@@ -956,7 +956,7 @@ impl Shell {
             degrees,
         }];
         requests.extend(self.style_keys(&[(cutlass_model::TextStyleKey::Curve, degrees)]));
-        self.apply_requests(&requests)
+        self.apply_text_requests(requests)
     }
 
     /// Fill a box behind the selected title in `color` at `alpha`, its
@@ -982,7 +982,7 @@ impl Shell {
         requests.extend(
             self.style_keys(&[(Key::BackgroundAlpha, alpha), (Key::BackgroundRound, round)]),
         );
-        self.apply_requests(&requests)
+        self.apply_text_requests(requests)
     }
 
     /// Lay the selected title's background out: a box around each line with
@@ -1014,7 +1014,7 @@ impl Shell {
             (Key::BackgroundOffsetX, offset_x),
             (Key::BackgroundOffsetY, offset_y),
         ]));
-        self.apply_requests(&requests)
+        self.apply_text_requests(requests)
     }
 
     /// Shape the selected title's background as the bubble keyed `bubble`.
@@ -1049,7 +1049,22 @@ impl Shell {
         self.refuse_locked(&segment_id)?;
         // With "Apply to all main captions" every caption on the row takes
         // it, each with a glow of its own.
-        let clips: Vec<SegmentId> = match self.draft() {
+        let clips = self.styled_clips(segment_id);
+        let face = self.face.name().to_owned();
+        let mut requests = Vec::new();
+        for clip in &clips {
+            let glow_id = MaterialId::new(self.fresh("glow"));
+            requests.extend(cutlass_editor::text_effect_requests(
+                effect, clip, glow_id, &face,
+            ));
+        }
+        self.apply_requests(&requests)
+    }
+
+    /// The clips a look given to `segment_id` reaches: every caption on
+    /// its row with "Apply to all main captions" on, or it alone.
+    pub(super) fn styled_clips(&self, segment_id: SegmentId) -> Vec<SegmentId> {
+        match self.draft() {
             Some(draft)
                 if self.all_captions
                     && cutlass_editor::main_caption_lane(draft, &segment_id).is_some() =>
@@ -1060,16 +1075,7 @@ impl Shell {
                     .collect()
             }
             _ => vec![segment_id],
-        };
-        let face = self.face.name().to_owned();
-        let mut requests = Vec::new();
-        for clip in &clips {
-            let glow_id = MaterialId::new(self.fresh("glow"));
-            requests.extend(cutlass_editor::text_effect_requests(
-                effect, clip, glow_id, &face,
-            ));
         }
-        self.apply_requests(&requests)
     }
 
     /// Give the selected title the bubble on the Bubble page with `id`:
@@ -1168,17 +1174,21 @@ impl Shell {
     ) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
-        let glow_id = MaterialId::new(self.fresh("glow"));
         let now = self.text_look();
-        let mut requests = vec![Request::SetTextGlow {
-            segment_id,
-            glow_id,
-            color: color.to_owned(),
-            strength,
-            range,
-            rays,
-            lean,
-        }];
+        // Every caption the look reaches takes a glow of its own.
+        let mut requests: Vec<Request> = self
+            .styled_clips(segment_id)
+            .into_iter()
+            .map(|clip| Request::SetTextGlow {
+                segment_id: clip,
+                glow_id: MaterialId::new(self.fresh("glow")),
+                color: color.to_owned(),
+                strength,
+                range,
+                rays,
+                lean,
+            })
+            .collect();
         // A keyed Intensity or Range plays its keys, so a change keys it here.
         for (setting, value, was) in [
             (
@@ -2888,6 +2898,70 @@ mod tests {
         assert!(!desktop.on_main_captions());
         desktop.set_text_size(20.0).unwrap();
         assert_eq!(sizes(&desktop), [30.0, 15.0, 20.0]);
+    }
+
+    #[test]
+    fn a_main_caption_parts_and_glow_reach_its_row_while_apply_to_all_is_on() {
+        let temp = Temp::new();
+        let mut desktop = subtitle_row(&temp);
+        pick(&mut desktop, "first");
+        let texts = |desktop: &Shell| -> Vec<MaterialText> {
+            let draft = desktop.draft().unwrap();
+            ["first", "second", "title"]
+                .iter()
+                .map(|id| {
+                    draft
+                        .materials
+                        .texts
+                        .iter()
+                        .find(|text| text.id.as_str() == *id)
+                        .unwrap()
+                        .clone()
+                })
+                .collect()
+        };
+        desktop.set_text_outline("#FF0000", 0.05).unwrap();
+        desktop.set_text_shadow("#000000", 8.0, -45.0, 0.3).unwrap();
+        desktop.set_text_shadow_opacity(0.5).unwrap();
+        desktop.set_text_background("#00FF00", 1.0, 0.2).unwrap();
+        desktop
+            .set_text_background_box(true, 0.2, 0.1, 0.0, 0.0)
+            .unwrap();
+        desktop.set_text_curve(true, 72.0).unwrap();
+        for (at, text) in texts(&desktop).iter().enumerate() {
+            let row = at < 2;
+            assert_eq!(text.border_color == "#FF0000", row, "{at}");
+            assert_eq!(text.has_shadow, row, "{at}");
+            assert_eq!(text.shadow_alpha == 0.5, row, "{at}");
+            assert_eq!(text.background_color == "#00FF00", row, "{at}");
+            assert_eq!(text.background_lines, row, "{at}");
+            assert_eq!(text.curve_on, row, "{at}");
+        }
+
+        // Each caption on the row glows with a glow of its own.
+        desktop.set_text_glow_rays(true).unwrap();
+        let draft = desktop.draft().unwrap();
+        let glows: Vec<Option<cutlass_model::MaterialId>> = ["first", "second", "title"]
+            .iter()
+            .map(|id| {
+                let segment = draft
+                    .tracks
+                    .iter()
+                    .flat_map(|track| &track.segments)
+                    .find(|segment| segment.id.as_str() == *id)
+                    .unwrap();
+                cutlass_model::segment_bloom(&draft.materials, segment)
+                    .map(|effect| effect.id.clone())
+            })
+            .collect();
+        assert!(glows[0].is_some() && glows[1].is_some() && glows[2].is_none());
+        assert_ne!(glows[0], glows[1]);
+
+        // Off, a change reaches the picked caption alone.
+        desktop.set_all_captions(false);
+        desktop.set_text_curve(false, 72.0).unwrap();
+        let curved: Vec<bool> = texts(&desktop).iter().map(|text| text.curve_on).collect();
+        assert_eq!(curved, [false, true, false]);
     }
 
     #[test]

@@ -320,7 +320,7 @@ replace_media: Play material_id (already in the library) in clip segment_id in p
 link_media: Point a material at its file at path after the media moved; width and height in pixels, duration in microseconds, long enough for its clips; a reversed copy is forgotten.
 {"op":"link_media","material_id":"m-a","path":"/Users/me/Movies/beach.mp4","width":1920,"height":1080,"duration":8000000}
 
-insert_track: Add an empty lane with a new id; kind video, audio, text, sticker, effect, filter, adjust or mixed; video and mixed lanes go just above the main track, audio just below it, the rest above the top video lane.
+insert_track: Add an empty lane with a new id; kind video, audio, text, sticker, effect, filter, adjust or mixed; video and mixed lanes go on top of the video lanes, audio just below the main track, the rest on the top row. On one layer the top row is drawn on top, so a new lane shows over the ones already there.
 {"op":"insert_track","track_id":"overlay-1","kind":"video"}
 
 insert_track_at: Add an empty lane of kind at index in the track order (0 is the top row); audio must go under the main track, the rest above it; an index outside the kind's block is refused.

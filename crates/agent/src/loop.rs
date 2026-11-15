@@ -34,6 +34,12 @@ pub trait ToolSink {
 
     /// The helper on `call` finished with `outcome`.
     fn helper_finished(&mut self, _call: &ToolCall, _outcome: &ToolOutcome) {}
+
+    /// `message` joined the turn's transcript: the ask, a reply, or a tool
+    /// result. A host that keeps the conversation itself hears each one as
+    /// it lands, so a turn that fails or is stopped is not lost. A helper's
+    /// own messages are not heard.
+    fn heard(&mut self, _message: &Message) {}
 }
 
 /// The rounds, transcript, and final completion of one ask.
@@ -105,9 +111,11 @@ pub fn run_after<M: Model, S: ToolSink>(
     definitions: &[ToolDefinition],
 ) -> Result<Turn, LoopError> {
     let mut messages = history;
-    messages.push(Message::User {
+    let asked = Message::User {
         text: ask.to_owned(),
-    });
+    };
+    tools.heard(&asked);
+    messages.push(asked);
     let mut rounds: u32 = 0;
     loop {
         if rounds >= cap {
@@ -119,10 +127,12 @@ pub fn run_after<M: Model, S: ToolSink>(
         };
         let completion = model.complete(&request).map_err(LoopError::Model)?;
         rounds += 1;
-        messages.push(Message::Assistant {
+        let replied = Message::Assistant {
             text: completion.text.clone(),
             calls: completion.calls.clone(),
-        });
+        };
+        tools.heard(&replied);
+        messages.push(replied);
         if completion.calls.is_empty() {
             return Ok(Turn {
                 rounds,
@@ -132,12 +142,14 @@ pub fn run_after<M: Model, S: ToolSink>(
         }
         for call in &completion.calls {
             let outcome = tools.run_tool(call);
-            messages.push(Message::Tool {
+            let result = Message::Tool {
                 call_id: call.id.clone(),
                 name: call.name.clone(),
                 content: outcome.content,
                 is_error: outcome.is_error,
-            });
+            };
+            tools.heard(&result);
+            messages.push(result);
         }
     }
 }
@@ -177,6 +189,52 @@ mod tests {
                     is_error: false,
                 })
         }
+    }
+
+    /// Keeps what it hears, as a host that holds the conversation does.
+    #[derive(Default)]
+    struct Listening(Vec<Message>);
+
+    impl ToolSink for Listening {
+        fn run_tool(&mut self, _call: &ToolCall) -> ToolOutcome {
+            ToolOutcome {
+                content: "ok".to_owned(),
+                is_error: false,
+            }
+        }
+
+        fn heard(&mut self, message: &Message) {
+            self.0.push(message.clone());
+        }
+    }
+
+    #[test]
+    fn a_host_hears_a_turn_that_ends_at_the_step_cap() {
+        let call = tool_call("1", "draft.apply", "{}");
+        let mut model = LocalModel::scripted(vec![
+            with_call("first", call.clone()),
+            with_call("second", tool_call("2", "draft.apply", "{}")),
+            done("never reached"),
+        ]);
+        let mut sink = Listening::default();
+        let error = run(&mut model, &mut sink, 2, "edit", &[]).unwrap_err();
+        assert_eq!(error, LoopError::StepCap { cap: 2 });
+        // The ask, both replies and both results: what was done is known
+        // though the turn gave no answer.
+        assert_eq!(sink.0.len(), 5);
+        assert_eq!(
+            sink.0[0],
+            Message::User {
+                text: "edit".to_owned()
+            }
+        );
+        assert!(matches!(&sink.0[1], Message::Assistant { text, .. } if text == "first"));
+        assert!(matches!(&sink.0[4], Message::Tool { call_id, .. } if call_id == "2"));
+        // A turn that finishes is heard in full, the same as it returns.
+        let mut model = LocalModel::scripted(vec![with_call("", call), done("done")]);
+        let mut sink = Listening::default();
+        let turn = run(&mut model, &mut sink, 8, "edit", &[]).unwrap();
+        assert_eq!(sink.0, turn.messages);
     }
 
     fn tool_call(id: &str, name: &str, arguments: &str) -> ToolCall {

@@ -335,9 +335,9 @@ impl fmt::Display for DraftError {
                 formatter,
                 "revision {actual} does not match {expected}, so nothing was written"
             ),
-            Self::RequestFailed { index, name, .. } => write!(
+            Self::RequestFailed { index, name, cause } => write!(
                 formatter,
-                "request {index} {name} failed, and the draft is unchanged"
+                "request {index} {name} failed: {cause}. The draft is unchanged"
             ),
             Self::EmptyUndo => write!(formatter, "nothing to undo"),
             Self::EmptyRedo => write!(formatter, "nothing to redo"),
@@ -1330,6 +1330,13 @@ mod tests {
             }
         );
         assert!(error.to_string().contains("request 1 place failed"));
+        // The text says why, so the caller can mend the request.
+        assert!(
+            error
+                .to_string()
+                .contains("clip id is empty or already used"),
+            "{error}"
+        );
         assert_eq!(tools.session().draft(), &original);
         assert_eq!(tools.session().revision(), 0);
         assert_eq!(tools.undo().unwrap_err(), DraftError::EmptyUndo);

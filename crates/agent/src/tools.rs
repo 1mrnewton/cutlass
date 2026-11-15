@@ -1124,28 +1124,39 @@ fn parse_query(arguments: &str) -> Result<Invocation, ToolError> {
 }
 
 /// `draft.apply` as JSON. The revision is required, so a combo built on an
-/// old read is refused rather than applied over newer edits.
+/// old read is refused rather than applied over newer edits. A request that
+/// does not read is named by its place in the list and its kind, so the
+/// caller knows which one to mend.
 fn parse_apply(arguments: &str) -> Result<Invocation, ToolError> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Apply {
         expected_revision: u64,
-        requests: Vec<Request>,
+        requests: Vec<serde_json::Value>,
         #[serde(default)]
         dry_run: bool,
         #[serde(default)]
         request_id: Option<String>,
     }
     let apply: Apply = serde_json::from_str(arguments).map_err(|error| {
-        ToolError::BadArguments(format!("bad arguments for draft.apply: {error}"))
+        ToolError::BadArguments(format!(
+            "bad arguments for draft.apply, which takes \
+             {{\"expected_revision\":N,\"requests\":[{{\"op\":...}}]}}: {error}"
+        ))
     })?;
     if apply.requests.is_empty() {
-        return Err(bad("draft.apply"));
+        return Err(ToolError::BadArguments(
+            "draft.apply needs at least one request in requests".to_owned(),
+        ));
+    }
+    let mut requests = Vec::with_capacity(apply.requests.len());
+    for (index, value) in apply.requests.into_iter().enumerate() {
+        requests.push(read_request(index, value)?);
     }
     Ok(Invocation::DraftApply(ApplyInput {
         request_id: apply.request_id.filter(|id| !id.is_empty()),
         expected_revision: apply.expected_revision,
-        requests: apply.requests,
+        requests,
         mode: if apply.dry_run {
             ApplyMode::DryRun
         } else {
@@ -1154,18 +1165,40 @@ fn parse_apply(arguments: &str) -> Result<Invocation, ToolError> {
     }))
 }
 
-fn parse_export(arguments: &str) -> Result<Invocation, ToolError> {
-    if let Some(path) = headed(arguments, "replace") {
-        return Ok(Invocation::ExportStart {
-            path: path.to_owned(),
-            replace: true,
-        });
+/// One request of a combo, or which one does not read and why.
+fn read_request(index: usize, value: serde_json::Value) -> Result<Request, ToolError> {
+    let Some(op) = value
+        .get("op")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+    else {
+        return Err(ToolError::BadArguments(format!(
+            "request {index} has no \"op\"; each request names its kind, such as \
+             {{\"op\":\"move\",...}}, and draft.query \"ops\" lists the kinds"
+        )));
+    };
+    if !crate::ops::ops().iter().any(|known| known.name == op) {
+        return Err(ToolError::BadArguments(format!(
+            "request {index}: no request kind {op}; draft.query \"ops\" lists them all"
+        )));
     }
-    if let Some(path) = headed(arguments, "new") {
-        return Ok(Invocation::ExportStart {
-            path: path.to_owned(),
-            replace: false,
-        });
+    serde_json::from_value(value).map_err(|error| {
+        ToolError::BadArguments(format!(
+            "request {index} {op}: {error}; draft.query \"ops {op}\" shows its fields"
+        ))
+    })
+}
+
+fn parse_export(arguments: &str) -> Result<Invocation, ToolError> {
+    for (keyword, replace) in [("replace", true), ("new", false)] {
+        if let Some(path) = headed(arguments, keyword).map(unquoted)
+            && !path.is_empty()
+        {
+            return Ok(Invocation::ExportStart {
+                path: path.to_owned(),
+                replace,
+            });
+        }
     }
     Err(bad("export.start"))
 }
@@ -1318,6 +1351,7 @@ fn bare(arguments: &str, name: &str, call: Invocation) -> Result<Invocation, Too
 }
 
 fn text_arg(arguments: &str, name: &str) -> Result<String, ToolError> {
+    let arguments = unquoted(arguments);
     if arguments.is_empty() {
         Err(bad(name))
     } else {
@@ -1354,8 +1388,27 @@ fn parse_i64(token: &str, name: &str) -> Result<i64, ToolError> {
     token.parse::<i64>().map_err(|_| bad(name))
 }
 
+/// The refusal for arguments that are not the tool's grammar, with the
+/// grammar, so the caller can write them again.
 fn bad(name: &str) -> ToolError {
-    ToolError::BadArguments(format!("bad arguments for {name}"))
+    let hint = crate::mcp_server::input_hint(name);
+    ToolError::BadArguments(if hint.is_empty() {
+        format!("bad arguments for {name}, which takes no input")
+    } else {
+        format!("bad arguments for {name}; its input is: {hint}")
+    })
+}
+
+/// `text` without one pair of quotes around it, as a model may write a
+/// path or an id.
+fn unquoted(text: &str) -> &str {
+    let text = text.trim();
+    for quote in ['"', '\''] {
+        if text.len() >= 2 && text.starts_with(quote) && text.ends_with(quote) {
+            return text[1..text.len() - 1].trim();
+        }
+    }
+    text
 }
 
 #[cfg(test)]
@@ -1958,6 +2011,86 @@ mod tests {
                 Err(ToolError::BadArguments(_))
             ));
         }
+    }
+
+    #[test]
+    fn a_refused_combo_says_which_request_and_why() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        let mut run = |arguments: &str| {
+            registry.run_tool(&ToolCall {
+                id: "1".to_owned(),
+                name: "draft.apply".to_owned(),
+                arguments: arguments.to_owned(),
+            })
+        };
+        // The second request leaves out a field: it is named by its place
+        // and kind, with where to read its fields.
+        let short = run(r#"{"expected_revision":0,"requests":[
+                {"op":"set_project_name","name":"n"},
+                {"op":"move","segment_id":"a"}]}"#);
+        assert!(short.is_error);
+        assert!(
+            short.content.contains("request 1 move"),
+            "{}",
+            short.content
+        );
+        assert!(short.content.contains("track_id"), "{}", short.content);
+        assert!(short.content.contains("ops move"), "{}", short.content);
+        // An unknown kind is said in a line, not with every kind there is.
+        let unknown = run(r#"{"expected_revision":0,"requests":[{"op":"fly"}]}"#);
+        assert!(
+            unknown.content.contains("request 0: no request kind fly"),
+            "{}",
+            unknown.content
+        );
+        assert!(unknown.content.len() < 200, "{}", unknown.content);
+        let nameless = run(r#"{"expected_revision":0,"requests":[{"segment_id":"a"}]}"#);
+        assert!(nameless.content.contains("request 0 has no \"op\""));
+        let empty = run(r#"{"expected_revision":0,"requests":[]}"#);
+        assert!(empty.content.contains("at least one request"));
+        // A request the session refuses carries the session's reason.
+        let missing = run(
+            r#"{"expected_revision":0,"requests":[{"op":"move","segment_id":"ghost","track_id":"main","start":0}]}"#,
+        );
+        assert!(missing.is_error);
+        assert!(
+            missing
+                .content
+                .contains("request 0 move failed: no clip has that id"),
+            "{}",
+            missing.content
+        );
+        assert_eq!(registry.draft.session().revision(), 0);
+    }
+
+    #[test]
+    fn a_refusal_names_the_input_a_tool_takes_and_quotes_come_off() {
+        let temp = Temp::new();
+        let registry = open(&temp, Gate::refuse());
+        let text = |name: &str, arguments: &str| match registry.parse(name, arguments) {
+            Err(error) => error.to_string(),
+            Ok(_) => String::new(),
+        };
+        assert!(text("draft.query", "materials please").contains("project | full"));
+        assert!(text("player.seek", "1.5").contains("<time_us>"));
+        assert!(text("speech.start", "0").contains("<start_us> <duration_us>"));
+        assert!(text("export.start", "/tmp/a.mp4").contains("new <path> | replace <path>"));
+        assert!(text("draft.undo", "now").contains("takes no input"));
+        assert_eq!(
+            registry.parse("media.probe", "\"/a b/c.mp4\"").unwrap(),
+            Invocation::MediaProbe {
+                path: "/a b/c.mp4".to_owned()
+            }
+        );
+        assert_eq!(
+            registry.parse("export.start", "new '/a b/c.mp4'").unwrap(),
+            Invocation::ExportStart {
+                path: "/a b/c.mp4".to_owned(),
+                replace: false
+            }
+        );
+        assert!(registry.parse("export.start", "new \"\"").is_err());
     }
 
     #[test]

@@ -272,7 +272,7 @@ pub(crate) fn input_schema(tool: &str) -> Value {
 }
 
 /// How a tool reads its text, or empty for a tool that takes none.
-fn input_hint(tool: &str) -> &'static str {
+pub(crate) fn input_hint(tool: &str) -> &'static str {
     match tool {
         "draft.query" => {
             "project | full | track <id> | segment <id> | range <start_us> <end_us> | ops | ops <kind> ..."

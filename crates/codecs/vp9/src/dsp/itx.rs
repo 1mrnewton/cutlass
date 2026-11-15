@@ -102,7 +102,11 @@ pub fn add<P: Pixel>(
                     run::<P, $t, $ln, $n>(dst, stride, coef, tmp, col_type, row_type, nz, max)
                 }};
             }
-            match (P::HIGH, n) {
+            // Deep pictures take the 32-bit lanes when no sum or product
+            // can leave `i32` (see `NARROW`), where they give the 64-bit
+            // lanes' values exactly.
+            let narrow = P::HIGH && magnitude(coef, n, nz) <= u64::from(NARROW[log2n]);
+            match (P::HIGH && !narrow, n) {
                 (true, 4) => go!(i64, 4, 4),
                 (true, 8) => go!(i64, 4, 8),
                 (true, 16) => go!(i64, 4, 16),
@@ -114,6 +118,30 @@ pub fn add<P: Pixel>(
             }
         },
     );
+}
+
+/// By `log2n`, the largest sum of the coefficients' magnitudes for which
+/// every value the 64-bit lanes make for a block (each sum, difference,
+/// product and rounding of both passes, and the final rounding) lies in
+/// `i32`: there the 32-bit lanes' wrapping arithmetic never wraps, and
+/// they make the same values. `tests::narrow_bounds_hold` derives the
+/// bound from the transforms themselves, run on bounds of magnitudes
+/// (55 661, 77 464, 40 572 and 39 509), and checks these against it.
+const NARROW: [u32; 4] = [55_000, 77_000, 40_000, 39_000];
+
+/// The sum of the magnitudes of every coefficient either lane width reads
+/// (columns `0..nz.1`, rows `0..nz.0` rounded up to 8, transposed).
+#[inline(always)]
+fn magnitude(coef: &[i32], n: usize, nz: (usize, usize)) -> u64 {
+    let (rows, cols) = (nz.0.min(n).div_ceil(8) * 8, nz.1.min(n));
+    let rows = rows.min(n);
+    let mut m = 0u64;
+    for k in 0..cols {
+        for &v in &coef[k * n..k * n + rows] {
+            m += u64::from(v.unsigned_abs());
+        }
+    }
+    m
 }
 
 #[inline(always)]
@@ -241,7 +269,134 @@ fn wht(i: [i32; 4], shift: u32) -> [i32; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kind, add};
+    use super::{Kind, NARROW, add, shift_of, tx1d};
+    use crate::dsp::lanes::{K, Lanes};
+    use std::cell::Cell;
+
+    thread_local! {
+        /// The 1-D input's bound on the sum of magnitudes, and the
+        /// largest bound a step has made from it.
+        static SUM: Cell<f64> = const { Cell::new(0.0) };
+        static TOP: Cell<f64> = const { Cell::new(0.0) };
+    }
+
+    /// A bound on the magnitude of a value of a 1-D transform of inputs
+    /// `x`: `sum(w[i] * |x[i]|) + c`. Each operation records the bound its
+    /// result has when the inputs' magnitudes sum to at most `SUM`, which
+    /// is `max(w) * SUM + c`, in `TOP`. The values are linear in the
+    /// inputs but for the roundings, each of which adds at most 1.5.
+    #[derive(Clone, Copy)]
+    struct Mag {
+        w: [f64; 32],
+        c: f64,
+    }
+
+    fn rec(m: Mag) -> Mag {
+        let g = m.w.iter().fold(0f64, |a, &b| a.max(b));
+        let v = g * SUM.with(Cell::get) + m.c;
+        TOP.with(|t| t.set(t.get().max(v)));
+        m
+    }
+
+    fn input(i: usize) -> Mag {
+        let mut m = Mag::ZERO;
+        m.w[i] = 1.0;
+        m
+    }
+
+    impl Mag {
+        /// `k * self + o`, plus `c`.
+        fn of(self, o: Self, k: f64, c: f64) -> Self {
+            rec(Mag {
+                w: core::array::from_fn(|i| k * self.w[i] + o.w[i]),
+                c: k * self.c + o.c + c,
+            })
+        }
+    }
+
+    impl Lanes for Mag {
+        const ZERO: Self = Mag {
+            w: [0.0; 32],
+            c: 0.0,
+        };
+        fn wrapping_add(self, o: Self) -> Self {
+            self.of(o, 1.0, 0.0)
+        }
+        fn wrapping_sub(self, o: Self) -> Self {
+            self.of(o, 1.0, 0.0)
+        }
+        fn wrapping_mul(self, k: K) -> Self {
+            self.of(Mag::ZERO, k.0.unsigned_abs() as f64, 0.0)
+        }
+        fn wrapping_neg(self) -> Self {
+            self
+        }
+        fn round_shift(self) -> Self {
+            // `x + 8192`, then `>> 14`: `|(x + 8192) >> 14|` is at most
+            // `|x| / 16384 + 1.5`.
+            self.of(Mag::ZERO, 1.0, 8192.0);
+            self.of(Mag::ZERO, 1.0 / 16384.0, 1.5)
+        }
+    }
+
+    /// The largest bound any step of a 1-D transform of `n` inputs makes
+    /// when their magnitudes sum to at most `sum`, and the bound of its
+    /// outputs as `(max(w), c)`.
+    fn pass(n: usize, adst: bool, sum: f64) -> (f64, (f64, f64)) {
+        SUM.with(|s| s.set(sum));
+        TOP.with(|t| t.set(sum));
+        let i: Vec<Mag> = (0..n).map(input).collect();
+        let mut o = vec![Mag::ZERO; n];
+        tx1d(n, adst, &i, &mut o);
+        let g = o.iter().flat_map(|m| m.w).fold(0f64, f64::max);
+        let c = o.iter().map(|m| m.c).fold(0f64, f64::max);
+        (TOP.with(Cell::get), (g, c))
+    }
+
+    /// The largest magnitude any step of a 2-D transform of size `n`
+    /// makes from coefficients whose magnitudes sum to at most `sum`, over
+    /// every pair of 1-D transforms. A first-pass output (row `r`, column
+    /// `k`) is at most `g * (row r's sum) + c`, so a column's inputs to
+    /// the second pass sum to at most `g * sum + n * c`.
+    fn top(n: usize, sum: f64) -> f64 {
+        let kinds: &[bool] = if n == 32 { &[false] } else { &[false, true] };
+        let mut worst = 0f64;
+        for &row in kinds {
+            for &col in kinds {
+                let (t1, (g, c)) = pass(n, row, sum);
+                let sum2 = g * sum + n as f64 * c;
+                let (t2, (g2, c2)) = pass(n, col, sum2);
+                let last = g2 * sum2 + c2 + f64::from(1 << (shift_of(n) - 1));
+                worst = worst.max(t1).max(t2).max(last);
+            }
+        }
+        worst
+    }
+
+    /// Whether every value fits in `i32`, with room for the bound's own
+    /// floating-point error (far below a part in 10^9).
+    fn fits(n: usize, sum: u32) -> bool {
+        top(n, f64::from(sum)) <= f64::from(i32::MAX) * (1.0 - 1e-9)
+    }
+
+    /// The 32-bit lanes are taken only where they cannot wrap.
+    #[test]
+    fn narrow_bounds_hold() {
+        for (log2n, &bound) in NARROW.iter().enumerate() {
+            let n = 4 << log2n;
+            let (mut lo, mut hi) = (0u32, u32::MAX);
+            while lo + 1 < hi {
+                let mid = lo + (hi - lo) / 2;
+                if fits(n, mid) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            println!("n {n}: largest bound {lo}, constant {bound}");
+            assert!(fits(n, bound), "n {n}");
+        }
+    }
 
     /// The lane transforms against the scalar ones of `txfm.rs`.
     #[test]
@@ -289,6 +444,75 @@ mod tests {
                     );
                     assert_eq!(got, want, "n {n} type {t}");
                     assert!(transposed.iter().all(|&v| v == 0));
+                }
+            }
+        }
+    }
+
+    /// Deep samples, on both lane widths: coefficients whose magnitudes
+    /// sum to around the bound (some to just under it, the 32-bit lanes;
+    /// some past it, the 64-bit ones), few or many, against the scalar
+    /// transforms.
+    #[test]
+    fn deep_samples_match_the_scalar_transforms_near_the_bound() {
+        let mut seed = 11u32;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            seed >> 8
+        };
+        for (log2n, &bound) in NARROW.iter().enumerate() {
+            let n = 4usize << log2n;
+            for t in 0..4u8 {
+                if n == 32 && t != 0 {
+                    continue;
+                }
+                for trial in 0..200 {
+                    let total = match trial % 3 {
+                        0 => bound,
+                        1 => bound / 3,
+                        _ => bound * 3,
+                    } as i32;
+                    let count = 1 + (rnd() as usize) % if trial % 2 == 0 { 4 } else { n * n };
+                    let mut natural = vec![0i32; n * n];
+                    let mut left = total;
+                    for k in 0..count {
+                        let at = (rnd() as usize) % (n * n);
+                        let v = if k + 1 == count {
+                            left
+                        } else {
+                            (rnd() as i32) % (left + 1)
+                        };
+                        left -= v;
+                        natural[at] = if rnd() % 2 == 0 { v } else { -v };
+                    }
+                    let mid: Vec<u16> = (0..n * n).map(|_| (rnd() % 4096) as u16).collect();
+                    let mut want: Vec<crate::pel::Wide<12>> =
+                        mid.iter().map(|&v| crate::pel::Wide(v)).collect();
+                    let wide: Vec<i64> = natural.iter().map(|&v| i64::from(v)).collect();
+                    crate::txfm::iht_add_pix(&wide, &mut want, n, n, t);
+                    let mut transposed = vec![0i32; n * n];
+                    for r in 0..n {
+                        for c in 0..n {
+                            transposed[c * n + r] = natural[r * n + c];
+                        }
+                    }
+                    let mut got = mid.clone();
+                    let col = if t & 1 == 1 { Kind::Adst } else { Kind::Dct };
+                    let row = if t & 2 == 2 { Kind::Adst } else { Kind::Dct };
+                    add(
+                        &mut got,
+                        n,
+                        &mut transposed,
+                        log2n,
+                        col,
+                        row,
+                        2,
+                        (n, n),
+                        4095,
+                        &mut super::Tmp::new(),
+                    );
+                    let want: Vec<u16> = want.iter().map(|w| w.0).collect();
+                    assert_eq!(got, want, "n {n} type {t} sum {total}");
                 }
             }
         }

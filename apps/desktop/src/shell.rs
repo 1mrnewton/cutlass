@@ -366,6 +366,9 @@ pub struct Inspection {
     pub scale_y: f64,
     /// One scale drives both axes; off, `scale_x` and `scale_y` are apart.
     pub uniform_scale: bool,
+    /// The Blend switch: off, the clip is drawn solid and normal, its
+    /// opacity and blend kept.
+    pub blend_on: bool,
     pub rotation: f64,
     pub transform_x: f64,
     pub transform_y: f64,
@@ -4713,6 +4716,7 @@ impl Shell {
             scale_x,
             scale_y,
             uniform_scale: segment.uniform_scale.on,
+            blend_on: !segment.blend_off,
             rotation: keyed.map_or(segment.clip.rotation, |pose| pose.rotation),
             transform_x: keyed.map_or(segment.clip.transform.x, |pose| pose.x),
             transform_y: keyed.map_or(segment.clip.transform.y, |pose| pose.y),
@@ -4753,7 +4757,8 @@ impl Shell {
             )
             .filter(|_| !letterbox_color(draft, segment).is_empty())
             .unwrap_or_else(|| letterbox_color(draft, segment)),
-            blend: cutlass_effects::segment_blend(draft, segment)
+            // The mode kept while the Blend switch is off, too.
+            blend: cutlass_effects::stored_blend(draft, segment)
                 .unwrap_or(cutlass_effects::BlendMode::SourceOver),
             // Keyed sliders show their value where the playhead is.
             adjust: cutlass_effects::keyed_adjust(
@@ -6228,6 +6233,14 @@ impl Shell {
             material_id,
             mode: mode.package_id().to_owned(),
         })
+    }
+
+    /// Turn the selected picture's Blend switch on or off. Off, it is drawn
+    /// solid and mixed normally; its opacity and mode stay. One undo step.
+    pub fn set_blend_on(&mut self, on: bool) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("a blend belongs on a picture")?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetBlendOn { segment_id, on })
     }
 
     /// Set one adjust slider on the selected picture; zero takes it off.

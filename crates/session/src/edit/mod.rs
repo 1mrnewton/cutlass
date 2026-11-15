@@ -624,6 +624,7 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             material_id,
             mode,
         } => blend::set_blend(draft, segment_id, material_id, mode),
+        Request::SetBlendOn { segment_id, on } => blend::set_blend_on(draft, segment_id, *on),
         Request::AddAdjustment {
             track_id,
             segment_id,

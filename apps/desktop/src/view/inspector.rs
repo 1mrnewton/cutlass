@@ -862,11 +862,28 @@ fn blend(
     inspection: &Inspection,
     mode: bool,
 ) {
-    let header = section(ui, state, "blend", "Blend", Some((true, false)), false);
+    let on = inspection.blend_on;
+    let header = section(ui, state, "blend", "Blend", Some((on, true)), false);
+    if header.toggled {
+        send(shell, |shell| shell.set_blend_on(!on));
+    }
     if !header.open {
         return;
     }
+    // Off, the opacity and mode are kept, dimmed, for when it is on again.
     body(ui, |ui| {
+        ui.add_enabled_ui(on, |ui| blend_rows(shell, ui, state, inspection, mode));
+    });
+}
+
+fn blend_rows(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+    mode: bool,
+) {
+    {
         if mode {
             let mut picked = None;
             label_row(ui, "Mode", |ui| {
@@ -891,7 +908,7 @@ fn blend(
             }
         }
         opacity_slider(shell, ui, state, inspection);
-    });
+    }
 }
 
 /// The steadying levels, as the stored level and the name shown.

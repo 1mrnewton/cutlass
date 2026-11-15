@@ -15,6 +15,11 @@ fn yes() -> bool {
     true
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn default_scene() -> String {
     "default".to_owned()
 }
@@ -160,6 +165,16 @@ pub struct Segment {
     pub enable_color_adjust_pro: bool,
     #[serde(default)]
     pub segment_color_tag: String,
+    /// The Blend switch is off: the clip is drawn solid and mixed normally,
+    /// its opacity and blend mode kept for when it is on again. An in or
+    /// out fade still plays. The app's own: the reference editor does not
+    /// read it.
+    #[serde(
+        default,
+        rename = "cutlass_blend_off",
+        skip_serializing_if = "is_false"
+    )]
+    pub blend_off: bool,
     /// Keys this model does not name yet. Video-only fields land here.
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
@@ -224,6 +239,7 @@ impl Segment {
             enable_mask_shadow: false,
             enable_color_adjust_pro: false,
             segment_color_tag: String::new(),
+            blend_off: false,
             rest: Map::new(),
         }
     }

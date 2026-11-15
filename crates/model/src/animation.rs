@@ -465,9 +465,14 @@ pub fn segment_animations<'a>(
 }
 
 /// The clip at `time` with its keyframes and then its animations applied.
+/// A clip whose Blend switch is off is drawn solid before its animations.
 #[must_use]
 pub fn animated_at(draft: &Draft, segment: &Segment, time: Micros) -> Option<(Clip, UniformScale)> {
     let (mut clip, mut uniform) = clip_at(segment, &draft.keyframe_graph_list, time)?;
+    // With the Blend switch off the clip is solid; its fades still play.
+    if segment.blend_off {
+        clip.alpha = 1.0;
+    }
     if let Some(group) = segment_animations(draft, segment) {
         let offset = time.0.saturating_sub(segment.target.start.0);
         let length = segment.target.duration.0;

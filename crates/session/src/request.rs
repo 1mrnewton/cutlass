@@ -546,6 +546,9 @@ pub enum Request {
         material_id: MaterialId,
         mode: String,
     },
+    /// Turn the clip's Blend switch on or off. Off, it is drawn solid and
+    /// mixed normally, its opacity and mode kept for when it is on again.
+    SetBlendOn { segment_id: SegmentId, on: bool },
     /// Put an adjustment layer from `start` for `duration` on `track_id`,
     /// an adjust row made when it is missing. Its sliders, set with
     /// [`Request::SetAdjust`], run over every picture below it.

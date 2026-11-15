@@ -220,6 +220,9 @@ bind_effect: Make the effect clip segment_id run only over clip, a clip on a vid
 set_blend: Blend a clip with the picture below by mode blend-multiply, blend-screen, blend-overlay, blend-add, blend-darken, blend-lighten, blend-color-burn, blend-color-dodge, blend-hard-light, blend-soft-light, blend-difference or blend-exclusion; empty or blend-source-over removes it; material_id names the new blend material; refused on audio, effect and filter lanes.
 {"op":"set_blend","segment_id":"a","material_id":"a-blend","mode":"blend-screen"}
 
+set_blend_on: Turn a clip's Blend switch on or off; off draws it solid and mixed normally, keeping its opacity and blend mode for when it is on again.
+{"op":"set_blend_on","segment_id":"a","on":false}
+
 add_adjustment: Place an adjustment layer from start for duration (microseconds) on adjust lane track_id, made when missing, with new ids segment_id and material_id; set its sliders with set_adjust; it acts on every picture below.
 {"op":"add_adjustment","track_id":"adjust-1","segment_id":"adj-2","material_id":"adj-2-adjust","start":5000000,"duration":3000000}
 

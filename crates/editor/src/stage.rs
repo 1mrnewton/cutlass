@@ -246,6 +246,8 @@ pub fn stage_pick(
             }
             let alpha = clip_at(segment, &draft.keyframe_graph_list, time)
                 .map_or(segment.clip.alpha, |(clip, _)| clip.alpha);
+            // With the Blend switch off a clear clip is drawn solid.
+            let alpha = if segment.blend_off { 1.0 } else { alpha };
             if alpha <= 0.0 {
                 continue;
             }

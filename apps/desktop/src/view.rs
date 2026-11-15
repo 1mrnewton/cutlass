@@ -19657,6 +19657,21 @@ mod tests {
         harness.get_by_label("Uniform scale").click();
         harness.run_steps(4);
         assert!(inspection(&harness).uniform_scale);
+        // The Blend switch unticks and ticks again, keeping the opacity.
+        harness.state_mut().0.set_opacity(0.5).unwrap();
+        assert!(inspection(&harness).blend_on);
+        // The section's switch comes before its name.
+        let switch = |harness: &egui_kittest::Harness<'_, (Shell, ViewState)>, name: &str| {
+            harness.query_all_by_label(name).next().unwrap().click();
+        };
+        switch(&harness, "Blend");
+        harness.run_steps(4);
+        assert!(!inspection(&harness).blend_on);
+        assert_eq!(inspection(&harness).opacity, 0.5);
+        picture(&mut harness, "title-parts-blend-off");
+        switch(&harness, "Blend");
+        harness.run_steps(4);
+        assert!(inspection(&harness).blend_on);
         drop(harness);
         let _ = std::fs::remove_dir_all(&temp);
     }

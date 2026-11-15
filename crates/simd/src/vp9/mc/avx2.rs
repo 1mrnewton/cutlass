@@ -594,6 +594,11 @@ fn sized<const W: usize>(b: &mut Block<'_>) {
         b.avg,
     );
     let (dst, tmp) = (&mut *b.dst, &mut *b.tmp);
+    // The rows between the passes start on a cache line, so that no
+    // 32-byte store or load of them is split across two: `TMP` leaves
+    // room for the move (they take `71 * TS` of it).
+    let skip = tmp.as_ptr().align_offset(64).min(63);
+    let tmp = &mut tmp[skip..];
     // SAFETY: `fits` checked the region (the module's notes): rows of
     // `src` from the first read hold `W + 24` samples, the loads across
     // read 16 from `c + 8` for `c < W - 8` at most and 8 or 16 for `W` of

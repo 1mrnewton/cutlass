@@ -110,11 +110,16 @@ impl<'a, P> View<'a, P> {
     }
 }
 
+/// A buffer on a cache line of its own: no vector load of it is split
+/// across two lines.
+#[repr(align(64))]
+pub struct Lines<T>(pub T);
+
 /// Buffers reconstruction keeps from row to row.
 pub struct Scratch<P> {
     /// Coefficients of the transform block being added; the transforms
     /// clear what they read.
-    pub coef: Vec<i32>,
+    pub coef: Box<Lines<[i32; 1024]>>,
     pub emu: Vec<P>,
     pub mc: Vec<u8>,
     pub itx: itx::Tmp,
@@ -128,7 +133,7 @@ pub struct Scratch<P> {
 impl<P: Pixel> Scratch<P> {
     pub fn new() -> Self {
         Self {
-            coef: vec![0; 1024],
+            coef: Box::new(Lines([0; 1024])),
             emu: vec![P::default(); 80 * 80],
             mc: vec![0; cutlass_simd::vp9::mc::TMP],
             itx: itx::Tmp::new(),
@@ -307,7 +312,7 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
                         let n = usize::from(rec.n);
                         if rec.eob > 0 {
                             for k in *coef_at..*coef_at + n {
-                                self.s.coef[usize::from(t.pos[k])] = t.val[k];
+                                self.s.coef.0[usize::from(t.pos[k])] = t.val[k];
                             }
                             self.add_residual(
                                 plane,
@@ -345,7 +350,7 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
         let stride = v.stride;
         let dst = v.at(y, x);
         if self.c.lossless {
-            itx::wht_add(dst, stride, &mut self.s.coef, max);
+            itx::wht_add(dst, stride, &mut self.s.coef.0, max);
             return;
         }
         let (col, row) = match kind {
@@ -357,7 +362,7 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
         itx::add(
             dst,
             stride,
-            &mut self.s.coef,
+            &mut self.s.coef.0,
             usize::from(tx),
             col,
             row,
@@ -593,7 +598,7 @@ impl<'c, 'v, P: Pixel> Recon<'c, 'v, P> {
 
     /// The coefficient scratch the residual is added from.
     pub(crate) fn coef(&mut self) -> &mut [i32] {
-        &mut self.s.coef
+        &mut self.s.coef.0
     }
 }
 

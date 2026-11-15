@@ -32,15 +32,19 @@ fn tx1d<V: Lanes>(n: usize, adst: bool, i: &[V], o: &mut [V]) {
 /// second pass reads only the rows the first wrote, so it is never
 /// cleared.
 pub struct Tmp {
-    i: Vec<i32>,
-    l: Vec<i64>,
+    i: Box<Lines<[i32; 1024]>>,
+    l: Box<Lines<[i64; 1024]>>,
 }
+
+/// A buffer on a cache line of its own.
+#[repr(align(64))]
+struct Lines<T>(T);
 
 impl Tmp {
     pub fn new() -> Self {
         Self {
-            i: vec![0; 32 * 32],
-            l: vec![0; 32 * 32],
+            i: Box::new(Lines([0; 32 * 32])),
+            l: Box::new(Lines([0; 32 * 32])),
         }
     }
 }
@@ -59,14 +63,14 @@ trait Pick: Elem {
 impl Pick for i32 {
     #[inline(always)]
     fn pick(t: &mut Tmp) -> &mut [Self] {
-        &mut t.i
+        &mut t.i.0
     }
 }
 
 impl Pick for i64 {
     #[inline(always)]
     fn pick(t: &mut Tmp) -> &mut [Self] {
-        &mut t.l
+        &mut t.l.0
     }
 }
 

@@ -79,6 +79,9 @@ set_vertical_flip: Flip a clip top to bottom (true) or not.
 set_rotation: Turn a clip's picture by degrees counter-clockwise (negative turns clockwise; 90 puts its right edge on top).
 {"op":"set_rotation","segment_id":"a","degrees":15.0}
 
+set_pivot: Set the point a clip's picture turns about and is sized about; x and y are shares of the picture's own half size from its middle with y up, each -8 to 8, so 0 0 is its middle, -1 0 the middle of its left edge and 1 1 its upper right corner. A picture that is neither turned nor sized stays where it is: set the pivot, then turn it or key its rotation, and it swings on that point (a door on its hinge, a hand on a clock). The pivot itself is not keyed.
+{"op":"set_pivot","segment_id":"a","x":-1.0,"y":0.0}
+
 set_position: Place a clip's picture; x and y are fractions of half the canvas from the middle, so 0 0 is centered and 1 puts the picture's middle on the right or top edge, y up.
 {"op":"set_position","segment_id":"a","x":0.5,"y":-0.25}
 

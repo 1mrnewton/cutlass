@@ -135,6 +135,9 @@ pub enum EditError {
     MainTrack,
     /// The rotation is not a finite number of degrees.
     Angle,
+    /// The pivot is not a finite number, or is further from the picture's
+    /// middle than [`rotate::PIVOT_REACH`] half sizes.
+    Pivot,
     /// Position is not a finite number.
     Position,
     /// Scale is not finite and greater than zero.
@@ -276,6 +279,9 @@ impl std::fmt::Display for EditError {
             Self::TrackKind => "the track id is already used, or that kind cannot be a track",
             Self::MainTrack => "the main track cannot be removed",
             Self::Angle => "the rotation is not a finite number of degrees",
+            Self::Pivot => {
+                "the pivot is not a finite number, or is more than 8 half sizes from the middle"
+            }
             Self::Position => "the position is not a finite number",
             Self::Scale => "the scale is not a finite number above zero",
             Self::Fade => "a fade length is negative",
@@ -464,6 +470,7 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             degrees,
         } => rotate::set_rotation(draft, segment_id, *degrees),
+        Request::SetPivot { segment_id, x, y } => rotate::set_pivot(draft, segment_id, *x, *y),
         Request::SetPosition { segment_id, x, y } => {
             placement::set_position(draft, segment_id, *x, *y)
         }

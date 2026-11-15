@@ -618,6 +618,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetMirror { .. } => "set_mirror",
         Request::SetVerticalFlip { .. } => "set_vertical_flip",
         Request::SetRotation { .. } => "set_rotation",
+        Request::SetPivot { .. } => "set_pivot",
         Request::SetPosition { .. } => "set_position",
         Request::SetScale { .. } => "set_scale",
         Request::SetUniformScale { .. } => "set_uniform_scale",

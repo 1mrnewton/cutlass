@@ -161,6 +161,8 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::Angle) => {
                 formatter.write_str("the rotation is not a finite number of degrees")
             }
+            Self::Edit(EditError::Pivot) => formatter
+                .write_str("the pivot is not a finite number, or is too far from the picture"),
             Self::Edit(EditError::Position) => {
                 formatter.write_str("the position is not a finite number")
             }

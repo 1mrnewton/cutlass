@@ -1855,27 +1855,38 @@ mod tests {
         draft.tracks[0]
             .segments
             .push(Segment::new("main", "movie", TimeRange::new(0, 4_000_000)));
-        draft.tracks.push(row(
-            "o1",
-            TrackType::Video,
-            TrackFlag::SubVideo,
-            "overlay",
-            "movie",
-        ));
-        draft.tracks.push(row(
-            "o2",
-            TrackType::Video,
-            TrackFlag::SubVideo,
-            "still",
-            "photo",
-        ));
-        draft.tracks.push(row(
-            "o3",
-            TrackType::Video,
-            TrackFlag::SubVideo,
-            "solid",
-            "color",
-        ));
+        // File order is the row order, top first: each overlay row goes
+        // above the ones before it.
+        draft.tracks.insert(
+            0,
+            row(
+                "o1",
+                TrackType::Video,
+                TrackFlag::SubVideo,
+                "overlay",
+                "movie",
+            ),
+        );
+        draft.tracks.insert(
+            0,
+            row(
+                "o2",
+                TrackType::Video,
+                TrackFlag::SubVideo,
+                "still",
+                "photo",
+            ),
+        );
+        draft.tracks.insert(
+            0,
+            row(
+                "o3",
+                TrackType::Video,
+                TrackFlag::SubVideo,
+                "solid",
+                "color",
+            ),
+        );
         draft
             .tracks
             .push(row("a", TrackType::Audio, TrackFlag::None, "sound", "song"));
@@ -1942,7 +1953,10 @@ mod tests {
                 continue;
             }
             for (at, segment) in row.segments.iter().enumerate() {
-                keys.push(((segment.render_index, track, at), segment.id.to_string()));
+                keys.push((
+                    cutlass_model::paint_order(segment.render_index, track, at),
+                    segment.id.to_string(),
+                ));
             }
         }
         keys.sort();

@@ -15730,7 +15730,8 @@ mod tests {
             "sticker-art",
             cutlass_model::TimeRange::new(0, 2_000_000),
         ));
-        draft.tracks.push(stickers);
+        // File order is the row order, top first: the sticker row above main.
+        draft.tracks.insert(0, stickers);
         cutlass_store::Folder::new(draft).save(&temp).unwrap();
         let (decoders, encoders) = crate::register_codecs();
         let mut shell = Shell::new(decoders, encoders, Settings::default());
@@ -15853,7 +15854,8 @@ mod tests {
         over.clip.scale = cutlass_model::Point::new(0.5, 0.5);
         over.uniform_scale.value = 0.5;
         overlay.segments.push(over);
-        draft.tracks.push(overlay);
+        // File order is the row order, top first: the overlay above main.
+        draft.tracks.insert(0, overlay);
         cutlass_store::Folder::new(draft).save(&temp).unwrap();
         let (decoders, encoders) = crate::register_codecs();
         let mut shell = Shell::new(decoders, encoders, Settings::default());

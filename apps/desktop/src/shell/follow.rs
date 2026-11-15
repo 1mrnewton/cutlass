@@ -805,9 +805,12 @@ fn followed_record<'a>(draft: &'a Draft, id: &SegmentId) -> Option<&'a RawMateri
 }
 
 /// The video clip drawn nearest below clip `id` at `time`: clips are drawn
-/// in order of render index, then row, then place on the row.
+/// in order of render index, then row with the top row on top, then place
+/// on the row ([`cutlass_model::paint_order`]).
 fn video_below(draft: &Draft, id: &SegmentId, time: Micros) -> Result<SegmentId, ShellError> {
-    let key = |t: usize, s: usize| (draft.tracks[t].segments[s].render_index, t, s);
+    let key = |t: usize, s: usize| {
+        cutlass_model::paint_order(draft.tracks[t].segments[s].render_index, t, s)
+    };
     let mut own = None;
     for (t, track) in draft.tracks.iter().enumerate() {
         if let Some(s) = track.segments.iter().position(|segment| &segment.id == id) {

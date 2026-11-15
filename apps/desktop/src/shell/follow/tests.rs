@@ -27,14 +27,15 @@ fn open(name: &str) -> (Shell, std::path::PathBuf) {
     stickers
         .segments
         .push(Segment::new("s", "m", TimeRange::new(500_000, 1_000_000)));
-    draft.tracks.push(stickers);
+    // File order is the row order, top first: rows above main go before it.
+    draft.tracks.insert(0, stickers);
     let mut locked = Track::main("locked");
     locked.kind = TrackType::Sticker;
     locked.attribute = TrackAttribute(TrackAttribute::LOCK);
     locked
         .segments
         .push(Segment::new("x", "m", TimeRange::new(0, 1_000_000)));
-    draft.tracks.push(locked);
+    draft.tracks.insert(0, locked);
     cutlass_store::Folder::new(draft).save(&temp).unwrap();
     let (decoders, encoders) = crate::register_codecs();
     let mut shell = Shell::new(decoders, encoders, Settings::default());
@@ -279,7 +280,12 @@ fn a_mask_follower_lands_keyed_and_is_kept_when_fixing() {
         })
         .unwrap();
     let draft = shell.session_draft().unwrap();
-    let clip = &draft.tracks[0].segments[0];
+    let clip = draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .find(|segment| segment.id.as_str() == "v")
+        .unwrap();
     assert!(
         cutlass_effects::segment_mask(draft, clip).is_some(),
         "a box mask"
@@ -355,7 +361,7 @@ fn the_video_followed_is_the_nearest_one_drawn_below() {
     let mut over = Track::main("over");
     over.segments
         .push(Segment::new("w", "m", TimeRange::new(0, 2_000_000)));
-    draft.tracks.push(over);
+    draft.tracks.insert(0, over);
     draft.materials.videos.push(MaterialVideo {
         id: "p".into(),
         kind: "photo".into(),
@@ -365,7 +371,8 @@ fn the_video_followed_is_the_nearest_one_drawn_below() {
     photo
         .segments
         .push(Segment::new("still", "p", TimeRange::new(0, 2_000_000)));
-    draft.tracks.insert(1, photo);
+    let main = draft.tracks.len() - 1;
+    draft.tracks.insert(main, photo);
     let stacked = temp.with_extension("stacked");
     let _ = std::fs::remove_dir_all(&stacked);
     cutlass_store::Folder::new(draft).save(&stacked).unwrap();

@@ -21704,7 +21704,8 @@ mod tests {
         over.clip.scale = cutlass_model::Point::new(0.5, 0.5);
         over.uniform_scale.value = 0.5;
         overlay.segments.push(over);
-        draft.tracks.push(overlay);
+        // File order is the row order, top first: the overlay above main.
+        draft.tracks.insert(0, overlay);
         edit(&mut draft);
         Folder::new(draft).save(&temp.path).unwrap();
         let mut desktop = shell();
@@ -21753,7 +21754,7 @@ mod tests {
     fn a_hidden_or_locked_row_is_passed_over_and_a_locked_clip_does_not_move() {
         let temp = Temp::new();
         let hidden = stage_project_with(&temp, |draft| {
-            draft.tracks[1].attribute = TrackAttribute(TrackAttribute::HIDE);
+            draft.tracks[0].attribute = TrackAttribute(TrackAttribute::HIDE);
         });
         assert_eq!(
             hidden.stage_pick(960.0, 540.0),
@@ -21762,7 +21763,7 @@ mod tests {
         drop(hidden);
         let temp = Temp::new();
         let mut desktop = stage_project_with(&temp, |draft| {
-            draft.tracks[1].attribute = TrackAttribute(TrackAttribute::LOCK);
+            draft.tracks[0].attribute = TrackAttribute(TrackAttribute::LOCK);
         });
         assert_eq!(
             desktop.stage_pick(960.0, 540.0),

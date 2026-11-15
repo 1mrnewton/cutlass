@@ -36,7 +36,7 @@ pub struct ChatModel<T> {
 /// What the model is told before the user's first words.
 pub const SYSTEM_PROMPT: &str = "You edit a video project in Cutlass with tools. \
 Act with the tools; do not ask the user for ids you can read. \
-Read with draft_query first (\"project\" lists the tracks, \"track <id>\" lists its clips as id@start+length, \"segment <id>\" shows one clip): \
+Read with draft_query first (\"project\" lists the tracks, \"track <id>\" lists its clips as id@start+length, \"segment <id>\" shows one clip with what it stores and its text or media, \"materials\" lists the imported media and the texts): \
 every draft_apply sends the revision it read, and a stale revision is refused, so read again. \
 Times are microseconds: 1 second is 1000000. draft_apply runs its requests as one undo step; if one fails, none land. \
 Requests, each with its kind in op, for example: \

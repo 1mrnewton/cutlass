@@ -35,6 +35,9 @@ pub struct SharedFrame<P> {
     shifts: [u32; 3],
     /// Luma rows `0..published` are final (`usize::MAX`: all).
     published: AtomicUsize,
+    /// Per plane, the rows of the picture (0: none) when every row below
+    /// them repeats their last one ([`FrameWriter::hold_edge`]).
+    held: [AtomicUsize; 3],
     lock: Mutex<()>,
     ready: Condvar,
 }
@@ -95,6 +98,24 @@ impl<P> SharedFrame<P> {
             std::slice::from_raw_parts(UnsafeCell::raw_get(buf.as_ptr().add(start)).cast_const(), n)
         };
         (s, self.strides[p])
+    }
+
+    /// The rows of plane `p` a reader may take as the picture's `visible`
+    /// rows held at their last one: every row of the buffer once the
+    /// writer has repeated that row below them all
+    /// ([`FrameWriter::hold_edge`]) and published every row, else
+    /// `visible`.
+    #[inline]
+    pub fn held_rows(&self, p: usize, visible: usize) -> usize {
+        let p = p.min(2);
+        if visible > 0
+            && self.published() == usize::MAX
+            && self.held[p].load(Ordering::Relaxed) == visible
+        {
+            self.rows[p].max(visible)
+        } else {
+            visible
+        }
     }
 
     /// The stride and allocated rows of plane `p`.
@@ -164,6 +185,7 @@ impl<P: Copy + Default> FrameWriter<P> {
                 rows,
                 shifts,
                 published: AtomicUsize::new(0),
+                held: [const { AtomicUsize::new(0) }; 3],
                 lock: Mutex::new(()),
                 ready: Condvar::new(),
             }),
@@ -178,6 +200,9 @@ impl<P> FrameWriter<P> {
         match Arc::get_mut(&mut frame) {
             Some(f) => {
                 *f.published.get_mut() = 0;
+                for h in &mut f.held {
+                    *h.get_mut() = 0;
+                }
                 Ok(Self { frame })
             }
             None => Err(frame),
@@ -221,6 +246,42 @@ impl<P> FrameWriter<P> {
                 stride: 0,
             })
         })
+    }
+
+    /// Repeats row `visible[p] - 1` of each plane into every row below it,
+    /// so that readers can take the rows past the picture as its edge held
+    /// ([`SharedFrame::held_rows`], once every row is published). Rows it
+    /// cannot write (published ones, or a plane without such a row) are
+    /// left, and that plane is not marked.
+    pub fn hold_edge(&mut self, visible: [usize; 3])
+    where
+        P: Copy,
+    {
+        let all = self.frame.rows;
+        let tails = self.tails();
+        let mut held = [0; 3];
+        for (p, t) in tails.into_iter().enumerate() {
+            let v = visible[p];
+            let (stride, rows) = (t.stride, all[p]);
+            if v == 0 || v >= rows || v - 1 < t.first_row || stride == 0 {
+                continue;
+            }
+            let from = (v - 1 - t.first_row) * stride;
+            let end = (rows - t.first_row) * stride;
+            if end > t.data.len() {
+                continue;
+            }
+            let mut at = from + stride;
+            while at < end {
+                t.data.copy_within(from..from + stride, at);
+                at += stride;
+            }
+            held[p] = v;
+        }
+        for (h, v) in self.frame.held.iter().zip(held) {
+            // Ordered before readers by the release of the next publish.
+            h.store(v, Ordering::Relaxed);
+        }
     }
 
     /// Publishes luma rows `0..luma` (`usize::MAX`: every row). The count
@@ -279,6 +340,31 @@ mod tests {
         let all = reader.join().unwrap_or_default();
         assert_eq!(&all[..16], &[7u8; 16][..]);
         assert_eq!(&all[16..], &[1u8; 16][..]);
+    }
+
+    #[test]
+    fn a_held_edge_repeats_the_last_row_below() {
+        let mut w = FrameWriter::<u8>::new([4, 2, 2], [8, 4, 4], [0, 1, 1]);
+        let shared = w.shared().clone();
+        {
+            let [y, u, v] = w.tails();
+            for (i, s) in y.data.iter_mut().enumerate() {
+                *s = i as u8;
+            }
+            u.data.fill(9);
+            v.data.fill(3);
+        }
+        w.publish(4);
+        w.hold_edge([6, 3, 4]);
+        assert_eq!(shared.held_rows(0, 6), 6, "not yet published");
+        w.publish(usize::MAX);
+        assert_eq!(shared.held_rows(0, 6), 8);
+        assert_eq!(shared.held_rows(0, 5), 5, "held for another height");
+        assert_eq!(shared.held_rows(1, 3), 4);
+        assert_eq!(shared.held_rows(2, 4), 4, "no row below");
+        let (y, _) = shared.plane(0);
+        assert_eq!(&y[20..24], &[20, 21, 22, 23]);
+        assert_eq!(&y[24..32], &[20, 21, 22, 23, 20, 21, 22, 23]);
     }
 
     #[test]

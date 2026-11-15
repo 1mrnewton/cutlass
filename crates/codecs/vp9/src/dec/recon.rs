@@ -656,7 +656,15 @@ pub(crate) fn mc_into<P: Pixel>(
     // kernels' loads past the end of a row, must be final.
     let last = (by + h as i32 + 4).clamp(1, rh) as usize;
     rp.buf.wait((last + 1) << shift);
-    let inside = bx - l >= 0 && by - t >= 0 && bx + w as i32 + r <= rw && by + h as i32 + bo <= rh;
+    // Below the picture, a finished reference may hold its last row
+    // repeated in the buffer (all but one row of it: the kernels read
+    // past the end of a row).
+    let below = match rp.buf.held_rows(first, rh as usize) as i32 {
+        held if held > rh => held - 1,
+        _ => rh,
+    };
+    let inside =
+        bx - l >= 0 && by - t >= 0 && bx + w as i32 + r <= rw && by + h as i32 + bo <= below;
     // By reference, an index at a time: moving the array into an
     // iterator copied it on every call.
     let mut dsts = dsts;

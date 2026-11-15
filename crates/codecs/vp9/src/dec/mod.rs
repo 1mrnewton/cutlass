@@ -575,6 +575,7 @@ impl<P: Pixel> FrameRecon<P> {
             }
         }
         if sb_row + 1 == self.sb_rows {
+            self.writer.hold_edge(self.ctx.dims.h);
             self.writer.publish(usize::MAX);
         } else {
             // The filter of the next row changes the last 8 chroma rows

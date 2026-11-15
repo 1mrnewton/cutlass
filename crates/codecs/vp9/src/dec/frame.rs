@@ -93,6 +93,13 @@ pub struct Pic<P> {
 /// What makes the caller's picture of a finished frame.
 pub type Present<P> = fn(&Pic<P>) -> Result<cutlass_decode::VideoFrame, cutlass_decode::CodecError>;
 
+/// Rows each plane's buffer has below its whole superblocks. A finished
+/// picture repeats its last row into them and the ones above
+/// ([`FrameWriter::hold_edge`]), so that motion compensation of the
+/// bottom superblock row reads the buffer instead of a copy of its
+/// window with the edge repeated.
+pub const EDGE_ROWS: usize = 16;
+
 /// The most buffers [`writer`] keeps for later pictures.
 pub const SPARE: usize = 16;
 
@@ -118,5 +125,5 @@ pub fn writer<P: Copy + Default>(
     {
         spare.swap_remove(i);
     }
-    FrameWriter::new(dims.stride, dims.rows, dims.shifts())
+    FrameWriter::new(dims.stride, dims.rows.map(|r| r + EDGE_ROWS), dims.shifts())
 }

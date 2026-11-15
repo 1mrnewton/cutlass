@@ -10,6 +10,9 @@ pub struct Canvas {
     view: wgpu::TextureView,
     width: u32,
     height: u32,
+    /// The buffer the last read copied into. Every read maps and unmaps it
+    /// before it returns, so the next read can use it again.
+    readback: std::sync::Mutex<Option<wgpu::Buffer>>,
 }
 
 impl Canvas {
@@ -40,6 +43,7 @@ impl Canvas {
             view,
             width,
             height,
+            readback: std::sync::Mutex::new(None),
         })
     }
 
@@ -67,12 +71,42 @@ impl Canvas {
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
         let padded = row.div_ceil(align) * align;
         let rows = self.height as usize;
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cutlass-render readback"),
-            size: (padded * rows) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        let mut kept = self
+            .readback
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let buffer = kept
+            .get_or_insert_with(|| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("cutlass-render readback"),
+                    size: (padded * rows) as u64,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                })
+            })
+            .clone();
+        drop(kept);
+        let read = self.copy_out(device, queue, &buffer, padded);
+        if read.is_err() {
+            // A failed read may leave the buffer mapped; the next read
+            // starts with a new one.
+            *self
+                .readback
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+        read
+    }
+
+    fn copy_out(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        buffer: &wgpu::Buffer,
+        padded: usize,
+    ) -> Result<Vec<u8>, RenderError> {
+        let row = self.width as usize * 4;
+        let rows = self.height as usize;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("cutlass-render readback"),
         });
@@ -84,7 +118,7 @@ impl Canvas {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
+                buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded as u32),

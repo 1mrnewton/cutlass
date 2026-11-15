@@ -1433,9 +1433,10 @@ impl<'s, 't, 'r, 'v, P: EncPixel> Tile<'s, 't, 'r, 'v, P> {
         let trial = s.second_pass
             && !self.choice_skip.0
             && (best.0 - self.choice_skip.1) / lam > TX_TRIAL_BITS * (bw_mi * bh_mi) as f64;
-        // From SKIP_TX_SPEED, not after an inter frame's best that codes
-        // no residual.
-        let smaller = s.speed < SKIP_TX_SPEED || s.intra_frame || !self.choice_skip.0;
+        // From SKIP_TX_SPEED, in one pass, not after an inter frame's best
+        // that codes no residual.
+        let smaller =
+            s.speed < SKIP_TX_SPEED || s.second_pass || s.intra_frame || !self.choice_skip.0;
         if (s.speed < 6 && smaller) || (s.intra_frame && s.speed < 9) || trial {
             let b0 = cands[best.1];
             let tries = if s.speed < 4 { 2 } else { 1 };
